@@ -14,7 +14,6 @@ import { storage } from "../utils/storage";
 import type { AuthState } from "../connection/authentication";
 import { TopRightPopoverBase } from "./TopRightPopoverBase";
 import type { MaterialName } from "../services/rocksMiningService";
-import { HowToPlaySeparator } from "./InfoPopover";
 
 const SWAGPACK_ITEM_COUNT = 467;
 const SWAGPACK_ID_OFFSET = 1000;
@@ -103,7 +102,7 @@ const LoadingText = styled.div`
 `;
 
 const ShopSection = styled.section`
-  padding: 9px 3px 8px 0;
+  padding: 9px 3px 3px 0;
 `;
 
 const ShopGrid = styled.div`
@@ -116,16 +115,30 @@ const ShopGrid = styled.div`
   }
 `;
 
-const ShopItem = styled.div`
+const ShopItem = styled.button`
+  appearance: none;
+  position: relative;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
+  aspect-ratio: 1 / 1.32;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 7px;
+  outline: none;
+  font: inherit;
+  background: var(--color-gray-f0);
+  color: inherit;
+  clip-path: inset(0 round 7px);
+
+  @media (prefers-color-scheme: dark) {
+    background: var(--inventoryItemBackgroundDark);
+  }
 `;
 
 const SoonLabel = styled.span`
   position: absolute;
-  inset: 0;
+  inset: 0 0 21px;
   z-index: 2;
   display: flex;
   align-items: center;
@@ -135,7 +148,12 @@ const SoonLabel = styled.span`
   font-weight: 700;
   line-height: 1;
   text-transform: lowercase;
+  transform: translateY(2px);
   pointer-events: none;
+
+  @media (max-width: 280px) {
+    bottom: 19px;
+  }
 
   @media (prefers-color-scheme: dark) {
     color: var(--color-gray-d0);
@@ -143,12 +161,11 @@ const SoonLabel = styled.span`
 `;
 
 const ShopImageFrame = styled.div`
-  position: relative;
+  position: absolute;
+  inset: 0 0 auto;
   width: 100%;
   aspect-ratio: 1 / 1;
   overflow: hidden;
-  border-radius: 7px;
-  background: var(--color-gray-f0);
 
   &::after {
     content: "";
@@ -159,8 +176,6 @@ const ShopImageFrame = styled.div`
   }
 
   @media (prefers-color-scheme: dark) {
-    background: var(--inventoryItemBackgroundDark);
-
     &::after {
       background: rgb(0 0 0 / 18%);
     }
@@ -185,32 +200,35 @@ const ShopImage = styled.img`
   }
 `;
 
-const PriceButton = styled.button`
-  appearance: none;
+const PricePanel = styled.div`
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  z-index: 3;
   width: 100%;
-  height: 22px;
+  height: 21px;
   min-width: 0;
-  margin-top: 6px;
-  padding: 0 5px 0 2px;
+  box-sizing: border-box;
+  padding: 0 2px;
   overflow: hidden;
-  border: 0;
-  outline: none;
-  border-radius: 999px;
+  border-radius: 0 0 7px 7px;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 1px;
-  background: var(--color-gray-f0);
+  background: rgb(240 240 240 / 82%);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
   color: var(--color-gray-69);
   -webkit-text-fill-color: currentColor;
 
   @media (prefers-color-scheme: dark) {
-    background: var(--color-gray-33);
+    background: rgb(42 42 42 / 82%);
     color: var(--color-gray-a0);
   }
 
   @media (max-width: 280px) {
-    height: 20px;
+    height: 19px;
     padding: 0 1px;
     gap: 0;
   }
@@ -253,23 +271,12 @@ const PriceAmount = styled.span`
   }
 `;
 
-const InventorySeparator = styled.div`
-  width: 100%;
-  height: 12px;
-  overflow: hidden;
-  font-size: 12px;
-  line-height: 1;
-  white-space: nowrap;
-  pointer-events: none;
-`;
-
 const InventorySection = styled.section`
-  padding-top: 8px;
+  padding-top: 7px;
 `;
 
 const EmptyState = styled(LoadingText)`
-  flex-direction: column;
-  gap: 10px;
+  min-height: 92px;
 `;
 
 const SwagPackLink = styled.a`
@@ -541,7 +548,12 @@ export const InventoryModal = React.forwardRef<
         <ShopSection aria-label="Shop">
           <ShopGrid>
             {SHOP_OFFERS.map(({ material, price }, index) => (
-              <ShopItem key={material}>
+              <ShopItem
+                key={material}
+                type="button"
+                disabled
+                aria-label={`${price} ${material}, coming soon`}
+              >
                 <ShopImageFrame>
                   <ShopImage
                     src={`${SWAGPACK_THUMB_IMAGE_BASE_URL}/${
@@ -552,34 +564,26 @@ export const InventoryModal = React.forwardRef<
                     decoding="async"
                     draggable={false}
                   />
-                  <SoonLabel>soon</SoonLabel>
                 </ShopImageFrame>
-                <PriceButton
-                  type="button"
-                  disabled
-                  aria-label={`${price} ${material}, coming soon`}
-                >
+                <SoonLabel aria-hidden="true">soon</SoonLabel>
+                <PricePanel aria-hidden="true">
                   <PriceMaterialIcon
                     src={`${MATERIAL_IMAGE_BASE_URL}/${material}.webp`}
                     alt=""
                     draggable={false}
                   />
                   <PriceAmount>{price}</PriceAmount>
-                </PriceButton>
+                </PricePanel>
               </ShopItem>
             ))}
           </ShopGrid>
         </ShopSection>
-        <InventorySeparator>
-          <HowToPlaySeparator ariaHidden />
-        </InventorySeparator>
         <InventorySection aria-label="Inventory">
           {isLoading ? (
             <LoadingText>LOADING...</LoadingText>
           ) : avatars.length === 0 && specials.length === 0 ? (
             dataOk ? (
               <EmptyState>
-                <span>No items yet.</span>
                 <SwagPackLink
                   href="https://www.tensor.trade/trade/swag_pack"
                   target="_blank"
