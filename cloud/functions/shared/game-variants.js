@@ -6,12 +6,9 @@ const legacyDefaultGameVariant = "Classic";
 
 function createGameVariantHelpers(monsRules) {
   function getAllGameVariantNames() {
-    const variants = Object.keys(monsRules.GameVariant).filter((key) => {
-      if (/^\d+$/.test(key)) {
-        return false;
-      }
-      return typeof monsRules.GameVariant[key] === "number";
-    });
+    const variants = Object.values(monsRules.GameVariant).filter(
+      (variant) => typeof variant === "string",
+    );
     return variants.length > 0 ? variants : [legacyDefaultGameVariant];
   }
 
@@ -34,20 +31,20 @@ function createGameVariantHelpers(monsRules) {
   }
 
   function runtimeGameVariantFromStoredValue(value) {
-    return monsRules.GameVariant[normalizeStoredGameVariant(value)];
+    return normalizeStoredGameVariant(value);
   }
 
   function createGameModelForStoredVariant(value) {
-    return monsRules.MonsGameModel.new(
-      runtimeGameVariantFromStoredValue(value),
-    );
+    return new monsRules.Game({
+      variant: runtimeGameVariantFromStoredValue(value),
+    });
   }
 
   function buildGameSeedForStoredVariant(value) {
     const gameVariant = normalizeStoredGameVariant(value);
     return {
       gameVariant,
-      fen: createGameModelForStoredVariant(gameVariant).fen(),
+      fen: createGameModelForStoredVariant(gameVariant).toFen(),
     };
   }
 

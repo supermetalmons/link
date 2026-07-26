@@ -1,13 +1,5 @@
 const { MATCH_TIMER_TERMINAL } = require("@mons/shared/timers");
-
-let monsPromise = null;
-
-const loadMons = async () => {
-  if (!monsPromise) {
-    monsPromise = import("mons-rules");
-  }
-  return monsPromise;
-};
+const { loadMonsRules, movesFromFlatString } = require("./monsRules");
 
 const isNonEmptyString = (value) => typeof value === "string" && value !== "";
 const normalizeColor = (value) =>
@@ -37,6 +29,9 @@ async function resolveMatchWinner(matchData, opponentMatchData) {
   if (!playerColor || !opponentColor) {
     return { winner: null, reason: "missing-color" };
   }
+  if (playerColor === opponentColor) {
+    return { winner: null, reason: "invalid-colors" };
+  }
 
   if (
     !isNonEmptyString(matchData.fen) ||
@@ -45,43 +40,28 @@ async function resolveMatchWinner(matchData, opponentMatchData) {
     return { winner: null, reason: "missing-fen" };
   }
 
-  const mons = await loadMons();
-  let winnerColorFen = "";
+  const mons = await loadMonsRules();
+  const playerSubmission = {
+    fen: matchData.fen,
+    moves: movesFromFlatString(matchData.flatMovesString),
+  };
+  const opponentSubmission = {
+    fen: opponentMatchData.fen,
+    moves: movesFromFlatString(opponentMatchData.flatMovesString),
+  };
+  const resolution = mons.resolveMatch(
+    playerColor === "white"
+      ? { white: playerSubmission, black: opponentSubmission }
+      : { white: opponentSubmission, black: playerSubmission },
+  );
 
-  if (playerColor === "white") {
-    winnerColorFen = mons.winner(
-      matchData.fen,
-      opponentMatchData.fen,
-      matchData.flatMovesString || "",
-      opponentMatchData.flatMovesString || "",
-    );
-  } else {
-    winnerColorFen = mons.winner(
-      opponentMatchData.fen,
-      matchData.fen,
-      opponentMatchData.flatMovesString || "",
-      matchData.flatMovesString || "",
-    );
-  }
-
-  if (winnerColorFen === "w") {
+  if (resolution.kind === "winner") {
+    const winnerColor = resolution.winner;
     return {
       winner:
-        playerColor === "white"
+        playerColor === winnerColor
           ? "player"
-          : opponentColor === "white"
-            ? "opponent"
-            : null,
-      reason: "winner-color",
-    };
-  }
-
-  if (winnerColorFen === "b") {
-    return {
-      winner:
-        playerColor === "black"
-          ? "player"
-          : opponentColor === "black"
+          : opponentColor === winnerColor
             ? "opponent"
             : null,
       reason: "winner-color",
@@ -90,7 +70,7 @@ async function resolveMatchWinner(matchData, opponentMatchData) {
 
   return {
     winner: null,
-    reason: winnerColorFen === "x" ? "invalid-game" : "pending",
+    reason: resolution.kind === "invalid" ? "invalid-game" : "pending",
   };
 }
 

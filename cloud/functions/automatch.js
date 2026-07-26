@@ -112,7 +112,7 @@ async function attemptAutomatch(
       existingAutomatchData.uid !== uid &&
       (profileId === "" || profileId !== existingAutomatchData.profileId)
     ) {
-      const matchSeed = buildGameSeedForStoredVariant(
+      const matchSeed = await buildGameSeedForStoredVariant(
         existingAutomatchData.gameVariant,
       );
       console.log("auto:attempt:foundExisting", {
@@ -198,7 +198,7 @@ async function attemptAutomatch(
     const inviteId = buildAutoInviteId();
     const password = randomAlphanumeric(15);
     const hostColor = pickHostColor();
-    const matchSeed = buildRandomGameSeed();
+    const matchSeed = await buildRandomGameSeed();
 
     const invite = {
       version: CONTROLLER_VERSION,

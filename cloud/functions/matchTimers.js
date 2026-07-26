@@ -8,6 +8,25 @@ const {
   formatMatchTimer,
   parseMatchTimer,
 } = require("@mons/shared/timers");
+const { loadMonsRules, movesFromFlatString } = require("./monsRules");
+
+const laterGameFromMatchData = (mons, matchData, opponentMatchData) => {
+  const playerGame =
+    typeof matchData.fen === "string"
+      ? mons.Game.fromFen(matchData.fen)
+      : undefined;
+  const opponentGame =
+    typeof opponentMatchData.fen === "string"
+      ? mons.Game.fromFen(opponentMatchData.fen)
+      : undefined;
+  if (!playerGame || !opponentGame) {
+    throw new HttpsError(
+      "failed-precondition",
+      "something is wrong with the game state.",
+    );
+  }
+  return playerGame.isLaterThan(opponentGame) ? playerGame : opponentGame;
+};
 
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
@@ -84,34 +103,30 @@ exports.startMatchTimer = onCall(async (request) => {
   const color = matchData.color;
   const opponentColor = opponentMatchData.color;
 
-  const mons = await import("mons-rules");
-
-  let game = mons.MonsGameModel.from_fen(matchData.fen);
-  if (!game.is_later_than(opponentMatchData.fen)) {
-    game = mons.MonsGameModel.from_fen(opponentMatchData.fen);
-  }
+  const mons = await loadMonsRules();
+  const game = laterGameFromMatchData(mons, matchData, opponentMatchData);
 
   if (
     matchData.status === "surrendered" ||
     opponentMatchData.status === "surrendered" ||
-    game.winner_color() !== undefined ||
+    game.winner !== undefined ||
     matchData.timer === MATCH_TIMER_TERMINAL ||
     opponentMatchData.timer === MATCH_TIMER_TERMINAL
   ) {
     throw new HttpsError("failed-precondition", "game is already over.");
   }
 
-  let whiteFlatMovesString = "";
-  let blackFlatMovesString = "";
+  let whiteMoves = [];
+  let blackMoves = [];
   if (color === "white") {
-    whiteFlatMovesString = matchData.flatMovesString;
-    blackFlatMovesString = opponentMatchData.flatMovesString;
+    whiteMoves = movesFromFlatString(matchData.flatMovesString);
+    blackMoves = movesFromFlatString(opponentMatchData.flatMovesString);
   } else {
-    whiteFlatMovesString = opponentMatchData.flatMovesString;
-    blackFlatMovesString = matchData.flatMovesString;
+    whiteMoves = movesFromFlatString(opponentMatchData.flatMovesString);
+    blackMoves = movesFromFlatString(matchData.flatMovesString);
   }
 
-  let result = game.verify_moves(whiteFlatMovesString, blackFlatMovesString);
+  const result = game.verifyHistory({ white: whiteMoves, black: blackMoves });
   if (!result) {
     throw new HttpsError(
       "failed-precondition",
@@ -119,9 +134,9 @@ exports.startMatchTimer = onCall(async (request) => {
     );
   }
 
-  let turnNumber = game.turn_number();
-  let activeColor = game.active_color();
-  let opponentColorModel =
+  const turnNumber = game.turnNumber;
+  const activeColor = game.activeColor;
+  const opponentColorModel =
     opponentColor === "white" ? mons.Color.White : mons.Color.Black;
 
   if (activeColor !== opponentColorModel) {
@@ -191,34 +206,30 @@ exports.claimMatchVictoryByTimer = onCall(async (request) => {
   const color = matchData.color;
   const opponentColor = opponentMatchData.color;
 
-  const mons = await import("mons-rules");
-
-  let game = mons.MonsGameModel.from_fen(matchData.fen);
-  if (!game.is_later_than(opponentMatchData.fen)) {
-    game = mons.MonsGameModel.from_fen(opponentMatchData.fen);
-  }
+  const mons = await loadMonsRules();
+  const game = laterGameFromMatchData(mons, matchData, opponentMatchData);
 
   if (
     matchData.status === "surrendered" ||
     opponentMatchData.status === "surrendered" ||
     matchData.timer === MATCH_TIMER_TERMINAL ||
     opponentMatchData.timer === MATCH_TIMER_TERMINAL ||
-    game.winner_color() !== undefined
+    game.winner !== undefined
   ) {
     throw new HttpsError("failed-precondition", "game is already over.");
   }
 
-  let whiteFlatMovesString = "";
-  let blackFlatMovesString = "";
+  let whiteMoves = [];
+  let blackMoves = [];
   if (color === "white") {
-    whiteFlatMovesString = matchData.flatMovesString;
-    blackFlatMovesString = opponentMatchData.flatMovesString;
+    whiteMoves = movesFromFlatString(matchData.flatMovesString);
+    blackMoves = movesFromFlatString(opponentMatchData.flatMovesString);
   } else {
-    whiteFlatMovesString = opponentMatchData.flatMovesString;
-    blackFlatMovesString = matchData.flatMovesString;
+    whiteMoves = movesFromFlatString(opponentMatchData.flatMovesString);
+    blackMoves = movesFromFlatString(matchData.flatMovesString);
   }
 
-  let result = game.verify_moves(whiteFlatMovesString, blackFlatMovesString);
+  const result = game.verifyHistory({ white: whiteMoves, black: blackMoves });
   if (!result) {
     throw new HttpsError(
       "failed-precondition",
@@ -226,8 +237,8 @@ exports.claimMatchVictoryByTimer = onCall(async (request) => {
     );
   }
 
-  let activeColor = game.active_color();
-  let opponentColorModel =
+  const activeColor = game.activeColor;
+  const opponentColorModel =
     opponentColor === "white" ? mons.Color.White : mons.Color.Black;
 
   if (activeColor !== opponentColorModel) {
@@ -243,7 +254,7 @@ exports.claimMatchVictoryByTimer = onCall(async (request) => {
     if (parsedTimer) {
       const { turnNumber, targetTimestamp } = parsedTimer;
       const timeDelta = targetTimestamp - Date.now();
-      const sameTurn = game.turn_number() === turnNumber;
+      const sameTurn = game.turnNumber === turnNumber;
       if (sameTurn && timeDelta <= 0) {
         await matchRef.child("timer").set(MATCH_TIMER_TERMINAL);
         await maybeEnqueueEventProgressFromInvite({

@@ -1,13 +1,6 @@
 export type StoredGameVariant<
-  TGameVariantEnum extends object = Record<string, number>,
-> = Extract<
-  {
-    [TKey in keyof TGameVariantEnum]: TGameVariantEnum[TKey] extends number
-      ? TKey
-      : never;
-  }[keyof TGameVariantEnum],
-  string
->;
+  TGameVariants extends object = Record<string, string>,
+> = Extract<TGameVariants[keyof TGameVariants], string>;
 
 export type GameSeed<TGameVariant extends string = string> = {
   gameVariant: TGameVariant;
@@ -15,7 +8,7 @@ export type GameSeed<TGameVariant extends string = string> = {
 };
 
 export interface GameModelWithFen {
-  fen(): string;
+  toFen(): string;
 }
 
 export const legacyDefaultGameVariant: "Classic";
@@ -35,13 +28,11 @@ export type GameVariantHelpers<
 };
 
 export function createGameVariantHelpers<
-  TGameVariantEnum extends { Classic: number },
+  TGameVariants extends { readonly Classic: "Classic" },
   TGameModel extends GameModelWithFen,
 >(monsRules: {
-  GameVariant: TGameVariantEnum;
-  MonsGameModel: {
-    new: (
-      variant: Extract<TGameVariantEnum[keyof TGameVariantEnum], number>,
-    ) => TGameModel;
-  };
-}): GameVariantHelpers<StoredGameVariant<TGameVariantEnum>, TGameModel>;
+  GameVariant: TGameVariants;
+  Game: new (options?: {
+    variant?: StoredGameVariant<TGameVariants>;
+  }) => TGameModel;
+}): GameVariantHelpers<StoredGameVariant<TGameVariants>, TGameModel>;

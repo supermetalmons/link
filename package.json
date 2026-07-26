@@ -9,22 +9,22 @@
     "@mons/shared": "file:cloud/functions/shared",
     "@rainbow-me/rainbowkit": "^2.2.4",
     "@solana/wallet-adapter-base": "^0.9.27",
-    "@tanstack/react-query": "^5.101.2",
+    "@tanstack/react-query": "^5.101.4",
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "ethers": "^6.17.0",
     "firebase": "^12.16.0",
     "glicko2": "^1.2.1",
-    "mons-rules": "0.2.3",
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7",
+    "mons-rules": "0.3.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "react-icons": "^5.7.0",
     "react-scripts": "5.0.1",
     "siwe": "^3.0.0",
     "styled-components": "^6.4.4",
     "typescript": "^5.9.3",
-    "viem": "^2.55.2",
+    "viem": "^2.55.8",
     "wagmi": "^2.15.6"
   },
   "scripts": {
@@ -75,6 +75,6 @@
     ]
   },
   "devDependencies": {
-    "prettier": "^3.9.5"
+    "prettier": "^3.9.6"
   }
 }

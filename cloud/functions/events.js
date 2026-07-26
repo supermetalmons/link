@@ -743,7 +743,7 @@ const assignWinnerToNextRound = ({
   return didSetParticipant || didClearBlocked;
 };
 
-const createInviteForMatch = ({
+const createInviteForMatch = async ({
   eventId,
   roundIndex,
   matchKey,
@@ -762,7 +762,7 @@ const createInviteForMatch = ({
   const inviteId = generateEventInviteId();
   const hostColor = pickHostColor();
   const guestColor = hostColor === "white" ? "black" : "white";
-  const gameSeed = buildRandomGameSeed();
+  const gameSeed = await buildRandomGameSeed();
 
   match.inviteId = inviteId;
   match.status = "pending";
@@ -790,7 +790,7 @@ const createInviteForMatch = ({
   return true;
 };
 
-const reconcileThirdPlaceMatchReadiness = ({
+const reconcileThirdPlaceMatchReadiness = async ({
   eventId,
   rounds,
   nowMs,
@@ -942,7 +942,7 @@ const reconcileThirdPlaceMatchReadiness = ({
       };
     }
     if (
-      createInviteForMatch({
+      await createInviteForMatch({
         eventId,
         roundIndex: null,
         matchKey: thirdPlaceMatch.matchKey || THIRD_PLACE_MATCH_KEY,
@@ -1015,7 +1015,7 @@ const reconcileThirdPlaceMatchReadiness = ({
   };
 };
 
-const reconcileBracketMatchReadiness = ({
+const reconcileBracketMatchReadiness = async ({
   eventId,
   rounds,
   nowMs,
@@ -1097,7 +1097,7 @@ const reconcileBracketMatchReadiness = ({
 
         if (hostProfileId && guestProfileId) {
           if (
-            createInviteForMatch({
+            await createInviteForMatch({
               eventId,
               roundIndex,
               matchKey,
@@ -1382,7 +1382,7 @@ const rebuildParticipantStatesFromRounds = ({
   };
 };
 
-const buildFixedBracketState = ({
+const buildFixedBracketState = async ({
   eventId,
   participantIds,
   participantsById,
@@ -1434,7 +1434,7 @@ const buildFixedBracketState = ({
         );
 
         if (hostProfileId && guestProfileId) {
-          createInviteForMatch({
+          await createInviteForMatch({
             eventId,
             roundIndex,
             matchKey,
@@ -1460,7 +1460,7 @@ const buildFixedBracketState = ({
     rounds[String(roundIndex)] = round;
   }
 
-  reconcileBracketMatchReadiness({
+  await reconcileBracketMatchReadiness({
     eventId,
     rounds,
     nowMs,
@@ -1470,7 +1470,7 @@ const buildFixedBracketState = ({
 
   if (enableThirdPlace && participantIds.length >= 4 && roundCount >= 2) {
     thirdPlaceMatch = createEmptyEventMatch(THIRD_PLACE_MATCH_KEY);
-    reconcileThirdPlaceMatchReadiness({
+    await reconcileThirdPlaceMatchReadiness({
       eventId,
       rounds,
       nowMs,
@@ -1496,7 +1496,7 @@ const buildFixedBracketState = ({
   };
 };
 
-const buildScheduledEventDueUpdates = ({ eventId, event, nowMs }) => {
+const buildScheduledEventDueUpdates = async ({ eventId, event, nowMs }) => {
   if (!event || event.status !== "scheduled") {
     return { didChange: false, updates: {} };
   }
@@ -1508,7 +1508,7 @@ const buildScheduledEventDueUpdates = ({ eventId, event, nowMs }) => {
   if (participantIds.length >= 2) {
     const participantsById = event.participants || {};
     const supportsThirdPlaceMatch = hasThirdPlaceMatchField(event);
-    const bracket = buildFixedBracketState({
+    const bracket = await buildFixedBracketState({
       eventId,
       participantIds,
       participantsById,
@@ -2024,7 +2024,7 @@ exports.joinEvent = onCall(async (request) => {
       );
     }
     if (typeof event.startAtMs === "number" && nowMs >= event.startAtMs) {
-      const dueTransition = buildScheduledEventDueUpdates({
+      const dueTransition = await buildScheduledEventDueUpdates({
         eventId,
         event,
         nowMs,
@@ -2072,7 +2072,7 @@ exports.joinEvent = onCall(async (request) => {
       [`events/${eventId}/updatedAtMs`]: nowMs,
     };
     const settleNowMs = getNowMs();
-    const dueTransition = buildScheduledEventDueUpdates({
+    const dueTransition = await buildScheduledEventDueUpdates({
       eventId,
       event,
       nowMs: settleNowMs,
@@ -2179,7 +2179,7 @@ exports.postponeEventStart = onCall(async (request) => {
       );
     }
     if (nowMs >= event.startAtMs) {
-      const dueTransition = buildScheduledEventDueUpdates({
+      const dueTransition = await buildScheduledEventDueUpdates({
         eventId,
         event,
         nowMs,
@@ -2326,7 +2326,7 @@ exports.removeEventParticipant = onCall(async (request) => {
       );
     }
     if (nowMs >= event.startAtMs) {
-      const dueTransition = buildScheduledEventDueUpdates({
+      const dueTransition = await buildScheduledEventDueUpdates({
         eventId,
         event,
         nowMs,
@@ -2375,7 +2375,7 @@ exports.removeEventParticipant = onCall(async (request) => {
 
     const commitNowMs = getNowMs();
     if (commitNowMs >= event.startAtMs) {
-      const dueTransition = buildScheduledEventDueUpdates({
+      const dueTransition = await buildScheduledEventDueUpdates({
         eventId,
         event,
         nowMs: commitNowMs,
@@ -2703,7 +2703,7 @@ const runEventSyncState = async ({
     let didChange = false;
 
     if (event.status === "scheduled") {
-      const dueTransition = buildScheduledEventDueUpdates({
+      const dueTransition = await buildScheduledEventDueUpdates({
         eventId,
         event,
         nowMs,
@@ -2782,7 +2782,7 @@ const runEventSyncState = async ({
       }
 
       if (
-        reconcileBracketMatchReadiness({
+        await reconcileBracketMatchReadiness({
           eventId,
           rounds,
           nowMs,
@@ -2794,7 +2794,7 @@ const runEventSyncState = async ({
       }
 
       if (supportsThirdPlaceMatch) {
-        const thirdPlaceResult = reconcileThirdPlaceMatchReadiness({
+        const thirdPlaceResult = await reconcileThirdPlaceMatchReadiness({
           eventId,
           rounds,
           nowMs,
@@ -2976,7 +2976,7 @@ const runEventSyncState = async ({
       }
 
       if (supportsThirdPlaceMatch) {
-        const thirdPlaceResult = reconcileThirdPlaceMatchReadiness({
+        const thirdPlaceResult = await reconcileThirdPlaceMatchReadiness({
           eventId,
           rounds,
           nowMs,

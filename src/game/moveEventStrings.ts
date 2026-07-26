@@ -26,15 +26,17 @@ export type MoveHistoryEntry = {
 
 export type MoveHistorySegmentRole = "arrow" | "destination" | "normal";
 
-function arrowForEvent(e: MonsRules.EventModel): {
+type DirectionalGameEvent = Extract<
+  MonsRules.GameEvent,
+  { readonly from: MonsRules.Position; readonly to: MonsRules.Position }
+>;
+
+function arrowForEvent(e: DirectionalGameEvent): {
   arrow: string;
   isRight: boolean;
 } {
-  const from = e.loc1;
-  const to = e.loc2;
-  if (!from || !to) return { arrow: "→", isRight: true };
-  let di = to.i - from.i;
-  let dj = to.j - from.j;
+  let di = e.to.row - e.from.row;
+  let dj = e.to.column - e.from.column;
   if (Board.isFlipped) {
     di = -di;
     dj = -dj;
@@ -50,7 +52,7 @@ function arrowForEvent(e: MonsRules.EventModel): {
   return { arrow: "→", isRight: true };
 }
 
-function addArrowToken(tokens: MoveHistoryToken[], ev: MonsRules.EventModel) {
+function addArrowToken(tokens: MoveHistoryToken[], ev: DirectionalGameEvent) {
   const { arrow, isRight } = arrowForEvent(ev);
   const arrowToken: MoveHistoryToken = { type: "text", text: arrow };
   if (isRight) {
@@ -62,7 +64,7 @@ function addArrowToken(tokens: MoveHistoryToken[], ev: MonsRules.EventModel) {
 
 function addActionArrowTokens(
   tokens: MoveHistoryToken[],
-  ev: MonsRules.EventModel,
+  ev: DirectionalGameEvent,
 ): boolean {
   const { arrow, isRight } = arrowForEvent(ev);
   const actionToken: MoveHistoryToken = {
@@ -96,16 +98,17 @@ function compositeToken(
   };
 }
 
-function tokensForItem(item?: MonsRules.ItemModel): MoveHistoryToken[] {
+function tokensForItem(item?: MonsRules.BoardItem): MoveHistoryToken[] {
   if (!item) return [];
   const tokens: MoveHistoryToken[] = [];
   switch (item.kind) {
-    case MonsRules.ItemModelKind.MonWithMana: {
-      const monToken = item.mon
-        ? monIconForKind(item.mon.kind, item.mon.color)
-        : null;
-      const manaToken = manaOverlayIconFor(item.mana);
-      if (monToken) {
+    case "mon": {
+      const monToken = monIconForKind(item.mon.kind, item.mon.color);
+      if (!monToken) {
+        break;
+      }
+      if (item.carrying?.kind === "mana") {
+        const manaToken = manaOverlayIconFor(item.carrying.mana);
         tokens.push(
           compositeToken(
             monToken,
@@ -113,56 +116,43 @@ function tokensForItem(item?: MonsRules.ItemModel): MoveHistoryToken[] {
             manaToken.variant,
           ),
         );
+      } else if (item.carrying?.kind === "consumable") {
+        tokens.push(
+          compositeToken(
+            monToken,
+            consumableIconFor(item.carrying.consumable),
+            "bomb",
+          ),
+        );
       } else {
-        tokens.push({ type: "icon", icon: manaToken.icon, alt: manaToken.alt });
+        tokens.push({ type: "icon", ...monToken });
       }
       break;
     }
-    case MonsRules.ItemModelKind.MonWithConsumable: {
-      const monToken = item.mon
-        ? monIconForKind(item.mon.kind, item.mon.color)
-        : null;
-      const consumableToken = consumableIconFor(item.consumable);
-      if (monToken) {
-        tokens.push(compositeToken(monToken, consumableToken, "bomb"));
-      } else {
-        tokens.push({ type: "icon", ...consumableToken });
-      }
-      break;
-    }
-    case MonsRules.ItemModelKind.Mon: {
-      if (item.mon) {
-        const monToken = monIconForKind(item.mon.kind, item.mon.color);
-        if (monToken) tokens.push({ type: "icon", ...monToken });
-      }
-      break;
-    }
-    case MonsRules.ItemModelKind.Mana: {
+    case "mana": {
       tokens.push({ type: "icon", ...manaIconFor(item.mana) });
       break;
     }
-    case MonsRules.ItemModelKind.Consumable: {
+    case "consumable": {
       tokens.push({ type: "icon", ...consumableIconFor(item.consumable) });
       break;
     }
-    default:
-      break;
   }
   return tokens;
 }
 
 function locationsEqual(
-  a?: MonsRules.Location,
-  b?: MonsRules.Location,
+  a?: MonsRules.Position,
+  b?: MonsRules.Position,
 ): boolean {
   if (!a || !b) return false;
-  return a.i === b.i && a.j === b.j;
+  return a.row === b.row && a.column === b.column;
 }
 
 function targetTokensFromActionEvents(
-  events: MonsRules.EventModel[],
+  events: readonly MonsRules.GameEvent[],
   startIndex: number,
-  targetLoc?: MonsRules.Location,
+  targetLoc?: MonsRules.Position,
 ): MoveHistoryToken[] {
   if (!targetLoc) return [];
   let targetMon: MonsRules.Mon | null = null;
@@ -178,18 +168,16 @@ function targetTokensFromActionEvents(
   for (let i = startIndex + 1; i < events.length; i++) {
     const next = events[i];
     switch (next.kind) {
-      case MonsRules.EventModelKind.MonFainted:
+      case "mon-fainted":
         if (
-          locationsEqual(next.loc1, targetLoc) ||
-          locationsEqual(next.loc2, targetLoc)
+          locationsEqual(next.from, targetLoc) ||
+          locationsEqual(next.to, targetLoc)
         ) {
-          if (next.mon) {
-            targetMon = next.mon;
-          }
+          targetMon = next.mon;
         }
         break;
-      case MonsRules.EventModelKind.ManaDropped:
-        if (locationsEqual(next.loc1, targetLoc) && next.mana) {
+      case "mana-dropped":
+        if (locationsEqual(next.at, targetLoc)) {
           manaTokens = [{ type: "icon", ...manaIconFor(next.mana) }];
           const overlay = manaOverlayIconFor(next.mana);
           manaOverlay = {
@@ -199,8 +187,8 @@ function targetTokensFromActionEvents(
           };
         }
         break;
-      case MonsRules.EventModelKind.SupermanaBackToBase:
-        if (locationsEqual(next.loc1, targetLoc)) {
+      case "supermana-back-to-base":
+        if (locationsEqual(next.from, targetLoc)) {
           supermanaTokens = [
             { type: "icon", icon: "supermana", alt: "supermana" },
           ];
@@ -211,8 +199,8 @@ function targetTokensFromActionEvents(
           };
         }
         break;
-      case MonsRules.EventModelKind.BombExplosion:
-        if (locationsEqual(next.loc1, targetLoc)) {
+      case "bomb-explosion":
+        if (locationsEqual(next.at, targetLoc)) {
           sawBombExplosion = true;
         }
         break;
@@ -282,28 +270,14 @@ function monIconForKind(
   }
 }
 
-function monIconForEvent(
-  ev: MonsRules.EventModel,
-  fallbackKind?: MonsRules.MonKind,
-): { icon: string; alt: string } | null {
-  const mon = ev.item?.mon ?? ev.mon;
-  if (mon) {
-    return monIconForKind(mon.kind, mon.color);
-  }
-  if (fallbackKind !== undefined) {
-    return monIconForKind(fallbackKind, ev.color);
-  }
-  return null;
-}
-
-function manaIconFor(mana?: MonsRules.ManaModel | null): {
+function manaIconFor(mana?: MonsRules.Mana | null): {
   icon: string;
   alt: string;
 } {
   if (!mana) {
     return { icon: "mana", alt: "mana" };
   }
-  if (mana.kind === MonsRules.ManaKind.Supermana) {
+  if (mana.kind === "supermana") {
     return { icon: "supermana", alt: "supermana" };
   }
   const isBlack = mana.color === MonsRules.Color.Black;
@@ -313,7 +287,7 @@ function manaIconFor(mana?: MonsRules.ManaModel | null): {
   };
 }
 
-function manaOverlayIconFor(mana?: MonsRules.ManaModel | null): {
+function manaOverlayIconFor(mana?: MonsRules.Mana | null): {
   icon: string;
   alt: string;
   variant: "mana" | "supermana";
@@ -321,7 +295,7 @@ function manaOverlayIconFor(mana?: MonsRules.ManaModel | null): {
   if (!mana) {
     return { icon: "mana", alt: "mana", variant: "mana" };
   }
-  if (mana.kind === MonsRules.ManaKind.Supermana) {
+  if (mana.kind === "supermana") {
     return { icon: "supermanaSimple", alt: "supermana", variant: "supermana" };
   }
   const isBlack = mana.color === MonsRules.Color.Black;
@@ -349,7 +323,7 @@ function consumableIconFor(consumable?: MonsRules.Consumable | null): {
 }
 
 export function tokensForSingleMoveEvents(
-  events: MonsRules.EventModel[],
+  events: readonly MonsRules.GameEvent[],
   activeColor?: MonsRules.Color,
 ): MoveHistoryEntry {
   const segments: MoveHistorySegment[] = [];
@@ -413,53 +387,23 @@ export function tokensForSingleMoveEvents(
     let arrowIsRight = true;
     let extraDestinationTokens: MoveHistorySegment | null = null;
     switch (ev.kind) {
-      case MonsRules.EventModelKind.MonMove: {
-        const monToken = monIconForEvent(ev);
-        if (ev.item?.kind === MonsRules.ItemModelKind.MonWithMana) {
-          const manaToken = manaOverlayIconFor(ev.item?.mana ?? ev.mana);
-          if (monToken) {
-            tokens.push(
-              compositeToken(
-                monToken,
-                { icon: manaToken.icon, alt: manaToken.alt },
-                manaToken.variant,
-              ),
-            );
-          } else {
-            tokens.push({
-              type: "icon",
-              icon: manaToken.icon,
-              alt: manaToken.alt,
-            });
-          }
-        } else if (
-          ev.item?.kind === MonsRules.ItemModelKind.MonWithConsumable
-        ) {
-          const consumableToken = consumableIconFor(ev.item?.consumable);
-          if (monToken) {
-            tokens.push(compositeToken(monToken, consumableToken, "bomb"));
-          } else {
-            tokens.push({ type: "icon", ...consumableToken });
-          }
-        } else {
-          if (monToken) tokens.push({ type: "icon", ...monToken });
-        }
-
+      case "mon-move": {
+        tokens.push(...tokensForItem(ev.item));
         addArrowToken(tokens, ev);
         arrowIsRight = arrowForEvent(ev).isRight;
         segmentRole = "arrow";
         break;
       }
-      case MonsRules.EventModelKind.ManaMove: {
-        const manaToken = manaIconFor(ev.mana ?? ev.item?.mana);
+      case "mana-move": {
+        const manaToken = manaIconFor(ev.mana);
         tokens.push({ type: "icon", ...manaToken });
         addArrowToken(tokens, ev);
         arrowIsRight = arrowForEvent(ev).isRight;
         segmentRole = "arrow";
         break;
       }
-      case MonsRules.EventModelKind.MysticAction: {
-        const monToken = monIconForEvent(ev, MonsRules.MonKind.Mystic);
+      case "mystic-action": {
+        const monToken = monIconForKind(ev.mystic.kind, ev.mystic.color);
         let actorToken: MoveHistoryToken | null = null;
         if (monToken) {
           actorToken = { type: "icon", ...monToken };
@@ -467,16 +411,12 @@ export function tokensForSingleMoveEvents(
         }
         arrowIsRight = addActionArrowTokens(tokens, ev);
         segmentRole = "arrow";
-        const targetTokens = targetTokensFromActionEvents(
-          events,
-          index,
-          ev.loc2,
-        );
+        const targetTokens = targetTokensFromActionEvents(events, index, ev.to);
         if (targetTokens.length > 0) extraDestinationTokens = targetTokens;
         break;
       }
-      case MonsRules.EventModelKind.DemonAction: {
-        const monToken = monIconForEvent(ev, MonsRules.MonKind.Demon);
+      case "demon-action": {
+        const monToken = monIconForKind(ev.demon.kind, ev.demon.color);
         let actorToken: MoveHistoryToken | null = null;
         if (monToken) {
           actorToken = { type: "icon", ...monToken };
@@ -484,15 +424,11 @@ export function tokensForSingleMoveEvents(
         }
         arrowIsRight = addActionArrowTokens(tokens, ev);
         segmentRole = "arrow";
-        const targetTokens = targetTokensFromActionEvents(
-          events,
-          index,
-          ev.loc2,
-        );
+        const targetTokens = targetTokensFromActionEvents(events, index, ev.to);
         if (targetTokens.length > 0) extraDestinationTokens = targetTokens;
         break;
       }
-      case MonsRules.EventModelKind.SpiritTargetMove: {
+      case "spirit-target-move": {
         const targetTokens = tokensForItem(ev.item);
         const spiritToken = monIconForKind(
           MonsRules.MonKind.Spirit,
@@ -524,38 +460,27 @@ export function tokensForSingleMoveEvents(
         segmentRole = "arrow";
         break;
       }
-      case MonsRules.EventModelKind.BombAttack: {
-        if (ev.mon) {
-          const monToken = monIconForKind(ev.mon.kind, ev.mon.color);
-          const bombToken = consumableIconFor(MonsRules.Consumable.Bomb);
-          if (monToken) {
-            tokens.push(compositeToken(monToken, bombToken, "bomb"));
-          } else {
-            tokens.push({ type: "icon", ...bombToken });
-          }
+      case "bomb-attack": {
+        const monToken = monIconForKind(ev.by.kind, ev.by.color);
+        const bombToken = consumableIconFor(MonsRules.Consumable.Bomb);
+        if (monToken) {
+          tokens.push(compositeToken(monToken, bombToken, "bomb"));
         } else {
-          tokens.push({
-            type: "icon",
-            ...consumableIconFor(MonsRules.Consumable.Bomb),
-          });
+          tokens.push({ type: "icon", ...bombToken });
         }
         addArrowToken(tokens, ev);
         arrowIsRight = arrowForEvent(ev).isRight;
         segmentRole = "arrow";
-        const targetTokens = targetTokensFromActionEvents(
-          events,
-          index,
-          ev.loc2,
-        );
+        const targetTokens = targetTokensFromActionEvents(events, index, ev.to);
         if (targetTokens.length > 0) extraDestinationTokens = targetTokens;
         break;
       }
-      case MonsRules.EventModelKind.ManaScored: {
+      case "mana-scored": {
         tokens.push({ type: "square", color: colors.manaPool, alt: "score" });
         segmentRole = "destination";
         break;
       }
-      case MonsRules.EventModelKind.PickupBomb: {
+      case "pickup-bomb": {
         tokens.push({
           type: "icon",
           ...consumableIconFor(MonsRules.Consumable.Bomb),
@@ -563,7 +488,7 @@ export function tokensForSingleMoveEvents(
         segmentRole = "destination";
         break;
       }
-      case MonsRules.EventModelKind.PickupPotion: {
+      case "pickup-potion": {
         tokens.push({
           type: "icon",
           ...consumableIconFor(MonsRules.Consumable.Potion),
@@ -571,30 +496,29 @@ export function tokensForSingleMoveEvents(
         segmentRole = "destination";
         break;
       }
-      case MonsRules.EventModelKind.PickupMana: {
+      case "pickup-mana": {
         const prevKind = index > 0 ? events[index - 1].kind : undefined;
         const cameFromManaMove =
-          prevKind === MonsRules.EventModelKind.ManaMove ||
-          prevKind === MonsRules.EventModelKind.SpiritTargetMove;
-        if (cameFromManaMove && ev.mon) {
-          const monToken = monIconForKind(ev.mon.kind, ev.mon.color);
+          prevKind === "mana-move" || prevKind === "spirit-target-move";
+        if (cameFromManaMove) {
+          const monToken = monIconForKind(ev.by.kind, ev.by.color);
           if (monToken) {
             tokens.push({ type: "icon", ...monToken });
           }
         } else {
-          const manaToken = manaIconFor(ev.mana ?? ev.item?.mana);
+          const manaToken = manaIconFor(ev.mana);
           tokens.push({ type: "icon", ...manaToken });
         }
         segmentRole = "destination";
         break;
       }
-      case MonsRules.EventModelKind.BombExplosion:
+      case "bomb-explosion":
         // TODO: explosion indicator when there is a swagpacked one
         break;
-      case MonsRules.EventModelKind.GameOver:
+      case "game-over":
         // TODO: add game ended indicator depending on the reason game ended
         break;
-      case MonsRules.EventModelKind.UsePotion:
+      case "use-potion":
         if (lastActionSegment) {
           insertPotionIntoActionSegment(lastActionSegment);
           segmentRole = "skip";
@@ -606,18 +530,16 @@ export function tokensForSingleMoveEvents(
           });
         }
         break;
-      case MonsRules.EventModelKind.NextTurn:
+      case "next-turn":
         hasTurnSeparator = true;
         segmentRole = "skip";
         break;
-      case MonsRules.EventModelKind.MonFainted:
-      case MonsRules.EventModelKind.ManaDropped:
-      case MonsRules.EventModelKind.MonAwake:
-      case MonsRules.EventModelKind.Takeback:
-      case MonsRules.EventModelKind.SupermanaBackToBase:
-      case MonsRules.EventModelKind.DemonAdditionalStep:
-        break;
-      default:
+      case "mon-fainted":
+      case "mana-dropped":
+      case "mon-awake":
+      case "takeback":
+      case "supermana-back-to-base":
+      case "demon-additional-step":
         break;
     }
 
@@ -632,9 +554,9 @@ export function tokensForSingleMoveEvents(
       lastArrowIsRight = arrowIsRight;
       rightInsertIndex = lastArrowIndex + 1;
       if (
-        ev.kind === MonsRules.EventModelKind.MysticAction ||
-        ev.kind === MonsRules.EventModelKind.DemonAction ||
-        ev.kind === MonsRules.EventModelKind.SpiritTargetMove
+        ev.kind === "mystic-action" ||
+        ev.kind === "demon-action" ||
+        ev.kind === "spirit-target-move"
       ) {
         lastActionSegment = tokens;
       } else {

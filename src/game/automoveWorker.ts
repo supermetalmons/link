@@ -13,25 +13,19 @@ const resolveWorkerAutomove = async (
   fen: string,
   preference: WorkerAutomoveRequest["preference"],
 ): Promise<WorkerAutomoveResult> => {
-  const gameFromFen = MonsRules.MonsGameModel.from_fen(fen);
+  const gameFromFen = MonsRules.Game.fromFen(fen);
   if (!gameFromFen) {
     throw new Error("failed to deserialize automove fen in worker");
   }
 
-  let output: MonsRules.OutputModel | null = null;
-  try {
-    output = gameFromFen.smartAutomove(preference) as MonsRules.OutputModel;
-    if (output.kind === MonsRules.OutputModelKind.Events) {
-      return {
-        kind: "events",
-        inputFen: output.input_fen(),
-      };
-    }
-    return { kind: "other" };
-  } finally {
-    output?.free();
-    gameFromFen.free();
+  const suggestion = gameFromFen.suggestMove(preference);
+  if (suggestion) {
+    return {
+      kind: "events",
+      inputFen: suggestion.inputFen,
+    };
   }
+  return { kind: "other" };
 };
 
 const postResponse = (response: WorkerAutomoveResponse): void => {

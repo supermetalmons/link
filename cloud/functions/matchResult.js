@@ -1,53 +1,10 @@
-const { MATCH_TIMER_TERMINAL } = require("@mons/shared/timers");
+const { resolveMatchWinner } = require("./matchOutcome");
 
 const resolveMatchResult = async (matchData, opponentMatchData) => {
-  let result = "none";
-  let mons = null;
-  if (
-    matchData.status === "surrendered" ||
-    opponentMatchData.timer === MATCH_TIMER_TERMINAL
-  ) {
-    result = "gg";
-  } else if (
-    opponentMatchData.status === "surrendered" ||
-    matchData.timer === MATCH_TIMER_TERMINAL
-  ) {
-    result = "win";
-  } else {
-    const color = matchData.color;
-    const opponentColor = opponentMatchData.color;
-    mons = await import("mons-rules");
-    let winnerColorFen = "";
-    if (color === "white") {
-      winnerColorFen = mons.winner(
-        matchData.fen,
-        opponentMatchData.fen,
-        matchData.flatMovesString,
-        opponentMatchData.flatMovesString,
-      );
-    } else {
-      winnerColorFen = mons.winner(
-        opponentMatchData.fen,
-        matchData.fen,
-        opponentMatchData.flatMovesString,
-        matchData.flatMovesString,
-      );
-    }
-    if (winnerColorFen !== "") {
-      let winnerColor = "none";
-      if (winnerColorFen === "w") {
-        winnerColor = "white";
-      } else if (winnerColorFen === "b") {
-        winnerColor = "black";
-      }
-      if (winnerColor === color) {
-        result = "win";
-      } else if (winnerColor === opponentColor) {
-        result = "gg";
-      }
-    }
-  }
-  return { result, mons };
+  const { winner } = await resolveMatchWinner(matchData, opponentMatchData);
+  const result =
+    winner === "player" ? "win" : winner === "opponent" ? "gg" : "none";
+  return { result };
 };
 
 module.exports = {

@@ -13,6 +13,28 @@ const {
 } = require("./utils");
 const { resolveMatchWinner } = require("./matchOutcome");
 const { requestEventProgress } = require("./eventProgressTasks");
+const { loadMonsRules } = require("./monsRules");
+
+const laterGameFromMatchData = (mons, matchData, opponentMatchData) => {
+  const playerGame =
+    typeof matchData.fen === "string"
+      ? mons.Game.fromFen(matchData.fen)
+      : undefined;
+  const opponentGame =
+    typeof opponentMatchData.fen === "string"
+      ? mons.Game.fromFen(opponentMatchData.fen)
+      : undefined;
+  if (!playerGame && !opponentGame) {
+    throw new HttpsError("internal", "Could not validate the game score.");
+  }
+  if (!playerGame) {
+    return opponentGame;
+  }
+  if (!opponentGame) {
+    return playerGame;
+  }
+  return playerGame.isLaterThan(opponentGame) ? playerGame : opponentGame;
+};
 
 const updateRating = createRatingUpdater(glicko2.Glicko2);
 
@@ -581,19 +603,20 @@ exports.updateRatings = onCall(async (request) => {
     const playerProfile = await getProfileByLoginId(playerId);
     const opponentProfile = await getProfileByLoginId(opponentId);
 
-    const mons = await import("mons-rules");
-    let gameForScore = mons.MonsGameModel.from_fen(matchData.fen);
-    if (!gameForScore.is_later_than(opponentMatchData.fen)) {
-      gameForScore = mons.MonsGameModel.from_fen(opponentMatchData.fen);
-    }
+    const mons = await loadMonsRules();
+    const gameForScore = laterGameFromMatchData(
+      mons,
+      matchData,
+      opponentMatchData,
+    );
     const playerManaPoints =
       matchData.color === "white"
-        ? gameForScore.white_score()
-        : gameForScore.black_score();
+        ? gameForScore.scores[mons.Color.White]
+        : gameForScore.scores[mons.Color.Black];
     const opponentManaPoints =
       opponentMatchData.color === "white"
-        ? gameForScore.white_score()
-        : gameForScore.black_score();
+        ? gameForScore.scores[mons.Color.White]
+        : gameForScore.scores[mons.Color.Black];
     const playerHasProfile = playerProfile.profileId !== "";
     const opponentHasProfile = opponentProfile.profileId !== "";
     const canUpdateRatings = playerHasProfile && opponentHasProfile;
