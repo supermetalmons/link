@@ -3668,10 +3668,7 @@ export function didSelectInputModifier(inputModifier: InputModifier) {
 
 export function didClickSquare(location: Location) {
   if (puzzleMode) {
-    const didFastForward = Board.fastForwardInstructionsIfNeeded();
-    if (didFastForward && location.i === -1 && location.j === -1) {
-      return;
-    }
+    Board.fastForwardInstructionsIfNeeded();
   }
   if (
     !canHandleLiveBoardInput() ||
@@ -3683,6 +3680,22 @@ export function didClickSquare(location: Location) {
     return;
   }
   processInput(AssistedInputKind.None, InputModifier.None, location);
+}
+
+export function didClickOutsideBoard() {
+  if (puzzleMode && Board.fastForwardInstructionsIfNeeded()) {
+    return;
+  }
+  if (
+    !canHandleLiveBoardInput() ||
+    (isOnlineGame && !didConnect) ||
+    isWatchOnly ||
+    isGameOver ||
+    isWaitingForInviteToGetAccepted
+  ) {
+    return;
+  }
+  processInput(AssistedInputKind.None, InputModifier.None, undefined, true);
 }
 
 function turnShouldBeConfirmedForOutputEvents(
@@ -4811,6 +4824,7 @@ function processInput(
   assistedInputKind: AssistedInputKind,
   inputModifier: InputModifier,
   inputLocation?: Location,
+  isOutsideBoardInput: boolean = false,
 ) {
   if (!canHandleLiveBoardInput()) {
     return;
@@ -4827,6 +4841,12 @@ function processInput(
 
   const expectedMatchId = getExpectedOnlineMatchIdOrReconnect();
   if (isOnlineGame && !expectedMatchId) {
+    return;
+  }
+
+  if (isOutsideBoardInput && currentInputs.length > 0) {
+    currentInputs = [];
+    Board.removeHighlights();
     return;
   }
 

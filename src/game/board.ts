@@ -4,6 +4,7 @@ import * as SVG from "../utils/svg";
 import {
   isOnlineGame,
   didClickSquare,
+  didClickOutsideBoard,
   didSelectInputModifier,
   canChangeEmoji,
   sendPlayerEmojiUpdate,
@@ -4403,7 +4404,7 @@ export function setupBoard() {
         return;
       }
       hideItemSelectionOrConfirmationOverlay();
-      didClickSquare(new Location(-1, -1));
+      didClickOutsideBoard();
       event.preventDefault();
       event.stopPropagation();
     }
