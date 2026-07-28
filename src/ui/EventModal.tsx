@@ -82,6 +82,12 @@ const WINNER_PODIUM_HEIGHT =
 
 const FALLBACK_MATCH_H = 40;
 const FALLBACK_AVATAR_PX = 28;
+const PRIZES_EVENT_ID = "NN3eRzoZo80";
+const PRIZE_IMAGE_URLS = [
+  "https://cdn.lil.org/player/scarecrow/thumbs/1092.webp",
+  "https://cdn.lil.org/player/scarecrow/thumbs/1111.webp",
+  "https://cdn.lil.org/player/scarecrow/thumbs/1514.webp",
+];
 const PARTICIPANT_PROFILE_CACHE_TTL_MS = 30_000;
 
 type BracketCardInteraction = "none" | "game" | "participant";
@@ -113,6 +119,26 @@ const getWinnerPodiumWidth = (entryCount: number): number => {
     WINNER_PODIUM_COLUMN_W * normalizedEntryCount +
     WINNER_PODIUM_COLUMN_GAP * Math.max(0, normalizedEntryCount - 1)
   );
+};
+
+const getCenteredContentOffsetY = (params: {
+  contentHeight: number;
+  viewportHeight: number;
+  insetTop: number;
+  insetBottom: number;
+}): number => {
+  const { contentHeight, viewportHeight, insetTop, insetBottom } = params;
+  const centeredBetweenBars = Math.round((insetTop - insetBottom) / 2);
+  if (contentHeight <= 0) {
+    return centeredBetweenBars;
+  }
+  const freeHalf = (viewportHeight - contentHeight) / 2;
+  const minOffsetY = insetTop + BRACKET_EDGE_PADDING_Y - freeHalf;
+  const maxOffsetY = freeHalf - insetBottom - BRACKET_EDGE_PADDING_Y;
+  if (minOffsetY > maxOffsetY) {
+    return centeredBetweenBars;
+  }
+  return Math.round(Math.min(Math.max(0, minOffsetY), maxOffsetY));
 };
 
 const getViewportSize = (): { width: number; height: number } => {
@@ -193,6 +219,32 @@ const TopBarTitle = styled.div`
   align-items: center;
   gap: 1px;
   padding: 6px 14px;
+`;
+
+const TopBarStack = styled.div`
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: 100%;
+`;
+
+const PrizesRow = styled.div`
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 40px));
+  cursor: default;
+`;
+
+const PrizeImage = styled.img`
+  flex: 0 1 auto;
+  min-width: 0;
+  height: clamp(56px, 13vh, 120px);
+  width: auto;
+  max-width: calc((min(420px, 100vw - 40px) - 16px) / 3);
+  object-fit: contain;
 `;
 
 const TopBarSubtitle = styled.div`
@@ -818,13 +870,14 @@ const DAY_MS = 24 * HOUR_MS;
 const formatRelativeStartUnit = (value: number, unit: string): string =>
   `${value} ${unit}${value === 1 ? "" : "s"}`;
 
-const formatRelativeStartCompactHoursAndMinutes = (
-  totalMinutes: number,
-): string => {
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  return `in ${hours}h${minutes === 0 ? "" : `${minutes}m`}`;
-};
+const formatRelativeStartUnits = (
+  primary: string,
+  secondaryValue: number,
+  secondaryUnit: string,
+): string =>
+  secondaryValue <= 0
+    ? `in ${primary}`
+    : `in ${primary} ${formatRelativeStartUnit(secondaryValue, secondaryUnit)}`;
 
 const formatRelativeStart = (
   event: EventRecord | null,
@@ -852,16 +905,21 @@ const formatRelativeStart = (
   if (deltaMs >= DAY_MS) {
     const days = Math.floor(deltaMs / DAY_MS);
     const hours = Math.floor((deltaMs % DAY_MS) / HOUR_MS);
-    if (hours === 0) {
-      return formatRelativeStartCompactHoursAndMinutes(roundedMinutes);
-    }
-    return `in ${formatRelativeStartUnit(days, "day")} ${formatRelativeStartUnit(hours, "hour")}`;
+    return formatRelativeStartUnits(
+      formatRelativeStartUnit(days, "day"),
+      hours,
+      "hour",
+    );
   }
 
   if (deltaMs >= HOUR_MS) {
     const hours = Math.floor(roundedMinutes / 60);
     const minutes = roundedMinutes % 60;
-    return `in ${formatRelativeStartUnit(hours, "hour")} ${formatRelativeStartUnit(minutes, "minute")}`;
+    return formatRelativeStartUnits(
+      formatRelativeStartUnit(hours, "hour"),
+      minutes,
+      "minute",
+    );
   }
 
   const minutes = roundedMinutes;
@@ -2719,6 +2777,7 @@ const EventModal: React.FC = () => {
   const [viewportSize, setViewportSize] = useState(getViewportSize);
   const [bracketInsets, setBracketInsets] = useState({ top: 0, bottom: 0 });
   const [participantsScale, setParticipantsScale] = useState(1);
+  const [participantsHeight, setParticipantsHeight] = useState(0);
   const [pendingJoinEventId, setPendingJoinEventId] = useState<string | null>(
     null,
   );
@@ -3082,6 +3141,10 @@ const EventModal: React.FC = () => {
     setParticipantsScale((prev) =>
       Math.abs(prev - scale) < 0.002 ? prev : scale,
     );
+    const scaledHeight = naturalH * scale;
+    setParticipantsHeight((prev) =>
+      Math.abs(prev - scaledHeight) < 1 ? prev : scaledHeight,
+    );
   }, [
     bracketInsets.top,
     bracketInsets.bottom,
@@ -3369,10 +3432,6 @@ const EventModal: React.FC = () => {
     viewportSize.height,
     viewportSize.width,
   ]);
-  const bracketOffsetY = Math.round(
-    (bracketInsets.top - bracketInsets.bottom) / 2,
-  );
-
   const isJoinWindowOpen =
     !!displayedEventRecord &&
     displayedEventRecord.status === "scheduled" &&
@@ -4011,6 +4070,18 @@ const EventModal: React.FC = () => {
     !isBracketStatus &&
     !isDismissedState &&
     !isPendingDismissState;
+  const centeredContentHeight =
+    hasBracket && bracketLayout
+      ? bracketFrameHeight * bracketScale
+      : showParticipantsPanel
+        ? participantsHeight
+        : 0;
+  const bracketOffsetY = getCenteredContentOffsetY({
+    contentHeight: centeredContentHeight,
+    viewportHeight: viewportSize.height,
+    insetTop: bracketInsets.top,
+    insetBottom: bracketInsets.bottom,
+  });
   const canDisqualifyFromLiveBracket =
     canManageDisqualifications &&
     !devStubRecord &&
@@ -4024,6 +4095,10 @@ const EventModal: React.FC = () => {
     !devStubRecord && removableScheduledParticipants.length > 0;
   const disableDisqualifyButton =
     isDisqualifying || livePendingMatches.length <= 0;
+  const showEventPrizes =
+    modalState.eventId === PRIZES_EVENT_ID &&
+    !!displayedEventRecord &&
+    !isDismissedState;
   const topBarTitleText = devStubRecord
     ? ""
     : formatRelativeStart(displayedEventRecord, nowMs);
@@ -4130,14 +4205,25 @@ const EventModal: React.FC = () => {
         </DevBracketHelper>
       )}
 
-      {!isDismissedState && topBarTitleText && (
+      {!isDismissedState && (topBarTitleText || showEventPrizes) && (
         <TopBar ref={topBarRef}>
-          <TopBarTitle>
-            <div>{topBarTitleText}</div>
-            {topBarSubtitleText && (
-              <TopBarSubtitle>{topBarSubtitleText}</TopBarSubtitle>
+          <TopBarStack>
+            {topBarTitleText && (
+              <TopBarTitle>
+                <div>{topBarTitleText}</div>
+                {topBarSubtitleText && (
+                  <TopBarSubtitle>{topBarSubtitleText}</TopBarSubtitle>
+                )}
+              </TopBarTitle>
             )}
-          </TopBarTitle>
+            {showEventPrizes && (
+              <PrizesRow>
+                {PRIZE_IMAGE_URLS.map((url) => (
+                  <PrizeImage key={url} src={url} alt="" draggable={false} />
+                ))}
+              </PrizesRow>
+            )}
+          </TopBarStack>
         </TopBar>
       )}
 

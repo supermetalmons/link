@@ -87,8 +87,10 @@ const Content = styled.div`
   }
 `;
 
+const INVENTORY_SECTION_MIN_HEIGHT_PX = 128;
+
 const LoadingText = styled.div`
-  min-height: 128px;
+  min-height: ${INVENTORY_SECTION_MIN_HEIGHT_PX}px;
   text-align: center;
   font-size: 0.8rem;
   color: var(--color-gray-77);
@@ -273,10 +275,10 @@ const PriceAmount = styled.span`
 
 const InventorySection = styled.section`
   padding-top: 7px;
-`;
-
-const EmptyState = styled(LoadingText)`
-  min-height: 92px;
+  min-height: ${INVENTORY_SECTION_MIN_HEIGHT_PX}px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
 `;
 
 const SwagPackLink = styled.a`
@@ -583,7 +585,7 @@ export const InventoryModal = React.forwardRef<
             <LoadingText>LOADING...</LoadingText>
           ) : avatars.length === 0 && specials.length === 0 ? (
             dataOk ? (
-              <EmptyState>
+              <LoadingText>
                 <SwagPackLink
                   href="https://www.tensor.trade/trade/swag_pack"
                   target="_blank"
@@ -591,7 +593,7 @@ export const InventoryModal = React.forwardRef<
                 >
                   Get Swag Pack
                 </SwagPackLink>
-              </EmptyState>
+              </LoadingText>
             ) : (
               <LoadingText>Failed to load.</LoadingText>
             )
