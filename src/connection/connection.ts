@@ -1437,9 +1437,7 @@ class Connection {
     }
   }
 
-  public async unlinkAuthMethod(
-    method: AuthMethodKey,
-  ): Promise<any> {
+  public async unlinkAuthMethod(method: AuthMethodKey): Promise<any> {
     try {
       await this.ensureAuthenticated();
       const unlinkAuthMethodFunction = httpsCallable(
@@ -1569,7 +1567,6 @@ class Connection {
     try {
       await this.ensureAuthenticated();
       const getNftsFunction = httpsCallable(this.functions, "getNfts");
-      // Keep the legacy payload for mixed-version rollouts; the server derives ownership.
       const response = await getNftsFunction({ sol, eth });
       return response.data;
     } catch (error) {
@@ -2791,8 +2788,6 @@ class Connection {
   ): Promise<boolean> {
     const profileId = this.getLocalProfileId();
     if (!profileId) {
-      // Fail-open when local profile resolution is unavailable; server enforces
-      // participant checks and this avoids suppressing legitimate participant syncs.
       return true;
     }
 
@@ -2836,8 +2831,6 @@ class Connection {
       const isParticipant = participantSnapshot.exists();
       const observedEvent = this.latestObservedEventById.get(eventId) ?? null;
       if (!isParticipant && !observedEvent) {
-        // Fail-open when we do not have an observed event snapshot yet. This
-        // avoids client-side false negatives from stale local profile ids.
         return true;
       }
       this.eventSyncParticipantCacheById.set(eventId, {
@@ -2847,7 +2840,6 @@ class Connection {
       });
       return isParticipant;
     } catch {
-      // Fail-open on transient read errors; server-side gate remains authoritative.
       return true;
     }
   }
@@ -4551,16 +4543,12 @@ class Connection {
       if (linkedProfileId) {
         return linkedProfileId;
       }
-    } catch {
-      // fall through
-    }
+    } catch {}
 
     try {
       const profile = await this.getProfileByLoginId(normalizedLoginUid);
       return this.normalizeStringOrNull(profile.id);
-    } catch {
-      // fall through
-    }
+    } catch {}
 
     const claimedProfileId = this.normalizeStringOrNull(
       await this.getCurrentProfileClaimId(),
@@ -5629,9 +5617,7 @@ class Connection {
               ) {
                 workingInvite.guestId = resolvedGuestId;
               }
-            } catch {
-              // Keep invite context even when autojoin races fail.
-            }
+            } catch {}
           }
         }
 

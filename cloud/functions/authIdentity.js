@@ -585,8 +585,6 @@ const readProfileByMethod = async (method, normalizedValue, rawValue) => {
         }
       }
     }
-    // Index points to a profile that no longer owns this method. Remove stale row best-effort
-    // with a conditional transaction so we do not delete a concurrently repaired index.
     await firestore
       .runTransaction(async (transaction) => {
         const liveIndexSnapshot = await transaction.get(indexRef);
@@ -2338,8 +2336,6 @@ const linkVerifiedMethod = async ({
       methodProfile &&
       currentProfile.id !== methodProfile.id
     ) {
-      // Defer merge until ensureProfileMethodAndLoginAndIndex has applied cooldown checks.
-      // The retry loop below will return conflictProfileId and merge deterministically.
       targetProfileId = currentProfile.id;
     } else {
       throw new HttpsError("internal", "unexpected-auth-state");

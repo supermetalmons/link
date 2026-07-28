@@ -1,5 +1,3 @@
-/// <reference lib="webworker" />
-
 import * as MonsRules from "mons-rules";
 import type {
   WorkerAutomoveRequest,
@@ -7,7 +5,12 @@ import type {
   WorkerAutomoveResult,
 } from "./automoveWorkerProtocol";
 
-declare const self: DedicatedWorkerGlobalScope;
+type AutomoveWorkerScope = {
+  postMessage(response: WorkerAutomoveResponse): void;
+  onmessage: ((event: MessageEvent<WorkerAutomoveRequest>) => void) | null;
+};
+
+declare const self: AutomoveWorkerScope;
 
 const resolveWorkerAutomove = async (
   fen: string,

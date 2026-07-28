@@ -486,8 +486,6 @@ const wagerSlotLayoutsEqual = (
     wagerSlotLayoutEqual(a.opponent, b.opponent));
 
 function invalidateWagerSlotLayout() {
-  // End markers move the name anchor. Resolution rendering must wait until
-  // BoardComponent publishes geometry calculated from the same revision.
   wagerSlotLayoutRevision += 1;
 }
 
@@ -1851,18 +1849,14 @@ function runMonsBoardAsDisplayWaitingHeartsAnimation() {
   }
 
   const frames: [number, number][][] = [
-    // Frame 0: empty
     [],
-    // Frame 1: center dot
     [[5, 5]],
-    // Frame 2: tiny heart seed
     [
       [4, 4],
       [4, 6],
       [5, 5],
       [6, 5],
     ],
-    // Frame 3: small heart
     [
       [3, 4],
       [3, 6],
@@ -1873,7 +1867,6 @@ function runMonsBoardAsDisplayWaitingHeartsAnimation() {
       [5, 6],
       [6, 5],
     ],
-    // Frame 4: medium heart
     [
       [2, 3],
       [2, 4],
@@ -1890,7 +1883,6 @@ function runMonsBoardAsDisplayWaitingHeartsAnimation() {
       [6, 6],
       [7, 5],
     ],
-    // Frame 5: large heart
     [
       [1, 2],
       [1, 3],
@@ -1913,7 +1905,6 @@ function runMonsBoardAsDisplayWaitingHeartsAnimation() {
       [7, 6],
       [8, 5],
     ],
-    // Frame 6: full heart
     [
       [0, 2],
       [0, 3],
@@ -3099,8 +3090,6 @@ function generateWagerPositions(
     const baseU = stackUs[s];
     const height = stackHeights[s];
     for (let i = 0; i < height; i += 1) {
-      // Rendering depends on array order: bottom chip first so chips above it
-      // overlap correctly to look like a chip stack viewed from the side.
       const jitter = (i % 2 === 0 ? -1 : 1) * WAGER_STACK_U_JITTER;
       positions.push({
         u: clampStackCoord(baseU + jitter),
@@ -3116,8 +3105,6 @@ function computeWagerStackHeights(count: number, stackCount: number): number[] {
   const base = Math.floor(count / safeStacks);
   const extra = count % safeStacks;
   const heights: number[] = [];
-  // Distribute extra chips to the inner columns first so the silhouette peaks
-  // toward the center like a casino chip pile with taller stacks in front.
   for (let s = 0; s < safeStacks; s += 1) {
     heights.push(base);
   }
@@ -3184,8 +3171,6 @@ function syncWagerPileIcons(
     if (visibleCount <= 0) {
       pile.positions = [];
     } else {
-      // Stack coordinates depend on the total visible count, so changing count
-      // needs a full regeneration to keep the deterministic pile balanced.
       pile.positions = generateWagerPositions(visibleCount);
     }
   }
@@ -3332,8 +3317,6 @@ function clearDisappearingPile(side: "player" | "opponent") {
 }
 
 function emitWagerRenderState() {
-  // Winner mode suppresses side piles even when the winner pile itself is
-  // hidden by layout; buildWagerRenderState decides actual visibility.
   const winnerModeActive = Boolean(
     winnerPileActive && winnerWagerPile && winnerWagerPile.count > 0,
   );
@@ -3600,8 +3583,6 @@ function retargetActiveWagerWinAnimation() {
 
   const previousIconSize = state.iconSize;
   const nextIconSize = getWagerIconLayout(nextWinnerSourceRect).iconSize;
-  // Preserve elapsed progress by remapping the original endpoints into the
-  // new source/target spaces instead of restarting or jumping the animation.
   state.starts = state.starts.map((start, index) => {
     const space = state.startSpaces[index];
     if (space === "winnerSource") {

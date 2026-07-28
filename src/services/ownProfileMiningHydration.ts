@@ -42,9 +42,6 @@ export function syncOwnProfileMiningState(profile: PlayerProfile): void {
     return;
   }
   const activeProfileId = storage.getProfileId("");
-  // Some hydration paths can construct an own-profile object before the
-  // active profile id has been persisted. Only publish mining state once this
-  // profile is the active session.
   if (activeProfileId !== profile.id) {
     if (!activeProfileId) {
       pendingOwnProfileMiningState = {

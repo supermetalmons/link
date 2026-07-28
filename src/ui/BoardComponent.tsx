@@ -490,9 +490,7 @@ const startVideoReactionElement = (
   videoElement.playsInline = true;
   try {
     videoElement.currentTime = 0;
-  } catch {
-    // Some browsers throw before media metadata is ready; playback can still start.
-  }
+  } catch {}
   playVideoReactionElement(videoElement, onCannotPlay);
 };
 
@@ -1022,8 +1020,6 @@ const getWagerStackRectForName = (
     slotLayout.nameX +
     nameMeasurement.width +
     WAGER_STACK_NAME_GAP_MULTIPLIER * multiplicator;
-  // Stacks build upward from the rect bottom; anchor mostly above the name so
-  // the lowest chip rests near the name baseline like a chip on a table.
   const y = slotLayout.nameY - h * 0.86;
   return clampBoardRect(x, y, w, h);
 };
@@ -1054,8 +1050,6 @@ const getWagerSlotLayoutForName = (
 };
 
 const playerInfoSlotHasVisibleName = (slot: BoardPlayerInfoSlotState) => {
-  // Wager stacks anchor to the name label; reaction-only rows intentionally
-  // hide stacks because there is no visible name to attach them to.
   return slot.nameVisible && slot.nameText !== "";
 };
 
@@ -3041,8 +3035,6 @@ const BoardComponent: React.FC = () => {
   }, [computedWagerSlotLayouts, playerInfoOverlayState.wagerLayoutRevision]);
 
   useLayoutEffect(() => {
-    // setWagerRenderHandler emits immediately, so register after slot layouts
-    // have reached board.ts and the first state uses the measured name layout.
     setWagerRenderHandler((state) => {
       applyWagerRenderStateRef.current(state);
     });
@@ -3581,10 +3573,6 @@ const BoardComponent: React.FC = () => {
         </div>
       )}
 
-      {/*
-        Board foreground order: avatars above player text, then effects and
-        interactive board controls. Later app UI still paints above this SVG.
-      */}
       <svg
         xmlns="http://www.w3.org/2000/svg"
         className={boardClassName}

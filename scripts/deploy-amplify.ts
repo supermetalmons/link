@@ -92,7 +92,8 @@ function parseArgs(argv: string[]): CliOptions {
 
     if (arg === "--job-type") {
       const value = argv[++i];
-      if (value !== "RELEASE" && value !== "RETRY") fail(`Invalid --job-type ${JSON.stringify(value)}`);
+      if (value !== "RELEASE" && value !== "RETRY")
+        fail(`Invalid --job-type ${JSON.stringify(value)}`);
       opts.jobType = value;
       continue;
     }
@@ -107,9 +108,6 @@ function parseArgs(argv: string[]): CliOptions {
       continue;
     }
 
-    // Allow positional branch: `npm run deploy -- production`
-    // and compatibility with `npm run deploy --branch production`,
-    // where npm may only forward `production`.
     if (!arg.startsWith("-")) {
       if (!opts.branch) {
         opts.branch = arg;
@@ -139,7 +137,9 @@ function awsCli(
   });
 
   if ((res as { error?: { code?: string } }).error?.code === "ENOENT") {
-    fail("AWS CLI not found. Install it (or ensure `aws` is in PATH) and try again.");
+    fail(
+      "AWS CLI not found. Install it (or ensure `aws` is in PATH) and try again.",
+    );
   }
 
   return {
@@ -160,21 +160,35 @@ function formatAwsFailure(
   const hints: string[] = [];
 
   if (/NoRegion|You must specify a region/i.test(combined)) {
-    hints.push("Set region via --region or AMPLIFY_REGION (for example: AMPLIFY_REGION=us-east-1).");
+    hints.push(
+      "Set region via --region or AMPLIFY_REGION (for example: AMPLIFY_REGION=us-east-1).",
+    );
   }
-  if (/NotFoundException|Branch .* not found|App .* not found/i.test(combined)) {
-    hints.push("Verify the Amplify app id (--app-id or AMPLIFY_APP_ID) and the branch name.");
+  if (
+    /NotFoundException|Branch .* not found|App .* not found/i.test(combined)
+  ) {
+    hints.push(
+      "Verify the Amplify app id (--app-id or AMPLIFY_APP_ID) and the branch name.",
+    );
   }
-  if (/NoCredentials|Unable to locate credentials|UnrecognizedClientException|ExpiredToken/i.test(combined)) {
+  if (
+    /NoCredentials|Unable to locate credentials|UnrecognizedClientException|ExpiredToken/i.test(
+      combined,
+    )
+  ) {
     hints.push(
       "Authenticate AWS CLI (for example: aws configure sso, then aws sso login --profile <name>; or aws configure).",
     );
   }
   if (!context.region) {
-    hints.push("No region provided via --region, AMPLIFY_REGION, AWS_REGION, or AWS_DEFAULT_REGION.");
+    hints.push(
+      "No region provided via --region, AMPLIFY_REGION, AWS_REGION, or AWS_DEFAULT_REGION.",
+    );
   }
   if (!context.profile) {
-    hints.push("No profile provided via --profile or AWS_PROFILE (default profile will be used if configured).");
+    hints.push(
+      "No profile provided via --profile or AWS_PROFILE (default profile will be used if configured).",
+    );
   }
 
   const lines = [`${operation}.`];
@@ -194,12 +208,16 @@ async function sleep(ms: number): Promise<void> {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
 
-  const appId = opts.appId || process.env.AMPLIFY_APP_ID || DEFAULT_AMPLIFY_APP_ID;
+  const appId =
+    opts.appId || process.env.AMPLIFY_APP_ID || DEFAULT_AMPLIFY_APP_ID;
   const branch = opts.branch || process.env.npm_config_branch;
   if (!branch) fail("Missing required arg: --branch <name>\n\n" + usage(), 2);
 
   const region =
-    opts.region || process.env.AMPLIFY_REGION || process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION;
+    opts.region ||
+    process.env.AMPLIFY_REGION ||
+    process.env.AWS_REGION ||
+    process.env.AWS_DEFAULT_REGION;
   const profile = opts.profile || process.env.AWS_PROFILE;
 
   const awsGlobalArgs: string[] = [];
@@ -233,16 +251,20 @@ async function main() {
     "pipe",
   );
   if (start.status !== 0) {
-    fail(formatAwsFailure("Failed to start Amplify job (aws amplify start-job)", start, { region, profile }));
+    fail(
+      formatAwsFailure(
+        "Failed to start Amplify job (aws amplify start-job)",
+        start,
+        { region, profile },
+      ),
+    );
   }
 
   let jobId: string | undefined;
   try {
     const payload = JSON.parse(start.stdout);
     jobId = payload?.jobSummary?.jobId;
-  } catch {
-    // ignore JSON parse failure and continue
-  }
+  } catch {}
 
   if (start.stdout.trim()) {
     console.log(`\n${start.stdout.trim()}\n`);
@@ -257,7 +279,9 @@ async function main() {
   console.log(`[deploy] Started job: ${jobId}`);
 
   if (!opts.wait) {
-    console.log("[deploy] Tip: re-run with --wait to poll status until completion.");
+    console.log(
+      "[deploy] Tip: re-run with --wait to poll status until completion.",
+    );
     return;
   }
 
@@ -268,7 +292,9 @@ async function main() {
 
   while (true) {
     if (Date.now() - startAt > maxMs) {
-      fail(`Timed out waiting for job ${jobId} after ${Math.round(maxMs / 60_000)} minutes.`);
+      fail(
+        `Timed out waiting for job ${jobId} after ${Math.round(maxMs / 60_000)} minutes.`,
+      );
     }
 
     const job = awsCli(
@@ -287,16 +313,21 @@ async function main() {
       "pipe",
     );
     if (job.status !== 0) {
-      fail(formatAwsFailure("Failed to poll job status (aws amplify get-job)", job, { region, profile }));
+      fail(
+        formatAwsFailure(
+          "Failed to poll job status (aws amplify get-job)",
+          job,
+          { region, profile },
+        ),
+      );
     }
 
     let status = "UNKNOWN";
     try {
       const payload = JSON.parse(job.stdout);
-      status = payload?.job?.summary?.status || payload?.jobSummary?.status || status;
-    } catch {
-      // ignore JSON parse failure and keep UNKNOWN
-    }
+      status =
+        payload?.job?.summary?.status || payload?.jobSummary?.status || status;
+    } catch {}
 
     console.log(`[deploy] Job status: ${status}`);
     if (status === "SUCCEED" || status === "SUCCEEDED") return;

@@ -333,7 +333,6 @@ const MoveHistoryPopup = React.forwardRef<HTMLDivElement>((_, ref) => {
   const pendingScrollIndexRef = React.useRef<number | null>(items.length - 1);
   const [isAtTop, setIsAtTop] = React.useState(false);
 
-  // Apply pending scroll after render when DOM reflects new items
   React.useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) {
@@ -348,7 +347,6 @@ const MoveHistoryPopup = React.forwardRef<HTMLDivElement>((_, ref) => {
     setIsAtTop((prev) => (prev === atTop ? prev : atTop));
   }, [items.length, selectedIndex, version]);
 
-  // User scroll updates selection and dismisses snapshot
   const handleScroll = React.useCallback(() => {
     const el = scrollRef.current;
     if (!el || items.length === 0) return;
@@ -365,7 +363,6 @@ const MoveHistoryPopup = React.forwardRef<HTMLDivElement>((_, ref) => {
     }
   }, [items.length]);
 
-  // Mouse drag support for desktop
   const handleMouseDown = React.useCallback((e: React.MouseEvent) => {
     isDraggingRef.current = true;
     startYRef.current = e.clientY;
@@ -398,7 +395,6 @@ const MoveHistoryPopup = React.forwardRef<HTMLDivElement>((_, ref) => {
     };
   }, []);
 
-  // Triple-click shows inline snapshot button
   const lastClickTimeRef = React.useRef(0);
   const clickCountRef = React.useRef(0);
   const lastClickedIndexRef = React.useRef(-1);
@@ -426,7 +422,6 @@ const MoveHistoryPopup = React.forwardRef<HTMLDivElement>((_, ref) => {
     [],
   );
 
-  // Click on item to select it
   const handleItemClick = React.useCallback(
     (index: number) => {
       if (isDraggingRef.current) return;
@@ -532,7 +527,6 @@ const MoveHistoryPopup = React.forwardRef<HTMLDivElement>((_, ref) => {
     };
   }, []);
 
-  // Calculate distance from selected for styling
   const getDistance = (index: number) => Math.abs(index - selectedIndex);
 
   const getIconImage = React.useCallback(

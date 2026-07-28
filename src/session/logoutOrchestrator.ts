@@ -5,7 +5,6 @@ const LOGOUT_SYNC_STORAGE_KEY = "__mons_link_logout_sync__";
 const LOGOUT_PENDING_WIPE_STORAGE_KEY = "__mons_link_logout_pending_wipe__";
 const LOGOUT_PENDING_WIPE_TAB_ACK_SESSION_KEY =
   "__mons_link_logout_pending_wipe_ack__";
-// Keep the marker briefly after logout so recently backgrounded tabs still have a fallback trigger.
 const LOGOUT_PENDING_WIPE_UNAUTH_RETENTION_MS = 60 * 1000;
 const LOGOUT_PENDING_WIPE_MAX_AGE_MS = 10 * 60 * 1000;
 const SIGN_IN_SYNC_CHANNEL = "mons-link-signin-sync";
@@ -373,7 +372,6 @@ const clearClientPersistenceForLogout = async (
     cleanupMode === "thorough"
       ? THOROUGH_PRE_RELOAD_CLEANUP_MS
       : FAST_PRE_RELOAD_CLEANUP_MS;
-  // Keep reload snappy by bounding pre-reload cleanup time.
   await Promise.race([heavyCleanupPromise, waitFor(preReloadBudgetMs)]);
 };
 
@@ -387,7 +385,6 @@ export const enforcePendingLogoutWipeIfNeeded = () => {
     return;
   }
   if (!hasPersistedAuthenticatedIdentity()) {
-    // Avoid wiping anon-mode local state after logout cleanup has already removed auth identity.
     const ageMs = Date.now() - marker.createdAtMs;
     if (
       !Number.isFinite(ageMs) ||
@@ -410,8 +407,6 @@ export const clearPendingLogoutWipeAfterSignIn = () => {
 
 const reloadAfterLogout = () => {
   window.location.reload();
-  // Safari can occasionally ignore reload() when called from async cleanup chains.
-  // If unload has not started shortly after, force same-url navigation.
   window.setTimeout(() => {
     try {
       window.location.replace(window.location.href);
@@ -436,7 +431,6 @@ const handleLogoutSignal = (
     try {
       reloadAfterLogout();
     } finally {
-      // If navigation fails, allow later logout signals to retry cleanup/reload.
       isHandlingSignal = false;
     }
   });
@@ -525,7 +519,6 @@ export const installLogoutSync = () => {
         !currentMarker ||
         !doesPendingLogoutWipeMarkerMatch(marker, currentMarker)
       ) {
-        // Ignore stale/reordered events that no longer represent current marker state.
         return;
       }
       if (isPendingLogoutWipeMarkerExpired(marker)) {

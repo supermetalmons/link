@@ -781,8 +781,6 @@ exports.updateRatings = onCall(async (request) => {
     const firestore = admin.firestore();
     const batch = firestore.batch();
     const completedAtMs = Date.now();
-    // Persist the durable result alongside the profile writes so retries can repair
-    // the RTDB projection marker without ever applying ratings twice.
     if (playerRatingUpdate && opponentRatingUpdate) {
       batch.update(
         firestore.collection("users").doc(playerProfile.profileId),

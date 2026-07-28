@@ -1455,9 +1455,7 @@ function getVerifiedFenCandidate(
     ) {
       return candidate;
     }
-  } catch {
-    // Invalid persisted input is not a trusted replay candidate.
-  }
+  } catch {}
   return null;
 }
 
@@ -4569,8 +4567,6 @@ function isWagerOutcomeAnimationBlocking() {
   if (!wagerOutcomeAnimating) {
     return false;
   }
-  // Preserve the existing 900 ms guard, then defer to the board's actual
-  // pending/running state if layout publication delayed the animation.
   if (
     wagerOutcomeAnimTimer !== null ||
     Board.isWagerWinAnimationPendingOrActive()
@@ -4969,7 +4965,6 @@ const isObservedMatchOpponentSide = (
   if (isWatchOnly) {
     return match.color === "black";
   }
-  // Non-reconnect live flow observes the opponent stream only; keep legacy behavior.
   if (!isReconnect) {
     return true;
   }
@@ -6003,9 +5998,6 @@ export function enterWatchOnlyMode() {
     return;
   }
   const sessionGuard = getSessionGuard();
-  // Spectator sessions do not hydrate the local player through the regular
-  // in-game profile path, so pull the signed-in profile once to restore
-  // mining state for the island button.
   connection
     .getProfileByLoginId(storedLoginId)
     .then((profile) => {

@@ -637,8 +637,6 @@ export function useAuthStatus() {
           scheduleDidAttemptAuthentication();
           return;
         }
-        // Watch-only bootstrap skips the normal own-profile hydration path, so
-        // fetch the full profile here to restore mining state for the island.
         if (isWatchOnly && !didLoadAuthoritativeProfile) {
           const authoritativeProfile = await loadAuthoritativeProfile();
           if (!isStillValid()) {

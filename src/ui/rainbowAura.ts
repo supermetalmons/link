@@ -18,8 +18,6 @@ export const RAINBOW_MASK_CSS_BASE = `-webkit-mask-size:100% 100%;mask-size:100%
 export function getRainbowAuraMaskUrl(src: string): string {
   if (!src || /^(?:blob|data):/i.test(src)) return src;
 
-  // WebKit can reuse a no-CORS <img> cache entry for the CORS-enabled mask
-  // request. Keep mask resources on their own versioned cache key.
   const hashIndex = src.indexOf("#");
   const url = hashIndex === -1 ? src : src.slice(0, hashIndex);
   const hash = hashIndex === -1 ? "" : src.slice(hashIndex);

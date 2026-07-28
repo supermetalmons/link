@@ -31,7 +31,6 @@ interface NavigationPickerProps {
   onLoadMoreGames?: () => void;
 }
 
-// Flip to `false` to restore the old event-cell cloud behavior.
 const ENABLE_EXPANDED_EVENT_CELL_CLOUD = true;
 
 const NavigationPickerContainer = styled.div`
@@ -353,12 +352,14 @@ const FightCloudInner = styled.div`
   display: flex;
   align-items: center;
   gap: ${ENABLE_EXPANDED_EVENT_CELL_CLOUD ? "5px" : "1px"};
-  ${ENABLE_EXPANDED_EVENT_CELL_CLOUD
-    ? `
+  ${
+    ENABLE_EXPANDED_EVENT_CELL_CLOUD
+      ? `
   width: 100%;
   min-width: 0;
   `
-    : ""}
+      : ""
+  }
   z-index: 1;
 `;
 
@@ -1041,8 +1042,7 @@ const NavigationPicker: React.FC<NavigationPickerProps> = ({
           </FightCloudInner>
         </FightCloudWrap>
       ),
-      badge:
-        hasBadge && <FightCloudBadge>+{overflow}</FightCloudBadge>,
+      badge: hasBadge && <FightCloudBadge>+{overflow}</FightCloudBadge>,
     };
   };
 

@@ -326,7 +326,6 @@ const resolveScheduledDateTimeStartAtMs = (data, nowMs = getNowMs()) => {
 
   const normalizedNowMs = toFiniteInteger(nowMs, NaN);
   if (Number.isFinite(normalizedNowMs)) {
-    // Prefer the next future instant for ambiguous wall times (DST fall back).
     const nextFutureInstantMs = matchingInstants.find(
       (candidateMs) => candidateMs > normalizedNowMs,
     );
@@ -905,8 +904,6 @@ const reconcileThirdPlaceMatchReadiness = async ({
   const guestSlotBlocked = isMatchSlotBlocked(thirdPlaceMatch, "guest");
   const winnerDisqualified = isMatchWinnerDisqualified(thirdPlaceMatch);
 
-  // isMatchResolved() treats winnerDisqualified as resolved, so gate on
-  // unresolved status to normalize pending/upcoming disqualifications to bye.
   if (winnerDisqualified && !isResolvedMatchStatus(status)) {
     if (
       applyMatchResolution(

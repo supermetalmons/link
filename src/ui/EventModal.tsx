@@ -1868,7 +1868,6 @@ const computeSymmetricalBracket = (
     });
   };
 
-  // Left side: columns 0 to sideRounds-1
   for (let r = 0; r < sideRounds; r++) {
     const layout = roundLayouts[r];
     const x = colX(r);
@@ -1881,7 +1880,6 @@ const computeSymmetricalBracket = (
       pushPosition(x, y, `L${r}_${m}`, match, layout);
     }
 
-    // Connectors from this round to the next (inward)
     if (r < sideRounds - 1) {
       const nextX = colX(r + 1);
       const nextLayout = roundLayouts[r + 1];
@@ -1946,7 +1944,6 @@ const computeSymmetricalBracket = (
       }
     }
 
-    // Connector from last side round to center final
     if (r === sideRounds - 1) {
       const y = getBracketMatchCenterY(r, 0, layout.height);
       const sx = x + layout.width;
@@ -1964,7 +1961,6 @@ const computeSymmetricalBracket = (
     }
   }
 
-  // Final: center column
   {
     const x = colX(sideRounds);
     const finalRound = rounds[totalRounds - 1];
@@ -1976,7 +1972,6 @@ const computeSymmetricalBracket = (
     }
   }
 
-  // Right side: columns sideRounds+1 to 2*sideRounds
   for (let r = 0; r < sideRounds; r++) {
     const layout = roundLayouts[r];
     const col = 2 * sideRounds - r;
@@ -1992,7 +1987,6 @@ const computeSymmetricalBracket = (
       pushPosition(x, y, `R${r}_${m}`, match, layout);
     }
 
-    // Connectors (going leftward toward center)
     if (r < sideRounds - 1) {
       const innerCol = 2 * sideRounds - (r + 1);
       const innerX = colX(innerCol);
@@ -2060,7 +2054,6 @@ const computeSymmetricalBracket = (
       }
     }
 
-    // Connector from right semi to center final
     if (r === sideRounds - 1) {
       const y = getBracketMatchCenterY(r, 0, layout.height);
       const sx = x;
@@ -2785,7 +2778,6 @@ const EventModal: React.FC = () => {
 
   useEffect(() => {
     const unsubscribe = subscribeToEventModalState((nextState) => {
-      // State identity also distinguishes a close/reopen of the same event.
       if (participantLookupModalStateRef.current !== nextState) {
         participantLookupModalStateRef.current = nextState;
         invalidateParticipantLookups();
@@ -3446,8 +3438,6 @@ const EventModal: React.FC = () => {
       }
       const nowMs = Date.now();
       if (event.type === "touchstart") {
-        // Mobile browsers may fire an emulated mousedown after touchstart.
-        // Ignore that synthetic mousedown so it cannot overwrite this gesture's latch.
         ignoreBackdropMouseDownUntilMsRef.current = nowMs + 1200;
         const shouldKeepVisible = shouldKeepVisibleForOutsideDismiss();
         ignoreNextBackdropClickRef.current = shouldKeepVisible;
@@ -3732,7 +3722,6 @@ const EventModal: React.FC = () => {
       }
       const displayName = getParticipantDisplayName(participant);
       const profileCacheKey = getParticipantProfileCacheKey(participant);
-      // Same-player clicks are independent attempts; the first valid result wins.
       let lookupGroup = activeParticipantLookupRef.current;
       if (
         !lookupGroup ||

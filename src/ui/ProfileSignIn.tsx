@@ -388,7 +388,6 @@ const armLogoutUiLastResortUnlockTimeout = (logoutAttemptId: number) => {
       return;
     }
     setLogoutUiLocked(false);
-    // Last resort only: if navigation keeps failing, restore controls so user is not trapped.
     setAuthStatusGlobally("unauthenticated");
   }, LOGOUT_UI_LAST_RESORT_UNLOCK_TIMEOUT_MS);
 };
@@ -403,9 +402,7 @@ const armLogoutUiRecoveryTimeout = (logoutAttemptId: number) => {
     if (finalizedLogoutAttemptId !== logoutAttemptId) {
       finalizedLogoutAttemptId = logoutAttemptId;
     }
-    // Keep auth controls hidden while forcing a heavier retry.
     setAuthStatusGlobally("loading");
-    // If sign out is stalled or reload failed, still force canonical logout cleanup + reload.
     armLogoutUiLastResortUnlockTimeout(logoutAttemptId);
     void performLogoutCleanupAndReload({ cleanupMode: "thorough" });
   }, LOGOUT_UI_RECOVERY_TIMEOUT_MS);
@@ -761,7 +758,6 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
         recoverXRedirectNavigationIfStalled();
         return;
       }
-      // Some webviews hand X off externally without unloading this page; recover when focus returns.
       const handleVisibilityChange = () => {
         if (document.visibilityState !== "visible") {
           return;
@@ -885,7 +881,6 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
         return;
       }
       shouldReopenSettingsAfterXRedirectRef.current = false;
-      // Reopen only after the settings callback has fully cleared so linked methods refresh against final state.
       closeProfileTransientUiForSettingsReopen();
       setIsSettingsOpen(true);
     });
@@ -965,7 +960,6 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     setSettingsInlineMessage(null);
     setIsEditingName(false);
     hideShinyCard();
-    // Keep auth controls hidden until the hard reload lands to avoid flicker.
     setAuthStatusGlobally("loading");
   }, []);
 

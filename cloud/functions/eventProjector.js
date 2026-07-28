@@ -56,8 +56,6 @@ const getListSortAtMs = (eventData, status) => {
             ? Math.floor(eventData.createdAtMs)
             : null;
     if (startedAtMs && Number.isFinite(startedAtMs) && startedAtMs > 0) {
-      // Keep active events stably ordered by event start time. This avoids
-      // reordering when sync touches `updatedAtMs` without user-visible changes.
       return startedAtMs;
     }
     return 1;
@@ -89,8 +87,6 @@ const getListSortAtMs = (eventData, status) => {
       ? Math.floor(eventData.createdAtMs)
       : 1;
   }
-  // Firestore pagination is listSortAt DESC. Map upcoming start times so sooner events
-  // receive larger listSortAt values, keeping paging and in-app ordering aligned.
   return Math.min(MAX_TIMESTAMP_MS, Math.max(1, MAX_TIMESTAMP_MS - startAtMs));
 };
 

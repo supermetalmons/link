@@ -114,7 +114,6 @@ const buildAppleStateEnvelope = (record: ApplePendingIntentRecord): string => {
   ) {
     return record.state;
   }
-  // Keep state compact to avoid provider-side truncation on redirect flows.
   return `${APPLE_STATE_ENVELOPE_PREFIX}${stateTokenPart}.${intentIdPart}.${expiresAtMsPart}.${consentSourcePart}`;
 };
 
@@ -639,7 +638,6 @@ export const clearConsumedAppleRedirectResult = (): void => {
 
 export const clearAppleSignInTransientState = (): void => {
   pendingAppleRedirectResult = null;
-  // Avoid replaying stale callback params captured at initial load.
   didConsumeInitialAppleCallbackSnapshot = true;
   if (typeof window !== "undefined") {
     const hashRaw = window.location.hash.startsWith("#")
@@ -808,7 +806,6 @@ const waitForApplePopupResult = (expectedStates: string[]): Promise<any> => {
       if (fallbackResolveId) {
         clearTimeout(fallbackResolveId);
       }
-      // Allow AppleIDSignInOnSuccess to provide complete payload before falling back.
       fallbackResolveId = setTimeout(() => {
         fallbackResolveId = null;
         finishResolve(

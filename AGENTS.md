@@ -1,3 +1,2 @@
-# Repo Instructions
-
-- don not add tests.
+- Don't add tests.
+- Avoid code comments except TODOs and essential context.

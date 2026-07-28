@@ -35,7 +35,6 @@ const STORAGE_KEYS = {
   CARD_SUBTITLE_ID: "cardSubtitleId",
   CARD_STICKERS: "cardStickers",
   REACTION_EXTRA_STICKER_CACHE: "reactionExtraStickerCache",
-  // Legacy keys are retained so sign-out removes caches written by older builds.
   REACTION_EXTRA_STICKER_IDS: "reactionExtraStickerIds",
   REACTION_EXTRA_STICKER_PROFILE_ID: "reactionExtraStickerProfileId",
   PROFILE_MONS: "profileMons",
