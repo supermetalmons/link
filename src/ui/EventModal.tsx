@@ -65,6 +65,7 @@ const BRACKET_COMPACT_CONNECTOR_W = 18;
 const BRACKET_EDGE_PADDING_X = 24;
 const BRACKET_EDGE_PADDING_Y = 16;
 const BRACKET_CORNER_R = 10;
+const CONTENT_AREA_PADDING_PX = 16;
 const WINNER_PODIUM_AVATAR_PX = 34;
 const WINNER_PODIUM_COLUMN_W = 70;
 const WINNER_PODIUM_COLUMN_GAP = 10;
@@ -83,11 +84,20 @@ const WINNER_PODIUM_HEIGHT =
 const FALLBACK_MATCH_H = 40;
 const FALLBACK_AVATAR_PX = 28;
 const PRIZES_EVENT_ID = "NN3eRzoZo80";
-const PRIZE_IMAGE_URLS = [
-  "https://cdn.lil.org/player/scarecrow/thumbs/1092.webp",
-  "https://cdn.lil.org/player/scarecrow/thumbs/1111.webp",
-  "https://cdn.lil.org/player/scarecrow/thumbs/1514.webp",
-];
+const EVENT_PRIZES = [
+  {
+    url: "https://cdn.lil.org/player/scarecrow/thumbs/1092.webp",
+    alt: "Prize collectible 1092",
+  },
+  {
+    url: "https://cdn.lil.org/player/scarecrow/thumbs/1111.webp",
+    alt: "Prize collectible 1111",
+  },
+  {
+    url: "https://cdn.lil.org/player/scarecrow/thumbs/1514.webp",
+    alt: "Prize collectible 1514",
+  },
+] as const;
 const PARTICIPANT_PROFILE_CACHE_TTL_MS = 30_000;
 
 type BracketCardInteraction = "none" | "game" | "participant";
@@ -356,7 +366,7 @@ const ContentArea = styled.div`
   max-height: min(560px, calc(100vh - 96px));
   max-height: min(560px, calc(100dvh - 96px));
   overflow-y: auto;
-  padding: 16px;
+  padding: ${CONTENT_AREA_PADDING_PX}px;
   border-radius: 16px;
   background: var(--color-white);
   cursor: default;
@@ -714,10 +724,15 @@ const MatchAvatarSlot = styled.div`
   transition: transform 0.15s ease;
 `;
 
-const BracketFallbackPanel = styled(ContentArea)`
+const BracketFallbackPanel = styled(ContentArea)<{
+  $maxContentHeight: number;
+}>`
   display: flex;
   flex-direction: column;
   gap: 12px;
+  max-height: min(560px, calc(100vh - 96px), ${(p) => p.$maxContentHeight}px);
+  max-height: min(560px, calc(100dvh - 96px), ${(p) => p.$maxContentHeight}px);
+  pointer-events: auto;
 `;
 
 const BracketFallbackRound = styled.div`
@@ -3119,6 +3134,8 @@ const EventModal: React.FC = () => {
   useLayoutEffect(() => {
     const el = participantsCloudRef.current;
     if (!el) {
+      setParticipantsScale(1);
+      setParticipantsHeight(0);
       return;
     }
     const naturalW = el.scrollWidth;
@@ -3148,6 +3165,9 @@ const EventModal: React.FC = () => {
   }, [
     bracketInsets.top,
     bracketInsets.bottom,
+    displayedEventRecord?.participants,
+    modalState.eventId,
+    modalState.isOpen,
     viewportSize.width,
     viewportSize.height,
   ]);
@@ -4082,6 +4102,17 @@ const EventModal: React.FC = () => {
     insetTop: bracketInsets.top,
     insetBottom: bracketInsets.bottom,
   });
+  const fallbackMaxContentHeight = Math.max(
+    1,
+    viewportSize.height -
+      bracketInsets.top -
+      bracketInsets.bottom -
+      BRACKET_EDGE_PADDING_Y * 2 -
+      CONTENT_AREA_PADDING_PX * 2,
+  );
+  const fallbackOffsetY = Math.round(
+    (bracketInsets.top - bracketInsets.bottom) / 2,
+  );
   const canDisqualifyFromLiveBracket =
     canManageDisqualifications &&
     !devStubRecord &&
@@ -4217,9 +4248,14 @@ const EventModal: React.FC = () => {
               </TopBarTitle>
             )}
             {showEventPrizes && (
-              <PrizesRow>
-                {PRIZE_IMAGE_URLS.map((url) => (
-                  <PrizeImage key={url} src={url} alt="" draggable={false} />
+              <PrizesRow role="group" aria-label="Event prizes">
+                {EVENT_PRIZES.map((prize) => (
+                  <PrizeImage
+                    key={prize.url}
+                    src={prize.url}
+                    alt={prize.alt}
+                    draggable={false}
+                  />
                 ))}
               </PrizesRow>
             )}
@@ -4433,65 +4469,70 @@ const EventModal: React.FC = () => {
       )}
 
       {showBracketFallbackGrid && (
-        <BracketFallbackPanel>
-          {bracketFallbackRounds.map((round) => (
-            <BracketFallbackRound key={round.key}>
-              <BracketFallbackRoundTitle>
-                {round.label}
-              </BracketFallbackRoundTitle>
-              <BracketFallbackGrid>
-                {round.matches.map((match, index) => {
-                  const action = getBracketMatchAction(match, participantsById);
-                  const interaction: BracketCardInteraction =
-                    action.kind === "game"
-                      ? "game"
-                      : action.kind === "participant"
-                        ? "participant"
-                        : "none";
-                  const hostSideData = getMatchSideData(match, "host");
-                  const guestSideData = getMatchSideData(match, "guest");
-                  const displayedSides = getDisplayedMatchSides(match);
-                  return (
-                    <BracketFallbackMatchCard
-                      key={`${round.key}_${match.matchKey}_${index}`}
-                      type="button"
-                      $interaction={interaction}
-                      disabled={action.kind === "none"}
-                      data-player-card-trigger={
-                        action.kind === "participant" ? "true" : undefined
-                      }
-                      onClick={() => handleBracketMatchAction(action)}
-                    >
-                      {displayedSides.map((side) => {
-                        const sideData =
-                          side === "host" ? hostSideData : guestSideData;
-                        return (
-                          <MatchAvatarSlot
-                            key={side}
-                            data-avatar-slot
-                            data-single-known={
-                              action.kind === "participant" &&
-                              action.side === side
-                                ? "true"
-                                : undefined
-                            }
-                          >
-                            <EventAvatar
-                              size={FALLBACK_AVATAR_PX}
-                              emojiId={sideData.emojiId}
-                              displayName={sideData.displayName}
-                              isBlocked={isMatchSideBlocked(match, side)}
-                            />
-                          </MatchAvatarSlot>
-                        );
-                      })}
-                    </BracketFallbackMatchCard>
-                  );
-                })}
-              </BracketFallbackGrid>
-            </BracketFallbackRound>
-          ))}
-        </BracketFallbackPanel>
+        <BracketPlacement $offsetY={fallbackOffsetY}>
+          <BracketFallbackPanel $maxContentHeight={fallbackMaxContentHeight}>
+            {bracketFallbackRounds.map((round) => (
+              <BracketFallbackRound key={round.key}>
+                <BracketFallbackRoundTitle>
+                  {round.label}
+                </BracketFallbackRoundTitle>
+                <BracketFallbackGrid>
+                  {round.matches.map((match, index) => {
+                    const action = getBracketMatchAction(
+                      match,
+                      participantsById,
+                    );
+                    const interaction: BracketCardInteraction =
+                      action.kind === "game"
+                        ? "game"
+                        : action.kind === "participant"
+                          ? "participant"
+                          : "none";
+                    const hostSideData = getMatchSideData(match, "host");
+                    const guestSideData = getMatchSideData(match, "guest");
+                    const displayedSides = getDisplayedMatchSides(match);
+                    return (
+                      <BracketFallbackMatchCard
+                        key={`${round.key}_${match.matchKey}_${index}`}
+                        type="button"
+                        $interaction={interaction}
+                        disabled={action.kind === "none"}
+                        data-player-card-trigger={
+                          action.kind === "participant" ? "true" : undefined
+                        }
+                        onClick={() => handleBracketMatchAction(action)}
+                      >
+                        {displayedSides.map((side) => {
+                          const sideData =
+                            side === "host" ? hostSideData : guestSideData;
+                          return (
+                            <MatchAvatarSlot
+                              key={side}
+                              data-avatar-slot
+                              data-single-known={
+                                action.kind === "participant" &&
+                                action.side === side
+                                  ? "true"
+                                  : undefined
+                              }
+                            >
+                              <EventAvatar
+                                size={FALLBACK_AVATAR_PX}
+                                emojiId={sideData.emojiId}
+                                displayName={sideData.displayName}
+                                isBlocked={isMatchSideBlocked(match, side)}
+                              />
+                            </MatchAvatarSlot>
+                          );
+                        })}
+                      </BracketFallbackMatchCard>
+                    );
+                  })}
+                </BracketFallbackGrid>
+              </BracketFallbackRound>
+            ))}
+          </BracketFallbackPanel>
+        </BracketPlacement>
       )}
 
       {showParticipantsPanel && (
