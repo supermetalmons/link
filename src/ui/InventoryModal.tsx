@@ -138,30 +138,6 @@ const ShopItem = styled.button`
   }
 `;
 
-const SoonLabel = styled.span`
-  position: absolute;
-  inset: 0 0 21px;
-  z-index: 2;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--color-gray-55);
-  font-size: 0.65rem;
-  font-weight: 700;
-  line-height: 1;
-  text-transform: lowercase;
-  transform: translateY(2px);
-  pointer-events: none;
-
-  @media (max-width: 280px) {
-    bottom: 19px;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    color: var(--color-gray-d0);
-  }
-`;
-
 const ShopImageFrame = styled.div`
   position: absolute;
   inset: 0 0 auto;
@@ -285,16 +261,13 @@ const SwagPackLink = styled.a`
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 7px 12px;
-  border-radius: 999px;
-  background: #41854c;
-  color: #fff;
+  color: var(--color-blue-primary);
   font-weight: 700;
   line-height: 1;
   text-decoration: none;
 
   @media (prefers-color-scheme: dark) {
-    background: #52a455;
+    color: var(--color-blue-primary-dark);
   }
 `;
 
@@ -567,7 +540,6 @@ export const InventoryModal = React.forwardRef<
                     draggable={false}
                   />
                 </ShopImageFrame>
-                <SoonLabel aria-hidden="true">soon</SoonLabel>
                 <PricePanel aria-hidden="true">
                   <PriceMaterialIcon
                     src={`${MATERIAL_IMAGE_BASE_URL}/${material}.webp`}
