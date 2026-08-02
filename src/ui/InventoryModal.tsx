@@ -258,7 +258,6 @@ const InventorySection = styled.section`
   min-height: ${INVENTORY_SECTION_MIN_HEIGHT_PX}px;
   display: flex;
   flex-direction: column;
-  justify-content: center;
 `;
 
 const SwagPackLink = styled.a`
@@ -319,7 +318,7 @@ const PrizeInventoryImage = styled.img`
   width: 100%;
   height: 100%;
   display: block;
-  object-fit: contain;
+  object-fit: cover;
   border-radius: 6px;
   pointer-events: none;
   -webkit-user-drag: none;
