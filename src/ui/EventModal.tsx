@@ -12,6 +12,7 @@ import { connection } from "../connection/connection";
 import {
   EventMatch,
   EventParticipant,
+  EventPrizeSelections,
   EventRecord,
   EventRound,
   PlayerProfile,
@@ -83,17 +84,22 @@ const WINNER_PODIUM_HEIGHT =
 
 const FALLBACK_MATCH_H = 40;
 const FALLBACK_AVATAR_PX = 28;
+const PRIZE_SELECTION_AVATAR_PX = 27;
+const PRIZE_SELECTION_GAP_PX = 12;
 const PRIZES_EVENT_ID = "NN3eRzoZo80";
 const EVENT_PRIZES = [
   {
+    id: "1092",
     url: "https://cdn.lil.org/player/scarecrow/thumbs/1092.webp",
     alt: "Prize collectible 1092",
   },
   {
+    id: "1111",
     url: "https://cdn.lil.org/player/scarecrow/thumbs/1111.webp",
     alt: "Prize collectible 1111",
   },
   {
+    id: "1514",
     url: "https://cdn.lil.org/player/scarecrow/thumbs/1514.webp",
     alt: "Prize collectible 1514",
   },
@@ -241,20 +247,82 @@ const TopBarStack = styled.div`
 
 const PrizesRow = styled.div`
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   justify-content: center;
-  gap: 8px;
-  max-width: min(420px, calc(100vw - 40px));
+  gap: 10px;
+  max-width: min(424px, calc(100vw - 36px));
   cursor: default;
 `;
 
-const PrizeImage = styled.img`
-  flex: 0 1 auto;
+const PrizeChoice = styled.div`
+  width: min(
+    clamp(44.8px, 10.4vh, 96px),
+    calc((min(424px, 100vw - 36px) - 20px) / 3)
+  );
   min-width: 0;
-  height: clamp(56px, 13vh, 120px);
-  width: auto;
-  max-width: calc((min(420px, 100vw - 40px) - 16px) / 3);
-  object-fit: contain;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+`;
+
+const PrizeChoiceButton = styled.button`
+  width: 100%;
+  height: auto;
+  aspect-ratio: 4 / 5;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  line-height: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+`;
+
+const PrizeImage = styled.img`
+  display: block;
+  min-width: 0;
+  height: 100%;
+  max-width: 100%;
+  width: 100%;
+`;
+
+const PrizeSelectionAvatars = styled.div`
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  margin-top: ${PRIZE_SELECTION_GAP_PX}px;
+`;
+
+const PrizeSelectionAvatarSlot = styled.button<{
+  $offsetX: number;
+  $offsetY: number;
+  $layer: number;
+}>`
+  position: relative;
+  z-index: ${(props) => props.$layer};
+  width: ${PRIZE_SELECTION_AVATAR_PX}px;
+  height: ${PRIZE_SELECTION_AVATAR_PX}px;
+  flex: 0 0 ${PRIZE_SELECTION_AVATAR_PX}px;
+  margin: -6px -8px;
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  line-height: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transform: translate(
+    ${(props) => props.$offsetX}px,
+    ${(props) => props.$offsetY}px
+  );
 `;
 
 const TopBarSubtitle = styled.div`
@@ -2193,6 +2261,21 @@ const getParticipantDisplayName = (participant: EventParticipant): string => {
   return "anon";
 };
 
+const getPrizeAvatarScatter = (prizeId: string, profileId: string) => {
+  const value = `${prizeId}:${profileId}`;
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  const normalizedHash = hash >>> 0;
+  return {
+    x: (normalizedHash % 9) - 4,
+    y: ((normalizedHash >>> 4) % 7) - 3,
+    layer: (normalizedHash >>> 6) % 8,
+  };
+};
+
 const getParticipantProfileCacheKey = (
   participant: EventParticipant,
 ): string => {
@@ -2787,6 +2870,10 @@ const EventModal: React.FC = () => {
   const [isDisqualifying, setIsDisqualifying] = useState(false);
   const [isPostponing, setIsPostponing] = useState(false);
   const [isRemovingParticipant, setIsRemovingParticipant] = useState(false);
+  const [isUpdatingPrizeSelection, setIsUpdatingPrizeSelection] =
+    useState(false);
+  const [eventPrizeSelections, setEventPrizeSelections] =
+    useState<EventPrizeSelections>({});
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [viewportSize, setViewportSize] = useState(getViewportSize);
@@ -3011,6 +3098,25 @@ const EventModal: React.FC = () => {
     modalState.eventId,
     modalState.isOpen,
   ]);
+
+  useEffect(() => {
+    setEventPrizeSelections({});
+    setIsUpdatingPrizeSelection(false);
+    if (
+      !modalState.isOpen ||
+      !modalState.eventId ||
+      modalState.eventId !== PRIZES_EVENT_ID
+    ) {
+      return;
+    }
+    return connection.subscribeToEventPrizeSelections(
+      modalState.eventId,
+      setEventPrizeSelections,
+      (error) => {
+        console.error("Error subscribing to event prize selections:", error);
+      },
+    );
+  }, [modalState.eventId, modalState.isOpen]);
 
   useEffect(() => {
     if (!modalState.isOpen || typeof window === "undefined") {
@@ -3316,6 +3422,37 @@ const EventModal: React.FC = () => {
     [eventRecord],
   );
   const currentRoute = getCurrentRouteState();
+
+  const handlePrizeSelectionClick = useCallback(
+    (prizeId: string) => {
+      if (
+        isUpdatingPrizeSelection ||
+        devStubRecord ||
+        modalState.eventId !== PRIZES_EVENT_ID ||
+        !currentProfileId ||
+        !eventRecord?.participants[currentProfileId] ||
+        (eventRecord.status !== "scheduled" &&
+          eventRecord.status !== "active" &&
+          eventRecord.status !== "ended")
+      ) {
+        return;
+      }
+      setIsUpdatingPrizeSelection(true);
+      void connection
+        .toggleEventPrizeSelection(modalState.eventId, prizeId)
+        .catch(() => {})
+        .finally(() => {
+          setIsUpdatingPrizeSelection(false);
+        });
+    },
+    [
+      currentProfileId,
+      devStubRecord,
+      eventRecord,
+      isUpdatingPrizeSelection,
+      modalState.eventId,
+    ],
+  );
 
   useEffect(() => {
     if (displayedEventRecord?.status === "dismissed") {
@@ -4130,6 +4267,15 @@ const EventModal: React.FC = () => {
     modalState.eventId === PRIZES_EVENT_ID &&
     !!displayedEventRecord &&
     !isDismissedState;
+  const canSelectEventPrize = !!(
+    showEventPrizes &&
+    !devStubRecord &&
+    currentProfileId &&
+    eventRecord?.participants[currentProfileId] &&
+    (eventRecord.status === "scheduled" ||
+      eventRecord.status === "active" ||
+      eventRecord.status === "ended")
+  );
   const topBarTitleText = devStubRecord
     ? ""
     : formatRelativeStart(displayedEventRecord, nowMs);
@@ -4249,14 +4395,82 @@ const EventModal: React.FC = () => {
             )}
             {showEventPrizes && (
               <PrizesRow role="group" aria-label="Event prizes">
-                {EVENT_PRIZES.map((prize) => (
-                  <PrizeImage
-                    key={prize.url}
-                    src={prize.url}
-                    alt={prize.alt}
-                    draggable={false}
-                  />
-                ))}
+                {EVENT_PRIZES.map((prize) => {
+                  const selectedParticipants = participants.filter(
+                    (participant) =>
+                      eventPrizeSelections[participant.profileId] === prize.id,
+                  );
+                  const isSelected =
+                    eventPrizeSelections[currentProfileId] === prize.id;
+                  const selectionCountLabel = `${selectedParticipants.length} ${
+                    selectedParticipants.length === 1
+                      ? "participant"
+                      : "participants"
+                  } selected`;
+                  const actionLabel = isSelected ? "Deselect" : "Select";
+                  return (
+                    <PrizeChoice key={prize.id}>
+                      <PrizeChoiceButton
+                        type="button"
+                        disabled={
+                          !canSelectEventPrize || isUpdatingPrizeSelection
+                        }
+                        aria-pressed={isSelected}
+                        aria-busy={
+                          isUpdatingPrizeSelection ? "true" : undefined
+                        }
+                        aria-label={`${
+                          canSelectEventPrize
+                            ? `${actionLabel} ${prize.alt}`
+                            : prize.alt
+                        }. ${selectionCountLabel}`}
+                        onClick={() => handlePrizeSelectionClick(prize.id)}
+                      >
+                        <PrizeImage
+                          src={prize.url}
+                          alt={prize.alt}
+                          draggable={false}
+                        />
+                      </PrizeChoiceButton>
+                      {selectedParticipants.length > 0 && (
+                        <PrizeSelectionAvatars
+                          role="group"
+                          aria-label={`Selected by ${selectedParticipants
+                            .map(getParticipantDisplayName)
+                            .join(", ")}`}
+                        >
+                          {selectedParticipants.map((participant) => {
+                            const scatter = getPrizeAvatarScatter(
+                              prize.id,
+                              participant.profileId,
+                            );
+                            return (
+                              <PrizeSelectionAvatarSlot
+                                key={participant.profileId}
+                                type="button"
+                                data-player-card-trigger="true"
+                                $offsetX={scatter.x}
+                                $offsetY={scatter.y}
+                                $layer={scatter.layer}
+                                title={getParticipantDisplayName(participant)}
+                                aria-label={`Open ${getParticipantDisplayName(participant)}`}
+                                onClick={() =>
+                                  void handleParticipantClick(participant)
+                                }
+                              >
+                                <EventAvatar
+                                  size={PRIZE_SELECTION_AVATAR_PX}
+                                  emojiId={participant.emojiId}
+                                  displayName={participant.displayName}
+                                />
+                              </PrizeSelectionAvatarSlot>
+                            );
+                          })}
+                        </PrizeSelectionAvatars>
+                      )}
+                    </PrizeChoice>
+                  );
+                })}
               </PrizesRow>
             )}
           </TopBarStack>

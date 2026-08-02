@@ -2395,6 +2395,7 @@ exports.removeEventParticipant = onCall(async (request) => {
       .ref()
       .update({
         [`events/${eventId}/participants/${participantProfileId}`]: null,
+        [`eventPrizeSelections/${eventId}/${participantProfileId}`]: null,
         [`events/${eventId}/updatedAtMs`]: commitNowMs,
       });
 

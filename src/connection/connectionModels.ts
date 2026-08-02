@@ -180,6 +180,8 @@ export interface EventRecord {
   rounds: Record<string, EventRound>;
 }
 
+export type EventPrizeSelections = Record<string, string>;
+
 export interface Reaction {
   uuid: string;
   variation: number;

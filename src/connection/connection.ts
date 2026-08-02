@@ -78,6 +78,7 @@ import {
   EventParticipant,
   EventRound,
   EventMatch,
+  EventPrizeSelections,
 } from "./connectionModels";
 import {
   buildDeterministicGameSeed,
@@ -2880,6 +2881,102 @@ class Connection {
       return;
     }
     this.activeEventSubscriptionsById.set(eventId, currentCount - 1);
+  }
+
+  public subscribeToEventPrizeSelections(
+    eventId: string,
+    onUpdate: (selections: EventPrizeSelections) => void,
+    onError?: (error: unknown) => void,
+  ): () => void {
+    const normalizedEventId = typeof eventId === "string" ? eventId.trim() : "";
+    if (!normalizedEventId) {
+      onUpdate({});
+      return () => {};
+    }
+    const selectionsRef = ref(
+      this.db,
+      `eventPrizeSelections/${normalizedEventId}`,
+    );
+    let disposed = false;
+    let unsubscribe: (() => void) | null = null;
+    const sessionGuard = this.createSessionGuard();
+
+    void this.ensureAuthenticated()
+      .then(() => {
+        if (disposed || !sessionGuard()) {
+          return;
+        }
+        unsubscribe = onValue(
+          selectionsRef,
+          (snapshot) => {
+            if (disposed || !sessionGuard()) {
+              return;
+            }
+            const rawSelections = snapshot.val();
+            if (!rawSelections || typeof rawSelections !== "object") {
+              onUpdate({});
+              return;
+            }
+            const selections: EventPrizeSelections = {};
+            Object.entries(rawSelections as Record<string, unknown>).forEach(
+              ([profileId, prizeId]) => {
+                const normalizedProfileId = profileId.trim();
+                const normalizedPrizeId =
+                  typeof prizeId === "string" ? prizeId.trim() : "";
+                if (normalizedProfileId && normalizedPrizeId) {
+                  selections[normalizedProfileId] = normalizedPrizeId;
+                }
+              },
+            );
+            onUpdate(selections);
+          },
+          (error) => {
+            if (disposed || !sessionGuard()) {
+              return;
+            }
+            onError?.(error);
+          },
+        );
+      })
+      .catch((error) => {
+        if (disposed || !sessionGuard()) {
+          return;
+        }
+        onError?.(error);
+      });
+
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }
+
+  public async toggleEventPrizeSelection(
+    eventId: string,
+    prizeId: string,
+  ): Promise<string | null> {
+    const normalizedEventId = this.normalizeString(eventId).trim();
+    const normalizedPrizeId = this.normalizeString(prizeId).trim();
+    const profileId = storage.getProfileId("").trim();
+    if (!normalizedEventId || !normalizedPrizeId || !profileId) {
+      throw new Error("Event prize selection requires an event and profile.");
+    }
+
+    try {
+      await this.ensureAuthenticated();
+      const result = await runTransaction(
+        ref(this.db, `eventPrizeSelections/${normalizedEventId}/${profileId}`),
+        (currentPrizeId) =>
+          currentPrizeId === normalizedPrizeId ? null : normalizedPrizeId,
+      );
+      const selectedPrizeId = result.snapshot.val();
+      return typeof selectedPrizeId === "string" && selectedPrizeId.trim()
+        ? selectedPrizeId.trim()
+        : null;
+    } catch (error) {
+      console.error("Error toggling event prize selection:", error);
+      throw error;
+    }
   }
 
   public subscribeToEvent(
