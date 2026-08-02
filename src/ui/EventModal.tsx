@@ -339,7 +339,7 @@ const PrizeAssignmentConnectorSvg = styled.svg`
   height: 100vh;
   overflow: visible;
   pointer-events: none;
-  z-index: ${EVENT_MODAL_Z_INDEX};
+  z-index: 0;
 
   path {
     fill: none;
@@ -596,6 +596,7 @@ const BracketContainer = styled.div<{
 
 const BracketPlacement = styled.div<{ $offsetY: number }>`
   position: relative;
+  z-index: 1;
   pointer-events: none;
   transform: translateY(${(p) => p.$offsetY}px);
 `;
