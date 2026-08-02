@@ -194,6 +194,12 @@ const EVENT_SYNC_COOLDOWN_SCHEDULED_MS = 1500;
 const EVENT_SYNC_PARTICIPANT_CACHE_TTL_MS = 3000;
 const EVENT_SYNC_PARTICIPANT_NEGATIVE_CACHE_TTL_MS = 800;
 const EVENT_SYNC_RETRY_DELAYS_MS = [150, 300] as const;
+const MAX_PROFILE_MERGE_REDIRECT_HOPS = 4;
+
+const normalizeProfileMergeTargetId = (value: unknown): string | null => {
+  const profileId = typeof value === "string" ? value.trim() : "";
+  return profileId || null;
+};
 
 export type EventScheduleTimezone = SharedEventScheduleTimezone;
 
@@ -294,12 +300,17 @@ class Connection {
   private inviteReactionsRef: any = null;
   private miningFrozenRef: any = null;
   private matchRefs: { [key: string]: any } = {};
-  private profileRefs: { [key: string]: any } = {};
+  private profileObserverCleanups = new Map<string, () => void>();
   private observerCleanupByContext = new Map<number, Map<string, () => void>>();
   private activeObserverKeysByContext = new Map<number, Set<string>>();
 
   private loginUid: string | null = null;
   private sameProfilePlayerUid: string | null = null;
+  private sameProfileHydrationRequest: {
+    uid: string;
+    sessionEpoch: number;
+    refreshRequested: boolean;
+  } | null = null;
   private optimisticResolvedMatchIds = new Set<string>();
 
   private latestInvite: Invite | null = null;
@@ -1212,9 +1223,8 @@ class Connection {
     await this.ensureAuthenticated();
     const visitedProfileIds = new Set<string>();
     let currentProfileId = normalizedProfileId;
-    const maxMergeRedirectHops = 4;
 
-    for (let hop = 0; hop <= maxMergeRedirectHops; hop += 1) {
+    for (let hop = 0; hop <= MAX_PROFILE_MERGE_REDIRECT_HOPS; hop += 1) {
       if (visitedProfileIds.has(currentProfileId)) {
         return null;
       }
@@ -1225,11 +1235,9 @@ class Connection {
       if (!profileSnapshot.exists()) {
         return null;
       }
-      const data = profileSnapshot.data();
-      const mergedIntoProfileId =
-        typeof data.mergedIntoProfileId === "string"
-          ? data.mergedIntoProfileId.trim()
-          : "";
+      const mergedIntoProfileId = normalizeProfileMergeTargetId(
+        profileSnapshot.data().mergedIntoProfileId,
+      );
       if (!mergedIntoProfileId) {
         return this.docToProfile(profileSnapshot, true);
       }
@@ -4570,20 +4578,53 @@ class Connection {
   }
 
   private hydrateSameProfilePlayer(uid: string): void {
-    const expectedUid = uid;
     const expectedEpoch = this.sessionEpoch;
     setupPlayerId(uid, false);
+    const activeRequest = this.sameProfileHydrationRequest;
+    if (
+      activeRequest?.uid === uid &&
+      activeRequest.sessionEpoch === expectedEpoch
+    ) {
+      activeRequest.refreshRequested = true;
+      return;
+    }
+    const request = {
+      uid,
+      sessionEpoch: expectedEpoch,
+      refreshRequested: false,
+    };
+    this.sameProfileHydrationRequest = request;
+    const isHydrationActive = () =>
+      this.sameProfileHydrationRequest === request &&
+      this.isSessionEpochActive(expectedEpoch) &&
+      this.sameProfilePlayerUid === uid;
     this.getProfileByLoginId(uid)
       .then((profile) => {
-        if (
-          !this.isSessionEpochActive(expectedEpoch) ||
-          this.sameProfilePlayerUid !== expectedUid
-        ) {
+        if (!isHydrationActive()) {
           return;
         }
-        didGetPlayerProfile(profile, expectedUid, true);
+        this.stopObservingProfile(uid);
+        didGetPlayerProfile(profile, uid, true);
       })
-      .catch(() => {});
+      .catch(() => {
+        if (!isHydrationActive()) {
+          return;
+        }
+        this.observeProfile(uid, this.activeContext, true);
+      })
+      .finally(() => {
+        if (this.sameProfileHydrationRequest !== request) {
+          return;
+        }
+        this.sameProfileHydrationRequest = null;
+        if (
+          request.refreshRequested &&
+          this.isSessionEpochActive(expectedEpoch) &&
+          this.sameProfilePlayerUid === uid
+        ) {
+          this.hydrateSameProfilePlayer(uid);
+        }
+      });
   }
 
   private setSameProfilePlayerUid(uid: string | null): void {
@@ -4593,6 +4634,7 @@ class Connection {
       }
       return;
     }
+    this.sameProfileHydrationRequest = null;
     this.sameProfilePlayerUid = uid;
     this.observeMiningFrozen(uid);
     if (uid) {
@@ -6109,6 +6151,7 @@ class Connection {
         if (!isObserverActive()) {
           return;
         }
+        this.stopObservingProfile(playerId);
         didGetPlayerProfile(profile, playerId, false);
       })
       .catch((error) => {
@@ -6120,12 +6163,23 @@ class Connection {
       });
   }
 
+  private stopObservingProfile(playerId: string): void {
+    const cleanup = this.profileObserverCleanups.get(playerId);
+    if (!cleanup) {
+      return;
+    }
+    this.profileObserverCleanups.delete(playerId);
+    cleanup();
+    decrementLifecycleCounter("connectionObservers");
+  }
+
   private observeProfile(
     playerId: string,
     context: MatchRuntimeContext | null = this.activeContext,
+    isOwnProfile = false,
   ): void {
     const profileRef = ref(this.db, `players/${playerId}/profile`);
-    if (this.profileRefs[playerId]) {
+    if (this.profileObserverCleanups.has(playerId)) {
       return;
     }
     const observeEpoch = context?.sessionEpoch ?? this.sessionEpoch;
@@ -6142,42 +6196,161 @@ class Connection {
         context.contextId,
         `profile:${playerId}`,
         () => {
-          const existingRef = this.profileRefs[playerId];
-          if (existingRef) {
-            off(existingRef);
-            delete this.profileRefs[playerId];
-            decrementLifecycleCounter("connectionObservers");
-          }
+          this.stopObservingProfile(playerId);
         },
       );
     }
-    this.profileRefs[playerId] = profileRef;
+    let linkedProfileId: string | null = null;
+    const visitedProfileIds = new Set<string>();
+    let observedProfileId: string | null = null;
+    let unsubscribeProfileRef: (() => void) | null = null;
+    let unsubscribeProfileDoc: (() => void) | null = null;
+    let profileLookupRequest: { profileId: string } | null = null;
+    const stopObservingProfileDoc = () => {
+      observedProfileId = null;
+      profileLookupRequest = null;
+      const unsubscribe = unsubscribeProfileDoc;
+      unsubscribeProfileDoc = null;
+      if (unsubscribe) {
+        unsubscribe();
+        decrementLifecycleCounter("connectionObservers");
+      }
+    };
+    const cleanupProfileObserver = () => {
+      const unsubscribe = unsubscribeProfileRef;
+      unsubscribeProfileRef = null;
+      unsubscribe?.();
+      stopObservingProfileDoc();
+    };
+    const isProfileObserverCurrent = () =>
+      this.profileObserverCleanups.get(playerId) === cleanupProfileObserver;
+    const recoverProfileByLoginId = (profileId: string): void => {
+      if (profileLookupRequest?.profileId === profileId) {
+        return;
+      }
+      const request = { profileId };
+      profileLookupRequest = request;
+      void this.getProfileByLoginId(playerId)
+        .then((profile) => {
+          if (
+            profileLookupRequest !== request ||
+            observedProfileId !== profileId ||
+            profile.id === profileId ||
+            !isObserverActive() ||
+            !isProfileObserverCurrent()
+          ) {
+            return;
+          }
+          this.stopObservingProfile(playerId);
+          didGetPlayerProfile(profile, playerId, isOwnProfile);
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (profileLookupRequest === request) {
+            profileLookupRequest = null;
+          }
+        });
+    };
+
+    const observeProfileDoc = (profileId: string): void => {
+      if (observedProfileId === profileId && unsubscribeProfileDoc) {
+        return;
+      }
+      stopObservingProfileDoc();
+      observedProfileId = profileId;
+      let unsubscribe: () => void;
+      try {
+        unsubscribe = onSnapshot(
+          doc(this.firestore, "users", profileId),
+          { includeMetadataChanges: true },
+          (profileSnapshot) => {
+            if (
+              !isObserverActive() ||
+              observedProfileId !== profileId ||
+              profileSnapshot.metadata.fromCache
+            ) {
+              return;
+            }
+            if (!profileSnapshot.exists()) {
+              recoverProfileByLoginId(profileId);
+              return;
+            }
+            const mergedIntoProfileId = normalizeProfileMergeTargetId(
+              profileSnapshot.data().mergedIntoProfileId,
+            );
+            if (mergedIntoProfileId) {
+              if (
+                visitedProfileIds.has(mergedIntoProfileId) ||
+                visitedProfileIds.size > MAX_PROFILE_MERGE_REDIRECT_HOPS
+              ) {
+                this.stopObservingProfile(playerId);
+                console.error("Invalid player profile merge redirect");
+                return;
+              }
+              visitedProfileIds.add(mergedIntoProfileId);
+              observeProfileDoc(mergedIntoProfileId);
+              return;
+            }
+            const profile = this.docToProfile(profileSnapshot, true);
+            this.stopObservingProfile(playerId);
+            didGetPlayerProfile(profile, playerId, isOwnProfile);
+          },
+          (error) => {
+            if (!isObserverActive() || observedProfileId !== profileId) {
+              return;
+            }
+            this.stopObservingProfile(playerId);
+            console.error("Error observing player profile:", error);
+          },
+        );
+      } catch (error) {
+        if (
+          this.profileObserverCleanups.has(playerId) &&
+          observedProfileId === profileId
+        ) {
+          this.stopObservingProfile(playerId);
+        }
+        console.error("Error observing player profile:", error);
+        return;
+      }
+      if (
+        !this.profileObserverCleanups.has(playerId) ||
+        observedProfileId !== profileId
+      ) {
+        unsubscribe();
+        return;
+      }
+      unsubscribeProfileDoc = unsubscribe;
+      incrementLifecycleCounter("connectionObservers");
+    };
+
+    this.profileObserverCleanups.set(playerId, cleanupProfileObserver);
     incrementLifecycleCounter("connectionObservers");
 
-    onValue(profileRef, (snapshot) => {
+    const unsubscribe = onValue(profileRef, (snapshot) => {
       if (!isObserverActive()) {
         return;
       }
-      const profile = snapshot.val();
-      if (profile) {
-        off(profileRef);
-        delete this.profileRefs[playerId];
-        decrementLifecycleCounter("connectionObservers");
-        this.getProfileByLoginId(playerId)
-          .then((profile) => {
-            if (!isObserverActive()) {
-              return;
-            }
-            didGetPlayerProfile(profile, playerId, false);
-          })
-          .catch((error) => {
-            if (!isObserverActive()) {
-              return;
-            }
-            console.error("Error getting player profile:", error);
-          });
+      const profileId = this.normalizeStringOrNull(snapshot.val());
+      if (!profileId) {
+        linkedProfileId = null;
+        visitedProfileIds.clear();
+        stopObservingProfileDoc();
+        return;
       }
+      if (linkedProfileId === profileId) {
+        return;
+      }
+      linkedProfileId = profileId;
+      visitedProfileIds.clear();
+      visitedProfileIds.add(profileId);
+      observeProfileDoc(profileId);
     });
+    if (this.profileObserverCleanups.get(playerId) !== cleanupProfileObserver) {
+      unsubscribe();
+      return;
+    }
+    unsubscribeProfileRef = unsubscribe;
   }
 
   public async checkBothPlayerProfiles(
@@ -6235,16 +6408,10 @@ class Connection {
       decrementLifecycleCounter("connectionObservers", removedMatchCount);
     }
 
-    let removedProfileCount = 0;
-    for (const key in this.profileRefs) {
-      off(this.profileRefs[key]);
+    this.profileObserverCleanups.forEach((_, key) => {
+      this.stopObservingProfile(key);
       console.log(`Stopped observing profile for key ${key}`);
-      removedProfileCount += 1;
-    }
-    this.profileRefs = {};
-    if (removedProfileCount > 0) {
-      decrementLifecycleCounter("connectionObservers", removedProfileCount);
-    }
+    });
   }
 }
 
