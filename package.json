@@ -36,7 +36,7 @@
     "format:check": "prettier --check . --ignore-unknown",
     "deploy:firebase": "npm --prefix cloud/functions install && cd cloud && firebase deploy --only functions,firestore:rules,firestore:indexes,database",
     "deploy:allFunctionsBatched": "npm --prefix cloud/functions install && npm --prefix cloud/functions run deploy:safe --",
-    "deploy:monsRulesFunctions": "npm --prefix cloud/functions install && npm --prefix cloud/functions run deploy:safe -- automatch updateRatings startMatchTimer claimMatchVictoryByTimer resolveWagerOutcome createEvent joinEvent postponeEventStart removeEventParticipant disqualifyEventMatchWinners syncEventState processEventProgress processEventProgressFallback",
+    "deploy:monsRulesFunctions": "npm --prefix cloud/functions install && npm --prefix cloud/functions run deploy:safe -- projectProfileEventPrizesOnPrizeWritten projectProfileEventPrizesOnMergeTargetWritten verifySolanaAddress verifyEthAddress verifyAppleToken completeXRedirectAuth automatch updateRatings startMatchTimer claimMatchVictoryByTimer resolveWagerOutcome createEvent joinEvent postponeEventStart removeEventParticipant disqualifyEventMatchWinners syncEventState processEventProgress processEventProgressFallback",
     "deploy": "node --experimental-strip-types scripts/deploy-amplify.ts",
     "latest:root": "npx --yes npm-check-updates@latest -u --peer --reject wagmi,@rainbow-me/rainbowkit && npm install --legacy-peer-deps",
     "latest:functions": "npx --yes npm-check-updates@latest -u --peer --packageFile cloud/functions/package.json && npm install --prefix cloud/functions",

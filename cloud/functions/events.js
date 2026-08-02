@@ -9,6 +9,12 @@ const {
 } = require("./utils");
 const { resolveMatchWinner } = require("./matchOutcome");
 const { enqueueEventProgressTask } = require("./eventProgressTasks");
+const {
+  EVENT_PRIZE_IDS,
+  PRIZES_EVENT_ID,
+  buildEventPrizeAssignments,
+  normalizeEventPrizeAssignments,
+} = require("./eventPrizeAwards");
 const { buildRandomGameSeed } = require("./gameVariants");
 const {
   buildAutoInviteId,
@@ -1376,6 +1382,249 @@ const rebuildParticipantStatesFromRounds = ({
   return {
     didChange,
     participantsById: nextParticipants,
+  };
+};
+
+const getEventPrizeDisqualifiedIdentityKeys = ({ rounds, thirdPlaceMatch }) => {
+  const identityKeys = new Set();
+  const addMatchIdentities = (match) => {
+    if (!match || match.winnerDisqualified !== true) {
+      return;
+    }
+    for (const value of [
+      match.hostProfileId,
+      match.hostLoginUid,
+      match.guestProfileId,
+      match.guestLoginUid,
+    ]) {
+      const identityKey = normalizeString(value);
+      if (identityKey) {
+        identityKeys.add(identityKey);
+      }
+    }
+  };
+
+  for (const roundIndex of getSortedRoundIndexes(rounds)) {
+    const matches = rounds[String(roundIndex)]?.matches;
+    for (const matchKey of getSortedMatchKeys(matches)) {
+      addMatchIdentities(matches[matchKey]);
+    }
+  }
+  addMatchIdentities(thirdPlaceMatch);
+  return identityKeys;
+};
+
+const isEventPrizeParticipantDisqualified = (participant, identityKeys) => {
+  if (!participant) {
+    return false;
+  }
+  const profileId = normalizeString(participant.profileId);
+  const loginUid = normalizeString(participant.loginUid);
+  return (
+    (profileId && identityKeys.has(profileId)) ||
+    (loginUid && identityKeys.has(loginUid))
+  );
+};
+
+const getResolvedMatchProfileId = (match, result) => {
+  const directProfileId = normalizeString(
+    result === "winner" ? match?.winnerProfileId : match?.loserProfileId,
+  );
+  if (directProfileId) {
+    return directProfileId;
+  }
+  const status = normalizeString(match?.status);
+  const winnerSide =
+    status === "host" ? "host" : status === "guest" ? "guest" : null;
+  if (!winnerSide) {
+    return "";
+  }
+  const side =
+    result === "winner" ? winnerSide : winnerSide === "host" ? "guest" : "host";
+  return normalizeString(match?.[`${side}ProfileId`]);
+};
+
+const getEventPrizePlacements = ({
+  event,
+  rounds,
+  participantsById,
+  thirdPlaceMatch,
+}) => {
+  const sortedRoundIndexes = getSortedRoundIndexes(rounds);
+  const finalRoundIndex = sortedRoundIndexes[sortedRoundIndexes.length - 1];
+  const finalRound = rounds[String(finalRoundIndex)];
+  const finalMatchKey = getSortedMatchKeys(finalRound?.matches)[0];
+  const finalMatch = finalRound?.matches?.[finalMatchKey];
+  if (!finalMatch) {
+    return [];
+  }
+
+  const disqualifiedIdentityKeys = getEventPrizeDisqualifiedIdentityKeys({
+    rounds,
+    thirdPlaceMatch,
+  });
+  const winnerProfileId =
+    normalizeString(event?.winnerProfileId) ||
+    getResolvedMatchProfileId(finalMatch, "winner");
+  const winner = participantsById[winnerProfileId];
+  if (
+    !winner ||
+    isEventPrizeParticipantDisqualified(winner, disqualifiedIdentityKeys)
+  ) {
+    return [];
+  }
+
+  const placements = [{ place: 1, profileId: winnerProfileId }];
+  const reservedProfileIds = new Set([winnerProfileId]);
+  const placementCandidates = [];
+  const pushCandidate = (profileId) => {
+    const normalizedProfileId = normalizeString(profileId);
+    const participant = participantsById[normalizedProfileId];
+    if (
+      !normalizedProfileId ||
+      !participant ||
+      reservedProfileIds.has(normalizedProfileId) ||
+      isEventPrizeParticipantDisqualified(participant, disqualifiedIdentityKeys)
+    ) {
+      return;
+    }
+    reservedProfileIds.add(normalizedProfileId);
+    placementCandidates.push(normalizedProfileId);
+  };
+
+  pushCandidate(getResolvedMatchProfileId(finalMatch, "loser"));
+  if (Object.keys(participantsById).length >= 3 && thirdPlaceMatch) {
+    pushCandidate(getResolvedMatchProfileId(thirdPlaceMatch, "winner"));
+  }
+
+  Object.values(participantsById)
+    .filter(
+      (participant) =>
+        !isEventPrizeParticipantDisqualified(
+          participant,
+          disqualifiedIdentityKeys,
+        ),
+    )
+    .sort((left, right) => {
+      const leftRound = Number.isFinite(left.eliminatedRoundIndex)
+        ? Math.floor(left.eliminatedRoundIndex)
+        : -1;
+      const rightRound = Number.isFinite(right.eliminatedRoundIndex)
+        ? Math.floor(right.eliminatedRoundIndex)
+        : -1;
+      if (leftRound !== rightRound) {
+        return rightRound - leftRound;
+      }
+      const joinedDifference =
+        toFiniteInteger(left.joinedAtMs, 0) -
+        toFiniteInteger(right.joinedAtMs, 0);
+      if (joinedDifference !== 0) {
+        return joinedDifference;
+      }
+      return normalizeString(left.profileId).localeCompare(
+        normalizeString(right.profileId),
+      );
+    })
+    .forEach((participant) => pushCandidate(participant.profileId));
+
+  if (placementCandidates[0]) {
+    placements.push({ place: 2, profileId: placementCandidates[0] });
+  }
+  if (placementCandidates[1] && Object.keys(participantsById).length >= 3) {
+    placements.push({ place: 3, profileId: placementCandidates[1] });
+  }
+  return placements;
+};
+
+const hasCompleteEventPrizeAssignments = (assignments, placementCount) => {
+  const expectedCount = Math.min(EVENT_PRIZE_IDS.length, placementCount);
+  if (expectedCount <= 0) {
+    return false;
+  }
+  for (let place = 1; place <= expectedCount; place += 1) {
+    if (!assignments[String(place)]) {
+      return false;
+    }
+  }
+  return Object.keys(assignments).length === expectedCount;
+};
+
+const addEventPrizeAssignmentUpdates = ({
+  updates,
+  eventId,
+  assignments,
+  includeEventAssignments,
+}) => {
+  if (includeEventAssignments) {
+    updates[`events/${eventId}/prizeAssignments`] = assignments;
+  }
+  for (const assignment of Object.values(assignments)) {
+    updates[`profileEventPrizes/${assignment.profileId}/${eventId}`] =
+      assignment;
+  }
+};
+
+const getMissingEventPrizeProjectionUpdates = async ({
+  eventId,
+  assignments,
+}) => {
+  const updates = {};
+  await Promise.all(
+    Object.values(assignments).map(async (assignment) => {
+      const snapshot = await admin
+        .database()
+        .ref(`profileEventPrizes/${assignment.profileId}/${eventId}`)
+        .once("value");
+      const current = snapshot.val();
+      if (
+        !current ||
+        current.eventId !== assignment.eventId ||
+        current.profileId !== assignment.profileId ||
+        Number(current.place) !== assignment.place ||
+        current.prizeId !== assignment.prizeId ||
+        Number(current.assignedAtMs) !== assignment.assignedAtMs
+      ) {
+        updates[`profileEventPrizes/${assignment.profileId}/${eventId}`] =
+          assignment;
+      }
+    }),
+  );
+  return updates;
+};
+
+const resolveEventPrizeAssignments = async ({
+  eventId,
+  event,
+  rounds,
+  participantsById,
+  thirdPlaceMatch,
+  assignedAtMs,
+}) => {
+  const placements = getEventPrizePlacements({
+    event,
+    rounds,
+    participantsById,
+    thirdPlaceMatch,
+  });
+  const storedAssignments = normalizeEventPrizeAssignments(
+    event?.prizeAssignments,
+    eventId,
+  );
+  if (hasCompleteEventPrizeAssignments(storedAssignments, placements.length)) {
+    return { assignments: storedAssignments, didCreate: false };
+  }
+  const selectionsSnapshot = await admin
+    .database()
+    .ref(`eventPrizeSelections/${eventId}`)
+    .once("value");
+  return {
+    assignments: buildEventPrizeAssignments({
+      eventId,
+      placements,
+      selections: selectionsSnapshot.val() || {},
+      assignedAtMs,
+    }),
+    didCreate: true,
   };
 };
 
@@ -2856,6 +3105,39 @@ const runEventSyncState = async ({
         event.winnerDisplayName = winnerParticipant
           ? winnerParticipant.displayName
           : null;
+        if (eventId === PRIZES_EVENT_ID) {
+          if (typeof event.prizeSelectionsLockedAtMs !== "number") {
+            const lockOwned = await isEventLockStillOwned(lockHandle);
+            if (!lockOwned) {
+              throw new HttpsError(
+                "aborted",
+                "Event lock expired while assigning prizes.",
+              );
+            }
+            event.prizeSelectionsLockedAtMs = nowMs;
+            await admin
+              .database()
+              .ref(`events/${eventId}/prizeSelectionsLockedAtMs`)
+              .set(nowMs);
+          }
+          const prizeAssignmentResult = await resolveEventPrizeAssignments({
+            eventId,
+            event,
+            rounds,
+            participantsById: participants,
+            thirdPlaceMatch,
+            assignedAtMs: event.endedAtMs,
+          });
+          if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
+            event.prizeAssignments = prizeAssignmentResult.assignments;
+            addEventPrizeAssignmentUpdates({
+              updates,
+              eventId,
+              assignments: prizeAssignmentResult.assignments,
+              includeEventAssignments: true,
+            });
+          }
+        }
       } else {
         event.status = "active";
         event.endedAtMs = null;
@@ -2942,6 +3224,7 @@ const runEventSyncState = async ({
           : null;
       let roundsChanged = false;
       let thirdPlaceMatchChanged = false;
+      let prizeStateChanged = false;
       const sortedRoundIndexes = getSortedRoundIndexes(rounds);
       for (const roundIndex of sortedRoundIndexes) {
         const round = rounds[String(roundIndex)];
@@ -2992,11 +3275,54 @@ const runEventSyncState = async ({
         }
       }
 
+      if (eventId === PRIZES_EVENT_ID) {
+        if (typeof event.prizeSelectionsLockedAtMs !== "number") {
+          updates[`events/${eventId}/prizeSelectionsLockedAtMs`] =
+            typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs;
+          prizeStateChanged = true;
+        }
+        const prizeAssignmentResult = await resolveEventPrizeAssignments({
+          eventId,
+          event,
+          rounds,
+          participantsById:
+            event.participants && typeof event.participants === "object"
+              ? event.participants
+              : {},
+          thirdPlaceMatch,
+          assignedAtMs:
+            typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs,
+        });
+        if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
+          if (prizeAssignmentResult.didCreate) {
+            addEventPrizeAssignmentUpdates({
+              updates,
+              eventId,
+              assignments: prizeAssignmentResult.assignments,
+              includeEventAssignments: true,
+            });
+            prizeStateChanged = true;
+          } else {
+            const projectionUpdates =
+              await getMissingEventPrizeProjectionUpdates({
+                eventId,
+                assignments: prizeAssignmentResult.assignments,
+              });
+            if (Object.keys(projectionUpdates).length > 0) {
+              Object.assign(updates, projectionUpdates);
+              prizeStateChanged = true;
+            }
+          }
+        }
+      }
+
       if (roundsChanged || thirdPlaceMatchChanged) {
         updates[`events/${eventId}/rounds`] = rounds;
         if (supportsThirdPlaceMatch) {
           updates[`events/${eventId}/thirdPlaceMatch`] = thirdPlaceMatch;
         }
+      }
+      if (roundsChanged || thirdPlaceMatchChanged || prizeStateChanged) {
         updates[`events/${eventId}/updatedAtMs`] = nowMs;
         didChange = true;
       }

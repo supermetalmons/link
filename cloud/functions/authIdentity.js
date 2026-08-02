@@ -22,6 +22,14 @@ const {
   assignRandomUsernameIfNeededForWalletlessProfile,
 } = require("./usernameRegistry");
 const { readProfileByLoginUid } = require("./profileLookup");
+const {
+  copyProfileEventPrizesToCanonicalTarget,
+  resolveCanonicalProfileId,
+} = require("./profileEventPrizeProjection");
+const {
+  PROFILE_MERGE_TARGETS_COLLECTION,
+  getProfileMergeTargetId,
+} = require("./profileMergeTargets");
 
 const INTENT_TTL_MS = 5 * 60 * 1000;
 const MERGE_LOCK_TTL_MS = 10 * 60 * 1000;
@@ -1409,6 +1417,12 @@ const mergeProfiles = async ({ targetProfileId, sourceProfileId, opId }) => {
   const firestore = admin.firestore();
   const targetRef = firestore.collection("users").doc(targetProfileId);
   const sourceRef = firestore.collection("users").doc(sourceProfileId);
+  const profileMergeTargetRef = firestore
+    .collection(PROFILE_MERGE_TARGETS_COLLECTION)
+    .doc(sourceProfileId);
+  const targetProfileMergeTargetRef = firestore
+    .collection(PROFILE_MERGE_TARGETS_COLLECTION)
+    .doc(targetProfileId);
   let lockRefs = [];
   lockRefs = await acquireMergeLocks({
     targetProfileId,
@@ -1425,6 +1439,52 @@ const mergeProfiles = async ({ targetProfileId, sourceProfileId, opId }) => {
       throw new HttpsError("not-found", "target-profile-not-found");
     }
     if (!sourceSnapshot.exists) {
+      const [profileMergeTargetSnapshot, targetProfileMergeTargetSnapshot] =
+        await Promise.all([
+          profileMergeTargetRef.get(),
+          targetProfileMergeTargetRef.get(),
+        ]);
+      if (
+        targetProfileMergeTargetSnapshot.exists &&
+        getProfileMergeTargetId(targetProfileMergeTargetSnapshot.data())
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "target-profile-already-merged",
+        );
+      }
+      const existingMergeTargetProfileId = profileMergeTargetSnapshot.exists
+        ? getProfileMergeTargetId(profileMergeTargetSnapshot.data())
+        : "";
+      if (existingMergeTargetProfileId) {
+        const canonicalMergeTargetProfileId =
+          await resolveCanonicalProfileId(sourceProfileId);
+        if (canonicalMergeTargetProfileId !== targetProfileId) {
+          throw new HttpsError(
+            "failed-precondition",
+            "profile-merge-target-conflict",
+          );
+        }
+      }
+      if (existingMergeTargetProfileId) {
+        const repairError = await runWithRetries({
+          attempts: 3,
+          baseDelayMs: 120,
+          work: async () => {
+            await copyProfileEventPrizesToCanonicalTarget(sourceProfileId);
+          },
+        });
+        if (repairError) {
+          console.error("auth:merge:event-prize-repair-pending", {
+            opId,
+            targetProfileId,
+            sourceProfileId,
+            error:
+              toCleanString(repairError && repairError.message) ||
+              String(repairError),
+          });
+        }
+      }
       return targetSnapshot;
     }
 
@@ -1619,12 +1679,40 @@ const mergeProfiles = async ({ targetProfileId, sourceProfileId, opId }) => {
       mergeSourceRetainedForGameCopy: true,
     };
     await firestore.runTransaction(async (transaction) => {
-      const [liveTargetSnapshot, liveSourceSnapshot] = await Promise.all([
+      const [
+        liveTargetSnapshot,
+        liveSourceSnapshot,
+        profileMergeTargetSnapshot,
+        targetProfileMergeTargetSnapshot,
+      ] = await Promise.all([
         transaction.get(targetRef),
         transaction.get(sourceRef),
+        transaction.get(profileMergeTargetRef),
+        transaction.get(targetProfileMergeTargetRef),
       ]);
       if (!liveTargetSnapshot.exists) {
         throw new HttpsError("not-found", "target-profile-not-found");
+      }
+      const existingMergeTargetProfileId = profileMergeTargetSnapshot.exists
+        ? getProfileMergeTargetId(profileMergeTargetSnapshot.data())
+        : "";
+      if (
+        existingMergeTargetProfileId &&
+        existingMergeTargetProfileId !== targetProfileId
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "profile-merge-target-conflict",
+        );
+      }
+      if (
+        targetProfileMergeTargetSnapshot.exists &&
+        getProfileMergeTargetId(targetProfileMergeTargetSnapshot.data())
+      ) {
+        throw new HttpsError(
+          "failed-precondition",
+          "target-profile-already-merged",
+        );
       }
       const methodIndexRefs = methodIndexEntries.map((entry) =>
         firestore
@@ -1815,10 +1903,37 @@ const mergeProfiles = async ({ targetProfileId, sourceProfileId, opId }) => {
       });
 
       transaction.set(targetRef, mergedData, { merge: true });
+      transaction.set(
+        profileMergeTargetRef,
+        {
+          sourceProfileId,
+          targetProfileId,
+          mergedAtMs: nowMs,
+          opId: toCleanString(opId) || null,
+        },
+        { merge: true },
+      );
       if (liveSourceSnapshot.exists) {
         transaction.set(sourceRef, sourceMergeRetainedPatch, { merge: true });
       }
     });
+    const prizeCopyError = await runWithRetries({
+      attempts: 3,
+      baseDelayMs: 120,
+      work: async () => {
+        await copyProfileEventPrizesToCanonicalTarget(sourceProfileId);
+      },
+    });
+    if (prizeCopyError) {
+      console.error("auth:merge:event-prize-copy-pending", {
+        opId,
+        targetProfileId,
+        sourceProfileId,
+        error:
+          toCleanString(prizeCopyError && prizeCopyError.message) ||
+          String(prizeCopyError),
+      });
+    }
     const mergedTargetSnapshot = await targetRef.get();
     const gameCopyError = await runWithRetries({
       attempts: 3,

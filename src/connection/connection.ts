@@ -78,7 +78,11 @@ import {
   EventParticipant,
   EventRound,
   EventMatch,
+  EventPrizeAssignment,
+  EventPrizeAssignments,
+  EventPrizeId,
   EventPrizeSelections,
+  ProfileEventPrizes,
 } from "./connectionModels";
 import {
   buildDeterministicGameSeed,
@@ -2921,14 +2925,85 @@ class Connection {
             Object.entries(rawSelections as Record<string, unknown>).forEach(
               ([profileId, prizeId]) => {
                 const normalizedProfileId = profileId.trim();
-                const normalizedPrizeId =
-                  typeof prizeId === "string" ? prizeId.trim() : "";
+                const normalizedPrizeId = this.normalizeEventPrizeId(prizeId);
                 if (normalizedProfileId && normalizedPrizeId) {
                   selections[normalizedProfileId] = normalizedPrizeId;
                 }
               },
             );
             onUpdate(selections);
+          },
+          (error) => {
+            if (disposed || !sessionGuard()) {
+              return;
+            }
+            onError?.(error);
+          },
+        );
+      })
+      .catch((error) => {
+        if (disposed || !sessionGuard()) {
+          return;
+        }
+        onError?.(error);
+      });
+
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }
+
+  public subscribeToProfileEventPrizes(
+    profileId: string,
+    onUpdate: (prizes: ProfileEventPrizes) => void,
+    onError?: (error: unknown) => void,
+  ): () => void {
+    const normalizedProfileId =
+      typeof profileId === "string" ? profileId.trim() : "";
+    if (!normalizedProfileId) {
+      onUpdate({});
+      return () => {};
+    }
+    const prizesRef = ref(this.db, `profileEventPrizes/${normalizedProfileId}`);
+    let disposed = false;
+    let unsubscribe: (() => void) | null = null;
+    const sessionGuard = this.createSessionGuard();
+
+    void this.ensureAuthenticated()
+      .then(() => {
+        if (disposed || !sessionGuard()) {
+          return;
+        }
+        unsubscribe = onValue(
+          prizesRef,
+          (snapshot) => {
+            if (disposed || !sessionGuard()) {
+              return;
+            }
+            const rawPrizes = snapshot.val();
+            if (!rawPrizes || typeof rawPrizes !== "object") {
+              onUpdate({});
+              return;
+            }
+            const prizes: ProfileEventPrizes = {};
+            Object.entries(rawPrizes as Record<string, unknown>).forEach(
+              ([eventId, rawPrize]) => {
+                const normalizedEventId = eventId.trim();
+                const prize = this.mapEventPrizeAssignment(
+                  rawPrize,
+                  normalizedEventId,
+                );
+                if (
+                  normalizedEventId &&
+                  prize?.eventId === normalizedEventId &&
+                  prize.profileId === normalizedProfileId
+                ) {
+                  prizes[normalizedEventId] = prize;
+                }
+              },
+            );
+            onUpdate(prizes);
           },
           (error) => {
             if (disposed || !sessionGuard()) {
@@ -3338,6 +3413,69 @@ class Connection {
     };
   }
 
+  private normalizeEventPrizeId(value: unknown): EventPrizeId | null {
+    if (value === "1092" || value === "1111" || value === "1514") {
+      return value;
+    }
+    return null;
+  }
+
+  private mapEventPrizeAssignment(
+    rawValue: unknown,
+    fallbackEventId: string,
+  ): EventPrizeAssignment | null {
+    if (!rawValue || typeof rawValue !== "object") {
+      return null;
+    }
+    const rawData = rawValue as Record<string, unknown>;
+    const eventId = this.normalizeString(rawData.eventId) || fallbackEventId;
+    const profileId = this.normalizeString(rawData.profileId);
+    const prizeId = this.normalizeEventPrizeId(rawData.prizeId);
+    const placeValue = this.normalizeFiniteNumber(rawData.place, NaN);
+    const place =
+      placeValue === 1 || placeValue === 2 || placeValue === 3
+        ? placeValue
+        : null;
+    const assignedAtMs = this.normalizeFiniteNumber(rawData.assignedAtMs, NaN);
+    if (
+      !eventId ||
+      !profileId ||
+      !prizeId ||
+      place === null ||
+      !Number.isFinite(assignedAtMs)
+    ) {
+      return null;
+    }
+    return {
+      eventId,
+      profileId,
+      prizeId,
+      place,
+      assignedAtMs: Math.floor(assignedAtMs),
+    };
+  }
+
+  private mapEventPrizeAssignments(
+    rawValue: unknown,
+    fallbackEventId: string,
+  ): EventPrizeAssignments {
+    if (!rawValue || typeof rawValue !== "object") {
+      return {};
+    }
+    const rawAssignments = rawValue as Record<string, unknown>;
+    const assignments: EventPrizeAssignments = {};
+    for (const place of [1, 2, 3] as const) {
+      const assignment = this.mapEventPrizeAssignment(
+        rawAssignments[String(place)],
+        fallbackEventId,
+      );
+      if (assignment?.place === place) {
+        assignments[`${place}`] = assignment;
+      }
+    }
+    return assignments;
+  }
+
   private mapDatabaseEventRecord(
     rawValue: unknown,
     fallbackEventId: string,
@@ -3362,6 +3500,10 @@ class Connection {
       rawData.thirdPlaceMatch && typeof rawData.thirdPlaceMatch === "object"
         ? (rawData.thirdPlaceMatch as Record<string, unknown>)
         : null;
+    const prizeSelectionsLockedAtMs = this.normalizeFiniteNumber(
+      rawData.prizeSelectionsLockedAtMs,
+      NaN,
+    );
     const participants: Record<string, EventParticipant> = {};
     const rounds: Record<string, EventRound> = {};
 
@@ -3424,6 +3566,13 @@ class Connection {
       thirdPlaceMatch: thirdPlaceMatchInput
         ? this.mapEventMatch(thirdPlaceMatchInput, THIRD_PLACE_MATCH_KEY)
         : null,
+      prizeSelectionsLockedAtMs: Number.isFinite(prizeSelectionsLockedAtMs)
+        ? prizeSelectionsLockedAtMs
+        : null,
+      prizeAssignments: this.mapEventPrizeAssignments(
+        rawData.prizeAssignments,
+        eventId,
+      ),
       participants,
       rounds,
     };

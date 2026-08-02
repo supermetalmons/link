@@ -60,10 +60,7 @@ export interface HistoricalMatchPair {
 }
 
 export type NavigationItemStatus = SharedNavigationStatus;
-export type NavigationGameStatus = Exclude<
-  SharedNavigationStatus,
-  "dismissed"
->;
+export type NavigationGameStatus = Exclude<SharedNavigationStatus, "dismissed">;
 type NavigationEventStatus = Exclude<SharedNavigationStatus, "pending">;
 type EventStatus = "scheduled" | "active" | "ended" | "dismissed";
 type EventParticipantState = "active" | "eliminated" | "winner";
@@ -158,6 +155,23 @@ export interface EventRound {
   matches: Record<string, EventMatch>;
 }
 
+export type EventPrizeId = "1092" | "1111" | "1514";
+export type EventPrizePlace = 1 | 2 | 3;
+
+export interface EventPrizeAssignment {
+  eventId: string;
+  profileId: string;
+  place: EventPrizePlace;
+  prizeId: EventPrizeId;
+  assignedAtMs: number;
+}
+
+export type EventPrizeAssignments = Partial<
+  Record<`${EventPrizePlace}`, EventPrizeAssignment>
+>;
+
+export type ProfileEventPrizes = Record<string, EventPrizeAssignment>;
+
 export interface EventRecord {
   schemaVersion: number;
   eventId: string;
@@ -176,11 +190,13 @@ export interface EventRecord {
   bracketSize: number;
   roundCount: number;
   thirdPlaceMatch?: EventMatch | null;
+  prizeSelectionsLockedAtMs?: number | null;
+  prizeAssignments?: EventPrizeAssignments;
   participants: Record<string, EventParticipant>;
   rounds: Record<string, EventRound>;
 }
 
-export type EventPrizeSelections = Record<string, string>;
+export type EventPrizeSelections = Record<string, EventPrizeId>;
 
 export interface Reaction {
   uuid: string;

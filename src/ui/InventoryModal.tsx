@@ -14,6 +14,8 @@ import { storage } from "../utils/storage";
 import type { AuthState } from "../connection/authentication";
 import { TopRightPopoverBase } from "./TopRightPopoverBase";
 import type { MaterialName } from "../services/rocksMiningService";
+import { connection } from "../connection/connection";
+import type { EventPrizeAssignment } from "../connection/connectionModels";
 
 const SWAGPACK_ITEM_COUNT = 467;
 const SWAGPACK_ID_OFFSET = 1000;
@@ -22,6 +24,8 @@ const SWAGPACK_INVENTORY_IMAGE_BASE_URL =
 const SWAGPACK_THUMB_IMAGE_BASE_URL =
   "https://cdn.lil.org/mons/emojipack/thumbs";
 const MATERIAL_IMAGE_BASE_URL = "https://cdn.lil.org/mons/rocks/materials";
+const EVENT_PRIZE_IMAGE_BASE_URL =
+  "https://cdn.lil.org/player/scarecrow/thumbs";
 
 const SHOP_OFFERS: ReadonlyArray<{
   material: MaterialName;
@@ -306,6 +310,22 @@ const NFTNameContainer = styled.div`
   }
 `;
 
+const PrizeInventoryTile = styled(NFTNameContainer)`
+  padding: 0;
+  cursor: default;
+`;
+
+const PrizeInventoryImage = styled.img`
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  border-radius: 6px;
+  pointer-events: none;
+  -webkit-user-drag: none;
+  user-drag: none;
+`;
+
 const AvatarTile = styled(NFTNameContainer)<{ $isActive: boolean }>`
   position: relative;
   padding: 0;
@@ -411,6 +431,8 @@ export const InventoryModal = React.forwardRef<
   const isAuthenticated = authState.authStatus === "authenticated";
   const [avatars, setAvatars] = useState<SwagAvatarItem[]>([]);
   const [specials, setSpecials] = useState<SwagAvatarItem[]>([]);
+  const [eventPrizes, setEventPrizes] = useState<EventPrizeAssignment[]>([]);
+  const [areEventPrizesLoading, setAreEventPrizesLoading] = useState(true);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [dataOk, setDataOk] = useState<boolean | null>(null);
   const [loadedInventory, setLoadedInventory] = useState<{
@@ -422,6 +444,33 @@ export const InventoryModal = React.forwardRef<
   );
   const [inventoryRefreshVersion, setInventoryRefreshVersion] = useState(0);
   const ownerKey = isAuthenticated ? getNftIdentityKey(authState) : null;
+
+  useEffect(() => {
+    setEventPrizes([]);
+    if (!isAuthenticated || !authState.profileId) {
+      setAreEventPrizesLoading(false);
+      return;
+    }
+    setAreEventPrizesLoading(true);
+    return connection.subscribeToProfileEventPrizes(
+      authState.profileId,
+      (prizes) => {
+        setEventPrizes(
+          Object.values(prizes).sort((left, right) => {
+            if (left.assignedAtMs !== right.assignedAtMs) {
+              return right.assignedAtMs - left.assignedAtMs;
+            }
+            return left.place - right.place;
+          }),
+        );
+        setAreEventPrizesLoading(false);
+      },
+      () => {
+        setEventPrizes([]);
+        setAreEventPrizesLoading(false);
+      },
+    );
+  }, [authState.profileId, isAuthenticated]);
 
   useEffect(() => {
     let isCancelled = false;
@@ -553,9 +602,14 @@ export const InventoryModal = React.forwardRef<
           </ShopGrid>
         </ShopSection>
         <InventorySection aria-label="Inventory">
-          {isLoading ? (
+          {(isLoading || areEventPrizesLoading) &&
+          avatars.length === 0 &&
+          specials.length === 0 &&
+          eventPrizes.length === 0 ? (
             <LoadingText>LOADING...</LoadingText>
-          ) : avatars.length === 0 && specials.length === 0 ? (
+          ) : avatars.length === 0 &&
+            specials.length === 0 &&
+            eventPrizes.length === 0 ? (
             dataOk ? (
               <LoadingText>
                 <SwagPackLink
@@ -572,6 +626,19 @@ export const InventoryModal = React.forwardRef<
           ) : (
             <NFTGridContainer>
               <NFTGrid>
+                {eventPrizes.map((prize) => (
+                  <PrizeInventoryTile
+                    key={`event-prize-${prize.eventId}`}
+                    role="img"
+                    aria-label={`Place ${prize.place} prize from event ${prize.eventId}`}
+                  >
+                    <PrizeInventoryImage
+                      src={`${EVENT_PRIZE_IMAGE_BASE_URL}/${prize.prizeId}.webp`}
+                      alt=""
+                      loading="lazy"
+                    />
+                  </PrizeInventoryTile>
+                ))}
                 {specials.map((item) => (
                   <AvatarTile
                     key={`special-${item.id}`}

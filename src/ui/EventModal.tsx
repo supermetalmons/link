@@ -12,6 +12,8 @@ import { connection } from "../connection/connection";
 import {
   EventMatch,
   EventParticipant,
+  EventPrizeAssignment,
+  EventPrizeId,
   EventPrizeSelections,
   EventRecord,
   EventRound,
@@ -87,6 +89,7 @@ const FALLBACK_AVATAR_PX = 28;
 const PRIZE_SELECTION_AVATAR_PX = 27;
 const PRIZE_SELECTION_GAP_PX = 12;
 const PRIZES_EVENT_ID = "NN3eRzoZo80";
+const PRIZE_DISPLAY_PLACES = [2, 1, 3] as const;
 const EVENT_PRIZES = [
   {
     id: "1092",
@@ -108,6 +111,10 @@ const PARTICIPANT_PROFILE_CACHE_TTL_MS = 30_000;
 
 type BracketCardInteraction = "none" | "game" | "participant";
 type WinnerPodiumPlace = 1 | 2 | 3;
+type PrizeConnectorPath = {
+  place: WinnerPodiumPlace;
+  d: string;
+};
 type ParticipantLookupGroup = {
   profileId: string;
   loginUid: string;
@@ -323,6 +330,33 @@ const PrizeSelectionAvatarSlot = styled.button<{
     ${(props) => props.$offsetX}px,
     ${(props) => props.$offsetY}px
   );
+`;
+
+const PrizeAssignmentConnectorSvg = styled.svg`
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: visible;
+  pointer-events: none;
+  z-index: ${EVENT_MODAL_Z_INDEX};
+
+  path {
+    fill: none;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  path[data-layer="glow"] {
+    stroke: rgba(255, 252, 224, 0.5);
+    stroke-width: 7;
+    filter: url(#event-prize-line-glow);
+  }
+
+  path[data-layer="core"] {
+    stroke: url(#event-prize-line-shine);
+    stroke-width: 1.8;
+  }
 `;
 
 const TopBarSubtitle = styled.div`
@@ -934,7 +968,8 @@ type EventAutoRecoveryReason =
   | "start-overdue"
   | "active-no-rounds"
   | "active-pending-without-invite"
-  | "active-should-end";
+  | "active-should-end"
+  | "ended-missing-prize-assignments";
 
 const PENDING_JOIN_POLL_INTERVAL_MS = 350;
 const PENDING_JOIN_POLL_TIMEOUT_MS = 60_000;
@@ -1088,6 +1123,28 @@ const isLocalEventCreator = (event: EventRecord | null): boolean => {
   );
 };
 
+const isLocalEventParticipant = (event: EventRecord | null): boolean => {
+  if (!event) {
+    return false;
+  }
+  if (isLocalEventCreator(event)) {
+    return true;
+  }
+  const localLoginUid = storage.getLoginId("").trim();
+  const localProfileId = storage.getProfileId("").trim();
+  if (localProfileId && event.participants[localProfileId]) {
+    return true;
+  }
+  return Object.values(event.participants).some((participant) => {
+    const participantLoginUid = participant.loginUid?.trim() ?? "";
+    return (
+      localLoginUid !== "" &&
+      participantLoginUid !== "" &&
+      localLoginUid === participantLoginUid
+    );
+  });
+};
+
 const getSortedParticipants = (
   event: EventRecord | null,
 ): EventParticipant[] => {
@@ -1128,6 +1185,14 @@ const getEventAutoRecoveryReason = (
       return "start-overdue";
     }
     return null;
+  }
+
+  if (
+    event.status === "ended" &&
+    event.eventId === PRIZES_EVENT_ID &&
+    Object.keys(event.prizeAssignments ?? {}).length === 0
+  ) {
+    return "ended-missing-prize-assignments";
   }
 
   if (event.status !== "active") {
@@ -2874,6 +2939,9 @@ const EventModal: React.FC = () => {
     useState(false);
   const [eventPrizeSelections, setEventPrizeSelections] =
     useState<EventPrizeSelections>({});
+  const [prizeConnectorPaths, setPrizeConnectorPaths] = useState<
+    PrizeConnectorPath[]
+  >([]);
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [viewportSize, setViewportSize] = useState(getViewportSize);
@@ -2905,6 +2973,12 @@ const EventModal: React.FC = () => {
   const topBarRef = useRef<HTMLDivElement | null>(null);
   const bottomBarRef = useRef<HTMLDivElement | null>(null);
   const participantsCloudRef = useRef<HTMLDivElement | null>(null);
+  const prizeChoiceRefs = useRef<
+    Partial<Record<EventPrizeId, HTMLButtonElement | null>>
+  >({});
+  const podiumBarRefs = useRef<
+    Partial<Record<WinnerPodiumPlace, HTMLDivElement | null>>
+  >({});
   const displayedEventRecord = devStubRecord ?? eventRecord;
   const invalidateParticipantLookups = useCallback(() => {
     activeParticipantLookupRef.current = null;
@@ -3132,16 +3206,19 @@ const EventModal: React.FC = () => {
     if (eventRecord.eventId !== modalState.eventId) {
       return;
     }
-    if (!isLocalEventCreator(eventRecord)) {
-      return;
-    }
-
     const autoRecoveryReason = getEventAutoRecoveryReason(eventRecord, nowMs);
     if (!autoRecoveryReason) {
       if (eventAutoRecoveryTimeoutRef.current !== null) {
         window.clearTimeout(eventAutoRecoveryTimeoutRef.current);
         eventAutoRecoveryTimeoutRef.current = null;
       }
+      return;
+    }
+    const canAttemptRecovery =
+      autoRecoveryReason === "ended-missing-prize-assignments"
+        ? isLocalEventParticipant(eventRecord)
+        : isLocalEventCreator(eventRecord);
+    if (!canAttemptRecovery) {
       return;
     }
 
@@ -3405,6 +3482,47 @@ const EventModal: React.FC = () => {
     () => getSortedRounds(displayedEventRecord),
     [displayedEventRecord],
   );
+  const eventPrizeAssignments = useMemo(
+    () =>
+      PRIZE_DISPLAY_PLACES.flatMap((place) => {
+        const assignment = displayedEventRecord?.prizeAssignments?.[`${place}`];
+        return assignment ? [assignment] : [];
+      }),
+    [displayedEventRecord],
+  );
+  const displayedEventPrizes = useMemo(() => {
+    if (
+      displayedEventRecord?.status !== "ended" ||
+      eventPrizeAssignments.length === 0
+    ) {
+      return EVENT_PRIZES.map((prize) => ({
+        prize,
+        assignment: null as EventPrizeAssignment | null,
+      }));
+    }
+    const assignedPrizeIds = new Set<EventPrizeId>();
+    const orderedAssignedPrizes = eventPrizeAssignments.flatMap(
+      (assignment) => {
+        const prize = EVENT_PRIZES.find(
+          (candidate) => candidate.id === assignment.prizeId,
+        );
+        if (!prize || assignedPrizeIds.has(prize.id)) {
+          return [];
+        }
+        assignedPrizeIds.add(prize.id);
+        return [{ prize, assignment }];
+      },
+    );
+    return [
+      ...orderedAssignedPrizes,
+      ...EVENT_PRIZES.filter((prize) => !assignedPrizeIds.has(prize.id)).map(
+        (prize) => ({
+          prize,
+          assignment: null as EventPrizeAssignment | null,
+        }),
+      ),
+    ];
+  }, [displayedEventRecord?.status, eventPrizeAssignments]);
   const currentProfileId = storage.getProfileId("");
   const eventUiState = useMemo(
     () => getCurrentUiState(displayedEventRecord, currentProfileId),
@@ -3431,9 +3549,8 @@ const EventModal: React.FC = () => {
         modalState.eventId !== PRIZES_EVENT_ID ||
         !currentProfileId ||
         !eventRecord?.participants[currentProfileId] ||
-        (eventRecord.status !== "scheduled" &&
-          eventRecord.status !== "active" &&
-          eventRecord.status !== "ended")
+        eventRecord.prizeSelectionsLockedAtMs != null ||
+        (eventRecord.status !== "scheduled" && eventRecord.status !== "active")
       ) {
         return;
       }
@@ -3499,15 +3616,29 @@ const EventModal: React.FC = () => {
       match: thirdPlaceMatch,
     };
   }, [bracketLayout, thirdPlaceMatch]);
-  const winnerPodiumEntries = useMemo(
-    () =>
-      getEndedEventWinnerPodiumEntries(
-        displayedEventRecord,
-        rounds,
-        participantsById,
-      ),
-    [displayedEventRecord, rounds, participantsById],
-  );
+  const winnerPodiumEntries = useMemo(() => {
+    if (eventPrizeAssignments.length > 0) {
+      const assignedEntries = eventPrizeAssignments.flatMap((assignment) => {
+        const participant = participantsById[assignment.profileId];
+        return participant
+          ? [
+              {
+                place: assignment.place,
+                participant,
+              },
+            ]
+          : [];
+      });
+      if (assignedEntries.length > 0) {
+        return assignedEntries;
+      }
+    }
+    return getEndedEventWinnerPodiumEntries(
+      displayedEventRecord,
+      rounds,
+      participantsById,
+    );
+  }, [displayedEventRecord, eventPrizeAssignments, rounds, participantsById]);
   const showWinnerPodium = !!(
     bracketLayout &&
     displayedEventRecord?.status === "ended" &&
@@ -3535,6 +3666,109 @@ const EventModal: React.FC = () => {
   const winnerPodiumOffsetX = Math.round(
     (bracketFrameWidth - winnerPodiumWidth) / 2,
   );
+  const prizeAssignmentSignature = eventPrizeAssignments
+    .map(
+      (assignment) =>
+        `${assignment.place}:${assignment.profileId}:${assignment.prizeId}`,
+    )
+    .join("|");
+
+  useLayoutEffect(() => {
+    if (
+      !modalState.isOpen ||
+      displayedEventRecord?.status !== "ended" ||
+      !showWinnerPodium ||
+      eventPrizeAssignments.length === 0 ||
+      typeof window === "undefined"
+    ) {
+      setPrizeConnectorPaths((current) =>
+        current.length === 0 ? current : [],
+      );
+      return;
+    }
+
+    let animationFrameId: number | null = null;
+    const measure = () => {
+      animationFrameId = null;
+      const nextPaths = eventPrizeAssignments.flatMap((assignment) => {
+        const prizeElement = prizeChoiceRefs.current[assignment.prizeId];
+        const podiumElement = podiumBarRefs.current[assignment.place];
+        if (!prizeElement || !podiumElement) {
+          return [];
+        }
+        const prizeRect = prizeElement.getBoundingClientRect();
+        const podiumRect = podiumElement.getBoundingClientRect();
+        const startX = prizeRect.left + prizeRect.width / 2;
+        const startY = prizeRect.bottom + 2;
+        const endX = podiumRect.left + podiumRect.width / 2;
+        const endY = podiumRect.top + 2;
+        if (endY <= startY + 4) {
+          return [];
+        }
+        return [
+          {
+            place: assignment.place,
+            d: `M ${startX.toFixed(1)} ${startY.toFixed(1)} L ${endX.toFixed(1)} ${endY.toFixed(1)}`,
+          },
+        ];
+      });
+      setPrizeConnectorPaths((current) =>
+        JSON.stringify(current) === JSON.stringify(nextPaths)
+          ? current
+          : nextPaths,
+      );
+    };
+    const scheduleMeasure = () => {
+      if (animationFrameId !== null) {
+        window.cancelAnimationFrame(animationFrameId);
+      }
+      animationFrameId = window.requestAnimationFrame(measure);
+    };
+
+    const observedElements = [
+      topBarRef.current,
+      ...eventPrizeAssignments.map(
+        (assignment) => prizeChoiceRefs.current[assignment.prizeId] ?? null,
+      ),
+      ...eventPrizeAssignments.map(
+        (assignment) => podiumBarRefs.current[assignment.place] ?? null,
+      ),
+    ].filter(
+      (element): element is HTMLDivElement | HTMLButtonElement =>
+        element !== null,
+    );
+    const resizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(scheduleMeasure);
+    observedElements.forEach((element) => resizeObserver?.observe(element));
+    window.addEventListener("resize", scheduleMeasure);
+    window.visualViewport?.addEventListener("resize", scheduleMeasure);
+    window.visualViewport?.addEventListener("scroll", scheduleMeasure);
+    scheduleMeasure();
+
+    return () => {
+      if (animationFrameId !== null) {
+        window.cancelAnimationFrame(animationFrameId);
+      }
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", scheduleMeasure);
+      window.visualViewport?.removeEventListener("resize", scheduleMeasure);
+      window.visualViewport?.removeEventListener("scroll", scheduleMeasure);
+    };
+  }, [
+    bracketFrameHeight,
+    bracketFrameWidth,
+    bracketInsets.bottom,
+    bracketInsets.top,
+    displayedEventRecord?.status,
+    eventPrizeAssignments,
+    modalState.isOpen,
+    prizeAssignmentSignature,
+    showWinnerPodium,
+    viewportSize.height,
+    viewportSize.width,
+  ]);
 
   const bracketFallbackRounds = useMemo(() => {
     return rounds
@@ -4272,9 +4506,8 @@ const EventModal: React.FC = () => {
     !devStubRecord &&
     currentProfileId &&
     eventRecord?.participants[currentProfileId] &&
-    (eventRecord.status === "scheduled" ||
-      eventRecord.status === "active" ||
-      eventRecord.status === "ended")
+    eventRecord.prizeSelectionsLockedAtMs == null &&
+    (eventRecord.status === "scheduled" || eventRecord.status === "active")
   );
   const topBarTitleText = devStubRecord
     ? ""
@@ -4382,6 +4615,41 @@ const EventModal: React.FC = () => {
         </DevBracketHelper>
       )}
 
+      {prizeConnectorPaths.length > 0 && (
+        <PrizeAssignmentConnectorSvg aria-hidden="true">
+          <defs>
+            <filter
+              id="event-prize-line-glow"
+              filterUnits="userSpaceOnUse"
+              x={-12}
+              y={-12}
+              width={viewportSize.width + 24}
+              height={viewportSize.height + 24}
+            >
+              <feGaussianBlur stdDeviation="4" />
+            </filter>
+            <linearGradient
+              id="event-prize-line-shine"
+              gradientUnits="userSpaceOnUse"
+              x1="0"
+              y1="0"
+              x2="0"
+              y2={Math.max(1, viewportSize.height)}
+            >
+              <stop offset="0" stopColor="rgba(255, 255, 255, 0.9)" />
+              <stop offset="0.5" stopColor="rgba(255, 244, 180, 0.82)" />
+              <stop offset="1" stopColor="rgba(255, 255, 255, 0.68)" />
+            </linearGradient>
+          </defs>
+          {prizeConnectorPaths.map((connector) => (
+            <React.Fragment key={connector.place}>
+              <path data-layer="glow" d={connector.d} />
+              <path data-layer="core" d={connector.d} />
+            </React.Fragment>
+          ))}
+        </PrizeAssignmentConnectorSvg>
+      )}
+
       {!isDismissedState && (topBarTitleText || showEventPrizes) && (
         <TopBar ref={topBarRef}>
           <TopBarStack>
@@ -4395,7 +4663,7 @@ const EventModal: React.FC = () => {
             )}
             {showEventPrizes && (
               <PrizesRow role="group" aria-label="Event prizes">
-                {EVENT_PRIZES.map((prize) => {
+                {displayedEventPrizes.map(({ prize, assignment }) => {
                   const selectedParticipants = participants.filter(
                     (participant) =>
                       eventPrizeSelections[participant.profileId] === prize.id,
@@ -4408,9 +4676,22 @@ const EventModal: React.FC = () => {
                       : "participants"
                   } selected`;
                   const actionLabel = isSelected ? "Deselect" : "Select";
+                  const awardedParticipant = assignment
+                    ? participantsById[assignment.profileId]
+                    : null;
+                  const awardLabel = assignment
+                    ? ` Awarded to ${
+                        awardedParticipant
+                          ? getParticipantDisplayName(awardedParticipant)
+                          : assignment.profileId
+                      } for place ${assignment.place}.`
+                    : "";
                   return (
                     <PrizeChoice key={prize.id}>
                       <PrizeChoiceButton
+                        ref={(element) => {
+                          prizeChoiceRefs.current[prize.id] = element;
+                        }}
                         type="button"
                         disabled={
                           !canSelectEventPrize || isUpdatingPrizeSelection
@@ -4423,7 +4704,7 @@ const EventModal: React.FC = () => {
                           canSelectEventPrize
                             ? `${actionLabel} ${prize.alt}`
                             : prize.alt
-                        }. ${selectionCountLabel}`}
+                        }. ${selectionCountLabel}.${awardLabel}`}
                         onClick={() => handlePrizeSelectionClick(prize.id)}
                       >
                         <PrizeImage
@@ -4519,7 +4800,12 @@ const EventModal: React.FC = () => {
                           displayName={entry.participant.displayName}
                         />
                       </WinnerPodiumAvatarSlot>
-                      <WinnerPodiumBar $place={entry.place}>
+                      <WinnerPodiumBar
+                        ref={(element) => {
+                          podiumBarRefs.current[entry.place] = element;
+                        }}
+                        $place={entry.place}
+                      >
                         <WinnerPodiumPlaceLabel>
                           {entry.place}
                         </WinnerPodiumPlaceLabel>
