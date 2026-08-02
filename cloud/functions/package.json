@@ -18,9 +18,9 @@
     "bs58": "^6.0.0",
     "ethers": "^6.17.0",
     "firebase-admin": "^14.2.0",
-    "firebase-functions": "^7.3.0",
+    "firebase-functions": "^7.3.2",
     "glicko2": "^1.2.1",
-    "mons-rules": "0.3.1",
+    "mons-rules": "0.3.3",
     "siwe": "^3.0.0",
     "tweetnacl": "^1.0.3"
   },
