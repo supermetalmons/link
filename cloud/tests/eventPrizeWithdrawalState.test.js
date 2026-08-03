@@ -16,7 +16,9 @@ const {
   normalizeSolanaAddress,
 } = require("../functions/eventPrizeWithdrawalState");
 const {
+  acquireWithdrawalClaim,
   deserializeSubmittedTransaction,
+  persistSubmittedTransaction,
   reconcileCompletedWithdrawalProjections,
   validatePrizeAssignment,
 } = require("../functions/eventPrizeWithdrawal");
@@ -92,6 +94,109 @@ test("rejects concurrent active leases", () => {
     leaseExpiresAtMs: 2000,
   });
   assert.equal(decision.kind, "busy");
+});
+
+test("checks the authoritative claim after a stale local transaction read", async () => {
+  const authoritative = {
+    status: "processing",
+    eventId,
+    prizeId,
+    assetAddress,
+    profileId,
+    place: 1,
+    recipientAddress,
+    requesterUid: "uid",
+    leaseId: "lease-current",
+    leaseExpiresAtMs: Date.now() + 60_000,
+  };
+  const withdrawalRef = {
+    transaction: async (update) => {
+      const optimistic = update(null);
+      assert.equal(optimistic.status, "processing");
+      const unchanged = update(authoritative);
+      assert.equal(unchanged, authoritative);
+      return {
+        committed: true,
+        snapshot: { val: () => unchanged },
+      };
+    },
+  };
+  await assert.rejects(
+    acquireWithdrawalClaim({
+      withdrawalRef,
+      eventId,
+      prizeId,
+      assetAddress,
+      profileId,
+      place: 1,
+      recipientAddress,
+      requesterUid: "uid",
+      canonicalRecordProfileId: profileId,
+      canonicalRecordSourceProfileId: profileId,
+    }),
+    (error) =>
+      error.code === "aborted" &&
+      error.message === "This prize withdrawal is already being processed.",
+  );
+});
+
+test("persists a submission after refreshing a stale local transaction cache", async () => {
+  const authoritative = {
+    status: "processing",
+    leaseId: "lease",
+  };
+  const inputs = [];
+  const withdrawalRef = {
+    transaction: async (update) => {
+      inputs.push(null);
+      assert.equal(update(null), null);
+      inputs.push(authoritative);
+      const submitted = update(authoritative);
+      return {
+        committed: true,
+        snapshot: { val: () => submitted },
+      };
+    },
+  };
+  const persisted = await persistSubmittedTransaction({
+    withdrawalRef,
+    leaseId: "lease",
+    transactionSignature: "signature",
+    signedTransactionBase64: "transaction",
+    blockhash: "blockhash",
+    lastValidBlockHeight: 123,
+  });
+  assert.deepEqual(inputs, [null, authoritative]);
+  assert.equal(persisted.status, "submitted");
+  assert.equal(persisted.transactionSignature, "signature");
+});
+
+test("does not persist a submission after authoritative lease ownership changes", async () => {
+  const authoritative = {
+    status: "processing",
+    leaseId: "another-lease",
+  };
+  const withdrawalRef = {
+    transaction: async (update) => {
+      const unchanged = update(authoritative);
+      assert.equal(unchanged, authoritative);
+      return {
+        committed: true,
+        snapshot: { val: () => unchanged },
+      };
+    },
+  };
+  await assert.rejects(
+    persistSubmittedTransaction({
+      withdrawalRef,
+      leaseId: "lease",
+      transactionSignature: "signature",
+      signedTransactionBase64: "transaction",
+      blockhash: "blockhash",
+      lastValidBlockHeight: 123,
+    }),
+    (error) => error.code === "aborted",
+  );
 });
 
 test("preserves submitted transaction data on an idempotent retry", () => {

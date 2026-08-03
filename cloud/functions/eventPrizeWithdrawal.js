@@ -143,31 +143,39 @@ const acquireWithdrawalClaim = async ({
   canonicalRecordSourceProfileId,
 }) => {
   const leaseId = crypto.randomBytes(16).toString("hex");
-  let decision = null;
+  const decide = (current) =>
+    decideWithdrawalClaim({
+      current,
+      eventId,
+      prizeId,
+      assetAddress,
+      profileId,
+      place,
+      recipientAddress,
+      requesterUid,
+      canonicalRecordProfileId,
+      canonicalRecordSourceProfileId,
+      leaseId,
+      nowMs: Date.now(),
+    });
   const result = await withdrawalRef.transaction(
     (current) => {
-      decision = decideWithdrawalClaim({
-        current,
-        eventId,
-        prizeId,
-        assetAddress,
-        profileId,
-        place,
-        recipientAddress,
-        requesterUid,
-        canonicalRecordProfileId,
-        canonicalRecordSourceProfileId,
-        leaseId,
-        nowMs: Date.now(),
-      });
-      return decision.kind === "acquired" ? decision.value : undefined;
+      const decision = decide(current);
+      return decision.kind === "acquired" ? decision.value : (current ?? null);
     },
     undefined,
     false,
   );
-  if (result.committed) {
-    return { leaseId, withdrawal: result.snapshot.val() };
+  const withdrawal = result.snapshot.val();
+  if (
+    result.committed &&
+    normalizeString(withdrawal?.leaseId) === leaseId &&
+    ["processing", "submitted"].includes(withdrawal?.status) &&
+    isWithdrawalRecordForPrize(withdrawal, eventId, prizeId, assetAddress)
+  ) {
+    return { leaseId, withdrawal };
   }
+  const decision = decide(withdrawal);
   if (decision?.kind === "completed") {
     return { completed: decision.value };
   }
@@ -201,7 +209,7 @@ const releaseProcessingClaim = async ({ withdrawalRef, leaseId }) => {
       ) {
         return null;
       }
-      return undefined;
+      return current ?? null;
     },
     undefined,
     false,
@@ -220,7 +228,7 @@ const markWithdrawalBlocked = async ({
         current.status === "completed" ||
         normalizeString(current.leaseId) !== leaseId
       ) {
-        return undefined;
+        return current ?? null;
       }
       return {
         ...current,
@@ -251,7 +259,7 @@ const persistSubmittedTransaction = async ({
         current.status === "completed" ||
         normalizeString(current.leaseId) !== leaseId
       ) {
-        return undefined;
+        return current ?? null;
       }
       return {
         ...current,
@@ -270,13 +278,23 @@ const persistSubmittedTransaction = async ({
     undefined,
     false,
   );
-  if (!result.committed) {
+  const persisted = result.snapshot.val();
+  if (
+    !result.committed ||
+    persisted?.status !== "submitted" ||
+    normalizeString(persisted.leaseId) !== leaseId ||
+    normalizeString(persisted.transactionSignature) !== transactionSignature ||
+    normalizeString(persisted.signedTransactionBase64) !==
+      signedTransactionBase64 ||
+    normalizeString(persisted.blockhash) !== blockhash ||
+    Number(persisted.lastValidBlockHeight) !== lastValidBlockHeight
+  ) {
     throw new HttpsError(
       "aborted",
       "Prize withdrawal ownership changed. Please try again.",
     );
   }
-  return result.snapshot.val();
+  return persisted;
 };
 
 const getCurrentBlockHeight = async (umi) => {
@@ -726,9 +744,11 @@ const withdrawEventPrize = onCall(
 );
 
 module.exports = {
+  acquireWithdrawalClaim,
   deserializeSubmittedTransaction,
   handleWithdrawEventPrize,
   loadSolanaDependencies,
+  persistSubmittedTransaction,
   reconcileCompletedWithdrawalProjections,
   validatePrizeAssignment,
   withdrawEventPrize,
