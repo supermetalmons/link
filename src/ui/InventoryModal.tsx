@@ -59,6 +59,14 @@ const InventoryPopup = styled(TopRightPopoverBase)`
   transform: none;
   transition: none;
 
+  @media screen and (max-height: 500px) {
+    max-height: calc(100dvh - 110px - env(safe-area-inset-bottom));
+  }
+
+  @media screen and (max-height: 453px) {
+    max-height: calc(100dvh - 103px - env(safe-area-inset-bottom));
+  }
+
   &:focus-visible {
     outline: none;
   }
