@@ -186,20 +186,19 @@ const PrizeWithdrawalControls = styled.div`
 `;
 
 const PrizeWithdrawalInput = styled.input`
-  appearance: none;
   width: 100%;
-  height: 34px;
+  height: 38px;
   box-sizing: border-box;
-  border: 0;
-  border-radius: 17px;
-  padding: 0 14px;
+  border: 1px solid #b8b8b8;
+  border-radius: 5px;
+  padding: 7px 10px;
   outline: none;
   box-shadow: none;
-  background: rgba(240, 240, 240, 0.94);
-  color: var(--color-black);
+  background: #fff;
+  color: #222;
   font: inherit;
-  font-size: 0.78rem;
-  text-align: center;
+  font-size: 0.82rem;
+  text-align: left;
   -webkit-tap-highlight-color: transparent;
 
   &:focus,
@@ -209,12 +208,19 @@ const PrizeWithdrawalInput = styled.input`
   }
 
   &:disabled {
-    opacity: 0.65;
+    background: #eee;
+    color: #777;
   }
 
   @media (prefers-color-scheme: dark) {
-    background: rgba(51, 51, 51, 0.94);
-    color: var(--color-white);
+    border-color: #686868;
+    background: #2f2f2f;
+    color: #f5f5f5;
+
+    &:disabled {
+      background: #3a3a3a;
+      color: #aaa;
+    }
   }
 `;
 
@@ -724,6 +730,8 @@ export const InventoryModal = React.forwardRef<
     null,
   );
   const [withdrawalAddress, setWithdrawalAddress] = useState("");
+  const [isWithdrawalAddressVisible, setIsWithdrawalAddressVisible] =
+    useState(false);
   const [withdrawalStatus, setWithdrawalStatus] =
     useState<PrizeWithdrawalStatus>("idle");
   const [withdrawalError, setWithdrawalError] = useState("");
@@ -893,6 +901,7 @@ export const InventoryModal = React.forwardRef<
     setWithdrawalAddress(
       item.kind === "eventPrize" ? authState.solAddress.trim() : "",
     );
+    setIsWithdrawalAddressVisible(false);
     setWithdrawalStatus("idle");
     setWithdrawalError("");
     withdrawalInFlightRef.current = false;
@@ -916,6 +925,7 @@ export const InventoryModal = React.forwardRef<
         onPreviewOutsideDismiss();
       }
       setPreviewItem(null);
+      setIsWithdrawalAddressVisible(false);
       setWithdrawalStatus("idle");
       setWithdrawalError("");
       withdrawalInFlightRef.current = false;
@@ -934,6 +944,17 @@ export const InventoryModal = React.forwardRef<
     }
     previewOverlayRef.current?.focus({ preventScroll: true });
   }, [previewItem]);
+
+  useLayoutEffect(() => {
+    if (
+      !isWithdrawalAddressVisible ||
+      previewItem?.kind !== "eventPrize" ||
+      isPrizeWithdrawalLocked
+    ) {
+      return;
+    }
+    withdrawalInputRef.current?.focus({ preventScroll: true });
+  }, [isPrizeWithdrawalLocked, isWithdrawalAddressVisible, previewItem]);
 
   useEffect(() => {
     if (!previewItem) {
@@ -964,6 +985,11 @@ export const InventoryModal = React.forwardRef<
       withdrawalInFlightRef.current ||
       !isAuthenticated
     ) {
+      return;
+    }
+    if (!isWithdrawalAddressVisible) {
+      setWithdrawalError("");
+      setIsWithdrawalAddressVisible(true);
       return;
     }
     const recipientAddress = withdrawalAddress.trim();
@@ -1291,26 +1317,30 @@ export const InventoryModal = React.forwardRef<
               </PreviewArtwork>
               {previewItem.kind === "eventPrize" && (
                 <PrizeWithdrawalControls ref={withdrawalControlsRef}>
-                  <PrizeWithdrawalError role="status" aria-live="polite">
-                    {withdrawalError}
-                  </PrizeWithdrawalError>
-                  <PrizeWithdrawalInput
-                    ref={withdrawalInputRef}
-                    type="text"
-                    value={withdrawalAddress}
-                    placeholder="Solana address"
-                    aria-label="Solana address"
-                    aria-invalid={withdrawalError ? "true" : undefined}
-                    disabled={isPrizeWithdrawalLocked}
-                    autoCapitalize="none"
-                    autoComplete="off"
-                    autoCorrect="off"
-                    spellCheck={false}
-                    onChange={(event) => {
-                      setWithdrawalAddress(event.target.value);
-                      setWithdrawalError("");
-                    }}
-                  />
+                  {isWithdrawalAddressVisible && (
+                    <>
+                      <PrizeWithdrawalInput
+                        ref={withdrawalInputRef}
+                        type="text"
+                        value={withdrawalAddress}
+                        placeholder="Solana address"
+                        aria-label="Solana address"
+                        aria-invalid={withdrawalError ? "true" : undefined}
+                        disabled={isPrizeWithdrawalLocked}
+                        autoCapitalize="none"
+                        autoComplete="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        onChange={(event) => {
+                          setWithdrawalAddress(event.target.value);
+                          setWithdrawalError("");
+                        }}
+                      />
+                      <PrizeWithdrawalError role="status" aria-live="polite">
+                        {withdrawalError}
+                      </PrizeWithdrawalError>
+                    </>
+                  )}
                   <PrizeWithdrawalButton
                     ref={withdrawalButtonRef}
                     type="button"
@@ -1324,7 +1354,9 @@ export const InventoryModal = React.forwardRef<
                       ? "Sending..."
                       : withdrawalStatus === "success"
                         ? "Success"
-                        : "Withdraw"}
+                        : isWithdrawalAddressVisible
+                          ? "Send"
+                          : "Withdraw"}
                   </PrizeWithdrawalButton>
                 </PrizeWithdrawalControls>
               )}
