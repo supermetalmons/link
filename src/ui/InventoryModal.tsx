@@ -103,9 +103,9 @@ const InventoryPreviewBackdrop = styled.div`
   }
 `;
 
-const InventoryPreviewLayer = styled.div`
+const InventoryPreviewLayer = styled.div<{ $isCompact: boolean }>`
   position: fixed;
-  inset: 0;
+  inset: auto;
   z-index: 90011;
   display: flex;
   align-items: center;
@@ -116,9 +116,18 @@ const InventoryPreviewLayer = styled.div`
   outline: none;
   touch-action: none;
   -webkit-tap-highlight-color: transparent;
+
+  ${(props) =>
+    props.$isCompact &&
+    `
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) auto;
+      gap: 8px;
+      padding: 8px 20px;
+    `}
 `;
 
-const PreviewArtwork = styled.div`
+const PreviewArtwork = styled.div<{ $isCompact: boolean }>`
   position: relative;
   width: min(50dvh, 92dvw, 420px);
   aspect-ratio: 1 / 1;
@@ -128,6 +137,18 @@ const PreviewArtwork = styled.div`
   -webkit-user-select: none;
   -webkit-touch-callout: none;
   animation: ${previewArtworkEnter} 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+
+  ${(props) =>
+    props.$isCompact &&
+    `
+      width: min(
+        72dvw,
+        260px,
+        max(96px, calc(var(--inventory-preview-height) - 126px))
+      );
+      align-self: center;
+      justify-self: center;
+    `}
 
   @media (prefers-reduced-motion: reduce) {
     animation: none;
@@ -170,8 +191,8 @@ const PreviewActionButton = styled(BottomPillButton)`
   cursor: pointer;
 `;
 
-const PrizeWithdrawalControls = styled.div`
-  position: fixed;
+const PrizeWithdrawalControls = styled.div<{ $isCompact: boolean }>`
+  position: absolute;
   left: 50%;
   bottom: max(14px, env(safe-area-inset-bottom));
   z-index: 90012;
@@ -183,6 +204,16 @@ const PrizeWithdrawalControls = styled.div`
   gap: 7px;
   pointer-events: auto;
   cursor: default;
+
+  ${(props) =>
+    props.$isCompact &&
+    `
+      position: static;
+      grid-row: 2;
+      width: min(360px, 100%);
+      transform: none;
+      justify-self: center;
+    `}
 `;
 
 const PrizeWithdrawalInput = styled.input`
@@ -200,6 +231,10 @@ const PrizeWithdrawalInput = styled.input`
   font-size: 0.82rem;
   text-align: left;
   -webkit-tap-highlight-color: transparent;
+
+  @media (pointer: coarse), (max-width: 520px) {
+    font-size: 16px;
+  }
 
   &:focus,
   &:focus-visible {
@@ -662,6 +697,26 @@ type InventoryPreviewItem =
 
 type PrizeWithdrawalStatus = "idle" | "sending" | "success";
 
+interface PreviewViewport {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+const getPreviewViewport = (): PreviewViewport => {
+  if (typeof window === "undefined") {
+    return { left: 0, top: 0, width: 1024, height: 768 };
+  }
+  const viewport = window.visualViewport;
+  return {
+    left: viewport?.offsetLeft ?? 0,
+    top: viewport?.offsetTop ?? 0,
+    width: Math.max(1, viewport?.width ?? window.innerWidth),
+    height: Math.max(1, viewport?.height ?? window.innerHeight),
+  };
+};
+
 const isValidSolanaAddress = (value: string): boolean => {
   try {
     return bs58.decode(value.trim()).length === 32;
@@ -735,6 +790,8 @@ export const InventoryModal = React.forwardRef<
   const [withdrawalStatus, setWithdrawalStatus] =
     useState<PrizeWithdrawalStatus>("idle");
   const [withdrawalError, setWithdrawalError] = useState("");
+  const [previewViewport, setPreviewViewport] =
+    useState<PreviewViewport>(getPreviewViewport);
   const previewOverlayRef = useRef<HTMLDivElement>(null);
   const previewActionButtonRef = useRef<HTMLButtonElement>(null);
   const withdrawalControlsRef = useRef<HTMLDivElement>(null);
@@ -746,6 +803,10 @@ export const InventoryModal = React.forwardRef<
   const ownerKey = isAuthenticated ? getNftIdentityKey(authState) : null;
   const isPrizeWithdrawalLocked =
     withdrawalStatus === "sending" || withdrawalStatus === "success";
+  const isCompactWithdrawalViewport =
+    previewItem?.kind === "eventPrize" &&
+    isWithdrawalAddressVisible &&
+    previewViewport.height < 560;
 
   useEffect(
     () => () => {
@@ -943,6 +1004,43 @@ export const InventoryModal = React.forwardRef<
       return;
     }
     previewOverlayRef.current?.focus({ preventScroll: true });
+  }, [previewItem]);
+
+  useLayoutEffect(() => {
+    if (!previewItem) {
+      return;
+    }
+    const visualViewport = window.visualViewport;
+    let animationFrameId: number | null = null;
+    const updatePreviewViewport = () => {
+      if (animationFrameId !== null) {
+        window.cancelAnimationFrame(animationFrameId);
+      }
+      animationFrameId = window.requestAnimationFrame(() => {
+        animationFrameId = null;
+        const next = getPreviewViewport();
+        setPreviewViewport((current) =>
+          current.left === next.left &&
+          current.top === next.top &&
+          current.width === next.width &&
+          current.height === next.height
+            ? current
+            : next,
+        );
+      });
+    };
+    updatePreviewViewport();
+    window.addEventListener("resize", updatePreviewViewport);
+    visualViewport?.addEventListener("resize", updatePreviewViewport);
+    visualViewport?.addEventListener("scroll", updatePreviewViewport);
+    return () => {
+      if (animationFrameId !== null) {
+        window.cancelAnimationFrame(animationFrameId);
+      }
+      window.removeEventListener("resize", updatePreviewViewport);
+      visualViewport?.removeEventListener("resize", updatePreviewViewport);
+      visualViewport?.removeEventListener("scroll", updatePreviewViewport);
+    };
   }, [previewItem]);
 
   useLayoutEffect(() => {
@@ -1285,6 +1383,16 @@ export const InventoryModal = React.forwardRef<
             />
             <InventoryPreviewLayer
               ref={previewOverlayRef}
+              $isCompact={isCompactWithdrawalViewport}
+              style={
+                {
+                  top: previewViewport.top,
+                  left: previewViewport.left,
+                  width: previewViewport.width,
+                  height: previewViewport.height,
+                  "--inventory-preview-height": `${previewViewport.height}px`,
+                } as React.CSSProperties
+              }
               data-inventory-item-preview="true"
               role="dialog"
               aria-modal="true"
@@ -1293,7 +1401,7 @@ export const InventoryModal = React.forwardRef<
               onClick={handlePreviewDismissClick}
               onKeyDown={handlePreviewKeyDown}
             >
-              <PreviewArtwork>
+              <PreviewArtwork $isCompact={isCompactWithdrawalViewport}>
                 {previewItem.kind === "avatar" ? (
                   <AvatarImage
                     src={`${SWAGPACK_INVENTORY_IMAGE_BASE_URL}/${previewItem.item.id}.webp`}
@@ -1316,7 +1424,10 @@ export const InventoryModal = React.forwardRef<
                 )}
               </PreviewArtwork>
               {previewItem.kind === "eventPrize" && (
-                <PrizeWithdrawalControls ref={withdrawalControlsRef}>
+                <PrizeWithdrawalControls
+                  ref={withdrawalControlsRef}
+                  $isCompact={isCompactWithdrawalViewport}
+                >
                   {isWithdrawalAddressVisible && (
                     <>
                       <PrizeWithdrawalInput
