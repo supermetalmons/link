@@ -1116,6 +1116,14 @@ export const TopRightControls: React.FC<TopRightControlsProps> = ({
       if (!(target instanceof Node)) {
         return;
       }
+      const targetElement =
+        target instanceof Element ? target : target.parentElement;
+      if (
+        openPopover === "inventory" &&
+        targetElement?.closest('[data-inventory-item-preview="true"]')
+      ) {
+        return;
+      }
       const popover =
         openPopover === "info"
           ? infoRef.current
@@ -1340,6 +1348,7 @@ export const TopRightControls: React.FC<TopRightControlsProps> = ({
           id={TOP_RIGHT_POPOVER_IDS.inventory}
           authState={authState}
           onDismiss={handleDismissInventory}
+          onPreviewOutsideDismiss={didDismissSomethingWithOutsideTapJustNow}
         />
       )}
     </>

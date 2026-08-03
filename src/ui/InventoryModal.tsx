@@ -1,5 +1,12 @@
-import React, { useEffect, useState } from "react";
-import styled from "styled-components";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
+import styled, { keyframes } from "styled-components";
 import {
   fetchNftsForIdentity,
   getNftIdentityKey,
@@ -16,6 +23,7 @@ import { TopRightPopoverBase } from "./TopRightPopoverBase";
 import type { MaterialName } from "../services/rocksMiningService";
 import { connection } from "../connection/connection";
 import type { EventPrizeAssignment } from "../connection/connectionModels";
+import { BottomPillButton } from "./BottomControlsStyles";
 
 const SWAGPACK_ITEM_COUNT = 467;
 const SWAGPACK_ID_OFFSET = 1000;
@@ -26,6 +34,14 @@ const SWAGPACK_THUMB_IMAGE_BASE_URL =
 const MATERIAL_IMAGE_BASE_URL = "https://cdn.lil.org/mons/rocks/materials";
 const EVENT_PRIZE_IMAGE_BASE_URL =
   "https://cdn.lil.org/player/scarecrow/thumbs";
+
+const SPECIAL_ACTION_COPY: Readonly<
+  Partial<Record<number, { action: string; current?: string }>>
+> = {
+  0: { action: "Pick Drainer" },
+  1: { action: "Use card background", current: "Current Background" },
+  2: { action: "Apply sticker", current: "Current Sticker" },
+};
 
 const SHOP_OFFERS: ReadonlyArray<{
   material: MaterialName;
@@ -48,7 +64,114 @@ const getRandomShopItemIds = (): number[] => {
 
 const SHOP_ITEM_IDS: readonly number[] = Object.freeze(getRandomShopItemIds());
 
-const InventoryPopup = styled(TopRightPopoverBase)`
+const previewBackdropEnter = keyframes`
+  from { opacity: 0; }
+  to { opacity: 1; }
+`;
+
+const previewArtworkEnter = keyframes`
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+`;
+
+const InventoryPreviewBackdrop = styled.div`
+  position: fixed;
+  inset: 0;
+  z-index: 90010;
+  background: rgba(0, 0, 0, 0.01);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  cursor: pointer;
+  outline: none;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+  animation: ${previewBackdropEnter} 160ms ease-out both;
+
+  @media (prefers-color-scheme: dark) {
+    background: rgba(15, 15, 15, 0.11);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+`;
+
+const InventoryPreviewLayer = styled.div`
+  position: fixed;
+  inset: 0;
+  z-index: 90011;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  pointer-events: none;
+  cursor: pointer;
+  outline: none;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+`;
+
+const PreviewArtwork = styled.div`
+  position: relative;
+  width: min(50dvh, 92dvw, 420px);
+  aspect-ratio: 1 / 1;
+  pointer-events: auto;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  animation: ${previewArtworkEnter} 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+`;
+
+const PreviewImage = styled.img`
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+`;
+
+const PreviewActionRow = styled.div`
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: max(14px, env(safe-area-inset-bottom));
+  z-index: 90011;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+`;
+
+const PreviewActionHitbox = styled.div`
+  padding: 20px;
+  margin: -20px;
+  pointer-events: auto;
+  cursor: pointer;
+`;
+
+const PreviewActionButton = styled(BottomPillButton)`
+  min-width: 150px;
+  padding-right: 20px;
+  padding-left: 20px;
+  cursor: pointer;
+`;
+
+const InventoryPopup = styled(TopRightPopoverBase)<{
+  $isPreviewOpen: boolean;
+}>`
   box-sizing: border-box;
   width: min(301px, calc(100dvw - 18px));
   max-height: calc(100dvh - 113px - env(safe-area-inset-bottom));
@@ -58,6 +181,21 @@ const InventoryPopup = styled(TopRightPopoverBase)`
   user-select: none;
   transform: none;
   transition: none;
+
+  ${(props) =>
+    props.$isPreviewOpen &&
+    `
+      pointer-events: none;
+      backdrop-filter: none;
+      -webkit-backdrop-filter: none;
+
+      & * {
+        backdrop-filter: none !important;
+        -webkit-backdrop-filter: none !important;
+        animation-play-state: paused !important;
+        will-change: auto !important;
+      }
+    `}
 
   @media screen and (max-height: 500px) {
     max-height: calc(100dvh - 110px - env(safe-area-inset-bottom));
@@ -298,23 +436,41 @@ const NFTGrid = styled.div`
   overflow: visible;
 `;
 
-const NFTNameContainer = styled.div`
+const NFTNameContainer = styled.button`
+  appearance: none;
   width: 100%;
+  min-width: 0;
   aspect-ratio: 1/1;
+  margin: 0;
+  padding: 2px;
+  border: 0;
   border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   overflow: hidden;
   cursor: pointer;
   display: flex;
   justify-content: center;
   align-items: center;
-  padding: 2px;
   text-align: center;
   box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+
+  &:focus-visible {
+    outline: 2px solid var(--color-blue-primary);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    &:focus-visible {
+      outline-color: var(--color-blue-primary-dark);
+    }
+  }
 `;
 
 const PrizeInventoryTile = styled(NFTNameContainer)`
   padding: 0;
-  cursor: default;
 `;
 
 const PrizeInventoryImage = styled.img`
@@ -328,13 +484,10 @@ const PrizeInventoryImage = styled.img`
   user-drag: none;
 `;
 
-const AvatarTile = styled(NFTNameContainer)<{ $isActive: boolean }>`
+const AvatarTile = styled(NFTNameContainer)`
   position: relative;
   padding: 0;
   overflow: visible;
-  outline: ${(props) =>
-    props.$isActive ? "2px solid var(--color-blue-primary)" : "none"};
-  outline-offset: 2px;
   transition:
     transform 0.13s ease-out,
     box-shadow 0.13s ease-out;
@@ -372,10 +525,6 @@ const AvatarTile = styled(NFTNameContainer)<{ $isActive: boolean }>`
     &:active::after {
       opacity: 0.12;
     }
-  }
-
-  @media (prefers-color-scheme: dark) {
-    outline-color: var(--color-blue-primary-dark);
   }
 `;
 
@@ -420,16 +569,22 @@ interface SwagAvatarItem {
   count: number;
 }
 
+type InventoryPreviewItem =
+  | { kind: "avatar"; item: SwagAvatarItem }
+  | { kind: "special"; item: SwagAvatarItem }
+  | { kind: "eventPrize"; prize: EventPrizeAssignment };
+
 interface InventoryModalProps {
   id: string;
   onDismiss: () => void;
+  onPreviewOutsideDismiss: () => void;
   authState: AuthState;
 }
 
 export const InventoryModal = React.forwardRef<
   HTMLDivElement,
   InventoryModalProps
->(({ id, onDismiss, authState }, ref) => {
+>(({ id, onDismiss, onPreviewOutsideDismiss, authState }, ref) => {
   const isAuthenticated = authState.authStatus === "authenticated";
   const [avatars, setAvatars] = useState<SwagAvatarItem[]>([]);
   const [specials, setSpecials] = useState<SwagAvatarItem[]>([]);
@@ -445,6 +600,12 @@ export const InventoryModal = React.forwardRef<
     getActiveInventoryItemSelection,
   );
   const [inventoryRefreshVersion, setInventoryRefreshVersion] = useState(0);
+  const [previewItem, setPreviewItem] = useState<InventoryPreviewItem | null>(
+    null,
+  );
+  const previewOverlayRef = useRef<HTMLDivElement>(null);
+  const previewActionButtonRef = useRef<HTMLButtonElement>(null);
+  const previewTriggerRef = useRef<HTMLButtonElement | null>(null);
   const ownerKey = isAuthenticated ? getNftIdentityKey(authState) : null;
 
   useEffect(() => {
@@ -552,6 +713,135 @@ export const InventoryModal = React.forwardRef<
     return true;
   };
 
+  const previewActionCopy =
+    previewItem?.kind === "avatar"
+      ? { action: "Set avatar" }
+      : previewItem?.kind === "special"
+        ? SPECIAL_ACTION_COPY[previewItem.item.id]
+        : undefined;
+  const desiredPreviewAvatarAura =
+    previewItem?.kind === "avatar" && previewItem.item.count >= 3
+      ? "rainbow"
+      : "";
+  const isPreviewItemCurrent =
+    previewItem?.kind === "avatar"
+      ? activeItemSelection.avatarId === previewItem.item.id &&
+        storage.getPlayerEmojiAura("") === desiredPreviewAvatarAura
+      : previewItem?.kind === "special"
+        ? activeItemSelection.specialIds.has(previewItem.item.id)
+        : false;
+  const shouldShowPreviewAction =
+    previewActionCopy !== undefined &&
+    (!isPreviewItemCurrent || previewActionCopy.current !== undefined);
+  const previewDialogLabel =
+    previewItem?.kind === "avatar"
+      ? `Avatar ${previewItem.item.id + SWAGPACK_ID_OFFSET}`
+      : previewItem?.kind === "special"
+        ? `Collectible ${previewItem.item.id}`
+        : previewItem?.kind === "eventPrize"
+          ? `Place ${previewItem.prize.place} event prize`
+          : "Collectible preview";
+
+  const openPreview = (
+    item: InventoryPreviewItem,
+    trigger: HTMLButtonElement,
+  ) => {
+    previewTriggerRef.current = trigger;
+    setPreviewItem(item);
+  };
+
+  const dismissPreview = useCallback(
+    (isOutsideTap = false) => {
+      if (isOutsideTap) {
+        onPreviewOutsideDismiss();
+      }
+      setPreviewItem(null);
+      const trigger = previewTriggerRef.current;
+      previewTriggerRef.current = null;
+      window.requestAnimationFrame(() => {
+        trigger?.focus({ preventScroll: true });
+      });
+    },
+    [onPreviewOutsideDismiss],
+  );
+
+  useLayoutEffect(() => {
+    if (!previewItem) {
+      return;
+    }
+    previewOverlayRef.current?.focus({ preventScroll: true });
+  }, [previewItem]);
+
+  useEffect(() => {
+    if (!previewItem) {
+      return;
+    }
+    const handlePreviewEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      dismissPreview();
+    };
+    document.addEventListener("keydown", handlePreviewEscape, true);
+    return () => {
+      document.removeEventListener("keydown", handlePreviewEscape, true);
+    };
+  }, [dismissPreview, previewItem]);
+
+  const handlePreviewDismissClick = (
+    event: React.MouseEvent<HTMLDivElement>,
+  ) => {
+    const target = event.target;
+    if (
+      target instanceof Node &&
+      previewActionButtonRef.current?.contains(target)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    dismissPreview(true);
+  };
+
+  const handlePreviewKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab") {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    if (shouldShowPreviewAction && !isPreviewItemCurrent) {
+      previewActionButtonRef.current?.focus({ preventScroll: true });
+    } else {
+      previewOverlayRef.current?.focus({ preventScroll: true });
+    }
+  };
+
+  const handleApplyPreviewItem = () => {
+    if (
+      !previewItem ||
+      !previewActionCopy ||
+      isPreviewItemCurrent ||
+      !canApplyInventoryItem()
+    ) {
+      return;
+    }
+    if (previewItem.kind === "avatar") {
+      setOwnershipVerifiedIdCardEmoji(
+        previewItem.item.id + SWAGPACK_ID_OFFSET,
+        desiredPreviewAvatarAura,
+      );
+    } else if (previewItem.kind === "special") {
+      setOwnershipVerifiedSpecialItem(previewItem.item.id);
+    }
+    setActiveItemSelection(getActiveInventoryItemSelection());
+    window.requestAnimationFrame(() => {
+      previewOverlayRef.current?.focus({ preventScroll: true });
+    });
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.key === "Enter" && e.target === e.currentTarget) {
       e.preventDefault();
@@ -565,6 +855,7 @@ export const InventoryModal = React.forwardRef<
       ref={ref}
       id={id}
       $isOpen
+      $isPreviewOpen={previewItem !== null}
       onKeyDown={handleKeyDown}
       tabIndex={-1}
       role="dialog"
@@ -631,8 +922,14 @@ export const InventoryModal = React.forwardRef<
                 {eventPrizes.map((prize) => (
                   <PrizeInventoryTile
                     key={`event-prize-${prize.eventId}`}
-                    role="img"
-                    aria-label={`Place ${prize.place} prize from event ${prize.eventId}`}
+                    type="button"
+                    aria-label={`View place ${prize.place} prize from event ${prize.eventId}`}
+                    onClick={(event) =>
+                      openPreview(
+                        { kind: "eventPrize", prize },
+                        event.currentTarget,
+                      )
+                    }
                   >
                     <PrizeInventoryImage
                       src={`${EVENT_PRIZE_IMAGE_BASE_URL}/${prize.prizeId}.webp`}
@@ -641,65 +938,131 @@ export const InventoryModal = React.forwardRef<
                     />
                   </PrizeInventoryTile>
                 ))}
-                {specials.map((item) => (
-                  <AvatarTile
-                    key={`special-${item.id}`}
-                    $isActive={activeItemSelection.specialIds.has(item.id)}
-                    onClick={() => {
-                      if (canApplyInventoryItem()) {
-                        setOwnershipVerifiedSpecialItem(item.id);
-                        setActiveItemSelection(
-                          getActiveInventoryItemSelection(),
-                        );
+                {specials.map((item) => {
+                  const isActive = activeItemSelection.specialIds.has(item.id);
+                  return (
+                    <AvatarTile
+                      key={`special-${item.id}`}
+                      type="button"
+                      aria-label={`View collectible ${item.id}${
+                        isActive ? ", current" : ""
+                      }`}
+                      onClick={(event) =>
+                        openPreview(
+                          { kind: "special", item },
+                          event.currentTarget,
+                        )
                       }
-                    }}
-                  >
-                    <SpecialImage
-                      src={`https://cdn.lil.org/mons/id_cards/misc/bd4/${item.id}.webp`}
-                      alt=""
-                      loading="lazy"
-                    />
-                    {item.count > 1 && (
-                      <CountIndicator count={item.count}>
-                        {item.count}
-                      </CountIndicator>
-                    )}
-                  </AvatarTile>
-                ))}
-                {avatars.map((item) => (
-                  <AvatarTile
-                    key={item.id}
-                    $isActive={activeItemSelection.avatarId === item.id}
-                    onClick={() => {
-                      if (canApplyInventoryItem()) {
-                        setOwnershipVerifiedIdCardEmoji(
-                          item.id + SWAGPACK_ID_OFFSET,
-                          item.count >= 3 ? "rainbow" : "",
-                        );
-                        setActiveItemSelection(
-                          getActiveInventoryItemSelection(),
-                        );
+                    >
+                      <SpecialImage
+                        src={`https://cdn.lil.org/mons/id_cards/misc/bd4/${item.id}.webp`}
+                        alt=""
+                        loading="lazy"
+                      />
+                      {item.count > 1 && (
+                        <CountIndicator count={item.count}>
+                          {item.count}
+                        </CountIndicator>
+                      )}
+                    </AvatarTile>
+                  );
+                })}
+                {avatars.map((item) => {
+                  const isActive = activeItemSelection.avatarId === item.id;
+                  return (
+                    <AvatarTile
+                      key={item.id}
+                      type="button"
+                      aria-label={`View avatar ${
+                        item.id + SWAGPACK_ID_OFFSET
+                      }${isActive ? ", current" : ""}`}
+                      onClick={(event) =>
+                        openPreview(
+                          { kind: "avatar", item },
+                          event.currentTarget,
+                        )
                       }
-                    }}
-                  >
-                    <AvatarImage
-                      src={`${SWAGPACK_INVENTORY_IMAGE_BASE_URL}/${item.id}.webp`}
-                      alt=""
-                      rainbowAura={item.count >= 3}
-                      loading="lazy"
-                    />
-                    {item.count > 1 && (
-                      <CountIndicator count={item.count}>
-                        {item.count}
-                      </CountIndicator>
-                    )}
-                  </AvatarTile>
-                ))}
+                    >
+                      <AvatarImage
+                        src={`${SWAGPACK_INVENTORY_IMAGE_BASE_URL}/${item.id}.webp`}
+                        alt=""
+                        rainbowAura={item.count >= 3}
+                        loading="lazy"
+                      />
+                      {item.count > 1 && (
+                        <CountIndicator count={item.count}>
+                          {item.count}
+                        </CountIndicator>
+                      )}
+                    </AvatarTile>
+                  );
+                })}
               </NFTGrid>
             </NFTGridContainer>
           )}
         </InventorySection>
       </Content>
+      {previewItem &&
+        createPortal(
+          <>
+            <InventoryPreviewBackdrop
+              data-inventory-item-preview="true"
+              onClick={handlePreviewDismissClick}
+            />
+            <InventoryPreviewLayer
+              ref={previewOverlayRef}
+              data-inventory-item-preview="true"
+              role="dialog"
+              aria-modal="true"
+              aria-label={previewDialogLabel}
+              tabIndex={-1}
+              onClick={handlePreviewDismissClick}
+              onKeyDown={handlePreviewKeyDown}
+            >
+              <PreviewArtwork>
+                {previewItem.kind === "avatar" ? (
+                  <AvatarImage
+                    src={`${SWAGPACK_INVENTORY_IMAGE_BASE_URL}/${previewItem.item.id}.webp`}
+                    alt=""
+                    rainbowAura={previewItem.item.count >= 3}
+                    loading="eager"
+                  />
+                ) : previewItem.kind === "special" ? (
+                  <PreviewImage
+                    src={`https://cdn.lil.org/mons/id_cards/misc/bd4/${previewItem.item.id}.webp`}
+                    alt=""
+                    draggable={false}
+                  />
+                ) : (
+                  <PreviewImage
+                    src={`${EVENT_PRIZE_IMAGE_BASE_URL}/${previewItem.prize.prizeId}.webp`}
+                    alt=""
+                    draggable={false}
+                  />
+                )}
+              </PreviewArtwork>
+              {previewActionCopy && shouldShowPreviewAction && (
+                <PreviewActionRow>
+                  <PreviewActionHitbox>
+                    <PreviewActionButton
+                      ref={previewActionButtonRef}
+                      type="button"
+                      isBlue={!isPreviewItemCurrent}
+                      isViewOnly={isPreviewItemCurrent}
+                      disabled={isPreviewItemCurrent}
+                      onClick={handleApplyPreviewItem}
+                    >
+                      {isPreviewItemCurrent
+                        ? previewActionCopy.current
+                        : previewActionCopy.action}
+                    </PreviewActionButton>
+                  </PreviewActionHitbox>
+                </PreviewActionRow>
+              )}
+            </InventoryPreviewLayer>
+          </>,
+          document.body,
+        )}
     </InventoryPopup>
   );
 });
