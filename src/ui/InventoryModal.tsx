@@ -302,7 +302,6 @@ const NFTNameContainer = styled.div`
   width: 100%;
   aspect-ratio: 1/1;
   border-radius: 6px;
-  background: var(--color-gray-f5);
   overflow: hidden;
   cursor: pointer;
   display: flex;
@@ -311,10 +310,6 @@ const NFTNameContainer = styled.div`
   padding: 2px;
   text-align: center;
   box-sizing: border-box;
-
-  @media (prefers-color-scheme: dark) {
-    background: var(--inventoryItemBackgroundDark);
-  }
 `;
 
 const PrizeInventoryTile = styled(NFTNameContainer)`
