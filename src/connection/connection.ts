@@ -82,6 +82,7 @@ import {
   EventPrizeAssignments,
   EventPrizeId,
   EventPrizeSelections,
+  EventPrizeWithdrawalResponse,
   ProfileEventPrizes,
 } from "./connectionModels";
 import {
@@ -3050,6 +3051,29 @@ class Connection {
         : null;
     } catch (error) {
       console.error("Error toggling event prize selection:", error);
+      throw error;
+    }
+  }
+
+  public async withdrawEventPrize(
+    eventId: string,
+    prizeId: EventPrizeId,
+    solanaAddress: string,
+  ): Promise<EventPrizeWithdrawalResponse> {
+    try {
+      await this.ensureAuthenticated();
+      const withdrawEventPrizeFunction = httpsCallable(
+        this.functions,
+        "withdrawEventPrize",
+      );
+      const response = await withdrawEventPrizeFunction({
+        eventId,
+        prizeId,
+        solanaAddress,
+      });
+      return response.data as EventPrizeWithdrawalResponse;
+    } catch (error) {
+      console.error("Error withdrawing event prize:", error);
       throw error;
     }
   }

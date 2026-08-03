@@ -15,6 +15,12 @@ const {
   buildEventPrizeAssignments,
   normalizeEventPrizeAssignments,
 } = require("./eventPrizeAwards");
+const {
+  filterProjectableEventPrizeAssignments,
+  getCompletedEventPrizeProjectionCleanupRequest,
+  isCompletedEventPrizeWithdrawal,
+  isMatchingProfileEventPrizeAssignment,
+} = require("./eventPrizeWithdrawalState");
 const { buildRandomGameSeed } = require("./gameVariants");
 const {
   buildAutoInviteId,
@@ -1549,7 +1555,22 @@ const hasCompleteEventPrizeAssignments = (assignments, placementCount) => {
   return Object.keys(assignments).length === expectedCount;
 };
 
-const addEventPrizeAssignmentUpdates = ({
+const getProjectableEventPrizeAssignments = async ({
+  eventId,
+  assignments,
+}) => {
+  const withdrawalsSnapshot = await admin
+    .database()
+    .ref(`eventPrizeWithdrawals/${eventId}`)
+    .once("value");
+  return filterProjectableEventPrizeAssignments({
+    eventId,
+    assignments,
+    withdrawals: withdrawalsSnapshot.val() || {},
+  });
+};
+
+const addEventPrizeAssignmentUpdates = async ({
   updates,
   eventId,
   assignments,
@@ -1558,7 +1579,11 @@ const addEventPrizeAssignmentUpdates = ({
   if (includeEventAssignments) {
     updates[`events/${eventId}/prizeAssignments`] = assignments;
   }
-  for (const assignment of Object.values(assignments)) {
+  const projectableAssignments = await getProjectableEventPrizeAssignments({
+    eventId,
+    assignments,
+  });
+  for (const assignment of Object.values(projectableAssignments)) {
     updates[`profileEventPrizes/${assignment.profileId}/${eventId}`] =
       assignment;
   }
@@ -1569,8 +1594,12 @@ const getMissingEventPrizeProjectionUpdates = async ({
   assignments,
 }) => {
   const updates = {};
+  const projectableAssignments = await getProjectableEventPrizeAssignments({
+    eventId,
+    assignments,
+  });
   await Promise.all(
-    Object.values(assignments).map(async (assignment) => {
+    Object.values(projectableAssignments).map(async (assignment) => {
       const snapshot = await admin
         .database()
         .ref(`profileEventPrizes/${assignment.profileId}/${eventId}`)
@@ -1590,6 +1619,45 @@ const getMissingEventPrizeProjectionUpdates = async ({
     }),
   );
   return updates;
+};
+
+const removeCompletedEventPrizeProjections = async ({
+  eventId,
+  assignments,
+}) => {
+  const withdrawalsSnapshot = await admin
+    .database()
+    .ref(`eventPrizeWithdrawals/${eventId}`)
+    .once("value");
+  const withdrawals = withdrawalsSnapshot.val() || {};
+  await Promise.all(
+    Object.values(assignments || {}).map(async (assignment) => {
+      if (
+        !isCompletedEventPrizeWithdrawal(
+          withdrawals[assignment.prizeId],
+          eventId,
+          assignment.prizeId,
+        )
+      ) {
+        return;
+      }
+      await admin
+        .database()
+        .ref(`profileEventPrizes/${assignment.profileId}/${eventId}`)
+        .transaction(
+          (currentAssignment) =>
+            isMatchingProfileEventPrizeAssignment(
+              currentAssignment,
+              eventId,
+              assignment.prizeId,
+            )
+              ? null
+              : undefined,
+          undefined,
+          false,
+        );
+    }),
+  );
 };
 
 const resolveEventPrizeAssignments = async ({
@@ -2948,6 +3016,7 @@ const runEventSyncState = async ({
     const nowMs = getNowMs();
     const updates = {};
     let didChange = false;
+    let eventPrizeAssignmentsForProjectionCleanup = null;
 
     if (event.status === "scheduled") {
       const dueTransition = await buildScheduledEventDueUpdates({
@@ -3129,8 +3198,10 @@ const runEventSyncState = async ({
             assignedAtMs: event.endedAtMs,
           });
           if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
+            eventPrizeAssignmentsForProjectionCleanup =
+              prizeAssignmentResult.assignments;
             event.prizeAssignments = prizeAssignmentResult.assignments;
-            addEventPrizeAssignmentUpdates({
+            await addEventPrizeAssignmentUpdates({
               updates,
               eventId,
               assignments: prizeAssignmentResult.assignments,
@@ -3294,8 +3365,10 @@ const runEventSyncState = async ({
             typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs,
         });
         if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
+          eventPrizeAssignmentsForProjectionCleanup =
+            prizeAssignmentResult.assignments;
           if (prizeAssignmentResult.didCreate) {
-            addEventPrizeAssignmentUpdates({
+            await addEventPrizeAssignmentUpdates({
               updates,
               eventId,
               assignments: prizeAssignmentResult.assignments,
@@ -3344,6 +3417,15 @@ const runEventSyncState = async ({
         });
       }
       await admin.database().ref().update(updates);
+    }
+    const projectionCleanupRequest =
+      getCompletedEventPrizeProjectionCleanupRequest({
+        eventId,
+        eventStatus: event.status,
+        assignments: eventPrizeAssignmentsForProjectionCleanup,
+      });
+    if (projectionCleanupRequest) {
+      await removeCompletedEventPrizeProjections(projectionCleanupRequest);
     }
 
     const refreshedSnapshot = await admin

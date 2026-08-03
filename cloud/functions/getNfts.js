@@ -1,8 +1,9 @@
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { VALID_REACTION_IDS } = require("@mons/shared/nfts");
+const { HELIUS_RPC_API_KEY, getHeliusRpcUrl } = require("./heliusRpc");
 const { readProfileByLoginUid } = require("./profileLookup");
 
-exports.getNfts = onCall(async (request) => {
+exports.getNfts = onCall({ secrets: [HELIUS_RPC_API_KEY] }, async (request) => {
   if (!request.auth) {
     throw new HttpsError(
       "unauthenticated",
@@ -30,7 +31,11 @@ exports.getNfts = onCall(async (request) => {
   }
 
   try {
-    async function fetchCollectionIdCounts(ownerAddress, collectionId) {
+    async function fetchCollectionIdCounts(
+      ownerAddress,
+      collectionId,
+      heliusRpcUrl,
+    ) {
       const idCounts = new Map();
       if (!ownerAddress) return [];
       let cursor = undefined;
@@ -46,22 +51,18 @@ exports.getNfts = onCall(async (request) => {
         if (cursor) {
           params.cursor = cursor;
         }
-        const solResponse = await fetch(
-          "https://mainnet.helius-rpc.com/?api-key=" +
-            process.env.HELIUS_API_KEY,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              jsonrpc: "2.0",
-              id: "mons-get-nfts",
-              method: "searchAssets",
-              params,
-            }),
+        const solResponse = await fetch(heliusRpcUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
           },
-        );
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "mons-get-nfts",
+            method: "searchAssets",
+            params,
+          }),
+        });
         const solData = await solResponse.json();
         if (!solResponse.ok || solData?.error) {
           throw new Error("Helius searchAssets request failed.");
@@ -75,8 +76,7 @@ exports.getNfts = onCall(async (request) => {
           throw new Error("Helius searchAssets response was malformed.");
         }
         const items = resultNode.items;
-        total =
-          typeof resultNode.total === "number" ? resultNode.total : total;
+        total = typeof resultNode.total === "number" ? resultNode.total : total;
         for (const item of items) {
           const jsonUri = item?.content?.json_uri || "";
           if (typeof jsonUri !== "string" || jsonUri.length === 0) continue;
@@ -109,14 +109,23 @@ exports.getNfts = onCall(async (request) => {
     let specials = [];
 
     if (sol) {
+      const heliusRpcUrl = getHeliusRpcUrl();
+      if (!heliusRpcUrl) {
+        throw new Error("Helius RPC is not configured.");
+      }
       const primaryCollectionId =
         "C22esis7kQMbX9JGWsMaKvsh1X5GeBmHPju28jiKDyAP";
       const specialsCollectionId =
         "GCcbUaghGawyM76BhJHsHUXb9kq7H3AZhPL7S3p9WajP";
-      const avatarsPromise = fetchCollectionIdCounts(sol, primaryCollectionId);
+      const avatarsPromise = fetchCollectionIdCounts(
+        sol,
+        primaryCollectionId,
+        heliusRpcUrl,
+      );
       const specialsPromise = fetchCollectionIdCounts(
         sol,
         specialsCollectionId,
+        heliusRpcUrl,
       );
       const [avatars, specialIds] = await Promise.all([
         avatarsPromise,

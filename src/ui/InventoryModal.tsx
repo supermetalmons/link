@@ -5,6 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import bs58 from "bs58";
 import { createPortal } from "react-dom";
 import styled, { keyframes } from "styled-components";
 import {
@@ -167,6 +168,85 @@ const PreviewActionButton = styled(BottomPillButton)`
   padding-right: 20px;
   padding-left: 20px;
   cursor: pointer;
+`;
+
+const PrizeWithdrawalControls = styled.div`
+  position: fixed;
+  left: 50%;
+  bottom: max(14px, env(safe-area-inset-bottom));
+  z-index: 90012;
+  width: min(360px, calc(100dvw - 40px));
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  pointer-events: auto;
+  cursor: default;
+`;
+
+const PrizeWithdrawalInput = styled.input`
+  appearance: none;
+  width: 100%;
+  height: 34px;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 17px;
+  padding: 0 14px;
+  outline: none;
+  box-shadow: none;
+  background: rgba(240, 240, 240, 0.94);
+  color: var(--color-black);
+  font: inherit;
+  font-size: 0.78rem;
+  text-align: center;
+  -webkit-tap-highlight-color: transparent;
+
+  &:focus,
+  &:focus-visible {
+    outline: none;
+    box-shadow: none;
+  }
+
+  &:disabled {
+    opacity: 0.65;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    background: rgba(51, 51, 51, 0.94);
+    color: var(--color-white);
+  }
+`;
+
+const PrizeWithdrawalError = styled.div`
+  min-height: 14px;
+  color: #d64a4a;
+  font-size: 0.7rem;
+  font-weight: 650;
+  line-height: 14px;
+  text-align: center;
+`;
+
+const PrizeWithdrawalButton = styled(PreviewActionButton)<{
+  $status: "idle" | "sending" | "success";
+}>`
+  ${(props) =>
+    props.$status === "success" &&
+    `
+      background-color: #47d14d;
+      color: var(--color-white);
+      cursor: default;
+
+      @media (hover: hover) and (pointer: fine) {
+        &:hover {
+          background-color: #47d14d;
+        }
+      }
+
+      &:active {
+        background-color: #47d14d;
+      }
+    `}
 `;
 
 const InventoryPopup = styled(TopRightPopoverBase)<{
@@ -574,6 +654,46 @@ type InventoryPreviewItem =
   | { kind: "special"; item: SwagAvatarItem }
   | { kind: "eventPrize"; prize: EventPrizeAssignment };
 
+type PrizeWithdrawalStatus = "idle" | "sending" | "success";
+
+const isValidSolanaAddress = (value: string): boolean => {
+  try {
+    return bs58.decode(value.trim()).length === 32;
+  } catch {
+    return false;
+  }
+};
+
+const getPrizeWithdrawalErrorMessage = (error: unknown): string => {
+  const errorData =
+    error && typeof error === "object"
+      ? (error as { code?: unknown; message?: unknown })
+      : {};
+  const code =
+    typeof errorData.code === "string"
+      ? errorData.code.replace(/^functions\//, "")
+      : "";
+  const message =
+    typeof errorData.message === "string" ? errorData.message : "";
+  if (code === "invalid-argument") {
+    return message.includes("destination other than")
+      ? "Choose a different destination address."
+      : "Enter a valid Solana address.";
+  }
+  if (code === "not-found" || code === "permission-denied") {
+    return "This prize is no longer available.";
+  }
+  if (code === "aborted") {
+    return "Withdrawal is already being processed. Try again shortly.";
+  }
+  if (code === "failed-precondition") {
+    return message.includes("original destination")
+      ? "Retry with the original destination address."
+      : "This prize cannot be withdrawn right now.";
+  }
+  return "Could not send the prize. Please try again.";
+};
+
 interface InventoryModalProps {
   id: string;
   onDismiss: () => void;
@@ -603,10 +723,30 @@ export const InventoryModal = React.forwardRef<
   const [previewItem, setPreviewItem] = useState<InventoryPreviewItem | null>(
     null,
   );
+  const [withdrawalAddress, setWithdrawalAddress] = useState("");
+  const [withdrawalStatus, setWithdrawalStatus] =
+    useState<PrizeWithdrawalStatus>("idle");
+  const [withdrawalError, setWithdrawalError] = useState("");
   const previewOverlayRef = useRef<HTMLDivElement>(null);
   const previewActionButtonRef = useRef<HTMLButtonElement>(null);
+  const withdrawalControlsRef = useRef<HTMLDivElement>(null);
+  const withdrawalInputRef = useRef<HTMLInputElement>(null);
+  const withdrawalButtonRef = useRef<HTMLButtonElement>(null);
+  const withdrawalInFlightRef = useRef(false);
   const previewTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const withdrawalDismissTimeoutRef = useRef<number | null>(null);
   const ownerKey = isAuthenticated ? getNftIdentityKey(authState) : null;
+  const isPrizeWithdrawalLocked =
+    withdrawalStatus === "sending" || withdrawalStatus === "success";
+
+  useEffect(
+    () => () => {
+      if (withdrawalDismissTimeoutRef.current !== null) {
+        window.clearTimeout(withdrawalDismissTimeoutRef.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     setEventPrizes([]);
@@ -746,23 +886,46 @@ export const InventoryModal = React.forwardRef<
     item: InventoryPreviewItem,
     trigger: HTMLButtonElement,
   ) => {
+    if (withdrawalDismissTimeoutRef.current !== null) {
+      window.clearTimeout(withdrawalDismissTimeoutRef.current);
+      withdrawalDismissTimeoutRef.current = null;
+    }
+    setWithdrawalAddress(
+      item.kind === "eventPrize" ? authState.solAddress.trim() : "",
+    );
+    setWithdrawalStatus("idle");
+    setWithdrawalError("");
+    withdrawalInFlightRef.current = false;
     previewTriggerRef.current = trigger;
     setPreviewItem(item);
   };
 
   const dismissPreview = useCallback(
-    (isOutsideTap = false) => {
+    (isOutsideTap = false, force = false) => {
+      if (
+        (isPrizeWithdrawalLocked || withdrawalInFlightRef.current) &&
+        !force
+      ) {
+        return;
+      }
+      if (withdrawalDismissTimeoutRef.current !== null) {
+        window.clearTimeout(withdrawalDismissTimeoutRef.current);
+        withdrawalDismissTimeoutRef.current = null;
+      }
       if (isOutsideTap) {
         onPreviewOutsideDismiss();
       }
       setPreviewItem(null);
+      setWithdrawalStatus("idle");
+      setWithdrawalError("");
+      withdrawalInFlightRef.current = false;
       const trigger = previewTriggerRef.current;
       previewTriggerRef.current = null;
       window.requestAnimationFrame(() => {
         trigger?.focus({ preventScroll: true });
       });
     },
-    [onPreviewOutsideDismiss],
+    [isPrizeWithdrawalLocked, onPreviewOutsideDismiss],
   );
 
   useLayoutEffect(() => {
@@ -783,13 +946,63 @@ export const InventoryModal = React.forwardRef<
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
+      if (isPrizeWithdrawalLocked) {
+        return;
+      }
       dismissPreview();
     };
     document.addEventListener("keydown", handlePreviewEscape, true);
     return () => {
       document.removeEventListener("keydown", handlePreviewEscape, true);
     };
-  }, [dismissPreview, previewItem]);
+  }, [dismissPreview, isPrizeWithdrawalLocked, previewItem]);
+
+  const handleWithdrawEventPrize = async () => {
+    if (
+      previewItem?.kind !== "eventPrize" ||
+      isPrizeWithdrawalLocked ||
+      withdrawalInFlightRef.current ||
+      !isAuthenticated
+    ) {
+      return;
+    }
+    const recipientAddress = withdrawalAddress.trim();
+    if (!isValidSolanaAddress(recipientAddress)) {
+      setWithdrawalError("Enter a valid Solana address.");
+      return;
+    }
+    const prize = previewItem.prize;
+    withdrawalInFlightRef.current = true;
+    setWithdrawalAddress(recipientAddress);
+    setWithdrawalError("");
+    setWithdrawalStatus("sending");
+    try {
+      const response = await connection.withdrawEventPrize(
+        prize.eventId,
+        prize.prizeId,
+        recipientAddress,
+      );
+      if (!response.ok || response.status !== "completed") {
+        throw new Error("Prize withdrawal did not complete.");
+      }
+      setEventPrizes((current) =>
+        current.filter(
+          (candidate) =>
+            candidate.eventId !== prize.eventId ||
+            candidate.prizeId !== prize.prizeId,
+        ),
+      );
+      setWithdrawalStatus("success");
+      withdrawalDismissTimeoutRef.current = window.setTimeout(() => {
+        withdrawalDismissTimeoutRef.current = null;
+        dismissPreview(false, true);
+      }, 1000);
+    } catch (error) {
+      withdrawalInFlightRef.current = false;
+      setWithdrawalStatus("idle");
+      setWithdrawalError(getPrizeWithdrawalErrorMessage(error));
+    }
+  };
 
   const handlePreviewDismissClick = (
     event: React.MouseEvent<HTMLDivElement>,
@@ -797,7 +1010,8 @@ export const InventoryModal = React.forwardRef<
     const target = event.target;
     if (
       target instanceof Node &&
-      previewActionButtonRef.current?.contains(target)
+      (previewActionButtonRef.current?.contains(target) ||
+        withdrawalControlsRef.current?.contains(target))
     ) {
       return;
     }
@@ -807,11 +1021,45 @@ export const InventoryModal = React.forwardRef<
   };
 
   const handlePreviewKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (
+      event.key === "Enter" &&
+      previewItem?.kind === "eventPrize" &&
+      event.target === withdrawalInputRef.current
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      void handleWithdrawEventPrize();
+      return;
+    }
     if (event.key !== "Tab") {
       return;
     }
     event.preventDefault();
     event.stopPropagation();
+    if (previewItem?.kind === "eventPrize") {
+      if (isPrizeWithdrawalLocked) {
+        previewOverlayRef.current?.focus({ preventScroll: true });
+        return;
+      }
+      const controls = [
+        withdrawalInputRef.current,
+        withdrawalButtonRef.current,
+      ].filter((control): control is HTMLInputElement | HTMLButtonElement =>
+        Boolean(control),
+      );
+      const currentIndex = controls.findIndex(
+        (control) => control === event.target,
+      );
+      const nextIndex =
+        currentIndex < 0
+          ? event.shiftKey
+            ? controls.length - 1
+            : 0
+          : (currentIndex + (event.shiftKey ? -1 : 1) + controls.length) %
+            controls.length;
+      controls[nextIndex]?.focus({ preventScroll: true });
+      return;
+    }
     if (shouldShowPreviewAction && !isPreviewItemCurrent) {
       previewActionButtonRef.current?.focus({ preventScroll: true });
     } else {
@@ -1041,6 +1289,45 @@ export const InventoryModal = React.forwardRef<
                   />
                 )}
               </PreviewArtwork>
+              {previewItem.kind === "eventPrize" && (
+                <PrizeWithdrawalControls ref={withdrawalControlsRef}>
+                  <PrizeWithdrawalError role="status" aria-live="polite">
+                    {withdrawalError}
+                  </PrizeWithdrawalError>
+                  <PrizeWithdrawalInput
+                    ref={withdrawalInputRef}
+                    type="text"
+                    value={withdrawalAddress}
+                    placeholder="Solana address"
+                    aria-label="Solana address"
+                    aria-invalid={withdrawalError ? "true" : undefined}
+                    disabled={isPrizeWithdrawalLocked}
+                    autoCapitalize="none"
+                    autoComplete="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    onChange={(event) => {
+                      setWithdrawalAddress(event.target.value);
+                      setWithdrawalError("");
+                    }}
+                  />
+                  <PrizeWithdrawalButton
+                    ref={withdrawalButtonRef}
+                    type="button"
+                    $status={withdrawalStatus}
+                    isBlue={withdrawalStatus === "idle"}
+                    isViewOnly={withdrawalStatus === "sending"}
+                    disabled={isPrizeWithdrawalLocked}
+                    onClick={() => void handleWithdrawEventPrize()}
+                  >
+                    {withdrawalStatus === "sending"
+                      ? "Sending..."
+                      : withdrawalStatus === "success"
+                        ? "Success"
+                        : "Withdraw"}
+                  </PrizeWithdrawalButton>
+                </PrizeWithdrawalControls>
+              )}
               {previewActionCopy && shouldShowPreviewAction && (
                 <PreviewActionRow>
                   <PreviewActionHitbox>

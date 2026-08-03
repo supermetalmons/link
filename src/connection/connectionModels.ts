@@ -172,6 +172,16 @@ export type EventPrizeAssignments = Partial<
 
 export type ProfileEventPrizes = Record<string, EventPrizeAssignment>;
 
+export interface EventPrizeWithdrawalResponse {
+  ok: true;
+  status: "completed";
+  eventId: string;
+  prizeId: EventPrizeId;
+  assetAddress: string;
+  recipientAddress: string;
+  transactionSignature: string;
+}
+
 export interface EventRecord {
   schemaVersion: number;
   eventId: string;
