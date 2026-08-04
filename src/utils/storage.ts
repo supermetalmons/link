@@ -63,7 +63,10 @@ const EXTERNAL_USER_STORAGE_KEY_PREFIXES = [
   "rainbow",
   "rk-",
 ];
-const EXTERNAL_USER_STORAGE_KEY_EXACT = ["WALLETCONNECT_DEEPLINK_CHOICE"];
+const EXTERNAL_USER_STORAGE_KEY_EXACT = [
+  "WALLETCONNECT_DEEPLINK_CHOICE",
+  "ethIntentByNonceV1",
+];
 
 const shouldClearExternalUserStorageKey = (key: string): boolean => {
   if (EXTERNAL_USER_STORAGE_KEY_EXACT.includes(key)) {

@@ -1,35 +1,14 @@
 import "./session/pendingLogoutWipeBootstrap";
-import "@rainbow-me/rainbowkit/styles.css";
 import "./index.css";
 import ReactDOM from "react-dom/client";
-import React, {
-  Suspense,
-  lazy,
-  useCallback,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
-
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { WagmiProvider } from "wagmi";
-import {
-  RainbowKitAuthenticationProvider,
-  RainbowKitProvider,
-  lightTheme,
-  darkTheme,
-} from "@rainbow-me/rainbowkit";
+import React, { Suspense, lazy, useCallback, useEffect, useState } from "react";
 
 import BoardComponent from "./ui/BoardComponent";
 import MainMenu, {
   closeAllKindsOfPopups,
   TopRightControls,
 } from "./ui/MainMenu";
-import { config } from "./utils/wagmi";
-import {
-  useAuthStatus,
-  createEthereumAuthAdapter,
-} from "./connection/authentication";
+import { useAuthStatus } from "./connection/authentication";
 import { connection } from "./connection/connection";
 import BottomControls from "./ui/BottomControls";
 import { isMobile } from "./utils/misc";
@@ -57,12 +36,10 @@ let globalIsMuted: boolean = (() => {
 
 export const getIsMuted = (): boolean => globalIsMuted;
 
-const queryClient = new QueryClient();
-
 export let setIslandButtonDimmed: (dimmed: boolean) => void = () => {};
 
 const App = () => {
-  const { authState, setAuthStatus } = useAuthStatus();
+  const { authState } = useAuthStatus();
   const { authStatus } = authState;
   const [isMuted, setIsMuted] = useState(globalIsMuted);
   const [isIslandButtonDim, setIsIslandButtonDim] = useState(() => {
@@ -73,17 +50,6 @@ const App = () => {
     useState(isMainGameLoaded());
   const [isLogoutUiLockedState, setIsLogoutUiLockedState] = useState(() =>
     isLogoutUiLocked(),
-  );
-  const ethereumAuthAdapter = useMemo(
-    () => createEthereumAuthAdapter(setAuthStatus),
-    [setAuthStatus],
-  );
-  const rainbowKitTheme = useMemo(
-    () => ({
-      lightMode: lightTheme(),
-      darkMode: darkTheme(),
-    }),
-    [],
   );
   const shouldHideAuthControls =
     authStatus === "loading" || isLogoutUiLockedState;
@@ -128,46 +94,29 @@ const App = () => {
   }, [isMuted]);
 
   return (
-    <WagmiProvider config={config}>
-      <QueryClientProvider client={queryClient}>
-        <RainbowKitAuthenticationProvider
-          adapter={ethereumAuthAdapter}
-          status={authStatus}
-        >
-          <RainbowKitProvider
-            showRecentTransactions={false}
-            modalSize="compact"
-            theme={rainbowKitTheme}
-          >
-            <div className="app-container">
-              <div className="top-buttons-container">
-                {!shouldHideAuthControls && shouldLoadIslandButton && (
-                  <Suspense fallback={null}>
-                    <LazyIslandButton dimmed={isIslandButtonDim} />
-                  </Suspense>
-                )}
-                <TopRightControls
-                  authState={authState}
-                  isVisible={!shouldHideAuthControls}
-                  isMuted={isMuted}
-                  onBeforeOpen={closeAllKindsOfPopups}
-                  onToggleMute={handleMuteToggle}
-                  onOpenSettings={showSettings}
-                  onRequestLogout={handleLogout}
-                />
-                {!shouldHideAuthControls && (
-                  <ProfileSignIn authState={authState} />
-                )}
-              </div>
-              <BoardComponent />
-              <MainMenu />
-              <BottomControls authState={authState} />
-              <EventModal />
-            </div>
-          </RainbowKitProvider>
-        </RainbowKitAuthenticationProvider>
-      </QueryClientProvider>
-    </WagmiProvider>
+    <div className="app-container">
+      <div className="top-buttons-container">
+        {!shouldHideAuthControls && shouldLoadIslandButton && (
+          <Suspense fallback={null}>
+            <LazyIslandButton dimmed={isIslandButtonDim} />
+          </Suspense>
+        )}
+        <TopRightControls
+          authState={authState}
+          isVisible={!shouldHideAuthControls}
+          isMuted={isMuted}
+          onBeforeOpen={closeAllKindsOfPopups}
+          onToggleMute={handleMuteToggle}
+          onOpenSettings={showSettings}
+          onRequestLogout={handleLogout}
+        />
+        {!shouldHideAuthControls && <ProfileSignIn authState={authState} />}
+      </div>
+      <BoardComponent />
+      <MainMenu />
+      <BottomControls authState={authState} />
+      <EventModal />
+    </div>
   );
 };
 
@@ -229,40 +178,3 @@ document.addEventListener(
 connection.signIn();
 installLogoutSync();
 initializeAppSessionManager();
-
-(function suppressThirdPartyErrorOverlay() {
-  if (typeof window === "undefined") return;
-
-  const isBenignLibraryError = (err: unknown) => {
-    try {
-      if (!err) return false;
-      const message =
-        typeof err === "string"
-          ? err
-          : ((err as { message?: string }).message ?? "");
-      if (message.includes("this.provider.disconnect is not a function")) {
-        return true;
-      } else {
-        return false;
-      }
-    } catch {
-      return false;
-    }
-  };
-
-  const stop = (evt: {
-    preventDefault(): void;
-    stopImmediatePropagation(): void;
-  }) => {
-    evt.preventDefault();
-    evt.stopImmediatePropagation();
-  };
-
-  window.addEventListener(
-    "unhandledrejection",
-    (e) => {
-      if (isBenignLibraryError(e.reason)) stop(e);
-    },
-    { capture: true },
-  );
-})();

@@ -1,6 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { createAuthenticationAdapter } from "@rainbow-me/rainbowkit";
-import { SiweMessage } from "siwe";
 import type { PlayerProfile } from "./connectionModels";
 import { connection } from "./connection";
 import { handleLoginSuccess } from "./loginSuccess";
@@ -40,9 +38,6 @@ const EMPTY_AUTH_IDENTITY: AuthIdentity = {
   solAddress: "",
 };
 
-const ETH_INTENT_STORAGE_KEY = "ethIntentByNonceV1";
-const ETH_INTENT_MAX_ITEMS = 200;
-const ETH_INTENT_MAX_AGE_MS = 10 * 60 * 1000;
 type AppleRedirectResult = NonNullable<
   ReturnType<typeof consumeAppleRedirectResult>
 >;
@@ -54,17 +49,6 @@ let inFlightAppleRedirectVerification: {
 } | null = null;
 let inFlightXRedirectCompletion: { key: string; promise: Promise<any> } | null =
   null;
-
-type EthIntentRecord = {
-  nonce: string;
-  intentId: string;
-  createdAtMs: number;
-};
-
-const ethIntentIdByNonce = new Map<
-  string,
-  { intentId: string; createdAtMs: number }
->();
 
 const getAppleRedirectVerificationKey = (
   redirectResult: AppleRedirectResult,
@@ -136,138 +120,6 @@ const publishXAuthErrorFeedback = (
   });
 };
 
-const readStoredEthIntentRecords = (): EthIntentRecord[] => {
-  if (typeof window === "undefined") {
-    return [];
-  }
-  try {
-    const raw = window.sessionStorage.getItem(ETH_INTENT_STORAGE_KEY);
-    if (!raw) {
-      return [];
-    }
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-    const nowMs = Date.now();
-    return parsed
-      .map((item) => {
-        const nonce = typeof item?.nonce === "string" ? item.nonce : "";
-        const intentId =
-          typeof item?.intentId === "string" ? item.intentId : "";
-        const createdAtMs =
-          typeof item?.createdAtMs === "number"
-            ? item.createdAtMs
-            : Number(item?.createdAtMs);
-        if (!nonce || !intentId || !Number.isFinite(createdAtMs)) {
-          return null;
-        }
-        if (nowMs - createdAtMs > ETH_INTENT_MAX_AGE_MS) {
-          return null;
-        }
-        return {
-          nonce,
-          intentId,
-          createdAtMs: Math.floor(createdAtMs),
-        };
-      })
-      .filter((record): record is EthIntentRecord => !!record);
-  } catch {
-    return [];
-  }
-};
-
-const writeStoredEthIntentRecords = (records: EthIntentRecord[]): void => {
-  if (typeof window === "undefined") {
-    return;
-  }
-  try {
-    if (records.length === 0) {
-      window.sessionStorage.removeItem(ETH_INTENT_STORAGE_KEY);
-      return;
-    }
-    window.sessionStorage.setItem(
-      ETH_INTENT_STORAGE_KEY,
-      JSON.stringify(records),
-    );
-  } catch {}
-};
-
-const pruneAndPersistEthIntentRecords = (): void => {
-  const nowMs = Date.now();
-  const records = Array.from(ethIntentIdByNonce.entries())
-    .map(([nonce, value]) => ({
-      nonce,
-      intentId: value.intentId,
-      createdAtMs: value.createdAtMs,
-    }))
-    .filter((record) => {
-      return (
-        record.nonce !== "" &&
-        record.intentId !== "" &&
-        nowMs - record.createdAtMs <= ETH_INTENT_MAX_AGE_MS
-      );
-    })
-    .sort((left, right) => left.createdAtMs - right.createdAtMs)
-    .slice(-ETH_INTENT_MAX_ITEMS);
-  ethIntentIdByNonce.clear();
-  records.forEach((record) => {
-    ethIntentIdByNonce.set(record.nonce, {
-      intentId: record.intentId,
-      createdAtMs: record.createdAtMs,
-    });
-  });
-  writeStoredEthIntentRecords(records);
-};
-
-const ensureEthIntentRecordsLoaded = (): void => {
-  if (ethIntentIdByNonce.size > 0) {
-    return;
-  }
-  const records = readStoredEthIntentRecords();
-  records.forEach((record) => {
-    ethIntentIdByNonce.set(record.nonce, {
-      intentId: record.intentId,
-      createdAtMs: record.createdAtMs,
-    });
-  });
-  pruneAndPersistEthIntentRecords();
-};
-
-const saveEthIntentRecord = (nonce: string, intentId: string): void => {
-  if (!nonce || !intentId) {
-    return;
-  }
-  ensureEthIntentRecordsLoaded();
-  ethIntentIdByNonce.set(nonce, {
-    intentId,
-    createdAtMs: Date.now(),
-  });
-  pruneAndPersistEthIntentRecords();
-};
-
-const takeEthIntentId = (nonce: string): string | undefined => {
-  if (!nonce) {
-    return undefined;
-  }
-  ensureEthIntentRecordsLoaded();
-  const record = ethIntentIdByNonce.get(nonce);
-  ethIntentIdByNonce.delete(nonce);
-  pruneAndPersistEthIntentRecords();
-  if (!record) {
-    return undefined;
-  }
-  if (Date.now() - record.createdAtMs > ETH_INTENT_MAX_AGE_MS) {
-    return undefined;
-  }
-  return record.intentId;
-};
-
-export const clearEthIntentState = (): void => {
-  ethIntentIdByNonce.clear();
-  writeStoredEthIntentRecords([]);
-};
-
 export function setAuthStatusGlobally(status: AuthStatus) {
   if (globalSetAuthStatus) {
     globalSetAuthStatus(status);
@@ -289,7 +141,6 @@ export function useAuthStatus() {
     }
     return { authStatus: "unauthenticated", ...EMPTY_AUTH_IDENTITY };
   });
-  const { authStatus } = authState;
   const setAuthStatus = useCallback((nextAuthStatus: AuthStatus) => {
     const nextIdentity =
       nextAuthStatus === "authenticated"
@@ -688,67 +539,3 @@ export function useAuthStatus() {
 
   return { authState, setAuthStatus };
 }
-
-export const createEthereumAuthAdapter = (
-  setAuthStatus: (status: AuthStatus) => void,
-) => {
-  return createAuthenticationAdapter({
-    getNonce: async () => {
-      const intent = await connection.beginAuthIntent("eth");
-      saveEthIntentRecord(intent.nonce, intent.intentId);
-      return intent.nonce;
-    },
-
-    createMessage: ({ nonce, address, chainId }) => {
-      return new SiweMessage({
-        domain: window.location.host,
-        address,
-        statement: "mons ftw",
-        uri: window.location.origin,
-        version: "1",
-        chainId,
-        nonce,
-      }).prepareMessage();
-    },
-
-    verify: async ({ message, signature }) => {
-      let intentId: string | undefined;
-      try {
-        const parsed = new SiweMessage(message);
-        intentId = takeEthIntentId(parsed.nonce);
-      } catch {
-        intentId = undefined;
-      }
-      if (!intentId) {
-        throw new Error("Missing Ethereum auth intent. Please retry sign in.");
-      }
-      setSignInInlineAuthError(null);
-      try {
-        const res = await connection.verifyEthAddress(
-          message,
-          signature,
-          intentId,
-        );
-        if (res && res.ok === true) {
-          setSignInInlineAuthError(null);
-          handleLoginSuccess(res, "eth");
-          setAuthStatus("authenticated");
-          return true;
-        }
-        setSignInInlineAuthError(null);
-        setAuthStatus("unauthenticated");
-        return false;
-      } catch (error) {
-        const cooldownMessage = formatAuthCooldownErrorMessage(error);
-        if (cooldownMessage) {
-          setSignInInlineAuthError(cooldownMessage);
-          setAuthStatus("unauthenticated");
-          return false;
-        }
-        throw error;
-      }
-    },
-
-    signOut: async () => {},
-  });
-};

@@ -6,7 +6,6 @@ import React, {
   useCallback,
 } from "react";
 import { cropAddress } from "@mons/shared/profiles";
-import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { flushSync } from "react-dom";
 import styled, { css } from "styled-components";
 import { storage } from "../utils/storage";
@@ -57,6 +56,8 @@ import {
 } from "./ShinyCard";
 import { registerProfileTransientUiHandler } from "./uiSession";
 import { performLogoutCleanupAndReload } from "../session/logoutOrchestrator";
+import { useEthereumWalletPicker } from "./EthereumWalletPicker";
+import { primeInjectedEthereumProviderDiscovery } from "../connection/injectedEthereumProviders";
 
 const Container = styled.div<{ $liftAboveEventModal?: boolean }>`
   position: relative;
@@ -526,6 +527,7 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     return eventModalState.isOpen && !!eventModalState.eventId;
   });
   const [solanaText, setSolanaText] = useState("Solana");
+  const [ethereumText, setEthereumText] = useState("Ethereum");
   const [inlineAuthError, setInlineAuthError] = useState("");
   const [appleButtonState, setAppleButtonState] =
     useState<AppleButtonUiState>("idle");
@@ -537,6 +539,9 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
   const [isPendingXSignInRedirectStale, setIsPendingXSignInRedirectStale] =
     useState(false);
   const [isSolanaConnecting, setIsSolanaConnecting] = useState(false);
+  const [isEthereumConnecting, setIsEthereumConnecting] = useState(false);
+  const { requestWalletSelection, pickerElement, closePicker } =
+    useEthereumWalletPicker();
   const [profileDisplayName, setProfileDisplayName] = useState(() =>
     formatDisplayName(pendingUsername, pendingEthAddress, pendingSolAddress),
   );
@@ -563,8 +568,6 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     null,
   );
   const appleConfirmExpiryTimeoutRef = useRef<number | null>(null);
-  const ethereumConnectModalRef = useRef<(() => void) | null>(null);
-  const ethereumConnectRetryTimeoutRef = useRef<number | null>(null);
   const pendingXSignInStaleTimeoutRef = useRef<number | null>(null);
   const xRedirectNavigationFallbackTimeoutRef = useRef<number | null>(null);
   const xRedirectVisibilityRecoveryHandlerRef = useRef<(() => void) | null>(
@@ -644,13 +647,6 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     if (appleConfirmExpiryTimeoutRef.current) {
       window.clearTimeout(appleConfirmExpiryTimeoutRef.current);
       appleConfirmExpiryTimeoutRef.current = null;
-    }
-  }, []);
-
-  const clearEthereumConnectRetryTimeout = useCallback(() => {
-    if (ethereumConnectRetryTimeoutRef.current !== null) {
-      window.clearTimeout(ethereumConnectRetryTimeoutRef.current);
-      ethereumConnectRetryTimeoutRef.current = null;
     }
   }, []);
 
@@ -832,7 +828,6 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
-      clearEthereumConnectRetryTimeout();
       clearAppleConfirmExpiryTimeout();
       clearPendingXSignInStaleTimeout();
       clearXRedirectNavigationFallbackTimeout();
@@ -843,7 +838,6 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     };
   }, [
     clearAppleConfirmExpiryTimeout,
-    clearEthereumConnectRetryTimeout,
     clearPendingXSignInStaleTimeout,
     clearXRedirectNavigationFallbackTimeout,
     clearXRedirectVisibilityRecovery,
@@ -852,6 +846,12 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
   useEffect(() => {
     isOpenRef.current = isOpen;
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen || authStatus === "authenticated") {
+      closePicker();
+    }
+  }, [isOpen, authStatus, closePicker]);
 
   useEffect(() => {
     authStatusRef.current = authStatus;
@@ -889,14 +889,6 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     clearPendingXSignInStaleTimeout,
     closeProfileTransientUiForSettingsReopen,
   ]);
-
-  useEffect(() => {
-    if (isOpen) {
-      return;
-    }
-    ethereumConnectModalRef.current = null;
-    clearEthereumConnectRetryTimeout();
-  }, [isOpen, clearEthereumConnectRetryTimeout]);
 
   useEffect(() => {
     if (authStatus === "authenticated" && appleButtonState !== "idle") {
@@ -1308,6 +1300,8 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
       return;
     }
     void import("../connection/solanaConnection").catch(() => {});
+    void import("../connection/ethereumConnection").catch(() => {});
+    primeInjectedEthereumProviderDiscovery();
     void preloadAppleSignInLibrary().catch(() => {});
     void ensurePreparedAppleIntent().catch(() => {});
   }, [isOpen, authStatus, ensurePreparedAppleIntent]);
@@ -1486,47 +1480,52 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
     }
   };
 
-  const handleEthereumClick = useCallback(() => {
+  const handleEthereumClick = async () => {
+    if (isEthereumConnecting) return;
+
     setInlineAuthError("");
-    const openConnectModal = ethereumConnectModalRef.current;
-    if (openConnectModal) {
-      clearEthereumConnectRetryTimeout();
-      openConnectModal();
-      return;
-    }
-
-    clearEthereumConnectRetryTimeout();
-    const startedAtMs = Date.now();
-    const tryOpenConnectModal = () => {
-      if (
-        !isMountedRef.current ||
-        !isOpenRef.current ||
-        authStatusRef.current === "authenticated"
-      ) {
-        clearEthereumConnectRetryTimeout();
+    setIsEthereumConnecting(true);
+    try {
+      const choice = await requestWalletSelection();
+      if (choice.status === "cancelled") {
         return;
       }
-      const modalOpener = ethereumConnectModalRef.current;
-      if (modalOpener) {
-        clearEthereumConnectRetryTimeout();
-        modalOpener();
-        return;
-      }
-      if (Date.now() - startedAtMs >= 1000) {
-        clearEthereumConnectRetryTimeout();
-        return;
-      }
-      ethereumConnectRetryTimeoutRef.current = window.setTimeout(
-        tryOpenConnectModal,
-        40,
+      const { connectToEthereumAndSign } =
+        await import("../connection/ethereumConnection");
+      const { message, signature, intentId } = await connectToEthereumAndSign(
+        choice.wallet,
       );
-    };
+      setEthereumText("Verifying...");
 
-    ethereumConnectRetryTimeoutRef.current = window.setTimeout(
-      tryOpenConnectModal,
-      0,
-    );
-  }, [clearEthereumConnectRetryTimeout]);
+      const res = await connection.verifyEthAddress(
+        message,
+        signature,
+        intentId,
+      );
+      if (res && res.ok === true) {
+        setInlineAuthError("");
+        handleLoginSuccess(res, "eth");
+        setAuthStatusGlobally("authenticated");
+        setIsOpen(false);
+        hideShinyCard();
+      }
+
+      setEthereumText("Ethereum");
+    } catch (error) {
+      const cooldownMessage = formatAuthCooldownErrorMessage(error);
+      if (cooldownMessage) {
+        setInlineAuthError(cooldownMessage);
+      }
+      if ((error as Error).message === "not found") {
+        setEthereumText("Not Found");
+        setTimeout(() => setEthereumText("Ethereum"), 500);
+      } else {
+        setEthereumText("Ethereum");
+      }
+    } finally {
+      setIsEthereumConnecting(false);
+    }
+  };
 
   const handleNotificationClick = () => {
     if (notificationState?.successHandler) {
@@ -1543,19 +1542,12 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
 
   const signInOptions = (
     <>
-      <ConnectButton.Custom>
-        {({ openConnectModal }) => {
-          ethereumConnectModalRef.current = openConnectModal ?? null;
-          return (
-            <CustomConnectButton
-              onClick={!isMobile ? handleEthereumClick : undefined}
-              onTouchStart={isMobile ? handleEthereumClick : undefined}
-            >
-              Ethereum
-            </CustomConnectButton>
-          );
-        }}
-      </ConnectButton.Custom>
+      <CustomConnectButton
+        onClick={!isMobile ? handleEthereumClick : undefined}
+        onTouchStart={isMobile ? handleEthereumClick : undefined}
+      >
+        {ethereumText}
+      </CustomConnectButton>
       <CustomConnectButton
         onClick={!isMobile ? handleSolanaClick : undefined}
         onTouchStart={isMobile ? handleSolanaClick : undefined}
@@ -1683,6 +1675,7 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
           xInlineMessage={settingsInlineMessage}
         />
       )}
+      {pickerElement}
     </Container>
   );
 };

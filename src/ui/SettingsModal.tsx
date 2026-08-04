@@ -20,10 +20,9 @@ import { formatAuthCooldownErrorMessage } from "../connection/authCooldownErrors
 import { storage } from "../utils/storage";
 import { updateProfileDisplayName } from "./ProfileSignIn";
 import { handleLoginSuccess, AddressKind } from "../connection/loginSuccess";
-import {
-  clearEthIntentState,
-  setAuthStatusGlobally,
-} from "../connection/authentication";
+import { setAuthStatusGlobally } from "../connection/authentication";
+import { useEthereumWalletPicker } from "./EthereumWalletPicker";
+import { primeInjectedEthereumProviderDiscovery } from "../connection/injectedEthereumProviders";
 import {
   clearAppleSignInTransientState,
   preloadAppleSignInLibrary,
@@ -371,6 +370,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [pendingDisconnectState, setPendingDisconnectState] =
     useState<PendingDisconnectState | null>(null);
   const [solanaConnectText, setSolanaConnectText] = useState<string>("Connect");
+  const [ethConnectText, setEthConnectText] = useState<string>("Connect");
+  const { requestWalletSelection, pickerElement } = useEthereumWalletPicker();
   const [isGlobalAppleFlowInProgress, setIsGlobalAppleFlowInProgress] =
     useState<boolean>(() => isSettingsAppleFlowInProgress);
   const [authMessage, setAuthMessage] = useState<string>(
@@ -386,6 +387,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const appleConfirmExpiryTimeoutRef = useRef<number | null>(null);
   const pendingDisconnectTimeoutRef = useRef<number | null>(null);
   const solanaNotFoundTimeoutRef = useRef<number | null>(null);
+  const ethNotFoundTimeoutRef = useRef<number | null>(null);
   const hasLoadedLinkedMethodsRef = useRef(false);
   const shouldRefreshAfterAppleFlowLoadRef = useRef(false);
   const appliedXInlineMessageIdRef = useRef<number | null>(
@@ -468,6 +470,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
   }, []);
 
+  const clearEthNotFoundTimeout = useCallback(() => {
+    if (ethNotFoundTimeoutRef.current !== null) {
+      window.clearTimeout(ethNotFoundTimeoutRef.current);
+      ethNotFoundTimeoutRef.current = null;
+    }
+  }, []);
+
   const clearPendingDisconnectTimeout = useCallback(() => {
     if (pendingDisconnectTimeoutRef.current !== null) {
       window.clearTimeout(pendingDisconnectTimeoutRef.current);
@@ -511,11 +520,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       clearAppleConfirmExpiryTimeout();
       clearPendingDisconnectTimeout();
       clearSolanaNotFoundTimeout();
+      clearEthNotFoundTimeout();
     };
   }, [
     clearAppleConfirmExpiryTimeout,
     clearPendingDisconnectTimeout,
     clearSolanaNotFoundTimeout,
+    clearEthNotFoundTimeout,
   ]);
 
   useEffect(() => {
@@ -565,6 +576,19 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   }, [clearSolanaNotFoundTimeout, solanaConnectText]);
 
   useEffect(() => {
+    if (ethConnectText !== "Not Found") {
+      clearEthNotFoundTimeout();
+      return;
+    }
+    clearEthNotFoundTimeout();
+    ethNotFoundTimeoutRef.current = window.setTimeout(() => {
+      ethNotFoundTimeoutRef.current = null;
+      setEthConnectText("Connect");
+    }, 650);
+    return clearEthNotFoundTimeout;
+  }, [clearEthNotFoundTimeout, ethConnectText]);
+
+  useEffect(() => {
     return subscribeSettingsAppleFlowProgress((inProgress) => {
       if (isMountedRef.current) {
         setIsGlobalAppleFlowInProgress(inProgress);
@@ -604,6 +628,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
     if (!linkedMethods.eth) {
       void import("../connection/ethereumConnection").catch(() => {});
+      primeInjectedEthereumProviderDiscovery();
     }
     if (!linkedMethods.sol) {
       void import("../connection/solanaConnection").catch(() => {});
@@ -684,10 +709,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         let result: any = null;
         let kind: AddressKind = method;
         if (method === "eth") {
+          const choice = await requestWalletSelection();
+          if (choice.status === "cancelled") {
+            return;
+          }
           const { connectToEthereumAndSign } =
             await import("../connection/ethereumConnection");
           const { message, signature, intentId } =
-            await connectToEthereumAndSign();
+            await connectToEthereumAndSign(choice.wallet);
+          clearEthNotFoundTimeout();
           result = await connection.verifyEthAddress(
             message,
             signature,
@@ -725,6 +755,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         if (method === "sol") {
           setSolanaConnectText("Connect");
         }
+        if (method === "eth") {
+          setEthConnectText("Connect");
+        }
       } catch (error) {
         console.error(`Failed to connect ${method}:`, error);
         if (!isMountedRef.current) {
@@ -748,6 +781,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             setSolanaConnectText("Connect");
           }
         }
+        if (method === "eth") {
+          const errorMessage = error instanceof Error ? error.message : "";
+          if (errorMessage === "not found") {
+            setEthConnectText("Not Found");
+          } else {
+            setEthConnectText("Connect");
+          }
+        }
       } finally {
         if (didStartXRedirect) {
           if (isMountedRef.current) {
@@ -762,7 +803,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         await refreshLinkedMethods();
       }
     },
-    [clearSolanaNotFoundTimeout, refreshLinkedMethods],
+    [
+      clearEthNotFoundTimeout,
+      clearSolanaNotFoundTimeout,
+      refreshLinkedMethods,
+      requestWalletSelection,
+    ],
   );
 
   const runAppleConnectFlow = useCallback(async () => {
@@ -893,7 +939,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         if (result && result.ok === true) {
           if (method === "eth") {
             storage.setEthAddress("");
-            clearEthIntentState();
           }
           if (method === "sol") {
             storage.setSolAddress("");
@@ -948,7 +993,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       : isLoading || isBusy || busyMethod !== null;
     const disableDisconnect =
       isLoading || isBusy || busyMethod !== null || linkedCount <= 1;
-    const connectText = method === "sol" ? solanaConnectText : "Connect";
+    const connectText =
+      method === "sol"
+        ? solanaConnectText
+        : method === "eth"
+          ? ethConnectText
+          : "Connect";
     const showDisconnectControl = isLinked;
     const pendingDisconnectStep =
       pendingDisconnectState?.method === method
@@ -1088,6 +1138,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             OK
           </SaveButton>
         </ButtonsContainer>
+        {pickerElement}
       </SettingsPopup>
     </ModalOverlay>
   );
