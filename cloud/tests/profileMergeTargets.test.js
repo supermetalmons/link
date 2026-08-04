@@ -5,10 +5,19 @@ const test = require("node:test");
 const {
   getProfileMergeTargetId,
   resolveProfileMergeTargetId,
+  resolveProfileMergeTargetPath,
 } = require("../functions/profileMergeTargets");
 
 const resolveFrom = (profileId, targets, options = {}) =>
   resolveProfileMergeTargetId({
+    profileId,
+    readMergeTarget: async (candidateProfileId) =>
+      targets[candidateProfileId] || null,
+    ...options,
+  });
+
+const resolvePathFrom = (profileId, targets, options = {}) =>
+  resolveProfileMergeTargetPath({
     profileId,
     readMergeTarget: async (candidateProfileId) =>
       targets[candidateProfileId] || null,
@@ -26,6 +35,7 @@ test("reads merge targets from stored records", () => {
 
 test("keeps profiles without a merge target unchanged", async () => {
   assert.equal(await resolveFrom("source", {}), "source");
+  assert.deepEqual(await resolvePathFrom("source", {}), ["source"]);
 });
 
 test("resolves chained profile merges to the final target", async () => {
@@ -49,26 +59,50 @@ test("resolves chained profile merges to the final target", async () => {
   );
 });
 
-test("rejects cyclic profile merge targets", async () => {
-  await assert.rejects(
-    resolveFrom("source", {
-      source: { targetProfileId: "target" },
-      target: { targetProfileId: "source" },
-    }),
-    /profile-merge-target-cycle/,
-  );
-});
-
-test("rejects merge target chains beyond the configured limit", async () => {
-  await assert.rejects(
-    resolveFrom(
+test("returns every profile in a chained merge", async () => {
+  assert.deepEqual(
+    await resolvePathFrom(
       "source",
       {
         source: { targetProfileId: "middle" },
         middle: { targetProfileId: "target" },
       },
-      { maxHops: 1 },
+      { maxHops: 2 },
     ),
+    ["source", "middle", "target"],
+  );
+});
+
+test("returns an empty merge path for an invalid profile", async () => {
+  assert.deepEqual(await resolvePathFrom(" ", {}), []);
+});
+
+test("rejects cyclic profile merge targets", async () => {
+  const targets = {
+    source: { targetProfileId: "target" },
+    target: { targetProfileId: "source" },
+  };
+  await assert.rejects(
+    resolveFrom("source", targets),
+    /profile-merge-target-cycle/,
+  );
+  await assert.rejects(
+    resolvePathFrom("source", targets),
+    /profile-merge-target-cycle/,
+  );
+});
+
+test("rejects merge target chains beyond the configured limit", async () => {
+  const targets = {
+    source: { targetProfileId: "middle" },
+    middle: { targetProfileId: "target" },
+  };
+  await assert.rejects(
+    resolveFrom("source", targets, { maxHops: 1 }),
+    /profile-merge-target-depth-exceeded/,
+  );
+  await assert.rejects(
+    resolvePathFrom("source", targets, { maxHops: 1 }),
     /profile-merge-target-depth-exceeded/,
   );
 });

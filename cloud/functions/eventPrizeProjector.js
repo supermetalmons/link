@@ -5,6 +5,7 @@ const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const {
   copyProfileEventPrizeAssignment,
   copyProfileEventPrizesToCanonicalTarget,
+  removeProfileEventPrizeAssignmentIfWithdrawalCompleted,
   resolveProfileEventPrizeOwnerId,
 } = require("./profileEventPrizeProjection");
 const {
@@ -32,6 +33,16 @@ const onProfileEventPrizeWritten = onValueWritten(
     if (!sourceProfileId || !eventId) {
       return;
     }
+    const sourceAssignment = event.data.after.val();
+    if (
+      await removeProfileEventPrizeAssignmentIfWithdrawalCompleted({
+        profileId: sourceProfileId,
+        eventId,
+        assignment: sourceAssignment,
+      })
+    ) {
+      return;
+    }
     const targetProfileId = await resolveProfileEventPrizeOwnerId({
       profileId: sourceProfileId,
       eventId,
@@ -43,7 +54,7 @@ const onProfileEventPrizeWritten = onValueWritten(
       sourceProfileId,
       targetProfileId,
       eventId,
-      sourceAssignment: event.data.after.val(),
+      sourceAssignment,
     });
   },
 );

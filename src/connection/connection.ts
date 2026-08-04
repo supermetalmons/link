@@ -3065,12 +3065,35 @@ class Connection {
       const withdrawEventPrizeFunction = httpsCallable(
         this.functions,
         "withdrawEventPrize",
+        { timeout: 135_000 },
       );
-      const response = await withdrawEventPrizeFunction({
+      const payload = {
         eventId,
         prizeId,
         solanaAddress,
-      });
+      };
+      let response;
+      try {
+        response = await withdrawEventPrizeFunction(payload);
+      } catch (error) {
+        const errorCode =
+          error &&
+          typeof error === "object" &&
+          "code" in error &&
+          typeof error.code === "string"
+            ? error.code.replace(/^functions\//, "")
+            : "";
+        if (
+          errorCode !== "unavailable" &&
+          errorCode !== "deadline-exceeded" &&
+          errorCode !== "internal" &&
+          errorCode !== "unknown"
+        ) {
+          throw error;
+        }
+        await this.delay(750);
+        response = await withdrawEventPrizeFunction(payload);
+      }
       return response.data as EventPrizeWithdrawalResponse;
     } catch (error) {
       console.error("Error withdrawing event prize:", error);

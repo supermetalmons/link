@@ -4,7 +4,7 @@ const admin = require("./firebaseAdmin");
 const { buildProfileEventPrizeMergeCopies } = require("./eventPrizeAwards");
 const {
   PROFILE_MERGE_TARGETS_COLLECTION,
-  resolveProfileMergeTargetId,
+  resolveProfileMergeTargetPath,
 } = require("./profileMergeTargets");
 const { readProfileByLoginUid } = require("./profileLookup");
 const {
@@ -16,9 +16,9 @@ const {
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 
-const resolveCanonicalProfileId = async (profileId) => {
+const resolveCanonicalProfilePath = async (profileId) => {
   const firestore = admin.firestore();
-  return resolveProfileMergeTargetId({
+  return resolveProfileMergeTargetPath({
     profileId,
     readMergeTarget: async (candidateProfileId) => {
       const snapshot = await firestore
@@ -28,6 +28,11 @@ const resolveCanonicalProfileId = async (profileId) => {
       return snapshot.exists ? snapshot.data() : null;
     },
   });
+};
+
+const resolveCanonicalProfileId = async (profileId) => {
+  const profileIds = await resolveCanonicalProfilePath(profileId);
+  return profileIds[profileIds.length - 1] || "";
 };
 
 const resolveProfileEventPrizeOwnerId = async ({ profileId, eventId }) => {
@@ -78,11 +83,35 @@ const removeMatchingProfileEventPrizeAssignment = async ({
     (currentAssignment) =>
       isMatchingProfileEventPrizeAssignment(currentAssignment, eventId, prizeId)
         ? null
-        : undefined,
+        : (currentAssignment ?? null),
     undefined,
     false,
   );
-  return result.committed === true;
+  return result.committed === true && !result.snapshot.val();
+};
+
+const removeProfileEventPrizeAssignmentIfWithdrawalCompleted = async ({
+  profileId,
+  eventId,
+  assignment,
+}) => {
+  const normalizedProfileId = normalizeString(profileId);
+  const normalizedEventId = normalizeString(eventId);
+  const prizeId = normalizeString(assignment?.prizeId);
+  if (!normalizedProfileId || !normalizedEventId || !prizeId) {
+    return false;
+  }
+  if (!(await isAssignmentWithdrawalCompleted(normalizedEventId, assignment))) {
+    return false;
+  }
+  await removeMatchingProfileEventPrizeAssignment({
+    targetRef: admin
+      .database()
+      .ref(`profileEventPrizes/${normalizedProfileId}/${normalizedEventId}`),
+    eventId: normalizedEventId,
+    prizeId,
+  });
+  return true;
 };
 
 const copyProfileEventPrizeAssignment = async ({
@@ -118,12 +147,13 @@ const copyProfileEventPrizeAssignment = async ({
     .ref(
       `profileEventPrizes/${normalizedTargetProfileId}/${normalizedEventId}`,
     );
-  if (await isAssignmentWithdrawalCompleted(normalizedEventId, copy)) {
-    await removeMatchingProfileEventPrizeAssignment({
-      targetRef,
+  if (
+    await removeProfileEventPrizeAssignmentIfWithdrawalCompleted({
+      profileId: normalizedTargetProfileId,
       eventId: normalizedEventId,
-      prizeId: copy.prizeId,
-    });
+      assignment: copy,
+    })
+  ) {
     return false;
   }
 
@@ -138,12 +168,13 @@ const copyProfileEventPrizeAssignment = async ({
     });
     return currentCopies[normalizedEventId];
   });
-  if (await isAssignmentWithdrawalCompleted(normalizedEventId, copy)) {
-    await removeMatchingProfileEventPrizeAssignment({
-      targetRef,
+  if (
+    await removeProfileEventPrizeAssignmentIfWithdrawalCompleted({
+      profileId: normalizedTargetProfileId,
       eventId: normalizedEventId,
-      prizeId: copy.prizeId,
-    });
+      assignment: copy,
+    })
+  ) {
     return false;
   }
   return result.committed === true;
@@ -205,7 +236,9 @@ module.exports = {
   copyProfileEventPrizeAssignment,
   copyProfileEventPrizes,
   copyProfileEventPrizesToCanonicalTarget,
+  removeProfileEventPrizeAssignmentIfWithdrawalCompleted,
   removeMatchingProfileEventPrizeAssignment,
   resolveCanonicalProfileId,
+  resolveCanonicalProfilePath,
   resolveProfileEventPrizeOwnerId,
 };

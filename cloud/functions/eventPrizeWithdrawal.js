@@ -10,6 +10,7 @@ const { readProfileByLoginUid } = require("./profileLookup");
 const {
   removeMatchingProfileEventPrizeAssignment,
   resolveCanonicalProfileId,
+  resolveCanonicalProfilePath,
 } = require("./profileEventPrizeProjection");
 const {
   EVENT_PRIZE_ADMIN_WALLET,
@@ -30,6 +31,10 @@ const EVENT_PRIZE_ADMIN_PRIVATE_KEY = defineSecret(
   "EVENT_PRIZE_ADMIN_PRIVATE_KEY",
 );
 const CONFIRMATION_COMMITMENT = "confirmed";
+const CONFIRMATION_TIMEOUT_MS = 45 * 1000;
+const SEND_TRANSACTION_TIMEOUT_MS = 10 * 1000;
+const SIGNATURE_STATUS_TIMEOUT_MS = 2 * 1000;
+const TRANSACTION_STATUS_RETRY_DELAYS_MS = [0, 500, 1000, 2000, 4000, 8000];
 let solanaDependencies = null;
 
 const loadSolanaDependencies = () => {
@@ -158,46 +163,60 @@ const acquireWithdrawalClaim = async ({
       leaseId,
       nowMs: Date.now(),
     });
-  const result = await withdrawalRef.transaction(
-    (current) => {
-      const decision = decide(current);
-      return decision.kind === "acquired" ? decision.value : (current ?? null);
-    },
-    undefined,
-    false,
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const result = await withdrawalRef.transaction(
+      (current) => {
+        const decision = decide(current);
+        return decision.kind === "acquired"
+          ? decision.value
+          : (current ?? null);
+      },
+      undefined,
+      false,
+    );
+    const withdrawal = result.snapshot.val();
+    if (
+      result.committed &&
+      normalizeString(withdrawal?.leaseId) === leaseId &&
+      ["processing", "submitted"].includes(withdrawal?.status) &&
+      isWithdrawalRecordForPrize(withdrawal, eventId, prizeId, assetAddress)
+    ) {
+      return { leaseId, withdrawal };
+    }
+    const decision = decide(withdrawal);
+    if (decision?.kind === "acquired") {
+      continue;
+    }
+    if (decision?.kind === "completed") {
+      return { completed: decision.value };
+    }
+    if (decision?.kind === "busy") {
+      throw new HttpsError(
+        "aborted",
+        "This prize withdrawal is already being processed.",
+      );
+    }
+    if (decision?.kind === "destination-mismatch") {
+      throw new HttpsError(
+        "failed-precondition",
+        "The pending withdrawal is locked to its original destination.",
+      );
+    }
+    if (decision?.kind === "blocked") {
+      throw new HttpsError(
+        "failed-precondition",
+        "This prize is unavailable for withdrawal.",
+      );
+    }
+    throw new HttpsError(
+      "permission-denied",
+      "Prize withdrawal is unavailable.",
+    );
+  }
+  throw new HttpsError(
+    "aborted",
+    "Prize withdrawal changed. Please try again.",
   );
-  const withdrawal = result.snapshot.val();
-  if (
-    result.committed &&
-    normalizeString(withdrawal?.leaseId) === leaseId &&
-    ["processing", "submitted"].includes(withdrawal?.status) &&
-    isWithdrawalRecordForPrize(withdrawal, eventId, prizeId, assetAddress)
-  ) {
-    return { leaseId, withdrawal };
-  }
-  const decision = decide(withdrawal);
-  if (decision?.kind === "completed") {
-    return { completed: decision.value };
-  }
-  if (decision?.kind === "busy") {
-    throw new HttpsError(
-      "aborted",
-      "This prize withdrawal is already being processed.",
-    );
-  }
-  if (decision?.kind === "destination-mismatch") {
-    throw new HttpsError(
-      "failed-precondition",
-      "The pending withdrawal is locked to its original destination.",
-    );
-  }
-  if (decision?.kind === "blocked") {
-    throw new HttpsError(
-      "failed-precondition",
-      "This prize is unavailable for withdrawal.",
-    );
-  }
-  throw new HttpsError("permission-denied", "Prize withdrawal is unavailable.");
 };
 
 const releaseProcessingClaim = async ({ withdrawalRef, leaseId }) => {
@@ -307,6 +326,35 @@ const getCurrentBlockHeight = async (umi) => {
     : Number.MAX_SAFE_INTEGER;
 };
 
+const deserializePersistedSubmittedTransaction = (umi, withdrawal) => {
+  const encoded = normalizeString(withdrawal?.signedTransactionBase64);
+  const transactionSignature = normalizeString(
+    withdrawal?.transactionSignature,
+  );
+  const blockhash = normalizeString(withdrawal?.blockhash);
+  const lastValidBlockHeight = Number(withdrawal?.lastValidBlockHeight);
+  if (
+    !encoded ||
+    !transactionSignature ||
+    !blockhash ||
+    !Number.isFinite(lastValidBlockHeight)
+  ) {
+    return null;
+  }
+  try {
+    return {
+      signedTransaction: umi.transactions.deserialize(
+        new Uint8Array(Buffer.from(encoded, "base64")),
+      ),
+      transactionSignature,
+      blockhash,
+      lastValidBlockHeight: Math.floor(lastValidBlockHeight),
+    };
+  } catch {
+    return null;
+  }
+};
+
 const deserializeSubmittedTransaction = async (umi, withdrawal) => {
   const encoded = normalizeString(withdrawal?.signedTransactionBase64);
   const lastValidBlockHeight = Number(withdrawal?.lastValidBlockHeight);
@@ -316,18 +364,7 @@ const deserializeSubmittedTransaction = async (umi, withdrawal) => {
   if ((await getCurrentBlockHeight(umi)) > lastValidBlockHeight) {
     return null;
   }
-  try {
-    return {
-      signedTransaction: umi.transactions.deserialize(
-        new Uint8Array(Buffer.from(encoded, "base64")),
-      ),
-      transactionSignature: normalizeString(withdrawal.transactionSignature),
-      blockhash: normalizeString(withdrawal.blockhash),
-      lastValidBlockHeight: Math.floor(lastValidBlockHeight),
-    };
-  } catch {
-    return null;
-  }
+  return deserializePersistedSubmittedTransaction(umi, withdrawal);
 };
 
 const buildSubmittedTransaction = async ({
@@ -380,30 +417,235 @@ const buildSubmittedTransaction = async ({
   };
 };
 
-const sendAndConfirmSubmittedTransaction = async ({ umi, submitted }) => {
+const waitForPromiseWithTimeout = (
+  promise,
+  timeoutMs,
+  timeoutCode = "rpc-timeout",
+) =>
+  new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(
+      () => {
+        const error = new Error("Prize transaction RPC timed out.");
+        error.code = timeoutCode;
+        reject(error);
+      },
+      Math.max(0, Number(timeoutMs) || 0),
+    );
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
+
+const getSubmittedTransactionSignature = (submitted) => {
+  const transactionSignature = submitted?.signedTransaction?.signatures?.[0];
+  if (!transactionSignature) {
+    throw new HttpsError("internal", "Prize transaction signature is missing.");
+  }
   const { base58 } = loadSolanaDependencies();
-  const sentSignature = await umi.rpc.sendTransaction(
-    submitted.signedTransaction,
-    {
-      skipPreflight: false,
-      preflightCommitment: CONFIRMATION_COMMITMENT,
-      maxRetries: 3,
-    },
-  );
-  const sentSignatureString = base58.deserialize(sentSignature)[0];
-  if (sentSignatureString !== submitted.transactionSignature) {
+  const transactionSignatureString =
+    base58.deserialize(transactionSignature)[0];
+  if (transactionSignatureString !== submitted.transactionSignature) {
     throw new HttpsError("internal", "Prize transaction signature mismatch.");
   }
-  const confirmation = await umi.rpc.confirmTransaction(sentSignature, {
-    commitment: CONFIRMATION_COMMITMENT,
-    strategy: {
-      type: "blockhash",
-      blockhash: submitted.blockhash,
-      lastValidBlockHeight: submitted.lastValidBlockHeight,
-    },
+  return transactionSignature;
+};
+
+const readSubmittedTransactionStatus = async ({
+  umi,
+  transactionSignature,
+  statusRequestTimeoutMs = SIGNATURE_STATUS_TIMEOUT_MS,
+}) => {
+  const [status] = await waitForPromiseWithTimeout(
+    umi.rpc.getSignatureStatuses([transactionSignature], {
+      searchTransactionHistory: true,
+    }),
+    statusRequestTimeoutMs,
+  );
+  if (!status) {
+    return { kind: "pending" };
+  }
+  if (status.error != null) {
+    return { kind: "failed", error: status.error };
+  }
+  if (["confirmed", "finalized"].includes(status.commitment)) {
+    return { kind: "confirmed" };
+  }
+  return { kind: "pending" };
+};
+
+const waitForSubmittedTransactionStatus = async ({
+  umi,
+  submitted,
+  retryDelaysMs = TRANSACTION_STATUS_RETRY_DELAYS_MS,
+  statusRequestTimeoutMs = SIGNATURE_STATUS_TIMEOUT_MS,
+}) => {
+  const transactionSignature = getSubmittedTransactionSignature(submitted);
+  let observedStatus = false;
+  let lastError = null;
+  for (const delayMs of retryDelaysMs) {
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+    try {
+      const status = await readSubmittedTransactionStatus({
+        umi,
+        transactionSignature,
+        statusRequestTimeoutMs,
+      });
+      observedStatus = true;
+      if (status.kind !== "pending") {
+        return status;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  return observedStatus
+    ? { kind: "pending" }
+    : { kind: "unknown", error: lastError };
+};
+
+const recoverSubmittedWithdrawal = async ({
+  umi,
+  withdrawal,
+  assetOwner,
+  recipientAddress,
+  statusRetryDelaysMs = TRANSACTION_STATUS_RETRY_DELAYS_MS,
+}) => {
+  const submitted = deserializePersistedSubmittedTransaction(umi, withdrawal);
+  if (!submitted) {
+    throw new HttpsError(
+      "internal",
+      "The submitted prize transaction is unavailable.",
+    );
+  }
+  let status = await waitForSubmittedTransactionStatus({
+    umi,
+    submitted,
+    retryDelaysMs: [0],
   });
-  if (confirmation.value.err) {
-    throw new HttpsError("failed-precondition", "Prize transfer failed.");
+  if (status.kind === "confirmed") {
+    return { kind: "completed", submitted };
+  }
+  if (status.kind === "failed") {
+    return assetOwner === EVENT_PRIZE_ADMIN_WALLET
+      ? { kind: "retry", discardPersistedSubmission: true }
+      : { kind: "blocked" };
+  }
+  if (assetOwner === recipientAddress) {
+    return { kind: "completed", submitted };
+  }
+  if (assetOwner === EVENT_PRIZE_ADMIN_WALLET) {
+    if (status.kind === "unknown") {
+      throw (
+        status.error || new Error("Prize transaction status is unavailable.")
+      );
+    }
+    return { kind: "retry", discardPersistedSubmission: false };
+  }
+  const remainingRetryDelaysMs =
+    statusRetryDelaysMs[0] === 0
+      ? statusRetryDelaysMs.slice(1)
+      : statusRetryDelaysMs;
+  if (remainingRetryDelaysMs.length > 0) {
+    status = await waitForSubmittedTransactionStatus({
+      umi,
+      submitted,
+      retryDelaysMs: remainingRetryDelaysMs,
+    });
+  }
+  if (status.kind === "confirmed") {
+    return { kind: "completed", submitted };
+  }
+  if (status.kind === "failed") {
+    return { kind: "blocked" };
+  }
+  throw status.error || new Error("Prize transaction confirmation is pending.");
+};
+
+const sendAndConfirmSubmittedTransaction = async ({
+  umi,
+  submitted,
+  statusRetryDelaysMs,
+  confirmationTimeoutMs = CONFIRMATION_TIMEOUT_MS,
+  sendTimeoutMs = SEND_TRANSACTION_TIMEOUT_MS,
+  statusRequestTimeoutMs = SIGNATURE_STATUS_TIMEOUT_MS,
+}) => {
+  const transactionSignature = getSubmittedTransactionSignature(submitted);
+  const { base58 } = loadSolanaDependencies();
+  let sendError = null;
+  try {
+    const sentSignature = await waitForPromiseWithTimeout(
+      umi.rpc.sendTransaction(submitted.signedTransaction, {
+        skipPreflight: false,
+        preflightCommitment: CONFIRMATION_COMMITMENT,
+        maxRetries: 3,
+      }),
+      sendTimeoutMs,
+    );
+    const sentSignatureString = base58.deserialize(sentSignature)[0];
+    if (sentSignatureString !== submitted.transactionSignature) {
+      throw new HttpsError("internal", "Prize transaction signature mismatch.");
+    }
+  } catch (error) {
+    if (error instanceof HttpsError) {
+      throw error;
+    }
+    if (Array.isArray(error?.logs) && error.logs.length > 0) {
+      throw new HttpsError(
+        "failed-precondition",
+        "The prize transfer could not be submitted.",
+      );
+    }
+    sendError = error;
+  }
+  try {
+    const confirmation = await waitForPromiseWithTimeout(
+      umi.rpc.confirmTransaction(transactionSignature, {
+        commitment: CONFIRMATION_COMMITMENT,
+        strategy: {
+          type: "blockhash",
+          blockhash: submitted.blockhash,
+          lastValidBlockHeight: submitted.lastValidBlockHeight,
+        },
+      }),
+      confirmationTimeoutMs,
+      "confirmation-timeout",
+    );
+    if (confirmation.value.err) {
+      throw new HttpsError("failed-precondition", "Prize transfer failed.");
+    }
+  } catch (error) {
+    if (error instanceof HttpsError) {
+      throw error;
+    }
+    const status = await waitForSubmittedTransactionStatus({
+      umi,
+      submitted,
+      retryDelaysMs: statusRetryDelaysMs,
+      statusRequestTimeoutMs,
+    });
+    if (status.kind === "failed") {
+      throw new HttpsError("failed-precondition", "Prize transfer failed.");
+    }
+    if (status.kind !== "confirmed") {
+      throw sendError || status.error || error;
+    }
+    console.info("event-prize-withdrawal-confirmation-reconciled", {
+      transactionSignature: submitted.transactionSignature,
+    });
+  }
+  if (sendError) {
+    console.info("event-prize-withdrawal-send-reconciled", {
+      transactionSignature: submitted.transactionSignature,
+    });
   }
 };
 
@@ -413,9 +655,16 @@ const reconcileCompletedWithdrawalProjections = async ({
   eventId,
   prizeId,
 }) => {
-  const projectionProfileIds = getWithdrawalProjectionProfileIds({
+  const knownProfileIds = getWithdrawalProjectionProfileIds({
     withdrawal,
     profileIds,
+  });
+  const canonicalProfilePaths = await Promise.all(
+    knownProfileIds.map(resolveCanonicalProfilePath),
+  );
+  const projectionProfileIds = getWithdrawalProjectionProfileIds({
+    withdrawal,
+    profileIds: knownProfileIds.concat(canonicalProfilePaths.flat()),
   });
   await Promise.all(
     projectionProfileIds.map((projectionProfileId) =>
@@ -428,6 +677,18 @@ const reconcileCompletedWithdrawalProjections = async ({
       }),
     ),
   );
+};
+
+const attemptCompletedWithdrawalProjectionReconciliation = async (args) => {
+  try {
+    await reconcileCompletedWithdrawalProjections(args);
+  } catch (error) {
+    console.warn("event-prize-withdrawal-projection-cleanup-failed", {
+      eventId: args.eventId,
+      prizeId: args.prizeId,
+      errorType: normalizeString(error?.name) || "Error",
+    });
+  }
 };
 
 const finalizeWithdrawal = async ({
@@ -446,16 +707,23 @@ const finalizeWithdrawal = async ({
       "The prize profile could not be verified.",
     );
   }
-  const canonicalProfileSnapshot = await readProfileByLoginUid(
-    requesterUid,
-    [],
-  );
-  const canonicalProfileId = normalizeString(canonicalProfileSnapshot?.id);
-  if (!canonicalProfileId) {
-    throw new HttpsError(
-      "unavailable",
-      "The prize profile could not be verified.",
+  let canonicalProfileId = normalizeString(profileId);
+  try {
+    const canonicalProfileSnapshot = await readProfileByLoginUid(
+      requesterUid,
+      [],
     );
+    canonicalProfileId =
+      normalizeString(canonicalProfileSnapshot?.id) || canonicalProfileId;
+  } catch {
+    console.warn("event-prize-withdrawal-profile-refresh-failed", {
+      eventId,
+      prizeId,
+      profileId: canonicalProfileId,
+    });
+  }
+  if (!canonicalProfileId) {
+    throw new HttpsError("internal", "The prize profile is unavailable.");
   }
   const projectionProfileIds = getWithdrawalProjectionProfileIds({
     withdrawal,
@@ -473,7 +741,7 @@ const finalizeWithdrawal = async ({
     completedAtMs,
   });
   await admin.database().ref().update(updates);
-  await reconcileCompletedWithdrawalProjections({
+  await attemptCompletedWithdrawalProjectionReconciliation({
     withdrawal: completed,
     profileIds: projectionProfileIds,
     eventId,
@@ -557,7 +825,7 @@ const handleWithdrawEventPrize = async (request) => {
         "Prize withdrawal is unavailable.",
       );
     }
-    await reconcileCompletedWithdrawalProjections({
+    await attemptCompletedWithdrawalProjectionReconciliation({
       withdrawal: existingWithdrawal,
       profileIds: [profileId],
       eventId,
@@ -604,7 +872,7 @@ const handleWithdrawEventPrize = async (request) => {
     canonicalRecordSourceProfileId: existingProfileId,
   });
   if (claim.completed) {
-    await reconcileCompletedWithdrawalProjections({
+    await attemptCompletedWithdrawalProjectionReconciliation({
       withdrawal: claim.completed,
       profileIds: [profileId],
       eventId,
@@ -637,19 +905,39 @@ const handleWithdrawEventPrize = async (request) => {
         "The prize collection could not be verified.",
       );
     }
-    if (asset.owner === recipientAddress && withdrawal.status === "submitted") {
-      const completed = await finalizeWithdrawal({
+    let discardPersistedSubmission = false;
+    if (withdrawal.status === "submitted") {
+      const recovery = await recoverSubmittedWithdrawal({
+        umi,
         withdrawal,
-        profileId,
-        eventId,
-        prizeId,
-        assetAddress,
+        assetOwner: asset.owner,
         recipientAddress,
-        transactionSignature: normalizeString(withdrawal.transactionSignature),
       });
-      return buildCompletedResponse(completed);
-    }
-    if (asset.owner !== EVENT_PRIZE_ADMIN_WALLET) {
+      if (recovery.kind === "completed") {
+        const completed = await finalizeWithdrawal({
+          withdrawal,
+          profileId,
+          eventId,
+          prizeId,
+          assetAddress,
+          recipientAddress,
+          transactionSignature: recovery.submitted.transactionSignature,
+        });
+        return buildCompletedResponse(completed);
+      }
+      if (recovery.kind === "blocked") {
+        await markWithdrawalBlocked({
+          withdrawalRef,
+          leaseId,
+          observedOwner: asset.owner,
+        });
+        throw new HttpsError(
+          "failed-precondition",
+          "This prize is unavailable for withdrawal.",
+        );
+      }
+      discardPersistedSubmission = recovery.discardPersistedSubmission;
+    } else if (asset.owner !== EVENT_PRIZE_ADMIN_WALLET) {
       await markWithdrawalBlocked({
         withdrawalRef,
         leaseId,
@@ -672,7 +960,9 @@ const handleWithdrawEventPrize = async (request) => {
         "The prize collection could not be verified.",
       );
     }
-    submitted = await deserializeSubmittedTransaction(umi, withdrawal);
+    submitted = discardPersistedSubmission
+      ? null
+      : await deserializeSubmittedTransaction(umi, withdrawal);
     if (!submitted) {
       submitted = await buildSubmittedTransaction({
         umi,
@@ -686,15 +976,6 @@ const handleWithdrawEventPrize = async (request) => {
       withdrawal = submittedSnapshot.val() || withdrawal;
     }
     await sendAndConfirmSubmittedTransaction({ umi, submitted });
-    const transferredAsset = await fetchAsset(umi, publicKey(assetAddress), {
-      commitment: CONFIRMATION_COMMITMENT,
-    });
-    if (transferredAsset.owner !== recipientAddress) {
-      throw new HttpsError(
-        "unavailable",
-        "Prize ownership could not be confirmed.",
-      );
-    }
     const completed = await finalizeWithdrawal({
       withdrawal,
       profileId,
@@ -745,11 +1026,15 @@ const withdrawEventPrize = onCall(
 
 module.exports = {
   acquireWithdrawalClaim,
+  deserializePersistedSubmittedTransaction,
   deserializeSubmittedTransaction,
   handleWithdrawEventPrize,
   loadSolanaDependencies,
   persistSubmittedTransaction,
+  recoverSubmittedWithdrawal,
   reconcileCompletedWithdrawalProjections,
+  sendAndConfirmSubmittedTransaction,
   validatePrizeAssignment,
+  waitForSubmittedTransactionStatus,
   withdrawEventPrize,
 };

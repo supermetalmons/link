@@ -231,20 +231,19 @@ const decideWithdrawalClaim = ({
     if (existingRecipientAddress !== recipientAddress) {
       return { kind: "destination-mismatch", value: existing };
     }
-    if (
-      leaseExpiresAtMs > nowMs &&
-      existingLeaseId &&
-      existingLeaseId !== leaseId
-    ) {
-      return { kind: "busy", value: existing };
-    }
   } else if (
     existing.status === "processing" &&
     leaseExpiresAtMs > nowMs &&
     existingLeaseId &&
     existingLeaseId !== leaseId
   ) {
-    return { kind: "busy", value: existing };
+    if (
+      !recordMatchesPrize ||
+      !recordOwnedByRequest ||
+      existingRecipientAddress !== recipientAddress
+    ) {
+      return { kind: "busy", value: existing };
+    }
   }
 
   const preserveSubmitted = existing.status === "submitted";
