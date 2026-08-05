@@ -13,8 +13,16 @@ import {
 import { AvatarImage } from "./AvatarImage";
 import { storage } from "../utils/storage";
 import { getStashedPlayerProfile } from "../utils/playerMetadata";
+import {
+  leaderboardCache,
+  type LeaderboardEntry,
+  type LeaderboardType,
+} from "./leaderboardCache";
 
-export type LeaderboardType = "rating" | "mp" | MiningMaterialName | "total";
+export {
+  resetLeaderboardCache,
+  type LeaderboardType,
+} from "./leaderboardCache";
 
 export const LEADERBOARD_TYPE_ICON_URLS = {
   rating: "https://cdn.lil.org/mons/icons/elo_2.webp",
@@ -507,21 +515,6 @@ interface LeaderboardProps {
   leaderboardType: LeaderboardType;
 }
 
-interface LeaderboardEntry {
-  eth?: string | null;
-  sol?: string | null;
-  mp: number;
-  rating: number;
-  win: boolean;
-  id: string;
-  emoji: number;
-  aura?: string;
-  ensName?: string | null;
-  username?: string | null;
-  profile: PlayerProfile;
-  materials: Record<MiningMaterialName, number>;
-}
-
 const getLeaderboardDisplayName = (row: LeaderboardEntry): string => {
   if (row.username) return row.username;
   if (row.ensName) return row.ensName;
@@ -549,12 +542,6 @@ const createLeaderboardEntry = (entry: PlayerProfile): LeaderboardEntry => ({
 
 const profilesToEntries = (profiles: PlayerProfile[]): LeaderboardEntry[] =>
   profiles.map(createLeaderboardEntry);
-
-const leaderboardCache = new Map<LeaderboardType, LeaderboardEntry[]>();
-
-export const resetLeaderboardCache = () => {
-  leaderboardCache.clear();
-};
 
 type RowPosition = "visible" | "above" | "below";
 

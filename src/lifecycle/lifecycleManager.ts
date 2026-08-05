@@ -7,9 +7,9 @@ import { resetMainGameLoadedState } from "../game/mainGameLoadState";
 import { resetWagerMaterialsState } from "../services/wagerMaterialsService";
 import { resetProfileMiningState } from "../services/rocksMiningService";
 import { resetNftCache } from "../services/nftCache";
-import { resetPlayerMetadataCaches } from "../utils/playerMetadata";
+import { resetPlayerMetadataCaches } from "../utils/playerMetadataCache";
 import { resetEnsCache } from "../utils/ensResolver";
-import { resetLeaderboardCache } from "../ui/Leaderboard";
+import { resetLeaderboardCache } from "../ui/leaderboardCache";
 import { getLifecycleCounters } from "./lifecycleDiagnostics";
 import type { RouteState } from "../navigation/routeState";
 

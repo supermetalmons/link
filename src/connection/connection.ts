@@ -108,6 +108,8 @@ import {
 import { rocksMiningService } from "../services/rocksMiningService";
 import { compareNavigationItems as compareNavigationItemsByDisplayOrder } from "../services/navigationItemOrdering";
 import { resetNftCache } from "../services/nftCache";
+import { resetPlayerMetadataCaches } from "../utils/playerMetadataCache";
+import { resetLeaderboardCache } from "../ui/leaderboardCache";
 import { RouteState, getCurrentRouteState } from "../navigation/routeState";
 import {
   decrementLifecycleCounter,
@@ -1158,15 +1160,11 @@ class Connection {
     this.setSameProfilePlayerUid(null);
     this.cleanupWagerObserver();
     rocksMiningService.resetProfileMiningState();
-    const [playerMetadata, ensResolver, leaderboard] = await Promise.all([
-      import("../utils/playerMetadata"),
-      import("../utils/ensResolver"),
-      import("../ui/Leaderboard"),
-    ]);
+    const ensResolver = await import("../utils/ensResolver");
     resetNftCache();
-    playerMetadata.resetPlayerMetadataCaches();
+    resetPlayerMetadataCaches();
     ensResolver.resetEnsCache();
-    leaderboard.resetLeaderboardCache();
+    resetLeaderboardCache();
     setFrozenMaterials(null);
     if (authSignOutError) {
       throw authSignOutError;

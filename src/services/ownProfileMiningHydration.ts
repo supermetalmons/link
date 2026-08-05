@@ -4,11 +4,11 @@ import {
 } from "../connection/connectionModels";
 import { rocksMiningService } from "./rocksMiningService";
 import { storage } from "../utils/storage";
-
-type PendingOwnProfileMiningState = {
-  profileId: string;
-  mining: PlayerMiningData;
-};
+import {
+  getPendingOwnProfileMiningState,
+  resetPendingOwnProfileMiningState,
+  setPendingOwnProfileMiningState,
+} from "../utils/playerMetadataCache";
 
 const cloneMiningState = (mining: PlayerMiningData): PlayerMiningData => ({
   lastRockDate: mining.lastRockDate ?? null,
@@ -19,9 +19,8 @@ const applyOwnProfileMiningState = (mining: PlayerMiningData): void => {
   rocksMiningService.setFromServer(mining, { persist: true });
 };
 
-let pendingOwnProfileMiningState: PendingOwnProfileMiningState | null = null;
-
 export function flushPendingOwnProfileMiningState(): void {
+  const pendingOwnProfileMiningState = getPendingOwnProfileMiningState();
   if (!pendingOwnProfileMiningState) {
     return;
   }
@@ -30,11 +29,11 @@ export function flushPendingOwnProfileMiningState(): void {
     return;
   }
   if (pendingOwnProfileMiningState.profileId !== activeProfileId) {
-    pendingOwnProfileMiningState = null;
+    resetPendingOwnProfileMiningState();
     return;
   }
   applyOwnProfileMiningState(pendingOwnProfileMiningState.mining);
-  pendingOwnProfileMiningState = null;
+  resetPendingOwnProfileMiningState();
 }
 
 export function syncOwnProfileMiningState(profile: PlayerProfile): void {
@@ -44,17 +43,15 @@ export function syncOwnProfileMiningState(profile: PlayerProfile): void {
   const activeProfileId = storage.getProfileId("");
   if (activeProfileId !== profile.id) {
     if (!activeProfileId) {
-      pendingOwnProfileMiningState = {
+      setPendingOwnProfileMiningState({
         profileId: profile.id,
         mining: cloneMiningState(profile.mining),
-      };
+      });
     }
     return;
   }
-  pendingOwnProfileMiningState = null;
+  resetPendingOwnProfileMiningState();
   applyOwnProfileMiningState(profile.mining);
 }
 
-export function resetPendingOwnProfileMiningState(): void {
-  pendingOwnProfileMiningState = null;
-}
+export { resetPendingOwnProfileMiningState } from "../utils/playerMetadataCache";

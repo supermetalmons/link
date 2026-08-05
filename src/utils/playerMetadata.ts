@@ -7,10 +7,16 @@ import { updateEmojiAndAuraIfNeeded } from "../game/board";
 import { isWatchOnly } from "../game/gameController";
 import { updateProfileDisplayName } from "../ui/ProfileSignIn";
 import { syncTutorialProgress } from "../content/problems";
+import { syncOwnProfileMiningState } from "../services/ownProfileMiningHydration";
 import {
-  resetPendingOwnProfileMiningState,
-  syncOwnProfileMiningState,
-} from "../services/ownProfileMiningHydration";
+  ensForUids,
+  ethAddressesForUids,
+  profilesForUids,
+  solAddressesForUids,
+  usernamesForUids,
+} from "./playerMetadataCache";
+
+export { resetPlayerMetadataCaches } from "./playerMetadataCache";
 
 const updateRating = createRatingUpdater(glicko2.Glicko2);
 
@@ -83,7 +89,7 @@ export function getStashedPlayerProfile(
   uid: string,
 ): PlayerProfile | undefined {
   if (!uid) return undefined;
-  return allProfilesDict[uid];
+  return profilesForUids[uid];
 }
 
 export function getStashedPlayerEthAddress(uid: string) {
@@ -111,7 +117,7 @@ export function updatePlayerMetadataWithProfile(
     delete solAddressesForUids[loginId];
   }
 
-  if (ethAddress && !ensDict[loginId] && !usernamesForUids[loginId]) {
+  if (ethAddress && !ensForUids[loginId] && !usernamesForUids[loginId]) {
     fetch(`https://api.ensideas.com/ens/resolve/${ethAddress}`)
       .then((response) => {
         if (response.ok) {
@@ -124,7 +130,7 @@ export function updatePlayerMetadataWithProfile(
           return;
         }
         if (data && data.name && data.name.trim() !== "") {
-          ensDict[loginId] = {
+          ensForUids[loginId] = {
             name: data.name,
             avatar: data.avatar,
           };
@@ -135,7 +141,7 @@ export function updatePlayerMetadataWithProfile(
   }
 
   if (profile.rating !== undefined && profile.nonce !== undefined) {
-    allProfilesDict[loginId] = profile;
+    profilesForUids[loginId] = profile;
     if (own) {
       syncOwnProfileMiningState(profile);
     }
@@ -147,7 +153,7 @@ export function updatePlayerMetadataWithProfile(
         if (!sessionGuard()) {
           return;
         }
-        allProfilesDict[loginId] = profile;
+        profilesForUids[loginId] = profile;
         if (profile.emoji !== undefined && own) {
           syncTutorialProgress(
             profile.completedProblemIds ?? [],
@@ -208,12 +214,12 @@ export function updatePlayerMetadataWithProfile(
 
 export function getRatingForUid(uid: string): number | undefined {
   if (!uid) return undefined;
-  return allProfilesDict[uid]?.rating;
+  return profilesForUids[uid]?.rating;
 }
 
 function getNonceForUid(uid: string): number | undefined {
   if (!uid) return undefined;
-  return allProfilesDict[uid]?.nonce;
+  return profilesForUids[uid]?.nonce;
 }
 
 function setRatingAndNonceForUid(
@@ -222,32 +228,13 @@ function setRatingAndNonceForUid(
   nonce: number,
 ): void {
   if (!uid) return;
-  if (allProfilesDict[uid]) {
-    allProfilesDict[uid].rating = rating;
-    allProfilesDict[uid].nonce = nonce;
+  if (profilesForUids[uid]) {
+    profilesForUids[uid].rating = rating;
+    profilesForUids[uid].nonce = nonce;
   }
 }
 
 export function getEnsNameForUid(uid: string): string | undefined {
   if (!uid) return undefined;
-  return ensDict[uid]?.name;
-}
-
-const usernamesForUids: { [key: string]: string } = {};
-const ethAddressesForUids: { [key: string]: string } = {};
-const solAddressesForUids: { [key: string]: string } = {};
-const ensDict: { [key: string]: { name: string; avatar: string } } = {};
-const allProfilesDict: { [key: string]: PlayerProfile } = {};
-
-export function resetPlayerMetadataCaches() {
-  Object.keys(usernamesForUids).forEach((key) => delete usernamesForUids[key]);
-  Object.keys(ethAddressesForUids).forEach(
-    (key) => delete ethAddressesForUids[key],
-  );
-  Object.keys(solAddressesForUids).forEach(
-    (key) => delete solAddressesForUids[key],
-  );
-  Object.keys(ensDict).forEach((key) => delete ensDict[key]);
-  Object.keys(allProfilesDict).forEach((key) => delete allProfilesDict[key]);
-  resetPendingOwnProfileMiningState();
+  return ensForUids[uid]?.name;
 }
