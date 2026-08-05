@@ -33,7 +33,7 @@
     "deploy:firebase": "npm --prefix cloud/functions install && cd cloud && firebase deploy --only functions,firestore:rules,firestore:indexes,database",
     "deploy:allFunctionsBatched": "npm --prefix cloud/functions install && npm --prefix cloud/functions run deploy:safe --",
     "deploy:monsRulesFunctions": "npm --prefix cloud/functions install && npm --prefix cloud/functions run deploy:safe -- projectProfileEventPrizesOnPrizeWritten projectProfileEventPrizesOnMergeTargetWritten getNfts withdrawEventPrize verifySolanaAddress verifyEthAddress verifyAppleToken completeXRedirectAuth automatch updateRatings startMatchTimer claimMatchVictoryByTimer resolveWagerOutcome createEvent joinEvent postponeEventStart removeEventParticipant disqualifyEventMatchWinners syncEventState processEventProgress processEventProgressFallback",
-    "deploy": "node --experimental-strip-types scripts/deploy-amplify.ts",
+    "deploy": "node --experimental-strip-types scripts/deploy-cloudflare.ts",
     "latest:root": "npx --yes npm-check-updates@latest -u --peer && npm install --legacy-peer-deps",
     "latest:functions": "npx --yes npm-check-updates@latest -u --peer --packageFile cloud/functions/package.json && npm install --prefix cloud/functions",
     "latest:admin": "npx --yes npm-check-updates@latest -u --peer --packageFile cloud/admin/package.json && npm install --prefix cloud/admin",
@@ -71,6 +71,7 @@
     ]
   },
   "devDependencies": {
-    "prettier": "^3.9.6"
+    "prettier": "^3.9.6",
+    "wrangler": "4.118.0"
   }
 }
