@@ -26,6 +26,7 @@ function usage(): string {
     "Usage:",
     "  npm run deploy -- dry-run",
     "  npm run deploy -- preview --token-file /path/to/cloudflare-token",
+    "  npm run deploy -- production",
     "  npm run deploy -- production --version-id <candidate-version-id> --token-file /path/to/cloudflare-token",
     "",
     "Authentication:",
@@ -76,9 +77,6 @@ function parseArgs(argv: string[]): CliOptions {
     fail(`Unknown argument: ${arg}\n\n${usage()}`, 2);
   }
 
-  if (mode === "production" && !versionId) {
-    fail("Production requires --version-id for the tested candidate.", 2);
-  }
   if (mode !== "production" && versionId) {
     fail("--version-id is only valid in production mode.", 2);
   }
@@ -177,6 +175,36 @@ function createBuildEnvironment(): NodeJS.ProcessEnv {
   return buildEnv;
 }
 
+function readUploadedVersionId(outputFile: string): string {
+  let contents: string;
+  try {
+    contents = readFileSync(outputFile, "utf8");
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    fail(`Unable to read the uploaded version metadata: ${detail}`);
+  }
+
+  for (const line of contents.trim().split(/\r?\n/).reverse()) {
+    try {
+      const entry = JSON.parse(line) as {
+        type?: unknown;
+        version_id?: unknown;
+      };
+      if (
+        entry.type === "version-upload" &&
+        typeof entry.version_id === "string" &&
+        entry.version_id
+      ) {
+        return entry.version_id;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  fail("Wrangler did not report the ID of the newly uploaded version.");
+}
+
 function main(): void {
   const opts = parseArgs(process.argv.slice(2));
   const nodeMajor = Number.parseInt(process.versions.node.split(".")[0], 10);
@@ -194,7 +222,7 @@ function main(): void {
   const buildEnv = createBuildEnvironment();
 
   console.log(`[deploy] Mode:  ${opts.mode}`);
-  if (opts.mode === "production") {
+  if (opts.mode === "production" && opts.versionId) {
     console.log(`[deploy] Version: ${opts.versionId}`);
   } else {
     console.log(
@@ -223,9 +251,18 @@ function main(): void {
   } else if (opts.mode === "preview") {
     wranglerArgs = ["versions", "upload", "--config", "wrangler.jsonc"];
   } else {
-    const versionId = opts.versionId;
+    let versionId = opts.versionId;
     if (!versionId) {
-      fail("Production requires --version-id for the tested candidate.", 2);
+      const outputFile = resolve(
+        wranglerLogDirectory,
+        `production-${process.pid}-${Date.now()}.json`,
+      );
+      wranglerEnv.WRANGLER_OUTPUT_FILE_PATH = outputFile;
+      const uploadArgs = ["versions", "upload", "--config", "wrangler.jsonc"];
+      console.log(`[deploy] Wrangler: ${uploadArgs.slice(0, 2).join(" ")}`);
+      run(wranglerBinary, uploadArgs, wranglerEnv, "Wrangler version upload");
+      versionId = readUploadedVersionId(outputFile);
+      console.log(`[deploy] Version: ${versionId} (new)`);
     }
     wranglerArgs = [
       "versions",

@@ -18,6 +18,8 @@ independently deployed to Firebase.
   `npm run deploy -- dry-run`
 - Upload a non-production Worker version:
   `npm run deploy -- preview --token-file /path/to/cloudflare-token`
+- Build, upload, and immediately deploy a new production Worker version:
+  `npm run deploy -- production`
 - Smoke-test the unique Version Preview URL printed by Wrangler, then promote the
   Version ID printed by the same command to `mons.link`:
   `npm run deploy -- production --version-id <candidate-version-id> --token-file /path/to/cloudflare-token`
@@ -30,12 +32,14 @@ frontend build environment. Vite writes to `build`, the helper sets
 Candidate builds therefore use the committed Firebase and Apple client
 fallbacks; no Worker runtime variables are required.
 
-Production does not rebuild or upload assets. It promotes the already tested
-Version ID, so the preview and production artifacts are identical. Use the
-unique version URL for smoke testing rather than a reusable preview alias. If the
-preview upload fails, stop before production. Always use the unmodified pinned
-Wrangler; do not work around an asset upload error by borrowing another Worker's
-asset namespace.
+Production with `--version-id` does not rebuild or upload assets. It promotes the
+already tested Version ID, so the preview and production artifacts are
+identical. Without `--version-id`, the helper builds and uploads a fresh version,
+reads its generated ID from Wrangler's structured output, and deploys it at 100%
+traffic. Use the unique version URL for smoke testing rather than a reusable
+preview alias. If the preview upload fails, stop before production. Always use
+the unmodified pinned Wrangler; do not work around an asset upload error by
+borrowing another Worker's asset namespace.
 
 Routine releases do not change routes or domains. If `wrangler.jsonc` routing is
 changed, review that change separately and apply it with
