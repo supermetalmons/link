@@ -13,14 +13,14 @@
     "@types/react-dom": "^19.2.4",
     "bs58": "^6.0.0",
     "ethers": "^6.17.0",
-    "firebase": "^12.17.0",
+    "firebase": "^12.17.1",
     "glicko2": "^1.2.1",
-    "mons-rules": "0.3.4",
+    "mons-rules": "0.3.5",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-icons": "^5.7.0",
-    "styled-components": "^6.4.4",
-    "typescript": "^5.9.3"
+    "styled-components": "^6.5.0",
+    "typescript": "^6.0.3"
   },
   "scripts": {
     "start": "vite",
@@ -58,6 +58,6 @@
     "terser": "^5.49.2",
     "vite": "^8.2.0",
     "vite-plugin-checker": "^0.14.5",
-    "wrangler": "4.118.0"
+    "wrangler": "4.119.0"
   }
 }
