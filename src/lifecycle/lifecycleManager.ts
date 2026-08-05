@@ -6,7 +6,7 @@ import { resetWagerStore } from "../game/wagerState";
 import { resetMainGameLoadedState } from "../game/mainGameLoadState";
 import { resetWagerMaterialsState } from "../services/wagerMaterialsService";
 import { resetProfileMiningState } from "../services/rocksMiningService";
-import { resetNftCache } from "../services/nftService";
+import { resetNftCache } from "../services/nftCache";
 import { resetPlayerMetadataCaches } from "../utils/playerMetadata";
 import { resetEnsCache } from "../utils/ensResolver";
 import { resetLeaderboardCache } from "../ui/Leaderboard";

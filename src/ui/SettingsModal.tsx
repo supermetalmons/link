@@ -35,7 +35,7 @@ import {
 import { formatXAuthErrorMessage } from "../connection/xAuthErrors";
 import { isMobile } from "../utils/misc";
 import { notifyOtherTabsAboutSignIn } from "../session/logoutOrchestrator";
-import { resetNftCache } from "../services/nftService";
+import { resetNftCache } from "../services/nftCache";
 
 const SettingsPopup = styled(ModalPopup)`
   padding: 20px;

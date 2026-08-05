@@ -107,6 +107,7 @@ import {
 } from "../services/wagerMaterialsService";
 import { rocksMiningService } from "../services/rocksMiningService";
 import { compareNavigationItems as compareNavigationItemsByDisplayOrder } from "../services/navigationItemOrdering";
+import { resetNftCache } from "../services/nftCache";
 import { RouteState, getCurrentRouteState } from "../navigation/routeState";
 import {
   decrementLifecycleCounter,
@@ -1157,14 +1158,12 @@ class Connection {
     this.setSameProfilePlayerUid(null);
     this.cleanupWagerObserver();
     rocksMiningService.resetProfileMiningState();
-    const [nftService, playerMetadata, ensResolver, leaderboard] =
-      await Promise.all([
-        import("../services/nftService"),
-        import("../utils/playerMetadata"),
-        import("../utils/ensResolver"),
-        import("../ui/Leaderboard"),
-      ]);
-    nftService.resetNftCache();
+    const [playerMetadata, ensResolver, leaderboard] = await Promise.all([
+      import("../utils/playerMetadata"),
+      import("../utils/ensResolver"),
+      import("../ui/Leaderboard"),
+    ]);
+    resetNftCache();
     playerMetadata.resetPlayerMetadataCaches();
     ensResolver.resetEnsCache();
     leaderboard.resetLeaderboardCache();
