@@ -1,12 +1,10 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import legacy from "@vitejs/plugin-legacy";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv, type Plugin } from "vite";
 import checker from "vite-plugin-checker";
 
 const defaultAppTitle = "mons.link • Play Mons";
-const supportedBrowsers = [">0.2%", "not dead", "not op_mini all"];
 
 const sharedPackageDirectory = resolve(
   import.meta.dirname,
@@ -57,9 +55,6 @@ export default defineConfig(({ mode }) => {
           watchPath: "src",
         },
         enableBuild: false,
-      }),
-      legacy({
-        targets: supportedBrowsers,
       }),
       restartOnSharedPackageChange(),
     ],

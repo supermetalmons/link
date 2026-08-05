@@ -19,7 +19,6 @@
     "@metaplex-foundation/umi-bundle-defaults": "^1.5.1",
     "@mons/shared": "file:shared",
     "bs58": "^6.0.0",
-    "ethers": "^6.17.0",
     "firebase-admin": "^14.2.0",
     "firebase-functions": "^7.3.2",
     "glicko2": "^1.2.1",
