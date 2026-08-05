@@ -27,5 +27,8 @@
     "siwe": "^3.0.0",
     "tweetnacl": "^1.0.3"
   },
+  "optionalDependencies": {
+    "utf-8-validate": "5.0.10"
+  },
   "private": true
 }
