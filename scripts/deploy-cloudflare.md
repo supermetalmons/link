@@ -3,7 +3,8 @@
 ## Frontend
 
 - Use Node.js 24 or newer.
-- Install dependencies: `npm install --legacy-peer-deps`
+- Install dependencies: `npm install`
+- Copy `.env.example` to `.env.local` for optional local overrides.
 - Run the local development server: `npm start`
 - Build the production frontend: `npm run build`
 
@@ -23,12 +24,11 @@ independently deployed to Firebase.
 
 The token file must contain only a scoped Cloudflare API token. Alternatively,
 set `CLOUDFLARE_API_TOKEN` in the invoking shell. The deploy helper removes
-Cloudflare credentials, Wrangler settings, local `REACT_APP_*` overrides, and
-Create React App build overrides from the frontend build environment. It fixes
-the output directory at `build`, sets `REACT_APP_BUILD_DATETIME`, and only passes
-the token to the Wrangler subprocess. Candidate builds therefore use the
-committed Firebase and Apple client fallbacks; no Worker runtime variables are
-required.
+Cloudflare credentials, Wrangler settings, and local `VITE_*` overrides from the
+frontend build environment. Vite writes to `build`, the helper sets
+`VITE_BUILD_DATETIME`, and only passes the token to the Wrangler subprocess.
+Candidate builds therefore use the committed Firebase and Apple client
+fallbacks; no Worker runtime variables are required.
 
 Production does not rebuild or upload assets. It promotes the already tested
 Version ID, so the preview and production artifacts are identical. Use the

@@ -29,7 +29,7 @@ export const getSessionGuard = () => {
   return () => {
     const isActive =
       expectedSessionId === currentSessionId && expectedEpoch === currentEpoch;
-    if (!isActive && process.env.NODE_ENV !== "production") {
+    if (!isActive && import.meta.env.DEV) {
       console.log("stale-session-callback", {
         expectedSessionId,
         expectedEpoch,

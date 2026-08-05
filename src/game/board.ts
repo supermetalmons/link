@@ -441,7 +441,7 @@ let wagerSlotLayouts: WagerSlotLayoutMap | null = null;
 let wagerSlotLayoutRevision = 0;
 let committedWagerSlotLayoutRevision = -1;
 let deferredResolvedWager: DeferredResolvedWager | null = null;
-const boardWagerDebugLogsEnabled = process.env.NODE_ENV !== "production";
+const boardWagerDebugLogsEnabled = import.meta.env.DEV;
 let lastWagerEmitSignature = "";
 const logBoardWagerDebug = (
   event: string,
@@ -2178,27 +2178,24 @@ function getPlayerInfoNameTexts(): {
   let playerNameString = "";
   let opponentNameString = "";
 
-  if ((!isOnlineGame || opponentMetadata.uid === "") && !isGameWithBot) {
-  } else {
+  if (isOnlineGame && opponentMetadata.uid !== "" && !isGameWithBot) {
     const placeholderName = "anon";
 
-    if (!isGameWithBot) {
-      playerNameString =
-        playerMetadata.displayName === undefined
-          ? placeholderName
-          : playerMetadata.displayName;
-      opponentNameString =
-        opponentMetadata.displayName === undefined
-          ? placeholderName
-          : opponentMetadata.displayName;
+    playerNameString =
+      playerMetadata.displayName === undefined
+        ? placeholderName
+        : playerMetadata.displayName;
+    opponentNameString =
+      opponentMetadata.displayName === undefined
+        ? placeholderName
+        : opponentMetadata.displayName;
 
-      const ratingPrefix = " • ";
-      if (playerMetadata.rating !== undefined) {
-        playerNameString += ratingPrefix + `${playerMetadata.rating}`;
-      }
-      if (opponentMetadata.rating !== undefined) {
-        opponentNameString += ratingPrefix + `${opponentMetadata.rating}`;
-      }
+    const ratingPrefix = " • ";
+    if (playerMetadata.rating !== undefined) {
+      playerNameString += ratingPrefix + `${playerMetadata.rating}`;
+    }
+    if (opponentMetadata.rating !== undefined) {
+      opponentNameString += ratingPrefix + `${opponentMetadata.rating}`;
     }
   }
 
@@ -4674,7 +4671,7 @@ export function drawTrace(trace: Trace) {
 export function hasBasePlaceholder(location: Location): boolean {
   location = inBoardCoordinates(location);
   const key = location.toString();
-  return basesPlaceholders.hasOwnProperty(key);
+  return Object.prototype.hasOwnProperty.call(basesPlaceholders, key);
 }
 
 function placeMonWithBomb(item: SVGElement, location: Location) {

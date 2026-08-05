@@ -55,7 +55,7 @@ function getDefaultMonId(type: MonType, profileId: string): number {
       return getStableRandomIdForProfileId(profileId, demonTypes.length);
     case MonType.ANGEL:
       return getStableRandomIdForProfileId(profileId, angelTypes.length);
-    case MonType.DRAINER:
+    case MonType.DRAINER: {
       if (drainerTypes.length === 0) {
         return 0;
       }
@@ -74,6 +74,7 @@ function getDefaultMonId(type: MonType, profileId: string): number {
         randomizableDrainerIndexes.length,
       );
       return randomizableDrainerIndexes[fallbackIndex];
+    }
     case MonType.SPIRIT:
       return getStableRandomIdForProfileId(profileId, spiritTypes.length);
     case MonType.MYSTIC:

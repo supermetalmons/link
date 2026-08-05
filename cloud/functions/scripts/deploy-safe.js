@@ -35,7 +35,10 @@ const parseArgs = (argv) => {
       continue;
     }
     if (arg.startsWith("--batch-size=")) {
-      options.batchSize = Number.parseInt(arg.slice("--batch-size=".length), 10);
+      options.batchSize = Number.parseInt(
+        arg.slice("--batch-size=".length),
+        10,
+      );
       continue;
     }
     if (arg === "--project") {

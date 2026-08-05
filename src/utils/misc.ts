@@ -33,10 +33,10 @@ export function getStableRandomIdForProfileId(
 }
 
 export function getBuildInfo(): string {
-  return process.env.REACT_APP_BUILD_DATETIME
+  return import.meta.env.VITE_BUILD_DATETIME
     ? (() => {
         const date = new Date(
-          Number(process.env.REACT_APP_BUILD_DATETIME) * 1000,
+          Number(import.meta.env.VITE_BUILD_DATETIME) * 1000,
         );
         const weekDays = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
         const day = weekDays[date.getDay()];

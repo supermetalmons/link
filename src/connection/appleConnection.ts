@@ -9,7 +9,7 @@ let appleScriptPromise: Promise<void> | null = null;
 const APPLE_SCRIPT_SRC =
   "https://appleid.cdn-apple.com/appleauth/static/jsapi/appleid/1/en_US/appleid.auth.js";
 const APPLE_CLIENT_ID = (
-  process.env.REACT_APP_APPLE_CLIENT_ID || "link.mons"
+  import.meta.env.VITE_APPLE_CLIENT_ID || "link.mons"
 ).trim();
 const APPLE_REDIRECT_URI = "https://mons.link";
 const APPLE_PENDING_INTENTS_STORAGE_KEY = "appleIntentByStateV1";

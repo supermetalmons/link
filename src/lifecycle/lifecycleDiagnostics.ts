@@ -33,7 +33,7 @@ export const decrementLifecycleCounter = (
   amount = 1,
 ) => {
   counters[counter] -= amount;
-  if (process.env.NODE_ENV !== "production" && counters[counter] < 0) {
+  if (import.meta.env.DEV && counters[counter] < 0) {
     console.warn("lifecycle-counter-negative", {
       counter,
       value: counters[counter],

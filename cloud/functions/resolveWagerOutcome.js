@@ -70,12 +70,10 @@ exports.resolveWagerOutcome = onCall(async (request) => {
   const playerProfile = await getProfileByLoginId(playerId);
   const opponentProfile = await getProfileByLoginId(opponentId);
 
-  if (
-    !(
-      (inviteData.hostId === playerId && inviteData.guestId === opponentId) ||
-      (inviteData.hostId === opponentId && inviteData.guestId === playerId)
-    )
-  ) {
+  if (!(
+    (inviteData.hostId === playerId && inviteData.guestId === opponentId) ||
+    (inviteData.hostId === opponentId && inviteData.guestId === playerId)
+  )) {
     throw new HttpsError(
       "permission-denied",
       "Players don't match invite data",

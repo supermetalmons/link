@@ -1285,8 +1285,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
   useLayoutEffect(() => {
     updateMaterialsBarScale();
     window.addEventListener("resize", updateMaterialsBarScale);
-    return () =>
-      window.removeEventListener("resize", updateMaterialsBarScale);
+    return () => window.removeEventListener("resize", updateMaterialsBarScale);
   }, [
     islandOverlayShown,
     materialAmounts,
@@ -5082,8 +5081,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
   const handlePointerStart = useCallback(
     (
       event:
-        | React.MouseEvent<HTMLDivElement>
-        | React.TouchEvent<HTMLDivElement>,
+        React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>,
     ) => {
       if (!islandOverlayVisible || islandClosing || islandOpening) {
         return;
@@ -5717,8 +5715,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
       }
       handlePointerStart(
         event as
-          | React.MouseEvent<HTMLDivElement>
-          | React.TouchEvent<HTMLDivElement>,
+          React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>,
       );
     },
     [handlePointerStart, isMaterialTarget],
@@ -5731,8 +5728,7 @@ function IslandButton({ imageUrl = DEFAULT_URL, dimmed = false }: Props) {
       }
       handlePointerStart(
         event as
-          | React.MouseEvent<HTMLDivElement>
-          | React.TouchEvent<HTMLDivElement>,
+          React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>,
       );
     },
     [handlePointerStart, isSelectorSafeAreaTarget],

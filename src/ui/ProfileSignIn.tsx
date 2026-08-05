@@ -1340,10 +1340,7 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
         setInlineAuthError(formatXAuthErrorMessage(error, "signin"));
       }
     } finally {
-      if (didStartXRedirect) {
-        return;
-      }
-      if (isMountedRef.current) {
+      if (!didStartXRedirect && isMountedRef.current) {
         clearPendingXSignInStaleTimeout();
         clearXRedirectNavigationFallbackTimeout();
         clearXRedirectVisibilityRecovery();

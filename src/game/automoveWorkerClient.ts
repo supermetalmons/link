@@ -18,9 +18,11 @@ type PendingRequestPromiseEntry = {
 let automoveWorker: Worker | null = null;
 let nextAutomoveRequestId = 1;
 const pendingRequestsById = new Map<number, PendingAutomoveRequest>();
-const pendingRequestPromisesByFen = new Map<string, PendingRequestPromiseEntry>();
-const isAutomoveWorkerClientDebugLoggingEnabled =
-  process.env.NODE_ENV !== "production";
+const pendingRequestPromisesByFen = new Map<
+  string,
+  PendingRequestPromiseEntry
+>();
+const isAutomoveWorkerClientDebugLoggingEnabled = import.meta.env.DEV;
 const debugAutomoveWorkerClient = (
   message: string,
   details?: Record<string, unknown>,
@@ -35,9 +37,7 @@ const debugAutomoveWorkerClient = (
   console.debug(`[automove-worker-client] ${message}`);
 };
 
-const requestKeyFor = (
-  fen: string,
-): string => fen;
+const requestKeyFor = (fen: string): string => fen;
 
 const rejectAllPendingRequests = (error: Error): void => {
   if (pendingRequestsById.size > 0) {
@@ -97,7 +97,10 @@ const handleWorkerMessage = (
     return;
   }
   if (!isWorkerAutomoveResponse(event.data)) {
-    handleWorkerFailure(worker, "received invalid response from automove worker");
+    handleWorkerFailure(
+      worker,
+      "received invalid response from automove worker",
+    );
     return;
   }
   const response = event.data;
@@ -147,7 +150,10 @@ const ensureAutomoveWorker = (): Worker => {
     handleWorkerFailure(worker, message);
   };
   worker.onmessageerror = () => {
-    handleWorkerFailure(worker, "received malformed message from automove worker");
+    handleWorkerFailure(
+      worker,
+      "received malformed message from automove worker",
+    );
   };
   automoveWorker = worker;
   return worker;

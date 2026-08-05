@@ -205,8 +205,7 @@ export const NotificationBannerComponent: React.FC<
 
   const handleCloseClick = (
     event:
-      | React.MouseEvent<HTMLButtonElement>
-      | React.TouchEvent<HTMLButtonElement>,
+      React.MouseEvent<HTMLButtonElement> | React.TouchEvent<HTMLButtonElement>,
   ) => {
     event.preventDefault();
     event.stopPropagation();

@@ -794,13 +794,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           if (isMountedRef.current) {
             setBusyMethod(null);
           }
-          return;
+        } else if (isMountedRef.current) {
+          setBusyMethod(null);
+          await refreshLinkedMethods();
         }
-        if (!isMountedRef.current) {
-          return;
-        }
-        setBusyMethod(null);
-        await refreshLinkedMethods();
       }
     },
     [
@@ -900,10 +897,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       }
     } finally {
       setSettingsAppleFlowInProgress(false);
-      if (!isActionCurrent()) {
-        return;
-      }
-      if (isMountedRef.current) {
+      if (isActionCurrent() && isMountedRef.current) {
         setBusyMethod((current) => (current === "apple" ? null : current));
         setAppleButtonState("idle");
         await refreshLinkedMethods();

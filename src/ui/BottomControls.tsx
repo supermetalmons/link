@@ -127,10 +127,7 @@ import {
   subscribeToFrozenMaterials,
 } from "../services/wagerMaterialsService";
 import { getStashedPlayerProfile } from "../utils/playerMetadata";
-import {
-  storage,
-  type ReactionExtraStickerCache,
-} from "../utils/storage";
+import { storage, type ReactionExtraStickerCache } from "../utils/storage";
 import {
   getCurrentTarget,
   isTransitionInProgress,
@@ -851,9 +848,7 @@ interface BottomControlsProps {
   authState: AuthState;
 }
 
-const BottomControls: React.FC<BottomControlsProps> = ({
-  authState,
-}) => {
+const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const { authStatus, profileId, ethAddress, solAddress } = authState;
   const isAuthenticated = authStatus === "authenticated";
   const [isEndMatchButtonVisible, setIsEndMatchButtonVisible] = useState(false);

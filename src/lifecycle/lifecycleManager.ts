@@ -14,7 +14,7 @@ import { getLifecycleCounters } from "./lifecycleDiagnostics";
 import type { RouteState } from "../navigation/routeState";
 
 const reportMatchScopeCounterDrift = () => {
-  if (process.env.NODE_ENV === "production") {
+  if (import.meta.env.PROD) {
     return;
   }
   const counters = getLifecycleCounters();

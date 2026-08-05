@@ -1827,7 +1827,7 @@ async function updateContent(
 ) {
   const updateProfileId = storage.getProfileId("").trim() || null;
   switch (contentType) {
-    case "profileCounter":
+    case "profileCounter": {
       const newCounter = newId;
       storage.setProfileCounter(newCounter);
       connection.updateProfileCounter(newCounter);
@@ -1839,7 +1839,8 @@ async function updateContent(
         ownCounterElement.textContent = newCounterText;
       }
       break;
-    case "emojiAndAura":
+    }
+    case "emojiAndAura": {
       const nextEmojiId = newId?.emojiId;
       const nextAura = newId?.aura ?? "";
       if (
@@ -1868,7 +1869,8 @@ async function updateContent(
         }
       }
       break;
-    case "bg":
+    }
+    case "bg": {
       if (source !== "inventory" && newId === INVENTORY_ONLY_BG_ID) {
         return;
       }
@@ -1881,7 +1883,8 @@ async function updateContent(
         ownBgImg.src = `https://cdn.lil.org/mons/id_cards/backgrounds/${newCardName}`;
       }
       break;
-    case "subtitle":
+    }
+    case "subtitle": {
       asciimojiIndex = newId;
       storage.setCardSubtitleId(newId);
       connection.updateCardSubtitleId(newId);
@@ -1889,11 +1892,12 @@ async function updateContent(
         ownSubtitleElement.textContent = getAsciimojiAtIndex(newId);
       }
       break;
+    }
     case "demon":
     case "angel":
     case "drainer":
     case "spirit":
-    case "mystic":
+    case "mystic": {
       if (
         contentType === "drainer" &&
         source !== "inventory" &&
@@ -1946,6 +1950,7 @@ async function updateContent(
         }
       }
       break;
+    }
     case "big-mon-top-right":
     case "bottom-left":
     case "bottom-right":
@@ -1953,7 +1958,7 @@ async function updateContent(
     case "middle-left":
     case "middle-right":
     case "mini-logo":
-    case "type-logo":
+    case "type-logo": {
       const nextSticker = newId;
       const type = contentType;
       if (
@@ -1980,6 +1985,7 @@ async function updateContent(
         didUpdateSticker(type, nextSticker);
       }
       break;
+    }
   }
 
   if (oldId !== null) {
@@ -2007,7 +2013,7 @@ function updateUndoButton() {
 
 export function setOwnershipVerifiedSpecialItem(id: number) {
   switch (id) {
-    case 0:
+    case 0: {
       if (royalAguapwoshiDrainerIndex < 0) {
         break;
       }
@@ -2020,6 +2026,7 @@ export function setOwnershipVerifiedSpecialItem(id: number) {
       );
       didUpdateIdCardMons();
       break;
+    }
     case 1:
       updateContent(
         "bg",
@@ -2028,7 +2035,7 @@ export function setOwnershipVerifiedSpecialItem(id: number) {
         "inventory",
       );
       break;
-    case 2:
+    case 2: {
       const type = INVENTORY_ONLY_STICKER_TYPE;
       const currentSticker = getStoredOwnStickers()[type];
       updateContent(
@@ -2038,6 +2045,7 @@ export function setOwnershipVerifiedSpecialItem(id: number) {
         "inventory",
       );
       break;
+    }
   }
 }
 

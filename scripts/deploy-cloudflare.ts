@@ -19,26 +19,6 @@ const wranglerBinary = resolve(
   ".bin",
   isWindows ? "wrangler.cmd" : "wrangler",
 );
-const craBuildEnvironment: Record<string, string> = {
-  BROWSERSLIST: "",
-  BROWSERSLIST_CONFIG: "",
-  BROWSERSLIST_ENV: "production",
-  BROWSERSLIST_ROOT_PATH: "",
-  BROWSERSLIST_STATS: "",
-  BUILD_PATH: "build",
-  CI: "",
-  DISABLE_ESLINT_PLUGIN: "",
-  DISABLE_NEW_JSX_TRANSFORM: "",
-  ESLINT_NO_DEV_ERRORS: "",
-  FAST_REFRESH: "",
-  GENERATE_SOURCEMAP: "",
-  IMAGE_INLINE_SIZE_LIMIT: "",
-  INLINE_RUNTIME_CHUNK: "",
-  NODE_PATH: "",
-  PUBLIC_URL: "",
-  TSC_COMPILE_ON_ERROR: "",
-};
-
 function usage(): string {
   return [
     "Build and deploy the mons.link frontend with the pinned local Wrangler.",
@@ -156,23 +136,19 @@ function readApiToken(tokenFile?: string): string {
 
 function createBuildEnvironment(): NodeJS.ProcessEnv {
   const buildEnv = { ...process.env };
-  const craNames = new Set(
-    Object.keys(craBuildEnvironment).map((name) => name.toUpperCase()),
-  );
 
   for (const name of Object.keys(buildEnv)) {
     const normalizedName = name.toUpperCase();
     if (
-      normalizedName.startsWith("REACT_APP_") ||
+      normalizedName.startsWith("VITE_") ||
       normalizedName.startsWith("CLOUDFLARE_") ||
       normalizedName.startsWith("WRANGLER_") ||
-      craNames.has(normalizedName)
+      normalizedName === "NODE_ENV"
     ) {
       delete buildEnv[name];
     }
   }
 
-  Object.assign(buildEnv, craBuildEnvironment);
   for (const filename of [
     ".env",
     ".env.local",
@@ -185,7 +161,7 @@ function createBuildEnvironment(): NodeJS.ProcessEnv {
     }
     for (const line of readFileSync(envFile, "utf8").split(/\r?\n/)) {
       const name = line.match(
-        /^\s*(?:export\s+)?(REACT_APP_[A-Za-z0-9_.-]+)\s*=/i,
+        /^\s*(?:export\s+)?(VITE_[A-Za-z0-9_.-]+)\s*=/i,
       )?.[1];
       if (name) {
         buildEnv[name] = "";
@@ -193,10 +169,11 @@ function createBuildEnvironment(): NodeJS.ProcessEnv {
     }
   }
 
-  buildEnv.REACT_APP_MONS_FIREBASE_API_KEY = "";
-  buildEnv.REACT_APP_APPLE_CLIENT_ID = "";
-  buildEnv.REACT_APP_TITLE = "";
-  buildEnv.REACT_APP_BUILD_DATETIME = String(Math.floor(Date.now() / 1000));
+  buildEnv.NODE_ENV = "production";
+  buildEnv.VITE_MONS_FIREBASE_API_KEY = "";
+  buildEnv.VITE_APPLE_CLIENT_ID = "";
+  buildEnv.VITE_APP_TITLE = "";
+  buildEnv.VITE_BUILD_DATETIME = String(Math.floor(Date.now() / 1000));
   return buildEnv;
 }
 
@@ -209,9 +186,7 @@ function main(): void {
     );
   }
   if (!existsSync(wranglerBinary)) {
-    fail(
-      "Pinned Wrangler binary not found. Run npm install --legacy-peer-deps first.",
-    );
+    fail("Pinned Wrangler binary not found. Run npm install first.");
   }
 
   const apiToken =
@@ -223,7 +198,7 @@ function main(): void {
     console.log(`[deploy] Version: ${opts.versionId}`);
   } else {
     console.log(
-      "[deploy] Build: npm run build (isolated production environment)",
+      "[deploy] Build: npm run build (isolated Vite production environment)",
     );
     run(npmBinary, ["run", "build"], buildEnv, "Frontend build");
   }

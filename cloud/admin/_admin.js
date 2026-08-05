@@ -20,12 +20,7 @@ const adminApp = hasFunctionsAdmin
 const adminFirestore = hasFunctionsAdmin
   ? requireFromFunctions("firebase-admin/firestore")
   : require("firebase-admin/firestore");
-const {
-  applicationDefault,
-  deleteApp,
-  getApps,
-  initializeApp,
-} = adminApp;
+const { applicationDefault, deleteApp, getApps, initializeApp } = adminApp;
 const { FieldPath, getFirestore } = adminFirestore;
 
 const firestore = () => getFirestore();

@@ -194,7 +194,7 @@ const buildMirroredMatchFromHost = ({
   timer: hostMatch.timer ?? "",
 });
 const LEADERBOARD_ENTRY_LIMIT = 99;
-const wagerDebugLogsEnabled = process.env.NODE_ENV !== "production";
+const wagerDebugLogsEnabled = import.meta.env.DEV;
 const EVENT_SYNC_COOLDOWN_ACTIVE_MS = 700;
 const EVENT_SYNC_COOLDOWN_SCHEDULED_MS = 1500;
 const EVENT_SYNC_PARTICIPANT_CACHE_TTL_MS = 3000;
@@ -363,7 +363,7 @@ class Connection {
     event: string,
     payload: Record<string, unknown> = {},
   ): void {
-    if (process.env.NODE_ENV === "production") {
+    if (import.meta.env.PROD) {
       return;
     }
     console.log(event, payload);
@@ -382,7 +382,7 @@ class Connection {
       return false;
     }
     const isActive = this.connectAttemptId === connectAttemptId;
-    if (!isActive && process.env.NODE_ENV !== "production") {
+    if (!isActive && import.meta.env.DEV) {
       this.logContextEvent("ctx.callback.stale_dropped", {
         reason: "connect-attempt-mismatch",
         expectedConnectAttemptId: connectAttemptId,
@@ -403,7 +403,7 @@ class Connection {
       !!activeContext &&
       activeContext.contextId === contextId &&
       activeContext.sessionEpoch === epoch;
-    if (!isActive && process.env.NODE_ENV !== "production") {
+    if (!isActive && import.meta.env.DEV) {
       this.logContextEvent("ctx.callback.stale_dropped", {
         reason: "context-mismatch",
         expectedContextId: contextId,
@@ -658,7 +658,7 @@ class Connection {
 
   private isSessionEpochActive(epoch: number) {
     const isActive = this.sessionEpoch === epoch;
-    if (!isActive && process.env.NODE_ENV !== "production") {
+    if (!isActive && import.meta.env.DEV) {
       console.log("stale-session-callback", {
         expectedEpoch: epoch,
         currentEpoch: this.sessionEpoch,
@@ -682,7 +682,7 @@ class Connection {
   ): () => boolean {
     const epoch = this.sessionEpoch;
     const contextId = this.activeContext?.contextId ?? null;
-    if (contextId === null && process.env.NODE_ENV !== "production") {
+    if (contextId === null && import.meta.env.DEV) {
       console.warn("createMatchContextGuard called without an active context", {
         inviteId,
         matchId,
@@ -699,7 +699,7 @@ class Connection {
         activeContext.inviteId === inviteId &&
         activeContext.matchId === matchId &&
         activeContext.contextId === contextId;
-      if (!isActive && process.env.NODE_ENV !== "production") {
+      if (!isActive && import.meta.env.DEV) {
         console.log("stale-session-callback", {
           expectedEpoch: epoch,
           currentEpoch: this.sessionEpoch,
@@ -735,7 +735,7 @@ class Connection {
   constructor() {
     const firebaseConfig = {
       apiKey:
-        process.env.REACT_APP_MONS_FIREBASE_API_KEY ||
+        import.meta.env.VITE_MONS_FIREBASE_API_KEY ||
         "AIzaSyC8Ihr4kDd34z-RXe8XTBCFtFbXebifo5Y",
       authDomain: "mons-link.firebaseapp.com",
       projectId: "mons-link",
@@ -949,7 +949,7 @@ class Connection {
     if (clipboard && typeof clipboard.writeText === "function") {
       void clipboard.writeText(link).catch((error) => {
         const didCopy = this.writeInviteLinkWithLegacyClipboardApi(link);
-        if (!didCopy && process.env.NODE_ENV !== "production") {
+        if (!didCopy && import.meta.env.DEV) {
           console.warn(warningLabel, error);
         }
       });

@@ -332,7 +332,7 @@ const WAGER_PANEL_COUNT_GAP_FRAC = 0.06;
 const WAGER_PANEL_COUNT_MIN_GAP_PX = 4;
 const WAGER_PANEL_COUNT_MIN_WIDTH_PX = 32;
 const WAGER_PANEL_COUNT_Y_OFFSET_FRAC = 0.04;
-const wagerUiDebugLogsEnabled = process.env.NODE_ENV !== "production";
+const wagerUiDebugLogsEnabled = import.meta.env.DEV;
 const BOT_STRENGTH_IGNORE_MOUSE_AFTER_TOUCH_MS = 700;
 const MIN_HORIZONTAL_OFFSET = 0.21;
 const END_OF_GAME_ICON_BASE_URL = "https://cdn.lil.org/mons/icons";

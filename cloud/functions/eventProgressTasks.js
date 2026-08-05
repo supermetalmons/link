@@ -111,10 +111,16 @@ const enqueueWithRetry = async (payload, options) => {
       return { ok: true, enqueued: true, duplicate: false, taskId: options.id };
     } catch (error) {
       if (isTaskAlreadyExistsError(error)) {
-        return { ok: true, enqueued: false, duplicate: true, taskId: options.id };
+        return {
+          ok: true,
+          enqueued: false,
+          duplicate: true,
+          taskId: options.id,
+        };
       }
       const shouldRetry =
-        isTransientEnqueueError(error) && attempt < ENQUEUE_RETRY_DELAYS_MS.length;
+        isTransientEnqueueError(error) &&
+        attempt < ENQUEUE_RETRY_DELAYS_MS.length;
       if (!shouldRetry) {
         throw error;
       }
@@ -147,7 +153,10 @@ const persistEventProgressFallbackSignal = async ({
       return {
         ...existing,
         sourceKey: normalizedSourceKey,
-        reason: normalizeString(reason) || normalizeString(existing.reason) || "progress",
+        reason:
+          normalizeString(reason) ||
+          normalizeString(existing.reason) ||
+          "progress",
         lastQueuedAtMs: nowMs,
         enqueueFailedAtMs: nowMs,
         enqueueErrorCode: normalizeString(enqueueErrorCode) || null,

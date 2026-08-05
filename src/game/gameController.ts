@@ -176,7 +176,7 @@ const automoveInFlightGames = new WeakSet<MonsRules.Game>();
 
 const automoveAlreadyInProgressErrorMessage =
   "smart automove already in progress";
-const isAutomoveDebugLoggingEnabled = process.env.NODE_ENV !== "production";
+const isAutomoveDebugLoggingEnabled = import.meta.env.DEV;
 const debugAutomove = (
   message: string,
   details?: Record<string, unknown>,
@@ -497,7 +497,7 @@ let localRematchSeriesInviteId: string | null = null;
 let localActiveRematchMatchId: string | null = null;
 const localRematchMatchIds: string[] = [];
 const localRematchSnapshotsByMatchId = new Map<string, LocalRematchSnapshot>();
-const boardViewDebugLogsEnabled = process.env.NODE_ENV !== "production";
+const boardViewDebugLogsEnabled = import.meta.env.DEV;
 const summarizeWagerState = (state: MatchWagerState | null) => {
   const proposalKeys = Object.keys(state?.proposals || {});
   const agreed = state?.agreed
@@ -3838,7 +3838,7 @@ function applyOutput(
   forceTurnConfirmation: boolean = false,
 ): boolean {
   switch (output.kind) {
-    case "invalid":
+    case "invalid": {
       const shouldTryToReselect =
         assistedInputKind === AssistedInputKind.None &&
         currentInputs.length > 1 &&
@@ -3862,7 +3862,8 @@ function applyOutput(
         );
       }
       break;
-    case "awaiting-start":
+    }
+    case "awaiting-start": {
       const startFromHighlights: Highlight[] = output.positions.map(
         (position) =>
           new Highlight(
@@ -3874,7 +3875,8 @@ function applyOutput(
       Board.removeHighlights();
       Board.applyHighlights(startFromHighlights);
       break;
-    case "awaiting-input":
+    }
+    case "awaiting-input": {
       const nextInputs = output.options;
 
       if (nextInputs[0]?.action === "select-consumable") {
@@ -3966,7 +3968,8 @@ function applyOutput(
         ...nextInputHighlights,
       ]);
       break;
-    case "complete":
+    }
+    case "complete": {
       if (!isRemoteInput && handleStaleOnlineLocalOutput(expectedMatchId)) {
         return false;
       }
@@ -4272,7 +4275,7 @@ function applyOutput(
             syncInviteBotIntoLocalGameButton();
             triggerMoveHistoryPopupReload();
             return false;
-          case "game-over":
+          case "game-over": {
             const isVictory = !isOnlineGame || event.winner === playerSideColor;
 
             if (isVictory) {
@@ -4307,6 +4310,7 @@ function applyOutput(
             }
 
             break;
+          }
         }
       }
 
@@ -4408,6 +4412,7 @@ function applyOutput(
       triggerMoveHistoryPopupReload();
 
       break;
+    }
   }
 
   return false;
@@ -4801,7 +4806,7 @@ function handleStaleOnlineLocalOutput(expectedMatchId: string | null): boolean {
   if (activeMatchId && activeMatchId === expectedMatchId) {
     return false;
   }
-  if (process.env.NODE_ENV !== "production") {
+  if (import.meta.env.DEV) {
     console.log("stale-online-local-output", {
       expectedMatchId,
       activeMatchId,

@@ -754,4 +754,6 @@ const MoveHistoryPopup = React.forwardRef<HTMLDivElement>((_, ref) => {
   );
 });
 
+MoveHistoryPopup.displayName = "MoveHistoryPopup";
+
 export default MoveHistoryPopup;
