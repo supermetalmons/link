@@ -10,6 +10,12 @@ const {
 const { resolveMatchWinner } = require("./matchOutcome");
 const { enqueueEventProgressTask } = require("./eventProgressTasks");
 const {
+  acquireEventLockWithRetry,
+  isEventLockStillOwned,
+  releaseEventLock,
+  startEventLockHeartbeat,
+} = require("./eventLocks");
+const {
   EVENT_PRIZE_IDS,
   PRIZES_EVENT_ID,
   buildEventPrizeAssignments,
@@ -50,8 +56,6 @@ const {
   parseEventMatchKey: parseMatchKey,
 } = require("@mons/shared/events");
 
-const EVENT_LOCK_TTL_MS = 30 * 1000;
-const EVENT_LOCK_REFRESH_INTERVAL_MS = 10 * 1000;
 const EVENT_MATCH_RESOLVE_CONCURRENCY = 4;
 const EVENT_SYNC_THROTTLE_WINDOW_MS = 500;
 const MIN_START_AHEAD_MS = MIN_STARTS_IN_MINUTES * 60 * 1000;
@@ -2002,6 +2006,7 @@ const createBaseEventRecord = ({
     updatedAtMs: createdAtMs,
     startAtMs,
     announceOnTelegram: announceOnTelegram === true,
+    ...(announceOnTelegram === true ? { telegramDeliveryVersion: 2 } : {}),
     startedAtMs: null,
     endedAtMs: null,
     createdByProfileId: creatorParticipant.profileId,
@@ -2019,134 +2024,6 @@ const createBaseEventRecord = ({
     },
     rounds: {},
   };
-};
-
-const acquireEventLock = async (eventId, ownerUid) => {
-  const lockRef = admin.database().ref(`eventLocks/${eventId}`);
-  const lockId = randomAlphanumeric(16);
-  const result = await lockRef.transaction((current) => {
-    const nowMs = getNowMs();
-    if (
-      current &&
-      typeof current.expiresAtMs === "number" &&
-      current.expiresAtMs > nowMs
-    ) {
-      return;
-    }
-    return {
-      lockId,
-      ownerUid,
-      expiresAtMs: nowMs + EVENT_LOCK_TTL_MS,
-      acquiredAtMs: nowMs,
-      refreshedAtMs: nowMs,
-    };
-  });
-  if (!result.committed) {
-    return null;
-  }
-  return {
-    ref: lockRef,
-    lockId,
-    ownerUid,
-  };
-};
-
-const acquireEventLockWithRetry = async (eventId, ownerUid, options = {}) => {
-  const attempts = Math.max(1, toFiniteInteger(options.attempts, 1));
-  const delayMs = Math.max(25, toFiniteInteger(options.delayMs, 100));
-
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const lockHandle = await acquireEventLock(eventId, ownerUid);
-    if (lockHandle) {
-      return lockHandle;
-    }
-    if (attempt < attempts - 1) {
-      await sleep(delayMs);
-    }
-  }
-
-  return null;
-};
-
-const isEventLockStillOwned = async (lockHandle) => {
-  if (!lockHandle) {
-    return false;
-  }
-  const snapshot = await lockHandle.ref.once("value");
-  const current = snapshot.val();
-  const nowMs = getNowMs();
-  return !!(
-    current &&
-    current.ownerUid === lockHandle.ownerUid &&
-    current.lockId === lockHandle.lockId &&
-    typeof current.expiresAtMs === "number" &&
-    current.expiresAtMs > nowMs
-  );
-};
-
-const startEventLockHeartbeat = (lockHandle) => {
-  if (!lockHandle) {
-    return () => {};
-  }
-  let isDisposed = false;
-  const heartbeatInterval = setInterval(() => {
-    if (isDisposed) {
-      return;
-    }
-    const refreshedAtMs = getNowMs();
-    void lockHandle.ref
-      .transaction((current) => {
-        if (
-          !current ||
-          current.ownerUid !== lockHandle.ownerUid ||
-          current.lockId !== lockHandle.lockId
-        ) {
-          return;
-        }
-        return {
-          ...current,
-          expiresAtMs: refreshedAtMs + EVENT_LOCK_TTL_MS,
-          refreshedAtMs,
-        };
-      })
-      .catch((error) => {
-        console.error(
-          "event:lock:heartbeat:error",
-          error && error.message ? error.message : error,
-        );
-      });
-  }, EVENT_LOCK_REFRESH_INTERVAL_MS);
-
-  if (typeof heartbeatInterval.unref === "function") {
-    heartbeatInterval.unref();
-  }
-
-  return () => {
-    isDisposed = true;
-    clearInterval(heartbeatInterval);
-  };
-};
-
-const releaseEventLock = async (lockHandle) => {
-  if (!lockHandle) {
-    return;
-  }
-  try {
-    const snapshot = await lockHandle.ref.once("value");
-    const current = snapshot.val();
-    if (
-      current &&
-      current.ownerUid === lockHandle.ownerUid &&
-      current.lockId === lockHandle.lockId
-    ) {
-      await lockHandle.ref.remove();
-    }
-  } catch (error) {
-    console.error(
-      "event:lock:release:error",
-      error && error.message ? error.message : error,
-    );
-  }
 };
 
 const tryAcquireEventSyncThrottle = async (eventId, ownerUid) => {

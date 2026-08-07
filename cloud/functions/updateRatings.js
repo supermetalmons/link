@@ -7,12 +7,10 @@ const { MATCH_TIMER_TERMINAL } = require("@mons/shared/timers");
 const {
   batchReadWithRetry,
   getProfileByLoginId,
-  appendAutomatchBotMessageText,
   getDisplayNameFromAddress,
   getTelegramEmojiTag,
 } = require("./utils");
 const { resolveMatchWinner } = require("./matchOutcome");
-const { requestEventProgress } = require("./eventProgressTasks");
 const { loadMonsRules } = require("./monsRules");
 
 const laterGameFromMatchData = (mons, matchData, opponentMatchData) => {
@@ -57,7 +55,6 @@ const RATING_UPDATE_LEASE_MS = 30 * 1000;
 const RATING_UPDATE_HEARTBEAT_INTERVAL_MS = 10 * 1000;
 const RATING_UPDATE_ACQUIRE_RETRY_DELAY_MS = 500;
 const RATING_UPDATE_ACQUIRE_MAX_ATTEMPTS = 70;
-const BOT_MESSAGE_LEASE_MS = 30 * 1000;
 
 const isFebruaryChallengeActive = () => {
   const now = Date.now();
@@ -280,111 +277,6 @@ const startRatingUpdateLeaseHeartbeat = ({ ratingUpdateRef, ownerToken }) => {
   };
 };
 
-const tryAcquireBotMessageLease = async ({ ratingUpdateRef, ownerToken }) => {
-  const nowMs = Date.now();
-  let claim = { status: "skip", data: null };
-
-  await admin.firestore().runTransaction(async (transaction) => {
-    const snapshot = await transaction.get(ratingUpdateRef);
-    const data = snapshot.exists ? snapshot.data() || {} : {};
-
-    if (
-      data.status !== "done" ||
-      typeof data.updateRatingMessage !== "string" ||
-      data.updateRatingMessage === ""
-    ) {
-      claim = { status: "skip", data };
-      return;
-    }
-
-    if (data.botMessageStatus === "done") {
-      claim = { status: "skip", data };
-      return;
-    }
-
-    const leaseExpiresAtMs =
-      typeof data.botMessageLeaseExpiresAtMs === "number"
-        ? data.botMessageLeaseExpiresAtMs
-        : 0;
-    if (
-      data.botMessageStatus === "processing" &&
-      leaseExpiresAtMs > nowMs &&
-      data.botMessageOwnerToken &&
-      data.botMessageOwnerToken !== ownerToken
-    ) {
-      claim = { status: "busy", data };
-      return;
-    }
-
-    transaction.set(
-      ratingUpdateRef,
-      {
-        botMessageStatus: "processing",
-        botMessageOwnerToken: ownerToken,
-        botMessageUpdatedAtMs: nowMs,
-        botMessageLeaseExpiresAtMs: nowMs + BOT_MESSAGE_LEASE_MS,
-      },
-      { merge: true },
-    );
-    claim = { status: "acquired", data };
-  });
-
-  return claim;
-};
-
-const finalizeBotMessageLease = async ({ ratingUpdateRef, didSucceed }) => {
-  const nowMs = Date.now();
-  await ratingUpdateRef.set(
-    {
-      botMessageStatus: didSucceed ? "done" : "failed",
-      botMessageUpdatedAtMs: nowMs,
-      botMessageCompletedAtMs: nowMs,
-      botMessageLeaseExpiresAtMs: nowMs,
-    },
-    { merge: true },
-  );
-};
-
-const maybeAppendStoredRatingUpdateMessage = async ({
-  ratingUpdateRef,
-  inviteId,
-  ownerToken,
-}) => {
-  try {
-    const claim = await tryAcquireBotMessageLease({
-      ratingUpdateRef,
-      ownerToken,
-    });
-    if (claim.status !== "acquired") {
-      return claim.status === "skip";
-    }
-
-    const data = await readRatingUpdateData(ratingUpdateRef);
-    const updateRatingMessage =
-      data && typeof data.updateRatingMessage === "string"
-        ? data.updateRatingMessage
-        : "";
-    if (!updateRatingMessage) {
-      await finalizeBotMessageLease({ ratingUpdateRef, didSucceed: true });
-      return true;
-    }
-
-    const didAppend = await appendAutomatchBotMessageText(
-      inviteId,
-      updateRatingMessage,
-      true,
-    );
-    await finalizeBotMessageLease({ ratingUpdateRef, didSucceed: didAppend });
-    return didAppend;
-  } catch (error) {
-    console.error("ratingUpdate:botMessage:error", {
-      inviteId,
-      error: error && error.message ? error.message : error,
-    });
-    return false;
-  }
-};
-
 const maybeApplyStoredFebruaryChallengeUpdate = async (ratingUpdateData) => {
   if (
     !ratingUpdateData ||
@@ -451,40 +343,13 @@ const isEventOwnedInvite = (inviteData) => {
   );
 };
 
-const maybeEnqueueEventProgressFromInvite = async ({
-  inviteData,
-  inviteId,
-  matchId,
-}) => {
-  const eventId = normalizeString(inviteData && inviteData.eventId);
-  if (!eventId || inviteData?.eventOwned !== true) {
-    return;
-  }
-  try {
-    const result = await requestEventProgress({
-      eventId,
-      sourceKey: `rating:${inviteId}:${matchId}`,
-      reason: "match-rating-updated",
-    });
-    if (result && result.fallbackPersisted) {
-      console.warn("event:progress:fallback:queued", {
-        eventId,
-        inviteId,
-        matchId,
-        reason: "match-rating-updated",
-        fallbackSignalId: result.fallbackSignalId || null,
-      });
-    }
-  } catch (error) {
-    console.error("event:progress:enqueue:error", {
-      eventId,
-      inviteId,
-      matchId,
-      reason: "match-rating-updated",
-      error: error && error.message ? error.message : error,
-    });
-  }
-};
+const getRatingEventMetadata = (inviteData) => ({
+  isEventMatch: isEventOwnedInvite(inviteData),
+  eventOwned: inviteData?.eventOwned === true,
+  eventId: normalizeString(inviteData?.eventId) || null,
+});
+
+exports.getRatingEventMetadata = getRatingEventMetadata;
 
 exports.updateRatings = onCall(async (request) => {
   if (!request.auth) {
@@ -573,16 +438,6 @@ exports.updateRatings = onCall(async (request) => {
   if (lease.status === "done") {
     await ensureRatingUpdateCompletionMarker(ratingUpdateFlagRef);
     await maybeApplyStoredFebruaryChallengeUpdate(lease.data);
-    await maybeAppendStoredRatingUpdateMessage({
-      ratingUpdateRef,
-      inviteId,
-      ownerToken: lease.ownerToken,
-    });
-    await maybeEnqueueEventProgressFromInvite({
-      inviteData,
-      inviteId,
-      matchId,
-    });
     return {
       ok: true,
     };
@@ -620,7 +475,8 @@ exports.updateRatings = onCall(async (request) => {
     const playerHasProfile = playerProfile.profileId !== "";
     const opponentHasProfile = opponentProfile.profileId !== "";
     const canUpdateRatings = playerHasProfile && opponentHasProfile;
-    const isEventMatch = isEventOwnedInvite(inviteData);
+    const ratingEventMetadata = getRatingEventMetadata(inviteData);
+    const isEventMatch = ratingEventMetadata.isEventMatch;
     const shouldApplyRatingDelta = canUpdateRatings && !isEventMatch;
 
     const playerEmoji =
@@ -812,10 +668,12 @@ exports.updateRatings = onCall(async (request) => {
         playerProfileId: playerProfile.profileId,
         opponentProfileId: opponentProfile.profileId,
         updateRatingMessage,
+        telegramDeliveryVersion:
+          !isEventMatch && inviteData.telegramDeliveryVersion === 2 ? 2 : null,
+        ...ratingEventMetadata,
         updatedAtMs: completedAtMs,
         completedAtMs,
         leaseExpiresAtMs: completedAtMs,
-        botMessageStatus: updateRatingMessage ? "pending" : "skipped",
       },
       { merge: true },
     );
@@ -826,16 +684,6 @@ exports.updateRatings = onCall(async (request) => {
       shouldUpdateFebruaryChallenge,
       playerProfileId: playerProfile.profileId,
       opponentProfileId: opponentProfile.profileId,
-    });
-    await maybeAppendStoredRatingUpdateMessage({
-      ratingUpdateRef,
-      inviteId,
-      ownerToken: lease.ownerToken,
-    });
-    await maybeEnqueueEventProgressFromInvite({
-      inviteData,
-      inviteId,
-      matchId,
     });
   } finally {
     stopRatingUpdateLeaseHeartbeat();

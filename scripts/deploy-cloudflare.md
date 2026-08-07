@@ -62,5 +62,5 @@ testing.
 
 ## Firebase deployment
 
-- Deploy Firebase services: `npm run deploy:firebase`
-- Deploy the configured function batch: `npm run deploy:allFunctionsBatched`
+- Deploy the complete Firebase release: `npm run deploy:firebase -- --project mons-link`
+- See `cloud/README.md` for dry-run, batch-size, and maintenance commands.

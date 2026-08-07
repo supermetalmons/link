@@ -1,9 +1,10 @@
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const admin = require("./firebaseAdmin");
+const { getProfileByLoginId } = require("./utils");
 const {
-  markCanceledAutomatchBotMessage,
-  getProfileByLoginId,
-} = require("./utils");
+  TELEGRAM_AUTOMATCH_VERSION,
+  buildAutomatchTelegramLifecycleUpdates,
+} = require("./automatchTelegramMessages");
 
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
@@ -41,6 +42,10 @@ const getQueuedInviteCandidatesFromSnapshot = (snapshot) => {
         uid: normalizeString(payload.uid),
         profileId: normalizeString(payload.profileId),
         timestamp: toFiniteTimestamp(payload.timestamp),
+        telegramDeliveryVersion:
+          payload.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION
+            ? TELEGRAM_AUTOMATCH_VERSION
+            : null,
       });
       return acc;
     }, [])
@@ -128,7 +133,11 @@ async function resolveQueuedAutomatchInviteId(uid, profileId) {
   const byUidSnapshot = await userAutomatchQuery.once("value");
   const byUidCandidates = getQueuedInviteCandidatesFromSnapshot(byUidSnapshot);
   if (byUidCandidates.length > 0) {
-    return { inviteId: byUidCandidates[0].inviteId, lookup: "uid" };
+    return {
+      inviteId: byUidCandidates[0].inviteId,
+      lookup: "uid",
+      telegramDeliveryVersion: byUidCandidates[0].telegramDeliveryVersion,
+    };
   }
 
   if (!normalizedProfileId) {
@@ -147,7 +156,11 @@ async function resolveQueuedAutomatchInviteId(uid, profileId) {
     if (
       await inviteHostMatchesProfile(candidate.inviteId, normalizedProfileId)
     ) {
-      return { inviteId: candidate.inviteId, lookup: "profileId" };
+      return {
+        inviteId: candidate.inviteId,
+        lookup: "profileId",
+        telegramDeliveryVersion: candidate.telegramDeliveryVersion,
+      };
     }
   }
   return {
@@ -182,6 +195,8 @@ exports.cancelAutomatch = onCall(async (request) => {
   }
 
   const inviteId = queuedInvite.inviteId;
+  const usesTelegramDeliveryV2 =
+    queuedInvite.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION;
   console.log("auto:cancel:inviteId", {
     inviteId,
     lookup: queuedInvite.lookup,
@@ -201,6 +216,17 @@ exports.cancelAutomatch = onCall(async (request) => {
     updates[`invites/${inviteId}/automatchStateHint`] = "canceled";
     updates[`invites/${inviteId}/automatchCanceledAt`] =
       admin.database.ServerValue.TIMESTAMP;
+    if (usesTelegramDeliveryV2) {
+      Object.assign(
+        updates,
+        buildAutomatchTelegramLifecycleUpdates({
+          inviteId,
+          lifecycle: "canceled",
+          timestamp: admin.database.ServerValue.TIMESTAMP,
+          generation: admin.database.ServerValue.increment(1),
+        }),
+      );
+    }
     await admin.database().ref().update(updates);
     console.log("auto:cancel:db:ok", { inviteId });
   } catch (e) {
@@ -221,18 +247,19 @@ exports.cancelAutomatch = onCall(async (request) => {
     const matchedUpdates = {};
     matchedUpdates[`invites/${inviteId}/automatchStateHint`] = "matched";
     matchedUpdates[`invites/${inviteId}/automatchCanceledAt`] = null;
+    if (usesTelegramDeliveryV2) {
+      Object.assign(
+        matchedUpdates,
+        buildAutomatchTelegramLifecycleUpdates({
+          inviteId,
+          lifecycle: "matched",
+          timestamp: admin.database.ServerValue.TIMESTAMP,
+          generation: admin.database.ServerValue.increment(1),
+        }),
+      );
+    }
     await admin.database().ref().update(matchedUpdates);
     return { ok: false };
-  }
-
-  try {
-    console.log("auto:cancel:markMessage", { inviteId });
-    await markCanceledAutomatchBotMessage(inviteId);
-  } catch (e) {
-    console.error("auto:cancel:markMessage:error", {
-      inviteId,
-      error: e && e.message ? e.message : e,
-    });
   }
 
   return { ok: true };

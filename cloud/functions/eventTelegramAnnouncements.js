@@ -1,40 +1,42 @@
+"use strict";
+
+const crypto = require("node:crypto");
 const admin = require("./firebaseAdmin");
 const {
   onValueCreated,
   onValueUpdated,
 } = require("firebase-functions/v2/database");
 const { customTelegramEmojis, getTelegramEmojiTag } = require("./utils");
+const {
+  buildTelegramEditUpdates,
+  buildTelegramSendUpdates,
+} = require("./telegramDelivery");
+const { createEventLockManager } = require("./eventLocks");
 const { THIRD_PLACE_MATCH_KEY } = require("@mons/shared/events");
 
-const EVENT_TELEGRAM_STATE_ROOT = "eventTelegramMessages";
-const EVENT_TELEGRAM_LOCK_ROOT = "eventTelegramLocks";
-const EVENT_TELEGRAM_LOCK_TTL_MS = 2 * 60 * 1000;
-const EVENT_TELEGRAM_LOCK_ATTEMPTS = 3;
-const EVENT_TELEGRAM_LOCK_RETRY_DELAY_MS = 120;
-const EVENT_TELEGRAM_TRIGGER_BASE_OPTIONS = {
+const EVENT_TELEGRAM_PROJECTION_ROOT = "eventTelegramProjections";
+const EVENT_TELEGRAM_PROJECTION_LOCK_ROOT = "eventTelegramProjectionLocks";
+const EVENT_TELEGRAM_PROJECTION_GUARD_FIELD = "eventTelegramProjectionGuard";
+const EVENT_TELEGRAM_DELIVERY_VERSION = 2;
+const EVENT_TELEGRAM_PROJECTION_OWNER_UID = "event-telegram-projector";
+const EVENT_TELEGRAM_PROJECTION_WRITER_APP = "event-telegram-projection-writer";
+const EVENT_TELEGRAM_TRIGGER_OPTIONS = {
   maxInstances: 5,
   concurrency: 20,
   memory: "256MiB",
   cpu: 1,
-};
-const EVENT_TELEGRAM_CREATED_OPTIONS = {
-  ...EVENT_TELEGRAM_TRIGGER_BASE_OPTIONS,
-  ref: "/events/{eventId}",
-};
-const EVENT_TELEGRAM_UPDATED_OPTIONS = {
-  ...EVENT_TELEGRAM_TRIGGER_BASE_OPTIONS,
-  ref: "/events/{eventId}",
+  retry: true,
 };
 const EVENT_URL_ROOT = "https://mons.link/event";
-const TELEGRAM_API_URL = "https://api.telegram.org";
-
 const EVENT_STATUS_SCHEDULED = "scheduled";
 const EVENT_STATUS_ENDED = "ended";
 const EVENT_STATUS_DISMISSED = "dismissed";
 
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const normalizeText = (value) =>
+  typeof value === "string" && value !== "" ? value : "";
 
 const normalizeNumberOrNull = (value) => {
   const numeric = typeof value === "number" ? value : Number(value);
@@ -97,8 +99,7 @@ const formatTimeInZone = (startAtMs, timeZone) => {
     }
   }
   if (!hour || !dayPeriod) {
-    const fallback = formatter.format(new Date(startAtMs));
-    return fallback.toUpperCase();
+    return formatter.format(new Date(startAtMs)).toUpperCase();
   }
   if (!minute || minute === "00") {
     return `${hour} ${dayPeriod}`;
@@ -128,10 +129,7 @@ const getParticipantRecords = (eventData) => {
         participant &&
         typeof participant === "object",
     )
-    .map(([profileId, participant]) => ({
-      profileId,
-      participant,
-    }))
+    .map(([profileId, participant]) => ({ profileId, participant }))
     .sort((left, right) => {
       const leftJoined = normalizePositiveNumberOrNull(
         left.participant.joinedAtMs,
@@ -174,8 +172,7 @@ const resolveParticipantName = (participant, fallbackDisplayName = "") => {
   if (displayName) {
     return displayName;
   }
-  const fallback = normalizeString(fallbackDisplayName);
-  return fallback || "anon";
+  return normalizeString(fallbackDisplayName) || "anon";
 };
 
 const resolveParticipantToken = (participant, fallbackDisplayName = "") => {
@@ -192,16 +189,15 @@ const resolveParticipantToken = (participant, fallbackDisplayName = "") => {
 };
 
 const getParticipantsByProfileId = (eventData) => {
-  const map = new Map();
+  const participantsByProfileId = new Map();
   for (const { profileId, participant } of getParticipantRecords(eventData)) {
-    map.set(profileId, participant);
+    participantsByProfileId.set(profileId, participant);
   }
-  return map;
+  return participantsByProfileId;
 };
 
 const toMatchIndex = (matchKey) => {
-  const normalized = normalizeString(matchKey);
-  const parts = normalized.split("_");
+  const parts = normalizeString(matchKey).split("_");
   if (parts.length !== 2) {
     return Number.MAX_SAFE_INTEGER;
   }
@@ -234,8 +230,7 @@ const collectActiveMatchEntries = (eventData) => {
       if (!match || typeof match !== "object") {
         continue;
       }
-      const inviteId = normalizeString(match.inviteId);
-      if (!inviteId) {
+      if (!normalizeString(match.inviteId)) {
         continue;
       }
       entries.push({
@@ -276,33 +271,45 @@ const buildStartedThreadMatchKey = (eventData) =>
     .map((entry) => entry.key)
     .join(";");
 
+const isV2TelegramEvent = (eventData) =>
+  Boolean(
+    eventData &&
+    typeof eventData === "object" &&
+    eventData.telegramDeliveryVersion === EVENT_TELEGRAM_DELIVERY_VERSION,
+  );
+
+const isTerminalStatus = (status) =>
+  status === EVENT_STATUS_ENDED || status === EVENT_STATUS_DISMISSED;
+
 const buildEventSignature = (eventData, nowMs = Date.now()) => {
-  if (!eventData || eventData.announceOnTelegram !== true) {
+  if (!isV2TelegramEvent(eventData)) {
     return "skip";
   }
   const status = normalizeString(eventData.status) || EVENT_STATUS_SCHEDULED;
-  if (status === EVENT_STATUS_ENDED || status === EVENT_STATUS_DISMISSED) {
-    return "skip";
-  }
   const startAtMs = normalizePositiveNumberOrNull(eventData.startAtMs);
-  const participantRenderKey = buildParticipantRenderKey(eventData);
-  const upcomingSignature =
-    status === EVENT_STATUS_SCHEDULED && startAtMs
-      ? {
-          ptEtUtcLine: formatPtEtUtcLine(startAtMs),
-          includeDateLine: shouldIncludeUtcDateLine(startAtMs, nowMs),
-          dateLine: shouldIncludeUtcDateLine(startAtMs, nowMs)
-            ? formatUtcDateLine(startAtMs)
-            : "",
-          participantRenderKey,
-        }
-      : null;
+  const active =
+    eventData.announceOnTelegram === true && !isTerminalStatus(status);
+  const includeDateLine = Boolean(
+    active &&
+    status === EVENT_STATUS_SCHEDULED &&
+    startAtMs &&
+    shouldIncludeUtcDateLine(startAtMs, nowMs),
+  );
   return JSON.stringify({
-    announceOnTelegram: true,
+    deliveryVersion: EVENT_TELEGRAM_DELIVERY_VERSION,
+    announceOnTelegram: eventData.announceOnTelegram === true,
     status,
     startAtMs: startAtMs || null,
-    upcoming: upcomingSignature,
-    startedMatchKey: buildStartedThreadMatchKey(eventData),
+    upcoming:
+      active && status === EVENT_STATUS_SCHEDULED && startAtMs
+        ? {
+            ptEtUtcLine: formatPtEtUtcLine(startAtMs),
+            includeDateLine,
+            dateLine: includeDateLine ? formatUtcDateLine(startAtMs) : "",
+            participantRenderKey: buildParticipantRenderKey(eventData),
+          }
+        : null,
+    startedMatchKey: active ? buildStartedThreadMatchKey(eventData) : "",
   });
 };
 
@@ -344,38 +351,45 @@ const renderStartedMessage = (eventId, matchLines) => {
   return lines.join("\n");
 };
 
-const buildStartedState = (eventId, eventData, state) => {
-  const participantsByProfileId = getParticipantsByProfileId(eventData);
-  const activeMatchEntries = collectActiveMatchEntries(eventData);
-  const previousOrder = Array.isArray(state.startedMatchKeys)
-    ? state.startedMatchKeys.filter(
+const parseProjectionState = (raw) => {
+  const value = raw && typeof raw === "object" ? raw : {};
+  const startedMatchKeys = Array.isArray(value.startedMatchKeys)
+    ? value.startedMatchKeys.filter(
         (key) => typeof key === "string" && key.trim() !== "",
       )
     : [];
-  const previousLinesByKey =
-    state.startedMatchLinesByKey &&
-    typeof state.startedMatchLinesByKey === "object"
-      ? state.startedMatchLinesByKey
+  const startedMatchLinesByKey =
+    value.startedMatchLinesByKey &&
+    typeof value.startedMatchLinesByKey === "object"
+      ? value.startedMatchLinesByKey
       : {};
+  return {
+    upcomingText: normalizeText(value.upcomingText),
+    startedText: normalizeText(value.startedText),
+    startedMatchKeys,
+    startedMatchLinesByKey,
+    lastProjectedSignature: normalizeString(value.lastProjectedSignature),
+  };
+};
 
+const buildStartedState = (eventId, eventData, rawState = {}) => {
+  const state = parseProjectionState(rawState);
+  const participantsByProfileId = getParticipantsByProfileId(eventData);
+  const activeMatchEntries = collectActiveMatchEntries(eventData);
   const nextOrder = [];
   const nextOrderSet = new Set();
-  for (const key of previousOrder) {
-    if (nextOrderSet.has(key)) {
-      continue;
+  for (const key of state.startedMatchKeys) {
+    if (!nextOrderSet.has(key)) {
+      nextOrderSet.add(key);
+      nextOrder.push(key);
     }
-    nextOrderSet.add(key);
-    nextOrder.push(key);
   }
-
   const nextLinesByKey = {};
-  for (const [key, value] of Object.entries(previousLinesByKey)) {
-    if (!nextOrderSet.has(key) || typeof value !== "string" || value === "") {
-      continue;
+  for (const [key, value] of Object.entries(state.startedMatchLinesByKey)) {
+    if (nextOrderSet.has(key) && typeof value === "string" && value !== "") {
+      nextLinesByKey[key] = value;
     }
-    nextLinesByKey[key] = value;
   }
-
   let appendedCount = 0;
   for (const entry of activeMatchEntries) {
     const hostProfileId = normalizeString(entry.match.hostProfileId);
@@ -395,11 +409,9 @@ const buildStartedState = (eventId, eventData, state) => {
     nextLinesByKey[entry.key] = line;
     appendedCount += 1;
   }
-
   const lines = nextOrder
     .map((key) => nextLinesByKey[key])
     .filter((line) => typeof line === "string" && line !== "");
-
   return {
     text: lines.length > 0 ? renderStartedMessage(eventId, lines) : null,
     startedMatchKeys: nextOrder,
@@ -408,405 +420,351 @@ const buildStartedState = (eventId, eventData, state) => {
   };
 };
 
-const parseState = (raw) => {
-  const value = raw && typeof raw === "object" ? raw : {};
-  const upcomingMessageId = normalizePositiveNumberOrNull(
-    value.upcomingMessageId,
-  );
-  const startedMessageId = normalizePositiveNumberOrNull(
-    value.startedMessageId,
-  );
-  const lastAppliedSignature = normalizeString(value.lastAppliedSignature);
-  const startedMatchKeys = Array.isArray(value.startedMatchKeys)
-    ? value.startedMatchKeys.filter(
-        (key) => typeof key === "string" && key.trim() !== "",
-      )
-    : [];
-  const startedMatchLinesByKey =
-    value.startedMatchLinesByKey &&
-    typeof value.startedMatchLinesByKey === "object"
-      ? value.startedMatchLinesByKey
-      : {};
-  return {
-    upcomingMessageId,
-    upcomingText: normalizeString(value.upcomingText),
-    startedMessageId,
-    startedText: normalizeString(value.startedText),
-    startedMatchKeys,
-    startedMatchLinesByKey,
-    lastAppliedSignature,
-  };
-};
+const hashProjection = (value) =>
+  crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-const createLockOwnerToken = () =>
-  `tg_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-
-const acquireEventAnnouncementLock = async (eventId) => {
-  const normalizedEventId = normalizeString(eventId);
-  if (!normalizedEventId) {
-    return null;
-  }
-  const nowMs = Date.now();
-  const ownerToken = createLockOwnerToken();
-  const lockRef = admin
-    .database()
-    .ref(`${EVENT_TELEGRAM_LOCK_ROOT}/${normalizedEventId}`);
-  const result = await lockRef.transaction((current) => {
-    const currentValue =
-      current && typeof current === "object" ? current : null;
-    const leaseExpiresAtMs =
-      currentValue && typeof currentValue.leaseExpiresAtMs === "number"
-        ? currentValue.leaseExpiresAtMs
-        : 0;
-    if (currentValue && leaseExpiresAtMs > nowMs) {
-      return;
-    }
-    return {
-      ownerToken,
-      acquiredAtMs: nowMs,
-      leaseExpiresAtMs: nowMs + EVENT_TELEGRAM_LOCK_TTL_MS,
-    };
-  });
-  if (!result.committed) {
-    return null;
-  }
-  const nextValue =
-    result.snapshot && typeof result.snapshot.val === "function"
-      ? result.snapshot.val()
-      : null;
-  if (
-    !nextValue ||
-    typeof nextValue !== "object" ||
-    normalizeString(nextValue.ownerToken) !== ownerToken
-  ) {
-    return null;
-  }
-  return {
-    eventId: normalizedEventId,
-    ownerToken,
-    ref: lockRef,
-  };
-};
-
-const acquireEventAnnouncementLockWithRetry = async (
+const buildDesiredOperation = ({
+  channel,
   eventId,
-  {
-    attempts = EVENT_TELEGRAM_LOCK_ATTEMPTS,
-    delayMs = EVENT_TELEGRAM_LOCK_RETRY_DELAY_MS,
-  } = {},
-) => {
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const lockHandle = await acquireEventAnnouncementLock(eventId);
-    if (lockHandle) {
-      return lockHandle;
-    }
-    if (attempt < attempts - 1 && delayMs > 0) {
-      await sleep(delayMs);
-    }
+  previousText,
+  desiredText,
+  active,
+}) => {
+  if (desiredText) {
+    return {
+      operation: previousText ? "edit" : "send",
+      channel,
+      messageKey: `event:${eventId}:${channel}`,
+      instanceKey: `event:${eventId}:${channel}:v2`,
+      text: desiredText,
+      ifMissing: previousText ? "send" : null,
+    };
+  }
+  if (!active && previousText) {
+    return {
+      operation: "edit",
+      channel,
+      messageKey: `event:${eventId}:${channel}`,
+      instanceKey: `event:${eventId}:${channel}:v2`,
+      text: previousText,
+      ifMissing: "skip",
+    };
   }
   return null;
 };
 
-const releaseEventAnnouncementLock = async (lockHandle) => {
-  if (!lockHandle) {
-    return;
-  }
-  try {
-    await lockHandle.ref.transaction((current) => {
-      const currentValue =
-        current && typeof current === "object" ? current : null;
-      if (
-        !currentValue ||
-        normalizeString(currentValue.ownerToken) !== lockHandle.ownerToken
-      ) {
-        return;
-      }
-      return null;
-    });
-  } catch (error) {
-    console.error("event:tg:lock:release:error", {
-      eventId: lockHandle.eventId,
-      error: error && error.message ? error.message : error,
-    });
-  }
-};
-
-const buildTelegramFailureResult = (result) => {
-  const description = normalizeString(
-    result && result.description,
-  ).toLowerCase();
-  if (description.includes("message is not modified")) {
-    return "not-modified";
-  }
-  if (description.includes("message to edit not found")) {
-    return "message-not-found";
-  }
-  return "failed";
-};
-
-const telegramRequest = async (method, body) => {
-  const token = normalizeString(process.env.TELEGRAM_BOT_TOKEN);
-  if (!token) {
-    return {
-      ok: false,
-      description: "missing token",
-    };
-  }
-  try {
-    const response = await fetch(`${TELEGRAM_API_URL}/bot${token}/${method}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    let data = null;
-    try {
-      data = await response.json();
-    } catch {}
-    if (response.ok && data && data.ok === true) {
-      return {
-        ok: true,
-        data,
-      };
-    }
-    return {
-      ok: false,
-      description:
-        (data && typeof data.description === "string"
-          ? data.description
-          : "") || `http-${response.status}`,
-    };
-  } catch (error) {
-    console.error("event:tg:request:error", {
-      method,
-      error: error && error.message ? error.message : error,
-    });
-    return {
-      ok: false,
-      description: "request error",
-    };
-  }
-};
-
-const sendTelegramHtmlMessage = async (chatId, text) => {
-  const result = await telegramRequest("sendMessage", {
-    chat_id: chatId,
-    text,
-    disable_web_page_preview: true,
-    disable_notification: false,
-    parse_mode: "HTML",
-  });
-  if (!result || result.ok !== true) {
-    return null;
-  }
-  const data = result.data;
-  const messageId =
-    data && data.result
-      ? normalizePositiveNumberOrNull(data.result.message_id)
-      : null;
-  return messageId;
-};
-
-const editTelegramHtmlMessage = async (chatId, messageId, text) => {
-  const result = await telegramRequest("editMessageText", {
-    chat_id: chatId,
-    message_id: messageId,
-    text,
-    disable_web_page_preview: true,
-    parse_mode: "HTML",
-  });
-  if (result && result.ok === true) {
-    return "edited";
-  }
-  return buildTelegramFailureResult(result);
-};
-
-const upsertTelegramMessage = async ({
-  chatId,
-  desiredText,
-  currentMessageId,
-  currentText,
+const buildEventTelegramProjection = ({
+  eventId,
+  eventData,
+  state: rawState,
+  nowMs = Date.now(),
 }) => {
-  if (!desiredText) {
-    return {
-      messageId: currentMessageId,
-      text: currentText,
-    };
+  const normalizedEventId = normalizeString(eventId);
+  if (!normalizedEventId || !isV2TelegramEvent(eventData)) {
+    return { action: "skip", reason: "not-v2" };
   }
-  if (desiredText === currentText && currentMessageId) {
-    return {
-      messageId: currentMessageId,
-      text: currentText,
-    };
-  }
-  if (currentMessageId) {
-    const editResult = await editTelegramHtmlMessage(
-      chatId,
-      currentMessageId,
-      desiredText,
-    );
-    if (editResult === "edited" || editResult === "not-modified") {
-      return {
-        messageId: currentMessageId,
-        text: desiredText,
+  const state = parseProjectionState(rawState);
+  const status = normalizeString(eventData.status) || EVENT_STATUS_SCHEDULED;
+  const active =
+    eventData.announceOnTelegram === true && !isTerminalStatus(status);
+  const upcomingText = active
+    ? renderUpcomingMessage(normalizedEventId, eventData, nowMs)
+    : null;
+  const startedState = active
+    ? buildStartedState(normalizedEventId, eventData, state)
+    : {
+        text: state.startedText || null,
+        startedMatchKeys: state.startedMatchKeys,
+        startedMatchLinesByKey: state.startedMatchLinesByKey,
+        appendedCount: 0,
       };
-    }
-    if (editResult !== "message-not-found") {
-      return {
-        messageId: currentMessageId,
-        text: currentText,
-      };
-    }
+  const nextUpcomingText = upcomingText || state.upcomingText;
+  const nextStartedText = startedState.text || state.startedText;
+  const signature = hashProjection({
+    source: buildEventSignature(eventData, nowMs),
+    upcomingText: nextUpcomingText,
+    startedText: nextStartedText,
+    startedMatchKeys: startedState.startedMatchKeys,
+    startedMatchLinesByKey: startedState.startedMatchLinesByKey,
+  });
+  if (state.lastProjectedSignature === signature) {
+    return { action: "unchanged", signature };
   }
-  const nextMessageId = await sendTelegramHtmlMessage(chatId, desiredText);
-  if (nextMessageId) {
-    return {
-      messageId: nextMessageId,
-      text: desiredText,
-    };
+  const operations = [
+    buildDesiredOperation({
+      channel: "upcoming",
+      eventId: normalizedEventId,
+      previousText: state.upcomingText,
+      desiredText: upcomingText,
+      active: Boolean(upcomingText),
+    }),
+    buildDesiredOperation({
+      channel: "started",
+      eventId: normalizedEventId,
+      previousText: state.startedText,
+      desiredText: active ? startedState.text : null,
+      active: Boolean(active && startedState.text),
+    }),
+  ].filter(Boolean);
+  for (const operation of operations) {
+    operation.sourceRevision = `event:${normalizedEventId}:${operation.channel}:${signature}`;
   }
   return {
-    messageId: currentMessageId,
-    text: currentText,
+    action: "project",
+    signature,
+    operations,
+    state: {
+      schemaVersion: EVENT_TELEGRAM_DELIVERY_VERSION,
+      upcomingText: nextUpcomingText,
+      startedText: nextStartedText,
+      startedMatchKeys: startedState.startedMatchKeys,
+      startedMatchLinesByKey: startedState.startedMatchLinesByKey,
+      lastProjectedSignature: signature,
+      updatedAtMs: Math.floor(nowMs),
+    },
   };
 };
 
-const applyEventAnnouncement = async ({
-  eventId,
-  eventData,
-  signature,
-  nowMs = Date.now(),
-}) => {
-  if (!eventId || !eventData || eventData.announceOnTelegram !== true) {
-    return;
+const buildEventTelegramProjectionUpdates = ({ eventId, projection }) => {
+  const normalizedEventId = normalizeString(eventId);
+  if (
+    !normalizedEventId ||
+    !projection ||
+    projection.action !== "project" ||
+    !projection.state
+  ) {
+    return {};
   }
-  const chatId = normalizeString(process.env.TELEGRAM_CHAT_ID_IVAN);
-  if (!chatId) {
-    return;
+  const updates = {
+    [`${EVENT_TELEGRAM_PROJECTION_ROOT}/${normalizedEventId}`]:
+      projection.state,
+  };
+  for (const operation of projection.operations) {
+    const common = {
+      messageKey: operation.messageKey,
+      destination: "events",
+      instanceKey: operation.instanceKey,
+      text: operation.text,
+      parseMode: "HTML",
+      silent: false,
+      sourceRevision: operation.sourceRevision,
+    };
+    const desiredUpdates =
+      operation.operation === "send"
+        ? buildTelegramSendUpdates(common)
+        : buildTelegramEditUpdates({
+            ...common,
+            ifMissing: operation.ifMissing,
+          });
+    Object.assign(updates, desiredUpdates);
   }
-  const lockHandle = await acquireEventAnnouncementLockWithRetry(eventId);
-  if (!lockHandle) {
-    console.log("event:tg:lock:busy", {
-      eventId,
+  return updates;
+};
+
+const addEventTelegramProjectionGuard = ({ updates, guard }) => {
+  if (!guard) {
+    return updates;
+  }
+  if (
+    guard.lockRoot !== EVENT_TELEGRAM_PROJECTION_LOCK_ROOT ||
+    !normalizeString(guard.eventId) ||
+    !normalizeString(guard.lockId) ||
+    !normalizeString(guard.ownerUid)
+  ) {
+    throw new TypeError("invalid event Telegram projection lock guard");
+  }
+  const guardedUpdates = {};
+  for (const [path, value] of Object.entries(updates)) {
+    const messagePathPrefix = "telegramMessages/";
+    const desiredPathSuffix = "/desired";
+    const messageKey =
+      path.startsWith(messagePathPrefix) && path.endsWith(desiredPathSuffix)
+        ? path.slice(messagePathPrefix.length, -desiredPathSuffix.length)
+        : "";
+    guardedUpdates[path] = {
+      ...value,
+      [EVENT_TELEGRAM_PROJECTION_GUARD_FIELD]: {
+        ...guard,
+        ...(messageKey ? { messageKey } : {}),
+      },
+    };
+  }
+  return guardedUpdates;
+};
+
+const createProjectionLockError = (eventId, code) => {
+  const error = new Error(`${code}:${eventId}`);
+  error.code = code;
+  return error;
+};
+
+const isPermissionDeniedError = (error) => {
+  const code = normalizeString(error && error.code).toLowerCase();
+  const message = normalizeString(error && error.message).toLowerCase();
+  return (
+    code.includes("permission-denied") ||
+    code.includes("permission_denied") ||
+    message.includes("permission denied")
+  );
+};
+
+const getEventTelegramProjectionCommitDatabase = () =>
+  admin.databaseWithAuthOverride(EVENT_TELEGRAM_PROJECTION_WRITER_APP, {
+    uid: EVENT_TELEGRAM_PROJECTION_OWNER_UID,
+    token: {
+      eventTelegramProjectionWriter: true,
+    },
+  });
+
+const createEventTelegramProjector = (dependencies = {}) => {
+  const getDatabase = dependencies.database
+    ? () => dependencies.database
+    : dependencies.getDatabase || admin.database;
+  const lockManager =
+    dependencies.lockManager ||
+    createEventLockManager({
+      getDatabase,
+      lockRoot: EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
     });
-    return;
-  }
+  const getCommitDatabase = dependencies.commitDatabase
+    ? () => dependencies.commitDatabase
+    : dependencies.getCommitDatabase ||
+      getEventTelegramProjectionCommitDatabase;
+  const ownerUid = dependencies.ownerUid || EVENT_TELEGRAM_PROJECTION_OWNER_UID;
 
-  try {
-    const stateRef = admin
-      .database()
-      .ref(`${EVENT_TELEGRAM_STATE_ROOT}/${eventId}`);
-    const stateSnapshot = await stateRef.once("value");
-    const state = parseState(stateSnapshot.val());
-
-    if (
-      state.lastAppliedSignature &&
-      state.lastAppliedSignature === signature
-    ) {
-      return;
+  return async (eventId, nowMs = Date.now()) => {
+    const normalizedEventId = normalizeString(eventId);
+    if (!normalizedEventId) {
+      return { action: "skip", reason: "invalid-event-id" };
     }
+    let lockHandle = null;
+    let stopLockHeartbeat = () => {};
+    try {
+      lockHandle = await lockManager.acquireEventLock(
+        normalizedEventId,
+        ownerUid,
+      );
+      if (!lockHandle) {
+        throw createProjectionLockError(
+          normalizedEventId,
+          "event-telegram-lock-busy",
+        );
+      }
+      stopLockHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
+      const database = getDatabase();
+      const eventSnapshot = await database
+        .ref(`events/${normalizedEventId}`)
+        .once("value");
+      const eventData = eventSnapshot.val();
+      if (!isV2TelegramEvent(eventData)) {
+        return { action: "skip", reason: "not-v2" };
+      }
+      const stateSnapshot = await database
+        .ref(`${EVENT_TELEGRAM_PROJECTION_ROOT}/${normalizedEventId}`)
+        .once("value");
+      const projection = buildEventTelegramProjection({
+        eventId: normalizedEventId,
+        eventData,
+        state: stateSnapshot.val(),
+        nowMs,
+      });
+      if (projection.action !== "project") {
+        return projection;
+      }
+      const guard = lockManager.getEventLockGuard(lockHandle);
+      const updates = addEventTelegramProjectionGuard({
+        updates: buildEventTelegramProjectionUpdates({
+          eventId: normalizedEventId,
+          projection,
+        }),
+        guard,
+      });
+      const lockRefreshed = await lockManager.refreshEventLock(lockHandle);
+      if (!lockRefreshed) {
+        throw createProjectionLockError(
+          normalizedEventId,
+          "event-telegram-lock-lost",
+        );
+      }
+      try {
+        await getCommitDatabase().ref().update(updates);
+      } catch (error) {
+        if (isPermissionDeniedError(error)) {
+          throw createProjectionLockError(
+            normalizedEventId,
+            "event-telegram-lock-lost",
+          );
+        }
+        throw error;
+      }
+      return projection;
+    } finally {
+      stopLockHeartbeat();
+      await lockManager.releaseEventLock(lockHandle);
+    }
+  };
+};
 
-    const upcomingText = renderUpcomingMessage(eventId, eventData, nowMs);
-    const nextStartedState = buildStartedState(eventId, eventData, state);
+const projectEventTelegram = createEventTelegramProjector();
 
-    const nextUpcomingMessage = await upsertTelegramMessage({
-      chatId,
-      desiredText: upcomingText,
-      currentMessageId: state.upcomingMessageId,
-      currentText: state.upcomingText,
+const runEventTelegramProjection = async (eventId, trigger) => {
+  try {
+    await projectEventTelegram(eventId);
+  } catch (error) {
+    console.error("event:telegram:projection-error", {
+      eventId,
+      trigger,
+      code: error && error.code ? String(error.code) : "error",
+      error: error && error.message ? error.message : String(error),
     });
-    const nextStartedMessage = await upsertTelegramMessage({
-      chatId,
-      desiredText: nextStartedState.text,
-      currentMessageId: state.startedMessageId,
-      currentText: state.startedText,
-    });
-
-    await stateRef.set({
-      upcomingMessageId: nextUpcomingMessage.messageId || null,
-      upcomingText: nextUpcomingMessage.text || "",
-      startedMessageId: nextStartedMessage.messageId || null,
-      startedText: nextStartedMessage.text || "",
-      startedMatchKeys: nextStartedState.startedMatchKeys,
-      startedMatchLinesByKey: nextStartedState.startedMatchLinesByKey,
-      lastAppliedSignature: signature,
-      updatedAtMs: nowMs,
-    });
-  } finally {
-    await releaseEventAnnouncementLock(lockHandle);
+    throw error;
   }
 };
 
 const onEventTelegramCreated = onValueCreated(
-  EVENT_TELEGRAM_CREATED_OPTIONS,
+  {
+    ...EVENT_TELEGRAM_TRIGGER_OPTIONS,
+    ref: "/events/{eventId}",
+  },
   async (event) => {
     const eventId = normalizeString(event.params.eventId);
-    const eventData =
-      event.data && typeof event.data.val === "function"
-        ? event.data.val()
-        : null;
-    if (!eventId || !eventData || eventData.announceOnTelegram !== true) {
+    const eventData = event.data.val();
+    if (!eventId || !isV2TelegramEvent(eventData)) {
       return;
     }
-    const nowMs = Date.now();
-    const signature = buildEventSignature(eventData, nowMs);
-    if (signature === "skip") {
-      return;
-    }
-    try {
-      await applyEventAnnouncement({
-        eventId,
-        eventData,
-        signature,
-        nowMs,
-      });
-    } catch (error) {
-      console.error("event:tg:create:error", {
-        eventId,
-        error: error && error.message ? error.message : error,
-      });
-    }
+    await runEventTelegramProjection(eventId, "created");
   },
 );
 
 const onEventTelegramUpdated = onValueUpdated(
-  EVENT_TELEGRAM_UPDATED_OPTIONS,
+  {
+    ...EVENT_TELEGRAM_TRIGGER_OPTIONS,
+    ref: "/events/{eventId}",
+  },
   async (event) => {
     const eventId = normalizeString(event.params.eventId);
-    const beforeData = event.data.before.exists()
-      ? event.data.before.val()
-      : null;
-    const afterData = event.data.after.exists() ? event.data.after.val() : null;
-    if (!eventId || !afterData) {
+    const eventData = event.data.after.val();
+    if (!eventId || !isV2TelegramEvent(eventData)) {
       return;
     }
-    const nowMs = Date.now();
-    const beforeSignature = buildEventSignature(beforeData, nowMs);
-    const afterSignature = buildEventSignature(afterData, nowMs);
-    if (beforeSignature === afterSignature) {
-      return;
-    }
-    if (afterSignature === "skip") {
-      return;
-    }
-    try {
-      await applyEventAnnouncement({
-        eventId,
-        eventData: afterData,
-        signature: afterSignature,
-        nowMs,
-      });
-    } catch (error) {
-      console.error("event:tg:update:error", {
-        eventId,
-        error: error && error.message ? error.message : error,
-      });
-    }
+    await runEventTelegramProjection(eventId, "updated");
   },
 );
 
 module.exports = {
+  EVENT_TELEGRAM_PROJECTION_GUARD_FIELD,
+  EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
+  addEventTelegramProjectionGuard,
+  buildEventSignature,
+  buildEventTelegramProjection,
+  buildEventTelegramProjectionUpdates,
+  buildStartedState,
+  createEventTelegramProjector,
+  formatPtEtUtcLine,
   onEventTelegramCreated,
   onEventTelegramUpdated,
+  parseProjectionState,
+  projectEventTelegram,
+  renderStartedMessage,
+  renderUpcomingMessage,
 };

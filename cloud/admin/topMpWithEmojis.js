@@ -1,33 +1,13 @@
 #!/usr/bin/env node
-const fs = require("fs");
-const path = require("path");
-const { admin, initAdmin, cleanupAdmin } = require("./_admin");
 const {
-  getDisplayNameFromAddress,
-  sendBotMessage,
-} = require("../functions/utils");
-
-try {
-  const envPath = path.resolve(__dirname, "../functions/.env");
-  if (fs.existsSync(envPath)) {
-    const raw = fs.readFileSync(envPath, "utf8");
-    for (const line of raw.split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith("#")) continue;
-      const idx = trimmed.indexOf("=");
-      if (idx === -1) continue;
-      const key = trimmed.slice(0, idx).trim();
-      let value = trimmed.slice(idx + 1).trim();
-      if (
-        (value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))
-      ) {
-        value = value.slice(1, -1);
-      }
-      if (!process.env[key]) process.env[key] = value;
-    }
-  }
-} catch {}
+  ADC_FAILURE_MESSAGE,
+  addApplicationDefaultCredentialHelp,
+  admin,
+  initAdmin,
+  cleanupAdmin,
+} = require("./_admin");
+const { getDisplayNameFromAddress } = require("../functions/utils");
+const { queueTelegramSend } = require("../functions/telegramDelivery");
 
 async function logTopMpWithEmojis(limit = 15) {
   const initialized = initAdmin();
@@ -56,15 +36,25 @@ async function logTopMpWithEmojis(limit = 15) {
         rank += 1;
       }
       console.log(output);
-      await sendBotMessage(output, false, true);
+      const sourceId = admin.database().ref("telegramMessages").push().key;
+      if (!sourceId) {
+        throw new Error("Could not allocate a Telegram message ID.");
+      }
+      await queueTelegramSend({
+        messageKey: `admin:top-mp:${sourceId}`,
+        destination: "community",
+        instanceKey: sourceId,
+        text: output,
+        parseMode: "HTML",
+        silent: false,
+        sourceRevision: sourceId,
+      });
       return;
     } finally {
       await cleanupAdmin();
     }
   }
-  throw new Error(
-    "Failed to initialize Admin SDK with Application Default Credentials. Run gcloud auth application-default login.",
-  );
+  throw new Error(ADC_FAILURE_MESSAGE);
 }
 
 async function main() {
@@ -72,6 +62,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err);
+  console.error(addApplicationDefaultCredentialHelp(err));
   process.exit(1);
 });

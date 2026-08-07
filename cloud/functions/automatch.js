@@ -2,11 +2,14 @@ const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const admin = require("./firebaseAdmin");
 const {
   getProfileByLoginId,
-  replaceAutomatchBotMessageByDeletingOriginal,
   getDisplayNameFromAddress,
-  sendAutomatchBotMessage,
   getTelegramEmojiTag,
 } = require("./utils");
+const {
+  TELEGRAM_AUTOMATCH_VERSION,
+  buildPendingAutomatchTelegramSource,
+  buildMatchedAutomatchTelegramUpdates,
+} = require("./automatchTelegramMessages");
 const {
   buildGameSeedForStoredVariant,
   buildRandomGameSeed,
@@ -128,6 +131,9 @@ async function attemptAutomatch(
         existingAutomatchData.rating,
         existingAutomatchData.emojiId,
       );
+      const usesTelegramDeliveryV2 =
+        existingAutomatchData.telegramDeliveryVersion ===
+        TELEGRAM_AUTOMATCH_VERSION;
 
       const invite = {
         version: CONTROLLER_VERSION,
@@ -135,6 +141,9 @@ async function attemptAutomatch(
         hostColor: existingAutomatchData.hostColor,
         guestId: uid,
         password: existingAutomatchData.password,
+        ...(usesTelegramDeliveryV2
+          ? { telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION }
+          : {}),
       };
 
       const match = buildFreshMatchRecord({
@@ -143,6 +152,16 @@ async function attemptAutomatch(
         aura,
         seed: matchSeed,
       });
+      const matchLink = `https://mons.link/${firstAutomatchId}`;
+      const matchMessage = `${existingPlayerName} vs. ${name} ${matchLink}`;
+      const telegramUpdates = usesTelegramDeliveryV2
+        ? buildMatchedAutomatchTelegramUpdates({
+            inviteId: firstAutomatchId,
+            matchedText: matchMessage,
+            timestamp: admin.database.ServerValue.TIMESTAMP,
+            generation: admin.database.ServerValue.increment(1),
+          })
+        : {};
 
       try {
         const success = await acceptInvite(
@@ -150,27 +169,13 @@ async function attemptAutomatch(
           invite,
           match,
           uid,
+          telegramUpdates,
         );
         console.log("auto:accept:done", {
           inviteId: firstAutomatchId,
           success,
         });
         if (success) {
-          const matchLink = `https://mons.link/${firstAutomatchId}`;
-          const matchMessage = `${existingPlayerName} vs. ${name} ${matchLink}`;
-          try {
-            console.log("auto:edit:trigger", { inviteId: firstAutomatchId });
-            replaceAutomatchBotMessageByDeletingOriginal(
-              firstAutomatchId,
-              matchMessage,
-              true,
-            );
-          } catch (e) {
-            console.error("auto:edit:trigger:error", {
-              inviteId: firstAutomatchId,
-              error: e && e.message ? e.message : e,
-            });
-          }
           return {
             ok: true,
             inviteId: firstAutomatchId,
@@ -208,6 +213,7 @@ async function attemptAutomatch(
       password,
       automatchStateHint: "pending",
       automatchCanceledAt: null,
+      telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
     };
 
     const match = buildFreshMatchRecord({
@@ -216,6 +222,10 @@ async function attemptAutomatch(
       aura,
       seed: matchSeed,
     });
+    const emojiSuffix = getTelegramEmojiTag("5355002036817525409");
+    const message = `${name} is looking for a match https://mons.link ${emojiSuffix}`;
+    const canceledMessage = `<i>${name} canceled an automatch</i>`;
+    const timestamp = admin.database.ServerValue.TIMESTAMP;
 
     const updates = {};
     updates[`players/${uid}/matches/${inviteId}`] = match;
@@ -231,22 +241,18 @@ async function attemptAutomatch(
       password,
       emojiId,
       gameVariant: matchSeed.gameVariant,
+      telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
     };
     updates[`invites/${inviteId}`] = invite;
+    updates[`telegramAutomatches/${inviteId}`] =
+      buildPendingAutomatchTelegramSource({
+        inviteId,
+        waitingText: message,
+        canceledText: canceledMessage,
+        timestamp,
+      });
     await admin.database().ref().update(updates);
     console.log("auto:create:db:ok", { inviteId });
-
-    const emojiSuffix = getTelegramEmojiTag("5355002036817525409");
-    const message = `${name} is looking for a match https://mons.link ${emojiSuffix}`;
-    try {
-      console.log("auto:send:trigger", { inviteId });
-      sendAutomatchBotMessage(inviteId, message, false, true, name);
-    } catch (e) {
-      console.error("auto:send:trigger:error", {
-        inviteId,
-        error: e && e.message ? e.message : e,
-      });
-    }
 
     return {
       ok: true,
@@ -257,7 +263,13 @@ async function attemptAutomatch(
   }
 }
 
-async function acceptInvite(firstAutomatchId, invite, match, uid) {
+async function acceptInvite(
+  firstAutomatchId,
+  invite,
+  match,
+  uid,
+  telegramUpdates,
+) {
   const updates = {};
   updates[`automatch/${firstAutomatchId}`] = null;
   updates[`invites/${firstAutomatchId}`] = {
@@ -266,6 +278,7 @@ async function acceptInvite(firstAutomatchId, invite, match, uid) {
     automatchCanceledAt: null,
   };
   updates[`players/${uid}/matches/${firstAutomatchId}`] = match;
+  Object.assign(updates, telegramUpdates);
   await admin.database().ref().update(updates);
   const guestIdRef = admin
     .database()

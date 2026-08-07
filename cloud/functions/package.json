@@ -5,7 +5,8 @@
     "serve": "firebase emulators:start --only functions",
     "shell": "firebase functions:shell",
     "start": "npm run shell",
-    "deploy": "firebase deploy --only functions",
+    "test": "node --experimental-strip-types --test ../tests/*.test.js",
+    "deploy": "npm test && npm run deploy:safe -- --include-non-functions",
     "deploy:safe": "node ./scripts/deploy-safe.js",
     "logs": "firebase functions:log"
   },

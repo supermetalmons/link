@@ -57,6 +57,15 @@ const {
   onEventTelegramCreated,
   onEventTelegramUpdated,
 } = require("./eventTelegramAnnouncements");
+const {
+  dispatchTelegramDelivery,
+  dispatchTelegramManualRecovery,
+  telegramDeliveryWorker,
+} = require("./telegramDeliveryFunctions");
+const {
+  projectAutomatchTelegramMessages,
+} = require("./automatchTelegramMessages");
+const { projectRatingTelegramUpdates } = require("./ratingTelegramProjector");
 
 exports.verifySolanaAddress = verifySolanaAddress;
 exports.verifyEthAddress = verifyEthAddress;
@@ -110,3 +119,8 @@ exports.projectProfileEventPrizesOnMergeTargetWritten =
   onProfileMergeTargetWritten;
 exports.projectEventTelegramOnCreated = onEventTelegramCreated;
 exports.projectEventTelegramOnUpdated = onEventTelegramUpdated;
+exports.dispatchTelegramDelivery = dispatchTelegramDelivery;
+exports.dispatchTelegramManualRecovery = dispatchTelegramManualRecovery;
+exports.telegramDeliveryWorker = telegramDeliveryWorker;
+exports.projectAutomatchTelegramMessages = projectAutomatchTelegramMessages;
+exports.projectRatingTelegramUpdates = projectRatingTelegramUpdates;

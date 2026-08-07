@@ -20,13 +20,21 @@ const adminApp = hasFunctionsAdmin
 const adminFirestore = hasFunctionsAdmin
   ? requireFromFunctions("firebase-admin/firestore")
   : require("firebase-admin/firestore");
+const adminDatabase = hasFunctionsAdmin
+  ? requireFromFunctions("firebase-admin/database")
+  : require("firebase-admin/database");
 const { applicationDefault, deleteApp, getApps, initializeApp } = adminApp;
 const { FieldPath, getFirestore } = adminFirestore;
+const { getDatabase } = adminDatabase;
+const ADC_FAILURE_MESSAGE =
+  "Failed to initialize Admin SDK with Application Default Credentials. Run gcloud auth application-default login.";
 
 const firestore = () => getFirestore();
 firestore.FieldPath = FieldPath;
+const database = () => getDatabase();
 
 const admin = {
+  database,
   firestore,
 };
 
@@ -80,4 +88,26 @@ async function cleanupAdmin() {
   } catch {}
 }
 
-module.exports = { initAdmin, cleanupAdmin, admin };
+function addApplicationDefaultCredentialHelp(error) {
+  const message =
+    error && typeof error.message === "string" ? error.message : String(error);
+  const normalized = message.toLowerCase();
+  if (
+    normalized.includes("default credential") ||
+    normalized.includes("default credentials") ||
+    normalized.includes("application_default_credentials") ||
+    normalized.includes("metadata server") ||
+    normalized.includes("invalid_grant")
+  ) {
+    return new Error(ADC_FAILURE_MESSAGE, { cause: error });
+  }
+  return error;
+}
+
+module.exports = {
+  ADC_FAILURE_MESSAGE,
+  addApplicationDefaultCredentialHelp,
+  initAdmin,
+  cleanupAdmin,
+  admin,
+};

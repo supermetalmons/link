@@ -35,6 +35,24 @@
       ".read": "auth != null && auth.token.admin === true",
       ".write": "auth != null && auth.token.admin === true"
     },
+    "eventTelegramProjectionLocks": {
+      ".read": "auth != null && auth.token.admin === true",
+      ".write": "auth != null && auth.token.admin === true"
+    },
+    "eventTelegramProjections": {
+      "$eventId": {
+        ".read": "auth != null && auth.token.admin === true",
+        ".write": "auth != null && auth.uid === 'event-telegram-projector' && auth.token.eventTelegramProjectionWriter === true && newData.child('eventTelegramProjectionGuard').child('lockRoot').val() === 'eventTelegramProjectionLocks' && newData.child('eventTelegramProjectionGuard').child('eventId').val() === $eventId && newData.child('eventTelegramProjectionGuard').child('ownerUid').val() === auth.uid && newData.child('eventTelegramProjectionGuard').child('lockId').isString() && root.child('eventTelegramProjectionLocks').child($eventId).child('ownerUid').val() === auth.uid && root.child('eventTelegramProjectionLocks').child($eventId).child('lockId').val() === newData.child('eventTelegramProjectionGuard').child('lockId').val() && root.child('eventTelegramProjectionLocks').child($eventId).child('expiresAtMs').isNumber() && root.child('eventTelegramProjectionLocks').child($eventId).child('expiresAtMs').val() > now"
+      }
+    },
+    "telegramMessages": {
+      "$messageKey": {
+        ".read": "auth != null && auth.token.admin === true",
+        "desired": {
+          ".write": "auth != null && auth.uid === 'event-telegram-projector' && auth.token.eventTelegramProjectionWriter === true && newData.child('destination').val() === 'events' && newData.child('eventTelegramProjectionGuard').child('lockRoot').val() === 'eventTelegramProjectionLocks' && newData.child('eventTelegramProjectionGuard').child('messageKey').val() === $messageKey && ($messageKey === 'event:' + newData.child('eventTelegramProjectionGuard').child('eventId').val() + ':upcoming' || $messageKey === 'event:' + newData.child('eventTelegramProjectionGuard').child('eventId').val() + ':started') && newData.child('eventTelegramProjectionGuard').child('ownerUid').val() === auth.uid && newData.child('eventTelegramProjectionGuard').child('eventId').isString() && newData.child('eventTelegramProjectionGuard').child('lockId').isString() && root.child('eventTelegramProjectionLocks').child(newData.child('eventTelegramProjectionGuard').child('eventId').val()).child('ownerUid').val() === auth.uid && root.child('eventTelegramProjectionLocks').child(newData.child('eventTelegramProjectionGuard').child('eventId').val()).child('lockId').val() === newData.child('eventTelegramProjectionGuard').child('lockId').val() && root.child('eventTelegramProjectionLocks').child(newData.child('eventTelegramProjectionGuard').child('eventId').val()).child('expiresAtMs').isNumber() && root.child('eventTelegramProjectionLocks').child(newData.child('eventTelegramProjectionGuard').child('eventId').val()).child('expiresAtMs').val() > now"
+        }
+      }
+    },
     "invites": {
       "$inviteId": {
         ".read": "(data.child('hostId').exists() && data.child('guestId').exists()) || (auth != null && (!data.child('password').exists() || auth.uid === data.child('hostId').val() || (data.child('hostId').exists() && ((auth.token.profileId != null && root.child('players').child(data.child('hostId').val()).child('profile').val() === auth.token.profileId) || (root.child('players').child(auth.uid).child('profile').exists() && root.child('players').child(data.child('hostId').val()).child('profile').val() === root.child('players').child(auth.uid).child('profile').val())))))",
