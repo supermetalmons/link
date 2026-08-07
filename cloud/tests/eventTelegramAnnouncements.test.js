@@ -94,7 +94,7 @@ const createRuntimeDatabase = (initial = {}) => {
       );
       if (
         guard.messageKey !== messageKey ||
-        value.destination !== "events" ||
+        value.destination !== "community" ||
         ![
           `event:${guard.eventId}:upcoming`,
           `event:${guard.eventId}:started`,
@@ -259,7 +259,7 @@ test("renders the exact upcoming template with DST-aware times and UTC date", ()
   assert.equal(
     renderUpcomingMessage(EVENT_ID, eventData, NOW_MS),
     [
-      "upcoming event alert",
+      "join sunday mons",
       "",
       "https://mons.link/event/EV2026",
       "",
@@ -281,7 +281,7 @@ test("omits the date and participant line when they are not applicable", () => {
       NOW_MS,
     ),
     [
-      "upcoming event alert",
+      "join sunday mons",
       "",
       "https://mons.link/event/EV2026",
       "",
@@ -320,7 +320,7 @@ test("queues the first upcoming post as an HTML send", () => {
   const desired =
     updates[`telegramMessages/event:${EVENT_ID}:upcoming/desired`];
   assert.equal(desired.operation, "send");
-  assert.equal(desired.destination, "events");
+  assert.equal(desired.destination, "community");
   assert.equal(desired.parseMode, "HTML");
   assert.equal(desired.silent, false);
   assert.equal(desired.disableWebPagePreview, true);
@@ -563,6 +563,14 @@ test("RTDB rules bind desired message keys to the guarded event and channel", ()
     "newData.child('eventTelegramProjectionGuard').child('eventId').val()";
 
   assert.equal(
+    writeRule.includes("newData.child('destination').val() === 'community'"),
+    true,
+  );
+  assert.equal(
+    writeRule.includes("newData.child('destination').val() === 'events'"),
+    false,
+  );
+  assert.equal(
     writeRule.includes(
       `$messageKey === 'event:' + ${eventIdExpression} + ':upcoming'`,
     ),
@@ -601,7 +609,7 @@ test("guarded writes reject cross-event and unsupported-channel message keys", a
       const updates = addEventTelegramProjectionGuard({
         updates: {
           [`telegramMessages/${messageKey}/desired`]: {
-            destination: "events",
+            destination: "community",
           },
         },
         guard,

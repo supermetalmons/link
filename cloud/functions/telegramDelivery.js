@@ -264,7 +264,7 @@ const resolveTelegramDestination = (destination, environment = process.env) => {
     return normalizeString(environment.TELEGRAM_EXTRA_CHAT_ID);
   }
   if (destination === TELEGRAM_DESTINATIONS.events) {
-    return normalizeString(environment.TELEGRAM_CHAT_ID_IVAN);
+    return normalizeString(environment.TELEGRAM_EXTRA_CHAT_ID);
   }
   return "";
 };

@@ -13,6 +13,7 @@ const {
   createTelegramDeliveryEngine,
   createTelegramLocalRetryBarrier,
   queueTelegramSend,
+  resolveTelegramDestination,
   validateTelegramMessageKey,
 } = require("../functions/telegramDelivery");
 const {
@@ -315,6 +316,21 @@ test("builds deterministic desired state and Firebase multipath updates", () => 
       destination: "community",
       sourceRevision: "deleted",
     }),
+  );
+});
+
+test("community and legacy events destinations resolve to the community chat", () => {
+  const environment = {
+    TELEGRAM_EXTRA_CHAT_ID: "community-chat",
+    TELEGRAM_CHAT_ID_IVAN: "legacy-events-chat",
+  };
+  assert.equal(
+    resolveTelegramDestination("community", environment),
+    "community-chat",
+  );
+  assert.equal(
+    resolveTelegramDestination("events", environment),
+    "community-chat",
   );
 });
 
@@ -4812,7 +4828,7 @@ test("Firebase exports carry retry, rate, timeout, and secret configuration", ()
     telegramDeliveryWorker.__endpoint.secretEnvironmentVariables.map(
       (secret) => secret.key,
     ),
-    ["TELEGRAM_BOT_TOKEN", "TELEGRAM_EXTRA_CHAT_ID", "TELEGRAM_CHAT_ID_IVAN"],
+    ["TELEGRAM_BOT_TOKEN", "TELEGRAM_EXTRA_CHAT_ID"],
   );
   assert.equal(telegramDeliveryWorker.__endpoint.maxInstances, 1);
   assert.equal(telegramDeliveryWorker.__endpoint.concurrency, 1);

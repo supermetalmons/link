@@ -322,7 +322,7 @@ const renderUpcomingMessage = (eventId, eventData, nowMs = Date.now()) => {
     return null;
   }
   const lines = [
-    "upcoming event alert",
+    "join sunday mons",
     "",
     `${EVENT_URL_ROOT}/${eventId}`,
     "",
@@ -542,7 +542,7 @@ const buildEventTelegramProjectionUpdates = ({ eventId, projection }) => {
   for (const operation of projection.operations) {
     const common = {
       messageKey: operation.messageKey,
-      destination: "events",
+      destination: "community",
       instanceKey: operation.instanceKey,
       text: operation.text,
       parseMode: "HTML",

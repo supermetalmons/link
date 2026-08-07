@@ -559,7 +559,6 @@ test("operations documentation uses the release driver and required setup", () =
   assert.match(readme, /maintenance deployments do not prune/);
   assert.match(readme, /functions:secrets:set TELEGRAM_BOT_TOKEN/);
   assert.match(readme, /functions:secrets:set TELEGRAM_EXTRA_CHAT_ID/);
-  assert.match(readme, /functions:secrets:set TELEGRAM_CHAT_ID_IVAN/);
   assert.match(readme, /roles\/cloudtasks\.enqueuer/);
   assert.match(readme, /roles\/cloudfunctions\.invoker/);
   assert.doesNotMatch(readme, /firebase deploy[^\n]*--only functions/);
