@@ -2,6 +2,7 @@
 
 const crypto = require("crypto");
 const admin = require("./firebaseAdmin");
+const { defineSecret } = require("firebase-functions/params");
 const { onValueWritten } = require("firebase-functions/v2/database");
 const { onTaskDispatched } = require("firebase-functions/v2/tasks");
 const { telegramBotToken } = require("./telegramClient");
@@ -14,6 +15,8 @@ const {
 
 const TELEGRAM_DELIVERY_QUEUE = "telegramDeliveryWorker";
 const TELEGRAM_TASK_DEADLINE_SECONDS = 30;
+const telegramCommunityChatId = defineSecret("TELEGRAM_EXTRA_CHAT_ID");
+const telegramEventsChatId = defineSecret("TELEGRAM_CHAT_ID_IVAN");
 const TELEGRAM_TASK_KINDS = new Set([
   "desired",
   "manual-recovery",
@@ -368,7 +371,7 @@ const dispatchTelegramManualRecovery = onValueWritten(
 
 const telegramDeliveryWorker = onTaskDispatched(
   {
-    secrets: [telegramBotToken],
+    secrets: [telegramBotToken, telegramCommunityChatId, telegramEventsChatId],
     maxInstances: 1,
     concurrency: 1,
     memory: "256MiB",

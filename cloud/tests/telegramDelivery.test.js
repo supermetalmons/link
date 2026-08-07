@@ -4812,7 +4812,7 @@ test("Firebase exports carry retry, rate, timeout, and secret configuration", ()
     telegramDeliveryWorker.__endpoint.secretEnvironmentVariables.map(
       (secret) => secret.key,
     ),
-    ["TELEGRAM_BOT_TOKEN"],
+    ["TELEGRAM_BOT_TOKEN", "TELEGRAM_EXTRA_CHAT_ID", "TELEGRAM_CHAT_ID_IVAN"],
   );
   assert.equal(telegramDeliveryWorker.__endpoint.maxInstances, 1);
   assert.equal(telegramDeliveryWorker.__endpoint.concurrency, 1);

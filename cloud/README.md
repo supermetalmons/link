@@ -6,9 +6,13 @@ Run all commands from the repository root.
 
 `npm install -g firebase-tools`
 
-Provision or rotate the Telegram bot token before the production release:
+Provision or rotate the Telegram bot token and destination chat IDs before the production release:
 
 `firebase functions:secrets:set TELEGRAM_BOT_TOKEN --config cloud/firebase.json --project mons-link`
+
+`firebase functions:secrets:set TELEGRAM_EXTRA_CHAT_ID --config cloud/firebase.json --project mons-link`
+
+`firebase functions:secrets:set TELEGRAM_CHAT_ID_IVAN --config cloud/firebase.json --project mons-link`
 
 Verify that every Functions runtime service account that enqueues Telegram tasks has `roles/cloudtasks.enqueuer`, can act as the task service account, and has `roles/cloudfunctions.invoker` on `telegramDeliveryWorker`.
 
