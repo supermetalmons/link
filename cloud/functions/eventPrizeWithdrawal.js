@@ -3,10 +3,14 @@
 const crypto = require("node:crypto");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { defineSecret } = require("firebase-functions/params");
-const { getEventPrizeDefinition } = require("@mons/shared/event-prizes");
+const {
+  getEventPrizeDefinition,
+  isEventPrizeStandard,
+} = require("@mons/shared/event-prizes");
 const admin = require("./firebaseAdmin");
 const { HELIUS_RPC_API_KEY, getHeliusRpcUrl } = require("./heliusRpc");
 const { readProfileByLoginUid } = require("./profileLookup");
+const { runRtdbDecisionTransaction } = require("./rtdbDecisionTransaction");
 const {
   removeMatchingProfileEventPrizeAssignment,
   resolveCanonicalProfileId,
@@ -14,11 +18,9 @@ const {
 } = require("./profileEventPrizeProjection");
 const {
   EVENT_PRIZE_ADMIN_WALLET,
-  EVENT_PRIZE_COLLECTION_ADDRESS,
   buildWithdrawalCompletionUpdates,
   decodeAdminSecretKey,
   decideWithdrawalClaim,
-  getEventPrizeAssetAddress,
   getEventPrizeWithdrawalPath,
   getWithdrawalProjectionProfileIds,
   isCompletedEventPrizeWithdrawal,
@@ -35,36 +37,88 @@ const CONFIRMATION_TIMEOUT_MS = 45 * 1000;
 const SEND_TRANSACTION_TIMEOUT_MS = 10 * 1000;
 const SIGNATURE_STATUS_TIMEOUT_MS = 2 * 1000;
 const TRANSACTION_STATUS_RETRY_DELAYS_MS = [0, 500, 1000, 2000, 4000, 8000];
-let solanaDependencies = null;
+let sharedSolanaDependencies = null;
+let coreSolanaDependencies = null;
+let compressedSolanaDependencies = null;
 
-const loadSolanaDependencies = () => {
-  if (!solanaDependencies) {
-    const {
-      fetchAsset,
-      fetchCollection,
-      mplCore,
-      transfer,
-    } = require("@metaplex-foundation/mpl-core");
+class DefinitiveSubmittedTransactionFailure extends Error {}
+
+const isDefinitiveSubmittedTransactionFailure = (error) =>
+  error instanceof DefinitiveSubmittedTransactionFailure;
+
+const loadSolanaDependencies = (standard) => {
+  if (standard != null && !isEventPrizeStandard(standard)) {
+    throw new TypeError("Unsupported event prize standard.");
+  }
+  if (!sharedSolanaDependencies) {
     const {
       base58,
       createSignerFromKeypair,
+      none,
       publicKey,
+      some,
       signerIdentity,
+      wrapNullable,
     } = require("@metaplex-foundation/umi");
     const { createUmi } = require("@metaplex-foundation/umi-bundle-defaults");
-    solanaDependencies = {
+    sharedSolanaDependencies = {
       base58,
       createSignerFromKeypair,
       createUmi,
-      fetchAsset,
-      fetchCollection,
-      mplCore,
+      none,
       publicKey,
+      some,
       signerIdentity,
-      transfer,
+      wrapNullable,
     };
   }
-  return solanaDependencies;
+  if (standard == null) {
+    return sharedSolanaDependencies;
+  }
+  if (standard === "core") {
+    if (!coreSolanaDependencies) {
+      const {
+        fetchAsset,
+        fetchCollection,
+        mplCore,
+        transfer: transferCore,
+      } = require("@metaplex-foundation/mpl-core");
+      coreSolanaDependencies = {
+        ...sharedSolanaDependencies,
+        fetchAsset,
+        fetchCollection,
+        mplCore,
+        transferCore,
+      };
+    }
+    return coreSolanaDependencies;
+  }
+  if (!compressedSolanaDependencies) {
+    const {
+      TokenProgramVersion,
+      TokenStandard,
+      canTransfer,
+      findLeafAssetIdPda,
+      getAssetWithProof,
+      hashMetadataCreators,
+      hashMetadataData,
+      mplBubblegum,
+      transfer: transferCompressed,
+    } = require("@metaplex-foundation/mpl-bubblegum");
+    compressedSolanaDependencies = {
+      ...sharedSolanaDependencies,
+      TokenProgramVersion,
+      TokenStandard,
+      canTransfer,
+      findLeafAssetIdPda,
+      getAssetWithProof,
+      hashMetadataCreators,
+      hashMetadataData,
+      mplBubblegum,
+      transferCompressed,
+    };
+  }
+  return compressedSolanaDependencies;
 };
 
 const normalizeString = (value) =>
@@ -91,9 +145,9 @@ const getRpcUrl = () => {
   return rpcUrl;
 };
 
-const createEventPrizeUmi = () => {
-  const { createSignerFromKeypair, createUmi, mplCore, signerIdentity } =
-    loadSolanaDependencies();
+const createEventPrizeUmi = (standard) => {
+  const dependencies = loadSolanaDependencies(standard);
+  const { createSignerFromKeypair, createUmi, signerIdentity } = dependencies;
   const secretKey = decodeAdminSecretKey(EVENT_PRIZE_ADMIN_PRIVATE_KEY.value());
   if (!secretKey) {
     throw new HttpsError(
@@ -101,9 +155,11 @@ const createEventPrizeUmi = () => {
       "The event prize wallet is not configured.",
     );
   }
+  const plugin =
+    standard === "core" ? dependencies.mplCore() : dependencies.mplBubblegum();
   const umi = createUmi(getRpcUrl(), {
     commitment: CONFIRMATION_COMMITMENT,
-  }).use(mplCore());
+  }).use(plugin);
   const keypair = umi.eddsa.createKeypairFromSecretKey(secretKey);
   const signer = createSignerFromKeypair(umi, keypair);
   if (signer.publicKey !== EVENT_PRIZE_ADMIN_WALLET) {
@@ -133,6 +189,418 @@ const validatePrizeAssignment = ({
     throw new HttpsError("not-found", "Event prize not found.");
   }
   return place;
+};
+
+const isBytes32 = (value) => value instanceof Uint8Array && value.length === 32;
+
+const areBytesEqual = (left, right) =>
+  left instanceof Uint8Array &&
+  right instanceof Uint8Array &&
+  left.length === right.length &&
+  left.every((value, index) => value === right[index]);
+
+const createPrizeAssetVerificationError = (message) =>
+  new HttpsError("failed-precondition", message);
+
+const parseCompressedPrizeObservation = ({ prize, rpcAsset }) => {
+  const { base58 } = loadSolanaDependencies();
+  const assetAddress = normalizeString(prize?.assetAddress);
+  const collectionAddress = normalizeString(prize?.collectionAddress);
+  const assetOwner = normalizeSolanaAddress(rpcAsset?.ownership?.owner);
+  const compression = rpcAsset?.compression;
+  const compressionTree = normalizeSolanaAddress(compression?.tree);
+  const leafId = Number(compression?.leaf_id);
+
+  if (
+    normalizeSolanaAddress(assetAddress) !== assetAddress ||
+    normalizeSolanaAddress(collectionAddress) !== collectionAddress ||
+    normalizeSolanaAddress(rpcAsset?.id) !== assetAddress ||
+    !assetOwner ||
+    !Array.isArray(rpcAsset?.grouping) ||
+    typeof rpcAsset?.ownership?.frozen !== "boolean" ||
+    rpcAsset?.ownership?.ownership_model !== "single" ||
+    !compressionTree ||
+    compression?.compressed !== true ||
+    !normalizeSolanaAddress(compression?.data_hash) ||
+    !normalizeSolanaAddress(compression?.creator_hash) ||
+    !Number.isSafeInteger(leafId) ||
+    leafId < 0
+  ) {
+    throw createPrizeAssetVerificationError(
+      "The compressed prize data could not be verified.",
+    );
+  }
+
+  let dataHash;
+  let creatorHash;
+  try {
+    dataHash = base58.serialize(compression.data_hash);
+    creatorHash = base58.serialize(compression.creator_hash);
+  } catch {
+    throw createPrizeAssetVerificationError(
+      "The compressed prize data could not be verified.",
+    );
+  }
+  if (!isBytes32(dataHash) || !isBytes32(creatorHash)) {
+    throw createPrizeAssetVerificationError(
+      "The compressed prize data could not be verified.",
+    );
+  }
+
+  if (
+    rpcAsset.interface !== "V1_NFT" ||
+    compression.collection_hash != null ||
+    compression.asset_data_hash != null ||
+    compression.flags != null
+  ) {
+    throw createPrizeAssetVerificationError(
+      "The compressed prize format is not supported.",
+    );
+  }
+
+  const collectionGroups = rpcAsset.grouping.filter(
+    (group) => group?.group_key === "collection",
+  );
+  if (collectionGroups.length !== 1) {
+    throw createPrizeAssetVerificationError(
+      "The compressed prize data could not be verified.",
+    );
+  }
+  const observedCollectionAddress = normalizeSolanaAddress(
+    collectionGroups[0].group_value,
+  );
+  if (!observedCollectionAddress) {
+    throw createPrizeAssetVerificationError(
+      "The compressed prize data could not be verified.",
+    );
+  }
+  return {
+    assetOwner,
+    collectionAddress,
+    collectionMatches: observedCollectionAddress === collectionAddress,
+    compression,
+    compressionTree,
+    creatorHash,
+    dataHash,
+    leafId,
+    rpcAsset,
+  };
+};
+
+const resolveCompressedPrizeOwnership = (observation) => {
+  const { canTransfer } = loadSolanaDependencies("compressed");
+  const { assetOwner, rpcAsset } = observation;
+  if (rpcAsset.burnt === true || rpcAsset.ownership.non_transferable === true) {
+    return {
+      assetOwner,
+      blocked: true,
+      message: "This prize is unavailable for withdrawal.",
+    };
+  }
+  if (
+    rpcAsset.burnt !== false ||
+    rpcAsset.ownership.frozen !== false ||
+    !canTransfer(rpcAsset)
+  ) {
+    throw createPrizeAssetVerificationError(
+      "This prize cannot be withdrawn right now.",
+    );
+  }
+  return { assetOwner, blocked: false };
+};
+
+const validateCompressedPrizeProof = ({ umi, assetWithProof, observation }) => {
+  const { findLeafAssetIdPda } = loadSolanaDependencies("compressed");
+  const {
+    assetOwner,
+    compression,
+    compressionTree,
+    creatorHash,
+    dataHash,
+    leafId,
+  } = observation;
+  const rpcAsset = observation.rpcAsset;
+  const rpcAssetProof = assetWithProof?.rpcAssetProof;
+  const leafDelegate = rpcAsset?.ownership?.delegate;
+  const expectedLeafDelegate =
+    normalizeSolanaAddress(leafDelegate) || assetOwner;
+  const merkleTree = normalizeSolanaAddress(assetWithProof?.merkleTree);
+  const nonce = Number(assetWithProof?.nonce);
+  const index = Number(assetWithProof?.index);
+  const proof = assetWithProof?.proof;
+  const rawProof = rpcAssetProof?.proof;
+  const rawNodeIndex = Number(rpcAssetProof?.node_index);
+  const leafNodeOffset = Array.isArray(rawProof)
+    ? 2 ** rawProof.length
+    : Number.NaN;
+
+  if (
+    (leafDelegate != null && !normalizeSolanaAddress(leafDelegate)) ||
+    normalizeSolanaAddress(assetWithProof?.leafOwner) !== assetOwner ||
+    normalizeSolanaAddress(assetWithProof?.leafDelegate) !==
+      expectedLeafDelegate ||
+    !merkleTree ||
+    normalizeSolanaAddress(rpcAssetProof?.tree_id) !== merkleTree ||
+    compressionTree !== merkleTree ||
+    !Number.isSafeInteger(nonce) ||
+    nonce < 0 ||
+    !Number.isSafeInteger(index) ||
+    index < 0 ||
+    leafId !== nonce ||
+    !isBytes32(assetWithProof?.root) ||
+    !isBytes32(assetWithProof?.dataHash) ||
+    !isBytes32(assetWithProof?.creatorHash) ||
+    !areBytesEqual(assetWithProof.dataHash, dataHash) ||
+    !areBytesEqual(assetWithProof.creatorHash, creatorHash) ||
+    !Array.isArray(proof) ||
+    proof.some((node) => !normalizeSolanaAddress(node)) ||
+    !Array.isArray(rawProof) ||
+    rawProof.some((node) => !normalizeSolanaAddress(node)) ||
+    proof.length > rawProof.length ||
+    proof.some((node, proofIndex) => node !== rawProof[proofIndex]) ||
+    !Number.isSafeInteger(rawNodeIndex) ||
+    !Number.isSafeInteger(leafNodeOffset) ||
+    rawNodeIndex - leafNodeOffset !== index
+  ) {
+    throw createPrizeAssetVerificationError(
+      "The compressed prize data could not be verified.",
+    );
+  }
+
+  const [derivedAssetAddress] = findLeafAssetIdPda(umi, {
+    merkleTree: assetWithProof.merkleTree,
+    leafIndex: assetWithProof.nonce,
+  });
+  if (derivedAssetAddress !== normalizeString(rpcAsset.id)) {
+    throw createPrizeAssetVerificationError(
+      "The compressed prize data could not be verified.",
+    );
+  }
+};
+
+const createCompressedPrizeMetadata = (rpcAsset) => {
+  const { TokenProgramVersion, TokenStandard, none, some, wrapNullable } =
+    loadSolanaDependencies("compressed");
+  return {
+    name: rpcAsset.content?.metadata?.name ?? "",
+    symbol: rpcAsset.content?.metadata?.symbol ?? "",
+    uri: rpcAsset.content?.json_uri,
+    sellerFeeBasisPoints: rpcAsset.royalty?.basis_points,
+    primarySaleHappened: rpcAsset.royalty?.primary_sale_happened,
+    isMutable: rpcAsset.mutable,
+    editionNonce: wrapNullable(rpcAsset.supply?.edition_nonce),
+    tokenStandard: some(TokenStandard.NonFungible),
+    uses: none(),
+    tokenProgramVersion: TokenProgramVersion.Original,
+    creators: rpcAsset.creators,
+  };
+};
+
+const getCompressedPrizeCollectionVerification = ({
+  collectionAddress,
+  creatorHash,
+  dataHash,
+  metadata,
+}) => {
+  const { hashMetadataCreators, hashMetadataData, publicKey, some } =
+    loadSolanaDependencies("compressed");
+  if (!metadata || !Array.isArray(metadata.creators)) {
+    throw createPrizeAssetVerificationError(
+      "The compressed prize data could not be verified.",
+    );
+  }
+  let computedCreatorHash;
+  let verifiedDataHash;
+  let unverifiedDataHash;
+  try {
+    computedCreatorHash = hashMetadataCreators(metadata.creators);
+    const collectionKey = publicKey(collectionAddress);
+    verifiedDataHash = hashMetadataData({
+      ...metadata,
+      collection: some({ key: collectionKey, verified: true }),
+    });
+    unverifiedDataHash = hashMetadataData({
+      ...metadata,
+      collection: some({ key: collectionKey, verified: false }),
+    });
+  } catch {
+    throw createPrizeAssetVerificationError(
+      "The compressed prize data could not be verified.",
+    );
+  }
+  if (
+    !areBytesEqual(computedCreatorHash, creatorHash) ||
+    (!areBytesEqual(verifiedDataHash, dataHash) &&
+      !areBytesEqual(unverifiedDataHash, dataHash))
+  ) {
+    throw createPrizeAssetVerificationError(
+      "The compressed prize data could not be verified.",
+    );
+  }
+  return areBytesEqual(verifiedDataHash, dataHash);
+};
+
+const resolveCompressedPrizeCollection = (observation) => {
+  if (!observation.collectionMatches) {
+    return {
+      assetOwner: observation.assetOwner,
+      blocked: true,
+      message: "The prize collection could not be verified.",
+    };
+  }
+  if (
+    !getCompressedPrizeCollectionVerification({
+      collectionAddress: observation.collectionAddress,
+      creatorHash: observation.creatorHash,
+      dataHash: observation.dataHash,
+      metadata: createCompressedPrizeMetadata(observation.rpcAsset),
+    })
+  ) {
+    return {
+      assetOwner: observation.assetOwner,
+      blocked: true,
+      message: "The prize collection could not be verified.",
+    };
+  }
+  return null;
+};
+
+const validateCompressedPrizeAsset = ({ umi, prize, assetWithProof }) => {
+  const observation = parseCompressedPrizeObservation({
+    prize,
+    rpcAsset: assetWithProof?.rpcAsset,
+  });
+  validateCompressedPrizeProof({ umi, assetWithProof, observation });
+  const collectionResolution = resolveCompressedPrizeCollection(observation);
+  if (collectionResolution) return collectionResolution;
+  return resolveCompressedPrizeOwnership(observation);
+};
+
+const buildCoreTransferBuilder = ({
+  umi,
+  asset,
+  collection,
+  recipientAddress,
+}) => {
+  const { publicKey, transferCore } = loadSolanaDependencies("core");
+  return transferCore(umi, {
+    asset,
+    collection,
+    newOwner: publicKey(recipientAddress),
+  });
+};
+
+const buildCompressedTransferBuilder = ({
+  umi,
+  assetWithProof,
+  recipientAddress,
+}) => {
+  const { publicKey, transferCompressed } =
+    loadSolanaDependencies("compressed");
+  return transferCompressed(umi, {
+    ...assetWithProof,
+    leafOwner: umi.identity,
+    leafDelegate: assetWithProof.leafDelegate,
+    newLeafOwner: publicKey(recipientAddress),
+  });
+};
+
+const loadCorePrizeAssetState = async ({ umi, prize, recipientAddress }) => {
+  const { fetchAsset, fetchCollection, publicKey } =
+    loadSolanaDependencies("core");
+  const asset = await fetchAsset(umi, publicKey(prize.assetAddress), {
+    commitment: CONFIRMATION_COMMITMENT,
+  });
+  if (
+    asset.publicKey !== prize.assetAddress ||
+    asset.updateAuthority.type !== "Collection" ||
+    asset.updateAuthority.address !== prize.collectionAddress
+  ) {
+    return {
+      assetOwner: normalizeSolanaAddress(asset.owner),
+      blocked: true,
+      message: "The prize collection could not be verified.",
+    };
+  }
+  return {
+    assetOwner: normalizeSolanaAddress(asset.owner),
+    blocked: false,
+    buildTransferBuilder: async () => {
+      const collection = await fetchCollection(
+        umi,
+        publicKey(prize.collectionAddress),
+        { commitment: CONFIRMATION_COMMITMENT },
+      );
+      if (collection.publicKey !== prize.collectionAddress) {
+        throw createPrizeAssetVerificationError(
+          "The prize collection could not be verified.",
+        );
+      }
+      return buildCoreTransferBuilder({
+        umi,
+        asset,
+        collection,
+        recipientAddress,
+      });
+    },
+  };
+};
+
+const loadCompressedPrizeAssetState = async ({
+  umi,
+  prize,
+  recipientAddress,
+}) => {
+  const { getAssetWithProof, publicKey } = loadSolanaDependencies("compressed");
+  const assetWithProof = await getAssetWithProof(
+    umi,
+    publicKey(prize.assetAddress),
+    { truncateCanopy: true },
+  );
+  const validation = validateCompressedPrizeAsset({
+    umi,
+    prize,
+    assetWithProof,
+  });
+  return validation.blocked
+    ? validation
+    : {
+        ...validation,
+        buildTransferBuilder: async () =>
+          buildCompressedTransferBuilder({
+            umi,
+            assetWithProof,
+            recipientAddress,
+          }),
+      };
+};
+
+const loadCompressedPrizeRecoveryState = async ({ umi, prize }) => {
+  const { publicKey } = loadSolanaDependencies("compressed");
+  const rpcAsset = await umi.rpc.getAsset({
+    assetId: publicKey(prize.assetAddress),
+    displayOptions: { showUnverifiedCollections: true },
+  });
+  const observation = parseCompressedPrizeObservation({ prize, rpcAsset });
+  const collectionResolution = resolveCompressedPrizeCollection(observation);
+  return collectionResolution || resolveCompressedPrizeOwnership(observation);
+};
+
+const loadPrizeAssetState = ({
+  umi,
+  prize,
+  recipientAddress,
+  needsTransferBuilder = true,
+}) => {
+  if (prize.standard === "core") {
+    return loadCorePrizeAssetState({ umi, prize, recipientAddress });
+  }
+  if (prize.standard === "compressed") {
+    return needsTransferBuilder
+      ? loadCompressedPrizeAssetState({ umi, prize, recipientAddress })
+      : loadCompressedPrizeRecoveryState({ umi, prize });
+  }
+  throw new TypeError("Unsupported event prize standard.");
 };
 
 const acquireWithdrawalClaim = async ({
@@ -316,14 +784,38 @@ const persistSubmittedTransaction = async ({
   return persisted;
 };
 
+const discardDefinitiveSubmittedTransaction = async ({
+  withdrawalRef,
+  leaseId,
+  transactionSignature,
+}) => {
+  const result = await runRtdbDecisionTransaction(withdrawalRef, (current) =>
+    current?.status === "submitted" &&
+    normalizeString(current.leaseId) === leaseId &&
+    normalizeString(current.transactionSignature) === transactionSignature
+      ? { value: null, decision: "discarded" }
+      : { commit: false, decision: "stale" },
+  );
+  if (
+    !result.committed ||
+    result.decision !== "discarded" ||
+    result.value !== null
+  ) {
+    throw new HttpsError(
+      "aborted",
+      "Prize withdrawal changed. Please try again.",
+    );
+  }
+};
+
 const getCurrentBlockHeight = async (umi) => {
   const blockHeight = await umi.rpc.call("getBlockHeight", [
     { commitment: CONFIRMATION_COMMITMENT },
   ]);
-  const numeric = Number(blockHeight);
-  return Number.isFinite(numeric)
-    ? Math.floor(numeric)
-    : Number.MAX_SAFE_INTEGER;
+  if (!Number.isSafeInteger(blockHeight) || blockHeight < 0) {
+    throw new Error("Solana RPC returned an invalid block height.");
+  }
+  return blockHeight;
 };
 
 const deserializePersistedSubmittedTransaction = (umi, withdrawal) => {
@@ -355,36 +847,19 @@ const deserializePersistedSubmittedTransaction = (umi, withdrawal) => {
   }
 };
 
-const deserializeSubmittedTransaction = async (umi, withdrawal) => {
-  const encoded = normalizeString(withdrawal?.signedTransactionBase64);
-  const lastValidBlockHeight = Number(withdrawal?.lastValidBlockHeight);
-  if (!encoded || !Number.isFinite(lastValidBlockHeight)) {
-    return null;
-  }
-  if ((await getCurrentBlockHeight(umi)) > lastValidBlockHeight) {
-    return null;
-  }
-  return deserializePersistedSubmittedTransaction(umi, withdrawal);
-};
-
 const buildSubmittedTransaction = async ({
   umi,
-  asset,
-  collection,
-  recipientAddress,
+  builder,
   withdrawalRef,
   leaseId,
 }) => {
-  const { base58, publicKey, transfer } = loadSolanaDependencies();
+  const { base58 } = loadSolanaDependencies();
   const latestBlockhash = await umi.rpc.getLatestBlockhash({
     commitment: CONFIRMATION_COMMITMENT,
   });
-  const builder = transfer(umi, {
-    asset,
-    collection,
-    newOwner: publicKey(recipientAddress),
-  }).setBlockhash(latestBlockhash);
-  const signedTransaction = await builder.buildAndSign(umi);
+  const signedTransaction = await builder
+    .setBlockhash(latestBlockhash)
+    .buildAndSign(umi);
   const simulation = await umi.rpc.simulateTransaction(signedTransaction, {
     commitment: CONFIRMATION_COMMITMENT,
     verifySignatures: true,
@@ -401,7 +876,7 @@ const buildSubmittedTransaction = async ({
   const signedTransactionBase64 = Buffer.from(
     umi.transactions.serialize(signedTransaction),
   ).toString("base64");
-  await persistSubmittedTransaction({
+  const persistedWithdrawal = await persistSubmittedTransaction({
     withdrawalRef,
     leaseId,
     transactionSignature,
@@ -414,6 +889,7 @@ const buildSubmittedTransaction = async ({
     transactionSignature,
     blockhash: latestBlockhash.blockhash,
     lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+    persistedWithdrawal,
   };
 };
 
@@ -469,15 +945,14 @@ const readSubmittedTransactionStatus = async ({
     statusRequestTimeoutMs,
   );
   if (!status) {
-    return { kind: "pending" };
+    return { kind: "pending", signatureFound: false };
   }
-  if (status.error != null) {
-    return { kind: "failed", error: status.error };
+  if (!["confirmed", "finalized"].includes(status.commitment)) {
+    return { kind: "pending", signatureFound: true };
   }
-  if (["confirmed", "finalized"].includes(status.commitment)) {
-    return { kind: "confirmed" };
-  }
-  return { kind: "pending" };
+  return status.error != null
+    ? { kind: "failed", error: status.error }
+    : { kind: "confirmed" };
 };
 
 const waitForSubmittedTransactionStatus = async ({
@@ -488,6 +963,7 @@ const waitForSubmittedTransactionStatus = async ({
 }) => {
   const transactionSignature = getSubmittedTransactionSignature(submitted);
   let observedStatus = false;
+  let signatureFound = false;
   let lastError = null;
   for (const delayMs of retryDelaysMs) {
     if (delayMs > 0) {
@@ -503,22 +979,17 @@ const waitForSubmittedTransactionStatus = async ({
       if (status.kind !== "pending") {
         return status;
       }
+      signatureFound ||= status.signatureFound;
     } catch (error) {
       lastError = error;
     }
   }
   return observedStatus
-    ? { kind: "pending" }
+    ? { kind: "pending", signatureFound }
     : { kind: "unknown", error: lastError };
 };
 
-const recoverSubmittedWithdrawal = async ({
-  umi,
-  withdrawal,
-  assetOwner,
-  recipientAddress,
-  statusRetryDelaysMs = TRANSACTION_STATUS_RETRY_DELAYS_MS,
-}) => {
+const inspectSubmittedWithdrawal = async ({ umi, withdrawal }) => {
   const submitted = deserializePersistedSubmittedTransaction(umi, withdrawal);
   if (!submitted) {
     throw new HttpsError(
@@ -526,18 +997,33 @@ const recoverSubmittedWithdrawal = async ({
       "The submitted prize transaction is unavailable.",
     );
   }
-  let status = await waitForSubmittedTransactionStatus({
+  const status = await waitForSubmittedTransactionStatus({
     umi,
     submitted,
     retryDelaysMs: [0],
   });
+  return { submitted, status };
+};
+
+const recoverSubmittedWithdrawal = async ({
+  umi,
+  withdrawal,
+  assetOwner,
+  recipientAddress,
+  inspection,
+  statusRetryDelaysMs = TRANSACTION_STATUS_RETRY_DELAYS_MS,
+}) => {
+  const submittedInspection =
+    inspection || (await inspectSubmittedWithdrawal({ umi, withdrawal }));
+  const { submitted } = submittedInspection;
+  let { status } = submittedInspection;
   if (status.kind === "confirmed") {
     return { kind: "completed", submitted };
   }
   if (status.kind === "failed") {
     return assetOwner === EVENT_PRIZE_ADMIN_WALLET
-      ? { kind: "retry", discardPersistedSubmission: true }
-      : { kind: "blocked" };
+      ? { kind: "retry", discardPersistedSubmission: true, submitted }
+      : { kind: "blocked", submitted };
   }
   if (assetOwner === recipientAddress) {
     return { kind: "completed", submitted };
@@ -548,7 +1034,7 @@ const recoverSubmittedWithdrawal = async ({
         status.error || new Error("Prize transaction status is unavailable.")
       );
     }
-    return { kind: "retry", discardPersistedSubmission: false };
+    return { kind: "retry", discardPersistedSubmission: false, submitted };
   }
   const remainingRetryDelaysMs =
     statusRetryDelaysMs[0] === 0
@@ -565,9 +1051,74 @@ const recoverSubmittedWithdrawal = async ({
     return { kind: "completed", submitted };
   }
   if (status.kind === "failed") {
-    return { kind: "blocked" };
+    return { kind: "blocked", submitted };
   }
   throw status.error || new Error("Prize transaction confirmation is pending.");
+};
+
+const reconcileSubmittedAssetState = async ({
+  umi,
+  withdrawal,
+  assetState,
+  recipientAddress,
+  inspection,
+  statusRetryDelaysMs,
+}) => {
+  const assetOwner = normalizeSolanaAddress(assetState.assetOwner);
+  if (!assetOwner) {
+    throw createPrizeAssetVerificationError(
+      "The prize ownership could not be verified.",
+    );
+  }
+  const submittedInspection =
+    inspection || (await inspectSubmittedWithdrawal({ umi, withdrawal }));
+  const recovery = await recoverSubmittedWithdrawal({
+    umi,
+    withdrawal,
+    assetOwner,
+    recipientAddress,
+    inspection: submittedInspection,
+    statusRetryDelaysMs,
+  });
+  if (recovery.kind === "completed" || recovery.kind === "blocked") {
+    return { kind: recovery.kind, assetOwner, submitted: recovery.submitted };
+  }
+  if (recovery.discardPersistedSubmission) {
+    return { kind: "discard", assetOwner, submitted: recovery.submitted };
+  }
+  const currentBlockHeight = await getCurrentBlockHeight(umi);
+  if (currentBlockHeight <= recovery.submitted.lastValidBlockHeight) {
+    return {
+      kind: assetState.blocked ? "retry" : "resume",
+      assetOwner,
+      submitted: recovery.submitted,
+    };
+  }
+  const finalStatus = await waitForSubmittedTransactionStatus({
+    umi,
+    submitted: recovery.submitted,
+    retryDelaysMs: [0],
+  });
+  if (finalStatus.kind === "confirmed") {
+    return {
+      kind: "completed",
+      assetOwner,
+      submitted: recovery.submitted,
+    };
+  }
+  const signatureRemainsAbsent =
+    submittedInspection.status.kind === "pending" &&
+    submittedInspection.status.signatureFound === false &&
+    finalStatus.kind === "pending" &&
+    finalStatus.signatureFound === false;
+  return {
+    kind:
+      finalStatus.kind === "failed" || signatureRemainsAbsent
+        ? "discard"
+        : "retry",
+    assetOwner,
+    submitted: recovery.submitted,
+  };
 };
 
 const sendAndConfirmSubmittedTransaction = async ({
@@ -598,12 +1149,6 @@ const sendAndConfirmSubmittedTransaction = async ({
     if (error instanceof HttpsError) {
       throw error;
     }
-    if (Array.isArray(error?.logs) && error.logs.length > 0) {
-      throw new HttpsError(
-        "failed-precondition",
-        "The prize transfer could not be submitted.",
-      );
-    }
     sendError = error;
   }
   try {
@@ -620,10 +1165,13 @@ const sendAndConfirmSubmittedTransaction = async ({
       "confirmation-timeout",
     );
     if (confirmation.value.err) {
-      throw new HttpsError("failed-precondition", "Prize transfer failed.");
+      throw new DefinitiveSubmittedTransactionFailure("Prize transfer failed.");
     }
   } catch (error) {
-    if (error instanceof HttpsError) {
+    if (
+      error instanceof HttpsError ||
+      isDefinitiveSubmittedTransactionFailure(error)
+    ) {
       throw error;
     }
     const status = await waitForSubmittedTransactionStatus({
@@ -633,7 +1181,7 @@ const sendAndConfirmSubmittedTransaction = async ({
       statusRequestTimeoutMs,
     });
     if (status.kind === "failed") {
-      throw new HttpsError("failed-precondition", "Prize transfer failed.");
+      throw new DefinitiveSubmittedTransactionFailure("Prize transfer failed.");
     }
     if (status.kind !== "confirmed") {
       throw sendError || status.error || error;
@@ -768,12 +1316,14 @@ const handleWithdrawEventPrize = async (request) => {
     );
   }
   const prize = getEventPrizeDefinition(eventId, prizeId);
-  const assetAddress = getEventPrizeAssetAddress(eventId, prizeId);
+  const assetAddress = normalizeSolanaAddress(prize?.assetAddress);
+  const collectionAddress = normalizeSolanaAddress(prize?.collectionAddress);
   if (
     !prize ||
     prize.claimAvailable !== true ||
-    prize.standard !== "core" ||
-    !assetAddress
+    !isEventPrizeStandard(prize.standard) ||
+    assetAddress !== normalizeString(prize.assetAddress) ||
+    collectionAddress !== normalizeString(prize.collectionAddress)
   ) {
     throw new HttpsError("invalid-argument", "Unsupported event prize.");
   }
@@ -896,115 +1446,146 @@ const handleWithdrawEventPrize = async (request) => {
   const { leaseId } = claim;
   let withdrawal = claim.withdrawal;
   let submitted = null;
+  const completeWithdrawal = async (transactionSignature) =>
+    buildCompletedResponse(
+      await finalizeWithdrawal({
+        withdrawal,
+        profileId,
+        eventId,
+        prizeId,
+        assetAddress,
+        recipientAddress,
+        transactionSignature,
+      }),
+    );
+  const blockWithdrawal = async (observedOwner, message) => {
+    await markWithdrawalBlocked({ withdrawalRef, leaseId, observedOwner });
+    throw new HttpsError(
+      "failed-precondition",
+      message || "This prize is unavailable for withdrawal.",
+    );
+  };
   try {
-    const { fetchAsset, fetchCollection, publicKey } = loadSolanaDependencies();
-    const umi = createEventPrizeUmi();
-    const asset = await fetchAsset(umi, publicKey(assetAddress), {
-      commitment: CONFIRMATION_COMMITMENT,
-    });
-    if (
-      asset.publicKey !== assetAddress ||
-      asset.updateAuthority.type !== "Collection" ||
-      asset.updateAuthority.address !== EVENT_PRIZE_COLLECTION_ADDRESS
-    ) {
-      await markWithdrawalBlocked({
-        withdrawalRef,
-        leaseId,
-        observedOwner: asset.owner,
-      });
-      throw new HttpsError(
-        "failed-precondition",
-        "The prize collection could not be verified.",
-      );
-    }
-    let discardPersistedSubmission = false;
+    const umi = createEventPrizeUmi(prize.standard);
+    let submittedInspection = null;
     if (withdrawal.status === "submitted") {
-      const recovery = await recoverSubmittedWithdrawal({
+      submittedInspection = await inspectSubmittedWithdrawal({
         umi,
         withdrawal,
-        assetOwner: asset.owner,
-        recipientAddress,
       });
-      if (recovery.kind === "completed") {
-        const completed = await finalizeWithdrawal({
-          withdrawal,
-          profileId,
-          eventId,
-          prizeId,
-          assetAddress,
-          recipientAddress,
-          transactionSignature: recovery.submitted.transactionSignature,
-        });
-        return buildCompletedResponse(completed);
+      if (submittedInspection.status.kind === "confirmed") {
+        const completedResponse = await completeWithdrawal(
+          submittedInspection.submitted.transactionSignature,
+        );
+        return completedResponse;
       }
-      if (recovery.kind === "blocked") {
-        await markWithdrawalBlocked({
+    }
+    const assetState = await loadPrizeAssetState({
+      umi,
+      prize,
+      recipientAddress,
+      needsTransferBuilder: withdrawal.status !== "submitted",
+    });
+    let assetOwner;
+    if (withdrawal.status === "submitted") {
+      const resolution = await reconcileSubmittedAssetState({
+        umi,
+        withdrawal,
+        assetState,
+        recipientAddress,
+        inspection: submittedInspection,
+      });
+      assetOwner = resolution.assetOwner;
+      if (resolution.kind === "completed") {
+        const completedResponse = await completeWithdrawal(
+          resolution.submitted.transactionSignature,
+        );
+        return completedResponse;
+      }
+      if (resolution.kind === "blocked") {
+        await blockWithdrawal(assetOwner, assetState.message);
+      }
+      if (resolution.kind === "discard") {
+        await discardDefinitiveSubmittedTransaction({
           withdrawalRef,
           leaseId,
-          observedOwner: asset.owner,
+          transactionSignature: resolution.submitted.transactionSignature,
         });
         throw new HttpsError(
-          "failed-precondition",
-          "This prize is unavailable for withdrawal.",
+          "unavailable",
+          "Prize transfer failed. Please try again.",
         );
       }
-      discardPersistedSubmission = recovery.discardPersistedSubmission;
-    } else if (asset.owner !== EVENT_PRIZE_ADMIN_WALLET) {
-      await markWithdrawalBlocked({
-        withdrawalRef,
-        leaseId,
-        observedOwner: asset.owner,
-      });
-      throw new HttpsError(
-        "failed-precondition",
-        "This prize is unavailable for withdrawal.",
-      );
+      if (resolution.kind === "retry") {
+        throw new HttpsError(
+          "unavailable",
+          "Prize withdrawal failed. Please try again.",
+        );
+      }
+      submitted = resolution.submitted;
+    } else {
+      assetOwner = normalizeSolanaAddress(assetState.assetOwner);
+      if (!assetOwner) {
+        throw createPrizeAssetVerificationError(
+          "The prize ownership could not be verified.",
+        );
+      }
+      if (assetState.blocked) {
+        await blockWithdrawal(assetOwner, assetState.message);
+      }
+      if (assetOwner !== EVENT_PRIZE_ADMIN_WALLET) {
+        await blockWithdrawal(assetOwner);
+      }
     }
 
-    const collection = await fetchCollection(
-      umi,
-      publicKey(EVENT_PRIZE_COLLECTION_ADDRESS),
-      { commitment: CONFIRMATION_COMMITMENT },
-    );
-    if (collection.publicKey !== EVENT_PRIZE_COLLECTION_ADDRESS) {
-      throw new HttpsError(
-        "failed-precondition",
-        "The prize collection could not be verified.",
-      );
-    }
-    submitted = discardPersistedSubmission
-      ? null
-      : await deserializeSubmittedTransaction(umi, withdrawal);
     if (!submitted) {
       submitted = await buildSubmittedTransaction({
         umi,
-        asset,
-        collection,
-        recipientAddress,
+        builder: await assetState.buildTransferBuilder(),
         withdrawalRef,
         leaseId,
       });
-      const submittedSnapshot = await withdrawalRef.once("value");
-      withdrawal = submittedSnapshot.val() || withdrawal;
+      withdrawal = submitted.persistedWithdrawal;
     }
     await sendAndConfirmSubmittedTransaction({ umi, submitted });
-    const completed = await finalizeWithdrawal({
-      withdrawal,
-      profileId,
-      eventId,
-      prizeId,
-      assetAddress,
-      recipientAddress,
-      transactionSignature: submitted.transactionSignature,
-    });
+    const completedResponse = await completeWithdrawal(
+      submitted.transactionSignature,
+    );
     console.info("event-prize-withdrawal-completed", {
       eventId,
       prizeId,
       profileId,
       transactionSignature: submitted.transactionSignature,
     });
-    return buildCompletedResponse(completed);
+    return completedResponse;
   } catch (error) {
+    if (submitted && isDefinitiveSubmittedTransactionFailure(error)) {
+      try {
+        await discardDefinitiveSubmittedTransaction({
+          withdrawalRef,
+          leaseId,
+          transactionSignature: submitted.transactionSignature,
+        });
+      } catch (discardError) {
+        if (discardError instanceof HttpsError) {
+          throw discardError;
+        }
+        console.error("event-prize-withdrawal-discard-failed", {
+          eventId,
+          prizeId,
+          profileId,
+          errorType: normalizeString(discardError?.name) || "Error",
+        });
+        throw new HttpsError(
+          "unavailable",
+          "Prize withdrawal failed. Please try again.",
+        );
+      }
+      throw new HttpsError(
+        "unavailable",
+        "Prize transfer failed. Please try again.",
+      );
+    }
     if (!submitted && withdrawal?.status !== "submitted") {
       await releaseProcessingClaim({ withdrawalRef, leaseId }).catch(() => {});
     }
@@ -1038,14 +1619,21 @@ const withdrawEventPrize = onCall(
 
 module.exports = {
   acquireWithdrawalClaim,
+  buildCompressedTransferBuilder,
+  buildSubmittedTransaction,
+  discardDefinitiveSubmittedTransaction,
   deserializePersistedSubmittedTransaction,
-  deserializeSubmittedTransaction,
   handleWithdrawEventPrize,
+  inspectSubmittedWithdrawal,
+  isDefinitiveSubmittedTransactionFailure,
+  loadPrizeAssetState,
   loadSolanaDependencies,
   persistSubmittedTransaction,
+  reconcileSubmittedAssetState,
   recoverSubmittedWithdrawal,
   reconcileCompletedWithdrawalProjections,
   sendAndConfirmSubmittedTransaction,
+  validateCompressedPrizeAsset,
   validatePrizeAssignment,
   waitForSubmittedTransactionStatus,
   withdrawEventPrize,

@@ -1,8 +1,32 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { createRequire } = require("node:module");
 const test = require("node:test");
 const bs58 = require("bs58");
+const requireFunctionDependency = createRequire(
+  require.resolve("../functions/package.json"),
+);
+const { createSignerFromKeypair, none, publicKeyBytes, signerIdentity, some } =
+  requireFunctionDependency("@metaplex-foundation/umi");
+const {
+  publicKey: publicKeySerializer,
+  u8,
+  u64,
+} = requireFunctionDependency("@metaplex-foundation/umi/serializers");
+const { createUmi } = requireFunctionDependency(
+  "@metaplex-foundation/umi-bundle-defaults",
+);
+const {
+  TokenProgramVersion,
+  TokenStandard,
+  findLeafAssetIdPda,
+  getTransferInstructionDataSerializer,
+  hash,
+  hashMetadataCreators,
+  hashMetadataData,
+  mplBubblegum,
+} = requireFunctionDependency("@metaplex-foundation/mpl-bubblegum");
 const {
   EVENT_PRIZE_ADMIN_WALLET,
   buildWithdrawalCompletionUpdates,
@@ -17,13 +41,21 @@ const {
 } = require("../functions/eventPrizeWithdrawalState");
 const {
   acquireWithdrawalClaim,
+  buildCompressedTransferBuilder,
+  buildSubmittedTransaction,
+  discardDefinitiveSubmittedTransaction,
   deserializePersistedSubmittedTransaction,
-  deserializeSubmittedTransaction,
   handleWithdrawEventPrize,
+  inspectSubmittedWithdrawal,
+  isDefinitiveSubmittedTransactionFailure,
+  loadPrizeAssetState,
+  loadSolanaDependencies,
   persistSubmittedTransaction,
+  reconcileSubmittedAssetState,
   recoverSubmittedWithdrawal,
   reconcileCompletedWithdrawalProjections,
   sendAndConfirmSubmittedTransaction,
+  validateCompressedPrizeAsset,
   validatePrizeAssignment,
   waitForSubmittedTransactionStatus,
 } = require("../functions/eventPrizeWithdrawal");
@@ -39,6 +71,158 @@ const prizeId = "1092";
 const assetAddress = getEventPrizeAssetAddress(eventId, prizeId);
 const profileId = "profile";
 const recipientAddress = "11111111111111111111111111111111";
+
+const generateTestSigner = (umi) =>
+  createSignerFromKeypair(umi, umi.eddsa.generateKeypair());
+
+const buildMerkleRootAndProof = (leaves, leafIndex) => {
+  const proof = [];
+  let nodes = leaves;
+  let index = leafIndex;
+  while (nodes.length > 1) {
+    proof.push(nodes[index ^ 1]);
+    const parents = [];
+    for (let nodeIndex = 0; nodeIndex < nodes.length; nodeIndex += 2) {
+      parents.push(hash([nodes[nodeIndex], nodes[nodeIndex + 1]]));
+    }
+    nodes = parents;
+    index = Math.floor(index / 2);
+  }
+  return { root: nodes[0], proof };
+};
+
+const calculateMerkleRoot = (leaf, proof, leafIndex) => {
+  return proof.reduce(
+    (node, sibling, depth) =>
+      Math.floor(leafIndex / 2 ** depth) % 2 === 0
+        ? hash([node, sibling])
+        : hash([sibling, node]),
+    leaf,
+  );
+};
+
+const createCompressedPrizeFixture = ({ collectionVerified = true } = {}) => {
+  const umi = createUmi("http://127.0.0.1:8899").use(mplBubblegum());
+  const owner = generateTestSigner(umi);
+  const merkleTree = generateTestSigner(umi).publicKey;
+  const collectionAddress = generateTestSigner(umi).publicKey;
+  const nonce = 4;
+  const [compressedAssetAddress] = findLeafAssetIdPda(umi, {
+    merkleTree,
+    leafIndex: nonce,
+  });
+  const metadata = {
+    name: "Prize",
+    symbol: "",
+    uri: "https://example.com/prize.json",
+    sellerFeeBasisPoints: 500,
+    primarySaleHappened: false,
+    isMutable: true,
+    editionNonce: none(),
+    tokenStandard: some(TokenStandard.NonFungible),
+    collection: some({
+      key: collectionAddress,
+      verified: collectionVerified,
+    }),
+    uses: none(),
+    tokenProgramVersion: TokenProgramVersion.Original,
+    creators: [
+      {
+        address: owner.publicKey,
+        verified: true,
+        share: 100,
+      },
+    ],
+  };
+  const dataHash = hashMetadataData(metadata);
+  const creatorHash = hashMetadataCreators(metadata.creators);
+  const leaf = hash([
+    u8().serialize(1),
+    publicKeySerializer().serialize(compressedAssetAddress),
+    publicKeySerializer().serialize(owner.publicKey),
+    publicKeySerializer().serialize(owner.publicKey),
+    u64().serialize(nonce),
+    dataHash,
+    creatorHash,
+  ]);
+  const leaves = Array.from({ length: 8 }, () =>
+    publicKeyBytes(generateTestSigner(umi).publicKey),
+  );
+  leaves[nonce] = leaf;
+  const merkle = buildMerkleRootAndProof(leaves, nonce);
+  const encodeBytes = (value) => bs58.default.encode(value);
+  const rootAddress = encodeBytes(merkle.root);
+  const dataHashAddress = encodeBytes(dataHash);
+  const creatorHashAddress = encodeBytes(creatorHash);
+  const proof = merkle.proof.map(encodeBytes);
+  umi.use(signerIdentity(owner));
+  const assetWithProof = {
+    leafOwner: owner.publicKey,
+    leafDelegate: owner.publicKey,
+    merkleTree,
+    root: merkle.root,
+    dataHash,
+    creatorHash,
+    nonce,
+    index: nonce,
+    proof,
+    metadata,
+    rpcAsset: {
+      id: compressedAssetAddress,
+      interface: "V1_NFT",
+      content: {
+        metadata: { name: metadata.name, symbol: metadata.symbol },
+        json_uri: metadata.uri,
+      },
+      creators: metadata.creators,
+      mutable: metadata.isMutable,
+      royalty: {
+        basis_points: metadata.sellerFeeBasisPoints,
+        primary_sale_happened: metadata.primarySaleHappened,
+      },
+      supply: { edition_nonce: null },
+      compression: {
+        compressed: true,
+        tree: merkleTree,
+        leaf_id: nonce,
+        data_hash: dataHashAddress,
+        creator_hash: creatorHashAddress,
+      },
+      grouping: [
+        {
+          group_key: "collection",
+          group_value: collectionAddress,
+        },
+      ],
+      ownership: {
+        owner: owner.publicKey,
+        delegate: null,
+        delegated: false,
+        frozen: false,
+        non_transferable: false,
+        ownership_model: "single",
+      },
+      burnt: false,
+    },
+    rpcAssetProof: {
+      tree_id: merkleTree,
+      root: rootAddress,
+      proof,
+      node_index: nonce + leaves.length,
+      leaf: encodeBytes(leaf),
+    },
+  };
+  return {
+    umi,
+    owner,
+    prize: {
+      assetAddress: compressedAssetAddress,
+      collectionAddress,
+      standard: "compressed",
+    },
+    assetWithProof,
+  };
+};
 
 const mockProfileMergeTargets = (targets) => () => ({
   collection: () => ({
@@ -77,6 +261,21 @@ const createSubmittedTransaction = (transactionSignature, overrides = {}) => ({
   ...overrides,
 });
 
+const reconcileTestSubmission = ({
+  submitted,
+  rpc = {},
+  assetOwner = EVENT_PRIZE_ADMIN_WALLET,
+  blocked = true,
+  status = { kind: "pending", signatureFound: false },
+}) =>
+  reconcileSubmittedAssetState({
+    umi: { rpc },
+    withdrawal: {},
+    assetState: { assetOwner, blocked },
+    recipientAddress,
+    inspection: { submitted, status },
+  });
+
 test("maps every configured prize to its asset address", () => {
   assert.equal(
     getEventPrizeAssetAddress(eventId, "1092"),
@@ -97,7 +296,7 @@ test("maps every configured prize to its asset address", () => {
   );
 });
 
-test("rejects compressed prizes before starting a withdrawal", async () => {
+test("routes claim-enabled compressed prizes through destination validation", async () => {
   await assert.rejects(
     handleWithdrawEventPrize({
       auth: { uid: "uid" },
@@ -108,11 +307,11 @@ test("rejects compressed prizes before starting a withdrawal", async () => {
     }),
     (error) =>
       error.code === "invalid-argument" &&
-      error.message === "Unsupported event prize.",
+      error.message === "A valid Solana address is required.",
   );
 });
 
-test("recognizes completed records independently of current claim availability", () => {
+test("recognizes completed compressed withdrawal records", () => {
   const compressedEventId = "FRkdorMWaYW";
   const compressedPrizeId = "1866";
   const compressedAssetAddress = getEventPrizeAssetAddress(
@@ -124,6 +323,7 @@ test("recognizes completed records independently of current claim availability",
     eventId: compressedEventId,
     prizeId: compressedPrizeId,
     assetAddress: compressedAssetAddress,
+    assetStandard: "compressed",
   };
   assert.equal(
     isCompletedEventPrizeWithdrawal(
@@ -150,6 +350,347 @@ test("recognizes completed records independently of current claim availability",
   );
 });
 
+test("accepts missing asset standards only for legacy Core records", () => {
+  const legacyCoreCompleted = {
+    status: "completed",
+    eventId,
+    prizeId,
+    assetAddress,
+  };
+  assert.equal(
+    isCompletedEventPrizeWithdrawal(legacyCoreCompleted, eventId, prizeId),
+    true,
+  );
+  assert.equal(
+    isCompletedEventPrizeWithdrawal(
+      {
+        status: "completed",
+        eventId: "FRkdorMWaYW",
+        prizeId: "1866",
+        assetAddress: getEventPrizeAssetAddress("FRkdorMWaYW", "1866"),
+      },
+      "FRkdorMWaYW",
+      "1866",
+    ),
+    false,
+  );
+});
+
+test("records the configured standard on new compressed withdrawals", () => {
+  const compressedEventId = "FRkdorMWaYW";
+  const compressedPrizeId = "1866";
+  const decision = decideWithdrawalClaim({
+    current: null,
+    eventId: compressedEventId,
+    prizeId: compressedPrizeId,
+    assetAddress: getEventPrizeAssetAddress(
+      compressedEventId,
+      compressedPrizeId,
+    ),
+    profileId,
+    place: 1,
+    recipientAddress,
+    requesterUid: "uid",
+    leaseId: "lease",
+    nowMs: 1000,
+  });
+  assert.equal(decision.kind, "acquired");
+  assert.equal(decision.value.assetStandard, "compressed");
+});
+
+test("validates a Helius-shaped Bubblegum V1 prize without a grouping verification flag", () => {
+  const fixture = createCompressedPrizeFixture();
+  assert.equal(
+    Object.hasOwn(fixture.assetWithProof.rpcAsset.grouping[0], "verified"),
+    false,
+  );
+  assert.deepEqual(validateCompressedPrizeAsset(fixture), {
+    assetOwner: fixture.owner.publicKey,
+    blocked: false,
+  });
+});
+
+test("accepts a fully truncated canopy proof", () => {
+  const fixture = createCompressedPrizeFixture();
+  fixture.assetWithProof.proof = [];
+  assert.deepEqual(validateCompressedPrizeAsset(fixture), {
+    assetOwner: fixture.owner.publicKey,
+    blocked: false,
+  });
+});
+
+test("blocks compressed prizes from another collection", () => {
+  const fixture = createCompressedPrizeFixture();
+  fixture.assetWithProof.rpcAsset.grouping[0].group_value = recipientAddress;
+  assert.deepEqual(validateCompressedPrizeAsset(fixture), {
+    assetOwner: fixture.owner.publicKey,
+    blocked: true,
+    message: "The prize collection could not be verified.",
+  });
+});
+
+test("blocks explicitly unverified compressed prize collections", () => {
+  const fixture = createCompressedPrizeFixture({ collectionVerified: false });
+  assert.deepEqual(validateCompressedPrizeAsset(fixture), {
+    assetOwner: fixture.owner.publicKey,
+    blocked: true,
+    message: "The prize collection could not be verified.",
+  });
+});
+
+test("keeps incomplete compressed ownership and collection data retryable", () => {
+  for (const update of [
+    (asset) => {
+      asset.grouping = [];
+    },
+    (asset) => {
+      delete asset.ownership.frozen;
+    },
+  ]) {
+    const fixture = createCompressedPrizeFixture();
+    update(fixture.assetWithProof.rpcAsset);
+    assert.throws(
+      () => validateCompressedPrizeAsset(fixture),
+      (error) =>
+        error.code === "failed-precondition" &&
+        error.message === "The compressed prize data could not be verified.",
+    );
+  }
+});
+
+test("rejects compressed metadata that does not match its leaf hashes", () => {
+  for (const update of [
+    (assetWithProof) => {
+      assetWithProof.rpcAsset.content.json_uri =
+        "https://example.com/other.json";
+    },
+    (assetWithProof) => {
+      assetWithProof.rpcAsset.creators[0].share = 99;
+    },
+  ]) {
+    const fixture = createCompressedPrizeFixture();
+    update(fixture.assetWithProof);
+    assert.throws(
+      () => validateCompressedPrizeAsset(fixture),
+      (error) =>
+        error.code === "failed-precondition" &&
+        error.message === "The compressed prize data could not be verified.",
+    );
+  }
+});
+
+test("blocks burnt and permanently non-transferable compressed prizes", () => {
+  for (const update of [
+    (asset) => {
+      asset.burnt = true;
+    },
+    (asset) => {
+      asset.ownership.non_transferable = true;
+    },
+  ]) {
+    const fixture = createCompressedPrizeFixture();
+    update(fixture.assetWithProof.rpcAsset);
+    assert.equal(validateCompressedPrizeAsset(fixture).blocked, true);
+  }
+});
+
+test("keeps frozen compressed prizes retryable", () => {
+  const fixture = createCompressedPrizeFixture();
+  fixture.assetWithProof.rpcAsset.ownership.frozen = true;
+  assert.throws(
+    () => validateCompressedPrizeAsset(fixture),
+    (error) =>
+      error.code === "failed-precondition" &&
+      error.message === "This prize cannot be withdrawn right now.",
+  );
+});
+
+test("submitted compressed recovery reads ownership without fetching a proof", async () => {
+  const fixture = createCompressedPrizeFixture();
+  let assetReadCount = 0;
+  let assetRequest;
+  const state = await loadPrizeAssetState({
+    umi: {
+      rpc: {
+        getAsset: async (request) => {
+          assetReadCount += 1;
+          assetRequest = request;
+          return fixture.assetWithProof.rpcAsset;
+        },
+        getAssetProof: async () => {
+          throw new Error("proof must not be read");
+        },
+        getAccount: async () => {
+          throw new Error("tree account must not be read");
+        },
+      },
+    },
+    prize: fixture.prize,
+    recipientAddress,
+    needsTransferBuilder: false,
+  });
+
+  assert.equal(assetReadCount, 1);
+  assert.deepEqual(assetRequest, {
+    assetId: fixture.prize.assetAddress,
+    displayOptions: { showUnverifiedCollections: true },
+  });
+  assert.deepEqual(state, {
+    assetOwner: fixture.owner.publicKey,
+    blocked: false,
+  });
+});
+
+test("submitted compressed recovery blocks an unverified collection without a proof", async () => {
+  const fixture = createCompressedPrizeFixture({ collectionVerified: false });
+  const state = await loadPrizeAssetState({
+    umi: {
+      rpc: {
+        getAsset: async () => fixture.assetWithProof.rpcAsset,
+        getAssetProof: async () => {
+          throw new Error("proof must not be read");
+        },
+        getAccount: async () => {
+          throw new Error("tree account must not be read");
+        },
+      },
+    },
+    prize: fixture.prize,
+    recipientAddress,
+    needsTransferBuilder: false,
+  });
+
+  assert.deepEqual(state, {
+    assetOwner: fixture.owner.publicKey,
+    blocked: true,
+    message: "The prize collection could not be verified.",
+  });
+});
+
+test("rejects Bubblegum V2 and malformed compressed prize proofs", () => {
+  const v2Fixture = createCompressedPrizeFixture();
+  v2Fixture.assetWithProof.rpcAsset.interface = "V2_NFT";
+  v2Fixture.assetWithProof.rpcAsset.compression.asset_data_hash =
+    recipientAddress;
+  assert.throws(
+    () => validateCompressedPrizeAsset(v2Fixture),
+    (error) =>
+      error.code === "failed-precondition" &&
+      error.message === "The compressed prize format is not supported.",
+  );
+
+  for (const update of [
+    (fixture) => {
+      fixture.assetWithProof.rpcAsset.id = recipientAddress;
+    },
+    (fixture) => {
+      fixture.assetWithProof.rpcAssetProof.tree_id = recipientAddress;
+    },
+    (fixture) => {
+      fixture.assetWithProof.proof = [recipientAddress];
+    },
+    (fixture) => {
+      fixture.assetWithProof.leafDelegate = recipientAddress;
+    },
+    (fixture) => {
+      fixture.assetWithProof.rpcAssetProof.node_index += 1;
+    },
+    (fixture) => {
+      fixture.assetWithProof.rpcAsset.compression.data_hash = "invalid";
+    },
+    (fixture) => {
+      fixture.assetWithProof.rpcAsset.compression.creator_hash = "invalid";
+    },
+    (fixture) => {
+      fixture.assetWithProof.dataHash = new Uint8Array(31);
+    },
+    (fixture) => {
+      fixture.assetWithProof.creatorHash = new Uint8Array(31);
+    },
+  ]) {
+    const fixture = createCompressedPrizeFixture();
+    update(fixture);
+    assert.throws(
+      () => validateCompressedPrizeAsset(fixture),
+      (error) =>
+        error.code === "failed-precondition" &&
+        error.message === "The compressed prize data could not be verified.",
+    );
+  }
+});
+
+test("builds compressed transfers with the admin identity as leaf owner", () => {
+  const fixture = createCompressedPrizeFixture();
+  const destination = generateTestSigner(fixture.umi).publicKey;
+  const builder = buildCompressedTransferBuilder({
+    umi: fixture.umi,
+    assetWithProof: fixture.assetWithProof,
+    recipientAddress: destination,
+  });
+  const [instruction] = builder.getInstructions();
+  const [instructionData] = getTransferInstructionDataSerializer().deserialize(
+    instruction.data,
+  );
+  assert.equal(instruction.keys[1].pubkey, fixture.owner.publicKey);
+  assert.equal(instruction.keys[1].isSigner, true);
+  assert.equal(instruction.keys[2].pubkey, fixture.owner.publicKey);
+  assert.equal(instruction.keys[3].pubkey, destination);
+  assert.equal(instruction.keys[4].pubkey, fixture.assetWithProof.merkleTree);
+  assert.deepEqual(
+    instruction.keys.slice(8).map((account) => account.pubkey),
+    fixture.assetWithProof.proof,
+  );
+  assert.deepEqual(instructionData.root, fixture.assetWithProof.root);
+  assert.deepEqual(instructionData.dataHash, fixture.assetWithProof.dataHash);
+  assert.deepEqual(
+    instructionData.creatorHash,
+    fixture.assetWithProof.creatorHash,
+  );
+  assert.equal(instructionData.nonce, BigInt(fixture.assetWithProof.nonce));
+  assert.equal(instructionData.index, fixture.assetWithProof.index);
+  assert.deepEqual(
+    fixture.assetWithProof.root,
+    publicKeyBytes(fixture.assetWithProof.rpcAssetProof.root),
+  );
+  assert.deepEqual(
+    fixture.assetWithProof.dataHash,
+    publicKeyBytes(fixture.assetWithProof.rpcAsset.compression.data_hash),
+  );
+  assert.deepEqual(
+    fixture.assetWithProof.creatorHash,
+    publicKeyBytes(fixture.assetWithProof.rpcAsset.compression.creator_hash),
+  );
+  assert.equal(
+    fixture.assetWithProof.merkleTree,
+    fixture.assetWithProof.rpcAssetProof.tree_id,
+  );
+  assert.equal(
+    fixture.assetWithProof.nonce,
+    fixture.assetWithProof.rpcAsset.compression.leaf_id,
+  );
+  assert.equal(fixture.assetWithProof.index, fixture.assetWithProof.nonce);
+  assert.deepEqual(
+    fixture.assetWithProof.proof,
+    fixture.assetWithProof.rpcAssetProof.proof,
+  );
+  assert.deepEqual(
+    calculateMerkleRoot(
+      publicKeyBytes(fixture.assetWithProof.rpcAssetProof.leaf),
+      fixture.assetWithProof.rpcAssetProof.proof.map((node) =>
+        publicKeyBytes(node),
+      ),
+      fixture.assetWithProof.index,
+    ),
+    fixture.assetWithProof.root,
+  );
+  assert.equal(
+    builder
+      .getSigners(fixture.umi)
+      .some((signer) => signer.publicKey === fixture.owner.publicKey),
+    true,
+  );
+});
+
 test("validates Solana addresses and 64-byte base58 secret keys", () => {
   assert.equal(normalizeSolanaAddress(recipientAddress), recipientAddress);
   assert.equal(normalizeSolanaAddress("invalid"), "");
@@ -166,6 +707,7 @@ test("acquires a new withdrawal lease", () => {
   const decision = claim(null);
   assert.equal(decision.kind, "acquired");
   assert.equal(decision.value.status, "processing");
+  assert.equal(decision.value.assetStandard, "core");
   assert.equal(decision.value.recipientAddress, recipientAddress);
   assert.equal(decision.value.leaseId, "lease-next");
 });
@@ -351,6 +893,73 @@ test("persists a submission after refreshing a stale local transaction cache", a
   assert.equal(persisted.transactionSignature, "signature");
 });
 
+test("simulates a signed transfer before persisting its submission", async () => {
+  const calls = [];
+  const signature = new Uint8Array(64).fill(21);
+  const signedTransaction = { signatures: [signature] };
+  const latestBlockhash = {
+    blockhash: "blockhash",
+    lastValidBlockHeight: 123,
+  };
+  const builder = {
+    setBlockhash: (value) => {
+      calls.push("set-blockhash");
+      assert.equal(value, latestBlockhash);
+      return builder;
+    },
+    buildAndSign: async () => {
+      calls.push("build-and-sign");
+      return signedTransaction;
+    },
+  };
+  const umi = {
+    rpc: {
+      getLatestBlockhash: async () => {
+        calls.push("latest-blockhash");
+        return latestBlockhash;
+      },
+      simulateTransaction: async (value, options) => {
+        calls.push("simulate");
+        assert.equal(value, signedTransaction);
+        assert.equal(options.verifySignatures, true);
+        return { err: null };
+      },
+    },
+    transactions: {
+      serialize: () => new Uint8Array([1, 2, 3]),
+    },
+  };
+  let current = { status: "processing", leaseId: "lease" };
+  const withdrawalRef = {
+    transaction: async (update) => {
+      calls.push("persist");
+      current = update(current);
+      return {
+        committed: true,
+        snapshot: { val: () => current },
+      };
+    },
+  };
+
+  const submitted = await buildSubmittedTransaction({
+    umi,
+    builder,
+    withdrawalRef,
+    leaseId: "lease",
+  });
+
+  assert.deepEqual(calls, [
+    "latest-blockhash",
+    "set-blockhash",
+    "build-and-sign",
+    "simulate",
+    "persist",
+  ]);
+  assert.equal(submitted.transactionSignature, bs58.default.encode(signature));
+  assert.equal(submitted.persistedWithdrawal, current);
+  assert.equal(current.status, "submitted");
+});
+
 test("does not persist a submission after authoritative lease ownership changes", async () => {
   const authoritative = {
     status: "processing",
@@ -377,6 +986,90 @@ test("does not persist a submission after authoritative lease ownership changes"
     }),
     (error) => error.code === "aborted",
   );
+});
+
+test("discards only the exact definitive submitted transaction", async () => {
+  let current = {
+    status: "submitted",
+    leaseId: "lease",
+    transactionSignature: "signature",
+  };
+  const withdrawalRef = {
+    transaction: async (update) => {
+      current = update(current);
+      return {
+        committed: true,
+        snapshot: { val: () => current },
+      };
+    },
+  };
+
+  await discardDefinitiveSubmittedTransaction({
+    withdrawalRef,
+    leaseId: "lease",
+    transactionSignature: "signature",
+  });
+
+  assert.equal(current, null);
+  const decision = claim(current);
+  assert.equal(decision.kind, "acquired");
+  assert.equal(decision.value.status, "processing");
+});
+
+test("checks authoritative state before discarding a submission", async () => {
+  const authoritative = {
+    status: "submitted",
+    leaseId: "lease",
+    transactionSignature: "signature",
+  };
+  const inputs = [];
+  const withdrawalRef = {
+    transaction: async (update) => {
+      inputs.push(null);
+      assert.equal(update(null), null);
+      inputs.push(authoritative);
+      assert.equal(update(authoritative), null);
+      return {
+        committed: true,
+        snapshot: { val: () => null },
+      };
+    },
+  };
+
+  await discardDefinitiveSubmittedTransaction({
+    withdrawalRef,
+    leaseId: "lease",
+    transactionSignature: "signature",
+  });
+  assert.deepEqual(inputs, [null, authoritative]);
+});
+
+test("does not discard a concurrent successor submission", async () => {
+  const successor = {
+    status: "submitted",
+    leaseId: "successor-lease",
+    transactionSignature: "successor-signature",
+  };
+  const withdrawalRef = {
+    transaction: async (update) => {
+      const next = update(successor);
+      assert.equal(next, successor);
+      return {
+        committed: true,
+        snapshot: { val: () => successor },
+      };
+    },
+  };
+
+  await assert.rejects(
+    discardDefinitiveSubmittedTransaction({
+      withdrawalRef,
+      leaseId: "old-lease",
+      transactionSignature: "old-signature",
+    }),
+    (error) => error.code === "aborted",
+  );
+  assert.equal(successor.transactionSignature, "successor-signature");
 });
 
 test("preserves submitted transaction data on an idempotent retry", () => {
@@ -631,29 +1324,6 @@ test("requires the entitlement to match the canonical profile and requested priz
   );
 });
 
-test("recovers the same submitted transaction while its blockhash is valid", async () => {
-  const serialized = new Uint8Array([1, 2, 3]);
-  const deserialized = { message: "same-transaction" };
-  const umi = {
-    rpc: { call: async () => 100 },
-    transactions: {
-      deserialize: (bytes) => {
-        assert.deepEqual(bytes, serialized);
-        return deserialized;
-      },
-    },
-  };
-  const recovered = await deserializeSubmittedTransaction(umi, {
-    signedTransactionBase64: Buffer.from(serialized).toString("base64"),
-    transactionSignature: "signature",
-    blockhash: "blockhash",
-    lastValidBlockHeight: 101,
-  });
-  assert.equal(recovered.signedTransaction, deserialized);
-  assert.equal(recovered.transactionSignature, "signature");
-  assert.equal(recovered.blockhash, "blockhash");
-});
-
 test("recognizes a confirmed submitted transaction by its stored signature", async () => {
   const transactionSignature = new Uint8Array(64).fill(1);
   let statusReadCount = 0;
@@ -693,7 +1363,7 @@ test("does not treat a processed transaction as failed", async () => {
         return [
           {
             commitment: statusReadCount === 1 ? "processed" : "confirmed",
-            error: null,
+            error: statusReadCount === 1 ? { InstructionError: [0, 1] } : null,
           },
         ];
       },
@@ -820,8 +1490,9 @@ test("recovers an ambiguous send error when the signature was confirmed", async 
   assert.equal(statusReadCount, 0);
 });
 
-test("preserves an ambiguous send error when the signature is not confirmed", async () => {
+test("preserves a log-bearing send error when the signature is not confirmed", async () => {
   const sendError = new Error("RPC rejected the request");
+  sendError.logs = ["Program failed"];
   const transactionSignature = new Uint8Array(64).fill(3);
   const umi = {
     rpc: {
@@ -844,7 +1515,7 @@ test("preserves an ambiguous send error when the signature is not confirmed", as
   );
 });
 
-test("preserves a confirmed on-chain transaction error", async () => {
+test("classifies a confirmed on-chain transaction error as definitive", async () => {
   const transactionSignature = new Uint8Array(64).fill(4);
   const umi = {
     rpc: {
@@ -865,15 +1536,18 @@ test("preserves a confirmed on-chain transaction error", async () => {
       submitted: createSubmittedTransaction(transactionSignature),
       statusRetryDelaysMs: [0],
     }),
-    (error) => error.code === "failed-precondition",
+    (error) =>
+      isDefinitiveSubmittedTransactionFailure(error) &&
+      error.message === "Prize transfer failed.",
   );
 });
 
-test("does not wait on a definitive preflight error", async () => {
+test("reconciles a log-bearing preflight error against the exact signature", async () => {
   const sendError = new Error("preflight failed");
   sendError.logs = ["Program failed"];
   const transactionSignature = new Uint8Array(64).fill(5);
   let confirmationCount = 0;
+  let statusReadCount = 0;
   const umi = {
     rpc: {
       sendTransaction: async () => {
@@ -881,17 +1555,65 @@ test("does not wait on a definitive preflight error", async () => {
       },
       confirmTransaction: async () => {
         confirmationCount += 1;
+        throw new Error("confirmation response was lost");
+      },
+      getSignatureStatuses: async () => {
+        statusReadCount += 1;
+        return [{ commitment: "confirmed", error: null }];
       },
     },
   };
+  await sendAndConfirmSubmittedTransaction({
+    umi,
+    submitted: createSubmittedTransaction(transactionSignature),
+    statusRetryDelaysMs: [0],
+  });
+  assert.equal(confirmationCount, 1);
+  assert.equal(statusReadCount, 1);
+});
+
+test("classifies a failed signature status as definitive", async () => {
+  const sendError = new Error("RPC response was lost");
+  const transactionSignature = new Uint8Array(64).fill(14);
+  const umi = {
+    rpc: {
+      sendTransaction: async () => {
+        throw sendError;
+      },
+      confirmTransaction: async () => {
+        throw new Error("confirmation failed");
+      },
+      getSignatureStatuses: async () => [
+        { commitment: "confirmed", error: { InstructionError: [0, 1] } },
+      ],
+    },
+  };
+
   await assert.rejects(
     sendAndConfirmSubmittedTransaction({
       umi,
       submitted: createSubmittedTransaction(transactionSignature),
+      statusRetryDelaysMs: [0],
     }),
-    (error) => error.code === "failed-precondition",
+    (error) =>
+      isDefinitiveSubmittedTransactionFailure(error) &&
+      error.message === "Prize transfer failed.",
   );
-  assert.equal(confirmationCount, 0);
+});
+
+test("does not classify same-message plain errors as definitive", () => {
+  assert.equal(
+    isDefinitiveSubmittedTransactionFailure(
+      new Error("Prize transfer failed."),
+    ),
+    false,
+  );
+  assert.equal(
+    isDefinitiveSubmittedTransactionFailure(
+      new Error("The prize transfer could not be submitted."),
+    ),
+    false,
+  );
 });
 
 test("rejects a stored signature that does not match the signed transaction", async () => {
@@ -913,37 +1635,6 @@ test("rejects a stored signature that does not match the signed transaction", as
     (error) => error.code === "internal",
   );
   assert.equal(sendCount, 0);
-});
-
-test("rebuilds an expired submitted transaction without changing its destination", async () => {
-  const umi = {
-    rpc: { call: async () => 102 },
-    transactions: {
-      deserialize: () => {
-        throw new Error("expired transaction should not be deserialized");
-      },
-    },
-  };
-  const recovered = await deserializeSubmittedTransaction(umi, {
-    signedTransactionBase64: Buffer.from([1]).toString("base64"),
-    transactionSignature: "signature",
-    blockhash: "blockhash",
-    lastValidBlockHeight: 101,
-  });
-  assert.equal(recovered, null);
-  const decision = claim({
-    status: "submitted",
-    eventId,
-    prizeId,
-    assetAddress,
-    profileId,
-    place: 1,
-    recipientAddress,
-    leaseId: "expired",
-    leaseExpiresAtMs: 500,
-  });
-  assert.equal(decision.kind, "acquired");
-  assert.equal(decision.value.recipientAddress, recipientAddress);
 });
 
 test("reads an expired persisted signature for completed-transfer recovery", () => {
@@ -973,11 +1664,107 @@ test("reads an expired persisted signature for completed-transfer recovery", () 
   );
 });
 
-test("recovers a confirmed submitted transfer after the NFT moved again", async () => {
+test("inspects a persisted submitted signature once", async () => {
+  const transactionSignature = new Uint8Array(64).fill(15);
+  let statusReadCount = 0;
+  const inspection = await inspectSubmittedWithdrawal({
+    umi: {
+      transactions: {
+        deserialize: () => ({ signatures: [transactionSignature] }),
+      },
+      rpc: {
+        getSignatureStatuses: async () => {
+          statusReadCount += 1;
+          return [{ commitment: "confirmed", error: null }];
+        },
+      },
+    },
+    withdrawal: {
+      signedTransactionBase64: Buffer.from([9]).toString("base64"),
+      transactionSignature: bs58.default.encode(transactionSignature),
+      blockhash: "blockhash",
+      lastValidBlockHeight: 123,
+    },
+  });
+
+  assert.equal(inspection.status.kind, "confirmed");
+  assert.equal(
+    inspection.submitted.transactionSignature,
+    bs58.default.encode(transactionSignature),
+  );
+  assert.equal(statusReadCount, 1);
+});
+
+test("a definitively failed signature never completes from recipient ownership", async () => {
+  const transactionSignature = new Uint8Array(64).fill(16);
+  const submitted = createSubmittedTransaction(transactionSignature);
+  const resolution = await reconcileTestSubmission({
+    submitted,
+    rpc: {
+      getSignatureStatuses: async () => {
+        throw new Error("the inspected status must be reused");
+      },
+    },
+    assetOwner: recipientAddress,
+    status: { kind: "failed", error: { InstructionError: [0, 1] } },
+  });
+
+  assert.deepEqual(resolution, {
+    kind: "blocked",
+    assetOwner: recipientAddress,
+    submitted,
+  });
+});
+
+test("recipient ownership completes an ambiguous submitted transfer", async () => {
+  const transactionSignature = new Uint8Array(64).fill(26);
+  const submitted = createSubmittedTransaction(transactionSignature);
+  const resolution = await reconcileTestSubmission({
+    submitted,
+    assetOwner: recipientAddress,
+  });
+
+  assert.deepEqual(resolution, {
+    kind: "completed",
+    assetOwner: recipientAddress,
+    submitted,
+  });
+});
+
+test("failed submissions rebuild only while the admin still owns the prize", async () => {
+  const transactionSignature = new Uint8Array(64).fill(17);
+  const submitted = createSubmittedTransaction(transactionSignature);
+  const base = {
+    umi: {},
+    withdrawal: {},
+    recipientAddress,
+    inspection: {
+      submitted,
+      status: { kind: "failed", error: { InstructionError: [0, 1] } },
+    },
+  };
+
+  assert.deepEqual(
+    await recoverSubmittedWithdrawal({
+      ...base,
+      assetOwner: EVENT_PRIZE_ADMIN_WALLET,
+    }),
+    { kind: "retry", discardPersistedSubmission: true, submitted },
+  );
+  assert.deepEqual(
+    await recoverSubmittedWithdrawal({
+      ...base,
+      assetOwner: "11111111111111111111111111111112",
+    }),
+    { kind: "blocked", submitted },
+  );
+});
+
+test("recovers a confirmed submitted transfer despite a blocked current state", async () => {
   const transactionSignature = new Uint8Array(64).fill(11);
   const serialized = new Uint8Array([4, 5, 6]);
   let statusReadCount = 0;
-  const recovery = await recoverSubmittedWithdrawal({
+  const resolution = await reconcileSubmittedAssetState({
     umi: {
       transactions: {
         deserialize: () => ({ signatures: [transactionSignature] }),
@@ -995,20 +1782,175 @@ test("recovers a confirmed submitted transfer after the NFT moved again", async 
       blockhash: "expired-blockhash",
       lastValidBlockHeight: 1,
     },
-    assetOwner: "11111111111111111111111111111112",
+    assetState: {
+      assetOwner: "11111111111111111111111111111112",
+      blocked: true,
+    },
     recipientAddress,
     statusRetryDelaysMs: [0],
   });
-  assert.equal(recovery.kind, "completed");
+  assert.equal(resolution.kind, "completed");
+  assert.equal(
+    resolution.submitted.transactionSignature,
+    bs58.default.encode(transactionSignature),
+  );
+  assert.equal(Object.hasOwn(resolution, "recovery"), false);
   assert.equal(statusReadCount, 1);
 });
 
-test("keeps a submitted withdrawal retryable when status is unavailable", async () => {
+test("keeps a blocked submitted withdrawal retryable while status is pending", async () => {
+  const transactionSignature = new Uint8Array(64).fill(18);
+  const submitted = createSubmittedTransaction(transactionSignature);
+  const resolution = await reconcileTestSubmission({
+    submitted,
+    rpc: {
+      call: async () => submitted.lastValidBlockHeight,
+    },
+  });
+
+  assert.deepEqual(resolution, {
+    kind: "retry",
+    assetOwner: EVENT_PRIZE_ADMIN_WALLET,
+    submitted,
+  });
+});
+
+test("resumes the exact submitted transaction while its blockhash is valid", async () => {
+  const transactionSignature = new Uint8Array(64).fill(23);
+  const submitted = createSubmittedTransaction(transactionSignature);
+  const resolution = await reconcileTestSubmission({
+    submitted,
+    rpc: {
+      call: async () => submitted.lastValidBlockHeight,
+    },
+    blocked: false,
+  });
+
+  assert.deepEqual(resolution, {
+    kind: "resume",
+    assetOwner: EVENT_PRIZE_ADMIN_WALLET,
+    submitted,
+  });
+});
+
+test("discards an expired submitted transaction when the current state is blocked", async () => {
+  const transactionSignature = new Uint8Array(64).fill(19);
+  const submitted = createSubmittedTransaction(transactionSignature);
+  const resolution = await reconcileTestSubmission({
+    submitted,
+    rpc: {
+      call: async () => submitted.lastValidBlockHeight + 1,
+      getSignatureStatuses: async () => [null],
+    },
+  });
+
+  assert.deepEqual(resolution, {
+    kind: "discard",
+    assetOwner: EVENT_PRIZE_ADMIN_WALLET,
+    submitted,
+  });
+});
+
+test("preserves an expired submission when its exact signature was processed", async () => {
+  const transactionSignature = new Uint8Array(64).fill(20);
+  const submitted = createSubmittedTransaction(transactionSignature);
+  const resolution = await reconcileTestSubmission({
+    submitted,
+    rpc: {
+      call: async () => submitted.lastValidBlockHeight + 1,
+      getSignatureStatuses: async () => [
+        { commitment: "processed", error: null },
+      ],
+    },
+  });
+
+  assert.equal(resolution.kind, "retry");
+  assert.equal(resolution.submitted, submitted);
+});
+
+test("preserves an expired processed submission on the transferable path", async () => {
+  const transactionSignature = new Uint8Array(64).fill(24);
+  const submitted = createSubmittedTransaction(transactionSignature);
+  const resolution = await reconcileTestSubmission({
+    submitted,
+    rpc: {
+      call: async () => submitted.lastValidBlockHeight + 1,
+      getSignatureStatuses: async () => [
+        { commitment: "processed", error: null },
+      ],
+    },
+    blocked: false,
+    status: { kind: "pending", signatureFound: true },
+  });
+
+  assert.equal(resolution.kind, "retry");
+  assert.equal(resolution.submitted, submitted);
+});
+
+test("completes an expired submission confirmed during final reconciliation", async () => {
+  const transactionSignature = new Uint8Array(64).fill(21);
+  const submitted = createSubmittedTransaction(transactionSignature);
+  const resolution = await reconcileTestSubmission({
+    submitted,
+    rpc: {
+      call: async () => submitted.lastValidBlockHeight + 1,
+      getSignatureStatuses: async () => [
+        { commitment: "confirmed", error: null },
+      ],
+    },
+  });
+
+  assert.deepEqual(resolution, {
+    kind: "completed",
+    assetOwner: EVENT_PRIZE_ADMIN_WALLET,
+    submitted,
+  });
+});
+
+test("completes a transferable submission confirmed during expiry reconciliation", async () => {
+  const transactionSignature = new Uint8Array(64).fill(25);
+  const submitted = createSubmittedTransaction(transactionSignature);
+  const resolution = await reconcileTestSubmission({
+    submitted,
+    rpc: {
+      call: async () => submitted.lastValidBlockHeight + 1,
+      getSignatureStatuses: async () => [
+        { commitment: "confirmed", error: null },
+      ],
+    },
+    blocked: false,
+  });
+
+  assert.deepEqual(resolution, {
+    kind: "completed",
+    assetOwner: EVENT_PRIZE_ADMIN_WALLET,
+    submitted,
+  });
+});
+
+test("keeps submitted recovery retryable after an invalid block height response", async () => {
+  const transactionSignature = new Uint8Array(64).fill(22);
+  const submitted = createSubmittedTransaction(transactionSignature);
+  await assert.rejects(
+    reconcileTestSubmission({
+      submitted,
+      rpc: {
+        call: async () => undefined,
+        getSignatureStatuses: async () => {
+          throw new Error("status must not be read after an invalid height");
+        },
+      },
+    }),
+    (error) => error.message === "Solana RPC returned an invalid block height.",
+  );
+});
+
+test("keeps a blocked submitted withdrawal retryable when status is unavailable", async () => {
   const transactionSignature = new Uint8Array(64).fill(12);
   const statusError = new Error("RPC unavailable");
   let statusReadCount = 0;
   await assert.rejects(
-    recoverSubmittedWithdrawal({
+    reconcileSubmittedAssetState({
       umi: {
         transactions: {
           deserialize: () => ({ signatures: [transactionSignature] }),
@@ -1026,7 +1968,10 @@ test("keeps a submitted withdrawal retryable when status is unavailable", async 
         blockhash: "blockhash",
         lastValidBlockHeight: 123,
       },
-      assetOwner: "11111111111111111111111111111112",
+      assetState: {
+        assetOwner: "11111111111111111111111111111112",
+        blocked: true,
+      },
       recipientAddress,
       statusRetryDelaysMs: [0],
     }),
@@ -1086,6 +2031,7 @@ test("completion records the canonical profile and retains event history", () =>
     completedAtMs: 30,
   });
   assert.equal(result.completed.status, "completed");
+  assert.equal(result.completed.assetStandard, "core");
   assert.equal(result.completed.profileId, currentProfileId);
   assert.equal(result.completed.entitledProfileId, originalProfileId);
   assert.equal(

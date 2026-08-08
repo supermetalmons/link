@@ -10,6 +10,7 @@ export type EventPrizeDefinition = Readonly<{
   id: EventPrizeId;
   imageUrl: string;
   assetAddress: string;
+  collectionAddress: string;
   standard: EventPrizeStandard;
   claimAvailable: boolean;
   alt: string;
@@ -40,3 +41,6 @@ export function isEventPrizeId(
   eventId: unknown,
   prizeId: unknown,
 ): prizeId is EventPrizeId;
+export function isEventPrizeStandard(
+  value: unknown,
+): value is EventPrizeStandard;

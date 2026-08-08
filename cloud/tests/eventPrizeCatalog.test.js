@@ -11,6 +11,7 @@ const {
   getEventPrizeDefinition,
   isEventPrizeEvent,
   isEventPrizeId,
+  isEventPrizeStandard,
 } = require("@mons/shared/event-prizes");
 const databaseRules = require("../database.rules.json");
 
@@ -19,13 +20,29 @@ test("preserves the legacy Core prize catalog", () => {
   assert.deepEqual(
     config.prizes.map((prize) => ({
       id: prize.id,
+      collectionAddress: prize.collectionAddress,
       standard: prize.standard,
       claimAvailable: prize.claimAvailable,
     })),
     [
-      { id: "1092", standard: "core", claimAvailable: true },
-      { id: "1111", standard: "core", claimAvailable: true },
-      { id: "1514", standard: "core", claimAvailable: true },
+      {
+        id: "1092",
+        collectionAddress: "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD",
+        standard: "core",
+        claimAvailable: true,
+      },
+      {
+        id: "1111",
+        collectionAddress: "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD",
+        standard: "core",
+        claimAvailable: true,
+      },
+      {
+        id: "1514",
+        collectionAddress: "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD",
+        standard: "core",
+        claimAvailable: true,
+      },
     ],
   );
 });
@@ -37,6 +54,7 @@ test("maps the compressed event to the supplied prizes in fallback order", () =>
       id: prize.id,
       imageUrl: prize.imageUrl,
       assetAddress: prize.assetAddress,
+      collectionAddress: prize.collectionAddress,
       standard: prize.standard,
       claimAvailable: prize.claimAvailable,
     })),
@@ -45,22 +63,25 @@ test("maps the compressed event to the supplied prizes in fallback order", () =>
         id: "1866",
         imageUrl: "https://cdn.lil.org/nft/card_nft/1866.webp",
         assetAddress: "2KNT8rbXC7G8w5AChbEHHi6i4FN7EAZCtdWX65ZSuQp6",
+        collectionAddress: "HpGDYGz6aRUs5qbvp1dmWGKTicQctX4PixfcouAQDCHF",
         standard: "compressed",
-        claimAvailable: false,
+        claimAvailable: true,
       },
       {
         id: "1682",
         imageUrl: "https://cdn.lil.org/nft/card_nft/1682.webp",
         assetAddress: "AzQvo7HgBQYiP4bK314QQTsdRKCY98gK9bxrXNMZAeMA",
+        collectionAddress: "HpGDYGz6aRUs5qbvp1dmWGKTicQctX4PixfcouAQDCHF",
         standard: "compressed",
-        claimAvailable: false,
+        claimAvailable: true,
       },
       {
         id: "6793",
         imageUrl: "https://cdn.lil.org/nft/card_nft/6793.webp",
         assetAddress: "CHDbyCecsFmLa9sQrMRz7xBbCs2JALbM4LXB35bv1CU",
+        collectionAddress: "HpGDYGz6aRUs5qbvp1dmWGKTicQctX4PixfcouAQDCHF",
         standard: "compressed",
-        claimAvailable: false,
+        claimAvailable: true,
       },
     ],
   );
@@ -102,4 +123,12 @@ test("catalog membership rejects inherited keys and padded IDs", () => {
     getEventPrizeDefinition(COMPRESSED_PRIZES_EVENT_ID, " 1866 ")?.id,
     "1866",
   );
+});
+
+test("recognizes only supported event prize standards", () => {
+  assert.equal(isEventPrizeStandard("core"), true);
+  assert.equal(isEventPrizeStandard("compressed"), true);
+  assert.equal(isEventPrizeStandard(" core "), false);
+  assert.equal(isEventPrizeStandard("unknown"), false);
+  assert.equal(isEventPrizeStandard(null), false);
 });

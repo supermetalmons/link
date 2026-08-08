@@ -15,6 +15,7 @@
   },
   "main": "index.js",
   "dependencies": {
+    "@metaplex-foundation/mpl-bubblegum": "^5.0.2",
     "@metaplex-foundation/mpl-core": "^1.10.0",
     "@metaplex-foundation/umi": "^1.5.1",
     "@metaplex-foundation/umi-bundle-defaults": "^1.5.1",
@@ -29,6 +30,15 @@
   },
   "optionalDependencies": {
     "utf-8-validate": "6.0.6"
+  },
+  "overrides": {
+    "@metaplex-foundation/mpl-token-metadata": "3.4.0",
+    "ethjs-unit": {
+      "bn.js": "4.12.3"
+    },
+    "number-to-bn": {
+      "bn.js": "4.12.3"
+    }
   },
   "private": true
 }

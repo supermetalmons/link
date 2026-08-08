@@ -1,11 +1,12 @@
 "use strict";
 
 const bs58 = require("bs58");
-const { getEventPrizeDefinition } = require("@mons/shared/event-prizes");
+const {
+  getEventPrizeDefinition,
+  isEventPrizeStandard,
+} = require("@mons/shared/event-prizes");
 
 const EVENT_PRIZE_ADMIN_WALLET = "Ay1mgqJr6WmihsSYdMZ1dkHL5r25N7VhCGk7NpCJcPGi";
-const EVENT_PRIZE_COLLECTION_ADDRESS =
-  "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD";
 const WITHDRAWAL_LEASE_MS = 5 * 60 * 1000;
 
 const normalizeString = (value) =>
@@ -35,6 +36,13 @@ const getEventPrizeAssetAddress = (eventId, prizeId) => {
   return normalizeString(prize?.assetAddress);
 };
 
+const getEventPrizeAssetStandard = (eventId, prizeId) => {
+  const standard = normalizeString(
+    getEventPrizeDefinition(eventId, prizeId)?.standard,
+  );
+  return isEventPrizeStandard(standard) ? standard : "";
+};
+
 const getEventPrizeWithdrawalPath = (eventId, prizeId) =>
   `eventPrizeWithdrawals/${normalizeString(eventId)}/${normalizeString(prizeId)}`;
 
@@ -46,7 +54,14 @@ const isWithdrawalRecordForPrize = (value, eventId, prizeId, assetAddress) => {
   if (!value || typeof value !== "object") {
     return false;
   }
+  const expectedAssetStandard = getEventPrizeAssetStandard(eventId, prizeId);
+  const recordedAssetStandard = normalizeString(value.assetStandard);
+  const assetStandardMatches =
+    (isEventPrizeStandard(recordedAssetStandard) &&
+      recordedAssetStandard === expectedAssetStandard) ||
+    (!recordedAssetStandard && expectedAssetStandard === "core");
   return (
+    assetStandardMatches &&
     normalizeString(value.eventId) === normalizeString(eventId) &&
     normalizeString(value.prizeId) === normalizeString(prizeId) &&
     normalizeString(value.assetAddress) === normalizeString(assetAddress)
@@ -155,6 +170,7 @@ const buildWithdrawalCompletionUpdates = ({
     eventId,
     prizeId,
     assetAddress,
+    assetStandard: getEventPrizeAssetStandard(eventId, prizeId),
     profileId,
     entitledProfileId,
     place: Number(withdrawal.place),
@@ -242,6 +258,7 @@ const decideWithdrawalClaim = ({
   }
 
   const preserveSubmitted = existing.status === "submitted";
+  const assetStandard = getEventPrizeAssetStandard(eventId, prizeId);
   return {
     kind: "acquired",
     value: {
@@ -249,6 +266,7 @@ const decideWithdrawalClaim = ({
       eventId,
       prizeId,
       assetAddress,
+      ...(assetStandard ? { assetStandard } : {}),
       entitledProfileId: preserveSubmitted
         ? normalizeString(existing.entitledProfileId) || existingProfileId
         : profileId,
@@ -270,7 +288,6 @@ const decideWithdrawalClaim = ({
 
 module.exports = {
   EVENT_PRIZE_ADMIN_WALLET,
-  EVENT_PRIZE_COLLECTION_ADDRESS,
   WITHDRAWAL_LEASE_MS,
   buildWithdrawalCompletionUpdates,
   decodeAdminSecretKey,
@@ -278,6 +295,7 @@ module.exports = {
   filterProjectableEventPrizeAssignments,
   getCompletedEventPrizeProjectionCleanupRequest,
   getEventPrizeAssetAddress,
+  getEventPrizeAssetStandard,
   getEventPrizeWithdrawalPath,
   getWithdrawalProjectionProfileIds,
   isCompletedEventPrizeWithdrawal,

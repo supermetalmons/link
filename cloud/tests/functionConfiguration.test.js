@@ -50,7 +50,7 @@ test("does not load Solana transfer dependencies with the Functions entry point"
   `);
 });
 
-test("loads Solana transfer dependencies on demand", () => {
+test("shared Solana loading excludes standard-specific SDKs", () => {
   const withdrawalPath = path.resolve(
     __dirname,
     "../functions/eventPrizeWithdrawal.js",
@@ -58,11 +58,54 @@ test("loads Solana transfer dependencies on demand", () => {
   runModuleLoadingCheck(`
     const { loadSolanaDependencies } = require(${JSON.stringify(withdrawalPath)});
     loadSolanaDependencies();
-    const loaded = Object.keys(require.cache).some((modulePath) =>
+    const loaded = Object.keys(require.cache).filter((modulePath) =>
+      modulePath.includes("/node_modules/@metaplex-foundation/mpl-core/") ||
+      modulePath.includes("/node_modules/@metaplex-foundation/mpl-bubblegum/")
+    );
+    if (loaded.length > 0) {
+      throw new Error(loaded.join("\\n"));
+    }
+  `);
+});
+
+test("Core Solana loading excludes Bubblegum", () => {
+  const withdrawalPath = path.resolve(
+    __dirname,
+    "../functions/eventPrizeWithdrawal.js",
+  );
+  runModuleLoadingCheck(`
+    const { loadSolanaDependencies } = require(${JSON.stringify(withdrawalPath)});
+    loadSolanaDependencies("core");
+    const loaded = Object.keys(require.cache);
+    const hasCore = loaded.some((modulePath) =>
       modulePath.includes("/node_modules/@metaplex-foundation/mpl-core/")
     );
-    if (!loaded) {
-      throw new Error("Solana transfer dependencies were not loaded");
+    const hasBubblegum = loaded.some((modulePath) =>
+      modulePath.includes("/node_modules/@metaplex-foundation/mpl-bubblegum/")
+    );
+    if (!hasCore || hasBubblegum) {
+      throw new Error(JSON.stringify({ hasCore, hasBubblegum }));
+    }
+  `);
+});
+
+test("compressed Solana loading excludes Core", () => {
+  const withdrawalPath = path.resolve(
+    __dirname,
+    "../functions/eventPrizeWithdrawal.js",
+  );
+  runModuleLoadingCheck(`
+    const { loadSolanaDependencies } = require(${JSON.stringify(withdrawalPath)});
+    loadSolanaDependencies("compressed");
+    const loaded = Object.keys(require.cache);
+    const hasCore = loaded.some((modulePath) =>
+      modulePath.includes("/node_modules/@metaplex-foundation/mpl-core/")
+    );
+    const hasBubblegum = loaded.some((modulePath) =>
+      modulePath.includes("/node_modules/@metaplex-foundation/mpl-bubblegum/")
+    );
+    if (hasCore || !hasBubblegum) {
+      throw new Error(JSON.stringify({ hasCore, hasBubblegum }));
     }
   `);
 });
