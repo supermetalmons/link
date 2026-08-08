@@ -6,6 +6,7 @@ import type {
   AutomatchStateHint,
   NavigationStatus as SharedNavigationStatus,
 } from "@mons/shared/navigation";
+import type { EventPrizeId as SharedEventPrizeId } from "@mons/shared/event-prizes";
 
 export interface Match {
   version: number;
@@ -155,7 +156,7 @@ export interface EventRound {
   matches: Record<string, EventMatch>;
 }
 
-export type EventPrizeId = "1092" | "1111" | "1514";
+export type EventPrizeId = SharedEventPrizeId;
 export type EventPrizePlace = 1 | 2 | 3;
 
 export interface EventPrizeAssignment {

@@ -19,6 +19,7 @@ const {
   acquireWithdrawalClaim,
   deserializePersistedSubmittedTransaction,
   deserializeSubmittedTransaction,
+  handleWithdrawEventPrize,
   persistSubmittedTransaction,
   recoverSubmittedWithdrawal,
   reconcileCompletedWithdrawalProjections,
@@ -35,7 +36,7 @@ const admin = require("../functions/firebaseAdmin");
 
 const eventId = "NN3eRzoZo80";
 const prizeId = "1092";
-const assetAddress = getEventPrizeAssetAddress(prizeId);
+const assetAddress = getEventPrizeAssetAddress(eventId, prizeId);
 const profileId = "profile";
 const recipientAddress = "11111111111111111111111111111111";
 
@@ -76,20 +77,77 @@ const createSubmittedTransaction = (transactionSignature, overrides = {}) => ({
   ...overrides,
 });
 
-test("maps every event prize to its Core asset", () => {
+test("maps every configured prize to its asset address", () => {
   assert.equal(
-    getEventPrizeAssetAddress("1092"),
+    getEventPrizeAssetAddress(eventId, "1092"),
     "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
   );
   assert.equal(
-    getEventPrizeAssetAddress("1111"),
+    getEventPrizeAssetAddress(eventId, "1111"),
     "8BhUWeckB6432Vnxr6Jg9ve2NN39huPk8PBNL87wQgpL",
   );
   assert.equal(
-    getEventPrizeAssetAddress("1514"),
+    getEventPrizeAssetAddress(eventId, "1514"),
     "FxgNuJ47j95kaWEVkPo4QGPfXzF4x5YKLFBSYezyFRRJ",
   );
-  assert.equal(getEventPrizeAssetAddress("invalid"), "");
+  assert.equal(getEventPrizeAssetAddress(eventId, "invalid"), "");
+  assert.equal(
+    getEventPrizeAssetAddress("FRkdorMWaYW", "1866"),
+    "2KNT8rbXC7G8w5AChbEHHi6i4FN7EAZCtdWX65ZSuQp6",
+  );
+});
+
+test("rejects compressed prizes before starting a withdrawal", async () => {
+  await assert.rejects(
+    handleWithdrawEventPrize({
+      auth: { uid: "uid" },
+      data: {
+        eventId: "FRkdorMWaYW",
+        prizeId: "1866",
+      },
+    }),
+    (error) =>
+      error.code === "invalid-argument" &&
+      error.message === "Unsupported event prize.",
+  );
+});
+
+test("recognizes completed records independently of current claim availability", () => {
+  const compressedEventId = "FRkdorMWaYW";
+  const compressedPrizeId = "1866";
+  const compressedAssetAddress = getEventPrizeAssetAddress(
+    compressedEventId,
+    compressedPrizeId,
+  );
+  const completed = {
+    status: "completed",
+    eventId: compressedEventId,
+    prizeId: compressedPrizeId,
+    assetAddress: compressedAssetAddress,
+  };
+  assert.equal(
+    isCompletedEventPrizeWithdrawal(
+      completed,
+      compressedEventId,
+      compressedPrizeId,
+    ),
+    true,
+  );
+  assert.deepEqual(
+    filterProjectableEventPrizeAssignments({
+      eventId: compressedEventId,
+      assignments: {
+        1: {
+          eventId: compressedEventId,
+          profileId,
+          place: 1,
+          prizeId: compressedPrizeId,
+        },
+      },
+      withdrawals: { [compressedPrizeId]: completed },
+    }),
+    {},
+  );
 });
 
 test("validates Solana addresses and 64-byte base58 secret keys", () => {
@@ -436,7 +494,7 @@ test("does not recover a submitted record for another prize", () => {
     status: "submitted",
     eventId,
     prizeId: "1111",
-    assetAddress: getEventPrizeAssetAddress("1111"),
+    assetAddress: getEventPrizeAssetAddress(eventId, "1111"),
     profileId,
     place: 2,
     recipientAddress,

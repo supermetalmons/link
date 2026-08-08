@@ -47,6 +47,11 @@ import {
   parseEventMatchKey,
 } from "@mons/shared/events";
 import { shuffle } from "@mons/shared/ids";
+import {
+  getEventPrizeConfig,
+  isEventPrizeEvent,
+  type EventPrizeDefinition,
+} from "@mons/shared/event-prizes";
 
 const BRACKET_MATCH_W = 72;
 const BRACKET_MATCH_H = 40;
@@ -88,25 +93,8 @@ const FALLBACK_MATCH_H = 40;
 const FALLBACK_AVATAR_PX = 28;
 const PRIZE_SELECTION_AVATAR_PX = 27;
 const PRIZE_SELECTION_GAP_PX = 12;
-const PRIZES_EVENT_ID = "NN3eRzoZo80";
 const PRIZE_DISPLAY_PLACES = [2, 1, 3] as const;
-const EVENT_PRIZES = [
-  {
-    id: "1092",
-    url: "https://cdn.lil.org/player/scarecrow/thumbs/1092.webp",
-    alt: "Prize collectible 1092",
-  },
-  {
-    id: "1111",
-    url: "https://cdn.lil.org/player/scarecrow/thumbs/1111.webp",
-    alt: "Prize collectible 1111",
-  },
-  {
-    id: "1514",
-    url: "https://cdn.lil.org/player/scarecrow/thumbs/1514.webp",
-    alt: "Prize collectible 1514",
-  },
-] as const;
+const EMPTY_EVENT_PRIZES = Object.freeze([]) as readonly EventPrizeDefinition[];
 const PARTICIPANT_PROFILE_CACHE_TTL_MS = 30_000;
 
 type BracketCardInteraction = "none" | "game" | "participant";
@@ -1190,7 +1178,7 @@ const getEventAutoRecoveryReason = (
 
   if (
     event.status === "ended" &&
-    event.eventId === PRIZES_EVENT_ID &&
+    isEventPrizeEvent(event.eventId) &&
     Object.keys(event.prizeAssignments ?? {}).length === 0
   ) {
     return "ended-missing-prize-assignments";
@@ -2981,6 +2969,8 @@ const EventModal: React.FC = () => {
     Partial<Record<WinnerPodiumPlace, HTMLDivElement | null>>
   >({});
   const displayedEventRecord = devStubRecord ?? eventRecord;
+  const eventPrizeConfig = getEventPrizeConfig(modalState.eventId);
+  const eventPrizes = eventPrizeConfig?.prizes ?? EMPTY_EVENT_PRIZES;
   const invalidateParticipantLookups = useCallback(() => {
     activeParticipantLookupRef.current = null;
     participantProfileCacheRef.current.clear();
@@ -3177,11 +3167,7 @@ const EventModal: React.FC = () => {
   useEffect(() => {
     setEventPrizeSelections({});
     setIsUpdatingPrizeSelection(false);
-    if (
-      !modalState.isOpen ||
-      !modalState.eventId ||
-      modalState.eventId !== PRIZES_EVENT_ID
-    ) {
+    if (!modalState.isOpen || !modalState.eventId || !eventPrizeConfig) {
       return;
     }
     return connection.subscribeToEventPrizeSelections(
@@ -3191,7 +3177,7 @@ const EventModal: React.FC = () => {
         console.error("Error subscribing to event prize selections:", error);
       },
     );
-  }, [modalState.eventId, modalState.isOpen]);
+  }, [eventPrizeConfig, modalState.eventId, modalState.isOpen]);
 
   useEffect(() => {
     if (!modalState.isOpen || typeof window === "undefined") {
@@ -3496,7 +3482,7 @@ const EventModal: React.FC = () => {
       displayedEventRecord?.status !== "ended" ||
       eventPrizeAssignments.length === 0
     ) {
-      return EVENT_PRIZES.map((prize) => ({
+      return eventPrizes.map((prize) => ({
         prize,
         assignment: null as EventPrizeAssignment | null,
       }));
@@ -3504,7 +3490,7 @@ const EventModal: React.FC = () => {
     const assignedPrizeIds = new Set<EventPrizeId>();
     const orderedAssignedPrizes = eventPrizeAssignments.flatMap(
       (assignment) => {
-        const prize = EVENT_PRIZES.find(
+        const prize = eventPrizes.find(
           (candidate) => candidate.id === assignment.prizeId,
         );
         if (!prize || assignedPrizeIds.has(prize.id)) {
@@ -3516,14 +3502,14 @@ const EventModal: React.FC = () => {
     );
     return [
       ...orderedAssignedPrizes,
-      ...EVENT_PRIZES.filter((prize) => !assignedPrizeIds.has(prize.id)).map(
-        (prize) => ({
+      ...eventPrizes
+        .filter((prize) => !assignedPrizeIds.has(prize.id))
+        .map((prize) => ({
           prize,
           assignment: null as EventPrizeAssignment | null,
-        }),
-      ),
+        })),
     ];
-  }, [displayedEventRecord?.status, eventPrizeAssignments]);
+  }, [displayedEventRecord?.status, eventPrizeAssignments, eventPrizes]);
   const currentProfileId = storage.getProfileId("");
   const eventUiState = useMemo(
     () => getCurrentUiState(displayedEventRecord, currentProfileId),
@@ -3547,7 +3533,7 @@ const EventModal: React.FC = () => {
       if (
         isUpdatingPrizeSelection ||
         devStubRecord ||
-        modalState.eventId !== PRIZES_EVENT_ID ||
+        !eventPrizeConfig ||
         !currentProfileId ||
         !eventRecord?.participants[currentProfileId] ||
         eventRecord.prizeSelectionsLockedAtMs != null ||
@@ -3557,7 +3543,7 @@ const EventModal: React.FC = () => {
       }
       setIsUpdatingPrizeSelection(true);
       void connection
-        .toggleEventPrizeSelection(modalState.eventId, prizeId)
+        .toggleEventPrizeSelection(eventPrizeConfig.eventId, prizeId)
         .catch(() => {})
         .finally(() => {
           setIsUpdatingPrizeSelection(false);
@@ -3567,8 +3553,8 @@ const EventModal: React.FC = () => {
       currentProfileId,
       devStubRecord,
       eventRecord,
+      eventPrizeConfig,
       isUpdatingPrizeSelection,
-      modalState.eventId,
     ],
   );
 
@@ -4499,9 +4485,7 @@ const EventModal: React.FC = () => {
   const disableDisqualifyButton =
     isDisqualifying || livePendingMatches.length <= 0;
   const showEventPrizes =
-    modalState.eventId === PRIZES_EVENT_ID &&
-    !!displayedEventRecord &&
-    !isDismissedState;
+    !!eventPrizeConfig && !!displayedEventRecord && !isDismissedState;
   const canSelectEventPrize = !!(
     showEventPrizes &&
     !devStubRecord &&
@@ -4709,7 +4693,7 @@ const EventModal: React.FC = () => {
                         onClick={() => handlePrizeSelectionClick(prize.id)}
                       >
                         <PrizeImage
-                          src={prize.url}
+                          src={prize.imageUrl}
                           alt={prize.alt}
                           draggable={false}
                         />

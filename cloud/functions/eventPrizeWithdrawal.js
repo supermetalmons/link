@@ -3,8 +3,8 @@
 const crypto = require("node:crypto");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { defineSecret } = require("firebase-functions/params");
+const { getEventPrizeDefinition } = require("@mons/shared/event-prizes");
 const admin = require("./firebaseAdmin");
-const { PRIZES_EVENT_ID } = require("./eventPrizeAwards");
 const { HELIUS_RPC_API_KEY, getHeliusRpcUrl } = require("./heliusRpc");
 const { readProfileByLoginUid } = require("./profileLookup");
 const {
@@ -761,16 +761,28 @@ const handleWithdrawEventPrize = async (request) => {
     request.data && typeof request.data === "object" ? request.data : {};
   const eventId = normalizeString(requestData.eventId);
   const prizeId = normalizeString(requestData.prizeId);
-  const recipientAddress = normalizeSolanaAddress(requestData.solanaAddress);
-  const assetAddress = getEventPrizeAssetAddress(prizeId);
-  if (!eventId || !prizeId || !recipientAddress) {
+  if (!eventId || !prizeId) {
     throw new HttpsError(
       "invalid-argument",
-      "eventId, prizeId, and a valid Solana address are required.",
+      "eventId and prizeId are required.",
     );
   }
-  if (eventId !== PRIZES_EVENT_ID || !assetAddress) {
+  const prize = getEventPrizeDefinition(eventId, prizeId);
+  const assetAddress = getEventPrizeAssetAddress(eventId, prizeId);
+  if (
+    !prize ||
+    prize.claimAvailable !== true ||
+    prize.standard !== "core" ||
+    !assetAddress
+  ) {
     throw new HttpsError("invalid-argument", "Unsupported event prize.");
+  }
+  const recipientAddress = normalizeSolanaAddress(requestData.solanaAddress);
+  if (!recipientAddress) {
+    throw new HttpsError(
+      "invalid-argument",
+      "A valid Solana address is required.",
+    );
   }
   if (recipientAddress === EVENT_PRIZE_ADMIN_WALLET) {
     throw new HttpsError(

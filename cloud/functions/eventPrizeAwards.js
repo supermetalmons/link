@@ -1,14 +1,13 @@
 "use strict";
 
-const PRIZES_EVENT_ID = "NN3eRzoZo80";
-const EVENT_PRIZE_IDS = Object.freeze(["1092", "1111", "1514"]);
+const {
+  getEventPrizeDefinitions,
+  isEventPrizeId,
+} = require("@mons/shared/event-prizes");
 const EVENT_PRIZE_PLACES = Object.freeze([1, 2, 3]);
 
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
-const isEventPrizeId = (value) =>
-  EVENT_PRIZE_IDS.includes(normalizeString(value));
 
 const normalizeEventPrizeAssignments = (value, eventId) => {
   if (!value || typeof value !== "object") {
@@ -32,7 +31,7 @@ const normalizeEventPrizeAssignments = (value, eventId) => {
       assignmentEventId !== normalizedEventId ||
       Number(assignment.place) !== place ||
       !profileId ||
-      !isEventPrizeId(prizeId) ||
+      !isEventPrizeId(normalizedEventId, prizeId) ||
       !Number.isFinite(assignedAtMs) ||
       assignedProfileIds.has(profileId) ||
       assignedPrizeIds.has(prizeId)
@@ -123,7 +122,14 @@ const buildEventPrizeAssignments = ({
 }) => {
   const normalizedEventId = normalizeString(eventId);
   const normalizedAssignedAtMs = Math.floor(Number(assignedAtMs));
-  if (!normalizedEventId || !Number.isFinite(normalizedAssignedAtMs)) {
+  const eventPrizeIds = getEventPrizeDefinitions(normalizedEventId).map(
+    (prize) => prize.id,
+  );
+  if (
+    !normalizedEventId ||
+    eventPrizeIds.length === 0 ||
+    !Number.isFinite(normalizedAssignedAtMs)
+  ) {
     return {};
   }
 
@@ -161,7 +167,7 @@ const buildEventPrizeAssignments = ({
         : "",
     );
     if (
-      isEventPrizeId(preferredPrizeId) &&
+      isEventPrizeId(normalizedEventId, preferredPrizeId) &&
       !assignedPrizeIds.has(preferredPrizeId)
     ) {
       assignPrize(placement, preferredPrizeId);
@@ -172,7 +178,7 @@ const buildEventPrizeAssignments = ({
     if (assignments[String(placement.place)]) {
       continue;
     }
-    const fallbackPrizeId = EVENT_PRIZE_IDS.find(
+    const fallbackPrizeId = eventPrizeIds.find(
       (prizeId) => !assignedPrizeIds.has(prizeId),
     );
     if (!fallbackPrizeId) {
@@ -185,9 +191,7 @@ const buildEventPrizeAssignments = ({
 };
 
 module.exports = {
-  EVENT_PRIZE_IDS,
   EVENT_PRIZE_PLACES,
-  PRIZES_EVENT_ID,
   buildProfileEventPrizeMergeCopies,
   buildEventPrizeAssignments,
   isEventPrizeId,

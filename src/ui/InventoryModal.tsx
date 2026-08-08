@@ -25,6 +25,7 @@ import type { MaterialName } from "../services/rocksMiningService";
 import { connection } from "../connection/connection";
 import type { EventPrizeAssignment } from "../connection/connectionModels";
 import { BottomPillButton } from "./BottomControlsStyles";
+import { getEventPrizeDefinition } from "@mons/shared/event-prizes";
 
 const SWAGPACK_ITEM_COUNT = 467;
 const SWAGPACK_ID_OFFSET = 1000;
@@ -33,8 +34,6 @@ const SWAGPACK_INVENTORY_IMAGE_BASE_URL =
 const SWAGPACK_THUMB_IMAGE_BASE_URL =
   "https://cdn.lil.org/mons/emojipack/thumbs";
 const MATERIAL_IMAGE_BASE_URL = "https://cdn.lil.org/mons/rocks/materials";
-const EVENT_PRIZE_IMAGE_BASE_URL =
-  "https://cdn.lil.org/player/scarecrow/thumbs";
 
 const SPECIAL_ACTION_COPY: Readonly<
   Partial<Record<number, { action: string; current?: string }>>
@@ -801,6 +800,13 @@ export const InventoryModal = React.forwardRef<
   const previewTriggerRef = useRef<HTMLButtonElement | null>(null);
   const withdrawalDismissTimeoutRef = useRef<number | null>(null);
   const ownerKey = isAuthenticated ? getNftIdentityKey(authState) : null;
+  const previewEventPrizeDefinition =
+    previewItem?.kind === "eventPrize"
+      ? getEventPrizeDefinition(
+          previewItem.prize.eventId,
+          previewItem.prize.prizeId,
+        )
+      : null;
   const isPrizeWithdrawalLocked =
     withdrawalStatus === "sending" || withdrawalStatus === "success";
   const isCompactWithdrawalViewport =
@@ -1079,6 +1085,7 @@ export const InventoryModal = React.forwardRef<
   const handleWithdrawEventPrize = async () => {
     if (
       previewItem?.kind !== "eventPrize" ||
+      previewEventPrizeDefinition?.claimAvailable !== true ||
       isPrizeWithdrawalLocked ||
       withdrawalInFlightRef.current ||
       !isAuthenticated
@@ -1291,25 +1298,34 @@ export const InventoryModal = React.forwardRef<
           ) : (
             <NFTGridContainer>
               <NFTGrid>
-                {eventPrizes.map((prize) => (
-                  <PrizeInventoryTile
-                    key={`event-prize-${prize.eventId}`}
-                    type="button"
-                    aria-label={`View place ${prize.place} prize from event ${prize.eventId}`}
-                    onClick={(event) =>
-                      openPreview(
-                        { kind: "eventPrize", prize },
-                        event.currentTarget,
-                      )
-                    }
-                  >
-                    <PrizeInventoryImage
-                      src={`${EVENT_PRIZE_IMAGE_BASE_URL}/${prize.prizeId}.webp`}
-                      alt=""
-                      loading="lazy"
-                    />
-                  </PrizeInventoryTile>
-                ))}
+                {eventPrizes.map((prize) => {
+                  const definition = getEventPrizeDefinition(
+                    prize.eventId,
+                    prize.prizeId,
+                  );
+                  if (!definition) {
+                    return null;
+                  }
+                  return (
+                    <PrizeInventoryTile
+                      key={`event-prize-${prize.eventId}-${prize.prizeId}`}
+                      type="button"
+                      aria-label={`View place ${prize.place} prize from event ${prize.eventId}`}
+                      onClick={(event) =>
+                        openPreview(
+                          { kind: "eventPrize", prize },
+                          event.currentTarget,
+                        )
+                      }
+                    >
+                      <PrizeInventoryImage
+                        src={definition.imageUrl}
+                        alt=""
+                        loading="lazy"
+                      />
+                    </PrizeInventoryTile>
+                  );
+                })}
                 {specials.map((item) => {
                   const isActive = activeItemSelection.specialIds.has(item.id);
                   return (
@@ -1415,62 +1431,79 @@ export const InventoryModal = React.forwardRef<
                     alt=""
                     draggable={false}
                   />
-                ) : (
+                ) : previewEventPrizeDefinition ? (
                   <PreviewImage
-                    src={`${EVENT_PRIZE_IMAGE_BASE_URL}/${previewItem.prize.prizeId}.webp`}
+                    src={previewEventPrizeDefinition.imageUrl}
                     alt=""
                     draggable={false}
                   />
-                )}
+                ) : null}
               </PreviewArtwork>
-              {previewItem.kind === "eventPrize" && (
-                <PrizeWithdrawalControls
-                  ref={withdrawalControlsRef}
-                  $isCompact={isCompactWithdrawalViewport}
-                >
-                  {isWithdrawalAddressVisible && (
-                    <>
-                      <PrizeWithdrawalInput
-                        ref={withdrawalInputRef}
-                        type="text"
-                        value={withdrawalAddress}
-                        placeholder="Solana address"
-                        aria-label="Solana address"
-                        aria-invalid={withdrawalError ? "true" : undefined}
-                        disabled={isPrizeWithdrawalLocked}
-                        autoCapitalize="none"
-                        autoComplete="off"
-                        autoCorrect="off"
-                        spellCheck={false}
-                        onChange={(event) => {
-                          setWithdrawalAddress(event.target.value);
-                          setWithdrawalError("");
-                        }}
-                      />
-                      <PrizeWithdrawalError role="status" aria-live="polite">
-                        {withdrawalError}
-                      </PrizeWithdrawalError>
-                    </>
-                  )}
-                  <PrizeWithdrawalButton
-                    ref={withdrawalButtonRef}
-                    type="button"
-                    $status={withdrawalStatus}
-                    isBlue={withdrawalStatus === "idle"}
-                    isViewOnly={withdrawalStatus === "sending"}
-                    disabled={isPrizeWithdrawalLocked}
-                    onClick={() => void handleWithdrawEventPrize()}
+              {previewItem.kind === "eventPrize" &&
+                previewEventPrizeDefinition && (
+                  <PrizeWithdrawalControls
+                    ref={withdrawalControlsRef}
+                    $isCompact={isCompactWithdrawalViewport}
                   >
-                    {withdrawalStatus === "sending"
-                      ? "Sending..."
-                      : withdrawalStatus === "success"
-                        ? "Success"
-                        : isWithdrawalAddressVisible
-                          ? "Send"
-                          : "Withdraw"}
-                  </PrizeWithdrawalButton>
-                </PrizeWithdrawalControls>
-              )}
+                    {previewEventPrizeDefinition.claimAvailable &&
+                      isWithdrawalAddressVisible && (
+                        <>
+                          <PrizeWithdrawalInput
+                            ref={withdrawalInputRef}
+                            type="text"
+                            value={withdrawalAddress}
+                            placeholder="Solana address"
+                            aria-label="Solana address"
+                            aria-invalid={withdrawalError ? "true" : undefined}
+                            disabled={isPrizeWithdrawalLocked}
+                            autoCapitalize="none"
+                            autoComplete="off"
+                            autoCorrect="off"
+                            spellCheck={false}
+                            onChange={(event) => {
+                              setWithdrawalAddress(event.target.value);
+                              setWithdrawalError("");
+                            }}
+                          />
+                          <PrizeWithdrawalError
+                            role="status"
+                            aria-live="polite"
+                          >
+                            {withdrawalError}
+                          </PrizeWithdrawalError>
+                        </>
+                      )}
+                    {previewEventPrizeDefinition.claimAvailable ? (
+                      <PrizeWithdrawalButton
+                        ref={withdrawalButtonRef}
+                        type="button"
+                        $status={withdrawalStatus}
+                        isBlue={withdrawalStatus === "idle"}
+                        isViewOnly={withdrawalStatus === "sending"}
+                        disabled={isPrizeWithdrawalLocked}
+                        onClick={() => void handleWithdrawEventPrize()}
+                      >
+                        {withdrawalStatus === "sending"
+                          ? "Sending..."
+                          : withdrawalStatus === "success"
+                            ? "Success"
+                            : isWithdrawalAddressVisible
+                              ? "Send"
+                              : "Withdraw"}
+                      </PrizeWithdrawalButton>
+                    ) : (
+                      <PrizeWithdrawalButton
+                        type="button"
+                        $status="idle"
+                        isBlue={false}
+                        isViewOnly={true}
+                        disabled={true}
+                      >
+                        Claim coming soon
+                      </PrizeWithdrawalButton>
+                    )}
+                  </PrizeWithdrawalControls>
+                )}
               {previewActionCopy && shouldShowPreviewAction && (
                 <PreviewActionRow>
                   <PreviewActionHitbox>

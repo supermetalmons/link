@@ -139,6 +139,7 @@ import {
 } from "@mons/shared/events";
 import type { AuthMethodKey } from "@mons/shared/auth";
 import type { XConsentSource } from "@mons/shared/x-redirect";
+import { isEventPrizeId } from "@mons/shared/event-prizes";
 
 const normalizeMiningData = (source: any): PlayerMiningData =>
   normalizeMiningSnapshot({
@@ -2923,7 +2924,10 @@ class Connection {
             Object.entries(rawSelections as Record<string, unknown>).forEach(
               ([profileId, prizeId]) => {
                 const normalizedProfileId = profileId.trim();
-                const normalizedPrizeId = this.normalizeEventPrizeId(prizeId);
+                const normalizedPrizeId = this.normalizeEventPrizeId(
+                  prizeId,
+                  normalizedEventId,
+                );
                 if (normalizedProfileId && normalizedPrizeId) {
                   selections[normalizedProfileId] = normalizedPrizeId;
                 }
@@ -3457,11 +3461,15 @@ class Connection {
     };
   }
 
-  private normalizeEventPrizeId(value: unknown): EventPrizeId | null {
-    if (value === "1092" || value === "1111" || value === "1514") {
-      return value;
-    }
-    return null;
+  private normalizeEventPrizeId(
+    value: unknown,
+    eventId: string,
+  ): EventPrizeId | null {
+    const normalizedValue = this.normalizeString(value).trim();
+    const normalizedEventId = eventId.trim();
+    return isEventPrizeId(normalizedEventId, normalizedValue)
+      ? normalizedValue
+      : null;
   }
 
   private mapEventPrizeAssignment(
@@ -3474,7 +3482,7 @@ class Connection {
     const rawData = rawValue as Record<string, unknown>;
     const eventId = this.normalizeString(rawData.eventId) || fallbackEventId;
     const profileId = this.normalizeString(rawData.profileId);
-    const prizeId = this.normalizeEventPrizeId(rawData.prizeId);
+    const prizeId = this.normalizeEventPrizeId(rawData.prizeId, eventId);
     const placeValue = this.normalizeFiniteNumber(rawData.place, NaN);
     const place =
       placeValue === 1 || placeValue === 2 || placeValue === 3

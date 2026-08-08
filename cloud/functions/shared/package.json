@@ -5,6 +5,7 @@
   "type": "commonjs",
   "exports": {
     "./auth": "./auth.js",
+    "./event-prizes": "./event-prizes.js",
     "./events": "./events.js",
     "./game-variants": "./game-variants.js",
     "./ids": "./ids.js",

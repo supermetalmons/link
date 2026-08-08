@@ -16,11 +16,13 @@ const {
   startEventLockHeartbeat,
 } = require("./eventLocks");
 const {
-  EVENT_PRIZE_IDS,
-  PRIZES_EVENT_ID,
   buildEventPrizeAssignments,
   normalizeEventPrizeAssignments,
 } = require("./eventPrizeAwards");
+const {
+  getEventPrizeDefinitions,
+  isEventPrizeEvent,
+} = require("@mons/shared/event-prizes");
 const {
   filterProjectableEventPrizeAssignments,
   getCompletedEventPrizeProjectionCleanupRequest,
@@ -1546,8 +1548,15 @@ const getEventPrizePlacements = ({
   return placements;
 };
 
-const hasCompleteEventPrizeAssignments = (assignments, placementCount) => {
-  const expectedCount = Math.min(EVENT_PRIZE_IDS.length, placementCount);
+const hasCompleteEventPrizeAssignments = (
+  assignments,
+  placementCount,
+  eventId,
+) => {
+  const expectedCount = Math.min(
+    getEventPrizeDefinitions(eventId).length,
+    placementCount,
+  );
   if (expectedCount <= 0) {
     return false;
   }
@@ -1682,7 +1691,13 @@ const resolveEventPrizeAssignments = async ({
     event?.prizeAssignments,
     eventId,
   );
-  if (hasCompleteEventPrizeAssignments(storedAssignments, placements.length)) {
+  if (
+    hasCompleteEventPrizeAssignments(
+      storedAssignments,
+      placements.length,
+      eventId,
+    )
+  ) {
     return { assignments: storedAssignments, didCreate: false };
   }
   const selectionsSnapshot = await admin
@@ -3051,7 +3066,7 @@ const runEventSyncState = async ({
         event.winnerDisplayName = winnerParticipant
           ? winnerParticipant.displayName
           : null;
-        if (eventId === PRIZES_EVENT_ID) {
+        if (isEventPrizeEvent(eventId)) {
           if (typeof event.prizeSelectionsLockedAtMs !== "number") {
             const lockOwned = await isEventLockStillOwned(lockHandle);
             if (!lockOwned) {
@@ -3223,7 +3238,7 @@ const runEventSyncState = async ({
         }
       }
 
-      if (eventId === PRIZES_EVENT_ID) {
+      if (isEventPrizeEvent(eventId)) {
         if (typeof event.prizeSelectionsLockedAtMs !== "number") {
           updates[`events/${eventId}/prizeSelectionsLockedAtMs`] =
             typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs;

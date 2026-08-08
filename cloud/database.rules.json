@@ -16,8 +16,8 @@
       "$eventId": {
         ".read": "auth != null && root.child('events').child($eventId).exists()",
         "$profileId": {
-          ".write": "auth != null && $eventId === 'NN3eRzoZo80' && !root.child('events').child($eventId).child('prizeSelectionsLockedAtMs').exists() && root.child('events').child($eventId).child('participants').child($profileId).exists() && ((auth.uid === root.child('events').child($eventId).child('participants').child($profileId).child('loginUid').val()) || (auth.token.profileId != null && auth.token.profileId === $profileId) || (root.child('players').child(auth.uid).child('profile').exists() && root.child('players').child(auth.uid).child('profile').val() === $profileId)) && (root.child('events').child($eventId).child('status').val() === 'scheduled' || root.child('events').child($eventId).child('status').val() === 'active')",
-          ".validate": "newData.isString() && (newData.val() === '1092' || newData.val() === '1111' || newData.val() === '1514')"
+          ".write": "auth != null && ($eventId === 'NN3eRzoZo80' || $eventId === 'FRkdorMWaYW') && !root.child('events').child($eventId).child('prizeSelectionsLockedAtMs').exists() && root.child('events').child($eventId).child('participants').child($profileId).exists() && ((auth.uid === root.child('events').child($eventId).child('participants').child($profileId).child('loginUid').val()) || (auth.token.profileId != null && auth.token.profileId === $profileId) || (root.child('players').child(auth.uid).child('profile').exists() && root.child('players').child(auth.uid).child('profile').val() === $profileId)) && (root.child('events').child($eventId).child('status').val() === 'scheduled' || root.child('events').child($eventId).child('status').val() === 'active')",
+          ".validate": "newData.isString() && (($eventId === 'NN3eRzoZo80' && (newData.val() === '1092' || newData.val() === '1111' || newData.val() === '1514')) || ($eventId === 'FRkdorMWaYW' && (newData.val() === '1866' || newData.val() === '1682' || newData.val() === '6793')))"
         }
       }
     },

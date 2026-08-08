@@ -1,15 +1,11 @@
 "use strict";
 
 const bs58 = require("bs58");
+const { getEventPrizeDefinition } = require("@mons/shared/event-prizes");
 
 const EVENT_PRIZE_ADMIN_WALLET = "Ay1mgqJr6WmihsSYdMZ1dkHL5r25N7VhCGk7NpCJcPGi";
 const EVENT_PRIZE_COLLECTION_ADDRESS =
   "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD";
-const EVENT_PRIZE_ASSET_ADDRESSES = Object.freeze({
-  1092: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
-  1111: "8BhUWeckB6432Vnxr6Jg9ve2NN39huPk8PBNL87wQgpL",
-  1514: "FxgNuJ47j95kaWEVkPo4QGPfXzF4x5YKLFBSYezyFRRJ",
-});
 const WITHDRAWAL_LEASE_MS = 5 * 60 * 1000;
 
 const normalizeString = (value) =>
@@ -34,8 +30,10 @@ const decodeAdminSecretKey = (value) => {
   return bytes?.length === 64 ? bytes : null;
 };
 
-const getEventPrizeAssetAddress = (prizeId) =>
-  EVENT_PRIZE_ASSET_ADDRESSES[normalizeString(prizeId)] || "";
+const getEventPrizeAssetAddress = (eventId, prizeId) => {
+  const prize = getEventPrizeDefinition(eventId, prizeId);
+  return normalizeString(prize?.assetAddress);
+};
 
 const getEventPrizeWithdrawalPath = (eventId, prizeId) =>
   `eventPrizeWithdrawals/${normalizeString(eventId)}/${normalizeString(prizeId)}`;
@@ -86,14 +84,11 @@ const isWithdrawalRecordOwnedByRequest = (
 };
 
 const isCompletedEventPrizeWithdrawal = (value, eventId, prizeId) => {
+  const assetAddress = getEventPrizeAssetAddress(eventId, prizeId);
   return (
+    Boolean(assetAddress) &&
     value?.status === "completed" &&
-    isWithdrawalRecordForPrize(
-      value,
-      eventId,
-      prizeId,
-      getEventPrizeAssetAddress(prizeId),
-    )
+    isWithdrawalRecordForPrize(value, eventId, prizeId, assetAddress)
   );
 };
 
@@ -275,7 +270,6 @@ const decideWithdrawalClaim = ({
 
 module.exports = {
   EVENT_PRIZE_ADMIN_WALLET,
-  EVENT_PRIZE_ASSET_ADDRESSES,
   EVENT_PRIZE_COLLECTION_ADDRESS,
   WITHDRAWAL_LEASE_MS,
   buildWithdrawalCompletionUpdates,
