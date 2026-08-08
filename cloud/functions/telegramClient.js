@@ -53,6 +53,9 @@ const getTransportErrorCode = (error) => {
 const isKnownSafeTelegramSendError = (error) =>
   TELEGRAM_SAFE_SEND_ERROR_CODES.has(getTransportErrorCode(error));
 
+const isSendOperation = (operation) =>
+  operation === "send" || operation === "send-media-group";
+
 const isNotModifiedDescription = (description) =>
   description.includes("message is not modified");
 
@@ -124,7 +127,7 @@ const telegramRequest = async ({
     const timedOut = controller.signal.aborted || error?.name === "AbortError";
     return buildFailure({
       classification:
-        operation === "send" &&
+        isSendOperation(operation) &&
         (timedOut || !isKnownSafeTelegramSendError(error))
           ? "uncertain"
           : "retryable",
@@ -147,7 +150,7 @@ const telegramRequest = async ({
       });
     }
     return buildFailure({
-      classification: operation === "send" ? "uncertain" : "retryable",
+      classification: isSendOperation(operation) ? "uncertain" : "retryable",
       code: "malformed-response",
       description: sanitizeDescription(error?.message, normalizedToken),
       httpStatus: response.status,
@@ -170,7 +173,7 @@ const telegramRequest = async ({
 
   if (!data || typeof data !== "object" || typeof data.ok !== "boolean") {
     return buildFailure({
-      classification: operation === "send" ? "uncertain" : "retryable",
+      classification: isSendOperation(operation) ? "uncertain" : "retryable",
       code: "malformed-response",
       description: "Telegram returned an invalid response",
       httpStatus: response.status,
@@ -185,7 +188,7 @@ const telegramRequest = async ({
       ? `http-${response.status}`
       : `telegram-${telegramErrorCode}`;
     return buildFailure({
-      classification: operation === "send" ? "uncertain" : "retryable",
+      classification: isSendOperation(operation) ? "uncertain" : "retryable",
       code,
       description: description || "Telegram transient failure",
       httpStatus: response.status,
@@ -193,6 +196,31 @@ const telegramRequest = async ({
   }
 
   if (response.ok && data && data.ok === true) {
+    if (operation === "send-media-group") {
+      const messageIds = Array.isArray(data.result)
+        ? data.result.map((message) =>
+            normalizePositiveInteger(message?.message_id),
+          )
+        : [];
+      if (
+        messageIds.length !== body.media.length ||
+        messageIds.some((messageId) => messageId === null)
+      ) {
+        return buildFailure({
+          classification: "uncertain",
+          code: "missing-message-id",
+          description:
+            "Telegram acknowledged media group send without all message IDs",
+          httpStatus: response.status,
+        });
+      }
+      return {
+        ok: true,
+        outcome: "sent",
+        messageIds,
+        httpStatus: response.status,
+      };
+    }
     if (operation === "send") {
       const messageId = normalizePositiveInteger(data?.result?.message_id);
       if (!messageId) {
@@ -280,6 +308,43 @@ const sendTelegramMessage = async ({
   });
 };
 
+const sendTelegramMediaGroup = async ({
+  chatId,
+  imageUrls,
+  text,
+  silent = false,
+  token,
+  fetchImpl,
+  timeoutMs,
+}) => {
+  const normalizedImageUrls = Array.isArray(imageUrls)
+    ? imageUrls.map(normalizeString)
+    : [];
+  if (
+    normalizedImageUrls.length < 2 ||
+    normalizedImageUrls.length > 10 ||
+    normalizedImageUrls.some((imageUrl) => !imageUrl)
+  ) {
+    throw new TypeError("Telegram media groups require 2 to 10 image URLs");
+  }
+  return telegramRequest({
+    operation: "send-media-group",
+    method: "sendMediaGroup",
+    body: {
+      chat_id: chatId,
+      media: normalizedImageUrls.map((imageUrl, index) => ({
+        type: "photo",
+        media: imageUrl,
+        ...(index === 0 ? { caption: text } : {}),
+      })),
+      disable_notification: silent,
+    },
+    token,
+    fetchImpl,
+    timeoutMs,
+  });
+};
+
 const editTelegramMessage = async ({
   chatId,
   messageId,
@@ -333,6 +398,7 @@ module.exports = {
   deleteTelegramMessage,
   editTelegramMessage,
   isKnownSafeTelegramSendError,
+  sendTelegramMediaGroup,
   sendTelegramMessage,
   telegramBotToken,
 };

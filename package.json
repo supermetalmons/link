@@ -29,6 +29,7 @@
     "check": "npm run lint && npm run typecheck",
     "build": "npm run check && vite build",
     "preview": "vite preview",
+    "announceEventPrizes": "node cloud/admin/announceEventPrizes.js",
     "repo-clean": "bash scripts/repo-clean.sh",
     "format": "prettier --write . --ignore-unknown",
     "format:check": "prettier --check . --ignore-unknown",

@@ -5,6 +5,7 @@ const test = require("node:test");
 const {
   deleteTelegramMessage,
   editTelegramMessage,
+  sendTelegramMediaGroup,
   sendTelegramMessage,
 } = require("../functions/telegramClient");
 
@@ -63,6 +64,91 @@ test("omits parse mode for plain text sends", async () => {
   });
   assert.equal(Object.hasOwn(body, "parse_mode"), false);
   assert.equal(body.disable_notification, false);
+});
+
+test("sends an exact Telegram media group with one plain-text caption", async () => {
+  let request;
+  const result = await sendTelegramMediaGroup({
+    chatId: "community-chat",
+    imageUrls: [
+      "https://example.com/one.webp",
+      "https://example.com/two.webp",
+      "https://example.com/three.webp",
+    ],
+    text: "Prizes are live\n\nhttps://mons.link/event/event-1",
+    token: "secret-token",
+    fetchImpl: async (url, options) => {
+      request = { url, options };
+      return jsonResponse(200, {
+        ok: true,
+        result: [{ message_id: 41 }, { message_id: 42 }, { message_id: 43 }],
+      });
+    },
+  });
+
+  assert.deepEqual(result, {
+    ok: true,
+    outcome: "sent",
+    messageIds: [41, 42, 43],
+    httpStatus: 200,
+  });
+  assert.equal(request.url.endsWith("/botsecret-token/sendMediaGroup"), true);
+  assert.deepEqual(JSON.parse(request.options.body), {
+    chat_id: "community-chat",
+    media: [
+      {
+        type: "photo",
+        media: "https://example.com/one.webp",
+        caption: "Prizes are live\n\nhttps://mons.link/event/event-1",
+      },
+      { type: "photo", media: "https://example.com/two.webp" },
+      { type: "photo", media: "https://example.com/three.webp" },
+    ],
+    disable_notification: false,
+  });
+});
+
+test("validates Telegram media group size and acknowledgements", async () => {
+  await assert.rejects(
+    () =>
+      sendTelegramMediaGroup({
+        chatId: "chat",
+        imageUrls: ["https://example.com/only.webp"],
+        text: "caption",
+      }),
+    TypeError,
+  );
+  await assert.rejects(
+    () =>
+      sendTelegramMediaGroup({
+        chatId: "chat",
+        imageUrls: Array.from(
+          { length: 11 },
+          (_, index) => `https://example.com/${index}.webp`,
+        ),
+        text: "caption",
+      }),
+    TypeError,
+  );
+
+  const result = await sendTelegramMediaGroup({
+    chatId: "chat",
+    imageUrls: [
+      "https://example.com/one.webp",
+      "https://example.com/two.webp",
+      "https://example.com/three.webp",
+    ],
+    text: "caption",
+    token: "token",
+    fetchImpl: async () =>
+      jsonResponse(200, {
+        ok: true,
+        result: [{ message_id: 1 }, { message_id: 2 }],
+      }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.classification, "uncertain");
+  assert.equal(result.code, "missing-message-id");
 });
 
 test("classifies explicit rate limits as safe retries", async () => {
