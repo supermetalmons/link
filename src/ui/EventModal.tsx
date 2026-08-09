@@ -2928,6 +2928,9 @@ const EventModal: React.FC = () => {
     useState(false);
   const [eventPrizeSelections, setEventPrizeSelections] =
     useState<EventPrizeSelections>({});
+  const [loadedPrizeImageIds, setLoadedPrizeImageIds] = useState<
+    ReadonlySet<EventPrizeId>
+  >(() => new Set());
   const [prizeConnectorPaths, setPrizeConnectorPaths] = useState<
     PrizeConnectorPath[]
   >([]);
@@ -2971,6 +2974,16 @@ const EventModal: React.FC = () => {
   const displayedEventRecord = devStubRecord ?? eventRecord;
   const eventPrizeConfig = getEventPrizeConfig(modalState.eventId);
   const eventPrizes = eventPrizeConfig?.prizes ?? EMPTY_EVENT_PRIZES;
+  const markPrizeImageLoaded = useCallback((prizeId: EventPrizeId) => {
+    setLoadedPrizeImageIds((current) => {
+      if (current.has(prizeId)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.add(prizeId);
+      return next;
+    });
+  }, []);
   const invalidateParticipantLookups = useCallback(() => {
     activeParticipantLookupRef.current = null;
     participantProfileCacheRef.current.clear();
@@ -3166,6 +3179,7 @@ const EventModal: React.FC = () => {
 
   useEffect(() => {
     setEventPrizeSelections({});
+    setLoadedPrizeImageIds(new Set());
     setIsUpdatingPrizeSelection(false);
     if (!modalState.isOpen || !modalState.eventId || !eventPrizeConfig) {
       return;
@@ -4696,9 +4710,11 @@ const EventModal: React.FC = () => {
                           src={prize.imageUrl}
                           alt={prize.alt}
                           draggable={false}
+                          onLoad={() => markPrizeImageLoaded(prize.id)}
                         />
                       </PrizeChoiceButton>
                       {displayedEventRecord.status !== "ended" &&
+                        loadedPrizeImageIds.has(prize.id) &&
                         selectedParticipants.length > 0 && (
                           <PrizeSelectionAvatars
                             role="group"
