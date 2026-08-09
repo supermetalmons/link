@@ -4698,42 +4698,43 @@ const EventModal: React.FC = () => {
                           draggable={false}
                         />
                       </PrizeChoiceButton>
-                      {selectedParticipants.length > 0 && (
-                        <PrizeSelectionAvatars
-                          role="group"
-                          aria-label={`Selected by ${selectedParticipants
-                            .map(getParticipantDisplayName)
-                            .join(", ")}`}
-                        >
-                          {selectedParticipants.map((participant) => {
-                            const scatter = getPrizeAvatarScatter(
-                              prize.id,
-                              participant.profileId,
-                            );
-                            return (
-                              <PrizeSelectionAvatarSlot
-                                key={participant.profileId}
-                                type="button"
-                                data-player-card-trigger="true"
-                                $offsetX={scatter.x}
-                                $offsetY={scatter.y}
-                                $layer={scatter.layer}
-                                title={getParticipantDisplayName(participant)}
-                                aria-label={`Open ${getParticipantDisplayName(participant)}`}
-                                onClick={() =>
-                                  void handleParticipantClick(participant)
-                                }
-                              >
-                                <EventAvatar
-                                  size={PRIZE_SELECTION_AVATAR_PX}
-                                  emojiId={participant.emojiId}
-                                  displayName={participant.displayName}
-                                />
-                              </PrizeSelectionAvatarSlot>
-                            );
-                          })}
-                        </PrizeSelectionAvatars>
-                      )}
+                      {displayedEventRecord.status !== "ended" &&
+                        selectedParticipants.length > 0 && (
+                          <PrizeSelectionAvatars
+                            role="group"
+                            aria-label={`Selected by ${selectedParticipants
+                              .map(getParticipantDisplayName)
+                              .join(", ")}`}
+                          >
+                            {selectedParticipants.map((participant) => {
+                              const scatter = getPrizeAvatarScatter(
+                                prize.id,
+                                participant.profileId,
+                              );
+                              return (
+                                <PrizeSelectionAvatarSlot
+                                  key={participant.profileId}
+                                  type="button"
+                                  data-player-card-trigger="true"
+                                  $offsetX={scatter.x}
+                                  $offsetY={scatter.y}
+                                  $layer={scatter.layer}
+                                  title={getParticipantDisplayName(participant)}
+                                  aria-label={`Open ${getParticipantDisplayName(participant)}`}
+                                  onClick={() =>
+                                    void handleParticipantClick(participant)
+                                  }
+                                >
+                                  <EventAvatar
+                                    size={PRIZE_SELECTION_AVATAR_PX}
+                                    emojiId={participant.emojiId}
+                                    displayName={participant.displayName}
+                                  />
+                                </PrizeSelectionAvatarSlot>
+                              );
+                            })}
+                          </PrizeSelectionAvatars>
+                        )}
                     </PrizeChoice>
                   );
                 })}
