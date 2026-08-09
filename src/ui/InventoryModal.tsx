@@ -684,6 +684,46 @@ const CountIndicator = styled.div<{ count: number }>`
   }
 `;
 
+interface CountedInventoryImageProps {
+  kind: "avatar" | "special";
+  src: string;
+  count: number;
+  rainbowAura?: boolean;
+}
+
+const CountedInventoryImage: React.FC<CountedInventoryImageProps> = ({
+  kind,
+  src,
+  count,
+  rainbowAura = false,
+}) => {
+  const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
+
+  return (
+    <>
+      {kind === "avatar" ? (
+        <AvatarImage
+          src={src}
+          alt=""
+          rainbowAura={rainbowAura}
+          loading="lazy"
+          onLoad={() => setLoadedSrc(src)}
+        />
+      ) : (
+        <SpecialImage
+          src={src}
+          alt=""
+          loading="lazy"
+          onLoad={() => setLoadedSrc(src)}
+        />
+      )}
+      {count > 1 && loadedSrc === src && (
+        <CountIndicator count={count}>{count}</CountIndicator>
+      )}
+    </>
+  );
+};
+
 interface SwagAvatarItem {
   id: number;
   count: number;
@@ -1318,6 +1358,7 @@ export const InventoryModal = React.forwardRef<
                 })}
                 {specials.map((item) => {
                   const isActive = activeItemSelection.specialIds.has(item.id);
+                  const imageSrc = `https://cdn.lil.org/mons/id_cards/misc/bd4/${item.id}.webp`;
                   return (
                     <AvatarTile
                       key={`special-${item.id}`}
@@ -1332,21 +1373,17 @@ export const InventoryModal = React.forwardRef<
                         )
                       }
                     >
-                      <SpecialImage
-                        src={`https://cdn.lil.org/mons/id_cards/misc/bd4/${item.id}.webp`}
-                        alt=""
-                        loading="lazy"
+                      <CountedInventoryImage
+                        kind="special"
+                        src={imageSrc}
+                        count={item.count}
                       />
-                      {item.count > 1 && (
-                        <CountIndicator count={item.count}>
-                          {item.count}
-                        </CountIndicator>
-                      )}
                     </AvatarTile>
                   );
                 })}
                 {avatars.map((item) => {
                   const isActive = activeItemSelection.avatarId === item.id;
+                  const imageSrc = `${SWAGPACK_INVENTORY_IMAGE_BASE_URL}/${item.id}.webp`;
                   return (
                     <AvatarTile
                       key={item.id}
@@ -1361,17 +1398,12 @@ export const InventoryModal = React.forwardRef<
                         )
                       }
                     >
-                      <AvatarImage
-                        src={`${SWAGPACK_INVENTORY_IMAGE_BASE_URL}/${item.id}.webp`}
-                        alt=""
+                      <CountedInventoryImage
+                        kind="avatar"
+                        src={imageSrc}
+                        count={item.count}
                         rainbowAura={item.count >= 3}
-                        loading="lazy"
                       />
-                      {item.count > 1 && (
-                        <CountIndicator count={item.count}>
-                          {item.count}
-                        </CountIndicator>
-                      )}
                     </AvatarTile>
                   );
                 })}
