@@ -308,12 +308,13 @@ const PrizeSelectionAvatars = styled.div<{
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: ${(props) =>
+  column-gap: ${(props) =>
     props.$density === "relaxed"
       ? "4px"
       : props.$density === "compact"
         ? "1px"
         : "0"};
+  row-gap: 0;
   margin-top: ${PRIZE_SELECTION_GAP_PX}px;
 `;
 
@@ -330,9 +331,9 @@ const PrizeSelectionAvatarSlot = styled.button<{
   flex: 0 0 ${PRIZE_SELECTION_AVATAR_PX}px;
   margin: ${(props) =>
     props.$density === "relaxed"
-      ? "0"
+      ? "-6px 0"
       : props.$density === "compact"
-        ? "-3px -4px"
+        ? "-6px -4px"
         : "-6px -8px"};
   padding: 0;
   border: none;
