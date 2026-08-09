@@ -99,10 +99,24 @@ const PARTICIPANT_PROFILE_CACHE_TTL_MS = 30_000;
 
 type BracketCardInteraction = "none" | "game" | "participant";
 type WinnerPodiumPlace = 1 | 2 | 3;
+type PrizeSelectionDensity = "relaxed" | "compact" | "crowded";
 type PrizeConnectorPath = {
   place: WinnerPodiumPlace;
   d: string;
 };
+
+const getPrizeSelectionDensity = (
+  avatarCount: number,
+): PrizeSelectionDensity => {
+  if (avatarCount <= 3) {
+    return "relaxed";
+  }
+  if (avatarCount <= 6) {
+    return "compact";
+  }
+  return "crowded";
+};
+
 type ParticipantLookupGroup = {
   profileId: string;
   loginUid: string;
@@ -286,17 +300,25 @@ const PrizeImage = styled.img`
   width: 100%;
 `;
 
-const PrizeSelectionAvatars = styled.div`
+const PrizeSelectionAvatars = styled.div<{
+  $density: PrizeSelectionDensity;
+}>`
   width: 100%;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: center;
-  gap: 0;
+  gap: ${(props) =>
+    props.$density === "relaxed"
+      ? "4px"
+      : props.$density === "compact"
+        ? "1px"
+        : "0"};
   margin-top: ${PRIZE_SELECTION_GAP_PX}px;
 `;
 
 const PrizeSelectionAvatarSlot = styled.button<{
+  $density: PrizeSelectionDensity;
   $offsetX: number;
   $offsetY: number;
   $layer: number;
@@ -306,7 +328,12 @@ const PrizeSelectionAvatarSlot = styled.button<{
   width: ${PRIZE_SELECTION_AVATAR_PX}px;
   height: ${PRIZE_SELECTION_AVATAR_PX}px;
   flex: 0 0 ${PRIZE_SELECTION_AVATAR_PX}px;
-  margin: -6px -8px;
+  margin: ${(props) =>
+    props.$density === "relaxed"
+      ? "0"
+      : props.$density === "compact"
+        ? "-3px -4px"
+        : "-6px -8px"};
   padding: 0;
   border: none;
   outline: none;
@@ -2315,7 +2342,11 @@ const getParticipantDisplayName = (participant: EventParticipant): string => {
   return "anon";
 };
 
-const getPrizeAvatarScatter = (prizeId: string, profileId: string) => {
+const getPrizeAvatarScatter = (
+  prizeId: string,
+  profileId: string,
+  density: PrizeSelectionDensity,
+) => {
   const value = `${prizeId}:${profileId}`;
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
@@ -2323,9 +2354,11 @@ const getPrizeAvatarScatter = (prizeId: string, profileId: string) => {
     hash = Math.imul(hash, 16777619);
   }
   const normalizedHash = hash >>> 0;
+  const scatterScale =
+    density === "relaxed" ? 0.4 : density === "compact" ? 0.75 : 1;
   return {
-    x: (normalizedHash % 9) - 4,
-    y: ((normalizedHash >>> 4) % 7) - 3,
+    x: ((normalizedHash % 9) - 4) * scatterScale,
+    y: (((normalizedHash >>> 4) % 7) - 3) * scatterScale,
     layer: (normalizedHash >>> 6) % 8,
   };
 };
@@ -4667,6 +4700,9 @@ const EventModal: React.FC = () => {
                     (participant) =>
                       eventPrizeSelections[participant.profileId] === prize.id,
                   );
+                  const prizeSelectionDensity = getPrizeSelectionDensity(
+                    selectedParticipants.length,
+                  );
                   const isSelected =
                     eventPrizeSelections[currentProfileId] === prize.id;
                   const selectionCountLabel = `${selectedParticipants.length} ${
@@ -4717,6 +4753,7 @@ const EventModal: React.FC = () => {
                         loadedPrizeImageIds.has(prize.id) &&
                         selectedParticipants.length > 0 && (
                           <PrizeSelectionAvatars
+                            $density={prizeSelectionDensity}
                             role="group"
                             aria-label={`Selected by ${selectedParticipants
                               .map(getParticipantDisplayName)
@@ -4726,12 +4763,14 @@ const EventModal: React.FC = () => {
                               const scatter = getPrizeAvatarScatter(
                                 prize.id,
                                 participant.profileId,
+                                prizeSelectionDensity,
                               );
                               return (
                                 <PrizeSelectionAvatarSlot
                                   key={participant.profileId}
                                   type="button"
                                   data-player-card-trigger="true"
+                                  $density={prizeSelectionDensity}
                                   $offsetX={scatter.x}
                                   $offsetY={scatter.y}
                                   $layer={scatter.layer}
