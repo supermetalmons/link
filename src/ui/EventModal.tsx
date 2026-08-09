@@ -93,6 +93,9 @@ const FALLBACK_MATCH_H = 40;
 const FALLBACK_AVATAR_PX = 28;
 const PRIZE_SELECTION_AVATAR_PX = 27;
 const PRIZE_SELECTION_GAP_PX = 12;
+const PRIZE_AVATAR_MOVE_DURATION_MS = 180;
+const PRIZE_AVATAR_APPEAR_DURATION_MS = 130;
+const PRIZE_AVATAR_DISAPPEAR_DURATION_MS = 120;
 const PRIZE_DISPLAY_PLACES = [2, 1, 3] as const;
 const EMPTY_EVENT_PRIZES = Object.freeze([]) as readonly EventPrizeDefinition[];
 const PARTICIPANT_PROFILE_CACHE_TTL_MS = 30_000;
@@ -100,6 +103,10 @@ const PARTICIPANT_PROFILE_CACHE_TTL_MS = 30_000;
 type BracketCardInteraction = "none" | "game" | "participant";
 type WinnerPodiumPlace = 1 | 2 | 3;
 type PrizeSelectionDensity = "relaxed" | "compact" | "crowded";
+type PendingPrizeAvatarAnimations = {
+  previousRects: Map<string, DOMRect>;
+  enteringProfileIds: Set<string>;
+};
 type PrizeConnectorPath = {
   place: WinnerPodiumPlace;
   d: string;
@@ -115,6 +122,122 @@ const getPrizeSelectionDensity = (
     return "compact";
   }
   return "crowded";
+};
+
+const shouldReducePrizeAvatarMotion = (): boolean => {
+  return (
+    typeof window === "undefined" ||
+    (typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches)
+  );
+};
+
+const animatePrizeAvatarExit = (
+  element: HTMLSpanElement,
+  onComplete: () => void,
+): (() => void) | null => {
+  if (
+    shouldReducePrizeAvatarMotion() ||
+    typeof element.animate !== "function"
+  ) {
+    return null;
+  }
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return null;
+  }
+  const clone = element.cloneNode(true) as HTMLSpanElement;
+  clone.setAttribute("aria-hidden", "true");
+  Object.assign(clone.style, {
+    position: "fixed",
+    left: `${rect.left}px`,
+    top: `${rect.top}px`,
+    width: `${rect.width}px`,
+    height: `${rect.height}px`,
+    margin: "0",
+    pointerEvents: "none",
+    transform: "none",
+    transformOrigin: "center",
+    zIndex: `${EVENT_MODAL_Z_INDEX + 3}`,
+  });
+  document.body.appendChild(clone);
+  let animation: Animation;
+  try {
+    animation = clone.animate(
+      [
+        { opacity: 1, transform: "scale(1)" },
+        { opacity: 0, transform: "scale(0.78)" },
+      ],
+      {
+        duration: PRIZE_AVATAR_DISAPPEAR_DURATION_MS,
+        easing: "ease-out",
+        fill: "forwards",
+      },
+    );
+  } catch {
+    clone.remove();
+    return null;
+  }
+  let isComplete = false;
+  const complete = () => {
+    if (isComplete) {
+      return;
+    }
+    isComplete = true;
+    clone.remove();
+    onComplete();
+  };
+  animation.addEventListener("finish", complete, { once: true });
+  animation.addEventListener("cancel", complete, { once: true });
+  return () => {
+    animation.cancel();
+    complete();
+  };
+};
+
+const animatePrizeAvatarPlacement = (
+  element: HTMLSpanElement,
+  previousRect: DOMRect | undefined,
+): void => {
+  if (
+    shouldReducePrizeAvatarMotion() ||
+    typeof element.animate !== "function"
+  ) {
+    return;
+  }
+  element.getAnimations().forEach((animation) => animation.cancel());
+  const nextRect = element.getBoundingClientRect();
+  if (nextRect.width <= 0 || nextRect.height <= 0) {
+    return;
+  }
+  if (!previousRect) {
+    element.animate(
+      [
+        { opacity: 0, transform: "scale(0.76)" },
+        { opacity: 1, transform: "scale(1)" },
+      ],
+      {
+        duration: PRIZE_AVATAR_APPEAR_DURATION_MS,
+        easing: "ease-out",
+      },
+    );
+    return;
+  }
+  const deltaX = previousRect.left - nextRect.left;
+  const deltaY = previousRect.top - nextRect.top;
+  if (Math.abs(deltaX) < 0.5 && Math.abs(deltaY) < 0.5) {
+    return;
+  }
+  element.animate(
+    [
+      { transform: `translate(${deltaX}px, ${deltaY}px)` },
+      { transform: "translate(0, 0)" },
+    ],
+    {
+      duration: PRIZE_AVATAR_MOVE_DURATION_MS,
+      easing: "cubic-bezier(0.2, 0.8, 0.2, 1)",
+    },
+  );
 };
 
 type ParticipantLookupGroup = {
@@ -348,6 +471,14 @@ const PrizeSelectionAvatarSlot = styled.button<{
   );
 `;
 
+const PrizeSelectionAvatarMotion = styled.span`
+  display: block;
+  width: 100%;
+  height: 100%;
+  line-height: 0;
+  transform-origin: center;
+`;
+
 const PrizeAssignmentConnectorSvg = styled.svg`
   position: fixed;
   inset: 0;
@@ -559,7 +690,7 @@ const Avatar = styled.img.attrs({
   flex-shrink: 0;
 `;
 
-const AvatarFallback = styled.div<{ $size?: number }>`
+const AvatarFallback = styled.span<{ $size?: number }>`
   width: ${(props) => Math.round((props.$size ?? 24) * 0.7)}px;
   height: ${(props) => Math.round((props.$size ?? 24) * 0.7)}px;
   border-radius: 50%;
@@ -3002,6 +3133,17 @@ const EventModal: React.FC = () => {
   const prizeChoiceRefs = useRef<
     Partial<Record<EventPrizeId, HTMLButtonElement | null>>
   >({});
+  const prizeSelectionAvatarRefs = useRef<Map<string, HTMLSpanElement>>(
+    new Map(),
+  );
+  const committedPrizeSelectionsRef = useRef<EventPrizeSelections>({});
+  const hasReceivedInitialPrizeSelectionsRef = useRef(false);
+  const isHydratingInitialPrizeSelectionsRef = useRef(false);
+  const pendingPrizeAvatarAnimationsRef =
+    useRef<PendingPrizeAvatarAnimations | null>(null);
+  const activePrizeAvatarExitCleanupsRef = useRef<Map<string, () => void>>(
+    new Map(),
+  );
   const podiumBarRefs = useRef<
     Partial<Record<WinnerPodiumPlace, HTMLDivElement | null>>
   >({});
@@ -3018,6 +3160,87 @@ const EventModal: React.FC = () => {
       return next;
     });
   }, []);
+  const clearPrizeAvatarExitAnimations = useCallback(() => {
+    const cleanups = Array.from(
+      activePrizeAvatarExitCleanupsRef.current.values(),
+    );
+    activePrizeAvatarExitCleanupsRef.current.clear();
+    cleanups.forEach((cleanup) => cleanup());
+  }, []);
+  const applyEventPrizeSelections = useCallback(
+    (nextSelections: EventPrizeSelections) => {
+      const previousSelections = committedPrizeSelectionsRef.current;
+      if (
+        !hasReceivedInitialPrizeSelectionsRef.current ||
+        isHydratingInitialPrizeSelectionsRef.current
+      ) {
+        hasReceivedInitialPrizeSelectionsRef.current = true;
+        isHydratingInitialPrizeSelectionsRef.current = true;
+        pendingPrizeAvatarAnimationsRef.current = null;
+        setEventPrizeSelections(nextSelections);
+        return;
+      }
+
+      for (const profileId of Object.keys(nextSelections)) {
+        activePrizeAvatarExitCleanupsRef.current.get(profileId)?.();
+      }
+      const profileIds = new Set([
+        ...Object.keys(previousSelections),
+        ...Object.keys(nextSelections),
+      ]);
+      const didChange = Array.from(profileIds).some(
+        (profileId) =>
+          previousSelections[profileId] !== nextSelections[profileId],
+      );
+
+      if (!didChange) {
+        setEventPrizeSelections(nextSelections);
+        return;
+      }
+
+      if (shouldReducePrizeAvatarMotion()) {
+        pendingPrizeAvatarAnimationsRef.current = null;
+        setEventPrizeSelections(nextSelections);
+        return;
+      }
+
+      const previousRects = new Map<string, DOMRect>();
+      for (const [profileId, element] of prizeSelectionAvatarRefs.current) {
+        if (!previousSelections[profileId] || !element.isConnected) {
+          continue;
+        }
+        previousRects.set(profileId, element.getBoundingClientRect());
+        if (!nextSelections[profileId]) {
+          activePrizeAvatarExitCleanupsRef.current.get(profileId)?.();
+          let cleanup: (() => void) | null = null;
+          cleanup = animatePrizeAvatarExit(element, () => {
+            if (
+              cleanup &&
+              activePrizeAvatarExitCleanupsRef.current.get(profileId) ===
+                cleanup
+            ) {
+              activePrizeAvatarExitCleanupsRef.current.delete(profileId);
+            }
+          });
+          if (cleanup) {
+            activePrizeAvatarExitCleanupsRef.current.set(profileId, cleanup);
+          }
+        }
+      }
+      const enteringProfileIds = new Set(
+        Array.from(profileIds).filter(
+          (profileId) =>
+            !previousSelections[profileId] && !!nextSelections[profileId],
+        ),
+      );
+      pendingPrizeAvatarAnimationsRef.current = {
+        previousRects,
+        enteringProfileIds,
+      };
+      setEventPrizeSelections(nextSelections);
+    },
+    [],
+  );
   const invalidateParticipantLookups = useCallback(() => {
     activeParticipantLookupRef.current = null;
     participantProfileCacheRef.current.clear();
@@ -3048,6 +3271,10 @@ const EventModal: React.FC = () => {
       eventAutoRecoveryInFlightSet.clear();
     };
   }, []);
+
+  useLayoutEffect(() => {
+    return clearPrizeAvatarExitAnimations;
+  }, [clearPrizeAvatarExitAnimations, modalState.eventId, modalState.isOpen]);
 
   useEffect(() => {
     const unsubscribe = subscribeToEventModalState((nextState) => {
@@ -3212,6 +3439,11 @@ const EventModal: React.FC = () => {
   ]);
 
   useEffect(() => {
+    clearPrizeAvatarExitAnimations();
+    committedPrizeSelectionsRef.current = {};
+    hasReceivedInitialPrizeSelectionsRef.current = false;
+    isHydratingInitialPrizeSelectionsRef.current = false;
+    pendingPrizeAvatarAnimationsRef.current = null;
     setEventPrizeSelections({});
     setLoadedPrizeImageIds(new Set());
     setIsUpdatingPrizeSelection(false);
@@ -3220,12 +3452,18 @@ const EventModal: React.FC = () => {
     }
     return connection.subscribeToEventPrizeSelections(
       modalState.eventId,
-      setEventPrizeSelections,
+      applyEventPrizeSelections,
       (error) => {
         console.error("Error subscribing to event prize selections:", error);
       },
     );
-  }, [eventPrizeConfig, modalState.eventId, modalState.isOpen]);
+  }, [
+    applyEventPrizeSelections,
+    clearPrizeAvatarExitAnimations,
+    eventPrizeConfig,
+    modalState.eventId,
+    modalState.isOpen,
+  ]);
 
   useEffect(() => {
     if (!modalState.isOpen || typeof window === "undefined") {
@@ -3489,6 +3727,52 @@ const EventModal: React.FC = () => {
     () => getSortedParticipants(displayedEventRecord),
     [displayedEventRecord],
   );
+  useLayoutEffect(() => {
+    committedPrizeSelectionsRef.current = eventPrizeSelections;
+    isHydratingInitialPrizeSelectionsRef.current = false;
+    const pendingAnimations = pendingPrizeAvatarAnimationsRef.current;
+    if (!pendingAnimations) {
+      return;
+    }
+
+    const profileIds = new Set([
+      ...pendingAnimations.previousRects.keys(),
+      ...pendingAnimations.enteringProfileIds,
+    ]);
+    const remainingPreviousRects = new Map<string, DOMRect>();
+    const remainingEnteringProfileIds = new Set<string>();
+
+    for (const profileId of profileIds) {
+      if (!eventPrizeSelections[profileId]) {
+        continue;
+      }
+      const previousRect = pendingAnimations.previousRects.get(profileId);
+      const isEntering =
+        pendingAnimations.enteringProfileIds.has(profileId) && !previousRect;
+      const element = prizeSelectionAvatarRefs.current.get(profileId);
+      if (!element?.isConnected) {
+        if (previousRect) {
+          remainingPreviousRects.set(profileId, previousRect);
+        }
+        if (isEntering) {
+          remainingEnteringProfileIds.add(profileId);
+        }
+        continue;
+      }
+      animatePrizeAvatarPlacement(
+        element,
+        isEntering ? undefined : previousRect,
+      );
+    }
+
+    pendingPrizeAvatarAnimationsRef.current =
+      remainingPreviousRects.size > 0 || remainingEnteringProfileIds.size > 0
+        ? {
+            previousRects: remainingPreviousRects,
+            enteringProfileIds: remainingEnteringProfileIds,
+          }
+        : null;
+  }, [eventPrizeSelections, loadedPrizeImageIds, participants]);
   const removableScheduledParticipants = useMemo(() => {
     if (!eventRecord || eventRecord.status !== "scheduled") {
       return [];
@@ -4781,11 +5065,26 @@ const EventModal: React.FC = () => {
                                     void handleParticipantClick(participant)
                                   }
                                 >
-                                  <EventAvatar
-                                    size={PRIZE_SELECTION_AVATAR_PX}
-                                    emojiId={participant.emojiId}
-                                    displayName={participant.displayName}
-                                  />
+                                  <PrizeSelectionAvatarMotion
+                                    ref={(element) => {
+                                      if (element) {
+                                        prizeSelectionAvatarRefs.current.set(
+                                          participant.profileId,
+                                          element,
+                                        );
+                                      } else {
+                                        prizeSelectionAvatarRefs.current.delete(
+                                          participant.profileId,
+                                        );
+                                      }
+                                    }}
+                                  >
+                                    <EventAvatar
+                                      size={PRIZE_SELECTION_AVATAR_PX}
+                                      emojiId={participant.emojiId}
+                                      displayName={participant.displayName}
+                                    />
+                                  </PrizeSelectionAvatarMotion>
                                 </PrizeSelectionAvatarSlot>
                               );
                             })}
