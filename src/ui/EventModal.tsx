@@ -6,7 +6,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import styled, { css } from "styled-components";
+import styled, { css, keyframes } from "styled-components";
 import { FaLink, FaShareAlt } from "react-icons/fa";
 import { connection } from "../connection/connection";
 import {
@@ -723,6 +723,23 @@ const BracketPlacement = styled.div<{ $offsetY: number }>`
   transform: translateY(${(p) => p.$offsetY}px);
 `;
 
+const endedAwardSparkleTwinkle = keyframes`
+  0%, 100% {
+    opacity: 0.56;
+    transform: rotate(-3deg);
+  }
+
+  48% {
+    opacity: 1;
+    transform: rotate(4deg);
+  }
+
+  72% {
+    opacity: 0.74;
+    transform: rotate(1deg);
+  }
+`;
+
 const EndedAwardsRow = styled.div<{ $bottom: number }>`
   position: absolute;
   z-index: 2;
@@ -748,6 +765,8 @@ const EndedAwardColumn = styled.div`
 `;
 
 const EndedAwardPrize = styled.div<{ $place: WinnerPodiumPlace }>`
+  position: relative;
+  isolation: isolate;
   width: ${ENDED_AWARD_PRIZE_WIDTH_CSS};
   min-width: 0;
   aspect-ratio: 4 / 5;
@@ -765,6 +784,187 @@ const EndedAwardPrize = styled.div<{ $place: WinnerPodiumPlace }>`
           ? ENDED_AWARD_RIGHT_PRIZE_OFFSET_X_CSS
           : "0px"}
   );
+`;
+
+const EndedAwardSparkles = styled.span<{ $place: WinnerPodiumPlace }>`
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  display: block;
+  pointer-events: none;
+  transform: ${(p) =>
+    p.$place === 2
+      ? "translate(-1px, -2px) rotate(-1.5deg)"
+      : p.$place === 3
+        ? "translate(1px, -1px) rotate(1.5deg)"
+        : "translateY(-3px)"};
+
+  > span {
+    position: absolute;
+    display: block;
+    width: clamp(7px, 2.1vh, 16px);
+    aspect-ratio: 1;
+    animation: ${endedAwardSparkleTwinkle} 2.1s ease-in-out infinite;
+
+    &::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: #fff5a3;
+      clip-path: polygon(
+        50% 0%,
+        61% 35%,
+        98% 35%,
+        68% 56%,
+        79% 91%,
+        50% 70%,
+        21% 91%,
+        32% 56%,
+        2% 35%,
+        39% 35%
+      );
+      filter: drop-shadow(0 0 2px rgba(255, 226, 52, 1))
+        drop-shadow(0 0 7px rgba(255, 180, 0, 0.9));
+      transform: rotate(var(--sparkle-rotation, 0deg))
+        scaleX(var(--sparkle-scale-x, 1)) scaleY(var(--sparkle-scale-y, 1));
+    }
+  }
+
+  > span:nth-child(1) {
+    --sparkle-rotation: -14deg;
+    --sparkle-scale-x: 1.12;
+    --sparkle-scale-y: 0.88;
+    bottom: calc(100% - 1px);
+    left: ${(p) => (p.$place === 1 ? "5%" : p.$place === 2 ? "-8%" : "-2%")};
+    animation-delay: ${(p) => `-${0.24 + p.$place * 0.17}s`};
+  }
+
+  > span:nth-child(2) {
+    --sparkle-rotation: 24deg;
+    --sparkle-scale-x: 0.78;
+    --sparkle-scale-y: 1.28;
+    right: ${(p) => (p.$place === 1 ? "-2%" : p.$place === 2 ? "6%" : "14%")};
+    bottom: ${(p) =>
+      p.$place === 1
+        ? "calc(100% + 20px)"
+        : p.$place === 2
+          ? "calc(100% + 15px)"
+          : "calc(100% + 23px)"};
+    width: clamp(5.5px, 1.5vh, 11.5px);
+    animation-duration: 2.6s;
+    animation-delay: ${(p) => `-${0.82 + p.$place * 0.13}s`};
+  }
+
+  > span:nth-child(3) {
+    --sparkle-rotation: -28deg;
+    --sparkle-scale-x: 1.32;
+    --sparkle-scale-y: 0.7;
+    top: ${(p) => (p.$place === 1 ? "18%" : p.$place === 2 ? "29%" : "41%")};
+    right: ${(p) => (p.$place === 1 ? "auto" : "calc(100% - 3px)")};
+    left: ${(p) => (p.$place === 1 ? "calc(100% - 3px)" : "auto")};
+    width: clamp(4px, 1vh, 8px);
+    animation-duration: 1.85s;
+    animation-delay: ${(p) => `-${1.31 + p.$place * 0.11}s`};
+  }
+
+  > span:nth-child(4) {
+    --sparkle-rotation: 9deg;
+    --sparkle-scale-x: 0.86;
+    --sparkle-scale-y: 1.2;
+    left: ${(p) => (p.$place === 1 ? "58%" : p.$place === 2 ? "45%" : "38%")};
+    bottom: ${(p) =>
+      p.$place === 1
+        ? "calc(100% + 5px)"
+        : p.$place === 2
+          ? "calc(100% + 9px)"
+          : "calc(100% + 3px)"};
+    width: clamp(6px, 1.75vh, 13px);
+    animation-duration: 2.4s;
+    animation-delay: ${(p) => `-${0.57 + p.$place * 0.19}s`};
+  }
+
+  > span:nth-child(5) {
+    --sparkle-rotation: -18deg;
+    --sparkle-scale-x: 1.18;
+    --sparkle-scale-y: 0.82;
+    left: ${(p) => (p.$place === 1 ? "38%" : p.$place === 2 ? "28%" : "20%")};
+    bottom: ${(p) =>
+      p.$place === 1
+        ? "calc(100% + 26px)"
+        : p.$place === 2
+          ? "calc(100% + 22px)"
+          : "calc(100% + 29px)"};
+    width: clamp(4.5px, 1.2vh, 9px);
+    animation-duration: 2.8s;
+    animation-delay: ${(p) => `-${1.08 + p.$place * 0.07}s`};
+  }
+
+  > span:nth-child(6) {
+    --sparkle-rotation: 31deg;
+    --sparkle-scale-x: 0.9;
+    --sparkle-scale-y: 1.16;
+    top: ${(p) => (p.$place === 1 ? "62%" : p.$place === 2 ? "56%" : "15%")};
+    right: ${(p) => (p.$place === 1 ? "calc(100% - 4px)" : "auto")};
+    left: ${(p) => (p.$place === 1 ? "auto" : "calc(100% - 4px)")};
+    width: clamp(5.5px, 1.55vh, 12px);
+    animation-duration: 2.25s;
+    animation-delay: ${(p) => `-${1.53 + p.$place * 0.16}s`};
+  }
+
+  > span:nth-child(7) {
+    --sparkle-rotation: -35deg;
+    --sparkle-scale-x: 1.26;
+    --sparkle-scale-y: 0.76;
+    left: ${(p) => (p.$place === 1 ? "23%" : p.$place === 2 ? "74%" : "65%")};
+    bottom: calc(100% - 3px);
+    width: clamp(4px, 1.1vh, 8.5px);
+    animation-duration: 2.95s;
+    animation-delay: ${(p) => `-${0.91 + p.$place * 0.22}s`};
+  }
+
+  @media (max-height: 420px) {
+    > span:nth-child(1) {
+      top: 4%;
+      right: calc(100% + 4px);
+      bottom: auto;
+      left: auto;
+    }
+
+    > span:nth-child(2) {
+      top: 6%;
+      right: auto;
+      bottom: auto;
+      left: calc(100% + 4px);
+    }
+
+    > span:nth-child(3) {
+      top: auto;
+      right: calc(100% + 4px);
+      bottom: 3%;
+      left: auto;
+    }
+
+    > span:nth-child(4) {
+      top: auto;
+      right: auto;
+      bottom: 22%;
+      left: calc(100% - 2px);
+    }
+
+    > span:nth-child(5),
+    > span:nth-child(6),
+    > span:nth-child(7) {
+      display: none;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    > span {
+      animation: none;
+      opacity: 0.8;
+      transform: none;
+    }
+  }
 `;
 
 const WinnerPodium = styled.div<{
@@ -5066,6 +5266,18 @@ const EventModal: React.FC = () => {
                       alt={`${prize.alt}, awarded to ${getParticipantDisplayName(participant)} for place ${assignment.place}`}
                       draggable={false}
                     />
+                    <EndedAwardSparkles
+                      $place={assignment.place}
+                      aria-hidden="true"
+                    >
+                      <span />
+                      <span />
+                      <span />
+                      <span />
+                      <span />
+                      <span />
+                      <span />
+                    </EndedAwardSparkles>
                   </EndedAwardPrize>
                   <WinnerPodiumColumn
                     type="button"
