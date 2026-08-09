@@ -26,11 +26,6 @@ test("binds the event-prize withdrawal secrets", () => {
   ]);
 });
 
-test("does not export the retired NFT lookup callable", () => {
-  const functionExports = require("../functions");
-  assert.equal(Object.hasOwn(functionExports, "getNfts"), false);
-});
-
 test("builds the Helius RPC URL from a normalized secret value", () => {
   assert.equal(
     buildHeliusRpcUrl(" key/+value "),

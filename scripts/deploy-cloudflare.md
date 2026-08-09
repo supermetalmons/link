@@ -106,19 +106,5 @@ configuration is intentionally changed, review it separately and apply it with
 
 ## Firebase deployment
 
-The deployed Firebase `getNfts` callable has been retired. Verify that state
-with filtered plain-text output rather than exporting the full function list:
-
-`firebase functions:list --config cloud/firebase.json --project mons-link | rg -i 'getnfts|withdraweventprize'`
-
-The output must contain `withdrawEventPrize` and must not contain `getNfts`.
-Keep `withdrawEventPrize` deployed and retain Firebase's
-`HELIUS_RPC_API_KEY` secret because event-prize withdrawals still use it. Do not
-delete that secret as part of the NFT lookup retirement.
-
-The `getNfts` source deletion and entry-point removal must land before any
-future Firebase release. Deploying an older source tree that still exports the
-callable can recreate it.
-
 - Deploy the complete Firebase release: `npm run deploy:firebase -- --project mons-link`
 - See `cloud/README.md` for dry-run, batch-size, and maintenance commands.
