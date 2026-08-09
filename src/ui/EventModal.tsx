@@ -93,10 +93,17 @@ const FALLBACK_MATCH_H = 40;
 const FALLBACK_AVATAR_PX = 28;
 const PRIZE_SELECTION_AVATAR_PX = 27;
 const PRIZE_SELECTION_GAP_PX = 12;
+const ENDED_AWARD_PRIZE_GAP_CSS = "clamp(15px, 5vw, 20px)";
+const ENDED_AWARD_LEFT_PRIZE_OFFSET_X_CSS =
+  "clamp(-30px, calc(95px - 32vw), 0px)";
+const ENDED_AWARD_RIGHT_PRIZE_OFFSET_X_CSS =
+  "clamp(0px, calc(32vw - 95px), 30px)";
 const PRIZE_AVATAR_MOVE_DURATION_MS = 180;
 const PRIZE_AVATAR_APPEAR_DURATION_MS = 130;
 const PRIZE_AVATAR_DISAPPEAR_DURATION_MS = 120;
 const PRIZE_DISPLAY_PLACES = [2, 1, 3] as const;
+const PRIZE_IMAGE_WIDTH_CSS =
+  "min(clamp(44.8px, 10.4vh, 96px), calc((min(424px, 100vw - 36px) - 20px) / 3))";
 const EMPTY_EVENT_PRIZES = Object.freeze([]) as readonly EventPrizeDefinition[];
 const PARTICIPANT_PROFILE_CACHE_TTL_MS = 30_000;
 
@@ -106,10 +113,6 @@ type PrizeSelectionDensity = "relaxed" | "compact" | "crowded";
 type PendingPrizeAvatarAnimations = {
   previousRects: Map<string, DOMRect>;
   enteringProfileIds: Set<string>;
-};
-type PrizeConnectorPath = {
-  place: WinnerPodiumPlace;
-  d: string;
 };
 
 const getPrizeSelectionDensity = (
@@ -387,10 +390,7 @@ const PrizesRow = styled.div`
 `;
 
 const PrizeChoice = styled.div`
-  width: min(
-    clamp(44.8px, 10.4vh, 96px),
-    calc((min(424px, 100vw - 36px) - 20px) / 3)
-  );
+  width: ${PRIZE_IMAGE_WIDTH_CSS};
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -477,33 +477,6 @@ const PrizeSelectionAvatarMotion = styled.span`
   height: 100%;
   line-height: 0;
   transform-origin: center;
-`;
-
-const PrizeAssignmentConnectorSvg = styled.svg`
-  position: fixed;
-  inset: 0;
-  width: 100vw;
-  height: 100vh;
-  overflow: visible;
-  pointer-events: none;
-  z-index: 0;
-
-  path {
-    fill: none;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-  }
-
-  path[data-layer="glow"] {
-    stroke: rgba(255, 252, 224, 0.5);
-    stroke-width: 7;
-    filter: url(#event-prize-line-glow);
-  }
-
-  path[data-layer="core"] {
-    stroke: url(#event-prize-line-shine);
-    stroke-width: 1.8;
-  }
 `;
 
 const TopBarSubtitle = styled.div`
@@ -746,6 +719,50 @@ const BracketPlacement = styled.div<{ $offsetY: number }>`
   z-index: 1;
   pointer-events: none;
   transform: translateY(${(p) => p.$offsetY}px);
+`;
+
+const EndedAwardsRow = styled.div<{ $bottom: number }>`
+  position: absolute;
+  z-index: 2;
+  left: 50%;
+  bottom: ${(p) => p.$bottom}px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: ${WINNER_PODIUM_COLUMN_GAP}px;
+  max-width: min(424px, calc(100vw - 36px));
+  pointer-events: none;
+`;
+
+const EndedAwardColumn = styled.div`
+  width: max(${WINNER_PODIUM_COLUMN_W}px, ${PRIZE_IMAGE_WIDTH_CSS});
+  min-width: 0;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: ${ENDED_AWARD_PRIZE_GAP_CSS};
+`;
+
+const EndedAwardPrize = styled.div<{ $place: WinnerPodiumPlace }>`
+  width: ${PRIZE_IMAGE_WIDTH_CSS};
+  min-width: 0;
+  aspect-ratio: 4 / 5;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  line-height: 0;
+  pointer-events: auto;
+  cursor: default;
+  transform: translateX(
+    ${(p) =>
+      p.$place === 2
+        ? ENDED_AWARD_LEFT_PRIZE_OFFSET_X_CSS
+        : p.$place === 3
+          ? ENDED_AWARD_RIGHT_PRIZE_OFFSET_X_CSS
+          : "0px"}
+  );
 `;
 
 const WinnerPodium = styled.div<{
@@ -3096,9 +3113,7 @@ const EventModal: React.FC = () => {
   const [loadedPrizeImageIds, setLoadedPrizeImageIds] = useState<
     ReadonlySet<EventPrizeId>
   >(() => new Set());
-  const [prizeConnectorPaths, setPrizeConnectorPaths] = useState<
-    PrizeConnectorPath[]
-  >([]);
+  const [endedAwardsHeight, setEndedAwardsHeight] = useState(0);
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [viewportSize, setViewportSize] = useState(getViewportSize);
@@ -3130,9 +3145,7 @@ const EventModal: React.FC = () => {
   const topBarRef = useRef<HTMLDivElement | null>(null);
   const bottomBarRef = useRef<HTMLDivElement | null>(null);
   const participantsCloudRef = useRef<HTMLDivElement | null>(null);
-  const prizeChoiceRefs = useRef<
-    Partial<Record<EventPrizeId, HTMLButtonElement | null>>
-  >({});
+  const endedAwardsRowRef = useRef<HTMLDivElement | null>(null);
   const prizeSelectionAvatarRefs = useRef<Map<string, HTMLSpanElement>>(
     new Map(),
   );
@@ -3144,9 +3157,6 @@ const EventModal: React.FC = () => {
   const activePrizeAvatarExitCleanupsRef = useRef<Map<string, () => void>>(
     new Map(),
   );
-  const podiumBarRefs = useRef<
-    Partial<Record<WinnerPodiumPlace, HTMLDivElement | null>>
-  >({});
   const displayedEventRecord = devStubRecord ?? eventRecord;
   const eventPrizeConfig = getEventPrizeConfig(modalState.eventId);
   const eventPrizes = eventPrizeConfig?.prizes ?? EMPTY_EVENT_PRIZES;
@@ -3935,6 +3945,15 @@ const EventModal: React.FC = () => {
       match: thirdPlaceMatch,
     };
   }, [bracketLayout, thirdPlaceMatch]);
+  const resolvedWinnerPodiumEntries = useMemo(
+    () =>
+      getEndedEventWinnerPodiumEntries(
+        displayedEventRecord,
+        rounds,
+        participantsById,
+      ),
+    [displayedEventRecord, rounds, participantsById],
+  );
   const winnerPodiumEntries = useMemo(() => {
     if (eventPrizeAssignments.length > 0) {
       const assignedEntries = eventPrizeAssignments.flatMap((assignment) => {
@@ -3952,142 +3971,98 @@ const EventModal: React.FC = () => {
         return assignedEntries;
       }
     }
-    return getEndedEventWinnerPodiumEntries(
-      displayedEventRecord,
-      rounds,
-      participantsById,
-    );
-  }, [displayedEventRecord, eventPrizeAssignments, rounds, participantsById]);
+    return resolvedWinnerPodiumEntries;
+  }, [eventPrizeAssignments, participantsById, resolvedWinnerPodiumEntries]);
   const showWinnerPodium = !!(
     bracketLayout &&
     displayedEventRecord?.status === "ended" &&
     winnerPodiumEntries.length > 0
   );
+  const endedAwardEntries = useMemo(
+    () =>
+      PRIZE_DISPLAY_PLACES.flatMap((place) => {
+        const assignment = eventPrizeAssignments.find(
+          (candidate) => candidate.place === place,
+        );
+        if (!assignment) {
+          return [];
+        }
+        const prize = eventPrizes.find(
+          (candidate) => candidate.id === assignment.prizeId,
+        );
+        const participant = participantsById[assignment.profileId];
+        return prize && participant ? [{ assignment, prize, participant }] : [];
+      }),
+    [eventPrizeAssignments, eventPrizes, participantsById],
+  );
+  const expectedEndedAwardCount = Math.min(
+    eventPrizes.length,
+    resolvedWinnerPodiumEntries.length,
+  );
+  const showEndedAwards = !!(
+    modalState.isOpen &&
+    showWinnerPodium &&
+    expectedEndedAwardCount > 0 &&
+    eventPrizeAssignments.length === expectedEndedAwardCount &&
+    endedAwardEntries.length === expectedEndedAwardCount &&
+    endedAwardEntries.every(
+      ({ assignment }) => assignment.place <= expectedEndedAwardCount,
+    )
+  );
+  const showBracketWinnerPodium = showWinnerPodium && !showEndedAwards;
+
+  useLayoutEffect(() => {
+    if (!showEndedAwards) {
+      setEndedAwardsHeight((current) => (current === 0 ? current : 0));
+      return;
+    }
+    const element = endedAwardsRowRef.current;
+    if (!element) {
+      return;
+    }
+    const measure = () => {
+      const nextHeight = Math.round(element.getBoundingClientRect().height);
+      setEndedAwardsHeight((current) =>
+        current === nextHeight ? current : nextHeight,
+      );
+    };
+    const resizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(measure);
+    resizeObserver?.observe(element);
+    measure();
+    return () => resizeObserver?.disconnect();
+  }, [showEndedAwards]);
+
+  const endedAwardsReservedHeight = showEndedAwards
+    ? endedAwardsHeight + WINNER_PODIUM_GAP_FROM_BRACKET
+    : 0;
   const winnerPodiumWidth = getWinnerPodiumWidth(winnerPodiumEntries.length);
   const bracketContentHeight = bracketLayout
     ? Math.max(bracketLayout.height, thirdPlaceLayout?.bottom ?? 0)
     : 0;
   const bracketFrameWidth = bracketLayout
-    ? Math.max(bracketLayout.width, showWinnerPodium ? winnerPodiumWidth : 0)
+    ? Math.max(
+        bracketLayout.width,
+        showBracketWinnerPodium ? winnerPodiumWidth : 0,
+      )
     : 0;
   const bracketFrameHeight = bracketLayout
     ? bracketContentHeight +
-      (showWinnerPodium
+      (showBracketWinnerPodium
         ? WINNER_PODIUM_HEIGHT + WINNER_PODIUM_GAP_FROM_BRACKET
         : 0)
     : 0;
   const bracketContentOffsetX = bracketLayout
     ? Math.round((bracketFrameWidth - bracketLayout.width) / 2)
     : 0;
-  const bracketContentOffsetY = showWinnerPodium
+  const bracketContentOffsetY = showBracketWinnerPodium
     ? WINNER_PODIUM_HEIGHT + WINNER_PODIUM_GAP_FROM_BRACKET
     : 0;
   const winnerPodiumOffsetX = Math.round(
     (bracketFrameWidth - winnerPodiumWidth) / 2,
   );
-  const prizeAssignmentSignature = eventPrizeAssignments
-    .map(
-      (assignment) =>
-        `${assignment.place}:${assignment.profileId}:${assignment.prizeId}`,
-    )
-    .join("|");
-
-  useLayoutEffect(() => {
-    if (
-      !modalState.isOpen ||
-      displayedEventRecord?.status !== "ended" ||
-      !showWinnerPodium ||
-      eventPrizeAssignments.length === 0 ||
-      typeof window === "undefined"
-    ) {
-      setPrizeConnectorPaths((current) =>
-        current.length === 0 ? current : [],
-      );
-      return;
-    }
-
-    let animationFrameId: number | null = null;
-    const measure = () => {
-      animationFrameId = null;
-      const nextPaths = eventPrizeAssignments.flatMap((assignment) => {
-        const prizeElement = prizeChoiceRefs.current[assignment.prizeId];
-        const podiumElement = podiumBarRefs.current[assignment.place];
-        if (!prizeElement || !podiumElement) {
-          return [];
-        }
-        const prizeRect = prizeElement.getBoundingClientRect();
-        const podiumRect = podiumElement.getBoundingClientRect();
-        const startX = prizeRect.left + prizeRect.width / 2;
-        const startY = prizeRect.bottom + 2;
-        const endX = podiumRect.left + podiumRect.width / 2;
-        const endY = podiumRect.top + 2;
-        if (endY <= startY + 4) {
-          return [];
-        }
-        return [
-          {
-            place: assignment.place,
-            d: `M ${startX.toFixed(1)} ${startY.toFixed(1)} L ${endX.toFixed(1)} ${endY.toFixed(1)}`,
-          },
-        ];
-      });
-      setPrizeConnectorPaths((current) =>
-        JSON.stringify(current) === JSON.stringify(nextPaths)
-          ? current
-          : nextPaths,
-      );
-    };
-    const scheduleMeasure = () => {
-      if (animationFrameId !== null) {
-        window.cancelAnimationFrame(animationFrameId);
-      }
-      animationFrameId = window.requestAnimationFrame(measure);
-    };
-
-    const observedElements = [
-      topBarRef.current,
-      ...eventPrizeAssignments.map(
-        (assignment) => prizeChoiceRefs.current[assignment.prizeId] ?? null,
-      ),
-      ...eventPrizeAssignments.map(
-        (assignment) => podiumBarRefs.current[assignment.place] ?? null,
-      ),
-    ].filter(
-      (element): element is HTMLDivElement | HTMLButtonElement =>
-        element !== null,
-    );
-    const resizeObserver =
-      typeof ResizeObserver === "undefined"
-        ? null
-        : new ResizeObserver(scheduleMeasure);
-    observedElements.forEach((element) => resizeObserver?.observe(element));
-    window.addEventListener("resize", scheduleMeasure);
-    window.visualViewport?.addEventListener("resize", scheduleMeasure);
-    window.visualViewport?.addEventListener("scroll", scheduleMeasure);
-    scheduleMeasure();
-
-    return () => {
-      if (animationFrameId !== null) {
-        window.cancelAnimationFrame(animationFrameId);
-      }
-      resizeObserver?.disconnect();
-      window.removeEventListener("resize", scheduleMeasure);
-      window.visualViewport?.removeEventListener("resize", scheduleMeasure);
-      window.visualViewport?.removeEventListener("scroll", scheduleMeasure);
-    };
-  }, [
-    bracketFrameHeight,
-    bracketFrameWidth,
-    bracketInsets.bottom,
-    bracketInsets.top,
-    displayedEventRecord?.status,
-    eventPrizeAssignments,
-    modalState.isOpen,
-    prizeAssignmentSignature,
-    showWinnerPodium,
-    viewportSize.height,
-    viewportSize.width,
-  ]);
 
   const bracketFallbackRounds = useMemo(() => {
     return rounds
@@ -4127,7 +4102,10 @@ const EventModal: React.FC = () => {
     const availW = Math.max(1, viewportSize.width - BRACKET_EDGE_PADDING_X * 2);
     const availH = Math.max(
       1,
-      viewportSize.height - reservedTop - reservedBottom,
+      viewportSize.height -
+        reservedTop -
+        reservedBottom -
+        endedAwardsReservedHeight * 2,
     );
     const sx = availW / Math.max(1, bracketFrameWidth);
     const sy = availH / Math.max(1, bracketFrameHeight);
@@ -4139,6 +4117,7 @@ const EventModal: React.FC = () => {
     bracketLayout,
     bracketInsets.bottom,
     bracketInsets.top,
+    endedAwardsReservedHeight,
     viewportSize.height,
     viewportSize.width,
   ]);
@@ -4792,6 +4771,10 @@ const EventModal: React.FC = () => {
     insetTop: bracketInsets.top,
     insetBottom: bracketInsets.bottom,
   });
+  const endedAwardsBottom = Math.round(
+    (bracketFrameHeight + bracketFrameHeight * bracketScale) / 2 +
+      WINNER_PODIUM_GAP_FROM_BRACKET,
+  );
   const fallbackMaxContentHeight = Math.max(
     1,
     viewportSize.height -
@@ -4818,6 +4801,7 @@ const EventModal: React.FC = () => {
     isDisqualifying || livePendingMatches.length <= 0;
   const showEventPrizes =
     !!eventPrizeConfig && !!displayedEventRecord && !isDismissedState;
+  const showTopBarEventPrizes = showEventPrizes && !showEndedAwards;
   const canSelectEventPrize = !!(
     showEventPrizes &&
     !devStubRecord &&
@@ -4932,42 +4916,7 @@ const EventModal: React.FC = () => {
         </DevBracketHelper>
       )}
 
-      {prizeConnectorPaths.length > 0 && (
-        <PrizeAssignmentConnectorSvg aria-hidden="true">
-          <defs>
-            <filter
-              id="event-prize-line-glow"
-              filterUnits="userSpaceOnUse"
-              x={-12}
-              y={-12}
-              width={viewportSize.width + 24}
-              height={viewportSize.height + 24}
-            >
-              <feGaussianBlur stdDeviation="4" />
-            </filter>
-            <linearGradient
-              id="event-prize-line-shine"
-              gradientUnits="userSpaceOnUse"
-              x1="0"
-              y1="0"
-              x2="0"
-              y2={Math.max(1, viewportSize.height)}
-            >
-              <stop offset="0" stopColor="rgba(255, 255, 255, 0.9)" />
-              <stop offset="0.5" stopColor="rgba(255, 244, 180, 0.82)" />
-              <stop offset="1" stopColor="rgba(255, 255, 255, 0.68)" />
-            </linearGradient>
-          </defs>
-          {prizeConnectorPaths.map((connector) => (
-            <React.Fragment key={connector.place}>
-              <path data-layer="glow" d={connector.d} />
-              <path data-layer="core" d={connector.d} />
-            </React.Fragment>
-          ))}
-        </PrizeAssignmentConnectorSvg>
-      )}
-
-      {!isDismissedState && (topBarTitleText || showEventPrizes) && (
+      {!isDismissedState && (topBarTitleText || showTopBarEventPrizes) && (
         <TopBar ref={topBarRef}>
           <TopBarStack>
             {topBarTitleText && (
@@ -4978,7 +4927,7 @@ const EventModal: React.FC = () => {
                 )}
               </TopBarTitle>
             )}
-            {showEventPrizes && (
+            {showTopBarEventPrizes && (
               <PrizesRow role="group" aria-label="Event prizes">
                 {displayedEventPrizes.map(({ prize, assignment }) => {
                   const selectedParticipants = participants.filter(
@@ -5009,9 +4958,6 @@ const EventModal: React.FC = () => {
                   return (
                     <PrizeChoice key={prize.id}>
                       <PrizeChoiceButton
-                        ref={(element) => {
-                          prizeChoiceRefs.current[prize.id] = element;
-                        }}
                         type="button"
                         disabled={
                           !canSelectEventPrize || isUpdatingPrizeSelection
@@ -5103,12 +5049,56 @@ const EventModal: React.FC = () => {
 
       {hasBracket && bracketLayout && (
         <BracketPlacement $offsetY={bracketOffsetY}>
+          {showEndedAwards && (
+            <EndedAwardsRow
+              ref={endedAwardsRowRef}
+              $bottom={endedAwardsBottom}
+              role="group"
+              aria-label="Event prize winners"
+            >
+              {endedAwardEntries.map(({ assignment, prize, participant }) => (
+                <EndedAwardColumn key={assignment.place}>
+                  <EndedAwardPrize $place={assignment.place}>
+                    <PrizeImage
+                      src={prize.imageUrl}
+                      alt={`${prize.alt}, awarded to ${getParticipantDisplayName(participant)} for place ${assignment.place}`}
+                      draggable={false}
+                    />
+                  </EndedAwardPrize>
+                  <WinnerPodiumColumn
+                    type="button"
+                    $place={assignment.place}
+                    data-player-card-trigger="true"
+                    onClick={() => void handleParticipantClick(participant)}
+                    aria-label={`Open ${getParticipantDisplayName(participant)}`}
+                  >
+                    <WinnerPodiumAvatarSlot
+                      data-avatar-slot
+                      data-single-known="true"
+                      $place={assignment.place}
+                    >
+                      <EventAvatar
+                        size={WINNER_PODIUM_AVATAR_PX}
+                        emojiId={participant.emojiId}
+                        displayName={participant.displayName}
+                      />
+                    </WinnerPodiumAvatarSlot>
+                    <WinnerPodiumBar $place={assignment.place}>
+                      <WinnerPodiumPlaceLabel>
+                        {assignment.place}
+                      </WinnerPodiumPlaceLabel>
+                    </WinnerPodiumBar>
+                  </WinnerPodiumColumn>
+                </EndedAwardColumn>
+              ))}
+            </EndedAwardsRow>
+          )}
           <BracketContainer
             $w={bracketFrameWidth}
             $h={bracketFrameHeight}
             $scale={bracketScale}
           >
-            {showWinnerPodium && (
+            {showBracketWinnerPodium && (
               <WinnerPodium
                 $x={winnerPodiumOffsetX}
                 $y={0}
@@ -5141,12 +5131,7 @@ const EventModal: React.FC = () => {
                           displayName={entry.participant.displayName}
                         />
                       </WinnerPodiumAvatarSlot>
-                      <WinnerPodiumBar
-                        ref={(element) => {
-                          podiumBarRefs.current[entry.place] = element;
-                        }}
-                        $place={entry.place}
-                      >
+                      <WinnerPodiumBar $place={entry.place}>
                         <WinnerPodiumPlaceLabel>
                           {entry.place}
                         </WinnerPodiumPlaceLabel>
