@@ -93,7 +93,8 @@ const FALLBACK_MATCH_H = 40;
 const FALLBACK_AVATAR_PX = 28;
 const PRIZE_SELECTION_AVATAR_PX = 27;
 const PRIZE_SELECTION_GAP_PX = 12;
-const ENDED_AWARD_PRIZE_GAP_CSS = "clamp(15px, 5vw, 20px)";
+const ENDED_AWARD_PRIZE_GAP_CSS =
+  "min(clamp(15px, 5vw, 20px), max(4px, calc((100vh - 320px) * 0.08)))";
 const ENDED_AWARD_LEFT_PRIZE_OFFSET_X_CSS =
   "clamp(-30px, calc(95px - 32vw), 0px)";
 const ENDED_AWARD_RIGHT_PRIZE_OFFSET_X_CSS =
@@ -104,6 +105,7 @@ const PRIZE_AVATAR_DISAPPEAR_DURATION_MS = 120;
 const PRIZE_DISPLAY_PLACES = [2, 1, 3] as const;
 const PRIZE_IMAGE_WIDTH_CSS =
   "min(clamp(44.8px, 10.4vh, 96px), calc((min(424px, 100vw - 36px) - 20px) / 3))";
+const ENDED_AWARD_PRIZE_WIDTH_CSS = `min(${PRIZE_IMAGE_WIDTH_CSS}, max(16px, calc((100vh - 320px) * 0.45)))`;
 const EMPTY_EVENT_PRIZES = Object.freeze([]) as readonly EventPrizeDefinition[];
 const PARTICIPANT_PROFILE_CACHE_TTL_MS = 30_000;
 
@@ -736,7 +738,7 @@ const EndedAwardsRow = styled.div<{ $bottom: number }>`
 `;
 
 const EndedAwardColumn = styled.div`
-  width: max(${WINNER_PODIUM_COLUMN_W}px, ${PRIZE_IMAGE_WIDTH_CSS});
+  width: max(${WINNER_PODIUM_COLUMN_W}px, ${ENDED_AWARD_PRIZE_WIDTH_CSS});
   min-width: 0;
   flex: 0 0 auto;
   display: flex;
@@ -746,7 +748,7 @@ const EndedAwardColumn = styled.div`
 `;
 
 const EndedAwardPrize = styled.div<{ $place: WinnerPodiumPlace }>`
-  width: ${PRIZE_IMAGE_WIDTH_CSS};
+  width: ${ENDED_AWARD_PRIZE_WIDTH_CSS};
   min-width: 0;
   aspect-ratio: 4 / 5;
   display: flex;
@@ -4105,7 +4107,7 @@ const EventModal: React.FC = () => {
       viewportSize.height -
         reservedTop -
         reservedBottom -
-        endedAwardsReservedHeight * 2,
+        endedAwardsReservedHeight,
     );
     const sx = availW / Math.max(1, bracketFrameWidth);
     const sy = availH / Math.max(1, bracketFrameHeight);
