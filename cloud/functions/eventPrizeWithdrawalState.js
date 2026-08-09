@@ -5,6 +5,7 @@ const {
   getEventPrizeDefinition,
   isEventPrizeStandard,
 } = require("@mons/shared/event-prizes");
+const { isValidSolanaAddress } = require("@mons/shared/solana");
 
 const EVENT_PRIZE_ADMIN_WALLET = "Ay1mgqJr6WmihsSYdMZ1dkHL5r25N7VhCGk7NpCJcPGi";
 const WITHDRAWAL_LEASE_MS = 5 * 60 * 1000;
@@ -22,8 +23,7 @@ const decodeBase58Bytes = (value) => {
 
 const normalizeSolanaAddress = (value) => {
   const address = normalizeString(value);
-  const bytes = decodeBase58Bytes(address);
-  return bytes?.length === 32 ? address : "";
+  return isValidSolanaAddress(address) ? address : "";
 };
 
 const decodeAdminSecretKey = (value) => {

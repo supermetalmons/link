@@ -20,10 +20,7 @@ export interface LeaderboardEntry {
   materials: Record<MiningMaterialName, number>;
 }
 
-export const leaderboardCache = new Map<
-  LeaderboardType,
-  LeaderboardEntry[]
->();
+export const leaderboardCache = new Map<LeaderboardType, LeaderboardEntry[]>();
 
 export const resetLeaderboardCache = () => {
   leaderboardCache.clear();

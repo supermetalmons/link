@@ -1,14 +1,17 @@
-import { connection } from "../connection/connection";
-import { VALID_REACTION_IDS } from "@mons/shared/nfts";
+import {
+  createEmptyNftApiResponse,
+  VALID_REACTION_IDS,
+  type NftApiResponse,
+} from "@mons/shared/nfts";
 import { shuffle } from "@mons/shared/ids";
 import type { AuthState } from "../connection/authentication";
 import type { AuthIdentity } from "../utils/storage";
 import {
   fetchCachedNfts,
-  getEmptyNftCollection,
   NFT_CACHE_TTL_MS,
   type NftFetchSnapshot,
 } from "./nftCache";
+import { fetchNftsFromApi } from "./nftApi";
 
 export { NFT_CACHE_TTL_MS, type NftFetchSnapshot } from "./nftCache";
 
@@ -25,7 +28,7 @@ export function getNftIdentityKey({
   return JSON.stringify([profileId, solAddress || "", ethAddress || ""]);
 }
 
-function generateStubResponse() {
+function generateStubResponse(): NftApiResponse {
   const validReactionIds = Array.from(VALID_REACTION_IDS);
   const validAvatarIds = Array.from({ length: 467 }, (_, i) => i);
   const randomInt = (min: number, max: number) =>
@@ -69,7 +72,11 @@ async function fetchNftsByIdentity(
     };
   }
 
-  return fetchCachedNfts(key, sol, eth, () => connection.getNfts(sol, eth));
+  return fetchCachedNfts(key, () =>
+    sol
+      ? fetchNftsFromApi(sol, eth)
+      : Promise.resolve(createEmptyNftApiResponse()),
+  );
 }
 
 export async function fetchNftsForIdentity(
@@ -77,7 +84,7 @@ export async function fetchNftsForIdentity(
 ): Promise<NftFetchSnapshot> {
   if (identity.authStatus !== "authenticated") {
     return {
-      data: getEmptyNftCollection(),
+      data: createEmptyNftApiResponse(),
       expiresAtMs: Date.now() + NFT_CACHE_TTL_MS,
     };
   }

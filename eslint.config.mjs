@@ -9,7 +9,11 @@ import reactHooks from "eslint-plugin-react-hooks";
 
 export default [
   {
-    files: ["src/**/*.{ts,tsx}"],
+    files: [
+      "src/**/*.{ts,tsx}",
+      "cloud/workers/api/**/*.ts",
+      "scripts/deploy-cloudflare-api*.ts",
+    ],
     languageOptions: {
       ecmaVersion: "latest",
       parser: tsParser,

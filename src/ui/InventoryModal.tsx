@@ -5,7 +5,6 @@ import React, {
   useRef,
   useState,
 } from "react";
-import bs58 from "bs58";
 import { createPortal } from "react-dom";
 import styled, { keyframes } from "styled-components";
 import {
@@ -26,6 +25,7 @@ import { connection } from "../connection/connection";
 import type { EventPrizeAssignment } from "../connection/connectionModels";
 import { BottomPillButton } from "./BottomControlsStyles";
 import { getEventPrizeDefinition } from "@mons/shared/event-prizes";
+import { isValidSolanaAddress } from "@mons/shared/solana";
 
 const SWAGPACK_ITEM_COUNT = 467;
 const SWAGPACK_ID_OFFSET = 1000;
@@ -716,14 +716,6 @@ const getPreviewViewport = (): PreviewViewport => {
   };
 };
 
-const isValidSolanaAddress = (value: string): boolean => {
-  try {
-    return bs58.decode(value.trim()).length === 32;
-  } catch {
-    return false;
-  }
-};
-
 const getPrizeWithdrawalErrorMessage = (error: unknown): string => {
   const errorData =
     error && typeof error === "object"
@@ -866,7 +858,7 @@ export const InventoryModal = React.forwardRef<
         }
         let isSnapshotFresh = snapshot.expiresAtMs > Date.now();
         if (
-          snapshot.data?.ok === true &&
+          snapshot.data.ok === true &&
           snapshot.expiresAtMs > 0 &&
           !isSnapshotFresh
         ) {
@@ -876,18 +868,16 @@ export const InventoryModal = React.forwardRef<
           }
           isSnapshotFresh = snapshot.expiresAtMs > Date.now();
         }
-        const data = isSnapshotFresh ? snapshot.data : { ok: false };
-        const ok = data?.ok === true;
+        const data = isSnapshotFresh ? snapshot.data : { ok: false as const };
+        const ok = data.ok === true;
         setDataOk(ok);
         setLoadedInventory(
           ok && ownerKey
             ? { ownerKey, expiresAtMs: snapshot.expiresAtMs }
             : null,
         );
-        setAvatars(
-          Array.isArray(data?.swagpack_avatars) ? data.swagpack_avatars : [],
-        );
-        setSpecials(Array.isArray(data?.specials) ? data.specials : []);
+        setAvatars(data.ok ? data.swagpack_avatars : []);
+        setSpecials(data.ok ? data.specials : []);
       } catch {
         if (isCancelled) {
           return;

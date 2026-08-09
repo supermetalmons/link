@@ -1575,18 +1575,6 @@ class Connection {
     }
   }
 
-  public async getNfts(sol: string, eth: string): Promise<any> {
-    try {
-      await this.ensureAuthenticated();
-      const getNftsFunction = httpsCallable(this.functions, "getNfts");
-      const response = await getNftsFunction({ sol, eth });
-      return response.data;
-    } catch (error) {
-      console.error("Error getting nfts:", error);
-      throw error;
-    }
-  }
-
   public async mineRock(
     date: string,
     materials: PlayerMiningMaterials,

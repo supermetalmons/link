@@ -16,8 +16,12 @@
     "./profiles": "./profiles.js",
     "./ratings": "./ratings.js",
     "./rematches": "./rematches.js",
+    "./solana": "./solana.js",
     "./timers": "./timers.js",
     "./usernames": "./usernames.js",
     "./x-redirect": "./x-redirect.js"
+  },
+  "dependencies": {
+    "bs58": "^6.0.0"
   }
 }

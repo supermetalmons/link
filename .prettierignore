@@ -3,5 +3,6 @@ build/
 coverage/
 package-lock.json
 cloud/**/node_modules/
+cloud/workers/api/worker-configuration.d.ts
 .claude/
 .cursor/

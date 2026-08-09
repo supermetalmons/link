@@ -1488,7 +1488,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         const { data, expiresAtMs } = snapshot;
         if (
           isCancelled ||
-          data?.ok !== true ||
+          data.ok !== true ||
           expiresAtMs <= Date.now() ||
           getStoredStickerOwnerKey() !== ownerKeyAtRequest
         ) {
