@@ -1,9 +1,13 @@
 export const LEGACY_CORE_PRIZES_EVENT_ID: "NN3eRzoZo80";
 export const COMPRESSED_PRIZES_EVENT_ID: "FRkdorMWaYW";
+export const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID: "VOxalSrexcA";
 
 export type EventPrizeEventId =
-  typeof LEGACY_CORE_PRIZES_EVENT_ID | typeof COMPRESSED_PRIZES_EVENT_ID;
-export type EventPrizeId = "1092" | "1111" | "1514" | "1866" | "1682" | "6793";
+  | typeof LEGACY_CORE_PRIZES_EVENT_ID
+  | typeof COMPRESSED_PRIZES_EVENT_ID
+  | typeof ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID;
+export type EventPrizeId =
+  "1092" | "1111" | "1514" | "1866" | "1682" | "6793" | "282" | "283" | "280";
 export type EventPrizeStandard = "core" | "compressed";
 
 export type EventPrizeDefinition = Readonly<{

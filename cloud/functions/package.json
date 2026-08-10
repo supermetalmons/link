@@ -29,7 +29,7 @@
     "tweetnacl": "^1.0.3"
   },
   "optionalDependencies": {
-    "utf-8-validate": "6.0.6"
+    "utf-8-validate": "5.0.10"
   },
   "overrides": {
     "@metaplex-foundation/mpl-token-metadata": "3.4.0",

@@ -35,6 +35,7 @@ const {
   filterProjectableEventPrizeAssignments,
   getCompletedEventPrizeProjectionCleanupRequest,
   getEventPrizeAssetAddress,
+  getEventPrizeAssetStandard,
   getWithdrawalProjectionProfileIds,
   isCompletedEventPrizeWithdrawal,
   normalizeSolanaAddress,
@@ -293,6 +294,36 @@ test("maps every configured prize to its asset address", () => {
   assert.equal(
     getEventPrizeAssetAddress("FRkdorMWaYW", "1866"),
     "2KNT8rbXC7G8w5AChbEHHi6i4FN7EAZCtdWX65ZSuQp6",
+  );
+  assert.equal(
+    getEventPrizeAssetAddress("VOxalSrexcA", "282"),
+    "88taYXAaCEmStoLNYiZC6sRSsakDrATpiVtviBTqebxi",
+  );
+  assert.equal(
+    getEventPrizeAssetAddress("VOxalSrexcA", "283"),
+    "29e8p9KMcZgaMZmmMseptz3pAdvQwT4hzhvr5C9NxUbu",
+  );
+  assert.equal(
+    getEventPrizeAssetAddress("VOxalSrexcA", "280"),
+    "6H1UzLgUm3yW6nzFQVFnsMs3MTRpv5BtyDMfp97XcqqV",
+  );
+  assert.equal(getEventPrizeAssetStandard("VOxalSrexcA", "282"), "core");
+  assert.equal(getEventPrizeAssetStandard("VOxalSrexcA", "283"), "core");
+  assert.equal(getEventPrizeAssetStandard("VOxalSrexcA", "280"), "core");
+});
+
+test("routes claim-enabled Artifact Magazine 3 prizes through destination validation", async () => {
+  await assert.rejects(
+    handleWithdrawEventPrize({
+      auth: { uid: "uid" },
+      data: {
+        eventId: "VOxalSrexcA",
+        prizeId: "282",
+      },
+    }),
+    (error) =>
+      error.code === "invalid-argument" &&
+      error.message === "A valid Solana address is required.",
   );
 });
 

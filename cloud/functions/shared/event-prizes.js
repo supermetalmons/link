@@ -2,10 +2,13 @@
 
 const LEGACY_CORE_PRIZES_EVENT_ID = "NN3eRzoZo80";
 const COMPRESSED_PRIZES_EVENT_ID = "FRkdorMWaYW";
+const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID = "VOxalSrexcA";
 const CORE_PRIZE_COLLECTION_ADDRESS =
   "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD";
 const COMPRESSED_PRIZE_COLLECTION_ADDRESS =
   "HpGDYGz6aRUs5qbvp1dmWGKTicQctX4PixfcouAQDCHF";
+const ARTIFACT_MAGAZINE_3_COLLECTION_ADDRESS =
+  "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ";
 
 const createPrize = ({
   id,
@@ -84,6 +87,35 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
       }),
     ]),
   }),
+  [ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID,
+    prizes: Object.freeze([
+      createPrize({
+        id: "282",
+        imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/282.webp",
+        assetAddress: "88taYXAaCEmStoLNYiZC6sRSsakDrATpiVtviBTqebxi",
+        collectionAddress: ARTIFACT_MAGAZINE_3_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        id: "283",
+        imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/283.webp",
+        assetAddress: "29e8p9KMcZgaMZmmMseptz3pAdvQwT4hzhvr5C9NxUbu",
+        collectionAddress: ARTIFACT_MAGAZINE_3_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        id: "280",
+        imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/280.webp",
+        assetAddress: "6H1UzLgUm3yW6nzFQVFnsMs3MTRpv5BtyDMfp97XcqqV",
+        collectionAddress: ARTIFACT_MAGAZINE_3_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
 });
 
 const EVENT_PRIZE_IDS = Object.freeze(
@@ -132,6 +164,7 @@ const isEventPrizeStandard = (value) =>
   value === "core" || value === "compressed";
 
 module.exports = {
+  ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID,
   COMPRESSED_PRIZES_EVENT_ID,
   EVENT_PRIZE_CONFIGS,
   EVENT_PRIZE_IDS,

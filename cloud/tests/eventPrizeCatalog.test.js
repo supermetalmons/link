@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const bs58 = require("bs58");
 const {
+  ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID,
   COMPRESSED_PRIZES_EVENT_ID,
   EVENT_PRIZE_IDS,
   LEGACY_CORE_PRIZES_EVENT_ID,
@@ -96,7 +97,53 @@ test("maps the compressed event to the supplied prizes in fallback order", () =>
     "1866",
     "1682",
     "6793",
+    "282",
+    "283",
+    "280",
   ]);
+  for (const prize of config.prizes) {
+    assert.equal(bs58.default.decode(prize.assetAddress).length, 32);
+  }
+});
+
+test("maps the Artifact Magazine 3 event to claimable Core prizes", () => {
+  const config = getEventPrizeConfig(ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID);
+  assert.deepEqual(
+    config.prizes.map((prize) => ({
+      id: prize.id,
+      imageUrl: prize.imageUrl,
+      assetAddress: prize.assetAddress,
+      collectionAddress: prize.collectionAddress,
+      standard: prize.standard,
+      claimAvailable: prize.claimAvailable,
+    })),
+    [
+      {
+        id: "282",
+        imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/282.webp",
+        assetAddress: "88taYXAaCEmStoLNYiZC6sRSsakDrATpiVtviBTqebxi",
+        collectionAddress: "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ",
+        standard: "core",
+        claimAvailable: true,
+      },
+      {
+        id: "283",
+        imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/283.webp",
+        assetAddress: "29e8p9KMcZgaMZmmMseptz3pAdvQwT4hzhvr5C9NxUbu",
+        collectionAddress: "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ",
+        standard: "core",
+        claimAvailable: true,
+      },
+      {
+        id: "280",
+        imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/280.webp",
+        assetAddress: "6H1UzLgUm3yW6nzFQVFnsMs3MTRpv5BtyDMfp97XcqqV",
+        collectionAddress: "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ",
+        standard: "core",
+        claimAvailable: true,
+      },
+    ],
+  );
   for (const prize of config.prizes) {
     assert.equal(bs58.default.decode(prize.assetAddress).length, 32);
   }
@@ -110,6 +157,11 @@ test("database rules scope selections to each event's prize IDs", () => {
   assert.match(selectionRules[".validate"], /1866/);
   assert.match(selectionRules[".validate"], /1682/);
   assert.match(selectionRules[".validate"], /6793/);
+  assert.match(selectionRules[".write"], /VOxalSrexcA/);
+  assert.match(
+    selectionRules[".validate"],
+    /\$eventId === 'VOxalSrexcA'.*newData\.val\(\) === '282'.*newData\.val\(\) === '283'.*newData\.val\(\) === '280'/,
+  );
 });
 
 test("catalog membership rejects inherited keys and padded IDs", () => {
