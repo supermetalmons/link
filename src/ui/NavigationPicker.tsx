@@ -31,8 +31,6 @@ interface NavigationPickerProps {
   onLoadMoreGames?: () => void;
 }
 
-const ENABLE_EXPANDED_EVENT_CELL_CLOUD = true;
-
 const NavigationPickerContainer = styled.div`
   position: fixed;
   bottom: max(50px, calc(env(safe-area-inset-bottom) + 44px));
@@ -244,19 +242,9 @@ const FightCloudWrap = styled.div`
   position: relative;
   display: flex;
   align-items: center;
-  ${
-    ENABLE_EXPANDED_EVENT_CELL_CLOUD
-      ? `
   width: 100%;
   min-width: 0;
   flex: 1;
-  `
-      : `
-  justify-content: center;
-  flex-shrink: 0;
-  margin-left: 2px;
-  `
-  }
 `;
 
 const EventAvatarImage = styled(GameEmojiImage)``;
@@ -290,19 +278,10 @@ const EventAvatarQuestionIcon = styled(FiPlus)`
 const FightCloudCanvas = styled.svg`
   position: absolute;
   top: 50%;
-  ${
-    ENABLE_EXPANDED_EVENT_CELL_CLOUD
-      ? `
   left: -8px;
   transform: translateY(-50%);
   width: calc(100% + 18px);
   height: 28px;
-  `
-      : `
-  left: 50%;
-  transform: translate(-50%, -50%);
-  `
-  }
   overflow: visible;
   pointer-events: none;
 `;
@@ -351,15 +330,9 @@ const FightCloudInner = styled.div`
   position: relative;
   display: flex;
   align-items: center;
-  gap: ${ENABLE_EXPANDED_EVENT_CELL_CLOUD ? "5px" : "1px"};
-  ${
-    ENABLE_EXPANDED_EVENT_CELL_CLOUD
-      ? `
+  gap: 5px;
   width: 100%;
   min-width: 0;
-  `
-      : ""
-  }
   z-index: 1;
 `;
 
@@ -368,7 +341,7 @@ const EventPreviewGroup = styled.div`
   align-items: center;
   gap: 1px;
   flex-shrink: 0;
-  margin-left: ${ENABLE_EXPANDED_EVENT_CELL_CLOUD ? "2px" : "0"};
+  margin-left: 2px;
 `;
 
 const FightCloudBadge = styled.span`
@@ -687,7 +660,6 @@ function getFightCloudPath(w: number, h: number) {
 
 const FIGHT_CLOUD_BASE_W = 160;
 const FIGHT_CLOUD_H = 28;
-const FIGHT_CLOUD_PAD_X = 10;
 
 const NavigationPicker: React.FC<NavigationPickerProps> = ({
   showsHomeNavigation,
@@ -995,17 +967,7 @@ const NavigationPicker: React.FC<NavigationPickerProps> = ({
     const hasBadge = showBadge && overflow > 0;
     const hasPreviewContent =
       previewEmojiIds.length > 0 || shouldShowUnknownOpponentSlot || hasBadge;
-    const renderedParticipantSlots =
-      previewEmojiIds.length + (shouldShowUnknownOpponentSlot ? 1 : 0);
-    const itemCount = renderedParticipantSlots + (hasBadge ? 1 : 0);
-
-    if (!ENABLE_EXPANDED_EVENT_CELL_CLOUD && itemCount === 0) {
-      return null;
-    }
-
-    const cloudW = ENABLE_EXPANDED_EVENT_CELL_CLOUD
-      ? FIGHT_CLOUD_BASE_W
-      : itemCount * 21 - 1 + FIGHT_CLOUD_PAD_X * 2;
+    const cloudW = FIGHT_CLOUD_BASE_W;
     const cloud = getFightCloudPath(cloudW, FIGHT_CLOUD_H);
 
     return {
@@ -1015,9 +977,7 @@ const NavigationPicker: React.FC<NavigationPickerProps> = ({
             width={cloudW}
             height={FIGHT_CLOUD_H}
             viewBox={`0 0 ${cloudW} ${FIGHT_CLOUD_H}`}
-            preserveAspectRatio={
-              ENABLE_EXPANDED_EVENT_CELL_CLOUD ? "none" : undefined
-            }
+            preserveAspectRatio="none"
             aria-hidden="true"
           >
             <CloudShape d={cloud} />

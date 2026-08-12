@@ -1,4 +1,8 @@
-import type { SpawnSyncReturns } from "node:child_process";
+import type {
+  CloudflareRuntime,
+  ProcessEnvironment,
+  SpawnResult,
+} from "./cloudflare/runtime.ts";
 
 const { spawnSync } = require("node:child_process");
 const { existsSync, mkdirSync, readFileSync, unlinkSync } = require("node:fs");
@@ -10,6 +14,14 @@ const {
 const {
   isValidSolanaAddress,
 }: typeof import("@mons/shared/solana") = require("@mons/shared/solana");
+const {
+  DeployError,
+  createWranglerEnvironment,
+  findLatestJsonRecord,
+  readCloudflareApiToken,
+  runCommand,
+  stripEnvironment,
+}: CloudflareRuntime = require("./cloudflare/runtime.ts");
 
 type CliOptions =
   | {
@@ -28,9 +40,6 @@ type CliOptions =
       mode: "triggers";
       tokenFile?: string;
     };
-
-type SpawnResult = Pick<SpawnSyncReturns<Buffer>, "error" | "status">;
-type ProcessEnvironment = Record<string, string | undefined>;
 
 export type RuntimeDependencies = {
   repoRoot: string;
@@ -83,16 +92,6 @@ const SMOKE_TIMEOUT_MS = 15_000;
 const SMOKE_RETRY_DELAYS_MS = [500, 1_500];
 const VERSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-class DeployError extends Error {
-  exitCode: number;
-
-  constructor(message: string, exitCode = 1) {
-    super(message);
-    this.name = "DeployError";
-    this.exitCode = exitCode;
-  }
-}
 
 function usage(): string {
   return [
@@ -193,46 +192,26 @@ function parseArgs(argv: string[]): CliOptions {
 function createChildEnvironment(
   source: ProcessEnvironment,
 ): ProcessEnvironment {
-  const environment = { ...source };
-  for (const name of Object.keys(environment)) {
-    const normalized = name.toUpperCase();
-    if (
+  return stripEnvironment(
+    source,
+    (normalized) =>
       normalized.startsWith("CLOUDFLARE_") ||
       normalized.startsWith("CF_") ||
       normalized.startsWith("WRANGLER_") ||
       normalized === "HELIUS_RPC_API_KEY" ||
-      normalized === "DOTENV_KEY"
-    ) {
-      delete environment[name];
-    }
-  }
-  return environment;
+      normalized === "DOTENV_KEY",
+  );
 }
 
 function readApiToken(
   tokenFile: string | undefined,
   dependencies: RuntimeDependencies,
 ): string {
-  if (tokenFile) {
-    let token: string;
-    try {
-      token = dependencies.readFile(resolve(tokenFile), "utf8").trim();
-    } catch {
-      throw new DeployError("Unable to read --token-file.");
-    }
-    if (!token) {
-      throw new DeployError("The Cloudflare token file is empty.");
-    }
-    return token;
-  }
-
-  const token = (dependencies.processEnv.CLOUDFLARE_API_TOKEN || "").trim();
-  if (!token) {
-    throw new DeployError(
-      "Missing Cloudflare authentication. Pass --token-file or set CLOUDFLARE_API_TOKEN.",
-    );
-  }
-  return token;
+  return readCloudflareApiToken({
+    tokenFile,
+    environment: dependencies.processEnv,
+    readFile: dependencies.readFile,
+  });
 }
 
 function run(
@@ -242,38 +221,14 @@ function run(
   label: string,
   dependencies: RuntimeDependencies,
 ): void {
-  const result = dependencies.spawn(command, args, {
-    cwd: dependencies.repoRoot,
-    env: environment,
-    stdio: "inherit",
-    shell: false,
-  });
-
-  if (result.error) {
-    throw new DeployError(`${label} could not start.`);
-  }
-  if (result.status !== 0) {
-    const exitCode = result.status ?? 1;
-    throw new DeployError(
-      `${label} failed with exit code ${exitCode}.`,
-      exitCode,
-    );
-  }
+  runCommand(command, args, environment, label, dependencies);
 }
 
 function parseUploadMetadata(contents: string): UploadMetadata {
-  let upload: Record<string, unknown> | undefined;
-  for (const line of contents.trim().split(/\r?\n/).reverse()) {
-    try {
-      const entry = JSON.parse(line) as Record<string, unknown>;
-      if (entry.type === "version-upload") {
-        upload = entry;
-        break;
-      }
-    } catch {
-      continue;
-    }
-  }
+  const upload = findLatestJsonRecord(
+    contents,
+    (entry) => entry.type === "version-upload",
+  );
 
   if (!upload) {
     throw new DeployError(
@@ -577,14 +532,11 @@ async function execute(
   );
   dependencies.mkdir(logDirectory, { recursive: true });
 
-  const wranglerEnvironment: ProcessEnvironment = {
-    ...childEnvironment,
-    CI: "true",
-    WRANGLER_LOG_PATH: logDirectory,
-    WRANGLER_LOG_SANITIZE: "true",
-    WRANGLER_SEND_ERROR_REPORTS: "false",
-    WRANGLER_SEND_METRICS: "false",
-  };
+  const wranglerEnvironment = createWranglerEnvironment(
+    childEnvironment,
+    logDirectory,
+    { ci: true },
+  );
 
   dependencies.log(`[api-deploy] Mode: ${options.mode}`);
 
@@ -609,6 +561,13 @@ async function execute(
       [npmCliPath, "run", "check:api"],
       wranglerEnvironment,
       "API validation",
+      dependencies,
+    );
+    run(
+      dependencies.nodeExecutable,
+      [npmCliPath, "run", "check:tooling"],
+      wranglerEnvironment,
+      "Deployment tooling validation",
       dependencies,
     );
 

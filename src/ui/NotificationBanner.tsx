@@ -1,11 +1,11 @@
 import React from "react";
 import styled from "styled-components";
 import { isMobile } from "../utils/misc";
-import { didDismissSomethingWithOutsideTapJustNow } from "./BottomControls";
+import { didDismissSomethingWithOutsideTapJustNow } from "./controls/outsideTapState";
 
 const NotificationBanner = styled.div<{
-  isVisible: boolean;
-  dismissType?: "click" | "close" | null;
+  $isVisible: boolean;
+  $dismissType?: "click" | "close" | null;
 }>`
   position: fixed;
   top: 56px;
@@ -18,13 +18,13 @@ const NotificationBanner = styled.div<{
   width: min(280px, 85dvw);
   box-shadow: 0 6px 20px var(--notificationBannerShadow);
   z-index: 6;
-  opacity: ${(props) => (props.isVisible ? 1 : 0)};
+  opacity: ${(props) => (props.$isVisible ? 1 : 0)};
   transform: ${(props) => {
-    if (props.isVisible) return "translateX(0) scale(1)";
-    if (props.dismissType === "click") return "translateX(0) scale(0.95)";
+    if (props.$isVisible) return "translateX(0) scale(1)";
+    if (props.$dismissType === "click") return "translateX(0) scale(0.95)";
     return "translateX(100%) scale(1)";
   }};
-  pointer-events: ${(props) => (props.isVisible ? "auto" : "none")};
+  pointer-events: ${(props) => (props.$isVisible ? "auto" : "none")};
   cursor: pointer;
   overflow: hidden;
   display: flex;
@@ -36,14 +36,14 @@ const NotificationBanner = styled.div<{
   -webkit-user-select: none;
   -webkit-tap-highlight-color: transparent;
   transition: ${(props) => {
-    if (props.dismissType === "click") return "all 0.2s ease-out";
+    if (props.$dismissType === "click") return "all 0.2s ease-out";
     return "all 0.45s cubic-bezier(0.25, 0.8, 0.25, 1)";
   }};
 
   &:active {
     transform: ${(props) => {
-      if (!props.isVisible)
-        return props.dismissType === "click"
+      if (!props.$isVisible)
+        return props.$dismissType === "click"
           ? "translateX(0) scale(0.95)"
           : "translateX(100%) scale(1)";
       return "translateX(0) scale(0.98)";
@@ -216,8 +216,8 @@ export const NotificationBannerComponent: React.FC<
   return (
     <NotificationBanner
       data-notification-banner="true"
-      isVisible={isVisible}
-      dismissType={dismissType}
+      $isVisible={isVisible}
+      $dismissType={dismissType}
       onClick={handleNotificationClick}
     >
       <NotificationImage

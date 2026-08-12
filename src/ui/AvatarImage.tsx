@@ -34,12 +34,12 @@ const RainbowBackground = styled.div`
   opacity: ${RAINBOW_AURA_OPACITY};
 `;
 
-const RainbowInner = styled.div<{ src: string }>`
+const RainbowInner = styled.div<{ $src: string }>`
   position: absolute;
   inset: 0;
   ${RAINBOW_MASK_CSS_BASE}
-  -webkit-mask-image: url(${({ src }) => getRainbowAuraMaskUrl(src)});
-  mask-image: url(${({ src }) => getRainbowAuraMaskUrl(src)});
+  -webkit-mask-image: url(${({ $src }) => getRainbowAuraMaskUrl($src)});
+  mask-image: url(${({ $src }) => getRainbowAuraMaskUrl($src)});
 `;
 
 const RainbowRotatorWrap = styled.div`
@@ -97,7 +97,7 @@ export const AvatarImage: React.FC<AvatarImageProps> = ({
     <AvatarContainer>
       {rainbowAura && (
         <RainbowBackground>
-          <RainbowInner src={src}>
+          <RainbowInner $src={src}>
             <RainbowRotatorWrap>
               <RainbowRotator />
             </RainbowRotatorWrap>

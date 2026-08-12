@@ -1,50 +1,17 @@
-import { useState, useEffect } from "react";
+import { createCachedResource } from "../resources/cachedResource";
+import { useCachedResource } from "../resources/useCachedResource";
 
-let emojisCache: any = null;
-let loadingPromise: Promise<any> | null = null;
+type Emojis = (typeof import("../content/emojis"))["emojis"] &
+  Record<string, any>;
 
-const loadEmojis = async (): Promise<any> => {
-  if (emojisCache) {
-    return emojisCache;
-  }
-
-  if (loadingPromise) {
-    return loadingPromise;
-  }
-
-  loadingPromise = (async () => {
-    try {
-      const emojis = (await import("../content/emojis")).emojis;
-      emojisCache = emojis;
-      return emojis;
-    } catch (error) {
-      console.error("Failed to load emojis:", error);
-      return null;
-    } finally {
-      loadingPromise = null;
-    }
-  })();
-
-  return loadingPromise;
-};
+const emojisResource = createCachedResource<Emojis>(
+  async () => (await import("../content/emojis")).emojis as Emojis,
+  (error) => {
+    console.error("Failed to load emojis:", error);
+  },
+);
 
 export const useEmojis = () => {
-  const [emojis, setEmojis] = useState<any>(emojisCache);
-  const [isLoading, setIsLoading] = useState(!emojisCache);
-
-  useEffect(() => {
-    if (emojisCache) {
-      setEmojis(emojisCache);
-      setIsLoading(false);
-      return;
-    }
-
-    setIsLoading(true);
-    loadEmojis().then((loadedEmojis) => {
-      setEmojis(loadedEmojis);
-      setIsLoading(false);
-    });
-  }, []);
-
+  const { value: emojis, isLoading } = useCachedResource(emojisResource);
   return { emojis, isLoading };
 };

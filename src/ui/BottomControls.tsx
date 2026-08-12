@@ -1,6 +1,7 @@
 import React, {
   useRef,
   useEffect,
+  useLayoutEffect,
   useState,
   useCallback,
   useMemo,
@@ -57,23 +58,23 @@ import {
 import type { RematchSeriesNavigatorItem } from "../game/gameController";
 import { connection } from "../connection/connection";
 import type { NavigationGamesPageCursor } from "../connection/connection";
-import type { AuthState } from "../connection/authentication";
+import type { AuthState } from "../connection/authModels";
 import { defaultEarlyInputEventName, isMobile } from "../utils/misc";
 import { soundPlayer } from "../utils/SoundPlayer";
 import { playReaction, playSounds } from "../content/sounds";
 import { newReactionOfKind, newStickerReaction } from "../content/sounds";
 import {
   showVoiceReactionText,
-  opponentSideMetadata,
-  playerSideMetadata,
   isMetadataSideDisplayedAtOpponentSlot,
-} from "../game/board";
+  getPlayerReactionUid,
+  getOpponentReactionUid,
+  showVideoReaction,
+} from "./controls/boardReactionPort";
 import NavigationPicker from "./NavigationPicker";
 import {
   ControlsContainer,
   BrushButton,
   NavigationListButton,
-  NavigationBadge,
   ControlButton,
   BottomPillButton,
   ResignButton,
@@ -96,16 +97,16 @@ import {
   getNftIdentityKey,
   NFT_CACHE_TTL_MS,
 } from "../services/nftService";
-import { closeMenuAndInfoIfAny } from "./MainMenu";
-import { showVideoReaction } from "./BoardComponent";
+import { closeMenuAndInfoIfAny } from "./controls/menuPort";
 import BoardStylePickerComponent, {
   preloadPangchiuBoardPreview,
 } from "./BoardStylePicker";
 import { Sound } from "../utils/gameModels";
-import MoveHistoryPopup, {
+import MoveHistoryPopup from "./MoveHistoryPopup";
+import {
   subscribeMoveHistoryPopupReload,
   triggerMoveHistoryPopupSelectionReset,
-} from "./MoveHistoryPopup";
+} from "./controls/moveHistoryPopupStore";
 import {
   MATERIALS,
   MaterialName,
@@ -154,109 +155,69 @@ import {
   writeNavigationGamesPersistedTopCache,
   writeNavigationGamesRuntimeCache,
 } from "../services/navigationGamesCache";
+import {
+  PrimaryActionType,
+  bindBottomControlsApi,
+  handleWagerPanelOutsideTap,
+  isWagerPanelVisible,
+  resetWagerPanelApi,
+  unbindBottomControlsApi,
+  type PrimaryAction,
+  type CloseNavigationAndAppearancePopupOptions,
+} from "./controls/bottomControlsPort";
+import { didDismissSomethingWithOutsideTapJustNow } from "./controls/outsideTapState";
+import {
+  CANCEL_AUTOMATCH_REVEAL_DELAY_MS,
+  NAVIGATION_PENDING_CANCEL_INTENT_TTL_MS,
+  getCancelAutomatchRevealDeadlineMs,
+  getTimerEnableDelayMs,
+  hasControlDeadlineElapsed,
+} from "./controls/controlTiming";
 
-const deltaTimeOutsideTap = isMobile ? 42 : 420;
+export {
+  didDismissSomethingWithOutsideTapJustNow,
+  didNotDismissAnythingWithOutsideTapJustNow,
+  resetOutsideTapDismissTimeout,
+} from "./controls/outsideTapState";
+export {
+  PrimaryActionType,
+  closeNavigationAndAppearancePopupIfAny,
+  disableAndHideUndoResignAndTimerControls,
+  enableTimerVictoryClaim,
+  hasBottomPopupsVisible,
+  hasNavigationPopupVisible,
+  hideTimerButtons,
+  setAutomatchEnabled,
+  setAutomatchVisible,
+  setAutomatchWaitingState,
+  setAutomoveActionEnabled,
+  setAutomoveActionVisible,
+  setBotGameOptionVisible,
+  setBrushAndNavigationButtonDimmed,
+  setEndMatchConfirmed,
+  setEndMatchVisible,
+  setHomeVisible,
+  setInviteLinkActionVisible,
+  setIsReadyToCopyExistingInviteLink,
+  setNavigationListButtonVisible,
+  setPlaySamePuzzleAgainButtonVisible,
+  setUndoEnabled,
+  setUndoVisible,
+  setWatchOnlyVisible,
+  showMoveHistoryButton,
+  showPrimaryAction,
+  showResignButton,
+  showTimerButtonProgressing,
+  showVoiceReactionButton,
+  showWaitingStateText,
+  setWagerPanelOutsideTapHandler,
+  setWagerPanelVisibilityChecker,
+} from "./controls/bottomControlsPort";
+
 const EVENT_MODAL_NAV_AUTOCLOSE_SUPPRESS_MS = 10000;
 const EVENT_GAME_BUTTON_STICKY_DURATION_MS = 2500;
-const HOME_NAVIGATION_BADGE_ENABLED = false;
 const rematchSeriesDigitsFontFamily =
   'ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, "Liberation Mono", "Courier New", monospace';
-
-export enum PrimaryActionType {
-  None = "none",
-  JoinGame = "joinGame",
-  Rematch = "rematch",
-}
-
-let latestModalOutsideTapDismissDate = Date.now();
-
-export function didDismissSomethingWithOutsideTapJustNow() {
-  latestModalOutsideTapDismissDate = Date.now();
-}
-
-type CloseNavigationAndAppearancePopupOptions = {
-  preserveNavigationSelection?: boolean;
-};
-
-let closeNavigationAndAppearancePopupIfAnyImpl: (
-  options?: CloseNavigationAndAppearancePopupOptions,
-) => void = () => {};
-let setNavigationListButtonVisibleImpl: (visible: boolean) => void = () => {};
-
-export const closeNavigationAndAppearancePopupIfAny = (
-  options?: CloseNavigationAndAppearancePopupOptions,
-) => {
-  closeNavigationAndAppearancePopupIfAnyImpl(options);
-};
-
-export const setNavigationListButtonVisible = (visible: boolean) => {
-  setNavigationListButtonVisibleImpl(visible);
-};
-
-export function resetOutsideTapDismissTimeout() {
-  if (!isMobile) {
-    latestModalOutsideTapDismissDate -= 1000;
-  }
-}
-
-export function didNotDismissAnythingWithOutsideTapJustNow(): boolean {
-  let delta = Date.now() - latestModalOutsideTapDismissDate;
-  return delta >= deltaTimeOutsideTap;
-}
-
-let isWagerPanelVisible: () => boolean = () => false;
-let handleWagerPanelOutsideTap:
-  ((event: TouchEvent | MouseEvent) => boolean) | null = null;
-
-export function setWagerPanelVisibilityChecker(checker: () => boolean) {
-  isWagerPanelVisible = checker;
-}
-
-export function setWagerPanelOutsideTapHandler(
-  handler: ((event: TouchEvent | MouseEvent) => boolean) | null,
-) {
-  handleWagerPanelOutsideTap = handler;
-}
-
-export function hasNavigationPopupVisible(): boolean {
-  return getIsNavigationPopupOpen();
-}
-
-let getIsNavigationPopupOpen: () => boolean = () => false;
-
-let hasBottomPopupsVisible: () => boolean = () => false;
-let showVoiceReactionButton: (show: boolean) => void = () => {};
-let showMoveHistoryButton: (show: boolean) => void = () => {};
-let showResignButton: () => void = () => {};
-let setInviteLinkActionVisible: (visible: boolean) => void = () => {};
-let setAutomatchEnabled: (enabled: boolean) => void = () => {};
-let setAutomatchVisible: (visible: boolean) => void = () => {};
-let setBotGameOptionVisible: (visible: boolean) => void = () => {};
-let setPlaySamePuzzleAgainButtonVisible: (visible: boolean) => void = () => {};
-let setAutomatchWaitingState: (waiting: boolean) => void = () => {};
-let setBrushAndNavigationButtonDimmed: (dimmed: boolean) => void = () => {};
-let setBadgeVisible: (visible: boolean) => void = () => {};
-
-let showWaitingStateText: (text: string) => void = () => {};
-let setHomeVisible: (visible: boolean) => void = () => {};
-let setEndMatchVisible: (visible: boolean) => void = () => {};
-let setEndMatchConfirmed: (confirmed: boolean) => void = () => {};
-let setUndoVisible: (visible: boolean) => void = () => {};
-let setAutomoveActionEnabled: (enabled: boolean) => void = () => {};
-let setAutomoveActionVisible: (visible: boolean) => void = () => {};
-let setWatchOnlyVisible: (visible: boolean) => void = () => {};
-let setUndoEnabled: (enabled: boolean) => void = () => {};
-let disableAndHideUndoResignAndTimerControls: () => void = () => {};
-let setIsReadyToCopyExistingInviteLink: () => void = () => {};
-let hideTimerButtons: () => void = () => {};
-let showTimerButtonProgressing: (
-  currentProgress: number,
-  target: number,
-  enableWhenTargetReached: boolean,
-) => void = () => {};
-let toggleReactionPicker: () => void = () => {};
-let enableTimerVictoryClaim: () => void = () => {};
-let showPrimaryAction: (action: PrimaryActionType) => void = () => {};
 let pendingImmediateCancelAutomatchInviteId: string | null = null;
 let pendingImmediateCancelAutomatchIntentExpiresAtMs = 0;
 let pendingDelayedCancelAutomatchInviteId: string | null = null;
@@ -300,8 +261,6 @@ const MATERIAL_IMAGE_BASE_URL = "https://cdn.lil.org/mons/rocks/materials";
 const STICKER_IMAGE_BASE_URL = "https://cdn.lil.org/mons/emojipack/swagpack/64";
 const NAVIGATION_GAMES_PAGE_SIZE = 80;
 const NAVIGATION_GAMES_LOAD_MORE_PAGE_SIZE = 50;
-const CANCEL_AUTOMATCH_REVEAL_DELAY_MS = 10000;
-const NAVIGATION_PENDING_CANCEL_INTENT_TTL_MS = 60000;
 const materialImagePromises: Map<
   MaterialName,
   Promise<string | null>
@@ -876,7 +835,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     useState(false);
   const [isBoardStylePickerVisible, setIsBoardStylePickerVisible] =
     useState(false);
-  const [isBadgeVisible, setIsBadgeVisible] = useState(false);
   const [navigationProjectedGames, setNavigationProjectedGames] = useState<
     NavigationItem[]
   >([]);
@@ -920,7 +878,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const [isUndoDisabled, setIsUndoDisabled] = useState(true);
   const [waitingStateText, setWaitingStateText] = useState("");
   const [isStartTimerVisible, setIsStartTimerVisible] = useState(false);
-  const [primaryAction, setPrimaryAction] = useState<PrimaryActionType>(
+  const [primaryAction, setPrimaryAction] = useState<PrimaryAction>(
     PrimaryActionType.None,
   );
   const [isUndoButtonVisible, setIsUndoButtonVisible] = useState(false);
@@ -1205,7 +1163,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
 
   const tryEnableTimerButtonFromDeadline = useCallback(() => {
     const deadline = hourglassEnableDeadlineRef.current;
-    if (deadline === null || Date.now() < deadline) {
+    if (!hasControlDeadlineElapsed(deadline, Date.now())) {
       return;
     }
     if (hourglassEnableTimeoutRef.current !== null) {
@@ -1220,7 +1178,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
 
   const tryRevealCancelAutomatchFromDeadline = useCallback(() => {
     const deadline = cancelAutomatchRevealDeadlineRef.current;
-    if (deadline === null || Date.now() < deadline) {
+    if (!hasControlDeadlineElapsed(deadline, Date.now())) {
       return;
     }
     if (cancelAutomatchRevealTimeoutRef.current !== null) {
@@ -2052,10 +2010,10 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         const now = Date.now();
         const pendingRevealAtMs = pendingCancelAutomatchRevealAtMsRef.current;
         pendingCancelAutomatchRevealAtMsRef.current = null;
-        const deadline =
-          pendingRevealAtMs !== null
-            ? pendingRevealAtMs
-            : now + CANCEL_AUTOMATCH_REVEAL_DELAY_MS;
+        const deadline = getCancelAutomatchRevealDeadlineMs(
+          pendingRevealAtMs,
+          now,
+        );
         if (deadline <= now) {
           setIsCancelAutomatchVisible(true);
         } else {
@@ -2199,9 +2157,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     [shouldSuppressNavigationPopupProgrammaticAutoCloseForEventModal],
   );
 
-  closeNavigationAndAppearancePopupIfAnyImpl =
-    closeNavigationAndAppearancePopupIfAnyHandler;
-
   useEffect(() => {
     return registerBottomControlsTransientUiHandler(
       closeNavigationAndAppearancePopupIfAnyHandler,
@@ -2214,39 +2169,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
 
   useEffect(() => {
     return () => {
-      closeNavigationAndAppearancePopupIfAnyImpl = () => {};
-      setNavigationListButtonVisibleImpl = () => {};
-      getIsNavigationPopupOpen = () => false;
-      hasBottomPopupsVisible = () => false;
-      showVoiceReactionButton = () => {};
-      showMoveHistoryButton = () => {};
-      showResignButton = () => {};
-      setInviteLinkActionVisible = () => {};
-      setAutomatchEnabled = () => {};
-      setAutomatchVisible = () => {};
-      setBotGameOptionVisible = () => {};
-      setPlaySamePuzzleAgainButtonVisible = () => {};
-      setAutomatchWaitingState = () => {};
-      setBrushAndNavigationButtonDimmed = () => {};
-      setBadgeVisible = () => {};
-      showWaitingStateText = () => {};
-      setHomeVisible = () => {};
-      setEndMatchVisible = () => {};
-      setEndMatchConfirmed = () => {};
-      setUndoVisible = () => {};
-      setAutomoveActionEnabled = () => {};
-      setAutomoveActionVisible = () => {};
-      setWatchOnlyVisible = () => {};
-      setUndoEnabled = () => {};
-      disableAndHideUndoResignAndTimerControls = () => {};
-      setIsReadyToCopyExistingInviteLink = () => {};
-      hideTimerButtons = () => {};
-      showTimerButtonProgressing = () => {};
-      toggleReactionPicker = () => {};
-      enableTimerVictoryClaim = () => {};
-      showPrimaryAction = () => {};
-      isWagerPanelVisible = () => false;
-      handleWagerPanelOutsideTap = null;
+      resetWagerPanelApi();
     };
   }, []);
 
@@ -2283,9 +2206,9 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   };
   beginInviteFlowRef.current = beginInviteFlow;
 
-  getIsNavigationPopupOpen = () => isNavigationPopupVisible;
+  const hasNavigationPopupVisibleHandler = () => isNavigationPopupVisible;
 
-  setNavigationListButtonVisibleImpl = (visible: boolean) => {
+  const setNavigationListButtonVisibleHandler = (visible: boolean) => {
     setIsNavigationListButtonVisible(visible);
     if (
       !visible &&
@@ -2295,39 +2218,35 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     }
   };
 
-  setBadgeVisible = (visible: boolean) => {
-    setIsBadgeVisible(HOME_NAVIGATION_BADGE_ENABLED && visible);
-  };
-
-  setBrushAndNavigationButtonDimmed = (dimmed: boolean) => {
+  const setBrushAndNavigationButtonDimmedHandler = (dimmed: boolean) => {
     setIsNavigationButtonDimmed(dimmed);
     setIsBrushButtonDimmed(dimmed);
   };
 
-  showVoiceReactionButton = (show: boolean) => {
+  const showVoiceReactionButtonHandler = (show: boolean) => {
     setIsVoiceReactionButtonVisible(show);
     if (!show) {
       setIsReactionPickerVisible(false);
     }
   };
 
-  showMoveHistoryButton = (show: boolean) => {
+  const showMoveHistoryButtonHandler = (show: boolean) => {
     setIsMoveHistoryButtonVisible(show);
   };
 
-  showResignButton = () => {
+  const showResignButtonHandler = () => {
     setIsResignButtonVisible(true);
   };
 
-  showWaitingStateText = (text: string) => {
+  const showWaitingStateTextHandler = (text: string) => {
     setWaitingStateText(text);
   };
 
-  setIsReadyToCopyExistingInviteLink = () => {
+  const setIsReadyToCopyExistingInviteLinkHandler = () => {
     setDidCreateInvite(true);
   };
 
-  hideTimerButtons = () => {
+  const hideTimerButtonsHandler = () => {
     if (hourglassEnableTimeoutRef.current) {
       clearTrackedMatchScopedTimeout(hourglassEnableTimeoutRef.current);
       hourglassEnableTimeoutRef.current = null;
@@ -2340,7 +2259,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     setIsClaimVictoryConfirmVisible(false);
   };
 
-  showTimerButtonProgressing = (
+  const showTimerButtonProgressingHandler = (
     currentProgress: number,
     target: number,
     enableWhenTargetReached: boolean,
@@ -2365,7 +2284,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     });
 
     if (enableWhenTargetReached) {
-      const timeUntilTarget = Math.max(0, (target - currentProgress) * 1000);
+      const timeUntilTarget = getTimerEnableDelayMs(currentProgress, target);
       if (timeUntilTarget <= 0) {
         setIsTimerButtonDisabled(false);
         return;
@@ -2380,7 +2299,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     }
   };
 
-  hasBottomPopupsVisible = () => {
+  const hasBottomPopupsVisibleHandler = () => {
     return (
       isReactionPickerVisible ||
       isMoveHistoryPopupVisible ||
@@ -2392,7 +2311,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     );
   };
 
-  enableTimerVictoryClaim = () => {
+  const enableTimerVictoryClaimHandler = () => {
     setIsClaimVictoryVisible(true);
     setIsUndoButtonVisible(false);
     setIsAutomoveButtonVisible(false);
@@ -2402,23 +2321,23 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     setIsClaimVictoryConfirmVisible(false);
   };
 
-  setPlaySamePuzzleAgainButtonVisible = (visible: boolean) => {
+  const setPlaySamePuzzleAgainButtonVisibleHandler = (visible: boolean) => {
     setIsSamePuzzleAgainVisible(visible);
   };
 
-  setEndMatchVisible = (visible: boolean) => {
+  const setEndMatchVisibleHandler = (visible: boolean) => {
     setIsEndMatchButtonVisible(visible);
   };
 
-  setEndMatchConfirmed = (confirmed: boolean) => {
+  const setEndMatchConfirmedHandler = (confirmed: boolean) => {
     setIsEndMatchConfirmed(confirmed);
   };
 
-  setBotGameOptionVisible = (visible: boolean) => {
+  const setBotGameOptionVisibleHandler = (visible: boolean) => {
     setIsBotGameButtonVisible(visible);
   };
 
-  setInviteLinkActionVisible = (visible: boolean) => {
+  const setInviteLinkActionVisibleHandler = (visible: boolean) => {
     setIsInviteLinkButtonVisible(visible);
     if (!visible) {
       setIsInviteLoading(false);
@@ -2427,7 +2346,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     }
   };
 
-  setAutomatchWaitingState = (waiting: boolean) => {
+  const setAutomatchWaitingStateHandler = (waiting: boolean) => {
     if (waiting) {
       let revealMode = automatchCancelRevealModeRef.current;
       let revealDeadline = automatchCancelRevealModeDeadlineRef.current;
@@ -2463,7 +2382,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       pendingCancelAutomatchRevealAtMsRef.current = shouldDelayReveal
         ? revealDeadline
         : null;
-      setAutomatchVisible(true);
+      setIsAutomatchButtonVisible(true);
       setIsAutomatchButtonEnabled(false);
       setAutomatchButtonTmpState(true);
       setCancelAutomatchRevealVersion((value) => value + 1);
@@ -2486,44 +2405,44 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     setIsCancelAutomatchDisabled(false);
   };
 
-  setAutomatchEnabled = (enabled: boolean) => {
+  const setAutomatchEnabledHandler = (enabled: boolean) => {
     setAutomatchButtonTmpState(false);
     setIsAutomatchButtonEnabled(enabled);
   };
 
-  setAutomatchVisible = (visible: boolean) => {
+  const setAutomatchVisibleHandler = (visible: boolean) => {
     setIsAutomatchButtonVisible(visible);
   };
 
-  setHomeVisible = (visible: boolean) => {
+  const setHomeVisibleHandler = (visible: boolean) => {
     setIsDeepHomeButtonVisible(visible);
   };
 
-  setAutomoveActionEnabled = (enabled: boolean) => {
+  const setAutomoveActionEnabledHandler = (enabled: boolean) => {
     setIsAutomoveButtonEnabled(enabled);
   };
 
-  setAutomoveActionVisible = (visible: boolean) => {
+  const setAutomoveActionVisibleHandler = (visible: boolean) => {
     setIsAutomoveButtonVisible(visible);
   };
 
-  setUndoVisible = (visible: boolean) => {
+  const setUndoVisibleHandler = (visible: boolean) => {
     setIsUndoButtonVisible(visible);
   };
 
-  setWatchOnlyVisible = (visible: boolean) => {
+  const setWatchOnlyVisibleHandler = (visible: boolean) => {
     setIsWatchOnlyIndicatorVisible(visible);
   };
 
-  setUndoEnabled = (enabled: boolean) => {
+  const setUndoEnabledHandler = (enabled: boolean) => {
     setIsUndoDisabled(!enabled);
   };
 
-  showPrimaryAction = (action: PrimaryActionType) => {
+  const showPrimaryActionHandler = (action: PrimaryAction) => {
     setPrimaryAction(action);
   };
 
-  disableAndHideUndoResignAndTimerControls = () => {
+  const disableAndHideUndoResignAndTimerControlsHandler = () => {
     setIsUndoDisabled(true);
     setIsUndoButtonVisible(false);
     setIsAutomoveButtonVisible(false);
@@ -2535,7 +2454,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     setIsClaimVictoryConfirmVisible(false);
   };
 
-  toggleReactionPicker = () => {
+  const toggleReactionPickerHandler = () => {
     if (!isReactionPickerVisible) {
       if (isVoiceReactionDisabled) {
         return;
@@ -2655,7 +2574,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
 
   const handleAutomoveClick = () => {
     if (!isAutomoveButtonEnabled) return;
-    setAutomoveActionEnabled(false);
+    setIsAutomoveButtonEnabled(false);
     didClickAutomoveButton();
   };
 
@@ -2786,8 +2705,8 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     [isVoiceReactionButtonVisible, setMatchScopedTimeout],
   );
 
-  const playerUid = playerSideMetadata.uid;
-  const opponentUid = opponentSideMetadata.uid;
+  const playerUid = getPlayerReactionUid();
+  const opponentUid = getOpponentReactionUid();
   const opponentProfile = opponentUid
     ? getStashedPlayerProfile(opponentUid)
     : undefined;
@@ -3416,11 +3335,52 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     pagedNavigationGames,
   ]);
 
+  useLayoutEffect(() => {
+    const boundApi = bindBottomControlsApi({
+      closeNavigationAndAppearancePopupIfAny:
+        closeNavigationAndAppearancePopupIfAnyHandler,
+      setNavigationListButtonVisible: setNavigationListButtonVisibleHandler,
+      hasNavigationPopupVisible: hasNavigationPopupVisibleHandler,
+      hasBottomPopupsVisible: hasBottomPopupsVisibleHandler,
+      showVoiceReactionButton: showVoiceReactionButtonHandler,
+      showMoveHistoryButton: showMoveHistoryButtonHandler,
+      showResignButton: showResignButtonHandler,
+      setInviteLinkActionVisible: setInviteLinkActionVisibleHandler,
+      setAutomatchEnabled: setAutomatchEnabledHandler,
+      setAutomatchVisible: setAutomatchVisibleHandler,
+      setBotGameOptionVisible: setBotGameOptionVisibleHandler,
+      setPlaySamePuzzleAgainButtonVisible:
+        setPlaySamePuzzleAgainButtonVisibleHandler,
+      setAutomatchWaitingState: setAutomatchWaitingStateHandler,
+      setBrushAndNavigationButtonDimmed:
+        setBrushAndNavigationButtonDimmedHandler,
+      showWaitingStateText: showWaitingStateTextHandler,
+      setHomeVisible: setHomeVisibleHandler,
+      setEndMatchVisible: setEndMatchVisibleHandler,
+      setEndMatchConfirmed: setEndMatchConfirmedHandler,
+      setUndoVisible: setUndoVisibleHandler,
+      setAutomoveActionEnabled: setAutomoveActionEnabledHandler,
+      setAutomoveActionVisible: setAutomoveActionVisibleHandler,
+      setWatchOnlyVisible: setWatchOnlyVisibleHandler,
+      setUndoEnabled: setUndoEnabledHandler,
+      disableAndHideUndoResignAndTimerControls:
+        disableAndHideUndoResignAndTimerControlsHandler,
+      setIsReadyToCopyExistingInviteLink:
+        setIsReadyToCopyExistingInviteLinkHandler,
+      hideTimerButtons: hideTimerButtonsHandler,
+      showTimerButtonProgressing: showTimerButtonProgressingHandler,
+      toggleReactionPicker: toggleReactionPickerHandler,
+      enableTimerVictoryClaim: enableTimerVictoryClaimHandler,
+      showPrimaryAction: showPrimaryActionHandler,
+    });
+    return () => unbindBottomControlsApi(boundApi);
+  });
+
   return (
     <>
       <BrushButton
         ref={brushButtonRef}
-        dimmed={isBrushButtonDimmed}
+        $dimmed={isBrushButtonDimmed}
         onClick={!isMobile ? handleBrushClick : undefined}
         onTouchStart={isMobile ? handleBrushClick : undefined}
         aria-label="Appearance"
@@ -3570,9 +3530,9 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         {isEndMatchPillVisible && (
           <BottomPillButton
             onClick={!isEndMatchPillFinished ? handleEndMatchClick : undefined}
-            isBlue={!isEndMatchPillFinished}
+            $isBlue={!isEndMatchPillFinished}
             disabled={isEndMatchPillFinished}
-            isViewOnly={isEndMatchPillFinished}
+            $isViewOnly={isEndMatchPillFinished}
           >
             {isEndMatchPillFinished ? (
               "Finished"
@@ -3587,14 +3547,14 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         {isWatchOnlyIndicatorVisible &&
           !isWatchOnlyMatchFinished &&
           !isEndMatchConfirmed && (
-            <BottomPillButton isViewOnly={true} disabled={true}>
+            <BottomPillButton $isViewOnly={true} disabled={true}>
               {"Watching"}
             </BottomPillButton>
           )}
         {isInviteLinkButtonVisible && !didCreateInvite && (
           <BottomPillButton
             onClick={handleInviteClick}
-            isBlue={true}
+            $isBlue={true}
             disabled={isInviteLoading}
           >
             {isInviteLoading ? (
@@ -3610,8 +3570,8 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         {isAutomatchPillVisible && (
           <BottomPillButton
             onClick={handleAutomatchClick}
-            isBlue={true}
-            isViewOnly={automatchButtonTmpState}
+            $isBlue={true}
+            $isViewOnly={automatchButtonTmpState}
             disabled={!isAutomatchButtonEnabled}
           >
             {automatchButtonTmpState ? (
@@ -3627,9 +3587,9 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         {isCancelAutomatchVisible && (
           <BottomPillButton
             onClick={handleCancelAutomatchClick}
-            isBlue={true}
+            $isBlue={true}
             disabled={isCancelAutomatchDisabled}
-            isViewOnly={isCancelAutomatchDisabled}
+            $isViewOnly={isCancelAutomatchDisabled}
           >
             {isCancelAutomatchDisabled ? (
               <ShimmerText>Canceling</ShimmerText>
@@ -3639,14 +3599,14 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
           </BottomPillButton>
         )}
         {isBotGameButtonVisible && (
-          <BottomPillButton onClick={handleBotGameClick} isBlue={true}>
+          <BottomPillButton onClick={handleBotGameClick} $isBlue={true}>
             <FaRobot style={{ marginRight: "6px", fontSize: "0.9em" }} />
             {"Bot Game"}
           </BottomPillButton>
         )}
         {isInviteLinkButtonVisible && didCreateInvite && (
           <>
-            <BottomPillButton onClick={handleInviteClick} isBlue={true}>
+            <BottomPillButton onClick={handleInviteClick} $isBlue={true}>
               {inviteCopiedTmpState ? (
                 "Link is copied"
               ) : (
@@ -3656,24 +3616,24 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
                 </>
               )}
             </BottomPillButton>
-            <BottomPillButton onClick={handleShare} isBlue={true}>
+            <BottomPillButton onClick={handleShare} $isBlue={true}>
               <FaShareAlt style={{ marginRight: "6px", fontSize: "0.9em" }} />
               {"Share"}
             </BottomPillButton>
           </>
         )}
         {primaryAction !== PrimaryActionType.None && (
-          <BottomPillButton isBlue={true} onClick={handlePrimaryActionClick}>
+          <BottomPillButton $isBlue={true} onClick={handlePrimaryActionClick}>
             {getPrimaryActionButtonText()}
           </BottomPillButton>
         )}
         {isSamePuzzleAgainVisible && (
-          <BottomPillButton onClick={handleSamePuzzleAgainClick} isBlue={true}>
+          <BottomPillButton onClick={handleSamePuzzleAgainClick} $isBlue={true}>
             {"Victory Lap"}
           </BottomPillButton>
         )}
         {waitingStateText !== "" && (
-          <BottomPillButton disabled={true} isViewOnly={true}>
+          <BottomPillButton disabled={true} $isViewOnly={true}>
             {waitingStateText}
           </BottomPillButton>
         )}
@@ -3727,8 +3687,8 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         )}
         {isVoiceReactionButtonVisible && !puzzleMode && (
           <ControlButton
-            onClick={!isMobile ? toggleReactionPicker : undefined}
-            onTouchStart={isMobile ? toggleReactionPicker : undefined}
+            onClick={!isMobile ? toggleReactionPickerHandler : undefined}
+            onTouchStart={isMobile ? toggleReactionPickerHandler : undefined}
             aria-label="Voice Reaction"
             ref={voiceReactionButtonRef}
             disabled={isVoiceReactionDisabled}
@@ -3748,20 +3708,17 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         )}
         <NavigationListButton
           ref={navigationButtonRef}
-          dimmed={isNavigationButtonDimmed}
+          $dimmed={isNavigationButtonDimmed}
           onClick={!isMobile ? handleNavigationButtonClick : undefined}
           onTouchStart={isMobile ? handleNavigationButtonClick : undefined}
           aria-label="Navigation"
         >
-          {HOME_NAVIGATION_BADGE_ENABLED && isBadgeVisible && (
-            <NavigationBadge />
-          )}
           <FaHome />
         </NavigationListButton>
         {isReactionPickerVisible && (
           <ReactionPillsContainer
             ref={pickerRef}
-            animatedMaxHeight={pickerMaxHeight}
+            $animatedMaxHeight={pickerMaxHeight}
           >
             {isWagerMode ? (
               <>
@@ -3920,33 +3877,4 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   );
 };
 
-export {
-  BottomControls as default,
-  setBrushAndNavigationButtonDimmed,
-  setPlaySamePuzzleAgainButtonVisible,
-  showWaitingStateText,
-  setEndMatchConfirmed,
-  setEndMatchVisible,
-  setBotGameOptionVisible,
-  setAutomatchWaitingState,
-  setAutomatchEnabled,
-  hasBottomPopupsVisible,
-  setWatchOnlyVisible,
-  setAutomoveActionEnabled,
-  setAutomoveActionVisible,
-  setIsReadyToCopyExistingInviteLink,
-  showVoiceReactionButton,
-  showMoveHistoryButton,
-  setInviteLinkActionVisible,
-  setAutomatchVisible,
-  showResignButton,
-  setUndoEnabled,
-  setUndoVisible,
-  setHomeVisible,
-  hideTimerButtons,
-  showTimerButtonProgressing,
-  disableAndHideUndoResignAndTimerControls,
-  enableTimerVictoryClaim,
-  showPrimaryAction,
-  setBadgeVisible,
-};
+export { BottomControls as default };

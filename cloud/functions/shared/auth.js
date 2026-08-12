@@ -41,6 +41,36 @@ const normalizeAuthCooldownReason = (value) => {
 const getAuthCooldownScope = (reason) =>
   reason === AUTH_COOLDOWN_REASONS.profileMethod ? "profile-method" : "method";
 
+const parseFiniteNumber = (value, fallback) => {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) ? Math.floor(numeric) : fallback;
+};
+
+const resolveAuthCooldownRetryAtMs = (
+  docData,
+  fallbackCooldownMs = AUTH_METHOD_REUSE_COOLDOWN_MS,
+) => {
+  const retryAtMs = parseFiniteNumber(docData && docData.retryAtMs, 0);
+  if (retryAtMs > 0) {
+    return retryAtMs;
+  }
+  const expiresAtMs = parseFiniteNumber(docData && docData.expiresAtMs, 0);
+  if (expiresAtMs > 0) {
+    return expiresAtMs;
+  }
+  const startedAtMs = Math.max(
+    parseFiniteNumber(docData && docData.startedAtMs, 0),
+    parseFiniteNumber(docData && docData.revokedAtMs, 0),
+    parseFiniteNumber(docData && docData.createdAtMs, 0),
+    parseFiniteNumber(docData && docData.updatedAtMs, 0),
+  );
+  const cooldownMs = parseFiniteNumber(
+    docData && docData.cooldownMs,
+    fallbackCooldownMs,
+  );
+  return startedAtMs > 0 && cooldownMs > 0 ? startedAtMs + cooldownMs : 0;
+};
+
 module.exports = {
   AUTH_METHODS,
   AUTH_METHOD_FIELD_BY_TYPE,
@@ -50,4 +80,5 @@ module.exports = {
   normalizeAuthMethod,
   normalizeAuthCooldownReason,
   getAuthCooldownScope,
+  resolveAuthCooldownRetryAtMs,
 };

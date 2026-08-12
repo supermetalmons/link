@@ -1,4 +1,4 @@
-import { hideShinyCard } from "./ShinyCard";
+import { hideShinyCard } from "./shinyCardUiPort";
 import { resetIslandOverlayState } from "./islandOverlayState";
 type SimpleTransientUiHandler = () => void;
 type NavigationTransientUiHandler = (options?: {

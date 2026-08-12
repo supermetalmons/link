@@ -1,10 +1,9 @@
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
-const admin = require("./firebaseAdmin");
 const {
   updateFrozenMaterials,
-  resolveWagerParticipants,
   removeWagerProposalWithRetry,
 } = require("./wagerHelpers");
+const { readWagerRequestContext } = require("./gameplay/wagerRequestContext");
 
 exports.cancelWagerProposal = onCall(async (request) => {
   if (!request.auth) {
@@ -27,27 +26,16 @@ exports.cancelWagerProposal = onCall(async (request) => {
     return { ok: false, reason: "invalid-argument", debug: baseDebug };
   }
 
-  const inviteSnap = await admin
-    .database()
-    .ref(`invites/${inviteId}`)
-    .once("value");
-  const inviteData = inviteSnap.val();
-  if (!inviteData) {
-    return { ok: false, reason: "invite-not-found", debug: baseDebug };
+  const context = await readWagerRequestContext({
+    request,
+    inviteId,
+    baseDebug,
+  });
+  if (context.failure) {
+    return context.failure;
   }
-  const inviteDebug = {
-    ...baseDebug,
-    hostId: inviteData.hostId || null,
-    guestId: inviteData.guestId || null,
-  };
-  if (!inviteData.guestId) {
-    return { ok: false, reason: "missing-opponent", debug: inviteDebug };
-  }
-  const resolved = await resolveWagerParticipants(inviteData, request.auth);
-  if (resolved.error) {
-    return { ok: false, reason: resolved.error, debug: inviteDebug };
-  }
-  const { playerUid } = resolved;
+  const { inviteDebug } = context;
+  const { playerUid } = context.participants;
   const resolvedDebug = { ...inviteDebug, playerUid };
 
   const removal = await removeWagerProposalWithRetry(

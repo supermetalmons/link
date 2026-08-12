@@ -197,6 +197,22 @@ test("requires an explicit smoke wallet and production version", () => {
   );
 });
 
+test("API token-file failures do not expose filesystem details", async () => {
+  const dependencies = createRuntimeDependencies({
+    readFile: () => {
+      throw new Error("private filesystem detail");
+    },
+  });
+
+  await assert.rejects(
+    execute(["triggers", "--token-file", "/secure/token"], dependencies),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message === "Unable to read --token-file." &&
+      !error.message.includes("private filesystem detail"),
+  );
+});
+
 test("removes Cloudflare, Wrangler, Helius, and dotenv values from child environments", () => {
   assert.deepEqual(
     createChildEnvironment({
@@ -604,13 +620,17 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
     dependencies,
   );
 
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.equal(calls[0].command, NODE_EXECUTABLE);
   assert.deepEqual(calls[0].args, [NPM_CLI_PATH, "run", "check:api"]);
   assert.equal(calls[0].environment.HELIUS_RPC_API_KEY, undefined);
   assert.equal(calls[0].environment.CLOUDFLARE_API_TOKEN, undefined);
   assert.equal(calls[1].command, NODE_EXECUTABLE);
-  assert.deepEqual(calls[1].args, [
+  assert.deepEqual(calls[1].args, [NPM_CLI_PATH, "run", "check:tooling"]);
+  assert.equal(calls[1].environment.HELIUS_RPC_API_KEY, undefined);
+  assert.equal(calls[1].environment.CLOUDFLARE_API_TOKEN, undefined);
+  assert.equal(calls[2].command, NODE_EXECUTABLE);
+  assert.deepEqual(calls[2].args, [
     WRANGLER_CLI_PATH,
     "versions",
     "upload",
@@ -620,9 +640,9 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
     "--env-file",
     WRANGLER_RELEASE_ENV_FILE,
   ]);
-  assert.equal(calls[1].environment.CLOUDFLARE_API_TOKEN, "file-token");
-  assert.equal(calls[1].environment.HELIUS_RPC_API_KEY, undefined);
-  assert.equal(calls[1].environment.CI, "true");
+  assert.equal(calls[2].environment.CLOUDFLARE_API_TOKEN, "file-token");
+  assert.equal(calls[2].environment.HELIUS_RPC_API_KEY, undefined);
+  assert.equal(calls[2].environment.CI, "true");
   assert.equal(files.size, 0);
   assert.equal(
     logs.some((message) => message.includes(SMOKE_SOL)),

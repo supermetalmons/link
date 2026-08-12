@@ -1,5 +1,7 @@
 # Cloudflare deployment
 
+See the repository [architecture and command map](../README.md) for local validation lanes. Firebase releases, Telegram recovery, and admin operations are documented in [cloud operations](../cloud/README.md).
+
 ## Frontend
 
 - Use Node.js 24 or newer.

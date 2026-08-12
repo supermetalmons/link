@@ -1,6 +1,6 @@
 import * as SVG from "../utils/svg";
 import { Location } from "../utils/gameModels";
-import { isFlipped, effectsLayer } from "./board";
+import { getBoardEffectsRuntime } from "./boardEffectsPort";
 
 type ParticleConfig = {
   numParticles: number;
@@ -36,6 +36,7 @@ type ParticleConfig = {
 };
 
 function inBoardCoordinates(location: Location): Location {
+  const { isFlipped } = getBoardEffectsRuntime();
   if (isFlipped) {
     return new Location(10 - location.i, 10 - location.j);
   } else {
@@ -49,6 +50,7 @@ function spawnParticlesAt(
   insertAtBeginning: boolean,
 ) {
   const location = inBoardCoordinates(at);
+  const { effectsLayer } = getBoardEffectsRuntime();
 
   const group = document.createElementNS(SVG.ns, "g");
   group.style.pointerEvents = "none";

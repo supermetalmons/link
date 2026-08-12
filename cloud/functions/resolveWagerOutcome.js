@@ -1,13 +1,18 @@
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const admin = require("./firebaseAdmin");
-const { batchReadWithRetry, getProfileByLoginId } = require("./utils");
+const { getProfileByLoginId } = require("./profileSummaryLookup");
 const {
   applyMaterialDeltas,
   updateFrozenMaterials,
   readUserMiningMaterials,
   updateUserMiningMaterials,
 } = require("./wagerHelpers");
-const { resolveMatchResult } = require("./matchResult");
+const { resolveMatchResult } = require("./matchOutcome");
+const {
+  assertInviteMatchesPlayers,
+  readMatchInviteRecords,
+} = require("./gameplay/matchRecords");
+const { assertResolvedPlayerClaim } = require("./gameplay/playerAuthorization");
 
 exports.resolveWagerOutcome = onCall(async (request) => {
   if (!request.auth) {
@@ -44,19 +49,13 @@ exports.resolveWagerOutcome = onCall(async (request) => {
     return { ok: false, reason: "invalid-argument", debug: baseDebug };
   }
 
-  const matchRef = admin
-    .database()
-    .ref(`players/${playerId}/matches/${matchId}`);
-  const inviteRef = admin.database().ref(`invites/${inviteId}`);
-  const opponentMatchRef = admin
-    .database()
-    .ref(`players/${opponentId}/matches/${matchId}`);
-
-  const [matchSnapshot, inviteSnapshot, opponentMatchSnapshot] =
-    await batchReadWithRetry([matchRef, inviteRef, opponentMatchRef]);
-  const matchData = matchSnapshot.val();
-  const inviteData = inviteSnapshot.val();
-  const opponentMatchData = opponentMatchSnapshot.val();
+  const { matchData, inviteData, opponentMatchData } =
+    await readMatchInviteRecords({
+      playerId,
+      opponentId,
+      matchId,
+      inviteId,
+    });
 
   if (!matchData || !inviteData || !opponentMatchData) {
     return { ok: false, reason: "match-not-found", debug: baseDebug };
@@ -70,29 +69,14 @@ exports.resolveWagerOutcome = onCall(async (request) => {
   const playerProfile = await getProfileByLoginId(playerId);
   const opponentProfile = await getProfileByLoginId(opponentId);
 
-  if (!(
-    (inviteData.hostId === playerId && inviteData.guestId === opponentId) ||
-    (inviteData.hostId === opponentId && inviteData.guestId === playerId)
-  )) {
-    throw new HttpsError(
-      "permission-denied",
-      "Players don't match invite data",
-    );
-  }
+  assertInviteMatchesPlayers(inviteData, playerId, opponentId);
 
-  if (uid !== playerId) {
-    const customClaims = request.auth.token || {};
-    if (
-      playerProfile.profileId &&
-      (!customClaims.profileId ||
-        customClaims.profileId !== playerProfile.profileId)
-    ) {
-      throw new HttpsError(
-        "permission-denied",
-        "You don't have permission to perform this action for this player.",
-      );
-    }
-  }
+  assertResolvedPlayerClaim({
+    uid,
+    playerId,
+    token: request.auth.token,
+    profileId: playerProfile.profileId,
+  });
 
   const matchResult = await resolveMatchResult(matchData, opponentMatchData);
   const result = matchResult.result;

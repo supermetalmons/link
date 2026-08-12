@@ -22,7 +22,10 @@ import {
 } from "../utils/gameModels";
 import { colors } from "../content/boardStyles";
 import { playSounds, playReaction, newReactionOfKind } from "../content/sounds";
-import { connection } from "../connection/connection";
+import {
+  gameConnection as connection,
+  type AutomatchResponse,
+} from "./gameConnectionPort";
 import {
   showMoveHistoryButton,
   setWatchOnlyVisible,
@@ -36,10 +39,10 @@ import {
   enableTimerVictoryClaim,
   showPrimaryAction,
   PrimaryActionType,
+  type PrimaryAction,
   setInviteLinkActionVisible,
   setAutomatchVisible,
   setHomeVisible,
-  setBadgeVisible,
   setIsReadyToCopyExistingInviteLink,
   setAutomoveActionVisible,
   setAutomoveActionEnabled,
@@ -53,11 +56,12 @@ import {
   setNavigationListButtonVisible,
   setPlaySamePuzzleAgainButtonVisible,
   closeNavigationAndAppearancePopupIfAny,
-} from "../ui/BottomControls";
+} from "../ui/controls/bottomControlsPort";
 import {
   triggerMoveHistoryPopupReload,
   isMoveHistoryPopupFollowingLatest,
-} from "../ui/MoveHistoryPopup";
+} from "../ui/controls/moveHistoryPopupStore";
+import { bindTutorialProgressSyncHandler } from "../ui/controls/tutorialProgressPort";
 import {
   Match,
   MatchWagerState,
@@ -72,16 +76,11 @@ import {
   Problem,
   markProblemCompleted,
   getTutorialCompleted,
-  getTutorialProgress,
-  getInitialProblem,
 } from "../content/problems";
 import { storage } from "../utils/storage";
-import {
-  showNotificationBanner,
-  hideNotificationBanner,
-} from "../ui/ProfileSignIn";
-import { showVideoReaction } from "../ui/BoardComponent";
-import { setIslandButtonDimmed } from "../index";
+import { hideNotificationBanner } from "../ui/identity/profileUiPort";
+import { showVideoReaction } from "../ui/controls/boardReactionPort";
+import { setIslandButtonDimmed } from "../runtime/islandButtonPort";
 import {
   getWagerState,
   setCurrentWagerMatch,
@@ -90,11 +89,7 @@ import {
 import {
   isTransitionInProgress,
   transitionToHome,
-} from "../session/AppSessionManager";
-import {
-  decrementLifecycleCounter,
-  incrementLifecycleCounter,
-} from "../lifecycle/lifecycleDiagnostics";
+} from "../session/sessionTransitionPort";
 import { getSessionGuard } from "./matchSession";
 import { syncOwnProfileMiningState } from "../services/ownProfileMiningHydration";
 import { RouteState, getCurrentRouteState } from "../navigation/routeState";
@@ -118,6 +113,30 @@ import {
   createLegacyBoardSquareTypeGrid,
   getDisplayedBoardSquareType,
 } from "./boardSquareTypes";
+import {
+  getNextBotAutomoveMode,
+  normalizeBotAutomoveMode,
+  type BotAutomoveMode,
+} from "./botAutomoveMode";
+import {
+  clearAllManagedGameTimeouts as clearManagedGameTimeouts,
+  clearManagedGameTimeout,
+  setManagedGameTimeout,
+} from "./managedGameTimeouts";
+import { bindGameInputRuntime } from "./gameInputPort";
+import {
+  buildGameFromMoveStreams,
+  countRecordedMovesInHistoricalPair as resolveRecordedMoveCount,
+  getHistoricalPairGameVariant,
+  getHistoricalResignedColor as resolveHistoricalResignedColor,
+  getHistoricalWinnerByTimerColor as resolveHistoricalTimerWinnerColor,
+  getMatchMovesByColor as resolveMatchMovesByColor,
+  getTrustedGameFromMatchPair as resolveTrustedGameFromMatchPair,
+  movesArrayForHistoryVerification,
+  normalizePersistedMoveHistory,
+  toMonsColor,
+  type TrustedMatchPairGame,
+} from "./historicalMatchModels";
 
 export let isWatchOnly = false;
 export let isOnlineGame = false;
@@ -136,8 +155,6 @@ let pendingAutomatchTransition = false;
 let pendingOnlineReconnectInviteId: string | null = null;
 let lastOnlineReconnectRequestedAtMs = 0;
 const onlineReconnectRequestCooldownMs = 3000;
-const shouldKeepOriginalBoardTileColoring = false;
-const shouldHighlightManaBasesOnNonClassicVariants = true;
 
 const watchOnlyListeners = new Set<(value: boolean) => void>();
 const displayedBoardSquareTypeListeners = new Set<
@@ -153,20 +170,7 @@ const isCreateInviteRoute = () =>
   activeRouteState.mode === "home" || activeRouteState.mode === "event";
 const isSnapshotRoute = () => activeRouteState.mode === "snapshot";
 const isBotsRoute = () => activeRouteState.mode === "watch";
-type BotAutomoveMode = "fast" | "normal" | "pro";
 type AutomovePreference = BotAutomoveMode;
-const botAutomoveModeCycle: BotAutomoveMode[] = ["fast", "normal", "pro"];
-const normalizeBotAutomoveMode = (
-  value: string | null | undefined,
-): BotAutomoveMode => {
-  if (value === "fast" || value === "normal" || value === "pro") {
-    return value;
-  }
-  if (value === "ultra") {
-    return "pro";
-  }
-  return "normal";
-};
 let botAutomoveMode: BotAutomoveMode = normalizeBotAutomoveMode(
   storage.getBotAutomoveMode("normal"),
 );
@@ -236,24 +240,15 @@ const normalizeBoardSquareType = (
 
 const buildBoardSquareTypeGrid = (
   gameModel: MonsRules.Game,
-  gameVariant: unknown = currentGameVariant,
+  _gameVariant: unknown = currentGameVariant,
 ): BoardSquareTypeGrid => {
-  if (shouldKeepOriginalBoardTileColoring) {
-    return createLegacyBoardSquareTypeGrid();
-  }
   const squareTypes: BoardSquareTypeGrid = [];
-  const shouldHighlightManaBases =
-    shouldHighlightManaBasesOnNonClassicVariants ||
-    normalizeStoredGameVariant(gameVariant) === legacyDefaultGameVariant;
   for (let row = 0; row < BOARD_GRID_SIZE; row += 1) {
     const squareTypeRow: BoardSquareType[] = [];
     for (let col = 0; col < BOARD_GRID_SIZE; col += 1) {
       const square = gameModel.squareAt({ row, column: col });
       squareTypeRow.push(
-        getDisplayedBoardSquareType(
-          normalizeBoardSquareType(square),
-          shouldHighlightManaBases,
-        ),
+        getDisplayedBoardSquareType(normalizeBoardSquareType(square), true),
       );
     }
     squareTypes.push(squareTypeRow);
@@ -467,7 +462,6 @@ let timerActivationCooldownMatchId: string | null = null;
 let timerActivationCooldownTurnNumber: number | null = null;
 let timerActivationCooldownStartedAtMs: number | null = null;
 let timerVictoryClaimTimeoutId: number | null = null;
-const activeGameTimeoutIds = new Set<number>();
 let isInviteBotIntoLocalGameUnavailable = false;
 let didMakeFirstLocalPlayerMoveOnLocalBoard = false;
 let viewedRematchMatchId: string | null = null;
@@ -568,43 +562,8 @@ type LocalRematchSnapshot = {
   resignedColor: "white" | "black" | null;
 };
 
-const setManagedGameTimeout = (
-  callback: () => void,
-  delay: number,
-  guard?: () => boolean,
-): number => {
-  incrementLifecycleCounter("gameTimeouts");
-  const timeoutId = window.setTimeout(() => {
-    if (activeGameTimeoutIds.has(timeoutId)) {
-      activeGameTimeoutIds.delete(timeoutId);
-      decrementLifecycleCounter("gameTimeouts");
-    }
-    if (guard && !guard()) {
-      return;
-    }
-    callback();
-  }, delay);
-  activeGameTimeoutIds.add(timeoutId);
-  return timeoutId;
-};
-
-const clearManagedGameTimeout = (timeoutId: number | null) => {
-  if (timeoutId === null) {
-    return;
-  }
-  if (activeGameTimeoutIds.has(timeoutId)) {
-    activeGameTimeoutIds.delete(timeoutId);
-    decrementLifecycleCounter("gameTimeouts");
-  }
-  clearTimeout(timeoutId);
-};
-
 const clearAllManagedGameTimeouts = () => {
-  activeGameTimeoutIds.forEach((timeoutId) => {
-    clearTimeout(timeoutId);
-    decrementLifecycleCounter("gameTimeouts");
-  });
-  activeGameTimeoutIds.clear();
+  clearManagedGameTimeouts();
   timerVictoryClaimTimeoutId = null;
 };
 
@@ -787,10 +746,12 @@ export const subscribeToWatchOnly = (listener: (value: boolean) => void) => {
 
 export function didSyncTutorialProgress() {
   if (getTutorialCompleted()) {
-    dismissBadgeAndNotificationBannerIfNeeded();
+    dismissNotificationBannerIfNeeded();
   }
   // TODO: update banner numbers if needed
 }
+
+bindTutorialProgressSyncHandler(didSyncTutorialProgress);
 
 function clearViewedRematchState() {
   viewedRematchRequestToken += 1;
@@ -1416,161 +1377,10 @@ function isValidGameFen(fen: unknown): boolean {
   return gameModelFromFen(fen) !== null;
 }
 
-type TrustedMatchPairGame = {
-  gameModel: MonsRules.Game;
-  whiteMovesCount: number;
-  blackMovesCount: number;
-};
-
-function normalizePersistedMoveHistory(value: unknown): string | null {
-  if (value === null || value === undefined) {
-    return "";
-  }
-  return typeof value === "string" ? value : null;
-}
-
-function persistedMoveCount(flatMovesString: string): number {
-  return flatMovesString === "" ? 0 : flatMovesString.split("-").length;
-}
-
-function movesArrayForHistoryVerification(flatMovesString: string): string[] {
-  return flatMovesString === "" ? [] : flatMovesString.split("-");
-}
-
-function getVerifiedFenCandidate(
-  match: Match,
-  whiteMovesString: string,
-  blackMovesString: string,
-): MonsRules.Game | null {
-  const candidate = gameModelFromFen(match.fen);
-  if (!candidate) {
-    return null;
-  }
-  try {
-    if (
-      candidate.verifyHistory({
-        white: movesArrayForHistoryVerification(whiteMovesString),
-        black: movesArrayForHistoryVerification(blackMovesString),
-      })
-    ) {
-      return candidate;
-    }
-  } catch {}
-  return null;
-}
-
 function getTrustedGameFromMatchPair(
   pair: HistoricalMatchPair,
 ): TrustedMatchPairGame | null {
-  const hostMatch = pair.hostMatch;
-  const guestMatch = pair.guestMatch;
-  if (!hostMatch || !guestMatch) {
-    return null;
-  }
-  const haveOppositeStoredColors =
-    (hostMatch.color === "white" && guestMatch.color === "black") ||
-    (hostMatch.color === "black" && guestMatch.color === "white");
-  if (!haveOppositeStoredColors) {
-    return null;
-  }
-
-  const whiteMatch = hostMatch.color === "white" ? hostMatch : guestMatch;
-  const blackMatch = hostMatch.color === "black" ? hostMatch : guestMatch;
-  const whiteMovesString = normalizePersistedMoveHistory(
-    whiteMatch.flatMovesString,
-  );
-  const blackMovesString = normalizePersistedMoveHistory(
-    blackMatch.flatMovesString,
-  );
-  if (whiteMovesString === null || blackMovesString === null) {
-    return null;
-  }
-
-  const hostCandidate = getVerifiedFenCandidate(
-    hostMatch,
-    whiteMovesString,
-    blackMovesString,
-  );
-  const guestCandidate = getVerifiedFenCandidate(
-    guestMatch,
-    whiteMovesString,
-    blackMovesString,
-  );
-  let verifiedGame: MonsRules.Game | null = null;
-  if (hostCandidate && guestCandidate) {
-    let candidatesAgree = false;
-    try {
-      candidatesAgree = hostCandidate.toFen() === guestCandidate.toFen();
-    } catch {
-      candidatesAgree = false;
-    }
-    if (!candidatesAgree) {
-      return null;
-    }
-    verifiedGame = hostCandidate;
-  } else {
-    verifiedGame = hostCandidate ?? guestCandidate;
-  }
-  if (!verifiedGame) {
-    return null;
-  }
-  return {
-    gameModel: verifiedGame,
-    whiteMovesCount: persistedMoveCount(whiteMovesString),
-    blackMovesCount: persistedMoveCount(blackMovesString),
-  };
-}
-
-function movesArrayFromFlatString(flatMovesString: unknown): string[] {
-  if (typeof flatMovesString !== "string" || flatMovesString === "") {
-    return [];
-  }
-  return flatMovesString.split("-").filter((move) => move !== "");
-}
-
-function buildGameFromMoveStreams(
-  gameVariant: unknown,
-  whiteMovesString: string,
-  blackMovesString: string,
-): MonsRules.Game | null {
-  const gameFromMoves = createGameModelForStoredVariant(gameVariant);
-  const whiteMoves = movesArrayFromFlatString(whiteMovesString);
-  const blackMoves = movesArrayFromFlatString(blackMovesString);
-  let whiteIndex = 0;
-  let blackIndex = 0;
-  while (whiteIndex < whiteMoves.length || blackIndex < blackMoves.length) {
-    const activeColor = gameFromMoves.activeColor;
-    if (activeColor === MonsRules.Color.White) {
-      if (whiteIndex >= whiteMoves.length) {
-        return null;
-      }
-      const output = gameFromMoves.playFen(whiteMoves[whiteIndex]);
-      if (output.kind === "invalid") {
-        return null;
-      }
-      whiteIndex += 1;
-    } else if (activeColor === MonsRules.Color.Black) {
-      if (blackIndex >= blackMoves.length) {
-        return null;
-      }
-      const output = gameFromMoves.playFen(blackMoves[blackIndex]);
-      if (output.kind === "invalid") {
-        return null;
-      }
-      blackIndex += 1;
-    } else {
-      return null;
-    }
-  }
-  return gameFromMoves;
-}
-
-function getHistoricalPairGameVariant(
-  pair: HistoricalMatchPair,
-): StoredGameVariant {
-  return normalizeStoredGameVariant(
-    pair.hostMatch?.gameVariant ?? pair.guestMatch?.gameVariant,
-  );
+  return resolveTrustedGameFromMatchPair(pair, gameModelFromFen);
 }
 
 function getReconstructedGameFromPair(
@@ -1705,54 +1515,19 @@ function getMatchMovesByColor(
   matchId: string,
   pair: HistoricalMatchPair,
 ): { whiteMoves: string | null; blackMoves: string | null } {
-  let whiteMoves: string | null = null;
-  let blackMoves: string | null = null;
-  const movesFromMatch = (match: Match | null): string =>
-    match?.flatMovesString ?? "";
-  const assignMovesByStoredColor = (match: Match | null) => {
-    if (!match) {
-      return;
-    }
-    if (match.color === "white" && whiteMoves === null) {
-      whiteMoves = match.flatMovesString ?? "";
-    } else if (match.color === "black" && blackMoves === null) {
-      blackMoves = match.flatMovesString ?? "";
-    }
-  };
-  assignMovesByStoredColor(pair.hostMatch);
-  assignMovesByStoredColor(pair.guestMatch);
-  if (whiteMoves === null || blackMoves === null) {
-    const hostColorBySeries = connection.getHostColorForMatch(matchId);
-    if (hostColorBySeries === "white") {
-      if (whiteMoves === null) {
-        whiteMoves = movesFromMatch(pair.hostMatch);
-      }
-      if (blackMoves === null) {
-        blackMoves = movesFromMatch(pair.guestMatch);
-      }
-    } else if (hostColorBySeries === "black") {
-      if (whiteMoves === null) {
-        whiteMoves = movesFromMatch(pair.guestMatch);
-      }
-      if (blackMoves === null) {
-        blackMoves = movesFromMatch(pair.hostMatch);
-      }
-    }
-  }
-  return {
-    whiteMoves,
-    blackMoves,
-  };
+  return resolveMatchMovesByColor(
+    pair,
+    connection.getHostColorForMatch(matchId),
+  );
 }
 
 function countRecordedMovesInHistoricalPair(
   matchId: string,
   pair: HistoricalMatchPair,
 ): number {
-  const { whiteMoves, blackMoves } = getMatchMovesByColor(matchId, pair);
-  return (
-    movesArrayFromFlatString(whiteMoves).length +
-    movesArrayFromFlatString(blackMoves).length
+  return resolveRecordedMoveCount(
+    pair,
+    connection.getHostColorForMatch(matchId),
   );
 }
 
@@ -1803,104 +1578,24 @@ function buildHistoricalGameModel(
   return getBestHistoricalGameModel(matchId, pair);
 }
 
-function toMonsColor(
-  color: string | null | undefined,
-): MonsRules.Color | undefined {
-  if (color === "white") {
-    return MonsRules.Color.White;
-  }
-  if (color === "black") {
-    return MonsRules.Color.Black;
-  }
-  return undefined;
-}
-
-function oppositeMonsColor(
-  color: MonsRules.Color | undefined,
-): MonsRules.Color | undefined {
-  if (color === MonsRules.Color.White) {
-    return MonsRules.Color.Black;
-  }
-  if (color === MonsRules.Color.Black) {
-    return MonsRules.Color.White;
-  }
-  return undefined;
-}
-
 function getHistoricalResignedColor(
   matchId: string,
   pair: HistoricalMatchPair,
 ): MonsRules.Color | undefined {
-  const hostMatchResigned = pair.hostMatch?.status === "surrendered";
-  const guestMatchResigned = pair.guestMatch?.status === "surrendered";
-  if (!hostMatchResigned && !guestMatchResigned) {
-    return undefined;
-  }
-  const hostStoredColor = hostMatchResigned
-    ? toMonsColor(pair.hostMatch?.color)
-    : undefined;
-  const guestStoredColor = guestMatchResigned
-    ? toMonsColor(pair.guestMatch?.color)
-    : undefined;
-  if (hostStoredColor !== undefined && guestStoredColor === undefined) {
-    return hostStoredColor;
-  }
-  if (guestStoredColor !== undefined && hostStoredColor === undefined) {
-    return guestStoredColor;
-  }
-  if (hostStoredColor !== undefined && guestStoredColor !== undefined) {
-    if (hostStoredColor === guestStoredColor) {
-      return hostStoredColor;
-    }
-  }
-  const hostSeriesColor = toMonsColor(connection.getHostColorForMatch(matchId));
-  if (hostSeriesColor !== undefined) {
-    if (hostMatchResigned && !guestMatchResigned) {
-      return hostSeriesColor;
-    }
-    if (guestMatchResigned && !hostMatchResigned) {
-      return oppositeMonsColor(hostSeriesColor);
-    }
-  }
-  return hostStoredColor ?? guestStoredColor;
+  return resolveHistoricalResignedColor(
+    pair,
+    connection.getHostColorForMatch(matchId),
+  );
 }
 
 function getHistoricalWinnerByTimerColor(
   matchId: string,
   pair: HistoricalMatchPair,
 ): MonsRules.Color | undefined {
-  const hostMatchWonByTimer = pair.hostMatch?.timer === MATCH_TIMER_TERMINAL;
-  const guestMatchWonByTimer = pair.guestMatch?.timer === MATCH_TIMER_TERMINAL;
-  if (!hostMatchWonByTimer && !guestMatchWonByTimer) {
-    return undefined;
-  }
-  const hostStoredColor = hostMatchWonByTimer
-    ? toMonsColor(pair.hostMatch?.color)
-    : undefined;
-  const guestStoredColor = guestMatchWonByTimer
-    ? toMonsColor(pair.guestMatch?.color)
-    : undefined;
-  if (hostStoredColor !== undefined && guestStoredColor === undefined) {
-    return hostStoredColor;
-  }
-  if (guestStoredColor !== undefined && hostStoredColor === undefined) {
-    return guestStoredColor;
-  }
-  if (hostStoredColor !== undefined && guestStoredColor !== undefined) {
-    if (hostStoredColor === guestStoredColor) {
-      return hostStoredColor;
-    }
-  }
-  const hostSeriesColor = toMonsColor(connection.getHostColorForMatch(matchId));
-  if (hostSeriesColor !== undefined) {
-    if (hostMatchWonByTimer && !guestMatchWonByTimer) {
-      return hostSeriesColor;
-    }
-    if (guestMatchWonByTimer && !hostMatchWonByTimer) {
-      return oppositeMonsColor(hostSeriesColor);
-    }
-  }
-  return hostStoredColor ?? guestStoredColor;
+  return resolveHistoricalTimerWinnerColor(
+    pair,
+    connection.getHostColorForMatch(matchId),
+  );
 }
 
 function getDisplayResignedColor(
@@ -2397,12 +2092,9 @@ export function didDismissMoveHistoryPopup() {
   syncInviteBotIntoLocalGameButton();
 }
 
-function dismissBadgeAndNotificationBannerIfNeeded() {
-  setBadgeVisible(false);
+function dismissNotificationBannerIfNeeded() {
   hideNotificationBanner();
 }
-
-const notificationBannerIsDisabledUntilItsMadeLessAnnoying = true;
 
 export function didAttemptAuthentication() {
   if (
@@ -2413,17 +2105,8 @@ export function didAttemptAuthentication() {
     !didConnect
   ) {
     if (!getTutorialCompleted()) {
-      setBadgeVisible(true);
       if (storage.isFirstLaunch()) {
         storage.trackFirstLaunch();
-      } else if (!notificationBannerIsDisabledUntilItsMadeLessAnnoying) {
-        const [completed, total] = getTutorialProgress();
-        showNotificationBanner(
-          "Play Mons 101",
-          `${completed} / ${total} lessons completed`,
-          "104",
-          resumeTutorialFromBanner,
-        );
       }
     }
   }
@@ -2941,7 +2624,7 @@ export function didFindYourOwnInviteThatNobodyJoined(isAutomatch: boolean) {
 }
 
 export function didClickStartBotGameButton() {
-  dismissBadgeAndNotificationBannerIfNeeded();
+  dismissNotificationBannerIfNeeded();
   startBotMatch(MonsRules.Color.White);
 }
 
@@ -3007,10 +2690,7 @@ export function didClickInviteBotIntoLocalGameButton() {
 }
 
 export function didClickBotStrengthControlButton() {
-  const nextIndex =
-    (botAutomoveModeCycle.indexOf(botAutomoveMode) + 1) %
-    botAutomoveModeCycle.length;
-  botAutomoveMode = botAutomoveModeCycle[nextIndex] ?? "normal";
+  botAutomoveMode = getNextBotAutomoveMode(botAutomoveMode);
   storage.setBotAutomoveMode(botAutomoveMode);
   syncBotStrengthControlButton();
 }
@@ -3027,7 +2707,7 @@ export function didFindInviteThatCanBeJoined() {
 }
 
 export function didClickAutomatchButton(
-  onAutomatchResponse?: (response: any) => void,
+  onAutomatchResponse?: (response: AutomatchResponse) => void,
 ) {
   setHomeVisible(true);
   setIslandButtonDimmed(true);
@@ -3037,7 +2717,7 @@ export function didClickAutomatchButton(
   showMoveHistoryButton(false);
   setInviteLinkActionVisible(false);
   setBotGameOptionVisible(false);
-  dismissBadgeAndNotificationBannerIfNeeded();
+  dismissNotificationBannerIfNeeded();
   setNavigationListButtonVisible(false);
   Board.hideBoardPlayersInfo();
   Board.removeHighlights();
@@ -3482,7 +3162,7 @@ export function didClickEndMatchButton() {
   triggerMoveHistoryPopupReload();
 }
 
-export function didClickPrimaryActionButton(action: PrimaryActionType) {
+export function didClickPrimaryActionButton(action: PrimaryAction) {
   switch (action) {
     case PrimaryActionType.JoinGame:
       connection.setupConnection(true);
@@ -4048,7 +3728,7 @@ function applyOutput(
 
       if (!isOnlineGame && !didStartLocalGame) {
         ensureLocalRematchSeriesInitialized();
-        dismissBadgeAndNotificationBannerIfNeeded();
+        dismissNotificationBannerIfNeeded();
         didStartLocalGame = true;
         setHomeVisible(true);
         setIslandButtonDimmed(true);
@@ -5345,7 +5025,7 @@ function updateDisplayedTimerIfNeeded(
 
 function showTimerCountdown(
   onConnect: boolean,
-  timer: any,
+  timer: unknown,
   timerColor: string,
   duration?: number,
 ): boolean {
@@ -5651,7 +5331,7 @@ export function didClickInviteActionButtonBeforeThereIsInviteReady() {
   setBrushAndNavigationButtonDimmed(true);
   setAutomatchVisible(false);
   setBotGameOptionVisible(false);
-  dismissBadgeAndNotificationBannerIfNeeded();
+  dismissNotificationBannerIfNeeded();
   setNavigationListButtonVisible(false);
   setAutomoveActionVisible(false);
   showMoveHistoryButton(false);
@@ -5676,10 +5356,6 @@ export function cleanupCurrentInputs() {
   currentInputs = [];
 }
 
-function resumeTutorialFromBanner() {
-  didSelectPuzzle(getInitialProblem());
-}
-
 export function getSelectedPuzzleId(): string | null {
   if (!puzzleMode || !selectedProblem) {
     return null;
@@ -5691,7 +5367,7 @@ export function didSelectPuzzle(
   problem: Problem,
   skipInstructions: boolean = false,
 ) {
-  dismissBadgeAndNotificationBannerIfNeeded();
+  dismissNotificationBannerIfNeeded();
   showPrimaryAction(PrimaryActionType.None);
   setPlaySamePuzzleAgainButtonVisible(false);
   isGameOver = false;
@@ -6044,3 +5720,28 @@ function movesCountOfMatch(match: Match): number {
   }
   return count;
 }
+
+bindGameInputRuntime({
+  get isOnlineGame() {
+    return isOnlineGame;
+  },
+  get isWatchOnly() {
+    return isWatchOnly;
+  },
+  get isGameWithBot() {
+    return isGameWithBot;
+  },
+  get isWaitingForRematchResponse() {
+    return isWaitingForRematchResponse;
+  },
+  didClickSquare,
+  didClickOutsideBoard,
+  didSelectInputModifier,
+  canChangeEmoji,
+  sendPlayerEmojiUpdate,
+  showItemsAfterChangingAssetsStyle,
+  cleanupCurrentInputs,
+  didClickInviteBotIntoLocalGameButton,
+  restoreBoardVariantAfterWaitingAnimation,
+  showNextWaitingAnimationBoardVariant,
+});

@@ -1,6 +1,9 @@
 import { storage } from "../utils/storage";
-import { connection } from "../connection/connection";
-import { didSyncTutorialProgress } from "../game/gameController";
+import { notifyTutorialProgressSynced } from "../ui/controls/tutorialProgressPort";
+import {
+  updatePersistedCompletedProblems,
+  updatePersistedTutorialCompleted,
+} from "./tutorialPersistencePort";
 
 export type Problem = {
   id: string;
@@ -208,11 +211,11 @@ export function markProblemCompleted(id: string): void {
     completed.add(id);
     const allCompleted = Array.from(completed);
     storage.setCompletedProblemIds(allCompleted);
-    connection.updateCompletedProblems(allCompleted);
+    updatePersistedCompletedProblems(allCompleted);
 
     if (allCompleted.length === problems.length && !getTutorialCompleted()) {
       storage.setTutorialCompleted(true);
-      connection.updateTutorialCompleted(true);
+      updatePersistedTutorialCompleted(true);
     }
   }
 }
@@ -245,12 +248,12 @@ export function syncTutorialProgress(
   storage.setTutorialCompleted(newTutorialCompleted);
 
   if (merged.size !== remoteCompletedProblemIds.length) {
-    connection.updateCompletedProblems(mergedArray);
+    updatePersistedCompletedProblems(mergedArray);
   }
   if (newTutorialCompleted !== remoteTutorialCompleted) {
-    connection.updateTutorialCompleted(newTutorialCompleted);
+    updatePersistedTutorialCompleted(newTutorialCompleted);
   }
-  didSyncTutorialProgress();
+  notifyTutorialProgressSynced();
 }
 
 export function getTutorialProgress(): [number, number] {

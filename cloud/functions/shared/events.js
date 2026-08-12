@@ -14,6 +14,15 @@ function isMonsLinkAdmin(value) {
   return MONS_LINK_ADMIN_USERNAMES.includes(value);
 }
 
+function isEventOwnedInvite(value) {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    (value.eventOwned === true ||
+      (typeof value.eventId === "string" && value.eventId.trim() !== ""))
+  );
+}
+
 const EVENT_SCHEMA_VERSION = 2;
 const THIRD_PLACE_MATCH_KEY = "third_place";
 const MIN_STARTS_IN_MINUTES = 1;
@@ -111,6 +120,7 @@ module.exports = {
   buildEventSeedOrder,
   getEventBracketSize,
   getFirstRoundByeSeeds,
+  isEventOwnedInvite,
   isMonsLinkAdmin,
   parseEventMatchKey,
 };

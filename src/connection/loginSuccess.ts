@@ -4,7 +4,7 @@ import {
   updateEmojiAndAuraIfNeeded,
 } from "../game/board";
 import { connection } from "./connection";
-import { updateProfileDisplayName } from "../ui/ProfileSignIn";
+import { updateProfileDisplayName } from "../ui/identity/profileUiPort";
 import {
   handleFreshlySignedInProfileInGameIfNeeded,
   isWatchOnly,

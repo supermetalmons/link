@@ -1,6 +1,20 @@
+import type {
+  CloudflareRuntime,
+  ProcessEnvironment,
+  SpawnResult,
+} from "./cloudflare/runtime.ts";
+
 const { spawnSync } = require("node:child_process");
 const { existsSync, mkdirSync, readFileSync } = require("node:fs");
 const { resolve } = require("node:path");
+const {
+  DeployError,
+  createWranglerEnvironment,
+  findLatestJsonRecord,
+  readCloudflareApiToken,
+  runCommand,
+  stripEnvironment,
+}: CloudflareRuntime = require("./cloudflare/runtime.ts");
 
 type DeployMode = "dry-run" | "preview" | "production";
 
@@ -10,15 +24,30 @@ type CliOptions = {
   versionId?: string;
 };
 
-const repoRoot = resolve(__dirname, "..");
-const isWindows = process.platform === "win32";
-const npmBinary = isWindows ? "npm.cmd" : "npm";
-const wranglerBinary = resolve(
-  repoRoot,
-  "node_modules",
-  ".bin",
-  isWindows ? "wrangler.cmd" : "wrangler",
-);
+export type FrontendRuntimeDependencies = {
+  repoRoot: string;
+  nodeVersion: string;
+  processEnv: ProcessEnvironment;
+  pid: number;
+  now: () => number;
+  npmExecutable: string;
+  wranglerExecutable: string;
+  spawn: (
+    command: string,
+    args: string[],
+    options: {
+      cwd: string;
+      env: ProcessEnvironment;
+      stdio: "inherit";
+      shell: false;
+    },
+  ) => SpawnResult;
+  exists: (path: string) => boolean;
+  mkdir: (path: string, options: { recursive: true }) => void;
+  readFile: (path: string, encoding: "utf8") => string;
+  log: (message: string) => void;
+};
+
 function usage(): string {
   return [
     "Build and deploy the mons.link frontend with the pinned local Wrangler.",
@@ -35,20 +64,14 @@ function usage(): string {
   ].join("\n");
 }
 
-function fail(message: string, exitCode = 1): never {
-  console.error(`\n[deploy] ${message}\n`);
-  process.exit(exitCode);
-}
-
 function parseArgs(argv: string[]): CliOptions {
   if (argv.includes("-h") || argv.includes("--help")) {
-    console.log(usage());
-    process.exit(0);
+    throw new DeployError(usage(), 0);
   }
 
   const mode = argv[0];
   if (mode !== "dry-run" && mode !== "preview" && mode !== "production") {
-    fail(
+    throw new DeployError(
       `Expected one deployment mode: dry-run, preview, or production.\n\n${usage()}`,
       2,
     );
@@ -56,96 +79,43 @@ function parseArgs(argv: string[]): CliOptions {
 
   let tokenFile: string | undefined;
   let versionId: string | undefined;
-  for (let i = 1; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === "--token-file") {
-      const value = argv[++i];
+  for (let index = 1; index < argv.length; index++) {
+    const arg = argv[index];
+    if (arg === "--token-file" || arg === "--version-id") {
+      const value = argv[++index];
       if (!value || value.startsWith("--")) {
-        fail("Missing value for --token-file.", 2);
+        throw new DeployError(`Missing value for ${arg}.`, 2);
       }
-      tokenFile = value;
+      if (arg === "--token-file") {
+        tokenFile = value;
+      } else {
+        versionId = value;
+      }
       continue;
     }
-    if (arg === "--version-id") {
-      const value = argv[++i];
-      if (!value || value.startsWith("--")) {
-        fail("Missing value for --version-id.", 2);
-      }
-      versionId = value;
-      continue;
-    }
-    fail(`Unknown argument: ${arg}\n\n${usage()}`, 2);
+    throw new DeployError(`Unknown argument: ${arg}\n\n${usage()}`, 2);
   }
 
   if (mode !== "production" && versionId) {
-    fail("--version-id is only valid in production mode.", 2);
+    throw new DeployError("--version-id is only valid in production mode.", 2);
   }
 
   return { mode, tokenFile, versionId };
 }
 
-function run(
-  command: string,
-  args: string[],
-  env: NodeJS.ProcessEnv,
-  label: string,
-): void {
-  const result = spawnSync(command, args, {
-    cwd: repoRoot,
-    env,
-    stdio: "inherit",
-    shell: false,
-  });
-
-  if (result.error) {
-    fail(`${label} could not start: ${result.error.message}`);
-  }
-  if (result.status !== 0) {
-    fail(
-      `${label} failed with exit code ${result.status ?? 1}.`,
-      result.status ?? 1,
-    );
-  }
-}
-
-function readApiToken(tokenFile?: string): string {
-  if (tokenFile) {
-    let value: string;
-    try {
-      value = readFileSync(resolve(tokenFile), "utf8").trim();
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      fail(`Unable to read --token-file: ${detail}`);
-    }
-    if (!value) {
-      fail("The Cloudflare token file is empty.");
-    }
-    return value;
-  }
-
-  const value = (process.env.CLOUDFLARE_API_TOKEN || "").trim();
-  if (!value) {
-    fail(
-      "Missing Cloudflare authentication. Pass --token-file or set CLOUDFLARE_API_TOKEN.",
-    );
-  }
-  return value;
-}
-
-function createBuildEnvironment(): NodeJS.ProcessEnv {
-  const buildEnv = { ...process.env };
-
-  for (const name of Object.keys(buildEnv)) {
-    const normalizedName = name.toUpperCase();
-    if (
+function createBuildEnvironment(
+  dependencies: FrontendRuntimeDependencies,
+): ProcessEnvironment {
+  const buildEnvironment = stripEnvironment(
+    dependencies.processEnv,
+    (normalizedName) =>
       normalizedName.startsWith("VITE_") ||
       normalizedName.startsWith("CLOUDFLARE_") ||
+      normalizedName.startsWith("CF_") ||
       normalizedName.startsWith("WRANGLER_") ||
-      normalizedName === "NODE_ENV"
-    ) {
-      delete buildEnv[name];
-    }
-  }
+      normalizedName === "DOTENV_KEY" ||
+      normalizedName === "NODE_ENV",
+  );
 
   for (const filename of [
     ".env",
@@ -153,116 +123,167 @@ function createBuildEnvironment(): NodeJS.ProcessEnv {
     ".env.production",
     ".env.production.local",
   ]) {
-    const envFile = resolve(repoRoot, filename);
-    if (!existsSync(envFile)) {
+    const envFile = resolve(dependencies.repoRoot, filename);
+    if (!dependencies.exists(envFile)) {
       continue;
     }
-    for (const line of readFileSync(envFile, "utf8").split(/\r?\n/)) {
+    for (const line of dependencies.readFile(envFile, "utf8").split(/\r?\n/)) {
       const name = line.match(
         /^\s*(?:export\s+)?(VITE_[A-Za-z0-9_.-]+)\s*=/i,
       )?.[1];
       if (name) {
-        buildEnv[name] = "";
+        buildEnvironment[name] = "";
       }
     }
   }
 
-  buildEnv.NODE_ENV = "production";
-  buildEnv.VITE_MONS_FIREBASE_API_KEY = "";
-  buildEnv.VITE_APPLE_CLIENT_ID = "";
-  buildEnv.VITE_APP_TITLE = "";
-  buildEnv.VITE_BUILD_DATETIME = String(Math.floor(Date.now() / 1000));
-  return buildEnv;
+  buildEnvironment.NODE_ENV = "production";
+  buildEnvironment.VITE_MONS_FIREBASE_API_KEY = "";
+  buildEnvironment.VITE_APPLE_CLIENT_ID = "";
+  buildEnvironment.VITE_APP_TITLE = "";
+  buildEnvironment.VITE_BUILD_DATETIME = String(
+    Math.floor(dependencies.now() / 1000),
+  );
+  return buildEnvironment;
 }
 
-function readUploadedVersionId(outputFile: string): string {
+function readUploadedVersionId(
+  outputFile: string,
+  dependencies: FrontendRuntimeDependencies,
+): string {
   let contents: string;
   try {
-    contents = readFileSync(outputFile, "utf8");
+    contents = dependencies.readFile(outputFile, "utf8");
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    fail(`Unable to read the uploaded version metadata: ${detail}`);
-  }
-
-  for (const line of contents.trim().split(/\r?\n/).reverse()) {
-    try {
-      const entry = JSON.parse(line) as {
-        type?: unknown;
-        version_id?: unknown;
-      };
-      if (
-        entry.type === "version-upload" &&
-        typeof entry.version_id === "string" &&
-        entry.version_id
-      ) {
-        return entry.version_id;
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  fail("Wrangler did not report the ID of the newly uploaded version.");
-}
-
-function main(): void {
-  const opts = parseArgs(process.argv.slice(2));
-  const nodeMajor = Number.parseInt(process.versions.node.split(".")[0], 10);
-  if (!Number.isFinite(nodeMajor) || nodeMajor < 24) {
-    fail(
-      `Node 24 or newer is required; current version is ${process.versions.node}.`,
+    throw new DeployError(
+      `Unable to read the uploaded version metadata: ${detail}`,
     );
   }
-  if (!existsSync(wranglerBinary)) {
-    fail("Pinned Wrangler binary not found. Run npm install first.");
+
+  const upload = findLatestJsonRecord(
+    contents,
+    (entry) => entry.type === "version-upload",
+  );
+  if (typeof upload?.version_id === "string" && upload.version_id) {
+    return upload.version_id;
+  }
+  throw new DeployError(
+    "Wrangler did not report the ID of the newly uploaded version.",
+  );
+}
+
+function createDefaultDependencies(): FrontendRuntimeDependencies {
+  const repoRoot = resolve(__dirname, "..");
+  const isWindows = process.platform === "win32";
+  return {
+    repoRoot,
+    nodeVersion: process.versions.node,
+    processEnv: process.env,
+    pid: process.pid,
+    now: Date.now,
+    npmExecutable: isWindows ? "npm.cmd" : "npm",
+    wranglerExecutable: resolve(
+      repoRoot,
+      "node_modules",
+      ".bin",
+      isWindows ? "wrangler.cmd" : "wrangler",
+    ),
+    spawn: spawnSync,
+    exists: existsSync,
+    mkdir: mkdirSync,
+    readFile: readFileSync,
+    log: console.log,
+  };
+}
+
+function execute(
+  argv: string[],
+  dependencies: FrontendRuntimeDependencies = createDefaultDependencies(),
+): void {
+  const options = parseArgs(argv);
+  const nodeMajor = Number.parseInt(dependencies.nodeVersion.split(".")[0], 10);
+  if (!Number.isFinite(nodeMajor) || nodeMajor < 24) {
+    throw new DeployError(
+      `Node 24 or newer is required; current version is ${dependencies.nodeVersion}.`,
+    );
+  }
+  if (!dependencies.exists(dependencies.wranglerExecutable)) {
+    throw new DeployError(
+      "Pinned Wrangler binary not found. Run npm install first.",
+    );
   }
 
   const apiToken =
-    opts.mode === "dry-run" ? undefined : readApiToken(opts.tokenFile);
-  const buildEnv = createBuildEnvironment();
+    options.mode === "dry-run"
+      ? undefined
+      : readCloudflareApiToken({
+          tokenFile: options.tokenFile,
+          environment: dependencies.processEnv,
+          readFile: dependencies.readFile,
+          includeReadError: true,
+        });
+  const buildEnvironment = createBuildEnvironment(dependencies);
 
-  console.log(`[deploy] Mode:  ${opts.mode}`);
-  if (opts.mode === "production" && opts.versionId) {
-    console.log(`[deploy] Version: ${opts.versionId}`);
+  dependencies.log(`[deploy] Mode:  ${options.mode}`);
+  if (options.mode === "production" && options.versionId) {
+    dependencies.log(`[deploy] Version: ${options.versionId}`);
   } else {
-    console.log(
+    dependencies.log(
       "[deploy] Build: npm run build (isolated Vite production environment)",
     );
-    run(npmBinary, ["run", "build"], buildEnv, "Frontend build");
+    runCommand(
+      dependencies.npmExecutable,
+      ["run", "build"],
+      buildEnvironment,
+      "Frontend build",
+      dependencies,
+      { includeSpawnError: true },
+    );
   }
 
-  const wranglerLogDirectory = resolve(repoRoot, ".cache", "wrangler-logs");
-  mkdirSync(wranglerLogDirectory, { recursive: true });
+  const wranglerLogDirectory = resolve(
+    dependencies.repoRoot,
+    ".cache",
+    "wrangler-logs",
+  );
+  dependencies.mkdir(wranglerLogDirectory, { recursive: true });
 
-  const wranglerEnv: NodeJS.ProcessEnv = {
-    ...buildEnv,
-    WRANGLER_LOG_PATH: wranglerLogDirectory,
-    WRANGLER_LOG_SANITIZE: "true",
-    WRANGLER_SEND_ERROR_REPORTS: "false",
-    WRANGLER_SEND_METRICS: "false",
-  };
+  const wranglerEnvironment = createWranglerEnvironment(
+    buildEnvironment,
+    wranglerLogDirectory,
+  );
   if (apiToken) {
-    wranglerEnv.CLOUDFLARE_API_TOKEN = apiToken;
+    wranglerEnvironment.CLOUDFLARE_API_TOKEN = apiToken;
   }
 
   let wranglerArgs: string[];
-  if (opts.mode === "dry-run") {
+  if (options.mode === "dry-run") {
     wranglerArgs = ["deploy", "--dry-run", "--config", "wrangler.jsonc"];
-  } else if (opts.mode === "preview") {
+  } else if (options.mode === "preview") {
     wranglerArgs = ["versions", "upload", "--config", "wrangler.jsonc"];
   } else {
-    let versionId = opts.versionId;
+    let versionId = options.versionId;
     if (!versionId) {
       const outputFile = resolve(
         wranglerLogDirectory,
-        `production-${process.pid}-${Date.now()}.json`,
+        `production-${dependencies.pid}-${dependencies.now()}.json`,
       );
-      wranglerEnv.WRANGLER_OUTPUT_FILE_PATH = outputFile;
+      wranglerEnvironment.WRANGLER_OUTPUT_FILE_PATH = outputFile;
       const uploadArgs = ["versions", "upload", "--config", "wrangler.jsonc"];
-      console.log(`[deploy] Wrangler: ${uploadArgs.slice(0, 2).join(" ")}`);
-      run(wranglerBinary, uploadArgs, wranglerEnv, "Wrangler version upload");
-      versionId = readUploadedVersionId(outputFile);
-      console.log(`[deploy] Version: ${versionId} (new)`);
+      dependencies.log(
+        `[deploy] Wrangler: ${uploadArgs.slice(0, 2).join(" ")}`,
+      );
+      runCommand(
+        dependencies.wranglerExecutable,
+        uploadArgs,
+        wranglerEnvironment,
+        "Wrangler version upload",
+        dependencies,
+        { includeSpawnError: true },
+      );
+      versionId = readUploadedVersionId(outputFile, dependencies);
+      dependencies.log(`[deploy] Version: ${versionId} (new)`);
     }
     wranglerArgs = [
       "versions",
@@ -277,8 +298,36 @@ function main(): void {
     ];
   }
 
-  console.log(`[deploy] Wrangler: ${wranglerArgs.slice(0, 2).join(" ")}`);
-  run(wranglerBinary, wranglerArgs, wranglerEnv, "Wrangler");
+  dependencies.log(`[deploy] Wrangler: ${wranglerArgs.slice(0, 2).join(" ")}`);
+  runCommand(
+    dependencies.wranglerExecutable,
+    wranglerArgs,
+    wranglerEnvironment,
+    "Wrangler",
+    dependencies,
+    { includeSpawnError: true },
+  );
 }
 
-main();
+if (require.main === module) {
+  try {
+    execute(process.argv.slice(2));
+  } catch (error) {
+    const exitCode = error instanceof DeployError ? error.exitCode : 1;
+    const message =
+      error instanceof Error ? error.message : "Unexpected failure.";
+    if (exitCode === 0) {
+      console.log(message);
+    } else {
+      console.error(`\n[deploy] ${message}\n`);
+    }
+    process.exitCode = exitCode;
+  }
+}
+
+module.exports = {
+  createBuildEnvironment,
+  execute,
+  parseArgs,
+  readUploadedVersionId,
+};

@@ -17,22 +17,16 @@ import {
   getRoutePathForTarget,
 } from "../navigation/routeState";
 import { INVALID_SNAPSHOT_ROUTE_ERROR } from "./sessionErrors";
+import {
+  bindSessionTransitionRuntime,
+  type SessionTransitionOptions,
+  type TransitionToHomeOptions,
+} from "./sessionTransitionPort";
 
 type AppSessionTarget = RouteState;
-type TransitionOptions = {
-  replace?: boolean;
-  skipNavigation?: boolean;
-  resetProfileScope?: boolean;
-  force?: boolean;
-};
-type TransitionToHomeOptions = {
-  resetProfileScope?: boolean;
-  forceMatchScopeReset?: boolean;
-  replace?: boolean;
-};
 type PendingTransitionRequest = {
   target: RouteState;
-  options?: TransitionOptions;
+  options?: SessionTransitionOptions;
   waiters: Array<() => void>;
 };
 
@@ -77,10 +71,10 @@ const isLobbyRoute = (target: RouteState): boolean => {
 };
 
 const mergeQueuedTransitionOptions = (
-  existing?: TransitionOptions,
-  incoming?: TransitionOptions,
-): TransitionOptions | undefined => {
-  const merged: TransitionOptions = {};
+  existing?: SessionTransitionOptions,
+  incoming?: SessionTransitionOptions,
+): SessionTransitionOptions | undefined => {
+  const merged: SessionTransitionOptions = {};
   if (incoming?.replace !== undefined) {
     merged.replace = incoming.replace;
   }
@@ -158,7 +152,7 @@ const syncEventModalForLobbyTarget = async (target: RouteState) => {
 
 const runTransition = async (
   target: RouteState,
-  options?: TransitionOptions,
+  options?: SessionTransitionOptions,
 ) => {
   if (isTransitioning) {
     return new Promise<void>((resolve) => {
@@ -276,7 +270,7 @@ const runTransition = async (
 
 export const transition = async (
   target: RouteState,
-  options?: TransitionOptions,
+  options?: SessionTransitionOptions,
 ) => {
   await runTransition(target, options);
 };
@@ -329,3 +323,9 @@ export const initializeAppSessionManager = () => {
   });
   void transition(currentTarget, { skipNavigation: true, force: true });
 };
+
+bindSessionTransitionRuntime({
+  transition,
+  transitionToHome,
+  isTransitionInProgress,
+});

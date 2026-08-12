@@ -10,8 +10,9 @@ import { logoBase64 } from "../content/uiAssets";
 import {
   didDismissSomethingWithOutsideTapJustNow,
   didNotDismissAnythingWithOutsideTapJustNow,
-  closeNavigationAndAppearancePopupIfAny,
-} from "./BottomControls";
+} from "./controls/outsideTapState";
+import { closeNavigationAndAppearancePopupIfAny } from "./controls/bottomControlsPort";
+import { bindMenuControlsApi } from "./controls/menuPort";
 import styled from "styled-components";
 import {
   defaultEarlyInputEventName,
@@ -24,8 +25,8 @@ import {
   LeaderboardType,
   LEADERBOARD_TYPE_ICON_URLS,
 } from "./Leaderboard";
-import { setAnimatedMonsEnabled } from "../game/board";
-import { closeProfilePopupIfAny } from "./ProfileSignIn";
+import { setAnimatedMonsEnabled } from "./mainMenuRuntimePort";
+import { closeProfilePopupIfAny } from "./identity/profileUiPort";
 import {
   FaTelegramPlane,
   FaUniversity,
@@ -42,7 +43,7 @@ import {
   FaRegGem,
   FaEllipsisH,
 } from "react-icons/fa";
-import { showsShinyCardSomewhere } from "./ShinyCard";
+import { showsShinyCardSomewhere } from "./shinyCardUiPort";
 import {
   startPlayingMusic,
   stopPlayingMusic,
@@ -65,8 +66,10 @@ import {
   MiningMaterialName,
 } from "../connection/connectionModels";
 import { registerMainMenuTransientUiHandler } from "./uiSession";
-import { connection } from "../connection/connection";
-import type { EventCreateDateTimePayload } from "../connection/connection";
+import {
+  createProfileEvent,
+  type EventCreateDateTimePayload,
+} from "./profileSurfaceDataPort";
 import {
   getEventModalState,
   openEventModal,
@@ -80,8 +83,12 @@ import {
   isMonsLinkAdmin,
   type EventScheduleTimezone,
 } from "@mons/shared/events";
-import type { AuthState } from "../connection/authentication";
+import type { AuthState } from "../connection/authModels";
 import { InventoryModal } from "./InventoryModal";
+import {
+  createCachedResource,
+  type CachedResource,
+} from "../resources/cachedResource";
 
 const MATERIAL_TYPES: MiningMaterialName[] = [...MINING_MATERIAL_NAMES];
 const LEADERBOARD_TYPES: LeaderboardType[] = [
@@ -141,43 +148,57 @@ const getDefaultScheduledDateTimeInput = (): { date: string; time: string } => {
   };
 };
 
-const materialImagePromises: Map<
-  MiningMaterialName,
-  Promise<string | null>
-> = new Map();
-const specialLeaderboardTypeImagePromises: Map<
+type ImageUrlResource = CachedResource<string | false>;
+
+const materialImageResources: Map<MiningMaterialName, ImageUrlResource> =
+  new Map();
+const specialLeaderboardTypeImageResources: Map<
   LeaderboardSpecialType,
-  Promise<string | null>
+  ImageUrlResource
 > = new Map();
 
-const fetchImageUrl = (url: string): Promise<string | null> =>
-  fetch(url)
-    .then((res) => {
-      if (!res.ok) throw new Error("Failed to fetch image");
-      return res.blob();
-    })
-    .then((blob) => URL.createObjectURL(blob))
-    .catch(() => null);
+const createImageUrlResource = (url: string): ImageUrlResource =>
+  createCachedResource(
+    async () => {
+      try {
+        const response = await fetch(url);
+        if (!response.ok) {
+          return false;
+        }
+        return URL.createObjectURL(await response.blob());
+      } catch {
+        return false;
+      }
+    },
+    () => {},
+  );
 
-const getMaterialImageUrl = (name: MiningMaterialName) => {
-  if (!materialImagePromises.has(name)) {
-    materialImagePromises.set(
-      name,
-      fetchImageUrl(`${MATERIAL_BASE_URL}/${name}.webp`),
-    );
+const loadCachedImageUrl = <Key,>(
+  resources: Map<Key, ImageUrlResource>,
+  key: Key,
+  url: string,
+): Promise<string | null> => {
+  let resource = resources.get(key);
+  if (!resource) {
+    resource = createImageUrlResource(url);
+    resources.set(key, resource);
   }
-  return materialImagePromises.get(name)!;
+  return resource.load().then((value) => value || null);
 };
 
-const getSpecialLeaderboardTypeImageUrl = (type: LeaderboardSpecialType) => {
-  if (!specialLeaderboardTypeImagePromises.has(type)) {
-    specialLeaderboardTypeImagePromises.set(
-      type,
-      fetchImageUrl(LEADERBOARD_TYPE_ICON_URLS[type]),
-    );
-  }
-  return specialLeaderboardTypeImagePromises.get(type)!;
-};
+const getMaterialImageUrl = (name: MiningMaterialName) =>
+  loadCachedImageUrl(
+    materialImageResources,
+    name,
+    `${MATERIAL_BASE_URL}/${name}.webp`,
+  );
+
+const getSpecialLeaderboardTypeImageUrl = (type: LeaderboardSpecialType) =>
+  loadCachedImageUrl(
+    specialLeaderboardTypeImageResources,
+    type,
+    LEADERBOARD_TYPE_ICON_URLS[type],
+  );
 
 const isMaterialLeaderboardType = (
   value: LeaderboardType,
@@ -282,20 +303,20 @@ const RockButton = styled.button`
   }
 `;
 
-const RockMenuWrapper = styled.div<{ isOpen: boolean }>`
+const RockMenuWrapper = styled.div<{ $isOpen: boolean }>`
   position: absolute;
   top: -25px;
   left: -26px;
   padding: 20px;
-  pointer-events: ${(props) => (props.isOpen ? "auto" : "none")};
-  z-index: ${(props) => (props.isOpen ? 80010 : 0)};
+  pointer-events: ${(props) => (props.$isOpen ? "auto" : "none")};
+  z-index: ${(props) => (props.$isOpen ? 80010 : 0)};
 
   @media screen and (max-width: 420px) {
     left: -23px;
   }
 `;
 
-const RockMenu = styled.div<{ isOpen: boolean; showLeaderboard: boolean }>`
+const RockMenu = styled.div<{ $isOpen: boolean }>`
   position: relative;
   background-color: var(--color-white);
   border-radius: 10px;
@@ -303,12 +324,12 @@ const RockMenu = styled.div<{ isOpen: boolean; showLeaderboard: boolean }>`
   display: flex;
   flex-direction: column;
   box-shadow: ${(props) =>
-    props.isOpen ? "0 6px 20px var(--notificationBannerShadow)" : "none"};
-  width: ${(props) => (props.showLeaderboard ? "min(300px, 83dvw)" : "230px")};
+    props.$isOpen ? "0 6px 20px var(--notificationBannerShadow)" : "none"};
+  width: min(300px, 83dvw);
 
   transform-origin: top left;
-  opacity: ${(props) => (props.isOpen ? 1 : 0)};
-  pointer-events: ${(props) => (props.isOpen ? "auto" : "none")};
+  opacity: ${(props) => (props.$isOpen ? 1 : 0)};
+  pointer-events: ${(props) => (props.$isOpen ? "auto" : "none")};
   z-index: 1;
 
   @media (prefers-color-scheme: dark) {
@@ -363,10 +384,7 @@ const LeaderboardTypeSelector = styled.div`
 `;
 
 const LeaderboardTypeButton = styled.button<{
-  isSelected: boolean;
-  isText?: boolean;
-  isSpecial?: boolean;
-  isTotal?: boolean;
+  $isSelected: boolean;
 }>`
   display: flex;
   align-items: center;
@@ -381,8 +399,8 @@ const LeaderboardTypeButton = styled.button<{
   font-size: 0.7rem;
   font-weight: 600;
   background-color: ${(props) =>
-    props.isSelected ? "var(--color-blue-primary)" : "var(--color-gray-f9)"};
-  color: ${(props) => (props.isSelected ? "#fff" : "#707070")};
+    props.$isSelected ? "var(--color-blue-primary)" : "var(--color-gray-f9)"};
+  color: ${(props) => (props.$isSelected ? "#fff" : "#707070")};
   -webkit-touch-callout: none;
   touch-action: manipulation;
   user-select: none;
@@ -392,7 +410,7 @@ const LeaderboardTypeButton = styled.button<{
   @media (hover: hover) and (pointer: fine) {
     &:hover {
       background-color: ${(props) =>
-        props.isSelected
+        props.$isSelected
           ? "var(--color-blue-primary)"
           : "var(--color-gray-f5)"};
     }
@@ -400,15 +418,15 @@ const LeaderboardTypeButton = styled.button<{
 
   @media (prefers-color-scheme: dark) {
     background-color: ${(props) =>
-      props.isSelected
+      props.$isSelected
         ? "var(--color-blue-primary-dark)"
         : "var(--color-gray-25)"};
-    color: ${(props) => (props.isSelected ? "#fff" : "var(--color-gray-99)")};
+    color: ${(props) => (props.$isSelected ? "#fff" : "var(--color-gray-99)")};
 
     @media (hover: hover) and (pointer: fine) {
       &:hover {
         background-color: ${(props) =>
-          props.isSelected
+          props.$isSelected
             ? "var(--color-blue-primary-dark)"
             : "var(--color-gray-27)"};
       }
@@ -935,6 +953,13 @@ export function hasMainMenuPopupsVisible(): boolean {
     (topRightControlsApi?.hasVisiblePopover() ?? false)
   );
 }
+
+bindMenuControlsApi({
+  closeAllKindsOfPopups,
+  closeMenuAndInfoIfAny,
+  closeMenuAndInfoIfAllowedForEvent,
+  hasMainMenuPopupsVisible,
+});
 
 interface TopRightControlsProps {
   authState: AuthState;
@@ -1596,10 +1621,9 @@ const MainMenu: React.FC = () => {
     setIsMenuOpen(false);
     setShowExperimental(false);
     openEventModalPendingCreate({ restoreHomeOnClose: false });
-    void connection
-      .createEvent(createRequest, {
-        announceOnTelegram: eventAnnounceOnTelegram,
-      })
+    void createProfileEvent(createRequest, {
+      announceOnTelegram: eventAnnounceOnTelegram,
+    })
       .then((result) => {
         if (!result.ok || !result.eventId) {
           setEventModalPendingCreateError("Failed to create event.");
@@ -1721,7 +1745,7 @@ const MainMenu: React.FC = () => {
           </CrackContainer>
         )}
         <RockMenuWrapper
-          isOpen={isMenuOpen}
+          $isOpen={isMenuOpen}
           onMouseLeave={(e) => {
             if (
               window.matchMedia("(hover: hover) and (pointer: fine)").matches
@@ -1738,7 +1762,7 @@ const MainMenu: React.FC = () => {
             }
           }}
         >
-          <RockMenu isOpen={isMenuOpen} showLeaderboard={true}>
+          <RockMenu $isOpen={isMenuOpen}>
             <MenuContent>
               <MenuTitle
                 onClick={!isMobile ? handleTitleClick : undefined}
@@ -1768,16 +1792,10 @@ const MainMenu: React.FC = () => {
                           : isMaterialType
                             ? materialUrls[type]
                             : null;
-                    const isTextType =
-                      (type === "total" && !showTotalAsIcons) ||
-                      (type !== "total" && !typeIconUrl);
                     return (
                       <LeaderboardTypeButton
                         key={type}
-                        isSelected={leaderboardType === type}
-                        isText={isTextType}
-                        isSpecial={isSpecialType}
-                        isTotal={type === "total"}
+                        $isSelected={leaderboardType === type}
                         onClick={() => handleLeaderboardTypeChange(type)}
                         onTouchStart={
                           isMobile

@@ -24,7 +24,6 @@ import {
   isPangchiuBoard,
   subscribeToBoardColorSetChanges,
 } from "../content/boardStyles";
-import { getUseLightTileManaBaseShade } from "../content/boardPatternSettings";
 import { defaultInputEventName, isMobile } from "../utils/misc";
 import { generateBoardPattern } from "../utils/boardPatternGenerator";
 import {
@@ -50,7 +49,12 @@ import {
 import {
   setWagerPanelOutsideTapHandler,
   setWagerPanelVisibilityChecker,
-} from "./BottomControls";
+} from "./controls/bottomControlsPort";
+import {
+  bindBoardVideoReactionHandler,
+  resetBoardVideoReactionHandler,
+  showVideoReaction,
+} from "./controls/boardReactionPort";
 import { connection } from "../connection/connection";
 import { MatchWagerState } from "../connection/connectionModels";
 import { subscribeToWagerState } from "../game/wagerState";
@@ -61,6 +65,25 @@ import {
   subscribeToFrozenMaterials,
 } from "../services/wagerMaterialsService";
 import { registerBoardTransientUiHandler } from "./uiSession";
+import {
+  bindBoardUiHandlers,
+  createEmptyPlayerInfoOverlayState,
+  playerInfoOverlayStatesEqual,
+} from "../game/boardUiPort";
+import type {
+  BoardInviteBotButtonLayout,
+  BoardEndOfGameMarker,
+  BoardPlayerInfoOverlayState,
+  BoardPlayerInfoSlotState,
+} from "../game/boardUiPort";
+import type { BotAutomoveMode } from "../game/botAutomoveMode";
+
+export type {
+  BoardInviteBotButtonLayout,
+  BoardPlayerInfoOverlayState,
+  BoardPlayerInfoSlotState,
+  BoardTimerColor,
+} from "../game/boardUiPort";
 
 const PANGCHIU_BOARD_BACKGROUND_URL =
   "https://cdn.lil.org/mons/boards/backgrounds/pangchiu.jpg";
@@ -132,89 +155,6 @@ export const updateBoardComponentForBoardStyleChange = () => {
   listeners.forEach((listener) => listener());
 };
 
-type BoardEndOfGameMarker = "none" | "victory" | "resign";
-export type BoardTimerColor = "green" | "orange" | "red";
-type BotStrengthControlMode = "fast" | "normal" | "pro";
-
-export type BoardInviteBotButtonLayout = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  fontSizePx: number;
-  horizontalPaddingPx: number;
-};
-
-export type BoardPlayerInfoSlotState = {
-  visible: boolean;
-  nameVisible: boolean;
-  scoreText: string;
-  nameText: string;
-  nameReactionText: string;
-  timerText: string;
-  timerVisible: boolean;
-  timerColor: BoardTimerColor;
-  endOfGameMarker: BoardEndOfGameMarker;
-  profileMetadataIsOpponent: boolean | null;
-};
-
-export type BoardPlayerInfoOverlayState = {
-  player: BoardPlayerInfoSlotState;
-  opponent: BoardPlayerInfoSlotState;
-  topControlSlot: WagerPileSide;
-  botStrengthControlVisible: boolean;
-  botStrengthControlMode: BotStrengthControlMode;
-  wagerLayoutRevision: number;
-};
-
-const createEmptyPlayerInfoSlotState = (): BoardPlayerInfoSlotState => ({
-  visible: false,
-  nameVisible: false,
-  scoreText: "",
-  nameText: "",
-  nameReactionText: "",
-  timerText: "",
-  timerVisible: false,
-  timerColor: "green",
-  endOfGameMarker: "none",
-  profileMetadataIsOpponent: null,
-});
-
-const createEmptyPlayerInfoOverlayState = (): BoardPlayerInfoOverlayState => ({
-  player: createEmptyPlayerInfoSlotState(),
-  opponent: createEmptyPlayerInfoSlotState(),
-  topControlSlot: "opponent",
-  botStrengthControlVisible: false,
-  botStrengthControlMode: "normal",
-  wagerLayoutRevision: 0,
-});
-
-const playerInfoSlotStatesEqual = (
-  a: BoardPlayerInfoSlotState,
-  b: BoardPlayerInfoSlotState,
-) =>
-  a.visible === b.visible &&
-  a.nameVisible === b.nameVisible &&
-  a.scoreText === b.scoreText &&
-  a.nameText === b.nameText &&
-  a.nameReactionText === b.nameReactionText &&
-  a.timerText === b.timerText &&
-  a.timerVisible === b.timerVisible &&
-  a.timerColor === b.timerColor &&
-  a.endOfGameMarker === b.endOfGameMarker &&
-  a.profileMetadataIsOpponent === b.profileMetadataIsOpponent;
-
-const playerInfoOverlayStatesEqual = (
-  a: BoardPlayerInfoOverlayState,
-  b: BoardPlayerInfoOverlayState,
-) =>
-  playerInfoSlotStatesEqual(a.player, b.player) &&
-  playerInfoSlotStatesEqual(a.opponent, b.opponent) &&
-  a.topControlSlot === b.topControlSlot &&
-  a.botStrengthControlVisible === b.botStrengthControlVisible &&
-  a.botStrengthControlMode === b.botStrengthControlMode &&
-  a.wagerLayoutRevision === b.wagerLayoutRevision;
-
 let latestBoardPlayerInfoOverlayState = createEmptyPlayerInfoOverlayState();
 let setTopBoardOverlayVisibleImpl: (
   blurry: boolean,
@@ -222,10 +162,6 @@ let setTopBoardOverlayVisibleImpl: (
   withConfirmAndCancelButtons: boolean,
   ok?: () => void,
   cancel?: () => void,
-) => void = () => {};
-let showVideoReactionImpl: (
-  opponent: boolean,
-  stickerId: number,
 ) => void = () => {};
 let showRaibowAuraImpl: (
   visible: boolean,
@@ -242,7 +178,7 @@ let updateWagerPlayerUidsImpl: (
 ) => void = () => {};
 type BotStrengthControlOverlayState = {
   visible: boolean;
-  mode: BotStrengthControlMode;
+  mode: BotAutomoveMode;
   x: number;
   y: number;
   size: number;
@@ -267,9 +203,7 @@ export const setTopBoardOverlayVisible = (
   );
 };
 
-export const showVideoReaction = (opponent: boolean, stickerId: number) => {
-  showVideoReactionImpl(opponent, stickerId);
-};
+export { showVideoReaction };
 
 export const showRaibowAura = (
   visible: boolean,
@@ -1537,7 +1471,6 @@ const BoardComponent: React.FC = () => {
     useState<BoardSquareTypeGrid | null>(() =>
       getCurrentDisplayedBoardSquareTypes(),
     );
-  const useLightTileManaBaseShade = getUseLightTileManaBaseShade();
   const [overlayState, setOverlayState] = useState<{
     blurry: boolean;
     svgElement: SVGElement | null;
@@ -1794,13 +1727,13 @@ const BoardComponent: React.FC = () => {
     clearPlayerVideoNow();
   }, [clearOpponentVideoNow, clearPlayerVideoNow]);
 
-  showVideoReactionImpl = (opponent: boolean, stickerId: number) => {
+  bindBoardVideoReactionHandler((opponent: boolean, stickerId: number) => {
     if (opponent) {
       showOpponentVideoReaction(stickerId);
     } else {
       showPlayerVideoReaction(stickerId);
     }
-  };
+  });
 
   const syncVideoReactionsAfterPageResume = useCallback(() => {
     if (document.visibilityState === "hidden") {
@@ -2201,7 +2134,7 @@ const BoardComponent: React.FC = () => {
     return () => {
       clearPendingWagerTransitionState();
       setTopBoardOverlayVisibleImpl = () => {};
-      showVideoReactionImpl = () => {};
+      resetBoardVideoReactionHandler();
       showRaibowAuraImpl = () => {};
       updateAuraForAvatarElementImpl = () => {};
       updateWagerPlayerUidsImpl = () => {};
@@ -3495,7 +3428,7 @@ const BoardComponent: React.FC = () => {
               offsetY: 100,
               keyPrefix: "board",
               squareTypes: displayedBoardSquareTypes,
-              useLightTileManaBaseShade: useLightTileManaBaseShade,
+              useLightTileManaBaseShade: true,
             })}
           </g>
         ) : (
@@ -4033,5 +3966,14 @@ const BoardComponent: React.FC = () => {
     </>
   );
 };
+
+bindBoardUiHandlers({
+  updateBoardComponentForBoardStyleChange,
+  setTopBoardOverlayVisible,
+  showRaibowAura,
+  updateAuraForAvatarElement,
+  updateWagerPlayerUids,
+  setBoardPlayerInfoOverlayState,
+});
 
 export default BoardComponent;

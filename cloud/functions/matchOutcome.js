@@ -1,5 +1,8 @@
 const { MATCH_TIMER_TERMINAL } = require("@mons/shared/timers");
-const { loadMonsRules, movesFromFlatString } = require("./monsRules");
+const { loadMonsRules } = require("./monsRules");
+const {
+  buildOrderedMatchSubmissions,
+} = require("./gameplay/matchReconstruction");
 
 const isNonEmptyString = (value) => typeof value === "string" && value !== "";
 const normalizeColor = (value) =>
@@ -41,18 +44,8 @@ async function resolveMatchWinner(matchData, opponentMatchData) {
   }
 
   const mons = await loadMonsRules();
-  const playerSubmission = {
-    fen: matchData.fen,
-    moves: movesFromFlatString(matchData.flatMovesString),
-  };
-  const opponentSubmission = {
-    fen: opponentMatchData.fen,
-    moves: movesFromFlatString(opponentMatchData.flatMovesString),
-  };
   const resolution = mons.resolveMatch(
-    playerColor === "white"
-      ? { white: playerSubmission, black: opponentSubmission }
-      : { white: opponentSubmission, black: playerSubmission },
+    buildOrderedMatchSubmissions(playerColor, matchData, opponentMatchData),
   );
 
   if (resolution.kind === "winner") {
@@ -74,6 +67,14 @@ async function resolveMatchWinner(matchData, opponentMatchData) {
   };
 }
 
+const resolveMatchResult = async (matchData, opponentMatchData) => {
+  const { winner } = await resolveMatchWinner(matchData, opponentMatchData);
+  const result =
+    winner === "player" ? "win" : winner === "opponent" ? "gg" : "none";
+  return { result };
+};
+
 module.exports = {
+  resolveMatchResult,
   resolveMatchWinner,
 };

@@ -9,6 +9,7 @@ export const MONS_LINK_ADMIN_USERNAMES: readonly [
 ];
 export type MonsLinkAdminUsername = (typeof MONS_LINK_ADMIN_USERNAMES)[number];
 export function isMonsLinkAdmin(value: unknown): value is MonsLinkAdminUsername;
+export function isEventOwnedInvite(value: unknown): boolean;
 
 export const EVENT_SCHEMA_VERSION: 2;
 export const THIRD_PLACE_MATCH_KEY: "third_place";
@@ -19,6 +20,12 @@ export const MAX_EVENT_PARTICIPANTS: 32;
 export const SCHEDULED_TIMEZONE_LOCAL: "local";
 
 export type EventScheduleTimezone = "local" | "ET" | "PT" | "CT";
+export type EventCreateDateTimePayload = {
+  scheduledDate: string;
+  scheduledTime: string;
+  scheduledTimezone: EventScheduleTimezone;
+  localTimezoneIana?: string;
+};
 export const EVENT_SCHEDULE_TIMEZONE_OPTIONS: readonly [
   Readonly<{ value: "local"; label: "Local" }>,
   Readonly<{ value: "ET"; label: "ET" }>,

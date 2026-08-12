@@ -38,7 +38,7 @@ export const ControlsContainer = styled.div`
 
 export const BrushButton = styled.button<{
   disabled?: boolean;
-  dimmed?: boolean;
+  $dimmed?: boolean;
 }>`
   position: fixed;
   bottom: max(10px, env(safe-area-inset-bottom));
@@ -47,7 +47,7 @@ export const BrushButton = styled.button<{
   height: 32px;
   border-radius: 16px;
   z-index: 1;
-  opacity: ${(props) => (props.dimmed ? 0.77 : 1)};
+  opacity: ${(props) => (props.$dimmed ? 0.77 : 1)};
   background-color: var(--color-gray-f9);
   border: none;
   display: flex;
@@ -105,9 +105,9 @@ export const BrushButton = styled.button<{
 `;
 
 export const BottomPillButton = styled.button<{
-  isPink?: boolean;
-  isBlue?: boolean;
-  isViewOnly?: boolean;
+  $isPink?: boolean;
+  $isBlue?: boolean;
+  $isViewOnly?: boolean;
   disabled?: boolean;
 }>`
   height: 32px;
@@ -184,7 +184,7 @@ export const BottomPillButton = styled.button<{
   }
 
   cursor: ${(props) =>
-    props.disabled || props.isViewOnly ? "default" : "pointer"};
+    props.disabled || props.$isViewOnly ? "default" : "pointer"};
   transition: background-color 0.3s ease;
   text-align: center;
   display: flex;
@@ -192,21 +192,21 @@ export const BottomPillButton = styled.button<{
   justify-content: center;
 
   background-color: ${(props) =>
-    props.isViewOnly
+    props.$isViewOnly
       ? "var(--color-gray-f0)"
-      : props.isBlue
+      : props.$isBlue
         ? "var(--color-gray-f0)"
-        : props.isPink && props.disabled
+        : props.$isPink && props.disabled
           ? "var(--pinkButtonBackgroundDisabled)"
-          : props.isPink
+          : props.$isPink
             ? "var(--color-pink-light)"
             : "var(--color-blue-primary)"};
   color: ${(props) =>
-    props.isPink && props.disabled
+    props.$isPink && props.disabled
       ? "var(--color-white)"
-      : props.isViewOnly
+      : props.$isViewOnly
         ? "var(--viewOnlyButtonTextColor)"
-        : props.isBlue
+        : props.$isBlue
           ? "var(--color-blue-primary)"
           : "var(--color-white)"};
   border: none;
@@ -214,13 +214,13 @@ export const BottomPillButton = styled.button<{
   @media (hover: hover) and (pointer: fine) {
     &:hover:not(:disabled) {
       background-color: ${(props) =>
-        props.isViewOnly
+        props.$isViewOnly
           ? "var(--color-gray-f0)"
-          : props.isBlue
+          : props.$isBlue
             ? "var(--color-gray-e0)"
-            : props.isPink && props.disabled
+            : props.$isPink && props.disabled
               ? "var(--pinkButtonBackgroundDisabled)"
-              : props.isPink
+              : props.$isPink
                 ? "var(--color-pink-mid)"
                 : "var(--bottomButtonBackgroundHover)"};
     }
@@ -228,48 +228,48 @@ export const BottomPillButton = styled.button<{
 
   &:active:not(:disabled) {
     background-color: ${(props) =>
-      props.isViewOnly
+      props.$isViewOnly
         ? "var(--color-gray-f0)"
-        : props.isBlue
+        : props.$isBlue
           ? "var(--color-gray-d0)"
-          : props.isPink && props.disabled
+          : props.$isPink && props.disabled
             ? "var(--pinkButtonBackgroundDisabled)"
-            : props.isPink
+            : props.$isPink
               ? "var(--pinkButtonBackgroundActive)"
               : "var(--bottomButtonBackgroundActive)"};
   }
 
   @media (prefers-color-scheme: dark) {
     color: ${(props) =>
-      props.isPink && props.disabled
+      props.$isPink && props.disabled
         ? "var(--color-text-on-pink-disabled)"
-        : props.isViewOnly
+        : props.$isViewOnly
           ? "var(--color-gray-77)"
-          : props.isBlue
+          : props.$isBlue
             ? "var(--color-blue-primary-dark)"
             : "var(--color-white)"};
 
     background-color: ${(props) =>
-      props.isViewOnly
+      props.$isViewOnly
         ? "var(--color-gray-33)"
-        : props.isBlue
+        : props.$isBlue
           ? "var(--color-gray-33)"
-          : props.isPink && props.disabled
+          : props.$isPink && props.disabled
             ? "var(--pinkButtonBackgroundDisabledDark)"
-            : props.isPink
+            : props.$isPink
               ? "var(--color-pink-mid)"
               : "var(--color-blue-primary-dark)"};
 
     @media (hover: hover) and (pointer: fine) {
       &:hover:not(:disabled) {
         background-color: ${(props) =>
-          props.isViewOnly
+          props.$isViewOnly
             ? "var(--color-gray-33)"
-            : props.isBlue
+            : props.$isBlue
               ? "var(--color-gray-44)"
-              : props.isPink && props.disabled
+              : props.$isPink && props.disabled
                 ? "var(--pinkButtonBackgroundDisabledDark)"
-                : props.isPink
+                : props.$isPink
                   ? "var(--color-pink-light)"
                   : "var(--bottomButtonBackgroundHoverDark)"};
       }
@@ -277,20 +277,20 @@ export const BottomPillButton = styled.button<{
 
     &:active:not(:disabled) {
       background-color: ${(props) =>
-        props.isViewOnly
+        props.$isViewOnly
           ? "var(--color-gray-33)"
-          : props.isBlue
+          : props.$isBlue
             ? "var(--color-gray-55)"
-            : props.isPink && props.disabled
+            : props.$isPink && props.disabled
               ? "var(--pinkButtonBackgroundDisabledDark)"
-              : props.isPink
+              : props.$isPink
                 ? "var(--pinkButtonBackgroundActiveDark)"
                 : "var(--bottomButtonBackgroundActiveDark)"};
     }
   }
 
   ${(props) =>
-    props.isViewOnly &&
+    props.$isViewOnly &&
     `
     font-weight: 600;
     letter-spacing: 0.015em;
@@ -380,12 +380,12 @@ export const ShimmerText = styled.span`
 
 export const NavigationListButton = styled.button<{
   disabled?: boolean;
-  dimmed?: boolean;
+  $dimmed?: boolean;
 }>`
   position: relative;
   width: 32px;
   height: 32px;
-  border-radius: ${(props) => (props.dimmed ? "16px" : "16px")};
+  border-radius: ${(props) => (props.$dimmed ? "16px" : "16px")};
   background-color: var(--color-gray-f0);
   border: none;
   display: flex;
@@ -403,19 +403,19 @@ export const NavigationListButton = styled.button<{
   overflow: visible;
 
   svg {
-    width: ${(props) => (props.dimmed ? "16px" : "13px")};
-    height: ${(props) => (props.dimmed ? "16px" : "13px")};
+    width: ${(props) => (props.$dimmed ? "16px" : "13px")};
+    height: ${(props) => (props.$dimmed ? "16px" : "13px")};
     color: ${(props) =>
-      props.dimmed ? "var(--color-gray-33)" : "var(--color-blue-primary)"};
+      props.$dimmed ? "var(--color-gray-33)" : "var(--color-blue-primary)"};
     overflow: visible;
   }
 
   @media screen and (max-width: 387px) {
-    width: ${(props) => (props.dimmed ? "32px" : "27px")};
+    width: ${(props) => (props.$dimmed ? "32px" : "27px")};
 
     svg {
-      width: ${(props) => (props.dimmed ? "16px" : "10px")};
-      height: ${(props) => (props.dimmed ? "16px" : "10px")};
+      width: ${(props) => (props.$dimmed ? "16px" : "10px")};
+      height: ${(props) => (props.$dimmed ? "16px" : "10px")};
     }
   }
 
@@ -429,7 +429,7 @@ export const NavigationListButton = styled.button<{
     background-color: var(--color-gray-33);
     svg {
       color: ${(props) =>
-        props.dimmed
+        props.$dimmed
           ? "var(--color-gray-f0)"
           : "var(--color-blue-primary-dark)"};
     }
@@ -440,17 +440,6 @@ export const NavigationListButton = styled.button<{
       }
     }
   }
-`;
-
-export const NavigationBadge = styled.div`
-  position: absolute;
-  top: -3px;
-  right: 1px;
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  background-color: var(--badgeBackgroundColor);
-  pointer-events: none;
 `;
 
 export const ControlButton = styled.button<{ disabled?: boolean }>`
@@ -511,10 +500,10 @@ export const ControlButton = styled.button<{ disabled?: boolean }>`
   }
 `;
 
-const ReactionPicker = styled.div<{ offsetToTheRight?: boolean }>`
+const ReactionPicker = styled.div<{ $offsetToTheRight?: boolean }>`
   position: absolute;
   bottom: 40px;
-  right: ${(props) => (props.offsetToTheRight ? "22px" : "64px")};
+  right: ${(props) => (props.$offsetToTheRight ? "22px" : "64px")};
   background-color: var(--panel-light-90);
   backdrop-filter: blur(3px);
   -webkit-backdrop-filter: blur(3px);
@@ -604,7 +593,7 @@ export const ResignButton = styled(ReactionButton)`
 `;
 
 export const ReactionPillsContainer = styled.div<{
-  animatedMaxHeight?: number;
+  $animatedMaxHeight?: number;
 }>`
   position: fixed;
   bottom: max(50px, calc(env(safe-area-inset-bottom) + 44px));
@@ -619,8 +608,8 @@ export const ReactionPillsContainer = styled.div<{
   gap: 6px;
   width: min(90vw, 204px);
   max-height: ${(props) =>
-    props.animatedMaxHeight
-      ? `min(calc(100dvh - 120px - env(safe-area-inset-bottom)), ${props.animatedMaxHeight}px)`
+    props.$animatedMaxHeight
+      ? `min(calc(100dvh - 120px - env(safe-area-inset-bottom)), ${props.$animatedMaxHeight}px)`
       : "calc(100dvh - 120px - env(safe-area-inset-bottom))"};
   transition: max-height 0.16s ease-out;
   overflow-y: auto;

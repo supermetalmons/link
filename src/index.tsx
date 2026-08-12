@@ -1,8 +1,16 @@
 import "./session/pendingLogoutWipeBootstrap";
 import "./index.css";
 import ReactDOM from "react-dom/client";
-import React, { Suspense, lazy, useCallback, useEffect, useState } from "react";
+import React, {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
+import "./ui/ShinyCard";
 import BoardComponent from "./ui/BoardComponent";
 import MainMenu, {
   closeAllKindsOfPopups,
@@ -12,9 +20,9 @@ import { useAuthStatus } from "./connection/authentication";
 import { connection } from "./connection/connection";
 import BottomControls from "./ui/BottomControls";
 import { isMobile } from "./utils/misc";
+import { preventTouchstartIfNeeded } from "./runtime/touchInputGuard";
 import { preloadSounds } from "./content/sounds";
 import { soundPlayer } from "./utils/SoundPlayer";
-import { storage } from "./utils/storage";
 import ProfileSignIn, {
   handleLogout,
   isLogoutUiLocked,
@@ -27,21 +35,84 @@ import { Sound } from "./utils/gameModels";
 import { initializeAppSessionManager } from "./session/AppSessionManager";
 import { getCurrentRouteState } from "./navigation/routeState";
 import { installLogoutSync } from "./session/logoutOrchestrator";
+import { bindGameConnection } from "./game/gameConnectionPort";
+import {
+  getIsMuted,
+  persistMuteState,
+  setIsMuted,
+  subscribeToMuteState,
+} from "./runtime/muteStore";
+import {
+  bindIslandButtonDimmer,
+  setIslandButtonDimmed,
+} from "./runtime/islandButtonPort";
+import { bindMiningConnection } from "./island/miningConnectionPort";
+import {
+  didClickAndChangePlayerEmoji,
+  didUpdateIdCardMons,
+  setAnimatedMonsEnabled,
+  updateEmojiAndAuraIfNeeded,
+} from "./game/board";
+import { isWatchOnly } from "./game/gameController";
+import { updateProfileDisplayName } from "./ui/identity/profileUiPort";
+import { syncTutorialProgress } from "./content/problems";
+import { syncOwnProfileMiningState } from "./services/ownProfileMiningHydration";
+import { bindPlayerMetadataRuntime } from "./utils/playerMetadataRuntimePort";
+import { bindProfileSurfaceData } from "./ui/profileSurfaceDataPort";
+import { bindMainMenuRuntime } from "./ui/mainMenuRuntimePort";
+import { bindShinyCardRuntime } from "./ui/shinyCardRuntimePort";
+import { bindTutorialPersistence } from "./content/tutorialPersistencePort";
+
+bindGameConnection(connection);
+bindMiningConnection(connection);
+bindTutorialPersistence({
+  updateCompletedProblems: (problemIds) =>
+    connection.updateCompletedProblems(problemIds),
+  updateTutorialCompleted: (completed) =>
+    connection.updateTutorialCompleted(completed),
+});
+bindPlayerMetadataRuntime({
+  createSessionGuard: () => connection.createSessionGuard(),
+  getProfileByLoginId: (loginId) => connection.getProfileByLoginId(loginId),
+  updateEmoji: (newId, matchOnly, aura) =>
+    connection.updateEmoji(newId, matchOnly, aura),
+  updateEmojiAndAuraIfNeeded,
+  isWatchOnly: () => isWatchOnly,
+  updateProfileDisplayName,
+  syncTutorialProgress,
+  syncOwnProfileMiningState,
+});
+bindProfileSurfaceData({
+  createEvent: (schedule, options) => connection.createEvent(schedule, options),
+  getLeaderboard: (type) => connection.getLeaderboard(type),
+  subscribeToProfileEventPrizes: (profileId, onUpdate, onError) =>
+    connection.subscribeToProfileEventPrizes(profileId, onUpdate, onError),
+  withdrawEventPrize: (eventId, prizeId, solanaAddress) =>
+    connection.withdrawEventPrize(eventId, prizeId, solanaAddress),
+});
+bindMainMenuRuntime({ setAnimatedMonsEnabled });
+bindShinyCardRuntime({
+  updateProfileCounter: (counter) => connection.updateProfileCounter(counter),
+  updateCardBackgroundId: (id) => connection.updateCardBackgroundId(id),
+  updateCardSubtitleId: (id) => connection.updateCardSubtitleId(id),
+  updateProfileMons: (mons) => connection.updateProfileMons(mons),
+  updateCardStickers: (stickers) => connection.updateCardStickers(stickers),
+  didClickAndChangePlayerEmoji,
+  didUpdateIdCardMons,
+});
 
 const LazyIslandButton = lazy(() => import("./ui/IslandButton"));
 
-let globalIsMuted: boolean = (() => {
-  return storage.getIsMuted(false);
-})();
-
-export const getIsMuted = (): boolean => globalIsMuted;
-
-export let setIslandButtonDimmed: (dimmed: boolean) => void = () => {};
+export { getIsMuted, setIslandButtonDimmed };
 
 const App = () => {
   const { authState } = useAuthStatus();
   const { authStatus } = authState;
-  const [isMuted, setIsMuted] = useState(globalIsMuted);
+  const isMuted = useSyncExternalStore(
+    subscribeToMuteState,
+    getIsMuted,
+    getIsMuted,
+  );
   const [isIslandButtonDim, setIsIslandButtonDim] = useState(() => {
     const routeState = getCurrentRouteState();
     return routeState.mode !== "home" && routeState.mode !== "event";
@@ -54,16 +125,12 @@ const App = () => {
   const shouldHideAuthControls =
     authStatus === "loading" || isLogoutUiLockedState;
 
-  setIslandButtonDimmed = (dimmed: boolean) => {
+  bindIslandButtonDimmer((dimmed: boolean) => {
     setIsIslandButtonDim(dimmed);
-  };
+  });
 
   useEffect(() => {
-    try {
-      storage.setIsMuted(isMuted);
-    } catch {}
-    globalIsMuted = isMuted;
-    soundPlayer.setMuted(isMuted);
+    persistMuteState();
   }, [isMuted]);
 
   useEffect(() => {
@@ -85,8 +152,6 @@ const App = () => {
 
   const handleMuteToggle = useCallback(() => {
     const nextIsMuted = !isMuted;
-    globalIsMuted = nextIsMuted;
-    soundPlayer.setMuted(nextIsMuted);
     setIsMuted(nextIsMuted);
     if (!nextIsMuted) {
       void soundPlayer.initializeOnUserInteraction(true);
@@ -129,33 +194,6 @@ root.render(
     <App />
   </React.StrictMode>,
 );
-
-let lastTouchStartTime = 0;
-const MIN_TIME_BETWEEN_TOUCHSTARTS = 555; // have seen a tooltip with 500
-
-export function preventTouchstartIfNeeded(event: TouchEvent | MouseEvent) {
-  if (!isMobile) {
-    return;
-  }
-  const target = event.target;
-  if (
-    target instanceof Element &&
-    target.closest(
-      ".small-top-control-buttons, [data-top-right-popover='true']",
-    )
-  ) {
-    return;
-  }
-  const currentTime = event.timeStamp;
-  const shouldPrevent =
-    currentTime - lastTouchStartTime < MIN_TIME_BETWEEN_TOUCHSTARTS;
-  if (!shouldPrevent) {
-    lastTouchStartTime = currentTime;
-  } else {
-    event.preventDefault();
-    event.stopPropagation();
-  }
-}
 
 if (isMobile) {
   document.addEventListener(

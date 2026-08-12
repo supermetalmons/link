@@ -12,7 +12,8 @@ export default [
     files: [
       "src/**/*.{ts,tsx}",
       "cloud/workers/api/**/*.ts",
-      "scripts/deploy-cloudflare-api*.ts",
+      "scripts/**/*.ts",
+      "cloud/admin/**/*.js",
     ],
     languageOptions: {
       ecmaVersion: "latest",

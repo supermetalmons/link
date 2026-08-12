@@ -1,10 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { cropAddress } from "@mons/shared/profiles";
 import { createEmptyMaterials } from "@mons/shared/mining";
 import styled from "styled-components";
 import { resolveENS } from "../utils/ensResolver";
-import { connection } from "../connection/connection";
-import { showShinyCard } from "./ShinyCard";
+import { showShinyCard } from "./shinyCardUiPort";
 import {
   PlayerProfile,
   MiningMaterialName,
@@ -18,6 +16,15 @@ import {
   type LeaderboardEntry,
   type LeaderboardType,
 } from "./leaderboardCache";
+import { getLeaderboardProfiles } from "./profileSurfaceDataPort";
+import {
+  LEADERBOARD_ENTRY_LIMIT,
+  createLeaderboardEntry,
+  getLeaderboardDisplayName,
+  getLeaderboardMaterialTotal,
+  populateMaterialLeaderboardCaches,
+  profilesToLeaderboardEntries,
+} from "./leaderboardModels";
 
 export {
   resetLeaderboardCache,
@@ -29,9 +36,7 @@ export const LEADERBOARD_TYPE_ICON_URLS = {
   mp: "https://cdn.lil.org/mons/emojipack/thumbs/1271.webp",
 } as const;
 
-const LEADERBOARD_ENTRY_LIMIT = 99;
-
-const LeaderboardContainer = styled.div<{ show: boolean }>`
+const LeaderboardContainer = styled.div`
   position: relative;
   opacity: 1;
   height: calc(
@@ -222,13 +227,13 @@ const TableWrapper = styled.div`
 `;
 
 const FloatingRowContainer = styled.div<{
-  visible: boolean;
-  position: "top" | "bottom";
-  suppressAnimation: boolean;
+  $visible: boolean;
+  $position: "top" | "bottom";
+  $suppressAnimation: boolean;
 }>`
   position: absolute;
   ${(props) =>
-    props.position === "top"
+    props.$position === "top"
       ? "top: -2px; padding-top: 2px;"
       : `bottom: ${BOTTOM_PANEL_OFFSET}px;`}
   left: 0;
@@ -236,15 +241,15 @@ const FloatingRowContainer = styled.div<{
   background: var(--color-white);
   transform: translateY(
     ${(props) =>
-      props.visible ? "0" : props.position === "top" ? "-100%" : "100%"}
+      props.$visible ? "0" : props.$position === "top" ? "-100%" : "100%"}
   );
-  opacity: ${(props) => (props.visible ? 1 : 0)};
+  opacity: ${(props) => (props.$visible ? 1 : 0)};
   transition: ${(props) =>
-    props.suppressAnimation
+    props.$suppressAnimation
       ? "none"
       : "transform 0.25s ease-out, opacity 0.2s ease-out"};
   z-index: 10;
-  pointer-events: ${(props) => (props.visible ? "auto" : "none")};
+  pointer-events: ${(props) => (props.$visible ? "auto" : "none")};
 
   @media (prefers-color-scheme: dark) {
     background: var(--color-deep-gray);
@@ -327,15 +332,18 @@ const FloatingRowName = styled.div`
   }
 `;
 
-const FloatingRowValue = styled.div<{ isRating?: boolean; win?: boolean }>`
+const FloatingRowValue = styled.div<{
+  $isRating?: boolean;
+  $win?: boolean;
+}>`
   width: 18.5%;
   text-align: right;
   padding-right: 15px;
   font-weight: 500;
   box-sizing: border-box;
   color: ${(props) => {
-    if (props.isRating) {
-      return props.win
+    if (props.$isRating) {
+      return props.$win
         ? "var(--leaderboardRatingWinColor)"
         : "var(--leaderboardRatingLossColor)";
     }
@@ -353,8 +361,8 @@ const FloatingRowValue = styled.div<{ isRating?: boolean; win?: boolean }>`
 
   @media (prefers-color-scheme: dark) {
     color: ${(props) => {
-      if (props.isRating) {
-        return props.win
+      if (props.$isRating) {
+        return props.$win
           ? "var(--leaderboardRatingWinColorDark)"
           : "var(--leaderboardRatingLossColorDark)";
       }
@@ -377,16 +385,16 @@ const LoadingText = styled.div`
   }
 `;
 
-const RatingCell = styled.td<{ win: boolean }>`
+const RatingCell = styled.td<{ $win: boolean }>`
   color: ${(props) =>
-    props.win
+    props.$win
       ? "var(--leaderboardRatingWinColor)"
       : "var(--leaderboardRatingLossColor)"};
   font-weight: 500;
 
   @media (prefers-color-scheme: dark) {
     color: ${(props) =>
-      props.win
+      props.$win
         ? "var(--leaderboardRatingWinColorDark)"
         : "var(--leaderboardRatingLossColorDark)"};
   }
@@ -514,34 +522,6 @@ interface LeaderboardProps {
   show: boolean;
   leaderboardType: LeaderboardType;
 }
-
-const getLeaderboardDisplayName = (row: LeaderboardEntry): string => {
-  if (row.username) return row.username;
-  if (row.ensName) return row.ensName;
-  if (row.eth) return cropAddress(row.eth);
-  if (row.sol) return cropAddress(row.sol);
-  return "";
-};
-
-const createLeaderboardEntry = (entry: PlayerProfile): LeaderboardEntry => ({
-  username: entry.username,
-  eth: entry.eth,
-  sol: entry.sol,
-  mp: entry.totalManaPoints ?? 0,
-  rating: Math.round(entry.rating ?? 1500),
-  win: entry.win ?? true,
-  id: entry.id,
-  emoji: entry.emoji,
-  aura: entry.aura,
-  ensName: null,
-  profile: entry,
-  materials: entry.mining?.materials
-    ? { ...createEmptyMaterials(), ...entry.mining.materials }
-    : createEmptyMaterials(),
-});
-
-const profilesToEntries = (profiles: PlayerProfile[]): LeaderboardEntry[] =>
-  profiles.map(createLeaderboardEntry);
 
 type RowPosition = "visible" | "above" | "below";
 
@@ -718,12 +698,11 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({
 
     const fetchId = ++currentFetchRef.current;
 
-    connection
-      .getLeaderboard(leaderboardType)
+    getLeaderboardProfiles(leaderboardType)
       .then((profiles) => {
         if (fetchId !== currentFetchRef.current) return;
 
-        const leaderboardData = profilesToEntries(profiles);
+        const leaderboardData = profilesToLeaderboardEntries(profiles);
         const currentEntry = getCurrentPlayerEntry();
         const mergedLeaderboardData =
           currentEntry &&
@@ -738,35 +717,10 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({
           leaderboardType === "total" ||
           MINING_MATERIAL_NAMES.includes(leaderboardType as MiningMaterialName)
         ) {
-          const allEntries = profilesToEntries(profiles);
-          const entryMap = new Map<string, LeaderboardEntry>();
-          allEntries.forEach((e) => entryMap.set(e.id, e));
-
-          MINING_MATERIAL_NAMES.forEach((material) => {
-            if (!leaderboardCache.has(material)) {
-              const sorted = [...entryMap.values()]
-                .sort((a, b) => b.materials[material] - a.materials[material])
-                .slice(0, LEADERBOARD_ENTRY_LIMIT);
-              leaderboardCache.set(material, sorted);
-            }
-          });
-
-          if (!leaderboardCache.has("total")) {
-            const sorted = [...entryMap.values()]
-              .sort((a, b) => {
-                const totalA = Object.values(a.materials).reduce(
-                  (sum, val) => sum + val,
-                  0,
-                );
-                const totalB = Object.values(b.materials).reduce(
-                  (sum, val) => sum + val,
-                  0,
-                );
-                return totalB - totalA;
-              })
-              .slice(0, LEADERBOARD_ENTRY_LIMIT);
-            leaderboardCache.set("total", sorted);
-          }
+          populateMaterialLeaderboardCaches(
+            leaderboardCache,
+            profilesToLeaderboardEntries(profiles),
+          );
         }
 
         const activeLeaderboardType = leaderboardType;
@@ -811,17 +765,13 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({
 
   const getValueCell = (row: LeaderboardEntry) => {
     if (leaderboardType === "rating") {
-      return <RatingCell win={row.win}>{row.rating}</RatingCell>;
+      return <RatingCell $win={row.win}>{row.rating}</RatingCell>;
     }
     if (leaderboardType === "mp") {
       return <MaterialCell>{row.mp}</MaterialCell>;
     }
     if (leaderboardType === "total") {
-      const total = Object.values(row.materials).reduce(
-        (sum, val) => sum + val,
-        0,
-      );
-      return <MaterialCell>{total}</MaterialCell>;
+      return <MaterialCell>{getLeaderboardMaterialTotal(row)}</MaterialCell>;
     }
     return <MaterialCell>{row.materials[leaderboardType]}</MaterialCell>;
   };
@@ -847,11 +797,11 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({
       return { value: row.mp, isRating: false, win: false };
     }
     if (leaderboardType === "total") {
-      const total = Object.values(row.materials).reduce(
-        (sum, val) => sum + val,
-        0,
-      );
-      return { value: total, isRating: false, win: false };
+      return {
+        value: getLeaderboardMaterialTotal(row),
+        isRating: false,
+        win: false,
+      };
     }
     return {
       value: row.materials[leaderboardType],
@@ -870,7 +820,7 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({
   };
 
   return (
-    <LeaderboardContainer show={show}>
+    <LeaderboardContainer>
       {data ? (
         <TableWrapper ref={tableWrapperRef}>
           <LeaderboardTable>
@@ -937,11 +887,11 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({
           {(["top", "bottom"] as const).map((position) => (
             <FloatingRowContainer
               key={position}
-              visible={
+              $visible={
                 currentRowPosition === (position === "top" ? "above" : "below")
               }
-              position={position}
-              suppressAnimation={
+              $position={position}
+              $suppressAnimation={
                 position === "top"
                   ? suppressPanelAnimation
                   : bottomPanelHasAnimated
@@ -971,8 +921,8 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({
                   </NameCellContent>
                 </FloatingRowName>
                 <FloatingRowValue
-                  isRating={getFloatingValue(currentPlayerData).isRating}
-                  win={getFloatingValue(currentPlayerData).win}
+                  $isRating={getFloatingValue(currentPlayerData).isRating}
+                  $win={getFloatingValue(currentPlayerData).win}
                 >
                   {getFloatingValue(currentPlayerData).value}
                 </FloatingRowValue>

@@ -9,7 +9,10 @@ const cloudRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(cloudRoot, "..");
 const functionsRoot = path.join(cloudRoot, "functions");
 const adminRoot = path.join(cloudRoot, "admin");
-const telegramClientPath = path.join(functionsRoot, "telegramClient.js");
+const telegramClientPaths = new Set([
+  path.join(functionsRoot, "telegramClient.js"),
+  path.join(functionsRoot, "telegram", "client.js"),
+]);
 const sourceExtensions = new Set([
   ".bash",
   ".cjs",
@@ -68,7 +71,7 @@ test("only the private Telegram client references the Bot API or token", () => {
   for (const filePath of listRepositorySourceFiles(repositoryRoot)) {
     const source = fs.readFileSync(filePath, "utf8");
     if (
-      filePath !== telegramClientPath &&
+      !telegramClientPaths.has(filePath) &&
       (source.includes(botApiHost) || source.includes(botTokenName))
     ) {
       violations.push(path.relative(repositoryRoot, filePath));
@@ -144,10 +147,10 @@ test("event Telegram projection uses a dedicated lock without changing domain lo
   assert.equal(eventsSource.includes("EVENT_TELEGRAM_PROJECTION_LOCK"), false);
 
   const projectorSource = fs.readFileSync(
-    path.join(functionsRoot, "eventTelegramAnnouncements.js"),
+    path.join(functionsRoot, "telegram", "eventAnnouncements.js"),
     "utf8",
   );
-  assert.equal(projectorSource.includes('require("./eventLocks")'), true);
+  assert.equal(projectorSource.includes('require("../eventLocks")'), true);
   assert.equal(projectorSource.includes("createEventLockManager"), true);
   assert.equal(projectorSource.includes("eventTelegramProjectionLocks"), true);
   assert.equal(

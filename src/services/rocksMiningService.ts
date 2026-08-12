@@ -1,32 +1,27 @@
 import {
   MATERIAL_KEYS,
-  cloneMaterials as cloneSharedMaterials,
   createDropsForMiningEvent,
-  createDropsFromRandom,
-  createEmptyMaterials as createSharedEmptyMaterials,
   formatMiningDateLocal,
-  normalizeMaterials as normalizeSharedMaterials,
-  normalizeMiningSnapshot as normalizeSharedMiningSnapshot,
 } from "@mons/shared/mining";
-import { computeHash32 } from "@mons/shared/ids";
-import { connection } from "../connection/connection";
 import {
   MiningMaterialName,
   PlayerMiningData,
   PlayerMiningMaterials,
 } from "../connection/connectionModels";
 import { storage } from "../utils/storage";
-
-const ROCK_VARIANT_COUNT = 27;
-
-const DROP_TESTING_MODE = false;
+import { getMiningConnection } from "../island/miningConnectionPort";
+import {
+  cloneMiningMaterials,
+  createEmptyMiningMaterials,
+  getRockVariantIndex,
+  isAnonymousProfile,
+  loadStoredMiningState,
+  normalizeMiningState,
+  shouldShowMiningRock,
+} from "../island/miningState";
 
 const getActiveProfileId = (): string => {
   return storage.getProfileId("");
-};
-
-const isAnonymousProfile = (profileId: string): boolean => {
-  return profileId === "";
 };
 
 type MiningListener = (snapshot: PlayerMiningData) => void;
@@ -42,30 +37,26 @@ export type MaterialName = MiningMaterialName;
 export const MATERIALS = MATERIAL_KEYS;
 
 const createEmptyMaterials = (): PlayerMiningMaterials =>
-  createSharedEmptyMaterials();
+  createEmptyMiningMaterials();
 
 const cloneMaterials = (source: PlayerMiningMaterials): PlayerMiningMaterials =>
-  cloneSharedMaterials(source);
-
-const normalizeMaterials = (
-  source?: Partial<PlayerMiningMaterials> | null,
-): PlayerMiningMaterials => normalizeSharedMaterials(source);
+  cloneMiningMaterials(source);
 
 const normalizeSnapshot = (
   source?: PlayerMiningData | null,
-): PlayerMiningData => normalizeSharedMiningSnapshot(source);
+): PlayerMiningData => normalizeMiningState(source);
 
 const formatMiningDate = formatMiningDateLocal;
 
 const loadInitialSnapshot = (profileId: string): PlayerMiningData => {
   const materials = isAnonymousProfile(profileId)
-    ? createEmptyMaterials()
-    : normalizeMaterials(storage.getMiningMaterials(createEmptyMaterials()));
-  const lastRockDateRaw = storage.getMiningLastRockDate(null);
-  return {
-    lastRockDate: typeof lastRockDateRaw === "string" ? lastRockDateRaw : null,
+    ? undefined
+    : storage.getMiningMaterials(createEmptyMaterials());
+  return loadStoredMiningState({
+    profileId,
+    lastRockDate: storage.getMiningLastRockDate(null),
     materials,
-  };
+  });
 };
 
 const initialProfileId = getActiveProfileId();
@@ -102,7 +93,7 @@ const setSnapshot = (
   if (isAnon) {
     serverSnapshotLoaded = true;
   }
-  if (!DROP_TESTING_MODE && persist) {
+  if (persist) {
     storage.setMiningLastRockDate(snapshot.lastRockDate);
     storage.setMiningMaterials(materials);
   }
@@ -117,11 +108,6 @@ const createDrops = (
   currentSnapshot: PlayerMiningData,
 ): { drops: MiningMaterialName[]; delta: PlayerMiningMaterials } =>
   createDropsForMiningEvent(profileId, date, currentSnapshot);
-
-const createTestingDrops = (): {
-  drops: MiningMaterialName[];
-  delta: PlayerMiningMaterials;
-} => createDropsFromRandom(Math.random);
 
 type MiningSubscription = () => void;
 
@@ -168,10 +154,6 @@ function setFromServer(
 
 function didBreakRock(): DidBreakRockResult {
   const date = formatMiningDate(new Date());
-  if (DROP_TESTING_MODE) {
-    const { drops, delta } = createTestingDrops();
-    return { drops, delta, date };
-  }
   const profileId = getActiveProfileId();
   const isAnon = isAnonymousProfile(profileId);
   const dropsData = isAnon
@@ -195,6 +177,7 @@ function didBreakRock(): DidBreakRockResult {
   };
   if (!isAnon) {
     const profileIdAtRequest = profileId;
+    const connection = getMiningConnection();
     const sessionGuard = connection.createSessionGuard();
     connection
       .mineRock(payload.date, payload.materials)
@@ -212,25 +195,21 @@ function didBreakRock(): DidBreakRockResult {
 }
 
 function shouldShowRock(dateOverride?: string): boolean {
-  if (DROP_TESTING_MODE) {
-    return true;
-  }
   const profileId = getActiveProfileId();
-  if (!isAnonymousProfile(profileId) && !serverSnapshotLoaded) {
-    return false;
-  }
   const today = dateOverride ?? formatMiningDate(new Date());
-  const last = snapshot.lastRockDate;
-  if (!last) return true;
-  return today > last;
+  return shouldShowMiningRock({
+    testingMode: false,
+    profileId,
+    serverSnapshotLoaded,
+    snapshot,
+    today,
+  });
 }
 
 function getRockImageUrl(dateOverride?: string): string {
   const today = dateOverride ?? formatMiningDate(new Date());
   const profileId = getActiveProfileId();
-  const seed = profileId ? `${profileId}:${today}` : today;
-  const hash = computeHash32(seed);
-  const index = (hash % ROCK_VARIANT_COUNT) + 1;
+  const index = getRockVariantIndex(profileId, today);
   return `https://cdn.lil.org/mons/rocks/gan/${index}.webp`;
 }
 

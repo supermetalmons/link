@@ -15,14 +15,17 @@ import {
   getActiveInventoryItemSelection,
   setOwnershipVerifiedIdCardEmoji,
   setOwnershipVerifiedSpecialItem,
-} from "./ShinyCard";
+} from "./shinyCardUiPort";
 import { AvatarImage } from "./AvatarImage";
 import { storage } from "../utils/storage";
-import type { AuthState } from "../connection/authentication";
+import type { AuthState } from "../connection/authModels";
 import { TopRightPopoverBase } from "./TopRightPopoverBase";
 import type { MaterialName } from "../services/rocksMiningService";
-import { connection } from "../connection/connection";
 import type { EventPrizeAssignment } from "../connection/connectionModels";
+import {
+  subscribeToProfileEventPrizes,
+  withdrawProfileEventPrize,
+} from "./profileSurfaceDataPort";
 import { BottomPillButton } from "./BottomControlsStyles";
 import { getEventPrizeDefinition } from "@mons/shared/event-prizes";
 import { isValidSolanaAddress } from "@mons/shared/solana";
@@ -660,7 +663,7 @@ const SpecialImage = styled.img`
   z-index: 2;
 `;
 
-const CountIndicator = styled.div<{ count: number }>`
+const CountIndicator = styled.div`
   position: absolute;
   bottom: -4px;
   right: -4px;
@@ -718,7 +721,7 @@ const CountedInventoryImage: React.FC<CountedInventoryImageProps> = ({
         />
       )}
       {count > 1 && loadedSrc === src && (
-        <CountIndicator count={count}>{count}</CountIndicator>
+        <CountIndicator>{count}</CountIndicator>
       )}
     </>
   );
@@ -862,7 +865,7 @@ export const InventoryModal = React.forwardRef<
       return;
     }
     setAreEventPrizesLoading(true);
-    return connection.subscribeToProfileEventPrizes(
+    return subscribeToProfileEventPrizes(
       authState.profileId,
       (prizes) => {
         setEventPrizes(
@@ -1138,7 +1141,7 @@ export const InventoryModal = React.forwardRef<
     setWithdrawalError("");
     setWithdrawalStatus("sending");
     try {
-      const response = await connection.withdrawEventPrize(
+      const response = await withdrawProfileEventPrize(
         prize.eventId,
         prize.prizeId,
         recipientAddress,
@@ -1500,8 +1503,8 @@ export const InventoryModal = React.forwardRef<
                         ref={withdrawalButtonRef}
                         type="button"
                         $status={withdrawalStatus}
-                        isBlue={withdrawalStatus === "idle"}
-                        isViewOnly={withdrawalStatus === "sending"}
+                        $isBlue={withdrawalStatus === "idle"}
+                        $isViewOnly={withdrawalStatus === "sending"}
                         disabled={isPrizeWithdrawalLocked}
                         onClick={() => void handleWithdrawEventPrize()}
                       >
@@ -1517,8 +1520,8 @@ export const InventoryModal = React.forwardRef<
                       <PrizeWithdrawalButton
                         type="button"
                         $status="idle"
-                        isBlue={false}
-                        isViewOnly={true}
+                        $isBlue={false}
+                        $isViewOnly={true}
                         disabled={true}
                       >
                         Claim coming soon
@@ -1532,8 +1535,8 @@ export const InventoryModal = React.forwardRef<
                     <PreviewActionButton
                       ref={previewActionButtonRef}
                       type="button"
-                      isBlue={!isPreviewItemCurrent}
-                      isViewOnly={isPreviewItemCurrent}
+                      $isBlue={!isPreviewItemCurrent}
+                      $isViewOnly={isPreviewItemCurrent}
                       disabled={isPreviewItemCurrent}
                       onClick={handleApplyPreviewItem}
                     >

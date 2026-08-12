@@ -30,3 +30,7 @@ export function normalizeAuthCooldownReason(
 export function getAuthCooldownScope(
   reason: AuthCooldownReason,
 ): AuthCooldownScope;
+export function resolveAuthCooldownRetryAtMs(
+  docData: unknown,
+  fallbackCooldownMs?: number,
+): number;

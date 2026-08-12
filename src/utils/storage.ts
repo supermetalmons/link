@@ -1,4 +1,4 @@
-import type { AssetsSet, BoardStyleSet } from "../content/boardStyles";
+import type { AssetsSet, BoardStyleSet } from "../content/boardStyleModels";
 
 export type AuthIdentity = {
   profileId: string;

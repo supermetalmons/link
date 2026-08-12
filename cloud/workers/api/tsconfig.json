@@ -16,10 +16,5 @@
     "strict": true,
     "types": ["node"]
   },
-  "include": [
-    "src/**/*.ts",
-    "test/**/*.ts",
-    "worker-configuration.d.ts",
-    "../../../scripts/deploy-cloudflare-api*.ts"
-  ]
+  "include": ["src/**/*.ts", "test/**/*.ts", "worker-configuration.d.ts"]
 }

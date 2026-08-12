@@ -72,14 +72,7 @@ import {
   HistoricalMatchPair,
   NavigationGameItem,
   NavigationItem,
-  NavigationItemStatus,
-  EventNavigationPreviewParticipant,
   EventRecord,
-  EventParticipant,
-  EventRound,
-  EventMatch,
-  EventPrizeAssignment,
-  EventPrizeAssignments,
   EventPrizeId,
   EventPrizeSelections,
   EventPrizeWithdrawalResponse,
@@ -133,13 +126,25 @@ import {
   normalizeStrictAutomatchStateHint,
 } from "@mons/shared/navigation";
 import { isAutoInviteId, pickHostColor } from "@mons/shared/ids";
-import {
-  THIRD_PLACE_MATCH_KEY,
-  type EventScheduleTimezone as SharedEventScheduleTimezone,
+import type {
+  EventCreateDateTimePayload,
+  EventScheduleTimezone as SharedEventScheduleTimezone,
 } from "@mons/shared/events";
 import type { AuthMethodKey } from "@mons/shared/auth";
 import type { XConsentSource } from "@mons/shared/x-redirect";
-import { isEventPrizeId } from "@mons/shared/event-prizes";
+import {
+  mapDatabaseEventRecord,
+  mapEventPrizeAssignment,
+  normalizeEventPrizeId,
+} from "./eventMappers";
+import { mapFirestoreGameDocToNavigationItem } from "./navigationMappers";
+import {
+  normalizeFiniteNumber,
+  normalizeString,
+  normalizeStringOrNull,
+} from "./valueNormalizers";
+import { ObserverRegistry } from "./observerRegistry";
+import { transition } from "../session/sessionTransitionPort";
 
 const normalizeMiningData = (source: any): PlayerMiningData =>
   normalizeMiningSnapshot({
@@ -212,13 +217,7 @@ const normalizeProfileMergeTargetId = (value: unknown): string | null => {
 };
 
 export type EventScheduleTimezone = SharedEventScheduleTimezone;
-
-export type EventCreateDateTimePayload = {
-  scheduledDate: string;
-  scheduledTime: string;
-  scheduledTimezone: EventScheduleTimezone;
-  localTimezoneIana?: string;
-};
+export type { EventCreateDateTimePayload } from "@mons/shared/events";
 
 type EventCreateOptions = {
   announceOnTelegram?: boolean;
@@ -311,8 +310,12 @@ class Connection {
   private miningFrozenRef: any = null;
   private matchRefs: { [key: string]: any } = {};
   private profileObserverCleanups = new Map<string, () => void>();
-  private observerCleanupByContext = new Map<number, Map<string, () => void>>();
-  private activeObserverKeysByContext = new Map<number, Set<string>>();
+  private observerRegistry = new ObserverRegistry(
+    (contextId, sessionEpoch) => this.isContextActive(contextId, sessionEpoch),
+    (reason, contextId) => {
+      this.logContextEvent("ctx.dispose", { reason, contextId });
+    },
+  );
 
   private loginUid: string | null = null;
   private sameProfilePlayerUid: string | null = null;
@@ -424,39 +427,11 @@ class Connection {
     key: string,
     cleanup: () => void,
   ): boolean {
-    let cleanupByKey = this.observerCleanupByContext.get(contextId);
-    if (!cleanupByKey) {
-      cleanupByKey = new Map();
-      this.observerCleanupByContext.set(contextId, cleanupByKey);
-    }
-    if (cleanupByKey.has(key)) {
-      return false;
-    }
-    cleanupByKey.set(key, cleanup);
-    let activeKeys = this.activeObserverKeysByContext.get(contextId);
-    if (!activeKeys) {
-      activeKeys = new Set();
-      this.activeObserverKeysByContext.set(contextId, activeKeys);
-    }
-    activeKeys.add(key);
-    return true;
+    return this.observerRegistry.register(contextId, key, cleanup);
   }
 
   private unregisterObserverCleanup(contextId: number, key: string): void {
-    const cleanupByKey = this.observerCleanupByContext.get(contextId);
-    if (cleanupByKey) {
-      cleanupByKey.delete(key);
-      if (cleanupByKey.size === 0) {
-        this.observerCleanupByContext.delete(contextId);
-      }
-    }
-    const activeKeys = this.activeObserverKeysByContext.get(contextId);
-    if (activeKeys) {
-      activeKeys.delete(key);
-      if (activeKeys.size === 0) {
-        this.activeObserverKeysByContext.delete(contextId);
-      }
-    }
+    this.observerRegistry.unregister(contextId, key);
   }
 
   private observeContextValue(
@@ -467,64 +442,22 @@ class Connection {
     onError?: (error: unknown) => void,
     onCleanup?: () => void,
   ): (() => void) | null {
-    const contextCleanup = () => {
-      off(targetRef);
-      decrementLifecycleCounter("connectionObservers");
-      onCleanup?.();
-    };
-    const isRegistered = this.registerObserverCleanup(
-      context.contextId,
+    return this.observerRegistry.observe(
+      context,
       key,
-      contextCleanup,
-    );
-    if (!isRegistered) {
-      return null;
-    }
-    incrementLifecycleCounter("connectionObservers");
-    onValue(
       targetRef,
-      (snapshot) => {
-        if (!this.isContextActive(context.contextId, context.sessionEpoch)) {
-          return;
-        }
-        onData(snapshot);
-      },
-      (error) => {
-        if (!this.isContextActive(context.contextId, context.sessionEpoch)) {
-          return;
-        }
-        onError?.(error);
-      },
+      onData,
+      onError,
+      onCleanup,
     );
-    return () => {
-      contextCleanup();
-      this.unregisterObserverCleanup(context.contextId, key);
-    };
   }
 
   private cleanupObserverContext(contextId: number, reason: string): void {
-    const cleanupByKey = this.observerCleanupByContext.get(contextId);
-    if (!cleanupByKey) {
-      return;
-    }
-    cleanupByKey.forEach((cleanup) => {
-      try {
-        cleanup();
-      } catch {}
-    });
-    this.observerCleanupByContext.delete(contextId);
-    this.activeObserverKeysByContext.delete(contextId);
-    this.logContextEvent("ctx.dispose", {
-      reason,
-      contextId,
-    });
+    this.observerRegistry.cleanupContext(contextId, reason);
   }
 
   private clearAllObserverContexts(reason: string): void {
-    const contextIds = Array.from(this.observerCleanupByContext.keys());
-    contextIds.forEach((contextId) => {
-      this.cleanupObserverContext(contextId, reason);
-    });
+    this.observerRegistry.clear(reason);
   }
 
   private buildRuntimeContext(
@@ -991,8 +924,8 @@ class Connection {
     autojoin = isAutoInviteId(inviteId),
   ): Promise<void> {
     const target = this.buildInviteRouteTarget(inviteId, autojoin);
-    const appSessionManager = await import("../session/AppSessionManager");
-    await appSessionManager.transition(target);
+    await Promise.resolve();
+    await transition(target);
   }
 
   private trackPendingInviteCreation(
@@ -1084,11 +1017,11 @@ class Connection {
       if (!inviteToReconnect) {
         return;
       }
-      const appSessionManager = await import("../session/AppSessionManager");
+      await Promise.resolve();
       if (!sessionGuard()) {
         return;
       }
-      await appSessionManager.transition(
+      await transition(
         {
           mode: "invite",
           path: inviteToReconnect,
@@ -3151,88 +3084,16 @@ class Connection {
     };
   }
 
-  private normalizeNavigationStatus(status: unknown): NavigationItemStatus {
-    if (
-      status === "pending" ||
-      status === "waiting" ||
-      status === "active" ||
-      status === "ended" ||
-      status === "dismissed"
-    ) {
-      return status;
-    }
-    return "waiting";
-  }
-
-  private readTimestampMillis(value: unknown): number {
-    if (typeof value === "number" && Number.isFinite(value)) {
-      return Math.floor(value);
-    }
-    if (
-      value &&
-      typeof value === "object" &&
-      "toMillis" in value &&
-      typeof (value as { toMillis: unknown }).toMillis === "function"
-    ) {
-      try {
-        const millis = (value as { toMillis: () => number }).toMillis();
-        if (Number.isFinite(millis)) {
-          return Math.floor(millis);
-        }
-      } catch {}
-    }
-    return 0;
-  }
-
-  private normalizeNavigationEntityType(value: unknown): "game" | "event" {
-    return value === "event" ? "event" : "game";
-  }
-
   private normalizeStringOrNull(value: unknown): string | null {
-    return typeof value === "string" && value !== "" ? value : null;
+    return normalizeStringOrNull(value);
   }
 
   private normalizeString(value: unknown): string {
-    return typeof value === "string" ? value : "";
+    return normalizeString(value);
   }
 
   private normalizeFiniteNumber(value: unknown, fallback = 0): number {
-    if (typeof value === "number" && Number.isFinite(value)) {
-      return Math.floor(value);
-    }
-    if (
-      typeof value === "string" &&
-      value !== "" &&
-      Number.isFinite(Number(value))
-    ) {
-      return Math.floor(Number(value));
-    }
-    return fallback;
-  }
-
-  private mapFirestoreParticipantPreview(
-    value: unknown,
-  ): EventNavigationPreviewParticipant[] {
-    if (!Array.isArray(value)) {
-      return [];
-    }
-    return value.reduce<EventNavigationPreviewParticipant[]>(
-      (acc, participant) => {
-        if (!participant || typeof participant !== "object") {
-          return acc;
-        }
-        const raw = participant as Record<string, unknown>;
-        const emojiId = this.normalizeFiniteNumber(raw.emojiId, NaN);
-        acc.push({
-          profileId: this.normalizeStringOrNull(raw.profileId),
-          displayName: this.normalizeStringOrNull(raw.displayName),
-          emojiId: Number.isFinite(emojiId) ? emojiId : null,
-          aura: this.normalizeStringOrNull(raw.aura),
-        });
-        return acc;
-      },
-      [],
-    );
+    return normalizeFiniteNumber(value, fallback);
   }
 
   private compareNavigationItems(a: NavigationItem, b: NavigationItem): number {
@@ -3243,379 +3104,28 @@ class Connection {
     rawData: Record<string, unknown>,
     fallbackInviteId: string,
   ): NavigationItem | null {
-    const entityType = this.normalizeNavigationEntityType(rawData.entityType);
-    if (entityType === "event") {
-      const eventId = this.normalizeStringOrNull(rawData.eventId);
-      if (!eventId) {
-        return null;
-      }
-      const rawStatus = this.normalizeNavigationStatus(rawData.status);
-      if (rawStatus === "pending") {
-        return null;
-      }
-      const status: Exclude<NavigationItemStatus, "pending"> = rawStatus;
-      const participantPreview = this.mapFirestoreParticipantPreview(
-        rawData.participantPreview,
-      );
-      return {
-        id:
-          typeof rawData.id === "string" && rawData.id !== ""
-            ? rawData.id
-            : `event_${eventId}`,
-        entityType: "event",
-        eventId,
-        status,
-        sortBucket: getNavigationSortBucket(status),
-        listSortAtMs:
-          this.readTimestampMillis(rawData.listSortAt) || Date.now(),
-        startAtMs: this.readTimestampMillis(rawData.startAt) || null,
-        updatedAtMs: this.readTimestampMillis(rawData.updatedAt) || null,
-        endedAtMs: this.readTimestampMillis(rawData.endedAt) || null,
-        participantCount: this.normalizeFiniteNumber(
-          rawData.participantCount,
-          participantPreview.length,
-        ),
-        participantPreview,
-        winnerDisplayName: this.normalizeStringOrNull(
-          rawData.winnerDisplayName,
-        ),
-      };
-    }
-
-    const inviteId =
-      typeof rawData.inviteId === "string" && rawData.inviteId !== ""
-        ? rawData.inviteId
-        : fallbackInviteId;
-    if (!inviteId) {
-      return null;
-    }
-
-    const rawStatus = this.normalizeNavigationStatus(rawData.status);
-    const status = rawStatus === "dismissed" ? "ended" : rawStatus;
-    const sortBucket = getNavigationSortBucket(status);
-    const listSortAtMs = this.readTimestampMillis(rawData.listSortAt);
-    const automatchStateHint = normalizeStrictAutomatchStateHint(
-      rawData.automatchStateHint,
-    );
-    const rawOpponentEmoji = rawData.opponentEmoji ?? rawData.opponentEmojiId;
-    const rawOpponentName = rawData.opponentName ?? rawData.opponentDisplayName;
-    const opponentEmoji =
-      typeof rawOpponentEmoji === "number" && Number.isFinite(rawOpponentEmoji)
-        ? Math.floor(rawOpponentEmoji)
-        : typeof rawOpponentEmoji === "string" &&
-            rawOpponentEmoji !== "" &&
-            Number.isFinite(Number(rawOpponentEmoji))
-          ? Math.floor(Number(rawOpponentEmoji))
-          : null;
-
-    if ((status === "active" || status === "ended") && opponentEmoji === null) {
-      return null;
-    }
-
-    return {
-      id: inviteId,
-      entityType: "game",
-      inviteId,
-      kind: rawData.kind === "auto" ? "auto" : "direct",
-      status,
-      sortBucket,
-      listSortAtMs: listSortAtMs > 0 ? listSortAtMs : Date.now(),
-      hostLoginId:
-        typeof rawData.hostLoginId === "string" ? rawData.hostLoginId : null,
-      guestLoginId:
-        typeof rawData.guestLoginId === "string" ? rawData.guestLoginId : null,
-      opponentProfileId:
-        typeof rawData.opponentProfileId === "string"
-          ? rawData.opponentProfileId
-          : null,
-      opponentName:
-        typeof rawOpponentName === "string" ? rawOpponentName : null,
-      opponentEmoji,
-      automatchStateHint,
-      isPendingAutomatch:
-        typeof rawData.isPendingAutomatch === "boolean"
-          ? rawData.isPendingAutomatch
-          : status === "pending",
-    };
-  }
-
-  private mapEventParticipant(
-    rawData: Record<string, unknown>,
-    fallbackProfileId: string,
-  ): EventParticipant {
-    return {
-      profileId: this.normalizeString(rawData.profileId) || fallbackProfileId,
-      loginUid: this.normalizeString(rawData.loginUid),
-      username: this.normalizeString(rawData.username),
-      displayName: this.normalizeString(rawData.displayName),
-      emojiId: this.normalizeFiniteNumber(rawData.emojiId, 0),
-      aura: this.normalizeString(rawData.aura),
-      joinedAtMs: this.normalizeFiniteNumber(rawData.joinedAtMs, 0),
-      state:
-        rawData.state === "eliminated" || rawData.state === "winner"
-          ? rawData.state
-          : "active",
-      eliminatedRoundIndex: Number.isFinite(
-        this.normalizeFiniteNumber(rawData.eliminatedRoundIndex, NaN),
-      )
-        ? this.normalizeFiniteNumber(rawData.eliminatedRoundIndex, NaN)
-        : null,
-      eliminatedByProfileId: this.normalizeStringOrNull(
-        rawData.eliminatedByProfileId,
-      ),
-    };
-  }
-
-  private mapEventMatch(
-    rawData: Record<string, unknown>,
-    fallbackMatchKey: string,
-  ): EventMatch {
-    return {
-      matchKey: this.normalizeString(rawData.matchKey) || fallbackMatchKey,
-      inviteId: this.normalizeStringOrNull(rawData.inviteId),
-      status:
-        rawData.status === "upcoming" ||
-        rawData.status === "host" ||
-        rawData.status === "guest" ||
-        rawData.status === "bye"
-          ? rawData.status
-          : "pending",
-      resolvedAtMs: Number.isFinite(
-        this.normalizeFiniteNumber(rawData.resolvedAtMs, NaN),
-      )
-        ? this.normalizeFiniteNumber(rawData.resolvedAtMs, NaN)
-        : null,
-      winnerDisqualified: rawData.winnerDisqualified === true,
-      winnerProfileId: this.normalizeStringOrNull(rawData.winnerProfileId),
-      loserProfileId: this.normalizeStringOrNull(rawData.loserProfileId),
-      hostSlotBlocked: rawData.hostSlotBlocked === true,
-      hostProfileId: this.normalizeStringOrNull(rawData.hostProfileId),
-      hostLoginUid: this.normalizeStringOrNull(rawData.hostLoginUid),
-      hostDisplayName: this.normalizeStringOrNull(rawData.hostDisplayName),
-      hostEmojiId: Number.isFinite(
-        this.normalizeFiniteNumber(rawData.hostEmojiId, NaN),
-      )
-        ? this.normalizeFiniteNumber(rawData.hostEmojiId, NaN)
-        : null,
-      hostAura: this.normalizeStringOrNull(rawData.hostAura),
-      guestProfileId: this.normalizeStringOrNull(rawData.guestProfileId),
-      guestLoginUid: this.normalizeStringOrNull(rawData.guestLoginUid),
-      guestDisplayName: this.normalizeStringOrNull(rawData.guestDisplayName),
-      guestEmojiId: Number.isFinite(
-        this.normalizeFiniteNumber(rawData.guestEmojiId, NaN),
-      )
-        ? this.normalizeFiniteNumber(rawData.guestEmojiId, NaN)
-        : null,
-      guestAura: this.normalizeStringOrNull(rawData.guestAura),
-      guestSlotBlocked: rawData.guestSlotBlocked === true,
-    };
-  }
-
-  private mapEventRound(
-    rawData: Record<string, unknown>,
-    fallbackRoundIndex: number,
-  ): EventRound {
-    const matchesInput =
-      rawData.matches && typeof rawData.matches === "object"
-        ? (rawData.matches as Record<string, unknown>)
-        : {};
-    const matches: Record<string, EventMatch> = {};
-    Object.keys(matchesInput).forEach((matchKey) => {
-      const matchValue = matchesInput[matchKey];
-      if (!matchValue || typeof matchValue !== "object") {
-        return;
-      }
-      matches[matchKey] = this.mapEventMatch(
-        matchValue as Record<string, unknown>,
-        matchKey,
-      );
-    });
-    const completedAtMs = this.normalizeFiniteNumber(
-      rawData.completedAtMs,
-      NaN,
-    );
-    return {
-      roundIndex: this.normalizeFiniteNumber(
-        rawData.roundIndex,
-        fallbackRoundIndex,
-      ),
-      status:
-        rawData.status === "completed" || rawData.status === "upcoming"
-          ? rawData.status
-          : "active",
-      createdAtMs: this.normalizeFiniteNumber(rawData.createdAtMs, 0),
-      completedAtMs: Number.isFinite(completedAtMs) ? completedAtMs : null,
-      matches,
-    };
+    return mapFirestoreGameDocToNavigationItem(rawData, fallbackInviteId);
   }
 
   private normalizeEventPrizeId(
     value: unknown,
     eventId: string,
   ): EventPrizeId | null {
-    const normalizedValue = this.normalizeString(value).trim();
-    const normalizedEventId = eventId.trim();
-    return isEventPrizeId(normalizedEventId, normalizedValue)
-      ? normalizedValue
-      : null;
+    return normalizeEventPrizeId(value, eventId);
   }
 
   private mapEventPrizeAssignment(
     rawValue: unknown,
     fallbackEventId: string,
-  ): EventPrizeAssignment | null {
-    if (!rawValue || typeof rawValue !== "object") {
-      return null;
-    }
-    const rawData = rawValue as Record<string, unknown>;
-    const eventId = this.normalizeString(rawData.eventId) || fallbackEventId;
-    const profileId = this.normalizeString(rawData.profileId);
-    const prizeId = this.normalizeEventPrizeId(rawData.prizeId, eventId);
-    const placeValue = this.normalizeFiniteNumber(rawData.place, NaN);
-    const place =
-      placeValue === 1 || placeValue === 2 || placeValue === 3
-        ? placeValue
-        : null;
-    const assignedAtMs = this.normalizeFiniteNumber(rawData.assignedAtMs, NaN);
-    if (
-      !eventId ||
-      !profileId ||
-      !prizeId ||
-      place === null ||
-      !Number.isFinite(assignedAtMs)
-    ) {
-      return null;
-    }
-    return {
-      eventId,
-      profileId,
-      prizeId,
-      place,
-      assignedAtMs: Math.floor(assignedAtMs),
-    };
-  }
-
-  private mapEventPrizeAssignments(
-    rawValue: unknown,
-    fallbackEventId: string,
-  ): EventPrizeAssignments {
-    if (!rawValue || typeof rawValue !== "object") {
-      return {};
-    }
-    const rawAssignments = rawValue as Record<string, unknown>;
-    const assignments: EventPrizeAssignments = {};
-    for (const place of [1, 2, 3] as const) {
-      const assignment = this.mapEventPrizeAssignment(
-        rawAssignments[String(place)],
-        fallbackEventId,
-      );
-      if (assignment?.place === place) {
-        assignments[`${place}`] = assignment;
-      }
-    }
-    return assignments;
+  ): ReturnType<typeof mapEventPrizeAssignment> {
+    return mapEventPrizeAssignment(rawValue, fallbackEventId);
   }
 
   private mapDatabaseEventRecord(
     rawValue: unknown,
     fallbackEventId: string,
   ): EventRecord | null {
-    if (!rawValue || typeof rawValue !== "object") {
-      return null;
-    }
-    const rawData = rawValue as Record<string, unknown>;
-    const eventId = this.normalizeString(rawData.eventId) || fallbackEventId;
-    if (!eventId) {
-      return null;
-    }
-    const participantsInput =
-      rawData.participants && typeof rawData.participants === "object"
-        ? (rawData.participants as Record<string, unknown>)
-        : {};
-    const roundsInput =
-      rawData.rounds && typeof rawData.rounds === "object"
-        ? (rawData.rounds as Record<string, unknown>)
-        : {};
-    const thirdPlaceMatchInput =
-      rawData.thirdPlaceMatch && typeof rawData.thirdPlaceMatch === "object"
-        ? (rawData.thirdPlaceMatch as Record<string, unknown>)
-        : null;
-    const prizeSelectionsLockedAtMs = this.normalizeFiniteNumber(
-      rawData.prizeSelectionsLockedAtMs,
-      NaN,
-    );
-    const participants: Record<string, EventParticipant> = {};
-    const rounds: Record<string, EventRound> = {};
-
-    Object.keys(participantsInput).forEach((profileId) => {
-      const participantValue = participantsInput[profileId];
-      if (!participantValue || typeof participantValue !== "object") {
-        return;
-      }
-      participants[profileId] = this.mapEventParticipant(
-        participantValue as Record<string, unknown>,
-        profileId,
-      );
-    });
-
-    Object.keys(roundsInput).forEach((roundKey) => {
-      const roundValue = roundsInput[roundKey];
-      if (!roundValue || typeof roundValue !== "object") {
-        return;
-      }
-      rounds[roundKey] = this.mapEventRound(
-        roundValue as Record<string, unknown>,
-        this.normalizeFiniteNumber(roundKey, 0),
-      );
-    });
-
-    return {
-      schemaVersion: this.normalizeFiniteNumber(rawData.schemaVersion, 1),
-      eventId,
-      status:
-        rawData.status === "active" ||
-        rawData.status === "ended" ||
-        rawData.status === "dismissed"
-          ? rawData.status
-          : "scheduled",
-      createdAtMs: this.normalizeFiniteNumber(rawData.createdAtMs, 0),
-      updatedAtMs: this.normalizeFiniteNumber(rawData.updatedAtMs, 0),
-      startAtMs: this.normalizeFiniteNumber(rawData.startAtMs, 0),
-      startedAtMs: Number.isFinite(
-        this.normalizeFiniteNumber(rawData.startedAtMs, NaN),
-      )
-        ? this.normalizeFiniteNumber(rawData.startedAtMs, NaN)
-        : null,
-      endedAtMs: Number.isFinite(
-        this.normalizeFiniteNumber(rawData.endedAtMs, NaN),
-      )
-        ? this.normalizeFiniteNumber(rawData.endedAtMs, NaN)
-        : null,
-      createdByProfileId: this.normalizeString(rawData.createdByProfileId),
-      createdByLoginUid: this.normalizeString(rawData.createdByLoginUid),
-      createdByUsername: this.normalizeString(rawData.createdByUsername),
-      winnerProfileId: this.normalizeStringOrNull(rawData.winnerProfileId),
-      winnerDisplayName: this.normalizeStringOrNull(rawData.winnerDisplayName),
-      currentRoundIndex: Number.isFinite(
-        this.normalizeFiniteNumber(rawData.currentRoundIndex, NaN),
-      )
-        ? this.normalizeFiniteNumber(rawData.currentRoundIndex, NaN)
-        : null,
-      bracketSize: this.normalizeFiniteNumber(rawData.bracketSize, 0),
-      roundCount: this.normalizeFiniteNumber(rawData.roundCount, 0),
-      thirdPlaceMatch: thirdPlaceMatchInput
-        ? this.mapEventMatch(thirdPlaceMatchInput, THIRD_PLACE_MATCH_KEY)
-        : null,
-      prizeSelectionsLockedAtMs: Number.isFinite(prizeSelectionsLockedAtMs)
-        ? prizeSelectionsLockedAtMs
-        : null,
-      prizeAssignments: this.mapEventPrizeAssignments(
-        rawData.prizeAssignments,
-        eventId,
-      ),
-      participants,
-      rounds,
-    };
+    return mapDatabaseEventRecord(rawValue, fallbackEventId);
   }
 
   public createOptimisticPendingAutomatchItem(

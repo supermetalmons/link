@@ -19,18 +19,16 @@ import { didAttemptAuthentication, isWatchOnly } from "../game/gameController";
 import {
   setSignInInlineAuthError,
   updateProfileDisplayName,
-} from "../ui/ProfileSignIn";
+} from "../ui/identity/profileUiPort";
 import {
   flushPendingOwnProfileMiningState,
   syncOwnProfileMiningState,
 } from "../services/ownProfileMiningHydration";
-export type AuthStatus = "loading" | "unauthenticated" | "authenticated";
+import type { AuthState, AuthStatus } from "./authModels";
+
+export type { AuthState, AuthStatus } from "./authModels";
 
 let globalSetAuthStatus: ((status: AuthStatus) => void) | null = null;
-
-export type AuthState = AuthIdentity & {
-  authStatus: AuthStatus;
-};
 
 const EMPTY_AUTH_IDENTITY: AuthIdentity = {
   profileId: "",

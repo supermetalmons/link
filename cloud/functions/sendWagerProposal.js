@@ -6,8 +6,11 @@ const {
   reserveFrozenMaterials,
   updateFrozenMaterials,
   readUserMiningMaterials,
-  resolveWagerParticipants,
 } = require("./wagerHelpers");
+const {
+  transitionWagerProposal,
+} = require("./gameplay/wagerProposalTransition");
+const { readWagerRequestContext } = require("./gameplay/wagerRequestContext");
 
 exports.sendWagerProposal = onCall(async (request) => {
   if (!request.auth) {
@@ -44,27 +47,16 @@ exports.sendWagerProposal = onCall(async (request) => {
     return { ok: false, reason: "invalid-argument", debug: baseDebug };
   }
 
-  const inviteSnap = await admin
-    .database()
-    .ref(`invites/${inviteId}`)
-    .once("value");
-  const inviteData = inviteSnap.val();
-  if (!inviteData) {
-    return { ok: false, reason: "invite-not-found", debug: baseDebug };
+  const context = await readWagerRequestContext({
+    request,
+    inviteId,
+    baseDebug,
+  });
+  if (context.failure) {
+    return context.failure;
   }
-  const inviteDebug = {
-    ...baseDebug,
-    hostId: inviteData.hostId || null,
-    guestId: inviteData.guestId || null,
-  };
-  if (!inviteData.guestId) {
-    return { ok: false, reason: "missing-opponent", debug: inviteDebug };
-  }
-  const resolved = await resolveWagerParticipants(inviteData, request.auth);
-  if (resolved.error) {
-    return { ok: false, reason: resolved.error, debug: inviteDebug };
-  }
-  const { playerUid, opponentUid, playerProfile } = resolved;
+  const { inviteDebug } = context;
+  const { playerUid, opponentUid, playerProfile } = context.participants;
   const playerDebug = { ...inviteDebug, playerUid, opponentUid };
 
   const totalMaterials = await readUserMiningMaterials(playerProfile.profileId);
@@ -89,52 +81,16 @@ exports.sendWagerProposal = onCall(async (request) => {
   let autoAgreement = null;
   let autoOpponentCount = 0;
   const txn = await wagerRef.transaction((current) => {
-    autoAgreement = null;
-    autoOpponentCount = 0;
-    const data = current || {};
-    if (data.resolved || data.agreed) {
-      return;
-    }
-    const proposals = data.proposals || {};
-    const proposedBy = data.proposedBy || {};
-    if (proposals[playerUid] || proposedBy[playerUid]) {
-      return;
-    }
-    const opponentProposal =
-      opponentUid && proposals ? proposals[opponentUid] : null;
-    const opponentCount = opponentProposal
-      ? normalizeCount(opponentProposal.count)
-      : 0;
-    if (
-      opponentProposal &&
-      opponentProposal.material === material &&
-      opponentCount > 0
-    ) {
-      const acceptedCount = Math.min(reservedCount, opponentCount);
-      if (acceptedCount <= 0) {
-        return;
-      }
-      const agreed = {
-        material,
-        count: acceptedCount,
-        total: acceptedCount * 2,
-        proposerId: opponentUid,
-        accepterId: playerUid,
-        acceptedAt: now,
-      };
-      proposedBy[playerUid] = true;
-      data.agreed = agreed;
-      data.proposals = null;
-      data.proposedBy = proposedBy;
-      autoAgreement = agreed;
-      autoOpponentCount = opponentCount;
-      return data;
-    }
-    proposals[playerUid] = { material, count: reservedCount, createdAt: now };
-    proposedBy[playerUid] = true;
-    data.proposals = proposals;
-    data.proposedBy = proposedBy;
-    return data;
+    const transition = transitionWagerProposal(current, {
+      playerUid,
+      opponentUid,
+      material,
+      reservedCount,
+      now,
+    });
+    autoAgreement = transition.autoAgreement;
+    autoOpponentCount = transition.autoOpponentCount;
+    return transition.value;
   });
 
   if (!txn.committed) {

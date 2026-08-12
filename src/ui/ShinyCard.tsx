@@ -1,4 +1,3 @@
-import { connection } from "../connection/connection";
 import {
   emojipackSize,
   emojis,
@@ -8,11 +7,30 @@ import {
 import { asciimojisCount, getAsciimojiAtIndex } from "../utils/asciimoji";
 import { isMobile, getStableRandomIdForProfileId } from "../utils/misc";
 import { storage } from "../utils/storage";
-import { handleEditDisplayName } from "./ProfileSignIn";
+import { handleEditDisplayName } from "./identity/profileUiPort";
 import {
-  didClickAndChangePlayerEmoji,
-  didUpdateIdCardMons,
-} from "../game/board";
+  notifyShinyCardMonsChange,
+  notifyShinyCardPlayerEmojiChange,
+  updateShinyCardBackgroundId,
+  updateShinyCardProfileCounter,
+  updateShinyCardProfileMons,
+  updateShinyCardStickers,
+  updateShinyCardSubtitleId,
+} from "./shinyCardRuntimePort";
+import {
+  bindShinyCardUi,
+  setShinyCardVisible,
+  showsShinyCardSomewhere,
+  type ActiveInventoryItemSelection,
+} from "./shinyCardUiPort";
+import {
+  ProfileScopedUndoHistory,
+  getNextRegularId,
+  getShinyCardUndoUpdateSource,
+  isInventoryEmojiId,
+  parseStickerMap,
+  type ShinyCardUpdateSource,
+} from "./shinyCardModels";
 import { STICKER_ADD_PROMPTS_FRAMES, STICKER_PATHS } from "../utils/stickers";
 import { PlayerProfile } from "../connection/connectionModels";
 import {
@@ -70,12 +88,12 @@ let spiritIndex = 0;
 let mysticIndex = 0;
 let currentlySelectedStickers: Record<string, string>;
 
-let undoQueue: Array<[string, any]> = [];
-let undoProfileId: string | null = null;
+const undoHistory = new ProfileScopedUndoHistory();
 let panelUndoButton: HTMLButtonElement | null = null;
 let shinyCardGeneration = 0;
 
-export let showsShinyCardSomewhere = false;
+export { showsShinyCardSomewhere } from "./shinyCardUiPort";
+export type { ActiveInventoryItemSelection } from "./shinyCardUiPort";
 let isEditingMode = false;
 
 let ownEmojiImg: HTMLImageElement | null;
@@ -120,18 +138,14 @@ const SHINY_CARD_Z_INDEX = 100200;
 const INVENTORY_ONLY_BG_ID = 100;
 const INVENTORY_ONLY_STICKER_TYPE = "big-mon-top-right";
 const INVENTORY_ONLY_STICKER_NAME = "gate";
-type UpdateSource = "default" | "inventory";
+type UpdateSource = ShinyCardUpdateSource;
 
 const isShowingOwnShinyCard = (): boolean =>
   showsShinyCardSomewhere && displayedOtherPlayerProfile === null;
 
 const synchronizeUndoQueueWithCurrentProfile = (): string | null => {
   const currentProfileId = storage.getProfileId("").trim() || null;
-  if (undoProfileId !== currentProfileId) {
-    undoQueue = [];
-    undoProfileId = currentProfileId;
-  }
-  return currentProfileId;
+  return undoHistory.synchronize(currentProfileId);
 };
 
 const enqueueUndoForProfile = (
@@ -139,28 +153,10 @@ const enqueueUndoForProfile = (
   contentType: string,
   oldId: any,
 ): void => {
-  const currentProfileId = synchronizeUndoQueueWithCurrentProfile();
-  if (!profileId || currentProfileId !== profileId) {
-    return;
-  }
-  undoQueue.push([contentType, oldId]);
-};
-
-const parseStickerMap = (json: string): Record<string, string> => {
-  try {
-    const parsed = JSON.parse(json);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return {};
-    }
-    return Object.fromEntries(
-      Object.entries(parsed).filter(
-        (entry): entry is [string, string] =>
-          typeof entry[0] === "string" && typeof entry[1] === "string",
-      ),
-    );
-  } catch {
-    return {};
-  }
+  undoHistory.enqueue(profileId, synchronizeUndoQueueWithCurrentProfile(), [
+    contentType,
+    oldId,
+  ]);
 };
 
 const getStoredOwnStickers = (): Record<string, string> =>
@@ -169,13 +165,7 @@ const getStoredOwnStickers = (): Record<string, string> =>
 const isInventoryOnlyEmojiId = (
   emojiId: string | number | undefined,
 ): boolean => {
-  const parsed = Number.parseInt(`${emojiId ?? ""}`, 10);
-  return Number.isFinite(parsed) && parsed >= swagpackStart;
-};
-
-export type ActiveInventoryItemSelection = {
-  avatarId: number | null;
-  specialIds: ReadonlySet<number>;
+  return isInventoryEmojiId(emojiId, swagpackStart);
 };
 
 export const getActiveInventoryItemSelection =
@@ -210,49 +200,21 @@ export const getActiveInventoryItemSelection =
   };
 
 const getNextRegularCardBackgroundId = (currentBgId: number): number => {
-  if (
-    !Number.isFinite(currentBgId) ||
-    currentBgId < 0 ||
-    currentBgId >= totalCardBgsCount
-  ) {
-    return 0;
-  }
-  return (currentBgId + 1) % totalCardBgsCount;
+  return getNextRegularId(currentBgId, totalCardBgsCount);
 };
 
 const getNextRegularDrainerId = (currentDrainerId: number): number => {
-  const regularDrainerCount = drainerTypes.length - 1;
-  if (regularDrainerCount <= 0) {
-    return 0;
-  }
-  if (
-    !Number.isFinite(currentDrainerId) ||
-    currentDrainerId < 0 ||
-    currentDrainerId >= regularDrainerCount
-  ) {
-    return 0;
-  }
-  return (currentDrainerId + 1) % regularDrainerCount;
+  return getNextRegularId(currentDrainerId, drainerTypes.length - 1);
 };
 
 const getUndoUpdateSource = (contentType: string, oldId: any): UpdateSource => {
-  switch (contentType) {
-    case "emojiAndAura":
-      if (isInventoryOnlyEmojiId(oldId?.emojiId) || oldId?.aura === "rainbow") {
-        return "inventory";
-      }
-      return "default";
-    case "bg":
-      return Number(oldId) === INVENTORY_ONLY_BG_ID ? "inventory" : "default";
-    case "drainer":
-      return Number(oldId) === royalAguapwoshiDrainerIndex
-        ? "inventory"
-        : "default";
-    case INVENTORY_ONLY_STICKER_TYPE:
-      return oldId === INVENTORY_ONLY_STICKER_NAME ? "inventory" : "default";
-    default:
-      return "default";
-  }
+  return getShinyCardUndoUpdateSource(contentType, oldId, {
+    inventoryEmojiStartId: swagpackStart,
+    inventoryBackgroundId: INVENTORY_ONLY_BG_ID,
+    inventoryDrainerId: royalAguapwoshiDrainerIndex,
+    inventoryStickerType: INVENTORY_ONLY_STICKER_TYPE,
+    inventoryStickerName: INVENTORY_ONLY_STICKER_NAME,
+  });
 };
 
 export const showShinyCard = async (
@@ -295,7 +257,7 @@ export const showShinyCard = async (
   const cardGeneration = ++shinyCardGeneration;
   cardIndex = storage.getCardBackgroundId(defaultCardBgIndex);
   asciimojiIndex = storage.getCardSubtitleId(defaultSubtitleIndex);
-  showsShinyCardSomewhere = true;
+  setShinyCardVisible(true);
   isEditingMode = false;
 
   if (!cardResizeObserver) {
@@ -693,7 +655,7 @@ export const showShinyCard = async (
 
     const undoBtn = document.createElement("button");
     undoBtn.className = "shiny-card-undo-button";
-    undoBtn.disabled = undoQueue.length === 0;
+    undoBtn.disabled = undoHistory.size === 0;
 
     const undoSvg = document.createElementNS(
       "http://www.w3.org/2000/svg",
@@ -740,7 +702,7 @@ export const showShinyCard = async (
         handleDoneAction(e);
       } else if ((e.ctrlKey || e.metaKey) && e.key === "z") {
         e.preventDefault();
-        if (undoQueue.length > 0) {
+        if (undoHistory.size > 0) {
           handleUndoAction(e);
         }
       }
@@ -1631,7 +1593,7 @@ const createOverlayStickersImage = (
 
 export const hideShinyCard = () => {
   shinyCardGeneration += 1;
-  showsShinyCardSomewhere = false;
+  setShinyCardVisible(false);
   displayedOtherPlayerProfile = null;
 
   if (editingPanel && editingPanel.parentNode) {
@@ -1816,7 +1778,7 @@ async function didClickMonImage(monType: string) {
       );
       break;
   }
-  didUpdateIdCardMons();
+  void notifyShinyCardMonsChange();
 }
 
 async function updateContent(
@@ -1830,7 +1792,7 @@ async function updateContent(
     case "profileCounter": {
       const newCounter = newId;
       storage.setProfileCounter(newCounter);
-      connection.updateProfileCounter(newCounter);
+      updateShinyCardProfileCounter(newCounter);
       const gpValue = storage.getPlayerNonce(-1) + 1;
       const mpValue = storage.getPlayerTotalManaPoints(0);
       const newCounterText =
@@ -1851,7 +1813,11 @@ async function updateContent(
       }
       const nextSmallEmojiUrl = emojis.getEmojiUrl(nextEmojiId);
       storage.setPlayerEmojiAura(nextAura);
-      didClickAndChangePlayerEmoji(nextEmojiId, nextSmallEmojiUrl, nextAura);
+      notifyShinyCardPlayerEmojiChange(
+        nextEmojiId,
+        nextSmallEmojiUrl,
+        nextAura,
+      );
       if (isShowingOwnShinyCard() && ownEmojiImg?.isConnected) {
         ownEmojiImg.src = `https://cdn.lil.org/mons/emojipack/regular/${nextEmojiId}.webp`;
       }
@@ -1877,7 +1843,7 @@ async function updateContent(
       const newCardName = `${newId}.webp`;
       storage.setCardBackgroundId(newId);
       cardIndex = newId;
-      connection.updateCardBackgroundId(newId);
+      updateShinyCardBackgroundId(newId);
       if (isShowingOwnShinyCard() && ownBgImg?.isConnected) {
         ownBgImg.style.visibility = "hidden";
         ownBgImg.src = `https://cdn.lil.org/mons/id_cards/backgrounds/${newCardName}`;
@@ -1887,7 +1853,7 @@ async function updateContent(
     case "subtitle": {
       asciimojiIndex = newId;
       storage.setCardSubtitleId(newId);
-      connection.updateCardSubtitleId(newId);
+      updateShinyCardSubtitleId(newId);
       if (isShowingOwnShinyCard() && ownSubtitleElement?.isConnected) {
         ownSubtitleElement.textContent = getAsciimojiAtIndex(newId);
       }
@@ -1937,7 +1903,7 @@ async function updateContent(
       }
       const monsIndexesString = ownMonsIndexes.join(",");
       storage.setProfileMons(monsIndexesString);
-      connection.updateProfileMons(monsIndexesString);
+      updateShinyCardProfileMons(monsIndexesString);
       if (isShowingOwnShinyCard()) {
         [demonIndex, angelIndex, drainerIndex, spiritIndex, mysticIndex] =
           ownMonsIndexes;
@@ -1979,7 +1945,7 @@ async function updateContent(
 
       const currentJson = JSON.stringify(updatedStickers);
       storage.setCardStickers(currentJson);
-      connection.updateCardStickers(currentJson);
+      updateShinyCardStickers(currentJson);
       if (isShowingOwnShinyCard()) {
         currentlySelectedStickers = updatedStickers;
         didUpdateSticker(type, nextSticker);
@@ -2007,7 +1973,7 @@ function updateExistingCardForAnotherProfile(
 function updateUndoButton() {
   synchronizeUndoQueueWithCurrentProfile();
   if (panelUndoButton) {
-    panelUndoButton.disabled = undoQueue.length === 0;
+    panelUndoButton.disabled = undoHistory.size === 0;
   }
 }
 
@@ -2024,7 +1990,7 @@ export function setOwnershipVerifiedSpecialItem(id: number) {
         ownDrainerIndex,
         "inventory",
       );
-      didUpdateIdCardMons();
+      void notifyShinyCardMonsChange();
       break;
     }
     case 1:
@@ -2063,13 +2029,22 @@ export function setOwnershipVerifiedIdCardEmoji(id: number, aura: string) {
   );
 }
 
+bindShinyCardUi({
+  show: showShinyCard,
+  hide: hideShinyCard,
+  updateDisplayName: updateShinyCardDisplayName,
+  getActiveInventoryItemSelection,
+  setOwnershipVerifiedSpecialItem,
+  setOwnershipVerifiedIdCardEmoji,
+});
+
 async function didClickIdCardEditUndoButton() {
-  synchronizeUndoQueueWithCurrentProfile();
-  if (undoQueue.length === 0) {
+  const undoEntry = undoHistory.pop(synchronizeUndoQueueWithCurrentProfile());
+  if (!undoEntry) {
     updateUndoButton();
     return;
   }
-  const [contentType, oldId] = undoQueue.pop()!;
+  const [contentType, oldId] = undoEntry;
   updateContent(
     contentType,
     oldId,

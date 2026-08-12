@@ -1,22 +1,7 @@
 import * as MonsRules from "mons-rules";
 import { cropAddress } from "@mons/shared/profiles";
 import * as SVG from "../utils/svg";
-import {
-  isOnlineGame,
-  didClickSquare,
-  didClickOutsideBoard,
-  didSelectInputModifier,
-  canChangeEmoji,
-  sendPlayerEmojiUpdate,
-  isWatchOnly,
-  isGameWithBot,
-  isWaitingForRematchResponse,
-  showItemsAfterChangingAssetsStyle,
-  cleanupCurrentInputs,
-  didClickInviteBotIntoLocalGameButton,
-  restoreBoardVariantAfterWaitingAnimation,
-  showNextWaitingAnimationBoardVariant,
-} from "./gameController";
+import { gameInputRuntime } from "./gameInputPort";
 import {
   Highlight,
   HighlightKind,
@@ -41,12 +26,15 @@ import { isDesktopSafari, defaultInputEventName } from "../utils/misc";
 import { playSounds } from "../content/sounds";
 import {
   hasNavigationPopupVisible,
+  hasBottomPopupsVisible,
+} from "../ui/controls/bottomControlsPort";
+import {
   didDismissSomethingWithOutsideTapJustNow,
   didNotDismissAnythingWithOutsideTapJustNow,
-  hasBottomPopupsVisible,
   resetOutsideTapDismissTimeout,
-} from "../ui/BottomControls";
-import { hasMainMenuPopupsVisible } from "../ui/MainMenu";
+} from "../ui/controls/outsideTapState";
+import { hasMainMenuPopupsVisible } from "../ui/controls/menuPort";
+import { bindBoardReactionMetadataApi } from "../ui/controls/boardReactionPort";
 import { hasIslandOverlayVisible } from "../ui/islandOverlayState";
 import {
   newEmptyPlayerMetadata,
@@ -59,7 +47,7 @@ import {
   getStashedPlayerProfile,
 } from "../utils/playerMetadata";
 import type { PlayerMetadata } from "../utils/playerMetadata";
-import { preventTouchstartIfNeeded } from "..";
+import { preventTouchstartIfNeeded } from "../runtime/touchInputGuard";
 import {
   setTopBoardOverlayVisible,
   updateBoardComponentForBoardStyleChange,
@@ -67,17 +55,17 @@ import {
   updateAuraForAvatarElement,
   updateWagerPlayerUids,
   setBoardPlayerInfoOverlayState,
-} from "../ui/BoardComponent";
+} from "./boardUiPort";
 import type {
   BoardInviteBotButtonLayout,
   BoardPlayerInfoOverlayState,
   BoardPlayerInfoSlotState,
   BoardTimerColor,
-} from "../ui/BoardComponent";
+} from "./boardUiPort";
 import { storage } from "../utils/storage";
 import { PlayerProfile } from "../connection/connectionModels";
-import { hasProfilePopupVisible } from "../ui/ProfileSignIn";
-import { showShinyCard, showsShinyCardSomewhere } from "../ui/ShinyCard";
+import { hasProfilePopupVisible } from "../ui/identity/profileUiPort";
+import { showShinyCard, showsShinyCardSomewhere } from "../ui/shinyCardUiPort";
 import { getMonId, getMonsIndexes, MonType } from "../utils/namedMons";
 import { instructor } from "../assets/talkingDude";
 import { loadGameAssets } from "../assets/gameAssetsLoader";
@@ -90,9 +78,54 @@ import {
 } from "../lifecycle/lifecycleDiagnostics";
 import { getCurrentRouteState } from "../navigation/routeState";
 import { hasEventModalVisible } from "../ui/eventModalController";
+import { bindBoardEffectsRuntime } from "./boardEffectsPort";
+import { bindBoardColorChangeHandler } from "../content/boardStyleRuntimePort";
+import {
+  cancelManagedBoardRaf,
+  cancelManagedBoardTimeout,
+  clearTrackedBoardRafs,
+  clearTrackedBoardTimeouts,
+  setManagedBoardRaf,
+  setManagedBoardTimeout,
+} from "./boardRuntimeScheduler";
+import {
+  MAX_WAGER_WIN_PILE_ITEMS,
+  WAGER_WIN_PILE_SCALE,
+  buildWagerFrames,
+  buildWagerRenderState,
+  clampWagerUnit,
+  createWagerPile,
+  generateWagerPositions,
+  getWagerIconFrame,
+  getWagerIconLayout as getWagerIconLayoutForAvatar,
+  remapWagerFrame as remapWagerFrameForAvatar,
+  syncWagerPileIcons,
+  updateWagerPileLayout as updateWagerPileLayoutForAvatar,
+  wagerPileHiddenByLayout,
+  wagerRectIsVisible,
+  wagerSlotLayoutsEqual,
+} from "./boardWagerModels";
+import type {
+  WagerPile,
+  WagerPileAnimation,
+  WagerPileRect,
+  WagerPileRenderState,
+  WagerRenderState,
+  WagerSlotLayout,
+  WagerSlotLayoutMap,
+} from "./boardWagerModels";
+import type { BotAutomoveMode } from "./botAutomoveMode";
+
+export { WAGER_WIN_PILE_SCALE } from "./boardWagerModels";
+export type {
+  WagerPileRect,
+  WagerPileRenderState,
+  WagerPileSide,
+  WagerRenderState,
+  WagerSlotLayout,
+} from "./boardWagerModels";
 
 let isExperimentingWithSprites = storage.getIsExperimentingWithSprites(false);
-const valentinesLoaderEnabled = false;
 
 const refreshBoardAfterStyleChange = (reloadItems: boolean) => {
   updateBoardComponentForBoardStyleChange();
@@ -141,6 +174,13 @@ export function setAnimatedMonsEnabled(
 
 export let playerSideMetadata = newEmptyPlayerMetadata();
 export let opponentSideMetadata = newEmptyPlayerMetadata();
+
+bindBoardReactionMetadataApi({
+  showVoiceReactionText,
+  isMetadataSideDisplayedAtOpponentSlot,
+  getPlayerUid: () => playerSideMetadata.uid,
+  getOpponentUid: () => opponentSideMetadata.uid,
+});
 
 function clearVoiceReactionState() {
   playerSideMetadata.voiceReactionText = "";
@@ -220,8 +260,6 @@ const smoothWaveAnimations = new Set<SmoothWaveAnimationData>();
 let smoothWaveTickerRafId: number | null = null;
 let smoothWaveTickerTimeoutId: number | null = null;
 const sparkleIntervalIds = new Set<number>();
-const boardTimeoutIds = new Set<number>();
-const boardRafIds = new Set<number>();
 let boardRuntimeToken = 0;
 
 const isBoardRuntimeTokenActive = (runtimeToken: number) =>
@@ -234,6 +272,8 @@ export let effectsLayer: HTMLElement | null;
 let controlsLayer: HTMLElement | null;
 let avatarLayer: HTMLElement | null;
 let boardBackgroundLayer: HTMLElement | null;
+
+bindBoardEffectsRuntime(() => ({ isFlipped, effectsLayer }));
 
 const items: { [key: string]: SVGElement } = {};
 const basesPlaceholders: { [key: string]: SVGElement } = {};
@@ -253,7 +293,6 @@ let dimmingOverlay: SVGElement | undefined;
 let inviteBotButtonContainer: SVGElement | undefined;
 let inviteBotButtonElement: HTMLButtonElement | undefined;
 let cleanupInviteBotButtonThemeListener: (() => void) | null = null;
-type BotAutomoveMode = "fast" | "normal" | "pro";
 let botStrengthControlMode: BotAutomoveMode = "normal";
 let botStrengthControlVisible = false;
 
@@ -300,17 +339,7 @@ let bomb: SVGElement;
 let supermana: SVGElement;
 let supermanaSimple: SVGElement;
 
-const MATERIAL_BASE_URL = "https://cdn.lil.org/mons/rocks/materials";
-const MAX_WAGER_PILE_ITEMS = 13;
-const MAX_WAGER_WIN_PILE_ITEMS = 32;
 const WAGER_PILE_SCALE = 1;
-export const WAGER_WIN_PILE_SCALE = 1.3333;
-const WAGER_ICON_SIZE_MULTIPLIER = 0.56;
-const WAGER_ICON_PADDING_FRAC = 0.15;
-const WAGER_STACK_BOTTOM_V = 0.86;
-const WAGER_STACK_TOP_V = 0.14;
-const WAGER_STACK_MAX_STEP_V = 0.16;
-const WAGER_STACK_U_JITTER = 0.008;
 const WAGER_WIN_ANIM_DURATION_MS = 800;
 
 const applyInviteBotButtonColors = (
@@ -339,23 +368,6 @@ const applyInviteBotButtonColors = (
   }
 };
 
-type WagerPile = {
-  positions: Array<{ u: number; v: number }>;
-  frames: Array<{ x: number; y: number }>;
-  material: MaterialName | null;
-  materialUrl: string | null;
-  count: number;
-  actualCount: number;
-  rect: { x: number; y: number; w: number; h: number } | null;
-  iconSize: number;
-};
-
-export type WagerPileSide = "player" | "opponent";
-export type WagerPileRect = { x: number; y: number; w: number; h: number };
-export type WagerSlotLayout = {
-  pile: WagerPileRect;
-  winner: WagerPileRect;
-};
 const PLAYER_INFO_REACTION_ONLY_PREFIX = "~ ";
 const PLAYER_INFO_REACTION_PREFIX = " ~ ";
 type PlayerInfoNameTexts = {
@@ -368,27 +380,6 @@ type PlayerMetadataDisplaySnapshot = {
   solAddress: string | undefined;
   ens: string | undefined;
   displayName: string | undefined;
-};
-type WagerSlotLayoutMap = Partial<Record<WagerPileSide, WagerSlotLayout>>;
-type WagerPileAnimation = "none" | "appear" | "disappear";
-export type WagerPileRenderState = {
-  side: WagerPileSide | "winner";
-  rect: WagerPileRect;
-  iconSize: number;
-  materialUrl: string;
-  frames: Array<{ x: number; y: number }>;
-  count: number;
-  actualCount: number;
-  animation: WagerPileAnimation;
-  isPending: boolean;
-};
-export type WagerRenderState = {
-  player: WagerPileRenderState | null;
-  opponent: WagerPileRenderState | null;
-  winner: WagerPileRenderState | null;
-  winAnimationActive: boolean;
-  playerDisappearing: WagerPileRenderState | null;
-  opponentDisappearing: WagerPileRenderState | null;
 };
 
 type WagerWinAnimationStartSpace =
@@ -461,30 +452,6 @@ export function setWagerRenderHandler(
   }
 }
 
-const wagerRectsEqual = (a?: WagerPileRect, b?: WagerPileRect) =>
-  a === b ||
-  (!!a && !!b && a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h);
-
-const wagerRectIsVisible = (
-  rect: WagerPileRect | null | undefined,
-): rect is WagerPileRect => !!rect && rect.w > 0 && rect.h > 0;
-
-const wagerPileHiddenByLayout = (pile: WagerPile | null) =>
-  !!pile && pile.count > 0 && !!pile.rect && !wagerRectIsVisible(pile.rect);
-
-const wagerSlotLayoutEqual = (a?: WagerSlotLayout, b?: WagerSlotLayout) =>
-  wagerRectsEqual(a?.pile, b?.pile) && wagerRectsEqual(a?.winner, b?.winner);
-
-const wagerSlotLayoutsEqual = (
-  a: WagerSlotLayoutMap | null,
-  b: WagerSlotLayoutMap | null,
-) =>
-  a === b ||
-  (!!a &&
-    !!b &&
-    wagerSlotLayoutEqual(a.player, b.player) &&
-    wagerSlotLayoutEqual(a.opponent, b.opponent));
-
 function invalidateWagerSlotLayout() {
   wagerSlotLayoutRevision += 1;
 }
@@ -538,78 +505,6 @@ let currentTextAnimation: {
   isAnimating: false,
   fastForwardCallback: null,
   timer: null,
-};
-
-const trackBoardTimeout = (timeoutId: number) => {
-  boardTimeoutIds.add(timeoutId);
-  incrementLifecycleCounter("boardTimeouts");
-};
-
-const setManagedBoardTimeout = (
-  callback: () => void,
-  delay: number,
-): number => {
-  const timeoutId = window.setTimeout(() => {
-    if (boardTimeoutIds.has(timeoutId)) {
-      boardTimeoutIds.delete(timeoutId);
-      decrementLifecycleCounter("boardTimeouts");
-    }
-    callback();
-  }, delay);
-  trackBoardTimeout(timeoutId);
-  return timeoutId;
-};
-
-const cancelManagedBoardTimeout = (timeoutId: number | null) => {
-  if (timeoutId === null) {
-    return;
-  }
-  if (boardTimeoutIds.has(timeoutId)) {
-    boardTimeoutIds.delete(timeoutId);
-    decrementLifecycleCounter("boardTimeouts");
-  }
-  clearTimeout(timeoutId);
-};
-
-const clearTrackedBoardTimeouts = () => {
-  boardTimeoutIds.forEach((timeoutId) => {
-    clearTimeout(timeoutId);
-    decrementLifecycleCounter("boardTimeouts");
-  });
-  boardTimeoutIds.clear();
-};
-
-const setManagedBoardRaf = (callback: FrameRequestCallback): number => {
-  let rafId = 0;
-  rafId = window.requestAnimationFrame((timestamp) => {
-    if (boardRafIds.has(rafId)) {
-      boardRafIds.delete(rafId);
-      decrementLifecycleCounter("boardRaf");
-    }
-    callback(timestamp);
-  });
-  boardRafIds.add(rafId);
-  incrementLifecycleCounter("boardRaf");
-  return rafId;
-};
-
-const cancelManagedBoardRaf = (rafId: number | null) => {
-  if (rafId === null) {
-    return;
-  }
-  if (boardRafIds.has(rafId)) {
-    boardRafIds.delete(rafId);
-    decrementLifecycleCounter("boardRaf");
-  }
-  cancelAnimationFrame(rafId);
-};
-
-const clearTrackedBoardRafs = () => {
-  boardRafIds.forEach((rafId) => {
-    cancelAnimationFrame(rafId);
-    decrementLifecycleCounter("boardRaf");
-  });
-  boardRafIds.clear();
 };
 
 const trackWavesInterval = (intervalId: number) => {
@@ -969,7 +864,7 @@ function setBoardDimmed(dimmed: boolean, color: string = "#00000023") {
 
   if (showsItemSelectionOrConfirmationOverlay) {
     hideItemSelectionOrConfirmationOverlay();
-    cleanupCurrentInputs();
+    gameInputRuntime.cleanupCurrentInputs();
   }
 }
 
@@ -988,7 +883,7 @@ function createFullBoardBackgroundElement(): SVGElement {
 }
 
 export async function didUpdateIdCardMons() {
-  if (!isWatchOnly && isExperimentingWithSprites) {
+  if (!gameInputRuntime.isWatchOnly && isExperimentingWithSprites) {
     didToggleItemsStyleSet(true);
   }
 }
@@ -1096,7 +991,7 @@ export async function didToggleItemsStyleSet(
   rotatedItemImageCache.clear();
 
   if (!monsBoardDisplayAnimationTimeout) {
-    showItemsAfterChangingAssetsStyle();
+    gameInputRuntime.showItemsAfterChangingAssetsStyle();
   }
 
   const allGridBoardOnlyElements = [
@@ -1447,7 +1342,7 @@ function syncAvatarForCurrentMetadata(
     : true;
   const keepHiddenState =
     !revealIfPossible && avatarIsHidden && placeholderIsHidden;
-  if (opponent && isGameWithBot) {
+  if (opponent && gameInputRuntime.isGameWithBot) {
     const didSetBotImage = setAvatarBotIfNeeded(avatar);
     let didChangeVisibility = false;
     if (!keepHiddenState) {
@@ -1470,8 +1365,10 @@ function syncAvatarForCurrentMetadata(
   let emojiId = metadata.emojiId ?? "";
   let aura =
     metadata.aura ??
-    (!opponent && !isWatchOnly ? storage.getPlayerEmojiAura("") : "");
-  if (!opponent && !isWatchOnly && emojiId === "") {
+    (!opponent && !gameInputRuntime.isWatchOnly
+      ? storage.getPlayerEmojiAura("")
+      : "");
+  if (!opponent && !gameInputRuntime.isWatchOnly && emojiId === "") {
     const storedEmojiId = storage.getPlayerEmojiId("");
     if (storedEmojiId !== "") {
       emojiId = storedEmojiId;
@@ -1482,7 +1379,12 @@ function syncAvatarForCurrentMetadata(
       metadata.aura = aura;
     }
   }
-  if (opponent && !isOnlineGame && !isGameWithBot && emojiId === "") {
+  if (
+    opponent &&
+    !gameInputRuntime.isOnlineGame &&
+    !gameInputRuntime.isGameWithBot &&
+    emojiId === ""
+  ) {
     if (!localHumanSeriesOpponentEmojiId) {
       const [fallbackEmojiId] = emojis.getRandomEmojiUrlOtherThan(
         playerSideMetadata.emojiId,
@@ -1493,7 +1395,12 @@ function syncAvatarForCurrentMetadata(
     emojiId = localHumanSeriesOpponentEmojiId;
     metadata.emojiId = localHumanSeriesOpponentEmojiId;
   }
-  if (opponent && !isOnlineGame && !isGameWithBot && emojiId !== "") {
+  if (
+    opponent &&
+    !gameInputRuntime.isOnlineGame &&
+    !gameInputRuntime.isGameWithBot &&
+    emojiId !== ""
+  ) {
     localHumanSeriesOpponentEmojiId = emojiId;
   }
 
@@ -1569,7 +1476,7 @@ export function resetPlayersMetadataForSession() {
 export function resetForNewGame() {
   setEndOfGameMarkers("none", "none");
   clearVoiceReactionState();
-  if (isWatchOnly) {
+  if (gameInputRuntime.isWatchOnly) {
     playerSideMetadata = newEmptyPlayerMetadata();
   }
   opponentSideMetadata = newEmptyPlayerMetadata();
@@ -1590,7 +1497,9 @@ export function resetForNewGame() {
         emojis.getEmojiUrl(opponentSideMetadata.emojiId) || "";
       const playerAuraVisible =
         (playerSideMetadata.aura ??
-          (!isWatchOnly ? storage.getPlayerEmojiAura("") : "")) === "rainbow";
+          (!gameInputRuntime.isWatchOnly
+            ? storage.getPlayerEmojiAura("")
+            : "")) === "rainbow";
       const opponentAuraVisible =
         (opponentSideMetadata.aura ?? "") === "rainbow";
       showRaibowAura(playerAuraVisible && playerUrl !== "", playerUrl, false);
@@ -1631,7 +1540,9 @@ export function updateEmojiAndAuraIfNeeded(
   const nextId = newEmojiId ?? "";
   const newAura =
     aura ??
-    (!isOpponentSide && !isWatchOnly ? storage.getPlayerEmojiAura("") : "");
+    (!isOpponentSide && !gameInputRuntime.isWatchOnly
+      ? storage.getPlayerEmojiAura("")
+      : "");
   const currentAura = targetMetadata.aura ?? "";
   if (currentId === nextId && currentAura === newAura) {
     syncAvatarForCurrentMetadata(isOpponentSide);
@@ -1791,7 +1702,7 @@ function setupInviteBotButton() {
   button.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    didClickInviteBotIntoLocalGameButton();
+    gameInputRuntime.didClickInviteBotIntoLocalGameButton();
   });
 
   container.appendChild(button);
@@ -1840,135 +1751,6 @@ export function setBotStrengthControlVisible(visible: boolean) {
   emitBoardPlayerInfoOverlayState();
 }
 
-function runMonsBoardAsDisplayWaitingHeartsAnimation() {
-  if (monsBoardDisplayAnimationTimeout) return;
-  const runToken = ++monsBoardDisplayAnimationRunToken;
-  if (!monsBoardDisplayAnimationLifecycleTracked) {
-    incrementLifecycleCounter("boardTimeouts");
-    monsBoardDisplayAnimationLifecycleTracked = true;
-  }
-
-  const frames: [number, number][][] = [
-    [],
-    [[5, 5]],
-    [
-      [4, 4],
-      [4, 6],
-      [5, 5],
-      [6, 5],
-    ],
-    [
-      [3, 4],
-      [3, 6],
-      [4, 3],
-      [4, 5],
-      [4, 7],
-      [5, 4],
-      [5, 6],
-      [6, 5],
-    ],
-    [
-      [2, 3],
-      [2, 4],
-      [2, 6],
-      [2, 7],
-      [3, 2],
-      [3, 5],
-      [3, 8],
-      [4, 2],
-      [4, 8],
-      [5, 3],
-      [5, 7],
-      [6, 4],
-      [6, 6],
-      [7, 5],
-    ],
-    [
-      [1, 2],
-      [1, 3],
-      [1, 7],
-      [1, 8],
-      [2, 1],
-      [2, 4],
-      [2, 6],
-      [2, 9],
-      [3, 1],
-      [3, 5],
-      [3, 9],
-      [4, 1],
-      [4, 9],
-      [5, 2],
-      [5, 8],
-      [6, 3],
-      [6, 7],
-      [7, 4],
-      [7, 6],
-      [8, 5],
-    ],
-    [
-      [0, 2],
-      [0, 3],
-      [0, 7],
-      [0, 8],
-      [1, 1],
-      [1, 4],
-      [1, 6],
-      [1, 9],
-      [2, 0],
-      [2, 5],
-      [2, 10],
-      [3, 0],
-      [3, 10],
-      [4, 0],
-      [4, 10],
-      [5, 0],
-      [5, 10],
-      [6, 1],
-      [6, 9],
-      [7, 2],
-      [7, 8],
-      [8, 3],
-      [8, 7],
-      [9, 4],
-      [9, 6],
-      [10, 5],
-    ],
-  ];
-
-  let frameIndex = 0;
-  let isWhite = true;
-  let hasShownFirstCycleCenter = false;
-
-  function animate() {
-    if (runToken !== monsBoardDisplayAnimationRunToken) {
-      return;
-    }
-    if (frameIndex === 1) {
-      if (hasShownFirstCycleCenter) {
-        showNextWaitingAnimationBoardVariant();
-      } else {
-        hasShownFirstCycleCenter = true;
-      }
-    }
-    cleanAllPixels();
-    for (const [x, y] of frames[frameIndex]) {
-      colorPixel(new Location(x, y), isWhite);
-    }
-    frameIndex = (frameIndex + 1) % frames.length;
-    if (frameIndex === 0) {
-      isWhite = !isWhite;
-    }
-    monsBoardDisplayAnimationTimeout = setTimeout(() => {
-      if (runToken !== monsBoardDisplayAnimationRunToken) {
-        return;
-      }
-      animate();
-    }, 323);
-  }
-
-  animate();
-}
-
 export function setPreserveDisplayAnimation(preserve: boolean) {
   if (preserveDisplayAnimation === preserve) {
     return;
@@ -1986,11 +1768,6 @@ export function setPreserveDisplayAnimation(preserve: boolean) {
 }
 
 export function runMonsBoardAsDisplayWaitingAnimation() {
-  if (valentinesLoaderEnabled) {
-    runMonsBoardAsDisplayWaitingHeartsAnimation();
-    return;
-  }
-
   if (monsBoardDisplayAnimationTimeout) return;
   const runToken = ++monsBoardDisplayAnimationRunToken;
   if (!monsBoardDisplayAnimationLifecycleTracked) {
@@ -2008,7 +1785,7 @@ export function runMonsBoardAsDisplayWaitingAnimation() {
     }
     if (radius === 0.5) {
       if (hasShownFirstCycleCenter) {
-        showNextWaitingAnimationBoardVariant();
+        gameInputRuntime.showNextWaitingAnimationBoardVariant();
       } else {
         hasShownFirstCycleCenter = true;
       }
@@ -2060,7 +1837,7 @@ export function stopMonsBoardAsDisplayAnimations() {
       monsBoardDisplayAnimationLifecycleTracked = false;
     }
     cleanAllPixels();
-    restoreBoardVariantAfterWaitingAnimation();
+    gameInputRuntime.restoreBoardVariantAfterWaitingAnimation();
   }
 }
 
@@ -2073,21 +1850,8 @@ function colorPixel(location: Location, white: boolean) {
     isFlipped ? 10 - location.i : location.i,
     location.j,
   );
-  const useValentines = valentinesLoaderEnabled;
-  const item = white
-    ? useValentines
-      ? angel
-      : mana
-    : useValentines
-      ? angelB
-      : manaB;
-  const kind = white
-    ? useValentines
-      ? ItemKind.Angel
-      : ItemKind.Mana
-    : useValentines
-      ? ItemKind.AngelBlack
-      : ItemKind.ManaBlack;
+  const item = white ? mana : manaB;
+  const kind = white ? ItemKind.Mana : ItemKind.ManaBlack;
   placeItem(item, flippedLocation, kind, false);
 }
 
@@ -2155,7 +1919,10 @@ function getPlayerInfoNameTexts(): {
     opponentMetadata.voiceReactionDate !== undefined &&
     currentTime - opponentMetadata.voiceReactionDate < thresholdDelta;
 
-  if (isWaitingForRematchResponse || playerScoreDisplayText === "") {
+  if (
+    gameInputRuntime.isWaitingForRematchResponse ||
+    playerScoreDisplayText === ""
+  ) {
     return {
       player: {
         nameText: "",
@@ -2178,7 +1945,11 @@ function getPlayerInfoNameTexts(): {
   let playerNameString = "";
   let opponentNameString = "";
 
-  if (isOnlineGame && opponentMetadata.uid !== "" && !isGameWithBot) {
+  if (
+    gameInputRuntime.isOnlineGame &&
+    opponentMetadata.uid !== "" &&
+    !gameInputRuntime.isGameWithBot
+  ) {
     const placeholderName = "anon";
 
     playerNameString =
@@ -2222,7 +1993,7 @@ function getPlayerInfoNameTexts(): {
 function getPlayerInfoProfileMetadataSide(
   metadataIsOpponent: boolean,
 ): boolean | null {
-  if (!metadataIsOpponent && !isWatchOnly) {
+  if (!metadataIsOpponent && !gameInputRuntime.isWatchOnly) {
     return null;
   }
   if (!canRedirectToExplorer(metadataIsOpponent)) {
@@ -2360,7 +2131,7 @@ export function setupLoggedInPlayerProfile(
   profile: PlayerProfile,
   loginId: string,
 ) {
-  if (!isWatchOnly) {
+  if (!gameInputRuntime.isWatchOnly) {
     setupPlayerId(loginId, false);
     didGetPlayerProfile(profile, loginId, true);
   }
@@ -2398,12 +2169,9 @@ export function showVoiceReactionText(
   }
 
   renderPlayersNamesLabels();
-  const voiceReactionTimeout = window.setTimeout(() => {
-    boardTimeoutIds.delete(voiceReactionTimeout);
-    decrementLifecycleCounter("boardTimeouts");
+  setManagedBoardTimeout(() => {
     renderPlayersNamesLabels();
   }, 3000);
-  trackBoardTimeout(voiceReactionTimeout);
 }
 
 export function setupPlayerId(uid: string, opponent: boolean) {
@@ -2824,16 +2592,16 @@ export function showItemSelection(): void {
   overlay.appendChild(background);
 
   createItemButton(overlay, 220, 365, false, assets.bomb, () =>
-    didSelectInputModifier(InputModifier.Bomb),
+    gameInputRuntime.didSelectInputModifier(InputModifier.Bomb),
   );
   createItemButton(overlay, 565, 365, false, assets.potion, () =>
-    didSelectInputModifier(InputModifier.Potion),
+    gameInputRuntime.didSelectInputModifier(InputModifier.Potion),
   );
 
   background.addEventListener(defaultInputEventName, (event) => {
     preventTouchstartIfNeeded(event);
     event.stopPropagation();
-    didSelectInputModifier(InputModifier.Cancel);
+    gameInputRuntime.didSelectInputModifier(InputModifier.Cancel);
     closeItemSelectionOrConfirmationOverlay();
   });
 
@@ -3005,14 +2773,6 @@ function getAvatarSize(): number {
   return 0.777 * getOuterElementsMultiplicator();
 }
 
-function getWagerMaterialUrl(name: MaterialName): string {
-  return `${MATERIAL_BASE_URL}/${name}.webp`;
-}
-
-function getWagerVisibleScale(): number {
-  return Math.max(0.1, 1 - WAGER_ICON_PADDING_FRAC * 2);
-}
-
 function getWagerRectForScale(
   isOpponent: boolean,
   scale: number,
@@ -3033,20 +2793,6 @@ function getWagerRectForScale(
   return { x, y, w, h };
 }
 
-function createWagerPile(): WagerPile | null {
-  const pile: WagerPile = {
-    positions: [],
-    frames: [],
-    material: null,
-    materialUrl: null,
-    count: 0,
-    actualCount: 0,
-    rect: null,
-    iconSize: 0,
-  };
-  return pile;
-}
-
 function ensureWagerPile(isOpponent: boolean): WagerPile | null {
   if (isOpponent) {
     if (!opponentWagerPile) {
@@ -3065,113 +2811,6 @@ function ensureWinnerWagerPile(): WagerPile | null {
     winnerWagerPile = createWagerPile();
   }
   return winnerWagerPile;
-}
-
-function generateWagerPositions(
-  count: number,
-): Array<{ u: number; v: number }> {
-  if (count <= 0) return [];
-  const stackCount = getWagerStackColumnCount(count);
-  const stackHeights = computeWagerStackHeights(count, stackCount);
-  const tallestStack = Math.max(1, ...stackHeights);
-  const stackUs = computeWagerStackCenterUs(stackCount);
-  const availableV = WAGER_STACK_BOTTOM_V - WAGER_STACK_TOP_V;
-  const stepV =
-    tallestStack > 1
-      ? Math.min(WAGER_STACK_MAX_STEP_V, availableV / (tallestStack - 1))
-      : 0;
-  const clampStackCoord = (value: number) =>
-    Math.max(WAGER_STACK_TOP_V, Math.min(WAGER_STACK_BOTTOM_V, value));
-  const positions: Array<{ u: number; v: number }> = [];
-  for (let s = 0; s < stackCount; s += 1) {
-    const baseU = stackUs[s];
-    const height = stackHeights[s];
-    for (let i = 0; i < height; i += 1) {
-      const jitter = (i % 2 === 0 ? -1 : 1) * WAGER_STACK_U_JITTER;
-      positions.push({
-        u: clampStackCoord(baseU + jitter),
-        v: clampStackCoord(WAGER_STACK_BOTTOM_V - i * stepV),
-      });
-    }
-  }
-  return positions;
-}
-
-function computeWagerStackHeights(count: number, stackCount: number): number[] {
-  const safeStacks = Math.max(1, stackCount);
-  const base = Math.floor(count / safeStacks);
-  const extra = count % safeStacks;
-  const heights: number[] = [];
-  for (let s = 0; s < safeStacks; s += 1) {
-    heights.push(base);
-  }
-  const order = getWagerStackTallOrder(safeStacks);
-  for (let i = 0; i < extra; i += 1) {
-    heights[order[i]] += 1;
-  }
-  return heights;
-}
-
-function getWagerStackTallOrder(stackCount: number): number[] {
-  if (stackCount <= 1) return [0];
-  if (stackCount === 2) return [0, 1];
-  if (stackCount === 3) return [1, 0, 2];
-  if (stackCount === 4) return [1, 2, 0, 3];
-  const indices: number[] = [];
-  for (let i = 0; i < stackCount; i += 1) indices.push(i);
-  return indices;
-}
-
-function computeWagerStackCenterUs(stackCount: number): number[] {
-  if (stackCount <= 1) return [0.5];
-  if (stackCount === 2) return [0.27, 0.73];
-  if (stackCount === 3) return [0.16, 0.5, 0.84];
-  if (stackCount === 4) return [0.12, 0.38, 0.62, 0.88];
-  const us: number[] = [];
-  for (let s = 0; s < stackCount; s += 1) {
-    us.push((s + 0.5) / stackCount);
-  }
-  return us;
-}
-
-function getWagerStackColumnCount(count: number): number {
-  if (count <= 3) {
-    return 1;
-  }
-  if (count <= 8) {
-    return 2;
-  }
-  if (count <= 18) {
-    return 3;
-  }
-  return 4;
-}
-
-function syncWagerPileIcons(
-  pile: WagerPile,
-  material: MaterialName,
-  count: number,
-  materialUrl?: string | null,
-  maxItems = MAX_WAGER_PILE_ITEMS,
-) {
-  const visibleCount = Math.max(0, Math.min(maxItems, count));
-  const nextUrl = materialUrl || getWagerMaterialUrl(material);
-  const sameMaterial = pile.material === material;
-  const sameVisibleCount = pile.count === visibleCount;
-  const reusePositions =
-    sameMaterial && sameVisibleCount && pile.positions.length === visibleCount;
-  pile.material = material;
-  pile.materialUrl = nextUrl;
-  pile.count = visibleCount;
-  pile.actualCount = count;
-  if (!reusePositions) {
-    if (visibleCount <= 0) {
-      pile.positions = [];
-    } else {
-      pile.positions = generateWagerPositions(visibleCount);
-    }
-  }
-  pile.frames = [];
 }
 
 function getWagerPileRect(isOpponent: boolean): {
@@ -3208,34 +2847,14 @@ function getWagerSlotRect(
 }
 
 function getWagerIconLayout(
-  rect: { x: number; y: number; w: number; h: number },
+  rect: WagerPileRect,
   iconSizeOverride?: number,
-): { iconSize: number; padding: number; maxX: number; maxY: number } {
-  const visibleScale = getWagerVisibleScale();
-  const rawIconSize = getAvatarSize() * WAGER_ICON_SIZE_MULTIPLIER;
-  const maxIconSize = Math.min(rect.w, rect.h) / visibleScale;
-  const iconSize = Math.min(iconSizeOverride ?? rawIconSize, maxIconSize);
-  const padding = iconSize * WAGER_ICON_PADDING_FRAC;
-  const visibleSize = iconSize * visibleScale;
-  const maxX = Math.max(0, rect.w - visibleSize);
-  const maxY = Math.max(0, rect.h - visibleSize);
-  return { iconSize, padding, maxX, maxY };
+): ReturnType<typeof getWagerIconLayoutForAvatar> {
+  return getWagerIconLayoutForAvatar(rect, getAvatarSize(), iconSizeOverride);
 }
 
-function updateWagerPileLayout(
-  pile: WagerPile,
-  rect: { x: number; y: number; w: number; h: number },
-) {
-  const layout = getWagerIconLayout(rect);
-  pile.rect = rect;
-  pile.iconSize = layout.iconSize;
-  pile.frames = [];
-  for (let i = 0; i < pile.count; i += 1) {
-    const pos = pile.positions[i] ?? { u: 0.5, v: 0.5 };
-    const ix = rect.x - layout.padding + pos.u * layout.maxX;
-    const iy = rect.y - layout.padding + pos.v * layout.maxY;
-    pile.frames.push({ x: ix, y: iy });
-  }
+function updateWagerPileLayout(pile: WagerPile, rect: WagerPileRect) {
+  updateWagerPileLayoutForAvatar(pile, rect, getAvatarSize());
 }
 
 function updateWagerLayout({
@@ -3265,34 +2884,6 @@ function updateWagerLayout({
   if (handleWagerRenderState || emitWithoutHandler) {
     emitWagerRenderState();
   }
-}
-
-function buildWagerRenderState(
-  pile: WagerPile | null,
-  side: WagerPileSide | "winner",
-  animation: WagerPileAnimation,
-  isPending: boolean,
-): WagerPileRenderState | null {
-  if (!pile || pile.count === 0 || !wagerRectIsVisible(pile.rect)) {
-    return null;
-  }
-  const materialUrl =
-    pile.materialUrl ||
-    (pile.material ? getWagerMaterialUrl(pile.material) : "");
-  if (!materialUrl) {
-    return null;
-  }
-  return {
-    side,
-    rect: { ...pile.rect },
-    iconSize: pile.iconSize,
-    materialUrl,
-    frames: pile.frames.map((f) => ({ ...f })),
-    count: pile.count,
-    actualCount: pile.actualCount,
-    animation,
-    isPending,
-  };
 }
 
 function clearDisappearingPile(side: "player" | "opponent") {
@@ -3466,38 +3057,6 @@ function cancelWagerWinAnimation() {
   wagerWinAnimState = null;
 }
 
-function getWagerIconFrame(
-  rect: { x: number; y: number; w: number; h: number },
-  layout: { iconSize: number; padding: number; maxX: number; maxY: number },
-  pos: { u: number; v: number },
-): { x: number; y: number } {
-  return {
-    x: rect.x - layout.padding + pos.u * layout.maxX,
-    y: rect.y - layout.padding + pos.v * layout.maxY,
-  };
-}
-
-function buildWagerFrames(
-  rect: { x: number; y: number; w: number; h: number },
-  layout: { iconSize: number; padding: number; maxX: number; maxY: number },
-  positions: Array<{ u: number; v: number }>,
-  count: number,
-): Array<{ x: number; y: number }> {
-  const frames: Array<{ x: number; y: number }> = [];
-  const initialCount = Math.min(count, positions.length);
-  for (let i = 0; i < initialCount; i += 1) {
-    frames.push(getWagerIconFrame(rect, layout, positions[i]));
-  }
-  while (frames.length < count) {
-    frames.push(
-      getWagerIconFrame(rect, layout, { u: Math.random(), v: Math.random() }),
-    );
-  }
-  return frames;
-}
-
-const clampWagerUnit = (value: number) => Math.max(0, Math.min(1, value));
-
 function remapWagerFrame(
   frame: { x: number; y: number },
   previousRect: WagerPileRect,
@@ -3505,23 +3064,14 @@ function remapWagerFrame(
   previousIconSize: number,
   nextIconSize: number,
 ) {
-  const previousLayout = getWagerIconLayout(previousRect, previousIconSize);
-  const nextLayout = getWagerIconLayout(nextRect, nextIconSize);
-  const u =
-    previousLayout.maxX > 0
-      ? clampWagerUnit(
-          (frame.x - previousRect.x + previousLayout.padding) /
-            previousLayout.maxX,
-        )
-      : 0.5;
-  const v =
-    previousLayout.maxY > 0
-      ? clampWagerUnit(
-          (frame.y - previousRect.y + previousLayout.padding) /
-            previousLayout.maxY,
-        )
-      : 0.5;
-  return getWagerIconFrame(nextRect, nextLayout, { u, v });
+  return remapWagerFrameForAvatar(
+    frame,
+    previousRect,
+    nextRect,
+    previousIconSize,
+    nextIconSize,
+    getAvatarSize(),
+  );
 }
 
 function applyWagerWinAnimationFrame(time: number): number | null {
@@ -4209,7 +3759,7 @@ export async function setupGameInfoElements(allHiddenInitially: boolean) {
     if (isOpponent) {
       opponentSideMetadata.aura = opponentSideMetadata.aura ?? "";
     } else {
-      if (!isWatchOnly) {
+      if (!gameInputRuntime.isWatchOnly) {
         playerSideMetadata.aura = storage.getPlayerEmojiAura("") ?? "";
       } else {
         playerSideMetadata.aura = playerSideMetadata.aura ?? "";
@@ -4251,7 +3801,8 @@ export async function setupGameInfoElements(allHiddenInitially: boolean) {
       preventTouchstartIfNeeded(event);
       playSounds([Sound.Click]);
       const metadataIsOpponent = metadataSideIsOpponentForSlot(isOpponent);
-      const shouldChangeEmoji = canChangeEmoji(metadataIsOpponent);
+      const shouldChangeEmoji =
+        gameInputRuntime.canChangeEmoji(metadataIsOpponent);
 
       if (shouldChangeEmoji) {
         pickAndDisplayDifferentEmoji(metadataIsOpponent);
@@ -4302,9 +3853,9 @@ export function didClickAndChangePlayerEmoji(
   if (aura !== undefined) {
     storage.setPlayerEmojiAura(aura);
   }
-  sendPlayerEmojiUpdate(parseInt(newId), aura);
+  gameInputRuntime.sendPlayerEmojiUpdate(parseInt(newId), aura);
 
-  if (!isWatchOnly) {
+  if (!gameInputRuntime.isWatchOnly) {
     playerSideMetadata.emojiId = newId;
     if (aura !== undefined) {
       playerSideMetadata.aura = aura;
@@ -4367,7 +3918,7 @@ export function setupBoard() {
       const x = isFlipped ? 10 - rawX : rawX;
       const y = isFlipped ? 10 - rawY : rawY;
 
-      didClickSquare(new Location(y, x));
+      gameInputRuntime.didClickSquare(new Location(y, x));
       event.preventDefault();
       event.stopPropagation();
     } else if (
@@ -4376,13 +3927,13 @@ export function setupBoard() {
       if (showsItemSelectionOrConfirmationOverlay) {
         didDismissSomethingWithOutsideTapJustNow();
         hideItemSelectionOrConfirmationOverlay();
-        cleanupCurrentInputs();
+        gameInputRuntime.cleanupCurrentInputs();
         event.preventDefault();
         event.stopPropagation();
         return;
       }
       hideItemSelectionOrConfirmationOverlay();
-      didClickOutsideBoard();
+      gameInputRuntime.didClickOutsideBoard();
       event.preventDefault();
       event.stopPropagation();
     }
@@ -4405,12 +3956,9 @@ export function setupBoard() {
 
   refreshWaves();
 
-  const preloadTimeout = window.setTimeout(() => {
-    boardTimeoutIds.delete(preloadTimeout);
-    decrementLifecycleCounter("boardTimeouts");
+  setManagedBoardTimeout(() => {
     preloadParticleEffects().catch(console.error);
   }, 100);
-  trackBoardTimeout(preloadTimeout);
 }
 
 export function disposeBoardRuntime() {
@@ -5573,6 +5121,8 @@ export function didToggleBoardColors() {
   }
 }
 
+bindBoardColorChangeHandler(didToggleBoardColors);
+
 function inBoardCoordinates(location: Location): Location {
   if (isFlipped) {
     return new Location(10 - location.i, 10 - location.j);
@@ -5661,13 +5211,10 @@ export async function indicateElectricHit(at: Location) {
 
 export async function indicatePotionUsage(at: Location) {
   const effects = await ensureParticleEffectsLoaded();
-  const potionTimeout = window.setTimeout(() => {
-    boardTimeoutIds.delete(potionTimeout);
-    decrementLifecycleCounter("boardTimeouts");
+  setManagedBoardTimeout(() => {
     playSounds([Sound.UsePotion]);
     effects.showPurpleBubbles(at);
   }, 300);
-  trackBoardTimeout(potionTimeout);
 }
 
 export async function indicateBombExplosion(at: Location) {

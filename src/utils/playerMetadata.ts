@@ -1,13 +1,7 @@
-import { connection } from "../connection/connection";
-import { PlayerProfile } from "../connection/connectionModels";
+import type { PlayerProfile } from "../connection/connectionModels";
 import glicko2 from "glicko2";
 import { createRatingUpdater } from "@mons/shared/ratings";
 import { storage } from "./storage";
-import { updateEmojiAndAuraIfNeeded } from "../game/board";
-import { isWatchOnly } from "../game/gameController";
-import { updateProfileDisplayName } from "../ui/ProfileSignIn";
-import { syncTutorialProgress } from "../content/problems";
-import { syncOwnProfileMiningState } from "../services/ownProfileMiningHydration";
 import {
   ensForUids,
   ethAddressesForUids,
@@ -15,6 +9,16 @@ import {
   solAddressesForUids,
   usernamesForUids,
 } from "./playerMetadataCache";
+import {
+  createPlayerMetadataSessionGuard,
+  getPlayerProfileByLoginId,
+  isPlayerMetadataWatchOnly,
+  syncPlayerMiningState,
+  syncPlayerTutorialProgress,
+  updatePlayerEmoji,
+  updatePlayerEmojiAndAura,
+  updatePlayerProfileDisplayName,
+} from "./playerMetadataRuntimePort";
 
 export { resetPlayerMetadataCaches } from "./playerMetadataCache";
 
@@ -102,7 +106,7 @@ export function updatePlayerMetadataWithProfile(
   own: boolean,
   onSuccess: () => void,
 ) {
-  const sessionGuard = connection.createSessionGuard();
+  const sessionGuard = createPlayerMetadataSessionGuard();
   usernamesForUids[loginId] = profile.username ?? "";
   const ethAddress = profile.eth ?? "";
   const solAddress = profile.sol ?? "";
@@ -143,19 +147,18 @@ export function updatePlayerMetadataWithProfile(
   if (profile.rating !== undefined && profile.nonce !== undefined) {
     profilesForUids[loginId] = profile;
     if (own) {
-      syncOwnProfileMiningState(profile);
+      syncPlayerMiningState(profile);
     }
     onSuccess();
   } else {
-    connection
-      .getProfileByLoginId(loginId)
+    getPlayerProfileByLoginId(loginId)
       .then((profile) => {
         if (!sessionGuard()) {
           return;
         }
         profilesForUids[loginId] = profile;
         if (profile.emoji !== undefined && own) {
-          syncTutorialProgress(
+          syncPlayerTutorialProgress(
             profile.completedProblemIds ?? [],
             profile.isTutorialCompleted ?? false,
           );
@@ -190,21 +193,21 @@ export function updatePlayerMetadataWithProfile(
             storage.setProfileMons(profile.profileMons);
           }
 
-          syncOwnProfileMiningState(profile);
+          syncPlayerMiningState(profile);
 
-          updateProfileDisplayName(
+          updatePlayerProfileDisplayName(
             profile.username ?? "",
             storage.getEthAddress(""),
             storage.getSolAddress(""),
           );
-          if (!isWatchOnly) {
-            updateEmojiAndAuraIfNeeded(
+          if (!isPlayerMetadataWatchOnly()) {
+            updatePlayerEmojiAndAura(
               profile.emoji.toString(),
               profile.aura,
               false,
             );
           }
-          connection.updateEmoji(profile.emoji, true, profile.aura ?? "");
+          updatePlayerEmoji(profile.emoji, true, profile.aura ?? "");
         }
         onSuccess();
       })

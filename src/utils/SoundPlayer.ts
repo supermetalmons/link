@@ -1,7 +1,5 @@
-import { getIsMuted } from "../index";
 import { isMobile } from "./misc";
-import { Sound } from "../utils/gameModels";
-import { playSounds } from "../content/sounds";
+import { getIsMuted, subscribeToMuteState } from "../runtime/muteStore";
 
 class SoundPlayer {
   private audioContext!: AudioContext;
@@ -13,6 +11,7 @@ class SoundPlayer {
   private playIslandShowUpOnInitComplete = false;
   private isResuming = false;
   private initializationPromise: Promise<void> | null = null;
+  private playIslandShowUp: () => void = () => {};
 
   constructor() {
     document.addEventListener(
@@ -26,6 +25,13 @@ class SoundPlayer {
       { once: true },
     );
     this.attachVisibilityHandlers();
+    subscribeToMuteState(() => {
+      this.setMuted(getIsMuted());
+    });
+  }
+
+  public setIslandShowUpPlayback(playback: () => void): void {
+    this.playIslandShowUp = playback;
   }
 
   public scheduleIslandShowUpOnInitComplete() {
@@ -80,7 +86,7 @@ class SoundPlayer {
 
     if (this.playIslandShowUpOnInitComplete) {
       this.playIslandShowUpOnInitComplete = false;
-      playSounds([Sound.IslandShowUp]);
+      this.playIslandShowUp();
     }
   }
 

@@ -1,10 +1,10 @@
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const admin = require("./firebaseAdmin");
+const { getProfileByLoginId } = require("./profileSummaryLookup");
 const {
-  getProfileByLoginId,
   getDisplayNameFromAddress,
   getTelegramEmojiTag,
-} = require("./utils");
+} = require("./telegramDisplay");
 const {
   TELEGRAM_AUTOMATCH_VERSION,
   buildPendingAutomatchTelegramSource,

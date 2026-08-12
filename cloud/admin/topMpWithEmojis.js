@@ -8,9 +8,16 @@ const {
 } = require("./_admin");
 const { getDisplayNameFromAddress } = require("../functions/utils");
 const { queueTelegramSend } = require("../functions/telegramDelivery");
+const {
+  createLeaderboardHeading,
+  parseLeaderboardArgs,
+} = require("./leaderboardCli");
 
-async function logTopMpWithEmojis(limit = 15) {
-  const initialized = initAdmin();
+async function logTopMpWithEmojis(
+  limit = 15,
+  adminArgs = process.argv.slice(2),
+) {
+  const initialized = initAdmin(adminArgs);
   if (initialized) {
     try {
       const firestore = admin.firestore();
@@ -19,7 +26,7 @@ async function logTopMpWithEmojis(limit = 15) {
         .orderBy("totalManaPoints", "desc")
         .limit(limit)
         .get();
-      let output = "<b>top 15 mp</b>\n\n";
+      let output = createLeaderboardHeading("mp", limit);
       let rank = 1;
       for (const doc of snap.docs) {
         const data = doc.data();
@@ -57,11 +64,16 @@ async function logTopMpWithEmojis(limit = 15) {
   throw new Error(ADC_FAILURE_MESSAGE);
 }
 
-async function main() {
-  await logTopMpWithEmojis(15);
+async function main(argv = process.argv.slice(2)) {
+  const { adminArgs, limit } = parseLeaderboardArgs(argv);
+  await logTopMpWithEmojis(limit, adminArgs);
 }
 
-main().catch((err) => {
-  console.error(addApplicationDefaultCredentialHelp(err));
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(addApplicationDefaultCredentialHelp(err));
+    process.exit(1);
+  });
+}
+
+module.exports = { logTopMpWithEmojis, main };

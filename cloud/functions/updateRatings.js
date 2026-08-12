@@ -3,36 +3,27 @@ const glicko2 = require("glicko2");
 const { createRatingUpdater } = require("@mons/shared/ratings");
 const admin = require("./firebaseAdmin");
 const { isAutoInviteId } = require("@mons/shared/ids");
+const { isEventOwnedInvite } = require("@mons/shared/events");
 const { MATCH_TIMER_TERMINAL } = require("@mons/shared/timers");
+const { getProfileByLoginId } = require("./profileSummaryLookup");
 const {
-  batchReadWithRetry,
-  getProfileByLoginId,
   getDisplayNameFromAddress,
   getTelegramEmojiTag,
-} = require("./utils");
+} = require("./telegramDisplay");
 const { resolveMatchWinner } = require("./matchOutcome");
 const { loadMonsRules } = require("./monsRules");
-
-const laterGameFromMatchData = (mons, matchData, opponentMatchData) => {
-  const playerGame =
-    typeof matchData.fen === "string"
-      ? mons.Game.fromFen(matchData.fen)
-      : undefined;
-  const opponentGame =
-    typeof opponentMatchData.fen === "string"
-      ? mons.Game.fromFen(opponentMatchData.fen)
-      : undefined;
-  if (!playerGame && !opponentGame) {
-    throw new HttpsError("internal", "Could not validate the game score.");
-  }
-  if (!playerGame) {
-    return opponentGame;
-  }
-  if (!opponentGame) {
-    return playerGame;
-  }
-  return playerGame.isLaterThan(opponentGame) ? playerGame : opponentGame;
-};
+const {
+  assertInviteMatchesPlayers,
+  readMatchInviteRecords,
+} = require("./gameplay/matchRecords");
+const { selectLaterGameForRating } = require("./gameplay/matchReconstruction");
+const {
+  acquireRatingUpdateLease,
+  ensureRatingUpdateCompletionMarker,
+  getRatingUpdateRef,
+  startRatingUpdateLeaseHeartbeat,
+} = require("./gameplay/ratingLease");
+const { assertResolvedPlayerClaim } = require("./gameplay/playerAuthorization");
 
 const updateRating = createRatingUpdater(glicko2.Glicko2);
 
@@ -51,10 +42,6 @@ const matchStatusTelegramEmojiIds = {
 
 const FEB_CHALLENGE_START_UTC = Date.UTC(2026, 1, 1);
 const FEB_CHALLENGE_END_UTC = Date.UTC(2026, 2, 1);
-const RATING_UPDATE_LEASE_MS = 30 * 1000;
-const RATING_UPDATE_HEARTBEAT_INTERVAL_MS = 10 * 1000;
-const RATING_UPDATE_ACQUIRE_RETRY_DELAY_MS = 500;
-const RATING_UPDATE_ACQUIRE_MAX_ATTEMPTS = 70;
 
 const isFebruaryChallengeActive = () => {
   const now = Date.now();
@@ -90,191 +77,6 @@ const updateFebruaryUniqueOpponents = async (profileId, opponentProfileId) => {
   } catch (error) {
     console.error("Error updating February unique opponents:", error);
   }
-};
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const createLeaseToken = (ownerUid) => {
-  return `${ownerUid}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-};
-
-const getRatingUpdateRef = (inviteId, matchId) => {
-  return admin
-    .firestore()
-    .collection("ratingUpdates")
-    .doc(`${inviteId}__${matchId}`);
-};
-
-const ensureRatingUpdateCompletionMarker = async (completionRef) => {
-  const snapshot = await completionRef.once("value");
-  if (snapshot.val() === true) {
-    return false;
-  }
-  await completionRef.set(true);
-  return true;
-};
-
-const readRatingUpdateData = async (ratingUpdateRef) => {
-  const snapshot = await ratingUpdateRef.get();
-  if (!snapshot.exists) {
-    return null;
-  }
-  return snapshot.data() || null;
-};
-
-const tryAcquireRatingUpdateLease = async ({
-  ratingUpdateRef,
-  ownerUid,
-  ownerToken,
-  inviteId,
-  matchId,
-  playerId,
-  opponentId,
-}) => {
-  const nowMs = Date.now();
-  let claim = { status: "busy", data: null };
-
-  await admin.firestore().runTransaction(async (transaction) => {
-    const snapshot = await transaction.get(ratingUpdateRef);
-    const data = snapshot.exists ? snapshot.data() || {} : {};
-
-    if (data.status === "done") {
-      claim = { status: "done", data };
-      return;
-    }
-
-    const leaseExpiresAtMs =
-      typeof data.leaseExpiresAtMs === "number" ? data.leaseExpiresAtMs : 0;
-    if (
-      data.status === "processing" &&
-      leaseExpiresAtMs > nowMs &&
-      data.ownerToken &&
-      data.ownerToken !== ownerToken
-    ) {
-      claim = { status: "busy", data };
-      return;
-    }
-
-    transaction.set(
-      ratingUpdateRef,
-      {
-        inviteId,
-        matchId,
-        playerId,
-        opponentId,
-        ownerUid,
-        ownerToken,
-        status: "processing",
-        startedAtMs:
-          typeof data.startedAtMs === "number" ? data.startedAtMs : nowMs,
-        updatedAtMs: nowMs,
-        leaseExpiresAtMs: nowMs + RATING_UPDATE_LEASE_MS,
-      },
-      { merge: true },
-    );
-    claim = { status: "acquired", data };
-  });
-
-  return claim;
-};
-
-const acquireRatingUpdateLease = async ({
-  completionRef,
-  ratingUpdateRef,
-  ownerUid,
-  inviteId,
-  matchId,
-  playerId,
-  opponentId,
-}) => {
-  const ownerToken = createLeaseToken(ownerUid);
-
-  for (
-    let attempt = 0;
-    attempt < RATING_UPDATE_ACQUIRE_MAX_ATTEMPTS;
-    attempt += 1
-  ) {
-    const completionSnapshot = await completionRef.once("value");
-    if (completionSnapshot.val() === true) {
-      return {
-        status: "done",
-        ownerToken,
-        data: await readRatingUpdateData(ratingUpdateRef),
-      };
-    }
-
-    const claim = await tryAcquireRatingUpdateLease({
-      ratingUpdateRef,
-      ownerUid,
-      ownerToken,
-      inviteId,
-      matchId,
-      playerId,
-      opponentId,
-    });
-    if (claim.status === "acquired" || claim.status === "done") {
-      return {
-        status: claim.status,
-        ownerToken,
-        data: claim.data,
-      };
-    }
-
-    if (attempt < RATING_UPDATE_ACQUIRE_MAX_ATTEMPTS - 1) {
-      await sleep(RATING_UPDATE_ACQUIRE_RETRY_DELAY_MS);
-    }
-  }
-
-  return {
-    status: "busy",
-    ownerToken,
-    data: await readRatingUpdateData(ratingUpdateRef),
-  };
-};
-
-const startRatingUpdateLeaseHeartbeat = ({ ratingUpdateRef, ownerToken }) => {
-  let isDisposed = false;
-  const heartbeatInterval = setInterval(() => {
-    if (isDisposed) {
-      return;
-    }
-    const nowMs = Date.now();
-    void admin
-      .firestore()
-      .runTransaction(async (transaction) => {
-        const snapshot = await transaction.get(ratingUpdateRef);
-        if (!snapshot.exists) {
-          return;
-        }
-        const data = snapshot.data() || {};
-        if (data.status !== "processing" || data.ownerToken !== ownerToken) {
-          return;
-        }
-        transaction.set(
-          ratingUpdateRef,
-          {
-            updatedAtMs: nowMs,
-            leaseExpiresAtMs: nowMs + RATING_UPDATE_LEASE_MS,
-          },
-          { merge: true },
-        );
-      })
-      .catch((error) => {
-        console.error(
-          "ratingUpdate:leaseHeartbeat:error",
-          error && error.message ? error.message : error,
-        );
-      });
-  }, RATING_UPDATE_HEARTBEAT_INTERVAL_MS);
-
-  if (typeof heartbeatInterval.unref === "function") {
-    heartbeatInterval.unref();
-  }
-
-  return () => {
-    isDisposed = true;
-    clearInterval(heartbeatInterval);
-  };
 };
 
 const maybeApplyStoredFebruaryChallengeUpdate = async (ratingUpdateData) => {
@@ -334,15 +136,6 @@ const getWagerSuffix = (inviteData, matchId) => {
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 
-const isEventOwnedInvite = (inviteData) => {
-  if (!inviteData || typeof inviteData !== "object") {
-    return false;
-  }
-  return (
-    inviteData.eventOwned === true || normalizeString(inviteData.eventId) !== ""
-  );
-};
-
 const getRatingEventMetadata = (inviteData) => ({
   isEventMatch: isEventOwnedInvite(inviteData),
   eventOwned: inviteData?.eventOwned === true,
@@ -369,45 +162,23 @@ exports.updateRatings = onCall(async (request) => {
     return { ok: false };
   }
 
-  const matchRef = admin
-    .database()
-    .ref(`players/${playerId}/matches/${matchId}`);
-  const inviteRef = admin.database().ref(`invites/${inviteId}`);
-  const opponentMatchRef = admin
-    .database()
-    .ref(`players/${opponentId}/matches/${matchId}`);
-
-  const [matchSnapshot, inviteSnapshot, opponentMatchSnapshot] =
-    await batchReadWithRetry([matchRef, inviteRef, opponentMatchRef]);
-
-  const matchData = matchSnapshot.val();
-  const inviteData = inviteSnapshot.val();
-  const opponentMatchData = opponentMatchSnapshot.val();
+  const { matchData, inviteData, opponentMatchData } =
+    await readMatchInviteRecords({
+      playerId,
+      opponentId,
+      matchId,
+      inviteId,
+    });
   const authPlayerProfile = await getProfileByLoginId(playerId);
 
-  if (!(
-    (inviteData.hostId === playerId && inviteData.guestId === opponentId) ||
-    (inviteData.hostId === opponentId && inviteData.guestId === playerId)
-  )) {
-    throw new HttpsError(
-      "permission-denied",
-      "Players don't match invite data",
-    );
-  }
+  assertInviteMatchesPlayers(inviteData, playerId, opponentId);
 
-  if (uid !== playerId) {
-    const customClaims = request.auth.token || {};
-    if (
-      authPlayerProfile.profileId &&
-      (!customClaims.profileId ||
-        customClaims.profileId !== authPlayerProfile.profileId)
-    ) {
-      throw new HttpsError(
-        "permission-denied",
-        "You don't have permission to perform this action for this player.",
-      );
-    }
-  }
+  assertResolvedPlayerClaim({
+    uid,
+    playerId,
+    token: request.auth.token,
+    profileId: authPlayerProfile.profileId,
+  });
 
   const resolvedWinner = await resolveMatchWinner(matchData, opponentMatchData);
   let result = "none";
@@ -459,7 +230,7 @@ exports.updateRatings = onCall(async (request) => {
     const opponentProfile = await getProfileByLoginId(opponentId);
 
     const mons = await loadMonsRules();
-    const gameForScore = laterGameFromMatchData(
+    const gameForScore = selectLaterGameForRating(
       mons,
       matchData,
       opponentMatchData,

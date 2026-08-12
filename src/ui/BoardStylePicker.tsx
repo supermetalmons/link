@@ -186,7 +186,7 @@ const SectionRow = styled.div`
   z-index: 1;
 `;
 
-const OptionButton = styled.button<{ isSelected?: boolean }>`
+const OptionButton = styled.button<{ $isSelected?: boolean }>`
   width: 44px;
   height: 44px;
   min-width: 44px;
@@ -207,7 +207,7 @@ const OptionButton = styled.button<{ isSelected?: boolean }>`
   -webkit-user-select: none;
 
   ${(props) =>
-    props.isSelected &&
+    props.$isSelected &&
     `
     border-color: var(--color-blue-primary);
     box-shadow: 0 0 0 3px var(--selectedBorderShadowColor);
@@ -215,7 +215,7 @@ const OptionButton = styled.button<{ isSelected?: boolean }>`
 
   @media (prefers-color-scheme: dark) {
     ${(props) =>
-      props.isSelected &&
+      props.$isSelected &&
       `
       border-color: var(--color-blue-primary-dark);
       box-shadow: 0 0 0 3px var(--selectedBorderShadowColorDark);
@@ -225,7 +225,7 @@ const OptionButton = styled.button<{ isSelected?: boolean }>`
   @media (hover: hover) and (pointer: fine) {
     &:hover {
       ${(props) =>
-        !props.isSelected &&
+        !props.$isSelected &&
         `
         border-color: var(--focusBorderColor);
         box-shadow: 0 0 0 2px var(--focusShadowColor);
@@ -246,7 +246,7 @@ const OptionButton = styled.button<{ isSelected?: boolean }>`
   @media (hover: none) and (pointer: coarse) {
     &:active {
       ${(props) =>
-        !props.isSelected &&
+        !props.$isSelected &&
         `
         border-color: var(--focusBorderColor);
         box-shadow: 0 0 0 2px var(--focusShadowColor);
@@ -272,7 +272,7 @@ const ColorSquare = styled(OptionButton)`
   }
 `;
 
-const ItemStyleButton = styled.button<{ isSelected?: boolean }>`
+const ItemStyleButton = styled.button<{ $isSelected?: boolean }>`
   width: 44px;
   height: 44px;
   min-width: 44px;
@@ -288,9 +288,9 @@ const ItemStyleButton = styled.button<{ isSelected?: boolean }>`
   user-select: none;
   -webkit-touch-callout: none;
   -webkit-user-select: none;
-  opacity: ${(props) => (props.isSelected ? 1 : 0.45)};
+  opacity: ${(props) => (props.$isSelected ? 1 : 0.45)};
   filter: ${(props) =>
-    props.isSelected
+    props.$isSelected
       ? "drop-shadow(0 0 4px rgba(59, 130, 246, 0.95))"
       : "none"};
   transition:
@@ -300,7 +300,7 @@ const ItemStyleButton = styled.button<{ isSelected?: boolean }>`
 
   @media (prefers-color-scheme: dark) {
     filter: ${(props) =>
-      props.isSelected
+      props.$isSelected
         ? "drop-shadow(0 0 4px rgba(100, 165, 255, 0.95))"
         : "none"};
   }
@@ -538,7 +538,7 @@ const BoardStylePickerComponent: React.FC = () => {
     <BoardStylePicker>
       <SectionRow>
         <ColorSquare
-          isSelected={isGridBoardSelected && currentColorSetKey === "default"}
+          $isSelected={isGridBoardSelected && currentColorSetKey === "default"}
           onClick={!isMobile ? handleColorSetChange("default") : undefined}
           onTouchStart={isMobile ? handleColorSetChange("default") : undefined}
           aria-label="Light board theme"
@@ -546,7 +546,7 @@ const BoardStylePickerComponent: React.FC = () => {
           {renderColorSquares("light")}
         </ColorSquare>
         <ColorSquare
-          isSelected={
+          $isSelected={
             isGridBoardSelected && currentColorSetKey === "darkAndYellow"
           }
           onClick={
@@ -565,7 +565,7 @@ const BoardStylePickerComponent: React.FC = () => {
           return (
             <ColorSquare
               key={styleSet}
-              isSelected={selectedBoardStyleSet === styleSet}
+              $isSelected={selectedBoardStyleSet === styleSet}
               onClick={!isMobile ? selectPictureBoard : undefined}
               onTouchStart={isMobile ? selectPictureBoard : undefined}
               aria-label={`${styleSet} board theme`}
@@ -580,7 +580,7 @@ const BoardStylePickerComponent: React.FC = () => {
       </SectionRow>
       <SectionRow>
         <ItemStyleButton
-          isSelected={selectedItemsStyleSet === AssetsSet.Pixel}
+          $isSelected={selectedItemsStyleSet === AssetsSet.Pixel}
           onClick={
             !isMobile ? handleItemsStyleSetChange(AssetsSet.Pixel) : undefined
           }
@@ -595,7 +595,7 @@ const BoardStylePickerComponent: React.FC = () => {
           />
         </ItemStyleButton>
         <ItemStyleButton
-          isSelected={selectedItemsStyleSet === AssetsSet.Original}
+          $isSelected={selectedItemsStyleSet === AssetsSet.Original}
           onClick={
             !isMobile
               ? handleItemsStyleSetChange(AssetsSet.Original)
@@ -612,7 +612,7 @@ const BoardStylePickerComponent: React.FC = () => {
           />
         </ItemStyleButton>
         <ItemStyleButton
-          isSelected={selectedItemsStyleSet === AssetsSet.Pangchiu}
+          $isSelected={selectedItemsStyleSet === AssetsSet.Pangchiu}
           onClick={
             !isMobile
               ? handleItemsStyleSetChange(AssetsSet.Pangchiu)

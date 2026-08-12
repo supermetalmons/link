@@ -38,8 +38,7 @@ const admin = {
   firestore,
 };
 
-function getProjectIdFromArgsEnvOrRc() {
-  const args = process.argv.slice(2);
+function getProjectIdFromArgsEnvOrRc(args = process.argv.slice(2)) {
   const pIdx = args.indexOf("--project");
   if (pIdx !== -1 && args[pIdx + 1]) return args[pIdx + 1];
   if (process.env.FIREBASE_PROJECT) return process.env.FIREBASE_PROJECT;
@@ -54,8 +53,10 @@ function getProjectIdFromArgsEnvOrRc() {
   return undefined;
 }
 
-function getDatabaseUrlFromArgsEnvOrProject(projectId) {
-  const args = process.argv.slice(2);
+function getDatabaseUrlFromArgsEnvOrProject(
+  projectId,
+  args = process.argv.slice(2),
+) {
   const dbIdx = args.indexOf("--database-url");
   if (dbIdx !== -1 && args[dbIdx + 1]) return args[dbIdx + 1];
   if (process.env.FIREBASE_DATABASE_URL)
@@ -65,10 +66,10 @@ function getDatabaseUrlFromArgsEnvOrProject(projectId) {
   return undefined;
 }
 
-function initAdmin() {
+function initAdmin(args = process.argv.slice(2)) {
   if (getApps().some((app) => app.name === "[DEFAULT]")) return true;
-  const projectId = getProjectIdFromArgsEnvOrRc();
-  const databaseURL = getDatabaseUrlFromArgsEnvOrProject(projectId);
+  const projectId = getProjectIdFromArgsEnvOrRc(args);
+  const databaseURL = getDatabaseUrlFromArgsEnvOrProject(projectId, args);
   try {
     initializeApp({
       credential: applicationDefault(),

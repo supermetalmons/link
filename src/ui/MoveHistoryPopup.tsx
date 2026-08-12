@@ -18,33 +18,20 @@ import type {
   MoveHistorySegmentRole,
 } from "../game/moveEventStrings";
 import { colors } from "../content/boardStyles";
+import {
+  getMoveHistoryPopupFollowingLatest,
+  setMoveHistoryPopupFollowingLatest,
+  setMoveHistoryPopupState,
+  subscribeMoveHistoryPopupReload,
+  subscribeMoveHistoryPopupSelectionReset,
+} from "./controls/moveHistoryPopupStore";
 
-const moveHistoryReloadListeners = new Set<() => void>();
-const moveHistorySelectionResetListeners = new Set<() => void>();
-export function triggerMoveHistoryPopupReload() {
-  moveHistoryReloadListeners.forEach((listener) => listener());
-}
-export function subscribeMoveHistoryPopupReload(listener: () => void) {
-  moveHistoryReloadListeners.add(listener);
-  return () => {
-    moveHistoryReloadListeners.delete(listener);
-  };
-}
-export function triggerMoveHistoryPopupSelectionReset() {
-  moveHistorySelectionResetListeners.forEach((listener) => listener());
-}
-function subscribeMoveHistoryPopupSelectionReset(listener: () => void) {
-  moveHistorySelectionResetListeners.add(listener);
-  return () => {
-    moveHistorySelectionResetListeners.delete(listener);
-  };
-}
-
-let _popupIsOpen = false;
-let _popupIsFollowingLatest = false;
-export function isMoveHistoryPopupFollowingLatest(): boolean {
-  return _popupIsOpen && _popupIsFollowingLatest;
-}
+export {
+  isMoveHistoryPopupFollowingLatest,
+  subscribeMoveHistoryPopupReload,
+  triggerMoveHistoryPopupReload,
+  triggerMoveHistoryPopupSelectionReset,
+} from "./controls/moveHistoryPopupStore";
 
 const ITEM_HEIGHT = 24;
 const VISIBLE_ITEMS = 7;
@@ -356,7 +343,7 @@ const MoveHistoryPopup = React.forwardRef<HTMLDivElement>((_, ref) => {
     const clamped = Math.max(0, Math.min(items.length - 1, newIndex));
     if (clamped !== selectedIndexRef.current) {
       selectedIndexRef.current = clamped;
-      _popupIsFollowingLatest = clamped >= items.length - 1;
+      setMoveHistoryPopupFollowingLatest(clamped >= items.length - 1);
       setSelectedIndex(clamped);
       setSnapshotIndex(null);
       didSelectVerboseTrackingEntity(clamped);
@@ -450,7 +437,7 @@ const MoveHistoryPopup = React.forwardRef<HTMLDivElement>((_, ref) => {
       }
 
       selectedIndexRef.current = index;
-      _popupIsFollowingLatest = index >= items.length - 1;
+      setMoveHistoryPopupFollowingLatest(index >= items.length - 1);
       setSelectedIndex(index);
       const el = scrollRef.current;
       if (el) {
@@ -462,8 +449,7 @@ const MoveHistoryPopup = React.forwardRef<HTMLDivElement>((_, ref) => {
   );
 
   React.useEffect(() => {
-    _popupIsOpen = true;
-    _popupIsFollowingLatest = true;
+    setMoveHistoryPopupState(true, true);
     try {
       didOpenMoveHistoryPopup();
     } catch {}
@@ -477,15 +463,15 @@ const MoveHistoryPopup = React.forwardRef<HTMLDivElement>((_, ref) => {
       }
       const newLatest = Math.max(0, newItems.length - 1);
       const currentSel = selectedIndexRef.current;
-      const wasFollowing = _popupIsFollowingLatest;
+      const wasFollowing = getMoveHistoryPopupFollowingLatest();
 
       let newSelection: number;
       if (wasFollowing || currentSel >= newLatest) {
         newSelection = newLatest;
-        _popupIsFollowingLatest = true;
+        setMoveHistoryPopupFollowingLatest(true);
       } else {
         newSelection = Math.min(currentSel, newLatest);
-        _popupIsFollowingLatest = newSelection >= newLatest;
+        setMoveHistoryPopupFollowingLatest(newSelection >= newLatest);
       }
 
       selectedIndexRef.current = newSelection;
@@ -494,7 +480,7 @@ const MoveHistoryPopup = React.forwardRef<HTMLDivElement>((_, ref) => {
       setSnapshotIndex(null);
       setVersion((v) => v + 1);
 
-      if (_popupIsFollowingLatest && !wasFollowing) {
+      if (getMoveHistoryPopupFollowingLatest() && !wasFollowing) {
         queueMicrotask(() => didSelectVerboseTrackingEntity(newSelection));
       }
     });
@@ -508,7 +494,7 @@ const MoveHistoryPopup = React.forwardRef<HTMLDivElement>((_, ref) => {
           newItems = [{ segments: [] }];
         }
         const newLatest = Math.max(0, newItems.length - 1);
-        _popupIsFollowingLatest = true;
+        setMoveHistoryPopupFollowingLatest(true);
         selectedIndexRef.current = newLatest;
         pendingScrollIndexRef.current = newLatest;
         setSelectedIndex(newLatest);
@@ -519,8 +505,7 @@ const MoveHistoryPopup = React.forwardRef<HTMLDivElement>((_, ref) => {
     return () => {
       unsubscribe();
       unsubscribeSelectionReset();
-      _popupIsOpen = false;
-      _popupIsFollowingLatest = false;
+      setMoveHistoryPopupState(false, false);
       try {
         didDismissMoveHistoryPopup();
       } catch {}

@@ -1,16 +1,8 @@
-import * as Board from "../game/board";
 import { storage } from "../utils/storage";
+import { notifyBoardColorChange } from "./boardStyleRuntimePort";
+import { AssetsSet, BoardStyleSet } from "./boardStyleModels";
 
-export enum AssetsSet {
-  Pixel = "Pixel",
-  Original = "Original",
-  Pangchiu = "Pangchiu",
-}
-
-export enum BoardStyleSet {
-  Grid = "Grid",
-  Pangchiu = "Pangchiu",
-}
+export { AssetsSet, BoardStyleSet } from "./boardStyleModels";
 
 const isAssetsSet = (value: unknown): value is AssetsSet => {
   return (
@@ -253,7 +245,7 @@ const notifyBoardColorSetListeners = () => {
 const applyColorMode = (mode: ColorMode) => {
   currentColorMode = mode;
   currentColorSetKey = resolveColorSetKeyForMode(mode);
-  Board.didToggleBoardColors();
+  notifyBoardColorChange();
   notifyBoardColorSetListeners();
 };
 

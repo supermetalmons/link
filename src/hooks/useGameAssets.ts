@@ -1,58 +1,16 @@
-import { useState, useEffect } from "react";
+import { createCachedResource } from "../resources/cachedResource";
+import { useCachedResource } from "../resources/useCachedResource";
 
-let assetsCache: any = null;
-let loadingPromise: Promise<any> | null = null;
+type GameAssets = Record<string, string>;
 
-const loadGameAssets = async (): Promise<any> => {
-  if (assetsCache) {
-    return assetsCache;
-  }
-
-  if (loadingPromise) {
-    return loadingPromise;
-  }
-
-  loadingPromise = (async () => {
-    try {
-      const gameAssets = (await import("../assets/gameAssetsPixel")).gameAssets;
-      assetsCache = gameAssets;
-      return gameAssets;
-    } catch (error) {
-      console.error("Failed to load game assets:", error);
-      return null;
-    } finally {
-      loadingPromise = null;
-    }
-  })();
-
-  return loadingPromise;
-};
+const gameAssetsResource = createCachedResource<GameAssets>(
+  async () => (await import("../assets/gameAssetsPixel")).gameAssets,
+  (error) => {
+    console.error("Failed to load game assets:", error);
+  },
+);
 
 export const useGameAssets = () => {
-  const [assets, setAssets] = useState<any>(assetsCache);
-  const [isLoading, setIsLoading] = useState(!assetsCache);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    if (assetsCache) {
-      setAssets(assetsCache);
-      setIsLoading(false);
-      return;
-    }
-
-    setIsLoading(true);
-    loadGameAssets().then((loadedAssets) => {
-      if (cancelled) {
-        return;
-      }
-      setAssets(loadedAssets);
-      setIsLoading(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
+  const { value: assets, isLoading } = useCachedResource(gameAssetsResource);
   return { assets, isLoading };
 };

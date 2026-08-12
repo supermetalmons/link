@@ -1,7 +1,7 @@
 import { Sound } from "../utils/gameModels";
-import { getIsMuted } from "../index";
 import { Reaction } from "../connection/connectionModels";
 import { soundPlayer } from "../utils/SoundPlayer";
+import { getIsMuted } from "../runtime/muteStore";
 
 export function directlyPlaySoundNamed(
   name: string,
@@ -334,3 +334,7 @@ const getSoundPriority = (sound: Sound) => {
       return 2;
   }
 };
+
+soundPlayer.setIslandShowUpPlayback(() => {
+  void playSounds([Sound.IslandShowUp]);
+});

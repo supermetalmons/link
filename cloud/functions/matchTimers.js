@@ -1,6 +1,6 @@
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const admin = require("./firebaseAdmin");
-const { batchReadWithRetry } = require("./utils");
+const { batchReadWithRetry } = require("./batchRead");
 const { requestEventProgress } = require("./eventProgressTasks");
 const {
   MATCH_TIMER_DURATION_MS,
@@ -8,25 +8,16 @@ const {
   formatMatchTimer,
   parseMatchTimer,
 } = require("@mons/shared/timers");
-const { loadMonsRules, movesFromFlatString } = require("./monsRules");
-
-const laterGameFromMatchData = (mons, matchData, opponentMatchData) => {
-  const playerGame =
-    typeof matchData.fen === "string"
-      ? mons.Game.fromFen(matchData.fen)
-      : undefined;
-  const opponentGame =
-    typeof opponentMatchData.fen === "string"
-      ? mons.Game.fromFen(opponentMatchData.fen)
-      : undefined;
-  if (!playerGame || !opponentGame) {
-    throw new HttpsError(
-      "failed-precondition",
-      "something is wrong with the game state.",
-    );
-  }
-  return playerGame.isLaterThan(opponentGame) ? playerGame : opponentGame;
-};
+const { loadMonsRules } = require("./monsRules");
+const {
+  buildOrderedMoveHistory,
+  requireLaterGameFromMatchData,
+} = require("./gameplay/matchReconstruction");
+const {
+  assertInviteMatchesPlayers,
+  readMatchInviteRecords,
+} = require("./gameplay/matchRecords");
+const { assertPlayerClaim } = require("./gameplay/playerAuthorization");
 
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
@@ -76,13 +67,12 @@ exports.startMatchTimer = onCall(async (request) => {
     const profileRef = admin.database().ref(`players/${playerId}/profile`);
     const profileSnapshot = await profileRef.once("value");
     const profileId = profileSnapshot.val();
-    const customClaims = request.auth.token || {};
-    if (!customClaims.profileId || customClaims.profileId !== profileId) {
-      throw new HttpsError(
-        "permission-denied",
-        "You don't have permission to perform this action for this player.",
-      );
-    }
+    assertPlayerClaim({
+      uid,
+      playerId,
+      token: request.auth.token,
+      profileId,
+    });
   }
 
   const matchRef = admin
@@ -100,11 +90,14 @@ exports.startMatchTimer = onCall(async (request) => {
   const matchData = matchSnapshot.val();
   const opponentMatchData = opponentMatchSnapshot.val();
 
-  const color = matchData.color;
   const opponentColor = opponentMatchData.color;
 
   const mons = await loadMonsRules();
-  const game = laterGameFromMatchData(mons, matchData, opponentMatchData);
+  const game = requireLaterGameFromMatchData(
+    mons,
+    matchData,
+    opponentMatchData,
+  );
 
   if (
     matchData.status === "surrendered" ||
@@ -116,17 +109,9 @@ exports.startMatchTimer = onCall(async (request) => {
     throw new HttpsError("failed-precondition", "game is already over.");
   }
 
-  let whiteMoves = [];
-  let blackMoves = [];
-  if (color === "white") {
-    whiteMoves = movesFromFlatString(matchData.flatMovesString);
-    blackMoves = movesFromFlatString(opponentMatchData.flatMovesString);
-  } else {
-    whiteMoves = movesFromFlatString(opponentMatchData.flatMovesString);
-    blackMoves = movesFromFlatString(matchData.flatMovesString);
-  }
-
-  const result = game.verifyHistory({ white: whiteMoves, black: blackMoves });
+  const result = game.verifyHistory(
+    buildOrderedMoveHistory(matchData, opponentMatchData),
+  );
   if (!result) {
     throw new HttpsError(
       "failed-precondition",
@@ -169,45 +154,31 @@ exports.claimMatchVictoryByTimer = onCall(async (request) => {
     const profileRef = admin.database().ref(`players/${playerId}/profile`);
     const profileSnapshot = await profileRef.once("value");
     const profileId = profileSnapshot.val();
-    const customClaims = request.auth.token || {};
-    if (!customClaims.profileId || customClaims.profileId !== profileId) {
-      throw new HttpsError(
-        "permission-denied",
-        "You don't have permission to perform this action for this player.",
-      );
-    }
+    assertPlayerClaim({
+      uid,
+      playerId,
+      token: request.auth.token,
+      profileId,
+    });
   }
 
-  const matchRef = admin
-    .database()
-    .ref(`players/${playerId}/matches/${matchId}`);
-  const opponentMatchRef = admin
-    .database()
-    .ref(`players/${opponentId}/matches/${matchId}`);
-  const inviteRef = admin.database().ref(`invites/${inviteId}`);
+  const { matchRef, matchData, inviteData, opponentMatchData } =
+    await readMatchInviteRecords({
+      playerId,
+      opponentId,
+      matchId,
+      inviteId,
+    });
+  assertInviteMatchesPlayers(inviteData, playerId, opponentId);
 
-  const [matchSnapshot, opponentMatchSnapshot, inviteSnapshot] =
-    await batchReadWithRetry([matchRef, opponentMatchRef, inviteRef]);
-
-  const inviteData = inviteSnapshot.val();
-  if (!(
-    (inviteData.hostId === playerId && inviteData.guestId === opponentId) ||
-    (inviteData.hostId === opponentId && inviteData.guestId === playerId)
-  )) {
-    throw new HttpsError(
-      "permission-denied",
-      "Players don't match invite data",
-    );
-  }
-
-  const matchData = matchSnapshot.val();
-  const opponentMatchData = opponentMatchSnapshot.val();
-
-  const color = matchData.color;
   const opponentColor = opponentMatchData.color;
 
   const mons = await loadMonsRules();
-  const game = laterGameFromMatchData(mons, matchData, opponentMatchData);
+  const game = requireLaterGameFromMatchData(
+    mons,
+    matchData,
+    opponentMatchData,
+  );
 
   if (
     matchData.status === "surrendered" ||
@@ -219,17 +190,9 @@ exports.claimMatchVictoryByTimer = onCall(async (request) => {
     throw new HttpsError("failed-precondition", "game is already over.");
   }
 
-  let whiteMoves = [];
-  let blackMoves = [];
-  if (color === "white") {
-    whiteMoves = movesFromFlatString(matchData.flatMovesString);
-    blackMoves = movesFromFlatString(opponentMatchData.flatMovesString);
-  } else {
-    whiteMoves = movesFromFlatString(opponentMatchData.flatMovesString);
-    blackMoves = movesFromFlatString(matchData.flatMovesString);
-  }
-
-  const result = game.verifyHistory({ white: whiteMoves, black: blackMoves });
+  const result = game.verifyHistory(
+    buildOrderedMoveHistory(matchData, opponentMatchData),
+  );
   if (!result) {
     throw new HttpsError(
       "failed-precondition",
