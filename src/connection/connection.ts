@@ -78,6 +78,7 @@ import {
   EventPrizeWithdrawalResponse,
   ProfileEventPrizes,
 } from "./connectionModels";
+import { resolvePlayerProfile } from "./playerProfileLookup";
 import {
   buildDeterministicGameSeed,
   buildGameSeedForStoredVariant,
@@ -1181,6 +1182,20 @@ class Connection {
       currentProfileId = mergedIntoProfileId;
     }
     return null;
+  }
+
+  private async getPlayerProfile(loginId: string): Promise<PlayerProfile> {
+    return resolvePlayerProfile(loginId, {
+      readLinkedProfileId: async (playerLoginId) => {
+        const snapshot = await get(
+          ref(this.db, `players/${playerLoginId}/profile`),
+        );
+        return snapshot.val();
+      },
+      getProfileById: (profileId) => this.getProfileById(profileId),
+      getProfileByLoginId: (playerLoginId) =>
+        this.getProfileByLoginId(playerLoginId),
+    });
   }
 
   private materialLeaderboardCache: Map<MiningMaterialName, PlayerProfile[]> =
@@ -3440,7 +3455,7 @@ class Connection {
     }
     let profile: PlayerProfile | null = null;
     try {
-      profile = await this.getProfileByLoginId(opponentLoginId);
+      profile = await this.getPlayerProfile(opponentLoginId);
     } catch {
       profile = null;
     }
@@ -4394,7 +4409,7 @@ class Connection {
       this.sameProfileHydrationRequest === request &&
       this.isSessionEpochActive(expectedEpoch) &&
       this.sameProfilePlayerUid === uid;
-    this.getProfileByLoginId(uid)
+    this.getPlayerProfile(uid)
       .then((profile) => {
         if (!isHydrationActive()) {
           return;
@@ -5942,7 +5957,7 @@ class Connection {
       },
     );
 
-    this.getProfileByLoginId(playerId)
+    this.getPlayerProfile(playerId)
       .then((profile) => {
         if (!isObserverActive()) {
           return;
