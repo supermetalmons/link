@@ -24,12 +24,12 @@
     "firebase-admin": "^14.2.0",
     "firebase-functions": "^7.3.2",
     "glicko2": "^1.2.1",
-    "mons-rules": "0.4.1",
+    "mons-rules": "0.4.2",
     "siwe": "^3.0.0",
     "tweetnacl": "^1.0.3"
   },
   "optionalDependencies": {
-    "utf-8-validate": "5.0.10"
+    "utf-8-validate": "6.0.6"
   },
   "overrides": {
     "@metaplex-foundation/mpl-token-metadata": "3.4.0",
