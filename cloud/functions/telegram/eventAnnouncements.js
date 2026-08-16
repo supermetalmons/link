@@ -13,6 +13,7 @@ const {
   buildTelegramSendUpdates,
 } = require("./desiredState");
 const { createEventLockManager } = require("../eventLocks");
+const { getEventPrizePlacements } = require("../events/bracket");
 const { THIRD_PLACE_MATCH_KEY } = require("@mons/shared/events");
 
 const EVENT_TELEGRAM_PROJECTION_ROOT = "eventTelegramProjections";
@@ -267,6 +268,75 @@ const collectActiveMatchEntries = (eventData) => {
   });
 };
 
+const loadEndedMatchResults = async (eventData, { firestore } = {}) => {
+  if (!firestore || typeof firestore.collection !== "function") {
+    throw new TypeError("event Telegram score loading requires Firestore");
+  }
+  const resultsByKey = {};
+  const scoreRequests = [];
+  for (const entry of collectActiveMatchEntries(eventData)) {
+    if (entry.match.winnerDisqualified === true) {
+      resultsByKey[entry.key] = { status: "disqualified" };
+      continue;
+    }
+    const inviteId = normalizeString(entry.match.inviteId);
+    const hostLoginUid = normalizeString(entry.match.hostLoginUid);
+    const guestLoginUid = normalizeString(entry.match.guestLoginUid);
+    if (!inviteId || !hostLoginUid || !guestLoginUid) {
+      resultsByKey[entry.key] = { status: "unavailable" };
+      continue;
+    }
+    scoreRequests.push({ entry, inviteId, hostLoginUid, guestLoginUid });
+  }
+  if (scoreRequests.length === 0) {
+    return resultsByKey;
+  }
+  const snapshots = await Promise.all(
+    scoreRequests.map(({ inviteId }) =>
+      firestore
+        .collection("ratingUpdates")
+        .doc(`${inviteId}__${inviteId}`)
+        .get(),
+    ),
+  );
+  for (let index = 0; index < scoreRequests.length; index += 1) {
+    const { entry, inviteId, hostLoginUid, guestLoginUid } =
+      scoreRequests[index];
+    const snapshot = snapshots[index];
+    const result = snapshot.exists ? snapshot.data() || {} : {};
+    if (
+      result.status !== "done" ||
+      normalizeString(result.inviteId) !== inviteId ||
+      normalizeString(result.matchId) !== inviteId ||
+      !Number.isFinite(result.playerManaPoints) ||
+      !Number.isFinite(result.opponentManaPoints)
+    ) {
+      resultsByKey[entry.key] = { status: "unavailable" };
+      continue;
+    }
+    const playerId = normalizeString(result.playerId);
+    const opponentId = normalizeString(result.opponentId);
+    const playerIsHost =
+      playerId === hostLoginUid && opponentId === guestLoginUid;
+    const playerIsGuest =
+      playerId === guestLoginUid && opponentId === hostLoginUid;
+    if (!playerIsHost && !playerIsGuest) {
+      resultsByKey[entry.key] = { status: "unavailable" };
+      continue;
+    }
+    resultsByKey[entry.key] = {
+      status: "scored",
+      hostScore: playerIsHost
+        ? result.playerManaPoints
+        : result.opponentManaPoints,
+      guestScore: playerIsHost
+        ? result.opponentManaPoints
+        : result.playerManaPoints,
+    };
+  }
+  return resultsByKey;
+};
+
 const buildStartedThreadMatchKey = (eventData) =>
   collectActiveMatchEntries(eventData)
     .map((entry) => entry.key)
@@ -352,6 +422,17 @@ const renderStartedMessage = (eventId, matchLines) => {
   return lines.join("\n");
 };
 
+const renderEndedMessage = (eventId, matchLines, placementLines) => {
+  const lines = ["event ended", "", `${EVENT_URL_ROOT}/${eventId}`];
+  if (Array.isArray(matchLines) && matchLines.length > 0) {
+    lines.push("", ...matchLines);
+  }
+  if (Array.isArray(placementLines) && placementLines.length > 0) {
+    lines.push("", ...placementLines);
+  }
+  return lines.join("\n");
+};
+
 const parseProjectionState = (raw) => {
   const value = raw && typeof raw === "object" ? raw : {};
   const startedMatchKeys = Array.isArray(value.startedMatchKeys)
@@ -367,6 +448,8 @@ const parseProjectionState = (raw) => {
   return {
     upcomingText: normalizeText(value.upcomingText),
     startedText: normalizeText(value.startedText),
+    endedText: normalizeText(value.endedText),
+    endedAnnouncementArmed: value.endedAnnouncementArmed === true,
     startedMatchKeys,
     startedMatchLinesByKey,
     lastProjectedSignature: normalizeString(value.lastProjectedSignature),
@@ -421,6 +504,62 @@ const buildStartedState = (eventId, eventData, rawState = {}) => {
   };
 };
 
+const buildEndedState = (eventId, eventData, resultsByKey = {}) => {
+  const participantsByProfileId = getParticipantsByProfileId(eventData);
+  const matchLines = collectActiveMatchEntries(eventData).map((entry) => {
+    const hostProfileId = normalizeString(entry.match.hostProfileId);
+    const guestProfileId = normalizeString(entry.match.guestProfileId);
+    const hostParticipant = participantsByProfileId.get(hostProfileId) || null;
+    const guestParticipant =
+      participantsByProfileId.get(guestProfileId) || null;
+    const matchup = `${resolveParticipantToken(hostParticipant, entry.match.hostDisplayName)} vs. ${resolveParticipantToken(guestParticipant, entry.match.guestDisplayName)}`;
+    const result = resultsByKey[entry.key];
+    if (
+      entry.match.winnerDisqualified === true ||
+      result?.status === "disqualified"
+    ) {
+      return `${matchup} (DQ)`;
+    }
+    if (
+      result?.status === "scored" &&
+      Number.isFinite(result.hostScore) &&
+      Number.isFinite(result.guestScore)
+    ) {
+      return `${matchup} (${result.hostScore} - ${result.guestScore})`;
+    }
+    return `${matchup} (score unavailable)`;
+  });
+  const participantsById = Object.fromEntries(
+    getParticipantRecords(eventData).map(({ profileId, participant }) => [
+      profileId,
+      participant,
+    ]),
+  );
+  const placements = getEventPrizePlacements({
+    event: eventData,
+    rounds:
+      eventData && eventData.rounds && typeof eventData.rounds === "object"
+        ? eventData.rounds
+        : {},
+    participantsById,
+    thirdPlaceMatch:
+      eventData &&
+      eventData.thirdPlaceMatch &&
+      typeof eventData.thirdPlaceMatch === "object"
+        ? eventData.thirdPlaceMatch
+        : null,
+  });
+  const placementLines = placements.map(({ place, profileId }) => {
+    const participant = participantsByProfileId.get(profileId) || null;
+    return `${place}. ${resolveParticipantToken(participant)}`;
+  });
+  return {
+    text: renderEndedMessage(eventId, matchLines, placementLines),
+    matchLines,
+    placementLines,
+  };
+};
+
 const hashProjection = (value) =>
   crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -457,6 +596,7 @@ const buildDesiredOperation = ({
 const buildEventTelegramProjection = ({
   eventId,
   eventData,
+  endedMatchResults = {},
   state: rawState,
   nowMs = Date.now(),
 }) => {
@@ -466,8 +606,11 @@ const buildEventTelegramProjection = ({
   }
   const state = parseProjectionState(rawState);
   const status = normalizeString(eventData.status) || EVENT_STATUS_SCHEDULED;
-  const active =
-    eventData.announceOnTelegram === true && !isTerminalStatus(status);
+  const enabled = eventData.announceOnTelegram === true;
+  const active = enabled && !isTerminalStatus(status);
+  const endedAnnouncementArmed = state.endedAnnouncementArmed || active;
+  const shouldRenderEnded =
+    enabled && status === EVENT_STATUS_ENDED && state.endedAnnouncementArmed;
   const upcomingText = active
     ? renderUpcomingMessage(normalizedEventId, eventData, nowMs)
     : null;
@@ -479,12 +622,20 @@ const buildEventTelegramProjection = ({
         startedMatchLinesByKey: state.startedMatchLinesByKey,
         appendedCount: 0,
       };
+  const endedState = shouldRenderEnded
+    ? state.endedText
+      ? { text: state.endedText }
+      : buildEndedState(normalizedEventId, eventData, endedMatchResults)
+    : { text: state.endedText || null };
   const nextUpcomingText = upcomingText || state.upcomingText;
   const nextStartedText = startedState.text || state.startedText;
+  const nextEndedText = endedState.text || state.endedText;
   const signature = hashProjection({
     source: buildEventSignature(eventData, nowMs),
     upcomingText: nextUpcomingText,
     startedText: nextStartedText,
+    endedText: nextEndedText,
+    endedAnnouncementArmed,
     startedMatchKeys: startedState.startedMatchKeys,
     startedMatchLinesByKey: startedState.startedMatchLinesByKey,
   });
@@ -506,6 +657,13 @@ const buildEventTelegramProjection = ({
       desiredText: active ? startedState.text : null,
       active: Boolean(active && startedState.text),
     }),
+    buildDesiredOperation({
+      channel: "ended",
+      eventId: normalizedEventId,
+      previousText: state.endedText,
+      desiredText: shouldRenderEnded ? endedState.text : null,
+      active: Boolean(shouldRenderEnded && endedState.text),
+    }),
   ].filter(Boolean);
   for (const operation of operations) {
     operation.sourceRevision = `event:${normalizedEventId}:${operation.channel}:${signature}`;
@@ -518,6 +676,8 @@ const buildEventTelegramProjection = ({
       schemaVersion: EVENT_TELEGRAM_DELIVERY_VERSION,
       upcomingText: nextUpcomingText,
       startedText: nextStartedText,
+      endedText: nextEndedText,
+      endedAnnouncementArmed,
       startedMatchKeys: startedState.startedMatchKeys,
       startedMatchLinesByKey: startedState.startedMatchLinesByKey,
       lastProjectedSignature: signature,
@@ -631,6 +791,11 @@ const createEventTelegramProjector = (dependencies = {}) => {
     ? () => dependencies.commitDatabase
     : dependencies.getCommitDatabase ||
       getEventTelegramProjectionCommitDatabase;
+  const getFirestore = dependencies.firestore
+    ? () => dependencies.firestore
+    : dependencies.getFirestore || admin.firestore;
+  const resolveEndedMatchResults =
+    dependencies.loadEndedMatchResults || loadEndedMatchResults;
   const ownerUid = dependencies.ownerUid || EVENT_TELEGRAM_PROJECTION_OWNER_UID;
 
   return async (eventId, nowMs = Date.now()) => {
@@ -663,10 +828,22 @@ const createEventTelegramProjector = (dependencies = {}) => {
       const stateSnapshot = await database
         .ref(`${EVENT_TELEGRAM_PROJECTION_ROOT}/${normalizedEventId}`)
         .once("value");
+      const rawState = stateSnapshot.val();
+      const status = normalizeString(eventData.status);
+      const endedMatchResults =
+        eventData.announceOnTelegram === true &&
+        status === EVENT_STATUS_ENDED &&
+        rawState?.endedAnnouncementArmed === true &&
+        !normalizeText(rawState?.endedText)
+          ? await resolveEndedMatchResults(eventData, {
+              firestore: getFirestore(),
+            })
+          : {};
       const projection = buildEventTelegramProjection({
         eventId: normalizedEventId,
         eventData,
-        state: stateSnapshot.val(),
+        endedMatchResults,
+        state: rawState,
         nowMs,
       });
       if (projection.action !== "project") {
@@ -756,16 +933,19 @@ module.exports = {
   EVENT_TELEGRAM_PROJECTION_GUARD_FIELD,
   EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
   addEventTelegramProjectionGuard,
+  buildEndedState,
   buildEventSignature,
   buildEventTelegramProjection,
   buildEventTelegramProjectionUpdates,
   buildStartedState,
   createEventTelegramProjector,
   formatPtEtUtcLine,
+  loadEndedMatchResults,
   onEventTelegramCreated,
   onEventTelegramUpdated,
   parseProjectionState,
   projectEventTelegram,
+  renderEndedMessage,
   renderStartedMessage,
   renderUpcomingMessage,
 };
