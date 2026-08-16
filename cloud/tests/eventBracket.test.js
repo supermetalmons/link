@@ -5,6 +5,7 @@ const test = require("node:test");
 const {
   applyMatchResolution,
   buildFixedBracketState,
+  buildSeedToProfileId,
   createEmptyEventMatch,
   getEventPrizePlacements,
   rebuildParticipantStatesFromRounds,
@@ -20,6 +21,19 @@ const participant = (profileId, joinedAtMs) => ({
   emojiId: joinedAtMs,
   aura: null,
   joinedAtMs,
+});
+
+test("seed assignment shuffles the full participant pool without username priority", () => {
+  const seedToProfileId = buildSeedToProfileId({
+    participantIds: ["listed-player", "player-2", "player-3"],
+    random: () => 0,
+  });
+
+  assert.deepEqual(Array.from(seedToProfileId.entries()), [
+    [1, "player-2"],
+    [2, "player-3"],
+    [3, "listed-player"],
+  ]);
 });
 
 test("empty matches preserve their persisted schema and slot mutations", () => {

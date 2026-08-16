@@ -28,8 +28,6 @@ const {
   buildEventMatchKey: getMatchKey,
   buildEventSeedOrder: buildSeedOrder,
   getEventBracketSize: getBracketSize,
-  getFirstRoundByeSeeds,
-  isMonsLinkAdmin,
   parseEventMatchKey: parseMatchKey,
 } = require("@mons/shared/events");
 const { getEventParticipantIds } = require("./participants");
@@ -39,7 +37,6 @@ const EVENT_MATCH_RESOLVE_CONCURRENCY = 4;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 const normalizeStringOrNull = (value) => normalizeString(value) || null;
-const normalizeUsername = (value) => normalizeString(value).toLowerCase();
 
 const toFiniteInteger = (value, fallback = 0) => {
   const numeric = typeof value === "number" ? value : Number(value);
@@ -104,53 +101,12 @@ const isMatchSlotBlocked = (match, slot) => {
     : match.hostSlotBlocked === true;
 };
 
-const buildSeedToProfileId = ({
-  participantIds,
-  participantsById,
-  bracketSize,
-  seedOrder,
-}) => {
-  const participantCount = participantIds.length;
-  const adminParticipantIds = [];
-  const nonAdminParticipantIds = [];
-
-  for (const profileId of participantIds) {
-    const participant = participantsById[profileId];
-    const username = normalizeUsername(participant && participant.username);
-    if (isMonsLinkAdmin(username)) {
-      adminParticipantIds.push(profileId);
-    } else {
-      nonAdminParticipantIds.push(profileId);
-    }
-  }
-
-  const shuffledAdminParticipantIds = shuffle(adminParticipantIds);
-  const shuffledNonAdminParticipantIds = shuffle(nonAdminParticipantIds);
-  const byeSeeds = shuffle(
-    getFirstRoundByeSeeds(participantCount, bracketSize, seedOrder),
-  );
+const buildSeedToProfileId = ({ participantIds, random = Math.random }) => {
+  const shuffledParticipantIds = shuffle(participantIds, random);
   const seedToProfileId = new Map();
 
-  while (byeSeeds.length > 0 && shuffledAdminParticipantIds.length > 0) {
-    const byeSeed = byeSeeds.pop();
-    const profileId = shuffledAdminParticipantIds.pop();
-    if (!byeSeed || !profileId) {
-      break;
-    }
-    seedToProfileId.set(byeSeed, profileId);
-  }
-
-  const remainingProfileIds = shuffle([
-    ...shuffledAdminParticipantIds,
-    ...shuffledNonAdminParticipantIds,
-  ]);
-  let remainingIndex = 0;
-  for (let seed = 1; seed <= participantCount; seed += 1) {
-    if (seedToProfileId.has(seed)) {
-      continue;
-    }
-    const profileId = remainingProfileIds[remainingIndex];
-    remainingIndex += 1;
+  for (let seed = 1; seed <= shuffledParticipantIds.length; seed += 1) {
+    const profileId = shuffledParticipantIds[seed - 1];
     if (!profileId) {
       break;
     }
@@ -1281,9 +1237,6 @@ const buildFixedBracketState = async ({
   let thirdPlaceMatch = null;
   const seedToProfileId = buildSeedToProfileId({
     participantIds,
-    participantsById,
-    bracketSize,
-    seedOrder,
   });
 
   for (let roundIndex = 0; roundIndex < roundCount; roundIndex += 1) {
