@@ -78,6 +78,34 @@ test("verifies an exact Firebase ID token and returns only UID plus token", asyn
   assert.deepEqual(identity, { idToken: token, uid: "firebase-uid" });
 });
 
+test("retains only a validated optional profile claim", async () => {
+  const { privateKey, publicJwk } = await signingKey();
+  const validToken = await signToken(privateKey, {
+    profileId: " profile-1 ",
+  });
+  const invalidToken = await signToken(privateKey, {
+    profileId: `profile-${"x".repeat(1_500)}`,
+  });
+  const validContext = context();
+  assert.deepEqual(
+    await verifyFirebaseRequest(request(validToken), validContext.ctx, {
+      cache: null,
+      fetcher: jwksFetch(publicJwk, { count: 0 }),
+      now: () => NOW_MS,
+    }),
+    { idToken: validToken, uid: "firebase-uid", profileId: "profile-1" },
+  );
+  const invalidContext = context();
+  assert.deepEqual(
+    await verifyFirebaseRequest(request(invalidToken), invalidContext.ctx, {
+      cache: null,
+      fetcher: jwksFetch(publicJwk, { count: 0 }),
+      now: () => NOW_MS,
+    }),
+    { idToken: invalidToken, uid: "firebase-uid" },
+  );
+});
+
 test("rejects missing, malformed, oversized, invalid, and unknown-key tokens", async () => {
   const { privateKey, publicJwk } = await signingKey();
   const other = await signingKey();

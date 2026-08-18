@@ -124,12 +124,7 @@ test("legacy Telegram transport helpers stay removed", () => {
 });
 
 test("a blocked Telegram client cannot delay latency-critical domain handlers", () => {
-  const domainFiles = [
-    "automatch.js",
-    "cancelAutomatch.js",
-    "updateRatings.js",
-    "events.js",
-  ];
+  const domainFiles = ["automatch.js", "updateRatings.js", "events.js"];
   for (const fileName of domainFiles) {
     const source = fs.readFileSync(path.join(functionsRoot, fileName), "utf8");
     assert.equal(source.includes("telegramClient"), false, fileName);

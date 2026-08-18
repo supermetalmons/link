@@ -3,9 +3,14 @@ const { onValueWritten } = require("firebase-functions/v2/database");
 const admin = require("../firebaseAdmin");
 const { runRtdbDecisionTransaction } = require("../rtdbDecisionTransaction");
 const { parseInviteMatchIndex } = require("../shared/rematches");
-
-const TELEGRAM_AUTOMATCH_VERSION = 2;
-const TELEGRAM_AUTOMATCH_ROOT = "telegramAutomatches";
+const {
+  TELEGRAM_AUTOMATCH_ROOT,
+  TELEGRAM_AUTOMATCH_VERSION,
+  buildAutomatchTelegramLifecycleUpdates,
+  buildMatchedAutomatchTelegramUpdates,
+  buildPendingAutomatchTelegramSource,
+  getAutomatchTelegramSourcePath,
+} = require("./automatchSource");
 const AUTOMATCH_PROJECTION_GUARD_VERSION = 1;
 
 const normalizeString = (value) =>
@@ -13,55 +18,6 @@ const normalizeString = (value) =>
 
 const normalizeGeneration = (value) =>
   Number.isInteger(value) && value >= 0 ? value : 0;
-
-const getAutomatchTelegramSourcePath = (inviteId) =>
-  `${TELEGRAM_AUTOMATCH_ROOT}/${inviteId}`;
-
-const buildPendingAutomatchTelegramSource = ({
-  inviteId,
-  waitingText,
-  canceledText,
-  timestamp,
-}) => ({
-  version: TELEGRAM_AUTOMATCH_VERSION,
-  generation: 1,
-  lifecycle: "pending",
-  waitingText,
-  canceledText,
-  waitingInstanceKey: `waiting:${inviteId}`,
-  createdAtMs: timestamp,
-  updatedAtMs: timestamp,
-});
-
-const buildMatchedAutomatchTelegramUpdates = ({
-  inviteId,
-  matchedText,
-  timestamp,
-  generation,
-}) => {
-  const sourcePath = getAutomatchTelegramSourcePath(inviteId);
-  return {
-    [`${sourcePath}/lifecycle`]: "matched",
-    [`${sourcePath}/matchedText`]: matchedText,
-    [`${sourcePath}/matchedInstanceKey`]: `matched:${inviteId}`,
-    [`${sourcePath}/updatedAtMs`]: timestamp,
-    [`${sourcePath}/generation`]: generation,
-  };
-};
-
-const buildAutomatchTelegramLifecycleUpdates = ({
-  inviteId,
-  lifecycle,
-  timestamp,
-  generation,
-}) => {
-  const sourcePath = getAutomatchTelegramSourcePath(inviteId);
-  return {
-    [`${sourcePath}/lifecycle`]: lifecycle,
-    [`${sourcePath}/updatedAtMs`]: timestamp,
-    [`${sourcePath}/generation`]: generation,
-  };
-};
 
 const resolveAutomatchTelegramLifecycle = (source, inviteData) => {
   if (!source || source.version !== TELEGRAM_AUTOMATCH_VERSION) {

@@ -1,9 +1,6 @@
 import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 import { createGoogleAccessToken } from "./googleAuth.ts";
-import {
-  createTelegramRepository,
-  type TelegramTransactionResult,
-} from "../../../functions/telegram/repositoryCore.js";
+import { createTelegramRepository } from "../../../functions/telegram/repositoryCore.js";
 import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
 
 const FIREBASE_DATABASE_SCOPE =
@@ -14,11 +11,47 @@ const RTDB_TIMEOUT_MS = 5_000;
 const MAX_RTDB_BODY_BYTES = 1024 * 1024;
 const MAX_TRANSACTION_ATTEMPTS = 25;
 
+export const FIREBASE_RTDB_SERVER_TIMESTAMP = Object.freeze({
+  ".sv": "timestamp",
+});
+
+export function firebaseRtdbIncrement(delta: number): Record<string, unknown> {
+  if (!Number.isFinite(delta)) {
+    throw new TypeError("RTDB increment must be finite");
+  }
+  return { ".sv": { increment: delta } };
+}
+
 export class FirebaseRtdbFailure extends Error {
   constructor() {
     super("firebase-rtdb-unavailable");
   }
 }
+
+export type FirebaseRtdbCredentials = {
+  email: string;
+  privateKeyPem: string;
+};
+
+export type FirebaseRtdbQuery = {
+  equalTo?: string | number | boolean | null;
+  orderBy?: string;
+};
+
+export type FirebaseRtdbTransactionResult = {
+  committed: boolean;
+  decision?: string;
+  value: unknown;
+};
+
+export type FirebaseRtdbClient = {
+  getPath: (path: string, query?: FirebaseRtdbQuery) => Promise<unknown>;
+  patchRoot: (updates: Record<string, unknown>) => Promise<void>;
+  transactPath: (
+    path: string,
+    updater: (current: unknown) => unknown,
+  ) => Promise<FirebaseRtdbTransactionResult>;
+};
 
 function databaseRoot(env: Env): string {
   const raw = env.FIREBASE_RTDB_URL.trim().replace(/\/+$/, "");
@@ -50,10 +83,22 @@ function databaseUrl(root: string, path: string): string {
     .filter(Boolean)
     .map((segment) => encodeURIComponent(segment))
     .join("/");
-  if (!encodedPath) {
-    throw new FirebaseRtdbFailure();
+  return encodedPath ? `${root}/${encodedPath}.json` : `${root}/.json`;
+}
+
+function queryDatabaseUrl(
+  root: string,
+  path: string,
+  query: FirebaseRtdbQuery = {},
+): string {
+  const url = new URL(databaseUrl(root, path));
+  if (query.orderBy !== undefined) {
+    url.searchParams.set("orderBy", JSON.stringify(query.orderBy));
   }
-  return `${root}/${encodedPath}.json`;
+  if (query.equalTo !== undefined) {
+    url.searchParams.set("equalTo", JSON.stringify(query.equalTo));
+  }
+  return url.toString();
 }
 
 function validateDecisionOutput(output: unknown):
@@ -89,32 +134,34 @@ function validateDecisionOutput(output: unknown):
   return { commit: true, value: candidate.value, decision };
 }
 
-export function createFirebaseRtdbRepository(
+export function createFirebaseRtdbClient(
   env: Env,
   {
+    credentials = {
+      email: env.TELEGRAM_FIREBASE_SERVICE_ACCOUNT_EMAIL,
+      privateKeyPem: env.TELEGRAM_FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY,
+    },
     fetcher = fetch,
     getAccessToken: getAccessTokenOverride,
     maxTransactionAttempts = MAX_TRANSACTION_ATTEMPTS,
     now = Date.now,
     timeoutMs = RTDB_TIMEOUT_MS,
   }: {
+    credentials?: FirebaseRtdbCredentials;
     fetcher?: typeof fetch;
     getAccessToken?: () => Promise<string>;
     maxTransactionAttempts?: number;
     now?: () => number;
     timeoutMs?: number;
   } = {},
-): TelegramRepository {
+): FirebaseRtdbClient {
   const root = databaseRoot(env);
   let accessToken: Promise<string> | null = null;
   const getAccessToken = () => {
     accessToken ||= getAccessTokenOverride
       ? getAccessTokenOverride()
       : createGoogleAccessToken(env, {
-          credentials: {
-            email: env.TELEGRAM_FIREBASE_SERVICE_ACCOUNT_EMAIL,
-            privateKeyPem: env.TELEGRAM_FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY,
-          },
+          credentials,
           fetcher,
           now,
           scopes: [FIREBASE_DATABASE_SCOPE, GOOGLE_USERINFO_EMAIL_SCOPE],
@@ -149,11 +196,27 @@ export function createFirebaseRtdbRepository(
       () => new FirebaseRtdbFailure(),
     );
   };
-  return createTelegramRepository({
-    async getPath(path) {
-      return readJson(await authorizedFetch(databaseUrl(root, path)));
+  return {
+    async getPath(path, query) {
+      return readJson(
+        await authorizedFetch(queryDatabaseUrl(root, path, query)),
+      );
     },
-    async transactPath(path, updater): Promise<TelegramTransactionResult> {
+    async patchRoot(updates) {
+      const url = new URL(databaseUrl(root, ""));
+      url.searchParams.set("print", "silent");
+      const response = await authorizedFetch(url.toString(), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updates),
+      });
+      if (!response.ok) {
+        await cancelResponseBody(response);
+        throw new FirebaseRtdbFailure();
+      }
+      await cancelResponseBody(response);
+    },
+    async transactPath(path, updater) {
       const url = databaseUrl(root, path);
       for (let attempt = 0; attempt < maxTransactionAttempts; attempt += 1) {
         const readResponse = await authorizedFetch(url, {
@@ -201,6 +264,17 @@ export function createFirebaseRtdbRepository(
       }
       throw new FirebaseRtdbFailure();
     },
+  };
+}
+
+export function createFirebaseRtdbRepository(
+  env: Env,
+  dependencies: Parameters<typeof createFirebaseRtdbClient>[1] = {},
+): TelegramRepository {
+  const client = createFirebaseRtdbClient(env, dependencies);
+  return createTelegramRepository({
+    getPath: client.getPath,
+    transactPath: client.transactPath,
   });
 }
 
@@ -212,5 +286,6 @@ export {
   RTDB_TIMEOUT_MS,
   databaseRoot,
   databaseUrl,
+  queryDatabaseUrl,
   validateDecisionOutput,
 };

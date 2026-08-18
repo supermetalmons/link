@@ -22,6 +22,7 @@ class FirebaseKeysFailure extends Error {}
 
 export type FirebaseIdentity = {
   idToken: string;
+  profileId?: string;
   uid: string;
 };
 
@@ -172,6 +173,25 @@ function readBearerToken(request: Request): string {
   return token;
 }
 
+function readProfileIdClaim(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const profileId = value.trim();
+  const hasControlCharacter = Array.from(profileId).some((character) => {
+    const code = character.codePointAt(0) || 0;
+    return code <= 0x1f || code === 0x7f;
+  });
+  if (
+    !profileId ||
+    new TextEncoder().encode(profileId).byteLength > 1_500 ||
+    hasControlCharacter
+  ) {
+    return undefined;
+  }
+  return profileId;
+}
+
 export async function verifyFirebaseRequest(
   request: Request,
   ctx: WorkerExecutionContext,
@@ -226,8 +246,11 @@ export async function verifyFirebaseRequest(
     ) {
       throw new Error("invalid-token");
     }
-    return { idToken, uid };
+    const profileId = readProfileIdClaim(payload.profileId);
+    return { idToken, uid, ...(profileId ? { profileId } : {}) };
   } catch {
     throw new AuthApiFailure(401, "unauthenticated", "authentication-required");
   }
 }
+
+export { readProfileIdClaim };

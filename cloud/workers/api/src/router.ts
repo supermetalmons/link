@@ -17,6 +17,11 @@ import {
   handleMiningRoute,
   type MiningRouteDependencies,
 } from "./miningRoute.ts";
+import {
+  GAMEPLAY_PATHS,
+  handleGameplayRoute,
+  type GameplayRouteDependencies,
+} from "./gameplayRoute.ts";
 
 const RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
 
@@ -37,6 +42,7 @@ export async function handleRequest(
   env: Env,
   dependencyOverrides: Partial<WorkerDependencies> & {
     auth?: AuthRouteDependencies;
+    gameplay?: GameplayRouteDependencies;
     mining?: MiningRouteDependencies;
     xCallback?: XCallbackDependencyOverrides;
   } = {},
@@ -51,6 +57,12 @@ export async function handleRequest(
       return jsonResponse({ ok: false, error: "unavailable" }, 503);
     }
     return handleAuthRoute(request, env, ctx, dependencyOverrides.auth);
+  }
+  if (GAMEPLAY_PATHS.has(pathname)) {
+    if (!ctx) {
+      return jsonResponse({ ok: false, error: "unavailable" }, 503);
+    }
+    return handleGameplayRoute(request, env, ctx, dependencyOverrides.gameplay);
   }
   if (pathname === "/mining/rock") {
     if (!ctx) {

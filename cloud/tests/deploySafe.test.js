@@ -24,8 +24,8 @@ const {
 const repositoryRoot = path.resolve(__dirname, "..", "..");
 const exportedFunctionNames = [
   "automatch",
-  "cancelAutomatch",
   "dispatchTelegramDelivery",
+  "updateRatings",
   "verifyEthAddress",
 ];
 const expectedReleaseFunctionBarriers = [
@@ -226,10 +226,6 @@ test("full releases preserve Telegram dependency barriers at every batch size", 
       batchIndexByFunctionName.get(functionName);
     assert.ok(
       batchIndex("projectAutomatchTelegramMessages") < batchIndex("automatch"),
-    );
-    assert.ok(
-      batchIndex("projectAutomatchTelegramMessages") <
-        batchIndex("cancelAutomatch"),
     );
     assert.ok(
       batchIndex("projectRatingTelegramUpdates") < batchIndex("updateRatings"),

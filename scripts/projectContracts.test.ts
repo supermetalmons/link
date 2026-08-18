@@ -98,6 +98,8 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     required: [
       "FIRESTORE_SERVICE_ACCOUNT_EMAIL",
       "FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY",
+      "GAMEPLAY_SERVICE_ACCOUNT_EMAIL",
+      "GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY",
       "HELIUS_RPC_API_KEY",
       "TELEGRAM_BOT_TOKEN",
       "TELEGRAM_EXTRA_CHAT_ID",

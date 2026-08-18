@@ -77,6 +77,53 @@ const compareNavigationItems = (left, right) => {
   return left.id.localeCompare(right.id);
 };
 
+const isRecord = (value) =>
+  value && typeof value === "object" && !Array.isArray(value);
+
+const isCancelAutomatchResponse = (value) =>
+  isRecord(value) &&
+  Object.keys(value).length === 1 &&
+  typeof value.ok === "boolean";
+
+const isRemoveNavigationGameRequest = (value) =>
+  isRecord(value) &&
+  Object.keys(value).length === 1 &&
+  typeof value.inviteId === "string" &&
+  value.inviteId.trim() !== "";
+
+const isRemoveNavigationGameResponse = (value) => {
+  if (
+    !isRecord(value) ||
+    value.ok !== true ||
+    typeof value.skipped !== "boolean" ||
+    typeof value.inviteId !== "string" ||
+    value.inviteId === "" ||
+    !(value.reason === null || typeof value.reason === "string")
+  ) {
+    return false;
+  }
+  const keys = Object.keys(value);
+  if (
+    keys.some(
+      (key) =>
+        key !== "ok" &&
+        key !== "skipped" &&
+        key !== "deleted" &&
+        key !== "reason" &&
+        key !== "inviteId",
+    )
+  ) {
+    return false;
+  }
+  if (Object.hasOwn(value, "deleted") && typeof value.deleted !== "boolean") {
+    return false;
+  }
+  if (!value.skipped) {
+    return value.deleted === true && value.reason === null;
+  }
+  return value.deleted !== true && typeof value.reason === "string";
+};
+
 module.exports = {
   NAVIGATION_SORT_BUCKETS,
   normalizeAutomatchStateHint,
@@ -85,4 +132,7 @@ module.exports = {
   getNavigationStatusPriority,
   getNavigationSortBucket,
   compareNavigationItems,
+  isCancelAutomatchResponse,
+  isRemoveNavigationGameRequest,
+  isRemoveNavigationGameResponse,
 };

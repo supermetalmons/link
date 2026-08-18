@@ -99,7 +99,9 @@ const AUTHENTICATED_ROUTE_SMOKES = [
   { path: "/auth/intents", method: "POST" },
   { path: "/auth/methods", method: "GET" },
   { path: "/auth/x/flows", method: "POST" },
+  { path: "/automatch/cancel", method: "POST" },
   { path: "/mining/rock", method: "POST" },
+  { path: "/navigation/games/remove", method: "POST" },
 ] as const;
 const SMOKE_TIMEOUT_MS = 15_000;
 const SMOKE_RETRY_DELAYS_MS = [500, 1_500, 5_000, 10_000, 15_000];
@@ -233,6 +235,8 @@ function createChildEnvironment(
       normalized === "X_CLIENT_SECRET" ||
       normalized === "FIRESTORE_SERVICE_ACCOUNT_EMAIL" ||
       normalized === "FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY" ||
+      normalized === "GAMEPLAY_SERVICE_ACCOUNT_EMAIL" ||
+      normalized === "GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY" ||
       normalized === "FIREBASE_RTDB_URL" ||
       normalized === "DOTENV_KEY",
   );

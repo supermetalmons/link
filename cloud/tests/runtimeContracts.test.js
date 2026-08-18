@@ -14,7 +14,6 @@ const callableExportNames = [
   "acceptWagerProposal",
   "announceEventPrizes",
   "automatch",
-  "cancelAutomatch",
   "cancelWagerProposal",
   "claimMatchVictoryByTimer",
   "completeXRedirectAuth",
@@ -25,7 +24,6 @@ const callableExportNames = [
   "joinEvent",
   "postponeEventStart",
   "removeEventParticipant",
-  "removeNavigationGame",
   "resolveWagerOutcome",
   "sendWagerProposal",
   "startMatchTimer",
@@ -433,7 +431,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 47);
+  assert.equal(expectedExportNames.length, 45);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

@@ -165,7 +165,7 @@ function smokeResponses(providerAttempts = 1): Response[] {
       swagpack_reactions: [{ id: 3, count: 1 }],
     }),
   );
-  for (let index = 0; index < 4; index++) {
+  for (let index = 0; index < 6; index++) {
     responses.push(authPreflightResponse(), unauthenticatedResponse());
   }
   responses.push(
@@ -315,6 +315,8 @@ test("removes release credentials and dotenv values from child environments", ()
       X_CLIENT_SECRET: "x-secret",
       FIRESTORE_SERVICE_ACCOUNT_EMAIL: "service-account",
       FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "private-key",
+      GAMEPLAY_SERVICE_ACCOUNT_EMAIL: "gameplay-service-account",
+      GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY: "gameplay-private-key",
       FIREBASE_RTDB_URL: "https://local.invalid",
       TELEGRAM_BOT_TOKEN: "telegram-token",
       TELEGRAM_QUEUE_BRIDGE_SECRET: "bridge-secret",
@@ -463,7 +465,7 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 15);
+  assert.equal(requests.length, 19);
   assert.equal(requests[0].url, `${PREVIEW_URL}/nfts`);
   assert.equal(requests[0].init.method, "OPTIONS");
   for (const request of requests) {
@@ -489,7 +491,7 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
     sol: SMOKE_SOL,
     eth: "",
   });
-  const authRequests = requests.slice(4, 12);
+  const authRequests = requests.slice(4, 16);
   assert.deepEqual(
     authRequests.map(({ url, init }) => [url, init.method]),
     [
@@ -499,19 +501,23 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
       [`${PREVIEW_URL}/auth/methods`, "GET"],
       [`${PREVIEW_URL}/auth/x/flows`, "OPTIONS"],
       [`${PREVIEW_URL}/auth/x/flows`, "POST"],
+      [`${PREVIEW_URL}/automatch/cancel`, "OPTIONS"],
+      [`${PREVIEW_URL}/automatch/cancel`, "POST"],
       [`${PREVIEW_URL}/mining/rock`, "OPTIONS"],
       [`${PREVIEW_URL}/mining/rock`, "POST"],
+      [`${PREVIEW_URL}/navigation/games/remove`, "OPTIONS"],
+      [`${PREVIEW_URL}/navigation/games/remove`, "POST"],
     ],
   );
   assert.equal(
-    requests[14].url,
+    requests[18].url,
     `${PREVIEW_URL}/auth/x/callback?state=abcdefghijklmnopqrstuvwx`,
   );
-  assert.equal(requests[12].url, `${PREVIEW_URL}/internal/telegram/delivery`);
-  assert.equal(requests[12].init.method, "POST");
-  assert.equal(requests[13].url, `${PREVIEW_URL}/auth/x/callback`);
-  assert.equal(requests[13].init.method, "GET");
-  assert.equal(requests[14].init.method, "GET");
+  assert.equal(requests[16].url, `${PREVIEW_URL}/internal/telegram/delivery`);
+  assert.equal(requests[16].init.method, "POST");
+  assert.equal(requests[17].url, `${PREVIEW_URL}/auth/x/callback`);
+  assert.equal(requests[17].init.method, "GET");
+  assert.equal(requests[18].init.method, "GET");
   assert.deepEqual(delays, [500]);
 });
 
@@ -574,6 +580,10 @@ test("retries an expected-success response body transport failure", async () => 
     unauthenticatedResponse(),
     authPreflightResponse(),
     unauthenticatedResponse(),
+    authPreflightResponse(),
+    unauthenticatedResponse(),
+    authPreflightResponse(),
+    unauthenticatedResponse(),
     telegramBridgeUnauthorizedResponse(),
     xCallbackResponse(),
     xCallbackResponse(),
@@ -592,7 +602,7 @@ test("retries an expected-success response body transport failure", async () => 
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 15);
+  assert.equal(requests.length, 19);
   assert.deepEqual(delays, [500]);
 });
 
@@ -704,6 +714,8 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
       X_CLIENT_SECRET: "x-secret-source",
       FIRESTORE_SERVICE_ACCOUNT_EMAIL: "service-account-source",
       FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "private-key-source",
+      GAMEPLAY_SERVICE_ACCOUNT_EMAIL: "gameplay-service-account-source",
+      GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY: "gameplay-private-key-source",
       WRANGLER_LOG_PATH: "/unsafe",
     },
     spawn: (command, args, options) => {
@@ -790,6 +802,11 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
     calls[2].environment.FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY,
     undefined,
   );
+  assert.equal(calls[2].environment.GAMEPLAY_SERVICE_ACCOUNT_EMAIL, undefined);
+  assert.equal(
+    calls[2].environment.GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY,
+    undefined,
+  );
   assert.equal(calls[2].environment.CI, "true");
   assert.equal(files.size, 0);
   assert.equal(
@@ -805,6 +822,8 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
     "x-secret-source",
     "service-account-source",
     "private-key-source",
+    "gameplay-service-account-source",
+    "gameplay-private-key-source",
   ]) {
     assert.equal(
       logs.some((message) => message.includes(sensitiveValue)),
@@ -839,6 +858,8 @@ test("trigger updates use only the selected token in a sanitized environment", a
       X_CLIENT_SECRET: "x-secret",
       FIRESTORE_SERVICE_ACCOUNT_EMAIL: "service-account",
       FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "private-key",
+      GAMEPLAY_SERVICE_ACCOUNT_EMAIL: "gameplay-service-account",
+      GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY: "gameplay-private-key",
       DOTENV_KEY: "dotenv-vault-key",
     },
     spawn: (command, args, options) => {
@@ -897,6 +918,11 @@ test("trigger updates use only the selected token in a sanitized environment", a
     calls[0].environment.FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY,
     undefined,
   );
+  assert.equal(calls[0].environment.GAMEPLAY_SERVICE_ACCOUNT_EMAIL, undefined);
+  assert.equal(
+    calls[0].environment.GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY,
+    undefined,
+  );
   assert.equal(calls[0].environment.DOTENV_KEY, undefined);
   assert.equal(fetchCalled, false);
   for (const sensitiveValue of [
@@ -909,6 +935,8 @@ test("trigger updates use only the selected token in a sanitized environment", a
     "x-secret",
     "service-account",
     "private-key",
+    "gameplay-service-account",
+    "gameplay-private-key",
     "dotenv-vault-key",
     "file-token",
   ]) {
@@ -941,7 +969,7 @@ test("production promotes only the explicit version and then smokes the custom d
     fetch: async (url) => {
       assert.match(
         String(url),
-        /^https:\/\/api\.mons\.link\/(?:nfts|mining\/rock|internal\/telegram\/delivery|auth\/(?:intents|methods|x\/(?:flows|callback)))/,
+        /^https:\/\/api\.mons\.link\/(?:nfts|mining\/rock|automatch\/cancel|navigation\/games\/remove|internal\/telegram\/delivery|auth\/(?:intents|methods|x\/(?:flows|callback)))/,
       );
       return nextResponse(responses);
     },

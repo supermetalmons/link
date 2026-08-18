@@ -3,12 +3,8 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
+const databaseRules = require("../database.rules.json");
 const firebaseAdmin = require("../functions/firebaseAdmin");
-const {
-  getQueuedInviteCandidatesFromSnapshot,
-  normalizeString,
-  toFiniteTimestamp,
-} = require("../functions/gameplay/automatchQueue");
 const {
   assertInviteMatchesPlayers,
   createMatchRecordRefs,
@@ -40,6 +36,13 @@ const {
   removeWagerProposalWithRetry,
 } = require("../functions/gameplay/wagerProposalRemoval");
 const wagerHelpers = require("../functions/wagerHelpers");
+
+test("automatch REST queries retain their RTDB indexes", () => {
+  assert.deepEqual(databaseRules.rules.automatch[".indexOn"], [
+    "uid",
+    "profileId",
+  ]);
+});
 
 const withFirebaseAdminMethod = async (method, replacement, callback) => {
   const original = firebaseAdmin[method];
@@ -84,52 +87,6 @@ test("wager helpers preserve their compatibility export surface", () => {
   assert.strictEqual(
     wagerHelpers.removeWagerProposalWithRetry,
     removeWagerProposalWithRetry,
-  );
-});
-
-test("automatch queue candidates retain normalization and newest-first order", () => {
-  assert.equal(normalizeString("  profile  "), "profile");
-  assert.equal(normalizeString(123), "");
-  assert.equal(toFiniteTimestamp(12.9), 12);
-  assert.equal(toFiniteTimestamp("15.8"), 15);
-  assert.equal(toFiniteTimestamp("invalid"), 0);
-  assert.deepEqual(
-    getQueuedInviteCandidatesFromSnapshot({
-      exists: () => true,
-      val: () => ({
-        older: {
-          uid: " login ",
-          profileId: " profile ",
-          timestamp: "10.9",
-          telegramDeliveryVersion: 2,
-        },
-        newer: {
-          uid: "other",
-          timestamp: 20,
-          telegramDeliveryVersion: 1,
-        },
-      }),
-    }),
-    [
-      {
-        inviteId: "newer",
-        uid: "other",
-        profileId: "",
-        timestamp: 20,
-        telegramDeliveryVersion: null,
-      },
-      {
-        inviteId: "older",
-        uid: "login",
-        profileId: "profile",
-        timestamp: 10,
-        telegramDeliveryVersion: 2,
-      },
-    ],
-  );
-  assert.deepEqual(
-    getQueuedInviteCandidatesFromSnapshot({ exists: () => false }),
-    [],
   );
 });
 

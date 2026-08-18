@@ -17,6 +17,24 @@ export interface AutomatchStateHintInput {
   storedStateHint?: unknown;
 }
 
+export type CancelAutomatchRequest = Record<string, never>;
+
+export interface CancelAutomatchResponse {
+  ok: boolean;
+}
+
+export interface RemoveNavigationGameRequest {
+  inviteId: string;
+}
+
+export interface RemoveNavigationGameResponse {
+  ok: true;
+  skipped: boolean;
+  deleted?: boolean;
+  reason: string | null;
+  inviteId: string;
+}
+
 export const NAVIGATION_SORT_BUCKETS: Readonly<
   Record<NavigationStatus, 20 | 30 | 40 | 50>
 >;
@@ -37,3 +55,12 @@ export function compareNavigationItems<T extends NavigationOrderingItem>(
   left: T,
   right: T,
 ): number;
+export function isCancelAutomatchResponse(
+  value: unknown,
+): value is CancelAutomatchResponse;
+export function isRemoveNavigationGameRequest(
+  value: unknown,
+): value is RemoveNavigationGameRequest;
+export function isRemoveNavigationGameResponse(
+  value: unknown,
+): value is RemoveNavigationGameResponse;

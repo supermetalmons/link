@@ -137,6 +137,80 @@ Before reconciliation, rollback by restoring the previous frontend and API
 Worker versions. After reconciliation, redeploy `mineRock` from the retained
 pre-migration commit before restoring those versions.
 
+## Gameplay mutation APIs
+
+Authenticated automatch cancellation and navigation cleanup are served by:
+
+- `POST https://api.mons.link/automatch/cancel`
+- `POST https://api.mons.link/navigation/games/remove`
+
+The browser sends its Firebase ID token in the `Authorization: Bearer` header.
+The Worker preserves the existing cancellation race check, automatch Telegram
+source updates, navigation-state gates, and conditional Firestore deletion.
+Firebase Authentication, RTDB, Firestore, and the existing projection triggers
+remain authoritative.
+
+Create one dedicated Google identity with separate least-privilege role
+bindings. The RTDB role is project-scoped because Realtime Database IAM does
+not provide path-level permissions. The Firestore delete role is conditioned on
+the default database:
+
+```sh
+gcloud iam roles create monsLinkGameplayRtdb --project mons-link --title="mons.link gameplay RTDB" --permissions=firebasedatabase.instances.get,firebasedatabase.instances.update --stage=GA
+gcloud iam roles create monsLinkNavigationGameDelete --project mons-link --title="mons.link navigation game deletion" --permissions=datastore.entities.delete --stage=GA
+gcloud iam service-accounts create mons-link-gameplay-api --project mons-link --display-name="mons.link gameplay API"
+gcloud projects add-iam-policy-binding mons-link --member="serviceAccount:mons-link-gameplay-api@mons-link.iam.gserviceaccount.com" --role="projects/mons-link/roles/monsLinkGameplayRtdb"
+gcloud projects add-iam-policy-binding mons-link --member="serviceAccount:mons-link-gameplay-api@mons-link.iam.gserviceaccount.com" --role="projects/mons-link/roles/monsLinkNavigationGameDelete" --condition='expression=resource.name=="projects/mons-link/databases/(default)",title=default-firestore-only'
+gcloud iam service-accounts keys create /secure/mons-link-gameplay-api.json --project mons-link --iam-account=mons-link-gameplay-api@mons-link.iam.gserviceaccount.com
+```
+
+Prepare an untracked secrets file outside the repository using the generated
+service-account key:
+
+```dotenv
+GAMEPLAY_SERVICE_ACCOUNT_EMAIL=mons-link-gameplay-api@mons-link.iam.gserviceaccount.com
+GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+```
+
+Deploy the RTDB query indexes before uploading the API candidate:
+
+```sh
+firebase deploy --only database --config cloud/firebase.json --project mons-link
+```
+
+Upload and smoke-test the API candidate with the new secrets, promote that exact
+version, then promote the frontend candidate:
+
+```sh
+npm run deploy:api -- preview --smoke-sol <known-wallet> --secrets-file /secure/mons-link-gameplay-api.env --token-file /secure/cloudflare-token
+npm run deploy:api -- production --version-id <candidate-version-id> --smoke-sol <known-wallet> --token-file /secure/cloudflare-token
+npm run deploy -- preview --token-file /secure/cloudflare-token
+npm run deploy -- production --version-id <frontend-candidate-version-id> --token-file /secure/cloudflare-token
+```
+
+In an authenticated production session, enter and cancel automatch. Confirm the
+queue entry disappears, the invite retains the correct canceled or matched
+state after the guest recheck, and the Telegram projection advances. Create a
+disposable direct invite without a guest, return home, and remove its waiting
+navigation item. Confirm only that waiting Firestore game document is deleted.
+
+After both checks pass, immediately run the complete Firebase release and
+confirm the retired callables are absent:
+
+```sh
+npm run deploy:firebase -- --project mons-link
+firebase functions:list --project mons-link
+```
+
+Delete the downloaded service-account key and temporary secrets file after the
+Worker version stores both values as encrypted secrets. Retain the service
+account and its Worker secrets for rollback.
+
+Before Firebase reconciliation, rollback the frontend and API Worker versions.
+After reconciliation, first redeploy `cancelAutomatch` and
+`removeNavigationGame` from the retained pre-migration commit, then restore the
+previous frontend and API Worker versions.
+
 ## Auth initiation and reads
 
 The API Worker owns these Firebase-authenticated routes:

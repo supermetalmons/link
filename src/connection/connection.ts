@@ -101,6 +101,10 @@ import {
 } from "../services/wagerMaterialsService";
 import { rocksMiningService } from "../services/rocksMiningService";
 import { mineRockViaApi } from "../services/miningApi";
+import {
+  cancelAutomatchViaApi,
+  removeNavigationGameViaApi,
+} from "../services/gameplayApi";
 import { compareNavigationItems as compareNavigationItemsByDisplayOrder } from "../services/navigationItemOrdering";
 import { resetNftCache } from "../services/nftCache";
 import { resetPlayerMetadataCaches } from "../utils/playerMetadataCache";
@@ -2276,12 +2280,7 @@ class Connection {
   public async cancelAutomatch(): Promise<any> {
     try {
       await this.ensureAuthenticated();
-      const cancelAutomatchFn = httpsCallable(
-        this.functions,
-        "cancelAutomatch",
-      );
-      const response = await cancelAutomatchFn({});
-      return response.data;
+      return cancelAutomatchViaApi(this.getAuthApiToken);
     } catch (error) {
       console.error("Error canceling automatch:", error);
       throw error;
@@ -2300,14 +2299,10 @@ class Connection {
     }
     try {
       await this.ensureAuthenticated();
-      const removeNavigationGameFn = httpsCallable(
-        this.functions,
-        "removeNavigationGame",
+      return removeNavigationGameViaApi(
+        { inviteId: normalizedInviteId },
+        this.getAuthApiToken,
       );
-      const response = await removeNavigationGameFn({
-        inviteId: normalizedInviteId,
-      });
-      return response.data;
     } catch (error) {
       console.error("Error removing waiting navigation game:", error);
       throw error;

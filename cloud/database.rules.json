@@ -4,7 +4,8 @@
     ".write": false,
     "automatch": {
       ".read": "auth != null && auth.token.admin === true",
-      ".write": "auth != null && auth.token.admin === true"
+      ".write": "auth != null && auth.token.admin === true",
+      ".indexOn": ["uid", "profileId"]
     },
     "events": {
       "$eventId": {

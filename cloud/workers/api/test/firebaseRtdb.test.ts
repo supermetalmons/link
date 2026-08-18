@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  createFirebaseRtdbClient,
   createFirebaseRtdbRepository,
+  FIREBASE_RTDB_SERVER_TIMESTAMP,
   FirebaseRtdbFailure,
+  firebaseRtdbIncrement,
   MAX_RTDB_BODY_BYTES,
 } from "../src/firebaseRtdb.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
@@ -50,6 +53,52 @@ test("reads Telegram state through authenticated bounded REST requests", async (
     new Headers(requests[0].init?.headers).get("Authorization"),
     "Bearer access-token",
   );
+});
+
+test("encodes exact RTDB queries and silent multipath server-value updates", async () => {
+  const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+  const client = createFirebaseRtdbClient(env, {
+    getAccessToken: async () => "access-token",
+    fetcher: async (input, init) => {
+      requests.push({ input, init });
+      return init?.method === "PATCH"
+        ? new Response(null, { status: 204 })
+        : jsonResponse({ invite: { uid: "firebase-uid" } });
+    },
+  });
+  assert.deepEqual(
+    await client.getPath("automatch", {
+      orderBy: "uid",
+      equalTo: "firebase-uid",
+    }),
+    { invite: { uid: "firebase-uid" } },
+  );
+  await client.patchRoot({
+    "automatch/invite": null,
+    "invites/invite/canceledAt": FIREBASE_RTDB_SERVER_TIMESTAMP,
+    "telegramAutomatches/invite/generation": firebaseRtdbIncrement(1),
+  });
+
+  const queryUrl = new URL(String(requests[0].input));
+  assert.equal(queryUrl.pathname, "/automatch.json");
+  assert.equal(queryUrl.searchParams.get("orderBy"), '"uid"');
+  assert.equal(queryUrl.searchParams.get("equalTo"), '"firebase-uid"');
+  const patchUrl = new URL(String(requests[1].input));
+  assert.equal(patchUrl.pathname, "/.json");
+  assert.equal(patchUrl.searchParams.get("print"), "silent");
+  assert.equal(requests[1].init?.method, "PATCH");
+  assert.deepEqual(JSON.parse(String(requests[1].init?.body)), {
+    "automatch/invite": null,
+    "invites/invite/canceledAt": { ".sv": "timestamp" },
+    "telegramAutomatches/invite/generation": {
+      ".sv": { increment: 1 },
+    },
+  });
+  assert.equal(
+    new Headers(requests[1].init?.headers).get("Authorization"),
+    "Bearer access-token",
+  );
+  assert.throws(() => firebaseRtdbIncrement(Number.NaN), TypeError);
 });
 
 test("commits and aborts ETag-backed transactions", async () => {
