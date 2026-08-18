@@ -154,7 +154,7 @@ function smokeResponses(providerAttempts = 1): Response[] {
       swagpack_reactions: [{ id: 3, count: 1 }],
     }),
   );
-  for (let index = 0; index < 3; index++) {
+  for (let index = 0; index < 4; index++) {
     responses.push(authPreflightResponse(), unauthenticatedResponse());
   }
   responses.push(xCallbackResponse(), xCallbackResponse());
@@ -428,7 +428,7 @@ test("validates the exact NFT API response shape", () => {
   );
 });
 
-test("smokes NFT, auth, and X callback routes with bounded retries", async () => {
+test("smokes NFT, authenticated, and X callback routes with bounded retries", async () => {
   const responses = smokeResponses(2);
   const requests: Array<{ url: string; init: RequestInit }> = [];
   const delays: number[] = [];
@@ -445,7 +445,7 @@ test("smokes NFT, auth, and X callback routes with bounded retries", async () =>
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 12);
+  assert.equal(requests.length, 14);
   assert.equal(requests[0].url, `${PREVIEW_URL}/nfts`);
   assert.equal(requests[0].init.method, "OPTIONS");
   for (const request of requests) {
@@ -471,7 +471,7 @@ test("smokes NFT, auth, and X callback routes with bounded retries", async () =>
     sol: SMOKE_SOL,
     eth: "",
   });
-  const authRequests = requests.slice(4, 10);
+  const authRequests = requests.slice(4, 12);
   assert.deepEqual(
     authRequests.map(({ url, init }) => [url, init.method]),
     [
@@ -481,15 +481,17 @@ test("smokes NFT, auth, and X callback routes with bounded retries", async () =>
       [`${PREVIEW_URL}/auth/methods`, "GET"],
       [`${PREVIEW_URL}/auth/x/flows`, "OPTIONS"],
       [`${PREVIEW_URL}/auth/x/flows`, "POST"],
+      [`${PREVIEW_URL}/mining/rock`, "OPTIONS"],
+      [`${PREVIEW_URL}/mining/rock`, "POST"],
     ],
   );
   assert.equal(
-    requests[11].url,
+    requests[13].url,
     `${PREVIEW_URL}/auth/x/callback?state=abcdefghijklmnopqrstuvwx`,
   );
-  assert.equal(requests[10].url, `${PREVIEW_URL}/auth/x/callback`);
-  assert.equal(requests[10].init.method, "GET");
-  assert.equal(requests[11].init.method, "GET");
+  assert.equal(requests[12].url, `${PREVIEW_URL}/auth/x/callback`);
+  assert.equal(requests[12].init.method, "GET");
+  assert.equal(requests[13].init.method, "GET");
   assert.deepEqual(delays, [500]);
 });
 
@@ -550,6 +552,8 @@ test("retries an expected-success response body transport failure", async () => 
     unauthenticatedResponse(),
     authPreflightResponse(),
     unauthenticatedResponse(),
+    authPreflightResponse(),
+    unauthenticatedResponse(),
     xCallbackResponse(),
     xCallbackResponse(),
   ];
@@ -567,7 +571,7 @@ test("retries an expected-success response body transport failure", async () => 
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 12);
+  assert.equal(requests.length, 14);
   assert.deepEqual(delays, [500]);
 });
 
@@ -916,7 +920,7 @@ test("production promotes only the explicit version and then smokes the custom d
     fetch: async (url) => {
       assert.match(
         String(url),
-        /^https:\/\/api\.mons\.link\/(?:nfts|auth\/(?:intents|methods|x\/(?:flows|callback)))/,
+        /^https:\/\/api\.mons\.link\/(?:nfts|mining\/rock|auth\/(?:intents|methods|x\/(?:flows|callback)))/,
       );
       return nextResponse(responses);
     },

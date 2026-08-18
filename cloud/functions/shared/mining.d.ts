@@ -5,6 +5,15 @@ export const MINING_MATERIAL_NAMES: typeof MATERIAL_KEYS;
 export type MiningMaterialName = (typeof MATERIAL_KEYS)[number];
 export type MiningMaterials = Record<MiningMaterialName, number>;
 
+export const MINE_ROCK_FAILURE_REASONS: readonly [
+  "date-out-of-range",
+  "profile-not-found",
+  "date-not-advanced",
+  "materials-mismatch",
+];
+
+export type MineRockFailureReason = (typeof MINE_ROCK_FAILURE_REASONS)[number];
+
 export interface MiningSnapshot {
   lastRockDate: string | null;
   materials: MiningMaterials;
@@ -14,6 +23,15 @@ export interface MiningDrops {
   drops: MiningMaterialName[];
   delta: MiningMaterials;
 }
+
+export interface MineRockRequest {
+  date: string;
+  materials: MiningMaterials;
+}
+
+export type MineRockResponse =
+  | { ok: true; mining: MiningSnapshot }
+  | { ok: false; reason: MineRockFailureReason };
 
 export interface WagerProposalLike {
   material?: string | null;
@@ -34,6 +52,9 @@ export function sumMaterials(
   right: MiningMaterials,
 ): MiningMaterials;
 export function normalizeMiningSnapshot(source?: unknown): MiningSnapshot;
+export function isMiningMaterials(value: unknown): value is MiningMaterials;
+export function isMiningSnapshot(value: unknown): value is MiningSnapshot;
+export function isMineRockResponse(value: unknown): value is MineRockResponse;
 
 export function formatMiningDateLocal(date: Date): string;
 export function formatMiningDateUtc(date: Date): string;

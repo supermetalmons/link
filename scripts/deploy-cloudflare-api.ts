@@ -94,10 +94,11 @@ const WRANGLER_CONFIG_ARGS = [
 const PRODUCTION_URL = "https://api.mons.link";
 const SMOKE_ORIGIN = "https://mons.link";
 const X_CALLBACK_PATH = "/auth/x/callback";
-const AUTH_ROUTE_SMOKES = [
+const AUTHENTICATED_ROUTE_SMOKES = [
   { path: "/auth/intents", method: "POST" },
   { path: "/auth/methods", method: "GET" },
   { path: "/auth/x/flows", method: "POST" },
+  { path: "/mining/rock", method: "POST" },
 ] as const;
 const SMOKE_TIMEOUT_MS = 15_000;
 const SMOKE_RETRY_DELAYS_MS = [500, 1_500];
@@ -539,7 +540,7 @@ async function smokeApi(
   await smokePost("", "Empty-wallet smoke request", true);
   await smokePost(smokeSol, "Provider-backed smoke request", false);
 
-  for (const authRoute of AUTH_ROUTE_SMOKES) {
+  for (const authRoute of AUTHENTICATED_ROUTE_SMOKES) {
     const authEndpoint = new URL(authRoute.path, baseUrl).toString();
     const label = `${authRoute.method} ${authRoute.path}`;
     const { response: authPreflight } = await fetchWithRetry(

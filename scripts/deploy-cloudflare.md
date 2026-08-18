@@ -106,6 +106,32 @@ configuration is intentionally changed, review it separately and apply it with
 `npm run deploy:api:triggers -- --token-file /path/to/cloudflare-token`, or set
 `CLOUDFLARE_API_TOKEN` in the invoking shell and omit `--token-file`.
 
+## Mining API
+
+Authenticated mining is served by `POST https://api.mons.link/mining/rock`.
+The browser sends its Firebase ID token in the `Authorization: Bearer` header.
+The Worker verifies that token, applies the existing authenticated-origin CORS
+policy, and rate limits attempts by Firebase UID.
+
+The Worker queries the caller's profile with the Firebase token, then updates
+only `mining.lastRockDate` and `mining.materials` with the existing Firestore
+service account. Each update is conditioned on the document version returned
+by the query. A conflicting write causes the Worker to re-read, revalidate, and
+retry up to three total attempts. The service account therefore needs its
+existing `datastore.entities.get` and `datastore.entities.update` permissions;
+mining does not require broader IAM access or another Worker secret.
+
+API release smoke checks cover mining preflight and unauthenticated responses
+without changing a profile. For the production cutover, promote the tested API
+Worker version first, then promote the frontend and break one available rock
+with an authenticated profile. Confirm that Firestore advances the date and
+materials exactly once before running the complete Firebase release. The final
+Firebase function reconciliation removes the retired `mineRock` callable.
+
+Before reconciliation, rollback by restoring the previous frontend and API
+Worker versions. After reconciliation, redeploy `mineRock` from the retained
+pre-migration commit before restoring those versions.
+
 ## Auth initiation and reads
 
 The API Worker owns these Firebase-authenticated routes:

@@ -13,6 +13,10 @@ import {
 } from "./xCallback.ts";
 import { AUTH_PATHS } from "./authHttp.ts";
 import { handleAuthRoute, type AuthRouteDependencies } from "./authRoutes.ts";
+import {
+  handleMiningRoute,
+  type MiningRouteDependencies,
+} from "./miningRoute.ts";
 
 const RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
 
@@ -33,6 +37,7 @@ export async function handleRequest(
   env: Env,
   dependencyOverrides: Partial<WorkerDependencies> & {
     auth?: AuthRouteDependencies;
+    mining?: MiningRouteDependencies;
     xCallback?: XCallbackDependencyOverrides;
   } = {},
   ctx?: ExecutionContext,
@@ -46,6 +51,12 @@ export async function handleRequest(
       return jsonResponse({ ok: false, error: "unavailable" }, 503);
     }
     return handleAuthRoute(request, env, ctx, dependencyOverrides.auth);
+  }
+  if (pathname === "/mining/rock") {
+    if (!ctx) {
+      return jsonResponse({ ok: false, error: "unavailable" }, 503);
+    }
+    return handleMiningRoute(request, env, ctx, dependencyOverrides.mining);
   }
   if (pathname !== "/nfts") {
     return jsonResponse({ ok: false, error: "not-found" }, 404);

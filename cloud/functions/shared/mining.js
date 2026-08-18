@@ -2,6 +2,23 @@ const { createSeededRandom } = require("./ids");
 
 const MATERIAL_KEYS = Object.freeze(["dust", "slime", "gum", "metal", "ice"]);
 const MINING_MATERIAL_NAMES = MATERIAL_KEYS;
+const MINE_ROCK_FAILURE_REASONS = Object.freeze([
+  "date-out-of-range",
+  "profile-not-found",
+  "date-not-advanced",
+  "materials-mismatch",
+]);
+
+const isRecord = (value) =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const hasExactKeys = (value, expectedKeys) => {
+  const actualKeys = Object.keys(value);
+  return (
+    actualKeys.length === expectedKeys.length &&
+    actualKeys.every((key) => expectedKeys.includes(key))
+  );
+};
 
 const createEmptyMaterials = () => {
   const result = {};
@@ -47,6 +64,33 @@ const normalizeMiningSnapshot = (source) => {
         : null,
     materials: normalizeMaterials(source && source.materials),
   };
+};
+
+const isMiningMaterials = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, MATERIAL_KEYS) &&
+  MATERIAL_KEYS.every((key) => Number.isInteger(value[key]) && value[key] >= 0);
+
+const isMiningSnapshot = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, ["lastRockDate", "materials"]) &&
+  (value.lastRockDate === null || typeof value.lastRockDate === "string") &&
+  isMiningMaterials(value.materials);
+
+const isMineRockResponse = (value) => {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (value.ok === true) {
+    return (
+      hasExactKeys(value, ["ok", "mining"]) && isMiningSnapshot(value.mining)
+    );
+  }
+  return (
+    value.ok === false &&
+    hasExactKeys(value, ["ok", "reason"]) &&
+    MINE_ROCK_FAILURE_REASONS.includes(value.reason)
+  );
 };
 
 const formatMiningDateLocal = (date) => {
@@ -206,11 +250,15 @@ const computeAcceptedReservation = (
 module.exports = {
   MATERIAL_KEYS,
   MINING_MATERIAL_NAMES,
+  MINE_ROCK_FAILURE_REASONS,
   createEmptyMaterials,
   cloneMaterials,
   normalizeMaterials,
   sumMaterials,
   normalizeMiningSnapshot,
+  isMiningMaterials,
+  isMiningSnapshot,
+  isMineRockResponse,
   formatMiningDateLocal,
   formatMiningDateUtc,
   createMiningSeededRandom,

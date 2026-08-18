@@ -100,6 +100,7 @@ import {
   setFrozenMaterials,
 } from "../services/wagerMaterialsService";
 import { rocksMiningService } from "../services/rocksMiningService";
+import { mineRockViaApi } from "../services/miningApi";
 import { compareNavigationItems as compareNavigationItemsByDisplayOrder } from "../services/navigationItemOrdering";
 import { resetNftCache } from "../services/nftCache";
 import { resetPlayerMetadataCaches } from "../utils/playerMetadataCache";
@@ -109,7 +110,10 @@ import {
   decrementLifecycleCounter,
   incrementLifecycleCounter,
 } from "../lifecycle/lifecycleDiagnostics";
-import { normalizeMiningSnapshot } from "@mons/shared/mining";
+import {
+  normalizeMiningSnapshot,
+  type MineRockResponse,
+} from "@mons/shared/mining";
 import {
   CONTROLLER_VERSION,
   buildFreshMatchRecord,
@@ -1514,12 +1518,10 @@ class Connection {
   public async mineRock(
     date: string,
     materials: PlayerMiningMaterials,
-  ): Promise<any> {
+  ): Promise<MineRockResponse> {
     try {
       await this.ensureAuthenticated();
-      const mineRockFunction = httpsCallable(this.functions, "mineRock");
-      const response = await mineRockFunction({ date, materials });
-      return response.data;
+      return mineRockViaApi({ date, materials }, this.getAuthApiToken);
     } catch (error) {
       console.error("Error mining rock:", error);
       throw error;

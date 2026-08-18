@@ -1,14 +1,12 @@
-import type {
-  PlayerMiningData,
-  PlayerMiningMaterials,
-} from "../connection/connectionModels";
+import type { PlayerMiningMaterials } from "../connection/connectionModels";
+import type { MineRockResponse } from "@mons/shared/mining";
 
 export type MiningConnectionPort = {
   createSessionGuard: () => () => boolean;
   mineRock: (
     date: string,
     materials: PlayerMiningMaterials,
-  ) => Promise<{ ok?: boolean; mining?: PlayerMiningData } | null>;
+  ) => Promise<MineRockResponse>;
 };
 
 let miningConnectionPort: MiningConnectionPort | null = null;

@@ -242,7 +242,7 @@ test("rejects malformed, oversized, and transport-failed responses safely", asyn
   }
 });
 
-test("connection removes only the three migrated Firebase callable names", () => {
+test("connection keeps migrated auth callable names off Firebase", () => {
   const source = readFileSync(
     new URL("../src/connection/connection.ts", import.meta.url),
     "utf8",
