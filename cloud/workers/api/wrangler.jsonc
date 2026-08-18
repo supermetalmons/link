@@ -9,6 +9,7 @@
   "preview_urls": true,
   "vars": {
     "AUTH_DISABLE_X_VERIFY": "false",
+    "FIREBASE_RTDB_URL": "https://mons-link-default-rtdb.firebaseio.com",
   },
   "routes": [
     {
@@ -21,6 +22,11 @@
       "FIRESTORE_SERVICE_ACCOUNT_EMAIL",
       "FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY",
       "HELIUS_RPC_API_KEY",
+      "TELEGRAM_BOT_TOKEN",
+      "TELEGRAM_EXTRA_CHAT_ID",
+      "TELEGRAM_FIREBASE_SERVICE_ACCOUNT_EMAIL",
+      "TELEGRAM_FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY",
+      "TELEGRAM_QUEUE_BRIDGE_SECRET",
       "X_CLIENT_ID",
       "X_CLIENT_SECRET",
     ],
@@ -43,6 +49,24 @@
       },
     },
   ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "TELEGRAM_DELIVERY_QUEUE",
+        "queue": "mons-link-telegram-delivery",
+      },
+    ],
+    "consumers": [
+      {
+        "queue": "mons-link-telegram-delivery",
+        "max_batch_size": 1,
+        "max_batch_timeout": 0,
+        "max_retries": 100,
+        "dead_letter_queue": "mons-link-telegram-delivery-dlq",
+        "max_concurrency": 1,
+      },
+    ],
+  },
   "observability": {
     "enabled": true,
     "logs": {

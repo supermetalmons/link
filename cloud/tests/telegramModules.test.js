@@ -12,8 +12,7 @@ const taskIdentity = require("../functions/telegram/taskIdentity");
 
 test("Telegram compatibility facades delegate to focused modules", () => {
   for (const [facadePath, modulePath] of [
-    ["../functions/telegramClient", "../functions/telegram/client"],
-    ["../functions/telegramDelivery", "../functions/telegram/deliveryEngine"],
+    ["../functions/telegramClient", "../functions/telegram/firebaseClient"],
     [
       "../functions/telegramDeliveryFunctions",
       "../functions/telegram/taskAdapters",

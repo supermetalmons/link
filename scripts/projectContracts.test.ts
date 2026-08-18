@@ -33,6 +33,7 @@ type WranglerConfig = {
   secrets?: { required?: string[] };
   vars?: Record<string, string>;
   ratelimits?: Array<Record<string, unknown>>;
+  queues?: Record<string, unknown>;
   observability?: Record<string, unknown>;
 };
 
@@ -89,12 +90,20 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.deepEqual(config.routes, [
     { pattern: "api.mons.link", custom_domain: true },
   ]);
-  assert.deepEqual(config.vars, { AUTH_DISABLE_X_VERIFY: "false" });
+  assert.deepEqual(config.vars, {
+    AUTH_DISABLE_X_VERIFY: "false",
+    FIREBASE_RTDB_URL: "https://mons-link-default-rtdb.firebaseio.com",
+  });
   assert.deepEqual(config.secrets, {
     required: [
       "FIRESTORE_SERVICE_ACCOUNT_EMAIL",
       "FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY",
       "HELIUS_RPC_API_KEY",
+      "TELEGRAM_BOT_TOKEN",
+      "TELEGRAM_EXTRA_CHAT_ID",
+      "TELEGRAM_FIREBASE_SERVICE_ACCOUNT_EMAIL",
+      "TELEGRAM_FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY",
+      "TELEGRAM_QUEUE_BRIDGE_SECRET",
       "X_CLIENT_ID",
       "X_CLIENT_SECRET",
     ],
@@ -111,6 +120,24 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       simple: { limit: 20, period: 60 },
     },
   ]);
+  assert.deepEqual(config.queues, {
+    producers: [
+      {
+        binding: "TELEGRAM_DELIVERY_QUEUE",
+        queue: "mons-link-telegram-delivery",
+      },
+    ],
+    consumers: [
+      {
+        queue: "mons-link-telegram-delivery",
+        max_batch_size: 1,
+        max_batch_timeout: 0,
+        max_retries: 100,
+        dead_letter_queue: "mons-link-telegram-delivery-dlq",
+        max_concurrency: 1,
+      },
+    ],
+  });
   assert.deepEqual(config.observability, {
     enabled: true,
     logs: {
@@ -233,6 +260,8 @@ test("package manifests preserve public scripts and deployment command vectors",
     logs: "firebase functions:log",
   });
   assert.deepEqual(adminPackage.scripts, {
+    "requeue:telegram": "node requeueTelegramDelivery.js",
+    "smoke:telegram": "node smokeTelegramDelivery.js",
     start: "node listAddresses.js",
     "shooting:alert": "node shootingStarAlert.js",
   });
@@ -310,21 +339,7 @@ test("API Worker preserves its runtime export surface", () => {
 
   assert.deepEqual(
     exportNames,
-    [
-      "PRIMARY_COLLECTION_ID",
-      "SPECIALS_COLLECTION_ID",
-      "default",
-      "extractIdFromJsonUri",
-      "handleRequest",
-    ].sort(),
-  );
-  assert.equal(
-    worker.PRIMARY_COLLECTION_ID,
-    "C22esis7kQMbX9JGWsMaKvsh1X5GeBmHPju28jiKDyAP",
-  );
-  assert.equal(
-    worker.SPECIALS_COLLECTION_ID,
-    "GCcbUaghGawyM76BhJHsHUXb9kq7H3AZhPL7S3p9WajP",
+    ["default", "extractIdFromJsonUri", "handleFetch", "handleRequest"].sort(),
   );
   assert.equal(typeof worker.extractIdFromJsonUri, "function");
   assert.equal(typeof worker.handleRequest, "function");

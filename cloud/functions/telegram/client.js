@@ -1,7 +1,5 @@
 "use strict";
 
-const { defineSecret } = require("firebase-functions/params");
-
 const TELEGRAM_API_ROOT = "https://api.telegram.org";
 const TELEGRAM_HTTP_TIMEOUT_MS = 10_000;
 const TELEGRAM_SAFE_SEND_ERROR_CODES = new Set([
@@ -12,8 +10,6 @@ const TELEGRAM_SAFE_SEND_ERROR_CODES = new Set([
   "ENOTFOUND",
   "UND_ERR_CONNECT_TIMEOUT",
 ]);
-const telegramBotToken = defineSecret("TELEGRAM_BOT_TOKEN");
-
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 
@@ -87,7 +83,7 @@ const telegramRequest = async ({
   fetchImpl = globalThis.fetch,
   timeoutMs = TELEGRAM_HTTP_TIMEOUT_MS,
 }) => {
-  const normalizedToken = normalizeString(token || telegramBotToken.value());
+  const normalizedToken = normalizeString(token);
   if (!normalizedToken) {
     return buildFailure({
       classification: "terminal",
@@ -400,5 +396,4 @@ module.exports = {
   isKnownSafeTelegramSendError,
   sendTelegramMediaGroup,
   sendTelegramMessage,
-  telegramBotToken,
 };

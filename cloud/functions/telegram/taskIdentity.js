@@ -1,7 +1,7 @@
 "use strict";
 
 const crypto = require("crypto");
-const { validateTelegramMessageKey } = require("./desiredState");
+const { validateTelegramMessageKey } = require("./desiredStateCore");
 const {
   TELEGRAM_DESIRED_TASK_KIND,
   TELEGRAM_PENDING_DELETE_TASK_KIND,

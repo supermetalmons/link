@@ -106,6 +106,11 @@ configuration is intentionally changed, review it separately and apply it with
 `npm run deploy:api:triggers -- --token-file /path/to/cloudflare-token`, or set
 `CLOUDFLARE_API_TOKEN` in the invoking shell and omit `--token-file`.
 
+The same trigger command applies the reviewed `mons-link-telegram-delivery`
+Queue consumer configuration. Provisioning, secret setup, hard cutover,
+recovery, and rollback are documented in the
+[Telegram delivery migration guide](migrate-telegram-delivery.md).
+
 ## Mining API
 
 Authenticated mining is served by `POST https://api.mons.link/mining/rock`.

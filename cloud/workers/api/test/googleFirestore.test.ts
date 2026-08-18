@@ -11,8 +11,10 @@ import {
   createServiceAccountAssertion,
   GoogleAuthFailure,
 } from "../src/googleAuth.ts";
+import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const env = {
+  ...TELEGRAM_TEST_ENV,
   FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
   FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",
@@ -108,6 +110,20 @@ test("creates and signs the exact Google service-account assertion", async () =>
     ),
     true,
   );
+});
+
+test("accepts explicit ordered OAuth scopes for non-Firestore services", async () => {
+  const { privateKeyPem: pem } = await generateTestKeyPair();
+  const assertion = await createServiceAccountAssertion({
+    email: "worker@example.iam.gserviceaccount.com",
+    privateKeyPem: pem,
+    nowMs: 1_700_000_000_000,
+    scopes: ["scope:first", "scope:second"],
+  });
+  const payload = JSON.parse(
+    Buffer.from(assertion.split(".")[1], "base64url").toString("utf8"),
+  ) as { scope: string };
+  assert.equal(payload.scope, "scope:first scope:second");
 });
 
 test("exchanges a signed assertion for a bounded Google access token", async () => {

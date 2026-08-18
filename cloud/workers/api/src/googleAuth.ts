@@ -1,7 +1,7 @@
 import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const FIRESTORE_SCOPE = "https://www.googleapis.com/auth/datastore";
+export const FIRESTORE_SCOPE = "https://www.googleapis.com/auth/datastore";
 const GOOGLE_TIMEOUT_MS = 5_000;
 const MAX_UPSTREAM_BODY_BYTES = 64 * 1024;
 
@@ -53,20 +53,28 @@ export async function createServiceAccountAssertion({
   email,
   privateKeyPem,
   nowMs,
+  scopes = [FIRESTORE_SCOPE],
 }: {
   email: string;
   privateKeyPem: string;
   nowMs: number;
+  scopes?: readonly string[];
 }): Promise<string> {
   const normalizedEmail = email.trim();
-  if (!normalizedEmail || !Number.isFinite(nowMs)) {
+  const normalizedScopes = scopes.map((scope) => scope.trim()).filter(Boolean);
+  if (
+    !normalizedEmail ||
+    !Number.isFinite(nowMs) ||
+    normalizedScopes.length === 0 ||
+    normalizedScopes.length !== scopes.length
+  ) {
     throw new GoogleAuthFailure();
   }
   const nowSeconds = Math.floor(nowMs / 1_000);
   const encodedHeader = base64UrlEncodeJson({ alg: "RS256", typ: "JWT" });
   const encodedPayload = base64UrlEncodeJson({
     iss: normalizedEmail,
-    scope: FIRESTORE_SCOPE,
+    scope: normalizedScopes.join(" "),
     aud: GOOGLE_TOKEN_URL,
     iat: nowSeconds,
     exp: nowSeconds + 3_600,
@@ -100,19 +108,27 @@ export async function createServiceAccountAssertion({
 export async function createGoogleAccessToken(
   env: Env,
   {
+    credentials = {
+      email: env.FIRESTORE_SERVICE_ACCOUNT_EMAIL,
+      privateKeyPem: env.FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY,
+    },
     fetcher = fetch,
     now = Date.now,
+    scopes = [FIRESTORE_SCOPE],
     timeoutMs = GOOGLE_TIMEOUT_MS,
   }: {
+    credentials?: { email: string; privateKeyPem: string };
     fetcher?: typeof fetch;
     now?: () => number;
+    scopes?: readonly string[];
     timeoutMs?: number;
   } = {},
 ): Promise<string> {
   const assertion = await createServiceAccountAssertion({
-    email: env.FIRESTORE_SERVICE_ACCOUNT_EMAIL,
-    privateKeyPem: env.FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY,
+    email: credentials.email,
+    privateKeyPem: credentials.privateKeyPem,
     nowMs: now(),
+    scopes,
   });
   let response: Response;
   try {

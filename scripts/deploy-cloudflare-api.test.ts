@@ -116,6 +116,17 @@ function unauthenticatedResponse(): Response {
   );
 }
 
+function telegramBridgeUnauthorizedResponse(): Response {
+  return new Response(JSON.stringify({ ok: false, error: "unauthenticated" }), {
+    status: 401,
+    headers: {
+      "Cache-Control": "no-store",
+      "Content-Type": "application/json",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
 function bodyFailureResponse(detail: string): Response {
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -157,7 +168,11 @@ function smokeResponses(providerAttempts = 1): Response[] {
   for (let index = 0; index < 4; index++) {
     responses.push(authPreflightResponse(), unauthenticatedResponse());
   }
-  responses.push(xCallbackResponse(), xCallbackResponse());
+  responses.push(
+    telegramBridgeUnauthorizedResponse(),
+    xCallbackResponse(),
+    xCallbackResponse(),
+  );
   return responses;
 }
 
@@ -300,6 +315,9 @@ test("removes release credentials and dotenv values from child environments", ()
       X_CLIENT_SECRET: "x-secret",
       FIRESTORE_SERVICE_ACCOUNT_EMAIL: "service-account",
       FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "private-key",
+      FIREBASE_RTDB_URL: "https://local.invalid",
+      TELEGRAM_BOT_TOKEN: "telegram-token",
+      TELEGRAM_QUEUE_BRIDGE_SECRET: "bridge-secret",
       DOTENV_KEY: "dotenv-vault-key",
     }),
     { PATH: "/bin" },
@@ -445,7 +463,7 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 14);
+  assert.equal(requests.length, 15);
   assert.equal(requests[0].url, `${PREVIEW_URL}/nfts`);
   assert.equal(requests[0].init.method, "OPTIONS");
   for (const request of requests) {
@@ -486,12 +504,14 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
     ],
   );
   assert.equal(
-    requests[13].url,
+    requests[14].url,
     `${PREVIEW_URL}/auth/x/callback?state=abcdefghijklmnopqrstuvwx`,
   );
-  assert.equal(requests[12].url, `${PREVIEW_URL}/auth/x/callback`);
-  assert.equal(requests[12].init.method, "GET");
+  assert.equal(requests[12].url, `${PREVIEW_URL}/internal/telegram/delivery`);
+  assert.equal(requests[12].init.method, "POST");
+  assert.equal(requests[13].url, `${PREVIEW_URL}/auth/x/callback`);
   assert.equal(requests[13].init.method, "GET");
+  assert.equal(requests[14].init.method, "GET");
   assert.deepEqual(delays, [500]);
 });
 
@@ -554,6 +574,7 @@ test("retries an expected-success response body transport failure", async () => 
     unauthenticatedResponse(),
     authPreflightResponse(),
     unauthenticatedResponse(),
+    telegramBridgeUnauthorizedResponse(),
     xCallbackResponse(),
     xCallbackResponse(),
   ];
@@ -571,7 +592,7 @@ test("retries an expected-success response body transport failure", async () => 
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 14);
+  assert.equal(requests.length, 15);
   assert.deepEqual(delays, [500]);
 });
 
@@ -604,7 +625,7 @@ test("bounds repeated response body transport failures without leaking details",
       !error.message.includes(bodyDetail),
   );
 
-  assert.deepEqual(delays, [500, 1_500]);
+  assert.deepEqual(delays, [500, 1_500, 5_000, 10_000, 15_000]);
 });
 
 test("does not retry semantic response failures", async () => {
@@ -920,7 +941,7 @@ test("production promotes only the explicit version and then smokes the custom d
     fetch: async (url) => {
       assert.match(
         String(url),
-        /^https:\/\/api\.mons\.link\/(?:nfts|mining\/rock|auth\/(?:intents|methods|x\/(?:flows|callback)))/,
+        /^https:\/\/api\.mons\.link\/(?:nfts|mining\/rock|internal\/telegram\/delivery|auth\/(?:intents|methods|x\/(?:flows|callback)))/,
       );
       return nextResponse(responses);
     },

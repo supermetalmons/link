@@ -7,12 +7,14 @@ import type {
 } from "../src/firestore.ts";
 import { handleAuthRoute } from "../src/authRoutes.ts";
 import { AuthApiFailure } from "../src/authErrors.ts";
+import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const ctx = {
   waitUntil: () => undefined,
 };
 
 const env = {
+  ...TELEGRAM_TEST_ENV,
   AUTH_DISABLE_X_VERIFY: "false",
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
   FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",

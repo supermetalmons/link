@@ -26,15 +26,10 @@ const exportedFunctionNames = [
   "automatch",
   "cancelAutomatch",
   "dispatchTelegramDelivery",
-  "telegramDeliveryWorker",
   "verifyEthAddress",
 ];
 const expectedReleaseFunctionBarriers = [
-  [
-    "telegramDeliveryWorker",
-    "dispatchTelegramDelivery",
-    "dispatchTelegramManualRecovery",
-  ],
+  ["dispatchTelegramDelivery", "dispatchTelegramManualRecovery"],
   [
     "projectAutomatchTelegramMessages",
     "projectRatingTelegramUpdates",
@@ -161,7 +156,7 @@ test("batching is flat and covers the selection exactly once", () => {
   const selectedFunctionNames = [...exportedFunctionNames].sort();
   const batches = buildDeploymentBatches(selectedFunctionNames, 2);
 
-  assert.equal(batches.length, 3);
+  assert.equal(batches.length, 2);
   assert.deepEqual(
     batches.flatMap((batch) => batch.functionNames),
     selectedFunctionNames,
@@ -559,8 +554,8 @@ test("operations documentation uses the release driver and required setup", () =
   assert.match(readme, /maintenance deployments do not prune/);
   assert.match(readme, /functions:secrets:set TELEGRAM_BOT_TOKEN/);
   assert.match(readme, /functions:secrets:set TELEGRAM_EXTRA_CHAT_ID/);
-  assert.match(readme, /roles\/cloudtasks\.enqueuer/);
-  assert.match(readme, /roles\/cloudfunctions\.invoker/);
+  assert.match(readme, /TELEGRAM_QUEUE_BRIDGE_SECRET/);
+  assert.match(readme, /Telegram delivery migration guide/);
   assert.doesNotMatch(readme, /firebase deploy[^\n]*--only functions/);
   assert.match(deploymentGuide, /deploy:firebase -- --project mons-link/);
   assert.doesNotMatch(

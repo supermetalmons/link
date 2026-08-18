@@ -41,7 +41,7 @@ const callableExportNames = [
 
 const httpExportNames = [];
 
-const taskQueueExportNames = ["processEventProgress", "telegramDeliveryWorker"];
+const taskQueueExportNames = ["processEventProgress"];
 
 const eventExportNames = [
   "dispatchTelegramDelivery",
@@ -169,27 +169,6 @@ Object.assign(expectedEndpointContracts, {
       minBackoffSeconds: 1,
     },
     {},
-  ),
-  telegramDeliveryWorker: taskQueueContract(
-    {
-      availableMemoryMb: 256,
-      timeoutSeconds: 30,
-      maxInstances: 1,
-      concurrency: 1,
-      cpu: 1,
-      secrets: ["TELEGRAM_BOT_TOKEN", "TELEGRAM_EXTRA_CHAT_ID"],
-    },
-    {
-      maxAttempts: 100,
-      maxDoublings: 10,
-      maxBackoffSeconds: 960,
-      maxRetrySeconds: 86400,
-      minBackoffSeconds: 1,
-    },
-    {
-      maxConcurrentDispatches: 1,
-      maxDispatchesPerSecond: 1,
-    },
   ),
   processEventProgressFallback: runtimeContract(
     {
@@ -352,6 +331,7 @@ Object.assign(expectedEndpointContracts, {
       maxInstances: 10,
       concurrency: 20,
       cpu: 1,
+      secrets: ["TELEGRAM_QUEUE_BRIDGE_SECRET"],
     },
   ),
   dispatchTelegramManualRecovery: runtimeContract(
@@ -369,6 +349,7 @@ Object.assign(expectedEndpointContracts, {
       maxInstances: 10,
       concurrency: 20,
       cpu: 1,
+      secrets: ["TELEGRAM_QUEUE_BRIDGE_SECRET"],
     },
   ),
   projectAutomatchTelegramMessages: runtimeContract(
@@ -452,7 +433,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 48);
+  assert.equal(expectedExportNames.length, 47);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

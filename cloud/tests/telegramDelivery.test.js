@@ -19,12 +19,11 @@ const {
 const {
   buildTelegramDeliveryTaskId,
   createTelegramDeliveryDispatcher,
-  createTelegramDeliveryWorkerHandler,
   createTelegramManualRecoveryDispatcher,
   dispatchTelegramDelivery,
   dispatchTelegramManualRecovery,
   enqueueTelegramDeliveryTask,
-  telegramDeliveryWorker,
+  signTelegramBridgeRequest,
 } = require("../functions/telegramDeliveryFunctions");
 
 const clone = (value) =>
@@ -223,6 +222,19 @@ const createEngine = ({
     localRetryBarrier: repository.localRetryBarrier,
   });
 
+test("delivery engine requires an explicit complete client", () => {
+  const repository = createRepository();
+  assert.throws(
+    () =>
+      createTelegramDeliveryEngine({
+        repository,
+        scheduleRetry: async () => ({ scheduled: true }),
+        localRetryBarrier: repository.localRetryBarrier,
+      }),
+    /complete Telegram client is required/,
+  );
+});
+
 const reconcileScheduledTask = (engine, task) =>
   engine.reconcile({
     messageKey: task.messageKey,
@@ -401,6 +413,25 @@ test("delivers a new send and persists its receipt", async () => {
   assert.equal(state.delivery.status, "delivered");
   assert.equal(state.delivery.attempts, 1);
   assert.equal(Object.hasOwn(state.delivery, "leaseOwner"), false);
+});
+
+test("settles a delete-only smoke record without calling Telegram", async () => {
+  const desired = buildTelegramDeleteDesired({
+    destination: "community",
+    sourceRevision: "migration-smoke",
+  });
+  const repository = createRepository({ key: { desired } });
+  const engine = createEngine({
+    repository,
+    client: createClient({
+      async deleteTelegramMessage() {
+        throw new Error("unexpected Telegram delete");
+      },
+    }),
+  });
+  const result = await engine.reconcile({ messageKey: "key" });
+  assert.equal(result.status, "delivered");
+  assert.equal(repository.state.get("key").applied, undefined);
 });
 
 test("always reconciles the latest desired revision from storage", async () => {
@@ -4603,251 +4634,81 @@ test("A to B to A revision changes receive unique durable task generations", asy
   assert.notEqual(enqueued[0].taskId, enqueued[2].taskId);
 });
 
-test("task enqueue treats duplicate deterministic IDs as success", async () => {
-  const functions = {
-    taskQueue() {
-      return {
-        async enqueue() {
-          const error = new Error("task already exists");
-          error.code = "functions/task-already-exists";
-          throw error;
-        },
-      };
-    },
-  };
-  const result = await enqueueTelegramDeliveryTask(
-    {
-      messageKey: "key",
-      revision: "revision",
-      generation: "generation",
-    },
-    { functions },
-  );
-  assert.equal(result.enqueued, false);
-  assert.equal(result.duplicate, true);
-});
-
-test("task enqueue preserves proof payload and exact schedule", async () => {
-  let enqueued;
-  const functions = {
-    taskQueue(queueName) {
-      assert.equal(queueName, "telegramDeliveryWorker");
-      return {
-        async enqueue(payload, options) {
-          enqueued = { payload, options };
-        },
-      };
-    },
-  };
-  const scheduleTimeMs = Date.now() + 60_000;
+test("task enqueue signs and posts the normalized wake-up payload", async () => {
+  const calls = [];
+  const nowMs = 1_700_000_000_000;
   const input = {
     messageKey: "key",
     revision: "revision",
     taskKind: "desired",
-    retrySequence: 3,
-    generation: "proof-generation",
-    retryStartedAtMs: 1_000,
-    retryDeadlineAtMs: 601_000,
-    retryAtMs: scheduleTimeMs,
-    retryProofLeaseOwner: "owner-3",
+    retrySequence: 0,
+    generation: "generation",
   };
   const result = await enqueueTelegramDeliveryTask(input, {
-    functions,
-    scheduleTimeMs,
+    fetchImpl: async (url, init) => {
+      calls.push({ url, init });
+      return new Response(null, { status: 202 });
+    },
+    now: () => nowMs,
+    secret: "bridge-secret",
   });
-  assert.deepEqual(enqueued.payload, input);
-  assert.equal(enqueued.options.scheduleTime.getTime(), scheduleTimeMs);
-  assert.equal(enqueued.options.id, buildTelegramDeliveryTaskId(input));
-  assert.equal(result.taskId, enqueued.options.id);
-  assert.notEqual(
-    buildTelegramDeliveryTaskId(input),
-    buildTelegramDeliveryTaskId({ ...input, retrySequence: 4 }),
+  const body = JSON.stringify(input);
+  const timestamp = String(Math.floor(nowMs / 1_000));
+  assert.equal(
+    calls[0].url,
+    "https://api.mons.link/internal/telegram/delivery",
   );
-  assert.notEqual(
-    buildTelegramDeliveryTaskId(input),
-    buildTelegramDeliveryTaskId({
-      ...input,
-      retryProofLeaseOwner: "owner-4",
-    }),
+  assert.equal(calls[0].init.body, body);
+  assert.equal(calls[0].init.headers["X-Mons-Telegram-Timestamp"], timestamp);
+  assert.equal(
+    calls[0].init.headers["X-Mons-Telegram-Signature"],
+    signTelegramBridgeRequest({ body, secret: "bridge-secret", timestamp }),
   );
-  assert.notEqual(
-    buildTelegramDeliveryTaskId(input),
-    buildTelegramDeliveryTaskId({
-      ...input,
-      taskKind: "pending-delete",
-      pendingDeleteId: "cleanup-1",
-      retryProofLeaseOwner: "cleanup-owner",
-    }),
-  );
+  assert.equal(result.taskId, buildTelegramDeliveryTaskId(input));
 });
 
-test("rate-limit proof task identity includes its owner and full deadline", async () => {
-  const enqueued = [];
-  const functions = {
-    taskQueue() {
-      return {
-        async enqueue(payload, options) {
-          enqueued.push({ payload, options });
-        },
-      };
-    },
-  };
+test("task enqueue fails closed on bridge rejection and transport failure", async () => {
   const input = {
     messageKey: "key",
     revision: "revision",
-    taskKind: "rate-limit-proof",
-    proofTaskKind: "desired",
-    retrySequence: 1,
-    generation: "rate-proof",
-    retryStartedAtMs: 10_000,
-    retryDeadlineAtMs: 610_000,
-    retryAtMs: 610_000,
-    barrierProofOwner: "gate-owner-a",
-    barrierRetryNotBeforeMs: 910_000,
+    generation: "generation",
   };
-  const first = await enqueueTelegramDeliveryTask(input, { functions });
-  const changedOwner = buildTelegramDeliveryTaskId({
-    ...input,
-    barrierProofOwner: "gate-owner-b",
-  });
-  const changedDeadline = buildTelegramDeliveryTaskId({
-    ...input,
-    barrierRetryNotBeforeMs: 920_000,
-  });
-  assert.deepEqual(enqueued[0].payload, input);
-  assert.equal(first.taskId, buildTelegramDeliveryTaskId(input));
-  assert.notEqual(first.taskId, changedOwner);
-  assert.notEqual(first.taskId, changedDeadline);
-});
-
-test("worker forwards the complete retry proof payload", async () => {
-  let reconciled;
-  const handler = createTelegramDeliveryWorkerHandler({
-    engine: {
-      async reconcile(input) {
-        reconciled = input;
-        return { status: "settled" };
-      },
-    },
-    logger: { error() {} },
-  });
-  await handler({
-    data: {
-      messageKey: "key",
-      revision: "revision",
-      taskKind: "pending-delete",
-      retrySequence: 2,
-      generation: "generation",
-      retryStartedAtMs: 1_000,
-      retryDeadlineAtMs: 601_000,
-      retryAtMs: 2_000,
-      pendingDeleteId: "cleanup-1",
-      retryProofLeaseOwner: "cleanup-owner",
-    },
-  });
-  assert.deepEqual(reconciled, {
-    messageKey: "key",
-    requestedRevision: "revision",
-    requestedGeneration: "generation",
-    taskKind: "pending-delete",
-    retrySequence: 2,
-    retryStartedAtMs: 1_000,
-    retryDeadlineAtMs: 601_000,
-    retryAtMs: 2_000,
-    safeRejectedAttemptId: undefined,
-    pendingDeleteId: "cleanup-1",
-    retryProofLeaseOwner: "cleanup-owner",
-  });
-});
-
-test("worker accepts scheduled logical retries and throws infrastructure failures", async () => {
-  const retrying = createTelegramDeliveryWorkerHandler({
-    engine: {
-      async reconcile() {
-        return {
-          status: "retryable",
-          reason: "locked",
-          retryAtMs: 12_345,
-          scheduled: true,
-        };
-      },
-    },
-    logger: { error() {} },
-  });
-  assert.deepEqual(
-    await retrying({
-      data: { messageKey: "key", revision: "r", generation: "g" },
-    }),
-    {
-      status: "retryable",
-      reason: "locked",
-      retryAtMs: 12_345,
-      scheduled: true,
-    },
-  );
-
-  const unscheduled = createTelegramDeliveryWorkerHandler({
-    engine: {
-      async reconcile() {
-        return { status: "retryable", reason: "locked" };
-      },
-    },
-    logger: { error() {} },
-  });
   await assert.rejects(
     () =>
-      unscheduled({
-        data: { messageKey: "key", revision: "r", generation: "g" },
+      enqueueTelegramDeliveryTask(input, {
+        fetchImpl: async () => new Response(null, { status: 503 }),
+        secret: "bridge-secret",
       }),
-    { code: "telegram-retry-not-scheduled" },
+    { code: "telegram-queue-bridge-rejected", status: 503 },
   );
-
-  const terminal = createTelegramDeliveryWorkerHandler({
-    engine: {
-      async reconcile() {
-        return { status: "terminal", reason: "rejected" };
-      },
-    },
-    logger: { error() {} },
-  });
-  assert.deepEqual(
-    await terminal({
-      data: { messageKey: "key", revision: "r", generation: "g" },
-    }),
-    { status: "terminal", reason: "rejected" },
+  await assert.rejects(
+    () =>
+      enqueueTelegramDeliveryTask(input, {
+        fetchImpl: async () => {
+          throw new Error("network failure");
+        },
+        secret: "bridge-secret",
+      }),
+    { code: "telegram-queue-bridge-unavailable" },
   );
 });
 
-test("Firebase exports carry retry, rate, timeout, and secret configuration", () => {
+test("Firebase dispatch exports retain retries and bind only the bridge secret", () => {
   assert.equal(dispatchTelegramDelivery.__endpoint.eventTrigger.retry, true);
   assert.equal(
     dispatchTelegramManualRecovery.__endpoint.eventTrigger.retry,
     true,
   );
   assert.deepEqual(
-    telegramDeliveryWorker.__endpoint.secretEnvironmentVariables.map(
+    dispatchTelegramDelivery.__endpoint.secretEnvironmentVariables.map(
       (secret) => secret.key,
     ),
-    ["TELEGRAM_BOT_TOKEN", "TELEGRAM_EXTRA_CHAT_ID"],
-  );
-  assert.equal(telegramDeliveryWorker.__endpoint.maxInstances, 1);
-  assert.equal(telegramDeliveryWorker.__endpoint.concurrency, 1);
-  assert.equal(telegramDeliveryWorker.__endpoint.timeoutSeconds, 30);
-  assert.deepEqual(
-    telegramDeliveryWorker.__endpoint.taskQueueTrigger.rateLimits,
-    {
-      maxConcurrentDispatches: 1,
-      maxDispatchesPerSecond: 1,
-    },
+    ["TELEGRAM_QUEUE_BRIDGE_SECRET"],
   );
   assert.deepEqual(
-    telegramDeliveryWorker.__endpoint.taskQueueTrigger.retryConfig,
-    {
-      maxAttempts: 100,
-      maxDoublings: 10,
-      maxBackoffSeconds: 960,
-      maxRetrySeconds: 86_400,
-      minBackoffSeconds: 1,
-    },
+    dispatchTelegramManualRecovery.__endpoint.secretEnvironmentVariables.map(
+      (secret) => secret.key,
+    ),
+    ["TELEGRAM_QUEUE_BRIDGE_SECRET"],
   );
 });

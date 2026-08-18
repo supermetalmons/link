@@ -3,11 +3,13 @@ import test from "node:test";
 import type { XFlowRepository, XRedirectFlow } from "../src/firestore.ts";
 import { handleXCallback } from "../src/xCallback.ts";
 import { XProviderFailure, type XOAuthProvider } from "../src/xProvider.ts";
+import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const FLOW_ID = "abcdefghijklmnopqrstuvwx";
 const CALLBACK_URL = `https://api.mons.link/auth/x/callback?state=${FLOW_ID}`;
 
 const env = {
+  ...TELEGRAM_TEST_ENV,
   FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
   FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",

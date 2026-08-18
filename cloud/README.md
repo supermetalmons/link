@@ -24,7 +24,7 @@ Provision or rotate the Telegram bot token and community chat ID before the prod
 
 `firebase functions:secrets:set TELEGRAM_EXTRA_CHAT_ID --config cloud/firebase.json --project mons-link`
 
-Verify that every Functions runtime service account that enqueues Telegram tasks has `roles/cloudtasks.enqueuer`, can act as the task service account, and has `roles/cloudfunctions.invoker` on `telegramDeliveryWorker`.
+Set `TELEGRAM_QUEUE_BRIDGE_SECRET` for both retained Telegram dispatch triggers. The Cloudflare Queue migration, hard cutover, recovery, and rollback procedure is documented in the [Telegram delivery migration guide](../scripts/migrate-telegram-delivery.md).
 
 ## Live Firebase operations
 

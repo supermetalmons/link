@@ -1,62 +1,88 @@
 "use strict";
 
-const admin = require("../firebaseAdmin");
+const { createHmac } = require("node:crypto");
 const { defineSecret } = require("firebase-functions/params");
 const { onValueWritten } = require("firebase-functions/v2/database");
-const { onTaskDispatched } = require("firebase-functions/v2/tasks");
-const {
-  isTaskAlreadyExistsError,
-  normalizeTaskQueueErrorCode: normalizeErrorCode,
-} = require("../taskQueueErrors");
-const { telegramBotToken } = require("./client");
-const { createTelegramDeliveryEngine } = require("./deliveryEngine");
-const { validateTelegramMessageKey } = require("./desiredState");
-const { createFirebaseTelegramRepository } = require("./rtdbRepository");
+const { validateTelegramMessageKey } = require("./desiredStateCore");
 const {
   TELEGRAM_DESIRED_TASK_KIND,
   TELEGRAM_MANUAL_RECOVERY_TASK_KIND,
 } = require("./taskKinds");
 const {
   buildTelegramDeliveryTaskId,
-  normalizeOptionalTimestamp,
   normalizeTaskPayload,
 } = require("./taskIdentity");
 
-const TELEGRAM_DELIVERY_QUEUE = "telegramDeliveryWorker";
-const TELEGRAM_TASK_DEADLINE_SECONDS = 30;
-const telegramCommunityChatId = defineSecret("TELEGRAM_EXTRA_CHAT_ID");
+const TELEGRAM_DELIVERY_BRIDGE_URL =
+  "https://api.mons.link/internal/telegram/delivery";
+const TELEGRAM_BRIDGE_TIMEOUT_MS = 5_000;
+const telegramQueueBridgeSecret = defineSecret("TELEGRAM_QUEUE_BRIDGE_SECRET");
+
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
+
+const signTelegramBridgeRequest = ({ body, secret, timestamp }) =>
+  createHmac("sha256", secret)
+    .update(`${timestamp}.${body}`)
+    .digest("base64url");
 
 const enqueueTelegramDeliveryTask = async (
   input,
   {
-    functions = admin.functions(),
-    queueName = TELEGRAM_DELIVERY_QUEUE,
-    scheduleTimeMs,
+    bridgeUrl = TELEGRAM_DELIVERY_BRIDGE_URL,
+    fetchImpl = globalThis.fetch,
+    now = Date.now,
+    secret = telegramQueueBridgeSecret.value(),
+    timeoutMs = TELEGRAM_BRIDGE_TIMEOUT_MS,
   } = {},
 ) => {
   const payload = normalizeTaskPayload(input);
-  const taskId = buildTelegramDeliveryTaskId(payload);
-  const options = {
-    id: taskId,
-    dispatchDeadlineSeconds: TELEGRAM_TASK_DEADLINE_SECONDS,
-  };
-  const normalizedScheduleTimeMs = normalizeOptionalTimestamp(
-    scheduleTimeMs ?? input?.scheduleTimeMs,
-  );
-  if (normalizedScheduleTimeMs > Date.now()) {
-    options.scheduleTime = new Date(normalizedScheduleTimeMs);
+  const normalizedSecret = normalizeString(secret);
+  if (!normalizedSecret) {
+    throw new Error("telegram-queue-bridge-secret-missing");
   }
+  if (typeof fetchImpl !== "function") {
+    throw new Error("telegram-queue-bridge-fetch-missing");
+  }
+  const body = JSON.stringify(payload);
+  const timestamp = String(Math.floor(now() / 1_000));
+  const signature = signTelegramBridgeRequest({
+    body,
+    secret: normalizedSecret,
+    timestamp,
+  });
+  let response;
   try {
-    await functions.taskQueue(queueName).enqueue(payload, options);
-    return { enqueued: true, duplicate: false, taskId };
+    response = await fetchImpl(bridgeUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Mons-Telegram-Signature": signature,
+        "X-Mons-Telegram-Timestamp": timestamp,
+      },
+      body,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
   } catch (error) {
-    if (isTaskAlreadyExistsError(error)) {
-      return { enqueued: false, duplicate: true, taskId };
-    }
-    throw error;
+    const failure = new Error("telegram-queue-bridge-unavailable");
+    failure.code = "telegram-queue-bridge-unavailable";
+    failure.cause = error;
+    throw failure;
   }
+  if (response.body) {
+    await response.body.cancel().catch(() => undefined);
+  }
+  if (response.status !== 202) {
+    const failure = new Error("telegram-queue-bridge-rejected");
+    failure.code = "telegram-queue-bridge-rejected";
+    failure.status = response.status;
+    throw failure;
+  }
+  return {
+    enqueued: true,
+    duplicate: false,
+    taskId: buildTelegramDeliveryTaskId(payload),
+  };
 };
 
 const createTelegramDeliveryDispatcher = ({
@@ -99,71 +125,6 @@ const createTelegramManualRecoveryDispatcher = ({
   };
 };
 
-const createTelegramDeliveryWorkerHandler = ({
-  engine,
-  logger = console,
-} = {}) => {
-  if (!engine || typeof engine.reconcile !== "function") {
-    throw new TypeError("engine.reconcile is required");
-  }
-  return async (request) => {
-    let payload;
-    try {
-      payload = normalizeTaskPayload(request?.data || {});
-    } catch (error) {
-      logger.error("telegram:delivery:invalid-task", {
-        code: normalizeErrorCode(error) || "invalid-task",
-      });
-      return { status: "skipped", reason: "invalid-task" };
-    }
-    let result;
-    try {
-      result = await engine.reconcile({
-        messageKey: payload.messageKey,
-        requestedRevision: payload.revision,
-        requestedGeneration: payload.generation,
-        taskKind: payload.taskKind,
-        retrySequence: payload.retrySequence,
-        retryStartedAtMs: payload.retryStartedAtMs,
-        retryDeadlineAtMs: payload.retryDeadlineAtMs,
-        retryAtMs: payload.retryAtMs,
-        safeRejectedAttemptId: payload.safeRejectedAttemptId,
-        pendingDeleteId: payload.pendingDeleteId,
-        retryProofLeaseOwner: payload.retryProofLeaseOwner,
-        ...(payload.proofTaskKind
-          ? { proofTaskKind: payload.proofTaskKind }
-          : {}),
-        ...(payload.barrierProofOwner
-          ? { barrierProofOwner: payload.barrierProofOwner }
-          : {}),
-        ...(payload.barrierRetryNotBeforeMs
-          ? {
-              barrierRetryNotBeforeMs: payload.barrierRetryNotBeforeMs,
-            }
-          : {}),
-        ...(payload.apiGateReclaimOwner
-          ? { apiGateReclaimOwner: payload.apiGateReclaimOwner }
-          : {}),
-        ...(payload.apiGateSettleOwner
-          ? { apiGateSettleOwner: payload.apiGateSettleOwner }
-          : {}),
-      });
-    } catch (error) {
-      logger.error("telegram:delivery:worker-error", {
-        messageKey: payload.messageKey,
-        code: normalizeErrorCode(error) || "delivery-error",
-      });
-      throw error;
-    }
-    if (result.status === "retryable" && !result.scheduled) {
-      const error = new Error("telegram-retry-not-scheduled");
-      error.code = "telegram-retry-not-scheduled";
-      throw error;
-    }
-    return result;
-  };
-};
-
 const dispatchTelegramDelivery = onValueWritten(
   {
     ref: "/telegramMessages/{messageKey}/desired/revision",
@@ -172,6 +133,7 @@ const dispatchTelegramDelivery = onValueWritten(
     memory: "256MiB",
     cpu: 1,
     retry: true,
+    secrets: [telegramQueueBridgeSecret],
   },
   async (event) => {
     const beforeRevision = event.data.before.exists()
@@ -185,9 +147,7 @@ const dispatchTelegramDelivery = onValueWritten(
     }
     const generation = normalizeString(event.id);
     if (!generation) {
-      const error = new Error("telegram-dispatch-generation-missing");
-      error.code = "telegram-dispatch-generation-missing";
-      throw error;
+      throw new Error("telegram-dispatch-generation-missing");
     }
     await createTelegramDeliveryDispatcher()({
       messageKey: event.params.messageKey,
@@ -205,6 +165,7 @@ const dispatchTelegramManualRecovery = onValueWritten(
     memory: "256MiB",
     cpu: 1,
     retry: true,
+    secrets: [telegramQueueBridgeSecret],
   },
   async (event) => {
     const beforeRequestId = event.data.before.exists()
@@ -218,9 +179,7 @@ const dispatchTelegramManualRecovery = onValueWritten(
     }
     const generation = normalizeString(event.id);
     if (!generation) {
-      const error = new Error("telegram-recovery-generation-missing");
-      error.code = "telegram-recovery-generation-missing";
-      throw error;
+      throw new Error("telegram-recovery-generation-missing");
     }
     await createTelegramManualRecoveryDispatcher()({
       messageKey: event.params.messageKey,
@@ -230,46 +189,15 @@ const dispatchTelegramManualRecovery = onValueWritten(
   },
 );
 
-const telegramDeliveryWorker = onTaskDispatched(
-  {
-    secrets: [telegramBotToken, telegramCommunityChatId],
-    maxInstances: 1,
-    concurrency: 1,
-    memory: "256MiB",
-    cpu: 1,
-    timeoutSeconds: TELEGRAM_TASK_DEADLINE_SECONDS,
-    retryConfig: {
-      maxAttempts: 100,
-      minBackoffSeconds: 1,
-      maxBackoffSeconds: 960,
-      maxDoublings: 10,
-      maxRetrySeconds: 86_400,
-    },
-    rateLimits: {
-      maxConcurrentDispatches: 1,
-      maxDispatchesPerSecond: 1,
-    },
-  },
-  async (request) => {
-    const repository = createFirebaseTelegramRepository();
-    const scheduleRetry = (payload) =>
-      enqueueTelegramDeliveryTask(payload, {
-        scheduleTimeMs: payload.scheduleTimeMs,
-      });
-    const engine = createTelegramDeliveryEngine({ repository, scheduleRetry });
-    return createTelegramDeliveryWorkerHandler({ engine })(request);
-  },
-);
-
 module.exports = {
-  TELEGRAM_DELIVERY_QUEUE,
-  TELEGRAM_TASK_DEADLINE_SECONDS,
+  TELEGRAM_BRIDGE_TIMEOUT_MS,
+  TELEGRAM_DELIVERY_BRIDGE_URL,
   buildTelegramDeliveryTaskId,
   createTelegramDeliveryDispatcher,
-  createTelegramDeliveryWorkerHandler,
   createTelegramManualRecoveryDispatcher,
   dispatchTelegramDelivery,
   dispatchTelegramManualRecovery,
   enqueueTelegramDeliveryTask,
-  telegramDeliveryWorker,
+  signTelegramBridgeRequest,
+  telegramQueueBridgeSecret,
 };

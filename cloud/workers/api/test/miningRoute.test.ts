@@ -13,6 +13,7 @@ import type {
   MiningProfile,
   MiningRepository,
 } from "../src/miningRepository.ts";
+import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const NOW_MS = Date.UTC(2026, 7, 18, 12);
 const ctx = { waitUntil: () => undefined };
@@ -26,6 +27,7 @@ function envWithRateLimit(
   }),
 ): Env {
   return {
+    ...TELEGRAM_TEST_ENV,
     AUTH_DISABLE_X_VERIFY: "false",
     AUTH_RATE_LIMITER: { limit },
     FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",

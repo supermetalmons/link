@@ -4,7 +4,10 @@ const { defineSecret } = require("firebase-functions/params");
 const { HttpsError, onCall } = require("firebase-functions/v2/https");
 const { getEventPrizeDefinitions } = require("@mons/shared/event-prizes");
 const { isMonsLinkAdmin } = require("@mons/shared/events");
-const { sendTelegramMediaGroup, telegramBotToken } = require("./client");
+const {
+  sendTelegramMediaGroup,
+  telegramBotToken,
+} = require("./firebaseClient");
 const { getProfileByLoginId } = require("../profileSummaryLookup");
 
 const EVENT_URL_ROOT = "https://mons.link/event/";

@@ -2,11 +2,6 @@
 
 const crypto = require("crypto");
 const {
-  deleteTelegramMessage,
-  editTelegramMessage,
-  sendTelegramMessage,
-} = require("./client");
-const {
   TELEGRAM_DESTINATIONS,
   TELEGRAM_MESSAGE_ROOT,
   TELEGRAM_SCHEMA_VERSION,
@@ -16,12 +11,9 @@ const {
   buildTelegramEditUpdates,
   buildTelegramSendDesired,
   buildTelegramSendUpdates,
-  queueTelegramDelete,
-  queueTelegramEdit,
-  queueTelegramSend,
   resolveTelegramDestination,
   validateTelegramMessageKey,
-} = require("./desiredState");
+} = require("./desiredStateCore");
 const {
   TELEGRAM_SAFE_RETRY_MAX_DELAY_MS,
   TELEGRAM_SAFE_RETRY_WINDOW_MS,
@@ -35,10 +27,6 @@ const {
   omitRetryState,
   resolveRetryDeadlineAtMs,
 } = require("./deliveryPolicy");
-const {
-  TELEGRAM_DELIVERY_CONTROL_ROOT,
-  createFirebaseTelegramRepository,
-} = require("./rtdbRepository");
 const {
   TELEGRAM_DESIRED_TASK_KIND,
   TELEGRAM_PENDING_DELETE_TASK_KIND,
@@ -159,11 +147,7 @@ const validateDesiredForDelivery = (desired) => {
 
 const createTelegramDeliveryEngine = ({
   repository,
-  client = {
-    sendTelegramMessage,
-    editTelegramMessage,
-    deleteTelegramMessage,
-  },
+  client,
   resolveDestination = resolveTelegramDestination,
   now = Date.now,
   createOwnerToken = () => crypto.randomUUID(),
@@ -175,6 +159,14 @@ const createTelegramDeliveryEngine = ({
 } = {}) => {
   if (!repository || typeof repository.transactMessage !== "function") {
     throw new TypeError("repository.transactMessage is required");
+  }
+  if (
+    !client ||
+    typeof client.sendTelegramMessage !== "function" ||
+    typeof client.editTelegramMessage !== "function" ||
+    typeof client.deleteTelegramMessage !== "function"
+  ) {
+    throw new TypeError("complete Telegram client is required");
   }
   if (
     typeof repository.getRetryNotBeforeMs !== "function" ||
@@ -3267,7 +3259,6 @@ const createTelegramDeliveryEngine = ({
 
 module.exports = {
   TELEGRAM_DESTINATIONS,
-  TELEGRAM_DELIVERY_CONTROL_ROOT,
   TELEGRAM_LEASE_TTL_MS,
   TELEGRAM_MESSAGE_ROOT,
   TELEGRAM_RATE_LIMIT_PROOF_TASK_KIND,
@@ -3280,12 +3271,8 @@ module.exports = {
   buildTelegramEditUpdates,
   buildTelegramSendDesired,
   buildTelegramSendUpdates,
-  createFirebaseTelegramRepository,
   createTelegramLocalRetryBarrier,
   createTelegramDeliveryEngine,
-  queueTelegramDelete,
-  queueTelegramEdit,
-  queueTelegramSend,
   resolveTelegramDestination,
   validateTelegramMessageKey,
 };

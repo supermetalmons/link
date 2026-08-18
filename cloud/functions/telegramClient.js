@@ -1,3 +1,3 @@
 "use strict";
 
-module.exports = require("./telegram/client");
+module.exports = require("./telegram/firebaseClient");

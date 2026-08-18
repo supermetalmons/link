@@ -12,6 +12,24 @@ const adminRoot = path.join(cloudRoot, "admin");
 const telegramClientPaths = new Set([
   path.join(functionsRoot, "telegramClient.js"),
   path.join(functionsRoot, "telegram", "client.js"),
+  path.join(functionsRoot, "telegram", "firebaseClient.js"),
+  path.join(
+    repositoryRoot,
+    "cloud",
+    "workers",
+    "api",
+    "src",
+    "telegramQueue.ts",
+  ),
+  path.join(repositoryRoot, "cloud", "workers", "api", "test", "testEnv.ts"),
+  path.join(
+    repositoryRoot,
+    "cloud",
+    "workers",
+    "api",
+    "worker-configuration.d.ts",
+  ),
+  path.join(repositoryRoot, "cloud", "workers", "api", "wrangler.jsonc"),
 ]);
 const sourceExtensions = new Set([
   ".bash",
@@ -200,7 +218,6 @@ test("all Telegram functions are exported", () => {
   const functionIndex = require("../functions/index");
   const exportNames = [
     "announceEventPrizes",
-    "telegramDeliveryWorker",
     "dispatchTelegramDelivery",
     "dispatchTelegramManualRecovery",
     "projectAutomatchTelegramMessages",

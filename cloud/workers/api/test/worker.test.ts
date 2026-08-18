@@ -3,11 +3,14 @@ import test from "node:test";
 import {
   extractIdFromJsonUri,
   handleRequest,
-  PRIMARY_COLLECTION_ID,
-  SPECIALS_COLLECTION_ID,
   type ProviderFetch,
 } from "../src/index.ts";
+import {
+  PRIMARY_COLLECTION_ID,
+  SPECIALS_COLLECTION_ID,
+} from "../src/helius.ts";
 import { isValidSolanaAddress } from "@mons/shared/solana";
+import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const VALID_SOLANA_ADDRESS = "11111111111111111111111111111111";
 const API_KEY = "test-helius-secret";
@@ -15,6 +18,7 @@ const HELIUS_PAGE_LIMIT = 1000;
 const HELIUS_MAX_PAGES_PER_COLLECTION = 3;
 const MAX_HELIUS_RESPONSE_BODY_BYTES = 8 * 1024 * 1024;
 const env = {
+  ...TELEGRAM_TEST_ENV,
   FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
   FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: API_KEY,

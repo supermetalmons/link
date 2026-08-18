@@ -94,6 +94,7 @@ const WRANGLER_CONFIG_ARGS = [
 const PRODUCTION_URL = "https://api.mons.link";
 const SMOKE_ORIGIN = "https://mons.link";
 const X_CALLBACK_PATH = "/auth/x/callback";
+const TELEGRAM_BRIDGE_PATH = "/internal/telegram/delivery";
 const AUTHENTICATED_ROUTE_SMOKES = [
   { path: "/auth/intents", method: "POST" },
   { path: "/auth/methods", method: "GET" },
@@ -101,7 +102,7 @@ const AUTHENTICATED_ROUTE_SMOKES = [
   { path: "/mining/rock", method: "POST" },
 ] as const;
 const SMOKE_TIMEOUT_MS = 15_000;
-const SMOKE_RETRY_DELAYS_MS = [500, 1_500];
+const SMOKE_RETRY_DELAYS_MS = [500, 1_500, 5_000, 10_000, 15_000];
 const VERSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -226,11 +227,13 @@ function createChildEnvironment(
       normalized.startsWith("CLOUDFLARE_") ||
       normalized.startsWith("CF_") ||
       normalized.startsWith("WRANGLER_") ||
+      normalized.startsWith("TELEGRAM_") ||
       normalized === "HELIUS_RPC_API_KEY" ||
       normalized === "X_CLIENT_ID" ||
       normalized === "X_CLIENT_SECRET" ||
       normalized === "FIRESTORE_SERVICE_ACCOUNT_EMAIL" ||
       normalized === "FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY" ||
+      normalized === "FIREBASE_RTDB_URL" ||
       normalized === "DOTENV_KEY",
   );
 }
@@ -353,6 +356,26 @@ function parseUnauthenticatedResponse(text: string): void {
     typeof (value as { message?: unknown }).message !== "string"
   ) {
     throw new DeployError("Auth route smoke response had an unexpected shape.");
+  }
+}
+
+function parseTelegramBridgeUnauthorizedResponse(text: string): void {
+  let value: unknown;
+  try {
+    value = JSON.parse(text) as unknown;
+  } catch {
+    throw new DeployError("Telegram bridge smoke response was not valid JSON.");
+  }
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    (value as { ok?: unknown }).ok !== false ||
+    (value as { error?: unknown }).error !== "unauthenticated"
+  ) {
+    throw new DeployError(
+      "Telegram bridge smoke response had an unexpected shape.",
+    );
   }
 }
 
@@ -613,6 +636,36 @@ async function smokeApi(
     }
     parseUnauthenticatedResponse(bodyText);
   }
+
+  const telegramBridgeEndpoint = new URL(
+    TELEGRAM_BRIDGE_PATH,
+    baseUrl,
+  ).toString();
+  const { response: unsignedBridge, bodyText: unsignedBridgeBody } =
+    await fetchWithRetry(
+      telegramBridgeEndpoint,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+      "Unsigned Telegram bridge smoke request",
+      dependencies,
+      401,
+    );
+  if (unsignedBridge.status !== 401) {
+    throw new DeployError(
+      `Unsigned Telegram bridge smoke request returned ${unsignedBridge.status}.`,
+    );
+  }
+  assertNoStore(unsignedBridge);
+  assertJsonResponse(unsignedBridge);
+  if (unsignedBridgeBody === undefined) {
+    throw new DeployError(
+      "Unsigned Telegram bridge smoke response body was unavailable.",
+    );
+  }
+  parseTelegramBridgeUnauthorizedResponse(unsignedBridgeBody);
 
   const callbackEndpoint = new URL(X_CALLBACK_PATH, baseUrl);
   const { response: missingState } = await fetchWithRetry(

@@ -9,6 +9,8 @@
     "firebase-admin": "^14.2.0"
   },
   "scripts": {
+    "requeue:telegram": "node requeueTelegramDelivery.js",
+    "smoke:telegram": "node smokeTelegramDelivery.js",
     "start": "node listAddresses.js",
     "shooting:alert": "node shootingStarAlert.js"
   }

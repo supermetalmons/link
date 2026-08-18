@@ -20,11 +20,7 @@ const NON_FUNCTION_DEPLOY_TARGETS = Object.freeze([
   ...FIRESTORE_DEPLOY_TARGETS,
 ]);
 const FULL_RELEASE_FUNCTION_BARRIERS = Object.freeze([
-  Object.freeze([
-    "telegramDeliveryWorker",
-    "dispatchTelegramDelivery",
-    "dispatchTelegramManualRecovery",
-  ]),
+  Object.freeze(["dispatchTelegramDelivery", "dispatchTelegramManualRecovery"]),
   Object.freeze([
     "projectAutomatchTelegramMessages",
     "projectRatingTelegramUpdates",
