@@ -4,6 +4,32 @@ export type AuthCooldownReason =
 export type AuthCooldownScope = "method" | "profile-method";
 export type AuthMethodField = "eth" | "sol" | "appleSub" | "xUserId";
 
+export interface AuthIntentRequest {
+  method: AuthMethodKey;
+}
+
+export interface AuthIntentResponse {
+  ok: true;
+  intentId: string;
+  nonce: string;
+  state: string;
+  expiresAtMs: number;
+}
+
+export interface LinkedAuthMethods {
+  apple: boolean;
+  eth: boolean;
+  sol: boolean;
+  x: boolean;
+}
+
+export interface LinkedAuthMethodsResponse {
+  ok: true;
+  profileId: string | null;
+  linkedMethods: LinkedAuthMethods;
+  appleLinked: boolean;
+}
+
 export const AUTH_METHODS: readonly ["eth", "sol", "apple", "x"];
 export const AUTH_METHOD_FIELD_BY_TYPE: Readonly<{
   eth: "eth";
@@ -30,6 +56,15 @@ export function normalizeAuthCooldownReason(
 export function getAuthCooldownScope(
   reason: AuthCooldownReason,
 ): AuthCooldownScope;
+export function getLinkedAuthMethodsFromProfile(
+  value: unknown,
+): LinkedAuthMethods;
+export function isAuthIntentResponse(
+  value: unknown,
+): value is AuthIntentResponse;
+export function isLinkedAuthMethodsResponse(
+  value: unknown,
+): value is LinkedAuthMethodsResponse;
 export function resolveAuthCooldownRetryAtMs(
   docData: unknown,
   fallbackCooldownMs?: number,

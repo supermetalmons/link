@@ -31,6 +31,7 @@ type WranglerConfig = {
   assets?: Record<string, unknown>;
   routes?: Array<Record<string, unknown>>;
   secrets?: { required?: string[] };
+  vars?: Record<string, string>;
   ratelimits?: Array<Record<string, unknown>>;
   observability?: Record<string, unknown>;
 };
@@ -88,6 +89,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.deepEqual(config.routes, [
     { pattern: "api.mons.link", custom_domain: true },
   ]);
+  assert.deepEqual(config.vars, { AUTH_DISABLE_X_VERIFY: "false" });
   assert.deepEqual(config.secrets, {
     required: [
       "FIRESTORE_SERVICE_ACCOUNT_EMAIL",
@@ -103,13 +105,18 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       namespace_id: "1616095643",
       simple: { limit: 10, period: 60 },
     },
+    {
+      name: "AUTH_RATE_LIMITER",
+      namespace_id: "1616095644",
+      simple: { limit: 20, period: 60 },
+    },
   ]);
   assert.deepEqual(config.observability, {
     enabled: true,
     logs: {
       enabled: true,
       head_sampling_rate: 0.1,
-      invocation_logs: true,
+      invocation_logs: false,
       persist: true,
     },
     traces: { enabled: false },
@@ -231,6 +238,7 @@ test("package manifests preserve public scripts and deployment command vectors",
   });
   assert.equal(apiPackage.private, true);
   assert.equal(apiPackage.type, "module");
+  assert.equal(rootPackage.dependencies?.jose, "^6.2.7");
 
   for (const packageName of [
     "@types/node",

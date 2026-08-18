@@ -82,6 +82,40 @@ function xCallbackResponse(): Response {
   });
 }
 
+function authResponseHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "https://mons.link",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Cache-Control": "no-store",
+    Vary: "Origin",
+  };
+}
+
+function authPreflightResponse(): Response {
+  return new Response(null, {
+    status: 204,
+    headers: authResponseHeaders(),
+  });
+}
+
+function unauthenticatedResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      ok: false,
+      error: "unauthenticated",
+      message: "authentication-required",
+    }),
+    {
+      status: 401,
+      headers: {
+        ...authResponseHeaders(),
+        "Content-Type": "application/json",
+      },
+    },
+  );
+}
+
 function bodyFailureResponse(detail: string): Response {
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -120,6 +154,9 @@ function smokeResponses(providerAttempts = 1): Response[] {
       swagpack_reactions: [{ id: 3, count: 1 }],
     }),
   );
+  for (let index = 0; index < 3; index++) {
+    responses.push(authPreflightResponse(), unauthenticatedResponse());
+  }
   responses.push(xCallbackResponse(), xCallbackResponse());
   return responses;
 }
@@ -391,7 +428,7 @@ test("validates the exact NFT API response shape", () => {
   );
 });
 
-test("smokes NFT and X callback routes with bounded retries", async () => {
+test("smokes NFT, auth, and X callback routes with bounded retries", async () => {
   const responses = smokeResponses(2);
   const requests: Array<{ url: string; init: RequestInit }> = [];
   const delays: number[] = [];
@@ -408,7 +445,7 @@ test("smokes NFT and X callback routes with bounded retries", async () => {
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 6);
+  assert.equal(requests.length, 12);
   assert.equal(requests[0].url, `${PREVIEW_URL}/nfts`);
   assert.equal(requests[0].init.method, "OPTIONS");
   for (const request of requests) {
@@ -434,13 +471,25 @@ test("smokes NFT and X callback routes with bounded retries", async () => {
     sol: SMOKE_SOL,
     eth: "",
   });
-  assert.equal(requests[4].url, `${PREVIEW_URL}/auth/x/callback`);
-  assert.equal(requests[4].init.method, "GET");
+  const authRequests = requests.slice(4, 10);
+  assert.deepEqual(
+    authRequests.map(({ url, init }) => [url, init.method]),
+    [
+      [`${PREVIEW_URL}/auth/intents`, "OPTIONS"],
+      [`${PREVIEW_URL}/auth/intents`, "POST"],
+      [`${PREVIEW_URL}/auth/methods`, "OPTIONS"],
+      [`${PREVIEW_URL}/auth/methods`, "GET"],
+      [`${PREVIEW_URL}/auth/x/flows`, "OPTIONS"],
+      [`${PREVIEW_URL}/auth/x/flows`, "POST"],
+    ],
+  );
   assert.equal(
-    requests[5].url,
+    requests[11].url,
     `${PREVIEW_URL}/auth/x/callback?state=abcdefghijklmnopqrstuvwx`,
   );
-  assert.equal(requests[5].init.method, "GET");
+  assert.equal(requests[10].url, `${PREVIEW_URL}/auth/x/callback`);
+  assert.equal(requests[10].init.method, "GET");
+  assert.equal(requests[11].init.method, "GET");
   assert.deepEqual(delays, [500]);
 });
 
@@ -495,6 +544,12 @@ test("retries an expected-success response body transport failure", async () => 
       swagpack_avatars: [],
       swagpack_reactions: [],
     }),
+    authPreflightResponse(),
+    unauthenticatedResponse(),
+    authPreflightResponse(),
+    unauthenticatedResponse(),
+    authPreflightResponse(),
+    unauthenticatedResponse(),
     xCallbackResponse(),
     xCallbackResponse(),
   ];
@@ -512,7 +567,7 @@ test("retries an expected-success response body transport failure", async () => 
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 6);
+  assert.equal(requests.length, 12);
   assert.deepEqual(delays, [500]);
 });
 
@@ -861,7 +916,7 @@ test("production promotes only the explicit version and then smokes the custom d
     fetch: async (url) => {
       assert.match(
         String(url),
-        /^https:\/\/api\.mons\.link\/(?:nfts|auth\/x\/callback)/,
+        /^https:\/\/api\.mons\.link\/(?:nfts|auth\/(?:intents|methods|x\/(?:flows|callback)))/,
       );
       return nextResponse(responses);
     },

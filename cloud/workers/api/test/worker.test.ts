@@ -18,6 +18,8 @@ const env = {
   FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
   FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: API_KEY,
+  AUTH_DISABLE_X_VERIFY: "false",
+  AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
   NFT_RATE_LIMITER: {
     limit: async () => ({ success: true }),
   },

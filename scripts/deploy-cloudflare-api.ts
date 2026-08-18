@@ -94,6 +94,11 @@ const WRANGLER_CONFIG_ARGS = [
 const PRODUCTION_URL = "https://api.mons.link";
 const SMOKE_ORIGIN = "https://mons.link";
 const X_CALLBACK_PATH = "/auth/x/callback";
+const AUTH_ROUTE_SMOKES = [
+  { path: "/auth/intents", method: "POST" },
+  { path: "/auth/methods", method: "GET" },
+  { path: "/auth/x/flows", method: "POST" },
+] as const;
 const SMOKE_TIMEOUT_MS = 15_000;
 const SMOKE_RETRY_DELAYS_MS = [500, 1_500];
 const VERSION_ID_PATTERN =
@@ -331,6 +336,25 @@ function parseNftResponse(text: string, requireEmpty: boolean): void {
   }
 }
 
+function parseUnauthenticatedResponse(text: string): void {
+  let value: unknown;
+  try {
+    value = JSON.parse(text) as unknown;
+  } catch {
+    throw new DeployError("Auth route smoke response was not valid JSON.");
+  }
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    (value as { ok?: unknown }).ok !== false ||
+    (value as { error?: unknown }).error !== "unauthenticated" ||
+    typeof (value as { message?: unknown }).message !== "string"
+  ) {
+    throw new DeployError("Auth route smoke response had an unexpected shape.");
+  }
+}
+
 function assertNoStore(response: Response): void {
   const cacheControl = response.headers.get("cache-control") || "";
   if (
@@ -514,6 +538,80 @@ async function smokeApi(
 
   await smokePost("", "Empty-wallet smoke request", true);
   await smokePost(smokeSol, "Provider-backed smoke request", false);
+
+  for (const authRoute of AUTH_ROUTE_SMOKES) {
+    const authEndpoint = new URL(authRoute.path, baseUrl).toString();
+    const label = `${authRoute.method} ${authRoute.path}`;
+    const { response: authPreflight } = await fetchWithRetry(
+      authEndpoint,
+      {
+        method: "OPTIONS",
+        headers: {
+          Origin: SMOKE_ORIGIN,
+          "Access-Control-Request-Method": authRoute.method,
+          "Access-Control-Request-Headers": "Authorization, Content-Type",
+        },
+      },
+      `${label} preflight smoke request`,
+      dependencies,
+    );
+    if (authPreflight.status !== 204) {
+      throw new DeployError(
+        `${label} preflight smoke request returned ${authPreflight.status}.`,
+      );
+    }
+    assertNoStore(authPreflight);
+    if (
+      authPreflight.headers.get("access-control-allow-origin") !== SMOKE_ORIGIN
+    ) {
+      throw new DeployError(`${label} had an unexpected CORS origin policy.`);
+    }
+    const authAllowedHeaders = (
+      authPreflight.headers.get("access-control-allow-headers") || ""
+    )
+      .split(",")
+      .map((header) => header.trim().toLowerCase());
+    if (
+      !authAllowedHeaders.includes("authorization") ||
+      !authAllowedHeaders.includes("content-type")
+    ) {
+      throw new DeployError(`${label} preflight omitted required headers.`);
+    }
+
+    const { response: unauthenticated, bodyText } = await fetchWithRetry(
+      authEndpoint,
+      {
+        method: authRoute.method,
+        headers: {
+          Origin: SMOKE_ORIGIN,
+          ...(authRoute.method === "POST"
+            ? { "Content-Type": "application/json" }
+            : {}),
+        },
+        ...(authRoute.method === "POST" ? { body: JSON.stringify({}) } : {}),
+      },
+      `${label} unauthenticated smoke request`,
+      dependencies,
+      401,
+    );
+    if (unauthenticated.status !== 401) {
+      throw new DeployError(
+        `${label} unauthenticated smoke request returned ${unauthenticated.status}.`,
+      );
+    }
+    assertNoStore(unauthenticated);
+    assertJsonResponse(unauthenticated);
+    if (
+      unauthenticated.headers.get("access-control-allow-origin") !==
+      SMOKE_ORIGIN
+    ) {
+      throw new DeployError(`${label} had an unexpected CORS origin policy.`);
+    }
+    if (bodyText === undefined) {
+      throw new DeployError(`${label} response body was unavailable.`);
+    }
+    parseUnauthenticatedResponse(bodyText);
+  }
 
   const callbackEndpoint = new URL(X_CALLBACK_PATH, baseUrl);
   const { response: missingState } = await fetchWithRetry(

@@ -132,7 +132,19 @@ import type {
   EventScheduleTimezone as SharedEventScheduleTimezone,
 } from "@mons/shared/events";
 import type { AuthMethodKey } from "@mons/shared/auth";
-import type { XConsentSource } from "@mons/shared/x-redirect";
+import type {
+  XConsentSource,
+  XRedirectStartResponse,
+} from "@mons/shared/x-redirect";
+import type {
+  AuthIntentResponse,
+  LinkedAuthMethodsResponse,
+} from "@mons/shared/auth";
+import {
+  beginAuthIntentViaApi,
+  beginXRedirectAuthViaApi,
+  getLinkedAuthMethodsViaApi,
+} from "../services/authApi";
 import {
   mapDatabaseEventRecord,
   mapEventPrizeAssignment,
@@ -1340,42 +1352,30 @@ class Connection {
     }
   }
 
-  public async beginAuthIntent(method: AuthMethodKey): Promise<{
-    ok: boolean;
-    intentId: string;
-    nonce: string;
-    state: string;
-    expiresAtMs: number;
-  }> {
+  private getAuthApiToken = async (forceRefresh: boolean): Promise<string> => {
+    const user = this.auth.currentUser;
+    if (!user) {
+      throw new Error("Failed to authenticate user");
+    }
+    return user.getIdToken(forceRefresh);
+  };
+
+  public async beginAuthIntent(
+    method: AuthMethodKey,
+  ): Promise<AuthIntentResponse> {
     try {
       await this.ensureAuthenticated();
-      const beginAuthIntentFunction = httpsCallable(
-        this.functions,
-        "beginAuthIntent",
-      );
-      const response = await beginAuthIntentFunction({ method });
-      return response.data as {
-        ok: boolean;
-        intentId: string;
-        nonce: string;
-        state: string;
-        expiresAtMs: number;
-      };
+      return beginAuthIntentViaApi(method, this.getAuthApiToken);
     } catch (error) {
       console.error("Error beginning auth intent:", error);
       throw error;
     }
   }
 
-  public async getLinkedAuthMethods(): Promise<any> {
+  public async getLinkedAuthMethods(): Promise<LinkedAuthMethodsResponse> {
     try {
       await this.ensureAuthenticated();
-      const getLinkedAuthMethodsFunction = httpsCallable(
-        this.functions,
-        "getLinkedAuthMethods",
-      );
-      const response = await getLinkedAuthMethodsFunction({});
-      return response.data;
+      return getLinkedAuthMethodsViaApi(this.getAuthApiToken);
     } catch (error) {
       console.error("Error getting linked auth methods:", error);
       throw error;
@@ -1444,29 +1444,17 @@ class Connection {
     intentId: string;
     consentSource?: XConsentSource;
     returnUrl?: string;
-  }): Promise<{
-    ok: boolean;
-    flowId: string;
-    authUrl: string;
-    expiresAtMs: number;
-  }> {
+  }): Promise<XRedirectStartResponse> {
     try {
       await this.ensureAuthenticated();
-      const beginXRedirectAuthFunction = httpsCallable(
-        this.functions,
-        "beginXRedirectAuth",
+      return beginXRedirectAuthViaApi(
+        {
+          intentId: params.intentId,
+          consentSource: params.consentSource || "signin",
+          returnUrl: params.returnUrl || "",
+        },
+        this.getAuthApiToken,
       );
-      const response = await beginXRedirectAuthFunction({
-        intentId: params.intentId,
-        consentSource: params.consentSource || "signin",
-        returnUrl: params.returnUrl || "",
-      });
-      return response.data as {
-        ok: boolean;
-        flowId: string;
-        authUrl: string;
-        expiresAtMs: number;
-      };
     } catch (error) {
       console.error("Error beginning X redirect auth:", error);
       throw error;

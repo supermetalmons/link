@@ -29,14 +29,14 @@ export function jsonResponse(
   });
 }
 
-async function readBoundedBody(request: Request): Promise<string> {
+export async function readBoundedBody(
+  request: Request,
+  maxBytes = MAX_REQUEST_BODY_BYTES,
+): Promise<string> {
   const contentLength = request.headers.get("Content-Length");
   if (contentLength) {
     const parsedLength = Number(contentLength);
-    if (
-      Number.isFinite(parsedLength) &&
-      parsedLength > MAX_REQUEST_BODY_BYTES
-    ) {
+    if (Number.isFinite(parsedLength) && parsedLength > maxBytes) {
       throw new Error("Invalid request body.");
     }
   }
@@ -45,15 +45,22 @@ async function readBoundedBody(request: Request): Promise<string> {
   }
   return readBoundedText(
     request.body,
-    MAX_REQUEST_BODY_BYTES,
+    maxBytes,
     () => new Error("Invalid request body."),
   );
+}
+
+export async function readBoundedJson(
+  request: Request,
+  maxBytes = MAX_REQUEST_BODY_BYTES,
+): Promise<unknown> {
+  return JSON.parse(await readBoundedBody(request, maxBytes)) as unknown;
 }
 
 export async function parseRequestBody(
   request: Request,
 ): Promise<NftApiRequest> {
-  const parsed: unknown = JSON.parse(await readBoundedBody(request));
+  const parsed = await readBoundedJson(request);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Invalid request body.");
   }

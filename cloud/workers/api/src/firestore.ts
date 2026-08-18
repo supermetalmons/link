@@ -1,13 +1,71 @@
 import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 import { createGoogleAccessToken } from "./googleAuth.ts";
+import {
+  getLinkedAuthMethodsFromProfile,
+  type AuthMethodKey,
+  type LinkedAuthMethodsResponse,
+} from "@mons/shared/auth";
 
 const FIRESTORE_PROJECT_ID = "mons-link";
 const FIRESTORE_DATABASE_ID = "(default)";
+const FIRESTORE_DOCUMENTS_ROOT = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/${FIRESTORE_DATABASE_ID}/documents`;
 const X_FLOW_COLLECTION = "xAuthRedirectFlows";
+const AUTH_INTENT_COLLECTION = "authIntents";
 const FIRESTORE_TIMEOUT_MS = 5_000;
 const MAX_FIRESTORE_BODY_BYTES = 64 * 1024;
 
 type FirestoreScalar = string | number | null;
+
+export type AuthIntentRecord = {
+  consumedAtMs: number;
+  expiresAtMs: number;
+  method: string;
+  uid: string;
+};
+
+export type AuthIntentDocument = {
+  consumedAtMs: null;
+  createdAtMs: number;
+  expiresAtMs: number;
+  intentId: string;
+  method: AuthMethodKey;
+  nonce: string;
+  state: string;
+  uid: string;
+};
+
+export type XRedirectFlowDocument = {
+  callbackUri: string;
+  codeChallenge: string;
+  codeVerifier: string;
+  consentSource: string;
+  createdAtMs: number;
+  errorCode: null;
+  expiresAtMs: number;
+  flowId: string;
+  intentId: string;
+  method: "x";
+  returnUrl: string;
+  status: "created";
+  uid: string;
+  updatedAtMs: number;
+  xUserId: null;
+  xUsername: null;
+};
+
+export type AuthRepository = {
+  createAuthIntent: (
+    document: AuthIntentDocument,
+  ) => Promise<"created" | "exists">;
+  createXFlow: (
+    document: XRedirectFlowDocument,
+  ) => Promise<"created" | "exists">;
+  getAuthIntent: (intentId: string) => Promise<AuthIntentRecord | null>;
+  getLinkedAuthMethods: (
+    uid: string,
+    firebaseIdToken: string,
+  ) => Promise<LinkedAuthMethodsResponse>;
+};
 
 export type XRedirectFlow = {
   returnUrl: string;
@@ -91,7 +149,38 @@ function encodeFirestoreValue(value: FirestoreScalar): Record<string, unknown> {
 }
 
 function documentUrl(flowId: string): string {
-  return `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/${FIRESTORE_DATABASE_ID}/documents/${X_FLOW_COLLECTION}/${encodeURIComponent(flowId)}`;
+  return `${FIRESTORE_DOCUMENTS_ROOT}/${X_FLOW_COLLECTION}/${encodeURIComponent(flowId)}`;
+}
+
+function createAuthorizedFetch(
+  fetcher: typeof fetch,
+  getAccessToken: () => Promise<string>,
+  timeoutMs: number,
+) {
+  return async (input: string, init: RequestInit = {}): Promise<Response> => {
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${await getAccessToken()}`);
+    try {
+      return await fetcher(input, {
+        ...init,
+        headers,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch {
+      throw new FirestoreFailure();
+    }
+  };
+}
+
+function encodeDocumentFields(
+  fields: Record<string, FirestoreScalar>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(fields).map(([name, value]) => [
+      name,
+      encodeFirestoreValue(value),
+    ]),
+  );
 }
 
 export function createXFlowRepository(
@@ -108,24 +197,15 @@ export function createXFlowRepository(
     getAccessToken?: typeof createGoogleAccessToken;
   } = {},
 ): XFlowRepository {
-  const accessToken = getAccessToken(env, { fetcher, now, timeoutMs });
-
-  const authorizedFetch = async (
-    input: string,
-    init: RequestInit = {},
-  ): Promise<Response> => {
-    const headers = new Headers(init.headers);
-    headers.set("Authorization", `Bearer ${await accessToken}`);
-    try {
-      return await fetcher(input, {
-        ...init,
-        headers,
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-    } catch {
-      throw new FirestoreFailure();
-    }
-  };
+  let accessToken: Promise<string> | null = null;
+  const authorizedFetch = createAuthorizedFetch(
+    fetcher,
+    () => {
+      accessToken ||= getAccessToken(env, { fetcher, now, timeoutMs });
+      return accessToken;
+    },
+    timeoutMs,
+  );
 
   return {
     async getFlow(flowId) {
@@ -157,9 +237,7 @@ export function createXFlowRepository(
         url.searchParams.append("updateMask.fieldPaths", name);
       }
       url.searchParams.set("currentDocument.exists", "true");
-      const fields = Object.fromEntries(
-        names.map((name) => [name, encodeFirestoreValue(updates[name])]),
-      );
+      const fields = encodeDocumentFields(updates);
       const response = await authorizedFetch(url.toString(), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -169,6 +247,205 @@ export function createXFlowRepository(
       if (!response.ok) {
         throw new FirestoreFailure();
       }
+    },
+  };
+}
+
+function parseAuthIntent(value: unknown): AuthIntentRecord {
+  const document = toRecord(value);
+  const fields = toRecord(document?.fields);
+  if (!fields) {
+    throw new FirestoreFailure();
+  }
+  return {
+    consumedAtMs: readFirestoreInteger(fields, "consumedAtMs"),
+    expiresAtMs: readFirestoreInteger(fields, "expiresAtMs"),
+    method: readFirestoreString(fields, "method"),
+    uid: readFirestoreString(fields, "uid"),
+  };
+}
+
+function profileFromRunQuery(value: unknown): {
+  fields: Record<string, unknown>;
+  profileId: string;
+} | null {
+  if (!Array.isArray(value)) {
+    throw new FirestoreFailure();
+  }
+  for (const entry of value) {
+    const result = toRecord(entry);
+    const document = toRecord(result?.document);
+    if (!document) {
+      continue;
+    }
+    const name = typeof document.name === "string" ? document.name.trim() : "";
+    const fields = toRecord(document.fields);
+    const profileId = name.split("/").pop()?.trim() || "";
+    if (!fields || !profileId) {
+      throw new FirestoreFailure();
+    }
+    return { fields, profileId };
+  }
+  return null;
+}
+
+function readProfileField(
+  fields: Record<string, unknown>,
+  name: string,
+): string {
+  return readFirestoreString(fields, name);
+}
+
+export function createAuthRepository(
+  env: Env,
+  {
+    fetcher = fetch,
+    now = Date.now,
+    timeoutMs = FIRESTORE_TIMEOUT_MS,
+    getAccessToken = createGoogleAccessToken,
+  }: {
+    fetcher?: typeof fetch;
+    now?: () => number;
+    timeoutMs?: number;
+    getAccessToken?: typeof createGoogleAccessToken;
+  } = {},
+): AuthRepository {
+  let accessToken: Promise<string> | null = null;
+  const authorizedFetch = createAuthorizedFetch(
+    fetcher,
+    () => {
+      accessToken ||= getAccessToken(env, { fetcher, now, timeoutMs });
+      return accessToken;
+    },
+    timeoutMs,
+  );
+
+  const createDocument = async (
+    collectionId: string,
+    documentId: string,
+    fields: Record<string, FirestoreScalar>,
+  ): Promise<"created" | "exists"> => {
+    const url = new URL(`${FIRESTORE_DOCUMENTS_ROOT}/${collectionId}`);
+    url.searchParams.set("documentId", documentId);
+    const response = await authorizedFetch(url.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fields: encodeDocumentFields(fields) }),
+    });
+    if (response.status === 409) {
+      await cancelResponseBody(response);
+      return "exists";
+    }
+    await cancelResponseBody(response);
+    if (!response.ok) {
+      throw new FirestoreFailure();
+    }
+    return "created";
+  };
+
+  return {
+    createAuthIntent(document) {
+      return createDocument(
+        AUTH_INTENT_COLLECTION,
+        document.intentId,
+        document,
+      );
+    },
+
+    createXFlow(document) {
+      return createDocument(X_FLOW_COLLECTION, document.flowId, document);
+    },
+
+    async getAuthIntent(intentId) {
+      const response = await authorizedFetch(
+        `${FIRESTORE_DOCUMENTS_ROOT}/${AUTH_INTENT_COLLECTION}/${encodeURIComponent(intentId)}`,
+      );
+      if (response.status === 404) {
+        await cancelResponseBody(response);
+        return null;
+      }
+      if (!response.ok) {
+        await cancelResponseBody(response);
+        throw new FirestoreFailure();
+      }
+      return parseAuthIntent(
+        await readBoundedJsonValue(
+          response,
+          MAX_FIRESTORE_BODY_BYTES,
+          () => new FirestoreFailure(),
+        ),
+      );
+    },
+
+    async getLinkedAuthMethods(uid, firebaseIdToken) {
+      let response: Response;
+      try {
+        response = await fetcher(`${FIRESTORE_DOCUMENTS_ROOT}:runQuery`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${firebaseIdToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            structuredQuery: {
+              select: {
+                fields: ["appleSub", "eth", "sol", "xUserId"].map(
+                  (fieldPath) => ({ fieldPath }),
+                ),
+              },
+              from: [{ collectionId: "users" }],
+              where: {
+                fieldFilter: {
+                  field: { fieldPath: "logins" },
+                  op: "ARRAY_CONTAINS",
+                  value: { stringValue: uid },
+                },
+              },
+              limit: 1,
+            },
+          }),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+      } catch {
+        throw new FirestoreFailure();
+      }
+      if (!response.ok) {
+        await cancelResponseBody(response);
+        throw new FirestoreFailure();
+      }
+      const profile = profileFromRunQuery(
+        await readBoundedJsonValue(
+          response,
+          MAX_FIRESTORE_BODY_BYTES,
+          () => new FirestoreFailure(),
+        ),
+      );
+      if (!profile) {
+        const linkedMethods = {
+          apple: false,
+          eth: false,
+          sol: false,
+          x: false,
+        };
+        return {
+          ok: true,
+          profileId: null,
+          linkedMethods,
+          appleLinked: false,
+        };
+      }
+      const linkedMethods = getLinkedAuthMethodsFromProfile({
+        appleSub: readProfileField(profile.fields, "appleSub"),
+        eth: readProfileField(profile.fields, "eth"),
+        sol: readProfileField(profile.fields, "sol"),
+        xUserId: readProfileField(profile.fields, "xUserId"),
+      });
+      return {
+        ok: true,
+        profileId: profile.profileId,
+        linkedMethods,
+        appleLinked: linkedMethods.apple,
+      };
     },
   };
 }

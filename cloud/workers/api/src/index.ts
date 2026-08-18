@@ -9,7 +9,7 @@ export type { ProviderFetch } from "./provider.ts";
 export { handleRequest };
 
 export default {
-  fetch(request, env) {
-    return handleRequest(request, env);
+  fetch(request, env, ctx) {
+    return handleRequest(request, env, {}, ctx);
   },
 } satisfies ExportedHandler<Env>;

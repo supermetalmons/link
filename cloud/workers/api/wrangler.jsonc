@@ -7,6 +7,9 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": true,
+  "vars": {
+    "AUTH_DISABLE_X_VERIFY": "false",
+  },
   "routes": [
     {
       "pattern": "api.mons.link",
@@ -31,13 +34,21 @@
         "period": 60,
       },
     },
+    {
+      "name": "AUTH_RATE_LIMITER",
+      "namespace_id": "1616095644",
+      "simple": {
+        "limit": 20,
+        "period": 60,
+      },
+    },
   ],
   "observability": {
     "enabled": true,
     "logs": {
       "enabled": true,
       "head_sampling_rate": 0.1,
-      "invocation_logs": true,
+      "invocation_logs": false,
       "persist": true,
     },
     "traces": {

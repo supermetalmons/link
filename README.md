@@ -10,7 +10,7 @@ mons.link is a browser game backed by Firebase and two Cloudflare Workers. The r
 | `test/`                   | Client behavior and contract tests                                          | Node test runner              |
 | `cloud/functions/`        | Callable, HTTP, task, schedule, and database-triggered backend functions    | Firebase Functions / CommonJS |
 | `cloud/functions/shared/` | Browser-safe `@mons/shared/*` contract subpaths                             | CommonJS package              |
-| `cloud/workers/api/`      | Bounded `/nfts` API and X OAuth callback                                    | Cloudflare Workers            |
+| `cloud/workers/api/`      | Bounded NFT API, auth initiation/reads, and X OAuth callback                | Cloudflare Workers            |
 | `cloud/admin/`            | Manually invoked production administration tools                            | Node / Firebase Admin         |
 | `scripts/`                | Deployment, repository maintenance, architecture, and tooling contracts     | Node and Bash                 |
 

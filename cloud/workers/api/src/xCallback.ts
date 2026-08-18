@@ -9,16 +9,7 @@ import {
   XProviderFailure,
   type XOAuthProvider,
 } from "./xProvider.ts";
-
-const X_FLOW_TTL_MS = 10 * 60 * 1_000;
-const X_FLOW_ID_PATTERN = /^[A-Za-z0-9_-]{24}$/;
-const DEFAULT_RETURN_URL = "https://mons.link/";
-const ALLOWED_RETURN_ORIGINS = new Set([
-  "https://mons.link",
-  "https://www.mons.link",
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-]);
+import { safeXReturnUrl, X_FLOW_ID_PATTERN, X_FLOW_TTL_MS } from "./xFlow.ts";
 
 const RESPONSE_HEADERS = {
   "Cache-Control": "no-store, no-cache, must-revalidate",
@@ -46,17 +37,6 @@ function textResponse(body: string, status: number, headers?: HeadersInit) {
   });
 }
 
-function safeReturnUrl(value: string): string {
-  try {
-    const url = new URL(value);
-    return ALLOWED_RETURN_ORIGINS.has(url.origin)
-      ? url.toString()
-      : DEFAULT_RETURN_URL;
-  } catch {
-    return DEFAULT_RETURN_URL;
-  }
-}
-
 function redirectResponse({
   returnUrl,
   flowId,
@@ -70,7 +50,7 @@ function redirectResponse({
   errorCode: string;
   consentSource: XConsentSource;
 }): Response {
-  const target = new URL(safeReturnUrl(returnUrl));
+  const target = new URL(safeXReturnUrl(returnUrl));
   target.searchParams.set(X_REDIRECT_RESULT_PARAMS.flowId, flowId);
   target.searchParams.set(X_REDIRECT_RESULT_PARAMS.status, status);
   if (errorCode) {
@@ -129,7 +109,7 @@ export async function handleXCallback(
     return textResponse("X auth session not found.", 400);
   }
 
-  const returnUrl = safeReturnUrl(flow.returnUrl);
+  const returnUrl = safeXReturnUrl(flow.returnUrl);
   const consentSource = normalizeServerXConsentSource(flow.consentSource);
   if (flow.status === "completed" || flow.status === "verified") {
     return redirectResponse({

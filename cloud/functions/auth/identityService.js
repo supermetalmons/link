@@ -30,8 +30,6 @@ const {
 const {
   assertSupportedMethod,
   createOpId,
-  createSiweNonce,
-  createToken,
   getMethodField,
   getMethodKey,
   getMethodValueFromProfile,
@@ -54,7 +52,6 @@ const {
   getExpectedMethodValueHashFromAuthOp,
 } = require("./authOperations");
 
-const INTENT_TTL_MS = 5 * 60 * 1000;
 const MERGE_LOCK_TTL_MS = 10 * 60 * 1000;
 const LINK_METHOD_MAX_ATTEMPTS = 3;
 const MERGE_LOCK_RELEASE_MAX_ATTEMPTS = 3;
@@ -578,45 +575,6 @@ const isVerifyReplayStillValid = async ({
 const { beginAuthOp, finishAuthOp, peekAuthOpReplay } = createAuthOperations({
   isVerifyReplayStillValid,
 });
-
-const beginAuthIntent = async (request) => {
-  if (!request.auth) {
-    throw new HttpsError(
-      "unauthenticated",
-      "The function must be called while authenticated.",
-    );
-  }
-  const method = assertSupportedMethod(request.data && request.data.method);
-  await enforceRateLimit({
-    uid: request.auth.uid,
-    method: `intent-${method}`,
-    request,
-  });
-
-  const firestore = admin.firestore();
-  const nowMs = Date.now();
-  const intentId = createToken(18);
-  const nonce = method === "eth" ? createSiweNonce(24) : createToken(18);
-  const state = createToken(18);
-  const expiresAtMs = nowMs + INTENT_TTL_MS;
-  await firestore.collection("authIntents").doc(intentId).set({
-    intentId,
-    uid: request.auth.uid,
-    method,
-    nonce,
-    state,
-    createdAtMs: nowMs,
-    expiresAtMs,
-    consumedAtMs: null,
-  });
-  return {
-    ok: true,
-    intentId,
-    nonce,
-    state,
-    expiresAtMs,
-  };
-};
 
 const consumeAuthIntent = async ({ uid, method, intentId }) => {
   const normalizedIntentId = toCleanString(intentId);
@@ -2236,32 +2194,6 @@ const unlinkMethodForUid = async ({ uid, method, opId, request }) => {
   }
 };
 
-const getLinkedMethodsForUid = async (uid) => {
-  const profileSnapshot = await readProfileByLoginUid(uid);
-  if (!profileSnapshot) {
-    return {
-      ok: true,
-      profileId: null,
-      linkedMethods: {
-        apple: false,
-        eth: false,
-        sol: false,
-        x: false,
-      },
-      appleLinked: false,
-    };
-  }
-  const linkedMethods = linkedMethodsFromProfileData(
-    profileSnapshot.data() || {},
-  );
-  return {
-    ok: true,
-    profileId: profileSnapshot.id,
-    linkedMethods,
-    appleLinked: linkedMethods.apple,
-  };
-};
-
 const syncProfileClaimForUid = async (uid) => {
   const profileSnapshot = await readProfileByLoginUid(uid);
   if (!profileSnapshot) {
@@ -2321,11 +2253,9 @@ const syncProfileClaimForUid = async (uid) => {
 };
 
 module.exports = {
-  beginAuthIntent,
   consumeAuthIntent,
   linkVerifiedMethod,
   peekAuthOpReplay,
   unlinkMethodForUid,
-  getLinkedMethodsForUid,
   syncProfileClaimForUid,
 };

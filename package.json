@@ -11,6 +11,7 @@
     "ethers": "^6.17.0",
     "firebase": "^12.17.1",
     "glicko2": "^1.2.1",
+    "jose": "^6.2.7",
     "mons-rules": "0.4.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

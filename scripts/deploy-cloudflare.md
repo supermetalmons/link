@@ -95,7 +95,7 @@ The wallet is sent only in the POST body and is not printed. Pass
 `CLOUDFLARE_API_TOKEN` in the invoking shell instead of `--token-file` when
 preferred.
 
-The API accepts only `POST /nfts` plus CORS preflight requests. Request bodies
+The NFT route accepts only `POST /nfts` plus CORS preflight requests. Request bodies
 larger than 4096 bytes return `400`, as do malformed JSON, invalid field types,
 and invalid non-empty Solana addresses. The Helius secret must remain in
 Firebase because event prize withdrawals also use it. Helius response bodies
@@ -106,27 +106,65 @@ configuration is intentionally changed, review it separately and apply it with
 `npm run deploy:api:triggers -- --token-file /path/to/cloudflare-token`, or set
 `CLOUDFLARE_API_TOKEN` in the invoking shell and omit `--token-file`.
 
+## Auth initiation and reads
+
+The API Worker owns these Firebase-authenticated routes:
+
+- `POST https://api.mons.link/auth/intents`
+- `GET https://api.mons.link/auth/methods`
+- `POST https://api.mons.link/auth/x/flows`
+
+The browser sends its Firebase ID token in the `Authorization: Bearer` header.
+The Worker verifies the token against Google's Secure Token keys. Auth route
+CORS permits `mons.link`, `www.mons.link`, and the documented port-3000 local
+origins, plus exact account-owned version-preview hostnames. The public NFT
+route retains wildcard CORS. Automatic invocation logs are disabled so bearer
+headers are not persisted; sanitized custom errors remain enabled.
+
+Intent creation is limited to 20 requests per minute for each authenticated
+UID and method through the `AUTH_RATE_LIMITER` binding. These counters are
+local to the Cloudflare location processing the request. Linked-method reads
+forward the user's Firebase token to Firestore, so Firestore Security Rules
+remain authoritative and the Worker service account does not require
+`datastore.entities.list`.
+
+The Worker service account creates `authIntents` and `xAuthRedirectFlows`
+documents and reads callback/intent records. Its custom role must contain
+exactly `datastore.entities.create`, `datastore.entities.get`, and
+`datastore.entities.update`. Existing installations created before the auth
+migration must update the role before promoting the new Worker:
+
+```sh
+gcloud iam roles update monsLinkXCallback --project mons-link --permissions=datastore.entities.create,datastore.entities.get,datastore.entities.update --stage=GA
+```
+
+Automated API smoke checks cover every auth preflight and unauthenticated
+response without creating Firestore records. After promotion, manually verify
+linked-method loading, all four intent types, and the X redirect start before
+removing the retired Firebase callables.
+
 ## X OAuth callback
 
 The API Worker also serves `GET https://api.mons.link/auth/x/callback`. It
 exchanges the X authorization code, reads and updates the existing
 `xAuthRedirectFlows` Firestore document through the Firestore REST API, and
-redirects to the flow's validated `mons.link` return URL. The flow creator and
-completion callable remain in Firebase. No Cloudflare storage resource is used.
+redirects to the flow's validated `mons.link` return URL. The Worker creates
+the flow, while the completion callable remains in Firebase. No Cloudflare
+storage resource is used.
 
 Register `https://api.mons.link/auth/x/callback` as an exact callback URI in the
 X application before deploying the Firebase flow-creator change. X client IDs,
 client secrets, authorization codes, access tokens, PKCE verifiers, service
 account keys, and raw flow IDs must not appear in source, arguments, or logs.
 
-Create a dedicated Google service account and project custom role for the
-callback. The role must contain only `datastore.entities.get` and
-`datastore.entities.update`, and its project binding must be conditioned on the
-default `mons-link` Firestore database:
+Create a dedicated Google service account and project custom role for auth and
+the callback. The role must contain only `datastore.entities.create`,
+`datastore.entities.get`, and `datastore.entities.update`, and its project
+binding must be conditioned on the default `mons-link` Firestore database:
 
 ```sh
-gcloud iam roles create monsLinkXCallback --project mons-link --title="mons.link X callback" --permissions=datastore.entities.get,datastore.entities.update --stage=GA
-gcloud iam service-accounts create mons-link-x-callback --project mons-link --display-name="mons.link X callback"
+gcloud iam roles create monsLinkXCallback --project mons-link --title="mons.link auth API" --permissions=datastore.entities.create,datastore.entities.get,datastore.entities.update --stage=GA
+gcloud iam service-accounts create mons-link-x-callback --project mons-link --display-name="mons.link auth API"
 gcloud projects add-iam-policy-binding mons-link --member="serviceAccount:mons-link-x-callback@mons-link.iam.gserviceaccount.com" --role="projects/mons-link/roles/monsLinkXCallback" --condition='expression=resource.name=="projects/mons-link/databases/(default)",title=default-firestore-only'
 gcloud iam service-accounts keys create /secure/mons-link-x-callback.json --project mons-link --iam-account=mons-link-x-callback@mons-link.iam.gserviceaccount.com
 ```
@@ -156,22 +194,24 @@ attached. Delete the local secrets file and the downloaded service-account JSON
 after the candidate has been promoted and the values are stored as encrypted
 Worker secrets.
 
-Preview and production smoke checks cover the NFT API, callback routing without
-a state value, and a random absent state that proves Google OAuth and Firestore
-read access. A real X code is intentionally not used by automated smoke checks.
-After production promotion, exercise X sign-in and settings linking manually,
-including provider denial.
+Preview and production smoke checks cover the NFT API, auth CORS and
+unauthenticated responses, callback routing without a state value, and a random
+absent state that proves Google OAuth and Firestore read access. A real X code
+is intentionally not used by automated smoke checks. After production
+promotion, exercise X sign-in and settings linking manually, including provider
+denial.
 
-This migration uses an immediate cutover. Deploy and smoke-test the Worker
-candidate first, then deploy the Firebase release that writes the new callback
-URI and reconciles away the former `xAuthRedirectCallback` function. Flows
-opened against the former Firebase URI may fail and must be retried. After
-verification, remove the former URI from X and remove the obsolete Firebase-side
-`X_CLIENT_SECRET` configuration.
+The auth compute migration uses an immediate cutover. Deploy and smoke-test the
+Worker candidate, promote and verify the frontend, then reconcile away
+`beginAuthIntent`, `getLinkedAuthMethods`, and `beginXRedirectAuth` through the
+complete Firebase release. Already-open tabs running the former frontend can
+fail after reconciliation and must be refreshed.
 
-For rollback, retain the pre-cutover Firebase commit and the prior API Worker
-version ID. Restore the former callback URI in X, redeploy the callback export
-from that commit, then roll back the API Worker if needed.
+For rollback after Firebase reconciliation, redeploy the three retired
+callables from the retained pre-migration commit, then roll back the frontend
+and API Workers to their recorded version IDs. The X callback remains on the
+API Worker throughout this rollback. Remove `datastore.entities.create` from
+the custom role only after the old auth start path is restored.
 
 ## Firebase deployment
 

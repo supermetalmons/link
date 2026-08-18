@@ -16,9 +16,34 @@ const AUTH_COOLDOWN_REASONS = Object.freeze({
   method: "method-reuse-cooldown",
   profileMethod: "profile-method-cooldown",
 });
+const AUTH_INTENT_RESPONSE_KEYS = Object.freeze([
+  "ok",
+  "intentId",
+  "nonce",
+  "state",
+  "expiresAtMs",
+]);
+const LINKED_AUTH_METHOD_KEYS = Object.freeze(["apple", "eth", "sol", "x"]);
+const LINKED_AUTH_METHODS_RESPONSE_KEYS = Object.freeze([
+  "ok",
+  "profileId",
+  "linkedMethods",
+  "appleLinked",
+]);
 
 const cleanString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
+
+const isRecord = (value) =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const hasExactKeys = (value, expectedKeys) => {
+  const keys = Object.keys(value);
+  return (
+    keys.length === expectedKeys.length &&
+    keys.every((key) => expectedKeys.includes(key))
+  );
+};
 
 const normalizeAuthMethod = (value) => {
   const method = cleanString(value).toLowerCase();
@@ -71,14 +96,54 @@ const resolveAuthCooldownRetryAtMs = (
   return startedAtMs > 0 && cooldownMs > 0 ? startedAtMs + cooldownMs : 0;
 };
 
+const isAuthIntentResponse = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, AUTH_INTENT_RESPONSE_KEYS) &&
+  value.ok === true &&
+  cleanString(value.intentId) !== "" &&
+  cleanString(value.nonce) !== "" &&
+  cleanString(value.state) !== "" &&
+  Number.isSafeInteger(value.expiresAtMs) &&
+  value.expiresAtMs > 0;
+
+const isLinkedAuthMethods = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, LINKED_AUTH_METHOD_KEYS) &&
+  LINKED_AUTH_METHOD_KEYS.every((key) => typeof value[key] === "boolean");
+
+const isLinkedAuthMethodsResponse = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, LINKED_AUTH_METHODS_RESPONSE_KEYS) &&
+  value.ok === true &&
+  (value.profileId === null || cleanString(value.profileId) !== "") &&
+  isLinkedAuthMethods(value.linkedMethods) &&
+  value.appleLinked === value.linkedMethods.apple;
+
+const getLinkedAuthMethodsFromProfile = (value) => {
+  const profile = isRecord(value) ? value : {};
+  const eth = cleanString(profile.eth).toLowerCase();
+  const sol = cleanString(profile.sol);
+  const apple = cleanString(profile.appleSub);
+  const x = cleanString(profile.xUserId);
+  return {
+    apple: apple.length >= 6,
+    eth: /^0x[a-f0-9]{40}$/.test(eth),
+    sol: sol.length >= 20 && sol.length <= 64,
+    x: /^\d+$/.test(x),
+  };
+};
+
 module.exports = {
   AUTH_METHODS,
   AUTH_METHOD_FIELD_BY_TYPE,
   AUTH_METHOD_LABELS,
   AUTH_METHOD_REUSE_COOLDOWN_MS,
   AUTH_COOLDOWN_REASONS,
+  getLinkedAuthMethodsFromProfile,
   normalizeAuthMethod,
   normalizeAuthCooldownReason,
   getAuthCooldownScope,
+  isAuthIntentResponse,
+  isLinkedAuthMethodsResponse,
   resolveAuthCooldownRetryAtMs,
 };

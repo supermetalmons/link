@@ -4,9 +4,10 @@ Run all commands from the repository root.
 
 See the repository [architecture and command map](../README.md) for package boundaries. Cloudflare Worker release and rollback procedures are documented in the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md).
 
-The X OAuth callback, its dedicated Firestore service account, and its encrypted
-Worker secret setup are documented in that deployment guide. Firebase retains
-the X flow creator, completion callable, and existing Firestore flow records.
+The auth API, X OAuth callback, dedicated Firestore service account, and
+encrypted Worker secret setup are documented in that deployment guide.
+Firebase retains auth verification/linking, the X completion callable, and the
+existing Firestore auth records.
 
 ## Setup
 
@@ -105,6 +106,10 @@ These are configuration values, not standalone shell commands.
 `AUTH_DISABLE_APPLE_VERIFY=true`
 
 `AUTH_DISABLE_X_VERIFY=true`
+
+X verification is initiated by the API Worker and completed by Firebase. Keep
+`AUTH_DISABLE_X_VERIFY` synchronized across both deployments; changing the
+Worker value requires a reviewed API Worker version release.
 
 `AUTH_DISABLE_UNLINK=true`
 

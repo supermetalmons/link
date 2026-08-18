@@ -11,6 +11,8 @@ import {
   handleXCallback,
   type XCallbackDependencyOverrides,
 } from "./xCallback.ts";
+import { AUTH_PATHS } from "./authHttp.ts";
+import { handleAuthRoute, type AuthRouteDependencies } from "./authRoutes.ts";
 
 const RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
 
@@ -30,12 +32,20 @@ export async function handleRequest(
   request: Request,
   env: Env,
   dependencyOverrides: Partial<WorkerDependencies> & {
+    auth?: AuthRouteDependencies;
     xCallback?: XCallbackDependencyOverrides;
   } = {},
+  ctx?: ExecutionContext,
 ): Promise<Response> {
   const pathname = new URL(request.url).pathname;
   if (pathname === "/auth/x/callback") {
     return handleXCallback(request, env, dependencyOverrides.xCallback);
+  }
+  if (AUTH_PATHS.has(pathname)) {
+    if (!ctx) {
+      return jsonResponse({ ok: false, error: "unavailable" }, 503);
+    }
+    return handleAuthRoute(request, env, ctx, dependencyOverrides.auth);
   }
   if (pathname !== "/nfts") {
     return jsonResponse({ ok: false, error: "not-found" }, 404);

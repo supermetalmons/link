@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  createAuthRepository,
   createXFlowRepository,
   FirestoreFailure,
   parseXRedirectFlowDocument,
@@ -15,6 +16,8 @@ const env = {
   FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
   FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",
+  AUTH_DISABLE_X_VERIFY: "false",
+  AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
   NFT_RATE_LIMITER: { limit: async () => ({ success: true }) },
   X_CLIENT_ID: "test-x-client",
   X_CLIENT_SECRET: "test-x-secret",
@@ -277,4 +280,170 @@ test("maps absent, oversized, and failed Firestore responses without exposing bo
       FirestoreFailure,
     );
   }
+});
+
+test("creates auth documents and reads intents with one service token", async () => {
+  const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+  const responses = [
+    new Response("{}", { status: 200 }),
+    new Response("{}", { status: 409 }),
+    new Response(
+      JSON.stringify({
+        fields: {
+          consumedAtMs: { nullValue: null },
+          expiresAtMs: { integerValue: "1300000" },
+          method: { stringValue: "x" },
+          uid: { stringValue: "firebase-uid" },
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ),
+  ];
+  let accessTokenCalls = 0;
+  const repository = createAuthRepository(env, {
+    getAccessToken: async () => {
+      accessTokenCalls++;
+      return "google-access-token";
+    },
+    fetcher: async (input, init) => {
+      requests.push({ input, init });
+      const response = responses.shift();
+      assert.ok(response);
+      return response;
+    },
+  });
+
+  assert.equal(
+    await repository.createAuthIntent({
+      consumedAtMs: null,
+      createdAtMs: 1_000_000,
+      expiresAtMs: 1_300_000,
+      intentId: "intent-id",
+      method: "x",
+      nonce: "nonce",
+      state: "state",
+      uid: "firebase-uid",
+    }),
+    "created",
+  );
+  assert.equal(
+    await repository.createXFlow({
+      callbackUri: "https://api.mons.link/auth/x/callback",
+      codeChallenge: "challenge",
+      codeVerifier: "verifier",
+      consentSource: "signin",
+      createdAtMs: 1_000_000,
+      errorCode: null,
+      expiresAtMs: 1_300_000,
+      flowId: "flow-id",
+      intentId: "intent-id",
+      method: "x",
+      returnUrl: "https://mons.link/",
+      status: "created",
+      uid: "firebase-uid",
+      updatedAtMs: 1_000_000,
+      xUserId: null,
+      xUsername: null,
+    }),
+    "exists",
+  );
+  assert.deepEqual(await repository.getAuthIntent("intent-id"), {
+    consumedAtMs: 0,
+    expiresAtMs: 1_300_000,
+    method: "x",
+    uid: "firebase-uid",
+  });
+
+  assert.equal(accessTokenCalls, 1);
+  assert.equal(requests.length, 3);
+  const intentUrl = new URL(String(requests[0].input));
+  assert.equal(intentUrl.pathname.endsWith("/documents/authIntents"), true);
+  assert.equal(intentUrl.searchParams.get("documentId"), "intent-id");
+  assert.equal(requests[0].init?.method, "POST");
+  assert.equal(
+    new Headers(requests[0].init?.headers).get("Authorization"),
+    "Bearer google-access-token",
+  );
+});
+
+test("queries only linked auth fields with the user's Firebase token", async () => {
+  const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+  const repository = createAuthRepository(env, {
+    getAccessToken: async () => "unused-service-token",
+    fetcher: async (input, init) => {
+      requests.push({ input, init });
+      return new Response(
+        JSON.stringify([
+          {
+            document: {
+              name: "projects/mons-link/databases/(default)/documents/users/profile-1",
+              fields: {
+                appleSub: { stringValue: "apple-sub" },
+                eth: {
+                  stringValue: "0x1111111111111111111111111111111111111111",
+                },
+                sol: { stringValue: "11111111111111111111" },
+                xUserId: { stringValue: "not-numeric" },
+              },
+            },
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    },
+  });
+
+  assert.deepEqual(
+    await repository.getLinkedAuthMethods("firebase-uid", "firebase-id-token"),
+    {
+      ok: true,
+      profileId: "profile-1",
+      linkedMethods: { apple: true, eth: true, sol: true, x: false },
+      appleLinked: true,
+    },
+  );
+  assert.equal(requests.length, 1);
+  assert.equal(String(requests[0].input).endsWith("/documents:runQuery"), true);
+  assert.equal(
+    new Headers(requests[0].init?.headers).get("Authorization"),
+    "Bearer firebase-id-token",
+  );
+  const query = JSON.parse(String(requests[0].init?.body));
+  assert.deepEqual(query.structuredQuery.select.fields, [
+    { fieldPath: "appleSub" },
+    { fieldPath: "eth" },
+    { fieldPath: "sol" },
+    { fieldPath: "xUserId" },
+  ]);
+  assert.deepEqual(query.structuredQuery.where.fieldFilter, {
+    field: { fieldPath: "logins" },
+    op: "ARRAY_CONTAINS",
+    value: { stringValue: "firebase-uid" },
+  });
+  assert.equal(query.structuredQuery.limit, 1);
+});
+
+test("returns the exact empty linked-method response without service auth", async () => {
+  let serviceTokenCalls = 0;
+  const repository = createAuthRepository(env, {
+    getAccessToken: async () => {
+      serviceTokenCalls++;
+      return "unused";
+    },
+    fetcher: async () =>
+      new Response(JSON.stringify([{ readTime: "2026-08-18T00:00:00Z" }]), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+  });
+  assert.deepEqual(
+    await repository.getLinkedAuthMethods("firebase-uid", "firebase-token"),
+    {
+      ok: true,
+      profileId: null,
+      linkedMethods: { apple: false, eth: false, sol: false, x: false },
+      appleLinked: false,
+    },
+  );
+  assert.equal(serviceTokenCalls, 0);
 });

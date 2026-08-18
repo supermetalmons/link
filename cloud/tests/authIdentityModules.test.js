@@ -11,6 +11,7 @@ const authOperations = require("../functions/auth/authOperations");
 const identityService = require("../functions/auth/identityService");
 const policy = require("../functions/auth/policy");
 const siwe = require("../functions/auth/siwe");
+const sharedAuth = require("../functions/shared/auth");
 
 const withFirestore = async (firestore, callback) => {
   const originalFirestore = firebaseAdmin.firestore;
@@ -55,21 +56,15 @@ const assertHttpsError = (callback, code, message) => {
 
 test("authIdentity remains the exact compatibility façade", () => {
   assert.deepEqual(Object.keys(authIdentity), [
-    "beginAuthIntent",
     "consumeAuthIntent",
     "normalizeMethodValue",
     "linkVerifiedMethod",
     "peekAuthOpReplay",
     "unlinkMethodForUid",
-    "getLinkedMethodsForUid",
     "syncProfileClaimForUid",
     "verifyAppleIdToken",
     "validateSiweDomainAndUri",
   ]);
-  assert.strictEqual(
-    authIdentity.beginAuthIntent,
-    identityService.beginAuthIntent,
-  );
   assert.strictEqual(
     authIdentity.consumeAuthIntent,
     identityService.consumeAuthIntent,
@@ -85,10 +80,6 @@ test("authIdentity remains the exact compatibility façade", () => {
   assert.strictEqual(
     authIdentity.unlinkMethodForUid,
     identityService.unlinkMethodForUid,
-  );
-  assert.strictEqual(
-    authIdentity.getLinkedMethodsForUid,
-    identityService.getLinkedMethodsForUid,
   );
   assert.strictEqual(
     authIdentity.syncProfileClaimForUid,
@@ -168,6 +159,26 @@ test("auth method policy preserves normalization and profile detection", () => {
     policy.hashMethodValue("x", "42"),
     crypto.createHash("sha256").update("x:42").digest("hex"),
   );
+});
+
+test("shared linked-method projection preserves every boolean combination", () => {
+  for (let mask = 0; mask < 16; mask += 1) {
+    assert.deepEqual(
+      sharedAuth.getLinkedAuthMethodsFromProfile({
+        appleSub: mask & 1 ? "apple-sub" : "short",
+        eth:
+          mask & 2 ? "0x1111111111111111111111111111111111111111" : "invalid",
+        sol: mask & 4 ? "11111111111111111111" : "short",
+        xUserId: mask & 8 ? "2244994945" : "not-numeric",
+      }),
+      {
+        apple: !!(mask & 1),
+        eth: !!(mask & 2),
+        sol: !!(mask & 4),
+        x: !!(mask & 8),
+      },
+    );
+  }
 });
 
 test("cooldown policy preserves legacy timestamp precedence and details", () => {

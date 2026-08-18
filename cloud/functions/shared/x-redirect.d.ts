@@ -1,5 +1,18 @@
 export type XConsentSource = "signin" | "settings";
 
+export interface XRedirectStartRequest {
+  intentId: string;
+  consentSource?: XConsentSource;
+  returnUrl?: string;
+}
+
+export interface XRedirectStartResponse {
+  ok: true;
+  flowId: string;
+  authUrl: string;
+  expiresAtMs: number;
+}
+
 export const X_REDIRECT_RESULT_PARAMS: Readonly<{
   flowId: "x_auth_flow";
   status: "x_auth_status";
@@ -15,3 +28,6 @@ export const X_REDIRECT_CALLBACK_PARAM_KEYS: readonly [
 export const X_REDIRECT_STARTED_ERROR_CODE: "x-sign-in-redirect-started";
 export function normalizeClientXConsentSource(value: unknown): XConsentSource;
 export function normalizeServerXConsentSource(value: unknown): XConsentSource;
+export function isXRedirectStartResponse(
+  value: unknown,
+): value is XRedirectStartResponse;

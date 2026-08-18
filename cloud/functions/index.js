@@ -4,12 +4,9 @@ admin.initializeApp();
 
 const { verifySolanaAddress } = require("./verifySolanaAddress");
 const { verifyEthAddress } = require("./verifyEthAddress");
-const { beginAuthIntent } = require("./beginAuthIntent");
-const { beginXRedirectAuth } = require("./beginXRedirectAuth");
 const { verifyAppleToken } = require("./verifyAppleToken");
 const { completeXRedirectAuth } = require("./completeXRedirectAuth");
 const { unlinkAuthMethod } = require("./unlinkAuthMethod");
-const { getLinkedAuthMethods } = require("./getLinkedAuthMethods");
 const { syncProfileClaim } = require("./syncProfileClaim");
 const { updateRatings } = require("./updateRatings");
 const { startMatchTimer, claimMatchVictoryByTimer } = require("./matchTimers");
@@ -68,12 +65,9 @@ const { projectRatingTelegramUpdates } = require("./ratingTelegramProjector");
 
 exports.verifySolanaAddress = verifySolanaAddress;
 exports.verifyEthAddress = verifyEthAddress;
-exports.beginAuthIntent = beginAuthIntent;
-exports.beginXRedirectAuth = beginXRedirectAuth;
 exports.verifyAppleToken = verifyAppleToken;
 exports.completeXRedirectAuth = completeXRedirectAuth;
 exports.unlinkAuthMethod = unlinkAuthMethod;
-exports.getLinkedAuthMethods = getLinkedAuthMethods;
 exports.syncProfileClaim = syncProfileClaim;
 exports.startMatchTimer = startMatchTimer;
 exports.claimMatchVictoryByTimer = claimMatchVictoryByTimer;
