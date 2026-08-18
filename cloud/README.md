@@ -4,6 +4,10 @@ Run all commands from the repository root.
 
 See the repository [architecture and command map](../README.md) for package boundaries. Cloudflare Worker release and rollback procedures are documented in the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md).
 
+The X OAuth callback, its dedicated Firestore service account, and its encrypted
+Worker secret setup are documented in that deployment guide. Firebase retains
+the X flow creator, completion callable, and existing Firestore flow records.
+
 ## Setup
 
 `npm ci --prefix cloud/functions`

@@ -46,6 +46,7 @@ function createRuntimeDependencies(
       throw new Error("Unexpected fetch.");
     },
     sleep: async () => undefined,
+    createSmokeState: () => "abcdefghijklmnopqrstuvwx",
     log: () => undefined,
     ...overrides,
   };
@@ -65,6 +66,19 @@ function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), {
     status,
     headers: responseHeaders({ "Content-Type": "application/json" }),
+  });
+}
+
+function xCallbackResponse(): Response {
+  return new Response("X auth session not found.", {
+    status: 400,
+    headers: {
+      "Cache-Control": "no-store, no-cache, must-revalidate",
+      Pragma: "no-cache",
+      Expires: "0",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+    },
   });
 }
 
@@ -106,6 +120,7 @@ function smokeResponses(providerAttempts = 1): Response[] {
       swagpack_reactions: [{ id: 3, count: 1 }],
     }),
   );
+  responses.push(xCallbackResponse(), xCallbackResponse());
   return responses;
 }
 
@@ -125,10 +140,13 @@ test("parses preview and production arguments", () => {
       SMOKE_SOL,
       "--token-file",
       "/tmp/token",
+      "--secrets-file",
+      "/tmp/secrets.env",
     ]),
     {
       mode: "preview",
       smokeSol: SMOKE_SOL,
+      secretsFile: "/tmp/secrets.env",
       tokenFile: "/tmp/token",
       versionId: undefined,
     },
@@ -167,6 +185,10 @@ test("parses trigger updates without a smoke wallet or version", () => {
     () => parseArgs(["triggers", "--version-id", VERSION_ID]),
     /not valid in triggers mode/,
   );
+  assert.throws(
+    () => parseArgs(["triggers", "--secrets-file", "/tmp/secrets.env"]),
+    /not valid in triggers mode/,
+  );
 });
 
 test("requires an explicit smoke wallet and production version", () => {
@@ -195,6 +217,19 @@ test("requires an explicit smoke wallet and production version", () => {
       ]),
     /must be a UUID/,
   );
+  assert.throws(
+    () =>
+      parseArgs([
+        "production",
+        "--version-id",
+        VERSION_ID,
+        "--smoke-sol",
+        SMOKE_SOL,
+        "--secrets-file",
+        "/tmp/secrets.env",
+      ]),
+    /only valid in preview mode/,
+  );
 });
 
 test("API token-file failures do not expose filesystem details", async () => {
@@ -213,7 +248,7 @@ test("API token-file failures do not expose filesystem details", async () => {
   );
 });
 
-test("removes Cloudflare, Wrangler, Helius, and dotenv values from child environments", () => {
+test("removes release credentials and dotenv values from child environments", () => {
   assert.deepEqual(
     createChildEnvironment({
       PATH: "/bin",
@@ -224,6 +259,10 @@ test("removes Cloudflare, Wrangler, Helius, and dotenv values from child environ
       WRANGLER_LOG_PATH: "/tmp/log",
       wrangler_send_metrics: "true",
       HELIUS_RPC_API_KEY: "helius",
+      X_CLIENT_ID: "x-client",
+      X_CLIENT_SECRET: "x-secret",
+      FIRESTORE_SERVICE_ACCOUNT_EMAIL: "service-account",
+      FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "private-key",
       DOTENV_KEY: "dotenv-vault-key",
     }),
     { PATH: "/bin" },
@@ -352,7 +391,7 @@ test("validates the exact NFT API response shape", () => {
   );
 });
 
-test("smokes CORS, empty-wallet, and provider-backed requests with bounded retries", async () => {
+test("smokes NFT and X callback routes with bounded retries", async () => {
   const responses = smokeResponses(2);
   const requests: Array<{ url: string; init: RequestInit }> = [];
   const delays: number[] = [];
@@ -364,11 +403,12 @@ test("smokes CORS, empty-wallet, and provider-backed requests with bounded retri
     sleep: async (milliseconds: number) => {
       delays.push(milliseconds);
     },
+    createSmokeState: () => "abcdefghijklmnopqrstuvwx",
   };
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 4);
+  assert.equal(requests.length, 6);
   assert.equal(requests[0].url, `${PREVIEW_URL}/nfts`);
   assert.equal(requests[0].init.method, "OPTIONS");
   for (const request of requests) {
@@ -376,7 +416,7 @@ test("smokes CORS, empty-wallet, and provider-backed requests with bounded retri
     assert.ok(request.init.signal instanceof AbortSignal);
     assert.equal(request.url.includes(SMOKE_SOL), false);
   }
-  for (const request of requests.slice(1)) {
+  for (const request of requests.slice(1, 4)) {
     assert.equal(
       new Headers(request.init.headers).get("origin"),
       "https://mons.link",
@@ -394,6 +434,13 @@ test("smokes CORS, empty-wallet, and provider-backed requests with bounded retri
     sol: SMOKE_SOL,
     eth: "",
   });
+  assert.equal(requests[4].url, `${PREVIEW_URL}/auth/x/callback`);
+  assert.equal(requests[4].init.method, "GET");
+  assert.equal(
+    requests[5].url,
+    `${PREVIEW_URL}/auth/x/callback?state=abcdefghijklmnopqrstuvwx`,
+  );
+  assert.equal(requests[5].init.method, "GET");
   assert.deepEqual(delays, [500]);
 });
 
@@ -448,6 +495,8 @@ test("retries an expected-success response body transport failure", async () => 
       swagpack_avatars: [],
       swagpack_reactions: [],
     }),
+    xCallbackResponse(),
+    xCallbackResponse(),
   ];
   const requests: RequestInit[] = [];
   const delays: number[] = [];
@@ -463,7 +512,7 @@ test("retries an expected-success response body transport failure", async () => 
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 4);
+  assert.equal(requests.length, 6);
   assert.deepEqual(delays, [500]);
 });
 
@@ -571,6 +620,10 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
       npm_execpath: NPM_CLI_PATH,
       CLOUDFLARE_API_TOKEN: "ambient-token",
       HELIUS_RPC_API_KEY: "helius-secret",
+      X_CLIENT_ID: "x-client-secret-source",
+      X_CLIENT_SECRET: "x-secret-source",
+      FIRESTORE_SERVICE_ACCOUNT_EMAIL: "service-account-source",
+      FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "private-key-source",
       WRANGLER_LOG_PATH: "/unsafe",
     },
     spawn: (command, args, options) => {
@@ -600,6 +653,10 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
       assert.notEqual(contents, undefined);
       return String(contents);
     },
+    exists: (path) =>
+      path === NPM_CLI_PATH ||
+      path === WRANGLER_CLI_PATH ||
+      path === "/secure/x-secrets.env",
     unlink: (path: string) => {
       files.delete(path);
     },
@@ -616,6 +673,8 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
       SMOKE_SOL,
       "--token-file",
       "/tmp/cloudflare-token",
+      "--secrets-file",
+      "/secure/x-secrets.env",
     ],
     dependencies,
   );
@@ -639,9 +698,18 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
     "cloud/workers/api/wrangler.jsonc",
     "--env-file",
     WRANGLER_RELEASE_ENV_FILE,
+    "--secrets-file",
+    "/secure/x-secrets.env",
   ]);
   assert.equal(calls[2].environment.CLOUDFLARE_API_TOKEN, "file-token");
   assert.equal(calls[2].environment.HELIUS_RPC_API_KEY, undefined);
+  assert.equal(calls[2].environment.X_CLIENT_ID, undefined);
+  assert.equal(calls[2].environment.X_CLIENT_SECRET, undefined);
+  assert.equal(calls[2].environment.FIRESTORE_SERVICE_ACCOUNT_EMAIL, undefined);
+  assert.equal(
+    calls[2].environment.FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY,
+    undefined,
+  );
   assert.equal(calls[2].environment.CI, "true");
   assert.equal(files.size, 0);
   assert.equal(
@@ -652,6 +720,17 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
     logs.some((message) => message.includes("helius-secret")),
     false,
   );
+  for (const sensitiveValue of [
+    "x-client-secret-source",
+    "x-secret-source",
+    "service-account-source",
+    "private-key-source",
+  ]) {
+    assert.equal(
+      logs.some((message) => message.includes(sensitiveValue)),
+      false,
+    );
+  }
   assert.equal(
     logs.some((message) => message.includes("file-token")),
     false,
@@ -676,6 +755,10 @@ test("trigger updates use only the selected token in a sanitized environment", a
       WRANGLER_LOG_PATH: "/unsafe",
       WRANGLER_UNSAFE_VALUE: "unsafe",
       HELIUS_RPC_API_KEY: "helius-secret",
+      X_CLIENT_ID: "x-client",
+      X_CLIENT_SECRET: "x-secret",
+      FIRESTORE_SERVICE_ACCOUNT_EMAIL: "service-account",
+      FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "private-key",
       DOTENV_KEY: "dotenv-vault-key",
     },
     spawn: (command, args, options) => {
@@ -727,6 +810,13 @@ test("trigger updates use only the selected token in a sanitized environment", a
     "/workspace/.cache/wrangler-logs",
   );
   assert.equal(calls[0].environment.HELIUS_RPC_API_KEY, undefined);
+  assert.equal(calls[0].environment.X_CLIENT_ID, undefined);
+  assert.equal(calls[0].environment.X_CLIENT_SECRET, undefined);
+  assert.equal(calls[0].environment.FIRESTORE_SERVICE_ACCOUNT_EMAIL, undefined);
+  assert.equal(
+    calls[0].environment.FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY,
+    undefined,
+  );
   assert.equal(calls[0].environment.DOTENV_KEY, undefined);
   assert.equal(fetchCalled, false);
   for (const sensitiveValue of [
@@ -735,6 +825,10 @@ test("trigger updates use only the selected token in a sanitized environment", a
     "https://legacy.invalid",
     "unsafe",
     "helius-secret",
+    "x-client",
+    "x-secret",
+    "service-account",
+    "private-key",
     "dotenv-vault-key",
     "file-token",
   ]) {
@@ -765,7 +859,10 @@ test("production promotes only the explicit version and then smokes the custom d
       return { status: 0 };
     },
     fetch: async (url) => {
-      assert.equal(url, "https://api.mons.link/nfts");
+      assert.match(
+        String(url),
+        /^https:\/\/api\.mons\.link\/(?:nfts|auth\/x\/callback)/,
+      );
       return nextResponse(responses);
     },
     log: (message: string) => logs.push(message),

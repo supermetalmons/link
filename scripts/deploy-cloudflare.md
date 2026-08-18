@@ -106,6 +106,73 @@ configuration is intentionally changed, review it separately and apply it with
 `npm run deploy:api:triggers -- --token-file /path/to/cloudflare-token`, or set
 `CLOUDFLARE_API_TOKEN` in the invoking shell and omit `--token-file`.
 
+## X OAuth callback
+
+The API Worker also serves `GET https://api.mons.link/auth/x/callback`. It
+exchanges the X authorization code, reads and updates the existing
+`xAuthRedirectFlows` Firestore document through the Firestore REST API, and
+redirects to the flow's validated `mons.link` return URL. The flow creator and
+completion callable remain in Firebase. No Cloudflare storage resource is used.
+
+Register `https://api.mons.link/auth/x/callback` as an exact callback URI in the
+X application before deploying the Firebase flow-creator change. X client IDs,
+client secrets, authorization codes, access tokens, PKCE verifiers, service
+account keys, and raw flow IDs must not appear in source, arguments, or logs.
+
+Create a dedicated Google service account and project custom role for the
+callback. The role must contain only `datastore.entities.get` and
+`datastore.entities.update`, and its project binding must be conditioned on the
+default `mons-link` Firestore database:
+
+```sh
+gcloud iam roles create monsLinkXCallback --project mons-link --title="mons.link X callback" --permissions=datastore.entities.get,datastore.entities.update --stage=GA
+gcloud iam service-accounts create mons-link-x-callback --project mons-link --display-name="mons.link X callback"
+gcloud projects add-iam-policy-binding mons-link --member="serviceAccount:mons-link-x-callback@mons-link.iam.gserviceaccount.com" --role="projects/mons-link/roles/monsLinkXCallback" --condition='expression=resource.name=="projects/mons-link/databases/(default)",title=default-firestore-only'
+gcloud iam service-accounts keys create /secure/mons-link-x-callback.json --project mons-link --iam-account=mons-link-x-callback@mons-link.iam.gserviceaccount.com
+```
+
+Prepare an untracked dotenv file outside the repository containing the existing
+X application credentials and the `client_email` and `private_key` values from
+the generated service-account key:
+
+```dotenv
+X_CLIENT_ID=...
+X_CLIENT_SECRET=...
+FIRESTORE_SERVICE_ACCOUNT_EMAIL=mons-link-x-callback@mons-link.iam.gserviceaccount.com
+FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+```
+
+Upload the first candidate with those secrets attached to that undeployed
+version:
+
+```sh
+npm run deploy:api -- preview --smoke-sol <known-wallet> --secrets-file /secure/mons-link-x-callback.env --token-file /path/to/cloudflare-token
+```
+
+The secrets file is accepted only in preview mode and is passed directly to
+`wrangler versions upload`; the release helper never reads or prints it.
+Existing secrets omitted from the file, including `HELIUS_RPC_API_KEY`, remain
+attached. Delete the local secrets file and the downloaded service-account JSON
+after the candidate has been promoted and the values are stored as encrypted
+Worker secrets.
+
+Preview and production smoke checks cover the NFT API, callback routing without
+a state value, and a random absent state that proves Google OAuth and Firestore
+read access. A real X code is intentionally not used by automated smoke checks.
+After production promotion, exercise X sign-in and settings linking manually,
+including provider denial.
+
+This migration uses an immediate cutover. Deploy and smoke-test the Worker
+candidate first, then deploy the Firebase release that writes the new callback
+URI and reconciles away the former `xAuthRedirectCallback` function. Flows
+opened against the former Firebase URI may fail and must be retried. After
+verification, remove the former URI from X and remove the obsolete Firebase-side
+`X_CLIENT_SECRET` configuration.
+
+For rollback, retain the pre-cutover Firebase commit and the prior API Worker
+version ID. Restore the former callback URI in X, redeploy the callback export
+from that commit, then roll back the API Worker if needed.
+
 ## Firebase deployment
 
 - Deploy the complete Firebase release: `npm run deploy:firebase -- --project mons-link`

@@ -5,6 +5,7 @@ import type {
 } from "./cloudflare/runtime.ts";
 
 const { spawnSync } = require("node:child_process");
+const { randomBytes } = require("node:crypto");
 const { existsSync, mkdirSync, readFileSync, unlinkSync } = require("node:fs");
 const { resolve } = require("node:path");
 const {
@@ -27,6 +28,7 @@ type CliOptions =
   | {
       mode: "preview";
       smokeSol: string;
+      secretsFile?: string;
       tokenFile?: string;
       versionId?: undefined;
     }
@@ -35,9 +37,11 @@ type CliOptions =
       smokeSol: string;
       tokenFile?: string;
       versionId: string;
+      secretsFile?: undefined;
     }
   | {
       mode: "triggers";
+      secretsFile?: undefined;
       tokenFile?: string;
     };
 
@@ -64,6 +68,7 @@ export type RuntimeDependencies = {
   unlink: (path: string) => void;
   fetch: typeof fetch;
   sleep: (milliseconds: number) => Promise<void>;
+  createSmokeState?: () => string;
   log: (message: string) => void;
 };
 
@@ -88,6 +93,7 @@ const WRANGLER_CONFIG_ARGS = [
 ];
 const PRODUCTION_URL = "https://api.mons.link";
 const SMOKE_ORIGIN = "https://mons.link";
+const X_CALLBACK_PATH = "/auth/x/callback";
 const SMOKE_TIMEOUT_MS = 15_000;
 const SMOKE_RETRY_DELAYS_MS = [500, 1_500];
 const VERSION_ID_PATTERN =
@@ -98,7 +104,7 @@ function usage(): string {
     "Release the mons-link-api Worker or update its triggers.",
     "",
     "Usage:",
-    "  npm run deploy:api -- preview --smoke-sol <wallet> [--token-file <path>]",
+    "  npm run deploy:api -- preview --smoke-sol <wallet> [--secrets-file <path>] [--token-file <path>]",
     "  npm run deploy:api -- production --version-id <uuid> --smoke-sol <wallet> [--token-file <path>]",
     "  npm run deploy:api:triggers -- [--token-file <path>]",
     "",
@@ -122,6 +128,7 @@ function parseArgs(argv: string[]): CliOptions {
   }
 
   let smokeSol: string | undefined;
+  let secretsFile: string | undefined;
   let tokenFile: string | undefined;
   let versionId: string | undefined;
 
@@ -131,6 +138,7 @@ function parseArgs(argv: string[]): CliOptions {
 
     if (
       arg === "--smoke-sol" ||
+      arg === "--secrets-file" ||
       arg === "--token-file" ||
       arg === "--version-id"
     ) {
@@ -140,6 +148,8 @@ function parseArgs(argv: string[]): CliOptions {
       index++;
       if (arg === "--smoke-sol") {
         smokeSol = value.trim();
+      } else if (arg === "--secrets-file") {
+        secretsFile = value;
       } else if (arg === "--token-file") {
         tokenFile = value;
       } else {
@@ -157,6 +167,9 @@ function parseArgs(argv: string[]): CliOptions {
     }
     if (versionId !== undefined) {
       throw new DeployError("--version-id is not valid in triggers mode.", 2);
+    }
+    if (secretsFile !== undefined) {
+      throw new DeployError("--secrets-file is not valid in triggers mode.", 2);
     }
     return { mode, tokenFile };
   }
@@ -179,12 +192,21 @@ function parseArgs(argv: string[]): CliOptions {
       2,
     );
   }
+  if (mode === "production" && secretsFile) {
+    throw new DeployError("--secrets-file is only valid in preview mode.", 2);
+  }
   if (versionId && !VERSION_ID_PATTERN.test(versionId)) {
     throw new DeployError("--version-id must be a UUID.", 2);
   }
 
   if (mode === "preview") {
-    return { mode, smokeSol, tokenFile, versionId: undefined };
+    return {
+      mode,
+      smokeSol,
+      secretsFile,
+      tokenFile,
+      versionId: undefined,
+    };
   }
   return { mode, smokeSol, tokenFile, versionId: versionId as string };
 }
@@ -199,6 +221,10 @@ function createChildEnvironment(
       normalized.startsWith("CF_") ||
       normalized.startsWith("WRANGLER_") ||
       normalized === "HELIUS_RPC_API_KEY" ||
+      normalized === "X_CLIENT_ID" ||
+      normalized === "X_CLIENT_SECRET" ||
+      normalized === "FIRESTORE_SERVICE_ACCOUNT_EMAIL" ||
+      normalized === "FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY" ||
       normalized === "DOTENV_KEY",
   );
 }
@@ -314,8 +340,33 @@ function assertNoStore(response: Response): void {
       .some((part) => part.trim() === "no-store")
   ) {
     throw new DeployError(
-      "NFT API smoke response was missing Cache-Control: no-store.",
+      "Smoke response was missing Cache-Control: no-store.",
     );
+  }
+}
+
+function assertXCallbackHeaders(response: Response): void {
+  assertNoStore(response);
+  if (response.headers.get("pragma") !== "no-cache") {
+    throw new DeployError("X callback smoke response was missing Pragma.");
+  }
+  if (response.headers.get("expires") !== "0") {
+    throw new DeployError(
+      "X callback smoke response had an unexpected expiry.",
+    );
+  }
+  if (response.headers.get("referrer-policy") !== "no-referrer") {
+    throw new DeployError(
+      "X callback smoke response had an unexpected referrer policy.",
+    );
+  }
+  if (response.headers.get("x-content-type-options") !== "nosniff") {
+    throw new DeployError(
+      "X callback smoke response was missing nosniff protection.",
+    );
+  }
+  if (response.headers.has("location")) {
+    throw new DeployError("X callback smoke response redirected unexpectedly.");
   }
 }
 
@@ -463,6 +514,39 @@ async function smokeApi(
 
   await smokePost("", "Empty-wallet smoke request", true);
   await smokePost(smokeSol, "Provider-backed smoke request", false);
+
+  const callbackEndpoint = new URL(X_CALLBACK_PATH, baseUrl);
+  const { response: missingState } = await fetchWithRetry(
+    callbackEndpoint.toString(),
+    { method: "GET" },
+    "Missing-state X callback smoke request",
+    dependencies,
+  );
+  if (missingState.status !== 400) {
+    throw new DeployError(
+      `Missing-state X callback smoke request returned ${missingState.status}.`,
+    );
+  }
+  assertXCallbackHeaders(missingState);
+
+  const smokeState =
+    dependencies.createSmokeState?.() || randomBytes(18).toString("base64url");
+  if (!/^[A-Za-z0-9_-]{24}$/.test(smokeState)) {
+    throw new DeployError("Generated X callback smoke state was invalid.");
+  }
+  callbackEndpoint.searchParams.set("state", smokeState);
+  const { response: unknownState } = await fetchWithRetry(
+    callbackEndpoint.toString(),
+    { method: "GET" },
+    "Unknown-state X callback smoke request",
+    dependencies,
+  );
+  if (unknownState.status !== 400) {
+    throw new DeployError(
+      `Unknown-state X callback smoke request returned ${unknownState.status}.`,
+    );
+  }
+  assertXCallbackHeaders(unknownState);
 }
 
 function createDefaultDependencies(): RuntimeDependencies {
@@ -481,6 +565,7 @@ function createDefaultDependencies(): RuntimeDependencies {
     fetch,
     sleep: (milliseconds) =>
       new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)),
+    createSmokeState: () => randomBytes(18).toString("base64url"),
     log: console.log,
   };
 }
@@ -555,6 +640,12 @@ async function execute(
   }
 
   if (options.mode === "preview") {
+    const secretsFile = options.secretsFile
+      ? resolve(options.secretsFile)
+      : undefined;
+    if (secretsFile && !dependencies.exists(secretsFile)) {
+      throw new DeployError("Unable to read --secrets-file.");
+    }
     dependencies.log("[api-deploy] Running complete API validation.");
     run(
       dependencies.nodeExecutable,
@@ -582,6 +673,7 @@ async function execute(
       "upload",
       "--strict",
       ...WRANGLER_CONFIG_ARGS,
+      ...(secretsFile ? ["--secrets-file", secretsFile] : []),
     ];
     dependencies.log("[api-deploy] Uploading an undeployed candidate version.");
     let metadata: UploadMetadata;

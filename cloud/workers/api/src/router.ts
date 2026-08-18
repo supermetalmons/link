@@ -7,6 +7,10 @@ import {
   ProviderFailure,
   type WorkerDependencies,
 } from "./provider.ts";
+import {
+  handleXCallback,
+  type XCallbackDependencyOverrides,
+} from "./xCallback.ts";
 
 const RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
 
@@ -25,9 +29,14 @@ const defaultDependencies: WorkerDependencies = {
 export async function handleRequest(
   request: Request,
   env: Env,
-  dependencyOverrides: Partial<WorkerDependencies> = {},
+  dependencyOverrides: Partial<WorkerDependencies> & {
+    xCallback?: XCallbackDependencyOverrides;
+  } = {},
 ): Promise<Response> {
   const pathname = new URL(request.url).pathname;
+  if (pathname === "/auth/x/callback") {
+    return handleXCallback(request, env, dependencyOverrides.xCallback);
+  }
   if (pathname !== "/nfts") {
     return jsonResponse({ ok: false, error: "not-found" }, 404);
   }

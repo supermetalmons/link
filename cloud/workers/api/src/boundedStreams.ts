@@ -35,26 +35,42 @@ export async function cancelResponseBody(response: Response): Promise<void> {
   } catch {}
 }
 
-export async function readBoundedJsonResponse(
+export async function readBoundedJsonValue(
   response: Response,
   maxBytes: number,
+  createError: () => Error,
 ): Promise<unknown> {
   const contentLength = response.headers.get("Content-Length");
   if (contentLength) {
     const parsedLength = Number(contentLength);
     if (Number.isFinite(parsedLength) && parsedLength > maxBytes) {
       await cancelResponseBody(response);
-      throw new ProviderFailure("unavailable");
+      throw createError();
     }
   }
   if (!response.body) {
-    throw new ProviderFailure("unavailable");
+    throw createError();
   }
-  return JSON.parse(
-    await readBoundedText(
-      response.body,
-      maxBytes,
-      () => new ProviderFailure("unavailable"),
-    ),
-  ) as unknown;
+  let text: string;
+  try {
+    text = await readBoundedText(response.body, maxBytes, createError);
+  } catch {
+    throw createError();
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw createError();
+  }
+}
+
+export async function readBoundedJsonResponse(
+  response: Response,
+  maxBytes: number,
+): Promise<unknown> {
+  return readBoundedJsonValue(
+    response,
+    maxBytes,
+    () => new ProviderFailure("unavailable"),
+  );
 }

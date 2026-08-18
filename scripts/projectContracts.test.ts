@@ -88,7 +88,15 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.deepEqual(config.routes, [
     { pattern: "api.mons.link", custom_domain: true },
   ]);
-  assert.deepEqual(config.secrets, { required: ["HELIUS_RPC_API_KEY"] });
+  assert.deepEqual(config.secrets, {
+    required: [
+      "FIRESTORE_SERVICE_ACCOUNT_EMAIL",
+      "FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY",
+      "HELIUS_RPC_API_KEY",
+      "X_CLIENT_ID",
+      "X_CLIENT_SECRET",
+    ],
+  });
   assert.deepEqual(config.ratelimits, [
     {
       name: "NFT_RATE_LIMITER",
@@ -335,6 +343,7 @@ test("deployment CLIs preserve their offline modes", () => {
   assert.deepEqual(parseApiArgs(["preview", "--smoke-sol", wallet]), {
     mode: "preview",
     smokeSol: wallet,
+    secretsFile: undefined,
     tokenFile: undefined,
     versionId: undefined,
   });

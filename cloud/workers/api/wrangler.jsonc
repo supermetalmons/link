@@ -14,7 +14,13 @@
     },
   ],
   "secrets": {
-    "required": ["HELIUS_RPC_API_KEY"],
+    "required": [
+      "FIRESTORE_SERVICE_ACCOUNT_EMAIL",
+      "FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY",
+      "HELIUS_RPC_API_KEY",
+      "X_CLIENT_ID",
+      "X_CLIENT_SECRET",
+    ],
   },
   "ratelimits": [
     {

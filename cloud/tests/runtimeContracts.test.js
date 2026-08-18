@@ -43,7 +43,7 @@ const callableExportNames = [
   "withdrawEventPrize",
 ];
 
-const httpExportNames = ["xAuthRedirectCallback"];
+const httpExportNames = [];
 
 const taskQueueExportNames = ["processEventProgress", "telegramDeliveryWorker"];
 
@@ -158,10 +158,6 @@ Object.assign(expectedEndpointContracts, {
     timeoutSeconds: 30,
     maxInstances: 20,
     concurrency: 20,
-  }),
-  xAuthRedirectCallback: runtimeContract({
-    type: "http",
-    invoker: ["public"],
   }),
   processEventProgress: taskQueueContract(
     {
@@ -460,7 +456,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 53);
+  assert.equal(expectedExportNames.length, 52);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

@@ -15,10 +15,14 @@ const HELIUS_PAGE_LIMIT = 1000;
 const HELIUS_MAX_PAGES_PER_COLLECTION = 3;
 const MAX_HELIUS_RESPONSE_BODY_BYTES = 8 * 1024 * 1024;
 const env = {
+  FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
+  FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: API_KEY,
   NFT_RATE_LIMITER: {
     limit: async () => ({ success: true }),
   },
+  X_CLIENT_ID: "test-x-client",
+  X_CLIENT_SECRET: "test-x-secret",
 } as Env;
 
 function post(body: unknown, headers?: HeadersInit) {
@@ -131,6 +135,14 @@ test("routes OPTIONS, rejected methods, and unknown paths without Helius", async
     { providerFetch },
   );
   assert.equal(missing.status, 404);
+
+  const xCallback = await handleRequest(
+    new Request("https://api.mons.link/auth/x/callback"),
+    routingEnv,
+    { providerFetch },
+  );
+  assert.equal(xCallback.status, 400);
+  assert.match(xCallback.headers.get("Cache-Control") || "", /no-store/);
   assert.equal(calls, 0);
   assert.equal(rateLimitCalls, 0);
 });

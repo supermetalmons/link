@@ -7,7 +7,7 @@ const {
 
 const X_REDIRECT_FLOW_COLLECTION = "xAuthRedirectFlows";
 const X_REDIRECT_FLOW_TTL_MS = 10 * 60 * 1000;
-const X_REDIRECT_CALLBACK_PATH = "/xAuthRedirectCallback";
+const X_REDIRECT_CALLBACK_URI = "https://api.mons.link/auth/x/callback";
 const X_OAUTH_SCOPES = "tweet.read users.read";
 
 const DEFAULT_ALLOWED_RETURN_ORIGINS = [
@@ -49,49 +49,7 @@ const buildXCodeChallenge = (codeVerifier) => {
   return crypto.createHash("sha256").update(verifier).digest("base64url");
 };
 
-const buildOriginFromHeaders = ({ headers, protocolHint }) => {
-  const host = toCleanString(headers && headers.host);
-  if (!host) {
-    throw new HttpsError("internal", "x-redirect-host-missing");
-  }
-  const forwardedProtoRaw = toCleanString(
-    headers && headers["x-forwarded-proto"],
-  );
-  const forwardedProto = forwardedProtoRaw
-    ? forwardedProtoRaw.split(",")[0].trim()
-    : "";
-  const protocolCandidate =
-    forwardedProto || toCleanString(protocolHint) || "https";
-  const protocol = protocolCandidate === "http" ? "http" : "https";
-  return `${protocol}://${host}`;
-};
-
-const buildXRedirectCallbackUriFromCallable = (request) => {
-  if (!request || !request.rawRequest) {
-    throw new HttpsError("internal", "x-redirect-request-missing");
-  }
-  const configured = toCleanString(process.env.X_OAUTH_REDIRECT_URI);
-  if (configured) {
-    return configured;
-  }
-  const origin = buildOriginFromHeaders({
-    headers: request.rawRequest.headers || {},
-    protocolHint: request.rawRequest.protocol,
-  });
-  return `${origin}${X_REDIRECT_CALLBACK_PATH}`;
-};
-
-const buildXRedirectCallbackUriFromHttpRequest = (request) => {
-  const configured = toCleanString(process.env.X_OAUTH_REDIRECT_URI);
-  if (configured) {
-    return configured;
-  }
-  const origin = buildOriginFromHeaders({
-    headers: request && request.headers ? request.headers : {},
-    protocolHint: request ? request.protocol : "",
-  });
-  return `${origin}${X_REDIRECT_CALLBACK_PATH}`;
-};
+const buildXRedirectCallbackUriFromCallable = () => X_REDIRECT_CALLBACK_URI;
 
 const getAllowedReturnOrigins = () => {
   const envConfigured = toCleanString(process.env.X_REDIRECT_ALLOWED_ORIGINS);
@@ -140,14 +98,6 @@ const getXOauthClientId = () => {
   return clientId;
 };
 
-const getXOauthClientSecret = () => {
-  const clientSecret = toCleanString(process.env.X_CLIENT_SECRET);
-  if (!clientSecret) {
-    throw new HttpsError("failed-precondition", "X_CLIENT_SECRET is required.");
-  }
-  return clientSecret;
-};
-
 const buildXOauthUrl = ({ clientId, callbackUri, flowId, codeChallenge }) => {
   const authUrl = new URL("https://x.com/i/oauth2/authorize");
   authUrl.searchParams.set("response_type", "code");
@@ -158,14 +108,6 @@ const buildXOauthUrl = ({ clientId, callbackUri, flowId, codeChallenge }) => {
   authUrl.searchParams.set("code_challenge", codeChallenge);
   authUrl.searchParams.set("code_challenge_method", "S256");
   return authUrl.toString();
-};
-
-const buildXBasicAuthorizationHeader = ({ clientId, clientSecret }) => {
-  const credentials = Buffer.from(
-    `${clientId}:${clientSecret}`,
-    "utf8",
-  ).toString("base64");
-  return `Basic ${credentials}`;
 };
 
 const buildReturnUrlWithXRedirectStatus = ({
@@ -199,11 +141,8 @@ module.exports = {
   createXCodeVerifier,
   buildXCodeChallenge,
   buildXRedirectCallbackUriFromCallable,
-  buildXRedirectCallbackUriFromHttpRequest,
   resolveSafeReturnUrl,
   getXOauthClientId,
-  getXOauthClientSecret,
   buildXOauthUrl,
-  buildXBasicAuthorizationHeader,
   buildReturnUrlWithXRedirectStatus,
 };
