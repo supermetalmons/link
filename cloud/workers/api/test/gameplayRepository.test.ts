@@ -4,6 +4,7 @@ import {
   createGameplayRepository,
   GameplayRepositoryFailure,
   MAX_FIRESTORE_BODY_BYTES,
+  parseAutomatchProfileQuery,
   parseNavigationGame,
   parseProfileQuery,
 } from "../src/gameplayRepository.ts";
@@ -73,6 +74,143 @@ test("parses only the profile and navigation fields used by gameplay", () => {
   assert.throws(
     () => parseNavigationGame({ fields: {} }),
     GameplayRepositoryFailure,
+  );
+  assert.deepEqual(
+    parseAutomatchProfileQuery([
+      {
+        document: {
+          name: "projects/mons-link/databases/(default)/documents/users/profile-1",
+          fields: {
+            aura: { stringValue: "legacy" },
+            custom: {
+              mapValue: {
+                fields: {
+                  aura: { stringValue: "rainbow" },
+                  emoji: { integerValue: "0" },
+                },
+              },
+            },
+            emoji: { integerValue: "8" },
+            eth: { stringValue: "0xabc" },
+            rating: { integerValue: "1512" },
+            sol: { stringValue: "solana" },
+            username: { stringValue: "alice" },
+          },
+        },
+      },
+    ]),
+    {
+      aura: "rainbow",
+      emoji: 0,
+      eth: "0xabc",
+      profileId: "profile-1",
+      rating: 1512,
+      sol: "solana",
+      username: "alice",
+    },
+  );
+  assert.deepEqual(
+    parseAutomatchProfileQuery([
+      {
+        document: {
+          name: "projects/mons-link/databases/(default)/documents/users/profile-2",
+        },
+      },
+    ]),
+    {
+      aura: "",
+      emoji: "",
+      eth: "",
+      profileId: "profile-2",
+      rating: 1500,
+      sol: "",
+      username: "",
+    },
+  );
+  assert.equal(
+    parseAutomatchProfileQuery([
+      {
+        document: {
+          name: "projects/mons-link/databases/(default)/documents/users/profile-3",
+          fields: {
+            aura: { stringValue: "legacy" },
+            custom: {
+              mapValue: { fields: { aura: { nullValue: null } } },
+            },
+          },
+        },
+      },
+    ])?.aura,
+    "legacy",
+  );
+  assert.equal(
+    parseAutomatchProfileQuery([
+      {
+        document: {
+          name: "projects/mons-link/databases/(default)/documents/users/profile-4",
+          fields: {
+            aura: { stringValue: "legacy" },
+            custom: {
+              mapValue: { fields: { aura: { stringValue: "" } } },
+            },
+          },
+        },
+      },
+    ])?.aura,
+    "",
+  );
+  assert.equal(parseAutomatchProfileQuery([{ readTime: "now" }]), null);
+  assert.throws(
+    () => parseAutomatchProfileQuery({}),
+    GameplayRepositoryFailure,
+  );
+});
+
+test("queries the caller profile summary with the Firebase token", async () => {
+  const requests: Array<{ input: string; init: RequestInit }> = [];
+  const repository = createGameplayRepository(env, {
+    rtdbClient,
+    fetcher: async (input, init = {}) => {
+      requests.push({ input: String(input), init });
+      return jsonResponse([
+        {
+          document: {
+            name: "projects/mons-link/databases/(default)/documents/users/profile-1",
+            fields: { rating: { doubleValue: 1501.5 } },
+          },
+        },
+      ]);
+    },
+  });
+  assert.deepEqual(
+    await repository.getAutomatchProfile("firebase-uid", "firebase-token"),
+    {
+      aura: "",
+      emoji: "",
+      eth: "",
+      profileId: "profile-1",
+      rating: 1501.5,
+      sol: "",
+      username: "",
+    },
+  );
+  assert.equal(requests[0].input.endsWith(":runQuery"), true);
+  assert.equal(
+    new Headers(requests[0].init.headers).get("Authorization"),
+    "Bearer firebase-token",
+  );
+  assert.deepEqual(
+    JSON.parse(String(requests[0].init.body)).structuredQuery.select.fields,
+    [
+      { fieldPath: "aura" },
+      { fieldPath: "custom.aura" },
+      { fieldPath: "custom.emoji" },
+      { fieldPath: "emoji" },
+      { fieldPath: "eth" },
+      { fieldPath: "rating" },
+      { fieldPath: "sol" },
+      { fieldPath: "username" },
+    ],
   );
 });
 

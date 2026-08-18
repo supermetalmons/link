@@ -225,9 +225,6 @@ test("full releases preserve Telegram dependency barriers at every batch size", 
     const batchIndex = (functionName) =>
       batchIndexByFunctionName.get(functionName);
     assert.ok(
-      batchIndex("projectAutomatchTelegramMessages") < batchIndex("automatch"),
-    );
-    assert.ok(
       batchIndex("projectRatingTelegramUpdates") < batchIndex("updateRatings"),
     );
     for (const eventDomainFunctionName of eventDomainFunctionNames) {

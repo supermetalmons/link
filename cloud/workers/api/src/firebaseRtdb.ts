@@ -35,6 +35,7 @@ export type FirebaseRtdbCredentials = {
 
 export type FirebaseRtdbQuery = {
   equalTo?: string | number | boolean | null;
+  limitToFirst?: number;
   orderBy?: string;
 };
 
@@ -45,8 +46,15 @@ export type FirebaseRtdbTransactionResult = {
 };
 
 export type FirebaseRtdbClient = {
-  getPath: (path: string, query?: FirebaseRtdbQuery) => Promise<unknown>;
-  patchRoot: (updates: Record<string, unknown>) => Promise<void>;
+  getPath: (
+    path: string,
+    query?: FirebaseRtdbQuery,
+    signal?: AbortSignal,
+  ) => Promise<unknown>;
+  patchRoot: (
+    updates: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) => Promise<void>;
   transactPath: (
     path: string,
     updater: (current: unknown) => unknown,
@@ -97,6 +105,12 @@ function queryDatabaseUrl(
   }
   if (query.equalTo !== undefined) {
     url.searchParams.set("equalTo", JSON.stringify(query.equalTo));
+  }
+  if (query.limitToFirst !== undefined) {
+    if (!Number.isInteger(query.limitToFirst) || query.limitToFirst < 1) {
+      throw new FirebaseRtdbFailure();
+    }
+    url.searchParams.set("limitToFirst", String(query.limitToFirst));
   }
   return url.toString();
 }
@@ -172,14 +186,18 @@ export function createFirebaseRtdbClient(
   const authorizedFetch = async (
     input: string,
     init: RequestInit = {},
+    signal?: AbortSignal,
   ): Promise<Response> => {
     const headers = new Headers(init.headers);
     headers.set("Authorization", `Bearer ${await getAccessToken()}`);
+    const requestSignal = signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+      : AbortSignal.timeout(timeoutMs);
     try {
       return await fetcher(input, {
         ...init,
         headers,
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: requestSignal,
       });
     } catch {
       throw new FirebaseRtdbFailure();
@@ -197,19 +215,23 @@ export function createFirebaseRtdbClient(
     );
   };
   return {
-    async getPath(path, query) {
+    async getPath(path, query, signal) {
       return readJson(
-        await authorizedFetch(queryDatabaseUrl(root, path, query)),
+        await authorizedFetch(queryDatabaseUrl(root, path, query), {}, signal),
       );
     },
-    async patchRoot(updates) {
+    async patchRoot(updates, signal) {
       const url = new URL(databaseUrl(root, ""));
       url.searchParams.set("print", "silent");
-      const response = await authorizedFetch(url.toString(), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(updates),
-      });
+      const response = await authorizedFetch(
+        url.toString(),
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(updates),
+        },
+        signal,
+      );
       if (!response.ok) {
         await cancelResponseBody(response);
         throw new FirebaseRtdbFailure();

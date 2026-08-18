@@ -57,6 +57,7 @@ test("reads Telegram state through authenticated bounded REST requests", async (
 
 test("encodes exact RTDB queries and silent multipath server-value updates", async () => {
   const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+  const controller = new AbortController();
   const client = createFirebaseRtdbClient(env, {
     getAccessToken: async () => "access-token",
     fetcher: async (input, init) => {
@@ -67,22 +68,31 @@ test("encodes exact RTDB queries and silent multipath server-value updates", asy
     },
   });
   assert.deepEqual(
-    await client.getPath("automatch", {
-      orderBy: "uid",
-      equalTo: "firebase-uid",
-    }),
+    await client.getPath(
+      "automatch",
+      {
+        orderBy: "uid",
+        equalTo: "firebase-uid",
+        limitToFirst: 1,
+      },
+      controller.signal,
+    ),
     { invite: { uid: "firebase-uid" } },
   );
-  await client.patchRoot({
-    "automatch/invite": null,
-    "invites/invite/canceledAt": FIREBASE_RTDB_SERVER_TIMESTAMP,
-    "telegramAutomatches/invite/generation": firebaseRtdbIncrement(1),
-  });
+  await client.patchRoot(
+    {
+      "automatch/invite": null,
+      "invites/invite/canceledAt": FIREBASE_RTDB_SERVER_TIMESTAMP,
+      "telegramAutomatches/invite/generation": firebaseRtdbIncrement(1),
+    },
+    controller.signal,
+  );
 
   const queryUrl = new URL(String(requests[0].input));
   assert.equal(queryUrl.pathname, "/automatch.json");
   assert.equal(queryUrl.searchParams.get("orderBy"), '"uid"');
   assert.equal(queryUrl.searchParams.get("equalTo"), '"firebase-uid"');
+  assert.equal(queryUrl.searchParams.get("limitToFirst"), "1");
   const patchUrl = new URL(String(requests[1].input));
   assert.equal(patchUrl.pathname, "/.json");
   assert.equal(patchUrl.searchParams.get("print"), "silent");
@@ -98,7 +108,14 @@ test("encodes exact RTDB queries and silent multipath server-value updates", asy
     new Headers(requests[1].init?.headers).get("Authorization"),
     "Bearer access-token",
   );
+  controller.abort();
+  assert.equal(requests[0].init?.signal?.aborted, true);
+  assert.equal(requests[1].init?.signal?.aborted, true);
   assert.throws(() => firebaseRtdbIncrement(Number.NaN), TypeError);
+  await assert.rejects(
+    () => client.getPath("automatch", { limitToFirst: 0 }),
+    FirebaseRtdbFailure,
+  );
 });
 
 test("commits and aborts ETag-backed transactions", async () => {

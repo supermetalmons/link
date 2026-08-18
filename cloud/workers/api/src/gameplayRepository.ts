@@ -19,6 +19,16 @@ export type NavigationGameDocument = {
 
 export type NavigationGameDeleteResult = "conflict" | "deleted" | "missing";
 
+export type AutomatchProfile = {
+  aura: string;
+  emoji: number | string;
+  eth: string;
+  profileId: string;
+  rating: number;
+  sol: string;
+  username: string;
+};
+
 export type GameplayRepository = {
   deleteNavigationGame: (
     profileId: string,
@@ -29,13 +39,25 @@ export type GameplayRepository = {
     uid: string,
     firebaseIdToken: string,
   ) => Promise<string | null>;
+  getAutomatchProfile: (
+    uid: string,
+    firebaseIdToken: string,
+    signal?: AbortSignal,
+  ) => Promise<AutomatchProfile | null>;
   getNavigationGame: (
     profileId: string,
     inviteId: string,
     firebaseIdToken: string,
   ) => Promise<NavigationGameDocument | null>;
-  getRtdbPath: (path: string, query?: FirebaseRtdbQuery) => Promise<unknown>;
-  patchRtdbRoot: (updates: Record<string, unknown>) => Promise<void>;
+  getRtdbPath: (
+    path: string,
+    query?: FirebaseRtdbQuery,
+    signal?: AbortSignal,
+  ) => Promise<unknown>;
+  patchRtdbRoot: (
+    updates: Record<string, unknown>,
+    signal?: AbortSignal,
+  ) => Promise<void>;
 };
 
 type GameplayRepositoryDependencies = {
@@ -87,6 +109,72 @@ function parseProfileQuery(value: unknown): string | null {
       throw new GameplayRepositoryFailure();
     }
     return profileId;
+  }
+  return null;
+}
+
+function readFirestoreString(value: unknown): string {
+  const encoded = toRecord(value);
+  return typeof encoded?.stringValue === "string" ? encoded.stringValue : "";
+}
+
+function readOptionalFirestoreString(value: unknown): string | undefined {
+  const encoded = toRecord(value);
+  return typeof encoded?.stringValue === "string"
+    ? encoded.stringValue
+    : undefined;
+}
+
+function readFirestoreNumber(value: unknown, fallback: number): number {
+  const encoded = toRecord(value);
+  const raw = encoded?.integerValue ?? encoded?.doubleValue;
+  const parsed =
+    typeof raw === "string" || typeof raw === "number" ? Number(raw) : NaN;
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function readFirestoreEmoji(value: unknown): number | string {
+  const encoded = toRecord(value);
+  if (typeof encoded?.stringValue === "string") {
+    return encoded.stringValue;
+  }
+  const parsed = readFirestoreNumber(value, NaN);
+  return Number.isFinite(parsed) ? parsed : "";
+}
+
+export function parseAutomatchProfileQuery(
+  value: unknown,
+): AutomatchProfile | null {
+  if (!Array.isArray(value)) {
+    throw new GameplayRepositoryFailure();
+  }
+  for (const entry of value) {
+    const result = toRecord(entry);
+    const document = toRecord(result?.document);
+    if (!document) {
+      continue;
+    }
+    const name = typeof document.name === "string" ? document.name.trim() : "";
+    const fields = toRecord(document.fields) || {};
+    const profileId = name.split("/").pop()?.trim() || "";
+    if (!profileId) {
+      throw new GameplayRepositoryFailure();
+    }
+    const custom = toRecord(toRecord(fields.custom)?.mapValue);
+    const customFields = toRecord(custom?.fields) || {};
+    const customEmoji = Object.hasOwn(customFields, "emoji")
+      ? readFirestoreEmoji(customFields.emoji)
+      : undefined;
+    const customAura = readOptionalFirestoreString(customFields.aura);
+    return {
+      aura: customAura ?? readFirestoreString(fields.aura),
+      emoji: customEmoji ?? readFirestoreEmoji(fields.emoji),
+      eth: readFirestoreString(fields.eth),
+      profileId,
+      rating: readFirestoreNumber(fields.rating, 1500),
+      sol: readFirestoreString(fields.sol),
+      username: readFirestoreString(fields.username),
+    };
   }
   return null;
 }
@@ -145,11 +233,15 @@ export function createGameplayRepository(
   const fetchWithTimeout = async (
     input: string,
     init: RequestInit,
+    signal?: AbortSignal,
   ): Promise<Response> => {
+    const requestSignal = signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+      : AbortSignal.timeout(timeoutMs);
     try {
       return await fetcher(input, {
         ...init,
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: requestSignal,
       });
     } catch {
       throw new GameplayRepositoryFailure();
@@ -159,6 +251,56 @@ export function createGameplayRepository(
   return {
     getRtdbPath: rtdbClient.getPath,
     patchRtdbRoot: rtdbClient.patchRoot,
+
+    async getAutomatchProfile(uid, firebaseIdToken, signal) {
+      const response = await fetchWithTimeout(
+        `${FIRESTORE_DOCUMENTS_ROOT}:runQuery`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${firebaseIdToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            structuredQuery: {
+              select: {
+                fields: [
+                  { fieldPath: "aura" },
+                  { fieldPath: "custom.aura" },
+                  { fieldPath: "custom.emoji" },
+                  { fieldPath: "emoji" },
+                  { fieldPath: "eth" },
+                  { fieldPath: "rating" },
+                  { fieldPath: "sol" },
+                  { fieldPath: "username" },
+                ],
+              },
+              from: [{ collectionId: "users" }],
+              where: {
+                fieldFilter: {
+                  field: { fieldPath: "logins" },
+                  op: "ARRAY_CONTAINS",
+                  value: { stringValue: uid },
+                },
+              },
+              limit: 1,
+            },
+          }),
+        },
+        signal,
+      );
+      if (!response.ok) {
+        await cancelResponseBody(response);
+        throw new GameplayRepositoryFailure();
+      }
+      return parseAutomatchProfileQuery(
+        await readBoundedJsonValue(
+          response,
+          MAX_FIRESTORE_BODY_BYTES,
+          () => new GameplayRepositoryFailure(),
+        ),
+      );
+    },
 
     async findProfileId(uid, firebaseIdToken) {
       const response = await fetchWithTimeout(

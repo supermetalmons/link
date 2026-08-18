@@ -100,6 +100,7 @@ const AUTHENTICATED_ROUTE_SMOKES = [
   { path: "/auth/methods", method: "GET" },
   { path: "/auth/x/flows", method: "POST" },
   { path: "/automatch/cancel", method: "POST" },
+  { path: "/automatch/start", method: "POST" },
   { path: "/mining/rock", method: "POST" },
   { path: "/navigation/games/remove", method: "POST" },
 ] as const;

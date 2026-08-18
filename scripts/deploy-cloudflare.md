@@ -139,16 +139,18 @@ pre-migration commit before restoring those versions.
 
 ## Gameplay mutation APIs
 
-Authenticated automatch cancellation and navigation cleanup are served by:
+Authenticated automatch start, cancellation, and navigation cleanup are served by:
 
+- `POST https://api.mons.link/automatch/start`
 - `POST https://api.mons.link/automatch/cancel`
 - `POST https://api.mons.link/navigation/games/remove`
 
 The browser sends its Firebase ID token in the `Authorization: Bearer` header.
-The Worker preserves the existing cancellation race check, automatch Telegram
-source updates, navigation-state gates, and conditional Firestore deletion.
-Firebase Authentication, RTDB, Firestore, and the existing projection triggers
-remain authoritative.
+The Worker preserves the existing first-entry matchmaking policy, bounded match
+retry behavior, cancellation race check, automatch Telegram source updates,
+navigation-state gates, and conditional Firestore deletion. Firebase
+Authentication, RTDB, Firestore, and the existing projection triggers remain
+authoritative.
 
 Create one dedicated Google identity with separate least-privilege role
 bindings. The RTDB role is project-scoped because Realtime Database IAM does
@@ -188,14 +190,18 @@ npm run deploy -- preview --token-file /secure/cloudflare-token
 npm run deploy -- production --version-id <frontend-candidate-version-id> --token-file /secure/cloudflare-token
 ```
 
-In an authenticated production session, enter and cancel automatch. Confirm the
-queue entry disappears, the invite retains the correct canceled or matched
-state after the guest recheck, and the Telegram projection advances. Create a
-disposable direct invite without a guest, return home, and remove its waiting
-navigation item. Confirm only that waiting Firestore game document is deleted.
+In two authenticated production sessions backed by distinct profiles, start an
+automatch in the first session and confirm the queue, invite, host match, and
+pending Telegram source. Start automatch in the second session and confirm it
+returns the same invite as matched, removes the queue, stores the guest match
+with the opposite color and same variant, and advances the Telegram projection.
+Start and cancel one more automatch and confirm the invite retains the correct
+canceled or matched state after the guest recheck. Create a disposable direct
+invite without a guest, return home, and remove its waiting navigation item.
+Confirm only that waiting Firestore game document is deleted.
 
-After both checks pass, immediately run the complete Firebase release and
-confirm the retired callables are absent:
+After these checks pass, immediately run the complete Firebase release and
+confirm the retired `automatch` callable is absent:
 
 ```sh
 npm run deploy:firebase -- --project mons-link
@@ -207,9 +213,8 @@ Worker version stores both values as encrypted secrets. Retain the service
 account and its Worker secrets for rollback.
 
 Before Firebase reconciliation, rollback the frontend and API Worker versions.
-After reconciliation, first redeploy `cancelAutomatch` and
-`removeNavigationGame` from the retained pre-migration commit, then restore the
-previous frontend and API Worker versions.
+After reconciliation, first redeploy `automatch` from the retained pre-migration
+commit, then restore the previous frontend and API Worker versions.
 
 ## Auth initiation and reads
 

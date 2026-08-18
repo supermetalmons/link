@@ -165,7 +165,7 @@ function smokeResponses(providerAttempts = 1): Response[] {
       swagpack_reactions: [{ id: 3, count: 1 }],
     }),
   );
-  for (let index = 0; index < 6; index++) {
+  for (let index = 0; index < 7; index++) {
     responses.push(authPreflightResponse(), unauthenticatedResponse());
   }
   responses.push(
@@ -465,7 +465,7 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 19);
+  assert.equal(requests.length, 21);
   assert.equal(requests[0].url, `${PREVIEW_URL}/nfts`);
   assert.equal(requests[0].init.method, "OPTIONS");
   for (const request of requests) {
@@ -491,7 +491,7 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
     sol: SMOKE_SOL,
     eth: "",
   });
-  const authRequests = requests.slice(4, 16);
+  const authRequests = requests.slice(4, 18);
   assert.deepEqual(
     authRequests.map(({ url, init }) => [url, init.method]),
     [
@@ -503,6 +503,8 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
       [`${PREVIEW_URL}/auth/x/flows`, "POST"],
       [`${PREVIEW_URL}/automatch/cancel`, "OPTIONS"],
       [`${PREVIEW_URL}/automatch/cancel`, "POST"],
+      [`${PREVIEW_URL}/automatch/start`, "OPTIONS"],
+      [`${PREVIEW_URL}/automatch/start`, "POST"],
       [`${PREVIEW_URL}/mining/rock`, "OPTIONS"],
       [`${PREVIEW_URL}/mining/rock`, "POST"],
       [`${PREVIEW_URL}/navigation/games/remove`, "OPTIONS"],
@@ -510,14 +512,14 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
     ],
   );
   assert.equal(
-    requests[18].url,
+    requests[20].url,
     `${PREVIEW_URL}/auth/x/callback?state=abcdefghijklmnopqrstuvwx`,
   );
-  assert.equal(requests[16].url, `${PREVIEW_URL}/internal/telegram/delivery`);
-  assert.equal(requests[16].init.method, "POST");
-  assert.equal(requests[17].url, `${PREVIEW_URL}/auth/x/callback`);
-  assert.equal(requests[17].init.method, "GET");
-  assert.equal(requests[18].init.method, "GET");
+  assert.equal(requests[18].url, `${PREVIEW_URL}/internal/telegram/delivery`);
+  assert.equal(requests[18].init.method, "POST");
+  assert.equal(requests[19].url, `${PREVIEW_URL}/auth/x/callback`);
+  assert.equal(requests[19].init.method, "GET");
+  assert.equal(requests[20].init.method, "GET");
   assert.deepEqual(delays, [500]);
 });
 
@@ -584,6 +586,8 @@ test("retries an expected-success response body transport failure", async () => 
     unauthenticatedResponse(),
     authPreflightResponse(),
     unauthenticatedResponse(),
+    authPreflightResponse(),
+    unauthenticatedResponse(),
     telegramBridgeUnauthorizedResponse(),
     xCallbackResponse(),
     xCallbackResponse(),
@@ -602,7 +606,7 @@ test("retries an expected-success response body transport failure", async () => 
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 19);
+  assert.equal(requests.length, 21);
   assert.deepEqual(delays, [500]);
 });
 
@@ -969,7 +973,7 @@ test("production promotes only the explicit version and then smokes the custom d
     fetch: async (url) => {
       assert.match(
         String(url),
-        /^https:\/\/api\.mons\.link\/(?:nfts|mining\/rock|automatch\/cancel|navigation\/games\/remove|internal\/telegram\/delivery|auth\/(?:intents|methods|x\/(?:flows|callback)))/,
+        /^https:\/\/api\.mons\.link\/(?:nfts|mining\/rock|automatch\/(?:cancel|start)|navigation\/games\/remove|internal\/telegram\/delivery|auth\/(?:intents|methods|x\/(?:flows|callback)))/,
       );
       return nextResponse(responses);
     },

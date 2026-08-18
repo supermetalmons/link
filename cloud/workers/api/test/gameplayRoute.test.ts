@@ -32,13 +32,13 @@ const identity: FirebaseIdentity = {
   profileId: "claim-profile",
   uid: "firebase-uid",
 };
-
 function repository(
   overrides: Partial<GameplayRepository> = {},
 ): GameplayRepository {
   return {
     deleteNavigationGame: async () => "deleted",
     findProfileId: async () => null,
+    getAutomatchProfile: async () => null,
     getNavigationGame: async () => null,
     getRtdbPath: async () => null,
     patchRtdbRoot: async () => undefined,
@@ -468,6 +468,32 @@ test("routes authenticated CORS and rejects methods before authentication", asyn
     context(),
   );
   assert.equal(forbidden.status, 403);
+
+  const started = await handleGameplayRoute(
+    request("/automatch/start", {
+      body: { emojiId: 7, aura: "rainbow" },
+    }),
+    env,
+    context(),
+    {
+      repository: repository({
+        getAutomatchProfile: async () => null,
+        getRtdbPath: async (path, query) => {
+          assert.equal(path, "automatch");
+          assert.deepEqual(query, { orderBy: "$key", limitToFirst: 1 });
+          return { auto_existing: { uid: identity.uid } };
+        },
+      }),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(started.status, 200);
+  assert.deepEqual(await started.json(), {
+    ok: true,
+    inviteId: "auto_existing",
+    mode: "pending",
+    matchedImmediately: false,
+  });
 });
 
 test("authenticates before body parsing and sanitizes route failures", async () => {
@@ -497,6 +523,9 @@ test("authenticates before body parsing and sanitizes route failures", async () 
 
   const invalidBodies = [
     ["/automatch/cancel", { unexpected: true }],
+    ["/automatch/start", {}],
+    ["/automatch/start", { emojiId: 0, aura: "" }],
+    ["/automatch/start", { emojiId: 1, aura: "", extra: true }],
     ["/navigation/games/remove", {}],
     ["/navigation/games/remove", { inviteId: "unsafe/key" }],
   ] as const;

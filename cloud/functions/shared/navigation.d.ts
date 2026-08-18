@@ -17,6 +17,26 @@ export interface AutomatchStateHintInput {
   storedStateHint?: unknown;
 }
 
+export interface StartAutomatchRequest {
+  emojiId: number;
+  aura: string;
+}
+
+export type StartAutomatchResponse =
+  | {
+      ok: true;
+      inviteId: string;
+      mode: "matched";
+      matchedImmediately: true;
+    }
+  | {
+      ok: true;
+      inviteId: string;
+      mode: "pending";
+      matchedImmediately: false;
+    }
+  | { ok: false };
+
 export type CancelAutomatchRequest = Record<string, never>;
 
 export interface CancelAutomatchResponse {
@@ -55,6 +75,12 @@ export function compareNavigationItems<T extends NavigationOrderingItem>(
   left: T,
   right: T,
 ): number;
+export function isStartAutomatchRequest(
+  value: unknown,
+): value is StartAutomatchRequest;
+export function isStartAutomatchResponse(
+  value: unknown,
+): value is StartAutomatchResponse;
 export function isCancelAutomatchResponse(
   value: unknown,
 ): value is CancelAutomatchResponse;

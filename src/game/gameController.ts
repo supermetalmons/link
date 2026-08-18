@@ -2734,7 +2734,7 @@ export function didClickAutomatchButton(
         return;
       }
       onAutomatchResponse?.(response);
-      const automatchInviteId = response.inviteId;
+      const automatchInviteId = response.ok ? response.inviteId : null;
       if (automatchInviteId) {
         connection.connectToAutomatch(automatchInviteId);
       } else {

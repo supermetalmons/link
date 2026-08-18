@@ -124,20 +124,24 @@ test("legacy Telegram transport helpers stay removed", () => {
 });
 
 test("a blocked Telegram client cannot delay latency-critical domain handlers", () => {
-  const domainFiles = ["automatch.js", "updateRatings.js", "events.js"];
-  for (const fileName of domainFiles) {
-    const source = fs.readFileSync(path.join(functionsRoot, fileName), "utf8");
-    assert.equal(source.includes("telegramClient"), false, fileName);
+  const domainFiles = [
+    path.join(repositoryRoot, "cloud/workers/api/src/automatch.ts"),
+    path.join(functionsRoot, "updateRatings.js"),
+    path.join(functionsRoot, "events.js"),
+  ];
+  for (const filePath of domainFiles) {
+    const source = fs.readFileSync(filePath, "utf8");
+    assert.equal(source.includes("telegramClient"), false, filePath);
     assert.equal(
       source.includes('require("./telegramDelivery")'),
       false,
-      fileName,
+      filePath,
     );
-    assert.equal(source.includes("telegramDeliveryFunctions"), false, fileName);
-    assert.equal(source.includes("queueTelegram"), false, fileName);
-    assert.equal(source.includes("sendTelegramMessage"), false, fileName);
-    assert.equal(source.includes("editTelegramMessage"), false, fileName);
-    assert.equal(source.includes("deleteTelegramMessage"), false, fileName);
+    assert.equal(source.includes("telegramDeliveryFunctions"), false, filePath);
+    assert.equal(source.includes("queueTelegram"), false, filePath);
+    assert.equal(source.includes("sendTelegramMessage"), false, filePath);
+    assert.equal(source.includes("editTelegramMessage"), false, filePath);
+    assert.equal(source.includes("deleteTelegramMessage"), false, filePath);
   }
 });
 

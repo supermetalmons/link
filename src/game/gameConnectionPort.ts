@@ -1,4 +1,5 @@
 import type { PlayerColor } from "@mons/shared/ids";
+import type { StartAutomatchResponse } from "@mons/shared/navigation";
 import type {
   HistoricalMatchPair,
   PlayerProfile,
@@ -6,12 +7,7 @@ import type {
 } from "../connection/connectionModels";
 import type { RouteState } from "../navigation/routeState";
 
-export type AutomatchResponse = {
-  ok: boolean;
-  inviteId?: string | null;
-  mode?: "matched" | "pending";
-  matchedImmediately?: boolean;
-};
+export type AutomatchResponse = StartAutomatchResponse;
 
 type TimerStartResponse =
   { ok: true; timer: string; duration: number } | { ok: false };

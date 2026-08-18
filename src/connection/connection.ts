@@ -104,6 +104,7 @@ import { mineRockViaApi } from "../services/miningApi";
 import {
   cancelAutomatchViaApi,
   removeNavigationGameViaApi,
+  startAutomatchViaApi,
 } from "../services/gameplayApi";
 import { compareNavigationItems as compareNavigationItemsByDisplayOrder } from "../services/navigationItemOrdering";
 import { resetNftCache } from "../services/nftCache";
@@ -133,6 +134,7 @@ import {
 import {
   getNavigationSortBucket,
   normalizeStrictAutomatchStateHint,
+  type StartAutomatchResponse,
 } from "@mons/shared/navigation";
 import { isAutoInviteId, pickHostColor } from "@mons/shared/ids";
 import type {
@@ -2263,14 +2265,12 @@ class Connection {
     }
   }
 
-  public async automatch(): Promise<any> {
+  public async automatch(): Promise<StartAutomatchResponse> {
     try {
       await this.ensureAuthenticated();
       const emojiId = getPlayersEmojiId();
       const aura = storage.getPlayerEmojiAura("");
-      const automatch = httpsCallable(this.functions, "automatch");
-      const response = await automatch({ emojiId, aura });
-      return response.data;
+      return startAutomatchViaApi({ emojiId, aura }, this.getAuthApiToken);
     } catch (error) {
       console.error("Error calling automatch:", error);
       throw error;

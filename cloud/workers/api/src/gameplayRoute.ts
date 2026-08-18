@@ -1,6 +1,7 @@
 import {
   inferAutomatchStateHint,
   isRemoveNavigationGameRequest,
+  isStartAutomatchRequest,
   type CancelAutomatchResponse,
   type RemoveNavigationGameResponse,
 } from "@mons/shared/navigation";
@@ -28,6 +29,7 @@ import {
   type GameplayRepository,
 } from "./gameplayRepository.ts";
 import { readBoundedJson } from "./http.ts";
+import { startAutomatch, type AutomatchDependencies } from "./automatch.ts";
 
 const MAX_FIREBASE_KEY_BYTES = 768;
 const MAX_NAVIGATION_DELETE_ATTEMPTS = 3;
@@ -35,6 +37,7 @@ const INVALID_FIREBASE_KEY_CHARACTERS = ".#$[]/";
 
 export const GAMEPLAY_PATHS = new Set([
   "/automatch/cancel",
+  "/automatch/start",
   "/navigation/games/remove",
 ]);
 
@@ -52,6 +55,7 @@ type QueuedAutomatch = {
 };
 
 export type GameplayRouteDependencies = {
+  automatch?: AutomatchDependencies;
   logFailure?: (kind: string) => void;
   repository?: GameplayRepository;
   verifyIdentity?: (
@@ -369,6 +373,12 @@ async function readGameplayBody(
     }
     return body;
   }
+  if (pathname === "/automatch/start") {
+    if (!isStartAutomatchRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
+  }
   if (!isRemoveNavigationGameRequest(body)) {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
   }
@@ -403,14 +413,26 @@ export async function handleGameplayRoute(
     )(request, ctx);
     const body = await readGameplayBody(request, pathname);
     const repository = dependencies.repository || createGameplayRepository(env);
-    const response =
-      pathname === "/automatch/cancel"
-        ? await cancelAutomatch(identity, repository)
-        : await removeNavigationGame(
-            identity,
-            normalizeString(body.inviteId),
-            repository,
-          );
+    let response;
+    if (pathname === "/automatch/cancel") {
+      response = await cancelAutomatch(identity, repository);
+    } else if (pathname === "/automatch/start") {
+      if (!isStartAutomatchRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      response = await startAutomatch(
+        identity,
+        body,
+        repository,
+        dependencies.automatch,
+      );
+    } else {
+      response = await removeNavigationGame(
+        identity,
+        normalizeString(body.inviteId),
+        repository,
+      );
+    }
     return authJsonResponse(response, 200, corsHeaders);
   } catch (error) {
     const failure =

@@ -1,9 +1,12 @@
 import {
   isCancelAutomatchResponse,
   isRemoveNavigationGameResponse,
+  isStartAutomatchResponse,
   type CancelAutomatchResponse,
   type RemoveNavigationGameRequest,
   type RemoveNavigationGameResponse,
+  type StartAutomatchRequest,
+  type StartAutomatchResponse,
 } from "@mons/shared/navigation";
 import type { AuthTokenProvider } from "./authApi";
 
@@ -172,6 +175,18 @@ export function cancelAutomatchViaApi(
     {},
     tokenProvider,
     isCancelAutomatchResponse,
+  );
+}
+
+export function startAutomatchViaApi(
+  request: StartAutomatchRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<StartAutomatchResponse> {
+  return gameplayMutation(
+    "/automatch/start",
+    request,
+    tokenProvider,
+    isStartAutomatchResponse,
   );
 }
 

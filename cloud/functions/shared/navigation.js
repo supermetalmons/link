@@ -80,6 +80,32 @@ const compareNavigationItems = (left, right) => {
 const isRecord = (value) =>
   value && typeof value === "object" && !Array.isArray(value);
 
+const isStartAutomatchRequest = (value) =>
+  isRecord(value) &&
+  Object.keys(value).length === 2 &&
+  Number.isInteger(value.emojiId) &&
+  value.emojiId > 0 &&
+  typeof value.aura === "string";
+
+const isStartAutomatchResponse = (value) => {
+  if (!isRecord(value) || typeof value.ok !== "boolean") {
+    return false;
+  }
+  if (value.ok === false) {
+    return Object.keys(value).length === 1;
+  }
+  if (
+    Object.keys(value).length !== 4 ||
+    typeof value.inviteId !== "string" ||
+    value.inviteId.trim() === "" ||
+    (value.mode !== "matched" && value.mode !== "pending") ||
+    typeof value.matchedImmediately !== "boolean"
+  ) {
+    return false;
+  }
+  return value.matchedImmediately === (value.mode === "matched");
+};
+
 const isCancelAutomatchResponse = (value) =>
   isRecord(value) &&
   Object.keys(value).length === 1 &&
@@ -132,6 +158,8 @@ module.exports = {
   getNavigationStatusPriority,
   getNavigationSortBucket,
   compareNavigationItems,
+  isStartAutomatchRequest,
+  isStartAutomatchResponse,
   isCancelAutomatchResponse,
   isRemoveNavigationGameRequest,
   isRemoveNavigationGameResponse,

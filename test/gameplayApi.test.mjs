@@ -16,12 +16,18 @@ registerHooks({
   },
 });
 
-const { GameplayApiError, cancelAutomatchViaApi, removeNavigationGameViaApi } =
-  await import("../src/services/gameplayApi.ts");
+const {
+  GameplayApiError,
+  cancelAutomatchViaApi,
+  removeNavigationGameViaApi,
+  startAutomatchViaApi,
+} = await import("../src/services/gameplayApi.ts");
 const {
   isCancelAutomatchResponse,
   isRemoveNavigationGameRequest,
   isRemoveNavigationGameResponse,
+  isStartAutomatchRequest,
+  isStartAutomatchResponse,
 } = await import("@mons/shared/navigation");
 
 const originalFetch = globalThis.fetch;
@@ -39,6 +45,12 @@ test.afterEach(() => {
 test("sends exact authenticated gameplay mutations and validates contracts", async () => {
   const calls = [];
   const responses = [
+    {
+      ok: true,
+      inviteId: "auto_invite",
+      mode: "pending",
+      matchedImmediately: false,
+    },
     { ok: true },
     {
       ok: true,
@@ -53,6 +65,18 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
     return jsonResponse(responses.shift());
   };
 
+  assert.deepEqual(
+    await startAutomatchViaApi(
+      { emojiId: 7, aura: "rainbow" },
+      async () => "firebase-token",
+    ),
+    {
+      ok: true,
+      inviteId: "auto_invite",
+      mode: "pending",
+      matchedImmediately: false,
+    },
+  );
   assert.deepEqual(await cancelAutomatchViaApi(async () => "firebase-token"), {
     ok: true,
   });
@@ -72,13 +96,14 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
   assert.deepEqual(
     calls.map((call) => call.input),
     [
+      "https://api.mons.link/automatch/start",
       "https://api.mons.link/automatch/cancel",
       "https://api.mons.link/navigation/games/remove",
     ],
   );
   assert.deepEqual(
     calls.map((call) => JSON.parse(call.init.body)),
-    [{}, { inviteId: "invite-1" }],
+    [{ emojiId: 7, aura: "rainbow" }, {}, { inviteId: "invite-1" }],
   );
   for (const call of calls) {
     assert.equal(call.init.method, "POST");
@@ -92,6 +117,63 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
 
   assert.equal(isCancelAutomatchResponse({ ok: false }), true);
   assert.equal(isCancelAutomatchResponse({ ok: true, extra: true }), false);
+  assert.equal(
+    isStartAutomatchRequest({
+      emojiId: 7,
+      aura: "rainbow",
+    }),
+    true,
+  );
+  assert.equal(
+    isStartAutomatchRequest({
+      emojiId: 0,
+      aura: "",
+    }),
+    false,
+  );
+  assert.equal(
+    isStartAutomatchRequest({
+      emojiId: 7,
+      aura: "",
+      extra: true,
+    }),
+    false,
+  );
+  assert.equal(
+    isStartAutomatchRequest({
+      emojiId: 7,
+      aura: null,
+    }),
+    false,
+  );
+  assert.equal(
+    isStartAutomatchResponse({
+      ok: true,
+      inviteId: "auto_invite",
+      mode: "matched",
+      matchedImmediately: true,
+    }),
+    true,
+  );
+  assert.equal(
+    isStartAutomatchResponse({
+      ok: true,
+      inviteId: "auto_invite",
+      mode: "pending",
+      matchedImmediately: true,
+    }),
+    false,
+  );
+  assert.equal(isStartAutomatchResponse({ ok: false, inviteId: null }), false);
+  assert.equal(
+    isStartAutomatchResponse({
+      ok: true,
+      inviteId: " ",
+      mode: "pending",
+      matchedImmediately: false,
+    }),
+    false,
+  );
   assert.equal(isRemoveNavigationGameRequest({ inviteId: "invite-1" }), true);
   assert.equal(isRemoveNavigationGameRequest({ inviteId: "" }), false);
   assert.equal(
@@ -195,10 +277,14 @@ test("rejects malformed and oversized gameplay responses", async () => {
   ];
   globalThis.fetch = async () => responses.shift();
   await assert.rejects(
-    cancelAutomatchViaApi(async () => "token"),
+    startAutomatchViaApi({ emojiId: 1, aura: "" }, async () => "token"),
     GameplayApiError,
   );
-  for (let index = 0; index < 3; index++) {
+  await assert.rejects(
+    removeNavigationGameViaApi({ inviteId: "invite" }, async () => "token"),
+    GameplayApiError,
+  );
+  for (let index = 0; index < 2; index++) {
     await assert.rejects(
       removeNavigationGameViaApi({ inviteId: "invite" }, async () => "token"),
       GameplayApiError,
@@ -256,9 +342,13 @@ test("connection no longer references the migrated Firebase callables", () => {
     "utf8",
   );
   assert.doesNotMatch(source, /httpsCallable\([^)]*cancelAutomatch/);
+  assert.doesNotMatch(source, /httpsCallable\([^)]*["']automatch["']/);
   assert.doesNotMatch(source, /httpsCallable\([^)]*removeNavigationGame/);
   assert.doesNotMatch(source, /"cancelAutomatch"/);
   assert.doesNotMatch(source, /"removeNavigationGame"/);
   assert.match(source, /cancelAutomatchViaApi/);
+  assert.match(source, /startAutomatchViaApi/);
   assert.match(source, /removeNavigationGameViaApi/);
+  assert.doesNotMatch(source, /PendingAutomatchOperationId/);
+  assert.doesNotMatch(source, /crypto\.randomUUID/);
 });

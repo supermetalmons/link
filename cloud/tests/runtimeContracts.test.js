@@ -13,7 +13,6 @@ const sharedDirectory = path.join(functionsDirectory, "shared");
 const callableExportNames = [
   "acceptWagerProposal",
   "announceEventPrizes",
-  "automatch",
   "cancelWagerProposal",
   "claimMatchVictoryByTimer",
   "completeXRedirectAuth",
@@ -431,7 +430,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 45);
+  assert.equal(expectedExportNames.length, 44);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

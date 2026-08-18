@@ -7,8 +7,8 @@ See the repository [architecture and command map](../README.md) for package boun
 The auth, mining, and gameplay APIs, X OAuth callback, dedicated Google service
 accounts, and encrypted Worker secret setup are documented in that deployment
 guide.
-Firebase retains auth verification/linking, the X completion callable, and the
-existing Firestore auth records.
+Firebase retains auth verification/linking, the X completion callable, the
+remaining game and event functions, and the existing Firestore auth records.
 
 ## Setup
 

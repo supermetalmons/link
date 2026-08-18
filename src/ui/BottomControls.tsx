@@ -2843,12 +2843,8 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         soundPlayer.initializeOnUserInteraction(false);
       }
       didClickAutomatchButton((response) => {
-        const inviteId =
-          response && typeof response.inviteId === "string"
-            ? response.inviteId
-            : "";
-        const mode =
-          response && typeof response.mode === "string" ? response.mode : "";
+        const inviteId = response.ok ? response.inviteId : "";
+        const mode = response.ok ? response.mode : "";
         if (mode === "pending" && inviteId) {
           requestPendingDelayedCancelAutomatchIntent(
             inviteId,
