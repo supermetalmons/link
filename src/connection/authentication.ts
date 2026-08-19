@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { normalizeProfileEmojiId } from "@mons/shared/profiles";
 import type { PlayerProfile } from "./connectionModels";
 import { connection } from "./connection";
 import { handleLoginSuccess } from "./loginSuccess";
@@ -392,10 +393,13 @@ export function useAuthStatus() {
           resolvedUsername = authoritativeProfile.username ?? "";
           resolvedEthAddress = authoritativeProfile.eth ?? "";
           resolvedSolAddress = authoritativeProfile.sol ?? "";
+          const normalizedAuthoritativeEmoji = normalizeProfileEmojiId(
+            authoritativeProfile.emoji,
+            0,
+          );
           const authoritativeEmoji =
-            Number.isFinite(authoritativeProfile.emoji) &&
-            authoritativeProfile.emoji > 0
-              ? Math.floor(authoritativeProfile.emoji)
+            normalizedAuthoritativeEmoji > 0
+              ? normalizedAuthoritativeEmoji
               : resolvedEmoji;
           resolvedEmoji = authoritativeEmoji;
           resolvedAura = authoritativeProfile.aura ?? "";

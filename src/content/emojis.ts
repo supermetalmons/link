@@ -1,4 +1,9 @@
-export const emojipackSize = 155;
+import {
+  getProfileFallbackEmojiId,
+  PROFILE_FALLBACK_EMOJI_COUNT,
+} from "@mons/shared/profiles";
+
+export const emojipackSize = PROFILE_FALLBACK_EMOJI_COUNT;
 export const swagpackStart = 1000;
 export const swagpackEnd = 1466;
 const swagpackSize = swagpackEnd - swagpackStart + 1;
@@ -30,22 +35,13 @@ export const emojis = {
   },
 
   getEmojiIdFromString: function (str: string) {
-    return getEmojiIdFromString(str);
+    return getProfileFallbackEmojiId(str);
   },
 
   getEmojiUrl: function (id: string) {
     return `https://cdn.lil.org/mons/emojipack/thumbs/${id}.webp`;
   },
 };
-
-function getEmojiIdFromString(str: string): string {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    hash += str.charCodeAt(i);
-  }
-  const index = hash % emojipackSize;
-  return (index + 1).toString();
-}
 
 function getRandomEmojiUrlOtherThan(
   id: string,

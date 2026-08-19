@@ -1,5 +1,5 @@
 import { createEmptyMaterials } from "@mons/shared/mining";
-import { cropAddress } from "@mons/shared/profiles";
+import { cropAddress, normalizeProfileEmojiId } from "@mons/shared/profiles";
 import {
   MINING_MATERIAL_NAMES,
   type PlayerProfile,
@@ -26,7 +26,7 @@ export const createLeaderboardEntry = (
   rating: Math.round(entry.rating ?? 1500),
   win: entry.win ?? true,
   id: entry.id,
-  emoji: entry.emoji,
+  emoji: normalizeProfileEmojiId(entry.emoji),
   aura: entry.aura,
   ensName: null,
   profile: entry,

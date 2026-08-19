@@ -1,4 +1,5 @@
 import type { PlayerProfile } from "../connection/connectionModels";
+import { normalizeProfileEmojiId } from "@mons/shared/profiles";
 import glicko2 from "glicko2";
 import { createRatingUpdater } from "@mons/shared/ratings";
 import { storage } from "./storage";
@@ -207,7 +208,11 @@ export function updatePlayerMetadataWithProfile(
               false,
             );
           }
-          updatePlayerEmoji(profile.emoji, true, profile.aura ?? "");
+          updatePlayerEmoji(
+            normalizeProfileEmojiId(profile.emoji),
+            true,
+            profile.aura ?? "",
+          );
         }
         onSuccess();
       })

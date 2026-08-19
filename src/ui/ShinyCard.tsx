@@ -33,6 +33,7 @@ import {
 } from "./shinyCardModels";
 import { STICKER_ADD_PROMPTS_FRAMES, STICKER_PATHS } from "../utils/stickers";
 import { PlayerProfile } from "../connection/connectionModels";
+import { normalizeProfileEmojiId } from "@mons/shared/profiles";
 import {
   MonType,
   getMonId,
@@ -1648,9 +1649,9 @@ function getBgIdForProfile(profile: PlayerProfile | null): number {
 }
 
 function getEmojiIdForProfile(profile: PlayerProfile | null): number {
-  return (
-    profile?.emoji ??
-    getStableRandomIdForProfileId(profile?.id ?? "", emojipackSize)
+  return normalizeProfileEmojiId(
+    profile?.emoji,
+    getStableRandomIdForProfileId(profile?.id ?? "", emojipackSize),
   );
 }
 

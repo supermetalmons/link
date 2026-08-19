@@ -16,7 +16,10 @@ import {
   type LeaderboardEntry,
   type LeaderboardType,
 } from "./leaderboardCache";
-import { getLeaderboardProfiles } from "./profileSurfaceDataPort";
+import {
+  getLeaderboardProfiles,
+  getProfileDetails,
+} from "./profileSurfaceDataPort";
 import {
   LEADERBOARD_ENTRY_LIMIT,
   createLeaderboardEntry,
@@ -756,7 +759,14 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({
   }, [show, leaderboardType, getCurrentPlayerEntry]);
 
   const handleRowClick = (row: LeaderboardEntry) => {
-    showShinyCard(row.profile, getLeaderboardDisplayName(row), true);
+    const displayName = getLeaderboardDisplayName(row);
+    void getProfileDetails(row.id)
+      .then((profile) => {
+        showShinyCard(profile ?? row.profile, displayName, true);
+      })
+      .catch(() => {
+        showShinyCard(row.profile, displayName, true);
+      });
   };
 
   const handleEmojiLoad = (emojiKey: string) => {

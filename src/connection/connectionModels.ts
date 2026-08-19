@@ -7,6 +7,7 @@ import type {
   NavigationStatus as SharedNavigationStatus,
 } from "@mons/shared/navigation";
 import type { EventPrizeId as SharedEventPrizeId } from "@mons/shared/event-prizes";
+import type { PlayerProfile as SharedPlayerProfile } from "@mons/shared/profiles";
 
 export interface Match {
   version: number;
@@ -261,24 +262,4 @@ export type MatchWagerState = {
   resolved?: WagerResolution;
 };
 
-export interface PlayerProfile {
-  id: string;
-  nonce: number | undefined;
-  rating: number | undefined;
-  totalManaPoints?: number | undefined;
-  win: boolean | undefined;
-  emoji: number;
-  aura?: string;
-  cardBackgroundId: number | undefined;
-  cardSubtitleId: number | undefined;
-  profileCounter: string | undefined;
-  profileMons: string | undefined;
-  cardStickers: string | undefined;
-  username: string | null;
-  eth?: string | null;
-  sol?: string | null;
-  feb2026UniqueOpponentsCount?: number;
-  completedProblemIds: string[] | undefined;
-  isTutorialCompleted: boolean | undefined;
-  mining?: PlayerMiningData;
-}
+export type PlayerProfile = SharedPlayerProfile;

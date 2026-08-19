@@ -323,6 +323,29 @@ and API Workers to their recorded version IDs. The X callback remains on the
 API Worker throughout this rollback. Remove `datastore.entities.create` from
 the custom role only after the old auth start path is restored.
 
+## Profile and leaderboard reads
+
+Authenticated one-shot profile lookups and leaderboards are served by:
+
+- `POST https://api.mons.link/profiles/lookup`
+- `POST https://api.mons.link/leaderboards/read`
+
+The browser sends its Firebase ID token in the `Authorization: Bearer` header.
+The Worker verifies the token and forwards that same token to Firestore REST, so
+the existing Firestore read rules remain authoritative. Profile lookup supports
+login UID and profile ID requests; profile-ID reads retain the bounded canonical
+merge redirect behavior. Leaderboards support rating, mana points, and each
+mining material with the existing 99-profile limit. Total-material ranking and
+the 60-second material cache remain browser-side. Leaderboard payloads omit card
+customization; selecting a row loads the complete profile through the lookup
+route.
+
+These routes add no Worker binding, secret, service-account permission, or
+shared edge cache. Automated smoke checks cover preflight and unauthenticated
+responses without reading production profile data. Promote the API Worker before
+the frontend that calls these routes. No Firebase deployment or function
+reconciliation is required for this migration.
+
 ## Firebase deployment
 
 - Deploy the complete Firebase release: `npm run deploy:firebase -- --project mons-link`

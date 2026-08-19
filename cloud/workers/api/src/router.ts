@@ -22,6 +22,12 @@ import {
   handleGameplayRoute,
   type GameplayRouteDependencies,
 } from "./gameplayRoute.ts";
+import {
+  PROFILE_PATHS,
+  handleProfileRoute,
+  type ProfileRouteDependencies,
+} from "./profileRoute.ts";
+import type { WorkerExecutionContext } from "./firebaseAuth.ts";
 
 const RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
 
@@ -44,9 +50,10 @@ export async function handleRequest(
     auth?: AuthRouteDependencies;
     gameplay?: GameplayRouteDependencies;
     mining?: MiningRouteDependencies;
+    profile?: ProfileRouteDependencies;
     xCallback?: XCallbackDependencyOverrides;
   } = {},
-  ctx?: ExecutionContext,
+  ctx?: WorkerExecutionContext,
 ): Promise<Response> {
   const pathname = new URL(request.url).pathname;
   if (pathname === "/auth/x/callback") {
@@ -63,6 +70,12 @@ export async function handleRequest(
       return jsonResponse({ ok: false, error: "unavailable" }, 503);
     }
     return handleGameplayRoute(request, env, ctx, dependencyOverrides.gameplay);
+  }
+  if (PROFILE_PATHS.has(pathname)) {
+    if (!ctx) {
+      return jsonResponse({ ok: false, error: "unavailable" }, 503);
+    }
+    return handleProfileRoute(request, env, ctx, dependencyOverrides.profile);
   }
   if (pathname === "/mining/rock") {
     if (!ctx) {

@@ -22,9 +22,7 @@ import {
   Firestore,
   collection,
   query,
-  where,
   limit,
-  getDoc,
   getDocs,
   orderBy,
   updateDoc,
@@ -101,6 +99,11 @@ import {
 } from "../services/wagerMaterialsService";
 import { rocksMiningService } from "../services/rocksMiningService";
 import { mineRockViaApi } from "../services/miningApi";
+import {
+  getProfileByIdViaApi,
+  getProfileByLoginIdViaApi,
+  readLeaderboardViaApi,
+} from "../services/profileApi";
 import {
   cancelAutomatchViaApi,
   removeNavigationGameViaApi,
@@ -1160,17 +1163,7 @@ class Connection {
 
   public async getProfileByLoginId(loginId: string): Promise<PlayerProfile> {
     await this.ensureAuthenticated();
-    const usersRef = collection(this.firestore, "users");
-    const q = query(
-      usersRef,
-      where("logins", "array-contains", loginId),
-      limit(1),
-    );
-    const querySnapshot = await getDocs(q);
-    if (!querySnapshot.empty) {
-      return this.docToProfile(querySnapshot.docs[0], true);
-    }
-    throw new Error("Profile not found");
+    return getProfileByLoginIdViaApi(loginId, this.getAuthApiToken);
   }
 
   public async getProfileById(
@@ -1181,29 +1174,7 @@ class Connection {
       return null;
     }
     await this.ensureAuthenticated();
-    const visitedProfileIds = new Set<string>();
-    let currentProfileId = normalizedProfileId;
-
-    for (let hop = 0; hop <= MAX_PROFILE_MERGE_REDIRECT_HOPS; hop += 1) {
-      if (visitedProfileIds.has(currentProfileId)) {
-        return null;
-      }
-      visitedProfileIds.add(currentProfileId);
-      const profileSnapshot = await getDoc(
-        doc(this.firestore, "users", currentProfileId),
-      );
-      if (!profileSnapshot.exists()) {
-        return null;
-      }
-      const mergedIntoProfileId = normalizeProfileMergeTargetId(
-        profileSnapshot.data().mergedIntoProfileId,
-      );
-      if (!mergedIntoProfileId) {
-        return this.docToProfile(profileSnapshot, true);
-      }
-      currentProfileId = mergedIntoProfileId;
-    }
-    return null;
+    return getProfileByIdViaApi(normalizedProfileId, this.getAuthApiToken);
   }
 
   private async getPlayerProfile(loginId: string): Promise<PlayerProfile> {
@@ -1256,23 +1227,13 @@ class Connection {
   }
 
   private async fetchAllMaterialLeaderboards(): Promise<void> {
-    const usersRef = collection(this.firestore, "users");
-    const materialQueries = MINING_MATERIAL_NAMES.map((material) =>
-      getDocs(
-        query(
-          usersRef,
-          orderBy(`mining.materials.${material}`, "desc"),
-          limit(LEADERBOARD_ENTRY_LIMIT),
-        ),
+    const leaderboards = await Promise.all(
+      MINING_MATERIAL_NAMES.map((material) =>
+        readLeaderboardViaApi(material, this.getAuthApiToken),
       ),
     );
-    const snapshots = await Promise.all(materialQueries);
     MINING_MATERIAL_NAMES.forEach((material, index) => {
-      const profiles: PlayerProfile[] = [];
-      snapshots[index].forEach((doc) => {
-        profiles.push(this.docToProfile(doc));
-      });
-      this.materialLeaderboardCache.set(material, profiles);
+      this.materialLeaderboardCache.set(material, leaderboards[index]);
     });
     this.materialLeaderboardCacheTime = Date.now();
   }
@@ -1289,7 +1250,6 @@ class Connection {
     type: "rating" | "mp" | MiningMaterialName | "total" = "rating",
   ): Promise<PlayerProfile[]> {
     await this.ensureAuthenticated();
-    const usersRef = collection(this.firestore, "users");
 
     if (type === "total") {
       if (!this.isMaterialCacheValid()) {
@@ -1331,20 +1291,7 @@ class Connection {
       return this.materialLeaderboardCache.get(materialType) ?? [];
     }
 
-    const leaderboardOrderField = type === "mp" ? "totalManaPoints" : "rating";
-    const q = query(
-      usersRef,
-      orderBy(leaderboardOrderField, "desc"),
-      limit(LEADERBOARD_ENTRY_LIMIT),
-    );
-    const querySnapshot = await getDocs(q);
-
-    const leaderboard: PlayerProfile[] = [];
-    querySnapshot.forEach((doc) => {
-      leaderboard.push(this.docToProfile(doc));
-    });
-
-    return leaderboard;
+    return readLeaderboardViaApi(type, this.getAuthApiToken);
   }
 
   public async editUsername(username: string): Promise<any> {

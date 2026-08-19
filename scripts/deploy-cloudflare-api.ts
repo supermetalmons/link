@@ -101,8 +101,10 @@ const AUTHENTICATED_ROUTE_SMOKES = [
   { path: "/auth/x/flows", method: "POST" },
   { path: "/automatch/cancel", method: "POST" },
   { path: "/automatch/start", method: "POST" },
+  { path: "/leaderboards/read", method: "POST" },
   { path: "/mining/rock", method: "POST" },
   { path: "/navigation/games/remove", method: "POST" },
+  { path: "/profiles/lookup", method: "POST" },
 ] as const;
 const SMOKE_TIMEOUT_MS = 15_000;
 const SMOKE_RETRY_DELAYS_MS = [500, 1_500, 5_000, 10_000, 15_000];
