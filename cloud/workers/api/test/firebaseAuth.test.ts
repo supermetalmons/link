@@ -39,6 +39,7 @@ async function signToken(
   privateKey: CryptoKey,
   overrides: Record<string, unknown> = {},
   kid = "firebase-key",
+  subject = "firebase-uid",
 ): Promise<string> {
   return new SignJWT({
     auth_time: NOW_SECONDS - 20,
@@ -47,7 +48,7 @@ async function signToken(
     .setProtectedHeader({ alg: "RS256", kid, typ: "JWT" })
     .setIssuer(ISSUER)
     .setAudience(PROJECT_ID)
-    .setSubject("firebase-uid")
+    .setSubject(subject)
     .setIssuedAt(NOW_SECONDS - 10)
     .setExpirationTime(NOW_SECONDS + 3_600)
     .sign(privateKey);
@@ -76,6 +77,39 @@ test("verifies an exact Firebase ID token and returns only UID plus token", asyn
     now: () => NOW_MS,
   });
   assert.deepEqual(identity, { idToken: token, uid: "firebase-uid" });
+});
+
+test("applies the Firebase UID character limit by code point", async () => {
+  const { privateKey, publicJwk } = await signingKey();
+  const validUid = "😀".repeat(128);
+  const validToken = await signToken(privateKey, {}, "firebase-key", validUid);
+  const validContext = context();
+  assert.deepEqual(
+    await verifyFirebaseRequest(request(validToken), validContext.ctx, {
+      cache: null,
+      fetcher: jwksFetch(publicJwk, { count: 0 }),
+      now: () => NOW_MS,
+    }),
+    { idToken: validToken, uid: validUid },
+  );
+
+  const invalidUid = "😀".repeat(129);
+  const invalidToken = await signToken(
+    privateKey,
+    {},
+    "firebase-key",
+    invalidUid,
+  );
+  const invalidContext = context();
+  await assert.rejects(
+    verifyFirebaseRequest(request(invalidToken), invalidContext.ctx, {
+      cache: null,
+      fetcher: jwksFetch(publicJwk, { count: 0 }),
+      now: () => NOW_MS,
+    }),
+    (error: unknown) =>
+      error instanceof Error && "status" in error && error.status === 401,
+  );
 });
 
 test("retains only a validated optional profile claim", async () => {

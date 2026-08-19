@@ -545,6 +545,9 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({
   const prevLeaderboardTypeRef = useRef<LeaderboardType>(leaderboardType);
   const prevShowRef = useRef<boolean>(show);
   const currentFetchRef = useRef<number>(0);
+  const profileDetailRequestRef = useRef(0);
+  const showRef = useRef(show);
+  showRef.current = show;
   const currentProfileId = storage.getProfileId("");
   const currentLoginId = storage.getLoginId("");
 
@@ -646,9 +649,19 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({
   }, [data, show]);
 
   useEffect(() => {
+    return () => {
+      profileDetailRequestRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
     const menuJustOpened = show && !prevShowRef.current;
     const leaderboardTypeChanged =
       prevLeaderboardTypeRef.current !== leaderboardType;
+
+    if (!show || leaderboardTypeChanged) {
+      profileDetailRequestRef.current += 1;
+    }
 
     if (menuJustOpened || leaderboardTypeChanged) {
       setSuppressPanelAnimation(true);
@@ -759,13 +772,19 @@ export const Leaderboard: React.FC<LeaderboardProps> = ({
   }, [show, leaderboardType, getCurrentPlayerEntry]);
 
   const handleRowClick = (row: LeaderboardEntry) => {
+    const requestId = ++profileDetailRequestRef.current;
     const displayName = getLeaderboardDisplayName(row);
+    const showProfile = (profile: PlayerProfile) => {
+      if (requestId === profileDetailRequestRef.current && showRef.current) {
+        showShinyCard(profile, displayName, true);
+      }
+    };
     void getProfileDetails(row.id)
       .then((profile) => {
-        showShinyCard(profile ?? row.profile, displayName, true);
+        showProfile(profile ?? row.profile);
       })
       .catch(() => {
-        showShinyCard(row.profile, displayName, true);
+        showProfile(row.profile);
       });
   };
 

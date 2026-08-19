@@ -1,5 +1,16 @@
 rules_version = '2';
 service cloud.firestore {
+  function validLeaderboardCustom(custom) {
+    return custom is map
+      && (!custom.keys().hasAny(["aura"])
+        || custom.aura == null
+        || (custom.aura is string && custom.aura.size() <= 32))
+      && (!custom.keys().hasAny(["emoji"])
+        || custom.emoji == null
+        || custom.emoji is int
+        || (custom.emoji is string && custom.emoji.size() <= 16));
+  }
+
   match /databases/{database}/documents {
     match /{document=**} {
       allow read, write: if false;
@@ -10,7 +21,8 @@ service cloud.firestore {
         && resource.data.logins != null
         && resource.data.logins.hasAll([request.auth.uid])
         && request.resource.data.diff(resource.data).removedKeys().size() == 0
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["custom"]);
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["custom"])
+        && validLeaderboardCustom(request.resource.data.custom);
     }
     match /users/{userId}/games/{inviteId} {
       allow read: if request.auth != null

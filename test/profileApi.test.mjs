@@ -248,4 +248,9 @@ test("connection routes one-shot reads through the API and keeps material cachin
     "utf8",
   );
   assert.match(leaderboardSource, /getProfileDetails\(row\.id\)/);
+  assert.match(leaderboardSource, /profileDetailRequestRef/);
+  assert.match(
+    leaderboardSource,
+    /requestId === profileDetailRequestRef\.current && showRef\.current/,
+  );
 });

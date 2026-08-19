@@ -236,7 +236,7 @@ export async function verifyFirebaseRequest(
       protectedHeader.alg !== "RS256" ||
       typeof protectedHeader.kid !== "string" ||
       !uid ||
-      uid.length > 128 ||
+      Array.from(uid).length > 128 ||
       typeof payload.exp !== "number" ||
       payload.exp <= nowSeconds - CLOCK_TOLERANCE_SECONDS ||
       typeof payload.iat !== "number" ||
