@@ -170,6 +170,7 @@ function smokeResponses(providerAttempts = 1): Response[] {
   }
   responses.push(
     telegramBridgeUnauthorizedResponse(),
+    telegramBridgeUnauthorizedResponse(),
     xCallbackResponse(),
     xCallbackResponse(),
   );
@@ -465,7 +466,7 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 25);
+  assert.equal(requests.length, 26);
   assert.equal(requests[0].url, `${PREVIEW_URL}/nfts`);
   assert.equal(requests[0].init.method, "OPTIONS");
   for (const request of requests) {
@@ -516,14 +517,19 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
     ],
   );
   assert.equal(
-    requests[24].url,
+    requests[25].url,
     `${PREVIEW_URL}/auth/x/callback?state=abcdefghijklmnopqrstuvwx`,
   );
   assert.equal(requests[22].url, `${PREVIEW_URL}/internal/telegram/delivery`);
   assert.equal(requests[22].init.method, "POST");
-  assert.equal(requests[23].url, `${PREVIEW_URL}/auth/x/callback`);
-  assert.equal(requests[23].init.method, "GET");
+  assert.equal(
+    requests[23].url,
+    `${PREVIEW_URL}/internal/telegram/event-prize-announcement`,
+  );
+  assert.equal(requests[23].init.method, "POST");
+  assert.equal(requests[24].url, `${PREVIEW_URL}/auth/x/callback`);
   assert.equal(requests[24].init.method, "GET");
+  assert.equal(requests[25].init.method, "GET");
   assert.deepEqual(delays, [500]);
 });
 
@@ -597,6 +603,7 @@ test("retries an expected-success response body transport failure", async () => 
     authPreflightResponse(),
     unauthenticatedResponse(),
     telegramBridgeUnauthorizedResponse(),
+    telegramBridgeUnauthorizedResponse(),
     xCallbackResponse(),
     xCallbackResponse(),
   ];
@@ -614,7 +621,7 @@ test("retries an expected-success response body transport failure", async () => 
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 25);
+  assert.equal(requests.length, 26);
   assert.deepEqual(delays, [500]);
 });
 
@@ -981,7 +988,7 @@ test("production promotes only the explicit version and then smokes the custom d
     fetch: async (url) => {
       assert.match(
         String(url),
-        /^https:\/\/api\.mons\.link\/(?:nfts|mining\/rock|automatch\/(?:cancel|start)|leaderboards\/read|navigation\/games\/remove|profiles\/lookup|internal\/telegram\/delivery|auth\/(?:intents|methods|x\/(?:flows|callback)))/,
+        /^https:\/\/api\.mons\.link\/(?:nfts|mining\/rock|automatch\/(?:cancel|start)|leaderboards\/read|navigation\/games\/remove|profiles\/lookup|internal\/telegram\/(?:delivery|event-prize-announcement)|auth\/(?:intents|methods|x\/(?:flows|callback)))/,
       );
       return nextResponse(responses);
     },

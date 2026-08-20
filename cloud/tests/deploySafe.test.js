@@ -545,9 +545,10 @@ test("operations documentation uses the release driver and required setup", () =
   assert.match(readme, /deploy:safe -- verifyEthAddress --project mons-link/);
   assert.match(readme, /removes deployed Firebase-managed Functions/);
   assert.match(readme, /maintenance deployments do not prune/);
-  assert.match(readme, /functions:secrets:set TELEGRAM_BOT_TOKEN/);
-  assert.match(readme, /functions:secrets:set TELEGRAM_EXTRA_CHAT_ID/);
+  assert.match(readme, /encrypted Worker\s+secrets/);
+  assert.match(readme, /TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET/);
   assert.match(readme, /TELEGRAM_QUEUE_BRIDGE_SECRET/);
+  assert.match(readme, /announceEventPrizes -- --bridge-secret-file/);
   assert.match(readme, /Telegram delivery migration guide/);
   assert.doesNotMatch(readme, /firebase deploy[^\n]*--only functions/);
   assert.match(deploymentGuide, /deploy:firebase -- --project mons-link/);

@@ -1,4 +1,8 @@
 import { handleRequest } from "./router.ts";
+import {
+  EVENT_PRIZE_ANNOUNCEMENT_PATH,
+  handleEventPrizeAnnouncement,
+} from "./eventPrizeAnnouncement.ts";
 import { handleTelegramBridge } from "./telegramBridge.ts";
 import {
   handleTelegramQueue,
@@ -14,7 +18,11 @@ export function handleFetch(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  if (new URL(request.url).pathname === "/internal/telegram/delivery") {
+  const pathname = new URL(request.url).pathname;
+  if (pathname === EVENT_PRIZE_ANNOUNCEMENT_PATH) {
+    return handleEventPrizeAnnouncement(request, env);
+  }
+  if (pathname === "/internal/telegram/delivery") {
     return handleTelegramBridge(request, env);
   }
   return handleRequest(request, env, {}, ctx);

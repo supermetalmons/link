@@ -18,13 +18,13 @@ remaining game and event functions, and the existing Firestore auth records.
 
 `npm install -g firebase-tools`
 
-Provision or rotate the Telegram bot token and community chat ID before the production release:
-
-`firebase functions:secrets:set TELEGRAM_BOT_TOKEN --config cloud/firebase.json --project mons-link`
-
-`firebase functions:secrets:set TELEGRAM_EXTRA_CHAT_ID --config cloud/firebase.json --project mons-link`
-
 Set `TELEGRAM_QUEUE_BRIDGE_SECRET` for both retained Telegram dispatch triggers. The Cloudflare Queue migration, hard cutover, recovery, and rollback procedure is documented in the [Telegram delivery migration guide](../scripts/migrate-telegram-delivery.md).
+
+The Telegram bot token, community chat ID, and dedicated announcement bridge
+secret are encrypted Worker secrets. Keep an operator copy of
+`TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET` in a protected file outside the
+repository. The former Firebase bot-token and chat-ID secret versions are no
+longer used by an active Function.
 
 ## Live Firebase operations
 
@@ -99,6 +99,27 @@ The GP and MP tools publish to the configured community destination. They defaul
 `node cloud/admin/topGpWithEmojis.js 25`
 
 `node cloud/admin/topMpWithEmojis.js 25`
+
+## Event prize announcements
+
+Event prize albums are sent synchronously through the HMAC-protected API Worker
+route. Use the same protected bridge-secret file as other Cloudflare Telegram
+administration. Validate the live route and shared secret without sending to
+Telegram:
+
+`npm run announceEventPrizes -- --bridge-secret-file /secure/telegram-announcement-secret --smoke`
+
+Preview, confirm, and send an announcement interactively:
+
+`npm run announceEventPrizes -- --bridge-secret-file /secure/telegram-announcement-secret`
+
+Or provide the event and single-line announcement explicitly; confirmation is
+still required:
+
+`npm run announceEventPrizes -- --bridge-secret-file /secure/telegram-announcement-secret FRkdorMWaYW "Win compressed NFTs"`
+
+An uncertain Telegram response is never retried automatically. Check the group
+before invoking the command again.
 
 ## Auth rollout configuration
 

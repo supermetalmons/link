@@ -101,6 +101,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       "GAMEPLAY_SERVICE_ACCOUNT_EMAIL",
       "GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY",
       "HELIUS_RPC_API_KEY",
+      "TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET",
       "TELEGRAM_BOT_TOKEN",
       "TELEGRAM_EXTRA_CHAT_ID",
       "TELEGRAM_FIREBASE_SERVICE_ACCOUNT_EMAIL",

@@ -95,6 +95,8 @@ const PRODUCTION_URL = "https://api.mons.link";
 const SMOKE_ORIGIN = "https://mons.link";
 const X_CALLBACK_PATH = "/auth/x/callback";
 const TELEGRAM_BRIDGE_PATH = "/internal/telegram/delivery";
+const EVENT_PRIZE_ANNOUNCEMENT_PATH =
+  "/internal/telegram/event-prize-announcement";
 const AUTHENTICATED_ROUTE_SMOKES = [
   { path: "/auth/intents", method: "POST" },
   { path: "/auth/methods", method: "GET" },
@@ -644,35 +646,42 @@ async function smokeApi(
     parseUnauthenticatedResponse(bodyText);
   }
 
-  const telegramBridgeEndpoint = new URL(
-    TELEGRAM_BRIDGE_PATH,
-    baseUrl,
-  ).toString();
-  const { response: unsignedBridge, bodyText: unsignedBridgeBody } =
-    await fetchWithRetry(
-      telegramBridgeEndpoint,
+  for (const internalRoute of [
+    {
+      path: TELEGRAM_BRIDGE_PATH,
+      label: "Telegram delivery bridge",
+    },
+    {
+      path: EVENT_PRIZE_ANNOUNCEMENT_PATH,
+      label: "Event prize announcement bridge",
+    },
+  ]) {
+    const endpoint = new URL(internalRoute.path, baseUrl).toString();
+    const { response, bodyText } = await fetchWithRetry(
+      endpoint,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       },
-      "Unsigned Telegram bridge smoke request",
+      `Unsigned ${internalRoute.label} smoke request`,
       dependencies,
       401,
     );
-  if (unsignedBridge.status !== 401) {
-    throw new DeployError(
-      `Unsigned Telegram bridge smoke request returned ${unsignedBridge.status}.`,
-    );
+    if (response.status !== 401) {
+      throw new DeployError(
+        `Unsigned ${internalRoute.label} smoke request returned ${response.status}.`,
+      );
+    }
+    assertNoStore(response);
+    assertJsonResponse(response);
+    if (bodyText === undefined) {
+      throw new DeployError(
+        `Unsigned ${internalRoute.label} smoke response body was unavailable.`,
+      );
+    }
+    parseTelegramBridgeUnauthorizedResponse(bodyText);
   }
-  assertNoStore(unsignedBridge);
-  assertJsonResponse(unsignedBridge);
-  if (unsignedBridgeBody === undefined) {
-    throw new DeployError(
-      "Unsigned Telegram bridge smoke response body was unavailable.",
-    );
-  }
-  parseTelegramBridgeUnauthorizedResponse(unsignedBridgeBody);
 
   const callbackEndpoint = new URL(X_CALLBACK_PATH, baseUrl);
   const { response: missingState } = await fetchWithRetry(

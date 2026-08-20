@@ -2,31 +2,29 @@
 
 "use strict";
 
+const { createHmac, randomUUID } = require("node:crypto");
+const fs = require("node:fs");
 const path = require("node:path");
 const { createInterface } = require("node:readline/promises");
-const { spawnSync } = require("node:child_process");
 const { stdin, stdout } = require("node:process");
 const { COMPRESSED_PRIZES_EVENT_ID } = require("@mons/shared/event-prizes");
 const {
   buildEventPrizeAnnouncement,
-  telegramCommunityChatId,
-} = require("../functions/eventPrizeTelegramAnnouncement");
-const {
-  sendTelegramMediaGroup,
-  telegramBotToken,
-} = require("../functions/telegramClient");
+} = require("../functions/telegram/eventPrizeAnnouncement");
 
-const FIREBASE_PROJECT_ID = "mons-link";
-const cloudRoot = path.resolve(__dirname, "..");
+const ANNOUNCEMENT_URL =
+  "https://api.mons.link/internal/telegram/event-prize-announcement";
+const REQUEST_TIMEOUT_MS = 15_000;
+const MAX_BRIDGE_SECRET_BYTES = 8 * 1024;
+const USAGE =
+  'Usage: npm run announceEventPrizes -- --bridge-secret-file <path> [--smoke | <event-id> "<announcement>"]';
 
 const parseAnnouncementArguments = (argv) => {
   if (argv.length === 0) {
     return null;
   }
   if (argv.length !== 2) {
-    throw new TypeError(
-      'Usage: npm run announceEventPrizes -- <event-id> "<announcement>"',
-    );
+    throw new TypeError(USAGE);
   }
   return {
     eventId: argv[0],
@@ -34,76 +32,230 @@ const parseAnnouncementArguments = (argv) => {
   };
 };
 
-const readFirebaseSecret = (
-  secretName,
-  {
-    projectId = FIREBASE_PROJECT_ID,
-    runCommand = spawnSync,
-    workingDirectory = cloudRoot,
-  } = {},
-) => {
-  const result = runCommand(
-    "firebase",
-    ["functions:secrets:access", secretName, "--project", projectId],
-    {
-      cwd: workingDirectory,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  if (result.error || result.status !== 0) {
-    const details = String(result.stderr || result.error?.message || "").trim();
-    throw new Error(
-      `Could not access Firebase secret ${secretName}.${
-        details ? ` ${details}` : ""
-      }`,
-    );
+const parseArgs = (argv) => {
+  let bridgeSecretFile = "";
+  let smoke = false;
+  const positionals = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === "--bridge-secret-file") {
+      const value = argv[++index];
+      if (bridgeSecretFile || !value || value.startsWith("--")) {
+        throw new TypeError(USAGE);
+      }
+      bridgeSecretFile = value;
+      continue;
+    }
+    if (arg === "--smoke") {
+      if (smoke) {
+        throw new TypeError(USAGE);
+      }
+      smoke = true;
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      throw new TypeError(USAGE);
+    }
+    positionals.push(arg);
   }
-  const value = String(result.stdout || "").trim();
-  if (!value) {
-    throw new Error(`Firebase secret ${secretName} is empty.`);
+  if (!bridgeSecretFile || (smoke && positionals.length > 0)) {
+    throw new TypeError(USAGE);
+  }
+  return {
+    bridgeSecretFile,
+    input: smoke ? null : parseAnnouncementArguments(positionals),
+    smoke,
+  };
+};
+
+const readBridgeSecretStream = async (stream = stdin) => {
+  let value = "";
+  stream.setEncoding("utf8");
+  for await (const chunk of stream) {
+    value += chunk;
+    if (Buffer.byteLength(value, "utf8") > MAX_BRIDGE_SECRET_BYTES) {
+      throw new Error("Telegram bridge secret input is too large.");
+    }
   }
   return value;
 };
 
-const sendEventPrizeAnnouncement = async (
-  input,
-  { readSecret = readFirebaseSecret, send = sendTelegramMediaGroup } = {},
+const readBridgeSecret = async (
+  filePath,
+  { readFile = fs.readFileSync, readStream = readBridgeSecretStream } = {},
 ) => {
-  const announcement = buildEventPrizeAnnouncement(input);
-  const token = await readSecret(telegramBotToken.name);
-  const chatId = await readSecret(telegramCommunityChatId.name);
-  const result = await send({
-    chatId,
-    imageUrls: announcement.imageUrls,
-    text: announcement.text,
-    silent: false,
-    token,
-  });
-  if (result?.ok) {
-    return {
-      ...announcement,
-      messageIds: result.messageIds,
-    };
+  let secret;
+  try {
+    secret = String(
+      filePath === "-"
+        ? await readStream()
+        : readFile(path.resolve(filePath), "utf8"),
+    ).trim();
+  } catch (error) {
+    throw new Error("Could not read the Telegram bridge secret file.", {
+      cause: error,
+    });
   }
-  if (result?.classification === "uncertain") {
+  if (!secret) {
+    throw new Error("Telegram bridge secret file is empty.");
+  }
+  return secret;
+};
+
+const createBridgeHeaders = (body, secret, nowMs) => {
+  const timestamp = String(Math.floor(nowMs / 1_000));
+  const signature = createHmac("sha256", secret)
+    .update(`${timestamp}.${body}`)
+    .digest("base64url");
+  return {
+    "Content-Type": "application/json",
+    "X-Mons-Telegram-Signature": signature,
+    "X-Mons-Telegram-Timestamp": timestamp,
+  };
+};
+
+const postEventPrizeAnnouncement = async (
+  input,
+  {
+    fetchImpl = globalThis.fetch,
+    now = Date.now,
+    secret,
+    url = ANNOUNCEMENT_URL,
+  },
+) => {
+  const body = JSON.stringify(input);
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      method: "POST",
+      headers: createBridgeHeaders(body, secret, now()),
+      body,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch {
+    throw new Error(
+      "Could not reach the Cloudflare announcement bridge. Delivery may be uncertain; check the group before retrying.",
+    );
+  }
+  let responseBody;
+  try {
+    responseBody = await response.json();
+  } catch {
     throw new Error(
       "Telegram may have accepted the announcement. Check the group before retrying.",
     );
   }
-  const details = [result?.code, result?.description]
-    .filter(Boolean)
-    .join(": ");
+  if (!responseBody || typeof responseBody !== "object") {
+    throw new Error(
+      "Telegram may have accepted the announcement. Check the group before retrying.",
+    );
+  }
+  return { body: responseBody, status: response.status };
+};
+
+const failureDetails = (body) =>
+  [body.code, body.description].filter(Boolean).join(": ");
+
+const sendEventPrizeAnnouncement = async (
+  input,
+  {
+    bridgeSecretFile,
+    fetchImpl,
+    now,
+    readSecret = readBridgeSecret,
+    requestId = randomUUID(),
+  },
+) => {
+  const announcement = buildEventPrizeAnnouncement(input);
+  const result = await postEventPrizeAnnouncement(
+    { ...input, requestId },
+    {
+      secret: await readSecret(bridgeSecretFile),
+      fetchImpl,
+      now,
+    },
+  );
+  if (result.status === 200 && result.body.ok === true) {
+    if (
+      !Array.isArray(result.body.messageIds) ||
+      result.body.messageIds.length !== announcement.imageUrls.length ||
+      result.body.messageIds.some(
+        (messageId) => !Number.isInteger(messageId) || messageId <= 0,
+      )
+    ) {
+      throw new Error(
+        "Telegram may have accepted the announcement. Check the group before retrying.",
+      );
+    }
+    return {
+      ...announcement,
+      messageIds: result.body.messageIds,
+    };
+  }
+  if (
+    result.status === 409 &&
+    result.body.error === "telegram-delivery-uncertain"
+  ) {
+    throw new Error(
+      "Telegram may have accepted the announcement. Check the group before retrying.",
+    );
+  }
+  if (result.status === 401) {
+    throw new Error("Cloudflare announcement bridge rejected the credentials.");
+  }
+  if (result.status === 400) {
+    throw new Error(
+      "Cloudflare announcement bridge rejected the announcement.",
+    );
+  }
+  if (result.status === 503) {
+    throw new Error("Telegram is temporarily unavailable. Please try again.");
+  }
+  if (result.status === 502) {
+    const details = failureDetails(result.body);
+    throw new Error(
+      `Telegram rejected the announcement.${details ? ` ${details}` : ""}`,
+    );
+  }
   throw new Error(
-    `Telegram rejected the announcement.${details ? ` ${details}` : ""}`,
+    "Telegram may have accepted the announcement. Check the group before retrying.",
   );
 };
 
+const smokeEventPrizeAnnouncement = async (
+  bridgeSecretFile,
+  { fetchImpl, now, readSecret = readBridgeSecret } = {},
+) => {
+  const result = await postEventPrizeAnnouncement(
+    {
+      eventId: "__cloudflare_smoke__",
+      announcement: "smoke",
+      requestId: "00000000-0000-4000-8000-000000000000",
+    },
+    {
+      secret: await readSecret(bridgeSecretFile),
+      fetchImpl,
+      now,
+    },
+  );
+  if (result.status !== 400 || result.body.error !== "invalid-request") {
+    throw new Error(
+      `Cloudflare announcement bridge smoke returned ${result.status}.`,
+    );
+  }
+  return { ok: true };
+};
+
 const main = async (argv = process.argv.slice(2)) => {
-  const cliInput = parseAnnouncementArguments(argv);
+  const options = parseArgs(argv);
+  if (options.smoke) {
+    await smokeEventPrizeAnnouncement(options.bridgeSecretFile);
+    stdout.write("Cloudflare announcement bridge smoke passed.\n");
+    return;
+  }
   const prompts = createInterface({ input: stdin, output: stdout });
   try {
-    const input = cliInput || {
+    const input = options.input || {
       eventId:
         (await prompts.question(
           `Event ID [${COMPRESSED_PRIZES_EVENT_ID}]: `,
@@ -120,7 +272,9 @@ const main = async (argv = process.argv.slice(2)) => {
       return;
     }
     stdout.write("Sending...\n");
-    const result = await sendEventPrizeAnnouncement(input);
+    const result = await sendEventPrizeAnnouncement(input, {
+      bridgeSecretFile: options.bridgeSecretFile,
+    });
     stdout.write(
       `Sent ${result.messageIds.length} Telegram messages: ${result.messageIds.join(
         ", ",
@@ -139,9 +293,15 @@ if (require.main === module) {
 }
 
 module.exports = {
-  FIREBASE_PROJECT_ID,
+  ANNOUNCEMENT_URL,
+  REQUEST_TIMEOUT_MS,
+  createBridgeHeaders,
   main,
   parseAnnouncementArguments,
-  readFirebaseSecret,
+  parseArgs,
+  postEventPrizeAnnouncement,
+  readBridgeSecret,
+  readBridgeSecretStream,
   sendEventPrizeAnnouncement,
+  smokeEventPrizeAnnouncement,
 };

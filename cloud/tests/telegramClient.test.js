@@ -7,7 +7,7 @@ const {
   editTelegramMessage,
   sendTelegramMediaGroup,
   sendTelegramMessage,
-} = require("../functions/telegramClient");
+} = require("../functions/telegram/client");
 
 const jsonResponse = (status, data) => ({
   status,

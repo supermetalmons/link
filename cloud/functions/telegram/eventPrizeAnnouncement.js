@@ -1,18 +1,9 @@
 "use strict";
 
-const { defineSecret } = require("firebase-functions/params");
-const { HttpsError, onCall } = require("firebase-functions/v2/https");
 const { getEventPrizeDefinitions } = require("@mons/shared/event-prizes");
-const { isMonsLinkAdmin } = require("@mons/shared/events");
-const {
-  sendTelegramMediaGroup,
-  telegramBotToken,
-} = require("./firebaseClient");
-const { getProfileByLoginId } = require("../profileSummaryLookup");
 
 const EVENT_URL_ROOT = "https://mons.link/event/";
 const TELEGRAM_MEDIA_CAPTION_MAX_LENGTH = 1024;
-const telegramCommunityChatId = defineSecret("TELEGRAM_EXTRA_CHAT_ID");
 
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
@@ -60,103 +51,8 @@ const buildEventPrizeAnnouncement = (input) => {
   };
 };
 
-const handleAnnounceEventPrizes = async (request, dependencies = {}) => {
-  const uid = normalizeString(request?.auth?.uid);
-  if (!uid) {
-    throw new HttpsError("unauthenticated", "Authentication is required.");
-  }
-
-  const readProfile = dependencies.getProfileByLoginId || getProfileByLoginId;
-  const profile = await readProfile(uid);
-  const username = normalizeString(profile?.username).toLowerCase();
-  if (!isMonsLinkAdmin(username)) {
-    throw new HttpsError(
-      "permission-denied",
-      "Only mons.link admins can announce event prizes.",
-    );
-  }
-
-  let announcement;
-  try {
-    announcement = buildEventPrizeAnnouncement(request?.data);
-  } catch (error) {
-    if (error instanceof TypeError) {
-      throw new HttpsError("invalid-argument", error.message);
-    }
-    throw error;
-  }
-
-  const hasInjectedChatId = Object.prototype.hasOwnProperty.call(
-    dependencies,
-    "chatId",
-  );
-  const chatId = normalizeString(
-    hasInjectedChatId ? dependencies.chatId : telegramCommunityChatId.value(),
-  );
-  if (!chatId) {
-    throw new HttpsError(
-      "failed-precondition",
-      "Telegram community chat is not configured.",
-    );
-  }
-
-  const send = dependencies.sendTelegramMediaGroup || sendTelegramMediaGroup;
-  const logger = dependencies.logger || console;
-  const result = await send({
-    chatId,
-    imageUrls: announcement.imageUrls,
-    text: announcement.text,
-    silent: false,
-  });
-  if (!result?.ok) {
-    logger.error("Event prize Telegram announcement failed", {
-      eventId: announcement.eventId,
-      classification: result?.classification || "unknown",
-      code: result?.code || "unknown",
-      description: result?.description || "",
-    });
-    if (result?.classification === "uncertain") {
-      throw new HttpsError(
-        "aborted",
-        "Telegram may have accepted this announcement. Check the group before retrying.",
-      );
-    }
-    if (result?.classification === "retryable") {
-      throw new HttpsError(
-        "unavailable",
-        "Telegram is temporarily unavailable. Please try again.",
-      );
-    }
-    throw new HttpsError(
-      "failed-precondition",
-      "Telegram rejected the announcement.",
-    );
-  }
-
-  return {
-    ok: true,
-    eventId: announcement.eventId,
-    eventUrl: announcement.eventUrl,
-    messageIds: result.messageIds,
-  };
-};
-
-const announceEventPrizes = onCall(
-  {
-    secrets: [telegramBotToken, telegramCommunityChatId],
-    timeoutSeconds: 30,
-    memory: "256MiB",
-    maxInstances: 1,
-    concurrency: 1,
-  },
-  handleAnnounceEventPrizes,
-);
-
 module.exports = {
   EVENT_URL_ROOT,
   TELEGRAM_MEDIA_CAPTION_MAX_LENGTH,
-  announceEventPrizes,
   buildEventPrizeAnnouncement,
-  handleAnnounceEventPrizes,
-  telegramCommunityChatId,
 };

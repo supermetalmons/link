@@ -12,7 +12,6 @@ const sharedDirectory = path.join(functionsDirectory, "shared");
 
 const callableExportNames = [
   "acceptWagerProposal",
-  "announceEventPrizes",
   "cancelWagerProposal",
   "claimMatchVictoryByTimer",
   "completeXRedirectAuth",
@@ -138,13 +137,6 @@ Object.assign(expectedEndpointContracts, {
     maxInstances: 3,
     concurrency: 1,
     secrets: ["EVENT_PRIZE_ADMIN_PRIVATE_KEY", "HELIUS_RPC_API_KEY"],
-  }),
-  announceEventPrizes: callableContract({
-    availableMemoryMb: 256,
-    timeoutSeconds: 30,
-    maxInstances: 1,
-    concurrency: 1,
-    secrets: ["TELEGRAM_BOT_TOKEN", "TELEGRAM_EXTRA_CHAT_ID"],
   }),
   syncEventState: callableContract({
     availableMemoryMb: 512,
@@ -430,7 +422,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 44);
+  assert.equal(expectedExportNames.length, 43);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

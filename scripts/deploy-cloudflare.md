@@ -111,6 +111,61 @@ Queue consumer configuration. Provisioning, secret setup, hard cutover,
 recovery, and rollback are documented in the
 [Telegram delivery migration guide](migrate-telegram-delivery.md).
 
+## Event prize announcement API
+
+The admin-only prize album operation is served synchronously by
+`POST https://api.mons.link/internal/telegram/event-prize-announcement`. The
+request body contains `requestId`, `eventId`, and `announcement`. The request is
+authenticated with the dedicated `TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET` using
+the timestamp and HMAC headers shared with the delivery bridge. The Worker uses
+its encrypted Telegram bot token and community chat ID.
+
+Generate a separate random 32-byte announcement secret in a protected operator
+file, then store the same value in Firebase Secret Manager for operator access
+and in the Worker:
+
+```sh
+openssl rand -hex 32 > /secure/telegram-announcement-secret
+firebase functions:secrets:set TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET --data-file /secure/telegram-announcement-secret --config cloud/firebase.json --project mons-link
+node_modules/.bin/wrangler secret put TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET --config cloud/workers/api/wrangler.jsonc < /secure/telegram-announcement-secret
+```
+
+Do not reuse the queue bridge secret.
+
+The send stays on the HTTP request path because a timeout or malformed Telegram
+acknowledgement is uncertain. Queue retries could publish the album twice. The
+Worker and CLI therefore return an explicit uncertain result and require the
+operator to inspect the group before retrying.
+
+Each CLI invocation signs a UUID request ID. The Worker reserves that ID in
+RTDB before calling Telegram and stores successful message IDs, so replaying an
+identical signed request returns the existing receipt without publishing the
+album twice.
+
+After promoting a smoke-tested API Worker candidate, validate the production
+route and bridge secret with an intentionally invalid event. This request is
+authenticated but cannot reach Telegram:
+
+```sh
+npm run announceEventPrizes -- --bridge-secret-file /secure/telegram-announcement-secret --smoke
+```
+
+Then preview and apply the complete Firebase release. Its forced manifest
+reconciliation removes the retired `announceEventPrizes` callable:
+
+```sh
+npm run deploy:firebase -- --project mons-link --dry-run
+npm run deploy:firebase -- --project mons-link
+firebase functions:list --project mons-link
+```
+
+The operational command retains local preview and confirmation:
+
+```sh
+npm run announceEventPrizes -- --bridge-secret-file /secure/telegram-announcement-secret
+npm run announceEventPrizes -- --bridge-secret-file /secure/telegram-announcement-secret FRkdorMWaYW "Win compressed NFTs"
+```
+
 ## Mining API
 
 Authenticated mining is served by `POST https://api.mons.link/mining/rock`.

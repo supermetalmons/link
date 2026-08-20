@@ -12,6 +12,7 @@ export const TELEGRAM_TEST_ENV = {
   FIREBASE_RTDB_URL: "https://mons-link-default-rtdb.firebaseio.com",
   GAMEPLAY_SERVICE_ACCOUNT_EMAIL: "gameplay@example.iam.gserviceaccount.com",
   GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
+  TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET: "test-announcement-secret",
   TELEGRAM_BOT_TOKEN: "test-telegram-token",
   TELEGRAM_DELIVERY_QUEUE: queue,
   TELEGRAM_EXTRA_CHAT_ID: "test-telegram-chat",

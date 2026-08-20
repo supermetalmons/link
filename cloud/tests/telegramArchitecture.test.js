@@ -10,9 +10,15 @@ const repositoryRoot = path.resolve(cloudRoot, "..");
 const functionsRoot = path.join(cloudRoot, "functions");
 const adminRoot = path.join(cloudRoot, "admin");
 const telegramClientPaths = new Set([
-  path.join(functionsRoot, "telegramClient.js"),
   path.join(functionsRoot, "telegram", "client.js"),
-  path.join(functionsRoot, "telegram", "firebaseClient.js"),
+  path.join(
+    repositoryRoot,
+    "cloud",
+    "workers",
+    "api",
+    "src",
+    "eventPrizeAnnouncement.ts",
+  ),
   path.join(
     repositoryRoot,
     "cloud",
@@ -216,7 +222,6 @@ test("admin credential failures include actionable ADC setup help", () => {
 test("all Telegram functions are exported", () => {
   const functionIndex = require("../functions/index");
   const exportNames = [
-    "announceEventPrizes",
     "dispatchTelegramDelivery",
     "dispatchTelegramManualRecovery",
     "projectAutomatchTelegramMessages",
