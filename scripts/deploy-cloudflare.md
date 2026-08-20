@@ -120,11 +120,12 @@ authenticated with the dedicated `TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET` using
 the timestamp and HMAC headers shared with the delivery bridge. The Worker uses
 its encrypted Telegram bot token and community chat ID.
 
-Generate a separate random 32-byte announcement secret in a protected operator
-file, then store the same value in Firebase Secret Manager for operator access
-and in the Worker:
+For rotation, generate the credential with restrictive file permissions and
+store the same value in Firebase Secret Manager for operator access and in the
+Worker:
 
 ```sh
+umask 077
 openssl rand -hex 32 > /secure/telegram-announcement-secret
 firebase functions:secrets:set TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET --data-file /secure/telegram-announcement-secret --config cloud/firebase.json --project mons-link
 node_modules/.bin/wrangler secret put TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET --config cloud/workers/api/wrangler.jsonc < /secure/telegram-announcement-secret
@@ -142,21 +143,10 @@ RTDB before calling Telegram and stores successful message IDs, so replaying an
 identical signed request returns the existing receipt without publishing the
 album twice.
 
-After promoting a smoke-tested API Worker candidate, validate the production
-route and bridge secret with an intentionally invalid event. This request is
-authenticated but cannot reach Telegram:
+Validate the production route and credential without reaching Telegram:
 
 ```sh
 npm run announceEventPrizes -- --bridge-secret-file /secure/telegram-announcement-secret --smoke
-```
-
-Then preview and apply the complete Firebase release. Its forced manifest
-reconciliation removes the retired `announceEventPrizes` callable:
-
-```sh
-npm run deploy:firebase -- --project mons-link --dry-run
-npm run deploy:firebase -- --project mons-link
-firebase functions:list --project mons-link
 ```
 
 The operational command retains local preview and confirmation:

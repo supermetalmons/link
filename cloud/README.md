@@ -21,10 +21,11 @@ remaining game and event functions, and the existing Firestore auth records.
 Set `TELEGRAM_QUEUE_BRIDGE_SECRET` for both retained Telegram dispatch triggers. The Cloudflare Queue migration, hard cutover, recovery, and rollback procedure is documented in the [Telegram delivery migration guide](../scripts/migrate-telegram-delivery.md).
 
 The Telegram bot token, community chat ID, and dedicated announcement bridge
-secret are encrypted Worker secrets. Keep an operator copy of
-`TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET` in a protected file outside the
-repository. The former Firebase bot-token and chat-ID secret versions are no
-longer used by an active Function.
+secret are encrypted Worker secrets. Event prize operations use a separate
+`TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET`; never use the queue bridge secret. Restore
+the protected operator file from Secret Manager when needed:
+
+`umask 077; firebase functions:secrets:access TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET --project mons-link > /secure/telegram-announcement-secret`
 
 ## Live Firebase operations
 
@@ -103,9 +104,8 @@ The GP and MP tools publish to the configured community destination. They defaul
 ## Event prize announcements
 
 Event prize albums are sent synchronously through the HMAC-protected API Worker
-route. Use the same protected bridge-secret file as other Cloudflare Telegram
-administration. Validate the live route and shared secret without sending to
-Telegram:
+route. Use the dedicated announcement-secret file. Validate the live route and
+credential without sending to Telegram:
 
 `npm run announceEventPrizes -- --bridge-secret-file /secure/telegram-announcement-secret --smoke`
 
