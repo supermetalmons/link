@@ -1,5 +1,6 @@
 import type { PlayerColor } from "@mons/shared/ids";
 import type { StartAutomatchResponse } from "@mons/shared/navigation";
+import type { StartMatchTimerResponse } from "@mons/shared/timers";
 import type {
   HistoricalMatchPair,
   PlayerProfile,
@@ -9,8 +10,7 @@ import type { RouteState } from "../navigation/routeState";
 
 export type AutomatchResponse = StartAutomatchResponse;
 
-type TimerStartResponse =
-  { ok: true; timer: string; duration: number } | { ok: false };
+type TimerStartResponse = StartMatchTimerResponse | { ok: false };
 
 type TimerClaimResponse = { ok: boolean };
 

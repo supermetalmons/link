@@ -13,6 +13,10 @@ import {
   type WagerProposalSendRequest,
 } from "@mons/shared/wagers";
 import {
+  isStartMatchTimerRequest,
+  type StartMatchTimerRequest,
+} from "@mons/shared/timers";
+import {
   TELEGRAM_AUTOMATCH_VERSION,
   buildAutomatchTelegramLifecycleUpdates,
 } from "../../../functions/telegram/automatchSource.js";
@@ -39,6 +43,11 @@ import {
 import { readBoundedJson } from "./http.ts";
 import { startAutomatch, type AutomatchDependencies } from "./automatch.ts";
 import {
+  enforceMatchTimerRateLimit,
+  startMatchTimer,
+  type MatchTimerDependencies,
+} from "./matchTimer.ts";
+import {
   acceptWagerProposal,
   removeWagerProposal,
   sendWagerProposal,
@@ -50,6 +59,7 @@ const MAX_NAVIGATION_DELETE_ATTEMPTS = 3;
 export const GAMEPLAY_PATHS = new Set([
   "/automatch/cancel",
   "/automatch/start",
+  "/matches/timer/start",
   "/navigation/games/remove",
   "/wagers/proposals/accept",
   "/wagers/proposals/cancel",
@@ -74,6 +84,7 @@ export type GameplayRouteDependencies = {
   automatch?: AutomatchDependencies;
   logFailure?: (kind: string) => void;
   repository?: GameplayRepository;
+  timer?: MatchTimerDependencies;
   wager?: WagerProposalDependencies;
   verifyIdentity?: (
     request: Request,
@@ -380,6 +391,21 @@ async function readGameplayBody(
     }
     return body;
   }
+  if (pathname === "/matches/timer/start") {
+    if (!isStartMatchTimerRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    const playerId = body.playerId.trim();
+    const opponentId = body.opponentId.trim();
+    const matchId = body.matchId.trim();
+    const inviteId = body.inviteId.trim();
+    return {
+      playerId,
+      opponentId,
+      matchId,
+      inviteId,
+    } satisfies StartMatchTimerRequest;
+  }
   if (pathname.startsWith("/wagers/proposals/")) {
     if (pathname === "/wagers/proposals/send") {
       if (!isWagerProposalSendRequest(body)) {
@@ -454,6 +480,15 @@ export async function handleGameplayRoute(
         repository,
         dependencies.automatch,
       );
+    } else if (pathname === "/matches/timer/start") {
+      if (!isStartMatchTimerRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      await enforceMatchTimerRateLimit(env.AUTH_RATE_LIMITER, identity.uid);
+      response = await startMatchTimer(identity, body, repository, {
+        ...dependencies.timer,
+        signal: dependencies.timer?.signal || request.signal,
+      });
     } else if (pathname === "/navigation/games/remove") {
       response = await removeNavigationGame(
         identity,

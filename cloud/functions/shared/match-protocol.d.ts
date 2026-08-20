@@ -31,3 +31,26 @@ export function buildFreshMatchRecord<
   aura: TAura;
   seed: MatchSeedRecord<TGameVariant>;
 }): FreshMatchRecord<TEmojiId, TAura, TGameVariant>;
+
+export type MatchHistoryRecord = {
+  color?: unknown;
+  fen?: unknown;
+  flatMovesString?: unknown;
+};
+
+export function movesFromFlatString(value: unknown): string[];
+export function buildOrderedMoveHistory(
+  player: MatchHistoryRecord,
+  opponent: MatchHistoryRecord,
+  parseMoves?: (value: unknown) => string[],
+): { white: string[]; black: string[] };
+export function parseGameFromMatchData<TGame>(
+  mons: { Game: { fromFen(fen: string): TGame | undefined } },
+  matchData: MatchHistoryRecord | null | undefined,
+): TGame | undefined;
+export function selectLaterGame<
+  TGame extends { isLaterThan(other: TGame): boolean },
+>(
+  playerGame: TGame | undefined,
+  opponentGame: TGame | undefined,
+): TGame | undefined;

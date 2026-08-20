@@ -112,6 +112,7 @@ import {
   removeNavigationGameViaApi,
   sendWagerProposalViaApi,
   startAutomatchViaApi,
+  startMatchTimerViaApi,
 } from "../services/gameplayApi";
 import { compareNavigationItems as compareNavigationItemsByDisplayOrder } from "../services/navigationItemOrdering";
 import { resetNftCache } from "../services/nftCache";
@@ -157,6 +158,7 @@ import type {
   AuthIntentResponse,
   LinkedAuthMethodsResponse,
 } from "@mons/shared/auth";
+import type { StartMatchTimerResponse } from "@mons/shared/timers";
 import {
   beginAuthIntentViaApi,
   beginXRedirectAuthViaApi,
@@ -2160,7 +2162,7 @@ class Connection {
     }
   }
 
-  public async startTimer(): Promise<any> {
+  public async startTimer(): Promise<StartMatchTimerResponse | { ok: false }> {
     try {
       await this.ensureAuthenticated();
       const writableContext = this.requireWritableContext(
@@ -2170,18 +2172,16 @@ class Connection {
       if (!writableContext) {
         return { ok: false };
       }
-      const startTimerFunction = httpsCallable(
-        this.functions,
-        "startMatchTimer",
-      );
       const opponentId = this.getOpponentId(writableContext.actorUid);
-      const response = await startTimerFunction({
-        playerId: writableContext.actorUid,
-        inviteId: writableContext.inviteId,
-        matchId: writableContext.matchId,
-        opponentId,
-      });
-      return response.data;
+      return startMatchTimerViaApi(
+        {
+          playerId: writableContext.actorUid,
+          opponentId,
+          matchId: writableContext.matchId,
+          inviteId: writableContext.inviteId,
+        },
+        this.getAuthApiToken,
+      );
     } catch (error) {
       console.error("Error starting a timer:", error);
       throw error;

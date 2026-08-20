@@ -58,6 +58,7 @@ export type FirebaseRtdbClient = {
   transactPath: (
     path: string,
     updater: (current: unknown) => unknown,
+    signal?: AbortSignal,
   ) => Promise<FirebaseRtdbTransactionResult>;
 };
 
@@ -238,12 +239,14 @@ export function createFirebaseRtdbClient(
       }
       await cancelResponseBody(response);
     },
-    async transactPath(path, updater) {
+    async transactPath(path, updater, signal) {
       const url = databaseUrl(root, path);
       for (let attempt = 0; attempt < maxTransactionAttempts; attempt += 1) {
-        const readResponse = await authorizedFetch(url, {
-          headers: { "X-Firebase-ETag": "true" },
-        });
+        const readResponse = await authorizedFetch(
+          url,
+          { headers: { "X-Firebase-ETag": "true" } },
+          signal,
+        );
         if (!readResponse.ok) {
           await cancelResponseBody(readResponse);
           throw new FirebaseRtdbFailure();
@@ -266,14 +269,18 @@ export function createFirebaseRtdbClient(
             value: current,
           };
         }
-        const writeResponse = await authorizedFetch(url, {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            "If-Match": etag,
+        const writeResponse = await authorizedFetch(
+          url,
+          {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json",
+              "If-Match": etag,
+            },
+            body: JSON.stringify(decision.value),
           },
-          body: JSON.stringify(decision.value),
-        });
+          signal,
+        );
         if (writeResponse.status === 412) {
           await cancelResponseBody(writeResponse);
           continue;

@@ -24,6 +24,7 @@ const {
   startRatingUpdateLeaseHeartbeat,
 } = require("./gameplay/ratingLease");
 const { assertResolvedPlayerClaim } = require("./gameplay/playerAuthorization");
+const { clearMatchTimerMarkers } = require("./gameplay/matchTimerMarkers");
 
 const updateRating = createRatingUpdater(glicko2.Glicko2);
 
@@ -207,6 +208,7 @@ exports.updateRatings = onCall(async (request) => {
   });
 
   if (lease.status === "done") {
+    await clearMatchTimerMarkers({ playerId, opponentId, matchId });
     await ensureRatingUpdateCompletionMarker(ratingUpdateFlagRef);
     await maybeApplyStoredFebruaryChallengeUpdate(lease.data);
     return {
@@ -449,6 +451,8 @@ exports.updateRatings = onCall(async (request) => {
       { merge: true },
     );
     await batch.commit();
+
+    await clearMatchTimerMarkers({ playerId, opponentId, matchId });
 
     await ensureRatingUpdateCompletionMarker(ratingUpdateFlagRef);
     await maybeApplyStoredFebruaryChallengeUpdate({

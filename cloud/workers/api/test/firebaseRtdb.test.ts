@@ -156,6 +156,36 @@ test("commits and aborts ETag-backed transactions", async () => {
   assert.equal(new Headers(requests[1].headers).get("If-Match"), '"one"');
 });
 
+test("propagates cancellation through transaction reads and writes", async () => {
+  const controller = new AbortController();
+  const signals: AbortSignal[] = [];
+  const responses = [
+    jsonResponse(null, 200, { ETag: '"one"' }),
+    jsonResponse({ ok: true }),
+  ];
+  const client = createFirebaseRtdbClient(env, {
+    getAccessToken: async () => "access-token",
+    fetcher: async (_input, init) => {
+      assert.ok(init?.signal);
+      signals.push(init.signal);
+      const response = responses.shift();
+      if (!response) throw new Error("missing response");
+      return response;
+    },
+  });
+  await client.transactPath(
+    "matchTimerStarts/player/match",
+    () => ({ value: { timer: "1;1000" } }),
+    controller.signal,
+  );
+  controller.abort();
+  assert.equal(signals.length, 2);
+  assert.equal(
+    signals.every((signal) => signal.aborted),
+    true,
+  );
+});
+
 test("retries conditional conflicts against fresh authoritative state", async () => {
   const values: unknown[] = [];
   const responses = [

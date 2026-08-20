@@ -1,6 +1,7 @@
 const { HttpsError } = require("firebase-functions/v2/https");
 const admin = require("../firebaseAdmin");
 const { batchReadWithRetry } = require("../batchRead");
+const { inviteMatchesPlayers } = require("@mons/shared/rematches");
 
 const createMatchRecordRefs = ({ playerId, opponentId, matchId, inviteId }) => {
   const matchRef = admin
@@ -38,10 +39,6 @@ const readMatchInviteRecords = async ({
     opponentMatchData: opponentMatchSnapshot.val(),
   };
 };
-
-const inviteMatchesPlayers = (inviteData, playerId, opponentId) =>
-  (inviteData.hostId === playerId && inviteData.guestId === opponentId) ||
-  (inviteData.hostId === opponentId && inviteData.guestId === playerId);
 
 const assertInviteMatchesPlayers = (inviteData, playerId, opponentId) => {
   if (!inviteMatchesPlayers(inviteData, playerId, opponentId)) {

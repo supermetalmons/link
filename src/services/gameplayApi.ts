@@ -19,6 +19,11 @@ import {
   type WagerProposalSendRequest,
   type WagerProposalSendResponse,
 } from "@mons/shared/wagers";
+import {
+  isStartMatchTimerResponse,
+  type StartMatchTimerRequest,
+  type StartMatchTimerResponse,
+} from "@mons/shared/timers";
 import type { AuthTokenProvider } from "./authApi";
 
 const GAMEPLAY_API_ROOT = "https://api.mons.link";
@@ -210,6 +215,18 @@ export function removeNavigationGameViaApi(
     request,
     tokenProvider,
     isRemoveNavigationGameResponse,
+  );
+}
+
+export function startMatchTimerViaApi(
+  request: StartMatchTimerRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<StartMatchTimerResponse> {
+  return gameplayMutation(
+    "/matches/timer/start",
+    request,
+    tokenProvider,
+    isStartMatchTimerResponse,
   );
 }
 

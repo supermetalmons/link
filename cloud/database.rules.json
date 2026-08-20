@@ -36,6 +36,10 @@
       ".read": "auth != null && auth.token.admin === true",
       ".write": "auth != null && auth.token.admin === true"
     },
+    "matchTimerStarts": {
+      ".read": false,
+      ".write": false
+    },
     "eventTelegramProjectionLocks": {
       ".read": "auth != null && auth.token.admin === true",
       ".write": "auth != null && auth.token.admin === true"

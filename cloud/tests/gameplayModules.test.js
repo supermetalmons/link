@@ -25,6 +25,10 @@ const {
   assertPlayerClaim,
   assertResolvedPlayerClaim,
 } = require("../functions/gameplay/playerAuthorization");
+const {
+  clearMatchTimerMarkers,
+  finishMatchTimer,
+} = require("../functions/gameplay/matchTimerMarkers");
 const wagerMaterials = require("../functions/gameplay/wagerMaterials");
 const wagerHelpers = require("../functions/wagerHelpers");
 
@@ -42,6 +46,52 @@ test("player reads expose gameplay state without exposing wager operations", () 
   assert.equal(players.$userId.profile[".read"], true);
   assert.equal(players.$userId.mining.frozen[".read"], true);
   assert.equal(players.$userId.mining._wagerOps, undefined);
+});
+
+test("timer starts use a protected marker without restricting match writes", () => {
+  assert.deepEqual(databaseRules.rules.matchTimerStarts, {
+    ".read": false,
+    ".write": false,
+  });
+  assert.equal(
+    databaseRules.rules.players.$userId.matches.$matchId.timer[".validate"],
+    "newData.isString() && (newData.val() === '' || newData.val() === data.val() || (auth != null && auth.token.admin === true))",
+  );
+});
+
+test("terminal matches clear both protected timer markers", async () => {
+  const updates = [];
+  await withFirebaseAdminMethod(
+    "database",
+    () => ({
+      ref: () => ({
+        update: async (value) => updates.push(value),
+      }),
+    }),
+    async () => {
+      await finishMatchTimer({
+        playerId: "player",
+        opponentId: "opponent",
+        matchId: "match",
+      });
+      await clearMatchTimerMarkers({
+        playerId: "player",
+        opponentId: "opponent",
+        matchId: "match",
+      });
+    },
+  );
+  assert.deepEqual(updates, [
+    {
+      "players/player/matches/match/timer": "gg",
+      "matchTimerStarts/player/match": null,
+      "matchTimerStarts/opponent/match": null,
+    },
+    {
+      "matchTimerStarts/player/match": null,
+      "matchTimerStarts/opponent/match": null,
+    },
+  ]);
 });
 
 const withFirebaseAdminMethod = async (method, replacement, callback) => {

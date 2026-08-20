@@ -5,6 +5,11 @@ export interface RematchInviteData {
 
 export function parseRematchIndices(rawValue: unknown): number[];
 export function rematchSeriesEnded(inviteData: unknown): boolean;
+export function inviteMatchesPlayers(
+  inviteData: unknown,
+  playerId: string,
+  opponentId: string,
+): boolean;
 export function createInviteCandidatesFromMatchId(matchId: string): string[];
 export function parseInviteMatchIndex(
   inviteId: unknown,

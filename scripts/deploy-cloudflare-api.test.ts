@@ -165,7 +165,7 @@ function smokeResponses(providerAttempts = 1): Response[] {
       swagpack_reactions: [{ id: 3, count: 1 }],
     }),
   );
-  for (let index = 0; index < 13; index++) {
+  for (let index = 0; index < 14; index++) {
     responses.push(authPreflightResponse(), unauthenticatedResponse());
   }
   responses.push(
@@ -466,7 +466,7 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 34);
+  assert.equal(requests.length, 36);
   assert.equal(requests[0].url, `${PREVIEW_URL}/nfts`);
   assert.equal(requests[0].init.method, "OPTIONS");
   for (const request of requests) {
@@ -492,7 +492,7 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
     sol: SMOKE_SOL,
     eth: "",
   });
-  const authRequests = requests.slice(4, 30);
+  const authRequests = requests.slice(4, 32);
   assert.deepEqual(
     authRequests.map(({ url, init }) => [url, init.method]),
     [
@@ -508,6 +508,8 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
       [`${PREVIEW_URL}/automatch/start`, "POST"],
       [`${PREVIEW_URL}/leaderboards/read`, "OPTIONS"],
       [`${PREVIEW_URL}/leaderboards/read`, "POST"],
+      [`${PREVIEW_URL}/matches/timer/start`, "OPTIONS"],
+      [`${PREVIEW_URL}/matches/timer/start`, "POST"],
       [`${PREVIEW_URL}/mining/rock`, "OPTIONS"],
       [`${PREVIEW_URL}/mining/rock`, "POST"],
       [`${PREVIEW_URL}/navigation/games/remove`, "OPTIONS"],
@@ -525,19 +527,19 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
     ],
   );
   assert.equal(
-    requests[33].url,
+    requests[35].url,
     `${PREVIEW_URL}/auth/x/callback?state=abcdefghijklmnopqrstuvwx`,
   );
-  assert.equal(requests[30].url, `${PREVIEW_URL}/internal/telegram/delivery`);
-  assert.equal(requests[30].init.method, "POST");
+  assert.equal(requests[32].url, `${PREVIEW_URL}/internal/telegram/delivery`);
+  assert.equal(requests[32].init.method, "POST");
   assert.equal(
-    requests[31].url,
+    requests[33].url,
     `${PREVIEW_URL}/internal/telegram/event-prize-announcement`,
   );
-  assert.equal(requests[31].init.method, "POST");
-  assert.equal(requests[32].url, `${PREVIEW_URL}/auth/x/callback`);
-  assert.equal(requests[32].init.method, "GET");
-  assert.equal(requests[33].init.method, "GET");
+  assert.equal(requests[33].init.method, "POST");
+  assert.equal(requests[34].url, `${PREVIEW_URL}/auth/x/callback`);
+  assert.equal(requests[34].init.method, "GET");
+  assert.equal(requests[35].init.method, "GET");
   assert.deepEqual(delays, [500]);
 });
 
@@ -618,6 +620,8 @@ test("retries an expected-success response body transport failure", async () => 
     unauthenticatedResponse(),
     authPreflightResponse(),
     unauthenticatedResponse(),
+    authPreflightResponse(),
+    unauthenticatedResponse(),
     telegramBridgeUnauthorizedResponse(),
     telegramBridgeUnauthorizedResponse(),
     xCallbackResponse(),
@@ -637,7 +641,7 @@ test("retries an expected-success response body transport failure", async () => 
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 34);
+  assert.equal(requests.length, 36);
   assert.deepEqual(delays, [500]);
 });
 
@@ -1004,7 +1008,7 @@ test("production promotes only the explicit version and then smokes the custom d
     fetch: async (url) => {
       assert.match(
         String(url),
-        /^https:\/\/api\.mons\.link\/(?:nfts|mining\/rock|automatch\/(?:cancel|start)|leaderboards\/read|navigation\/games\/remove|profiles\/lookup|wagers\/proposals\/(?:accept|cancel|decline|send)|internal\/telegram\/(?:delivery|event-prize-announcement)|auth\/(?:intents|methods|x\/(?:flows|callback)))/,
+        /^https:\/\/api\.mons\.link\/(?:nfts|mining\/rock|automatch\/(?:cancel|start)|leaderboards\/read|matches\/timer\/start|navigation\/games\/remove|profiles\/lookup|wagers\/proposals\/(?:accept|cancel|decline|send)|internal\/telegram\/(?:delivery|event-prize-announcement)|auth\/(?:intents|methods|x\/(?:flows|callback)))/,
       );
       return nextResponse(responses);
     },

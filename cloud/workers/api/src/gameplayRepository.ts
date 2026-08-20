@@ -71,6 +71,7 @@ export type GameplayRepository = {
   transactRtdbPath: (
     path: string,
     updater: (current: unknown) => unknown,
+    signal?: AbortSignal,
   ) => Promise<FirebaseRtdbTransactionResult>;
 };
 

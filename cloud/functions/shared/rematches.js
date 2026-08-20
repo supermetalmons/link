@@ -30,6 +30,12 @@ const rematchSeriesEnded = (inviteData) => {
   return hostRematches.endsWith("x") || guestRematches.endsWith("x");
 };
 
+const inviteMatchesPlayers = (inviteData, playerId, opponentId) =>
+  !!inviteData &&
+  typeof inviteData === "object" &&
+  ((inviteData.hostId === playerId && inviteData.guestId === opponentId) ||
+    (inviteData.hostId === opponentId && inviteData.guestId === playerId));
+
 const createInviteCandidatesFromMatchId = (matchId) => {
   const candidates = [];
   for (let splitIndex = matchId.length - 1; splitIndex > 0; splitIndex -= 1) {
@@ -115,6 +121,7 @@ const deriveLatestMatchId = (inviteId, inviteData, latestMatchIdHint) => {
 module.exports = {
   parseRematchIndices,
   rematchSeriesEnded,
+  inviteMatchesPlayers,
   createInviteCandidatesFromMatchId,
   parseInviteMatchIndex,
   getHintMatchIndex,

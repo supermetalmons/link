@@ -182,12 +182,50 @@ Before reconciliation, rollback by restoring the previous frontend and API
 Worker versions. After reconciliation, redeploy `mineRock` from the retained
 pre-migration commit before restoring those versions.
 
+## Match timer API
+
+Starting a match timer is served by
+`POST https://api.mons.link/matches/timer/start`. The browser sends its
+Firebase ID token in the `Authorization: Bearer` header and provides the acting
+player, opponent, invite, and match IDs. The Worker verifies direct login
+ownership or the existing same-profile claim, checks the invite participants
+and match series, reads both RTDB match records, validates the later state and
+move history with `mons-rules`, and requires the opponent's turn.
+
+Timer attempts share the authenticated rate-limit binding at 20 attempts per
+minute per Firebase UID and Cloudflare location. The Worker writes through the
+existing gameplay service account, so no new secret or IAM permission is
+required. A protected RTDB marker makes the first valid timer for a turn win;
+repeated requests restore that exact timer without extending its deadline, even
+if the player match record was cleared or recreated. Terminal timer state is
+never overwritten.
+
+API smoke checks cover preflight and unauthenticated responses without reading
+or changing a match. Deploy the reviewed RTDB rules before testing the Worker
+candidate so clients cannot modify the protected timer marker:
+
+```sh
+firebase deploy --only database --config cloud/firebase.json --project mons-link
+```
+
+Call the version-preview route with an authenticated disposable match and
+repeat the request to confirm the deadline remains unchanged. Promote the API
+Worker, deploy and verify the frontend, then run the complete Firebase release
+to remove the retired `startMatchTimer` callable.
+`claimMatchVictoryByTimer` remains in Firebase.
+
+Before Firebase reconciliation, rollback the frontend and API Worker versions.
+After reconciliation, redeploy `startMatchTimer` from the retained pre-migration
+commit before restoring those versions. Already-open tabs using the former
+frontend must be refreshed after the callable is removed.
+
 ## Gameplay mutation APIs
 
 Authenticated gameplay mutations are served by:
 
 - `POST https://api.mons.link/automatch/start`
 - `POST https://api.mons.link/automatch/cancel`
+- `POST https://api.mons.link/matches/timer/start`
 - `POST https://api.mons.link/navigation/games/remove`
 - `POST https://api.mons.link/wagers/proposals/send`
 - `POST https://api.mons.link/wagers/proposals/accept`

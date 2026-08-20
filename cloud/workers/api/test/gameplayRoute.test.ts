@@ -518,6 +518,157 @@ test("routes authenticated CORS and rejects methods before authentication", asyn
   });
 });
 
+test("routes match timer starts with rate limiting and idempotent storage", async () => {
+  let rateLimitKey = "";
+  const timerEnv = {
+    ...env,
+    AUTH_RATE_LIMITER: {
+      limit: async ({ key }: RateLimitOptions) => {
+        rateLimitKey = key;
+        return { success: true };
+      },
+    },
+  } as Env;
+  const paths: string[] = [];
+  const response = await handleGameplayRoute(
+    request("/matches/timer/start", {
+      body: {
+        playerId: identity.uid,
+        opponentId: "opponent-uid",
+        matchId: "match-1",
+        inviteId: "match-1",
+      },
+    }),
+    timerEnv,
+    context(),
+    {
+      repository: repository({
+        getRtdbPath: async (path) => {
+          paths.push(path);
+          if (path === "invites/match-1") {
+            return { hostId: identity.uid, guestId: "opponent-uid" };
+          }
+          if (path.startsWith(`players/${identity.uid}/`)) {
+            return {
+              color: "black",
+              fen: "player-fen",
+              flatMovesString: "",
+              status: "",
+              timer: "4;12345",
+            };
+          }
+          return {
+            color: "white",
+            fen: "opponent-fen",
+            flatMovesString: "",
+            status: "",
+            timer: "",
+          };
+        },
+        transactRtdbPath: async (path, updater) => {
+          paths.push(path);
+          return applyTransaction(updater, "4;12345");
+        },
+      }),
+      timer: {
+        now: () => 1_000,
+        resolveGame: () => ({
+          activeColor: "white",
+          historyValid: true,
+          turnNumber: 4,
+          winner: undefined,
+        }),
+      },
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    timer: "4;12345",
+    duration: 90_000,
+  });
+  assert.equal(rateLimitKey, `timer:${identity.uid}`);
+  assert.deepEqual(paths, [
+    `players/${identity.uid}/matches/match-1`,
+    "players/opponent-uid/matches/match-1",
+    "invites/match-1",
+    `matchTimerStarts/${identity.uid}/match-1`,
+    `players/${identity.uid}/matches/match-1/timer`,
+  ]);
+});
+
+test("rejects rate-limited match timers before repository access", async () => {
+  let reads = 0;
+  const response = await handleGameplayRoute(
+    request("/matches/timer/start", {
+      body: {
+        playerId: identity.uid,
+        opponentId: "opponent-uid",
+        matchId: "match-1",
+        inviteId: "match-1",
+      },
+    }),
+    {
+      ...env,
+      AUTH_RATE_LIMITER: { limit: async () => ({ success: false }) },
+    } as Env,
+    context(),
+    {
+      repository: repository({
+        getRtdbPath: async () => {
+          reads++;
+          return null;
+        },
+      }),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 429);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "resource-exhausted",
+    message: "Too many timer attempts.",
+  });
+  assert.equal(reads, 0);
+});
+
+test("sanitizes match timer rate-limit infrastructure failures", async () => {
+  const failures: string[] = [];
+  const response = await handleGameplayRoute(
+    request("/matches/timer/start", {
+      body: {
+        playerId: identity.uid,
+        opponentId: "opponent-uid",
+        matchId: "match-1",
+        inviteId: "match-1",
+      },
+    }),
+    {
+      ...env,
+      AUTH_RATE_LIMITER: {
+        limit: async () => {
+          throw new Error("private-rate-limit-detail");
+        },
+      },
+    } as Env,
+    context(),
+    {
+      logFailure: (kind) => failures.push(kind),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 503);
+  const payload = await response.json();
+  assert.deepEqual(payload, {
+    ok: false,
+    error: "unavailable",
+    message: "rate-limit-unavailable",
+  });
+  assert.doesNotMatch(JSON.stringify(payload), /private/);
+  assert.deepEqual(failures, ["rate-limit-unavailable"]);
+});
+
 test("routes wager cancellation and decline to their exact proposal owners", async () => {
   const run = async (
     path: "/wagers/proposals/cancel" | "/wagers/proposals/decline",
@@ -814,6 +965,35 @@ test("authenticates before body parsing and sanitizes route failures", async () 
     ["/automatch/start", {}],
     ["/automatch/start", { emojiId: 0, aura: "" }],
     ["/automatch/start", { emojiId: 1, aura: "", extra: true }],
+    ["/matches/timer/start", {}],
+    [
+      "/matches/timer/start",
+      {
+        playerId: "player",
+        opponentId: "player",
+        matchId: "match",
+        inviteId: "match",
+      },
+    ],
+    [
+      "/matches/timer/start",
+      {
+        playerId: "unsafe/player",
+        opponentId: "opponent",
+        matchId: "match",
+        inviteId: "match",
+      },
+    ],
+    [
+      "/matches/timer/start",
+      {
+        playerId: "player",
+        opponentId: "opponent",
+        matchId: "match",
+        inviteId: "match",
+        extra: true,
+      },
+    ],
     ["/navigation/games/remove", {}],
     ["/navigation/games/remove", { inviteId: "unsafe/key" }],
     ["/wagers/proposals/cancel", {}],
