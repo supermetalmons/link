@@ -5,6 +5,7 @@ const { isSafeFirebaseKey } = require("./ids");
 const MATCH_TIMER_DURATION_MS = 90000;
 const MATCH_TIMER_DURATION_SECONDS = MATCH_TIMER_DURATION_MS / 1000;
 const MATCH_TIMER_TERMINAL = "gg";
+const MATCH_TIMER_CLAIM_ROOT = "matchTimerClaims";
 const MATCH_TIMER_START_ROOT = "matchTimerStarts";
 
 const isRecord = (value) =>
@@ -65,6 +66,8 @@ const isStartMatchTimerRequest = (value) =>
   isSafeFirebaseKey(value.inviteId) &&
   value.playerId.trim() !== value.opponentId.trim();
 
+const isClaimMatchVictoryByTimerRequest = isStartMatchTimerRequest;
+
 const isStartMatchTimerResponse = (value) => {
   if (
     !isRecord(value) ||
@@ -77,15 +80,21 @@ const isStartMatchTimerResponse = (value) => {
   return parseStrictMatchTimer(value.timer) !== null;
 };
 
+const isClaimMatchVictoryByTimerResponse = (value) =>
+  isRecord(value) && hasExactKeys(value, ["ok"]) && value.ok === true;
+
 module.exports = {
   MATCH_TIMER_DURATION_MS,
   MATCH_TIMER_DURATION_SECONDS,
   MATCH_TIMER_TERMINAL,
+  MATCH_TIMER_CLAIM_ROOT,
   MATCH_TIMER_START_ROOT,
   formatMatchTimer,
   parseMatchTimer,
   parseStrictMatchTimer,
   isMatchTimerTerminal,
+  isClaimMatchVictoryByTimerRequest,
+  isClaimMatchVictoryByTimerResponse,
   isStartMatchTimerRequest,
   isStartMatchTimerResponse,
 };

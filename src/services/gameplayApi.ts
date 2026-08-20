@@ -20,7 +20,10 @@ import {
   type WagerProposalSendResponse,
 } from "@mons/shared/wagers";
 import {
+  isClaimMatchVictoryByTimerResponse,
   isStartMatchTimerResponse,
+  type ClaimMatchVictoryByTimerRequest,
+  type ClaimMatchVictoryByTimerResponse,
   type StartMatchTimerRequest,
   type StartMatchTimerResponse,
 } from "@mons/shared/timers";
@@ -227,6 +230,18 @@ export function startMatchTimerViaApi(
     request,
     tokenProvider,
     isStartMatchTimerResponse,
+  );
+}
+
+export function claimMatchVictoryByTimerViaApi(
+  request: ClaimMatchVictoryByTimerRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<ClaimMatchVictoryByTimerResponse> {
+  return gameplayMutation(
+    "/matches/timer/claim",
+    request,
+    tokenProvider,
+    isClaimMatchVictoryByTimerResponse,
   );
 }
 

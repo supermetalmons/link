@@ -1,9 +1,12 @@
 import {
   MATCH_TIMER_DURATION_MS,
+  MATCH_TIMER_CLAIM_ROOT,
   MATCH_TIMER_START_ROOT,
   MATCH_TIMER_TERMINAL,
   formatMatchTimer,
   parseStrictMatchTimer,
+  type ClaimMatchVictoryByTimerRequest,
+  type ClaimMatchVictoryByTimerResponse,
   type StartMatchTimerRequest,
   type StartMatchTimerResponse,
 } from "@mons/shared/timers";
@@ -19,8 +22,12 @@ import {
 import { Color, Game } from "mons-rules";
 import { AuthApiFailure } from "./authErrors.ts";
 import type { FirebaseIdentity } from "./firebaseAuth.ts";
+import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 
+const EVENT_PROGRESS_FALLBACK_ROOT = "eventProgressFallback";
+const MATCH_TIMER_CLAIM_LEASE_MS = 30_000;
+const MATCH_TIMER_CLAIM_SIDE_EFFECT_ATTEMPTS = 3;
 const TIMER_DEADLINE_GRACE_MS = 500;
 const MAX_MATCH_FEN_BYTES = 16 * 1024;
 const MAX_MATCH_HISTORY_BYTES = 64 * 1024;
@@ -47,6 +54,16 @@ type MatchTimerMarker = {
   turnNumber: number;
 };
 
+type MatchTimerClaimFence = {
+  expiresAtMs: number;
+  inviteId: string;
+  opponentId: string;
+  playerId: string;
+  status: "pending";
+  timer: string;
+  turnNumber: number;
+};
+
 export type MatchTimerDependencies = {
   now?: () => number;
   signal?: AbortSignal;
@@ -60,6 +77,14 @@ type MatchTimerRepository = Pick<
   GameplayRepository,
   "getRtdbPath" | "transactRtdbPath"
 >;
+
+type MatchTimerClaimRepository = Pick<
+  GameplayRepository,
+  "getRtdbPath" | "patchRtdbRoot" | "transactRtdbPath"
+>;
+
+type MatchTimerRequest =
+  ClaimMatchVictoryByTimerRequest | StartMatchTimerRequest;
 
 function failedPrecondition(message: string): AuthApiFailure {
   return new AuthApiFailure(409, "failed-precondition", message);
@@ -110,7 +135,7 @@ function movesFromFlatString(value: string): string[] {
 }
 
 async function readMatchRecords(
-  request: StartMatchTimerRequest,
+  request: MatchTimerRequest,
   repository: MatchTimerRepository,
   signal: AbortSignal,
 ): Promise<[unknown, unknown, unknown]> {
@@ -228,6 +253,149 @@ export async function enforceMatchTimerRateLimit(
       "Too many timer attempts.",
     );
   }
+}
+
+export async function enforceMatchTimerClaimRateLimit(
+  rateLimiter: RateLimit,
+  uid: string,
+): Promise<void> {
+  let outcome: RateLimitOutcome;
+  try {
+    outcome = await rateLimiter.limit({ key: `timer-claim:${uid}` });
+  } catch {
+    throw new AuthApiFailure(503, "unavailable", "rate-limit-unavailable");
+  }
+  if (!outcome.success) {
+    throw new AuthApiFailure(
+      429,
+      "resource-exhausted",
+      "Too many timer claim attempts.",
+    );
+  }
+}
+
+function bytesToHex(value: ArrayBuffer): string {
+  return Array.from(new Uint8Array(value), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+export async function buildEventProgressFallbackSignalId(
+  eventId: string,
+  sourceKey: string,
+): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-1",
+    new TextEncoder().encode(`fallback:${eventId}:${sourceKey}`),
+  );
+  return `sig_${bytesToHex(digest).slice(0, 24)}`;
+}
+
+async function buildTimerClaimSideEffectUpdates(
+  inviteValue: unknown,
+  request: ClaimMatchVictoryByTimerRequest,
+  fence: MatchTimerClaimFence,
+  nowMs: number,
+): Promise<Record<string, unknown>> {
+  const updates: Record<string, unknown> = {
+    [`players/${request.playerId}/matches/${request.matchId}/timer`]:
+      MATCH_TIMER_TERMINAL,
+    [`${MATCH_TIMER_CLAIM_ROOT}/${request.matchId}`]: {
+      ...fence,
+      status: "claimed",
+      claimedAtMs: nowMs,
+      expiresAtMs: null,
+    },
+    [`${MATCH_TIMER_START_ROOT}/${request.playerId}/${request.matchId}`]: null,
+    [`${MATCH_TIMER_START_ROOT}/${request.opponentId}/${request.matchId}`]:
+      null,
+  };
+  const invite = toRecord(inviteValue);
+  const eventId =
+    invite?.eventOwned === true && typeof invite.eventId === "string"
+      ? invite.eventId.trim()
+      : "";
+  if (!eventId || !isSafeFirebaseKey(eventId)) {
+    return updates;
+  }
+  const sourceKey = `timer:${request.inviteId}:${request.matchId}`;
+  const signalId = await buildEventProgressFallbackSignalId(eventId, sourceKey);
+  updates[`${EVENT_PROGRESS_FALLBACK_ROOT}/${eventId}/${signalId}`] = {
+    eventId,
+    sourceKey,
+    reason: "timer-claimed",
+    firstQueuedAtMs: nowMs,
+    lastQueuedAtMs: nowMs,
+  };
+  return updates;
+}
+
+async function persistTimerClaimSideEffects(
+  updates: Record<string, unknown>,
+  repository: MatchTimerClaimRepository,
+  signal: AbortSignal,
+): Promise<void> {
+  let lastError: unknown;
+  for (
+    let attempt = 0;
+    attempt < MATCH_TIMER_CLAIM_SIDE_EFFECT_ATTEMPTS;
+    attempt++
+  ) {
+    try {
+      await repository.patchRtdbRoot(updates, signal);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+function matchSnapshotIsCurrent(
+  current: Record<string, unknown>,
+  snapshot: MatchTimerRecord,
+): boolean {
+  return (
+    current.color === snapshot.color &&
+    current.fen === snapshot.fen &&
+    (typeof current.flatMovesString === "string"
+      ? current.flatMovesString
+      : "") === snapshot.flatMovesString &&
+    (typeof current.status === "string" ? current.status : "") ===
+      snapshot.status &&
+    (typeof current.timer === "string" ? current.timer : "") === snapshot.timer
+  );
+}
+
+function claimFenceMatches(
+  value: Record<string, unknown>,
+  fence: MatchTimerClaimFence,
+): boolean {
+  return (
+    value.playerId === fence.playerId &&
+    value.opponentId === fence.opponentId &&
+    value.inviteId === fence.inviteId &&
+    value.timer === fence.timer &&
+    value.turnNumber === fence.turnNumber
+  );
+}
+
+async function releasePendingClaimFence(
+  path: string,
+  fence: MatchTimerClaimFence,
+  repository: MatchTimerClaimRepository,
+  signal: AbortSignal,
+): Promise<void> {
+  await repository.transactRtdbPath(
+    path,
+    (current) => {
+      const value = toRecord(current);
+      return value?.status === "pending" && claimFenceMatches(value, fence)
+        ? { decision: "released", value: null }
+        : { commit: false, decision: "preserved" };
+    },
+    signal,
+  );
 }
 
 export async function startMatchTimer(
@@ -350,6 +518,178 @@ export async function startMatchTimer(
     throw failedPrecondition("game state changed.");
   }
   return { ok: true, timer, duration: MATCH_TIMER_DURATION_MS };
+}
+
+export async function claimMatchVictoryByTimer(
+  identity: FirebaseIdentity,
+  request: ClaimMatchVictoryByTimerRequest,
+  repository: MatchTimerClaimRepository,
+  dependencies: MatchTimerDependencies = {},
+): Promise<ClaimMatchVictoryByTimerResponse> {
+  const timeoutSignal = AbortSignal.timeout(MATCH_TIMER_OPERATION_TIMEOUT_MS);
+  const signal = dependencies.signal
+    ? AbortSignal.any([dependencies.signal, timeoutSignal])
+    : timeoutSignal;
+  await authorizePlayer(identity, request.playerId, repository, signal);
+  const [playerValue, opponentValue, inviteValue] = await readMatchRecords(
+    request,
+    repository,
+    signal,
+  );
+  if (
+    !inviteMatchesPlayers(inviteValue, request.playerId, request.opponentId) ||
+    parseInviteMatchIndex(request.inviteId, request.matchId) === null
+  ) {
+    throw new AuthApiFailure(403, "permission-denied", "permission-denied");
+  }
+  const player = readMatchTimerRecord(playerValue);
+  const opponent = readMatchTimerRecord(opponentValue);
+  if (player.color === opponent.color) {
+    throw failedPrecondition("something is wrong with the game state.");
+  }
+  const now = dependencies.now || Date.now;
+  const game = (dependencies.resolveGame || resolveMatchTimerGame)(
+    player,
+    opponent,
+  );
+  if (player.timer === MATCH_TIMER_TERMINAL) {
+    const replayedAtMs = now();
+    const replayFence: MatchTimerClaimFence = {
+      status: "pending",
+      playerId: request.playerId,
+      opponentId: request.opponentId,
+      inviteId: request.inviteId,
+      timer: MATCH_TIMER_TERMINAL,
+      turnNumber: game.turnNumber,
+      expiresAtMs: replayedAtMs + MATCH_TIMER_CLAIM_LEASE_MS,
+    };
+    await persistTimerClaimSideEffects(
+      await buildTimerClaimSideEffectUpdates(
+        inviteValue,
+        request,
+        replayFence,
+        replayedAtMs,
+      ),
+      repository,
+      signal,
+    );
+    return { ok: true };
+  }
+  if (
+    player.status === "surrendered" ||
+    opponent.status === "surrendered" ||
+    opponent.timer === MATCH_TIMER_TERMINAL ||
+    game.winner !== undefined
+  ) {
+    throw failedPrecondition("game is already over.");
+  }
+  if (!game.historyValid) {
+    throw failedPrecondition("something is wrong with the moves.");
+  }
+  const opponentColor = opponent.color === "white" ? Color.White : Color.Black;
+  if (game.activeColor !== opponentColor) {
+    throw failedPrecondition("can't claim timer victory on your own turn.");
+  }
+  if (!player.timer) {
+    throw failedPrecondition("could not find an existing timer.");
+  }
+  const parsedTimer = parseStrictMatchTimer(player.timer);
+  if (!parsedTimer) {
+    throw failedPrecondition("wrong timer format.");
+  }
+  if (game.turnNumber !== parsedTimer.turnNumber) {
+    throw failedPrecondition(
+      "can't claim this timer anymore, it's turn is over.",
+    );
+  }
+  const nowMs = now();
+  const timeDelta = parsedTimer.targetTimestamp - nowMs;
+  if (timeDelta > 0) {
+    throw failedPrecondition(`can't claim yet, ${timeDelta} ms remaining`);
+  }
+
+  const claimPath = `${MATCH_TIMER_CLAIM_ROOT}/${request.matchId}`;
+  const claimFence: MatchTimerClaimFence = {
+    status: "pending",
+    playerId: request.playerId,
+    opponentId: request.opponentId,
+    inviteId: request.inviteId,
+    timer: player.timer,
+    turnNumber: game.turnNumber,
+    expiresAtMs: nowMs + MATCH_TIMER_CLAIM_LEASE_MS,
+  };
+  const claimTransaction = await repository.transactRtdbPath(
+    claimPath,
+    (current) => {
+      const value = toRecord(current);
+      if (value?.status === "claimed") {
+        return claimFenceMatches(value, claimFence)
+          ? { commit: false, decision: "already-claimed" }
+          : { commit: false, decision: "busy" };
+      }
+      if (
+        value?.status === "pending" &&
+        typeof value.expiresAtMs === "number" &&
+        value.expiresAtMs > nowMs
+      ) {
+        return { commit: false, decision: "busy" };
+      }
+      return { decision: "acquired", value: claimFence };
+    },
+    signal,
+  );
+  if (claimTransaction.decision === "busy") {
+    throw failedPrecondition("game state changed.");
+  }
+  if (claimTransaction.decision === "already-claimed") {
+    await persistTimerClaimSideEffects(
+      await buildTimerClaimSideEffectUpdates(
+        inviteValue,
+        request,
+        claimFence,
+        now(),
+      ),
+      repository,
+      signal,
+    );
+    return { ok: true };
+  }
+
+  let freshValues: [unknown, unknown, unknown];
+  try {
+    freshValues = await readMatchRecords(request, repository, signal);
+  } catch (error) {
+    await releasePendingClaimFence(claimPath, claimFence, repository, signal);
+    throw error;
+  }
+  const [freshPlayerValue, freshOpponentValue, freshInviteValue] = freshValues;
+  let snapshotsMatch = false;
+  try {
+    snapshotsMatch =
+      matchSnapshotIsCurrent(toRecord(freshPlayerValue) || {}, player) &&
+      matchSnapshotIsCurrent(toRecord(freshOpponentValue) || {}, opponent) &&
+      inviteMatchesPlayers(
+        freshInviteValue,
+        request.playerId,
+        request.opponentId,
+      );
+  } catch {}
+  if (!snapshotsMatch) {
+    await releasePendingClaimFence(claimPath, claimFence, repository, signal);
+    throw failedPrecondition("game state changed.");
+  }
+
+  await persistTimerClaimSideEffects(
+    await buildTimerClaimSideEffectUpdates(
+      freshInviteValue,
+      request,
+      claimFence,
+      now(),
+    ),
+    repository,
+    signal,
+  );
+  return { ok: true };
 }
 
 export {

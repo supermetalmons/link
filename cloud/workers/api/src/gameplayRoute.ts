@@ -13,7 +13,9 @@ import {
   type WagerProposalSendRequest,
 } from "@mons/shared/wagers";
 import {
+  isClaimMatchVictoryByTimerRequest,
   isStartMatchTimerRequest,
+  type ClaimMatchVictoryByTimerRequest,
   type StartMatchTimerRequest,
 } from "@mons/shared/timers";
 import {
@@ -43,6 +45,8 @@ import {
 import { readBoundedJson } from "./http.ts";
 import { startAutomatch, type AutomatchDependencies } from "./automatch.ts";
 import {
+  claimMatchVictoryByTimer,
+  enforceMatchTimerClaimRateLimit,
   enforceMatchTimerRateLimit,
   startMatchTimer,
   type MatchTimerDependencies,
@@ -59,6 +63,7 @@ const MAX_NAVIGATION_DELETE_ATTEMPTS = 3;
 export const GAMEPLAY_PATHS = new Set([
   "/automatch/cancel",
   "/automatch/start",
+  "/matches/timer/claim",
   "/matches/timer/start",
   "/navigation/games/remove",
   "/wagers/proposals/accept",
@@ -406,6 +411,21 @@ async function readGameplayBody(
       inviteId,
     } satisfies StartMatchTimerRequest;
   }
+  if (pathname === "/matches/timer/claim") {
+    if (!isClaimMatchVictoryByTimerRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    const playerId = body.playerId.trim();
+    const opponentId = body.opponentId.trim();
+    const matchId = body.matchId.trim();
+    const inviteId = body.inviteId.trim();
+    return {
+      playerId,
+      opponentId,
+      matchId,
+      inviteId,
+    } satisfies ClaimMatchVictoryByTimerRequest;
+  }
   if (pathname.startsWith("/wagers/proposals/")) {
     if (pathname === "/wagers/proposals/send") {
       if (!isWagerProposalSendRequest(body)) {
@@ -486,6 +506,18 @@ export async function handleGameplayRoute(
       }
       await enforceMatchTimerRateLimit(env.AUTH_RATE_LIMITER, identity.uid);
       response = await startMatchTimer(identity, body, repository, {
+        ...dependencies.timer,
+        signal: dependencies.timer?.signal || request.signal,
+      });
+    } else if (pathname === "/matches/timer/claim") {
+      if (!isClaimMatchVictoryByTimerRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      await enforceMatchTimerClaimRateLimit(
+        env.AUTH_RATE_LIMITER,
+        identity.uid,
+      );
+      response = await claimMatchVictoryByTimer(identity, body, repository, {
         ...dependencies.timer,
         signal: dependencies.timer?.signal || request.signal,
       });

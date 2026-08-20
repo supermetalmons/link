@@ -36,6 +36,10 @@
       ".read": "auth != null && auth.token.admin === true",
       ".write": "auth != null && auth.token.admin === true"
     },
+    "matchTimerClaims": {
+      ".read": false,
+      ".write": false
+    },
     "matchTimerStarts": {
       ".read": false,
       ".write": false
@@ -140,7 +144,7 @@
             "timer": {
               ".validate": "newData.isString() && (newData.val() === '' || newData.val() === data.val() || (auth != null && auth.token.admin === true))"
             },
-            ".validate": "(newData.exists() && newData.child('fen').exists() && ((data.exists() && !data.child('gameVariant').exists()) || newData.child('gameVariant').exists())) && (!data.exists() || ((!data.child('flatMovesString').exists() || (data.child('flatMovesString').exists() && (data.child('fen').val() === newData.child('fen').val() || (data.child('fen').val() != newData.child('fen').val() && data.child('flatMovesString').val() != newData.child('flatMovesString').val())))) && (data.child('flatMovesString').exists() || data.child('fen').exists() && !data.child('flatMovesString').exists() && !newData.child('flatMovesString').exists())))"
+            ".validate": "(newData.exists() && newData.child('fen').exists() && ((data.exists() && !data.child('gameVariant').exists()) || newData.child('gameVariant').exists())) && (!data.exists() || ((!data.child('flatMovesString').exists() || (data.child('flatMovesString').exists() && (data.child('fen').val() === newData.child('fen').val() || (data.child('fen').val() != newData.child('fen').val() && data.child('flatMovesString').val() != newData.child('flatMovesString').val())))) && (data.child('flatMovesString').exists() || data.child('fen').exists() && !data.child('flatMovesString').exists() && !newData.child('flatMovesString').exists()))) && (!root.child('matchTimerClaims').child($matchId).exists() || (root.child('matchTimerClaims').child($matchId).child('status').val() === 'pending' && root.child('matchTimerClaims').child($matchId).child('expiresAtMs').isNumber() && root.child('matchTimerClaims').child($matchId).child('expiresAtMs').val() <= now))"
           }
         },
         "profile": {

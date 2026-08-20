@@ -21,6 +21,7 @@ const {
   acceptWagerProposalViaApi,
   cancelAutomatchViaApi,
   cancelWagerProposalViaApi,
+  claimMatchVictoryByTimerViaApi,
   declineWagerProposalViaApi,
   removeNavigationGameViaApi,
   sendWagerProposalViaApi,
@@ -34,8 +35,12 @@ const {
   isStartAutomatchRequest,
   isStartAutomatchResponse,
 } = await import("@mons/shared/navigation");
-const { isStartMatchTimerRequest, isStartMatchTimerResponse } =
-  await import("@mons/shared/timers");
+const {
+  isClaimMatchVictoryByTimerRequest,
+  isClaimMatchVictoryByTimerResponse,
+  isStartMatchTimerRequest,
+  isStartMatchTimerResponse,
+} = await import("@mons/shared/timers");
 const {
   isWagerProposalAcceptResponse,
   isWagerProposalSendRequest,
@@ -72,6 +77,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       inviteId: "invite-1",
     },
     { ok: true, timer: "4;1000", duration: 90000 },
+    { ok: true },
     { ok: true },
     { ok: false, reason: "proposal-missing" },
     {
@@ -134,6 +140,18 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
     { ok: true, timer: "4;1000", duration: 90000 },
   );
   assert.deepEqual(
+    await claimMatchVictoryByTimerViaApi(
+      {
+        playerId: "player-1",
+        opponentId: "player-2",
+        matchId: "match-1",
+        inviteId: "match-1",
+      },
+      async () => "firebase-token",
+    ),
+    { ok: true },
+  );
+  assert.deepEqual(
     await cancelWagerProposalViaApi(
       { inviteId: "invite-1", matchId: "match-1" },
       async () => "firebase-token",
@@ -184,6 +202,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       "https://api.mons.link/automatch/cancel",
       "https://api.mons.link/navigation/games/remove",
       "https://api.mons.link/matches/timer/start",
+      "https://api.mons.link/matches/timer/claim",
       "https://api.mons.link/wagers/proposals/cancel",
       "https://api.mons.link/wagers/proposals/decline",
       "https://api.mons.link/wagers/proposals/send",
@@ -196,6 +215,12 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       { emojiId: 7, aura: "rainbow" },
       {},
       { inviteId: "invite-1" },
+      {
+        playerId: "player-1",
+        opponentId: "player-2",
+        matchId: "match-1",
+        inviteId: "match-1",
+      },
       {
         playerId: "player-1",
         opponentId: "player-2",
@@ -357,6 +382,48 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
     false,
   );
   assert.equal(
+    isClaimMatchVictoryByTimerRequest({
+      playerId: "player-1",
+      opponentId: "player-2",
+      matchId: "match-1",
+      inviteId: "match-1",
+    }),
+    true,
+  );
+  assert.equal(
+    isClaimMatchVictoryByTimerRequest({
+      playerId: "player-1",
+      opponentId: "player-1",
+      matchId: "match-1",
+      inviteId: "match-1",
+    }),
+    false,
+  );
+  assert.equal(
+    isClaimMatchVictoryByTimerRequest({
+      playerId: "unsafe/player",
+      opponentId: "player-2",
+      matchId: "match-1",
+      inviteId: "match-1",
+    }),
+    false,
+  );
+  assert.equal(
+    isClaimMatchVictoryByTimerRequest({
+      playerId: "player-1",
+      opponentId: "player-2",
+      matchId: "match-1",
+      inviteId: "match-1",
+      extra: true,
+    }),
+    false,
+  );
+  assert.equal(isClaimMatchVictoryByTimerResponse({ ok: true }), true);
+  assert.equal(
+    isClaimMatchVictoryByTimerResponse({ ok: true, extra: true }),
+    false,
+  );
+  assert.equal(
     isStartMatchTimerResponse({
       ok: true,
       timer: "4;1000;extra",
@@ -474,6 +541,7 @@ test("rejects malformed and oversized gameplay responses", async () => {
     jsonResponse({ ok: "yes" }),
     jsonResponse({ ok: true, skipped: false }),
     jsonResponse({ ok: true, timer: "invalid", duration: 90000 }),
+    jsonResponse({ ok: true, extra: true }),
     jsonResponse({ ok: true, debug: {} }),
     jsonResponse({ ok: true, count: 1, debug: {} }),
     jsonResponse({ ok: true, count: 1, agreed: { material: "dust" } }),
@@ -493,6 +561,18 @@ test("rejects malformed and oversized gameplay responses", async () => {
   );
   await assert.rejects(
     startMatchTimerViaApi(
+      {
+        playerId: "player",
+        opponentId: "opponent",
+        matchId: "match",
+        inviteId: "match",
+      },
+      async () => "token",
+    ),
+    GameplayApiError,
+  );
+  await assert.rejects(
+    claimMatchVictoryByTimerViaApi(
       {
         playerId: "player",
         opponentId: "opponent",
@@ -596,6 +676,7 @@ test("connection no longer references the migrated Firebase callables", () => {
   assert.doesNotMatch(source, /httpsCallable\([^)]*sendWagerProposal/);
   assert.doesNotMatch(source, /httpsCallable\([^)]*acceptWagerProposal/);
   assert.doesNotMatch(source, /["']startMatchTimer["']/);
+  assert.doesNotMatch(source, /["']claimMatchVictoryByTimer["']/);
   assert.match(source, /cancelAutomatchViaApi/);
   assert.match(source, /cancelWagerProposalViaApi/);
   assert.match(source, /declineWagerProposalViaApi/);
@@ -604,6 +685,7 @@ test("connection no longer references the migrated Firebase callables", () => {
   assert.match(source, /startAutomatchViaApi/);
   assert.match(source, /removeNavigationGameViaApi/);
   assert.match(source, /startMatchTimerViaApi/);
+  assert.match(source, /claimMatchVictoryByTimerViaApi/);
   assert.doesNotMatch(source, /PendingAutomatchOperationId/);
   assert.doesNotMatch(source, /crypto\.randomUUID/);
 });

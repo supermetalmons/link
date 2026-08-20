@@ -108,6 +108,7 @@ import {
   acceptWagerProposalViaApi,
   cancelAutomatchViaApi,
   cancelWagerProposalViaApi,
+  claimMatchVictoryByTimerViaApi,
   declineWagerProposalViaApi,
   removeNavigationGameViaApi,
   sendWagerProposalViaApi,
@@ -158,7 +159,10 @@ import type {
   AuthIntentResponse,
   LinkedAuthMethodsResponse,
 } from "@mons/shared/auth";
-import type { StartMatchTimerResponse } from "@mons/shared/timers";
+import type {
+  ClaimMatchVictoryByTimerResponse,
+  StartMatchTimerResponse,
+} from "@mons/shared/timers";
 import {
   beginAuthIntentViaApi,
   beginXRedirectAuthViaApi,
@@ -2188,7 +2192,9 @@ class Connection {
     }
   }
 
-  public async claimVictoryByTimer(): Promise<any> {
+  public async claimVictoryByTimer(): Promise<
+    ClaimMatchVictoryByTimerResponse | { ok: false }
+  > {
     try {
       await this.ensureAuthenticated();
       const writableContext = this.requireWritableContext(
@@ -2198,18 +2204,16 @@ class Connection {
       if (!writableContext) {
         return { ok: false };
       }
-      const claimVictoryByTimerFunction = httpsCallable(
-        this.functions,
-        "claimMatchVictoryByTimer",
-      );
       const opponentId = this.getOpponentId(writableContext.actorUid);
-      const response = await claimVictoryByTimerFunction({
-        playerId: writableContext.actorUid,
-        inviteId: writableContext.inviteId,
-        matchId: writableContext.matchId,
-        opponentId,
-      });
-      return response.data;
+      return claimMatchVictoryByTimerViaApi(
+        {
+          playerId: writableContext.actorUid,
+          opponentId,
+          matchId: writableContext.matchId,
+          inviteId: writableContext.inviteId,
+        },
+        this.getAuthApiToken,
+      );
     } catch (error) {
       console.error("Error claiming victory by timer:", error);
       throw error;

@@ -5,7 +5,9 @@ import { AuthApiFailure } from "../src/authErrors.ts";
 import type { FirebaseIdentity } from "../src/firebaseAuth.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import {
+  buildEventProgressFallbackSignalId,
   buildOrderedMoveHistory,
+  claimMatchVictoryByTimer,
   MAX_MATCH_FEN_BYTES,
   MAX_MATCH_HISTORY_BYTES,
   MAX_MATCH_HISTORY_ENTRIES,
@@ -19,6 +21,11 @@ import {
 type TimerRepository = Pick<
   GameplayRepository,
   "getRtdbPath" | "transactRtdbPath"
+>;
+
+type ClaimTimerRepository = Pick<
+  GameplayRepository,
+  "getRtdbPath" | "patchRtdbRoot" | "transactRtdbPath"
 >;
 
 const identity: FirebaseIdentity = {
@@ -124,6 +131,95 @@ function repository({
     },
   };
   return { paths, writes, value };
+}
+
+function claimRepository({
+  failPatchAttempts = 0,
+  initialClaim = null,
+  invite = { hostId: "player-1", guestId: "player-2" },
+  liveOpponent,
+  livePlayer,
+  opponent = match("white"),
+  player = match("black", { timer: "7;1000" }),
+  profile = "profile-1",
+}: {
+  failPatchAttempts?: number;
+  initialClaim?: unknown;
+  invite?: unknown;
+  liveOpponent?: unknown;
+  livePlayer?: unknown;
+  opponent?: unknown;
+  player?: unknown;
+  profile?: unknown;
+} = {}): {
+  patchAttempts: () => number;
+  patches: Array<Record<string, unknown>>;
+  paths: string[];
+  transactions: Array<{ path: string; value: unknown }>;
+  value: ClaimTimerRepository;
+} {
+  const patches: Array<Record<string, unknown>> = [];
+  const paths: string[] = [];
+  const transactions: Array<{ path: string; value: unknown }> = [];
+  let patchAttempts = 0;
+  let playerReads = 0;
+  let opponentReads = 0;
+  let storedClaim: unknown = initialClaim;
+  return {
+    patchAttempts: () => patchAttempts,
+    patches,
+    paths,
+    transactions,
+    value: {
+      getRtdbPath: async (path) => {
+        paths.push(path);
+        if (path === "players/player-1/profile") return profile;
+        if (path.startsWith("players/player-1/matches/")) {
+          playerReads++;
+          return playerReads === 1 || livePlayer === undefined
+            ? player
+            : livePlayer;
+        }
+        if (path.startsWith("players/player-2/matches/")) {
+          opponentReads++;
+          return opponentReads === 1 || liveOpponent === undefined
+            ? opponent
+            : liveOpponent;
+        }
+        if (path.startsWith("invites/")) return invite;
+        assert.fail(`unexpected RTDB path ${path}`);
+      },
+      patchRtdbRoot: async (updates) => {
+        patchAttempts++;
+        if (patchAttempts <= failPatchAttempts) {
+          throw new Error("patch-failed");
+        }
+        patches.push(updates);
+      },
+      transactRtdbPath: async (path, updater) => {
+        paths.push(path);
+        const decision = updater(storedClaim) as {
+          commit?: boolean;
+          decision?: string;
+          value?: unknown;
+        };
+        if (decision.commit === false) {
+          return {
+            committed: false,
+            decision: decision.decision,
+            value: storedClaim,
+          };
+        }
+        storedClaim = decision.value;
+        transactions.push({ path, value: decision.value });
+        return {
+          committed: true,
+          decision: decision.decision,
+          value: decision.value,
+        };
+      },
+    },
+  };
 }
 
 async function expectFailure(
@@ -616,4 +712,380 @@ test("rejects excessive move-history entries before splitting", () => {
     (error: unknown) =>
       error instanceof AuthApiFailure && error.code === "failed-precondition",
   );
+});
+
+test("claims an expired timer and clears both protected markers", async () => {
+  const repo = claimRepository();
+  const response = await claimMatchVictoryByTimer(
+    identity,
+    request,
+    repo.value,
+    {
+      now: () => 1_001,
+      resolveGame: () => gameState(),
+    },
+  );
+  assert.deepEqual(response, { ok: true });
+  assert.deepEqual(repo.patches, [
+    {
+      "players/player-1/matches/match-1/timer": "gg",
+      "matchTimerClaims/match-1": {
+        status: "claimed",
+        playerId: "player-1",
+        opponentId: "player-2",
+        inviteId: "match-1",
+        timer: "7;1000",
+        turnNumber: 7,
+        claimedAtMs: 1_001,
+        expiresAtMs: null,
+      },
+      "matchTimerStarts/player-1/match-1": null,
+      "matchTimerStarts/player-2/match-1": null,
+    },
+  ]);
+  assert.deepEqual(repo.transactions, [
+    {
+      path: "matchTimerClaims/match-1",
+      value: {
+        status: "pending",
+        playerId: "player-1",
+        opponentId: "player-2",
+        inviteId: "match-1",
+        timer: "7;1000",
+        turnNumber: 7,
+        expiresAtMs: 31_001,
+      },
+    },
+  ]);
+});
+
+test("authorizes same-profile timer claims and rejects unrelated identities", async () => {
+  const sameProfile = claimRepository();
+  const response = await claimMatchVictoryByTimer(
+    { ...identity, uid: "login-2" },
+    request,
+    sameProfile.value,
+    { now: () => 1_001, resolveGame: () => gameState() },
+  );
+  assert.equal(response.ok, true);
+  assert.equal(sameProfile.paths[0], "players/player-1/profile");
+
+  const unrelated = claimRepository({ profile: "profile-2" });
+  await expectFailure(
+    () =>
+      claimMatchVictoryByTimer(
+        { ...identity, uid: "login-2" },
+        request,
+        unrelated.value,
+        { now: () => 1_001, resolveGame: () => gameState() },
+      ),
+    403,
+    "permission-denied",
+    "permission-denied",
+  );
+  assert.deepEqual(unrelated.patches, []);
+});
+
+test("preserves timer-claim game and deadline preconditions", async () => {
+  const cases: Array<{
+    name: string;
+    now?: number;
+    opponent?: unknown;
+    player?: unknown;
+    state?: MatchTimerGameState;
+    message: string;
+  }> = [
+    {
+      name: "missing match",
+      player: null,
+      message: "something is wrong with the game state.",
+    },
+    {
+      name: "same colors",
+      opponent: match("black"),
+      message: "something is wrong with the game state.",
+    },
+    {
+      name: "surrendered",
+      player: match("black", { status: "surrendered", timer: "7;1000" }),
+      message: "game is already over.",
+    },
+    {
+      name: "winner",
+      state: gameState({ winner: "white" }),
+      message: "game is already over.",
+    },
+    {
+      name: "invalid history",
+      state: gameState({ historyValid: false }),
+      message: "something is wrong with the moves.",
+    },
+    {
+      name: "own turn",
+      state: gameState({ activeColor: "black" }),
+      message: "can't claim timer victory on your own turn.",
+    },
+    {
+      name: "missing timer",
+      player: match("black"),
+      message: "could not find an existing timer.",
+    },
+    {
+      name: "malformed timer",
+      player: match("black", { timer: "invalid" }),
+      message: "wrong timer format.",
+    },
+    {
+      name: "stale timer",
+      player: match("black", { timer: "6;1000" }),
+      message: "can't claim this timer anymore, it's turn is over.",
+    },
+    {
+      name: "unexpired timer",
+      now: 900,
+      message: "can't claim yet, 100 ms remaining",
+    },
+  ];
+  for (const entry of cases) {
+    const repo = claimRepository({
+      ...(entry.player === undefined ? {} : { player: entry.player }),
+      ...(entry.opponent === undefined ? {} : { opponent: entry.opponent }),
+    });
+    await expectFailure(
+      () =>
+        claimMatchVictoryByTimer(identity, request, repo.value, {
+          now: () => entry.now ?? 1_001,
+          resolveGame: () => entry.state || gameState(),
+        }),
+      409,
+      "failed-precondition",
+      entry.message,
+    );
+    assert.deepEqual(repo.patches, [], entry.name);
+  }
+});
+
+test("rejects invalid timer-claim ownership and repository writes", async () => {
+  const unrelatedInvite = claimRepository({
+    invite: { hostId: "other", guestId: "player-2" },
+  });
+  await expectFailure(
+    () =>
+      claimMatchVictoryByTimer(identity, request, unrelatedInvite.value, {
+        now: () => 1_001,
+        resolveGame: () => gameState(),
+      }),
+    403,
+    "permission-denied",
+    "permission-denied",
+  );
+
+  const unrelatedSeries = claimRepository();
+  await expectFailure(
+    () =>
+      claimMatchVictoryByTimer(
+        identity,
+        { ...request, matchId: "unrelated" },
+        unrelatedSeries.value,
+        { now: () => 1_001, resolveGame: () => gameState() },
+      ),
+    403,
+    "permission-denied",
+    "permission-denied",
+  );
+
+  const failingWrite = claimRepository({ failPatchAttempts: 3 });
+  await assert.rejects(
+    () =>
+      claimMatchVictoryByTimer(identity, request, failingWrite.value, {
+        now: () => 1_001,
+        resolveGame: () => gameState(),
+      }),
+    /patch-failed/,
+  );
+  assert.equal(failingWrite.patchAttempts(), 3);
+});
+
+test("aborts when the live match advances after validation", async () => {
+  const snapshot = match("white");
+  const repo = claimRepository({
+    opponent: snapshot,
+    liveOpponent: {
+      ...snapshot,
+      fen: `${snapshot.fen} changed`,
+      flatMovesString: "new-move",
+    },
+  });
+  await expectFailure(
+    () =>
+      claimMatchVictoryByTimer(identity, request, repo.value, {
+        now: () => 1_001,
+        resolveGame: () => gameState(),
+      }),
+    409,
+    "failed-precondition",
+    "game state changed.",
+  );
+  assert.deepEqual(repo.transactions, [
+    {
+      path: "matchTimerClaims/match-1",
+      value: {
+        status: "pending",
+        playerId: "player-1",
+        opponentId: "player-2",
+        inviteId: "match-1",
+        timer: "7;1000",
+        turnNumber: 7,
+        expiresAtMs: 31_001,
+      },
+    },
+    { path: "matchTimerClaims/match-1", value: null },
+  ]);
+  assert.deepEqual(repo.patches, []);
+});
+
+test("rejects a second request while a claim fence is active", async () => {
+  const repo = claimRepository({
+    initialClaim: {
+      status: "pending",
+      playerId: "player-1",
+      opponentId: "player-2",
+      inviteId: "match-1",
+      timer: "7;1000",
+      turnNumber: 7,
+      expiresAtMs: 31_001,
+    },
+  });
+  await expectFailure(
+    () =>
+      claimMatchVictoryByTimer(identity, request, repo.value, {
+        now: () => 1_001,
+        resolveGame: () => gameState(),
+      }),
+    409,
+    "failed-precondition",
+    "game state changed.",
+  );
+  assert.deepEqual(repo.transactions, []);
+  assert.deepEqual(repo.patches, []);
+});
+
+test("creates the complete event fallback signal when none exists", async () => {
+  const repo = claimRepository({
+    invite: {
+      hostId: "player-1",
+      guestId: "player-2",
+      eventOwned: true,
+      eventId: "event-1",
+    },
+  });
+  await claimMatchVictoryByTimer(identity, request, repo.value, {
+    now: () => 2_000,
+    resolveGame: () => gameState(),
+  });
+  assert.deepEqual(repo.patches, [
+    {
+      "players/player-1/matches/match-1/timer": "gg",
+      "matchTimerClaims/match-1": {
+        status: "claimed",
+        playerId: "player-1",
+        opponentId: "player-2",
+        inviteId: "match-1",
+        timer: "7;1000",
+        turnNumber: 7,
+        claimedAtMs: 2_000,
+        expiresAtMs: null,
+      },
+      "matchTimerStarts/player-1/match-1": null,
+      "matchTimerStarts/player-2/match-1": null,
+      "eventProgressFallback/event-1/sig_4ffbc0751b333354eed5f2c1": {
+        eventId: "event-1",
+        sourceKey: "timer:match-1:match-1",
+        reason: "timer-claimed",
+        firstQueuedAtMs: 2_000,
+        lastQueuedAtMs: 2_000,
+      },
+    },
+  ]);
+});
+
+test("signals event progression with the deterministic fallback identity", async () => {
+  assert.equal(
+    await buildEventProgressFallbackSignalId(
+      "event-1",
+      "timer:match-1:match-1",
+    ),
+    "sig_4ffbc0751b333354eed5f2c1",
+  );
+  assert.equal(
+    await buildEventProgressFallbackSignalId(
+      "event-1",
+      "timer:match-1:match-2",
+    ),
+    "sig_f164f55f9d3661bb0f7461e0",
+  );
+  const repo = claimRepository({
+    invite: {
+      hostId: "player-1",
+      guestId: "player-2",
+      eventOwned: true,
+      eventId: "event-1",
+    },
+  });
+  const response = await claimMatchVictoryByTimer(
+    identity,
+    request,
+    repo.value,
+    { now: () => 2_000, resolveGame: () => gameState() },
+  );
+  assert.deepEqual(response, { ok: true });
+  assert.deepEqual(repo.patches, [
+    {
+      "players/player-1/matches/match-1/timer": "gg",
+      "matchTimerClaims/match-1": {
+        status: "claimed",
+        playerId: "player-1",
+        opponentId: "player-2",
+        inviteId: "match-1",
+        timer: "7;1000",
+        turnNumber: 7,
+        claimedAtMs: 2_000,
+        expiresAtMs: null,
+      },
+      "matchTimerStarts/player-1/match-1": null,
+      "matchTimerStarts/player-2/match-1": null,
+      "eventProgressFallback/event-1/sig_4ffbc0751b333354eed5f2c1": {
+        eventId: "event-1",
+        sourceKey: "timer:match-1:match-1",
+        reason: "timer-claimed",
+        firstQueuedAtMs: 2_000,
+        lastQueuedAtMs: 2_000,
+      },
+    },
+  ]);
+});
+
+test("retries claim side effects and repairs a terminal replay", async () => {
+  const repo = claimRepository({
+    failPatchAttempts: 2,
+    player: match("black", { timer: "gg" }),
+    invite: {
+      hostId: "player-1",
+      guestId: "player-2",
+      eventOwned: true,
+      eventId: "event-1",
+    },
+  });
+  const response = await claimMatchVictoryByTimer(
+    identity,
+    request,
+    repo.value,
+    {
+      now: () => 2_000,
+      resolveGame: () => gameState(),
+    },
+  );
+  assert.deepEqual(response, { ok: true });
+  assert.equal(repo.patchAttempts(), 3);
+  assert.equal(repo.patches.length, 1);
 });

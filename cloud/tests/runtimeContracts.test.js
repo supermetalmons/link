@@ -11,7 +11,6 @@ const functionsIndexPath = path.join(functionsDirectory, "index.js");
 const sharedDirectory = path.join(functionsDirectory, "shared");
 
 const callableExportNames = [
-  "claimMatchVictoryByTimer",
   "completeXRedirectAuth",
   "createEvent",
   "disqualifyEventMatchWinners",
@@ -418,7 +417,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 38);
+  assert.equal(expectedExportNames.length, 37);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

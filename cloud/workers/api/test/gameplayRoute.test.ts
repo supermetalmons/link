@@ -598,6 +598,203 @@ test("routes match timer starts with rate limiting and idempotent storage", asyn
   ]);
 });
 
+test("routes timer victory claims with a separate limit and terminal update", async () => {
+  let rateLimitKey = "";
+  const patches: Array<Record<string, unknown>> = [];
+  const response = await handleGameplayRoute(
+    request("/matches/timer/claim", {
+      body: {
+        playerId: identity.uid,
+        opponentId: "opponent-uid",
+        matchId: "match-1",
+        inviteId: "match-1",
+      },
+    }),
+    {
+      ...env,
+      AUTH_RATE_LIMITER: {
+        limit: async ({ key }: RateLimitOptions) => {
+          rateLimitKey = key;
+          return { success: true };
+        },
+      },
+    } as Env,
+    context(),
+    {
+      repository: repository({
+        getRtdbPath: async (path) => {
+          if (path === "invites/match-1") {
+            return { hostId: identity.uid, guestId: "opponent-uid" };
+          }
+          if (path.startsWith(`players/${identity.uid}/`)) {
+            return {
+              color: "black",
+              fen: "player-fen",
+              flatMovesString: "",
+              status: "",
+              timer: "4;1000",
+            };
+          }
+          return {
+            color: "white",
+            fen: "opponent-fen",
+            flatMovesString: "",
+            status: "",
+            timer: "",
+          };
+        },
+        patchRtdbRoot: async (updates) => {
+          patches.push(updates);
+        },
+        transactRtdbPath: async (_path, updater) =>
+          applyTransaction(updater, {
+            color: "black",
+            fen: "player-fen",
+            flatMovesString: "",
+            status: "",
+            timer: "4;1000",
+          }),
+      }),
+      timer: {
+        now: () => 1_001,
+        resolveGame: () => ({
+          activeColor: "white",
+          historyValid: true,
+          turnNumber: 4,
+          winner: undefined,
+        }),
+      },
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true });
+  assert.equal(rateLimitKey, `timer-claim:${identity.uid}`);
+  assert.deepEqual(patches, [
+    {
+      [`players/${identity.uid}/matches/match-1/timer`]: "gg",
+      "matchTimerClaims/match-1": {
+        status: "claimed",
+        playerId: identity.uid,
+        opponentId: "opponent-uid",
+        inviteId: "match-1",
+        timer: "4;1000",
+        turnNumber: 4,
+        claimedAtMs: 1_001,
+        expiresAtMs: null,
+      },
+      [`matchTimerStarts/${identity.uid}/match-1`]: null,
+      "matchTimerStarts/opponent-uid/match-1": null,
+    },
+  ]);
+});
+
+test("rejects rate-limited timer claims before repository access", async () => {
+  let reads = 0;
+  const response = await handleGameplayRoute(
+    request("/matches/timer/claim", {
+      body: {
+        playerId: identity.uid,
+        opponentId: "opponent-uid",
+        matchId: "match-1",
+        inviteId: "match-1",
+      },
+    }),
+    {
+      ...env,
+      AUTH_RATE_LIMITER: { limit: async () => ({ success: false }) },
+    } as Env,
+    context(),
+    {
+      repository: repository({
+        getRtdbPath: async () => {
+          reads++;
+          return null;
+        },
+      }),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 429);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "resource-exhausted",
+    message: "Too many timer claim attempts.",
+  });
+  assert.equal(reads, 0);
+});
+
+test("sanitizes timer claim repository failures", async () => {
+  const failures: string[] = [];
+  const response = await handleGameplayRoute(
+    request("/matches/timer/claim", {
+      body: {
+        playerId: identity.uid,
+        opponentId: "opponent-uid",
+        matchId: "match-1",
+        inviteId: "match-1",
+      },
+    }),
+    env,
+    context(),
+    {
+      logFailure: (kind) => failures.push(kind),
+      repository: repository({
+        getRtdbPath: async (path) => {
+          if (path === "invites/match-1") {
+            return { hostId: identity.uid, guestId: "opponent-uid" };
+          }
+          return path.includes(identity.uid)
+            ? {
+                color: "black",
+                fen: "player-fen",
+                flatMovesString: "",
+                status: "",
+                timer: "4;1000",
+              }
+            : {
+                color: "white",
+                fen: "opponent-fen",
+                flatMovesString: "",
+                status: "",
+                timer: "",
+              };
+        },
+        patchRtdbRoot: async () => {
+          throw new Error("private-rtdb-detail");
+        },
+        transactRtdbPath: async (_path, updater) =>
+          applyTransaction(updater, {
+            color: "black",
+            fen: "player-fen",
+            flatMovesString: "",
+            status: "",
+            timer: "4;1000",
+          }),
+      }),
+      timer: {
+        now: () => 1_001,
+        resolveGame: () => ({
+          activeColor: "white",
+          historyValid: true,
+          turnNumber: 4,
+          winner: undefined,
+        }),
+      },
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 503);
+  const payload = await response.json();
+  assert.deepEqual(payload, {
+    ok: false,
+    error: "unavailable",
+    message: "gameplay-service-unavailable",
+  });
+  assert.doesNotMatch(JSON.stringify(payload), /private-rtdb-detail/);
+  assert.deepEqual(failures, ["gameplay-service-unavailable"]);
+});
+
 test("rejects rate-limited match timers before repository access", async () => {
   let reads = 0;
   const response = await handleGameplayRoute(
@@ -966,6 +1163,26 @@ test("authenticates before body parsing and sanitizes route failures", async () 
     ["/automatch/start", { emojiId: 0, aura: "" }],
     ["/automatch/start", { emojiId: 1, aura: "", extra: true }],
     ["/matches/timer/start", {}],
+    ["/matches/timer/claim", {}],
+    [
+      "/matches/timer/claim",
+      {
+        playerId: "player",
+        opponentId: "player",
+        matchId: "match",
+        inviteId: "match",
+      },
+    ],
+    [
+      "/matches/timer/claim",
+      {
+        playerId: "player",
+        opponentId: "opponent",
+        matchId: "match",
+        inviteId: "match",
+        extra: true,
+      },
+    ],
     [
       "/matches/timer/start",
       {

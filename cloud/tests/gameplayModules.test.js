@@ -27,7 +27,6 @@ const {
 } = require("../functions/gameplay/playerAuthorization");
 const {
   clearMatchTimerMarkers,
-  finishMatchTimer,
 } = require("../functions/gameplay/matchTimerMarkers");
 const wagerMaterials = require("../functions/gameplay/wagerMaterials");
 const wagerHelpers = require("../functions/wagerHelpers");
@@ -48,7 +47,11 @@ test("player reads expose gameplay state without exposing wager operations", () 
   assert.equal(players.$userId.mining._wagerOps, undefined);
 });
 
-test("timer starts use a protected marker without restricting match writes", () => {
+test("timer coordination roots are protected and fence live match writes", () => {
+  assert.deepEqual(databaseRules.rules.matchTimerClaims, {
+    ".read": false,
+    ".write": false,
+  });
   assert.deepEqual(databaseRules.rules.matchTimerStarts, {
     ".read": false,
     ".write": false,
@@ -57,9 +60,13 @@ test("timer starts use a protected marker without restricting match writes", () 
     databaseRules.rules.players.$userId.matches.$matchId.timer[".validate"],
     "newData.isString() && (newData.val() === '' || newData.val() === data.val() || (auth != null && auth.token.admin === true))",
   );
+  const matchValidation =
+    databaseRules.rules.players.$userId.matches.$matchId[".validate"];
+  assert.match(matchValidation, /matchTimerClaims/);
+  assert.match(matchValidation, /expiresAtMs/);
 });
 
-test("terminal matches clear both protected timer markers", async () => {
+test("rating completion clears both protected timer markers", async () => {
   const updates = [];
   await withFirebaseAdminMethod(
     "database",
@@ -69,11 +76,6 @@ test("terminal matches clear both protected timer markers", async () => {
       }),
     }),
     async () => {
-      await finishMatchTimer({
-        playerId: "player",
-        opponentId: "opponent",
-        matchId: "match",
-      });
       await clearMatchTimerMarkers({
         playerId: "player",
         opponentId: "opponent",
@@ -82,11 +84,6 @@ test("terminal matches clear both protected timer markers", async () => {
     },
   );
   assert.deepEqual(updates, [
-    {
-      "players/player/matches/match/timer": "gg",
-      "matchTimerStarts/player/match": null,
-      "matchTimerStarts/opponent/match": null,
-    },
     {
       "matchTimerStarts/player/match": null,
       "matchTimerStarts/opponent/match": null,

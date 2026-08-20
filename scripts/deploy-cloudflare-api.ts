@@ -104,6 +104,7 @@ const AUTHENTICATED_ROUTE_SMOKES = [
   { path: "/automatch/cancel", method: "POST" },
   { path: "/automatch/start", method: "POST" },
   { path: "/leaderboards/read", method: "POST" },
+  { path: "/matches/timer/claim", method: "POST" },
   { path: "/matches/timer/start", method: "POST" },
   { path: "/mining/rock", method: "POST" },
   { path: "/navigation/games/remove", method: "POST" },
