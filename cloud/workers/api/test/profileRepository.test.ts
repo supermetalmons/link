@@ -4,6 +4,7 @@ import {
   BASE_PROFILE_FIELDS,
   createProfileRepository,
   LEADERBOARD_ENTRY_LIMIT,
+  LEADERBOARD_PROFILE_FIELDS,
   MAX_PROFILE_RESPONSE_BODY_BYTES,
   PROFILE_CARD_FIELDS,
   PROFILE_LOOKUP_FIELDS,
@@ -169,10 +170,27 @@ test("runs exact authenticated login and leaderboard queries", async () => {
     (await repository.getProfileByLoginId("login-1", "firebase-token"))?.id,
     "profile-1",
   );
-  assert.equal(
-    (await repository.readLeaderboard("rating", "firebase-token"))[0].id,
-    "profile-2",
+  const ratingProfile = (
+    await repository.readLeaderboard("rating", "firebase-token")
+  )[0];
+  assert.equal(ratingProfile.id, "profile-2");
+  assert.deepEqual(
+    {
+      cardBackgroundId: ratingProfile.cardBackgroundId,
+      cardSubtitleId: ratingProfile.cardSubtitleId,
+      profileCounter: ratingProfile.profileCounter,
+      profileMons: ratingProfile.profileMons,
+      cardStickers: ratingProfile.cardStickers,
+    },
+    {
+      cardBackgroundId: 3,
+      cardSubtitleId: 4,
+      profileCounter: "mp",
+      profileMons: "1,2",
+      cardStickers: "{}",
+    },
   );
+  assert.equal(Object.hasOwn(ratingProfile, "completedProblemIds"), false);
   assert.equal(
     (await repository.readLeaderboard("mp", "firebase-token"))[0].id,
     "profile-3",
@@ -203,12 +221,10 @@ test("runs exact authenticated login and leaderboard queries", async () => {
   assert.equal(loginQuery.limit, 1);
 
   const expectedOrders = ["rating", "totalManaPoints", "mining.materials.dust"];
-  assert.equal(
-    BASE_PROFILE_FIELDS.some((field) =>
-      PROFILE_CARD_FIELDS.includes(field as never),
-    ),
-    false,
-  );
+  assert.deepEqual(LEADERBOARD_PROFILE_FIELDS, [
+    ...BASE_PROFILE_FIELDS,
+    ...PROFILE_CARD_FIELDS,
+  ]);
   assert.equal(
     PROFILE_CARD_FIELDS.every((field) => PROFILE_LOOKUP_FIELDS.includes(field)),
     true,
@@ -216,7 +232,7 @@ test("runs exact authenticated login and leaderboard queries", async () => {
   for (let index = 1; index < requests.length; index++) {
     const query = JSON.parse(String(requests[index].init.body)).structuredQuery;
     assert.deepEqual(query.select.fields, [
-      ...BASE_PROFILE_FIELDS.map((fieldPath) => ({ fieldPath })),
+      ...LEADERBOARD_PROFILE_FIELDS.map((fieldPath) => ({ fieldPath })),
     ]);
     assert.deepEqual(query.orderBy, [
       {

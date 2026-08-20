@@ -36,9 +36,13 @@ const PROFILE_CARD_FIELDS = [
   "custom.profileMons",
 ] as const;
 
-const PROFILE_LOOKUP_FIELDS = [
+const LEADERBOARD_PROFILE_FIELDS = [
   ...BASE_PROFILE_FIELDS,
   ...PROFILE_CARD_FIELDS,
+] as const;
+
+const PROFILE_LOOKUP_FIELDS = [
+  ...LEADERBOARD_PROFILE_FIELDS,
   "custom.completedProblems",
   "custom.tutorialCompleted",
   "mergedIntoProfileId",
@@ -370,7 +374,7 @@ export function createProfileRepository({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             structuredQuery: {
-              select: { fields: selectFields(BASE_PROFILE_FIELDS) },
+              select: { fields: selectFields(LEADERBOARD_PROFILE_FIELDS) },
               from: [{ collectionId: "users" }],
               orderBy: [
                 {
@@ -391,6 +395,7 @@ export function createProfileRepository({
 export {
   BASE_PROFILE_FIELDS,
   FIRESTORE_DOCUMENTS_ROOT,
+  LEADERBOARD_PROFILE_FIELDS,
   LEADERBOARD_ENTRY_LIMIT,
   MAX_PROFILE_RESPONSE_BODY_BYTES,
   PROFILE_LOOKUP_FIELDS,

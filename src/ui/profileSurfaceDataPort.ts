@@ -16,7 +16,6 @@ export type ProfileSurfaceDataPort = {
     options?: { announceOnTelegram?: boolean },
   ): Promise<{ ok: boolean; eventId?: string; event?: EventRecord | null }>;
   getLeaderboard(type: LeaderboardType): Promise<PlayerProfile[]>;
-  getProfileById(profileId: string): Promise<PlayerProfile | null>;
   subscribeToProfileEventPrizes(
     profileId: string,
     onUpdate: (prizes: ProfileEventPrizes) => void,
@@ -51,9 +50,6 @@ export const createProfileEvent = (
 
 export const getLeaderboardProfiles = (type: LeaderboardType) =>
   getPort().getLeaderboard(type);
-
-export const getProfileDetails = (profileId: string) =>
-  getPort().getProfileById(profileId);
 
 export const subscribeToProfileEventPrizes = (
   profileId: string,

@@ -85,7 +85,6 @@ bindPlayerMetadataRuntime({
 bindProfileSurfaceData({
   createEvent: (schedule, options) => connection.createEvent(schedule, options),
   getLeaderboard: (type) => connection.getLeaderboard(type),
-  getProfileById: (profileId) => connection.getProfileById(profileId),
   subscribeToProfileEventPrizes: (profileId, onUpdate, onError) =>
     connection.subscribeToProfileEventPrizes(profileId, onUpdate, onError),
   withdrawEventPrize: (eventId, prizeId, solanaAddress) =>

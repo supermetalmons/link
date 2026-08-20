@@ -41,6 +41,12 @@ const profile = {
   totalManaPoints: 0,
   win: true,
   emoji: "12",
+  aura: "rainbow",
+  cardBackgroundId: 3,
+  cardSubtitleId: 4,
+  profileCounter: "mp",
+  profileMons: "1,2",
+  cardStickers: "{}",
   username: null,
   eth: null,
   sol: null,
@@ -247,10 +253,9 @@ test("connection routes one-shot reads through the API and keeps material cachin
     new URL("../src/ui/Leaderboard.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(leaderboardSource, /getProfileDetails\(row\.id\)/);
-  assert.match(leaderboardSource, /profileDetailRequestRef/);
   assert.match(
     leaderboardSource,
-    /requestId === profileDetailRequestRef\.current && showRef\.current/,
+    /showShinyCard\(row\.profile, getLeaderboardDisplayName\(row\), true\)/,
   );
+  assert.doesNotMatch(leaderboardSource, /getProfileDetails/);
 });

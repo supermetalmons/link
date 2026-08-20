@@ -336,9 +336,9 @@ the existing Firestore read rules remain authoritative. Profile lookup supports
 login UID and profile ID requests; profile-ID reads retain the bounded canonical
 merge redirect behavior. Leaderboards support rating, mana points, and each
 mining material with the existing 99-profile limit. Total-material ranking and
-the 60-second material cache remain browser-side. Leaderboard payloads omit card
-customization; selecting a row loads the complete profile through the lookup
-route.
+the 60-second material cache remain browser-side. Leaderboard payloads include
+the card customization fields needed to open profile cards immediately without
+another lookup.
 
 These routes add no Worker binding, secret, service-account permission, or
 shared edge cache. Automated smoke checks cover preflight and unauthenticated
