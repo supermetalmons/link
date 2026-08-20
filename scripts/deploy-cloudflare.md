@@ -269,18 +269,6 @@ response without mutating RTDB. For changes to gameplay behavior, use two
 authenticated production sessions backed by distinct profiles and verify only
 the affected automatch, navigation, or wager flow before completing the release.
 
-For the wager cutover, verify a normal proposal, explicit acceptance, cancel,
-decline, a matching automatic agreement, exact frozen-material counts, and a
-failed proposal rollback before running the complete Firebase release. The
-final Firebase reconciliation removes the retired `sendWagerProposal`,
-`acceptWagerProposal`, `cancelWagerProposal`, and `declineWagerProposal`
-callables.
-
-Before reconciliation, rollback only the frontend to restore the callable path.
-After reconciliation, first redeploy all four callables from the retained
-pre-migration commit, then roll back both the frontend and API Worker versions
-so only one wager mutation protocol remains active.
-
 ## Auth initiation and reads
 
 The API Worker owns these Firebase-authenticated routes:
