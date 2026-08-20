@@ -6,6 +6,13 @@ import {
   type RemoveNavigationGameResponse,
 } from "@mons/shared/navigation";
 import {
+  isWagerProposalAcceptRequest,
+  isWagerProposalRemovalRequest,
+  isWagerProposalSendRequest,
+  type WagerProposalAcceptRequest,
+  type WagerProposalSendRequest,
+} from "@mons/shared/wagers";
+import {
   TELEGRAM_AUTOMATCH_VERSION,
   buildAutomatchTelegramLifecycleUpdates,
 } from "../../../functions/telegram/automatchSource.js";
@@ -24,21 +31,30 @@ import {
   FIREBASE_RTDB_SERVER_TIMESTAMP,
   firebaseRtdbIncrement,
 } from "./firebaseRtdb.ts";
+import { MAX_FIREBASE_KEY_BYTES, isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
   createGameplayRepository,
   type GameplayRepository,
 } from "./gameplayRepository.ts";
 import { readBoundedJson } from "./http.ts";
 import { startAutomatch, type AutomatchDependencies } from "./automatch.ts";
+import {
+  acceptWagerProposal,
+  removeWagerProposal,
+  sendWagerProposal,
+  type WagerProposalDependencies,
+} from "./wagerProposal.ts";
 
-const MAX_FIREBASE_KEY_BYTES = 768;
 const MAX_NAVIGATION_DELETE_ATTEMPTS = 3;
-const INVALID_FIREBASE_KEY_CHARACTERS = ".#$[]/";
 
 export const GAMEPLAY_PATHS = new Set([
   "/automatch/cancel",
   "/automatch/start",
   "/navigation/games/remove",
+  "/wagers/proposals/accept",
+  "/wagers/proposals/cancel",
+  "/wagers/proposals/decline",
+  "/wagers/proposals/send",
 ]);
 
 type QueuedAutomatchCandidate = {
@@ -58,6 +74,7 @@ export type GameplayRouteDependencies = {
   automatch?: AutomatchDependencies;
   logFailure?: (kind: string) => void;
   repository?: GameplayRepository;
+  wager?: WagerProposalDependencies;
   verifyIdentity?: (
     request: Request,
     ctx: WorkerExecutionContext,
@@ -78,22 +95,6 @@ function finiteTimestamp(value: unknown): number {
   const parsed =
     typeof value === "number" || typeof value === "string" ? Number(value) : 0;
   return Number.isFinite(parsed) ? Math.floor(parsed) : 0;
-}
-
-function isSafeFirebaseKey(value: string): boolean {
-  const hasInvalidCharacter = Array.from(value).some((character) => {
-    const code = character.codePointAt(0) || 0;
-    return (
-      code <= 0x1f ||
-      code === 0x7f ||
-      INVALID_FIREBASE_KEY_CHARACTERS.includes(character)
-    );
-  });
-  return (
-    value !== "" &&
-    !hasInvalidCharacter &&
-    new TextEncoder().encode(value).byteLength <= MAX_FIREBASE_KEY_BYTES
-  );
 }
 
 export function getQueuedAutomatchCandidates(
@@ -379,6 +380,33 @@ async function readGameplayBody(
     }
     return body;
   }
+  if (pathname.startsWith("/wagers/proposals/")) {
+    if (pathname === "/wagers/proposals/send") {
+      if (!isWagerProposalSendRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      const inviteId = body.inviteId.trim();
+      const matchId = body.matchId.trim();
+      if (!isSafeFirebaseKey(inviteId) || !isSafeFirebaseKey(matchId)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      return {
+        inviteId,
+        matchId,
+        material: body.material,
+        count: body.count,
+      } satisfies WagerProposalSendRequest;
+    }
+    if (!isWagerProposalAcceptRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    const inviteId = body.inviteId.trim();
+    const matchId = body.matchId.trim();
+    if (!isSafeFirebaseKey(inviteId) || !isSafeFirebaseKey(matchId)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return { inviteId, matchId } satisfies WagerProposalAcceptRequest;
+  }
   if (!isRemoveNavigationGameRequest(body)) {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
   }
@@ -426,11 +454,42 @@ export async function handleGameplayRoute(
         repository,
         dependencies.automatch,
       );
-    } else {
+    } else if (pathname === "/navigation/games/remove") {
       response = await removeNavigationGame(
         identity,
         normalizeString(body.inviteId),
         repository,
+      );
+    } else if (pathname === "/wagers/proposals/send") {
+      if (!isWagerProposalSendRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      response = await sendWagerProposal(
+        identity,
+        body,
+        repository,
+        dependencies.wager,
+      );
+    } else if (pathname === "/wagers/proposals/accept") {
+      if (!isWagerProposalAcceptRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      response = await acceptWagerProposal(
+        identity,
+        body,
+        repository,
+        dependencies.wager,
+      );
+    } else {
+      if (!isWagerProposalRemovalRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      response = await removeWagerProposal(
+        identity,
+        body,
+        pathname.endsWith("/cancel") ? "cancel" : "decline",
+        repository,
+        dependencies.wager,
       );
     }
     return authJsonResponse(response, 200, corsHeaders);

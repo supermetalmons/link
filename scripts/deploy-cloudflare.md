@@ -184,11 +184,15 @@ pre-migration commit before restoring those versions.
 
 ## Gameplay mutation APIs
 
-Authenticated automatch start, cancellation, and navigation cleanup are served by:
+Authenticated gameplay mutations are served by:
 
 - `POST https://api.mons.link/automatch/start`
 - `POST https://api.mons.link/automatch/cancel`
 - `POST https://api.mons.link/navigation/games/remove`
+- `POST https://api.mons.link/wagers/proposals/send`
+- `POST https://api.mons.link/wagers/proposals/accept`
+- `POST https://api.mons.link/wagers/proposals/cancel`
+- `POST https://api.mons.link/wagers/proposals/decline`
 
 The browser sends its Firebase ID token in the `Authorization: Bearer` header.
 The Worker preserves the existing first-entry matchmaking policy, bounded match
@@ -197,10 +201,25 @@ navigation-state gates, and conditional Firestore deletion. Firebase
 Authentication, RTDB, Firestore, and the existing projection triggers remain
 authoritative.
 
-Create one dedicated Google identity with separate least-privilege role
-bindings. The RTDB role is project-scoped because Realtime Database IAM does
-not provide path-level permissions. The Firestore delete role is conditioned on
-the default database:
+Wager proposal send reserves the authenticated participant's available
+materials and atomically creates a proposal or matching automatic agreement.
+Accept reserves the available agreed amount, claims the agreement, clears both
+proposals, and normalizes both participants' frozen materials. Cancellation
+removes the authenticated participant's proposal; decline removes the
+opponent's proposal. The Worker resolves both login IDs to their Firestore
+profiles and accepts direct login ownership or the caller's `profileId` claim.
+It reads the caller's authoritative material total with the same Firebase ID
+token and performs all frozen-material and wager mutations through RTDB
+transactions. Responses expose only the documented result fields and never
+include internal debug state. The existing gameplay service account already has
+the required RTDB read and update permissions, so these routes require no new
+secret or IAM role.
+
+Initial environments require one dedicated Google identity with separate
+least-privilege role bindings. Routine releases reuse this identity and its
+encrypted Worker secrets. The RTDB role is project-scoped because Realtime
+Database IAM does not provide path-level permissions. The Firestore delete role
+is conditioned on the default database:
 
 ```sh
 gcloud iam roles create monsLinkGameplayRtdb --project mons-link --title="mons.link gameplay RTDB" --permissions=firebasedatabase.instances.get,firebasedatabase.instances.update --stage=GA
@@ -211,55 +230,56 @@ gcloud projects add-iam-policy-binding mons-link --member="serviceAccount:mons-l
 gcloud iam service-accounts keys create /secure/mons-link-gameplay-api.json --project mons-link --iam-account=mons-link-gameplay-api@mons-link.iam.gserviceaccount.com
 ```
 
-Prepare an untracked secrets file outside the repository using the generated
-service-account key:
+For initial provisioning or intentional key rotation, prepare an untracked
+secrets file outside the repository using the generated service-account key:
 
 ```dotenv
 GAMEPLAY_SERVICE_ACCOUNT_EMAIL=mons-link-gameplay-api@mons-link.iam.gserviceaccount.com
 GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
 ```
 
-Deploy the RTDB query indexes before uploading the API candidate:
+Attach those credentials to the first undeployed API candidate:
+
+```sh
+npm run deploy:api -- preview --smoke-sol <known-wallet> --secrets-file /secure/mons-link-gameplay-api.env --token-file /secure/cloudflare-token
+```
+
+After that candidate is promoted and the encrypted secrets are retained by the
+Worker, delete the temporary secrets file and downloaded service-account key.
+
+Deploy the reviewed RTDB rules before uploading the API candidate so gameplay
+state remains readable while the internal wager-operation ledger stays private:
 
 ```sh
 firebase deploy --only database --config cloud/firebase.json --project mons-link
 ```
 
-Upload and smoke-test the API candidate with the new secrets, promote that exact
-version, then promote the frontend candidate:
+For a routine release, upload and smoke-test the API candidate, promote that
+exact version, then promote the frontend candidate:
 
 ```sh
-npm run deploy:api -- preview --smoke-sol <known-wallet> --secrets-file /secure/mons-link-gameplay-api.env --token-file /secure/cloudflare-token
+npm run deploy:api -- preview --smoke-sol <known-wallet> --token-file /secure/cloudflare-token
 npm run deploy:api -- production --version-id <candidate-version-id> --smoke-sol <known-wallet> --token-file /secure/cloudflare-token
 npm run deploy -- preview --token-file /secure/cloudflare-token
 npm run deploy -- production --version-id <frontend-candidate-version-id> --token-file /secure/cloudflare-token
 ```
 
-In two authenticated production sessions backed by distinct profiles, start an
-automatch in the first session and confirm the queue, invite, host match, and
-pending Telegram source. Start automatch in the second session and confirm it
-returns the same invite as matched, removes the queue, stores the guest match
-with the opposite color and same variant, and advances the Telegram projection.
-Start and cancel one more automatch and confirm the invite retains the correct
-canceled or matched state after the guest recheck. Create a disposable direct
-invite without a guest, return home, and remove its waiting navigation item.
-Confirm only that waiting Firestore game document is deleted.
+API smoke checks cover every gameplay route's preflight and unauthenticated
+response without mutating RTDB. For changes to gameplay behavior, use two
+authenticated production sessions backed by distinct profiles and verify only
+the affected automatch, navigation, or wager flow before completing the release.
 
-After these checks pass, immediately run the complete Firebase release and
-confirm the retired `automatch` callable is absent:
+For the wager cutover, verify a normal proposal, explicit acceptance, cancel,
+decline, a matching automatic agreement, exact frozen-material counts, and a
+failed proposal rollback before running the complete Firebase release. The
+final Firebase reconciliation removes the retired `sendWagerProposal`,
+`acceptWagerProposal`, `cancelWagerProposal`, and `declineWagerProposal`
+callables.
 
-```sh
-npm run deploy:firebase -- --project mons-link
-firebase functions:list --project mons-link
-```
-
-Delete the downloaded service-account key and temporary secrets file after the
-Worker version stores both values as encrypted secrets. Retain the service
-account and its Worker secrets for rollback.
-
-Before Firebase reconciliation, rollback the frontend and API Worker versions.
-After reconciliation, first redeploy `automatch` from the retained pre-migration
-commit, then restore the previous frontend and API Worker versions.
+Before reconciliation, rollback only the frontend to restore the callable path.
+After reconciliation, first redeploy all four callables from the retained
+pre-migration commit, then roll back both the frontend and API Worker versions
+so only one wager mutation protocol remains active.
 
 ## Auth initiation and reads
 

@@ -107,6 +107,10 @@ const AUTHENTICATED_ROUTE_SMOKES = [
   { path: "/mining/rock", method: "POST" },
   { path: "/navigation/games/remove", method: "POST" },
   { path: "/profiles/lookup", method: "POST" },
+  { path: "/wagers/proposals/accept", method: "POST" },
+  { path: "/wagers/proposals/cancel", method: "POST" },
+  { path: "/wagers/proposals/decline", method: "POST" },
+  { path: "/wagers/proposals/send", method: "POST" },
 ] as const;
 const SMOKE_TIMEOUT_MS = 15_000;
 const SMOKE_RETRY_DELAYS_MS = [500, 1_500, 5_000, 10_000, 15_000];

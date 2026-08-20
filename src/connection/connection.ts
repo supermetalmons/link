@@ -105,8 +105,12 @@ import {
   readLeaderboardViaApi,
 } from "../services/profileApi";
 import {
+  acceptWagerProposalViaApi,
   cancelAutomatchViaApi,
+  cancelWagerProposalViaApi,
+  declineWagerProposalViaApi,
   removeNavigationGameViaApi,
+  sendWagerProposalViaApi,
   startAutomatchViaApi,
 } from "../services/gameplayApi";
 import { compareNavigationItems as compareNavigationItemsByDisplayOrder } from "../services/navigationItemOrdering";
@@ -3748,12 +3752,11 @@ class Connection {
         }
       }
       console.log("wager:send:start", { inviteId, matchId, material, count });
-      const sendWagerProposalFunction = httpsCallable(
-        this.functions,
-        "sendWagerProposal",
-      );
       const data = await this.callWagerFunctionWithRetry("wager:send", () =>
-        sendWagerProposalFunction({ inviteId, matchId, material, count }),
+        sendWagerProposalViaApi(
+          { inviteId, matchId, material, count },
+          this.getAuthApiToken,
+        ),
       );
       if (!sessionGuard()) {
         return { ok: false };
@@ -3912,12 +3915,8 @@ class Connection {
         optimisticApplied = true;
       }
       console.log("wager:cancel:start", { inviteId, matchId });
-      const cancelWagerProposalFunction = httpsCallable(
-        this.functions,
-        "cancelWagerProposal",
-      );
       const data = await this.callWagerFunctionWithRetry("wager:cancel", () =>
-        cancelWagerProposalFunction({ inviteId, matchId }),
+        cancelWagerProposalViaApi({ inviteId, matchId }, this.getAuthApiToken),
       );
       if (!sessionGuard()) {
         return { ok: false };
@@ -4006,12 +4005,8 @@ class Connection {
         optimisticApplied = true;
       }
       console.log("wager:decline:start", { inviteId, matchId });
-      const declineWagerProposalFunction = httpsCallable(
-        this.functions,
-        "declineWagerProposal",
-      );
       const data = await this.callWagerFunctionWithRetry("wager:decline", () =>
-        declineWagerProposalFunction({ inviteId, matchId }),
+        declineWagerProposalViaApi({ inviteId, matchId }, this.getAuthApiToken),
       );
       if (!sessionGuard()) {
         return { ok: false };
@@ -4132,12 +4127,8 @@ class Connection {
         }
       }
       console.log("wager:accept:start", { inviteId, matchId });
-      const acceptWagerProposalFunction = httpsCallable(
-        this.functions,
-        "acceptWagerProposal",
-      );
       const data = await this.callWagerFunctionWithRetry("wager:accept", () =>
-        acceptWagerProposalFunction({ inviteId, matchId }),
+        acceptWagerProposalViaApi({ inviteId, matchId }, this.getAuthApiToken),
       );
       if (!sessionGuard()) {
         return { ok: false };

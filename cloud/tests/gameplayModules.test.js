@@ -25,16 +25,7 @@ const {
   assertPlayerClaim,
   assertResolvedPlayerClaim,
 } = require("../functions/gameplay/playerAuthorization");
-const {
-  transitionWagerProposal,
-} = require("../functions/gameplay/wagerProposalTransition");
 const wagerMaterials = require("../functions/gameplay/wagerMaterials");
-const {
-  resolveWagerParticipants,
-} = require("../functions/gameplay/wagerParticipants");
-const {
-  removeWagerProposalWithRetry,
-} = require("../functions/gameplay/wagerProposalRemoval");
 const wagerHelpers = require("../functions/wagerHelpers");
 
 test("automatch REST queries retain their RTDB indexes", () => {
@@ -42,6 +33,15 @@ test("automatch REST queries retain their RTDB indexes", () => {
     "uid",
     "profileId",
   ]);
+});
+
+test("player reads expose gameplay state without exposing wager operations", () => {
+  const players = databaseRules.rules.players;
+  assert.equal(players[".read"], undefined);
+  assert.equal(players.$userId.matches[".read"], true);
+  assert.equal(players.$userId.profile[".read"], true);
+  assert.equal(players.$userId.mining.frozen[".read"], true);
+  assert.equal(players.$userId.mining._wagerOps, undefined);
 });
 
 const withFirebaseAdminMethod = async (method, replacement, callback) => {
@@ -60,13 +60,8 @@ test("wager helpers preserve their compatibility export surface", () => {
     "normalizeCount",
     "applyMaterialDeltas",
     "updateFrozenMaterials",
-    "updateFrozenMaterialsWithCap",
-    "reserveFrozenMaterials",
-    "reserveAcceptedMaterials",
     "readUserMiningMaterials",
     "updateUserMiningMaterials",
-    "resolveWagerParticipants",
-    "removeWagerProposalWithRetry",
   ]);
   assert.strictEqual(
     wagerHelpers.isMaterialName,
@@ -79,14 +74,6 @@ test("wager helpers preserve their compatibility export surface", () => {
   assert.strictEqual(
     wagerHelpers.applyMaterialDeltas,
     wagerMaterials.applyMaterialDeltas,
-  );
-  assert.strictEqual(
-    wagerHelpers.resolveWagerParticipants,
-    resolveWagerParticipants,
-  );
-  assert.strictEqual(
-    wagerHelpers.removeWagerProposalWithRetry,
-    removeWagerProposalWithRetry,
   );
 });
 
@@ -271,78 +258,6 @@ test("player authorization preserves strict and unresolved profile policies", ()
         profileId: "profile",
       }),
     (error) => error.code === "permission-denied",
-  );
-});
-
-test("wager proposal transitions preserve proposals and automatic agreements", () => {
-  const proposal = transitionWagerProposal(null, {
-    playerUid: "player",
-    opponentUid: "opponent",
-    material: "dust",
-    reservedCount: 4,
-    now: 100,
-  });
-  assert.deepEqual(proposal, {
-    value: {
-      proposals: {
-        player: { material: "dust", count: 4, createdAt: 100 },
-      },
-      proposedBy: { player: true },
-    },
-    autoAgreement: null,
-    autoOpponentCount: 0,
-  });
-
-  const agreement = transitionWagerProposal(
-    {
-      proposals: {
-        opponent: { material: "dust", count: "6" },
-      },
-      proposedBy: { opponent: true },
-    },
-    {
-      playerUid: "player",
-      opponentUid: "opponent",
-      material: "dust",
-      reservedCount: 4,
-      now: 200,
-    },
-  );
-  assert.deepEqual(agreement, {
-    value: {
-      proposals: null,
-      proposedBy: { opponent: true, player: true },
-      agreed: {
-        material: "dust",
-        count: 4,
-        total: 8,
-        proposerId: "opponent",
-        accepterId: "player",
-        acceptedAt: 200,
-      },
-    },
-    autoAgreement: {
-      material: "dust",
-      count: 4,
-      total: 8,
-      proposerId: "opponent",
-      accepterId: "player",
-      acceptedAt: 200,
-    },
-    autoOpponentCount: 6,
-  });
-  assert.deepEqual(
-    transitionWagerProposal(
-      { resolved: true },
-      {
-        playerUid: "player",
-        opponentUid: "opponent",
-        material: "dust",
-        reservedCount: 4,
-        now: 300,
-      },
-    ),
-    { value: undefined, autoAgreement: null, autoOpponentCount: 0 },
   );
 });
 

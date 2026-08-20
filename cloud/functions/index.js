@@ -12,10 +12,6 @@ const { updateRatings } = require("./updateRatings");
 const { startMatchTimer, claimMatchVictoryByTimer } = require("./matchTimers");
 const { editUsername } = require("./editUsername");
 const { withdrawEventPrize } = require("./eventPrizeWithdrawal");
-const { sendWagerProposal } = require("./sendWagerProposal");
-const { cancelWagerProposal } = require("./cancelWagerProposal");
-const { declineWagerProposal } = require("./declineWagerProposal");
-const { acceptWagerProposal } = require("./acceptWagerProposal");
 const { resolveWagerOutcome } = require("./resolveWagerOutcome");
 const {
   createEvent,
@@ -68,10 +64,6 @@ exports.claimMatchVictoryByTimer = claimMatchVictoryByTimer;
 exports.updateRatings = updateRatings;
 exports.editUsername = editUsername;
 exports.withdrawEventPrize = withdrawEventPrize;
-exports.sendWagerProposal = sendWagerProposal;
-exports.cancelWagerProposal = cancelWagerProposal;
-exports.declineWagerProposal = declineWagerProposal;
-exports.acceptWagerProposal = acceptWagerProposal;
 exports.resolveWagerOutcome = resolveWagerOutcome;
 exports.createEvent = createEvent;
 exports.joinEvent = joinEvent;

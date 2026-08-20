@@ -18,8 +18,12 @@ registerHooks({
 
 const {
   GameplayApiError,
+  acceptWagerProposalViaApi,
   cancelAutomatchViaApi,
+  cancelWagerProposalViaApi,
+  declineWagerProposalViaApi,
   removeNavigationGameViaApi,
+  sendWagerProposalViaApi,
   startAutomatchViaApi,
 } = await import("../src/services/gameplayApi.ts");
 const {
@@ -29,6 +33,11 @@ const {
   isStartAutomatchRequest,
   isStartAutomatchResponse,
 } = await import("@mons/shared/navigation");
+const {
+  isWagerProposalAcceptResponse,
+  isWagerProposalSendRequest,
+  isWagerProposalSendResponse,
+} = await import("@mons/shared/wagers");
 
 const originalFetch = globalThis.fetch;
 
@@ -59,6 +68,21 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       reason: null,
       inviteId: "invite-1",
     },
+    { ok: true },
+    { ok: false, reason: "proposal-missing" },
+    {
+      ok: true,
+      count: 3,
+      agreed: {
+        material: "dust",
+        count: 3,
+        total: 6,
+        proposerId: "guest",
+        accepterId: "host",
+        acceptedAt: 100,
+      },
+    },
+    { ok: true, count: 2 },
   ];
   globalThis.fetch = async (input, init) => {
     calls.push({ input: String(input), init });
@@ -94,16 +118,77 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
     },
   );
   assert.deepEqual(
+    await cancelWagerProposalViaApi(
+      { inviteId: "invite-1", matchId: "match-1" },
+      async () => "firebase-token",
+    ),
+    { ok: true },
+  );
+  assert.deepEqual(
+    await declineWagerProposalViaApi(
+      { inviteId: "invite-1", matchId: "match-1" },
+      async () => "firebase-token",
+    ),
+    { ok: false, reason: "proposal-missing" },
+  );
+  assert.deepEqual(
+    await sendWagerProposalViaApi(
+      {
+        inviteId: "invite-1",
+        matchId: "match-1",
+        material: "dust",
+        count: 4,
+      },
+      async () => "firebase-token",
+    ),
+    {
+      ok: true,
+      count: 3,
+      agreed: {
+        material: "dust",
+        count: 3,
+        total: 6,
+        proposerId: "guest",
+        accepterId: "host",
+        acceptedAt: 100,
+      },
+    },
+  );
+  assert.deepEqual(
+    await acceptWagerProposalViaApi(
+      { inviteId: "invite-1", matchId: "match-1" },
+      async () => "firebase-token",
+    ),
+    { ok: true, count: 2 },
+  );
+  assert.deepEqual(
     calls.map((call) => call.input),
     [
       "https://api.mons.link/automatch/start",
       "https://api.mons.link/automatch/cancel",
       "https://api.mons.link/navigation/games/remove",
+      "https://api.mons.link/wagers/proposals/cancel",
+      "https://api.mons.link/wagers/proposals/decline",
+      "https://api.mons.link/wagers/proposals/send",
+      "https://api.mons.link/wagers/proposals/accept",
     ],
   );
   assert.deepEqual(
     calls.map((call) => JSON.parse(call.init.body)),
-    [{ emojiId: 7, aura: "rainbow" }, {}, { inviteId: "invite-1" }],
+    [
+      { emojiId: 7, aura: "rainbow" },
+      {},
+      { inviteId: "invite-1" },
+      { inviteId: "invite-1", matchId: "match-1" },
+      { inviteId: "invite-1", matchId: "match-1" },
+      {
+        inviteId: "invite-1",
+        matchId: "match-1",
+        material: "dust",
+        count: 4,
+      },
+      { inviteId: "invite-1", matchId: "match-1" },
+    ],
   );
   for (const call of calls) {
     assert.equal(call.init.method, "POST");
@@ -195,6 +280,32 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
     }),
     false,
   );
+  assert.equal(
+    isWagerProposalSendRequest({
+      inviteId: "invite",
+      matchId: "match",
+      material: "dust",
+      count: 1.4,
+    }),
+    true,
+  );
+  assert.equal(
+    isWagerProposalSendRequest({
+      inviteId: "invite",
+      matchId: "match",
+      material: "unknown",
+      count: 1,
+    }),
+    false,
+  );
+  assert.equal(
+    isWagerProposalSendResponse({ ok: true, count: 1, debug: {} }),
+    false,
+  );
+  assert.equal(
+    isWagerProposalAcceptResponse({ ok: false, reason: "proposal-missing" }),
+    true,
+  );
 });
 
 test("refreshes the Firebase token once after a 401", async () => {
@@ -270,6 +381,9 @@ test("rejects malformed and oversized gameplay responses", async () => {
   const responses = [
     jsonResponse({ ok: "yes" }),
     jsonResponse({ ok: true, skipped: false }),
+    jsonResponse({ ok: true, debug: {} }),
+    jsonResponse({ ok: true, count: 1, debug: {} }),
+    jsonResponse({ ok: true, count: 1, agreed: { material: "dust" } }),
     new Response("{}", {
       headers: { "Content-Length": String(64 * 1024 + 1) },
     }),
@@ -282,6 +396,32 @@ test("rejects malformed and oversized gameplay responses", async () => {
   );
   await assert.rejects(
     removeNavigationGameViaApi({ inviteId: "invite" }, async () => "token"),
+    GameplayApiError,
+  );
+  await assert.rejects(
+    cancelWagerProposalViaApi(
+      { inviteId: "invite", matchId: "match" },
+      async () => "token",
+    ),
+    GameplayApiError,
+  );
+  await assert.rejects(
+    acceptWagerProposalViaApi(
+      { inviteId: "invite", matchId: "match" },
+      async () => "token",
+    ),
+    GameplayApiError,
+  );
+  await assert.rejects(
+    sendWagerProposalViaApi(
+      {
+        inviteId: "invite",
+        matchId: "match",
+        material: "dust",
+        count: 1,
+      },
+      async () => "token",
+    ),
     GameplayApiError,
   );
   for (let index = 0; index < 2; index++) {
@@ -346,7 +486,15 @@ test("connection no longer references the migrated Firebase callables", () => {
   assert.doesNotMatch(source, /httpsCallable\([^)]*removeNavigationGame/);
   assert.doesNotMatch(source, /"cancelAutomatch"/);
   assert.doesNotMatch(source, /"removeNavigationGame"/);
+  assert.doesNotMatch(source, /httpsCallable\([^)]*cancelWagerProposal/);
+  assert.doesNotMatch(source, /httpsCallable\([^)]*declineWagerProposal/);
+  assert.doesNotMatch(source, /httpsCallable\([^)]*sendWagerProposal/);
+  assert.doesNotMatch(source, /httpsCallable\([^)]*acceptWagerProposal/);
   assert.match(source, /cancelAutomatchViaApi/);
+  assert.match(source, /cancelWagerProposalViaApi/);
+  assert.match(source, /declineWagerProposalViaApi/);
+  assert.match(source, /sendWagerProposalViaApi/);
+  assert.match(source, /acceptWagerProposalViaApi/);
   assert.match(source, /startAutomatchViaApi/);
   assert.match(source, /removeNavigationGameViaApi/);
   assert.doesNotMatch(source, /PendingAutomatchOperationId/);

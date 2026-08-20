@@ -307,6 +307,7 @@ test("shared package preserves every direct export subpath", () => {
     "./solana": "./solana.js",
     "./timers": "./timers.js",
     "./usernames": "./usernames.js",
+    "./wagers": "./wagers.js",
     "./x-redirect": "./x-redirect.js",
   };
 

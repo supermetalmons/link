@@ -110,18 +110,19 @@
       }
     },
     "players": {
-      ".read": true,
       "$userId": {
         ".write": "auth != null && (auth.uid === $userId || auth.token.admin === true || (data.child('profile').exists() && data.child('profile').val() === auth.token.profileId) || (data.child('profile').exists() && root.child('players').child(auth.uid).child('profile').exists() && data.child('profile').val() === root.child('players').child(auth.uid).child('profile').val()))",
         ".validate": "newData.exists() && newData.child('matches').exists() && (auth.token.admin === true || ((!data.child('profile').exists() && !newData.child('profile').exists()) || (data.child('profile').exists() && newData.child('profile').val() === data.child('profile').val())))",
         "mining": {
           ".write": "auth != null && auth.token.admin === true",
           "frozen": {
+            ".read": true,
             ".write": "auth != null && auth.token.admin === true",
             ".validate": "newData.hasChildren(['dust','slime','gum','metal','ice'])"
           }
         },
         "matches": {
+          ".read": true,
           "$matchId": {
             "fen": {
               ".validate": "newData.isString() && newData.val().length > 0"
@@ -139,6 +140,7 @@
           }
         },
         "profile": {
+          ".read": true,
           ".write": "auth != null && auth.token.admin === true",
           ".validate": "!data.exists() && newData.isString() && newData.val().length > 0"
         }

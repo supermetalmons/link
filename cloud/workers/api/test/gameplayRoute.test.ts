@@ -40,10 +40,32 @@ function repository(
     findProfileId: async () => null,
     getAutomatchProfile: async () => null,
     getNavigationGame: async () => null,
+    getMiningMaterials: async () => ({
+      dust: 10,
+      slime: 10,
+      gum: 10,
+      metal: 10,
+      ice: 10,
+    }),
     getRtdbPath: async () => null,
     patchRtdbRoot: async () => undefined,
+    transactRtdbPath: async () => ({ committed: false, value: null }),
     ...overrides,
   };
+}
+
+function applyTransaction(
+  updater: (current: unknown) => unknown,
+  current: unknown,
+): { committed: boolean; decision?: string; value: unknown } {
+  const decision = updater(current) as {
+    commit?: boolean;
+    decision?: string;
+    value?: unknown;
+  };
+  return decision.commit === false
+    ? { committed: false, decision: decision.decision, value: current }
+    : { committed: true, decision: decision.decision, value: decision.value };
 }
 
 function context(): Pick<ExecutionContext, "waitUntil"> {
@@ -496,6 +518,272 @@ test("routes authenticated CORS and rejects methods before authentication", asyn
   });
 });
 
+test("routes wager cancellation and decline to their exact proposal owners", async () => {
+  const run = async (
+    path: "/wagers/proposals/cancel" | "/wagers/proposals/decline",
+  ) => {
+    const transactionPaths: string[] = [];
+    const response = await handleGameplayRoute(
+      request(path, { body: { inviteId: "invite", matchId: "match" } }),
+      env,
+      context(),
+      {
+        repository: repository({
+          findProfileId: async (uid) => `profile-${uid}`,
+          getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
+          transactRtdbPath: async (transactionPath, updater) => {
+            transactionPaths.push(transactionPath);
+            const current = transactionPath.startsWith("invites/")
+              ? {
+                  proposals: {
+                    host: { material: "dust", count: 1 },
+                    guest: { material: "ice", count: 2 },
+                  },
+                }
+              : { dust: 2, slime: 0, gum: 0, metal: 0, ice: 3 };
+            const decision = updater(current) as {
+              commit?: boolean;
+              value?: unknown;
+            };
+            return decision.commit === false
+              ? { committed: false, value: current }
+              : { committed: true, value: decision.value };
+          },
+        }),
+        verifyIdentity: async () => ({
+          idToken: "token",
+          profileId: "profile-host",
+          uid: "host",
+        }),
+      },
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true });
+    return transactionPaths;
+  };
+
+  assert.deepEqual(await run("/wagers/proposals/cancel"), [
+    "invites/invite/wagers/match",
+    "players/host/mining",
+  ]);
+  assert.deepEqual(await run("/wagers/proposals/decline"), [
+    "invites/invite/wagers/match",
+    "players/guest/mining",
+  ]);
+});
+
+test("routes wager send and accept through the authenticated gameplay surface", async () => {
+  const send = await handleGameplayRoute(
+    request("/wagers/proposals/send", {
+      body: {
+        inviteId: "invite",
+        matchId: "match",
+        material: "dust",
+        count: 2,
+      },
+    }),
+    env,
+    context(),
+    {
+      repository: repository({
+        findProfileId: async (uid) => `profile-${uid}`,
+        getMiningMaterials: async (_profileId, token) => {
+          assert.equal(token, "token");
+          return { dust: 2, slime: 0, gum: 0, metal: 0, ice: 0 };
+        },
+        getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
+        transactRtdbPath: async (path, updater) =>
+          applyTransaction(
+            updater,
+            path.startsWith("players/")
+              ? {
+                  frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+                }
+              : null,
+          ),
+      }),
+      verifyIdentity: async () => ({
+        idToken: "token",
+        profileId: "profile-host",
+        uid: "host",
+      }),
+      wager: { now: () => 100 },
+    },
+  );
+  assert.equal(send.status, 200);
+  assert.deepEqual(await send.json(), { ok: true, count: 2 });
+
+  let reads = 0;
+  const accept = await handleGameplayRoute(
+    request("/wagers/proposals/accept", {
+      body: { inviteId: "invite", matchId: "match" },
+    }),
+    env,
+    context(),
+    {
+      repository: repository({
+        findProfileId: async (uid) => `profile-${uid}`,
+        getMiningMaterials: async () => ({
+          dust: 2,
+          slime: 0,
+          gum: 0,
+          metal: 0,
+          ice: 0,
+        }),
+        getRtdbPath: async () => {
+          reads++;
+          return reads === 1
+            ? { hostId: "host", guestId: "guest" }
+            : { proposals: { guest: { material: "dust", count: 2 } } };
+        },
+        transactRtdbPath: async (path, updater) =>
+          applyTransaction(
+            updater,
+            path.startsWith("players/")
+              ? {
+                  frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+                }
+              : { proposals: { guest: { material: "dust", count: 2 } } },
+          ),
+      }),
+      verifyIdentity: async () => ({
+        idToken: "token",
+        profileId: "profile-host",
+        uid: "host",
+      }),
+      wager: { now: () => 200 },
+    },
+  );
+  assert.equal(accept.status, 200);
+  assert.deepEqual(await accept.json(), { ok: true, count: 2 });
+});
+
+test("returns wager permission and infrastructure failures without details", async () => {
+  const forbidden = await handleGameplayRoute(
+    request("/wagers/proposals/cancel", {
+      body: { inviteId: "invite", matchId: "match" },
+    }),
+    env,
+    context(),
+    {
+      repository: repository({
+        findProfileId: async (uid) => `profile-${uid}`,
+        getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
+      }),
+      verifyIdentity: async () => ({
+        idToken: "token",
+        profileId: "profile-other",
+        uid: "other",
+      }),
+    },
+  );
+  assert.equal(forbidden.status, 403);
+  assert.deepEqual(await forbidden.json(), {
+    ok: false,
+    error: "permission-denied",
+    message: "permission-denied",
+  });
+
+  const routeFailures: string[] = [];
+  const materialFailures: Array<Record<string, unknown>> = [];
+  let transactions = 0;
+  const unavailable = await handleGameplayRoute(
+    request("/wagers/proposals/cancel", {
+      body: { inviteId: "invite", matchId: "match" },
+    }),
+    env,
+    context(),
+    {
+      logFailure: (kind) => routeFailures.push(kind),
+      repository: repository({
+        findProfileId: async (uid) => `profile-${uid}`,
+        getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
+        transactRtdbPath: async (_path, updater) => {
+          transactions++;
+          if (transactions === 2) {
+            throw new Error("private-upstream-detail");
+          }
+          const current = {
+            proposals: { host: { material: "dust", count: 1 } },
+          };
+          const decision = updater(current) as { value?: unknown };
+          return { committed: true, value: decision.value };
+        },
+      }),
+      verifyIdentity: async () => ({
+        idToken: "token",
+        profileId: "profile-host",
+        uid: "host",
+      }),
+      wager: {
+        logMaterialReleaseFailure: (record) => materialFailures.push(record),
+      },
+    },
+  );
+  assert.equal(unavailable.status, 503);
+  const payload = await unavailable.json();
+  assert.deepEqual(payload, {
+    ok: false,
+    error: "unavailable",
+    message: "gameplay-service-unavailable",
+  });
+  assert.doesNotMatch(JSON.stringify(payload), /private|token|host/);
+  assert.deepEqual(routeFailures, ["gameplay-service-unavailable"]);
+  assert.equal(materialFailures.length, 1);
+
+  let sendTransactions = 0;
+  const sendFailure = await handleGameplayRoute(
+    request("/wagers/proposals/send", {
+      body: {
+        inviteId: "invite",
+        matchId: "match",
+        material: "dust",
+        count: 1,
+      },
+    }),
+    env,
+    context(),
+    {
+      repository: repository({
+        findProfileId: async (uid) => `profile-${uid}`,
+        getMiningMaterials: async () => ({
+          dust: 1,
+          slime: 0,
+          gum: 0,
+          metal: 0,
+          ice: 0,
+        }),
+        getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
+        transactRtdbPath: async (_path, updater) => {
+          sendTransactions++;
+          if (sendTransactions === 3) {
+            throw new Error("private-rollback-detail");
+          }
+          return applyTransaction(
+            updater,
+            sendTransactions === 1
+              ? { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 }
+              : { proposedBy: { host: true } },
+          );
+        },
+      }),
+      verifyIdentity: async () => ({
+        idToken: "token",
+        profileId: "profile-host",
+        uid: "host",
+      }),
+    },
+  );
+  assert.equal(sendFailure.status, 503);
+  const sendPayload = await sendFailure.json();
+  assert.deepEqual(sendPayload, {
+    ok: false,
+    error: "unavailable",
+    message: "gameplay-service-unavailable",
+  });
+  assert.doesNotMatch(JSON.stringify(sendPayload), /private|rollback|host/);
+});
+
 test("authenticates before body parsing and sanitizes route failures", async () => {
   let repositoryReads = 0;
   const unauthenticated = await handleGameplayRoute(
@@ -528,6 +816,52 @@ test("authenticates before body parsing and sanitizes route failures", async () 
     ["/automatch/start", { emojiId: 1, aura: "", extra: true }],
     ["/navigation/games/remove", {}],
     ["/navigation/games/remove", { inviteId: "unsafe/key" }],
+    ["/wagers/proposals/cancel", {}],
+    ["/wagers/proposals/cancel", { inviteId: "invite", matchId: "unsafe/key" }],
+    ["/wagers/proposals/accept", {}],
+    [
+      "/wagers/proposals/accept",
+      { inviteId: "invite", matchId: "match", extra: true },
+    ],
+    [
+      "/wagers/proposals/send",
+      { inviteId: "invite", matchId: "match", material: "dust" },
+    ],
+    [
+      "/wagers/proposals/send",
+      {
+        inviteId: "invite",
+        matchId: "match",
+        material: "dust",
+        count: 0.4,
+      },
+    ],
+    [
+      "/wagers/proposals/send",
+      {
+        inviteId: "invite",
+        matchId: "match",
+        material: "unknown",
+        count: 1,
+      },
+    ],
+    [
+      "/wagers/proposals/send",
+      {
+        inviteId: "unsafe/key",
+        matchId: "match",
+        material: "dust",
+        count: 1,
+      },
+    ],
+    [
+      "/wagers/proposals/decline",
+      { inviteId: "x".repeat(769), matchId: "match" },
+    ],
+    [
+      "/wagers/proposals/decline",
+      { inviteId: "invite", matchId: "match", extra: true },
+    ],
   ] as const;
   for (const [path, body] of invalidBodies) {
     const response = await handleGameplayRoute(

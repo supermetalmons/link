@@ -8,6 +8,17 @@ import {
   type StartAutomatchRequest,
   type StartAutomatchResponse,
 } from "@mons/shared/navigation";
+import {
+  isWagerProposalAcceptResponse,
+  isWagerProposalRemovalResponse,
+  isWagerProposalSendResponse,
+  type WagerProposalAcceptRequest,
+  type WagerProposalAcceptResponse,
+  type WagerProposalRemovalRequest,
+  type WagerProposalRemovalResponse,
+  type WagerProposalSendRequest,
+  type WagerProposalSendResponse,
+} from "@mons/shared/wagers";
 import type { AuthTokenProvider } from "./authApi";
 
 const GAMEPLAY_API_ROOT = "https://api.mons.link";
@@ -199,5 +210,53 @@ export function removeNavigationGameViaApi(
     request,
     tokenProvider,
     isRemoveNavigationGameResponse,
+  );
+}
+
+export function cancelWagerProposalViaApi(
+  request: WagerProposalRemovalRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<WagerProposalRemovalResponse> {
+  return gameplayMutation(
+    "/wagers/proposals/cancel",
+    request,
+    tokenProvider,
+    isWagerProposalRemovalResponse,
+  );
+}
+
+export function declineWagerProposalViaApi(
+  request: WagerProposalRemovalRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<WagerProposalRemovalResponse> {
+  return gameplayMutation(
+    "/wagers/proposals/decline",
+    request,
+    tokenProvider,
+    isWagerProposalRemovalResponse,
+  );
+}
+
+export function sendWagerProposalViaApi(
+  request: WagerProposalSendRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<WagerProposalSendResponse> {
+  return gameplayMutation(
+    "/wagers/proposals/send",
+    request,
+    tokenProvider,
+    isWagerProposalSendResponse,
+  );
+}
+
+export function acceptWagerProposalViaApi(
+  request: WagerProposalAcceptRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<WagerProposalAcceptResponse> {
+  return gameplayMutation(
+    "/wagers/proposals/accept",
+    request,
+    tokenProvider,
+    isWagerProposalAcceptResponse,
   );
 }

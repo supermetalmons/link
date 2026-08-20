@@ -19,6 +19,7 @@
     "./solana": "./solana.js",
     "./timers": "./timers.js",
     "./usernames": "./usernames.js",
+    "./wagers": "./wagers.js",
     "./x-redirect": "./x-redirect.js"
   },
   "dependencies": {

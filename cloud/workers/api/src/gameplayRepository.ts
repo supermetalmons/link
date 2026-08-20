@@ -1,8 +1,14 @@
+import {
+  MATERIAL_KEYS,
+  normalizeMaterials,
+  type MiningMaterials,
+} from "@mons/shared/mining";
 import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 import {
   createFirebaseRtdbClient,
   type FirebaseRtdbClient,
   type FirebaseRtdbQuery,
+  type FirebaseRtdbTransactionResult,
 } from "./firebaseRtdb.ts";
 import { createGoogleAccessToken } from "./googleAuth.ts";
 
@@ -49,6 +55,10 @@ export type GameplayRepository = {
     inviteId: string,
     firebaseIdToken: string,
   ) => Promise<NavigationGameDocument | null>;
+  getMiningMaterials: (
+    profileId: string,
+    firebaseIdToken: string,
+  ) => Promise<MiningMaterials>;
   getRtdbPath: (
     path: string,
     query?: FirebaseRtdbQuery,
@@ -58,6 +68,10 @@ export type GameplayRepository = {
     updates: Record<string, unknown>,
     signal?: AbortSignal,
   ) => Promise<void>;
+  transactRtdbPath: (
+    path: string,
+    updater: (current: unknown) => unknown,
+  ) => Promise<FirebaseRtdbTransactionResult>;
 };
 
 type GameplayRepositoryDependencies = {
@@ -197,6 +211,30 @@ function parseNavigationGame(value: unknown): NavigationGameDocument {
   };
 }
 
+function readFirestoreMapFields(value: unknown): Record<string, unknown> {
+  const encoded = toRecord(value);
+  const mapValue = toRecord(encoded?.mapValue);
+  return toRecord(mapValue?.fields) || {};
+}
+
+export function parseMiningMaterialsDocument(value: unknown): MiningMaterials {
+  const document = toRecord(value);
+  if (!document) {
+    throw new GameplayRepositoryFailure();
+  }
+  const fields = toRecord(document.fields) || {};
+  const miningFields = readFirestoreMapFields(fields.mining);
+  const materialFields = readFirestoreMapFields(miningFields.materials);
+  return normalizeMaterials(
+    Object.fromEntries(
+      MATERIAL_KEYS.map((key) => [
+        key,
+        readFirestoreNumber(materialFields[key], 0),
+      ]),
+    ),
+  );
+}
+
 export function createGameplayRepository(
   env: Env,
   {
@@ -251,6 +289,7 @@ export function createGameplayRepository(
   return {
     getRtdbPath: rtdbClient.getPath,
     patchRtdbRoot: rtdbClient.patchRoot,
+    transactRtdbPath: rtdbClient.transactPath,
 
     async getAutomatchProfile(uid, firebaseIdToken, signal) {
       const response = await fetchWithTimeout(
@@ -354,6 +393,31 @@ export function createGameplayRepository(
         throw new GameplayRepositoryFailure();
       }
       return parseNavigationGame(
+        await readBoundedJsonValue(
+          response,
+          MAX_FIRESTORE_BODY_BYTES,
+          () => new GameplayRepositoryFailure(),
+        ),
+      );
+    },
+
+    async getMiningMaterials(profileId, firebaseIdToken) {
+      const url = new URL(
+        `${FIRESTORE_DOCUMENTS_ROOT}/${documentPath(profileId)}`,
+      );
+      url.searchParams.append("mask.fieldPaths", "mining.materials");
+      const response = await fetchWithTimeout(url.toString(), {
+        headers: { Authorization: `Bearer ${firebaseIdToken}` },
+      });
+      if (response.status === 404) {
+        await cancelResponseBody(response);
+        return normalizeMaterials();
+      }
+      if (!response.ok) {
+        await cancelResponseBody(response);
+        throw new GameplayRepositoryFailure();
+      }
+      return parseMiningMaterialsDocument(
         await readBoundedJsonValue(
           response,
           MAX_FIRESTORE_BODY_BYTES,

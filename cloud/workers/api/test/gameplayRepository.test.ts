@@ -5,6 +5,7 @@ import {
   GameplayRepositoryFailure,
   MAX_FIRESTORE_BODY_BYTES,
   parseAutomatchProfileQuery,
+  parseMiningMaterialsDocument,
   parseNavigationGame,
   parseProfileQuery,
 } from "../src/gameplayRepository.ts";
@@ -163,6 +164,78 @@ test("parses only the profile and navigation fields used by gameplay", () => {
   assert.throws(
     () => parseAutomatchProfileQuery({}),
     GameplayRepositoryFailure,
+  );
+  assert.deepEqual(
+    parseMiningMaterialsDocument({
+      fields: {
+        mining: {
+          mapValue: {
+            fields: {
+              materials: {
+                mapValue: {
+                  fields: {
+                    dust: { integerValue: "3" },
+                    slime: { doubleValue: 1.4 },
+                    ice: { stringValue: "2" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    }),
+    { dust: 3, slime: 1, gum: 0, metal: 0, ice: 0 },
+  );
+  assert.throws(
+    () => parseMiningMaterialsDocument([]),
+    GameplayRepositoryFailure,
+  );
+});
+
+test("reads only mining materials with the caller Firebase token", async () => {
+  const requests: Array<{ input: string; init: RequestInit }> = [];
+  const responses = [
+    jsonResponse({
+      fields: {
+        mining: {
+          mapValue: {
+            fields: {
+              materials: {
+                mapValue: {
+                  fields: { dust: { integerValue: "4" } },
+                },
+              },
+            },
+          },
+        },
+      },
+    }),
+    jsonResponse({}, 404),
+  ];
+  const repository = createGameplayRepository(env, {
+    rtdbClient,
+    fetcher: async (input, init = {}) => {
+      requests.push({ input: String(input), init });
+      return responses.shift() as Response;
+    },
+  });
+  assert.deepEqual(
+    await repository.getMiningMaterials("profile-1", "firebase-token"),
+    { dust: 4, slime: 0, gum: 0, metal: 0, ice: 0 },
+  );
+  assert.deepEqual(
+    await repository.getMiningMaterials("missing", "firebase-token"),
+    { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+  );
+  const url = new URL(requests[0].input);
+  assert.equal(url.pathname.endsWith("/documents/users/profile-1"), true);
+  assert.deepEqual(url.searchParams.getAll("mask.fieldPaths"), [
+    "mining.materials",
+  ]);
+  assert.equal(
+    new Headers(requests[0].init.headers).get("Authorization"),
+    "Bearer firebase-token",
   );
 });
 

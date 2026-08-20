@@ -11,19 +11,15 @@ const functionsIndexPath = path.join(functionsDirectory, "index.js");
 const sharedDirectory = path.join(functionsDirectory, "shared");
 
 const callableExportNames = [
-  "acceptWagerProposal",
-  "cancelWagerProposal",
   "claimMatchVictoryByTimer",
   "completeXRedirectAuth",
   "createEvent",
-  "declineWagerProposal",
   "disqualifyEventMatchWinners",
   "editUsername",
   "joinEvent",
   "postponeEventStart",
   "removeEventParticipant",
   "resolveWagerOutcome",
-  "sendWagerProposal",
   "startMatchTimer",
   "syncEventState",
   "syncProfileClaim",
@@ -85,6 +81,7 @@ const expectedSharedExports = {
   "./solana": "./solana.js",
   "./timers": "./timers.js",
   "./usernames": "./usernames.js",
+  "./wagers": "./wagers.js",
   "./x-redirect": "./x-redirect.js",
 };
 
@@ -422,7 +419,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 43);
+  assert.equal(expectedExportNames.length, 39);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

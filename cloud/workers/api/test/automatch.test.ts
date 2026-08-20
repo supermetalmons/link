@@ -42,8 +42,16 @@ function repository(
     findProfileId: async () => null,
     getAutomatchProfile: async () => profile,
     getNavigationGame: async () => null,
+    getMiningMaterials: async () => ({
+      dust: 10,
+      slime: 10,
+      gum: 10,
+      metal: 10,
+      ice: 10,
+    }),
     getRtdbPath: async () => null,
     patchRtdbRoot: async () => undefined,
+    transactRtdbPath: async () => ({ committed: false, value: null }),
     ...overrides,
   };
 }
