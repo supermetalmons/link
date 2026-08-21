@@ -28,6 +28,7 @@ const MAX_RATING_TRANSACTION_ATTEMPTS = 5;
 type FirestoreDocument = {
   fields: Record<string, unknown>;
   name: string;
+  updateTime?: string;
 };
 
 export type NavigationGameDocument = {
@@ -64,7 +65,11 @@ export type RatingProfile = AutomatchProfile & {
 };
 
 export type RatingUpdateData = {
+  completedAtMs?: number;
+  eventId?: string;
+  eventOwned?: boolean;
   inviteId: string;
+  isEventMatch?: boolean;
   leaseExpiresAtMs: number;
   matchId: string;
   opponentId: string;
@@ -75,6 +80,17 @@ export type RatingUpdateData = {
   shouldUpdateFebruaryChallenge: boolean;
   startedAtMs: number;
   status: string;
+  telegramDeliveryVersion?: number | null;
+  telegramProjectionReason?: string;
+  telegramProjectionState?: string;
+  telegramProjectionUpdatedAtMs?: number;
+  telegramProjectionVersion?: number;
+  updateRatingMessage?: string;
+};
+
+export type PendingRatingTelegramProjection = {
+  operationId: string;
+  updateTime: string;
 };
 
 export type RatingLeaseInput = {
@@ -143,6 +159,24 @@ export type RatingRepository = Pick<
   tryAcquireRatingLease: (
     input: RatingLeaseInput,
   ) => Promise<RatingLeaseResult>;
+};
+
+export type RatingProjectionRepository = RatingRepository & {
+  claimRatingTelegramProjection: (
+    operationId: string,
+    updateTime: string,
+    claimedAtMs: number,
+  ) => Promise<boolean>;
+  listDueRatingTelegramProjections: (
+    updatedBeforeMs: number,
+    limit: number,
+  ) => Promise<PendingRatingTelegramProjection[]>;
+  markRatingTelegramProjection: (
+    operationId: string,
+    state: "dead" | "done",
+    updatedAtMs: number,
+    reason?: string,
+  ) => Promise<void>;
 };
 
 export type GameplayRepository = {
@@ -224,7 +258,11 @@ function parseFirestoreDocument(value: unknown): FirestoreDocument {
   if (typeof document?.name !== "string" || !fields) {
     throw new GameplayRepositoryFailure();
   }
-  return { name: document.name, fields };
+  const updateTime =
+    typeof document.updateTime === "string" && document.updateTime.trim()
+      ? document.updateTime.trim()
+      : undefined;
+  return { name: document.name, fields, ...(updateTime ? { updateTime } : {}) };
 }
 
 function parseFirestoreDocuments(value: unknown): FirestoreDocument[] {
@@ -522,7 +560,11 @@ function ratingUpdateFromDocument(
   const number = (value: unknown) =>
     typeof value === "number" && Number.isFinite(value) ? value : 0;
   return {
+    completedAtMs: number(fields.completedAtMs),
+    eventId: string(fields.eventId),
+    eventOwned: fields.eventOwned === true,
     inviteId: string(fields.inviteId),
+    isEventMatch: fields.isEventMatch === true,
     leaseExpiresAtMs: number(fields.leaseExpiresAtMs),
     matchId: string(fields.matchId),
     opponentId: string(fields.opponentId),
@@ -534,6 +576,15 @@ function ratingUpdateFromDocument(
       fields.shouldUpdateFebruaryChallenge === true,
     startedAtMs: number(fields.startedAtMs),
     status: string(fields.status),
+    telegramDeliveryVersion:
+      number(fields.telegramDeliveryVersion) > 0
+        ? number(fields.telegramDeliveryVersion)
+        : null,
+    telegramProjectionReason: string(fields.telegramProjectionReason),
+    telegramProjectionState: string(fields.telegramProjectionState),
+    telegramProjectionUpdatedAtMs: number(fields.telegramProjectionUpdatedAtMs),
+    telegramProjectionVersion: number(fields.telegramProjectionVersion),
+    updateRatingMessage: string(fields.updateRatingMessage),
   };
 }
 
@@ -993,7 +1044,7 @@ export function createRatingRepository(
     now = Date.now,
     timeoutMs = FIRESTORE_TIMEOUT_MS,
   }: RatingRepositoryDependencies = {},
-): RatingRepository {
+): RatingProjectionRepository {
   const attempts =
     Number.isInteger(maxTransactionAttempts) && maxTransactionAttempts > 0
       ? maxTransactionAttempts
@@ -1202,6 +1253,55 @@ export function createRatingRepository(
     getRtdbPath: gameplayRepository.getRtdbPath,
     patchRtdbRoot: gameplayRepository.patchRtdbRoot,
 
+    async claimRatingTelegramProjection(operationId, updateTime, claimedAtMs) {
+      if (
+        !operationId ||
+        !updateTime ||
+        !Number.isSafeInteger(claimedAtMs) ||
+        claimedAtMs < 0
+      ) {
+        throw new GameplayRepositoryFailure();
+      }
+      const url = new URL(
+        `${FIRESTORE_DOCUMENTS_ROOT}/ratingUpdates/${encodeURIComponent(operationId)}`,
+      );
+      url.searchParams.append(
+        "updateMask.fieldPaths",
+        "telegramProjectionUpdatedAtMs",
+      );
+      url.searchParams.set("currentDocument.updateTime", updateTime);
+      const response = await request(url.toString(), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fields: encodeFirestoreFields({
+            telegramProjectionUpdatedAtMs: claimedAtMs,
+          }),
+        }),
+      });
+      if (response.ok) {
+        await cancelResponseBody(response);
+        return true;
+      }
+      if (response.status === 409 || response.status === 412) {
+        await cancelResponseBody(response);
+        return false;
+      }
+      if (response.status === 400) {
+        const body = await readBoundedJsonValue(
+          response,
+          MAX_RATING_FIRESTORE_BODY_BYTES,
+          () => new GameplayRepositoryFailure(),
+        );
+        if (isPreconditionConflict(body)) {
+          return false;
+        }
+        throw new GameplayRepositoryFailure();
+      }
+      await cancelResponseBody(response);
+      throw new GameplayRepositoryFailure();
+    },
+
     async applyFebruaryChallengeReplay(playerProfileId, opponentProfileId) {
       if (
         !playerProfileId ||
@@ -1336,6 +1436,107 @@ export function createRatingRepository(
     },
 
     getRatingProfile: queryProfile,
+
+    async listDueRatingTelegramProjections(updatedBeforeMs, limit) {
+      if (
+        !Number.isSafeInteger(updatedBeforeMs) ||
+        updatedBeforeMs < 0 ||
+        !Number.isInteger(limit) ||
+        limit < 1 ||
+        limit > 100
+      ) {
+        throw new GameplayRepositoryFailure();
+      }
+      const response = await postJson(`${FIRESTORE_DOCUMENTS_ROOT}:runQuery`, {
+        structuredQuery: {
+          select: {
+            fields: [{ fieldPath: "telegramProjectionUpdatedAtMs" }],
+          },
+          from: [{ collectionId: "ratingUpdates" }],
+          where: {
+            compositeFilter: {
+              op: "AND",
+              filters: [
+                {
+                  fieldFilter: {
+                    field: { fieldPath: "telegramProjectionState" },
+                    op: "EQUAL",
+                    value: { stringValue: "pending" },
+                  },
+                },
+                {
+                  fieldFilter: {
+                    field: { fieldPath: "telegramProjectionUpdatedAtMs" },
+                    op: "LESS_THAN_OR_EQUAL",
+                    value: { integerValue: String(updatedBeforeMs) },
+                  },
+                },
+              ],
+            },
+          },
+          orderBy: [
+            {
+              field: { fieldPath: "telegramProjectionUpdatedAtMs" },
+              direction: "ASCENDING",
+            },
+          ],
+          limit,
+        },
+      });
+      return parseFirestoreDocuments(await readJson(response)).map(
+        (document) => {
+          const operationId = document.name.split("/").pop()?.trim() || "";
+          if (!operationId) {
+            throw new GameplayRepositoryFailure();
+          }
+          if (!document.updateTime) {
+            throw new GameplayRepositoryFailure();
+          }
+          return {
+            operationId,
+            updateTime: document.updateTime,
+          };
+        },
+      );
+    },
+
+    async markRatingTelegramProjection(
+      operationId,
+      state,
+      updatedAtMs,
+      reason,
+    ) {
+      if (
+        !operationId ||
+        (state !== "dead" && state !== "done") ||
+        !Number.isSafeInteger(updatedAtMs) ||
+        updatedAtMs < 0
+      ) {
+        throw new GameplayRepositoryFailure();
+      }
+      const fields = {
+        telegramProjectionState: state,
+        telegramProjectionUpdatedAtMs: updatedAtMs,
+        telegramProjectionReason: reason?.trim() || null,
+      };
+      const url = new URL(
+        `${FIRESTORE_DOCUMENTS_ROOT}/ratingUpdates/${encodeURIComponent(operationId)}`,
+      );
+      for (const fieldPath of Object.keys(fields)) {
+        url.searchParams.append("updateMask.fieldPaths", fieldPath);
+      }
+      url.searchParams.set("currentDocument.exists", "true");
+      const response = await request(url.toString(), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fields: encodeFirestoreFields(fields) }),
+      });
+      await cancelResponseBody(response);
+      if (!response.ok) {
+        throw new GameplayRepositoryFailure();
+      }
+    },
+
     readRatingUpdate: readOperation,
 
     async tryAcquireRatingLease(input) {

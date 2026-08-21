@@ -507,6 +507,19 @@ test("non-v2 rating records do not access RTDB", async () => {
   );
 });
 
+test("the retained rating trigger ignores non-event Telegram records", async () => {
+  assert.deepEqual(
+    await projectRatingUpdateRecord(makeRatingUpdate(), {
+      database: {
+        ref() {
+          throw new Error("non-event records must be handled by Cloudflare");
+        },
+      },
+    }),
+    { status: "skipped" },
+  );
+});
+
 test("rating projection retries failed Firestore events", () => {
   assert.equal(
     projectRatingTelegramUpdates.__endpoint.eventTrigger.retry,

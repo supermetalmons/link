@@ -47,7 +47,11 @@ function gameplayRepository(): GameplayRepository {
 }
 
 function document(name: string, fields: Record<string, unknown>) {
-  return { name, fields: encodeFirestoreFields(fields) };
+  return {
+    name,
+    fields: encodeFirestoreFields(fields),
+    updateTime: "2026-08-21T00:00:00Z",
+  };
 }
 
 function profileDocument(uid: string, profileId: string) {
@@ -630,4 +634,109 @@ test("reconciles an ambiguous final commit from the completed record", async () 
   );
   assert.equal(commitAttempts, 1);
   assert.equal(result.status, "replayed");
+});
+
+test("lists and completes pending Telegram rating projections", async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const repository = createRatingRepository(env, gameplayRepository(), {
+    getAccessToken: async () => "token",
+    fetcher: async (input, init = {}) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url.endsWith(":runQuery")) {
+        const body = JSON.parse(String(init.body));
+        assert.deepEqual(body.structuredQuery.select, {
+          fields: [{ fieldPath: "telegramProjectionUpdatedAtMs" }],
+        });
+        assert.deepEqual(body.structuredQuery.where, {
+          compositeFilter: {
+            op: "AND",
+            filters: [
+              {
+                fieldFilter: {
+                  field: { fieldPath: "telegramProjectionState" },
+                  op: "EQUAL",
+                  value: { stringValue: "pending" },
+                },
+              },
+              {
+                fieldFilter: {
+                  field: { fieldPath: "telegramProjectionUpdatedAtMs" },
+                  op: "LESS_THAN_OR_EQUAL",
+                  value: { integerValue: "200" },
+                },
+              },
+            ],
+          },
+        });
+        assert.deepEqual(body.structuredQuery.orderBy, [
+          {
+            field: { fieldPath: "telegramProjectionUpdatedAtMs" },
+            direction: "ASCENDING",
+          },
+        ]);
+        assert.equal(body.structuredQuery.limit, 10);
+        return Response.json([
+          {
+            document: document(operationName, {
+              telegramProjectionUpdatedAtMs: 200,
+            }),
+          },
+        ]);
+      }
+      if (url.includes("/ratingUpdates/auto_aaaaaaaaaaa__auto_aaaaaaaaaaa?")) {
+        assert.equal(init.method, "PATCH");
+        const parsed = new URL(url);
+        if (parsed.searchParams.has("currentDocument.updateTime")) {
+          assert.deepEqual(
+            parsed.searchParams.getAll("updateMask.fieldPaths"),
+            ["telegramProjectionUpdatedAtMs"],
+          );
+          assert.equal(
+            parsed.searchParams.get("currentDocument.updateTime"),
+            "2026-08-21T00:00:00Z",
+          );
+          assert.deepEqual(
+            decodeFirestoreFields(JSON.parse(String(init.body)).fields),
+            { telegramProjectionUpdatedAtMs: 250 },
+          );
+          return Response.json({});
+        }
+        assert.deepEqual(parsed.searchParams.getAll("updateMask.fieldPaths"), [
+          "telegramProjectionState",
+          "telegramProjectionUpdatedAtMs",
+          "telegramProjectionReason",
+        ]);
+        assert.equal(parsed.searchParams.get("currentDocument.exists"), "true");
+        assert.deepEqual(
+          decodeFirestoreFields(JSON.parse(String(init.body)).fields),
+          {
+            telegramProjectionState: "done",
+            telegramProjectionUpdatedAtMs: 300,
+            telegramProjectionReason: null,
+          },
+        );
+        return Response.json({});
+      }
+      assert.fail(`unexpected request ${url}`);
+    },
+  });
+  const pending = await repository.listDueRatingTelegramProjections(200, 10);
+  assert.equal(pending.length, 1);
+  assert.equal(pending[0].operationId, "auto_aaaaaaaaaaa__auto_aaaaaaaaaaa");
+  assert.equal(pending[0].updateTime, "2026-08-21T00:00:00Z");
+  assert.equal(
+    await repository.claimRatingTelegramProjection(
+      pending[0].operationId,
+      pending[0].updateTime,
+      250,
+    ),
+    true,
+  );
+  await repository.markRatingTelegramProjection(
+    pending[0].operationId,
+    "done",
+    300,
+  );
+  assert.equal(calls.length, 3);
 });

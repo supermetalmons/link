@@ -8,7 +8,10 @@ The auth, profile, leaderboard, mining, and gameplay APIs, X OAuth callback,
 dedicated Google service accounts, and encrypted Worker secret setup are
 documented in that deployment guide.
 Firebase retains auth verification/linking, the X completion callable, the
-remaining game and event functions, and the existing Firestore auth records.
+remaining game and event functions, event-progress rating projection, and the
+existing Firestore auth records. Automatch and non-event rating Telegram
+projection run in the API Worker with durable Firebase-backed pending state;
+Firebase retains the generic desired-revision and manual-recovery dispatchers.
 Username editing is owned by the API Worker; its dedicated service account and
 cutover procedure are documented in the Cloudflare deployment guide.
 
@@ -58,6 +61,13 @@ Ambiguous sends stay at `telegramMessages/{messageKey}/delivery/status = uncerta
 - `{ "requestId": "...", "action": "confirm-send-absent" }` when Telegram did not create the message.
 - `{ "requestId": "...", "action": "confirm-send-applied", "messageId": 123 }` when Telegram created it.
 - `{ "requestId": "...", "action": "abandon" }` to retain the audit record and stop delivery.
+
+Before rolling Telegram projection back to Firebase, preview and drain pending
+automatch and rating projections:
+
+`npm --prefix cloud/admin run replay:telegram-projections -- --project mons-link --dry-run`
+
+`npm --prefix cloud/admin run replay:telegram-projections -- --project mons-link --execute`
 
 The recovery dispatcher is idempotent by `requestId`. Retry-window exhaustion remains visible through `delivery/deadLetterAtMs`, and failed stale-message cleanup remains visible under `delivery/orphanedDeletes`.
 

@@ -30,7 +30,6 @@ const exportedFunctionNames = [
 const expectedReleaseFunctionBarriers = [
   ["dispatchTelegramDelivery", "dispatchTelegramManualRecovery"],
   [
-    "projectAutomatchTelegramMessages",
     "projectRatingTelegramUpdates",
     "projectEventTelegramOnCreated",
     "projectEventTelegramOnUpdated",

@@ -1,85 +1,14 @@
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
 const admin = require("../firebaseAdmin");
-const { TELEGRAM_AUTOMATCH_VERSION } = require("./automatchMessages");
 const { requestEventProgress } = require("../eventProgressTasks");
 const { runRtdbDecisionTransaction } = require("../rtdbDecisionTransaction");
-
-const normalizeString = (value) =>
-  typeof value === "string" && value.trim() !== "" ? value.trim() : "";
-
-const isEventRatingUpdate = (ratingUpdate) =>
-  ratingUpdate &&
-  (ratingUpdate.isEventMatch === true ||
-    ratingUpdate.eventOwned === true ||
-    normalizeString(ratingUpdate.eventId) !== "");
-
-const shouldProjectRatingTelegramUpdate = (ratingUpdate) =>
-  !!ratingUpdate &&
-  ratingUpdate.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION &&
-  ratingUpdate.status === "done" &&
-  !isEventRatingUpdate(ratingUpdate) &&
-  normalizeString(ratingUpdate.inviteId) !== "" &&
-  normalizeString(ratingUpdate.matchId) !== "" &&
-  normalizeString(ratingUpdate.updateRatingMessage) !== "";
-
-const shouldRequestEventRatingProgress = (ratingUpdate) =>
-  !!ratingUpdate &&
-  ratingUpdate.status === "done" &&
-  ratingUpdate.isEventMatch === true &&
-  ratingUpdate.eventOwned === true &&
-  normalizeString(ratingUpdate.eventId) !== "" &&
-  normalizeString(ratingUpdate.inviteId) !== "" &&
-  normalizeString(ratingUpdate.matchId) !== "";
-
-const mergeRatingResultFragment = (source, ratingUpdate) => {
-  if (
-    !source ||
-    source.version !== TELEGRAM_AUTOMATCH_VERSION ||
-    !shouldProjectRatingTelegramUpdate(ratingUpdate)
-  ) {
-    return { changed: false, source, reason: "skipped" };
-  }
-  const matchId = normalizeString(ratingUpdate.matchId);
-  const existingResults =
-    source.results && typeof source.results === "object" ? source.results : {};
-  if (Object.hasOwn(existingResults, matchId)) {
-    return { changed: false, source, reason: "duplicate" };
-  }
-  const completedAtMs =
-    typeof ratingUpdate.completedAtMs === "number" &&
-    Number.isFinite(ratingUpdate.completedAtMs)
-      ? Math.floor(ratingUpdate.completedAtMs)
-      : null;
-  const result = {
-    text: ratingUpdate.updateRatingMessage,
-    ...(completedAtMs === null ? {} : { completedAtMs }),
-  };
-  const currentUpdatedAtMs =
-    typeof source.updatedAtMs === "number" &&
-    Number.isFinite(source.updatedAtMs)
-      ? Math.floor(source.updatedAtMs)
-      : 0;
-  const currentGeneration =
-    Number.isInteger(source.generation) && source.generation >= 0
-      ? source.generation
-      : 0;
-  return {
-    changed: true,
-    reason: "inserted",
-    source: {
-      ...source,
-      results: {
-        ...existingResults,
-        [matchId]: result,
-      },
-      updatedAtMs:
-        completedAtMs === null
-          ? currentUpdatedAtMs
-          : Math.max(currentUpdatedAtMs, completedAtMs),
-      generation: currentGeneration + 1,
-    },
-  };
-};
+const {
+  isEventRatingUpdate,
+  mergeRatingResultFragment,
+  normalizeString,
+  shouldProjectRatingTelegramUpdate,
+  shouldRequestEventRatingProgress,
+} = require("./projectionCore");
 
 const projectRatingTelegramUpdate = async (ratingUpdate, dependencies = {}) => {
   if (!shouldProjectRatingTelegramUpdate(ratingUpdate)) {
@@ -153,7 +82,7 @@ const projectRatingUpdateRecord = async (ratingUpdate, dependencies = {}) => {
   if (shouldRequestEventRatingProgress(ratingUpdate)) {
     return requestEventRatingProgress(ratingUpdate, dependencies);
   }
-  return projectRatingTelegramUpdate(ratingUpdate, dependencies);
+  return { status: "skipped" };
 };
 
 const projectRatingTelegramUpdates = onDocumentWritten(

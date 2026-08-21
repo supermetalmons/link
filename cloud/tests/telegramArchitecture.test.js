@@ -144,7 +144,13 @@ test("a blocked Telegram client cannot delay latency-critical domain handlers", 
       filePath,
     );
     assert.equal(source.includes("telegramDeliveryFunctions"), false, filePath);
-    assert.equal(source.includes("queueTelegram"), false, filePath);
+    for (const helper of [
+      "queueTelegramSend",
+      "queueTelegramEdit",
+      "queueTelegramDelete",
+    ]) {
+      assert.equal(source.includes(helper), false, filePath);
+    }
     assert.equal(source.includes("sendTelegramMessage"), false, filePath);
     assert.equal(source.includes("editTelegramMessage"), false, filePath);
     assert.equal(source.includes("deleteTelegramMessage"), false, filePath);
@@ -219,12 +225,11 @@ test("admin credential failures include actionable ADC setup help", () => {
   assert.equal(addApplicationDefaultCredentialHelp(unrelated), unrelated);
 });
 
-test("all Telegram functions are exported", () => {
+test("all retained Firebase Telegram functions are exported", () => {
   const functionIndex = require("../functions/index");
   const exportNames = [
     "dispatchTelegramDelivery",
     "dispatchTelegramManualRecovery",
-    "projectAutomatchTelegramMessages",
     "projectRatingTelegramUpdates",
     "projectEventTelegramOnCreated",
     "projectEventTelegramOnUpdated",

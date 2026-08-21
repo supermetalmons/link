@@ -212,6 +212,9 @@ test("builds exact non-event rating, mana, and Telegram fields", () => {
   });
   assert.equal(result.ratingUpdate.didApplyRatingDelta, true);
   assert.equal(result.ratingUpdate.telegramDeliveryVersion, 2);
+  assert.equal(result.ratingUpdate.telegramProjectionVersion, 1);
+  assert.equal(result.ratingUpdate.telegramProjectionState, "pending");
+  assert.equal(result.ratingUpdate.telegramProjectionUpdatedAtMs, nowMs);
   assert.equal(result.ratingUpdate.status, "done");
   assert.match(String(result.ratingUpdate.updateRatingMessage), /Alice/);
   assert.match(String(result.ratingUpdate.updateRatingMessage), /Bob/);
@@ -242,6 +245,8 @@ test("event ratings preserve win and mana without applying a rating delta", () =
   assert.equal(built.ratingUpdate.eventOwned, true);
   assert.equal(built.ratingUpdate.eventId, "event-1");
   assert.equal(built.ratingUpdate.telegramDeliveryVersion, null);
+  assert.equal(built.ratingUpdate.telegramProjectionState, undefined);
+  assert.equal(built.ratingUpdate.telegramProjectionVersion, undefined);
   assert.equal(built.repairData.shouldUpdateFebruaryChallenge, false);
   assert.deepEqual(built.playerUpdate, {
     nonce: 5,
@@ -370,9 +375,13 @@ test("resolves a normally completed game through mons-rules", () => {
 
 test("updates once and persists exact repair markers", async () => {
   const state = createRepository();
+  const projectionTasks: unknown[] = [];
   assert.deepEqual(
     await updateRatings(identity, request, state.repository, {
       createOwnerToken: () => "owner-token",
+      enqueueTelegramProjection: async (task) => {
+        projectionTasks.push(task);
+      },
       now: () => Date.UTC(2026, 7, 21),
     }),
     { ok: true },
@@ -381,6 +390,12 @@ test("updates once and persists exact repair markers", async () => {
   assert.equal(state.getAttempts(), 1);
   assert.equal(state.getFinalPlan()?.ratingUpdate.status, "done");
   assert.equal(state.getOperationReads(), 1);
+  assert.deepEqual(projectionTasks, [
+    {
+      kind: "rating-telegram-projection",
+      operationId: `${request.inviteId}__${request.matchId}`,
+    },
+  ]);
   assert.deepEqual(state.patches, [
     {
       [`matchTimerStarts/${request.playerId}/${request.matchId}`]: null,
@@ -388,6 +403,27 @@ test("updates once and persists exact repair markers", async () => {
       [`invites/${request.inviteId}/matchesRatingUpdates/${request.matchId}`]: true,
     },
   ]);
+});
+
+test("rating queue failures preserve the committed response and pending state", async () => {
+  const state = createRepository();
+  const failures: string[] = [];
+  assert.deepEqual(
+    await updateRatings(identity, request, state.repository, {
+      createOwnerToken: () => "owner-token",
+      enqueueTelegramProjection: async () => {
+        throw new Error("queue-unavailable");
+      },
+      logProjectionFailure: (task) => failures.push(task.operationId),
+      now: () => Date.UTC(2026, 7, 21),
+    }),
+    { ok: true },
+  );
+  assert.equal(
+    state.getFinalPlan()?.ratingUpdate.telegramProjectionState,
+    "pending",
+  );
+  assert.deepEqual(failures, [`${request.inviteId}__${request.matchId}`]);
 });
 
 test("repairs completed replays without reacquiring or finalizing", async () => {

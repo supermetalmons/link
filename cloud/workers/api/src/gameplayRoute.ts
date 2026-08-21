@@ -25,6 +25,7 @@ import {
 } from "@mons/shared/ratings";
 import {
   TELEGRAM_AUTOMATCH_VERSION,
+  buildAutomatchTelegramProjectionOutboxUpdates,
   buildAutomatchTelegramLifecycleUpdates,
 } from "../../../functions/telegram/automatchSource.js";
 import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
@@ -42,7 +43,11 @@ import {
   FIREBASE_RTDB_SERVER_TIMESTAMP,
   firebaseRtdbIncrement,
 } from "./firebaseRtdb.ts";
-import { MAX_FIREBASE_KEY_BYTES, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import {
+  MAX_FIREBASE_KEY_BYTES,
+  isSafeFirebaseKey,
+  isSafeFirestoreDocumentId,
+} from "./firebaseKeys.ts";
 import {
   createGameplayRepository,
   type GameplayRepository,
@@ -50,7 +55,12 @@ import {
   type RatingRepository,
 } from "./gameplayRepository.ts";
 import { readBoundedJson } from "./http.ts";
-import { startAutomatch, type AutomatchDependencies } from "./automatch.ts";
+import {
+  createAutomatchProjectionTask,
+  enqueueAutomatchProjection,
+  startAutomatch,
+  type AutomatchDependencies,
+} from "./automatch.ts";
 import {
   claimMatchVictoryByTimer,
   enforceMatchTimerClaimRateLimit,
@@ -73,9 +83,9 @@ import {
   updateRatings,
   type RatingUpdateDependencies,
 } from "./ratingUpdate.ts";
+import type { TelegramProjectionTask } from "./telegramProjectionTasks.ts";
 
 const MAX_NAVIGATION_DELETE_ATTEMPTS = 3;
-const MAX_FIRESTORE_DOCUMENT_ID_BYTES = 1_500;
 
 export const GAMEPLAY_PATHS = new Set([
   "/automatch/cancel",
@@ -245,6 +255,7 @@ async function resolveQueuedAutomatch(
 export async function cancelAutomatch(
   identity: FirebaseIdentity,
   repository: GameplayRepository,
+  dependencies: AutomatchDependencies = {},
 ): Promise<CancelAutomatchResponse> {
   const profileId = await resolveProfileId(identity, repository);
   const queued = await resolveQueuedAutomatch(
@@ -263,6 +274,9 @@ export async function cancelAutomatch(
   }
   const usesTelegramDeliveryV2 =
     queued.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION;
+  const projectionTask = usesTelegramDeliveryV2
+    ? createAutomatchProjectionTask(inviteId, dependencies)
+    : null;
   const canceledUpdates: Record<string, unknown> = {
     [`automatch/${inviteId}`]: null,
     [`invites/${inviteId}/automatchStateHint`]: "canceled",
@@ -278,8 +292,19 @@ export async function cancelAutomatch(
         generation: firebaseRtdbIncrement(1),
       }),
     );
+    Object.assign(
+      canceledUpdates,
+      buildAutomatchTelegramProjectionOutboxUpdates({
+        inviteId,
+        requestId: projectionTask?.requestId || "",
+        timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
+      }),
+    );
   }
   await repository.patchRtdbRoot(canceledUpdates);
+  if (projectionTask) {
+    await enqueueAutomatchProjection(projectionTask, dependencies);
+  }
   if (
     !normalizeString(
       await repository.getRtdbPath(`invites/${inviteId}/guestId`),
@@ -291,6 +316,9 @@ export async function cancelAutomatch(
     [`invites/${inviteId}/automatchStateHint`]: "matched",
     [`invites/${inviteId}/automatchCanceledAt`]: null,
   };
+  const matchedProjectionTask = usesTelegramDeliveryV2
+    ? createAutomatchProjectionTask(inviteId, dependencies)
+    : null;
   if (usesTelegramDeliveryV2) {
     Object.assign(
       matchedUpdates,
@@ -301,8 +329,19 @@ export async function cancelAutomatch(
         generation: firebaseRtdbIncrement(1),
       }),
     );
+    Object.assign(
+      matchedUpdates,
+      buildAutomatchTelegramProjectionOutboxUpdates({
+        inviteId,
+        requestId: matchedProjectionTask?.requestId || "",
+        timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
+      }),
+    );
   }
   await repository.patchRtdbRoot(matchedUpdates);
+  if (matchedProjectionTask) {
+    await enqueueAutomatchProjection(matchedProjectionTask, dependencies);
+  }
   return { ok: false };
 }
 
@@ -499,8 +538,7 @@ async function readGameplayBody(
       !isSafeFirebaseKey(opponentId) ||
       !isSafeFirebaseKey(inviteId) ||
       !isSafeFirebaseKey(matchId) ||
-      new TextEncoder().encode(`${inviteId}__${matchId}`).byteLength >
-        MAX_FIRESTORE_DOCUMENT_ID_BYTES
+      !isSafeFirestoreDocumentId(`${inviteId}__${matchId}`)
     ) {
       throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
     }
@@ -548,9 +586,39 @@ export async function handleGameplayRoute(
     }
     const body = await readGameplayBody(request, pathname);
     const repository = dependencies.repository || createGameplayRepository(env);
+    const defaultEnqueueTelegramProjection = async (
+      task: TelegramProjectionTask,
+    ) => {
+      ctx.waitUntil(
+        env.TELEGRAM_PROJECTION_QUEUE.send(task).catch(() => {
+          console.error(
+            JSON.stringify({
+              event: "telegram_projection_enqueue_failed",
+              kind: task.kind,
+            }),
+          );
+        }),
+      );
+    };
+    const automatchDependencies: AutomatchDependencies = {
+      ...dependencies.automatch,
+      enqueueTelegramProjection:
+        dependencies.automatch?.enqueueTelegramProjection ||
+        defaultEnqueueTelegramProjection,
+    };
+    const ratingDependencies: RatingUpdateDependencies = {
+      ...dependencies.rating,
+      enqueueTelegramProjection:
+        dependencies.rating?.enqueueTelegramProjection ||
+        defaultEnqueueTelegramProjection,
+    };
     let response;
     if (pathname === "/automatch/cancel") {
-      response = await cancelAutomatch(identity, repository);
+      response = await cancelAutomatch(
+        identity,
+        repository,
+        automatchDependencies,
+      );
     } else if (pathname === "/automatch/start") {
       if (!isStartAutomatchRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
@@ -559,7 +627,7 @@ export async function handleGameplayRoute(
         identity,
         body,
         repository,
-        dependencies.automatch,
+        automatchDependencies,
       );
     } else if (pathname === "/matches/timer/start") {
       if (!isStartMatchTimerRequest(body)) {
@@ -597,7 +665,7 @@ export async function handleGameplayRoute(
         body,
         dependencies.ratingRepository ||
           createRatingRepository(env, repository),
-        dependencies.rating,
+        ratingDependencies,
       );
     } else if (pathname === "/wagers/proposals/send") {
       if (!isWagerProposalSendRequest(body)) {

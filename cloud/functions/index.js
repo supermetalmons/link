@@ -44,9 +44,6 @@ const {
   dispatchTelegramDelivery,
   dispatchTelegramManualRecovery,
 } = require("./telegramDeliveryFunctions");
-const {
-  projectAutomatchTelegramMessages,
-} = require("./automatchTelegramMessages");
 const { projectRatingTelegramUpdates } = require("./ratingTelegramProjector");
 
 exports.verifySolanaAddress = verifySolanaAddress;
@@ -85,5 +82,4 @@ exports.projectEventTelegramOnCreated = onEventTelegramCreated;
 exports.projectEventTelegramOnUpdated = onEventTelegramUpdated;
 exports.dispatchTelegramDelivery = dispatchTelegramDelivery;
 exports.dispatchTelegramManualRecovery = dispatchTelegramManualRecovery;
-exports.projectAutomatchTelegramMessages = projectAutomatchTelegramMessages;
 exports.projectRatingTelegramUpdates = projectRatingTelegramUpdates;

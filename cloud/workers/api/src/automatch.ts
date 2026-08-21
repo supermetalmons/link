@@ -16,6 +16,7 @@ import {
 import * as monsRules from "mons-rules";
 import {
   TELEGRAM_AUTOMATCH_VERSION,
+  buildAutomatchTelegramProjectionOutboxUpdates,
   buildMatchedAutomatchTelegramUpdates,
   buildPendingAutomatchTelegramSource,
   getAutomatchTelegramSourcePath,
@@ -33,6 +34,10 @@ import type {
   AutomatchProfile,
   GameplayRepository,
 } from "./gameplayRepository.ts";
+import type {
+  AutomatchTelegramProjectionTask,
+  TelegramProjectionTask,
+} from "./telegramProjectionTasks.ts";
 
 const MAX_AUTOMATCH_RETRY_COUNT = 3;
 const AUTOMATCH_TOTAL_TIMEOUT_MS = 20_000;
@@ -41,7 +46,10 @@ const AUTOMATCH_WAITING_EMOJI_ID = "5355002036817525409";
 const gameVariantHelpers = createGameVariantHelpers(monsRules);
 
 type AutomatchDependencies = {
+  createProjectionRequestId?: () => string;
+  enqueueTelegramProjection?: (task: TelegramProjectionTask) => Promise<void>;
   logProfileFailure?: () => void;
+  logProjectionFailure?: (task: AutomatchTelegramProjectionTask) => void;
   random?: RandomSource;
   signal?: AbortSignal;
 };
@@ -100,6 +108,42 @@ function secureRandom(): number {
   return values[0] / 0x1_0000_0000;
 }
 
+export function createAutomatchProjectionTask(
+  inviteId: string,
+  dependencies: AutomatchDependencies,
+): AutomatchTelegramProjectionTask {
+  return {
+    kind: "automatch-telegram-projection",
+    inviteId,
+    requestId: (
+      dependencies.createProjectionRequestId || (() => crypto.randomUUID())
+    )(),
+  };
+}
+
+export async function enqueueAutomatchProjection(
+  task: AutomatchTelegramProjectionTask,
+  dependencies: AutomatchDependencies,
+): Promise<void> {
+  if (!dependencies.enqueueTelegramProjection) {
+    return;
+  }
+  try {
+    await dependencies.enqueueTelegramProjection(task);
+  } catch {
+    (
+      dependencies.logProjectionFailure ||
+      ((failedTask) =>
+        console.error(
+          JSON.stringify({
+            event: "automatch_telegram_projection_enqueue_failed",
+            inviteId: failedTask.inviteId,
+          }),
+        ))
+    )(task);
+  }
+}
+
 async function readProfile(
   identity: FirebaseIdentity,
   request: StartAutomatchRequest,
@@ -144,6 +188,7 @@ async function attemptAutomatch(
   random: RandomSource,
   signal: AbortSignal,
   retryCount: number,
+  dependencies: AutomatchDependencies,
 ): Promise<StartAutomatchResponse> {
   if (signal.aborted) {
     throw new Error("automatch-operation-timeout");
@@ -193,6 +238,10 @@ async function attemptAutomatch(
       mode: "pending",
       matchedImmediately: false,
     };
+    const projectionTask = createAutomatchProjectionTask(
+      inviteId,
+      dependencies,
+    );
     await repository.patchRtdbRoot(
       {
         [`players/${identity.uid}/matches/${inviteId}`]: match,
@@ -227,9 +276,15 @@ async function attemptAutomatch(
             canceledText,
             timestamp,
           }),
+        ...buildAutomatchTelegramProjectionOutboxUpdates({
+          inviteId,
+          requestId: projectionTask.requestId,
+          timestamp,
+        }),
       },
       signal,
     );
+    await enqueueAutomatchProjection(projectionTask, dependencies);
     return response;
   }
 
@@ -286,6 +341,9 @@ async function attemptAutomatch(
     [`players/${identity.uid}/matches/${queued.inviteId}`]: match,
   };
   const matchedResponse = matchedAutomatchResponse(queued.inviteId);
+  const projectionTask = usesTelegramDeliveryV2
+    ? createAutomatchProjectionTask(queued.inviteId, dependencies)
+    : null;
   if (usesTelegramDeliveryV2) {
     Object.assign(
       updates,
@@ -294,6 +352,14 @@ async function attemptAutomatch(
         matchedText,
         timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
         generation: firebaseRtdbIncrement(1),
+      }),
+    );
+    Object.assign(
+      updates,
+      buildAutomatchTelegramProjectionOutboxUpdates({
+        inviteId: queued.inviteId,
+        requestId: projectionTask?.requestId || "",
+        timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
       }),
     );
   }
@@ -305,15 +371,22 @@ async function attemptAutomatch(
         signal,
       ),
     );
+  let committed = false;
   try {
     await repository.patchRtdbRoot(updates, signal);
+    committed = true;
   } catch (patchFailure) {
     try {
       if ((await readGuestId()) === identity.uid) {
-        return matchedResponse;
+        committed = true;
       }
     } catch {}
-    throw patchFailure;
+    if (!committed) {
+      throw patchFailure;
+    }
+  }
+  if (projectionTask) {
+    await enqueueAutomatchProjection(projectionTask, dependencies);
   }
   if ((await readGuestId()) === identity.uid) {
     return matchedResponse;
@@ -326,6 +399,7 @@ async function attemptAutomatch(
     random,
     signal,
     retryCount + 1,
+    dependencies,
   );
 }
 
@@ -359,6 +433,7 @@ export async function startAutomatch(
     dependencies.random || secureRandom,
     signal,
     0,
+    dependencies,
   );
 }
 

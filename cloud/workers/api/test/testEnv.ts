@@ -17,6 +17,7 @@ export const TELEGRAM_TEST_ENV = {
   TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET: "test-announcement-secret",
   TELEGRAM_BOT_TOKEN: "test-telegram-token",
   TELEGRAM_DELIVERY_QUEUE: queue,
+  TELEGRAM_PROJECTION_QUEUE: queue,
   TELEGRAM_EXTRA_CHAT_ID: "test-telegram-chat",
   TELEGRAM_FIREBASE_SERVICE_ACCOUNT_EMAIL:
     "telegram@example.iam.gserviceaccount.com",

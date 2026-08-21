@@ -13,4 +13,6 @@ test("the Worker entrypoint remains a thin exact compatibility facade", () => {
   ]);
   assert.strictEqual(entrypoint.handleRequest, handleRequest);
   assert.strictEqual(entrypoint.extractIdFromJsonUri, extractIdFromJsonUri);
+  assert.equal(typeof entrypoint.default.queue, "function");
+  assert.equal(typeof entrypoint.default.scheduled, "function");
 });

@@ -1,4 +1,5 @@
 export const TELEGRAM_AUTOMATCH_ROOT: "telegramAutomatches";
+export const TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT: "telegramProjectionOutbox/automatch";
 export const TELEGRAM_AUTOMATCH_VERSION: 2;
 
 export interface AutomatchTelegramSourceInput {
@@ -7,6 +8,14 @@ export interface AutomatchTelegramSourceInput {
 }
 
 export function getAutomatchTelegramSourcePath(inviteId: string): string;
+export function getAutomatchTelegramProjectionOutboxPath(
+  inviteId: string,
+): string;
+export function buildAutomatchTelegramProjectionOutboxUpdates(input: {
+  inviteId: string;
+  requestId: string;
+  timestamp: unknown;
+}): Record<string, unknown>;
 export function buildPendingAutomatchTelegramSource(
   input: AutomatchTelegramSourceInput & {
     waitingText: string;

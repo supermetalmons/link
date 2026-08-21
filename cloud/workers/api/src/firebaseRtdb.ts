@@ -34,9 +34,11 @@ export type FirebaseRtdbCredentials = {
 };
 
 export type FirebaseRtdbQuery = {
+  endAt?: string | number | boolean | null;
   equalTo?: string | number | boolean | null;
   limitToFirst?: number;
   orderBy?: string;
+  startAt?: string | number | boolean | null;
 };
 
 export type FirebaseRtdbTransactionResult = {
@@ -106,6 +108,12 @@ function queryDatabaseUrl(
   }
   if (query.equalTo !== undefined) {
     url.searchParams.set("equalTo", JSON.stringify(query.equalTo));
+  }
+  if (query.startAt !== undefined) {
+    url.searchParams.set("startAt", JSON.stringify(query.startAt));
+  }
+  if (query.endAt !== undefined) {
+    url.searchParams.set("endAt", JSON.stringify(query.endAt));
   }
   if (query.limitToFirst !== undefined) {
     if (!Number.isInteger(query.limitToFirst) || query.limitToFirst < 1) {

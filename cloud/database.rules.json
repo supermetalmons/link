@@ -62,6 +62,11 @@
         }
       }
     },
+    "telegramProjectionOutbox": {
+      "automatch": {
+        ".indexOn": ["updatedAtMs"]
+      }
+    },
     "invites": {
       "$inviteId": {
         ".read": "(data.child('hostId').exists() && data.child('guestId').exists()) || (auth != null && (!data.child('password').exists() || auth.uid === data.child('hostId').val() || (data.child('hostId').exists() && ((auth.token.profileId != null && root.child('players').child(data.child('hostId').val()).child('profile').val() === auth.token.profileId) || (root.child('players').child(auth.uid).child('profile').exists() && root.child('players').child(data.child('hostId').val()).child('profile').val() === root.child('players').child(auth.uid).child('profile').val())))))",

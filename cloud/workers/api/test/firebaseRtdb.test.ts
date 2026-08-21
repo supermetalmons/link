@@ -79,6 +79,15 @@ test("encodes exact RTDB queries and silent multipath server-value updates", asy
     ),
     { invite: { uid: "firebase-uid" } },
   );
+  assert.deepEqual(
+    await client.getPath("automatch", {
+      orderBy: "updatedAtMs",
+      startAt: 0,
+      endAt: 1_000,
+      limitToFirst: 100,
+    }),
+    { invite: { uid: "firebase-uid" } },
+  );
   await client.patchRoot(
     {
       "automatch/invite": null,
@@ -93,11 +102,16 @@ test("encodes exact RTDB queries and silent multipath server-value updates", asy
   assert.equal(queryUrl.searchParams.get("orderBy"), '"uid"');
   assert.equal(queryUrl.searchParams.get("equalTo"), '"firebase-uid"');
   assert.equal(queryUrl.searchParams.get("limitToFirst"), "1");
-  const patchUrl = new URL(String(requests[1].input));
+  const rangeUrl = new URL(String(requests[1].input));
+  assert.equal(rangeUrl.searchParams.get("orderBy"), '"updatedAtMs"');
+  assert.equal(rangeUrl.searchParams.get("startAt"), "0");
+  assert.equal(rangeUrl.searchParams.get("endAt"), "1000");
+  assert.equal(rangeUrl.searchParams.get("limitToFirst"), "100");
+  const patchUrl = new URL(String(requests[2].input));
   assert.equal(patchUrl.pathname, "/.json");
   assert.equal(patchUrl.searchParams.get("print"), "silent");
-  assert.equal(requests[1].init?.method, "PATCH");
-  assert.deepEqual(JSON.parse(String(requests[1].init?.body)), {
+  assert.equal(requests[2].init?.method, "PATCH");
+  assert.deepEqual(JSON.parse(String(requests[2].init?.body)), {
     "automatch/invite": null,
     "invites/invite/canceledAt": { ".sv": "timestamp" },
     "telegramAutomatches/invite/generation": {
@@ -105,12 +119,13 @@ test("encodes exact RTDB queries and silent multipath server-value updates", asy
     },
   });
   assert.equal(
-    new Headers(requests[1].init?.headers).get("Authorization"),
+    new Headers(requests[2].init?.headers).get("Authorization"),
     "Bearer access-token",
   );
   controller.abort();
   assert.equal(requests[0].init?.signal?.aborted, true);
-  assert.equal(requests[1].init?.signal?.aborted, true);
+  assert.equal(requests[1].init?.signal?.aborted, false);
+  assert.equal(requests[2].init?.signal?.aborted, true);
   assert.throws(() => firebaseRtdbIncrement(Number.NaN), TypeError);
   await assert.rejects(
     () => client.getPath("automatch", { limitToFirst: 0 }),

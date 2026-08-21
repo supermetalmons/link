@@ -78,6 +78,7 @@ test("normalizes the first bounded queue result", () => {
 
 test("creates a pending automatch with profile metadata and exact roots", async () => {
   let updates: Record<string, unknown> | null = null;
+  const projectionTasks: unknown[] = [];
   const result = await startAutomatch(
     identity,
     request(),
@@ -91,7 +92,13 @@ test("creates a pending automatch with profile metadata and exact roots", async 
         updates = value;
       },
     }),
-    { random: () => 0 },
+    {
+      createProjectionRequestId: () => "request-1",
+      enqueueTelegramProjection: async (task) => {
+        projectionTasks.push(task);
+      },
+      random: () => 0,
+    },
   );
   assert.deepEqual(result, {
     ok: true,
@@ -99,12 +106,20 @@ test("creates a pending automatch with profile metadata and exact roots", async 
     mode: "pending",
     matchedImmediately: false,
   });
+  assert.deepEqual(projectionTasks, [
+    {
+      kind: "automatch-telegram-projection",
+      inviteId: "auto_aaaaaaaaaaa",
+      requestId: "request-1",
+    },
+  ]);
   assert.ok(updates);
   assert.deepEqual(Object.keys(updates).sort(), [
     "automatch/auto_aaaaaaaaaaa",
     "invites/auto_aaaaaaaaaaa",
     "players/guest-uid/matches/auto_aaaaaaaaaaa",
     "telegramAutomatches/auto_aaaaaaaaaaa",
+    "telegramProjectionOutbox/automatch/auto_aaaaaaaaaaa",
   ]);
   const queue = updates["automatch/auto_aaaaaaaaaaa"] as Record<
     string,
@@ -119,6 +134,15 @@ test("creates a pending automatch with profile metadata and exact roots", async 
     string,
     unknown
   >;
+  assert.deepEqual(
+    updates["telegramProjectionOutbox/automatch/auto_aaaaaaaaaaa"],
+    {
+      schemaVersion: 1,
+      status: "pending",
+      requestId: "request-1",
+      updatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+    },
+  );
   assert.equal(queue.emojiId, 9);
   assert.equal(queue.profileId, "guest-profile");
   assert.equal(queue.password, "aaaaaaaaaaaaaaa");
@@ -160,7 +184,11 @@ test("uses client metadata when profile lookup fails", async () => {
         updates = value;
       },
     }),
-    { logProfileFailure: () => logs.push("failed"), random: () => 0 },
+    {
+      createProjectionRequestId: () => "request-1",
+      logProfileFailure: () => logs.push("failed"),
+      random: () => 0,
+    },
   );
   assert.equal(result.ok, true);
   assert.deepEqual(logs, ["failed"]);
@@ -177,6 +205,40 @@ test("uses client metadata when profile lookup fails", async () => {
   assert.equal(queue.emojiId, 3);
   assert.equal(match.emojiId, 3);
   assert.equal(match.aura, "rainbow");
+});
+
+test("automatch queue failures preserve the committed response and outbox", async () => {
+  let updates: Record<string, unknown> = {};
+  const failures: string[] = [];
+  const result = await startAutomatch(
+    identity,
+    request(),
+    repository({
+      getRtdbPath: async () => null,
+      patchRtdbRoot: async (value) => {
+        updates = value;
+      },
+    }),
+    {
+      createProjectionRequestId: () => "request-1",
+      enqueueTelegramProjection: async () => {
+        throw new Error("queue-unavailable");
+      },
+      logProjectionFailure: (task) => failures.push(task.inviteId),
+      random: () => 0,
+    },
+  );
+  assert.equal(result.ok, true);
+  assert.deepEqual(failures, ["auto_aaaaaaaaaaa"]);
+  assert.deepEqual(
+    updates["telegramProjectionOutbox/automatch/auto_aaaaaaaaaaa"],
+    {
+      schemaVersion: 1,
+      status: "pending",
+      requestId: "request-1",
+      updatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+    },
+  );
 });
 
 test("uses the verified profile claim when profile lookup fails", async () => {
@@ -275,6 +337,7 @@ test("matches a different v2 candidate and verifies the persisted guest", async 
         updates = value;
       },
     }),
+    { createProjectionRequestId: () => "request-1" },
   );
   assert.deepEqual(result, {
     ok: true,
@@ -311,6 +374,15 @@ test("matches a different v2 candidate and verifies the persisted guest", async 
   assert.match(
     String(updates["telegramAutomatches/auto_existing/matchedText"]),
     /Bob \(1400\).*Alice \(1512\)/,
+  );
+  assert.deepEqual(
+    updates["telegramProjectionOutbox/automatch/auto_existing"],
+    {
+      schemaVersion: 1,
+      status: "pending",
+      requestId: "request-1",
+      updatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+    },
   );
 });
 

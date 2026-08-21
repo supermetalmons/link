@@ -34,6 +34,7 @@ type WranglerConfig = {
   vars?: Record<string, string>;
   ratelimits?: Array<Record<string, unknown>>;
   queues?: Record<string, unknown>;
+  triggers?: Record<string, unknown>;
   observability?: Record<string, unknown>;
 };
 
@@ -133,6 +134,10 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
         binding: "TELEGRAM_DELIVERY_QUEUE",
         queue: "mons-link-telegram-delivery",
       },
+      {
+        binding: "TELEGRAM_PROJECTION_QUEUE",
+        queue: "mons-link-telegram-projection",
+      },
     ],
     consumers: [
       {
@@ -143,8 +148,17 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
         dead_letter_queue: "mons-link-telegram-delivery-dlq",
         max_concurrency: 1,
       },
+      {
+        queue: "mons-link-telegram-projection",
+        max_batch_size: 5,
+        max_batch_timeout: 1,
+        max_retries: 20,
+        dead_letter_queue: "mons-link-telegram-projection-dlq",
+        max_concurrency: 5,
+      },
     ],
   });
+  assert.deepEqual(config.triggers, { crons: ["*/5 * * * *"] });
   assert.deepEqual(config.observability, {
     enabled: true,
     logs: {
@@ -267,6 +281,7 @@ test("package manifests preserve public scripts and deployment command vectors",
     logs: "firebase functions:log",
   });
   assert.deepEqual(adminPackage.scripts, {
+    "replay:telegram-projections": "node replayTelegramProjections.js",
     "requeue:telegram": "node requeueTelegramDelivery.js",
     "smoke:telegram": "node smokeTelegramDelivery.js",
     start: "node listAddresses.js",

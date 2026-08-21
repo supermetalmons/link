@@ -22,7 +22,6 @@ const NON_FUNCTION_DEPLOY_TARGETS = Object.freeze([
 const FULL_RELEASE_FUNCTION_BARRIERS = Object.freeze([
   Object.freeze(["dispatchTelegramDelivery", "dispatchTelegramManualRecovery"]),
   Object.freeze([
-    "projectAutomatchTelegramMessages",
     "projectRatingTelegramUpdates",
     "projectEventTelegramOnCreated",
     "projectEventTelegramOnUpdated",

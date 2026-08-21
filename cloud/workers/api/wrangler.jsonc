@@ -62,6 +62,10 @@
         "binding": "TELEGRAM_DELIVERY_QUEUE",
         "queue": "mons-link-telegram-delivery",
       },
+      {
+        "binding": "TELEGRAM_PROJECTION_QUEUE",
+        "queue": "mons-link-telegram-projection",
+      },
     ],
     "consumers": [
       {
@@ -72,7 +76,18 @@
         "dead_letter_queue": "mons-link-telegram-delivery-dlq",
         "max_concurrency": 1,
       },
+      {
+        "queue": "mons-link-telegram-projection",
+        "max_batch_size": 5,
+        "max_batch_timeout": 1,
+        "max_retries": 20,
+        "dead_letter_queue": "mons-link-telegram-projection-dlq",
+        "max_concurrency": 5,
+      },
     ],
+  },
+  "triggers": {
+    "crons": ["*/5 * * * *"],
   },
   "observability": {
     "enabled": true,

@@ -34,7 +34,6 @@ const eventExportNames = [
   "dispatchTelegramDelivery",
   "dispatchTelegramManualRecovery",
   "processEventProgressFallback",
-  "projectAutomatchTelegramMessages",
   "projectEventTelegramOnCreated",
   "projectEventTelegramOnUpdated",
   "projectProfileEventPrizesOnMergeTargetWritten",
@@ -333,20 +332,6 @@ Object.assign(expectedEndpointContracts, {
       secrets: ["TELEGRAM_QUEUE_BRIDGE_SECRET"],
     },
   ),
-  projectAutomatchTelegramMessages: runtimeContract(
-    {
-      type: "event",
-      eventType: "google.firebase.database.ref.v1.written",
-      pathPatterns: { ref: "telegramAutomatches/{inviteId}", instance: "*" },
-      retry: true,
-    },
-    {
-      availableMemoryMb: 256,
-      maxInstances: 10,
-      concurrency: 20,
-      cpu: 1,
-    },
-  ),
   projectRatingTelegramUpdates: runtimeContract(
     {
       type: "event",
@@ -414,7 +399,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 34);
+  assert.equal(expectedExportNames.length, 33);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

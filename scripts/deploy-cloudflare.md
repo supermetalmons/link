@@ -106,9 +106,9 @@ configuration is intentionally changed, review it separately and apply it with
 `npm run deploy:api:triggers -- --token-file /path/to/cloudflare-token`, or set
 `CLOUDFLARE_API_TOKEN` in the invoking shell and omit `--token-file`.
 
-The same trigger command applies the reviewed `mons-link-telegram-delivery`
-Queue consumer configuration. Provisioning, secret setup, hard cutover,
-recovery, and rollback are documented in the
+The same trigger command applies the reviewed Telegram delivery and projection
+Queue consumers plus the projection recovery schedule. Provisioning, secret
+setup, hard cutover, recovery, and rollback are documented in the
 [Telegram delivery migration guide](migrate-telegram-delivery.md).
 
 ## Event prize announcement API
@@ -523,9 +523,12 @@ keeps concurrent clients and retries from applying the same match twice.
 
 The Worker commits both profile changes and the completed rating record in one
 Firestore transaction. It then repairs the RTDB completion and timer markers.
-The existing `projectRatingTelegramUpdates` Firebase trigger remains deployed
-and continues handling Telegram projection and event progress from the
-completed Firestore record.
+The Worker stores non-event Telegram projection state in the completed rating
+record and wakes the dedicated projection Queue. Its five-minute recovery sweep
+re-enqueues pending records after an immediate Queue failure. The retained
+`projectRatingTelegramUpdates` Firebase trigger handles only event progress;
+the generic Firebase desired-revision dispatcher continues forwarding completed
+`telegramMessages` projections to the Cloudflare delivery Queue.
 
 The dedicated `mons-link-rating-api` service account uses the
 `monsLinkRatingMutation` custom role, conditioned on the default Firestore

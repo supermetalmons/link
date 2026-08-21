@@ -26,6 +26,7 @@ import {
   getDisplayNameFromAddress,
   getTelegramEmojiTag,
 } from "../../../functions/telegramDisplay.js";
+import { TELEGRAM_AUTOMATCH_VERSION } from "../../../functions/telegram/automatchSource.js";
 import { AuthApiFailure } from "./authErrors.ts";
 import type { FirebaseIdentity } from "./firebaseAuth.ts";
 import type {
@@ -34,6 +35,11 @@ import type {
   RatingRepairData,
   RatingRepository,
 } from "./gameplayRepository.ts";
+import {
+  TELEGRAM_PROJECTION_SCHEMA_VERSION,
+  type RatingTelegramProjectionTask,
+  type TelegramProjectionTask,
+} from "./telegramProjectionTasks.ts";
 
 const RATING_UPDATE_LEASE_MS = 30_000;
 const FEB_CHALLENGE_START_UTC = Date.UTC(2026, 1, 1);
@@ -65,6 +71,8 @@ type RatingResult = "gg" | "win";
 
 export type RatingUpdateDependencies = {
   createOwnerToken?: (uid: string) => string;
+  enqueueTelegramProjection?: (task: TelegramProjectionTask) => Promise<void>;
+  logProjectionFailure?: (task: RatingTelegramProjectionTask) => void;
   now?: () => number;
 };
 
@@ -171,6 +179,33 @@ function selectScoreGame(
 
 function hasMoves(record: RatingMatchRecord): boolean {
   return record.flatMovesString.length > 0;
+}
+
+async function enqueueRatingProjection(
+  operationId: string,
+  dependencies: RatingUpdateDependencies,
+): Promise<void> {
+  if (!dependencies.enqueueTelegramProjection) {
+    return;
+  }
+  const task: RatingTelegramProjectionTask = {
+    kind: "rating-telegram-projection",
+    operationId,
+  };
+  try {
+    await dependencies.enqueueTelegramProjection(task);
+  } catch {
+    (
+      dependencies.logProjectionFailure ||
+      ((failedTask) =>
+        console.error(
+          JSON.stringify({
+            event: "rating_telegram_projection_enqueue_failed",
+            operationId: failedTask.operationId,
+          }),
+        ))
+    )(task);
+  }
 }
 
 function emptyProfile(): RatingProfile {
@@ -352,8 +387,9 @@ function buildRatingPlan({
     nowMs >= FEB_CHALLENGE_START_UTC &&
     nowMs < FEB_CHALLENGE_END_UTC;
   const telegramDeliveryVersion =
-    !eventMetadata.isEventMatch && invite.telegramDeliveryVersion === 2
-      ? 2
+    !eventMetadata.isEventMatch &&
+    invite.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION
+      ? TELEGRAM_AUTOMATCH_VERSION
       : null;
   return {
     playerUpdate,
@@ -383,6 +419,14 @@ function buildRatingPlan({
       opponentProfileId: resolvedOpponent.profileId,
       updateRatingMessage,
       telegramDeliveryVersion,
+      ...(telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION
+        ? {
+            telegramProjectionVersion: TELEGRAM_PROJECTION_SCHEMA_VERSION,
+            telegramProjectionState: "pending",
+            telegramProjectionUpdatedAtMs: nowMs,
+            telegramProjectionReason: null,
+          }
+        : {}),
       ...eventMetadata,
       updatedAtMs: nowMs,
       completedAtMs: nowMs,
@@ -462,6 +506,9 @@ export async function updateRatings(
   const existing = await repository.readRatingUpdate(operationId);
   if (completed === true || existing?.status === "done") {
     await repairRatingSideEffects(request, existing, repository);
+    if (existing?.telegramProjectionState === "pending") {
+      await enqueueRatingProjection(operationId, dependencies);
+    }
     return { ok: true };
   }
   const [playerValue, opponentValue] = await Promise.all([
@@ -491,6 +538,9 @@ export async function updateRatings(
   });
   if (lease.status === "done") {
     await repairRatingSideEffects(request, lease.data, repository);
+    if (lease.data?.telegramProjectionState === "pending") {
+      await enqueueRatingProjection(operationId, dependencies);
+    }
     return { ok: true };
   }
   if (lease.status !== "acquired") {
@@ -523,6 +573,12 @@ export async function updateRatings(
     return { ok: true, skipped: true };
   }
   await repairRatingSideEffects(request, finalized.data, repository);
+  if (
+    invite.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION &&
+    !getRatingEventMetadata(invite).isEventMatch
+  ) {
+    await enqueueRatingProjection(operationId, dependencies);
+  }
   return { ok: true };
 }
 

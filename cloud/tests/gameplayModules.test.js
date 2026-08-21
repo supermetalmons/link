@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const databaseRules = require("../database.rules.json");
+const firestoreIndexes = require("../firestore.indexes.json");
 const {
   buildOrderedMatchSubmissions,
   buildOrderedMoveHistory,
@@ -15,6 +16,19 @@ test("automatch REST queries retain their RTDB indexes", () => {
     "uid",
     "profileId",
   ]);
+  assert.deepEqual(
+    databaseRules.rules.telegramProjectionOutbox.automatch[".indexOn"],
+    ["updatedAtMs"],
+  );
+  assert.ok(
+    firestoreIndexes.indexes.some(
+      (index) =>
+        index.collectionGroup === "ratingUpdates" &&
+        index.queryScope === "COLLECTION" &&
+        index.fields[0]?.fieldPath === "telegramProjectionState" &&
+        index.fields[1]?.fieldPath === "telegramProjectionUpdatedAtMs",
+    ),
+  );
 });
 
 test("player reads expose gameplay state without exposing wager operations", () => {

@@ -72,9 +72,13 @@ function applyTransaction(
     : { committed: true, decision: decision.decision, value: decision.value };
 }
 
-function context(): Pick<ExecutionContext, "waitUntil"> {
+function context(
+  promises: Promise<unknown>[] = [],
+): Pick<ExecutionContext, "waitUntil"> {
   return {
-    waitUntil() {},
+    waitUntil(promise) {
+      promises.push(promise);
+    },
   };
 }
 
@@ -160,6 +164,7 @@ test("cancels the newest UID automatch with exact v2 multipath updates", async (
         patches.push(updates);
       },
     }),
+    { createProjectionRequestId: () => "request-canceled" },
   );
   assert.deepEqual(result, { ok: true });
   assert.equal(guestReads, 2);
@@ -173,6 +178,12 @@ test("cancels the newest UID automatch with exact v2 multipath updates", async (
       "telegramAutomatches/auto-newer/generation": {
         ".sv": { increment: 1 },
       },
+      "telegramProjectionOutbox/automatch/auto-newer": {
+        schemaVersion: 1,
+        status: "pending",
+        requestId: "request-canceled",
+        updatedAtMs: { ".sv": "timestamp" },
+      },
     },
   ]);
 });
@@ -180,6 +191,7 @@ test("cancels the newest UID automatch with exact v2 multipath updates", async (
 test("uses profile fallback and restores matched state after a guest race", async () => {
   const patches: Array<Record<string, unknown>> = [];
   let guestReads = 0;
+  const requestIds = ["request-canceled", "request-matched"];
   const result = await cancelAutomatch(
     identity,
     repository({
@@ -211,6 +223,9 @@ test("uses profile fallback and restores matched state after a guest race", asyn
         patches.push(updates);
       },
     }),
+    {
+      createProjectionRequestId: () => requestIds.shift() || "unexpected",
+    },
   );
   assert.deepEqual(result, { ok: false });
   assert.equal(patches.length, 2);
@@ -221,6 +236,12 @@ test("uses profile fallback and restores matched state after a guest race", asyn
     "telegramAutomatches/auto-race/updatedAtMs": { ".sv": "timestamp" },
     "telegramAutomatches/auto-race/generation": {
       ".sv": { increment: 1 },
+    },
+    "telegramProjectionOutbox/automatch/auto-race": {
+      schemaVersion: 1,
+      status: "pending",
+      requestId: "request-matched",
+      updatedAtMs: { ".sv": "timestamp" },
     },
   });
 });
@@ -520,6 +541,47 @@ test("routes authenticated CORS and rejects methods before authentication", asyn
     mode: "pending",
     matchedImmediately: false,
   });
+});
+
+test("committed gameplay does not wait for the projection Queue", async () => {
+  let releaseQueue: (() => void) | undefined;
+  const blockedQueue = new Promise<void>((resolve) => {
+    releaseQueue = resolve;
+  });
+  const background: Promise<unknown>[] = [];
+  const response = await handleGameplayRoute(
+    request("/automatch/start", {
+      body: { emojiId: 7, aura: "rainbow" },
+    }),
+    {
+      ...env,
+      TELEGRAM_PROJECTION_QUEUE: {
+        ...env.TELEGRAM_PROJECTION_QUEUE,
+        send: async () => {
+          await blockedQueue;
+          return {
+            metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+          };
+        },
+      },
+    },
+    context(background),
+    {
+      automatch: {
+        createProjectionRequestId: () => "request-1",
+        random: () => 0,
+      },
+      repository: repository({
+        getAutomatchProfile: async () => null,
+        getRtdbPath: async () => null,
+      }),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(background.length, 1);
+  releaseQueue?.();
+  await Promise.all(background);
 });
 
 test("routes exact authenticated rating updates without a new rate limit", async () => {

@@ -9,6 +9,14 @@ import {
   type TelegramTaskPayload,
   type WagerSettlementRetryTask,
 } from "./telegramQueue.ts";
+import {
+  handleTelegramProjectionQueue,
+  handleTelegramProjectionSweep,
+} from "./telegramProjection.ts";
+import {
+  TELEGRAM_PROJECTION_QUEUE_NAME,
+  type TelegramProjectionTask,
+} from "./telegramProjectionTasks.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
 export type { ProviderFetch } from "./provider.ts";
@@ -31,8 +39,13 @@ export function handleFetch(
 
 export default {
   fetch: handleFetch,
-  queue: handleTelegramQueue,
+  queue(batch, env) {
+    return batch.queue === TELEGRAM_PROJECTION_QUEUE_NAME
+      ? handleTelegramProjectionQueue(batch, env)
+      : handleTelegramQueue(batch, env);
+  },
+  scheduled: handleTelegramProjectionSweep,
 } satisfies ExportedHandler<
   Env,
-  TelegramTaskPayload | WagerSettlementRetryTask
+  TelegramTaskPayload | WagerSettlementRetryTask | TelegramProjectionTask
 >;
