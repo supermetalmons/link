@@ -1,4 +1,8 @@
-const { isMaterialName, normalizeCount } = require("./mining");
+const {
+  isMaterialName,
+  isMiningSnapshot,
+  normalizeCount,
+} = require("./mining");
 
 const WAGER_PROPOSAL_REMOVAL_FAILURE_REASONS = Object.freeze([
   "invite-not-found",
@@ -22,6 +26,18 @@ const WAGER_PROPOSAL_ACCEPT_FAILURE_REASONS = Object.freeze([
   "proposal-missing",
   "insufficient-materials",
   "proposal-unavailable",
+]);
+
+const WAGER_OUTCOME_RESOLVE_FAILURE_REASONS = Object.freeze([
+  "invite-not-found",
+  "missing-opponent",
+  "profile-not-found",
+  "match-not-found",
+]);
+
+const WAGER_OUTCOME_RESOLVE_SUCCESS_REASONS = Object.freeze([
+  "no-wager",
+  "already-resolved",
 ]);
 
 const isRecord = (value) =>
@@ -54,6 +70,14 @@ const isWagerProposalSendRequest = (value) =>
   typeof value.count === "number" &&
   Number.isFinite(value.count) &&
   normalizeCount(value.count) > 0;
+
+const isWagerOutcomeResolveRequest = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, ["inviteId", "matchId"]) &&
+  typeof value.inviteId === "string" &&
+  value.inviteId.trim() !== "" &&
+  typeof value.matchId === "string" &&
+  value.matchId.trim() !== "";
 
 const isWagerAgreement = (value) =>
   isRecord(value) &&
@@ -133,11 +157,38 @@ const isWagerProposalAcceptResponse = (value) => {
   );
 };
 
+const isWagerOutcomeResolveResponse = (value) => {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (value.ok === true) {
+    if (value.mining !== null && !isMiningSnapshot(value.mining)) {
+      return false;
+    }
+    if (hasExactKeys(value, ["ok", "mining"])) {
+      return true;
+    }
+    return (
+      hasExactKeys(value, ["ok", "reason", "mining"]) &&
+      WAGER_OUTCOME_RESOLVE_SUCCESS_REASONS.includes(value.reason)
+    );
+  }
+  return (
+    value.ok === false &&
+    hasExactKeys(value, ["ok", "reason"]) &&
+    WAGER_OUTCOME_RESOLVE_FAILURE_REASONS.includes(value.reason)
+  );
+};
+
 module.exports = {
+  WAGER_OUTCOME_RESOLVE_FAILURE_REASONS,
+  WAGER_OUTCOME_RESOLVE_SUCCESS_REASONS,
   WAGER_PROPOSAL_ACCEPT_FAILURE_REASONS,
   WAGER_PROPOSAL_REMOVAL_FAILURE_REASONS,
   WAGER_PROPOSAL_SEND_FAILURE_REASONS,
   isWagerAgreement,
+  isWagerOutcomeResolveRequest,
+  isWagerOutcomeResolveResponse,
   isWagerProposalAcceptRequest: isWagerProposalRemovalRequest,
   isWagerProposalAcceptResponse,
   isWagerProposalRemovalRequest,

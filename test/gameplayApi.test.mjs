@@ -24,6 +24,7 @@ const {
   claimMatchVictoryByTimerViaApi,
   declineWagerProposalViaApi,
   removeNavigationGameViaApi,
+  resolveWagerOutcomeViaApi,
   sendWagerProposalViaApi,
   startAutomatchViaApi,
   startMatchTimerViaApi,
@@ -42,6 +43,7 @@ const {
   isStartMatchTimerResponse,
 } = await import("@mons/shared/timers");
 const {
+  isWagerOutcomeResolveResponse,
   isWagerProposalAcceptResponse,
   isWagerProposalSendRequest,
   isWagerProposalSendResponse,
@@ -93,6 +95,13 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       },
     },
     { ok: true, count: 2 },
+    {
+      ok: true,
+      mining: {
+        lastRockDate: "2026-08-20",
+        materials: { dust: 4, slime: 3, gum: 2, metal: 1, ice: 0 },
+      },
+    },
   ];
   globalThis.fetch = async (input, init) => {
     calls.push({ input: String(input), init });
@@ -196,6 +205,19 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
     { ok: true, count: 2 },
   );
   assert.deepEqual(
+    await resolveWagerOutcomeViaApi(
+      { inviteId: "invite-1", matchId: "match-1" },
+      async () => "firebase-token",
+    ),
+    {
+      ok: true,
+      mining: {
+        lastRockDate: "2026-08-20",
+        materials: { dust: 4, slime: 3, gum: 2, metal: 1, ice: 0 },
+      },
+    },
+  );
+  assert.deepEqual(
     calls.map((call) => call.input),
     [
       "https://api.mons.link/automatch/start",
@@ -207,6 +229,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       "https://api.mons.link/wagers/proposals/decline",
       "https://api.mons.link/wagers/proposals/send",
       "https://api.mons.link/wagers/proposals/accept",
+      "https://api.mons.link/wagers/outcomes/resolve",
     ],
   );
   assert.deepEqual(
@@ -235,6 +258,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
         material: "dust",
         count: 4,
       },
+      { inviteId: "invite-1", matchId: "match-1" },
       { inviteId: "invite-1", matchId: "match-1" },
     ],
   );
@@ -465,6 +489,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
     isWagerProposalAcceptResponse({ ok: false, reason: "proposal-missing" }),
     true,
   );
+  assert.equal(isWagerOutcomeResolveResponse({ ok: true, mining: null }), true);
 });
 
 test("refreshes the Firebase token once after a 401", async () => {
@@ -545,6 +570,7 @@ test("rejects malformed and oversized gameplay responses", async () => {
     jsonResponse({ ok: true, debug: {} }),
     jsonResponse({ ok: true, count: 1, debug: {} }),
     jsonResponse({ ok: true, count: 1, agreed: { material: "dust" } }),
+    jsonResponse({ ok: true, mining: null, debug: {} }),
     new Response("{}", {
       headers: { "Content-Length": String(64 * 1024 + 1) },
     }),
@@ -605,6 +631,13 @@ test("rejects malformed and oversized gameplay responses", async () => {
         material: "dust",
         count: 1,
       },
+      async () => "token",
+    ),
+    GameplayApiError,
+  );
+  await assert.rejects(
+    resolveWagerOutcomeViaApi(
+      { inviteId: "invite", matchId: "match" },
       async () => "token",
     ),
     GameplayApiError,
@@ -675,6 +708,7 @@ test("connection no longer references the migrated Firebase callables", () => {
   assert.doesNotMatch(source, /httpsCallable\([^)]*declineWagerProposal/);
   assert.doesNotMatch(source, /httpsCallable\([^)]*sendWagerProposal/);
   assert.doesNotMatch(source, /httpsCallable\([^)]*acceptWagerProposal/);
+  assert.doesNotMatch(source, /["']resolveWagerOutcome["']/);
   assert.doesNotMatch(source, /["']startMatchTimer["']/);
   assert.doesNotMatch(source, /["']claimMatchVictoryByTimer["']/);
   assert.match(source, /cancelAutomatchViaApi/);
@@ -682,6 +716,11 @@ test("connection no longer references the migrated Firebase callables", () => {
   assert.match(source, /declineWagerProposalViaApi/);
   assert.match(source, /sendWagerProposalViaApi/);
   assert.match(source, /acceptWagerProposalViaApi/);
+  assert.match(source, /resolveWagerOutcomeViaApi/);
+  assert.match(source, /optimistic: true/);
+  assert.match(source, /responseData\.reason === "no-wager"/);
+  assert.doesNotMatch(source, /previousFrozenMaterials/);
+  assert.doesNotMatch(source, /previousMining/);
   assert.match(source, /startAutomatchViaApi/);
   assert.match(source, /removeNavigationGameViaApi/);
   assert.match(source, /startMatchTimerViaApi/);

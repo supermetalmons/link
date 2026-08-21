@@ -10,7 +10,6 @@ const { unlinkAuthMethod } = require("./unlinkAuthMethod");
 const { syncProfileClaim } = require("./syncProfileClaim");
 const { updateRatings } = require("./updateRatings");
 const { withdrawEventPrize } = require("./eventPrizeWithdrawal");
-const { resolveWagerOutcome } = require("./resolveWagerOutcome");
 const {
   createEvent,
   joinEvent,
@@ -59,7 +58,6 @@ exports.unlinkAuthMethod = unlinkAuthMethod;
 exports.syncProfileClaim = syncProfileClaim;
 exports.updateRatings = updateRatings;
 exports.withdrawEventPrize = withdrawEventPrize;
-exports.resolveWagerOutcome = resolveWagerOutcome;
 exports.createEvent = createEvent;
 exports.joinEvent = joinEvent;
 exports.postponeEventStart = postponeEventStart;

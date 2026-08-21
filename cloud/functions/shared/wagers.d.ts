@@ -1,4 +1,36 @@
-import type { MiningMaterialName } from "./mining";
+import type { MiningMaterialName, MiningSnapshot } from "./mining";
+
+export const WAGER_OUTCOME_RESOLVE_FAILURE_REASONS: readonly [
+  "invite-not-found",
+  "missing-opponent",
+  "profile-not-found",
+  "match-not-found",
+];
+
+export type WagerOutcomeResolveFailureReason =
+  (typeof WAGER_OUTCOME_RESOLVE_FAILURE_REASONS)[number];
+
+export const WAGER_OUTCOME_RESOLVE_SUCCESS_REASONS: readonly [
+  "no-wager",
+  "already-resolved",
+];
+
+export type WagerOutcomeResolveSuccessReason =
+  (typeof WAGER_OUTCOME_RESOLVE_SUCCESS_REASONS)[number];
+
+export interface WagerOutcomeResolveRequest {
+  inviteId: string;
+  matchId: string;
+}
+
+export type WagerOutcomeResolveResponse =
+  | { ok: true; mining: MiningSnapshot | null }
+  | {
+      ok: true;
+      reason: WagerOutcomeResolveSuccessReason;
+      mining: MiningSnapshot | null;
+    }
+  | { ok: false; reason: WagerOutcomeResolveFailureReason };
 
 export const WAGER_PROPOSAL_REMOVAL_FAILURE_REASONS: readonly [
   "invite-not-found",
@@ -70,6 +102,12 @@ export type WagerProposalAcceptResponse =
 export function isWagerProposalRemovalRequest(
   value: unknown,
 ): value is WagerProposalRemovalRequest;
+export function isWagerOutcomeResolveRequest(
+  value: unknown,
+): value is WagerOutcomeResolveRequest;
+export function isWagerOutcomeResolveResponse(
+  value: unknown,
+): value is WagerOutcomeResolveResponse;
 export function isWagerProposalRemovalResponse(
   value: unknown,
 ): value is WagerProposalRemovalResponse;

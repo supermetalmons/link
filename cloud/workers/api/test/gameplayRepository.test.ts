@@ -6,6 +6,7 @@ import {
   MAX_FIRESTORE_BODY_BYTES,
   parseAutomatchProfileQuery,
   parseMiningMaterialsDocument,
+  parseMiningSnapshotDocument,
   parseNavigationGame,
   parseProfileQuery,
 } from "../src/gameplayRepository.ts";
@@ -191,6 +192,177 @@ test("parses only the profile and navigation fields used by gameplay", () => {
     () => parseMiningMaterialsDocument([]),
     GameplayRepositoryFailure,
   );
+  assert.deepEqual(
+    parseMiningSnapshotDocument({
+      fields: {
+        mining: {
+          mapValue: {
+            fields: {
+              lastRockDate: { stringValue: "2026-08-20" },
+              materials: {
+                mapValue: {
+                  fields: { dust: { integerValue: "4" } },
+                },
+              },
+            },
+          },
+        },
+      },
+    }),
+    {
+      lastRockDate: "2026-08-20",
+      materials: { dust: 4, slime: 0, gum: 0, metal: 0, ice: 0 },
+    },
+  );
+});
+
+test("applies one atomic idempotent settlement transfer", async () => {
+  const requests: Array<{ input: string; init: RequestInit }> = [];
+  const fingerprint = "settlement-fingerprint";
+  const responses = [
+    jsonResponse({}, 404),
+    jsonResponse({}),
+    jsonResponse({ fields: { fingerprint: { stringValue: fingerprint } } }),
+  ];
+  const repository = createGameplayRepository(env, {
+    rtdbClient,
+    getAccessToken: async (_env, options) => {
+      assert.equal(options?.credentials, undefined);
+      return "firestore-access-token";
+    },
+    fetcher: async (input, init = {}) => {
+      requests.push({ input: String(input), init });
+      return responses.shift() as Response;
+    },
+  });
+  const input = {
+    operationId: "operation-id",
+    fingerprint,
+    winnerProfileId: "winner",
+    loserProfileId: "loser",
+    material: "dust" as const,
+    count: 2,
+    appliedAtMs: 100,
+  };
+  assert.equal(await repository.applyWagerTransferOnce(input), "applied");
+  assert.equal(await repository.applyWagerTransferOnce(input), "replayed");
+  assert.equal(requests.length, 3);
+  for (const entry of requests) {
+    assert.equal(
+      new Headers(entry.init.headers).get("Authorization"),
+      "Bearer firestore-access-token",
+    );
+  }
+  assert.equal(requests[1].input.endsWith("/documents:commit"), true);
+  assert.deepEqual(JSON.parse(String(requests[1].init.body)), {
+    writes: [
+      {
+        update: {
+          name: "projects/mons-link/databases/(default)/documents/wagerSettlements/operation-id",
+          fields: {
+            appliedAtMs: { integerValue: "100" },
+            count: { integerValue: "2" },
+            fingerprint: { stringValue: fingerprint },
+            loserProfileId: { stringValue: "loser" },
+            material: { stringValue: "dust" },
+            operationId: { stringValue: "operation-id" },
+            winnerProfileId: { stringValue: "winner" },
+          },
+        },
+        currentDocument: { exists: false },
+      },
+      {
+        transform: {
+          document:
+            "projects/mons-link/databases/(default)/documents/users/winner",
+          fieldTransforms: [
+            {
+              fieldPath: "mining.materials.dust",
+              increment: { integerValue: "2" },
+            },
+          ],
+        },
+        currentDocument: { exists: true },
+      },
+      {
+        transform: {
+          document:
+            "projects/mons-link/databases/(default)/documents/users/loser",
+          fieldTransforms: [
+            {
+              fieldPath: "mining.materials.dust",
+              increment: { integerValue: "-2" },
+            },
+          ],
+        },
+        currentDocument: { exists: true },
+      },
+    ],
+  });
+});
+
+test("reconciles an ambiguous settlement commit from its ledger", async () => {
+  const fingerprint = "ambiguous-fingerprint";
+  let committed = false;
+  const repository = createGameplayRepository(env, {
+    rtdbClient,
+    getAccessToken: async () => "firestore-access-token",
+    fetcher: async (input) => {
+      const url = String(input);
+      if (url.endsWith("/documents:commit")) {
+        committed = true;
+        throw new Error("ambiguous-commit");
+      }
+      return committed
+        ? jsonResponse({
+            fields: { fingerprint: { stringValue: fingerprint } },
+          })
+        : jsonResponse({}, 404);
+    },
+  });
+  assert.equal(
+    await repository.applyWagerTransferOnce({
+      operationId: "ambiguous-operation",
+      fingerprint,
+      winnerProfileId: "winner",
+      loserProfileId: "loser",
+      material: "dust",
+      count: 1,
+      appliedAtMs: 100,
+    }),
+    "replayed",
+  );
+});
+
+test("reads settlement mining with Firestore credentials", async () => {
+  const repository = createGameplayRepository(env, {
+    rtdbClient,
+    getAccessToken: async () => "firestore-access-token",
+    fetcher: async (_input, init = {}) => {
+      assert.equal(
+        new Headers(init.headers).get("Authorization"),
+        "Bearer firestore-access-token",
+      );
+      return jsonResponse({
+        fields: {
+          mining: {
+            mapValue: {
+              fields: {
+                lastRockDate: { stringValue: "2026-08-20" },
+                materials: {
+                  mapValue: { fields: { dust: { integerValue: "3" } } },
+                },
+              },
+            },
+          },
+        },
+      });
+    },
+  });
+  assert.deepEqual(await repository.getMiningSnapshot("profile-1"), {
+    lastRockDate: "2026-08-20",
+    materials: { dust: 3, slime: 0, gum: 0, metal: 0, ice: 0 },
+  });
 });
 
 test("reads only mining materials with the caller Firebase token", async () => {

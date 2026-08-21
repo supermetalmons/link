@@ -9,6 +9,7 @@ import {
   type StartAutomatchResponse,
 } from "@mons/shared/navigation";
 import {
+  isWagerOutcomeResolveResponse,
   isWagerProposalAcceptResponse,
   isWagerProposalRemovalResponse,
   isWagerProposalSendResponse,
@@ -18,6 +19,8 @@ import {
   type WagerProposalRemovalResponse,
   type WagerProposalSendRequest,
   type WagerProposalSendResponse,
+  type WagerOutcomeResolveRequest,
+  type WagerOutcomeResolveResponse,
 } from "@mons/shared/wagers";
 import {
   isClaimMatchVictoryByTimerResponse,
@@ -290,5 +293,17 @@ export function acceptWagerProposalViaApi(
     request,
     tokenProvider,
     isWagerProposalAcceptResponse,
+  );
+}
+
+export function resolveWagerOutcomeViaApi(
+  request: WagerOutcomeResolveRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<WagerOutcomeResolveResponse> {
+  return gameplayMutation(
+    "/wagers/outcomes/resolve",
+    request,
+    tokenProvider,
+    isWagerOutcomeResolveResponse,
   );
 }

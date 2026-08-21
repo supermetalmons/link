@@ -7,6 +7,7 @@ import { handleTelegramBridge } from "./telegramBridge.ts";
 import {
   handleTelegramQueue,
   type TelegramTaskPayload,
+  type WagerSettlementRetryTask,
 } from "./telegramQueue.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
@@ -31,4 +32,7 @@ export function handleFetch(
 export default {
   fetch: handleFetch,
   queue: handleTelegramQueue,
-} satisfies ExportedHandler<Env, TelegramTaskPayload>;
+} satisfies ExportedHandler<
+  Env,
+  TelegramTaskPayload | WagerSettlementRetryTask
+>;

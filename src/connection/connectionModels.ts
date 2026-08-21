@@ -253,6 +253,7 @@ type WagerResolution = {
   count: number;
   total?: number;
   resolvedAt?: number;
+  optimistic?: boolean;
 };
 
 export type MatchWagerState = {

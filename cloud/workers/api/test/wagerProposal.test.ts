@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  isWagerOutcomeResolveRequest,
+  isWagerOutcomeResolveResponse,
   isWagerProposalAcceptResponse,
   isWagerProposalRemovalRequest,
   isWagerProposalRemovalResponse,
@@ -26,6 +28,7 @@ function repository(
   overrides: Partial<GameplayRepository> = {},
 ): GameplayRepository {
   return {
+    applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     findProfileId: async (uid) => `profile-${uid}`,
     getAutomatchProfile: async () => null,
@@ -37,6 +40,7 @@ function repository(
       metal: 10,
       ice: 10,
     }),
+    getMiningSnapshot: async () => null,
     getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
     patchRtdbRoot: async () => undefined,
     transactRtdbPath: async () => ({ committed: false, value: null }),
@@ -84,6 +88,54 @@ function materialsOnly(value: unknown) {
 }
 
 test("wager contracts require exact request and response shapes", () => {
+  assert.equal(
+    isWagerOutcomeResolveRequest({ inviteId: "invite", matchId: "match" }),
+    true,
+  );
+  assert.equal(
+    isWagerOutcomeResolveRequest({
+      inviteId: "invite",
+      matchId: "match",
+      playerId: "host",
+    }),
+    false,
+  );
+  assert.equal(
+    isWagerOutcomeResolveResponse({
+      ok: true,
+      mining: {
+        lastRockDate: null,
+        materials: {
+          dust: 1,
+          slime: 0,
+          gum: 0,
+          metal: 0,
+          ice: 0,
+        },
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    isWagerOutcomeResolveResponse({
+      ok: true,
+      reason: "already-resolved",
+      mining: null,
+    }),
+    true,
+  );
+  assert.equal(
+    isWagerOutcomeResolveResponse({ ok: false, reason: "match-not-found" }),
+    true,
+  );
+  assert.equal(
+    isWagerOutcomeResolveResponse({
+      ok: false,
+      reason: "match-not-found",
+      debug: {},
+    }),
+    false,
+  );
   assert.equal(
     isWagerProposalRemovalRequest({ inviteId: "invite", matchId: "match" }),
     true,

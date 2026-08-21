@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
+import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import {
   handleTelegramQueueMessage,
   infrastructureRetryDelaySeconds,
   logicalDelaySeconds,
+  parseWagerSettlementRetryTask,
 } from "../src/telegramQueue.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
@@ -56,6 +58,14 @@ function queueMessage(body: unknown, attempts = 1) {
 }
 
 const unusedRepository = {} as TelegramRepository;
+const unusedGameplayRepository = {} as GameplayRepository;
+
+const wagerTask = {
+  kind: "wager-settlement" as const,
+  inviteId: "invite-1",
+  matchId: "invite-1",
+  operationId: "a".repeat(64),
+};
 
 test("acknowledges processed tasks and preserves one-second pacing", async () => {
   const queued = queueMessage(task);
@@ -159,4 +169,46 @@ test("calculates bounded logical and infrastructure delays", () => {
   assert.equal(infrastructureRetryDelaySeconds(1), 1);
   assert.equal(infrastructureRetryDelaySeconds(7), 60);
   assert.equal(infrastructureRetryDelaySeconds(100), 60);
+});
+
+test("validates and processes durable wager settlement retries", async () => {
+  assert.deepEqual(parseWagerSettlementRetryTask(wagerTask), wagerTask);
+  assert.equal(
+    parseWagerSettlementRetryTask({ ...wagerTask, extra: true }),
+    null,
+  );
+  const queued = queueMessage(wagerTask);
+  const resumed: unknown[] = [];
+  await handleTelegramQueueMessage(
+    queued.message,
+    envWithQueue(TELEGRAM_TEST_ENV.TELEGRAM_DELIVERY_QUEUE.send),
+    {
+      createGameplay: () => unusedGameplayRepository,
+      logger: { error() {}, info() {} },
+      resumeSettlement: async (input, repository) => {
+        resumed.push(input, repository);
+        return "completed";
+      },
+    },
+  );
+  assert.equal(queued.acknowledgements(), 1);
+  assert.deepEqual(queued.retries, []);
+  assert.deepEqual(resumed, [wagerTask, unusedGameplayRepository]);
+});
+
+test("retries failed durable wager settlements", async () => {
+  const queued = queueMessage(wagerTask, 3);
+  await handleTelegramQueueMessage(
+    queued.message,
+    envWithQueue(TELEGRAM_TEST_ENV.TELEGRAM_DELIVERY_QUEUE.send),
+    {
+      createGameplay: () => unusedGameplayRepository,
+      logger: { error() {}, info() {} },
+      resumeSettlement: async () => {
+        throw new Error("temporary");
+      },
+    },
+  );
+  assert.equal(queued.acknowledgements(), 0);
+  assert.deepEqual(queued.retries, [{ delaySeconds: 4 }]);
 });

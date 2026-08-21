@@ -112,6 +112,7 @@ import {
   claimMatchVictoryByTimerViaApi,
   declineWagerProposalViaApi,
   removeNavigationGameViaApi,
+  resolveWagerOutcomeViaApi,
   sendWagerProposalViaApi,
   startAutomatchViaApi,
   startMatchTimerViaApi,
@@ -164,6 +165,7 @@ import type {
   ClaimMatchVictoryByTimerResponse,
   StartMatchTimerResponse,
 } from "@mons/shared/timers";
+import type { WagerOutcomeResolveResponse } from "@mons/shared/wagers";
 import {
   beginAuthIntentViaApi,
   beginXRedirectAuthViaApi,
@@ -1614,76 +1616,59 @@ class Connection {
     if (!state) {
       return false;
     }
-    const resolved = state.resolved ?? null;
     const agreed = state.agreed ?? null;
-    let material: MiningMaterialName | null = null;
-    let count = 0;
-    let winnerId: string | null = null;
-    let loserId: string | null = null;
-    if (resolved && resolved.material) {
-      const resolvedCount = Number(resolved.count) || 0;
-      if (resolvedCount <= 0) {
-        return false;
-      }
-      material = resolved.material;
-      count = Math.max(0, Math.round(resolvedCount));
-      winnerId = resolved.winnerId || null;
-      loserId = resolved.loserId || null;
-    } else if (agreed && agreed.material) {
-      if (typeof isWin !== "boolean") {
-        return false;
-      }
-      const agreedCount =
-        agreed.count ??
-        (agreed.total ? Math.max(0, Math.round(agreed.total / 2)) : 0);
-      if (!agreedCount) {
-        return false;
-      }
-      const opponentId = this.getOpponentId(writableContext.actorUid);
-      if (!opponentId) {
-        return false;
-      }
-      material = agreed.material;
-      count = Math.max(0, Math.round(agreedCount));
-      winnerId = isWin ? writableContext.actorUid : opponentId;
-      loserId = isWin ? opponentId : writableContext.actorUid;
-      const resolvedState: MatchWagerState = {
-        ...(state ?? {}),
-        proposals: undefined,
-        resolved: {
-          winnerId,
-          loserId,
-          material,
-          count,
-          total: count * 2,
-          resolvedAt: Date.now(),
-        },
-      };
-      this.setLocalWagerState(resolvedState);
-    }
-    if (!material || !count || !winnerId || !loserId) {
+    if (state.resolved || !agreed?.material || typeof isWin !== "boolean") {
       return false;
     }
-    const myId = writableContext.actorUid;
-    if (myId !== winnerId && myId !== loserId) {
+    const rawCount =
+      agreed.count ??
+      (agreed.total ? Math.max(0, Math.round(agreed.total / 2)) : 0);
+    const count = Math.max(0, Math.round(rawCount));
+    const opponentId = this.getOpponentId(writableContext.actorUid);
+    if (!count || !opponentId) {
       return false;
     }
-    const delta = myId === winnerId ? count : -count;
-    applyFrozenMaterialsDelta({ [material]: -count });
-    if (delta !== 0) {
-      const snapshot = rocksMiningService.getSnapshot();
-      const currentMaterials = snapshot.materials;
-      const nextMaterials = {
-        ...currentMaterials,
-        [material]: Math.max(0, (currentMaterials[material] ?? 0) + delta),
-      };
-      rocksMiningService.setFromServer(
-        { ...snapshot, materials: nextMaterials },
-        { persist: true },
-      );
-    }
+    const winnerId = isWin ? writableContext.actorUid : opponentId;
+    const loserId = isWin ? opponentId : writableContext.actorUid;
+    this.setLocalWagerState({
+      ...state,
+      proposals: undefined,
+      resolved: {
+        winnerId,
+        loserId,
+        material: agreed.material,
+        count,
+        total: count * 2,
+        resolvedAt: Date.now(),
+        optimistic: true,
+      },
+    });
     this.optimisticResolvedMatchIds.add(matchId);
     return true;
+  }
+
+  private restoreOptimisticWagerResolution(
+    matchId: string,
+    previousState: MatchWagerState | null,
+    isActive: () => boolean,
+  ): void {
+    let restored = false;
+    const wagers = this.latestInvite?.wagers;
+    if (wagers?.[matchId]?.resolved?.optimistic) {
+      if (previousState) {
+        wagers[matchId] = previousState;
+      } else {
+        delete wagers[matchId];
+      }
+      restored = true;
+    }
+    if (isActive() && getWagerState()?.resolved?.optimistic) {
+      setWagerState(matchId, previousState);
+      restored = true;
+    }
+    if (restored) {
+      this.optimisticResolvedMatchIds.delete(matchId);
+    }
   }
 
   public isAutomatch(): boolean {
@@ -3640,11 +3625,12 @@ class Connection {
   public async resolveWagerOutcome(isWin?: boolean): Promise<any> {
     const sessionGuard = this.createSessionGuard();
     const profileIdAtRequest = storage.getProfileId("");
+    let restoreOptimisticState = (_state?: MatchWagerState | null) => {};
     try {
       await this.ensureAuthenticated();
       const writableContext = this.requireWritableContext(
         undefined,
-        "resolveWagerOutcome",
+        "wagerOutcomeResolve",
       );
       if (!writableContext) {
         return { ok: false };
@@ -3653,28 +3639,44 @@ class Connection {
       if (!opponentId) {
         return { ok: false };
       }
-      this.applyOptimisticWagerResolution(isWin);
+      const inviteId = writableContext.inviteId;
+      const matchId = writableContext.matchId;
+      const matchGuard = this.createMatchContextGuard(inviteId, matchId);
+      const previousWagerState = this.cloneWagerState(getWagerState());
+      const optimisticApplied = this.applyOptimisticWagerResolution(isWin);
+      restoreOptimisticState = (state = previousWagerState) => {
+        if (!optimisticApplied) {
+          return;
+        }
+        this.restoreOptimisticWagerResolution(matchId, state, matchGuard);
+      };
       console.log("wager:resolve:start", {
-        inviteId: writableContext.inviteId,
-        matchId: writableContext.matchId,
+        inviteId,
+        matchId,
         opponentId,
       });
-      const resolveWagerOutcomeFunction = httpsCallable(
-        this.functions,
-        "resolveWagerOutcome",
-      );
       const data = await this.callWagerFunctionWithRetry("wager:resolve", () =>
-        resolveWagerOutcomeFunction({
-          playerId: writableContext.actorUid,
-          inviteId: writableContext.inviteId,
-          matchId: writableContext.matchId,
-          opponentId,
-        }),
+        resolveWagerOutcomeViaApi(
+          {
+            inviteId,
+            matchId,
+          },
+          this.getAuthApiToken,
+        ),
       );
-      const responseData = data as { mining?: PlayerMiningData } | null;
+      const responseData = data as WagerOutcomeResolveResponse | null;
       console.log("wager:resolve:done", responseData);
-      if (
+      if (responseData?.ok === false) {
+        restoreOptimisticState();
+      } else if (
         responseData &&
+        "reason" in responseData &&
+        responseData.reason === "no-wager"
+      ) {
+        restoreOptimisticState(null);
+      }
+      if (
+        responseData?.ok === true &&
         responseData.mining &&
         sessionGuard() &&
         storage.getProfileId("") === profileIdAtRequest
@@ -3685,6 +3687,7 @@ class Connection {
       }
       return responseData;
     } catch (error) {
+      restoreOptimisticState();
       console.error("Error resolving wager outcome:", error);
       throw error;
     }

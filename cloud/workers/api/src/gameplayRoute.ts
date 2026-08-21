@@ -6,6 +6,7 @@ import {
   type RemoveNavigationGameResponse,
 } from "@mons/shared/navigation";
 import {
+  isWagerOutcomeResolveRequest,
   isWagerProposalAcceptRequest,
   isWagerProposalRemovalRequest,
   isWagerProposalSendRequest,
@@ -57,6 +58,11 @@ import {
   sendWagerProposal,
   type WagerProposalDependencies,
 } from "./wagerProposal.ts";
+import {
+  enforceWagerOutcomeRateLimit,
+  resolveWagerOutcome,
+  type WagerOutcomeDependencies,
+} from "./wagerOutcome.ts";
 
 const MAX_NAVIGATION_DELETE_ATTEMPTS = 3;
 
@@ -70,6 +76,7 @@ export const GAMEPLAY_PATHS = new Set([
   "/wagers/proposals/cancel",
   "/wagers/proposals/decline",
   "/wagers/proposals/send",
+  "/wagers/outcomes/resolve",
 ]);
 
 type QueuedAutomatchCandidate = {
@@ -91,6 +98,7 @@ export type GameplayRouteDependencies = {
   repository?: GameplayRepository;
   timer?: MatchTimerDependencies;
   wager?: WagerProposalDependencies;
+  wagerOutcome?: WagerOutcomeDependencies;
   verifyIdentity?: (
     request: Request,
     ctx: WorkerExecutionContext,
@@ -453,6 +461,17 @@ async function readGameplayBody(
     }
     return { inviteId, matchId } satisfies WagerProposalAcceptRequest;
   }
+  if (pathname === "/wagers/outcomes/resolve") {
+    if (!isWagerOutcomeResolveRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    const inviteId = body.inviteId.trim();
+    const matchId = body.matchId.trim();
+    if (!isSafeFirebaseKey(inviteId) || !isSafeFirebaseKey(matchId)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return { inviteId, matchId };
+  }
   if (!isRemoveNavigationGameRequest(body)) {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
   }
@@ -485,6 +504,9 @@ export async function handleGameplayRoute(
     const identity = await (
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
+    if (pathname === "/wagers/outcomes/resolve") {
+      await enforceWagerOutcomeRateLimit(env.AUTH_RATE_LIMITER, identity.uid);
+    }
     const body = await readGameplayBody(request, pathname);
     const repository = dependencies.repository || createGameplayRepository(env);
     let response;
@@ -547,6 +569,19 @@ export async function handleGameplayRoute(
         repository,
         dependencies.wager,
       );
+    } else if (pathname === "/wagers/outcomes/resolve") {
+      if (!isWagerOutcomeResolveRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      response = await resolveWagerOutcome(identity, body, repository, {
+        ...dependencies.wagerOutcome,
+        scheduleRetry:
+          dependencies.wagerOutcome?.scheduleRetry ||
+          (async (task) => {
+            await env.TELEGRAM_DELIVERY_QUEUE.send(task);
+          }),
+        signal: dependencies.wagerOutcome?.signal || request.signal,
+      });
     } else {
       if (!isWagerProposalRemovalRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");

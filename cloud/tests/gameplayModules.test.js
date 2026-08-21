@@ -28,8 +28,6 @@ const {
 const {
   clearMatchTimerMarkers,
 } = require("../functions/gameplay/matchTimerMarkers");
-const wagerMaterials = require("../functions/gameplay/wagerMaterials");
-const wagerHelpers = require("../functions/wagerHelpers");
 
 test("automatch REST queries retain their RTDB indexes", () => {
   assert.deepEqual(databaseRules.rules.automatch[".indexOn"], [
@@ -100,29 +98,6 @@ const withFirebaseAdminMethod = async (method, replacement, callback) => {
     firebaseAdmin[method] = original;
   }
 };
-
-test("wager helpers preserve their compatibility export surface", () => {
-  assert.deepEqual(Object.keys(wagerHelpers), [
-    "isMaterialName",
-    "normalizeCount",
-    "applyMaterialDeltas",
-    "updateFrozenMaterials",
-    "readUserMiningMaterials",
-    "updateUserMiningMaterials",
-  ]);
-  assert.strictEqual(
-    wagerHelpers.isMaterialName,
-    wagerMaterials.isMaterialName,
-  );
-  assert.strictEqual(
-    wagerHelpers.normalizeCount,
-    wagerMaterials.normalizeCount,
-  );
-  assert.strictEqual(
-    wagerHelpers.applyMaterialDeltas,
-    wagerMaterials.applyMaterialDeltas,
-  );
-});
 
 test("match reconstruction retains timer and rating selection policies", () => {
   const playerGame = {

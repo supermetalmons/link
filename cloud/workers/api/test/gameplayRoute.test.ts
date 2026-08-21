@@ -36,6 +36,7 @@ function repository(
   overrides: Partial<GameplayRepository> = {},
 ): GameplayRepository {
   return {
+    applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     findProfileId: async () => null,
     getAutomatchProfile: async () => null,
@@ -47,6 +48,7 @@ function repository(
       metal: 10,
       ice: 10,
     }),
+    getMiningSnapshot: async () => null,
     getRtdbPath: async () => null,
     patchRtdbRoot: async () => undefined,
     transactRtdbPath: async () => ({ committed: false, value: null }),

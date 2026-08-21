@@ -17,6 +17,14 @@ import {
   type TelegramClient,
 } from "../../../functions/telegram/client.js";
 import { createFirebaseRtdbRepository } from "./firebaseRtdb.ts";
+import {
+  createGameplayRepository,
+  type GameplayRepository,
+} from "./gameplayRepository.ts";
+import {
+  resumeWagerSettlement,
+  type WagerSettlementRetryTask,
+} from "./wagerOutcome.ts";
 
 const MAX_QUEUE_DELAY_SECONDS = 24 * 60 * 60;
 const MIN_DISPATCH_INTERVAL_MS = 1_000;
@@ -38,6 +46,30 @@ type TelegramEngineFactory = (input: {
   logger: Pick<Console, "error" | "info">;
   localRetryBarrier: ReturnType<typeof createTelegramLocalRetryBarrier>;
 }) => TelegramEngine;
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function parseWagerSettlementRetryTask(
+  value: unknown,
+): WagerSettlementRetryTask | null {
+  const task = toRecord(value);
+  return task?.kind === "wager-settlement" &&
+    typeof task.inviteId === "string" &&
+    typeof task.matchId === "string" &&
+    typeof task.operationId === "string" &&
+    Object.keys(task).length === 4
+    ? {
+        kind: "wager-settlement",
+        inviteId: task.inviteId,
+        matchId: task.matchId,
+        operationId: task.operationId,
+      }
+    : null;
+}
 
 function logicalDelaySeconds(scheduleTimeMs: number, nowMs: number): number {
   return Math.min(
@@ -84,17 +116,55 @@ export async function handleTelegramQueueMessage(
   {
     createRepository = createFirebaseRtdbRepository,
     createEngine = createTelegramDeliveryEngine,
+    createGameplay = createGameplayRepository,
     logger = console,
     now = Date.now,
+    resumeSettlement = resumeWagerSettlement,
     sleep = defaultSleep,
   }: {
     createRepository?: (env: Env) => TelegramRepository;
     createEngine?: TelegramEngineFactory;
+    createGameplay?: (env: Env) => GameplayRepository;
     logger?: Pick<Console, "error" | "info">;
     now?: () => number;
+    resumeSettlement?: typeof resumeWagerSettlement;
     sleep?: (milliseconds: number) => Promise<void>;
   } = {},
 ): Promise<void> {
+  const raw = toRecord(message.body);
+  if (raw?.kind === "wager-settlement") {
+    const task = parseWagerSettlementRetryTask(raw);
+    if (!task) {
+      message.ack();
+      logger.error(
+        JSON.stringify({ event: "wager_settlement_queue_invalid_message" }),
+      );
+      return;
+    }
+    try {
+      const status = await resumeSettlement(task, createGameplay(env), now);
+      message.ack();
+      logger.info(
+        JSON.stringify({
+          event: "wager_settlement_queue_processed",
+          operationId: task.operationId,
+          status,
+        }),
+      );
+    } catch (error) {
+      message.retry({
+        delaySeconds: infrastructureRetryDelaySeconds(message.attempts),
+      });
+      logger.error(
+        JSON.stringify({
+          event: "wager_settlement_queue_failed",
+          operationId: task.operationId,
+          code: error instanceof Error ? error.message : "unknown",
+        }),
+      );
+    }
+    return;
+  }
   const startedAtMs = now();
   let payloadValidated = false;
   let messageKey = "unknown";
@@ -180,5 +250,7 @@ export {
   createRetryScheduler,
   infrastructureRetryDelaySeconds,
   logicalDelaySeconds,
+  parseWagerSettlementRetryTask,
   type TelegramTaskPayload,
+  type WagerSettlementRetryTask,
 };

@@ -1,7 +1,10 @@
 import {
   MATERIAL_KEYS,
   normalizeMaterials,
+  normalizeMiningSnapshot,
+  type MiningMaterialName,
   type MiningMaterials,
+  type MiningSnapshot,
 } from "@mons/shared/mining";
 import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 import {
@@ -14,7 +17,9 @@ import { createGoogleAccessToken } from "./googleAuth.ts";
 
 const FIRESTORE_PROJECT_ID = "mons-link";
 const FIRESTORE_DATABASE_ID = "(default)";
-const FIRESTORE_DOCUMENTS_ROOT = `https://firestore.googleapis.com/v1/projects/${FIRESTORE_PROJECT_ID}/databases/${FIRESTORE_DATABASE_ID}/documents`;
+const FIRESTORE_DATABASE_NAME = `projects/${FIRESTORE_PROJECT_ID}/databases/${FIRESTORE_DATABASE_ID}`;
+const FIRESTORE_DOCUMENT_NAME_ROOT = `${FIRESTORE_DATABASE_NAME}/documents`;
+const FIRESTORE_DOCUMENTS_ROOT = `https://firestore.googleapis.com/v1/${FIRESTORE_DOCUMENT_NAME_ROOT}`;
 const FIRESTORE_TIMEOUT_MS = 5_000;
 const MAX_FIRESTORE_BODY_BYTES = 64 * 1024;
 
@@ -24,6 +29,16 @@ export type NavigationGameDocument = {
 };
 
 export type NavigationGameDeleteResult = "conflict" | "deleted" | "missing";
+
+export type WagerTransferInput = {
+  appliedAtMs: number;
+  count: number;
+  fingerprint: string;
+  loserProfileId: string;
+  material: MiningMaterialName;
+  operationId: string;
+  winnerProfileId: string;
+};
 
 export type AutomatchProfile = {
   aura: string;
@@ -36,6 +51,9 @@ export type AutomatchProfile = {
 };
 
 export type GameplayRepository = {
+  applyWagerTransferOnce: (
+    input: WagerTransferInput,
+  ) => Promise<"applied" | "replayed">;
   deleteNavigationGame: (
     profileId: string,
     inviteId: string,
@@ -59,6 +77,7 @@ export type GameplayRepository = {
     profileId: string,
     firebaseIdToken: string,
   ) => Promise<MiningMaterials>;
+  getMiningSnapshot: (profileId: string) => Promise<MiningSnapshot | null>;
   getRtdbPath: (
     path: string,
     query?: FirebaseRtdbQuery,
@@ -218,22 +237,52 @@ function readFirestoreMapFields(value: unknown): Record<string, unknown> {
   return toRecord(mapValue?.fields) || {};
 }
 
-export function parseMiningMaterialsDocument(value: unknown): MiningMaterials {
-  const document = toRecord(value);
-  if (!document) {
-    throw new GameplayRepositoryFailure();
-  }
-  const fields = toRecord(document.fields) || {};
+function readMiningSnapshotFields(
+  fields: Record<string, unknown>,
+): MiningSnapshot {
   const miningFields = readFirestoreMapFields(fields.mining);
   const materialFields = readFirestoreMapFields(miningFields.materials);
-  return normalizeMaterials(
-    Object.fromEntries(
+  const lastRockDate = toRecord(miningFields.lastRockDate);
+  return normalizeMiningSnapshot({
+    lastRockDate:
+      typeof lastRockDate?.stringValue === "string"
+        ? lastRockDate.stringValue
+        : null,
+    materials: Object.fromEntries(
       MATERIAL_KEYS.map((key) => [
         key,
         readFirestoreNumber(materialFields[key], 0),
       ]),
     ),
-  );
+  });
+}
+
+export function parseMiningMaterialsDocument(value: unknown): MiningMaterials {
+  const document = toRecord(value);
+  if (!document) {
+    throw new GameplayRepositoryFailure();
+  }
+  return readMiningSnapshotFields(toRecord(document.fields) || {}).materials;
+}
+
+export function parseMiningSnapshotDocument(value: unknown): MiningSnapshot {
+  const document = toRecord(value);
+  if (!document) {
+    throw new GameplayRepositoryFailure();
+  }
+  return readMiningSnapshotFields(toRecord(document.fields) || {});
+}
+
+function encodeWagerTransferLedger(input: WagerTransferInput): unknown {
+  return {
+    appliedAtMs: { integerValue: String(input.appliedAtMs) },
+    count: { integerValue: String(input.count) },
+    fingerprint: { stringValue: input.fingerprint },
+    loserProfileId: { stringValue: input.loserProfileId },
+    material: { stringValue: input.material },
+    operationId: { stringValue: input.operationId },
+    winnerProfileId: { stringValue: input.winnerProfileId },
+  };
 }
 
 export function createGameplayRepository(
@@ -255,6 +304,7 @@ export function createGameplayRepository(
   }: GameplayRepositoryDependencies = {},
 ): GameplayRepository {
   let serviceAccessToken: Promise<string> | null = null;
+  let firestoreAccessToken: Promise<string> | null = null;
   const getServiceAccessToken = () => {
     serviceAccessToken ||= getAccessToken(env, {
       credentials: {
@@ -268,6 +318,16 @@ export function createGameplayRepository(
       throw new GameplayRepositoryFailure();
     });
     return serviceAccessToken;
+  };
+  const getFirestoreAccessToken = () => {
+    firestoreAccessToken ||= getAccessToken(env, {
+      fetcher,
+      now,
+      timeoutMs,
+    }).catch(() => {
+      throw new GameplayRepositoryFailure();
+    });
+    return firestoreAccessToken;
   };
   const fetchWithTimeout = async (
     input: string,
@@ -286,8 +346,126 @@ export function createGameplayRepository(
       throw new GameplayRepositoryFailure();
     }
   };
+  const readWagerTransferLedger = async (
+    input: WagerTransferInput,
+  ): Promise<boolean> => {
+    const response = await fetchWithTimeout(
+      `${FIRESTORE_DOCUMENTS_ROOT}/wagerSettlements/${encodeURIComponent(input.operationId)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${await getFirestoreAccessToken()}`,
+        },
+      },
+    );
+    if (response.status === 404) {
+      await cancelResponseBody(response);
+      return false;
+    }
+    if (!response.ok) {
+      await cancelResponseBody(response);
+      throw new GameplayRepositoryFailure();
+    }
+    const document = toRecord(
+      await readBoundedJsonValue(
+        response,
+        MAX_FIRESTORE_BODY_BYTES,
+        () => new GameplayRepositoryFailure(),
+      ),
+    );
+    const fields = toRecord(document?.fields);
+    const fingerprint = readFirestoreString(fields?.fingerprint);
+    if (!fingerprint || fingerprint !== input.fingerprint) {
+      throw new GameplayRepositoryFailure();
+    }
+    return true;
+  };
 
   return {
+    async applyWagerTransferOnce(input) {
+      if (
+        !input.operationId ||
+        !input.fingerprint ||
+        !input.winnerProfileId ||
+        !input.loserProfileId ||
+        !MATERIAL_KEYS.includes(input.material) ||
+        !Number.isSafeInteger(input.count) ||
+        input.count <= 0 ||
+        !Number.isSafeInteger(input.appliedAtMs) ||
+        input.appliedAtMs < 0
+      ) {
+        throw new GameplayRepositoryFailure();
+      }
+      if (await readWagerTransferLedger(input)) {
+        return "replayed";
+      }
+      const ledgerName = `${FIRESTORE_DOCUMENT_NAME_ROOT}/wagerSettlements/${encodeURIComponent(input.operationId)}`;
+      const writes: Array<Record<string, unknown>> = [
+        {
+          update: {
+            name: ledgerName,
+            fields: encodeWagerTransferLedger(input),
+          },
+          currentDocument: { exists: false },
+        },
+      ];
+      if (input.winnerProfileId !== input.loserProfileId) {
+        writes.push(
+          {
+            transform: {
+              document: `${FIRESTORE_DOCUMENT_NAME_ROOT}/${documentPath(input.winnerProfileId)}`,
+              fieldTransforms: [
+                {
+                  fieldPath: `mining.materials.${input.material}`,
+                  increment: { integerValue: String(input.count) },
+                },
+              ],
+            },
+            currentDocument: { exists: true },
+          },
+          {
+            transform: {
+              document: `${FIRESTORE_DOCUMENT_NAME_ROOT}/${documentPath(input.loserProfileId)}`,
+              fieldTransforms: [
+                {
+                  fieldPath: `mining.materials.${input.material}`,
+                  increment: { integerValue: String(-input.count) },
+                },
+              ],
+            },
+            currentDocument: { exists: true },
+          },
+        );
+      }
+      let response: Response;
+      try {
+        response = await fetchWithTimeout(
+          `${FIRESTORE_DOCUMENTS_ROOT}:commit`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${await getFirestoreAccessToken()}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ writes }),
+          },
+        );
+      } catch {
+        if (await readWagerTransferLedger(input)) {
+          return "replayed";
+        }
+        throw new GameplayRepositoryFailure();
+      }
+      if (response.ok) {
+        await cancelResponseBody(response);
+        return "applied";
+      }
+      await cancelResponseBody(response);
+      if (await readWagerTransferLedger(input)) {
+        return "replayed";
+      }
+      throw new GameplayRepositoryFailure();
+    },
+
     getRtdbPath: rtdbClient.getPath,
     patchRtdbRoot: rtdbClient.patchRoot,
     transactRtdbPath: rtdbClient.transactPath,
@@ -419,6 +597,33 @@ export function createGameplayRepository(
         throw new GameplayRepositoryFailure();
       }
       return parseMiningMaterialsDocument(
+        await readBoundedJsonValue(
+          response,
+          MAX_FIRESTORE_BODY_BYTES,
+          () => new GameplayRepositoryFailure(),
+        ),
+      );
+    },
+
+    async getMiningSnapshot(profileId) {
+      const url = new URL(
+        `${FIRESTORE_DOCUMENTS_ROOT}/${documentPath(profileId)}`,
+      );
+      url.searchParams.append("mask.fieldPaths", "mining");
+      const response = await fetchWithTimeout(url.toString(), {
+        headers: {
+          Authorization: `Bearer ${await getFirestoreAccessToken()}`,
+        },
+      });
+      if (response.status === 404) {
+        await cancelResponseBody(response);
+        return null;
+      }
+      if (!response.ok) {
+        await cancelResponseBody(response);
+        throw new GameplayRepositoryFailure();
+      }
+      return parseMiningSnapshotDocument(
         await readBoundedJsonValue(
           response,
           MAX_FIRESTORE_BODY_BYTES,

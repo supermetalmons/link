@@ -33,6 +33,7 @@ export type WagerProposalDependencies = {
 };
 
 type WagerParticipants = {
+  opponentProfileId: string;
   opponentUid: string;
   playerProfileId: string;
   playerUid: string;
@@ -235,14 +236,16 @@ async function resolveWagerParticipants(
   }
   return isHost
     ? {
-        playerUid: hostId,
-        playerProfileId: hostProfileId,
+        opponentProfileId: guestProfileId,
         opponentUid: guestId,
+        playerProfileId: hostProfileId,
+        playerUid: hostId,
       }
     : {
-        playerUid: guestId,
-        playerProfileId: guestProfileId,
+        opponentProfileId: hostProfileId,
         opponentUid: hostId,
+        playerProfileId: guestProfileId,
+        playerUid: guestId,
       };
 }
 
@@ -271,7 +274,7 @@ function transitionWagerProposal(
   if (ownProposal?.operationId === input.operationId) {
     return { decision: "replayed" };
   }
-  if (wager.resolved || wager.agreed) {
+  if (wager.resolved || wager.agreed || wager.settlement) {
     return { decision: "unavailable" };
   }
   const proposedBy = { ...(toRecord(wager.proposedBy) || {}) };
@@ -348,6 +351,33 @@ async function updateFrozenMaterialsOnce(
         : applyMaterialDeltas(current, deltas),
       deltas,
     }),
+    now,
+  );
+}
+
+export async function releaseWagerSettlementReservation(
+  repository: GameplayRepository,
+  input: {
+    count: number;
+    material: MiningMaterialName;
+    operationId: string;
+    uid: string;
+  },
+  now: () => number,
+): Promise<void> {
+  const operationId = await createOperationId(
+    "settlement-release",
+    input.operationId,
+    input.uid,
+    input.material,
+    String(input.count),
+  );
+  await updateFrozenMaterialsOnce(
+    repository,
+    input.uid,
+    operationId,
+    "settlement-release",
+    { [input.material]: -input.count },
     now,
   );
 }
@@ -624,7 +654,7 @@ export async function acceptWagerProposal(
     }
     return { ok: true, count: replayAgreement.count };
   }
-  if (!wager || wager.resolved || wager.agreed) {
+  if (!wager || wager.resolved || wager.agreed || wager.settlement) {
     return { ok: false, reason: "proposal-missing" };
   }
   const proposals = toRecord(wager.proposals) || {};
@@ -670,7 +700,12 @@ export async function acceptWagerProposal(
       ) {
         return { commit: false, decision: "replayed" };
       }
-      if (!currentWager || currentWager.resolved || currentWager.agreed) {
+      if (
+        !currentWager ||
+        currentWager.resolved ||
+        currentWager.agreed ||
+        currentWager.settlement
+      ) {
         return { commit: false, decision: "proposal-unavailable" };
       }
       const currentProposals = toRecord(currentWager.proposals) || {};
@@ -774,7 +809,14 @@ async function removeProposal(
       }
       const proposals = toRecord(wager?.proposals);
       const proposal = toRecord(proposals?.[proposalUid]);
-      if (!wager || wager.agreed || wager.resolved || !proposals || !proposal) {
+      if (
+        !wager ||
+        wager.agreed ||
+        wager.resolved ||
+        wager.settlement ||
+        !proposals ||
+        !proposal
+      ) {
         return { commit: false, decision: "proposal-missing" };
       }
       const nextProposals = { ...proposals };

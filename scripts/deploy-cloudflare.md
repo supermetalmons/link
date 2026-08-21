@@ -246,6 +246,7 @@ Authenticated gameplay mutations are served by:
 - `POST https://api.mons.link/wagers/proposals/accept`
 - `POST https://api.mons.link/wagers/proposals/cancel`
 - `POST https://api.mons.link/wagers/proposals/decline`
+- `POST https://api.mons.link/wagers/outcomes/resolve`
 
 The browser sends its Firebase ID token in the `Authorization: Bearer` header.
 The Worker preserves the existing first-entry matchmaking policy, bounded match
@@ -267,6 +268,14 @@ transactions. Responses expose only the documented result fields and never
 include internal debug state. The existing gameplay service account already has
 the required RTDB read and update permissions, so these routes require no new
 secret or IAM role.
+
+Wager outcome resolution derives both participants from the invite, validates
+the match belongs to that invite, and claims the live wager state in one RTDB
+transaction. A Firestore ledger and atomic material transforms make the transfer
+exactly once. RTDB reservation releases and finalization are resumable through
+the existing Cloudflare delivery queue. A `wager-settlement-uncertain` response
+means a legacy marker exists without proof of completion; inspect the wager,
+both Firestore balances, and both frozen balances before reconciling it manually.
 
 Initial environments require one dedicated Google identity with separate
 least-privilege role bindings. Routine releases reuse this identity and its
@@ -321,6 +330,11 @@ API smoke checks cover every gameplay route's preflight and unauthenticated
 response without mutating RTDB. For changes to gameplay behavior, use two
 authenticated production sessions backed by distinct profiles and verify only
 the affected automatch, navigation, or wager flow before completing the release.
+Do not reconcile the retired `resolveWagerOutcome` callable until one controlled
+wager has resolved through the production Worker and a repeated request returns
+the same balances. Already-open tabs using the former frontend must be refreshed.
+After reconciliation, restore the callable from the retained pre-migration
+commit before rolling back the frontend or API Worker.
 
 ## Auth initiation and reads
 
