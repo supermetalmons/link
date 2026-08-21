@@ -22,6 +22,13 @@ const FIRESTORE_DOCUMENT_NAME_ROOT = `${FIRESTORE_DATABASE_NAME}/documents`;
 const FIRESTORE_DOCUMENTS_ROOT = `https://firestore.googleapis.com/v1/${FIRESTORE_DOCUMENT_NAME_ROOT}`;
 const FIRESTORE_TIMEOUT_MS = 5_000;
 const MAX_FIRESTORE_BODY_BYTES = 64 * 1024;
+const MAX_RATING_FIRESTORE_BODY_BYTES = 256 * 1024;
+const MAX_RATING_TRANSACTION_ATTEMPTS = 5;
+
+type FirestoreDocument = {
+  fields: Record<string, unknown>;
+  name: string;
+};
 
 export type NavigationGameDocument = {
   status: string | null;
@@ -48,6 +55,94 @@ export type AutomatchProfile = {
   rating: number;
   sol: string;
   username: string;
+};
+
+export type RatingProfile = AutomatchProfile & {
+  feb2026UniqueOpponents: string[];
+  nonce: number;
+  totalManaPoints: number;
+};
+
+export type RatingUpdateData = {
+  inviteId: string;
+  leaseExpiresAtMs: number;
+  matchId: string;
+  opponentId: string;
+  opponentProfileId: string;
+  ownerToken: string;
+  playerId: string;
+  playerProfileId: string;
+  shouldUpdateFebruaryChallenge: boolean;
+  startedAtMs: number;
+  status: string;
+};
+
+export type RatingLeaseInput = {
+  inviteId: string;
+  matchId: string;
+  opponentId: string;
+  ownerToken: string;
+  ownerUid: string;
+  playerId: string;
+  leaseMs: number;
+};
+
+export type RatingLeaseResult = {
+  data: RatingUpdateData | null;
+  status: "acquired" | "busy" | "done";
+};
+
+type RatingOperationIdentity = Pick<
+  RatingLeaseInput,
+  "inviteId" | "matchId" | "opponentId" | "playerId"
+>;
+
+export type RatingCommitPlan = {
+  opponentUpdate: Record<string, unknown> | null;
+  playerUpdate: Record<string, unknown> | null;
+  repairData: RatingRepairData;
+  ratingUpdate: Record<string, unknown>;
+};
+
+export type RatingRepairData = Pick<
+  RatingUpdateData,
+  "opponentProfileId" | "playerProfileId" | "shouldUpdateFebruaryChallenge"
+>;
+
+export type RatingFinalizeInput = {
+  inviteId: string;
+  matchId: string;
+  opponentId: string;
+  operationId: string;
+  ownerToken: string;
+  playerId: string;
+};
+
+export type RatingFinalizeResult =
+  | { data: RatingUpdateData; status: "replayed" }
+  | { data: RatingRepairData; status: "committed" }
+  | { status: "lost" };
+
+export type RatingRepository = Pick<
+  GameplayRepository,
+  "getRtdbPath" | "patchRtdbRoot"
+> & {
+  applyFebruaryChallengeReplay: (
+    playerProfileId: string,
+    opponentProfileId: string,
+  ) => Promise<void>;
+  finalizeRatingUpdate: (
+    input: RatingFinalizeInput,
+    buildPlan: (
+      player: RatingProfile | null,
+      opponent: RatingProfile | null,
+    ) => RatingCommitPlan,
+  ) => Promise<RatingFinalizeResult>;
+  getRatingProfile: (uid: string) => Promise<RatingProfile | null>;
+  readRatingUpdate: (operationId: string) => Promise<RatingUpdateData | null>;
+  tryAcquireRatingLease: (
+    input: RatingLeaseInput,
+  ) => Promise<RatingLeaseResult>;
 };
 
 export type GameplayRepository = {
@@ -102,6 +197,14 @@ type GameplayRepositoryDependencies = {
   timeoutMs?: number;
 };
 
+type RatingRepositoryDependencies = {
+  fetcher?: typeof fetch;
+  getAccessToken?: typeof createGoogleAccessToken;
+  maxTransactionAttempts?: number;
+  now?: () => number;
+  timeoutMs?: number;
+};
+
 export class GameplayRepositoryFailure extends Error {
   constructor() {
     super("gameplay-repository-unavailable");
@@ -112,6 +215,143 @@ function toRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function parseFirestoreDocument(value: unknown): FirestoreDocument {
+  const document = toRecord(value);
+  const fields =
+    document?.fields === undefined ? {} : toRecord(document.fields);
+  if (typeof document?.name !== "string" || !fields) {
+    throw new GameplayRepositoryFailure();
+  }
+  return { name: document.name, fields };
+}
+
+function parseFirestoreDocuments(value: unknown): FirestoreDocument[] {
+  if (!Array.isArray(value)) {
+    throw new GameplayRepositoryFailure();
+  }
+  const documents: FirestoreDocument[] = [];
+  for (const entry of value) {
+    const result = toRecord(entry);
+    if (result?.document !== undefined) {
+      documents.push(parseFirestoreDocument(result.document));
+    }
+  }
+  return documents;
+}
+
+function decodeFirestoreValue(value: unknown): unknown {
+  const encoded = toRecord(value);
+  if (!encoded) {
+    throw new GameplayRepositoryFailure();
+  }
+  if (typeof encoded.stringValue === "string") {
+    return encoded.stringValue;
+  }
+  if (typeof encoded.booleanValue === "boolean") {
+    return encoded.booleanValue;
+  }
+  if (encoded.nullValue !== undefined) {
+    return null;
+  }
+  if (
+    typeof encoded.integerValue === "string" ||
+    typeof encoded.integerValue === "number"
+  ) {
+    const parsed = Number(encoded.integerValue);
+    if (!Number.isFinite(parsed)) {
+      throw new GameplayRepositoryFailure();
+    }
+    return parsed;
+  }
+  if (typeof encoded.doubleValue === "number") {
+    return encoded.doubleValue;
+  }
+  const arrayValue = toRecord(encoded.arrayValue);
+  if (arrayValue) {
+    const values = arrayValue.values;
+    if (values === undefined) {
+      return [];
+    }
+    if (!Array.isArray(values)) {
+      throw new GameplayRepositoryFailure();
+    }
+    return values.map(decodeFirestoreValue);
+  }
+  const mapValue = toRecord(encoded.mapValue);
+  if (mapValue) {
+    const fields =
+      mapValue.fields === undefined ? {} : toRecord(mapValue.fields);
+    if (!fields) {
+      throw new GameplayRepositoryFailure();
+    }
+    return Object.fromEntries(
+      Object.entries(fields).map(([key, entry]) => [
+        key,
+        decodeFirestoreValue(entry),
+      ]),
+    );
+  }
+  throw new GameplayRepositoryFailure();
+}
+
+function decodeFirestoreFields(
+  fields: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(fields).map(([key, value]) => [
+      key,
+      decodeFirestoreValue(value),
+    ]),
+  );
+}
+
+function encodeFirestoreValue(value: unknown): Record<string, unknown> {
+  if (value === null) {
+    return { nullValue: null };
+  }
+  if (typeof value === "string") {
+    return { stringValue: value };
+  }
+  if (typeof value === "boolean") {
+    return { booleanValue: value };
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Number.isSafeInteger(value)
+      ? { integerValue: String(value) }
+      : { doubleValue: value };
+  }
+  if (Array.isArray(value)) {
+    return {
+      arrayValue: { values: value.map((entry) => encodeFirestoreValue(entry)) },
+    };
+  }
+  const record = toRecord(value);
+  if (record) {
+    return {
+      mapValue: {
+        fields: Object.fromEntries(
+          Object.entries(record).map(([key, entry]) => [
+            key,
+            encodeFirestoreValue(entry),
+          ]),
+        ),
+      },
+    };
+  }
+  throw new GameplayRepositoryFailure();
+}
+
+function encodeFirestoreFields(
+  fields: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(fields).map(([key, value]) => [
+      key,
+      encodeFirestoreValue(value),
+    ]),
+  );
 }
 
 function isPreconditionConflict(value: unknown): boolean {
@@ -235,6 +475,79 @@ function readFirestoreMapFields(value: unknown): Record<string, unknown> {
   const encoded = toRecord(value);
   const mapValue = toRecord(encoded?.mapValue);
   return toRecord(mapValue?.fields) || {};
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
+function ratingProfileFromDocument(document: FirestoreDocument): RatingProfile {
+  const fields = decodeFirestoreFields(document.fields);
+  const custom = toRecord(fields.custom) || {};
+  const profileId = document.name.split("/").pop()?.trim() || "";
+  if (!profileId) {
+    throw new GameplayRepositoryFailure();
+  }
+  const number = (value: unknown, fallback: number) =>
+    typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  const string = (value: unknown) => (typeof value === "string" ? value : "");
+  const customEmoji = custom.emoji;
+  return {
+    aura: string(custom.aura) || string(fields.aura),
+    emoji:
+      typeof customEmoji === "string" || typeof customEmoji === "number"
+        ? customEmoji
+        : typeof fields.emoji === "string" || typeof fields.emoji === "number"
+          ? fields.emoji
+          : "",
+    eth: string(fields.eth),
+    feb2026UniqueOpponents: readStringArray(fields.feb2026UniqueOpponents),
+    nonce: number(fields.nonce, fields.nonce === undefined ? -1 : 0),
+    profileId,
+    rating: number(fields.rating, 1500),
+    sol: string(fields.sol),
+    totalManaPoints: number(fields.totalManaPoints, 0),
+    username: string(fields.username),
+  };
+}
+
+function ratingUpdateFromDocument(
+  document: FirestoreDocument,
+): RatingUpdateData {
+  const fields = decodeFirestoreFields(document.fields);
+  const string = (value: unknown) =>
+    typeof value === "string" ? value.trim() : "";
+  const number = (value: unknown) =>
+    typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return {
+    inviteId: string(fields.inviteId),
+    leaseExpiresAtMs: number(fields.leaseExpiresAtMs),
+    matchId: string(fields.matchId),
+    opponentId: string(fields.opponentId),
+    opponentProfileId: string(fields.opponentProfileId),
+    ownerToken: string(fields.ownerToken),
+    playerId: string(fields.playerId),
+    playerProfileId: string(fields.playerProfileId),
+    shouldUpdateFebruaryChallenge:
+      fields.shouldUpdateFebruaryChallenge === true,
+    startedAtMs: number(fields.startedAtMs),
+    status: string(fields.status),
+  };
+}
+
+function isSameRatingOperation(
+  data: RatingUpdateData | null,
+  input: RatingOperationIdentity,
+): data is RatingUpdateData {
+  return (
+    data !== null &&
+    data.inviteId === input.inviteId &&
+    data.matchId === input.matchId &&
+    data.playerId === input.playerId &&
+    data.opponentId === input.opponentId
+  );
 }
 
 function readMiningSnapshotFields(
@@ -670,11 +983,436 @@ export function createGameplayRepository(
   };
 }
 
+export function createRatingRepository(
+  env: Env,
+  gameplayRepository: GameplayRepository,
+  {
+    fetcher = fetch,
+    getAccessToken = createGoogleAccessToken,
+    maxTransactionAttempts = MAX_RATING_TRANSACTION_ATTEMPTS,
+    now = Date.now,
+    timeoutMs = FIRESTORE_TIMEOUT_MS,
+  }: RatingRepositoryDependencies = {},
+): RatingRepository {
+  const attempts =
+    Number.isInteger(maxTransactionAttempts) && maxTransactionAttempts > 0
+      ? maxTransactionAttempts
+      : MAX_RATING_TRANSACTION_ATTEMPTS;
+  let accessToken: Promise<string> | null = null;
+  const token = () => {
+    accessToken ||= getAccessToken(env, {
+      credentials: {
+        email: env.RATING_SERVICE_ACCOUNT_EMAIL,
+        privateKeyPem: env.RATING_SERVICE_ACCOUNT_PRIVATE_KEY,
+      },
+      fetcher,
+      now,
+      timeoutMs,
+    }).catch(() => {
+      throw new GameplayRepositoryFailure();
+    });
+    return accessToken;
+  };
+  const request = async (
+    input: string,
+    init: RequestInit,
+  ): Promise<Response> => {
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${await token()}`);
+    try {
+      return await fetcher(input, {
+        ...init,
+        headers,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch {
+      throw new GameplayRepositoryFailure();
+    }
+  };
+  const readJson = async (response: Response): Promise<unknown> => {
+    if (!response.ok) {
+      await cancelResponseBody(response);
+      throw new GameplayRepositoryFailure();
+    }
+    return readBoundedJsonValue(
+      response,
+      MAX_RATING_FIRESTORE_BODY_BYTES,
+      () => new GameplayRepositoryFailure(),
+    );
+  };
+  const postJson = (input: string, body: unknown) =>
+    request(input, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const operationName = (operationId: string) =>
+    `${FIRESTORE_DOCUMENT_NAME_ROOT}/ratingUpdates/${operationId}`;
+  const profileName = (profileId: string) =>
+    `${FIRESTORE_DOCUMENT_NAME_ROOT}/users/${profileId}`;
+  const beginTransaction = async (
+    retryTransaction?: string,
+  ): Promise<string> => {
+    const response = await postJson(
+      `${FIRESTORE_DOCUMENTS_ROOT}:beginTransaction`,
+      {
+        options: {
+          readWrite: retryTransaction ? { retryTransaction } : {},
+        },
+      },
+    );
+    const body = toRecord(await readJson(response));
+    const transaction =
+      typeof body?.transaction === "string" ? body.transaction.trim() : "";
+    if (!transaction) {
+      throw new GameplayRepositoryFailure();
+    }
+    return transaction;
+  };
+  const rollback = async (transaction: string): Promise<void> => {
+    try {
+      const response = await postJson(`${FIRESTORE_DOCUMENTS_ROOT}:rollback`, {
+        transaction,
+      });
+      await cancelResponseBody(response);
+    } catch {}
+  };
+  const batchGet = async (
+    transaction: string,
+    names: string[],
+    fieldPaths?: string[],
+  ): Promise<Map<string, FirestoreDocument | null>> => {
+    const uniqueNames = Array.from(new Set(names));
+    const response = await postJson(`${FIRESTORE_DOCUMENTS_ROOT}:batchGet`, {
+      documents: uniqueNames,
+      ...(fieldPaths ? { mask: { fieldPaths } } : {}),
+      transaction,
+    });
+    const body = await readJson(response);
+    if (!Array.isArray(body)) {
+      throw new GameplayRepositoryFailure();
+    }
+    const results = new Map<string, FirestoreDocument | null>();
+    for (const entry of body) {
+      const record = toRecord(entry);
+      if (record?.found !== undefined) {
+        const document = parseFirestoreDocument(record.found);
+        results.set(document.name, document);
+      } else if (typeof record?.missing === "string") {
+        results.set(record.missing, null);
+      }
+    }
+    if (uniqueNames.some((name) => !results.has(name))) {
+      throw new GameplayRepositoryFailure();
+    }
+    return results;
+  };
+  const queryProfile = async (
+    uid: string,
+    transaction?: string,
+  ): Promise<RatingProfile | null> => {
+    const response = await postJson(`${FIRESTORE_DOCUMENTS_ROOT}:runQuery`, {
+      structuredQuery: {
+        select: {
+          fields: [
+            "aura",
+            "custom.aura",
+            "custom.emoji",
+            "emoji",
+            "eth",
+            "feb2026UniqueOpponents",
+            "nonce",
+            "rating",
+            "sol",
+            "totalManaPoints",
+            "username",
+          ].map((fieldPath) => ({ fieldPath })),
+        },
+        from: [{ collectionId: "users" }],
+        where: {
+          fieldFilter: {
+            field: { fieldPath: "logins" },
+            op: "ARRAY_CONTAINS",
+            value: { stringValue: uid },
+          },
+        },
+        limit: 1,
+      },
+      ...(transaction ? { transaction } : {}),
+    });
+    const documents = parseFirestoreDocuments(await readJson(response));
+    return documents[0] ? ratingProfileFromDocument(documents[0]) : null;
+  };
+  const readOperation = async (
+    operationId: string,
+  ): Promise<RatingUpdateData | null> => {
+    const response = await request(
+      `${FIRESTORE_DOCUMENTS_ROOT}/ratingUpdates/${encodeURIComponent(operationId)}`,
+      {},
+    );
+    if (response.status === 404) {
+      await cancelResponseBody(response);
+      return null;
+    }
+    return ratingUpdateFromDocument(
+      parseFirestoreDocument(await readJson(response)),
+    );
+  };
+  const updateWrite = (
+    name: string,
+    fields: Record<string, unknown>,
+    requireExisting = false,
+  ) => ({
+    update: { name, fields: encodeFirestoreFields(fields) },
+    updateMask: { fieldPaths: Object.keys(fields) },
+    ...(requireExisting ? { currentDocument: { exists: true } } : {}),
+  });
+  const commit = async (
+    transaction: string,
+    writes: Array<Record<string, unknown>>,
+  ): Promise<"committed" | "conflict"> => {
+    const response = await postJson(`${FIRESTORE_DOCUMENTS_ROOT}:commit`, {
+      writes,
+      transaction,
+    });
+    if (response.ok) {
+      await cancelResponseBody(response);
+      return "committed";
+    }
+    if (response.status === 409 || response.status === 412) {
+      await cancelResponseBody(response);
+      return "conflict";
+    }
+    if (response.status === 400) {
+      const body = await readBoundedJsonValue(
+        response,
+        MAX_RATING_FIRESTORE_BODY_BYTES,
+        () => new GameplayRepositoryFailure(),
+      );
+      if (isPreconditionConflict(body)) {
+        return "conflict";
+      }
+      throw new GameplayRepositoryFailure();
+    }
+    await cancelResponseBody(response);
+    throw new GameplayRepositoryFailure();
+  };
+
+  return {
+    getRtdbPath: gameplayRepository.getRtdbPath,
+    patchRtdbRoot: gameplayRepository.patchRtdbRoot,
+
+    async applyFebruaryChallengeReplay(playerProfileId, opponentProfileId) {
+      if (
+        !playerProfileId ||
+        !opponentProfileId ||
+        playerProfileId === opponentProfileId
+      ) {
+        return;
+      }
+      let retryTransaction: string | undefined;
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        const transaction = await beginTransaction(retryTransaction);
+        const playerDocumentName = profileName(playerProfileId);
+        const opponentDocumentName = profileName(opponentProfileId);
+        try {
+          const documents = await batchGet(
+            transaction,
+            [playerDocumentName, opponentDocumentName],
+            ["feb2026UniqueOpponents"],
+          );
+          const writes: Array<Record<string, unknown>> = [];
+          for (const [name, otherProfileId] of [
+            [playerDocumentName, opponentProfileId],
+            [opponentDocumentName, playerProfileId],
+          ] as const) {
+            const document = documents.get(name);
+            if (!document) {
+              continue;
+            }
+            const fields = decodeFirestoreFields(document.fields);
+            const opponents = readStringArray(fields.feb2026UniqueOpponents);
+            if (opponents.includes(otherProfileId)) {
+              continue;
+            }
+            const updatedOpponents = [...opponents, otherProfileId];
+            writes.push(
+              updateWrite(
+                name,
+                {
+                  feb2026UniqueOpponents: updatedOpponents,
+                  feb2026UniqueOpponentsCount: updatedOpponents.length,
+                },
+                true,
+              ),
+            );
+          }
+          if (writes.length === 0) {
+            await rollback(transaction);
+            return;
+          }
+          const result = await commit(transaction, writes);
+          if (result === "committed") {
+            return;
+          }
+          retryTransaction = transaction;
+        } catch (error) {
+          await rollback(transaction);
+          throw error;
+        }
+      }
+      throw new GameplayRepositoryFailure();
+    },
+
+    async finalizeRatingUpdate(input, buildPlan) {
+      let retryTransaction: string | undefined;
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        const transaction = await beginTransaction(retryTransaction);
+        try {
+          const name = operationName(input.operationId);
+          const operationDocument = (await batchGet(transaction, [name])).get(
+            name,
+          );
+          if (!operationDocument) {
+            await rollback(transaction);
+            return { status: "lost" };
+          }
+          const operation = ratingUpdateFromDocument(operationDocument);
+          if (operation.status === "done") {
+            await rollback(transaction);
+            return { status: "replayed", data: operation };
+          }
+          if (
+            operation.status !== "processing" ||
+            operation.ownerToken !== input.ownerToken ||
+            !isSameRatingOperation(operation, input)
+          ) {
+            await rollback(transaction);
+            return { status: "lost" };
+          }
+          const player = await queryProfile(input.playerId, transaction);
+          const opponent = await queryProfile(input.opponentId, transaction);
+          const plan = buildPlan(player, opponent);
+          const writes: Array<Record<string, unknown>> = [];
+          if (player && plan.playerUpdate) {
+            writes.push(
+              updateWrite(
+                profileName(player.profileId),
+                plan.playerUpdate,
+                true,
+              ),
+            );
+          }
+          if (opponent && plan.opponentUpdate) {
+            writes.push(
+              updateWrite(
+                profileName(opponent.profileId),
+                plan.opponentUpdate,
+                true,
+              ),
+            );
+          }
+          writes.push(updateWrite(name, plan.ratingUpdate, true));
+          const result = await commit(transaction, writes);
+          if (result === "committed") {
+            return { status: "committed", data: plan.repairData };
+          }
+          retryTransaction = transaction;
+        } catch (error) {
+          await rollback(transaction);
+          const replay = await readOperation(input.operationId).catch(
+            () => null,
+          );
+          if (
+            replay?.status === "done" &&
+            isSameRatingOperation(replay, input)
+          ) {
+            return { status: "replayed", data: replay };
+          }
+          throw error;
+        }
+      }
+      throw new GameplayRepositoryFailure();
+    },
+
+    getRatingProfile: queryProfile,
+    readRatingUpdate: readOperation,
+
+    async tryAcquireRatingLease(input) {
+      let retryTransaction: string | undefined;
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        const transaction = await beginTransaction(retryTransaction);
+        const name = operationName(`${input.inviteId}__${input.matchId}`);
+        try {
+          const document = (await batchGet(transaction, [name])).get(name);
+          const data = document ? ratingUpdateFromDocument(document) : null;
+          if (data?.status === "done") {
+            await rollback(transaction);
+            return { status: "done", data };
+          }
+          const attemptNowMs = now();
+          if (
+            data?.status === "processing" &&
+            data.leaseExpiresAtMs > attemptNowMs &&
+            data.ownerToken &&
+            data.ownerToken !== input.ownerToken
+          ) {
+            await rollback(transaction);
+            return { status: "busy", data };
+          }
+          const result = await commit(transaction, [
+            updateWrite(name, {
+              inviteId: input.inviteId,
+              matchId: input.matchId,
+              playerId: input.playerId,
+              opponentId: input.opponentId,
+              ownerUid: input.ownerUid,
+              ownerToken: input.ownerToken,
+              status: "processing",
+              startedAtMs: data?.startedAtMs || attemptNowMs,
+              updatedAtMs: attemptNowMs,
+              leaseExpiresAtMs: attemptNowMs + input.leaseMs,
+            }),
+          ]);
+          if (result === "committed") {
+            return { status: "acquired", data };
+          }
+          retryTransaction = transaction;
+        } catch (error) {
+          await rollback(transaction);
+          const replay = await readOperation(
+            `${input.inviteId}__${input.matchId}`,
+          ).catch(() => null);
+          if (isSameRatingOperation(replay, input)) {
+            if (replay.status === "done") {
+              return { status: "done", data: replay };
+            }
+            if (
+              replay.status === "processing" &&
+              replay.ownerToken === input.ownerToken
+            ) {
+              return { status: "acquired", data: replay };
+            }
+          }
+          throw error;
+        }
+      }
+      throw new GameplayRepositoryFailure();
+    },
+  };
+}
+
 export {
   FIRESTORE_TIMEOUT_MS,
   MAX_FIRESTORE_BODY_BYTES,
+  MAX_RATING_FIRESTORE_BODY_BYTES,
+  MAX_RATING_TRANSACTION_ATTEMPTS,
+  decodeFirestoreFields,
   documentPath,
+  encodeFirestoreFields,
   isPreconditionConflict,
   parseNavigationGame,
   parseProfileQuery,
+  ratingProfileFromDocument,
+  ratingUpdateFromDocument,
 };

@@ -20,7 +20,6 @@ const callableExportNames = [
   "syncEventState",
   "syncProfileClaim",
   "unlinkAuthMethod",
-  "updateRatings",
   "verifyAppleToken",
   "verifyEthAddress",
   "verifySolanaAddress",
@@ -415,7 +414,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 35);
+  assert.equal(expectedExportNames.length, 34);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

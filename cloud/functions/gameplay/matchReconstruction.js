@@ -18,15 +18,6 @@ const requireLaterGameFromMatchData = (mons, matchData, opponentMatchData) => {
   return selectLaterGame(playerGame, opponentGame);
 };
 
-const selectLaterGameForRating = (mons, matchData, opponentMatchData) => {
-  const playerGame = parseGameFromMatchData(mons, matchData);
-  const opponentGame = parseGameFromMatchData(mons, opponentMatchData);
-  if (!playerGame && !opponentGame) {
-    throw new HttpsError("internal", "Could not validate the game score.");
-  }
-  return selectLaterGame(playerGame, opponentGame);
-};
-
 const buildOrderedMatchSubmissions = (
   playerColor,
   matchData,
@@ -49,5 +40,4 @@ module.exports = {
   buildOrderedMatchSubmissions,
   buildOrderedMoveHistory,
   requireLaterGameFromMatchData,
-  selectLaterGameForRating,
 };

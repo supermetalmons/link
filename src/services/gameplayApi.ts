@@ -30,11 +30,24 @@ import {
   type StartMatchTimerRequest,
   type StartMatchTimerResponse,
 } from "@mons/shared/timers";
+import {
+  isRatingUpdateResponse,
+  type RatingUpdateRequest,
+  type RatingUpdateResponse,
+} from "@mons/shared/ratings";
 import type { AuthTokenProvider } from "./authApi";
 
 const GAMEPLAY_API_ROOT = "https://api.mons.link";
 const GAMEPLAY_API_TIMEOUT_MS = 30_000;
+const RATING_API_TIMEOUT_MS = 60_000;
+const RATING_BUSY_RETRY_DELAY_MS = 31_000;
 const GAMEPLAY_API_MAX_RESPONSE_BYTES = 64 * 1024;
+
+type RatingRetryOptions = {
+  now?: () => number;
+  shouldRetry?: () => boolean;
+  sleep?: (milliseconds: number) => Promise<void>;
+};
 
 export class GameplayApiError extends Error {
   readonly code: string;
@@ -121,6 +134,7 @@ async function gameplayMutation<T>(
   body: unknown,
   tokenProvider: AuthTokenProvider,
   validate: (value: unknown) => value is T,
+  timeoutMs = GAMEPLAY_API_TIMEOUT_MS,
 ): Promise<T> {
   const controller = new AbortController();
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -130,7 +144,7 @@ async function gameplayMutation<T>(
       reject(
         new GameplayApiError("unavailable", "Gameplay request timed out."),
       );
-    }, GAMEPLAY_API_TIMEOUT_MS);
+    }, timeoutMs);
   });
   const run = async (): Promise<T> => {
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -307,3 +321,65 @@ export function resolveWagerOutcomeViaApi(
     isWagerOutcomeResolveResponse,
   );
 }
+
+export async function updateRatingsViaApi(
+  request: RatingUpdateRequest,
+  tokenProvider: AuthTokenProvider,
+  options: RatingRetryOptions = {},
+): Promise<RatingUpdateResponse> {
+  const now = options.now || Date.now;
+  const deadlineAt = now() + RATING_API_TIMEOUT_MS;
+  let canRetryUnavailable = true;
+  const mutate = () => {
+    const remainingMs = deadlineAt - now();
+    if (remainingMs <= 0) {
+      throw new GameplayApiError("unavailable", "Gameplay request timed out.");
+    }
+    return gameplayMutation(
+      "/ratings/update",
+      request,
+      tokenProvider,
+      isRatingUpdateResponse,
+      remainingMs,
+    );
+  };
+  const mutateWithUnavailableRetry = async () => {
+    try {
+      return await mutate();
+    } catch (error) {
+      if (
+        !canRetryUnavailable ||
+        !(error instanceof GameplayApiError) ||
+        error.code !== "unavailable" ||
+        (options.shouldRetry && !options.shouldRetry()) ||
+        deadlineAt - now() <= 0
+      ) {
+        throw error;
+      }
+      canRetryUnavailable = false;
+      return mutate();
+    }
+  };
+  const response = await mutateWithUnavailableRetry();
+  if (response.ok && "skipped" in response) {
+    const remainingMs = deadlineAt - now();
+    if (remainingMs <= 0) {
+      return response;
+    }
+    await (
+      options.sleep ||
+      ((milliseconds: number) =>
+        new Promise<void>((resolve) => setTimeout(resolve, milliseconds)))
+    )(Math.min(RATING_BUSY_RETRY_DELAY_MS, remainingMs));
+    if (
+      (options.shouldRetry && !options.shouldRetry()) ||
+      deadlineAt - now() <= 0
+    ) {
+      return response;
+    }
+    return mutateWithUnavailableRetry();
+  }
+  return response;
+}
+
+export { RATING_API_TIMEOUT_MS, RATING_BUSY_RETRY_DELAY_MS };

@@ -32,6 +32,32 @@ export type RatingUpdater = (
   lossPlayerGamesCount: number,
 ) => [number, number];
 
+export interface RatingUpdateRequest {
+  playerId: string;
+  opponentId: string;
+  inviteId: string;
+  matchId: string;
+}
+
+export type RatingUpdateResponse =
+  { ok: true } | { ok: true; skipped: true } | { ok: false };
+
+export interface RatingEventMetadata {
+  isEventMatch: boolean;
+  eventOwned: boolean;
+  eventId: string | null;
+}
+
+export function getRatingEventMetadata(value: unknown): RatingEventMetadata;
+
+export function isRatingUpdateRequest(
+  value: unknown,
+): value is RatingUpdateRequest;
+
+export function isRatingUpdateResponse(
+  value: unknown,
+): value is RatingUpdateResponse;
+
 export function createRatingUpdater<TPlayer extends RatingPlayerLike>(
   Glicko2: RatingCalculatorConstructor<TPlayer>,
 ): RatingUpdater;

@@ -509,6 +509,58 @@ After reconciliation, restore and deploy `editUsername` from commit
 `e928329da`, then rollback both Workers. Delete the downloaded Google key and
 the external secrets file once Cloudflare retains the encrypted secrets.
 
+## Rating updates
+
+Authenticated automatch rating completion is served by:
+
+- `POST https://api.mons.link/ratings/update`
+
+The browser sends its Firebase ID token and the acting login, opponent login,
+invite, and match IDs. The Worker validates the invite participants and the
+authoritative match replicas, resolves the result with `mons-rules`, and uses
+the existing `ratingUpdates/{inviteId}__{matchId}` Firestore lease. This shared
+lease prevents old tabs calling the Firebase callable and new tabs calling the
+Worker from applying the same match twice during cutover.
+
+The Worker commits both profile changes and the completed rating record in one
+Firestore transaction. It then repairs the RTDB completion and timer markers.
+The existing `projectRatingTelegramUpdates` Firebase trigger remains deployed
+and continues handling Telegram projection and event progress from the
+completed Firestore record.
+
+Provision a dedicated Google identity with the exact rating transaction
+permissions, conditioned on the default Firestore database:
+
+```sh
+gcloud iam roles create monsLinkRatingMutation --project mons-link --title="mons.link rating mutation" --permissions=datastore.databases.get,datastore.entities.create,datastore.entities.get,datastore.entities.list,datastore.entities.update --stage=GA
+gcloud iam service-accounts create mons-link-rating-api --project mons-link --display-name="mons.link rating API"
+gcloud projects add-iam-policy-binding mons-link --member="serviceAccount:mons-link-rating-api@mons-link.iam.gserviceaccount.com" --role="projects/mons-link/roles/monsLinkRatingMutation" --condition='expression=resource.name=="projects/mons-link/databases/(default)",title=default-firestore-only'
+gcloud iam service-accounts keys create /secure/mons-link-rating-api.json --project mons-link --iam-account=mons-link-rating-api@mons-link.iam.gserviceaccount.com
+```
+
+Prepare an untracked external secrets file for the first candidate or key
+rotation:
+
+```dotenv
+RATING_SERVICE_ACCOUNT_EMAIL=mons-link-rating-api@mons-link.iam.gserviceaccount.com
+RATING_SERVICE_ACCOUNT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+```
+
+Upload and smoke-test the API candidate with the secrets file, promote it, then
+promote the frontend. Complete one controlled normal automatch and one
+event-owned match. Confirm each profile changes once, the rating record is
+`done`, the RTDB completion marker is true, protected timer markers are gone,
+and the retained projector produces one Telegram update or event-progress
+signal. Replay the API request and confirm no additional profile mutation.
+
+Run the complete Firebase release only after those checks. Reconciliation
+removes `updateRatings` while retaining `projectRatingTelegramUpdates`.
+Before reconciliation, rollback the frontend and API versions. After
+reconciliation, redeploy `updateRatings` from commit `341f23e36` before rolling
+back those versions. Old tabs must refresh after the callable is removed.
+Delete the downloaded key and external secrets file after Cloudflare retains
+the encrypted secrets.
+
 ## Firebase deployment
 
 - Deploy the complete Firebase release: `npm run deploy:firebase -- --project mons-link`

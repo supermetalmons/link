@@ -3,7 +3,14 @@ import {
   normalizeCount,
   type MiningMaterialName,
 } from "@mons/shared/mining";
-import { movesFromFlatString } from "@mons/shared/match-protocol";
+import {
+  MAX_MATCH_FEN_BYTES,
+  MAX_MATCH_HISTORY_BYTES,
+  MAX_MATCH_HISTORY_ENTRIES,
+  isMatchFenWithinLimit,
+  isMatchHistoryWithinLimits,
+  movesFromFlatString,
+} from "@mons/shared/match-protocol";
 import { parseInviteMatchIndex } from "@mons/shared/rematches";
 import type {
   WagerOutcomeResolveRequest,
@@ -19,9 +26,6 @@ import {
   resolveWagerParticipants,
 } from "./wagerProposal.ts";
 
-const MAX_MATCH_FEN_BYTES = 16 * 1024;
-const MAX_MATCH_HISTORY_BYTES = 64 * 1024;
-const MAX_MATCH_HISTORY_ENTRIES = 2_048;
 const SETTLEMENT_VERSION = 1;
 
 type MatchRecord = {
@@ -102,25 +106,14 @@ function parseMatchRecord(value: unknown): MatchRecord | null {
   const flatMovesString =
     typeof record.flatMovesString === "string" ? record.flatMovesString : "";
   if (
-    new TextEncoder().encode(fen).byteLength > MAX_MATCH_FEN_BYTES ||
-    new TextEncoder().encode(flatMovesString).byteLength >
-      MAX_MATCH_HISTORY_BYTES
+    !isMatchFenWithinLimit(fen) ||
+    !isMatchHistoryWithinLimits(flatMovesString)
   ) {
     throw new AuthApiFailure(
       409,
       "failed-precondition",
       "match-result-unavailable",
     );
-  }
-  let entries = flatMovesString ? 1 : 0;
-  for (const character of flatMovesString) {
-    if (character === "-" && ++entries > MAX_MATCH_HISTORY_ENTRIES) {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        "match-result-unavailable",
-      );
-    }
   }
   return {
     color,

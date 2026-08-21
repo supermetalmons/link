@@ -1,4 +1,10 @@
 export const CONTROLLER_VERSION: 2;
+export const MAX_MATCH_FEN_BYTES: 16384;
+export const MAX_MATCH_HISTORY_BYTES: 65536;
+export const MAX_MATCH_HISTORY_ENTRIES: 2048;
+
+export function isMatchFenWithinLimit(value: unknown): value is string;
+export function isMatchHistoryWithinLimits(value: unknown): value is string;
 
 export type MatchSeedRecord<TGameVariant extends string = string> = {
   gameVariant: TGameVariant;

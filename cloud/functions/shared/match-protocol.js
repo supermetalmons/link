@@ -1,6 +1,32 @@
 "use strict";
 
 const CONTROLLER_VERSION = 2;
+const MAX_MATCH_FEN_BYTES = 16 * 1024;
+const MAX_MATCH_HISTORY_BYTES = 64 * 1024;
+const MAX_MATCH_HISTORY_ENTRIES = 2_048;
+
+function isMatchFenWithinLimit(value) {
+  return (
+    typeof value === "string" &&
+    new TextEncoder().encode(value).byteLength <= MAX_MATCH_FEN_BYTES
+  );
+}
+
+function isMatchHistoryWithinLimits(value) {
+  if (
+    typeof value !== "string" ||
+    new TextEncoder().encode(value).byteLength > MAX_MATCH_HISTORY_BYTES
+  ) {
+    return false;
+  }
+  let entries = value === "" ? 0 : 1;
+  for (const character of value) {
+    if (character === "-" && ++entries > MAX_MATCH_HISTORY_ENTRIES) {
+      return false;
+    }
+  }
+  return true;
+}
 
 function buildFreshMatchRecord({ color, emojiId, aura, seed }) {
   return {
@@ -55,8 +81,13 @@ function selectLaterGame(playerGame, opponentGame) {
 
 module.exports = {
   CONTROLLER_VERSION,
+  MAX_MATCH_FEN_BYTES,
+  MAX_MATCH_HISTORY_BYTES,
+  MAX_MATCH_HISTORY_ENTRIES,
   buildOrderedMoveHistory,
   buildFreshMatchRecord,
+  isMatchFenWithinLimit,
+  isMatchHistoryWithinLimits,
   movesFromFlatString,
   parseGameFromMatchData,
   selectLaterGame,

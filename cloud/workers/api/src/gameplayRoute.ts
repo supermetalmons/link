@@ -20,6 +20,10 @@ import {
   type StartMatchTimerRequest,
 } from "@mons/shared/timers";
 import {
+  isRatingUpdateRequest,
+  type RatingUpdateRequest,
+} from "@mons/shared/ratings";
+import {
   TELEGRAM_AUTOMATCH_VERSION,
   buildAutomatchTelegramLifecycleUpdates,
 } from "../../../functions/telegram/automatchSource.js";
@@ -42,6 +46,8 @@ import { MAX_FIREBASE_KEY_BYTES, isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
   createGameplayRepository,
   type GameplayRepository,
+  createRatingRepository,
+  type RatingRepository,
 } from "./gameplayRepository.ts";
 import { readBoundedJson } from "./http.ts";
 import { startAutomatch, type AutomatchDependencies } from "./automatch.ts";
@@ -63,8 +69,13 @@ import {
   resolveWagerOutcome,
   type WagerOutcomeDependencies,
 } from "./wagerOutcome.ts";
+import {
+  updateRatings,
+  type RatingUpdateDependencies,
+} from "./ratingUpdate.ts";
 
 const MAX_NAVIGATION_DELETE_ATTEMPTS = 3;
+const MAX_FIRESTORE_DOCUMENT_ID_BYTES = 1_500;
 
 export const GAMEPLAY_PATHS = new Set([
   "/automatch/cancel",
@@ -72,6 +83,7 @@ export const GAMEPLAY_PATHS = new Set([
   "/matches/timer/claim",
   "/matches/timer/start",
   "/navigation/games/remove",
+  "/ratings/update",
   "/wagers/proposals/accept",
   "/wagers/proposals/cancel",
   "/wagers/proposals/decline",
@@ -96,6 +108,8 @@ export type GameplayRouteDependencies = {
   automatch?: AutomatchDependencies;
   logFailure?: (kind: string) => void;
   repository?: GameplayRepository;
+  rating?: RatingUpdateDependencies;
+  ratingRepository?: RatingRepository;
   timer?: MatchTimerDependencies;
   wager?: WagerProposalDependencies;
   wagerOutcome?: WagerOutcomeDependencies;
@@ -472,6 +486,31 @@ async function readGameplayBody(
     }
     return { inviteId, matchId };
   }
+  if (pathname === "/ratings/update") {
+    if (!isRatingUpdateRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    const playerId = body.playerId.trim();
+    const opponentId = body.opponentId.trim();
+    const inviteId = body.inviteId.trim();
+    const matchId = body.matchId.trim();
+    if (
+      !isSafeFirebaseKey(playerId) ||
+      !isSafeFirebaseKey(opponentId) ||
+      !isSafeFirebaseKey(inviteId) ||
+      !isSafeFirebaseKey(matchId) ||
+      new TextEncoder().encode(`${inviteId}__${matchId}`).byteLength >
+        MAX_FIRESTORE_DOCUMENT_ID_BYTES
+    ) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return {
+      playerId,
+      opponentId,
+      inviteId,
+      matchId,
+    } satisfies RatingUpdateRequest;
+  }
   if (!isRemoveNavigationGameRequest(body)) {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
   }
@@ -548,6 +587,17 @@ export async function handleGameplayRoute(
         identity,
         normalizeString(body.inviteId),
         repository,
+      );
+    } else if (pathname === "/ratings/update") {
+      if (!isRatingUpdateRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      response = await updateRatings(
+        identity,
+        body,
+        dependencies.ratingRepository ||
+          createRatingRepository(env, repository),
+        dependencies.rating,
       );
     } else if (pathname === "/wagers/proposals/send") {
       if (!isWagerProposalSendRequest(body)) {

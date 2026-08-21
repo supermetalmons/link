@@ -10,7 +10,7 @@ const {
   projectRatingUpdateRecord,
   projectRatingTelegramUpdates,
 } = require("../functions/ratingTelegramProjector");
-const { getRatingEventMetadata } = require("../functions/updateRatings");
+const { getRatingEventMetadata } = require("@mons/shared/ratings");
 
 const inviteId = "auto_example";
 const makeSource = (overrides = {}) => ({

@@ -18,6 +18,8 @@ registerHooks({
 
 const {
   GameplayApiError,
+  RATING_API_TIMEOUT_MS,
+  RATING_BUSY_RETRY_DELAY_MS,
   acceptWagerProposalViaApi,
   cancelAutomatchViaApi,
   cancelWagerProposalViaApi,
@@ -28,7 +30,10 @@ const {
   sendWagerProposalViaApi,
   startAutomatchViaApi,
   startMatchTimerViaApi,
+  updateRatingsViaApi,
 } = await import("../src/services/gameplayApi.ts");
+const { isRatingUpdateRequest, isRatingUpdateResponse } =
+  await import("@mons/shared/ratings");
 const {
   isCancelAutomatchResponse,
   isRemoveNavigationGameRequest,
@@ -59,6 +64,138 @@ const jsonResponse = (body, status = 200) =>
 
 test.afterEach(() => {
   globalThis.fetch = originalFetch;
+});
+
+test("sends the exact rating mutation with strict contracts", async () => {
+  const calls = [];
+  const delays = [];
+  let now = 1_000;
+  const responses = [{ ok: true, skipped: true }, { ok: true }];
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input: String(input), init });
+    return jsonResponse(responses.shift());
+  };
+  const request = {
+    playerId: "player",
+    opponentId: "opponent",
+    inviteId: "auto_aaaaaaaaaaa",
+    matchId: "auto_aaaaaaaaaaa",
+  };
+  assert.deepEqual(
+    await updateRatingsViaApi(request, async () => "firebase-token", {
+      now: () => now,
+      sleep: async (milliseconds) => {
+        delays.push(milliseconds);
+        now += milliseconds;
+      },
+    }),
+    { ok: true },
+  );
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].input, "https://api.mons.link/ratings/update");
+  assert.deepEqual(JSON.parse(calls[0].init.body), request);
+  assert.equal(
+    new Headers(calls[0].init.headers).get("Authorization"),
+    "Bearer firebase-token",
+  );
+  assert.equal(RATING_API_TIMEOUT_MS, 60_000);
+  assert.equal(RATING_BUSY_RETRY_DELAY_MS, 31_000);
+  assert.deepEqual(delays, [31_000]);
+  assert.equal(isRatingUpdateRequest(request), true);
+  assert.equal(isRatingUpdateRequest({ ...request, extra: true }), false);
+  assert.equal(isRatingUpdateResponse({ ok: true }), true);
+  assert.equal(isRatingUpdateResponse({ ok: true, skipped: true }), true);
+  assert.equal(isRatingUpdateResponse({ ok: false }), true);
+  assert.equal(isRatingUpdateResponse({ ok: true, skipped: false }), false);
+  assert.equal(isRatingUpdateResponse({ ok: true, extra: true }), false);
+});
+
+test("does not retry a busy rating update after its auth identity changes", async () => {
+  let fetches = 0;
+  let tokens = 0;
+  globalThis.fetch = async () => {
+    fetches++;
+    return jsonResponse({ ok: true, skipped: true });
+  };
+  const response = await updateRatingsViaApi(
+    {
+      playerId: "player",
+      opponentId: "opponent",
+      inviteId: "auto_aaaaaaaaaaa",
+      matchId: "auto_aaaaaaaaaaa",
+    },
+    async () => {
+      tokens++;
+      return "firebase-token";
+    },
+    {
+      shouldRetry: () => false,
+      sleep: async () => undefined,
+    },
+  );
+  assert.deepEqual(response, { ok: true, skipped: true });
+  assert.equal(fetches, 1);
+  assert.equal(tokens, 1);
+});
+
+test("retries one unavailable rating update within the same deadline", async () => {
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches++;
+    return fetches === 1
+      ? jsonResponse(
+          {
+            ok: false,
+            error: "unavailable",
+            message: "gameplay-service-unavailable",
+          },
+          503,
+        )
+      : jsonResponse({ ok: true });
+  };
+  assert.deepEqual(
+    await updateRatingsViaApi(
+      {
+        playerId: "player",
+        opponentId: "opponent",
+        inviteId: "auto_aaaaaaaaaaa",
+        matchId: "auto_aaaaaaaaaaa",
+      },
+      async () => "firebase-token",
+    ),
+    { ok: true },
+  );
+  assert.equal(fetches, 2);
+});
+
+test("bounds a busy rating retry to one 60-second deadline", async () => {
+  let fetches = 0;
+  let now = 1_000;
+  const delays = [];
+  globalThis.fetch = async () => {
+    fetches++;
+    now += 40_000;
+    return jsonResponse({ ok: true, skipped: true });
+  };
+  const response = await updateRatingsViaApi(
+    {
+      playerId: "player",
+      opponentId: "opponent",
+      inviteId: "auto_aaaaaaaaaaa",
+      matchId: "auto_aaaaaaaaaaa",
+    },
+    async () => "firebase-token",
+    {
+      now: () => now,
+      sleep: async (milliseconds) => {
+        delays.push(milliseconds);
+        now += milliseconds;
+      },
+    },
+  );
+  assert.deepEqual(response, { ok: true, skipped: true });
+  assert.equal(fetches, 1);
+  assert.deepEqual(delays, [20_000]);
 });
 
 test("sends exact authenticated gameplay mutations and validates contracts", async () => {
@@ -711,6 +848,7 @@ test("connection no longer references the migrated Firebase callables", () => {
   assert.doesNotMatch(source, /["']resolveWagerOutcome["']/);
   assert.doesNotMatch(source, /["']startMatchTimer["']/);
   assert.doesNotMatch(source, /["']claimMatchVictoryByTimer["']/);
+  assert.doesNotMatch(source, /httpsCallable\([^)]*updateRatings/);
   assert.match(source, /cancelAutomatchViaApi/);
   assert.match(source, /cancelWagerProposalViaApi/);
   assert.match(source, /declineWagerProposalViaApi/);
@@ -725,6 +863,7 @@ test("connection no longer references the migrated Firebase callables", () => {
   assert.match(source, /removeNavigationGameViaApi/);
   assert.match(source, /startMatchTimerViaApi/);
   assert.match(source, /claimMatchVictoryByTimerViaApi/);
+  assert.match(source, /updateRatingsViaApi/);
   assert.doesNotMatch(source, /PendingAutomatchOperationId/);
   assert.doesNotMatch(source, /crypto\.randomUUID/);
 });

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Game } from "mons-rules";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import {
   cancelAutomatch,
@@ -12,6 +13,7 @@ import type {
   GameplayRepository,
   NavigationGameDeleteResult,
   NavigationGameDocument,
+  RatingRepository,
 } from "../src/gameplayRepository.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
@@ -518,6 +520,119 @@ test("routes authenticated CORS and rejects methods before authentication", asyn
     mode: "pending",
     matchedImmediately: false,
   });
+});
+
+test("routes exact authenticated rating updates without a new rate limit", async () => {
+  const ratingRequest = {
+    playerId: identity.uid,
+    opponentId: "opponent-uid",
+    inviteId: "auto_aaaaaaaaaaa",
+    matchId: "auto_aaaaaaaaaaa",
+  };
+  const patches: Record<string, unknown>[] = [];
+  const ratingRepository: RatingRepository = {
+    applyFebruaryChallengeReplay: async () => undefined,
+    finalizeRatingUpdate: async (_input, buildPlan) => {
+      const plan = buildPlan(null, null);
+      assert.equal(plan.ratingUpdate.status, "done");
+      return { status: "committed", data: plan.repairData };
+    },
+    getRatingProfile: async () => null,
+    getRtdbPath: async (path) => {
+      if (
+        path ===
+        `invites/${ratingRequest.inviteId}/matchesRatingUpdates/${ratingRequest.matchId}`
+      ) {
+        return false;
+      }
+      if (path === `invites/${ratingRequest.inviteId}`) {
+        return {
+          hostId: ratingRequest.playerId,
+          guestId: ratingRequest.opponentId,
+        };
+      }
+      if (
+        path ===
+        `players/${ratingRequest.playerId}/matches/${ratingRequest.matchId}`
+      ) {
+        return {
+          color: "white",
+          emojiId: 1,
+          fen: new Game().toFen(),
+          flatMovesString: "",
+          status: "",
+          timer: "",
+        };
+      }
+      if (
+        path ===
+        `players/${ratingRequest.opponentId}/matches/${ratingRequest.matchId}`
+      ) {
+        return {
+          color: "black",
+          emojiId: 2,
+          fen: new Game().toFen(),
+          flatMovesString: "",
+          status: "surrendered",
+          timer: "",
+        };
+      }
+      return null;
+    },
+    patchRtdbRoot: async (updates) => {
+      patches.push(updates);
+    },
+    readRatingUpdate: async () => null,
+    tryAcquireRatingLease: async () => ({
+      status: "acquired",
+      data: null,
+    }),
+  };
+  const response = await handleGameplayRoute(
+    request("/ratings/update", { body: ratingRequest }),
+    env,
+    context(),
+    {
+      ratingRepository,
+      repository: repository(),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { ok: true });
+  assert.equal(patches.length, 1);
+
+  const invalid = await handleGameplayRoute(
+    request("/ratings/update", {
+      body: { ...ratingRequest, playerId: "unsafe/player" },
+    }),
+    env,
+    context(),
+    {
+      ratingRepository,
+      repository: repository(),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(invalid.status, 400);
+
+  const oversizedOperation = await handleGameplayRoute(
+    request("/ratings/update", {
+      body: {
+        ...ratingRequest,
+        inviteId: `auto_${"a".repeat(763)}`,
+        matchId: "b".repeat(768),
+      },
+    }),
+    env,
+    context(),
+    {
+      ratingRepository,
+      repository: repository(),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(oversizedOperation.status, 400);
 });
 
 test("routes match timer starts with rate limiting and idempotent storage", async () => {

@@ -11,7 +11,12 @@ import {
   type StartMatchTimerResponse,
 } from "@mons/shared/timers";
 import {
+  MAX_MATCH_FEN_BYTES,
+  MAX_MATCH_HISTORY_BYTES,
+  MAX_MATCH_HISTORY_ENTRIES,
   buildOrderedMoveHistory as buildSharedOrderedMoveHistory,
+  isMatchFenWithinLimit,
+  isMatchHistoryWithinLimits,
   parseGameFromMatchData,
   selectLaterGame,
 } from "@mons/shared/match-protocol";
@@ -29,9 +34,6 @@ const EVENT_PROGRESS_FALLBACK_ROOT = "eventProgressFallback";
 const MATCH_TIMER_CLAIM_LEASE_MS = 30_000;
 const MATCH_TIMER_CLAIM_SIDE_EFFECT_ATTEMPTS = 3;
 const TIMER_DEADLINE_GRACE_MS = 500;
-const MAX_MATCH_FEN_BYTES = 16 * 1024;
-const MAX_MATCH_HISTORY_BYTES = 64 * 1024;
-const MAX_MATCH_HISTORY_ENTRIES = 2_048;
 const MATCH_TIMER_OPERATION_TIMEOUT_MS = 20_000;
 
 export type MatchTimerRecord = {
@@ -106,9 +108,8 @@ function readMatchTimerRecord(value: unknown): MatchTimerRecord {
     !record ||
     (color !== "white" && color !== "black") ||
     !fen.trim() ||
-    new TextEncoder().encode(fen).byteLength > MAX_MATCH_FEN_BYTES ||
-    new TextEncoder().encode(flatMovesString).byteLength >
-      MAX_MATCH_HISTORY_BYTES
+    !isMatchFenWithinLimit(fen) ||
+    !isMatchHistoryWithinLimits(flatMovesString)
   ) {
     throw failedPrecondition("something is wrong with the game state.");
   }
@@ -122,14 +123,11 @@ function readMatchTimerRecord(value: unknown): MatchTimerRecord {
 }
 
 function movesFromFlatString(value: string): string[] {
+  if (!isMatchHistoryWithinLimits(value)) {
+    throw failedPrecondition("something is wrong with the game state.");
+  }
   if (value === "") {
     return [];
-  }
-  let entries = 1;
-  for (const character of value) {
-    if (character === "-" && ++entries > MAX_MATCH_HISTORY_ENTRIES) {
-      throw failedPrecondition("something is wrong with the game state.");
-    }
   }
   return value.split("-");
 }

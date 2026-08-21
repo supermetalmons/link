@@ -8,7 +8,6 @@ const { verifyAppleToken } = require("./verifyAppleToken");
 const { completeXRedirectAuth } = require("./completeXRedirectAuth");
 const { unlinkAuthMethod } = require("./unlinkAuthMethod");
 const { syncProfileClaim } = require("./syncProfileClaim");
-const { updateRatings } = require("./updateRatings");
 const { withdrawEventPrize } = require("./eventPrizeWithdrawal");
 const {
   createEvent,
@@ -56,7 +55,6 @@ exports.verifyAppleToken = verifyAppleToken;
 exports.completeXRedirectAuth = completeXRedirectAuth;
 exports.unlinkAuthMethod = unlinkAuthMethod;
 exports.syncProfileClaim = syncProfileClaim;
-exports.updateRatings = updateRatings;
 exports.withdrawEventPrize = withdrawEventPrize;
 exports.createEvent = createEvent;
 exports.joinEvent = joinEvent;

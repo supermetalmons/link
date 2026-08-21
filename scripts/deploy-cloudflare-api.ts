@@ -110,6 +110,7 @@ const AUTHENTICATED_ROUTE_SMOKES = [
   { path: "/navigation/games/remove", method: "POST" },
   { path: "/profiles/lookup", method: "POST" },
   { path: "/profiles/username", method: "POST" },
+  { path: "/ratings/update", method: "POST" },
   { path: "/wagers/proposals/accept", method: "POST" },
   { path: "/wagers/proposals/cancel", method: "POST" },
   { path: "/wagers/proposals/decline", method: "POST" },
@@ -250,6 +251,8 @@ function createChildEnvironment(
       normalized === "FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY" ||
       normalized === "GAMEPLAY_SERVICE_ACCOUNT_EMAIL" ||
       normalized === "GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY" ||
+      normalized === "RATING_SERVICE_ACCOUNT_EMAIL" ||
+      normalized === "RATING_SERVICE_ACCOUNT_PRIVATE_KEY" ||
       normalized === "FIREBASE_RTDB_URL" ||
       normalized === "DOTENV_KEY",
   );

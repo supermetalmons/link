@@ -116,6 +116,7 @@ import {
   sendWagerProposalViaApi,
   startAutomatchViaApi,
   startMatchTimerViaApi,
+  updateRatingsViaApi,
 } from "../services/gameplayApi";
 import { compareNavigationItems as compareNavigationItemsByDisplayOrder } from "../services/navigationItemOrdering";
 import { resetNftCache } from "../services/nftCache";
@@ -166,6 +167,7 @@ import type {
   StartMatchTimerResponse,
 } from "@mons/shared/timers";
 import type { WagerOutcomeResolveResponse } from "@mons/shared/wagers";
+import type { RatingUpdateResponse } from "@mons/shared/ratings";
 import {
   beginAuthIntentViaApi,
   beginXRedirectAuthViaApi,
@@ -3583,9 +3585,7 @@ class Connection {
     return items.slice(0, boundedLimit);
   }
 
-  public async updateRatings(): Promise<any> {
-    const sessionGuard = this.createSessionGuard();
-    const profileIdAtRequest = storage.getProfileId("");
+  public async updateRatings(): Promise<RatingUpdateResponse> {
     try {
       await this.ensureAuthenticated();
       const writableContext = this.requireWritableContext(
@@ -3595,27 +3595,20 @@ class Connection {
       if (!writableContext) {
         return { ok: false };
       }
-      const updateRatingsFunction = httpsCallable(
-        this.functions,
-        "updateRatings",
-      );
       const opponentId = this.getOpponentId(writableContext.actorUid);
-      const response = await updateRatingsFunction({
-        playerId: writableContext.actorUid,
-        inviteId: writableContext.inviteId,
-        matchId: writableContext.matchId,
-        opponentId,
-      });
-      const data = response.data as { mining?: PlayerMiningData } | null;
-      if (
-        data &&
-        data.mining &&
-        sessionGuard() &&
-        storage.getProfileId("") === profileIdAtRequest
-      ) {
-        rocksMiningService.setFromServer(data.mining, { persist: true });
-      }
-      return data;
+      return updateRatingsViaApi(
+        {
+          playerId: writableContext.actorUid,
+          inviteId: writableContext.inviteId,
+          matchId: writableContext.matchId,
+          opponentId,
+        },
+        this.getAuthApiToken,
+        {
+          shouldRetry: () =>
+            this.auth.currentUser?.uid === writableContext.loginUid,
+        },
+      );
     } catch (error) {
       console.error("Error updating ratings:", error);
       throw error;
