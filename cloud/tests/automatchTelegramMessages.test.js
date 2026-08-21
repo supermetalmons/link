@@ -5,13 +5,15 @@ const {
   buildPendingAutomatchTelegramSource,
   buildMatchedAutomatchTelegramUpdates,
   buildAutomatchTelegramLifecycleUpdates,
+} = require("../functions/telegram/automatchSource");
+const {
+  buildAutomatchProjectionGuard,
+  buildAutomatchTelegramProjection,
+  evaluateAutomatchProjectionUpdate,
   resolveAutomatchTelegramLifecycle,
   getAutomatchResultFragments,
   renderMatchedAutomatchTelegramText,
-  buildAutomatchTelegramProjection,
-  queueAutomatchTelegramProjection,
-  projectAutomatchTelegramMessages,
-} = require("../functions/automatchTelegramMessages");
+} = require("../functions/telegram/projectionCore");
 
 const inviteId = "auto_example";
 const waitingText =
@@ -32,42 +34,6 @@ const makeSource = (overrides = {}) => ({
   generation: 2,
   ...overrides,
 });
-
-const createSnapshot = (value) => ({
-  exists: () => value !== null && value !== undefined,
-  val: () => value,
-});
-
-const createMessageDatabase = (
-  initialState = null,
-  { coldStart = false } = {},
-) => {
-  let state = initialState;
-  return {
-    database: {
-      ref(path) {
-        assert.equal(path, `telegramMessages/automatch:${inviteId}`);
-        return {
-          async transaction(updater) {
-            if (coldStart) {
-              updater(undefined);
-            }
-            const next = updater(state);
-            if (next === undefined) {
-              return { committed: false, snapshot: createSnapshot(state) };
-            }
-            state = next;
-            return { committed: true, snapshot: createSnapshot(state) };
-          },
-        };
-      },
-    },
-    getState: () => state,
-    setState: (nextState) => {
-      state = nextState;
-    },
-  };
-};
 
 test("pending source stores exact waiting and canceled messages", () => {
   const timestamp = { ".sv": "timestamp" };
@@ -186,7 +152,7 @@ test("result fragments render once in deterministic rematch order", () => {
   );
 });
 
-test("pending projection queues the existing HTML message as a send", () => {
+test("pending projection builds the existing HTML message as a send", () => {
   const projection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({ lifecycle: "pending" }),
@@ -255,129 +221,90 @@ test("v1 sources are never projected", () => {
   );
 });
 
-test("stale pending projection cannot replace a matched applied instance", async () => {
-  const store = createMessageDatabase();
-  const matchedProjection = buildAutomatchTelegramProjection({
+test("stale pending projection cannot replace a matched applied instance", () => {
+  const pendingProjection = buildAutomatchTelegramProjection({
     inviteId,
-    source: makeSource({ generation: 2 }),
-    inviteData: { guestId: "guest" },
+    source: makeSource({ lifecycle: "pending", generation: 99 }),
+    inviteData: { guestId: null },
   });
-  await queueAutomatchTelegramProjection(matchedProjection, {
-    database: store.database,
-  });
-  const matchedRecord = store.getState();
-  store.setState({
-    ...matchedRecord,
-    automatchProjection: null,
-    applied: {
-      messageId: 42,
-      instanceKey: `matched:${inviteId}`,
-      contentHash: matchedRecord.desired.contentHash,
+  const decision = evaluateAutomatchProjectionUpdate(
+    {
+      applied: {
+        messageId: 42,
+        instanceKey: `matched:${inviteId}`,
+      },
+      delivery: { status: "delivered" },
     },
-    delivery: { status: "delivered" },
-  });
-  const pendingProjection = buildAutomatchTelegramProjection({
-    inviteId,
-    source: makeSource({ lifecycle: "pending", generation: 99 }),
-    inviteData: { guestId: null },
-  });
+    pendingProjection,
+  );
 
-  const result = await queueAutomatchTelegramProjection(pendingProjection, {
-    database: store.database,
+  assert.deepEqual(decision, {
+    allowed: false,
+    reason: "matched-regression",
   });
-
-  assert.equal(result.status, "stale");
-  assert.equal(result.reason, "matched-regression");
-  assert.equal(store.getState().desired.text, matchedText);
-  assert.equal(store.getState().applied.instanceKey, `matched:${inviteId}`);
-  assert.deepEqual(store.getState().delivery, { status: "delivered" });
 });
 
-test("cold-cache projection uses the final authoritative guard decision", async () => {
+test("projection guards retain matched lifecycle and source generation", () => {
   const matchedProjection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({ generation: 2 }),
     inviteData: { guestId: "guest" },
   });
-  const warmStore = createMessageDatabase();
-  await queueAutomatchTelegramProjection(matchedProjection, {
-    database: warmStore.database,
-  });
-  const matchedRecord = warmStore.getState();
-  const coldStore = createMessageDatabase(matchedRecord, { coldStart: true });
-  const pendingProjection = buildAutomatchTelegramProjection({
-    inviteId,
-    source: makeSource({ lifecycle: "pending", generation: 99 }),
-    inviteData: { guestId: null },
-  });
+  const guard = buildAutomatchProjectionGuard(matchedProjection);
 
-  const result = await queueAutomatchTelegramProjection(pendingProjection, {
-    database: coldStore.database,
-  });
-
-  assert.equal(result.status, "stale");
-  assert.equal(result.reason, "matched-regression");
-  assert.equal(coldStore.getState().desired.text, matchedText);
-  assert.equal(coldStore.getState().automatchProjection.lifecycle, "matched");
+  assert.equal(guard.lifecycle, "matched");
+  assert.equal(guard.sourceGeneration, 2);
+  assert.equal(guard.sourceRevision, matchedProjection.sourceRevision);
 });
 
-test("stale cancellation cannot replace matched desired state", async () => {
-  const store = createMessageDatabase();
+test("stale cancellation cannot replace matched desired state", () => {
   const matchedProjection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({ generation: 5 }),
     inviteData: { guestId: "guest" },
-  });
-  await queueAutomatchTelegramProjection(matchedProjection, {
-    database: store.database,
   });
   const canceledProjection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({ lifecycle: "canceled", generation: 6 }),
     inviteData: { guestId: null },
   });
+  const decision = evaluateAutomatchProjectionUpdate(
+    {
+      automatchProjection: buildAutomatchProjectionGuard(matchedProjection),
+    },
+    canceledProjection,
+  );
 
-  const result = await queueAutomatchTelegramProjection(canceledProjection, {
-    database: store.database,
+  assert.deepEqual(decision, {
+    allowed: false,
+    reason: "matched-regression",
   });
-
-  assert.equal(result.status, "stale");
-  assert.equal(result.reason, "matched-regression");
-  assert.equal(store.getState().desired.instanceKey, `matched:${inviteId}`);
-  assert.equal(store.getState().automatchProjection.lifecycle, "matched");
 });
 
-test("pending projection cannot replace canceled desired state", async () => {
-  const store = createMessageDatabase();
-  const canceledProjection = buildAutomatchTelegramProjection({
-    inviteId,
-    source: makeSource({ lifecycle: "canceled", generation: 2 }),
-    inviteData: { guestId: null },
-  });
-  await queueAutomatchTelegramProjection(canceledProjection, {
-    database: store.database,
-  });
+test("pending projection cannot replace canceled desired state", () => {
   const pendingProjection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({ lifecycle: "pending", generation: 3 }),
     inviteData: { guestId: null },
   });
+  const decision = evaluateAutomatchProjectionUpdate(
+    {
+      desired: {
+        operation: "edit",
+        ifMissing: "skip",
+        instanceKey: `waiting:${inviteId}`,
+      },
+    },
+    pendingProjection,
+  );
 
-  const result = await queueAutomatchTelegramProjection(pendingProjection, {
-    database: store.database,
+  assert.deepEqual(decision, {
+    allowed: false,
+    reason: "canceled-regression",
   });
-
-  assert.equal(result.status, "stale");
-  assert.equal(result.reason, "canceled-regression");
-  assert.equal(store.getState().desired.text, canceledText);
-  assert.equal(store.getState().automatchProjection.lifecycle, "canceled");
 });
 
-test("matched projection cannot drop result fragments already desired", async () => {
-  const store = createMessageDatabase({
-    delivery: { status: "delivered", attempts: 2 },
-    customState: { preserved: true },
-  });
+test("matched projection cannot drop result fragments already guarded", () => {
   const moreResultsProjection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({
@@ -389,9 +316,6 @@ test("matched projection cannot drop result fragments already desired", async ()
     }),
     inviteData: { guestId: "guest" },
   });
-  await queueAutomatchTelegramProjection(moreResultsProjection, {
-    database: store.database,
-  });
   const fewerResultsProjection = buildAutomatchTelegramProjection({
     inviteId,
     source: makeSource({
@@ -402,28 +326,15 @@ test("matched projection cannot drop result fragments already desired", async ()
     }),
     inviteData: { guestId: "guest" },
   });
-
-  const result = await queueAutomatchTelegramProjection(
+  const decision = evaluateAutomatchProjectionUpdate(
+    {
+      automatchProjection: buildAutomatchProjectionGuard(moreResultsProjection),
+    },
     fewerResultsProjection,
-    { database: store.database },
   );
 
-  assert.equal(result.status, "stale");
-  assert.equal(result.reason, "result-regression");
-  assert.equal(
-    store.getState().desired.text,
-    `${matchedText}\n\nfirst game\n\nfirst rematch`,
-  );
-  assert.deepEqual(store.getState().delivery, {
-    status: "delivered",
-    attempts: 2,
+  assert.deepEqual(decision, {
+    allowed: false,
+    reason: "result-regression",
   });
-  assert.deepEqual(store.getState().customState, { preserved: true });
-});
-
-test("automatch projection retries failed source events", () => {
-  assert.equal(
-    projectAutomatchTelegramMessages.__endpoint.eventTrigger.retry,
-    true,
-  );
 });

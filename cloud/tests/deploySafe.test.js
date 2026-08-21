@@ -544,7 +544,7 @@ test("operations documentation uses the release driver and required setup", () =
   assert.match(readme, /TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET/);
   assert.match(readme, /TELEGRAM_QUEUE_BRIDGE_SECRET/);
   assert.match(readme, /announceEventPrizes -- --bridge-secret-file/);
-  assert.match(readme, /Telegram delivery migration guide/);
+  assert.match(readme, /Telegram delivery recovery/);
   assert.doesNotMatch(readme, /firebase deploy[^\n]*--only functions/);
   assert.match(deploymentGuide, /deploy:firebase -- --project mons-link/);
   assert.doesNotMatch(

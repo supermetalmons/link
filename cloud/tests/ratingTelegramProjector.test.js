@@ -1,15 +1,16 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  isEventRatingUpdate,
-  shouldProjectRatingTelegramUpdate,
   shouldRequestEventRatingProgress,
-  mergeRatingResultFragment,
-  projectRatingTelegramUpdate,
   requestEventRatingProgress,
   projectRatingUpdateRecord,
   projectRatingTelegramUpdates,
 } = require("../functions/ratingTelegramProjector");
+const {
+  isEventRatingUpdate,
+  mergeRatingResultFragment,
+  shouldProjectRatingTelegramUpdate,
+} = require("../functions/telegram/projectionCore");
 const { getRatingEventMetadata } = require("@mons/shared/ratings");
 
 const inviteId = "auto_example";
@@ -42,70 +43,6 @@ const makeEventRatingUpdate = (overrides = {}) =>
     eventId: "event_example",
     ...overrides,
   });
-
-const createSnapshot = (value) => ({
-  exists: () => value !== null && value !== undefined,
-  val: () => value,
-});
-
-const createRatingDatabase = (initialState, { coldStart = false } = {}) => {
-  let source = initialState;
-  let transactionCount = 0;
-  return {
-    database: {
-      ref(path) {
-        assert.equal(path, `telegramAutomatches/${inviteId}`);
-        return {
-          async transaction(updater) {
-            transactionCount += 1;
-            if (coldStart) {
-              updater(undefined);
-            }
-            const next = updater(source);
-            if (next === undefined) {
-              return { committed: false, snapshot: createSnapshot(source) };
-            }
-            source = next;
-            return { committed: true, snapshot: createSnapshot(source) };
-          },
-        };
-      },
-    },
-    getSource: () => source,
-    getTransactionCount: () => transactionCount,
-  };
-};
-
-const createConcurrentRatingDatabase = (initialState) => {
-  let source = initialState;
-  let tail = Promise.resolve();
-  return {
-    database: {
-      ref(path) {
-        assert.equal(path, `telegramAutomatches/${inviteId}`);
-        return {
-          async transaction(updater) {
-            updater(undefined);
-            const previous = tail;
-            let release;
-            tail = new Promise((resolve) => {
-              release = resolve;
-            });
-            await previous;
-            try {
-              const next = updater(source);
-              source = next;
-              return { committed: true, snapshot: createSnapshot(source) };
-            } finally {
-              release();
-            }
-          },
-        };
-      },
-    },
-    getSource: () => source,
-  };
-};
 
 test("only completed v2 non-event rating updates are projectable", () => {
   assert.equal(shouldProjectRatingTelegramUpdate(makeRatingUpdate()), true);
@@ -241,87 +178,6 @@ test("v1 automatch sources remain untouched", () => {
   assert.equal(result.changed, false);
   assert.equal(result.reason, "skipped");
   assert.equal(result.source, source);
-});
-
-test("transaction projection is idempotent", async () => {
-  const store = createRatingDatabase(makeSource());
-
-  const first = await projectRatingTelegramUpdate(makeRatingUpdate(), {
-    database: store.database,
-  });
-  const duplicate = await projectRatingTelegramUpdate(makeRatingUpdate(), {
-    database: store.database,
-  });
-
-  assert.deepEqual(first, { status: "inserted", committed: true });
-  assert.deepEqual(duplicate, { status: "duplicate", committed: false });
-  assert.equal(store.getTransactionCount(), 2);
-  assert.equal(Object.keys(store.getSource().results).length, 1);
-  assert.equal(store.getSource().generation, 3);
-});
-
-test("cold-cache transaction reaches authoritative source before deciding", async () => {
-  const store = createRatingDatabase(makeSource(), { coldStart: true });
-
-  const inserted = await projectRatingTelegramUpdate(makeRatingUpdate(), {
-    database: store.database,
-  });
-  const duplicate = await projectRatingTelegramUpdate(makeRatingUpdate(), {
-    database: store.database,
-  });
-
-  assert.deepEqual(inserted, { status: "inserted", committed: true });
-  assert.deepEqual(duplicate, { status: "duplicate", committed: false });
-  assert.equal(Object.keys(store.getSource().results).length, 1);
-  assert.equal(store.getSource().generation, 3);
-});
-
-test("cold-cache missing and legacy sources remain untouched", async () => {
-  const missingStore = createRatingDatabase(null, { coldStart: true });
-  assert.deepEqual(
-    await projectRatingTelegramUpdate(makeRatingUpdate(), {
-      database: missingStore.database,
-    }),
-    { status: "skipped", committed: false },
-  );
-  assert.equal(missingStore.getSource(), null);
-
-  const legacySource = makeSource({ version: 1 });
-  const legacyStore = createRatingDatabase(legacySource, { coldStart: true });
-  assert.deepEqual(
-    await projectRatingTelegramUpdate(makeRatingUpdate(), {
-      database: legacyStore.database,
-    }),
-    { status: "skipped", committed: false },
-  );
-  assert.equal(legacyStore.getSource(), legacySource);
-});
-
-test("concurrent result fragment transactions retain both matches", async () => {
-  const store = createConcurrentRatingDatabase(makeSource());
-  const rematchId = `${inviteId}1`;
-
-  const [first, second] = await Promise.all([
-    projectRatingTelegramUpdate(makeRatingUpdate(), {
-      database: store.database,
-    }),
-    projectRatingTelegramUpdate(
-      makeRatingUpdate({
-        matchId: rematchId,
-        updateRatingMessage: "Bob 1489↑ Alice 1510↓ (9 - 4)",
-        completedAtMs: 300,
-      }),
-      { database: store.database },
-    ),
-  ]);
-
-  assert.deepEqual(first, { status: "inserted", committed: true });
-  assert.deepEqual(second, { status: "inserted", committed: true });
-  assert.deepEqual(Object.keys(store.getSource().results).sort(), [
-    inviteId,
-    rematchId,
-  ]);
-  assert.equal(store.getSource().generation, 4);
 });
 
 test("event records route to deterministic progress without touching RTDB", async () => {
@@ -490,21 +346,6 @@ test("background projector waits for a blocked event task request", async () => 
   const result = await projection;
   assert.equal(settled, true);
   assert.equal(result.status, "event-progress-requested");
-});
-
-test("non-v2 rating records do not access RTDB", async () => {
-  const database = {
-    ref() {
-      throw new Error("unexpected database access");
-    },
-  };
-  assert.deepEqual(
-    await projectRatingTelegramUpdate(
-      makeRatingUpdate({ telegramDeliveryVersion: null }),
-      { database },
-    ),
-    { status: "skipped" },
-  );
 });
 
 test("the retained rating trigger ignores non-event Telegram records", async () => {

@@ -21,10 +21,6 @@ test("Telegram compatibility facades delegate to focused modules", () => {
       "../functions/telegram/eventAnnouncements",
     ],
     [
-      "../functions/automatchTelegramMessages",
-      "../functions/telegram/automatchMessages",
-    ],
-    [
       "../functions/ratingTelegramProjector",
       "../functions/telegram/ratingProjector",
     ],

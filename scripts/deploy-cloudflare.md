@@ -106,10 +106,10 @@ configuration is intentionally changed, review it separately and apply it with
 `npm run deploy:api:triggers -- --token-file /path/to/cloudflare-token`, or set
 `CLOUDFLARE_API_TOKEN` in the invoking shell and omit `--token-file`.
 
-The same trigger command applies the reviewed Telegram delivery and projection
-Queue consumers plus the projection recovery schedule. Provisioning, secret
-setup, hard cutover, recovery, and rollback are documented in the
-[Telegram delivery migration guide](migrate-telegram-delivery.md).
+The trigger command applies reviewed routes and Cron schedules. Queue resources
+and initial consumer attachment are managed explicitly with Wrangler Queue
+commands; the tracked API Wrangler configuration remains the source of truth
+for producer bindings and consumer settings.
 
 ## Event prize announcement API
 

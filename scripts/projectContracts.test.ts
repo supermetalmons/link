@@ -281,7 +281,6 @@ test("package manifests preserve public scripts and deployment command vectors",
     logs: "firebase functions:log",
   });
   assert.deepEqual(adminPackage.scripts, {
-    "replay:telegram-projections": "node replayTelegramProjections.js",
     "requeue:telegram": "node requeueTelegramDelivery.js",
     "smoke:telegram": "node smokeTelegramDelivery.js",
     start: "node listAddresses.js",

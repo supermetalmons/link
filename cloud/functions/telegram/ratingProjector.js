@@ -1,36 +1,9 @@
 const { onDocumentWritten } = require("firebase-functions/v2/firestore");
-const admin = require("../firebaseAdmin");
 const { requestEventProgress } = require("../eventProgressTasks");
-const { runRtdbDecisionTransaction } = require("../rtdbDecisionTransaction");
 const {
-  isEventRatingUpdate,
-  mergeRatingResultFragment,
   normalizeString,
-  shouldProjectRatingTelegramUpdate,
   shouldRequestEventRatingProgress,
 } = require("./projectionCore");
-
-const projectRatingTelegramUpdate = async (ratingUpdate, dependencies = {}) => {
-  if (!shouldProjectRatingTelegramUpdate(ratingUpdate)) {
-    return { status: "skipped" };
-  }
-  const database = dependencies.database || admin.database();
-  const inviteId = normalizeString(ratingUpdate.inviteId);
-  const transactionResult = await runRtdbDecisionTransaction(
-    database.ref(`telegramAutomatches/${inviteId}`),
-    (source) => {
-      const merged = mergeRatingResultFragment(source, ratingUpdate);
-      const decision = { status: merged.reason };
-      return merged.changed
-        ? { value: merged.source, decision }
-        : { commit: false, decision };
-    },
-  );
-  return {
-    status: transactionResult.decision?.status || "skipped",
-    committed: transactionResult.committed,
-  };
-};
 
 const requestEventRatingProgress = async (ratingUpdate, dependencies = {}) => {
   if (!shouldRequestEventRatingProgress(ratingUpdate)) {
@@ -103,11 +76,7 @@ const projectRatingTelegramUpdates = onDocumentWritten(
 );
 
 module.exports = {
-  isEventRatingUpdate,
-  shouldProjectRatingTelegramUpdate,
   shouldRequestEventRatingProgress,
-  mergeRatingResultFragment,
-  projectRatingTelegramUpdate,
   requestEventRatingProgress,
   projectRatingUpdateRecord,
   projectRatingTelegramUpdates,

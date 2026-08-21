@@ -23,7 +23,7 @@ cutover procedure are documented in the Cloudflare deployment guide.
 
 `npm install -g firebase-tools`
 
-Set `TELEGRAM_QUEUE_BRIDGE_SECRET` for both retained Telegram dispatch triggers. The Cloudflare Queue migration, hard cutover, recovery, and rollback procedure is documented in the [Telegram delivery migration guide](../scripts/migrate-telegram-delivery.md).
+Set `TELEGRAM_QUEUE_BRIDGE_SECRET` for both retained Telegram dispatch triggers.
 
 The Telegram bot token, community chat ID, and dedicated announcement bridge
 secret are encrypted Worker secrets. Event prize operations use a separate
@@ -61,13 +61,6 @@ Ambiguous sends stay at `telegramMessages/{messageKey}/delivery/status = uncerta
 - `{ "requestId": "...", "action": "confirm-send-absent" }` when Telegram did not create the message.
 - `{ "requestId": "...", "action": "confirm-send-applied", "messageId": 123 }` when Telegram created it.
 - `{ "requestId": "...", "action": "abandon" }` to retain the audit record and stop delivery.
-
-Before rolling Telegram projection back to Firebase, preview and drain pending
-automatch and rating projections:
-
-`npm --prefix cloud/admin run replay:telegram-projections -- --project mons-link --dry-run`
-
-`npm --prefix cloud/admin run replay:telegram-projections -- --project mons-link --execute`
 
 The recovery dispatcher is idempotent by `requestId`. Retry-window exhaustion remains visible through `delivery/deadLetterAtMs`, and failed stale-message cleanup remains visible under `delivery/orphanedDeletes`.
 
