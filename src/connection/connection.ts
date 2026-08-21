@@ -100,6 +100,7 @@ import {
 import { rocksMiningService } from "../services/rocksMiningService";
 import { mineRockViaApi } from "../services/miningApi";
 import {
+  editUsernameViaApi,
   getProfileByIdViaApi,
   getProfileByLoginIdViaApi,
   readLeaderboardViaApi,
@@ -1307,12 +1308,7 @@ class Connection {
   public async editUsername(username: string): Promise<any> {
     try {
       await this.ensureAuthenticated();
-      const editUsernameFunction = httpsCallable(
-        this.functions,
-        "editUsername",
-      );
-      const response = await editUsernameFunction({ username });
-      return response.data;
+      return editUsernameViaApi(username, this.getAuthApiToken);
     } catch (error) {
       console.error("Error editing username:", error);
       throw error;

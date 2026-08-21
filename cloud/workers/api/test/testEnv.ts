@@ -20,4 +20,6 @@ export const TELEGRAM_TEST_ENV = {
     "telegram@example.iam.gserviceaccount.com",
   TELEGRAM_FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   TELEGRAM_QUEUE_BRIDGE_SECRET: "test-bridge-secret",
+  USERNAME_SERVICE_ACCOUNT_EMAIL: "username@example.iam.gserviceaccount.com",
+  USERNAME_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
 } as const;

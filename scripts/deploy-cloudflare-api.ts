@@ -109,6 +109,7 @@ const AUTHENTICATED_ROUTE_SMOKES = [
   { path: "/mining/rock", method: "POST" },
   { path: "/navigation/games/remove", method: "POST" },
   { path: "/profiles/lookup", method: "POST" },
+  { path: "/profiles/username", method: "POST" },
   { path: "/wagers/proposals/accept", method: "POST" },
   { path: "/wagers/proposals/cancel", method: "POST" },
   { path: "/wagers/proposals/decline", method: "POST" },

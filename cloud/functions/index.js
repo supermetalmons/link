@@ -9,7 +9,6 @@ const { completeXRedirectAuth } = require("./completeXRedirectAuth");
 const { unlinkAuthMethod } = require("./unlinkAuthMethod");
 const { syncProfileClaim } = require("./syncProfileClaim");
 const { updateRatings } = require("./updateRatings");
-const { editUsername } = require("./editUsername");
 const { withdrawEventPrize } = require("./eventPrizeWithdrawal");
 const { resolveWagerOutcome } = require("./resolveWagerOutcome");
 const {
@@ -59,7 +58,6 @@ exports.completeXRedirectAuth = completeXRedirectAuth;
 exports.unlinkAuthMethod = unlinkAuthMethod;
 exports.syncProfileClaim = syncProfileClaim;
 exports.updateRatings = updateRatings;
-exports.editUsername = editUsername;
 exports.withdrawEventPrize = withdrawEventPrize;
 exports.resolveWagerOutcome = resolveWagerOutcome;
 exports.createEvent = createEvent;

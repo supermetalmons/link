@@ -107,6 +107,8 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       "TELEGRAM_FIREBASE_SERVICE_ACCOUNT_EMAIL",
       "TELEGRAM_FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY",
       "TELEGRAM_QUEUE_BRIDGE_SECRET",
+      "USERNAME_SERVICE_ACCOUNT_EMAIL",
+      "USERNAME_SERVICE_ACCOUNT_PRIVATE_KEY",
       "X_CLIENT_ID",
       "X_CLIENT_SECRET",
     ],

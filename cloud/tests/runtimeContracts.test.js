@@ -14,7 +14,6 @@ const callableExportNames = [
   "completeXRedirectAuth",
   "createEvent",
   "disqualifyEventMatchWinners",
-  "editUsername",
   "joinEvent",
   "postponeEventStart",
   "removeEventParticipant",
@@ -417,7 +416,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 37);
+  assert.equal(expectedExportNames.length, 36);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

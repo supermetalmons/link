@@ -3,6 +3,10 @@ import test from "node:test";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { handleProfileRoute, validLookupId } from "../src/profileRoute.ts";
 import type { ProfileRepository } from "../src/profileRepository.ts";
+import type {
+  UsernameEditOutcome,
+  UsernameRepository,
+} from "../src/usernameRepository.ts";
 import { handleRequest } from "../src/router.ts";
 import { TELEGRAM_TEST_ENV as BASE_ENV } from "./testEnv.ts";
 
@@ -43,6 +47,14 @@ function repository(
     getProfileByLoginId: async () => profile,
     readLeaderboard: async () => [profile],
     ...overrides,
+  };
+}
+
+function usernameRepository(
+  outcome: UsernameEditOutcome = "updated",
+): UsernameRepository {
+  return {
+    editUsername: async () => outcome,
   };
 }
 
@@ -174,7 +186,85 @@ test("authenticates before parsing and strictly validates request bodies", async
     );
     assert.equal(response.status, 400);
   }
+  for (const body of [{}, { username: 7 }, { username: "mons", extra: true }]) {
+    const response = await handleProfileRoute(
+      request("/profiles/username", body),
+      TELEGRAM_TEST_ENV,
+      ctx,
+      {
+        usernameRepository: usernameRepository(),
+        verifyIdentity: async () => identity,
+      },
+    );
+    assert.equal(response.status, 400);
+  }
   assert.equal(reads, 0);
+});
+
+test("preserves username validation and repository outcomes", async () => {
+  const validationCases = [
+    [" anon ", "This name is reserved."],
+    ["abcdefghijklmnop", "Must be shorter than 15 characters."],
+    ["mons!", "Use only letters and numbers."],
+  ];
+  for (const [username, validationError] of validationCases) {
+    let writes = 0;
+    const response = await handleProfileRoute(
+      request("/profiles/username", { username }),
+      TELEGRAM_TEST_ENV,
+      ctx,
+      {
+        usernameRepository: {
+          editUsername: async () => {
+            writes++;
+            return "updated";
+          },
+        },
+        verifyIdentity: async () => identity,
+      },
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(await responseJson(response), {
+      ok: false,
+      validationError,
+    });
+    assert.equal(writes, 0);
+  }
+
+  const outcomeResponses = new Map<
+    UsernameEditOutcome,
+    Record<string, unknown>
+  >([
+    ["updated", { ok: true }],
+    ["profile-not-found", { ok: false }],
+    [
+      "taken",
+      {
+        ok: false,
+        validationError: "That name has been taken. Choose another.",
+      },
+    ],
+    ["cannot-clear", { ok: false, validationError: "Can't be empty." }],
+  ]);
+  for (const [outcome, expected] of outcomeResponses) {
+    const calls: Array<[string, string]> = [];
+    const response = await handleProfileRoute(
+      request("/profiles/username", { username: " Mons " }),
+      TELEGRAM_TEST_ENV,
+      ctx,
+      {
+        usernameRepository: {
+          editUsername: async (uid, username) => {
+            calls.push([uid, username]);
+            return outcome;
+          },
+        },
+        verifyIdentity: async () => identity,
+      },
+    );
+    assert.deepEqual(await responseJson(response), expected);
+    assert.deepEqual(calls, [["firebase-uid", "Mons"]]);
+  }
 });
 
 test("returns exact lookup and leaderboard responses with the verified token", async () => {
@@ -257,6 +347,31 @@ test("sanitizes repository failures and router dispatches both paths", async () 
   });
   assert.deepEqual(logged, ["profile-service-unavailable"]);
 
+  const usernameFailure = await handleProfileRoute(
+    request("/profiles/username", { username: "mons" }),
+    TELEGRAM_TEST_ENV,
+    ctx,
+    {
+      logFailure: (kind) => logged.push(kind),
+      usernameRepository: {
+        editUsername: async () => {
+          throw new Error("private-firestore-detail");
+        },
+      },
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(usernameFailure.status, 503);
+  assert.deepEqual(await responseJson(usernameFailure), {
+    ok: false,
+    error: "unavailable",
+    message: "profile-service-unavailable",
+  });
+  assert.deepEqual(logged, [
+    "profile-service-unavailable",
+    "profile-service-unavailable",
+  ]);
+
   const routed = await handleRequest(
     request("/profiles/lookup", { kind: "profile", id: "profile-1" }),
     TELEGRAM_TEST_ENV,
@@ -270,4 +385,18 @@ test("sanitizes repository failures and router dispatches both paths", async () 
   );
   assert.equal(routed.status, 200);
   assert.deepEqual(await responseJson(routed), { ok: true, profile });
+
+  const usernameRouted = await handleRequest(
+    request("/profiles/username", { username: "mons" }),
+    TELEGRAM_TEST_ENV,
+    {
+      profile: {
+        usernameRepository: usernameRepository(),
+        verifyIdentity: async () => identity,
+      },
+    },
+    ctx,
+  );
+  assert.equal(usernameRouted.status, 200);
+  assert.deepEqual(await responseJson(usernameRouted), { ok: true });
 });

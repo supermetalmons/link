@@ -9,6 +9,8 @@ dedicated Google service accounts, and encrypted Worker secret setup are
 documented in that deployment guide.
 Firebase retains auth verification/linking, the X completion callable, the
 remaining game and event functions, and the existing Firestore auth records.
+Username editing is owned by the API Worker; its dedicated service account and
+cutover procedure are documented in the Cloudflare deployment guide.
 
 ## Setup
 

@@ -452,6 +452,49 @@ responses without reading production profile data. Promote the API Worker before
 the frontend that calls these routes. No Firebase deployment or function
 reconciliation is required for this migration.
 
+## Username editing
+
+Authenticated username changes are served by:
+
+- `POST https://api.mons.link/profiles/username`
+
+The browser sends its Firebase ID token in the `Authorization: Bearer` header
+and a strict `{ "username": "..." }` body. The Worker preserves the existing
+trimmed, case-insensitive uniqueness contract, reserved-name rules, legacy
+username-index cleanup, and the restriction that Apple- or X-only profiles
+cannot clear their username. Firestore remains authoritative, and the Worker
+uses a read-write Firestore REST transaction with bounded conflict retries.
+
+Create one dedicated Google identity and a custom role with only the database
+transaction and entity permissions used by username mutation:
+
+```sh
+gcloud iam roles create monsLinkUsernameMutation --project mons-link --title="mons.link username mutation" --permissions=datastore.databases.get,datastore.entities.create,datastore.entities.delete,datastore.entities.get,datastore.entities.list,datastore.entities.update --stage=GA
+gcloud iam service-accounts create mons-link-username-api --project mons-link --display-name="mons.link username API"
+gcloud projects add-iam-policy-binding mons-link --member="serviceAccount:mons-link-username-api@mons-link.iam.gserviceaccount.com" --role="projects/mons-link/roles/monsLinkUsernameMutation" --condition='expression=resource.name=="projects/mons-link/databases/(default)",title=default-firestore-only'
+gcloud iam service-accounts keys create /secure/mons-link-username-api.json --project mons-link --iam-account=mons-link-username-api@mons-link.iam.gserviceaccount.com
+```
+
+Prepare an untracked secrets file outside the repository for the first
+candidate or an intentional key rotation:
+
+```dotenv
+USERNAME_SERVICE_ACCOUNT_EMAIL=mons-link-username-api@mons-link.iam.gserviceaccount.com
+USERNAME_SERVICE_ACCOUNT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+```
+
+Upload and smoke-test the API candidate with that secrets file, promote the
+exact API version, then promote the frontend. Automated production checks cover
+preflight and unauthenticated responses and do not change a live username.
+After the frontend promotion, run the complete Firebase release to reconcile
+away the retired `editUsername` callable. Already-open tabs using the former
+frontend must refresh.
+
+Before Firebase reconciliation, rollback only the frontend and API versions.
+After reconciliation, restore and deploy `editUsername` from commit
+`e928329da`, then rollback both Workers. Delete the downloaded Google key and
+the external secrets file once Cloudflare retains the encrypted secrets.
+
 ## Firebase deployment
 
 - Deploy the complete Firebase release: `npm run deploy:firebase -- --project mons-link`

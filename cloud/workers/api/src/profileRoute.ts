@@ -20,15 +20,29 @@ import {
   createProfileRepository,
   type ProfileRepository,
 } from "./profileRepository.ts";
+import {
+  createUsernameRepository,
+  type UsernameRepository,
+} from "./usernameRepository.ts";
+import {
+  USERNAME_MAX_LENGTH,
+  USERNAME_VALIDATION_MESSAGES,
+  isAlphanumericUsername,
+  isReservedExplicitUsername,
+  isUsernameEditRequest,
+  type UsernameEditResponse,
+} from "@mons/shared/usernames";
 
 export const PROFILE_PATHS = new Set([
   "/leaderboards/read",
   "/profiles/lookup",
+  "/profiles/username",
 ]);
 
 export type ProfileRouteDependencies = {
   logFailure?: (kind: string) => void;
   repository?: ProfileRepository;
+  usernameRepository?: UsernameRepository;
   verifyIdentity?: (
     request: Request,
     ctx: WorkerExecutionContext,
@@ -77,8 +91,62 @@ export async function handleProfileRoute(
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
     const body = await parseBody(request);
-    const repository = dependencies.repository || createProfileRepository();
     const pathname = new URL(request.url).pathname;
+
+    if (pathname === "/profiles/username") {
+      if (!isUsernameEditRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      const username = body.username.trim();
+      let validationError = "";
+      if (isReservedExplicitUsername(username)) {
+        validationError = USERNAME_VALIDATION_MESSAGES.reserved;
+      } else if (username.length > USERNAME_MAX_LENGTH) {
+        validationError = USERNAME_VALIDATION_MESSAGES.tooLong;
+      } else if (username && !isAlphanumericUsername(username)) {
+        validationError = USERNAME_VALIDATION_MESSAGES.alphanumeric;
+      }
+      if (validationError) {
+        const response: UsernameEditResponse = {
+          ok: false,
+          validationError,
+        };
+        return authJsonResponse(response, 200, corsHeaders);
+      }
+      const usernameRepository =
+        dependencies.usernameRepository || createUsernameRepository(env);
+      const outcome = await usernameRepository.editUsername(
+        identity.uid,
+        username,
+      );
+      if (outcome === "taken") {
+        return authJsonResponse(
+          {
+            ok: false,
+            validationError: "That name has been taken. Choose another.",
+          } satisfies UsernameEditResponse,
+          200,
+          corsHeaders,
+        );
+      }
+      if (outcome === "cannot-clear") {
+        return authJsonResponse(
+          {
+            ok: false,
+            validationError: "Can't be empty.",
+          } satisfies UsernameEditResponse,
+          200,
+          corsHeaders,
+        );
+      }
+      return authJsonResponse(
+        { ok: outcome === "updated" } satisfies UsernameEditResponse,
+        200,
+        corsHeaders,
+      );
+    }
+
+    const repository = dependencies.repository || createProfileRepository();
 
     if (pathname === "/profiles/lookup") {
       if (!isProfileLookupRequest(body)) {

@@ -7,6 +7,17 @@ const USERNAME_VALIDATION_MESSAGES = Object.freeze({
   alphanumeric: "Use only letters and numbers.",
 });
 
+const isRecord = (value) =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const hasExactKeys = (value, expectedKeys) => {
+  const actualKeys = Object.keys(value);
+  return (
+    actualKeys.length === expectedKeys.length &&
+    actualKeys.every((key) => expectedKeys.includes(key))
+  );
+};
+
 const cleanUsername = (value) =>
   typeof value === "string" ? value.trim() : "";
 
@@ -45,6 +56,27 @@ const getUsernameIndexDocIds = (username) => {
   return [canonical, cleaned];
 };
 
+const isUsernameEditRequest = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, ["username"]) &&
+  typeof value.username === "string";
+
+const isUsernameEditResponse = (value) => {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (value.ok === true) {
+    return hasExactKeys(value, ["ok"]);
+  }
+  return (
+    value.ok === false &&
+    (hasExactKeys(value, ["ok"]) ||
+      (hasExactKeys(value, ["ok", "validationError"]) &&
+        typeof value.validationError === "string" &&
+        value.validationError !== ""))
+  );
+};
+
 module.exports = {
   USERNAME_MAX_LENGTH,
   USERNAME_LOOKUP_KEY_FIELD,
@@ -55,4 +87,6 @@ module.exports = {
   isReservedExplicitUsername,
   isSafeFirestoreDocIdSegment,
   getUsernameIndexDocIds,
+  isUsernameEditRequest,
+  isUsernameEditResponse,
 };

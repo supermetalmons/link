@@ -6,9 +6,22 @@ export const USERNAME_VALIDATION_MESSAGES: Readonly<{
   alphanumeric: "Use only letters and numbers.";
 }>;
 
+export type UsernameEditRequest = {
+  username: string;
+};
+
+export type UsernameEditResponse =
+  { ok: true } | { ok: false; validationError?: string };
+
 export function cleanUsername(value: unknown): string;
 export function buildUsernameLookupKey(username: unknown): string;
 export function isAlphanumericUsername(username: unknown): boolean;
 export function isReservedExplicitUsername(username: unknown): boolean;
 export function isSafeFirestoreDocIdSegment(value: unknown): boolean;
 export function getUsernameIndexDocIds(username: unknown): string[];
+export function isUsernameEditRequest(
+  value: unknown,
+): value is UsernameEditRequest;
+export function isUsernameEditResponse(
+  value: unknown,
+): value is UsernameEditResponse;

@@ -17,6 +17,7 @@ registerHooks({
 });
 
 const {
+  editUsernameViaApi,
   getProfileByIdViaApi,
   getProfileByLoginIdViaApi,
   ProfileApiError,
@@ -32,6 +33,8 @@ const {
   isProfileLookupResponse,
   normalizeProfileEmojiId,
 } = await import("@mons/shared/profiles");
+const { isUsernameEditRequest, isUsernameEditResponse } =
+  await import("@mons/shared/usernames");
 
 const originalFetch = globalThis.fetch;
 const profile = {
@@ -100,14 +103,28 @@ test("shared profile contracts validate exact requests and responses", () => {
   assert.equal(normalizeProfileEmojiId("12"), 12);
   assert.equal(normalizeProfileEmojiId(0), 0);
   assert.equal(normalizeProfileEmojiId("invalid", 7), 7);
+  assert.equal(isUsernameEditRequest({ username: "Mons" }), true);
+  assert.equal(isUsernameEditRequest({ username: "Mons", extra: true }), false);
+  assert.equal(isUsernameEditRequest({ username: 7 }), false);
+  assert.equal(isUsernameEditResponse({ ok: true }), true);
+  assert.equal(isUsernameEditResponse({ ok: false }), true);
+  assert.equal(
+    isUsernameEditResponse({ ok: false, validationError: "Taken" }),
+    true,
+  );
+  assert.equal(
+    isUsernameEditResponse({ ok: false, validationError: "", extra: true }),
+    false,
+  );
 });
 
-test("sends exact authenticated lookup and leaderboard requests", async () => {
+test("sends exact authenticated profile requests", async () => {
   const calls = [];
   const responses = [
     { ok: true, profile },
     { ok: true, profile: null },
     { ok: true, profiles: [profile] },
+    { ok: true },
   ];
   globalThis.fetch = async (input, init) => {
     calls.push({ input: String(input), init });
@@ -124,6 +141,9 @@ test("sends exact authenticated lookup and leaderboard requests", async () => {
     (await readLeaderboardViaApi("rating", tokenProvider))[0].id,
     "profile-1",
   );
+  assert.deepEqual(await editUsernameViaApi("Mons", tokenProvider), {
+    ok: true,
+  });
 
   assert.deepEqual(
     calls.map((call) => [call.input, JSON.parse(call.init.body)]),
@@ -137,6 +157,7 @@ test("sends exact authenticated lookup and leaderboard requests", async () => {
         { kind: "profile", id: "missing" },
       ],
       ["https://api.mons.link/leaderboards/read", { type: "rating" }],
+      ["https://api.mons.link/profiles/username", { username: "Mons" }],
     ],
   );
   for (const call of calls) {
@@ -241,6 +262,8 @@ test("connection routes one-shot reads through the API and keeps material cachin
   assert.match(source, /getProfileByLoginIdViaApi/);
   assert.match(source, /getProfileByIdViaApi/);
   assert.match(source, /readLeaderboardViaApi/);
+  assert.match(source, /editUsernameViaApi/);
+  assert.doesNotMatch(source, /httpsCallable\([^)]*["']editUsername["']/);
   assert.match(
     source,
     /MINING_MATERIAL_NAMES\.map\(\(material\) =>\s*readLeaderboardViaApi/,

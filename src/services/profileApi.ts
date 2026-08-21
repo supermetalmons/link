@@ -9,6 +9,11 @@ import {
   type ProfileLookupResponse,
 } from "@mons/shared/profiles";
 import type { AuthTokenProvider } from "./authApi";
+import {
+  isUsernameEditResponse,
+  type UsernameEditRequest,
+  type UsernameEditResponse,
+} from "@mons/shared/usernames";
 
 const PROFILE_API_ROOT = "https://api.mons.link";
 const PROFILE_API_TIMEOUT_MS = 15_000;
@@ -87,7 +92,7 @@ function responseError(value: unknown, status: number): ProfileApiError {
 
 async function profileRequest<T>(
   path: string,
-  body: ProfileLookupRequest | LeaderboardReadRequest,
+  body: ProfileLookupRequest | LeaderboardReadRequest | UsernameEditRequest,
   tokenProvider: AuthTokenProvider,
   validate: (value: unknown) => value is T,
 ): Promise<T> {
@@ -202,6 +207,18 @@ export async function readLeaderboardViaApi(
     isLeaderboardReadResponse,
   );
   return response.profiles;
+}
+
+export function editUsernameViaApi(
+  username: string,
+  tokenProvider: AuthTokenProvider,
+): Promise<UsernameEditResponse> {
+  return profileRequest(
+    "/profiles/username",
+    { username },
+    tokenProvider,
+    isUsernameEditResponse,
+  );
 }
 
 export {
