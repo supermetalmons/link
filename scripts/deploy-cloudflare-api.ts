@@ -100,6 +100,7 @@ const EVENT_PRIZE_ANNOUNCEMENT_PATH =
 const AUTHENTICATED_ROUTE_SMOKES = [
   { path: "/auth/intents", method: "POST" },
   { path: "/auth/methods", method: "GET" },
+  { path: "/auth/profile-claim/sync", method: "POST" },
   { path: "/auth/x/flows", method: "POST" },
   { path: "/automatch/cancel", method: "POST" },
   { path: "/automatch/start", method: "POST" },

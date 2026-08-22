@@ -7,7 +7,6 @@ const { verifyEthAddress } = require("./verifyEthAddress");
 const { verifyAppleToken } = require("./verifyAppleToken");
 const { completeXRedirectAuth } = require("./completeXRedirectAuth");
 const { unlinkAuthMethod } = require("./unlinkAuthMethod");
-const { syncProfileClaim } = require("./syncProfileClaim");
 const { withdrawEventPrize } = require("./eventPrizeWithdrawal");
 const {
   createEvent,
@@ -45,7 +44,6 @@ exports.verifyEthAddress = verifyEthAddress;
 exports.verifyAppleToken = verifyAppleToken;
 exports.completeXRedirectAuth = completeXRedirectAuth;
 exports.unlinkAuthMethod = unlinkAuthMethod;
-exports.syncProfileClaim = syncProfileClaim;
 exports.withdrawEventPrize = withdrawEventPrize;
 exports.createEvent = createEvent;
 exports.postponeEventStart = postponeEventStart;

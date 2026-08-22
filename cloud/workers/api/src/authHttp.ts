@@ -30,6 +30,7 @@ function isAllowedAuthOrigin(origin: string): boolean {
 export const AUTH_PATHS = new Set([
   "/auth/intents",
   "/auth/methods",
+  "/auth/profile-claim/sync",
   "/auth/x/flows",
 ]);
 

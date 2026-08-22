@@ -357,12 +357,13 @@ removal clears both the participant and the participant's event-prize selection.
 Automated API smoke checks cover preflight and unauthenticated responses without
 reading or changing an event.
 
-## Auth initiation and reads
+## Auth initiation, reads, and profile claim synchronization
 
 The API Worker owns these Firebase-authenticated routes:
 
 - `POST https://api.mons.link/auth/intents`
 - `GET https://api.mons.link/auth/methods`
+- `POST https://api.mons.link/auth/profile-claim/sync`
 - `POST https://api.mons.link/auth/x/flows`
 
 The browser sends its Firebase ID token in the `Authorization: Bearer` header.
@@ -389,10 +390,35 @@ migration must update the role before promoting the new Worker:
 gcloud iam roles update monsLinkXCallback --project mons-link --permissions=datastore.entities.create,datastore.entities.get,datastore.entities.update --stage=GA
 ```
 
+Profile-claim synchronization queries the caller's profile with the caller's
+Firebase ID token and rejects duplicate `logins` ownership before changing
+anything. It then reconciles only the Firebase Auth `profileId` custom claim and
+`players/{uid}/profile` RTDB link. Existing unrelated custom claims are
+preserved. Requests use the existing auth rate limiter per Firebase UID. When no
+profile exists, stale claim and RTDB cleanup remains best-effort and the route
+returns the empty linked-method response.
+
+The route reuses the existing `mons-link-x-callback` auth API identity and its
+`FIRESTORE_SERVICE_ACCOUNT_*` Worker secrets. Grant that identity a separate
+project-level role without changing the Firestore-conditioned role:
+
+```sh
+if gcloud iam roles describe monsLinkProfileClaimSync --project mons-link >/dev/null 2>&1; then
+  gcloud iam roles update monsLinkProfileClaimSync --project mons-link --title="mons.link profile claim sync" --permissions=firebaseauth.users.get,firebaseauth.users.update,firebasedatabase.instances.get,firebasedatabase.instances.update --stage=GA
+else
+  gcloud iam roles create monsLinkProfileClaimSync --project mons-link --title="mons.link profile claim sync" --permissions=firebaseauth.users.get,firebaseauth.users.update,firebasedatabase.instances.get,firebasedatabase.instances.update --stage=GA
+fi
+gcloud projects add-iam-policy-binding mons-link --member="serviceAccount:mons-link-x-callback@mons-link.iam.gserviceaccount.com" --role="projects/mons-link/roles/monsLinkProfileClaimSync" --condition=None
+```
+
+No new service-account key, Worker secret, or Cloudflare binding is required.
+
 Automated API smoke checks cover every auth preflight and unauthenticated
-response without creating Firestore records. After promotion, manually verify
-linked-method loading, all four intent types, and the X redirect start before
-removing the retired Firebase callables.
+response without creating Firestore records. Before promotion, call the profile
+claim route on the version-preview URL with disposable users covering one
+linked profile and one missing profile. After promotion, manually verify
+profile recovery, linked-method loading, all four intent types, and the X
+redirect start before removing the retired Firebase callables.
 
 ## X OAuth callback
 
@@ -454,15 +480,17 @@ denial.
 
 The auth compute migration uses an immediate cutover. Deploy and smoke-test the
 Worker candidate, promote and verify the frontend, then reconcile away
-`beginAuthIntent`, `getLinkedAuthMethods`, and `beginXRedirectAuth` through the
-complete Firebase release. Already-open tabs running the former frontend can
-fail after reconciliation and must be refreshed.
+`beginAuthIntent`, `getLinkedAuthMethods`, `syncProfileClaim`, and
+`beginXRedirectAuth` through the complete Firebase release. Already-open tabs
+running the former frontend can fail after reconciliation and must be refreshed.
 
-For rollback after Firebase reconciliation, redeploy the three retired
+For rollback after Firebase reconciliation, redeploy the four retired
 callables from the retained pre-migration commit, then roll back the frontend
 and API Workers to their recorded version IDs. The X callback remains on the
 API Worker throughout this rollback. Remove `datastore.entities.create` from
-the custom role only after the old auth start path is restored.
+the Firestore custom role only after the old auth start path is restored. Remove
+the `monsLinkProfileClaimSync` binding only after the old profile-claim callable
+and frontend are restored and verified.
 
 ## Profile and leaderboard reads
 

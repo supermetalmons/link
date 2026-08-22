@@ -61,7 +61,6 @@ test("authIdentity remains the exact compatibility façade", () => {
     "linkVerifiedMethod",
     "peekAuthOpReplay",
     "unlinkMethodForUid",
-    "syncProfileClaimForUid",
     "verifyAppleIdToken",
     "validateSiweDomainAndUri",
   ]);
@@ -80,10 +79,6 @@ test("authIdentity remains the exact compatibility façade", () => {
   assert.strictEqual(
     authIdentity.unlinkMethodForUid,
     identityService.unlinkMethodForUid,
-  );
-  assert.strictEqual(
-    authIdentity.syncProfileClaimForUid,
-    identityService.syncProfileClaimForUid,
   );
   assert.strictEqual(
     authIdentity.normalizeMethodValue,

@@ -165,7 +165,7 @@ function smokeResponses(providerAttempts = 1): Response[] {
       swagpack_reactions: [{ id: 3, count: 1 }],
     }),
   );
-  for (let index = 0; index < 20; index++) {
+  for (let index = 0; index < 21; index++) {
     responses.push(authPreflightResponse(), unauthenticatedResponse());
   }
   responses.push(
@@ -468,7 +468,7 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 48);
+  assert.equal(requests.length, 50);
   assert.equal(requests[0].url, `${PREVIEW_URL}/nfts`);
   assert.equal(requests[0].init.method, "OPTIONS");
   for (const request of requests) {
@@ -494,7 +494,7 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
     sol: SMOKE_SOL,
     eth: "",
   });
-  const authRequests = requests.slice(4, 44);
+  const authRequests = requests.slice(4, 46);
   assert.deepEqual(
     authRequests.map(({ url, init }) => [url, init.method]),
     [
@@ -502,6 +502,8 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
       [`${PREVIEW_URL}/auth/intents`, "POST"],
       [`${PREVIEW_URL}/auth/methods`, "OPTIONS"],
       [`${PREVIEW_URL}/auth/methods`, "GET"],
+      [`${PREVIEW_URL}/auth/profile-claim/sync`, "OPTIONS"],
+      [`${PREVIEW_URL}/auth/profile-claim/sync`, "POST"],
       [`${PREVIEW_URL}/auth/x/flows`, "OPTIONS"],
       [`${PREVIEW_URL}/auth/x/flows`, "POST"],
       [`${PREVIEW_URL}/automatch/cancel`, "OPTIONS"],
@@ -541,19 +543,19 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
     ],
   );
   assert.equal(
-    requests[47].url,
+    requests[49].url,
     `${PREVIEW_URL}/auth/x/callback?state=abcdefghijklmnopqrstuvwx`,
   );
-  assert.equal(requests[44].url, `${PREVIEW_URL}/internal/telegram/delivery`);
-  assert.equal(requests[44].init.method, "POST");
+  assert.equal(requests[46].url, `${PREVIEW_URL}/internal/telegram/delivery`);
+  assert.equal(requests[46].init.method, "POST");
   assert.equal(
-    requests[45].url,
+    requests[47].url,
     `${PREVIEW_URL}/internal/telegram/event-prize-announcement`,
   );
-  assert.equal(requests[45].init.method, "POST");
-  assert.equal(requests[46].url, `${PREVIEW_URL}/auth/x/callback`);
-  assert.equal(requests[46].init.method, "GET");
-  assert.equal(requests[47].init.method, "GET");
+  assert.equal(requests[47].init.method, "POST");
+  assert.equal(requests[48].url, `${PREVIEW_URL}/auth/x/callback`);
+  assert.equal(requests[48].init.method, "GET");
+  assert.equal(requests[49].init.method, "GET");
   assert.deepEqual(delays, [500]);
 });
 
@@ -648,6 +650,8 @@ test("retries an expected-success response body transport failure", async () => 
     unauthenticatedResponse(),
     authPreflightResponse(),
     unauthenticatedResponse(),
+    authPreflightResponse(),
+    unauthenticatedResponse(),
     telegramBridgeUnauthorizedResponse(),
     telegramBridgeUnauthorizedResponse(),
     xCallbackResponse(),
@@ -667,7 +671,7 @@ test("retries an expected-success response body transport failure", async () => 
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 48);
+  assert.equal(requests.length, 50);
   assert.deepEqual(delays, [500]);
 });
 
@@ -1050,7 +1054,7 @@ test("production promotes only the explicit version and then smokes the custom d
     fetch: async (url) => {
       assert.match(
         String(url),
-        /^https:\/\/api\.mons\.link\/(?:nfts|mining\/rock|automatch\/(?:cancel|start)|events\/participants\/(?:join|remove)|leaderboards\/read|matches\/timer\/(?:claim|start)|navigation\/games\/remove|profiles\/(?:lookup|username)|ratings\/update|wagers\/(?:proposals\/(?:accept|cancel|decline|send)|outcomes\/resolve)|internal\/telegram\/(?:delivery|event-prize-announcement)|auth\/(?:intents|methods|x\/(?:flows|callback)))/,
+        /^https:\/\/api\.mons\.link\/(?:nfts|mining\/rock|automatch\/(?:cancel|start)|events\/participants\/(?:join|remove)|leaderboards\/read|matches\/timer\/(?:claim|start)|navigation\/games\/remove|profiles\/(?:lookup|username)|ratings\/update|wagers\/(?:proposals\/(?:accept|cancel|decline|send)|outcomes\/resolve)|internal\/telegram\/(?:delivery|event-prize-announcement)|auth\/(?:intents|methods|profile-claim\/sync|x\/(?:flows|callback)))/,
       );
       return nextResponse(responses);
     },

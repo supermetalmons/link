@@ -4,6 +4,7 @@ import {
   createAuthRepository,
   createXFlowRepository,
   FirestoreFailure,
+  LoginProfileConflict,
   parseXRedirectFlowDocument,
 } from "../src/firestore.ts";
 import {
@@ -462,4 +463,35 @@ test("returns the exact empty linked-method response without service auth", asyn
     },
   );
   assert.equal(serviceTokenCalls, 0);
+});
+
+test("queries two profiles for claim sync and blocks ambiguous ownership", async () => {
+  const requests: RequestInit[] = [];
+  const document = (profileId: string) => ({
+    document: {
+      name: `projects/mons-link/databases/(default)/documents/users/${profileId}`,
+      fields: {
+        appleSub: { stringValue: "apple-sub" },
+        eth: { stringValue: "" },
+        sol: { stringValue: "11111111111111111111" },
+        xUserId: { stringValue: "" },
+      },
+    },
+  });
+  const repository = createAuthRepository(env, {
+    getAccessToken: async () => "unused",
+    fetcher: async (_input, init) => {
+      requests.push(init || {});
+      return new Response(
+        JSON.stringify([document("profile-1"), document("profile-2")]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    },
+  });
+
+  await assert.rejects(
+    repository.getProfileClaimSource("firebase-uid", "firebase-token"),
+    LoginProfileConflict,
+  );
+  assert.equal(JSON.parse(String(requests[0].body)).structuredQuery.limit, 2);
 });

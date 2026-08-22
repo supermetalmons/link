@@ -65,6 +65,10 @@ export type AuthRepository = {
     uid: string,
     firebaseIdToken: string,
   ) => Promise<LinkedAuthMethodsResponse>;
+  getProfileClaimSource: (
+    uid: string,
+    firebaseIdToken: string,
+  ) => Promise<LinkedAuthMethodsResponse>;
 };
 
 export type XRedirectFlow = {
@@ -89,6 +93,12 @@ export type XFlowRepository = {
 export class FirestoreFailure extends Error {
   constructor() {
     super("firestore-unavailable");
+  }
+}
+
+export class LoginProfileConflict extends Error {
+  constructor() {
+    super("login-profile-conflict");
   }
 }
 
@@ -265,13 +275,16 @@ function parseAuthIntent(value: unknown): AuthIntentRecord {
   };
 }
 
-function profileFromRunQuery(value: unknown): {
+type ProfileQueryResult = {
   fields: Record<string, unknown>;
   profileId: string;
-} | null {
+};
+
+function profilesFromRunQuery(value: unknown): ProfileQueryResult[] {
   if (!Array.isArray(value)) {
     throw new FirestoreFailure();
   }
+  const profiles: ProfileQueryResult[] = [];
   for (const entry of value) {
     const result = toRecord(entry);
     const document = toRecord(result?.document);
@@ -284,9 +297,9 @@ function profileFromRunQuery(value: unknown): {
     if (!fields || !profileId) {
       throw new FirestoreFailure();
     }
-    return { fields, profileId };
+    profiles.push({ fields, profileId });
   }
-  return null;
+  return profiles;
 }
 
 function readProfileField(
@@ -343,6 +356,86 @@ export function createAuthRepository(
     return "created";
   };
 
+  const queryLinkedProfile = async (
+    uid: string,
+    firebaseIdToken: string,
+    limit: 1 | 2,
+  ): Promise<ProfileQueryResult[]> => {
+    let response: Response;
+    try {
+      response = await fetcher(`${FIRESTORE_DOCUMENTS_ROOT}:runQuery`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${firebaseIdToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          structuredQuery: {
+            select: {
+              fields: ["appleSub", "eth", "sol", "xUserId"].map(
+                (fieldPath) => ({ fieldPath }),
+              ),
+            },
+            from: [{ collectionId: "users" }],
+            where: {
+              fieldFilter: {
+                field: { fieldPath: "logins" },
+                op: "ARRAY_CONTAINS",
+                value: { stringValue: uid },
+              },
+            },
+            limit,
+          },
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch {
+      throw new FirestoreFailure();
+    }
+    if (!response.ok) {
+      await cancelResponseBody(response);
+      throw new FirestoreFailure();
+    }
+    return profilesFromRunQuery(
+      await readBoundedJsonValue(
+        response,
+        MAX_FIRESTORE_BODY_BYTES,
+        () => new FirestoreFailure(),
+      ),
+    );
+  };
+
+  const linkedMethodsResponse = (
+    profile: ProfileQueryResult | null,
+  ): LinkedAuthMethodsResponse => {
+    if (!profile) {
+      const linkedMethods = {
+        apple: false,
+        eth: false,
+        sol: false,
+        x: false,
+      };
+      return {
+        ok: true,
+        profileId: null,
+        linkedMethods,
+        appleLinked: false,
+      };
+    }
+    const linkedMethods = getLinkedAuthMethodsFromProfile({
+      appleSub: readProfileField(profile.fields, "appleSub"),
+      eth: readProfileField(profile.fields, "eth"),
+      sol: readProfileField(profile.fields, "sol"),
+      xUserId: readProfileField(profile.fields, "xUserId"),
+    });
+    return {
+      ok: true,
+      profileId: profile.profileId,
+      linkedMethods,
+      appleLinked: linkedMethods.apple,
+    };
+  };
+
   return {
     createAuthIntent(document) {
       return createDocument(
@@ -378,74 +471,16 @@ export function createAuthRepository(
     },
 
     async getLinkedAuthMethods(uid, firebaseIdToken) {
-      let response: Response;
-      try {
-        response = await fetcher(`${FIRESTORE_DOCUMENTS_ROOT}:runQuery`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${firebaseIdToken}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            structuredQuery: {
-              select: {
-                fields: ["appleSub", "eth", "sol", "xUserId"].map(
-                  (fieldPath) => ({ fieldPath }),
-                ),
-              },
-              from: [{ collectionId: "users" }],
-              where: {
-                fieldFilter: {
-                  field: { fieldPath: "logins" },
-                  op: "ARRAY_CONTAINS",
-                  value: { stringValue: uid },
-                },
-              },
-              limit: 1,
-            },
-          }),
-          signal: AbortSignal.timeout(timeoutMs),
-        });
-      } catch {
-        throw new FirestoreFailure();
+      const profiles = await queryLinkedProfile(uid, firebaseIdToken, 1);
+      return linkedMethodsResponse(profiles[0] || null);
+    },
+
+    async getProfileClaimSource(uid, firebaseIdToken) {
+      const profiles = await queryLinkedProfile(uid, firebaseIdToken, 2);
+      if (profiles.length > 1) {
+        throw new LoginProfileConflict();
       }
-      if (!response.ok) {
-        await cancelResponseBody(response);
-        throw new FirestoreFailure();
-      }
-      const profile = profileFromRunQuery(
-        await readBoundedJsonValue(
-          response,
-          MAX_FIRESTORE_BODY_BYTES,
-          () => new FirestoreFailure(),
-        ),
-      );
-      if (!profile) {
-        const linkedMethods = {
-          apple: false,
-          eth: false,
-          sol: false,
-          x: false,
-        };
-        return {
-          ok: true,
-          profileId: null,
-          linkedMethods,
-          appleLinked: false,
-        };
-      }
-      const linkedMethods = getLinkedAuthMethodsFromProfile({
-        appleSub: readProfileField(profile.fields, "appleSub"),
-        eth: readProfileField(profile.fields, "eth"),
-        sol: readProfileField(profile.fields, "sol"),
-        xUserId: readProfileField(profile.fields, "xUserId"),
-      });
-      return {
-        ok: true,
-        profileId: profile.profileId,
-        linkedMethods,
-        appleLinked: linkedMethods.apple,
-      };
+      return linkedMethodsResponse(profiles[0] || null);
     },
   };
 }

@@ -21,6 +21,7 @@ const {
   beginAuthIntentViaApi,
   beginXRedirectAuthViaApi,
   getLinkedAuthMethodsViaApi,
+  syncProfileClaimViaApi,
 } = await import("../src/services/authApi.ts");
 
 const originalFetch = globalThis.fetch;
@@ -53,6 +54,12 @@ test("auth API clients send exact bearer requests and validate responses", async
     },
     {
       ok: true,
+      profileId: "profile-1",
+      linkedMethods: { apple: true, eth: false, sol: true, x: false },
+      appleLinked: true,
+    },
+    {
+      ok: true,
       flowId: "flow-id",
       authUrl: "https://x.com/i/oauth2/authorize",
       expiresAtMs: 1_600_000,
@@ -74,6 +81,10 @@ test("auth API clients send exact bearer requests and validate responses", async
     "profile-1",
   );
   assert.equal(
+    (await syncProfileClaimViaApi(tokenProvider)).profileId,
+    "profile-1",
+  );
+  assert.equal(
     (
       await beginXRedirectAuthViaApi(
         {
@@ -92,6 +103,7 @@ test("auth API clients send exact bearer requests and validate responses", async
     [
       ["https://api.mons.link/auth/intents", "POST"],
       ["https://api.mons.link/auth/methods", "GET"],
+      ["https://api.mons.link/auth/profile-claim/sync", "POST"],
       ["https://api.mons.link/auth/x/flows", "POST"],
     ],
   );
@@ -104,6 +116,7 @@ test("auth API clients send exact bearer requests and validate responses", async
   }
   assert.equal(new Headers(calls[1].init.headers).get("Content-Type"), null);
   assert.deepEqual(JSON.parse(calls[0].init.body), { method: "eth" });
+  assert.deepEqual(JSON.parse(calls[2].init.body), {});
 });
 
 test("retries exactly once with a forced token refresh after 401", async () => {
@@ -185,6 +198,29 @@ test("applies the request deadline to Firebase token acquisition", async () => {
   }
 });
 
+test("allows profile claim synchronization a longer request deadline", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const delays = [];
+  globalThis.setTimeout = (callback, delay, ...args) => {
+    delays.push(delay);
+    return originalSetTimeout(callback, 60_000, ...args);
+  };
+  globalThis.fetch = async () =>
+    jsonResponse({
+      ok: true,
+      profileId: "profile-1",
+      linkedMethods: { apple: false, eth: false, sol: true, x: false },
+      appleLinked: false,
+    });
+  try {
+    await getLinkedAuthMethodsViaApi(async () => "token");
+    await syncProfileClaimViaApi(async () => "token");
+    assert.deepEqual(delays, [15_000, 30_000]);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 test("maps server errors without retrying writes and preserves details", async () => {
   let fetches = 0;
   let tokenCalls = 0;
@@ -251,6 +287,7 @@ test("connection keeps migrated auth callable names off Firebase", () => {
     "beginAuthIntent",
     "beginXRedirectAuth",
     "getLinkedAuthMethods",
+    "syncProfileClaim",
   ]) {
     assert.doesNotMatch(source, new RegExp(`httpsCallable\\([^)]*${name}`));
     assert.doesNotMatch(source, new RegExp(`\"${name}\"`));

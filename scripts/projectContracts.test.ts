@@ -473,3 +473,25 @@ test("operations documentation cross-links package and deployment guides", () =>
   assert.equal(existsSync(resolve(repositoryRoot, "cloud/.prettierrc")), false);
   assert.equal(existsSync(resolve(repositoryRoot, ".prettierrc")), true);
 });
+
+test("profile claim synchronization is Worker-owned with a least-privilege runbook", () => {
+  const authApi = readText("src/services/authApi.ts");
+  const functionsIndex = readText("cloud/functions/index.js");
+  const deployGuide = readText("scripts/deploy-cloudflare.md");
+
+  assert.match(authApi, /\/auth\/profile-claim\/sync/);
+  assert.doesNotMatch(functionsIndex, /syncProfileClaim/);
+  for (const permission of [
+    "firebaseauth.users.get",
+    "firebaseauth.users.update",
+    "firebasedatabase.instances.get",
+    "firebasedatabase.instances.update",
+  ]) {
+    assert.match(deployGuide, new RegExp(permission.replaceAll(".", "\\.")));
+  }
+  assert.match(deployGuide, /monsLinkProfileClaimSync/);
+  assert.match(deployGuide, /roles describe monsLinkProfileClaimSync/);
+  assert.match(deployGuide, /roles create monsLinkProfileClaimSync/);
+  assert.match(deployGuide, /roles update monsLinkProfileClaimSync/);
+  assert.match(deployGuide, /--condition=None/);
+});

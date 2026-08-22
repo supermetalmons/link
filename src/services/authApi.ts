@@ -13,6 +13,7 @@ import {
 
 const AUTH_API_ROOT = "https://api.mons.link";
 const AUTH_API_TIMEOUT_MS = 15_000;
+const PROFILE_CLAIM_SYNC_TIMEOUT_MS = 30_000;
 const AUTH_API_MAX_RESPONSE_BYTES = 64 * 1024;
 
 export type AuthTokenProvider = (forceRefresh: boolean) => Promise<string>;
@@ -97,6 +98,7 @@ async function authRequest<T>(
   init: Omit<RequestInit, "cache" | "headers" | "signal">,
   tokenProvider: AuthTokenProvider,
   validate: (value: unknown) => value is T,
+  timeoutMs = AUTH_API_TIMEOUT_MS,
 ): Promise<T> {
   const controller = new AbortController();
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -104,7 +106,7 @@ async function authRequest<T>(
     timeoutId = setTimeout(() => {
       controller.abort();
       reject(new AuthApiError("unavailable", "Auth request timed out."));
-    }, AUTH_API_TIMEOUT_MS);
+    }, timeoutMs);
   });
   const run = async (): Promise<T> => {
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -176,6 +178,18 @@ export function getLinkedAuthMethodsViaApi(
     { method: "GET" },
     tokenProvider,
     isLinkedAuthMethodsResponse,
+  );
+}
+
+export function syncProfileClaimViaApi(
+  tokenProvider: AuthTokenProvider,
+): Promise<LinkedAuthMethodsResponse> {
+  return authRequest(
+    "/auth/profile-claim/sync",
+    { method: "POST", body: JSON.stringify({}) },
+    tokenProvider,
+    isLinkedAuthMethodsResponse,
+    PROFILE_CLAIM_SYNC_TIMEOUT_MS,
   );
 }
 

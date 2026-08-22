@@ -2,7 +2,6 @@ const {
   consumeAuthIntent,
   linkVerifiedMethod,
   peekAuthOpReplay,
-  syncProfileClaimForUid,
   unlinkMethodForUid,
 } = require("./auth/identityService");
 const { normalizeMethodValue } = require("./auth/policy");
@@ -15,7 +14,6 @@ module.exports = {
   linkVerifiedMethod,
   peekAuthOpReplay,
   unlinkMethodForUid,
-  syncProfileClaimForUid,
   verifyAppleIdToken,
   validateSiweDomainAndUri,
 };

@@ -174,6 +174,7 @@ import {
   beginAuthIntentViaApi,
   beginXRedirectAuthViaApi,
   getLinkedAuthMethodsViaApi,
+  syncProfileClaimViaApi,
 } from "../services/authApi";
 import {
   mapDatabaseEventRecord,
@@ -1351,15 +1352,10 @@ class Connection {
     }
   }
 
-  public async syncProfileClaim(): Promise<any> {
+  public async syncProfileClaim(): Promise<LinkedAuthMethodsResponse> {
     try {
       await this.ensureAuthenticated();
-      const syncProfileClaimFunction = httpsCallable(
-        this.functions,
-        "syncProfileClaim",
-      );
-      const response = await syncProfileClaimFunction({});
-      return response.data;
+      return syncProfileClaimViaApi(this.getAuthApiToken);
     } catch (error) {
       console.error("Error syncing profile claim:", error);
       throw error;

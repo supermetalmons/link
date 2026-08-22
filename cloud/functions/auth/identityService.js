@@ -2194,68 +2194,9 @@ const unlinkMethodForUid = async ({ uid, method, opId, request }) => {
   }
 };
 
-const syncProfileClaimForUid = async (uid) => {
-  const profileSnapshot = await readProfileByLoginUid(uid);
-  if (!profileSnapshot) {
-    try {
-      const normalizedUid = toCleanString(uid);
-      if (normalizedUid) {
-        const auth = admin.auth();
-        const profileRef = admin
-          .database()
-          .ref(`players/${normalizedUid}/profile`);
-        const [userRecord, profileLinkSnapshot] = await Promise.all([
-          auth.getUser(normalizedUid),
-          profileRef.once("value"),
-        ]);
-        const claims = { ...(userRecord.customClaims || {}) };
-        const hasProfileClaim = Object.prototype.hasOwnProperty.call(
-          claims,
-          "profileId",
-        );
-        if (hasProfileClaim) {
-          delete claims.profileId;
-        }
-        const writes = [];
-        if (hasProfileClaim) {
-          writes.push(auth.setCustomUserClaims(normalizedUid, claims));
-        }
-        if (profileLinkSnapshot.exists()) {
-          writes.push(profileRef.remove());
-        }
-        if (writes.length > 0) {
-          await Promise.all(writes);
-        }
-      }
-    } catch {}
-    return {
-      ok: true,
-      profileId: null,
-      linkedMethods: {
-        apple: false,
-        eth: false,
-        sol: false,
-        x: false,
-      },
-      appleLinked: false,
-    };
-  }
-  await ensureProfileClaimAndRtdb(uid, profileSnapshot.id);
-  const linkedMethods = linkedMethodsFromProfileData(
-    profileSnapshot.data() || {},
-  );
-  return {
-    ok: true,
-    profileId: profileSnapshot.id,
-    linkedMethods,
-    appleLinked: linkedMethods.apple,
-  };
-};
-
 module.exports = {
   consumeAuthIntent,
   linkVerifiedMethod,
   peekAuthOpReplay,
   unlinkMethodForUid,
-  syncProfileClaimForUid,
 };

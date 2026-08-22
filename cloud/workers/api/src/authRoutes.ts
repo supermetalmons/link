@@ -34,6 +34,10 @@ import {
   X_CALLBACK_URI,
   X_FLOW_TTL_MS,
 } from "./xFlow.ts";
+import {
+  syncProfileClaim,
+  type ProfileClaimDependencies,
+} from "./profileClaim.ts";
 
 const AUTH_INTENT_TTL_MS = 5 * 60 * 1_000;
 const CREATE_ID_ATTEMPTS = 3;
@@ -43,6 +47,7 @@ const SIWE_ALPHABET =
 export type AuthRouteDependencies = {
   logFailure?: (kind: string) => void;
   now?: () => number;
+  profileClaim?: ProfileClaimDependencies;
   randomBytes?: (length: number) => Uint8Array;
   repository?: AuthRepository;
   verifyIdentity?: (
@@ -302,6 +307,17 @@ export async function handleAuthRoute(
           repository,
           dependencies,
         ),
+        200,
+        corsHeaders,
+      );
+    }
+    if (pathname === "/auth/profile-claim/sync") {
+      await enforceAuthRateLimit(env, `auth-profile-claim:${identity.uid}`);
+      return authJsonResponse(
+        await syncProfileClaim(identity, env, {
+          ...dependencies.profileClaim,
+          repository,
+        }),
         200,
         corsHeaders,
       );
