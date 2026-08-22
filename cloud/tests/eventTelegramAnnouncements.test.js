@@ -12,7 +12,7 @@ const {
   buildEventSignature,
   buildEventTelegramProjection,
   buildEventTelegramProjectionUpdates,
-  createEventTelegramProjector,
+  createEventTelegramProjector: createRuntimeEventTelegramProjector,
   loadEndedMatchResults,
   renderUpcomingMessage,
 } = require("../functions/eventTelegramAnnouncements");
@@ -156,6 +156,13 @@ const ENDED_MATCH_RESULTS = {
   third_place: { status: "scored", hostScore: 6, guestScore: 4 },
 };
 const ARMED_PROJECTION_STATE = { endedAnnouncementArmed: true };
+
+const createEventTelegramProjector = (dependencies = {}) =>
+  createRuntimeEventTelegramProjector({
+    ...dependencies,
+    dispatchDelivery:
+      dependencies.dispatchDelivery || (async () => ({ enqueued: true })),
+  });
 
 const project = (eventData, state = null, nowMs = NOW_MS) =>
   buildEventTelegramProjection({
@@ -939,6 +946,64 @@ test("the runtime projector persists the ended post through the guarded channel"
   assert.equal(scoreLoadCount, 1);
 });
 
+test("the runtime projector dispatches persisted desired state before advancing projection state", async () => {
+  const database = createRuntimeDatabase({
+    [`events/${EVENT_ID}`]: buildEvent(),
+  });
+  const dispatches = [];
+  const projector = createEventTelegramProjector({
+    database,
+    commitDatabase: database,
+    dispatchDelivery: async (input) => {
+      dispatches.push(input);
+      assert.ok(database.read(`telegramMessages/${input.messageKey}/desired`));
+      assert.equal(database.read(`eventTelegramProjections/${EVENT_ID}`), null);
+      return { enqueued: true };
+    },
+  });
+
+  const projection = await projector(EVENT_ID, NOW_MS);
+
+  assert.equal(projection.action, "project");
+  assert.equal(dispatches.length, 1);
+  assert.equal(
+    dispatches[0].generation,
+    `event:${EVENT_ID}:${dispatches[0].revision}`,
+  );
+  assert.ok(database.read(`eventTelegramProjections/${EVENT_ID}`));
+  assert.equal(database.updateCalls.length, 2);
+});
+
+test("a bridge failure preserves desired state and retries the same deterministic dispatch", async () => {
+  const database = createRuntimeDatabase({
+    [`events/${EVENT_ID}`]: buildEvent(),
+  });
+  const dispatches = [];
+  let failDispatch = true;
+  const projector = createEventTelegramProjector({
+    database,
+    commitDatabase: database,
+    dispatchDelivery: async (input) => {
+      dispatches.push(input);
+      if (failDispatch) {
+        throw new Error("bridge-unavailable");
+      }
+      return { enqueued: true };
+    },
+  });
+
+  await assert.rejects(() => projector(EVENT_ID, NOW_MS), /bridge-unavailable/);
+  assert.ok(
+    database.read(`telegramMessages/event:${EVENT_ID}:upcoming/desired`),
+  );
+  assert.equal(database.read(`eventTelegramProjections/${EVENT_ID}`), null);
+
+  failDispatch = false;
+  await projector(EVENT_ID, NOW_MS);
+  assert.deepEqual(dispatches[1], dispatches[0]);
+  assert.ok(database.read(`eventTelegramProjections/${EVENT_ID}`));
+});
+
 test("the runtime projector does not backfill an unarmed ended event", async () => {
   const database = createRuntimeDatabase({
     [`events/${EVENT_ID}`]: buildEndedEvent(),
@@ -1105,8 +1170,11 @@ test("projection locking stays isolated from the domain lock and commits desired
   continueEventRead();
   const projection = await projectionPromise;
   assert.equal(projection.action, "project");
-  assert.equal(database.updateCalls.length, 1);
-  const updates = database.updateCalls[0];
+  assert.equal(database.updateCalls.length, 2);
+  const updates = {
+    ...database.updateCalls[0],
+    ...database.updateCalls[1],
+  };
   const persistedProjection = {
     ...updates[`eventTelegramProjections/${EVENT_ID}`],
   };
@@ -1172,7 +1240,7 @@ test("a domain-held lock does not block terminal projection", async () => {
 
   const terminal = await projector(EVENT_ID, NOW_MS);
   assert.equal(terminal.action, "project");
-  assert.equal(database.updateCalls.length, 1);
+  assert.equal(database.updateCalls.length, 2);
   const desired = database.read(desiredPath);
   assert.equal(desired.operation, "edit");
   assert.equal(desired.ifMissing, "skip");
@@ -1358,7 +1426,7 @@ test("a delayed stale commit cannot regress a successor projection after lease h
   continueStaleCommit();
   const staleError = await staleOutcome;
   assert.equal(staleError.code, "event-telegram-lock-lost");
-  assert.equal(database.updateCalls.length, 1);
+  assert.equal(database.updateCalls.length, 2);
 
   const state = database.read(`eventTelegramProjections/${EVENT_ID}`);
   assert.deepEqual(state.startedMatchKeys, [
@@ -1499,7 +1567,7 @@ test("contending projections retain append-only match history without duplicate 
   await firstProjection;
   const duplicate = await projector(EVENT_ID, NOW_MS);
   assert.equal(duplicate.action, "unchanged");
-  assert.equal(database.updateCalls.length, 1);
+  assert.equal(database.updateCalls.length, 2);
   const state = database.read(`eventTelegramProjections/${EVENT_ID}`);
   assert.deepEqual(state.startedMatchKeys, [
     "round:0:match_0",

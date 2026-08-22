@@ -7,15 +7,11 @@ const telegramDelivery = require("../functions/telegramDelivery");
 const desiredState = require("../functions/telegram/desiredState");
 const deliveryPolicy = require("../functions/telegram/deliveryPolicy");
 const rtdbRepository = require("../functions/telegram/rtdbRepository");
-const taskAdapters = require("../functions/telegramDeliveryFunctions");
+const queueBridge = require("../functions/telegram/queueBridge");
 const taskIdentity = require("../functions/telegram/taskIdentity");
 
 test("Telegram compatibility facades delegate to focused modules", () => {
   for (const [facadePath, modulePath] of [
-    [
-      "../functions/telegramDeliveryFunctions",
-      "../functions/telegram/taskAdapters",
-    ],
     [
       "../functions/eventTelegramAnnouncements",
       "../functions/telegram/eventAnnouncements",
@@ -70,9 +66,9 @@ test("retry policy preserves deadline clamping and rate-limit proof timing", () 
   );
 });
 
-test("task adapters retain the extracted deterministic task identity", () => {
+test("queue bridge retains the extracted deterministic task identity", () => {
   assert.strictEqual(
-    taskAdapters.buildTelegramDeliveryTaskId,
+    queueBridge.buildTelegramDeliveryTaskId,
     taskIdentity.buildTelegramDeliveryTaskId,
   );
   const payload = {

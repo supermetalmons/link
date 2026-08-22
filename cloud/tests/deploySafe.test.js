@@ -22,13 +22,8 @@ const {
 } = require("../functions/scripts/deploy-safe");
 
 const repositoryRoot = path.resolve(__dirname, "..", "..");
-const exportedFunctionNames = [
-  "automatch",
-  "dispatchTelegramDelivery",
-  "verifyEthAddress",
-];
+const exportedFunctionNames = ["automatch", "verifyEthAddress"];
 const expectedReleaseFunctionBarriers = [
-  ["dispatchTelegramDelivery", "dispatchTelegramManualRecovery"],
   [
     "projectRatingTelegramUpdates",
     "projectEventTelegramOnCreated",
@@ -154,7 +149,7 @@ test("batching is flat and covers the selection exactly once", () => {
   const selectedFunctionNames = [...exportedFunctionNames].sort();
   const batches = buildDeploymentBatches(selectedFunctionNames, 2);
 
-  assert.equal(batches.length, 2);
+  assert.equal(batches.length, 1);
   assert.deepEqual(
     batches.flatMap((batch) => batch.functionNames),
     selectedFunctionNames,
@@ -196,10 +191,7 @@ test("full releases preserve Telegram dependency barriers at every batch size", 
         batch.functionNames.map((functionName) => [functionName, batchIndex]),
       ),
     );
-    const deliveryBatchIndexes = FULL_RELEASE_FUNCTION_BARRIERS[0].map(
-      (functionName) => batchIndexByFunctionName.get(functionName),
-    );
-    const projectorBatchIndexes = FULL_RELEASE_FUNCTION_BARRIERS[1].map(
+    const projectorBatchIndexes = FULL_RELEASE_FUNCTION_BARRIERS[0].map(
       (functionName) => batchIndexByFunctionName.get(functionName),
     );
     const remainingBatchIndexes = remainingFunctionNames.map((functionName) =>
@@ -213,9 +205,6 @@ test("full releases preserve Telegram dependency barriers at every batch size", 
     assert.equal(
       new Set(flattenedFunctionNames).size,
       flattenedFunctionNames.length,
-    );
-    assert.ok(
-      Math.max(...deliveryBatchIndexes) < Math.min(...projectorBatchIndexes),
     );
     assert.ok(
       Math.max(...projectorBatchIndexes) < Math.min(...remainingBatchIndexes),
@@ -335,10 +324,10 @@ test("dry-run previews the complete release without spawning Firebase", () => {
 
   assert.equal(result.exitCode, 0);
   assert.equal(calls.length, 0);
-  assert.equal(logs.length, 6);
+  assert.equal(logs.length, 5);
   assert.equal(
     logs.filter((line) => line.includes("--project forwarded-project")).length,
-    5,
+    4,
   );
   assert.match(logs.at(0), /--only database --project forwarded-project$/);
   assert.match(
@@ -372,7 +361,7 @@ test("full release forwards one project through every spawned deployment", () =>
   );
 
   assert.equal(result.exitCode, 0);
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 4);
   assert.deepEqual(
     calls
       .flatMap(({ args }) =>

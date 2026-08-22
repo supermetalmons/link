@@ -238,8 +238,20 @@ test("automatch projection persists desired state and clears its exact outbox", 
     },
     "invites/auto_example": { guestId: "guest" },
   });
+  const enqueued: Array<Record<string, string>> = [];
   assert.equal(
-    await processAutomatchTask(task, store.client, () => 200),
+    await processAutomatchTask(
+      task,
+      store.client,
+      async (input) => {
+        enqueued.push(input);
+        assert.notEqual(
+          store.read("telegramProjectionOutbox/automatch/auto_example"),
+          null,
+        );
+      },
+      () => 200,
+    ),
     "projected",
   );
   assert.equal(
@@ -251,6 +263,14 @@ test("automatch projection persists desired state and clears its exact outbox", 
   ) as Record<string, Record<string, unknown>>;
   assert.equal(message.desired.operation, "send");
   assert.equal(message.automatchProjection.lifecycle, "matched");
+  assert.deepEqual(enqueued, [
+    {
+      generation: `automatch:request-1:${message.desired.revision}`,
+      messageKey: "automatch:auto_example",
+      producer: "automatch-projection",
+      revision: message.desired.revision as string,
+    },
+  ]);
 });
 
 test("automatch projection acknowledges stale work and dead-letters invalid sources", async () => {
@@ -270,6 +290,7 @@ test("automatch projection acknowledges stale work and dead-letters invalid sour
         requestId: "stale-request",
       },
       stale.client,
+      async () => undefined,
       () => 200,
     ),
     "stale",
@@ -293,6 +314,7 @@ test("automatch projection acknowledges stale work and dead-letters invalid sour
         requestId: "request-1",
       },
       invalid.client,
+      async () => undefined,
       () => 200,
     ),
     "dead",
@@ -328,7 +350,13 @@ test("rating projection merges once, projects the latest source, and completes",
     operationId: "auto_example__auto_example",
   };
   assert.equal(
-    await processRatingTask(task, store.client, repository, () => 300),
+    await processRatingTask(
+      task,
+      store.client,
+      repository,
+      async () => undefined,
+      () => 300,
+    ),
     "projected",
   );
   assert.deepEqual(marks, [{ state: "done" }]);
@@ -345,10 +373,81 @@ test("rating projection merges once, projects the latest source, and completes",
 
   marks.length = 0;
   assert.equal(
-    await processRatingTask(task, store.client, repository, () => 400),
+    await processRatingTask(
+      task,
+      store.client,
+      repository,
+      async () => undefined,
+      () => 400,
+    ),
     "duplicate",
   );
   assert.deepEqual(marks, [{ state: "done" }]);
+});
+
+test("projection dispatch failures preserve pending recovery markers", async () => {
+  const task = {
+    kind: "automatch-telegram-projection" as const,
+    inviteId: "auto_example",
+    requestId: "request-1",
+  };
+  const store = rtdbState({
+    "telegramProjectionOutbox/automatch/auto_example": {
+      schemaVersion: 1,
+      status: "pending",
+      requestId: "request-1",
+      updatedAtMs: 100,
+    },
+    "telegramAutomatches/auto_example": {
+      version: 2,
+      lifecycle: "matched",
+      matchedText: "Alice vs. Bob https://mons.link/auto_example",
+      matchedInstanceKey: "matched:auto_example",
+      generation: 2,
+    },
+    "invites/auto_example": { guestId: "guest" },
+  });
+
+  await assert.rejects(
+    () =>
+      processAutomatchTask(
+        task,
+        store.client,
+        async () => {
+          throw new Error("queue-unavailable");
+        },
+        () => 200,
+      ),
+    /queue-unavailable/,
+  );
+  assert.deepEqual(
+    store.read("telegramProjectionOutbox/automatch/auto_example"),
+    {
+      schemaVersion: 1,
+      status: "pending",
+      requestId: "request-1",
+      updatedAtMs: 100,
+    },
+  );
+
+  const marks: Array<{ state: string; reason?: string }> = [];
+  await assert.rejects(
+    () =>
+      processRatingTask(
+        {
+          kind: "rating-telegram-projection",
+          operationId: "auto_example__auto_example",
+        },
+        store.client,
+        ratingRepository(ratingUpdate(), marks),
+        async () => {
+          throw new Error("queue-unavailable");
+        },
+        () => 300,
+      ),
+    /queue-unavailable/,
+  );
+  assert.deepEqual(marks, []);
 });
 
 test("projection queue acknowledges poison tasks and retries transient failures", async () => {

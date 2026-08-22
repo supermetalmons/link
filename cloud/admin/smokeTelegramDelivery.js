@@ -11,6 +11,11 @@ const {
   initAdmin,
 } = require("./_admin");
 const { queueTelegramDelete } = require("../functions/telegramDelivery");
+const {
+  createDispatchers,
+  parseBridgeSecretFile,
+  readBridgeSecret,
+} = require("./telegramQueueCli");
 
 const SMOKE_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 1_000;
@@ -20,6 +25,7 @@ const sleep = (milliseconds) =>
 
 const smokeTelegramDelivery = async ({
   database = admin.database(),
+  dispatchDelivery,
   now = Date.now,
   randomId = randomUUID,
   sleepImpl = sleep,
@@ -34,7 +40,11 @@ const smokeTelegramDelivery = async ({
         destination: "community",
         sourceRevision: smokeId,
       },
-      { database },
+      {
+        database,
+        dispatchDelivery,
+        generation: `smoke:${smokeId}`,
+      },
     );
     const deadlineAtMs = now() + SMOKE_TIMEOUT_MS;
     while (now() < deadlineAtMs) {
@@ -57,9 +67,15 @@ const smokeTelegramDelivery = async ({
 };
 
 const main = async (argv = process.argv.slice(2)) => {
-  if (!initAdmin(argv)) throw new Error(ADC_FAILURE_MESSAGE);
+  const { bridgeSecretFile, remainingArgs } = parseBridgeSecretFile(argv);
+  const { dispatchDelivery } = createDispatchers(
+    readBridgeSecret(bridgeSecretFile),
+  );
+  if (!initAdmin(remainingArgs)) throw new Error(ADC_FAILURE_MESSAGE);
   try {
-    console.log(JSON.stringify(await smokeTelegramDelivery()));
+    console.log(
+      JSON.stringify(await smokeTelegramDelivery({ dispatchDelivery })),
+    );
   } finally {
     await cleanupAdmin();
   }

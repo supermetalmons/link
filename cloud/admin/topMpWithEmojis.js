@@ -12,10 +12,16 @@ const {
   createLeaderboardHeading,
   parseLeaderboardArgs,
 } = require("./leaderboardCli");
+const {
+  createDispatchers,
+  parseBridgeSecretFile,
+  readBridgeSecret,
+} = require("./telegramQueueCli");
 
 async function logTopMpWithEmojis(
   limit = 15,
   adminArgs = process.argv.slice(2),
+  dependencies = {},
 ) {
   const initialized = initAdmin(adminArgs);
   if (initialized) {
@@ -47,15 +53,21 @@ async function logTopMpWithEmojis(
       if (!sourceId) {
         throw new Error("Could not allocate a Telegram message ID.");
       }
-      await queueTelegramSend({
-        messageKey: `admin:top-mp:${sourceId}`,
-        destination: "community",
-        instanceKey: sourceId,
-        text: output,
-        parseMode: "HTML",
-        silent: false,
-        sourceRevision: sourceId,
-      });
+      await queueTelegramSend(
+        {
+          messageKey: `admin:top-mp:${sourceId}`,
+          destination: "community",
+          instanceKey: sourceId,
+          text: output,
+          parseMode: "HTML",
+          silent: false,
+          sourceRevision: sourceId,
+        },
+        {
+          dispatchDelivery: dependencies.dispatchDelivery,
+          generation: `admin:top-mp:${sourceId}`,
+        },
+      );
       return;
     } finally {
       await cleanupAdmin();
@@ -65,8 +77,12 @@ async function logTopMpWithEmojis(
 }
 
 async function main(argv = process.argv.slice(2)) {
-  const { adminArgs, limit } = parseLeaderboardArgs(argv);
-  await logTopMpWithEmojis(limit, adminArgs);
+  const { bridgeSecretFile, remainingArgs } = parseBridgeSecretFile(argv);
+  const { adminArgs, limit } = parseLeaderboardArgs(remainingArgs);
+  const { dispatchDelivery } = createDispatchers(
+    readBridgeSecret(bridgeSecretFile),
+  );
+  await logTopMpWithEmojis(limit, adminArgs, { dispatchDelivery });
 }
 
 if (require.main === module) {

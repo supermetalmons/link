@@ -20,11 +20,9 @@ const {
   buildTelegramDeliveryTaskId,
   createTelegramDeliveryDispatcher,
   createTelegramManualRecoveryDispatcher,
-  dispatchTelegramDelivery,
-  dispatchTelegramManualRecovery,
   enqueueTelegramDeliveryTask,
   signTelegramBridgeRequest,
-} = require("../functions/telegramDeliveryFunctions");
+} = require("../functions/telegram/queueBridge");
 
 const clone = (value) =>
   value === undefined ? undefined : structuredClone(value);
@@ -356,8 +354,9 @@ test("validates Firebase-safe logical message keys", () => {
   }
 });
 
-test("queue APIs await only durable desired persistence", async () => {
+test("queue APIs persist desired state before explicit dispatch", async () => {
   let updates;
+  const dispatched = [];
   const database = {
     ref() {
       return {
@@ -375,13 +374,64 @@ test("queue APIs await only durable desired persistence", async () => {
       text: "notice",
       sourceRevision: "1",
     },
-    { database },
+    {
+      database,
+      dispatchDelivery: async (input) => {
+        assert.ok(updates);
+        dispatched.push(input);
+        return { enqueued: true, taskId: "task-1" };
+      },
+    },
   );
   assert.equal(result.messageKey, "admin:test:1");
   assert.equal(result.revision, result.desired.revision);
   assert.deepEqual(updates, {
     "telegramMessages/admin:test:1/desired": result.desired,
   });
+  assert.deepEqual(dispatched, [
+    {
+      messageKey: "admin:test:1",
+      revision: result.revision,
+      generation: `desired:${result.revision}`,
+    },
+  ]);
+  assert.deepEqual(result.dispatch, { enqueued: true, taskId: "task-1" });
+});
+
+test("queue APIs report a durable pending message after dispatch failure", async () => {
+  let updates;
+  await assert.rejects(
+    () =>
+      queueTelegramSend(
+        {
+          messageKey: "admin:test:pending",
+          destination: "community",
+          instanceKey: "admin:test:pending",
+          text: "notice",
+          sourceRevision: "1",
+        },
+        {
+          database: {
+            ref: () => ({
+              update: async (value) => {
+                updates = value;
+              },
+            }),
+          },
+          dispatchDelivery: async () => {
+            throw new Error("bridge-unavailable");
+          },
+        },
+      ),
+    (error) => {
+      assert.equal(error.code, "telegram-delivery-pending");
+      assert.equal(error.messageKey, "admin:test:pending");
+      assert.match(error.message, /Do not rerun/);
+      assert.match(error.message, /requeue:telegram/);
+      return true;
+    },
+  );
+  assert.ok(updates["telegramMessages/admin:test:pending/desired"]);
 });
 
 test("delivers a new send and persists its receipt", async () => {
@@ -4530,7 +4580,7 @@ test("dispatcher enqueues every valid revision as a wake-up task", async () => {
   );
 });
 
-test("dispatcher rejects unsafe keys and skips incomplete identities", async () => {
+test("dispatcher rejects unsafe keys and incomplete identities", async () => {
   let enqueues = 0;
   const dispatcher = createTelegramDeliveryDispatcher({
     enqueueTask: async () => {
@@ -4546,21 +4596,23 @@ test("dispatcher rejects unsafe keys and skips incomplete identities", async () 
       }),
     TypeError,
   );
-  assert.deepEqual(
-    await dispatcher({
-      messageKey: "key",
-      revision: " ",
-      generation: "generation",
-    }),
-    { skipped: true, reason: "missing-dispatch-identity" },
+  await assert.rejects(
+    () =>
+      dispatcher({
+        messageKey: "key",
+        revision: " ",
+        generation: "generation",
+      }),
+    TypeError,
   );
-  assert.deepEqual(
-    await dispatcher({
-      messageKey: "key",
-      revision: "revision",
-      generation: "",
-    }),
-    { skipped: true, reason: "missing-dispatch-identity" },
+  await assert.rejects(
+    () =>
+      dispatcher({
+        messageKey: "key",
+        revision: "revision",
+        generation: "",
+      }),
+    TypeError,
   );
   assert.equal(enqueues, 0);
 });
@@ -4690,25 +4742,5 @@ test("task enqueue fails closed on bridge rejection and transport failure", asyn
         secret: "bridge-secret",
       }),
     { code: "telegram-queue-bridge-unavailable" },
-  );
-});
-
-test("Firebase dispatch exports retain retries and bind only the bridge secret", () => {
-  assert.equal(dispatchTelegramDelivery.__endpoint.eventTrigger.retry, true);
-  assert.equal(
-    dispatchTelegramManualRecovery.__endpoint.eventTrigger.retry,
-    true,
-  );
-  assert.deepEqual(
-    dispatchTelegramDelivery.__endpoint.secretEnvironmentVariables.map(
-      (secret) => secret.key,
-    ),
-    ["TELEGRAM_QUEUE_BRIDGE_SECRET"],
-  );
-  assert.deepEqual(
-    dispatchTelegramManualRecovery.__endpoint.secretEnvironmentVariables.map(
-      (secret) => secret.key,
-    ),
-    ["TELEGRAM_QUEUE_BRIDGE_SECRET"],
   );
 });

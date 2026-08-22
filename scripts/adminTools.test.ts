@@ -85,8 +85,10 @@ test("both leaderboard entrypoints parse arguments and preserve delivery keys", 
       resolve(repositoryRoot, "cloud/admin", filename),
       "utf8",
     );
-    assert.match(source, /parseLeaderboardArgs\(argv\)/);
+    assert.match(source, /parseBridgeSecretFile\(argv\)/);
+    assert.match(source, /parseLeaderboardArgs\(remainingArgs\)/);
     assert.match(source, /initAdmin\(adminArgs\)/);
+    assert.match(source, /dispatchDelivery/);
     assert.match(
       source,
       new RegExp(`createLeaderboardHeading\\("${metric}", limit\\)`),

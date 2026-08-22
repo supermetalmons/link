@@ -11,7 +11,8 @@ Firebase retains auth verification/linking, the X completion callable, the
 remaining game and event functions, event-progress rating projection, and the
 existing Firestore auth records. Automatch and non-event rating Telegram
 projection run in the API Worker with durable Firebase-backed pending state;
-Firebase retains the generic desired-revision and manual-recovery dispatchers.
+the Worker and retained event projectors enqueue delivery directly. Manual
+recovery is initiated through the authenticated operator command.
 Username editing is owned by the API Worker; its dedicated service account and
 cutover procedure are documented in the Cloudflare deployment guide.
 
@@ -23,7 +24,11 @@ cutover procedure are documented in the Cloudflare deployment guide.
 
 `npm install -g firebase-tools`
 
-Set `TELEGRAM_QUEUE_BRIDGE_SECRET` for both retained Telegram dispatch triggers.
+`TELEGRAM_QUEUE_BRIDGE_SECRET` remains attached to the retained event Telegram
+projectors and the API Worker queue bridge. Restore its protected operator file
+when running announcement, smoke, recovery, or requeue tools:
+
+`umask 077; firebase functions:secrets:access TELEGRAM_QUEUE_BRIDGE_SECRET --project mons-link > /secure/telegram-queue-bridge-secret`
 
 The Telegram bot token, community chat ID, and dedicated announcement bridge
 secret are encrypted Worker secrets. Event prize operations use a separate
@@ -56,13 +61,19 @@ Deploy a single function for maintenance:
 
 ## Telegram delivery recovery
 
-Ambiguous sends stay at `telegramMessages/{messageKey}/delivery/status = uncertain` and are never retried automatically. Resolve one by writing a new unique `requestId` under `telegramMessages/{messageKey}/manualRecovery` with one of these payloads:
+Ambiguous sends stay at `telegramMessages/{messageKey}/delivery/status = uncertain` and are never retried automatically. Preview and execute exactly one reviewed recovery action with the protected queue-bridge secret:
 
-- `{ "requestId": "...", "action": "confirm-send-absent" }` when Telegram did not create the message.
-- `{ "requestId": "...", "action": "confirm-send-applied", "messageId": 123 }` when Telegram created it.
-- `{ "requestId": "...", "action": "abandon" }` to retain the audit record and stop delivery.
+`npm run recover:telegram -- --message-key <key> --action confirm-send-absent --bridge-secret-file /secure/telegram-queue-bridge-secret --project mons-link`
 
-The recovery dispatcher is idempotent by `requestId`. Retry-window exhaustion remains visible through `delivery/deadLetterAtMs`, and failed stale-message cleanup remains visible under `delivery/orphanedDeletes`.
+`npm run recover:telegram -- --message-key <key> --action confirm-send-absent --bridge-secret-file /secure/telegram-queue-bridge-secret --project mons-link --execute`
+
+Use `--action confirm-send-applied --message-id <telegram-message-id>` when Telegram created the uncertain message. Use `--action abandon` to retain the audit record and stop delivery. The command validates the uncertain send marker, writes a unique request, queues it through Cloudflare, and waits for the matching result.
+
+If the bridge is unavailable after the request is written, wake every pending desired and recovery record through Cloudflare:
+
+`npm run requeue:telegram -- --target cloudflare --bridge-secret-file /secure/telegram-queue-bridge-secret --project mons-link --execute`
+
+Recovery remains idempotent by `requestId`. Retry-window exhaustion remains visible through `delivery/deadLetterAtMs`, and failed stale-message cleanup remains visible under `delivery/orphanedDeletes`.
 
 `AUTH_EXPORT_PATH="$(mktemp)" && firebase auth:export "$AUTH_EXPORT_PATH" --config cloud/firebase.json --project mons-link --format=json && echo "Exported to $AUTH_EXPORT_PATH"`
 
@@ -100,11 +111,17 @@ Records without a resolvable expiry are retained. Repeat the legacy scan after i
 
 The GP and MP tools publish to the configured community destination. They default to 15 entries and accept one integer limit from 1 through 90:
 
-`node cloud/admin/topGpWithEmojis.js`
+`node cloud/admin/topGpWithEmojis.js --bridge-secret-file /secure/telegram-queue-bridge-secret`
 
-`node cloud/admin/topGpWithEmojis.js 25`
+`node cloud/admin/topGpWithEmojis.js 25 --bridge-secret-file /secure/telegram-queue-bridge-secret`
 
-`node cloud/admin/topMpWithEmojis.js 25`
+`node cloud/admin/topMpWithEmojis.js 25 --bridge-secret-file /secure/telegram-queue-bridge-secret`
+
+The shooting-star and delete-only delivery smoke tools use the same queue bridge:
+
+`npm --prefix cloud/admin run shooting:alert -- --bridge-secret-file /secure/telegram-queue-bridge-secret --project mons-link`
+
+`npm run smoke:telegram -- --bridge-secret-file /secure/telegram-queue-bridge-secret --project mons-link`
 
 ## Event prize announcements
 

@@ -12,6 +12,10 @@ const {
   buildTelegramEditUpdates,
   buildTelegramSendUpdates,
 } = require("./desiredState");
+const {
+  createTelegramDeliveryDispatcher,
+  telegramQueueBridgeSecret,
+} = require("./queueBridge");
 const { createEventLockManager } = require("../eventLocks");
 const { getEventPrizePlacements } = require("../events/bracket");
 const { THIRD_PLACE_MATCH_KEY } = require("@mons/shared/events");
@@ -28,6 +32,7 @@ const EVENT_TELEGRAM_TRIGGER_OPTIONS = {
   memory: "256MiB",
   cpu: 1,
   retry: true,
+  secrets: [telegramQueueBridgeSecret],
 };
 const EVENT_URL_ROOT = "https://mons.link/event";
 const EVENT_STATUS_SCHEDULED = "scheduled";
@@ -753,6 +758,43 @@ const addEventTelegramProjectionGuard = ({ updates, guard }) => {
   return guardedUpdates;
 };
 
+const splitEventTelegramProjectionUpdates = ({ eventId, updates }) => {
+  const statePath = `${EVENT_TELEGRAM_PROJECTION_ROOT}/${eventId}`;
+  const desiredUpdates = {};
+  const stateUpdates = {};
+  for (const [path, value] of Object.entries(updates)) {
+    if (path === statePath) {
+      stateUpdates[path] = value;
+    } else {
+      desiredUpdates[path] = value;
+    }
+  }
+  if (Object.keys(stateUpdates).length !== 1) {
+    throw new TypeError("event Telegram projection state update is required");
+  }
+  return { desiredUpdates, stateUpdates };
+};
+
+const buildEventTelegramDispatches = ({ eventId, desiredUpdates }) => {
+  const messagePathPrefix = "telegramMessages/";
+  const desiredPathSuffix = "/desired";
+  return Object.entries(desiredUpdates).map(([path, desired]) => {
+    const messageKey =
+      path.startsWith(messagePathPrefix) && path.endsWith(desiredPathSuffix)
+        ? path.slice(messagePathPrefix.length, -desiredPathSuffix.length)
+        : "";
+    const revision = normalizeString(desired && desired.revision);
+    if (!messageKey || !revision) {
+      throw new TypeError("invalid event Telegram desired update");
+    }
+    return {
+      messageKey,
+      revision,
+      generation: `event:${eventId}:${revision}`,
+    };
+  });
+};
+
 const createProjectionLockError = (eventId, code) => {
   const error = new Error(`${code}:${eventId}`);
   error.code = code;
@@ -796,6 +838,8 @@ const createEventTelegramProjector = (dependencies = {}) => {
     : dependencies.getFirestore || admin.firestore;
   const resolveEndedMatchResults =
     dependencies.loadEndedMatchResults || loadEndedMatchResults;
+  const dispatchDelivery =
+    dependencies.dispatchDelivery || createTelegramDeliveryDispatcher();
   const ownerUid = dependencies.ownerUid || EVENT_TELEGRAM_PROJECTION_OWNER_UID;
 
   return async (eventId, nowMs = Date.now()) => {
@@ -857,15 +901,35 @@ const createEventTelegramProjector = (dependencies = {}) => {
         }),
         guard,
       });
-      const lockRefreshed = await lockManager.refreshEventLock(lockHandle);
-      if (!lockRefreshed) {
-        throw createProjectionLockError(
-          normalizedEventId,
-          "event-telegram-lock-lost",
-        );
-      }
+      const { desiredUpdates, stateUpdates } =
+        splitEventTelegramProjectionUpdates({
+          eventId: normalizedEventId,
+          updates,
+        });
+      const refreshLock = async () => {
+        if (!(await lockManager.refreshEventLock(lockHandle))) {
+          throw createProjectionLockError(
+            normalizedEventId,
+            "event-telegram-lock-lost",
+          );
+        }
+      };
       try {
-        await getCommitDatabase().ref().update(updates);
+        if (Object.keys(desiredUpdates).length > 0) {
+          await refreshLock();
+          await getCommitDatabase().ref().update(desiredUpdates);
+          const dispatches = buildEventTelegramDispatches({
+            eventId: normalizedEventId,
+            desiredUpdates,
+          });
+          await Promise.all(dispatches.map(dispatchDelivery));
+          console.info("event:telegram:delivery-enqueued", {
+            eventId: normalizedEventId,
+            count: dispatches.length,
+          });
+        }
+        await refreshLock();
+        await getCommitDatabase().ref().update(stateUpdates);
       } catch (error) {
         if (isPermissionDeniedError(error)) {
           throw createProjectionLockError(
@@ -935,6 +999,7 @@ module.exports = {
   addEventTelegramProjectionGuard,
   buildEndedState,
   buildEventSignature,
+  buildEventTelegramDispatches,
   buildEventTelegramProjection,
   buildEventTelegramProjectionUpdates,
   buildStartedState,
@@ -948,4 +1013,5 @@ module.exports = {
   renderEndedMessage,
   renderStartedMessage,
   renderUpcomingMessage,
+  splitEventTelegramProjectionUpdates,
 };

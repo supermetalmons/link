@@ -201,6 +201,8 @@ test("admin Telegram scripts use durable aliases and document ADC setup", () => 
     assert.equal(source.includes(keyPrefix), true);
     assert.equal(source.includes(option), true);
     assert.match(source, /ADC_FAILURE_MESSAGE/);
+    assert.match(source, /parseBridgeSecretFile/);
+    assert.match(source, /dispatchDelivery/);
     assert.equal(source.includes("../functions/.env"), false);
   }
   const adminSource = fs.readFileSync(
@@ -228,8 +230,6 @@ test("admin credential failures include actionable ADC setup help", () => {
 test("all retained Firebase Telegram functions are exported", () => {
   const functionIndex = require("../functions/index");
   const exportNames = [
-    "dispatchTelegramDelivery",
-    "dispatchTelegramManualRecovery",
     "projectRatingTelegramUpdates",
     "projectEventTelegramOnCreated",
     "projectEventTelegramOnUpdated",
@@ -237,4 +237,6 @@ test("all retained Firebase Telegram functions are exported", () => {
   for (const exportName of exportNames) {
     assert.equal(typeof functionIndex[exportName], "function", exportName);
   }
+  assert.equal(functionIndex.dispatchTelegramDelivery, undefined);
+  assert.equal(functionIndex.dispatchTelegramManualRecovery, undefined);
 });

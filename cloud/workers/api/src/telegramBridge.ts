@@ -8,6 +8,7 @@ import {
   hasValidTelegramBridgeSignature,
   MAX_TIMESTAMP_SKEW_SECONDS,
 } from "./telegramBridgeAuth.ts";
+import { enqueueTelegramDeliveryTask } from "./telegramDeliveryTasks.ts";
 
 const MAX_BRIDGE_BODY_BYTES = 8 * 1024;
 const BRIDGE_KEYS = new Set([
@@ -99,7 +100,7 @@ export async function handleTelegramBridge(
     return bridgeResponse(400, "invalid-request");
   }
   try {
-    await env.TELEGRAM_DELIVERY_QUEUE.send(payload);
+    await enqueueTelegramDeliveryTask(env, payload);
   } catch {
     console.error(JSON.stringify({ event: "telegram_bridge_enqueue_failed" }));
     return bridgeResponse(503, "unavailable");

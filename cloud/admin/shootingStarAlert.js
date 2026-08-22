@@ -7,9 +7,18 @@ const {
   cleanupAdmin,
 } = require("./_admin");
 const { queueTelegramSend } = require("../functions/telegramDelivery");
+const {
+  createDispatchers,
+  parseBridgeSecretFile,
+  readBridgeSecret,
+} = require("./telegramQueueCli");
 
-async function main() {
-  if (!initAdmin()) {
+async function main(argv = process.argv.slice(2)) {
+  const { bridgeSecretFile, remainingArgs } = parseBridgeSecretFile(argv);
+  const { dispatchDelivery } = createDispatchers(
+    readBridgeSecret(bridgeSecretFile),
+  );
+  if (!initAdmin(remainingArgs)) {
     throw new Error(ADC_FAILURE_MESSAGE);
   }
   try {
@@ -47,20 +56,30 @@ async function main() {
     if (!sourceId) {
       throw new Error("Could not allocate a Telegram message ID.");
     }
-    await queueTelegramSend({
-      messageKey: `admin:shooting-star:${sourceId}`,
-      destination: "community",
-      instanceKey: sourceId,
-      text: message,
-      silent: true,
-      sourceRevision: sourceId,
-    });
+    await queueTelegramSend(
+      {
+        messageKey: `admin:shooting-star:${sourceId}`,
+        destination: "community",
+        instanceKey: sourceId,
+        text: message,
+        silent: true,
+        sourceRevision: sourceId,
+      },
+      {
+        dispatchDelivery,
+        generation: `admin:shooting-star:${sourceId}`,
+      },
+    );
   } finally {
     await cleanupAdmin();
   }
 }
 
-main().catch((err) => {
-  console.error(addApplicationDefaultCredentialHelp(err));
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(addApplicationDefaultCredentialHelp(err));
+    process.exit(1);
+  });
+}
+
+module.exports = { main };

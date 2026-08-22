@@ -2,8 +2,6 @@
 
 const { createHmac } = require("node:crypto");
 const { defineSecret } = require("firebase-functions/params");
-const { onValueWritten } = require("firebase-functions/v2/database");
-const { validateTelegramMessageKey } = require("./desiredStateCore");
 const {
   TELEGRAM_DESIRED_TASK_KIND,
   TELEGRAM_MANUAL_RECOVERY_TASK_KIND,
@@ -12,6 +10,7 @@ const {
   buildTelegramDeliveryTaskId,
   normalizeTaskPayload,
 } = require("./taskIdentity");
+const { validateTelegramMessageKey } = require("./desiredStateCore");
 
 const TELEGRAM_DELIVERY_BRIDGE_URL =
   "https://api.mons.link/internal/telegram/delivery";
@@ -92,8 +91,8 @@ const createTelegramDeliveryDispatcher = ({
     const normalizedMessageKey = validateTelegramMessageKey(messageKey);
     const normalizedRevision = normalizeString(revision);
     const normalizedGeneration = normalizeString(generation);
-    if (!normalizedRevision || !normalizedGeneration) {
-      return { skipped: true, reason: "missing-dispatch-identity" };
+    if (!normalizedMessageKey || !normalizedRevision || !normalizedGeneration) {
+      throw new TypeError("complete Telegram dispatch identity is required");
     }
     return enqueueTask({
       messageKey: normalizedMessageKey,
@@ -112,8 +111,12 @@ const createTelegramManualRecoveryDispatcher = ({
     const normalizedMessageKey = validateTelegramMessageKey(messageKey);
     const normalizedRequestId = normalizeString(requestId);
     const normalizedGeneration = normalizeString(generation);
-    if (!normalizedRequestId || !normalizedGeneration) {
-      return { skipped: true, reason: "missing-dispatch-identity" };
+    if (
+      !normalizedMessageKey ||
+      !normalizedRequestId ||
+      !normalizedGeneration
+    ) {
+      throw new TypeError("complete Telegram recovery identity is required");
     }
     return enqueueTask({
       messageKey: normalizedMessageKey,
@@ -125,78 +128,12 @@ const createTelegramManualRecoveryDispatcher = ({
   };
 };
 
-const dispatchTelegramDelivery = onValueWritten(
-  {
-    ref: "/telegramMessages/{messageKey}/desired/revision",
-    maxInstances: 10,
-    concurrency: 20,
-    memory: "256MiB",
-    cpu: 1,
-    retry: true,
-    secrets: [telegramQueueBridgeSecret],
-  },
-  async (event) => {
-    const beforeRevision = event.data.before.exists()
-      ? normalizeString(event.data.before.val())
-      : "";
-    const afterRevision = event.data.after.exists()
-      ? normalizeString(event.data.after.val())
-      : "";
-    if (!afterRevision || beforeRevision === afterRevision) {
-      return;
-    }
-    const generation = normalizeString(event.id);
-    if (!generation) {
-      throw new Error("telegram-dispatch-generation-missing");
-    }
-    await createTelegramDeliveryDispatcher()({
-      messageKey: event.params.messageKey,
-      revision: afterRevision,
-      generation,
-    });
-  },
-);
-
-const dispatchTelegramManualRecovery = onValueWritten(
-  {
-    ref: "/telegramMessages/{messageKey}/manualRecovery/requestId",
-    maxInstances: 10,
-    concurrency: 20,
-    memory: "256MiB",
-    cpu: 1,
-    retry: true,
-    secrets: [telegramQueueBridgeSecret],
-  },
-  async (event) => {
-    const beforeRequestId = event.data.before.exists()
-      ? normalizeString(event.data.before.val())
-      : "";
-    const afterRequestId = event.data.after.exists()
-      ? normalizeString(event.data.after.val())
-      : "";
-    if (!afterRequestId || beforeRequestId === afterRequestId) {
-      return;
-    }
-    const generation = normalizeString(event.id);
-    if (!generation) {
-      throw new Error("telegram-recovery-generation-missing");
-    }
-    await createTelegramManualRecoveryDispatcher()({
-      messageKey: event.params.messageKey,
-      requestId: afterRequestId,
-      generation,
-    });
-  },
-);
-
 module.exports = {
   TELEGRAM_BRIDGE_TIMEOUT_MS,
   TELEGRAM_DELIVERY_BRIDGE_URL,
   buildTelegramDeliveryTaskId,
   createTelegramDeliveryDispatcher,
   createTelegramManualRecoveryDispatcher,
-  dispatchTelegramDelivery,
-  dispatchTelegramManualRecovery,
   enqueueTelegramDeliveryTask,
   signTelegramBridgeRequest,
   telegramQueueBridgeSecret,

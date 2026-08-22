@@ -33,6 +33,10 @@ import {
   type RatingTelegramProjectionTask,
   type TelegramProjectionTask,
 } from "./telegramProjectionTasks.ts";
+import {
+  enqueueInitialTelegramDelivery,
+  type InitialTelegramDelivery,
+} from "./telegramDeliveryTasks.ts";
 
 const PROJECTION_SWEEP_LIMIT = 100;
 const PROJECTION_INPUT_RETRIES = 5;
@@ -50,8 +54,14 @@ type ProjectionLogger = Pick<Console, "error" | "info">;
 type ProjectionDependencies = {
   createRating?: (env: Env) => RatingProjectionRepository;
   createRtdb?: (env: Env) => FirebaseRtdbClient;
+  enqueueDelivery?: (input: InitialTelegramDelivery) => Promise<unknown>;
   logger?: ProjectionLogger;
   now?: () => number;
+};
+
+type AutomatchProjectionResult = {
+  delivery?: { messageKey: string; revision: string };
+  status: "projected" | "stale" | "invalid";
 };
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -109,7 +119,7 @@ async function readAutomatchInputs(
 async function projectAutomatchSource(
   inviteId: string,
   rtdb: FirebaseRtdbClient,
-): Promise<"projected" | "stale" | "invalid"> {
+): Promise<AutomatchProjectionResult> {
   let input = await readAutomatchInputs(inviteId, rtdb);
   for (let attempt = 0; attempt < PROJECTION_INPUT_RETRIES; attempt += 1) {
     const projection = buildAutomatchTelegramProjection({
@@ -118,7 +128,7 @@ async function projectAutomatchSource(
       inviteData: toRecord(input.inviteData),
     });
     if (!projection) {
-      return "invalid";
+      return { status: "invalid" };
     }
     const desired = projectionDesired(projection);
     const transaction = await rtdb.transactPath(
@@ -140,7 +150,15 @@ async function projectAutomatchSource(
     );
     const latest = await readAutomatchInputs(inviteId, rtdb);
     if (inputFingerprint(input) === inputFingerprint(latest)) {
-      return transaction.committed ? "projected" : "stale";
+      return transaction.committed
+        ? {
+            status: "projected",
+            delivery: {
+              messageKey: projection.messageKey,
+              revision: desired.revision,
+            },
+          }
+        : { status: "stale" };
     }
     input = latest;
   }
@@ -181,6 +199,7 @@ async function settleAutomatchOutbox(
 async function processAutomatchTask(
   task: AutomatchTelegramProjectionTask,
   rtdb: FirebaseRtdbClient,
+  enqueueDelivery: (input: InitialTelegramDelivery) => Promise<unknown>,
   now: () => number,
 ): Promise<string> {
   const outbox = parseOutbox(
@@ -189,19 +208,27 @@ async function processAutomatchTask(
   if (!outbox || outbox.requestId !== task.requestId) {
     return "stale";
   }
-  const status = await projectAutomatchSource(task.inviteId, rtdb);
-  if (status === "invalid") {
+  const projection = await projectAutomatchSource(task.inviteId, rtdb);
+  if (projection.status === "invalid") {
     await settleAutomatchOutbox(rtdb, task, "dead", now, "invalid-source");
     return "dead";
   }
+  if (projection.delivery) {
+    await enqueueDelivery({
+      ...projection.delivery,
+      generation: `automatch:${task.requestId}:${projection.delivery.revision}`,
+      producer: "automatch-projection",
+    });
+  }
   await settleAutomatchOutbox(rtdb, task, "clear", now);
-  return status;
+  return projection.status;
 }
 
 async function processRatingTask(
   task: RatingTelegramProjectionTask,
   rtdb: FirebaseRtdbClient,
   rating: RatingProjectionRepository,
+  enqueueDelivery: (input: InitialTelegramDelivery) => Promise<unknown>,
   now: () => number,
 ): Promise<string> {
   const update = await rating.readRatingUpdate(task.operationId);
@@ -240,8 +267,8 @@ async function processRatingTask(
     );
     return "dead";
   }
-  const projectionStatus = await projectAutomatchSource(update.inviteId, rtdb);
-  if (projectionStatus === "invalid") {
+  const projection = await projectAutomatchSource(update.inviteId, rtdb);
+  if (projection.status === "invalid") {
     await rating.markRatingTelegramProjection(
       task.operationId,
       "dead",
@@ -250,8 +277,15 @@ async function processRatingTask(
     );
     return "dead";
   }
+  if (projection.delivery) {
+    await enqueueDelivery({
+      ...projection.delivery,
+      generation: `rating:${task.operationId}:${projection.delivery.revision}`,
+      producer: "rating-projection",
+    });
+  }
   await rating.markRatingTelegramProjection(task.operationId, "done", now());
-  return mergeReason === "duplicate" ? "duplicate" : projectionStatus;
+  return mergeReason === "duplicate" ? "duplicate" : projection.status;
 }
 
 export function projectionRetryDelaySeconds(attempts: number): number {
@@ -281,12 +315,22 @@ export async function handleTelegramProjectionMessage(
     dependencies.createRating ||
     ((workerEnv: Env) =>
       createRatingRepository(workerEnv, createGameplayRepository(workerEnv)));
+  const enqueueDelivery =
+    dependencies.enqueueDelivery ||
+    ((input: InitialTelegramDelivery) =>
+      enqueueInitialTelegramDelivery(env, input));
   try {
     const rtdb = createRtdb(env);
     const status =
       task.kind === "automatch-telegram-projection"
-        ? await processAutomatchTask(task, rtdb, now)
-        : await processRatingTask(task, rtdb, createRating(env), now);
+        ? await processAutomatchTask(task, rtdb, enqueueDelivery, now)
+        : await processRatingTask(
+            task,
+            rtdb,
+            createRating(env),
+            enqueueDelivery,
+            now,
+          );
     message.ack();
     logger.info(
       JSON.stringify({
