@@ -490,8 +490,4 @@ test("profile claim synchronization is Worker-owned with a least-privilege runbo
     assert.match(deployGuide, new RegExp(permission.replaceAll(".", "\\.")));
   }
   assert.match(deployGuide, /monsLinkProfileClaimSync/);
-  assert.match(deployGuide, /roles describe monsLinkProfileClaimSync/);
-  assert.match(deployGuide, /roles create monsLinkProfileClaimSync/);
-  assert.match(deployGuide, /roles update monsLinkProfileClaimSync/);
-  assert.match(deployGuide, /--condition=None/);
 });

@@ -399,26 +399,15 @@ profile exists, stale claim and RTDB cleanup remains best-effort and the route
 returns the empty linked-method response.
 
 The route reuses the existing `mons-link-x-callback` auth API identity and its
-`FIRESTORE_SERVICE_ACCOUNT_*` Worker secrets. Grant that identity a separate
-project-level role without changing the Firestore-conditioned role:
-
-```sh
-if gcloud iam roles describe monsLinkProfileClaimSync --project mons-link >/dev/null 2>&1; then
-  gcloud iam roles update monsLinkProfileClaimSync --project mons-link --title="mons.link profile claim sync" --permissions=firebaseauth.users.get,firebaseauth.users.update,firebasedatabase.instances.get,firebasedatabase.instances.update --stage=GA
-else
-  gcloud iam roles create monsLinkProfileClaimSync --project mons-link --title="mons.link profile claim sync" --permissions=firebaseauth.users.get,firebaseauth.users.update,firebasedatabase.instances.get,firebasedatabase.instances.update --stage=GA
-fi
-gcloud projects add-iam-policy-binding mons-link --member="serviceAccount:mons-link-x-callback@mons-link.iam.gserviceaccount.com" --role="projects/mons-link/roles/monsLinkProfileClaimSync" --condition=None
-```
-
-No new service-account key, Worker secret, or Cloudflare binding is required.
+`FIRESTORE_SERVICE_ACCOUNT_*` Worker secrets. Its separate
+`monsLinkProfileClaimSync` project-level role contains exactly
+`firebaseauth.users.get`, `firebaseauth.users.update`,
+`firebasedatabase.instances.get`, and `firebasedatabase.instances.update`
+without changing the Firestore-conditioned role. No additional service-account
+key, Worker secret, or Cloudflare binding is required.
 
 Automated API smoke checks cover every auth preflight and unauthenticated
-response without creating Firestore records. Before promotion, call the profile
-claim route on the version-preview URL with disposable users covering one
-linked profile and one missing profile. After promotion, manually verify
-profile recovery, linked-method loading, all four intent types, and the X
-redirect start before removing the retired Firebase callables.
+response without creating Firestore records.
 
 ## X OAuth callback
 
@@ -477,20 +466,6 @@ absent state that proves Google OAuth and Firestore read access. A real X code
 is intentionally not used by automated smoke checks. After production
 promotion, exercise X sign-in and settings linking manually, including provider
 denial.
-
-The auth compute migration uses an immediate cutover. Deploy and smoke-test the
-Worker candidate, promote and verify the frontend, then reconcile away
-`beginAuthIntent`, `getLinkedAuthMethods`, `syncProfileClaim`, and
-`beginXRedirectAuth` through the complete Firebase release. Already-open tabs
-running the former frontend can fail after reconciliation and must be refreshed.
-
-For rollback after Firebase reconciliation, redeploy the four retired
-callables from the retained pre-migration commit, then roll back the frontend
-and API Workers to their recorded version IDs. The X callback remains on the
-API Worker throughout this rollback. Remove `datastore.entities.create` from
-the Firestore custom role only after the old auth start path is restored. Remove
-the `monsLinkProfileClaimSync` binding only after the old profile-claim callable
-and frontend are restored and verified.
 
 ## Profile and leaderboard reads
 
