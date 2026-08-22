@@ -555,47 +555,15 @@ exact version. Confirm both rating secret names are present on the promoted
 Worker before deleting the downloaded key and external secrets file. Revoke the
 previous Google key only after the new Worker version is confirmed healthy.
 
-## Telegram dispatcher retirement
+## Telegram delivery
 
 Telegram desired records remain in Firebase RTDB, while every producer now
 enqueues delivery explicitly. Worker-owned automatch and rating projections use
 the `TELEGRAM_DELIVERY_QUEUE` binding. Retained event projectors persist guarded
 desired records, call the HMAC-protected Worker bridge, and advance projection
-state only after every enqueue succeeds. Admin send, smoke, requeue, and manual
-recovery tools use the same bridge with a protected secret file.
-
-Record the current API Worker version and the pre-migration Firebase commit.
-Upload, smoke-test, and promote the API Worker first. While the old Firebase
-dispatchers remain deployed, duplicate wake-ups are expected and delivery stays
-idempotent:
-
-```sh
-npm run deploy:api -- preview --smoke-sol <known-wallet> --token-file /secure/cloudflare-token
-npm run deploy:api -- production --version-id <candidate-version-id> --smoke-sol <known-wallet> --token-file /secure/cloudflare-token
-```
-
-Deploy only the two direct event producers. This positional maintenance release
-does not prune the old dispatchers:
-
-```sh
-npm --prefix cloud/functions run deploy:safe -- projectEventTelegramOnCreated projectEventTelegramOnUpdated --project mons-link
-npm run smoke:telegram -- --bridge-secret-file /secure/telegram-queue-bridge-secret --project mons-link
-```
-
-After confirming Worker and Firebase enqueue logs, run the complete Firebase
-release. Its forced manifest reconciliation removes
-`dispatchTelegramDelivery` and `dispatchTelegramManualRecovery`:
-
-```sh
-npm run deploy:firebase -- --project mons-link
-npm run smoke:telegram -- --bridge-secret-file /secure/telegram-queue-bridge-secret --project mons-link
-```
-
-Before reconciliation, rollback the API Worker and event projector versions.
-After reconciliation, restore and deploy both dispatchers from the recorded
-pre-migration commit before rolling back the new producers. Use
-`requeue:telegram -- --target cloudflare` to wake any pending desired or manual
-recovery records.
+state only after every enqueue succeeds. Admin sends and manual recovery use the
+same bridge with a protected secret file. Manual recovery operations are
+documented in [cloud operations](../cloud/README.md).
 
 ## Firebase deployment
 

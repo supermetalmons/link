@@ -283,11 +283,11 @@ test("package manifests preserve public scripts and deployment command vectors",
   });
   assert.deepEqual(adminPackage.scripts, {
     "recover:telegram": "node recoverTelegramDelivery.js",
-    "requeue:telegram": "node requeueTelegramDelivery.js",
-    "smoke:telegram": "node smokeTelegramDelivery.js",
     start: "node listAddresses.js",
     "shooting:alert": "node shootingStarAlert.js",
   });
+  assert.equal(rootPackage.scripts?.["requeue:telegram"], undefined);
+  assert.equal(rootPackage.scripts?.["smoke:telegram"], undefined);
   assert.equal(apiPackage.private, true);
   assert.equal(apiPackage.type, "module");
   assert.equal(rootPackage.dependencies?.jose, "^6.2.7");

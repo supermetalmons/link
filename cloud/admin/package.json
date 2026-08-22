@@ -10,8 +10,6 @@
   },
   "scripts": {
     "recover:telegram": "node recoverTelegramDelivery.js",
-    "requeue:telegram": "node requeueTelegramDelivery.js",
-    "smoke:telegram": "node smokeTelegramDelivery.js",
     "start": "node listAddresses.js",
     "shooting:alert": "node shootingStarAlert.js"
   }

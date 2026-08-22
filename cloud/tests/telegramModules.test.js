@@ -35,10 +35,6 @@ test("delivery exports use the extracted desired-state and repository modules", 
     desiredState.buildTelegramEditUpdates,
   );
   assert.strictEqual(
-    telegramDelivery.queueTelegramDelete,
-    desiredState.queueTelegramDelete,
-  );
-  assert.strictEqual(
     telegramDelivery.createFirebaseTelegramRepository,
     rtdbRepository.createFirebaseTelegramRepository,
   );

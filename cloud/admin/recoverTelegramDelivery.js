@@ -187,7 +187,7 @@ const recoverTelegramDelivery = async (
     });
   } catch (error) {
     throw new Error(
-      `Manual recovery ${requestId} remains pending. Run requeue:telegram against Cloudflare.`,
+      `Manual recovery ${requestId} remains pending. Retry the same recover:telegram command.`,
       { cause: error },
     );
   }
@@ -219,7 +219,7 @@ const recoverTelegramDelivery = async (
     await sleepImpl(POLL_INTERVAL_MS);
   }
   throw new Error(
-    `Manual recovery ${requestId} remains pending. Run requeue:telegram against Cloudflare.`,
+    `Manual recovery ${requestId} remains pending. Retry the same recover:telegram command.`,
   );
 };
 

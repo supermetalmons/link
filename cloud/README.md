@@ -26,7 +26,7 @@ cutover procedure are documented in the Cloudflare deployment guide.
 
 `TELEGRAM_QUEUE_BRIDGE_SECRET` remains attached to the retained event Telegram
 projectors and the API Worker queue bridge. Restore its protected operator file
-when running announcement, smoke, recovery, or requeue tools:
+when running announcement or recovery tools:
 
 `umask 077; firebase functions:secrets:access TELEGRAM_QUEUE_BRIDGE_SECRET --project mons-link > /secure/telegram-queue-bridge-secret`
 
@@ -69,11 +69,7 @@ Ambiguous sends stay at `telegramMessages/{messageKey}/delivery/status = uncerta
 
 Use `--action confirm-send-applied --message-id <telegram-message-id>` when Telegram created the uncertain message. Use `--action abandon` to retain the audit record and stop delivery. The command validates the uncertain send marker, writes a unique request, queues it through Cloudflare, and waits for the matching result.
 
-If the bridge is unavailable after the request is written, wake every pending desired and recovery record through Cloudflare:
-
-`npm run requeue:telegram -- --target cloudflare --bridge-secret-file /secure/telegram-queue-bridge-secret --project mons-link --execute`
-
-Recovery remains idempotent by `requestId`. Retry-window exhaustion remains visible through `delivery/deadLetterAtMs`, and failed stale-message cleanup remains visible under `delivery/orphanedDeletes`.
+If the bridge is unavailable after the request is written, retry the same command. It resumes the matching request without replacing it. Recovery remains idempotent by `requestId`. Retry-window exhaustion remains visible through `delivery/deadLetterAtMs`, and failed stale-message cleanup remains visible under `delivery/orphanedDeletes`.
 
 `AUTH_EXPORT_PATH="$(mktemp)" && firebase auth:export "$AUTH_EXPORT_PATH" --config cloud/firebase.json --project mons-link --format=json && echo "Exported to $AUTH_EXPORT_PATH"`
 
@@ -117,11 +113,9 @@ The GP and MP tools publish to the configured community destination. They defaul
 
 `node cloud/admin/topMpWithEmojis.js 25 --bridge-secret-file /secure/telegram-queue-bridge-secret`
 
-The shooting-star and delete-only delivery smoke tools use the same queue bridge:
+The shooting-star tool uses the same queue bridge:
 
 `npm --prefix cloud/admin run shooting:alert -- --bridge-secret-file /secure/telegram-queue-bridge-secret --project mons-link`
-
-`npm run smoke:telegram -- --bridge-secret-file /secure/telegram-queue-bridge-secret --project mons-link`
 
 ## Event prize announcements
 

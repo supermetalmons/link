@@ -23,7 +23,7 @@ const persistDesiredUpdates = async (
     });
   } catch (error) {
     const failure = new Error(
-      `Telegram desired state persisted for ${normalizedMessageKey} but was not confirmed enqueued. Do not rerun the producer; run requeue:telegram against Cloudflare.`,
+      `Telegram desired state persisted for ${normalizedMessageKey} but was not confirmed enqueued. Do not rerun the producer; operator intervention is required.`,
       { cause: error },
     );
     failure.code = "telegram-delivery-pending";
@@ -49,29 +49,7 @@ const queueTelegramSend = (input, dependencies = {}) =>
     },
   );
 
-const queueTelegramEdit = (input, dependencies = {}) =>
-  persistDesiredUpdates(
-    input.messageKey,
-    core.buildTelegramEditUpdates(input),
-    {
-      ...dependencies,
-      database: dependencies.database || admin.database(),
-    },
-  );
-
-const queueTelegramDelete = (input, dependencies = {}) =>
-  persistDesiredUpdates(
-    input.messageKey,
-    core.buildTelegramDeleteUpdates(input),
-    {
-      ...dependencies,
-      database: dependencies.database || admin.database(),
-    },
-  );
-
 module.exports = {
   ...core,
-  queueTelegramDelete,
-  queueTelegramEdit,
   queueTelegramSend,
 };

@@ -144,11 +144,7 @@ test("a blocked Telegram client cannot delay latency-critical domain handlers", 
       filePath,
     );
     assert.equal(source.includes("telegramDeliveryFunctions"), false, filePath);
-    for (const helper of [
-      "queueTelegramSend",
-      "queueTelegramEdit",
-      "queueTelegramDelete",
-    ]) {
+    for (const helper of ["queueTelegramSend"]) {
       assert.equal(source.includes(helper), false, filePath);
     }
     assert.equal(source.includes("sendTelegramMessage"), false, filePath);

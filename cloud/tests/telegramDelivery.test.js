@@ -427,7 +427,7 @@ test("queue APIs report a durable pending message after dispatch failure", async
       assert.equal(error.code, "telegram-delivery-pending");
       assert.equal(error.messageKey, "admin:test:pending");
       assert.match(error.message, /Do not rerun/);
-      assert.match(error.message, /requeue:telegram/);
+      assert.match(error.message, /operator intervention/);
       return true;
     },
   );
@@ -468,7 +468,7 @@ test("delivers a new send and persists its receipt", async () => {
 test("settles a delete-only smoke record without calling Telegram", async () => {
   const desired = buildTelegramDeleteDesired({
     destination: "community",
-    sourceRevision: "migration-smoke",
+    sourceRevision: "delete-only",
   });
   const repository = createRepository({ key: { desired } });
   const engine = createEngine({
