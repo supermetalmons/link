@@ -30,7 +30,7 @@ function gameplayRepository(): GameplayRepository {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     findProfileId: async () => null,
-    getAutomatchProfile: async () => null,
+    getGameplayProfile: async () => null,
     getMiningMaterials: async () => ({
       dust: 0,
       slime: 0,

@@ -35,6 +35,14 @@ import {
   type RatingUpdateRequest,
   type RatingUpdateResponse,
 } from "@mons/shared/ratings";
+import {
+  isJoinEventResponse,
+  isRemoveEventParticipantResponse,
+  type JoinEventRequest,
+  type JoinEventResponse,
+  type RemoveEventParticipantRequest,
+  type RemoveEventParticipantResponse,
+} from "@mons/shared/events";
 import type { AuthTokenProvider } from "./authApi";
 
 const GAMEPLAY_API_ROOT = "https://api.mons.link";
@@ -235,6 +243,30 @@ export function removeNavigationGameViaApi(
     request,
     tokenProvider,
     isRemoveNavigationGameResponse,
+  );
+}
+
+export function joinEventViaApi(
+  request: JoinEventRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<JoinEventResponse> {
+  return gameplayMutation(
+    "/events/participants/join",
+    request,
+    tokenProvider,
+    isJoinEventResponse,
+  );
+}
+
+export function removeEventParticipantViaApi(
+  request: RemoveEventParticipantRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<RemoveEventParticipantResponse> {
+  return gameplayMutation(
+    "/events/participants/remove",
+    request,
+    tokenProvider,
+    isRemoveEventParticipantResponse,
   );
 }
 

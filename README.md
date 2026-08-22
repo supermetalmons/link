@@ -4,15 +4,15 @@ mons.link is a browser game backed by Firebase and two Cloudflare Workers. The r
 
 ## Project map
 
-| Path                      | Responsibility                                                              | Runtime                       |
-| ------------------------- | --------------------------------------------------------------------------- | ----------------------------- |
-| `src/`                    | React UI, game orchestration, Firebase client, assets, and browser services | Vite / browser                |
-| `test/`                   | Client behavior and contract tests                                          | Node test runner              |
-| `cloud/functions/`        | Callable, HTTP, task, schedule, and database-triggered backend functions    | Firebase Functions / CommonJS |
-| `cloud/functions/shared/` | Browser-safe `@mons/shared/*` contract subpaths                             | CommonJS package              |
-| `cloud/workers/api/`      | NFT, profile, leaderboard, gameplay, ratings, mining, auth, and X APIs      | Cloudflare Workers            |
-| `cloud/admin/`            | Manually invoked production administration tools                            | Node / Firebase Admin         |
-| `scripts/`                | Deployment, repository maintenance, architecture, and tooling contracts     | Node and Bash                 |
+| Path                      | Responsibility                                                                | Runtime                       |
+| ------------------------- | ----------------------------------------------------------------------------- | ----------------------------- |
+| `src/`                    | React UI, game orchestration, Firebase client, assets, and browser services   | Vite / browser                |
+| `test/`                   | Client behavior and contract tests                                            | Node test runner              |
+| `cloud/functions/`        | Callable, HTTP, task, schedule, and database-triggered backend functions      | Firebase Functions / CommonJS |
+| `cloud/functions/shared/` | Browser-safe `@mons/shared/*` contract subpaths                               | CommonJS package              |
+| `cloud/workers/api/`      | NFT, profile, leaderboard, gameplay, event, ratings, mining, auth, and X APIs | Cloudflare Workers            |
+| `cloud/admin/`            | Manually invoked production administration tools                              | Node / Firebase Admin         |
+| `scripts/`                | Deployment, repository maintenance, architecture, and tooling contracts       | Node and Bash                 |
 
 The frontend Worker is configured by `wrangler.jsonc`. The API Worker has its independent configuration under `cloud/workers/api/`. Firebase configuration, rules, indexes, and deployment entrypoints remain under `cloud/`.
 

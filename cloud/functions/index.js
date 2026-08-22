@@ -11,9 +11,7 @@ const { syncProfileClaim } = require("./syncProfileClaim");
 const { withdrawEventPrize } = require("./eventPrizeWithdrawal");
 const {
   createEvent,
-  joinEvent,
   postponeEventStart,
-  removeEventParticipant,
   disqualifyEventMatchWinners,
   syncEventState,
   processEventProgress,
@@ -50,9 +48,7 @@ exports.unlinkAuthMethod = unlinkAuthMethod;
 exports.syncProfileClaim = syncProfileClaim;
 exports.withdrawEventPrize = withdrawEventPrize;
 exports.createEvent = createEvent;
-exports.joinEvent = joinEvent;
 exports.postponeEventStart = postponeEventStart;
-exports.removeEventParticipant = removeEventParticipant;
 exports.disqualifyEventMatchWinners = disqualifyEventMatchWinners;
 exports.syncEventState = syncEventState;
 exports.processEventProgress = processEventProgress;

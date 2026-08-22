@@ -31,7 +31,7 @@ import {
   firebaseRtdbIncrement,
 } from "./firebaseRtdb.ts";
 import type {
-  AutomatchProfile,
+  GameplayProfile,
   GameplayRepository,
 } from "./gameplayRepository.ts";
 import type {
@@ -59,7 +59,7 @@ type QueuedAutomatch = {
   inviteId: string;
 };
 
-export function emptyAutomatchProfile(): AutomatchProfile {
+export function emptyAutomatchProfile(): GameplayProfile {
   return {
     aura: "",
     emoji: "",
@@ -150,7 +150,7 @@ async function readProfile(
   repository: GameplayRepository,
   logProfileFailure: () => void,
   signal: AbortSignal,
-): Promise<AutomatchProfile> {
+): Promise<GameplayProfile> {
   const fallbackProfile = {
     ...emptyAutomatchProfile(),
     aura: request.aura,
@@ -159,7 +159,7 @@ async function readProfile(
   };
   try {
     return (
-      (await repository.getAutomatchProfile(
+      (await repository.getGameplayProfile(
         identity.uid,
         identity.idToken,
         signal,
@@ -183,7 +183,7 @@ function matchedAutomatchResponse(inviteId: string): StartAutomatchResponse {
 async function attemptAutomatch(
   identity: FirebaseIdentity,
   request: StartAutomatchRequest,
-  profile: AutomatchProfile,
+  profile: GameplayProfile,
   repository: GameplayRepository,
   random: RandomSource,
   signal: AbortSignal,

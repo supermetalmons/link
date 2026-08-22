@@ -336,6 +336,43 @@ the same balances. Already-open tabs using the former frontend must be refreshed
 After reconciliation, restore the callable from the retained pre-migration
 commit before rolling back the frontend or API Worker.
 
+## Event participation APIs
+
+Authenticated event participation mutations are served by:
+
+- `POST https://api.mons.link/events/participants/join`
+- `POST https://api.mons.link/events/participants/remove`
+
+The browser sends its Firebase ID token. The Worker reads the caller's profile
+with that token, then uses the existing gameplay service account for RTDB reads,
+transactions, and multipath updates. Firebase event state, realtime listeners,
+event progress, navigation projection, and Telegram projection remain
+authoritative. No new Worker secret, binding, IAM permission, or Firebase rule
+is required.
+
+Both routes use the same `eventLocks/{eventId}` lease schema as the retained
+Firebase event functions. A late join or removal preserves the existing
+opportunistic event-start transition before rejecting the mutation. Join
+replays preserve the original `joinedAtMs`; removal clears both the participant
+and the participant's event-prize selection.
+
+Automated API smoke checks cover preflight and unauthenticated responses without
+reading or changing an event. For the production cutover, record the current API
+and frontend version IDs and the pre-migration commit. Promote the tested API
+candidate first, then promote the frontend candidate. With a scheduled event,
+join from a second profile, repeat the join and verify `joinedAtMs` is unchanged,
+then remove that profile as the creator. Confirm the participant and prize
+selection are absent and the retained navigation and Telegram projectors
+advance normally.
+
+After those checks pass, run the complete Firebase release to reconcile away
+the retired `joinEvent` and `removeEventParticipant` callables. Already-open tabs
+using the former frontend must refresh.
+
+Before reconciliation, rollback the frontend and API Worker versions. After
+reconciliation, restore and deploy both callables from the recorded
+pre-migration commit before rolling back the frontend and API versions.
+
 ## Auth initiation and reads
 
 The API Worker owns these Firebase-authenticated routes:

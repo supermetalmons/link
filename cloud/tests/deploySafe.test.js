@@ -32,9 +32,7 @@ const expectedReleaseFunctionBarriers = [
 ];
 const eventDomainFunctionNames = [
   "createEvent",
-  "joinEvent",
   "postponeEventStart",
-  "removeEventParticipant",
   "disqualifyEventMatchWinners",
   "syncEventState",
   "processEventProgress",

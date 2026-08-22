@@ -4,7 +4,7 @@ import {
   createGameplayRepository,
   GameplayRepositoryFailure,
   MAX_FIRESTORE_BODY_BYTES,
-  parseAutomatchProfileQuery,
+  parseGameplayProfileQuery,
   parseMiningMaterialsDocument,
   parseMiningSnapshotDocument,
   parseNavigationGame,
@@ -78,7 +78,7 @@ test("parses only the profile and navigation fields used by gameplay", () => {
     GameplayRepositoryFailure,
   );
   assert.deepEqual(
-    parseAutomatchProfileQuery([
+    parseGameplayProfileQuery([
       {
         document: {
           name: "projects/mons-link/databases/(default)/documents/users/profile-1",
@@ -112,7 +112,7 @@ test("parses only the profile and navigation fields used by gameplay", () => {
     },
   );
   assert.deepEqual(
-    parseAutomatchProfileQuery([
+    parseGameplayProfileQuery([
       {
         document: {
           name: "projects/mons-link/databases/(default)/documents/users/profile-2",
@@ -130,7 +130,7 @@ test("parses only the profile and navigation fields used by gameplay", () => {
     },
   );
   assert.equal(
-    parseAutomatchProfileQuery([
+    parseGameplayProfileQuery([
       {
         document: {
           name: "projects/mons-link/databases/(default)/documents/users/profile-3",
@@ -146,7 +146,7 @@ test("parses only the profile and navigation fields used by gameplay", () => {
     "legacy",
   );
   assert.equal(
-    parseAutomatchProfileQuery([
+    parseGameplayProfileQuery([
       {
         document: {
           name: "projects/mons-link/databases/(default)/documents/users/profile-4",
@@ -161,11 +161,8 @@ test("parses only the profile and navigation fields used by gameplay", () => {
     ])?.aura,
     "",
   );
-  assert.equal(parseAutomatchProfileQuery([{ readTime: "now" }]), null);
-  assert.throws(
-    () => parseAutomatchProfileQuery({}),
-    GameplayRepositoryFailure,
-  );
+  assert.equal(parseGameplayProfileQuery([{ readTime: "now" }]), null);
+  assert.throws(() => parseGameplayProfileQuery({}), GameplayRepositoryFailure);
   assert.deepEqual(
     parseMiningMaterialsDocument({
       fields: {
@@ -428,7 +425,7 @@ test("queries the caller profile summary with the Firebase token", async () => {
     },
   });
   assert.deepEqual(
-    await repository.getAutomatchProfile("firebase-uid", "firebase-token"),
+    await repository.getGameplayProfile("firebase-uid", "firebase-token"),
     {
       aura: "",
       emoji: "",

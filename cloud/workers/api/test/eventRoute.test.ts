@@ -1,0 +1,276 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { EventLockManager } from "../../../functions/events/lockManagerCore.js";
+import { AuthApiFailure } from "../src/authErrors.ts";
+import { handleEventRoute } from "../src/eventRoute.ts";
+import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+
+const identity = {
+  uid: "creator-login",
+  idToken: "firebase-token",
+  profileId: "creator-profile",
+};
+
+const participant = {
+  profileId: "creator-profile",
+  loginUid: "creator-login",
+  username: "creator",
+  displayName: "creator",
+  emojiId: 7,
+  aura: "rainbow",
+  joinedAtMs: 1,
+  state: "active",
+  eliminatedRoundIndex: null,
+  eliminatedByProfileId: null,
+};
+
+const lockHandle = {
+  eventId: "event-1",
+  path: "eventLocks/event-1",
+  lockId: "lock-1",
+  ownerUid: identity.uid,
+  lockRoot: "eventLocks",
+};
+
+const lockManager: EventLockManager = {
+  acquireEventLock: async () => lockHandle,
+  acquireEventLockWithRetry: async () => lockHandle,
+  getEventLockGuard: () => ({
+    lockRoot: "eventLocks",
+    eventId: "event-1",
+    lockId: "lock-1",
+    ownerUid: identity.uid,
+  }),
+  isEventLockStillOwned: async () => true,
+  refreshEventLock: async () => true,
+  releaseEventLock: async () => true,
+  startEventLockHeartbeat: () => () => undefined,
+};
+
+function createRepository(): GameplayRepository {
+  return {
+    applyWagerTransferOnce: async () => "applied",
+    deleteNavigationGame: async () => "deleted",
+    findProfileId: async () => identity.profileId,
+    getGameplayProfile: async () => ({
+      profileId: identity.profileId,
+      username: "creator",
+      eth: "",
+      sol: "",
+      rating: 1500,
+      emoji: 7,
+      aura: "rainbow",
+    }),
+    getNavigationGame: async () => null,
+    getMiningMaterials: async () => ({
+      dust: 0,
+      slime: 0,
+      gum: 0,
+      metal: 0,
+      ice: 0,
+    }),
+    getMiningSnapshot: async () => null,
+    getRtdbPath: async (path) =>
+      path === "events/event-1"
+        ? {
+            eventId: "event-1",
+            status: "scheduled",
+            startAtMs: 10_000,
+            createdByLoginUid: identity.uid,
+            createdByProfileId: identity.profileId,
+            participants: { [identity.profileId]: participant },
+          }
+        : null,
+    patchRtdbRoot: async () => undefined,
+    transactRtdbPath: async () => ({ committed: false, value: null }),
+  };
+}
+
+const ctx = { waitUntil: () => undefined };
+
+test("serves authenticated event CORS preflight", async () => {
+  const response = await handleEventRoute(
+    new Request("https://api.mons.link/events/participants/join", {
+      method: "OPTIONS",
+      headers: { Origin: "https://mons.link" },
+    }),
+    TELEGRAM_TEST_ENV,
+    ctx,
+  );
+  assert.equal(response.status, 204);
+  assert.equal(
+    response.headers.get("Access-Control-Allow-Origin"),
+    "https://mons.link",
+  );
+  assert.equal(response.headers.get("Cache-Control"), "no-store");
+});
+
+test("authenticates before parsing event request bodies", async () => {
+  const response = await handleEventRoute(
+    new Request("https://api.mons.link/events/participants/join", {
+      method: "POST",
+      headers: {
+        Origin: "https://mons.link",
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    }),
+    TELEGRAM_TEST_ENV,
+    ctx,
+    {
+      verifyIdentity: async () => {
+        throw new AuthApiFailure(
+          401,
+          "unauthenticated",
+          "authentication-required",
+        );
+      },
+    },
+  );
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "unauthenticated",
+    message: "authentication-required",
+  });
+});
+
+test("rejects wrong methods and strict-body violations", async () => {
+  const wrongMethod = await handleEventRoute(
+    new Request("https://api.mons.link/events/participants/join"),
+    TELEGRAM_TEST_ENV,
+    ctx,
+  );
+  assert.equal(wrongMethod.status, 405);
+
+  const invalidBody = await handleEventRoute(
+    new Request("https://api.mons.link/events/participants/join", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ eventId: "event-1", extra: true }),
+    }),
+    TELEGRAM_TEST_ENV,
+    ctx,
+    { verifyIdentity: async () => identity },
+  );
+  assert.equal(invalidBody.status, 400);
+});
+
+test("returns strict join and removal responses", async () => {
+  const background: Promise<unknown>[] = [];
+  const routeCtx = {
+    waitUntil(promise: Promise<unknown>) {
+      background.push(promise);
+    },
+  };
+  const dependencies = {
+    verifyIdentity: async () => identity,
+    repository: createRepository(),
+    participation: {
+      lockManager,
+      now: () => 100,
+      buildDueUpdates: async () => ({ didChange: false, updates: {} }),
+    },
+  };
+  const join = await handleEventRoute(
+    new Request("https://api.mons.link/events/participants/join", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ eventId: "event-1" }),
+    }),
+    TELEGRAM_TEST_ENV,
+    routeCtx,
+    dependencies,
+  );
+  assert.equal(join.status, 200);
+  assert.deepEqual(await join.json(), {
+    ok: true,
+    eventId: "event-1",
+    participant: { ...participant, joinedAtMs: 1 },
+  });
+
+  const removal = await handleEventRoute(
+    new Request("https://api.mons.link/events/participants/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        eventId: "event-1",
+        participantProfileId: "target-profile",
+      }),
+    }),
+    TELEGRAM_TEST_ENV,
+    routeCtx,
+    {
+      ...dependencies,
+      repository: {
+        ...createRepository(),
+        getRtdbPath: async () => ({
+          eventId: "event-1",
+          status: "scheduled",
+          startAtMs: 10_000,
+          createdByLoginUid: identity.uid,
+          createdByProfileId: identity.profileId,
+          participants: {
+            [identity.profileId]: participant,
+            "target-profile": {
+              ...participant,
+              profileId: "target-profile",
+              loginUid: "target-login",
+            },
+          },
+        }),
+      },
+    },
+  );
+  assert.equal(removal.status, 200);
+  assert.deepEqual(await removal.json(), {
+    ok: true,
+    eventId: "event-1",
+    removedProfileId: "target-profile",
+  });
+  assert.equal(background.length, 2);
+  await Promise.all(background);
+});
+
+test("registers the complete mutation before it settles", async () => {
+  let finishPatch: () => void = () => undefined;
+  const patchGate = new Promise<void>((resolve) => {
+    finishPatch = resolve;
+  });
+  let registeredPromise: Promise<unknown> | undefined;
+  let markRegistered: () => void = () => undefined;
+  const registered = new Promise<void>((resolve) => {
+    markRegistered = resolve;
+  });
+  const repository = createRepository();
+  repository.patchRtdbRoot = () => patchGate;
+  const responsePromise = handleEventRoute(
+    new Request("https://api.mons.link/events/participants/join", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ eventId: "event-1" }),
+    }),
+    TELEGRAM_TEST_ENV,
+    {
+      waitUntil(promise) {
+        registeredPromise = promise;
+        markRegistered();
+      },
+    },
+    {
+      verifyIdentity: async () => identity,
+      repository,
+      participation: {
+        lockManager,
+        now: () => 100,
+        buildDueUpdates: async () => ({ didChange: false, updates: {} }),
+      },
+    },
+  );
+  await registered;
+  assert.ok(registeredPromise);
+  finishPatch();
+  assert.equal((await responsePromise).status, 200);
+  await registeredPromise;
+});

@@ -17,6 +17,7 @@ export const MIN_STARTS_IN_MINUTES: 1;
 export const MAX_STARTS_IN_DAYS: 14;
 export const MAX_STARTS_IN_MINUTES: 20160;
 export const MAX_EVENT_PARTICIPANTS: 32;
+export const MAX_EVENT_PARTICIPANT_TEXT_BYTES: 256;
 export const SCHEDULED_TIMEZONE_LOCAL: "local";
 
 export type EventScheduleTimezone = "local" | "ET" | "PT" | "CT";
@@ -35,6 +36,47 @@ export const EVENT_SCHEDULE_TIMEZONE_OPTIONS: readonly [
 
 export type EventPostponeMinutes = 5 | 10 | 15;
 export const EVENT_POSTPONE_OPTIONS_MINUTES: readonly [5, 10, 15];
+
+export type EventParticipantSnapshot = {
+  profileId: string;
+  loginUid: string;
+  username: string;
+  displayName: string;
+  emojiId: number;
+  aura: string;
+  joinedAtMs: number;
+  state: "active";
+  eliminatedRoundIndex: null;
+  eliminatedByProfileId: null;
+};
+
+export type JoinEventRequest = { eventId: string };
+export type JoinEventResponse = {
+  ok: true;
+  eventId: string;
+  participant: EventParticipantSnapshot;
+};
+export type RemoveEventParticipantRequest = {
+  eventId: string;
+  participantProfileId: string;
+};
+export type RemoveEventParticipantResponse = {
+  ok: true;
+  eventId: string;
+  removedProfileId: string;
+};
+
+export function isEventParticipantSnapshot(
+  value: unknown,
+): value is EventParticipantSnapshot;
+export function isJoinEventRequest(value: unknown): value is JoinEventRequest;
+export function isJoinEventResponse(value: unknown): value is JoinEventResponse;
+export function isRemoveEventParticipantRequest(
+  value: unknown,
+): value is RemoveEventParticipantRequest;
+export function isRemoveEventParticipantResponse(
+  value: unknown,
+): value is RemoveEventParticipantResponse;
 
 export type EventMatchKeyParts = {
   roundIndex: number;

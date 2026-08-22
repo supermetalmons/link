@@ -11,7 +11,7 @@ import {
   firebaseRtdbIncrement,
 } from "../src/firebaseRtdb.ts";
 import type {
-  AutomatchProfile,
+  GameplayProfile,
   GameplayRepository,
 } from "../src/gameplayRepository.ts";
 
@@ -24,7 +24,7 @@ function request(emojiId = 1, aura = "") {
   return { emojiId, aura };
 }
 
-const profile: AutomatchProfile = {
+const profile: GameplayProfile = {
   aura: "rainbow",
   emoji: 9,
   eth: "0xabcdef",
@@ -41,7 +41,7 @@ function repository(
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     findProfileId: async () => null,
-    getAutomatchProfile: async () => profile,
+    getGameplayProfile: async () => profile,
     getNavigationGame: async () => null,
     getMiningMaterials: async () => ({
       dust: 10,
@@ -177,7 +177,7 @@ test("uses client metadata when profile lookup fails", async () => {
     identity,
     request(3, "rainbow"),
     repository({
-      getAutomatchProfile: async () => {
+      getGameplayProfile: async () => {
         throw new Error("private-profile-error");
       },
       patchRtdbRoot: async (value) => {
@@ -247,7 +247,7 @@ test("uses the verified profile claim when profile lookup fails", async () => {
     identity,
     request(),
     repository({
-      getAutomatchProfile: async () => {
+      getGameplayProfile: async () => {
         throw new Error("profile-unavailable");
       },
       getRtdbPath: async () => ({

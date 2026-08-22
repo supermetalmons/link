@@ -103,6 +103,8 @@ const AUTHENTICATED_ROUTE_SMOKES = [
   { path: "/auth/x/flows", method: "POST" },
   { path: "/automatch/cancel", method: "POST" },
   { path: "/automatch/start", method: "POST" },
+  { path: "/events/participants/join", method: "POST" },
+  { path: "/events/participants/remove", method: "POST" },
   { path: "/leaderboards/read", method: "POST" },
   { path: "/matches/timer/claim", method: "POST" },
   { path: "/matches/timer/start", method: "POST" },

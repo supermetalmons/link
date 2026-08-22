@@ -48,7 +48,7 @@ export type WagerTransferInput = {
   winnerProfileId: string;
 };
 
-export type AutomatchProfile = {
+export type GameplayProfile = {
   aura: string;
   emoji: number | string;
   eth: string;
@@ -58,7 +58,7 @@ export type AutomatchProfile = {
   username: string;
 };
 
-export type RatingProfile = AutomatchProfile & {
+export type RatingProfile = GameplayProfile & {
   feb2026UniqueOpponents: string[];
   nonce: number;
   totalManaPoints: number;
@@ -192,11 +192,11 @@ export type GameplayRepository = {
     uid: string,
     firebaseIdToken: string,
   ) => Promise<string | null>;
-  getAutomatchProfile: (
+  getGameplayProfile: (
     uid: string,
     firebaseIdToken: string,
     signal?: AbortSignal,
-  ) => Promise<AutomatchProfile | null>;
+  ) => Promise<GameplayProfile | null>;
   getNavigationGame: (
     profileId: string,
     inviteId: string,
@@ -454,9 +454,9 @@ function readFirestoreEmoji(value: unknown): number | string {
   return Number.isFinite(parsed) ? parsed : "";
 }
 
-export function parseAutomatchProfileQuery(
+export function parseGameplayProfileQuery(
   value: unknown,
-): AutomatchProfile | null {
+): GameplayProfile | null {
   if (!Array.isArray(value)) {
     throw new GameplayRepositoryFailure();
   }
@@ -834,7 +834,7 @@ export function createGameplayRepository(
     patchRtdbRoot: rtdbClient.patchRoot,
     transactRtdbPath: rtdbClient.transactPath,
 
-    async getAutomatchProfile(uid, firebaseIdToken, signal) {
+    async getGameplayProfile(uid, firebaseIdToken, signal) {
       const response = await fetchWithTimeout(
         `${FIRESTORE_DOCUMENTS_ROOT}:runQuery`,
         {
@@ -875,7 +875,7 @@ export function createGameplayRepository(
         await cancelResponseBody(response);
         throw new GameplayRepositoryFailure();
       }
-      return parseAutomatchProfileQuery(
+      return parseGameplayProfileQuery(
         await readBoundedJsonValue(
           response,
           MAX_FIRESTORE_BODY_BYTES,

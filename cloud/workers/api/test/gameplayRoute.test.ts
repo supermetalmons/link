@@ -41,7 +41,7 @@ function repository(
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     findProfileId: async () => null,
-    getAutomatchProfile: async () => null,
+    getGameplayProfile: async () => null,
     getNavigationGame: async () => null,
     getMiningMaterials: async () => ({
       dust: 10,
@@ -524,7 +524,7 @@ test("routes authenticated CORS and rejects methods before authentication", asyn
     context(),
     {
       repository: repository({
-        getAutomatchProfile: async () => null,
+        getGameplayProfile: async () => null,
         getRtdbPath: async (path, query) => {
           assert.equal(path, "automatch");
           assert.deepEqual(query, { orderBy: "$key", limitToFirst: 1 });
@@ -572,7 +572,7 @@ test("committed gameplay does not wait for the projection Queue", async () => {
         random: () => 0,
       },
       repository: repository({
-        getAutomatchProfile: async () => null,
+        getGameplayProfile: async () => null,
         getRtdbPath: async () => null,
       }),
       verifyIdentity: async () => identity,

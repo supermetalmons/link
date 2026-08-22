@@ -31,7 +31,7 @@ function repository(
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     findProfileId: async (uid) => `profile-${uid}`,
-    getAutomatchProfile: async () => null,
+    getGameplayProfile: async () => null,
     getNavigationGame: async () => null,
     getMiningMaterials: async () => ({
       dust: 10,

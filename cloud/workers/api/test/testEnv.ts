@@ -8,10 +8,20 @@ const queue = {
   }),
 } satisfies Queue;
 
+const rateLimit = {
+  limit: async () => ({ success: true }),
+} satisfies RateLimit;
+
 export const TELEGRAM_TEST_ENV = {
+  AUTH_DISABLE_X_VERIFY: "false",
+  AUTH_RATE_LIMITER: rateLimit,
   FIREBASE_RTDB_URL: "https://mons-link-default-rtdb.firebaseio.com",
+  FIRESTORE_SERVICE_ACCOUNT_EMAIL: "firestore@example.iam.gserviceaccount.com",
+  FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   GAMEPLAY_SERVICE_ACCOUNT_EMAIL: "gameplay@example.iam.gserviceaccount.com",
   GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
+  HELIUS_RPC_API_KEY: "test-helius-key",
+  NFT_RATE_LIMITER: rateLimit,
   RATING_SERVICE_ACCOUNT_EMAIL: "rating@example.iam.gserviceaccount.com",
   RATING_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET: "test-announcement-secret",
@@ -25,4 +35,6 @@ export const TELEGRAM_TEST_ENV = {
   TELEGRAM_QUEUE_BRIDGE_SECRET: "test-bridge-secret",
   USERNAME_SERVICE_ACCOUNT_EMAIL: "username@example.iam.gserviceaccount.com",
   USERNAME_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
+  X_CLIENT_ID: "test-x-client-id",
+  X_CLIENT_SECRET: "test-x-client-secret",
 } as const;

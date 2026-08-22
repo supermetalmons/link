@@ -4,11 +4,11 @@ Run all commands from the repository root.
 
 See the repository [architecture and command map](../README.md) for package boundaries. Cloudflare Worker release and rollback procedures are documented in the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md).
 
-The auth, profile, leaderboard, mining, and gameplay APIs, X OAuth callback,
+The auth, profile, leaderboard, mining, gameplay, and event participation APIs, X OAuth callback,
 dedicated Google service accounts, and encrypted Worker secret setup are
 documented in that deployment guide.
 Firebase retains auth verification/linking, the X completion callable, the
-remaining game and event functions, event-progress rating projection, and the
+remaining event functions, event-progress rating projection, and the
 existing Firestore auth records. Automatch and non-event rating Telegram
 projection run in the API Worker with durable Firebase-backed pending state;
 the Worker and retained event projectors enqueue delivery directly. Manual

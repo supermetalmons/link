@@ -25,6 +25,8 @@ const {
   cancelWagerProposalViaApi,
   claimMatchVictoryByTimerViaApi,
   declineWagerProposalViaApi,
+  joinEventViaApi,
+  removeEventParticipantViaApi,
   removeNavigationGameViaApi,
   resolveWagerOutcomeViaApi,
   sendWagerProposalViaApi,
@@ -53,6 +55,14 @@ const {
   isWagerProposalSendRequest,
   isWagerProposalSendResponse,
 } = await import("@mons/shared/wagers");
+const {
+  MAX_EVENT_PARTICIPANT_TEXT_BYTES,
+  isEventParticipantSnapshot,
+  isJoinEventRequest,
+  isJoinEventResponse,
+  isRemoveEventParticipantRequest,
+  isRemoveEventParticipantResponse,
+} = await import("@mons/shared/events");
 
 const originalFetch = globalThis.fetch;
 
@@ -215,6 +225,23 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       reason: null,
       inviteId: "invite-1",
     },
+    {
+      ok: true,
+      eventId: "event-1",
+      participant: {
+        profileId: "profile-1",
+        loginUid: "login-1",
+        username: "player",
+        displayName: "player",
+        emojiId: 7,
+        aura: "rainbow",
+        joinedAtMs: 100,
+        state: "active",
+        eliminatedRoundIndex: null,
+        eliminatedByProfileId: null,
+      },
+    },
+    { ok: true, eventId: "event-1", removedProfileId: "profile-2" },
     { ok: true, timer: "4;1000", duration: 90000 },
     { ok: true },
     { ok: true },
@@ -272,6 +299,29 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       reason: null,
       inviteId: "invite-1",
     },
+  );
+  const participant = {
+    profileId: "profile-1",
+    loginUid: "login-1",
+    username: "player",
+    displayName: "player",
+    emojiId: 7,
+    aura: "rainbow",
+    joinedAtMs: 100,
+    state: "active",
+    eliminatedRoundIndex: null,
+    eliminatedByProfileId: null,
+  };
+  assert.deepEqual(
+    await joinEventViaApi({ eventId: "event-1" }, async () => "firebase-token"),
+    { ok: true, eventId: "event-1", participant },
+  );
+  assert.deepEqual(
+    await removeEventParticipantViaApi(
+      { eventId: "event-1", participantProfileId: "profile-2" },
+      async () => "firebase-token",
+    ),
+    { ok: true, eventId: "event-1", removedProfileId: "profile-2" },
   );
   assert.deepEqual(
     await startMatchTimerViaApi(
@@ -360,6 +410,8 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       "https://api.mons.link/automatch/start",
       "https://api.mons.link/automatch/cancel",
       "https://api.mons.link/navigation/games/remove",
+      "https://api.mons.link/events/participants/join",
+      "https://api.mons.link/events/participants/remove",
       "https://api.mons.link/matches/timer/start",
       "https://api.mons.link/matches/timer/claim",
       "https://api.mons.link/wagers/proposals/cancel",
@@ -375,6 +427,8 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       { emojiId: 7, aura: "rainbow" },
       {},
       { inviteId: "invite-1" },
+      { eventId: "event-1" },
+      { eventId: "event-1", participantProfileId: "profile-2" },
       {
         playerId: "player-1",
         opponentId: "player-2",
@@ -488,6 +542,52 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       inviteId: "invite-1",
     }),
     false,
+  );
+  assert.equal(isJoinEventRequest({ eventId: "event-1" }), true);
+  assert.equal(isJoinEventRequest({ eventId: "event-1", extra: true }), false);
+  assert.equal(
+    isRemoveEventParticipantRequest({
+      eventId: "event-1",
+      participantProfileId: "profile-2",
+    }),
+    true,
+  );
+  assert.equal(
+    isRemoveEventParticipantRequest({
+      eventId: "event-1",
+      participantProfileId: "bad/profile",
+    }),
+    false,
+  );
+  assert.equal(isEventParticipantSnapshot(participant), true);
+  for (const field of ["username", "displayName", "aura"]) {
+    assert.equal(
+      isEventParticipantSnapshot({
+        ...participant,
+        [field]: "x".repeat(MAX_EVENT_PARTICIPANT_TEXT_BYTES + 1),
+      }),
+      false,
+    );
+  }
+  assert.equal(
+    isEventParticipantSnapshot({ ...participant, emojiId: Infinity }),
+    false,
+  );
+  assert.equal(
+    isEventParticipantSnapshot({ ...participant, emojiId: -1 }),
+    false,
+  );
+  assert.equal(
+    isJoinEventResponse({ ok: true, eventId: "event-1", participant }),
+    true,
+  );
+  assert.equal(
+    isRemoveEventParticipantResponse({
+      ok: true,
+      eventId: "event-1",
+      removedProfileId: "profile-2",
+    }),
+    true,
   );
   assert.equal(
     isStartMatchTimerRequest({
@@ -849,6 +949,8 @@ test("connection no longer references the migrated Firebase callables", () => {
   assert.doesNotMatch(source, /["']startMatchTimer["']/);
   assert.doesNotMatch(source, /["']claimMatchVictoryByTimer["']/);
   assert.doesNotMatch(source, /httpsCallable\([^)]*updateRatings/);
+  assert.doesNotMatch(source, /httpsCallable\([^)]*joinEvent/);
+  assert.doesNotMatch(source, /httpsCallable\([^)]*removeEventParticipant/);
   assert.match(source, /cancelAutomatchViaApi/);
   assert.match(source, /cancelWagerProposalViaApi/);
   assert.match(source, /declineWagerProposalViaApi/);
@@ -864,6 +966,8 @@ test("connection no longer references the migrated Firebase callables", () => {
   assert.match(source, /startMatchTimerViaApi/);
   assert.match(source, /claimMatchVictoryByTimerViaApi/);
   assert.match(source, /updateRatingsViaApi/);
+  assert.match(source, /joinEventViaApi/);
+  assert.match(source, /removeEventParticipantViaApi/);
   assert.doesNotMatch(source, /PendingAutomatchOperationId/);
   assert.doesNotMatch(source, /crypto\.randomUUID/);
 });

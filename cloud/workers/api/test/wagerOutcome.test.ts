@@ -125,7 +125,7 @@ function createRepository({
     },
     deleteNavigationGame: async () => "deleted",
     findProfileId: findProfileId || (async (uid) => `profile-${uid}`),
-    getAutomatchProfile: async () => null,
+    getGameplayProfile: async () => null,
     getNavigationGame: async () => null,
     getMiningMaterials: async () => emptyMaterials(),
     getMiningSnapshot: async (profileId) =>

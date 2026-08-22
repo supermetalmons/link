@@ -1,5 +1,7 @@
 "use strict";
 
+const { isSafeFirebaseKey } = require("./ids");
+
 const MONS_LINK_ADMIN_USERNAMES = Object.freeze([
   "ivan",
   "meinong",
@@ -37,6 +39,7 @@ const EVENT_SCHEDULE_TIMEZONE_OPTIONS = Object.freeze([
   Object.freeze({ value: "CT", label: "CT" }),
 ]);
 const EVENT_POSTPONE_OPTIONS_MINUTES = Object.freeze([5, 10, 15]);
+const MAX_EVENT_PARTICIPANT_TEXT_BYTES = 256;
 
 function buildEventMatchKey(roundIndex, matchIndex) {
   return `${roundIndex}_${matchIndex}`;
@@ -105,11 +108,90 @@ function getFirstRoundByeSeeds(participantCount, bracketSize, seedOrder) {
   return byeSeeds;
 }
 
+function isExactRecord(value, keys) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const actualKeys = Object.keys(value);
+  return (
+    actualKeys.length === keys.length &&
+    actualKeys.every((key) => keys.includes(key))
+  );
+}
+
+function isJoinEventRequest(value) {
+  return isExactRecord(value, ["eventId"]) && isSafeFirebaseKey(value.eventId);
+}
+
+function isRemoveEventParticipantRequest(value) {
+  return (
+    isExactRecord(value, ["eventId", "participantProfileId"]) &&
+    isSafeFirebaseKey(value.eventId) &&
+    isSafeFirebaseKey(value.participantProfileId)
+  );
+}
+
+function isBoundedParticipantText(value) {
+  return (
+    typeof value === "string" &&
+    new TextEncoder().encode(value).byteLength <=
+      MAX_EVENT_PARTICIPANT_TEXT_BYTES
+  );
+}
+
+function isEventParticipantSnapshot(value) {
+  return (
+    isExactRecord(value, [
+      "profileId",
+      "loginUid",
+      "username",
+      "displayName",
+      "emojiId",
+      "aura",
+      "joinedAtMs",
+      "state",
+      "eliminatedRoundIndex",
+      "eliminatedByProfileId",
+    ]) &&
+    isSafeFirebaseKey(value.profileId) &&
+    isSafeFirebaseKey(value.loginUid) &&
+    isBoundedParticipantText(value.username) &&
+    isBoundedParticipantText(value.displayName) &&
+    Number.isSafeInteger(value.emojiId) &&
+    value.emojiId >= 0 &&
+    isBoundedParticipantText(value.aura) &&
+    Number.isSafeInteger(value.joinedAtMs) &&
+    value.joinedAtMs >= 0 &&
+    value.state === "active" &&
+    value.eliminatedRoundIndex === null &&
+    value.eliminatedByProfileId === null
+  );
+}
+
+function isJoinEventResponse(value) {
+  return (
+    isExactRecord(value, ["ok", "eventId", "participant"]) &&
+    value.ok === true &&
+    isSafeFirebaseKey(value.eventId) &&
+    isEventParticipantSnapshot(value.participant)
+  );
+}
+
+function isRemoveEventParticipantResponse(value) {
+  return (
+    isExactRecord(value, ["ok", "eventId", "removedProfileId"]) &&
+    value.ok === true &&
+    isSafeFirebaseKey(value.eventId) &&
+    isSafeFirebaseKey(value.removedProfileId)
+  );
+}
+
 module.exports = {
   EVENT_POSTPONE_OPTIONS_MINUTES,
   EVENT_SCHEDULE_TIMEZONE_OPTIONS,
   EVENT_SCHEMA_VERSION,
   MAX_EVENT_PARTICIPANTS,
+  MAX_EVENT_PARTICIPANT_TEXT_BYTES,
   MAX_STARTS_IN_DAYS,
   MAX_STARTS_IN_MINUTES,
   MIN_STARTS_IN_MINUTES,
@@ -121,6 +203,11 @@ module.exports = {
   getEventBracketSize,
   getFirstRoundByeSeeds,
   isEventOwnedInvite,
+  isEventParticipantSnapshot,
+  isJoinEventRequest,
+  isJoinEventResponse,
   isMonsLinkAdmin,
+  isRemoveEventParticipantRequest,
+  isRemoveEventParticipantResponse,
   parseEventMatchKey,
 };

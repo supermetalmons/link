@@ -111,6 +111,8 @@ import {
   cancelWagerProposalViaApi,
   claimMatchVictoryByTimerViaApi,
   declineWagerProposalViaApi,
+  joinEventViaApi,
+  removeEventParticipantViaApi,
   removeNavigationGameViaApi,
   resolveWagerOutcomeViaApi,
   sendWagerProposalViaApi,
@@ -2302,12 +2304,10 @@ class Connection {
   ): Promise<{ ok: boolean; eventId?: string }> {
     try {
       await this.ensureAuthenticated();
-      const joinEventFunction = httpsCallable(this.functions, "joinEvent");
-      const response = await joinEventFunction({ eventId });
-      const data = response.data as { ok?: boolean; eventId?: unknown };
+      const data = await joinEventViaApi({ eventId }, this.getAuthApiToken);
       return {
-        ok: data?.ok === true,
-        eventId: typeof data?.eventId === "string" ? data.eventId : undefined,
+        ok: data.ok,
+        eventId: data.eventId,
       };
     } catch (error) {
       console.error("Error joining event:", error);
@@ -2378,37 +2378,18 @@ class Connection {
   ): Promise<{
     ok: boolean;
     eventId?: string;
-    event?: EventRecord | null;
     removedProfileId?: string;
   }> {
     try {
       await this.ensureAuthenticated();
-      const removeEventParticipantFunction = httpsCallable(
-        this.functions,
-        "removeEventParticipant",
+      const data = await removeEventParticipantViaApi(
+        { eventId, participantProfileId },
+        this.getAuthApiToken,
       );
-      const response = await removeEventParticipantFunction({
-        eventId,
-        participantProfileId,
-      });
-      const data = response.data as {
-        ok?: boolean;
-        eventId?: unknown;
-        event?: unknown;
-        removedProfileId?: unknown;
-      };
-      const normalizedEventId =
-        typeof data?.eventId === "string" ? data.eventId : "";
-      const normalizedRemovedProfileId =
-        typeof data?.removedProfileId === "string" ? data.removedProfileId : "";
       return {
-        ok: data?.ok === true,
-        eventId: normalizedEventId || undefined,
-        event: this.mapDatabaseEventRecord(
-          data?.event ?? null,
-          normalizedEventId,
-        ),
-        removedProfileId: normalizedRemovedProfileId || undefined,
+        ok: data.ok,
+        eventId: data.eventId,
+        removedProfileId: data.removedProfileId,
       };
     } catch (error) {
       console.error("Error removing event participant:", error);
