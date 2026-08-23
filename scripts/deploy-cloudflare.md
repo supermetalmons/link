@@ -106,10 +106,8 @@ configuration is intentionally changed, review it separately and apply it with
 `npm run deploy:api:triggers -- --token-file /path/to/cloudflare-token`, or set
 `CLOUDFLARE_API_TOKEN` in the invoking shell and omit `--token-file`.
 
-The trigger command reconciles reviewed routes, Cron schedules, and Queue
-consumers from the tracked API Wrangler configuration. Create Queue resources
-before version upload, but do not run the trigger command when adding a consumer
-until a compatible Worker version is promoted.
+The trigger command reconciles reviewed routes and Cron schedules. Queue
+consumers are attached separately after a compatible Worker version is promoted.
 
 ## Event prize announcement API
 
@@ -425,16 +423,17 @@ npx wrangler queues update mons-link-auth-recovery-replay-dlq --message-retentio
 
 Do not attach the consumer to a Worker version that predates auth recovery.
 After the compatible API version is promoted at 100% traffic, apply the tracked
-triggers to attach the consumer, then verify it:
+triggers and attach the consumer, then verify it:
 
 ```sh
 npm run deploy:api:triggers -- --token-file /path/to/cloudflare-token
+npm run deploy:api -- consumer --token-file /path/to/cloudflare-token
 npx wrangler queues consumer worker list mons-link-auth-recovery --config cloud/workers/api/wrangler.jsonc
 ```
 
 Before rolling back to a Worker version that predates auth recovery, remove the
 consumer. This preserves buffered tasks; do not purge the Queue. Reattach the
-consumer by reapplying the tracked triggers only after a compatible version is
+consumer by rerunning the consumer command only after a compatible version is
 promoted again. Detached main-Queue tasks also expire after 14 days, so complete
 the rollback or repair and restore a compatible consumer before the oldest task
 reaches that deadline.

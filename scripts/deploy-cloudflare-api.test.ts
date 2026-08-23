@@ -242,6 +242,14 @@ test("parses trigger updates without a smoke wallet or version", () => {
     () => parseArgs(["triggers", "--secrets-file", "/tmp/secrets.env"]),
     /not valid in triggers mode/,
   );
+  assert.deepEqual(parseArgs(["consumer", "--token-file", "/tmp/token"]), {
+    mode: "consumer",
+    tokenFile: "/tmp/token",
+  });
+  assert.throws(
+    () => parseArgs(["consumer", "--smoke-sol", SMOKE_SOL]),
+    /not valid in consumer mode/,
+  );
 });
 
 test("requires an explicit smoke wallet and production version", () => {
@@ -995,6 +1003,50 @@ test("trigger updates use only the selected token in a sanitized environment", a
       false,
     );
   }
+});
+
+test("auth recovery consumer attachment uses the tracked queue settings", async () => {
+  const calls: Array<{
+    command: string;
+    args: string[];
+    environment: RuntimeDependencies["processEnv"];
+  }> = [];
+  const dependencies = createRuntimeDependencies({
+    spawn: (command, args, options) => {
+      calls.push({ command, args, environment: { ...options.env } });
+      return { status: 0 };
+    },
+  });
+
+  await execute(["consumer"], dependencies);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, NODE_EXECUTABLE);
+  assert.deepEqual(calls[0].args, [
+    WRANGLER_CLI_PATH,
+    "queues",
+    "consumer",
+    "add",
+    "mons-link-auth-recovery",
+    "mons-link-api",
+    "--batch-size",
+    "1",
+    "--batch-timeout",
+    "1",
+    "--message-retries",
+    "100",
+    "--retry-delay-secs",
+    "60",
+    "--dead-letter-queue",
+    "mons-link-auth-recovery-dlq",
+    "--max-concurrency",
+    "1",
+    "--config",
+    "cloud/workers/api/wrangler.jsonc",
+    "--env-file",
+    WRANGLER_RELEASE_ENV_FILE,
+  ]);
+  assert.equal(calls[0].environment.CLOUDFLARE_API_TOKEN, "token");
 });
 
 test("production promotes only the explicit version and then smokes the custom domain", async () => {

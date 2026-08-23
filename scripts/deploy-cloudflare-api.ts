@@ -43,6 +43,11 @@ type CliOptions =
       mode: "triggers";
       secretsFile?: undefined;
       tokenFile?: string;
+    }
+  | {
+      mode: "consumer";
+      secretsFile?: undefined;
+      tokenFile?: string;
     };
 
 export type RuntimeDependencies = {
@@ -83,6 +88,8 @@ type SmokeFetchResult = {
 };
 
 const WORKER_NAME = "mons-link-api";
+const AUTH_RECOVERY_QUEUE = "mons-link-auth-recovery";
+const AUTH_RECOVERY_DLQ = "mons-link-auth-recovery-dlq";
 const API_CONFIG = "cloud/workers/api/wrangler.jsonc";
 const WRANGLER_RELEASE_ENV_FILE = "cloud/workers/api/release.env";
 const WRANGLER_CONFIG_ARGS = [
@@ -132,12 +139,13 @@ const VERSION_ID_PATTERN =
 
 function usage(): string {
   return [
-    "Release the mons-link-api Worker or update its triggers.",
+    "Release the mons-link-api Worker, update its triggers, or attach its recovery consumer.",
     "",
     "Usage:",
     "  npm run deploy:api -- preview --smoke-sol <wallet> [--secrets-file <path>] [--token-file <path>]",
     "  npm run deploy:api -- production --version-id <uuid> --smoke-sol <wallet> [--token-file <path>]",
     "  npm run deploy:api:triggers -- [--token-file <path>]",
+    "  npm run deploy:api -- consumer [--token-file <path>]",
     "",
     "Authentication:",
     "  Pass --token-file, or set CLOUDFLARE_API_TOKEN in the shell.",
@@ -151,9 +159,14 @@ function parseArgs(argv: string[]): CliOptions {
   }
 
   const mode = argv[0];
-  if (mode !== "preview" && mode !== "production" && mode !== "triggers") {
+  if (
+    mode !== "preview" &&
+    mode !== "production" &&
+    mode !== "triggers" &&
+    mode !== "consumer"
+  ) {
     throw new DeployError(
-      `Expected one mode: preview, production, or triggers.\n\n${usage()}`,
+      `Expected one mode: preview, production, triggers, or consumer.\n\n${usage()}`,
       2,
     );
   }
@@ -192,15 +205,15 @@ function parseArgs(argv: string[]): CliOptions {
     throw new DeployError(`Unknown argument: ${arg}\n\n${usage()}`, 2);
   }
 
-  if (mode === "triggers") {
+  if (mode === "triggers" || mode === "consumer") {
     if (smokeSol !== undefined) {
-      throw new DeployError("--smoke-sol is not valid in triggers mode.", 2);
+      throw new DeployError(`--smoke-sol is not valid in ${mode} mode.`, 2);
     }
     if (versionId !== undefined) {
-      throw new DeployError("--version-id is not valid in triggers mode.", 2);
+      throw new DeployError(`--version-id is not valid in ${mode} mode.`, 2);
     }
     if (secretsFile !== undefined) {
-      throw new DeployError("--secrets-file is not valid in triggers mode.", 2);
+      throw new DeployError(`--secrets-file is not valid in ${mode} mode.`, 2);
     }
     return { mode, tokenFile };
   }
@@ -823,6 +836,40 @@ async function execute(
       dependencies,
     );
     dependencies.log("[api-deploy] Worker triggers applied.");
+    return;
+  }
+
+  if (options.mode === "consumer") {
+    wranglerEnvironment.CLOUDFLARE_API_TOKEN = apiToken;
+    dependencies.log("[api-deploy] Attaching auth recovery consumer.");
+    run(
+      dependencies.nodeExecutable,
+      [
+        wranglerCliPath,
+        "queues",
+        "consumer",
+        "add",
+        AUTH_RECOVERY_QUEUE,
+        WORKER_NAME,
+        "--batch-size",
+        "1",
+        "--batch-timeout",
+        "1",
+        "--message-retries",
+        "100",
+        "--retry-delay-secs",
+        "60",
+        "--dead-letter-queue",
+        AUTH_RECOVERY_DLQ,
+        "--max-concurrency",
+        "1",
+        ...WRANGLER_CONFIG_ARGS,
+      ],
+      wranglerEnvironment,
+      "Wrangler auth recovery consumer attachment",
+      dependencies,
+    );
+    dependencies.log("[api-deploy] Auth recovery consumer attached.");
     return;
   }
 

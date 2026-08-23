@@ -424,6 +424,7 @@ test("auth recovery DLQ replay stays manual and uses the recovery handler", () =
   }
 
   const deploymentGuide = readText("scripts/deploy-cloudflare.md");
+  const deploymentHelper = readText("scripts/deploy-cloudflare-api.ts");
   for (const queue of [
     "mons-link-auth-recovery",
     "mons-link-auth-recovery-dlq",
@@ -442,6 +443,11 @@ test("auth recovery DLQ replay stays manual and uses the recovery handler", () =
       ),
     );
   }
+  assert.match(deploymentGuide, /npm run deploy:api -- consumer --token-file/);
+  assert.match(
+    deploymentHelper,
+    /"queues",\s*"consumer",\s*"add",\s*AUTH_RECOVERY_QUEUE/,
+  );
   assert.match(
     deploymentGuide,
     /queues consumer remove mons-link-auth-recovery mons-link-api/,
@@ -539,7 +545,7 @@ test("deployment CLIs preserve their offline modes", () => {
   });
   assert.throws(
     () => parseApiArgs(["dry-run"]),
-    /preview, production, or triggers/,
+    /preview, production, triggers, or consumer/,
   );
 
   assert.deepEqual(
