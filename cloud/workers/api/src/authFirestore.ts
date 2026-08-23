@@ -44,7 +44,6 @@ export type AuthFirestoreWrite =
     };
 
 export type AuthFirestoreTransaction = {
-  id: string;
   batchGet: (
     names: string[],
   ) => Promise<Map<string, AuthFirestoreDocument | null>>;
@@ -652,7 +651,6 @@ export function createAuthFirestoreClient(
         }
         try {
           const operation = await work({
-            id,
             batchGet: (names) => batchGet(names, id),
             query: (
               collectionId,

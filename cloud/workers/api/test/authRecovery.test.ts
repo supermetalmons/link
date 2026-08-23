@@ -177,7 +177,6 @@ function legacyGameSweepFirestore(
     },
     runTransaction: async (work) => {
       const operation = await work({
-        id: "transaction",
         batchGet: async (names) =>
           new Map(names.map((name) => [name, documents.get(name) || null])),
         query: async () => [],
@@ -338,7 +337,6 @@ test("sweeps legacy claim backlogs into the existing profile recovery path", asy
     },
     runTransaction: async (work) => {
       const operation = await work({
-        id: "transaction",
         batchGet: async (names) =>
           new Map(names.map((name) => [name, documents.get(name) || null])),
         query: async () => [],
@@ -401,7 +399,6 @@ test("keeps a materialized legacy backlog pending when enqueue fails", async () 
     query: async () => [backlog],
     runTransaction: async (work) => {
       const operation = await work({
-        id: "transaction",
         batchGet: async (names) =>
           new Map(names.map((name) => [name, documents.get(name) || null])),
         query: async () => [],
@@ -764,7 +761,6 @@ test("rotates past poison rows and drains a current game outbox record", async (
     },
     runTransaction: async (work) => {
       const operation = await work({
-        id: "transaction",
         batchGet: async (names) => {
           if (names.includes(poison.name)) {
             throw new Error("poison-backlog");

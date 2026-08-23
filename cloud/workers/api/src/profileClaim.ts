@@ -1,5 +1,6 @@
 import type { LinkedAuthMethodsResponse } from "@mons/shared/auth";
 import { AuthApiFailure } from "./authErrors.ts";
+import { cleanString } from "./authPolicy.ts";
 import {
   createFirebaseAuthAdminClient,
   FirebaseAuthAdminFailure,
@@ -27,10 +28,6 @@ export type ProfileClaimDependencies = {
   rtdbClient?: Pick<FirebaseRtdbClient, "getPath" | "patchRoot">;
   schedulePendingProfileRecovery?: (profileId: string) => void | Promise<void>;
 };
-
-function cleanString(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
 
 function cleanupFailureKind(error: unknown): string {
   if (error instanceof FirebaseAuthAdminFailure) {

@@ -146,7 +146,7 @@ function memoryFirestore(
         transaction: AuthFirestoreTransaction,
       ) => Promise<{ result: T; writes: AuthFirestoreWrite[] }>,
     ) => {
-      const operation = await work({ id: "transaction", batchGet, query });
+      const operation = await work({ batchGet, query });
       apply(operation.writes);
       return operation.result;
     },

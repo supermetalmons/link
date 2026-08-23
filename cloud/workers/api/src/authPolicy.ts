@@ -18,6 +18,12 @@ export const PENDING_CLAIM_SYNC_FIELD_PATHS = [
   "pendingClaimSyncUpdatedAtMs",
 ] as const;
 
+export const PENDING_MERGE_GAME_COPY_FIELD_PATHS = [
+  "pendingMergeGameCopySourceProfileId",
+  "pendingMergeGameCopyOpId",
+  "pendingMergeGameCopyUpdatedAtMs",
+] as const;
+
 export function cleanString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }

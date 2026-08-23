@@ -1,5 +1,6 @@
 import {
   AUTH_COOLDOWN_REASONS,
+  AUTH_METHODS,
   AUTH_METHOD_REUSE_COOLDOWN_MS,
   getLinkedAuthMethodsFromProfile,
   getAuthCooldownScope,
@@ -24,6 +25,7 @@ import {
   isCompletedEventPrizeWithdrawal,
   isMatchingProfileEventPrizeAssignment,
 } from "../../../functions/eventPrizeWithdrawalState.js";
+import { PROFILE_MERGE_TARGETS_COLLECTION } from "../../../functions/profileMergeTargets.js";
 import { AuthApiFailure } from "./authErrors.ts";
 import {
   type AuthFirestoreClient,
@@ -59,6 +61,7 @@ import {
   normalizeProfileMethod,
   profileMethodCooldownId,
   PENDING_CLAIM_SYNC_FIELD_PATHS,
+  PENDING_MERGE_GAME_COPY_FIELD_PATHS,
   throwMethodCooldown,
   throwProfileMethodCooldown,
   uniqueStrings,
@@ -71,7 +74,6 @@ const MERGE_GAME_FINALIZE_DELAY_MS = 60 * 1_000;
 const LINK_METHOD_MAX_ATTEMPTS = 3;
 const AUTO_NAME_MAX_ATTEMPTS = 30;
 const USERNAME_CONFLICT_QUERY_LIMIT = 100;
-const PROFILE_MERGE_TARGETS_COLLECTION = "profileMergeTargets";
 const LOCK_RELEASE_RETRY_DELAYS_MS = [25, 50] as const;
 const PROVIDER_METADATA_FIELD_PATHS = {
   apple: [
@@ -329,7 +331,7 @@ function buildProfileMergePlan(
   opId: string,
   nowMs: number,
 ): ProfileMergePlan {
-  for (const method of ["eth", "sol", "apple", "x"] as const) {
+  for (const method of AUTH_METHODS) {
     const targetValue = normalizeProfileMethod(method, target.fields);
     const sourceValue = normalizeProfileMethod(method, source.fields);
     if (targetValue && sourceValue && targetValue !== sourceValue) {
@@ -383,7 +385,7 @@ function buildProfileMergePlan(
   const deleteTargetFields: string[] = usernameKey
     ? []
     : [USERNAME_LOOKUP_KEY_FIELD];
-  for (const method of ["eth", "sol", "apple", "x"] as const) {
+  for (const method of AUTH_METHODS) {
     const value =
       normalizeProfileMethod(method, target.fields) ||
       normalizeProfileMethod(method, source.fields);
@@ -416,14 +418,12 @@ function buildProfileMergePlan(
   for (const method of ["apple", "x"] as const) {
     mergeProviderMetadata(method, PROVIDER_METADATA_FIELD_PATHS[method]);
   }
-  const methodIndexes = (["eth", "sol", "apple", "x"] as const)
-    .map((method) => ({
-      method,
-      value: normalizeProfileMethod(method, merged),
-    }))
-    .filter((entry): entry is { method: AuthMethodKey; value: string } =>
-      Boolean(entry.value),
-    );
+  const methodIndexes = AUTH_METHODS.map((method) => ({
+    method,
+    value: normalizeProfileMethod(method, merged),
+  })).filter((entry): entry is { method: AuthMethodKey; value: string } =>
+    Boolean(entry.value),
+  );
   return {
     deleteTargetFields,
     merged,
@@ -1392,11 +1392,7 @@ export function createAuthIdentityService(
             authUpdateWrite(
               targetName,
               {},
-              [
-                "pendingMergeGameCopySourceProfileId",
-                "pendingMergeGameCopyOpId",
-                "pendingMergeGameCopyUpdatedAtMs",
-              ],
+              [...PENDING_MERGE_GAME_COPY_FIELD_PATHS],
               true,
             ),
           );
@@ -1478,11 +1474,7 @@ export function createAuthIdentityService(
                 authUpdateWrite(
                   targetName,
                   {},
-                  [
-                    "pendingClaimSyncLogins",
-                    "pendingClaimSyncOpId",
-                    "pendingClaimSyncUpdatedAtMs",
-                  ],
+                  [...PENDING_CLAIM_SYNC_FIELD_PATHS],
                   true,
                 ),
               ]),
@@ -2219,14 +2211,11 @@ export function createAuthIdentityService(
   };
 
   const assignUsername = async (
-    profileId: string,
+    profile: AuthFirestoreDocument,
     preferredUsername?: string | null,
   ): Promise<AuthFirestoreDocument> => {
-    const profileName = authDocumentName("users", profileId);
-    const profile = await firestore.get(profileName);
-    if (!profile) {
-      authFailure(404, "not-found", "profile-not-found");
-    }
+    const profileId = profile.id;
+    const profileName = profile.name;
     const currentUsername = cleanString(profile.fields.username);
     if (
       (currentUsername && !isReservedExplicitUsername(currentUsername)) ||
@@ -2266,7 +2255,11 @@ export function createAuthIdentityService(
           authFailure(404, "not-found", "profile-not-found");
         }
         const explicit = cleanString(liveProfile.fields.username);
-        if (explicit && !isReservedExplicitUsername(explicit)) {
+        if (
+          (explicit && !isReservedExplicitUsername(explicit)) ||
+          cleanString(liveProfile.fields.eth) ||
+          cleanString(liveProfile.fields.sol)
+        ) {
           return { result: true, writes: [] };
         }
         const ownerIds = Array.from(
@@ -2472,7 +2465,7 @@ export function createAuthIdentityService(
     await enqueuePendingGameRecovery(profile);
     if (method === "apple" || method === "x") {
       profile = await assignUsername(
-        profile.id,
+        profile,
         method === "x" ? cleanString(profile.fields.xUsername) : null,
       );
     }
@@ -2704,7 +2697,7 @@ export function createAuthIdentityService(
         await enqueuePendingGameRecovery(profile);
         if (input.method === "apple" || input.method === "x") {
           profile = await assignUsername(
-            targetProfileId,
+            profile,
             input.method === "x" ? input.xUsername : null,
           );
         }

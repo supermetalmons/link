@@ -33,10 +33,10 @@ import {
   normalizeMethodValue,
 } from "./authPolicy.ts";
 import { parseSiweMessage, type ParsedSiweMessage } from "./siweAuth.ts";
+import { X_FLOW_TTL_MS } from "./xFlow.ts";
 
 const AUTH_MUTATION_MAX_BODY_BYTES = 16 * 1024;
 const AUTH_MUTATION_DEADLINE_MS = 40_000;
-const X_FLOW_TTL_MS = 10 * 60 * 1_000;
 
 export type AuthMutationDependencies = {
   firestore?: AuthFirestoreClient;

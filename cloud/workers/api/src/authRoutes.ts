@@ -2,6 +2,7 @@ import {
   normalizeAuthMethod,
   type AuthIntentResponse,
 } from "@mons/shared/auth";
+import { base64url } from "jose";
 import {
   normalizeServerXConsentSource,
   type XRedirectStartResponse,
@@ -44,6 +45,7 @@ import {
 } from "./authMutations.ts";
 import { enqueueAuthRecovery } from "./authRecovery.ts";
 import { secureAlphanumericId, secureRandomBytes } from "./authRandom.ts";
+import { featureDisabled } from "./authPolicy.ts";
 
 const AUTH_INTENT_TTL_MS = 5 * 60 * 1_000;
 const CREATE_ID_ATTEMPTS = 3;
@@ -68,17 +70,6 @@ function toRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function base64UrlEncode(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-  return btoa(binary)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
-
 function assertMethod(request: Request, expected: string): void {
   if (request.method !== expected) {
     throw new AuthApiFailure(405, "method-not-allowed", "method-not-allowed");
@@ -95,12 +86,6 @@ async function parseBody(request: Request): Promise<Record<string, unknown>> {
   } catch {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
   }
-}
-
-function xVerificationDisabled(env: Env): boolean {
-  return ["1", "true", "yes"].includes(
-    env.AUTH_DISABLE_X_VERIFY.trim().toLowerCase(),
-  );
 }
 
 async function enforceAuthRateLimit(env: Env, key: string): Promise<void> {
@@ -140,7 +125,7 @@ async function handleBeginIntent(
   const randomBytes = dependencies.randomBytes || secureRandomBytes;
   const nowMs = (dependencies.now || Date.now)();
   for (let attempt = 0; attempt < CREATE_ID_ATTEMPTS; attempt++) {
-    const intentId = base64UrlEncode(randomBytes(18));
+    const intentId = base64url.encode(randomBytes(18));
     const document: AuthIntentDocument = {
       consumedAtMs: null,
       createdAtMs: nowMs,
@@ -150,8 +135,8 @@ async function handleBeginIntent(
       nonce:
         method === "eth"
           ? secureAlphanumericId(24, randomBytes)
-          : base64UrlEncode(randomBytes(18)),
-      state: base64UrlEncode(randomBytes(18)),
+          : base64url.encode(randomBytes(18)),
+      state: base64url.encode(randomBytes(18)),
       uid: identity.uid,
     };
     if ((await repository.createAuthIntent(document)) === "created") {
@@ -175,7 +160,7 @@ async function handleBeginXFlow(
   repository: AuthRepository,
   dependencies: AuthRouteDependencies,
 ): Promise<XRedirectStartResponse> {
-  if (xVerificationDisabled(env)) {
+  if (featureDisabled(env.AUTH_DISABLE_X_VERIFY)) {
     throw new AuthApiFailure(409, "failed-precondition", "x-auth-disabled");
   }
   const body = await parseBody(request);
@@ -213,15 +198,15 @@ async function handleBeginXFlow(
   }
   const randomBytes = dependencies.randomBytes || secureRandomBytes;
   for (let attempt = 0; attempt < CREATE_ID_ATTEMPTS; attempt++) {
-    const flowId = base64UrlEncode(randomBytes(18));
-    const codeVerifier = base64UrlEncode(randomBytes(48));
+    const flowId = base64url.encode(randomBytes(18));
+    const codeVerifier = base64url.encode(randomBytes(48));
     const challengeBytes = new Uint8Array(
       await crypto.subtle.digest(
         "SHA-256",
         new TextEncoder().encode(codeVerifier),
       ),
     );
-    const codeChallenge = base64UrlEncode(challengeBytes);
+    const codeChallenge = base64url.encode(challengeBytes);
     const consentSource = normalizeServerXConsentSource(body.consentSource);
     const returnUrl = safeXReturnUrl(
       typeof body.returnUrl === "string" ? body.returnUrl : "",

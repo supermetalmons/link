@@ -1,4 +1,8 @@
 import { isSafeFirestoreDocIdSegment } from "@mons/shared/usernames";
+import {
+  MAX_PROFILE_MERGE_TARGET_HOPS,
+  PROFILE_MERGE_TARGETS_COLLECTION,
+} from "../../../functions/profileMergeTargets.js";
 import { createAuthIdentityService } from "./authIdentity.ts";
 import {
   type AuthFirestoreClient,
@@ -16,13 +20,13 @@ import {
 import {
   cleanString,
   PENDING_CLAIM_SYNC_FIELD_PATHS,
+  PENDING_MERGE_GAME_COPY_FIELD_PATHS,
   uniqueStrings,
 } from "./authPolicy.ts";
 
 const RETRY_DELAY_SECONDS = 60;
 const LEGACY_CLAIM_BACKLOG_SWEEP_LIMIT = 10;
 const LEGACY_GAME_BACKLOG_SWEEP_LIMIT = 10;
-const LEGACY_MERGE_TARGET_MAX_HOPS = 32;
 const AUTH_RECOVERY_SWEEP_CURSORS_COLLECTION = "authRecoverySweepCursors";
 
 type AuthRecoverySweepDependencies = {
@@ -221,7 +225,7 @@ async function materializeLegacyGameBacklog(
       }
       const sourceName = authDocumentName("users", sourceProfileId);
       const mergeTargetName = authDocumentName(
-        "profileMergeTargets",
+        PROFILE_MERGE_TARGETS_COLLECTION,
         sourceProfileId,
       );
       const snapshots = await transaction.batchGet([
@@ -242,7 +246,7 @@ async function materializeLegacyGameBacklog(
       let resolvedTargetProfileId = targetProfileId;
       let target: AuthFirestoreDocument | null = null;
       const visitedProfileIds = new Set([sourceProfileId]);
-      for (let depth = 0; depth <= LEGACY_MERGE_TARGET_MAX_HOPS; depth++) {
+      for (let depth = 0; depth <= MAX_PROFILE_MERGE_TARGET_HOPS; depth++) {
         if (visitedProfileIds.has(resolvedTargetProfileId)) {
           return { result: null, writes: [deleteBacklog()] };
         }
@@ -252,7 +256,7 @@ async function materializeLegacyGameBacklog(
           resolvedTargetProfileId,
         );
         const resolvedMergeTargetName = authDocumentName(
-          "profileMergeTargets",
+          PROFILE_MERGE_TARGETS_COLLECTION,
           resolvedTargetProfileId,
         );
         const resolvedSnapshots = await transaction.batchGet([
@@ -329,11 +333,7 @@ async function materializeLegacyGameBacklog(
                   pendingMergeGameCopyOpId: reusableActiveOp || markerOpId,
                   pendingMergeGameCopyUpdatedAtMs: now(),
                 },
-                [
-                  "pendingMergeGameCopySourceProfileId",
-                  "pendingMergeGameCopyOpId",
-                  "pendingMergeGameCopyUpdatedAtMs",
-                ],
+                [...PENDING_MERGE_GAME_COPY_FIELD_PATHS],
                 target.updateTime ? { updateTime: target.updateTime } : true,
               ),
             ];
