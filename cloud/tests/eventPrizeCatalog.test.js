@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const bs58 = require("bs58");
 const {
+  ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID,
   ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID,
   COMPRESSED_PRIZES_EVENT_ID,
   EVENT_PRIZE_IDS,
@@ -100,6 +101,9 @@ test("maps the compressed event to the supplied prizes in fallback order", () =>
     "282",
     "283",
     "280",
+    "281",
+    "279",
+    "284",
   ]);
   for (const prize of config.prizes) {
     assert.equal(bs58.default.decode(prize.assetAddress).length, 32);
@@ -149,6 +153,49 @@ test("maps the Artifact Magazine 3 event to claimable Core prizes", () => {
   }
 });
 
+test("maps the second Artifact Magazine 3 event to claimable Core prizes", () => {
+  const config = getEventPrizeConfig(ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID);
+  assert.deepEqual(
+    config.prizes.map((prize) => ({
+      id: prize.id,
+      imageUrl: prize.imageUrl,
+      assetAddress: prize.assetAddress,
+      collectionAddress: prize.collectionAddress,
+      standard: prize.standard,
+      claimAvailable: prize.claimAvailable,
+    })),
+    [
+      {
+        id: "281",
+        imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/281.webp",
+        assetAddress: "7Bx4AxqugjJUYvR2AS8ggduSEjbf2kMcLP5T6dSVZLP9",
+        collectionAddress: "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ",
+        standard: "core",
+        claimAvailable: true,
+      },
+      {
+        id: "279",
+        imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/279.webp",
+        assetAddress: "FQhpFRVkJAg2hMoQn62Xo9UjuJuzideuiKB22nbNrQr9",
+        collectionAddress: "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ",
+        standard: "core",
+        claimAvailable: true,
+      },
+      {
+        id: "284",
+        imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/284.webp",
+        assetAddress: "H7SFR6CSyZYcfpvF4rSoDDfuj2TMiwfqUuyXzS2tLvXa",
+        collectionAddress: "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ",
+        standard: "core",
+        claimAvailable: true,
+      },
+    ],
+  );
+  for (const prize of config.prizes) {
+    assert.equal(bs58.default.decode(prize.assetAddress).length, 32);
+  }
+});
+
 test("database rules scope selections to each event's prize IDs", () => {
   const selectionRules =
     databaseRules.rules.eventPrizeSelections.$eventId.$profileId;
@@ -161,6 +208,11 @@ test("database rules scope selections to each event's prize IDs", () => {
   assert.match(
     selectionRules[".validate"],
     /\$eventId === 'VOxalSrexcA'.*newData\.val\(\) === '282'.*newData\.val\(\) === '283'.*newData\.val\(\) === '280'/,
+  );
+  assert.match(selectionRules[".write"], /oXAceF6anag/);
+  assert.match(
+    selectionRules[".validate"],
+    /\$eventId === 'oXAceF6anag'.*newData\.val\(\) === '281'.*newData\.val\(\) === '279'.*newData\.val\(\) === '284'/,
   );
 });
 

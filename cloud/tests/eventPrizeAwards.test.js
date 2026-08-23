@@ -111,6 +111,38 @@ test("assigns Artifact Magazine 3 prizes by preference with the supplied fallbac
   assert.equal(fallback["3"].prizeId, "280");
 });
 
+test("assigns second Artifact Magazine 3 prizes by preference with the supplied fallback order", () => {
+  const eventId = "oXAceF6anag";
+  const preferred = build(
+    {
+      first: "284",
+      second: "281",
+      third: "279",
+    },
+    eventId,
+  );
+  assert.equal(preferred["1"].prizeId, "284");
+  assert.equal(preferred["2"].prizeId, "281");
+  assert.equal(preferred["3"].prizeId, "279");
+
+  const conflict = build(
+    {
+      first: "279",
+      second: "279",
+      third: "284",
+    },
+    eventId,
+  );
+  assert.equal(conflict["1"].prizeId, "279");
+  assert.equal(conflict["2"].prizeId, "281");
+  assert.equal(conflict["3"].prizeId, "284");
+
+  const fallback = build({}, eventId);
+  assert.equal(fallback["1"].prizeId, "281");
+  assert.equal(fallback["2"].prizeId, "279");
+  assert.equal(fallback["3"].prizeId, "284");
+});
+
 test("validates prize IDs against their configured event", () => {
   assert.equal(isEventPrizeId("NN3eRzoZo80", "1092"), true);
   assert.equal(isEventPrizeId("NN3eRzoZo80", "1866"), false);
@@ -118,6 +150,8 @@ test("validates prize IDs against their configured event", () => {
   assert.equal(isEventPrizeId("FRkdorMWaYW", "1092"), false);
   assert.equal(isEventPrizeId("VOxalSrexcA", "282"), true);
   assert.equal(isEventPrizeId("VOxalSrexcA", "1866"), false);
+  assert.equal(isEventPrizeId("oXAceF6anag", "281"), true);
+  assert.equal(isEventPrizeId("oXAceF6anag", "282"), false);
   assert.deepEqual(build({ first: "1092" }, "unsupported"), {});
 });
 
