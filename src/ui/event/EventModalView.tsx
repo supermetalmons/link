@@ -2227,6 +2227,8 @@ const EventModal: React.FC = () => {
                     <PrizeChoice key={prize.id}>
                       <PrizeChoiceButton
                         type="button"
+                        $imageWidth={prize.imageWidth}
+                        $imageHeight={prize.imageHeight}
                         disabled={
                           !canSelectEventPrize || isUpdatingPrizeSelection
                         }
@@ -2244,6 +2246,8 @@ const EventModal: React.FC = () => {
                         <PrizeImage
                           src={prize.imageUrl}
                           alt={prize.alt}
+                          width={prize.imageWidth}
+                          height={prize.imageHeight}
                           draggable={false}
                           onLoad={() => markPrizeImageLoaded(prize.id)}
                         />
@@ -2326,10 +2330,16 @@ const EventModal: React.FC = () => {
             >
               {endedAwardEntries.map(({ assignment, prize, participant }) => (
                 <EndedAwardColumn key={assignment.place}>
-                  <EndedAwardPrize $place={assignment.place}>
+                  <EndedAwardPrize
+                    $place={assignment.place}
+                    $imageWidth={prize.imageWidth}
+                    $imageHeight={prize.imageHeight}
+                  >
                     <PrizeImage
                       src={prize.imageUrl}
                       alt={`${prize.alt}, awarded to ${getParticipantDisplayName(participant)} for place ${assignment.place}`}
+                      width={prize.imageWidth}
+                      height={prize.imageHeight}
                       draggable={false}
                     />
                     <EndedAwardSparkles

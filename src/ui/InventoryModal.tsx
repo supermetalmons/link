@@ -1354,6 +1354,8 @@ export const InventoryModal = React.forwardRef<
                       <PrizeInventoryImage
                         src={definition.imageUrl}
                         alt=""
+                        width={definition.imageWidth}
+                        height={definition.imageHeight}
                         loading="lazy"
                       />
                     </PrizeInventoryTile>
@@ -1460,6 +1462,8 @@ export const InventoryModal = React.forwardRef<
                   <PreviewImage
                     src={previewEventPrizeDefinition.imageUrl}
                     alt=""
+                    width={previewEventPrizeDefinition.imageWidth}
+                    height={previewEventPrizeDefinition.imageHeight}
                     draggable={false}
                   />
                 ) : null}

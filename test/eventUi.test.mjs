@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import test from "node:test";
 
@@ -271,6 +272,25 @@ test("preserves podium ordering and excludes a disqualified final winner", () =>
     getEndedEventWinnerPodiumEntries(event, rounds, participants),
     [],
   );
+});
+
+test("sizes event prize artwork from catalog image dimensions", () => {
+  const styles = readFileSync(
+    new URL("../src/ui/event/EventModal.styles.ts", import.meta.url),
+    "utf8",
+  );
+  const view = readFileSync(
+    new URL("../src/ui/event/EventModalView.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.doesNotMatch(styles, /aspect-ratio:\s*4\s*\/\s*5/);
+  assert.equal(styles.match(/props\.\$imageWidth/g)?.length, 2);
+  assert.equal(styles.match(/props\.\$imageHeight/g)?.length, 2);
+  assert.equal(view.match(/\$imageWidth=\{prize\.imageWidth\}/g)?.length, 2);
+  assert.equal(view.match(/\$imageHeight=\{prize\.imageHeight\}/g)?.length, 2);
+  assert.equal(view.match(/width=\{prize\.imageWidth\}/g)?.length, 2);
+  assert.equal(view.match(/height=\{prize\.imageHeight\}/g)?.length, 2);
 });
 
 test("preserves the controller façade and modal state transitions", async () => {

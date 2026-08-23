@@ -10,10 +10,24 @@ const COMPRESSED_PRIZE_COLLECTION_ADDRESS =
   "HpGDYGz6aRUs5qbvp1dmWGKTicQctX4PixfcouAQDCHF";
 const ARTIFACT_MAGAZINE_3_COLLECTION_ADDRESS =
   "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ";
+const SCARECROW_PRIZE_IMAGE_SIZE = Object.freeze({
+  imageWidth: 420,
+  imageHeight: 525,
+});
+const COMPRESSED_PRIZE_IMAGE_SIZE = Object.freeze({
+  imageWidth: 776,
+  imageHeight: 1098,
+});
+const ARTIFACT_MAGAZINE_3_IMAGE_SIZE = Object.freeze({
+  imageWidth: 1320,
+  imageHeight: 1320,
+});
 
 const createPrize = ({
   id,
   imageUrl,
+  imageWidth,
+  imageHeight,
   assetAddress,
   collectionAddress,
   standard,
@@ -22,6 +36,8 @@ const createPrize = ({
   Object.freeze({
     id,
     imageUrl,
+    imageWidth,
+    imageHeight,
     assetAddress,
     collectionAddress,
     standard,
@@ -34,6 +50,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
     eventId: LEGACY_CORE_PRIZES_EVENT_ID,
     prizes: Object.freeze([
       createPrize({
+        ...SCARECROW_PRIZE_IMAGE_SIZE,
         id: "1092",
         imageUrl: "https://cdn.lil.org/player/scarecrow/thumbs/1092.webp",
         assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
@@ -42,6 +59,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
         claimAvailable: true,
       }),
       createPrize({
+        ...SCARECROW_PRIZE_IMAGE_SIZE,
         id: "1111",
         imageUrl: "https://cdn.lil.org/player/scarecrow/thumbs/1111.webp",
         assetAddress: "8BhUWeckB6432Vnxr6Jg9ve2NN39huPk8PBNL87wQgpL",
@@ -50,6 +68,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
         claimAvailable: true,
       }),
       createPrize({
+        ...SCARECROW_PRIZE_IMAGE_SIZE,
         id: "1514",
         imageUrl: "https://cdn.lil.org/player/scarecrow/thumbs/1514.webp",
         assetAddress: "FxgNuJ47j95kaWEVkPo4QGPfXzF4x5YKLFBSYezyFRRJ",
@@ -63,6 +82,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
     eventId: COMPRESSED_PRIZES_EVENT_ID,
     prizes: Object.freeze([
       createPrize({
+        ...COMPRESSED_PRIZE_IMAGE_SIZE,
         id: "1866",
         imageUrl: "https://cdn.lil.org/nft/card_nft/1866.webp",
         assetAddress: "2KNT8rbXC7G8w5AChbEHHi6i4FN7EAZCtdWX65ZSuQp6",
@@ -71,6 +91,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
         claimAvailable: true,
       }),
       createPrize({
+        ...COMPRESSED_PRIZE_IMAGE_SIZE,
         id: "1682",
         imageUrl: "https://cdn.lil.org/nft/card_nft/1682.webp",
         assetAddress: "AzQvo7HgBQYiP4bK314QQTsdRKCY98gK9bxrXNMZAeMA",
@@ -79,6 +100,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
         claimAvailable: true,
       }),
       createPrize({
+        ...COMPRESSED_PRIZE_IMAGE_SIZE,
         id: "6793",
         imageUrl: "https://cdn.lil.org/nft/card_nft/6793.webp",
         assetAddress: "CHDbyCecsFmLa9sQrMRz7xBbCs2JALbM4LXB35bv1CU",
@@ -92,6 +114,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
     eventId: ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID,
     prizes: Object.freeze([
       createPrize({
+        ...ARTIFACT_MAGAZINE_3_IMAGE_SIZE,
         id: "282",
         imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/282.webp",
         assetAddress: "88taYXAaCEmStoLNYiZC6sRSsakDrATpiVtviBTqebxi",
@@ -100,6 +123,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
         claimAvailable: true,
       }),
       createPrize({
+        ...ARTIFACT_MAGAZINE_3_IMAGE_SIZE,
         id: "283",
         imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/283.webp",
         assetAddress: "29e8p9KMcZgaMZmmMseptz3pAdvQwT4hzhvr5C9NxUbu",
@@ -108,6 +132,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
         claimAvailable: true,
       }),
       createPrize({
+        ...ARTIFACT_MAGAZINE_3_IMAGE_SIZE,
         id: "280",
         imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/280.webp",
         assetAddress: "6H1UzLgUm3yW6nzFQVFnsMs3MTRpv5BtyDMfp97XcqqV",
@@ -121,6 +146,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
     eventId: ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID,
     prizes: Object.freeze([
       createPrize({
+        ...ARTIFACT_MAGAZINE_3_IMAGE_SIZE,
         id: "281",
         imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/281.webp",
         assetAddress: "7Bx4AxqugjJUYvR2AS8ggduSEjbf2kMcLP5T6dSVZLP9",
@@ -129,6 +155,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
         claimAvailable: true,
       }),
       createPrize({
+        ...ARTIFACT_MAGAZINE_3_IMAGE_SIZE,
         id: "279",
         imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/279.webp",
         assetAddress: "FQhpFRVkJAg2hMoQn62Xo9UjuJuzideuiKB22nbNrQr9",
@@ -137,6 +164,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
         claimAvailable: true,
       }),
       createPrize({
+        ...ARTIFACT_MAGAZINE_3_IMAGE_SIZE,
         id: "284",
         imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/284.webp",
         assetAddress: "H7SFR6CSyZYcfpvF4rSoDDfuj2TMiwfqUuyXzS2tLvXa",

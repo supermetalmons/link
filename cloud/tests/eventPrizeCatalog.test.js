@@ -22,6 +22,8 @@ test("preserves the legacy Core prize catalog", () => {
   assert.deepEqual(
     config.prizes.map((prize) => ({
       id: prize.id,
+      imageWidth: prize.imageWidth,
+      imageHeight: prize.imageHeight,
       collectionAddress: prize.collectionAddress,
       standard: prize.standard,
       claimAvailable: prize.claimAvailable,
@@ -29,18 +31,24 @@ test("preserves the legacy Core prize catalog", () => {
     [
       {
         id: "1092",
+        imageWidth: 420,
+        imageHeight: 525,
         collectionAddress: "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD",
         standard: "core",
         claimAvailable: true,
       },
       {
         id: "1111",
+        imageWidth: 420,
+        imageHeight: 525,
         collectionAddress: "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD",
         standard: "core",
         claimAvailable: true,
       },
       {
         id: "1514",
+        imageWidth: 420,
+        imageHeight: 525,
         collectionAddress: "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD",
         standard: "core",
         claimAvailable: true,
@@ -55,6 +63,8 @@ test("maps the compressed event to the supplied prizes in fallback order", () =>
     config.prizes.map((prize) => ({
       id: prize.id,
       imageUrl: prize.imageUrl,
+      imageWidth: prize.imageWidth,
+      imageHeight: prize.imageHeight,
       assetAddress: prize.assetAddress,
       collectionAddress: prize.collectionAddress,
       standard: prize.standard,
@@ -64,6 +74,8 @@ test("maps the compressed event to the supplied prizes in fallback order", () =>
       {
         id: "1866",
         imageUrl: "https://cdn.lil.org/nft/card_nft/1866.webp",
+        imageWidth: 776,
+        imageHeight: 1098,
         assetAddress: "2KNT8rbXC7G8w5AChbEHHi6i4FN7EAZCtdWX65ZSuQp6",
         collectionAddress: "HpGDYGz6aRUs5qbvp1dmWGKTicQctX4PixfcouAQDCHF",
         standard: "compressed",
@@ -72,6 +84,8 @@ test("maps the compressed event to the supplied prizes in fallback order", () =>
       {
         id: "1682",
         imageUrl: "https://cdn.lil.org/nft/card_nft/1682.webp",
+        imageWidth: 776,
+        imageHeight: 1098,
         assetAddress: "AzQvo7HgBQYiP4bK314QQTsdRKCY98gK9bxrXNMZAeMA",
         collectionAddress: "HpGDYGz6aRUs5qbvp1dmWGKTicQctX4PixfcouAQDCHF",
         standard: "compressed",
@@ -80,6 +94,8 @@ test("maps the compressed event to the supplied prizes in fallback order", () =>
       {
         id: "6793",
         imageUrl: "https://cdn.lil.org/nft/card_nft/6793.webp",
+        imageWidth: 776,
+        imageHeight: 1098,
         assetAddress: "CHDbyCecsFmLa9sQrMRz7xBbCs2JALbM4LXB35bv1CU",
         collectionAddress: "HpGDYGz6aRUs5qbvp1dmWGKTicQctX4PixfcouAQDCHF",
         standard: "compressed",
@@ -116,6 +132,8 @@ test("maps the Artifact Magazine 3 event to claimable Core prizes", () => {
     config.prizes.map((prize) => ({
       id: prize.id,
       imageUrl: prize.imageUrl,
+      imageWidth: prize.imageWidth,
+      imageHeight: prize.imageHeight,
       assetAddress: prize.assetAddress,
       collectionAddress: prize.collectionAddress,
       standard: prize.standard,
@@ -125,6 +143,8 @@ test("maps the Artifact Magazine 3 event to claimable Core prizes", () => {
       {
         id: "282",
         imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/282.webp",
+        imageWidth: 1320,
+        imageHeight: 1320,
         assetAddress: "88taYXAaCEmStoLNYiZC6sRSsakDrATpiVtviBTqebxi",
         collectionAddress: "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ",
         standard: "core",
@@ -133,6 +153,8 @@ test("maps the Artifact Magazine 3 event to claimable Core prizes", () => {
       {
         id: "283",
         imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/283.webp",
+        imageWidth: 1320,
+        imageHeight: 1320,
         assetAddress: "29e8p9KMcZgaMZmmMseptz3pAdvQwT4hzhvr5C9NxUbu",
         collectionAddress: "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ",
         standard: "core",
@@ -141,6 +163,8 @@ test("maps the Artifact Magazine 3 event to claimable Core prizes", () => {
       {
         id: "280",
         imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/280.webp",
+        imageWidth: 1320,
+        imageHeight: 1320,
         assetAddress: "6H1UzLgUm3yW6nzFQVFnsMs3MTRpv5BtyDMfp97XcqqV",
         collectionAddress: "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ",
         standard: "core",
@@ -159,6 +183,8 @@ test("maps the second Artifact Magazine 3 event to claimable Core prizes", () =>
     config.prizes.map((prize) => ({
       id: prize.id,
       imageUrl: prize.imageUrl,
+      imageWidth: prize.imageWidth,
+      imageHeight: prize.imageHeight,
       assetAddress: prize.assetAddress,
       collectionAddress: prize.collectionAddress,
       standard: prize.standard,
@@ -168,6 +194,8 @@ test("maps the second Artifact Magazine 3 event to claimable Core prizes", () =>
       {
         id: "281",
         imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/281.webp",
+        imageWidth: 1320,
+        imageHeight: 1320,
         assetAddress: "7Bx4AxqugjJUYvR2AS8ggduSEjbf2kMcLP5T6dSVZLP9",
         collectionAddress: "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ",
         standard: "core",
@@ -176,6 +204,8 @@ test("maps the second Artifact Magazine 3 event to claimable Core prizes", () =>
       {
         id: "279",
         imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/279.webp",
+        imageWidth: 1320,
+        imageHeight: 1320,
         assetAddress: "FQhpFRVkJAg2hMoQn62Xo9UjuJuzideuiKB22nbNrQr9",
         collectionAddress: "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ",
         standard: "core",
@@ -184,6 +214,8 @@ test("maps the second Artifact Magazine 3 event to claimable Core prizes", () =>
       {
         id: "284",
         imageUrl: "https://cdn.lil.org/player/artifact_magazine_3/mid/284.webp",
+        imageWidth: 1320,
+        imageHeight: 1320,
         assetAddress: "H7SFR6CSyZYcfpvF4rSoDDfuj2TMiwfqUuyXzS2tLvXa",
         collectionAddress: "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ",
         standard: "core",

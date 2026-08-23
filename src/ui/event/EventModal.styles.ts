@@ -122,10 +122,14 @@ export const PrizeChoice = styled.div`
   gap: 0;
 `;
 
-export const PrizeChoiceButton = styled.button`
+export const PrizeChoiceButton = styled.button<{
+  $imageWidth: number;
+  $imageHeight: number;
+}>`
   width: 100%;
   height: auto;
-  aspect-ratio: 4 / 5;
+  aspect-ratio: ${(props) => props.$imageWidth} /
+    ${(props) => props.$imageHeight};
   min-width: 0;
   margin: 0;
   padding: 0;
@@ -486,12 +490,17 @@ export const EndedAwardColumn = styled.div`
   gap: ${ENDED_AWARD_PRIZE_GAP_CSS};
 `;
 
-export const EndedAwardPrize = styled.div<{ $place: WinnerPodiumPlace }>`
+export const EndedAwardPrize = styled.div<{
+  $place: WinnerPodiumPlace;
+  $imageWidth: number;
+  $imageHeight: number;
+}>`
   position: relative;
   isolation: isolate;
   width: ${ENDED_AWARD_PRIZE_WIDTH_CSS};
   min-width: 0;
-  aspect-ratio: 4 / 5;
+  aspect-ratio: ${(props) => props.$imageWidth} /
+    ${(props) => props.$imageHeight};
   display: flex;
   align-items: flex-end;
   justify-content: center;

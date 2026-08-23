@@ -26,6 +26,8 @@ export type EventPrizeStandard = "core" | "compressed";
 export type EventPrizeDefinition = Readonly<{
   id: EventPrizeId;
   imageUrl: string;
+  imageWidth: number;
+  imageHeight: number;
   assetAddress: string;
   collectionAddress: string;
   standard: EventPrizeStandard;
