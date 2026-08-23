@@ -308,6 +308,7 @@ test("returns linked methods using the verified UID and original token", async (
 
 test("synchronizes the profile claim through the authenticated POST route", async () => {
   const calls: string[][] = [];
+  const recoveries: string[] = [];
   const response = await handleAuthRoute(
     request("/auth/profile-claim/sync", "POST", {}),
     env,
@@ -326,9 +327,13 @@ test("synchronizes the profile claim through the authenticated POST route", asyn
               x: false,
             },
             appleLinked: true,
+            pendingRecovery: true,
           };
         },
       }),
+      enqueuePendingProfileRecovery: async (profileId) => {
+        recoveries.push(profileId);
+      },
       profileClaim: {
         authClient: {
           getUser: async (uid) => ({
@@ -346,7 +351,11 @@ test("synchronizes the profile claim through the authenticated POST route", asyn
     },
   );
   assert.equal(response.status, 200);
-  assert.deepEqual(calls, [["firebase-uid", "firebase-id-token"]]);
+  assert.deepEqual(calls, [
+    ["firebase-uid", "firebase-id-token"],
+    ["firebase-uid", "firebase-id-token"],
+  ]);
+  assert.deepEqual(recoveries, ["profile-1"]);
   assert.deepEqual(await responseJson(response), {
     ok: true,
     profileId: "profile-1",
@@ -361,6 +370,52 @@ test("synchronizes the profile claim through the authenticated POST route", asyn
     { repository: repository(), verifyIdentity },
   );
   assert.equal(rejectedMethod.status, 405);
+});
+
+test("propagates pending profile recovery enqueue failures", async () => {
+  const logs: string[] = [];
+  const response = await handleAuthRoute(
+    request("/auth/profile-claim/sync", "POST", {}),
+    env,
+    ctx,
+    {
+      enqueuePendingProfileRecovery: async () => {
+        throw new Error("private-queue-detail");
+      },
+      logFailure: (kind) => logs.push(kind),
+      repository: repository({
+        getProfileClaimSource: async () => ({
+          ok: true,
+          profileId: "profile-1",
+          linkedMethods: { apple: false, eth: true, sol: false, x: false },
+          appleLinked: false,
+          pendingRecovery: true,
+        }),
+      }),
+      profileClaim: {
+        authClient: {
+          getUser: async () => ({
+            uid: "firebase-uid",
+            customClaims: { profileId: "profile-1" },
+          }),
+          setCustomUserClaims: async () => undefined,
+        },
+        rtdbClient: {
+          getPath: async () => "profile-1",
+          patchRoot: async () => undefined,
+        },
+      },
+      verifyIdentity,
+    },
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(logs, ["auth-service-unavailable"]);
+  assert.deepEqual(await responseJson(response), {
+    ok: false,
+    error: "unavailable",
+    message: "auth-service-unavailable",
+  });
 });
 
 test("sanitizes profile-claim reconciliation failures", async () => {
@@ -628,4 +683,71 @@ test("falls back unsafe X return URLs and sanitizes repository failures", async 
     JSON.stringify(await responseJson(failed)).includes("private"),
     false,
   );
+});
+
+test("rate limits and dispatches auth mutations after Firebase authentication", async () => {
+  const keys: string[] = [];
+  const response = await handleAuthRoute(
+    request("/auth/methods/unlink", "POST", {
+      method: "apple",
+      opId: "6ba7b810-9dad-41d1-80b4-00c04fd430c8",
+    }),
+    {
+      ...env,
+      AUTH_RATE_LIMITER: {
+        limit: async ({ key }: RateLimitOptions) => {
+          keys.push(key);
+          return { success: true };
+        },
+      },
+    } as Env,
+    ctx,
+    {
+      mutation: {
+        identityService: {
+          consumeIntent: async () => {
+            throw new Error("unexpected");
+          },
+          readIntent: async () => {
+            throw new Error("unexpected");
+          },
+          prepareVerifiedMethod: async () => {
+            throw new Error("unexpected");
+          },
+          linkVerifiedMethod: async () => {
+            throw new Error("unexpected");
+          },
+          peekVerifyReplay: async () => null,
+          refreshCompletedVerifyResult: async () => null,
+          recoverPendingProfile: async () => true,
+          unlinkMethod: async (uid, method, opId) => {
+            assert.equal(uid, "firebase-uid");
+            assert.equal(method, "apple");
+            assert.equal(opId, "6ba7b810-9dad-41d1-80b4-00c04fd430c8");
+            return {
+              ok: true,
+              profileId: "profile-1",
+              linkedMethods: {
+                apple: false,
+                eth: true,
+                sol: false,
+                x: false,
+              },
+              appleLinked: false,
+            };
+          },
+        },
+      },
+      repository: repository(),
+      verifyIdentity,
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(keys, ["auth-mutation:methods:unlink:firebase-uid"]);
+  assert.deepEqual(await responseJson(response), {
+    ok: true,
+    profileId: "profile-1",
+    linkedMethods: { apple: false, eth: true, sol: false, x: false },
+    appleLinked: false,
+  });
 });

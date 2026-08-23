@@ -1,9 +1,16 @@
 import {
-  isAuthIntentResponse,
+  isAuthVerificationResponse,
   isLinkedAuthMethodsResponse,
+  isAuthIntentResponse,
+  type AppleAuthVerificationRequest,
+  type AuthMethodUnlinkRequest,
+  type AuthVerificationResponse,
   type AuthIntentResponse,
   type AuthMethodKey,
+  type EthereumAuthVerificationRequest,
   type LinkedAuthMethodsResponse,
+  type SolanaAuthVerificationRequest,
+  type XAuthCompletionRequest,
 } from "@mons/shared/auth";
 import {
   isXRedirectStartResponse,
@@ -14,9 +21,17 @@ import {
 const AUTH_API_ROOT = "https://api.mons.link";
 const AUTH_API_TIMEOUT_MS = 15_000;
 const PROFILE_CLAIM_SYNC_TIMEOUT_MS = 30_000;
-const AUTH_API_MAX_RESPONSE_BYTES = 64 * 1024;
+const AUTH_MUTATION_TIMEOUT_MS = 60_000;
+const AUTH_API_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export type AuthTokenProvider = (forceRefresh: boolean) => Promise<string>;
+
+type AuthMutationRequest =
+  | AppleAuthVerificationRequest
+  | AuthMethodUnlinkRequest
+  | EthereumAuthVerificationRequest
+  | SolanaAuthVerificationRequest
+  | XAuthCompletionRequest;
 
 export class AuthApiError extends Error {
   readonly code: string;
@@ -158,6 +173,21 @@ async function authRequest<T>(
   }
 }
 
+function authMutationRequest<T>(
+  path: string,
+  request: AuthMutationRequest,
+  tokenProvider: AuthTokenProvider,
+  validate: (value: unknown) => value is T,
+): Promise<T> {
+  return authRequest(
+    path,
+    { method: "POST", body: JSON.stringify(request) },
+    tokenProvider,
+    validate,
+    AUTH_MUTATION_TIMEOUT_MS,
+  );
+}
+
 export function beginAuthIntentViaApi(
   method: AuthMethodKey,
   tokenProvider: AuthTokenProvider,
@@ -202,5 +232,69 @@ export function beginXRedirectAuthViaApi(
     { method: "POST", body: JSON.stringify(request) },
     tokenProvider,
     isXRedirectStartResponse,
+  );
+}
+
+export function verifySolanaAddressViaApi(
+  request: SolanaAuthVerificationRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<AuthVerificationResponse> {
+  return authMutationRequest(
+    "/auth/methods/sol/verify",
+    request,
+    tokenProvider,
+    isAuthVerificationResponse,
+  );
+}
+
+export function verifyEthereumAddressViaApi(
+  request: EthereumAuthVerificationRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<AuthVerificationResponse> {
+  return authMutationRequest(
+    "/auth/methods/eth/verify",
+    request,
+    tokenProvider,
+    isAuthVerificationResponse,
+  );
+}
+
+export function verifyAppleTokenViaApi(
+  request: AppleAuthVerificationRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<AuthVerificationResponse> {
+  return authMutationRequest(
+    "/auth/methods/apple/verify",
+    request,
+    tokenProvider,
+    isAuthVerificationResponse,
+  );
+}
+
+export function completeXRedirectAuthViaApi(
+  request: XAuthCompletionRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<AuthVerificationResponse> {
+  return authMutationRequest(
+    "/auth/x/flows/complete",
+    request,
+    tokenProvider,
+    isAuthVerificationResponse,
+  );
+}
+
+export function unlinkAuthMethodViaApi(
+  method: AuthMethodKey,
+  tokenProvider: AuthTokenProvider,
+): Promise<LinkedAuthMethodsResponse> {
+  const request: AuthMethodUnlinkRequest = {
+    method,
+    opId: crypto.randomUUID(),
+  };
+  return authMutationRequest(
+    "/auth/methods/unlink",
+    request,
+    tokenProvider,
+    isLinkedAuthMethodsResponse,
   );
 }

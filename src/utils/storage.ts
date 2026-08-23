@@ -240,7 +240,7 @@ export const storage = {
     return getItem(STORAGE_KEYS.PLAYER_RATING, defaultValue);
   },
 
-  setPlayerRating: (value: number): void => {
+  setPlayerRating: (value: number | null): void => {
     setItem(STORAGE_KEYS.PLAYER_RATING, value);
   },
 
@@ -248,7 +248,7 @@ export const storage = {
     return getItem(STORAGE_KEYS.PLAYER_TOTAL_MANA_POINTS, defaultValue);
   },
 
-  setPlayerTotalManaPoints: (value: number): void => {
+  setPlayerTotalManaPoints: (value: number | null): void => {
     setItem(STORAGE_KEYS.PLAYER_TOTAL_MANA_POINTS, value);
   },
 
@@ -274,7 +274,7 @@ export const storage = {
     return getItem(STORAGE_KEYS.CARD_BACKGROUND_ID, defaultValue);
   },
 
-  setCardBackgroundId: (value: number): void => {
+  setCardBackgroundId: (value: number | null): void => {
     setItem(STORAGE_KEYS.CARD_BACKGROUND_ID, value);
   },
 
@@ -282,7 +282,7 @@ export const storage = {
     return getItem(STORAGE_KEYS.CARD_SUBTITLE_ID, defaultValue);
   },
 
-  setCardSubtitleId: (value: number): void => {
+  setCardSubtitleId: (value: number | null): void => {
     setItem(STORAGE_KEYS.CARD_SUBTITLE_ID, value);
   },
 
@@ -290,7 +290,7 @@ export const storage = {
     return getItem(STORAGE_KEYS.PROFILE_COUNTER, defaultValue);
   },
 
-  setProfileCounter: (value: string): void => {
+  setProfileCounter: (value: string | null): void => {
     setItem(STORAGE_KEYS.PROFILE_COUNTER, value);
   },
 
@@ -298,7 +298,7 @@ export const storage = {
     return JSON.stringify(getItem(STORAGE_KEYS.CARD_STICKERS, defaultValue));
   },
 
-  setCardStickers: (value: string): void => {
+  setCardStickers: (value: string | null): void => {
     setItem(STORAGE_KEYS.CARD_STICKERS, value);
   },
 
@@ -345,7 +345,7 @@ export const storage = {
     return getItem(STORAGE_KEYS.PROFILE_MONS, defaultValue);
   },
 
-  setProfileMons: (value: string): void => {
+  setProfileMons: (value: string | null): void => {
     setItem(STORAGE_KEYS.PROFILE_MONS, value);
   },
 
@@ -353,7 +353,7 @@ export const storage = {
     return getItem(STORAGE_KEYS.PLAYER_NONCE, defaultValue);
   },
 
-  setPlayerNonce: (value: number): void => {
+  setPlayerNonce: (value: number | null): void => {
     setItem(STORAGE_KEYS.PLAYER_NONCE, value);
   },
 

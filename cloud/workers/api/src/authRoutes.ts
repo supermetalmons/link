@@ -38,18 +38,24 @@ import {
   syncProfileClaim,
   type ProfileClaimDependencies,
 } from "./profileClaim.ts";
+import {
+  handleAuthMutation,
+  type AuthMutationDependencies,
+} from "./authMutations.ts";
+import { enqueueAuthRecovery } from "./authRecovery.ts";
+import { secureAlphanumericId, secureRandomBytes } from "./authRandom.ts";
 
 const AUTH_INTENT_TTL_MS = 5 * 60 * 1_000;
 const CREATE_ID_ATTEMPTS = 3;
-const SIWE_ALPHABET =
-  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 export type AuthRouteDependencies = {
   logFailure?: (kind: string) => void;
   now?: () => number;
   profileClaim?: ProfileClaimDependencies;
   randomBytes?: (length: number) => Uint8Array;
+  enqueuePendingProfileRecovery?: (profileId: string) => Promise<void>;
   repository?: AuthRepository;
+  mutation?: AuthMutationDependencies;
   verifyIdentity?: (
     request: Request,
     ctx: WorkerExecutionContext,
@@ -62,12 +68,6 @@ function toRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function secureRandomBytes(length: number): Uint8Array {
-  const bytes = new Uint8Array(length);
-  crypto.getRandomValues(bytes);
-  return bytes;
-}
-
 function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) {
@@ -77,21 +77,6 @@ function base64UrlEncode(bytes: Uint8Array): string {
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
     .replace(/=+$/g, "");
-}
-
-function createSiweNonce(randomBytes: (length: number) => Uint8Array): string {
-  let nonce = "";
-  while (nonce.length < 24) {
-    for (const byte of randomBytes(32)) {
-      if (byte < 248) {
-        nonce += SIWE_ALPHABET[byte % SIWE_ALPHABET.length];
-        if (nonce.length === 24) {
-          break;
-        }
-      }
-    }
-  }
-  return nonce;
 }
 
 function assertMethod(request: Request, expected: string): void {
@@ -164,7 +149,7 @@ async function handleBeginIntent(
       method,
       nonce:
         method === "eth"
-          ? createSiweNonce(randomBytes)
+          ? secureAlphanumericId(24, randomBytes)
           : base64UrlEncode(randomBytes(18)),
       state: base64UrlEncode(randomBytes(18)),
       uid: identity.uid,
@@ -291,6 +276,30 @@ export async function handleAuthRoute(
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
     const repository = dependencies.repository || createAuthRepository(env);
+    if (
+      pathname === "/auth/methods/apple/verify" ||
+      pathname === "/auth/methods/eth/verify" ||
+      pathname === "/auth/methods/sol/verify" ||
+      pathname === "/auth/methods/unlink" ||
+      pathname === "/auth/x/flows/complete"
+    ) {
+      const operation = pathname.split("/").slice(2).join(":");
+      await enforceAuthRateLimit(
+        env,
+        `auth-mutation:${operation}:${identity.uid}`,
+      );
+      return authJsonResponse(
+        await handleAuthMutation(
+          request,
+          identity,
+          env,
+          ctx,
+          dependencies.mutation,
+        ),
+        200,
+        corsHeaders,
+      );
+    }
     if (pathname === "/auth/methods") {
       return authJsonResponse(
         await repository.getLinkedAuthMethods(identity.uid, identity.idToken),
@@ -317,6 +326,9 @@ export async function handleAuthRoute(
         await syncProfileClaim(identity, env, {
           ...dependencies.profileClaim,
           repository,
+          schedulePendingProfileRecovery:
+            dependencies.enqueuePendingProfileRecovery ||
+            ((profileId) => enqueueAuthRecovery(env, profileId)),
         }),
         200,
         corsHeaders,

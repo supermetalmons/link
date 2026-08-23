@@ -68,7 +68,11 @@ export type AuthRepository = {
   getProfileClaimSource: (
     uid: string,
     firebaseIdToken: string,
-  ) => Promise<LinkedAuthMethodsResponse>;
+  ) => Promise<ProfileClaimSource>;
+};
+
+export type ProfileClaimSource = LinkedAuthMethodsResponse & {
+  pendingRecovery?: boolean;
 };
 
 export type XRedirectFlow = {
@@ -80,6 +84,8 @@ export type XRedirectFlow = {
   createdAtMs: number;
   callbackUri: string;
   codeVerifier: string;
+  processingStartedAtMs: number;
+  updateTime: string;
 };
 
 export type XFlowRepository = {
@@ -87,7 +93,8 @@ export type XFlowRepository = {
   updateFlow: (
     flowId: string,
     updates: Record<string, FirestoreScalar>,
-  ) => Promise<void>;
+    updateTime: string,
+  ) => Promise<string>;
 };
 
 export class FirestoreFailure extends Error {
@@ -95,6 +102,8 @@ export class FirestoreFailure extends Error {
     super("firestore-unavailable");
   }
 }
+
+export class XFlowConflict extends FirestoreFailure {}
 
 export class LoginProfileConflict extends Error {
   constructor() {
@@ -127,10 +136,31 @@ function readFirestoreInteger(
   return Number.isSafeInteger(parsed) ? parsed : 0;
 }
 
+function hasFirestoreStringArrayValue(
+  fields: Record<string, unknown>,
+  name: string,
+): boolean {
+  const value = toRecord(fields[name]);
+  const array = toRecord(value?.arrayValue);
+  const values = array?.values;
+  return (
+    Array.isArray(values) &&
+    values.some((item) => {
+      const encoded = toRecord(item);
+      return (
+        typeof encoded?.stringValue === "string" &&
+        Boolean(encoded.stringValue.trim())
+      );
+    })
+  );
+}
+
 export function parseXRedirectFlowDocument(value: unknown): XRedirectFlow {
   const document = toRecord(value);
   const fields = toRecord(document?.fields);
-  if (!fields) {
+  const updateTime =
+    typeof document?.updateTime === "string" ? document.updateTime.trim() : "";
+  if (!fields || !updateTime) {
     throw new FirestoreFailure();
   }
   return {
@@ -142,7 +172,18 @@ export function parseXRedirectFlowDocument(value: unknown): XRedirectFlow {
     createdAtMs: readFirestoreInteger(fields, "createdAtMs"),
     callbackUri: readFirestoreString(fields, "callbackUri"),
     codeVerifier: readFirestoreString(fields, "codeVerifier"),
+    processingStartedAtMs: readFirestoreInteger(
+      fields,
+      "processingStartedAtMs",
+    ),
+    updateTime,
   };
+}
+
+function isPreconditionConflict(value: unknown): boolean {
+  const body = toRecord(value);
+  const error = toRecord(body?.error);
+  return error?.status === "ABORTED" || error?.status === "FAILED_PRECONDITION";
 }
 
 function encodeFirestoreValue(value: FirestoreScalar): Record<string, unknown> {
@@ -237,26 +278,48 @@ export function createXFlowRepository(
       );
     },
 
-    async updateFlow(flowId, updates) {
+    async updateFlow(flowId, updates, updateTime) {
       const names = Object.keys(updates);
-      if (names.length === 0) {
+      if (names.length === 0 || !updateTime.trim()) {
         throw new FirestoreFailure();
       }
       const url = new URL(documentUrl(flowId));
       for (const name of names) {
         url.searchParams.append("updateMask.fieldPaths", name);
       }
-      url.searchParams.set("currentDocument.exists", "true");
+      url.searchParams.set("currentDocument.updateTime", updateTime);
       const fields = encodeDocumentFields(updates);
       const response = await authorizedFetch(url.toString(), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ fields }),
       });
-      await cancelResponseBody(response);
-      if (!response.ok) {
+      if (response.ok) {
+        return parseXRedirectFlowDocument(
+          await readBoundedJsonValue(
+            response,
+            MAX_FIRESTORE_BODY_BYTES,
+            () => new FirestoreFailure(),
+          ),
+        ).updateTime;
+      }
+      if (response.status === 409 || response.status === 412) {
+        await cancelResponseBody(response);
+        throw new XFlowConflict();
+      }
+      if (response.status === 400) {
+        const body = await readBoundedJsonValue(
+          response,
+          MAX_FIRESTORE_BODY_BYTES,
+          () => new FirestoreFailure(),
+        );
+        if (isPreconditionConflict(body)) {
+          throw new XFlowConflict();
+        }
         throw new FirestoreFailure();
       }
+      await cancelResponseBody(response);
+      throw new FirestoreFailure();
     },
   };
 }
@@ -372,9 +435,19 @@ export function createAuthRepository(
         body: JSON.stringify({
           structuredQuery: {
             select: {
-              fields: ["appleSub", "eth", "sol", "xUserId"].map(
-                (fieldPath) => ({ fieldPath }),
-              ),
+              fields: [
+                "appleSub",
+                "eth",
+                "sol",
+                "xUserId",
+                ...(limit === 2
+                  ? [
+                      "pendingClaimSyncLogins",
+                      "pendingClaimSyncOpId",
+                      "pendingMergeGameCopySourceProfileId",
+                    ]
+                  : []),
+              ].map((fieldPath) => ({ fieldPath })),
             },
             from: [{ collectionId: "users" }],
             where: {
@@ -480,7 +553,22 @@ export function createAuthRepository(
       if (profiles.length > 1) {
         throw new LoginProfileConflict();
       }
-      return linkedMethodsResponse(profiles[0] || null);
+      const profile = profiles[0] || null;
+      return {
+        ...linkedMethodsResponse(profile),
+        pendingRecovery: Boolean(
+          profile &&
+          (hasFirestoreStringArrayValue(
+            profile.fields,
+            "pendingClaimSyncLogins",
+          ) ||
+            readProfileField(profile.fields, "pendingClaimSyncOpId") ||
+            readProfileField(
+              profile.fields,
+              "pendingMergeGameCopySourceProfileId",
+            )),
+        ),
+      };
     },
   };
 }

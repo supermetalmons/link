@@ -58,10 +58,24 @@ const resolveProfileMergeTargetId = async (options) => {
   return profileIds[profileIds.length - 1] || "";
 };
 
+const orderProfileMergeCleanupIds = (profileIds, canonicalProfileIds) => {
+  const normalizedProfileIds = Array.from(
+    new Set((profileIds || []).map(normalizeString).filter(Boolean)),
+  );
+  const canonicalIds = new Set(
+    (canonicalProfileIds || []).map(normalizeString).filter(Boolean),
+  );
+  return [
+    ...normalizedProfileIds.filter((profileId) => !canonicalIds.has(profileId)),
+    ...normalizedProfileIds.filter((profileId) => canonicalIds.has(profileId)),
+  ];
+};
+
 module.exports = {
   MAX_PROFILE_MERGE_TARGET_HOPS,
   PROFILE_MERGE_TARGETS_COLLECTION,
   getProfileMergeTargetId,
+  orderProfileMergeCleanupIds,
   resolveProfileMergeTargetId,
   resolveProfileMergeTargetPath,
 };

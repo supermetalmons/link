@@ -89,11 +89,13 @@ export function createFirebaseAuthAdminClient(
     fetcher = fetch,
     getAccessToken = createGoogleAccessToken,
     now = Date.now,
+    signal,
     timeoutMs = FIREBASE_AUTH_TIMEOUT_MS,
   }: {
     fetcher?: typeof fetch;
     getAccessToken?: typeof createGoogleAccessToken;
     now?: () => number;
+    signal?: AbortSignal;
     timeoutMs?: number;
   } = {},
 ): FirebaseAuthAdminClient {
@@ -117,11 +119,14 @@ export function createFirebaseAuthAdminClient(
         Authorization: `Bearer ${await accessToken}`,
         "Content-Type": "application/json",
       });
+      const requestSignal = signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+        : AbortSignal.timeout(timeoutMs);
       return await fetcher(`${FIREBASE_AUTH_ROOT}${path}`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: requestSignal,
       });
     } catch {
       throw new FirebaseAuthAdminFailure();

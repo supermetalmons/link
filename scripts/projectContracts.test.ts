@@ -92,8 +92,13 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     { pattern: "api.mons.link", custom_domain: true },
   ]);
   assert.deepEqual(config.vars, {
+    APPLE_AUDIENCES: "link.mons",
+    AUTH_DISABLE_APPLE_VERIFY: "false",
+    AUTH_DISABLE_MERGE: "false",
+    AUTH_DISABLE_UNLINK: "false",
     AUTH_DISABLE_X_VERIFY: "false",
     FIREBASE_RTDB_URL: "https://mons-link-default-rtdb.firebaseio.com",
+    SIWE_ALLOWED_DOMAINS: "mons.link,www.mons.link,localhost,127.0.0.1",
   });
   assert.deepEqual(config.secrets, {
     required: [
@@ -131,6 +136,10 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.deepEqual(config.queues, {
     producers: [
       {
+        binding: "AUTH_RECOVERY_QUEUE",
+        queue: "mons-link-auth-recovery",
+      },
+      {
         binding: "TELEGRAM_DELIVERY_QUEUE",
         queue: "mons-link-telegram-delivery",
       },
@@ -140,6 +149,15 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       },
     ],
     consumers: [
+      {
+        queue: "mons-link-auth-recovery",
+        max_batch_size: 1,
+        max_batch_timeout: 1,
+        max_retries: 100,
+        retry_delay: 60,
+        dead_letter_queue: "mons-link-auth-recovery-dlq",
+        max_concurrency: 1,
+      },
       {
         queue: "mons-link-telegram-delivery",
         max_batch_size: 1,
@@ -204,6 +222,7 @@ test("package manifests preserve public scripts and deployment command vectors",
     "lint:api",
     "typecheck:api",
     "test:api",
+    "test:api:runtime",
     "dry-run:api",
     "check:api:core",
     "check:api",
@@ -373,6 +392,111 @@ test("API Worker preserves its runtime export surface", () => {
   );
 });
 
+test("auth recovery DLQ replay stays manual and uses the recovery handler", () => {
+  const recoveryTasks = require(
+    resolve(repositoryRoot, "cloud/workers/api/src/authRecoveryTask.ts"),
+  ) as Record<string, unknown>;
+  assert.equal(
+    recoveryTasks.AUTH_RECOVERY_QUEUE_NAME,
+    "mons-link-auth-recovery",
+  );
+  assert.equal(
+    recoveryTasks.AUTH_RECOVERY_DLQ_NAME,
+    "mons-link-auth-recovery-dlq",
+  );
+
+  const entrypoint = readText("cloud/workers/api/src/index.ts");
+  assert.match(entrypoint, /batch\.queue === AUTH_RECOVERY_QUEUE_NAME/);
+  assert.match(entrypoint, /batch\.queue === AUTH_RECOVERY_DLQ_NAME/);
+
+  const config = readJsonc("cloud/workers/api/wrangler.jsonc");
+  const consumers = (config.queues?.consumers || []) as Array<{
+    queue?: string;
+  }>;
+  for (const queue of [
+    "mons-link-auth-recovery-dlq",
+    "mons-link-auth-recovery-replay-dlq",
+  ]) {
+    assert.equal(
+      consumers.some((consumer) => consumer.queue === queue),
+      false,
+    );
+  }
+
+  const deploymentGuide = readText("scripts/deploy-cloudflare.md");
+  for (const queue of [
+    "mons-link-auth-recovery",
+    "mons-link-auth-recovery-dlq",
+    "mons-link-auth-recovery-replay-dlq",
+  ]) {
+    assert.match(
+      deploymentGuide,
+      new RegExp(
+        `queues create ${queue} --message-retention-period-secs 1209600`,
+      ),
+    );
+    assert.match(
+      deploymentGuide,
+      new RegExp(
+        `queues update ${queue} --message-retention-period-secs 1209600`,
+      ),
+    );
+  }
+  assert.match(
+    deploymentGuide,
+    /queues consumer remove mons-link-auth-recovery mons-link-api/,
+  );
+  assert.match(
+    deploymentGuide,
+    /queues consumer add mons-link-auth-recovery-dlq mons-link-api.*--dead-letter-queue mons-link-auth-recovery-replay-dlq/,
+  );
+  assert.match(
+    deploymentGuide,
+    /queues consumer worker list mons-link-auth-recovery-dlq/,
+  );
+  assert.match(
+    deploymentGuide,
+    /queues consumer remove mons-link-auth-recovery-dlq mons-link-api/,
+  );
+  assert.match(deploymentGuide, /14-day action deadline/);
+  assert.match(
+    deploymentGuide,
+    /Detached main-Queue tasks also expire after 14 days/,
+  );
+  assert.match(
+    deploymentGuide,
+    /Keep `mons-link-auth-recovery-replay-dlq` consumer-free/,
+  );
+  assert.match(deploymentGuide, /do not purge or delete the Queue/);
+
+  const mainConsumerRemoval = deploymentGuide.indexOf(
+    "queues consumer remove mons-link-auth-recovery mons-link-api",
+  );
+  const replayConsumerRemoval = deploymentGuide.indexOf(
+    "queues consumer remove mons-link-auth-recovery-dlq mons-link-api",
+  );
+  const postPruneRollback = deploymentGuide.indexOf(
+    "If rollback is needed after pruning",
+  );
+  const apiDeploymentsList = deploymentGuide.indexOf(
+    "deployments list --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
+  );
+  const apiRollback = deploymentGuide.indexOf(
+    "rollback <known-good-api-version-id> --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
+  );
+  assert.ok(mainConsumerRemoval < replayConsumerRemoval);
+  assert.match(
+    deploymentGuide,
+    /Continue with one of the mutually exclusive auth\s+rollback branches/,
+  );
+  assert.doesNotMatch(
+    deploymentGuide.slice(replayConsumerRemoval, postPruneRollback),
+    /(?:deployments list|rollback <known-good-api-version-id>) --config cloud\/workers\/api\/wrangler\.jsonc/,
+  );
+  assert.ok(postPruneRollback < apiDeploymentsList);
+  assert.ok(apiDeploymentsList < apiRollback);
+});
+
 test("deployment CLIs preserve their offline modes", () => {
   const { parseArgs: parseApiArgs } = require(
     resolve(repositoryRoot, "scripts/deploy-cloudflare-api.ts"),
@@ -427,6 +551,7 @@ test("deployment CLIs preserve their offline modes", () => {
     ]),
     {
       batchSize: 10,
+      confirmAuthPrune: false,
       dryRun: true,
       includeNonFunctions: true,
       project: "mons-link",
@@ -490,4 +615,50 @@ test("profile claim synchronization is Worker-owned with a least-privilege runbo
     assert.match(deployGuide, new RegExp(permission.replaceAll(".", "\\.")));
   }
   assert.match(deployGuide, /monsLinkProfileClaimSync/);
+  assert.match(deployGuide, /npm run deploy:api:triggers/);
+  assert.match(
+    deployGuide,
+    /queues consumer worker list mons-link-auth-recovery/,
+  );
+});
+
+test("provider verification and auth mutations are Worker-owned", () => {
+  const authApi = readText("src/services/authApi.ts");
+  const authIdentity = readText("cloud/workers/api/src/authIdentity.ts");
+  const connection = readText("src/connection/connection.ts");
+  const functionsIndex = readText("cloud/functions/index.js");
+  const deployGuide = readText("scripts/deploy-cloudflare.md");
+  for (const route of [
+    "/auth/methods/apple/verify",
+    "/auth/methods/eth/verify",
+    "/auth/methods/sol/verify",
+    "/auth/methods/unlink",
+    "/auth/x/flows/complete",
+  ]) {
+    assert.match(authApi, new RegExp(route.replaceAll("/", "\\/")));
+  }
+  for (const callable of [
+    "completeXRedirectAuth",
+    "unlinkAuthMethod",
+    "verifyAppleToken",
+    "verifyEthAddress",
+    "verifySolanaAddress",
+  ]) {
+    assert.doesNotMatch(functionsIndex, new RegExp(callable));
+    assert.doesNotMatch(
+      connection,
+      new RegExp(`httpsCallable\\([^)]*${callable}`),
+    );
+  }
+  for (const permission of [
+    "datastore.databases.get",
+    "datastore.entities.create",
+    "datastore.entities.delete",
+    "datastore.entities.get",
+    "datastore.entities.list",
+    "datastore.entities.update",
+  ]) {
+    assert.match(deployGuide, new RegExp(permission.replaceAll(".", "\\.")));
+  }
+  assert.doesNotMatch(authIdentity, /authRateLimits/);
 });

@@ -9,10 +9,9 @@ import {
   handleFreshlySignedInProfileInGameIfNeeded,
   isWatchOnly,
 } from "../game/gameController";
-import {
-  PlayerMiningData,
-  PlayerProfile,
-} from "../connection/connectionModels";
+import { PlayerProfile } from "../connection/connectionModels";
+import type { AuthProfileResponse } from "@mons/shared/auth";
+import { isMiningSnapshot } from "@mons/shared/mining";
 import { syncTutorialProgress } from "../content/problems";
 import {
   clearPendingLogoutWipeAfterSignIn,
@@ -26,32 +25,8 @@ import {
 
 export type AddressKind = "eth" | "sol" | "apple" | "x";
 
-interface VerifyResponse {
-  ok: true;
-  uid: string;
-  profileId: string;
-  username: string | null;
-  address?: string | null;
-  eth?: string | null;
-  sol?: string | null;
-  emoji: number;
-  aura?: string | null;
-  rating?: number;
-  nonce?: number;
-  totalManaPoints?: number;
-  win?: number;
-  cardBackgroundId?: number;
-  cardSubtitleId?: number;
-  profileCounter?: string;
-  profileMons?: any;
-  cardStickers?: any;
-  completedProblems?: any;
-  tutorialCompleted?: any;
-  mining?: PlayerMiningData;
-}
-
 export function handleLoginSuccess(
-  res: VerifyResponse,
+  res: AuthProfileResponse,
   addressKind: AddressKind,
 ): void {
   enforcePendingLogoutWipeIfNeeded();
@@ -79,25 +54,31 @@ export function handleLoginSuccess(
     isTutorialCompleted: undefined,
     eth: resolvedEth ?? null,
     sol: resolvedSol ?? null,
-    mining: res.mining,
+    mining: isMiningSnapshot(res.mining) ? res.mining : undefined,
   };
 
-  if (res.rating !== undefined) profile.rating = res.rating;
-  if (res.nonce !== undefined) profile.nonce = res.nonce;
-  if (res.totalManaPoints !== undefined)
-    (profile as any).totalManaPoints = res.totalManaPoints;
-  if (res.cardBackgroundId !== undefined)
+  if (typeof res.rating === "number") profile.rating = res.rating;
+  if (typeof res.nonce === "number") profile.nonce = res.nonce;
+  if (typeof res.totalManaPoints === "number")
+    profile.totalManaPoints = res.totalManaPoints;
+  if (typeof res.cardBackgroundId === "number")
     profile.cardBackgroundId = res.cardBackgroundId;
-  if (res.cardStickers !== undefined) profile.cardStickers = res.cardStickers;
-  if (res.cardSubtitleId !== undefined)
+  if (typeof res.cardStickers === "string")
+    profile.cardStickers = res.cardStickers;
+  if (typeof res.cardSubtitleId === "number")
     profile.cardSubtitleId = res.cardSubtitleId;
-  if (res.profileCounter !== undefined)
+  if (typeof res.profileCounter === "string")
     profile.profileCounter = res.profileCounter;
-  if (res.profileMons !== undefined) profile.profileMons = res.profileMons;
+  if (typeof res.profileMons === "string")
+    profile.profileMons = res.profileMons;
 
   syncTutorialProgress(
-    res.completedProblems ?? [],
-    res.tutorialCompleted ?? false,
+    Array.isArray(res.completedProblems)
+      ? res.completedProblems.filter(
+          (value): value is string => typeof value === "string",
+        )
+      : [],
+    res.tutorialCompleted === true,
   );
   const resolvedLoginUid = connection.getSameProfilePlayerUid() ?? res.uid;
   setupLoggedInPlayerProfile(profile, resolvedLoginUid);
@@ -113,18 +94,26 @@ export function handleLoginSuccess(
   flushPendingOwnProfileMiningState();
   updateProfileDisplayName(username, resolvedEth ?? null, resolvedSol ?? null);
 
-  if (res.rating !== undefined) storage.setPlayerRating(res.rating);
-  if (res.nonce !== undefined) storage.setPlayerNonce(res.nonce);
-  if (res.totalManaPoints !== undefined)
-    storage.setPlayerTotalManaPoints(res.totalManaPoints);
-  if (res.cardBackgroundId !== undefined)
-    storage.setCardBackgroundId(res.cardBackgroundId);
-  if (res.cardStickers !== undefined) storage.setCardStickers(res.cardStickers);
-  if (res.cardSubtitleId !== undefined)
-    storage.setCardSubtitleId(res.cardSubtitleId);
-  if (res.profileCounter !== undefined)
-    storage.setProfileCounter(res.profileCounter);
-  if (res.profileMons !== undefined) storage.setProfileMons(res.profileMons);
+  storage.setPlayerRating(typeof res.rating === "number" ? res.rating : null);
+  storage.setPlayerNonce(typeof res.nonce === "number" ? res.nonce : null);
+  storage.setPlayerTotalManaPoints(
+    typeof res.totalManaPoints === "number" ? res.totalManaPoints : null,
+  );
+  storage.setCardBackgroundId(
+    typeof res.cardBackgroundId === "number" ? res.cardBackgroundId : null,
+  );
+  storage.setCardStickers(
+    typeof res.cardStickers === "string" ? res.cardStickers : null,
+  );
+  storage.setCardSubtitleId(
+    typeof res.cardSubtitleId === "number" ? res.cardSubtitleId : null,
+  );
+  storage.setProfileCounter(
+    typeof res.profileCounter === "string" ? res.profileCounter : null,
+  );
+  storage.setProfileMons(
+    typeof res.profileMons === "string" ? res.profileMons : null,
+  );
 
   notifyOtherTabsAboutSignIn(profileId, res.uid);
   clearPendingLogoutWipeAfterSignIn();

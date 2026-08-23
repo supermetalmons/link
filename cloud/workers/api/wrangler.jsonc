@@ -8,8 +8,13 @@
   "workers_dev": false,
   "preview_urls": true,
   "vars": {
+    "APPLE_AUDIENCES": "link.mons",
+    "AUTH_DISABLE_APPLE_VERIFY": "false",
+    "AUTH_DISABLE_MERGE": "false",
+    "AUTH_DISABLE_UNLINK": "false",
     "AUTH_DISABLE_X_VERIFY": "false",
     "FIREBASE_RTDB_URL": "https://mons-link-default-rtdb.firebaseio.com",
+    "SIWE_ALLOWED_DOMAINS": "mons.link,www.mons.link,localhost,127.0.0.1",
   },
   "routes": [
     {
@@ -59,6 +64,10 @@
   "queues": {
     "producers": [
       {
+        "binding": "AUTH_RECOVERY_QUEUE",
+        "queue": "mons-link-auth-recovery",
+      },
+      {
         "binding": "TELEGRAM_DELIVERY_QUEUE",
         "queue": "mons-link-telegram-delivery",
       },
@@ -68,6 +77,15 @@
       },
     ],
     "consumers": [
+      {
+        "queue": "mons-link-auth-recovery",
+        "max_batch_size": 1,
+        "max_batch_timeout": 1,
+        "max_retries": 100,
+        "retry_delay": 60,
+        "dead_letter_queue": "mons-link-auth-recovery-dlq",
+        "max_concurrency": 1,
+      },
       {
         "queue": "mons-link-telegram-delivery",
         "max_batch_size": 1,

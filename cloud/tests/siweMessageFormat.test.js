@@ -1,8 +1,8 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const test = require("node:test");
 const { createRequire } = require("node:module");
+const test = require("node:test");
 
 const requireFromFunctions = createRequire(
   require.resolve("../functions/package.json"),

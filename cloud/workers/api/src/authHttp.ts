@@ -29,9 +29,14 @@ function isAllowedAuthOrigin(origin: string): boolean {
 
 export const AUTH_PATHS = new Set([
   "/auth/intents",
+  "/auth/methods/apple/verify",
+  "/auth/methods/eth/verify",
   "/auth/methods",
+  "/auth/methods/sol/verify",
+  "/auth/methods/unlink",
   "/auth/profile-claim/sync",
   "/auth/x/flows",
+  "/auth/x/flows/complete",
 ]);
 
 export function getAuthCorsHeaders(request: Request): Record<string, string> {

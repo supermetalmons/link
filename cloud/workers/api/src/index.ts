@@ -5,6 +5,13 @@ import {
 } from "./eventPrizeAnnouncement.ts";
 import { handleTelegramBridge } from "./telegramBridge.ts";
 import {
+  AUTH_RECOVERY_DLQ_NAME,
+  AUTH_RECOVERY_QUEUE_NAME,
+  handleAuthRecoverySweep,
+  handleAuthRecoveryQueue,
+  type AuthRecoveryTask,
+} from "./authRecovery.ts";
+import {
   handleTelegramQueue,
   type TelegramTaskPayload,
   type WagerSettlementRetryTask,
@@ -37,15 +44,41 @@ export function handleFetch(
   return handleRequest(request, env, {}, ctx);
 }
 
+async function handleScheduled(
+  controller: ScheduledController,
+  env: Env,
+): Promise<void> {
+  const results = await Promise.allSettled([
+    handleAuthRecoverySweep(controller, env),
+    handleTelegramProjectionSweep(controller, env),
+  ]);
+  const failure = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failure) {
+    throw failure.reason;
+  }
+}
+
 export default {
   fetch: handleFetch,
   queue(batch, env) {
-    return batch.queue === TELEGRAM_PROJECTION_QUEUE_NAME
-      ? handleTelegramProjectionQueue(batch, env)
-      : handleTelegramQueue(batch, env);
+    if (
+      batch.queue === AUTH_RECOVERY_QUEUE_NAME ||
+      batch.queue === AUTH_RECOVERY_DLQ_NAME
+    ) {
+      return handleAuthRecoveryQueue(batch, env);
+    }
+    if (batch.queue === TELEGRAM_PROJECTION_QUEUE_NAME) {
+      return handleTelegramProjectionQueue(batch, env);
+    }
+    return handleTelegramQueue(batch, env);
   },
-  scheduled: handleTelegramProjectionSweep,
+  scheduled: handleScheduled,
 } satisfies ExportedHandler<
   Env,
-  TelegramTaskPayload | WagerSettlementRetryTask | TelegramProjectionTask
+  | AuthRecoveryTask
+  | TelegramTaskPayload
+  | WagerSettlementRetryTask
+  | TelegramProjectionTask
 >;

@@ -5,11 +5,11 @@ Run all commands from the repository root.
 See the repository [architecture and command map](../README.md) for package boundaries. Cloudflare Worker release and rollback procedures are documented in the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md).
 
 The auth, profile, leaderboard, mining, gameplay, and event participation APIs,
-profile-claim synchronization, X OAuth callback, dedicated Google service
-accounts, and encrypted Worker secret setup are documented in that deployment
-guide. Firebase retains auth verification/linking other than profile-claim
-synchronization, the X completion callable, the remaining event functions,
-event-progress rating projection, and the existing Firestore auth records.
+profile-claim synchronization, provider verification, X OAuth completion and
+callback, dedicated Google service accounts, and encrypted Worker secret setup
+are documented in that deployment guide. Firebase retains the remaining event
+functions, event-progress rating projection, and the existing Firestore auth
+records.
 Automatch and non-event rating Telegram
 projection run in the API Worker with durable Firebase-backed pending state;
 the Worker and retained event projectors enqueue delivery directly. Manual
@@ -44,9 +44,14 @@ These commands deploy Firebase services or export live authentication data.
 
 Deploy Realtime Database rules, every exported function, then Firestore rules and indexes through the production release driver:
 
-`npm run deploy:firebase -- --project mons-link`
+`npm run deploy:firebase -- --project mons-link --confirm-auth-prune`
 
-Full releases finish the Functions phase with a forced manifest reconciliation. This removes deployed Firebase-managed Functions that are no longer exported locally. Positional maintenance deployments do not prune other Functions.
+Live full releases require `--confirm-auth-prune` before starting any Firebase
+process. The Functions phase ends with forced manifest reconciliation, which
+removes all deployed Firebase-managed Functions that are no longer exported
+locally. Until the auth production matrix passes, use only dry runs or
+positional maintenance deployments; maintenance deployments do not prune other
+Functions.
 
 Preview the same release without starting any Firebase process:
 
@@ -54,11 +59,11 @@ Preview the same release without starting any Firebase process:
 
 Change only the quota-oriented function batch size:
 
-`npm run deploy:firebase -- --project mons-link --batch-size 5`
+`npm run deploy:firebase -- --project mons-link --batch-size 5 --confirm-auth-prune`
 
-Deploy a single function for maintenance:
+Deploy a single retained function for maintenance:
 
-`npm --prefix cloud/functions run deploy:safe -- verifyEthAddress --project mons-link`
+`npm --prefix cloud/functions run deploy:safe -- createEvent --project mons-link`
 
 ## Telegram delivery recovery
 
@@ -104,6 +109,13 @@ Then delete expired legacy records and normalize active legacy records for futur
 
 Records without a resolvable expiry are retained. Repeat the legacy scan after importing old data, manually writing legacy-shaped records, or rolling back to a writer that does not store `retryAtMs`.
 
+## Profile merge projection reconciliation
+
+Keep profile merging disabled while running the one-time reconciliation. Read
+the exact compatibility-callable disable/re-enable steps, cutover order, and
+bounded dry-run/execute pagination procedure in the
+[Cloudflare deployment guide](../scripts/deploy-cloudflare.md).
+
 ## Telegram leaderboard announcements
 
 The GP and MP tools publish to the configured community destination. They default to 15 entries and accept one integer limit from 1 through 90:
@@ -146,10 +158,13 @@ These are configuration values, not standalone shell commands.
 
 `AUTH_DISABLE_X_VERIFY=true`
 
-X verification is initiated by the API Worker and completed by Firebase. Keep
-`AUTH_DISABLE_X_VERIFY` synchronized across both deployments; changing the
-Worker value requires a reviewed API Worker version release.
-
 `AUTH_DISABLE_UNLINK=true`
 
 `AUTH_DISABLE_MERGE=true`
+
+The cutover guide temporarily disables the legacy merge path while the
+mutation-capable Worker remains unpromoted. Once that Worker receives production
+traffic and until the five compatibility callables are pruned, keep all four
+values identical in the API Worker and deployed Firebase Functions. A
+Worker-only change does not disable the public callable path. After pruning,
+these values are Worker-owned.

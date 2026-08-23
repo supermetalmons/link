@@ -6,6 +6,7 @@ import {
   FirestoreFailure,
   LoginProfileConflict,
   parseXRedirectFlowDocument,
+  XFlowConflict,
 } from "../src/firestore.ts";
 import {
   createGoogleAccessToken,
@@ -64,6 +65,7 @@ async function generateTestKeyPair() {
 function firestoreDocument() {
   return {
     name: "projects/mons-link/databases/(default)/documents/xAuthRedirectFlows/abcdefghijklmnopqrstuvwx",
+    updateTime: "2026-08-22T00:00:00Z",
     fields: {
       returnUrl: { stringValue: "https://mons.link/" },
       consentSource: { stringValue: "signin" },
@@ -204,6 +206,8 @@ test("parses only the Firestore scalar fields used by X redirects", () => {
     createdAtMs: 900_000,
     callbackUri: "https://api.mons.link/auth/x/callback",
     codeVerifier: "verifier",
+    processingStartedAtMs: 0,
+    updateTime: "2026-08-22T00:00:00Z",
   });
   assert.throws(() => parseXRedirectFlowDocument({}), FirestoreFailure);
 });
@@ -218,7 +222,13 @@ test("reads and patches the existing flow through authenticated Firestore REST",
         headers: { "Content-Type": "application/json" },
       });
     }
-    return new Response(JSON.stringify(firestoreDocument()), { status: 200 });
+    return new Response(
+      JSON.stringify({
+        ...firestoreDocument(),
+        updateTime: "2026-08-22T00:00:01Z",
+      }),
+      { status: 200 },
+    );
   };
   let accessTokenCalls = 0;
   const repository = createXFlowRepository(env, {
@@ -232,13 +242,20 @@ test("reads and patches the existing flow through authenticated Firestore REST",
     (await repository.getFlow("abcdefghijklmnopqrstuvwx"))?.status,
     "created",
   );
-  await repository.updateFlow("abcdefghijklmnopqrstuvwx", {
-    status: "verified",
-    xUserId: "2244994945",
-    xUsername: null,
-    errorCode: null,
-    updatedAtMs: 1_000_000,
-  });
+  assert.equal(
+    await repository.updateFlow(
+      "abcdefghijklmnopqrstuvwx",
+      {
+        status: "verified",
+        xUserId: "2244994945",
+        xUsername: null,
+        errorCode: null,
+        updatedAtMs: 1_000_000,
+      },
+      "2026-08-22T00:00:00Z",
+    ),
+    "2026-08-22T00:00:01Z",
+  );
 
   assert.equal(accessTokenCalls, 1);
   assert.equal(requests.length, 2);
@@ -258,7 +275,10 @@ test("reads and patches the existing flow through authenticated Firestore REST",
     "errorCode",
     "updatedAtMs",
   ]);
-  assert.equal(patchUrl.searchParams.get("currentDocument.exists"), "true");
+  assert.equal(
+    patchUrl.searchParams.get("currentDocument.updateTime"),
+    "2026-08-22T00:00:00Z",
+  );
   assert.deepEqual(JSON.parse(String(requests[1].init?.body)), {
     fields: {
       status: { stringValue: "verified" },
@@ -268,6 +288,34 @@ test("reads and patches the existing flow through authenticated Firestore REST",
       updatedAtMs: { integerValue: "1000000" },
     },
   });
+});
+
+test("classifies X flow update-time conflicts", async () => {
+  for (const response of [
+    new Response("private-conflict", { status: 412 }),
+    new Response(
+      JSON.stringify({
+        error: {
+          message: "private-precondition-detail",
+          status: "FAILED_PRECONDITION",
+        },
+      }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    ),
+  ]) {
+    const repository = createXFlowRepository(env, {
+      getAccessToken: async () => "token",
+      fetcher: async () => response,
+    });
+    await assert.rejects(
+      repository.updateFlow(
+        "abcdefghijklmnopqrstuvwx",
+        { status: "failed" },
+        "2026-08-22T00:00:00Z",
+      ),
+      XFlowConflict,
+    );
+  }
 });
 
 test("maps absent, oversized, and failed Firestore responses without exposing bodies", async () => {
@@ -493,5 +541,77 @@ test("queries two profiles for claim sync and blocks ambiguous ownership", async
     repository.getProfileClaimSource("firebase-uid", "firebase-token"),
     LoginProfileConflict,
   );
-  assert.equal(JSON.parse(String(requests[0].body)).structuredQuery.limit, 2);
+  const query = JSON.parse(String(requests[0].body)).structuredQuery;
+  assert.equal(query.limit, 2);
+  assert.deepEqual(query.select.fields, [
+    { fieldPath: "appleSub" },
+    { fieldPath: "eth" },
+    { fieldPath: "sol" },
+    { fieldPath: "xUserId" },
+    { fieldPath: "pendingClaimSyncLogins" },
+    { fieldPath: "pendingClaimSyncOpId" },
+    { fieldPath: "pendingMergeGameCopySourceProfileId" },
+  ]);
+});
+
+test("reports legacy pending claim sync without an operation marker", async () => {
+  const repository = createAuthRepository(env, {
+    getAccessToken: async () => "unused",
+    fetcher: async () =>
+      new Response(
+        JSON.stringify([
+          {
+            document: {
+              name: "projects/mons-link/databases/(default)/documents/users/profile-1",
+              fields: {
+                pendingClaimSyncLogins: {
+                  arrayValue: {
+                    values: [{ stringValue: "firebase-uid" }],
+                  },
+                },
+              },
+            },
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+  });
+  assert.equal(
+    (await repository.getProfileClaimSource("firebase-uid", "firebase-token"))
+      .pendingRecovery,
+    true,
+  );
+});
+
+test("reports pending auth recovery from the claim-sync projection", async () => {
+  const repository = createAuthRepository(env, {
+    getAccessToken: async () => "unused",
+    fetcher: async () =>
+      new Response(
+        JSON.stringify([
+          {
+            document: {
+              name: "projects/mons-link/databases/(default)/documents/users/profile-1",
+              fields: {
+                sol: { stringValue: "11111111111111111111" },
+                pendingMergeGameCopySourceProfileId: {
+                  stringValue: "source-profile",
+                },
+              },
+            },
+          },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+  });
+  assert.deepEqual(
+    await repository.getProfileClaimSource("firebase-uid", "firebase-token"),
+    {
+      ok: true,
+      profileId: "profile-1",
+      linkedMethods: { apple: false, eth: false, sol: true, x: false },
+      appleLinked: false,
+      pendingRecovery: true,
+    },
+  );
 });

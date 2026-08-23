@@ -100,8 +100,13 @@ const EVENT_PRIZE_ANNOUNCEMENT_PATH =
 const AUTHENTICATED_ROUTE_SMOKES = [
   { path: "/auth/intents", method: "POST" },
   { path: "/auth/methods", method: "GET" },
+  { path: "/auth/methods/apple/verify", method: "POST" },
+  { path: "/auth/methods/eth/verify", method: "POST" },
+  { path: "/auth/methods/sol/verify", method: "POST" },
+  { path: "/auth/methods/unlink", method: "POST" },
   { path: "/auth/profile-claim/sync", method: "POST" },
   { path: "/auth/x/flows", method: "POST" },
+  { path: "/auth/x/flows/complete", method: "POST" },
   { path: "/automatch/cancel", method: "POST" },
   { path: "/automatch/start", method: "POST" },
   { path: "/events/participants/join", method: "POST" },

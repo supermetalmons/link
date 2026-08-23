@@ -20,8 +20,13 @@ const {
   AuthApiError,
   beginAuthIntentViaApi,
   beginXRedirectAuthViaApi,
+  completeXRedirectAuthViaApi,
   getLinkedAuthMethodsViaApi,
   syncProfileClaimViaApi,
+  unlinkAuthMethodViaApi,
+  verifyAppleTokenViaApi,
+  verifyEthereumAddressViaApi,
+  verifySolanaAddressViaApi,
 } = await import("../src/services/authApi.ts");
 
 const originalFetch = globalThis.fetch;
@@ -38,10 +43,11 @@ test.afterEach(() => {
 
 test("auth API clients send exact bearer requests and validate responses", async () => {
   const calls = [];
+  const intentId = "abcdefghijklmnopqrstuvwx";
   const responses = [
     {
       ok: true,
-      intentId: "intent-id",
+      intentId,
       nonce: "nonce",
       state: "state",
       expiresAtMs: 1_300_000,
@@ -74,7 +80,7 @@ test("auth API clients send exact bearer requests and validate responses", async
 
   assert.equal(
     (await beginAuthIntentViaApi("eth", tokenProvider)).intentId,
-    "intent-id",
+    intentId,
   );
   assert.equal(
     (await getLinkedAuthMethodsViaApi(tokenProvider)).profileId,
@@ -88,7 +94,7 @@ test("auth API clients send exact bearer requests and validate responses", async
     (
       await beginXRedirectAuthViaApi(
         {
-          intentId: "intent-id",
+          intentId,
           consentSource: "settings",
           returnUrl: "https://mons.link/settings",
         },
@@ -117,6 +123,93 @@ test("auth API clients send exact bearer requests and validate responses", async
   assert.equal(new Headers(calls[1].init.headers).get("Content-Type"), null);
   assert.deepEqual(JSON.parse(calls[0].init.body), { method: "eth" });
   assert.deepEqual(JSON.parse(calls[2].init.body), {});
+});
+
+test("auth mutation clients use exact Worker routes and preserve typed responses", async () => {
+  const calls = [];
+  const profile = {
+    ok: true,
+    uid: "login-1",
+    profileId: "profile-1",
+    username: "Mons123",
+    emoji: 1,
+    linkedMethods: { apple: true, eth: true, sol: true, x: true },
+    appleLinked: true,
+    profileMons: "x".repeat(70 * 1024),
+    opId: "operation-1",
+  };
+  const responses = [
+    profile,
+    profile,
+    profile,
+    profile,
+    {
+      ok: true,
+      profileId: "profile-1",
+      linkedMethods: { apple: false, eth: true, sol: true, x: true },
+      appleLinked: false,
+    },
+  ];
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input: String(input), init });
+    return jsonResponse(responses.shift());
+  };
+  const token = async () => "firebase-token";
+  await verifySolanaAddressViaApi(
+    {
+      intentId: "intent-sol",
+      address: "11111111111111111111111111111111",
+      signature: "signature",
+      emoji: 1,
+      aura: "",
+    },
+    token,
+  );
+  await verifyEthereumAddressViaApi(
+    {
+      intentId: "intent-eth",
+      message: "message",
+      signature: "signature",
+      emoji: 1,
+      aura: null,
+    },
+    token,
+  );
+  await verifyAppleTokenViaApi(
+    {
+      intentId: "intent-apple",
+      idToken: "apple-token",
+      consentSource: "signin",
+      emoji: 1,
+      aura: "",
+    },
+    token,
+  );
+  await completeXRedirectAuthViaApi(
+    { flowId: "flow-1", emoji: 1, aura: "" },
+    token,
+  );
+  await unlinkAuthMethodViaApi("apple", token);
+  assert.deepEqual(
+    calls.map((call) => call.input),
+    [
+      "https://api.mons.link/auth/methods/sol/verify",
+      "https://api.mons.link/auth/methods/eth/verify",
+      "https://api.mons.link/auth/methods/apple/verify",
+      "https://api.mons.link/auth/x/flows/complete",
+      "https://api.mons.link/auth/methods/unlink",
+    ],
+  );
+  for (const call of calls) {
+    assert.equal(call.init.method, "POST");
+    assert.equal(
+      new Headers(call.init.headers).get("Authorization"),
+      "Bearer firebase-token",
+    );
+  }
+  const unlinkBody = JSON.parse(calls[4].init.body);
+  assert.equal(unlinkBody.method, "apple");
+  assert.match(unlinkBody.opId, /^[0-9a-f-]{36}$/);
 });
 
 test("retries exactly once with a forced token refresh after 401", async () => {
@@ -148,6 +241,35 @@ test("retries exactly once with a forced token refresh after 401", async () => {
   assert.equal(response.profileId, null);
   assert.deepEqual(refreshes, [false, true]);
   assert.deepEqual(tokens, ["Bearer stale-token", "Bearer fresh-token"]);
+});
+
+test("keeps one unlink operation ID across a forced token refresh", async () => {
+  const bodies = [];
+  globalThis.fetch = async (_input, init) => {
+    bodies.push(JSON.parse(init.body));
+    if (bodies.length === 1) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: "unauthenticated",
+          message: "authentication-required",
+        },
+        401,
+      );
+    }
+    return jsonResponse({
+      ok: true,
+      profileId: "profile-1",
+      linkedMethods: { apple: false, eth: true, sol: false, x: false },
+      appleLinked: false,
+    });
+  };
+  await unlinkAuthMethodViaApi("apple", async (refresh) =>
+    refresh ? "fresh" : "stale",
+  );
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[0].opId, bodies[1].opId);
+  assert.match(bodies[0].opId, /^[0-9a-f-]{36}$/);
 });
 
 test("does not wait for a stalled 401 body cancellation", async () => {
@@ -260,7 +382,7 @@ test("rejects malformed, oversized, and transport-failed responses safely", asyn
     async () =>
       new Response("{}", {
         status: 200,
-        headers: { "Content-Length": String(64 * 1024 + 1) },
+        headers: { "Content-Length": String(8 * 1024 * 1024 + 1) },
       }),
     async () => {
       throw new Error("private-network-detail");
@@ -286,11 +408,57 @@ test("connection keeps migrated auth callable names off Firebase", () => {
   for (const name of [
     "beginAuthIntent",
     "beginXRedirectAuth",
+    "completeXRedirectAuth",
     "getLinkedAuthMethods",
     "syncProfileClaim",
+    "unlinkAuthMethod",
+    "verifyAppleToken",
+    "verifyEthAddress",
+    "verifySolanaAddress",
   ]) {
     assert.doesNotMatch(source, new RegExp(`httpsCallable\\([^)]*${name}`));
     assert.doesNotMatch(source, new RegExp(`\"${name}\"`));
   }
   assert.match(source, /httpsCallable\(/);
+});
+
+test("migrated auth responses remain typed through client consumers", () => {
+  const authentication = readFileSync(
+    new URL("../src/connection/authentication.ts", import.meta.url),
+    "utf8",
+  );
+  const loginSuccess = readFileSync(
+    new URL("../src/connection/loginSuccess.ts", import.meta.url),
+    "utf8",
+  );
+  const settings = readFileSync(
+    new URL("../src/ui/identity/SettingsModalView.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(authentication, /Promise<any>/);
+  assert.doesNotMatch(loginSuccess, /profile as any/);
+  assert.doesNotMatch(settings, /result:\s*any/);
+});
+
+test("connection normalizes cached presentation data for every auth mutation", () => {
+  const source = readFileSync(
+    new URL("../src/connection/connection.ts", import.meta.url),
+    "utf8",
+  );
+  const helper = source.match(
+    /const getStoredAuthPresentation = \(\): \{[\s\S]*?^\};/m,
+  )?.[0];
+  assert.ok(helper);
+  assert.match(helper, /return normalizeAuthPresentation\(/);
+  assert.match(helper, /storage\.getPlayerEmojiId\("1"\)/);
+  assert.match(helper, /storage\.getPlayerEmojiAura\(""\)/);
+  const authMutationSection = source.slice(
+    source.indexOf("public async verifyAppleToken"),
+    source.indexOf("public subscribeToAuthChanges"),
+  );
+  assert.equal(
+    authMutationSection.match(/getStoredAuthPresentation\(\)/g)?.length,
+    4,
+  );
+  assert.doesNotMatch(authMutationSection, /storage\.getPlayerEmoji/);
 });

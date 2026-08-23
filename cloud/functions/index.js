@@ -2,11 +2,6 @@ const admin = require("./firebaseAdmin");
 
 admin.initializeApp();
 
-const { verifySolanaAddress } = require("./verifySolanaAddress");
-const { verifyEthAddress } = require("./verifyEthAddress");
-const { verifyAppleToken } = require("./verifyAppleToken");
-const { completeXRedirectAuth } = require("./completeXRedirectAuth");
-const { unlinkAuthMethod } = require("./unlinkAuthMethod");
 const { withdrawEventPrize } = require("./eventPrizeWithdrawal");
 const {
   createEvent,
@@ -39,11 +34,6 @@ const {
 } = require("./eventTelegramAnnouncements");
 const { projectRatingTelegramUpdates } = require("./ratingTelegramProjector");
 
-exports.verifySolanaAddress = verifySolanaAddress;
-exports.verifyEthAddress = verifyEthAddress;
-exports.verifyAppleToken = verifyAppleToken;
-exports.completeXRedirectAuth = completeXRedirectAuth;
-exports.unlinkAuthMethod = unlinkAuthMethod;
 exports.withdrawEventPrize = withdrawEventPrize;
 exports.createEvent = createEvent;
 exports.postponeEventStart = postponeEventStart;

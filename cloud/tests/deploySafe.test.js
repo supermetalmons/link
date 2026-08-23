@@ -51,6 +51,7 @@ test("argument parsing supports full releases and positional maintenance", () =>
     ]),
     {
       batchSize: 2,
+      confirmAuthPrune: false,
       dryRun: true,
       includeNonFunctions: false,
       project: "mons-link",
@@ -63,9 +64,11 @@ test("argument parsing supports full releases and positional maintenance", () =>
       "--project=mons-staging",
       "--batch-size",
       "7",
+      "--confirm-auth-prune",
     ]),
     {
       batchSize: 7,
+      confirmAuthPrune: true,
       dryRun: false,
       includeNonFunctions: true,
       project: "mons-staging",
@@ -338,11 +341,30 @@ test("dry-run previews the complete release without spawning Firebase", () => {
   );
 });
 
+test("live full releases require auth-prune confirmation before spawning", () => {
+  const calls = [];
+
+  assert.throws(
+    () =>
+      runDeployment(["--include-non-functions"], {
+        exportedFunctionNames,
+        log: () => {},
+        spawn: (...args) => {
+          calls.push(args);
+          return { status: 0 };
+        },
+      }),
+    /pass --confirm-auth-prune/i,
+  );
+  assert.equal(calls.length, 0);
+});
+
 test("full release forwards one project through every spawned deployment", () => {
   const calls = [];
   const result = runDeployment(
     [
       "--include-non-functions",
+      "--confirm-auth-prune",
       "--project",
       "forwarded-project",
       "--batch-size=2",
@@ -393,7 +415,7 @@ test("a failed function batch prevents Firestore deployment", () => {
   const calls = [];
   const statuses = [0, 0, 7, 0];
   const result = runDeployment(
-    ["--include-non-functions", "--batch-size", "2"],
+    ["--include-non-functions", "--confirm-auth-prune", "--batch-size", "2"],
     {
       exportedFunctionNames,
       log: () => {},
@@ -414,14 +436,17 @@ test("a failed function batch prevents Firestore deployment", () => {
 
 test("a failed database rules deployment prevents function deployment", () => {
   const calls = [];
-  const result = runDeployment(["--include-non-functions"], {
-    exportedFunctionNames,
-    log: () => {},
-    spawn: (command, args) => {
-      calls.push({ command, args });
-      return { status: 6 };
+  const result = runDeployment(
+    ["--include-non-functions", "--confirm-auth-prune"],
+    {
+      exportedFunctionNames,
+      log: () => {},
+      spawn: (command, args) => {
+        calls.push({ command, args });
+        return { status: 6 };
+      },
     },
-  });
+  );
 
   assert.equal(result.exitCode, 6);
   assert.equal(calls.length, 1);
@@ -431,7 +456,7 @@ test("a failed database rules deployment prevents function deployment", () => {
 test("a failed function reconciliation prevents Firestore deployment", () => {
   const calls = [];
   const result = runDeployment(
-    ["--include-non-functions", "--batch-size", "20"],
+    ["--include-non-functions", "--confirm-auth-prune", "--batch-size", "20"],
     {
       exportedFunctionNames,
       log: () => {},
@@ -454,7 +479,7 @@ test("a failed function reconciliation prevents Firestore deployment", () => {
 test("a failed non-function deployment is propagated", () => {
   const calls = [];
   const result = runDeployment(
-    ["--include-non-functions", "--batch-size", "20"],
+    ["--include-non-functions", "--confirm-auth-prune", "--batch-size", "20"],
     {
       exportedFunctionNames,
       log: () => {},
@@ -524,16 +549,293 @@ test("operations documentation uses the release driver and required setup", () =
 
   assert.match(readme, /deploy:firebase -- --project mons-link/);
   assert.match(readme, /deploy:firebase -- --project mons-link --dry-run/);
-  assert.match(readme, /deploy:safe -- verifyEthAddress --project mons-link/);
-  assert.match(readme, /removes deployed Firebase-managed Functions/);
+  assert.match(readme, /deploy:safe -- createEvent --project mons-link/);
+  assert.match(readme, /--confirm-auth-prune/);
+  assert.match(readme, /removes all deployed Firebase-managed Functions/);
   assert.match(readme, /maintenance deployments do not prune/);
+  assert.match(
+    readme,
+    /keep all four\s+values\s+identical in the API Worker and deployed Firebase Functions/,
+  );
   assert.match(readme, /encrypted Worker\s+secrets/);
   assert.match(readme, /TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET/);
   assert.match(readme, /TELEGRAM_QUEUE_BRIDGE_SECRET/);
   assert.match(readme, /announceEventPrizes -- --bridge-secret-file/);
   assert.match(readme, /Telegram delivery recovery/);
   assert.doesNotMatch(readme, /firebase deploy[^\n]*--only functions/);
-  assert.match(deploymentGuide, /deploy:firebase -- --project mons-link/);
+  assert.match(
+    deploymentGuide,
+    /deploy:firebase -- --project mons-link --confirm-auth-prune/,
+  );
+  const mergeDisableRoot = deploymentGuide.indexOf(
+    'AUTH_DISABLE_ROOT="$(mktemp -d)"',
+  );
+  const projectorDeployment = deploymentGuide.indexOf(
+    "projectProfileGamesOnInviteCreated",
+  );
+  const mergeEnabled = deploymentGuide.indexOf(
+    "Only after every listed projector is live and the historical reconciliation is",
+  );
+  const mergeBackfill = deploymentGuide.indexOf(
+    "npm run reconcile:merge-projections --",
+  );
+  const mergeEnableRoot = deploymentGuide.indexOf(
+    'AUTH_ENABLE_ROOT="$(mktemp -d)"',
+  );
+  const mergeEnableDeploy = deploymentGuide.indexOf(
+    'npm --prefix "$AUTH_ENABLE_ROOT/repo/cloud/functions" run deploy:safe --',
+  );
+  const enabledCandidateUpload = deploymentGuide.indexOf(
+    "npm run deploy:api -- preview --smoke-sol <known-wallet> --secrets-file /secure/mons-link-x-callback.env",
+  );
+  const apiPromotion = deploymentGuide.indexOf(
+    "passes preview smoke may that exact Worker version be promoted",
+  );
+  const manualXVerification = deploymentGuide.indexOf(
+    "production promotions, exercise X sign-in",
+  );
+  for (const position of [
+    mergeDisableRoot,
+    projectorDeployment,
+    mergeBackfill,
+    mergeEnableRoot,
+    mergeEnableDeploy,
+    enabledCandidateUpload,
+    mergeEnabled,
+    apiPromotion,
+    manualXVerification,
+  ]) {
+    assert.notEqual(position, -1);
+  }
+  assert.ok(mergeDisableRoot < projectorDeployment);
+  assert.ok(projectorDeployment < mergeBackfill);
+  assert.ok(mergeBackfill < mergeEnableRoot);
+  assert.ok(mergeEnableRoot < mergeEnableDeploy);
+  assert.ok(mergeEnableDeploy < enabledCandidateUpload);
+  assert.ok(enabledCandidateUpload < mergeEnabled);
+  assert.ok(mergeBackfill < mergeEnabled);
+  assert.ok(mergeEnabled < apiPromotion);
+  assert.ok(apiPromotion < manualXVerification);
+  const projectorProcedure = deploymentGuide.slice(
+    projectorDeployment,
+    mergeBackfill,
+  );
+  for (const functionName of [
+    "projectProfileGamesOnInviteCreated",
+    "projectProfileGamesOnInviteGuestIdChanged",
+    "projectProfileGamesOnInviteHostRematchesChanged",
+    "projectProfileGamesOnInviteGuestRematchesChanged",
+    "projectProfileGamesOnMatchCreated",
+    "projectProfileGamesOnInviteMatchRatingUpdated",
+    "projectProfileGamesOnAutomatchQueueWritten",
+    "projectProfileGamesOnProfileLinkCreated",
+    "projectProfileGamesOnProfileLinkWritten",
+    "projectProfileGamesOnProfileDeleted",
+    "projectProfileGamesOnEventWritten",
+  ]) {
+    assert.match(projectorProcedure, new RegExp(`\\b${functionName}\\b`));
+  }
+  const mergeDisableProcedure = deploymentGuide.slice(
+    mergeDisableRoot,
+    projectorDeployment,
+  );
+  const mergeEnableProcedure = deploymentGuide.slice(
+    mergeEnableRoot,
+    mergeEnabled,
+  );
+  assert.match(mergeDisableProcedure, /^AUTH_DISABLE_MERGE=true$/m);
+  assert.match(mergeEnableProcedure, /^AUTH_DISABLE_MERGE=false$/m);
+  for (const procedure of [mergeDisableProcedure, mergeEnableProcedure]) {
+    assert.match(procedure, /git worktree add --detach .* f6ae7878a/);
+    assert.match(procedure, /\.env\.mons-link/);
+    for (const functionName of [
+      "verifySolanaAddress",
+      "verifyEthAddress",
+      "verifyAppleToken",
+      "completeXRedirectAuth",
+      "unlinkAuthMethod",
+    ]) {
+      assert.match(procedure, new RegExp(`\\b${functionName}\\b`));
+    }
+  }
+  assert.match(deploymentGuide, /fixed 200-document pages/);
+  const prePruneRollback = deploymentGuide.indexOf(
+    "If rollback is needed before pruning",
+  );
+  const postPruneRollback = deploymentGuide.indexOf(
+    "If rollback is needed after pruning",
+  );
+  const postPruneMainConsumerRemoval = deploymentGuide.indexOf(
+    "queues consumer remove mons-link-auth-recovery mons-link-api",
+    postPruneRollback,
+  );
+  const postPruneDlqConsumerRemoval = deploymentGuide.indexOf(
+    "queues consumer remove mons-link-auth-recovery-dlq mons-link-api",
+    postPruneRollback,
+  );
+  const rollbackRoot = deploymentGuide.indexOf(
+    'AUTH_ROLLBACK_ROOT="$(mktemp -d)"',
+  );
+  const rollbackWorktree = deploymentGuide.indexOf(
+    'git worktree add --detach "$AUTH_ROLLBACK_ROOT/repo" f6ae7878a',
+  );
+  const rollbackInstall = deploymentGuide.indexOf(
+    'npm --prefix "$AUTH_ROLLBACK_ROOT/repo/cloud/functions" ci',
+  );
+  const rollbackEnvironment = deploymentGuide.indexOf(
+    'cat > "$AUTH_ROLLBACK_ROOT/repo/cloud/functions/.env.mons-link"',
+  );
+  const rollbackDeploy = deploymentGuide.indexOf(
+    'npm --prefix "$AUTH_ROLLBACK_ROOT/repo/cloud/functions" run deploy:safe --',
+  );
+  const rollbackCleanup = deploymentGuide.indexOf(
+    'git worktree remove "$AUTH_ROLLBACK_ROOT/repo"',
+  );
+  const postPruneFrontendRollback = deploymentGuide.indexOf(
+    "rollback <known-good-frontend-version-id> --config wrangler.jsonc",
+    postPruneRollback,
+  );
+  const postPruneApiRollback = deploymentGuide.indexOf(
+    "rollback <known-good-api-version-id> --config cloud/workers/api/wrangler.jsonc",
+    postPruneRollback,
+  );
+  for (const position of [
+    prePruneRollback,
+    postPruneRollback,
+    postPruneMainConsumerRemoval,
+    postPruneDlqConsumerRemoval,
+    rollbackRoot,
+    rollbackWorktree,
+    rollbackEnvironment,
+    rollbackInstall,
+    rollbackDeploy,
+    rollbackCleanup,
+    postPruneFrontendRollback,
+    postPruneApiRollback,
+  ]) {
+    assert.notEqual(position, -1);
+  }
+  assert.ok(prePruneRollback < postPruneRollback);
+  assert.ok(postPruneRollback < postPruneMainConsumerRemoval);
+  assert.ok(postPruneMainConsumerRemoval < postPruneDlqConsumerRemoval);
+  assert.ok(postPruneDlqConsumerRemoval < rollbackRoot);
+  assert.ok(rollbackRoot < rollbackWorktree);
+  assert.ok(rollbackWorktree < rollbackEnvironment);
+  assert.ok(rollbackEnvironment < rollbackInstall);
+  assert.ok(rollbackInstall < rollbackDeploy);
+  assert.ok(rollbackDeploy < rollbackCleanup);
+  assert.ok(rollbackCleanup < postPruneFrontendRollback);
+  assert.ok(postPruneFrontendRollback < postPruneApiRollback);
+  const rollbackProcedure = deploymentGuide.slice(
+    rollbackEnvironment,
+    rollbackCleanup,
+  );
+  assert.match(
+    deploymentGuide,
+    /if a\s+kill\s+switch is active in production, use that same value\s+here before deploying/,
+  );
+  for (const setting of [
+    "APPLE_AUDIENCES=link.mons",
+    "SIWE_ALLOWED_DOMAINS=mons.link,www.mons.link,localhost,127.0.0.1",
+    "AUTH_DISABLE_APPLE_VERIFY=false",
+    "AUTH_DISABLE_X_VERIFY=false",
+    "AUTH_DISABLE_UNLINK=false",
+    "AUTH_DISABLE_MERGE=true",
+  ]) {
+    assert.match(rollbackProcedure, new RegExp(`^${setting}$`, "m"));
+  }
+  for (const functionName of [
+    "verifySolanaAddress",
+    "verifyEthAddress",
+    "verifyAppleToken",
+    "completeXRedirectAuth",
+    "unlinkAuthMethod",
+  ]) {
+    assert.match(rollbackProcedure, new RegExp(`\\b${functionName}\\b`));
+  }
+  assert.match(
+    deploymentGuide,
+    /roll back the frontend version first,\s+then the API version/,
+  );
+  assert.match(
+    deploymentGuide,
+    /compatibility callables are still deployed, so do not\s+run the post-prune restoration/,
+  );
+  assert.match(
+    deploymentGuide,
+    /Keep legacy merging\s+disabled until a compatible recovery consumer is restored/,
+  );
+  assert.match(
+    deploymentGuide,
+    /buffered\s+recovery task and pending profile marker is drained or\s+verified absent/,
+  );
+  assert.match(deploymentGuide, /promoted at 100% traffic/);
+  assert.match(deploymentGuide, /This preserves buffered tasks/);
+  for (const queue of [
+    "mons-link-auth-recovery",
+    "mons-link-auth-recovery-dlq",
+    "mons-link-auth-recovery-replay-dlq",
+  ]) {
+    assert.match(
+      deploymentGuide,
+      new RegExp(
+        `queues create ${queue} --message-retention-period-secs 1209600`,
+      ),
+    );
+    assert.match(
+      deploymentGuide,
+      new RegExp(
+        `queues update ${queue} --message-retention-period-secs 1209600`,
+      ),
+    );
+  }
+  assert.match(
+    deploymentGuide,
+    /queues consumer add mons-link-auth-recovery-dlq mons-link-api.*--dead-letter-queue mons-link-auth-recovery-replay-dlq/,
+  );
+  assert.match(deploymentGuide, /14-day action deadline/);
+  assert.match(
+    deploymentGuide,
+    /Detached main-Queue tasks also expire after 14 days/,
+  );
+  assert.match(deploymentGuide, /do not purge or delete the Queue/);
+  const authTriggerDeployment = deploymentGuide.lastIndexOf(
+    "npm run deploy:api:triggers",
+  );
+  assert.ok(
+    deploymentGuide.indexOf("queues create mons-link-auth-recovery") <
+      authTriggerDeployment,
+  );
+  assert.ok(
+    deploymentGuide.indexOf("promoted at 100% traffic") < authTriggerDeployment,
+  );
+  assert.doesNotMatch(
+    deploymentGuide,
+    /queues consumer worker add mons-link-auth-recovery/,
+  );
+  const mainConsumerRemoval = deploymentGuide.indexOf(
+    "queues consumer remove mons-link-auth-recovery mons-link-api",
+  );
+  const replayConsumerRemoval = deploymentGuide.indexOf(
+    "queues consumer remove mons-link-auth-recovery-dlq mons-link-api",
+  );
+  const apiDeploymentsList = deploymentGuide.indexOf(
+    "deployments list --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
+  );
+  const apiRollback = deploymentGuide.indexOf(
+    "rollback <known-good-api-version-id> --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
+  );
+  assert.ok(mainConsumerRemoval < replayConsumerRemoval);
+  assert.match(
+    deploymentGuide,
+    /Continue with one of the mutually exclusive auth\s+rollback branches/,
+  );
+  assert.doesNotMatch(
+    deploymentGuide.slice(replayConsumerRemoval, postPruneRollback),
+    /(?:deployments list|rollback <known-good-api-version-id>) --config cloud\/workers\/api\/wrangler\.jsonc/,
+  );
+  assert.ok(postPruneRollback < apiDeploymentsList);
+  assert.ok(apiDeploymentsList < apiRollback);
   assert.doesNotMatch(
     operationsDocumentation,
     /deploy:(?:allFunctionsBatched|telegramFunctions|monsRulesFunctions)/,

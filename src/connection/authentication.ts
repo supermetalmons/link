@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import type { AuthVerificationResponse } from "@mons/shared/auth";
 import { normalizeProfileEmojiId } from "@mons/shared/profiles";
 import type { PlayerProfile } from "./connectionModels";
 import { connection } from "./connection";
@@ -44,10 +45,12 @@ type XRedirectResult = NonNullable<ReturnType<typeof consumeXRedirectResult>>;
 
 let inFlightAppleRedirectVerification: {
   key: string;
-  promise: Promise<any>;
+  promise: Promise<AuthVerificationResponse>;
 } | null = null;
-let inFlightXRedirectCompletion: { key: string; promise: Promise<any> } | null =
-  null;
+let inFlightXRedirectCompletion: {
+  key: string;
+  promise: Promise<AuthVerificationResponse>;
+} | null = null;
 
 const getAppleRedirectVerificationKey = (
   redirectResult: AppleRedirectResult,
@@ -57,7 +60,7 @@ const getAppleRedirectVerificationKey = (
 
 const verifyAppleRedirectResultOnce = (
   redirectResult: AppleRedirectResult,
-): Promise<any> => {
+): Promise<AuthVerificationResponse> => {
   const key = getAppleRedirectVerificationKey(redirectResult);
   if (
     inFlightAppleRedirectVerification &&
@@ -86,7 +89,7 @@ const getXRedirectCompletionKey = (redirectResult: XRedirectResult): string => {
 
 const completeXRedirectResultOnce = (
   redirectResult: XRedirectResult,
-): Promise<any> => {
+): Promise<AuthVerificationResponse> => {
   const key = getXRedirectCompletionKey(redirectResult);
   if (inFlightXRedirectCompletion && inFlightXRedirectCompletion.key === key) {
     return inFlightXRedirectCompletion.promise;

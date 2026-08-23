@@ -11,15 +11,10 @@ const functionsIndexPath = path.join(functionsDirectory, "index.js");
 const sharedDirectory = path.join(functionsDirectory, "shared");
 
 const callableExportNames = [
-  "completeXRedirectAuth",
   "createEvent",
   "disqualifyEventMatchWinners",
   "postponeEventStart",
   "syncEventState",
-  "unlinkAuthMethod",
-  "verifyAppleToken",
-  "verifyEthAddress",
-  "verifySolanaAddress",
   "withdrawEventPrize",
 ];
 
@@ -165,12 +160,12 @@ Object.assign(expectedEndpointContracts, {
   projectProfileGamesOnInviteCreated: eventContract({
     eventType: "google.firebase.database.ref.v1.created",
     pathPatterns: { ref: "invites/{inviteId}", instance: "*" },
-    retry: false,
+    retry: true,
   }),
   projectProfileGamesOnInviteGuestIdChanged: eventContract({
     eventType: "google.firebase.database.ref.v1.written",
     pathPatterns: { ref: "invites/{inviteId}/guestId", instance: "*" },
-    retry: false,
+    retry: true,
   }),
   projectProfileGamesOnInviteHostRematchesChanged: eventContract({
     eventType: "google.firebase.database.ref.v1.written",
@@ -178,7 +173,7 @@ Object.assign(expectedEndpointContracts, {
       ref: "invites/{inviteId}/hostRematches",
       instance: "*",
     },
-    retry: false,
+    retry: true,
   }),
   projectProfileGamesOnInviteGuestRematchesChanged: eventContract({
     eventType: "google.firebase.database.ref.v1.written",
@@ -186,7 +181,7 @@ Object.assign(expectedEndpointContracts, {
       ref: "invites/{inviteId}/guestRematches",
       instance: "*",
     },
-    retry: false,
+    retry: true,
   }),
   projectProfileGamesOnMatchCreated: eventContract({
     eventType: "google.firebase.database.ref.v1.created",
@@ -194,7 +189,7 @@ Object.assign(expectedEndpointContracts, {
       ref: "players/{loginUid}/matches/{matchId}",
       instance: "*",
     },
-    retry: false,
+    retry: true,
   }),
   projectProfileGamesOnInviteMatchRatingUpdated: eventContract({
     eventType: "google.firebase.database.ref.v1.created",
@@ -202,22 +197,22 @@ Object.assign(expectedEndpointContracts, {
       ref: "invites/{inviteId}/matchesRatingUpdates/{matchId}",
       instance: "*",
     },
-    retry: false,
+    retry: true,
   }),
   projectProfileGamesOnAutomatchQueueWritten: eventContract({
     eventType: "google.firebase.database.ref.v1.written",
     pathPatterns: { ref: "automatch/{inviteId}", instance: "*" },
-    retry: false,
+    retry: true,
   }),
   projectProfileGamesOnProfileLinkCreated: eventContract({
     eventType: "google.firebase.database.ref.v1.created",
     pathPatterns: { ref: "players/{loginUid}/profile", instance: "*" },
-    retry: false,
+    retry: true,
   }),
   projectProfileGamesOnProfileLinkWritten: eventContract({
     eventType: "google.firebase.database.ref.v1.written",
     pathPatterns: { ref: "players/{loginUid}/profile", instance: "*" },
-    retry: false,
+    retry: true,
   }),
   projectProfileGamesOnProfileDeleted: eventContract({
     eventType: "google.cloud.firestore.document.v1.deleted",
@@ -230,7 +225,7 @@ Object.assign(expectedEndpointContracts, {
       type: "event",
       eventType: "google.firebase.database.ref.v1.written",
       pathPatterns: { ref: "events/{eventId}", instance: "*" },
-      retry: false,
+      retry: true,
     },
     {
       availableMemoryMb: 256,
@@ -360,7 +355,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 28);
+  assert.equal(expectedExportNames.length, 23);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   getProfileMergeTargetId,
+  orderProfileMergeCleanupIds,
   resolveProfileMergeTargetId,
   resolveProfileMergeTargetPath,
 } = require("../functions/profileMergeTargets");
@@ -70,6 +71,16 @@ test("returns every profile in a chained merge", async () => {
       { maxHops: 2 },
     ),
     ["source", "middle", "target"],
+  );
+});
+
+test("orders merge sources before canonical projection owners", () => {
+  assert.deepEqual(
+    orderProfileMergeCleanupIds(
+      ["target", "source", "older-source", "target"],
+      ["target"],
+    ),
+    ["source", "older-source", "target"],
   );
 });
 

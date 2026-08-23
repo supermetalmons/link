@@ -16,5 +16,11 @@
     "strict": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "worker-configuration.d.ts"]
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "runtime/**/*.ts",
+    "vitest.config.ts",
+    "worker-configuration.d.ts"
+  ]
 }

@@ -5,6 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import type { AuthVerificationResponse } from "@mons/shared/auth";
 import { flushSync } from "react-dom";
 import styled from "styled-components";
 import {
@@ -659,7 +660,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setBusyMethod(method);
       let didStartXRedirect = false;
       try {
-        let result: any = null;
+        let result: AuthVerificationResponse | null = null;
         let kind: AddressKind = method;
         if (method === "eth") {
           const choice = await requestWalletSelection();

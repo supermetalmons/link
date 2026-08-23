@@ -8,6 +8,7 @@
   "dependencies": {
     "@mons/shared": "file:cloud/functions/shared",
     "@solana/wallet-adapter-base": "^0.9.27",
+    "bs58": "^6.0.0",
     "ethers": "^6.17.0",
     "firebase": "^12.17.1",
     "glicko2": "^1.2.1",
@@ -16,7 +17,8 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-icons": "^5.7.0",
-    "styled-components": "^6.5.2"
+    "styled-components": "^6.5.2",
+    "tweetnacl": "^1.0.3"
   },
   "scripts": {
     "start": "vite",
@@ -29,12 +31,13 @@
     "preview": "vite preview",
     "types:api": "wrangler types cloud/workers/api/worker-configuration.d.ts --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
     "types:api:check": "wrangler types cloud/workers/api/worker-configuration.d.ts --check --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
-    "format:check:api": "prettier --check \"cloud/workers/api/{src,test}/**/*.ts\" cloud/workers/api/wrangler.jsonc --ignore-unknown",
-    "lint:api": "eslint \"cloud/workers/api/{src,test}/**/*.ts\"",
+    "format:check:api": "prettier --check \"cloud/workers/api/{src,test,runtime}/**/*.ts\" cloud/workers/api/vitest.config.ts cloud/workers/api/wrangler.jsonc --ignore-unknown",
+    "lint:api": "eslint \"cloud/workers/api/{src,test,runtime}/**/*.ts\" cloud/workers/api/vitest.config.ts",
     "typecheck:api": "tsc --noEmit -p cloud/workers/api/tsconfig.json",
     "test:api": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test cloud/workers/api/test/*.test.ts",
+    "test:api:runtime": "vitest run --config cloud/workers/api/vitest.config.ts",
     "dry-run:api": "wrangler versions upload --dry-run --strict --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
-    "check:api:core": "npm run lint:api && npm run typecheck:api && npm run test:api && npm run types:api:check && npm run dry-run:api",
+    "check:api:core": "npm run lint:api && npm run typecheck:api && npm run test:api && npm run test:api:runtime && npm run types:api:check && npm run dry-run:api",
     "check:api": "npm run format:check:api && npm run check:api:core",
     "deploy:api": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/deploy-cloudflare-api.ts",
     "deploy:api:triggers": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/deploy-cloudflare-api.ts triggers",
@@ -46,6 +49,7 @@
     "check:tooling": "npm run format:check:tooling && npm run check:tooling:core",
     "check:all": "npm run format:check && npm run check && npm run check:api:core && npm run check:tooling:core && npm --prefix cloud/functions test",
     "announceEventPrizes": "node cloud/admin/announceEventPrizes.js",
+    "reconcile:merge-projections": "node cloud/admin/reconcileProfileMergeProjections.js",
     "recover:telegram": "node cloud/admin/recoverTelegramDelivery.js",
     "repo-clean": "bash scripts/repo-clean.sh",
     "format": "prettier --write . --ignore-unknown",
@@ -59,6 +63,7 @@
     "latest": "npm run latest:root && npm run latest:functions && npm run latest:admin"
   },
   "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.0.0",
     "@eslint/js": "^9.39.5",
     "@types/node": "^26.2.0",
     "@types/react": "^19.2.18",
@@ -73,9 +78,11 @@
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^7.1.1",
     "prettier": "^3.9.6",
+    "siwe": "^3.0.0",
     "typescript": "^6.0.3",
     "vite": "^8.2.1",
     "vite-plugin-checker": "^0.14.5",
+    "vitest": "^4.1.11",
     "wrangler": "4.123.0"
   }
 }

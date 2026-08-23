@@ -1,5 +1,8 @@
 export type AuthErrorCode =
+  | "aborted"
+  | "deadline-exceeded"
   | "failed-precondition"
+  | "internal"
   | "invalid-argument"
   | "method-not-allowed"
   | "not-found"

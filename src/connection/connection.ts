@@ -155,12 +155,16 @@ import type {
   EventCreateDateTimePayload,
   EventScheduleTimezone as SharedEventScheduleTimezone,
 } from "@mons/shared/events";
-import type { AuthMethodKey } from "@mons/shared/auth";
+import {
+  normalizeAuthPresentation,
+  type AuthMethodKey,
+} from "@mons/shared/auth";
 import type {
   XConsentSource,
   XRedirectStartResponse,
 } from "@mons/shared/x-redirect";
 import type {
+  AuthVerificationResponse,
   AuthIntentResponse,
   LinkedAuthMethodsResponse,
 } from "@mons/shared/auth";
@@ -173,8 +177,13 @@ import type { RatingUpdateResponse } from "@mons/shared/ratings";
 import {
   beginAuthIntentViaApi,
   beginXRedirectAuthViaApi,
+  completeXRedirectAuthViaApi,
   getLinkedAuthMethodsViaApi,
   syncProfileClaimViaApi,
+  unlinkAuthMethodViaApi,
+  verifyAppleTokenViaApi,
+  verifyEthereumAddressViaApi,
+  verifySolanaAddressViaApi,
 } from "../services/authApi";
 import {
   mapDatabaseEventRecord,
@@ -189,6 +198,16 @@ import {
 } from "./valueNormalizers";
 import { ObserverRegistry } from "./observerRegistry";
 import { transition } from "../session/sessionTransitionPort";
+
+const getStoredAuthPresentation = (): {
+  emoji: number;
+  aura: string | null;
+} => {
+  return normalizeAuthPresentation(
+    storage.getPlayerEmojiId("1"),
+    storage.getPlayerEmojiAura(""),
+  );
+};
 
 const normalizeMiningData = (source: any): PlayerMiningData =>
   normalizeMiningSnapshot({
@@ -1362,15 +1381,12 @@ class Connection {
     }
   }
 
-  public async unlinkAuthMethod(method: AuthMethodKey): Promise<any> {
+  public async unlinkAuthMethod(
+    method: AuthMethodKey,
+  ): Promise<LinkedAuthMethodsResponse> {
     try {
       await this.ensureAuthenticated();
-      const unlinkAuthMethodFunction = httpsCallable(
-        this.functions,
-        "unlinkAuthMethod",
-      );
-      const response = await unlinkAuthMethodFunction({ method });
-      return response.data;
+      return unlinkAuthMethodViaApi(method, this.getAuthApiToken);
     } catch (error) {
       console.error("Error unlinking auth method:", error);
       throw error;
@@ -1381,24 +1397,19 @@ class Connection {
     intentId: string,
     idToken: string,
     consentSource = "signin",
-  ): Promise<any> {
+  ): Promise<AuthVerificationResponse> {
     try {
       await this.ensureAuthenticated();
-      const verifyAppleTokenFunction = httpsCallable(
-        this.functions,
-        "verifyAppleToken",
+      const presentation = getStoredAuthPresentation();
+      return verifyAppleTokenViaApi(
+        {
+          intentId,
+          idToken,
+          ...presentation,
+          consentSource: consentSource === "settings" ? "settings" : "signin",
+        },
+        this.getAuthApiToken,
       );
-      const emojiString = storage.getPlayerEmojiId("1");
-      const emoji = parseInt(emojiString);
-      const aura = storage.getPlayerEmojiAura("");
-      const response = await verifyAppleTokenFunction({
-        intentId,
-        idToken,
-        emoji,
-        aura,
-        consentSource,
-      });
-      return response.data;
     } catch (error) {
       console.error("Error verifying Apple token:", error);
       throw error;
@@ -1426,22 +1437,16 @@ class Connection {
     }
   }
 
-  public async completeXRedirectAuth(params: { flowId: string }): Promise<any> {
+  public async completeXRedirectAuth(params: {
+    flowId: string;
+  }): Promise<AuthVerificationResponse> {
     try {
       await this.ensureAuthenticated();
-      const completeXRedirectAuthFunction = httpsCallable(
-        this.functions,
-        "completeXRedirectAuth",
+      const presentation = getStoredAuthPresentation();
+      return completeXRedirectAuthViaApi(
+        { flowId: params.flowId, ...presentation },
+        this.getAuthApiToken,
       );
-      const emojiString = storage.getPlayerEmojiId("1");
-      const emoji = parseInt(emojiString);
-      const aura = storage.getPlayerEmojiAura("");
-      const response = await completeXRedirectAuthFunction({
-        flowId: params.flowId,
-        emoji,
-        aura,
-      });
-      return response.data;
     } catch (error) {
       console.error("Error completing X redirect auth:", error);
       throw error;
@@ -1452,24 +1457,14 @@ class Connection {
     address: string,
     signature: string,
     intentId: string,
-  ): Promise<any> {
+  ): Promise<AuthVerificationResponse> {
     try {
       await this.ensureAuthenticated();
-      const verifySolanaAddressFunction = httpsCallable(
-        this.functions,
-        "verifySolanaAddress",
+      const presentation = getStoredAuthPresentation();
+      return verifySolanaAddressViaApi(
+        { address, signature, intentId, ...presentation },
+        this.getAuthApiToken,
       );
-      const emojiString = storage.getPlayerEmojiId("1");
-      const emoji = parseInt(emojiString);
-      const aura = storage.getPlayerEmojiAura("");
-      const response = await verifySolanaAddressFunction({
-        address,
-        signature,
-        emoji,
-        aura,
-        intentId,
-      });
-      return response.data;
     } catch (error) {
       console.error("Error verifying Solana address:", error);
       throw error;
@@ -1493,24 +1488,14 @@ class Connection {
     message: string,
     signature: string,
     intentId: string,
-  ): Promise<any> {
+  ): Promise<AuthVerificationResponse> {
     try {
       await this.ensureAuthenticated();
-      const verifyEthAddressFunction = httpsCallable(
-        this.functions,
-        "verifyEthAddress",
+      const presentation = getStoredAuthPresentation();
+      return verifyEthereumAddressViaApi(
+        { message, signature, intentId, ...presentation },
+        this.getAuthApiToken,
       );
-      const emojiString = storage.getPlayerEmojiId("1");
-      const emoji = parseInt(emojiString);
-      const aura = storage.getPlayerEmojiAura("");
-      const response = await verifyEthAddressFunction({
-        message,
-        signature,
-        emoji,
-        aura,
-        intentId,
-      });
-      return response.data;
     } catch (error) {
       console.error("Error verifying Ethereum address:", error);
       throw error;

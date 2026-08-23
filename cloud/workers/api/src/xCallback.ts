@@ -3,13 +3,20 @@ import {
   normalizeServerXConsentSource,
   type XConsentSource,
 } from "@mons/shared/x-redirect";
-import { createXFlowRepository, type XFlowRepository } from "./firestore.ts";
+import {
+  createXFlowRepository,
+  XFlowConflict,
+  type XFlowRepository,
+  type XRedirectFlow,
+} from "./firestore.ts";
 import {
   createXOAuthProvider,
   XProviderFailure,
   type XOAuthProvider,
 } from "./xProvider.ts";
 import { safeXReturnUrl, X_FLOW_ID_PATTERN, X_FLOW_TTL_MS } from "./xFlow.ts";
+
+const X_CALLBACK_PROCESSING_LEASE_MS = 60_000;
 
 const RESPONSE_HEADERS = {
   "Cache-Control": "no-store, no-cache, must-revalidate",
@@ -76,6 +83,33 @@ function publicErrorCode(error: unknown): string {
   return raw.trim().slice(0, 120) || "x-redirect-verify-failed";
 }
 
+function terminalFlowRedirect(
+  flowId: string,
+  flow: XRedirectFlow,
+): Response | null {
+  const returnUrl = safeXReturnUrl(flow.returnUrl);
+  const consentSource = normalizeServerXConsentSource(flow.consentSource);
+  if (flow.status === "completed" || flow.status === "verified") {
+    return redirectResponse({
+      returnUrl,
+      flowId,
+      status: "ready",
+      errorCode: "",
+      consentSource,
+    });
+  }
+  if (flow.status === "failed") {
+    return redirectResponse({
+      returnUrl,
+      flowId,
+      status: "failed",
+      errorCode: flow.errorCode || "x-redirect-failed",
+      consentSource,
+    });
+  }
+  return null;
+}
+
 export async function handleXCallback(
   request: Request,
   env: Env,
@@ -109,37 +143,66 @@ export async function handleXCallback(
     return textResponse("X auth session not found.", 400);
   }
 
-  const returnUrl = safeXReturnUrl(flow.returnUrl);
-  const consentSource = normalizeServerXConsentSource(flow.consentSource);
-  if (flow.status === "completed" || flow.status === "verified") {
-    return redirectResponse({
-      returnUrl,
-      flowId,
-      status: "ready",
-      errorCode: "",
-      consentSource,
-    });
-  }
-  if (flow.status === "failed") {
-    return redirectResponse({
-      returnUrl,
-      flowId,
-      status: "failed",
-      errorCode: flow.errorCode || "x-redirect-failed",
-      consentSource,
-    });
+  const existingRedirect = terminalFlowRedirect(flowId, flow);
+  if (existingRedirect) {
+    return existingRedirect;
   }
 
-  const failFlow = async (errorCode: string): Promise<Response> => {
+  const returnUrl = safeXReturnUrl(flow.returnUrl);
+  const consentSource = normalizeServerXConsentSource(flow.consentSource);
+  const updateFlow = async (
+    expectedFlow: XRedirectFlow,
+    updates: Record<string, string | number | null>,
+  ): Promise<{ response: Response } | { updateTime: string }> => {
     try {
-      await repository.updateFlow(flowId, {
-        status: "failed",
-        errorCode,
-        updatedAtMs: now(),
-      });
+      return {
+        updateTime: await repository.updateFlow(
+          flowId,
+          updates,
+          expectedFlow.updateTime,
+        ),
+      };
+    } catch (error) {
+      if (!(error instanceof XFlowConflict)) {
+        logFailure("firestore-update");
+        return { response: textResponse("Service Unavailable", 503) };
+      }
+    }
+    let current;
+    try {
+      current = await repository.getFlow(flowId);
     } catch {
-      logFailure("firestore-update");
-      return textResponse("Service Unavailable", 503);
+      logFailure("firestore-read");
+      return { response: textResponse("Service Unavailable", 503) };
+    }
+    if (!current) {
+      return { response: textResponse("X auth session not found.", 400) };
+    }
+    const authoritativeRedirect = terminalFlowRedirect(flowId, current);
+    if (authoritativeRedirect) {
+      return { response: authoritativeRedirect };
+    }
+    return {
+      response: textResponse("Authorization is still processing.", 503, {
+        "Retry-After": "2",
+      }),
+    };
+  };
+
+  const failFlow = async (
+    expectedFlow: XRedirectFlow,
+    errorCode: string,
+  ): Promise<Response> => {
+    const outcome = await updateFlow(expectedFlow, {
+      status: "failed",
+      errorCode,
+      ...(expectedFlow.status === "processing"
+        ? { processingStartedAtMs: null }
+        : {}),
+      updatedAtMs: now(),
+    });
+    if ("response" in outcome) {
+      return outcome.response;
     }
     return redirectResponse({
       returnUrl,
@@ -151,26 +214,55 @@ export async function handleXCallback(
   };
 
   const nowMs = now();
+  if (flow.status !== "created" && flow.status !== "processing") {
+    return textResponse("X auth session is invalid.", 400);
+  }
   if (
     flow.expiresAtMs <= 0 ||
     flow.expiresAtMs < nowMs ||
     (flow.createdAtMs > 0 && nowMs - flow.createdAtMs > X_FLOW_TTL_MS * 2)
   ) {
-    return failFlow("x-redirect-expired");
+    return failFlow(flow, "x-redirect-expired");
+  }
+  if (
+    flow.status === "processing" &&
+    flow.processingStartedAtMs > 0 &&
+    nowMs <= flow.processingStartedAtMs + X_CALLBACK_PROCESSING_LEASE_MS
+  ) {
+    return textResponse("Authorization is still processing.", 503, {
+      "Retry-After": "2",
+    });
   }
 
   const url = new URL(request.url);
   const oauthError = url.searchParams.get("error")?.trim() || "";
   if (oauthError) {
-    return failFlow(`x-oauth-${oauthError}`.slice(0, 120));
+    return failFlow(flow, `x-oauth-${oauthError}`.slice(0, 120));
   }
   const code = url.searchParams.get("code")?.trim() || "";
   if (!code) {
-    return failFlow("x-oauth-missing-code");
+    return failFlow(flow, "x-oauth-missing-code");
   }
   if (!flow.callbackUri || !flow.codeVerifier) {
-    return failFlow("x-redirect-verify-failed");
+    return failFlow(flow, "x-redirect-verify-failed");
   }
+
+  const processingStartedAtMs = now();
+  const claim = await updateFlow(flow, {
+    status: "processing",
+    processingStartedAtMs,
+    errorCode: null,
+    updatedAtMs: processingStartedAtMs,
+  });
+  if ("response" in claim) {
+    return claim.response;
+  }
+  flow = {
+    ...flow,
+    status: "processing",
+    processingStartedAtMs,
+    updateTime: claim.updateTime,
+  };
 
   let authenticatedUser;
   try {
@@ -183,20 +275,19 @@ export async function handleXCallback(
   } catch (error) {
     const errorCode = publicErrorCode(error);
     logFailure("x-provider");
-    return failFlow(errorCode);
+    return failFlow(flow, errorCode);
   }
 
-  try {
-    await repository.updateFlow(flowId, {
-      status: "verified",
-      xUserId: authenticatedUser.id,
-      xUsername: authenticatedUser.username || null,
-      errorCode: null,
-      updatedAtMs: now(),
-    });
-  } catch {
-    logFailure("firestore-update");
-    return textResponse("Service Unavailable", 503);
+  const outcome = await updateFlow(flow, {
+    status: "verified",
+    xUserId: authenticatedUser.id,
+    xUsername: authenticatedUser.username || null,
+    errorCode: null,
+    processingStartedAtMs: null,
+    updatedAtMs: now(),
+  });
+  if ("response" in outcome) {
+    return outcome.response;
   }
 
   return redirectResponse({

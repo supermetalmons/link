@@ -15,13 +15,17 @@ import {
   createAuthRepository,
   type AuthRepository,
   LoginProfileConflict,
+  type ProfileClaimSource,
 } from "./firestore.ts";
+
+const MAX_RECONCILIATION_ATTEMPTS = 3;
 
 export type ProfileClaimDependencies = {
   authClient?: FirebaseAuthAdminClient;
   logCleanupFailure?: (kind: string) => void;
   repository?: Pick<AuthRepository, "getProfileClaimSource">;
   rtdbClient?: Pick<FirebaseRtdbClient, "getPath" | "patchRoot">;
+  schedulePendingProfileRecovery?: (profileId: string) => void | Promise<void>;
 };
 
 function cleanString(value: unknown): string {
@@ -44,34 +48,43 @@ export async function syncProfileClaim(
   dependencies: ProfileClaimDependencies = {},
 ): Promise<LinkedAuthMethodsResponse> {
   const repository = dependencies.repository || createAuthRepository(env);
-  let source: LinkedAuthMethodsResponse;
-  try {
-    source = await repository.getProfileClaimSource(
-      identity.uid,
-      identity.idToken,
-    );
-  } catch (error) {
-    if (error instanceof LoginProfileConflict) {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        "login-profile-conflict",
+  const readSource = async (): Promise<ProfileClaimSource> => {
+    try {
+      return await repository.getProfileClaimSource(
+        identity.uid,
+        identity.idToken,
       );
+    } catch (error) {
+      if (error instanceof LoginProfileConflict) {
+        throw new AuthApiFailure(
+          409,
+          "failed-precondition",
+          "login-profile-conflict",
+        );
+      }
+      throw error;
     }
-    throw error;
-  }
+  };
 
-  const reconcile = async (): Promise<void> => {
-    const authClient =
-      dependencies.authClient || createFirebaseAuthAdminClient(env);
-    const rtdbClient =
-      dependencies.rtdbClient ||
-      createFirebaseRtdbClient(env, {
-        credentials: {
-          email: env.FIRESTORE_SERVICE_ACCOUNT_EMAIL,
-          privateKeyPem: env.FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY,
-        },
-      });
+  let source = await readSource();
+  const authClient =
+    dependencies.authClient || createFirebaseAuthAdminClient(env);
+  const rtdbClient =
+    dependencies.rtdbClient ||
+    createFirebaseRtdbClient(env, {
+      credentials: {
+        email: env.FIRESTORE_SERVICE_ACCOUNT_EMAIL,
+        privateKeyPem: env.FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY,
+      },
+    });
+  const logCleanupFailure =
+    dependencies.logCleanupFailure ||
+    ((kind: string) =>
+      console.error(
+        JSON.stringify({ event: "profile_claim_cleanup_failure", kind }),
+      ));
+
+  const reconcile = async (current: ProfileClaimSource): Promise<void> => {
     const [user, profileLink] = await Promise.all([
       authClient.getUser(identity.uid),
       rtdbClient.getPath(`players/${identity.uid}/profile`),
@@ -80,19 +93,19 @@ export async function syncProfileClaim(
     const hasProfileClaim = Object.hasOwn(claims, "profileId");
     const writes: Promise<void>[] = [];
 
-    if (source.profileId) {
-      if (cleanString(profileLink) !== source.profileId) {
+    if (current.profileId) {
+      if (cleanString(profileLink) !== current.profileId) {
         writes.push(
           rtdbClient.patchRoot({
-            [`players/${identity.uid}/profile`]: source.profileId,
+            [`players/${identity.uid}/profile`]: current.profileId,
           }),
         );
       }
-      if (cleanString(claims.profileId) !== source.profileId) {
+      if (cleanString(claims.profileId) !== current.profileId) {
         writes.push(
           authClient.setCustomUserClaims(identity.uid, {
             ...claims,
-            profileId: source.profileId,
+            profileId: current.profileId,
           }),
         );
       }
@@ -110,24 +123,55 @@ export async function syncProfileClaim(
       }
     }
 
-    await Promise.all(writes);
+    const outcomes = await Promise.allSettled(writes);
+    const failure = outcomes.find(
+      (outcome): outcome is PromiseRejectedResult =>
+        outcome.status === "rejected",
+    );
+    if (failure) {
+      throw failure.reason;
+    }
   };
 
-  if (source.profileId) {
-    await reconcile();
-  } else {
+  for (let attempt = 0; attempt < MAX_RECONCILIATION_ATTEMPTS; attempt++) {
+    let reconciliationFailed = false;
+    let reconciliationFailure: unknown;
     try {
-      await reconcile();
+      await reconcile(source);
     } catch (error) {
-      (
-        dependencies.logCleanupFailure ||
-        ((kind) =>
-          console.error(
-            JSON.stringify({ event: "profile_claim_cleanup_failure", kind }),
-          ))
-      )(cleanupFailureKind(error));
+      if (source.profileId) {
+        reconciliationFailed = true;
+        reconciliationFailure = error;
+      } else {
+        logCleanupFailure(cleanupFailureKind(error));
+      }
     }
+
+    const verifiedSource = await readSource();
+    if (verifiedSource.profileId === source.profileId) {
+      if (verifiedSource.profileId && verifiedSource.pendingRecovery) {
+        await dependencies.schedulePendingProfileRecovery?.(
+          verifiedSource.profileId,
+        );
+      }
+      if (reconciliationFailed) {
+        throw reconciliationFailure;
+      }
+      const { pendingRecovery: _pendingRecovery, ...response } = verifiedSource;
+      return response;
+    }
+    source = verifiedSource;
   }
 
-  return source;
+  try {
+    await reconcile(source);
+  } catch (error) {
+    if (!source.profileId) {
+      logCleanupFailure(cleanupFailureKind(error));
+    }
+  }
+  if (source.profileId && source.pendingRecovery) {
+    await dependencies.schedulePendingProfileRecovery?.(source.profileId);
+  }
+  throw new AuthApiFailure(409, "aborted", "profile-claim-source-unstable");
 }

@@ -1,9 +1,15 @@
 const admin = require("./firebaseAdmin");
+const { FieldPath } = require("firebase-admin/firestore");
 const {
   onValueCreated,
   onValueWritten,
 } = require("firebase-functions/v2/database");
 const { onDocumentDeleted } = require("firebase-functions/v2/firestore");
+const {
+  orderProfileMergeCleanupIds,
+  PROFILE_MERGE_TARGETS_COLLECTION,
+  resolveProfileMergeTargetPath,
+} = require("./profileMergeTargets");
 const {
   createInviteCandidatesFromMatchId,
   deriveLatestMatchId,
@@ -35,12 +41,118 @@ const PROFILE_LINK_STALE_CLEANUP_WAIT_MAX_MS = 4000;
 const PROFILE_LINK_STALE_CLEANUP_WAIT_STEP_MS = 250;
 const PROFILE_DELETE_GAMES_CLEANUP_BATCH_SIZE = 400;
 const PROFILE_DELETE_GAMES_CLEANUP_TIMEOUT_MS = 50000;
+const PROFILE_MERGE_RECONCILE_CONCURRENCY = 10;
+const PROFILE_MERGE_RECONCILE_PAGE_SIZE = 200;
+const AUTOMATCH_MARKER_RECONCILE_ATTEMPTS = 3;
+const PROFILE_LINK_RECONCILE_ATTEMPTS = 3;
 
 const READ_RETRY_ATTEMPTS = 2;
 const READ_RETRY_DELAY_MS = 25;
 
-const loginToProfileCache = new Map();
 const profileSummaryCache = new Map();
+
+const readMergeTarget = async (firestore, profileId) => {
+  const snapshot = await readWithRetries(() =>
+    firestore.collection(PROFILE_MERGE_TARGETS_COLLECTION).doc(profileId).get(),
+  );
+  return snapshot.exists ? snapshot.data() : null;
+};
+
+const buildResolvedProfile = (profilePath, pendingSourcePath = []) => {
+  const profileId = profilePath[profilePath.length - 1] || null;
+  if (!profileId) {
+    return { cleanupProfileIds: [], profileId: null };
+  }
+  const cleanupProfileIds = [...profilePath];
+  if (
+    pendingSourcePath.length > 1 &&
+    pendingSourcePath[pendingSourcePath.length - 1] === profileId
+  ) {
+    cleanupProfileIds.unshift(...pendingSourcePath.slice(0, -1));
+  }
+  return {
+    cleanupProfileIds: Array.from(new Set(cleanupProfileIds)),
+    profileId,
+  };
+};
+
+const buildInviteProjectionOwnerPlan = (
+  hostProfile,
+  guestProfile,
+  cleanupProfileIds = [],
+) => {
+  const ownerProfileIds = getOwnerProfileIds(
+    hostProfile.profileId,
+    guestProfile.profileId,
+  );
+  return {
+    cleanupProfileIds: orderProfileMergeCleanupIds(
+      [
+        ...hostProfile.cleanupProfileIds,
+        ...guestProfile.cleanupProfileIds,
+        ...cleanupProfileIds,
+        ...ownerProfileIds,
+      ],
+      ownerProfileIds,
+    ),
+    ownerProfileIds,
+  };
+};
+
+const readExistingProjectionDocuments = async ({
+  attempts = READ_RETRY_ATTEMPTS,
+  inviteId,
+  profileIds,
+  readDocument,
+  reason,
+  retryDelayMs = READ_RETRY_DELAY_MS,
+  logger = console,
+  wait = delay,
+}) => {
+  const results = await Promise.allSettled(
+    profileIds.map(async (profileId) => {
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        try {
+          return { profileId, snapshot: await readDocument(profileId) };
+        } catch (error) {
+          if (attempt >= attempts) {
+            throw error;
+          }
+          await wait(retryDelayMs);
+        }
+      }
+      throw new Error("projector:existing-doc-read-retry-exhausted");
+    }),
+  );
+  const documents = [];
+  let didFail = false;
+  let failure = null;
+  results.forEach((result, index) => {
+    if (result.status === "rejected") {
+      if (!didFail) {
+        didFail = true;
+        failure = result.reason;
+      }
+      logger.error("projector:existing-doc-read-failed", {
+        inviteId,
+        ownerProfileId: profileIds[index],
+        reason,
+        error:
+          result.reason && result.reason.message
+            ? result.reason.message
+            : result.reason,
+      });
+      return;
+    }
+    if (result.value.snapshot.exists) {
+      documents.push(result.value);
+    }
+  });
+  if (didFail) {
+    throw failure;
+  }
+  return documents;
+};
 
 const toTimestamp = (millis) => {
   const normalized = Number.isFinite(millis)
@@ -55,6 +167,25 @@ const delay = async (ms) => {
     return;
   }
   await new Promise((resolve) => setTimeout(resolve, safeDelay));
+};
+
+const readWithRetries = async (
+  read,
+  attempts = READ_RETRY_ATTEMPTS,
+  retryDelayMs = READ_RETRY_DELAY_MS,
+) => {
+  let failure = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await read();
+    } catch (error) {
+      failure = error;
+      if (attempt < attempts) {
+        await delay(retryDelayMs);
+      }
+    }
+  }
+  throw failure;
 };
 
 async function readLoginSummaryFromRtdbMatches(
@@ -84,38 +215,34 @@ async function readLoginSummaryFromRtdbMatches(
   }
 
   for (const candidateMatchId of candidateMatchIds) {
-    for (let attempt = 1; attempt <= READ_RETRY_ATTEMPTS; attempt += 1) {
-      try {
-        const matchSnapshot = await admin
+    try {
+      const matchSnapshot = await readWithRetries(() =>
+        admin
           .database()
           .ref(`players/${normalizedLoginUid}/matches/${candidateMatchId}`)
-          .once("value");
-        if (!matchSnapshot.exists()) {
-          break;
-        }
-        const matchData = matchSnapshot.val() || {};
-        const emoji = getEmojiId(matchData.emojiId);
-        if (emoji !== null) {
-          const summary = {
-            name: null,
-            emoji,
-          };
-          cache.set(cacheKey, summary);
-          return summary;
-        }
-        break;
-      } catch (error) {
-        if (attempt >= READ_RETRY_ATTEMPTS) {
-          console.error("projector:login-summary-rtdb-read-failed", {
-            loginUid: normalizedLoginUid,
-            matchId: candidateMatchId,
-            attempts: attempt,
-            error: error && error.message ? error.message : error,
-          });
-          break;
-        }
-        await delay(READ_RETRY_DELAY_MS);
+          .once("value"),
+      );
+      if (!matchSnapshot.exists()) {
+        continue;
       }
+      const matchData = matchSnapshot.val() || {};
+      const emoji = getEmojiId(matchData.emojiId);
+      if (emoji !== null) {
+        const summary = {
+          name: null,
+          emoji,
+        };
+        cache.set(cacheKey, summary);
+        return summary;
+      }
+    } catch (error) {
+      console.error("projector:login-summary-rtdb-read-failed", {
+        loginUid: normalizedLoginUid,
+        matchId: candidateMatchId,
+        attempts: READ_RETRY_ATTEMPTS,
+        error: error && error.message ? error.message : error,
+      });
+      throw error;
     }
   }
 
@@ -123,7 +250,11 @@ async function readLoginSummaryFromRtdbMatches(
   return null;
 }
 
-const readInviteExists = async (inviteId, inviteExistenceCache) => {
+const readInviteExists = async (
+  inviteId,
+  inviteExistenceCache,
+  dependencies = {},
+) => {
   if (!inviteId) {
     return false;
   }
@@ -134,17 +265,18 @@ const readInviteExists = async (inviteId, inviteExistenceCache) => {
     }
     return await cached;
   }
-  const promise = admin
-    .database()
-    .ref(`invites/${inviteId}`)
-    .once("value")
+  const readInvite =
+    dependencies.readInvite ||
+    (() => admin.database().ref(`invites/${inviteId}`).once("value"));
+  const promise = readWithRetries(() => readInvite(inviteId))
     .then((snapshot) => snapshot.exists())
     .catch((error) => {
       console.error("projector:invite-exists-read-failed", {
         inviteId,
+        attempts: READ_RETRY_ATTEMPTS,
         error: error && error.message ? error.message : error,
       });
-      return false;
+      throw error;
     });
   if (inviteExistenceCache) {
     inviteExistenceCache.set(inviteId, promise);
@@ -196,61 +328,117 @@ async function resolveInviteIdFromMatchId(matchId, options = {}) {
   return existingCandidates[0];
 }
 
-async function resolveProfileIdForLogin(loginUid) {
-  const normalizedLoginUid = normalizeString(loginUid);
-  if (!normalizedLoginUid) {
+const readCurrentProfileLink = async (loginUid) => {
+  const snapshot = await readWithRetries(() =>
+    admin.database().ref(`players/${loginUid}/profile`).once("value"),
+  );
+  return normalizeString(snapshot.val());
+};
+
+const resolveProfileLinkCatchupState = async (
+  { eventProfileId, loginUid, staleProfileId },
+  dependencies = {},
+) => {
+  const readProfileLink =
+    dependencies.readCurrentProfileLink || readCurrentProfileLink;
+  const profileId = await readProfileLink(loginUid);
+  if (!profileId) {
     return null;
   }
+  return {
+    cleanupProfileIds: Array.from(
+      new Set([staleProfileId, eventProfileId, profileId].filter(Boolean)),
+    ),
+    profileId,
+  };
+};
 
-  if (loginToProfileCache.has(normalizedLoginUid)) {
-    const cachedProfileId = loginToProfileCache.get(normalizedLoginUid);
-    if (cachedProfileId) {
-      return cachedProfileId;
-    }
-    loginToProfileCache.delete(normalizedLoginUid);
+async function resolveProfileForLogin(loginUid) {
+  const normalizedLoginUid = normalizeString(loginUid);
+  if (!normalizedLoginUid) {
+    return { cleanupProfileIds: [], profileId: null };
   }
 
-  let profileId = null;
+  let rawProfileId = null;
+  let profileLinkReadError = null;
+  let profileQueryReadError = null;
 
   try {
-    const profileSnapshot = await admin
-      .database()
-      .ref(`players/${normalizedLoginUid}/profile`)
-      .once("value");
+    const profileSnapshot = await readWithRetries(() =>
+      admin
+        .database()
+        .ref(`players/${normalizedLoginUid}/profile`)
+        .once("value"),
+    );
     const profileValue = normalizeString(profileSnapshot.val());
     if (profileValue) {
-      profileId = profileValue;
+      rawProfileId = profileValue;
     }
   } catch (error) {
+    profileLinkReadError = error;
     console.error("projector:profile-resolve:rtdb-read-failed", {
       loginUid: normalizedLoginUid,
+      attempts: READ_RETRY_ATTEMPTS,
       error: error && error.message ? error.message : error,
     });
   }
 
-  if (!profileId) {
+  if (!rawProfileId) {
     try {
-      const usersSnapshot = await admin
-        .firestore()
-        .collection("users")
-        .where("logins", "array-contains", normalizedLoginUid)
-        .limit(1)
-        .get();
+      const usersSnapshot = await readWithRetries(() =>
+        admin
+          .firestore()
+          .collection("users")
+          .where("logins", "array-contains", normalizedLoginUid)
+          .limit(1)
+          .get(),
+      );
       if (!usersSnapshot.empty) {
-        profileId = usersSnapshot.docs[0].id;
+        rawProfileId = usersSnapshot.docs[0].id;
       }
     } catch (error) {
+      profileQueryReadError = error;
       console.error("projector:profile-resolve:firestore-read-failed", {
         loginUid: normalizedLoginUid,
+        attempts: READ_RETRY_ATTEMPTS,
         error: error && error.message ? error.message : error,
       });
     }
   }
 
-  if (profileId) {
-    loginToProfileCache.set(normalizedLoginUid, profileId);
+  if (!rawProfileId) {
+    if (profileQueryReadError || profileLinkReadError) {
+      throw profileQueryReadError || profileLinkReadError;
+    }
+    return { cleanupProfileIds: [], profileId: null };
   }
-  return profileId;
+  const firestore = admin.firestore();
+  const profilePath = await resolveProfileMergeTargetPath({
+    profileId: rawProfileId,
+    readMergeTarget: (candidateProfileId) =>
+      readMergeTarget(firestore, candidateProfileId),
+  });
+  const profileId = profilePath[profilePath.length - 1] || null;
+  if (!profileId) {
+    return { cleanupProfileIds: [], profileId: null };
+  }
+  let pendingSourcePath = [];
+  const profileSnapshot = await readWithRetries(() =>
+    firestore.collection("users").doc(profileId).get(),
+  );
+  const pendingSourceProfileId = normalizeString(
+    profileSnapshot.exists
+      ? (profileSnapshot.data() || {}).pendingMergeGameCopySourceProfileId
+      : null,
+  );
+  if (pendingSourceProfileId) {
+    pendingSourcePath = await resolveProfileMergeTargetPath({
+      profileId: pendingSourceProfileId,
+      readMergeTarget: (candidateProfileId) =>
+        readMergeTarget(firestore, candidateProfileId),
+    });
+  }
+  return buildResolvedProfile(profilePath, pendingSourcePath);
 }
 
 async function readProfileSummary(profileId) {
@@ -263,32 +451,24 @@ async function readProfileSummary(profileId) {
   }
 
   let summary = null;
-  for (let attempt = 1; attempt <= READ_RETRY_ATTEMPTS; attempt += 1) {
-    try {
-      const profileDoc = await admin
-        .firestore()
-        .collection("users")
-        .doc(normalizedProfileId)
-        .get();
-      if (profileDoc.exists) {
-        const profileData = profileDoc.data() || {};
-        summary = {
-          name: getProfileDisplayName(profileData),
-          emoji: getProfileEmoji(profileData),
-        };
-      }
-      break;
-    } catch (error) {
-      if (attempt >= READ_RETRY_ATTEMPTS) {
-        console.error("projector:profile-summary-read-failed", {
-          profileId: normalizedProfileId,
-          attempts: attempt,
-          error: error && error.message ? error.message : error,
-        });
-        break;
-      }
-      await delay(READ_RETRY_DELAY_MS);
+  try {
+    const profileDoc = await readWithRetries(() =>
+      admin.firestore().collection("users").doc(normalizedProfileId).get(),
+    );
+    if (profileDoc.exists) {
+      const profileData = profileDoc.data() || {};
+      summary = {
+        name: getProfileDisplayName(profileData),
+        emoji: getProfileEmoji(profileData),
+      };
     }
+  } catch (error) {
+    console.error("projector:profile-summary-read-failed", {
+      profileId: normalizedProfileId,
+      attempts: READ_RETRY_ATTEMPTS,
+      error: error && error.message ? error.message : error,
+    });
+    throw error;
   }
 
   profileSummaryCache.set(normalizedProfileId, summary);
@@ -312,8 +492,12 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
   const firestore = admin.firestore();
 
   const [inviteSnapshot, automatchSnapshot] = await Promise.all([
-    db.ref(`invites/${normalizedInviteId}`).once("value"),
-    db.ref(`automatch/${normalizedInviteId}`).once("value"),
+    readWithRetries(() =>
+      db.ref(`invites/${normalizedInviteId}`).once("value"),
+    ),
+    readWithRetries(() =>
+      db.ref(`automatch/${normalizedInviteId}`).once("value"),
+    ),
   ]);
 
   const inviteData = inviteSnapshot.exists() ? inviteSnapshot.val() : null;
@@ -324,12 +508,18 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
   const hostLoginId = normalizeString(inviteData ? inviteData.hostId : null);
   const guestLoginId = normalizeString(inviteData ? inviteData.guestId : null);
 
-  const [hostProfileId, guestProfileId] = await Promise.all([
-    resolveProfileIdForLogin(hostLoginId),
-    resolveProfileIdForLogin(guestLoginId),
+  const [hostProfile, guestProfile] = await Promise.all([
+    resolveProfileForLogin(hostLoginId),
+    resolveProfileForLogin(guestLoginId),
   ]);
+  const hostProfileId = hostProfile.profileId;
+  const guestProfileId = guestProfile.profileId;
 
-  const ownerProfileIds = getOwnerProfileIds(hostProfileId, guestProfileId);
+  const { cleanupProfileIds, ownerProfileIds } = buildInviteProjectionOwnerPlan(
+    hostProfile,
+    guestProfile,
+    options.cleanupProfileIds,
+  );
 
   const automatchStateHint = inferAutomatchStateHint({
     inviteId: normalizedInviteId,
@@ -357,31 +547,21 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
   const loginSummaryCache = new Map();
 
   const existingDocsByOwnerProfileId = new Map();
-  const existingDocs = [];
-  await Promise.all(
-    ownerProfileIds.map(async (ownerProfileId) => {
-      try {
-        const ownerDocSnapshot = await firestore
-          .collection("users")
-          .doc(ownerProfileId)
-          .collection("games")
-          .doc(normalizedInviteId)
-          .get();
-        if (!ownerDocSnapshot.exists) {
-          return;
-        }
-        existingDocsByOwnerProfileId.set(ownerProfileId, ownerDocSnapshot);
-        existingDocs.push({ ownerProfileId, docSnapshot: ownerDocSnapshot });
-      } catch (error) {
-        console.error("projector:existing-doc-read-failed", {
-          inviteId: normalizedInviteId,
-          ownerProfileId,
-          reason,
-          error: error && error.message ? error.message : error,
-        });
-      }
-    }),
-  );
+  const existingDocs = await readExistingProjectionDocuments({
+    inviteId: normalizedInviteId,
+    profileIds: cleanupProfileIds,
+    readDocument: (ownerProfileId) =>
+      firestore
+        .collection("users")
+        .doc(ownerProfileId)
+        .collection("games")
+        .doc(normalizedInviteId)
+        .get(),
+    reason,
+  });
+  existingDocs.forEach(({ profileId, snapshot }) => {
+    existingDocsByOwnerProfileId.set(profileId, snapshot);
+  });
 
   const ownerSet = new Set(ownerProfileIds);
   const canPruneOwners =
@@ -395,9 +575,9 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
   for (const existing of existingDocs) {
     if (
       !shouldProject ||
-      (canPruneOwners && !ownerSet.has(existing.ownerProfileId))
+      (canPruneOwners && !ownerSet.has(existing.profileId))
     ) {
-      batch.delete(existing.docSnapshot.ref);
+      batch.delete(existing.snapshot.ref);
       deleteCount += 1;
     }
   }
@@ -610,54 +790,68 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
   };
 }
 
-async function syncAutomatchInviteMarkerFromQueue(inviteId, queueExists) {
+async function syncAutomatchInviteMarkerFromQueue(inviteId) {
   const normalizedInviteId = normalizeString(inviteId);
   if (!normalizedInviteId) {
     return { ok: false, updated: false, reason: "invalid-invite-id" };
   }
-
-  const inviteSnapshot = await admin
-    .database()
-    .ref(`invites/${normalizedInviteId}`)
-    .once("value");
-  if (!inviteSnapshot.exists()) {
-    return { ok: true, updated: false, reason: "missing-invite" };
-  }
-
-  const inviteData = inviteSnapshot.val() || {};
-  const guestId = normalizeString(inviteData.guestId);
-  const currentHint = normalizeString(inviteData.automatchStateHint);
-  const currentCanceledAt =
-    typeof inviteData.automatchCanceledAt === "number"
-      ? inviteData.automatchCanceledAt
-      : null;
-
-  const nextHint = queueExists ? "pending" : guestId ? "matched" : "canceled";
-  const nextCanceledAt = nextHint === "canceled" ? Date.now() : null;
-
-  const canceledAtChanged =
-    nextHint === "canceled"
-      ? currentCanceledAt === null
-      : currentCanceledAt !== null;
-  const hintChanged = currentHint !== nextHint;
-
-  if (!hintChanged && !canceledAtChanged) {
-    return { ok: true, updated: false, reason: "marker-unchanged" };
-  }
-
-  const updates = {};
-  updates[`invites/${normalizedInviteId}/automatchStateHint`] = nextHint;
-  updates[`invites/${normalizedInviteId}/automatchCanceledAt`] = nextCanceledAt;
-
-  await admin.database().ref().update(updates);
-
-  return {
-    ok: true,
-    updated: true,
-    inviteId: normalizedInviteId,
-    automatchStateHint: nextHint,
-    automatchCanceledAt: nextCanceledAt,
+  const database = admin.database();
+  const inviteRef = database.ref(`invites/${normalizedInviteId}`);
+  const queueRef = database.ref(`automatch/${normalizedInviteId}`);
+  const readState = async () => {
+    const [inviteSnapshot, queueSnapshot] = await Promise.all([
+      readWithRetries(() => inviteRef.once("value")),
+      readWithRetries(() => queueRef.once("value")),
+    ]);
+    if (!inviteSnapshot.exists()) {
+      return null;
+    }
+    const inviteData = inviteSnapshot.val() || {};
+    const nextHint = queueSnapshot.exists()
+      ? "pending"
+      : normalizeString(inviteData.guestId)
+        ? "matched"
+        : "canceled";
+    const currentCanceledAt =
+      typeof inviteData.automatchCanceledAt === "number"
+        ? inviteData.automatchCanceledAt
+        : null;
+    const markerMatches =
+      normalizeString(inviteData.automatchStateHint) === nextHint &&
+      (nextHint === "canceled"
+        ? currentCanceledAt !== null
+        : currentCanceledAt === null);
+    return { currentCanceledAt, markerMatches, nextHint };
   };
+
+  let updated = false;
+  for (
+    let attempt = 0;
+    attempt < AUTOMATCH_MARKER_RECONCILE_ATTEMPTS;
+    attempt += 1
+  ) {
+    const state = await readState();
+    if (!state) {
+      return { ok: true, updated, reason: "missing-invite" };
+    }
+    if (state.markerMatches) {
+      return {
+        ok: true,
+        updated,
+        reason: updated ? "marker-reconciled" : "marker-unchanged",
+        inviteId: normalizedInviteId,
+        automatchStateHint: state.nextHint,
+        automatchCanceledAt: state.currentCanceledAt,
+      };
+    }
+    const nextCanceledAt = state.nextHint === "canceled" ? Date.now() : null;
+    await inviteRef.update({
+      automatchStateHint: state.nextHint,
+      automatchCanceledAt: nextCanceledAt,
+    });
+    updated = true;
+  }
+  throw new Error("projector:automatch-marker-reconcile-exhausted");
 }
 
 const hasMeaningfulValueChange = (before, after) => {
@@ -677,21 +871,34 @@ const processWithConcurrency = async (
     return;
   }
   let index = 0;
+  let didFail = false;
+  let failure = null;
   const workerCount = Math.max(1, Math.min(concurrency, items.length));
   const runners = Array.from({ length: workerCount }, async () => {
     while (true) {
-      if (shouldContinue && !shouldContinue()) {
+      try {
+        if (didFail || (shouldContinue && !shouldContinue())) {
+          return;
+        }
+        const currentIndex = index;
+        index += 1;
+        if (currentIndex >= items.length) {
+          return;
+        }
+        await worker(items[currentIndex], currentIndex);
+      } catch (error) {
+        if (!didFail) {
+          didFail = true;
+          failure = error;
+        }
         return;
       }
-      const currentIndex = index;
-      index += 1;
-      if (currentIndex >= items.length) {
-        return;
-      }
-      await worker(items[currentIndex], currentIndex);
     }
   });
   await Promise.all(runners);
+  if (didFail) {
+    throw failure;
+  }
 };
 
 const readNumericMillis = (value) => {
@@ -755,15 +962,184 @@ const deleteProfileGamesProjectionDocs = async (profileRef) => {
   };
 };
 
-const onInviteCreated = onValueCreated("/invites/{inviteId}", async (event) => {
-  const inviteId = event.params.inviteId;
-  await recomputeInviteProjection(inviteId, "invite-created", {
-    eventTimestampMs: Date.now(),
+const classifyProfileGameProjection = (docId, data = {}) => {
+  const normalizedDocId = normalizeString(docId);
+  const storedEventId = normalizeString(data.eventId);
+  const isEvent =
+    data.entityType === "event" ||
+    data.source === "event-projector" ||
+    !!storedEventId ||
+    (normalizedDocId && normalizedDocId.startsWith("event_"));
+  if (isEvent) {
+    const eventId =
+      storedEventId ||
+      (normalizedDocId && normalizedDocId.startsWith("event_")
+        ? normalizedDocId.slice("event_".length)
+        : null);
+    return eventId ? { entityType: "event", id: eventId } : null;
+  }
+  const inviteId = normalizeString(data.inviteId) || normalizedDocId;
+  return inviteId ? { entityType: "game", id: inviteId } : null;
+};
+
+const reconcileProfileMergeProjections = async (
+  { dryRun = false, sourceProfileId, targetProfileId },
+  dependencies = {},
+) => {
+  const normalizedSourceProfileId = normalizeString(sourceProfileId);
+  const normalizedTargetProfileId = normalizeString(targetProfileId);
+  if (
+    !normalizedSourceProfileId ||
+    !normalizedTargetProfileId ||
+    normalizedSourceProfileId === normalizedTargetProfileId
+  ) {
+    throw new Error("profile-merge-reconcile-invalid-target");
+  }
+  const firestore = dependencies.firestore || admin.firestore();
+  const profileIds = await resolveProfileMergeTargetPath({
+    profileId: normalizedSourceProfileId,
+    readMergeTarget: (profileId) => readMergeTarget(firestore, profileId),
   });
-});
+  if (profileIds[1] !== normalizedTargetProfileId) {
+    throw new Error("profile-merge-reconcile-target-mismatch");
+  }
+  const requestedPageSize = Math.floor(Number(dependencies.pageSize));
+  const pageSize =
+    Number.isSafeInteger(requestedPageSize) && requestedPageSize > 0
+      ? Math.min(requestedPageSize, PROFILE_MERGE_RECONCILE_PAGE_SIZE)
+      : PROFILE_MERGE_RECONCILE_PAGE_SIZE;
+  const database = dryRun ? null : dependencies.database || admin.database();
+  const eventProjectorImpl = dryRun ? null : require("./eventProjector");
+  const projectEventImpl = dryRun
+    ? null
+    : dependencies.projectEvent || eventProjectorImpl.projectEvent;
+  const reconcileLiveEventProjectionImpl = dryRun
+    ? null
+    : dependencies.reconcileLiveEventProjection ||
+      eventProjectorImpl.reconcileLiveEventProjection;
+  const recomputeInviteProjectionImpl = dryRun
+    ? null
+    : dependencies.recomputeInviteProjection || recomputeInviteProjection;
+  let scannedGameDocuments = 0;
+  let projectionCount = 0;
+  let pagesScanned = 0;
+  const scannedProfileIds =
+    dependencies.scannedProfileIds instanceof Set
+      ? dependencies.scannedProfileIds
+      : null;
+  const projectionProfileIds = [
+    profileIds[profileIds.length - 1],
+    ...profileIds.slice(0, -1),
+  ].filter(Boolean);
+  for (const profileId of projectionProfileIds) {
+    if (scannedProfileIds && scannedProfileIds.has(profileId)) {
+      continue;
+    }
+    const games = firestore
+      .collection("users")
+      .doc(profileId)
+      .collection("games");
+    const terminalSnapshot = await games
+      .orderBy(FieldPath.documentId(), "desc")
+      .limit(1)
+      .get();
+    if (terminalSnapshot.empty) {
+      scannedProfileIds?.add(profileId);
+      continue;
+    }
+    const terminalId = terminalSnapshot.docs[0].id;
+    let cursor = null;
+    while (true) {
+      let query = games
+        .orderBy(FieldPath.documentId())
+        .endAt(terminalId)
+        .limit(pageSize);
+      if (cursor) {
+        query = query.startAfter(cursor);
+      }
+      const snapshot = await query.get();
+      if (snapshot.empty) {
+        break;
+      }
+      pagesScanned += 1;
+      scannedGameDocuments += snapshot.size;
+      const projections = new Map();
+      for (const doc of snapshot.docs) {
+        const projection = classifyProfileGameProjection(
+          doc.id,
+          doc.data() || {},
+        );
+        if (projection) {
+          projections.set(
+            `${projection.entityType}:${projection.id}`,
+            projection,
+          );
+        }
+      }
+      projectionCount += projections.size;
+      if (!dryRun) {
+        await processWithConcurrency(
+          Array.from(projections.values()),
+          PROFILE_MERGE_RECONCILE_CONCURRENCY,
+          async (projection) => {
+            if (projection.entityType === "event") {
+              await reconcileLiveEventProjectionImpl(
+                projection.id,
+                null,
+                null,
+                { cleanupProfileIds: profileIds },
+                {
+                  projectEvent: projectEventImpl,
+                  readLiveEvent: async () => {
+                    const eventSnapshot = await database
+                      .ref(`events/${projection.id}`)
+                      .once("value");
+                    return eventSnapshot.exists() ? eventSnapshot.val() : null;
+                  },
+                },
+              );
+              return;
+            }
+            await recomputeInviteProjectionImpl(
+              projection.id,
+              "profile-merge-reconciliation",
+              {
+                cleanupProfileIds: profileIds,
+                eventTimestampMs: Date.now(),
+                preserveNewerListSortAt: true,
+              },
+            );
+          },
+        );
+      }
+      cursor = snapshot.docs[snapshot.docs.length - 1].id;
+      if (snapshot.size < pageSize) {
+        break;
+      }
+    }
+    scannedProfileIds?.add(profileId);
+  }
+  return {
+    dryRun: dryRun === true,
+    pagesScanned,
+    profileIds,
+    projectionCount,
+    scannedGameDocuments,
+  };
+};
+
+const onInviteCreated = onValueCreated(
+  { ref: "/invites/{inviteId}", retry: true },
+  async (event) => {
+    const inviteId = event.params.inviteId;
+    await recomputeInviteProjection(inviteId, "invite-created", {
+      eventTimestampMs: Date.now(),
+    });
+  },
+);
 
 const onInviteGuestIdChanged = onValueWritten(
-  "/invites/{inviteId}/guestId",
+  { ref: "/invites/{inviteId}/guestId", retry: true },
   async (event) => {
     const before = event.data.before.val();
     const after = event.data.after.val();
@@ -777,7 +1153,7 @@ const onInviteGuestIdChanged = onValueWritten(
 );
 
 const onInviteHostRematchesChanged = onValueWritten(
-  "/invites/{inviteId}/hostRematches",
+  { ref: "/invites/{inviteId}/hostRematches", retry: true },
   async (event) => {
     const before = event.data.before.val();
     const after = event.data.after.val();
@@ -795,7 +1171,7 @@ const onInviteHostRematchesChanged = onValueWritten(
 );
 
 const onInviteGuestRematchesChanged = onValueWritten(
-  "/invites/{inviteId}/guestRematches",
+  { ref: "/invites/{inviteId}/guestRematches", retry: true },
   async (event) => {
     const before = event.data.before.val();
     const after = event.data.after.val();
@@ -813,7 +1189,7 @@ const onInviteGuestRematchesChanged = onValueWritten(
 );
 
 const onMatchCreated = onValueCreated(
-  "/players/{loginUid}/matches/{matchId}",
+  { ref: "/players/{loginUid}/matches/{matchId}", retry: true },
   async (event) => {
     const matchId = normalizeString(event.params.matchId);
     if (!matchId) {
@@ -837,7 +1213,10 @@ const onMatchCreated = onValueCreated(
 );
 
 const onInviteMatchRatingUpdated = onValueCreated(
-  "/invites/{inviteId}/matchesRatingUpdates/{matchId}",
+  {
+    ref: "/invites/{inviteId}/matchesRatingUpdates/{matchId}",
+    retry: true,
+  },
   async (event) => {
     const matchId = normalizeString(event.params.matchId);
     if (!matchId) {
@@ -855,7 +1234,7 @@ const onInviteMatchRatingUpdated = onValueCreated(
 );
 
 const onAutomatchQueueWritten = onValueWritten(
-  "/automatch/{inviteId}",
+  { ref: "/automatch/{inviteId}", retry: true },
   async (event) => {
     const inviteId = event.params.inviteId;
     const beforeExists = event.data.before.exists();
@@ -870,27 +1249,47 @@ const onAutomatchQueueWritten = onValueWritten(
       return;
     }
 
-    await syncAutomatchInviteMarkerFromQueue(inviteId, afterExists);
+    await syncAutomatchInviteMarkerFromQueue(inviteId);
     await recomputeInviteProjection(inviteId, "automatch-queue", {
       eventTimestampMs: Date.now(),
     });
   },
 );
 
-const processProfileLinkCatchup = async ({
-  loginUid,
-  profileId,
-  staleProfileId = null,
-  eventLabel,
-}) => {
+const processProfileLinkCatchup = async (
+  { loginUid, profileId: eventProfileId, staleProfileId = null, eventLabel },
+  dependencies = {},
+) => {
   const startedAt = Date.now();
   const shouldContinue = () =>
     Date.now() - startedAt < PROFILE_LINK_CATCHUP_TIMEOUT_MS;
+  const readProfileLink =
+    dependencies.readCurrentProfileLink || readCurrentProfileLink;
+  const recomputeInviteProjectionImpl =
+    dependencies.recomputeInviteProjection || recomputeInviteProjection;
+  const resolveInviteIdImpl =
+    dependencies.resolveInviteIdFromMatchId || resolveInviteIdFromMatchId;
+  const state = await resolveProfileLinkCatchupState(
+    {
+      eventProfileId,
+      loginUid,
+      staleProfileId,
+    },
+    {
+      readCurrentProfileLink: readProfileLink,
+    },
+  );
+  if (!state) {
+    return;
+  }
+  const observedProfileIds = new Set(state.cleanupProfileIds);
+  let profileId = state.profileId;
 
-  const matchesSnapshot = await admin
-    .database()
-    .ref(`players/${loginUid}/matches`)
-    .once("value");
+  const matchesSnapshot = dependencies.readMatches
+    ? await dependencies.readMatches(loginUid)
+    : await readWithRetries(() =>
+        admin.database().ref(`players/${loginUid}/matches`).once("value"),
+      );
   if (!matchesSnapshot.exists()) {
     return;
   }
@@ -908,7 +1307,7 @@ const processProfileLinkCatchup = async ({
     if (inviteIds.length >= PROFILE_LINK_CATCHUP_MAX_INVITES) {
       break;
     }
-    const inviteId = await resolveInviteIdFromMatchId(matchId, {
+    const inviteId = await resolveInviteIdImpl(matchId, {
       inviteExistenceCache,
     });
     if (!inviteId || inviteSet.has(inviteId)) {
@@ -920,41 +1319,70 @@ const processProfileLinkCatchup = async ({
 
   let processed = 0;
   let failed = 0;
-  const successfullyRecomputedInviteIds = [];
-
-  await processWithConcurrency(
-    inviteIds,
-    PROFILE_LINK_CATCHUP_CONCURRENCY,
-    async (inviteId) => {
-      if (!shouldContinue()) {
-        return;
-      }
-      try {
-        await recomputeInviteProjection(inviteId, "profile-link-catchup", {
-          eventTimestampMs: Date.now(),
-          preserveNewerListSortAt: true,
-        });
-        successfullyRecomputedInviteIds.push(inviteId);
-        processed += 1;
-      } catch (error) {
-        failed += 1;
-        console.error("projector:profile-link-catchup:recompute-failed", {
-          loginUid,
-          profileId,
-          inviteId,
-          error: error && error.message ? error.message : error,
-        });
-      }
-    },
-    shouldContinue,
-  );
+  let didConverge = false;
+  let convergenceAttempts = 0;
+  const successfullyRecomputedInviteIds = new Set();
+  for (
+    let attempt = 0;
+    attempt < PROFILE_LINK_RECONCILE_ATTEMPTS;
+    attempt += 1
+  ) {
+    convergenceAttempts = attempt + 1;
+    observedProfileIds.add(profileId);
+    const cleanupProfileIds = Array.from(observedProfileIds);
+    let attemptedThisRound = 0;
+    await processWithConcurrency(
+      inviteIds,
+      PROFILE_LINK_CATCHUP_CONCURRENCY,
+      async (inviteId) => {
+        if (!shouldContinue()) {
+          return;
+        }
+        attemptedThisRound += 1;
+        try {
+          await recomputeInviteProjectionImpl(
+            inviteId,
+            "profile-link-catchup",
+            {
+              cleanupProfileIds,
+              eventTimestampMs: Date.now(),
+              preserveNewerListSortAt: true,
+            },
+          );
+          successfullyRecomputedInviteIds.add(inviteId);
+          processed += 1;
+        } catch (error) {
+          failed += 1;
+          console.error("projector:profile-link-catchup:recompute-failed", {
+            loginUid,
+            profileId,
+            inviteId,
+            error: error && error.message ? error.message : error,
+          });
+        }
+      },
+      shouldContinue,
+    );
+    if (attemptedThisRound !== inviteIds.length) {
+      break;
+    }
+    const nextProfileId = await readProfileLink(loginUid);
+    if (nextProfileId === profileId) {
+      didConverge = true;
+      break;
+    }
+    if (!nextProfileId) {
+      break;
+    }
+    profileId = nextProfileId;
+  }
 
   const didTimeout = !shouldContinue();
   const didHitInviteCap = inviteIds.length >= PROFILE_LINK_CATCHUP_MAX_INVITES;
 
   let staleCleanupDeleted = 0;
   let staleCleanupState = "skipped";
-  if (staleProfileId && staleProfileId !== profileId) {
+  if (didConverge && staleProfileId && staleProfileId !== profileId) {
     const firestore = admin.firestore();
     const targetRef = firestore.collection("users").doc(profileId);
     const staleRef = firestore.collection("users").doc(staleProfileId);
@@ -968,7 +1396,7 @@ const processProfileLinkCatchup = async ({
       )
     ) {
       staleCleanupState = "merge-marker-mismatch";
-    } else if (successfullyRecomputedInviteIds.length === 0) {
+    } else if (successfullyRecomputedInviteIds.size === 0) {
       staleCleanupState = "no-successful-recomputes";
     } else {
       const staleProfileDeleted = await waitForProfileDeletion(staleRef);
@@ -976,14 +1404,16 @@ const processProfileLinkCatchup = async ({
         staleCleanupState = "stale-profile-still-exists";
       } else {
         staleCleanupState = "done";
-        const deleteOps = successfullyRecomputedInviteIds.map((inviteId) => ({
-          type: "delete",
-          ref: firestore
-            .collection("users")
-            .doc(staleProfileId)
-            .collection("games")
-            .doc(inviteId),
-        }));
+        const deleteOps = Array.from(successfullyRecomputedInviteIds).map(
+          (inviteId) => ({
+            type: "delete",
+            ref: firestore
+              .collection("users")
+              .doc(staleProfileId)
+              .collection("games")
+              .doc(inviteId),
+          }),
+        );
         while (deleteOps.length > 0) {
           const batch = firestore.batch();
           const chunk = deleteOps.splice(0, 400);
@@ -1001,6 +1431,7 @@ const processProfileLinkCatchup = async ({
     event: eventLabel,
     loginUid,
     profileId,
+    eventProfileId,
     staleProfileId: staleProfileId || null,
     matchIdsScanned: matchIds.length,
     inviteIdsResolved: inviteIds.length,
@@ -1010,12 +1441,20 @@ const processProfileLinkCatchup = async ({
     staleCleanupState,
     didTimeout,
     didHitInviteCap,
+    didConverge,
+    convergenceAttempts,
     elapsedMs: Date.now() - startedAt,
   });
+  if (failed > 0) {
+    throw new Error("projector:profile-link-catchup-incomplete");
+  }
+  if (!didConverge) {
+    throw new Error("projector:profile-link-catchup-profile-changed");
+  }
 };
 
 const onProfileLinkCreated = onValueCreated(
-  "/players/{loginUid}/profile",
+  { ref: "/players/{loginUid}/profile", retry: true },
   async (event) => {
     const loginUid = normalizeString(event.params.loginUid);
     const profileId = normalizeString(event.data.val());
@@ -1032,7 +1471,7 @@ const onProfileLinkCreated = onValueCreated(
 );
 
 const onProfileLinkWritten = onValueWritten(
-  "/players/{loginUid}/profile",
+  { ref: "/players/{loginUid}/profile", retry: true },
   async (event) => {
     if (!event.data.before.exists()) {
       return;
@@ -1078,6 +1517,9 @@ const onProfileDeleted = onDocumentDeleted(
 );
 
 module.exports = {
+  buildInviteProjectionOwnerPlan,
+  buildResolvedProfile,
+  classifyProfileGameProjection,
   onInviteCreated,
   onInviteGuestIdChanged,
   onInviteHostRematchesChanged,
@@ -1088,4 +1530,12 @@ module.exports = {
   onProfileLinkCreated,
   onProfileLinkWritten,
   onProfileDeleted,
+  processProfileLinkCatchup,
+  processWithConcurrency,
+  readInviteExists,
+  readExistingProjectionDocuments,
+  reconcileProfileMergeProjections,
+  recomputeInviteProjection,
+  resolveProfileLinkCatchupState,
+  syncAutomatchInviteMarkerFromQueue,
 };

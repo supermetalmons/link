@@ -165,7 +165,7 @@ function smokeResponses(providerAttempts = 1): Response[] {
       swagpack_reactions: [{ id: 3, count: 1 }],
     }),
   );
-  for (let index = 0; index < 21; index++) {
+  for (let index = 0; index < 26; index++) {
     responses.push(authPreflightResponse(), unauthenticatedResponse());
   }
   responses.push(
@@ -468,7 +468,7 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 50);
+  assert.equal(requests.length, 60);
   assert.equal(requests[0].url, `${PREVIEW_URL}/nfts`);
   assert.equal(requests[0].init.method, "OPTIONS");
   for (const request of requests) {
@@ -494,7 +494,7 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
     sol: SMOKE_SOL,
     eth: "",
   });
-  const authRequests = requests.slice(4, 46);
+  const authRequests = requests.slice(4, 56);
   assert.deepEqual(
     authRequests.map(({ url, init }) => [url, init.method]),
     [
@@ -502,10 +502,20 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
       [`${PREVIEW_URL}/auth/intents`, "POST"],
       [`${PREVIEW_URL}/auth/methods`, "OPTIONS"],
       [`${PREVIEW_URL}/auth/methods`, "GET"],
+      [`${PREVIEW_URL}/auth/methods/apple/verify`, "OPTIONS"],
+      [`${PREVIEW_URL}/auth/methods/apple/verify`, "POST"],
+      [`${PREVIEW_URL}/auth/methods/eth/verify`, "OPTIONS"],
+      [`${PREVIEW_URL}/auth/methods/eth/verify`, "POST"],
+      [`${PREVIEW_URL}/auth/methods/sol/verify`, "OPTIONS"],
+      [`${PREVIEW_URL}/auth/methods/sol/verify`, "POST"],
+      [`${PREVIEW_URL}/auth/methods/unlink`, "OPTIONS"],
+      [`${PREVIEW_URL}/auth/methods/unlink`, "POST"],
       [`${PREVIEW_URL}/auth/profile-claim/sync`, "OPTIONS"],
       [`${PREVIEW_URL}/auth/profile-claim/sync`, "POST"],
       [`${PREVIEW_URL}/auth/x/flows`, "OPTIONS"],
       [`${PREVIEW_URL}/auth/x/flows`, "POST"],
+      [`${PREVIEW_URL}/auth/x/flows/complete`, "OPTIONS"],
+      [`${PREVIEW_URL}/auth/x/flows/complete`, "POST"],
       [`${PREVIEW_URL}/automatch/cancel`, "OPTIONS"],
       [`${PREVIEW_URL}/automatch/cancel`, "POST"],
       [`${PREVIEW_URL}/automatch/start`, "OPTIONS"],
@@ -543,19 +553,19 @@ test("smokes NFT, authenticated, and X callback routes with bounded retries", as
     ],
   );
   assert.equal(
-    requests[49].url,
+    requests[59].url,
     `${PREVIEW_URL}/auth/x/callback?state=abcdefghijklmnopqrstuvwx`,
   );
-  assert.equal(requests[46].url, `${PREVIEW_URL}/internal/telegram/delivery`);
-  assert.equal(requests[46].init.method, "POST");
+  assert.equal(requests[56].url, `${PREVIEW_URL}/internal/telegram/delivery`);
+  assert.equal(requests[56].init.method, "POST");
   assert.equal(
-    requests[47].url,
+    requests[57].url,
     `${PREVIEW_URL}/internal/telegram/event-prize-announcement`,
   );
-  assert.equal(requests[47].init.method, "POST");
-  assert.equal(requests[48].url, `${PREVIEW_URL}/auth/x/callback`);
-  assert.equal(requests[48].init.method, "GET");
-  assert.equal(requests[49].init.method, "GET");
+  assert.equal(requests[57].init.method, "POST");
+  assert.equal(requests[58].url, `${PREVIEW_URL}/auth/x/callback`);
+  assert.equal(requests[58].init.method, "GET");
+  assert.equal(requests[59].init.method, "GET");
   assert.deepEqual(delays, [500]);
 });
 
@@ -600,9 +610,10 @@ test("rejects redirects without retrying or following them", async () => {
 });
 
 test("retries an expected-success response body transport failure", async () => {
-  const responses = [
-    new Response(null, { status: 204, headers: responseHeaders() }),
-    jsonResponse(emptyPayload()),
+  const responses = smokeResponses();
+  responses.splice(
+    2,
+    1,
     bodyFailureResponse("transient-body-failure"),
     jsonResponse({
       ok: true,
@@ -610,53 +621,7 @@ test("retries an expected-success response body transport failure", async () => 
       swagpack_avatars: [],
       swagpack_reactions: [],
     }),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    authPreflightResponse(),
-    unauthenticatedResponse(),
-    telegramBridgeUnauthorizedResponse(),
-    telegramBridgeUnauthorizedResponse(),
-    xCallbackResponse(),
-    xCallbackResponse(),
-  ];
+  );
   const requests: RequestInit[] = [];
   const delays: number[] = [];
   const dependencies = {
@@ -671,7 +636,7 @@ test("retries an expected-success response body transport failure", async () => 
 
   await smokeApi(PREVIEW_URL, SMOKE_SOL, dependencies);
 
-  assert.equal(requests.length, 50);
+  assert.equal(requests.length, 60);
   assert.deepEqual(delays, [500]);
 });
 
@@ -1054,7 +1019,7 @@ test("production promotes only the explicit version and then smokes the custom d
     fetch: async (url) => {
       assert.match(
         String(url),
-        /^https:\/\/api\.mons\.link\/(?:nfts|mining\/rock|automatch\/(?:cancel|start)|events\/participants\/(?:join|remove)|leaderboards\/read|matches\/timer\/(?:claim|start)|navigation\/games\/remove|profiles\/(?:lookup|username)|ratings\/update|wagers\/(?:proposals\/(?:accept|cancel|decline|send)|outcomes\/resolve)|internal\/telegram\/(?:delivery|event-prize-announcement)|auth\/(?:intents|methods|profile-claim\/sync|x\/(?:flows|callback)))/,
+        /^https:\/\/api\.mons\.link\/(?:nfts|mining\/rock|automatch\/(?:cancel|start)|events\/participants\/(?:join|remove)|leaderboards\/read|matches\/timer\/(?:claim|start)|navigation\/games\/remove|profiles\/(?:lookup|username)|ratings\/update|wagers\/(?:proposals\/(?:accept|cancel|decline|send)|outcomes\/resolve)|internal\/telegram\/(?:delivery|event-prize-announcement)|auth\/(?:intents|methods(?:\/(?:apple\/verify|eth\/verify|sol\/verify|unlink))?|profile-claim\/sync|x\/(?:flows(?:\/complete)?|callback)))/,
       );
       return nextResponse(responses);
     },

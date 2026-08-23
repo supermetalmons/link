@@ -106,10 +106,10 @@ configuration is intentionally changed, review it separately and apply it with
 `npm run deploy:api:triggers -- --token-file /path/to/cloudflare-token`, or set
 `CLOUDFLARE_API_TOKEN` in the invoking shell and omit `--token-file`.
 
-The trigger command applies reviewed routes and Cron schedules. Queue resources
-and initial consumer attachment are managed explicitly with Wrangler Queue
-commands; the tracked API Wrangler configuration remains the source of truth
-for producer bindings and consumer settings.
+The trigger command reconciles reviewed routes, Cron schedules, and Queue
+consumers from the tracked API Wrangler configuration. Create Queue resources
+before version upload, but do not run the trigger command when adding a consumer
+until a compatible Worker version is promoted.
 
 ## Event prize announcement API
 
@@ -357,14 +357,19 @@ removal clears both the participant and the participant's event-prize selection.
 Automated API smoke checks cover preflight and unauthenticated responses without
 reading or changing an event.
 
-## Auth initiation, reads, and profile claim synchronization
+## Authentication APIs
 
 The API Worker owns these Firebase-authenticated routes:
 
 - `POST https://api.mons.link/auth/intents`
 - `GET https://api.mons.link/auth/methods`
+- `POST https://api.mons.link/auth/methods/apple/verify`
+- `POST https://api.mons.link/auth/methods/eth/verify`
+- `POST https://api.mons.link/auth/methods/sol/verify`
+- `POST https://api.mons.link/auth/methods/unlink`
 - `POST https://api.mons.link/auth/profile-claim/sync`
 - `POST https://api.mons.link/auth/x/flows`
+- `POST https://api.mons.link/auth/x/flows/complete`
 
 The browser sends its Firebase ID token in the `Authorization: Bearer` header.
 The Worker verifies the token against Google's Secure Token keys. Auth route
@@ -377,26 +382,102 @@ Intent creation is limited to 20 requests per minute for each authenticated
 UID and method through the `AUTH_RATE_LIMITER` binding. These counters are
 local to the Cloudflare location processing the request. Linked-method reads
 forward the user's Firebase token to Firestore, so Firestore Security Rules
-remain authoritative and the Worker service account does not require
-`datastore.entities.list`.
+remain authoritative for that read path. Auth mutation queries use the
+separately conditioned service-account permissions documented below.
 
-The Worker service account creates `authIntents` and `xAuthRedirectFlows`
-documents and reads callback/intent records. Its custom role must contain
-exactly `datastore.entities.create`, `datastore.entities.get`, and
-`datastore.entities.update`. Existing installations created before the auth
-migration must update the role before promoting the new Worker:
+The Worker service account owns auth intents, X flows, method indexes,
+operation replays, cooldowns, profile linking and merging, username indexes,
+and merge repair records. Its Firestore-conditioned custom role must contain
+exactly the database transaction and entity permissions below. Update the role
+before uploading an auth-mutation candidate:
 
 ```sh
-gcloud iam roles update monsLinkXCallback --project mons-link --permissions=datastore.entities.create,datastore.entities.get,datastore.entities.update --stage=GA
+gcloud iam roles update monsLinkXCallback --project mons-link --permissions=datastore.databases.get,datastore.entities.create,datastore.entities.delete,datastore.entities.get,datastore.entities.list,datastore.entities.update --stage=GA
 ```
 
 Profile-claim synchronization queries the caller's profile with the caller's
 Firebase ID token and rejects duplicate `logins` ownership before changing
 anything. It then reconciles only the Firebase Auth `profileId` custom claim and
 `players/{uid}/profile` RTDB link. Existing unrelated custom claims are
-preserved. Requests use the existing auth rate limiter per Firebase UID. When no
-profile exists, stale claim and RTDB cleanup remains best-effort and the route
-returns the empty linked-method response.
+preserved. The same projected query detects pending merge repairs and enqueues
+them on the durable auth recovery Queue. Requests use the existing auth rate
+limiter per Firebase UID. When no profile exists, stale claim and RTDB cleanup
+remains best-effort and the route returns the empty linked-method response.
+
+Create the durable auth recovery Queue, its primary dead-letter Queue, and the
+secondary replay dead-letter Queue before the first candidate upload. All three
+Queues use the 14-day retention limit:
+
+```sh
+npx wrangler queues create mons-link-auth-recovery --message-retention-period-secs 1209600
+npx wrangler queues create mons-link-auth-recovery-dlq --message-retention-period-secs 1209600
+npx wrangler queues create mons-link-auth-recovery-replay-dlq --message-retention-period-secs 1209600
+```
+
+For any Queue that already exists, update its retention instead of recreating
+it:
+
+```sh
+npx wrangler queues update mons-link-auth-recovery --message-retention-period-secs 1209600
+npx wrangler queues update mons-link-auth-recovery-dlq --message-retention-period-secs 1209600
+npx wrangler queues update mons-link-auth-recovery-replay-dlq --message-retention-period-secs 1209600
+```
+
+Do not attach the consumer to a Worker version that predates auth recovery.
+After the compatible API version is promoted at 100% traffic, apply the tracked
+triggers to attach the consumer, then verify it:
+
+```sh
+npm run deploy:api:triggers -- --token-file /path/to/cloudflare-token
+npx wrangler queues consumer worker list mons-link-auth-recovery --config cloud/workers/api/wrangler.jsonc
+```
+
+Before rolling back to a Worker version that predates auth recovery, remove the
+consumer. This preserves buffered tasks; do not purge the Queue. Reattach the
+consumer by reapplying the tracked triggers only after a compatible version is
+promoted again. Detached main-Queue tasks also expire after 14 days, so complete
+the rollback or repair and restore a compatible consumer before the oldest task
+reaches that deadline.
+
+```sh
+npx wrangler queues consumer remove mons-link-auth-recovery mons-link-api --config cloud/workers/api/wrangler.jsonc
+```
+
+If the temporary primary-DLQ replay consumer is attached, remove it before the
+rollback as well:
+
+```sh
+npx wrangler queues consumer remove mons-link-auth-recovery-dlq mons-link-api --config cloud/workers/api/wrangler.jsonc
+```
+
+With the applicable consumers detached, do not roll back the API from this
+generic Queue procedure. Continue with one of the mutually exclusive auth
+rollback branches in the cutover section below; they enforce frontend-first
+ordering and restore compatibility callables when required.
+
+Keep both dead-letter Queues without consumers during normal operation. The
+14-day action deadline applies to buffered tasks on a detached main Queue and
+to parked messages in either DLQ. After fixing the root cause, attach the
+compatible API Worker to the primary DLQ temporarily, verify the consumer, and
+monitor the Queue until it drains. Failed replays move to the secondary DLQ
+instead of being deleted:
+
+```sh
+npx wrangler queues consumer add mons-link-auth-recovery-dlq mons-link-api --batch-size 1 --batch-timeout 1 --message-retries 100 --retry-delay-secs 60 --dead-letter-queue mons-link-auth-recovery-replay-dlq --max-concurrency 1 --config cloud/workers/api/wrangler.jsonc
+npx wrangler queues consumer worker list mons-link-auth-recovery-dlq --config cloud/workers/api/wrangler.jsonc
+```
+
+Remove the temporary consumer after the DLQ drains and before any rollback to a
+Worker version that predates auth recovery:
+
+```sh
+npx wrangler queues consumer remove mons-link-auth-recovery-dlq mons-link-api --config cloud/workers/api/wrangler.jsonc
+```
+
+Keep `mons-link-auth-recovery-replay-dlq` consumer-free. If it receives a
+message, do not purge or delete the Queue. Inspect the failed profile recovery
+and its authoritative Firestore pending markers, fix the remaining cause, and
+complete a reviewed recovery before that message's 14-day deadline.
 
 The route reuses the existing `mons-link-x-callback` auth API identity and its
 `FIRESTORE_SERVICE_ACCOUNT_*` Worker secrets. Its separate
@@ -404,10 +485,22 @@ The route reuses the existing `mons-link-x-callback` auth API identity and its
 `firebaseauth.users.get`, `firebaseauth.users.update`,
 `firebasedatabase.instances.get`, and `firebasedatabase.instances.update`
 without changing the Firestore-conditioned role. No additional service-account
-key, Worker secret, or Cloudflare binding is required.
+key or Worker secret is required.
+
+Provider verification preserves the existing single-use intent, signature,
+profile merge, replay, method-index, username, cooldown, custom-claim, RTDB,
+game projection, and event-prize reconciliation contracts. Apple accepts only
+the tracked `link.mons` audience. Ethereum accepts the tracked production and
+port-3000 local SIWE domains. The existing rate-limit binding rejects excessive
+mutation attempts before cryptographic work, keyed by operation and Firebase
+UID. Auth proofs, tokens, flow IDs, provider identifiers, and service-account
+credentials must never be logged.
 
 Automated API smoke checks cover every auth preflight and unauthenticated
-response without creating Firestore records.
+response without creating Firestore records. Before removing the Firebase
+callables, exercise all four providers, unlinking, replay, cooldown rejection,
+last-method rejection, and a disposable two-profile merge through the promoted
+Worker and frontend.
 
 ## X OAuth callback
 
@@ -415,8 +508,7 @@ The API Worker also serves `GET https://api.mons.link/auth/x/callback`. It
 exchanges the X authorization code, reads and updates the existing
 `xAuthRedirectFlows` Firestore document through the Firestore REST API, and
 redirects to the flow's validated `mons.link` return URL. The Worker creates
-the flow, while the completion callable remains in Firebase. No Cloudflare
-storage resource is used.
+and completes the flow. No Cloudflare storage resource is used.
 
 Register `https://api.mons.link/auth/x/callback` as an exact callback URI in the
 X application before deploying the Firebase flow-creator change. X client IDs,
@@ -424,12 +516,11 @@ client secrets, authorization codes, access tokens, PKCE verifiers, service
 account keys, and raw flow IDs must not appear in source, arguments, or logs.
 
 Create a dedicated Google service account and project custom role for auth and
-the callback. The role must contain only `datastore.entities.create`,
-`datastore.entities.get`, and `datastore.entities.update`, and its project
-binding must be conditioned on the default `mons-link` Firestore database:
+the callback. Its project binding must be conditioned on the default
+`mons-link` Firestore database:
 
 ```sh
-gcloud iam roles create monsLinkXCallback --project mons-link --title="mons.link auth API" --permissions=datastore.entities.create,datastore.entities.get,datastore.entities.update --stage=GA
+gcloud iam roles create monsLinkXCallback --project mons-link --title="mons.link auth API" --permissions=datastore.databases.get,datastore.entities.create,datastore.entities.delete,datastore.entities.get,datastore.entities.list,datastore.entities.update --stage=GA
 gcloud iam service-accounts create mons-link-x-callback --project mons-link --display-name="mons.link auth API"
 gcloud projects add-iam-policy-binding mons-link --member="serviceAccount:mons-link-x-callback@mons-link.iam.gserviceaccount.com" --role="projects/mons-link/roles/monsLinkXCallback" --condition='expression=resource.name=="projects/mons-link/databases/(default)",title=default-firestore-only'
 gcloud iam service-accounts keys create /secure/mons-link-x-callback.json --project mons-link --iam-account=mons-link-x-callback@mons-link.iam.gserviceaccount.com
@@ -446,8 +537,102 @@ FIRESTORE_SERVICE_ACCOUNT_EMAIL=mons-link-x-callback@mons-link.iam.gserviceaccou
 FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
 ```
 
-Upload the first candidate with those secrets attached to that undeployed
-version:
+Before any mutation-capable Worker receives production traffic, quiesce the
+legacy public merge path by deploying the compatibility callables with
+`AUTH_DISABLE_MERGE=true` from the retained complete checkout. The other values
+below match the tracked Worker configuration; if another kill switch is active
+in production, use that same value here:
+
+```sh
+AUTH_DISABLE_ROOT="$(mktemp -d)"
+git worktree add --detach "$AUTH_DISABLE_ROOT/repo" f6ae7878a
+cat > "$AUTH_DISABLE_ROOT/repo/cloud/functions/.env.mons-link" <<'EOF'
+APPLE_AUDIENCES=link.mons
+SIWE_ALLOWED_DOMAINS=mons.link,www.mons.link,localhost,127.0.0.1
+AUTH_DISABLE_APPLE_VERIFY=false
+AUTH_DISABLE_X_VERIFY=false
+AUTH_DISABLE_UNLINK=false
+AUTH_DISABLE_MERGE=true
+EOF
+npm --prefix "$AUTH_DISABLE_ROOT/repo/cloud/functions" ci
+npm --prefix "$AUTH_DISABLE_ROOT/repo/cloud/functions" run deploy:safe -- \
+  verifySolanaAddress \
+  verifyEthAddress \
+  verifyAppleToken \
+  completeXRedirectAuth \
+  unlinkAuthMethod \
+  --project mons-link
+rm "$AUTH_DISABLE_ROOT/repo/cloud/functions/.env.mons-link"
+git worktree remove "$AUTH_DISABLE_ROOT/repo"
+rmdir "$AUTH_DISABLE_ROOT"
+```
+
+With legacy merges disabled, deploy every merge-aware game projector with this
+non-pruning positional maintenance deployment:
+
+```sh
+npm --prefix cloud/functions run deploy:safe -- \
+  projectProfileGamesOnInviteCreated \
+  projectProfileGamesOnInviteGuestIdChanged \
+  projectProfileGamesOnInviteHostRematchesChanged \
+  projectProfileGamesOnInviteGuestRematchesChanged \
+  projectProfileGamesOnMatchCreated \
+  projectProfileGamesOnInviteMatchRatingUpdated \
+  projectProfileGamesOnAutomatchQueueWritten \
+  projectProfileGamesOnProfileLinkCreated \
+  projectProfileGamesOnProfileLinkWritten \
+  projectProfileGamesOnProfileDeleted \
+  projectProfileGamesOnEventWritten \
+  --project mons-link
+```
+
+With those projectors live, reconcile every existing `profileMergeTargets`
+page while merges remain disabled. Preview a bounded page first, execute the
+same page, then repeat both commands with the returned `nextCursor` as
+`--after <source-profile-id>` until `hasMore` is false:
+
+```sh
+npm run reconcile:merge-projections -- --project mons-link --limit 20 --dry-run
+npm run reconcile:merge-projections -- --project mons-link --limit 20 --execute
+```
+
+The command re-reads authoritative invites and events through the same reviewed
+projection logic, repairs canonical target games, and removes retained source
+games. Each merge target is streamed in fixed 200-document pages, so histories
+larger than one page remain bounded without requiring another cursor.
+
+After every historical page succeeds, re-enable the compatibility callables
+from a fresh retained checkout so they match the tracked Worker candidate.
+Carry forward any reviewed non-merge kill-switch overrides from the disable
+step:
+
+```sh
+AUTH_ENABLE_ROOT="$(mktemp -d)"
+git worktree add --detach "$AUTH_ENABLE_ROOT/repo" f6ae7878a
+cat > "$AUTH_ENABLE_ROOT/repo/cloud/functions/.env.mons-link" <<'EOF'
+APPLE_AUDIENCES=link.mons
+SIWE_ALLOWED_DOMAINS=mons.link,www.mons.link,localhost,127.0.0.1
+AUTH_DISABLE_APPLE_VERIFY=false
+AUTH_DISABLE_X_VERIFY=false
+AUTH_DISABLE_UNLINK=false
+AUTH_DISABLE_MERGE=false
+EOF
+npm --prefix "$AUTH_ENABLE_ROOT/repo/cloud/functions" ci
+npm --prefix "$AUTH_ENABLE_ROOT/repo/cloud/functions" run deploy:safe -- \
+  verifySolanaAddress \
+  verifyEthAddress \
+  verifyAppleToken \
+  completeXRedirectAuth \
+  unlinkAuthMethod \
+  --project mons-link
+rm "$AUTH_ENABLE_ROOT/repo/cloud/functions/.env.mons-link"
+git worktree remove "$AUTH_ENABLE_ROOT/repo"
+rmdir "$AUTH_ENABLE_ROOT"
+```
+
+With quiescence, projector deployment, historical reconciliation, and
+compatibility re-enablement complete, upload the first merge-enabled candidate
+with the prepared secrets:
 
 ```sh
 npm run deploy:api -- preview --smoke-sol <known-wallet> --secrets-file /secure/mons-link-x-callback.env --token-file /path/to/cloudflare-token
@@ -463,9 +648,82 @@ Worker secrets.
 Preview and production smoke checks cover the NFT API, auth CORS and
 unauthenticated responses, callback routing without a state value, and a random
 absent state that proves Google OAuth and Firestore read access. A real X code
-is intentionally not used by automated smoke checks. After production
-promotion, exercise X sign-in and settings linking manually, including provider
-denial.
+is intentionally not used by automated smoke checks.
+
+Only after every listed projector is live and the historical reconciliation is
+complete, the compatibility callables are re-enabled, and the enabled candidate
+passes preview smoke may that exact Worker version be promoted. Promote the API
+version, then the frontend version that calls the mutation routes. After both
+production promotions, exercise X sign-in and settings linking manually,
+including provider denial. Keep `verifySolanaAddress`,
+`verifyEthAddress`, `verifyAppleToken`, `completeXRedirectAuth`, and
+`unlinkAuthMethod` deployed until the production matrix passes. During that
+overlap, keep `AUTH_DISABLE_APPLE_VERIFY`, `AUTH_DISABLE_X_VERIFY`,
+`AUTH_DISABLE_UNLINK`, and `AUTH_DISABLE_MERGE` identical in the Worker and
+Firebase Functions; changing only the Worker leaves the public callable path
+enabled. Then run
+`npm run deploy:firebase -- --project mons-link --confirm-auth-prune` to prune
+the callables together.
+Already-open tabs using the former frontend must refresh.
+
+If rollback is needed before pruning, roll back the frontend version first,
+then the API version. The compatibility callables are still deployed, so do not
+run the post-prune restoration.
+
+If rollback is needed after pruning, first detach the main recovery consumer:
+
+```sh
+npx wrangler queues consumer remove mons-link-auth-recovery mons-link-api --config cloud/workers/api/wrangler.jsonc
+```
+
+If the temporary primary-DLQ replay consumer is attached, detach it too:
+
+```sh
+npx wrangler queues consumer remove mons-link-auth-recovery-dlq mons-link-api --config cloud/workers/api/wrangler.jsonc
+```
+
+Next restore the five callables from the complete detached checkout below with
+merging disabled. The other dotenv values match the tracked Worker
+configuration; if a kill switch is active in production, use that same value
+here before deploying:
+
+```sh
+AUTH_ROLLBACK_ROOT="$(mktemp -d)"
+git worktree add --detach "$AUTH_ROLLBACK_ROOT/repo" f6ae7878a
+cat > "$AUTH_ROLLBACK_ROOT/repo/cloud/functions/.env.mons-link" <<'EOF'
+APPLE_AUDIENCES=link.mons
+SIWE_ALLOWED_DOMAINS=mons.link,www.mons.link,localhost,127.0.0.1
+AUTH_DISABLE_APPLE_VERIFY=false
+AUTH_DISABLE_X_VERIFY=false
+AUTH_DISABLE_UNLINK=false
+AUTH_DISABLE_MERGE=true
+EOF
+npm --prefix "$AUTH_ROLLBACK_ROOT/repo/cloud/functions" ci
+npm --prefix "$AUTH_ROLLBACK_ROOT/repo/cloud/functions" run deploy:safe -- \
+  verifySolanaAddress \
+  verifyEthAddress \
+  verifyAppleToken \
+  completeXRedirectAuth \
+  unlinkAuthMethod \
+  --project mons-link
+rm "$AUTH_ROLLBACK_ROOT/repo/cloud/functions/.env.mons-link"
+git worktree remove "$AUTH_ROLLBACK_ROOT/repo"
+rmdir "$AUTH_ROLLBACK_ROOT"
+```
+
+Then supply `CLOUDFLARE_API_TOKEN` in the shell and roll back the frontend
+version before the API version:
+
+```sh
+node_modules/.bin/wrangler deployments list --config wrangler.jsonc
+node_modules/.bin/wrangler rollback <known-good-frontend-version-id> --config wrangler.jsonc
+node_modules/.bin/wrangler deployments list --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+node_modules/.bin/wrangler rollback <known-good-api-version-id> --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+Keep legacy merging disabled until a compatible recovery consumer is restored
+and every buffered recovery task and pending profile marker is drained or
+verified absent.
 
 ## Profile and leaderboard reads
 
@@ -591,5 +849,6 @@ documented in [cloud operations](../cloud/README.md).
 
 ## Firebase deployment
 
-- Deploy the complete Firebase release: `npm run deploy:firebase -- --project mons-link`
+- Deploy the complete Firebase release after reviewing its dry run:
+  `npm run deploy:firebase -- --project mons-link --confirm-auth-prune`
 - See `cloud/README.md` for dry-run, batch-size, and maintenance commands.

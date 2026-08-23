@@ -1,6 +1,11 @@
 const admin = require("./firebaseAdmin");
 const { onValueWritten } = require("firebase-functions/v2/database");
 const {
+  orderProfileMergeCleanupIds,
+  PROFILE_MERGE_TARGETS_COLLECTION,
+  resolveProfileMergeTargetPath,
+} = require("./profileMergeTargets");
+const {
   NAVIGATION_SORT_BUCKETS: SORT_BUCKETS,
 } = require("@mons/shared/navigation");
 const {
@@ -13,6 +18,29 @@ const {
   normalizeString,
 } = require("./events/eventProjectionModel");
 const MAX_BATCH_WRITES = 450;
+const EVENT_PROJECTION_RECONCILE_ATTEMPTS = 3;
+const READ_RETRY_ATTEMPTS = 2;
+const READ_RETRY_DELAY_MS = 25;
+
+const delay = (ms) =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+const readWithRetries = async (read) => {
+  let failure = null;
+  for (let attempt = 1; attempt <= READ_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await read();
+    } catch (error) {
+      failure = error;
+      if (attempt < READ_RETRY_ATTEMPTS) {
+        await delay(READ_RETRY_DELAY_MS);
+      }
+    }
+  }
+  throw failure;
+};
 
 const toTimestamp = (millis) => {
   const normalized =
@@ -22,7 +50,51 @@ const toTimestamp = (millis) => {
   return admin.firestore.Timestamp.fromMillis(Math.max(1, normalized));
 };
 
-async function projectEvent(eventId, beforeData, afterData) {
+const resolveProfilePath = (firestore, profileId) =>
+  resolveProfileMergeTargetPath({
+    profileId,
+    readMergeTarget: async (candidateProfileId) => {
+      const snapshot = await readWithRetries(() =>
+        firestore
+          .collection(PROFILE_MERGE_TARGETS_COLLECTION)
+          .doc(candidateProfileId)
+          .get(),
+      );
+      return snapshot.exists ? snapshot.data() : null;
+    },
+  });
+
+const buildEventProjectionOwnerPlan = ({
+  afterOwnerPaths,
+  beforeOwnerPaths,
+  cleanupProfileIds = [],
+  rawAfterOwnerProfileIds,
+  rawBeforeOwnerProfileIds,
+}) => {
+  const beforeOwnerProfileIds = beforeOwnerPaths
+    .map((profileIds) => profileIds[profileIds.length - 1])
+    .filter(Boolean);
+  const afterOwnerProfileIds = Array.from(
+    new Set(
+      afterOwnerPaths
+        .map((profileIds) => profileIds[profileIds.length - 1])
+        .filter(Boolean),
+    ),
+  );
+  const allOwnerProfileIds = orderProfileMergeCleanupIds(
+    [
+      ...rawBeforeOwnerProfileIds,
+      ...rawAfterOwnerProfileIds,
+      ...beforeOwnerPaths.flat(),
+      ...afterOwnerPaths.flat(),
+      ...cleanupProfileIds,
+    ],
+    [...beforeOwnerProfileIds, ...afterOwnerProfileIds],
+  );
+  return { afterOwnerProfileIds, allOwnerProfileIds };
+};
+
+async function projectEvent(eventId, beforeData, afterData, options = {}) {
   const firestore = admin.firestore();
   const docId = `event_${eventId}`;
   const beforeParticipants =
@@ -37,11 +109,41 @@ async function projectEvent(eventId, beforeData, afterData) {
     typeof afterData.participants === "object"
       ? afterData.participants
       : {};
-  const beforeOwnerProfileIds = getOwnerProfileIds(beforeParticipants);
-  const afterOwnerProfileIds = getOwnerProfileIds(afterParticipants);
-  const allOwnerProfileIds = Array.from(
-    new Set([...beforeOwnerProfileIds, ...afterOwnerProfileIds]),
+  const rawBeforeOwnerProfileIds = getOwnerProfileIds(beforeParticipants);
+  const rawAfterOwnerProfileIds = getOwnerProfileIds(afterParticipants);
+  const cleanupOwnerProfileIds = Array.from(
+    new Set(
+      (options.cleanupOwnerProfileIds || [])
+        .map(normalizeString)
+        .filter(Boolean),
+    ),
   );
+  const [beforeOwnerPaths, afterOwnerPaths, cleanupOwnerPaths] =
+    await Promise.all(
+      [
+        rawBeforeOwnerProfileIds,
+        rawAfterOwnerProfileIds,
+        cleanupOwnerProfileIds,
+      ].map((ownerProfileIds) =>
+        Promise.all(
+          ownerProfileIds.map((profileId) =>
+            resolveProfilePath(firestore, profileId),
+          ),
+        ),
+      ),
+    );
+  const cleanupProfileIds = [
+    ...(options.cleanupProfileIds || []),
+    ...cleanupOwnerPaths.flat(),
+  ];
+  const { afterOwnerProfileIds, allOwnerProfileIds } =
+    buildEventProjectionOwnerPlan({
+      afterOwnerPaths,
+      beforeOwnerPaths,
+      cleanupProfileIds,
+      rawAfterOwnerProfileIds,
+      rawBeforeOwnerProfileIds,
+    });
   const status = mapEventStatusToNavigationStatus(
     normalizeString(afterData && afterData.status),
   );
@@ -113,6 +215,61 @@ async function projectEvent(eventId, beforeData, afterData) {
   await commitBatchIfNeeded(true);
 }
 
+const reconcileLiveEventProjection = async (
+  eventId,
+  beforeData,
+  afterData,
+  options = {},
+  dependencies = {},
+) => {
+  const readLiveEvent =
+    dependencies.readLiveEvent ||
+    (async () => {
+      const liveSnapshot = await readWithRetries(() =>
+        admin.database().ref(`events/${eventId}`).once("value"),
+      );
+      return liveSnapshot.exists() ? liveSnapshot.val() : null;
+    });
+  const projectEventImpl = dependencies.projectEvent || projectEvent;
+  const cleanupOwnerProfileIds = new Set([
+    ...getOwnerProfileIds(
+      beforeData && typeof beforeData.participants === "object"
+        ? beforeData.participants
+        : {},
+    ),
+    ...getOwnerProfileIds(
+      afterData && typeof afterData.participants === "object"
+        ? afterData.participants
+        : {},
+    ),
+  ]);
+  let liveData = await readLiveEvent(eventId);
+  for (
+    let attempt = 0;
+    attempt < EVENT_PROJECTION_RECONCILE_ATTEMPTS;
+    attempt += 1
+  ) {
+    getOwnerProfileIds(
+      liveData && typeof liveData.participants === "object"
+        ? liveData.participants
+        : {},
+    ).forEach((profileId) => cleanupOwnerProfileIds.add(profileId));
+    await projectEventImpl(eventId, beforeData, liveData, {
+      cleanupOwnerProfileIds: Array.from(cleanupOwnerProfileIds),
+      cleanupProfileIds: options.cleanupProfileIds,
+    });
+    const confirmedData = await readLiveEvent(eventId);
+    if (
+      buildProjectionFingerprint(confirmedData) ===
+      buildProjectionFingerprint(liveData)
+    ) {
+      return;
+    }
+    liveData = confirmedData;
+  }
+  throw new Error("projector:event-reconcile-exhausted");
+};
+
 const onEventWritten = onValueWritten(
   {
     ref: "/events/{eventId}",
@@ -120,6 +277,7 @@ const onEventWritten = onValueWritten(
     concurrency: 40,
     memory: "256MiB",
     cpu: 1,
+    retry: true,
   },
   async (event) => {
     const eventId = normalizeString(event.params.eventId);
@@ -135,10 +293,13 @@ const onEventWritten = onValueWritten(
     if (beforeFingerprint === afterFingerprint) {
       return;
     }
-    await projectEvent(eventId, beforeData, afterData);
+    await reconcileLiveEventProjection(eventId, beforeData, afterData);
   },
 );
 
 module.exports = {
+  buildEventProjectionOwnerPlan,
   onEventWritten,
+  projectEvent,
+  reconcileLiveEventProjection,
 };
