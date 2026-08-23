@@ -48,13 +48,16 @@ export type AuthMutationDependencies = {
 
 type AuthProfileReference = Pick<AuthProfileResponse, "profileId" | "opId">;
 
-function authProfileReference(value: unknown): AuthProfileReference | null {
+function authProfileReference(
+  value: unknown,
+  fallbackOpId = "",
+): AuthProfileReference | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
   const fields = value as Record<string, unknown>;
   const profileId = cleanString(fields.profileId);
-  const opId = cleanString(fields.opId);
+  const opId = cleanString(fields.opId) || cleanString(fallbackOpId);
   return profileId && opId ? { profileId, opId } : null;
 }
 
@@ -386,7 +389,8 @@ async function executeAuthMutation(
     flow: AuthFirestoreDocument,
   ): Promise<AuthProfileResponse> => {
     const xUserId = cleanString(flow.fields.xUserId);
-    const storedResult = authProfileReference(flow.fields.result);
+    const opId = `x-redirect:${payload.flowId}`;
+    const storedResult = authProfileReference(flow.fields.result, opId);
     if (!xUserId || !storedResult) {
       throw new AuthApiFailure(
         409,
@@ -395,11 +399,7 @@ async function executeAuthMutation(
       );
     }
     const candidate =
-      (await service.peekVerifyReplay(
-        `x-redirect:${payload.flowId}`,
-        "x",
-        identity.uid,
-      )) || storedResult;
+      (await service.peekVerifyReplay(opId, "x", identity.uid)) || storedResult;
     const result = await service.refreshCompletedVerifyResult(
       candidate,
       "x",

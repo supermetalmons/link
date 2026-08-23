@@ -197,12 +197,27 @@ test("claims a callback before exchanging its single-use code", async () => {
   let current = flow();
   let version = 0;
   let exchanges = 0;
+  let initialReads = 0;
+  let releaseInitialReads!: () => void;
   let releaseExchange!: () => void;
+  const initialReadGate = new Promise<void>((resolve) => {
+    releaseInitialReads = resolve;
+  });
   const exchangeGate = new Promise<void>((resolve) => {
     releaseExchange = resolve;
   });
   const repository: XFlowRepository = {
-    getFlow: async () => structuredClone(current),
+    getFlow: async () => {
+      const snapshot = structuredClone(current);
+      if (initialReads < 2) {
+        initialReads++;
+        if (initialReads === 2) {
+          releaseInitialReads();
+        }
+        await initialReadGate;
+      }
+      return snapshot;
+    },
     updateFlow: async (_flowId, update, updateTime) => {
       if (updateTime !== current.updateTime) {
         throw new XFlowConflict();
@@ -223,6 +238,9 @@ test("claims a callback before exchanging its single-use code", async () => {
   const provider = createProvider({
     exchangeCode: async () => {
       exchanges++;
+      if (exchanges > 1) {
+        throw new XProviderFailure("x-token-exchange-invalid-grant");
+      }
       await exchangeGate;
       return "x-access-token";
     },
@@ -232,21 +250,22 @@ test("claims a callback before exchanging its single-use code", async () => {
     env,
     { repository, provider, now: () => 1_000_000 },
   );
-  while (exchanges === 0) {
-    await Promise.resolve();
-  }
-  const duplicate = await handleXCallback(
+  const second = handleXCallback(
     new Request(`${CALLBACK_URL}&code=authorization-code`),
     env,
     { repository, provider, now: () => 1_000_000 },
   );
+  const duplicate = await Promise.race([first, second]);
+  const exchangeCountBeforeRelease = exchanges;
+  releaseExchange();
+  const responses = await Promise.all([first, second]);
+  const response = responses.find((candidate) => candidate.status === 302);
+
   assert.equal(duplicate.status, 503);
   assert.equal(duplicate.headers.get("Retry-After"), "2");
+  assert.equal(exchangeCountBeforeRelease, 1);
   assert.equal(exchanges, 1);
-  releaseExchange();
-  const response = await first;
-
-  assert.equal(exchanges, 1);
+  assert.ok(response);
   assert.equal(response.status, 302);
   assert.equal(
     redirectParameters(response).searchParams.get("x_auth_status"),
@@ -355,6 +374,54 @@ test("returns a completed redirect when a claimed callback loses its final write
   assert.equal(userReads, 1);
   const location = redirectParameters(response);
   assert.equal(location.searchParams.get("x_auth_status"), "ready");
+});
+
+test("retries a transient final write without re-exchanging the code", async () => {
+  let current = flow();
+  let version = 0;
+  let exchanges = 0;
+  let verifiedWrites = 0;
+  const repository: XFlowRepository = {
+    getFlow: async () => structuredClone(current),
+    updateFlow: async (_flowId, update, updateTime) => {
+      if (updateTime !== current.updateTime) {
+        throw new XFlowConflict();
+      }
+      if (update.status === "verified" && verifiedWrites++ === 0) {
+        throw new Error("transient-write-failure");
+      }
+      version++;
+      current = {
+        ...current,
+        ...update,
+        processingStartedAtMs:
+          typeof update.processingStartedAtMs === "number"
+            ? update.processingStartedAtMs
+            : 0,
+        updateTime: `2026-08-22T00:00:0${version}Z`,
+      };
+      return current.updateTime;
+    },
+  };
+  const response = await handleXCallback(
+    new Request(`${CALLBACK_URL}&code=authorization-code`),
+    env,
+    {
+      repository,
+      provider: createProvider({
+        exchangeCode: async () => {
+          exchanges++;
+          return "x-access-token";
+        },
+      }),
+      now: () => 1_000_000,
+    },
+  );
+
+  assert.equal(response.status, 302);
+  assert.equal(exchanges, 1);
+  assert.equal(verifiedWrites, 2);
+  assert.equal(current.status, "verified");
 });
 
 test("exchanges the stored callback URI and verifier before persisting success", async () => {

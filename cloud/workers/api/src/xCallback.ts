@@ -154,6 +154,7 @@ export async function handleXCallback(
     expectedFlow: XRedirectFlow,
     updates: Record<string, string | number | null>,
   ): Promise<{ response: Response } | { updateTime: string }> => {
+    let writeError: unknown;
     try {
       return {
         updateTime: await repository.updateFlow(
@@ -163,12 +164,25 @@ export async function handleXCallback(
         ),
       };
     } catch (error) {
-      if (!(error instanceof XFlowConflict)) {
-        logFailure("firestore-update");
-        return { response: textResponse("Service Unavailable", 503) };
+      writeError = error;
+    }
+    if (
+      updates.status !== "processing" &&
+      !(writeError instanceof XFlowConflict)
+    ) {
+      try {
+        return {
+          updateTime: await repository.updateFlow(
+            flowId,
+            updates,
+            expectedFlow.updateTime,
+          ),
+        };
+      } catch (error) {
+        writeError = error;
       }
     }
-    let current;
+    let current: XRedirectFlow | null;
     try {
       current = await repository.getFlow(flowId);
     } catch {
@@ -181,6 +195,9 @@ export async function handleXCallback(
     const authoritativeRedirect = terminalFlowRedirect(flowId, current);
     if (authoritativeRedirect) {
       return { response: authoritativeRedirect };
+    }
+    if (!(writeError instanceof XFlowConflict)) {
+      logFailure("firestore-update");
     }
     return {
       response: textResponse("Authorization is still processing.", 503, {

@@ -627,7 +627,7 @@ test("returns a concurrently completed X replay after a write conflict", async (
   });
 });
 
-test("checks auth replay recovery before returning a completed X flow", async () => {
+test("recovers completed legacy X flows before returning them", async () => {
   let replayChecks = 0;
   const response = await handleAuthMutation(
     request("/auth/x/flows/complete", {
@@ -646,7 +646,6 @@ test("checks auth replay recovery before returning a completed X flow", async ()
           xUserId: "12345",
           result: {
             profileId: profile.profileId,
-            opId: profile.opId,
           },
         }),
         [],
