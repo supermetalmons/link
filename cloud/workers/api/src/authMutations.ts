@@ -450,6 +450,13 @@ async function executeAuthMutation(
         return completedFlowResult(current);
       }
       if (status === "failed") {
+        if (
+          fields.status === "completed" &&
+          cleanString(current.fields.errorCode) === "x-redirect-flow-expired"
+        ) {
+          await writeTerminalFlow(current, fields, fieldPaths);
+          return null;
+        }
         throw new AuthApiFailure(
           409,
           "failed-precondition",

@@ -559,6 +559,134 @@ test("re-evaluates a verified callback after an expiry conflict", async () => {
   );
 });
 
+test("lets successful X completion supersede a concurrent expiry failure", async () => {
+  const nowMs = Date.now();
+  const initial = firestoreDocument(
+    "xAuthRedirectFlows",
+    FLOW_ID,
+    {
+      uid: identity.uid,
+      status: "verified",
+      createdAtMs: nowMs,
+      expiresAtMs: nowMs + 60_000,
+      intentId: INTENT_ID,
+      xUserId: "12345",
+      consentSource: "signin",
+    },
+    "2026-08-22T00:00:00Z",
+  );
+  const failed = firestoreDocument(
+    "xAuthRedirectFlows",
+    FLOW_ID,
+    {
+      ...initial.fields,
+      status: "failed",
+      errorCode: "x-redirect-flow-expired",
+    },
+    "2026-08-22T00:00:01Z",
+  );
+  const writes: AuthFirestoreWrite[] = [];
+  let reads = 0;
+  const client = firestore(initial, writes);
+  client.get = async () => (reads++ === 0 ? initial : failed);
+  client.commitWrites = async (input) => {
+    writes.push(...input);
+    if (writes.length === 1) {
+      throw new AuthFirestoreConflict();
+    }
+  };
+
+  const response = await handleAuthMutation(
+    request("/auth/x/flows/complete", {
+      flowId: FLOW_ID,
+      emoji: 1,
+      aura: "",
+    }),
+    identity,
+    env,
+    ctx,
+    {
+      firestore: client,
+      identityService: service(),
+      now: () => nowMs,
+    },
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(reads, 2);
+  assert.deepEqual(
+    writes.map((write) =>
+      "update" in write ? write.update.fields.status : undefined,
+    ),
+    [{ stringValue: "completed" }, { stringValue: "completed" }],
+  );
+  assert.deepEqual(
+    writes.map((write) => write.currentDocument),
+    [
+      { updateTime: "2026-08-22T00:00:00Z" },
+      { updateTime: "2026-08-22T00:00:01Z" },
+    ],
+  );
+});
+
+test("preserves other concurrent X terminal failures", async () => {
+  const nowMs = Date.now();
+  const initial = firestoreDocument(
+    "xAuthRedirectFlows",
+    FLOW_ID,
+    {
+      uid: identity.uid,
+      status: "verified",
+      createdAtMs: nowMs,
+      expiresAtMs: nowMs + 60_000,
+      intentId: INTENT_ID,
+      xUserId: "12345",
+      consentSource: "signin",
+    },
+    "2026-08-22T00:00:00Z",
+  );
+  const failed = firestoreDocument(
+    "xAuthRedirectFlows",
+    FLOW_ID,
+    {
+      ...initial.fields,
+      status: "failed",
+      errorCode: "x-token-exchange-failed",
+    },
+    "2026-08-22T00:00:01Z",
+  );
+  const writes: AuthFirestoreWrite[] = [];
+  let reads = 0;
+  const client = firestore(initial, writes);
+  client.get = async () => (reads++ === 0 ? initial : failed);
+  client.commitWrites = async (input) => {
+    writes.push(...input);
+    throw new AuthFirestoreConflict();
+  };
+
+  await assert.rejects(
+    handleAuthMutation(
+      request("/auth/x/flows/complete", {
+        flowId: FLOW_ID,
+        emoji: 1,
+        aura: "",
+      }),
+      identity,
+      env,
+      ctx,
+      {
+        firestore: client,
+        identityService: service(),
+        now: () => nowMs,
+      },
+    ),
+    /x-token-exchange-failed/,
+  );
+
+  assert.equal(reads, 2);
+  assert.equal(writes.length, 1);
+});
+
 test("returns a concurrently completed X replay after a write conflict", async () => {
   const nowMs = Date.now();
   const initial = firestoreDocument(
