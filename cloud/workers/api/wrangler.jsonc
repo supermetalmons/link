@@ -9,7 +9,7 @@
   "preview_urls": true,
   "vars": {
     "APPLE_AUDIENCES": "link.mons",
-    "AUTH_MUTATIONS_DISABLED": "true",
+    "AUTH_MUTATIONS_DISABLED": "false",
     "FIREBASE_RTDB_URL": "https://mons-link-default-rtdb.firebaseio.com",
   },
   "routes": [
