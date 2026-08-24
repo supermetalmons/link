@@ -14,6 +14,7 @@ import {
   XProviderFailure,
   type XOAuthProvider,
 } from "./xProvider.ts";
+import { authMutationsDisabled } from "./authPolicy.ts";
 import { safeXReturnUrl, X_FLOW_ID_PATTERN, X_FLOW_TTL_MS } from "./xFlow.ts";
 
 const X_CALLBACK_PROCESSING_LEASE_MS = 60_000;
@@ -146,6 +147,11 @@ export async function handleXCallback(
   const existingRedirect = terminalFlowRedirect(flowId, flow);
   if (existingRedirect) {
     return existingRedirect;
+  }
+  if (authMutationsDisabled(env.AUTH_MUTATIONS_DISABLED)) {
+    return textResponse("Auth maintenance in progress.", 503, {
+      "Retry-After": "60",
+    });
   }
 
   const returnUrl = safeXReturnUrl(flow.returnUrl);

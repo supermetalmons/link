@@ -1,7 +1,6 @@
 const admin = require("./firebaseAdmin");
 const { onValueWritten } = require("firebase-functions/v2/database");
 const {
-  orderProfileMergeCleanupIds,
   PROFILE_MERGE_TARGETS_COLLECTION,
   resolveProfileMergeTargetPath,
 } = require("./profileMergeTargets");
@@ -95,9 +94,6 @@ const buildEventProjectionOwnerPlan = ({
   rawAfterOwnerProfileIds,
   rawBeforeOwnerProfileIds,
 }) => {
-  const beforeOwnerProfileIds = beforeOwnerPaths
-    .map((profileIds) => profileIds[profileIds.length - 1])
-    .filter(Boolean);
   const afterOwnerProfileIds = Array.from(
     new Set(
       afterOwnerPaths
@@ -105,17 +101,55 @@ const buildEventProjectionOwnerPlan = ({
         .filter(Boolean),
     ),
   );
-  const allOwnerProfileIds = orderProfileMergeCleanupIds(
-    [
-      ...rawBeforeOwnerProfileIds,
-      ...rawAfterOwnerProfileIds,
-      ...beforeOwnerPaths.flat(),
-      ...afterOwnerPaths.flat(),
-      ...cleanupProfileIds,
-    ],
-    [...beforeOwnerProfileIds, ...afterOwnerProfileIds],
+  const allProfileIds = Array.from(
+    new Set(
+      [
+        ...rawBeforeOwnerProfileIds,
+        ...rawAfterOwnerProfileIds,
+        ...beforeOwnerPaths.flat(),
+        ...afterOwnerPaths.flat(),
+        ...cleanupProfileIds,
+      ]
+        .map(normalizeString)
+        .filter(Boolean),
+    ),
   );
+  const currentOwnerIds = new Set(afterOwnerProfileIds);
+  const allOwnerProfileIds = [
+    ...afterOwnerProfileIds,
+    ...allProfileIds.filter((profileId) => !currentOwnerIds.has(profileId)),
+  ];
   return { afterOwnerProfileIds, allOwnerProfileIds };
+};
+
+const verifyCurrentOwnerProfiles = async (firestore, profileIds) => {
+  for (
+    let index = 0;
+    index < profileIds.length;
+    index += PROFILE_PATH_RESOLVE_CONCURRENCY
+  ) {
+    const ids = profileIds.slice(
+      index,
+      index + PROFILE_PATH_RESOLVE_CONCURRENCY,
+    );
+    const snapshots = await Promise.all(
+      ids.map((profileId) =>
+        readWithRetries(() =>
+          firestore.collection("users").doc(profileId).get(),
+        ),
+      ),
+    );
+    const missingIndex = snapshots.findIndex((snapshot) => !snapshot.exists);
+    if (missingIndex >= 0) {
+      throw new Error(`projector:event-owner-missing:${ids[missingIndex]}`);
+    }
+    const retiredIndex = snapshots.findIndex((snapshot) =>
+      normalizeString((snapshot.data?.() || {}).mergedIntoProfileId),
+    );
+    if (retiredIndex >= 0) {
+      throw new Error(`projector:event-owner-retired:${ids[retiredIndex]}`);
+    }
+  }
 };
 
 async function projectEvent(eventId, beforeData, afterData, options = {}) {
@@ -164,6 +198,7 @@ async function projectEvent(eventId, beforeData, afterData, options = {}) {
       rawAfterOwnerProfileIds,
       rawBeforeOwnerProfileIds,
     });
+  await verifyCurrentOwnerProfiles(firestore, afterOwnerProfileIds);
   const status = mapEventStatusToNavigationStatus(
     normalizeString(afterData && afterData.status),
   );

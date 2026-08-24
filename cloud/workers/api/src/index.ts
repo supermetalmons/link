@@ -5,7 +5,6 @@ import {
 } from "./eventPrizeAnnouncement.ts";
 import { handleTelegramBridge } from "./telegramBridge.ts";
 import {
-  AUTH_RECOVERY_DLQ_NAME,
   AUTH_RECOVERY_QUEUE_NAME,
   handleAuthRecoverySweep,
   handleAuthRecoveryQueue,
@@ -63,10 +62,7 @@ async function handleScheduled(
 export default {
   fetch: handleFetch,
   queue(batch, env) {
-    if (
-      batch.queue === AUTH_RECOVERY_QUEUE_NAME ||
-      batch.queue === AUTH_RECOVERY_DLQ_NAME
-    ) {
+    if (batch.queue === AUTH_RECOVERY_QUEUE_NAME) {
       return handleAuthRecoveryQueue(batch, env);
     }
     if (batch.queue === TELEGRAM_PROJECTION_QUEUE_NAME) {

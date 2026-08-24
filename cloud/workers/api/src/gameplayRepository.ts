@@ -665,8 +665,6 @@ export function createGameplayRepository(
     `${FIRESTORE_DOCUMENT_NAME_ROOT}/wagerSettlements/${encodeURIComponent(operationId)}`;
   const mergeTargetName = (profileId: string) =>
     `${FIRESTORE_DOCUMENT_NAME_ROOT}/${PROFILE_MERGE_TARGETS_COLLECTION}/${encodeURIComponent(profileId)}`;
-  const mergeLockName = (profileId: string) =>
-    `${FIRESTORE_DOCUMENT_NAME_ROOT}/mergeLocks/profile:${encodeURIComponent(profileId)}`;
 
   return {
     async applyWagerTransferOnce(input) {
@@ -700,14 +698,9 @@ export function createGameplayRepository(
             mergeTargetName(input.winnerProfileId),
             mergeTargetName(input.loserProfileId),
           ];
-          const initialLockNames = [
-            mergeLockName(input.winnerProfileId),
-            mergeLockName(input.loserProfileId),
-          ];
           const initialDocuments = await batchGetWagerDocuments(transaction, [
             ledgerName,
             ...targetNames,
-            ...initialLockNames,
           ]);
           const ledger = initialDocuments.get(ledgerName);
           if (ledger) {
@@ -755,41 +748,6 @@ export function createGameplayRepository(
           const winnerProfileId = winnerProfilePath.at(-1);
           const loserProfileId = loserProfilePath.at(-1);
           if (!winnerProfileId || !loserProfileId) {
-            throw new GameplayRepositoryFailure();
-          }
-          const lockNames = Array.from(
-            new Set(
-              [...winnerProfilePath, ...loserProfilePath].map(mergeLockName),
-            ),
-          );
-          const lockDocuments = new Map<string, FirestoreDocument | null>();
-          for (const name of lockNames) {
-            if (initialDocuments.has(name)) {
-              lockDocuments.set(name, initialDocuments.get(name) || null);
-            }
-          }
-          const unreadLockNames = lockNames.filter(
-            (name) => !lockDocuments.has(name),
-          );
-          if (unreadLockNames.length > 0) {
-            for (const [name, document] of await batchGetWagerDocuments(
-              transaction,
-              unreadLockNames,
-            )) {
-              lockDocuments.set(name, document);
-            }
-          }
-          const nowMs = now();
-          if (
-            lockNames.some((name) => {
-              const lock = lockDocuments.get(name);
-              return (
-                lock !== null &&
-                lock !== undefined &&
-                readFirestoreNumber(lock.fields.expiresAtMs, 0) > nowMs
-              );
-            })
-          ) {
             throw new GameplayRepositoryFailure();
           }
           const writes: Array<Record<string, unknown>> = [

@@ -18,7 +18,6 @@ const env = {
   FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
   FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",
-  AUTH_DISABLE_X_VERIFY: "false",
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
   NFT_RATE_LIMITER: { limit: async () => ({ success: true }) },
   X_CLIENT_ID: "test-x-client",
@@ -152,6 +151,28 @@ test("redirects failed flows with the stored error", async () => {
     location.searchParams.get("x_auth_error"),
     "x-oauth-access-denied",
   );
+});
+
+test("does not mutate an active flow during auth maintenance", async () => {
+  const updates: Array<Record<string, unknown>> = [];
+  let providerCalls = 0;
+  const response = await handleXCallback(
+    new Request(`${CALLBACK_URL}&code=oauth-code`),
+    { ...env, AUTH_MUTATIONS_DISABLED: "true" } as unknown as Env,
+    {
+      repository: createRepository(flow(), updates),
+      provider: createProvider({
+        exchangeCode: async () => {
+          providerCalls += 1;
+          return "unused";
+        },
+      }),
+    },
+  );
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("retry-after"), "60");
+  assert.deepEqual(updates, []);
+  assert.equal(providerCalls, 0);
 });
 
 test("persists expiration, X denial, and missing-code failures", async () => {

@@ -12,6 +12,7 @@ const {
   reconcileWagerSettlementDocument,
   reconcileWagerSettlementPage,
   reconcileWagerSettlementResolution,
+  requiresManualReview,
 } = require("../admin/reconcileWagerSettlementMerges");
 
 const timestamp = (seconds, nanoseconds = 0) => ({ seconds, nanoseconds });
@@ -215,6 +216,31 @@ test("timestamp comparisons retain nanosecond ordering", () => {
   assert.equal(compareTimestamps(timestamp(10), timestamp(9, 999_999_999)), 1);
   assert.equal(compareTimestamps(timestamp(10, 2), timestamp(10, 1)), 1);
   assert.equal(compareTimestamps(timestamp(10, 1), timestamp(10, 1)), 0);
+});
+
+test("wager reconciliation CLI fails pages and resolutions needing review", () => {
+  assert.equal(
+    requiresManualReview({
+      manualReviewRequired: true,
+    }),
+    true,
+  );
+  assert.equal(
+    requiresManualReview({ winner: { reviewRequired: true } }),
+    true,
+  );
+  assert.equal(
+    requiresManualReview({
+      manualReviewRequired: false,
+      results: [
+        {
+          loser: { reviewRequired: false },
+          winner: { reviewRequired: false },
+        },
+      ],
+    }),
+    false,
+  );
 });
 
 test("repairs only a side settled after its original merge marker", async () => {

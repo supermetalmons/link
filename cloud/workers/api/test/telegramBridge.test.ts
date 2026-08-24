@@ -19,7 +19,6 @@ const payload = {
 function queueEnv(send: Queue["send"]): Env {
   return {
     ...TELEGRAM_TEST_ENV,
-    AUTH_DISABLE_X_VERIFY: "false",
     AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
     FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
     FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",

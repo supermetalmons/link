@@ -1,6 +1,9 @@
 import type { LinkedAuthMethodsResponse } from "@mons/shared/auth";
 import { AuthApiFailure } from "./authErrors.ts";
-import { cleanString } from "./authPolicy.ts";
+import {
+  createAuthIdentityService,
+  type AuthIdentityService,
+} from "./authIdentity.ts";
 import {
   createFirebaseAuthAdminClient,
   FirebaseAuthAdminFailure,
@@ -26,7 +29,7 @@ export type ProfileClaimDependencies = {
   logCleanupFailure?: (kind: string) => void;
   repository?: Pick<AuthRepository, "getProfileClaimSource">;
   rtdbClient?: Pick<FirebaseRtdbClient, "getPath" | "patchRoot">;
-  schedulePendingProfileRecovery?: (profileId: string) => void | Promise<void>;
+  syncCurrentCallerProfile?: AuthIdentityService["syncCurrentCallerProfile"];
 };
 
 function cleanupFailureKind(error: unknown): string {
@@ -80,8 +83,11 @@ export async function syncProfileClaim(
       console.error(
         JSON.stringify({ event: "profile_claim_cleanup_failure", kind }),
       ));
+  const syncCurrentCallerProfile =
+    dependencies.syncCurrentCallerProfile ||
+    createAuthIdentityService(env).syncCurrentCallerProfile;
 
-  const reconcile = async (current: ProfileClaimSource): Promise<void> => {
+  const cleanupMissingProfile = async (): Promise<void> => {
     const [user, profileLink] = await Promise.all([
       authClient.getUser(identity.uid),
       rtdbClient.getPath(`players/${identity.uid}/profile`),
@@ -90,34 +96,16 @@ export async function syncProfileClaim(
     const hasProfileClaim = Object.hasOwn(claims, "profileId");
     const writes: Promise<void>[] = [];
 
-    if (current.profileId) {
-      if (cleanString(profileLink) !== current.profileId) {
-        writes.push(
-          rtdbClient.patchRoot({
-            [`players/${identity.uid}/profile`]: current.profileId,
-          }),
-        );
-      }
-      if (cleanString(claims.profileId) !== current.profileId) {
-        writes.push(
-          authClient.setCustomUserClaims(identity.uid, {
-            ...claims,
-            profileId: current.profileId,
-          }),
-        );
-      }
-    } else {
-      if (profileLink !== null) {
-        writes.push(
-          rtdbClient.patchRoot({
-            [`players/${identity.uid}/profile`]: null,
-          }),
-        );
-      }
-      if (hasProfileClaim) {
-        delete claims.profileId;
-        writes.push(authClient.setCustomUserClaims(identity.uid, claims));
-      }
+    if (profileLink !== null) {
+      writes.push(
+        rtdbClient.patchRoot({
+          [`players/${identity.uid}/profile`]: null,
+        }),
+      );
+    }
+    if (hasProfileClaim) {
+      delete claims.profileId;
+      writes.push(authClient.setCustomUserClaims(identity.uid, claims));
     }
 
     const outcomes = await Promise.allSettled(writes);
@@ -131,44 +119,33 @@ export async function syncProfileClaim(
   };
 
   for (let attempt = 0; attempt < MAX_RECONCILIATION_ATTEMPTS; attempt++) {
-    let reconciliationFailed = false;
-    let reconciliationFailure: unknown;
-    try {
-      await reconcile(source);
-    } catch (error) {
-      if (source.profileId) {
-        reconciliationFailed = true;
-        reconciliationFailure = error;
-      } else {
-        logCleanupFailure(cleanupFailureKind(error));
+    if (source.profileId) {
+      const verifiedSource = await readSource();
+      if (verifiedSource.profileId === source.profileId) {
+        return syncCurrentCallerProfile(identity.uid);
       }
+      source = verifiedSource;
+      continue;
+    }
+    try {
+      await cleanupMissingProfile();
+    } catch (error) {
+      logCleanupFailure(cleanupFailureKind(error));
     }
 
     const verifiedSource = await readSource();
-    if (verifiedSource.profileId === source.profileId) {
-      if (verifiedSource.profileId && verifiedSource.pendingRecovery) {
-        await dependencies.schedulePendingProfileRecovery?.(
-          verifiedSource.profileId,
-        );
-      }
-      if (reconciliationFailed) {
-        throw reconciliationFailure;
-      }
-      const { pendingRecovery: _pendingRecovery, ...response } = verifiedSource;
-      return response;
+    if (verifiedSource.profileId === null) {
+      return verifiedSource;
     }
     source = verifiedSource;
   }
 
-  try {
-    await reconcile(source);
-  } catch (error) {
-    if (!source.profileId) {
+  if (source.profileId === null) {
+    try {
+      await cleanupMissingProfile();
+    } catch (error) {
       logCleanupFailure(cleanupFailureKind(error));
     }
-  }
-  if (source.profileId && source.pendingRecovery) {
-    await dependencies.schedulePendingProfileRecovery?.(source.profileId);
   }
   throw new AuthApiFailure(409, "aborted", "profile-claim-source-unstable");
 }

@@ -1,522 +1,884 @@
 import { isSafeFirestoreDocIdSegment } from "@mons/shared/usernames";
 import {
+  getEventPrizeDefinition,
+  isEventPrizeId,
+  isEventPrizeStandard,
+} from "@mons/shared/event-prizes";
+import {
   MAX_PROFILE_MERGE_TARGET_HOPS,
   PROFILE_MERGE_TARGETS_COLLECTION,
 } from "../../../functions/profileMergeTargets.js";
-import { createAuthIdentityService } from "./authIdentity.ts";
 import {
   type AuthFirestoreClient,
   type AuthFirestoreDocument,
+  type AuthFirestoreWrite,
+  AuthFirestoreConflict,
   authDeleteWrite,
   authDocumentName,
-  authFieldFilter,
   authUpdateWrite,
   createAuthFirestoreClient,
 } from "./authFirestore.ts";
 import {
-  enqueueAuthRecovery as enqueueProfileRecovery,
-  parseAuthRecoveryTask,
-} from "./authRecoveryTask.ts";
+  type FirebaseAuthAdminClient,
+  createFirebaseAuthAdminClient,
+} from "./firebaseAuthAdmin.ts";
+import {
+  type FirebaseRtdbClient,
+  createFirebaseRtdbClient,
+} from "./firebaseRtdb.ts";
+import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { createGoogleAccessToken } from "./googleAuth.ts";
 import {
   cleanString,
-  PENDING_CLAIM_SYNC_FIELD_PATHS,
-  PENDING_MERGE_GAME_COPY_FIELD_PATHS,
+  finiteNumber,
   uniqueStoredFirebaseUids,
 } from "./authPolicy.ts";
 
+export const AUTH_RECOVERY_QUEUE_NAME = "mons-link-auth-recovery";
+export const AUTH_RECOVERY_JOBS_COLLECTION = "authRecoveryJobs";
+export const MERGE_GAME_FINALIZE_DELAY_MS = 60 * 1_000;
+export const MERGE_PRIZE_RECOVERY_PAGE_SIZE = 20;
 const RETRY_DELAY_SECONDS = 60;
-const LEGACY_CLAIM_BACKLOG_SWEEP_LIMIT = 10;
-const LEGACY_GAME_BACKLOG_SWEEP_LIMIT = 10;
-const AUTH_RECOVERY_SWEEP_CURSORS_COLLECTION = "authRecoverySweepCursors";
+const STALE_ENQUEUE_MS = 2 * 60 * 60 * 1_000;
+const CLAIM_PAGE_SIZE = 20;
 
-type AuthRecoverySweepDependencies = {
-  enqueue?: (profileId: string) => Promise<void>;
-  firestore?: Pick<AuthFirestoreClient, "query" | "runTransaction">;
-  logger?: Pick<Console, "error">;
+export type AuthRecoveryTask = {
+  kind: "auth-profile-recovery";
+  profileId: string;
+};
+
+export type AuthRecoveryPhase = "prizes" | "games" | "finalize";
+
+export type AuthRecoveryJob = {
+  profileId: string;
+  loginUids: string[];
+  sourceProfileIds: string[];
+  sourcePhase: AuthRecoveryPhase;
+  prizeCursor: string | null;
+  phaseStartedAtMs: number;
+  lastEnqueuedAtMs: number;
+  createdAtMs: number;
+  updatedAtMs: number;
+};
+
+type AuthRecoveryDependencies = {
+  authClient?: FirebaseAuthAdminClient;
+  buildPrizeCopy?: typeof buildPrizeCopy;
+  firestore?: AuthFirestoreClient;
+  logger?: Pick<Console, "error" | "info">;
   now?: () => number;
+  rtdb?: FirebaseRtdbClient;
+  signal?: AbortSignal;
 };
 
-type MaterializedClaimBacklog = {
-  backlogName: string | null;
-  profileId: string;
-};
-
-type MaterializedGameBacklog = {
-  backlogName: string | null;
-  backlogOpId: string;
-  backlogTargetProfileId: string;
-  profileId: string;
-  sourceProfileId: string;
-};
-
-function validDocumentId(value: unknown): string {
-  const id = cleanString(value);
-  return isSafeFirestoreDocIdSegment(id) ? id : "";
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
-async function readRotatingPendingBacklogPage({
-  collectionId,
-  fieldPaths,
-  firestore,
-  limit,
-}: {
-  collectionId: string;
-  fieldPaths: string[];
-  firestore: Pick<AuthFirestoreClient, "query" | "runTransaction">;
-  limit: number;
-}): Promise<AuthFirestoreDocument[]> {
-  const cursorName = authDocumentName(
-    AUTH_RECOVERY_SWEEP_CURSORS_COLLECTION,
-    collectionId,
-  );
-  const afterDocumentId = await firestore.runTransaction(
-    async (transaction) => {
-      const cursor = (await transaction.batchGet([cursorName])).get(cursorName);
-      return {
-        result: validDocumentId(cursor?.fields.afterDocumentId),
-        writes: [],
-      };
-    },
-  );
-  const candidates = await firestore.query(
-    collectionId,
-    authFieldFilter("status", "EQUAL", "pending"),
-    limit,
-    fieldPaths,
-    afterDocumentId,
-  );
-  const nextAfterDocumentId = candidates.at(-1)?.id || "";
-  if (nextAfterDocumentId !== afterDocumentId) {
-    await firestore.runTransaction(async (transaction) => {
-      const cursor = (await transaction.batchGet([cursorName])).get(cursorName);
-      if (validDocumentId(cursor?.fields.afterDocumentId) !== afterDocumentId) {
-        return { result: undefined, writes: [] };
-      }
-      return {
-        result: undefined,
-        writes: [
-          authUpdateWrite(
-            cursorName,
-            { afterDocumentId: nextAfterDocumentId },
-            ["afterDocumentId"],
-          ),
-        ],
-      };
-    });
+function exactDocumentId(value: unknown): string {
+  if (typeof value !== "string" || value.trim() !== value) {
+    return "";
   }
-  return candidates;
+  return isSafeFirestoreDocIdSegment(value) && isSafeFirebaseKey(value)
+    ? value
+    : "";
 }
 
-async function materializeLegacyClaimBacklog(
-  candidate: AuthFirestoreDocument,
-  firestore: Pick<AuthFirestoreClient, "runTransaction">,
-  now: () => number,
-): Promise<MaterializedClaimBacklog | null> {
-  return firestore.runTransaction(async (transaction) => {
-    const backlog = (await transaction.batchGet([candidate.name])).get(
-      candidate.name,
-    );
-    if (!backlog || cleanString(backlog.fields.status) !== "pending") {
-      return { result: null, writes: [] };
+function uniqueDocumentIds(value: unknown): string[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const id = exactDocumentId(item);
+    if (!id) {
+      return null;
     }
-    const deleteBacklog = () =>
-      authDeleteWrite(
-        backlog.name,
-        backlog.updateTime ? { updateTime: backlog.updateTime } : true,
-      );
-    const targetProfileId = validDocumentId(backlog.fields.targetProfileId);
-    if (!targetProfileId) {
-      return { result: null, writes: [deleteBacklog()] };
+    if (!seen.has(id)) {
+      seen.add(id);
+      result.push(id);
     }
-    const targetName = authDocumentName("users", targetProfileId);
-    const target = (await transaction.batchGet([targetName])).get(targetName);
-    if (!target) {
-      return { result: null, writes: [deleteBacklog()] };
-    }
-    const pendingOpId = cleanString(target.fields.pendingClaimSyncOpId);
-    const ownedLogins = new Set(uniqueStoredFirebaseUids(target.fields.logins));
-    const pendingLogins = uniqueStoredFirebaseUids(
-      target.fields.pendingClaimSyncLogins,
-      backlog.fields.failedLoginUids,
-    ).filter((uid) => ownedLogins.has(uid));
-    if (pendingLogins.length === 0) {
-      return { result: null, writes: [deleteBacklog()] };
-    }
-    const markerOpId = pendingOpId || backlog.id;
-    const targetWrite = authUpdateWrite(
-      target.name,
-      {
-        pendingClaimSyncLogins: pendingLogins,
-        pendingClaimSyncOpId: markerOpId,
-        pendingClaimSyncUpdatedAtMs: now(),
-      },
-      [...PENDING_CLAIM_SYNC_FIELD_PATHS],
-      target.updateTime ? { updateTime: target.updateTime } : true,
-    );
-    return {
-      result: {
-        backlogName: markerOpId === backlog.id ? backlog.name : null,
-        profileId: targetProfileId,
-      },
-      writes: [
-        targetWrite,
-        ...(markerOpId === backlog.id ? [] : [deleteBacklog()]),
-      ],
-    };
-  });
+  }
+  return result;
 }
 
-async function markClaimBacklogQueued(
-  backlogName: string,
-  firestore: Pick<AuthFirestoreClient, "runTransaction">,
-  now: () => number,
+export function authRecoveryJobName(profileId: string): string {
+  return authDocumentName(AUTH_RECOVERY_JOBS_COLLECTION, profileId);
+}
+
+export function parseAuthRecoveryTask(value: unknown): AuthRecoveryTask | null {
+  const task = record(value);
+  const profileId = exactDocumentId(task.profileId);
+  return task.kind === "auth-profile-recovery" &&
+    profileId &&
+    Object.keys(task).length === 2
+    ? { kind: "auth-profile-recovery", profileId }
+    : null;
+}
+
+export function parseAuthRecoveryJob(
+  document: AuthFirestoreDocument,
+): AuthRecoveryJob | null {
+  const fields = document.fields;
+  const profileId = exactDocumentId(fields.profileId);
+  const sourceProfileIds = uniqueDocumentIds(fields.sourceProfileIds);
+  const sourcePhase = fields.sourcePhase;
+  const prizeCursor = fields.prizeCursor;
+  if (
+    !profileId ||
+    profileId !== document.id ||
+    !sourceProfileIds ||
+    !Array.isArray(fields.loginUids) ||
+    !fields.loginUids.every((uid) => typeof uid === "string") ||
+    !["prizes", "games", "finalize"].includes(String(sourcePhase)) ||
+    (prizeCursor !== null && typeof prizeCursor !== "string")
+  ) {
+    return null;
+  }
+  return {
+    profileId,
+    loginUids: uniqueStoredFirebaseUids(fields.loginUids),
+    sourceProfileIds,
+    sourcePhase: sourcePhase as AuthRecoveryPhase,
+    prizeCursor,
+    phaseStartedAtMs: finiteNumber(fields.phaseStartedAtMs, 0),
+    lastEnqueuedAtMs: finiteNumber(fields.lastEnqueuedAtMs, 0),
+    createdAtMs: finiteNumber(fields.createdAtMs, 0),
+    updatedAtMs: finiteNumber(fields.updatedAtMs, 0),
+  };
+}
+
+export function newAuthRecoveryJob(
+  profileId: string,
+  loginUids: string[],
+  sourceProfileIds: string[],
+  nowMs: number,
+): AuthRecoveryJob {
+  return {
+    profileId,
+    loginUids: uniqueStoredFirebaseUids(loginUids),
+    sourceProfileIds: Array.from(new Set(sourceProfileIds)),
+    sourcePhase: sourceProfileIds.length > 0 ? "prizes" : "finalize",
+    prizeCursor: null,
+    phaseStartedAtMs: nowMs,
+    lastEnqueuedAtMs: 0,
+    createdAtMs: nowMs,
+    updatedAtMs: nowMs,
+  };
+}
+
+export async function enqueueAuthRecovery(
+  env: Env,
+  profileId: string,
 ): Promise<void> {
+  const canonicalProfileId = exactDocumentId(profileId);
+  if (!canonicalProfileId) {
+    throw new TypeError("invalid-profile-id");
+  }
+  await env.AUTH_RECOVERY_QUEUE.send(
+    {
+      kind: "auth-profile-recovery",
+      profileId: canonicalProfileId,
+    } satisfies AuthRecoveryTask,
+    { delaySeconds: RETRY_DELAY_SECONDS },
+  );
+}
+
+export async function markAuthRecoveryEnqueued(
+  firestore: Pick<AuthFirestoreClient, "runTransaction">,
+  profileId: string,
+  nowMs: number,
+): Promise<void> {
+  const name = authRecoveryJobName(profileId);
   await firestore.runTransaction(async (transaction) => {
-    const backlog = (await transaction.batchGet([backlogName])).get(
-      backlogName,
-    );
-    if (!backlog || cleanString(backlog.fields.status) !== "pending") {
+    const job = (await transaction.batchGet([name])).get(name);
+    if (!job) {
       return { result: undefined, writes: [] };
     }
     return {
       result: undefined,
       writes: [
         authUpdateWrite(
-          backlog.name,
-          { status: "queued", updatedAtMs: now() },
-          ["status", "updatedAtMs"],
-          backlog.updateTime ? { updateTime: backlog.updateTime } : true,
+          name,
+          { lastEnqueuedAtMs: nowMs, updatedAtMs: nowMs },
+          ["lastEnqueuedAtMs", "updatedAtMs"],
+          job.updateTime ? { updateTime: job.updateTime } : true,
         ),
       ],
     };
   });
 }
 
-async function materializeLegacyGameBacklog(
-  candidate: AuthFirestoreDocument,
+export async function enqueuePersistedAuthRecovery(
+  env: Env,
   firestore: Pick<AuthFirestoreClient, "runTransaction">,
-  now: () => number,
-): Promise<MaterializedGameBacklog | null> {
-  return firestore.runTransaction<MaterializedGameBacklog | null>(
-    async (transaction) => {
-      const backlog = (await transaction.batchGet([candidate.name])).get(
-        candidate.name,
-      );
-      if (!backlog || cleanString(backlog.fields.status) !== "pending") {
-        return { result: null, writes: [] };
-      }
-      const deleteBacklog = () =>
-        authDeleteWrite(
-          backlog.name,
-          backlog.updateTime ? { updateTime: backlog.updateTime } : true,
-        );
-      const targetProfileId = validDocumentId(backlog.fields.targetProfileId);
-      const sourceProfileId = validDocumentId(backlog.fields.sourceProfileId);
-      const backlogOpId = cleanString(backlog.fields.opId);
-      const markerOpId =
-        validDocumentId(backlogOpId) || `legacy-game:${backlog.id}`;
-      if (
-        !targetProfileId ||
-        !sourceProfileId ||
-        targetProfileId === sourceProfileId ||
-        !validDocumentId(markerOpId)
-      ) {
-        return { result: null, writes: [deleteBacklog()] };
-      }
-      const sourceName = authDocumentName("users", sourceProfileId);
-      const mergeTargetName = authDocumentName(
-        PROFILE_MERGE_TARGETS_COLLECTION,
-        sourceProfileId,
-      );
-      const snapshots = await transaction.batchGet([
-        sourceName,
-        mergeTargetName,
-      ]);
-      const source = snapshots.get(sourceName);
-      const mergeTarget = snapshots.get(mergeTargetName);
-      if (
-        cleanString(mergeTarget?.fields.targetProfileId) !== targetProfileId ||
-        (source &&
-          (cleanString(source.fields.mergedIntoProfileId) !== targetProfileId ||
-            source.fields.mergeSourceRetainedForGameCopy !== true ||
-            uniqueStoredFirebaseUids(source.fields.logins).length > 0))
-      ) {
-        return { result: null, writes: [deleteBacklog()] };
-      }
-      let resolvedTargetProfileId = targetProfileId;
-      let target: AuthFirestoreDocument | null = null;
-      const visitedProfileIds = new Set([sourceProfileId]);
-      for (let depth = 0; depth <= MAX_PROFILE_MERGE_TARGET_HOPS; depth++) {
-        if (visitedProfileIds.has(resolvedTargetProfileId)) {
-          return { result: null, writes: [deleteBacklog()] };
-        }
-        visitedProfileIds.add(resolvedTargetProfileId);
-        const resolvedTargetName = authDocumentName(
-          "users",
-          resolvedTargetProfileId,
-        );
-        const resolvedMergeTargetName = authDocumentName(
-          PROFILE_MERGE_TARGETS_COLLECTION,
-          resolvedTargetProfileId,
-        );
-        const resolvedSnapshots = await transaction.batchGet([
-          resolvedTargetName,
-          resolvedMergeTargetName,
-        ]);
-        const candidateTarget = resolvedSnapshots.get(resolvedTargetName);
-        const nextTargetRaw = cleanString(
-          resolvedSnapshots.get(resolvedMergeTargetName)?.fields
-            .targetProfileId,
-        );
-        if (nextTargetRaw) {
-          const nextTargetProfileId = validDocumentId(nextTargetRaw);
-          if (
-            !nextTargetProfileId ||
-            (candidateTarget &&
-              cleanString(candidateTarget.fields.mergedIntoProfileId) &&
-              cleanString(candidateTarget.fields.mergedIntoProfileId) !==
-                nextTargetProfileId)
-          ) {
-            return { result: null, writes: [deleteBacklog()] };
-          }
-          resolvedTargetProfileId = nextTargetProfileId;
-          continue;
-        }
-        if (
-          !candidateTarget ||
-          cleanString(candidateTarget.fields.mergedIntoProfileId)
-        ) {
-          return { result: null, writes: [deleteBacklog()] };
-        }
-        target = candidateTarget;
-        break;
-      }
-      if (!target) {
-        return { result: null, writes: [] };
-      }
-      const activeSource = cleanString(
-        target.fields.pendingMergeGameCopySourceProfileId,
-      );
-      const activeOp = cleanString(target.fields.pendingMergeGameCopyOpId);
-      const sourceClaimCleanup = source
-        ? [
-            authUpdateWrite(
-              source.name,
-              {},
-              [...PENDING_CLAIM_SYNC_FIELD_PATHS],
-              source.updateTime ? { updateTime: source.updateTime } : true,
-            ),
-          ]
-        : [];
-      if (activeSource && activeSource !== sourceProfileId) {
-        return {
-          result: {
-            backlogName: null,
-            backlogOpId,
-            backlogTargetProfileId: targetProfileId,
-            profileId: resolvedTargetProfileId,
-            sourceProfileId,
-          },
-          writes: sourceClaimCleanup,
-        };
-      }
-      const reusableActiveOp = validDocumentId(activeOp);
-      const writes =
-        activeSource && reusableActiveOp
-          ? sourceClaimCleanup
-          : [
-              ...sourceClaimCleanup,
-              authUpdateWrite(
-                target.name,
-                {
-                  pendingMergeGameCopySourceProfileId: sourceProfileId,
-                  pendingMergeGameCopyOpId: reusableActiveOp || markerOpId,
-                  pendingMergeGameCopyUpdatedAtMs: now(),
-                },
-                [...PENDING_MERGE_GAME_COPY_FIELD_PATHS],
-                target.updateTime ? { updateTime: target.updateTime } : true,
-              ),
-            ];
-      return {
-        result: {
-          backlogName: backlog.name,
-          backlogOpId,
-          backlogTargetProfileId: targetProfileId,
-          profileId: resolvedTargetProfileId,
-          sourceProfileId,
-        },
-        writes,
-      };
-    },
+  profileId: string,
+  nowMs: number,
+): Promise<void> {
+  await enqueueAuthRecovery(env, profileId);
+  await markAuthRecoveryEnqueued(firestore, profileId, nowMs);
+}
+
+export async function ensureFirebaseProfileClaim(
+  uid: string,
+  profileId: string,
+  dependencies: {
+    authClient: FirebaseAuthAdminClient;
+    rtdb: Pick<FirebaseRtdbClient, "getPath" | "patchRoot">;
+    signal?: AbortSignal;
+  },
+): Promise<void> {
+  if (!isCanonicalFirebaseUid(uid)) {
+    throw new TypeError("invalid-firebase-uid");
+  }
+  const [user, profileLink] = await Promise.all([
+    dependencies.authClient.getUser(uid),
+    dependencies.rtdb.getPath(
+      `players/${uid}/profile`,
+      undefined,
+      dependencies.signal,
+    ),
+  ]);
+  const writes: Promise<void>[] = [];
+  if (cleanString(profileLink) !== profileId) {
+    writes.push(
+      dependencies.rtdb.patchRoot(
+        { [`players/${uid}/profile`]: profileId },
+        dependencies.signal,
+      ),
+    );
+  }
+  if (cleanString(user.customClaims.profileId) !== profileId) {
+    writes.push(
+      dependencies.authClient.setCustomUserClaims(uid, {
+        ...user.customClaims,
+        profileId,
+      }),
+    );
+  }
+  const outcomes = await Promise.allSettled(writes);
+  const failure = outcomes.find(
+    (outcome): outcome is PromiseRejectedResult =>
+      outcome.status === "rejected",
+  );
+  if (failure) {
+    throw failure.reason;
+  }
+}
+
+function timestampMillis(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.floor(value);
+  }
+  const timestamp = cleanString(record(value).__firestoreTimestamp);
+  const parsed = timestamp ? Date.parse(timestamp) : NaN;
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function mergeFreshness(fields: Record<string, unknown>): number {
+  return Math.max(
+    timestampMillis(fields.updatedAt),
+    timestampMillis(fields.listSortAt),
   );
 }
 
-async function deleteMaterializedGameBacklog(
-  materialized: MaterializedGameBacklog,
-  firestore: Pick<AuthFirestoreClient, "runTransaction">,
-): Promise<void> {
-  const backlogName = materialized.backlogName;
-  if (!backlogName) {
-    return;
+function isEquivalentPrizeAssignment(
+  value: unknown,
+  expected: unknown,
+): boolean {
+  const current = record(value);
+  const assignment = record(expected);
+  return (
+    cleanString(current.eventId) === cleanString(assignment.eventId) &&
+    cleanString(current.profileId) === cleanString(assignment.profileId) &&
+    finiteNumber(current.place, 0) === finiteNumber(assignment.place, -1) &&
+    cleanString(current.prizeId) === cleanString(assignment.prizeId) &&
+    finiteNumber(current.assignedAtMs, -1) ===
+      finiteNumber(assignment.assignedAtMs, -2)
+  );
+}
+
+function buildPrizeCopy(
+  sourceProfileId: string,
+  targetProfileId: string,
+  eventId: string,
+  value: unknown,
+): Record<string, unknown> | null {
+  const assignment = record(value);
+  const normalizedEventId = cleanString(eventId);
+  const prizeId = cleanString(assignment.prizeId);
+  const place = finiteNumber(assignment.place, 0);
+  const assignedAtMs = finiteNumber(assignment.assignedAtMs, NaN);
+  if (
+    cleanString(assignment.eventId) !== normalizedEventId ||
+    cleanString(assignment.profileId) !== sourceProfileId ||
+    ![1, 2, 3].includes(place) ||
+    !isEventPrizeId(normalizedEventId, prizeId) ||
+    !Number.isFinite(assignedAtMs)
+  ) {
+    return null;
   }
-  await firestore.runTransaction(async (transaction) => {
-    const backlog = (await transaction.batchGet([backlogName])).get(
-      backlogName,
+  return {
+    eventId: normalizedEventId,
+    profileId: targetProfileId,
+    place,
+    prizeId,
+    assignedAtMs: Math.floor(assignedAtMs),
+  };
+}
+
+function isCompletedPrizeWithdrawal(
+  value: unknown,
+  eventId: string,
+  prizeId: string,
+): boolean {
+  const withdrawal = record(value);
+  const definition = getEventPrizeDefinition(eventId, prizeId);
+  const assetAddress = cleanString(definition?.assetAddress);
+  const expectedStandard = cleanString(definition?.standard);
+  const recordedStandard = cleanString(withdrawal.assetStandard);
+  const standardMatches =
+    (isEventPrizeStandard(recordedStandard) &&
+      recordedStandard === expectedStandard) ||
+    (!recordedStandard && expectedStandard === "core");
+  return (
+    Boolean(assetAddress) &&
+    withdrawal.status === "completed" &&
+    standardMatches &&
+    cleanString(withdrawal.eventId) === eventId &&
+    cleanString(withdrawal.prizeId) === prizeId &&
+    cleanString(withdrawal.assetAddress) === assetAddress
+  );
+}
+
+export function createAuthRecoveryService(
+  env: Env,
+  dependencies: AuthRecoveryDependencies = {},
+) {
+  let accessToken: Promise<string> | null = null;
+  const accessTokenProvider = () => {
+    accessToken ||= createGoogleAccessToken(env, {
+      credentials: {
+        email: env.FIRESTORE_SERVICE_ACCOUNT_EMAIL,
+        privateKeyPem: env.FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY,
+      },
+    });
+    return accessToken;
+  };
+  const firestore =
+    dependencies.firestore ||
+    createAuthFirestoreClient(env, {
+      accessTokenProvider,
+      signal: dependencies.signal,
+    });
+  const authClient =
+    dependencies.authClient ||
+    createFirebaseAuthAdminClient(env, { signal: dependencies.signal });
+  const rtdb =
+    dependencies.rtdb ||
+    createFirebaseRtdbClient(env, {
+      credentials: {
+        email: env.FIRESTORE_SERVICE_ACCOUNT_EMAIL,
+        privateKeyPem: env.FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY,
+      },
+    });
+  const logger = dependencies.logger || console;
+  const now = dependencies.now || Date.now;
+
+  const mutateJob = async (
+    profileId: string,
+    update: (job: AuthRecoveryJob) => AuthRecoveryJob | null | undefined,
+  ): Promise<boolean> => {
+    const name = authRecoveryJobName(profileId);
+    return firestore.runTransaction(async (transaction) => {
+      const document = (await transaction.batchGet([name])).get(name);
+      if (!document) {
+        return { result: true, writes: [] };
+      }
+      const job = parseAuthRecoveryJob(document);
+      if (!job) {
+        return { result: false, writes: [] };
+      }
+      const next = update(job);
+      if (next === undefined) {
+        return { result: false, writes: [] };
+      }
+      return {
+        result: next === null,
+        writes: [
+          next === null
+            ? authDeleteWrite(
+                name,
+                document.updateTime
+                  ? { updateTime: document.updateTime }
+                  : true,
+              )
+            : authUpdateWrite(
+                name,
+                next,
+                Object.keys(next),
+                document.updateTime
+                  ? { updateTime: document.updateTime }
+                  : true,
+              ),
+        ],
+      };
+    });
+  };
+
+  const removeLoginUid = (profileId: string, uid: string) =>
+    mutateJob(profileId, (job) => {
+      const loginUids = job.loginUids.filter((candidate) => candidate !== uid);
+      if (loginUids.length === job.loginUids.length) {
+        return undefined;
+      }
+      return { ...job, loginUids, updatedAtMs: now() };
+    });
+
+  const copyPrize = async (
+    sourceProfileId: string,
+    targetProfileId: string,
+    eventId: string,
+    sourceAssignment: unknown,
+  ): Promise<void> => {
+    const assignment = (dependencies.buildPrizeCopy || buildPrizeCopy)(
+      sourceProfileId,
+      targetProfileId,
+      eventId,
+      sourceAssignment,
+    );
+    if (!assignment) {
+      throw new Error("auth-recovery-prize-invalid");
+    }
+    const prizeId = cleanString(assignment.prizeId);
+    const targetPath = `profileEventPrizes/${targetProfileId}/${eventId}`;
+    const existingTarget = await rtdb.getPath(
+      targetPath,
+      undefined,
+      dependencies.signal,
     );
     if (
-      !backlog ||
-      cleanString(backlog.fields.status) !== "pending" ||
-      validDocumentId(backlog.fields.targetProfileId) !==
-        materialized.backlogTargetProfileId ||
-      validDocumentId(backlog.fields.sourceProfileId) !==
-        materialized.sourceProfileId ||
-      cleanString(backlog.fields.opId) !== materialized.backlogOpId
+      existingTarget !== null &&
+      existingTarget !== undefined &&
+      !isEquivalentPrizeAssignment(existingTarget, assignment)
     ) {
-      return { result: undefined, writes: [] };
+      throw new Error("auth-recovery-prize-conflict");
     }
-    return {
-      result: undefined,
-      writes: [
-        authDeleteWrite(
-          backlog.name,
-          backlog.updateTime ? { updateTime: backlog.updateTime } : true,
-        ),
-      ],
+    const removeIfCompleted = async (): Promise<boolean> => {
+      if (!prizeId) {
+        return false;
+      }
+      const withdrawal = await rtdb.getPath(
+        `eventPrizeWithdrawals/${eventId}/${prizeId}`,
+        undefined,
+        dependencies.signal,
+      );
+      if (!isCompletedPrizeWithdrawal(withdrawal, eventId, prizeId)) {
+        return false;
+      }
+      await rtdb.transactPath(
+        targetPath,
+        (current) =>
+          cleanString(record(current).eventId) === eventId &&
+          cleanString(record(current).prizeId) === prizeId
+            ? { value: null }
+            : { commit: false },
+        dependencies.signal,
+      );
+      return true;
     };
-  });
-}
+    if (await removeIfCompleted()) {
+      return;
+    }
+    await rtdb.transactPath(
+      targetPath,
+      (current) => {
+        if (current === null || current === undefined) {
+          return { value: assignment };
+        }
+        if (isEquivalentPrizeAssignment(current, assignment)) {
+          return { commit: false };
+        }
+        throw new Error("auth-recovery-prize-conflict");
+      },
+      dependencies.signal,
+    );
+    await removeIfCompleted();
+  };
 
-export async function sweepLegacyAuthClaimBacklogs(
-  env: Env,
-  dependencies: AuthRecoverySweepDependencies = {},
-): Promise<number> {
-  const firestore = dependencies.firestore || createAuthFirestoreClient(env);
-  const enqueue =
-    dependencies.enqueue ||
-    ((profileId: string) => enqueueProfileRecovery(env, profileId));
-  const logger = dependencies.logger || console;
-  const now = dependencies.now || Date.now;
-  const candidates = await readRotatingPendingBacklogPage({
-    collectionId: "authClaimSyncBacklog",
-    fieldPaths: ["targetProfileId"],
-    firestore,
-    limit: LEGACY_CLAIM_BACKLOG_SWEEP_LIMIT,
-  });
-  const profileIds = new Set<string>();
-  const backlogNamesByProfile = new Map<string, Set<string>>();
-  let failure: unknown;
-  for (const candidate of candidates) {
-    try {
-      const materialized = await materializeLegacyClaimBacklog(
-        candidate,
-        firestore,
-        now,
+  const recoverClaims = async (job: AuthRecoveryJob): Promise<void> => {
+    const validUids = job.loginUids
+      .filter(isCanonicalFirebaseUid)
+      .slice(0, CLAIM_PAGE_SIZE);
+    for (const uid of validUids) {
+      try {
+        await ensureFirebaseProfileClaim(uid, job.profileId, {
+          authClient,
+          rtdb,
+          signal: dependencies.signal,
+        });
+        await removeLoginUid(job.profileId, uid);
+      } catch {
+        logger.error(JSON.stringify({ event: "auth_claim_recovery_pending" }));
+      }
+    }
+  };
+
+  const recoverPrizes = async (
+    job: AuthRecoveryJob,
+    sourceProfileId: string,
+  ): Promise<void> => {
+    const cursor = job.prizeCursor || "";
+    const source = record(
+      await rtdb.getPath(
+        `profileEventPrizes/${sourceProfileId}`,
+        {
+          orderBy: "$key",
+          ...(cursor ? { startAt: cursor } : {}),
+          limitToFirst: cursor
+            ? MERGE_PRIZE_RECOVERY_PAGE_SIZE + 2
+            : MERGE_PRIZE_RECOVERY_PAGE_SIZE + 1,
+        },
+        dependencies.signal,
+      ),
+    );
+    const remaining = Object.entries(source)
+      .filter(([eventId]) => eventId > cursor)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+    const page = remaining.slice(0, MERGE_PRIZE_RECOVERY_PAGE_SIZE);
+    for (const [eventId, assignment] of page) {
+      await copyPrize(sourceProfileId, job.profileId, eventId, assignment);
+    }
+    const complete = remaining.length <= page.length;
+    const nextCursor = page.at(-1)?.[0] || job.prizeCursor;
+    await mutateJob(job.profileId, (live) => {
+      if (
+        live.sourceProfileIds[0] !== sourceProfileId ||
+        live.sourcePhase !== "prizes" ||
+        live.prizeCursor !== job.prizeCursor
+      ) {
+        return undefined;
+      }
+      return {
+        ...live,
+        sourcePhase: complete ? "games" : "prizes",
+        prizeCursor: nextCursor,
+        phaseStartedAtMs: complete ? now() : live.phaseStartedAtMs,
+        updatedAtMs: now(),
+      };
+    });
+  };
+
+  const recoverGames = async (
+    job: AuthRecoveryJob,
+    sourceProfileId: string,
+  ): Promise<void> => {
+    const sourcePage = await firestore.listPage(
+      `users/${sourceProfileId}`,
+      "games",
+    );
+    if (sourcePage.documents.length > 0) {
+      const targetName = authDocumentName("users", job.profileId);
+      const targetNames = sourcePage.documents.map(
+        (game) => `${targetName}/games/${game.id}`,
       );
-      if (materialized) {
-        profileIds.add(materialized.profileId);
-        if (materialized.backlogName) {
-          const names = backlogNamesByProfile.get(materialized.profileId);
-          if (names) {
-            names.add(materialized.backlogName);
-          } else {
-            backlogNamesByProfile.set(
-              materialized.profileId,
-              new Set([materialized.backlogName]),
-            );
+      const targets = await firestore.batchGet(targetNames);
+      const writes: AuthFirestoreWrite[] = [];
+      for (const game of sourcePage.documents) {
+        const targetGameName = `${targetName}/games/${game.id}`;
+        const current = targets.get(targetGameName) || null;
+        if (
+          !current ||
+          mergeFreshness(game.fields) >= mergeFreshness(current.fields)
+        ) {
+          writes.push({
+            update: { name: targetGameName, fields: game.rawFields },
+            updateMask: { fieldPaths: Object.keys(game.rawFields) },
+            currentDocument: current?.updateTime
+              ? { updateTime: current.updateTime }
+              : { exists: false },
+          });
+        }
+        writes.push(
+          authDeleteWrite(
+            game.name,
+            game.updateTime ? { updateTime: game.updateTime } : true,
+          ),
+        );
+      }
+      await firestore.commitWrites(writes);
+      await mutateJob(job.profileId, (live) =>
+        live.sourceProfileIds[0] === sourceProfileId &&
+        live.sourcePhase === "games"
+          ? { ...live, phaseStartedAtMs: now(), updatedAtMs: now() }
+          : undefined,
+      );
+      return;
+    }
+    if (now() - job.phaseStartedAtMs < MERGE_GAME_FINALIZE_DELAY_MS) {
+      return;
+    }
+    await mutateJob(job.profileId, (live) =>
+      live.sourceProfileIds[0] === sourceProfileId &&
+      live.sourcePhase === "games"
+        ? {
+            ...live,
+            sourcePhase: "finalize",
+            phaseStartedAtMs: now(),
+            updatedAtMs: now(),
           }
+        : undefined,
+    );
+  };
+
+  const finalizeSource = async (
+    job: AuthRecoveryJob,
+    sourceProfileId: string,
+  ): Promise<void> => {
+    const sourcePage = await firestore.listPage(
+      `users/${sourceProfileId}`,
+      "games",
+    );
+    if (sourcePage.documents.length > 0) {
+      await mutateJob(job.profileId, (live) =>
+        live.sourceProfileIds[0] === sourceProfileId &&
+        live.sourcePhase === "finalize"
+          ? {
+              ...live,
+              sourcePhase: "games",
+              phaseStartedAtMs: now(),
+              updatedAtMs: now(),
+            }
+          : undefined,
+      );
+      return;
+    }
+    const jobName = authRecoveryJobName(job.profileId);
+    const targetName = authDocumentName("users", job.profileId);
+    const sourceName = authDocumentName("users", sourceProfileId);
+    const mergeTargetName = authDocumentName(
+      PROFILE_MERGE_TARGETS_COLLECTION,
+      sourceProfileId,
+    );
+    await firestore.runTransaction(async (transaction) => {
+      const snapshots = await transaction.batchGet([
+        jobName,
+        targetName,
+        sourceName,
+        mergeTargetName,
+      ]);
+      const jobDocument = snapshots.get(jobName);
+      if (!jobDocument) {
+        return { result: undefined, writes: [] };
+      }
+      const live = parseAuthRecoveryJob(jobDocument);
+      const target = snapshots.get(targetName);
+      const source = snapshots.get(sourceName);
+      const mergeTarget = snapshots.get(mergeTargetName);
+      let currentMapping = mergeTarget;
+      let firstTargetProfileId = "";
+      let resolvesToTarget = false;
+      const visited = new Set([sourceProfileId]);
+      for (let depth = 0; depth <= MAX_PROFILE_MERGE_TARGET_HOPS; depth++) {
+        const nextProfileId = exactDocumentId(
+          currentMapping?.fields.targetProfileId,
+        );
+        if (!nextProfileId || visited.has(nextProfileId)) {
+          break;
         }
+        firstTargetProfileId ||= nextProfileId;
+        if (nextProfileId === job.profileId) {
+          resolvesToTarget = true;
+          break;
+        }
+        visited.add(nextProfileId);
+        const nextMappingName = authDocumentName(
+          PROFILE_MERGE_TARGETS_COLLECTION,
+          nextProfileId,
+        );
+        currentMapping = (await transaction.batchGet([nextMappingName])).get(
+          nextMappingName,
+        );
+      }
+      if (
+        !live ||
+        !target ||
+        live.sourceProfileIds[0] !== sourceProfileId ||
+        live.sourcePhase !== "finalize" ||
+        !resolvesToTarget ||
+        (source &&
+          (exactDocumentId(source.fields.mergedIntoProfileId) !==
+            firstTargetProfileId ||
+            uniqueStoredFirebaseUids(source.fields.logins).length > 0))
+      ) {
+        return { result: undefined, writes: [] };
+      }
+      const writes: AuthFirestoreWrite[] = [];
+      if (source) {
+        writes.push(
+          authDeleteWrite(
+            sourceName,
+            source.updateTime ? { updateTime: source.updateTime } : true,
+          ),
+        );
+      }
+      const sourceProfileIds = source
+        ? live.sourceProfileIds
+        : live.sourceProfileIds.slice(1);
+      const updated: AuthRecoveryJob = {
+        ...live,
+        sourceProfileIds,
+        sourcePhase: source
+          ? "games"
+          : sourceProfileIds.length > 0
+            ? "prizes"
+            : "finalize",
+        prizeCursor: null,
+        phaseStartedAtMs: now(),
+        updatedAtMs: now(),
+      };
+      writes.push(
+        authUpdateWrite(
+          jobName,
+          updated,
+          Object.keys(updated),
+          jobDocument.updateTime
+            ? { updateTime: jobDocument.updateTime }
+            : true,
+        ),
+      );
+      return { result: undefined, writes };
+    });
+  };
+
+  const recoverProfile = async (profileId: string): Promise<boolean> => {
+    const name = authRecoveryJobName(profileId);
+    const document = await firestore.get(name);
+    if (!document) {
+      return true;
+    }
+    let job = parseAuthRecoveryJob(document);
+    if (!job) {
+      logger.error(JSON.stringify({ event: "auth_recovery_job_invalid" }));
+      return false;
+    }
+    await recoverClaims(job);
+    const refreshed = await firestore.get(name);
+    if (!refreshed) {
+      return true;
+    }
+    job = parseAuthRecoveryJob(refreshed);
+    if (!job) {
+      return false;
+    }
+    if (job.loginUids.some(isCanonicalFirebaseUid)) {
+      return false;
+    }
+    if (job.sourceProfileIds.length === 0) {
+      if (job.loginUids.length === 0) {
+        if (now() - job.updatedAtMs < MERGE_GAME_FINALIZE_DELAY_MS) {
+          return false;
+        }
+        return mutateJob(profileId, (live) =>
+          live.loginUids.length === 0 &&
+          live.sourceProfileIds.length === 0 &&
+          now() - live.updatedAtMs >= MERGE_GAME_FINALIZE_DELAY_MS
+            ? null
+            : undefined,
+        );
+      }
+      logger.error(JSON.stringify({ event: "auth_recovery_uid_invalid" }));
+      return false;
+    }
+    const sourceProfileId = job.sourceProfileIds[0];
+    try {
+      if (job.sourcePhase === "prizes") {
+        await recoverPrizes(job, sourceProfileId);
+      } else if (job.sourcePhase === "games") {
+        await recoverGames(job, sourceProfileId);
+      } else {
+        await finalizeSource(job, sourceProfileId);
       }
     } catch (error) {
-      failure ||= error;
-      logger.error(
-        JSON.stringify({ event: "auth_legacy_claim_backlog_sweep_failed" }),
-      );
+      if (!(error instanceof AuthFirestoreConflict)) {
+        logger.error(
+          JSON.stringify({
+            event:
+              error instanceof Error &&
+              error.message === "auth-recovery-prize-conflict"
+                ? "auth_recovery_prize_conflict"
+                : "auth_recovery_pending",
+          }),
+        );
+      }
     }
-  }
-  for (const profileId of profileIds) {
-    await enqueue(profileId);
-    for (const backlogName of backlogNamesByProfile.get(profileId) || []) {
-      await markClaimBacklogQueued(backlogName, firestore, now);
-    }
-  }
-  if (failure) {
-    throw failure;
-  }
-  return profileIds.size;
+    return (await firestore.get(name)) === null;
+  };
+
+  return { recoverProfile, removeLoginUid };
 }
 
-export async function sweepLegacyAuthGameBacklogs(
+export async function sweepAuthRecoveryJobs(
   env: Env,
-  dependencies: AuthRecoverySweepDependencies = {},
+  dependencies: Pick<
+    AuthRecoveryDependencies,
+    "firestore" | "logger" | "now"
+  > = {},
 ): Promise<number> {
   const firestore = dependencies.firestore || createAuthFirestoreClient(env);
-  const enqueue =
-    dependencies.enqueue ||
-    ((profileId: string) => enqueueProfileRecovery(env, profileId));
   const logger = dependencies.logger || console;
   const now = dependencies.now || Date.now;
-  const candidates = await readRotatingPendingBacklogPage({
-    collectionId: "authMergeGameBacklog",
-    fieldPaths: ["opId", "sourceProfileId", "targetProfileId"],
-    firestore,
-    limit: LEGACY_GAME_BACKLOG_SWEEP_LIMIT,
-  });
-  const backlogsByProfile = new Map<string, MaterializedGameBacklog[]>();
-  let failure: unknown;
-  for (const candidate of candidates) {
-    try {
-      const materialized = await materializeLegacyGameBacklog(
-        candidate,
-        firestore,
-        now,
-      );
-      if (materialized) {
-        const backlogs = backlogsByProfile.get(materialized.profileId);
-        if (backlogs) {
-          backlogs.push(materialized);
-        } else {
-          backlogsByProfile.set(materialized.profileId, [materialized]);
-        }
+  let pageToken = "";
+  let enqueued = 0;
+  let firstFailure: unknown;
+  do {
+    const page = await firestore.listPage(
+      "",
+      AUTH_RECOVERY_JOBS_COLLECTION,
+      pageToken,
+    );
+    for (const document of page.documents) {
+      const job = parseAuthRecoveryJob(document);
+      if (!job) {
+        logger.error(JSON.stringify({ event: "auth_recovery_job_invalid" }));
+        continue;
       }
-    } catch (error) {
-      failure ||= error;
-      logger.error(
-        JSON.stringify({ event: "auth_legacy_game_backlog_sweep_failed" }),
-      );
+      if (now() - job.lastEnqueuedAtMs < STALE_ENQUEUE_MS) {
+        continue;
+      }
+      try {
+        await enqueuePersistedAuthRecovery(
+          env,
+          firestore,
+          job.profileId,
+          now(),
+        );
+        enqueued++;
+      } catch (error) {
+        firstFailure ||= error;
+        logger.error(
+          JSON.stringify({ event: "auth_recovery_enqueue_failure" }),
+        );
+      }
     }
+    pageToken = page.nextPageToken;
+  } while (pageToken);
+  if (firstFailure) {
+    throw firstFailure;
   }
-  for (const [profileId, backlogs] of backlogsByProfile) {
-    await enqueue(profileId);
-    for (const backlog of backlogs) {
-      await deleteMaterializedGameBacklog(backlog, firestore);
-    }
-  }
-  if (failure) {
-    throw failure;
-  }
-  return backlogsByProfile.size;
+  return enqueued;
 }
 
 export async function handleAuthRecoverySweep(
   _controller: ScheduledController,
   env: Env,
 ): Promise<void> {
-  const [claimResult, gameResult] = await Promise.allSettled([
-    sweepLegacyAuthClaimBacklogs(env),
-    sweepLegacyAuthGameBacklogs(env),
-  ]);
-  if (claimResult.status === "rejected") {
-    throw claimResult.reason;
-  }
-  if (gameResult.status === "rejected") {
-    throw gameResult.reason;
-  }
+  const enqueued = await sweepAuthRecoveryJobs(env);
   console.info(
-    JSON.stringify({
-      event: "auth_recovery_sweep_completed",
-      legacyClaimBacklogs: claimResult.value,
-      legacyGameBacklogs: gameResult.value,
-    }),
+    JSON.stringify({ event: "auth_recovery_sweep_completed", enqueued }),
   );
 }
 
@@ -524,9 +886,7 @@ export async function handleAuthRecoveryMessage(
   message: Message<unknown>,
   env: Env,
   recover = (profileId: string) =>
-    createAuthIdentityService(env, {
-      claimBacklogStatus: "queued",
-    }).recoverPendingProfile(profileId),
+    createAuthRecoveryService(env).recoverProfile(profileId),
 ): Promise<void> {
   const task = parseAuthRecoveryTask(message.body);
   if (!task) {
@@ -553,10 +913,4 @@ export async function handleAuthRecoveryQueue(
   }
 }
 
-export {
-  AUTH_RECOVERY_DLQ_NAME,
-  AUTH_RECOVERY_QUEUE_NAME,
-  enqueueAuthRecovery,
-  parseAuthRecoveryTask as parseTask,
-  type AuthRecoveryTask,
-} from "./authRecoveryTask.ts";
+export { parseAuthRecoveryTask as parseTask };

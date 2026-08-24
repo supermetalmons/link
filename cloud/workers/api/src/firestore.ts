@@ -71,9 +71,7 @@ export type AuthRepository = {
   ) => Promise<ProfileClaimSource>;
 };
 
-export type ProfileClaimSource = LinkedAuthMethodsResponse & {
-  pendingRecovery?: boolean;
-};
+export type ProfileClaimSource = LinkedAuthMethodsResponse;
 
 export type XRedirectFlow = {
   returnUrl: string;
@@ -134,25 +132,6 @@ function readFirestoreInteger(
   const parsed =
     typeof raw === "string" || typeof raw === "number" ? Number(raw) : 0;
   return Number.isSafeInteger(parsed) ? parsed : 0;
-}
-
-function hasFirestoreStringArrayValue(
-  fields: Record<string, unknown>,
-  name: string,
-): boolean {
-  const value = toRecord(fields[name]);
-  const array = toRecord(value?.arrayValue);
-  const values = array?.values;
-  return (
-    Array.isArray(values) &&
-    values.some((item) => {
-      const encoded = toRecord(item);
-      return (
-        typeof encoded?.stringValue === "string" &&
-        Boolean(encoded.stringValue.trim())
-      );
-    })
-  );
 }
 
 export function parseXRedirectFlowDocument(value: unknown): XRedirectFlow {
@@ -435,19 +414,9 @@ export function createAuthRepository(
         body: JSON.stringify({
           structuredQuery: {
             select: {
-              fields: [
-                "appleSub",
-                "eth",
-                "sol",
-                "xUserId",
-                ...(limit === 2
-                  ? [
-                      "pendingClaimSyncLogins",
-                      "pendingClaimSyncOpId",
-                      "pendingMergeGameCopySourceProfileId",
-                    ]
-                  : []),
-              ].map((fieldPath) => ({ fieldPath })),
+              fields: ["appleSub", "eth", "sol", "xUserId"].map(
+                (fieldPath) => ({ fieldPath }),
+              ),
             },
             from: [{ collectionId: "users" }],
             where: {
@@ -553,22 +522,7 @@ export function createAuthRepository(
       if (profiles.length > 1) {
         throw new LoginProfileConflict();
       }
-      const profile = profiles[0] || null;
-      return {
-        ...linkedMethodsResponse(profile),
-        pendingRecovery: Boolean(
-          profile &&
-          (hasFirestoreStringArrayValue(
-            profile.fields,
-            "pendingClaimSyncLogins",
-          ) ||
-            readProfileField(profile.fields, "pendingClaimSyncOpId") ||
-            readProfileField(
-              profile.fields,
-              "pendingMergeGameCopySourceProfileId",
-            )),
-        ),
-      };
+      return linkedMethodsResponse(profiles[0] || null);
     },
   };
 }

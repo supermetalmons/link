@@ -1,12 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AuthMethodKey, AuthProfileResponse } from "@mons/shared/auth";
-import { buildProfileEventPrizeMergeCopies } from "../../../functions/eventPrizeAwards.js";
-import {
-  getEventPrizeWithdrawalPath,
-  isCompletedEventPrizeWithdrawal,
-  isMatchingProfileEventPrizeAssignment,
-} from "../../../functions/eventPrizeWithdrawalState.js";
 import {
   AUTH_FIRESTORE_DATABASE_ROOT,
   type AuthFirestoreClient,
@@ -17,10 +11,17 @@ import {
   encodeFields,
 } from "../src/authFirestore.ts";
 import { createAuthIdentityService } from "../src/authIdentity.ts";
-import { createAuthMergeRecovery } from "../src/authMergeRecovery.ts";
+import {
+  authRecoveryJobName,
+  newAuthRecoveryJob,
+} from "../src/authRecovery.ts";
 import type { FirebaseAuthAdminClient } from "../src/firebaseAuthAdmin.ts";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
-import { getMethodKey, uniqueStoredFirebaseUids } from "../src/authPolicy.ts";
+import {
+  getMethodKey,
+  hashMethodValue,
+  uniqueStoredFirebaseUids,
+} from "../src/authPolicy.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 function toRecord(value: unknown): Record<string, unknown> {
@@ -199,72 +200,6 @@ function dependencies(firestore: AuthFirestoreClient) {
 }
 
 const env = TELEGRAM_TEST_ENV as Env;
-
-test("checkpoints bounded prize recovery pages", async () => {
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "target-profile",
-      fields: {
-        pendingMergeGameCopySourceProfileId: "source-profile",
-        pendingMergeGameCopyOpId: "merge-operation",
-      },
-    },
-  ]);
-  const deps = dependencies(memory.client);
-  deps.rtdbValues.set("profileEventPrizes/source-profile", {
-    FRkdorMWaYW: {
-      eventId: "FRkdorMWaYW",
-      profileId: "source-profile",
-      place: 1,
-      prizeId: "1866",
-      assignedAtMs: 1,
-    },
-    NN3eRzoZo80: {
-      eventId: "NN3eRzoZo80",
-      profileId: "source-profile",
-      place: 2,
-      prizeId: "1111",
-      assignedAtMs: 2,
-    },
-  });
-  const recovery = createAuthMergeRecovery({
-    buildPrizeCopies: buildProfileEventPrizeMergeCopies,
-    durableFirestore: memory.client,
-    firestore: memory.client,
-    getWithdrawalPath: getEventPrizeWithdrawalPath,
-    isCompletedWithdrawal: isCompletedEventPrizeWithdrawal,
-    isMatchingAssignment: isMatchingProfileEventPrizeAssignment,
-    mergeGameBacklogName: (opId) =>
-      authDocumentName("authMergeGameBacklog", opId),
-    now: () => 123,
-    prizePageSize: 1,
-    rtdb: deps.rtdb,
-  });
-  const input = {
-    opId: "merge-operation",
-    sourceProfileId: "source-profile",
-    targetName: authDocumentName("users", "target-profile"),
-    targetProfileId: "target-profile",
-  };
-  assert.equal(await recovery.reconcileProfilePrizes(input), false);
-  assert.equal(
-    memory.documents.get(input.targetName)?.fields.pendingMergePrizeCopyCursor,
-    "FRkdorMWaYW",
-  );
-  assert.equal(await recovery.reconcileProfilePrizes(input), true);
-  assert.equal(
-    memory.documents.get(input.targetName)?.fields
-      .pendingMergePrizeCopyCompletedOpId,
-    "merge-operation",
-  );
-  assert.ok(
-    deps.rtdbValues.get("profileEventPrizes/target-profile/FRkdorMWaYW"),
-  );
-  assert.ok(
-    deps.rtdbValues.get("profileEventPrizes/target-profile/NN3eRzoZo80"),
-  );
-});
 
 test("consumes an exact auth intent once inside a transaction", async () => {
   const nowMs = 1_000_000;
@@ -505,23 +440,37 @@ test("does not let a second X operation reuse a consumed intent", async () => {
   );
 });
 
-test("creates a new profile, method index, replay, claim, and RTDB link", async () => {
+test("keeps a recovery job when Queue enqueue fails", async (t) => {
   const memory = memoryFirestore([]);
   const deps = dependencies(memory.client);
-  const service = createAuthIdentityService(env, {
-    ...deps,
-    now: () => 2_000_000,
-  });
-  const response = await service.linkVerifiedMethod({
+  t.mock.method(console, "error", () => undefined);
+  const service = createAuthIdentityService(
+    {
+      ...env,
+      AUTH_RECOVERY_QUEUE: {
+        ...env.AUTH_RECOVERY_QUEUE,
+        send: async () => {
+          throw new Error("queue-unavailable");
+        },
+      },
+    } as Env,
+    {
+      ...deps,
+      now: () => 2_000_000,
+    },
+  );
+  const input = {
     uid: "login-1",
     method: "sol",
     methodValueRaw: "11111111111111111111111111111111",
     normalizedMethodValue: "11111111111111111111111111111111",
+    intentId: "intent-sol",
     requestEmoji: 4,
     requestAura: "rainbow",
     preferredAddress: "11111111111111111111111111111111",
     opId: "intent:intent-sol",
-  });
+  } as const;
+  const response = await service.linkVerifiedMethod(input);
   assert.equal(response.profileId, "generated-1");
   assert.equal(response.emoji, 4);
   assert.equal(response.linkedMethods.sol, true);
@@ -540,6 +489,248 @@ test("creates a new profile, method index, replay, claim, and RTDB link", async 
     memory.documents.get(authDocumentName("authOps", "intent:intent-sol"))
       ?.fields.status,
     "success",
+  );
+  assert.deepEqual(
+    memory.documents.get(authRecoveryJobName("generated-1"))?.fields.loginUids,
+    [],
+  );
+  const intentFields = {
+    uid: "login-1",
+    method: "sol",
+    nonce: "nonce-sol",
+    consumedAtMs: 1_999_999,
+    consumedByOpId: input.opId,
+    expiresAtMs: 1_999_999,
+  };
+  memory.documents.set(authDocumentName("authIntents", input.intentId), {
+    id: input.intentId,
+    name: authDocumentName("authIntents", input.intentId),
+    fields: intentFields,
+    rawFields: encodeFields(intentFields),
+    updateTime: "2026-08-22T00:00:00Z",
+  });
+  const replayIntent = await service.readIntent(
+    input.uid,
+    input.method,
+    input.intentId,
+    input.opId,
+  );
+  assert.equal(
+    (await service.prepareVerifiedMethod(input, replayIntent))?.profileId,
+    response.profileId,
+  );
+});
+
+test("rejects a successful replay with different immutable context", async () => {
+  const memory = memoryFirestore([]);
+  const service = createAuthIdentityService(env, {
+    ...dependencies(memory.client),
+    now: () => 2_050_000,
+  });
+  const input = {
+    uid: "login-1",
+    method: "sol" as const,
+    methodValueRaw: "11111111111111111111111111111111",
+    normalizedMethodValue: "11111111111111111111111111111111",
+    requestEmoji: 1,
+    requestAura: null,
+    preferredAddress: "11111111111111111111111111111111",
+    opId: "immutable-replay",
+  };
+  await service.linkVerifiedMethod(input);
+  await assert.rejects(
+    service.linkVerifiedMethod({
+      ...input,
+      methodValueRaw: "22222222222222222222222222222222",
+      normalizedMethodValue: "22222222222222222222222222222222",
+      preferredAddress: "22222222222222222222222222222222",
+    }),
+    (error) =>
+      error instanceof Error && error.message === "op-context-mismatch",
+  );
+});
+
+test("does not resume a successful verification whose live effect is gone", async () => {
+  const nowMs = 2_075_000;
+  const sol = "11111111111111111111111111111111";
+  const opId = "stale-successful-verification";
+  const memory = memoryFirestore([
+    {
+      collection: "users",
+      id: "profile-1",
+      fields: {
+        logins: ["login-1"],
+        eth: "0x1111111111111111111111111111111111111111",
+      },
+    },
+    {
+      collection: "authOps",
+      id: opId,
+      fields: {
+        uid: "login-1",
+        kind: "verify",
+        method: "sol",
+        status: "success",
+        meta: { methodValueHash: hashMethodValue("sol", sol) },
+        result: {
+          ok: true,
+          uid: "login-1",
+          profileId: "profile-1",
+          username: null,
+          linkedMethods: { apple: false, eth: false, sol: true, x: false },
+          appleLinked: false,
+          emoji: 1,
+          opId,
+        },
+        updatedAtMs: nowMs,
+      },
+    },
+  ]);
+  const service = createAuthIdentityService(env, {
+    ...dependencies(memory.client),
+    now: () => nowMs,
+  });
+
+  await assert.rejects(
+    service.linkVerifiedMethod({
+      uid: "login-1",
+      method: "sol",
+      methodValueRaw: sol,
+      normalizedMethodValue: sol,
+      requestEmoji: 1,
+      requestAura: null,
+      preferredAddress: sol,
+      opId,
+    }),
+    (error) =>
+      error instanceof Error && error.message === "profile-merged-retry",
+  );
+  assert.equal(
+    memory.documents.get(authDocumentName("users", "profile-1"))?.fields.sol,
+    undefined,
+  );
+  assert.equal(
+    memory.documents.has(
+      authDocumentName("authMethodIndex", getMethodKey("sol", sol)),
+    ),
+    false,
+  );
+  assert.equal(
+    memory.documents.get(authDocumentName("authOps", opId))?.fields.status,
+    "success",
+  );
+});
+
+test("merges profiles into one recovery job and repairs only the caller", async () => {
+  const eth = "0x1111111111111111111111111111111111111111";
+  const sol = "11111111111111111111111111111111";
+  const memory = memoryFirestore([
+    {
+      collection: "users",
+      id: "target-profile",
+      fields: { logins: ["login-1"], eth },
+    },
+    {
+      collection: "users",
+      id: "source-profile",
+      fields: { logins: ["login-2"], sol },
+    },
+    {
+      collection: "authMethodIndex",
+      id: getMethodKey("sol", sol),
+      fields: { profileId: "source-profile", method: "sol" },
+    },
+  ]);
+  const tasks: unknown[] = [];
+  const recoveryEnv = {
+    ...env,
+    AUTH_RECOVERY_QUEUE: {
+      ...env.AUTH_RECOVERY_QUEUE,
+      send: async (body: unknown) => {
+        tasks.push(body);
+        return {
+          metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+        };
+      },
+    },
+  } as Env;
+  const deps = dependencies(memory.client);
+  const service = createAuthIdentityService(recoveryEnv, {
+    ...deps,
+    now: () => 2_100_000,
+  });
+  const response = await service.linkVerifiedMethod({
+    uid: "login-1",
+    method: "sol",
+    methodValueRaw: sol,
+    normalizedMethodValue: sol,
+    requestEmoji: 1,
+    requestAura: null,
+    preferredAddress: sol,
+    opId: "merge-operation",
+  });
+  assert.equal(response.profileId, "target-profile");
+  assert.equal(deps.claims.get("login-1")?.profileId, "target-profile");
+  assert.deepEqual(
+    memory.documents.get(authRecoveryJobName("target-profile"))?.fields
+      .loginUids,
+    ["login-2"],
+  );
+  assert.deepEqual(
+    memory.documents.get(authRecoveryJobName("target-profile"))?.fields
+      .sourceProfileIds,
+    ["source-profile"],
+  );
+  assert.equal(
+    memory.documents.get(authDocumentName("users", "source-profile"))?.fields
+      .mergedIntoProfileId,
+    "target-profile",
+  );
+  assert.equal(tasks.length > 0, true);
+});
+
+test("rejects a merge while either profile has a recovery job", async () => {
+  const eth = "0x1111111111111111111111111111111111111111";
+  const sol = "11111111111111111111111111111111";
+  const memory = memoryFirestore([
+    {
+      collection: "users",
+      id: "target-profile",
+      fields: { logins: ["login-1"], eth },
+    },
+    {
+      collection: "users",
+      id: "source-profile",
+      fields: { logins: ["login-2"], sol },
+    },
+    {
+      collection: "authMethodIndex",
+      id: getMethodKey("sol", sol),
+      fields: { profileId: "source-profile", method: "sol" },
+    },
+    {
+      collection: "authRecoveryJobs",
+      id: "source-profile",
+      fields: newAuthRecoveryJob("source-profile", ["login-2"], [], 1),
+    },
+  ]);
+  const service = createAuthIdentityService(env, {
+    ...dependencies(memory.client),
+    now: () => 2_150_000,
+  });
+  await assert.rejects(
+    service.linkVerifiedMethod({
+      uid: "login-1",
+      method: "sol",
+      methodValueRaw: sol,
+      normalizedMethodValue: sol,
+      requestEmoji: 1,
+      requestAura: null,
+      preferredAddress: sol,
+      opId: "blocked-merge",
+    }),
+    (error) =>
+      error instanceof Error && error.message === "merge-recovery-pending",
   );
 });
 
@@ -681,7 +872,6 @@ test("finalizes a link on the canonical profile after a concurrent merge", async
       source.fields = {
         logins: [],
         mergedIntoProfileId: "target-profile",
-        mergeSourceRetainedForGameCopy: true,
       };
       source.rawFields = encodeFields(source.fields);
       const indexName = authDocumentName(
@@ -771,348 +961,6 @@ test("rejects legacy Ethereum owners split across checksum representations", asy
   );
 });
 
-test("keeps a committed link successful when claim repair is pending", async () => {
-  const memory = memoryFirestore([]);
-  const deps = dependencies(memory.client);
-  deps.authClient.getUser = async () => {
-    throw new Error("temporary-auth-failure");
-  };
-  const service = createAuthIdentityService(env, {
-    ...deps,
-    now: () => 2_500_000,
-  });
-  const response = await service.linkVerifiedMethod({
-    uid: "login-1",
-    method: "sol",
-    methodValueRaw: "11111111111111111111111111111111",
-    normalizedMethodValue: "11111111111111111111111111111111",
-    requestEmoji: 4,
-    requestAura: "rainbow",
-    preferredAddress: "11111111111111111111111111111111",
-    opId: "claim-repair-operation",
-  });
-  assert.equal(response.ok, true);
-  assert.equal(
-    memory.documents.get(authDocumentName("authOps", "claim-repair-operation"))
-      ?.fields.status,
-    "success",
-  );
-  assert.deepEqual(
-    memory.documents.get(authDocumentName("users", response.profileId))?.fields
-      .pendingClaimSyncLogins,
-    ["login-1"],
-  );
-});
-
-test("waits for both claim writes when one sibling fails", async () => {
-  const memory = memoryFirestore([]);
-  const deps = dependencies(memory.client);
-  let rtdbSettled = false;
-  deps.authClient.setCustomUserClaims = async () => {
-    throw new Error("temporary-auth-failure");
-  };
-  deps.rtdb.patchRoot = async () => {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    rtdbSettled = true;
-  };
-  const service = createAuthIdentityService(env, {
-    ...deps,
-    now: () => 2_550_000,
-  });
-
-  const response = await service.linkVerifiedMethod({
-    uid: "login-1",
-    method: "sol",
-    methodValueRaw: "11111111111111111111111111111111",
-    normalizedMethodValue: "11111111111111111111111111111111",
-    requestEmoji: 1,
-    requestAura: null,
-    preferredAddress: "11111111111111111111111111111111",
-    opId: "claim-sibling-settlement",
-  });
-
-  assert.equal(response.ok, true);
-  assert.equal(rtdbSettled, true);
-});
-
-test("retries a committed link when claim recovery cannot be persisted", async () => {
-  const sol = "11111111111111111111111111111111";
-  const opId = "claim-marker-write-failure";
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "profile-1",
-      fields: { logins: ["login-1"], sol },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: { profileId: "profile-1", method: "sol" },
-    },
-  ]);
-  const runTransaction = memory.client.runTransaction;
-  let markerWriteFailures = 2;
-  memory.client.runTransaction = async <T>(
-    work: Parameters<AuthFirestoreClient["runTransaction"]>[0],
-  ) =>
-    runTransaction(async (transaction) => {
-      const operation = await work(transaction);
-      const persistsClaimBacklog = operation.writes.some(
-        (write) =>
-          "update" in write &&
-          write.update.name.includes("/documents/authClaimSyncBacklog/") &&
-          decodeFields(write.update.fields).status === "pending",
-      );
-      if (persistsClaimBacklog && markerWriteFailures > 0) {
-        markerWriteFailures--;
-        throw new Error("temporary-claim-marker-failure");
-      }
-      return operation;
-    }) as Promise<T>;
-  const recoveryTasks: unknown[] = [];
-  const recoveryEnv = {
-    ...env,
-    AUTH_RECOVERY_QUEUE: {
-      ...env.AUTH_RECOVERY_QUEUE,
-      send: async (body: unknown, options?: QueueSendOptions) => {
-        recoveryTasks.push({ body, options });
-        return env.AUTH_RECOVERY_QUEUE.send(body, options);
-      },
-    },
-  } as Env;
-  const deps = dependencies(memory.client);
-  const service = createAuthIdentityService(recoveryEnv, {
-    ...deps,
-    now: () => 2_600_000,
-  });
-  const input = {
-    uid: "login-1",
-    method: "sol" as const,
-    methodValueRaw: sol,
-    normalizedMethodValue: sol,
-    requestEmoji: 1,
-    requestAura: "",
-    preferredAddress: sol,
-    opId,
-  };
-  await assert.rejects(
-    service.linkVerifiedMethod(input),
-    (error) =>
-      error instanceof Error &&
-      error.message === "temporary-claim-marker-failure",
-  );
-  assert.equal(markerWriteFailures, 0);
-  assert.deepEqual(recoveryTasks, []);
-  assert.equal(deps.claims.has("login-1"), false);
-  assert.equal(deps.rtdbValues.has("players/login-1/profile"), false);
-  assert.equal(
-    memory.documents.get(authDocumentName("authOps", opId))?.fields.status,
-    "success",
-  );
-
-  const replay = await service.linkVerifiedMethod(input);
-  assert.equal(replay.profileId, "profile-1");
-  assert.equal(deps.claims.get("login-1")?.profileId, "profile-1");
-  assert.equal(deps.rtdbValues.get("players/login-1/profile"), "profile-1");
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "profile-1"))?.fields
-      .pendingClaimSyncLogins,
-    undefined,
-  );
-});
-
-test("queues claim repair when another operation owns the profile lock", async () => {
-  const sol = "11111111111111111111111111111111";
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "profile-1",
-      fields: { logins: ["login-1"], sol },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: { profileId: "profile-1", method: "sol", normalizedValue: sol },
-    },
-    {
-      collection: "mergeLocks",
-      id: "profile:profile-1",
-      fields: { opId: "other-operation", expiresAtMs: 4_000_000 },
-    },
-  ]);
-  const deps = dependencies(memory.client);
-  const service = createAuthIdentityService(env, {
-    ...deps,
-    now: () => 3_000_000,
-  });
-  const response = await service.linkVerifiedMethod({
-    uid: "login-1",
-    method: "sol",
-    methodValueRaw: sol,
-    normalizedMethodValue: sol,
-    requestEmoji: 1,
-    requestAura: "",
-    preferredAddress: sol,
-    opId: "contending-operation",
-  });
-  assert.equal(response.ok, true);
-  assert.equal(deps.claims.has("login-1"), false);
-  assert.deepEqual(
-    memory.documents.get(authDocumentName("users", "profile-1"))?.fields
-      .pendingClaimSyncLogins,
-    ["login-1"],
-  );
-});
-
-test("rejects an active merge lock owned by another invocation of the same operation", async () => {
-  const eth = "0x1111111111111111111111111111111111111111";
-  const sol = "11111111111111111111111111111111";
-  const opId = "duplicate-merge-operation";
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "target-profile",
-      fields: { logins: ["login-1"], eth },
-    },
-    {
-      collection: "users",
-      id: "source-profile",
-      fields: { logins: ["login-2"], sol },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: { profileId: "source-profile", method: "sol" },
-    },
-    {
-      collection: "mergeLocks",
-      id: "profile:target-profile",
-      fields: {
-        opId: "first-invocation",
-        operationId: opId,
-        ownerId: "first-invocation",
-        expiresAtMs: 4_000_000,
-      },
-    },
-  ]);
-  const service = createAuthIdentityService(env, {
-    ...dependencies(memory.client),
-    createLockOwnerId: () => "second-invocation",
-    now: () => 3_000_000,
-  });
-  await assert.rejects(
-    service.linkVerifiedMethod({
-      uid: "login-1",
-      method: "sol",
-      methodValueRaw: sol,
-      normalizedMethodValue: sol,
-      requestEmoji: 1,
-      requestAura: "",
-      preferredAddress: sol,
-      opId,
-    }),
-    (error) => error instanceof Error && error.message === "merge-lock-active",
-  );
-  assert.equal(
-    memory.documents.get(
-      authDocumentName("mergeLocks", "profile:target-profile"),
-    )?.fields.opId,
-    "first-invocation",
-  );
-  assert.equal(
-    memory.documents.get(
-      authDocumentName("mergeLocks", "profile:target-profile"),
-    )?.fields.operationId,
-    opId,
-  );
-  assert.equal(
-    memory.documents.has(authDocumentName("users", "source-profile")),
-    true,
-  );
-});
-
-test("uses a twenty-minute mixed-version-safe lease and preserves its successor", async () => {
-  const sol = "11111111111111111111111111111111";
-  const opId = "claim-repair-operation";
-  const lockName = authDocumentName("mergeLocks", "profile:profile-1");
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "profile-1",
-      fields: { logins: ["login-1"], sol },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: { profileId: "profile-1", method: "sol", normalizedValue: sol },
-    },
-  ]);
-  const deps = dependencies(memory.client);
-  deps.authClient.getUser = async (uid) => {
-    const lock = memory.documents.get(lockName);
-    assert.equal(lock?.fields.opId, "first-invocation");
-    assert.equal(lock?.fields.ownerId, "first-invocation");
-    assert.equal(lock?.fields.operationId, opId);
-    assert.notEqual(lock?.fields.opId, opId);
-    assert.equal(lock?.fields.expiresAtMs, 4_200_000);
-    assert.equal(
-      Number(lock?.fields.expiresAtMs) > 3_000_000 &&
-        String(lock?.fields.opId) !== opId,
-      true,
-    );
-    if (lock) {
-      lock.fields.opId = "successor-invocation";
-      lock.fields.ownerId = "successor-invocation";
-      lock.rawFields = encodeFields(lock.fields);
-    }
-    return { uid, customClaims: {} };
-  };
-  const service = createAuthIdentityService(env, {
-    ...deps,
-    createLockOwnerId: () => "first-invocation",
-    now: () => 3_000_000,
-  });
-  await service.linkVerifiedMethod({
-    uid: "login-1",
-    method: "sol",
-    methodValueRaw: sol,
-    normalizedMethodValue: sol,
-    requestEmoji: 1,
-    requestAura: "",
-    preferredAddress: sol,
-    opId,
-  });
-  assert.equal(
-    memory.documents.get(lockName)?.fields.ownerId,
-    "successor-invocation",
-  );
-  assert.equal(
-    memory.documents.get(lockName)?.fields.opId,
-    "successor-invocation",
-  );
-  assert.equal(memory.documents.get(lockName)?.fields.operationId, opId);
-  assert.equal(memory.documents.get(lockName)?.fields.expiresAtMs, 4_200_000);
-});
-
-test("does not start a service-wide cleanup deadline", () => {
-  const descriptor = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");
-  assert.ok(descriptor);
-  const deadlines: number[] = [];
-  Object.defineProperty(AbortSignal, "timeout", {
-    ...descriptor,
-    value: (milliseconds: number) => {
-      deadlines.push(milliseconds);
-      return descriptor.value.call(AbortSignal, milliseconds) as AbortSignal;
-    },
-  });
-  try {
-    createAuthIdentityService(env);
-  } finally {
-    Object.defineProperty(AbortSignal, "timeout", descriptor);
-  }
-  assert.deepEqual(deadlines, []);
-});
-
 test("recovers a committed verification from an incomplete operation", async () => {
   const sol = "11111111111111111111111111111111";
   const memory = memoryFirestore([]);
@@ -1177,6 +1025,18 @@ test("refreshes a completed result only while its profile owns the method", asyn
         custom: { emoji: 1 },
       },
     },
+    {
+      collection: "authOps",
+      id: "x-redirect:flow-1",
+      fields: {
+        uid: "login-1",
+        kind: "verify",
+        method: "x",
+        status: "success",
+        meta: { methodValueHash: hashMethodValue("x", "12345") },
+        updatedAtMs: 2_600_000,
+      },
+    },
   ]);
   const service = createAuthIdentityService(env, {
     ...dependencies(memory.client),
@@ -1213,192 +1073,104 @@ test("refreshes a completed result only while its profile owns the method", asyn
   );
 });
 
-test("does not let an older claim repair clear a newer marker", async () => {
-  const sol = "11111111111111111111111111111111";
+test("rebuilds a successful replay from the live canonical profile", async () => {
+  const staleResult: AuthProfileResponse = {
+    ok: true,
+    uid: "login-1",
+    profileId: "retired-profile",
+    username: "Retired",
+    linkedMethods: { apple: false, eth: false, sol: false, x: true },
+    appleLinked: false,
+    emoji: 1,
+    opId: "canonical-replay",
+  };
   const memory = memoryFirestore([
     {
       collection: "users",
-      id: "profile-1",
+      id: "canonical-profile",
       fields: {
         logins: ["login-1"],
-        sol,
-        pendingClaimSyncLogins: ["login-1"],
-        pendingClaimSyncOpId: "newer-claim-operation",
+        xUserId: "12345",
+        username: "Canonical",
+        custom: { emoji: 2 },
       },
     },
     {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: { profileId: "profile-1", method: "sol", normalizedValue: sol },
-    },
-  ]);
-  const deps = dependencies(memory.client);
-  let claimReads = 0;
-  deps.authClient.getUser = async (uid) => {
-    claimReads++;
-    if (claimReads <= 2) {
-      throw new Error("temporary-auth-failure");
-    }
-    return { uid, customClaims: {} };
-  };
-  const service = createAuthIdentityService(env, {
-    ...deps,
-    now: () => 2_750_000,
-  });
-  const response = await service.linkVerifiedMethod({
-    uid: "login-1",
-    method: "sol",
-    methodValueRaw: sol,
-    normalizedMethodValue: sol,
-    requestEmoji: 1,
-    requestAura: "",
-    preferredAddress: sol,
-    opId: "older-auth-operation",
-  });
-  assert.equal(response.ok, true);
-  assert.equal(claimReads, 3);
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "profile-1"))?.fields
-      .pendingClaimSyncOpId,
-    "newer-claim-operation",
-  );
-});
-
-test("preserves unattempted claim repairs from the same operation", async () => {
-  const sol = "11111111111111111111111111111111";
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "profile-1",
+      collection: "authOps",
+      id: "canonical-replay",
       fields: {
-        logins: ["login-1", "login-2"],
-        sol,
-        pendingClaimSyncLogins: ["login-2"],
-        pendingClaimSyncOpId: "claim-repair-operation",
+        uid: "login-1",
+        kind: "verify",
+        method: "x",
+        status: "success",
+        meta: { methodValueHash: hashMethodValue("x", "12345") },
+        result: staleResult,
+        updatedAtMs: 2_650_000,
       },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: { profileId: "profile-1", method: "sol", normalizedValue: sol },
     },
   ]);
   const deps = dependencies(memory.client);
-  deps.authClient.getUser = async (uid) => {
-    if (uid === "login-2") {
-      throw new Error("temporary-auth-failure");
-    }
-    return { uid, customClaims: deps.claims.get(uid) || {} };
-  };
   const service = createAuthIdentityService(env, {
     ...deps,
-    now: () => 2_800_000,
+    now: () => 2_650_000,
   });
-  await service.linkVerifiedMethod({
-    uid: "login-1",
-    method: "sol",
-    methodValueRaw: sol,
-    normalizedMethodValue: sol,
-    requestEmoji: 1,
-    requestAura: "",
-    preferredAddress: sol,
-    opId: "claim-repair-operation",
-  });
-  assert.deepEqual(
-    memory.documents.get(authDocumentName("users", "profile-1"))?.fields
-      .pendingClaimSyncLogins,
-    ["login-2"],
+  const replay = await service.peekVerifyReplay(
+    "canonical-replay",
+    "x",
+    "login-1",
   );
+  assert.equal(replay?.profileId, "canonical-profile");
+  assert.equal(replay?.username, "Canonical");
+  assert.equal(replay?.emoji, 2);
+  assert.equal(deps.claims.get("login-1")?.profileId, "canonical-profile");
   assert.deepEqual(
-    memory.documents.get(
-      authDocumentName("authClaimSyncBacklog", "claim-repair-operation"),
-    )?.fields.failedLoginUids,
-    ["login-2"],
+    memory.documents.get(authRecoveryJobName("canonical-profile"))?.fields
+      .loginUids,
+    [],
   );
 });
 
-test("keeps queue-owned claim recovery out of the pending sweep", async () => {
+test("synchronizes the current caller through the recovery barrier", async () => {
   const memory = memoryFirestore([
     {
       collection: "users",
-      id: "profile-1",
+      id: "canonical-profile",
       fields: {
         logins: ["login-1"],
-        pendingClaimSyncLogins: ["login-1"],
-        pendingClaimSyncOpId: "claim-repair-operation",
+        appleSub: "apple-subject",
+        sol: "11111111111111111111111111111111",
       },
     },
   ]);
   const deps = dependencies(memory.client);
-  deps.authClient.getUser = async () => {
-    throw new Error("temporary-auth-failure");
-  };
+  deps.claims.set("login-1", { admin: true, profileId: "retired-profile" });
+  deps.rtdbValues.set("players/login-1/profile", "retired-profile");
   const service = createAuthIdentityService(env, {
     ...deps,
-    claimBacklogStatus: "queued",
-    now: () => 2_900_000,
+    now: () => 2_700_000,
   });
-  assert.equal(await service.recoverPendingProfile("profile-1"), false);
-  assert.equal(
-    memory.documents.get(
-      authDocumentName("authClaimSyncBacklog", "claim-repair-operation"),
-    )?.fields.status,
-    "queued",
-  );
-});
 
-test("clears retired-source claim recovery without external writes", async () => {
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "source-profile",
-      fields: {
-        logins: [],
-        mergedIntoProfileId: "target-profile",
-        mergeSourceRetainedForGameCopy: true,
-        pendingClaimSyncLogins: ["login-1"],
-        pendingClaimSyncOpId: "claim-repair-operation",
-        pendingClaimSyncUpdatedAtMs: 2_900_000,
-      },
-    },
-    {
-      collection: "authClaimSyncBacklog",
-      id: "claim-repair-operation",
-      fields: {
-        status: "queued",
-        targetProfileId: "source-profile",
-        failedLoginUids: ["login-1"],
-      },
-    },
-  ]);
-  const deps = dependencies(memory.client);
-  let externalReads = 0;
-  deps.authClient.getUser = async () => {
-    externalReads++;
-    throw new Error("unexpected-auth-read");
-  };
-  deps.rtdb.getPath = async () => {
-    externalReads++;
-    throw new Error("unexpected-rtdb-read");
-  };
-  const service = createAuthIdentityService(env, {
-    ...deps,
-    claimBacklogStatus: "queued",
-    now: () => 3_000_000,
+  const result = await service.syncCurrentCallerProfile("login-1");
+
+  assert.equal(result.profileId, "canonical-profile");
+  assert.deepEqual(result.linkedMethods, {
+    apple: true,
+    eth: false,
+    sol: true,
+    x: false,
   });
-  assert.equal(await service.recoverPendingProfile("source-profile"), true);
-  assert.equal(externalReads, 0);
-  const source = memory.documents.get(
-    authDocumentName("users", "source-profile"),
-  );
-  assert.equal(source?.fields.pendingClaimSyncLogins, undefined);
-  assert.equal(source?.fields.pendingClaimSyncOpId, undefined);
-  assert.equal(source?.fields.pendingClaimSyncUpdatedAtMs, undefined);
+  assert.deepEqual(deps.claims.get("login-1"), {
+    admin: true,
+    profileId: "canonical-profile",
+  });
   assert.equal(
-    memory.documents.has(
-      authDocumentName("authClaimSyncBacklog", "claim-repair-operation"),
-    ),
-    false,
+    deps.rtdbValues.get("players/login-1/profile"),
+    "canonical-profile",
+  );
+  assert.deepEqual(
+    memory.documents.get(authRecoveryJobName("canonical-profile"))?.fields
+      .loginUids,
+    [],
   );
 });
 
@@ -1417,8 +1189,9 @@ test("unlinks a non-final method and writes both cooldown records", async () => 
       fields: { profileId: "profile-1", method: "eth", normalizedValue: eth },
     },
   ]);
+  const deps = dependencies(memory.client);
   const service = createAuthIdentityService(env, {
-    ...dependencies(memory.client),
+    ...deps,
     now: () => 3_000_000,
   });
   const response = await service.unlinkMethod("login-1", "eth", "unlink-1");
@@ -1447,6 +1220,77 @@ test("unlinks a non-final method and writes both cooldown records", async () => 
       .status,
     "success",
   );
+  assert.deepEqual(
+    memory.documents.get(authRecoveryJobName("profile-1"))?.fields.loginUids,
+    [],
+  );
+  assert.equal(deps.claims.get("login-1")?.profileId, "profile-1");
+});
+
+test("retries unlinking on the canonical profile after a merge", async () => {
+  const eth = "0x1111111111111111111111111111111111111111";
+  const sol = "11111111111111111111111111111111";
+  const memory = memoryFirestore([
+    {
+      collection: "users",
+      id: "source-profile",
+      fields: { logins: ["login-1"], eth, sol },
+    },
+    {
+      collection: "users",
+      id: "target-profile",
+      fields: { logins: [], eth, sol },
+    },
+    {
+      collection: "authMethodIndex",
+      id: getMethodKey("eth", eth),
+      fields: { profileId: "source-profile", method: "eth" },
+    },
+  ]);
+  const runTransaction = memory.client.runTransaction;
+  let merged = false;
+  memory.client.runTransaction = (work) => {
+    if (!merged) {
+      merged = true;
+      const source = memory.documents.get(
+        authDocumentName("users", "source-profile"),
+      );
+      const target = memory.documents.get(
+        authDocumentName("users", "target-profile"),
+      );
+      const index = memory.documents.get(
+        authDocumentName("authMethodIndex", getMethodKey("eth", eth)),
+      );
+      assert.ok(source);
+      assert.ok(target);
+      assert.ok(index);
+      source.fields = {
+        logins: [],
+        mergedIntoProfileId: "target-profile",
+      };
+      target.fields.logins = ["login-1"];
+      index.fields.profileId = "target-profile";
+    }
+    return runTransaction(work);
+  };
+  const service = createAuthIdentityService(env, {
+    ...dependencies(memory.client),
+    now: () => 3_100_000,
+  });
+
+  const response = await service.unlinkMethod(
+    "login-1",
+    "eth",
+    "unlink-after-merge",
+  );
+
+  assert.equal(response.profileId, "target-profile");
+  assert.deepEqual(response.linkedMethods, {
+    apple: false,
+    eth: false,
+    sol: true,
+    x: false,
+  });
 });
 
 test("does not replace a successful unlink replay with a raced failure", async () => {
@@ -1514,6 +1358,129 @@ test("does not replace a successful unlink replay with a raced failure", async (
   );
 });
 
+test("rebuilds an unlink replay from the live canonical profile", async () => {
+  const nowMs = 3_600_000;
+  const opId = "canonical-unlink-replay";
+  const memory = memoryFirestore([
+    {
+      collection: "users",
+      id: "canonical-profile",
+      fields: {
+        logins: ["login-1"],
+        sol: "11111111111111111111111111111111",
+      },
+    },
+    {
+      collection: "authOps",
+      id: opId,
+      fields: {
+        opId,
+        kind: "unlink",
+        method: "eth",
+        uid: "login-1",
+        status: "success",
+        result: {
+          ok: true,
+          profileId: "retired-profile",
+          linkedMethods: { apple: false, eth: false, sol: false, x: true },
+          appleLinked: false,
+        },
+        updatedAtMs: nowMs,
+      },
+    },
+    {
+      collection: "authRecoveryJobs",
+      id: "canonical-profile",
+      fields: newAuthRecoveryJob("canonical-profile", ["login-1"], [], nowMs),
+    },
+  ]);
+  const deps = dependencies(memory.client);
+  const service = createAuthIdentityService(env, {
+    ...deps,
+    now: () => nowMs,
+  });
+
+  const replay = await service.unlinkMethod("login-1", "eth", opId);
+
+  assert.equal(replay.profileId, "canonical-profile");
+  assert.deepEqual(replay.linkedMethods, {
+    apple: false,
+    eth: false,
+    sol: true,
+    x: false,
+  });
+  assert.equal(deps.claims.get("login-1")?.profileId, "canonical-profile");
+  assert.equal(
+    deps.rtdbValues.get("players/login-1/profile"),
+    "canonical-profile",
+  );
+});
+
+test("does not resume a successful unlink whose live effect is gone", async () => {
+  const nowMs = 3_700_000;
+  const opId = "stale-successful-unlink";
+  const eth = "0x1111111111111111111111111111111111111111";
+  const memory = memoryFirestore([
+    {
+      collection: "users",
+      id: "profile-1",
+      fields: {
+        logins: ["login-1"],
+        eth,
+        sol: "11111111111111111111111111111111",
+      },
+    },
+    {
+      collection: "authOps",
+      id: opId,
+      fields: {
+        opId,
+        kind: "unlink",
+        method: "eth",
+        uid: "login-1",
+        status: "success",
+        result: {
+          ok: true,
+          profileId: "profile-1",
+          linkedMethods: { apple: false, eth: false, sol: true, x: false },
+          appleLinked: false,
+        },
+        updatedAtMs: nowMs,
+      },
+    },
+  ]);
+  const service = createAuthIdentityService(env, {
+    ...dependencies(memory.client),
+    now: () => nowMs,
+  });
+
+  await assert.rejects(
+    service.unlinkMethod("login-1", "eth", opId),
+    (error) =>
+      error instanceof Error && error.message === "profile-merged-retry",
+  );
+  assert.equal(
+    memory.documents.get(authDocumentName("users", "profile-1"))?.fields.eth,
+    eth,
+  );
+  assert.equal(
+    memory.documents.has(
+      authDocumentName("authMethodRevocations", getMethodKey("eth", eth)),
+    ),
+    false,
+  );
+  assert.equal(
+    memory.documents.has(
+      authDocumentName("authProfileMethodCooldowns", "profile-1:eth"),
+    ),
+    false,
+  );
+  assert.equal(
+    memory.documents.get(authDocumentName("authOps", opId))?.fields.status,
+    "success",
+  );
+});
+
 test("refuses to unlink the final authentication method", async () => {
   const sol = "11111111111111111111111111111111";
   const memory = memoryFirestore([
@@ -1531,969 +1498,6 @@ test("refuses to unlink the final authentication method", async () => {
     service.unlinkMethod("login-1", "sol", "unlink-final"),
     (error) =>
       error instanceof Error && error.message === "cannot-remove-last-method",
-  );
-});
-
-test("merges conflicting profiles and finalizes game cleanup after recovery delay", async () => {
-  const eth = "0x1111111111111111111111111111111111111111";
-  const sol = "11111111111111111111111111111111";
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "target-profile",
-      fields: {
-        logins: ["login-1"],
-        eth,
-        username: "Target123",
-        usernameLookupKey: "target123",
-        xUsername: "stale-target-name",
-        win: [],
-        custom: { emoji: 3, aura: "   ", completedProblems: ["one"] },
-        mining: { lastRockDate: null, materials: {} },
-        pendingMergePrizeCopyCursor: "stale-event",
-        pendingMergePrizeCopyCompletedAtMs: 1,
-        pendingMergePrizeCopyCompletedOpId: "stale-operation",
-      },
-    },
-    {
-      collection: "users",
-      id: "source-profile",
-      fields: {
-        logins: ["login-2"],
-        sol,
-        xUserId: "12345",
-        xUsername: "source-name",
-        win: "source-win",
-        custom: { emoji: 7, aura: "source-aura", completedProblems: ["two"] },
-        mining: { lastRockDate: null, materials: {} },
-      },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: {
-        profileId: "source-profile",
-        method: "sol",
-        normalizedValue: sol,
-      },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("eth", eth),
-      fields: {
-        profileId: "stale-method-owner",
-        method: "eth",
-        normalizedValue: eth,
-      },
-    },
-    {
-      collection: "usernameIndex",
-      id: "target123",
-      fields: {
-        profileId: "stale-username-owner",
-        username: "Target123",
-      },
-    },
-    {
-      collection: "users",
-      id: "stale-lookup-profile",
-      fields: {
-        logins: [],
-        username: "Other123",
-        usernameLookupKey: "target123",
-      },
-    },
-  ]);
-  const deps = dependencies(memory.client);
-  deps.rtdbValues.set("profileEventPrizes/source-profile", {
-    NN3eRzoZo80: {
-      eventId: "NN3eRzoZo80",
-      profileId: "source-profile",
-      place: 2,
-      prizeId: "1111",
-      assignedAtMs: 1234,
-    },
-    FRkdorMWaYW: {
-      eventId: "FRkdorMWaYW",
-      profileId: "source-profile",
-      place: 1,
-      prizeId: "1866",
-      assignedAtMs: 5678,
-    },
-  });
-  deps.rtdbValues.set("profileEventPrizes/target-profile/NN3eRzoZo80", {
-    eventId: "NN3eRzoZo80",
-    profileId: "target-profile",
-    place: 1,
-    prizeId: "1092",
-    assignedAtMs: 1234,
-  });
-  let nowMs = 5_000_000;
-  const service = createAuthIdentityService(env, {
-    ...deps,
-    now: () => nowMs,
-  });
-  const response = await service.linkVerifiedMethod({
-    uid: "login-1",
-    method: "sol",
-    methodValueRaw: sol,
-    normalizedMethodValue: sol,
-    requestEmoji: 1,
-    requestAura: "",
-    preferredAddress: sol,
-    opId: "merge-operation",
-  });
-  assert.equal(response.profileId, "target-profile");
-  assert.equal(response.linkedMethods.eth, true);
-  assert.equal(response.linkedMethods.sol, true);
-  assert.equal(response.aura, "source-aura");
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
-      .win,
-    "source-win",
-  );
-  assert.equal(
-    memory.documents.get(
-      authDocumentName("authMethodIndex", getMethodKey("eth", eth)),
-    )?.fields.profileId,
-    "target-profile",
-  );
-  assert.equal(
-    memory.documents.get(authDocumentName("usernameIndex", "target123"))?.fields
-      .profileId,
-    "target-profile",
-  );
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
-      .xUsername,
-    "source-name",
-  );
-  assert.equal(
-    memory.documents.has(authDocumentName("users", "source-profile")),
-    true,
-  );
-  assert.equal(
-    memory.documents.get(
-      authDocumentName("profileMergeTargets", "source-profile"),
-    )?.fields.targetProfileId,
-    "target-profile",
-  );
-  assert.equal(deps.claims.get("login-1")?.profileId, "target-profile");
-  assert.equal(deps.claims.get("login-2")?.profileId, "target-profile");
-  const mergedTarget = memory.documents.get(
-    authDocumentName("users", "target-profile"),
-  );
-  assert.equal(mergedTarget?.fields.pendingMergePrizeCopyCursor, undefined);
-  assert.equal(
-    mergedTarget?.fields.pendingMergePrizeCopyCompletedAtMs,
-    undefined,
-  );
-  assert.equal(
-    mergedTarget?.fields.pendingMergePrizeCopyCompletedOpId,
-    undefined,
-  );
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
-      .pendingMergeGameCopySourceProfileId,
-    "source-profile",
-  );
-  nowMs += 60_000;
-  assert.equal(await service.recoverPendingProfile("target-profile"), true);
-  assert.equal(deps.claims.get("login-1")?.profileId, "target-profile");
-  assert.equal(deps.claims.get("login-2")?.profileId, "target-profile");
-  assert.equal(
-    memory.documents.has(authDocumentName("users", "source-profile")),
-    false,
-  );
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
-      .pendingMergeGameCopySourceProfileId,
-    undefined,
-  );
-  assert.equal(
-    memory.documents.has(
-      authDocumentName("authMergeGameBacklog", "merge-operation:copy"),
-    ),
-    false,
-  );
-  assert.deepEqual(deps.rtdbTransactions, [
-    "profileEventPrizes/target-profile/FRkdorMWaYW",
-    "profileEventPrizes/target-profile/NN3eRzoZo80",
-  ]);
-  assert.deepEqual(
-    deps.rtdbValues.get("profileEventPrizes/target-profile/FRkdorMWaYW"),
-    {
-      eventId: "FRkdorMWaYW",
-      profileId: "target-profile",
-      place: 1,
-      prizeId: "1866",
-      assignedAtMs: 5678,
-    },
-  );
-});
-
-test("derives merged values from the transaction snapshots", async () => {
-  const eth = "0x1111111111111111111111111111111111111111";
-  const sol = "11111111111111111111111111111111";
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "target-profile",
-      fields: { logins: ["login-1"], eth, totalManaPoints: 1 },
-    },
-    {
-      collection: "users",
-      id: "source-profile",
-      fields: { logins: ["login-2"], sol, totalManaPoints: 2 },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: { profileId: "source-profile", method: "sol" },
-    },
-  ]);
-  const originalRunTransaction = memory.client.runTransaction;
-  let transactions = 0;
-  memory.client.runTransaction = async <T>(
-    work: Parameters<AuthFirestoreClient["runTransaction"]>[0],
-  ) => {
-    transactions++;
-    if (transactions === 3) {
-      const name = authDocumentName("users", "target-profile");
-      const profile = memory.documents.get(name);
-      if (profile) {
-        profile.fields.totalManaPoints = 10;
-        profile.rawFields = encodeFields(profile.fields);
-      }
-    }
-    return originalRunTransaction(work) as Promise<T>;
-  };
-  const service = createAuthIdentityService(env, {
-    ...dependencies(memory.client),
-    now: () => 5_500_000,
-  });
-  const response = await service.linkVerifiedMethod({
-    uid: "login-1",
-    method: "sol",
-    methodValueRaw: sol,
-    normalizedMethodValue: sol,
-    requestEmoji: 1,
-    requestAura: "",
-    preferredAddress: sol,
-    opId: "live-merge-operation",
-  });
-  assert.equal(response.totalManaPoints, 12);
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
-      .usernameLookupKey,
-    undefined,
-  );
-});
-
-test("does not merge a retained source twice after a transaction retry", async () => {
-  const eth = "0x1111111111111111111111111111111111111111";
-  const sol = "11111111111111111111111111111111";
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "target-profile",
-      fields: { logins: ["login-1"], eth, rating: 1800 },
-    },
-    {
-      collection: "users",
-      id: "source-profile",
-      fields: { logins: ["login-2"], sol, rating: 1900 },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: { profileId: "source-profile", method: "sol" },
-    },
-  ]);
-  const originalRunTransaction = memory.client.runTransaction;
-  let transactions = 0;
-  memory.client.runTransaction = async <T>(
-    work: Parameters<AuthFirestoreClient["runTransaction"]>[0],
-  ) => {
-    transactions++;
-    if (transactions === 3) {
-      await originalRunTransaction(work);
-    }
-    return originalRunTransaction(work) as Promise<T>;
-  };
-  const service = createAuthIdentityService(env, {
-    ...dependencies(memory.client),
-    now: () => 5_550_000,
-  });
-  const response = await service.linkVerifiedMethod({
-    uid: "login-1",
-    method: "sol",
-    methodValueRaw: sol,
-    normalizedMethodValue: sol,
-    requestEmoji: 1,
-    requestAura: "",
-    preferredAddress: sol,
-    opId: "retried-merge-operation",
-  });
-  assert.equal(response.rating, 1800);
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
-      .rating,
-    1800,
-  );
-});
-
-test("does not skip a live source with incomplete merge metadata", async () => {
-  const eth = "0x1111111111111111111111111111111111111111";
-  const sol = "11111111111111111111111111111111";
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "target-profile",
-      fields: { logins: ["login-1"], eth, rating: 1800 },
-    },
-    {
-      collection: "users",
-      id: "source-profile",
-      fields: {
-        logins: ["login-2"],
-        sol,
-        rating: 1700,
-        mergedIntoProfileId: "target-profile",
-      },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: { profileId: "source-profile", method: "sol" },
-    },
-    {
-      collection: "profileMergeTargets",
-      id: "source-profile",
-      fields: { targetProfileId: "target-profile" },
-    },
-  ]);
-  const service = createAuthIdentityService(env, {
-    ...dependencies(memory.client),
-    now: () => 5_560_000,
-  });
-  const response = await service.linkVerifiedMethod({
-    uid: "login-1",
-    method: "sol",
-    methodValueRaw: sol,
-    normalizedMethodValue: sol,
-    requestEmoji: 1,
-    requestAura: "",
-    preferredAddress: sol,
-    opId: "incomplete-merge-operation",
-  });
-  assert.equal(response.rating, 1700);
-  assert.equal(response.linkedMethods.sol, true);
-});
-
-test("repairs prizes when a concurrent merge already deleted the source", async () => {
-  const eth = "0x1111111111111111111111111111111111111111";
-  const sol = "11111111111111111111111111111111";
-  const eventId = "FRkdorMWaYW";
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "target-profile",
-      fields: {
-        logins: ["login-1"],
-        eth,
-        pendingMergePrizeCopyCursor: "stale-event",
-        pendingMergePrizeCopyCompletedAtMs: 1,
-        pendingMergePrizeCopyCompletedOpId: "stale-operation",
-      },
-    },
-    {
-      collection: "users",
-      id: "source-profile",
-      fields: { logins: ["login-2"], sol },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: { profileId: "source-profile", method: "sol" },
-    },
-    {
-      collection: "profileMergeTargets",
-      id: "source-profile",
-      fields: { targetProfileId: "target-profile" },
-    },
-  ]);
-  const originalRunTransaction = memory.client.runTransaction;
-  let transactions = 0;
-  memory.client.runTransaction = <T>(
-    work: Parameters<AuthFirestoreClient["runTransaction"]>[0],
-  ) => {
-    transactions++;
-    if (transactions === 3) {
-      memory.documents.delete(authDocumentName("users", "source-profile"));
-    }
-    return originalRunTransaction(work) as Promise<T>;
-  };
-  const deps = dependencies(memory.client);
-  deps.rtdbValues.set("profileEventPrizes/source-profile", {
-    [eventId]: {
-      eventId,
-      profileId: "source-profile",
-      place: 1,
-      prizeId: "1866",
-      assignedAtMs: 1,
-    },
-  });
-  const getPath = deps.rtdb.getPath;
-  let failures = 1;
-  deps.rtdb.getPath = async (path, query, signal) => {
-    if (path === "profileEventPrizes/source-profile" && failures > 0) {
-      failures--;
-      throw new Error("temporary-rtdb-failure");
-    }
-    return getPath(path, query, signal);
-  };
-  let nowMs = 5_565_000;
-  const service = createAuthIdentityService(env, {
-    ...deps,
-    now: () => nowMs,
-  });
-  const response = await service.linkVerifiedMethod({
-    uid: "login-1",
-    method: "sol",
-    methodValueRaw: sol,
-    normalizedMethodValue: sol,
-    requestEmoji: 1,
-    requestAura: "",
-    preferredAddress: sol,
-    opId: "missing-source-merge-operation",
-  });
-  assert.equal(response.profileId, "target-profile");
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
-      .pendingMergePrizeCopyCursor,
-    undefined,
-  );
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
-      .pendingMergeGameCopySourceProfileId,
-    "source-profile",
-  );
-  assert.equal(
-    memory.documents.has(
-      authDocumentName(
-        "authMergeGameBacklog",
-        "missing-source-merge-operation:copy",
-      ),
-    ),
-    false,
-  );
-  nowMs += 60_000;
-  const pendingReplay = await service.peekVerifyReplay(
-    "missing-source-merge-operation",
-    "sol",
-    "login-1",
-  );
-  assert.equal(pendingReplay?.ok, true);
-  assert.equal(
-    deps.rtdbValues.get(`profileEventPrizes/target-profile/${eventId}`),
-    undefined,
-  );
-  const replay = await service.peekVerifyReplay(
-    "missing-source-merge-operation",
-    "sol",
-    "login-1",
-  );
-  assert.equal(replay?.ok, true);
-  assert.deepEqual(
-    deps.rtdbValues.get(`profileEventPrizes/target-profile/${eventId}`),
-    {
-      eventId,
-      profileId: "target-profile",
-      place: 1,
-      prizeId: "1866",
-      assignedAtMs: 1,
-    },
-  );
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
-      .pendingMergeGameCopySourceProfileId,
-    undefined,
-  );
-  assert.equal(
-    memory.documents.has(
-      authDocumentName(
-        "authMergeGameBacklog",
-        "missing-source-merge-operation:copy",
-      ),
-    ),
-    false,
-  );
-});
-
-test("expires owned merge locks when deletion keeps failing", async () => {
-  const eth = "0x1111111111111111111111111111111111111111";
-  const sol = "11111111111111111111111111111111";
-  const nowMs = 5_575_000;
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "profile-1",
-      fields: { logins: ["login-1"], eth },
-    },
-  ]);
-  const originalRunTransaction = memory.client.runTransaction;
-  let releaseFailures = 0;
-  memory.client.runTransaction = <T>(
-    work: Parameters<AuthFirestoreClient["runTransaction"]>[0],
-  ) =>
-    originalRunTransaction(async (transaction) => {
-      const operation = await work(transaction);
-      const deletesLock = operation.writes.some(
-        (write) => "delete" in write && write.delete.includes("/mergeLocks/"),
-      );
-      if (deletesLock && releaseFailures < 3) {
-        releaseFailures++;
-        throw new Error("temporary-lock-release-failure");
-      }
-      return operation;
-    }) as Promise<T>;
-  const service = createAuthIdentityService(env, {
-    ...dependencies(memory.client),
-    now: () => nowMs,
-  });
-  await service.linkVerifiedMethod({
-    uid: "login-1",
-    method: "sol",
-    methodValueRaw: sol,
-    normalizedMethodValue: sol,
-    requestEmoji: 1,
-    requestAura: "",
-    preferredAddress: sol,
-    opId: "lock-release-operation",
-  });
-  assert.equal(releaseFailures, 3);
-  assert.equal(
-    memory.documents.get(authDocumentName("mergeLocks", "profile:profile-1"))
-      ?.fields.expiresAtMs,
-    nowMs - 1,
-  );
-});
-
-test("removes a copied prize after its withdrawal completes", async () => {
-  const eth = "0x1111111111111111111111111111111111111111";
-  const sol = "11111111111111111111111111111111";
-  const eventId = "FRkdorMWaYW";
-  const prizeId = "1866";
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "target-profile",
-      fields: { logins: ["login-1"], eth },
-    },
-    {
-      collection: "users",
-      id: "source-profile",
-      fields: { logins: ["login-2"], sol },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: { profileId: "source-profile", method: "sol" },
-    },
-  ]);
-  const deps = dependencies(memory.client);
-  deps.rtdbValues.set("profileEventPrizes/source-profile", {
-    [eventId]: {
-      eventId,
-      profileId: "source-profile",
-      place: 1,
-      prizeId,
-      assignedAtMs: 1,
-    },
-  });
-  const getPath = deps.rtdb.getPath;
-  let withdrawalReads = 0;
-  deps.rtdb.getPath = async (path, query, signal) => {
-    if (path === `eventPrizeWithdrawals/${eventId}/${prizeId}`) {
-      withdrawalReads++;
-      return withdrawalReads === 1
-        ? null
-        : {
-            status: "completed",
-            eventId,
-            prizeId,
-            assetAddress: "2KNT8rbXC7G8w5AChbEHHi6i4FN7EAZCtdWX65ZSuQp6",
-            assetStandard: "compressed",
-          };
-    }
-    return getPath(path, query, signal);
-  };
-  let nowMs = 5_600_000;
-  const service = createAuthIdentityService(env, {
-    ...deps,
-    now: () => nowMs,
-  });
-  const response = await service.linkVerifiedMethod({
-    uid: "login-1",
-    method: "sol",
-    methodValueRaw: sol,
-    normalizedMethodValue: sol,
-    requestEmoji: 1,
-    requestAura: "",
-    preferredAddress: sol,
-    opId: "withdrawn-prize-merge",
-  });
-  assert.equal(response.ok, true);
-  assert.equal(withdrawalReads, 0);
-  nowMs += 60_000;
-  assert.equal(await service.recoverPendingProfile("target-profile"), true);
-  assert.equal(withdrawalReads, 2);
-  assert.equal(
-    deps.rtdbValues.get(`profileEventPrizes/target-profile/${eventId}`),
-    null,
-  );
-});
-
-test("clears retired source claim markers before pending prize recovery", async () => {
-  const eth = "0x1111111111111111111111111111111111111111";
-  const sol = "11111111111111111111111111111111";
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "target-profile",
-      fields: { logins: ["login-1"], eth },
-    },
-    {
-      collection: "users",
-      id: "source-profile",
-      fields: {
-        logins: ["login-2"],
-        sol,
-        pendingClaimSyncLogins: ["login-2"],
-        pendingClaimSyncOpId: "older-claim-repair",
-        pendingClaimSyncUpdatedAtMs: 5_700_000,
-      },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: { profileId: "source-profile", method: "sol" },
-    },
-  ]);
-  const deps = dependencies(memory.client);
-  const recoveryTasks: Array<{ body: unknown; options: unknown }> = [];
-  const recoveryEnv = {
-    ...env,
-    AUTH_RECOVERY_QUEUE: {
-      ...env.AUTH_RECOVERY_QUEUE,
-      send: async (body: unknown, options?: QueueSendOptions) => {
-        recoveryTasks.push({ body, options });
-        return env.AUTH_RECOVERY_QUEUE.send(body, options);
-      },
-    },
-  } as Env;
-  deps.rtdbValues.set("profileEventPrizes/source-profile", {
-    FRkdorMWaYW: {
-      eventId: "FRkdorMWaYW",
-      profileId: "source-profile",
-      place: 1,
-      prizeId: "1866",
-      assignedAtMs: 5678,
-    },
-  });
-  const transactPath = deps.rtdb.transactPath;
-  let failures = 1;
-  deps.rtdb.transactPath = async (path, updater, signal) => {
-    if (failures > 0) {
-      failures--;
-      throw new Error("temporary-rtdb-failure");
-    }
-    return transactPath(path, updater, signal);
-  };
-  let nowMs = 5_750_000;
-  const service = createAuthIdentityService(recoveryEnv, {
-    ...deps,
-    now: () => nowMs,
-  });
-  await service.linkVerifiedMethod({
-    uid: "login-1",
-    method: "sol",
-    methodValueRaw: sol,
-    normalizedMethodValue: sol,
-    requestEmoji: 1,
-    requestAura: "",
-    preferredAddress: sol,
-    opId: "merge-prize-recovery",
-  });
-  assert.ok(
-    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
-      .pendingMergeGameCopySourceProfileId,
-  );
-  const retainedSource = memory.documents.get(
-    authDocumentName("users", "source-profile"),
-  );
-  assert.ok(retainedSource);
-  assert.equal(retainedSource.fields.pendingClaimSyncLogins, undefined);
-  assert.equal(retainedSource.fields.pendingClaimSyncOpId, undefined);
-  assert.equal(retainedSource.fields.pendingClaimSyncUpdatedAtMs, undefined);
-  assert.equal(
-    deps.rtdbValues.get("profileEventPrizes/target-profile/FRkdorMWaYW"),
-    undefined,
-  );
-  assert.deepEqual(recoveryTasks, [
-    {
-      body: {
-        kind: "auth-profile-recovery",
-        profileId: "target-profile",
-      },
-      options: { delaySeconds: 60 },
-    },
-  ]);
-  nowMs += 60_000;
-  const pendingReplay = await service.peekVerifyReplay(
-    "merge-prize-recovery",
-    "sol",
-    "login-1",
-  );
-  assert.equal(pendingReplay?.ok, true);
-  assert.equal(
-    memory.documents.has(authDocumentName("users", "source-profile")),
-    true,
-  );
-  const replay = await service.peekVerifyReplay(
-    "merge-prize-recovery",
-    "sol",
-    "login-1",
-  );
-  assert.equal(replay?.ok, true);
-  assert.equal(
-    memory.documents.has(authDocumentName("users", "source-profile")),
-    false,
-  );
-  assert.deepEqual(
-    deps.rtdbValues.get("profileEventPrizes/target-profile/FRkdorMWaYW"),
-    {
-      eventId: "FRkdorMWaYW",
-      profileId: "target-profile",
-      place: 1,
-      prizeId: "1866",
-      assignedAtMs: 5678,
-    },
-  );
-  assert.equal(deps.claims.get("login-2")?.profileId, "target-profile");
-  assert.equal(
-    deps.rtdbValues.get("players/login-2/profile"),
-    "target-profile",
-  );
-});
-
-test("requires a durable game-recovery wake-up before retry succeeds", async () => {
-  const eth = "0x1111111111111111111111111111111111111111";
-  const sol = "11111111111111111111111111111111";
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "target-profile",
-      fields: { logins: ["login-1"], eth },
-    },
-    {
-      collection: "users",
-      id: "source-profile",
-      fields: { logins: ["login-2"], sol },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: { profileId: "source-profile", method: "sol" },
-    },
-  ]);
-  let queueUnavailable = true;
-  let sends = 0;
-  const recoveryEnv = {
-    ...env,
-    AUTH_RECOVERY_QUEUE: {
-      ...env.AUTH_RECOVERY_QUEUE,
-      send: async (body: unknown, options?: QueueSendOptions) => {
-        sends++;
-        if (queueUnavailable) {
-          throw new Error("queue-unavailable");
-        }
-        return env.AUTH_RECOVERY_QUEUE.send(body, options);
-      },
-    },
-  } as Env;
-  const deps = dependencies(memory.client);
-  const getPath = deps.rtdb.getPath;
-  deps.rtdb.getPath = async (path, query, signal) => {
-    if (path === "profileEventPrizes/source-profile") {
-      throw new Error("prize-copy-unavailable");
-    }
-    return getPath(path, query, signal);
-  };
-  const service = createAuthIdentityService(recoveryEnv, {
-    ...deps,
-    now: () => 5_800_000,
-  });
-  const input = {
-    uid: "login-1",
-    method: "sol" as const,
-    methodValueRaw: sol,
-    normalizedMethodValue: sol,
-    requestEmoji: 1,
-    requestAura: "",
-    preferredAddress: sol,
-    opId: "strict-game-recovery-enqueue",
-  };
-  await assert.rejects(service.linkVerifiedMethod(input), /queue-unavailable/);
-  assert.equal(sends, 1);
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
-      .pendingMergeGameCopySourceProfileId,
-    "source-profile",
-  );
-  assert.equal(
-    memory.documents.get(authDocumentName("authMergeGameBacklog", input.opId))
-      ?.fields.status,
-    "pending",
-  );
-
-  queueUnavailable = false;
-  const replay = await service.peekVerifyReplay(
-    input.opId,
-    input.method,
-    input.uid,
-  );
-  assert.equal(replay?.profileId, "target-profile");
-  assert.equal(sends, 2);
-  assert.equal(
-    memory.documents.has(authDocumentName("authMergeGameBacklog", input.opId)),
-    false,
-  );
-});
-
-test("does not overwrite an older pending merge marker", async () => {
-  const sol = "11111111111111111111111111111111";
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "target-profile",
-      fields: {
-        logins: ["login-1"],
-        sol,
-        pendingMergeGameCopySourceProfileId: "source-a",
-        pendingMergeGameCopyOpId: "source-a-operation",
-      },
-    },
-    {
-      collection: "users",
-      id: "source-a",
-      fields: { logins: [] },
-    },
-    {
-      collection: "users",
-      id: "source-b",
-      fields: { logins: ["login-2"], xUserId: "12345" },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("x", "12345"),
-      fields: { profileId: "source-b", method: "x" },
-    },
-  ]);
-  const deps = dependencies(memory.client);
-  const getPath = deps.rtdb.getPath;
-  deps.rtdb.getPath = async (path, query, signal) => {
-    if (path === "profileEventPrizes/source-a") {
-      throw new Error("temporary-rtdb-failure");
-    }
-    return getPath(path, query, signal);
-  };
-  const service = createAuthIdentityService(env, {
-    ...deps,
-    now: () => 5_900_000,
-  });
-  await assert.rejects(
-    service.linkVerifiedMethod({
-      uid: "login-1",
-      method: "x",
-      methodValueRaw: "12345",
-      normalizedMethodValue: "12345",
-      requestEmoji: 1,
-      requestAura: "",
-      preferredAddress: null,
-      opId: "new-merge-operation",
-    }),
-    (error) =>
-      error instanceof Error && error.message === "merge-recovery-pending",
-  );
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
-      .pendingMergeGameCopySourceProfileId,
-    "source-a",
-  );
-  assert.equal(
-    memory.documents.has(authDocumentName("users", "source-b")),
-    true,
-  );
-});
-
-test("does not merge a source profile with pending recovery", async () => {
-  const eth = "0x1111111111111111111111111111111111111111";
-  const sol = "11111111111111111111111111111111";
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "target-profile",
-      fields: { logins: ["login-1"], eth },
-    },
-    {
-      collection: "users",
-      id: "source-profile",
-      fields: {
-        logins: ["login-2"],
-        sol,
-        pendingMergeGameCopySourceProfileId: "older-source",
-        pendingMergeGameCopyOpId: "older-operation",
-      },
-    },
-    {
-      collection: "users",
-      id: "older-source",
-      fields: { logins: [] },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: { profileId: "source-profile", method: "sol" },
-    },
-  ]);
-  const service = createAuthIdentityService(env, {
-    ...dependencies(memory.client),
-    now: () => 5_950_000,
-  });
-  await assert.rejects(
-    service.linkVerifiedMethod({
-      uid: "login-1",
-      method: "sol",
-      methodValueRaw: sol,
-      normalizedMethodValue: sol,
-      requestEmoji: 1,
-      requestAura: "",
-      preferredAddress: sol,
-      opId: "new-merge-operation",
-    }),
-    (error) =>
-      error instanceof Error && error.message === "merge-recovery-pending",
-  );
-  assert.equal(
-    memory.documents.has(authDocumentName("users", "source-profile")),
-    true,
-  );
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
-      .sol,
-    undefined,
   );
 });
 
@@ -2612,197 +1616,6 @@ test("finds a live username owner after multiple stale lookup rows", async () =>
     opId: "hidden-username-owner-operation",
   });
   assert.equal(response.username, "Aaaa000");
-});
-
-test("recovers legacy pending claim logins without an operation marker", async () => {
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "profile-1",
-      fields: {
-        logins: ["login-1"],
-        pendingClaimSyncLogins: ["login-1"],
-      },
-    },
-  ]);
-  const deps = dependencies(memory.client);
-  const service = createAuthIdentityService(env, {
-    ...deps,
-    now: () => 6_400_000,
-  });
-  assert.equal(await service.recoverPendingProfile("profile-1"), true);
-  assert.equal(deps.claims.get("login-1")?.profileId, "profile-1");
-  assert.equal(deps.rtdbValues.get("players/login-1/profile"), "profile-1");
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "profile-1"))?.fields
-      .pendingClaimSyncLogins,
-    undefined,
-  );
-});
-
-test("keeps unsafe stored UIDs pending without building RTDB paths", async () => {
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "profile-1",
-      fields: {
-        logins: ["legacy/login"],
-        pendingClaimSyncLogins: ["legacy/login"],
-        pendingClaimSyncOpId: "legacy-claim-repair",
-      },
-    },
-  ]);
-  const deps = dependencies(memory.client);
-  let externalReads = 0;
-  deps.authClient.getUser = async () => {
-    externalReads++;
-    throw new Error("unexpected-auth-read");
-  };
-  deps.rtdb.getPath = async () => {
-    externalReads++;
-    throw new Error("unexpected-rtdb-read");
-  };
-  const service = createAuthIdentityService(env, {
-    ...deps,
-    now: () => 6_450_000,
-  });
-  assert.equal(await service.recoverPendingProfile("profile-1"), false);
-  assert.equal(externalReads, 0);
-  assert.deepEqual(
-    memory.documents.get(authDocumentName("users", "profile-1"))?.fields
-      .pendingClaimSyncLogins,
-    ["legacy/login"],
-  );
-});
-
-test("recovers a legacy marker-only game merge without a backlog", async () => {
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "target-profile",
-      fields: {
-        logins: [],
-        pendingMergeGameCopySourceProfileId: "source-profile",
-      },
-    },
-    {
-      collection: "users",
-      id: "source-profile",
-      fields: {
-        logins: [],
-        mergedIntoProfileId: "target-profile",
-        mergeSourceRetainedForGameCopy: true,
-      },
-    },
-    {
-      collection: "profileMergeTargets",
-      id: "source-profile",
-      fields: { targetProfileId: "target-profile" },
-    },
-  ]);
-  const sourceGameName = `${AUTH_FIRESTORE_DATABASE_ROOT}/documents/users/source-profile/games/invite-legacy`;
-  memory.documents.set(sourceGameName, {
-    id: "invite-legacy",
-    name: sourceGameName,
-    fields: { listSortAt: 10, status: "ended" },
-    rawFields: encodeFields({ listSortAt: 10, status: "ended" }),
-    updateTime: "2026-08-22T00:00:00Z",
-  });
-  const service = createAuthIdentityService(env, {
-    ...dependencies(memory.client),
-    now: () => 6_500_000,
-  });
-
-  assert.equal(await service.recoverPendingProfile("target-profile"), true);
-  assert.equal(memory.documents.has(sourceGameName), false);
-  assert.equal(
-    memory.documents.get(
-      `${AUTH_FIRESTORE_DATABASE_ROOT}/documents/users/target-profile/games/invite-legacy`,
-    )?.fields.status,
-    "ended",
-  );
-  assert.equal(
-    memory.documents.has(authDocumentName("users", "source-profile")),
-    false,
-  );
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
-      .pendingMergeGameCopySourceProfileId,
-    undefined,
-  );
-});
-
-test("resumes a pending game merge during profile recovery", async () => {
-  const sol = "11111111111111111111111111111111";
-  const memory = memoryFirestore([
-    {
-      collection: "users",
-      id: "target-profile",
-      fields: {
-        logins: ["login-1"],
-        sol,
-        pendingMergeGameCopySourceProfileId: "source-profile",
-        pendingMergeGameCopyOpId: "original-operation",
-      },
-    },
-    {
-      collection: "users",
-      id: "source-profile",
-      fields: { logins: [] },
-    },
-    {
-      collection: "authMethodIndex",
-      id: getMethodKey("sol", sol),
-      fields: {
-        profileId: "target-profile",
-        method: "sol",
-        normalizedValue: sol,
-      },
-    },
-    {
-      collection: "authMergeGameBacklog",
-      id: "original-operation",
-      fields: {
-        opId: "original-operation",
-        sourceProfileId: "source-profile",
-        targetProfileId: "target-profile",
-        status: "pending",
-        createdAtMs: 6_400_000,
-        updatedAtMs: 6_400_000,
-      },
-    },
-  ]);
-  const sourceGameName = `${AUTH_FIRESTORE_DATABASE_ROOT}/documents/users/source-profile/games/invite-1`;
-  memory.documents.set(sourceGameName, {
-    id: "invite-1",
-    name: sourceGameName,
-    fields: { listSortAt: 10, status: "ended" },
-    rawFields: encodeFields({ listSortAt: 10, status: "ended" }),
-    updateTime: "2026-08-22T00:00:00Z",
-  });
-  const service = createAuthIdentityService(env, {
-    ...dependencies(memory.client),
-    now: () => 6_500_000,
-  });
-  assert.equal(await service.recoverPendingProfile("target-profile"), true);
-  assert.equal(memory.documents.has(sourceGameName), false);
-  assert.equal(
-    memory.documents.get(
-      `${AUTH_FIRESTORE_DATABASE_ROOT}/documents/users/target-profile/games/invite-1`,
-    )?.fields.status,
-    "ended",
-  );
-  assert.equal(
-    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
-      .pendingMergeGameCopySourceProfileId,
-    undefined,
-  );
-  assert.equal(
-    memory.documents.has(
-      authDocumentName("authMergeGameBacklog", "original-operation"),
-    ),
-    false,
-  );
 });
 
 test("normalizes every supported method in the in-memory test boundary", () => {

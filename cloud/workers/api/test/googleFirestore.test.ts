@@ -20,7 +20,6 @@ const env = {
   FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
   FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",
-  AUTH_DISABLE_X_VERIFY: "false",
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
   NFT_RATE_LIMITER: { limit: async () => ({ success: true }) },
   X_CLIENT_ID: "test-x-client",
@@ -548,42 +547,10 @@ test("queries two profiles for claim sync and blocks ambiguous ownership", async
     { fieldPath: "eth" },
     { fieldPath: "sol" },
     { fieldPath: "xUserId" },
-    { fieldPath: "pendingClaimSyncLogins" },
-    { fieldPath: "pendingClaimSyncOpId" },
-    { fieldPath: "pendingMergeGameCopySourceProfileId" },
   ]);
 });
 
-test("reports legacy pending claim sync without an operation marker", async () => {
-  const repository = createAuthRepository(env, {
-    getAccessToken: async () => "unused",
-    fetcher: async () =>
-      new Response(
-        JSON.stringify([
-          {
-            document: {
-              name: "projects/mons-link/databases/(default)/documents/users/profile-1",
-              fields: {
-                pendingClaimSyncLogins: {
-                  arrayValue: {
-                    values: [{ stringValue: "firebase-uid" }],
-                  },
-                },
-              },
-            },
-          },
-        ]),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
-  });
-  assert.equal(
-    (await repository.getProfileClaimSource("firebase-uid", "firebase-token"))
-      .pendingRecovery,
-    true,
-  );
-});
-
-test("reports pending auth recovery from the claim-sync projection", async () => {
+test("returns a claim source without legacy recovery state", async () => {
   const repository = createAuthRepository(env, {
     getAccessToken: async () => "unused",
     fetcher: async () =>
@@ -594,9 +561,6 @@ test("reports pending auth recovery from the claim-sync projection", async () =>
               name: "projects/mons-link/databases/(default)/documents/users/profile-1",
               fields: {
                 sol: { stringValue: "11111111111111111111" },
-                pendingMergeGameCopySourceProfileId: {
-                  stringValue: "source-profile",
-                },
               },
             },
           },
@@ -611,7 +575,6 @@ test("reports pending auth recovery from the claim-sync projection", async () =>
       profileId: "profile-1",
       linkedMethods: { apple: false, eth: false, sol: true, x: false },
       appleLinked: false,
-      pendingRecovery: true,
     },
   );
 });

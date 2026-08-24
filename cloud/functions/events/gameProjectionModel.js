@@ -159,6 +159,13 @@ const pickListSortMillis = ({
   nowMs,
   existingListSortMs,
 }) => {
+  if (
+    options.preserveListSortAt === true &&
+    Number.isFinite(existingListSortMs)
+  ) {
+    return Math.floor(existingListSortMs);
+  }
+
   let nextSortMillis = Number.isFinite(options.listSortAtMs)
     ? Math.floor(options.listSortAtMs)
     : nowMs;

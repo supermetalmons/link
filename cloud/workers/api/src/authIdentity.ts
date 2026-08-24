@@ -19,12 +19,6 @@ import {
   isReservedExplicitUsername,
   isSafeFirestoreDocIdSegment,
 } from "@mons/shared/usernames";
-import { buildProfileEventPrizeMergeCopies } from "../../../functions/eventPrizeAwards.js";
-import {
-  getEventPrizeWithdrawalPath,
-  isCompletedEventPrizeWithdrawal,
-  isMatchingProfileEventPrizeAssignment,
-} from "../../../functions/eventPrizeWithdrawalState.js";
 import { PROFILE_MERGE_TARGETS_COLLECTION } from "../../../functions/profileMergeTargets.js";
 import { AuthApiFailure } from "./authErrors.ts";
 import {
@@ -47,12 +41,10 @@ import {
   type FirebaseRtdbClient,
   createFirebaseRtdbClient,
 } from "./firebaseRtdb.ts";
-import { isCanonicalFirebaseUid } from "./firebaseKeys.ts";
 import {
   assertAuthMethod,
   cleanString,
   cooldownRetryAtMs,
-  featureDisabled,
   finiteNumber,
   getMethodField,
   getMethodKey,
@@ -62,27 +54,25 @@ import {
   normalizeProfileMethod,
   profileMethodCooldownId,
   readStoredFirebaseUid,
-  PENDING_CLAIM_SYNC_FIELD_PATHS,
-  PENDING_MERGE_GAME_COPY_FIELD_PATHS,
-  PENDING_MERGE_PRIZE_COPY_FIELD_PATHS,
   throwMethodCooldown,
   throwProfileMethodCooldown,
   uniqueStoredFirebaseUids,
   uniqueStrings,
 } from "./authPolicy.ts";
-import { enqueueAuthRecovery } from "./authRecoveryTask.ts";
 import {
-  createAuthMergeRecovery,
-  MERGE_GAME_FINALIZE_DELAY_MS,
-} from "./authMergeRecovery.ts";
+  authRecoveryJobName,
+  createAuthRecoveryService,
+  enqueuePersistedAuthRecovery,
+  ensureFirebaseProfileClaim,
+  newAuthRecoveryJob,
+  parseAuthRecoveryJob,
+} from "./authRecovery.ts";
 import { createGoogleAccessToken } from "./googleAuth.ts";
 
 const AUTH_OP_REPLAY_TTL_MS = 10 * 60 * 1_000;
-const MERGE_LOCK_TTL_MS = 20 * 60 * 1_000;
 const LINK_METHOD_MAX_ATTEMPTS = 3;
 const AUTO_NAME_MAX_ATTEMPTS = 30;
 const USERNAME_CONFLICT_QUERY_LIMIT = 100;
-const LOCK_RELEASE_RETRY_DELAYS_MS = [25, 50] as const;
 const PROVIDER_METADATA_FIELD_PATHS = {
   apple: [
     "appleEmailMasked",
@@ -152,7 +142,7 @@ export type AuthIdentityService = {
     uid: string,
     expectedMethodValue: string,
   ) => Promise<AuthProfileResponse | null>;
-  recoverPendingProfile: (profileId: string) => Promise<boolean>;
+  syncCurrentCallerProfile: (uid: string) => Promise<LinkedAuthMethodsResponse>;
   unlinkMethod: (
     uid: string,
     method: AuthMethodKey,
@@ -162,28 +152,11 @@ export type AuthIdentityService = {
 
 type ServiceDependencies = {
   authClient?: FirebaseAuthAdminClient;
-  claimBacklogStatus?: "pending" | "queued";
-  createLockOwnerId?: () => string;
-  deferRecovery?: boolean;
   firestore?: AuthFirestoreClient;
   now?: () => number;
   randomInteger?: (maximum: number) => number;
   rtdb?: FirebaseRtdbClient;
   signal?: AbortSignal;
-};
-
-type ClaimReconciliationInput = {
-  loginUids: string[];
-  opId: string;
-  sourceProfileId: string;
-  targetName: string;
-  targetProfileId: string;
-};
-
-type MergeLockLease = {
-  names: string[];
-  operationId: string;
-  ownerId: string;
 };
 
 type AuthOperationOutcome =
@@ -210,10 +183,7 @@ function hasMergeValue(value: unknown): boolean {
 }
 
 function isRetiredMergeSource(fields: Record<string, unknown>): boolean {
-  return (
-    cleanString(fields.mergedIntoProfileId) !== "" ||
-    fields.mergeSourceRetainedForGameCopy === true
-  );
+  return cleanString(fields.mergedIntoProfileId) !== "";
 }
 
 function mergeCustom(
@@ -327,8 +297,6 @@ type ProfileMergePlan = {
 function buildProfileMergePlan(
   target: AuthFirestoreDocument,
   source: AuthFirestoreDocument,
-  sourceProfileId: string,
-  opId: string,
   nowMs: number,
 ): ProfileMergePlan {
   for (const method of AUTH_METHODS) {
@@ -377,15 +345,10 @@ function buildProfileMergePlan(
     custom: mergeCustom(target.fields, source.fields),
     mining: mergeMining(target.fields, source.fields),
     mergedAtMs: nowMs,
-    mergedSourceProfileId: sourceProfileId,
-    pendingMergeGameCopySourceProfileId: sourceProfileId,
-    pendingMergeGameCopyOpId: opId,
-    pendingMergeGameCopyUpdatedAtMs: nowMs,
   };
-  const deleteTargetFields: string[] = [
-    ...PENDING_MERGE_PRIZE_COPY_FIELD_PATHS,
-    ...(usernameKey ? [] : [USERNAME_LOOKUP_KEY_FIELD]),
-  ];
+  const deleteTargetFields: string[] = usernameKey
+    ? []
+    : [USERNAME_LOOKUP_KEY_FIELD];
   for (const method of AUTH_METHODS) {
     const value =
       normalizeProfileMethod(method, target.fields) ||
@@ -471,11 +434,13 @@ export function createAuthIdentityService(
       },
     });
   const now = dependencies.now || Date.now;
-  const claimBacklogStatus = dependencies.claimBacklogStatus || "pending";
-  const deferRecovery = dependencies.deferRecovery === true;
-  const gameRecoveryWakeups = new Set<string>();
-  const createLockOwnerId =
-    dependencies.createLockOwnerId || (() => crypto.randomUUID());
+  const recovery = createAuthRecoveryService(env, {
+    authClient,
+    firestore: durableFirestore,
+    now,
+    rtdb,
+    signal: dependencies.signal,
+  });
   const randomInteger =
     dependencies.randomInteger ||
     ((maximum: number) => {
@@ -490,59 +455,18 @@ export function createAuthIdentityService(
       return buffer[0] % maximum;
     });
 
-  const mergeGameBacklogName = (opId: string) =>
-    authDocumentName("authMergeGameBacklog", opId);
-  const mergeGameBacklogWrite = (
-    opId: string,
-    sourceProfileId: string,
-    targetProfileId: string,
-    nowMs: number,
-  ) =>
-    authUpdateWrite(mergeGameBacklogName(opId), {
-      opId,
-      sourceProfileId,
-      targetProfileId,
-      status: "pending",
-      createdAtMs: nowMs,
-      updatedAtMs: nowMs,
-    });
-  const acknowledgeMergeGameBacklog = async (opId: string): Promise<void> => {
-    if (!cleanString(opId)) {
-      return;
-    }
-    try {
-      await durableFirestore.commitWrites([
-        authDeleteWrite(mergeGameBacklogName(opId)),
-      ]);
-    } catch {
-      console.error(
-        JSON.stringify({ event: "auth_merge_game_backlog_ack_failure" }),
-      );
-    }
-  };
-
   const enqueueRecoveryBestEffort = async (
     profileId: string,
   ): Promise<void> => {
     try {
-      await enqueueAuthRecovery(env, profileId);
+      await enqueuePersistedAuthRecovery(
+        env,
+        durableFirestore,
+        profileId,
+        now(),
+      );
     } catch {
       console.error(JSON.stringify({ event: "auth_recovery_enqueue_failure" }));
-    }
-  };
-
-  const enqueuePendingGameRecovery = async (
-    profile: AuthFirestoreDocument,
-  ): Promise<void> => {
-    const sourceProfileId = cleanString(
-      profile.fields.pendingMergeGameCopySourceProfileId,
-    );
-    if (sourceProfileId && !gameRecoveryWakeups.has(profile.id)) {
-      await enqueueAuthRecovery(env, profile.id);
-      gameRecoveryWakeups.add(profile.id);
-      await acknowledgeMergeGameBacklog(
-        cleanString(profile.fields.pendingMergeGameCopyOpId),
-      );
     }
   };
 
@@ -687,49 +611,12 @@ export function createAuthIdentityService(
     return discovered;
   };
 
-  const ensureProfileClaim = async (
-    uid: string,
-    profileId: string,
-  ): Promise<void> => {
-    if (!isCanonicalFirebaseUid(uid)) {
-      throw new TypeError("invalid-firebase-uid");
-    }
-    const [user, profileLink] = await Promise.all([
-      authClient.getUser(uid),
-      rtdb.getPath(`players/${uid}/profile`, undefined, dependencies.signal),
-    ]);
-    const writes: Promise<void>[] = [];
-    if (cleanString(profileLink) !== profileId) {
-      writes.push(
-        rtdb.patchRoot(
-          { [`players/${uid}/profile`]: profileId },
-          dependencies.signal,
-        ),
-      );
-    }
-    if (cleanString(user.customClaims.profileId) !== profileId) {
-      writes.push(
-        authClient.setCustomUserClaims(uid, {
-          ...user.customClaims,
-          profileId,
-        }),
-      );
-    }
-    const outcomes = await Promise.allSettled(writes);
-    const failure = outcomes.find(
-      (outcome): outcome is PromiseRejectedResult =>
-        outcome.status === "rejected",
-    );
-    if (failure) {
-      throw failure.reason;
-    }
-  };
-
   const replayFromOp = async (
     opId: string,
     kind: "unlink" | "verify",
     method: AuthMethodKey,
     uid: string,
+    expectedMeta?: Record<string, unknown> | null,
   ): Promise<AuthProfileResponse | LinkedAuthMethodsResponse | null> => {
     const operation = await firestore.get(authDocumentName("authOps", opId));
     if (!operation) {
@@ -764,15 +651,26 @@ export function createAuthIdentityService(
       return null;
     }
     if (kind === "verify") {
+      const storedMeta = record(fields.meta);
+      if (
+        expectedMeta !== undefined &&
+        (cleanString(storedMeta.methodValueHash) !==
+          cleanString(record(expectedMeta).methodValueHash) ||
+          cleanString(storedMeta.intentId) !==
+            cleanString(record(expectedMeta).intentId))
+      ) {
+        authFailure(403, "permission-denied", "op-context-mismatch");
+      }
       const profile = await profileByLogin(uid);
-      if (!profile || profile.id !== cleanString(result.profileId)) {
+      if (!profile) {
         return null;
       }
       const currentValue = normalizeProfileMethod(method, profile.fields);
       const expectedHash = cleanString(record(fields.meta).methodValueHash);
       if (
         !currentValue ||
-        (expectedHash && hashMethodValue(method, currentValue) !== expectedHash)
+        !expectedHash ||
+        hashMethodValue(method, currentValue) !== expectedHash
       ) {
         return null;
       }
@@ -781,7 +679,17 @@ export function createAuthIdentityService(
       return result;
     }
     if (kind === "unlink" && isLinkedAuthMethodsResponse(result)) {
-      return result;
+      const profile = await repairCurrentCaller(uid);
+      if (normalizeProfileMethod(method, profile.fields)) {
+        return null;
+      }
+      const linkedMethods = getLinkedAuthMethodsFromProfile(profile.fields);
+      return {
+        ok: true,
+        profileId: profile.id,
+        linkedMethods,
+        appleLinked: linkedMethods.apple,
+      };
     }
     return null;
   };
@@ -825,7 +733,7 @@ export function createAuthIdentityService(
         }
       }
     };
-    const replay = await replayFromOp(opId, kind, method, uid);
+    const replay = await replayFromOp(opId, kind, method, uid, meta);
     if (replay) {
       return replay;
     }
@@ -833,6 +741,9 @@ export function createAuthIdentityService(
     const existing = await durableFirestore.get(operationName);
     if (existing) {
       validateExisting(existing);
+      if (existing.fields.status === "success") {
+        authFailure(409, "aborted", "profile-merged-retry");
+      }
       return null;
     }
     const nowMs = now();
@@ -859,7 +770,7 @@ export function createAuthIdentityService(
       if (!(error instanceof AuthFirestoreConflict)) {
         throw error;
       }
-      const racedReplay = await replayFromOp(opId, kind, method, uid);
+      const racedReplay = await replayFromOp(opId, kind, method, uid, meta);
       if (racedReplay) {
         return racedReplay;
       }
@@ -868,6 +779,9 @@ export function createAuthIdentityService(
         throw error;
       }
       validateExisting(raced);
+      if (raced.fields.status === "success") {
+        authFailure(409, "aborted", "profile-merged-retry");
+      }
       return null;
     }
   };
@@ -1030,6 +944,12 @@ export function createAuthIdentityService(
           normalizedValue: input.normalizedMethodValue,
           updatedAtMs: nowMs,
         }),
+        authUpdateWrite(
+          authRecoveryJobName(profileId),
+          newAuthRecoveryJob(profileId, [input.uid], [], nowMs),
+          undefined,
+          false,
+        ),
       );
       return { result: profileId, writes };
     });
@@ -1044,9 +964,15 @@ export function createAuthIdentityService(
         "authMethodIndex",
         getMethodKey(input.method, input.normalizedMethodValue),
       );
-      const snapshots = await transaction.batchGet([profileName, indexName]);
+      const recoveryName = authRecoveryJobName(profileId);
+      const snapshots = await transaction.batchGet([
+        profileName,
+        indexName,
+        recoveryName,
+      ]);
       const profile = getOne(snapshots, profileName);
       const index = getOne(snapshots, indexName);
+      const recoveryDocument = getOne(snapshots, recoveryName);
       if (!profile) {
         authFailure(404, "not-found", "profile-not-found");
       }
@@ -1104,290 +1030,49 @@ export function createAuthIdentityService(
       patch.logins = uniqueStoredFirebaseUids(profile.fields.logins, [
         input.uid,
       ]);
+      const nowMs = now();
+      const existingRecovery = recoveryDocument
+        ? parseAuthRecoveryJob(recoveryDocument)
+        : null;
+      if (recoveryDocument && !existingRecovery) {
+        authFailure(409, "failed-precondition", "auth-recovery-job-invalid");
+      }
+      const recoveryJob = existingRecovery
+        ? {
+            ...existingRecovery,
+            loginUids: uniqueStoredFirebaseUids(existingRecovery.loginUids, [
+              input.uid,
+            ]),
+            updatedAtMs: nowMs,
+          }
+        : newAuthRecoveryJob(profileId, [input.uid], [], nowMs);
       writes.push(
         authUpdateWrite(profileName, patch, Object.keys(patch), true),
         authUpdateWrite(indexName, {
           profileId,
           method: input.method,
           normalizedValue: input.normalizedMethodValue,
-          updatedAtMs: now(),
+          updatedAtMs: nowMs,
         }),
+        authUpdateWrite(
+          recoveryName,
+          recoveryJob,
+          Object.keys(recoveryJob),
+          recoveryDocument
+            ? recoveryDocument.updateTime
+              ? { updateTime: recoveryDocument.updateTime }
+              : true
+            : false,
+        ),
       );
       return { result: { kind: "linked" as const }, writes };
     });
-
-  const acquireMergeLocks = async (
-    targetProfileId: string,
-    sourceProfileId: string,
-    opId: string,
-  ): Promise<MergeLockLease> => {
-    const ownerId = createLockOwnerId();
-    const profileIds = Array.from(
-      new Set([targetProfileId, sourceProfileId]),
-    ).sort();
-    const names = profileIds.map((profileId) =>
-      authDocumentName("mergeLocks", `profile:${profileId}`),
-    );
-    await firestore.runTransaction(async (transaction) => {
-      const snapshots = await transaction.batchGet(names);
-      for (const name of names) {
-        const lock = getOne(snapshots, name);
-        if (lock && finiteNumber(lock.fields.expiresAtMs, 0) > now()) {
-          authFailure(409, "aborted", "merge-lock-active");
-        }
-      }
-      const nowMs = now();
-      return {
-        result: undefined,
-        writes: names.map((name, index) =>
-          authUpdateWrite(name, {
-            key: name.split("/").at(-1),
-            opId: ownerId,
-            operationId: opId,
-            ownerId,
-            profileId: profileIds[index],
-            targetProfileId,
-            sourceProfileId,
-            expiresAtMs: nowMs + MERGE_LOCK_TTL_MS,
-            updatedAtMs: nowMs,
-          }),
-        ),
-      };
-    });
-    return { names, operationId: opId, ownerId };
-  };
-
-  const releaseMergeLocks = async (lease: MergeLockLease): Promise<void> => {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        await durableFirestore.runTransaction(async (transaction) => {
-          const snapshots = await transaction.batchGet(lease.names);
-          const writes = lease.names
-            .filter((name) => {
-              const fields = getOne(snapshots, name)?.fields;
-              return (
-                cleanString(fields?.opId) === lease.ownerId &&
-                cleanString(fields?.ownerId) === lease.ownerId &&
-                cleanString(fields?.operationId) === lease.operationId
-              );
-            })
-            .map((name) => authDeleteWrite(name, true));
-          return { result: undefined, writes };
-        });
-        return;
-      } catch {
-        const delay = LOCK_RELEASE_RETRY_DELAYS_MS[attempt];
-        if (delay) {
-          await new Promise<void>((resolve) => setTimeout(resolve, delay));
-        }
-      }
-    }
-    try {
-      await durableFirestore.runTransaction(async (transaction) => {
-        const snapshots = await transaction.batchGet(lease.names);
-        const nowMs = now();
-        const writes = lease.names
-          .filter((name) => {
-            const fields = getOne(snapshots, name)?.fields;
-            return (
-              cleanString(fields?.opId) === lease.ownerId &&
-              cleanString(fields?.ownerId) === lease.ownerId &&
-              cleanString(fields?.operationId) === lease.operationId
-            );
-          })
-          .map((name) =>
-            authUpdateWrite(
-              name,
-              { expiresAtMs: nowMs - 1, updatedAtMs: nowMs },
-              ["expiresAtMs", "updatedAtMs"],
-              true,
-            ),
-          );
-        return { result: undefined, writes };
-      });
-      return;
-    } catch {
-      console.error(
-        JSON.stringify({ event: "auth_merge_lock_release_failure" }),
-      );
-    }
-  };
-
-  const { reconcileProfileGames, reconcileProfilePrizes } =
-    createAuthMergeRecovery({
-      buildPrizeCopies: buildProfileEventPrizeMergeCopies,
-      durableFirestore,
-      firestore,
-      getWithdrawalPath: getEventPrizeWithdrawalPath,
-      isCompletedWithdrawal: isCompletedEventPrizeWithdrawal,
-      isMatchingAssignment: isMatchingProfileEventPrizeAssignment,
-      mergeGameBacklogName,
-      now,
-      rtdb,
-      signal: dependencies.signal,
-    });
-
-  const persistClaimResult = async (
-    {
-      loginUids,
-      opId,
-      sourceProfileId,
-      targetName,
-      targetProfileId,
-    }: ClaimReconciliationInput,
-    failedLogins: string[],
-  ): Promise<void> => {
-    const backlogName = authDocumentName("authClaimSyncBacklog", opId);
-    await durableFirestore.runTransaction(async (transaction) => {
-      const target = getOne(
-        await transaction.batchGet([targetName]),
-        targetName,
-      );
-      if (!target) {
-        authFailure(500, "internal", "target-profile-missing");
-      }
-      const pendingOpId = cleanString(target.fields.pendingClaimSyncOpId);
-      const attemptedLogins = new Set(loginUids);
-      const pendingLogins = uniqueStoredFirebaseUids(
-        pendingOpId && pendingOpId !== opId
-          ? target.fields.pendingClaimSyncLogins
-          : uniqueStoredFirebaseUids(
-              target.fields.pendingClaimSyncLogins,
-            ).filter((loginUid) => !attemptedLogins.has(loginUid)),
-        failedLogins,
-      );
-      if (pendingLogins.length > 0) {
-        const markerOpId = pendingOpId || opId;
-        const markerBacklogName = authDocumentName(
-          "authClaimSyncBacklog",
-          markerOpId,
-        );
-        const updatedAtMs = now();
-        return {
-          result: undefined,
-          writes: [
-            authUpdateWrite(targetName, {
-              pendingClaimSyncLogins: pendingLogins,
-              pendingClaimSyncOpId: markerOpId,
-              pendingClaimSyncUpdatedAtMs: updatedAtMs,
-            }),
-            authUpdateWrite(markerBacklogName, {
-              opId: markerOpId,
-              targetProfileId,
-              sourceProfileId,
-              failedLoginUids: pendingLogins,
-              status: claimBacklogStatus,
-              createdAtMs: updatedAtMs,
-              updatedAtMs,
-            }),
-            ...(markerOpId === opId ? [] : [authDeleteWrite(backlogName)]),
-          ],
-        };
-      }
-      return {
-        result: undefined,
-        writes: [
-          ...(pendingOpId && pendingOpId !== opId
-            ? []
-            : [
-                authUpdateWrite(
-                  targetName,
-                  {},
-                  [...PENDING_CLAIM_SYNC_FIELD_PATHS],
-                  true,
-                ),
-              ]),
-          authDeleteWrite(backlogName),
-        ],
-      };
-    });
-  };
-
-  const reconcilePersistedProfileClaims = async (
-    input: ClaimReconciliationInput,
-  ): Promise<string[]> => {
-    const failedLogins: string[] = [];
-    for (const loginUid of input.loginUids) {
-      try {
-        await ensureProfileClaim(loginUid, input.targetProfileId);
-      } catch {
-        failedLogins.push(loginUid);
-      }
-    }
-    await persistClaimResult(input, failedLogins);
-    return failedLogins;
-  };
-
-  const reconcileProfileClaims = async (
-    input: ClaimReconciliationInput,
-  ): Promise<string[]> => {
-    await persistClaimResult(input, input.loginUids);
-    return reconcilePersistedProfileClaims(input);
-  };
-
-  const reconcileProfileClaimsBestEffort = async (
-    input: ClaimReconciliationInput,
-  ): Promise<boolean> => {
-    let lease: MergeLockLease | null = null;
-    let pending = true;
-    let durableRecovery = false;
-    try {
-      lease = await acquireMergeLocks(
-        input.targetProfileId,
-        input.targetProfileId,
-        input.opId,
-      );
-      await persistClaimResult(input, input.loginUids);
-      durableRecovery = true;
-      pending = (await reconcilePersistedProfileClaims(input)).length > 0;
-    } catch (error) {
-      let persistenceFailure: unknown = error;
-      try {
-        let target: AuthFirestoreDocument | null = null;
-        const loginUid = input.loginUids[0];
-        if (loginUid) {
-          try {
-            target = await profileByLogin(loginUid);
-          } catch {}
-        }
-        target ||= await durableFirestore.get(input.targetName);
-        if (target) {
-          await persistClaimResult(
-            {
-              ...input,
-              sourceProfileId:
-                cleanString(target.fields.mergedSourceProfileId) ||
-                input.sourceProfileId,
-              targetName: target.name,
-              targetProfileId: target.id,
-            },
-            input.loginUids,
-          );
-          durableRecovery = true;
-        }
-      } catch (failure) {
-        persistenceFailure = failure;
-      }
-      console.error(JSON.stringify({ event: "auth_claim_recovery_pending" }));
-      if (!durableRecovery) {
-        throw persistenceFailure;
-      }
-    } finally {
-      if (lease) {
-        await releaseMergeLocks(lease);
-      }
-    }
-    return pending;
-  };
 
   const mergeProfiles = async (
     targetProfileId: string,
     sourceProfileId: string,
     opId: string,
   ): Promise<AuthFirestoreDocument> => {
-    if (featureDisabled(env.AUTH_DISABLE_MERGE)) {
-      authFailure(409, "failed-precondition", "merge-disabled");
-    }
     if (targetProfileId === sourceProfileId) {
       const profile = await firestore.get(
         authDocumentName("users", targetProfileId),
@@ -1397,271 +1082,217 @@ export function createAuthIdentityService(
       }
       return profile;
     }
-    const lease = await acquireMergeLocks(
-      targetProfileId,
+    const targetName = authDocumentName("users", targetProfileId);
+    const sourceName = authDocumentName("users", sourceProfileId);
+    const mergeTargetName = authDocumentName(
+      PROFILE_MERGE_TARGETS_COLLECTION,
       sourceProfileId,
-      opId,
     );
-    try {
-      const targetName = authDocumentName("users", targetProfileId);
-      const sourceName = authDocumentName("users", sourceProfileId);
-      const mergeTargetName = authDocumentName(
-        PROFILE_MERGE_TARGETS_COLLECTION,
-        sourceProfileId,
+    const targetMergeTargetName = authDocumentName(
+      PROFILE_MERGE_TARGETS_COLLECTION,
+      targetProfileId,
+    );
+    const targetRecoveryName = authRecoveryJobName(targetProfileId);
+    const sourceRecoveryName = authRecoveryJobName(sourceProfileId);
+    const mergeResult = await firestore.runTransaction<{
+      kind: "existing" | "merged";
+    }>(async (transaction) => {
+      const baseSnapshots = await transaction.batchGet([
+        targetName,
+        sourceName,
+        mergeTargetName,
+        targetMergeTargetName,
+        targetRecoveryName,
+        sourceRecoveryName,
+      ]);
+      const target = getOne(baseSnapshots, targetName);
+      const source = getOne(baseSnapshots, sourceName);
+      if (!target) {
+        authFailure(404, "not-found", "target-profile-not-found");
+      }
+      if (
+        getOne(baseSnapshots, targetRecoveryName) ||
+        getOne(baseSnapshots, sourceRecoveryName)
+      ) {
+        authFailure(409, "aborted", "merge-recovery-pending");
+      }
+      const existingMergeTarget = getOne(baseSnapshots, mergeTargetName);
+      const existingMergeTargetId = cleanString(
+        existingMergeTarget?.fields.targetProfileId,
       );
-      const targetMergeTargetName = authDocumentName(
-        PROFILE_MERGE_TARGETS_COLLECTION,
-        targetProfileId,
-      );
-      const mergeResult = await firestore.runTransaction<
-        | {
-            kind: "existing";
-            queueRecovery: boolean;
-          }
-        | { kind: "merged"; logins: string[] }
-      >(async (transaction) => {
-        const baseSnapshots = await transaction.batchGet([
-          targetName,
-          sourceName,
-          mergeTargetName,
-          targetMergeTargetName,
-        ]);
-        const target = getOne(baseSnapshots, targetName);
-        const source = getOne(baseSnapshots, sourceName);
-        if (!target) {
-          authFailure(404, "not-found", "target-profile-not-found");
-        }
-        const pendingSource = cleanString(
-          target.fields.pendingMergeGameCopySourceProfileId,
+      if (existingMergeTargetId && existingMergeTargetId !== targetProfileId) {
+        authFailure(
+          409,
+          "failed-precondition",
+          "profile-merge-target-conflict",
         );
-        const pendingOp = cleanString(target.fields.pendingMergeGameCopyOpId);
-        if (
-          pendingSource &&
-          (pendingSource !== sourceProfileId || pendingOp !== opId)
-        ) {
-          authFailure(409, "aborted", "merge-recovery-pending");
-        }
-        if (cleanString(source?.fields.pendingMergeGameCopySourceProfileId)) {
-          authFailure(409, "aborted", "merge-recovery-pending");
-        }
-        const existingMergeTarget = getOne(baseSnapshots, mergeTargetName);
-        const existingMergeTargetId = cleanString(
-          existingMergeTarget?.fields.targetProfileId,
+      }
+      const targetMergeTarget = getOne(baseSnapshots, targetMergeTargetName);
+      if (
+        targetMergeTarget &&
+        cleanString(targetMergeTarget.fields.targetProfileId)
+      ) {
+        authFailure(
+          409,
+          "failed-precondition",
+          "target-profile-already-merged",
         );
-        if (
-          existingMergeTargetId &&
-          existingMergeTargetId !== targetProfileId
-        ) {
-          authFailure(
-            409,
-            "failed-precondition",
-            "profile-merge-target-conflict",
-          );
-        }
-        const targetMergeTarget = getOne(baseSnapshots, targetMergeTargetName);
-        if (
-          targetMergeTarget &&
-          cleanString(targetMergeTarget.fields.targetProfileId)
-        ) {
-          authFailure(
-            409,
-            "failed-precondition",
-            "target-profile-already-merged",
-          );
-        }
-        if (
-          source &&
-          existingMergeTargetId === targetProfileId &&
-          cleanString(source.fields.mergedIntoProfileId) === targetProfileId &&
-          source.fields.mergeSourceRetainedForGameCopy === true
-        ) {
-          const nowMs = now();
-          return {
-            result: {
-              kind: "existing" as const,
-              queueRecovery: true,
-            },
-            writes: [
-              authUpdateWrite(
-                sourceName,
-                {},
-                [...PENDING_CLAIM_SYNC_FIELD_PATHS],
-                true,
-              ),
-              ...(!pendingSource
-                ? [
-                    authUpdateWrite(
-                      targetName,
-                      {
-                        pendingMergeGameCopySourceProfileId: sourceProfileId,
-                        pendingMergeGameCopyOpId: opId,
-                        pendingMergeGameCopyUpdatedAtMs: nowMs,
-                      },
-                      [...PENDING_MERGE_GAME_COPY_FIELD_PATHS],
-                      true,
-                    ),
-                  ]
-                : []),
-              mergeGameBacklogWrite(
-                opId,
-                sourceProfileId,
-                targetProfileId,
-                nowMs,
-              ),
-            ],
-          };
-        }
-        if (!source) {
-          const repairPrizes = existingMergeTargetId === targetProfileId;
-          const nowMs = now();
-          return {
-            result: {
-              kind: "existing" as const,
-              queueRecovery: repairPrizes,
-            },
-            writes: repairPrizes
-              ? [
-                  ...(!pendingSource
-                    ? [
-                        authUpdateWrite(
-                          targetName,
-                          {
-                            pendingMergeGameCopySourceProfileId:
-                              sourceProfileId,
-                            pendingMergeGameCopyOpId: opId,
-                            pendingMergeGameCopyUpdatedAtMs: nowMs,
-                          },
-                          [...PENDING_MERGE_GAME_COPY_FIELD_PATHS],
-                          true,
-                        ),
-                      ]
-                    : []),
-                  mergeGameBacklogWrite(
-                    opId,
-                    sourceProfileId,
-                    targetProfileId,
-                    nowMs,
-                  ),
-                ]
-              : [],
-          };
+      }
+      if (
+        source &&
+        existingMergeTargetId === targetProfileId &&
+        cleanString(source.fields.mergedIntoProfileId) === targetProfileId
+      ) {
+        if (uniqueStoredFirebaseUids(source.fields.logins).length > 0) {
+          authFailure(409, "failed-precondition", "merge-source-invalid");
         }
         const nowMs = now();
-        const plan = buildProfileMergePlan(
-          target,
-          source,
-          sourceProfileId,
-          opId,
-          nowMs,
-        );
-        const names = [
-          ...plan.methodIndexes.map((entry) =>
-            authDocumentName(
-              "authMethodIndex",
-              getMethodKey(entry.method, entry.value),
+        return {
+          result: {
+            kind: "existing" as const,
+          },
+          writes: [
+            authUpdateWrite(
+              targetRecoveryName,
+              newAuthRecoveryJob(
+                targetProfileId,
+                uniqueStoredFirebaseUids(target.fields.logins),
+                [sourceProfileId],
+                nowMs,
+              ),
+              undefined,
+              false,
             ),
-          ),
-          ...(plan.usernameKey
-            ? [authDocumentName("usernameIndex", plan.usernameKey)]
-            : []),
-          ...plan.staleUsernameIndexNames,
-        ];
-        const snapshots = await transaction.batchGet(names);
-        const externalOwnerIds = new Set<string>();
-        for (const name of names) {
-          const owner = cleanString(getOne(snapshots, name)?.fields.profileId);
-          if (owner && owner !== targetProfileId && owner !== sourceProfileId) {
-            externalOwnerIds.add(owner);
-          }
+          ],
+        };
+      }
+      if (!source) {
+        if (existingMergeTargetId === targetProfileId) {
+          return {
+            result: { kind: "existing" as const },
+            writes: [],
+          };
         }
-        const externalOwnerNames = Array.from(externalOwnerIds, (owner) =>
-          authDocumentName("users", owner),
-        );
-        const externalOwners = await transaction.batchGet(externalOwnerNames);
-        const writes: AuthFirestoreWrite[] = [];
-        for (const entry of plan.methodIndexes) {
-          const name = authDocumentName(
+        authFailure(404, "not-found", "source-profile-not-found");
+      }
+      const nowMs = now();
+      const plan = buildProfileMergePlan(target, source, nowMs);
+      const names = [
+        ...plan.methodIndexes.map((entry) =>
+          authDocumentName(
             "authMethodIndex",
             getMethodKey(entry.method, entry.value),
-          );
-          const index = getOne(snapshots, name);
-          const owner = index ? cleanString(index.fields.profileId) : "";
-          if (owner && owner !== targetProfileId && owner !== sourceProfileId) {
-            const ownerProfile = getOne(
-              externalOwners,
-              authDocumentName("users", owner),
-            );
-            if (
-              ownerProfile &&
-              normalizeProfileMethod(entry.method, ownerProfile.fields) ===
-                entry.value
-            ) {
-              authFailure(409, "failed-precondition", "method-index-conflict");
-            }
-          }
-          writes.push(
-            authUpdateWrite(name, {
-              profileId: targetProfileId,
-              method: entry.method,
-              normalizedValue: entry.value,
-              updatedAtMs: nowMs,
-            }),
-          );
+          ),
+        ),
+        ...(plan.usernameKey
+          ? [authDocumentName("usernameIndex", plan.usernameKey)]
+          : []),
+        ...plan.staleUsernameIndexNames,
+      ];
+      const snapshots = await transaction.batchGet(names);
+      const externalOwnerIds = new Set<string>();
+      for (const name of names) {
+        const owner = cleanString(getOne(snapshots, name)?.fields.profileId);
+        if (owner && owner !== targetProfileId && owner !== sourceProfileId) {
+          externalOwnerIds.add(owner);
         }
-        if (plan.usernameKey) {
-          const usernameName = authDocumentName(
-            "usernameIndex",
-            plan.usernameKey,
-          );
-          const index = getOne(snapshots, usernameName);
-          const owner = index ? cleanString(index.fields.profileId) : "";
-          if (owner && owner !== targetProfileId && owner !== sourceProfileId) {
-            const ownerProfile = getOne(
-              externalOwners,
-              authDocumentName("users", owner),
-            );
-            if (
-              ownerProfile &&
-              buildUsernameLookupKey(ownerProfile.fields.username) ===
-                plan.usernameKey
-            ) {
-              authFailure(
-                409,
-                "failed-precondition",
-                "username-index-conflict",
-              );
-            }
-          }
-          const conflicts = await transaction.query(
-            "users",
-            authFieldFilter(
-              USERNAME_LOOKUP_KEY_FIELD,
-              "EQUAL",
-              plan.usernameKey,
-            ),
-            USERNAME_CONFLICT_QUERY_LIMIT,
-            ["username"],
+      }
+      const externalOwnerNames = Array.from(externalOwnerIds, (owner) =>
+        authDocumentName("users", owner),
+      );
+      const externalOwners = await transaction.batchGet(externalOwnerNames);
+      const writes: AuthFirestoreWrite[] = [];
+      for (const entry of plan.methodIndexes) {
+        const name = authDocumentName(
+          "authMethodIndex",
+          getMethodKey(entry.method, entry.value),
+        );
+        const index = getOne(snapshots, name);
+        const owner = index ? cleanString(index.fields.profileId) : "";
+        if (owner && owner !== targetProfileId && owner !== sourceProfileId) {
+          const ownerProfile = getOne(
+            externalOwners,
+            authDocumentName("users", owner),
           );
           if (
-            conflicts.length >= USERNAME_CONFLICT_QUERY_LIMIT ||
-            conflicts.some(
-              (document) =>
-                document.id !== targetProfileId &&
-                document.id !== sourceProfileId &&
-                buildUsernameLookupKey(document.fields.username) ===
-                  plan.usernameKey,
-            )
+            ownerProfile &&
+            normalizeProfileMethod(entry.method, ownerProfile.fields) ===
+              entry.value
+          ) {
+            authFailure(409, "failed-precondition", "method-index-conflict");
+          }
+        }
+        writes.push(
+          authUpdateWrite(name, {
+            profileId: targetProfileId,
+            method: entry.method,
+            normalizedValue: entry.value,
+            updatedAtMs: nowMs,
+          }),
+        );
+      }
+      if (plan.usernameKey) {
+        const usernameName = authDocumentName(
+          "usernameIndex",
+          plan.usernameKey,
+        );
+        const index = getOne(snapshots, usernameName);
+        const owner = index ? cleanString(index.fields.profileId) : "";
+        if (owner && owner !== targetProfileId && owner !== sourceProfileId) {
+          const ownerProfile = getOne(
+            externalOwners,
+            authDocumentName("users", owner),
+          );
+          if (
+            ownerProfile &&
+            buildUsernameLookupKey(ownerProfile.fields.username) ===
+              plan.usernameKey
           ) {
             authFailure(409, "failed-precondition", "username-index-conflict");
           }
-          const exactConflicts = await transaction.query(
+        }
+        const conflicts = await transaction.query(
+          "users",
+          authFieldFilter(USERNAME_LOOKUP_KEY_FIELD, "EQUAL", plan.usernameKey),
+          USERNAME_CONFLICT_QUERY_LIMIT,
+          ["username"],
+        );
+        if (
+          conflicts.length >= USERNAME_CONFLICT_QUERY_LIMIT ||
+          conflicts.some(
+            (document) =>
+              document.id !== targetProfileId &&
+              document.id !== sourceProfileId &&
+              buildUsernameLookupKey(document.fields.username) ===
+                plan.usernameKey,
+          )
+        ) {
+          authFailure(409, "failed-precondition", "username-index-conflict");
+        }
+        const exactConflicts = await transaction.query(
+          "users",
+          authFieldFilter("username", "EQUAL", plan.mergedUsername),
+          3,
+          ["username"],
+        );
+        if (
+          exactConflicts.some(
+            (document) =>
+              document.id !== targetProfileId &&
+              document.id !== sourceProfileId,
+          )
+        ) {
+          authFailure(409, "failed-precondition", "username-index-conflict");
+        }
+        if (plan.usernameKey !== plan.mergedUsername) {
+          const lowercaseConflicts = await transaction.query(
             "users",
-            authFieldFilter("username", "EQUAL", plan.mergedUsername),
+            authFieldFilter("username", "EQUAL", plan.usernameKey),
             3,
             ["username"],
           );
           if (
-            exactConflicts.some(
+            lowercaseConflicts.some(
               (document) =>
                 document.id !== targetProfileId &&
                 document.id !== sourceProfileId,
@@ -1669,371 +1300,205 @@ export function createAuthIdentityService(
           ) {
             authFailure(409, "failed-precondition", "username-index-conflict");
           }
-          if (plan.usernameKey !== plan.mergedUsername) {
-            const lowercaseConflicts = await transaction.query(
-              "users",
-              authFieldFilter("username", "EQUAL", plan.usernameKey),
-              3,
-              ["username"],
-            );
-            if (
-              lowercaseConflicts.some(
-                (document) =>
-                  document.id !== targetProfileId &&
-                  document.id !== sourceProfileId,
-              )
-            ) {
-              authFailure(
-                409,
-                "failed-precondition",
-                "username-index-conflict",
-              );
-            }
-          }
-          writes.push(
-            authUpdateWrite(usernameName, {
-              profileId: targetProfileId,
-              username: plan.mergedUsername,
-              lookupKey: plan.usernameKey,
-              updatedAtMs: nowMs,
-            }),
-          );
         }
-        const canonicalUsernameIndexName = plan.usernameKey
-          ? authDocumentName("usernameIndex", plan.usernameKey)
-          : "";
-        for (const name of plan.staleUsernameIndexNames) {
-          if (name === canonicalUsernameIndexName) {
-            continue;
-          }
-          const stale = getOne(snapshots, name);
-          const owner = stale ? cleanString(stale.fields.profileId) : "";
-          if (owner === targetProfileId || owner === sourceProfileId) {
-            writes.push(authDeleteWrite(name, true));
-          }
-        }
-        const targetPaths = Array.from(
-          new Set([...Object.keys(plan.merged), ...plan.deleteTargetFields]),
-        );
         writes.push(
-          authUpdateWrite(targetName, plan.merged, targetPaths, true),
-          authUpdateWrite(mergeTargetName, {
-            sourceProfileId,
-            targetProfileId,
-            mergedAtMs: nowMs,
-            opId,
+          authUpdateWrite(usernameName, {
+            profileId: targetProfileId,
+            username: plan.mergedUsername,
+            lookupKey: plan.usernameKey,
+            updatedAtMs: nowMs,
           }),
-          mergeGameBacklogWrite(opId, sourceProfileId, targetProfileId, nowMs),
-          authUpdateWrite(
-            sourceName,
-            {
-              logins: [],
-              mergedIntoProfileId: targetProfileId,
-              mergedAtMs: nowMs,
-              mergeSourceRetainedForGameCopy: true,
-            },
-            [
-              "logins",
-              "eth",
-              "sol",
-              "appleSub",
-              ...PROVIDER_METADATA_FIELD_PATHS.apple,
-              "xUserId",
-              ...PROVIDER_METADATA_FIELD_PATHS.x,
-              "username",
-              USERNAME_LOOKUP_KEY_FIELD,
-              "rating",
-              "totalManaPoints",
-              "nonce",
-              "win",
-              "feb2026UniqueOpponentsCount",
-              "custom",
-              "mining",
-              "mergedIntoProfileId",
-              "mergedAtMs",
-              "mergeSourceRetainedForGameCopy",
-              ...PENDING_CLAIM_SYNC_FIELD_PATHS,
-            ],
-            true,
-          ),
         );
-        return {
-          result: {
-            kind: "merged" as const,
-            logins: plan.mergedLogins,
-          },
-          writes,
-        };
-      });
-      if (
-        mergeResult.kind === "merged" ||
-        (mergeResult.kind === "existing" && mergeResult.queueRecovery)
-      ) {
-        await enqueueAuthRecovery(env, targetProfileId);
-        gameRecoveryWakeups.add(targetProfileId);
-        await acknowledgeMergeGameBacklog(opId);
       }
-      if (mergeResult.kind === "merged") {
-        try {
-          await reconcileProfileClaims({
-            loginUids: mergeResult.logins,
-            opId,
-            sourceProfileId,
-            targetName,
+      const canonicalUsernameIndexName = plan.usernameKey
+        ? authDocumentName("usernameIndex", plan.usernameKey)
+        : "";
+      for (const name of plan.staleUsernameIndexNames) {
+        if (name === canonicalUsernameIndexName) {
+          continue;
+        }
+        const stale = getOne(snapshots, name);
+        const owner = stale ? cleanString(stale.fields.profileId) : "";
+        if (owner === targetProfileId || owner === sourceProfileId) {
+          writes.push(authDeleteWrite(name, true));
+        }
+      }
+      const targetPaths = Array.from(
+        new Set([...Object.keys(plan.merged), ...plan.deleteTargetFields]),
+      );
+      writes.push(
+        authUpdateWrite(targetName, plan.merged, targetPaths, true),
+        authUpdateWrite(mergeTargetName, {
+          sourceProfileId,
+          targetProfileId,
+          mergedAtMs: nowMs,
+          opId,
+        }),
+        authUpdateWrite(
+          targetRecoveryName,
+          newAuthRecoveryJob(
             targetProfileId,
-          });
-        } catch {
-          console.error(
-            JSON.stringify({ event: "auth_claim_recovery_pending" }),
-          );
-        }
+            plan.mergedLogins,
+            [sourceProfileId],
+            nowMs,
+          ),
+          undefined,
+          false,
+        ),
+        authUpdateWrite(
+          sourceName,
+          {
+            logins: [],
+            mergedIntoProfileId: targetProfileId,
+            mergedAtMs: nowMs,
+          },
+          [
+            "logins",
+            "eth",
+            "sol",
+            "appleSub",
+            ...PROVIDER_METADATA_FIELD_PATHS.apple,
+            "xUserId",
+            ...PROVIDER_METADATA_FIELD_PATHS.x,
+            "username",
+            USERNAME_LOOKUP_KEY_FIELD,
+            "rating",
+            "totalManaPoints",
+            "nonce",
+            "win",
+            "feb2026UniqueOpponentsCount",
+            "custom",
+            "mining",
+            "mergedIntoProfileId",
+            "mergedAtMs",
+          ],
+          true,
+        ),
+      );
+      return {
+        result: {
+          kind: "merged" as const,
+        },
+        writes,
+      };
+    });
+    const mergedProfile = await firestore.get(targetName);
+    if (!mergedProfile) {
+      if (mergeResult.kind === "existing") {
+        authFailure(404, "not-found", "target-profile-not-found");
       }
-      const mergedProfile = await firestore.get(targetName);
-      if (!mergedProfile) {
-        if (mergeResult.kind === "existing") {
-          authFailure(404, "not-found", "target-profile-not-found");
-        }
-        authFailure(500, "internal", "target-profile-missing");
-      }
-      return mergedProfile;
-    } finally {
-      await releaseMergeLocks(lease);
+      authFailure(500, "internal", "target-profile-missing");
     }
+    return mergedProfile;
   };
 
-  const recoverPendingProfileState = async (
-    profile: AuthFirestoreDocument,
-  ): Promise<AuthFirestoreDocument> => {
-    const targetName = profile.name;
-    const targetProfileId = profile.id;
-    const sourceProfileId = cleanString(
-      profile.fields.pendingMergeGameCopySourceProfileId,
-    );
-    const pendingLogins = uniqueStoredFirebaseUids(
-      profile.fields.pendingClaimSyncLogins,
-    );
-    if (deferRecovery && (sourceProfileId || pendingLogins.length > 0)) {
-      if (!gameRecoveryWakeups.has(targetProfileId)) {
-        await enqueueRecoveryBestEffort(targetProfileId);
-        gameRecoveryWakeups.add(targetProfileId);
+  const acquireCallerRecoveryBarrier = (uid: string) =>
+    durableFirestore.runTransaction(async (transaction) => {
+      const profile = await profileByLogin(uid, transaction);
+      if (!profile || isRetiredMergeSource(profile.fields)) {
+        authFailure(409, "aborted", "profile-merged-retry");
       }
-      return profile;
-    }
-    const recoveryUpdatedAtMs = finiteNumber(
-      profile.fields.pendingMergeGameCopyUpdatedAtMs,
-      0,
-    );
-    if (
-      sourceProfileId &&
-      recoveryUpdatedAtMs > 0 &&
-      now() - recoveryUpdatedAtMs < MERGE_GAME_FINALIZE_DELAY_MS
-    ) {
-      return profile;
-    }
-    if (!sourceProfileId) {
-      if (pendingLogins.length === 0) {
-        return profile;
-      }
-      const claimOpId =
-        cleanString(profile.fields.pendingClaimSyncOpId) ||
-        `recovery:${targetProfileId}`;
-      const lease = await acquireMergeLocks(
-        targetProfileId,
-        targetProfileId,
-        claimOpId,
+      const recoveryName = authRecoveryJobName(profile.id);
+      const recoveryDocument = getOne(
+        await transaction.batchGet([recoveryName]),
+        recoveryName,
       );
-      try {
-        const fresh = (await firestore.get(targetName)) || profile;
-        if (
-          cleanString(fresh.fields.pendingMergeGameCopySourceProfileId) ||
-          (cleanString(fresh.fields.pendingClaimSyncOpId) &&
-            cleanString(fresh.fields.pendingClaimSyncOpId) !== claimOpId)
-        ) {
-          return fresh;
-        }
-        if (
-          cleanString(fresh.fields.mergedIntoProfileId) ||
-          fresh.fields.mergeSourceRetainedForGameCopy === true
-        ) {
-          const backlogName = authDocumentName(
-            "authClaimSyncBacklog",
-            claimOpId,
-          );
-          await durableFirestore.runTransaction(async (transaction) => {
-            const live = getOne(
-              await transaction.batchGet([targetName]),
-              targetName,
-            );
-            if (!live) {
-              return {
-                result: undefined,
-                writes: [authDeleteWrite(backlogName)],
-              };
-            }
-            const liveOpId = cleanString(live.fields.pendingClaimSyncOpId);
-            if (
-              (!cleanString(live.fields.mergedIntoProfileId) &&
-                live.fields.mergeSourceRetainedForGameCopy !== true) ||
-              (liveOpId && liveOpId !== claimOpId)
-            ) {
-              return { result: undefined, writes: [] };
-            }
-            return {
-              result: undefined,
-              writes: [
-                authUpdateWrite(
-                  targetName,
-                  {},
-                  [...PENDING_CLAIM_SYNC_FIELD_PATHS],
-                  true,
-                ),
-                authDeleteWrite(backlogName),
-              ],
-            };
-          });
-          return (await firestore.get(targetName)) || fresh;
-        }
-        try {
-          await reconcileProfileClaims({
-            loginUids: uniqueStoredFirebaseUids(
-              fresh.fields.pendingClaimSyncLogins,
-            ),
-            opId: claimOpId,
-            sourceProfileId:
-              cleanString(fresh.fields.mergedSourceProfileId) ||
-              targetProfileId,
-            targetName,
-            targetProfileId,
-          });
-        } catch {
-          console.error(
-            JSON.stringify({ event: "auth_claim_recovery_pending" }),
-          );
-        }
-        return (await firestore.get(targetName)) || fresh;
-      } finally {
-        await releaseMergeLocks(lease);
+      const existingRecovery = recoveryDocument
+        ? parseAuthRecoveryJob(recoveryDocument)
+        : null;
+      if (recoveryDocument && !existingRecovery) {
+        authFailure(409, "failed-precondition", "auth-recovery-job-invalid");
       }
-    }
-    const gameOpId =
-      cleanString(profile.fields.pendingMergeGameCopyOpId) ||
-      `recovery:${sourceProfileId}:${targetProfileId}`;
-    const lease = await acquireMergeLocks(
-      targetProfileId,
-      sourceProfileId,
-      gameOpId,
-    );
-    try {
-      const fresh = await firestore.get(targetName);
-      if (!fresh) {
-        authFailure(500, "internal", "target-profile-missing");
-      }
-      const freshSource = cleanString(
-        fresh.fields.pendingMergeGameCopySourceProfileId,
-      );
-      const freshOp = cleanString(fresh.fields.pendingMergeGameCopyOpId);
-      if (
-        freshSource !== sourceProfileId ||
-        (freshOp && freshOp !== gameOpId)
-      ) {
-        return fresh;
-      }
-      if (!freshOp) {
-        const claimed = await durableFirestore.runTransaction(
-          async (transaction) => {
-            const live = getOne(
-              await transaction.batchGet([targetName]),
-              targetName,
-            );
-            if (
-              !live ||
-              cleanString(live.fields.pendingMergeGameCopySourceProfileId) !==
-                sourceProfileId
-            ) {
-              return { result: false, writes: [] };
-            }
-            const liveOp = cleanString(live.fields.pendingMergeGameCopyOpId);
-            if (liveOp && liveOp !== gameOpId) {
-              return { result: false, writes: [] };
-            }
-            return {
-              result: true,
-              writes: liveOp
-                ? []
-                : [
-                    authUpdateWrite(
-                      targetName,
-                      { pendingMergeGameCopyOpId: gameOpId },
-                      ["pendingMergeGameCopyOpId"],
-                      true,
-                    ),
-                  ],
-            };
-          },
-        );
-        if (!claimed) {
-          return (await firestore.get(targetName)) || fresh;
-        }
-      }
-      if (
-        !(await reconcileProfilePrizes({
-          opId: gameOpId,
-          sourceProfileId,
-          targetName,
-          targetProfileId,
-        }))
-      ) {
-        return (await firestore.get(targetName)) || fresh;
-      }
-      const claimOpId =
-        cleanString(fresh.fields.pendingClaimSyncOpId) || gameOpId;
-      try {
-        await reconcileProfileClaims({
-          loginUids: uniqueStoredFirebaseUids(
-            fresh.fields.logins,
-            fresh.fields.pendingClaimSyncLogins,
+      const nowMs = now();
+      const recoveryJob = existingRecovery
+        ? {
+            ...existingRecovery,
+            loginUids: uniqueStoredFirebaseUids(existingRecovery.loginUids, [
+              uid,
+            ]),
+            updatedAtMs: nowMs,
+          }
+        : newAuthRecoveryJob(profile.id, [uid], [], nowMs);
+      return {
+        result: profile,
+        writes: [
+          authUpdateWrite(
+            recoveryName,
+            recoveryJob,
+            Object.keys(recoveryJob),
+            recoveryDocument
+              ? recoveryDocument.updateTime
+                ? { updateTime: recoveryDocument.updateTime }
+                : true
+              : false,
           ),
-          opId: claimOpId,
-          sourceProfileId,
-          targetName,
-          targetProfileId,
-        });
-      } catch {
-        console.error(JSON.stringify({ event: "auth_claim_recovery_pending" }));
-        return (await firestore.get(targetName)) || fresh;
-      }
-      await reconcileProfileGames({
-        opId: gameOpId,
-        sourceProfileId,
-        targetName,
+        ],
+      };
+    });
+
+  const repairCurrentCaller = async (
+    uid: string,
+  ): Promise<AuthFirestoreDocument> => {
+    for (let attempt = 0; attempt < LINK_METHOD_MAX_ATTEMPTS; attempt++) {
+      const profile = await acquireCallerRecoveryBarrier(uid);
+      await ensureFirebaseProfileClaim(uid, profile.id, {
+        authClient,
+        rtdb,
+        signal: dependencies.signal,
       });
-      return (await firestore.get(targetName)) || fresh;
-    } finally {
-      await releaseMergeLocks(lease);
+      await recovery.removeLoginUid(profile.id, uid);
+      const confirmed = await profileByLogin(uid);
+      if (confirmed?.id !== profile.id) {
+        continue;
+      }
+      const fresh = await firestore.get(profile.name);
+      if (!fresh || isRetiredMergeSource(fresh.fields)) {
+        continue;
+      }
+      if (await durableFirestore.get(authRecoveryJobName(profile.id))) {
+        await enqueueRecoveryBestEffort(profile.id);
+      }
+      return fresh;
     }
+    authFailure(409, "aborted", "profile-merged-retry");
+  };
+
+  const syncCurrentCallerProfile = async (
+    uid: string,
+  ): Promise<LinkedAuthMethodsResponse> => {
+    const profile = await repairCurrentCaller(uid);
+    const linkedMethods = getLinkedAuthMethodsFromProfile(profile.fields);
+    return {
+      ok: true,
+      profileId: profile.id,
+      linkedMethods,
+      appleLinked: linkedMethods.apple,
+    };
   };
 
   const recoverVerifyReplay = async (
     replay: AuthProfileResponse,
+    method: AuthMethodKey,
+    uid: string,
   ): Promise<AuthProfileResponse> => {
-    const profile = await firestore.get(
-      authDocumentName("users", replay.profileId),
+    const operation = await firestore.get(
+      authDocumentName("authOps", replay.opId),
     );
-    if (profile) {
-      const recovered = await recoverPendingProfileState(profile);
-      const pendingClaims = await reconcileProfileClaimsBestEffort({
-        loginUids: [replay.uid],
-        opId: replay.opId,
-        sourceProfileId:
-          cleanString(recovered.fields.mergedSourceProfileId) || recovered.id,
-        targetName: recovered.name,
-        targetProfileId: recovered.id,
-      });
-      if (pendingClaims) {
-        await enqueueRecoveryBestEffort(recovered.id);
-      }
+    const expectedHash = cleanString(
+      record(operation?.fields.meta).methodValueHash,
+    );
+    const profile = await repairCurrentCaller(uid);
+    const currentValue = normalizeProfileMethod(method, profile.fields);
+    if (
+      !currentValue ||
+      !expectedHash ||
+      hashMethodValue(method, currentValue) !== expectedHash
+    ) {
+      authFailure(409, "aborted", "profile-merged-retry");
     }
-    return replay;
+    const preferredAddress =
+      method === "eth" || method === "sol" ? currentValue : null;
+    return profileResponse(profile, uid, preferredAddress, replay.opId);
   };
 
   const refreshCompletedVerifyResult = async (
@@ -2042,18 +1507,40 @@ export function createAuthIdentityService(
     uid: string,
     expectedMethodValue: string,
   ): Promise<AuthProfileResponse | null> => {
-    let profile = await profileByLogin(uid);
-    if (!profile || profile.id !== result.profileId) {
-      return null;
-    }
-    profile = await recoverPendingProfileState(profile);
+    const normalizedMethodValue = normalizeMethodValue(
+      method,
+      expectedMethodValue,
+    );
+    const operation = await firestore.get(
+      authDocumentName("authOps", result.opId),
+    );
+    const operationFields = operation?.fields;
+    const updatedAtMs = Math.max(
+      finiteNumber(operationFields?.updatedAtMs, 0),
+      finiteNumber(operationFields?.startedAtMs, 0),
+    );
     if (
-      normalizeProfileMethod(method, profile.fields) !==
-      normalizeMethodValue(method, expectedMethodValue)
+      !operationFields ||
+      readStoredFirebaseUid(operationFields.uid) !== uid ||
+      cleanString(operationFields.kind) !== "verify" ||
+      cleanString(operationFields.method) !== method ||
+      operationFields.status !== "success" ||
+      !updatedAtMs ||
+      now() - updatedAtMs > AUTH_OP_REPLAY_TTL_MS ||
+      cleanString(record(operationFields.meta).methodValueHash) !==
+        hashMethodValue(method, normalizedMethodValue)
     ) {
       return null;
     }
-    return profileResponse(profile, uid, null, result.opId);
+    const profile = await repairCurrentCaller(uid);
+    if (
+      normalizeProfileMethod(method, profile.fields) !== normalizedMethodValue
+    ) {
+      return null;
+    }
+    const preferredAddress =
+      method === "eth" || method === "sol" ? normalizedMethodValue : null;
+    return profileResponse(profile, uid, preferredAddress, result.opId);
   };
 
   const randomUsername = (): string => {
@@ -2311,11 +1798,8 @@ export function createAuthIdentityService(
       return null;
     }
     const expectedHash = cleanString(record(fields.meta).methodValueHash);
-    let profile = await profileByLogin(uid);
-    if (!profile) {
-      return null;
-    }
-    const currentValue = normalizeProfileMethod(method, profile.fields);
+    let profile = await repairCurrentCaller(uid);
+    let currentValue = normalizeProfileMethod(method, profile.fields);
     if (
       !expectedHash ||
       !currentValue ||
@@ -2323,13 +1807,19 @@ export function createAuthIdentityService(
     ) {
       return null;
     }
-    profile = await recoverPendingProfileState(profile);
-    await enqueuePendingGameRecovery(profile);
     if (method === "apple" || method === "x") {
       profile = await assignUsername(
         profile,
         method === "x" ? cleanString(profile.fields.xUsername) : null,
       );
+      profile = await repairCurrentCaller(uid);
+      currentValue = normalizeProfileMethod(method, profile.fields);
+      if (
+        !currentValue ||
+        hashMethodValue(method, currentValue) !== expectedHash
+      ) {
+        return null;
+      }
     }
     const preferredAddress =
       method === "eth" || method === "sol"
@@ -2337,18 +1827,6 @@ export function createAuthIdentityService(
         : null;
     const response = profileResponse(profile, uid, preferredAddress, opId);
     await finishOpBestEffort(opId, { result: response });
-    if (
-      await reconcileProfileClaimsBestEffort({
-        loginUids: [uid],
-        opId,
-        sourceProfileId:
-          cleanString(profile.fields.mergedSourceProfileId) || profile.id,
-        targetName: profile.name,
-        targetProfileId: profile.id,
-      })
-    ) {
-      await enqueueRecoveryBestEffort(profile.id);
-    }
     return response;
   };
 
@@ -2419,7 +1897,9 @@ export function createAuthIdentityService(
       cleanString(fields.kind) !== "verify" ||
       cleanString(fields.method) !== method ||
       cleanString(record(fields.meta).intentId) !== intentId ||
-      (fields.status !== "started" && fields.status !== "failed") ||
+      (fields.status !== "started" &&
+        fields.status !== "failed" &&
+        fields.status !== "success") ||
       !updatedAtMs ||
       now() - updatedAtMs > AUTH_OP_REPLAY_TTL_MS
     ) {
@@ -2474,7 +1954,7 @@ export function createAuthIdentityService(
         ...(input.intentId ? { intentId: input.intentId } : {}),
       },
     )) as AuthProfileResponse | null;
-    return replay ? recoverVerifyReplay(replay) : null;
+    return replay ? recoverVerifyReplay(replay, input.method, input.uid) : null;
   };
 
   return {
@@ -2515,10 +1995,7 @@ export function createAuthIdentityService(
         return replay;
       }
       try {
-        let current = await profileByLogin(input.uid);
-        if (current) {
-          current = await recoverPendingProfileState(current);
-        }
+        const current = await profileByLogin(input.uid);
         const methodProfile = await profileByMethod(
           input.method,
           input.normalizedMethodValue,
@@ -2550,13 +2027,8 @@ export function createAuthIdentityService(
           authFailure(409, "aborted", "method-index-race-retry");
         }
         for (let attempt = 0; attempt < LINK_METHOD_MAX_ATTEMPTS; attempt++) {
-          let profile = await profileByLogin(input.uid);
-          if (!profile) {
-            authFailure(500, "internal", "target-profile-missing");
-          }
+          let profile = await repairCurrentCaller(input.uid);
           targetProfileId = profile.id;
-          profile = await recoverPendingProfileState(profile);
-          await enqueuePendingGameRecovery(profile);
           if (
             normalizeProfileMethod(input.method, profile.fields) !==
             input.normalizedMethodValue
@@ -2578,6 +2050,7 @@ export function createAuthIdentityService(
               }
               throw error;
             }
+            profile = await repairCurrentCaller(input.uid);
           }
           const response = profileResponse(
             profile,
@@ -2585,22 +2058,9 @@ export function createAuthIdentityService(
             input.preferredAddress || null,
             input.opId,
           );
-          await finishOpBestEffort(input.opId, { result: response });
-          if (
-            await reconcileProfileClaimsBestEffort({
-              loginUids: [input.uid],
-              opId: input.opId,
-              sourceProfileId:
-                cleanString(profile.fields.mergedSourceProfileId) ||
-                targetProfileId,
-              targetName: profile.name,
-              targetProfileId,
-            })
-          ) {
-            await enqueueRecoveryBestEffort(targetProfileId);
-          }
           const confirmedProfile = await profileByLogin(input.uid);
           if (confirmedProfile?.id === profile.id) {
+            await finishOpBestEffort(input.opId, { result: response });
             return response;
           }
         }
@@ -2618,140 +2078,178 @@ export function createAuthIdentityService(
         uid,
       )) as AuthProfileResponse | null;
       return replay
-        ? recoverVerifyReplay(replay)
+        ? recoverVerifyReplay(replay, method, uid)
         : recoverIncompleteVerifyOp(opId, method, uid);
     },
     refreshCompletedVerifyResult,
-    async recoverPendingProfile(profileId) {
-      const profile = await firestore.get(authDocumentName("users", profileId));
-      if (!profile) {
-        return true;
-      }
-      const recovered = await recoverPendingProfileState(profile);
-      return (
-        !cleanString(recovered.fields.pendingClaimSyncOpId) &&
-        uniqueStoredFirebaseUids(recovered.fields.pendingClaimSyncLogins)
-          .length === 0 &&
-        !cleanString(recovered.fields.pendingMergeGameCopySourceProfileId)
-      );
-    },
+    syncCurrentCallerProfile,
     async unlinkMethod(uid, rawMethod, opId) {
       const method = assertAuthMethod(rawMethod);
-      if (featureDisabled(env.AUTH_DISABLE_UNLINK)) {
-        authFailure(409, "failed-precondition", "unlink-disabled");
-      }
       const replay = await beginOp(opId, "unlink", method, uid, null);
       if (replay) {
         return replay as LinkedAuthMethodsResponse;
       }
       try {
-        const profile = await profileByLogin(uid);
-        if (!profile) {
-          authFailure(404, "not-found", "profile-not-found");
-        }
-        const profileName = profile.name;
-        const response = await firestore.runTransaction(async (transaction) => {
-          const live = getOne(
-            await transaction.batchGet([profileName]),
-            profileName,
-          );
-          if (!live) {
+        for (let attempt = 0; attempt < LINK_METHOD_MAX_ATTEMPTS; attempt++) {
+          const profile = await profileByLogin(uid);
+          if (!profile) {
             authFailure(404, "not-found", "profile-not-found");
           }
-          const normalizedValue = normalizeProfileMethod(method, live.fields);
-          const rawValue = cleanString(live.fields[getMethodField(method)]);
-          if (!normalizedValue && !rawValue) {
-            authFailure(409, "failed-precondition", "method-not-linked");
-          }
-          if (normalizedValue && linkedMethodCount(live.fields) <= 1) {
-            authFailure(
-              409,
-              "failed-precondition",
-              "cannot-remove-last-method",
-            );
-          }
-          const fieldPaths =
-            method === "apple" || method === "x"
-              ? [
-                  getMethodField(method),
-                  ...PROVIDER_METADATA_FIELD_PATHS[method],
-                ]
-              : [getMethodField(method)];
-          const writes: AuthFirestoreWrite[] = [
-            authUpdateWrite(profileName, {}, fieldPaths, true),
-          ];
-          const nowMs = now();
-          const retryAtMs = nowMs + AUTH_METHOD_REUSE_COOLDOWN_MS;
-          writes.push(
-            authUpdateWrite(
-              authDocumentName(
-                "authProfileMethodCooldowns",
-                profileMethodCooldownId(profile.id, method),
-              ),
-              {
-                profileId: profile.id,
-                method,
-                scope: getAuthCooldownScope(
-                  AUTH_COOLDOWN_REASONS.profileMethod,
-                ),
-                unlinkedByUid: uid,
-                cooldownMs: AUTH_METHOD_REUSE_COOLDOWN_MS,
-                startedAtMs: nowMs,
-                retryAtMs,
-                updatedAtMs: nowMs,
-              },
-            ),
-          );
-          if (normalizedValue) {
-            const methodId = getMethodKey(method, normalizedValue);
-            const indexName = authDocumentName("authMethodIndex", methodId);
-            const index = getOne(
-              await transaction.batchGet([indexName]),
-              indexName,
-            );
-            if (!index || cleanString(index.fields.profileId) === profile.id) {
-              if (index) {
-                writes.push(authDeleteWrite(indexName, true));
+          const profileName = profile.name;
+          const recoveryName = authRecoveryJobName(profile.id);
+          const committed = await firestore.runTransaction(
+            async (transaction) => {
+              const snapshots = await transaction.batchGet([
+                profileName,
+                recoveryName,
+              ]);
+              const live = getOne(snapshots, profileName);
+              if (
+                !live ||
+                isRetiredMergeSource(live.fields) ||
+                !uniqueStoredFirebaseUids(live.fields.logins).includes(uid)
+              ) {
+                return { result: null, writes: [] };
               }
-            }
-            writes.push(
-              authUpdateWrite(
-                authDocumentName("authMethodRevocations", methodId),
-                {
-                  method,
-                  normalizedValue,
-                  profileId: profile.id,
-                  scope: getAuthCooldownScope(AUTH_COOLDOWN_REASONS.method),
-                  unlinkedByUid: uid,
-                  cooldownMs: AUTH_METHOD_REUSE_COOLDOWN_MS,
-                  startedAtMs: nowMs,
-                  retryAtMs,
+              const nowMs = now();
+              const recoveryDocument = getOne(snapshots, recoveryName);
+              const existingRecovery = recoveryDocument
+                ? parseAuthRecoveryJob(recoveryDocument)
+                : null;
+              if (recoveryDocument && !existingRecovery) {
+                authFailure(
+                  409,
+                  "failed-precondition",
+                  "auth-recovery-job-invalid",
+                );
+              }
+              const recoveryJob = existingRecovery
+                ? {
+                    ...existingRecovery,
+                    loginUids: uniqueStoredFirebaseUids(
+                      existingRecovery.loginUids,
+                      [uid],
+                    ),
+                    updatedAtMs: nowMs,
+                  }
+                : newAuthRecoveryJob(profile.id, [uid], [], nowMs);
+              const normalizedValue = normalizeProfileMethod(
+                method,
+                live.fields,
+              );
+              const rawValue = cleanString(live.fields[getMethodField(method)]);
+              if (!normalizedValue && !rawValue) {
+                authFailure(409, "failed-precondition", "method-not-linked");
+              }
+              if (normalizedValue && linkedMethodCount(live.fields) <= 1) {
+                authFailure(
+                  409,
+                  "failed-precondition",
+                  "cannot-remove-last-method",
+                );
+              }
+              const fieldPaths =
+                method === "apple" || method === "x"
+                  ? [
+                      getMethodField(method),
+                      ...PROVIDER_METADATA_FIELD_PATHS[method],
+                    ]
+                  : [getMethodField(method)];
+              const writes: AuthFirestoreWrite[] = [
+                authUpdateWrite(profileName, {}, fieldPaths, true),
+                authUpdateWrite(
+                  recoveryName,
+                  recoveryJob,
+                  Object.keys(recoveryJob),
+                  recoveryDocument
+                    ? recoveryDocument.updateTime
+                      ? { updateTime: recoveryDocument.updateTime }
+                      : true
+                    : false,
+                ),
+              ];
+              const retryAtMs = nowMs + AUTH_METHOD_REUSE_COOLDOWN_MS;
+              writes.push(
+                authUpdateWrite(
+                  authDocumentName(
+                    "authProfileMethodCooldowns",
+                    profileMethodCooldownId(profile.id, method),
+                  ),
+                  {
+                    profileId: profile.id,
+                    method,
+                    scope: getAuthCooldownScope(
+                      AUTH_COOLDOWN_REASONS.profileMethod,
+                    ),
+                    unlinkedByUid: uid,
+                    cooldownMs: AUTH_METHOD_REUSE_COOLDOWN_MS,
+                    startedAtMs: nowMs,
+                    retryAtMs,
+                    updatedAtMs: nowMs,
+                  },
+                ),
+              );
+              if (normalizedValue) {
+                const methodId = getMethodKey(method, normalizedValue);
+                const indexName = authDocumentName("authMethodIndex", methodId);
+                const index = getOne(
+                  await transaction.batchGet([indexName]),
+                  indexName,
+                );
+                if (
+                  !index ||
+                  cleanString(index.fields.profileId) === profile.id
+                ) {
+                  if (index) {
+                    writes.push(authDeleteWrite(indexName, true));
+                  }
+                }
+                writes.push(
+                  authUpdateWrite(
+                    authDocumentName("authMethodRevocations", methodId),
+                    {
+                      method,
+                      normalizedValue,
+                      profileId: profile.id,
+                      scope: getAuthCooldownScope(AUTH_COOLDOWN_REASONS.method),
+                      unlinkedByUid: uid,
+                      cooldownMs: AUTH_METHOD_REUSE_COOLDOWN_MS,
+                      startedAtMs: nowMs,
+                      retryAtMs,
+                      updatedAtMs: nowMs,
+                    },
+                  ),
+                );
+              }
+              const nextFields = { ...live.fields };
+              for (const fieldPath of fieldPaths) {
+                delete nextFields[fieldPath];
+              }
+              const linkedMethods = getLinkedAuthMethodsFromProfile(nextFields);
+              const response: LinkedAuthMethodsResponse = {
+                ok: true,
+                profileId: profile.id,
+                linkedMethods,
+                appleLinked: linkedMethods.apple,
+              };
+              writes.push(
+                authUpdateWrite(authDocumentName("authOps", opId), {
+                  status: "success",
+                  result: response,
                   updatedAtMs: nowMs,
-                },
-              ),
-            );
-          }
-          const nextFields = { ...live.fields };
-          for (const fieldPath of fieldPaths) {
-            delete nextFields[fieldPath];
-          }
-          const linkedMethods = getLinkedAuthMethodsFromProfile(nextFields);
-          const response: LinkedAuthMethodsResponse = {
-            ok: true,
-            profileId: profile.id,
-            linkedMethods,
-            appleLinked: linkedMethods.apple,
-          };
-          writes.push(
-            authUpdateWrite(authDocumentName("authOps", opId), {
-              status: "success",
-              result: response,
-              updatedAtMs: nowMs,
-            }),
+                }),
+              );
+              return { result: response, writes };
+            },
           );
-          return { result: response, writes };
-        });
-        return response;
+          if (!committed) {
+            continue;
+          }
+          const response = await syncCurrentCallerProfile(uid);
+          await finishOpBestEffort(opId, { result: response });
+          return response;
+        }
+        authFailure(409, "aborted", "profile-merged-retry");
       } catch (error) {
         const replay = await replayFromOp(opId, "unlink", method, uid);
         if (replay && isLinkedAuthMethodsResponse(replay)) {

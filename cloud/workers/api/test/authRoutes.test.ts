@@ -17,7 +17,6 @@ const PREVIEW_ORIGIN = "https://8bdf84df-mons-link.lil-org.workers.dev";
 
 const env = {
   ...TELEGRAM_TEST_ENV,
-  AUTH_DISABLE_X_VERIFY: "false",
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
   FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
   FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
@@ -173,6 +172,49 @@ test("auth routes enforce methods and authentication before repository work", as
   assert.equal(repositoryCalls, 0);
 });
 
+test("the global maintenance gate blocks POST auth mutations only", async () => {
+  const maintenanceEnv = {
+    ...env,
+    AUTH_MUTATIONS_DISABLED: "true",
+  } as unknown as Env;
+  for (const path of [
+    "/auth/intents",
+    "/auth/methods/apple/verify",
+    "/auth/methods/eth/verify",
+    "/auth/methods/sol/verify",
+    "/auth/methods/unlink",
+    "/auth/profile-claim/sync",
+    "/auth/x/flows",
+    "/auth/x/flows/complete",
+  ]) {
+    const response = await handleAuthRoute(
+      request(path, "POST", {}),
+      maintenanceEnv,
+      ctx,
+      { repository: repository(), verifyIdentity },
+    );
+    assert.equal(response.status, 409, path);
+    assert.deepEqual(await responseJson(response), {
+      ok: false,
+      error: "failed-precondition",
+      message: "auth-mutations-disabled",
+    });
+  }
+  const methods = await handleAuthRoute(
+    request("/auth/methods", "GET"),
+    maintenanceEnv,
+    ctx,
+    { repository: repository(), verifyIdentity },
+  );
+  assert.equal(methods.status, 200);
+  const preflight = await handleAuthRoute(
+    request("/auth/intents", "OPTIONS"),
+    maintenanceEnv,
+    ctx,
+  );
+  assert.equal(preflight.status, 204);
+});
+
 test("creates exact auth intents for every supported method", async () => {
   const documents: AuthIntentDocument[] = [];
   const keys: string[] = [];
@@ -316,7 +358,6 @@ test("returns linked methods using the verified UID and original token", async (
 
 test("synchronizes the profile claim through the authenticated POST route", async () => {
   const calls: string[][] = [];
-  const recoveries: string[] = [];
   const response = await handleAuthRoute(
     request("/auth/profile-claim/sync", "POST", {}),
     env,
@@ -335,14 +376,21 @@ test("synchronizes the profile claim through the authenticated POST route", asyn
               x: false,
             },
             appleLinked: true,
-            pendingRecovery: true,
           };
         },
       }),
-      enqueuePendingProfileRecovery: async (profileId) => {
-        recoveries.push(profileId);
-      },
       profileClaim: {
+        syncCurrentCallerProfile: async () => ({
+          ok: true,
+          profileId: "profile-1",
+          linkedMethods: {
+            apple: true,
+            eth: false,
+            sol: true,
+            x: false,
+          },
+          appleLinked: true,
+        }),
         authClient: {
           getUser: async (uid) => ({
             uid,
@@ -363,7 +411,6 @@ test("synchronizes the profile claim through the authenticated POST route", asyn
     ["firebase-uid", "firebase-id-token"],
     ["firebase-uid", "firebase-id-token"],
   ]);
-  assert.deepEqual(recoveries, ["profile-1"]);
   assert.deepEqual(await responseJson(response), {
     ok: true,
     profileId: "profile-1",
@@ -378,52 +425,6 @@ test("synchronizes the profile claim through the authenticated POST route", asyn
     { repository: repository(), verifyIdentity },
   );
   assert.equal(rejectedMethod.status, 405);
-});
-
-test("propagates pending profile recovery enqueue failures", async () => {
-  const logs: string[] = [];
-  const response = await handleAuthRoute(
-    request("/auth/profile-claim/sync", "POST", {}),
-    env,
-    ctx,
-    {
-      enqueuePendingProfileRecovery: async () => {
-        throw new Error("private-queue-detail");
-      },
-      logFailure: (kind) => logs.push(kind),
-      repository: repository({
-        getProfileClaimSource: async () => ({
-          ok: true,
-          profileId: "profile-1",
-          linkedMethods: { apple: false, eth: true, sol: false, x: false },
-          appleLinked: false,
-          pendingRecovery: true,
-        }),
-      }),
-      profileClaim: {
-        authClient: {
-          getUser: async () => ({
-            uid: "firebase-uid",
-            customClaims: { profileId: "profile-1" },
-          }),
-          setCustomUserClaims: async () => undefined,
-        },
-        rtdbClient: {
-          getPath: async () => "profile-1",
-          patchRoot: async () => undefined,
-        },
-      },
-      verifyIdentity,
-    },
-  );
-
-  assert.equal(response.status, 503);
-  assert.deepEqual(logs, ["auth-service-unavailable"]);
-  assert.deepEqual(await responseJson(response), {
-    ok: false,
-    error: "unavailable",
-    message: "auth-service-unavailable",
-  });
 });
 
 test("sanitizes profile-claim reconciliation failures", async () => {
@@ -443,15 +444,8 @@ test("sanitizes profile-claim reconciliation failures", async () => {
         }),
       }),
       profileClaim: {
-        authClient: {
-          getUser: async () => {
-            throw new Error("private-auth-response");
-          },
-          setCustomUserClaims: async () => undefined,
-        },
-        rtdbClient: {
-          getPath: async () => "profile-1",
-          patchRoot: async () => undefined,
+        syncCurrentCallerProfile: async () => {
+          throw new Error("private-auth-response");
         },
       },
       verifyIdentity,
@@ -636,21 +630,12 @@ test("rate limits X flow reads and creation", async () => {
   assert.equal(rateCalls, 0);
 });
 
-test("rejects disabled, missing, foreign, wrong-method, and stale X intents", async () => {
-  const disabledEnv = { ...env } as Env;
-  Object.defineProperty(disabledEnv, "AUTH_DISABLE_X_VERIFY", {
-    value: "true",
-  });
+test("rejects missing, foreign, wrong-method, and stale X intents", async () => {
   const cases: Array<{
     testEnv?: Env;
     intent: Awaited<ReturnType<AuthRepository["getAuthIntent"]>>;
     status: number;
   }> = [
-    {
-      testEnv: disabledEnv,
-      intent: null,
-      status: 409,
-    },
     { intent: null, status: 409 },
     {
       intent: {
@@ -785,7 +770,9 @@ test("rate limits and dispatches auth mutations after Firebase authentication", 
           },
           peekVerifyReplay: async () => null,
           refreshCompletedVerifyResult: async () => null,
-          recoverPendingProfile: async () => true,
+          syncCurrentCallerProfile: async () => {
+            throw new Error("unexpected");
+          },
           unlinkMethod: async (uid, method, opId) => {
             assert.equal(uid, "firebase-uid");
             assert.equal(method, "apple");

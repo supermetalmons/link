@@ -71,7 +71,12 @@ function service(
     }),
     peekVerifyReplay: async () => null,
     refreshCompletedVerifyResult: async () => null,
-    recoverPendingProfile: async () => true,
+    syncCurrentCallerProfile: async () => ({
+      ok: true,
+      profileId: profile.profileId,
+      linkedMethods: profile.linkedMethods,
+      appleLinked: profile.appleLinked,
+    }),
     unlinkMethod: async () => ({
       ok: true,
       profileId: "profile-1",
@@ -154,9 +159,37 @@ test("returns the legacy false response for invalid Ethereum signatures", async 
     identity,
     env,
     ctx,
-    { identityService: service() },
+    { identityService: service({ peekVerifyReplay: async () => profile }) },
   );
   assert.deepEqual(response, { ok: false });
+});
+
+test("does not replay before validating the submitted Solana proof", async () => {
+  const keys = nacl.sign.keyPair();
+  let replayReads = 0;
+  const response = await handleAuthMutation(
+    request("/auth/methods/sol/verify", {
+      intentId: INTENT_ID,
+      address: bs58.encode(keys.publicKey),
+      signature: Buffer.alloc(64).toString("base64"),
+      emoji: 1,
+      aura: null,
+    }),
+    identity,
+    env,
+    ctx,
+    {
+      identityService: service({
+        peekVerifyReplay: async () => {
+          replayReads += 1;
+          return profile;
+        },
+      }),
+    },
+  );
+
+  assert.deepEqual(response, { ok: false });
+  assert.equal(replayReads, 0);
 });
 
 test("links a valid Ethereum proof with the consumed nonce", async () => {
@@ -172,13 +205,14 @@ test("links a valid Ethereum proof with the consumed nonce", async () => {
     nonce,
     issuedAt: new Date().toISOString(),
   });
+  const signature = await wallet.signMessage(message);
   let linkedMethod = "";
   const phases: string[] = [];
   const response = await handleAuthMutation(
     request("/auth/methods/eth/verify", {
       intentId: INTENT_ID,
       message,
-      signature: await wallet.signMessage(message),
+      signature,
       emoji: 1,
       aura: "",
     }),
@@ -209,6 +243,43 @@ test("links a valid Ethereum proof with the consumed nonce", async () => {
   assert.equal(response.ok, true);
   assert.equal(linkedMethod, "eth");
   assert.deepEqual(phases, [`prepare:eth:${INTENT_ID}`, "link"]);
+
+  let replayPrepares = 0;
+  const replay = await handleAuthMutation(
+    request("/auth/methods/eth/verify", {
+      intentId: INTENT_ID,
+      message,
+      signature,
+      emoji: 1,
+      aura: "",
+    }),
+    identity,
+    env,
+    ctx,
+    {
+      identityService: service({
+        readIntent: async () => ({
+          uid: identity.uid,
+          method: "eth",
+          nonce,
+          consumedAtMs: Date.now() - 1,
+          expiresAtMs: Date.now() - 1,
+        }),
+        prepareVerifiedMethod: async () => {
+          replayPrepares += 1;
+          return profile;
+        },
+        linkVerifiedMethod: async () => {
+          throw new Error("unexpected link");
+        },
+      }),
+    },
+  );
+  if (!replay.ok) {
+    assert.fail("expected replay success");
+  }
+  assert.equal(replay.profileId, profile.profileId);
+  assert.equal(replayPrepares, 1);
 });
 
 test("validates production, local, and account-owned SIWE origins", () => {
@@ -217,10 +288,10 @@ test("validates production, local, and account-owned SIWE origins", () => {
     "http://localhost:3000",
     PREVIEW_ORIGIN,
   ]) {
-    validateSiweLocation(
-      { domain: new URL(origin).host, uri: `${origin}/settings` },
-      env,
-    );
+    validateSiweLocation({
+      domain: new URL(origin).host,
+      uri: `${origin}/settings`,
+    });
   }
   for (const location of [
     {
@@ -233,7 +304,7 @@ test("validates production, local, and account-owned SIWE origins", () => {
     },
   ]) {
     assert.throws(
-      () => validateSiweLocation(location, env),
+      () => validateSiweLocation(location),
       (error) =>
         error instanceof Error &&
         (error.message === "siwe-domain-not-allowed" ||
@@ -269,6 +340,7 @@ test("verifies Apple through the injected bounded provider", async () => {
 
 test("does not consume an Apple intent when verification is unavailable", async () => {
   let consumes = 0;
+  let replayReads = 0;
   await assert.rejects(
     handleAuthMutation(
       request("/auth/methods/apple/verify", {
@@ -283,6 +355,10 @@ test("does not consume an Apple intent when verification is unavailable", async 
       ctx,
       {
         identityService: service({
+          peekVerifyReplay: async () => {
+            replayReads += 1;
+            return profile;
+          },
           consumeIntent: async () => {
             consumes++;
             throw new Error("unexpected consume");
@@ -296,6 +372,7 @@ test("does not consume an Apple intent when verification is unavailable", async 
     /temporary-apple-failure/,
   );
   assert.equal(consumes, 0);
+  assert.equal(replayReads, 0);
 });
 
 test("starts the Apple operation before consuming its intent", async () => {
@@ -457,7 +534,7 @@ test("prepares X verification before linking", async () => {
   assert.deepEqual(storedFlowResult(writes[0]), {
     mapValue: {
       fields: encodeFields({
-        ...profile,
+        profileId: profile.profileId,
         opId: `x-redirect:${FLOW_ID}`,
       }),
     },

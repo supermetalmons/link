@@ -12,25 +12,6 @@ import { base64url } from "jose";
 import { createHash } from "node:crypto";
 import { AuthApiFailure } from "./authErrors.ts";
 
-export const PENDING_CLAIM_SYNC_FIELD_PATHS = [
-  "pendingClaimSyncLogins",
-  "pendingClaimSyncOpId",
-  "pendingClaimSyncUpdatedAtMs",
-] as const;
-
-export const PENDING_MERGE_PRIZE_COPY_FIELD_PATHS = [
-  "pendingMergePrizeCopyCursor",
-  "pendingMergePrizeCopyCompletedAtMs",
-  "pendingMergePrizeCopyCompletedOpId",
-] as const;
-
-export const PENDING_MERGE_GAME_COPY_FIELD_PATHS = [
-  "pendingMergeGameCopySourceProfileId",
-  "pendingMergeGameCopyOpId",
-  "pendingMergeGameCopyUpdatedAtMs",
-  ...PENDING_MERGE_PRIZE_COPY_FIELD_PATHS,
-] as const;
-
 export function cleanString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -70,8 +51,8 @@ export function uniqueStrings(...values: unknown[]): string[] {
   return [...result];
 }
 
-export function featureDisabled(value: string): boolean {
-  return ["1", "true", "yes"].includes(value.trim().toLowerCase());
+export function authMutationsDisabled(value: unknown): boolean {
+  return value === "true";
 }
 
 export function finiteNumber(value: unknown, fallback: number): number {

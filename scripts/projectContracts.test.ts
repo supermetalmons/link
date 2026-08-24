@@ -91,15 +91,17 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.deepEqual(config.routes, [
     { pattern: "api.mons.link", custom_domain: true },
   ]);
-  assert.deepEqual(config.vars, {
-    APPLE_AUDIENCES: "link.mons",
-    AUTH_DISABLE_APPLE_VERIFY: "false",
-    AUTH_DISABLE_MERGE: "false",
-    AUTH_DISABLE_UNLINK: "false",
-    AUTH_DISABLE_X_VERIFY: "false",
-    FIREBASE_RTDB_URL: "https://mons-link-default-rtdb.firebaseio.com",
-    SIWE_ALLOWED_DOMAINS: "mons.link,www.mons.link,localhost,127.0.0.1",
-  });
+  assert.deepEqual(Object.keys(config.vars || {}).sort(), [
+    "APPLE_AUDIENCES",
+    "AUTH_MUTATIONS_DISABLED",
+    "FIREBASE_RTDB_URL",
+  ]);
+  assert.equal(config.vars?.APPLE_AUDIENCES, "link.mons");
+  assert.match(config.vars?.AUTH_MUTATIONS_DISABLED || "", /^(?:true|false)$/);
+  assert.equal(
+    config.vars?.FIREBASE_RTDB_URL,
+    "https://mons-link-default-rtdb.firebaseio.com",
+  );
   assert.deepEqual(config.secrets, {
     required: [
       "FIRESTORE_SERVICE_ACCOUNT_EMAIL",
@@ -155,7 +157,6 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
         max_batch_timeout: 1,
         max_retries: 100,
         retry_delay: 60,
-        dead_letter_queue: "mons-link-auth-recovery-dlq",
         max_concurrency: 1,
       },
       {
@@ -198,92 +199,6 @@ test("Wrangler release environment contains no active values", () => {
   assert.deepEqual(activeLines, []);
 });
 
-test("API preview uploads require reviewed auth kill-switch values", () => {
-  const deploymentHelper = readText("scripts/deploy-cloudflare-api.ts");
-  const deploymentGuide = readText("scripts/deploy-cloudflare.md");
-
-  for (const name of [
-    "AUTH_DISABLE_APPLE_VERIFY",
-    "AUTH_DISABLE_X_VERIFY",
-    "AUTH_DISABLE_UNLINK",
-    "AUTH_DISABLE_MERGE",
-  ]) {
-    assert.match(deploymentHelper, new RegExp(`"${name}"`));
-    assert.match(deploymentGuide, new RegExp(`export ${name}=`));
-  }
-  assert.match(deploymentHelper, /must be explicitly set to true or false/);
-  assert.match(deploymentHelper, /createTemporaryReleaseConfig/);
-  assert.match(deploymentHelper, /name\.startsWith\("AUTH_DISABLE_"\)/);
-  assert.match(deploymentHelper, /reconcileAuthRecoveryConsumer/);
-  assert.match(deploymentHelper, /flag: "wx"/);
-  assert.match(deploymentGuide, /must not\s+contain any `AUTH_DISABLE_\*` key/);
-  assert.match(
-    deploymentGuide,
-    /last changed in the Dashboard[\s\S]*first set that same non-secret variable/,
-  );
-});
-
-test("wager merge reconciliation and preview finish before live merging is enabled", () => {
-  const deploymentGuide = readText("scripts/deploy-cloudflare.md");
-  const firstScan = deploymentGuide.indexOf(
-    "While merges remain disabled, reconcile the historical wager settlement",
-  );
-  const disabledPromotion = deploymentGuide.indexOf(
-    "<merge-disabled-candidate-version-id>",
-  );
-  const secondScan = deploymentGuide.indexOf(
-    "restart the wager settlement\nscan from the beginning",
-  );
-  const enabledPreview = deploymentGuide.indexOf(
-    "npm run deploy:api -- preview --smoke-sol <known-wallet> --token-file /path/to/cloudflare-token",
-    secondScan,
-  );
-  const enabledPromotion = deploymentGuide.indexOf(
-    "<merge-enabled-candidate-version-id>",
-  );
-  const mergeEnable = deploymentGuide.indexOf("AUTH_ENABLE_ROOT");
-
-  for (const point of [
-    firstScan,
-    disabledPromotion,
-    secondScan,
-    enabledPreview,
-    enabledPromotion,
-    mergeEnable,
-  ]) {
-    assert.notEqual(point, -1);
-  }
-  assert.ok(firstScan < disabledPromotion);
-  assert.ok(disabledPromotion < secondScan);
-  assert.ok(secondScan < enabledPreview);
-  assert.ok(enabledPreview < enabledPromotion);
-  assert.ok(enabledPromotion < mergeEnable);
-  assert.match(
-    deploymentGuide.slice(secondScan, mergeEnable),
-    /reconcile:wager-settlement-merges -- --project mons-link --limit 20 --execute/,
-  );
-  assert.match(
-    deploymentGuide.slice(firstScan, mergeEnable),
-    /--resolve <operation-id> --winner included --loser lost --dry-run/,
-  );
-  assert.match(
-    deploymentGuide.slice(firstScan, mergeEnable),
-    /only those sides/,
-  );
-  assert.match(
-    deploymentGuide.slice(firstScan, disabledPromotion),
-    /every dry-run and execute page must\s+return top-level `"manualReviewRequired": false`/,
-  );
-  assert.match(
-    deploymentGuide.slice(secondScan, enabledPreview),
-    /every page in this second full scan has returned\s+`"manualReviewRequired": false`/,
-  );
-  assert.match(
-    deploymentGuide.slice(secondScan, enabledPromotion),
-    /both production\s+merge paths are still disabled/,
-  );
-});
-
 test("package manifests preserve public scripts and deployment command vectors", () => {
   const rootPackage = readJson<PackageManifest>("package.json");
   const functionsPackage = readJson<PackageManifest>(
@@ -312,8 +227,10 @@ test("package manifests preserve public scripts and deployment command vectors",
     "dry-run:api",
     "check:api:core",
     "check:api",
-    "deploy:api",
+    "upload:api",
+    "promote:api",
     "deploy:api:triggers",
+    "smoke:api",
     "format:check:tooling",
     "lint:tooling",
     "typecheck:tooling",
@@ -322,6 +239,7 @@ test("package manifests preserve public scripts and deployment command vectors",
     "check:tooling",
     "check:all",
     "announceEventPrizes",
+    "convert:legacy-auth-recovery",
     "reconcile:wager-settlement-merges",
     "recover:telegram",
     "repo-clean",
@@ -350,8 +268,12 @@ test("package manifests preserve public scripts and deployment command vectors",
       "types:api": rootPackage.scripts?.["types:api"],
       "types:api:check": rootPackage.scripts?.["types:api:check"],
       "dry-run:api": rootPackage.scripts?.["dry-run:api"],
-      "deploy:api": rootPackage.scripts?.["deploy:api"],
+      "upload:api": rootPackage.scripts?.["upload:api"],
+      "promote:api": rootPackage.scripts?.["promote:api"],
       "deploy:api:triggers": rootPackage.scripts?.["deploy:api:triggers"],
+      "smoke:api": rootPackage.scripts?.["smoke:api"],
+      "convert:legacy-auth-recovery":
+        rootPackage.scripts?.["convert:legacy-auth-recovery"],
       "reconcile:wager-settlement-merges":
         rootPackage.scripts?.["reconcile:wager-settlement-merges"],
       "prepare:firebase": rootPackage.scripts?.["prepare:firebase"],
@@ -368,10 +290,16 @@ test("package manifests preserve public scripts and deployment command vectors",
         "wrangler types cloud/workers/api/worker-configuration.d.ts --check --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
       "dry-run:api":
         "wrangler versions upload --dry-run --strict --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
-      "deploy:api":
-        "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/deploy-cloudflare-api.ts",
+      "upload:api":
+        "wrangler versions upload --strict --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
+      "promote:api":
+        "wrangler versions deploy --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env --percentage 100 --yes",
       "deploy:api:triggers":
-        "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/deploy-cloudflare-api.ts triggers",
+        "wrangler triggers deploy --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
+      "smoke:api":
+        "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/smoke-cloudflare-api.ts",
+      "convert:legacy-auth-recovery":
+        "node cloud/admin/convertLegacyAuthRecoveryJobs.js",
       "reconcile:wager-settlement-merges":
         "node cloud/admin/reconcileWagerSettlementMerges.js",
       "prepare:firebase":
@@ -401,6 +329,8 @@ test("package manifests preserve public scripts and deployment command vectors",
   assert.equal(apiPackage.private, true);
   assert.equal(apiPackage.type, "module");
   assert.equal(rootPackage.dependencies?.jose, "^6.2.7");
+  assert.equal(rootPackage.dependencies?.["@spruceid/siwe-parser"], "3.0.0");
+  assert.equal(rootPackage.devDependencies?.siwe, undefined);
 
   for (const packageName of [
     "@types/node",
@@ -483,166 +413,12 @@ test("API Worker preserves its runtime export surface", () => {
   );
 });
 
-test("auth recovery DLQ replay stays manual and uses the recovery handler", () => {
-  const recoveryTasks = require(
-    resolve(repositoryRoot, "cloud/workers/api/src/authRecoveryTask.ts"),
-  ) as Record<string, unknown>;
-  assert.equal(
-    recoveryTasks.AUTH_RECOVERY_QUEUE_NAME,
-    "mons-link-auth-recovery",
-  );
-  assert.equal(
-    recoveryTasks.AUTH_RECOVERY_DLQ_NAME,
-    "mons-link-auth-recovery-dlq",
-  );
-
-  const entrypoint = readText("cloud/workers/api/src/index.ts");
-  assert.match(entrypoint, /batch\.queue === AUTH_RECOVERY_QUEUE_NAME/);
-  assert.match(entrypoint, /batch\.queue === AUTH_RECOVERY_DLQ_NAME/);
-
-  const config = readJsonc("cloud/workers/api/wrangler.jsonc");
-  const consumers = (config.queues?.consumers || []) as Array<{
-    queue?: string;
-  }>;
-  for (const queue of [
-    "mons-link-auth-recovery-dlq",
-    "mons-link-auth-recovery-replay-dlq",
-  ]) {
-    assert.equal(
-      consumers.some((consumer) => consumer.queue === queue),
-      false,
-    );
-  }
-
-  const deploymentGuide = readText("scripts/deploy-cloudflare.md");
-  const deploymentHelper = readText("scripts/deploy-cloudflare-api.ts");
-  for (const queue of [
-    "mons-link-auth-recovery",
-    "mons-link-auth-recovery-dlq",
-    "mons-link-auth-recovery-replay-dlq",
-  ]) {
-    assert.match(
-      deploymentGuide,
-      new RegExp(
-        `queues create ${queue} --message-retention-period-secs 1209600`,
-      ),
-    );
-    assert.match(
-      deploymentGuide,
-      new RegExp(
-        `queues update ${queue} --message-retention-period-secs 1209600`,
-      ),
-    );
-  }
-  assert.match(deploymentGuide, /npm run deploy:api -- consumer --token-file/);
-  assert.match(
-    deploymentGuide,
-    /temporary release\s+configuration omits the auth recovery consumer/,
-  );
-  assert.match(
-    deploymentHelper,
-    /requestCloudflareApi[\s\S]*Cloudflare Queue consumer update/,
-  );
-  assert.match(
-    deploymentGuide,
-    /queues consumer remove mons-link-auth-recovery mons-link-api/,
-  );
-  assert.match(
-    deploymentGuide,
-    /queues consumer add mons-link-auth-recovery-dlq mons-link-api.*--dead-letter-queue mons-link-auth-recovery-replay-dlq/,
-  );
-  assert.match(
-    deploymentGuide,
-    /queues consumer worker list mons-link-auth-recovery-dlq/,
-  );
-  assert.match(
-    deploymentGuide,
-    /queues consumer remove mons-link-auth-recovery-dlq mons-link-api/,
-  );
-  assert.match(deploymentGuide, /14-day action deadline/);
-  assert.match(
-    deploymentGuide,
-    /Detached main-Queue tasks also expire after 14 days/,
-  );
-  assert.match(
-    deploymentGuide,
-    /Keep `mons-link-auth-recovery-replay-dlq` consumer-free/,
-  );
-  assert.match(deploymentGuide, /do not purge or delete the Queue/);
-
-  const mainConsumerRemoval = deploymentGuide.indexOf(
-    "queues consumer remove mons-link-auth-recovery mons-link-api",
-  );
-  const replayConsumerRemoval = deploymentGuide.indexOf(
-    "queues consumer remove mons-link-auth-recovery-dlq mons-link-api",
-  );
-  const postPruneRollback = deploymentGuide.indexOf(
-    "If rollback is needed after pruning",
-  );
-  const apiDeploymentsList = deploymentGuide.indexOf(
-    "deployments list --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
-  );
-  const apiRollback = deploymentGuide.indexOf(
-    "rollback <known-good-api-version-id> --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
-  );
-  assert.ok(mainConsumerRemoval < replayConsumerRemoval);
-  assert.match(
-    deploymentGuide,
-    /Continue with one of the mutually exclusive auth\s+rollback branches/,
-  );
-  assert.doesNotMatch(
-    deploymentGuide.slice(replayConsumerRemoval, postPruneRollback),
-    /(?:deployments list|rollback <known-good-api-version-id>) --config cloud\/workers\/api\/wrangler\.jsonc/,
-  );
-  assert.ok(postPruneRollback < apiDeploymentsList);
-  assert.ok(apiDeploymentsList < apiRollback);
-});
-
-test("deployment CLIs preserve their offline modes", () => {
-  const { parseArgs: parseApiArgs } = require(
-    resolve(repositoryRoot, "scripts/deploy-cloudflare-api.ts"),
-  ) as {
-    parseArgs: (argv: string[]) => Record<string, unknown>;
-  };
+test("remaining deployment CLIs preserve their offline modes", () => {
   const { parseArgs: parseFirebaseArgs } = require(
     resolve(repositoryRoot, "cloud/functions/scripts/deploy-safe.js"),
   ) as {
     parseArgs: (argv: string[]) => Record<string, unknown>;
   };
-  const wallet = "11111111111111111111111111111111";
-  const versionId = "4da38b82-96db-472c-8856-a2e72d34079d";
-
-  assert.deepEqual(parseApiArgs(["preview", "--smoke-sol", wallet]), {
-    mode: "preview",
-    smokeSol: wallet,
-    secretsFile: undefined,
-    tokenFile: undefined,
-    versionId: undefined,
-  });
-  assert.deepEqual(
-    parseApiArgs([
-      "production",
-      "--version-id",
-      versionId,
-      "--smoke-sol",
-      wallet,
-    ]),
-    {
-      mode: "production",
-      smokeSol: wallet,
-      tokenFile: undefined,
-      versionId,
-    },
-  );
-  assert.deepEqual(parseApiArgs(["triggers"]), {
-    mode: "triggers",
-    tokenFile: undefined,
-  });
-  assert.throws(
-    () => parseApiArgs(["dry-run"]),
-    /preview, production, triggers, or consumer/,
-  );
-
   assert.deepEqual(
     parseFirebaseArgs([
       "--dry-run",
@@ -684,7 +460,6 @@ test("deployment CLIs preserve their offline modes", () => {
 test("operations documentation cross-links package and deployment guides", () => {
   const rootReadme = readText("README.md");
   const cloudReadme = readText("cloud/README.md");
-  const deployGuide = readText("scripts/deploy-cloudflare.md");
 
   assert.match(
     rootReadme,
@@ -695,32 +470,20 @@ test("operations documentation cross-links package and deployment guides", () =>
     cloudReadme,
     /\[Cloudflare deployment guide\]\(\.\.\/scripts\/deploy-cloudflare\.md\)/,
   );
-  assert.match(deployGuide, /\[cloud operations\]\(\.\.\/cloud\/README\.md\)/);
+  assert.equal(
+    existsSync(resolve(repositoryRoot, "scripts/deploy-cloudflare.md")),
+    true,
+  );
   assert.equal(existsSync(resolve(repositoryRoot, "cloud/.prettierrc")), false);
   assert.equal(existsSync(resolve(repositoryRoot, ".prettierrc")), true);
 });
 
-test("profile claim synchronization is Worker-owned with a least-privilege runbook", () => {
+test("profile claim synchronization is Worker-owned", () => {
   const authApi = readText("src/services/authApi.ts");
   const functionsIndex = readText("cloud/functions/index.js");
-  const deployGuide = readText("scripts/deploy-cloudflare.md");
 
   assert.match(authApi, /\/auth\/profile-claim\/sync/);
   assert.doesNotMatch(functionsIndex, /syncProfileClaim/);
-  for (const permission of [
-    "firebaseauth.users.get",
-    "firebaseauth.users.update",
-    "firebasedatabase.instances.get",
-    "firebasedatabase.instances.update",
-  ]) {
-    assert.match(deployGuide, new RegExp(permission.replaceAll(".", "\\.")));
-  }
-  assert.match(deployGuide, /monsLinkProfileClaimSync/);
-  assert.match(deployGuide, /npm run deploy:api:triggers/);
-  assert.match(
-    deployGuide,
-    /queues consumer worker list mons-link-auth-recovery/,
-  );
 });
 
 test("provider verification and auth mutations are Worker-owned", () => {
@@ -728,7 +491,6 @@ test("provider verification and auth mutations are Worker-owned", () => {
   const authIdentity = readText("cloud/workers/api/src/authIdentity.ts");
   const connection = readText("src/connection/connection.ts");
   const functionsIndex = readText("cloud/functions/index.js");
-  const deployGuide = readText("scripts/deploy-cloudflare.md");
   for (const route of [
     "/auth/methods/apple/verify",
     "/auth/methods/eth/verify",
@@ -750,16 +512,6 @@ test("provider verification and auth mutations are Worker-owned", () => {
       connection,
       new RegExp(`httpsCallable\\([^)]*${callable}`),
     );
-  }
-  for (const permission of [
-    "datastore.databases.get",
-    "datastore.entities.create",
-    "datastore.entities.delete",
-    "datastore.entities.get",
-    "datastore.entities.list",
-    "datastore.entities.update",
-  ]) {
-    assert.match(deployGuide, new RegExp(permission.replaceAll(".", "\\.")));
   }
   assert.doesNotMatch(authIdentity, /authRateLimits/);
 });

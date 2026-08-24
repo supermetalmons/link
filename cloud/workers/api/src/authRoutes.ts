@@ -43,9 +43,8 @@ import {
   handleAuthMutation,
   type AuthMutationDependencies,
 } from "./authMutations.ts";
-import { enqueueAuthRecovery } from "./authRecovery.ts";
 import { secureAlphanumericId, secureRandomBytes } from "./authRandom.ts";
-import { featureDisabled } from "./authPolicy.ts";
+import { authMutationsDisabled } from "./authPolicy.ts";
 
 const AUTH_INTENT_TTL_MS = 5 * 60 * 1_000;
 const CREATE_ID_ATTEMPTS = 3;
@@ -56,7 +55,6 @@ export type AuthRouteDependencies = {
   now?: () => number;
   profileClaim?: ProfileClaimDependencies;
   randomBytes?: (length: number) => Uint8Array;
-  enqueuePendingProfileRecovery?: (profileId: string) => Promise<void>;
   repository?: AuthRepository;
   mutation?: AuthMutationDependencies;
   verifyIdentity?: (
@@ -161,9 +159,6 @@ async function handleBeginXFlow(
   repository: AuthRepository,
   dependencies: AuthRouteDependencies,
 ): Promise<XRedirectStartResponse> {
-  if (featureDisabled(env.AUTH_DISABLE_X_VERIFY)) {
-    throw new AuthApiFailure(409, "failed-precondition", "x-auth-disabled");
-  }
   const body = await parseBody(request);
   const intentId =
     typeof body.intentId === "string" ? body.intentId.trim() : "";
@@ -261,6 +256,16 @@ export async function handleAuthRoute(
     const identity = await (
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
+    if (
+      request.method === "POST" &&
+      authMutationsDisabled(env.AUTH_MUTATIONS_DISABLED)
+    ) {
+      throw new AuthApiFailure(
+        409,
+        "failed-precondition",
+        "auth-mutations-disabled",
+      );
+    }
     const repository = dependencies.repository || createAuthRepository(env);
     if (
       pathname === "/auth/methods/apple/verify" ||
@@ -312,9 +317,6 @@ export async function handleAuthRoute(
         await syncProfileClaim(identity, env, {
           ...dependencies.profileClaim,
           repository,
-          schedulePendingProfileRecovery:
-            dependencies.enqueuePendingProfileRecovery ||
-            ((profileId) => enqueueAuthRecovery(env, profileId)),
         }),
         200,
         corsHeaders,

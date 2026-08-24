@@ -54,7 +54,7 @@ Copy `.env.example` to `.env.local` only when local overrides are needed. Local 
 | Command                                                    | Purpose                                                                                    |
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | `npm run deploy -- dry-run`                                | Build and validate the frontend Worker without authentication.                             |
-| `npm run deploy:api -- preview ...`                        | Upload and smoke-test an API candidate.                                                    |
+| `npm run upload:api`                                       | Upload an API candidate without sending it production traffic.                             |
 | `npm run deploy:firebase -- --project mons-link --dry-run` | Preview the complete Firebase release plan.                                                |
 | `npm run repo-clean`                                       | Apply the documented destructive branch/worktree cleanup policy to the current repository. |
 

@@ -147,4 +147,14 @@ test("game projection normalization preserves timestamps, identity display, and 
     }),
     700,
   );
+  assert.equal(
+    pickListSortMillis({
+      options: { preserveListSortAt: true },
+      status: "active",
+      automatchData: null,
+      nowMs: 900,
+      existingListSortMs: 700,
+    }),
+    700,
+  );
 });

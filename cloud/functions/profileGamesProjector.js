@@ -36,9 +36,6 @@ const {
 const PROFILE_LINK_CATCHUP_MAX_INVITES = 300;
 const PROFILE_LINK_CATCHUP_CONCURRENCY = 20;
 const PROFILE_LINK_CATCHUP_TIMEOUT_MS = 50000;
-const PROFILE_LINK_STALE_CLEANUP_MERGE_WINDOW_MS = 15 * 60 * 1000;
-const PROFILE_LINK_STALE_CLEANUP_WAIT_MAX_MS = 4000;
-const PROFILE_LINK_STALE_CLEANUP_WAIT_STEP_MS = 250;
 const PROFILE_DELETE_GAMES_CLEANUP_BATCH_SIZE = 400;
 const PROFILE_DELETE_GAMES_CLEANUP_TIMEOUT_MS = 50000;
 const PROFILE_MERGE_RECONCILE_CONCURRENCY = 10;
@@ -49,8 +46,6 @@ const PROFILE_LINK_RECONCILE_ATTEMPTS = 3;
 const READ_RETRY_ATTEMPTS = 2;
 const READ_RETRY_DELAY_MS = 25;
 
-const profileSummaryCache = new Map();
-
 const readMergeTarget = async (firestore, profileId) => {
   const snapshot = await readWithRetries(() =>
     firestore.collection(PROFILE_MERGE_TARGETS_COLLECTION).doc(profileId).get(),
@@ -58,20 +53,13 @@ const readMergeTarget = async (firestore, profileId) => {
   return snapshot.exists ? snapshot.data() : null;
 };
 
-const buildResolvedProfile = (profilePath, pendingSourcePath = []) => {
+const buildResolvedProfile = (profilePath) => {
   const profileId = profilePath[profilePath.length - 1] || null;
   if (!profileId) {
     return { cleanupProfileIds: [], profileId: null };
   }
-  const cleanupProfileIds = [...profilePath];
-  if (
-    pendingSourcePath.length > 1 &&
-    pendingSourcePath[pendingSourcePath.length - 1] === profileId
-  ) {
-    cleanupProfileIds.unshift(...pendingSourcePath.slice(0, -1));
-  }
   return {
-    cleanupProfileIds: Array.from(new Set(cleanupProfileIds)),
+    cleanupProfileIds: Array.from(new Set(profilePath)),
     profileId,
   };
 };
@@ -481,32 +469,42 @@ async function resolveProfileForLogin(loginUid) {
     return { cleanupProfileIds: [], profileId: null };
   }
   const firestore = admin.firestore();
-  const profilePath = await resolveProfileMergeTargetPath({
-    profileId: rawProfileId,
-    readMergeTarget: (candidateProfileId) =>
-      readMergeTarget(firestore, candidateProfileId),
-  });
-  const profileId = profilePath[profilePath.length - 1] || null;
-  if (!profileId) {
-    return { cleanupProfileIds: [], profileId: null };
-  }
-  let pendingSourcePath = [];
-  const profileSnapshot = await readWithRetries(() =>
-    firestore.collection("users").doc(profileId).get(),
-  );
-  const pendingSourceProfileId = normalizeString(
-    profileSnapshot.exists
-      ? (profileSnapshot.data() || {}).pendingMergeGameCopySourceProfileId
-      : null,
-  );
-  if (pendingSourceProfileId) {
-    pendingSourcePath = await resolveProfileMergeTargetPath({
-      profileId: pendingSourceProfileId,
+  const resolvePath = () =>
+    resolveProfileMergeTargetPath({
+      profileId: rawProfileId,
       readMergeTarget: (candidateProfileId) =>
         readMergeTarget(firestore, candidateProfileId),
     });
+  let profilePath = await resolvePath();
+  let profileId = profilePath[profilePath.length - 1] || null;
+  let profileSnapshot = profileId
+    ? await readWithRetries(() =>
+        firestore.collection("users").doc(profileId).get(),
+      )
+    : null;
+  if (
+    !profileSnapshot?.exists ||
+    normalizeString((profileSnapshot.data?.() || {}).mergedIntoProfileId)
+  ) {
+    const refreshedPath = await resolvePath();
+    profilePath = Array.from(new Set([...profilePath, ...refreshedPath]));
+    profileId = refreshedPath[refreshedPath.length - 1] || null;
+    profileSnapshot = profileId
+      ? await readWithRetries(() =>
+          firestore.collection("users").doc(profileId).get(),
+        )
+      : null;
   }
-  return buildResolvedProfile(profilePath, pendingSourcePath);
+  if (
+    !profileSnapshot?.exists ||
+    normalizeString((profileSnapshot.data?.() || {}).mergedIntoProfileId)
+  ) {
+    return {
+      cleanupProfileIds: Array.from(new Set(profilePath)),
+      profileId: null,
+    };
+  }
+  return buildResolvedProfile(profilePath);
 }
 
 async function readProfileSummary(profileId) {
@@ -514,10 +512,6 @@ async function readProfileSummary(profileId) {
   if (!normalizedProfileId) {
     return null;
   }
-  if (profileSummaryCache.has(normalizedProfileId)) {
-    return profileSummaryCache.get(normalizedProfileId);
-  }
-
   let summary = null;
   try {
     const profileDoc = await readWithRetries(() =>
@@ -539,7 +533,6 @@ async function readProfileSummary(profileId) {
     throw error;
   }
 
-  profileSummaryCache.set(normalizedProfileId, summary);
   return summary;
 }
 
@@ -834,16 +827,13 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
     const existingListSortMs = Number.isFinite(canonicalListSortMs)
       ? canonicalListSortMs
       : sourceListSortMs;
-    const nextListSortMs =
-      !Number.isFinite(canonicalListSortMs) && Number.isFinite(sourceListSortMs)
-        ? sourceListSortMs
-        : pickListSortMillis({
-            options,
-            status,
-            automatchData,
-            nowMs,
-            existingListSortMs,
-          });
+    const nextListSortMs = pickListSortMillis({
+      options,
+      status,
+      automatchData,
+      nowMs,
+      existingListSortMs,
+    });
 
     const existingCreatedAt =
       (existingDocData && existingDocData.createdAt) ||
@@ -876,7 +866,17 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
       lastEventAt: toTimestamp(nowMs),
     };
 
-    batch.set(ownerDocRef, projectionDocData, { merge: true });
+    if (options.preserveListSortAt === true) {
+      if (existingDocSnapshot) {
+        batch.update(ownerDocRef, projectionDocData, {
+          lastUpdateTime: existingDocSnapshot.updateTime,
+        });
+      } else {
+        batch.create(ownerDocRef, projectionDocData);
+      }
+    } else {
+      batch.set(ownerDocRef, projectionDocData, { merge: true });
+    }
     setCount += 1;
   }
 
@@ -1017,42 +1017,6 @@ const processWithConcurrency = async (
   if (didFail) {
     throw failure;
   }
-};
-
-const readNumericMillis = (value) => {
-  const fromTimestamp = readTimestampMillis(value);
-  if (Number.isFinite(fromTimestamp)) {
-    return fromTimestamp;
-  }
-  const numeric = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(numeric) ? Math.floor(numeric) : null;
-};
-
-const hasRecentMergeMarkerForSource = (targetData, staleProfileId) => {
-  const mergedSourceProfileId = normalizeString(
-    targetData && targetData.mergedSourceProfileId,
-  );
-  if (!mergedSourceProfileId || mergedSourceProfileId !== staleProfileId) {
-    return false;
-  }
-  const mergedAtMs = readNumericMillis(targetData && targetData.mergedAtMs);
-  if (!Number.isFinite(mergedAtMs)) {
-    return false;
-  }
-  return Date.now() - mergedAtMs <= PROFILE_LINK_STALE_CLEANUP_MERGE_WINDOW_MS;
-};
-
-const waitForProfileDeletion = async (profileRef) => {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt <= PROFILE_LINK_STALE_CLEANUP_WAIT_MAX_MS) {
-    const snapshot = await profileRef.get();
-    if (!snapshot.exists) {
-      return true;
-    }
-    await delay(PROFILE_LINK_STALE_CLEANUP_WAIT_STEP_MS);
-  }
-  const finalSnapshot = await profileRef.get();
-  return !finalSnapshot.exists;
 };
 
 const deleteProfileGamesProjectionDocs = async (profileRef) => {
@@ -1199,21 +1163,37 @@ const reconcileProfileMergeProjections = async (
         PROFILE_MERGE_RECONCILE_CONCURRENCY,
         async (projection) => {
           if (projection.entityType === "event") {
-            await reconcileLiveEventProjectionImpl(
-              projection.id,
-              null,
-              null,
-              { cleanupProfileIds: profileIds, dryRun },
-              {
-                projectEvent: projectEventImpl,
-                readLiveEvent: async () => {
-                  const eventSnapshot = await (database || admin.database())
-                    .ref(`events/${projection.id}`)
-                    .once("value");
-                  return eventSnapshot.exists() ? eventSnapshot.val() : null;
+            try {
+              await reconcileLiveEventProjectionImpl(
+                projection.id,
+                null,
+                null,
+                { cleanupProfileIds: profileIds, dryRun },
+                {
+                  projectEvent: projectEventImpl,
+                  readLiveEvent: async () => {
+                    const eventSnapshot = await (database || admin.database())
+                      .ref(`events/${projection.id}`)
+                      .once("value");
+                    return eventSnapshot.exists() ? eventSnapshot.val() : null;
+                  },
                 },
-              },
-            );
+              );
+            } catch (error) {
+              if (
+                !String(error && error.message).startsWith(
+                  "projector:event-owner-",
+                )
+              ) {
+                throw error;
+              }
+              profileBlocked = true;
+              blockedProjections.set(`event:${projection.id}`, {
+                entityType: "event",
+                id: projection.id,
+                reason: "unresolved-owner-profile",
+              });
+            }
             return;
           }
           const result = await recomputeInviteProjectionImpl(
@@ -1223,7 +1203,7 @@ const reconcileProfileMergeProjections = async (
               cleanupProfileIds: profileIds,
               dryRun,
               eventTimestampMs: Date.now(),
-              preserveNewerListSortAt: true,
+              preserveListSortAt: true,
             },
           );
           if (result && result.sourceCleanupSafe === false) {
@@ -1481,7 +1461,7 @@ const processProfileLinkCatchup = async (
             {
               cleanupProfileIds,
               eventTimestampMs: Date.now(),
-              preserveNewerListSortAt: true,
+              preserveListSortAt: true,
             },
           );
           if (result && result.sourceCleanupSafe === false) {
@@ -1526,24 +1506,20 @@ const processProfileLinkCatchup = async (
   let staleCleanupDeleted = 0;
   let staleCleanupState = "skipped";
   if (didConverge && staleProfileId && staleProfileId !== profileId) {
-    const firestore = admin.firestore();
-    const targetRef = firestore.collection("users").doc(profileId);
+    const firestore = dependencies.firestore || admin.firestore();
     const staleRef = firestore.collection("users").doc(staleProfileId);
-    const targetSnapshot = await targetRef.get();
-    if (!targetSnapshot.exists) {
-      staleCleanupState = "target-profile-missing";
-    } else if (
-      !hasRecentMergeMarkerForSource(
-        targetSnapshot.data() || {},
-        staleProfileId,
-      )
-    ) {
-      staleCleanupState = "merge-marker-mismatch";
+    const mergePath = await resolveProfileMergeTargetPath({
+      profileId: staleProfileId,
+      readMergeTarget: (candidateProfileId) =>
+        readMergeTarget(firestore, candidateProfileId),
+    });
+    if (mergePath.length < 2 || mergePath[mergePath.length - 1] !== profileId) {
+      staleCleanupState = "merge-target-mismatch";
     } else if (successfullyRecomputedInviteIds.size === 0) {
       staleCleanupState = "no-successful-recomputes";
     } else {
-      const staleProfileDeleted = await waitForProfileDeletion(staleRef);
-      if (!staleProfileDeleted) {
+      const staleSnapshot = await staleRef.get();
+      if (staleSnapshot.exists) {
         staleCleanupState = "stale-profile-still-exists";
       } else {
         staleCleanupState = "done";
@@ -1642,6 +1618,13 @@ const onProfileDeleted = onDocumentDeleted(
   async (event) => {
     const profileId = normalizeString(event.params.profileId);
     if (!profileId) {
+      return;
+    }
+    const deletedProfile = event.data?.data?.() || {};
+    if (normalizeString(deletedProfile.mergedIntoProfileId)) {
+      console.log("projector:profile-delete-games-cleanup:recovery-owned", {
+        profileId,
+      });
       return;
     }
     const profileRef = admin.firestore().collection("users").doc(profileId);

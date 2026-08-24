@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { exports } from "cloudflare:workers";
+import { ParsedMessage } from "@spruceid/siwe-parser";
 import { SignJWT, exportJWK, generateKeyPair } from "jose";
 import { Wallet } from "ethers";
 import bs58 from "bs58";
@@ -12,14 +13,10 @@ import {
   validateSiweLocation,
 } from "../src/authMutations.ts";
 import { prepareSiweMessage } from "../../../../src/connection/siweMessage.ts";
-import { parseSiweMessage } from "../src/siweAuth.ts";
 
 const env = {
   APPLE_AUDIENCES: "link.mons",
-  AUTH_DISABLE_APPLE_VERIFY: "false",
-  AUTH_DISABLE_UNLINK: "false",
-  AUTH_DISABLE_X_VERIFY: "false",
-  SIWE_ALLOWED_DOMAINS: "mons.link,www.mons.link,localhost,127.0.0.1",
+  AUTH_MUTATIONS_DISABLED: "false" as unknown as Env["AUTH_MUTATIONS_DISABLED"],
 } as Env;
 const identity = { uid: "runtime-login", idToken: "firebase-token" };
 const nonce = "nonceABC123456789012345";
@@ -68,7 +65,12 @@ function service(): AuthIdentityService {
     }),
     peekVerifyReplay: async () => null,
     refreshCompletedVerifyResult: async () => null,
-    recoverPendingProfile: async () => true,
+    syncCurrentCallerProfile: async () => ({
+      ok: true,
+      profileId: profile.profileId,
+      linkedMethods: profile.linkedMethods,
+      appleLinked: profile.appleLinked,
+    }),
     unlinkMethod: async () => ({
       ok: true,
       profileId: profile.profileId,
@@ -90,34 +92,28 @@ describe("auth runtime primitives", () => {
 
   it("applies the production and port-aware SIWE domain policy", () => {
     expect(() =>
-      validateSiweLocation(
-        { domain: "mons.link", uri: "https://mons.link" },
-        env,
-      ),
+      validateSiweLocation({ domain: "mons.link", uri: "https://mons.link" }),
     ).not.toThrow();
     expect(() =>
-      validateSiweLocation(
-        { domain: "localhost:3000", uri: "http://localhost:3000" },
-        env,
-      ),
+      validateSiweLocation({
+        domain: "localhost:3000",
+        uri: "http://localhost:3000",
+      }),
     ).not.toThrow();
     expect(() =>
-      validateSiweLocation(
-        { domain: "attacker.invalid", uri: "https://attacker.invalid" },
-        env,
-      ),
+      validateSiweLocation({
+        domain: "attacker.invalid",
+        uri: "https://attacker.invalid",
+      }),
     ).toThrow("siwe-domain-not-allowed");
     expect(() =>
-      validateSiweLocation(
-        { domain: "mons.link", uri: "data:text/plain,mons" },
-        env,
-      ),
+      validateSiweLocation({
+        domain: "mons.link",
+        uri: "data:text/plain,mons",
+      }),
     ).toThrow("siwe-uri-not-allowed");
     expect(() =>
-      validateSiweLocation(
-        { domain: "mons.link", uri: "http://mons.link" },
-        env,
-      ),
+      validateSiweLocation({ domain: "mons.link", uri: "http://mons.link" }),
     ).toThrow("siwe-uri-not-allowed");
   });
 
@@ -156,7 +152,7 @@ describe("auth runtime primitives", () => {
       nonce,
       issuedAt: new Date().toISOString(),
     });
-    expect(() => parseSiweMessage(message)).not.toThrow();
+    expect(() => new ParsedMessage(message)).not.toThrow();
     const ethereumResponse = await handleAuthMutation(
       request("/auth/methods/eth/verify", {
         intentId,

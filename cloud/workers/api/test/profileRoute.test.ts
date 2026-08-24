@@ -14,7 +14,6 @@ const ctx = { waitUntil: () => undefined };
 const identity = { idToken: "firebase-id-token", uid: "firebase-uid" };
 const TELEGRAM_TEST_ENV = {
   ...BASE_ENV,
-  AUTH_DISABLE_X_VERIFY: "false",
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
   FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
   FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",

@@ -9,6 +9,14 @@ export default defineConfig({
     }),
   ],
   test: {
+    deps: {
+      optimizer: {
+        ssr: {
+          enabled: true,
+          include: ["@spruceid/siwe-parser"],
+        },
+      },
+    },
     include: ["runtime/**/*.test.ts"],
   },
 });

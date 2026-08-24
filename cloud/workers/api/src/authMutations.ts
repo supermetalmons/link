@@ -8,6 +8,7 @@ import {
   type AuthProfileResponse,
   type LinkedAuthMethodsResponse,
 } from "@mons/shared/auth";
+import { ParsedMessage } from "@spruceid/siwe-parser";
 import bs58 from "bs58";
 import { getAddress, verifyMessage } from "ethers";
 import nacl from "tweetnacl";
@@ -30,11 +31,9 @@ import type { FirebaseIdentity } from "./firebaseAuth.ts";
 import { readBoundedJson } from "./http.ts";
 import {
   cleanString,
-  featureDisabled,
   normalizeMethodValue,
   readStoredFirebaseUid,
 } from "./authPolicy.ts";
-import { parseSiweMessage, type ParsedSiweMessage } from "./siweAuth.ts";
 import { X_FLOW_TTL_MS } from "./xFlow.ts";
 
 const AUTH_MUTATION_MAX_BODY_BYTES = 16 * 1024;
@@ -87,26 +86,18 @@ async function consumeRejectedIntent(
   }
 }
 
-function validateSiweLocation(
-  data: {
-    domain?: string;
-    uri?: string;
-  },
-  env: Env,
-): void {
-  const allowed = new Set(
-    env.SIWE_ALLOWED_DOMAINS.split(",")
-      .map((value) => value.trim().toLowerCase())
-      .filter(Boolean),
-  );
-  const domain = cleanString(data.domain).toLowerCase();
-  const bareDomain = domain.includes(":") ? domain.split(":")[0] : domain;
-  if (
-    !domain ||
-    (!allowed.has(domain) &&
-      !allowed.has(bareDomain) &&
-      !isAllowedAuthOrigin(`https://${domain}`))
-  ) {
+function validateSiweLocation(data: {
+  scheme?: string;
+  domain?: string;
+  uri?: string;
+}): void {
+  const domain = cleanString(data.domain);
+  const scheme = cleanString(data.scheme).toLowerCase();
+  const domainAllowed = scheme
+    ? isAllowedAuthOrigin(`${scheme}://${domain}`)
+    : isAllowedAuthOrigin(`https://${domain}`) ||
+      isAllowedAuthOrigin(`http://${domain}`);
+  if (!domain || !domainAllowed) {
     throw new AuthApiFailure(
       403,
       "permission-denied",
@@ -123,19 +114,10 @@ function validateSiweLocation(
   } catch {
     throw new AuthApiFailure(403, "permission-denied", "siwe-uri-not-allowed");
   }
-  const host = url.host.toLowerCase();
-  const bareHost = host.includes(":") ? host.split(":")[0] : host;
-  const isLocal = bareHost === "localhost" || bareHost === "127.0.0.1";
   if (
-    !host ||
-    (!allowed.has(host) &&
-      !allowed.has(bareHost) &&
-      !isAllowedAuthOrigin(url.origin)) ||
+    !isAllowedAuthOrigin(url.origin) ||
     url.username !== "" ||
-    url.password !== "" ||
-    (isLocal
-      ? url.protocol !== "http:" && url.protocol !== "https:"
-      : url.protocol !== "https:")
+    url.password !== ""
   ) {
     throw new AuthApiFailure(403, "permission-denied", "siwe-uri-not-allowed");
   }
@@ -170,7 +152,6 @@ async function executeAuthMutation(
   const service =
     dependencies.identityService ||
     createAuthIdentityService(env, {
-      deferRecovery: true,
       signal: operationSignal,
     });
   if (pathname === "/auth/methods/sol/verify") {
@@ -178,10 +159,6 @@ async function executeAuthMutation(
       invalidRequest();
     }
     const opId = `intent:${payload.intentId}`;
-    const replay = await service.peekVerifyReplay(opId, "sol", identity.uid);
-    if (replay) {
-      return replay;
-    }
     const intent = await service.readIntent(
       identity.uid,
       "sol",
@@ -247,13 +224,9 @@ async function executeAuthMutation(
       invalidRequest();
     }
     const opId = `intent:${payload.intentId}`;
-    const replay = await service.peekVerifyReplay(opId, "eth", identity.uid);
-    if (replay) {
-      return replay;
-    }
-    let message: ParsedSiweMessage;
+    let message: ParsedMessage;
     try {
-      message = parseSiweMessage(payload.message);
+      message = new ParsedMessage(payload.message);
       getAddress(message.address);
     } catch {
       throw new AuthApiFailure(
@@ -298,7 +271,7 @@ async function executeAuthMutation(
       return { ok: false };
     }
     try {
-      validateSiweLocation(message, env);
+      validateSiweLocation(message);
     } catch (error) {
       await consumeRejectedIntent(
         service,
@@ -329,18 +302,7 @@ async function executeAuthMutation(
     if (!isAppleAuthVerificationRequest(payload)) {
       invalidRequest();
     }
-    if (featureDisabled(env.AUTH_DISABLE_APPLE_VERIFY)) {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        "apple-auth-disabled",
-      );
-    }
     const opId = `intent:${payload.intentId}`;
-    const replay = await service.peekVerifyReplay(opId, "apple", identity.uid);
-    if (replay) {
-      return replay;
-    }
     const intent = await service.readIntent(
       identity.uid,
       "apple",
@@ -380,9 +342,6 @@ async function executeAuthMutation(
   }
   if (!isXAuthCompletionRequest(payload)) {
     invalidRequest();
-  }
-  if (featureDisabled(env.AUTH_DISABLE_X_VERIFY)) {
-    throw new AuthApiFailure(409, "failed-precondition", "x-auth-disabled");
   }
   const firestore =
     dependencies.firestore ||
@@ -625,7 +584,10 @@ async function executeAuthMutation(
       flow,
       {
         status: "completed",
-        result: response,
+        result: {
+          profileId: response.profileId,
+          opId: response.opId,
+        },
         completedAtMs,
         updatedAtMs: completedAtMs,
         errorCode: null,

@@ -1,8 +1,16 @@
 import type { NftApiRequest } from "@mons/shared/nfts";
-import { isValidSolanaAddress } from "@mons/shared/solana";
+import bs58 from "bs58";
 import { readBoundedText } from "./boundedStreams.ts";
 
 const MAX_REQUEST_BODY_BYTES = 4096;
+
+function isValidSolanaAddress(value: string): boolean {
+  try {
+    return value.length <= 64 && bs58.decode(value).byteLength === 32;
+  } catch {
+    return false;
+  }
+}
 
 export const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",

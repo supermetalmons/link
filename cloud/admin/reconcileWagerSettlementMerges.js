@@ -629,6 +629,11 @@ const reconcileWagerSettlementPage = async (
   };
 };
 
+const requiresManualReview = (result) =>
+  result?.manualReviewRequired === true ||
+  result?.winner?.reviewRequired === true ||
+  result?.loser?.reviewRequired === true;
+
 const main = async (argv = process.argv.slice(2)) => {
   const options = parseArgs(argv);
   if (!initAdmin(options.adminArgs)) {
@@ -639,6 +644,7 @@ const main = async (argv = process.argv.slice(2)) => {
       ? await reconcileWagerSettlementResolution(options)
       : await reconcileWagerSettlementPage(options);
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return result;
   } catch (error) {
     throw addApplicationDefaultCredentialHelp(error);
   } finally {
@@ -647,10 +653,16 @@ const main = async (argv = process.argv.slice(2)) => {
 };
 
 if (require.main === module) {
-  main().catch((error) => {
-    console.error(error?.message || error);
-    process.exitCode = 1;
-  });
+  main()
+    .then((result) => {
+      if (requiresManualReview(result)) {
+        process.exitCode = 1;
+      }
+    })
+    .catch((error) => {
+      console.error(error?.message || error);
+      process.exitCode = 1;
+    });
 }
 
 module.exports = {
@@ -665,4 +677,5 @@ module.exports = {
   reconcileWagerSettlementDocument,
   reconcileWagerSettlementPage,
   reconcileWagerSettlementResolution,
+  requiresManualReview,
 };

@@ -15,7 +15,6 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const env = {
   ...TELEGRAM_TEST_ENV,
-  AUTH_DISABLE_X_VERIFY: "false",
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
   FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
   FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
@@ -383,81 +382,9 @@ test("rejects malformed profile merge targets during settlement", async () => {
   }
 });
 
-test("rejects settlement while a participant merge lock is active", async () => {
-  let commitAttempts = 0;
-  let rollbacks = 0;
-  const lockReads = new Set<string>();
-  const repository = createGameplayRepository(env, {
-    rtdbClient,
-    getAccessToken: async () => "firestore-access-token",
-    now: () => 100,
-    fetcher: async (input, init = {}) => {
-      const url = String(input);
-      if (url.endsWith("/wagerSettlements/locked-operation")) {
-        return jsonResponse({}, 404);
-      }
-      if (url.endsWith(":beginTransaction")) {
-        return jsonResponse({ transaction: "locked-transaction" });
-      }
-      if (url.endsWith(":batchGet")) {
-        const body = JSON.parse(String(init.body)) as {
-          documents: string[];
-        };
-        return jsonResponse(
-          body.documents.map((name) => {
-            const marker = "/mergeLocks/profile:";
-            const markerIndex = name.indexOf(marker);
-            if (markerIndex >= 0) {
-              const profileId = decodeURIComponent(
-                name.slice(markerIndex + marker.length),
-              );
-              lockReads.add(profileId);
-              if (profileId === "winner") {
-                return {
-                  found: {
-                    name,
-                    fields: { expiresAtMs: { integerValue: "101" } },
-                  },
-                };
-              }
-            }
-            return { missing: name };
-          }),
-        );
-      }
-      if (url.endsWith(":rollback")) {
-        rollbacks++;
-        return jsonResponse({});
-      }
-      if (url.endsWith(":commit")) {
-        commitAttempts++;
-        return jsonResponse({});
-      }
-      throw new Error(`unexpected request: ${url}`);
-    },
-  });
-
-  await assert.rejects(
-    repository.applyWagerTransferOnce({
-      operationId: "locked-operation",
-      fingerprint: "locked-fingerprint",
-      winnerProfileId: "winner",
-      loserProfileId: "loser",
-      material: "dust",
-      count: 2,
-      appliedAtMs: 100,
-    }),
-    GameplayRepositoryFailure,
-  );
-  assert.deepEqual(Array.from(lockReads).sort(), ["loser", "winner"]);
-  assert.equal(commitAttempts, 0);
-  assert.equal(rollbacks, 1);
-});
-
-test("retries against canonical profiles after a lock-protected merge races settlement", async () => {
+test("retries against canonical profiles when a merge races settlement", async () => {
   const fingerprint = "canonical-fingerprint";
   const mergeTargets = new Map<string, string>();
-  const lockReads = new Set<string>();
   let transactionSequence = 0;
   let commitAttempts = 0;
   let rawCommitBody: unknown;
@@ -491,18 +418,16 @@ test("retries against canonical profiles after a lock-protected merge races sett
           body.transaction,
           `canonical-transaction-${transactionSequence}`,
         );
+        assert.equal(
+          body.documents.every(
+            (name) =>
+              name.includes("/wagerSettlements/") ||
+              name.includes("/profileMergeTargets/"),
+          ),
+          true,
+        );
         return jsonResponse(
           body.documents.map((name) => {
-            const lockMarker = "/mergeLocks/profile:";
-            const lockMarkerIndex = name.indexOf(lockMarker);
-            if (lockMarkerIndex >= 0) {
-              lockReads.add(
-                decodeURIComponent(
-                  name.slice(lockMarkerIndex + lockMarker.length),
-                ),
-              );
-              return { missing: name };
-            }
             const marker = "/profileMergeTargets/";
             const markerIndex = name.indexOf(marker);
             const profileId =
@@ -554,13 +479,6 @@ test("retries against canonical profiles after a lock-protected merge races sett
   const writes = commitBody?.writes as Array<Record<string, unknown>>;
   assert.equal(commitAttempts, 2);
   assert.equal(commitBody.transaction, "canonical-transaction-2");
-  assert.deepEqual(Array.from(lockReads).sort(), [
-    "intermediate-winner",
-    "loser",
-    "retired-loser",
-    "retired-winner",
-    "winner",
-  ]);
   assert.deepEqual(
     writes
       .slice(1)
