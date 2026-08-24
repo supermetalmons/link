@@ -129,6 +129,7 @@ const createFirestore = (initialRecords) => {
     firestore,
     read: (path) => structuredClone(records.get(path)?.data),
     ref,
+    update: (path, patch) => applyUpdate(ref(path), patch),
     updateCalls,
   };
 };
@@ -705,22 +706,115 @@ test("leaves an overdrawn canonical repair for manual review", async () => {
     },
   });
 
-  await assert.rejects(
-    reconcileWagerSettlementDocument(
-      {
-        dryRun: false,
-        firestore: memory.firestore,
-        ledgerRef: memory.ref("wagerSettlements/overdrawn"),
-      },
-      { increment: (count) => ({ increment: count }) },
-    ),
-    /Unsafe canonical balance repair/,
+  const result = await reconcileWagerSettlementDocument(
+    {
+      dryRun: false,
+      firestore: memory.firestore,
+      ledgerRef: memory.ref("wagerSettlements/overdrawn"),
+    },
+    { increment: (count) => ({ increment: count }) },
   );
+  assert.equal(result.action, "manual-review");
+  assert.equal(result.loser.reviewRequired, true);
+  assert.equal(result.loser.reviewReason, "canonical-balance-underflow");
+  assert.equal(result.loser.availableBalance, 1);
+  assert.equal(result.loser.requiredDebit, 2);
+  assert.deepEqual(result.deltas, []);
   assert.equal(
     memory.read("users/overdrawn-canonical").mining.materials.dust,
     1,
   );
   assert.equal(memory.updateCalls.length, 0);
+
+  const page = await reconcileWagerSettlementPage(
+    { after: "", dryRun: true, limit: 1 },
+    {
+      documentIdField: "__name__",
+      firestore: memory.firestore,
+      increment: (count) => ({ increment: count }),
+    },
+  );
+  assert.equal(page.manualReviewRequired, true);
+  assert.equal(
+    page.results[0].loser.reviewReason,
+    "canonical-balance-underflow",
+  );
+
+  const resolved = await reconcileWagerSettlementResolution(
+    {
+      decisions: { loser: "included" },
+      dryRun: false,
+      operationId: "overdrawn",
+    },
+    {
+      firestore: memory.firestore,
+      increment: (count) => ({ increment: count }),
+    },
+  );
+  assert.equal(resolved.action, "resolved");
+  assert.equal(
+    memory.read("wagerSettlements/overdrawn").profileMergeLoserResolution,
+    "included",
+  );
+});
+
+test("keeps a lost underflow decision pending until the balance is safe", async () => {
+  const memory = createFirestore({
+    "profileMergeTargets/underflow-loser": {
+      createTime: timestamp(10),
+      data: { targetProfileId: "underflow-canonical" },
+    },
+    "users/underflow-canonical": {
+      data: { mining: { materials: { dust: 1 } } },
+    },
+    "wagerSettlements/underflow": {
+      createTime: timestamp(20),
+      data: ledger("underflow"),
+    },
+  });
+
+  const result = await reconcileWagerSettlementResolution(
+    {
+      decisions: { loser: "lost" },
+      dryRun: false,
+      operationId: "underflow",
+    },
+    {
+      firestore: memory.firestore,
+      increment: (count) => ({ increment: count }),
+    },
+  );
+  assert.equal(result.action, "manual-review");
+  assert.equal(result.loser.reviewReason, "canonical-balance-underflow");
+  assert.equal(
+    memory.read("wagerSettlements/underflow").profileMergeLoserResolution,
+    undefined,
+  );
+  assert.equal(memory.updateCalls.length, 0);
+
+  memory.update("users/underflow-canonical", {
+    "mining.materials.dust": 3,
+  });
+  const resolved = await reconcileWagerSettlementResolution(
+    {
+      decisions: { loser: "lost" },
+      dryRun: false,
+      operationId: "underflow",
+    },
+    {
+      firestore: memory.firestore,
+      increment: (count) => ({ increment: count }),
+    },
+  );
+  assert.equal(resolved.action, "resolved");
+  assert.equal(
+    memory.read("users/underflow-canonical").mining.materials.dust,
+    1,
+  );
+  assert.equal(
+    memory.read("wagerSettlements/underflow").profileMergeLoserResolution,
+    "lost",
+  );
 });
 
 test("page reconciliation returns a bounded resumable cursor", async () => {

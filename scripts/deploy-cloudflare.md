@@ -675,6 +675,10 @@ when `"manualReviewRequired": false`. Document-ID pagination is not a snapshot,
 so a legacy settlement created during this first pass could also sort behind its
 cursor.
 
+`canonical-balance-underflow` remains in manual review when `lost` would make a
+balance negative. Choose `included`, or restore enough reviewed balance and rerun
+the same `lost` resolution; no decision is recorded until the repair is safe.
+
 Keep merging disabled and promote the fixed Worker before the final pass. Use
 the prepared secrets on this first candidate, smoke it, and promote its exact
 version ID:

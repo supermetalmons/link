@@ -330,10 +330,13 @@ const buildDeltas = (ledger, winner, loser) => {
 const applyManualDecision = (sideName, side, decisions) => {
   const decision = decisions?.[sideName];
   if (!side.reviewRequired) {
-    if (decision !== undefined) {
-      throw new Error(`Unexpected ${sideName} resolution decision`);
+    if (decision === undefined) {
+      return side;
     }
-    return side;
+    if (side.repairRequired && decision === "lost") {
+      return side;
+    }
+    throw new Error(`Unexpected ${sideName} resolution decision`);
   }
   if (decision === undefined) {
     throw new Error(`Missing ${sideName} resolution decision`);
@@ -341,11 +344,50 @@ const applyManualDecision = (sideName, side, decisions) => {
   if (decision !== "included" && decision !== "lost") {
     throw new Error(`Invalid ${sideName} resolution decision`);
   }
-  return {
+  const resolved = {
     ...side,
     repairRequired: decision === "lost",
     reviewRequired: false,
   };
+  delete resolved.availableBalance;
+  delete resolved.requiredDebit;
+  delete resolved.reviewReason;
+  return resolved;
+};
+
+const markBalanceUnderflows = ({ deltas, ledger, loser, profiles, winner }) => {
+  let nextLoser = loser;
+  for (const delta of deltas) {
+    const profile = profiles.get(delta.profileId).snapshot;
+    const data = profile.data() || {};
+    const current = data.mining?.materials?.[ledger.material] ?? 0;
+    if (
+      !Number.isSafeInteger(current) ||
+      current < 0 ||
+      !Number.isSafeInteger(current + delta.count)
+    ) {
+      throw new Error(`Unsafe canonical balance repair: ${delta.profileId}`);
+    }
+    if (current + delta.count >= 0) {
+      continue;
+    }
+    if (
+      delta.count >= 0 ||
+      !nextLoser.repairRequired ||
+      nextLoser.canonicalProfileId !== delta.profileId
+    ) {
+      throw new Error(`Unsafe canonical balance repair: ${delta.profileId}`);
+    }
+    nextLoser = {
+      ...nextLoser,
+      availableBalance: current,
+      repairRequired: false,
+      requiredDebit: -delta.count,
+      reviewReason: "canonical-balance-underflow",
+      reviewRequired: true,
+    };
+  }
+  return { loser: nextLoser, winner };
 };
 
 const hasExactDecisions = (expected, actual) => {
@@ -402,44 +444,48 @@ const reconcileWagerSettlementDocument = async (
       repairedProfileId: ledger.loserRepairedProfileId,
       transaction,
     });
+    const profiles = new Map();
+    const loadRepairProfiles = async () => {
+      const repairProfileIds = new Set([
+        ...(winner.repairRequired ? [winner.canonicalProfileId] : []),
+        ...(loser.repairRequired ? [loser.canonicalProfileId] : []),
+      ]);
+      for (const profileId of repairProfileIds) {
+        if (profiles.has(profileId)) {
+          continue;
+        }
+        const ref = firestore.collection("users").doc(profileId);
+        const profile = await transaction.get(ref);
+        if (!profile.exists) {
+          throw new Error(`Missing canonical profile: ${profileId}`);
+        }
+        profiles.set(profileId, { ref, snapshot: profile });
+      }
+    };
+    await loadRepairProfiles();
+    ({ loser, winner } = markBalanceUnderflows({
+      deltas: buildDeltas(ledger, winner, loser),
+      ledger,
+      loser,
+      profiles,
+      winner,
+    }));
     const manualResolution = decisions !== undefined;
     if (manualResolution) {
-      const reviewRequired = winner.reviewRequired || loser.reviewRequired;
-      if (!reviewRequired) {
-        throw new Error("Wager settlement does not require manual resolution");
-      }
       winner = applyManualDecision("winner", winner, decisions);
       loser = applyManualDecision("loser", loser, decisions);
     }
+    await loadRepairProfiles();
+    ({ loser, winner } = markBalanceUnderflows({
+      deltas: buildDeltas(ledger, winner, loser),
+      ledger,
+      loser,
+      profiles,
+      winner,
+    }));
     const deltas = buildDeltas(ledger, winner, loser);
     const repairRequired = winner.repairRequired || loser.repairRequired;
     const reviewRequired = winner.reviewRequired || loser.reviewRequired;
-    const profiles = new Map();
-    const repairProfileIds = new Set([
-      ...(winner.repairRequired ? [winner.canonicalProfileId] : []),
-      ...(loser.repairRequired ? [loser.canonicalProfileId] : []),
-    ]);
-    for (const profileId of repairProfileIds) {
-      const ref = firestore.collection("users").doc(profileId);
-      const profile = await transaction.get(ref);
-      if (!profile.exists) {
-        throw new Error(`Missing canonical profile: ${profileId}`);
-      }
-      profiles.set(profileId, { ref, snapshot: profile });
-    }
-    for (const delta of deltas) {
-      const profile = profiles.get(delta.profileId).snapshot;
-      const data = profile.data() || {};
-      const current = data.mining?.materials?.[ledger.material] ?? 0;
-      if (
-        !Number.isSafeInteger(current) ||
-        current < 0 ||
-        !Number.isSafeInteger(current + delta.count) ||
-        current + delta.count < 0
-      ) {
-        throw new Error(`Unsafe canonical balance repair: ${delta.profileId}`);
-      }
-    }
     if (!dryRun) {
       for (const delta of deltas) {
         transaction.update(profiles.get(delta.profileId).ref, {
@@ -447,7 +493,7 @@ const reconcileWagerSettlementDocument = async (
         });
       }
       const ledgerPatch = {};
-      if (manualResolution) {
+      if (manualResolution && !reviewRequired) {
         if (decisions.winner !== undefined) {
           ledgerPatch.profileMergeWinnerResolution = decisions.winner;
         }
@@ -478,16 +524,16 @@ const reconcileWagerSettlementDocument = async (
         transaction.update(ledgerRef, ledgerPatch);
       }
     }
-    const action = manualResolution
-      ? dryRun
-        ? "would-resolve"
-        : "resolved"
-      : reviewRequired
-        ? repairRequired
-          ? dryRun
-            ? "would-partially-repair"
-            : "partially-repaired"
-          : "manual-review"
+    const action = reviewRequired
+      ? repairRequired
+        ? dryRun
+          ? "would-partially-repair"
+          : "partially-repaired"
+        : "manual-review"
+      : manualResolution
+        ? dryRun
+          ? "would-resolve"
+          : "resolved"
         : repairRequired
           ? dryRun
             ? "would-repair"

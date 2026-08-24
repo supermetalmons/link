@@ -20,6 +20,7 @@ const {
   readInviteExists,
   readExistingProjectionDocuments,
   reconcileProfileMergeProjections,
+  recomputeInviteProjection,
   resolveProfileLinkCatchupState,
   syncAutomatchInviteMarkerFromQueue,
 } = require("../functions/profileGamesProjector");
@@ -32,6 +33,105 @@ const snapshot = (documents) => ({
 });
 
 const gameDocument = (id, data) => ({ id, data: () => data });
+
+const runInviteProjection = async ({
+  eventTimestampMs,
+  invite,
+  inviteId,
+  mergeTargets,
+  profileLinks,
+  profiles,
+  projections,
+}) => {
+  const originalDatabase = firebaseAdmin.database;
+  const originalFirestore = firebaseAdmin.firestore;
+  const deletes = [];
+  const sets = [];
+  const valueSnapshot = (value) => ({
+    exists: () => value !== null && value !== undefined,
+    val: () => value ?? null,
+  });
+  const gameRef = (profileId) => {
+    const ref = {
+      path: `users/${profileId}/games/${inviteId}`,
+      get: async () => {
+        const data = projections[profileId];
+        return {
+          data: () => data,
+          exists: data !== null && data !== undefined,
+          ref,
+        };
+      },
+    };
+    return ref;
+  };
+  const firestore = {
+    batch: () => ({
+      commit: async () => undefined,
+      delete: (ref) => deletes.push(ref.path),
+      set: (ref, data, options) => sets.push({ data, options, path: ref.path }),
+    }),
+    collection: (collectionName) => ({
+      doc: (profileId) => {
+        if (collectionName === "profileMergeTargets") {
+          const data = mergeTargets[profileId];
+          return {
+            get: async () => ({
+              data: () => data,
+              exists: data !== null && data !== undefined,
+            }),
+          };
+        }
+        assert.equal(collectionName, "users");
+        const data = profiles[profileId];
+        return {
+          collection: (subcollectionName) => {
+            assert.equal(subcollectionName, "games");
+            return { doc: () => gameRef(profileId) };
+          },
+          get: async () => ({
+            data: () => data,
+            exists: data !== null && data !== undefined,
+          }),
+        };
+      },
+    }),
+  };
+  const firestoreFactory = () => firestore;
+  firestoreFactory.Timestamp = originalFirestore.Timestamp;
+  firebaseAdmin.firestore = firestoreFactory;
+  firebaseAdmin.database = () => ({
+    ref: (path) => ({
+      once: async () => {
+        if (path === `invites/${inviteId}`) {
+          return valueSnapshot(invite);
+        }
+        if (path === `automatch/${inviteId}`) {
+          return valueSnapshot(null);
+        }
+        const profileMatch = path.match(/^players\/(.+)\/profile$/);
+        if (profileMatch) {
+          return valueSnapshot(profileLinks[profileMatch[1]]);
+        }
+        if (path.startsWith("players/")) {
+          return valueSnapshot(null);
+        }
+        throw new Error(`unexpected-path:${path}`);
+      },
+    }),
+  });
+  try {
+    const result = await recomputeInviteProjection(
+      inviteId,
+      "profile-merge-reconciliation",
+      { eventTimestampMs, preserveNewerListSortAt: true },
+    );
+    return { deletes, result, sets };
+  } finally {
+    firebaseAdmin.database = originalDatabase;
+    firebaseAdmin.firestore = originalFirestore;
+  }
+};
 
 test("event cleanup keeps raw merge paths ahead of canonical writes", () => {
   assert.deepEqual(
@@ -354,6 +454,121 @@ test("projection cleanup retries transient reads before returning", async () => 
     ["source", "target"],
   );
 });
+
+test("canonical rebuild uses the freshest matching source projection", async () => {
+  const inviteId = "merge-fallback-invite";
+  const { deletes, result, sets } = await runInviteProjection({
+    eventTimestampMs: 3000,
+    invite: {
+      guestId: "merge-fallback-guest-login",
+      hostId: "merge-fallback-host-login",
+    },
+    inviteId,
+    mergeTargets: {
+      "merge-fallback-source-old": {
+        targetProfileId: "merge-fallback-source-new",
+      },
+      "merge-fallback-source-new": {
+        targetProfileId: "merge-fallback-target",
+      },
+    },
+    profileLinks: {
+      "merge-fallback-guest-login": "merge-fallback-guest",
+      "merge-fallback-host-login": "merge-fallback-source-old",
+    },
+    profiles: {
+      "merge-fallback-target": {
+        custom: { emoji: 11 },
+        username: "Current host",
+      },
+    },
+    projections: {
+      "merge-fallback-source-old": {
+        createdAt: 100,
+        listSortAt: 1000,
+        opponentEmoji: 4,
+        opponentName: "Old guest",
+        ownerLoginId: "merge-fallback-host-login",
+        ownerRole: "host",
+        updatedAt: 1000,
+      },
+      "merge-fallback-source-new": {
+        createdAt: 200,
+        listSortAt: 1500,
+        opponentEmojiId: 9,
+        opponentDisplayName: "Fresh guest",
+        ownerLoginId: "merge-fallback-host-login",
+        ownerRole: "host",
+        updatedAt: 2000,
+      },
+    },
+  });
+  const targetWrite = sets.find(
+    ({ path }) => path === `users/merge-fallback-target/games/${inviteId}`,
+  );
+  assert.ok(targetWrite);
+  assert.equal(targetWrite.data.opponentEmoji, 9);
+  assert.equal(targetWrite.data.opponentName, "Fresh guest");
+  assert.equal(targetWrite.data.listSortAt.toMillis(), 1500);
+  assert.equal(targetWrite.data.createdAt, 200);
+  assert.deepEqual(deletes.sort(), [
+    `users/merge-fallback-source-new/games/${inviteId}`,
+    `users/merge-fallback-source-old/games/${inviteId}`,
+  ]);
+  assert.equal(result.writes, 2);
+  assert.equal(result.deletes, 2);
+});
+
+for (const [status, inviteState] of [
+  ["active", {}],
+  ["ended", { hostRematches: "x" }],
+]) {
+  test(`${status} rebuild keeps its source when canonical metadata is unresolved`, async () => {
+    const inviteId = `merge-blocked-${status}-invite`;
+    const { deletes, result, sets } = await runInviteProjection({
+      eventTimestampMs: 3000,
+      invite: {
+        guestId: `merge-blocked-${status}-guest-login`,
+        hostId: `merge-blocked-${status}-host-login`,
+        ...inviteState,
+      },
+      inviteId,
+      mergeTargets: {
+        [`merge-blocked-${status}-source`]: {
+          targetProfileId: `merge-blocked-${status}-target`,
+        },
+      },
+      profileLinks: {
+        [`merge-blocked-${status}-guest-login`]: `merge-blocked-${status}-guest`,
+        [`merge-blocked-${status}-host-login`]: `merge-blocked-${status}-source`,
+      },
+      profiles: {
+        [`merge-blocked-${status}-target`]: {
+          custom: { emoji: 11 },
+          username: "Current host",
+        },
+      },
+      projections: {
+        [`merge-blocked-${status}-source`]: {
+          opponentName: "Guest",
+          ownerLoginId: `merge-blocked-${status}-host-login`,
+          ownerRole: "host",
+          updatedAt: 2000,
+        },
+      },
+    });
+    assert.deepEqual(deletes, []);
+    assert.equal(
+      sets.some(
+        ({ path }) =>
+          path === `users/merge-blocked-${status}-target/games/${inviteId}`,
+      ),
+      false,
+    );
+    assert.equal(result.deletes, 0);
+    assert.equal(result.skipped, 1);
+  });
+}
 
 test("invite existence reads propagate after bounded retries", async () => {
   let reads = 0;

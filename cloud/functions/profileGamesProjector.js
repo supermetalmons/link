@@ -154,6 +154,74 @@ const readExistingProjectionDocuments = async ({
   return documents;
 };
 
+const getStoredProjectionOwnerRole = (profileId, data) => {
+  const ownerRole = normalizeString(data && data.ownerRole);
+  if (ownerRole === "host" || ownerRole === "guest") {
+    return ownerRole;
+  }
+  const ownerProfileId =
+    normalizeString(data && data.ownerProfileId) || profileId;
+  if (ownerProfileId === normalizeString(data && data.hostProfileId)) {
+    return "host";
+  }
+  if (ownerProfileId === normalizeString(data && data.guestProfileId)) {
+    return "guest";
+  }
+  return null;
+};
+
+const findFreshestSourceProjectionData = ({
+  existingDocs,
+  ownerContext,
+  ownerProfileId,
+  requiresResolvedOpponentEmoji,
+}) => {
+  let freshest = null;
+  let freshestMs = Number.NEGATIVE_INFINITY;
+  for (const existing of existingDocs) {
+    if (existing.profileId === ownerProfileId) {
+      continue;
+    }
+    const data = existing.snapshot.data() || {};
+    const storedOwnerLoginId = normalizeString(data.ownerLoginId);
+    const ownerLoginId = normalizeString(ownerContext.ownerLoginId);
+    if (
+      storedOwnerLoginId &&
+      ownerLoginId &&
+      storedOwnerLoginId !== ownerLoginId
+    ) {
+      continue;
+    }
+    if (
+      (!storedOwnerLoginId || !ownerLoginId) &&
+      getStoredProjectionOwnerRole(existing.profileId, data) !==
+        ownerContext.ownerRole
+    ) {
+      continue;
+    }
+    if (
+      requiresResolvedOpponentEmoji &&
+      getEmojiId(data.opponentEmoji ?? data.opponentEmojiId) === null
+    ) {
+      continue;
+    }
+    const freshnessMs = [
+      data.updatedAt,
+      data.lastEventAt,
+      data.listSortAt,
+      data.createdAt,
+    ].reduce((current, value) => {
+      const millis = readTimestampMillis(value);
+      return Number.isFinite(millis) ? Math.max(current, millis) : current;
+    }, Number.NEGATIVE_INFINITY);
+    if (!freshest || freshnessMs > freshestMs) {
+      freshest = data;
+      freshestMs = freshnessMs;
+    }
+  }
+  return freshest;
+};
+
 const toTimestamp = (millis) => {
   const normalized = Number.isFinite(millis)
     ? Math.floor(Number(millis))
@@ -572,17 +640,16 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
   let deleteCount = 0;
   let skippedCount = 0;
 
-  for (const existing of existingDocs) {
-    if (
-      !shouldProject ||
-      (canPruneOwners && !ownerSet.has(existing.profileId))
-    ) {
-      batch.delete(existing.snapshot.ref);
-      deleteCount += 1;
-    }
-  }
-
   if (!shouldProject || ownerProfileIds.length === 0) {
+    for (const existing of existingDocs) {
+      if (
+        !shouldProject ||
+        (canPruneOwners && !ownerSet.has(existing.profileId))
+      ) {
+        batch.delete(existing.snapshot.ref);
+        deleteCount += 1;
+      }
+    }
     if (!options.dryRun && deleteCount > 0) {
       await batch.commit();
     }
@@ -621,6 +688,7 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
         : null,
     latestMatchId,
   };
+  let canPruneProjectionSources = true;
 
   for (const ownerProfileId of ownerProfileIds) {
     const ownerContext = getOwnerContext({
@@ -640,14 +708,33 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
     const existingDocData = existingDocSnapshot
       ? existingDocSnapshot.data()
       : null;
+    const requiresResolvedOpponentEmoji =
+      status === "active" || status === "ended";
+    const sourceProjectionData = findFreshestSourceProjectionData({
+      existingDocs,
+      ownerContext,
+      ownerProfileId,
+      requiresResolvedOpponentEmoji,
+    });
 
     const opponentProfileSummary = ownerContext.opponentProfileId
       ? await readProfileSummary(ownerContext.opponentProfileId)
       : null;
+    const existingOpponentName = normalizeString(
+      existingDocData
+        ? (existingDocData.opponentName ?? existingDocData.opponentDisplayName)
+        : null,
+    );
+    const sourceOpponentName = normalizeString(
+      sourceProjectionData
+        ? (sourceProjectionData.opponentName ??
+            sourceProjectionData.opponentDisplayName)
+        : null,
+    );
     const opponentName =
       opponentProfileSummary && typeof opponentProfileSummary.name === "string"
         ? opponentProfileSummary.name
-        : null;
+        : existingOpponentName || sourceOpponentName;
     const opponentEmojiFromProfile =
       opponentProfileSummary &&
       opponentProfileSummary.emoji !== null &&
@@ -674,22 +761,24 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
         ? (existingDocData.opponentEmoji ?? existingDocData.opponentEmojiId)
         : null,
     );
+    const sourceOpponentEmoji = getEmojiId(
+      sourceProjectionData
+        ? (sourceProjectionData.opponentEmoji ??
+            sourceProjectionData.opponentEmojiId)
+        : null,
+    );
     const opponentEmoji =
       opponentEmojiFromProfile !== null
         ? opponentEmojiFromProfile
         : opponentEmojiFromLogin !== null
           ? opponentEmojiFromLogin
-          : existingOpponentEmoji;
+          : existingOpponentEmoji !== null
+            ? existingOpponentEmoji
+            : sourceOpponentEmoji;
 
-    const requiresResolvedOpponentEmoji =
-      status === "active" || status === "ended";
     if (requiresResolvedOpponentEmoji && opponentEmoji === null) {
-      if (existingDocSnapshot) {
-        batch.delete(ownerDocRef);
-        deleteCount += 1;
-      } else {
-        skippedCount += 1;
-      }
+      canPruneProjectionSources = false;
+      skippedCount += 1;
       continue;
     }
 
@@ -730,21 +819,34 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
       continue;
     }
 
-    const existingListSortMs = existingDocData
+    const canonicalListSortMs = existingDocData
       ? readTimestampMillis(existingDocData.listSortAt)
       : null;
-    const nextListSortMs = pickListSortMillis({
-      options,
-      status,
-      automatchData,
-      nowMs,
-      existingListSortMs,
-    });
+    const sourceListSortMs = readTimestampMillis(
+      sourceProjectionData?.listSortAt,
+    );
+    const existingListSortMs = Number.isFinite(canonicalListSortMs)
+      ? canonicalListSortMs
+      : sourceListSortMs;
+    const nextListSortMs =
+      !Number.isFinite(canonicalListSortMs) && Number.isFinite(sourceListSortMs)
+        ? sourceListSortMs
+        : pickListSortMillis({
+            options,
+            status,
+            automatchData,
+            nowMs,
+            existingListSortMs,
+          });
 
-    const existingCreatedAt = existingDocData
-      ? existingDocData.createdAt
-      : null;
-    const existingEndedAt = existingDocData ? existingDocData.endedAt : null;
+    const existingCreatedAt =
+      (existingDocData && existingDocData.createdAt) ||
+      (sourceProjectionData && sourceProjectionData.createdAt) ||
+      null;
+    const existingEndedAt =
+      (existingDocData && existingDocData.endedAt) ||
+      (sourceProjectionData && sourceProjectionData.endedAt) ||
+      null;
 
     const projectionDocData = {
       ...commonProjection,
@@ -770,6 +872,15 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
 
     batch.set(ownerDocRef, projectionDocData, { merge: true });
     setCount += 1;
+  }
+
+  if (canPruneOwners && canPruneProjectionSources) {
+    for (const existing of existingDocs) {
+      if (!ownerSet.has(existing.profileId)) {
+        batch.delete(existing.snapshot.ref);
+        deleteCount += 1;
+      }
+    }
   }
 
   if (!options.dryRun && (setCount > 0 || deleteCount > 0)) {
