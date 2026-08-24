@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AuthMethodKey, AuthProfileResponse } from "@mons/shared/auth";
+import { buildProfileEventPrizeMergeCopies } from "../../../functions/eventPrizeAwards.js";
+import {
+  getEventPrizeWithdrawalPath,
+  isCompletedEventPrizeWithdrawal,
+  isMatchingProfileEventPrizeAssignment,
+} from "../../../functions/eventPrizeWithdrawalState.js";
 import {
   AUTH_FIRESTORE_DATABASE_ROOT,
   type AuthFirestoreClient,
@@ -11,6 +17,7 @@ import {
   encodeFields,
 } from "../src/authFirestore.ts";
 import { createAuthIdentityService } from "../src/authIdentity.ts";
+import { createAuthMergeRecovery } from "../src/authMergeRecovery.ts";
 import type { FirebaseAuthAdminClient } from "../src/firebaseAuthAdmin.ts";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
 import { getMethodKey } from "../src/authPolicy.ts";
@@ -192,6 +199,72 @@ function dependencies(firestore: AuthFirestoreClient) {
 }
 
 const env = TELEGRAM_TEST_ENV as Env;
+
+test("checkpoints bounded prize recovery pages", async () => {
+  const memory = memoryFirestore([
+    {
+      collection: "users",
+      id: "target-profile",
+      fields: {
+        pendingMergeGameCopySourceProfileId: "source-profile",
+        pendingMergeGameCopyOpId: "merge-operation",
+      },
+    },
+  ]);
+  const deps = dependencies(memory.client);
+  deps.rtdbValues.set("profileEventPrizes/source-profile", {
+    FRkdorMWaYW: {
+      eventId: "FRkdorMWaYW",
+      profileId: "source-profile",
+      place: 1,
+      prizeId: "1866",
+      assignedAtMs: 1,
+    },
+    NN3eRzoZo80: {
+      eventId: "NN3eRzoZo80",
+      profileId: "source-profile",
+      place: 2,
+      prizeId: "1111",
+      assignedAtMs: 2,
+    },
+  });
+  const recovery = createAuthMergeRecovery({
+    buildPrizeCopies: buildProfileEventPrizeMergeCopies,
+    durableFirestore: memory.client,
+    firestore: memory.client,
+    getWithdrawalPath: getEventPrizeWithdrawalPath,
+    isCompletedWithdrawal: isCompletedEventPrizeWithdrawal,
+    isMatchingAssignment: isMatchingProfileEventPrizeAssignment,
+    mergeGameBacklogName: (opId) =>
+      authDocumentName("authMergeGameBacklog", opId),
+    now: () => 123,
+    prizePageSize: 1,
+    rtdb: deps.rtdb,
+  });
+  const input = {
+    opId: "merge-operation",
+    sourceProfileId: "source-profile",
+    targetName: authDocumentName("users", "target-profile"),
+    targetProfileId: "target-profile",
+  };
+  assert.equal(await recovery.reconcileProfilePrizes(input), false);
+  assert.equal(
+    memory.documents.get(input.targetName)?.fields.pendingMergePrizeCopyCursor,
+    "FRkdorMWaYW",
+  );
+  assert.equal(await recovery.reconcileProfilePrizes(input), true);
+  assert.equal(
+    memory.documents.get(input.targetName)?.fields
+      .pendingMergePrizeCopyCompletedOpId,
+    "merge-operation",
+  );
+  assert.ok(
+    deps.rtdbValues.get("profileEventPrizes/target-profile/FRkdorMWaYW"),
+  );
+  assert.ok(
+    deps.rtdbValues.get("profileEventPrizes/target-profile/NN3eRzoZo80"),
+  );
+});
 
 test("consumes an exact auth intent once inside a transaction", async () => {
   const nowMs = 1_000_000;
@@ -1365,6 +1438,9 @@ test("merges conflicting profiles and finalizes game cleanup after recovery dela
         win: [],
         custom: { emoji: 3, aura: "   ", completedProblems: ["one"] },
         mining: { lastRockDate: null, materials: {} },
+        pendingMergePrizeCopyCursor: "stale-event",
+        pendingMergePrizeCopyCompletedAtMs: 1,
+        pendingMergePrizeCopyCompletedOpId: "stale-operation",
       },
     },
     {
@@ -1492,6 +1568,18 @@ test("merges conflicting profiles and finalizes game cleanup after recovery dela
   );
   assert.equal(deps.claims.get("login-1")?.profileId, "target-profile");
   assert.equal(deps.claims.get("login-2")?.profileId, "target-profile");
+  const mergedTarget = memory.documents.get(
+    authDocumentName("users", "target-profile"),
+  );
+  assert.equal(mergedTarget?.fields.pendingMergePrizeCopyCursor, undefined);
+  assert.equal(
+    mergedTarget?.fields.pendingMergePrizeCopyCompletedAtMs,
+    undefined,
+  );
+  assert.equal(
+    mergedTarget?.fields.pendingMergePrizeCopyCompletedOpId,
+    undefined,
+  );
   assert.equal(
     memory.documents.get(authDocumentName("users", "target-profile"))?.fields
       .pendingMergeGameCopySourceProfileId,
@@ -1499,6 +1587,8 @@ test("merges conflicting profiles and finalizes game cleanup after recovery dela
   );
   nowMs += 60_000;
   assert.equal(await service.recoverPendingProfile("target-profile"), true);
+  assert.equal(deps.claims.get("login-1")?.profileId, "target-profile");
+  assert.equal(deps.claims.get("login-2")?.profileId, "target-profile");
   assert.equal(
     memory.documents.has(authDocumentName("users", "source-profile")),
     false,
@@ -1515,10 +1605,8 @@ test("merges conflicting profiles and finalizes game cleanup after recovery dela
     false,
   );
   assert.deepEqual(deps.rtdbTransactions, [
-    "profileEventPrizes/target-profile/NN3eRzoZo80",
     "profileEventPrizes/target-profile/FRkdorMWaYW",
     "profileEventPrizes/target-profile/NN3eRzoZo80",
-    "profileEventPrizes/target-profile/FRkdorMWaYW",
   ]);
   assert.deepEqual(
     deps.rtdbValues.get("profileEventPrizes/target-profile/FRkdorMWaYW"),
@@ -1699,7 +1787,13 @@ test("repairs prizes when a concurrent merge already deleted the source", async 
     {
       collection: "users",
       id: "target-profile",
-      fields: { logins: ["login-1"], eth },
+      fields: {
+        logins: ["login-1"],
+        eth,
+        pendingMergePrizeCopyCursor: "stale-event",
+        pendingMergePrizeCopyCompletedAtMs: 1,
+        pendingMergePrizeCopyCompletedOpId: "stale-operation",
+      },
     },
     {
       collection: "users",
@@ -1765,6 +1859,11 @@ test("repairs prizes when a concurrent merge already deleted the source", async 
   assert.equal(response.profileId, "target-profile");
   assert.equal(
     memory.documents.get(authDocumentName("users", "target-profile"))?.fields
+      .pendingMergePrizeCopyCursor,
+    undefined,
+  );
+  assert.equal(
+    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
       .pendingMergeGameCopySourceProfileId,
     "source-profile",
   );
@@ -1778,6 +1877,16 @@ test("repairs prizes when a concurrent merge already deleted the source", async 
     false,
   );
   nowMs += 60_000;
+  const pendingReplay = await service.peekVerifyReplay(
+    "missing-source-merge-operation",
+    "sol",
+    "login-1",
+  );
+  assert.equal(pendingReplay?.ok, true);
+  assert.equal(
+    deps.rtdbValues.get(`profileEventPrizes/target-profile/${eventId}`),
+    undefined,
+  );
   const replay = await service.peekVerifyReplay(
     "missing-source-merge-operation",
     "sol",
@@ -1908,9 +2017,10 @@ test("removes a copied prize after its withdrawal completes", async () => {
     }
     return getPath(path, query, signal);
   };
+  let nowMs = 5_600_000;
   const service = createAuthIdentityService(env, {
     ...deps,
-    now: () => 5_600_000,
+    now: () => nowMs,
   });
   const response = await service.linkVerifiedMethod({
     uid: "login-1",
@@ -1923,6 +2033,9 @@ test("removes a copied prize after its withdrawal completes", async () => {
     opId: "withdrawn-prize-merge",
   });
   assert.equal(response.ok, true);
+  assert.equal(withdrawalReads, 0);
+  nowMs += 60_000;
+  assert.equal(await service.recoverPendingProfile("target-profile"), true);
   assert.equal(withdrawalReads, 2);
   assert.equal(
     deps.rtdbValues.get(`profileEventPrizes/target-profile/${eventId}`),
@@ -2026,6 +2139,16 @@ test("clears retired source claim markers before pending prize recovery", async 
     },
   ]);
   nowMs += 60_000;
+  const pendingReplay = await service.peekVerifyReplay(
+    "merge-prize-recovery",
+    "sol",
+    "login-1",
+  );
+  assert.equal(pendingReplay?.ok, true);
+  assert.equal(
+    memory.documents.has(authDocumentName("users", "source-profile")),
+    true,
+  );
   const replay = await service.peekVerifyReplay(
     "merge-prize-recovery",
     "sol",

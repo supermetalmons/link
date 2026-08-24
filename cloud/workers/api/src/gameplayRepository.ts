@@ -14,6 +14,13 @@ import {
   type FirebaseRtdbTransactionResult,
 } from "./firebaseRtdb.ts";
 import { createGoogleAccessToken } from "./googleAuth.ts";
+import {
+  createFirestoreRestCodec,
+  createFirestoreRestTransport,
+  isFirestorePreconditionConflict,
+  toFirestoreRecord,
+  type FirestoreRestDocument,
+} from "./firestoreRest.ts";
 
 const FIRESTORE_PROJECT_ID = "mons-link";
 const FIRESTORE_DATABASE_ID = "(default)";
@@ -25,11 +32,7 @@ const MAX_FIRESTORE_BODY_BYTES = 64 * 1024;
 const MAX_RATING_FIRESTORE_BODY_BYTES = 256 * 1024;
 const MAX_RATING_TRANSACTION_ATTEMPTS = 5;
 
-type FirestoreDocument = {
-  fields: Record<string, unknown>;
-  name: string;
-  updateTime?: string;
-};
+type FirestoreDocument = FirestoreRestDocument;
 
 export type NavigationGameDocument = {
   status: string | null;
@@ -245,157 +248,30 @@ export class GameplayRepositoryFailure extends Error {
   }
 }
 
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
+const toRecord = toFirestoreRecord;
+const firestoreCodec = createFirestoreRestCodec(
+  () => new GameplayRepositoryFailure(),
+);
+const isPreconditionConflict = isFirestorePreconditionConflict;
 
 function parseFirestoreDocument(value: unknown): FirestoreDocument {
-  const document = toRecord(value);
-  const fields =
-    document?.fields === undefined ? {} : toRecord(document.fields);
-  if (typeof document?.name !== "string" || !fields) {
-    throw new GameplayRepositoryFailure();
-  }
-  const updateTime =
-    typeof document.updateTime === "string" && document.updateTime.trim()
-      ? document.updateTime.trim()
-      : undefined;
-  return { name: document.name, fields, ...(updateTime ? { updateTime } : {}) };
+  return firestoreCodec.parseDocument(value);
 }
 
 function parseFirestoreDocuments(value: unknown): FirestoreDocument[] {
-  if (!Array.isArray(value)) {
-    throw new GameplayRepositoryFailure();
-  }
-  const documents: FirestoreDocument[] = [];
-  for (const entry of value) {
-    const result = toRecord(entry);
-    if (result?.document !== undefined) {
-      documents.push(parseFirestoreDocument(result.document));
-    }
-  }
-  return documents;
-}
-
-function decodeFirestoreValue(value: unknown): unknown {
-  const encoded = toRecord(value);
-  if (!encoded) {
-    throw new GameplayRepositoryFailure();
-  }
-  if (typeof encoded.stringValue === "string") {
-    return encoded.stringValue;
-  }
-  if (typeof encoded.booleanValue === "boolean") {
-    return encoded.booleanValue;
-  }
-  if (encoded.nullValue !== undefined) {
-    return null;
-  }
-  if (
-    typeof encoded.integerValue === "string" ||
-    typeof encoded.integerValue === "number"
-  ) {
-    const parsed = Number(encoded.integerValue);
-    if (!Number.isFinite(parsed)) {
-      throw new GameplayRepositoryFailure();
-    }
-    return parsed;
-  }
-  if (typeof encoded.doubleValue === "number") {
-    return encoded.doubleValue;
-  }
-  const arrayValue = toRecord(encoded.arrayValue);
-  if (arrayValue) {
-    const values = arrayValue.values;
-    if (values === undefined) {
-      return [];
-    }
-    if (!Array.isArray(values)) {
-      throw new GameplayRepositoryFailure();
-    }
-    return values.map(decodeFirestoreValue);
-  }
-  const mapValue = toRecord(encoded.mapValue);
-  if (mapValue) {
-    const fields =
-      mapValue.fields === undefined ? {} : toRecord(mapValue.fields);
-    if (!fields) {
-      throw new GameplayRepositoryFailure();
-    }
-    return Object.fromEntries(
-      Object.entries(fields).map(([key, entry]) => [
-        key,
-        decodeFirestoreValue(entry),
-      ]),
-    );
-  }
-  throw new GameplayRepositoryFailure();
+  return firestoreCodec.parseDocuments(value);
 }
 
 function decodeFirestoreFields(
   fields: Record<string, unknown>,
 ): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(fields).map(([key, value]) => [
-      key,
-      decodeFirestoreValue(value),
-    ]),
-  );
-}
-
-function encodeFirestoreValue(value: unknown): Record<string, unknown> {
-  if (value === null) {
-    return { nullValue: null };
-  }
-  if (typeof value === "string") {
-    return { stringValue: value };
-  }
-  if (typeof value === "boolean") {
-    return { booleanValue: value };
-  }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Number.isSafeInteger(value)
-      ? { integerValue: String(value) }
-      : { doubleValue: value };
-  }
-  if (Array.isArray(value)) {
-    return {
-      arrayValue: { values: value.map((entry) => encodeFirestoreValue(entry)) },
-    };
-  }
-  const record = toRecord(value);
-  if (record) {
-    return {
-      mapValue: {
-        fields: Object.fromEntries(
-          Object.entries(record).map(([key, entry]) => [
-            key,
-            encodeFirestoreValue(entry),
-          ]),
-        ),
-      },
-    };
-  }
-  throw new GameplayRepositoryFailure();
+  return firestoreCodec.decodeFields(fields);
 }
 
 function encodeFirestoreFields(
   fields: Record<string, unknown>,
 ): Record<string, unknown> {
-  return Object.fromEntries(
-    Object.entries(fields).map(([key, value]) => [
-      key,
-      encodeFirestoreValue(value),
-    ]),
-  );
-}
-
-function isPreconditionConflict(value: unknown): boolean {
-  const body = toRecord(value);
-  const error = toRecord(body?.error);
-  return error?.status === "ABORTED" || error?.status === "FAILED_PRECONDITION";
+  return firestoreCodec.encodeFields(fields);
 }
 
 function documentPath(profileId: string, inviteId?: string): string {
@@ -1049,85 +925,30 @@ export function createRatingRepository(
     Number.isInteger(maxTransactionAttempts) && maxTransactionAttempts > 0
       ? maxTransactionAttempts
       : MAX_RATING_TRANSACTION_ATTEMPTS;
-  let accessToken: Promise<string> | null = null;
-  const token = () => {
-    accessToken ||= getAccessToken(env, {
-      credentials: {
-        email: env.RATING_SERVICE_ACCOUNT_EMAIL,
-        privateKeyPem: env.RATING_SERVICE_ACCOUNT_PRIVATE_KEY,
-      },
-      fetcher,
-      now,
-      timeoutMs,
-    }).catch(() => {
-      throw new GameplayRepositoryFailure();
-    });
-    return accessToken;
-  };
-  const request = async (
-    input: string,
-    init: RequestInit,
-  ): Promise<Response> => {
-    const headers = new Headers(init.headers);
-    headers.set("Authorization", `Bearer ${await token()}`);
-    try {
-      return await fetcher(input, {
-        ...init,
-        headers,
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-    } catch {
-      throw new GameplayRepositoryFailure();
-    }
-  };
-  const readJson = async (response: Response): Promise<unknown> => {
-    if (!response.ok) {
-      await cancelResponseBody(response);
-      throw new GameplayRepositoryFailure();
-    }
-    return readBoundedJsonValue(
-      response,
-      MAX_RATING_FIRESTORE_BODY_BYTES,
-      () => new GameplayRepositoryFailure(),
-    );
-  };
-  const postJson = (input: string, body: unknown) =>
-    request(input, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+  const transport = createFirestoreRestTransport({
+    createFailure: () => new GameplayRepositoryFailure(),
+    documentsRoot: FIRESTORE_DOCUMENTS_ROOT,
+    fetcher,
+    getAccessToken: () =>
+      getAccessToken(env, {
+        credentials: {
+          email: env.RATING_SERVICE_ACCOUNT_EMAIL,
+          privateKeyPem: env.RATING_SERVICE_ACCOUNT_PRIVATE_KEY,
+        },
+        fetcher,
+        now,
+        timeoutMs,
+      }),
+    maxBodyBytes: MAX_RATING_FIRESTORE_BODY_BYTES,
+    timeoutMs,
+  });
+  const { post: postJson, readJson, request } = transport;
   const operationName = (operationId: string) =>
     `${FIRESTORE_DOCUMENT_NAME_ROOT}/ratingUpdates/${operationId}`;
   const profileName = (profileId: string) =>
     `${FIRESTORE_DOCUMENT_NAME_ROOT}/users/${profileId}`;
-  const beginTransaction = async (
-    retryTransaction?: string,
-  ): Promise<string> => {
-    const response = await postJson(
-      `${FIRESTORE_DOCUMENTS_ROOT}:beginTransaction`,
-      {
-        options: {
-          readWrite: retryTransaction ? { retryTransaction } : {},
-        },
-      },
-    );
-    const body = toRecord(await readJson(response));
-    const transaction =
-      typeof body?.transaction === "string" ? body.transaction.trim() : "";
-    if (!transaction) {
-      throw new GameplayRepositoryFailure();
-    }
-    return transaction;
-  };
-  const rollback = async (transaction: string): Promise<void> => {
-    try {
-      const response = await postJson(`${FIRESTORE_DOCUMENTS_ROOT}:rollback`, {
-        transaction,
-      });
-      await cancelResponseBody(response);
-    } catch {}
-  };
+  const beginTransaction = transport.beginTransaction;
+  const rollback = transport.rollback;
   const batchGet = async (
     transaction: string,
     names: string[],
@@ -1221,33 +1042,7 @@ export function createRatingRepository(
   const commit = async (
     transaction: string,
     writes: Array<Record<string, unknown>>,
-  ): Promise<"committed" | "conflict"> => {
-    const response = await postJson(`${FIRESTORE_DOCUMENTS_ROOT}:commit`, {
-      writes,
-      transaction,
-    });
-    if (response.ok) {
-      await cancelResponseBody(response);
-      return "committed";
-    }
-    if (response.status === 409 || response.status === 412) {
-      await cancelResponseBody(response);
-      return "conflict";
-    }
-    if (response.status === 400) {
-      const body = await readBoundedJsonValue(
-        response,
-        MAX_RATING_FIRESTORE_BODY_BYTES,
-        () => new GameplayRepositoryFailure(),
-      );
-      if (isPreconditionConflict(body)) {
-        return "conflict";
-      }
-      throw new GameplayRepositoryFailure();
-    }
-    await cancelResponseBody(response);
-    throw new GameplayRepositoryFailure();
-  };
+  ): Promise<"committed" | "conflict"> => transport.commit(writes, transaction);
 
   return {
     getRtdbPath: gameplayRepository.getRtdbPath,

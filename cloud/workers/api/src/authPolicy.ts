@@ -18,10 +18,17 @@ export const PENDING_CLAIM_SYNC_FIELD_PATHS = [
   "pendingClaimSyncUpdatedAtMs",
 ] as const;
 
+export const PENDING_MERGE_PRIZE_COPY_FIELD_PATHS = [
+  "pendingMergePrizeCopyCursor",
+  "pendingMergePrizeCopyCompletedAtMs",
+  "pendingMergePrizeCopyCompletedOpId",
+] as const;
+
 export const PENDING_MERGE_GAME_COPY_FIELD_PATHS = [
   "pendingMergeGameCopySourceProfileId",
   "pendingMergeGameCopyOpId",
   "pendingMergeGameCopyUpdatedAtMs",
+  ...PENDING_MERGE_PRIZE_COPY_FIELD_PATHS,
 ] as const;
 
 export function cleanString(value: unknown): string {

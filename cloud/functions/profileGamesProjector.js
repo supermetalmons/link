@@ -1321,7 +1321,7 @@ const processProfileLinkCatchup = async (
   let failed = 0;
   let didConverge = false;
   let convergenceAttempts = 0;
-  const successfullyRecomputedInviteIds = new Set();
+  let successfullyRecomputedInviteIds = new Set();
   for (
     let attempt = 0;
     attempt < PROFILE_LINK_RECONCILE_ATTEMPTS;
@@ -1331,6 +1331,9 @@ const processProfileLinkCatchup = async (
     observedProfileIds.add(profileId);
     const cleanupProfileIds = Array.from(observedProfileIds);
     let attemptedThisRound = 0;
+    let roundProcessed = 0;
+    let roundFailed = 0;
+    const roundSuccessfulInviteIds = new Set();
     await processWithConcurrency(
       inviteIds,
       PROFILE_LINK_CATCHUP_CONCURRENCY,
@@ -1349,10 +1352,10 @@ const processProfileLinkCatchup = async (
               preserveNewerListSortAt: true,
             },
           );
-          successfullyRecomputedInviteIds.add(inviteId);
-          processed += 1;
+          roundSuccessfulInviteIds.add(inviteId);
+          roundProcessed += 1;
         } catch (error) {
-          failed += 1;
+          roundFailed += 1;
           console.error("projector:profile-link-catchup:recompute-failed", {
             loginUid,
             profileId,
@@ -1363,6 +1366,9 @@ const processProfileLinkCatchup = async (
       },
       shouldContinue,
     );
+    processed = roundProcessed;
+    failed = roundFailed;
+    successfullyRecomputedInviteIds = roundSuccessfulInviteIds;
     if (attemptedThisRound !== inviteIds.length) {
       break;
     }

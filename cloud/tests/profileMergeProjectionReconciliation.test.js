@@ -9,6 +9,7 @@ const {
 const {
   buildEventProjectionOwnerPlan,
   reconcileLiveEventProjection,
+  resolveProfilePaths,
 } = require("../functions/eventProjector");
 const {
   buildInviteProjectionOwnerPlan,
@@ -44,6 +45,34 @@ test("event cleanup keeps raw merge paths ahead of canonical writes", () => {
       afterOwnerProfileIds: ["target"],
       allOwnerProfileIds: ["source", "middle", "target"],
     },
+  );
+});
+
+test("event owner paths are deduplicated and concurrency bounded", async () => {
+  const ids = Array.from({ length: 12 }, (_, index) => `profile-${index}`);
+  const reads = new Map();
+  let active = 0;
+  let maxActive = 0;
+  const firestore = {
+    collection: () => ({
+      doc: (profileId) => ({
+        get: async () => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          reads.set(profileId, (reads.get(profileId) || 0) + 1);
+          await new Promise((resolve) => setImmediate(resolve));
+          active -= 1;
+          return { exists: false };
+        },
+      }),
+    }),
+  };
+  const paths = await resolveProfilePaths(firestore, [...ids, ...ids]);
+  assert.equal(paths.size, ids.length);
+  assert.equal(maxActive, 10);
+  assert.deepEqual(
+    Array.from(reads.values()),
+    ids.map(() => 1),
   );
 });
 
@@ -178,6 +207,34 @@ test("profile-link catchup converges and cleans an intermediate live owner", asy
     ["event-profile", "initial-live-profile"],
     ["event-profile", "initial-live-profile", "final-live-profile"],
   ]);
+});
+
+test("profile-link catchup ignores failures from a superseded owner", async () => {
+  let liveProfileId = "initial-live-profile";
+  let attempts = 0;
+  await processProfileLinkCatchup(
+    {
+      eventLabel: "test",
+      loginUid: "login-1",
+      profileId: "event-profile",
+    },
+    {
+      readCurrentProfileLink: async () => liveProfileId,
+      readMatches: async () => ({
+        exists: () => true,
+        val: () => ({ "match-1": {} }),
+      }),
+      recomputeInviteProjection: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          liveProfileId = "final-live-profile";
+          throw new Error("superseded-owner-failure");
+        }
+      },
+      resolveInviteIdFromMatchId: async () => "invite-1",
+    },
+  );
+  assert.equal(attempts, 2);
 });
 
 const createProjectionFirestore = ({ games, targets }) => {

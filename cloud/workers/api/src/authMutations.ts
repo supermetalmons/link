@@ -158,7 +158,10 @@ async function executeAuthMutation(
   const payload = await body(request);
   const service =
     dependencies.identityService ||
-    createAuthIdentityService(env, { signal: operationSignal });
+    createAuthIdentityService(env, {
+      deferRecovery: true,
+      signal: operationSignal,
+    });
   if (pathname === "/auth/methods/sol/verify") {
     if (!isSolanaAuthVerificationRequest(payload)) {
       invalidRequest();

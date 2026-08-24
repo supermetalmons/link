@@ -19,6 +19,7 @@ const {
 } = require("./events/eventProjectionModel");
 const MAX_BATCH_WRITES = 450;
 const EVENT_PROJECTION_RECONCILE_ATTEMPTS = 3;
+const PROFILE_PATH_RESOLVE_CONCURRENCY = 10;
 const READ_RETRY_ATTEMPTS = 2;
 const READ_RETRY_DELAY_MS = 25;
 
@@ -63,6 +64,29 @@ const resolveProfilePath = (firestore, profileId) =>
       return snapshot.exists ? snapshot.data() : null;
     },
   });
+
+const resolveProfilePaths = async (firestore, profileIds) => {
+  const ids = Array.from(new Set(profileIds));
+  const paths = new Map();
+  let index = 0;
+  const workers = Array.from(
+    { length: Math.min(PROFILE_PATH_RESOLVE_CONCURRENCY, ids.length) },
+    async () => {
+      while (index < ids.length) {
+        const currentIndex = index;
+        index += 1;
+        const profileId = ids[currentIndex];
+        paths.set(profileId, await resolveProfilePath(firestore, profileId));
+      }
+    },
+  );
+  const results = await Promise.allSettled(workers);
+  const failure = results.find((result) => result.status === "rejected");
+  if (failure) {
+    throw failure.reason;
+  }
+  return paths;
+};
 
 const buildEventProjectionOwnerPlan = ({
   afterOwnerPaths,
@@ -118,20 +142,16 @@ async function projectEvent(eventId, beforeData, afterData, options = {}) {
         .filter(Boolean),
     ),
   );
-  const [beforeOwnerPaths, afterOwnerPaths, cleanupOwnerPaths] =
-    await Promise.all(
-      [
-        rawBeforeOwnerProfileIds,
-        rawAfterOwnerProfileIds,
-        cleanupOwnerProfileIds,
-      ].map((ownerProfileIds) =>
-        Promise.all(
-          ownerProfileIds.map((profileId) =>
-            resolveProfilePath(firestore, profileId),
-          ),
-        ),
-      ),
-    );
+  const resolvedPaths = await resolveProfilePaths(firestore, [
+    ...rawBeforeOwnerProfileIds,
+    ...rawAfterOwnerProfileIds,
+    ...cleanupOwnerProfileIds,
+  ]);
+  const pathsFor = (profileIds) =>
+    profileIds.map((profileId) => resolvedPaths.get(profileId) || [profileId]);
+  const beforeOwnerPaths = pathsFor(rawBeforeOwnerProfileIds);
+  const afterOwnerPaths = pathsFor(rawAfterOwnerProfileIds);
+  const cleanupOwnerPaths = pathsFor(cleanupOwnerProfileIds);
   const cleanupProfileIds = [
     ...(options.cleanupProfileIds || []),
     ...cleanupOwnerPaths.flat(),
@@ -302,4 +322,5 @@ module.exports = {
   onEventWritten,
   projectEvent,
   reconcileLiveEventProjection,
+  resolveProfilePaths,
 };
