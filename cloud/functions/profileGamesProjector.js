@@ -552,6 +552,8 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
       reason,
       skipped: true,
       skipReason: "invalid-invite-id",
+      sourceCleanupSafe: false,
+      blockedReason: "invalid-invite-id",
     };
   }
 
@@ -632,8 +634,15 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
   });
 
   const ownerSet = new Set(ownerProfileIds);
-  const canPruneOwners =
-    (!hostLoginId || !!hostProfileId) && (!guestLoginId || !!guestProfileId);
+  const hasUnresolvedOwner = Boolean(
+    shouldProject &&
+    (ownerProfileIds.length === 0 ||
+      !hostLoginId ||
+      !hostProfileId ||
+      (guestLoginId && !guestProfileId)),
+  );
+  let sourceCleanupSafe = !hasUnresolvedOwner;
+  let blockedReason = hasUnresolvedOwner ? "unresolved-owner-profile" : null;
   const batch = firestore.batch();
 
   let setCount = 0;
@@ -641,11 +650,8 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
   let skippedCount = 0;
 
   if (!shouldProject || ownerProfileIds.length === 0) {
-    for (const existing of existingDocs) {
-      if (
-        !shouldProject ||
-        (canPruneOwners && !ownerSet.has(existing.profileId))
-      ) {
+    if (sourceCleanupSafe) {
+      for (const existing of existingDocs) {
         batch.delete(existing.snapshot.ref);
         deleteCount += 1;
       }
@@ -659,7 +665,8 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
       reason,
       shouldProject,
       ownerProfileIds,
-      canPruneOwners,
+      sourceCleanupSafe,
+      ...(blockedReason ? { blockedReason } : {}),
       writes: 0,
       deletes: deleteCount,
       skipped: 0,
@@ -688,8 +695,6 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
         : null,
     latestMatchId,
   };
-  let canPruneProjectionSources = true;
-
   for (const ownerProfileId of ownerProfileIds) {
     const ownerContext = getOwnerContext({
       ownerProfileId,
@@ -777,7 +782,8 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
             : sourceOpponentEmoji;
 
     if (requiresResolvedOpponentEmoji && opponentEmoji === null) {
-      canPruneProjectionSources = false;
+      sourceCleanupSafe = false;
+      blockedReason ||= "unresolved-opponent-emoji";
       skippedCount += 1;
       continue;
     }
@@ -874,7 +880,7 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
     setCount += 1;
   }
 
-  if (canPruneOwners && canPruneProjectionSources) {
+  if (sourceCleanupSafe) {
     for (const existing of existingDocs) {
       if (!ownerSet.has(existing.profileId)) {
         batch.delete(existing.snapshot.ref);
@@ -893,7 +899,8 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
     reason,
     shouldProject,
     ownerProfileIds,
-    canPruneOwners,
+    sourceCleanupSafe,
+    ...(blockedReason ? { blockedReason } : {}),
     writes: setCount,
     deletes: deleteCount,
     skipped: skippedCount,
@@ -1119,21 +1126,19 @@ const reconcileProfileMergeProjections = async (
     Number.isSafeInteger(requestedPageSize) && requestedPageSize > 0
       ? Math.min(requestedPageSize, PROFILE_MERGE_RECONCILE_PAGE_SIZE)
       : PROFILE_MERGE_RECONCILE_PAGE_SIZE;
-  const database = dryRun ? null : dependencies.database || admin.database();
-  const eventProjectorImpl = dryRun ? null : require("./eventProjector");
-  const projectEventImpl = dryRun
-    ? null
-    : dependencies.projectEvent || eventProjectorImpl.projectEvent;
-  const reconcileLiveEventProjectionImpl = dryRun
-    ? null
-    : dependencies.reconcileLiveEventProjection ||
-      eventProjectorImpl.reconcileLiveEventProjection;
-  const recomputeInviteProjectionImpl = dryRun
-    ? null
-    : dependencies.recomputeInviteProjection || recomputeInviteProjection;
+  const database = dependencies.database;
+  const eventProjectorImpl = require("./eventProjector");
+  const projectEventImpl =
+    dependencies.projectEvent || eventProjectorImpl.projectEvent;
+  const reconcileLiveEventProjectionImpl =
+    dependencies.reconcileLiveEventProjection ||
+    eventProjectorImpl.reconcileLiveEventProjection;
+  const recomputeInviteProjectionImpl =
+    dependencies.recomputeInviteProjection || recomputeInviteProjection;
   let scannedGameDocuments = 0;
   let projectionCount = 0;
   let pagesScanned = 0;
+  const blockedProjections = new Map();
   const scannedProfileIds =
     dependencies.scannedProfileIds instanceof Set
       ? dependencies.scannedProfileIds
@@ -1158,6 +1163,7 @@ const reconcileProfileMergeProjections = async (
       scannedProfileIds?.add(profileId);
       continue;
     }
+    let profileBlocked = false;
     const terminalId = terminalSnapshot.docs[0].id;
     let cursor = null;
     while (true) {
@@ -1188,49 +1194,64 @@ const reconcileProfileMergeProjections = async (
         }
       }
       projectionCount += projections.size;
-      if (!dryRun) {
-        await processWithConcurrency(
-          Array.from(projections.values()),
-          PROFILE_MERGE_RECONCILE_CONCURRENCY,
-          async (projection) => {
-            if (projection.entityType === "event") {
-              await reconcileLiveEventProjectionImpl(
-                projection.id,
-                null,
-                null,
-                { cleanupProfileIds: profileIds },
-                {
-                  projectEvent: projectEventImpl,
-                  readLiveEvent: async () => {
-                    const eventSnapshot = await database
-                      .ref(`events/${projection.id}`)
-                      .once("value");
-                    return eventSnapshot.exists() ? eventSnapshot.val() : null;
-                  },
-                },
-              );
-              return;
-            }
-            await recomputeInviteProjectionImpl(
+      await processWithConcurrency(
+        Array.from(projections.values()),
+        PROFILE_MERGE_RECONCILE_CONCURRENCY,
+        async (projection) => {
+          if (projection.entityType === "event") {
+            await reconcileLiveEventProjectionImpl(
               projection.id,
-              "profile-merge-reconciliation",
+              null,
+              null,
+              { cleanupProfileIds: profileIds, dryRun },
               {
-                cleanupProfileIds: profileIds,
-                eventTimestampMs: Date.now(),
-                preserveNewerListSortAt: true,
+                projectEvent: projectEventImpl,
+                readLiveEvent: async () => {
+                  const eventSnapshot = await (database || admin.database())
+                    .ref(`events/${projection.id}`)
+                    .once("value");
+                  return eventSnapshot.exists() ? eventSnapshot.val() : null;
+                },
               },
             );
-          },
-        );
-      }
+            return;
+          }
+          const result = await recomputeInviteProjectionImpl(
+            projection.id,
+            "profile-merge-reconciliation",
+            {
+              cleanupProfileIds: profileIds,
+              dryRun,
+              eventTimestampMs: Date.now(),
+              preserveNewerListSortAt: true,
+            },
+          );
+          if (result && result.sourceCleanupSafe === false) {
+            profileBlocked = true;
+            const blockedProjection = {
+              entityType: projection.entityType,
+              id: projection.id,
+              reason: result.blockedReason || "source-cleanup-unsafe",
+            };
+            blockedProjections.set(
+              `${projection.entityType}:${projection.id}`,
+              blockedProjection,
+            );
+          }
+        },
+      );
       cursor = snapshot.docs[snapshot.docs.length - 1].id;
       if (snapshot.size < pageSize) {
         break;
       }
     }
-    scannedProfileIds?.add(profileId);
+    if (!profileBlocked) {
+      scannedProfileIds?.add(profileId);
+    }
   }
   return {
+    complete: blockedProjections.size === 0,
+    blockedProjections: Array.from(blockedProjections.values()),
     dryRun: dryRun === true,
     pagesScanned,
     profileIds,
@@ -1454,7 +1475,7 @@ const processProfileLinkCatchup = async (
         }
         attemptedThisRound += 1;
         try {
-          await recomputeInviteProjectionImpl(
+          const result = await recomputeInviteProjectionImpl(
             inviteId,
             "profile-link-catchup",
             {
@@ -1463,6 +1484,11 @@ const processProfileLinkCatchup = async (
               preserveNewerListSortAt: true,
             },
           );
+          if (result && result.sourceCleanupSafe === false) {
+            throw new Error(
+              `projector:profile-link-catchup-blocked:${result.blockedReason || "source-cleanup-unsafe"}`,
+            );
+          }
           roundSuccessfulInviteIds.add(inviteId);
           roundProcessed += 1;
         } catch (error) {

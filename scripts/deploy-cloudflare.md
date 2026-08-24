@@ -526,11 +526,12 @@ key or Worker secret is required.
 Provider verification preserves the existing single-use intent, signature,
 profile merge, replay, method-index, username, cooldown, custom-claim, RTDB,
 game projection, and event-prize reconciliation contracts. Apple accepts only
-the tracked `link.mons` audience. Ethereum accepts the tracked production and
-port-3000 local SIWE domains. The existing rate-limit binding rejects excessive
-mutation attempts before cryptographic work, keyed by operation and Firebase
-UID. Auth proofs, tokens, flow IDs, provider identifiers, and service-account
-credentials must never be logged.
+the tracked `link.mons` audience. Ethereum accepts the tracked production,
+port-3000 local, and exact account-owned version-preview SIWE domains. The
+existing rate-limit binding rejects excessive mutation attempts before
+cryptographic work, keyed by operation and Firebase UID. Auth proofs, tokens,
+flow IDs, provider identifiers, and service-account credentials must never be
+logged.
 
 Automated API smoke checks cover every auth preflight and unauthenticated
 response without creating Firestore records. Before removing the Firebase
@@ -543,8 +544,9 @@ Worker and frontend.
 The API Worker also serves `GET https://api.mons.link/auth/x/callback`. It
 exchanges the X authorization code, reads and updates the existing
 `xAuthRedirectFlows` Firestore document through the Firestore REST API, and
-redirects to the flow's validated `mons.link` return URL. The Worker creates
-and completes the flow. No Cloudflare storage resource is used.
+redirects to the flow's validated production, local, or account-owned
+version-preview return URL. The Worker creates and completes the flow. No
+Cloudflare storage resource is used.
 
 Register `https://api.mons.link/auth/x/callback` as an exact callback URI in the
 X application before deploying the Firebase flow-creator change. X client IDs,
@@ -580,7 +582,29 @@ below match the tracked Worker configuration; if another kill switch is active
 in production, use that same value here:
 
 ```sh
+(
+set -e
 AUTH_DISABLE_ROOT="$(mktemp -d)"
+record_auth_cleanup_status() {
+  "$@"
+  AUTH_CLEANUP_STEP_STATUS=$?
+  if [ "$AUTH_CLEANUP_STATUS" -eq 0 ]; then
+    AUTH_CLEANUP_STATUS=$AUTH_CLEANUP_STEP_STATUS
+  fi
+}
+trap '
+  AUTH_DISABLE_STATUS=$?
+  trap - EXIT
+  set +e
+  AUTH_CLEANUP_STATUS=0
+  record_auth_cleanup_status rm -f "$AUTH_DISABLE_ROOT/repo/cloud/functions/.env.mons-link"
+  record_auth_cleanup_status git worktree remove --force "$AUTH_DISABLE_ROOT/repo"
+  record_auth_cleanup_status rmdir "$AUTH_DISABLE_ROOT"
+  if [ "$AUTH_DISABLE_STATUS" -eq 0 ]; then
+    AUTH_DISABLE_STATUS=$AUTH_CLEANUP_STATUS
+  fi
+  exit "$AUTH_DISABLE_STATUS"
+' EXIT
 git worktree add --detach "$AUTH_DISABLE_ROOT/repo" f6ae7878a
 cat > "$AUTH_DISABLE_ROOT/repo/cloud/functions/.env.mons-link" <<'EOF'
 APPLE_AUDIENCES=link.mons
@@ -598,9 +622,7 @@ npm --prefix "$AUTH_DISABLE_ROOT/repo/cloud/functions" run deploy:safe -- \
   completeXRedirectAuth \
   unlinkAuthMethod \
   --project mons-link
-rm "$AUTH_DISABLE_ROOT/repo/cloud/functions/.env.mons-link"
-git worktree remove "$AUTH_DISABLE_ROOT/repo"
-rmdir "$AUTH_DISABLE_ROOT"
+)
 ```
 
 With legacy merges disabled, deploy every merge-aware game projector with this
@@ -624,7 +646,7 @@ npm --prefix cloud/functions run deploy:safe -- \
 
 With those projectors live, reconcile every existing `profileMergeTargets`
 page while merges remain disabled. Preview a bounded page first, execute the
-same page, then repeat both commands with the returned `nextCursor` as
+same page, then repeat both commands with the forward `nextCursor` as
 `--after <source-profile-id>` until `hasMore` is false:
 
 ```sh
@@ -634,8 +656,15 @@ npm run reconcile:merge-projections -- --project mons-link --limit 20 --execute
 
 The command re-reads authoritative invites and events through the same reviewed
 projection logic, repairs canonical target games, and removes retained source
-games. Each merge target is streamed in fixed 200-document pages, so histories
-larger than one page remain bounded without requiring another cursor.
+games. A page with blocked projections returns `"complete": false`, exits
+nonzero, and still returns a forward `nextCursor`. Treat that exit as an
+expected blocked result, execute the page so its safe repairs can complete, and
+continue through every later page with the returned cursor. After reaching
+`hasMore: false`, restart from the beginning by omitting `--after`. Repeat full
+passes until every dry-run and execute page returns `"complete": true`; do not
+replay one blocked page with the same cursor. Each merge target is streamed in
+fixed 200-document pages, so histories larger than one page remain bounded
+without requiring another cursor.
 
 While merges remain disabled, reconcile the historical wager settlement
 ledgers too. Preview a bounded page, execute that page, then repeat both commands
@@ -730,7 +759,29 @@ compatibility callables from a fresh retained checkout. Carry forward any
 reviewed non-merge kill-switch overrides from the disable step:
 
 ```sh
+(
+set -e
 AUTH_ENABLE_ROOT="$(mktemp -d)"
+record_auth_cleanup_status() {
+  "$@"
+  AUTH_CLEANUP_STEP_STATUS=$?
+  if [ "$AUTH_CLEANUP_STATUS" -eq 0 ]; then
+    AUTH_CLEANUP_STATUS=$AUTH_CLEANUP_STEP_STATUS
+  fi
+}
+trap '
+  AUTH_ENABLE_STATUS=$?
+  trap - EXIT
+  set +e
+  AUTH_CLEANUP_STATUS=0
+  record_auth_cleanup_status rm -f "$AUTH_ENABLE_ROOT/repo/cloud/functions/.env.mons-link"
+  record_auth_cleanup_status git worktree remove --force "$AUTH_ENABLE_ROOT/repo"
+  record_auth_cleanup_status rmdir "$AUTH_ENABLE_ROOT"
+  if [ "$AUTH_ENABLE_STATUS" -eq 0 ]; then
+    AUTH_ENABLE_STATUS=$AUTH_CLEANUP_STATUS
+  fi
+  exit "$AUTH_ENABLE_STATUS"
+' EXIT
 git worktree add --detach "$AUTH_ENABLE_ROOT/repo" f6ae7878a
 cat > "$AUTH_ENABLE_ROOT/repo/cloud/functions/.env.mons-link" <<'EOF'
 APPLE_AUDIENCES=link.mons
@@ -748,9 +799,7 @@ npm --prefix "$AUTH_ENABLE_ROOT/repo/cloud/functions" run deploy:safe -- \
   completeXRedirectAuth \
   unlinkAuthMethod \
   --project mons-link
-rm "$AUTH_ENABLE_ROOT/repo/cloud/functions/.env.mons-link"
-git worktree remove "$AUTH_ENABLE_ROOT/repo"
-rmdir "$AUTH_ENABLE_ROOT"
+)
 ```
 
 Delete the local secrets file and downloaded service-account JSON after the
@@ -800,7 +849,29 @@ configuration; if a kill switch is active in production, use that same value
 here before deploying:
 
 ```sh
+(
+set -e
 AUTH_ROLLBACK_ROOT="$(mktemp -d)"
+record_auth_cleanup_status() {
+  "$@"
+  AUTH_CLEANUP_STEP_STATUS=$?
+  if [ "$AUTH_CLEANUP_STATUS" -eq 0 ]; then
+    AUTH_CLEANUP_STATUS=$AUTH_CLEANUP_STEP_STATUS
+  fi
+}
+trap '
+  AUTH_ROLLBACK_STATUS=$?
+  trap - EXIT
+  set +e
+  AUTH_CLEANUP_STATUS=0
+  record_auth_cleanup_status rm -f "$AUTH_ROLLBACK_ROOT/repo/cloud/functions/.env.mons-link"
+  record_auth_cleanup_status git worktree remove --force "$AUTH_ROLLBACK_ROOT/repo"
+  record_auth_cleanup_status rmdir "$AUTH_ROLLBACK_ROOT"
+  if [ "$AUTH_ROLLBACK_STATUS" -eq 0 ]; then
+    AUTH_ROLLBACK_STATUS=$AUTH_CLEANUP_STATUS
+  fi
+  exit "$AUTH_ROLLBACK_STATUS"
+' EXIT
 git worktree add --detach "$AUTH_ROLLBACK_ROOT/repo" f6ae7878a
 cat > "$AUTH_ROLLBACK_ROOT/repo/cloud/functions/.env.mons-link" <<'EOF'
 APPLE_AUDIENCES=link.mons
@@ -818,9 +889,7 @@ npm --prefix "$AUTH_ROLLBACK_ROOT/repo/cloud/functions" run deploy:safe -- \
   completeXRedirectAuth \
   unlinkAuthMethod \
   --project mons-link
-rm "$AUTH_ROLLBACK_ROOT/repo/cloud/functions/.env.mons-link"
-git worktree remove "$AUTH_ROLLBACK_ROOT/repo"
-rmdir "$AUTH_ROLLBACK_ROOT"
+)
 ```
 
 Then supply `CLOUDFLARE_API_TOKEN` in the shell and roll back the frontend

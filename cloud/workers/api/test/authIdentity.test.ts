@@ -20,7 +20,7 @@ import { createAuthIdentityService } from "../src/authIdentity.ts";
 import { createAuthMergeRecovery } from "../src/authMergeRecovery.ts";
 import type { FirebaseAuthAdminClient } from "../src/firebaseAuthAdmin.ts";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
-import { getMethodKey } from "../src/authPolicy.ts";
+import { getMethodKey, uniqueStoredFirebaseUids } from "../src/authPolicy.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 function toRecord(value: unknown): Record<string, unknown> {
@@ -312,6 +312,35 @@ test("consumes an exact auth intent once inside a transaction", async () => {
   await assert.rejects(
     service.consumeIntent("login-1", "sol", "intent-1"),
     (error) => error instanceof Error && error.message === "intent-consumed",
+  );
+});
+
+test("keeps stored Firebase UIDs byte-exact", async () => {
+  assert.deepEqual(
+    uniqueStoredFirebaseUids(["", " login-1 ", "login-1"], ["", " login-1 "]),
+    ["", " login-1 ", "login-1"],
+  );
+  const memory = memoryFirestore([
+    {
+      collection: "authIntents",
+      id: "legacy-intent",
+      fields: {
+        uid: " login-1 ",
+        method: "sol",
+        nonce: "nonce-1",
+        consumedAtMs: null,
+        expiresAtMs: 1_001_000,
+      },
+    },
+  ]);
+  const service = createAuthIdentityService(env, {
+    ...dependencies(memory.client),
+    now: () => 1_000_000,
+  });
+  await assert.rejects(
+    service.readIntent("login-1", "sol", "legacy-intent"),
+    (error) =>
+      error instanceof Error && error.message === "intent-user-mismatch",
   );
 });
 
@@ -2608,6 +2637,41 @@ test("recovers legacy pending claim logins without an operation marker", async (
     memory.documents.get(authDocumentName("users", "profile-1"))?.fields
       .pendingClaimSyncLogins,
     undefined,
+  );
+});
+
+test("keeps unsafe stored UIDs pending without building RTDB paths", async () => {
+  const memory = memoryFirestore([
+    {
+      collection: "users",
+      id: "profile-1",
+      fields: {
+        logins: ["legacy/login"],
+        pendingClaimSyncLogins: ["legacy/login"],
+        pendingClaimSyncOpId: "legacy-claim-repair",
+      },
+    },
+  ]);
+  const deps = dependencies(memory.client);
+  let externalReads = 0;
+  deps.authClient.getUser = async () => {
+    externalReads++;
+    throw new Error("unexpected-auth-read");
+  };
+  deps.rtdb.getPath = async () => {
+    externalReads++;
+    throw new Error("unexpected-rtdb-read");
+  };
+  const service = createAuthIdentityService(env, {
+    ...deps,
+    now: () => 6_450_000,
+  });
+  assert.equal(await service.recoverPendingProfile("profile-1"), false);
+  assert.equal(externalReads, 0);
+  assert.deepEqual(
+    memory.documents.get(authDocumentName("users", "profile-1"))?.fields
+      .pendingClaimSyncLogins,
+    ["legacy/login"],
   );
 });
 

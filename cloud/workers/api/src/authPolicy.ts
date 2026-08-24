@@ -35,6 +35,25 @@ export function cleanString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+export function readStoredFirebaseUid(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+export function uniqueStoredFirebaseUids(...values: unknown[]): string[] {
+  const result = new Set<string>();
+  for (const value of values) {
+    if (!Array.isArray(value)) {
+      continue;
+    }
+    for (const item of value) {
+      if (typeof item === "string") {
+        result.add(item);
+      }
+    }
+  }
+  return [...result];
+}
+
 export function uniqueStrings(...values: unknown[]): string[] {
   const result = new Set<string>();
   for (const value of values) {

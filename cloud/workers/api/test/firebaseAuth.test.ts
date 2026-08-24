@@ -79,9 +79,40 @@ test("verifies an exact Firebase ID token and returns only UID plus token", asyn
   assert.deepEqual(identity, { idToken: token, uid: "firebase-uid" });
 });
 
-test("applies the Firebase UID character limit by code point", async () => {
+test("rejects noncanonical and malformed Firebase UIDs", async () => {
   const { privateKey, publicJwk } = await signingKey();
-  const validUid = "😀".repeat(128);
+  for (const uid of [
+    "",
+    " firebase-uid",
+    "firebase-uid ",
+    " ",
+    "firebase/uid",
+    "firebase.uid",
+    "firebase#uid",
+    "firebase$uid",
+    "firebase[uid",
+    "firebase]uid",
+    "firebase\u0000uid",
+    "firebase\ud800uid",
+    "firebase\udc00uid",
+  ]) {
+    const token = await signToken(privateKey, {}, "firebase-key", uid);
+    const { ctx } = context();
+    await assert.rejects(
+      verifyFirebaseRequest(request(token), ctx, {
+        cache: null,
+        fetcher: jwksFetch(publicJwk, { count: 0 }),
+        now: () => NOW_MS,
+      }),
+      (error: unknown) =>
+        error instanceof Error && "status" in error && error.status === 401,
+    );
+  }
+});
+
+test("applies the Firebase UID UTF-16 length limit", async () => {
+  const { privateKey, publicJwk } = await signingKey();
+  const validUid = "😀".repeat(64);
   const validToken = await signToken(privateKey, {}, "firebase-key", validUid);
   const validContext = context();
   assert.deepEqual(
@@ -93,7 +124,7 @@ test("applies the Firebase UID character limit by code point", async () => {
     { idToken: validToken, uid: validUid },
   );
 
-  const invalidUid = "😀".repeat(129);
+  const invalidUid = "😀".repeat(65);
   const invalidToken = await signToken(
     privateKey,
     {},

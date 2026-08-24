@@ -6,6 +6,7 @@ import {
 } from "jose";
 import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 import { AuthApiFailure } from "./authErrors.ts";
+import { isCanonicalFirebaseUid } from "./firebaseKeys.ts";
 
 const FIREBASE_PROJECT_ID = "mons-link";
 const FIREBASE_ISSUER = `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`;
@@ -230,13 +231,12 @@ export async function verifyFirebaseRequest(
         requiredClaims: ["auth_time", "exp", "iat", "sub"],
       },
     );
-    const uid = typeof payload.sub === "string" ? payload.sub.trim() : "";
+    const uid = isCanonicalFirebaseUid(payload.sub) ? payload.sub : "";
     const authTime = payload.auth_time;
     if (
       protectedHeader.alg !== "RS256" ||
       typeof protectedHeader.kid !== "string" ||
       !uid ||
-      Array.from(uid).length > 128 ||
       typeof payload.exp !== "number" ||
       payload.exp <= nowSeconds - CLOCK_TOLERANCE_SECONDS ||
       typeof payload.iat !== "number" ||

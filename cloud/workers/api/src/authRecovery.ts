@@ -21,7 +21,7 @@ import {
   cleanString,
   PENDING_CLAIM_SYNC_FIELD_PATHS,
   PENDING_MERGE_GAME_COPY_FIELD_PATHS,
-  uniqueStrings,
+  uniqueStoredFirebaseUids,
 } from "./authPolicy.ts";
 
 const RETRY_DELAY_SECONDS = 60;
@@ -134,8 +134,8 @@ async function materializeLegacyClaimBacklog(
       return { result: null, writes: [deleteBacklog()] };
     }
     const pendingOpId = cleanString(target.fields.pendingClaimSyncOpId);
-    const ownedLogins = new Set(uniqueStrings(target.fields.logins));
-    const pendingLogins = uniqueStrings(
+    const ownedLogins = new Set(uniqueStoredFirebaseUids(target.fields.logins));
+    const pendingLogins = uniqueStoredFirebaseUids(
       target.fields.pendingClaimSyncLogins,
       backlog.fields.failedLoginUids,
     ).filter((uid) => ownedLogins.has(uid));
@@ -239,7 +239,7 @@ async function materializeLegacyGameBacklog(
         (source &&
           (cleanString(source.fields.mergedIntoProfileId) !== targetProfileId ||
             source.fields.mergeSourceRetainedForGameCopy !== true ||
-            uniqueStrings(source.fields.logins).length > 0))
+            uniqueStoredFirebaseUids(source.fields.logins).length > 0))
       ) {
         return { result: null, writes: [deleteBacklog()] };
       }

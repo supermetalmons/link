@@ -13,6 +13,7 @@ const ctx = {
   waitUntil: () => undefined,
 };
 const X_INTENT_ID = "abcdefghijklmnopqrstuvwx";
+const PREVIEW_ORIGIN = "https://8bdf84df-mons-link.lil-org.workers.dev";
 
 const env = {
   ...TELEGRAM_TEST_ENV,
@@ -113,20 +114,26 @@ test("auth routes apply exact origin-aware preflight policy", async () => {
   });
 
   const preview = await handleAuthRoute(
-    request(
-      "/auth/intents",
-      "OPTIONS",
-      undefined,
-      "https://8bdf84df-mons-link.lil-org.workers.dev",
-    ),
+    request("/auth/intents", "OPTIONS", undefined, PREVIEW_ORIGIN),
     env,
     ctx,
   );
   assert.equal(preview.status, 204);
   assert.equal(
     preview.headers.get("Access-Control-Allow-Origin"),
-    "https://8bdf84df-mons-link.lil-org.workers.dev",
+    PREVIEW_ORIGIN,
   );
+  for (const origin of [
+    "https://8bdf84df-mons-link.attacker.workers.dev",
+    `https://user:secret@${new URL(PREVIEW_ORIGIN).host}`,
+  ]) {
+    const invalidPreview = await handleAuthRoute(
+      request("/auth/intents", "OPTIONS", undefined, origin),
+      env,
+      ctx,
+    );
+    assert.equal(invalidPreview.status, 403);
+  }
 });
 
 test("auth routes enforce methods and authentication before repository work", async () => {
@@ -546,6 +553,46 @@ test("creates an exact X flow with bounded intent and PKCE state", async () => {
   assert.equal(created[0].codeVerifier.length, 64);
   assert.equal(created[0].codeChallenge.length, 43);
   assert.deepEqual(rateKeys, ["auth-x-flow:firebase-uid"]);
+});
+
+test("keeps only exact account-owned preview X return URLs", async () => {
+  for (const [returnUrl, expected] of [
+    [
+      `${PREVIEW_ORIGIN}/settings?tab=identity`,
+      `${PREVIEW_ORIGIN}/settings?tab=identity`,
+    ],
+    [
+      "https://8bdf84df-mons-link.attacker.workers.dev/settings",
+      "https://mons.link/",
+    ],
+    [
+      `https://user:secret@${new URL(PREVIEW_ORIGIN).host}/settings`,
+      "https://mons.link/",
+    ],
+  ]) {
+    const created: XRedirectFlowDocument[] = [];
+    const response = await handleAuthRoute(
+      request("/auth/x/flows", "POST", {
+        intentId: X_INTENT_ID,
+        returnUrl,
+      }),
+      env,
+      ctx,
+      {
+        now: () => 1_000_000,
+        randomBytes: deterministicBytes,
+        repository: repository({
+          createXFlow: async (document) => {
+            created.push(document);
+            return "created";
+          },
+        }),
+        verifyIdentity,
+      },
+    );
+    assert.equal(response.status, 200);
+    assert.equal(created[0].returnUrl, expected);
+  }
 });
 
 test("rate limits X flow reads and creation", async () => {

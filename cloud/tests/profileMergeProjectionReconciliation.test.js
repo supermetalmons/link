@@ -35,6 +35,8 @@ const snapshot = (documents) => ({
 const gameDocument = (id, data) => ({ id, data: () => data });
 
 const runInviteProjection = async ({
+  cleanupProfileIds,
+  dryRun = false,
   eventTimestampMs,
   invite,
   inviteId,
@@ -95,6 +97,11 @@ const runInviteProjection = async ({
           }),
         };
       },
+      where: () => ({
+        limit: () => ({
+          get: async () => ({ docs: [], empty: true }),
+        }),
+      }),
     }),
   };
   const firestoreFactory = () => firestore;
@@ -124,7 +131,12 @@ const runInviteProjection = async ({
     const result = await recomputeInviteProjection(
       inviteId,
       "profile-merge-reconciliation",
-      { eventTimestampMs, preserveNewerListSortAt: true },
+      {
+        cleanupProfileIds,
+        dryRun,
+        eventTimestampMs,
+        preserveNewerListSortAt: true,
+      },
     );
     return { deletes, result, sets };
   } finally {
@@ -337,6 +349,60 @@ test("profile-link catchup ignores failures from a superseded owner", async () =
   assert.equal(attempts, 2);
 });
 
+test("profile-link catchup retries blocked projections without stale cleanup", async () => {
+  const originalFirestore = firebaseAdmin.firestore;
+  let deletes = 0;
+  const firestore = {
+    batch: () => ({
+      commit: async () => undefined,
+      delete: () => {
+        deletes += 1;
+      },
+    }),
+    collection: () => ({
+      doc: (profileId) => ({
+        collection: () => ({ doc: () => ({ profileId }) }),
+        get: async () => ({
+          data: () => ({
+            mergedAtMs: Date.now(),
+            mergedSourceProfileId: "stale-profile",
+          }),
+          exists: profileId === "target-profile",
+        }),
+      }),
+    }),
+  };
+  firebaseAdmin.firestore = () => firestore;
+  try {
+    await assert.rejects(
+      processProfileLinkCatchup(
+        {
+          eventLabel: "test",
+          loginUid: "login-1",
+          profileId: "target-profile",
+          staleProfileId: "stale-profile",
+        },
+        {
+          readCurrentProfileLink: async () => "target-profile",
+          readMatches: async () => ({
+            exists: () => true,
+            val: () => ({ "match-1": {} }),
+          }),
+          recomputeInviteProjection: async () => ({
+            blockedReason: "unresolved-owner-profile",
+            sourceCleanupSafe: false,
+          }),
+          resolveInviteIdFromMatchId: async () => "invite-1",
+        },
+      ),
+      /profile-link-catchup-incomplete/,
+    );
+    assert.equal(deletes, 0);
+  } finally {
+    firebaseAdmin.firestore = originalFirestore;
+  }
+});
+
 const createProjectionFirestore = ({ games, targets }) => {
   const queryLimits = [];
   const buildGamesQuery = (
@@ -411,6 +477,10 @@ const createProjectionFirestore = ({ games, targets }) => {
     },
   };
 };
+
+const safeRecomputeInviteProjection = async () => ({
+  sourceCleanupSafe: true,
+});
 
 test("projection cleanup reads settle together and fail before returning data", async () => {
   let siblingSettled = false;
@@ -517,6 +587,7 @@ test("canonical rebuild uses the freshest matching source projection", async () 
   ]);
   assert.equal(result.writes, 2);
   assert.equal(result.deletes, 2);
+  assert.equal(result.sourceCleanupSafe, true);
 });
 
 for (const [status, inviteState] of [
@@ -567,8 +638,51 @@ for (const [status, inviteState] of [
     );
     assert.equal(result.deletes, 0);
     assert.equal(result.skipped, 1);
+    assert.equal(result.sourceCleanupSafe, false);
+    assert.equal(result.blockedReason, "unresolved-opponent-emoji");
   });
 }
+
+test("projecting invite keeps its source when no owner can resolve", async () => {
+  const inviteId = "merge-blocked-owner-invite";
+  const { deletes, result, sets } = await runInviteProjection({
+    cleanupProfileIds: ["merge-blocked-owner-source"],
+    eventTimestampMs: 3000,
+    invite: { hostId: "merge-blocked-owner-login" },
+    inviteId,
+    mergeTargets: {},
+    profileLinks: {},
+    profiles: {},
+    projections: {
+      "merge-blocked-owner-source": { ownerRole: "host" },
+    },
+  });
+  assert.deepEqual(deletes, []);
+  assert.deepEqual(sets, []);
+  assert.equal(result.sourceCleanupSafe, false);
+  assert.equal(result.blockedReason, "unresolved-owner-profile");
+});
+
+test("deleted invite cleanup is safe without resolved owners", async () => {
+  const inviteId = "merge-deleted-owner-invite";
+  const { deletes, result, sets } = await runInviteProjection({
+    cleanupProfileIds: ["merge-deleted-owner-source"],
+    eventTimestampMs: 3000,
+    invite: null,
+    inviteId,
+    mergeTargets: {},
+    profileLinks: {},
+    profiles: {},
+    projections: {
+      "merge-deleted-owner-source": { ownerRole: "host" },
+    },
+  });
+  assert.deepEqual(deletes, [
+    `users/merge-deleted-owner-source/games/${inviteId}`,
+  ]);
+  assert.deepEqual(sets, []);
+  assert.equal(result.sourceCleanupSafe, true);
+});
 
 test("invite existence reads propagate after bounded retries", async () => {
   let reads = 0;
@@ -695,6 +809,8 @@ test("reconciles canonical projections before historical sources", async () => {
     },
   );
   assert.deepEqual(result, {
+    complete: true,
+    blockedProjections: [],
     dryRun: false,
     pagesScanned: 2,
     profileIds: ["source", "target"],
@@ -708,6 +824,110 @@ test("reconciles canonical projections before historical sources", async () => {
   calls.forEach((call) => {
     assert.deepEqual(call.options.cleanupProfileIds, ["source", "target"]);
   });
+});
+
+test("dry-run and execute report the same blockers and finish safe siblings", async () => {
+  const firestore = createProjectionFirestore({
+    games: {
+      target: [
+        gameDocument("invite-blocked", {}),
+        gameDocument("invite-safe", {}),
+      ],
+    },
+    targets: { source: { targetProfileId: "target" } },
+  });
+  const modes = [];
+  const recomputeInviteProjection = async (inviteId, _reason, options) => {
+    modes.push({ dryRun: options.dryRun, inviteId });
+    return inviteId === "invite-blocked"
+      ? {
+          blockedReason: "unresolved-owner-profile",
+          sourceCleanupSafe: false,
+        }
+      : { sourceCleanupSafe: true };
+  };
+  const dryScannedProfileIds = new Set();
+  const executeScannedProfileIds = new Set();
+  const dryResult = await reconcileProfileMergeProjections(
+    {
+      dryRun: true,
+      sourceProfileId: "source",
+      targetProfileId: "target",
+    },
+    {
+      firestore,
+      recomputeInviteProjection,
+      scannedProfileIds: dryScannedProfileIds,
+    },
+  );
+  const executeResult = await reconcileProfileMergeProjections(
+    {
+      dryRun: false,
+      sourceProfileId: "source",
+      targetProfileId: "target",
+    },
+    {
+      firestore,
+      recomputeInviteProjection,
+      scannedProfileIds: executeScannedProfileIds,
+    },
+  );
+  assert.equal(dryResult.complete, false);
+  assert.deepEqual(dryResult.blockedProjections, [
+    {
+      entityType: "game",
+      id: "invite-blocked",
+      reason: "unresolved-owner-profile",
+    },
+  ]);
+  assert.deepEqual(
+    executeResult.blockedProjections,
+    dryResult.blockedProjections,
+  );
+  assert.deepEqual(Array.from(dryScannedProfileIds), ["source"]);
+  assert.deepEqual(Array.from(executeScannedProfileIds), ["source"]);
+  assert.deepEqual(modes, [
+    { dryRun: true, inviteId: "invite-blocked" },
+    { dryRun: true, inviteId: "invite-safe" },
+    { dryRun: false, inviteId: "invite-blocked" },
+    { dryRun: false, inviteId: "invite-safe" },
+  ]);
+});
+
+test("dry-run reads and plans authoritative event state without writes", async () => {
+  const firestore = createProjectionFirestore({
+    games: {
+      target: [gameDocument("event_event-1", { entityType: "event" })],
+    },
+    targets: { source: { targetProfileId: "target" } },
+  });
+  let reads = 0;
+  let plans = 0;
+  const result = await reconcileProfileMergeProjections(
+    {
+      dryRun: true,
+      sourceProfileId: "source",
+      targetProfileId: "target",
+    },
+    {
+      database: {
+        ref: () => ({
+          once: async () => {
+            reads += 1;
+            return { exists: () => false, val: () => null };
+          },
+        }),
+      },
+      firestore,
+      projectEvent: async (_eventId, _before, _after, options) => {
+        plans += 1;
+        assert.equal(options.dryRun, true);
+      },
+    },
+  );
+  assert.equal(result.complete, true);
+  assert.equal(reads, 2);
+  assert.equal(plans, 1);
 });
 
 test("event backfill converges on a concurrent live change", async () => {
@@ -777,7 +997,7 @@ test("paginates histories beyond the former total cap with bounded reads", async
       sourceProfileId: "source",
       targetProfileId: "target",
     },
-    { firestore },
+    { firestore, recomputeInviteProjection: safeRecomputeInviteProjection },
   );
   assert.equal(result.scannedGameDocuments, 10005);
   assert.equal(result.projectionCount, 10005);
@@ -806,7 +1026,11 @@ test("reuses completed profile scans across merge candidates", async () => {
       sourceProfileId: "source-a",
       targetProfileId: "target",
     },
-    { firestore, scannedProfileIds },
+    {
+      firestore,
+      recomputeInviteProjection: safeRecomputeInviteProjection,
+      scannedProfileIds,
+    },
   );
   const second = await reconcileProfileMergeProjections(
     {
@@ -814,12 +1038,61 @@ test("reuses completed profile scans across merge candidates", async () => {
       sourceProfileId: "source-b",
       targetProfileId: "target",
     },
-    { firestore, scannedProfileIds },
+    {
+      firestore,
+      recomputeInviteProjection: safeRecomputeInviteProjection,
+      scannedProfileIds,
+    },
   );
   assert.equal(first.scannedGameDocuments, 2);
   assert.equal(second.scannedGameDocuments, 1);
   assert.deepEqual(Array.from(scannedProfileIds).sort(), [
     "source-a",
+    "source-b",
+    "target",
+  ]);
+});
+
+test("blocked profile scans remain available to a repairing merge sibling", async () => {
+  const firestore = createProjectionFirestore({
+    games: {
+      "source-a": [gameDocument("invite-shared", {})],
+      "source-b": [gameDocument("invite-shared", {})],
+      target: [gameDocument("invite-shared", {})],
+    },
+    targets: {
+      "source-a": { targetProfileId: "target" },
+      "source-b": { targetProfileId: "target" },
+    },
+  });
+  const scannedProfileIds = new Set();
+  const recomputeInviteProjection = async (_inviteId, _reason, options) =>
+    options.cleanupProfileIds.includes("source-a")
+      ? {
+          blockedReason: "unresolved-opponent-emoji",
+          sourceCleanupSafe: false,
+        }
+      : { sourceCleanupSafe: true };
+  const blocked = await reconcileProfileMergeProjections(
+    {
+      dryRun: true,
+      sourceProfileId: "source-a",
+      targetProfileId: "target",
+    },
+    { firestore, recomputeInviteProjection, scannedProfileIds },
+  );
+  const repaired = await reconcileProfileMergeProjections(
+    {
+      dryRun: true,
+      sourceProfileId: "source-b",
+      targetProfileId: "target",
+    },
+    { firestore, recomputeInviteProjection, scannedProfileIds },
+  );
+  assert.equal(blocked.complete, false);
+  assert.equal(repaired.complete, true);
+  assert.equal(repaired.scannedGameDocuments, 2);
+  assert.deepEqual(Array.from(scannedProfileIds).sort(), [
     "source-b",
     "target",
   ]);
@@ -844,7 +1117,11 @@ test("reuses every completed collection in a merge chain", async () => {
       sourceProfileId: "source",
       targetProfileId: "middle",
     },
-    { firestore, scannedProfileIds },
+    {
+      firestore,
+      recomputeInviteProjection: safeRecomputeInviteProjection,
+      scannedProfileIds,
+    },
   );
   const middleResult = await reconcileProfileMergeProjections(
     {
@@ -852,7 +1129,11 @@ test("reuses every completed collection in a merge chain", async () => {
       sourceProfileId: "middle",
       targetProfileId: "target",
     },
-    { firestore, scannedProfileIds },
+    {
+      firestore,
+      recomputeInviteProjection: safeRecomputeInviteProjection,
+      scannedProfileIds,
+    },
   );
   assert.equal(sourceResult.scannedGameDocuments, 3);
   assert.equal(middleResult.scannedGameDocuments, 0);
@@ -911,9 +1192,88 @@ test("returns an explicit cursor for the next bounded merge page", async () => {
       },
     },
   );
+  assert.equal(result.complete, true);
+  assert.deepEqual(result.blockedProjections, []);
   assert.equal(result.hasMore, true);
   assert.equal(result.nextCursor, "source-b");
   assert.equal(result.results.length, 2);
   assert.equal(scannedSets.length, 2);
   assert.equal(scannedSets[0], scannedSets[1]);
+});
+
+const createMergeCandidateFirestore = (ids) => ({
+  collection: () => {
+    let after = "";
+    let queryLimit = Infinity;
+    return {
+      get: async () =>
+        snapshot(
+          ids
+            .filter((id) => id > after)
+            .slice(0, queryLimit)
+            .map((id) => ({
+              id,
+              data: () => ({ targetProfileId: "target" }),
+            })),
+        ),
+      limit(value) {
+        queryLimit = value;
+        return this;
+      },
+      orderBy() {
+        return this;
+      },
+      startAfter(value) {
+        after = value;
+        return this;
+      },
+    };
+  },
+});
+
+const blockedPageResult = {
+  complete: false,
+  blockedProjections: [
+    {
+      entityType: "game",
+      id: "invite-shared",
+      reason: "unresolved-opponent-emoji",
+    },
+  ],
+};
+
+test("blocked page advances to a later repair and supports a clean rescan", async () => {
+  let repaired = false;
+  const reconcileProfileMergeProjections = async ({ sourceProfileId }) => {
+    if (sourceProfileId === "source-b") {
+      repaired = true;
+      return { complete: true, blockedProjections: [] };
+    }
+    return repaired
+      ? { complete: true, blockedProjections: [] }
+      : blockedPageResult;
+  };
+  const firestore = createMergeCandidateFirestore(["source-a", "source-b"]);
+  const first = await reconcileProfileMergeProjectionPage(
+    { after: "", dryRun: true, limit: 1 },
+    { firestore, reconcileProfileMergeProjections },
+  );
+  assert.equal(first.complete, false);
+  assert.equal(first.hasMore, true);
+  assert.equal(first.nextCursor, "source-a");
+
+  const second = await reconcileProfileMergeProjectionPage(
+    { after: first.nextCursor, dryRun: true, limit: 1 },
+    { firestore, reconcileProfileMergeProjections },
+  );
+  assert.equal(second.complete, true);
+  assert.equal(second.hasMore, false);
+  assert.equal(second.nextCursor, null);
+
+  const clean = await reconcileProfileMergeProjectionPage(
+    { after: "", dryRun: true, limit: 2 },
+    { firestore, reconcileProfileMergeProjections },
+  );
+  assert.equal(clean.complete, true);
+  assert.deepEqual(clean.blockedProjections, []);
 });

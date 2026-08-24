@@ -570,6 +570,10 @@ test("operations documentation uses the release driver and required setup", () =
   const mergeDisableRoot = deploymentGuide.indexOf(
     'AUTH_DISABLE_ROOT="$(mktemp -d)"',
   );
+  const mergeDisableProcedureStart = deploymentGuide.lastIndexOf(
+    "\n(\n",
+    mergeDisableRoot,
+  );
   const projectorDeployment = deploymentGuide.indexOf(
     "projectProfileGamesOnInviteCreated",
   );
@@ -594,6 +598,10 @@ test("operations documentation uses the release driver and required setup", () =
   const mergeEnableRoot = deploymentGuide.indexOf(
     'AUTH_ENABLE_ROOT="$(mktemp -d)"',
   );
+  const mergeEnableProcedureStart = deploymentGuide.lastIndexOf(
+    "\n(\n",
+    mergeEnableRoot,
+  );
   const mergeEnableDeploy = deploymentGuide.indexOf(
     'npm --prefix "$AUTH_ENABLE_ROOT/repo/cloud/functions" run deploy:safe --',
   );
@@ -609,6 +617,7 @@ test("operations documentation uses the release driver and required setup", () =
   );
   for (const position of [
     mergeDisableRoot,
+    mergeDisableProcedureStart,
     projectorDeployment,
     mergeBackfill,
     firstWagerScan,
@@ -618,6 +627,7 @@ test("operations documentation uses the release driver and required setup", () =
     enabledCandidateUpload,
     enabledWorkerPromotion,
     mergeEnableRoot,
+    mergeEnableProcedureStart,
     mergeEnableDeploy,
     mergeEnabled,
     manualXVerification,
@@ -657,11 +667,11 @@ test("operations documentation uses the release driver and required setup", () =
     assert.match(projectorProcedure, new RegExp(`\\b${functionName}\\b`));
   }
   const mergeDisableProcedure = deploymentGuide.slice(
-    mergeDisableRoot,
+    mergeDisableProcedureStart,
     projectorDeployment,
   );
   const mergeEnableProcedure = deploymentGuide.slice(
-    mergeEnableRoot,
+    mergeEnableProcedureStart,
     mergeEnabled,
   );
   assert.match(mergeDisableProcedure, /^AUTH_DISABLE_MERGE=true$/m);
@@ -697,6 +707,10 @@ test("operations documentation uses the release driver and required setup", () =
   const rollbackRoot = deploymentGuide.indexOf(
     'AUTH_ROLLBACK_ROOT="$(mktemp -d)"',
   );
+  const rollbackProcedureStart = deploymentGuide.lastIndexOf(
+    "\n(\n",
+    rollbackRoot,
+  );
   const rollbackWorktree = deploymentGuide.indexOf(
     'git worktree add --detach "$AUTH_ROLLBACK_ROOT/repo" f6ae7878a',
   );
@@ -710,8 +724,9 @@ test("operations documentation uses the release driver and required setup", () =
     'npm --prefix "$AUTH_ROLLBACK_ROOT/repo/cloud/functions" run deploy:safe --',
   );
   const rollbackCleanup = deploymentGuide.indexOf(
-    'git worktree remove "$AUTH_ROLLBACK_ROOT/repo"',
+    'git worktree remove --force "$AUTH_ROLLBACK_ROOT/repo"',
   );
+  const rollbackEnd = deploymentGuide.indexOf("\n)\n```", rollbackDeploy);
   const postPruneFrontendRollback = deploymentGuide.indexOf(
     "rollback <known-good-frontend-version-id> --config wrangler.jsonc",
     postPruneRollback,
@@ -726,11 +741,13 @@ test("operations documentation uses the release driver and required setup", () =
     postPruneMainConsumerRemoval,
     postPruneDlqConsumerRemoval,
     rollbackRoot,
+    rollbackProcedureStart,
     rollbackWorktree,
     rollbackEnvironment,
     rollbackInstall,
     rollbackDeploy,
     rollbackCleanup,
+    rollbackEnd,
     postPruneFrontendRollback,
     postPruneApiRollback,
   ]) {
@@ -740,16 +757,88 @@ test("operations documentation uses the release driver and required setup", () =
   assert.ok(postPruneRollback < postPruneMainConsumerRemoval);
   assert.ok(postPruneMainConsumerRemoval < postPruneDlqConsumerRemoval);
   assert.ok(postPruneDlqConsumerRemoval < rollbackRoot);
-  assert.ok(rollbackRoot < rollbackWorktree);
+  assert.ok(rollbackRoot < rollbackCleanup);
+  assert.ok(rollbackCleanup < rollbackWorktree);
   assert.ok(rollbackWorktree < rollbackEnvironment);
   assert.ok(rollbackEnvironment < rollbackInstall);
   assert.ok(rollbackInstall < rollbackDeploy);
-  assert.ok(rollbackDeploy < rollbackCleanup);
-  assert.ok(rollbackCleanup < postPruneFrontendRollback);
+  assert.ok(rollbackDeploy < rollbackEnd);
+  assert.ok(rollbackEnd < postPruneFrontendRollback);
   assert.ok(postPruneFrontendRollback < postPruneApiRollback);
   const rollbackProcedure = deploymentGuide.slice(
     rollbackEnvironment,
-    rollbackCleanup,
+    rollbackEnd,
+  );
+  for (const [prefix, procedure] of [
+    ["AUTH_DISABLE", mergeDisableProcedure],
+    ["AUTH_ENABLE", mergeEnableProcedure],
+    [
+      "AUTH_ROLLBACK",
+      deploymentGuide.slice(rollbackProcedureStart, rollbackEnd),
+    ],
+  ]) {
+    const setFailFast = procedure.indexOf("set -e");
+    const trapStart = procedure.indexOf("trap '");
+    const bodyStart = procedure.indexOf("git worktree add --detach");
+    const disableFailFast = procedure.indexOf("set +e", trapStart);
+    const removeSecret = procedure.indexOf(
+      `record_auth_cleanup_status rm -f "$${prefix}_ROOT/repo/cloud/functions/.env.mons-link"`,
+    );
+    const removeWorktree = procedure.indexOf(
+      `record_auth_cleanup_status git worktree remove --force "$${prefix}_ROOT/repo"`,
+    );
+    const removeRoot = procedure.indexOf(
+      `record_auth_cleanup_status rmdir "$${prefix}_ROOT"`,
+    );
+
+    for (const position of [
+      setFailFast,
+      trapStart,
+      bodyStart,
+      disableFailFast,
+      removeSecret,
+      removeWorktree,
+      removeRoot,
+    ]) {
+      assert.notEqual(position, -1);
+    }
+    assert.ok(setFailFast < trapStart);
+    assert.ok(trapStart < bodyStart);
+    assert.ok(trapStart < disableFailFast);
+    assert.ok(disableFailFast < removeSecret);
+    assert.ok(removeSecret < removeWorktree);
+    assert.ok(removeWorktree < removeRoot);
+    assert.match(procedure, /record_auth_cleanup_status\(\)/);
+    assert.match(procedure, /AUTH_CLEANUP_STEP_STATUS=\$\?/);
+    assert.match(
+      procedure,
+      /if \[ "\$AUTH_CLEANUP_STATUS" -eq 0 \]; then\s+AUTH_CLEANUP_STATUS=\$AUTH_CLEANUP_STEP_STATUS\s+fi/,
+    );
+    assert.match(procedure, new RegExp(`${prefix}_STATUS=\\$\\?`));
+    assert.match(procedure, /AUTH_CLEANUP_STATUS=0/);
+    assert.match(
+      procedure,
+      new RegExp(
+        `if \\[ "\\$${prefix}_STATUS" -eq 0 \\]; then\\s+${prefix}_STATUS=\\$AUTH_CLEANUP_STATUS\\s+fi`,
+      ),
+    );
+    assert.ok(procedure.includes(`exit "$${prefix}_STATUS"`));
+  }
+  assert.match(
+    deploymentGuide,
+    /blocked projections returns `"complete": false`, exits\s+nonzero, and still returns a forward `nextCursor`/,
+  );
+  assert.match(
+    deploymentGuide,
+    /continue through every later page with the returned cursor/,
+  );
+  assert.match(
+    deploymentGuide,
+    /restart from the beginning by omitting `--after`/,
+  );
+  assert.match(
+    deploymentGuide,
+    /until every dry-run and execute page returns `"complete": true`/,
   );
   assert.match(
     deploymentGuide,

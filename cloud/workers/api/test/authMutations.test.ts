@@ -4,7 +4,10 @@ import bs58 from "bs58";
 import { Wallet } from "ethers";
 import nacl from "tweetnacl";
 import type { AuthProfileResponse } from "@mons/shared/auth";
-import { handleAuthMutation } from "../src/authMutations.ts";
+import {
+  handleAuthMutation,
+  validateSiweLocation,
+} from "../src/authMutations.ts";
 import type { AuthIdentityService } from "../src/authIdentity.ts";
 import {
   AuthFirestoreConflict,
@@ -21,6 +24,7 @@ const identity = { uid: "login-1", idToken: "firebase-token" };
 const ctx = { waitUntil: () => undefined };
 const INTENT_ID = "abcdefghijklmnopqrstuvwx";
 const FLOW_ID = "zyxwvutsrqponmlkjihgfedc";
+const PREVIEW_ORIGIN = "https://8bdf84df-mons-link.lil-org.workers.dev";
 
 const profile: AuthProfileResponse = {
   ok: true,
@@ -205,6 +209,37 @@ test("links a valid Ethereum proof with the consumed nonce", async () => {
   assert.equal(response.ok, true);
   assert.equal(linkedMethod, "eth");
   assert.deepEqual(phases, [`prepare:eth:${INTENT_ID}`, "link"]);
+});
+
+test("validates production, local, and account-owned SIWE origins", () => {
+  for (const origin of [
+    "https://mons.link",
+    "http://localhost:3000",
+    PREVIEW_ORIGIN,
+  ]) {
+    validateSiweLocation(
+      { domain: new URL(origin).host, uri: `${origin}/settings` },
+      env,
+    );
+  }
+  for (const location of [
+    {
+      domain: "8bdf84df-mons-link.attacker.workers.dev",
+      uri: "https://8bdf84df-mons-link.attacker.workers.dev",
+    },
+    {
+      domain: new URL(PREVIEW_ORIGIN).host,
+      uri: `https://user:secret@${new URL(PREVIEW_ORIGIN).host}/settings`,
+    },
+  ]) {
+    assert.throws(
+      () => validateSiweLocation(location, env),
+      (error) =>
+        error instanceof Error &&
+        (error.message === "siwe-domain-not-allowed" ||
+          error.message === "siwe-uri-not-allowed"),
+    );
+  }
 });
 
 test("verifies Apple through the injected bounded provider", async () => {
@@ -427,6 +462,39 @@ test("prepares X verification before linking", async () => {
       }),
     },
   });
+});
+
+test("does not trim stored X flow UIDs", async () => {
+  await assert.rejects(
+    handleAuthMutation(
+      request("/auth/x/flows/complete", {
+        flowId: FLOW_ID,
+        emoji: 1,
+        aura: "",
+      }),
+      identity,
+      env,
+      ctx,
+      {
+        firestore: firestore(
+          firestoreDocument("xAuthRedirectFlows", FLOW_ID, {
+            uid: ` ${identity.uid} `,
+            status: "verified",
+            createdAtMs: Date.now(),
+            expiresAtMs: Date.now() + 60_000,
+            intentId: INTENT_ID,
+            xUserId: "12345",
+            consentSource: "signin",
+          }),
+          [],
+        ),
+        identityService: service(),
+      },
+    ),
+    (error) =>
+      error instanceof Error &&
+      error.message === "x-redirect-flow-user-mismatch",
+  );
 });
 
 test("replays and persists completed X flows without consuming again", async () => {

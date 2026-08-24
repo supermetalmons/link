@@ -13,6 +13,7 @@ import { getAddress, verifyMessage } from "ethers";
 import nacl from "tweetnacl";
 import { verifyAppleIdToken } from "./appleAuth.ts";
 import { AuthApiFailure } from "./authErrors.ts";
+import { isAllowedAuthOrigin } from "./authHttp.ts";
 import {
   authDocumentName,
   authUpdateWrite,
@@ -31,6 +32,7 @@ import {
   cleanString,
   featureDisabled,
   normalizeMethodValue,
+  readStoredFirebaseUid,
 } from "./authPolicy.ts";
 import { parseSiweMessage, type ParsedSiweMessage } from "./siweAuth.ts";
 import { X_FLOW_TTL_MS } from "./xFlow.ts";
@@ -99,7 +101,12 @@ function validateSiweLocation(
   );
   const domain = cleanString(data.domain).toLowerCase();
   const bareDomain = domain.includes(":") ? domain.split(":")[0] : domain;
-  if (!domain || (!allowed.has(domain) && !allowed.has(bareDomain))) {
+  if (
+    !domain ||
+    (!allowed.has(domain) &&
+      !allowed.has(bareDomain) &&
+      !isAllowedAuthOrigin(`https://${domain}`))
+  ) {
     throw new AuthApiFailure(
       403,
       "permission-denied",
@@ -121,7 +128,11 @@ function validateSiweLocation(
   const isLocal = bareHost === "localhost" || bareHost === "127.0.0.1";
   if (
     !host ||
-    (!allowed.has(host) && !allowed.has(bareHost)) ||
+    (!allowed.has(host) &&
+      !allowed.has(bareHost) &&
+      !isAllowedAuthOrigin(url.origin)) ||
+    url.username !== "" ||
+    url.password !== "" ||
     (isLocal
       ? url.protocol !== "http:" && url.protocol !== "https:"
       : url.protocol !== "https:")
@@ -441,7 +452,7 @@ async function executeAuthMutation(
         throw error;
       }
       const current = await loadFlow();
-      if (cleanString(current.fields.uid) !== identity.uid) {
+      if (readStoredFirebaseUid(current.fields.uid) !== identity.uid) {
         throw new AuthApiFailure(
           403,
           "permission-denied",
@@ -485,7 +496,7 @@ async function executeAuthMutation(
   let flow = await loadFlow();
   let refreshedFlow = false;
   while (true) {
-    if (cleanString(flow.fields.uid) !== identity.uid) {
+    if (readStoredFirebaseUid(flow.fields.uid) !== identity.uid) {
       throw new AuthApiFailure(
         403,
         "permission-denied",

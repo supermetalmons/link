@@ -47,6 +47,7 @@ import {
   type FirebaseRtdbClient,
   createFirebaseRtdbClient,
 } from "./firebaseRtdb.ts";
+import { isCanonicalFirebaseUid } from "./firebaseKeys.ts";
 import {
   assertAuthMethod,
   cleanString,
@@ -60,11 +61,13 @@ import {
   normalizeMethodValue,
   normalizeProfileMethod,
   profileMethodCooldownId,
+  readStoredFirebaseUid,
   PENDING_CLAIM_SYNC_FIELD_PATHS,
   PENDING_MERGE_GAME_COPY_FIELD_PATHS,
   PENDING_MERGE_PRIZE_COPY_FIELD_PATHS,
   throwMethodCooldown,
   throwProfileMethodCooldown,
+  uniqueStoredFirebaseUids,
   uniqueStrings,
 } from "./authPolicy.ts";
 import { enqueueAuthRecovery } from "./authRecoveryTask.ts";
@@ -335,7 +338,7 @@ function buildProfileMergePlan(
       authFailure(409, "failed-precondition", "merge-method-conflict");
     }
   }
-  const mergedLogins = uniqueStrings(
+  const mergedLogins = uniqueStoredFirebaseUids(
     target.fields.logins,
     source.fields.logins,
   );
@@ -688,6 +691,9 @@ export function createAuthIdentityService(
     uid: string,
     profileId: string,
   ): Promise<void> => {
+    if (!isCanonicalFirebaseUid(uid)) {
+      throw new TypeError("invalid-firebase-uid");
+    }
     const [user, profileLink] = await Promise.all([
       authClient.getUser(uid),
       rtdb.getPath(`players/${uid}/profile`, undefined, dependencies.signal),
@@ -730,7 +736,7 @@ export function createAuthIdentityService(
       return null;
     }
     const fields = operation.fields;
-    const existingUid = cleanString(fields.uid);
+    const existingUid = readStoredFirebaseUid(fields.uid);
     const existingKind = cleanString(fields.kind);
     const existingMethod = cleanString(fields.method);
     if (!existingUid || !existingKind || !existingMethod) {
@@ -788,7 +794,7 @@ export function createAuthIdentityService(
     meta: Record<string, unknown> | null,
   ): Promise<AuthProfileResponse | LinkedAuthMethodsResponse | null> => {
     const validateExisting = (existing: AuthFirestoreDocument): void => {
-      const existingUid = cleanString(existing.fields.uid);
+      const existingUid = readStoredFirebaseUid(existing.fields.uid);
       const existingKind = cleanString(existing.fields.kind);
       const existingMethod = cleanString(existing.fields.method);
       if (!existingUid || !existingKind || !existingMethod) {
@@ -1095,7 +1101,9 @@ export function createAuthIdentityService(
         }
       }
       const patch = methodPatch(input, now());
-      patch.logins = uniqueStrings(profile.fields.logins, [input.uid]);
+      patch.logins = uniqueStoredFirebaseUids(profile.fields.logins, [
+        input.uid,
+      ]);
       writes.push(
         authUpdateWrite(profileName, patch, Object.keys(patch), true),
         authUpdateWrite(indexName, {
@@ -1240,12 +1248,12 @@ export function createAuthIdentityService(
       }
       const pendingOpId = cleanString(target.fields.pendingClaimSyncOpId);
       const attemptedLogins = new Set(loginUids);
-      const pendingLogins = uniqueStrings(
+      const pendingLogins = uniqueStoredFirebaseUids(
         pendingOpId && pendingOpId !== opId
           ? target.fields.pendingClaimSyncLogins
-          : uniqueStrings(target.fields.pendingClaimSyncLogins).filter(
-              (loginUid) => !attemptedLogins.has(loginUid),
-            ),
+          : uniqueStoredFirebaseUids(
+              target.fields.pendingClaimSyncLogins,
+            ).filter((loginUid) => !attemptedLogins.has(loginUid)),
         failedLogins,
       );
       if (pendingLogins.length > 0) {
@@ -1801,7 +1809,9 @@ export function createAuthIdentityService(
     const sourceProfileId = cleanString(
       profile.fields.pendingMergeGameCopySourceProfileId,
     );
-    const pendingLogins = uniqueStrings(profile.fields.pendingClaimSyncLogins);
+    const pendingLogins = uniqueStoredFirebaseUids(
+      profile.fields.pendingClaimSyncLogins,
+    );
     if (deferRecovery && (sourceProfileId || pendingLogins.length > 0)) {
       if (!gameRecoveryWakeups.has(targetProfileId)) {
         await enqueueRecoveryBestEffort(targetProfileId);
@@ -1885,7 +1895,9 @@ export function createAuthIdentityService(
         }
         try {
           await reconcileProfileClaims({
-            loginUids: uniqueStrings(fresh.fields.pendingClaimSyncLogins),
+            loginUids: uniqueStoredFirebaseUids(
+              fresh.fields.pendingClaimSyncLogins,
+            ),
             opId: claimOpId,
             sourceProfileId:
               cleanString(fresh.fields.mergedSourceProfileId) ||
@@ -1977,7 +1989,7 @@ export function createAuthIdentityService(
         cleanString(fresh.fields.pendingClaimSyncOpId) || gameOpId;
       try {
         await reconcileProfileClaims({
-          loginUids: uniqueStrings(
+          loginUids: uniqueStoredFirebaseUids(
             fresh.fields.logins,
             fresh.fields.pendingClaimSyncLogins,
           ),
@@ -2278,7 +2290,7 @@ export function createAuthIdentityService(
       return null;
     }
     const fields = operation.fields;
-    const existingUid = cleanString(fields.uid);
+    const existingUid = readStoredFirebaseUid(fields.uid);
     const existingKind = cleanString(fields.kind);
     const existingMethod = cleanString(fields.method);
     if (!existingUid || !existingKind || !existingMethod) {
@@ -2349,7 +2361,7 @@ export function createAuthIdentityService(
     if (!intent) {
       authFailure(409, "failed-precondition", "intent-not-found");
     }
-    if (cleanString(intent.fields.uid) !== uid) {
+    if (readStoredFirebaseUid(intent.fields.uid) !== uid) {
       authFailure(403, "permission-denied", "intent-user-mismatch");
     }
     if (cleanString(intent.fields.method) !== method) {
@@ -2403,7 +2415,7 @@ export function createAuthIdentityService(
     );
     if (
       !fields ||
-      cleanString(fields.uid) !== uid ||
+      readStoredFirebaseUid(fields.uid) !== uid ||
       cleanString(fields.kind) !== "verify" ||
       cleanString(fields.method) !== method ||
       cleanString(record(fields.meta).intentId) !== intentId ||
@@ -2618,7 +2630,8 @@ export function createAuthIdentityService(
       const recovered = await recoverPendingProfileState(profile);
       return (
         !cleanString(recovered.fields.pendingClaimSyncOpId) &&
-        uniqueStrings(recovered.fields.pendingClaimSyncLogins).length === 0 &&
+        uniqueStoredFirebaseUids(recovered.fields.pendingClaimSyncLogins)
+          .length === 0 &&
         !cleanString(recovered.fields.pendingMergeGameCopySourceProfileId)
       );
     },

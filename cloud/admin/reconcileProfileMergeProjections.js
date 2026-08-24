@@ -92,6 +92,7 @@ const reconcileProfileMergeProjectionPage = async (
   const snapshot = await query.get();
   const candidates = snapshot.docs.slice(0, options.limit);
   const results = [];
+  const blockedProjections = new Map();
   const scannedProfileIds = new Set();
   for (const candidate of candidates) {
     const targetProfileId =
@@ -110,8 +111,16 @@ const reconcileProfileMergeProjectionPage = async (
       { scannedProfileIds },
     );
     results.push({ sourceProfileId: candidate.id, targetProfileId, ...result });
+    for (const projection of result.blockedProjections || []) {
+      blockedProjections.set(
+        `${projection.entityType}:${projection.id}`,
+        projection,
+      );
+    }
   }
   return {
+    complete: blockedProjections.size === 0,
+    blockedProjections: Array.from(blockedProjections.values()),
     dryRun: options.dryRun,
     hasMore: snapshot.docs.length > candidates.length,
     nextCursor:
@@ -130,6 +139,7 @@ const main = async (argv = process.argv.slice(2)) => {
   try {
     const result = await reconcileProfileMergeProjectionPage(options);
     stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return result;
   } catch (error) {
     throw addApplicationDefaultCredentialHelp(error);
   } finally {
@@ -138,10 +148,16 @@ const main = async (argv = process.argv.slice(2)) => {
 };
 
 if (require.main === module) {
-  main().catch((error) => {
-    console.error(error?.message || error);
-    process.exitCode = 1;
-  });
+  main()
+    .then((result) => {
+      if (!result.complete) {
+        process.exitCode = 1;
+      }
+    })
+    .catch((error) => {
+      console.error(error?.message || error);
+      process.exitCode = 1;
+    });
 }
 
 module.exports = {

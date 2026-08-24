@@ -1,20 +1,16 @@
+import { isAllowedAuthOrigin } from "./authHttp.ts";
+
 const X_AUTHORIZATION_URL = "https://x.com/i/oauth2/authorize";
 export const X_CALLBACK_URI = "https://api.mons.link/auth/x/callback";
 export const X_FLOW_TTL_MS = 10 * 60 * 1_000;
 export const X_FLOW_ID_PATTERN = /^[A-Za-z0-9_-]{24}$/;
 
 const DEFAULT_RETURN_URL = "https://mons.link/";
-const ALLOWED_RETURN_ORIGINS = new Set([
-  "https://mons.link",
-  "https://www.mons.link",
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-]);
 
 export function safeXReturnUrl(value: string): string {
   try {
     const url = new URL(value);
-    return ALLOWED_RETURN_ORIGINS.has(url.origin)
+    return !url.username && !url.password && isAllowedAuthOrigin(url.origin)
       ? url.toString()
       : DEFAULT_RETURN_URL;
   } catch {

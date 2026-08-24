@@ -9,13 +9,14 @@ const ALLOWED_AUTH_ORIGINS = new Set([
 const AUTH_PREVIEW_HOST_PATTERN =
   /^[0-9a-f]{8}-mons-link\.lil-org\.workers\.dev$/;
 
-function isAllowedAuthOrigin(origin: string): boolean {
+export function isAllowedAuthOrigin(origin: string): boolean {
   if (ALLOWED_AUTH_ORIGINS.has(origin)) {
     return true;
   }
   try {
     const url = new URL(origin);
     return (
+      url.origin === origin &&
       url.protocol === "https:" &&
       !url.port &&
       !url.username &&
