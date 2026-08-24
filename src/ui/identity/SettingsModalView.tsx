@@ -701,9 +701,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           return;
         }
 
-        if (result && result.ok === true) {
+        if (result && result.ok === true && handleLoginSuccess(result, kind)) {
           setAuthMessage("");
-          handleLoginSuccess(result, kind);
           setAuthStatusGlobally("authenticated");
         }
         if (method === "sol") {
@@ -838,9 +837,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       if (!isActionCurrent()) {
         return;
       }
-      if (result && result.ok === true) {
+      if (result && result.ok === true && handleLoginSuccess(result, "apple")) {
         setAuthMessage("");
-        handleLoginSuccess(result, "apple");
         setAuthStatusGlobally("authenticated");
       }
     } catch (error) {

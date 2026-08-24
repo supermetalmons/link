@@ -206,6 +206,13 @@ function hasMergeValue(value: unknown): boolean {
   return true;
 }
 
+function isRetiredMergeSource(fields: Record<string, unknown>): boolean {
+  return (
+    cleanString(fields.mergedIntoProfileId) !== "" ||
+    fields.mergeSourceRetainedForGameCopy === true
+  );
+}
+
 function mergeCustom(
   target: Record<string, unknown>,
   source: Record<string, unknown>,
@@ -2053,6 +2060,9 @@ export function createAuthIdentityService(
   ): Promise<AuthFirestoreDocument> => {
     const profileId = profile.id;
     const profileName = profile.name;
+    if (isRetiredMergeSource(profile.fields)) {
+      authFailure(409, "aborted", "profile-merged-retry");
+    }
     const currentUsername = cleanString(profile.fields.username);
     if (
       (currentUsername && !isReservedExplicitUsername(currentUsername)) ||
@@ -2090,6 +2100,9 @@ export function createAuthIdentityService(
         const liveProfile = getOne(snapshots, profileName);
         if (!liveProfile) {
           authFailure(404, "not-found", "profile-not-found");
+        }
+        if (isRetiredMergeSource(liveProfile.fields)) {
+          authFailure(409, "aborted", "profile-merged-retry");
         }
         const explicit = cleanString(liveProfile.fields.username);
         if (
@@ -2524,41 +2537,62 @@ export function createAuthIdentityService(
         if (!linked) {
           authFailure(409, "aborted", "method-index-race-retry");
         }
-        let profile = await firestore.get(
-          authDocumentName("users", targetProfileId),
-        );
-        if (!profile) {
-          authFailure(500, "internal", "target-profile-missing");
-        }
-        profile = await recoverPendingProfileState(profile);
-        await enqueuePendingGameRecovery(profile);
-        if (input.method === "apple" || input.method === "x") {
-          profile = await assignUsername(
+        for (let attempt = 0; attempt < LINK_METHOD_MAX_ATTEMPTS; attempt++) {
+          let profile = await profileByLogin(input.uid);
+          if (!profile) {
+            authFailure(500, "internal", "target-profile-missing");
+          }
+          targetProfileId = profile.id;
+          profile = await recoverPendingProfileState(profile);
+          await enqueuePendingGameRecovery(profile);
+          if (
+            normalizeProfileMethod(input.method, profile.fields) !==
+            input.normalizedMethodValue
+          ) {
+            authFailure(409, "aborted", "method-index-race-retry");
+          }
+          if (input.method === "apple" || input.method === "x") {
+            try {
+              profile = await assignUsername(
+                profile,
+                input.method === "x" ? input.xUsername : null,
+              );
+            } catch (error) {
+              if (
+                error instanceof AuthApiFailure &&
+                error.message === "profile-merged-retry"
+              ) {
+                continue;
+              }
+              throw error;
+            }
+          }
+          const response = profileResponse(
             profile,
-            input.method === "x" ? input.xUsername : null,
+            input.uid,
+            input.preferredAddress || null,
+            input.opId,
           );
-        }
-        const response = profileResponse(
-          profile,
-          input.uid,
-          input.preferredAddress || null,
-          input.opId,
-        );
-        await finishOpBestEffort(input.opId, { result: response });
-        if (
-          await reconcileProfileClaimsBestEffort({
-            loginUids: [input.uid],
-            opId: input.opId,
-            sourceProfileId:
-              cleanString(profile.fields.mergedSourceProfileId) ||
+          await finishOpBestEffort(input.opId, { result: response });
+          if (
+            await reconcileProfileClaimsBestEffort({
+              loginUids: [input.uid],
+              opId: input.opId,
+              sourceProfileId:
+                cleanString(profile.fields.mergedSourceProfileId) ||
+                targetProfileId,
+              targetName: profile.name,
               targetProfileId,
-            targetName: profile.name,
-            targetProfileId,
-          })
-        ) {
-          await enqueueRecoveryBestEffort(targetProfileId);
+            })
+          ) {
+            await enqueueRecoveryBestEffort(targetProfileId);
+          }
+          const confirmedProfile = await profileByLogin(input.uid);
+          if (confirmedProfile?.id === profile.id) {
+            return response;
+          }
         }
-        return response;
+        authFailure(409, "aborted", "profile-merged-retry");
       } catch (error) {
         await finishOpBestEffort(input.opId, { error });
         throw error;

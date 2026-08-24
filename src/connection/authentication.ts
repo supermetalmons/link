@@ -193,8 +193,9 @@ export function useAuthStatus() {
         clearConsumedAppleRedirectResult();
         if (res && res.ok === true) {
           setSignInInlineAuthError(null);
-          handleLoginSuccess(res, "apple");
-          setAuthStatus("authenticated");
+          if (handleLoginSuccess(res, "apple")) {
+            setAuthStatus("authenticated");
+          }
         } else if (shouldForceUnauthenticatedOnFailure) {
           setAuthStatus("unauthenticated");
         }
@@ -259,14 +260,15 @@ export function useAuthStatus() {
         clearConsumedXRedirectResult();
         if (res && res.ok === true) {
           setSignInInlineAuthError(null);
-          handleLoginSuccess(res, "x");
-          setAuthStatus("authenticated");
-          if (redirectResult.consentSource === "settings") {
-            publishXAuthUiFeedback({
-              target: "settings",
-              kind: "success",
-              message: "X linked successfully.",
-            });
+          if (handleLoginSuccess(res, "x")) {
+            setAuthStatus("authenticated");
+            if (redirectResult.consentSource === "settings") {
+              publishXAuthUiFeedback({
+                target: "settings",
+                kind: "success",
+                message: "X linked successfully.",
+              });
+            }
           }
         } else if (shouldForceUnauthenticatedOnFailure) {
           setAuthStatus("unauthenticated");

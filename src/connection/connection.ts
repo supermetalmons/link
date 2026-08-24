@@ -1363,6 +1363,10 @@ class Connection {
     return createUserBoundAuthTokenProvider(user, () => this.auth.currentUser);
   }
 
+  public isCurrentAuthUser(uid: string): boolean {
+    return this.auth.currentUser?.uid === uid;
+  }
+
   public async beginAuthIntent(
     method: AuthMethodKey,
   ): Promise<AuthIntentResponse> {

@@ -12,6 +12,7 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 const ctx = {
   waitUntil: () => undefined,
 };
+const X_INTENT_ID = "abcdefghijklmnopqrstuvwx";
 
 const env = {
   ...TELEGRAM_TEST_ENV,
@@ -503,7 +504,7 @@ test("creates an exact X flow with bounded intent and PKCE state", async () => {
   const rateKeys: string[] = [];
   const response = await handleAuthRoute(
     request("/auth/x/flows", "POST", {
-      intentId: "intent-1",
+      intentId: X_INTENT_ID,
       consentSource: "settings",
       returnUrl: "https://mons.link/settings?tab=identity",
     }),
@@ -544,13 +545,13 @@ test("creates an exact X flow with bounded intent and PKCE state", async () => {
   assert.equal(created[0].returnUrl, "https://mons.link/settings?tab=identity");
   assert.equal(created[0].codeVerifier.length, 64);
   assert.equal(created[0].codeChallenge.length, 43);
-  assert.deepEqual(rateKeys, ["auth-x-flow:firebase-uid:intent-1"]);
+  assert.deepEqual(rateKeys, ["auth-x-flow:firebase-uid"]);
 });
 
 test("rate limits X flow reads and creation", async () => {
   let intentReads = 0;
   const response = await handleAuthRoute(
-    request("/auth/x/flows", "POST", { intentId: "intent-1" }),
+    request("/auth/x/flows", "POST", { intentId: X_INTENT_ID }),
     {
       ...env,
       AUTH_RATE_LIMITER: { limit: async () => ({ success: false }) },
@@ -568,6 +569,24 @@ test("rate limits X flow reads and creation", async () => {
   );
   assert.equal(response.status, 429);
   assert.equal(intentReads, 0);
+
+  let rateCalls = 0;
+  const invalid = await handleAuthRoute(
+    request("/auth/x/flows", "POST", { intentId: "short" }),
+    {
+      ...env,
+      AUTH_RATE_LIMITER: {
+        limit: async () => {
+          rateCalls++;
+          return { success: true };
+        },
+      },
+    } as Env,
+    ctx,
+    { repository: repository(), verifyIdentity },
+  );
+  assert.equal(invalid.status, 400);
+  assert.equal(rateCalls, 0);
 });
 
 test("rejects disabled, missing, foreign, wrong-method, and stale X intents", async () => {
@@ -625,7 +644,7 @@ test("rejects disabled, missing, foreign, wrong-method, and stale X intents", as
   ];
   for (const entry of cases) {
     const response = await handleAuthRoute(
-      request("/auth/x/flows", "POST", { intentId: "intent-1" }),
+      request("/auth/x/flows", "POST", { intentId: X_INTENT_ID }),
       entry.testEnv || env,
       ctx,
       {
@@ -642,7 +661,7 @@ test("falls back unsafe X return URLs and sanitizes repository failures", async 
   const created: XRedirectFlowDocument[] = [];
   const response = await handleAuthRoute(
     request("/auth/x/flows", "POST", {
-      intentId: "intent-1",
+      intentId: X_INTENT_ID,
       returnUrl: "https://attacker.invalid/steal",
     }),
     env,

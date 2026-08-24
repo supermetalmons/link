@@ -616,6 +616,89 @@ test("converges on a login profile that appears before method attachment", async
   );
 });
 
+test("finalizes a link on the canonical profile after a concurrent merge", async () => {
+  const xUserId = "2244994945";
+  const memory = memoryFirestore([
+    {
+      collection: "users",
+      id: "source-profile",
+      fields: {
+        logins: ["login-1"],
+        appleSub: "apple-subject-1",
+        custom: { emoji: 1 },
+      },
+    },
+  ]);
+  const runTransaction = memory.client.runTransaction;
+  let transactions = 0;
+  memory.client.runTransaction = async <T>(
+    work: Parameters<AuthFirestoreClient["runTransaction"]>[0],
+  ) => {
+    const result = await runTransaction(work);
+    transactions++;
+    if (transactions === 1) {
+      const sourceName = authDocumentName("users", "source-profile");
+      const source = memory.documents.get(sourceName);
+      assert.ok(source);
+      const targetName = authDocumentName("users", "target-profile");
+      const targetFields = structuredClone(source.fields);
+      memory.documents.set(targetName, {
+        id: "target-profile",
+        name: targetName,
+        fields: targetFields,
+        rawFields: encodeFields(targetFields),
+        updateTime: "2026-08-22T00:00:01Z",
+      });
+      source.fields = {
+        logins: [],
+        mergedIntoProfileId: "target-profile",
+        mergeSourceRetainedForGameCopy: true,
+      };
+      source.rawFields = encodeFields(source.fields);
+      const indexName = authDocumentName(
+        "authMethodIndex",
+        getMethodKey("x", xUserId),
+      );
+      const index = memory.documents.get(indexName);
+      assert.ok(index);
+      index.fields.profileId = "target-profile";
+      index.rawFields = encodeFields(index.fields);
+    }
+    return result as T;
+  };
+  const deps = dependencies(memory.client);
+  const service = createAuthIdentityService(env, {
+    ...deps,
+    now: () => 2_350_000,
+    randomInteger: () => 0,
+  });
+
+  const response = await service.linkVerifiedMethod({
+    uid: "login-1",
+    method: "x",
+    methodValueRaw: xUserId,
+    normalizedMethodValue: xUserId,
+    requestEmoji: 1,
+    requestAura: null,
+    preferredAddress: null,
+    xUsername: "Mons",
+    opId: "concurrent-final-profile",
+  });
+
+  assert.equal(response.profileId, "target-profile");
+  assert.equal(response.username, "Mons");
+  assert.equal(deps.claims.get("login-1")?.profileId, "target-profile");
+  assert.equal(
+    deps.rtdbValues.get("players/login-1/profile"),
+    "target-profile",
+  );
+  assert.equal(
+    memory.documents.get(authDocumentName("users", "source-profile"))?.fields
+      .username,
+    undefined,
+  );
+});
+
 test("rejects legacy Ethereum owners split across checksum representations", async () => {
   const normalized = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
   const checksummed = "0xABCDEFabcdefABCDEFabcdefABCDEFabcdefABCD";

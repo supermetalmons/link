@@ -698,6 +698,10 @@ test("migrated auth responses remain typed through client consumers", () => {
   assert.doesNotMatch(loginSuccess, /profile as any/);
   assert.doesNotMatch(settings, /result:\s*any/);
   assert.match(
+    loginSuccess,
+    /if \(!connection\.isCurrentAuthUser\(res\.uid\)\)/,
+  );
+  assert.match(
     settings,
     /const result = \(await connection\.unlinkAuthMethod\(method\)\)\.read\(\);/,
   );

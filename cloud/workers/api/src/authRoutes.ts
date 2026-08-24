@@ -49,6 +49,7 @@ import { featureDisabled } from "./authPolicy.ts";
 
 const AUTH_INTENT_TTL_MS = 5 * 60 * 1_000;
 const CREATE_ID_ATTEMPTS = 3;
+const AUTH_TOKEN_PATTERN = /^[A-Za-z0-9_-]{24}$/;
 
 export type AuthRouteDependencies = {
   logFailure?: (kind: string) => void;
@@ -166,10 +167,10 @@ async function handleBeginXFlow(
   const body = await parseBody(request);
   const intentId =
     typeof body.intentId === "string" ? body.intentId.trim() : "";
-  if (!intentId) {
+  if (!AUTH_TOKEN_PATTERN.test(intentId)) {
     throw new AuthApiFailure(400, "invalid-argument", "intentId is required.");
   }
-  await enforceAuthRateLimit(env, `auth-x-flow:${identity.uid}:${intentId}`);
+  await enforceAuthRateLimit(env, `auth-x-flow:${identity.uid}`);
   const intent = await repository.getAuthIntent(intentId);
   if (!intent) {
     throw new AuthApiFailure(409, "failed-precondition", "x-intent-invalid");

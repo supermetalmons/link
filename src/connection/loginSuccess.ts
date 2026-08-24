@@ -28,7 +28,10 @@ export type AddressKind = "eth" | "sol" | "apple" | "x";
 export function handleLoginSuccess(
   res: AuthProfileResponse,
   addressKind: AddressKind,
-): void {
+): boolean {
+  if (!connection.isCurrentAuthUser(res.uid)) {
+    return false;
+  }
   enforcePendingLogoutWipeIfNeeded();
   const { emoji, profileId } = res;
   const username = res.username ?? "";
@@ -124,4 +127,5 @@ export function handleLoginSuccess(
   }
 
   handleFreshlySignedInProfileInGameIfNeeded(profileId);
+  return true;
 }

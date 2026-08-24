@@ -1062,9 +1062,8 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
         signature,
         intentId,
       );
-      if (res && res.ok === true) {
+      if (res && res.ok === true && handleLoginSuccess(res, "sol")) {
         setInlineAuthError("");
-        handleLoginSuccess(res, "sol");
         setAuthStatusGlobally("authenticated");
         setIsOpen(false);
         hideShinyCard();
@@ -1154,9 +1153,8 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
       if (!isActionCurrent()) {
         return;
       }
-      if (res && res.ok === true) {
+      if (res && res.ok === true && handleLoginSuccess(res, "apple")) {
         setInlineAuthError("");
-        handleLoginSuccess(res, "apple");
         setAppleStateIfMounted("idle");
         setAuthStatusGlobally("authenticated");
         setIsOpen(false);
@@ -1196,9 +1194,8 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
         signature,
         intentId,
       );
-      if (res && res.ok === true) {
+      if (res && res.ok === true && handleLoginSuccess(res, "eth")) {
         setInlineAuthError("");
-        handleLoginSuccess(res, "eth");
         setAuthStatusGlobally("authenticated");
         setIsOpen(false);
         hideShinyCard();
