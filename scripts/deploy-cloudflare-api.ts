@@ -6,8 +6,15 @@ import type {
 
 const { spawnSync } = require("node:child_process");
 const { randomBytes } = require("node:crypto");
-const { existsSync, mkdirSync, readFileSync, unlinkSync } = require("node:fs");
+const {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} = require("node:fs");
 const { resolve } = require("node:path");
+const typescript: typeof import("typescript") = require("typescript");
 const {
   isExactNftApiResponse,
   NFT_RESPONSE_ARRAY_KEYS,
@@ -71,6 +78,11 @@ export type RuntimeDependencies = {
   mkdir: (path: string, options: { recursive: true }) => void;
   readFile: (path: string, encoding: "utf8") => string;
   unlink: (path: string) => void;
+  writeFile: (
+    path: string,
+    contents: string,
+    options: { encoding: "utf8"; flag: "wx"; mode: number },
+  ) => void;
   fetch: typeof fetch;
   sleep: (milliseconds: number) => Promise<void>;
   createSmokeState?: () => string;
@@ -87,17 +99,38 @@ type SmokeFetchResult = {
   bodyText?: string;
 };
 
+type AuthKillSwitchValue = "false" | "true";
+type AuthKillSwitchName = (typeof AUTH_KILL_SWITCH_NAMES)[number];
+type AuthKillSwitches = Record<AuthKillSwitchName, AuthKillSwitchValue>;
+type WranglerConfig = Record<string, unknown>;
+type AuthRecoveryConsumerBody = {
+  dead_letter_queue: string;
+  script_name: string;
+  settings: {
+    batch_size: number;
+    max_concurrency: number;
+    max_retries: number;
+    max_wait_time_ms: number;
+    retry_delay: number;
+  };
+  type: "worker";
+};
+
 const WORKER_NAME = "mons-link-api";
 const AUTH_RECOVERY_QUEUE = "mons-link-auth-recovery";
-const AUTH_RECOVERY_DLQ = "mons-link-auth-recovery-dlq";
+const CLOUDFLARE_API_BASE_URL = "https://api.cloudflare.com/client/v4";
+const CLOUDFLARE_API_RESPONSE_MAX_BYTES = 256 * 1024;
+const CLOUDFLARE_API_TIMEOUT_MS = 15_000;
+const AUTH_KILL_SWITCH_NAMES = [
+  "AUTH_DISABLE_APPLE_VERIFY",
+  "AUTH_DISABLE_X_VERIFY",
+  "AUTH_DISABLE_UNLINK",
+  "AUTH_DISABLE_MERGE",
+] as const;
+const DOTENV_LINE_PATTERN =
+  /(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/gm;
 const API_CONFIG = "cloud/workers/api/wrangler.jsonc";
 const WRANGLER_RELEASE_ENV_FILE = "cloud/workers/api/release.env";
-const WRANGLER_CONFIG_ARGS = [
-  "--config",
-  API_CONFIG,
-  "--env-file",
-  WRANGLER_RELEASE_ENV_FILE,
-];
 const PRODUCTION_URL = "https://api.mons.link";
 const SMOKE_ORIGIN = "https://mons.link";
 const X_CALLBACK_PATH = "/auth/x/callback";
@@ -139,7 +172,7 @@ const VERSION_ID_PATTERN =
 
 function usage(): string {
   return [
-    "Release the mons-link-api Worker, update its triggers, or attach its recovery consumer.",
+    "Release the mons-link-api Worker, update its triggers, or reconcile its recovery consumer.",
     "",
     "Usage:",
     "  npm run deploy:api -- preview --smoke-sol <wallet> [--secrets-file <path>] [--token-file <path>]",
@@ -150,6 +183,9 @@ function usage(): string {
     "Authentication:",
     "  Pass --token-file, or set CLOUDFLARE_API_TOKEN in the shell.",
     "  The token is provided only to Wrangler and is never printed.",
+    "",
+    "Preview inputs:",
+    "  Explicitly set all four AUTH_DISABLE_* variables to true or false.",
   ].join("\n");
 }
 
@@ -265,6 +301,7 @@ function createChildEnvironment(
       normalized.startsWith("CF_") ||
       normalized.startsWith("WRANGLER_") ||
       normalized.startsWith("TELEGRAM_") ||
+      normalized.startsWith("AUTH_DISABLE_") ||
       normalized === "HELIUS_RPC_API_KEY" ||
       normalized === "X_CLIENT_ID" ||
       normalized === "X_CLIENT_SECRET" ||
@@ -277,6 +314,415 @@ function createChildEnvironment(
       normalized === "FIREBASE_RTDB_URL" ||
       normalized === "DOTENV_KEY",
   );
+}
+
+function readAuthKillSwitches(source: ProcessEnvironment): AuthKillSwitches {
+  const entries = AUTH_KILL_SWITCH_NAMES.map((name) => {
+    const value = source[name]?.trim();
+    if (value !== "true" && value !== "false") {
+      throw new DeployError(
+        `${name} must be explicitly set to true or false for preview uploads.`,
+        2,
+      );
+    }
+    return [name, value] as const;
+  });
+  return Object.fromEntries(entries) as AuthKillSwitches;
+}
+
+function wranglerConfigArgs(configPath: string): string[] {
+  return ["--config", configPath, "--env-file", WRANGLER_RELEASE_ENV_FILE];
+}
+
+function readTrackedWranglerConfig(
+  dependencies: RuntimeDependencies,
+): WranglerConfig {
+  const sourcePath = resolve(dependencies.repoRoot, API_CONFIG);
+  const parsed = typescript.parseConfigFileTextToJson(
+    sourcePath,
+    dependencies.readFile(sourcePath, "utf8"),
+  );
+  if (parsed.error || !parsed.config || typeof parsed.config !== "object") {
+    throw new DeployError("Unable to parse the API Wrangler configuration.");
+  }
+  return parsed.config as WranglerConfig;
+}
+
+function getAuthRecoveryConsumer(config: WranglerConfig): WranglerConfig {
+  const queues = config.queues;
+  if (!queues || typeof queues !== "object" || Array.isArray(queues)) {
+    throw new DeployError("API Wrangler Queue configuration is invalid.");
+  }
+  const consumers = (queues as WranglerConfig).consumers;
+  if (!Array.isArray(consumers)) {
+    throw new DeployError("API Wrangler Queue consumers are invalid.");
+  }
+  const authConsumers = consumers.filter(
+    (consumer): consumer is WranglerConfig =>
+      !!consumer &&
+      typeof consumer === "object" &&
+      !Array.isArray(consumer) &&
+      (consumer as WranglerConfig).queue === AUTH_RECOVERY_QUEUE,
+  );
+  if (authConsumers.length !== 1) {
+    throw new DeployError(
+      "API Wrangler configuration must contain one auth recovery consumer.",
+    );
+  }
+  return authConsumers[0];
+}
+
+function writeTemporaryWranglerConfig(
+  config: WranglerConfig,
+  dependencies: RuntimeDependencies,
+): string {
+  const temporaryPath = resolve(
+    dependencies.repoRoot,
+    "cloud",
+    "workers",
+    "api",
+    `.wrangler-release-${dependencies.pid}-${dependencies.now()}.json`,
+  );
+  dependencies.writeFile(
+    temporaryPath,
+    `${JSON.stringify(config, null, 2)}\n`,
+    {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    },
+  );
+  return temporaryPath;
+}
+
+function createTemporaryReleaseConfig(
+  authKillSwitches: AuthKillSwitches | undefined,
+  dependencies: RuntimeDependencies,
+): string {
+  const config = readTrackedWranglerConfig(dependencies);
+  const authConsumer = getAuthRecoveryConsumer(config);
+
+  const vars = config.vars;
+  if (!vars || typeof vars !== "object" || Array.isArray(vars)) {
+    throw new DeployError("API Wrangler variables are invalid.");
+  }
+  for (const name of AUTH_KILL_SWITCH_NAMES) {
+    const current = (vars as Record<string, unknown>)[name];
+    if (current !== "true" && current !== "false") {
+      throw new DeployError(`Tracked ${name} must be true or false.`);
+    }
+    if (authKillSwitches) {
+      (vars as Record<string, unknown>)[name] = authKillSwitches[name];
+    }
+  }
+
+  const queues = config.queues as WranglerConfig;
+  queues.consumers = (queues.consumers as unknown[]).filter(
+    (consumer) => consumer !== authConsumer,
+  );
+  return writeTemporaryWranglerConfig(config, dependencies);
+}
+
+function readSecretsFileKeys(contents: string): string[] {
+  try {
+    const parsed = JSON.parse(contents) as unknown;
+    if (parsed && typeof parsed === "object") {
+      return Object.keys(parsed);
+    }
+    return [];
+  } catch {}
+
+  const keys: string[] = [];
+  DOTENV_LINE_PATTERN.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = DOTENV_LINE_PATTERN.exec(contents))) {
+    keys.push(match[1]);
+  }
+  return keys;
+}
+
+function validateSecretsFile(
+  secretsFile: string,
+  dependencies: RuntimeDependencies,
+): void {
+  let contents: string;
+  try {
+    contents = dependencies.readFile(secretsFile, "utf8");
+  } catch {
+    throw new DeployError("Unable to read --secrets-file.");
+  }
+  if (
+    readSecretsFileKeys(contents).some((name) =>
+      name.startsWith("AUTH_DISABLE_"),
+    )
+  ) {
+    throw new DeployError(
+      "--secrets-file must not define AUTH_DISABLE_* variables; set reviewed kill switches in the shell.",
+      2,
+    );
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function readTrackedConsumerInteger(
+  consumer: WranglerConfig,
+  name: string,
+  minimum: number,
+): number {
+  const value = consumer[name];
+  if (
+    typeof value !== "number" ||
+    !Number.isSafeInteger(value) ||
+    value < minimum
+  ) {
+    throw new DeployError("Auth recovery consumer configuration is invalid.");
+  }
+  return value;
+}
+
+function readAuthRecoveryConsumerRequest(dependencies: RuntimeDependencies): {
+  accountId: string;
+  body: AuthRecoveryConsumerBody;
+} {
+  const config = readTrackedWranglerConfig(dependencies);
+  if (
+    config.name !== WORKER_NAME ||
+    typeof config.account_id !== "string" ||
+    !/^[A-Za-z0-9_-]{1,128}$/.test(config.account_id)
+  ) {
+    throw new DeployError("API Wrangler identity configuration is invalid.");
+  }
+  const consumer = getAuthRecoveryConsumer(config);
+  const batchTimeout = readTrackedConsumerInteger(
+    consumer,
+    "max_batch_timeout",
+    0,
+  );
+  const maxWaitTime = batchTimeout * 1_000;
+  const deadLetterQueue = consumer.dead_letter_queue;
+  if (
+    !Number.isSafeInteger(maxWaitTime) ||
+    typeof deadLetterQueue !== "string" ||
+    !deadLetterQueue.trim()
+  ) {
+    throw new DeployError("Auth recovery consumer configuration is invalid.");
+  }
+  return {
+    accountId: config.account_id,
+    body: {
+      type: "worker",
+      script_name: WORKER_NAME,
+      dead_letter_queue: deadLetterQueue,
+      settings: {
+        batch_size: readTrackedConsumerInteger(consumer, "max_batch_size", 1),
+        max_retries: readTrackedConsumerInteger(consumer, "max_retries", 0),
+        max_wait_time_ms: maxWaitTime,
+        max_concurrency: readTrackedConsumerInteger(
+          consumer,
+          "max_concurrency",
+          1,
+        ),
+        retry_delay: readTrackedConsumerInteger(consumer, "retry_delay", 0),
+      },
+    },
+  };
+}
+
+async function readBoundedCloudflareResponse(
+  response: Response,
+  label: string,
+): Promise<unknown> {
+  const contentLength = Number(response.headers.get("content-length"));
+  if (
+    Number.isFinite(contentLength) &&
+    contentLength > CLOUDFLARE_API_RESPONSE_MAX_BYTES
+  ) {
+    await discardResponseBody(response);
+    throw new DeployError(`${label} returned an oversized response.`);
+  }
+  if (!response.body) {
+    throw new DeployError(`${label} returned an invalid response.`);
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        break;
+      }
+      totalBytes += chunk.value.byteLength;
+      if (totalBytes > CLOUDFLARE_API_RESPONSE_MAX_BYTES) {
+        await reader.cancel().catch(() => undefined);
+        throw new DeployError(`${label} returned an oversized response.`);
+      }
+      chunks.push(chunk.value);
+    }
+  } catch (error) {
+    if (error instanceof DeployError) {
+      throw error;
+    }
+    throw new DeployError(`${label} returned an unreadable response.`);
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+  } catch {
+    throw new DeployError(`${label} returned an invalid response.`);
+  }
+}
+
+async function requestCloudflareApi(
+  url: URL,
+  init: { body?: string; method: "GET" | "POST" | "PUT" },
+  apiToken: string,
+  label: string,
+  dependencies: RuntimeDependencies,
+): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await dependencies.fetch(url, {
+      method: init.method,
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${apiToken}`,
+        ...(init.body ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(init.body ? { body: init.body } : {}),
+      redirect: "manual",
+      signal: AbortSignal.timeout(CLOUDFLARE_API_TIMEOUT_MS),
+    });
+  } catch {
+    throw new DeployError(`${label} request failed.`);
+  }
+  if (!response.ok) {
+    await discardResponseBody(response);
+    throw new DeployError(`${label} returned HTTP ${response.status}.`);
+  }
+  const envelope = await readBoundedCloudflareResponse(response, label);
+  if (
+    !isRecord(envelope) ||
+    envelope.success !== true ||
+    !("result" in envelope)
+  ) {
+    throw new DeployError(`${label} returned an invalid response.`);
+  }
+  return envelope.result;
+}
+
+function readCloudflareIdentifier(value: unknown, label: string): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) {
+    throw new DeployError(`${label} returned an invalid response.`);
+  }
+  return value;
+}
+
+async function reconcileAuthRecoveryConsumer(
+  apiToken: string,
+  dependencies: RuntimeDependencies,
+): Promise<void> {
+  const { accountId, body } = readAuthRecoveryConsumerRequest(dependencies);
+  const queuesUrl = new URL(
+    `${CLOUDFLARE_API_BASE_URL}/accounts/${accountId}/queues`,
+  );
+  queuesUrl.searchParams.set("name", AUTH_RECOVERY_QUEUE);
+  queuesUrl.searchParams.set("page", "1");
+  const queueResult = await requestCloudflareApi(
+    queuesUrl,
+    { method: "GET" },
+    apiToken,
+    "Cloudflare Queue lookup",
+    dependencies,
+  );
+  if (!Array.isArray(queueResult) || queueResult.length > 100) {
+    throw new DeployError(
+      "Cloudflare Queue lookup returned an invalid response.",
+    );
+  }
+  const matchingQueues = queueResult.filter(
+    (queue): queue is WranglerConfig =>
+      isRecord(queue) && queue.queue_name === AUTH_RECOVERY_QUEUE,
+  );
+  if (matchingQueues.length !== 1) {
+    throw new DeployError(
+      "Cloudflare Queue lookup returned an invalid response.",
+    );
+  }
+
+  const queue = matchingQueues[0];
+  const queueId = readCloudflareIdentifier(
+    queue.queue_id,
+    "Cloudflare Queue lookup",
+  );
+  if (!Array.isArray(queue.consumers) || queue.consumers.length > 100) {
+    throw new DeployError(
+      "Cloudflare Queue lookup returned an invalid response.",
+    );
+  }
+  const matchingConsumers = queue.consumers.filter(
+    (consumer): consumer is WranglerConfig =>
+      isRecord(consumer) &&
+      consumer.type === "worker" &&
+      (consumer.script === WORKER_NAME || consumer.service === WORKER_NAME),
+  );
+  if (matchingConsumers.length > 1) {
+    throw new DeployError(
+      "Cloudflare Queue lookup returned an invalid response.",
+    );
+  }
+
+  const consumerId = matchingConsumers[0]
+    ? readCloudflareIdentifier(
+        matchingConsumers[0].consumer_id,
+        "Cloudflare Queue lookup",
+      )
+    : undefined;
+  const consumerUrl = new URL(
+    `${CLOUDFLARE_API_BASE_URL}/accounts/${accountId}/queues/${queueId}/consumers${consumerId ? `/${consumerId}` : ""}`,
+  );
+  const result = await requestCloudflareApi(
+    consumerUrl,
+    { method: consumerId ? "PUT" : "POST", body: JSON.stringify(body) },
+    apiToken,
+    "Cloudflare Queue consumer update",
+    dependencies,
+  );
+  if (!isRecord(result)) {
+    throw new DeployError(
+      "Cloudflare Queue consumer update returned an invalid response.",
+    );
+  }
+  const returnedConsumerId = readCloudflareIdentifier(
+    result.consumer_id,
+    "Cloudflare Queue consumer update",
+  );
+  if (consumerId && returnedConsumerId !== consumerId) {
+    throw new DeployError(
+      "Cloudflare Queue consumer update returned an invalid response.",
+    );
+  }
+}
+
+function removeTemporaryFile(
+  path: string,
+  dependencies: RuntimeDependencies,
+): void {
+  try {
+    dependencies.unlink(path);
+  } catch {}
 }
 
 function readApiToken(
@@ -762,6 +1208,7 @@ function createDefaultDependencies(): RuntimeDependencies {
     mkdir: mkdirSync,
     readFile: readFileSync,
     unlink: unlinkSync,
+    writeFile: writeFileSync,
     fetch,
     sleep: (milliseconds) =>
       new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)),
@@ -828,57 +1275,46 @@ async function execute(
   if (options.mode === "triggers") {
     wranglerEnvironment.CLOUDFLARE_API_TOKEN = apiToken;
     dependencies.log("[api-deploy] Applying reviewed Worker triggers.");
-    run(
-      dependencies.nodeExecutable,
-      [wranglerCliPath, "triggers", "deploy", ...WRANGLER_CONFIG_ARGS],
-      wranglerEnvironment,
-      "Wrangler trigger deployment",
-      dependencies,
-    );
+    const releaseConfig = createTemporaryReleaseConfig(undefined, dependencies);
+    try {
+      run(
+        dependencies.nodeExecutable,
+        [
+          wranglerCliPath,
+          "triggers",
+          "deploy",
+          ...wranglerConfigArgs(releaseConfig),
+        ],
+        wranglerEnvironment,
+        "Wrangler trigger deployment",
+        dependencies,
+      );
+    } finally {
+      removeTemporaryFile(releaseConfig, dependencies);
+    }
     dependencies.log("[api-deploy] Worker triggers applied.");
     return;
   }
 
   if (options.mode === "consumer") {
-    wranglerEnvironment.CLOUDFLARE_API_TOKEN = apiToken;
-    dependencies.log("[api-deploy] Attaching auth recovery consumer.");
-    run(
-      dependencies.nodeExecutable,
-      [
-        wranglerCliPath,
-        "queues",
-        "consumer",
-        "add",
-        AUTH_RECOVERY_QUEUE,
-        WORKER_NAME,
-        "--batch-size",
-        "1",
-        "--batch-timeout",
-        "1",
-        "--message-retries",
-        "100",
-        "--retry-delay-secs",
-        "60",
-        "--dead-letter-queue",
-        AUTH_RECOVERY_DLQ,
-        "--max-concurrency",
-        "1",
-        ...WRANGLER_CONFIG_ARGS,
-      ],
-      wranglerEnvironment,
-      "Wrangler auth recovery consumer attachment",
-      dependencies,
-    );
-    dependencies.log("[api-deploy] Auth recovery consumer attached.");
+    dependencies.log("[api-deploy] Reconciling auth recovery consumer.");
+    await reconcileAuthRecoveryConsumer(apiToken, dependencies);
+    dependencies.log("[api-deploy] Auth recovery consumer reconciled.");
     return;
   }
 
   if (options.mode === "preview") {
+    const authKillSwitches = readAuthKillSwitches(dependencies.processEnv);
+    dependencies.log(
+      `[api-deploy] Auth kill switches: ${AUTH_KILL_SWITCH_NAMES.map(
+        (name) => `${name}=${authKillSwitches[name]}`,
+      ).join(" ")}`,
+    );
     const secretsFile = options.secretsFile
       ? resolve(options.secretsFile)
       : undefined;
-    if (secretsFile && !dependencies.exists(secretsFile)) {
-      throw new DeployError("Unable to read --secrets-file.");
+    if (secretsFile) {
+      validateSecretsFile(secretsFile, dependencies);
     }
     dependencies.log("[api-deploy] Running complete API validation.");
     run(
@@ -896,6 +1332,10 @@ async function execute(
       dependencies,
     );
 
+    const releaseConfig = createTemporaryReleaseConfig(
+      authKillSwitches,
+      dependencies,
+    );
     const outputFile = resolve(
       logDirectory,
       `api-upload-${dependencies.pid}-${dependencies.now()}.json`,
@@ -906,7 +1346,7 @@ async function execute(
       "versions",
       "upload",
       "--strict",
-      ...WRANGLER_CONFIG_ARGS,
+      ...wranglerConfigArgs(releaseConfig),
       ...(secretsFile ? ["--secrets-file", secretsFile] : []),
     ];
     dependencies.log("[api-deploy] Uploading an undeployed candidate version.");
@@ -921,9 +1361,8 @@ async function execute(
       );
       metadata = readUploadMetadata(outputFile, dependencies);
     } finally {
-      try {
-        dependencies.unlink(outputFile);
-      } catch {}
+      removeTemporaryFile(outputFile, dependencies);
+      removeTemporaryFile(releaseConfig, dependencies);
     }
 
     dependencies.log(`[api-deploy] Version: ${metadata.versionId}`);
@@ -936,23 +1375,28 @@ async function execute(
   const versionId = options.versionId;
   wranglerEnvironment.CLOUDFLARE_API_TOKEN = apiToken;
   dependencies.log(`[api-deploy] Version: ${versionId}`);
-  run(
-    dependencies.nodeExecutable,
-    [
-      wranglerCliPath,
-      "versions",
-      "deploy",
-      "--version-id",
-      versionId,
-      "--percentage",
-      "100",
-      "--yes",
-      ...WRANGLER_CONFIG_ARGS,
-    ],
-    wranglerEnvironment,
-    "Wrangler version promotion",
-    dependencies,
-  );
+  const releaseConfig = createTemporaryReleaseConfig(undefined, dependencies);
+  try {
+    run(
+      dependencies.nodeExecutable,
+      [
+        wranglerCliPath,
+        "versions",
+        "deploy",
+        "--version-id",
+        versionId,
+        "--percentage",
+        "100",
+        "--yes",
+        ...wranglerConfigArgs(releaseConfig),
+      ],
+      wranglerEnvironment,
+      "Wrangler version promotion",
+      dependencies,
+    );
+  } finally {
+    removeTemporaryFile(releaseConfig, dependencies);
+  }
 
   try {
     await smokeApi(PRODUCTION_URL, options.smokeSol, dependencies);

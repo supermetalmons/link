@@ -574,10 +574,22 @@ test("operations documentation uses the release driver and required setup", () =
     "projectProfileGamesOnInviteCreated",
   );
   const mergeEnabled = deploymentGuide.indexOf(
-    "Only after every listed projector is live and the historical reconciliation is",
+    "Only after every listed projector is live, historical reconciliation is",
   );
   const mergeBackfill = deploymentGuide.indexOf(
     "npm run reconcile:merge-projections --",
+  );
+  const firstWagerScan = deploymentGuide.indexOf(
+    "While merges remain disabled, reconcile the historical wager settlement",
+  );
+  const mergeDisabledCandidateUpload = deploymentGuide.indexOf(
+    "npm run deploy:api -- preview --smoke-sol <known-wallet> --secrets-file /secure/mons-link-x-callback.env",
+  );
+  const mergeDisabledPromotion = deploymentGuide.indexOf(
+    "npm run deploy:api -- production --version-id <merge-disabled-candidate-version-id>",
+  );
+  const secondWagerScan = deploymentGuide.indexOf(
+    "restart the wager settlement\nscan from the beginning",
   );
   const mergeEnableRoot = deploymentGuide.indexOf(
     'AUTH_ENABLE_ROOT="$(mktemp -d)"',
@@ -586,36 +598,45 @@ test("operations documentation uses the release driver and required setup", () =
     'npm --prefix "$AUTH_ENABLE_ROOT/repo/cloud/functions" run deploy:safe --',
   );
   const enabledCandidateUpload = deploymentGuide.indexOf(
-    "npm run deploy:api -- preview --smoke-sol <known-wallet> --secrets-file /secure/mons-link-x-callback.env",
+    "npm run deploy:api -- preview --smoke-sol <known-wallet> --token-file /path/to/cloudflare-token",
+    secondWagerScan,
   );
-  const apiPromotion = deploymentGuide.indexOf(
-    "passes preview smoke may that exact Worker version be promoted",
+  const enabledWorkerPromotion = deploymentGuide.indexOf(
+    "npm run deploy:api -- production --version-id <merge-enabled-candidate-version-id>",
   );
   const manualXVerification = deploymentGuide.indexOf(
-    "production promotions, exercise X sign-in",
+    "After both production promotions, exercise X",
   );
   for (const position of [
     mergeDisableRoot,
     projectorDeployment,
     mergeBackfill,
+    firstWagerScan,
+    mergeDisabledCandidateUpload,
+    mergeDisabledPromotion,
+    secondWagerScan,
+    enabledCandidateUpload,
+    enabledWorkerPromotion,
     mergeEnableRoot,
     mergeEnableDeploy,
-    enabledCandidateUpload,
     mergeEnabled,
-    apiPromotion,
     manualXVerification,
   ]) {
     assert.notEqual(position, -1);
   }
   assert.ok(mergeDisableRoot < projectorDeployment);
   assert.ok(projectorDeployment < mergeBackfill);
-  assert.ok(mergeBackfill < mergeEnableRoot);
+  assert.ok(mergeBackfill < firstWagerScan);
+  assert.ok(firstWagerScan < mergeDisabledCandidateUpload);
+  assert.ok(mergeDisabledCandidateUpload < mergeDisabledPromotion);
+  assert.ok(mergeDisabledPromotion < secondWagerScan);
+  assert.ok(secondWagerScan < enabledCandidateUpload);
+  assert.ok(enabledCandidateUpload < enabledWorkerPromotion);
+  assert.ok(enabledWorkerPromotion < mergeEnableRoot);
   assert.ok(mergeEnableRoot < mergeEnableDeploy);
-  assert.ok(mergeEnableDeploy < enabledCandidateUpload);
-  assert.ok(enabledCandidateUpload < mergeEnabled);
+  assert.ok(mergeEnableDeploy < mergeEnabled);
   assert.ok(mergeBackfill < mergeEnabled);
-  assert.ok(mergeEnabled < apiPromotion);
-  assert.ok(apiPromotion < manualXVerification);
+  assert.ok(mergeEnabled < manualXVerification);
   const projectorProcedure = deploymentGuide.slice(
     projectorDeployment,
     mergeBackfill,

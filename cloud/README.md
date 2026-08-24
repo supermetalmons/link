@@ -167,4 +167,10 @@ mutation-capable Worker remains unpromoted. Once that Worker receives production
 traffic and until the five compatibility callables are pruned, keep all four
 values identical in the API Worker and deployed Firebase Functions. A
 Worker-only change does not disable the public callable path. After pruning,
-these values are Worker-owned.
+these values are Worker-owned. Every API preview upload requires all four values
+as explicit shell inputs; the release helper embeds them in Wrangler's temporary
+strict-validation configuration so an active switch cannot be reset by a
+routine release. See the
+[Cloudflare deployment guide](../scripts/deploy-cloudflare.md). Secrets files
+must not contain `AUTH_DISABLE_*`; those reviewed values come only from the
+explicit shell inputs.

@@ -20,7 +20,14 @@ const SMOKE_SOL = "11111111111111111111111111111111";
 const NODE_EXECUTABLE = "/runtime/node";
 const NPM_CLI_PATH = "/runtime/npm-cli.js";
 const WRANGLER_CLI_PATH = "/workspace/node_modules/wrangler/bin/wrangler.js";
+const API_CONFIG_PATH = "/workspace/cloud/workers/api/wrangler.jsonc";
+const TEMP_RELEASE_CONFIG_PATH =
+  "/workspace/cloud/workers/api/.wrangler-release-42-1234.json";
 const WRANGLER_RELEASE_ENV_FILE = "cloud/workers/api/release.env";
+const API_CONFIG_CONTENTS = readFileSync(
+  resolve(__dirname, "..", "cloud/workers/api/wrangler.jsonc"),
+  "utf8",
+);
 
 function createRuntimeDependencies(
   overrides: Partial<RuntimeDependencies> = {},
@@ -32,16 +39,24 @@ function createRuntimeDependencies(
     processEnv: {
       npm_execpath: NPM_CLI_PATH,
       CLOUDFLARE_API_TOKEN: "token",
+      AUTH_DISABLE_APPLE_VERIFY: "false",
+      AUTH_DISABLE_X_VERIFY: "false",
+      AUTH_DISABLE_UNLINK: "false",
+      AUTH_DISABLE_MERGE: "false",
     },
     pid: 42,
     now: () => 1234,
     spawn: () => ({ status: 0 }),
     exists: (path) => path === NPM_CLI_PATH || path === WRANGLER_CLI_PATH,
     mkdir: () => undefined,
-    readFile: () => {
+    readFile: (path) => {
+      if (path === API_CONFIG_PATH) {
+        return API_CONFIG_CONTENTS;
+      }
       throw new Error("Unexpected file read.");
     },
     unlink: () => undefined,
+    writeFile: () => undefined,
     fetch: async () => {
       throw new Error("Unexpected fetch.");
     },
@@ -328,6 +343,10 @@ test("removes release credentials and dotenv values from child environments", ()
       GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY: "gameplay-private-key",
       RATING_SERVICE_ACCOUNT_EMAIL: "rating-service-account",
       RATING_SERVICE_ACCOUNT_PRIVATE_KEY: "rating-private-key",
+      AUTH_DISABLE_APPLE_VERIFY: "true",
+      AUTH_DISABLE_X_VERIFY: "false",
+      AUTH_DISABLE_UNLINK: "true",
+      AUTH_DISABLE_MERGE: "false",
       FIREBASE_RTDB_URL: "https://local.invalid",
       TELEGRAM_BOT_TOKEN: "telegram-token",
       TELEGRAM_QUEUE_BRIDGE_SECRET: "bridge-secret",
@@ -352,6 +371,86 @@ test("keeps the Wrangler release environment file value-free", () => {
     false,
     "Wrangler release environment file must contain only comments or blank lines.",
   );
+});
+
+test("preview requires every auth kill switch to be an explicit boolean", async () => {
+  let spawned = false;
+  const baseEnvironment = {
+    npm_execpath: NPM_CLI_PATH,
+    CLOUDFLARE_API_TOKEN: "token",
+    AUTH_DISABLE_APPLE_VERIFY: "false",
+    AUTH_DISABLE_X_VERIFY: "false",
+    AUTH_DISABLE_UNLINK: "false",
+  };
+  const dependencies = createRuntimeDependencies({
+    processEnv: baseEnvironment,
+    spawn: () => {
+      spawned = true;
+      return { status: 0 };
+    },
+  });
+
+  await assert.rejects(
+    execute(["preview", "--smoke-sol", SMOKE_SOL], dependencies),
+    /AUTH_DISABLE_MERGE must be explicitly set to true or false/,
+  );
+  assert.equal(spawned, false);
+
+  await assert.rejects(
+    execute(["preview", "--smoke-sol", SMOKE_SOL], {
+      ...dependencies,
+      processEnv: { ...baseEnvironment, AUTH_DISABLE_MERGE: "1" },
+    }),
+    /AUTH_DISABLE_MERGE must be explicitly set to true or false/,
+  );
+  assert.equal(spawned, false);
+});
+
+test("preview rejects auth kill switches in JSON and dotenv secrets files", async () => {
+  for (const [path, contents] of [
+    [
+      "/secure/secrets.json",
+      JSON.stringify({
+        X_CLIENT_SECRET: "json-secret",
+        AUTH_DISABLE_MERGE: "false",
+      }),
+    ],
+    [
+      "/secure/secrets.env",
+      'X_CLIENT_SECRET="dotenv-secret"\nexport AUTH_DISABLE_FUTURE = "true"\n',
+    ],
+  ]) {
+    let spawned = false;
+    const logs: string[] = [];
+    const dependencies = createRuntimeDependencies({
+      readFile: (readPath) => {
+        assert.equal(readPath, path);
+        return contents;
+      },
+      spawn: () => {
+        spawned = true;
+        return { status: 0 };
+      },
+      log: (message) => logs.push(message),
+    });
+
+    await assert.rejects(
+      execute(
+        ["preview", "--smoke-sol", SMOKE_SOL, "--secrets-file", path],
+        dependencies,
+      ),
+      /--secrets-file must not define AUTH_DISABLE_\*/,
+    );
+    assert.equal(spawned, false);
+    assert.equal(
+      logs.some((message) => message.includes("json-secret")),
+      false,
+    );
+    assert.equal(
+      logs.some((message) => message.includes("dotenv-secret")),
+      false,
+    );
+  }
 });
 
 test("requires the npm lifecycle JavaScript entrypoint", async () => {
@@ -739,6 +838,7 @@ test("requires wildcard CORS on POST smoke responses", async () => {
 
 test("preview validates, uploads with strict mode, sanitizes secrets, and smokes", async () => {
   const files = new Map<string, string>();
+  let releaseConfigContents = "";
   const calls: Array<{
     command: string;
     args: string[];
@@ -760,6 +860,10 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
       GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY: "gameplay-private-key-source",
       RATING_SERVICE_ACCOUNT_EMAIL: "rating-service-account-source",
       RATING_SERVICE_ACCOUNT_PRIVATE_KEY: "rating-private-key-source",
+      AUTH_DISABLE_APPLE_VERIFY: "true",
+      AUTH_DISABLE_X_VERIFY: "false",
+      AUTH_DISABLE_UNLINK: "true",
+      AUTH_DISABLE_MERGE: "true",
       WRANGLER_LOG_PATH: "/unsafe",
     },
     spawn: (command, args, options) => {
@@ -785,6 +889,12 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
       if (path === "/tmp/cloudflare-token") {
         return "file-token\n";
       }
+      if (path === API_CONFIG_PATH) {
+        return API_CONFIG_CONTENTS;
+      }
+      if (path === "/secure/x-secrets.env") {
+        return 'X_CLIENT_ID="file-client"\nX_CLIENT_SECRET="file-secret"\n';
+      }
       const contents = files.get(path);
       assert.notEqual(contents, undefined);
       return String(contents);
@@ -795,6 +905,16 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
       path === "/secure/x-secrets.env",
     unlink: (path: string) => {
       files.delete(path);
+    },
+    writeFile: (path, contents, options) => {
+      assert.equal(path, TEMP_RELEASE_CONFIG_PATH);
+      assert.deepEqual(options, {
+        encoding: "utf8",
+        flag: "wx",
+        mode: 0o600,
+      });
+      releaseConfigContents = contents;
+      files.set(path, contents);
     },
     fetch: async () => {
       return nextResponse(responses);
@@ -831,12 +951,26 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
     "upload",
     "--strict",
     "--config",
-    "cloud/workers/api/wrangler.jsonc",
+    TEMP_RELEASE_CONFIG_PATH,
     "--env-file",
     WRANGLER_RELEASE_ENV_FILE,
     "--secrets-file",
     "/secure/x-secrets.env",
   ]);
+  const releaseConfig = JSON.parse(releaseConfigContents) as {
+    vars: Record<string, string>;
+    queues: { consumers: Array<{ queue: string }> };
+  };
+  assert.equal(releaseConfig.vars.AUTH_DISABLE_APPLE_VERIFY, "true");
+  assert.equal(releaseConfig.vars.AUTH_DISABLE_X_VERIFY, "false");
+  assert.equal(releaseConfig.vars.AUTH_DISABLE_UNLINK, "true");
+  assert.equal(releaseConfig.vars.AUTH_DISABLE_MERGE, "true");
+  assert.equal(
+    releaseConfig.queues.consumers.some(
+      (consumer) => consumer.queue === "mons-link-auth-recovery",
+    ),
+    false,
+  );
   assert.equal(calls[2].environment.CLOUDFLARE_API_TOKEN, "file-token");
   assert.equal(calls[2].environment.HELIUS_RPC_API_KEY, undefined);
   assert.equal(calls[2].environment.X_CLIENT_ID, undefined);
@@ -856,6 +990,10 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
     calls[2].environment.RATING_SERVICE_ACCOUNT_PRIVATE_KEY,
     undefined,
   );
+  assert.equal(calls[2].environment.AUTH_DISABLE_APPLE_VERIFY, undefined);
+  assert.equal(calls[2].environment.AUTH_DISABLE_X_VERIFY, undefined);
+  assert.equal(calls[2].environment.AUTH_DISABLE_UNLINK, undefined);
+  assert.equal(calls[2].environment.AUTH_DISABLE_MERGE, undefined);
   assert.equal(calls[2].environment.CI, "true");
   assert.equal(files.size, 0);
   assert.equal(
@@ -875,7 +1013,13 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
     "rating-service-account-source",
     "rating-private-key-source",
     "gameplay-private-key-source",
+    "file-client",
+    "file-secret",
   ]) {
+    assert.equal(
+      calls[2].args.some((arg) => arg.includes(sensitiveValue)),
+      false,
+    );
     assert.equal(
       logs.some((message) => message.includes(sensitiveValue)),
       false,
@@ -884,6 +1028,16 @@ test("preview validates, uploads with strict mode, sanitizes secrets, and smokes
   assert.equal(
     logs.some((message) => message.includes("file-token")),
     false,
+  );
+  assert.equal(
+    logs.some(
+      (message) =>
+        message.includes("AUTH_DISABLE_APPLE_VERIFY=true") &&
+        message.includes("AUTH_DISABLE_X_VERIFY=false") &&
+        message.includes("AUTH_DISABLE_UNLINK=true") &&
+        message.includes("AUTH_DISABLE_MERGE=true"),
+    ),
+    true,
   );
 });
 
@@ -895,6 +1049,7 @@ test("trigger updates use only the selected token in a sanitized environment", a
   }> = [];
   const logs: string[] = [];
   let fetchCalled = false;
+  let releaseConfigContents = "";
   const dependencies = createRuntimeDependencies({
     processEnv: {
       PATH: "/bin",
@@ -920,12 +1075,19 @@ test("trigger updates use only the selected token in a sanitized environment", a
       return { status: 0 };
     },
     readFile: (path) => {
-      assert.equal(path, "/tmp/cloudflare-token");
-      return "file-token\n";
+      if (path === "/tmp/cloudflare-token") {
+        return "file-token\n";
+      }
+      assert.equal(path, API_CONFIG_PATH);
+      return API_CONFIG_CONTENTS;
     },
     fetch: async () => {
       fetchCalled = true;
       throw new Error("trigger mode must not smoke");
+    },
+    writeFile: (path, contents) => {
+      assert.equal(path, TEMP_RELEASE_CONFIG_PATH);
+      releaseConfigContents = contents;
     },
     log: (message: string) => logs.push(message),
   });
@@ -942,7 +1104,7 @@ test("trigger updates use only the selected token in a sanitized environment", a
     "triggers",
     "deploy",
     "--config",
-    "cloud/workers/api/wrangler.jsonc",
+    TEMP_RELEASE_CONFIG_PATH,
     "--env-file",
     WRANGLER_RELEASE_ENV_FILE,
   ]);
@@ -983,6 +1145,15 @@ test("trigger updates use only the selected token in a sanitized environment", a
   );
   assert.equal(calls[0].environment.DOTENV_KEY, undefined);
   assert.equal(fetchCalled, false);
+  const releaseConfig = JSON.parse(releaseConfigContents) as {
+    queues: { consumers: Array<{ queue: string }> };
+  };
+  assert.equal(
+    releaseConfig.queues.consumers.some(
+      (consumer) => consumer.queue === "mons-link-auth-recovery",
+    ),
+    false,
+  );
   for (const sensitiveValue of [
     "ambient-token",
     "https://modern.invalid",
@@ -1005,48 +1176,156 @@ test("trigger updates use only the selected token in a sanitized environment", a
   }
 });
 
-test("auth recovery consumer attachment uses the tracked queue settings", async () => {
-  const calls: Array<{
-    command: string;
-    args: string[];
-    environment: RuntimeDependencies["processEnv"];
-  }> = [];
+test("auth recovery consumer reconciliation creates only the missing Queue consumer", async () => {
+  const requests: Array<{ body?: unknown; init: RequestInit; url: string }> =
+    [];
+  const logs: string[] = [];
+  const responses = [
+    jsonResponse({
+      success: true,
+      result: [
+        {
+          queue_id: "queue-id",
+          queue_name: "mons-link-auth-recovery",
+          consumers: [],
+        },
+      ],
+    }),
+    jsonResponse({
+      success: true,
+      result: { consumer_id: "consumer-id" },
+    }),
+  ];
   const dependencies = createRuntimeDependencies({
-    spawn: (command, args, options) => {
-      calls.push({ command, args, environment: { ...options.env } });
-      return { status: 0 };
+    spawn: () => {
+      throw new Error("consumer reconciliation must not invoke Wrangler");
+    },
+    writeFile: () => {
+      throw new Error("consumer reconciliation must not write a config");
+    },
+    fetch: async (input, init = {}) => {
+      requests.push({
+        body: init.body ? JSON.parse(String(init.body)) : undefined,
+        init,
+        url: String(input),
+      });
+      const response = responses.shift();
+      assert.notEqual(response, undefined);
+      return response as Response;
+    },
+    log: (message) => logs.push(message),
+  });
+
+  await execute(["consumer"], dependencies);
+
+  assert.equal(requests.length, 2);
+  assert.equal(
+    requests[0].url,
+    "https://api.cloudflare.com/client/v4/accounts/e25f90fc073ea309b54b8b5144bf28e0/queues?name=mons-link-auth-recovery&page=1",
+  );
+  assert.equal(requests[0].init.method, "GET");
+  assert.equal(
+    requests[1].url,
+    "https://api.cloudflare.com/client/v4/accounts/e25f90fc073ea309b54b8b5144bf28e0/queues/queue-id/consumers",
+  );
+  assert.equal(requests[1].init.method, "POST");
+  assert.deepEqual(requests[1].body, {
+    type: "worker",
+    script_name: "mons-link-api",
+    dead_letter_queue: "mons-link-auth-recovery-dlq",
+    settings: {
+      batch_size: 1,
+      max_retries: 100,
+      max_wait_time_ms: 1_000,
+      max_concurrency: 1,
+      retry_delay: 60,
+    },
+  });
+  for (const request of requests) {
+    const headers = new Headers(request.init.headers);
+    assert.equal(headers.get("authorization"), "Bearer token");
+    assert.equal(request.init.redirect, "manual");
+    assert.ok(request.init.signal instanceof AbortSignal);
+  }
+  assert.equal(
+    logs.some((message) => message.includes("token")),
+    false,
+  );
+});
+
+test("auth recovery consumer reconciliation updates the existing matching consumer", async () => {
+  const requests: Array<{ init: RequestInit; url: string }> = [];
+  const responses = [
+    jsonResponse({
+      success: true,
+      result: [
+        {
+          queue_id: "queue-id",
+          queue_name: "mons-link-auth-recovery",
+          consumers: [
+            { consumer_id: "other-id", type: "worker", script: "other" },
+            {
+              consumer_id: "consumer-id",
+              type: "worker",
+              script: "mons-link-api",
+            },
+          ],
+        },
+      ],
+    }),
+    jsonResponse({
+      success: true,
+      result: { consumer_id: "consumer-id" },
+    }),
+  ];
+  const dependencies = createRuntimeDependencies({
+    fetch: async (input, init = {}) => {
+      requests.push({ init, url: String(input) });
+      const response = responses.shift();
+      assert.notEqual(response, undefined);
+      return response as Response;
     },
   });
 
   await execute(["consumer"], dependencies);
 
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].command, NODE_EXECUTABLE);
-  assert.deepEqual(calls[0].args, [
-    WRANGLER_CLI_PATH,
-    "queues",
-    "consumer",
-    "add",
-    "mons-link-auth-recovery",
-    "mons-link-api",
-    "--batch-size",
-    "1",
-    "--batch-timeout",
-    "1",
-    "--message-retries",
-    "100",
-    "--retry-delay-secs",
-    "60",
-    "--dead-letter-queue",
-    "mons-link-auth-recovery-dlq",
-    "--max-concurrency",
-    "1",
-    "--config",
-    "cloud/workers/api/wrangler.jsonc",
-    "--env-file",
-    WRANGLER_RELEASE_ENV_FILE,
-  ]);
-  assert.equal(calls[0].environment.CLOUDFLARE_API_TOKEN, "token");
+  assert.equal(requests.length, 2);
+  assert.equal(
+    requests[1].url,
+    "https://api.cloudflare.com/client/v4/accounts/e25f90fc073ea309b54b8b5144bf28e0/queues/queue-id/consumers/consumer-id",
+  );
+  assert.equal(requests[1].init.method, "PUT");
+});
+
+test("auth recovery consumer reconciliation rejects oversized API responses generically", async () => {
+  const logs: string[] = [];
+  const dependencies = createRuntimeDependencies({
+    processEnv: {
+      npm_execpath: NPM_CLI_PATH,
+      CLOUDFLARE_API_TOKEN: "sensitive-token",
+    },
+    fetch: async () =>
+      new Response("sensitive-response-body", {
+        headers: {
+          "Content-Length": "999999",
+          "Content-Type": "application/json",
+        },
+      }),
+    log: (message) => logs.push(message),
+  });
+
+  await assert.rejects(
+    execute(["consumer"], dependencies),
+    /Cloudflare Queue lookup returned an oversized response/,
+  );
+  assert.equal(
+    logs.some(
+      (message) =>
+        message.includes("sensitive-token") ||
+        message.includes("sensitive-response-body"),
+    ),
+    false,
+  );
 });
 
 test("production promotes only the explicit version and then smokes the custom domain", async () => {
@@ -1095,7 +1374,7 @@ test("production promotes only the explicit version and then smokes the custom d
     "100",
     "--yes",
     "--config",
-    "cloud/workers/api/wrangler.jsonc",
+    TEMP_RELEASE_CONFIG_PATH,
     "--env-file",
     WRANGLER_RELEASE_ENV_FILE,
   ]);

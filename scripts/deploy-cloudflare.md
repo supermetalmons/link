@@ -75,6 +75,32 @@ does not change the frontend Worker or its `mons.link` route.
 - Promote that exact candidate and smoke-test the custom domain:
   `npm run deploy:api -- production --version-id <candidate-version-id> --smoke-sol <known-wallet> --token-file /path/to/cloudflare-token`
 
+Before every preview upload, export all four non-secret auth kill switches. Start
+from the current production values and change a value only as part of the
+reviewed release. The tracked defaults are:
+
+```sh
+export AUTH_DISABLE_APPLE_VERIFY=false
+export AUTH_DISABLE_X_VERIFY=false
+export AUTH_DISABLE_UNLINK=false
+export AUTH_DISABLE_MERGE=false
+```
+
+The helper rejects missing or non-boolean values and prints the four selected
+values before validation. It embeds them in a mode-`0600` temporary release
+configuration so Wrangler strict validation reviews the exact upload values,
+then deletes that file. A `--secrets-file` may be JSON or dotenv, but must not
+contain any `AUTH_DISABLE_*` key. The helper reads only its keys for this check
+and never prints or forwards secret values as command arguments.
+
+If the production Worker was last changed in the Dashboard and a reviewed
+release changes one of these values, first set that same non-secret variable to
+the selected value in the Dashboard. The strict preview then verifies the
+Dashboard and candidate agree instead of rejecting the intentional change. This
+is safe for the initial merge-disable step below. After that candidate is
+promoted through Wrangler, later kill-switch changes are CLI-originated and do
+not need the Dashboard step unless someone edits the Worker there again.
+
 `HELIUS_RPC_API_KEY` is a required encrypted Worker secret. Keep its value out
 of source, Wrangler configuration, shell arguments, and logs. Routine version
 uploads inherit the existing encrypted secret, and Wrangler rejects an upload
@@ -106,8 +132,13 @@ configuration is intentionally changed, review it separately and apply it with
 `npm run deploy:api:triggers -- --token-file /path/to/cloudflare-token`, or set
 `CLOUDFLARE_API_TOKEN` in the invoking shell and omit `--token-file`.
 
-The trigger command reconciles reviewed routes and Cron schedules. Queue
-consumers are attached separately after a compatible Worker version is promoted.
+The tracked `wrangler.jsonc` includes the auth recovery consumer so local Queue
+development can process its messages. The release helper's temporary release
+configuration omits the auth recovery consumer, so routine trigger updates
+cannot attach it. They reconcile only reviewed routes, Cron schedules, and the
+tracked Telegram Queue consumers. Attach the recovery consumer only with the
+explicit command documented below after a compatible Worker version is
+promoted.
 
 ## Event prize announcement API
 
@@ -431,6 +462,12 @@ npm run deploy:api -- consumer --token-file /path/to/cloudflare-token
 npx wrangler queues consumer worker list mons-link-auth-recovery --config cloud/workers/api/wrangler.jsonc
 ```
 
+The explicit consumer command reads the tracked auth recovery settings, looks up
+that Queue through the Cloudflare API, and creates or updates only the matching
+Worker consumer. It does not deploy routes, domains, Cron schedules, Preview URL
+settings, or Telegram consumers. Routine trigger deployments omit the recovery
+consumer and leave its current attachment unchanged.
+
 Before rolling back to a Worker version that predates auth recovery, remove the
 consumer. This preserves buffered tasks; do not purge the Queue. Reattach the
 consumer by rerunning the consumer command only after a compatible version is
@@ -600,10 +637,93 @@ projection logic, repairs canonical target games, and removes retained source
 games. Each merge target is streamed in fixed 200-document pages, so histories
 larger than one page remain bounded without requiring another cursor.
 
-After every historical page succeeds, re-enable the compatibility callables
-from a fresh retained checkout so they match the tracked Worker candidate.
-Carry forward any reviewed non-merge kill-switch overrides from the disable
-step:
+While merges remain disabled, reconcile the historical wager settlement
+ledgers too. Preview a bounded page, execute that page, then repeat both commands
+with the returned `nextCursor` as `--after <operation-id>` until `hasMore` is
+false:
+
+```sh
+npm run reconcile:wager-settlement-merges -- --project mons-link --limit 20 --dry-run
+npm run reconcile:wager-settlement-merges -- --project mons-link --limit 20 --execute
+```
+
+In both this scan and the final scan below, every dry-run and execute page must
+return top-level `"manualReviewRequired": false`. Do not execute or advance a
+page while that value is true.
+
+For a settlement committed strictly after a merge marker, the command repairs
+the affected canonical side and records that side so retries cannot apply it
+twice. A settlement committed before or at the same instant as its merge marker
+cannot be classified safely: it returns `manual-review` and remains unmarked.
+`would-partially-repair` and `partially-repaired` mean one side was repaired but
+another still requires that review. For any of these three results, stop the
+cutover and inspect the affected balances plus settlement and merge history.
+Resolve every side marked `"reviewRequired": true`, and only those sides, by
+deciding whether its wager delta was already `included` in the canonical
+balance or was `lost` during the merge:
+
+```sh
+npm run reconcile:wager-settlement-merges -- --project mons-link --resolve <operation-id> --winner included --loser lost --dry-run
+npm run reconcile:wager-settlement-merges -- --project mons-link --resolve <operation-id> --winner included --loser lost --execute
+```
+
+Omit `--winner` or `--loser` when that side does not require review. `included`
+makes no balance change; `lost` applies that side's canonical delta. Confirm
+`would-resolve`, then `resolved` or the retry-safe `already-reconciled`. Rerun
+the blocked scan page after every listed operation is resolved, and advance only
+when `"manualReviewRequired": false`. Document-ID pagination is not a snapshot,
+so a legacy settlement created during this first pass could also sort behind its
+cursor.
+
+Keep merging disabled and promote the fixed Worker before the final pass. Use
+the prepared secrets on this first candidate, smoke it, and promote its exact
+version ID:
+
+```sh
+export AUTH_DISABLE_MERGE=true
+npm run deploy:api -- preview --smoke-sol <known-wallet> --secrets-file /secure/mons-link-x-callback.env --token-file /path/to/cloudflare-token
+npm run deploy:api -- production --version-id <merge-disabled-candidate-version-id> --smoke-sol <known-wallet> --token-file /path/to/cloudflare-token
+```
+
+The secrets file is accepted only in preview mode. The helper reads its JSON or
+dotenv keys to reject `AUTH_DISABLE_*`, then passes the file directly to
+`wrangler versions upload` without printing its values. Existing secrets omitted
+from the file, including `HELIUS_RPC_API_KEY`, remain attached.
+
+Once the fixed Worker serves production traffic, restart the wager settlement
+scan from the beginning by omitting `--after`. Preview and execute every page
+again until `hasMore` is false. Recorded repairs are safe and cheap to revisit;
+an unresolved manual-review case would appear again. This pass catches any late
+legacy settlement that sorted behind the first pass. Do not re-enable either
+merge path until every page in this second full scan has returned
+`"manualReviewRequired": false` and `hasMore` is false.
+
+```sh
+npm run reconcile:wager-settlement-merges -- --project mons-link --limit 20 --dry-run
+npm run reconcile:wager-settlement-merges -- --project mons-link --limit 20 --execute
+```
+
+After every historical page succeeds and every review-required result is
+resolved, prepare and smoke the merge-enabled candidate while both production
+merge paths are still disabled. The compatibility callables still have
+`AUTH_DISABLE_MERGE=true`, and the promoted Worker still has the same value:
+
+```sh
+export AUTH_DISABLE_MERGE=false
+npm run deploy:api -- preview --smoke-sol <known-wallet> --token-file /path/to/cloudflare-token
+```
+
+Only after that exact candidate passes preview smoke, promote it and smoke the
+production domain:
+
+```sh
+npm run deploy:api -- production --version-id <merge-enabled-candidate-version-id> --smoke-sol <known-wallet> --token-file /path/to/cloudflare-token
+```
+
+If promotion or production smoke fails, leave the compatibility callables
+disabled and roll back the Worker. After production smoke passes, re-enable the
+compatibility callables from a fresh retained checkout. Carry forward any
+reviewed non-merge kill-switch overrides from the disable step:
 
 ```sh
 AUTH_ENABLE_ROOT="$(mktemp -d)"
@@ -629,32 +749,21 @@ git worktree remove "$AUTH_ENABLE_ROOT/repo"
 rmdir "$AUTH_ENABLE_ROOT"
 ```
 
-With quiescence, projector deployment, historical reconciliation, and
-compatibility re-enablement complete, upload the first merge-enabled candidate
-with the prepared secrets:
-
-```sh
-npm run deploy:api -- preview --smoke-sol <known-wallet> --secrets-file /secure/mons-link-x-callback.env --token-file /path/to/cloudflare-token
-```
-
-The secrets file is accepted only in preview mode and is passed directly to
-`wrangler versions upload`; the release helper never reads or prints it.
-Existing secrets omitted from the file, including `HELIUS_RPC_API_KEY`, remain
-attached. Delete the local secrets file and the downloaded service-account JSON
-after the candidate has been promoted and the values are stored as encrypted
-Worker secrets.
+Delete the local secrets file and downloaded service-account JSON after the
+merge-disabled candidate has been promoted and their values are stored as
+encrypted Worker secrets.
 
 Preview and production smoke checks cover the NFT API, auth CORS and
 unauthenticated responses, callback routing without a state value, and a random
 absent state that proves Google OAuth and Firestore read access. A real X code
 is intentionally not used by automated smoke checks.
 
-Only after every listed projector is live and the historical reconciliation is
-complete, the compatibility callables are re-enabled, and the enabled candidate
-passes preview smoke may that exact Worker version be promoted. Promote the API
-version, then the frontend version that calls the mutation routes. After both
-production promotions, exercise X sign-in and settings linking manually,
-including provider denial. Keep `verifySolanaAddress`,
+Only after every listed projector is live, historical reconciliation is
+complete, the merge-enabled Worker passes production smoke, and the
+compatibility callables are re-enabled may the frontend version that calls the
+mutation routes be promoted. After both production promotions, exercise X
+sign-in and settings linking manually, including provider denial. Keep
+`verifySolanaAddress`,
 `verifyEthAddress`, `verifyAppleToken`, `completeXRedirectAuth`, and
 `unlinkAuthMethod` deployed until the production matrix passes. During that
 overlap, keep `AUTH_DISABLE_APPLE_VERIFY`, `AUTH_DISABLE_X_VERIFY`,

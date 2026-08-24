@@ -6,6 +6,10 @@ import {
   type MiningMaterials,
   type MiningSnapshot,
 } from "@mons/shared/mining";
+import {
+  PROFILE_MERGE_TARGETS_COLLECTION,
+  resolveProfileMergeTargetPath,
+} from "../../../functions/profileMergeTargets.js";
 import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 import {
   createFirebaseRtdbClient,
@@ -13,6 +17,7 @@ import {
   type FirebaseRtdbQuery,
   type FirebaseRtdbTransactionResult,
 } from "./firebaseRtdb.ts";
+import { isSafeFirestoreDocumentId } from "./firebaseKeys.ts";
 import { createGoogleAccessToken } from "./googleAuth.ts";
 import {
   createFirestoreRestCodec,
@@ -31,6 +36,7 @@ const FIRESTORE_TIMEOUT_MS = 5_000;
 const MAX_FIRESTORE_BODY_BYTES = 64 * 1024;
 const MAX_RATING_FIRESTORE_BODY_BYTES = 256 * 1024;
 const MAX_RATING_TRANSACTION_ATTEMPTS = 5;
+const MAX_WAGER_TRANSFER_TRANSACTION_ATTEMPTS = 5;
 
 type FirestoreDocument = FirestoreRestDocument;
 
@@ -619,6 +625,48 @@ export function createGameplayRepository(
     }
     return true;
   };
+  const wagerTransport = createFirestoreRestTransport({
+    createFailure: () => new GameplayRepositoryFailure(),
+    documentsRoot: FIRESTORE_DOCUMENTS_ROOT,
+    fetcher,
+    getAccessToken: getFirestoreAccessToken,
+    maxBodyBytes: MAX_FIRESTORE_BODY_BYTES,
+    timeoutMs,
+  });
+  const batchGetWagerDocuments = async (
+    transaction: string,
+    names: string[],
+  ): Promise<Map<string, FirestoreDocument | null>> => {
+    const uniqueNames = Array.from(new Set(names));
+    const response = await wagerTransport.post(
+      `${FIRESTORE_DOCUMENTS_ROOT}:batchGet`,
+      { documents: uniqueNames, transaction },
+    );
+    const body = await wagerTransport.readJson(response);
+    if (!Array.isArray(body)) {
+      throw new GameplayRepositoryFailure();
+    }
+    const documents = new Map<string, FirestoreDocument | null>();
+    for (const entry of body) {
+      const result = toRecord(entry);
+      if (result?.found !== undefined) {
+        const document = parseFirestoreDocument(result.found);
+        documents.set(document.name, document);
+      } else if (typeof result?.missing === "string") {
+        documents.set(result.missing, null);
+      }
+    }
+    if (uniqueNames.some((name) => !documents.has(name))) {
+      throw new GameplayRepositoryFailure();
+    }
+    return documents;
+  };
+  const wagerLedgerName = (operationId: string) =>
+    `${FIRESTORE_DOCUMENT_NAME_ROOT}/wagerSettlements/${encodeURIComponent(operationId)}`;
+  const mergeTargetName = (profileId: string) =>
+    `${FIRESTORE_DOCUMENT_NAME_ROOT}/${PROFILE_MERGE_TARGETS_COLLECTION}/${encodeURIComponent(profileId)}`;
+  const mergeLockName = (profileId: string) =>
+    `${FIRESTORE_DOCUMENT_NAME_ROOT}/mergeLocks/profile:${encodeURIComponent(profileId)}`;
 
   return {
     async applyWagerTransferOnce(input) {
@@ -638,68 +686,168 @@ export function createGameplayRepository(
       if (await readWagerTransferLedger(input)) {
         return "replayed";
       }
-      const ledgerName = `${FIRESTORE_DOCUMENT_NAME_ROOT}/wagerSettlements/${encodeURIComponent(input.operationId)}`;
-      const writes: Array<Record<string, unknown>> = [
-        {
-          update: {
-            name: ledgerName,
-            fields: encodeWagerTransferLedger(input),
-          },
-          currentDocument: { exists: false },
-        },
-      ];
-      if (input.winnerProfileId !== input.loserProfileId) {
-        writes.push(
-          {
-            transform: {
-              document: `${FIRESTORE_DOCUMENT_NAME_ROOT}/${documentPath(input.winnerProfileId)}`,
-              fieldTransforms: [
-                {
-                  fieldPath: `mining.materials.${input.material}`,
-                  increment: { integerValue: String(input.count) },
+      const ledgerName = wagerLedgerName(input.operationId);
+      let retryTransaction: string | undefined;
+      for (
+        let attempt = 0;
+        attempt < MAX_WAGER_TRANSFER_TRANSACTION_ATTEMPTS;
+        attempt++
+      ) {
+        const transaction =
+          await wagerTransport.beginTransaction(retryTransaction);
+        try {
+          const targetNames = [
+            mergeTargetName(input.winnerProfileId),
+            mergeTargetName(input.loserProfileId),
+          ];
+          const initialLockNames = [
+            mergeLockName(input.winnerProfileId),
+            mergeLockName(input.loserProfileId),
+          ];
+          const initialDocuments = await batchGetWagerDocuments(transaction, [
+            ledgerName,
+            ...targetNames,
+            ...initialLockNames,
+          ]);
+          const ledger = initialDocuments.get(ledgerName);
+          if (ledger) {
+            const fingerprint = readFirestoreString(ledger.fields.fingerprint);
+            if (!fingerprint || fingerprint !== input.fingerprint) {
+              throw new GameplayRepositoryFailure();
+            }
+            await wagerTransport.rollback(transaction);
+            return "replayed";
+          }
+          const mergeTargets = new Map<string, FirestoreDocument | null>(
+            targetNames.map((name) => [
+              name,
+              initialDocuments.get(name) || null,
+            ]),
+          );
+          const readMergeTarget = async (profileId: string) => {
+            const name = mergeTargetName(profileId);
+            if (!mergeTargets.has(name)) {
+              const document = (
+                await batchGetWagerDocuments(transaction, [name])
+              ).get(name);
+              mergeTargets.set(name, document || null);
+            }
+            const document = mergeTargets.get(name);
+            if (!document) {
+              return null;
+            }
+            const targetProfileId = readFirestoreString(
+              document.fields.targetProfileId,
+            );
+            if (!isSafeFirestoreDocumentId(targetProfileId)) {
+              throw new GameplayRepositoryFailure();
+            }
+            return { targetProfileId };
+          };
+          const winnerProfilePath = await resolveProfileMergeTargetPath({
+            profileId: input.winnerProfileId,
+            readMergeTarget,
+          });
+          const loserProfilePath = await resolveProfileMergeTargetPath({
+            profileId: input.loserProfileId,
+            readMergeTarget,
+          });
+          const winnerProfileId = winnerProfilePath.at(-1);
+          const loserProfileId = loserProfilePath.at(-1);
+          if (!winnerProfileId || !loserProfileId) {
+            throw new GameplayRepositoryFailure();
+          }
+          const lockNames = Array.from(
+            new Set(
+              [...winnerProfilePath, ...loserProfilePath].map(mergeLockName),
+            ),
+          );
+          const lockDocuments = new Map<string, FirestoreDocument | null>();
+          for (const name of lockNames) {
+            if (initialDocuments.has(name)) {
+              lockDocuments.set(name, initialDocuments.get(name) || null);
+            }
+          }
+          const unreadLockNames = lockNames.filter(
+            (name) => !lockDocuments.has(name),
+          );
+          if (unreadLockNames.length > 0) {
+            for (const [name, document] of await batchGetWagerDocuments(
+              transaction,
+              unreadLockNames,
+            )) {
+              lockDocuments.set(name, document);
+            }
+          }
+          const nowMs = now();
+          if (
+            lockNames.some((name) => {
+              const lock = lockDocuments.get(name);
+              return (
+                lock !== null &&
+                lock !== undefined &&
+                readFirestoreNumber(lock.fields.expiresAtMs, 0) > nowMs
+              );
+            })
+          ) {
+            throw new GameplayRepositoryFailure();
+          }
+          const writes: Array<Record<string, unknown>> = [
+            {
+              update: {
+                name: ledgerName,
+                fields: encodeWagerTransferLedger({
+                  ...input,
+                  winnerProfileId,
+                  loserProfileId,
+                }),
+              },
+              currentDocument: { exists: false },
+            },
+          ];
+          if (winnerProfileId !== loserProfileId) {
+            writes.push(
+              {
+                transform: {
+                  document: `${FIRESTORE_DOCUMENT_NAME_ROOT}/${documentPath(winnerProfileId)}`,
+                  fieldTransforms: [
+                    {
+                      fieldPath: `mining.materials.${input.material}`,
+                      increment: { integerValue: String(input.count) },
+                    },
+                  ],
                 },
-              ],
-            },
-            currentDocument: { exists: true },
-          },
-          {
-            transform: {
-              document: `${FIRESTORE_DOCUMENT_NAME_ROOT}/${documentPath(input.loserProfileId)}`,
-              fieldTransforms: [
-                {
-                  fieldPath: `mining.materials.${input.material}`,
-                  increment: { integerValue: String(-input.count) },
+                currentDocument: { exists: true },
+              },
+              {
+                transform: {
+                  document: `${FIRESTORE_DOCUMENT_NAME_ROOT}/${documentPath(loserProfileId)}`,
+                  fieldTransforms: [
+                    {
+                      fieldPath: `mining.materials.${input.material}`,
+                      increment: { integerValue: String(-input.count) },
+                    },
+                  ],
                 },
-              ],
-            },
-            currentDocument: { exists: true },
-          },
-        );
-      }
-      let response: Response;
-      try {
-        response = await fetchWithTimeout(
-          `${FIRESTORE_DOCUMENTS_ROOT}:commit`,
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${await getFirestoreAccessToken()}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ writes }),
-          },
-        );
-      } catch {
-        if (await readWagerTransferLedger(input)) {
-          return "replayed";
+                currentDocument: { exists: true },
+              },
+            );
+          }
+          const result = await wagerTransport.commit(writes, transaction);
+          if (result === "committed") {
+            return "applied";
+          }
+          retryTransaction = transaction;
+        } catch (error) {
+          await wagerTransport.rollback(transaction);
+          if (await readWagerTransferLedger(input).catch(() => false)) {
+            return "replayed";
+          }
+          throw error instanceof GameplayRepositoryFailure
+            ? error
+            : new GameplayRepositoryFailure();
         }
-        throw new GameplayRepositoryFailure();
       }
-      if (response.ok) {
-        await cancelResponseBody(response);
-        return "applied";
-      }
-      await cancelResponseBody(response);
       if (await readWagerTransferLedger(input)) {
         return "replayed";
       }

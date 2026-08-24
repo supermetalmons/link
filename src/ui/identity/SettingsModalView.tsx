@@ -883,7 +883,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setPendingDisconnectState({ method, step: "confirm" });
       setBusyMethod(method);
       try {
-        const result = await connection.unlinkAuthMethod(method);
+        const result = (await connection.unlinkAuthMethod(method)).read();
         if (result && result.ok === true) {
           if (method === "eth") {
             storage.setEthAddress("");

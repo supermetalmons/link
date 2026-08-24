@@ -216,11 +216,7 @@ test("parses only the profile and navigation fields used by gameplay", () => {
 test("applies one atomic idempotent settlement transfer", async () => {
   const requests: Array<{ input: string; init: RequestInit }> = [];
   const fingerprint = "settlement-fingerprint";
-  const responses = [
-    jsonResponse({}, 404),
-    jsonResponse({}),
-    jsonResponse({ fields: { fingerprint: { stringValue: fingerprint } } }),
-  ];
+  let committed = false;
   const repository = createGameplayRepository(env, {
     rtdbClient,
     getAccessToken: async (_env, options) => {
@@ -228,8 +224,29 @@ test("applies one atomic idempotent settlement transfer", async () => {
       return "firestore-access-token";
     },
     fetcher: async (input, init = {}) => {
-      requests.push({ input: String(input), init });
-      return responses.shift() as Response;
+      const url = String(input);
+      requests.push({ input: url, init });
+      if (url.endsWith("/wagerSettlements/operation-id")) {
+        return committed
+          ? jsonResponse({
+              fields: { fingerprint: { stringValue: fingerprint } },
+            })
+          : jsonResponse({}, 404);
+      }
+      if (url.endsWith(":beginTransaction")) {
+        return jsonResponse({ transaction: "wager-transaction" });
+      }
+      if (url.endsWith(":batchGet")) {
+        const body = JSON.parse(String(init.body));
+        return jsonResponse(
+          body.documents.map((name: string) => ({ missing: name })),
+        );
+      }
+      if (url.endsWith(":commit")) {
+        committed = true;
+        return jsonResponse({});
+      }
+      throw new Error(`unexpected request: ${url}`);
     },
   });
   const input = {
@@ -243,15 +260,15 @@ test("applies one atomic idempotent settlement transfer", async () => {
   };
   assert.equal(await repository.applyWagerTransferOnce(input), "applied");
   assert.equal(await repository.applyWagerTransferOnce(input), "replayed");
-  assert.equal(requests.length, 3);
+  assert.equal(requests.length, 5);
   for (const entry of requests) {
     assert.equal(
       new Headers(entry.init.headers).get("Authorization"),
       "Bearer firestore-access-token",
     );
   }
-  assert.equal(requests[1].input.endsWith("/documents:commit"), true);
-  assert.deepEqual(JSON.parse(String(requests[1].init.body)), {
+  assert.equal(requests[3].input.endsWith("/documents:commit"), true);
+  assert.deepEqual(JSON.parse(String(requests[3].init.body)), {
     writes: [
       {
         update: {
@@ -295,6 +312,274 @@ test("applies one atomic idempotent settlement transfer", async () => {
         currentDocument: { exists: true },
       },
     ],
+    transaction: "wager-transaction",
+  });
+});
+
+test("rejects malformed profile merge targets during settlement", async () => {
+  for (const targetProfileId of [
+    { stringValue: "   " },
+    { integerValue: "1" },
+    { stringValue: "invalid/profile" },
+    { stringValue: "__reserved__" },
+    { stringValue: "x".repeat(1_501) },
+  ]) {
+    let commitAttempts = 0;
+    let rollbacks = 0;
+    const repository = createGameplayRepository(env, {
+      rtdbClient,
+      getAccessToken: async () => "firestore-access-token",
+      fetcher: async (input, init = {}) => {
+        const url = String(input);
+        if (url.endsWith("/wagerSettlements/malformed-target")) {
+          return jsonResponse({}, 404);
+        }
+        if (url.endsWith(":beginTransaction")) {
+          return jsonResponse({ transaction: "malformed-target-transaction" });
+        }
+        if (url.endsWith(":batchGet")) {
+          const body = JSON.parse(String(init.body)) as {
+            documents: string[];
+          };
+          return jsonResponse(
+            body.documents.map((name) =>
+              name.endsWith("/profileMergeTargets/winner")
+                ? {
+                    found: {
+                      name,
+                      fields: { targetProfileId },
+                    },
+                  }
+                : { missing: name },
+            ),
+          );
+        }
+        if (url.endsWith(":rollback")) {
+          rollbacks++;
+          return jsonResponse({});
+        }
+        if (url.endsWith(":commit")) {
+          commitAttempts++;
+          return jsonResponse({});
+        }
+        throw new Error(`unexpected request: ${url}`);
+      },
+    });
+
+    await assert.rejects(
+      repository.applyWagerTransferOnce({
+        operationId: "malformed-target",
+        fingerprint: "malformed-target-fingerprint",
+        winnerProfileId: "winner",
+        loserProfileId: "loser",
+        material: "dust",
+        count: 2,
+        appliedAtMs: 100,
+      }),
+      GameplayRepositoryFailure,
+    );
+    assert.equal(commitAttempts, 0);
+    assert.equal(rollbacks, 1);
+  }
+});
+
+test("rejects settlement while a participant merge lock is active", async () => {
+  let commitAttempts = 0;
+  let rollbacks = 0;
+  const lockReads = new Set<string>();
+  const repository = createGameplayRepository(env, {
+    rtdbClient,
+    getAccessToken: async () => "firestore-access-token",
+    now: () => 100,
+    fetcher: async (input, init = {}) => {
+      const url = String(input);
+      if (url.endsWith("/wagerSettlements/locked-operation")) {
+        return jsonResponse({}, 404);
+      }
+      if (url.endsWith(":beginTransaction")) {
+        return jsonResponse({ transaction: "locked-transaction" });
+      }
+      if (url.endsWith(":batchGet")) {
+        const body = JSON.parse(String(init.body)) as {
+          documents: string[];
+        };
+        return jsonResponse(
+          body.documents.map((name) => {
+            const marker = "/mergeLocks/profile:";
+            const markerIndex = name.indexOf(marker);
+            if (markerIndex >= 0) {
+              const profileId = decodeURIComponent(
+                name.slice(markerIndex + marker.length),
+              );
+              lockReads.add(profileId);
+              if (profileId === "winner") {
+                return {
+                  found: {
+                    name,
+                    fields: { expiresAtMs: { integerValue: "101" } },
+                  },
+                };
+              }
+            }
+            return { missing: name };
+          }),
+        );
+      }
+      if (url.endsWith(":rollback")) {
+        rollbacks++;
+        return jsonResponse({});
+      }
+      if (url.endsWith(":commit")) {
+        commitAttempts++;
+        return jsonResponse({});
+      }
+      throw new Error(`unexpected request: ${url}`);
+    },
+  });
+
+  await assert.rejects(
+    repository.applyWagerTransferOnce({
+      operationId: "locked-operation",
+      fingerprint: "locked-fingerprint",
+      winnerProfileId: "winner",
+      loserProfileId: "loser",
+      material: "dust",
+      count: 2,
+      appliedAtMs: 100,
+    }),
+    GameplayRepositoryFailure,
+  );
+  assert.deepEqual(Array.from(lockReads).sort(), ["loser", "winner"]);
+  assert.equal(commitAttempts, 0);
+  assert.equal(rollbacks, 1);
+});
+
+test("retries against canonical profiles after a lock-protected merge races settlement", async () => {
+  const fingerprint = "canonical-fingerprint";
+  const mergeTargets = new Map<string, string>();
+  const lockReads = new Set<string>();
+  let transactionSequence = 0;
+  let commitAttempts = 0;
+  let rawCommitBody: unknown;
+  const repository = createGameplayRepository(env, {
+    rtdbClient,
+    getAccessToken: async () => "firestore-access-token",
+    fetcher: async (input, init = {}) => {
+      const url = String(input);
+      if (url.endsWith("/wagerSettlements/canonical-operation")) {
+        return jsonResponse({}, 404);
+      }
+      if (url.endsWith(":beginTransaction")) {
+        transactionSequence++;
+        const body = JSON.parse(String(init.body));
+        if (transactionSequence === 2) {
+          assert.equal(
+            body.options.readWrite.retryTransaction,
+            "canonical-transaction-1",
+          );
+        }
+        return jsonResponse({
+          transaction: `canonical-transaction-${transactionSequence}`,
+        });
+      }
+      if (url.endsWith(":batchGet")) {
+        const body = JSON.parse(String(init.body)) as {
+          documents: string[];
+          transaction: string;
+        };
+        assert.equal(
+          body.transaction,
+          `canonical-transaction-${transactionSequence}`,
+        );
+        return jsonResponse(
+          body.documents.map((name) => {
+            const lockMarker = "/mergeLocks/profile:";
+            const lockMarkerIndex = name.indexOf(lockMarker);
+            if (lockMarkerIndex >= 0) {
+              lockReads.add(
+                decodeURIComponent(
+                  name.slice(lockMarkerIndex + lockMarker.length),
+                ),
+              );
+              return { missing: name };
+            }
+            const marker = "/profileMergeTargets/";
+            const markerIndex = name.indexOf(marker);
+            const profileId =
+              markerIndex < 0
+                ? ""
+                : decodeURIComponent(name.slice(markerIndex + marker.length));
+            const targetProfileId = mergeTargets.get(profileId);
+            return targetProfileId
+              ? {
+                  found: {
+                    name,
+                    fields: {
+                      targetProfileId: { stringValue: targetProfileId },
+                    },
+                  },
+                }
+              : { missing: name };
+          }),
+        );
+      }
+      if (url.endsWith(":commit")) {
+        commitAttempts++;
+        if (commitAttempts === 1) {
+          mergeTargets.set("retired-winner", "intermediate-winner");
+          mergeTargets.set("intermediate-winner", "winner");
+          mergeTargets.set("retired-loser", "loser");
+          return jsonResponse({}, 409);
+        }
+        rawCommitBody = JSON.parse(String(init.body));
+        return jsonResponse({});
+      }
+      throw new Error(`unexpected request: ${url}`);
+    },
+  });
+
+  assert.equal(
+    await repository.applyWagerTransferOnce({
+      operationId: "canonical-operation",
+      fingerprint,
+      winnerProfileId: "retired-winner",
+      loserProfileId: "retired-loser",
+      material: "dust",
+      count: 2,
+      appliedAtMs: 100,
+    }),
+    "applied",
+  );
+  const commitBody = rawCommitBody as Record<string, unknown>;
+  const writes = commitBody?.writes as Array<Record<string, unknown>>;
+  assert.equal(commitAttempts, 2);
+  assert.equal(commitBody.transaction, "canonical-transaction-2");
+  assert.deepEqual(Array.from(lockReads).sort(), [
+    "intermediate-winner",
+    "loser",
+    "retired-loser",
+    "retired-winner",
+    "winner",
+  ]);
+  assert.deepEqual(
+    writes
+      .slice(1)
+      .map((write) =>
+        String((write.transform as Record<string, unknown>).document),
+      ),
+    [
+      "projects/mons-link/databases/(default)/documents/users/winner",
+      "projects/mons-link/databases/(default)/documents/users/loser",
+    ],
+  );
+  assert.deepEqual((writes[0].update as Record<string, unknown>).fields, {
+    appliedAtMs: { integerValue: "100" },
+    count: { integerValue: "2" },
+    fingerprint: { stringValue: fingerprint },
+    loserProfileId: { stringValue: "loser" },
+    material: { stringValue: "dust" },
+    operationId: { stringValue: "canonical-operation" },
+    winnerProfileId: { stringValue: "winner" },
   });
 });
 
@@ -304,17 +589,32 @@ test("reconciles an ambiguous settlement commit from its ledger", async () => {
   const repository = createGameplayRepository(env, {
     rtdbClient,
     getAccessToken: async () => "firestore-access-token",
-    fetcher: async (input) => {
+    fetcher: async (input, init = {}) => {
       const url = String(input);
+      if (url.endsWith("/wagerSettlements/ambiguous-operation")) {
+        return committed
+          ? jsonResponse({
+              fields: { fingerprint: { stringValue: fingerprint } },
+            })
+          : jsonResponse({}, 404);
+      }
+      if (url.endsWith(":beginTransaction")) {
+        return jsonResponse({ transaction: "ambiguous-transaction" });
+      }
+      if (url.endsWith(":batchGet")) {
+        const body = JSON.parse(String(init.body));
+        return jsonResponse(
+          body.documents.map((name: string) => ({ missing: name })),
+        );
+      }
       if (url.endsWith("/documents:commit")) {
         committed = true;
         throw new Error("ambiguous-commit");
       }
-      return committed
-        ? jsonResponse({
-            fields: { fingerprint: { stringValue: fingerprint } },
-          })
-        : jsonResponse({}, 404);
+      if (url.endsWith(":rollback")) {
+        return jsonResponse({});
+      }
+      throw new Error(`unexpected request: ${url}`);
     },
   });
   assert.equal(

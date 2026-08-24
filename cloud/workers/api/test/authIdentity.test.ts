@@ -2528,6 +2528,63 @@ test("recovers legacy pending claim logins without an operation marker", async (
   );
 });
 
+test("recovers a legacy marker-only game merge without a backlog", async () => {
+  const memory = memoryFirestore([
+    {
+      collection: "users",
+      id: "target-profile",
+      fields: {
+        logins: [],
+        pendingMergeGameCopySourceProfileId: "source-profile",
+      },
+    },
+    {
+      collection: "users",
+      id: "source-profile",
+      fields: {
+        logins: [],
+        mergedIntoProfileId: "target-profile",
+        mergeSourceRetainedForGameCopy: true,
+      },
+    },
+    {
+      collection: "profileMergeTargets",
+      id: "source-profile",
+      fields: { targetProfileId: "target-profile" },
+    },
+  ]);
+  const sourceGameName = `${AUTH_FIRESTORE_DATABASE_ROOT}/documents/users/source-profile/games/invite-legacy`;
+  memory.documents.set(sourceGameName, {
+    id: "invite-legacy",
+    name: sourceGameName,
+    fields: { listSortAt: 10, status: "ended" },
+    rawFields: encodeFields({ listSortAt: 10, status: "ended" }),
+    updateTime: "2026-08-22T00:00:00Z",
+  });
+  const service = createAuthIdentityService(env, {
+    ...dependencies(memory.client),
+    now: () => 6_500_000,
+  });
+
+  assert.equal(await service.recoverPendingProfile("target-profile"), true);
+  assert.equal(memory.documents.has(sourceGameName), false);
+  assert.equal(
+    memory.documents.get(
+      `${AUTH_FIRESTORE_DATABASE_ROOT}/documents/users/target-profile/games/invite-legacy`,
+    )?.fields.status,
+    "ended",
+  );
+  assert.equal(
+    memory.documents.has(authDocumentName("users", "source-profile")),
+    false,
+  );
+  assert.equal(
+    memory.documents.get(authDocumentName("users", "target-profile"))?.fields
+      .pendingMergeGameCopySourceProfileId,
+    undefined,
+  );
+});
+
 test("resumes a pending game merge during profile recovery", async () => {
   const sol = "11111111111111111111111111111111";
   const memory = memoryFirestore([

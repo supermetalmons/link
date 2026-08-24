@@ -20,7 +20,9 @@ const {
   AuthApiError,
   beginAuthIntentViaApi,
   beginXRedirectAuthViaApi,
+  bindAuthSessionResult,
   completeXRedirectAuthViaApi,
+  createUserBoundAuthTokenProvider,
   getLinkedAuthMethodsViaApi,
   syncProfileClaimViaApi,
   unlinkAuthMethodViaApi,
@@ -272,6 +274,244 @@ test("keeps one unlink operation ID across a forced token refresh", async () => 
   assert.match(bodies[0].opId, /^[0-9a-f-]{36}$/);
 });
 
+test("does not retry unlink after the authenticated user changes", async () => {
+  const tokenRequests = [];
+  const userA = {
+    uid: "user-a",
+    async getIdToken(forceRefresh) {
+      tokenRequests.push([this.uid, forceRefresh]);
+      return "user-a-token";
+    },
+  };
+  const userB = {
+    uid: "user-b",
+    async getIdToken(forceRefresh) {
+      tokenRequests.push([this.uid, forceRefresh]);
+      return "user-b-token";
+    },
+  };
+  let currentUser = userA;
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    currentUser = userB;
+    return jsonResponse(
+      {
+        ok: false,
+        error: "unauthenticated",
+        message: "authentication-required",
+      },
+      401,
+    );
+  };
+
+  await assert.rejects(
+    unlinkAuthMethodViaApi(
+      "apple",
+      createUserBoundAuthTokenProvider(userA, () => currentUser),
+    ),
+    (error) =>
+      error instanceof AuthApiError &&
+      error.code === "unauthenticated" &&
+      error.message === "authentication-changed",
+  );
+  assert.equal(requests, 1);
+  assert.deepEqual(tokenRequests, [["user-a", false]]);
+});
+
+test("does not send unlink after the user changes during token acquisition", async () => {
+  let resolveToken;
+  const token = new Promise((resolve) => {
+    resolveToken = resolve;
+  });
+  const userA = {
+    uid: "user-a",
+    getIdToken() {
+      return token;
+    },
+  };
+  const userB = {
+    uid: "user-b",
+    async getIdToken() {
+      return "user-b-token";
+    },
+  };
+  let currentUser = userA;
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    return jsonResponse({
+      ok: true,
+      profileId: "profile-a",
+      linkedMethods: { apple: false, eth: true, sol: false, x: false },
+      appleLinked: false,
+    });
+  };
+
+  const unlink = unlinkAuthMethodViaApi(
+    "apple",
+    createUserBoundAuthTokenProvider(userA, () => currentUser),
+  );
+  currentUser = userB;
+  resolveToken("user-a-token");
+
+  await assert.rejects(
+    unlink,
+    (error) =>
+      error instanceof AuthApiError &&
+      error.code === "unauthenticated" &&
+      error.message === "authentication-changed",
+  );
+  assert.equal(requests, 0);
+});
+
+test("rechecks the user in the microtask between token acquisition and fetch", async () => {
+  let resolveToken;
+  const token = new Promise((resolve) => {
+    resolveToken = resolve;
+  });
+  const userA = {
+    uid: "user-a",
+    getIdToken() {
+      return token;
+    },
+  };
+  const userB = {
+    uid: "user-b",
+    async getIdToken() {
+      return "user-b-token";
+    },
+  };
+  let currentUser = userA;
+  let requests = 0;
+  globalThis.fetch = async () => {
+    requests++;
+    return jsonResponse({
+      ok: true,
+      profileId: "profile-a",
+      linkedMethods: { apple: false, eth: true, sol: false, x: false },
+      appleLinked: false,
+    });
+  };
+
+  const unlink = unlinkAuthMethodViaApi(
+    "apple",
+    createUserBoundAuthTokenProvider(userA, () => currentUser),
+  );
+  resolveToken("user-a-token");
+  queueMicrotask(() => {
+    currentUser = userB;
+  });
+
+  await assert.rejects(
+    unlink,
+    (error) =>
+      error instanceof AuthApiError &&
+      error.code === "unauthenticated" &&
+      error.message === "authentication-changed",
+  );
+  assert.equal(requests, 0);
+});
+
+test("rejects a successful unlink response after the user changes", async () => {
+  let resolveResponse;
+  const response = new Promise((resolve) => {
+    resolveResponse = resolve;
+  });
+  let markRequestStarted;
+  const requestStarted = new Promise((resolve) => {
+    markRequestStarted = resolve;
+  });
+  const userA = {
+    uid: "user-a",
+    async getIdToken() {
+      return "user-a-token";
+    },
+  };
+  const userB = {
+    uid: "user-b",
+    async getIdToken() {
+      return "user-b-token";
+    },
+  };
+  let currentUser = userA;
+  globalThis.fetch = async () => {
+    markRequestStarted();
+    return response;
+  };
+
+  const unlink = unlinkAuthMethodViaApi(
+    "apple",
+    createUserBoundAuthTokenProvider(userA, () => currentUser),
+  );
+  await requestStarted;
+  currentUser = userB;
+  resolveResponse(
+    jsonResponse({
+      ok: true,
+      profileId: "profile-a",
+      linkedMethods: { apple: false, eth: true, sol: false, x: false },
+      appleLinked: false,
+    }),
+  );
+
+  await assert.rejects(
+    unlink,
+    (error) =>
+      error instanceof AuthApiError &&
+      error.code === "unauthenticated" &&
+      error.message === "authentication-changed",
+  );
+});
+
+test("session-bound results reject an auth change before caller mutations", async () => {
+  let resolveResponse;
+  const response = new Promise((resolve) => {
+    resolveResponse = resolve;
+  });
+  const userA = {
+    uid: "user-a",
+    async getIdToken() {
+      return "user-a-token";
+    },
+  };
+  const userB = {
+    uid: "user-b",
+    async getIdToken() {
+      return "user-b-token";
+    },
+  };
+  let currentUser = userA;
+  const tokenProvider = createUserBoundAuthTokenProvider(
+    userA,
+    () => currentUser,
+  );
+  const connectionUnlink = async () => {
+    const result = await response;
+    return bindAuthSessionResult(result, tokenProvider.assertCurrentUser);
+  };
+  let mutations = 0;
+  const disconnect = (async () => {
+    const result = (await connectionUnlink()).read();
+    mutations++;
+    return result;
+  })();
+
+  resolveResponse({ ok: true });
+  queueMicrotask(() => {
+    currentUser = userB;
+  });
+
+  await assert.rejects(
+    disconnect,
+    (error) =>
+      error instanceof AuthApiError &&
+      error.code === "unauthenticated" &&
+      error.message === "authentication-changed",
+  );
+  assert.equal(mutations, 0);
+});
+
 test("does not wait for a stalled 401 body cancellation", async () => {
   let requests = 0;
   globalThis.fetch = async () => {
@@ -422,6 +662,20 @@ test("connection keeps migrated auth callable names off Firebase", () => {
   assert.match(source, /httpsCallable\(/);
 });
 
+test("connection fails closed when unlink starts without a user", () => {
+  const source = readFileSync(
+    new URL("../src/connection/connection.ts", import.meta.url),
+    "utf8",
+  );
+  const unlinkMethod = source.slice(
+    source.indexOf("public async unlinkAuthMethod"),
+    source.indexOf("public async verifyAppleToken"),
+  );
+  assert.match(unlinkMethod, /const user = this\.auth\.currentUser;/);
+  assert.doesNotMatch(unlinkMethod, /ensureAuthenticated/);
+  assert.doesNotMatch(unlinkMethod, /\?\? this\.auth\.currentUser/);
+});
+
 test("migrated auth responses remain typed through client consumers", () => {
   const authentication = readFileSync(
     new URL("../src/connection/authentication.ts", import.meta.url),
@@ -438,6 +692,10 @@ test("migrated auth responses remain typed through client consumers", () => {
   assert.doesNotMatch(authentication, /Promise<any>/);
   assert.doesNotMatch(loginSuccess, /profile as any/);
   assert.doesNotMatch(settings, /result:\s*any/);
+  assert.match(
+    settings,
+    /const result = \(await connection\.unlinkAuthMethod\(method\)\)\.read\(\);/,
+  );
 });
 
 test("connection normalizes cached presentation data for every auth mutation", () => {

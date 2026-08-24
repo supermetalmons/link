@@ -198,6 +198,92 @@ test("Wrangler release environment contains no active values", () => {
   assert.deepEqual(activeLines, []);
 });
 
+test("API preview uploads require reviewed auth kill-switch values", () => {
+  const deploymentHelper = readText("scripts/deploy-cloudflare-api.ts");
+  const deploymentGuide = readText("scripts/deploy-cloudflare.md");
+
+  for (const name of [
+    "AUTH_DISABLE_APPLE_VERIFY",
+    "AUTH_DISABLE_X_VERIFY",
+    "AUTH_DISABLE_UNLINK",
+    "AUTH_DISABLE_MERGE",
+  ]) {
+    assert.match(deploymentHelper, new RegExp(`"${name}"`));
+    assert.match(deploymentGuide, new RegExp(`export ${name}=`));
+  }
+  assert.match(deploymentHelper, /must be explicitly set to true or false/);
+  assert.match(deploymentHelper, /createTemporaryReleaseConfig/);
+  assert.match(deploymentHelper, /name\.startsWith\("AUTH_DISABLE_"\)/);
+  assert.match(deploymentHelper, /reconcileAuthRecoveryConsumer/);
+  assert.match(deploymentHelper, /flag: "wx"/);
+  assert.match(deploymentGuide, /must not\s+contain any `AUTH_DISABLE_\*` key/);
+  assert.match(
+    deploymentGuide,
+    /last changed in the Dashboard[\s\S]*first set that same non-secret variable/,
+  );
+});
+
+test("wager merge reconciliation and preview finish before live merging is enabled", () => {
+  const deploymentGuide = readText("scripts/deploy-cloudflare.md");
+  const firstScan = deploymentGuide.indexOf(
+    "While merges remain disabled, reconcile the historical wager settlement",
+  );
+  const disabledPromotion = deploymentGuide.indexOf(
+    "<merge-disabled-candidate-version-id>",
+  );
+  const secondScan = deploymentGuide.indexOf(
+    "restart the wager settlement\nscan from the beginning",
+  );
+  const enabledPreview = deploymentGuide.indexOf(
+    "npm run deploy:api -- preview --smoke-sol <known-wallet> --token-file /path/to/cloudflare-token",
+    secondScan,
+  );
+  const enabledPromotion = deploymentGuide.indexOf(
+    "<merge-enabled-candidate-version-id>",
+  );
+  const mergeEnable = deploymentGuide.indexOf("AUTH_ENABLE_ROOT");
+
+  for (const point of [
+    firstScan,
+    disabledPromotion,
+    secondScan,
+    enabledPreview,
+    enabledPromotion,
+    mergeEnable,
+  ]) {
+    assert.notEqual(point, -1);
+  }
+  assert.ok(firstScan < disabledPromotion);
+  assert.ok(disabledPromotion < secondScan);
+  assert.ok(secondScan < enabledPreview);
+  assert.ok(enabledPreview < enabledPromotion);
+  assert.ok(enabledPromotion < mergeEnable);
+  assert.match(
+    deploymentGuide.slice(secondScan, mergeEnable),
+    /reconcile:wager-settlement-merges -- --project mons-link --limit 20 --execute/,
+  );
+  assert.match(
+    deploymentGuide.slice(firstScan, mergeEnable),
+    /--resolve <operation-id> --winner included --loser lost --dry-run/,
+  );
+  assert.match(
+    deploymentGuide.slice(firstScan, mergeEnable),
+    /only those sides/,
+  );
+  assert.match(
+    deploymentGuide.slice(firstScan, disabledPromotion),
+    /every dry-run and execute page must\s+return top-level `"manualReviewRequired": false`/,
+  );
+  assert.match(
+    deploymentGuide.slice(secondScan, enabledPreview),
+    /every page in this second full scan has returned\s+`"manualReviewRequired": false`/,
+  );
+  assert.match(
+    deploymentGuide.slice(secondScan, enabledPromotion),
+    /both production\s+merge paths are still disabled/,
+  );
+});
+
 test("package manifests preserve public scripts and deployment command vectors", () => {
   const rootPackage = readJson<PackageManifest>("package.json");
   const functionsPackage = readJson<PackageManifest>(
@@ -236,6 +322,7 @@ test("package manifests preserve public scripts and deployment command vectors",
     "check:tooling",
     "check:all",
     "announceEventPrizes",
+    "reconcile:wager-settlement-merges",
     "recover:telegram",
     "repo-clean",
     "format",
@@ -265,6 +352,8 @@ test("package manifests preserve public scripts and deployment command vectors",
       "dry-run:api": rootPackage.scripts?.["dry-run:api"],
       "deploy:api": rootPackage.scripts?.["deploy:api"],
       "deploy:api:triggers": rootPackage.scripts?.["deploy:api:triggers"],
+      "reconcile:wager-settlement-merges":
+        rootPackage.scripts?.["reconcile:wager-settlement-merges"],
       "prepare:firebase": rootPackage.scripts?.["prepare:firebase"],
       "deploy:firebase": rootPackage.scripts?.["deploy:firebase"],
       deploy: rootPackage.scripts?.deploy,
@@ -283,6 +372,8 @@ test("package manifests preserve public scripts and deployment command vectors",
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/deploy-cloudflare-api.ts",
       "deploy:api:triggers":
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/deploy-cloudflare-api.ts triggers",
+      "reconcile:wager-settlement-merges":
+        "node cloud/admin/reconcileWagerSettlementMerges.js",
       "prepare:firebase":
         "npm --prefix cloud/functions ci && npm --prefix cloud/functions test",
       "deploy:firebase":
@@ -445,8 +536,12 @@ test("auth recovery DLQ replay stays manual and uses the recovery handler", () =
   }
   assert.match(deploymentGuide, /npm run deploy:api -- consumer --token-file/);
   assert.match(
+    deploymentGuide,
+    /temporary release\s+configuration omits the auth recovery consumer/,
+  );
+  assert.match(
     deploymentHelper,
-    /"queues",\s*"consumer",\s*"add",\s*AUTH_RECOVERY_QUEUE/,
+    /requestCloudflareApi[\s\S]*Cloudflare Queue consumer update/,
   );
   assert.match(
     deploymentGuide,

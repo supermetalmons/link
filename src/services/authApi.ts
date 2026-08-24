@@ -24,7 +24,18 @@ const PROFILE_CLAIM_SYNC_TIMEOUT_MS = 30_000;
 const AUTH_MUTATION_TIMEOUT_MS = 60_000;
 const AUTH_API_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 
-export type AuthTokenProvider = (forceRefresh: boolean) => Promise<string>;
+export type AuthTokenProvider = ((forceRefresh: boolean) => Promise<string>) & {
+  readonly assertCurrentUser?: () => void;
+};
+
+export type AuthSessionBoundResult<T> = {
+  readonly read: () => T;
+};
+
+type AuthTokenUser = {
+  readonly uid: string;
+  getIdToken(forceRefresh?: boolean): Promise<string>;
+};
 
 type AuthMutationRequest =
   | AppleAuthVerificationRequest
@@ -47,6 +58,40 @@ export class AuthApiError extends Error {
       this.customData = { details };
     }
   }
+}
+
+export function createUserBoundAuthTokenProvider(
+  user: AuthTokenUser,
+  getCurrentUser: () => AuthTokenUser | null,
+): AuthTokenProvider & { readonly assertCurrentUser: () => void } {
+  const uid = user.uid;
+  const assertCurrentUser = (): void => {
+    const currentUser = getCurrentUser();
+    if (currentUser !== user || currentUser.uid !== uid) {
+      throw new AuthApiError("unauthenticated", "authentication-changed");
+    }
+  };
+  return Object.assign(
+    async (forceRefresh: boolean) => {
+      assertCurrentUser();
+      const token = await user.getIdToken(forceRefresh);
+      assertCurrentUser();
+      return token;
+    },
+    { assertCurrentUser },
+  );
+}
+
+export function bindAuthSessionResult<T>(
+  value: T,
+  assertCurrentUser: () => void,
+): AuthSessionBoundResult<T> {
+  return {
+    read: () => {
+      assertCurrentUser();
+      return value;
+    },
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -137,6 +182,7 @@ async function authRequest<T>(
         if (init.body !== undefined) {
           headers.set("Content-Type", "application/json");
         }
+        tokenProvider.assertCurrentUser?.();
         const response = await fetch(`${AUTH_API_ROOT}${path}`, {
           ...init,
           headers,
@@ -154,6 +200,7 @@ async function authRequest<T>(
         if (!validate(payload)) {
           throw new AuthApiError("unavailable", "Auth service is unavailable.");
         }
+        tokenProvider.assertCurrentUser?.();
         return payload;
       } catch (error) {
         if (error instanceof AuthApiError) {

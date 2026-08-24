@@ -1919,6 +1919,43 @@ export function createAuthIdentityService(
       ) {
         return fresh;
       }
+      if (!freshOp) {
+        const claimed = await durableFirestore.runTransaction(
+          async (transaction) => {
+            const live = getOne(
+              await transaction.batchGet([targetName]),
+              targetName,
+            );
+            if (
+              !live ||
+              cleanString(live.fields.pendingMergeGameCopySourceProfileId) !==
+                sourceProfileId
+            ) {
+              return { result: false, writes: [] };
+            }
+            const liveOp = cleanString(live.fields.pendingMergeGameCopyOpId);
+            if (liveOp && liveOp !== gameOpId) {
+              return { result: false, writes: [] };
+            }
+            return {
+              result: true,
+              writes: liveOp
+                ? []
+                : [
+                    authUpdateWrite(
+                      targetName,
+                      { pendingMergeGameCopyOpId: gameOpId },
+                      ["pendingMergeGameCopyOpId"],
+                      true,
+                    ),
+                  ],
+            };
+          },
+        );
+        if (!claimed) {
+          return (await firestore.get(targetName)) || fresh;
+        }
+      }
       if (
         !(await reconcileProfilePrizes({
           opId: gameOpId,

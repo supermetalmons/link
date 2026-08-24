@@ -177,13 +177,16 @@ import type { RatingUpdateResponse } from "@mons/shared/ratings";
 import {
   beginAuthIntentViaApi,
   beginXRedirectAuthViaApi,
+  bindAuthSessionResult,
   completeXRedirectAuthViaApi,
+  createUserBoundAuthTokenProvider,
   getLinkedAuthMethodsViaApi,
   syncProfileClaimViaApi,
   unlinkAuthMethodViaApi,
   verifyAppleTokenViaApi,
   verifyEthereumAddressViaApi,
   verifySolanaAddressViaApi,
+  type AuthSessionBoundResult,
 } from "../services/authApi";
 import {
   mapDatabaseEventRecord,
@@ -1383,10 +1386,18 @@ class Connection {
 
   public async unlinkAuthMethod(
     method: AuthMethodKey,
-  ): Promise<LinkedAuthMethodsResponse> {
+  ): Promise<AuthSessionBoundResult<LinkedAuthMethodsResponse>> {
     try {
-      await this.ensureAuthenticated();
-      return unlinkAuthMethodViaApi(method, this.getAuthApiToken);
+      const user = this.auth.currentUser;
+      if (!user) {
+        throw new Error("Failed to authenticate user");
+      }
+      const tokenProvider = createUserBoundAuthTokenProvider(
+        user,
+        () => this.auth.currentUser,
+      );
+      const result = await unlinkAuthMethodViaApi(method, tokenProvider);
+      return bindAuthSessionResult(result, tokenProvider.assertCurrentUser);
     } catch (error) {
       console.error("Error unlinking auth method:", error);
       throw error;

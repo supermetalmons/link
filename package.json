@@ -50,6 +50,7 @@
     "check:all": "npm run format:check && npm run check && npm run check:api:core && npm run check:tooling:core && npm --prefix cloud/functions test",
     "announceEventPrizes": "node cloud/admin/announceEventPrizes.js",
     "reconcile:merge-projections": "node cloud/admin/reconcileProfileMergeProjections.js",
+    "reconcile:wager-settlement-merges": "node cloud/admin/reconcileWagerSettlementMerges.js",
     "recover:telegram": "node cloud/admin/recoverTelegramDelivery.js",
     "repo-clean": "bash scripts/repo-clean.sh",
     "format": "prettier --write . --ignore-unknown",
