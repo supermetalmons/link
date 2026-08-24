@@ -676,7 +676,7 @@ async function reconcileAuthRecoveryConsumer(
     (consumer): consumer is WranglerConfig =>
       isRecord(consumer) &&
       consumer.type === "worker" &&
-      (consumer.script === WORKER_NAME || consumer.service === WORKER_NAME),
+      consumer.script_name === WORKER_NAME,
   );
   if (matchingConsumers.length > 1) {
     throw new DeployError(

@@ -1263,11 +1263,15 @@ test("auth recovery consumer reconciliation updates the existing matching consum
           queue_id: "queue-id",
           queue_name: "mons-link-auth-recovery",
           consumers: [
-            { consumer_id: "other-id", type: "worker", script: "other" },
+            {
+              consumer_id: "other-id",
+              type: "worker",
+              script_name: "other",
+            },
             {
               consumer_id: "consumer-id",
               type: "worker",
-              script: "mons-link-api",
+              script_name: "mons-link-api",
             },
           ],
         },

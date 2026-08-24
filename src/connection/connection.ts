@@ -187,6 +187,7 @@ import {
   verifyEthereumAddressViaApi,
   verifySolanaAddressViaApi,
   type AuthSessionBoundResult,
+  type AuthTokenProvider,
 } from "../services/authApi";
 import {
   mapDatabaseEventRecord,
@@ -1352,6 +1353,16 @@ class Connection {
     return user.getIdToken(forceRefresh);
   };
 
+  private getUserBoundAuthTokenProvider(): AuthTokenProvider & {
+    readonly assertCurrentUser: () => void;
+  } {
+    const user = this.auth.currentUser;
+    if (!user) {
+      throw new Error("Failed to authenticate user");
+    }
+    return createUserBoundAuthTokenProvider(user, () => this.auth.currentUser);
+  }
+
   public async beginAuthIntent(
     method: AuthMethodKey,
   ): Promise<AuthIntentResponse> {
@@ -1388,14 +1399,7 @@ class Connection {
     method: AuthMethodKey,
   ): Promise<AuthSessionBoundResult<LinkedAuthMethodsResponse>> {
     try {
-      const user = this.auth.currentUser;
-      if (!user) {
-        throw new Error("Failed to authenticate user");
-      }
-      const tokenProvider = createUserBoundAuthTokenProvider(
-        user,
-        () => this.auth.currentUser,
-      );
+      const tokenProvider = this.getUserBoundAuthTokenProvider();
       const result = await unlinkAuthMethodViaApi(method, tokenProvider);
       return bindAuthSessionResult(result, tokenProvider.assertCurrentUser);
     } catch (error) {
@@ -1412,6 +1416,7 @@ class Connection {
     try {
       await this.ensureAuthenticated();
       const presentation = getStoredAuthPresentation();
+      const tokenProvider = this.getUserBoundAuthTokenProvider();
       return verifyAppleTokenViaApi(
         {
           intentId,
@@ -1419,7 +1424,7 @@ class Connection {
           ...presentation,
           consentSource: consentSource === "settings" ? "settings" : "signin",
         },
-        this.getAuthApiToken,
+        tokenProvider,
       );
     } catch (error) {
       console.error("Error verifying Apple token:", error);
@@ -1454,9 +1459,10 @@ class Connection {
     try {
       await this.ensureAuthenticated();
       const presentation = getStoredAuthPresentation();
+      const tokenProvider = this.getUserBoundAuthTokenProvider();
       return completeXRedirectAuthViaApi(
         { flowId: params.flowId, ...presentation },
-        this.getAuthApiToken,
+        tokenProvider,
       );
     } catch (error) {
       console.error("Error completing X redirect auth:", error);
@@ -1472,9 +1478,10 @@ class Connection {
     try {
       await this.ensureAuthenticated();
       const presentation = getStoredAuthPresentation();
+      const tokenProvider = this.getUserBoundAuthTokenProvider();
       return verifySolanaAddressViaApi(
         { address, signature, intentId, ...presentation },
-        this.getAuthApiToken,
+        tokenProvider,
       );
     } catch (error) {
       console.error("Error verifying Solana address:", error);
@@ -1503,9 +1510,10 @@ class Connection {
     try {
       await this.ensureAuthenticated();
       const presentation = getStoredAuthPresentation();
+      const tokenProvider = this.getUserBoundAuthTokenProvider();
       return verifyEthereumAddressViaApi(
         { message, signature, intentId, ...presentation },
-        this.getAuthApiToken,
+        tokenProvider,
       );
     } catch (error) {
       console.error("Error verifying Ethereum address:", error);

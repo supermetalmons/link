@@ -662,18 +662,23 @@ test("connection keeps migrated auth callable names off Firebase", () => {
   assert.match(source, /httpsCallable\(/);
 });
 
-test("connection fails closed when unlink starts without a user", () => {
+test("connection fails closed when a user-bound auth mutation starts without a user", () => {
   const source = readFileSync(
     new URL("../src/connection/connection.ts", import.meta.url),
     "utf8",
+  );
+  const tokenProvider = source.slice(
+    source.indexOf("private getUserBoundAuthTokenProvider"),
+    source.indexOf("public async beginAuthIntent"),
   );
   const unlinkMethod = source.slice(
     source.indexOf("public async unlinkAuthMethod"),
     source.indexOf("public async verifyAppleToken"),
   );
-  assert.match(unlinkMethod, /const user = this\.auth\.currentUser;/);
+  assert.match(tokenProvider, /const user = this\.auth\.currentUser;/);
+  assert.match(unlinkMethod, /this\.getUserBoundAuthTokenProvider\(\)/);
   assert.doesNotMatch(unlinkMethod, /ensureAuthenticated/);
-  assert.doesNotMatch(unlinkMethod, /\?\? this\.auth\.currentUser/);
+  assert.doesNotMatch(tokenProvider, /\?\? this\.auth\.currentUser/);
 });
 
 test("migrated auth responses remain typed through client consumers", () => {
@@ -711,12 +716,16 @@ test("connection normalizes cached presentation data for every auth mutation", (
   assert.match(helper, /storage\.getPlayerEmojiId\("1"\)/);
   assert.match(helper, /storage\.getPlayerEmojiAura\(""\)/);
   const authMutationSection = source.slice(
-    source.indexOf("public async verifyAppleToken"),
+    source.indexOf("public async unlinkAuthMethod"),
     source.indexOf("public subscribeToAuthChanges"),
   );
   assert.equal(
     authMutationSection.match(/getStoredAuthPresentation\(\)/g)?.length,
     4,
+  );
+  assert.equal(
+    authMutationSection.match(/getUserBoundAuthTokenProvider\(\)/g)?.length,
+    5,
   );
   assert.doesNotMatch(authMutationSection, /storage\.getPlayerEmoji/);
 });
