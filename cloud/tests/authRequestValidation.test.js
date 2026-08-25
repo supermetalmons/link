@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   isAppleAuthVerificationRequest,
+  isAuthProfileResponse,
   isEthereumAuthVerificationRequest,
   isSolanaAuthVerificationRequest,
   isXAuthCompletionRequest,
@@ -83,4 +84,25 @@ test("normalizes cached presentation values to request-safe bounds", () => {
     assert.equal(normalizeAuthPresentation(emoji, null).emoji, 1);
   }
   assert.equal(normalizeAuthPresentation(1, "a".repeat(33)).aura, null);
+});
+
+test("accepts the retired address key without requiring new responses to emit it", () => {
+  const response = {
+    ok: true,
+    uid: "login-1",
+    profileId: "profile-1",
+    username: null,
+    address: null,
+    eth: null,
+    sol: null,
+    linkedMethods: { apple: false, eth: false, sol: false, x: false },
+    appleLinked: false,
+    emoji: 1,
+    opId: "operation-1",
+  };
+
+  assert.equal(isAuthProfileResponse(response), true);
+  assert.equal(isAuthProfileResponse({ ...response, address: 1 }), false);
+  const { address: _address, ...currentResponse } = response;
+  assert.equal(isAuthProfileResponse(currentResponse), true);
 });

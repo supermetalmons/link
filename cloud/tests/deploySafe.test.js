@@ -22,7 +22,7 @@ const {
 } = require("../functions/scripts/deploy-safe");
 
 const repositoryRoot = path.resolve(__dirname, "..", "..");
-const exportedFunctionNames = ["automatch", "verifyEthAddress"];
+const exportedFunctionNames = ["createEvent", "syncEventState"];
 const expectedReleaseFunctionBarriers = [
   [
     "projectRatingTelegramUpdates",
@@ -42,8 +42,8 @@ const eventDomainFunctionNames = [
 test("argument parsing supports full releases and positional maintenance", () => {
   assert.deepEqual(
     parseArgs([
-      "verifyEthAddress",
-      "automatch",
+      "syncEventState",
+      "createEvent",
       "--project",
       "mons-link",
       "--batch-size=2",
@@ -51,11 +51,10 @@ test("argument parsing supports full releases and positional maintenance", () =>
     ]),
     {
       batchSize: 2,
-      confirmAuthPrune: false,
       dryRun: true,
       includeNonFunctions: false,
       project: "mons-link",
-      functionNames: ["verifyEthAddress", "automatch"],
+      functionNames: ["syncEventState", "createEvent"],
     },
   );
   assert.deepEqual(
@@ -64,11 +63,9 @@ test("argument parsing supports full releases and positional maintenance", () =>
       "--project=mons-staging",
       "--batch-size",
       "7",
-      "--confirm-auth-prune",
     ]),
     {
       batchSize: 7,
-      confirmAuthPrune: true,
       dryRun: false,
       includeNonFunctions: true,
       project: "mons-staging",
@@ -84,7 +81,7 @@ test("argument parsing rejects incomplete and conflicting options", async (t) =>
     ["--batch-size"],
     ["--project"],
     ["--unknown"],
-    ["--include-non-functions", "automatch"],
+    ["--include-non-functions", "createEvent"],
   ];
   for (const argv of cases) {
     await t.test(argv.join(" "), () => {
@@ -127,10 +124,10 @@ test("future runtime exports are selected dynamically once", () => {
 test("positional maintenance selection is deduplicated and validated", () => {
   assert.deepEqual(
     buildDeploymentFunctionNames(
-      parseArgs(["verifyEthAddress", "automatch", "verifyEthAddress"]),
+      parseArgs(["syncEventState", "createEvent", "syncEventState"]),
       exportedFunctionNames,
     ),
-    ["verifyEthAddress", "automatch"],
+    ["syncEventState", "createEvent"],
   );
   assert.throws(
     () =>
@@ -235,7 +232,7 @@ test("full releases preserve Telegram dependency barriers at every batch size", 
 test("positional maintenance batches only the requested functions", () => {
   const calls = [];
   const result = runDeployment(
-    ["verifyEthAddress", "automatch", "--batch-size", "100"],
+    ["syncEventState", "createEvent", "--batch-size", "100"],
     {
       exportedFunctionNames,
       log: () => {},
@@ -247,24 +244,24 @@ test("positional maintenance batches only the requested functions", () => {
   );
 
   assert.equal(result.exitCode, 0);
-  assert.deepEqual(result.functionNames, ["verifyEthAddress", "automatch"]);
+  assert.deepEqual(result.functionNames, ["syncEventState", "createEvent"]);
   assert.equal(result.batches.length, 1);
   assert.deepEqual(result.batches[0].functionNames, [
-    "verifyEthAddress",
-    "automatch",
+    "syncEventState",
+    "createEvent",
   ]);
   assert.equal(calls.length, 1);
   assert.equal(
     calls[0].args[2],
-    "functions:verifyEthAddress,functions:automatch",
+    "functions:syncEventState,functions:createEvent",
   );
 });
 
 test("Firebase command builders forward the project to exact targets", () => {
-  assert.deepEqual(buildFirebaseCommandArgs(["automatch"], "mons-link"), [
+  assert.deepEqual(buildFirebaseCommandArgs(["createEvent"], "mons-link"), [
     "deploy",
     "--only",
-    "functions:automatch",
+    "functions:createEvent",
     "--project",
     "mons-link",
   ]);
@@ -341,30 +338,11 @@ test("dry-run previews the complete release without spawning Firebase", () => {
   );
 });
 
-test("live full releases require auth-prune confirmation before spawning", () => {
-  const calls = [];
-
-  assert.throws(
-    () =>
-      runDeployment(["--include-non-functions"], {
-        exportedFunctionNames,
-        log: () => {},
-        spawn: (...args) => {
-          calls.push(args);
-          return { status: 0 };
-        },
-      }),
-    /pass --confirm-auth-prune/i,
-  );
-  assert.equal(calls.length, 0);
-});
-
 test("full release forwards one project through every spawned deployment", () => {
   const calls = [];
   const result = runDeployment(
     [
       "--include-non-functions",
-      "--confirm-auth-prune",
       "--project",
       "forwarded-project",
       "--batch-size=2",
@@ -415,7 +393,7 @@ test("a failed function batch prevents Firestore deployment", () => {
   const calls = [];
   const statuses = [0, 0, 7, 0];
   const result = runDeployment(
-    ["--include-non-functions", "--confirm-auth-prune", "--batch-size", "2"],
+    ["--include-non-functions", "--batch-size", "2"],
     {
       exportedFunctionNames,
       log: () => {},
@@ -436,17 +414,14 @@ test("a failed function batch prevents Firestore deployment", () => {
 
 test("a failed database rules deployment prevents function deployment", () => {
   const calls = [];
-  const result = runDeployment(
-    ["--include-non-functions", "--confirm-auth-prune"],
-    {
-      exportedFunctionNames,
-      log: () => {},
-      spawn: (command, args) => {
-        calls.push({ command, args });
-        return { status: 6 };
-      },
+  const result = runDeployment(["--include-non-functions"], {
+    exportedFunctionNames,
+    log: () => {},
+    spawn: (command, args) => {
+      calls.push({ command, args });
+      return { status: 6 };
     },
-  );
+  });
 
   assert.equal(result.exitCode, 6);
   assert.equal(calls.length, 1);
@@ -456,7 +431,7 @@ test("a failed database rules deployment prevents function deployment", () => {
 test("a failed function reconciliation prevents Firestore deployment", () => {
   const calls = [];
   const result = runDeployment(
-    ["--include-non-functions", "--confirm-auth-prune", "--batch-size", "20"],
+    ["--include-non-functions", "--batch-size", "20"],
     {
       exportedFunctionNames,
       log: () => {},
@@ -479,7 +454,7 @@ test("a failed function reconciliation prevents Firestore deployment", () => {
 test("a failed non-function deployment is propagated", () => {
   const calls = [];
   const result = runDeployment(
-    ["--include-non-functions", "--confirm-auth-prune", "--batch-size", "20"],
+    ["--include-non-functions", "--batch-size", "20"],
     {
       exportedFunctionNames,
       log: () => {},
@@ -516,12 +491,6 @@ test("package entry points expose one test-gated production release", () => {
     rootPackageJson.scripts["deploy:firebase"],
     "npm run prepare:firebase && node cloud/functions/scripts/deploy-safe.js --include-non-functions",
   );
-  assert.equal(
-    rootPackageJson.scripts["deploy:allFunctionsBatched"],
-    undefined,
-  );
-  assert.equal(rootPackageJson.scripts["deploy:telegramFunctions"], undefined);
-  assert.equal(rootPackageJson.scripts["deploy:monsRulesFunctions"], undefined);
   assert.equal(
     functionsPackageJson.scripts.test,
     "node --experimental-strip-types --test ../tests/*.test.js",

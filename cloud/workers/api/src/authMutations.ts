@@ -49,16 +49,13 @@ export type AuthMutationDependencies = {
 
 type AuthProfileReference = Pick<AuthProfileResponse, "profileId" | "opId">;
 
-function authProfileReference(
-  value: unknown,
-  fallbackOpId = "",
-): AuthProfileReference | null {
+function authProfileReference(value: unknown): AuthProfileReference | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
   const fields = value as Record<string, unknown>;
   const profileId = cleanString(fields.profileId);
-  const opId = cleanString(fields.opId) || cleanString(fallbackOpId);
+  const opId = cleanString(fields.opId);
   return profileId && opId ? { profileId, opId } : null;
 }
 
@@ -213,7 +210,6 @@ async function executeAuthMutation(
       intentId: payload.intentId,
       requestEmoji: payload.emoji,
       requestAura: payload.aura,
-      preferredAddress: payload.address,
       opId,
     } as const;
     const concurrentReplay = await service.prepareVerifiedMethod(input, intent);
@@ -292,7 +288,6 @@ async function executeAuthMutation(
       intentId: payload.intentId,
       requestEmoji: payload.emoji,
       requestAura: payload.aura,
-      preferredAddress: address,
       opId,
     } as const;
     const concurrentReplay = await service.prepareVerifiedMethod(input, intent);
@@ -325,7 +320,6 @@ async function executeAuthMutation(
       requestAura: payload.aura,
       appleEmailMasked: verified.emailMasked,
       consentSource: payload.consentSource,
-      preferredAddress: null,
       opId,
     } as const;
     const concurrentReplay = await service.prepareVerifiedMethod(input, intent);
@@ -363,7 +357,7 @@ async function executeAuthMutation(
   ): Promise<AuthProfileResponse> => {
     const xUserId = cleanString(flow.fields.xUserId);
     const opId = `x-redirect:${payload.flowId}`;
-    const storedResult = authProfileReference(flow.fields.result, opId);
+    const storedResult = authProfileReference(flow.fields.result);
     if (!xUserId || !storedResult) {
       throw new AuthApiFailure(
         409,
@@ -547,7 +541,6 @@ async function executeAuthMutation(
     xUsername: cleanString(flow.fields.xUsername) || null,
     consentSource:
       flow.fields.consentSource === "settings" ? "settings" : "signin",
-    preferredAddress: null,
     opId,
   } as const;
   let response: AuthProfileResponse;

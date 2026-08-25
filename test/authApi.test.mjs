@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import test from "node:test";
 
@@ -608,7 +607,6 @@ test("maps server errors without retrying writes and preserves details", async (
       assert.equal(error.code, "failed-precondition");
       assert.equal(error.message, "x-auth-disabled");
       assert.deepEqual(error.details, { reason: "disabled" });
-      assert.deepEqual(error.customData, { details: { reason: "disabled" } });
       return true;
     },
   );
@@ -638,98 +636,4 @@ test("rejects malformed, oversized, and transport-failed responses safely", asyn
         !error.message.includes("private"),
     );
   }
-});
-
-test("connection keeps migrated auth callable names off Firebase", () => {
-  const source = readFileSync(
-    new URL("../src/connection/connection.ts", import.meta.url),
-    "utf8",
-  );
-  for (const name of [
-    "beginAuthIntent",
-    "beginXRedirectAuth",
-    "completeXRedirectAuth",
-    "getLinkedAuthMethods",
-    "syncProfileClaim",
-    "unlinkAuthMethod",
-    "verifyAppleToken",
-    "verifyEthAddress",
-    "verifySolanaAddress",
-  ]) {
-    assert.doesNotMatch(source, new RegExp(`httpsCallable\\([^)]*${name}`));
-    assert.doesNotMatch(source, new RegExp(`\"${name}\"`));
-  }
-  assert.match(source, /httpsCallable\(/);
-});
-
-test("connection fails closed when a user-bound auth mutation starts without a user", () => {
-  const source = readFileSync(
-    new URL("../src/connection/connection.ts", import.meta.url),
-    "utf8",
-  );
-  const tokenProvider = source.slice(
-    source.indexOf("private getUserBoundAuthTokenProvider"),
-    source.indexOf("public async beginAuthIntent"),
-  );
-  const unlinkMethod = source.slice(
-    source.indexOf("public async unlinkAuthMethod"),
-    source.indexOf("public async verifyAppleToken"),
-  );
-  assert.match(tokenProvider, /const user = this\.auth\.currentUser;/);
-  assert.match(unlinkMethod, /this\.getUserBoundAuthTokenProvider\(\)/);
-  assert.doesNotMatch(unlinkMethod, /ensureAuthenticated/);
-  assert.doesNotMatch(tokenProvider, /\?\? this\.auth\.currentUser/);
-});
-
-test("migrated auth responses remain typed through client consumers", () => {
-  const authentication = readFileSync(
-    new URL("../src/connection/authentication.ts", import.meta.url),
-    "utf8",
-  );
-  const loginSuccess = readFileSync(
-    new URL("../src/connection/loginSuccess.ts", import.meta.url),
-    "utf8",
-  );
-  const settings = readFileSync(
-    new URL("../src/ui/identity/SettingsModalView.tsx", import.meta.url),
-    "utf8",
-  );
-  assert.doesNotMatch(authentication, /Promise<any>/);
-  assert.doesNotMatch(loginSuccess, /profile as any/);
-  assert.doesNotMatch(settings, /result:\s*any/);
-  assert.match(
-    loginSuccess,
-    /if \(!connection\.isCurrentAuthUser\(res\.uid\)\)/,
-  );
-  assert.match(
-    settings,
-    /const result = \(await connection\.unlinkAuthMethod\(method\)\)\.read\(\);/,
-  );
-});
-
-test("connection normalizes cached presentation data for every auth mutation", () => {
-  const source = readFileSync(
-    new URL("../src/connection/connection.ts", import.meta.url),
-    "utf8",
-  );
-  const helper = source.match(
-    /const getStoredAuthPresentation = \(\): \{[\s\S]*?^\};/m,
-  )?.[0];
-  assert.ok(helper);
-  assert.match(helper, /return normalizeAuthPresentation\(/);
-  assert.match(helper, /storage\.getPlayerEmojiId\("1"\)/);
-  assert.match(helper, /storage\.getPlayerEmojiAura\(""\)/);
-  const authMutationSection = source.slice(
-    source.indexOf("public async unlinkAuthMethod"),
-    source.indexOf("public subscribeToAuthChanges"),
-  );
-  assert.equal(
-    authMutationSection.match(/getStoredAuthPresentation\(\)/g)?.length,
-    4,
-  );
-  assert.equal(
-    authMutationSection.match(/getUserBoundAuthTokenProvider\(\)/g)?.length,
-    5,
-  );
-  assert.doesNotMatch(authMutationSection, /storage\.getPlayerEmoji/);
 });

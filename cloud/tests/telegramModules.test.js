@@ -4,9 +4,9 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const telegramDelivery = require("../functions/telegramDelivery");
+const deliveryEngine = require("../functions/telegram/deliveryEngine");
 const desiredState = require("../functions/telegram/desiredState");
 const deliveryPolicy = require("../functions/telegram/deliveryPolicy");
-const rtdbRepository = require("../functions/telegram/rtdbRepository");
 const queueBridge = require("../functions/telegram/queueBridge");
 const taskIdentity = require("../functions/telegram/taskIdentity");
 
@@ -25,7 +25,11 @@ test("Telegram compatibility facades delegate to focused modules", () => {
   }
 });
 
-test("delivery exports use the extracted desired-state and repository modules", () => {
+test("delivery exports use the extracted engine and desired-state modules", () => {
+  assert.strictEqual(
+    telegramDelivery.createTelegramDeliveryEngine,
+    deliveryEngine.createTelegramDeliveryEngine,
+  );
   assert.strictEqual(
     telegramDelivery.buildTelegramSendDesired,
     desiredState.buildTelegramSendDesired,
@@ -33,10 +37,6 @@ test("delivery exports use the extracted desired-state and repository modules", 
   assert.strictEqual(
     telegramDelivery.buildTelegramEditUpdates,
     desiredState.buildTelegramEditUpdates,
-  );
-  assert.strictEqual(
-    telegramDelivery.createFirebaseTelegramRepository,
-    rtdbRepository.createFirebaseTelegramRepository,
   );
 });
 

@@ -90,7 +90,7 @@ const resolveProfilePaths = async (firestore, profileIds) => {
 const buildEventProjectionOwnerPlan = ({
   afterOwnerPaths,
   beforeOwnerPaths,
-  cleanupProfileIds = [],
+  cleanupOwnerPaths = [],
   rawAfterOwnerProfileIds,
   rawBeforeOwnerProfileIds,
 }) => {
@@ -108,7 +108,7 @@ const buildEventProjectionOwnerPlan = ({
         ...rawAfterOwnerProfileIds,
         ...beforeOwnerPaths.flat(),
         ...afterOwnerPaths.flat(),
-        ...cleanupProfileIds,
+        ...cleanupOwnerPaths.flat(),
       ]
         .map(normalizeString)
         .filter(Boolean),
@@ -186,15 +186,11 @@ async function projectEvent(eventId, beforeData, afterData, options = {}) {
   const beforeOwnerPaths = pathsFor(rawBeforeOwnerProfileIds);
   const afterOwnerPaths = pathsFor(rawAfterOwnerProfileIds);
   const cleanupOwnerPaths = pathsFor(cleanupOwnerProfileIds);
-  const cleanupProfileIds = [
-    ...(options.cleanupProfileIds || []),
-    ...cleanupOwnerPaths.flat(),
-  ];
   const { afterOwnerProfileIds, allOwnerProfileIds } =
     buildEventProjectionOwnerPlan({
       afterOwnerPaths,
       beforeOwnerPaths,
-      cleanupProfileIds,
+      cleanupOwnerPaths,
       rawAfterOwnerProfileIds,
       rawBeforeOwnerProfileIds,
     });
@@ -213,9 +209,7 @@ async function projectEvent(eventId, beforeData, afterData, options = {}) {
     if (writesCount <= 0) {
       return;
     }
-    if (!options.dryRun) {
-      await batch.commit();
-    }
+    await batch.commit();
     batch = firestore.batch();
     writesCount = 0;
   };
@@ -276,7 +270,6 @@ const reconcileLiveEventProjection = async (
   eventId,
   beforeData,
   afterData,
-  options = {},
   dependencies = {},
 ) => {
   const readLiveEvent =
@@ -313,8 +306,6 @@ const reconcileLiveEventProjection = async (
     ).forEach((profileId) => cleanupOwnerProfileIds.add(profileId));
     await projectEventImpl(eventId, beforeData, liveData, {
       cleanupOwnerProfileIds: Array.from(cleanupOwnerProfileIds),
-      cleanupProfileIds: options.cleanupProfileIds,
-      dryRun: options.dryRun === true,
     });
     const confirmedData = await readLiveEvent(eventId);
     if (

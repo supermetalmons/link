@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import test from "node:test";
 
@@ -204,14 +203,4 @@ test("applies one deadline to token acquisition and response reading", async (t)
   t.mock.timers.runAll();
   await bodyRejection;
   assert.equal(signal.aborted, true);
-});
-
-test("connection no longer references the Firebase mineRock callable", () => {
-  const source = readFileSync(
-    new URL("../src/connection/connection.ts", import.meta.url),
-    "utf8",
-  );
-  assert.doesNotMatch(source, /httpsCallable\([^)]*mineRock/);
-  assert.doesNotMatch(source, /"mineRock"/);
-  assert.match(source, /mineRockViaApi/);
 });

@@ -900,46 +900,6 @@ test("returns a concurrently completed X replay after a write conflict", async (
   });
 });
 
-test("recovers completed legacy X flows before returning them", async () => {
-  let replayChecks = 0;
-  const response = await handleAuthMutation(
-    request("/auth/x/flows/complete", {
-      flowId: FLOW_ID,
-      emoji: 1,
-      aura: "",
-    }),
-    identity,
-    env,
-    ctx,
-    {
-      firestore: firestore(
-        firestoreDocument("xAuthRedirectFlows", FLOW_ID, {
-          uid: identity.uid,
-          status: "completed",
-          xUserId: "12345",
-          result: {
-            profileId: profile.profileId,
-          },
-        }),
-        [],
-      ),
-      identityService: service({
-        peekVerifyReplay: async () => {
-          replayChecks++;
-          return profile;
-        },
-        refreshCompletedVerifyResult: async (result) => ({
-          ...profile,
-          profileId: result.profileId,
-          opId: result.opId,
-        }),
-      }),
-    },
-  );
-  assert.equal(response.ok, true);
-  assert.equal(replayChecks, 1);
-});
-
 test("rejects a completed X flow after live ownership validation fails", async () => {
   let refreshChecks = 0;
   await assert.rejects(

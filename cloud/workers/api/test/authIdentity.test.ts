@@ -367,7 +367,6 @@ test("starts a verification operation before consuming its intent", async () => 
     intentId: "intent-sol",
     requestEmoji: 1,
     requestAura: null,
-    preferredAddress: "11111111111111111111111111111111",
     opId: "intent:intent-sol",
   };
   assert.equal(await service.prepareVerifiedMethod(input, intent), null);
@@ -421,7 +420,6 @@ test("does not let a second X operation reuse a consumed intent", async () => {
     intentId: "intent-x",
     requestEmoji: 1,
     requestAura: null,
-    preferredAddress: null,
     opId,
   });
 
@@ -467,7 +465,6 @@ test("keeps a recovery job when Queue enqueue fails", async (t) => {
     intentId: "intent-sol",
     requestEmoji: 4,
     requestAura: "rainbow",
-    preferredAddress: "11111111111111111111111111111111",
     opId: "intent:intent-sol",
   } as const;
   const response = await service.linkVerifiedMethod(input);
@@ -534,7 +531,6 @@ test("rejects a successful replay with different immutable context", async () =>
     normalizedMethodValue: "11111111111111111111111111111111",
     requestEmoji: 1,
     requestAura: null,
-    preferredAddress: "11111111111111111111111111111111",
     opId: "immutable-replay",
   };
   await service.linkVerifiedMethod(input);
@@ -543,7 +539,6 @@ test("rejects a successful replay with different immutable context", async () =>
       ...input,
       methodValueRaw: "22222222222222222222222222222222",
       normalizedMethodValue: "22222222222222222222222222222222",
-      preferredAddress: "22222222222222222222222222222222",
     }),
     (error) =>
       error instanceof Error && error.message === "op-context-mismatch",
@@ -599,7 +594,6 @@ test("does not resume a successful verification whose live effect is gone", asyn
       normalizedMethodValue: sol,
       requestEmoji: 1,
       requestAura: null,
-      preferredAddress: sol,
       opId,
     }),
     (error) =>
@@ -666,7 +660,6 @@ test("merges profiles into one recovery job and repairs only the caller", async 
     normalizedMethodValue: sol,
     requestEmoji: 1,
     requestAura: null,
-    preferredAddress: sol,
     opId: "merge-operation",
   });
   assert.equal(response.profileId, "target-profile");
@@ -726,7 +719,6 @@ test("rejects a merge while either profile has a recovery job", async () => {
       normalizedMethodValue: sol,
       requestEmoji: 1,
       requestAura: null,
-      preferredAddress: sol,
       opId: "blocked-merge",
     }),
     (error) =>
@@ -768,7 +760,6 @@ test("rechecks login ownership before creating a first profile", async () => {
     normalizedMethodValue: sol,
     requestEmoji: 1,
     requestAura: null,
-    preferredAddress: sol,
     opId: "concurrent-first-profile",
   });
   assert.equal(response.profileId, "profile-1");
@@ -826,7 +817,6 @@ test("converges on a login profile that appears before method attachment", async
     normalizedMethodValue: sol,
     requestEmoji: 1,
     requestAura: null,
-    preferredAddress: sol,
     opId: "concurrent-method-profile",
   });
   assert.equal(response.profileId, "login-profile");
@@ -899,7 +889,6 @@ test("finalizes a link on the canonical profile after a concurrent merge", async
     normalizedMethodValue: xUserId,
     requestEmoji: 1,
     requestAura: null,
-    preferredAddress: null,
     xUsername: "Mons",
     opId: "concurrent-final-profile",
   });
@@ -946,7 +935,6 @@ test("rejects legacy Ethereum owners split across checksum representations", asy
       normalizedMethodValue: normalized,
       requestEmoji: 1,
       requestAura: null,
-      preferredAddress: normalized,
       opId: "legacy-eth-duplicate-operation",
     }),
     (error) =>
@@ -989,7 +977,6 @@ test("recovers a committed verification from an incomplete operation", async () 
     normalizedMethodValue: sol,
     requestEmoji: 1,
     requestAura: "",
-    preferredAddress: sol,
     opId: "incomplete-verify-operation",
   });
   assert.equal(initial.ok, true);
@@ -1526,7 +1513,6 @@ test("does not reuse a legacy username that lacks a lookup-key field", async () 
     normalizedMethodValue: "12345",
     requestEmoji: 1,
     requestAura: "",
-    preferredAddress: null,
     xUsername: "Alice7",
     opId: "legacy-username-operation",
   });
@@ -1562,7 +1548,6 @@ test("ignores stale lookup-key fields when assigning a preferred username", asyn
     normalizedMethodValue: "12345",
     requestEmoji: 1,
     requestAura: "",
-    preferredAddress: null,
     xUsername: "Alice7",
     opId: "stale-lookup-operation",
   });
@@ -1611,7 +1596,6 @@ test("finds a live username owner after multiple stale lookup rows", async () =>
     normalizedMethodValue: "12345",
     requestEmoji: 1,
     requestAura: "",
-    preferredAddress: null,
     xUsername: "Alice7",
     opId: "hidden-username-owner-operation",
   });

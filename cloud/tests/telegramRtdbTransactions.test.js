@@ -7,16 +7,29 @@ const {
   buildTelegramDeleteDesired,
   buildTelegramEditDesired,
   buildTelegramSendDesired,
-  createFirebaseTelegramRepository,
   createTelegramDeliveryEngine,
   createTelegramLocalRetryBarrier,
 } = require("../functions/telegramDelivery");
+const {
+  createTelegramRepository,
+} = require("../functions/telegram/repositoryCore");
 const {
   runRtdbDecisionTransaction,
 } = require("../functions/rtdbDecisionTransaction");
 
 const clone = (value) =>
   value === undefined ? undefined : structuredClone(value);
+
+const createRtdbRepository = (database) =>
+  createTelegramRepository({
+    async getPath(path) {
+      const snapshot = await database.ref(path).once("value");
+      return snapshot.exists() ? snapshot.val() : null;
+    },
+    transactPath(path, updater) {
+      return runRtdbDecisionTransaction(database.ref(path), updater);
+    },
+  });
 
 const createColdDatabase = (initial = {}) => {
   let root = clone(initial);
@@ -121,7 +134,7 @@ const sendDesired = () =>
   });
 
 const createEngine = ({ database, client, now = () => 10_000 }) => {
-  const repository = createFirebaseTelegramRepository(database);
+  const repository = createRtdbRepository(database);
   return createTelegramDeliveryEngine({
     repository,
     client,
@@ -384,7 +397,7 @@ test("cold delivery-control transactions rerun owner fences authoritatively", as
       },
     },
   });
-  const matchingRepository = createFirebaseTelegramRepository(matchingDatabase);
+  const matchingRepository = createRtdbRepository(matchingDatabase);
   assert.equal(await matchingRepository.releaseApiGate("gate-a"), true);
   assert.equal(matchingDatabase.read("telegramDeliveryControl/apiGate"), null);
 
@@ -400,7 +413,7 @@ test("cold delivery-control transactions rerun owner fences authoritatively", as
       },
     },
   });
-  const proofRepository = createFirebaseTelegramRepository(proofDatabase);
+  const proofRepository = createRtdbRepository(proofDatabase);
   assert.deepEqual(
     await proofRepository.extendRetryBarrierAndReleaseApiGate({
       owner: "gate-a",
@@ -427,7 +440,7 @@ test("cold delivery-control transactions rerun owner fences authoritatively", as
       },
     },
   });
-  const staleRepository = createFirebaseTelegramRepository(staleDatabase);
+  const staleRepository = createRtdbRepository(staleDatabase);
   assert.equal(await staleRepository.releaseApiGate("gate-a"), false);
   const staleProof = await staleRepository.extendRetryBarrierAndReleaseApiGate({
     owner: "gate-a",

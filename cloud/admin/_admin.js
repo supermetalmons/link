@@ -24,14 +24,13 @@ const adminDatabase = hasFunctionsAdmin
   ? requireFromFunctions("firebase-admin/database")
   : require("firebase-admin/database");
 const { applicationDefault, deleteApp, getApps, initializeApp } = adminApp;
-const { FieldPath, FieldValue, getFirestore } = adminFirestore;
+const { FieldPath, getFirestore } = adminFirestore;
 const { getDatabase } = adminDatabase;
 const ADC_FAILURE_MESSAGE =
   "Failed to initialize Admin SDK with Application Default Credentials. Run gcloud auth application-default login.";
 
 const firestore = () => getFirestore();
 firestore.FieldPath = FieldPath;
-firestore.FieldValue = FieldValue;
 const database = () => getDatabase();
 
 const admin = {

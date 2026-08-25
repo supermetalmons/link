@@ -1,7 +1,6 @@
 import {
   AUTH_COOLDOWN_REASONS,
   AUTH_METHOD_LABELS,
-  AUTH_METHOD_REUSE_COOLDOWN_MS,
   getAuthCooldownScope,
   normalizeAuthCooldownReason,
   normalizeAuthMethod,
@@ -66,37 +65,6 @@ const parseDetailsObject = (
   };
 };
 
-const parseFallbackFromMessage = (
-  message: string,
-): AuthCooldownErrorDetails | null => {
-  const lowerMessage = message.toLowerCase();
-  const reason = lowerMessage.includes(AUTH_COOLDOWN_REASONS.profileMethod)
-    ? AUTH_COOLDOWN_REASONS.profileMethod
-    : lowerMessage.includes(AUTH_COOLDOWN_REASONS.method)
-      ? AUTH_COOLDOWN_REASONS.method
-      : null;
-  if (!reason) {
-    return null;
-  }
-  const method = lowerMessage.includes("apple")
-    ? "apple"
-    : lowerMessage.includes(" x ") || lowerMessage.includes('"x"')
-      ? "x"
-      : lowerMessage.includes("sol")
-        ? "sol"
-        : lowerMessage.includes("eth") || lowerMessage.includes("ethereum")
-          ? "eth"
-          : null;
-  return {
-    reason,
-    scope: getAuthCooldownScope(reason),
-    method,
-    retryAtMs: null,
-    cooldownMs: AUTH_METHOD_REUSE_COOLDOWN_MS,
-    profileId: null,
-  };
-};
-
 const getMethodLabel = (method: AuthMethodKey | null): string => {
   return method ? AUTH_METHOD_LABELS[method] : "this sign-in method";
 };
@@ -121,24 +89,7 @@ const parseAuthCooldownError = (
   if (!isRecord(error)) {
     return null;
   }
-  const customData = isRecord(error.customData) ? error.customData : null;
-  const cause = isRecord(error.cause) ? error.cause : null;
-  const detailsCandidates = [
-    error.details,
-    customData ? customData.details : undefined,
-    cause ? cause.details : undefined,
-  ];
-  for (const candidate of detailsCandidates) {
-    const parsed = parseDetailsObject(candidate);
-    if (parsed) {
-      return parsed;
-    }
-  }
-  const message = toCleanString(error.message);
-  if (!message) {
-    return null;
-  }
-  return parseFallbackFromMessage(message);
+  return parseDetailsObject(error.details);
 };
 
 export const formatAuthCooldownErrorMessage = (

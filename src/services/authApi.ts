@@ -46,7 +46,6 @@ type AuthMutationRequest =
 
 export class AuthApiError extends Error {
   readonly code: string;
-  readonly customData?: { details: unknown };
   readonly details?: unknown;
 
   constructor(code: string, message: string, details?: unknown) {
@@ -54,9 +53,6 @@ export class AuthApiError extends Error {
     this.name = "AuthApiError";
     this.code = code;
     this.details = details;
-    if (details !== undefined) {
-      this.customData = { details };
-    }
   }
 }
 

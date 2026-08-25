@@ -9,7 +9,6 @@ const {
   buildTelegramEditUpdates,
   buildTelegramSendDesired,
   buildTelegramSendUpdates,
-  createFirebaseTelegramRepository,
   createTelegramDeliveryEngine,
   createTelegramLocalRetryBarrier,
   queueTelegramSend,
@@ -949,32 +948,6 @@ test("a bot-wide retry barrier blocks other keys and new revisions", async () =>
     "delivered",
   );
   assert.equal(sends, 2);
-});
-
-test("durable retry barrier extension never shortens its deadline", async () => {
-  let retryNotBeforeMs = 0;
-  const snapshot = () => ({
-    exists: () => retryNotBeforeMs > 0,
-    val: () => retryNotBeforeMs,
-  });
-  const database = {
-    ref(path) {
-      assert.equal(path, "telegramDeliveryControl/retryNotBeforeMs");
-      return {
-        async once() {
-          return snapshot();
-        },
-        async transaction(updater) {
-          retryNotBeforeMs = updater(retryNotBeforeMs);
-          return { committed: true, snapshot: snapshot() };
-        },
-      };
-    },
-  };
-  const repository = createFirebaseTelegramRepository(database);
-  assert.equal(await repository.extendRetryNotBeforeMs(50_000), 50_000);
-  assert.equal(await repository.extendRetryNotBeforeMs(30_000), 50_000);
-  assert.equal(await repository.getRetryNotBeforeMs(), 50_000);
 });
 
 test("durable API gate blocks cold workers when barrier persistence fails", async () => {

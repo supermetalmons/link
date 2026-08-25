@@ -37,7 +37,6 @@ export interface AuthProfileResponse {
   uid: string;
   profileId: string;
   username: string | null;
-  address?: string | null;
   eth?: string | null;
   sol?: string | null;
   linkedMethods: LinkedAuthMethods;

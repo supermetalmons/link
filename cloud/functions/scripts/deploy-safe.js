@@ -78,7 +78,6 @@ const parseBatchSize = (value) => {
 const parseArgs = (argv) => {
   const options = {
     batchSize: DEFAULT_BATCH_SIZE,
-    confirmAuthPrune: false,
     dryRun: false,
     includeNonFunctions: false,
     project: "",
@@ -89,10 +88,6 @@ const parseArgs = (argv) => {
     const arg = argv[index];
     if (arg === "--dry-run") {
       options.dryRun = true;
-      continue;
-    }
-    if (arg === "--confirm-auth-prune") {
-      options.confirmAuthPrune = true;
       continue;
     }
     if (arg === "--include-non-functions") {
@@ -239,16 +234,6 @@ const runDeployment = (argv, dependencies = {}) => {
     options.functionNames.length > 0
       ? buildDeploymentBatches(functionNames, options.batchSize)
       : buildReleaseDeploymentBatches(functionNames, options.batchSize);
-
-  if (
-    options.functionNames.length === 0 &&
-    !options.dryRun &&
-    !options.confirmAuthPrune
-  ) {
-    throw new Error(
-      "Full Firebase reconciliation can prune deployed auth callables. Review a dry run, then pass --confirm-auth-prune.",
-    );
-  }
 
   if (options.includeNonFunctions) {
     const commandArgs = buildNonFunctionFirebaseCommandArgs(

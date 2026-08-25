@@ -101,7 +101,6 @@ type LinkInput = {
   normalizedMethodValue: string;
   intentId?: string;
   opId: string;
-  preferredAddress?: string | null;
   requestAura: string | null;
   requestEmoji: number;
   uid: string;
@@ -1496,9 +1495,7 @@ export function createAuthIdentityService(
     ) {
       authFailure(409, "aborted", "profile-merged-retry");
     }
-    const preferredAddress =
-      method === "eth" || method === "sol" ? currentValue : null;
-    return profileResponse(profile, uid, preferredAddress, replay.opId);
+    return profileResponse(profile, uid, replay.opId);
   };
 
   const refreshCompletedVerifyResult = async (
@@ -1538,9 +1535,7 @@ export function createAuthIdentityService(
     ) {
       return null;
     }
-    const preferredAddress =
-      method === "eth" || method === "sol" ? normalizedMethodValue : null;
-    return profileResponse(profile, uid, preferredAddress, result.opId);
+    return profileResponse(profile, uid, result.opId);
   };
 
   const randomUsername = (): string => {
@@ -1713,7 +1708,6 @@ export function createAuthIdentityService(
   const profileResponse = (
     profile: AuthFirestoreDocument,
     uid: string,
-    preferredAddress: string | null,
     opId: string,
   ): AuthProfileResponse => {
     const fields = profile.fields;
@@ -1727,7 +1721,6 @@ export function createAuthIdentityService(
       uid,
       profileId: profile.id,
       username: cleanString(fields.username) || null,
-      address: preferredAddress || eth || sol,
       eth,
       sol,
       linkedMethods,
@@ -1821,11 +1814,7 @@ export function createAuthIdentityService(
         return null;
       }
     }
-    const preferredAddress =
-      method === "eth" || method === "sol"
-        ? normalizeProfileMethod(method, profile.fields)
-        : null;
-    const response = profileResponse(profile, uid, preferredAddress, opId);
+    const response = profileResponse(profile, uid, opId);
     await finishOpBestEffort(opId, { result: response });
     return response;
   };
@@ -2052,12 +2041,7 @@ export function createAuthIdentityService(
             }
             profile = await repairCurrentCaller(input.uid);
           }
-          const response = profileResponse(
-            profile,
-            input.uid,
-            input.preferredAddress || null,
-            input.opId,
-          );
+          const response = profileResponse(profile, input.uid, input.opId);
           const confirmedProfile = await profileByLogin(input.uid);
           if (confirmedProfile?.id === profile.id) {
             await finishOpBestEffort(input.opId, { result: response });

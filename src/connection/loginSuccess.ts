@@ -23,22 +23,15 @@ import {
   syncOwnProfileMiningState,
 } from "../services/ownProfileMiningHydration";
 
-export type AddressKind = "eth" | "sol" | "apple" | "x";
-
-export function handleLoginSuccess(
-  res: AuthProfileResponse,
-  addressKind: AddressKind,
-): boolean {
+export function handleLoginSuccess(res: AuthProfileResponse): boolean {
   if (!connection.isCurrentAuthUser(res.uid)) {
     return false;
   }
   enforcePendingLogoutWipeIfNeeded();
   const { emoji, profileId } = res;
   const username = res.username ?? "";
-  const resolvedEth =
-    res.eth ?? (addressKind === "eth" ? (res.address ?? null) : null);
-  const resolvedSol =
-    res.sol ?? (addressKind === "sol" ? (res.address ?? null) : null);
+  const resolvedEth = res.eth ?? null;
+  const resolvedSol = res.sol ?? null;
 
   const profile: PlayerProfile = {
     id: profileId,

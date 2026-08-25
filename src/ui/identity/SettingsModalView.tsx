@@ -20,7 +20,7 @@ import { connection } from "../../connection/connection";
 import { formatAuthCooldownErrorMessage } from "../../connection/authCooldownErrors";
 import { storage } from "../../utils/storage";
 import { updateProfileDisplayName } from "./profileUiPort";
-import { handleLoginSuccess, AddressKind } from "../../connection/loginSuccess";
+import { handleLoginSuccess } from "../../connection/loginSuccess";
 import { setAuthStatusGlobally } from "../../connection/authentication";
 import { useEthereumWalletPicker } from "../EthereumWalletPicker";
 import { primeInjectedEthereumProviderDiscovery } from "../../connection/injectedEthereumProviders";
@@ -661,7 +661,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       let didStartXRedirect = false;
       try {
         let result: AuthVerificationResponse | null = null;
-        let kind: AddressKind = method;
         if (method === "eth") {
           const choice = await requestWalletSelection();
           if (choice.status === "cancelled") {
@@ -677,7 +676,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             signature,
             intentId,
           );
-          kind = "eth";
         } else if (method === "sol") {
           const { connectToSolana } =
             await import("../../connection/solanaConnection");
@@ -688,7 +686,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             signature,
             intentId,
           );
-          kind = "sol";
         } else if (method === "x") {
           const intent = await connection.beginAuthIntent("x");
           didStartXRedirect = true;
@@ -701,7 +698,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           return;
         }
 
-        if (result && result.ok === true && handleLoginSuccess(result, kind)) {
+        if (result && result.ok === true && handleLoginSuccess(result)) {
           setAuthMessage("");
           setAuthStatusGlobally("authenticated");
         }
@@ -837,7 +834,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       if (!isActionCurrent()) {
         return;
       }
-      if (result && result.ok === true && handleLoginSuccess(result, "apple")) {
+      if (result && result.ok === true && handleLoginSuccess(result)) {
         setAuthMessage("");
         setAuthStatusGlobally("authenticated");
       }

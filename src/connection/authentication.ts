@@ -193,7 +193,7 @@ export function useAuthStatus() {
         clearConsumedAppleRedirectResult();
         if (res && res.ok === true) {
           setSignInInlineAuthError(null);
-          if (handleLoginSuccess(res, "apple")) {
+          if (handleLoginSuccess(res)) {
             setAuthStatus("authenticated");
           }
         } else if (shouldForceUnauthenticatedOnFailure) {
@@ -260,7 +260,7 @@ export function useAuthStatus() {
         clearConsumedXRedirectResult();
         if (res && res.ok === true) {
           setSignInInlineAuthError(null);
-          if (handleLoginSuccess(res, "x")) {
+          if (handleLoginSuccess(res)) {
             setAuthStatus("authenticated");
             if (redirectResult.consentSource === "settings") {
               publishXAuthUiFeedback({

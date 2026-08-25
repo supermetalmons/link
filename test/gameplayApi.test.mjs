@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import test from "node:test";
 
@@ -929,45 +928,4 @@ test("applies one deadline to token acquisition and response reading", async (t)
   t.mock.timers.runAll();
   await bodyRejection;
   assert.equal(signal.aborted, true);
-});
-
-test("connection no longer references the migrated Firebase callables", () => {
-  const source = readFileSync(
-    new URL("../src/connection/connection.ts", import.meta.url),
-    "utf8",
-  );
-  assert.doesNotMatch(source, /httpsCallable\([^)]*cancelAutomatch/);
-  assert.doesNotMatch(source, /httpsCallable\([^)]*["']automatch["']/);
-  assert.doesNotMatch(source, /httpsCallable\([^)]*removeNavigationGame/);
-  assert.doesNotMatch(source, /"cancelAutomatch"/);
-  assert.doesNotMatch(source, /"removeNavigationGame"/);
-  assert.doesNotMatch(source, /httpsCallable\([^)]*cancelWagerProposal/);
-  assert.doesNotMatch(source, /httpsCallable\([^)]*declineWagerProposal/);
-  assert.doesNotMatch(source, /httpsCallable\([^)]*sendWagerProposal/);
-  assert.doesNotMatch(source, /httpsCallable\([^)]*acceptWagerProposal/);
-  assert.doesNotMatch(source, /["']resolveWagerOutcome["']/);
-  assert.doesNotMatch(source, /["']startMatchTimer["']/);
-  assert.doesNotMatch(source, /["']claimMatchVictoryByTimer["']/);
-  assert.doesNotMatch(source, /httpsCallable\([^)]*updateRatings/);
-  assert.doesNotMatch(source, /httpsCallable\([^)]*joinEvent/);
-  assert.doesNotMatch(source, /httpsCallable\([^)]*removeEventParticipant/);
-  assert.match(source, /cancelAutomatchViaApi/);
-  assert.match(source, /cancelWagerProposalViaApi/);
-  assert.match(source, /declineWagerProposalViaApi/);
-  assert.match(source, /sendWagerProposalViaApi/);
-  assert.match(source, /acceptWagerProposalViaApi/);
-  assert.match(source, /resolveWagerOutcomeViaApi/);
-  assert.match(source, /optimistic: true/);
-  assert.match(source, /responseData\.reason === "no-wager"/);
-  assert.doesNotMatch(source, /previousFrozenMaterials/);
-  assert.doesNotMatch(source, /previousMining/);
-  assert.match(source, /startAutomatchViaApi/);
-  assert.match(source, /removeNavigationGameViaApi/);
-  assert.match(source, /startMatchTimerViaApi/);
-  assert.match(source, /claimMatchVictoryByTimerViaApi/);
-  assert.match(source, /updateRatingsViaApi/);
-  assert.match(source, /joinEventViaApi/);
-  assert.match(source, /removeEventParticipantViaApi/);
-  assert.doesNotMatch(source, /PendingAutomatchOperationId/);
-  assert.doesNotMatch(source, /crypto\.randomUUID/);
 });

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import test from "node:test";
 
@@ -252,33 +251,4 @@ test("rejects malformed, oversized, failed, and timed-out responses", async () =
   } finally {
     globalThis.setTimeout = originalSetTimeout;
   }
-});
-
-test("connection routes one-shot reads through the API and keeps material caching", () => {
-  const source = readFileSync(
-    new URL("../src/connection/connection.ts", import.meta.url),
-    "utf8",
-  );
-  assert.match(source, /getProfileByLoginIdViaApi/);
-  assert.match(source, /getProfileByIdViaApi/);
-  assert.match(source, /readLeaderboardViaApi/);
-  assert.match(source, /editUsernameViaApi/);
-  assert.doesNotMatch(source, /httpsCallable\([^)]*["']editUsername["']/);
-  assert.match(
-    source,
-    /MINING_MATERIAL_NAMES\.map\(\(material\) =>\s*readLeaderboardViaApi/,
-  );
-  assert.match(source, /LEADERBOARD_CACHE_TTL = 60000/);
-  assert.match(source, /if \(type === "total"\)/);
-  assert.doesNotMatch(source, /where\("logins", "array-contains", loginId\)/);
-
-  const leaderboardSource = readFileSync(
-    new URL("../src/ui/Leaderboard.tsx", import.meta.url),
-    "utf8",
-  );
-  assert.match(
-    leaderboardSource,
-    /showShinyCard\(row\.profile, getLeaderboardDisplayName\(row\), true\)/,
-  );
-  assert.doesNotMatch(leaderboardSource, /getProfileDetails/);
 });

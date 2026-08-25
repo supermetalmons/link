@@ -14,14 +14,10 @@ const {
 const {
   AUTH_COOLDOWN_COLLECTIONS,
   PAGE_SIZE,
-  applyCooldownMutations,
   buildCleanupQuery,
-  classifyCooldown,
   cleanupCollection,
   deleteDocuments,
-  hasCanonicalRetryAtMs,
   parseArgs: parseCleanupArgs,
-  resolveRetryAtMs,
 } = require("../cloud/admin/cleanupAuthMethodRevocations.js");
 
 test("leaderboard CLIs retain 15 as the default and accept a bounded limit", () => {
@@ -99,31 +95,17 @@ test("both leaderboard entrypoints parse arguments and preserve delivery keys", 
   }
 });
 
-test("auth cooldown cleanup covers both collections and expiry formats", () => {
+test("auth cooldown cleanup covers both canonical collections", () => {
   assert.deepEqual(AUTH_COOLDOWN_COLLECTIONS, [
     "authMethodRevocations",
     "authProfileMethodCooldowns",
   ]);
-  assert.equal(resolveRetryAtMs({ retryAtMs: 20, expiresAtMs: 30 }), 20);
-  assert.equal(resolveRetryAtMs({ retryAtMs: 20.5 }), 20);
-  assert.equal(resolveRetryAtMs({ expiresAtMs: 30 }), 30);
-  assert.equal(resolveRetryAtMs({ startedAtMs: 40, cooldownMs: 5 }), 45);
-  assert.equal(hasCanonicalRetryAtMs({ retryAtMs: 20 }), true);
-  assert.equal(hasCanonicalRetryAtMs({ retryAtMs: "20" }), false);
-  assert.equal(hasCanonicalRetryAtMs({ retryAtMs: 20.5 }), false);
-  assert.equal(classifyCooldown({}, 50), "unknown");
-  assert.equal(classifyCooldown({ retryAtMs: 51 }, 50), "active");
-  assert.equal(classifyCooldown({ retryAtMs: 50 }, 50), "expired");
 });
 
 test("auth cooldown cleanup defaults safe and requires explicit execution", () => {
-  assert.deepEqual(parseCleanupArgs([]), {
-    dryRun: true,
-    scanLegacy: false,
-  });
+  assert.deepEqual(parseCleanupArgs([]), { dryRun: true });
   assert.deepEqual(parseCleanupArgs(["--project", "mons-link"]), {
     dryRun: true,
-    scanLegacy: false,
   });
   assert.deepEqual(
     parseCleanupArgs([
@@ -132,22 +114,16 @@ test("auth cooldown cleanup defaults safe and requires explicit execution", () =
       "--database-url",
       "https://mons-link-default-rtdb.firebaseio.com",
     ]),
-    { dryRun: true, scanLegacy: false },
+    { dryRun: true },
   );
   assert.deepEqual(parseCleanupArgs(["--project", "mons-link", "--execute"]), {
     dryRun: false,
-    scanLegacy: false,
-  });
-  assert.deepEqual(parseCleanupArgs(["--scan-legacy", "--dry-run"]), {
-    dryRun: true,
-    scanLegacy: true,
   });
   for (const argv of [
     ["--dry-rnu"],
     ["--project"],
     ["--project", "--execute"],
     ["--dry-run", "--execute"],
-    ["--scan-legacy", "--scan-legacy"],
   ]) {
     assert.throws(() => parseCleanupArgs(argv), /Usage/);
   }
@@ -204,10 +180,8 @@ test("auth cooldown recurring cleanup uses the retryAtMs index", () => {
     buildCleanupQuery({
       firestore,
       collectionName: "authMethodRevocations",
-      documentIdField: "__name__",
       lastDoc: cursor,
       nowMs: 100,
-      scanLegacy: false,
     }),
     query,
   );
@@ -220,73 +194,30 @@ test("auth cooldown recurring cleanup uses the retryAtMs index", () => {
   ]);
 });
 
-test("auth cooldown legacy cleanup explicitly uses a document scan", () => {
-  const calls: unknown[][] = [];
-  const documentIdField = { field: "__name__" };
-  const query = {
-    orderBy: (...args: unknown[]) => {
-      calls.push(["orderBy", ...args]);
-      return query;
-    },
-    startAfter: (...args: unknown[]) => {
-      calls.push(["startAfter", ...args]);
-      return query;
-    },
-    limit: (...args: unknown[]) => {
-      calls.push(["limit", ...args]);
-      return query;
-    },
-  };
-  const firestore = {
-    collection: (...args: unknown[]) => {
-      calls.push(["collection", ...args]);
-      return query;
-    },
-  };
-
-  assert.strictEqual(
-    buildCleanupQuery({
-      firestore,
-      collectionName: "authMethodRevocations",
-      documentIdField,
-      lastDoc: null,
-      nowMs: 100,
-      scanLegacy: true,
-    }),
-    query,
-  );
-  assert.deepEqual(calls, [
-    ["collection", "authMethodRevocations"],
-    ["orderBy", documentIdField],
-    ["limit", PAGE_SIZE],
-  ]);
-});
-
-test("auth cooldown legacy execution deletes expired and normalizes active records", async () => {
-  const createDoc = (id: string, data: Record<string, unknown>) => ({
-    data: () => data,
-    ref: { path: `authMethodRevocations/${id}` },
-    updateTime: { id },
-  });
+test("auth cooldown cleanup reclassifies indexed candidates", async () => {
   const docs = [
-    createDoc("expired", { revokedAtMs: 80, cooldownMs: 10 }),
-    createDoc("expires", { expiresAtMs: 130 }),
-    createDoc("string", { retryAtMs: "140" }),
-    createDoc("canonical", { retryAtMs: 150 }),
-    createDoc("unknown", {}),
+    {
+      data: () => ({ retryAtMs: 50 }),
+      ref: { path: "authMethodRevocations/expired" },
+      updateTime: { id: "expired" },
+    },
+    {
+      data: () => ({ retryAtMs: 0, expiresAtMs: 200 }),
+      ref: { path: "authMethodRevocations/active-fallback" },
+      updateTime: { id: "active-fallback" },
+    },
   ];
   const deletes: unknown[][] = [];
-  const updates: unknown[][] = [];
   let commits = 0;
   const query = {
     get: async () => ({ empty: false, size: docs.length, docs }),
     limit: () => query,
     orderBy: () => query,
+    where: () => query,
   };
   const firestore = {
     batch: () => ({
       delete: (...args: unknown[]) => deletes.push(args),
-      update: (...args: unknown[]) => updates.push(args),
       commit: async () => {
         commits += 1;
       },
@@ -298,43 +229,33 @@ test("auth cooldown legacy execution deletes expired and normalizes active recor
     await cleanupCollection({
       firestore,
       collectionName: "authMethodRevocations",
-      documentIdField: "__name__",
       dryRun: false,
       nowMs: 100,
-      scanLegacy: true,
     }),
     {
       collection: "authMethodRevocations",
-      mode: "legacy-compatible",
-      candidatesScanned: 5,
+      candidatesScanned: 2,
       expired: 1,
       deleted: 1,
-      activeSkipped: 3,
-      unknownSkipped: 1,
-      normalizable: 2,
-      normalized: 2,
     },
   );
   assert.deepEqual(deletes, [
     [docs[0].ref, { lastUpdateTime: docs[0].updateTime }],
   ]);
-  assert.deepEqual(updates, [
-    [docs[1].ref, { retryAtMs: 130 }, { lastUpdateTime: docs[1].updateTime }],
-    [docs[2].ref, { retryAtMs: 140 }, { lastUpdateTime: docs[2].updateTime }],
-  ]);
   assert.equal(commits, 1);
 });
 
-test("auth cooldown dry-run reports legacy work without creating a batch", async () => {
+test("auth cooldown dry-run reports indexed candidates without a batch", async () => {
   const doc = {
-    data: () => ({ expiresAtMs: 130 }),
-    ref: { path: "authMethodRevocations/active" },
-    updateTime: { id: "active" },
+    data: () => ({ retryAtMs: 50 }),
+    ref: { path: "authMethodRevocations/expired" },
+    updateTime: { id: "expired" },
   };
   const query = {
     get: async () => ({ empty: false, size: 1, docs: [doc] }),
     limit: () => query,
     orderBy: () => query,
+    where: () => query,
   };
   const firestore = {
     batch: () => {
@@ -346,14 +267,12 @@ test("auth cooldown dry-run reports legacy work without creating a batch", async
   const summary = await cleanupCollection({
     firestore,
     collectionName: "authMethodRevocations",
-    documentIdField: "__name__",
     dryRun: true,
     nowMs: 100,
-    scanLegacy: true,
   });
 
-  assert.equal(summary.normalizable, 1);
-  assert.equal(summary.normalized, 0);
+  assert.equal(summary.candidatesScanned, 1);
+  assert.equal(summary.expired, 1);
   assert.equal(summary.deleted, 0);
 });
 
@@ -385,7 +304,6 @@ test("auth cooldown cleanup advances after a full page", async () => {
   const summary = await cleanupCollection({
     firestore,
     collectionName: "authMethodRevocations",
-    documentIdField: "__name__",
     dryRun: true,
     nowMs: PAGE_SIZE,
   });
@@ -404,7 +322,6 @@ test("auth cooldown mutation failures are not reported as successful", async () 
   const firestore = {
     batch: () => ({
       delete: () => {},
-      update: () => {},
       commit: async () => {
         throw conflict;
       },
@@ -412,7 +329,7 @@ test("auth cooldown mutation failures are not reported as successful", async () 
   };
 
   await assert.rejects(
-    applyCooldownMutations(firestore, [doc], []),
+    deleteDocuments(firestore, [doc]),
     (error: unknown) => error === conflict,
   );
 });

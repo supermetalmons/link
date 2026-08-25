@@ -1,5 +1,4 @@
 const admin = require("./firebaseAdmin");
-const { FieldPath } = require("firebase-admin/firestore");
 const {
   onValueCreated,
   onValueWritten,
@@ -38,8 +37,6 @@ const PROFILE_LINK_CATCHUP_CONCURRENCY = 20;
 const PROFILE_LINK_CATCHUP_TIMEOUT_MS = 50000;
 const PROFILE_DELETE_GAMES_CLEANUP_BATCH_SIZE = 400;
 const PROFILE_DELETE_GAMES_CLEANUP_TIMEOUT_MS = 50000;
-const PROFILE_MERGE_RECONCILE_CONCURRENCY = 10;
-const PROFILE_MERGE_RECONCILE_PAGE_SIZE = 200;
 const AUTOMATCH_MARKER_RECONCILE_ATTEMPTS = 3;
 const PROFILE_LINK_RECONCILE_ATTEMPTS = 3;
 
@@ -649,7 +646,7 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
         deleteCount += 1;
       }
     }
-    if (!options.dryRun && deleteCount > 0) {
+    if (deleteCount > 0) {
       await batch.commit();
     }
     return {
@@ -663,7 +660,6 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
       writes: 0,
       deletes: deleteCount,
       skipped: 0,
-      dryRun: options.dryRun === true,
     };
   }
 
@@ -889,7 +885,7 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
     }
   }
 
-  if (!options.dryRun && (setCount > 0 || deleteCount > 0)) {
+  if (setCount > 0 || deleteCount > 0) {
     await batch.commit();
   }
 
@@ -904,7 +900,6 @@ async function recomputeInviteProjection(inviteId, reason, options = {}) {
     writes: setCount,
     deletes: deleteCount,
     skipped: skippedCount,
-    dryRun: options.dryRun === true,
   };
 }
 
@@ -1041,202 +1036,6 @@ const deleteProfileGamesProjectionDocs = async (profileRef) => {
   return {
     deleted,
     complete: remainingSnapshot.empty,
-  };
-};
-
-const classifyProfileGameProjection = (docId, data = {}) => {
-  const normalizedDocId = normalizeString(docId);
-  const storedEventId = normalizeString(data.eventId);
-  const isEvent =
-    data.entityType === "event" ||
-    data.source === "event-projector" ||
-    !!storedEventId ||
-    (normalizedDocId && normalizedDocId.startsWith("event_"));
-  if (isEvent) {
-    const eventId =
-      storedEventId ||
-      (normalizedDocId && normalizedDocId.startsWith("event_")
-        ? normalizedDocId.slice("event_".length)
-        : null);
-    return eventId ? { entityType: "event", id: eventId } : null;
-  }
-  const inviteId = normalizeString(data.inviteId) || normalizedDocId;
-  return inviteId ? { entityType: "game", id: inviteId } : null;
-};
-
-const reconcileProfileMergeProjections = async (
-  { dryRun = false, sourceProfileId, targetProfileId },
-  dependencies = {},
-) => {
-  const normalizedSourceProfileId = normalizeString(sourceProfileId);
-  const normalizedTargetProfileId = normalizeString(targetProfileId);
-  if (
-    !normalizedSourceProfileId ||
-    !normalizedTargetProfileId ||
-    normalizedSourceProfileId === normalizedTargetProfileId
-  ) {
-    throw new Error("profile-merge-reconcile-invalid-target");
-  }
-  const firestore = dependencies.firestore || admin.firestore();
-  const profileIds = await resolveProfileMergeTargetPath({
-    profileId: normalizedSourceProfileId,
-    readMergeTarget: (profileId) => readMergeTarget(firestore, profileId),
-  });
-  if (profileIds[1] !== normalizedTargetProfileId) {
-    throw new Error("profile-merge-reconcile-target-mismatch");
-  }
-  const requestedPageSize = Math.floor(Number(dependencies.pageSize));
-  const pageSize =
-    Number.isSafeInteger(requestedPageSize) && requestedPageSize > 0
-      ? Math.min(requestedPageSize, PROFILE_MERGE_RECONCILE_PAGE_SIZE)
-      : PROFILE_MERGE_RECONCILE_PAGE_SIZE;
-  const database = dependencies.database;
-  const eventProjectorImpl = require("./eventProjector");
-  const projectEventImpl =
-    dependencies.projectEvent || eventProjectorImpl.projectEvent;
-  const reconcileLiveEventProjectionImpl =
-    dependencies.reconcileLiveEventProjection ||
-    eventProjectorImpl.reconcileLiveEventProjection;
-  const recomputeInviteProjectionImpl =
-    dependencies.recomputeInviteProjection || recomputeInviteProjection;
-  let scannedGameDocuments = 0;
-  let projectionCount = 0;
-  let pagesScanned = 0;
-  const blockedProjections = new Map();
-  const scannedProfileIds =
-    dependencies.scannedProfileIds instanceof Set
-      ? dependencies.scannedProfileIds
-      : null;
-  const projectionProfileIds = [
-    profileIds[profileIds.length - 1],
-    ...profileIds.slice(0, -1),
-  ].filter(Boolean);
-  for (const profileId of projectionProfileIds) {
-    if (scannedProfileIds && scannedProfileIds.has(profileId)) {
-      continue;
-    }
-    const games = firestore
-      .collection("users")
-      .doc(profileId)
-      .collection("games");
-    const terminalSnapshot = await games
-      .orderBy(FieldPath.documentId(), "desc")
-      .limit(1)
-      .get();
-    if (terminalSnapshot.empty) {
-      scannedProfileIds?.add(profileId);
-      continue;
-    }
-    let profileBlocked = false;
-    const terminalId = terminalSnapshot.docs[0].id;
-    let cursor = null;
-    while (true) {
-      let query = games
-        .orderBy(FieldPath.documentId())
-        .endAt(terminalId)
-        .limit(pageSize);
-      if (cursor) {
-        query = query.startAfter(cursor);
-      }
-      const snapshot = await query.get();
-      if (snapshot.empty) {
-        break;
-      }
-      pagesScanned += 1;
-      scannedGameDocuments += snapshot.size;
-      const projections = new Map();
-      for (const doc of snapshot.docs) {
-        const projection = classifyProfileGameProjection(
-          doc.id,
-          doc.data() || {},
-        );
-        if (projection) {
-          projections.set(
-            `${projection.entityType}:${projection.id}`,
-            projection,
-          );
-        }
-      }
-      projectionCount += projections.size;
-      await processWithConcurrency(
-        Array.from(projections.values()),
-        PROFILE_MERGE_RECONCILE_CONCURRENCY,
-        async (projection) => {
-          if (projection.entityType === "event") {
-            try {
-              await reconcileLiveEventProjectionImpl(
-                projection.id,
-                null,
-                null,
-                { cleanupProfileIds: profileIds, dryRun },
-                {
-                  projectEvent: projectEventImpl,
-                  readLiveEvent: async () => {
-                    const eventSnapshot = await (database || admin.database())
-                      .ref(`events/${projection.id}`)
-                      .once("value");
-                    return eventSnapshot.exists() ? eventSnapshot.val() : null;
-                  },
-                },
-              );
-            } catch (error) {
-              if (
-                !String(error && error.message).startsWith(
-                  "projector:event-owner-",
-                )
-              ) {
-                throw error;
-              }
-              profileBlocked = true;
-              blockedProjections.set(`event:${projection.id}`, {
-                entityType: "event",
-                id: projection.id,
-                reason: "unresolved-owner-profile",
-              });
-            }
-            return;
-          }
-          const result = await recomputeInviteProjectionImpl(
-            projection.id,
-            "profile-merge-reconciliation",
-            {
-              cleanupProfileIds: profileIds,
-              dryRun,
-              eventTimestampMs: Date.now(),
-              preserveListSortAt: true,
-            },
-          );
-          if (result && result.sourceCleanupSafe === false) {
-            profileBlocked = true;
-            const blockedProjection = {
-              entityType: projection.entityType,
-              id: projection.id,
-              reason: result.blockedReason || "source-cleanup-unsafe",
-            };
-            blockedProjections.set(
-              `${projection.entityType}:${projection.id}`,
-              blockedProjection,
-            );
-          }
-        },
-      );
-      cursor = snapshot.docs[snapshot.docs.length - 1].id;
-      if (snapshot.size < pageSize) {
-        break;
-      }
-    }
-    if (!profileBlocked) {
-      scannedProfileIds?.add(profileId);
-    }
-  }
-  return {
-    complete: blockedProjections.size === 0,
-    blockedProjections: Array.from(blockedProjections.values()),
-    dryRun: dryRun === true,
-    pagesScanned,
-    profileIds,
-    projectionCount,
-    scannedGameDocuments,
   };
 };
 
@@ -1645,7 +1444,6 @@ const onProfileDeleted = onDocumentDeleted(
 module.exports = {
   buildInviteProjectionOwnerPlan,
   buildResolvedProfile,
-  classifyProfileGameProjection,
   onInviteCreated,
   onInviteGuestIdChanged,
   onInviteHostRematchesChanged,
@@ -1660,7 +1458,6 @@ module.exports = {
   processWithConcurrency,
   readInviteExists,
   readExistingProjectionDocuments,
-  reconcileProfileMergeProjections,
   recomputeInviteProjection,
   resolveProfileLinkCatchupState,
   syncAutomatchInviteMarkerFromQueue,

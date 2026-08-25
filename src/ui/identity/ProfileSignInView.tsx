@@ -1062,7 +1062,7 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
         signature,
         intentId,
       );
-      if (res && res.ok === true && handleLoginSuccess(res, "sol")) {
+      if (res && res.ok === true && handleLoginSuccess(res)) {
         setInlineAuthError("");
         setAuthStatusGlobally("authenticated");
         setIsOpen(false);
@@ -1153,7 +1153,7 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
       if (!isActionCurrent()) {
         return;
       }
-      if (res && res.ok === true && handleLoginSuccess(res, "apple")) {
+      if (res && res.ok === true && handleLoginSuccess(res)) {
         setInlineAuthError("");
         setAppleStateIfMounted("idle");
         setAuthStatusGlobally("authenticated");
@@ -1194,7 +1194,7 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
         signature,
         intentId,
       );
-      if (res && res.ok === true && handleLoginSuccess(res, "eth")) {
+      if (res && res.ok === true && handleLoginSuccess(res)) {
         setInlineAuthError("");
         setAuthStatusGlobally("authenticated");
         setIsOpen(false);

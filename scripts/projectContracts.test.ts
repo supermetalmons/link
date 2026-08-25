@@ -239,8 +239,6 @@ test("package manifests preserve public scripts and deployment command vectors",
     "check:tooling",
     "check:all",
     "announceEventPrizes",
-    "convert:legacy-auth-recovery",
-    "reconcile:wager-settlement-merges",
     "recover:telegram",
     "repo-clean",
     "format",
@@ -272,10 +270,6 @@ test("package manifests preserve public scripts and deployment command vectors",
       "promote:api": rootPackage.scripts?.["promote:api"],
       "deploy:api:triggers": rootPackage.scripts?.["deploy:api:triggers"],
       "smoke:api": rootPackage.scripts?.["smoke:api"],
-      "convert:legacy-auth-recovery":
-        rootPackage.scripts?.["convert:legacy-auth-recovery"],
-      "reconcile:wager-settlement-merges":
-        rootPackage.scripts?.["reconcile:wager-settlement-merges"],
       "prepare:firebase": rootPackage.scripts?.["prepare:firebase"],
       "deploy:firebase": rootPackage.scripts?.["deploy:firebase"],
       deploy: rootPackage.scripts?.deploy,
@@ -298,10 +292,6 @@ test("package manifests preserve public scripts and deployment command vectors",
         "wrangler triggers deploy --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
       "smoke:api":
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/smoke-cloudflare-api.ts",
-      "convert:legacy-auth-recovery":
-        "node cloud/admin/convertLegacyAuthRecoveryJobs.js",
-      "reconcile:wager-settlement-merges":
-        "node cloud/admin/reconcileWagerSettlementMerges.js",
       "prepare:firebase":
         "npm --prefix cloud/functions ci && npm --prefix cloud/functions test",
       "deploy:firebase":
@@ -324,13 +314,10 @@ test("package manifests preserve public scripts and deployment command vectors",
     start: "node listAddresses.js",
     "shooting:alert": "node shootingStarAlert.js",
   });
-  assert.equal(rootPackage.scripts?.["requeue:telegram"], undefined);
-  assert.equal(rootPackage.scripts?.["smoke:telegram"], undefined);
   assert.equal(apiPackage.private, true);
   assert.equal(apiPackage.type, "module");
   assert.equal(rootPackage.dependencies?.jose, "^6.2.7");
   assert.equal(rootPackage.dependencies?.["@spruceid/siwe-parser"], "3.0.0");
-  assert.equal(rootPackage.devDependencies?.siwe, undefined);
 
   for (const packageName of [
     "@types/node",
@@ -428,7 +415,6 @@ test("remaining deployment CLIs preserve their offline modes", () => {
     ]),
     {
       batchSize: 10,
-      confirmAuthPrune: false,
       dryRun: true,
       includeNonFunctions: true,
       project: "mons-link",
@@ -478,19 +464,14 @@ test("operations documentation cross-links package and deployment guides", () =>
   assert.equal(existsSync(resolve(repositoryRoot, ".prettierrc")), true);
 });
 
-test("profile claim synchronization is Worker-owned", () => {
+test("profile claim synchronization uses the Worker route", () => {
   const authApi = readText("src/services/authApi.ts");
-  const functionsIndex = readText("cloud/functions/index.js");
 
   assert.match(authApi, /\/auth\/profile-claim\/sync/);
-  assert.doesNotMatch(functionsIndex, /syncProfileClaim/);
 });
 
-test("provider verification and auth mutations are Worker-owned", () => {
+test("provider verification and auth mutations use Worker routes", () => {
   const authApi = readText("src/services/authApi.ts");
-  const authIdentity = readText("cloud/workers/api/src/authIdentity.ts");
-  const connection = readText("src/connection/connection.ts");
-  const functionsIndex = readText("cloud/functions/index.js");
   for (const route of [
     "/auth/methods/apple/verify",
     "/auth/methods/eth/verify",
@@ -500,18 +481,24 @@ test("provider verification and auth mutations are Worker-owned", () => {
   ]) {
     assert.match(authApi, new RegExp(route.replaceAll("/", "\\/")));
   }
-  for (const callable of [
-    "completeXRedirectAuth",
-    "unlinkAuthMethod",
-    "verifyAppleToken",
-    "verifyEthAddress",
-    "verifySolanaAddress",
-  ]) {
-    assert.doesNotMatch(functionsIndex, new RegExp(callable));
-    assert.doesNotMatch(
-      connection,
-      new RegExp(`httpsCallable\\([^)]*${callable}`),
-    );
-  }
-  assert.doesNotMatch(authIdentity, /authRateLimits/);
+});
+
+test("client Firebase callables are exactly the retained event operations", () => {
+  const connection = readText("src/connection/connection.ts");
+  const callableNames = Array.from(
+    connection.matchAll(/httpsCallable\(\s*this\.functions\s*,\s*"([^"]+)"/g),
+    (match) => match[1],
+  ).sort();
+
+  assert.equal(
+    callableNames.length,
+    Array.from(connection.matchAll(/\bhttpsCallable\s*\(/g)).length,
+  );
+  assert.deepEqual(callableNames, [
+    "createEvent",
+    "disqualifyEventMatchWinners",
+    "postponeEventStart",
+    "syncEventState",
+    "withdrawEventPrize",
+  ]);
 });

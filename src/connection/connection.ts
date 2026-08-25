@@ -172,7 +172,12 @@ import type {
   ClaimMatchVictoryByTimerResponse,
   StartMatchTimerResponse,
 } from "@mons/shared/timers";
-import type { WagerOutcomeResolveResponse } from "@mons/shared/wagers";
+import type {
+  WagerOutcomeResolveResponse,
+  WagerProposalAcceptResponse,
+  WagerProposalRemovalResponse,
+  WagerProposalSendResponse,
+} from "@mons/shared/wagers";
 import type { RatingUpdateResponse } from "@mons/shared/ratings";
 import {
   beginAuthIntentViaApi,
@@ -298,6 +303,12 @@ interface NavigationGamesPageResult {
   nextCursor: NavigationGamesPageCursor;
   hasMore: boolean;
 }
+
+type WagerApiResponse =
+  | WagerOutcomeResolveResponse
+  | WagerProposalAcceptResponse
+  | WagerProposalRemovalResponse
+  | WagerProposalSendResponse;
 
 type InviteRole = "host" | "guest" | "watch";
 
@@ -813,9 +824,8 @@ class Connection {
     await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  private shouldRetryWagerResult(result: any): boolean {
-    const reason =
-      result && typeof result.reason === "string" ? result.reason : "";
+  private shouldRetryWagerResult(result: WagerApiResponse): boolean {
+    const reason = result.ok === false ? result.reason : "";
     return (
       reason === "proposal-unavailable" ||
       reason === "proposal-missing" ||
@@ -823,11 +833,11 @@ class Connection {
     );
   }
 
-  private async callWagerFunctionWithRetry(
+  private async callWagerApiWithRetry<T extends WagerApiResponse>(
     label: string,
-    call: () => Promise<any>,
+    call: () => Promise<T>,
     maxAttempts = 3,
-  ): Promise<any> {
+  ): Promise<T> {
     let attempt = 0;
     while (attempt < maxAttempts) {
       attempt += 1;
@@ -835,11 +845,7 @@ class Connection {
         if (attempt > 1) {
           console.log(`${label}:retry`, { attempt });
         }
-        const response = await call();
-        const data =
-          response && typeof response === "object" && "data" in response
-            ? (response as any).data
-            : response;
+        const data = await call();
         if (
           data &&
           data.ok === false &&
@@ -859,7 +865,7 @@ class Connection {
         throw error;
       }
     }
-    return null;
+    throw new Error("wager-retry-exhausted");
   }
 
   public setupConnection(
@@ -3633,7 +3639,7 @@ class Connection {
         matchId,
         opponentId,
       });
-      const data = await this.callWagerFunctionWithRetry("wager:resolve", () =>
+      const data = await this.callWagerApiWithRetry("wager:resolve", () =>
         resolveWagerOutcomeViaApi(
           {
             inviteId,
@@ -3733,7 +3739,7 @@ class Connection {
         }
       }
       console.log("wager:send:start", { inviteId, matchId, material, count });
-      const data = await this.callWagerFunctionWithRetry("wager:send", () =>
+      const data = await this.callWagerApiWithRetry("wager:send", () =>
         sendWagerProposalViaApi(
           { inviteId, matchId, material, count },
           this.getAuthApiToken,
@@ -3762,30 +3768,16 @@ class Connection {
             }
           }
         } else if (data && data.agreed) {
-          const agreed = data.agreed as WagerAgreement;
-          const rawCount =
-            typeof agreed.count === "number"
-              ? agreed.count
-              : Number(agreed.count);
-          const agreedCount = Number.isFinite(rawCount)
-            ? Math.max(0, Math.round(rawCount))
-            : agreed.total
-              ? Math.max(0, Math.round(agreed.total / 2))
-              : 0;
-          const nextAgreed: WagerAgreement = {
-            ...agreed,
-            count: agreedCount,
-            total: agreed.total ?? agreedCount * 2,
-          };
+          const agreed: WagerAgreement = data.agreed;
           const latestState = getWagerState();
           if (!latestState?.resolved) {
             const nextState: MatchWagerState = {
               ...(latestState ?? {}),
               proposals: undefined,
-              agreed: nextAgreed,
+              agreed,
             };
             this.setLocalWagerState(nextState);
-            const delta = agreedCount - optimisticCount;
+            const delta = agreed.count - optimisticCount;
             if (delta !== 0) {
               applyFrozenMaterialsDelta({ [material]: delta });
             }
@@ -3896,7 +3888,7 @@ class Connection {
         optimisticApplied = true;
       }
       console.log("wager:cancel:start", { inviteId, matchId });
-      const data = await this.callWagerFunctionWithRetry("wager:cancel", () =>
+      const data = await this.callWagerApiWithRetry("wager:cancel", () =>
         cancelWagerProposalViaApi({ inviteId, matchId }, this.getAuthApiToken),
       );
       if (!sessionGuard()) {
@@ -3986,7 +3978,7 @@ class Connection {
         optimisticApplied = true;
       }
       console.log("wager:decline:start", { inviteId, matchId });
-      const data = await this.callWagerFunctionWithRetry("wager:decline", () =>
+      const data = await this.callWagerApiWithRetry("wager:decline", () =>
         declineWagerProposalViaApi({ inviteId, matchId }, this.getAuthApiToken),
       );
       if (!sessionGuard()) {
@@ -4108,7 +4100,7 @@ class Connection {
         }
       }
       console.log("wager:accept:start", { inviteId, matchId });
-      const data = await this.callWagerFunctionWithRetry("wager:accept", () =>
+      const data = await this.callWagerApiWithRetry("wager:accept", () =>
         acceptWagerProposalViaApi({ inviteId, matchId }, this.getAuthApiToken),
       );
       if (!sessionGuard()) {
