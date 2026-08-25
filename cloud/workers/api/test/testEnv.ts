@@ -43,6 +43,7 @@ export const TELEGRAM_TEST_ENV = {
   GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",
   NFT_RATE_LIMITER: rateLimit,
+  PROFILE_GAME_PROJECTION_QUEUE: queue,
   RATING_SERVICE_ACCOUNT_EMAIL: "rating@example.iam.gserviceaccount.com",
   RATING_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET: "test-announcement-secret",

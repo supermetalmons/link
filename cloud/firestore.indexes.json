@@ -41,6 +41,20 @@
           "order": "ASCENDING"
         }
       ]
+    },
+    {
+      "collectionGroup": "ratingUpdates",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "profileGameProjectionState",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "profileGameProjectionUpdatedAtMs",
+          "order": "ASCENDING"
+        }
+      ]
     }
   ],
   "fieldOverrides": [

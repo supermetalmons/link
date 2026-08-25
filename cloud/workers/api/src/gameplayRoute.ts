@@ -88,6 +88,7 @@ import {
   type EventProgressPlan,
 } from "./eventProgress.ts";
 import type { TelegramProjectionTask } from "./telegramProjectionTasks.ts";
+import type { ProfileGameProjectionTask } from "./profileGameProjectionTasks.ts";
 
 const MAX_NAVIGATION_DELETE_ATTEMPTS = 3;
 
@@ -619,6 +620,20 @@ export async function handleGameplayRoute(
         }),
       );
     };
+    const defaultEnqueueProfileGameProjection = async (
+      task: ProfileGameProjectionTask,
+    ) => {
+      ctx.waitUntil(
+        env.PROFILE_GAME_PROJECTION_QUEUE.send(task).catch(() => {
+          console.error(
+            JSON.stringify({
+              event: "profile_game_projection_enqueue_failed",
+              kind: task.kind,
+            }),
+          );
+        }),
+      );
+    };
     const automatchDependencies: AutomatchDependencies = {
       ...dependencies.automatch,
       enqueueTelegramProjection:
@@ -630,6 +645,9 @@ export async function handleGameplayRoute(
       enqueueEventProgress:
         dependencies.rating?.enqueueEventProgress ||
         defaultEnqueueEventProgress,
+      enqueueProfileGameProjection:
+        dependencies.rating?.enqueueProfileGameProjection ||
+        defaultEnqueueProfileGameProjection,
       enqueueTelegramProjection:
         dependencies.rating?.enqueueTelegramProjection ||
         defaultEnqueueTelegramProjection,

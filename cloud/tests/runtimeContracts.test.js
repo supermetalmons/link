@@ -27,7 +27,6 @@ const eventExportNames = [
   "projectProfileGamesOnInviteGuestIdChanged",
   "projectProfileGamesOnInviteGuestRematchesChanged",
   "projectProfileGamesOnInviteHostRematchesChanged",
-  "projectProfileGamesOnInviteMatchRatingUpdated",
   "projectProfileGamesOnMatchCreated",
   "projectProfileGamesOnProfileDeleted",
   "projectProfileGamesOnProfileLinkCreated",
@@ -141,14 +140,6 @@ Object.assign(expectedEndpointContracts, {
     eventType: "google.firebase.database.ref.v1.created",
     pathPatterns: {
       ref: "players/{loginUid}/matches/{matchId}",
-      instance: "*",
-    },
-    retry: true,
-  }),
-  projectProfileGamesOnInviteMatchRatingUpdated: eventContract({
-    eventType: "google.firebase.database.ref.v1.created",
-    pathPatterns: {
-      ref: "invites/{inviteId}/matchesRatingUpdates/{matchId}",
       instance: "*",
     },
     retry: true,
@@ -299,7 +290,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 16);
+  assert.equal(expectedExportNames.length, 15);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

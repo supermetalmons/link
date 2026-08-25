@@ -215,6 +215,10 @@ test("builds exact non-event rating, mana, and Telegram fields", () => {
   assert.equal(result.ratingUpdate.telegramProjectionVersion, 1);
   assert.equal(result.ratingUpdate.telegramProjectionState, "pending");
   assert.equal(result.ratingUpdate.telegramProjectionUpdatedAtMs, nowMs);
+  assert.equal(result.ratingUpdate.profileGameProjectionVersion, 1);
+  assert.equal(result.ratingUpdate.profileGameProjectionState, "pending");
+  assert.equal(result.ratingUpdate.profileGameProjectionUpdatedAtMs, nowMs);
+  assert.equal(result.ratingUpdate.profileGameProjectionReason, null);
   assert.equal(result.ratingUpdate.status, "done");
   assert.match(String(result.ratingUpdate.updateRatingMessage), /Alice/);
   assert.match(String(result.ratingUpdate.updateRatingMessage), /Bob/);
@@ -389,6 +393,9 @@ test("updates once and persists exact repair markers", async () => {
       enqueueTelegramProjection: async (task) => {
         projectionTasks.push(task);
       },
+      enqueueProfileGameProjection: async (task) => {
+        projectionTasks.push(task);
+      },
       now: () => Date.UTC(2026, 7, 21),
     }),
     { ok: true },
@@ -398,6 +405,10 @@ test("updates once and persists exact repair markers", async () => {
   assert.equal(state.getFinalPlan()?.ratingUpdate.status, "done");
   assert.equal(state.getOperationReads(), 1);
   assert.deepEqual(projectionTasks, [
+    {
+      kind: "rating-profile-game-projection",
+      operationId: `${request.inviteId}__${request.matchId}`,
+    },
     {
       kind: "rating-telegram-projection",
       operationId: `${request.inviteId}__${request.matchId}`,
@@ -489,6 +500,11 @@ test("rating queue failures preserve the committed response and pending state", 
       enqueueTelegramProjection: async () => {
         throw new Error("queue-unavailable");
       },
+      enqueueProfileGameProjection: async () => {
+        throw new Error("queue-unavailable");
+      },
+      logProfileGameProjectionFailure: (task) =>
+        failures.push(`profile:${task.operationId}`),
       logProjectionFailure: (task) => failures.push(task.operationId),
       now: () => Date.UTC(2026, 7, 21),
     }),
@@ -498,7 +514,14 @@ test("rating queue failures preserve the committed response and pending state", 
     state.getFinalPlan()?.ratingUpdate.telegramProjectionState,
     "pending",
   );
-  assert.deepEqual(failures, [`${request.inviteId}__${request.matchId}`]);
+  assert.equal(
+    state.getFinalPlan()?.ratingUpdate.profileGameProjectionState,
+    "pending",
+  );
+  assert.deepEqual(failures, [
+    `profile:${request.inviteId}__${request.matchId}`,
+    `${request.inviteId}__${request.matchId}`,
+  ]);
 });
 
 test("repairs completed replays without reacquiring or finalizing", async () => {

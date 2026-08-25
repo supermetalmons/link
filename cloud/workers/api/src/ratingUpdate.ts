@@ -41,6 +41,11 @@ import {
   type TelegramProjectionTask,
 } from "./telegramProjectionTasks.ts";
 import {
+  PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
+  type ProfileGameProjectionTask,
+  type RatingProfileGameProjectionTask,
+} from "./profileGameProjectionTasks.ts";
+import {
   buildEventProgressPlan,
   type EventProgressPlan,
 } from "./eventProgress.ts";
@@ -76,7 +81,13 @@ type RatingResult = "gg" | "win";
 export type RatingUpdateDependencies = {
   createOwnerToken?: (uid: string) => string;
   enqueueEventProgress?: (plan: EventProgressPlan) => Promise<void>;
+  enqueueProfileGameProjection?: (
+    task: ProfileGameProjectionTask,
+  ) => Promise<void>;
   enqueueTelegramProjection?: (task: TelegramProjectionTask) => Promise<void>;
+  logProfileGameProjectionFailure?: (
+    task: RatingProfileGameProjectionTask,
+  ) => void;
   logProjectionFailure?: (task: RatingTelegramProjectionTask) => void;
   now?: () => number;
 };
@@ -206,6 +217,33 @@ async function enqueueRatingProjection(
         console.error(
           JSON.stringify({
             event: "rating_telegram_projection_enqueue_failed",
+            operationId: failedTask.operationId,
+          }),
+        ))
+    )(task);
+  }
+}
+
+async function enqueueProfileGameProjection(
+  operationId: string,
+  dependencies: RatingUpdateDependencies,
+): Promise<void> {
+  if (!dependencies.enqueueProfileGameProjection) {
+    return;
+  }
+  const task: RatingProfileGameProjectionTask = {
+    kind: "rating-profile-game-projection",
+    operationId,
+  };
+  try {
+    await dependencies.enqueueProfileGameProjection(task);
+  } catch {
+    (
+      dependencies.logProfileGameProjectionFailure ||
+      ((failedTask) =>
+        console.error(
+          JSON.stringify({
+            event: "rating_profile_game_projection_enqueue_failed",
             operationId: failedTask.operationId,
           }),
         ))
@@ -422,6 +460,10 @@ function buildRatingPlan({
       shouldUpdateFebruaryChallenge,
       playerProfileId: resolvedPlayer.profileId,
       opponentProfileId: resolvedOpponent.profileId,
+      profileGameProjectionVersion: PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
+      profileGameProjectionState: "pending",
+      profileGameProjectionUpdatedAtMs: nowMs,
+      profileGameProjectionReason: null,
       updateRatingMessage,
       telegramDeliveryVersion,
       ...(telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION
@@ -573,6 +615,9 @@ export async function updateRatings(
     if (existing?.telegramProjectionState === "pending") {
       await enqueueRatingProjection(operationId, dependencies);
     }
+    if (existing?.profileGameProjectionState === "pending") {
+      await enqueueProfileGameProjection(operationId, dependencies);
+    }
     return { ok: true };
   }
   const [playerValue, opponentValue] = await Promise.all([
@@ -610,6 +655,9 @@ export async function updateRatings(
     await dispatchEventProgress(progress, dependencies);
     if (lease.data?.telegramProjectionState === "pending") {
       await enqueueRatingProjection(operationId, dependencies);
+    }
+    if (lease.data?.profileGameProjectionState === "pending") {
+      await enqueueProfileGameProjection(operationId, dependencies);
     }
     return { ok: true };
   }
@@ -650,6 +698,7 @@ export async function updateRatings(
     now(),
   );
   await dispatchEventProgress(progress, dependencies);
+  await enqueueProfileGameProjection(operationId, dependencies);
   if (
     invite.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION &&
     !getRatingEventMetadata(invite).isEventMatch

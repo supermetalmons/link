@@ -18,6 +18,21 @@ type FirestoreRestTransportOptions = {
 
 const PRESERVED_FIRESTORE_VALUE = Symbol("preservedFirestoreValue");
 
+export function firestoreTimestampFromMillis(millis: number): {
+  __firestoreTimestamp: string;
+} {
+  if (!Number.isFinite(millis)) {
+    throw new TypeError("invalid Firestore timestamp");
+  }
+  const value = {
+    __firestoreTimestamp: new Date(
+      Math.max(1, Math.floor(millis)),
+    ).toISOString(),
+  };
+  Object.defineProperty(value, PRESERVED_FIRESTORE_VALUE, { value: true });
+  return value;
+}
+
 export function toFirestoreRecord(
   value: unknown,
 ): Record<string, unknown> | null {

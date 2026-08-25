@@ -157,6 +157,10 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
         binding: "TELEGRAM_PROJECTION_QUEUE",
         queue: "mons-link-telegram-projection",
       },
+      {
+        binding: "PROFILE_GAME_PROJECTION_QUEUE",
+        queue: "mons-link-profile-game-projection",
+      },
     ],
     consumers: [
       {
@@ -181,6 +185,13 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
         max_batch_timeout: 1,
         max_retries: 20,
         dead_letter_queue: "mons-link-telegram-projection-dlq",
+        max_concurrency: 5,
+      },
+      {
+        queue: "mons-link-profile-game-projection",
+        max_batch_size: 1,
+        max_batch_timeout: 1,
+        max_retries: 3,
         max_concurrency: 5,
       },
     ],

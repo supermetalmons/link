@@ -45,6 +45,8 @@ npm run smoke:api -- --base-url https://api.mons.link --smoke-sol <known-wallet>
 
 `upload:api` uses `wrangler versions upload --strict`; it does not send traffic to the candidate. `promote:api` deploys the explicit Version ID to 100% of traffic without prompting. `deploy:api:triggers` applies the tracked route, Cron, and Queue consumer configuration. Routine code-only releases may omit the trigger command when that configuration is unchanged.
 
+`mons-link-profile-game-projection` is the permanent rating projector Queue. The five-minute Worker schedule repairs missing RTDB completion markers and re-enqueues pending records. Monitor Queue consumption, pending marker age, and `profile_game_projection_*` logs.
+
 The `mons-link-event-progress` Workflow owns scheduled event starts and retriable event synchronization. The five-minute Worker schedule reconciles `eventProgressOutbox` records and scheduled events with deterministic Workflow instances. Inspect a production instance with:
 
 ```sh

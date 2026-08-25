@@ -115,6 +115,12 @@ test("game projection normalization preserves timestamps, identity display, and 
     readTimestampMillis({ _seconds: 12, _nanoseconds: 500_000_000 }),
     12_500,
   );
+  assert.equal(
+    readTimestampMillis({
+      __firestoreTimestamp: "1970-01-01T00:00:12.500Z",
+    }),
+    12_500,
+  );
   assert.equal(getProfileDisplayName({ username: " player " }), "player");
   assert.equal(
     getProfileDisplayName({ eth: "0x1234567890abcdef" }),

@@ -32,6 +32,13 @@ const readTimestampMillis = (value) => {
       : 0;
     return Math.floor(Number(value._seconds) * 1000 + nanos / 1e6);
   }
+  if (
+    typeof value === "object" &&
+    typeof value.__firestoreTimestamp === "string"
+  ) {
+    const millis = Date.parse(value.__firestoreTimestamp);
+    return Number.isFinite(millis) ? Math.floor(millis) : null;
+  }
   return null;
 };
 

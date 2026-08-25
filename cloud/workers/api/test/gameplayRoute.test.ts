@@ -649,10 +649,23 @@ test("routes exact authenticated rating updates without a new rate limit", async
       data: null,
     }),
   };
+  const background: Promise<unknown>[] = [];
+  const profileProjectionTasks: unknown[] = [];
   const response = await handleGameplayRoute(
     request("/ratings/update", { body: ratingRequest }),
-    env,
-    context(),
+    {
+      ...env,
+      PROFILE_GAME_PROJECTION_QUEUE: {
+        ...env.PROFILE_GAME_PROJECTION_QUEUE,
+        send: async (task) => {
+          profileProjectionTasks.push(task);
+          return {
+            metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+          };
+        },
+      },
+    },
+    context(background),
     {
       ratingRepository,
       repository: repository(),
@@ -662,6 +675,13 @@ test("routes exact authenticated rating updates without a new rate limit", async
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true });
   assert.equal(patches.length, 1);
+  await Promise.all(background);
+  assert.deepEqual(profileProjectionTasks, [
+    {
+      kind: "rating-profile-game-projection",
+      operationId: `${ratingRequest.inviteId}__${ratingRequest.matchId}`,
+    },
+  ]);
 
   const invalid = await handleGameplayRoute(
     request("/ratings/update", {

@@ -753,6 +753,118 @@ test("lists, claims, and completes pending event rating progress", async () => {
   assert.equal(calls.length, 3);
 });
 
+test("lists, claims, and completes pending profile game projections", async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const repository = createRatingRepository(env, gameplayRepository(), {
+    getAccessToken: async () => "token",
+    fetcher: async (input, init = {}) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url.endsWith(":runQuery")) {
+        const body = JSON.parse(String(init.body));
+        assert.deepEqual(body.structuredQuery.select, {
+          fields: [
+            { fieldPath: "profileGameProjectionUpdatedAtMs" },
+            { fieldPath: "profileGameProjectionVersion" },
+            { fieldPath: "inviteId" },
+            { fieldPath: "matchId" },
+          ],
+        });
+        assert.deepEqual(body.structuredQuery.where, {
+          compositeFilter: {
+            op: "AND",
+            filters: [
+              {
+                fieldFilter: {
+                  field: { fieldPath: "profileGameProjectionState" },
+                  op: "EQUAL",
+                  value: { stringValue: "pending" },
+                },
+              },
+              {
+                fieldFilter: {
+                  field: { fieldPath: "profileGameProjectionUpdatedAtMs" },
+                  op: "LESS_THAN_OR_EQUAL",
+                  value: { integerValue: "200" },
+                },
+              },
+            ],
+          },
+        });
+        assert.deepEqual(body.structuredQuery.orderBy, [
+          {
+            field: { fieldPath: "profileGameProjectionUpdatedAtMs" },
+            direction: "ASCENDING",
+          },
+        ]);
+        return Response.json([
+          {
+            document: document(operationName, {
+              inviteId: "auto_aaaaaaaaaaa",
+              matchId: "auto_aaaaaaaaaaa",
+              profileGameProjectionUpdatedAtMs: 200,
+              profileGameProjectionVersion: 1,
+            }),
+          },
+        ]);
+      }
+      if (url.includes("/ratingUpdates/auto_aaaaaaaaaaa__auto_aaaaaaaaaaa?")) {
+        const parsed = new URL(url);
+        if (parsed.searchParams.has("currentDocument.updateTime")) {
+          assert.deepEqual(
+            parsed.searchParams.getAll("updateMask.fieldPaths"),
+            ["profileGameProjectionUpdatedAtMs"],
+          );
+          assert.deepEqual(
+            decodeFirestoreFields(JSON.parse(String(init.body)).fields),
+            { profileGameProjectionUpdatedAtMs: 250 },
+          );
+          return Response.json({});
+        }
+        assert.deepEqual(parsed.searchParams.getAll("updateMask.fieldPaths"), [
+          "profileGameProjectionState",
+          "profileGameProjectionUpdatedAtMs",
+          "profileGameProjectionReason",
+        ]);
+        assert.deepEqual(
+          decodeFirestoreFields(JSON.parse(String(init.body)).fields),
+          {
+            profileGameProjectionState: "done",
+            profileGameProjectionUpdatedAtMs: 300,
+            profileGameProjectionReason: null,
+          },
+        );
+        return Response.json({});
+      }
+      assert.fail(`unexpected request ${url}`);
+    },
+  });
+  const pending = await repository.listDueRatingProfileGameProjections(200, 10);
+  assert.deepEqual(pending, [
+    {
+      inviteId: "auto_aaaaaaaaaaa",
+      matchId: "auto_aaaaaaaaaaa",
+      operationId: "auto_aaaaaaaaaaa__auto_aaaaaaaaaaa",
+      updateTime: "2026-08-21T00:00:00Z",
+      version: 1,
+    },
+  ]);
+  assert.equal(
+    await repository.claimRatingProfileGameProjection(
+      pending[0].operationId,
+      pending[0].updateTime,
+      250,
+    ),
+    true,
+  );
+  await repository.markRatingProfileGameProjection(
+    pending[0].operationId,
+    "done",
+    300,
+  );
+  assert.equal(calls.length, 3);
+});
+
 test("lists and completes pending Telegram rating projections", async () => {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const repository = createRatingRepository(env, gameplayRepository(), {

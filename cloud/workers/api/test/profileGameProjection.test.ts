@@ -1,0 +1,425 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import type {
+  RatingProfileGameProjectionRepository,
+  RatingUpdateData,
+} from "../src/gameplayRepository.ts";
+import {
+  handleProfileGameProjectionMessage,
+  processRatingProfileGameProjection,
+  profileGameProjectionRetryDelaySeconds,
+  sweepProfileGameProjections,
+} from "../src/profileGameProjection.ts";
+import type { ProfileGameProjectionRuntime } from "../src/profileGameProjectionRepository.ts";
+import {
+  parseProfileGameProjectionTask,
+  PROFILE_GAME_PROJECTION_QUEUE_NAME,
+  type ProfileGameProjectionTask,
+} from "../src/profileGameProjectionTasks.ts";
+import worker from "../src/workerHandler.ts";
+import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+
+const operationId = "auto_aaaaaaaaaaa__auto_aaaaaaaaaaa";
+
+function ratingUpdate(
+  overrides: Partial<RatingUpdateData> = {},
+): RatingUpdateData {
+  return {
+    completedAtMs: 200,
+    inviteId: "auto_aaaaaaaaaaa",
+    leaseExpiresAtMs: 1,
+    matchId: "auto_aaaaaaaaaaa",
+    opponentId: "opponent",
+    opponentProfileId: "opponent-profile",
+    ownerToken: "owner",
+    playerId: "player",
+    playerProfileId: "player-profile",
+    profileGameProjectionState: "pending",
+    profileGameProjectionUpdatedAtMs: 200,
+    profileGameProjectionVersion: 1,
+    shouldUpdateFebruaryChallenge: false,
+    startedAtMs: 1,
+    status: "done",
+    ...overrides,
+  };
+}
+
+function ratingRepository(
+  data: RatingUpdateData | null,
+  state: {
+    marker?: unknown;
+    marks: Array<{ state: string; reason?: string }>;
+    patches: Array<Record<string, unknown>>;
+  },
+): RatingProfileGameProjectionRepository {
+  return {
+    applyFebruaryChallengeReplay: async () => undefined,
+    claimRatingProfileGameProjection: async () => true,
+    finalizeRatingUpdate: async () => ({ status: "lost" }),
+    getRatingProfile: async () => null,
+    getRtdbPath: async () => state.marker ?? null,
+    listDueRatingProfileGameProjections: async () => [],
+    markRatingProfileGameProjection: async (
+      _operationId,
+      projectionState,
+      _updatedAtMs,
+      reason,
+    ) => {
+      state.marks.push({
+        state: projectionState,
+        ...(reason ? { reason } : {}),
+      });
+    },
+    patchRtdbRoot: async (updates) => {
+      state.patches.push(updates);
+    },
+    readRatingUpdate: async () => data,
+    tryAcquireRatingLease: async () => ({ status: "busy", data: null }),
+  };
+}
+
+function runtime(
+  calls: Array<{
+    inviteId: string;
+    options: Record<string, unknown>;
+    reason: string;
+  }>,
+): ProfileGameProjectionRuntime {
+  return {
+    async recomputeInviteProjection(inviteId, reason, options = {}) {
+      calls.push({ inviteId, reason, options });
+      return {
+        inviteId,
+        ok: true,
+        reason,
+        skipped: 0,
+        sourceCleanupSafe: true,
+      };
+    },
+  };
+}
+
+function queueMessage<Body>(body: Body, attempts = 1) {
+  let acknowledgements = 0;
+  const retries: QueueRetryOptions[] = [];
+  return {
+    acknowledgements: () => acknowledgements,
+    message: {
+      id: "profile-game-projection-message",
+      timestamp: new Date(0),
+      body,
+      attempts,
+      ack: () => {
+        acknowledgements += 1;
+      },
+      retry: (options?: QueueRetryOptions) => {
+        retries.push(options || {});
+      },
+    } satisfies Message<Body>,
+    retries,
+  };
+}
+
+test("profile game projection tasks require exact safe payloads", () => {
+  assert.deepEqual(
+    parseProfileGameProjectionTask({
+      kind: "rating-profile-game-projection",
+      operationId,
+    }),
+    { kind: "rating-profile-game-projection", operationId },
+  );
+  assert.equal(
+    parseProfileGameProjectionTask({
+      kind: "rating-profile-game-projection",
+      operationId,
+      extra: true,
+    }),
+    null,
+  );
+  assert.equal(
+    parseProfileGameProjectionTask({
+      kind: "rating-profile-game-projection",
+      operationId: "unsafe/path",
+    }),
+    null,
+  );
+});
+
+test("rating projection uses deterministic completion inputs and completes once", async () => {
+  const calls: Array<{
+    inviteId: string;
+    options: Record<string, unknown>;
+    reason: string;
+  }> = [];
+  const state = { marker: true, marks: [], patches: [] } as {
+    marker: unknown;
+    marks: Array<{ state: string; reason?: string }>;
+    patches: Array<Record<string, unknown>>;
+  };
+  const status = await processRatingProfileGameProjection(
+    operationId,
+    ratingRepository(ratingUpdate(), state),
+    runtime(calls),
+    () => 300,
+  );
+  assert.equal(status, "done");
+  assert.deepEqual(calls, [
+    {
+      inviteId: "auto_aaaaaaaaaaa",
+      reason: "invite-match-rating-updated",
+      options: {
+        eventTimestampMs: 200,
+        latestMatchIdHint: "auto_aaaaaaaaaaa",
+      },
+    },
+  ]);
+  assert.deepEqual(state.marks, [{ state: "done" }]);
+
+  assert.equal(
+    await processRatingProfileGameProjection(
+      operationId,
+      ratingRepository(
+        ratingUpdate({ profileGameProjectionState: "done" }),
+        state,
+      ),
+      runtime(calls),
+      () => 400,
+    ),
+    "stale",
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("rating projection dead-letters invalid records and retries missing markers", async () => {
+  const invalidState = { marker: true, marks: [], patches: [] } as {
+    marker: unknown;
+    marks: Array<{ state: string; reason?: string }>;
+    patches: Array<Record<string, unknown>>;
+  };
+  assert.equal(
+    await processRatingProfileGameProjection(
+      operationId,
+      ratingRepository(
+        ratingUpdate({ profileGameProjectionVersion: 2 }),
+        invalidState,
+      ),
+      runtime([]),
+      () => 300,
+    ),
+    "dead",
+  );
+  assert.deepEqual(invalidState.marks, [
+    { state: "dead", reason: "invalid-record" },
+  ]);
+
+  const missingState = { marker: null, marks: [], patches: [] } as {
+    marker: unknown;
+    marks: Array<{ state: string; reason?: string }>;
+    patches: Array<Record<string, unknown>>;
+  };
+  await assert.rejects(
+    () =>
+      processRatingProfileGameProjection(
+        operationId,
+        ratingRepository(ratingUpdate(), missingState),
+        runtime([]),
+        () => 300,
+      ),
+    /marker-pending/,
+  );
+  assert.deepEqual(missingState.marks, []);
+});
+
+test("profile game projection Queue acknowledges poison and retries transient work", async () => {
+  const invalid = queueMessage({ invalid: true });
+  await handleProfileGameProjectionMessage(invalid.message, TELEGRAM_TEST_ENV, {
+    logger: { error() {}, info() {} },
+  });
+  assert.equal(invalid.acknowledgements(), 1);
+  assert.deepEqual(invalid.retries, []);
+
+  const failed = queueMessage(
+    { kind: "rating-profile-game-projection", operationId },
+    4,
+  );
+  await handleProfileGameProjectionMessage(failed.message, TELEGRAM_TEST_ENV, {
+    createRating: () => {
+      throw new Error("temporary");
+    },
+    logger: { error() {}, info() {} },
+  });
+  assert.equal(failed.acknowledgements(), 0);
+  assert.deepEqual(failed.retries, [{ delaySeconds: 8 }]);
+  assert.equal(profileGameProjectionRetryDelaySeconds(100), 60);
+});
+
+test("profile game projection Queue keeps exhausted infrastructure work pending", async () => {
+  const exhausted = queueMessage(
+    { kind: "rating-profile-game-projection", operationId },
+    100,
+  );
+  const state = { marker: true, marks: [], patches: [] } as {
+    marker: unknown;
+    marks: Array<{ state: string; reason?: string }>;
+    patches: Array<Record<string, unknown>>;
+  };
+  await handleProfileGameProjectionMessage(
+    exhausted.message,
+    TELEGRAM_TEST_ENV,
+    {
+      createRating: () => ratingRepository(ratingUpdate(), state),
+      createRuntime: () => ({
+        recomputeInviteProjection: async () => {
+          throw new Error("persistent-failure");
+        },
+      }),
+      logger: { error() {}, info() {} },
+      now: () => 300,
+    },
+  );
+  assert.equal(exhausted.acknowledgements(), 0);
+  assert.deepEqual(exhausted.retries, [{ delaySeconds: 60 }]);
+  assert.deepEqual(state.marks, []);
+});
+
+test("Worker Queue routing selects the profile game projection consumer", async () => {
+  const invalid = queueMessage({
+    kind: "rating-profile-game-projection",
+    operationId: "unsafe/path",
+  } satisfies ProfileGameProjectionTask);
+  const logs: string[] = [];
+  const originalError = console.error;
+  console.error = (message) => {
+    logs.push(String(message));
+  };
+  try {
+    await worker.queue?.(
+      {
+        messages: [invalid.message],
+        queue: PROFILE_GAME_PROJECTION_QUEUE_NAME,
+        metadata: { metrics: { backlogBytes: 0, backlogCount: 0 } },
+        ackAll() {},
+        retryAll() {},
+      },
+      TELEGRAM_TEST_ENV,
+    );
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(invalid.acknowledgements(), 1);
+  assert.equal(
+    logs.some((entry) =>
+      entry.includes("profile_game_projection_queue_invalid_message"),
+    ),
+    true,
+  );
+});
+
+test("scheduled recovery claims, repairs, and batches valid projection records", async () => {
+  const batches: ProfileGameProjectionTask[][] = [];
+  const queue = {
+    ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
+    sendBatch: async (messages: Iterable<MessageSendRequest<unknown>>) => {
+      batches.push(
+        Array.from(messages).map(
+          ({ body }) => body as ProfileGameProjectionTask,
+        ),
+      );
+      return {
+        metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+      };
+    },
+  } satisfies Queue;
+  const env = {
+    ...TELEGRAM_TEST_ENV,
+    PROFILE_GAME_PROJECTION_QUEUE: queue,
+  } satisfies Env;
+  const state = { marker: null, marks: [], patches: [] } as {
+    marker: unknown;
+    marks: Array<{ state: string; reason?: string }>;
+    patches: Array<Record<string, unknown>>;
+  };
+  const rating = ratingRepository(ratingUpdate(), state);
+  rating.listDueRatingProfileGameProjections = async (
+    updatedBeforeMs,
+    limit,
+  ) => {
+    assert.equal(updatedBeforeMs, 600_000);
+    assert.equal(limit, 100);
+    return [
+      {
+        inviteId: "auto_aaaaaaaaaaa",
+        matchId: "auto_aaaaaaaaaaa",
+        operationId,
+        updateTime: "2026-08-25T00:00:00Z",
+        version: 1,
+      },
+      {
+        inviteId: "bad",
+        matchId: "bad",
+        operationId: "mismatch",
+        updateTime: "2026-08-25T00:00:01Z",
+        version: 1,
+      },
+    ];
+  };
+  const claims: string[] = [];
+  rating.claimRatingProfileGameProjection = async (claimedOperationId) => {
+    claims.push(claimedOperationId);
+    return true;
+  };
+
+  assert.equal(
+    await sweepProfileGameProjections(env, {
+      createRating: () => rating,
+      logger: { error() {}, info() {} },
+      now: () => 600_000,
+    }),
+    1,
+  );
+  assert.deepEqual(claims.sort(), ["mismatch", operationId].sort());
+  assert.deepEqual(state.patches, [
+    {
+      "invites/auto_aaaaaaaaaaa/matchesRatingUpdates/auto_aaaaaaaaaaa": true,
+    },
+  ]);
+  assert.deepEqual(state.marks, [
+    { state: "dead", reason: "invalid-recovery-marker" },
+  ]);
+  assert.deepEqual(batches.flat(), [
+    { kind: "rating-profile-game-projection", operationId },
+  ]);
+});
+
+test("scheduled recovery bounds concurrent claims", async () => {
+  const rating = ratingRepository(null, {
+    marker: null,
+    marks: [],
+    patches: [],
+  });
+  rating.listDueRatingProfileGameProjections = async () =>
+    Array.from({ length: 25 }, (_, index) => ({
+      inviteId: `auto_${String(index).padStart(11, "a")}`,
+      matchId: `auto_${String(index).padStart(11, "a")}`,
+      operationId: `operation-${index}`,
+      updateTime: `update-${index}`,
+      version: 1,
+    }));
+  let active = 0;
+  let maximum = 0;
+  rating.claimRatingProfileGameProjection = async () => {
+    active += 1;
+    maximum = Math.max(maximum, active);
+    await new Promise((resolve) => setImmediate(resolve));
+    active -= 1;
+    return false;
+  };
+  assert.equal(
+    await sweepProfileGameProjections(TELEGRAM_TEST_ENV, {
+      createRating: () => rating,
+      now: () => 600_000,
+    }),
+    0,
+  );
+  assert.equal(maximum, 10);
+});

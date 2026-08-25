@@ -24,6 +24,14 @@ import {
   type TelegramProjectionTask,
 } from "./telegramProjectionTasks.ts";
 import { sweepEventProgress } from "./eventProgress.ts";
+import {
+  handleProfileGameProjectionQueue,
+  handleProfileGameProjectionSweep,
+} from "./profileGameProjection.ts";
+import {
+  PROFILE_GAME_PROJECTION_QUEUE_NAME,
+  type ProfileGameProjectionTask,
+} from "./profileGameProjectionTasks.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
 export type { ProviderFetch } from "./provider.ts";
@@ -51,6 +59,7 @@ async function handleScheduled(
   const results = await Promise.allSettled([
     handleAuthRecoverySweep(controller, env),
     sweepEventProgress(env),
+    handleProfileGameProjectionSweep(controller, env),
     handleTelegramProjectionSweep(controller, env),
   ]);
   const failure = results.find(
@@ -70,12 +79,16 @@ export default {
     if (batch.queue === TELEGRAM_PROJECTION_QUEUE_NAME) {
       return handleTelegramProjectionQueue(batch, env);
     }
+    if (batch.queue === PROFILE_GAME_PROJECTION_QUEUE_NAME) {
+      return handleProfileGameProjectionQueue(batch, env);
+    }
     return handleTelegramQueue(batch, env);
   },
   scheduled: handleScheduled,
 } satisfies ExportedHandler<
   Env,
   | AuthRecoveryTask
+  | ProfileGameProjectionTask
   | TelegramTaskPayload
   | WagerSettlementRetryTask
   | TelegramProjectionTask

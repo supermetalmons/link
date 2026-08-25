@@ -90,6 +90,10 @@ export type RatingUpdateData = {
   ownerToken: string;
   playerId: string;
   playerProfileId: string;
+  profileGameProjectionReason?: string;
+  profileGameProjectionState?: string;
+  profileGameProjectionUpdatedAtMs?: number;
+  profileGameProjectionVersion?: number;
   shouldUpdateFebruaryChallenge: boolean;
   startedAtMs: number;
   status: string;
@@ -104,6 +108,14 @@ export type RatingUpdateData = {
 export type PendingRatingTelegramProjection = {
   operationId: string;
   updateTime: string;
+};
+
+export type PendingRatingProfileGameProjection = {
+  inviteId: string;
+  matchId: string;
+  operationId: string;
+  updateTime: string;
+  version: number;
 };
 
 export type PendingRatingEventProgress = {
@@ -212,6 +224,24 @@ export type RatingProjectionRepository = RatingRepository & {
     limit: number,
   ) => Promise<PendingRatingTelegramProjection[]>;
   markRatingTelegramProjection: (
+    operationId: string,
+    state: "dead" | "done",
+    updatedAtMs: number,
+    reason?: string,
+  ) => Promise<void>;
+};
+
+export type RatingProfileGameProjectionRepository = RatingRepository & {
+  claimRatingProfileGameProjection: (
+    operationId: string,
+    updateTime: string,
+    claimedAtMs: number,
+  ) => Promise<boolean>;
+  listDueRatingProfileGameProjections: (
+    updatedBeforeMs: number,
+    limit: number,
+  ) => Promise<PendingRatingProfileGameProjection[]>;
+  markRatingProfileGameProjection: (
     operationId: string,
     state: "dead" | "done",
     updatedAtMs: number,
@@ -489,6 +519,12 @@ function ratingUpdateFromDocument(
     ownerToken: string(fields.ownerToken),
     playerId: string(fields.playerId),
     playerProfileId: string(fields.playerProfileId),
+    profileGameProjectionReason: string(fields.profileGameProjectionReason),
+    profileGameProjectionState: string(fields.profileGameProjectionState),
+    profileGameProjectionUpdatedAtMs: number(
+      fields.profileGameProjectionUpdatedAtMs,
+    ),
+    profileGameProjectionVersion: number(fields.profileGameProjectionVersion),
     shouldUpdateFebruaryChallenge:
       fields.shouldUpdateFebruaryChallenge === true,
     startedAtMs: number(fields.startedAtMs),
@@ -1061,7 +1097,9 @@ export function createRatingRepository(
     now = Date.now,
     timeoutMs = FIRESTORE_TIMEOUT_MS,
   }: RatingRepositoryDependencies = {},
-): RatingProjectionRepository & RatingEventProgressRepository {
+): RatingProjectionRepository &
+  RatingEventProgressRepository &
+  RatingProfileGameProjectionRepository {
   const attempts =
     Number.isInteger(maxTransactionAttempts) && maxTransactionAttempts > 0
       ? maxTransactionAttempts
@@ -1212,6 +1250,59 @@ export function createRatingRepository(
         body: JSON.stringify({
           fields: encodeFirestoreFields({
             eventProgressUpdatedAtMs: claimedAtMs,
+          }),
+        }),
+      });
+      if (response.ok) {
+        await cancelResponseBody(response);
+        return true;
+      }
+      if (response.status === 409 || response.status === 412) {
+        await cancelResponseBody(response);
+        return false;
+      }
+      if (response.status === 400) {
+        const body = await readBoundedJsonValue(
+          response,
+          MAX_RATING_FIRESTORE_BODY_BYTES,
+          () => new GameplayRepositoryFailure(),
+        );
+        if (isPreconditionConflict(body)) {
+          return false;
+        }
+        throw new GameplayRepositoryFailure();
+      }
+      await cancelResponseBody(response);
+      throw new GameplayRepositoryFailure();
+    },
+
+    async claimRatingProfileGameProjection(
+      operationId,
+      updateTime,
+      claimedAtMs,
+    ) {
+      if (
+        !operationId ||
+        !updateTime ||
+        !Number.isSafeInteger(claimedAtMs) ||
+        claimedAtMs < 0
+      ) {
+        throw new GameplayRepositoryFailure();
+      }
+      const url = new URL(
+        `${FIRESTORE_DOCUMENTS_ROOT}/ratingUpdates/${encodeURIComponent(operationId)}`,
+      );
+      url.searchParams.append(
+        "updateMask.fieldPaths",
+        "profileGameProjectionUpdatedAtMs",
+      );
+      url.searchParams.set("currentDocument.updateTime", updateTime);
+      const response = await request(url.toString(), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fields: encodeFirestoreFields({
+            profileGameProjectionUpdatedAtMs: claimedAtMs,
           }),
         }),
       });
@@ -1500,6 +1591,84 @@ export function createRatingRepository(
       );
     },
 
+    async listDueRatingProfileGameProjections(updatedBeforeMs, limit) {
+      if (
+        !Number.isSafeInteger(updatedBeforeMs) ||
+        updatedBeforeMs < 0 ||
+        !Number.isInteger(limit) ||
+        limit < 1 ||
+        limit > 100
+      ) {
+        throw new GameplayRepositoryFailure();
+      }
+      const response = await postJson(`${FIRESTORE_DOCUMENTS_ROOT}:runQuery`, {
+        structuredQuery: {
+          select: {
+            fields: [
+              { fieldPath: "profileGameProjectionUpdatedAtMs" },
+              { fieldPath: "profileGameProjectionVersion" },
+              { fieldPath: "inviteId" },
+              { fieldPath: "matchId" },
+            ],
+          },
+          from: [{ collectionId: "ratingUpdates" }],
+          where: {
+            compositeFilter: {
+              op: "AND",
+              filters: [
+                {
+                  fieldFilter: {
+                    field: { fieldPath: "profileGameProjectionState" },
+                    op: "EQUAL",
+                    value: { stringValue: "pending" },
+                  },
+                },
+                {
+                  fieldFilter: {
+                    field: {
+                      fieldPath: "profileGameProjectionUpdatedAtMs",
+                    },
+                    op: "LESS_THAN_OR_EQUAL",
+                    value: { integerValue: String(updatedBeforeMs) },
+                  },
+                },
+              ],
+            },
+          },
+          orderBy: [
+            {
+              field: { fieldPath: "profileGameProjectionUpdatedAtMs" },
+              direction: "ASCENDING",
+            },
+          ],
+          limit,
+        },
+      });
+      return parseFirestoreDocuments(await readJson(response)).map(
+        (document) => {
+          const operationId = document.name.split("/").pop()?.trim() || "";
+          if (!operationId || !document.updateTime) {
+            throw new GameplayRepositoryFailure();
+          }
+          const fields = decodeFirestoreFields(document.fields);
+          const string = (value: unknown) =>
+            typeof value === "string" ? value.trim() : "";
+          const version =
+            typeof fields.profileGameProjectionVersion === "number" &&
+            Number.isSafeInteger(fields.profileGameProjectionVersion)
+              ? fields.profileGameProjectionVersion
+              : 0;
+          return {
+            inviteId: string(fields.inviteId),
+            matchId: string(fields.matchId),
+            operationId,
+            updateTime: document.updateTime,
+            version,
+          };
+        },
+      );
+    },
+
     async listDueRatingTelegramProjections(updatedBeforeMs, limit) {
       if (
         !Number.isSafeInteger(updatedBeforeMs) ||
@@ -1576,6 +1745,43 @@ export function createRatingRepository(
         eventProgressState: state,
         eventProgressUpdatedAtMs: updatedAtMs,
         eventProgressReason: reason?.trim() || null,
+      };
+      const url = new URL(
+        `${FIRESTORE_DOCUMENTS_ROOT}/ratingUpdates/${encodeURIComponent(operationId)}`,
+      );
+      for (const fieldPath of Object.keys(fields)) {
+        url.searchParams.append("updateMask.fieldPaths", fieldPath);
+      }
+      url.searchParams.set("currentDocument.exists", "true");
+      const response = await request(url.toString(), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fields: encodeFirestoreFields(fields) }),
+      });
+      await cancelResponseBody(response);
+      if (!response.ok) {
+        throw new GameplayRepositoryFailure();
+      }
+    },
+
+    async markRatingProfileGameProjection(
+      operationId,
+      state,
+      updatedAtMs,
+      reason,
+    ) {
+      if (
+        !operationId ||
+        (state !== "dead" && state !== "done") ||
+        !Number.isSafeInteger(updatedAtMs) ||
+        updatedAtMs < 0
+      ) {
+        throw new GameplayRepositoryFailure();
+      }
+      const fields = {
+        profileGameProjectionState: state,
+        profileGameProjectionUpdatedAtMs: updatedAtMs,
+        profileGameProjectionReason: reason?.trim() || null,
       };
       const url = new URL(
         `${FIRESTORE_DOCUMENTS_ROOT}/ratingUpdates/${encodeURIComponent(operationId)}`,
