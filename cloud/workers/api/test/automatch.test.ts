@@ -79,6 +79,7 @@ test("normalizes the first bounded queue result", () => {
 test("creates a pending automatch with profile metadata and exact roots", async () => {
   let updates: Record<string, unknown> | null = null;
   const projectionTasks: unknown[] = [];
+  const profileProjectionTasks: unknown[] = [];
   const result = await startAutomatch(
     identity,
     request(),
@@ -97,6 +98,9 @@ test("creates a pending automatch with profile metadata and exact roots", async 
       enqueueTelegramProjection: async (task) => {
         projectionTasks.push(task);
       },
+      enqueueProfileGameProjection: async (task) => {
+        profileProjectionTasks.push(task);
+      },
       random: () => 0,
     },
   );
@@ -113,11 +117,19 @@ test("creates a pending automatch with profile metadata and exact roots", async 
       requestId: "request-1",
     },
   ]);
+  assert.deepEqual(profileProjectionTasks, [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto_aaaaaaaaaaa",
+      requestId: "request-1",
+    },
+  ]);
   assert.ok(updates);
   assert.deepEqual(Object.keys(updates).sort(), [
     "automatch/auto_aaaaaaaaaaa",
     "invites/auto_aaaaaaaaaaa",
     "players/guest-uid/matches/auto_aaaaaaaaaaa",
+    "profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa",
     "telegramAutomatches/auto_aaaaaaaaaaa",
     "telegramProjectionOutbox/automatch/auto_aaaaaaaaaaa",
   ]);
@@ -134,6 +146,16 @@ test("creates a pending automatch with profile metadata and exact roots", async 
     string,
     unknown
   >;
+  assert.deepEqual(
+    updates["profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa"],
+    {
+      schemaVersion: 1,
+      status: "pending",
+      requestId: "request-1",
+      sourceUpdatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+      lastQueuedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+    },
+  );
   assert.deepEqual(
     updates["telegramProjectionOutbox/automatch/auto_aaaaaaaaaaa"],
     {
@@ -207,7 +229,7 @@ test("uses client metadata when profile lookup fails", async () => {
   assert.equal(match.aura, "rainbow");
 });
 
-test("automatch queue failures preserve the committed response and outbox", async () => {
+test("automatch queue failures preserve the committed response and outboxes", async () => {
   let updates: Record<string, unknown> = {};
   const failures: string[] = [];
   const result = await startAutomatch(
@@ -224,12 +246,31 @@ test("automatch queue failures preserve the committed response and outbox", asyn
       enqueueTelegramProjection: async () => {
         throw new Error("queue-unavailable");
       },
-      logProjectionFailure: (task) => failures.push(task.inviteId),
+      enqueueProfileGameProjection: async () => {
+        throw new Error("profile-queue-unavailable");
+      },
+      logProjectionFailure: (task) =>
+        failures.push(`telegram:${task.inviteId}`),
+      logProfileGameProjectionFailure: (task) =>
+        failures.push(`profile:${task.inviteId}`),
       random: () => 0,
     },
   );
   assert.equal(result.ok, true);
-  assert.deepEqual(failures, ["auto_aaaaaaaaaaa"]);
+  assert.deepEqual(failures, [
+    "telegram:auto_aaaaaaaaaaa",
+    "profile:auto_aaaaaaaaaaa",
+  ]);
+  assert.deepEqual(
+    updates["profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa"],
+    {
+      schemaVersion: 1,
+      status: "pending",
+      requestId: "request-1",
+      sourceUpdatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+      lastQueuedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+    },
+  );
   assert.deepEqual(
     updates["telegramProjectionOutbox/automatch/auto_aaaaaaaaaaa"],
     {
@@ -307,6 +348,7 @@ test("returns pending automatches for the same login or profile", async (t) => {
 test("matches a different v2 candidate and verifies the persisted guest", async () => {
   let updates: Record<string, unknown> = {};
   let guestReads = 0;
+  const profileProjectionTasks: unknown[] = [];
   const result = await startAutomatch(
     identity,
     request(),
@@ -337,7 +379,12 @@ test("matches a different v2 candidate and verifies the persisted guest", async 
         updates = value;
       },
     }),
-    { createProjectionRequestId: () => "request-1" },
+    {
+      createProjectionRequestId: () => "request-1",
+      enqueueProfileGameProjection: async (task) => {
+        profileProjectionTasks.push(task);
+      },
+    },
   );
   assert.deepEqual(result, {
     ok: true,
@@ -346,6 +393,13 @@ test("matches a different v2 candidate and verifies the persisted guest", async 
     matchedImmediately: true,
   });
   assert.equal(guestReads, 1);
+  assert.deepEqual(profileProjectionTasks, [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto_existing",
+      requestId: "request-1",
+    },
+  ]);
   assert.deepEqual(updates["invites/auto_existing"], {
     version: 2,
     hostId: "host-uid",
@@ -384,10 +438,21 @@ test("matches a different v2 candidate and verifies the persisted guest", async 
       updatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
     },
   );
+  assert.deepEqual(
+    updates["profileGameProjectionOutbox/automatch/auto_existing"],
+    {
+      schemaVersion: 1,
+      status: "pending",
+      requestId: "request-1",
+      sourceUpdatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+      lastQueuedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+    },
+  );
 });
 
 test("keeps legacy matches free of Telegram v2 updates", async () => {
   let updates: Record<string, unknown> = {};
+  const profileProjectionTasks: unknown[] = [];
   const result = await startAutomatch(
     identity,
     request(),
@@ -407,12 +472,36 @@ test("keeps legacy matches free of Telegram v2 updates", async () => {
         updates = value;
       },
     }),
+    {
+      createProjectionRequestId: () => "legacy-request",
+      enqueueProfileGameProjection: async (task) => {
+        profileProjectionTasks.push(task);
+      },
+    },
   );
   assert.equal(result.ok, true);
   assert.deepEqual(Object.keys(updates).sort(), [
     "automatch/auto_legacy",
     "invites/auto_legacy",
     "players/guest-uid/matches/auto_legacy",
+    "profileGameProjectionOutbox/automatch/auto_legacy",
+  ]);
+  assert.deepEqual(
+    updates["profileGameProjectionOutbox/automatch/auto_legacy"],
+    {
+      schemaVersion: 1,
+      status: "pending",
+      requestId: "legacy-request",
+      sourceUpdatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+      lastQueuedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+    },
+  );
+  assert.deepEqual(profileProjectionTasks, [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto_legacy",
+      requestId: "legacy-request",
+    },
   ]);
   assert.equal(
     Object.hasOwn(

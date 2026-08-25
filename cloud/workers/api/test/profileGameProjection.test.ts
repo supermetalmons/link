@@ -5,15 +5,23 @@ import type {
   RatingUpdateData,
 } from "../src/gameplayRepository.ts";
 import {
+  claimAutomatchSweepCandidate,
   handleProfileGameProjectionMessage,
+  processAutomatchProfileGameProjection,
   processRatingProfileGameProjection,
   profileGameProjectionRetryDelaySeconds,
-  sweepProfileGameProjections,
+  sweepAutomatchProfileGameProjections,
+  sweepRatingProfileGameProjections,
 } from "../src/profileGameProjection.ts";
+import {
+  buildAutomatchProfileGameProjectionOutboxUpdates,
+  parseAutomatchProfileGameProjectionOutbox,
+} from "../src/profileGameProjectionOutbox.ts";
 import type { ProfileGameProjectionRuntime } from "../src/profileGameProjectionRepository.ts";
 import {
   parseProfileGameProjectionTask,
   PROFILE_GAME_PROJECTION_QUEUE_NAME,
+  type AutomatchProfileGameProjectionTask,
   type ProfileGameProjectionTask,
 } from "../src/profileGameProjectionTasks.ts";
 import worker from "../src/workerHandler.ts";
@@ -120,7 +128,67 @@ function queueMessage<Body>(body: Body, attempts = 1) {
   };
 }
 
+function automatchOutbox(
+  requestId = "request-1",
+  sourceUpdatedAtMs = 100,
+  lastQueuedAtMs = 200,
+) {
+  return {
+    schemaVersion: 1,
+    status: "pending",
+    requestId,
+    sourceUpdatedAtMs,
+    lastQueuedAtMs,
+  };
+}
+
+function automatchTask(
+  requestId = "request-1",
+): AutomatchProfileGameProjectionTask {
+  return {
+    kind: "automatch-profile-game-projection",
+    inviteId: "auto_aaaaaaaaaaa",
+    requestId,
+  };
+}
+
+function applyRtdbTransaction(
+  current: unknown,
+  updater: (value: unknown) => unknown,
+): { committed: boolean; decision?: string; value: unknown } {
+  const output = updater(current) as {
+    commit?: false;
+    decision?: string;
+    value?: unknown;
+  };
+  return output.commit === false
+    ? { committed: false, decision: output.decision, value: current }
+    : { committed: true, decision: output.decision, value: output.value };
+}
+
 test("profile game projection tasks require exact safe payloads", () => {
+  assert.deepEqual(
+    parseProfileGameProjectionTask(automatchTask()),
+    automatchTask(),
+  );
+  assert.equal(
+    parseProfileGameProjectionTask({ ...automatchTask(), extra: true }),
+    null,
+  );
+  assert.equal(
+    parseProfileGameProjectionTask({
+      ...automatchTask(),
+      inviteId: "unsafe/path",
+    }),
+    null,
+  );
+  assert.equal(
+    parseProfileGameProjectionTask({
+      ...automatchTask(),
+      requestId: "unsafe/path",
+    }),
+    null,
+  );
   assert.deepEqual(
     parseProfileGameProjectionTask({
       kind: "rating-profile-game-projection",
@@ -143,6 +211,171 @@ test("profile game projection tasks require exact safe payloads", () => {
     }),
     null,
   );
+});
+
+test("automatch outboxes preserve source and recovery timestamps", () => {
+  assert.deepEqual(
+    buildAutomatchProfileGameProjectionOutboxUpdates({
+      inviteId: "auto_aaaaaaaaaaa",
+      requestId: "request-1",
+      timestamp: 100,
+    }),
+    {
+      "profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa": automatchOutbox(
+        "request-1",
+        100,
+        100,
+      ),
+    },
+  );
+  assert.deepEqual(
+    parseAutomatchProfileGameProjectionOutbox(automatchOutbox()),
+    automatchOutbox(),
+  );
+  for (const invalid of [
+    null,
+    { ...automatchOutbox(), status: "dead" },
+    { ...automatchOutbox(), requestId: "unsafe/path" },
+    { ...automatchOutbox(), sourceUpdatedAtMs: null },
+    { ...automatchOutbox(), lastQueuedAtMs: Number.NaN },
+  ]) {
+    assert.equal(parseAutomatchProfileGameProjectionOutbox(invalid), null);
+  }
+});
+
+test("automatch projection uses the immutable source timestamp and exact-clears", async () => {
+  const path = "profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa";
+  const values = new Map<string, unknown>([[path, automatchOutbox()]]);
+  const calls: Array<{
+    inviteId: string;
+    options: Record<string, unknown>;
+    reason: string;
+  }> = [];
+  const rtdb = {
+    getRtdbPath: async (requestedPath: string) => values.get(requestedPath),
+    transactRtdbPath: async (
+      requestedPath: string,
+      updater: (current: unknown) => unknown,
+    ) => {
+      const result = applyRtdbTransaction(values.get(requestedPath), updater);
+      if (result.committed) {
+        values.set(requestedPath, result.value);
+      }
+      return result;
+    },
+  };
+  assert.equal(
+    await processAutomatchProfileGameProjection(
+      automatchTask(),
+      rtdb,
+      runtime(calls),
+    ),
+    "projected",
+  );
+  assert.deepEqual(calls, [
+    {
+      inviteId: "auto_aaaaaaaaaaa",
+      reason: "automatch-queue",
+      options: { eventTimestampMs: 100 },
+    },
+  ]);
+  assert.equal(values.get(path), null);
+
+  values.set(path, automatchOutbox("request-new", 300, 300));
+  assert.equal(
+    await processAutomatchProfileGameProjection(
+      automatchTask(),
+      rtdb,
+      runtime(calls),
+    ),
+    "stale",
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("automatch projection serializes newer work behind the current invite", async () => {
+  const outboxPath = "profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa";
+  const values = new Map<string, unknown>([[outboxPath, automatchOutbox()]]);
+  let projection = "initial";
+  let releaseFirst: (() => void) | undefined;
+  const firstBlocked = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let firstStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    firstStarted = resolve;
+  });
+  const rtdb = {
+    getRtdbPath: async (path: string) => values.get(path),
+    transactRtdbPath: async (
+      path: string,
+      updater: (current: unknown) => unknown,
+    ) => {
+      const result = applyRtdbTransaction(values.get(path), updater);
+      if (result.committed) {
+        values.set(path, result.value);
+      }
+      return result;
+    },
+  };
+  const first = processAutomatchProfileGameProjection(
+    automatchTask(),
+    rtdb,
+    {
+      recomputeInviteProjection: async () => {
+        firstStarted?.();
+        await firstBlocked;
+        projection = "canceled";
+        return {
+          inviteId: "auto_aaaaaaaaaaa",
+          ok: true,
+          reason: "automatch-queue",
+          skipped: 0,
+          sourceCleanupSafe: true,
+        };
+      },
+    },
+    "owner-a",
+    () => 100,
+  );
+  await started;
+  values.set(outboxPath, automatchOutbox("request-new", 300, 300));
+  await assert.rejects(
+    () =>
+      processAutomatchProfileGameProjection(
+        automatchTask("request-new"),
+        rtdb,
+        runtime([]),
+        "owner-b",
+        () => 200,
+      ),
+    /lock-busy/,
+  );
+  releaseFirst?.();
+  assert.equal(await first, "superseded");
+  assert.equal(
+    await processAutomatchProfileGameProjection(
+      automatchTask("request-new"),
+      rtdb,
+      {
+        recomputeInviteProjection: async () => {
+          projection = "matched";
+          return {
+            inviteId: "auto_aaaaaaaaaaa",
+            ok: true,
+            reason: "automatch-queue",
+            skipped: 0,
+            sourceCleanupSafe: true,
+          };
+        },
+      },
+      "owner-b",
+      () => 300,
+    ),
+    "projected",
+  );
+  assert.equal(projection, "matched");
+  assert.equal(values.get(outboxPath), null);
 });
 
 test("rating projection uses deterministic completion inputs and completes once", async () => {
@@ -251,6 +484,36 @@ test("profile game projection Queue acknowledges poison and retries transient wo
   assert.equal(failed.acknowledgements(), 0);
   assert.deepEqual(failed.retries, [{ delaySeconds: 8 }]);
   assert.equal(profileGameProjectionRetryDelaySeconds(100), 60);
+});
+
+test("automatch Queue retries transient work without settling its outbox", async () => {
+  const failed = queueMessage(automatchTask(), 3);
+  const outboxPath = "profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa";
+  const values = new Map<string, unknown>([[outboxPath, automatchOutbox()]]);
+  let transactions = 0;
+  await handleProfileGameProjectionMessage(failed.message, TELEGRAM_TEST_ENV, {
+    createRtdb: () => ({
+      getRtdbPath: async (path) => values.get(path),
+      transactRtdbPath: async (path, updater) => {
+        transactions++;
+        const result = applyRtdbTransaction(values.get(path), updater);
+        if (result.committed) {
+          values.set(path, result.value);
+        }
+        return result;
+      },
+    }),
+    createRuntime: () => ({
+      recomputeInviteProjection: async () => {
+        throw new Error("temporary-projection-failure");
+      },
+    }),
+    logger: { error() {}, info() {} },
+  });
+  assert.equal(failed.acknowledgements(), 0);
+  assert.deepEqual(failed.retries, [{ delaySeconds: 4 }]);
+  assert.equal(transactions, 2);
+  assert.deepEqual(values.get(outboxPath), automatchOutbox());
 });
 
 test("profile game projection Queue keeps exhausted infrastructure work pending", async () => {
@@ -370,7 +633,7 @@ test("scheduled recovery claims, repairs, and batches valid projection records",
   };
 
   assert.equal(
-    await sweepProfileGameProjections(env, {
+    await sweepRatingProfileGameProjections(env, {
       createRating: () => rating,
       logger: { error() {}, info() {} },
       now: () => 600_000,
@@ -415,11 +678,127 @@ test("scheduled recovery bounds concurrent claims", async () => {
     return false;
   };
   assert.equal(
-    await sweepProfileGameProjections(TELEGRAM_TEST_ENV, {
+    await sweepRatingProfileGameProjections(TELEGRAM_TEST_ENV, {
       createRating: () => rating,
       now: () => 600_000,
     }),
     0,
   );
   assert.equal(maximum, 10);
+});
+
+test("automatch recovery claims due outboxes, removes poison, and preserves source time", async () => {
+  const batches: ProfileGameProjectionTask[][] = [];
+  const logs: string[] = [];
+  const queue = {
+    ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
+    sendBatch: async (messages: Iterable<MessageSendRequest<unknown>>) => {
+      batches.push(
+        Array.from(messages).map(
+          ({ body }) => body as ProfileGameProjectionTask,
+        ),
+      );
+      return {
+        metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+      };
+    },
+  } satisfies Queue;
+  const values = new Map<string, unknown>([
+    ["auto_aaaaaaaaaaa", automatchOutbox("request-1", 50, 100)],
+    ["auto_bbbbbbbbbbb", { ...automatchOutbox("unsafe/path", 60, 200) }],
+    [
+      "auto_ccccccccccc",
+      {
+        schemaVersion: 1,
+        status: "pending",
+        requestId: "request-3",
+        sourceUpdatedAtMs: 70,
+      },
+    ],
+    ["auto_ddddddddddd", "invalid"],
+  ]);
+  const rtdb = {
+    getRtdbPath: async (path: string, query?: Record<string, unknown>) => {
+      assert.equal(path, "profileGameProjectionOutbox/automatch");
+      assert.deepEqual(query, {
+        orderBy: "lastQueuedAtMs",
+        endAt: 300_000,
+        limitToFirst: 100,
+      });
+      return Object.fromEntries(values);
+    },
+    transactRtdbPath: async (
+      path: string,
+      updater: (current: unknown) => unknown,
+    ) => {
+      const inviteId = path.split("/").at(-1) || "";
+      const result = applyRtdbTransaction(values.get(inviteId), updater);
+      if (result.committed) {
+        values.set(inviteId, result.value);
+      }
+      return result;
+    },
+  };
+  assert.equal(
+    await sweepAutomatchProfileGameProjections(
+      {
+        ...TELEGRAM_TEST_ENV,
+        PROFILE_GAME_PROJECTION_QUEUE: queue,
+      },
+      {
+        createRtdb: () => rtdb,
+        logger: { error: (message) => logs.push(String(message)), info() {} },
+        now: () => 600_000,
+      },
+    ),
+    1,
+  );
+  assert.deepEqual(batches.flat(), [automatchTask()]);
+  assert.deepEqual(values.get("auto_aaaaaaaaaaa"), {
+    ...automatchOutbox("request-1", 50, 100),
+    lastQueuedAtMs: 600_000,
+  });
+  assert.equal(values.get("auto_bbbbbbbbbbb"), null);
+  assert.equal(values.get("auto_ccccccccccc"), null);
+  assert.equal(values.get("auto_ddddddddddd"), null);
+  assert.equal(
+    logs.some(
+      (entry) =>
+        entry.includes("profile_game_projection_invalid_outboxes_removed") &&
+        entry.includes('"count":3'),
+    ),
+    true,
+  );
+});
+
+test("automatch recovery claims an outbox only once", async () => {
+  let current: unknown = automatchOutbox("request-1", 50, 100);
+  const rtdb = {
+    getRtdbPath: async () => current,
+    transactRtdbPath: async (
+      _path: string,
+      updater: (value: unknown) => unknown,
+    ) => {
+      const result = applyRtdbTransaction(current, updater);
+      if (result.committed) {
+        current = result.value;
+      }
+      return result;
+    },
+  };
+  const candidate = {
+    lastQueuedAtMs: 100,
+    task: automatchTask(),
+  };
+  assert.deepEqual(
+    await Promise.all([
+      claimAutomatchSweepCandidate(rtdb, candidate, 600_000),
+      claimAutomatchSweepCandidate(rtdb, candidate, 600_000),
+    ]),
+    [true, false],
+  );
+  assert.deepEqual(current, {
+    ...automatchOutbox("request-1", 50, 100),
+    lastQueuedAtMs: 600_000,
+  });
 });

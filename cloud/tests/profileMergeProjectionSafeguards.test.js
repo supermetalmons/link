@@ -18,7 +18,6 @@ const {
   readExistingProjectionDocuments,
   recomputeInviteProjection,
   resolveProfileLinkCatchupState,
-  syncAutomatchInviteMarkerFromQueue,
 } = require("../functions/profileGamesProjector");
 const firebaseAdmin = require("../functions/firebaseAdmin");
 
@@ -1071,52 +1070,4 @@ test("concurrency pools await active siblings before rethrowing", async () => {
     /worker-failed/,
   );
   assert.equal(siblingSettled, true);
-});
-
-test("automatch marker retries converge after a concurrent queue change", async () => {
-  const originalDatabase = firebaseAdmin.database;
-  const updates = [];
-  const inviteData = {
-    automatchStateHint: "canceled",
-    automatchCanceledAt: 1,
-  };
-  let queueExists = true;
-  firebaseAdmin.database = () => ({
-    ref(path) {
-      if (path === "invites/invite-1") {
-        return {
-          once: async () => ({
-            exists: () => true,
-            val: () => ({ ...inviteData }),
-          }),
-          update: async (value) => {
-            Object.assign(inviteData, value);
-            updates.push(value);
-            if (updates.length === 1) {
-              queueExists = false;
-            }
-          },
-        };
-      }
-      if (path === "automatch/invite-1") {
-        return {
-          once: async () => ({ exists: () => queueExists }),
-        };
-      }
-      throw new Error(`unexpected-path:${path}`);
-    },
-  });
-  try {
-    const result = await syncAutomatchInviteMarkerFromQueue("invite-1");
-    assert.equal(result.automatchStateHint, "canceled");
-    assert.equal(updates.length, 2);
-    assert.deepEqual(updates[0], {
-      automatchStateHint: "pending",
-      automatchCanceledAt: null,
-    });
-    assert.equal(updates[1].automatchStateHint, "canceled");
-    assert.equal(typeof updates[1].automatchCanceledAt, "number");
-  } finally {
-    firebaseAdmin.database = originalDatabase;
-  }
 });

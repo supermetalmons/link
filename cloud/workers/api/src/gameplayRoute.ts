@@ -56,7 +56,9 @@ import {
 } from "./gameplayRepository.ts";
 import { readBoundedJson } from "./http.ts";
 import {
+  createAutomatchProfileGameProjectionTask,
   createAutomatchProjectionTask,
+  enqueueAutomatchProfileGameProjection,
   enqueueAutomatchProjection,
   startAutomatch,
   type AutomatchDependencies,
@@ -87,6 +89,7 @@ import {
   ensureEventProgressWorkflow,
   type EventProgressPlan,
 } from "./eventProgress.ts";
+import { buildAutomatchProfileGameProjectionOutboxUpdates } from "./profileGameProjectionOutbox.ts";
 import type { TelegramProjectionTask } from "./telegramProjectionTasks.ts";
 import type { ProfileGameProjectionTask } from "./profileGameProjectionTasks.ts";
 
@@ -279,13 +282,26 @@ export async function cancelAutomatch(
   }
   const usesTelegramDeliveryV2 =
     queued.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION;
+  const profileGameProjectionTask = createAutomatchProfileGameProjectionTask(
+    inviteId,
+    dependencies,
+  );
   const projectionTask = usesTelegramDeliveryV2
-    ? createAutomatchProjectionTask(inviteId, dependencies)
+    ? createAutomatchProjectionTask(
+        inviteId,
+        dependencies,
+        profileGameProjectionTask.requestId,
+      )
     : null;
   const canceledUpdates: Record<string, unknown> = {
     [`automatch/${inviteId}`]: null,
     [`invites/${inviteId}/automatchStateHint`]: "canceled",
     [`invites/${inviteId}/automatchCanceledAt`]: FIREBASE_RTDB_SERVER_TIMESTAMP,
+    ...buildAutomatchProfileGameProjectionOutboxUpdates({
+      inviteId,
+      requestId: profileGameProjectionTask.requestId,
+      timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
+    }),
   };
   if (usesTelegramDeliveryV2) {
     Object.assign(
@@ -310,6 +326,10 @@ export async function cancelAutomatch(
   if (projectionTask) {
     await enqueueAutomatchProjection(projectionTask, dependencies);
   }
+  await enqueueAutomatchProfileGameProjection(
+    profileGameProjectionTask,
+    dependencies,
+  );
   if (
     !normalizeString(
       await repository.getRtdbPath(`invites/${inviteId}/guestId`),
@@ -321,9 +341,23 @@ export async function cancelAutomatch(
     [`invites/${inviteId}/automatchStateHint`]: "matched",
     [`invites/${inviteId}/automatchCanceledAt`]: null,
   };
+  const matchedProfileGameProjectionTask =
+    createAutomatchProfileGameProjectionTask(inviteId, dependencies);
   const matchedProjectionTask = usesTelegramDeliveryV2
-    ? createAutomatchProjectionTask(inviteId, dependencies)
+    ? createAutomatchProjectionTask(
+        inviteId,
+        dependencies,
+        matchedProfileGameProjectionTask.requestId,
+      )
     : null;
+  Object.assign(
+    matchedUpdates,
+    buildAutomatchProfileGameProjectionOutboxUpdates({
+      inviteId,
+      requestId: matchedProfileGameProjectionTask.requestId,
+      timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
+    }),
+  );
   if (usesTelegramDeliveryV2) {
     Object.assign(
       matchedUpdates,
@@ -347,6 +381,10 @@ export async function cancelAutomatch(
   if (matchedProjectionTask) {
     await enqueueAutomatchProjection(matchedProjectionTask, dependencies);
   }
+  await enqueueAutomatchProfileGameProjection(
+    matchedProfileGameProjectionTask,
+    dependencies,
+  );
   return { ok: false };
 }
 
@@ -636,6 +674,9 @@ export async function handleGameplayRoute(
     };
     const automatchDependencies: AutomatchDependencies = {
       ...dependencies.automatch,
+      enqueueProfileGameProjection:
+        dependencies.automatch?.enqueueProfileGameProjection ||
+        defaultEnqueueProfileGameProjection,
       enqueueTelegramProjection:
         dependencies.automatch?.enqueueTelegramProjection ||
         defaultEnqueueTelegramProjection,

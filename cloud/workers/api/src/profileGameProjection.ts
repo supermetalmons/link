@@ -1,9 +1,16 @@
 import {
   createGameplayRepository,
   createRatingRepository,
+  type GameplayRepository,
   type RatingProfileGameProjectionRepository,
 } from "./gameplayRepository.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import {
+  AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT,
+  getAutomatchProfileGameProjectionLockPath,
+  getAutomatchProfileGameProjectionOutboxPath,
+  parseAutomatchProfileGameProjectionOutbox,
+} from "./profileGameProjectionOutbox.ts";
 import {
   createProfileGameProjectionRuntime,
   type ProfileGameProjectionRuntime,
@@ -11,21 +18,49 @@ import {
 import {
   parseProfileGameProjectionTask,
   PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
+  type AutomatchProfileGameProjectionTask,
   type ProfileGameProjectionTask,
 } from "./profileGameProjectionTasks.ts";
 
 const PROFILE_GAME_PROJECTION_SWEEP_LIMIT = 100;
 const PROFILE_GAME_PROJECTION_SWEEP_CONCURRENCY = 10;
 const MAX_PROFILE_GAME_PROJECTION_RETRY_DELAY_SECONDS = 60;
+const PROFILE_GAME_PROJECTION_RECOVERY_DELAY_MS = 5 * 60 * 1_000;
+const AUTOMATCH_PROFILE_GAME_PROJECTION_LOCK_MS = 15 * 60 * 1_000;
 
 type ProfileGameProjectionLogger = Pick<Console, "error" | "info">;
+type ProfileGameProjectionRtdb = Pick<
+  GameplayRepository,
+  "getRtdbPath" | "transactRtdbPath"
+>;
 
 export type ProfileGameProjectionDependencies = {
   createRating?: (env: Env) => RatingProfileGameProjectionRepository;
+  createRtdb?: (env: Env) => ProfileGameProjectionRtdb;
   createRuntime?: (env: Env) => ProfileGameProjectionRuntime;
   logger?: ProfileGameProjectionLogger;
   now?: () => number;
 };
+
+type AutomatchSweepCandidate = {
+  lastQueuedAtMs: number;
+  task: AutomatchProfileGameProjectionTask;
+};
+
+type AutomatchSweepEntry =
+  | { kind: "candidate"; value: AutomatchSweepCandidate }
+  | { inviteId: string; kind: "invalid" };
+
+export type ProfileGameProjectionSweepResult = {
+  automatch: number;
+  rating: number;
+};
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
 
 function validRatingProjectionRecord(
   operationId: string,
@@ -53,6 +88,189 @@ export function profileGameProjectionRetryDelaySeconds(
     MAX_PROFILE_GAME_PROJECTION_RETRY_DELAY_SECONDS,
     2 ** exponent,
   );
+}
+
+async function acquireAutomatchProfileGameProjectionLock(
+  task: AutomatchProfileGameProjectionTask,
+  ownerId: string,
+  rtdb: ProfileGameProjectionRtdb,
+  nowMs: number,
+): Promise<void> {
+  const result = await rtdb.transactRtdbPath(
+    getAutomatchProfileGameProjectionLockPath(task.inviteId),
+    (current) => {
+      const record = toRecord(current);
+      const expiresAtMs = record?.expiresAtMs;
+      if (
+        typeof record?.ownerId === "string" &&
+        typeof expiresAtMs === "number" &&
+        Number.isFinite(expiresAtMs) &&
+        expiresAtMs > nowMs
+      ) {
+        return { commit: false, decision: "busy" };
+      }
+      return {
+        value: {
+          ownerId,
+          requestId: task.requestId,
+          expiresAtMs: nowMs + AUTOMATCH_PROFILE_GAME_PROJECTION_LOCK_MS,
+        },
+        decision: "acquired",
+      };
+    },
+  );
+  if (!result.committed) {
+    throw new Error("profile-game-projection-lock-busy");
+  }
+}
+
+async function releaseAutomatchProfileGameProjectionLock(
+  task: AutomatchProfileGameProjectionTask,
+  ownerId: string,
+  rtdb: ProfileGameProjectionRtdb,
+): Promise<void> {
+  await rtdb.transactRtdbPath(
+    getAutomatchProfileGameProjectionLockPath(task.inviteId),
+    (current) =>
+      toRecord(current)?.ownerId === ownerId
+        ? { value: null, decision: "released" }
+        : { commit: false, decision: "not-owner" },
+  );
+}
+
+export async function settleAutomatchProfileGameProjectionOutbox(
+  task: AutomatchProfileGameProjectionTask,
+  rtdb: ProfileGameProjectionRtdb,
+): Promise<boolean> {
+  const result = await rtdb.transactRtdbPath(
+    getAutomatchProfileGameProjectionOutboxPath(task.inviteId),
+    (current) => {
+      const outbox = parseAutomatchProfileGameProjectionOutbox(current);
+      if (!outbox || outbox.requestId !== task.requestId) {
+        return { commit: false, decision: "stale" };
+      }
+      return { value: null, decision: "cleared" };
+    },
+  );
+  return result.committed;
+}
+
+export async function processAutomatchProfileGameProjection(
+  task: AutomatchProfileGameProjectionTask,
+  rtdb: ProfileGameProjectionRtdb,
+  runtime: ProfileGameProjectionRuntime,
+  ownerId: string = crypto.randomUUID(),
+  now: () => number = Date.now,
+): Promise<"projected" | "stale" | "superseded"> {
+  await acquireAutomatchProfileGameProjectionLock(task, ownerId, rtdb, now());
+  try {
+    const outbox = parseAutomatchProfileGameProjectionOutbox(
+      await rtdb.getRtdbPath(
+        getAutomatchProfileGameProjectionOutboxPath(task.inviteId),
+      ),
+    );
+    if (!outbox || outbox.requestId !== task.requestId) {
+      return "stale";
+    }
+    await runtime.recomputeInviteProjection(task.inviteId, "automatch-queue", {
+      eventTimestampMs: outbox.sourceUpdatedAtMs,
+    });
+    return (await settleAutomatchProfileGameProjectionOutbox(task, rtdb))
+      ? "projected"
+      : "superseded";
+  } finally {
+    await releaseAutomatchProfileGameProjectionLock(task, ownerId, rtdb);
+  }
+}
+
+function automatchSweepEntries(value: unknown): AutomatchSweepEntry[] {
+  const records = toRecord(value) || {};
+  return Object.entries(records).map(([inviteId, raw]) => {
+    const outbox = parseAutomatchProfileGameProjectionOutbox(raw);
+    return outbox && isSafeFirebaseKey(inviteId)
+      ? {
+          kind: "candidate",
+          value: {
+            lastQueuedAtMs: outbox.lastQueuedAtMs,
+            task: {
+              kind: "automatch-profile-game-projection",
+              inviteId,
+              requestId: outbox.requestId,
+            },
+          },
+        }
+      : { inviteId, kind: "invalid" };
+  });
+}
+
+async function claimAutomatchSweepCandidate(
+  rtdb: ProfileGameProjectionRtdb,
+  candidate: AutomatchSweepCandidate,
+  nowMs: number,
+): Promise<boolean> {
+  const result = await rtdb.transactRtdbPath(
+    getAutomatchProfileGameProjectionOutboxPath(candidate.task.inviteId),
+    (current) => {
+      const outbox = parseAutomatchProfileGameProjectionOutbox(current);
+      if (
+        !outbox ||
+        outbox.requestId !== candidate.task.requestId ||
+        outbox.lastQueuedAtMs !== candidate.lastQueuedAtMs ||
+        outbox.lastQueuedAtMs > nowMs
+      ) {
+        return { commit: false, decision: "not-due" };
+      }
+      return {
+        value: { ...toRecord(current), lastQueuedAtMs: nowMs },
+        decision: "claimed",
+      };
+    },
+  );
+  return result.committed;
+}
+
+async function removeInvalidAutomatchSweepEntry(
+  rtdb: ProfileGameProjectionRtdb,
+  inviteId: string,
+): Promise<boolean> {
+  const result = await rtdb.transactRtdbPath(
+    getAutomatchProfileGameProjectionOutboxPath(inviteId),
+    (current) => {
+      const record = toRecord(current);
+      if (
+        current === null ||
+        current === undefined ||
+        (record &&
+          parseAutomatchProfileGameProjectionOutbox(current) &&
+          isSafeFirebaseKey(inviteId))
+      ) {
+        return { commit: false, decision: "changed" };
+      }
+      return { value: null, decision: "removed-invalid" };
+    },
+  );
+  return result.committed;
+}
+
+async function collectSuccessfulClaims<T>(
+  items: readonly T[],
+  claim: (item: T) => Promise<boolean>,
+): Promise<{ claimed: T[]; failure: Error | null }> {
+  const claimed: T[] = [];
+  let failure: Error | null = null;
+  for (const item of items) {
+    try {
+      if (await claim(item)) {
+        claimed.push(item);
+      }
+    } catch (error) {
+      failure ||=
+        error instanceof Error
+          ? error
+          : new Error("profile-game-projection-claim-failed");
+    }
+  }
+  return { claimed, failure };
 }
 
 export async function processRatingProfileGameProjection(
@@ -111,20 +329,34 @@ export async function handleProfileGameProjectionMessage(
   }
   const now = dependencies.now || Date.now;
   try {
-    const rating = (
-      dependencies.createRating ||
-      ((workerEnv: Env) =>
-        createRatingRepository(workerEnv, createGameplayRepository(workerEnv)))
-    )(env);
     const runtime = (
       dependencies.createRuntime || createProfileGameProjectionRuntime
     )(env);
-    const status = await processRatingProfileGameProjection(
-      task.operationId,
-      rating,
-      runtime,
-      now,
-    );
+    const status =
+      task.kind === "automatch-profile-game-projection"
+        ? await processAutomatchProfileGameProjection(
+            task,
+            (
+              dependencies.createRtdb ||
+              ((workerEnv: Env) => createGameplayRepository(workerEnv))
+            )(env),
+            runtime,
+            message.id,
+            now,
+          )
+        : await processRatingProfileGameProjection(
+            task.operationId,
+            (
+              dependencies.createRating ||
+              ((workerEnv: Env) =>
+                createRatingRepository(
+                  workerEnv,
+                  createGameplayRepository(workerEnv),
+                ))
+            )(env),
+            runtime,
+            now,
+          );
     message.ack();
     logger.info(
       JSON.stringify({
@@ -151,11 +383,13 @@ export async function handleProfileGameProjectionQueue(
   batch: MessageBatch<unknown>,
   env: Env,
 ): Promise<void> {
-  const rating = createRatingRepository(env, createGameplayRepository(env));
-  const runtime = createProfileGameProjectionRuntime(env);
+  const rtdb = createGameplayRepository(env);
+  const rating = createRatingRepository(env, rtdb);
+  const runtime = createProfileGameProjectionRuntime(env, { rtdb });
   for (const message of batch.messages) {
     await handleProfileGameProjectionMessage(message, env, {
       createRating: () => rating,
+      createRtdb: () => rtdb,
       createRuntime: () => runtime,
     });
   }
@@ -190,7 +424,7 @@ async function forEachConcurrent<T>(
   await Promise.all(runners);
 }
 
-export async function sweepProfileGameProjections(
+export async function sweepRatingProfileGameProjections(
   env: Env,
   dependencies: ProfileGameProjectionDependencies = {},
 ): Promise<number> {
@@ -263,6 +497,96 @@ export async function sweepProfileGameProjections(
   return tasks.length;
 }
 
+export async function sweepAutomatchProfileGameProjections(
+  env: Env,
+  dependencies: ProfileGameProjectionDependencies = {},
+): Promise<number> {
+  const logger = dependencies.logger || console;
+  const now = dependencies.now || Date.now;
+  const nowMs = now();
+  const dueBeforeMs = nowMs - PROFILE_GAME_PROJECTION_RECOVERY_DELAY_MS;
+  const rtdb = (
+    dependencies.createRtdb ||
+    ((workerEnv: Env) => createGameplayRepository(workerEnv))
+  )(env);
+  const value = await rtdb.getRtdbPath(
+    AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT,
+    {
+      orderBy: "lastQueuedAtMs",
+      endAt: dueBeforeMs,
+      limitToFirst: PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
+    },
+  );
+  const entries = automatchSweepEntries(value);
+  const invalidInviteIds = entries.flatMap((entry) =>
+    entry.kind === "invalid" ? [entry.inviteId] : [],
+  );
+  let invalidFailure: Error | null = null;
+  let invalidRemoved = 0;
+  for (const inviteId of invalidInviteIds) {
+    try {
+      if (await removeInvalidAutomatchSweepEntry(rtdb, inviteId)) {
+        invalidRemoved++;
+      }
+    } catch (error) {
+      invalidFailure ||=
+        error instanceof Error
+          ? error
+          : new Error("profile-game-projection-invalid-record-failed");
+    }
+  }
+  if (invalidRemoved > 0) {
+    logger.error(
+      JSON.stringify({
+        event: "profile_game_projection_invalid_outboxes_removed",
+        count: invalidRemoved,
+      }),
+    );
+  }
+  const candidates = entries.flatMap((entry) =>
+    entry.kind === "candidate" ? [entry.value] : [],
+  );
+  const claims = await collectSuccessfulClaims(candidates, (candidate) =>
+    claimAutomatchSweepCandidate(rtdb, candidate, nowMs),
+  );
+  const tasks = claims.claimed.map(({ task }) => task);
+  await sendProfileGameProjectionTasks(
+    env.PROFILE_GAME_PROJECTION_QUEUE,
+    tasks,
+  );
+  if (claims.failure) {
+    throw claims.failure;
+  }
+  if (invalidFailure) {
+    throw invalidFailure;
+  }
+  return tasks.length;
+}
+
+export async function sweepProfileGameProjections(
+  env: Env,
+  dependencies: ProfileGameProjectionDependencies = {},
+): Promise<ProfileGameProjectionSweepResult> {
+  const [automatch, rating] = await Promise.allSettled([
+    sweepAutomatchProfileGameProjections(env, dependencies),
+    sweepRatingProfileGameProjections(env, dependencies),
+  ]);
+  const failures = [automatch, rating].flatMap((result) =>
+    result.status === "rejected" ? [result.reason] : [],
+  );
+  if (
+    failures.length > 0 ||
+    automatch.status === "rejected" ||
+    rating.status === "rejected"
+  ) {
+    throw new AggregateError(failures, "profile-game-projection-sweep-failed");
+  }
+  return {
+    automatch: automatch.value,
+    rating: rating.value,
+  };
+}
+
 export async function handleProfileGameProjectionSweep(
   _controller: ScheduledController,
   env: Env,
@@ -271,7 +595,9 @@ export async function handleProfileGameProjectionSweep(
   console.info(
     JSON.stringify({
       event: "profile_game_projection_sweep_completed",
-      enqueued,
+      enqueued: enqueued.automatch + enqueued.rating,
+      automatchEnqueued: enqueued.automatch,
+      ratingEnqueued: enqueued.rating,
     }),
   );
 }
@@ -279,7 +605,13 @@ export async function handleProfileGameProjectionSweep(
 export {
   MAX_PROFILE_GAME_PROJECTION_RETRY_DELAY_SECONDS,
   PROFILE_GAME_PROJECTION_SWEEP_CONCURRENCY,
+  PROFILE_GAME_PROJECTION_RECOVERY_DELAY_MS,
   PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
+  acquireAutomatchProfileGameProjectionLock,
+  automatchSweepEntries,
+  claimAutomatchSweepCandidate,
+  releaseAutomatchProfileGameProjectionLock,
+  removeInvalidAutomatchSweepEntry,
   sendProfileGameProjectionTasks,
   validRatingProjectionRecord,
 };

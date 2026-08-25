@@ -19,7 +19,6 @@ const taskQueueExportNames = [];
 const eventExportNames = [
   "projectProfileEventPrizesOnMergeTargetWritten",
   "projectProfileEventPrizesOnPrizeWritten",
-  "projectProfileGamesOnAutomatchQueueWritten",
   "projectProfileGamesOnEventWritten",
   "projectProfileGamesOnInviteCreated",
   "projectProfileGamesOnInviteGuestIdChanged",
@@ -142,11 +141,6 @@ Object.assign(expectedEndpointContracts, {
     },
     retry: true,
   }),
-  projectProfileGamesOnAutomatchQueueWritten: eventContract({
-    eventType: "google.firebase.database.ref.v1.written",
-    pathPatterns: { ref: "automatch/{inviteId}", instance: "*" },
-    retry: true,
-  }),
   projectProfileGamesOnProfileLinkCreated: eventContract({
     eventType: "google.firebase.database.ref.v1.created",
     pathPatterns: { ref: "players/{loginUid}/profile", instance: "*" },
@@ -258,7 +252,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 13);
+  assert.equal(expectedExportNames.length, 12);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

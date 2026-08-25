@@ -9,7 +9,6 @@ const {
   onInviteHostRematchesChanged,
   onInviteGuestRematchesChanged,
   onMatchCreated,
-  onAutomatchQueueWritten,
   onProfileLinkCreated,
   onProfileLinkWritten,
   onProfileDeleted,
@@ -28,7 +27,6 @@ exports.projectProfileGamesOnInviteHostRematchesChanged =
 exports.projectProfileGamesOnInviteGuestRematchesChanged =
   onInviteGuestRematchesChanged;
 exports.projectProfileGamesOnMatchCreated = onMatchCreated;
-exports.projectProfileGamesOnAutomatchQueueWritten = onAutomatchQueueWritten;
 exports.projectProfileGamesOnProfileLinkCreated = onProfileLinkCreated;
 exports.projectProfileGamesOnProfileLinkWritten = onProfileLinkWritten;
 exports.projectProfileGamesOnProfileDeleted = onProfileDeleted;

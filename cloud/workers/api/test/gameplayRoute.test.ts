@@ -134,6 +134,7 @@ test("normalizes queued candidates and selects newest valid records first", () =
 
 test("cancels the newest UID automatch with exact v2 multipath updates", async () => {
   const patches: Array<Record<string, unknown>> = [];
+  const profileProjectionTasks: unknown[] = [];
   let guestReads = 0;
   const result = await cancelAutomatch(
     identity,
@@ -163,15 +164,34 @@ test("cancels the newest UID automatch with exact v2 multipath updates", async (
         patches.push(updates);
       },
     }),
-    { createProjectionRequestId: () => "request-canceled" },
+    {
+      createProjectionRequestId: () => "request-canceled",
+      enqueueProfileGameProjection: async (task) => {
+        profileProjectionTasks.push(task);
+      },
+    },
   );
   assert.deepEqual(result, { ok: true });
   assert.equal(guestReads, 2);
+  assert.deepEqual(profileProjectionTasks, [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto-newer",
+      requestId: "request-canceled",
+    },
+  ]);
   assert.deepEqual(patches, [
     {
       "automatch/auto-newer": null,
       "invites/auto-newer/automatchStateHint": "canceled",
       "invites/auto-newer/automatchCanceledAt": { ".sv": "timestamp" },
+      "profileGameProjectionOutbox/automatch/auto-newer": {
+        schemaVersion: 1,
+        status: "pending",
+        requestId: "request-canceled",
+        sourceUpdatedAtMs: { ".sv": "timestamp" },
+        lastQueuedAtMs: { ".sv": "timestamp" },
+      },
       "telegramAutomatches/auto-newer/lifecycle": "canceled",
       "telegramAutomatches/auto-newer/updatedAtMs": { ".sv": "timestamp" },
       "telegramAutomatches/auto-newer/generation": {
@@ -189,6 +209,7 @@ test("cancels the newest UID automatch with exact v2 multipath updates", async (
 
 test("uses profile fallback and restores matched state after a guest race", async () => {
   const patches: Array<Record<string, unknown>> = [];
+  const profileProjectionTasks: unknown[] = [];
   let guestReads = 0;
   const requestIds = ["request-canceled", "request-matched"];
   const result = await cancelAutomatch(
@@ -224,13 +245,35 @@ test("uses profile fallback and restores matched state after a guest race", asyn
     }),
     {
       createProjectionRequestId: () => requestIds.shift() || "unexpected",
+      enqueueProfileGameProjection: async (task) => {
+        profileProjectionTasks.push(task);
+      },
     },
   );
   assert.deepEqual(result, { ok: false });
   assert.equal(patches.length, 2);
+  assert.deepEqual(profileProjectionTasks, [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto-race",
+      requestId: "request-canceled",
+    },
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto-race",
+      requestId: "request-matched",
+    },
+  ]);
   assert.deepEqual(patches[1], {
     "invites/auto-race/automatchStateHint": "matched",
     "invites/auto-race/automatchCanceledAt": null,
+    "profileGameProjectionOutbox/automatch/auto-race": {
+      schemaVersion: 1,
+      status: "pending",
+      requestId: "request-matched",
+      sourceUpdatedAtMs: { ".sv": "timestamp" },
+      lastQueuedAtMs: { ".sv": "timestamp" },
+    },
     "telegramAutomatches/auto-race/lifecycle": "matched",
     "telegramAutomatches/auto-race/updatedAtMs": { ".sv": "timestamp" },
     "telegramAutomatches/auto-race/generation": {
@@ -279,6 +322,7 @@ test("returns false without writes for missing queues and existing guests", asyn
 
 test("keeps legacy automatch cancellation free of Telegram v2 updates", async () => {
   const patches: Array<Record<string, unknown>> = [];
+  const profileProjectionTasks: unknown[] = [];
   const result = await cancelAutomatch(
     identity,
     repository({
@@ -294,6 +338,12 @@ test("keeps legacy automatch cancellation free of Telegram v2 updates", async ()
         patches.push(updates);
       },
     }),
+    {
+      createProjectionRequestId: () => "legacy-request",
+      enqueueProfileGameProjection: async (task) => {
+        profileProjectionTasks.push(task);
+      },
+    },
   );
   assert.deepEqual(result, { ok: true });
   assert.deepEqual(patches, [
@@ -301,6 +351,20 @@ test("keeps legacy automatch cancellation free of Telegram v2 updates", async ()
       "automatch/auto-legacy": null,
       "invites/auto-legacy/automatchStateHint": "canceled",
       "invites/auto-legacy/automatchCanceledAt": { ".sv": "timestamp" },
+      "profileGameProjectionOutbox/automatch/auto-legacy": {
+        schemaVersion: 1,
+        status: "pending",
+        requestId: "legacy-request",
+        sourceUpdatedAtMs: { ".sv": "timestamp" },
+        lastQueuedAtMs: { ".sv": "timestamp" },
+      },
+    },
+  ]);
+  assert.deepEqual(profileProjectionTasks, [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto-legacy",
+      requestId: "legacy-request",
     },
   ]);
 });
@@ -542,12 +606,13 @@ test("routes authenticated CORS and rejects methods before authentication", asyn
   });
 });
 
-test("committed gameplay does not wait for the projection Queue", async () => {
+test("committed gameplay does not wait for projection Queues", async () => {
   let releaseQueue: (() => void) | undefined;
   const blockedQueue = new Promise<void>((resolve) => {
     releaseQueue = resolve;
   });
   const background: Promise<unknown>[] = [];
+  const profileProjectionTasks: unknown[] = [];
   const response = await handleGameplayRoute(
     request("/automatch/start", {
       body: { emojiId: 7, aura: "rainbow" },
@@ -558,6 +623,15 @@ test("committed gameplay does not wait for the projection Queue", async () => {
         ...env.TELEGRAM_PROJECTION_QUEUE,
         send: async () => {
           await blockedQueue;
+          return {
+            metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+          };
+        },
+      },
+      PROFILE_GAME_PROJECTION_QUEUE: {
+        ...env.PROFILE_GAME_PROJECTION_QUEUE,
+        send: async (task) => {
+          profileProjectionTasks.push(task);
           return {
             metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
           };
@@ -578,9 +652,16 @@ test("committed gameplay does not wait for the projection Queue", async () => {
     },
   );
   assert.equal(response.status, 200);
-  assert.equal(background.length, 1);
+  assert.equal(background.length, 2);
   releaseQueue?.();
   await Promise.all(background);
+  assert.deepEqual(profileProjectionTasks, [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto_aaaaaaaaaaa",
+      requestId: "request-1",
+    },
+  ]);
 });
 
 test("routes exact authenticated rating updates without a new rate limit", async () => {

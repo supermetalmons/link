@@ -34,6 +34,11 @@ import type {
   GameplayProfile,
   GameplayRepository,
 } from "./gameplayRepository.ts";
+import { buildAutomatchProfileGameProjectionOutboxUpdates } from "./profileGameProjectionOutbox.ts";
+import type {
+  AutomatchProfileGameProjectionTask,
+  ProfileGameProjectionTask,
+} from "./profileGameProjectionTasks.ts";
 import type {
   AutomatchTelegramProjectionTask,
   TelegramProjectionTask,
@@ -47,8 +52,14 @@ const gameVariantHelpers = createGameVariantHelpers(monsRules);
 
 type AutomatchDependencies = {
   createProjectionRequestId?: () => string;
+  enqueueProfileGameProjection?: (
+    task: ProfileGameProjectionTask,
+  ) => Promise<void>;
   enqueueTelegramProjection?: (task: TelegramProjectionTask) => Promise<void>;
   logProfileFailure?: () => void;
+  logProfileGameProjectionFailure?: (
+    task: AutomatchProfileGameProjectionTask,
+  ) => void;
   logProjectionFailure?: (task: AutomatchTelegramProjectionTask) => void;
   random?: RandomSource;
   signal?: AbortSignal;
@@ -111,9 +122,23 @@ function secureRandom(): number {
 export function createAutomatchProjectionTask(
   inviteId: string,
   dependencies: AutomatchDependencies,
+  requestId = (
+    dependencies.createProjectionRequestId || (() => crypto.randomUUID())
+  )(),
 ): AutomatchTelegramProjectionTask {
   return {
     kind: "automatch-telegram-projection",
+    inviteId,
+    requestId,
+  };
+}
+
+export function createAutomatchProfileGameProjectionTask(
+  inviteId: string,
+  dependencies: AutomatchDependencies,
+): AutomatchProfileGameProjectionTask {
+  return {
+    kind: "automatch-profile-game-projection",
     inviteId,
     requestId: (
       dependencies.createProjectionRequestId || (() => crypto.randomUUID())
@@ -137,6 +162,29 @@ export async function enqueueAutomatchProjection(
         console.error(
           JSON.stringify({
             event: "automatch_telegram_projection_enqueue_failed",
+            inviteId: failedTask.inviteId,
+          }),
+        ))
+    )(task);
+  }
+}
+
+export async function enqueueAutomatchProfileGameProjection(
+  task: AutomatchProfileGameProjectionTask,
+  dependencies: AutomatchDependencies,
+): Promise<void> {
+  if (!dependencies.enqueueProfileGameProjection) {
+    return;
+  }
+  try {
+    await dependencies.enqueueProfileGameProjection(task);
+  } catch {
+    (
+      dependencies.logProfileGameProjectionFailure ||
+      ((failedTask) =>
+        console.error(
+          JSON.stringify({
+            event: "automatch_profile_game_projection_enqueue_failed",
             inviteId: failedTask.inviteId,
           }),
         ))
@@ -238,9 +286,14 @@ async function attemptAutomatch(
       mode: "pending",
       matchedImmediately: false,
     };
+    const profileGameProjectionTask = createAutomatchProfileGameProjectionTask(
+      inviteId,
+      dependencies,
+    );
     const projectionTask = createAutomatchProjectionTask(
       inviteId,
       dependencies,
+      profileGameProjectionTask.requestId,
     );
     await repository.patchRtdbRoot(
       {
@@ -281,10 +334,19 @@ async function attemptAutomatch(
           requestId: projectionTask.requestId,
           timestamp,
         }),
+        ...buildAutomatchProfileGameProjectionOutboxUpdates({
+          inviteId,
+          requestId: profileGameProjectionTask.requestId,
+          timestamp,
+        }),
       },
       signal,
     );
     await enqueueAutomatchProjection(projectionTask, dependencies);
+    await enqueueAutomatchProfileGameProjection(
+      profileGameProjectionTask,
+      dependencies,
+    );
     return response;
   }
 
@@ -341,9 +403,25 @@ async function attemptAutomatch(
     [`players/${identity.uid}/matches/${queued.inviteId}`]: match,
   };
   const matchedResponse = matchedAutomatchResponse(queued.inviteId);
+  const profileGameProjectionTask = createAutomatchProfileGameProjectionTask(
+    queued.inviteId,
+    dependencies,
+  );
   const projectionTask = usesTelegramDeliveryV2
-    ? createAutomatchProjectionTask(queued.inviteId, dependencies)
+    ? createAutomatchProjectionTask(
+        queued.inviteId,
+        dependencies,
+        profileGameProjectionTask.requestId,
+      )
     : null;
+  Object.assign(
+    updates,
+    buildAutomatchProfileGameProjectionOutboxUpdates({
+      inviteId: queued.inviteId,
+      requestId: profileGameProjectionTask.requestId,
+      timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
+    }),
+  );
   if (usesTelegramDeliveryV2) {
     Object.assign(
       updates,
@@ -388,6 +466,10 @@ async function attemptAutomatch(
   if (projectionTask) {
     await enqueueAutomatchProjection(projectionTask, dependencies);
   }
+  await enqueueAutomatchProfileGameProjection(
+    profileGameProjectionTask,
+    dependencies,
+  );
   if ((await readGuestId()) === identity.uid) {
     return matchedResponse;
   }

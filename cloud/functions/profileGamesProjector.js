@@ -22,7 +22,6 @@ const PROFILE_LINK_CATCHUP_CONCURRENCY = 20;
 const PROFILE_LINK_CATCHUP_TIMEOUT_MS = 50000;
 const PROFILE_DELETE_GAMES_CLEANUP_BATCH_SIZE = 400;
 const PROFILE_DELETE_GAMES_CLEANUP_TIMEOUT_MS = 50000;
-const AUTOMATCH_MARKER_RECONCILE_ATTEMPTS = 3;
 const PROFILE_LINK_RECONCILE_ATTEMPTS = 3;
 
 const READ_RETRY_ATTEMPTS = 2;
@@ -164,70 +163,6 @@ const resolveProfileLinkCatchupState = async (
     profileId,
   };
 };
-
-async function syncAutomatchInviteMarkerFromQueue(inviteId) {
-  const normalizedInviteId = normalizeString(inviteId);
-  if (!normalizedInviteId) {
-    return { ok: false, updated: false, reason: "invalid-invite-id" };
-  }
-  const database = admin.database();
-  const inviteRef = database.ref(`invites/${normalizedInviteId}`);
-  const queueRef = database.ref(`automatch/${normalizedInviteId}`);
-  const readState = async () => {
-    const [inviteSnapshot, queueSnapshot] = await Promise.all([
-      readWithRetries(() => inviteRef.once("value")),
-      readWithRetries(() => queueRef.once("value")),
-    ]);
-    if (!inviteSnapshot.exists()) {
-      return null;
-    }
-    const inviteData = inviteSnapshot.val() || {};
-    const nextHint = queueSnapshot.exists()
-      ? "pending"
-      : normalizeString(inviteData.guestId)
-        ? "matched"
-        : "canceled";
-    const currentCanceledAt =
-      typeof inviteData.automatchCanceledAt === "number"
-        ? inviteData.automatchCanceledAt
-        : null;
-    const markerMatches =
-      normalizeString(inviteData.automatchStateHint) === nextHint &&
-      (nextHint === "canceled"
-        ? currentCanceledAt !== null
-        : currentCanceledAt === null);
-    return { currentCanceledAt, markerMatches, nextHint };
-  };
-
-  let updated = false;
-  for (
-    let attempt = 0;
-    attempt < AUTOMATCH_MARKER_RECONCILE_ATTEMPTS;
-    attempt += 1
-  ) {
-    const state = await readState();
-    if (!state) {
-      return { ok: true, updated, reason: "missing-invite" };
-    }
-    if (state.markerMatches) {
-      return {
-        ok: true,
-        updated,
-        reason: updated ? "marker-reconciled" : "marker-unchanged",
-        inviteId: normalizedInviteId,
-        automatchStateHint: state.nextHint,
-        automatchCanceledAt: state.currentCanceledAt,
-      };
-    }
-    const nextCanceledAt = state.nextHint === "canceled" ? Date.now() : null;
-    await inviteRef.update({
-      automatchStateHint: state.nextHint,
-      automatchCanceledAt: nextCanceledAt,
-    });
-    updated = true;
-  }
-  throw new Error("projector:automatch-marker-reconcile-exhausted");
-}
 
 const hasMeaningfulValueChange = (before, after) => {
   if (before === after) {
@@ -381,29 +316,6 @@ const onMatchCreated = onValueCreated(
     await recomputeInviteProjection(inviteId, "match-created", {
       eventTimestampMs: Date.now(),
       latestMatchIdHint: matchId,
-    });
-  },
-);
-
-const onAutomatchQueueWritten = onValueWritten(
-  { ref: "/automatch/{inviteId}", retry: true },
-  async (event) => {
-    const inviteId = event.params.inviteId;
-    const beforeExists = event.data.before.exists();
-    const afterExists = event.data.after.exists();
-    const beforeVal = beforeExists ? event.data.before.val() : null;
-    const afterVal = afterExists ? event.data.after.val() : null;
-
-    if (
-      beforeExists === afterExists &&
-      JSON.stringify(beforeVal) === JSON.stringify(afterVal)
-    ) {
-      return;
-    }
-
-    await syncAutomatchInviteMarkerFromQueue(inviteId);
-    await recomputeInviteProjection(inviteId, "automatch-queue", {
-      eventTimestampMs: Date.now(),
     });
   },
 );
@@ -690,7 +602,6 @@ module.exports = {
   onInviteHostRematchesChanged,
   onInviteGuestRematchesChanged,
   onMatchCreated,
-  onAutomatchQueueWritten,
   onProfileLinkCreated,
   onProfileLinkWritten,
   onProfileDeleted,
@@ -700,5 +611,4 @@ module.exports = {
   readExistingProjectionDocuments,
   recomputeInviteProjection,
   resolveProfileLinkCatchupState,
-  syncAutomatchInviteMarkerFromQueue,
 };

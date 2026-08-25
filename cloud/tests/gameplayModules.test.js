@@ -20,6 +20,10 @@ test("automatch REST queries retain their RTDB indexes", () => {
     databaseRules.rules.telegramProjectionOutbox.automatch[".indexOn"],
     ["updatedAtMs"],
   );
+  assert.deepEqual(
+    databaseRules.rules.profileGameProjectionOutbox.automatch[".indexOn"],
+    ["lastQueuedAtMs"],
+  );
   assert.ok(
     firestoreIndexes.indexes.some(
       (index) =>
