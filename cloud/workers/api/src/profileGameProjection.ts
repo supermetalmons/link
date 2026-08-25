@@ -27,12 +27,18 @@ const PROFILE_GAME_PROJECTION_SWEEP_CONCURRENCY = 10;
 const MAX_PROFILE_GAME_PROJECTION_RETRY_DELAY_SECONDS = 60;
 const PROFILE_GAME_PROJECTION_RECOVERY_DELAY_MS = 5 * 60 * 1_000;
 const AUTOMATCH_PROFILE_GAME_PROJECTION_LOCK_MS = 15 * 60 * 1_000;
+const PROFILE_GAME_PROJECTION_LOCK_RELEASE_ATTEMPTS = 3;
 
 type ProfileGameProjectionLogger = Pick<Console, "error" | "info">;
 type ProfileGameProjectionRtdb = Pick<
   GameplayRepository,
   "getRtdbPath" | "transactRtdbPath"
 >;
+
+type ProfileGameProjectionLock = {
+  inviteId: string;
+  requestId?: string;
+};
 
 export type ProfileGameProjectionDependencies = {
   createRating?: (env: Env) => RatingProfileGameProjectionRepository;
@@ -91,14 +97,19 @@ export function profileGameProjectionRetryDelaySeconds(
   );
 }
 
-async function acquireAutomatchProfileGameProjectionLock(
-  task: AutomatchProfileGameProjectionTask,
+async function acquireProfileGameProjectionLock(
+  lock: ProfileGameProjectionLock,
   ownerId: string,
   rtdb: ProfileGameProjectionRtdb,
   nowMs: number,
 ): Promise<void> {
+  const value = {
+    ownerId,
+    ...(lock.requestId ? { requestId: lock.requestId } : {}),
+    expiresAtMs: nowMs + AUTOMATCH_PROFILE_GAME_PROJECTION_LOCK_MS,
+  };
   const result = await rtdb.transactRtdbPath(
-    getAutomatchProfileGameProjectionLockPath(task.inviteId),
+    getAutomatchProfileGameProjectionLockPath(lock.inviteId),
     (current) => {
       const record = toRecord(current);
       const expiresAtMs = record?.expiresAtMs;
@@ -111,11 +122,7 @@ async function acquireAutomatchProfileGameProjectionLock(
         return { commit: false, decision: "busy" };
       }
       return {
-        value: {
-          ownerId,
-          requestId: task.requestId,
-          expiresAtMs: nowMs + AUTOMATCH_PROFILE_GAME_PROJECTION_LOCK_MS,
-        },
+        value,
         decision: "acquired",
       };
     },
@@ -125,18 +132,31 @@ async function acquireAutomatchProfileGameProjectionLock(
   }
 }
 
-async function releaseAutomatchProfileGameProjectionLock(
-  task: AutomatchProfileGameProjectionTask,
+async function releaseProfileGameProjectionLock(
+  lock: ProfileGameProjectionLock,
   ownerId: string,
   rtdb: ProfileGameProjectionRtdb,
 ): Promise<void> {
-  await rtdb.transactRtdbPath(
-    getAutomatchProfileGameProjectionLockPath(task.inviteId),
-    (current) =>
-      toRecord(current)?.ownerId === ownerId
-        ? { value: null, decision: "released" }
-        : { commit: false, decision: "not-owner" },
-  );
+  for (
+    let attempt = 0;
+    attempt < PROFILE_GAME_PROJECTION_LOCK_RELEASE_ATTEMPTS;
+    attempt++
+  ) {
+    try {
+      await rtdb.transactRtdbPath(
+        getAutomatchProfileGameProjectionLockPath(lock.inviteId),
+        (current) =>
+          toRecord(current)?.ownerId === ownerId
+            ? { value: null, decision: "released" }
+            : { commit: false, decision: "not-owner" },
+      );
+      return;
+    } catch (error) {
+      if (attempt === PROFILE_GAME_PROJECTION_LOCK_RELEASE_ATTEMPTS - 1) {
+        throw error;
+      }
+    }
+  }
 }
 
 export async function settleAutomatchProfileGameProjectionOutbox(
@@ -163,7 +183,7 @@ export async function processAutomatchProfileGameProjection(
   ownerId: string = crypto.randomUUID(),
   now: () => number = Date.now,
 ): Promise<"projected" | "stale" | "superseded"> {
-  await acquireAutomatchProfileGameProjectionLock(task, ownerId, rtdb, now());
+  await acquireProfileGameProjectionLock(task, ownerId, rtdb, now());
   try {
     const outbox = parseAutomatchProfileGameProjectionOutbox(
       await rtdb.getRtdbPath(
@@ -180,7 +200,7 @@ export async function processAutomatchProfileGameProjection(
       ? "projected"
       : "superseded";
   } finally {
-    await releaseAutomatchProfileGameProjectionLock(task, ownerId, rtdb);
+    await releaseProfileGameProjectionLock(task, ownerId, rtdb);
   }
 }
 
@@ -318,6 +338,8 @@ export async function processRatingProfileGameProjection(
   rating: RatingProfileGameProjectionRepository,
   runtime: ProfileGameProjectionRuntime,
   now: () => number,
+  rtdb: ProfileGameProjectionRtdb,
+  ownerId: string = crypto.randomUUID(),
 ): Promise<"dead" | "done" | "stale"> {
   const update = await rating.readRatingUpdate(operationId);
   if (!update || update.profileGameProjectionState !== "pending") {
@@ -332,21 +354,27 @@ export async function processRatingProfileGameProjection(
     );
     return "dead";
   }
-  if (
-    (await rating.getRtdbPath(
-      `invites/${update.inviteId}/matchesRatingUpdates/${update.matchId}`,
-    )) !== true
-  ) {
-    throw new Error("profile-game-projection-marker-pending");
+  const lock = { inviteId: update.inviteId };
+  await acquireProfileGameProjectionLock(lock, ownerId, rtdb, now());
+  try {
+    if (
+      (await rating.getRtdbPath(
+        `invites/${update.inviteId}/matchesRatingUpdates/${update.matchId}`,
+      )) !== true
+    ) {
+      throw new Error("profile-game-projection-marker-pending");
+    }
+    await runtime.recomputeInviteProjection(
+      update.inviteId,
+      "invite-match-rating-updated",
+      {
+        eventTimestampMs: update.completedAtMs,
+        latestMatchIdHint: update.matchId,
+      },
+    );
+  } finally {
+    await releaseProfileGameProjectionLock(lock, ownerId, rtdb);
   }
-  await runtime.recomputeInviteProjection(
-    update.inviteId,
-    "invite-match-rating-updated",
-    {
-      eventTimestampMs: update.completedAtMs,
-      latestMatchIdHint: update.matchId,
-    },
-  );
   await rating.markRatingProfileGameProjection(operationId, "done", now());
   return "done";
 }
@@ -369,6 +397,7 @@ export async function handleProfileGameProjectionMessage(
   }
   const now = dependencies.now || Date.now;
   try {
+    const ownerId = crypto.randomUUID();
     const runtime = (
       dependencies.createRuntime || createProfileGameProjectionRuntime
     )(env);
@@ -381,7 +410,7 @@ export async function handleProfileGameProjectionMessage(
               ((workerEnv: Env) => createGameplayRepository(workerEnv))
             )(env),
             runtime,
-            message.id,
+            ownerId,
             now,
           )
         : await processRatingProfileGameProjection(
@@ -396,6 +425,11 @@ export async function handleProfileGameProjectionMessage(
             )(env),
             runtime,
             now,
+            (
+              dependencies.createRtdb ||
+              ((workerEnv: Env) => createGameplayRepository(workerEnv))
+            )(env),
+            ownerId,
           );
     message.ack();
     logger.info(
@@ -551,15 +585,22 @@ export async function sweepAutomatchProfileGameProjections(
     dependencies.createRtdb ||
     ((workerEnv: Env) => createGameplayRepository(workerEnv))
   )(env);
-  const value = await rtdb.getRtdbPath(
-    AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT,
-    {
+  const [dueValue, malformedValue] = await Promise.all([
+    rtdb.getRtdbPath(AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT, {
       orderBy: "lastQueuedAtMs",
       endAt: dueBeforeMs,
       limitToFirst: PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
-    },
-  );
-  const entries = automatchSweepEntries(value);
+    }),
+    rtdb.getRtdbPath(AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT, {
+      orderBy: "lastQueuedAtMs",
+      startAt: "",
+      limitToFirst: PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
+    }),
+  ]);
+  const entries = [
+    ...automatchSweepEntries(dueValue),
+    ...automatchSweepEntries(malformedValue),
+  ];
   const invalidInviteIds = entries.flatMap((entry) =>
     entry.kind === "invalid" ? [entry.inviteId] : [],
   );
@@ -662,10 +703,10 @@ export {
   PROFILE_GAME_PROJECTION_SWEEP_CONCURRENCY,
   PROFILE_GAME_PROJECTION_RECOVERY_DELAY_MS,
   PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
-  acquireAutomatchProfileGameProjectionLock,
+  acquireProfileGameProjectionLock,
   automatchSweepEntries,
   claimAutomatchSweepCandidate,
-  releaseAutomatchProfileGameProjectionLock,
+  releaseProfileGameProjectionLock,
   repairInvalidAutomatchSweepEntry,
   sendProfileGameProjectionTasks,
   validRatingProjectionRecord,

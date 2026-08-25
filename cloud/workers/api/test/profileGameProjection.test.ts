@@ -166,6 +166,22 @@ function applyRtdbTransaction(
     : { committed: true, decision: output.decision, value: output.value };
 }
 
+function projectionLockRtdb(values = new Map<string, unknown>()) {
+  return {
+    getRtdbPath: async (path: string) => values.get(path),
+    transactRtdbPath: async (
+      path: string,
+      updater: (current: unknown) => unknown,
+    ) => {
+      const result = applyRtdbTransaction(values.get(path), updater);
+      if (result.committed) {
+        values.set(path, result.value);
+      }
+      return result;
+    },
+  };
+}
+
 test("profile game projection tasks require exact safe payloads", () => {
   assert.deepEqual(
     parseProfileGameProjectionTask(automatchTask()),
@@ -394,6 +410,7 @@ test("rating projection uses deterministic completion inputs and completes once"
     ratingRepository(ratingUpdate(), state),
     runtime(calls),
     () => 300,
+    projectionLockRtdb(),
   );
   assert.equal(status, "done");
   assert.deepEqual(calls, [
@@ -417,10 +434,119 @@ test("rating projection uses deterministic completion inputs and completes once"
       ),
       runtime(calls),
       () => 400,
+      projectionLockRtdb(),
     ),
     "stale",
   );
   assert.equal(calls.length, 1);
+});
+
+test("rating projection does not re-enter an active projection lock", async () => {
+  const values = new Map<string, unknown>();
+  const rtdb = projectionLockRtdb(values);
+  const state = { marker: true, marks: [], patches: [] } as {
+    marker: unknown;
+    marks: Array<{ state: string; reason?: string }>;
+    patches: Array<Record<string, unknown>>;
+  };
+  let releaseFirst: (() => void) | undefined;
+  const firstBlocked = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let firstStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    firstStarted = resolve;
+  });
+  const first = processRatingProfileGameProjection(
+    operationId,
+    ratingRepository(ratingUpdate(), state),
+    {
+      recomputeInviteProjection: async () => {
+        firstStarted?.();
+        await firstBlocked;
+        return {
+          inviteId: "auto_aaaaaaaaaaa",
+          ok: true,
+          reason: "invite-match-rating-updated",
+          skipped: 0,
+          sourceCleanupSafe: true,
+        };
+      },
+    },
+    () => 100,
+    rtdb,
+    "owner-a",
+  );
+  await started;
+  await assert.rejects(
+    () =>
+      processRatingProfileGameProjection(
+        operationId,
+        ratingRepository(ratingUpdate(), state),
+        runtime([]),
+        () => 200,
+        rtdb,
+        "owner-a",
+      ),
+    /lock-busy/,
+  );
+  releaseFirst?.();
+  assert.equal(await first, "done");
+  assert.equal(
+    values.get("profileGameProjectionLocks/automatch/auto_aaaaaaaaaaa"),
+    null,
+  );
+});
+
+test("rating projection retries lock release before marking completion", async () => {
+  let current: unknown = null;
+  let failRelease = true;
+  let releaseAttempts = 0;
+  const rtdb = {
+    getRtdbPath: async () => null,
+    transactRtdbPath: async (
+      _path: string,
+      updater: (value: unknown) => unknown,
+    ) => {
+      const result = applyRtdbTransaction(current, updater);
+      if (result.committed && result.value === null) {
+        releaseAttempts++;
+        if (failRelease) {
+          failRelease = false;
+          throw new Error("release-failed");
+        }
+      }
+      if (result.committed) {
+        current = result.value;
+      }
+      return result;
+    },
+  };
+  const state = { marker: true, marks: [], patches: [] } as {
+    marker: unknown;
+    marks: Array<{ state: string; reason?: string }>;
+    patches: Array<Record<string, unknown>>;
+  };
+  const calls: Array<{
+    inviteId: string;
+    options: Record<string, unknown>;
+    reason: string;
+  }> = [];
+  assert.equal(
+    await processRatingProfileGameProjection(
+      operationId,
+      ratingRepository(ratingUpdate(), state),
+      runtime(calls),
+      () => 100,
+      rtdb,
+      "owner-a",
+    ),
+    "done",
+  );
+  assert.equal(current, null);
+  assert.equal(releaseAttempts, 2);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(state.marks, [{ state: "done" }]);
 });
 
 test("rating projection dead-letters invalid records and retries missing markers", async () => {
@@ -438,6 +564,7 @@ test("rating projection dead-letters invalid records and retries missing markers
       ),
       runtime([]),
       () => 300,
+      projectionLockRtdb(),
     ),
     "dead",
   );
@@ -457,6 +584,7 @@ test("rating projection dead-letters invalid records and retries missing markers
         ratingRepository(ratingUpdate(), missingState),
         runtime([]),
         () => 300,
+        projectionLockRtdb(),
       ),
     /marker-pending/,
   );
@@ -531,6 +659,7 @@ test("profile game projection Queue keeps exhausted infrastructure work pending"
     TELEGRAM_TEST_ENV,
     {
       createRating: () => ratingRepository(ratingUpdate(), state),
+      createRtdb: () => projectionLockRtdb(),
       createRuntime: () => ({
         recomputeInviteProjection: async () => {
           throw new Error("persistent-failure");
@@ -716,16 +845,41 @@ test("automatch recovery claims due outboxes, repairs poison, and preserves sour
       },
     ],
     ["auto_ddddddddddd", "invalid"],
+    [
+      "auto_eeeeeeeeeee",
+      { ...automatchOutbox("request-5", 80, 200), lastQueuedAtMs: "bad" },
+    ],
+    [
+      "auto_fffffffffff",
+      {
+        ...automatchOutbox("request-6", 90, 200),
+        lastQueuedAtMs: { invalid: true },
+      },
+    ],
   ]);
   const rtdb = {
     getRtdbPath: async (path: string, query?: Record<string, unknown>) => {
       assert.equal(path, "profileGameProjectionOutbox/automatch");
+      if (query?.endAt === 300_000) {
+        return Object.fromEntries(
+          [...values].filter(
+            ([inviteId]) =>
+              inviteId !== "auto_eeeeeeeeeee" &&
+              inviteId !== "auto_fffffffffff",
+          ),
+        );
+      }
       assert.deepEqual(query, {
         orderBy: "lastQueuedAtMs",
-        endAt: 300_000,
+        startAt: "",
         limitToFirst: 100,
       });
-      return Object.fromEntries(values);
+      return Object.fromEntries(
+        [...values].filter(
+          ([inviteId]) =>
+            inviteId === "auto_eeeeeeeeeee" || inviteId === "auto_fffffffffff",
+        ),
+      );
     },
     transactRtdbPath: async (
       path: string,
@@ -739,7 +893,13 @@ test("automatch recovery claims due outboxes, repairs poison, and preserves sour
       return result;
     },
   };
-  const requestIds = ["repair-1", "repair-2", "repair-3"];
+  const requestIds = [
+    "repair-1",
+    "repair-2",
+    "repair-3",
+    "repair-4",
+    "repair-5",
+  ];
   assert.equal(
     await sweepAutomatchProfileGameProjections(
       {
@@ -753,7 +913,7 @@ test("automatch recovery claims due outboxes, repairs poison, and preserves sour
         now: () => 600_000,
       },
     ),
-    4,
+    6,
   );
   assert.deepEqual(batches.flat(), [
     {
@@ -770,6 +930,16 @@ test("automatch recovery claims due outboxes, repairs poison, and preserves sour
       kind: "automatch-profile-game-projection",
       inviteId: "auto_ddddddddddd",
       requestId: "repair-3",
+    },
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto_eeeeeeeeeee",
+      requestId: "repair-4",
+    },
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto_fffffffffff",
+      requestId: "repair-5",
     },
     automatchTask(),
   ]);
@@ -789,11 +959,19 @@ test("automatch recovery claims due outboxes, repairs poison, and preserves sour
     values.get("auto_ddddddddddd"),
     automatchOutbox("repair-3", 600_000, 600_000),
   );
+  assert.deepEqual(
+    values.get("auto_eeeeeeeeeee"),
+    automatchOutbox("repair-4", 80, 600_000),
+  );
+  assert.deepEqual(
+    values.get("auto_fffffffffff"),
+    automatchOutbox("repair-5", 90, 600_000),
+  );
   assert.equal(
     logs.some(
       (entry) =>
         entry.includes("profile_game_projection_invalid_outboxes_recovered") &&
-        entry.includes('"repaired":3') &&
+        entry.includes('"repaired":5') &&
         entry.includes('"removed":0'),
     ),
     true,
