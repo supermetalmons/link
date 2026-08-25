@@ -244,6 +244,13 @@ test("event ratings preserve win and mana without applying a rating delta", () =
   assert.equal(built.ratingUpdate.isEventMatch, true);
   assert.equal(built.ratingUpdate.eventOwned, true);
   assert.equal(built.ratingUpdate.eventId, "event-1");
+  assert.equal(built.ratingUpdate.eventProgressVersion, 1);
+  assert.equal(built.ratingUpdate.eventProgressState, "pending");
+  assert.equal(
+    built.ratingUpdate.eventProgressUpdatedAtMs,
+    FEB_CHALLENGE_START_UTC + 1,
+  );
+  assert.equal(built.ratingUpdate.eventProgressReason, null);
   assert.equal(built.ratingUpdate.telegramDeliveryVersion, null);
   assert.equal(built.ratingUpdate.telegramProjectionState, undefined);
   assert.equal(built.ratingUpdate.telegramProjectionVersion, undefined);
@@ -403,6 +410,74 @@ test("updates once and persists exact repair markers", async () => {
       [`invites/${request.inviteId}/matchesRatingUpdates/${request.matchId}`]: true,
     },
   ]);
+});
+
+test("event ratings persist and dispatch one deterministic progress outbox", async () => {
+  const state = createRepository({
+    invite: {
+      hostId: request.playerId,
+      guestId: request.opponentId,
+      eventOwned: true,
+      eventId: "event-1",
+    },
+  });
+  const progressPlans: Array<{
+    outboxId: string;
+    params: { sourceKey: string };
+  }> = [];
+  assert.deepEqual(
+    await updateRatings(identity, request, state.repository, {
+      createOwnerToken: () => "owner-token",
+      enqueueEventProgress: async (plan) => {
+        progressPlans.push(plan);
+      },
+      now: () => 2_000,
+    }),
+    { ok: true },
+  );
+  assert.equal(progressPlans.length, 1);
+  assert.equal(
+    progressPlans[0].params.sourceKey,
+    `rating:${request.inviteId}:${request.matchId}`,
+  );
+  const update = state.patches[0];
+  assert.equal(
+    Object.hasOwn(update, `eventProgressOutbox/${progressPlans[0].outboxId}`),
+    true,
+  );
+  assert.equal(
+    state.getFinalPlan()?.ratingUpdate.eventProgressState,
+    "pending",
+  );
+});
+
+test("event ratings retain a pending recovery marker when RTDB repair fails", async () => {
+  const state = createRepository({
+    invite: {
+      hostId: request.playerId,
+      guestId: request.opponentId,
+      eventOwned: true,
+      eventId: "event-1",
+    },
+  });
+  state.repository.patchRtdbRoot = async () => {
+    throw new Error("rtdb-unavailable");
+  };
+  await assert.rejects(
+    updateRatings(identity, request, state.repository, {
+      createOwnerToken: () => "owner-token",
+      now: () => 2_000,
+    }),
+    /rtdb-unavailable/,
+  );
+  assert.equal(
+    state.getFinalPlan()?.ratingUpdate.eventProgressState,
+    "pending",
+  );
+  assert.equal(
+    state.getFinalPlan()?.ratingUpdate.eventProgressUpdatedAtMs,
+    2_000,
+  );
 });
 
 test("rating queue failures preserve the committed response and pending state", async () => {

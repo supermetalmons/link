@@ -2,7 +2,7 @@
 
 Run commands from the repository root. See the repository [architecture and command map](../README.md) for package boundaries and the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md) for API release, maintenance, and rollback procedures.
 
-Firebase retains event functions, event-progress rating projection, and the existing Firebase data stores. The API Worker owns auth, profile and leaderboard reads, username mutation, mining, gameplay, event participation, X callback, and Worker-backed Telegram delivery.
+Firebase retains event projection triggers, event-prize withdrawal, and the existing Firebase data stores. The API Worker owns auth, profile and leaderboard reads, username mutation, mining, gameplay, event control and progress Workflows, X callback, and Worker-backed Telegram delivery.
 
 ## Setup
 

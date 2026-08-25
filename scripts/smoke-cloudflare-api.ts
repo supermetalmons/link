@@ -229,6 +229,33 @@ async function smokeApi(
     throw new Error("Auth smoke response was invalid.");
   }
 
+  for (const path of [
+    "/events/create",
+    "/events/start/postpone",
+    "/events/matches/winners/disqualify",
+    "/events/state/sync",
+  ]) {
+    const eventRoute = await request(
+      `${options.baseUrl}${path}`,
+      {
+        method: "POST",
+        headers: { Origin: ORIGIN, "Content-Type": "application/json" },
+        body: "{}",
+      },
+      401,
+      dependencies,
+    );
+    const eventPayload = parseJson(eventRoute.body);
+    if (
+      !eventPayload ||
+      typeof eventPayload !== "object" ||
+      Array.isArray(eventPayload) ||
+      (eventPayload as { error?: unknown }).error !== "unauthenticated"
+    ) {
+      throw new Error("Event route smoke response was invalid.");
+    }
+  }
+
   const callbackUrl = `${options.baseUrl}/auth/x/callback`;
   await request(callbackUrl, { method: "GET" }, 400, dependencies);
   const state = dependencies.randomState();

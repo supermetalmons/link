@@ -23,7 +23,9 @@ const {
   cancelAutomatchViaApi,
   cancelWagerProposalViaApi,
   claimMatchVictoryByTimerViaApi,
+  createEventViaApi,
   declineWagerProposalViaApi,
+  disqualifyEventMatchWinnersViaApi,
   joinEventViaApi,
   removeEventParticipantViaApi,
   removeNavigationGameViaApi,
@@ -31,7 +33,9 @@ const {
   sendWagerProposalViaApi,
   startAutomatchViaApi,
   startMatchTimerViaApi,
+  syncEventStateViaApi,
   updateRatingsViaApi,
+  postponeEventStartViaApi,
 } = await import("../src/services/gameplayApi.ts");
 const { isRatingUpdateRequest, isRatingUpdateResponse } =
   await import("@mons/shared/ratings");
@@ -56,11 +60,19 @@ const {
 } = await import("@mons/shared/wagers");
 const {
   MAX_EVENT_PARTICIPANT_TEXT_BYTES,
+  isCreateEventRequest,
+  isCreateEventResponse,
+  isDisqualifyEventMatchWinnersRequest,
+  isDisqualifyEventMatchWinnersResponse,
   isEventParticipantSnapshot,
   isJoinEventRequest,
   isJoinEventResponse,
   isRemoveEventParticipantRequest,
   isRemoveEventParticipantResponse,
+  isPostponeEventStartRequest,
+  isPostponeEventStartResponse,
+  isSyncEventStateRequest,
+  isSyncEventStateResponse,
 } = await import("@mons/shared/events");
 
 const originalFetch = globalThis.fetch;
@@ -73,6 +85,133 @@ const jsonResponse = (body, status = 200) =>
 
 test.afterEach(() => {
   globalThis.fetch = originalFetch;
+});
+
+test("sends exact authenticated event-control mutations", async () => {
+  const calls = [];
+  const event = { eventId: "event-1", status: "scheduled", startAtMs: 600_000 };
+  const responses = [
+    { ok: true, eventId: "event-1", event },
+    {
+      ok: true,
+      eventId: "event-1",
+      event: { ...event, startAtMs: 900_000 },
+      postponeByMinutes: 5,
+      startAtMs: 900_000,
+    },
+    {
+      ok: true,
+      eventId: "event-1",
+      didChange: false,
+      event,
+      didDisqualify: true,
+      matchKey: "0_0",
+    },
+    { ok: true, eventId: "event-1", didChange: false, event },
+  ];
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input: String(input), init });
+    return jsonResponse(responses.shift());
+  };
+  const tokenProvider = async () => "firebase-token";
+  assert.deepEqual(
+    await createEventViaApi(
+      { startsInMinutes: 5, announceOnTelegram: true },
+      tokenProvider,
+    ),
+    { ok: true, eventId: "event-1", event },
+  );
+  assert.deepEqual(
+    await postponeEventStartViaApi(
+      { eventId: "event-1", postponeByMinutes: 5 },
+      tokenProvider,
+    ),
+    {
+      ok: true,
+      eventId: "event-1",
+      event: { ...event, startAtMs: 900_000 },
+      postponeByMinutes: 5,
+      startAtMs: 900_000,
+    },
+  );
+  assert.equal(
+    (
+      await disqualifyEventMatchWinnersViaApi(
+        { eventId: "event-1", matchKey: "0_0" },
+        tokenProvider,
+      )
+    ).didDisqualify,
+    true,
+  );
+  assert.deepEqual(
+    await syncEventStateViaApi({ eventId: "event-1" }, tokenProvider),
+    { ok: true, eventId: "event-1", didChange: false, event },
+  );
+  assert.deepEqual(
+    calls.map((call) => call.input),
+    [
+      "https://api.mons.link/events/create",
+      "https://api.mons.link/events/start/postpone",
+      "https://api.mons.link/events/matches/winners/disqualify",
+      "https://api.mons.link/events/state/sync",
+    ],
+  );
+  assert.equal(
+    calls.every(
+      (call) =>
+        new Headers(call.init.headers).get("Authorization") ===
+        "Bearer firebase-token",
+    ),
+    true,
+  );
+  assert.equal(isCreateEventRequest({ startsInMinutes: 5 }), true);
+  assert.equal(isCreateEventRequest({ startsInMinutes: 0 }), false);
+  assert.equal(
+    isCreateEventResponse({ ok: true, eventId: "event-1", event }),
+    true,
+  );
+  assert.equal(
+    isPostponeEventStartRequest({ eventId: "event-1", postponeByMinutes: 5 }),
+    true,
+  );
+  assert.equal(
+    isPostponeEventStartResponse({
+      ok: true,
+      eventId: "event-1",
+      event,
+      postponeByMinutes: 5,
+      startAtMs: 900_000,
+    }),
+    true,
+  );
+  assert.equal(
+    isDisqualifyEventMatchWinnersRequest({
+      eventId: "event-1",
+      matchKey: "0_0",
+    }),
+    true,
+  );
+  assert.equal(
+    isDisqualifyEventMatchWinnersResponse({
+      ok: true,
+      eventId: "event-1",
+      didChange: false,
+      event,
+      didDisqualify: true,
+      matchKey: "0_0",
+    }),
+    true,
+  );
+  assert.equal(isSyncEventStateRequest({ eventId: "event-1" }), true);
+  assert.equal(
+    isSyncEventStateResponse({
+      ok: true,
+      eventId: "event-1",
+      skipped: true,
+      reason: "locked",
+    }),
+    true,
+  );
 });
 
 test("sends the exact rating mutation with strict contracts", async () => {

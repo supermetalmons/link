@@ -34,6 +34,7 @@ type WranglerConfig = {
   vars?: Record<string, string>;
   ratelimits?: Array<Record<string, unknown>>;
   queues?: Record<string, unknown>;
+  workflows?: Array<Record<string, unknown>>;
   triggers?: Record<string, unknown>;
   observability?: Record<string, unknown>;
 };
@@ -90,6 +91,13 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.equal(config.preview_urls, true);
   assert.deepEqual(config.routes, [
     { pattern: "api.mons.link", custom_domain: true },
+  ]);
+  assert.deepEqual(config.workflows, [
+    {
+      binding: "EVENT_PROGRESS_WORKFLOW",
+      name: "mons-link-event-progress",
+      class_name: "EventProgressWorkflow",
+    },
   ]);
   assert.deepEqual(Object.keys(config.vars || {}).sort(), [
     "APPLE_AUDIENCES",
@@ -382,7 +390,7 @@ test("shared package preserves every direct export subpath", () => {
 
 test("API Worker preserves its runtime export surface", () => {
   const worker = require(
-    resolve(repositoryRoot, "cloud/workers/api/src/index.ts"),
+    resolve(repositoryRoot, "cloud/workers/api/src/workerHandler.ts"),
   ) as Record<string, unknown>;
   const exportNames = Object.keys(worker)
     .filter((name) => name !== "__esModule")
@@ -483,7 +491,7 @@ test("provider verification and auth mutations use Worker routes", () => {
   }
 });
 
-test("client Firebase callables are exactly the retained event operations", () => {
+test("client Firebase callables retain only prize withdrawal", () => {
   const connection = readText("src/connection/connection.ts");
   const callableNames = Array.from(
     connection.matchAll(/httpsCallable\(\s*this\.functions\s*,\s*"([^"]+)"/g),
@@ -494,11 +502,5 @@ test("client Firebase callables are exactly the retained event operations", () =
     callableNames.length,
     Array.from(connection.matchAll(/\bhttpsCallable\s*\(/g)).length,
   );
-  assert.deepEqual(callableNames, [
-    "createEvent",
-    "disqualifyEventMatchWinners",
-    "postponeEventStart",
-    "syncEventState",
-    "withdrawEventPrize",
-  ]);
+  assert.deepEqual(callableNames, ["withdrawEventPrize"]);
 });

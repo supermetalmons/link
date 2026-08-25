@@ -4,7 +4,7 @@ import {
   extractIdFromJsonUri,
   handleRequest,
   type ProviderFetch,
-} from "../src/index.ts";
+} from "../src/workerHandler.ts";
 import {
   PRIMARY_COLLECTION_ID,
   SPECIALS_COLLECTION_ID,

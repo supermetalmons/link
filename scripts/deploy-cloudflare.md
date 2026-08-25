@@ -5,7 +5,7 @@ Run commands from the repository root with Node.js 24 or newer. Firebase operati
 ## Source of truth
 
 - `wrangler.jsonc` owns the frontend Worker configuration.
-- `cloud/workers/api/wrangler.jsonc` owns the API Worker routes, variables, bindings, Queues, consumers, and Cron schedule.
+- `cloud/workers/api/wrangler.jsonc` owns the API Worker routes, variables, bindings, Queues, Workflows, consumers, and Cron schedule.
 - `cloud/workers/api/release.env` stays empty. It prevents release commands from loading developer environment files.
 - Encrypted secrets stay in Cloudflare. Their required names are declared in the API Wrangler configuration.
 - Do not edit production Worker configuration in the Cloudflare Dashboard. Review and deploy the tracked configuration.
@@ -44,6 +44,14 @@ npm run smoke:api -- --base-url https://api.mons.link --smoke-sol <known-wallet>
 ```
 
 `upload:api` uses `wrangler versions upload --strict`; it does not send traffic to the candidate. `promote:api` deploys the explicit Version ID to 100% of traffic without prompting. `deploy:api:triggers` applies the tracked route, Cron, and Queue consumer configuration. Routine code-only releases may omit the trigger command when that configuration is unchanged.
+
+The `mons-link-event-progress` Workflow owns scheduled event starts and retriable event synchronization. The five-minute Worker schedule reconciles `eventProgressOutbox` records and scheduled events with deterministic Workflow instances. Inspect a production instance with:
+
+```sh
+npx wrangler workflows instances describe mons-link-event-progress latest --config cloud/workers/api/wrangler.jsonc
+```
+
+Before retiring the legacy Firebase event-progress functions, verify that `processEventProgress` has no pending Cloud Tasks and that `eventProgressFallback` is empty. The Cloudflare outbox is private and indexed by `lastQueuedAtMs` for bounded recovery sweeps.
 
 Rollback always targets a reviewed Version ID:
 

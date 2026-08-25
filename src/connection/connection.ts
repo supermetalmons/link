@@ -110,7 +110,9 @@ import {
   cancelAutomatchViaApi,
   cancelWagerProposalViaApi,
   claimMatchVictoryByTimerViaApi,
+  createEventViaApi,
   declineWagerProposalViaApi,
+  disqualifyEventMatchWinnersViaApi,
   joinEventViaApi,
   removeEventParticipantViaApi,
   removeNavigationGameViaApi,
@@ -118,7 +120,9 @@ import {
   sendWagerProposalViaApi,
   startAutomatchViaApi,
   startMatchTimerViaApi,
+  syncEventStateViaApi,
   updateRatingsViaApi,
+  postponeEventStartViaApi,
 } from "../services/gameplayApi";
 import { compareNavigationItems as compareNavigationItemsByDisplayOrder } from "../services/navigationItemOrdering";
 import { resetNftCache } from "../services/nftCache";
@@ -2265,7 +2269,6 @@ class Connection {
   ): Promise<{ ok: boolean; eventId?: string; event?: EventRecord | null }> {
     try {
       await this.ensureAuthenticated();
-      const createEventFunction = httpsCallable(this.functions, "createEvent");
       const requestPayloadBase =
         typeof schedule === "number"
           ? {
@@ -2274,9 +2277,7 @@ class Connection {
           : {
               scheduledDate: this.normalizeString(schedule.scheduledDate),
               scheduledTime: this.normalizeString(schedule.scheduledTime),
-              scheduledTimezone: this.normalizeString(
-                schedule.scheduledTimezone,
-              ),
+              scheduledTimezone: schedule.scheduledTimezone,
               ...(this.normalizeString(schedule.localTimezoneIana || "") !== ""
                 ? {
                     localTimezoneIana: this.normalizeString(
@@ -2289,19 +2290,14 @@ class Connection {
         ...requestPayloadBase,
         announceOnTelegram: options.announceOnTelegram === true,
       };
-      const response = await createEventFunction(requestPayload);
-      const data = response.data as {
-        ok?: boolean;
-        eventId?: unknown;
-        event?: unknown;
-      };
+      const data = await createEventViaApi(
+        requestPayload,
+        this.getAuthApiToken,
+      );
       return {
-        ok: data?.ok === true,
-        eventId: typeof data?.eventId === "string" ? data.eventId : undefined,
-        event: this.mapDatabaseEventRecord(
-          data?.event ?? null,
-          typeof data?.eventId === "string" ? data.eventId : "",
-        ),
+        ok: data.ok,
+        eventId: data.eventId,
+        event: this.mapDatabaseEventRecord(data.event, data.eventId),
       };
     } catch (error) {
       console.error("Error creating event:", error);
@@ -2337,44 +2333,26 @@ class Connection {
   }> {
     try {
       await this.ensureAuthenticated();
-      const postponeEventStartFunction = httpsCallable(
-        this.functions,
-        "postponeEventStart",
-      );
-      const response = await postponeEventStartFunction({
-        eventId,
-        postponeByMinutes,
-      });
-      const data = response.data as {
-        ok?: boolean;
-        eventId?: unknown;
-        event?: unknown;
-        postponeByMinutes?: unknown;
-        startAtMs?: unknown;
-      };
-      const normalizedEventId =
-        typeof data?.eventId === "string" ? data.eventId : "";
-      const normalizedPostponeByMinutes = this.normalizeFiniteNumber(
-        data?.postponeByMinutes,
-        NaN,
-      );
-      const normalizedStartAtMs = this.normalizeFiniteNumber(
-        data?.startAtMs,
-        NaN,
+      if (
+        postponeByMinutes !== 5 &&
+        postponeByMinutes !== 10 &&
+        postponeByMinutes !== 15
+      ) {
+        throw new Error("Invalid event postponement interval.");
+      }
+      const data = await postponeEventStartViaApi(
+        {
+          eventId,
+          postponeByMinutes,
+        },
+        this.getAuthApiToken,
       );
       return {
-        ok: data?.ok === true,
-        eventId: normalizedEventId || undefined,
-        event: this.mapDatabaseEventRecord(
-          data?.event ?? null,
-          normalizedEventId,
-        ),
-        postponeByMinutes: Number.isFinite(normalizedPostponeByMinutes)
-          ? normalizedPostponeByMinutes
-          : undefined,
-        startAtMs: Number.isFinite(normalizedStartAtMs)
-          ? normalizedStartAtMs
-          : undefined,
+        ok: data.ok,
+        eventId: data.eventId,
+        event: this.mapDatabaseEventRecord(data.event, data.eventId),
+        postponeByMinutes: data.postponeByMinutes,
+        startAtMs: data.startAtMs,
       };
     } catch (error) {
       console.error("Error postponing event start:", error);
@@ -2419,36 +2397,19 @@ class Connection {
   }> {
     try {
       await this.ensureAuthenticated();
-      const disqualifyEventMatchWinnersFunction = httpsCallable(
-        this.functions,
-        "disqualifyEventMatchWinners",
+      const data = await disqualifyEventMatchWinnersViaApi(
+        { eventId, matchKey },
+        this.getAuthApiToken,
       );
-      const response = await disqualifyEventMatchWinnersFunction({
-        eventId,
-        matchKey,
-      });
-      const data = response.data as {
-        ok?: boolean;
-        eventId?: unknown;
-        event?: unknown;
-        didDisqualify?: unknown;
-        matchKey?: unknown;
-      };
-      const normalizedEventId =
-        typeof data?.eventId === "string" ? data.eventId : "";
       return {
-        ok: data?.ok === true,
-        eventId: normalizedEventId || undefined,
+        ok: data.ok,
+        eventId: data.eventId,
         event: this.mapDatabaseEventRecord(
-          data?.event ?? null,
-          normalizedEventId,
+          "event" in data ? data.event : null,
+          data.eventId,
         ),
-        didDisqualify:
-          typeof data?.didDisqualify === "boolean"
-            ? data.didDisqualify
-            : undefined,
-        matchKey:
-          typeof data?.matchKey === "string" ? data.matchKey : undefined,
+        didDisqualify: data.didDisqualify,
+        matchKey: data.matchKey,
       };
     } catch (error) {
       console.error("Error disqualifying event match winners:", error);
@@ -2479,10 +2440,6 @@ class Connection {
     const syncPromise = (async () => {
       try {
         await this.ensureAuthenticated();
-        const syncEventStateFunction = httpsCallable(
-          this.functions,
-          "syncEventState",
-        );
         const isParticipant =
           await this.isLocalProfileEventParticipant(normalizedEventId);
         if (!isParticipant) {
@@ -2497,26 +2454,21 @@ class Connection {
         const maxRetries = EVENT_SYNC_RETRY_DELAYS_MS.length;
         const maxAttempts = maxRetries + 1;
         for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-          const response = await syncEventStateFunction({
-            eventId: normalizedEventId,
-          });
-          const data = response.data as {
-            ok?: boolean;
-            didChange?: unknown;
-            skipped?: unknown;
-            reason?: unknown;
-            event?: unknown;
-          };
-          const reason = this.normalizeEventSyncSkipReason(data?.reason);
+          const data = await syncEventStateViaApi(
+            { eventId: normalizedEventId },
+            this.getAuthApiToken,
+          );
+          const isSkipped = "skipped" in data;
+          const reason = this.normalizeEventSyncSkipReason(
+            isSkipped ? data.reason : undefined,
+          );
           const parsed = {
-            ok: data?.ok === true,
-            didChange:
-              typeof data?.didChange === "boolean" ? data.didChange : undefined,
-            skipped:
-              typeof data?.skipped === "boolean" ? data.skipped : undefined,
+            ok: data.ok,
+            didChange: isSkipped ? undefined : data.didChange,
+            skipped: isSkipped ? true : undefined,
             reason,
             event: this.mapDatabaseEventRecord(
-              data?.event ?? null,
+              "event" in data ? data.event : null,
               normalizedEventId,
             ),
           };

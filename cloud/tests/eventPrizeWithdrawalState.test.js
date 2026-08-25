@@ -40,6 +40,7 @@ const {
   isCompletedEventPrizeWithdrawal,
   normalizeSolanaAddress,
 } = require("../functions/eventPrizeWithdrawalState");
+const eventPrizeProjectionState = require("../functions/eventPrizeProjectionState");
 const {
   acquireWithdrawalClaim,
   buildCompressedTransferBuilder,
@@ -72,6 +73,21 @@ const prizeId = "1092";
 const assetAddress = getEventPrizeAssetAddress(eventId, prizeId);
 const profileId = "profile";
 const recipientAddress = "11111111111111111111111111111111";
+
+test("re-exports the shared event-prize projection policy", () => {
+  const withdrawalState = require("../functions/eventPrizeWithdrawalState");
+  for (const name of [
+    "filterProjectableEventPrizeAssignments",
+    "getCompletedEventPrizeProjectionCleanupRequest",
+    "getEventPrizeAssetAddress",
+    "getEventPrizeAssetStandard",
+    "isCompletedEventPrizeWithdrawal",
+    "isMatchingProfileEventPrizeAssignment",
+    "isWithdrawalRecordForPrize",
+  ]) {
+    assert.strictEqual(withdrawalState[name], eventPrizeProjectionState[name]);
+  }
+});
 
 const generateTestSigner = (umi) =>
   createSignerFromKeypair(umi, umi.eddsa.generateKeypair());

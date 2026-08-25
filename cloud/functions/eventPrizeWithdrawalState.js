@@ -2,9 +2,14 @@
 
 const bs58 = require("bs58");
 const {
-  getEventPrizeDefinition,
-  isEventPrizeStandard,
-} = require("@mons/shared/event-prizes");
+  filterProjectableEventPrizeAssignments,
+  getCompletedEventPrizeProjectionCleanupRequest,
+  getEventPrizeAssetAddress,
+  getEventPrizeAssetStandard,
+  isCompletedEventPrizeWithdrawal,
+  isMatchingProfileEventPrizeAssignment,
+  isWithdrawalRecordForPrize,
+} = require("./eventPrizeProjectionState");
 const { isValidSolanaAddress } = require("@mons/shared/solana");
 
 const EVENT_PRIZE_ADMIN_WALLET = "Ay1mgqJr6WmihsSYdMZ1dkHL5r25N7VhCGk7NpCJcPGi";
@@ -31,42 +36,8 @@ const decodeAdminSecretKey = (value) => {
   return bytes?.length === 64 ? bytes : null;
 };
 
-const getEventPrizeAssetAddress = (eventId, prizeId) => {
-  const prize = getEventPrizeDefinition(eventId, prizeId);
-  return normalizeString(prize?.assetAddress);
-};
-
-const getEventPrizeAssetStandard = (eventId, prizeId) => {
-  const standard = normalizeString(
-    getEventPrizeDefinition(eventId, prizeId)?.standard,
-  );
-  return isEventPrizeStandard(standard) ? standard : "";
-};
-
 const getEventPrizeWithdrawalPath = (eventId, prizeId) =>
   `eventPrizeWithdrawals/${normalizeString(eventId)}/${normalizeString(prizeId)}`;
-
-const isMatchingProfileEventPrizeAssignment = (value, eventId, prizeId) =>
-  normalizeString(value?.eventId) === normalizeString(eventId) &&
-  normalizeString(value?.prizeId) === normalizeString(prizeId);
-
-const isWithdrawalRecordForPrize = (value, eventId, prizeId, assetAddress) => {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-  const expectedAssetStandard = getEventPrizeAssetStandard(eventId, prizeId);
-  const recordedAssetStandard = normalizeString(value.assetStandard);
-  const assetStandardMatches =
-    (isEventPrizeStandard(recordedAssetStandard) &&
-      recordedAssetStandard === expectedAssetStandard) ||
-    (!recordedAssetStandard && expectedAssetStandard === "core");
-  return (
-    assetStandardMatches &&
-    normalizeString(value.eventId) === normalizeString(eventId) &&
-    normalizeString(value.prizeId) === normalizeString(prizeId) &&
-    normalizeString(value.assetAddress) === normalizeString(assetAddress)
-  );
-};
 
 const isWithdrawalRecordOwnedByRequest = (
   value,
@@ -96,50 +67,6 @@ const isWithdrawalRecordOwnedByRequest = (
     (normalizedRequesterUid &&
       normalizeString(value.requesterUid) === normalizedRequesterUid)
   );
-};
-
-const isCompletedEventPrizeWithdrawal = (value, eventId, prizeId) => {
-  const assetAddress = getEventPrizeAssetAddress(eventId, prizeId);
-  return (
-    Boolean(assetAddress) &&
-    value?.status === "completed" &&
-    isWithdrawalRecordForPrize(value, eventId, prizeId, assetAddress)
-  );
-};
-
-const filterProjectableEventPrizeAssignments = ({
-  eventId,
-  assignments,
-  withdrawals,
-}) => {
-  const projectable = {};
-  for (const [place, assignment] of Object.entries(assignments || {})) {
-    const prizeId = normalizeString(assignment?.prizeId);
-    if (
-      prizeId &&
-      !isCompletedEventPrizeWithdrawal(withdrawals?.[prizeId], eventId, prizeId)
-    ) {
-      projectable[place] = assignment;
-    }
-  }
-  return projectable;
-};
-
-const getCompletedEventPrizeProjectionCleanupRequest = ({
-  eventId,
-  eventStatus,
-  assignments,
-}) => {
-  const normalizedEventId = normalizeString(eventId);
-  if (
-    !normalizedEventId ||
-    normalizeString(eventStatus) !== "ended" ||
-    !assignments ||
-    Object.keys(assignments).length === 0
-  ) {
-    return null;
-  }
-  return { eventId: normalizedEventId, assignments };
 };
 
 const getWithdrawalProjectionProfileIds = ({ withdrawal, profileIds }) =>

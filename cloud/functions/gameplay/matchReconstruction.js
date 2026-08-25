@@ -1,4 +1,9 @@
-const { HttpsError } = require("firebase-functions/v2/https");
+class MatchReconstructionError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
 const {
   buildOrderedMoveHistory,
   movesFromFlatString,
@@ -10,7 +15,7 @@ const requireLaterGameFromMatchData = (mons, matchData, opponentMatchData) => {
   const playerGame = parseGameFromMatchData(mons, matchData);
   const opponentGame = parseGameFromMatchData(mons, opponentMatchData);
   if (!playerGame || !opponentGame) {
-    throw new HttpsError(
+    throw new MatchReconstructionError(
       "failed-precondition",
       "something is wrong with the game state.",
     );

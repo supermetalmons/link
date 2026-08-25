@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import * as entrypoint from "../src/index.ts";
+import * as entrypoint from "../src/workerHandler.ts";
 import { extractIdFromJsonUri } from "../src/helius.ts";
 import { handleRequest } from "../src/router.ts";
 

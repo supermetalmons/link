@@ -40,6 +40,10 @@ import {
   type RatingTelegramProjectionTask,
   type TelegramProjectionTask,
 } from "./telegramProjectionTasks.ts";
+import {
+  buildEventProgressPlan,
+  type EventProgressPlan,
+} from "./eventProgress.ts";
 
 const RATING_UPDATE_LEASE_MS = 30_000;
 const FEB_CHALLENGE_START_UTC = Date.UTC(2026, 1, 1);
@@ -71,6 +75,7 @@ type RatingResult = "gg" | "win";
 
 export type RatingUpdateDependencies = {
   createOwnerToken?: (uid: string) => string;
+  enqueueEventProgress?: (plan: EventProgressPlan) => Promise<void>;
   enqueueTelegramProjection?: (task: TelegramProjectionTask) => Promise<void>;
   logProjectionFailure?: (task: RatingTelegramProjectionTask) => void;
   now?: () => number;
@@ -427,6 +432,14 @@ function buildRatingPlan({
             telegramProjectionReason: null,
           }
         : {}),
+      ...(eventMetadata.eventOwned && eventMetadata.eventId
+        ? {
+            eventProgressVersion: 1,
+            eventProgressState: "pending",
+            eventProgressUpdatedAtMs: nowMs,
+            eventProgressReason: null,
+          }
+        : {}),
       ...eventMetadata,
       updatedAtMs: nowMs,
       completedAtMs: nowMs,
@@ -457,12 +470,27 @@ async function repairRatingSideEffects(
   request: RatingUpdateRequest,
   data: RatingRepairData | null,
   repository: RatingRepository,
-): Promise<void> {
+  eventId: string | null,
+  nowMs: number,
+): Promise<EventProgressPlan | null> {
+  const progress = eventId
+    ? await buildEventProgressPlan(
+        {
+          eventId,
+          sourceKey: `rating:${request.inviteId}:${request.matchId}`,
+          reason: "match-rating-updated",
+        },
+        nowMs,
+      )
+    : null;
   await repository.patchRtdbRoot({
     [`${MATCH_TIMER_START_ROOT}/${request.playerId}/${request.matchId}`]: null,
     [`${MATCH_TIMER_START_ROOT}/${request.opponentId}/${request.matchId}`]:
       null,
     [`invites/${request.inviteId}/matchesRatingUpdates/${request.matchId}`]: true,
+    ...(progress
+      ? { [`eventProgressOutbox/${progress.outboxId}`]: progress.outbox }
+      : {}),
   });
   if (
     data?.shouldUpdateFebruaryChallenge &&
@@ -472,6 +500,27 @@ async function repairRatingSideEffects(
     await repository.applyFebruaryChallengeReplay(
       data.playerProfileId,
       data.opponentProfileId,
+    );
+  }
+  return progress;
+}
+
+async function dispatchEventProgress(
+  progress: EventProgressPlan | null,
+  dependencies: RatingUpdateDependencies,
+): Promise<void> {
+  if (!progress || !dependencies.enqueueEventProgress) {
+    return;
+  }
+  try {
+    await dependencies.enqueueEventProgress(progress);
+  } catch {
+    console.error(
+      JSON.stringify({
+        event: "rating_event_progress_enqueue_failed",
+        eventId: progress.params.eventId,
+        sourceKey: progress.params.sourceKey,
+      }),
     );
   }
 }
@@ -503,9 +552,24 @@ export async function updateRatings(
   ) {
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
   }
+  const eventMetadata = getRatingEventMetadata(invite);
+  const progressEventId =
+    eventMetadata.isEventMatch &&
+    eventMetadata.eventOwned &&
+    eventMetadata.eventId
+      ? eventMetadata.eventId
+      : null;
+  const now = dependencies.now || Date.now;
   const existing = await repository.readRatingUpdate(operationId);
   if (completed === true || existing?.status === "done") {
-    await repairRatingSideEffects(request, existing, repository);
+    const progress = await repairRatingSideEffects(
+      request,
+      existing,
+      repository,
+      progressEventId,
+      now(),
+    );
+    await dispatchEventProgress(progress, dependencies);
     if (existing?.telegramProjectionState === "pending") {
       await enqueueRatingProjection(operationId, dependencies);
     }
@@ -522,7 +586,6 @@ export async function updateRatings(
   const playerMatch = readMatchRecord(playerValue);
   const opponentMatch = readMatchRecord(opponentValue);
   const result = resolveRatingResult(playerMatch, opponentMatch);
-  const now = dependencies.now || Date.now;
   const ownerToken = (
     dependencies.createOwnerToken ||
     ((uid: string) => `${uid}_${crypto.randomUUID()}`)
@@ -537,7 +600,14 @@ export async function updateRatings(
     leaseMs: RATING_UPDATE_LEASE_MS,
   });
   if (lease.status === "done") {
-    await repairRatingSideEffects(request, lease.data, repository);
+    const progress = await repairRatingSideEffects(
+      request,
+      lease.data,
+      repository,
+      progressEventId,
+      now(),
+    );
+    await dispatchEventProgress(progress, dependencies);
     if (lease.data?.telegramProjectionState === "pending") {
       await enqueueRatingProjection(operationId, dependencies);
     }
@@ -572,7 +642,14 @@ export async function updateRatings(
   if (finalized.status === "lost") {
     return { ok: true, skipped: true };
   }
-  await repairRatingSideEffects(request, finalized.data, repository);
+  const progress = await repairRatingSideEffects(
+    request,
+    finalized.data,
+    repository,
+    progressEventId,
+    now(),
+  );
+  await dispatchEventProgress(progress, dependencies);
   if (
     invite.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION &&
     !getRatingEventMetadata(invite).isEventMatch

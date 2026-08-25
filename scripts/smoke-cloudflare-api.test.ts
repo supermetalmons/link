@@ -104,6 +104,16 @@ test("smokes NFT, auth, X callback, and internal routes", async () => {
     if (url.endsWith("/auth/intents")) {
       return json({ error: "unauthenticated" }, 401);
     }
+    if (
+      [
+        "/events/create",
+        "/events/start/postpone",
+        "/events/matches/winners/disqualify",
+        "/events/state/sync",
+      ].some((path) => url.endsWith(path))
+    ) {
+      return json({ error: "unauthenticated" }, 401);
+    }
     if (url.includes("/auth/x/callback")) {
       return json({ error: "invalid-state" }, 400);
     }
@@ -123,7 +133,7 @@ test("smokes NFT, auth, X callback, and internal routes", async () => {
     },
   );
 
-  assert.equal(requests.length, 8);
+  assert.equal(requests.length, 12);
   assert.deepEqual(logs, ["[api-smoke] Passed https://api.mons.link"]);
 });
 

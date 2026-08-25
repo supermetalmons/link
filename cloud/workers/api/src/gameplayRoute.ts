@@ -83,6 +83,10 @@ import {
   updateRatings,
   type RatingUpdateDependencies,
 } from "./ratingUpdate.ts";
+import {
+  ensureEventProgressWorkflow,
+  type EventProgressPlan,
+} from "./eventProgress.ts";
 import type { TelegramProjectionTask } from "./telegramProjectionTasks.ts";
 
 const MAX_NAVIGATION_DELETE_ATTEMPTS = 3;
@@ -586,6 +590,21 @@ export async function handleGameplayRoute(
     }
     const body = await readGameplayBody(request, pathname);
     const repository = dependencies.repository || createGameplayRepository(env);
+    const defaultEnqueueEventProgress = async (plan: EventProgressPlan) => {
+      ctx.waitUntil(
+        ensureEventProgressWorkflow(env.EVENT_PROGRESS_WORKFLOW, plan).catch(
+          () => {
+            console.error(
+              JSON.stringify({
+                event: "event_progress_enqueue_failed",
+                eventId: plan.params.eventId,
+                sourceKey: plan.params.sourceKey,
+              }),
+            );
+          },
+        ),
+      );
+    };
     const defaultEnqueueTelegramProjection = async (
       task: TelegramProjectionTask,
     ) => {
@@ -608,6 +627,9 @@ export async function handleGameplayRoute(
     };
     const ratingDependencies: RatingUpdateDependencies = {
       ...dependencies.rating,
+      enqueueEventProgress:
+        dependencies.rating?.enqueueEventProgress ||
+        defaultEnqueueEventProgress,
       enqueueTelegramProjection:
         dependencies.rating?.enqueueTelegramProjection ||
         defaultEnqueueTelegramProjection,
@@ -636,6 +658,9 @@ export async function handleGameplayRoute(
       await enforceMatchTimerRateLimit(env.AUTH_RATE_LIMITER, identity.uid);
       response = await startMatchTimer(identity, body, repository, {
         ...dependencies.timer,
+        enqueueEventProgress:
+          dependencies.timer?.enqueueEventProgress ||
+          defaultEnqueueEventProgress,
         signal: dependencies.timer?.signal || request.signal,
       });
     } else if (pathname === "/matches/timer/claim") {
@@ -648,6 +673,9 @@ export async function handleGameplayRoute(
       );
       response = await claimMatchVictoryByTimer(identity, body, repository, {
         ...dependencies.timer,
+        enqueueEventProgress:
+          dependencies.timer?.enqueueEventProgress ||
+          defaultEnqueueEventProgress,
         signal: dependencies.timer?.signal || request.signal,
       });
     } else if (pathname === "/navigation/games/remove") {

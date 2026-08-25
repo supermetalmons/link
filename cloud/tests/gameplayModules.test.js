@@ -29,6 +29,15 @@ test("automatch REST queries retain their RTDB indexes", () => {
         index.fields[1]?.fieldPath === "telegramProjectionUpdatedAtMs",
     ),
   );
+  assert.ok(
+    firestoreIndexes.indexes.some(
+      (index) =>
+        index.collectionGroup === "ratingUpdates" &&
+        index.queryScope === "COLLECTION" &&
+        index.fields[0]?.fieldPath === "eventProgressState" &&
+        index.fields[1]?.fieldPath === "eventProgressUpdatedAtMs",
+    ),
+  );
 });
 
 test("player reads expose gameplay state without exposing wager operations", () => {

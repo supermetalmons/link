@@ -12,11 +12,30 @@ const rateLimit = {
   limit: async () => ({ success: true }),
 } satisfies RateLimit;
 
+const workflowInstance = {
+  id: "test-workflow-instance",
+  delete: async () => undefined,
+  pause: async () => undefined,
+  restart: async () => undefined,
+  resume: async () => undefined,
+  sendEvent: async () => undefined,
+  status: async () => ({ status: "complete" as const }),
+  terminate: async () => undefined,
+} satisfies WorkflowInstance;
+
+const workflow = {
+  create: async () => workflowInstance,
+  createBatch: async () => [workflowInstance],
+  deleteBatch: async () => ({ deleted: [], errors: [] }),
+  get: async () => workflowInstance,
+} satisfies Workflow;
+
 export const TELEGRAM_TEST_ENV = {
   APPLE_AUDIENCES: "link.mons",
   AUTH_RECOVERY_QUEUE: queue,
   AUTH_MUTATIONS_DISABLED: "false" as unknown as Env["AUTH_MUTATIONS_DISABLED"],
   AUTH_RATE_LIMITER: rateLimit,
+  EVENT_PROGRESS_WORKFLOW: workflow,
   FIREBASE_RTDB_URL: "https://mons-link-default-rtdb.firebaseio.com",
   FIRESTORE_SERVICE_ACCOUNT_EMAIL: "firestore@example.iam.gserviceaccount.com",
   FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",

@@ -1,6 +1,5 @@
 const { getApp, initializeApp } = require("firebase-admin/app");
 const { getDatabase, ServerValue } = require("firebase-admin/database");
-const { getFunctions } = require("firebase-admin/functions");
 const { isDeepStrictEqual } = require("node:util");
 const {
   FieldValue,
@@ -63,12 +62,9 @@ const firestore = () => getFirestore(getDefaultApp());
 firestore.FieldValue = FieldValue;
 firestore.Timestamp = Timestamp;
 
-const functions = () => getFunctions(getDefaultApp());
-
 module.exports = {
   database,
   databaseWithAuthOverride,
   firestore,
-  functions,
   initializeApp: getDefaultApp,
 };

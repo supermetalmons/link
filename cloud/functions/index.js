@@ -4,14 +4,6 @@ admin.initializeApp();
 
 const { withdrawEventPrize } = require("./eventPrizeWithdrawal");
 const {
-  createEvent,
-  postponeEventStart,
-  disqualifyEventMatchWinners,
-  syncEventState,
-  processEventProgress,
-  processEventProgressFallback,
-} = require("./events");
-const {
   onInviteCreated,
   onInviteGuestIdChanged,
   onInviteHostRematchesChanged,
@@ -32,15 +24,8 @@ const {
   onEventTelegramCreated,
   onEventTelegramUpdated,
 } = require("./eventTelegramAnnouncements");
-const { projectRatingTelegramUpdates } = require("./ratingTelegramProjector");
 
 exports.withdrawEventPrize = withdrawEventPrize;
-exports.createEvent = createEvent;
-exports.postponeEventStart = postponeEventStart;
-exports.disqualifyEventMatchWinners = disqualifyEventMatchWinners;
-exports.syncEventState = syncEventState;
-exports.processEventProgress = processEventProgress;
-exports.processEventProgressFallback = processEventProgressFallback;
 exports.projectProfileGamesOnInviteCreated = onInviteCreated;
 exports.projectProfileGamesOnInviteGuestIdChanged = onInviteGuestIdChanged;
 exports.projectProfileGamesOnInviteHostRematchesChanged =
@@ -60,4 +45,3 @@ exports.projectProfileEventPrizesOnMergeTargetWritten =
   onProfileMergeTargetWritten;
 exports.projectEventTelegramOnCreated = onEventTelegramCreated;
 exports.projectEventTelegramOnUpdated = onEventTelegramUpdated;
-exports.projectRatingTelegramUpdates = projectRatingTelegramUpdates;

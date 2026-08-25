@@ -24,19 +24,12 @@ const {
 const repositoryRoot = path.resolve(__dirname, "..", "..");
 const exportedFunctionNames = ["createEvent", "syncEventState"];
 const expectedReleaseFunctionBarriers = [
-  [
-    "projectRatingTelegramUpdates",
-    "projectEventTelegramOnCreated",
-    "projectEventTelegramOnUpdated",
-  ],
+  ["projectEventTelegramOnCreated", "projectEventTelegramOnUpdated"],
 ];
 const eventDomainFunctionNames = [
-  "createEvent",
-  "postponeEventStart",
-  "disqualifyEventMatchWinners",
-  "syncEventState",
-  "processEventProgress",
-  "processEventProgressFallback",
+  "projectProfileGamesOnEventWritten",
+  "projectProfileEventPrizesOnPrizeWritten",
+  "projectProfileEventPrizesOnMergeTargetWritten",
 ];
 
 test("argument parsing supports full releases and positional maintenance", () => {

@@ -16,10 +16,6 @@ test("Telegram compatibility facades delegate to focused modules", () => {
       "../functions/eventTelegramAnnouncements",
       "../functions/telegram/eventAnnouncements",
     ],
-    [
-      "../functions/ratingTelegramProjector",
-      "../functions/telegram/ratingProjector",
-    ],
   ]) {
     assert.strictEqual(require(facadePath), require(modulePath));
   }

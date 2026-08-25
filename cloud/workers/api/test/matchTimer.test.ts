@@ -5,7 +5,6 @@ import { AuthApiFailure } from "../src/authErrors.ts";
 import type { FirebaseIdentity } from "../src/firebaseAuth.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import {
-  buildEventProgressFallbackSignalId,
   buildOrderedMoveHistory,
   claimMatchVictoryByTimer,
   MAX_MATCH_FEN_BYTES,
@@ -17,6 +16,7 @@ import {
   type MatchTimerGameState,
   type MatchTimerRecord,
 } from "../src/matchTimer.ts";
+import { buildEventProgressPlan } from "../src/eventProgress.ts";
 
 type TimerRepository = Pick<
   GameplayRepository,
@@ -970,7 +970,7 @@ test("rejects a second request while a claim fence is active", async () => {
   assert.deepEqual(repo.patches, []);
 });
 
-test("creates the complete event fallback signal when none exists", async () => {
+test("creates the complete event progress outbox when none exists", async () => {
   const repo = claimRepository({
     invite: {
       hostId: "player-1",
@@ -998,31 +998,40 @@ test("creates the complete event fallback signal when none exists", async () => 
       },
       "matchTimerStarts/player-1/match-1": null,
       "matchTimerStarts/player-2/match-1": null,
-      "eventProgressFallback/event-1/sig_4ffbc0751b333354eed5f2c1": {
-        eventId: "event-1",
-        sourceKey: "timer:match-1:match-1",
-        reason: "timer-claimed",
-        firstQueuedAtMs: 2_000,
-        lastQueuedAtMs: 2_000,
-      },
+      "eventProgressOutbox/ep_63b21a5345d223c4862730817dae4ae1899564b989fb8f057490ae277c5d5a16":
+        {
+          schemaVersion: 1,
+          eventId: "event-1",
+          sourceKey: "timer:match-1:match-1",
+          reason: "timer-claimed",
+          firstQueuedAtMs: 2_000,
+          lastQueuedAtMs: 2_000,
+          runAtMs: null,
+        },
     },
   ]);
 });
 
-test("signals event progression with the deterministic fallback identity", async () => {
+test("signals event progression with the deterministic Workflow identity", async () => {
   assert.equal(
-    await buildEventProgressFallbackSignalId(
-      "event-1",
-      "timer:match-1:match-1",
-    ),
-    "sig_4ffbc0751b333354eed5f2c1",
+    (
+      await buildEventProgressPlan({
+        eventId: "event-1",
+        sourceKey: "timer:match-1:match-1",
+        reason: "timer-claimed",
+      })
+    ).outboxId,
+    "ep_63b21a5345d223c4862730817dae4ae1899564b989fb8f057490ae277c5d5a16",
   );
   assert.equal(
-    await buildEventProgressFallbackSignalId(
-      "event-1",
-      "timer:match-1:match-2",
-    ),
-    "sig_f164f55f9d3661bb0f7461e0",
+    (
+      await buildEventProgressPlan({
+        eventId: "event-1",
+        sourceKey: "timer:match-1:match-2",
+        reason: "timer-claimed",
+      })
+    ).workflowId,
+    "event-progress-36ff8d469c3914ad9bab1a9ce4111ce21f4c9e48b578dd149de0dc4f32bbb763",
   );
   const repo = claimRepository({
     invite: {
@@ -1032,13 +1041,24 @@ test("signals event progression with the deterministic fallback identity", async
       eventId: "event-1",
     },
   });
+  const progressPlans: Array<{ params: { sourceKey: string } }> = [];
   const response = await claimMatchVictoryByTimer(
     identity,
     request,
     repo.value,
-    { now: () => 2_000, resolveGame: () => gameState() },
+    {
+      enqueueEventProgress: async (plan) => {
+        progressPlans.push(plan);
+      },
+      now: () => 2_000,
+      resolveGame: () => gameState(),
+    },
   );
   assert.deepEqual(response, { ok: true });
+  assert.deepEqual(
+    progressPlans.map((plan) => plan.params.sourceKey),
+    ["timer:match-1:match-1"],
+  );
   assert.deepEqual(repo.patches, [
     {
       "players/player-1/matches/match-1/timer": "gg",
@@ -1054,13 +1074,16 @@ test("signals event progression with the deterministic fallback identity", async
       },
       "matchTimerStarts/player-1/match-1": null,
       "matchTimerStarts/player-2/match-1": null,
-      "eventProgressFallback/event-1/sig_4ffbc0751b333354eed5f2c1": {
-        eventId: "event-1",
-        sourceKey: "timer:match-1:match-1",
-        reason: "timer-claimed",
-        firstQueuedAtMs: 2_000,
-        lastQueuedAtMs: 2_000,
-      },
+      "eventProgressOutbox/ep_63b21a5345d223c4862730817dae4ae1899564b989fb8f057490ae277c5d5a16":
+        {
+          schemaVersion: 1,
+          eventId: "event-1",
+          sourceKey: "timer:match-1:match-1",
+          reason: "timer-claimed",
+          firstQueuedAtMs: 2_000,
+          lastQueuedAtMs: 2_000,
+          runAtMs: null,
+        },
     },
   ]);
 });

@@ -36,12 +36,24 @@ import {
   type RatingUpdateResponse,
 } from "@mons/shared/ratings";
 import {
+  isCreateEventResponse,
+  isDisqualifyEventMatchWinnersResponse,
   isJoinEventResponse,
+  isPostponeEventStartResponse,
   isRemoveEventParticipantResponse,
+  isSyncEventStateResponse,
+  type CreateEventRequest,
+  type CreateEventResponse,
+  type DisqualifyEventMatchWinnersRequest,
+  type DisqualifyEventMatchWinnersResponse,
   type JoinEventRequest,
   type JoinEventResponse,
+  type PostponeEventStartRequest,
+  type PostponeEventStartResponse,
   type RemoveEventParticipantRequest,
   type RemoveEventParticipantResponse,
+  type SyncEventStateRequest,
+  type SyncEventStateResponse,
 } from "@mons/shared/events";
 import type { AuthTokenProvider } from "./authApi";
 
@@ -255,6 +267,54 @@ export function joinEventViaApi(
     request,
     tokenProvider,
     isJoinEventResponse,
+  );
+}
+
+export function createEventViaApi(
+  request: CreateEventRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<CreateEventResponse> {
+  return gameplayMutation(
+    "/events/create",
+    request,
+    tokenProvider,
+    isCreateEventResponse,
+  );
+}
+
+export function postponeEventStartViaApi(
+  request: PostponeEventStartRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<PostponeEventStartResponse> {
+  return gameplayMutation(
+    "/events/start/postpone",
+    request,
+    tokenProvider,
+    isPostponeEventStartResponse,
+  );
+}
+
+export function disqualifyEventMatchWinnersViaApi(
+  request: DisqualifyEventMatchWinnersRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<DisqualifyEventMatchWinnersResponse> {
+  return gameplayMutation(
+    "/events/matches/winners/disqualify",
+    request,
+    tokenProvider,
+    isDisqualifyEventMatchWinnersResponse,
+  );
+}
+
+export function syncEventStateViaApi(
+  request: SyncEventStateRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<SyncEventStateResponse> {
+  return gameplayMutation(
+    "/events/state/sync",
+    request,
+    tokenProvider,
+    isSyncEventStateResponse,
   );
 }
 

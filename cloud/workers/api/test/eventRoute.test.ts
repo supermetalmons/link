@@ -3,6 +3,8 @@ import test from "node:test";
 import type { EventLockManager } from "../../../functions/events/lockManagerCore.js";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { handleEventRoute } from "../src/eventRoute.ts";
+import { EVENT_CONTROL_TIMEOUT_MS } from "../src/eventOperations.ts";
+import { EVENT_OPERATION_TIMEOUT_MS } from "../src/eventParticipation.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
@@ -155,6 +157,46 @@ test("rejects wrong methods and strict-body violations", async () => {
     { verifyIdentity: async () => identity },
   );
   assert.equal(invalidBody.status, 400);
+});
+
+test("keeps participation and event-control deadlines separate", async () => {
+  const timeoutDescriptor = Object.getOwnPropertyDescriptor(
+    AbortSignal,
+    "timeout",
+  );
+  const timeouts: number[] = [];
+  Object.defineProperty(AbortSignal, "timeout", {
+    configurable: true,
+    value(milliseconds: number) {
+      timeouts.push(milliseconds);
+      return new AbortController().signal;
+    },
+  });
+  try {
+    for (const pathname of ["/events/participants/join", "/events/create"]) {
+      const response = await handleEventRoute(
+        new Request(`https://api.mons.link${pathname}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        }),
+        TELEGRAM_TEST_ENV,
+        ctx,
+        { verifyIdentity: async () => identity },
+      );
+      assert.equal(response.status, 400);
+    }
+  } finally {
+    if (timeoutDescriptor) {
+      Object.defineProperty(AbortSignal, "timeout", timeoutDescriptor);
+    }
+  }
+  assert.deepEqual(timeouts, [
+    EVENT_OPERATION_TIMEOUT_MS,
+    EVENT_CONTROL_TIMEOUT_MS,
+  ]);
+  assert.equal(EVENT_OPERATION_TIMEOUT_MS, 25_000);
+  assert.equal(EVENT_CONTROL_TIMEOUT_MS, 30_000);
 });
 
 test("returns strict join and removal responses", async () => {

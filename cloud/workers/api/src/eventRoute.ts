@@ -1,8 +1,16 @@
 import {
+  isCreateEventRequest,
+  isDisqualifyEventMatchWinnersRequest,
   isJoinEventRequest,
+  isPostponeEventStartRequest,
   isRemoveEventParticipantRequest,
+  isSyncEventStateRequest,
+  type CreateEventRequest,
+  type DisqualifyEventMatchWinnersRequest,
   type JoinEventRequest,
+  type PostponeEventStartRequest,
   type RemoveEventParticipantRequest,
+  type SyncEventStateRequest,
 } from "@mons/shared/events";
 import { normalizeFirebaseKey } from "@mons/shared/ids";
 import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
@@ -27,13 +35,26 @@ import {
   type GameplayRepository,
 } from "./gameplayRepository.ts";
 import { readBoundedJson } from "./http.ts";
+import {
+  createEvent,
+  disqualifyEventMatchWinners,
+  EVENT_CONTROL_TIMEOUT_MS,
+  postponeEventStart,
+  syncEventState,
+  type EventControlDependencies,
+} from "./eventOperations.ts";
 
 export const EVENT_PATHS = new Set([
+  "/events/create",
+  "/events/matches/winners/disqualify",
   "/events/participants/join",
   "/events/participants/remove",
+  "/events/start/postpone",
+  "/events/state/sync",
 ]);
 
 export type EventRouteDependencies = {
+  control?: EventControlDependencies;
   participation?: EventParticipationDependencies;
   repository?: GameplayRepository;
   verifyIdentity?: (
@@ -52,7 +73,14 @@ function toRecord(value: unknown): Record<string, unknown> | null {
 export async function readEventBody(
   request: Request,
   pathname: string,
-): Promise<JoinEventRequest | RemoveEventParticipantRequest> {
+): Promise<
+  | CreateEventRequest
+  | DisqualifyEventMatchWinnersRequest
+  | JoinEventRequest
+  | PostponeEventStartRequest
+  | RemoveEventParticipantRequest
+  | SyncEventStateRequest
+> {
   let body: Record<string, unknown> | null;
   try {
     body = toRecord(await readBoundedJson(request));
@@ -64,6 +92,30 @@ export async function readEventBody(
       throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
     }
     return { eventId: normalizeFirebaseKey(body.eventId) || "" };
+  }
+  if (pathname === "/events/create") {
+    if (!isCreateEventRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
+  }
+  if (pathname === "/events/start/postpone") {
+    if (!isPostponeEventStartRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
+  }
+  if (pathname === "/events/matches/winners/disqualify") {
+    if (!isDisqualifyEventMatchWinnersRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
+  }
+  if (pathname === "/events/state/sync") {
+    if (!isSyncEventStateRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
   }
   if (!isRemoveEventParticipantRequest(body)) {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
@@ -93,9 +145,14 @@ export async function handleEventRoute(
     if (!EVENT_PATHS.has(pathname)) {
       throw new AuthApiFailure(404, "not-found", "not-found");
     }
-    const signal =
-      dependencies.participation?.signal ||
-      AbortSignal.timeout(EVENT_OPERATION_TIMEOUT_MS);
+    const isParticipationPath =
+      pathname === "/events/participants/join" ||
+      pathname === "/events/participants/remove";
+    const signal = isParticipationPath
+      ? dependencies.participation?.signal ||
+        AbortSignal.timeout(EVENT_OPERATION_TIMEOUT_MS)
+      : dependencies.control?.signal ||
+        AbortSignal.timeout(EVENT_CONTROL_TIMEOUT_MS);
     const identity = await (
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
@@ -111,7 +168,7 @@ export async function handleEventRoute(
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
       operation = joinEvent(identity, body, repository, participation);
-    } else {
+    } else if (pathname === "/events/participants/remove") {
       if (!isRemoveEventParticipantRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
@@ -121,6 +178,38 @@ export async function handleEventRoute(
         repository,
         participation,
       );
+    } else if (pathname === "/events/create") {
+      if (!isCreateEventRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      operation = createEvent(env, identity, body, {
+        ...dependencies.control,
+        signal,
+      });
+    } else if (pathname === "/events/start/postpone") {
+      if (!isPostponeEventStartRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      operation = postponeEventStart(env, identity, body, {
+        ...dependencies.control,
+        signal,
+      });
+    } else if (pathname === "/events/matches/winners/disqualify") {
+      if (!isDisqualifyEventMatchWinnersRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      operation = disqualifyEventMatchWinners(env, identity, body, {
+        ...dependencies.control,
+        signal,
+      });
+    } else {
+      if (!isSyncEventStateRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      operation = syncEventState(env, identity, body, {
+        ...dependencies.control,
+        signal,
+      });
     }
     ctx.waitUntil(
       operation.then(
@@ -134,17 +223,13 @@ export async function handleEventRoute(
     const failure =
       error instanceof AuthApiFailure
         ? error
-        : new AuthApiFailure(
-            503,
-            "unavailable",
-            "event-participation-service-unavailable",
-          );
+        : new AuthApiFailure(503, "unavailable", "event-service-unavailable");
     if (failure.status >= 500) {
       (
         dependencies.logFailure ||
         ((kind) =>
           console.error(
-            JSON.stringify({ event: "event_participation_failure", kind }),
+            JSON.stringify({ event: "event_service_failure", kind }),
           ))
       )(failure.message);
     }

@@ -226,7 +226,6 @@ test("admin credential failures include actionable ADC setup help", () => {
 test("all retained Firebase Telegram functions are exported", () => {
   const functionIndex = require("../functions/index");
   const exportNames = [
-    "projectRatingTelegramUpdates",
     "projectEventTelegramOnCreated",
     "projectEventTelegramOnUpdated",
   ];

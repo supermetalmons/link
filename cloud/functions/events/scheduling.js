@@ -1,6 +1,11 @@
 "use strict";
 
-const { HttpsError } = require("firebase-functions/v2/https");
+class EventSchedulingError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
 const {
   MAX_STARTS_IN_DAYS,
   MAX_STARTS_IN_MINUTES,
@@ -167,7 +172,7 @@ const hasDateTimeScheduleRequest = (data) => {
 const resolveRequestedScheduleTimezone = (data) => {
   const scheduledTimezoneRaw = normalizeString(data && data.scheduledTimezone);
   if (!scheduledTimezoneRaw) {
-    throw new HttpsError(
+    throw new EventSchedulingError(
       "invalid-argument",
       "scheduledTimezone is required for date/time scheduling.",
     );
@@ -175,13 +180,13 @@ const resolveRequestedScheduleTimezone = (data) => {
   if (scheduledTimezoneRaw.toLowerCase() === SCHEDULED_TIMEZONE_LOCAL) {
     const localTimezoneIana = normalizeString(data && data.localTimezoneIana);
     if (!localTimezoneIana) {
-      throw new HttpsError(
+      throw new EventSchedulingError(
         "invalid-argument",
         "localTimezoneIana is required when scheduledTimezone is local.",
       );
     }
     if (!isValidIanaTimezone(localTimezoneIana)) {
-      throw new HttpsError(
+      throw new EventSchedulingError(
         "invalid-argument",
         "localTimezoneIana must be a valid IANA timezone.",
       );
@@ -191,7 +196,7 @@ const resolveRequestedScheduleTimezone = (data) => {
   const timezoneKey = scheduledTimezoneRaw.toUpperCase();
   const resolvedTimezone = PRESET_EVENT_TIMEZONE_BY_KEY[timezoneKey];
   if (!resolvedTimezone) {
-    throw new HttpsError(
+    throw new EventSchedulingError(
       "invalid-argument",
       "scheduledTimezone must be one of: local, ET, PT, CT.",
     );
@@ -202,14 +207,14 @@ const resolveRequestedScheduleTimezone = (data) => {
 const resolveScheduledDateTimeStartAtMs = (data, nowMs = Date.now()) => {
   const scheduledDate = normalizeString(data && data.scheduledDate);
   if (!scheduledDate) {
-    throw new HttpsError(
+    throw new EventSchedulingError(
       "invalid-argument",
       "scheduledDate is required for date/time scheduling.",
     );
   }
   const scheduledTime = normalizeString(data && data.scheduledTime);
   if (!scheduledTime) {
-    throw new HttpsError(
+    throw new EventSchedulingError(
       "invalid-argument",
       "scheduledTime is required for date/time scheduling.",
     );
@@ -217,14 +222,14 @@ const resolveScheduledDateTimeStartAtMs = (data, nowMs = Date.now()) => {
 
   const dateParts = parseScheduledDateParts(scheduledDate);
   if (!dateParts) {
-    throw new HttpsError(
+    throw new EventSchedulingError(
       "invalid-argument",
       "scheduledDate must be in YYYY-MM-DD format.",
     );
   }
   const timeParts = parseScheduledTimeParts(scheduledTime);
   if (!timeParts) {
-    throw new HttpsError(
+    throw new EventSchedulingError(
       "invalid-argument",
       "scheduledTime must be in HH:mm 24-hour format.",
     );
@@ -265,7 +270,7 @@ const resolveScheduledDateTimeStartAtMs = (data, nowMs = Date.now()) => {
   }
 
   if (matchingInstants.length <= 0) {
-    throw new HttpsError(
+    throw new EventSchedulingError(
       "invalid-argument",
       "Selected date/time does not exist in the selected timezone.",
     );
@@ -287,13 +292,13 @@ const resolveScheduledDateTimeStartAtMs = (data, nowMs = Date.now()) => {
 const assertScheduledStartWindow = (startAtMs, nowMs) => {
   const deltaMs = toFiniteInteger(startAtMs, 0) - toFiniteInteger(nowMs, 0);
   if (deltaMs < MIN_START_AHEAD_MS) {
-    throw new HttpsError(
+    throw new EventSchedulingError(
       "invalid-argument",
       `Event must start at least ${MIN_STARTS_IN_MINUTES} minute from now.`,
     );
   }
   if (deltaMs > MAX_START_AHEAD_MS) {
-    throw new HttpsError(
+    throw new EventSchedulingError(
       "invalid-argument",
       `Event must start within ${MAX_STARTS_IN_DAYS} days from now.`,
     );
@@ -301,6 +306,7 @@ const assertScheduledStartWindow = (startAtMs, nowMs) => {
 };
 
 module.exports = {
+  EventSchedulingError,
   assertScheduledStartWindow,
   hasDateTimeScheduleRequest,
   parseScheduledDateParts,

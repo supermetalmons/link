@@ -10,20 +10,13 @@ const functionsDirectory = path.resolve(__dirname, "../functions");
 const functionsIndexPath = path.join(functionsDirectory, "index.js");
 const sharedDirectory = path.join(functionsDirectory, "shared");
 
-const callableExportNames = [
-  "createEvent",
-  "disqualifyEventMatchWinners",
-  "postponeEventStart",
-  "syncEventState",
-  "withdrawEventPrize",
-];
+const callableExportNames = ["withdrawEventPrize"];
 
 const httpExportNames = [];
 
-const taskQueueExportNames = ["processEventProgress"];
+const taskQueueExportNames = [];
 
 const eventExportNames = [
-  "processEventProgressFallback",
   "projectEventTelegramOnCreated",
   "projectEventTelegramOnUpdated",
   "projectProfileEventPrizesOnMergeTargetWritten",
@@ -39,7 +32,6 @@ const eventExportNames = [
   "projectProfileGamesOnProfileDeleted",
   "projectProfileGamesOnProfileLinkCreated",
   "projectProfileGamesOnProfileLinkWritten",
-  "projectRatingTelegramUpdates",
 ];
 
 const expectedExportNames = [
@@ -119,44 +111,6 @@ Object.assign(expectedEndpointContracts, {
     concurrency: 1,
     secrets: ["EVENT_PRIZE_ADMIN_PRIVATE_KEY", "HELIUS_RPC_API_KEY"],
   }),
-  syncEventState: callableContract({
-    availableMemoryMb: 512,
-    timeoutSeconds: 30,
-    maxInstances: 20,
-    concurrency: 20,
-  }),
-  processEventProgress: taskQueueContract(
-    {
-      availableMemoryMb: 512,
-      timeoutSeconds: 30,
-      maxInstances: 20,
-      concurrency: 20,
-    },
-    {
-      maxAttempts: 12,
-      maxDoublings: 5,
-      maxBackoffSeconds: 30,
-      minBackoffSeconds: 1,
-    },
-    {},
-  ),
-  processEventProgressFallback: runtimeContract(
-    {
-      type: "event",
-      eventType: "google.firebase.database.ref.v1.written",
-      pathPatterns: {
-        ref: "eventProgressFallback/{eventId}/{signalId}",
-        instance: "*",
-      },
-      retry: true,
-    },
-    {
-      availableMemoryMb: 512,
-      timeoutSeconds: 30,
-      maxInstances: 20,
-      concurrency: 20,
-    },
-  ),
   projectProfileGamesOnInviteCreated: eventContract({
     eventType: "google.firebase.database.ref.v1.created",
     pathPatterns: { ref: "invites/{inviteId}", instance: "*" },
@@ -288,16 +242,6 @@ Object.assign(expectedEndpointContracts, {
       secrets: ["TELEGRAM_QUEUE_BRIDGE_SECRET"],
     },
   ),
-  projectRatingTelegramUpdates: runtimeContract(
-    {
-      type: "event",
-      eventType: "google.cloud.firestore.document.v1.written",
-      pathPatterns: { document: "ratingUpdates/{ratingUpdateId}" },
-      filters: { database: "(default)", namespace: "(default)" },
-      retry: true,
-    },
-    { availableMemoryMb: 256, maxInstances: 10, concurrency: 20 },
-  ),
 });
 
 const normalizeEndpoint = (endpoint) => {
@@ -355,7 +299,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 23);
+  assert.equal(expectedExportNames.length, 16);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

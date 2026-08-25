@@ -77,6 +77,10 @@ export type RatingUpdateData = {
   completedAtMs?: number;
   eventId?: string;
   eventOwned?: boolean;
+  eventProgressReason?: string;
+  eventProgressState?: string;
+  eventProgressUpdatedAtMs?: number;
+  eventProgressVersion?: number;
   inviteId: string;
   isEventMatch?: boolean;
   leaseExpiresAtMs: number;
@@ -100,6 +104,15 @@ export type RatingUpdateData = {
 export type PendingRatingTelegramProjection = {
   operationId: string;
   updateTime: string;
+};
+
+export type PendingRatingEventProgress = {
+  eventId: string;
+  inviteId: string;
+  matchId: string;
+  operationId: string;
+  updateTime: string;
+  version: number;
 };
 
 export type RatingLeaseInput = {
@@ -168,6 +181,24 @@ export type RatingRepository = Pick<
   tryAcquireRatingLease: (
     input: RatingLeaseInput,
   ) => Promise<RatingLeaseResult>;
+};
+
+export type RatingEventProgressRepository = RatingRepository & {
+  claimRatingEventProgress: (
+    operationId: string,
+    updateTime: string,
+    claimedAtMs: number,
+  ) => Promise<boolean>;
+  listDueRatingEventProgress: (
+    updatedBeforeMs: number,
+    limit: number,
+  ) => Promise<PendingRatingEventProgress[]>;
+  markRatingEventProgress: (
+    operationId: string,
+    state: "dead" | "done",
+    updatedAtMs: number,
+    reason?: string,
+  ) => Promise<void>;
 };
 
 export type RatingProjectionRepository = RatingRepository & {
@@ -445,6 +476,10 @@ function ratingUpdateFromDocument(
     completedAtMs: number(fields.completedAtMs),
     eventId: string(fields.eventId),
     eventOwned: fields.eventOwned === true,
+    eventProgressReason: string(fields.eventProgressReason),
+    eventProgressState: string(fields.eventProgressState),
+    eventProgressUpdatedAtMs: number(fields.eventProgressUpdatedAtMs),
+    eventProgressVersion: number(fields.eventProgressVersion),
     inviteId: string(fields.inviteId),
     isEventMatch: fields.isEventMatch === true,
     leaseExpiresAtMs: number(fields.leaseExpiresAtMs),
@@ -1026,7 +1061,7 @@ export function createRatingRepository(
     now = Date.now,
     timeoutMs = FIRESTORE_TIMEOUT_MS,
   }: RatingRepositoryDependencies = {},
-): RatingProjectionRepository {
+): RatingProjectionRepository & RatingEventProgressRepository {
   const attempts =
     Number.isInteger(maxTransactionAttempts) && maxTransactionAttempts > 0
       ? maxTransactionAttempts
@@ -1153,6 +1188,55 @@ export function createRatingRepository(
   return {
     getRtdbPath: gameplayRepository.getRtdbPath,
     patchRtdbRoot: gameplayRepository.patchRtdbRoot,
+
+    async claimRatingEventProgress(operationId, updateTime, claimedAtMs) {
+      if (
+        !operationId ||
+        !updateTime ||
+        !Number.isSafeInteger(claimedAtMs) ||
+        claimedAtMs < 0
+      ) {
+        throw new GameplayRepositoryFailure();
+      }
+      const url = new URL(
+        `${FIRESTORE_DOCUMENTS_ROOT}/ratingUpdates/${encodeURIComponent(operationId)}`,
+      );
+      url.searchParams.append(
+        "updateMask.fieldPaths",
+        "eventProgressUpdatedAtMs",
+      );
+      url.searchParams.set("currentDocument.updateTime", updateTime);
+      const response = await request(url.toString(), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fields: encodeFirestoreFields({
+            eventProgressUpdatedAtMs: claimedAtMs,
+          }),
+        }),
+      });
+      if (response.ok) {
+        await cancelResponseBody(response);
+        return true;
+      }
+      if (response.status === 409 || response.status === 412) {
+        await cancelResponseBody(response);
+        return false;
+      }
+      if (response.status === 400) {
+        const body = await readBoundedJsonValue(
+          response,
+          MAX_RATING_FIRESTORE_BODY_BYTES,
+          () => new GameplayRepositoryFailure(),
+        );
+        if (isPreconditionConflict(body)) {
+          return false;
+        }
+        throw new GameplayRepositoryFailure();
+      }
+      await cancelResponseBody(response);
+      throw new GameplayRepositoryFailure();
+    },
 
     async claimRatingTelegramProjection(operationId, updateTime, claimedAtMs) {
       if (
@@ -1338,6 +1422,84 @@ export function createRatingRepository(
 
     getRatingProfile: queryProfile,
 
+    async listDueRatingEventProgress(updatedBeforeMs, limit) {
+      if (
+        !Number.isSafeInteger(updatedBeforeMs) ||
+        updatedBeforeMs < 0 ||
+        !Number.isInteger(limit) ||
+        limit < 1 ||
+        limit > 100
+      ) {
+        throw new GameplayRepositoryFailure();
+      }
+      const response = await postJson(`${FIRESTORE_DOCUMENTS_ROOT}:runQuery`, {
+        structuredQuery: {
+          select: {
+            fields: [
+              { fieldPath: "eventProgressUpdatedAtMs" },
+              { fieldPath: "eventProgressVersion" },
+              { fieldPath: "eventId" },
+              { fieldPath: "inviteId" },
+              { fieldPath: "matchId" },
+            ],
+          },
+          from: [{ collectionId: "ratingUpdates" }],
+          where: {
+            compositeFilter: {
+              op: "AND",
+              filters: [
+                {
+                  fieldFilter: {
+                    field: { fieldPath: "eventProgressState" },
+                    op: "EQUAL",
+                    value: { stringValue: "pending" },
+                  },
+                },
+                {
+                  fieldFilter: {
+                    field: { fieldPath: "eventProgressUpdatedAtMs" },
+                    op: "LESS_THAN_OR_EQUAL",
+                    value: { integerValue: String(updatedBeforeMs) },
+                  },
+                },
+              ],
+            },
+          },
+          orderBy: [
+            {
+              field: { fieldPath: "eventProgressUpdatedAtMs" },
+              direction: "ASCENDING",
+            },
+          ],
+          limit,
+        },
+      });
+      return parseFirestoreDocuments(await readJson(response)).map(
+        (document) => {
+          const operationId = document.name.split("/").pop()?.trim() || "";
+          if (!operationId || !document.updateTime) {
+            throw new GameplayRepositoryFailure();
+          }
+          const fields = decodeFirestoreFields(document.fields);
+          const string = (value: unknown) =>
+            typeof value === "string" ? value.trim() : "";
+          const version =
+            typeof fields.eventProgressVersion === "number" &&
+            Number.isSafeInteger(fields.eventProgressVersion)
+              ? fields.eventProgressVersion
+              : 0;
+          return {
+            eventId: string(fields.eventId),
+            inviteId: string(fields.inviteId),
+            matchId: string(fields.matchId),
+            operationId,
+            updateTime: document.updateTime,
+            version,
+          };
+        },
+      );
+    },
+
     async listDueRatingTelegramProjections(updatedBeforeMs, limit) {
       if (
         !Number.isSafeInteger(updatedBeforeMs) ||
@@ -1399,6 +1561,38 @@ export function createRatingRepository(
           };
         },
       );
+    },
+
+    async markRatingEventProgress(operationId, state, updatedAtMs, reason) {
+      if (
+        !operationId ||
+        (state !== "dead" && state !== "done") ||
+        !Number.isSafeInteger(updatedAtMs) ||
+        updatedAtMs < 0
+      ) {
+        throw new GameplayRepositoryFailure();
+      }
+      const fields = {
+        eventProgressState: state,
+        eventProgressUpdatedAtMs: updatedAtMs,
+        eventProgressReason: reason?.trim() || null,
+      };
+      const url = new URL(
+        `${FIRESTORE_DOCUMENTS_ROOT}/ratingUpdates/${encodeURIComponent(operationId)}`,
+      );
+      for (const fieldPath of Object.keys(fields)) {
+        url.searchParams.append("updateMask.fieldPaths", fieldPath);
+      }
+      url.searchParams.set("currentDocument.exists", "true");
+      const response = await request(url.toString(), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fields: encodeFirestoreFields(fields) }),
+      });
+      await cancelResponseBody(response);
+      if (!response.ok) {
+        throw new GameplayRepositoryFailure();
+      }
     },
 
     async markRatingTelegramProjection(

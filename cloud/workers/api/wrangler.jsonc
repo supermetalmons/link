@@ -57,6 +57,13 @@
       },
     },
   ],
+  "workflows": [
+    {
+      "binding": "EVENT_PROGRESS_WORKFLOW",
+      "name": "mons-link-event-progress",
+      "class_name": "EventProgressWorkflow",
+    },
+  ],
   "queues": {
     "producers": [
       {

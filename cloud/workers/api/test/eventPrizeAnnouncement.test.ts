@@ -5,7 +5,7 @@ import {
   handleEventPrizeAnnouncement,
 } from "../src/eventPrizeAnnouncement.ts";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
-import { handleFetch } from "../src/index.ts";
+import { handleFetch } from "../src/workerHandler.ts";
 import { createTelegramBridgeSignature } from "../src/telegramBridgeAuth.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 

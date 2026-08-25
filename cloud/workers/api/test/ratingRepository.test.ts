@@ -635,6 +635,124 @@ test("reconciles an ambiguous final commit from the completed record", async () 
   assert.equal(result.status, "replayed");
 });
 
+test("lists, claims, and completes pending event rating progress", async () => {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  const repository = createRatingRepository(env, gameplayRepository(), {
+    getAccessToken: async () => "token",
+    fetcher: async (input, init = {}) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url.endsWith(":runQuery")) {
+        const body = JSON.parse(String(init.body));
+        assert.deepEqual(body.structuredQuery.select, {
+          fields: [
+            { fieldPath: "eventProgressUpdatedAtMs" },
+            { fieldPath: "eventProgressVersion" },
+            { fieldPath: "eventId" },
+            { fieldPath: "inviteId" },
+            { fieldPath: "matchId" },
+          ],
+        });
+        assert.deepEqual(body.structuredQuery.where, {
+          compositeFilter: {
+            op: "AND",
+            filters: [
+              {
+                fieldFilter: {
+                  field: { fieldPath: "eventProgressState" },
+                  op: "EQUAL",
+                  value: { stringValue: "pending" },
+                },
+              },
+              {
+                fieldFilter: {
+                  field: { fieldPath: "eventProgressUpdatedAtMs" },
+                  op: "LESS_THAN_OR_EQUAL",
+                  value: { integerValue: "200" },
+                },
+              },
+            ],
+          },
+        });
+        assert.deepEqual(body.structuredQuery.orderBy, [
+          {
+            field: { fieldPath: "eventProgressUpdatedAtMs" },
+            direction: "ASCENDING",
+          },
+        ]);
+        assert.equal(body.structuredQuery.limit, 10);
+        return Response.json([
+          {
+            document: document(operationName, {
+              eventId: "event-1",
+              eventProgressUpdatedAtMs: 200,
+              eventProgressVersion: 1,
+              inviteId: "auto_aaaaaaaaaaa",
+              matchId: "auto_aaaaaaaaaaa",
+            }),
+          },
+        ]);
+      }
+      if (url.includes("/ratingUpdates/auto_aaaaaaaaaaa__auto_aaaaaaaaaaa?")) {
+        assert.equal(init.method, "PATCH");
+        const parsed = new URL(url);
+        if (parsed.searchParams.has("currentDocument.updateTime")) {
+          assert.deepEqual(
+            parsed.searchParams.getAll("updateMask.fieldPaths"),
+            ["eventProgressUpdatedAtMs"],
+          );
+          assert.equal(
+            parsed.searchParams.get("currentDocument.updateTime"),
+            "2026-08-21T00:00:00Z",
+          );
+          assert.deepEqual(
+            decodeFirestoreFields(JSON.parse(String(init.body)).fields),
+            { eventProgressUpdatedAtMs: 250 },
+          );
+          return Response.json({});
+        }
+        assert.deepEqual(parsed.searchParams.getAll("updateMask.fieldPaths"), [
+          "eventProgressState",
+          "eventProgressUpdatedAtMs",
+          "eventProgressReason",
+        ]);
+        assert.equal(parsed.searchParams.get("currentDocument.exists"), "true");
+        assert.deepEqual(
+          decodeFirestoreFields(JSON.parse(String(init.body)).fields),
+          {
+            eventProgressState: "done",
+            eventProgressUpdatedAtMs: 300,
+            eventProgressReason: null,
+          },
+        );
+        return Response.json({});
+      }
+      assert.fail(`unexpected request ${url}`);
+    },
+  });
+  const pending = await repository.listDueRatingEventProgress(200, 10);
+  assert.deepEqual(pending, [
+    {
+      eventId: "event-1",
+      inviteId: "auto_aaaaaaaaaaa",
+      matchId: "auto_aaaaaaaaaaa",
+      operationId: "auto_aaaaaaaaaaa__auto_aaaaaaaaaaa",
+      updateTime: "2026-08-21T00:00:00Z",
+      version: 1,
+    },
+  ]);
+  assert.equal(
+    await repository.claimRatingEventProgress(
+      pending[0].operationId,
+      pending[0].updateTime,
+      250,
+    ),
+    true,
+  );
+  await repository.markRatingEventProgress(pending[0].operationId, "done", 300);
+  assert.equal(calls.length, 3);
+});
+
 test("lists and completes pending Telegram rating projections", async () => {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const repository = createRatingRepository(env, gameplayRepository(), {

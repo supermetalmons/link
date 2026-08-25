@@ -8,10 +8,14 @@
       ".indexOn": ["uid", "profileId"]
     },
     "events": {
+      ".indexOn": ["status"],
       "$eventId": {
         ".read": "auth != null",
         ".write": "auth != null && auth.token.admin === true"
       }
+    },
+    "eventProgressOutbox": {
+      ".indexOn": ["lastQueuedAtMs"]
     },
     "eventPrizeSelections": {
       "$eventId": {

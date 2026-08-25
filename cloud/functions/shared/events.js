@@ -186,6 +186,166 @@ function isRemoveEventParticipantResponse(value) {
   );
 }
 
+function hasExactOptionalKeys(value, requiredKeys, optionalKeys) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const actualKeys = Object.keys(value);
+  return (
+    requiredKeys.every((key) => actualKeys.includes(key)) &&
+    actualKeys.every(
+      (key) => requiredKeys.includes(key) || optionalKeys.includes(key),
+    )
+  );
+}
+
+function isCreateEventRequest(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  if (
+    hasExactOptionalKeys(value, ["startsInMinutes"], ["announceOnTelegram"])
+  ) {
+    return (
+      Number.isSafeInteger(value.startsInMinutes) &&
+      value.startsInMinutes >= MIN_STARTS_IN_MINUTES &&
+      value.startsInMinutes <= MAX_STARTS_IN_MINUTES &&
+      (value.announceOnTelegram === undefined ||
+        typeof value.announceOnTelegram === "boolean")
+    );
+  }
+  if (
+    !hasExactOptionalKeys(
+      value,
+      ["scheduledDate", "scheduledTime", "scheduledTimezone"],
+      ["announceOnTelegram", "localTimezoneIana"],
+    )
+  ) {
+    return false;
+  }
+  return (
+    typeof value.scheduledDate === "string" &&
+    typeof value.scheduledTime === "string" &&
+    EVENT_SCHEDULE_TIMEZONE_OPTIONS.some(
+      (option) => option.value === value.scheduledTimezone,
+    ) &&
+    (value.localTimezoneIana === undefined ||
+      typeof value.localTimezoneIana === "string") &&
+    (value.announceOnTelegram === undefined ||
+      typeof value.announceOnTelegram === "boolean")
+  );
+}
+
+function isPostponeEventStartRequest(value) {
+  return (
+    isExactRecord(value, ["eventId", "postponeByMinutes"]) &&
+    isSafeFirebaseKey(value.eventId) &&
+    EVENT_POSTPONE_OPTIONS_MINUTES.includes(value.postponeByMinutes)
+  );
+}
+
+function isDisqualifyEventMatchWinnersRequest(value) {
+  return (
+    isExactRecord(value, ["eventId", "matchKey"]) &&
+    isSafeFirebaseKey(value.eventId) &&
+    (value.matchKey === THIRD_PLACE_MATCH_KEY ||
+      parseEventMatchKey(value.matchKey) !== null)
+  );
+}
+
+function isSyncEventStateRequest(value) {
+  return isExactRecord(value, ["eventId"]) && isSafeFirebaseKey(value.eventId);
+}
+
+function isEventApiRecord(value, eventId) {
+  return (
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    value.eventId === eventId &&
+    typeof value.status === "string"
+  );
+}
+
+function isCreateEventResponse(value) {
+  return (
+    isExactRecord(value, ["ok", "eventId", "event"]) &&
+    value.ok === true &&
+    isSafeFirebaseKey(value.eventId) &&
+    isEventApiRecord(value.event, value.eventId)
+  );
+}
+
+function isPostponeEventStartResponse(value) {
+  return (
+    isExactRecord(value, [
+      "ok",
+      "eventId",
+      "event",
+      "postponeByMinutes",
+      "startAtMs",
+    ]) &&
+    value.ok === true &&
+    isSafeFirebaseKey(value.eventId) &&
+    isEventApiRecord(value.event, value.eventId) &&
+    EVENT_POSTPONE_OPTIONS_MINUTES.includes(value.postponeByMinutes) &&
+    Number.isSafeInteger(value.startAtMs) &&
+    value.startAtMs >= 0
+  );
+}
+
+const EVENT_SYNC_SKIP_REASONS = Object.freeze([
+  "locked",
+  "not-participant",
+  "rate-limited",
+]);
+
+function isSyncEventStateResponse(value) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    value.ok !== true ||
+    !isSafeFirebaseKey(value.eventId)
+  ) {
+    return false;
+  }
+  if (value.skipped === true) {
+    return (
+      hasExactOptionalKeys(
+        value,
+        ["ok", "eventId", "skipped", "reason"],
+        ["event"],
+      ) &&
+      EVENT_SYNC_SKIP_REASONS.includes(value.reason) &&
+      (value.event === undefined ||
+        isEventApiRecord(value.event, value.eventId))
+    );
+  }
+  return (
+    isExactRecord(value, ["ok", "eventId", "didChange", "event"]) &&
+    typeof value.didChange === "boolean" &&
+    isEventApiRecord(value.event, value.eventId)
+  );
+}
+
+function isDisqualifyEventMatchWinnersResponse(value) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    typeof value.didDisqualify !== "boolean" ||
+    (value.matchKey !== THIRD_PLACE_MATCH_KEY &&
+      parseEventMatchKey(value.matchKey) === null)
+  ) {
+    return false;
+  }
+  const syncValue = { ...value };
+  delete syncValue.didDisqualify;
+  delete syncValue.matchKey;
+  return isSyncEventStateResponse(syncValue);
+}
+
 module.exports = {
   EVENT_POSTPONE_OPTIONS_MINUTES,
   EVENT_SCHEDULE_TIMEZONE_OPTIONS,
@@ -202,6 +362,10 @@ module.exports = {
   buildEventSeedOrder,
   getEventBracketSize,
   getFirstRoundByeSeeds,
+  isCreateEventRequest,
+  isCreateEventResponse,
+  isDisqualifyEventMatchWinnersRequest,
+  isDisqualifyEventMatchWinnersResponse,
   isEventOwnedInvite,
   isEventParticipantSnapshot,
   isJoinEventRequest,
@@ -209,5 +373,9 @@ module.exports = {
   isMonsLinkAdmin,
   isRemoveEventParticipantRequest,
   isRemoveEventParticipantResponse,
+  isPostponeEventStartRequest,
+  isPostponeEventStartResponse,
+  isSyncEventStateRequest,
+  isSyncEventStateResponse,
   parseEventMatchKey,
 };

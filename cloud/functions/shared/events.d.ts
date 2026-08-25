@@ -37,6 +37,79 @@ export const EVENT_SCHEDULE_TIMEZONE_OPTIONS: readonly [
 export type EventPostponeMinutes = 5 | 10 | 15;
 export const EVENT_POSTPONE_OPTIONS_MINUTES: readonly [5, 10, 15];
 
+export type CreateEventRequest =
+  | {
+      startsInMinutes: number;
+      announceOnTelegram?: boolean;
+    }
+  | (EventCreateDateTimePayload & { announceOnTelegram?: boolean });
+export type PostponeEventStartRequest = {
+  eventId: string;
+  postponeByMinutes: EventPostponeMinutes;
+};
+export type DisqualifyEventMatchWinnersRequest = {
+  eventId: string;
+  matchKey: string;
+};
+export type SyncEventStateRequest = { eventId: string };
+export type EventApiRecord = Record<string, unknown> & {
+  eventId: string;
+  status: string;
+};
+export type CreateEventResponse = {
+  ok: true;
+  eventId: string;
+  event: EventApiRecord;
+};
+export type PostponeEventStartResponse = CreateEventResponse & {
+  postponeByMinutes: EventPostponeMinutes;
+  startAtMs: number;
+};
+export type EventSyncSkipReason = "locked" | "not-participant" | "rate-limited";
+export type SyncEventStateResponse =
+  | {
+      ok: true;
+      eventId: string;
+      didChange: boolean;
+      event: EventApiRecord;
+    }
+  | {
+      ok: true;
+      eventId: string;
+      skipped: true;
+      reason: EventSyncSkipReason;
+      event?: EventApiRecord;
+    };
+export type DisqualifyEventMatchWinnersResponse = SyncEventStateResponse & {
+  didDisqualify: boolean;
+  matchKey: string;
+};
+
+export function isCreateEventRequest(
+  value: unknown,
+): value is CreateEventRequest;
+export function isCreateEventResponse(
+  value: unknown,
+): value is CreateEventResponse;
+export function isPostponeEventStartRequest(
+  value: unknown,
+): value is PostponeEventStartRequest;
+export function isPostponeEventStartResponse(
+  value: unknown,
+): value is PostponeEventStartResponse;
+export function isDisqualifyEventMatchWinnersRequest(
+  value: unknown,
+): value is DisqualifyEventMatchWinnersRequest;
+export function isDisqualifyEventMatchWinnersResponse(
+  value: unknown,
+): value is DisqualifyEventMatchWinnersResponse;
+export function isSyncEventStateRequest(
+  value: unknown,
+): value is SyncEventStateRequest;
+export function isSyncEventStateResponse(
+  value: unknown,
+): value is SyncEventStateResponse;
+
 export type EventParticipantSnapshot = {
   profileId: string;
   loginUid: string;

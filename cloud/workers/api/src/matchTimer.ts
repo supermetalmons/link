@@ -29,8 +29,11 @@ import { AuthApiFailure } from "./authErrors.ts";
 import type { FirebaseIdentity } from "./firebaseAuth.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
+import {
+  buildEventProgressPlan,
+  type EventProgressPlan,
+} from "./eventProgress.ts";
 
-const EVENT_PROGRESS_FALLBACK_ROOT = "eventProgressFallback";
 const MATCH_TIMER_CLAIM_LEASE_MS = 30_000;
 const MATCH_TIMER_CLAIM_SIDE_EFFECT_ATTEMPTS = 3;
 const TIMER_DEADLINE_GRACE_MS = 500;
@@ -67,6 +70,7 @@ type MatchTimerClaimFence = {
 };
 
 export type MatchTimerDependencies = {
+  enqueueEventProgress?: (plan: EventProgressPlan) => Promise<void>;
   now?: () => number;
   signal?: AbortSignal;
   resolveGame?: (
@@ -272,29 +276,15 @@ export async function enforceMatchTimerClaimRateLimit(
   }
 }
 
-function bytesToHex(value: ArrayBuffer): string {
-  return Array.from(new Uint8Array(value), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
-}
-
-export async function buildEventProgressFallbackSignalId(
-  eventId: string,
-  sourceKey: string,
-): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    "SHA-1",
-    new TextEncoder().encode(`fallback:${eventId}:${sourceKey}`),
-  );
-  return `sig_${bytesToHex(digest).slice(0, 24)}`;
-}
-
 async function buildTimerClaimSideEffectUpdates(
   inviteValue: unknown,
   request: ClaimMatchVictoryByTimerRequest,
   fence: MatchTimerClaimFence,
   nowMs: number,
-): Promise<Record<string, unknown>> {
+): Promise<{
+  progress: EventProgressPlan | null;
+  updates: Record<string, unknown>;
+}> {
   const updates: Record<string, unknown> = {
     [`players/${request.playerId}/matches/${request.matchId}/timer`]:
       MATCH_TIMER_TERMINAL,
@@ -314,18 +304,31 @@ async function buildTimerClaimSideEffectUpdates(
       ? invite.eventId.trim()
       : "";
   if (!eventId || !isSafeFirebaseKey(eventId)) {
-    return updates;
+    return { progress: null, updates };
   }
   const sourceKey = `timer:${request.inviteId}:${request.matchId}`;
-  const signalId = await buildEventProgressFallbackSignalId(eventId, sourceKey);
-  updates[`${EVENT_PROGRESS_FALLBACK_ROOT}/${eventId}/${signalId}`] = {
-    eventId,
-    sourceKey,
-    reason: "timer-claimed",
-    firstQueuedAtMs: nowMs,
-    lastQueuedAtMs: nowMs,
-  };
-  return updates;
+  const progress = await buildEventProgressPlan(
+    {
+      eventId,
+      sourceKey,
+      reason: "timer-claimed",
+    },
+    nowMs,
+  );
+  updates[`eventProgressOutbox/${progress.outboxId}`] = progress.outbox;
+  return { progress, updates };
+}
+
+async function persistClaimSideEffectsAndDispatch(
+  sideEffects: Awaited<ReturnType<typeof buildTimerClaimSideEffectUpdates>>,
+  repository: MatchTimerClaimRepository,
+  signal: AbortSignal,
+  dependencies: MatchTimerDependencies,
+): Promise<void> {
+  await persistTimerClaimSideEffects(sideEffects.updates, repository, signal);
+  if (sideEffects.progress && dependencies.enqueueEventProgress) {
+    await dependencies.enqueueEventProgress(sideEffects.progress);
+  }
 }
 
 async function persistTimerClaimSideEffects(
@@ -561,7 +564,7 @@ export async function claimMatchVictoryByTimer(
       turnNumber: game.turnNumber,
       expiresAtMs: replayedAtMs + MATCH_TIMER_CLAIM_LEASE_MS,
     };
-    await persistTimerClaimSideEffects(
+    await persistClaimSideEffectsAndDispatch(
       await buildTimerClaimSideEffectUpdates(
         inviteValue,
         request,
@@ -570,6 +573,7 @@ export async function claimMatchVictoryByTimer(
       ),
       repository,
       signal,
+      dependencies,
     );
     return { ok: true };
   }
@@ -640,7 +644,7 @@ export async function claimMatchVictoryByTimer(
     throw failedPrecondition("game state changed.");
   }
   if (claimTransaction.decision === "already-claimed") {
-    await persistTimerClaimSideEffects(
+    await persistClaimSideEffectsAndDispatch(
       await buildTimerClaimSideEffectUpdates(
         inviteValue,
         request,
@@ -649,6 +653,7 @@ export async function claimMatchVictoryByTimer(
       ),
       repository,
       signal,
+      dependencies,
     );
     return { ok: true };
   }
@@ -677,7 +682,7 @@ export async function claimMatchVictoryByTimer(
     throw failedPrecondition("game state changed.");
   }
 
-  await persistTimerClaimSideEffects(
+  await persistClaimSideEffectsAndDispatch(
     await buildTimerClaimSideEffectUpdates(
       freshInviteValue,
       request,
@@ -686,6 +691,7 @@ export async function claimMatchVictoryByTimer(
     ),
     repository,
     signal,
+    dependencies,
   );
   return { ok: true };
 }
