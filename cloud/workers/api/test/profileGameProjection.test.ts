@@ -687,7 +687,7 @@ test("scheduled recovery bounds concurrent claims", async () => {
   assert.equal(maximum, 10);
 });
 
-test("automatch recovery claims due outboxes, removes poison, and preserves source time", async () => {
+test("automatch recovery claims due outboxes, repairs poison, and preserves source time", async () => {
   const batches: ProfileGameProjectionTask[][] = [];
   const logs: string[] = [];
   const queue = {
@@ -739,6 +739,7 @@ test("automatch recovery claims due outboxes, removes poison, and preserves sour
       return result;
     },
   };
+  const requestIds = ["repair-1", "repair-2", "repair-3"];
   assert.equal(
     await sweepAutomatchProfileGameProjections(
       {
@@ -746,26 +747,54 @@ test("automatch recovery claims due outboxes, removes poison, and preserves sour
         PROFILE_GAME_PROJECTION_QUEUE: queue,
       },
       {
+        createRequestId: () => requestIds.shift() || "unexpected",
         createRtdb: () => rtdb,
         logger: { error: (message) => logs.push(String(message)), info() {} },
         now: () => 600_000,
       },
     ),
-    1,
+    4,
   );
-  assert.deepEqual(batches.flat(), [automatchTask()]);
+  assert.deepEqual(batches.flat(), [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto_bbbbbbbbbbb",
+      requestId: "repair-1",
+    },
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto_ccccccccccc",
+      requestId: "repair-2",
+    },
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto_ddddddddddd",
+      requestId: "repair-3",
+    },
+    automatchTask(),
+  ]);
   assert.deepEqual(values.get("auto_aaaaaaaaaaa"), {
     ...automatchOutbox("request-1", 50, 100),
     lastQueuedAtMs: 600_000,
   });
-  assert.equal(values.get("auto_bbbbbbbbbbb"), null);
-  assert.equal(values.get("auto_ccccccccccc"), null);
-  assert.equal(values.get("auto_ddddddddddd"), null);
+  assert.deepEqual(
+    values.get("auto_bbbbbbbbbbb"),
+    automatchOutbox("repair-1", 60, 600_000),
+  );
+  assert.deepEqual(
+    values.get("auto_ccccccccccc"),
+    automatchOutbox("repair-2", 70, 600_000),
+  );
+  assert.deepEqual(
+    values.get("auto_ddddddddddd"),
+    automatchOutbox("repair-3", 600_000, 600_000),
+  );
   assert.equal(
     logs.some(
       (entry) =>
-        entry.includes("profile_game_projection_invalid_outboxes_removed") &&
-        entry.includes('"count":3'),
+        entry.includes("profile_game_projection_invalid_outboxes_recovered") &&
+        entry.includes('"repaired":3') &&
+        entry.includes('"removed":0'),
     ),
     true,
   );

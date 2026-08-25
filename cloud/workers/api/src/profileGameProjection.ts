@@ -37,6 +37,7 @@ type ProfileGameProjectionRtdb = Pick<
 export type ProfileGameProjectionDependencies = {
   createRating?: (env: Env) => RatingProfileGameProjectionRepository;
   createRtdb?: (env: Env) => ProfileGameProjectionRtdb;
+  createRequestId?: () => string;
   createRuntime?: (env: Env) => ProfileGameProjectionRuntime;
   logger?: ProfileGameProjectionLogger;
   now?: () => number;
@@ -229,10 +230,19 @@ async function claimAutomatchSweepCandidate(
   return result.committed;
 }
 
-async function removeInvalidAutomatchSweepEntry(
+type InvalidAutomatchSweepResult =
+  | { kind: "changed" }
+  | { kind: "removed" }
+  | { kind: "repaired"; task: AutomatchProfileGameProjectionTask };
+
+async function repairInvalidAutomatchSweepEntry(
   rtdb: ProfileGameProjectionRtdb,
   inviteId: string,
-): Promise<boolean> {
+  nowMs: number,
+  createRequestId: () => string,
+): Promise<InvalidAutomatchSweepResult> {
+  const safeInviteId = isSafeFirebaseKey(inviteId);
+  const requestId = safeInviteId ? createRequestId() : "";
   const result = await rtdb.transactRtdbPath(
     getAutomatchProfileGameProjectionOutboxPath(inviteId),
     (current) => {
@@ -246,10 +256,40 @@ async function removeInvalidAutomatchSweepEntry(
       ) {
         return { commit: false, decision: "changed" };
       }
-      return { value: null, decision: "removed-invalid" };
+      if (!safeInviteId) {
+        return { value: null, decision: "removed-invalid" };
+      }
+      const sourceUpdatedAtMs = record?.sourceUpdatedAtMs;
+      return {
+        value: {
+          schemaVersion: PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
+          status: "pending",
+          requestId,
+          sourceUpdatedAtMs:
+            typeof sourceUpdatedAtMs === "number" &&
+            Number.isFinite(sourceUpdatedAtMs) &&
+            sourceUpdatedAtMs >= 0
+              ? Math.floor(sourceUpdatedAtMs)
+              : nowMs,
+          lastQueuedAtMs: nowMs,
+        },
+        decision: "repaired-invalid",
+      };
     },
   );
-  return result.committed;
+  if (!result.committed) {
+    return { kind: "changed" };
+  }
+  return safeInviteId
+    ? {
+        kind: "repaired",
+        task: {
+          kind: "automatch-profile-game-projection",
+          inviteId,
+          requestId,
+        },
+      }
+    : { kind: "removed" };
 }
 
 async function collectSuccessfulClaims<T>(
@@ -503,6 +543,8 @@ export async function sweepAutomatchProfileGameProjections(
 ): Promise<number> {
   const logger = dependencies.logger || console;
   const now = dependencies.now || Date.now;
+  const createRequestId =
+    dependencies.createRequestId || (() => crypto.randomUUID());
   const nowMs = now();
   const dueBeforeMs = nowMs - PROFILE_GAME_PROJECTION_RECOVERY_DELAY_MS;
   const rtdb = (
@@ -522,10 +564,19 @@ export async function sweepAutomatchProfileGameProjections(
     entry.kind === "invalid" ? [entry.inviteId] : [],
   );
   let invalidFailure: Error | null = null;
+  const repairedTasks: AutomatchProfileGameProjectionTask[] = [];
   let invalidRemoved = 0;
   for (const inviteId of invalidInviteIds) {
     try {
-      if (await removeInvalidAutomatchSweepEntry(rtdb, inviteId)) {
+      const result = await repairInvalidAutomatchSweepEntry(
+        rtdb,
+        inviteId,
+        nowMs,
+        createRequestId,
+      );
+      if (result.kind === "repaired") {
+        repairedTasks.push(result.task);
+      } else if (result.kind === "removed") {
         invalidRemoved++;
       }
     } catch (error) {
@@ -535,11 +586,12 @@ export async function sweepAutomatchProfileGameProjections(
           : new Error("profile-game-projection-invalid-record-failed");
     }
   }
-  if (invalidRemoved > 0) {
+  if (repairedTasks.length > 0 || invalidRemoved > 0) {
     logger.error(
       JSON.stringify({
-        event: "profile_game_projection_invalid_outboxes_removed",
-        count: invalidRemoved,
+        event: "profile_game_projection_invalid_outboxes_recovered",
+        repaired: repairedTasks.length,
+        removed: invalidRemoved,
       }),
     );
   }
@@ -549,7 +601,10 @@ export async function sweepAutomatchProfileGameProjections(
   const claims = await collectSuccessfulClaims(candidates, (candidate) =>
     claimAutomatchSweepCandidate(rtdb, candidate, nowMs),
   );
-  const tasks = claims.claimed.map(({ task }) => task);
+  const tasks: ProfileGameProjectionTask[] = [
+    ...repairedTasks,
+    ...claims.claimed.map(({ task }) => task),
+  ];
   await sendProfileGameProjectionTasks(
     env.PROFILE_GAME_PROJECTION_QUEUE,
     tasks,
@@ -611,7 +666,7 @@ export {
   automatchSweepEntries,
   claimAutomatchSweepCandidate,
   releaseAutomatchProfileGameProjectionLock,
-  removeInvalidAutomatchSweepEntry,
+  repairInvalidAutomatchSweepEntry,
   sendProfileGameProjectionTasks,
   validRatingProjectionRecord,
 };

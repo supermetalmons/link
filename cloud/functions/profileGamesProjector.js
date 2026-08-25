@@ -1,4 +1,5 @@
 const admin = require("./firebaseAdmin");
+const { randomUUID } = require("node:crypto");
 const {
   onValueCreated,
   onValueWritten,
@@ -23,6 +24,9 @@ const PROFILE_LINK_CATCHUP_TIMEOUT_MS = 50000;
 const PROFILE_DELETE_GAMES_CLEANUP_BATCH_SIZE = 400;
 const PROFILE_DELETE_GAMES_CLEANUP_TIMEOUT_MS = 50000;
 const PROFILE_LINK_RECONCILE_ATTEMPTS = 3;
+const AUTOMATCH_PROFILE_GAME_PROJECTION_LOCK_MS = 15 * 60 * 1000;
+const AUTOMATCH_PROFILE_GAME_PROJECTION_LOCK_ROOT =
+  "profileGameProjectionLocks/automatch";
 
 const READ_RETRY_ATTEMPTS = 2;
 const READ_RETRY_DELAY_MS = 25;
@@ -146,6 +150,53 @@ const readCurrentProfileLink = async (loginUid) => {
   return normalizeString(snapshot.val());
 };
 
+const withInviteProjectionLock = async (inviteId, work, dependencies = {}) => {
+  const normalizedInviteId = normalizeString(inviteId);
+  if (!normalizedInviteId) {
+    throw new Error("projector:invalid-invite-id");
+  }
+  const ownerId = (dependencies.createOwnerId || randomUUID)();
+  const nowMs = (dependencies.now || Date.now)();
+  const lockRef = dependencies.lockRef
+    ? dependencies.lockRef(normalizedInviteId)
+    : admin
+        .database()
+        .ref(
+          `${AUTOMATCH_PROFILE_GAME_PROJECTION_LOCK_ROOT}/${normalizedInviteId}`,
+        );
+  const acquired = await lockRef.transaction(
+    (current) => {
+      const expiresAtMs = current?.expiresAtMs;
+      if (
+        typeof current?.ownerId === "string" &&
+        typeof expiresAtMs === "number" &&
+        Number.isFinite(expiresAtMs) &&
+        expiresAtMs > nowMs
+      ) {
+        return undefined;
+      }
+      return {
+        ownerId,
+        expiresAtMs: nowMs + AUTOMATCH_PROFILE_GAME_PROJECTION_LOCK_MS,
+      };
+    },
+    undefined,
+    false,
+  );
+  if (!acquired.committed) {
+    throw new Error("projector:profile-game-projection-lock-busy");
+  }
+  try {
+    return await work();
+  } finally {
+    await lockRef.transaction(
+      (current) => (current?.ownerId === ownerId ? null : undefined),
+      undefined,
+      false,
+    );
+  }
+};
+
 const resolveProfileLinkCatchupState = async (
   { eventProfileId, loginUid, staleProfileId },
   dependencies = {},
@@ -240,9 +291,11 @@ const onInviteCreated = onValueCreated(
   { ref: "/invites/{inviteId}", retry: true },
   async (event) => {
     const inviteId = event.params.inviteId;
-    await recomputeInviteProjection(inviteId, "invite-created", {
-      eventTimestampMs: Date.now(),
-    });
+    await withInviteProjectionLock(inviteId, () =>
+      recomputeInviteProjection(inviteId, "invite-created", {
+        eventTimestampMs: Date.now(),
+      }),
+    );
   },
 );
 
@@ -254,9 +307,11 @@ const onInviteGuestIdChanged = onValueWritten(
     if (!hasMeaningfulValueChange(before, after)) {
       return;
     }
-    await recomputeInviteProjection(event.params.inviteId, "invite-guest-id", {
-      eventTimestampMs: Date.now(),
-    });
+    await withInviteProjectionLock(event.params.inviteId, () =>
+      recomputeInviteProjection(event.params.inviteId, "invite-guest-id", {
+        eventTimestampMs: Date.now(),
+      }),
+    );
   },
 );
 
@@ -268,12 +323,14 @@ const onInviteHostRematchesChanged = onValueWritten(
     if (!hasMeaningfulValueChange(before, after)) {
       return;
     }
-    await recomputeInviteProjection(
-      event.params.inviteId,
-      "invite-host-rematches",
-      {
-        eventTimestampMs: Date.now(),
-      },
+    await withInviteProjectionLock(event.params.inviteId, () =>
+      recomputeInviteProjection(
+        event.params.inviteId,
+        "invite-host-rematches",
+        {
+          eventTimestampMs: Date.now(),
+        },
+      ),
     );
   },
 );
@@ -286,12 +343,14 @@ const onInviteGuestRematchesChanged = onValueWritten(
     if (!hasMeaningfulValueChange(before, after)) {
       return;
     }
-    await recomputeInviteProjection(
-      event.params.inviteId,
-      "invite-guest-rematches",
-      {
-        eventTimestampMs: Date.now(),
-      },
+    await withInviteProjectionLock(event.params.inviteId, () =>
+      recomputeInviteProjection(
+        event.params.inviteId,
+        "invite-guest-rematches",
+        {
+          eventTimestampMs: Date.now(),
+        },
+      ),
     );
   },
 );
@@ -313,10 +372,12 @@ const onMatchCreated = onValueCreated(
       return;
     }
 
-    await recomputeInviteProjection(inviteId, "match-created", {
-      eventTimestampMs: Date.now(),
-      latestMatchIdHint: matchId,
-    });
+    await withInviteProjectionLock(inviteId, () =>
+      recomputeInviteProjection(inviteId, "match-created", {
+        eventTimestampMs: Date.now(),
+        latestMatchIdHint: matchId,
+      }),
+    );
   },
 );
 
@@ -331,6 +392,8 @@ const processProfileLinkCatchup = async (
     dependencies.readCurrentProfileLink || readCurrentProfileLink;
   const recomputeInviteProjectionImpl =
     dependencies.recomputeInviteProjection || recomputeInviteProjection;
+  const withInviteProjectionLockImpl =
+    dependencies.withInviteProjectionLock || withInviteProjectionLock;
   const resolveInviteIdImpl =
     dependencies.resolveInviteIdFromMatchId || resolveInviteIdFromMatchId;
   const state = await resolveProfileLinkCatchupState(
@@ -407,14 +470,12 @@ const processProfileLinkCatchup = async (
         }
         attemptedThisRound += 1;
         try {
-          const result = await recomputeInviteProjectionImpl(
-            inviteId,
-            "profile-link-catchup",
-            {
+          const result = await withInviteProjectionLockImpl(inviteId, () =>
+            recomputeInviteProjectionImpl(inviteId, "profile-link-catchup", {
               cleanupProfileIds,
               eventTimestampMs: Date.now(),
               preserveListSortAt: true,
-            },
+            }),
           );
           if (result && result.sourceCleanupSafe === false) {
             throw new Error(
@@ -611,4 +672,5 @@ module.exports = {
   readExistingProjectionDocuments,
   recomputeInviteProjection,
   resolveProfileLinkCatchupState,
+  withInviteProjectionLock,
 };

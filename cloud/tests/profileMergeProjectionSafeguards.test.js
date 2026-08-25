@@ -18,8 +18,11 @@ const {
   readExistingProjectionDocuments,
   recomputeInviteProjection,
   resolveProfileLinkCatchupState,
+  withInviteProjectionLock,
 } = require("../functions/profileGamesProjector");
 const firebaseAdmin = require("../functions/firebaseAdmin");
+
+const runWithoutProjectionLock = async (_inviteId, work) => work();
 
 const runEventProjection = async ({
   afterData,
@@ -441,6 +444,55 @@ test("profile-link retries use the live owner and retain event owners for cleanu
   );
 });
 
+test("Firebase projectors serialize each invite with the shared lock", async () => {
+  let current = null;
+  const lockRef = () => ({
+    transaction: async (updater) => {
+      const next = updater(current);
+      if (next === undefined) {
+        return { committed: false, snapshot: { val: () => current } };
+      }
+      current = next;
+      return { committed: true, snapshot: { val: () => current } };
+    },
+  });
+  let releaseFirst;
+  const firstBlocked = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  let firstStarted;
+  const started = new Promise((resolve) => {
+    firstStarted = resolve;
+  });
+  const first = withInviteProjectionLock(
+    "invite-1",
+    async () => {
+      firstStarted();
+      await firstBlocked;
+    },
+    { createOwnerId: () => "owner-a", lockRef, now: () => 100 },
+  );
+  await started;
+  await assert.rejects(
+    () =>
+      withInviteProjectionLock("invite-1", async () => undefined, {
+        createOwnerId: () => "owner-b",
+        lockRef,
+        now: () => 200,
+      }),
+    /lock-busy/,
+  );
+  releaseFirst();
+  await first;
+  assert.equal(current, null);
+  await withInviteProjectionLock("invite-1", async () => undefined, {
+    createOwnerId: () => "owner-b",
+    lockRef,
+    now: () => 300,
+  });
+  assert.equal(current, null);
+});
+
 test("profile-link catchup converges and cleans an intermediate live owner", async () => {
   let liveProfileId = "initial-live-profile";
   const cleanupRounds = [];
@@ -463,6 +515,7 @@ test("profile-link catchup converges and cleans an intermediate live owner", asy
         }
       },
       resolveInviteIdFromMatchId: async () => "invite-1",
+      withInviteProjectionLock: runWithoutProjectionLock,
     },
   );
   assert.deepEqual(cleanupRounds, [
@@ -494,6 +547,7 @@ test("profile-link catchup ignores failures from a superseded owner", async () =
         }
       },
       resolveInviteIdFromMatchId: async () => "invite-1",
+      withInviteProjectionLock: runWithoutProjectionLock,
     },
   );
   assert.equal(attempts, 2);
@@ -537,6 +591,7 @@ test("profile-link catchup retries blocked projections without stale cleanup", a
             sourceCleanupSafe: false,
           }),
           resolveInviteIdFromMatchId: async () => "invite-1",
+          withInviteProjectionLock: runWithoutProjectionLock,
         },
       ),
       /profile-link-catchup-incomplete/,
@@ -601,6 +656,7 @@ const runProfileLinkStaleCleanup = async ({
       }),
       recomputeInviteProjection: async () => ({ sourceCleanupSafe: true }),
       resolveInviteIdFromMatchId: async () => "invite-1",
+      withInviteProjectionLock: runWithoutProjectionLock,
     },
   );
   return deletes;
