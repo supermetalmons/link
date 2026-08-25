@@ -1,22 +1,12 @@
 "use strict";
 
 const crypto = require("node:crypto");
-const admin = require("../firebaseAdmin");
-const {
-  onValueCreated,
-  onValueUpdated,
-} = require("firebase-functions/v2/database");
 const { getTelegramEmojiTag } = require("../telegramDisplay");
 const { customTelegramEmojis } = require("../telegramEmojiData");
 const {
   buildTelegramEditUpdates,
   buildTelegramSendUpdates,
-} = require("./desiredState");
-const {
-  createTelegramDeliveryDispatcher,
-  telegramQueueBridgeSecret,
-} = require("./queueBridge");
-const { createEventLockManager } = require("../eventLocks");
+} = require("./desiredStateCore");
 const { getEventPrizePlacements } = require("../events/bracket");
 const { THIRD_PLACE_MATCH_KEY } = require("@mons/shared/events");
 
@@ -24,16 +14,6 @@ const EVENT_TELEGRAM_PROJECTION_ROOT = "eventTelegramProjections";
 const EVENT_TELEGRAM_PROJECTION_LOCK_ROOT = "eventTelegramProjectionLocks";
 const EVENT_TELEGRAM_PROJECTION_GUARD_FIELD = "eventTelegramProjectionGuard";
 const EVENT_TELEGRAM_DELIVERY_VERSION = 2;
-const EVENT_TELEGRAM_PROJECTION_OWNER_UID = "event-telegram-projector";
-const EVENT_TELEGRAM_PROJECTION_WRITER_APP = "event-telegram-projection-writer";
-const EVENT_TELEGRAM_TRIGGER_OPTIONS = {
-  maxInstances: 5,
-  concurrency: 20,
-  memory: "256MiB",
-  cpu: 1,
-  retry: true,
-  secrets: [telegramQueueBridgeSecret],
-};
 const EVENT_URL_ROOT = "https://mons.link/event";
 const EVENT_STATUS_SCHEDULED = "scheduled";
 const EVENT_STATUS_ENDED = "ended";
@@ -273,9 +253,9 @@ const collectActiveMatchEntries = (eventData) => {
   });
 };
 
-const loadEndedMatchResults = async (eventData, { firestore } = {}) => {
-  if (!firestore || typeof firestore.collection !== "function") {
-    throw new TypeError("event Telegram score loading requires Firestore");
+const loadEndedMatchResults = async (eventData, { readRatingUpdate } = {}) => {
+  if (typeof readRatingUpdate !== "function") {
+    throw new TypeError("event Telegram score loading requires rating reads");
   }
   const resultsByKey = {};
   const scoreRequests = [];
@@ -298,17 +278,13 @@ const loadEndedMatchResults = async (eventData, { firestore } = {}) => {
   }
   const snapshots = await Promise.all(
     scoreRequests.map(({ inviteId }) =>
-      firestore
-        .collection("ratingUpdates")
-        .doc(`${inviteId}__${inviteId}`)
-        .get(),
+      readRatingUpdate(`${inviteId}__${inviteId}`),
     ),
   );
   for (let index = 0; index < scoreRequests.length; index += 1) {
     const { entry, inviteId, hostLoginUid, guestLoginUid } =
       scoreRequests[index];
-    const snapshot = snapshots[index];
-    const result = snapshot.exists ? snapshot.data() || {} : {};
+    const result = snapshots[index] || {};
     if (
       result.status !== "done" ||
       normalizeString(result.inviteId) !== inviteId ||
@@ -795,207 +771,11 @@ const buildEventTelegramDispatches = ({ eventId, desiredUpdates }) => {
   });
 };
 
-const createProjectionLockError = (eventId, code) => {
-  const error = new Error(`${code}:${eventId}`);
-  error.code = code;
-  return error;
-};
-
-const isPermissionDeniedError = (error) => {
-  const code = normalizeString(error && error.code).toLowerCase();
-  const message = normalizeString(error && error.message).toLowerCase();
-  return (
-    code.includes("permission-denied") ||
-    code.includes("permission_denied") ||
-    message.includes("permission denied")
-  );
-};
-
-const getEventTelegramProjectionCommitDatabase = () =>
-  admin.databaseWithAuthOverride(EVENT_TELEGRAM_PROJECTION_WRITER_APP, {
-    uid: EVENT_TELEGRAM_PROJECTION_OWNER_UID,
-    token: {
-      eventTelegramProjectionWriter: true,
-    },
-  });
-
-const createEventTelegramProjector = (dependencies = {}) => {
-  const getDatabase = dependencies.database
-    ? () => dependencies.database
-    : dependencies.getDatabase || admin.database;
-  const lockManager =
-    dependencies.lockManager ||
-    createEventLockManager({
-      getDatabase,
-      lockRoot: EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
-    });
-  const getCommitDatabase = dependencies.commitDatabase
-    ? () => dependencies.commitDatabase
-    : dependencies.getCommitDatabase ||
-      getEventTelegramProjectionCommitDatabase;
-  const getFirestore = dependencies.firestore
-    ? () => dependencies.firestore
-    : dependencies.getFirestore || admin.firestore;
-  const resolveEndedMatchResults =
-    dependencies.loadEndedMatchResults || loadEndedMatchResults;
-  const dispatchDelivery =
-    dependencies.dispatchDelivery || createTelegramDeliveryDispatcher();
-  const ownerUid = dependencies.ownerUid || EVENT_TELEGRAM_PROJECTION_OWNER_UID;
-
-  return async (eventId, nowMs = Date.now()) => {
-    const normalizedEventId = normalizeString(eventId);
-    if (!normalizedEventId) {
-      return { action: "skip", reason: "invalid-event-id" };
-    }
-    let lockHandle = null;
-    let stopLockHeartbeat = () => {};
-    try {
-      lockHandle = await lockManager.acquireEventLock(
-        normalizedEventId,
-        ownerUid,
-      );
-      if (!lockHandle) {
-        throw createProjectionLockError(
-          normalizedEventId,
-          "event-telegram-lock-busy",
-        );
-      }
-      stopLockHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
-      const database = getDatabase();
-      const eventSnapshot = await database
-        .ref(`events/${normalizedEventId}`)
-        .once("value");
-      const eventData = eventSnapshot.val();
-      if (!isV2TelegramEvent(eventData)) {
-        return { action: "skip", reason: "not-v2" };
-      }
-      const stateSnapshot = await database
-        .ref(`${EVENT_TELEGRAM_PROJECTION_ROOT}/${normalizedEventId}`)
-        .once("value");
-      const rawState = stateSnapshot.val();
-      const status = normalizeString(eventData.status);
-      const endedMatchResults =
-        eventData.announceOnTelegram === true &&
-        status === EVENT_STATUS_ENDED &&
-        rawState?.endedAnnouncementArmed === true &&
-        !normalizeText(rawState?.endedText)
-          ? await resolveEndedMatchResults(eventData, {
-              firestore: getFirestore(),
-            })
-          : {};
-      const projection = buildEventTelegramProjection({
-        eventId: normalizedEventId,
-        eventData,
-        endedMatchResults,
-        state: rawState,
-        nowMs,
-      });
-      if (projection.action !== "project") {
-        return projection;
-      }
-      const guard = lockManager.getEventLockGuard(lockHandle);
-      const updates = addEventTelegramProjectionGuard({
-        updates: buildEventTelegramProjectionUpdates({
-          eventId: normalizedEventId,
-          projection,
-        }),
-        guard,
-      });
-      const { desiredUpdates, stateUpdates } =
-        splitEventTelegramProjectionUpdates({
-          eventId: normalizedEventId,
-          updates,
-        });
-      const refreshLock = async () => {
-        if (!(await lockManager.refreshEventLock(lockHandle))) {
-          throw createProjectionLockError(
-            normalizedEventId,
-            "event-telegram-lock-lost",
-          );
-        }
-      };
-      try {
-        if (Object.keys(desiredUpdates).length > 0) {
-          await refreshLock();
-          await getCommitDatabase().ref().update(desiredUpdates);
-          const dispatches = buildEventTelegramDispatches({
-            eventId: normalizedEventId,
-            desiredUpdates,
-          });
-          await Promise.all(dispatches.map(dispatchDelivery));
-          console.info("event:telegram:delivery-enqueued", {
-            eventId: normalizedEventId,
-            count: dispatches.length,
-          });
-        }
-        await refreshLock();
-        await getCommitDatabase().ref().update(stateUpdates);
-      } catch (error) {
-        if (isPermissionDeniedError(error)) {
-          throw createProjectionLockError(
-            normalizedEventId,
-            "event-telegram-lock-lost",
-          );
-        }
-        throw error;
-      }
-      return projection;
-    } finally {
-      stopLockHeartbeat();
-      await lockManager.releaseEventLock(lockHandle);
-    }
-  };
-};
-
-const projectEventTelegram = createEventTelegramProjector();
-
-const runEventTelegramProjection = async (eventId, trigger) => {
-  try {
-    await projectEventTelegram(eventId);
-  } catch (error) {
-    console.error("event:telegram:projection-error", {
-      eventId,
-      trigger,
-      code: error && error.code ? String(error.code) : "error",
-      error: error && error.message ? error.message : String(error),
-    });
-    throw error;
-  }
-};
-
-const onEventTelegramCreated = onValueCreated(
-  {
-    ...EVENT_TELEGRAM_TRIGGER_OPTIONS,
-    ref: "/events/{eventId}",
-  },
-  async (event) => {
-    const eventId = normalizeString(event.params.eventId);
-    const eventData = event.data.val();
-    if (!eventId || !isV2TelegramEvent(eventData)) {
-      return;
-    }
-    await runEventTelegramProjection(eventId, "created");
-  },
-);
-
-const onEventTelegramUpdated = onValueUpdated(
-  {
-    ...EVENT_TELEGRAM_TRIGGER_OPTIONS,
-    ref: "/events/{eventId}",
-  },
-  async (event) => {
-    const eventId = normalizeString(event.params.eventId);
-    const eventData = event.data.after.val();
-    if (!eventId || !isV2TelegramEvent(eventData)) {
-      return;
-    }
-    await runEventTelegramProjection(eventId, "updated");
-  },
-);
-
 module.exports = {
+  EVENT_TELEGRAM_DELIVERY_VERSION,
   EVENT_TELEGRAM_PROJECTION_GUARD_FIELD,
   EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
+  EVENT_TELEGRAM_PROJECTION_ROOT,
   addEventTelegramProjectionGuard,
   buildEndedState,
   buildEventSignature,
@@ -1003,13 +783,10 @@ module.exports = {
   buildEventTelegramProjection,
   buildEventTelegramProjectionUpdates,
   buildStartedState,
-  createEventTelegramProjector,
   formatPtEtUtcLine,
+  isV2TelegramEvent,
   loadEndedMatchResults,
-  onEventTelegramCreated,
-  onEventTelegramUpdated,
   parseProjectionState,
-  projectEventTelegram,
   renderEndedMessage,
   renderStartedMessage,
   renderUpcomingMessage,

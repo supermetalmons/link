@@ -37,6 +37,10 @@ import {
   enqueueInitialTelegramDelivery,
   type InitialTelegramDelivery,
 } from "./telegramDeliveryTasks.ts";
+import {
+  processEventProjectionTask,
+  sweepEventTelegramProjections,
+} from "./eventTelegramProjection.ts";
 
 const PROJECTION_SWEEP_LIMIT = 100;
 const PROJECTION_INPUT_RETRIES = 5;
@@ -321,16 +325,26 @@ export async function handleTelegramProjectionMessage(
       enqueueInitialTelegramDelivery(env, input));
   try {
     const rtdb = createRtdb(env);
-    const status =
-      task.kind === "automatch-telegram-projection"
-        ? await processAutomatchTask(task, rtdb, enqueueDelivery, now)
-        : await processRatingTask(
-            task,
-            rtdb,
-            createRating(env),
-            enqueueDelivery,
-            now,
-          );
+    let status: string;
+    if (task.kind === "automatch-telegram-projection") {
+      status = await processAutomatchTask(task, rtdb, enqueueDelivery, now);
+    } else if (task.kind === "event-telegram-projection") {
+      status = await processEventProjectionTask(
+        task,
+        rtdb,
+        createRating(env),
+        enqueueDelivery,
+        now,
+      );
+    } else {
+      status = await processRatingTask(
+        task,
+        rtdb,
+        createRating(env),
+        enqueueDelivery,
+        now,
+      );
+    }
     message.ack();
     logger.info(
       JSON.stringify({
@@ -595,7 +609,7 @@ async function sweepRatingProjections(
 export async function sweepTelegramProjections(
   env: Env,
   dependencies: ProjectionDependencies = {},
-): Promise<{ automatch: number; rating: number }> {
+): Promise<{ automatch: number; event: number; rating: number }> {
   const logger = dependencies.logger || console;
   const now = dependencies.now || Date.now;
   const createRtdb =
@@ -608,14 +622,35 @@ export async function sweepTelegramProjections(
   const nowMs = now();
   const rtdb = createRtdb(env);
   const rating = createRating(env);
-  const [automatch, ratingCount] = await Promise.allSettled([
+  const [automatch, event, ratingCount] = await Promise.allSettled([
     sweepAutomatchProjections(env, rtdb, logger, nowMs),
+    sweepEventTelegramProjections(
+      env.TELEGRAM_PROJECTION_QUEUE,
+      rtdb,
+      nowMs,
+    ).catch((error) => {
+      logger.error(
+        JSON.stringify({
+          event: "telegram_projection_event_sweep_failed",
+          code: error instanceof Error ? error.message : "unknown",
+        }),
+      );
+      throw error;
+    }),
     sweepRatingProjections(env, rating, logger, nowMs),
   ]);
-  if (automatch.status === "rejected" || ratingCount.status === "rejected") {
+  if (
+    automatch.status === "rejected" ||
+    event.status === "rejected" ||
+    ratingCount.status === "rejected"
+  ) {
     throw new Error("telegram-projection-sweep-failed");
   }
-  return { automatch: automatch.value, rating: ratingCount.value };
+  return {
+    automatch: automatch.value,
+    event: event.value,
+    rating: ratingCount.value,
+  };
 }
 
 export async function handleTelegramProjectionSweep(
@@ -626,7 +661,9 @@ export async function handleTelegramProjectionSweep(
   console.info(
     JSON.stringify({
       event: "telegram_projection_sweep_completed",
-      ...result,
+      automatch: result.automatch,
+      eventCount: result.event,
+      rating: result.rating,
     }),
   );
 }

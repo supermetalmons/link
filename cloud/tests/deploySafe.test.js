@@ -23,15 +23,7 @@ const {
 
 const repositoryRoot = path.resolve(__dirname, "..", "..");
 const exportedFunctionNames = ["createEvent", "syncEventState"];
-const expectedReleaseFunctionBarriers = [
-  ["projectEventTelegramOnCreated", "projectEventTelegramOnUpdated"],
-];
-const eventDomainFunctionNames = [
-  "projectProfileGamesOnEventWritten",
-  "projectProfileEventPrizesOnPrizeWritten",
-  "projectProfileEventPrizesOnMergeTargetWritten",
-];
-
+const expectedReleaseFunctionBarriers = [];
 test("argument parsing supports full releases and positional maintenance", () => {
   assert.deepEqual(
     parseArgs([
@@ -153,40 +145,18 @@ test("batching is flat and covers the selection exactly once", () => {
   }
 });
 
-test("full releases preserve Telegram dependency barriers at every batch size", () => {
+test("full releases batch every retained function exactly once", () => {
   const functionNames = readExportedFunctionNames();
-  const prerequisiteFunctionNames = FULL_RELEASE_FUNCTION_BARRIERS.flat();
-  const remainingFunctionNames = functionNames.filter(
-    (functionName) => !prerequisiteFunctionNames.includes(functionName),
-  );
 
   assert.deepEqual(
     FULL_RELEASE_FUNCTION_BARRIERS,
     expectedReleaseFunctionBarriers,
   );
-  for (const prerequisiteFunctionName of prerequisiteFunctionNames) {
-    assert.equal(
-      functionNames.includes(prerequisiteFunctionName),
-      true,
-      prerequisiteFunctionName,
-    );
-  }
 
   for (const batchSize of [1, 2, DEFAULT_BATCH_SIZE, 100]) {
     const batches = buildReleaseDeploymentBatches(functionNames, batchSize);
     const flattenedFunctionNames = batches.flatMap(
       (batch) => batch.functionNames,
-    );
-    const batchIndexByFunctionName = new Map(
-      batches.flatMap((batch, batchIndex) =>
-        batch.functionNames.map((functionName) => [functionName, batchIndex]),
-      ),
-    );
-    const projectorBatchIndexes = FULL_RELEASE_FUNCTION_BARRIERS[0].map(
-      (functionName) => batchIndexByFunctionName.get(functionName),
-    );
-    const remainingBatchIndexes = remainingFunctionNames.map((functionName) =>
-      batchIndexByFunctionName.get(functionName),
     );
 
     assert.deepEqual(
@@ -197,21 +167,6 @@ test("full releases preserve Telegram dependency barriers at every batch size", 
       new Set(flattenedFunctionNames).size,
       flattenedFunctionNames.length,
     );
-    assert.ok(
-      Math.max(...projectorBatchIndexes) < Math.min(...remainingBatchIndexes),
-    );
-    const batchIndex = (functionName) =>
-      batchIndexByFunctionName.get(functionName);
-    for (const eventDomainFunctionName of eventDomainFunctionNames) {
-      assert.ok(
-        batchIndex("projectEventTelegramOnCreated") <
-          batchIndex(eventDomainFunctionName),
-      );
-      assert.ok(
-        batchIndex("projectEventTelegramOnUpdated") <
-          batchIndex(eventDomainFunctionName),
-      );
-    }
     for (const [index, batch] of batches.entries()) {
       assert.equal(batch.batchIndex, index);
       assert.equal(batch.batchCount, batches.length);

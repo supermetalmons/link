@@ -9,16 +9,14 @@ const desiredState = require("../functions/telegram/desiredState");
 const deliveryPolicy = require("../functions/telegram/deliveryPolicy");
 const queueBridge = require("../functions/telegram/queueBridge");
 const taskIdentity = require("../functions/telegram/taskIdentity");
+const eventProjectionCore = require("../functions/telegram/eventProjectionCore");
 
-test("Telegram compatibility facades delegate to focused modules", () => {
-  for (const [facadePath, modulePath] of [
-    [
-      "../functions/eventTelegramAnnouncements",
-      "../functions/telegram/eventAnnouncements",
-    ],
-  ]) {
-    assert.strictEqual(require(facadePath), require(modulePath));
-  }
+test("event Telegram projection is exposed through the shared core", () => {
+  assert.equal(
+    typeof eventProjectionCore.buildEventTelegramProjection,
+    "function",
+  );
+  assert.equal(typeof eventProjectionCore.loadEndedMatchResults, "function");
 });
 
 test("delivery exports use the extracted engine and desired-state modules", () => {

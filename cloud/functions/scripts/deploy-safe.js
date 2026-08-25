@@ -19,12 +19,7 @@ const NON_FUNCTION_DEPLOY_TARGETS = Object.freeze([
   ...DATABASE_DEPLOY_TARGETS,
   ...FIRESTORE_DEPLOY_TARGETS,
 ]);
-const FULL_RELEASE_FUNCTION_BARRIERS = Object.freeze([
-  Object.freeze([
-    "projectEventTelegramOnCreated",
-    "projectEventTelegramOnUpdated",
-  ]),
-]);
+const FULL_RELEASE_FUNCTION_BARRIERS = Object.freeze([]);
 
 const uniqueSorted = (items) => Array.from(new Set(items)).sort();
 

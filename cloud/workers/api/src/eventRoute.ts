@@ -34,6 +34,7 @@ import {
   createGameplayRepository,
   type GameplayRepository,
 } from "./gameplayRepository.ts";
+import { createEventTelegramProjectionRepository } from "./eventTelegramProjectionProducer.ts";
 import { readBoundedJson } from "./http.ts";
 import {
   createEvent,
@@ -157,7 +158,11 @@ export async function handleEventRoute(
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
     const body = await readEventBody(request, pathname);
-    const repository = dependencies.repository || createGameplayRepository(env);
+    const repository = createEventTelegramProjectionRepository(
+      env,
+      dependencies.repository || createGameplayRepository(env),
+      { schedule: (work) => ctx.waitUntil(work) },
+    );
     const participation = {
       ...dependencies.participation,
       signal,
@@ -184,6 +189,7 @@ export async function handleEventRoute(
       }
       operation = createEvent(env, identity, body, {
         ...dependencies.control,
+        repository,
         signal,
       });
     } else if (pathname === "/events/start/postpone") {
@@ -192,6 +198,7 @@ export async function handleEventRoute(
       }
       operation = postponeEventStart(env, identity, body, {
         ...dependencies.control,
+        repository,
         signal,
       });
     } else if (pathname === "/events/matches/winners/disqualify") {
@@ -200,6 +207,7 @@ export async function handleEventRoute(
       }
       operation = disqualifyEventMatchWinners(env, identity, body, {
         ...dependencies.control,
+        repository,
         signal,
       });
     } else {
@@ -208,6 +216,7 @@ export async function handleEventRoute(
       }
       operation = syncEventState(env, identity, body, {
         ...dependencies.control,
+        repository,
         signal,
       });
     }

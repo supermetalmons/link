@@ -19,10 +19,6 @@ const {
   onProfileEventPrizeWritten,
   onProfileMergeTargetWritten,
 } = require("./eventPrizeProjector");
-const {
-  onEventTelegramCreated,
-  onEventTelegramUpdated,
-} = require("./eventTelegramAnnouncements");
 
 exports.withdrawEventPrize = withdrawEventPrize;
 exports.projectProfileGamesOnInviteCreated = onInviteCreated;
@@ -40,5 +36,3 @@ exports.projectProfileGamesOnEventWritten = onEventWritten;
 exports.projectProfileEventPrizesOnPrizeWritten = onProfileEventPrizeWritten;
 exports.projectProfileEventPrizesOnMergeTargetWritten =
   onProfileMergeTargetWritten;
-exports.projectEventTelegramOnCreated = onEventTelegramCreated;
-exports.projectEventTelegramOnUpdated = onEventTelegramUpdated;

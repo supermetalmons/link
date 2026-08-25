@@ -2,7 +2,7 @@
 
 Run commands from the repository root. See the repository [architecture and command map](../README.md) for package boundaries and the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md) for API release, maintenance, and rollback procedures.
 
-Firebase retains the remaining invite, profile, event, and prize projection triggers, event-prize withdrawal, and the existing Firebase data stores. The API Worker owns auth, profile and leaderboard reads, username mutation, mining, gameplay, rating-driven profile-game projection, event control and progress Workflows, X callback, and Worker-backed Telegram delivery.
+Firebase retains the remaining invite, profile, event profile-game, and prize projection triggers, event-prize withdrawal, and the existing Firebase data stores. The API Worker owns auth, profile and leaderboard reads, username mutation, mining, gameplay, rating-driven profile-game projection, event control and progress Workflows, X callback, event Telegram projection, and Worker-backed Telegram delivery.
 
 ## Setup
 
@@ -55,6 +55,8 @@ node cloud/admin/cleanupAuthMethodRevocations.js --project mons-link --execute
 ```
 
 ## Telegram recovery and announcements
+
+Event Telegram projection runs through `mons-link-telegram-projection`. Every supported API or Workflow mutation writes `telegramProjectionOutbox/event/{eventId}` and increments `eventTelegramProjectionGenerations/{eventId}` atomically with the event update. The five-minute Worker schedule recovers pending markers; direct Firebase client event writes are disabled.
 
 Restore protected operator credentials only when needed:
 

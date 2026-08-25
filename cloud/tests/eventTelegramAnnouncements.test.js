@@ -12,16 +12,16 @@ const {
   buildEventSignature,
   buildEventTelegramProjection,
   buildEventTelegramProjectionUpdates,
-  createEventTelegramProjector: createRuntimeEventTelegramProjector,
+  buildEventTelegramDispatches,
   loadEndedMatchResults,
   renderUpcomingMessage,
-} = require("../functions/eventTelegramAnnouncements");
+  splitEventTelegramProjectionUpdates,
+} = require("../functions/telegram/eventProjectionCore");
 const {
   EVENT_LOCK_ROOT,
   EVENT_LOCK_TTL_MS,
   createEventLockManager,
 } = require("../functions/eventLocks");
-const firebaseAdmin = require("../functions/firebaseAdmin");
 
 const EVENT_ID = "EV2026";
 const NOW_MS = Date.UTC(2026, 7, 7, 12, 0, 0);
@@ -157,12 +157,90 @@ const ENDED_MATCH_RESULTS = {
 };
 const ARMED_PROJECTION_STATE = { endedAnnouncementArmed: true };
 
-const createEventTelegramProjector = (dependencies = {}) =>
-  createRuntimeEventTelegramProjector({
-    ...dependencies,
-    dispatchDelivery:
-      dependencies.dispatchDelivery || (async () => ({ enqueued: true })),
-  });
+const createProjectionError = (eventId, code) => {
+  const error = new Error(`${code}:${eventId}`);
+  error.code = code;
+  return error;
+};
+
+const createEventTelegramProjector = (dependencies = {}) => {
+  const database = dependencies.database;
+  const commitDatabase = dependencies.commitDatabase || database;
+  const lockManager =
+    dependencies.lockManager || createRuntimeLockManager(database);
+  const resolveEndedMatchResults =
+    dependencies.loadEndedMatchResults || loadEndedMatchResults;
+  const dispatchDelivery =
+    dependencies.dispatchDelivery || (async () => ({ enqueued: true }));
+  return async (eventId, nowMs = Date.now()) => {
+    const lockHandle = await lockManager.acquireEventLock(
+      eventId,
+      "event-telegram-projector",
+    );
+    if (!lockHandle) {
+      throw createProjectionError(eventId, "event-telegram-lock-busy");
+    }
+    const stopHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
+    try {
+      const eventData = (await database.ref(`events/${eventId}`).once()).val();
+      const rawState = (
+        await database.ref(`eventTelegramProjections/${eventId}`).once()
+      ).val();
+      const endedMatchResults =
+        eventData?.announceOnTelegram === true &&
+        eventData?.status === "ended" &&
+        rawState?.endedAnnouncementArmed === true &&
+        !rawState?.endedText
+          ? await resolveEndedMatchResults(eventData, {
+              readRatingUpdate: async () => null,
+            })
+          : {};
+      const projection = buildEventTelegramProjection({
+        eventId,
+        eventData,
+        endedMatchResults,
+        state: rawState,
+        nowMs,
+      });
+      if (projection.action !== "project") {
+        return projection;
+      }
+      const updates = addEventTelegramProjectionGuard({
+        updates: buildEventTelegramProjectionUpdates({ eventId, projection }),
+        guard: lockManager.getEventLockGuard(lockHandle),
+      });
+      const { desiredUpdates, stateUpdates } =
+        splitEventTelegramProjectionUpdates({ eventId, updates });
+      const refreshLock = async () => {
+        if (!(await lockManager.refreshEventLock(lockHandle))) {
+          throw createProjectionError(eventId, "event-telegram-lock-lost");
+        }
+      };
+      try {
+        if (Object.keys(desiredUpdates).length > 0) {
+          await refreshLock();
+          await commitDatabase.ref().update(desiredUpdates);
+          const dispatches = buildEventTelegramDispatches({
+            eventId,
+            desiredUpdates,
+          });
+          await Promise.all(dispatches.map(dispatchDelivery));
+        }
+        await refreshLock();
+        await commitDatabase.ref().update(stateUpdates);
+      } catch (error) {
+        if (String(error?.code).includes("PERMISSION_DENIED")) {
+          throw createProjectionError(eventId, "event-telegram-lock-lost");
+        }
+        throw error;
+      }
+      return projection;
+    } finally {
+      stopHeartbeat();
+      await lockManager.releaseEventLock(lockHandle);
+    }
+  };
+};
 
 const project = (eventData, state = null, nowMs = NOW_MS) =>
   buildEventTelegramProjection({
@@ -779,24 +857,12 @@ test("loads host and guest scores from the completed rating result", async () =>
     },
   };
   const paths = [];
-  const firestore = {
-    collection(name) {
-      assert.equal(name, "ratingUpdates");
-      return {
-        doc(id) {
-          paths.push(id);
-          return {
-            get: async () => ({
-              exists: Object.hasOwn(values, id),
-              data: () => values[id],
-            }),
-          };
-        },
-      };
-    },
+  const readRatingUpdate = async (id) => {
+    paths.push(id);
+    return values[id] || null;
   };
   const result = await loadEndedMatchResults(eventData, {
-    firestore,
+    readRatingUpdate,
   });
 
   assert.deepEqual(paths, ["auto_final__auto_final"]);
@@ -804,9 +870,10 @@ test("loads host and guest scores from the completed rating result", async () =>
     "round:0:0_0": { status: "scored", hostScore: 9, guestScore: 4 },
   });
   delete values.auto_final__auto_final;
-  assert.deepEqual(await loadEndedMatchResults(eventData, { firestore }), {
-    "round:0:0_0": { status: "unavailable" },
-  });
+  assert.deepEqual(
+    await loadEndedMatchResults(eventData, { readRatingUpdate }),
+    { "round:0:0_0": { status: "unavailable" } },
+  );
 
   const disqualified = await loadEndedMatchResults(
     buildEvent({
@@ -824,10 +891,8 @@ test("loads host and guest scores from the completed rating result", async () =>
       },
     }),
     {
-      firestore: {
-        collection() {
-          throw new Error("DQ matches must not load rating results");
-        },
+      readRatingUpdate() {
+        throw new Error("DQ matches must not load rating results");
       },
     },
   );
@@ -1028,66 +1093,25 @@ test("the runtime projector does not backfill an unarmed ended event", async () 
   );
 });
 
-test("the default projection commit uses the down-scoped RTDB writer", async () => {
-  const database = createRuntimeDatabase({
-    [`events/${EVENT_ID}`]: buildEvent(),
-  });
-  const originalDatabaseWithAuthOverride =
-    firebaseAdmin.databaseWithAuthOverride;
-  let writerConfig = null;
-  firebaseAdmin.databaseWithAuthOverride = (appName, authOverride) => {
-    writerConfig = { appName, authOverride };
-    return database;
-  };
-  try {
-    const projector = createEventTelegramProjector({ database });
-    const projection = await projector(EVENT_ID, NOW_MS);
-    assert.equal(projection.action, "project");
-  } finally {
-    firebaseAdmin.databaseWithAuthOverride = originalDatabaseWithAuthOverride;
-  }
-  assert.deepEqual(writerConfig, {
-    appName: "event-telegram-projection-writer",
-    authOverride: {
-      uid: "event-telegram-projector",
-      token: { eventTelegramProjectionWriter: true },
-    },
-  });
+test("the shared projection core has no Firebase runtime dependencies", () => {
+  const source = fs.readFileSync(
+    path.resolve(__dirname, "../functions/telegram/eventProjectionCore.js"),
+    "utf8",
+  );
+  assert.equal(source.includes("firebase-admin"), false);
+  assert.equal(source.includes("firebase-functions"), false);
+  assert.equal(source.includes("queueBridge"), false);
 });
 
-test("RTDB rules bind desired message keys to the guarded event and channel", () => {
+test("RTDB rules index Worker event outboxes and deny client projection writes", () => {
   const rules = JSON.parse(fs.readFileSync(databaseRulesPath, "utf8"));
-  const writeRule =
-    rules.rules.telegramMessages["$messageKey"].desired[".write"];
-  const eventIdExpression =
-    "newData.child('eventTelegramProjectionGuard').child('eventId').val()";
-
-  assert.equal(
-    writeRule.includes("newData.child('destination').val() === 'community'"),
-    true,
-  );
-  assert.equal(
-    writeRule.includes("newData.child('destination').val() === 'events'"),
-    false,
-  );
-  assert.equal(
-    writeRule.includes(
-      `$messageKey === 'event:' + ${eventIdExpression} + ':upcoming'`,
-    ),
-    true,
-  );
-  assert.equal(
-    writeRule.includes(
-      `$messageKey === 'event:' + ${eventIdExpression} + ':started'`,
-    ),
-    true,
-  );
-  assert.equal(
-    writeRule.includes(
-      `$messageKey === 'event:' + ${eventIdExpression} + ':ended'`,
-    ),
-    true,
-  );
+  assert.deepEqual(rules.rules.telegramProjectionOutbox.event[".indexOn"], [
+    "updatedAtMs",
+  ]);
+  assert.equal(rules.rules.eventTelegramProjectionLocks, undefined);
+  assert.equal(rules.rules.eventTelegramProjections, undefined);
+  assert.equal(rules.rules.telegramMessages["$messageKey"].desired, undefined);
+  assert.equal(rules.rules.events["$eventId"][".write"], false);
 });
 
 test("guarded writes reject cross-event and unsupported-channel message keys", async (t) => {

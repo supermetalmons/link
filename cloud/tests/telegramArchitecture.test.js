@@ -172,16 +172,52 @@ test("event Telegram projection uses a dedicated lock without changing domain lo
   assert.equal(eventsSource.includes("EVENT_TELEGRAM_PROJECTION_LOCK"), false);
 
   const projectorSource = fs.readFileSync(
-    path.join(functionsRoot, "telegram", "eventAnnouncements.js"),
+    path.join(
+      repositoryRoot,
+      "cloud/workers/api/src/eventTelegramProjection.ts",
+    ),
     "utf8",
   );
-  assert.equal(projectorSource.includes('require("../eventLocks")'), true);
-  assert.equal(projectorSource.includes("createEventLockManager"), true);
-  assert.equal(projectorSource.includes("eventTelegramProjectionLocks"), true);
+  assert.equal(projectorSource.includes("createEventLockManagerCore"), true);
   assert.equal(
     projectorSource.includes("EVENT_TELEGRAM_PROJECTION_LOCK_ROOT"),
     true,
   );
+  const coreSource = fs.readFileSync(
+    path.join(functionsRoot, "telegram", "eventProjectionCore.js"),
+    "utf8",
+  );
+  assert.equal(coreSource.includes("eventTelegramProjectionLocks"), true);
+});
+
+test("event HTTP and Workflow runtimes install the outbox producer", () => {
+  for (const relativePath of [
+    "cloud/workers/api/src/eventRoute.ts",
+    "cloud/workers/api/src/eventProgress.ts",
+  ]) {
+    const source = fs.readFileSync(
+      path.join(repositoryRoot, relativePath),
+      "utf8",
+    );
+    assert.equal(
+      source.includes("createEventTelegramProjectionRepository"),
+      true,
+      relativePath,
+    );
+  }
+});
+
+test("Worker tests exercise the production event projector", () => {
+  const source = fs.readFileSync(
+    path.join(
+      repositoryRoot,
+      "cloud/workers/api/test/eventTelegramProjection.test.ts",
+    ),
+    "utf8",
+  );
+  assert.equal(source.includes("processEventProjectionTask"), true);
+  assert.equal(source.includes("newer generation fences stale"), true);
+  assert.equal(source.includes("successor marker survives"), true);
 });
 
 test("admin Telegram scripts use durable aliases and document ADC setup", () => {
@@ -223,14 +259,14 @@ test("admin credential failures include actionable ADC setup help", () => {
   assert.equal(addApplicationDefaultCredentialHelp(unrelated), unrelated);
 });
 
-test("all retained Firebase Telegram functions are exported", () => {
+test("event Telegram projection is no longer exported by Firebase", () => {
   const functionIndex = require("../functions/index");
   const exportNames = [
     "projectEventTelegramOnCreated",
     "projectEventTelegramOnUpdated",
   ];
   for (const exportName of exportNames) {
-    assert.equal(typeof functionIndex[exportName], "function", exportName);
+    assert.equal(functionIndex[exportName], undefined, exportName);
   }
   assert.equal(functionIndex.dispatchTelegramDelivery, undefined);
   assert.equal(functionIndex.dispatchTelegramManualRecovery, undefined);

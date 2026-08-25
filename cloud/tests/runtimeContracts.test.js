@@ -17,8 +17,6 @@ const httpExportNames = [];
 const taskQueueExportNames = [];
 
 const eventExportNames = [
-  "projectEventTelegramOnCreated",
-  "projectEventTelegramOnUpdated",
   "projectProfileEventPrizesOnMergeTargetWritten",
   "projectProfileEventPrizesOnPrizeWritten",
   "projectProfileGamesOnAutomatchQueueWritten",
@@ -203,36 +201,6 @@ Object.assign(expectedEndpointContracts, {
     },
     { availableMemoryMb: 256, maxInstances: 10, concurrency: 20 },
   ),
-  projectEventTelegramOnCreated: runtimeContract(
-    {
-      type: "event",
-      eventType: "google.firebase.database.ref.v1.created",
-      pathPatterns: { ref: "events/{eventId}", instance: "*" },
-      retry: true,
-    },
-    {
-      availableMemoryMb: 256,
-      maxInstances: 5,
-      concurrency: 20,
-      cpu: 1,
-      secrets: ["TELEGRAM_QUEUE_BRIDGE_SECRET"],
-    },
-  ),
-  projectEventTelegramOnUpdated: runtimeContract(
-    {
-      type: "event",
-      eventType: "google.firebase.database.ref.v1.updated",
-      pathPatterns: { ref: "events/{eventId}", instance: "*" },
-      retry: true,
-    },
-    {
-      availableMemoryMb: 256,
-      maxInstances: 5,
-      concurrency: 20,
-      cpu: 1,
-      secrets: ["TELEGRAM_QUEUE_BRIDGE_SECRET"],
-    },
-  ),
 });
 
 const normalizeEndpoint = (endpoint) => {
@@ -290,7 +258,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 15);
+  assert.equal(expectedExportNames.length, 13);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

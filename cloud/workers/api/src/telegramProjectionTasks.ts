@@ -17,8 +17,16 @@ export type RatingTelegramProjectionTask = {
   operationId: string;
 };
 
+export type EventTelegramProjectionTask = {
+  kind: "event-telegram-projection";
+  eventId: string;
+  requestId: string;
+};
+
 export type TelegramProjectionTask =
-  AutomatchTelegramProjectionTask | RatingTelegramProjectionTask;
+  | AutomatchTelegramProjectionTask
+  | EventTelegramProjectionTask
+  | RatingTelegramProjectionTask;
 
 function toRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -63,6 +71,17 @@ export function parseTelegramProjectionTask(
     return exactKeys(task, ["kind", "operationId"]) &&
       isSafeFirestoreDocumentId(task.operationId)
       ? { kind: task.kind, operationId: task.operationId }
+      : null;
+  }
+  if (task.kind === "event-telegram-projection") {
+    return exactKeys(task, ["kind", "eventId", "requestId"]) &&
+      validRtdbId(task.eventId) &&
+      validRtdbId(task.requestId)
+      ? {
+          kind: task.kind,
+          eventId: task.eventId,
+          requestId: task.requestId,
+        }
       : null;
   }
   return null;

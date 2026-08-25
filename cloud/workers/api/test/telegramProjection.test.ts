@@ -172,6 +172,18 @@ test("projection tasks require exact safe payloads", () => {
       operationId: "auto_example__auto_example",
     },
   );
+  assert.deepEqual(
+    parseTelegramProjectionTask({
+      kind: "event-telegram-projection",
+      eventId: "event-1",
+      requestId: "request-1",
+    }),
+    {
+      kind: "event-telegram-projection",
+      eventId: "event-1",
+      requestId: "request-1",
+    },
+  );
   assert.equal(
     parseTelegramProjectionTask({
       kind: "rating-telegram-projection",
@@ -525,7 +537,7 @@ test("scheduled recovery batches both pending outbox kinds", async () => {
     createRating: () => ratingRepository(ratingUpdate(), marks),
     now: () => 600_000,
   });
-  assert.deepEqual(result, { automatch: 1, rating: 1 });
+  assert.deepEqual(result, { automatch: 1, event: 0, rating: 1 });
   assert.deepEqual(
     batches.flat().sort((left, right) => left.kind.localeCompare(right.kind)),
     [
@@ -579,7 +591,7 @@ test("recovery takes current records and reports scan failures", async () => {
       }),
     /telegram-projection-sweep-failed/,
   );
-  assert.equal(logs.length, 1);
+  assert.equal(logs.length, 2);
   assert.deepEqual(batches.flat(), [
     {
       kind: "rating-telegram-projection",
@@ -613,7 +625,7 @@ test("recovery takes current records and reports scan failures", async () => {
     createRating: () => ratingRepository(null, []),
     now: () => 600_000,
   });
-  assert.deepEqual(recovered, { automatch: 1, rating: 0 });
+  assert.deepEqual(recovered, { automatch: 1, event: 0, rating: 0 });
   assert.deepEqual(batches.flat(), [
     {
       kind: "automatch-telegram-projection",
@@ -723,7 +735,7 @@ test("recovery removes malformed markers from the timestamp index", async () => 
     createRating: () => ratingRepository(null, []),
     now: () => 600_000,
   });
-  assert.deepEqual(result, { automatch: 0, rating: 0 });
+  assert.deepEqual(result, { automatch: 0, event: 0, rating: 0 });
   for (const inviteId of Object.keys(records)) {
     const record = store.read(
       `telegramProjectionOutbox/automatch/${inviteId}`,
@@ -759,7 +771,7 @@ test("recovery claims bounded pages sequentially", async () => {
       createRating: () => rating,
       now: () => 600_000,
     }),
-    { automatch: 0, rating: 0 },
+    { automatch: 0, event: 0, rating: 0 },
   );
   assert.equal(maxActiveClaims, 1);
 });
