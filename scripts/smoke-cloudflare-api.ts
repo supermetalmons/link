@@ -9,7 +9,10 @@ const ORIGIN = "https://mons.link";
 const PREVIEW_HOST_PATTERN =
   /^[0-9a-f]{8}-mons-link-api\.lil-org\.workers\.dev$/;
 
-type Options = { baseUrl: string; smokeSol: string };
+type Options = {
+  baseUrl: string;
+  smokeSol: string;
+};
 type Dependencies = {
   fetch: typeof fetch;
   randomState: () => string;
@@ -233,7 +236,9 @@ async function smokeApi(
     "/events/create",
     "/events/start/postpone",
     "/events/matches/winners/disqualify",
+    "/events/prize-selections/toggle",
     "/events/state/sync",
+    "/profiles/custom",
   ]) {
     const eventRoute = await request(
       `${options.baseUrl}${path}`,
@@ -252,7 +257,7 @@ async function smokeApi(
       Array.isArray(eventPayload) ||
       (eventPayload as { error?: unknown }).error !== "unauthenticated"
     ) {
-      throw new Error("Event route smoke response was invalid.");
+      throw new Error("Authenticated route smoke response was invalid.");
     }
   }
 

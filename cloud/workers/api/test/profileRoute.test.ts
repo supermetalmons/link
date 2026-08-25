@@ -4,6 +4,10 @@ import { AuthApiFailure } from "../src/authErrors.ts";
 import { handleProfileRoute, validLookupId } from "../src/profileRoute.ts";
 import type { ProfileRepository } from "../src/profileRepository.ts";
 import type {
+  ProfileCustomizationRepository,
+  ProfileCustomizationUpdateOutcome,
+} from "../src/profileCustomizationRepository.ts";
+import type {
   UsernameEditOutcome,
   UsernameRepository,
 } from "../src/usernameRepository.ts";
@@ -56,6 +60,18 @@ function usernameRepository(
     editUsername: async () => outcome,
   };
 }
+
+function customizationRepository(
+  outcome: ProfileCustomizationUpdateOutcome = "updated",
+): ProfileCustomizationRepository {
+  return { updateCustomization: async () => outcome };
+}
+
+const customizationProfile = {
+  documentName: "profile-document",
+  eth: "",
+  sol: "",
+};
 
 function request(
   path: string,
@@ -197,6 +213,31 @@ test("authenticates before parsing and strictly validates request bodies", async
     );
     assert.equal(response.status, 400);
   }
+  for (const body of [
+    {},
+    { field: "unknown", value: true },
+    { field: "emoji", value: 7 },
+    { field: "aura", value: "rainbow" },
+    { field: "cardBackgroundId", value: -1 },
+    {
+      field: "emojiAndAura",
+      value: { emoji: 7, aura: "rainbow" },
+    },
+    { field: "emojiAndAura", value: { emoji: 7, aura: "", extra: true } },
+    { field: "profileCounter", value: "xp" },
+    { field: "tutorialCompleted", value: true, extra: true },
+  ]) {
+    const response = await handleProfileRoute(
+      request("/profiles/custom", body),
+      TELEGRAM_TEST_ENV,
+      ctx,
+      {
+        customizationRepository: customizationRepository(),
+        verifyIdentity: async () => identity,
+      },
+    );
+    assert.equal(response.status, 400);
+  }
   assert.equal(reads, 0);
 });
 
@@ -322,6 +363,137 @@ test("returns exact lookup and leaderboard responses with the verified token", a
   ]);
 });
 
+test("updates one exact customization field for the verified login", async () => {
+  const calls: Array<[string, unknown]> = [];
+  const response = await handleProfileRoute(
+    request("/profiles/custom", { field: "completedProblems", value: ["1"] }),
+    TELEGRAM_TEST_ENV,
+    ctx,
+    {
+      customizationRepository: {
+        updateCustomization: async (uid, update) => {
+          calls.push([uid, update]);
+          return "updated";
+        },
+      },
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await responseJson(response), { ok: true });
+  assert.deepEqual(calls, [
+    ["firebase-uid", { field: "completedProblems", value: ["1"] }],
+  ]);
+});
+
+test("authorizes protected customization before writing", async () => {
+  let writes = 0;
+  const response = await handleProfileRoute(
+    request("/profiles/custom", { field: "cardBackgroundId", value: 100 }),
+    TELEGRAM_TEST_ENV,
+    ctx,
+    {
+      authorizeCustomization: async () => {
+        throw new AuthApiFailure(
+          403,
+          "permission-denied",
+          "profile-customization-not-owned",
+        );
+      },
+      customizationRepository: {
+        updateCustomization: async (_uid, _update, authorize) => {
+          await authorize(customizationProfile);
+          writes++;
+          return "updated";
+        },
+      },
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 403);
+  assert.equal(writes, 0);
+});
+
+test("maps missing and conflicting customization owners", async () => {
+  for (const [outcome, status, error, message] of [
+    ["profile-not-found", 404, "not-found", "profile-not-found"],
+    [
+      "login-profile-conflict",
+      409,
+      "failed-precondition",
+      "login-profile-conflict",
+    ],
+  ] as const) {
+    const response = await handleProfileRoute(
+      request("/profiles/custom", { field: "tutorialCompleted", value: true }),
+      TELEGRAM_TEST_ENV,
+      ctx,
+      {
+        customizationRepository: customizationRepository(outcome),
+        verifyIdentity: async () => identity,
+      },
+    );
+    assert.equal(response.status, status);
+    assert.deepEqual(await responseJson(response), {
+      ok: false,
+      error,
+      message,
+    });
+  }
+});
+
+test("does not rate limit customization", async () => {
+  let writes = 0;
+  const response = await handleProfileRoute(
+    request("/profiles/custom", { field: "tutorialCompleted", value: true }),
+    {
+      ...TELEGRAM_TEST_ENV,
+      AUTH_RATE_LIMITER: {
+        limit: async () => {
+          throw new Error("unexpected rate limiter call");
+        },
+      },
+    },
+    ctx,
+    {
+      customizationRepository: {
+        updateCustomization: async () => {
+          writes++;
+          return "updated";
+        },
+      },
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(writes, 1);
+});
+
+test("does not write customization after its request deadline", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let writes = 0;
+  const response = await handleProfileRoute(
+    request("/profiles/custom", { field: "tutorialCompleted", value: true }),
+    TELEGRAM_TEST_ENV,
+    ctx,
+    {
+      authorizeCustomization: async () => undefined,
+      customizationRepository: {
+        updateCustomization: async (_uid, _update, authorize) => {
+          await authorize(customizationProfile);
+          writes++;
+          return "updated";
+        },
+      },
+      customizationSignal: controller.signal,
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 503);
+  assert.equal(writes, 0);
+});
+
 test("sanitizes repository failures and router dispatches both paths", async () => {
   const logged: string[] = [];
   const failure = await handleProfileRoute(
@@ -371,6 +543,27 @@ test("sanitizes repository failures and router dispatches both paths", async () 
     "profile-service-unavailable",
   ]);
 
+  const customizationFailure = await handleProfileRoute(
+    request("/profiles/custom", { field: "tutorialCompleted", value: true }),
+    TELEGRAM_TEST_ENV,
+    ctx,
+    {
+      customizationRepository: {
+        updateCustomization: async () => {
+          throw new Error("private-firestore-detail");
+        },
+      },
+      logFailure: (kind) => logged.push(kind),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(customizationFailure.status, 503);
+  assert.deepEqual(await responseJson(customizationFailure), {
+    ok: false,
+    error: "unavailable",
+    message: "profile-service-unavailable",
+  });
+
   const routed = await handleRequest(
     request("/profiles/lookup", { kind: "profile", id: "profile-1" }),
     TELEGRAM_TEST_ENV,
@@ -398,4 +591,18 @@ test("sanitizes repository failures and router dispatches both paths", async () 
   );
   assert.equal(usernameRouted.status, 200);
   assert.deepEqual(await responseJson(usernameRouted), { ok: true });
+
+  const customizationRouted = await handleRequest(
+    request("/profiles/custom", { field: "profileCounter", value: "mp" }),
+    TELEGRAM_TEST_ENV,
+    {
+      profile: {
+        customizationRepository: customizationRepository(),
+        verifyIdentity: async () => identity,
+      },
+    },
+    ctx,
+  );
+  assert.equal(customizationRouted.status, 200);
+  assert.deepEqual(await responseJson(customizationRouted), { ok: true });
 });

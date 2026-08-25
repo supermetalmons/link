@@ -53,7 +53,37 @@ export interface LeaderboardReadResponse {
   profiles: CompletePlayerProfile[];
 }
 
+export type ProfileCustomizationField =
+  | "emojiAndAura"
+  | "cardBackgroundId"
+  | "cardSubtitleId"
+  | "profileCounter"
+  | "profileMons"
+  | "cardStickers"
+  | "completedProblems"
+  | "tutorialCompleted";
+
+export type ProfileCustomizationUpdateRequest =
+  | {
+      field: "emojiAndAura";
+      value: { emoji: number; aura: "" | "rainbow" };
+    }
+  | {
+      field: "cardBackgroundId" | "cardSubtitleId";
+      value: number;
+    }
+  | { field: "profileCounter"; value: "gp" | "mp" }
+  | { field: "profileMons" | "cardStickers"; value: string }
+  | { field: "completedProblems"; value: string[] }
+  | { field: "tutorialCompleted"; value: boolean };
+
+export type ProfileCustomizationUpdateResponse = { ok: true };
+
 export const LEADERBOARD_READ_TYPES: readonly LeaderboardReadType[];
+export const PROFILE_CUSTOMIZATION_FIELDS: readonly ProfileCustomizationField[];
+export const PROFILE_STICKER_CATALOG: Readonly<
+  Record<string, readonly string[]>
+>;
 export const PROFILE_FALLBACK_EMOJI_COUNT: 155;
 
 export function cropAddress(address: string): string;
@@ -63,6 +93,12 @@ export function normalizeProfileEmojiId(
   fallback?: number,
 ): number;
 export function isPlayerProfile(value: unknown): value is CompletePlayerProfile;
+export function isProfileCustomizationUpdateRequest(
+  value: unknown,
+): value is ProfileCustomizationUpdateRequest;
+export function isProfileCustomizationUpdateResponse(
+  value: unknown,
+): value is ProfileCustomizationUpdateResponse;
 export function isProfileLookupRequest(
   value: unknown,
 ): value is ProfileLookupRequest;

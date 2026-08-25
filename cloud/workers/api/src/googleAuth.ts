@@ -115,12 +115,14 @@ export async function createGoogleAccessToken(
     fetcher = fetch,
     now = Date.now,
     scopes = [FIRESTORE_SCOPE],
+    signal,
     timeoutMs = GOOGLE_TIMEOUT_MS,
   }: {
     credentials?: { email: string; privateKeyPem: string };
     fetcher?: typeof fetch;
     now?: () => number;
     scopes?: readonly string[];
+    signal?: AbortSignal;
     timeoutMs?: number;
   } = {},
 ): Promise<string> {
@@ -139,7 +141,9 @@ export async function createGoogleAccessToken(
         grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
         assertion,
       }),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+        : AbortSignal.timeout(timeoutMs),
     });
   } catch {
     throw new GoogleAuthFailure();

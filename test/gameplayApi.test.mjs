@@ -34,6 +34,7 @@ const {
   startAutomatchViaApi,
   startMatchTimerViaApi,
   syncEventStateViaApi,
+  toggleEventPrizeSelectionViaApi,
   updateRatingsViaApi,
   postponeEventStartViaApi,
 } = await import("../src/services/gameplayApi.ts");
@@ -74,6 +75,11 @@ const {
   isSyncEventStateRequest,
   isSyncEventStateResponse,
 } = await import("@mons/shared/events");
+const {
+  LEGACY_CORE_PRIZES_EVENT_ID,
+  isToggleEventPrizeSelectionRequest,
+  isToggleEventPrizeSelectionResponse,
+} = await import("@mons/shared/event-prizes");
 
 const originalFetch = globalThis.fetch;
 
@@ -211,6 +217,63 @@ test("sends exact authenticated event-control mutations", async () => {
       reason: "locked",
     }),
     true,
+  );
+});
+
+test("sends the exact event prize selection mutation", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input: String(input), init });
+    return jsonResponse({
+      ok: true,
+      eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+      selectedPrizeId: "1092",
+    });
+  };
+  const request = {
+    eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+    prizeId: "1092",
+  };
+  assert.deepEqual(
+    await toggleEventPrizeSelectionViaApi(
+      request,
+      async () => "firebase-token",
+    ),
+    {
+      ok: true,
+      eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+      selectedPrizeId: "1092",
+    },
+  );
+  assert.equal(
+    calls[0].input,
+    "https://api.mons.link/events/prize-selections/toggle",
+  );
+  assert.deepEqual(JSON.parse(calls[0].init.body), request);
+  assert.equal(
+    new Headers(calls[0].init.headers).get("Authorization"),
+    "Bearer firebase-token",
+  );
+  assert.equal(isToggleEventPrizeSelectionRequest(request), true);
+  assert.equal(
+    isToggleEventPrizeSelectionRequest({ ...request, prizeId: "invalid" }),
+    false,
+  );
+  assert.equal(
+    isToggleEventPrizeSelectionResponse({
+      ok: true,
+      eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+      selectedPrizeId: null,
+    }),
+    true,
+  );
+  assert.equal(
+    isToggleEventPrizeSelectionResponse({
+      ok: true,
+      eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+      selectedPrizeId: "1682",
+    }),
+    false,
   );
 });
 

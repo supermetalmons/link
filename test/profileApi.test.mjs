@@ -22,16 +22,21 @@ const {
   ProfileApiError,
   PROFILE_API_MAX_RESPONSE_BYTES,
   readLeaderboardViaApi,
+  updateProfileCustomizationViaApi,
 } = await import("../src/services/profileApi.ts");
 const {
   getProfileFallbackEmojiId,
   isLeaderboardReadRequest,
   isLeaderboardReadResponse,
   isPlayerProfile,
+  isProfileCustomizationUpdateRequest,
+  isProfileCustomizationUpdateResponse,
   isProfileLookupRequest,
   isProfileLookupResponse,
   normalizeProfileEmojiId,
+  PROFILE_STICKER_CATALOG,
 } = await import("@mons/shared/profiles");
+const { STICKER_PATHS } = await import("../src/utils/stickers.ts");
 const { isUsernameEditRequest, isUsernameEditResponse } =
   await import("@mons/shared/usernames");
 
@@ -115,6 +120,57 @@ test("shared profile contracts validate exact requests and responses", () => {
     isUsernameEditResponse({ ok: false, validationError: "", extra: true }),
     false,
   );
+  for (const request of [
+    { field: "emojiAndAura", value: { emoji: 7, aura: "" } },
+    {
+      field: "emojiAndAura",
+      value: { emoji: 1009, aura: "rainbow" },
+    },
+    { field: "cardBackgroundId", value: 3 },
+    { field: "cardSubtitleId", value: 4 },
+    { field: "profileCounter", value: "mp" },
+    { field: "profileMons", value: "1,2,3,1,2" },
+    { field: "cardStickers", value: "{}" },
+    { field: "completedProblems", value: ["one"] },
+    { field: "tutorialCompleted", value: true },
+  ]) {
+    assert.equal(isProfileCustomizationUpdateRequest(request), true);
+  }
+  for (const request of [
+    { field: "emoji", value: 7 },
+    { field: "aura", value: "rainbow" },
+    { field: "emojiAndAura", value: { emoji: -1, aura: "" } },
+    { field: "emojiAndAura", value: { emoji: 156, aura: "" } },
+    { field: "emojiAndAura", value: { emoji: 7, aura: "rainbow" } },
+    {
+      field: "emojiAndAura",
+      value: { emoji: 1009, aura: "rainbow", extra: true },
+    },
+    { field: "cardBackgroundId", value: 37 },
+    { field: "cardSubtitleId", value: 30 },
+    { field: "aura", value: "x".repeat(33) },
+    { field: "profileCounter", value: "xp" },
+    { field: "profileMons", value: "0,0,6,0,0" },
+    { field: "cardStickers", value: '{"unknown":"sticker"}' },
+    { field: "completedProblems", value: [1] },
+    { field: "tutorialCompleted", value: true, extra: true },
+  ]) {
+    assert.equal(isProfileCustomizationUpdateRequest(request), false);
+  }
+  assert.equal(isProfileCustomizationUpdateResponse({ ok: true }), true);
+  assert.equal(
+    isProfileCustomizationUpdateResponse({ ok: true, extra: true }),
+    false,
+  );
+  assert.deepEqual(
+    PROFILE_STICKER_CATALOG,
+    Object.fromEntries(
+      Object.entries(STICKER_PATHS).map(([field, stickers]) => [
+        field,
+        stickers.map(({ name }) => name),
+      ]),
+    ),
+  );
 });
 
 test("sends exact authenticated profile requests", async () => {
@@ -123,6 +179,7 @@ test("sends exact authenticated profile requests", async () => {
     { ok: true, profile },
     { ok: true, profile: null },
     { ok: true, profiles: [profile] },
+    { ok: true },
     { ok: true },
   ];
   globalThis.fetch = async (input, init) => {
@@ -143,6 +200,16 @@ test("sends exact authenticated profile requests", async () => {
   assert.deepEqual(await editUsernameViaApi("Mons", tokenProvider), {
     ok: true,
   });
+  assert.deepEqual(
+    await updateProfileCustomizationViaApi(
+      {
+        field: "emojiAndAura",
+        value: { emoji: 1009, aura: "rainbow" },
+      },
+      tokenProvider,
+    ),
+    { ok: true },
+  );
 
   assert.deepEqual(
     calls.map((call) => [call.input, JSON.parse(call.init.body)]),
@@ -157,6 +224,13 @@ test("sends exact authenticated profile requests", async () => {
       ],
       ["https://api.mons.link/leaderboards/read", { type: "rating" }],
       ["https://api.mons.link/profiles/username", { username: "Mons" }],
+      [
+        "https://api.mons.link/profiles/custom",
+        {
+          field: "emojiAndAura",
+          value: { emoji: 1009, aura: "rainbow" },
+        },
+      ],
     ],
   );
   for (const call of calls) {
@@ -168,6 +242,7 @@ test("sends exact authenticated profile requests", async () => {
     assert.equal(headers.get("Accept"), "application/json");
     assert.equal(headers.get("Content-Type"), "application/json");
   }
+  assert.equal(calls.at(-1).init.keepalive, true);
 });
 
 test("refreshes once after 401 and preserves missing-login compatibility", async () => {

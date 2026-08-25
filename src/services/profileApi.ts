@@ -1,5 +1,6 @@
 import {
   isLeaderboardReadResponse,
+  isProfileCustomizationUpdateResponse,
   isProfileLookupResponse,
   type CompletePlayerProfile,
   type LeaderboardReadRequest,
@@ -7,6 +8,8 @@ import {
   type LeaderboardReadType,
   type ProfileLookupRequest,
   type ProfileLookupResponse,
+  type ProfileCustomizationUpdateRequest,
+  type ProfileCustomizationUpdateResponse,
 } from "@mons/shared/profiles";
 import type { AuthTokenProvider } from "./authApi";
 import {
@@ -92,9 +95,14 @@ function responseError(value: unknown, status: number): ProfileApiError {
 
 async function profileRequest<T>(
   path: string,
-  body: ProfileLookupRequest | LeaderboardReadRequest | UsernameEditRequest,
+  body:
+    | ProfileLookupRequest
+    | LeaderboardReadRequest
+    | ProfileCustomizationUpdateRequest
+    | UsernameEditRequest,
   tokenProvider: AuthTokenProvider,
   validate: (value: unknown) => value is T,
+  options: { keepalive?: boolean } = {},
 ): Promise<T> {
   const controller = new AbortController();
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -123,6 +131,7 @@ async function profileRequest<T>(
           },
           body: JSON.stringify(body),
           cache: "no-store",
+          keepalive: options.keepalive,
           signal: controller.signal,
         });
         if (response.status === 401 && attempt === 0) {
@@ -218,6 +227,19 @@ export function editUsernameViaApi(
     { username },
     tokenProvider,
     isUsernameEditResponse,
+  );
+}
+
+export function updateProfileCustomizationViaApi(
+  request: ProfileCustomizationUpdateRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<ProfileCustomizationUpdateResponse> {
+  return profileRequest(
+    "/profiles/custom",
+    request,
+    tokenProvider,
+    isProfileCustomizationUpdateResponse,
+    { keepalive: true },
   );
 }
 

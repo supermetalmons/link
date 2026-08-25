@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventLockManager } from "../../../functions/events/lockManagerCore.js";
+import { LEGACY_CORE_PRIZES_EVENT_ID } from "@mons/shared/event-prizes";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { handleEventRoute } from "../src/eventRoute.ts";
 import { EVENT_CONTROL_TIMEOUT_MS } from "../src/eventOperations.ts";
@@ -173,7 +174,11 @@ test("keeps participation and event-control deadlines separate", async () => {
     },
   });
   try {
-    for (const pathname of ["/events/participants/join", "/events/create"]) {
+    for (const pathname of [
+      "/events/participants/join",
+      "/events/prize-selections/toggle",
+      "/events/create",
+    ]) {
       const response = await handleEventRoute(
         new Request(`https://api.mons.link${pathname}`, {
           method: "POST",
@@ -192,6 +197,7 @@ test("keeps participation and event-control deadlines separate", async () => {
     }
   }
   assert.deepEqual(timeouts, [
+    EVENT_OPERATION_TIMEOUT_MS,
     EVENT_OPERATION_TIMEOUT_MS,
     EVENT_CONTROL_TIMEOUT_MS,
   ]);
@@ -273,6 +279,68 @@ test("returns strict join and removal responses", async () => {
   });
   assert.equal(background.length, 4);
   await Promise.all(background);
+});
+
+test("returns a strict event prize selection response", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const repository = createRepository();
+  repository.getRtdbPath = async (path) =>
+    path === `events/${eventId}`
+      ? {
+          eventId,
+          status: "active",
+          participants: { [identity.profileId]: participant },
+        }
+      : null;
+  repository.transactRtdbPath = async (_path, updater) => {
+    const decision = updater(null);
+    assert.ok(decision && typeof decision === "object" && "value" in decision);
+    return { committed: true, value: decision.value };
+  };
+  const response = await handleEventRoute(
+    new Request("https://api.mons.link/events/prize-selections/toggle", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ eventId, prizeId: "1092" }),
+    }),
+    TELEGRAM_TEST_ENV,
+    ctx,
+    {
+      verifyIdentity: async () => identity,
+      repository,
+      participation: { lockManager },
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    eventId,
+    selectedPrizeId: "1092",
+  });
+});
+
+test("rejects malformed event prize selections after authentication", async () => {
+  for (const body of [
+    {},
+    { eventId: LEGACY_CORE_PRIZES_EVENT_ID, prizeId: "invalid" },
+    {
+      eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+      prizeId: "1092",
+      extra: true,
+    },
+  ]) {
+    const response = await handleEventRoute(
+      new Request("https://api.mons.link/events/prize-selections/toggle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+      TELEGRAM_TEST_ENV,
+      ctx,
+      { verifyIdentity: async () => identity },
+    );
+    assert.equal(response.status, 400);
+  }
 });
 
 test("registers the complete mutation before it settles", async () => {

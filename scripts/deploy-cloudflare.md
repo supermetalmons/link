@@ -87,6 +87,24 @@ Rollback with an explicit known-good version:
 npx wrangler rollback <known-good-version-id> --config wrangler.jsonc
 ```
 
+## Browser mutation cutover
+
+Profile customization and event-prize selection are Worker-owned mutations. Their Firebase reads and live subscriptions remain active, but direct browser writes are denied by the tracked Firestore and Realtime Database rules. Avatar and aura changes use one atomic `emojiAndAura` mutation.
+
+Release changes to these mutations in this order:
+
+1. Upload, smoke, and promote the API Worker version.
+2. Upload, smoke, and promote the frontend Worker version.
+3. From `cloud/`, deploy only the rule targets:
+
+```sh
+firebase deploy --only database,firestore:rules --project mons-link
+```
+
+Do not use the full Firebase release for this rule-only cutover. If rollback is required after the rules close, restore the previous Firebase rules first, roll back the frontend Worker second, and roll back the API Worker last.
+
+When changing the profile mutation contract, first promote an API bridge that accepts both the old and new request shapes. Promote the new frontend next, then remove the old API shape. Retain the bridge Version ID; after the frontend switches, rollback starts by restoring the bridge API before restoring the old frontend.
+
 ## IAM and secrets
 
 Use the dedicated Google identities already named by the required Worker secrets. Routine releases reuse their encrypted credentials; key creation and role changes are provisioning work, not deployment steps.
@@ -98,7 +116,7 @@ Use the dedicated Google identities already named by the required Worker secrets
 - Do not broaden these roles to Editor or Owner. Revoke an old service-account key only after its replacement Worker version is healthy.
 - Keep X, Telegram, Helius, and Google private-key values only as encrypted Worker secrets. `TELEGRAM_QUEUE_BRIDGE_SECRET` and `TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET` are distinct credentials.
 
-The API smoke command covers NFT lookup, one auth route, the X callback, and one internal route without performing an authenticated mutation.
+The API smoke command covers NFT lookup, unauthenticated checks for both browser mutation routes, one auth route, the X callback, and one internal route without performing an authenticated mutation.
 
 ## Auth maintenance and recovery
 

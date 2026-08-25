@@ -221,6 +221,28 @@ const isEventPrizeId = (eventId, prizeId) =>
 const isEventPrizeStandard = (value) =>
   value === "core" || value === "compressed";
 
+const isExactRecord = (value, keys) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const actualKeys = Object.keys(value);
+  return (
+    actualKeys.length === keys.length &&
+    actualKeys.every((key) => keys.includes(key))
+  );
+};
+
+const isToggleEventPrizeSelectionRequest = (value) =>
+  isExactRecord(value, ["eventId", "prizeId"]) &&
+  isEventPrizeId(value.eventId, value.prizeId);
+
+const isToggleEventPrizeSelectionResponse = (value) =>
+  isExactRecord(value, ["ok", "eventId", "selectedPrizeId"]) &&
+  value.ok === true &&
+  isEventPrizeEvent(value.eventId) &&
+  (value.selectedPrizeId === null ||
+    isEventPrizeId(value.eventId, value.selectedPrizeId));
+
 module.exports = {
   ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID,
   ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID,
@@ -234,4 +256,6 @@ module.exports = {
   isEventPrizeEvent,
   isEventPrizeId,
   isEventPrizeStandard,
+  isToggleEventPrizeSelectionRequest,
+  isToggleEventPrizeSelectionResponse,
 };

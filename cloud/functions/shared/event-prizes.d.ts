@@ -40,6 +40,17 @@ export type EventPrizeConfig = Readonly<{
   prizes: readonly EventPrizeDefinition[];
 }>;
 
+export type ToggleEventPrizeSelectionRequest = {
+  eventId: EventPrizeEventId;
+  prizeId: EventPrizeId;
+};
+
+export type ToggleEventPrizeSelectionResponse = {
+  ok: true;
+  eventId: EventPrizeEventId;
+  selectedPrizeId: EventPrizeId | null;
+};
+
 export const EVENT_PRIZE_CONFIGS: Readonly<
   Record<EventPrizeEventId, EventPrizeConfig>
 >;
@@ -63,3 +74,9 @@ export function isEventPrizeId(
 export function isEventPrizeStandard(
   value: unknown,
 ): value is EventPrizeStandard;
+export function isToggleEventPrizeSelectionRequest(
+  value: unknown,
+): value is ToggleEventPrizeSelectionRequest;
+export function isToggleEventPrizeSelectionResponse(
+  value: unknown,
+): value is ToggleEventPrizeSelectionResponse;

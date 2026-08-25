@@ -25,7 +25,6 @@ import {
   limit,
   getDocs,
   orderBy,
-  updateDoc,
   doc,
   onSnapshot,
   startAfter,
@@ -104,6 +103,7 @@ import {
   getProfileByIdViaApi,
   getProfileByLoginIdViaApi,
   readLeaderboardViaApi,
+  updateProfileCustomizationViaApi,
 } from "../services/profileApi";
 import {
   acceptWagerProposalViaApi,
@@ -121,6 +121,7 @@ import {
   startAutomatchViaApi,
   startMatchTimerViaApi,
   syncEventStateViaApi,
+  toggleEventPrizeSelectionViaApi,
   updateRatingsViaApi,
   postponeEventStartViaApi,
 } from "../services/gameplayApi";
@@ -176,6 +177,8 @@ import type {
   ClaimMatchVictoryByTimerResponse,
   StartMatchTimerResponse,
 } from "@mons/shared/timers";
+import { isToggleEventPrizeSelectionRequest } from "@mons/shared/event-prizes";
+import type { ProfileCustomizationUpdateRequest } from "@mons/shared/profiles";
 import type {
   WagerOutcomeResolveResponse,
   WagerProposalAcceptResponse,
@@ -2837,21 +2840,22 @@ class Connection {
     const normalizedEventId = this.normalizeString(eventId).trim();
     const normalizedPrizeId = this.normalizeString(prizeId).trim();
     const profileId = storage.getProfileId("").trim();
-    if (!normalizedEventId || !normalizedPrizeId || !profileId) {
+    const request = {
+      eventId: normalizedEventId,
+      prizeId: normalizedPrizeId,
+    };
+    if (!profileId || !isToggleEventPrizeSelectionRequest(request)) {
       throw new Error("Event prize selection requires an event and profile.");
     }
 
     try {
       await this.ensureAuthenticated();
-      const result = await runTransaction(
-        ref(this.db, `eventPrizeSelections/${normalizedEventId}/${profileId}`),
-        (currentPrizeId) =>
-          currentPrizeId === normalizedPrizeId ? null : normalizedPrizeId,
+      const tokenProvider = this.getUserBoundAuthTokenProvider();
+      const response = await toggleEventPrizeSelectionViaApi(
+        request,
+        tokenProvider,
       );
-      const selectedPrizeId = result.snapshot.val();
-      return typeof selectedPrizeId === "string" && selectedPrizeId.trim()
-        ? selectedPrizeId.trim()
-        : null;
+      return response.selectedPrizeId;
     } catch (error) {
       console.error("Error toggling event prize selection:", error);
       throw error;
@@ -4315,48 +4319,60 @@ class Connection {
     newId: number,
     aura: string | null | undefined,
   ): void {
-    this.updateCustomField("emoji", newId);
-    if (aura !== undefined && aura !== null)
-      this.updateCustomField("aura", aura);
+    const storedAura = aura ?? storage.getPlayerEmojiAura("");
+    this.updateCustomField({
+      field: "emojiAndAura",
+      value: {
+        emoji: newId,
+        aura: storedAura === "rainbow" ? "rainbow" : "",
+      },
+    });
   }
 
   public updateCardBackgroundId(newId: number): void {
-    this.updateCustomField("cardBackgroundId", newId);
+    this.updateCustomField({ field: "cardBackgroundId", value: newId });
   }
 
   public updateCardSubtitleId(newId: number): void {
-    this.updateCustomField("cardSubtitleId", newId);
+    this.updateCustomField({ field: "cardSubtitleId", value: newId });
   }
 
   public updateProfileCounter(counter: string): void {
-    this.updateCustomField("profileCounter", counter);
+    if (counter === "gp" || counter === "mp") {
+      this.updateCustomField({ field: "profileCounter", value: counter });
+    }
   }
 
   public updateProfileMons(mons: string): void {
-    this.updateCustomField("profileMons", mons);
+    this.updateCustomField({ field: "profileMons", value: mons });
   }
 
   public updateCardStickers(stickers: string): void {
-    this.updateCustomField("cardStickers", stickers);
+    this.updateCustomField({ field: "cardStickers", value: stickers });
   }
 
   public updateCompletedProblems(ids: string[]): void {
-    this.updateCustomField("completedProblems", ids);
+    this.updateCustomField({ field: "completedProblems", value: ids });
   }
 
   public updateTutorialCompleted(completed: boolean): void {
-    this.updateCustomField("tutorialCompleted", completed);
+    this.updateCustomField({ field: "tutorialCompleted", value: completed });
   }
 
-  private updateCustomField(fieldName: string, newValue: any): void {
-    const id = this.getLocalProfileId();
-    if (id === null) {
+  private updateCustomField(request: ProfileCustomizationUpdateRequest): void {
+    const profileId = this.getLocalProfileId();
+    if (profileId === null) {
       return;
     }
-    const userDocRef = doc(this.firestore, "users", id);
-    updateDoc(userDocRef, {
-      [`custom.${fieldName}`]: newValue,
-    }).catch(() => {});
+    let tokenProvider: AuthTokenProvider;
+    try {
+      tokenProvider = this.getUserBoundAuthTokenProvider();
+    } catch {
+      return;
+    }
+    void updateProfileCustomizationViaApi(request, tokenProvider).catch(
+      () => undefined,
+    );
   }
 
   public sendVoiceReaction(reaction: Reaction): void {

@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { EventLockManager } from "../../../functions/events/lockManagerCore.js";
 import { AuthApiFailure } from "../src/authErrors.ts";
+import { LEGACY_CORE_PRIZES_EVENT_ID } from "@mons/shared/event-prizes";
 import {
   joinEvent,
   removeEventParticipant,
+  toggleEventPrizeSelection,
   type EventParticipationRepository,
 } from "../src/eventParticipation.ts";
 import type { GameplayProfile } from "../src/gameplayRepository.ts";
@@ -82,7 +84,7 @@ function createRepository({
     getRtdbPath: async (path) =>
       path in pathValues
         ? structuredClone(pathValues[path])
-        : path === "events/event-1"
+        : path === `events/${event?.eventId || "event-1"}`
           ? structuredClone(event)
           : null,
     patchRtdbRoot: async (updates) => {
@@ -656,4 +658,149 @@ test("rejects missing participants and rechecks the start boundary", async () =>
       "events/event-1/updatedAtMs": 101,
     },
   ]);
+});
+
+test("toggles an event prize selection with the canonical participant", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const { repository } = createRepository({
+    event: scheduledEvent({ eventId }),
+  });
+  const paths: string[] = [];
+  let stored: unknown = null;
+  repository.transactRtdbPath = async (path, updater) => {
+    paths.push(path);
+    const decision = updater(stored);
+    if (
+      !decision ||
+      typeof decision !== "object" ||
+      !("value" in decision) ||
+      ("commit" in decision && decision.commit === false)
+    ) {
+      return { committed: false, value: stored };
+    }
+    stored = decision.value;
+    return { committed: true, value: stored };
+  };
+  const lock = createLockManager();
+  assert.deepEqual(
+    await toggleEventPrizeSelection(
+      identity,
+      { eventId, prizeId: "1092" },
+      repository,
+      { lockManager: lock.manager },
+    ),
+    { ok: true, eventId, selectedPrizeId: "1092" },
+  );
+  assert.deepEqual(
+    await toggleEventPrizeSelection(
+      identity,
+      { eventId, prizeId: "1092" },
+      repository,
+      { lockManager: lock.manager },
+    ),
+    { ok: true, eventId, selectedPrizeId: null },
+  );
+  assert.deepEqual(paths, [
+    `eventPrizeSelections/${eventId}/${identity.profileId}`,
+    `eventPrizeSelections/${eventId}/${identity.profileId}`,
+  ]);
+  assert.equal(lock.stopped(), 2);
+  assert.equal(lock.released(), 2);
+});
+
+test("falls back to the unique participant owned by the verified login", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const { repository } = createRepository({
+    event: scheduledEvent({
+      eventId,
+      participants: {
+        "merged-profile": participant("merged-profile", identity.uid, 1),
+      },
+    }),
+  });
+  let path = "";
+  repository.transactRtdbPath = async (receivedPath, updater) => {
+    path = receivedPath;
+    const decision = updater(null);
+    assert.ok(decision && typeof decision === "object" && "value" in decision);
+    return { committed: true, value: decision.value };
+  };
+  const response = await toggleEventPrizeSelection(
+    identity,
+    { eventId, prizeId: "1111" },
+    repository,
+    { lockManager: createLockManager().manager },
+  );
+  assert.equal(response.selectedPrizeId, "1111");
+  assert.equal(path, `eventPrizeSelections/${eventId}/merged-profile`);
+});
+
+test("rejects closed, locked, foreign, and busy prize selections", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const cases = [
+    {
+      event: scheduledEvent({ eventId, status: "ended" }),
+      lock: createLockManager(),
+      status: 409,
+      message: "Prize selection is closed for this event.",
+    },
+    {
+      event: scheduledEvent({ eventId, prizeSelectionsLockedAtMs: 1 }),
+      lock: createLockManager(),
+      status: 409,
+      message: "Prize selection is locked for this event.",
+    },
+    {
+      event: scheduledEvent({
+        eventId,
+        participants: { other: participant("other", "other-login", 1) },
+      }),
+      lock: createLockManager(),
+      status: 403,
+      message: "Only event participants can select prizes.",
+    },
+    {
+      event: scheduledEvent({ eventId }),
+      lock: createLockManager({ acquired: false }),
+      status: 503,
+      message: "Event is busy. Please try selecting again.",
+    },
+  ];
+  for (const scenario of cases) {
+    await expectFailure(
+      toggleEventPrizeSelection(
+        identity,
+        { eventId, prizeId: "1092" },
+        createRepository({ event: scenario.event }).repository,
+        { lockManager: scenario.lock.manager },
+      ),
+      scenario.status,
+      scenario.message,
+    );
+  }
+});
+
+test("rejects a prize selection after losing its event lock", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const { repository } = createRepository({
+    event: scheduledEvent({ eventId }),
+  });
+  let transactions = 0;
+  repository.transactRtdbPath = async () => {
+    transactions++;
+    return { committed: true, value: "1092" };
+  };
+  const lock = createLockManager({ owned: false });
+  await expectFailure(
+    toggleEventPrizeSelection(
+      identity,
+      { eventId, prizeId: "1092" },
+      repository,
+      { lockManager: lock.manager },
+    ),
+    503,
+    "Event is busy. Please try selecting again.",
+  );
+  assert.equal(transactions, 0);
+  assert.equal(lock.released(), 1);
 });

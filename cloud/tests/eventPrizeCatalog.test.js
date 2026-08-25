@@ -1,6 +1,8 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const bs58 = require("bs58");
 const {
@@ -228,24 +230,28 @@ test("maps the second Artifact Magazine 3 event to claimable Core prizes", () =>
   }
 });
 
-test("database rules scope selections to each event's prize IDs", () => {
+test("database rules keep selection reads and close direct writes", () => {
   const selectionRules =
     databaseRules.rules.eventPrizeSelections.$eventId.$profileId;
-  assert.match(selectionRules[".write"], /FRkdorMWaYW/);
-  assert.match(selectionRules[".validate"], /FRkdorMWaYW/);
-  assert.match(selectionRules[".validate"], /1866/);
-  assert.match(selectionRules[".validate"], /1682/);
-  assert.match(selectionRules[".validate"], /6793/);
-  assert.match(selectionRules[".write"], /VOxalSrexcA/);
+  assert.equal(selectionRules[".write"], false);
+  assert.equal(selectionRules[".validate"], undefined);
   assert.match(
-    selectionRules[".validate"],
-    /\$eventId === 'VOxalSrexcA'.*newData\.val\(\) === '282'.*newData\.val\(\) === '283'.*newData\.val\(\) === '280'/,
+    databaseRules.rules.eventPrizeSelections.$eventId[".read"],
+    /auth != null/,
   );
-  assert.match(selectionRules[".write"], /oXAceF6anag/);
+});
+
+test("firestore rules retain profile reads and close direct updates", () => {
+  const rules = fs.readFileSync(
+    path.resolve(__dirname, "..", "firestore.rules"),
+    "utf8",
+  );
   assert.match(
-    selectionRules[".validate"],
-    /\$eventId === 'oXAceF6anag'.*newData\.val\(\) === '281'.*newData\.val\(\) === '279'.*newData\.val\(\) === '284'/,
+    rules,
+    /match \/users\/\{userId\}[\s\S]*allow read: if request\.auth != null;/,
   );
+  assert.match(rules, /allow update: if false;/);
+  assert.doesNotMatch(rules, /validLeaderboardCustom/);
 });
 
 test("catalog membership rejects inherited keys and padded IDs", () => {

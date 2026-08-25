@@ -1,9 +1,15 @@
 const assert: typeof import("node:assert/strict") = require("node:assert/strict");
 const test: typeof import("node:test") = require("node:test");
 const { parseArgs, smokeApi } = require("./smoke-cloudflare-api.ts") as {
-  parseArgs: (argv: string[]) => { baseUrl: string; smokeSol: string };
+  parseArgs: (argv: string[]) => {
+    baseUrl: string;
+    smokeSol: string;
+  };
   smokeApi: (
-    options: { baseUrl: string; smokeSol: string },
+    options: {
+      baseUrl: string;
+      smokeSol: string;
+    },
     dependencies: {
       fetch: typeof fetch;
       randomState: () => string;
@@ -19,7 +25,6 @@ const EMPTY_NFTS = {
   swagpack_avatars: [],
   swagpack_reactions: [],
 };
-
 function json(
   body: unknown,
   status: number,
@@ -61,7 +66,7 @@ test("parses only production and canonical preview smoke targets", () => {
   }
 });
 
-test("smokes NFT, auth, X callback, and internal routes", async () => {
+test("smokes public, unauthenticated, and internal routes", async () => {
   const requests: Array<{ method: string; url: string }> = [];
   let nftPosts = 0;
   const fetchStub: typeof fetch = async (input, init) => {
@@ -109,7 +114,9 @@ test("smokes NFT, auth, X callback, and internal routes", async () => {
         "/events/create",
         "/events/start/postpone",
         "/events/matches/winners/disqualify",
+        "/events/prize-selections/toggle",
         "/events/state/sync",
+        "/profiles/custom",
       ].some((path) => url.endsWith(path))
     ) {
       return json({ error: "unauthenticated" }, 401);
@@ -133,7 +140,7 @@ test("smokes NFT, auth, X callback, and internal routes", async () => {
     },
   );
 
-  assert.equal(requests.length, 12);
+  assert.equal(requests.length, 14);
   assert.deepEqual(logs, ["[api-smoke] Passed https://api.mons.link"]);
 });
 

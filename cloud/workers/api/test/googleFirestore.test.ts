@@ -177,6 +177,18 @@ test("rejects malformed keys, failed exchanges, oversized bodies, and fetch erro
 
   const { privateKeyPem: pem } = await generateTestKeyPair();
   const authEnv = { ...env, FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: pem };
+  const operationController = new AbortController();
+  operationController.abort();
+  await assert.rejects(
+    createGoogleAccessToken(authEnv, {
+      fetcher: async (_input, init) => {
+        assert.equal(init?.signal?.aborted, true);
+        throw new DOMException("aborted", "AbortError");
+      },
+      signal: operationController.signal,
+    }),
+    GoogleAuthFailure,
+  );
   for (const fetcher of [
     async () => new Response("denied", { status: 403 }),
     async () =>

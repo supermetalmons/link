@@ -489,6 +489,28 @@ test("profile claim synchronization uses the Worker route", () => {
   assert.match(authApi, /\/auth\/profile-claim\/sync/);
 });
 
+test("browser customization and prize selection mutations use Worker routes", () => {
+  const gameplayApi = readText("src/services/gameplayApi.ts");
+  const profileApi = readText("src/services/profileApi.ts");
+  const connection = readText("src/connection/connection.ts");
+
+  assert.match(gameplayApi, /\/events\/prize-selections\/toggle/);
+  assert.match(profileApi, /\/profiles\/custom/);
+  assert.match(
+    connection,
+    /getUserBoundAuthTokenProvider\(\)[\s\S]{0,250}toggleEventPrizeSelectionViaApi/,
+  );
+  assert.match(connection, /field: "emojiAndAura"/);
+  assert.doesNotMatch(connection, /profileCustomizationWrites/);
+  assert.doesNotMatch(connection, /pendingProfileCustomizations/);
+  assert.doesNotMatch(connection, /drainProfileCustomizations/);
+  assert.doesNotMatch(connection, /\bupdateDoc\s*\(/);
+  assert.doesNotMatch(
+    connection,
+    /runTransaction\([\s\S]{0,200}eventPrizeSelections/,
+  );
+});
+
 test("provider verification and auth mutations use Worker routes", () => {
   const authApi = readText("src/services/authApi.ts");
   for (const route of [

@@ -1,5 +1,10 @@
 import { createGameVariantHelpers } from "@mons/shared/game-variants";
 import {
+  isEventPrizeId,
+  type ToggleEventPrizeSelectionRequest,
+  type ToggleEventPrizeSelectionResponse,
+} from "@mons/shared/event-prizes";
+import {
   MAX_EVENT_PARTICIPANTS,
   isEventParticipantSnapshot,
   type EventParticipantSnapshot,
@@ -612,6 +617,101 @@ export async function removeEventParticipant(
       signal,
     );
     return { ok: true, eventId, removedProfileId: participantProfileId };
+  } finally {
+    stopHeartbeat();
+    await lockManager.releaseEventLock(lockHandle);
+  }
+}
+
+export async function toggleEventPrizeSelection(
+  identity: FirebaseIdentity,
+  request: ToggleEventPrizeSelectionRequest,
+  repository: EventParticipationRepository,
+  dependencies: EventParticipationDependencies = {},
+): Promise<ToggleEventPrizeSelectionResponse> {
+  const signal =
+    dependencies.signal || AbortSignal.timeout(EVENT_OPERATION_TIMEOUT_MS);
+  const profile = await readProfile(identity, repository, signal);
+  const eventId = request.eventId;
+  if (!isEventPrizeId(eventId, request.prizeId)) {
+    throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+  }
+  const lockManager =
+    dependencies.lockManager || createDefaultLockManager(repository, signal);
+  const busyMessage = "Event is busy. Please try selecting again.";
+  const lockHandle = await acquireLock(
+    eventId,
+    identity,
+    lockManager,
+    busyMessage,
+  );
+  const stopHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
+  try {
+    const event = await readEvent(eventId, repository, signal);
+    if (event.status !== "scheduled" && event.status !== "active") {
+      throw new AuthApiFailure(
+        409,
+        "failed-precondition",
+        "Prize selection is closed for this event.",
+      );
+    }
+    if (
+      event.prizeSelectionsLockedAtMs !== undefined &&
+      event.prizeSelectionsLockedAtMs !== null
+    ) {
+      throw new AuthApiFailure(
+        409,
+        "failed-precondition",
+        "Prize selection is locked for this event.",
+      );
+    }
+    const participants = toRecord(event.participants) || {};
+    let participantProfileId = "";
+    if (toRecord(participants[profile.profileId])) {
+      participantProfileId = profile.profileId;
+    } else {
+      const matchingProfileIds = Object.entries(participants)
+        .filter(([, participant]) => {
+          const record = toRecord(participant);
+          return record && normalizeString(record.loginUid) === identity.uid;
+        })
+        .map(([profileId]) => profileId);
+      if (matchingProfileIds.length === 1) {
+        participantProfileId = matchingProfileIds[0];
+      }
+    }
+    if (!participantProfileId) {
+      throw new AuthApiFailure(
+        403,
+        "permission-denied",
+        "Only event participants can select prizes.",
+      );
+    }
+    await requireOwnedLock(lockManager, lockHandle, busyMessage);
+    const result = await repository.transactRtdbPath(
+      `eventPrizeSelections/${eventId}/${participantProfileId}`,
+      (current) => ({
+        value: current === request.prizeId ? null : request.prizeId,
+      }),
+      signal,
+    );
+    if (!result.committed) {
+      throw new AuthApiFailure(503, "unavailable", busyMessage);
+    }
+    const selectedPrizeId =
+      result.value === null
+        ? null
+        : isEventPrizeId(eventId, result.value)
+          ? result.value
+          : undefined;
+    if (selectedPrizeId === undefined) {
+      throw new AuthApiFailure(
+        503,
+        "unavailable",
+        "event-participation-service-unavailable",
+      );
+    }
+    return { ok: true, eventId, selectedPrizeId };
   } finally {
     stopHeartbeat();
     await lockManager.releaseEventLock(lockHandle);

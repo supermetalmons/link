@@ -1,7 +1,9 @@
 import {
   isLeaderboardReadRequest,
+  isProfileCustomizationUpdateRequest,
   isProfileLookupRequest,
   type LeaderboardReadResponse,
+  type ProfileCustomizationUpdateResponse,
   type ProfileLookupResponse,
 } from "@mons/shared/profiles";
 import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
@@ -16,6 +18,11 @@ import {
   type WorkerExecutionContext,
 } from "./firebaseAuth.ts";
 import { readBoundedJson } from "./http.ts";
+import {
+  createProfileCustomizationRepository,
+  type ProfileCustomizationRepository,
+} from "./profileCustomizationRepository.ts";
+import { authorizeProfileCustomization } from "./profileCustomizationPolicy.ts";
 import {
   createProfileRepository,
   type ProfileRepository,
@@ -35,12 +42,16 @@ import {
 
 export const PROFILE_PATHS = new Set([
   "/leaderboards/read",
+  "/profiles/custom",
   "/profiles/lookup",
   "/profiles/username",
 ]);
 
 export type ProfileRouteDependencies = {
   logFailure?: (kind: string) => void;
+  authorizeCustomization?: typeof authorizeProfileCustomization;
+  customizationRepository?: ProfileCustomizationRepository;
+  customizationSignal?: AbortSignal;
   repository?: ProfileRepository;
   usernameRepository?: UsernameRepository;
   verifyIdentity?: (
@@ -48,6 +59,8 @@ export type ProfileRouteDependencies = {
     ctx: WorkerExecutionContext,
   ) => Promise<FirebaseIdentity>;
 };
+
+const PROFILE_CUSTOMIZATION_TIMEOUT_MS = 12_000;
 
 function validLookupId(kind: "login" | "profile", id: string): boolean {
   const bytes = new TextEncoder().encode(id);
@@ -87,11 +100,11 @@ export async function handleProfileRoute(
     if (request.method !== "POST") {
       throw new AuthApiFailure(405, "method-not-allowed", "method-not-allowed");
     }
+    const pathname = new URL(request.url).pathname;
     const identity = await (
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
     const body = await parseBody(request);
-    const pathname = new URL(request.url).pathname;
 
     if (pathname === "/profiles/username") {
       if (!isUsernameEditRequest(body)) {
@@ -141,6 +154,42 @@ export async function handleProfileRoute(
       }
       return authJsonResponse(
         { ok: outcome === "updated" } satisfies UsernameEditResponse,
+        200,
+        corsHeaders,
+      );
+    }
+
+    if (pathname === "/profiles/custom") {
+      if (!isProfileCustomizationUpdateRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      const signal =
+        dependencies.customizationSignal ||
+        AbortSignal.timeout(PROFILE_CUSTOMIZATION_TIMEOUT_MS);
+      const customizationRepository =
+        dependencies.customizationRepository ||
+        createProfileCustomizationRepository(env, { signal });
+      signal.throwIfAborted();
+      const outcome = await customizationRepository.updateCustomization(
+        identity.uid,
+        body,
+        (profile) =>
+          (
+            dependencies.authorizeCustomization || authorizeProfileCustomization
+          )(body, profile, env, { signal }),
+      );
+      if (outcome === "profile-not-found") {
+        throw new AuthApiFailure(404, "not-found", "profile-not-found");
+      }
+      if (outcome === "login-profile-conflict") {
+        throw new AuthApiFailure(
+          409,
+          "failed-precondition",
+          "login-profile-conflict",
+        );
+      }
+      return authJsonResponse(
+        { ok: true } satisfies ProfileCustomizationUpdateResponse,
         200,
         corsHeaders,
       );

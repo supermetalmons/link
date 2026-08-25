@@ -36,6 +36,11 @@ import {
   type RatingUpdateResponse,
 } from "@mons/shared/ratings";
 import {
+  isToggleEventPrizeSelectionResponse,
+  type ToggleEventPrizeSelectionRequest,
+  type ToggleEventPrizeSelectionResponse,
+} from "@mons/shared/event-prizes";
+import {
   isCreateEventResponse,
   isDisqualifyEventMatchWinnersResponse,
   isJoinEventResponse,
@@ -327,6 +332,18 @@ export function removeEventParticipantViaApi(
     request,
     tokenProvider,
     isRemoveEventParticipantResponse,
+  );
+}
+
+export function toggleEventPrizeSelectionViaApi(
+  request: ToggleEventPrizeSelectionRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<ToggleEventPrizeSelectionResponse> {
+  return gameplayMutation(
+    "/events/prize-selections/toggle",
+    request,
+    tokenProvider,
+    isToggleEventPrizeSelectionResponse,
   );
 }
 

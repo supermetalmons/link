@@ -18,6 +18,7 @@ export async function fetchNftInventory(
   requestBody: NftApiRequest,
   env: Env,
   dependencies: WorkerDependencies,
+  operationSignal?: AbortSignal,
 ): Promise<NftApiResponse> {
   if (!requestBody.sol) {
     return createEmptyNftApiResponse();
@@ -28,17 +29,20 @@ export async function fetchNftInventory(
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(),
-    dependencies.providerTimeoutMs,
-  );
+  const signals = [
+    controller.signal,
+    AbortSignal.timeout(dependencies.providerTimeoutMs),
+  ];
+  if (operationSignal) {
+    signals.push(operationSignal);
+  }
+  const context: HeliusLookupContext = {
+    apiKey,
+    ownerAddress: requestBody.sol,
+    signal: AbortSignal.any(signals),
+    dependencies,
+  };
   try {
-    const context: HeliusLookupContext = {
-      apiKey,
-      ownerAddress: requestBody.sol,
-      signal: controller.signal,
-      dependencies,
-    };
     const [swagpackAvatars, specials] = await Promise.all([
       fetchCollectionIdCounts(context, PRIMARY_COLLECTION_ID),
       fetchCollectionIdCounts(context, SPECIALS_COLLECTION_ID),
@@ -54,7 +58,5 @@ export async function fetchNftInventory(
   } catch (error) {
     controller.abort();
     throw error;
-  } finally {
-    clearTimeout(timeout);
   }
 }

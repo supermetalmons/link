@@ -215,6 +215,7 @@ export function createAuthFirestoreClient(
           },
           fetcher,
           now,
+          signal,
           timeoutMs,
         })),
     maxBodyBytes: MAX_FIRESTORE_METADATA_BODY_BYTES,

@@ -1,4 +1,8 @@
 import {
+  isToggleEventPrizeSelectionRequest,
+  type ToggleEventPrizeSelectionRequest,
+} from "@mons/shared/event-prizes";
+import {
   isCreateEventRequest,
   isDisqualifyEventMatchWinnersRequest,
   isJoinEventRequest,
@@ -23,6 +27,7 @@ import {
   EVENT_OPERATION_TIMEOUT_MS,
   joinEvent,
   removeEventParticipant,
+  toggleEventPrizeSelection,
   type EventParticipationDependencies,
 } from "./eventParticipation.ts";
 import {
@@ -50,6 +55,7 @@ export const EVENT_PATHS = new Set([
   "/events/matches/winners/disqualify",
   "/events/participants/join",
   "/events/participants/remove",
+  "/events/prize-selections/toggle",
   "/events/start/postpone",
   "/events/state/sync",
 ]);
@@ -81,6 +87,7 @@ export async function readEventBody(
   | PostponeEventStartRequest
   | RemoveEventParticipantRequest
   | SyncEventStateRequest
+  | ToggleEventPrizeSelectionRequest
 > {
   let body: Record<string, unknown> | null;
   try {
@@ -118,6 +125,12 @@ export async function readEventBody(
     }
     return body;
   }
+  if (pathname === "/events/prize-selections/toggle") {
+    if (!isToggleEventPrizeSelectionRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
+  }
   if (!isRemoveEventParticipantRequest(body)) {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
   }
@@ -148,7 +161,8 @@ export async function handleEventRoute(
     }
     const isParticipationPath =
       pathname === "/events/participants/join" ||
-      pathname === "/events/participants/remove";
+      pathname === "/events/participants/remove" ||
+      pathname === "/events/prize-selections/toggle";
     const signal = isParticipationPath
       ? dependencies.participation?.signal ||
         AbortSignal.timeout(EVENT_OPERATION_TIMEOUT_MS)
@@ -178,6 +192,16 @@ export async function handleEventRoute(
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
       operation = removeEventParticipant(
+        identity,
+        body,
+        repository,
+        participation,
+      );
+    } else if (pathname === "/events/prize-selections/toggle") {
+      if (!isToggleEventPrizeSelectionRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      operation = toggleEventPrizeSelection(
         identity,
         body,
         repository,
