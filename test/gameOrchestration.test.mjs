@@ -29,6 +29,8 @@ const MonsRules = await import("mons-rules");
 const { MATCH_TIMER_TERMINAL } = await import("@mons/shared/timers");
 const { getNextBotAutomoveMode, normalizeBotAutomoveMode } =
   await import("../src/game/botAutomoveMode.ts");
+const { getAutomoveWorkerFailurePolicy, getWatchAutomoveWorkerRetryDelayMs } =
+  await import("../src/game/automoveWorkerFailurePolicy.ts");
 const { bindGameConnection, gameConnection, isGameConnectionBound } =
   await import("../src/game/gameConnectionPort.ts");
 const {
@@ -94,6 +96,15 @@ test("normalizes legacy bot modes and cycles in display order", () => {
   assert.equal(getNextBotAutomoveMode("fast"), "normal");
   assert.equal(getNextBotAutomoveMode("normal"), "pro");
   assert.equal(getNextBotAutomoveMode("pro"), "fast");
+});
+
+test("pauses watch automove instead of falling back to the main thread", () => {
+  assert.equal(getAutomoveWorkerFailurePolicy(true), "pause-and-retry");
+  assert.equal(getAutomoveWorkerFailurePolicy(false), "main-thread-fallback");
+  assert.deepEqual(
+    [0, 1, 2, 3, 4, 5].map(getWatchAutomoveWorkerRetryDelayMs),
+    [1_000, 2_000, 4_000, 8_000, 15_000, 15_000],
+  );
 });
 
 test("normalizes persisted histories without accepting malformed values", () => {

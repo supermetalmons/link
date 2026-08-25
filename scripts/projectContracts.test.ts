@@ -324,7 +324,7 @@ test("package manifests preserve public scripts and deployment command vectors",
   });
   assert.equal(apiPackage.private, true);
   assert.equal(apiPackage.type, "module");
-  assert.equal(rootPackage.dependencies?.jose, "^6.2.7");
+  assert.equal(rootPackage.dependencies?.jose, "^6.2.10");
   assert.equal(rootPackage.dependencies?.["@spruceid/siwe-parser"], "3.0.0");
 
   for (const packageName of [

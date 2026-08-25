@@ -6,6 +6,11 @@ import {
 } from "@mons/shared/timers";
 import { requestSmartAutomoveFromWorker } from "./automoveWorkerClient";
 import type { WorkerAutomoveResult } from "./automoveWorkerProtocol";
+import {
+  getAutomoveWorkerFailurePolicy,
+  getWatchAutomoveWorkerRetryDelayMs,
+  type AutomoveWorkerFailurePolicy,
+} from "./automoveWorkerFailurePolicy";
 import * as Board from "./board";
 import {
   tokensForSingleMoveEvents,
@@ -176,6 +181,7 @@ let botAutomoveMode: BotAutomoveMode = normalizeBotAutomoveMode(
 );
 const offMainThreadAutomoveRetryDelayMs = 15_000;
 let offMainThreadAutomoveDisabledUntilMs = 0;
+let consecutiveWatchAutomoveWorkerFailures = 0;
 const automoveInFlightGames = new WeakSet<MonsRules.Game>();
 
 const automoveAlreadyInProgressErrorMessage =
@@ -2214,7 +2220,8 @@ export async function go(routeStateOverride?: RouteState) {
 
     setWatchOnlyState(true);
     lastBotMoveTimestamp = 0;
-    automove();
+    consecutiveWatchAutomoveWorkerFailures = 0;
+    scheduleWatchAutomove();
   } else if (isSnapshotRoute()) {
     const snapshot = routeState.snapshotId ?? "";
     if (!loadCurrentGameFromFen(snapshot)) {
@@ -2423,7 +2430,7 @@ function rematchInLoopMode() {
   Board.showRandomEmojisForLoopMode();
   setNewBoard(false);
   lastBotMoveTimestamp = 0;
-  automove();
+  scheduleWatchAutomove();
 }
 
 function startFreshLocalMatch() {
@@ -2901,7 +2908,12 @@ export function didUpdateRematchSeriesMetadata() {
   triggerMoveHistoryPopupReload();
 }
 
-type ResolvedAutomoveOutput = WorkerAutomoveResult;
+type ResolvedAutomoveOutput =
+  | WorkerAutomoveResult
+  | {
+      kind: "worker-retry";
+      retryInMs: number;
+    };
 
 const resolveAutomoveFromMainThread = async (
   gameModel: MonsRules.Game,
@@ -2921,6 +2933,7 @@ const resolveAutomoveOutput = async (
   gameModel: MonsRules.Game,
   fen: string,
   preference: AutomovePreference,
+  workerFailurePolicy: AutomoveWorkerFailurePolicy,
 ): Promise<ResolvedAutomoveOutput> => {
   if (automoveInFlightGames.has(gameModel)) {
     debugAutomove("ignoring concurrent automove request", {
@@ -2932,7 +2945,10 @@ const resolveAutomoveOutput = async (
   automoveInFlightGames.add(gameModel);
   try {
     const now = Date.now();
-    if (now >= offMainThreadAutomoveDisabledUntilMs) {
+    if (
+      workerFailurePolicy === "pause-and-retry" ||
+      now >= offMainThreadAutomoveDisabledUntilMs
+    ) {
       const workerStartedAtMs = Date.now();
       debugAutomove("requesting worker automove", {
         preference,
@@ -2941,6 +2957,9 @@ const resolveAutomoveOutput = async (
       try {
         const result = await requestSmartAutomoveFromWorker(fen, preference);
         offMainThreadAutomoveDisabledUntilMs = 0;
+        if (workerFailurePolicy === "pause-and-retry") {
+          consecutiveWatchAutomoveWorkerFailures = 0;
+        }
         debugAutomove("worker automove resolved", {
           preference,
           resultKind: result.kind,
@@ -2948,12 +2967,34 @@ const resolveAutomoveOutput = async (
         });
         return result;
       } catch (error) {
+        if (workerFailurePolicy === "pause-and-retry") {
+          const retryInMs = getWatchAutomoveWorkerRetryDelayMs(
+            consecutiveWatchAutomoveWorkerFailures,
+          );
+          consecutiveWatchAutomoveWorkerFailures += 1;
+          debugAutomove("worker automove failed", {
+            preference,
+            retryDelayMs: retryInMs,
+            workerFailurePolicy,
+            errorMessage:
+              error instanceof Error ? error.message : String(error),
+          });
+          console.warn(
+            "[automove] worker path failed; pausing before restarting the worker",
+            error,
+          );
+          return {
+            kind: "worker-retry",
+            retryInMs,
+          };
+        }
         offMainThreadAutomoveDisabledUntilMs =
           Date.now() + offMainThreadAutomoveRetryDelayMs;
-        debugAutomove("worker automove failed; using temporary fallback", {
+        debugAutomove("worker automove failed", {
           preference,
           retryDelayMs: offMainThreadAutomoveRetryDelayMs,
           disabledUntilMs: offMainThreadAutomoveDisabledUntilMs,
+          workerFailurePolicy,
           errorMessage: error instanceof Error ? error.message : String(error),
         });
         console.warn(
@@ -3006,6 +3047,7 @@ function automove(onAutomoveButtonClick: boolean = false) {
     isBotsRoute() || (isGameWithBot && game.activeColor === botPlayerColor);
   const gameBeforeAutomove = game;
   const fenBeforeAutomove = gameBeforeAutomove.toFen();
+  const workerFailurePolicy = getAutomoveWorkerFailurePolicy(isBotsRoute());
   const takebacksBeforeAutomove = gameBeforeAutomove.takebackFens;
   const inputColorBeforeAutomove = gameBeforeAutomove.activeColor;
   const syncAutomoveActionState = () => {
@@ -3018,10 +3060,34 @@ function automove(onAutomoveButtonClick: boolean = false) {
       setAutomoveActionEnabled(false);
     }
   };
-  resolveAutomoveOutput(gameBeforeAutomove, fenBeforeAutomove, preference)
+  resolveAutomoveOutput(
+    gameBeforeAutomove,
+    fenBeforeAutomove,
+    preference,
+    workerFailurePolicy,
+  )
     .then((output: ResolvedAutomoveOutput) => {
       let showedEndTurnConfirmation = false;
       if (!sessionGuard()) {
+        return;
+      }
+      if (output.kind === "worker-retry") {
+        syncAutomoveActionState();
+        setManagedGameTimeout(
+          () => {
+            if (
+              isGameOver ||
+              !isBotsRoute() ||
+              game !== gameBeforeAutomove ||
+              game.toFen() !== fenBeforeAutomove
+            ) {
+              return;
+            }
+            automove();
+          },
+          output.retryInMs,
+          sessionGuard,
+        );
         return;
       }
       if (output.kind === "events") {
@@ -3098,6 +3164,20 @@ function automove(onAutomoveButtonClick: boolean = false) {
       }
       throw e;
     });
+}
+
+function scheduleWatchAutomove() {
+  const watchAutomoveGuard = getSessionGuard();
+  setManagedGameTimeout(
+    () => {
+      if (isGameOver || !isBotsRoute()) {
+        return;
+      }
+      automove();
+    },
+    botTurnComputationDelayMs,
+    watchAutomoveGuard,
+  );
 }
 
 function didConfirmRematchProposal() {
@@ -4073,7 +4153,7 @@ function applyOutput(
             botTurnGuard,
           );
         } else if (isBotsRoute()) {
-          automove();
+          scheduleWatchAutomove();
         }
       }
 

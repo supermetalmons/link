@@ -6,7 +6,7 @@
     "node": "^22.13.0 || >=24.0.0"
   },
   "dependencies": {
-    "firebase-admin": "^14.2.0"
+    "firebase-admin": "^14.3.0"
   },
   "scripts": {
     "recover:telegram": "node recoverTelegramDelivery.js",

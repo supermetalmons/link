@@ -17,6 +17,7 @@
     "types": ["node"]
   },
   "include": [
+    "../../../src/glicko2.d.ts",
     "src/**/*.ts",
     "test/**/*.ts",
     "runtime/**/*.ts",

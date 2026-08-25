@@ -141,7 +141,9 @@ const ensureAutomoveWorker = (): Worker => {
     return automoveWorker;
   }
   debugAutomoveWorkerClient("creating worker instance");
-  const worker = new Worker(new URL("./automoveWorker.ts", import.meta.url));
+  const worker = new Worker(new URL("./automoveWorker.ts", import.meta.url), {
+    type: "module",
+  });
   worker.onmessage = (event: MessageEvent<unknown>) => {
     handleWorkerMessage(worker, event);
   };
@@ -209,10 +211,11 @@ export const requestSmartAutomoveFromWorker = (
     preference,
     promise,
   });
-  void promise.finally(() => {
+  const removePendingPromise = () => {
     if (pendingRequestPromisesByFen.get(key)?.promise === promise) {
       pendingRequestPromisesByFen.delete(key);
     }
-  });
+  };
+  void promise.then(removePendingPromise, removePendingPromise);
   return promise;
 };
