@@ -39,51 +39,17 @@ The full release reconciles deployed Functions with the current export manifest.
 npm --prefix cloud/functions run deploy:safe -- <function-name> --project mons-link
 ```
 
-For the forward profile-projection cutover, do not start with the full release. Follow the ordered cutover in the Cloudflare deployment guide so the additive database and Firestore indexes are ready before the Worker takes ownership and the legacy Functions are reconciled.
-
 ## Auth maintenance and recovery
 
 `AUTH_MUTATIONS_DISABLED` in `cloud/workers/api/wrangler.jsonc` is the only auth maintenance switch. Change and release it as reviewed Worker configuration; do not create environment-specific copies or Dashboard overrides.
 
 `mons-link-auth-recovery` is the permanent recovery Queue. Its consumer applies `authRecoveryJobs` idempotently, and the scheduled sweep re-enqueues stale jobs. Investigate a stuck job without purging the Queue or deleting its job record.
 
-## Event profile-game projection recovery
+## Profile-game projection recovery
 
-Event mutations atomically accumulate prior owners under `profileGameProjectionOutbox/event/{eventId}` before enqueueing the permanent profile-game projection Queue. The five-minute Worker schedule re-enqueues stale markers. Preview a production reconciliation, then execute and wait for Cloudflare to clear the exact marker and verify every canonical Firestore projection:
+`mons-link-profile-game-projection` permanently owns rating, automatch, event, and profile-link projections. Producers persist durable markers before enqueueing, and the five-minute Worker schedule repairs and re-enqueues stale markers while request fencing preserves newer work and recoverable cleanup owners.
 
-```sh
-node cloud/admin/reconcileEventProfileGames.js --sample --project mons-link
-node cloud/admin/reconcileEventProfileGames.js --sample --project mons-link --execute --wait
-```
-
-Do not purge the Queue or delete a pending outbox. Malformed markers are repaired in place and re-enqueued while preserving recoverable cleanup owners.
-
-## Profile-link projection recovery
-
-Profile-link changes atomically persist `profileGameProjectionOutbox/profile/{loginUid}` before the API Worker attempts to enqueue the permanent profile-game projection Queue. The five-minute schedule recovers stale markers, and request IDs prevent an older task from clearing a newer link change. Preview a production candidate, then execute and wait for the marker to settle:
-
-```sh
-npm run reconcile:profile-link-games -- --sample --project mons-link
-npm run reconcile:profile-link-games -- --sample --project mons-link --execute --wait
-```
-
-Profile documents must not be deleted manually. Audit bounded pages of profile-game documents and explicitly delete only confirmed orphans:
-
-```sh
-npm run audit:orphan-profile-games -- --project mons-link --dry-run
-npm run audit:orphan-profile-games -- --project mons-link --execute
-```
-
-Repeat bounded pages with the reported `--after <nextCursor>` until a clean pass reports no orphans.
-
-Reconcile profile-event prizes across merge targets with a dry-run immediately before each execute page. Conflicts are retained for review and never overwritten:
-
-```sh
-npm run reconcile:profile-event-prizes -- --project mons-link --dry-run
-npm run reconcile:profile-event-prizes -- --project mons-link --execute
-```
-
-Repeat bounded pages with the reported `--after <nextCursor>`, then restart from the beginning and require a clean dry-run pass.
+Investigate stuck work through Queue consumption, pending marker age, and projection logs. Do not purge the Queue, delete a pending outbox, manually delete profile documents, or manually rewrite canonical profile-event prizes.
 
 ## Auth cooldown cleanup
 

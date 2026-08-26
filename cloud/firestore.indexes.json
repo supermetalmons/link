@@ -71,34 +71,6 @@
           "order": "DESCENDING"
         }
       ]
-    },
-    {
-      "collectionGroup": "games",
-      "fieldPath": "eventId",
-      "indexes": [
-        {
-          "queryScope": "COLLECTION_GROUP",
-          "order": "ASCENDING"
-        },
-        {
-          "queryScope": "COLLECTION_GROUP",
-          "order": "DESCENDING"
-        }
-      ]
-    },
-    {
-      "collectionGroup": "games",
-      "fieldPath": "ownerLoginId",
-      "indexes": [
-        {
-          "queryScope": "COLLECTION_GROUP",
-          "order": "ASCENDING"
-        },
-        {
-          "queryScope": "COLLECTION_GROUP",
-          "order": "DESCENDING"
-        }
-      ]
     }
   ]
 }
