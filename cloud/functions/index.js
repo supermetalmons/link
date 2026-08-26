@@ -9,14 +9,7 @@ const {
   onInviteHostRematchesChanged,
   onInviteGuestRematchesChanged,
   onMatchCreated,
-  onProfileLinkCreated,
-  onProfileLinkWritten,
-  onProfileDeleted,
 } = require("./profileGamesProjector");
-const {
-  onProfileEventPrizeWritten,
-  onProfileMergeTargetWritten,
-} = require("./eventPrizeProjector");
 
 exports.withdrawEventPrize = withdrawEventPrize;
 exports.projectProfileGamesOnInviteCreated = onInviteCreated;
@@ -26,9 +19,3 @@ exports.projectProfileGamesOnInviteHostRematchesChanged =
 exports.projectProfileGamesOnInviteGuestRematchesChanged =
   onInviteGuestRematchesChanged;
 exports.projectProfileGamesOnMatchCreated = onMatchCreated;
-exports.projectProfileGamesOnProfileLinkCreated = onProfileLinkCreated;
-exports.projectProfileGamesOnProfileLinkWritten = onProfileLinkWritten;
-exports.projectProfileGamesOnProfileDeleted = onProfileDeleted;
-exports.projectProfileEventPrizesOnPrizeWritten = onProfileEventPrizeWritten;
-exports.projectProfileEventPrizesOnMergeTargetWritten =
-  onProfileMergeTargetWritten;

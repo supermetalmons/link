@@ -12,6 +12,7 @@ import {
 } from "./gameplayRepository.ts";
 import { createEventTelegramProjectionRepository } from "./eventTelegramProjectionProducer.ts";
 import { createEventProfileGameProjectionRepository } from "./eventProfileGameProjectionProducer.ts";
+import { createProfileEventPrizeOwnerResolver } from "./profileEventPrizeOwner.ts";
 import {
   createEventRuntime,
   type EventProgressOutboxRecord,
@@ -666,6 +667,10 @@ export function createWorkflowEventRuntime(env: Env, signal: AbortSignal) {
       },
       eventLockManager: lockManager,
       getProfileByLoginId: async () => ({}),
+      resolveProfileEventPrizeOwnerId: createProfileEventPrizeOwnerResolver(
+        env,
+        { rtdb: repository, signal },
+      ),
       random: secureRandom,
       sleep: (milliseconds) => scheduler.wait(milliseconds, { signal }),
     }),

@@ -21,6 +21,7 @@ import {
   LoginProfileConflict,
   type ProfileClaimSource,
 } from "./firestore.ts";
+import { getProfileLinkProfileGameProjectionOutboxPath } from "./profileGameProjectionOutbox.ts";
 
 const MAX_RECONCILIATION_ATTEMPTS = 3;
 
@@ -100,6 +101,7 @@ export async function syncProfileClaim(
       writes.push(
         rtdbClient.patchRoot({
           [`players/${identity.uid}/profile`]: null,
+          [getProfileLinkProfileGameProjectionOutboxPath(identity.uid)]: null,
         }),
       );
     }

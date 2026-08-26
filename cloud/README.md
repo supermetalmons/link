@@ -2,7 +2,7 @@
 
 Run commands from the repository root. See the repository [architecture and command map](../README.md) for package boundaries and the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md) for API release, maintenance, and rollback procedures.
 
-Firebase retains the remaining invite, profile, and prize projection triggers, event-prize withdrawal, and the existing Firebase data stores. The API Worker owns auth, profile and leaderboard reads, profile customization, username mutation, mining, gameplay, event-prize selection, rating-, automatch-, and event-driven profile-game projection, event control and progress Workflows, X callback, event Telegram projection, and Worker-backed Telegram delivery.
+Firebase retains the five manual invite and match projection triggers, event-prize withdrawal, and the existing Firebase data stores. The API Worker owns auth, profile and leaderboard reads, profile customization, username mutation, mining, gameplay, event-prize selection and canonical projection, profile-link catch-up, rating-, automatch-, and event-driven profile-game projection, event control and progress Workflows, X callback, event Telegram projection, and Worker-backed Telegram delivery.
 
 ## Setup
 
@@ -39,6 +39,8 @@ The full release reconciles deployed Functions with the current export manifest.
 npm --prefix cloud/functions run deploy:safe -- <function-name> --project mons-link
 ```
 
+For the forward profile-projection cutover, do not start with the full release. Follow the ordered cutover in the Cloudflare deployment guide so the additive database and Firestore indexes are ready before the Worker takes ownership and the legacy Functions are reconciled.
+
 ## Auth maintenance and recovery
 
 `AUTH_MUTATIONS_DISABLED` in `cloud/workers/api/wrangler.jsonc` is the only auth maintenance switch. Change and release it as reviewed Worker configuration; do not create environment-specific copies or Dashboard overrides.
@@ -55,6 +57,33 @@ node cloud/admin/reconcileEventProfileGames.js --sample --project mons-link --ex
 ```
 
 Do not purge the Queue or delete a pending outbox. Malformed markers are repaired in place and re-enqueued while preserving recoverable cleanup owners.
+
+## Profile-link projection recovery
+
+Profile-link changes atomically persist `profileGameProjectionOutbox/profile/{loginUid}` before the API Worker attempts to enqueue the permanent profile-game projection Queue. The five-minute schedule recovers stale markers, and request IDs prevent an older task from clearing a newer link change. Preview a production candidate, then execute and wait for the marker to settle:
+
+```sh
+npm run reconcile:profile-link-games -- --sample --project mons-link
+npm run reconcile:profile-link-games -- --sample --project mons-link --execute --wait
+```
+
+Profile documents must not be deleted manually. Audit bounded pages of profile-game documents and explicitly delete only confirmed orphans:
+
+```sh
+npm run audit:orphan-profile-games -- --project mons-link --dry-run
+npm run audit:orphan-profile-games -- --project mons-link --execute
+```
+
+Repeat bounded pages with the reported `--after <nextCursor>` until a clean pass reports no orphans.
+
+Reconcile profile-event prizes across merge targets with a dry-run immediately before each execute page. Conflicts are retained for review and never overwritten:
+
+```sh
+npm run reconcile:profile-event-prizes -- --project mons-link --dry-run
+npm run reconcile:profile-event-prizes -- --project mons-link --execute
+```
+
+Repeat bounded pages with the reported `--after <nextCursor>`, then restart from the beginning and require a clean dry-run pass.
 
 ## Auth cooldown cleanup
 

@@ -22,9 +22,6 @@ export type EventBracketRuntime = {
     didChange: boolean;
     updates: Record<string, unknown>;
   }>;
-  getMissingEventPrizeProjectionUpdates(
-    input: Record<string, unknown>,
-  ): Promise<Record<string, unknown>>;
   getSortedRoundIndexes(rounds: unknown): number[];
   hasThirdPlaceMatchField(event: unknown): boolean;
   isMatchResolved(match: unknown): boolean;
@@ -39,6 +36,9 @@ export type EventBracketRuntime = {
   reconcileBracketMatchReadiness(
     input: Record<string, unknown>,
   ): Promise<boolean>;
+  reconcileProfileEventPrizeAssignments(
+    input: Record<string, unknown>,
+  ): Promise<{ didChange: boolean; settled: boolean }>;
   reconcileThirdPlaceMatchReadiness(input: Record<string, unknown>): Promise<{
     didChange: boolean;
     thirdPlaceMatch: Record<string, unknown> | null;
@@ -72,6 +72,10 @@ export function createEventBracketRuntime(dependencies: {
     match: unknown,
     opponentMatch: unknown,
   ) => Promise<{ winner: "player" | "opponent" | null; reason: string }>;
+  resolveProfileEventPrizeOwnerId?: (input: {
+    eventId: string;
+    profileId: string;
+  }) => Promise<string>;
 }): EventBracketRuntime;
 
 export function getEventPrizePlacements(

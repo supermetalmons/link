@@ -9,18 +9,23 @@ import {
   handleProfileGameProjectionMessage,
   processAutomatchProfileGameProjection,
   processEventProfileGameProjection,
+  processProfileLinkProfileGameProjection,
   processRatingProfileGameProjection,
   profileGameProjectionRetryDelaySeconds,
   repairInvalidEventSweepEntry,
+  repairInvalidProfileLinkSweepEntry,
   sweepAutomatchProfileGameProjections,
   sweepEventProfileGameProjections,
+  sweepProfileLinkProfileGameProjections,
   sweepRatingProfileGameProjections,
 } from "../src/profileGameProjection.ts";
 import {
   buildAutomatchProfileGameProjectionOutboxUpdates,
   buildEventProfileGameProjectionOutboxUpdates,
+  buildProfileLinkProfileGameProjectionOutbox,
   parseAutomatchProfileGameProjectionOutbox,
   parseEventProfileGameProjectionOutbox,
+  parseProfileLinkProfileGameProjectionOutbox,
 } from "../src/profileGameProjectionOutbox.ts";
 import type {
   EventProfileGameProjectionRuntime,
@@ -31,6 +36,7 @@ import {
   PROFILE_GAME_PROJECTION_QUEUE_NAME,
   type AutomatchProfileGameProjectionTask,
   type EventProfileGameProjectionTask,
+  type ProfileLinkProfileGameProjectionTask,
   type ProfileGameProjectionTask,
 } from "../src/profileGameProjectionTasks.ts";
 import worker from "../src/workerHandler.ts";
@@ -187,6 +193,33 @@ function eventTask(
   };
 }
 
+function profileLinkOutbox(
+  requestId = "profile-request-1",
+  lastQueuedAtMs = 200,
+  matchCursor: string | null = null,
+) {
+  return {
+    schemaVersion: 1,
+    status: "pending",
+    requestId,
+    profileId: "profile-1",
+    cleanupProfileIds: { "stale-profile": true },
+    matchCursor,
+    sourceUpdatedAtMs: 100,
+    lastQueuedAtMs,
+  };
+}
+
+function profileLinkTask(
+  requestId = "profile-request-1",
+): ProfileLinkProfileGameProjectionTask {
+  return {
+    kind: "profile-link-profile-game-projection",
+    loginUid: "login-1",
+    requestId,
+  };
+}
+
 function eventRuntime(
   calls: Array<{ cleanupOwnerProfileIds: string[]; eventId: string }>,
   status: "missing" | "projected" = "projected",
@@ -253,6 +286,21 @@ test("profile game projection tasks require exact safe payloads", () => {
   assert.deepEqual(parseProfileGameProjectionTask(eventTask()), eventTask());
   assert.equal(
     parseProfileGameProjectionTask({ ...eventTask(), extra: true }),
+    null,
+  );
+  assert.deepEqual(
+    parseProfileGameProjectionTask(profileLinkTask()),
+    profileLinkTask(),
+  );
+  assert.equal(
+    parseProfileGameProjectionTask({ ...profileLinkTask(), extra: true }),
+    null,
+  );
+  assert.equal(
+    parseProfileGameProjectionTask({
+      ...profileLinkTask(),
+      loginUid: "unsafe/path",
+    }),
     null,
   );
   assert.equal(
@@ -365,6 +413,44 @@ test("event outboxes preserve accumulated cleanup owners", () => {
     { ...eventOutbox(), cleanupOwnerProfileIds: { owner: false } },
   ]) {
     assert.equal(parseEventProfileGameProjectionOutbox(invalid), null);
+  }
+});
+
+test("profile-link outboxes preserve current and cleanup profiles", () => {
+  assert.deepEqual(
+    buildProfileLinkProfileGameProjectionOutbox({
+      cleanupProfileIds: ["stale-profile", "stale-profile"],
+      lastQueuedAtMs: 200,
+      profileId: "profile-1",
+      requestId: "profile-request-1",
+      sourceUpdatedAtMs: 100,
+    }),
+    profileLinkOutbox(),
+  );
+  assert.deepEqual(
+    parseProfileLinkProfileGameProjectionOutbox(profileLinkOutbox()),
+    {
+      ...profileLinkOutbox(),
+      cleanupProfileIds: ["stale-profile"],
+    },
+  );
+  const omittedCleanup = Object.fromEntries(
+    Object.entries(profileLinkOutbox()).filter(
+      ([key]) => key !== "cleanupProfileIds",
+    ),
+  );
+  assert.deepEqual(
+    parseProfileLinkProfileGameProjectionOutbox(omittedCleanup),
+    { ...profileLinkOutbox(), cleanupProfileIds: [] },
+  );
+  for (const invalid of [
+    null,
+    { ...profileLinkOutbox(), profileId: "unsafe/path" },
+    { ...profileLinkOutbox(), requestId: "unsafe/path" },
+    { ...profileLinkOutbox(), cleanupProfileIds: { owner: false } },
+    { ...profileLinkOutbox(), sourceUpdatedAtMs: Number.NaN },
+  ]) {
+    assert.equal(parseProfileLinkProfileGameProjectionOutbox(invalid), null);
   }
 });
 
@@ -501,6 +587,61 @@ test("automatch projection serializes newer work behind the current invite", asy
   );
   assert.equal(projection, "matched");
   assert.equal(values.get(outboxPath), null);
+  assert.equal(
+    await processProfileLinkProfileGameProjection(
+      profileLinkTask(),
+      rtdb,
+      async () => ({ didHitInviteCap: false, nextMatchCursor: null }),
+      "duplicate-owner",
+      () => 400,
+    ),
+    "stale",
+  );
+});
+
+test("profile-link recovery rebuilds malformed markers from the live link", async () => {
+  let current: unknown = {
+    status: "bad",
+    profileId: "stale-profile",
+    cleanupProfileIds: { "older-profile": true, "unsafe/path": true },
+  };
+  const result = await repairInvalidProfileLinkSweepEntry(
+    {
+      getRtdbPath: async (path) => {
+        assert.equal(path, "players/login-1/profile");
+        return "profile-1";
+      },
+      transactRtdbPath: async (_path, updater) => {
+        const transaction = applyRtdbTransaction(current, updater);
+        if (transaction.committed) current = transaction.value;
+        return transaction;
+      },
+    },
+    "login-1",
+    600_000,
+    () => "repair-request",
+  );
+  assert.deepEqual(result, {
+    kind: "repaired",
+    task: {
+      kind: "profile-link-profile-game-projection",
+      loginUid: "login-1",
+      requestId: "repair-request",
+    },
+  });
+  assert.deepEqual(current, {
+    schemaVersion: 1,
+    status: "pending",
+    requestId: "repair-request",
+    profileId: "profile-1",
+    cleanupProfileIds: {
+      "older-profile": true,
+      "stale-profile": true,
+    },
+    matchCursor: null,
+    sourceUpdatedAtMs: 600_000,
+    lastQueuedAtMs: 600_000,
+  });
 });
 
 test("event projection reconciles cleanup owners and exact-clears its outbox", async () => {
@@ -567,6 +708,129 @@ test("event projection preserves a superseding outbox", async () => {
     values.get(outboxPath),
     eventOutbox("event-request-new", 400),
   );
+});
+
+test("profile-link projection uses nested invite locks and exact-clears", async () => {
+  const outboxPath = "profileGameProjectionOutbox/profile/login-1";
+  const values = new Map<string, unknown>([[outboxPath, profileLinkOutbox()]]);
+  const rtdb = projectionLockRtdb(values);
+  const calls: Array<Record<string, unknown>> = [];
+  assert.equal(
+    await processProfileLinkProfileGameProjection(
+      profileLinkTask(),
+      rtdb,
+      async (input) => {
+        calls.push({
+          cleanupProfileIds: input.cleanupProfileIds,
+          loginUid: input.loginUid,
+          profileId: input.profileId,
+        });
+        await input.withInviteProjectionLock("invite-1", async () => undefined);
+        return { didHitInviteCap: false, nextMatchCursor: null };
+      },
+      "profile-owner",
+      () => 300,
+    ),
+    "projected",
+  );
+  assert.deepEqual(calls, [
+    {
+      cleanupProfileIds: ["stale-profile"],
+      loginUid: "login-1",
+      profileId: "profile-1",
+    },
+  ]);
+  assert.equal(values.get(outboxPath), null);
+});
+
+test("profile-link projection advances capped work before clearing", async () => {
+  const outboxPath = "profileGameProjectionOutbox/profile/login-1";
+  const values = new Map<string, unknown>([[outboxPath, profileLinkOutbox()]]);
+  const rtdb = projectionLockRtdb(values);
+  assert.equal(
+    await processProfileLinkProfileGameProjection(
+      profileLinkTask(),
+      rtdb,
+      async () => ({
+        didHitInviteCap: true,
+        nextMatchCursor: "match-300",
+      }),
+      "profile-owner",
+      () => 300,
+    ),
+    "continued",
+  );
+  assert.deepEqual(
+    values.get(outboxPath),
+    profileLinkOutbox("profile-request-1", 300, "match-300"),
+  );
+  assert.equal(
+    await processProfileLinkProfileGameProjection(
+      profileLinkTask(),
+      rtdb,
+      async (input) => {
+        assert.equal(input.matchCursor, "match-300");
+        return { didHitInviteCap: false, nextMatchCursor: null };
+      },
+      "profile-owner-next",
+      () => 400,
+    ),
+    "projected",
+  );
+  assert.equal(values.get(outboxPath), null);
+});
+
+test("profile-link projection exact-settles missing links", async () => {
+  const outboxPath = "profileGameProjectionOutbox/profile/login-1";
+  const values = new Map<string, unknown>([[outboxPath, profileLinkOutbox()]]);
+  const rtdb = projectionLockRtdb(values);
+  assert.equal(
+    await processProfileLinkProfileGameProjection(
+      profileLinkTask(),
+      rtdb,
+      async () => null,
+      "profile-owner",
+      () => 300,
+    ),
+    "missing",
+  );
+  assert.equal(values.get(outboxPath), null);
+
+  values.set(outboxPath, profileLinkOutbox());
+  assert.equal(
+    await processProfileLinkProfileGameProjection(
+      profileLinkTask(),
+      rtdb,
+      async () => {
+        values.set(outboxPath, profileLinkOutbox("profile-request-new", 400));
+        return null;
+      },
+      "profile-owner-next",
+      () => 400,
+    ),
+    "superseded",
+  );
+  assert.deepEqual(
+    values.get(outboxPath),
+    profileLinkOutbox("profile-request-new", 400),
+  );
+});
+
+test("profile-link projection retains timed-out work without a cursor", async () => {
+  const outboxPath = "profileGameProjectionOutbox/profile/login-1";
+  const outbox = profileLinkOutbox();
+  const values = new Map<string, unknown>([[outboxPath, outbox]]);
+  await assert.rejects(
+    processProfileLinkProfileGameProjection(
+      profileLinkTask(),
+      projectionLockRtdb(values),
+      async () => ({ didHitInviteCap: true, nextMatchCursor: "" }),
+      "profile-owner",
+      () => 300,
+    ),
+    /no-progress/,
+  );
+  assert.deepEqual(values.get(outboxPath), outbox);
 });
 
 test("rating projection uses deterministic completion inputs and completes once", async () => {
@@ -835,6 +1099,63 @@ test("event Queue retries transient work without settling its outbox", async () 
   assert.equal(failed.acknowledgements(), 0);
   assert.deepEqual(failed.retries, [{ delaySeconds: 4 }]);
   assert.deepEqual(values.get(outboxPath), eventOutbox());
+});
+
+test("profile-link Queue immediately dispatches the next capped page", async () => {
+  const message = queueMessage(profileLinkTask());
+  const outboxPath = "profileGameProjectionOutbox/profile/login-1";
+  const values = new Map<string, unknown>([[outboxPath, profileLinkOutbox()]]);
+  const sent: unknown[] = [];
+  await handleProfileGameProjectionMessage(
+    message.message,
+    {
+      ...TELEGRAM_TEST_ENV,
+      PROFILE_GAME_PROJECTION_QUEUE: {
+        ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
+        send: async (body: unknown) => {
+          sent.push(body);
+          return {
+            metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+          };
+        },
+      },
+    },
+    {
+      createRtdb: () => projectionLockRtdb(values),
+      createRuntime: () => runtime([]),
+      logger: { error() {}, info() {} },
+      now: () => 300,
+      processProfileLink: async () => ({
+        didHitInviteCap: true,
+        nextMatchCursor: "match-300",
+      }),
+    },
+  );
+  assert.equal(message.acknowledgements(), 1);
+  assert.deepEqual(sent, [profileLinkTask()]);
+  assert.deepEqual(
+    values.get(outboxPath),
+    profileLinkOutbox("profile-request-1", 300, "match-300"),
+  );
+});
+
+test("profile-link Queue reports missing after exact settlement", async () => {
+  const message = queueMessage(profileLinkTask());
+  const outboxPath = "profileGameProjectionOutbox/profile/login-1";
+  const values = new Map<string, unknown>([[outboxPath, profileLinkOutbox()]]);
+  const logs: string[] = [];
+  await handleProfileGameProjectionMessage(message.message, TELEGRAM_TEST_ENV, {
+    createRtdb: () => projectionLockRtdb(values),
+    createRuntime: () => runtime([]),
+    logger: {
+      error() {},
+      info: (entry) => logs.push(String(entry)),
+    },
+    processProfileLink: async () => null,
+  });
+  assert.equal(message.acknowledgements(), 1);
+  assert.equal(values.get(outboxPath), null);
+  assert.equal(JSON.parse(logs.at(-1) || "{}").status, "missing");
 });
 
 test("profile game projection Queue keeps exhausted infrastructure work pending", async () => {
@@ -1406,6 +1727,54 @@ test("automatch recovery claims an outbox only once", async () => {
   );
   assert.deepEqual(current, {
     ...automatchOutbox("request-1", 50, 100),
+    lastQueuedAtMs: 600_000,
+  });
+});
+
+test("profile-link recovery claims due markers on the existing Queue", async () => {
+  const batches: ProfileGameProjectionTask[][] = [];
+  let current: unknown = profileLinkOutbox("profile-request-1", 100);
+  const queue = {
+    ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
+    sendBatch: async (messages: Iterable<MessageSendRequest<unknown>>) => {
+      batches.push(
+        Array.from(messages).map(
+          ({ body }) => body as ProfileGameProjectionTask,
+        ),
+      );
+      return {
+        metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+      };
+    },
+  } satisfies Queue;
+  const rtdb = {
+    getRtdbPath: async (_path: string, query?: Record<string, unknown>) =>
+      query?.endAt === 300_000 ? { "login-1": current } : null,
+    transactRtdbPath: async (
+      _path: string,
+      updater: (value: unknown) => unknown,
+    ) => {
+      const result = applyRtdbTransaction(current, updater);
+      if (result.committed) current = result.value;
+      return result;
+    },
+  };
+  assert.equal(
+    await sweepProfileLinkProfileGameProjections(
+      {
+        ...TELEGRAM_TEST_ENV,
+        PROFILE_GAME_PROJECTION_QUEUE: queue,
+      },
+      {
+        createRtdb: () => rtdb,
+        now: () => 600_000,
+      },
+    ),
+    1,
+  );
+  assert.deepEqual(batches.flat(), [profileLinkTask()]);
+  assert.deepEqual(current, {
+    ...profileLinkOutbox("profile-request-1", 100),
     lastQueuedAtMs: 600_000,
   });
 });

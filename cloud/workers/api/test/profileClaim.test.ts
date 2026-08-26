@@ -147,7 +147,10 @@ test("delegates when a profile appears after no-profile cleanup", async () => {
     { uid: identity.uid, claims: { admin: true } },
   ]);
   assert.deepEqual(clients.rtdbWrites, [
-    { "players/firebase-uid/profile": null },
+    {
+      "players/firebase-uid/profile": null,
+      "profileGameProjectionOutbox/profile/firebase-uid": null,
+    },
   ]);
   assert.deepEqual(clients.readState(), {
     customClaims: { admin: true },
@@ -264,7 +267,7 @@ test("fails closed after bounded profile source instability", async () => {
   assert.deepEqual(clients.rtdbWrites, []);
 });
 
-test("removes only stale profile state when no profile exists", async () => {
+test("removes stale profile state and its projection outbox", async () => {
   const authWrites: Array<Record<string, unknown>> = [];
   const rtdbWrites: Array<Record<string, unknown>> = [];
   const result = await syncProfileClaim(identity, env, {
@@ -282,7 +285,12 @@ test("removes only stale profile state when no profile exists", async () => {
   assert.deepEqual(authWrites, [
     { uid: identity.uid, claims: { admin: true } },
   ]);
-  assert.deepEqual(rtdbWrites, [{ "players/firebase-uid/profile": null }]);
+  assert.deepEqual(rtdbWrites, [
+    {
+      "players/firebase-uid/profile": null,
+      "profileGameProjectionOutbox/profile/firebase-uid": null,
+    },
+  ]);
 });
 
 test("does no cleanup writes when profile state is already absent", async () => {

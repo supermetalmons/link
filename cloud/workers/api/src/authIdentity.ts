@@ -1442,6 +1442,10 @@ export function createAuthIdentityService(
       const profile = await acquireCallerRecoveryBarrier(uid);
       await ensureFirebaseProfileClaim(uid, profile.id, {
         authClient,
+        enqueueProfileLinkProjection: (task) =>
+          env.PROFILE_GAME_PROJECTION_QUEUE.send(task),
+        logger: console,
+        now,
         rtdb,
         signal: dependencies.signal,
       });

@@ -35,6 +35,8 @@ const createEventRuntime = (dependencies) => {
   const admin = dependencies.admin;
   const getProfileByLoginId = dependencies.getProfileByLoginId;
   const enqueueEventProgressTask = dependencies.enqueueEventProgressTask;
+  const resolveProfileEventPrizeOwnerId =
+    dependencies.resolveProfileEventPrizeOwnerId;
   const {
     acquireEventLockWithRetry,
     isEventLockStillOwned,
@@ -45,7 +47,6 @@ const createEventRuntime = (dependencies) => {
     addEventPrizeAssignmentUpdates,
     applyMatchResolution,
     buildScheduledEventDueUpdates,
-    getMissingEventPrizeProjectionUpdates,
     getSortedRoundIndexes,
     hasThirdPlaceMatchField,
     isMatchResolved,
@@ -53,12 +54,13 @@ const createEventRuntime = (dependencies) => {
     rebuildParticipantStatesFromRounds,
     recomputeRoundStatuses,
     reconcileBracketMatchReadiness,
+    reconcileProfileEventPrizeAssignments,
     reconcileThirdPlaceMatchReadiness,
     removeCompletedEventPrizeProjections,
     resolveEventPrizeAssignments,
     resolveRoundMatchState,
     resolveRoundMatchesWithConcurrency,
-  } = createEventBracketRuntime({ admin });
+  } = createEventBracketRuntime({ admin, resolveProfileEventPrizeOwnerId });
   const HttpsError = EventRuntimeError;
   const EVENT_SYNC_THROTTLE_WINDOW_MS = 500;
 
@@ -1181,16 +1183,6 @@ const createEventRuntime = (dependencies) => {
                 includeEventAssignments: true,
               });
               prizeStateChanged = true;
-            } else {
-              const projectionUpdates =
-                await getMissingEventPrizeProjectionUpdates({
-                  eventId,
-                  assignments: prizeAssignmentResult.assignments,
-                });
-              if (Object.keys(projectionUpdates).length > 0) {
-                Object.assign(updates, projectionUpdates);
-                prizeStateChanged = true;
-              }
             }
           }
         }
@@ -1223,6 +1215,31 @@ const createEventRuntime = (dependencies) => {
           });
         }
         await admin.database().ref().update(updates);
+      }
+      if (eventPrizeAssignmentsForProjectionCleanup) {
+        let projectionSettled = false;
+        for (let attempt = 0; attempt <= 3; attempt += 1) {
+          if (!(await isEventLockStillOwned(lockHandle))) {
+            break;
+          }
+          const projectionResult = await reconcileProfileEventPrizeAssignments({
+            eventId,
+            assignments: eventPrizeAssignmentsForProjectionCleanup,
+          });
+          if (projectionResult.didChange) {
+            didChange = true;
+          }
+          if (projectionResult.settled) {
+            projectionSettled = true;
+            break;
+          }
+        }
+        if (!projectionSettled) {
+          throw new HttpsError(
+            "aborted",
+            "Event prize ownership changed during projection.",
+          );
+        }
       }
       const projectionCleanupRequest =
         getCompletedEventPrizeProjectionCleanupRequest({

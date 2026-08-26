@@ -16,6 +16,25 @@ const identity = {
   profileId: "creator-profile",
 };
 
+function privateKeyPem(bytes: ArrayBuffer): string {
+  const base64 = Buffer.from(bytes).toString("base64");
+  return `-----BEGIN PRIVATE KEY-----\n${base64}\n-----END PRIVATE KEY-----`;
+}
+
+async function generatePrivateKeyPem(): Promise<string> {
+  const keys = (await crypto.subtle.generateKey(
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-256",
+    },
+    true,
+    ["sign", "verify"],
+  )) as CryptoKeyPair;
+  return privateKeyPem(await crypto.subtle.exportKey("pkcs8", keys.privateKey));
+}
+
 function getPath(root: Record<string, unknown>, path: string): unknown {
   if (!path) {
     return root;
@@ -452,7 +471,7 @@ test("progresses resolved semifinal winners into an active final", async () => {
   assert.equal(typeof final.inviteId, "string");
 });
 
-test("repairs missing terminal prize projections", async () => {
+test("repairs terminal prizes and rechecks ownership after commit", async () => {
   const eventId = "NN3eRzoZo80";
   const assignedAtMs = 500;
   const final = {
@@ -512,6 +531,14 @@ test("repairs missing terminal prize projections", async () => {
     { eventId },
     {
       repository: state.repository,
+      resolveProfileEventPrizeOwnerId: async ({ profileId }) =>
+        profileId === identity.profileId &&
+        getPath(
+          state.values,
+          `profileEventPrizes/${identity.profileId}/${eventId}`,
+        )
+          ? "canonical-profile"
+          : profileId,
       now: () => 1_000,
       random: () => 0,
       sleep: async () => undefined,
@@ -529,6 +556,110 @@ test("repairs missing terminal prize projections", async () => {
   assert.deepEqual(
     getPath(state.values, `profileEventPrizes/runner-up/${eventId}`),
     assignments[2],
+  );
+  assert.deepEqual(
+    getPath(state.values, `profileEventPrizes/canonical-profile/${eventId}`),
+    { ...assignments[1], profileId: "canonical-profile" },
+  );
+});
+
+test("uses canonical prize ownership with an injected repository", async (t) => {
+  const eventId = "NN3eRzoZo80";
+  const assignedAtMs = 500;
+  const assignment = {
+    eventId,
+    profileId: identity.profileId,
+    place: 1,
+    prizeId: "1092",
+    assignedAtMs,
+  };
+  const final = {
+    ...match("0_0", identity.profileId, null),
+    inviteId: "final-invite",
+    status: "host",
+    resolvedAtMs: assignedAtMs,
+    winnerProfileId: identity.profileId,
+  };
+  const event = {
+    eventId,
+    status: "ended",
+    startAtMs: 1,
+    endedAtMs: assignedAtMs,
+    updatedAtMs: assignedAtMs,
+    createdByLoginUid: identity.uid,
+    createdByProfileId: identity.profileId,
+    currentRoundIndex: 0,
+    winnerProfileId: identity.profileId,
+    winnerDisplayName: identity.profileId.toUpperCase(),
+    prizeSelectionsLockedAtMs: assignedAtMs,
+    prizeAssignments: { 1: assignment },
+    supportsThirdPlaceMatch: false,
+    participants: {
+      [identity.profileId]: participant(identity.profileId, 1),
+    },
+    rounds: {
+      0: {
+        status: "completed",
+        completedAtMs: assignedAtMs,
+        matches: { "0_0": final },
+      },
+    },
+  };
+  const state = createRepository({ [`events/${eventId}`]: event });
+  const originalFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url === "https://oauth2.googleapis.com/token") {
+      return Response.json({ access_token: "access-token" });
+    }
+    const collectionPath = "/profileMergeTargets/";
+    const pathIndex = url.indexOf(collectionPath);
+    if (pathIndex < 0) {
+      throw new Error(`unexpected request: ${url}`);
+    }
+    const profileId = decodeURIComponent(
+      url.slice(pathIndex + collectionPath.length),
+    );
+    if (profileId !== identity.profileId) {
+      return new Response(null, { status: 404 });
+    }
+    return Response.json({
+      name: `projects/mons-link/databases/(default)/documents/profileMergeTargets/${identity.profileId}`,
+      updateTime: "2026-08-26T00:00:00Z",
+      fields: {
+        targetProfileId: { stringValue: "canonical-profile" },
+      },
+    });
+  };
+
+  await syncEventState(
+    {
+      ...workflowEnvironment(() => undefined),
+      FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: await generatePrivateKeyPem(),
+    },
+    identity,
+    { eventId },
+    {
+      repository: state.repository,
+      now: () => 1_000,
+      random: () => 0,
+      sleep: async () => undefined,
+    },
+  );
+
+  assert.equal(
+    getPath(
+      state.values,
+      `profileEventPrizes/${identity.profileId}/${eventId}`,
+    ),
+    null,
+  );
+  assert.deepEqual(
+    getPath(state.values, `profileEventPrizes/canonical-profile/${eventId}`),
+    { ...assignment, profileId: "canonical-profile" },
   );
 });
 

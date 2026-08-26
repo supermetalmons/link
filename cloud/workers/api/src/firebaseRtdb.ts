@@ -38,6 +38,7 @@ export type FirebaseRtdbQuery = {
   equalTo?: string | number | boolean | null;
   limitToFirst?: number;
   orderBy?: string;
+  shallow?: boolean;
   startAt?: string | number | boolean | null;
 };
 
@@ -103,6 +104,19 @@ function queryDatabaseUrl(
   query: FirebaseRtdbQuery = {},
 ): string {
   const url = new URL(databaseUrl(root, path));
+  if (
+    query.shallow === true &&
+    (query.orderBy !== undefined ||
+      query.equalTo !== undefined ||
+      query.startAt !== undefined ||
+      query.endAt !== undefined ||
+      query.limitToFirst !== undefined)
+  ) {
+    throw new FirebaseRtdbFailure();
+  }
+  if (query.shallow === true) {
+    url.searchParams.set("shallow", "true");
+  }
   if (query.orderBy !== undefined) {
     url.searchParams.set("orderBy", JSON.stringify(query.orderBy));
   }

@@ -15,6 +15,7 @@ import {
   authRecoveryJobName,
   createAuthRecoveryService,
   enqueueAuthRecovery,
+  ensureFirebaseProfileClaim,
   handleAuthRecoveryMessage,
   newAuthRecoveryJob,
   parseAuthRecoveryJob,
@@ -286,6 +287,62 @@ test("repairs canonical UIDs and leaves malformed legacy UIDs internal", async (
     memory.documents.get(authRecoveryJobName("profile-1"))?.fields.loginUids,
     ["legacy/login"],
   );
+});
+
+test("profile claim changes persist a recoverable link marker before enqueue", async () => {
+  const external = externalDependencies(memoryFirestore([]).client);
+  external.values.set("players/login-1/profile", "source-profile");
+  external.values.set("profileGameProjectionOutbox/profile/login-1", {
+    schemaVersion: 1,
+    status: "pending",
+    requestId: "older-request",
+    profileId: "middle-profile",
+    cleanupProfileIds: { "older-profile": true },
+    matchCursor: null,
+    sourceUpdatedAtMs: 50,
+    lastQueuedAtMs: 50,
+  });
+  const tasks: unknown[] = [];
+  const logs: string[] = [];
+  await ensureFirebaseProfileClaim("login-1", "target-profile", {
+    authClient: external.authClient,
+    createRequestId: () => "profile-request",
+    enqueueProfileLinkProjection: async (task) => {
+      tasks.push(task);
+      throw new Error("queue-unavailable");
+    },
+    logger: { error: (message) => logs.push(String(message)) },
+    now: () => 100,
+    rtdb: external.rtdb,
+  });
+  assert.equal(
+    external.values.get("players/login-1/profile"),
+    "target-profile",
+  );
+  assert.deepEqual(
+    external.values.get("profileGameProjectionOutbox/profile/login-1"),
+    {
+      schemaVersion: 1,
+      status: "pending",
+      requestId: "profile-request",
+      profileId: "target-profile",
+      cleanupProfileIds: {
+        "older-profile": true,
+        "source-profile": true,
+      },
+      matchCursor: null,
+      sourceUpdatedAtMs: 100,
+      lastQueuedAtMs: 100,
+    },
+  );
+  assert.deepEqual(tasks, [
+    {
+      kind: "profile-link-profile-game-projection",
+      loginUid: "login-1",
+      requestId: "profile-request",
+    },
+  ]);
+  assert.equal(logs.length, 1);
 });
 
 test("copies each source game and deletes it in the same commit", async () => {

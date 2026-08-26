@@ -24,9 +24,16 @@ export type EventProfileGameProjectionTask = {
   requestId: string;
 };
 
+export type ProfileLinkProfileGameProjectionTask = {
+  kind: "profile-link-profile-game-projection";
+  loginUid: string;
+  requestId: string;
+};
+
 export type ProfileGameProjectionTask =
   | AutomatchProfileGameProjectionTask
   | EventProfileGameProjectionTask
+  | ProfileLinkProfileGameProjectionTask
   | RatingProfileGameProjectionTask;
 
 function exactKeys(
@@ -58,6 +65,20 @@ export function parseProfileGameProjectionTask(
     return {
       kind: task.kind,
       inviteId: task.inviteId,
+      requestId: task.requestId,
+    };
+  }
+  if (
+    exactKeys(task, ["kind", "loginUid", "requestId"]) &&
+    task.kind === "profile-link-profile-game-projection" &&
+    typeof task.loginUid === "string" &&
+    isSafeFirebaseKey(task.loginUid) &&
+    typeof task.requestId === "string" &&
+    isSafeFirebaseKey(task.requestId)
+  ) {
+    return {
+      kind: task.kind,
+      loginUid: task.loginUid,
       requestId: task.requestId,
     };
   }

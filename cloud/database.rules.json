@@ -66,6 +66,9 @@
       },
       "event": {
         ".indexOn": ["lastQueuedAtMs"]
+      },
+      "profile": {
+        ".indexOn": ["lastQueuedAtMs"]
       }
     },
     "invites": {

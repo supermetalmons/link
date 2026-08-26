@@ -25,6 +25,7 @@ import {
   createEventAdminAdapter,
   ensureEventProgressWorkflow,
 } from "./eventProgress.ts";
+import { createProfileEventPrizeOwnerResolver } from "./profileEventPrizeOwner.ts";
 
 export const EVENT_CONTROL_TIMEOUT_MS = 30_000;
 
@@ -32,6 +33,10 @@ export type EventControlDependencies = {
   now?: () => number;
   random?: () => number;
   repository?: GameplayRepository;
+  resolveProfileEventPrizeOwnerId?: (input: {
+    eventId: string;
+    profileId: string;
+  }) => Promise<string>;
   signal?: AbortSignal;
   sleep?: (milliseconds: number) => Promise<void>;
 };
@@ -103,6 +108,12 @@ function createRuntime(
   const repository =
     dependencies.repository ||
     createGameplayRepository(env, { timeoutMs: EVENT_CONTROL_TIMEOUT_MS });
+  const resolveProfileEventPrizeOwnerId =
+    dependencies.resolveProfileEventPrizeOwnerId ||
+    createProfileEventPrizeOwnerResolver(env, {
+      rtdb: repository,
+      signal,
+    });
   const lockManager = createEventLockManagerCore({
     createLockId: () => crypto.randomUUID(),
     transactPath: (path, updater) =>
@@ -153,6 +164,7 @@ function createRuntime(
         {}
       );
     },
+    resolveProfileEventPrizeOwnerId,
     now: dependencies.now,
     random: dependencies.random || secureRandom,
     sleep:

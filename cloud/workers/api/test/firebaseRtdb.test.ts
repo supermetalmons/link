@@ -132,6 +132,34 @@ test("encodes exact RTDB queries and silent multipath server-value updates", asy
   );
 });
 
+test("encodes shallow RTDB reads and rejects filtered shallow queries", async () => {
+  const requests: Array<RequestInfo | URL> = [];
+  const client = createFirebaseRtdbClient(env, {
+    getAccessToken: async () => "access-token",
+    fetcher: async (input) => {
+      requests.push(input);
+      return jsonResponse({ "match-1": true });
+    },
+  });
+
+  assert.deepEqual(
+    await client.getPath("players/firebase-uid/matches", { shallow: true }),
+    { "match-1": true },
+  );
+  const shallowUrl = new URL(String(requests[0]));
+  assert.equal(shallowUrl.pathname, "/players/firebase-uid/matches.json");
+  assert.equal(shallowUrl.searchParams.get("shallow"), "true");
+  await assert.rejects(
+    () =>
+      client.getPath("players/firebase-uid/matches", {
+        orderBy: "$key",
+        shallow: true,
+      }),
+    FirebaseRtdbFailure,
+  );
+  assert.equal(requests.length, 1);
+});
+
 test("commits and aborts ETag-backed transactions", async () => {
   const responses = [
     jsonResponse({ value: 1 }, 200, { ETag: '"one"' }),

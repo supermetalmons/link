@@ -45,11 +45,34 @@ npm run smoke:api -- --base-url https://api.mons.link --smoke-sol <known-wallet>
 
 `upload:api` uses `wrangler versions upload --strict`; it does not send traffic to the candidate. `promote:api` deploys the explicit Version ID to 100% of traffic without prompting. `deploy:api:triggers` applies the tracked route, Cron, and Queue consumer configuration. Routine code-only releases may omit the trigger command when that configuration is unchanged.
 
-`mons-link-profile-game-projection` is the permanent rating, automatch, and event projector Queue. Automatch mutations atomically persist `profileGameProjectionOutbox/automatch/{inviteId}` before enqueueing. Event mutations accumulate every pre-mutation owner under `profileGameProjectionOutbox/event/{eventId}` in the same RTDB commit as the event and use a separate per-event projection lock. The five-minute Worker schedule repairs malformed automatch and event markers, preserving recoverable cleanup owners, repairs rating completion markers, claims pending markers by `lastQueuedAtMs`, and re-enqueues all three task kinds. Monitor Queue consumption, pending marker age, `event_profile_game_projection_*`, and `profile_game_projection_*` logs.
+`mons-link-profile-game-projection` is the permanent rating, automatch, event, and profile-link projector Queue. Automatch mutations atomically persist `profileGameProjectionOutbox/automatch/{inviteId}` before enqueueing. Event mutations accumulate every pre-mutation owner under `profileGameProjectionOutbox/event/{eventId}` in the same RTDB commit as the event and use a separate per-event projection lock. Profile-link changes atomically persist `profileGameProjectionOutbox/profile/{loginUid}`, accumulate stale profile owners, and use request-fenced per-login and per-invite locks. The five-minute Worker schedule repairs malformed automatch, event, and profile-link markers, preserving recoverable cleanup owners, repairs rating completion markers, claims pending markers by `lastQueuedAtMs`, and re-enqueues all four task kinds. Monitor Queue consumption, pending marker age, `event_profile_game_projection_*`, `profile_link_profile_game_projection_*`, and `profile_game_projection_*` logs.
 
 The retired Firebase function `projectProfileGamesOnAutomatchQueueWritten` must not remain deployed in steady state. Deploy the Realtime Database index, promote the Worker version, and then reconcile the Firebase Functions manifest. For rollback, restore and deploy the Firebase trigger from the pre-cutover revision before rolling the API Worker back.
 
 The retired Firebase function `projectProfileGamesOnEventWritten` must not remain deployed in steady state. During cutover, deploy the RTDB index while the Firebase trigger remains live, promote the Worker, and run the production sample reconciliation before reconciling the Firebase Functions manifest. Run the same reconciliation after deletion to prove Cloudflare-only ownership. For rollback after deletion, restore and deploy the trigger from the recorded pre-cutover revision before rolling the API Worker back; retain pending outboxes and the RTDB index.
+
+The retired Firebase functions `projectProfileGamesOnProfileLinkCreated`, `projectProfileGamesOnProfileLinkWritten`, `projectProfileGamesOnProfileDeleted`, `projectProfileEventPrizesOnPrizeWritten`, and `projectProfileEventPrizesOnMergeTargetWritten` must not remain deployed in steady state. Use this forward cutover order:
+
+1. While all five triggers remain live, deploy only the additive Realtime Database rules and Firestore indexes:
+
+   ```sh
+   firebase deploy --config cloud/firebase.json --only database,firestore:indexes --project mons-link
+   ```
+
+2. Wait until the `games.ownerLoginId` collection-group index reports `Enabled` in Firebase.
+3. Promote the recorded Worker Version ID and apply its Queue and schedule configuration:
+
+   ```sh
+   npm run promote:api -- --version-id <version-id>
+   npm run deploy:api:triggers
+   ```
+
+4. Run every page of `reconcile:profile-event-prizes` and `audit:orphan-profile-games` to a clean pass, and run `reconcile:profile-link-games -- --sample --execute --wait` successfully. Conflicting canonical prizes block the cutover and are never overwritten; production profile documents must not be deleted manually.
+5. Run the full Firebase release to reconcile the Functions manifest only after the Worker owns the projections and reconciliation is clean:
+
+   ```sh
+   npm run deploy:firebase -- --project mons-link
+   ```
 
 `mons-link-telegram-projection` owns automatch, rating, and event Telegram projections. Event mutations persist `telegramProjectionOutbox/event/{eventId}` and increment a durable per-event generation before enqueueing. The consumer serializes each event with `eventTelegramProjectionLocks`, generation-fences desired and projection-state commits, advances state only after dispatch succeeds, and clears only the exact request marker it processed. The five-minute schedule claims pending markers by `updatedAtMs`; monitor `firstQueuedAtMs`, `telegram_projection_queue_*`, and `telegram_projection_event_sweep_failed`.
 

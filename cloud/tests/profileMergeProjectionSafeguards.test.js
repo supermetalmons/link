@@ -9,18 +9,70 @@ const {
 const {
   buildInviteProjectionOwnerPlan,
   buildResolvedProfile,
-  onProfileDeleted,
-  processProfileLinkCatchup,
-  processWithConcurrency,
   readInviteExists,
   readExistingProjectionDocuments,
   recomputeInviteProjection,
-  resolveProfileLinkCatchupState,
   withInviteProjectionLock,
 } = require("../functions/profileGamesProjector");
+const {
+  createProfileLinkProjectionCore,
+  processWithConcurrency,
+} = require("../functions/profileLinkProjectionCore");
 const firebaseAdmin = require("../functions/firebaseAdmin");
 
 const runWithoutProjectionLock = async (_inviteId, work) => work();
+
+const processProfileLinkCatchup = async (input, dependencies) => {
+  const firestore = dependencies.firestore || null;
+  const core = createProfileLinkProjectionCore({
+    logger: { error: () => undefined, info: () => undefined },
+    recomputeInviteProjection: dependencies.recomputeInviteProjection,
+    resolveInviteIdFromMatchId: dependencies.resolveInviteIdFromMatchId,
+    repository: {
+      async deleteProfileGameProjections(profileId, inviteIds) {
+        if (!firestore) return 0;
+        const batch = firestore.batch();
+        inviteIds.forEach((inviteId) =>
+          batch.delete(
+            firestore
+              .collection("users")
+              .doc(profileId)
+              .collection("games")
+              .doc(inviteId),
+          ),
+        );
+        await batch.commit();
+        return inviteIds.length;
+      },
+      getCurrentProfileLink: dependencies.readCurrentProfileLink,
+      async getMatches(loginUid) {
+        const snapshot = await dependencies.readMatches(loginUid);
+        return snapshot.exists() ? snapshot.val() || {} : null;
+      },
+      async getMergeTarget(profileId) {
+        if (!firestore) return null;
+        const snapshot = await firestore
+          .collection("profileMergeTargets")
+          .doc(profileId)
+          .get();
+        return snapshot.exists ? snapshot.data() || null : null;
+      },
+      inviteExists: async () => false,
+      async profileExists(profileId) {
+        if (!firestore) return true;
+        return (await firestore.collection("users").doc(profileId).get())
+          .exists;
+      },
+    },
+    withInviteProjectionLock: dependencies.withInviteProjectionLock,
+  });
+  return core.processProfileLinkCatchup({
+    cleanupProfileIds: [input.staleProfileId].filter(Boolean),
+    loginUid: input.loginUid,
+    profileId: input.profileId,
+    sourceUpdatedAtMs: 100,
+  });
+};
 
 const runEventProjection = async ({
   afterData,
@@ -411,36 +463,6 @@ test("event retries converge when the live event changes during projection", asy
   );
 });
 
-test("profile-link retries use the live owner and retain event owners for cleanup", async () => {
-  const state = await resolveProfileLinkCatchupState(
-    {
-      eventProfileId: "stale-after-profile",
-      loginUid: "login-1",
-      staleProfileId: "before-profile",
-    },
-    { readCurrentProfileLink: async () => "live-profile" },
-  );
-  assert.deepEqual(state, {
-    cleanupProfileIds: [
-      "before-profile",
-      "stale-after-profile",
-      "live-profile",
-    ],
-    profileId: "live-profile",
-  });
-  assert.equal(
-    await resolveProfileLinkCatchupState(
-      {
-        eventProfileId: "stale-after-profile",
-        loginUid: "login-1",
-        staleProfileId: "before-profile",
-      },
-      { readCurrentProfileLink: async () => "" },
-    ),
-    null,
-  );
-});
-
 test("Firebase projectors serialize each invite with the shared lock", async () => {
   let current = null;
   const lockRef = () => ({
@@ -686,24 +708,157 @@ test("profile-link catchup retains projections until the merge source is deleted
   );
 });
 
-test("merge-source deletion leaves game cleanup to recovery", async () => {
-  const originalFirestore = firebaseAdmin.firestore;
-  let firestoreReads = 0;
-  firebaseAdmin.firestore = () => {
-    firestoreReads += 1;
-    throw new Error("unexpected-firestore-read");
-  };
-  try {
-    await onProfileDeleted.run({
-      data: {
-        data: () => ({ mergedIntoProfileId: "target-profile" }),
+test("profile-link catchup advances one bounded 20-match page", async () => {
+  const matches = Object.fromEntries(
+    Array.from({ length: 301 }, (_, index) => [
+      `invite-${String(index).padStart(3, "0")}`,
+      {},
+    ]),
+  );
+  let recomputed = 0;
+  const core = createProfileLinkProjectionCore({
+    logger: { error: () => undefined, info: () => undefined },
+    recomputeInviteProjection: async () => {
+      recomputed += 1;
+      return { sourceCleanupSafe: true };
+    },
+    repository: {
+      deleteProfileGameProjections: async () => 0,
+      getCurrentProfileLink: async () => "profile-1",
+      getMatches: async () => matches,
+      getMergeTarget: async () => null,
+      inviteExists: async () => true,
+      profileExists: async () => true,
+    },
+    withInviteProjectionLock: runWithoutProjectionLock,
+  });
+  const result = await core.processProfileLinkCatchup({
+    loginUid: "login-1",
+    profileId: "profile-1",
+    sourceUpdatedAtMs: 100,
+  });
+  assert.equal(result.didHitInviteCap, true);
+  assert.equal(result.matchIdsScanned, 20);
+  assert.equal(result.inviteIdsResolved, 20);
+  assert.equal(recomputed, 20);
+  assert.equal(result.nextMatchCursor, "invite-019");
+  const secondPage = await core.processProfileLinkCatchup({
+    loginUid: "login-1",
+    matchCursor: result.nextMatchCursor,
+    profileId: "profile-1",
+    sourceUpdatedAtMs: 100,
+  });
+  assert.equal(secondPage.didHitInviteCap, true);
+  assert.equal(secondPage.matchIdsScanned, 20);
+  assert.equal(secondPage.nextMatchCursor, "invite-039");
+  assert.equal(recomputed, 40);
+});
+
+test("profile-link catchup bounds scans with unresolved and duplicate invites", async () => {
+  const matches = Object.fromEntries(
+    Array.from({ length: 25 }, (_, index) => [
+      `match-${String(index).padStart(2, "0")}`,
+      {},
+    ]),
+  );
+  const inspectedMatchIds = [];
+  const recomputedInviteIds = [];
+  const core = createProfileLinkProjectionCore({
+    logger: { error: () => undefined, info: () => undefined },
+    recomputeInviteProjection: async (inviteId) => {
+      recomputedInviteIds.push(inviteId);
+      return { sourceCleanupSafe: true };
+    },
+    resolveInviteIdFromMatchId: async (matchId) => {
+      inspectedMatchIds.push(matchId);
+      return Number(matchId.slice(-2)) % 2 === 0 ? null : "shared-invite";
+    },
+    repository: {
+      deleteProfileGameProjections: async () => 0,
+      getCurrentProfileLink: async () => "profile-1",
+      getMatches: async () => matches,
+      getMergeTarget: async () => null,
+      inviteExists: async () => true,
+      profileExists: async () => true,
+    },
+    withInviteProjectionLock: runWithoutProjectionLock,
+  });
+
+  const result = await core.processProfileLinkCatchup({
+    loginUid: "login-1",
+    profileId: "profile-1",
+    sourceUpdatedAtMs: 100,
+  });
+
+  assert.deepEqual(inspectedMatchIds, Object.keys(matches).slice(0, 20));
+  assert.equal(result.matchIdsScanned, 20);
+  assert.equal(result.inviteIdsResolved, 1);
+  assert.equal(result.didHitInviteCap, true);
+  assert.equal(result.nextMatchCursor, "match-19");
+  assert.deepEqual(recomputedInviteIds, ["shared-invite"]);
+});
+
+test("profile-link catchup returns missing when the live link is gone", async () => {
+  let matchReads = 0;
+  const core = createProfileLinkProjectionCore({
+    logger: { error: () => undefined, info: () => undefined },
+    recomputeInviteProjection: async () => ({ sourceCleanupSafe: true }),
+    repository: {
+      deleteProfileGameProjections: async () => 0,
+      getCurrentProfileLink: async () => null,
+      getMatches: async () => {
+        matchReads += 1;
+        return {};
       },
-      params: { profileId: "source-profile" },
-    });
-    assert.equal(firestoreReads, 0);
-  } finally {
-    firebaseAdmin.firestore = originalFirestore;
-  }
+      getMergeTarget: async () => null,
+      inviteExists: async () => true,
+      profileExists: async () => true,
+    },
+    withInviteProjectionLock: runWithoutProjectionLock,
+  });
+  assert.equal(
+    await core.processProfileLinkCatchup({
+      loginUid: "login-1",
+      profileId: "profile-1",
+      sourceUpdatedAtMs: 100,
+    }),
+    null,
+  );
+  assert.equal(matchReads, 0);
+});
+
+test("profile-link catchup starts its budget after initial reads", async () => {
+  let initialReadsComplete = false;
+  let nowCalls = 0;
+  const core = createProfileLinkProjectionCore({
+    logger: { error: () => undefined, info: () => undefined },
+    now: () => {
+      assert.equal(initialReadsComplete, true);
+      nowCalls += 1;
+      return nowCalls === 1 ? 0 : 50_000;
+    },
+    recomputeInviteProjection: async () => ({ sourceCleanupSafe: true }),
+    repository: {
+      deleteProfileGameProjections: async () => 0,
+      getCurrentProfileLink: async () => "profile-1",
+      getMatches: async () => {
+        initialReadsComplete = true;
+        return { "match-1": {} };
+      },
+      getMergeTarget: async () => null,
+      inviteExists: async () => true,
+      profileExists: async () => true,
+    },
+    withInviteProjectionLock: runWithoutProjectionLock,
+  });
+  await assert.rejects(
+    core.processProfileLinkCatchup({
+      loginUid: "login-1",
+      profileId: "profile-1",
+      sourceUpdatedAtMs: 100,
+    }),
+    /no-progress/,
+  );
 });
 
 test("projection cleanup reads settle together and fail before returning data", async () => {

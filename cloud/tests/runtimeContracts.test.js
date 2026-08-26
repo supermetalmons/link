@@ -17,16 +17,11 @@ const httpExportNames = [];
 const taskQueueExportNames = [];
 
 const eventExportNames = [
-  "projectProfileEventPrizesOnMergeTargetWritten",
-  "projectProfileEventPrizesOnPrizeWritten",
   "projectProfileGamesOnInviteCreated",
   "projectProfileGamesOnInviteGuestIdChanged",
   "projectProfileGamesOnInviteGuestRematchesChanged",
   "projectProfileGamesOnInviteHostRematchesChanged",
   "projectProfileGamesOnMatchCreated",
-  "projectProfileGamesOnProfileDeleted",
-  "projectProfileGamesOnProfileLinkCreated",
-  "projectProfileGamesOnProfileLinkWritten",
 ];
 
 const expectedExportNames = [
@@ -140,46 +135,6 @@ Object.assign(expectedEndpointContracts, {
     },
     retry: true,
   }),
-  projectProfileGamesOnProfileLinkCreated: eventContract({
-    eventType: "google.firebase.database.ref.v1.created",
-    pathPatterns: { ref: "players/{loginUid}/profile", instance: "*" },
-    retry: true,
-  }),
-  projectProfileGamesOnProfileLinkWritten: eventContract({
-    eventType: "google.firebase.database.ref.v1.written",
-    pathPatterns: { ref: "players/{loginUid}/profile", instance: "*" },
-    retry: true,
-  }),
-  projectProfileGamesOnProfileDeleted: eventContract({
-    eventType: "google.cloud.firestore.document.v1.deleted",
-    pathPatterns: { document: "users/{profileId}" },
-    filters: { database: "(default)", namespace: "(default)" },
-    retry: true,
-  }),
-  projectProfileEventPrizesOnPrizeWritten: runtimeContract(
-    {
-      type: "event",
-      eventType: "google.firebase.database.ref.v1.written",
-      pathPatterns: {
-        ref: "profileEventPrizes/{profileId}/{eventId}",
-        instance: "*",
-      },
-      retry: true,
-    },
-    { availableMemoryMb: 256, maxInstances: 10, concurrency: 20 },
-  ),
-  projectProfileEventPrizesOnMergeTargetWritten: runtimeContract(
-    {
-      type: "event",
-      eventType: "google.cloud.firestore.document.v1.written",
-      pathPatterns: {
-        document: "profileMergeTargets/{sourceProfileId}",
-      },
-      filters: { database: "(default)", namespace: "(default)" },
-      retry: true,
-    },
-    { availableMemoryMb: 256, maxInstances: 10, concurrency: 20 },
-  ),
 });
 
 const normalizeEndpoint = (endpoint) => {
@@ -237,7 +192,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 11);
+  assert.equal(expectedExportNames.length, 6);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

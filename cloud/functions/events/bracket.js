@@ -47,6 +47,9 @@ const createEventBracketRuntime = (dependencies = {}) => {
     dependencies.resolveMatchWinner || defaultResolveMatchWinner;
   const buildRandomGameSeed =
     dependencies.buildRandomGameSeed || defaultBuildRandomGameSeed;
+  const resolveProfileEventPrizeOwnerId =
+    dependencies.resolveProfileEventPrizeOwnerId ||
+    (async ({ profileId }) => profileId);
   const EVENT_MATCH_RESOLVE_CONCURRENCY = 4;
 
   const normalizeString = (value) =>
@@ -348,11 +351,49 @@ const createEventBracketRuntime = (dependencies = {}) => {
       .database()
       .ref(`eventPrizeWithdrawals/${eventId}`)
       .once("value");
-    return filterProjectableEventPrizeAssignments({
+    const projectableAssignments = filterProjectableEventPrizeAssignments({
       eventId,
       assignments,
       withdrawals: withdrawalsSnapshot.val() || {},
     });
+    const canonicalAssignments = {};
+    const canonicalProfileIds = new Set();
+    for (const [place, assignment] of Object.entries(projectableAssignments)) {
+      const sourceProfileId = normalizeString(assignment?.profileId);
+      const canonicalProfileId = normalizeString(
+        await resolveProfileEventPrizeOwnerId({
+          eventId,
+          profileId: sourceProfileId,
+        }),
+      );
+      if (!canonicalProfileId) {
+        continue;
+      }
+      if (canonicalProfileIds.has(canonicalProfileId)) {
+        throw new Error("profile-event-prize-conflict");
+      }
+      canonicalProfileIds.add(canonicalProfileId);
+      canonicalAssignments[place] =
+        canonicalProfileId === sourceProfileId
+          ? assignment
+          : { ...assignment, profileId: canonicalProfileId };
+    }
+    return canonicalAssignments;
+  };
+
+  const assignmentsMatch = (current, assignment) =>
+    current?.eventId === assignment?.eventId &&
+    current?.profileId === assignment?.profileId &&
+    Number(current?.place) === Number(assignment?.place) &&
+    current?.prizeId === assignment?.prizeId &&
+    Number(current?.assignedAtMs) === Number(assignment?.assignedAtMs);
+
+  const assignmentSetsMatch = (left, right) => {
+    const places = Object.keys(left);
+    return (
+      places.length === Object.keys(right).length &&
+      places.every((place) => assignmentsMatch(left[place], right[place]))
+    );
   };
 
   const addEventPrizeAssignmentUpdates = async ({
@@ -364,46 +405,47 @@ const createEventBracketRuntime = (dependencies = {}) => {
     if (includeEventAssignments) {
       updates[`events/${eventId}/prizeAssignments`] = assignments;
     }
-    const projectableAssignments = await getProjectableEventPrizeAssignments({
-      eventId,
-      assignments,
-    });
-    for (const assignment of Object.values(projectableAssignments)) {
-      updates[`profileEventPrizes/${assignment.profileId}/${eventId}`] =
-        assignment;
-    }
   };
 
-  const getMissingEventPrizeProjectionUpdates = async ({
+  const reconcileProfileEventPrizeAssignments = async ({
     eventId,
     assignments,
   }) => {
-    const updates = {};
     const projectableAssignments = await getProjectableEventPrizeAssignments({
       eventId,
       assignments,
     });
-    await Promise.all(
+    const transactions = await Promise.all(
       Object.values(projectableAssignments).map(async (assignment) => {
-        const snapshot = await admin
+        return admin
           .database()
           .ref(`profileEventPrizes/${assignment.profileId}/${eventId}`)
-          .once("value");
-        const current = snapshot.val();
-        if (
-          !current ||
-          current.eventId !== assignment.eventId ||
-          current.profileId !== assignment.profileId ||
-          Number(current.place) !== assignment.place ||
-          current.prizeId !== assignment.prizeId ||
-          Number(current.assignedAtMs) !== assignment.assignedAtMs
-        ) {
-          updates[`profileEventPrizes/${assignment.profileId}/${eventId}`] =
-            assignment;
-        }
+          .transaction(
+            (current) => {
+              if (current === null || current === undefined) {
+                return assignment;
+              }
+              if (assignmentsMatch(current, assignment)) {
+                return undefined;
+              }
+              throw new Error("profile-event-prize-conflict");
+            },
+            undefined,
+            false,
+          );
       }),
     );
-    return updates;
+    const confirmedAssignments = await getProjectableEventPrizeAssignments({
+      eventId,
+      assignments,
+    });
+    return {
+      didChange: transactions.some((transaction) => transaction.committed),
+      settled: assignmentSetsMatch(
+        projectableAssignments,
+        confirmedAssignments,
+      ),
+    };
   };
 
   const removeCompletedEventPrizeProjections = async ({
@@ -426,21 +468,38 @@ const createEventBracketRuntime = (dependencies = {}) => {
         ) {
           return;
         }
-        await admin
-          .database()
-          .ref(`profileEventPrizes/${assignment.profileId}/${eventId}`)
-          .transaction(
-            (currentAssignment) =>
-              isMatchingProfileEventPrizeAssignment(
-                currentAssignment,
-                eventId,
-                assignment.prizeId,
-              )
-                ? null
-                : undefined,
-            undefined,
-            false,
-          );
+        const canonicalProfileId = normalizeString(
+          await resolveProfileEventPrizeOwnerId({
+            eventId,
+            profileId: normalizeString(assignment.profileId),
+          }),
+        );
+        const profileIds = Array.from(
+          new Set(
+            [normalizeString(assignment.profileId), canonicalProfileId].filter(
+              Boolean,
+            ),
+          ),
+        );
+        await Promise.all(
+          profileIds.map((profileId) =>
+            admin
+              .database()
+              .ref(`profileEventPrizes/${profileId}/${eventId}`)
+              .transaction(
+                (currentAssignment) =>
+                  isMatchingProfileEventPrizeAssignment(
+                    currentAssignment,
+                    eventId,
+                    assignment.prizeId,
+                  )
+                    ? null
+                    : undefined,
+                undefined,
+                false,
+              ),
+          ),
+        );
       }),
     );
   };
@@ -602,7 +661,6 @@ const createEventBracketRuntime = (dependencies = {}) => {
     buildSeedToProfileId,
     createEmptyEventMatch,
     getEventPrizePlacements,
-    getMissingEventPrizeProjectionUpdates,
     getSortedMatchKeys,
     getSortedRoundIndexes,
     hasThirdPlaceMatchField,
@@ -612,6 +670,7 @@ const createEventBracketRuntime = (dependencies = {}) => {
     rebuildParticipantStatesFromRounds,
     recomputeRoundStatuses,
     reconcileBracketMatchReadiness,
+    reconcileProfileEventPrizeAssignments,
     reconcileThirdPlaceMatchReadiness,
     removeCompletedEventPrizeProjections,
     resolveEventPrizeAssignments,

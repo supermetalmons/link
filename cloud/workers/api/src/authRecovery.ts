@@ -33,6 +33,12 @@ import {
   finiteNumber,
   uniqueStoredFirebaseUids,
 } from "./authPolicy.ts";
+import {
+  buildProfileLinkProfileGameProjectionOutbox,
+  getProfileLinkProfileGameProjectionOutboxPath,
+  parseProfileLinkProfileGameProjectionOutbox,
+} from "./profileGameProjectionOutbox.ts";
+import type { ProfileLinkProfileGameProjectionTask } from "./profileGameProjectionTasks.ts";
 
 export const AUTH_RECOVERY_QUEUE_NAME = "mons-link-auth-recovery";
 export const AUTH_RECOVERY_JOBS_COLLECTION = "authRecoveryJobs";
@@ -227,6 +233,12 @@ export async function ensureFirebaseProfileClaim(
   profileId: string,
   dependencies: {
     authClient: FirebaseAuthAdminClient;
+    createRequestId?: () => string;
+    enqueueProfileLinkProjection?: (
+      task: ProfileLinkProfileGameProjectionTask,
+    ) => Promise<unknown>;
+    logger?: Pick<Console, "error">;
+    now?: () => number;
     rtdb: Pick<FirebaseRtdbClient, "getPath" | "patchRoot">;
     signal?: AbortSignal;
   },
@@ -234,21 +246,68 @@ export async function ensureFirebaseProfileClaim(
   if (!isCanonicalFirebaseUid(uid)) {
     throw new TypeError("invalid-firebase-uid");
   }
-  const [user, profileLink] = await Promise.all([
+  const outboxPath = getProfileLinkProfileGameProjectionOutboxPath(uid);
+  const [user, profileLink, existingOutboxValue] = await Promise.all([
     dependencies.authClient.getUser(uid),
     dependencies.rtdb.getPath(
       `players/${uid}/profile`,
       undefined,
       dependencies.signal,
     ),
+    dependencies.rtdb.getPath(outboxPath, undefined, dependencies.signal),
   ]);
   const writes: Promise<void>[] = [];
   if (cleanString(profileLink) !== profileId) {
+    const nowMs = (dependencies.now || Date.now)();
+    const requestId = dependencies.createRequestId
+      ? dependencies.createRequestId()
+      : crypto.randomUUID();
+    const existingOutbox =
+      parseProfileLinkProfileGameProjectionOutbox(existingOutboxValue);
+    const previousProfileId = exactDocumentId(profileLink);
+    const cleanupProfileIds = Array.from(
+      new Set([
+        ...(existingOutbox?.cleanupProfileIds || []),
+        ...(previousProfileId && previousProfileId !== profileId
+          ? [previousProfileId]
+          : []),
+      ]),
+    );
+    const task = {
+      kind: "profile-link-profile-game-projection",
+      loginUid: uid,
+      requestId,
+    } satisfies ProfileLinkProfileGameProjectionTask;
     writes.push(
-      dependencies.rtdb.patchRoot(
-        { [`players/${uid}/profile`]: profileId },
-        dependencies.signal,
-      ),
+      dependencies.rtdb
+        .patchRoot(
+          {
+            [`players/${uid}/profile`]: profileId,
+            [outboxPath]: buildProfileLinkProfileGameProjectionOutbox({
+              cleanupProfileIds,
+              lastQueuedAtMs: nowMs,
+              profileId,
+              requestId,
+              sourceUpdatedAtMs: nowMs,
+            }),
+          },
+          dependencies.signal,
+        )
+        .then(async () => {
+          if (!dependencies.enqueueProfileLinkProjection) {
+            return;
+          }
+          try {
+            await dependencies.enqueueProfileLinkProjection(task);
+          } catch {
+            (dependencies.logger || console).error(
+              JSON.stringify({
+                event: "profile_link_profile_game_projection_enqueue_failed",
+                loginUid: uid,
+              }),
+            );
+          }
+        }),
     );
   }
   if (cleanString(user.customClaims.profileId) !== profileId) {
@@ -517,6 +576,10 @@ export function createAuthRecoveryService(
       try {
         await ensureFirebaseProfileClaim(uid, job.profileId, {
           authClient,
+          enqueueProfileLinkProjection: (task) =>
+            env.PROFILE_GAME_PROJECTION_QUEUE.send(task),
+          logger,
+          now,
           rtdb,
           signal: dependencies.signal,
         });

@@ -84,6 +84,10 @@ export function createEventRuntime(dependencies: {
     startEventLockHeartbeat(handle: Record<string, unknown>): () => void;
   };
   getProfileByLoginId(uid: string): Promise<Record<string, unknown>>;
+  resolveProfileEventPrizeOwnerId(input: {
+    eventId: string;
+    profileId: string;
+  }): Promise<string>;
   now?: () => number;
   random: () => number;
   sleep(milliseconds: number): Promise<void>;
