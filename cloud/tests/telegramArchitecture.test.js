@@ -190,7 +190,7 @@ test("event Telegram projection uses a dedicated lock without changing domain lo
   assert.equal(coreSource.includes("eventTelegramProjectionLocks"), true);
 });
 
-test("event HTTP and Workflow runtimes install the outbox producer", () => {
+test("event HTTP and Workflow runtimes install every outbox producer", () => {
   for (const relativePath of [
     "cloud/workers/api/src/eventRoute.ts",
     "cloud/workers/api/src/eventProgress.ts",
@@ -201,6 +201,11 @@ test("event HTTP and Workflow runtimes install the outbox producer", () => {
     );
     assert.equal(
       source.includes("createEventTelegramProjectionRepository"),
+      true,
+      relativePath,
+    );
+    assert.equal(
+      source.includes("createEventProfileGameProjectionRepository"),
       true,
       relativePath,
     );
@@ -268,6 +273,11 @@ test("event Telegram projection is no longer exported by Firebase", () => {
   for (const exportName of exportNames) {
     assert.equal(functionIndex[exportName], undefined, exportName);
   }
+  assert.equal(
+    functionIndex.projectProfileGamesOnEventWritten,
+    undefined,
+    "projectProfileGamesOnEventWritten",
+  );
   assert.equal(functionIndex.dispatchTelegramDelivery, undefined);
   assert.equal(functionIndex.dispatchTelegramManualRecovery, undefined);
 });

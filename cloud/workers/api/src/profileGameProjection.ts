@@ -7,18 +7,25 @@ import {
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
   AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT,
+  EVENT_PROFILE_GAME_PROJECTION_OUTBOX_ROOT,
   getAutomatchProfileGameProjectionLockPath,
   getAutomatchProfileGameProjectionOutboxPath,
+  getEventProfileGameProjectionLockPath,
+  getEventProfileGameProjectionOutboxPath,
   parseAutomatchProfileGameProjectionOutbox,
+  parseEventProfileGameProjectionOutbox,
 } from "./profileGameProjectionOutbox.ts";
 import {
+  createEventProfileGameProjectionRuntime,
   createProfileGameProjectionRuntime,
+  type EventProfileGameProjectionRuntime,
   type ProfileGameProjectionRuntime,
 } from "./profileGameProjectionRepository.ts";
 import {
   parseProfileGameProjectionTask,
   PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
   type AutomatchProfileGameProjectionTask,
+  type EventProfileGameProjectionTask,
   type ProfileGameProjectionTask,
 } from "./profileGameProjectionTasks.ts";
 
@@ -36,11 +43,12 @@ type ProfileGameProjectionRtdb = Pick<
 >;
 
 type ProfileGameProjectionLock = {
-  inviteId: string;
+  path: string;
   requestId?: string;
 };
 
 export type ProfileGameProjectionDependencies = {
+  createEventRuntime?: (env: Env) => EventProfileGameProjectionRuntime;
   createRating?: (env: Env) => RatingProfileGameProjectionRepository;
   createRtdb?: (env: Env) => ProfileGameProjectionRtdb;
   createRequestId?: () => string;
@@ -58,8 +66,18 @@ type AutomatchSweepEntry =
   | { kind: "candidate"; value: AutomatchSweepCandidate }
   | { inviteId: string; kind: "invalid" };
 
+type EventSweepCandidate = {
+  lastQueuedAtMs: number;
+  task: EventProfileGameProjectionTask;
+};
+
+type EventSweepEntry =
+  | { kind: "candidate"; value: EventSweepCandidate }
+  | { eventId: string; kind: "invalid" };
+
 export type ProfileGameProjectionSweepResult = {
   automatch: number;
+  event: number;
   rating: number;
 };
 
@@ -108,25 +126,22 @@ async function acquireProfileGameProjectionLock(
     ...(lock.requestId ? { requestId: lock.requestId } : {}),
     expiresAtMs: nowMs + AUTOMATCH_PROFILE_GAME_PROJECTION_LOCK_MS,
   };
-  const result = await rtdb.transactRtdbPath(
-    getAutomatchProfileGameProjectionLockPath(lock.inviteId),
-    (current) => {
-      const record = toRecord(current);
-      const expiresAtMs = record?.expiresAtMs;
-      if (
-        typeof record?.ownerId === "string" &&
-        typeof expiresAtMs === "number" &&
-        Number.isFinite(expiresAtMs) &&
-        expiresAtMs > nowMs
-      ) {
-        return { commit: false, decision: "busy" };
-      }
-      return {
-        value,
-        decision: "acquired",
-      };
-    },
-  );
+  const result = await rtdb.transactRtdbPath(lock.path, (current) => {
+    const record = toRecord(current);
+    const expiresAtMs = record?.expiresAtMs;
+    if (
+      typeof record?.ownerId === "string" &&
+      typeof expiresAtMs === "number" &&
+      Number.isFinite(expiresAtMs) &&
+      expiresAtMs > nowMs
+    ) {
+      return { commit: false, decision: "busy" };
+    }
+    return {
+      value,
+      decision: "acquired",
+    };
+  });
   if (!result.committed) {
     throw new Error("profile-game-projection-lock-busy");
   }
@@ -143,12 +158,10 @@ async function releaseProfileGameProjectionLock(
     attempt++
   ) {
     try {
-      await rtdb.transactRtdbPath(
-        getAutomatchProfileGameProjectionLockPath(lock.inviteId),
-        (current) =>
-          toRecord(current)?.ownerId === ownerId
-            ? { value: null, decision: "released" }
-            : { commit: false, decision: "not-owner" },
+      await rtdb.transactRtdbPath(lock.path, (current) =>
+        toRecord(current)?.ownerId === ownerId
+          ? { value: null, decision: "released" }
+          : { commit: false, decision: "not-owner" },
       );
       return;
     } catch (error) {
@@ -183,7 +196,11 @@ export async function processAutomatchProfileGameProjection(
   ownerId: string = crypto.randomUUID(),
   now: () => number = Date.now,
 ): Promise<"projected" | "stale" | "superseded"> {
-  await acquireProfileGameProjectionLock(task, ownerId, rtdb, now());
+  const lock = {
+    path: getAutomatchProfileGameProjectionLockPath(task.inviteId),
+    requestId: task.requestId,
+  };
+  await acquireProfileGameProjectionLock(lock, ownerId, rtdb, now());
   try {
     const outbox = parseAutomatchProfileGameProjectionOutbox(
       await rtdb.getRtdbPath(
@@ -200,7 +217,65 @@ export async function processAutomatchProfileGameProjection(
       ? "projected"
       : "superseded";
   } finally {
-    await releaseProfileGameProjectionLock(task, ownerId, rtdb);
+    await releaseProfileGameProjectionLock(lock, ownerId, rtdb);
+  }
+}
+
+export async function settleEventProfileGameProjectionOutbox(
+  task: EventProfileGameProjectionTask,
+  rtdb: ProfileGameProjectionRtdb,
+): Promise<boolean> {
+  const result = await rtdb.transactRtdbPath(
+    getEventProfileGameProjectionOutboxPath(task.eventId),
+    (current) => {
+      const outbox = parseEventProfileGameProjectionOutbox(current);
+      if (!outbox || outbox.requestId !== task.requestId) {
+        return { commit: false, decision: "stale" };
+      }
+      return { value: null, decision: "cleared" };
+    },
+  );
+  return result.committed;
+}
+
+export async function processEventProfileGameProjection(
+  task: EventProfileGameProjectionTask,
+  rtdb: ProfileGameProjectionRtdb,
+  runtime: EventProfileGameProjectionRuntime,
+  ownerId: string = crypto.randomUUID(),
+  now: () => number = Date.now,
+): Promise<"missing" | "projected" | "stale" | "superseded"> {
+  const initialOutbox = parseEventProfileGameProjectionOutbox(
+    await rtdb.getRtdbPath(
+      getEventProfileGameProjectionOutboxPath(task.eventId),
+    ),
+  );
+  if (!initialOutbox || initialOutbox.requestId !== task.requestId) {
+    return "stale";
+  }
+  const lock = {
+    path: getEventProfileGameProjectionLockPath(task.eventId),
+    requestId: task.requestId,
+  };
+  await acquireProfileGameProjectionLock(lock, ownerId, rtdb, now());
+  try {
+    const outbox = parseEventProfileGameProjectionOutbox(
+      await rtdb.getRtdbPath(
+        getEventProfileGameProjectionOutboxPath(task.eventId),
+      ),
+    );
+    if (!outbox || outbox.requestId !== task.requestId) {
+      return "stale";
+    }
+    const result = await runtime.reconcileEventProjection(
+      task.eventId,
+      outbox.cleanupOwnerProfileIds,
+    );
+    return (await settleEventProfileGameProjectionOutbox(task, rtdb))
+      ? result.status
+      : "superseded";
+  } finally {
+    await releaseProfileGameProjectionLock(lock, ownerId, rtdb);
   }
 }
 
@@ -221,6 +296,26 @@ function automatchSweepEntries(value: unknown): AutomatchSweepEntry[] {
           },
         }
       : { inviteId, kind: "invalid" };
+  });
+}
+
+function eventSweepEntries(value: unknown): EventSweepEntry[] {
+  const records = toRecord(value) || {};
+  return Object.entries(records).map(([eventId, raw]) => {
+    const outbox = parseEventProfileGameProjectionOutbox(raw);
+    return outbox && isSafeFirebaseKey(eventId)
+      ? {
+          kind: "candidate",
+          value: {
+            lastQueuedAtMs: outbox.lastQueuedAtMs,
+            task: {
+              kind: "event-profile-game-projection",
+              eventId,
+              requestId: outbox.requestId,
+            },
+          },
+        }
+      : { eventId, kind: "invalid" };
   });
 }
 
@@ -248,6 +343,108 @@ async function claimAutomatchSweepCandidate(
     },
   );
   return result.committed;
+}
+
+async function claimEventSweepCandidate(
+  rtdb: ProfileGameProjectionRtdb,
+  candidate: EventSweepCandidate,
+  nowMs: number,
+): Promise<boolean> {
+  const result = await rtdb.transactRtdbPath(
+    getEventProfileGameProjectionOutboxPath(candidate.task.eventId),
+    (current) => {
+      const outbox = parseEventProfileGameProjectionOutbox(current);
+      if (
+        !outbox ||
+        outbox.requestId !== candidate.task.requestId ||
+        outbox.lastQueuedAtMs !== candidate.lastQueuedAtMs ||
+        outbox.lastQueuedAtMs > nowMs
+      ) {
+        return { commit: false, decision: "not-due" };
+      }
+      return {
+        value: { ...toRecord(current), lastQueuedAtMs: nowMs },
+        decision: "claimed",
+      };
+    },
+  );
+  return result.committed;
+}
+
+type InvalidEventSweepResult =
+  | { kind: "changed" }
+  | { kind: "removed" }
+  | { kind: "repaired"; task: EventProfileGameProjectionTask };
+
+function salvageEventCleanupOwnerProfileIds(value: unknown): string[] {
+  const raw = toRecord(value)?.cleanupOwnerProfileIds;
+  const candidates =
+    typeof raw === "string"
+      ? [raw]
+      : Array.isArray(raw)
+        ? raw
+        : Object.keys(toRecord(raw) || {});
+  return Array.from(
+    new Set(
+      candidates.filter(
+        (profileId): profileId is string =>
+          typeof profileId === "string" && isSafeFirebaseKey(profileId),
+      ),
+    ),
+  );
+}
+
+async function repairInvalidEventSweepEntry(
+  rtdb: ProfileGameProjectionRtdb,
+  eventId: string,
+  nowMs: number,
+  createRequestId: () => string,
+): Promise<InvalidEventSweepResult> {
+  const safeEventId = isSafeFirebaseKey(eventId);
+  const requestId = safeEventId ? createRequestId() : "";
+  const result = await rtdb.transactRtdbPath(
+    `${EVENT_PROFILE_GAME_PROJECTION_OUTBOX_ROOT}/${eventId}`,
+    (current) => {
+      if (
+        current === null ||
+        current === undefined ||
+        (parseEventProfileGameProjectionOutbox(current) &&
+          isSafeFirebaseKey(eventId))
+      ) {
+        return { commit: false, decision: "changed" };
+      }
+      if (!safeEventId) {
+        return { value: null, decision: "removed-invalid" };
+      }
+      const cleanupOwnerProfileIds =
+        salvageEventCleanupOwnerProfileIds(current);
+      return {
+        value: {
+          schemaVersion: PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
+          status: "pending",
+          requestId,
+          lastQueuedAtMs: nowMs,
+          cleanupOwnerProfileIds: Object.fromEntries(
+            cleanupOwnerProfileIds.map((profileId) => [profileId, true]),
+          ),
+        },
+        decision: "repaired-invalid",
+      };
+    },
+  );
+  if (!result.committed) {
+    return { kind: "changed" };
+  }
+  return safeEventId
+    ? {
+        kind: "repaired",
+        task: {
+          kind: "event-profile-game-projection",
+          eventId,
+          requestId,
+        },
+      }
+    : { kind: "removed" };
 }
 
 type InvalidAutomatchSweepResult =
@@ -354,7 +551,9 @@ export async function processRatingProfileGameProjection(
     );
     return "dead";
   }
-  const lock = { inviteId: update.inviteId };
+  const lock = {
+    path: getAutomatchProfileGameProjectionLockPath(update.inviteId),
+  };
   await acquireProfileGameProjectionLock(lock, ownerId, rtdb, now());
   try {
     if (
@@ -398,39 +597,50 @@ export async function handleProfileGameProjectionMessage(
   const now = dependencies.now || Date.now;
   try {
     const ownerId = crypto.randomUUID();
+    const rtdb = (
+      dependencies.createRtdb ||
+      ((workerEnv: Env) => createGameplayRepository(workerEnv))
+    )(env);
     const runtime = (
       dependencies.createRuntime || createProfileGameProjectionRuntime
     )(env);
-    const status =
-      task.kind === "automatch-profile-game-projection"
-        ? await processAutomatchProfileGameProjection(
-            task,
-            (
-              dependencies.createRtdb ||
-              ((workerEnv: Env) => createGameplayRepository(workerEnv))
-            )(env),
-            runtime,
-            ownerId,
-            now,
-          )
-        : await processRatingProfileGameProjection(
-            task.operationId,
-            (
-              dependencies.createRating ||
-              ((workerEnv: Env) =>
-                createRatingRepository(
-                  workerEnv,
-                  createGameplayRepository(workerEnv),
-                ))
-            )(env),
-            runtime,
-            now,
-            (
-              dependencies.createRtdb ||
-              ((workerEnv: Env) => createGameplayRepository(workerEnv))
-            )(env),
-            ownerId,
-          );
+    let status: string;
+    if (task.kind === "automatch-profile-game-projection") {
+      status = await processAutomatchProfileGameProjection(
+        task,
+        rtdb,
+        runtime,
+        ownerId,
+        now,
+      );
+    } else if (task.kind === "event-profile-game-projection") {
+      status = await processEventProfileGameProjection(
+        task,
+        rtdb,
+        (
+          dependencies.createEventRuntime ||
+          createEventProfileGameProjectionRuntime
+        )(env),
+        ownerId,
+        now,
+      );
+    } else {
+      status = await processRatingProfileGameProjection(
+        task.operationId,
+        (
+          dependencies.createRating ||
+          ((workerEnv: Env) =>
+            createRatingRepository(
+              workerEnv,
+              createGameplayRepository(workerEnv),
+            ))
+        )(env),
+        runtime,
+        now,
+        rtdb,
+        ownerId,
+      );
+    }
     message.ack();
     logger.info(
       JSON.stringify({
@@ -460,8 +670,10 @@ export async function handleProfileGameProjectionQueue(
   const rtdb = createGameplayRepository(env);
   const rating = createRatingRepository(env, rtdb);
   const runtime = createProfileGameProjectionRuntime(env, { rtdb });
+  const eventRuntime = createEventProfileGameProjectionRuntime(env, { rtdb });
   for (const message of batch.messages) {
     await handleProfileGameProjectionMessage(message, env, {
+      createEventRuntime: () => eventRuntime,
       createRating: () => rating,
       createRtdb: () => rtdb,
       createRuntime: () => runtime,
@@ -659,26 +871,132 @@ export async function sweepAutomatchProfileGameProjections(
   return tasks.length;
 }
 
+export async function sweepEventProfileGameProjections(
+  env: Env,
+  dependencies: ProfileGameProjectionDependencies = {},
+): Promise<number> {
+  const logger = dependencies.logger || console;
+  const now = dependencies.now || Date.now;
+  const createRequestId =
+    dependencies.createRequestId || (() => crypto.randomUUID());
+  const nowMs = now();
+  const dueBeforeMs = nowMs - PROFILE_GAME_PROJECTION_RECOVERY_DELAY_MS;
+  const rtdb = (
+    dependencies.createRtdb ||
+    ((workerEnv: Env) => createGameplayRepository(workerEnv))
+  )(env);
+  const [dueValue, malformedValue] = await Promise.all([
+    rtdb.getRtdbPath(EVENT_PROFILE_GAME_PROJECTION_OUTBOX_ROOT, {
+      orderBy: "lastQueuedAtMs",
+      endAt: dueBeforeMs,
+      limitToFirst: PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
+    }),
+    rtdb.getRtdbPath(EVENT_PROFILE_GAME_PROJECTION_OUTBOX_ROOT, {
+      orderBy: "lastQueuedAtMs",
+      startAt: "",
+      limitToFirst: PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
+    }),
+  ]);
+  const entries = [
+    ...eventSweepEntries(dueValue),
+    ...eventSweepEntries(malformedValue),
+  ];
+  const invalidEventIds = Array.from(
+    new Set(
+      entries.flatMap((entry) =>
+        entry.kind === "invalid" ? [entry.eventId] : [],
+      ),
+    ),
+  );
+  const failures: Error[] = [];
+  const repairedTasks: EventProfileGameProjectionTask[] = [];
+  let invalidRemoved = 0;
+  for (const eventId of invalidEventIds) {
+    try {
+      const result = await repairInvalidEventSweepEntry(
+        rtdb,
+        eventId,
+        nowMs,
+        createRequestId,
+      );
+      if (result.kind === "repaired") {
+        repairedTasks.push(result.task);
+      } else if (result.kind === "removed") {
+        invalidRemoved += 1;
+      }
+    } catch (error) {
+      failures.push(
+        error instanceof Error
+          ? error
+          : new Error("event-profile-game-invalid-record-failed"),
+      );
+    }
+  }
+  if (repairedTasks.length > 0 || invalidRemoved > 0) {
+    logger.error(
+      JSON.stringify({
+        event: "event_profile_game_projection_invalid_outboxes_recovered",
+        repaired: repairedTasks.length,
+        removed: invalidRemoved,
+      }),
+    );
+  }
+  const candidateByEventId = new Map<string, EventSweepCandidate>();
+  for (const entry of entries) {
+    if (entry.kind === "candidate") {
+      candidateByEventId.set(entry.value.task.eventId, entry.value);
+    }
+  }
+  const claims = await collectSuccessfulClaims(
+    Array.from(candidateByEventId.values()),
+    (candidate) => claimEventSweepCandidate(rtdb, candidate, nowMs),
+  );
+  const tasks: ProfileGameProjectionTask[] = [
+    ...repairedTasks,
+    ...claims.claimed.map(({ task }) => task),
+  ];
+  await sendProfileGameProjectionTasks(
+    env.PROFILE_GAME_PROJECTION_QUEUE,
+    tasks,
+  );
+  if (claims.failure) {
+    failures.push(claims.failure);
+  }
+  if (failures.length === 1) {
+    throw failures[0];
+  }
+  if (failures.length > 1) {
+    throw new AggregateError(
+      failures,
+      "event-profile-game-projection-sweep-failed",
+    );
+  }
+  return tasks.length;
+}
+
 export async function sweepProfileGameProjections(
   env: Env,
   dependencies: ProfileGameProjectionDependencies = {},
 ): Promise<ProfileGameProjectionSweepResult> {
-  const [automatch, rating] = await Promise.allSettled([
+  const [automatch, event, rating] = await Promise.allSettled([
     sweepAutomatchProfileGameProjections(env, dependencies),
+    sweepEventProfileGameProjections(env, dependencies),
     sweepRatingProfileGameProjections(env, dependencies),
   ]);
-  const failures = [automatch, rating].flatMap((result) =>
+  const failures = [automatch, event, rating].flatMap((result) =>
     result.status === "rejected" ? [result.reason] : [],
   );
   if (
     failures.length > 0 ||
     automatch.status === "rejected" ||
+    event.status === "rejected" ||
     rating.status === "rejected"
   ) {
     throw new AggregateError(failures, "profile-game-projection-sweep-failed");
   }
   return {
     automatch: automatch.value,
+    event: event.value,
     rating: rating.value,
   };
 }
@@ -691,8 +1009,9 @@ export async function handleProfileGameProjectionSweep(
   console.info(
     JSON.stringify({
       event: "profile_game_projection_sweep_completed",
-      enqueued: enqueued.automatch + enqueued.rating,
+      enqueued: enqueued.automatch + enqueued.event + enqueued.rating,
       automatchEnqueued: enqueued.automatch,
+      eventEnqueued: enqueued.event,
       ratingEnqueued: enqueued.rating,
     }),
   );
@@ -706,6 +1025,10 @@ export {
   acquireProfileGameProjectionLock,
   automatchSweepEntries,
   claimAutomatchSweepCandidate,
+  claimEventSweepCandidate,
+  eventSweepEntries,
+  repairInvalidEventSweepEntry,
+  salvageEventCleanupOwnerProfileIds,
   releaseProfileGameProjectionLock,
   repairInvalidAutomatchSweepEntry,
   sendProfileGameProjectionTasks,

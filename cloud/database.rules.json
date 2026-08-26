@@ -63,6 +63,9 @@
     "profileGameProjectionOutbox": {
       "automatch": {
         ".indexOn": ["lastQueuedAtMs"]
+      },
+      "event": {
+        ".indexOn": ["lastQueuedAtMs"]
       }
     },
     "invites": {

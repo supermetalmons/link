@@ -24,6 +24,10 @@ test("automatch REST queries retain their RTDB indexes", () => {
     databaseRules.rules.profileGameProjectionOutbox.automatch[".indexOn"],
     ["lastQueuedAtMs"],
   );
+  assert.deepEqual(
+    databaseRules.rules.profileGameProjectionOutbox.event[".indexOn"],
+    ["lastQueuedAtMs"],
+  );
   assert.ok(
     firestoreIndexes.indexes.some(
       (index) =>
@@ -49,6 +53,16 @@ test("automatch REST queries retain their RTDB indexes", () => {
         index.queryScope === "COLLECTION" &&
         index.fields[0]?.fieldPath === "profileGameProjectionState" &&
         index.fields[1]?.fieldPath === "profileGameProjectionUpdatedAtMs",
+    ),
+  );
+  assert.ok(
+    firestoreIndexes.fieldOverrides.some(
+      (override) =>
+        override.collectionGroup === "games" &&
+        override.fieldPath === "eventId" &&
+        override.indexes.some(
+          (index) => index.queryScope === "COLLECTION_GROUP",
+        ),
     ),
   );
 });

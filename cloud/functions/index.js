@@ -13,7 +13,6 @@ const {
   onProfileLinkWritten,
   onProfileDeleted,
 } = require("./profileGamesProjector");
-const { onEventWritten } = require("./eventProjector");
 const {
   onProfileEventPrizeWritten,
   onProfileMergeTargetWritten,
@@ -30,7 +29,6 @@ exports.projectProfileGamesOnMatchCreated = onMatchCreated;
 exports.projectProfileGamesOnProfileLinkCreated = onProfileLinkCreated;
 exports.projectProfileGamesOnProfileLinkWritten = onProfileLinkWritten;
 exports.projectProfileGamesOnProfileDeleted = onProfileDeleted;
-exports.projectProfileGamesOnEventWritten = onEventWritten;
 exports.projectProfileEventPrizesOnPrizeWritten = onProfileEventPrizeWritten;
 exports.projectProfileEventPrizesOnMergeTargetWritten =
   onProfileMergeTargetWritten;

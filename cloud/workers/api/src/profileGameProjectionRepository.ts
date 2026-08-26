@@ -1,5 +1,10 @@
 import { PROFILE_MERGE_TARGETS_COLLECTION } from "../../../functions/profileMergeTargets.js";
 import {
+  createEventProfileGameProjectionCore,
+  type EventProfileGameProjectionRepository,
+  type EventProjectionWrite,
+} from "../../../functions/eventProfileGameProjectionCore.js";
+import {
   createProfileGamesProjectionCore,
   type ProfileGamesProjectionRepository,
   type ProjectionWrite,
@@ -31,9 +36,22 @@ export type ProfileGameProjectionRuntime = {
   ): Promise<RecomputeInviteProjectionResult>;
 };
 
+export type EventProfileGameProjectionRuntime = {
+  reconcileEventProjection(
+    eventId: string,
+    cleanupOwnerProfileIds?: string[],
+  ): Promise<{
+    deleted: number;
+    ownerProfileIds: string[];
+    status: "missing" | "projected";
+    written: number;
+  }>;
+};
+
 type ProfileGameProjectionDependencies = {
   firestore?: AuthFirestoreClient;
   logger?: Pick<Console, "error">;
+  now?: () => number;
   rtdb?: ProjectionRtdbRepository;
   wait?: (milliseconds: number) => Promise<void>;
 };
@@ -48,6 +66,13 @@ function projectionDocumentName(profileId: string, inviteId: string): string {
     throw new TypeError("invalid profile game projection document id");
   }
   return `${AUTH_FIRESTORE_DATABASE_ROOT}/documents/users/${profileId}/games/${inviteId}`;
+}
+
+function eventProjectionDocumentName(
+  profileId: string,
+  eventId: string,
+): string {
+  return projectionDocumentName(profileId, `event_${eventId}`);
 }
 
 function toFirestoreWrite(write: ProjectionWrite) {
@@ -68,6 +93,17 @@ function toFirestoreWrite(write: ProjectionWrite) {
     return authUpdateWrite(name, write.data, Object.keys(write.data), {
       updateTime: write.updateTime,
     });
+  }
+  return authUpdateWrite(name, write.data);
+}
+
+function toEventFirestoreWrite(write: EventProjectionWrite) {
+  const name = eventProjectionDocumentName(write.profileId, write.eventId);
+  if (write.type === "delete") {
+    return authDeleteWrite(name);
+  }
+  if (!write.data) {
+    throw new TypeError("event profile-game projection data is required");
   }
   return authUpdateWrite(name, write.data);
 }
@@ -144,7 +180,52 @@ export function createProfileGameProjectionRuntime(
   });
 }
 
+export function createEventProfileGameProjectionRuntime(
+  env: Env,
+  dependencies: ProfileGameProjectionDependencies = {},
+): EventProfileGameProjectionRuntime {
+  const firestore = dependencies.firestore || createAuthFirestoreClient(env);
+  const rtdb = dependencies.rtdb || createGameplayRepository(env);
+  const repository: EventProfileGameProjectionRepository = {
+    async commitProjectionWrites(writes) {
+      await firestore.commitWrites(writes.map(toEventFirestoreWrite));
+    },
+
+    async getEvent(eventId) {
+      const event = await rtdb.getRtdbPath(`events/${eventId}`);
+      return event && typeof event === "object" && !Array.isArray(event)
+        ? (event as Record<string, unknown>)
+        : null;
+    },
+
+    async getMergeTarget(profileId) {
+      return (
+        (
+          await firestore.get(
+            authDocumentName(PROFILE_MERGE_TARGETS_COLLECTION, profileId),
+          )
+        )?.fields ?? null
+      );
+    },
+
+    async getProfile(profileId) {
+      const profile = await firestore.get(authDocumentName("users", profileId));
+      return profile
+        ? { data: profile.fields, updateTime: profile.updateTime }
+        : null;
+    },
+  };
+  return createEventProfileGameProjectionCore({
+    now: dependencies.now,
+    repository,
+    timestampFromMillis: firestoreTimestampFromMillis,
+    wait: dependencies.wait,
+  });
+}
+
 export {
+  eventProjectionDocumentName,
   firestoreTimestampFromMillis as timestampFromMillis,
   projectionDocumentName,
+  toEventFirestoreWrite,
 };

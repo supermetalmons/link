@@ -11,6 +11,7 @@ import {
   type RatingEventProgressRepository,
 } from "./gameplayRepository.ts";
 import { createEventTelegramProjectionRepository } from "./eventTelegramProjectionProducer.ts";
+import { createEventProfileGameProjectionRepository } from "./eventProfileGameProjectionProducer.ts";
 import {
   createEventRuntime,
   type EventProgressOutboxRecord,
@@ -634,9 +635,9 @@ export async function runEventProgressWorkflow(
 }
 
 export function createWorkflowEventRuntime(env: Env, signal: AbortSignal) {
-  const repository = createEventTelegramProjectionRepository(
+  const repository = createEventProfileGameProjectionRepository(
     env,
-    createGameplayRepository(env),
+    createEventTelegramProjectionRepository(env, createGameplayRepository(env)),
   );
   const lockManager = createEventLockManagerCore({
     createLockId: () => crypto.randomUUID(),

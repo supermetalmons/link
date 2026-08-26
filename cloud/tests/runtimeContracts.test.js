@@ -19,7 +19,6 @@ const taskQueueExportNames = [];
 const eventExportNames = [
   "projectProfileEventPrizesOnMergeTargetWritten",
   "projectProfileEventPrizesOnPrizeWritten",
-  "projectProfileGamesOnEventWritten",
   "projectProfileGamesOnInviteCreated",
   "projectProfileGamesOnInviteGuestIdChanged",
   "projectProfileGamesOnInviteGuestRematchesChanged",
@@ -157,20 +156,6 @@ Object.assign(expectedEndpointContracts, {
     filters: { database: "(default)", namespace: "(default)" },
     retry: true,
   }),
-  projectProfileGamesOnEventWritten: runtimeContract(
-    {
-      type: "event",
-      eventType: "google.firebase.database.ref.v1.written",
-      pathPatterns: { ref: "events/{eventId}", instance: "*" },
-      retry: true,
-    },
-    {
-      availableMemoryMb: 256,
-      maxInstances: 10,
-      concurrency: 40,
-      cpu: 1,
-    },
-  ),
   projectProfileEventPrizesOnPrizeWritten: runtimeContract(
     {
       type: "event",
@@ -252,7 +237,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 12);
+  assert.equal(expectedExportNames.length, 11);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

@@ -4,10 +4,8 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   buildEventProjectionOwnerPlan,
-  projectEvent,
-  reconcileLiveEventProjection,
-  resolveProfilePaths,
-} = require("../functions/eventProjector");
+  createEventProfileGameProjectionCore,
+} = require("../functions/eventProfileGameProjectionCore");
 const {
   buildInviteProjectionOwnerPlan,
   buildResolvedProfile,
@@ -32,70 +30,51 @@ const runEventProjection = async ({
   profileIds = [],
   retiredProfileIds = [],
 }) => {
-  const originalFirestore = firebaseAdmin.firestore;
   const existingProfileIds = new Set(profileIds);
   const retiredIds = new Set(retiredProfileIds);
   const commits = [];
   const operations = [];
-  const firestore = {
-    batch: () => {
-      const batchOperations = [];
-      return {
-        commit: async () => commits.push([...batchOperations]),
-        delete: (ref) => {
-          const operation = { path: ref.path, type: "delete" };
-          batchOperations.push(operation);
-          operations.push(operation);
-        },
-        set: (ref) => {
-          const operation = { path: ref.path, type: "set" };
-          batchOperations.push(operation);
-          operations.push(operation);
-        },
-      };
-    },
-    collection: (collectionName) => ({
-      doc: (profileId) => {
-        if (collectionName === "profileMergeTargets") {
-          const data = mergeTargets[profileId];
-          return {
-            get: async () => ({
-              data: () => data,
-              exists: data !== null && data !== undefined,
-            }),
-          };
+  const core = createEventProfileGameProjectionCore({
+    repository: {
+      commitProjectionWrites: async (writes) => {
+        for (const write of writes) {
+          operations.push({
+            path: `users/${write.profileId}/games/event_${write.eventId}`,
+            type: write.type === "delete" ? "delete" : "set",
+          });
         }
-        assert.equal(collectionName, "users");
-        return {
-          collection: (subcollectionName) => {
-            assert.equal(subcollectionName, "games");
-            return {
-              doc: (id) => ({ path: `users/${profileId}/games/${id}` }),
-            };
-          },
-          get: async () => ({
-            data: () =>
-              retiredIds.has(profileId)
+        for (let index = 0; index < operations.length; index += 450) {
+          commits.push(operations.slice(index, index + 450));
+        }
+      },
+      getEvent: async () => afterData,
+      getMergeTarget: async (profileId) => mergeTargets[profileId] ?? null,
+      getProfile: async (profileId) =>
+        existingProfileIds.has(profileId) || retiredIds.has(profileId)
+          ? {
+              data: retiredIds.has(profileId)
                 ? { mergedIntoProfileId: "canonical-profile" }
                 : {},
-            exists:
-              existingProfileIds.has(profileId) || retiredIds.has(profileId),
-          }),
-        };
-      },
-    }),
-  };
-  const firestoreFactory = () => firestore;
-  firestoreFactory.Timestamp = originalFirestore.Timestamp;
-  firebaseAdmin.firestore = firestoreFactory;
+              updateTime: `update-${profileId}`,
+            }
+          : null,
+    },
+    timestampFromMillis: (millis) => ({ millis }),
+  });
   try {
-    await projectEvent("event-1", beforeData, afterData, options);
+    const beforeOwnerProfileIds = Object.values(
+      beforeData?.participants || {},
+    ).flatMap((participant) =>
+      participant?.profileId ? [participant.profileId] : [],
+    );
+    await core.projectEvent("event-1", afterData, [
+      ...beforeOwnerProfileIds,
+      ...(options.cleanupOwnerProfileIds || []),
+    ]);
     return { commits, operations };
   } catch (error) {
     error.projectionOperations = operations;
     throw error;
-  } finally {
-    firebaseAdmin.firestore = originalFirestore;
   }
 };
 
@@ -333,21 +312,23 @@ test("event owner paths are deduplicated and concurrency bounded", async () => {
   const reads = new Map();
   let active = 0;
   let maxActive = 0;
-  const firestore = {
-    collection: () => ({
-      doc: (profileId) => ({
-        get: async () => {
-          active += 1;
-          maxActive = Math.max(maxActive, active);
-          reads.set(profileId, (reads.get(profileId) || 0) + 1);
-          await new Promise((resolve) => setImmediate(resolve));
-          active -= 1;
-          return { exists: false };
-        },
-      }),
-    }),
-  };
-  const paths = await resolveProfilePaths(firestore, [...ids, ...ids]);
+  const core = createEventProfileGameProjectionCore({
+    repository: {
+      commitProjectionWrites: async () => undefined,
+      getEvent: async () => null,
+      getMergeTarget: async (profileId) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        reads.set(profileId, (reads.get(profileId) || 0) + 1);
+        await new Promise((resolve) => setImmediate(resolve));
+        active -= 1;
+        return null;
+      },
+      getProfile: async () => null,
+    },
+    timestampFromMillis: (millis) => millis,
+  });
+  const paths = await core.resolveProfilePaths([...ids, ...ids]);
   assert.equal(paths.size, ids.length);
   assert.equal(maxActive, 10);
   assert.deepEqual(
@@ -375,19 +356,29 @@ test("event retries project live state while retaining stale owners for cleanup"
   const liveData = {
     participants: { live: { profileId: "live-profile" } },
   };
-  const calls = [];
-  await reconcileLiveEventProjection("event-1", beforeData, afterData, {
-    readLiveEvent: async () => liveData,
-    projectEvent: async (...args) => calls.push(args),
+  const commits = [];
+  const core = createEventProfileGameProjectionCore({
+    repository: {
+      commitProjectionWrites: async (writes) => commits.push(writes),
+      getEvent: async () => liveData,
+      getMergeTarget: async () => null,
+      getProfile: async () => ({ data: {}, updateTime: "update" }),
+    },
+    timestampFromMillis: (millis) => millis,
   });
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0][1], beforeData);
-  assert.equal(calls[0][2], liveData);
-  assert.deepEqual(calls[0][3].cleanupOwnerProfileIds, [
-    "before-profile",
-    "stale-after-profile",
-    "live-profile",
+  await core.reconcileEventProjection("event-1", [
+    ...Object.values(beforeData.participants).map(({ profileId }) => profileId),
+    ...Object.values(afterData.participants).map(({ profileId }) => profileId),
   ]);
+  assert.equal(commits.length, 1);
+  assert.deepEqual(
+    commits[0].map(({ type, profileId }) => ({ type, profileId })),
+    [
+      { type: "merge", profileId: "live-profile" },
+      { type: "delete", profileId: "before-profile" },
+      { type: "delete", profileId: "stale-after-profile" },
+    ],
+  );
 });
 
 test("event retries converge when the live event changes during projection", async () => {
@@ -397,21 +388,27 @@ test("event retries converge when the live event changes during projection", asy
   const intermediateData = {
     participants: { intermediate: { profileId: "intermediate-profile" } },
   };
-  const projectedStates = [];
-  const cleanupOwnerSets = [];
+  const commits = [];
   const liveStates = [intermediateData, null, null];
-  await reconcileLiveEventProjection("event-1", null, staleData, {
-    readLiveEvent: async () => liveStates.shift() ?? null,
-    projectEvent: async (_eventId, _beforeData, liveData, options) => {
-      projectedStates.push(liveData);
-      cleanupOwnerSets.push(options.cleanupOwnerProfileIds);
+  const core = createEventProfileGameProjectionCore({
+    repository: {
+      commitProjectionWrites: async (writes) => commits.push(writes),
+      getEvent: async () => (liveStates.length > 0 ? liveStates.shift() : null),
+      getMergeTarget: async () => null,
+      getProfile: async () => ({ data: {}, updateTime: "update" }),
     },
+    timestampFromMillis: (millis) => millis,
   });
-  assert.deepEqual(projectedStates, [intermediateData, null]);
-  assert.deepEqual(cleanupOwnerSets[1], [
-    "stale-profile",
-    "intermediate-profile",
+  await core.reconcileEventProjection("event-1", [
+    staleData.participants.stale.profileId,
   ]);
+  assert.deepEqual(
+    commits[1].map(({ type, profileId }) => ({ type, profileId })),
+    [
+      { type: "delete", profileId: "stale-profile" },
+      { type: "delete", profileId: "intermediate-profile" },
+    ],
+  );
 });
 
 test("profile-link retries use the live owner and retain event owners for cleanup", async () => {

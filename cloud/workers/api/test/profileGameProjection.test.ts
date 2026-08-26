@@ -8,20 +8,29 @@ import {
   claimAutomatchSweepCandidate,
   handleProfileGameProjectionMessage,
   processAutomatchProfileGameProjection,
+  processEventProfileGameProjection,
   processRatingProfileGameProjection,
   profileGameProjectionRetryDelaySeconds,
+  repairInvalidEventSweepEntry,
   sweepAutomatchProfileGameProjections,
+  sweepEventProfileGameProjections,
   sweepRatingProfileGameProjections,
 } from "../src/profileGameProjection.ts";
 import {
   buildAutomatchProfileGameProjectionOutboxUpdates,
+  buildEventProfileGameProjectionOutboxUpdates,
   parseAutomatchProfileGameProjectionOutbox,
+  parseEventProfileGameProjectionOutbox,
 } from "../src/profileGameProjectionOutbox.ts";
-import type { ProfileGameProjectionRuntime } from "../src/profileGameProjectionRepository.ts";
+import type {
+  EventProfileGameProjectionRuntime,
+  ProfileGameProjectionRuntime,
+} from "../src/profileGameProjectionRepository.ts";
 import {
   parseProfileGameProjectionTask,
   PROFILE_GAME_PROJECTION_QUEUE_NAME,
   type AutomatchProfileGameProjectionTask,
+  type EventProfileGameProjectionTask,
   type ProfileGameProjectionTask,
 } from "../src/profileGameProjectionTasks.ts";
 import worker from "../src/workerHandler.ts";
@@ -152,6 +161,49 @@ function automatchTask(
   };
 }
 
+function eventOutbox(
+  requestId = "event-request-1",
+  lastQueuedAtMs = 200,
+  cleanupOwnerProfileIds = ["stale-profile"],
+) {
+  return {
+    schemaVersion: 1,
+    status: "pending",
+    requestId,
+    lastQueuedAtMs,
+    cleanupOwnerProfileIds: Object.fromEntries(
+      cleanupOwnerProfileIds.map((profileId) => [profileId, true]),
+    ),
+  };
+}
+
+function eventTask(
+  requestId = "event-request-1",
+): EventProfileGameProjectionTask {
+  return {
+    kind: "event-profile-game-projection",
+    eventId: "event-1",
+    requestId,
+  };
+}
+
+function eventRuntime(
+  calls: Array<{ cleanupOwnerProfileIds: string[]; eventId: string }>,
+  status: "missing" | "projected" = "projected",
+): EventProfileGameProjectionRuntime {
+  return {
+    async reconcileEventProjection(eventId, cleanupOwnerProfileIds = []) {
+      calls.push({ eventId, cleanupOwnerProfileIds });
+      return {
+        deleted: 0,
+        ownerProfileIds: [],
+        status,
+        written: 0,
+      };
+    },
+  };
+}
+
 function applyRtdbTransaction(
   current: unknown,
   updater: (value: unknown) => unknown,
@@ -195,6 +247,22 @@ test("profile game projection tasks require exact safe payloads", () => {
     parseProfileGameProjectionTask({
       ...automatchTask(),
       inviteId: "unsafe/path",
+    }),
+    null,
+  );
+  assert.deepEqual(parseProfileGameProjectionTask(eventTask()), eventTask());
+  assert.equal(
+    parseProfileGameProjectionTask({ ...eventTask(), extra: true }),
+    null,
+  );
+  assert.equal(
+    parseProfileGameProjectionTask({ ...eventTask(), eventId: "unsafe/path" }),
+    null,
+  );
+  assert.equal(
+    parseProfileGameProjectionTask({
+      ...eventTask(),
+      requestId: "unsafe/path",
     }),
     null,
   );
@@ -256,6 +324,47 @@ test("automatch outboxes preserve source and recovery timestamps", () => {
     { ...automatchOutbox(), lastQueuedAtMs: Number.NaN },
   ]) {
     assert.equal(parseAutomatchProfileGameProjectionOutbox(invalid), null);
+  }
+});
+
+test("event outboxes preserve accumulated cleanup owners", () => {
+  assert.deepEqual(
+    buildEventProfileGameProjectionOutboxUpdates({
+      cleanupOwnerProfileIds: ["owner-a", "owner-b", "owner-a"],
+      eventId: "event-1",
+      requestId: "event-request-1",
+      timestamp: 100,
+    }),
+    {
+      "profileGameProjectionOutbox/event/event-1/schemaVersion": 1,
+      "profileGameProjectionOutbox/event/event-1/status": "pending",
+      "profileGameProjectionOutbox/event/event-1/requestId": "event-request-1",
+      "profileGameProjectionOutbox/event/event-1/lastQueuedAtMs": 100,
+      "profileGameProjectionOutbox/event/event-1/reason": null,
+      "profileGameProjectionOutbox/event/event-1/deadAtMs": null,
+      "profileGameProjectionOutbox/event/event-1/cleanupOwnerProfileIds/owner-a": true,
+      "profileGameProjectionOutbox/event/event-1/cleanupOwnerProfileIds/owner-b": true,
+    },
+  );
+  assert.deepEqual(parseEventProfileGameProjectionOutbox(eventOutbox()), {
+    schemaVersion: 1,
+    status: "pending",
+    requestId: "event-request-1",
+    lastQueuedAtMs: 200,
+    cleanupOwnerProfileIds: ["stale-profile"],
+  });
+  for (const invalid of [
+    null,
+    { ...eventOutbox(), status: "dead" },
+    { ...eventOutbox(), requestId: "unsafe/path" },
+    { ...eventOutbox(), lastQueuedAtMs: Number.NaN },
+    {
+      ...eventOutbox(),
+      cleanupOwnerProfileIds: { "unsafe/path": true },
+    },
+    { ...eventOutbox(), cleanupOwnerProfileIds: { owner: false } },
+  ]) {
+    assert.equal(parseEventProfileGameProjectionOutbox(invalid), null);
   }
 });
 
@@ -392,6 +501,72 @@ test("automatch projection serializes newer work behind the current invite", asy
   );
   assert.equal(projection, "matched");
   assert.equal(values.get(outboxPath), null);
+});
+
+test("event projection reconciles cleanup owners and exact-clears its outbox", async () => {
+  const outboxPath = "profileGameProjectionOutbox/event/event-1";
+  const values = new Map<string, unknown>([[outboxPath, eventOutbox()]]);
+  const calls: Array<{ cleanupOwnerProfileIds: string[]; eventId: string }> =
+    [];
+  const rtdb = projectionLockRtdb(values);
+  assert.equal(
+    await processEventProfileGameProjection(
+      eventTask(),
+      rtdb,
+      eventRuntime(calls),
+      "event-owner",
+      () => 300,
+    ),
+    "projected",
+  );
+  assert.deepEqual(calls, [
+    { eventId: "event-1", cleanupOwnerProfileIds: ["stale-profile"] },
+  ]);
+  assert.equal(values.get(outboxPath), null);
+
+  values.set(outboxPath, eventOutbox("event-request-new", 400));
+  assert.equal(
+    await processEventProfileGameProjection(
+      eventTask(),
+      rtdb,
+      eventRuntime(calls),
+      "event-owner",
+      () => 400,
+    ),
+    "stale",
+  );
+  assert.equal(calls.length, 1);
+});
+
+test("event projection preserves a superseding outbox", async () => {
+  const outboxPath = "profileGameProjectionOutbox/event/event-1";
+  const values = new Map<string, unknown>([[outboxPath, eventOutbox()]]);
+  const rtdb = projectionLockRtdb(values);
+  const runtime: EventProfileGameProjectionRuntime = {
+    async reconcileEventProjection() {
+      values.set(outboxPath, eventOutbox("event-request-new", 400));
+      return {
+        deleted: 0,
+        ownerProfileIds: [],
+        status: "projected",
+        written: 0,
+      };
+    },
+  };
+  assert.equal(
+    await processEventProfileGameProjection(
+      eventTask(),
+      rtdb,
+      runtime,
+      "event-owner",
+      () => 300,
+    ),
+    "superseded",
+  );
+  assert.deepEqual(
+    values.get(outboxPath),
+    eventOutbox("event-request-new", 400),
+  );
 });
 
 test("rating projection uses deterministic completion inputs and completes once", async () => {
@@ -644,6 +819,24 @@ test("automatch Queue retries transient work without settling its outbox", async
   assert.deepEqual(values.get(outboxPath), automatchOutbox());
 });
 
+test("event Queue retries transient work without settling its outbox", async () => {
+  const failed = queueMessage(eventTask(), 3);
+  const outboxPath = "profileGameProjectionOutbox/event/event-1";
+  const values = new Map<string, unknown>([[outboxPath, eventOutbox()]]);
+  await handleProfileGameProjectionMessage(failed.message, TELEGRAM_TEST_ENV, {
+    createEventRuntime: () => ({
+      reconcileEventProjection: async () => {
+        throw new Error("temporary-event-projection-failure");
+      },
+    }),
+    createRtdb: () => projectionLockRtdb(values),
+    logger: { error() {}, info() {} },
+  });
+  assert.equal(failed.acknowledgements(), 0);
+  assert.deepEqual(failed.retries, [{ delaySeconds: 4 }]);
+  assert.deepEqual(values.get(outboxPath), eventOutbox());
+});
+
 test("profile game projection Queue keeps exhausted infrastructure work pending", async () => {
   const exhausted = queueMessage(
     { kind: "rating-profile-game-projection", operationId },
@@ -814,6 +1007,213 @@ test("scheduled recovery bounds concurrent claims", async () => {
     0,
   );
   assert.equal(maximum, 10);
+});
+
+test("event recovery normalizes every non-null malformed marker", async () => {
+  const runRepair = async (value: unknown, eventId = "event-1") => {
+    let current = value;
+    const result = await repairInvalidEventSweepEntry(
+      {
+        getRtdbPath: async () => null,
+        transactRtdbPath: async (_path, updater) => {
+          const transaction = applyRtdbTransaction(current, updater);
+          if (transaction.committed) {
+            current = transaction.value;
+          }
+          return transaction;
+        },
+      },
+      eventId,
+      600_000,
+      () => "repair-request",
+    );
+    return { current, result };
+  };
+  const repairedResult = {
+    kind: "repaired" as const,
+    task: {
+      kind: "event-profile-game-projection" as const,
+      eventId: "event-1",
+      requestId: "repair-request",
+    },
+  };
+  for (const [value, cleanupOwnerProfileIds] of [
+    [
+      {
+        status: "bad",
+        cleanupOwnerProfileIds: {
+          "owner-object": false,
+          "unsafe/path": true,
+        },
+      },
+      ["owner-object"],
+    ],
+    [
+      { status: "bad", cleanupOwnerProfileIds: "owner-string" },
+      ["owner-string"],
+    ],
+    [
+      {
+        status: "bad",
+        cleanupOwnerProfileIds: ["owner-array", "unsafe/path", 7],
+      },
+      ["owner-array"],
+    ],
+    ["corrupt", []],
+    [false, []],
+    [["corrupt"], []],
+  ] as Array<[unknown, string[]]>) {
+    assert.deepEqual(await runRepair(value), {
+      result: repairedResult,
+      current: {
+        schemaVersion: 1,
+        status: "pending",
+        requestId: "repair-request",
+        lastQueuedAtMs: 600_000,
+        cleanupOwnerProfileIds: Object.fromEntries(
+          cleanupOwnerProfileIds.map((profileId) => [profileId, true]),
+        ),
+      },
+    });
+  }
+
+  const concurrent = eventOutbox("concurrent-request", 700_000);
+  assert.deepEqual(await runRepair(null), {
+    current: null,
+    result: { kind: "changed" },
+  });
+  assert.deepEqual(await runRepair(concurrent), {
+    current: concurrent,
+    result: { kind: "changed" },
+  });
+  assert.deepEqual(await runRepair({ status: "bad" }, "unsafe/path"), {
+    current: null,
+    result: { kind: "removed" },
+  });
+});
+
+test("event recovery claims due outboxes and repairs malformed records", async () => {
+  const batches: ProfileGameProjectionTask[][] = [];
+  const logs: string[] = [];
+  const queue = {
+    ...TELEGRAM_TEST_ENV.PROFILE_GAME_PROJECTION_QUEUE,
+    sendBatch: async (messages: Iterable<MessageSendRequest<unknown>>) => {
+      batches.push(
+        Array.from(messages).map(
+          ({ body }) => body as ProfileGameProjectionTask,
+        ),
+      );
+      return {
+        metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+      };
+    },
+  } satisfies Queue;
+  const values = new Map<string, unknown>([
+    ["event-1", eventOutbox("event-request-1", 100)],
+    [
+      "event-bad",
+      {
+        ...eventOutbox("event-request-2", 200),
+        status: "bad",
+        cleanupOwnerProfileIds: { "stale-profile": false },
+      },
+    ],
+    ["event-negative", { ...eventOutbox(), lastQueuedAtMs: -1 }],
+    ["event-boolean", { ...eventOutbox(), lastQueuedAtMs: false }],
+  ]);
+  const rtdb = {
+    getRtdbPath: async (path: string, query?: Record<string, unknown>) => {
+      assert.equal(path, "profileGameProjectionOutbox/event");
+      if (query?.endAt === 300_000) {
+        return Object.fromEntries(values);
+      }
+      assert.deepEqual(query, {
+        orderBy: "lastQueuedAtMs",
+        startAt: "",
+        limitToFirst: 100,
+      });
+      return null;
+    },
+    transactRtdbPath: async (
+      path: string,
+      updater: (current: unknown) => unknown,
+    ) => {
+      const eventId = path.split("/").at(-1) || "";
+      const result = applyRtdbTransaction(values.get(eventId), updater);
+      if (result.committed) {
+        values.set(eventId, result.value);
+      }
+      return result;
+    },
+  };
+  const requestIds = ["repair-bad", "repair-negative", "repair-boolean"];
+  assert.equal(
+    await sweepEventProfileGameProjections(
+      {
+        ...TELEGRAM_TEST_ENV,
+        PROFILE_GAME_PROJECTION_QUEUE: queue,
+      },
+      {
+        createRequestId: () => requestIds.shift() || "unexpected",
+        createRtdb: () => rtdb,
+        logger: { error: (message) => logs.push(String(message)), info() {} },
+        now: () => 600_000,
+      },
+    ),
+    4,
+  );
+  assert.deepEqual(batches.flat(), [
+    {
+      kind: "event-profile-game-projection",
+      eventId: "event-bad",
+      requestId: "repair-bad",
+    },
+    {
+      kind: "event-profile-game-projection",
+      eventId: "event-negative",
+      requestId: "repair-negative",
+    },
+    {
+      kind: "event-profile-game-projection",
+      eventId: "event-boolean",
+      requestId: "repair-boolean",
+    },
+    eventTask(),
+  ]);
+  assert.deepEqual(values.get("event-1"), {
+    ...eventOutbox("event-request-1", 100),
+    lastQueuedAtMs: 600_000,
+  });
+  assert.deepEqual(values.get("event-bad"), {
+    schemaVersion: 1,
+    status: "pending",
+    requestId: "repair-bad",
+    lastQueuedAtMs: 600_000,
+    cleanupOwnerProfileIds: { "stale-profile": true },
+  });
+  assert.deepEqual(values.get("event-negative"), {
+    schemaVersion: 1,
+    status: "pending",
+    requestId: "repair-negative",
+    lastQueuedAtMs: 600_000,
+    cleanupOwnerProfileIds: { "stale-profile": true },
+  });
+  assert.deepEqual(values.get("event-boolean"), {
+    schemaVersion: 1,
+    status: "pending",
+    requestId: "repair-boolean",
+    lastQueuedAtMs: 600_000,
+    cleanupOwnerProfileIds: { "stale-profile": true },
+  });
+  assert.equal(
+    logs.some(
+      (entry) =>
+        entry.includes(
+          "event_profile_game_projection_invalid_outboxes_recovered",
+        ) && entry.includes('"repaired":3'),
+    ),
+    true,
+  );
 });
 
 test("automatch recovery claims due outboxes, repairs poison, and preserves source time", async () => {

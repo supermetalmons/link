@@ -277,7 +277,7 @@ test("returns strict join and removal responses", async () => {
     eventId: "event-1",
     removedProfileId: "target-profile",
   });
-  assert.equal(background.length, 4);
+  assert.equal(background.length, 6);
   await Promise.all(background);
 });
 

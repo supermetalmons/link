@@ -18,8 +18,27 @@ export type AutomatchProfileGameProjectionTask = {
   requestId: string;
 };
 
+export type EventProfileGameProjectionTask = {
+  kind: "event-profile-game-projection";
+  eventId: string;
+  requestId: string;
+};
+
 export type ProfileGameProjectionTask =
-  AutomatchProfileGameProjectionTask | RatingProfileGameProjectionTask;
+  | AutomatchProfileGameProjectionTask
+  | EventProfileGameProjectionTask
+  | RatingProfileGameProjectionTask;
+
+function exactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): boolean {
+  const keys = Object.keys(value);
+  return (
+    keys.length === expected.length &&
+    keys.every((key) => expected.includes(key))
+  );
+}
 
 export function parseProfileGameProjectionTask(
   value: unknown,
@@ -28,12 +47,8 @@ export function parseProfileGameProjectionTask(
     return null;
   }
   const task = value as Record<string, unknown>;
-  const keys = Object.keys(task);
   if (
-    keys.length === 3 &&
-    keys.includes("kind") &&
-    keys.includes("inviteId") &&
-    keys.includes("requestId") &&
+    exactKeys(task, ["kind", "inviteId", "requestId"]) &&
     task.kind === "automatch-profile-game-projection" &&
     typeof task.inviteId === "string" &&
     isSafeFirebaseKey(task.inviteId) &&
@@ -46,9 +61,21 @@ export function parseProfileGameProjectionTask(
       requestId: task.requestId,
     };
   }
-  return keys.length === 2 &&
-    keys.includes("kind") &&
-    keys.includes("operationId") &&
+  if (
+    exactKeys(task, ["kind", "eventId", "requestId"]) &&
+    task.kind === "event-profile-game-projection" &&
+    typeof task.eventId === "string" &&
+    isSafeFirebaseKey(task.eventId) &&
+    typeof task.requestId === "string" &&
+    isSafeFirebaseKey(task.requestId)
+  ) {
+    return {
+      kind: task.kind,
+      eventId: task.eventId,
+      requestId: task.requestId,
+    };
+  }
+  return exactKeys(task, ["kind", "operationId"]) &&
     task.kind === "rating-profile-game-projection" &&
     isSafeFirestoreDocumentId(task.operationId)
     ? { kind: task.kind, operationId: task.operationId }

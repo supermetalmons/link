@@ -2,7 +2,7 @@
 
 Run commands from the repository root. See the repository [architecture and command map](../README.md) for package boundaries and the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md) for API release, maintenance, and rollback procedures.
 
-Firebase retains the remaining invite, profile, event profile-game, and prize projection triggers, event-prize withdrawal, and the existing Firebase data stores. The API Worker owns auth, profile and leaderboard reads, profile customization, username mutation, mining, gameplay, event-prize selection, rating- and automatch-driven profile-game projection, event control and progress Workflows, X callback, event Telegram projection, and Worker-backed Telegram delivery.
+Firebase retains the remaining invite, profile, and prize projection triggers, event-prize withdrawal, and the existing Firebase data stores. The API Worker owns auth, profile and leaderboard reads, profile customization, username mutation, mining, gameplay, event-prize selection, rating-, automatch-, and event-driven profile-game projection, event control and progress Workflows, X callback, event Telegram projection, and Worker-backed Telegram delivery.
 
 ## Setup
 
@@ -44,6 +44,17 @@ npm --prefix cloud/functions run deploy:safe -- <function-name> --project mons-l
 `AUTH_MUTATIONS_DISABLED` in `cloud/workers/api/wrangler.jsonc` is the only auth maintenance switch. Change and release it as reviewed Worker configuration; do not create environment-specific copies or Dashboard overrides.
 
 `mons-link-auth-recovery` is the permanent recovery Queue. Its consumer applies `authRecoveryJobs` idempotently, and the scheduled sweep re-enqueues stale jobs. Investigate a stuck job without purging the Queue or deleting its job record.
+
+## Event profile-game projection recovery
+
+Event mutations atomically accumulate prior owners under `profileGameProjectionOutbox/event/{eventId}` before enqueueing the permanent profile-game projection Queue. The five-minute Worker schedule re-enqueues stale markers. Preview a production reconciliation, then execute and wait for Cloudflare to clear the exact marker and verify every canonical Firestore projection:
+
+```sh
+node cloud/admin/reconcileEventProfileGames.js --sample --project mons-link
+node cloud/admin/reconcileEventProfileGames.js --sample --project mons-link --execute --wait
+```
+
+Do not purge the Queue or delete a pending outbox. Malformed markers are repaired in place and re-enqueued while preserving recoverable cleanup owners.
 
 ## Auth cooldown cleanup
 

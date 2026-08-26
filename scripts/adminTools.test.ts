@@ -19,6 +19,12 @@ const {
   deleteDocuments,
   parseArgs: parseCleanupArgs,
 } = require("../cloud/admin/cleanupAuthMethodRevocations.js");
+const {
+  ownerProfileIds: eventProjectionOwnerProfileIds,
+  parseArgs: parseEventProjectionArgs,
+  selectSampleEvent,
+  writeRecoveryOutbox,
+} = require("../cloud/admin/reconcileEventProfileGames.js");
 
 test("leaderboard CLIs retain 15 as the default and accept a bounded limit", () => {
   assert.equal(DEFAULT_LEADERBOARD_LIMIT, 15);
@@ -127,6 +133,132 @@ test("auth cooldown cleanup defaults safe and requires explicit execution", () =
   ]) {
     assert.throws(() => parseCleanupArgs(argv), /Usage/);
   }
+});
+
+test("event profile-game reconciliation defaults safe and requires a target", () => {
+  assert.deepEqual(parseEventProjectionArgs(["--sample"]), {
+    adminArgs: [],
+    dryRun: true,
+    eventId: "",
+    sample: true,
+    wait: false,
+  });
+  assert.deepEqual(
+    parseEventProjectionArgs([
+      "--event-id",
+      "event-1",
+      "--project",
+      "mons-link",
+      "--execute",
+      "--wait",
+    ]),
+    {
+      adminArgs: ["--project", "mons-link"],
+      dryRun: false,
+      eventId: "event-1",
+      sample: false,
+      wait: true,
+    },
+  );
+  for (const argv of [
+    [],
+    ["--sample", "--event-id", "event-1"],
+    ["--sample", "--wait"],
+    ["--event-id", "unsafe/path"],
+    ["--sample", "--dry-run", "--execute"],
+  ]) {
+    assert.throws(() => parseEventProjectionArgs(argv), /Usage/);
+  }
+});
+
+test("event profile-game recovery merges cleanup owners into one due marker", async () => {
+  let current: unknown = {
+    status: "pending",
+    requestId: "old-request",
+    cleanupOwnerProfileIds: { "old-owner": true },
+  };
+  const ref = {
+    transaction: async (updater: (value: unknown) => unknown) => {
+      current = updater(current);
+      return { committed: true };
+    },
+  };
+  await writeRecoveryOutbox({
+    database: {
+      ref: (path: string) => {
+        assert.equal(path, "profileGameProjectionOutbox/event/event-1");
+        return ref;
+      },
+    },
+    eventId: "event-1",
+    profileIds: ["new-owner"],
+    requestId: "manual-request",
+  });
+  assert.deepEqual(current, {
+    schemaVersion: 1,
+    status: "pending",
+    requestId: "manual-request",
+    lastQueuedAtMs: 0,
+    reason: null,
+    deadAtMs: null,
+    cleanupOwnerProfileIds: {
+      "old-owner": true,
+      "new-owner": true,
+    },
+  });
+  assert.deepEqual(
+    eventProjectionOwnerProfileIds({
+      participants: {
+        a: { profileId: "profile-a" },
+        b: { profileId: "unsafe/path" },
+      },
+    }),
+    ["profile-a"],
+  );
+});
+
+test("event profile-game sample selection paginates by key", async () => {
+  const pages = [
+    Object.fromEntries(
+      Array.from({ length: 100 }, (_, index) => [
+        `event-${String(index).padStart(3, "0")}`,
+        { participants: {} },
+      ]),
+    ),
+    {
+      "event-099": { participants: {} },
+      "event-100": {
+        participants: { owner: { profileId: "profile-a" } },
+      },
+    },
+  ];
+  let page = 0;
+  const query = {
+    limitToFirst: () => query,
+    once: async () => {
+      const values = pages[page++] || {};
+      return {
+        forEach: (
+          iteratee: (child: { key: string; val: () => unknown }) => unknown,
+        ) => {
+          for (const [key, value] of Object.entries(values)) {
+            iteratee({ key, val: () => value });
+          }
+        },
+      };
+    },
+    orderByKey: () => query,
+    startAt: (cursor: string) => {
+      assert.equal(cursor, "event-099");
+      return query;
+    },
+  };
+  assert.deepEqual(await selectSampleEvent({ ref: () => query }), {
+    eventId: "event-100",
+    event: {
+      participants: { owner: { profileId: "profile-a" } },
+    },
+  });
 });
 
 test("auth cooldown deletes require the scanned document version", async () => {

@@ -40,6 +40,7 @@ import {
   type GameplayRepository,
 } from "./gameplayRepository.ts";
 import { createEventTelegramProjectionRepository } from "./eventTelegramProjectionProducer.ts";
+import { createEventProfileGameProjectionRepository } from "./eventProfileGameProjectionProducer.ts";
 import { readBoundedJson } from "./http.ts";
 import {
   createEvent,
@@ -172,10 +173,15 @@ export async function handleEventRoute(
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
     const body = await readEventBody(request, pathname);
-    const repository = createEventTelegramProjectionRepository(
+    const schedule = (work: Promise<void>) => ctx.waitUntil(work);
+    const repository = createEventProfileGameProjectionRepository(
       env,
-      dependencies.repository || createGameplayRepository(env),
-      { schedule: (work) => ctx.waitUntil(work) },
+      createEventTelegramProjectionRepository(
+        env,
+        dependencies.repository || createGameplayRepository(env),
+        { schedule },
+      ),
+      { schedule },
     );
     const participation = {
       ...dependencies.participation,

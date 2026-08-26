@@ -8,7 +8,9 @@ import type {
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import { decodeFirestoreFields } from "../src/gameplayRepository.ts";
 import {
+  createEventProfileGameProjectionRuntime,
   createProfileGameProjectionRuntime,
+  eventProjectionDocumentName,
   projectionDocumentName,
   timestampFromMillis,
 } from "../src/profileGameProjectionRepository.ts";
@@ -124,5 +126,80 @@ test("Worker projection adapter preserves the shared projector document contract
   assert.equal(
     projectionDocumentName("host-profile", "auto_aaaaaaaaaaa"),
     `${firestoreRoot}/users/host-profile/games/auto_aaaaaaaaaaa`,
+  );
+});
+
+test("Worker event projection adapter writes and deletes exact Firestore documents", async () => {
+  const writes: AuthFirestoreWrite[][] = [];
+  const documents = new Map([
+    [
+      `${firestoreRoot}/profileMergeTargets/source-profile`,
+      firestoreDocument(`${firestoreRoot}/profileMergeTargets/source-profile`, {
+        targetProfileId: "target-profile",
+      }),
+    ],
+    [
+      `${firestoreRoot}/users/target-profile`,
+      firestoreDocument(`${firestoreRoot}/users/target-profile`, {}),
+    ],
+  ]);
+  const firestore = {
+    batchGet: async () => new Map(),
+    commitWrites: async (batch) => {
+      writes.push(batch);
+    },
+    createDocumentId: () => "document-id",
+    get: async (name) => documents.get(name) || null,
+    listPage: async () => ({ documents: [], nextPageToken: "" }),
+    query: async () => [],
+    runTransaction: async (work) =>
+      (
+        await work({
+          batchGet: async () => new Map(),
+          query: async () => [],
+        })
+      ).result,
+  } satisfies AuthFirestoreClient;
+  const event = {
+    status: "active",
+    updatedAtMs: 500,
+    participants: {
+      source: { profileId: "source-profile", joinedAtMs: 1 },
+    },
+  };
+  const rtdb = {
+    getRtdbPath: async (path: string) =>
+      path === "events/event-1" ? event : null,
+  } satisfies Pick<GameplayRepository, "getRtdbPath">;
+  const runtime = createEventProfileGameProjectionRuntime(TELEGRAM_TEST_ENV, {
+    firestore,
+    rtdb,
+    wait: async () => undefined,
+  });
+  const result = await runtime.reconcileEventProjection("event-1", [
+    "stale-profile",
+  ]);
+  assert.deepEqual(result, {
+    deleted: 2,
+    ownerProfileIds: ["target-profile"],
+    status: "projected",
+    written: 1,
+  });
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].length, 3);
+  assert.equal(
+    "update" in writes[0][0] ? writes[0][0].update.name : "",
+    eventProjectionDocumentName("target-profile", "event-1"),
+  );
+  assert.deepEqual(
+    "update" in writes[0][0] ? writes[0][0].update.fields.updatedAt : null,
+    { timestampValue: "1970-01-01T00:00:00.500Z" },
+  );
+  assert.deepEqual(
+    writes[0].slice(1).map((write) => ("delete" in write ? write.delete : "")),
+    [
+      eventProjectionDocumentName("source-profile", "event-1"),
+      eventProjectionDocumentName("stale-profile", "event-1"),
+    ],
   );
 });
