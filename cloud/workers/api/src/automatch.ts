@@ -43,6 +43,7 @@ import type {
   AutomatchTelegramProjectionTask,
   TelegramProjectionTask,
 } from "./telegramProjectionTasks.ts";
+import { withGameSessionMutationLease } from "./gameSessionMutations.ts";
 
 const MAX_AUTOMATCH_RETRY_COUNT = 3;
 const AUTOMATCH_TOTAL_TIMEOUT_MS = 20_000;
@@ -295,52 +296,60 @@ async function attemptAutomatch(
       dependencies,
       profileGameProjectionTask.requestId,
     );
-    await repository.patchRtdbRoot(
-      {
-        [`players/${identity.uid}/matches/${inviteId}`]: match,
-        [`automatch/${inviteId}`]: {
-          uid: identity.uid,
-          rating: profile.rating,
-          timestamp,
-          username: profile.username,
-          ethAddress: profile.eth,
-          solAddress: profile.sol,
-          profileId: profile.profileId,
-          hostColor,
-          password,
-          emojiId,
-          gameVariant: matchSeed.gameVariant,
-          telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
-        },
-        [`invites/${inviteId}`]: {
-          version: CONTROLLER_VERSION,
-          hostId: identity.uid,
-          hostColor,
-          guestId: null,
-          password,
-          automatchStateHint: "pending",
-          automatchCanceledAt: null,
-          telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
-        },
-        [getAutomatchTelegramSourcePath(inviteId)]:
-          buildPendingAutomatchTelegramSource({
-            inviteId,
-            waitingText,
-            canceledText,
-            timestamp,
-          }),
-        ...buildAutomatchTelegramProjectionOutboxUpdates({
-          inviteId,
-          requestId: projectionTask.requestId,
-          timestamp,
-        }),
-        ...buildAutomatchProfileGameProjectionOutboxUpdates({
-          inviteId,
-          requestId: profileGameProjectionTask.requestId,
-          timestamp,
-        }),
+    await withGameSessionMutationLease(
+      inviteId,
+      profileGameProjectionTask.requestId,
+      repository,
+      async () => {
+        await repository.patchRtdbRoot(
+          {
+            [`players/${identity.uid}/matches/${inviteId}`]: match,
+            [`automatch/${inviteId}`]: {
+              uid: identity.uid,
+              rating: profile.rating,
+              timestamp,
+              username: profile.username,
+              ethAddress: profile.eth,
+              solAddress: profile.sol,
+              profileId: profile.profileId,
+              hostColor,
+              password,
+              emojiId,
+              gameVariant: matchSeed.gameVariant,
+              telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
+            },
+            [`invites/${inviteId}`]: {
+              version: CONTROLLER_VERSION,
+              hostId: identity.uid,
+              hostColor,
+              guestId: null,
+              password,
+              automatchStateHint: "pending",
+              automatchCanceledAt: null,
+              telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
+            },
+            [getAutomatchTelegramSourcePath(inviteId)]:
+              buildPendingAutomatchTelegramSource({
+                inviteId,
+                waitingText,
+                canceledText,
+                timestamp,
+              }),
+            ...buildAutomatchTelegramProjectionOutboxUpdates({
+              inviteId,
+              requestId: projectionTask.requestId,
+              timestamp,
+            }),
+            ...buildAutomatchProfileGameProjectionOutboxUpdates({
+              inviteId,
+              requestId: profileGameProjectionTask.requestId,
+              timestamp,
+            }),
+          },
+          signal,
+        );
       },
-      signal,
+      {},
     );
     await enqueueAutomatchProjection(projectionTask, dependencies);
     await enqueueAutomatchProfileGameProjection(
@@ -451,8 +460,30 @@ async function attemptAutomatch(
     );
   let committed = false;
   try {
-    await repository.patchRtdbRoot(updates, signal);
-    committed = true;
+    committed = await withGameSessionMutationLease(
+      queued.inviteId,
+      profileGameProjectionTask.requestId,
+      repository,
+      async () => {
+        const [currentQueueValue, currentGuestId] = await Promise.all([
+          repository.getRtdbPath(
+            `automatch/${queued.inviteId}`,
+            undefined,
+            signal,
+          ),
+          readGuestId(),
+        ]);
+        if (
+          normalizeString(toRecord(currentQueueValue)?.uid) !== existingUid ||
+          currentGuestId
+        ) {
+          return false;
+        }
+        await repository.patchRtdbRoot(updates, signal);
+        return true;
+      },
+      {},
+    );
   } catch (patchFailure) {
     try {
       if ((await readGuestId()) === identity.uid) {
@@ -462,6 +493,18 @@ async function attemptAutomatch(
     if (!committed) {
       throw patchFailure;
     }
+  }
+  if (!committed) {
+    return attemptAutomatch(
+      identity,
+      request,
+      profile,
+      repository,
+      random,
+      signal,
+      retryCount + 1,
+      dependencies,
+    );
   }
   if (projectionTask) {
     await enqueueAutomatchProjection(projectionTask, dependencies);

@@ -32,6 +32,7 @@ import {
   PROFILE_GAME_PROJECTION_QUEUE_NAME,
   type ProfileGameProjectionTask,
 } from "./profileGameProjectionTasks.ts";
+import { sweepGameSessionMutationReceipts } from "./gameSessionMutations.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
 export type { ProviderFetch } from "./provider.ts";
@@ -61,6 +62,9 @@ async function handleScheduled(
     sweepEventProgress(env),
     handleProfileGameProjectionSweep(controller, env),
     handleTelegramProjectionSweep(controller, env),
+    sweepGameSessionMutationReceipts(env, {
+      now: () => controller.scheduledTime,
+    }),
   ]);
   const failure = results.find(
     (result): result is PromiseRejectedResult => result.status === "rejected",

@@ -9,11 +9,9 @@ const {
 const {
   buildInviteProjectionOwnerPlan,
   buildResolvedProfile,
-  readInviteExists,
+  createProfileGamesProjectionCore,
   readExistingProjectionDocuments,
-  recomputeInviteProjection,
-  withInviteProjectionLock,
-} = require("../functions/profileGamesProjector");
+} = require("../functions/profileGamesProjectionCore");
 const {
   createProfileLinkProjectionCore,
   processWithConcurrency,
@@ -142,140 +140,88 @@ const runInviteProjection = async ({
   projections,
   projectionUpdateTimes = {},
 }) => {
-  const originalDatabase = firebaseAdmin.database;
-  const originalFirestore = firebaseAdmin.firestore;
   const deletes = [];
   const sets = [];
   const currentUpdateTimes = { ...projectionUpdateTimes };
-  const valueSnapshot = (value) => ({
-    exists: () => value !== null && value !== undefined,
-    val: () => value ?? null,
-  });
-  const gameRef = (profileId) => {
-    const ref = {
-      path: `users/${profileId}/games/${inviteId}`,
-      get: async () => {
-        const data = projections[profileId];
-        if (
-          data !== null &&
-          data !== undefined &&
-          !currentUpdateTimes[profileId]
-        ) {
-          currentUpdateTimes[profileId] =
-            originalFirestore.Timestamp.fromMillis(1);
-        }
-        return {
-          data: () => data,
-          exists: data !== null && data !== undefined,
-          ref,
-          updateTime: currentUpdateTimes[profileId],
-        };
-      },
-    };
-    return ref;
-  };
-  const firestore = {
-    batch: () => {
-      const conditionalUpdates = [];
-      return {
-        commit: async () => {
-          beforeCommit?.({ currentUpdateTimes, projections });
-          for (const update of conditionalUpdates) {
-            const profileId = update.path.split("/")[1];
-            if (
-              update.precondition.lastUpdateTime !==
-              currentUpdateTimes[profileId]
-            ) {
-              throw new Error("firestore-precondition-failed");
-            }
+  const timestampFromMillis = firebaseAdmin.firestore.Timestamp.fromMillis;
+  const core = createProfileGamesProjectionCore({
+    repository: {
+      async commitProjectionWrites(writes) {
+        beforeCommit?.({ currentUpdateTimes, projections });
+        for (const write of writes) {
+          const path = `users/${write.profileId}/games/${inviteId}`;
+          if (write.type === "delete") {
+            deletes.push(path);
+            continue;
           }
-        },
-        create: (ref, data) =>
-          sets.push({ data, method: "create", path: ref.path }),
-        delete: (ref) => deletes.push(ref.path),
-        set: (ref, data, options) =>
-          sets.push({ data, method: "set", options, path: ref.path }),
-        update: (ref, data, precondition) => {
-          const operation = {
-            data,
-            method: "update",
-            path: ref.path,
-            precondition,
-          };
-          conditionalUpdates.push(operation);
-          sets.push(operation);
-        },
-      };
-    },
-    collection: (collectionName) => ({
-      doc: (profileId) => {
-        if (collectionName === "profileMergeTargets") {
-          const data = mergeTargets[profileId];
-          return {
-            get: async () => ({
-              data: () => data,
-              exists: data !== null && data !== undefined,
-            }),
-          };
+          if (
+            write.type === "update" &&
+            write.updateTime !== currentUpdateTimes[write.profileId]
+          ) {
+            throw new Error("firestore-precondition-failed");
+          }
+          sets.push({
+            data: write.data,
+            method: write.type === "merge" ? "set" : write.type,
+            ...(write.type === "merge" ? { options: { merge: true } } : {}),
+            ...(write.type === "update"
+              ? {
+                  precondition: {
+                    lastUpdateTime: write.updateTime,
+                  },
+                }
+              : {}),
+            path,
+          });
         }
-        assert.equal(collectionName, "users");
-        const data = profiles[profileId];
-        return {
-          collection: (subcollectionName) => {
-            assert.equal(subcollectionName, "games");
-            return { doc: () => gameRef(profileId) };
-          },
-          get: async () => ({
-            data: () => data,
-            exists: data !== null && data !== undefined,
-          }),
-        };
       },
-      where: () => ({
-        limit: () => ({
-          get: async () => ({ docs: [], empty: true }),
-        }),
-      }),
-    }),
-  };
-  const firestoreFactory = () => firestore;
-  firestoreFactory.Timestamp = originalFirestore.Timestamp;
-  firebaseAdmin.firestore = firestoreFactory;
-  firebaseAdmin.database = () => ({
-    ref: (path) => ({
-      once: async () => {
-        if (path === `invites/${inviteId}`) {
-          return valueSnapshot(invite);
+      async findProfileByLogin(loginUid) {
+        const profileId = profileLinks[loginUid];
+        const data = profiles[profileId];
+        return profileId && data ? { id: profileId, data } : null;
+      },
+      async getMergeTarget(profileId) {
+        return mergeTargets[profileId] ?? null;
+      },
+      async getProfile(profileId) {
+        const data = profiles[profileId];
+        return data
+          ? {
+              data,
+              updateTime:
+                currentUpdateTimes[profileId] || timestampFromMillis(1),
+            }
+          : null;
+      },
+      async getProjection(profileId) {
+        const data = projections[profileId];
+        if (data === null || data === undefined) {
+          return null;
         }
-        if (path === `automatch/${inviteId}`) {
-          return valueSnapshot(null);
-        }
+        currentUpdateTimes[profileId] ||= timestampFromMillis(1);
+        return { data, updateTime: currentUpdateTimes[profileId] };
+      },
+      async getRtdbPath(path) {
+        if (path === `invites/${inviteId}`) return invite;
+        if (path === `automatch/${inviteId}`) return null;
         const profileMatch = path.match(/^players\/(.+)\/profile$/);
-        if (profileMatch) {
-          return valueSnapshot(profileLinks[profileMatch[1]]);
-        }
-        if (path.startsWith("players/")) {
-          return valueSnapshot(null);
-        }
+        if (profileMatch) return profileLinks[profileMatch[1]] ?? null;
+        if (path.startsWith("players/")) return null;
         throw new Error(`unexpected-path:${path}`);
       },
-    }),
+    },
+    timestampFromMillis,
   });
-  try {
-    const result = await recomputeInviteProjection(
-      inviteId,
-      "profile-link-catchup",
-      {
-        cleanupProfileIds,
-        eventTimestampMs,
-        preserveListSortAt: true,
-      },
-    );
-    return { deletes, result, sets };
-  } finally {
-    firebaseAdmin.database = originalDatabase;
-    firebaseAdmin.firestore = originalFirestore;
-  }
+  const result = await core.recomputeInviteProjection(
+    inviteId,
+    "profile-link-catchup",
+    {
+      cleanupProfileIds,
+      eventTimestampMs,
+      preserveListSortAt: true,
+    },
+  );
+  return { deletes, result, sets };
 };
 
 test("event cleanup orders canonical writes ahead of raw merge paths", () => {
@@ -461,55 +407,6 @@ test("event retries converge when the live event changes during projection", asy
       { type: "delete", profileId: "intermediate-profile" },
     ],
   );
-});
-
-test("Firebase projectors serialize each invite with the shared lock", async () => {
-  let current = null;
-  const lockRef = () => ({
-    transaction: async (updater) => {
-      const next = updater(current);
-      if (next === undefined) {
-        return { committed: false, snapshot: { val: () => current } };
-      }
-      current = next;
-      return { committed: true, snapshot: { val: () => current } };
-    },
-  });
-  let releaseFirst;
-  const firstBlocked = new Promise((resolve) => {
-    releaseFirst = resolve;
-  });
-  let firstStarted;
-  const started = new Promise((resolve) => {
-    firstStarted = resolve;
-  });
-  const first = withInviteProjectionLock(
-    "invite-1",
-    async () => {
-      firstStarted();
-      await firstBlocked;
-    },
-    { createOwnerId: () => "owner-a", lockRef, now: () => 100 },
-  );
-  await started;
-  await assert.rejects(
-    () =>
-      withInviteProjectionLock("invite-1", async () => undefined, {
-        createOwnerId: () => "owner-b",
-        lockRef,
-        now: () => 200,
-      }),
-    /lock-busy/,
-  );
-  releaseFirst();
-  await first;
-  assert.equal(current, null);
-  await withInviteProjectionLock("invite-1", async () => undefined, {
-    createOwnerId: () => "owner-b",
-    lockRef,
-    now: () => 300,
-  });
-  assert.equal(current, null);
 });
 
 test("profile-link catchup converges and cleans an intermediate live owner", async () => {
@@ -1330,20 +1227,6 @@ test("deleted invite cleanup is safe without resolved owners", async () => {
   ]);
   assert.deepEqual(sets, []);
   assert.equal(result.sourceCleanupSafe, true);
-});
-
-test("invite existence reads propagate after bounded retries", async () => {
-  let reads = 0;
-  await assert.rejects(
-    readInviteExists("invite-1", null, {
-      readInvite: async () => {
-        reads += 1;
-        throw new Error("invite-read-failed");
-      },
-    }),
-    /invite-read-failed/,
-  );
-  assert.equal(reads, 2);
 });
 
 test("concurrency pools await active siblings before rethrowing", async () => {

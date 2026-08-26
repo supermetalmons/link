@@ -23,10 +23,14 @@ const {
   cancelAutomatchViaApi,
   cancelWagerProposalViaApi,
   claimMatchVictoryByTimerViaApi,
+  createInviteViaApi,
   createEventViaApi,
   declineWagerProposalViaApi,
   disqualifyEventMatchWinnersViaApi,
+  endRematchViaApi,
+  ensureMatchViaApi,
   joinEventViaApi,
+  joinInviteViaApi,
   removeEventParticipantViaApi,
   removeNavigationGameViaApi,
   resolveWagerOutcomeViaApi,
@@ -37,7 +41,27 @@ const {
   toggleEventPrizeSelectionViaApi,
   updateRatingsViaApi,
   postponeEventStartViaApi,
+  proposeRematchViaApi,
 } = await import("../src/services/gameplayApi.ts");
+const { createUserBoundAuthTokenProvider } =
+  await import("../src/services/authApi.ts");
+const {
+  MAX_GAME_SESSION_RESPONSE_BYTES,
+  MAX_GAME_SESSION_STATUS_BYTES,
+  MAX_GAME_SESSION_TIMER_BYTES,
+  isCreateInviteRequest,
+  isCreateInviteResponse,
+  isEndRematchRequest,
+  isEndRematchResponse,
+  isEnsureMatchRequest,
+  isEnsureMatchResponse,
+  isJoinInviteRequest,
+  isJoinInviteResponse,
+  isProposeRematchRequest,
+  isProposeRematchResponse,
+} = await import("@mons/shared/game-sessions");
+const { MAX_MATCH_FEN_BYTES, MAX_MATCH_HISTORY_BYTES } =
+  await import("@mons/shared/match-protocol");
 const { isRatingUpdateRequest, isRatingUpdateResponse } =
   await import("@mons/shared/ratings");
 const {
@@ -275,6 +299,414 @@ test("sends the exact event prize selection mutation", async () => {
     }),
     false,
   );
+});
+
+test("sends exact structural game-session mutations with stable operation IDs", async () => {
+  const calls = [];
+  const operationIds = [1, 2, 3, 4, 5].map(
+    (index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+  );
+  const match = {
+    version: 2,
+    color: "white",
+    emojiId: 7,
+    aura: "rainbow",
+    gameVariant: "Classic",
+    fen: "fen",
+    status: "",
+    flatMovesString: "",
+    timer: "",
+  };
+  const responses = [
+    {
+      ok: true,
+      inviteId: "abcdefghijk",
+      hostId: "host",
+      matchId: "abcdefghijk",
+    },
+    {
+      ok: true,
+      inviteId: "abcdefghijk",
+      guestId: "guest",
+      joined: true,
+      matchId: "abcdefghijk",
+    },
+    {
+      ok: true,
+      inviteId: "abcdefghijk",
+      actorUid: "host",
+      matchId: "abcdefghijk1",
+      rematches: "1",
+      match,
+    },
+    {
+      ok: true,
+      inviteId: "abcdefghijk",
+      actorUid: "host",
+      rematches: "1x",
+    },
+    {
+      ok: true,
+      inviteId: "abcdefghijk",
+      actorUid: "guest",
+      matchId: "abcdefghijk1",
+      created: true,
+      match,
+    },
+  ];
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input: String(input), init });
+    return jsonResponse(responses.shift());
+  };
+  const tokenProvider = async () => "firebase-token";
+  const presentation = { emojiId: 7, aura: "rainbow" };
+  const createRequest = {
+    operationId: operationIds[0],
+    inviteId: "abcdefghijk",
+    ...presentation,
+  };
+  const joinRequest = { ...createRequest, operationId: operationIds[1] };
+  const proposeRequest = { ...createRequest, operationId: operationIds[2] };
+  const endRequest = {
+    operationId: operationIds[3],
+    inviteId: "abcdefghijk",
+  };
+  const ensureRequest = {
+    ...createRequest,
+    operationId: operationIds[4],
+    matchId: "abcdefghijk1",
+  };
+  assert.equal(
+    (await createInviteViaApi(createRequest, tokenProvider)).hostId,
+    "host",
+  );
+  assert.equal(
+    (await joinInviteViaApi(joinRequest, tokenProvider)).joined,
+    true,
+  );
+  assert.equal(
+    (await proposeRematchViaApi(proposeRequest, tokenProvider)).matchId,
+    "abcdefghijk1",
+  );
+  assert.equal(
+    (await endRematchViaApi(endRequest, tokenProvider)).rematches,
+    "1x",
+  );
+  assert.equal(
+    (await ensureMatchViaApi(ensureRequest, tokenProvider)).created,
+    true,
+  );
+  assert.deepEqual(
+    calls.map(({ input }) => input),
+    [
+      "https://api.mons.link/invites/create",
+      "https://api.mons.link/invites/join",
+      "https://api.mons.link/rematches/propose",
+      "https://api.mons.link/rematches/end",
+      "https://api.mons.link/matches/ensure",
+    ],
+  );
+  assert.deepEqual(
+    calls.map(({ init }) => JSON.parse(init.body)),
+    [createRequest, joinRequest, proposeRequest, endRequest, ensureRequest],
+  );
+  for (const [validator, value] of [
+    [isCreateInviteRequest, createRequest],
+    [isJoinInviteRequest, joinRequest],
+    [isProposeRematchRequest, proposeRequest],
+    [isEndRematchRequest, endRequest],
+    [isEnsureMatchRequest, ensureRequest],
+    [
+      isCreateInviteResponse,
+      {
+        ok: true,
+        inviteId: "abcdefghijk",
+        hostId: "host",
+        matchId: "abcdefghijk",
+      },
+    ],
+    [
+      isJoinInviteResponse,
+      {
+        ok: true,
+        inviteId: "abcdefghijk",
+        guestId: "guest",
+        joined: true,
+        matchId: "abcdefghijk",
+      },
+    ],
+    [
+      isProposeRematchResponse,
+      {
+        ok: true,
+        inviteId: "abcdefghijk",
+        actorUid: "host",
+        matchId: "abcdefghijk1",
+        rematches: "1",
+        match,
+      },
+    ],
+    [
+      isEndRematchResponse,
+      {
+        ok: true,
+        inviteId: "abcdefghijk",
+        actorUid: "host",
+        rematches: "x",
+      },
+    ],
+    [
+      isEnsureMatchResponse,
+      {
+        ok: true,
+        inviteId: "abcdefghijk",
+        actorUid: "guest",
+        matchId: "abcdefghijk1",
+        created: true,
+        match,
+      },
+    ],
+  ]) {
+    assert.equal(validator(value), true);
+  }
+  assert.equal(isCreateInviteRequest({ ...createRequest, extra: true }), false);
+  assert.equal(isCreateInviteRequest({ ...createRequest, aura: null }), false);
+  assert.equal(isJoinInviteRequest({ ...joinRequest, aura: null }), false);
+  assert.equal(
+    isProposeRematchRequest({ ...proposeRequest, aura: null }),
+    false,
+  );
+  assert.equal(isEnsureMatchRequest({ ...ensureRequest, aura: null }), false);
+});
+
+test("accepts the largest valid ensured match response", async () => {
+  const match = {
+    version: 2,
+    color: "white",
+    emojiId: 1,
+    aura: "",
+    gameVariant: "Classic",
+    fen: "\u0000".repeat(MAX_MATCH_FEN_BYTES),
+    status: "\u0000".repeat(MAX_GAME_SESSION_STATUS_BYTES),
+    flatMovesString: "\u0000".repeat(MAX_MATCH_HISTORY_BYTES),
+    timer: "\u0000".repeat(MAX_GAME_SESSION_TIMER_BYTES),
+  };
+  const response = {
+    ok: true,
+    inviteId: "abcdefghijk",
+    actorUid: "host",
+    matchId: "abcdefghijk1",
+    created: true,
+    match,
+  };
+  const responseBytes = new TextEncoder().encode(JSON.stringify(response));
+  assert.ok(responseBytes.byteLength > 128 * 1024);
+  assert.ok(responseBytes.byteLength < MAX_GAME_SESSION_RESPONSE_BYTES);
+  assert.equal(
+    isEnsureMatchResponse({
+      ...response,
+      match: {
+        ...match,
+        status: "s".repeat(MAX_GAME_SESSION_STATUS_BYTES + 1),
+      },
+    }),
+    false,
+  );
+  globalThis.fetch = async () => jsonResponse(response);
+  assert.equal(
+    (
+      await ensureMatchViaApi(
+        {
+          operationId: "00000000-0000-4000-8000-000000000005",
+          inviteId: "abcdefghijk",
+          matchId: "abcdefghijk1",
+          emojiId: 1,
+          aura: "",
+        },
+        async () => "firebase-token",
+      )
+    ).match.flatMovesString.length,
+    MAX_MATCH_HISTORY_BYTES,
+  );
+});
+
+test("retries busy and ambiguous failures with the same operation ID", async () => {
+  const bodies = [];
+  let calls = 0;
+  globalThis.fetch = async (_input, init) => {
+    calls += 1;
+    bodies.push(JSON.parse(init.body));
+    return calls === 1
+      ? jsonResponse({ error: "aborted", message: "invite-busy" }, 409)
+      : calls === 2
+        ? jsonResponse(
+            { error: "unavailable", message: "gameplay-service-unavailable" },
+            503,
+          )
+        : jsonResponse({
+            ok: true,
+            inviteId: "abcdefghijk",
+            hostId: "host",
+            matchId: "abcdefghijk",
+          });
+  };
+  const request = {
+    operationId: "00000000-0000-4000-8000-000000000001",
+    inviteId: "abcdefghijk",
+    emojiId: 7,
+    aura: "rainbow",
+  };
+  await createInviteViaApi(request, async () => "firebase-token");
+  assert.equal(calls, 3);
+  assert.deepEqual(bodies, [request, request, request]);
+});
+
+test("bounds structural retries to one request deadline", async (t) => {
+  let calls = 0;
+  let nowCalls = 0;
+  t.mock.method(Date, "now", () => (nowCalls++ < 2 ? 0 : 30_000));
+  globalThis.fetch = async () => {
+    calls += 1;
+    return jsonResponse(
+      { error: "unavailable", message: "gameplay-service-unavailable" },
+      503,
+    );
+  };
+  await assert.rejects(
+    createInviteViaApi(
+      {
+        operationId: "00000000-0000-4000-8000-000000000001",
+        inviteId: "abcdefghijk",
+        emojiId: 7,
+        aura: "rainbow",
+      },
+      async () => "firebase-token",
+    ),
+    (error) =>
+      error instanceof GameplayApiError &&
+      error.message === "Gameplay request timed out.",
+  );
+  assert.equal(calls, 1);
+});
+
+test("stops a structural retry after the authenticated user changes", async () => {
+  let fetches = 0;
+  const firstUser = {
+    uid: "first-user",
+    getIdToken: async () => "first-token",
+  };
+  const secondUser = {
+    uid: "second-user",
+    getIdToken: async () => "second-token",
+  };
+  let currentUser = firstUser;
+  const tokenProvider = createUserBoundAuthTokenProvider(
+    firstUser,
+    () => currentUser,
+  );
+  globalThis.fetch = async () => {
+    fetches += 1;
+    currentUser = secondUser;
+    return jsonResponse({ error: "aborted", message: "invite-busy" }, 409);
+  };
+  await assert.rejects(
+    createInviteViaApi(
+      {
+        operationId: "00000000-0000-4000-8000-000000000001",
+        inviteId: "abcdefghijk",
+        emojiId: 7,
+        aura: "rainbow",
+      },
+      tokenProvider,
+    ),
+    /authentication-changed/,
+  );
+  assert.equal(fetches, 1);
+});
+
+test("does not send a structural mutation after authentication changes", async () => {
+  let resolveToken;
+  const token = new Promise((resolve) => {
+    resolveToken = resolve;
+  });
+  const firstUser = {
+    uid: "first-user",
+    getIdToken: () => token,
+  };
+  const secondUser = {
+    uid: "second-user",
+    getIdToken: async () => "second-token",
+  };
+  let currentUser = firstUser;
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches += 1;
+    return jsonResponse({
+      ok: true,
+      inviteId: "abcdefghijk",
+      hostId: firstUser.uid,
+      matchId: "abcdefghijk",
+    });
+  };
+  const request = createInviteViaApi(
+    {
+      operationId: "00000000-0000-4000-8000-000000000001",
+      inviteId: "abcdefghijk",
+      emojiId: 7,
+      aura: "rainbow",
+    },
+    createUserBoundAuthTokenProvider(firstUser, () => currentUser),
+  );
+  resolveToken("first-token");
+  queueMicrotask(() => {
+    currentUser = secondUser;
+  });
+  await assert.rejects(request, /authentication-changed/);
+  assert.equal(fetches, 0);
+});
+
+test("does not return a structural mutation after authentication changes", async () => {
+  let resolveResponse;
+  const response = new Promise((resolve) => {
+    resolveResponse = resolve;
+  });
+  let requestStarted;
+  const started = new Promise((resolve) => {
+    requestStarted = resolve;
+  });
+  const firstUser = {
+    uid: "first-user",
+    getIdToken: async () => "first-token",
+  };
+  const secondUser = {
+    uid: "second-user",
+    getIdToken: async () => "second-token",
+  };
+  let currentUser = firstUser;
+  globalThis.fetch = async () => {
+    requestStarted();
+    return response;
+  };
+  const request = createInviteViaApi(
+    {
+      operationId: "00000000-0000-4000-8000-000000000001",
+      inviteId: "abcdefghijk",
+      emojiId: 7,
+      aura: "rainbow",
+    },
+    createUserBoundAuthTokenProvider(firstUser, () => currentUser),
+  );
+  await started;
+  currentUser = secondUser;
+  resolveResponse(
+    jsonResponse({
+      ok: true,
+      inviteId: "abcdefghijk",
+      hostId: firstUser.uid,
+      matchId: "abcdefghijk",
+    }),
+  );
+  await assert.rejects(request, /authentication-changed/);
 });
 
 test("sends the exact rating mutation with strict contracts", async () => {

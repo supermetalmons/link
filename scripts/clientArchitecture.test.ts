@@ -326,3 +326,54 @@ test("client mixed graph includes no-substitution template imports", () => {
     ).includes("../assets/monsSprites"),
   );
 });
+
+test("structural game-session mutations stay behind the gameplay API", () => {
+  const connectionSource = readFileSync(
+    resolve(sourceRoot, "connection/connection.ts"),
+    "utf8",
+  );
+  for (const api of [
+    "createInviteViaApi",
+    "joinInviteViaApi",
+    "proposeRematchViaApi",
+    "endRematchViaApi",
+    "ensureMatchViaApi",
+  ]) {
+    assert.match(connectionSource, new RegExp(`\\b${api}\\b`));
+  }
+  assert.doesNotMatch(connectionSource, /await update\(ref\(this\.db\)/);
+  assert.doesNotMatch(connectionSource, /createGuestMatchFromHost/);
+  assert.doesNotMatch(connectionSource, /runTransaction\(\s*guestIdRef/);
+
+  const connectSource = connectionSource.slice(
+    connectionSource.indexOf("public connectToGame"),
+    connectionSource.indexOf(
+      "public tryNavigateWatchOnlyToLatestApprovedMatch",
+    ),
+  );
+  assert.ok(
+    connectSource.indexOf("fetchInviteWithPendingCreation") <
+      connectSource.indexOf("joinInviteViaApi"),
+  );
+  assert.match(connectSource, /getUserBoundAuthTokenProvider\(uid\)/);
+
+  const rematchSource = connectionSource.slice(
+    connectionSource.indexOf("public sendRematchProposal"),
+    connectionSource.indexOf("public rematchSeriesEndIsIndicated"),
+  );
+  assert.ok(
+    rematchSource.indexOf("proposeRematchViaApi") <
+      rematchSource.indexOf("stopObservingAllMatches"),
+  );
+  assert.match(
+    rematchSource,
+    /getUserBoundAuthTokenProvider\(\s*writableContext\.loginUid,?\s*\)/,
+  );
+  assert.match(rematchSource, /pendingRematchProposal/);
+
+  const createInviteSource = connectionSource.slice(
+    connectionSource.indexOf("public async createInvite"),
+    connectionSource.indexOf("private observeRematchOrEndMatchIndicators"),
+  );
+  assert.match(createInviteSource, /getUserBoundAuthTokenProvider\(uid\)/);
+});

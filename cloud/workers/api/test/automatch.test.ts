@@ -37,6 +37,7 @@ const profile: GameplayProfile = {
 function repository(
   overrides: Partial<GameplayRepository> = {},
 ): GameplayRepository {
+  const transactionValues = new Map<string, unknown>();
   return {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
@@ -53,7 +54,26 @@ function repository(
     getMiningSnapshot: async () => null,
     getRtdbPath: async () => null,
     patchRtdbRoot: async () => undefined,
-    transactRtdbPath: async () => ({ committed: false, value: null }),
+    transactRtdbPath: async (path, updater) => {
+      const decision = updater(transactionValues.get(path) ?? null) as {
+        commit?: boolean;
+        decision?: string;
+        value?: unknown;
+      };
+      if (decision.commit === false) {
+        return {
+          committed: false,
+          decision: decision.decision,
+          value: transactionValues.get(path) ?? null,
+        };
+      }
+      transactionValues.set(path, decision.value);
+      return {
+        committed: true,
+        decision: decision.decision,
+        value: decision.value,
+      };
+    },
     ...overrides,
   };
 }
@@ -152,6 +172,7 @@ test("creates a pending automatch with profile metadata and exact roots", async 
       schemaVersion: 1,
       status: "pending",
       requestId: "request-1",
+      reason: "automatch-queue",
       sourceUpdatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
       lastQueuedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
     },
@@ -267,6 +288,7 @@ test("automatch queue failures preserve the committed response and outboxes", as
       schemaVersion: 1,
       status: "pending",
       requestId: "request-1",
+      reason: "automatch-queue",
       sourceUpdatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
       lastQueuedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
     },
@@ -369,9 +391,15 @@ test("matches a different v2 candidate and verifies the persisted guest", async 
             },
           };
         }
+        if (path === "automatch/auto_existing") {
+          return {
+            uid: "host-uid",
+            profileId: "host-profile",
+          };
+        }
         if (path === "invites/auto_existing/guestId") {
           guestReads++;
-          return "guest-uid";
+          return guestReads === 1 ? null : "guest-uid";
         }
         assert.fail(`unexpected path ${path}`);
       },
@@ -392,7 +420,7 @@ test("matches a different v2 candidate and verifies the persisted guest", async 
     mode: "matched",
     matchedImmediately: true,
   });
-  assert.equal(guestReads, 1);
+  assert.equal(guestReads, 2);
   assert.deepEqual(profileProjectionTasks, [
     {
       kind: "automatch-profile-game-projection",
@@ -444,6 +472,7 @@ test("matches a different v2 candidate and verifies the persisted guest", async 
       schemaVersion: 1,
       status: "pending",
       requestId: "request-1",
+      reason: "automatch-queue",
       sourceUpdatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
       lastQueuedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
     },
@@ -452,24 +481,31 @@ test("matches a different v2 candidate and verifies the persisted guest", async 
 
 test("keeps legacy matches free of Telegram v2 updates", async () => {
   let updates: Record<string, unknown> = {};
+  let committed = false;
   const profileProjectionTasks: unknown[] = [];
   const result = await startAutomatch(
     identity,
     request(),
     repository({
-      getRtdbPath: async (path) =>
-        path === "automatch"
-          ? {
-              auto_legacy: {
-                uid: "host-uid",
-                hostColor: "white",
-                password: "password",
-                gameVariant: "Classic",
-              },
-            }
-          : "guest-uid",
+      getRtdbPath: async (path) => {
+        if (path === "automatch") {
+          return {
+            auto_legacy: {
+              uid: "host-uid",
+              hostColor: "white",
+              password: "password",
+              gameVariant: "Classic",
+            },
+          };
+        }
+        if (path === "automatch/auto_legacy") {
+          return { uid: "host-uid" };
+        }
+        return committed ? "guest-uid" : null;
+      },
       patchRtdbRoot: async (value) => {
         updates = value;
+        committed = true;
       },
     }),
     {
@@ -492,6 +528,7 @@ test("keeps legacy matches free of Telegram v2 updates", async () => {
       schemaVersion: 1,
       status: "pending",
       requestId: "legacy-request",
+      reason: "automatch-queue",
       sourceUpdatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
       lastQueuedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
     },
@@ -531,6 +568,9 @@ test("bounds failed guest verification to four total attempts", async () => {
             },
           };
         }
+        if (path === "automatch/auto_race") {
+          return { uid: "host-uid" };
+        }
         return "other-guest";
       },
       patchRtdbRoot: async (updates) => {
@@ -540,28 +580,35 @@ test("bounds failed guest verification to four total attempts", async () => {
   );
   assert.deepEqual(result, { ok: false });
   assert.equal(queueReads, 4);
-  assert.equal(writes.length, 4);
+  assert.equal(writes.length, 0);
 });
 
 test("reconciles a committed match after an ambiguous patch failure", async () => {
   let writes = 0;
+  let committed = false;
   const result = await startAutomatch(
     identity,
     request(),
     repository({
-      getRtdbPath: async (path) =>
-        path === "automatch"
-          ? {
-              auto_committed: {
-                uid: "host-uid",
-                hostColor: "white",
-                password: "password",
-                gameVariant: "Classic",
-              },
-            }
-          : "guest-uid",
+      getRtdbPath: async (path) => {
+        if (path === "automatch") {
+          return {
+            auto_committed: {
+              uid: "host-uid",
+              hostColor: "white",
+              password: "password",
+              gameVariant: "Classic",
+            },
+          };
+        }
+        if (path === "automatch/auto_committed") {
+          return { uid: "host-uid" };
+        }
+        return committed ? "guest-uid" : null;
+      },
       patchRtdbRoot: async () => {
         writes++;
+        committed = true;
         throw new Error("response-lost-after-commit");
       },
     }),
@@ -595,6 +642,9 @@ test("does not retry an unconfirmed patch failure", async () => {
                   gameVariant: "Classic",
                 },
               };
+            }
+            if (path === "automatch/auto_unconfirmed") {
+              return { uid: "host-uid" };
             }
             return null;
           },

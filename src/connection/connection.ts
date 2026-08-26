@@ -14,7 +14,6 @@ import {
   onValue,
   off,
   get,
-  update,
   runTransaction,
 } from "firebase/database";
 import {
@@ -76,12 +75,6 @@ import {
   ProfileEventPrizes,
 } from "./connectionModels";
 import { resolvePlayerProfile } from "./playerProfileLookup";
-import {
-  buildDeterministicGameSeed,
-  buildGameSeedForStoredVariant,
-  buildRandomGameSeed,
-  getStoredGameVariantForPersistence,
-} from "../game/gameVariants";
 import { storage } from "../utils/storage";
 import { generateNewInviteId } from "../utils/misc";
 import {
@@ -110,10 +103,14 @@ import {
   cancelAutomatchViaApi,
   cancelWagerProposalViaApi,
   claimMatchVictoryByTimerViaApi,
+  createInviteViaApi,
   createEventViaApi,
   declineWagerProposalViaApi,
   disqualifyEventMatchWinnersViaApi,
+  endRematchViaApi,
+  ensureMatchViaApi,
   joinEventViaApi,
+  joinInviteViaApi,
   removeEventParticipantViaApi,
   removeNavigationGameViaApi,
   resolveWagerOutcomeViaApi,
@@ -124,6 +121,7 @@ import {
   toggleEventPrizeSelectionViaApi,
   updateRatingsViaApi,
   postponeEventStartViaApi,
+  proposeRematchViaApi,
 } from "../services/gameplayApi";
 import { compareNavigationItems as compareNavigationItemsByDisplayOrder } from "../services/navigationItemOrdering";
 import { resetNftCache } from "../services/nftCache";
@@ -139,11 +137,6 @@ import {
   type MineRockResponse,
 } from "@mons/shared/mining";
 import {
-  CONTROLLER_VERSION,
-  buildFreshMatchRecord,
-  type MatchSeedRecord,
-} from "@mons/shared/match-protocol";
-import {
   createInviteCandidatesFromMatchId,
   deriveLatestMatchId,
   parseInviteMatchIndex,
@@ -155,7 +148,7 @@ import {
   normalizeStrictAutomatchStateHint,
   type StartAutomatchResponse,
 } from "@mons/shared/navigation";
-import { isAutoInviteId, pickHostColor } from "@mons/shared/ids";
+import { isAutoInviteId } from "@mons/shared/ids";
 import type {
   EventCreateDateTimePayload,
   EventScheduleTimezone as SharedEventScheduleTimezone,
@@ -234,53 +227,6 @@ const normalizeMiningData = (source: any): PlayerMiningData =>
         : undefined,
   });
 
-const buildFreshMatch = ({
-  color,
-  emojiId,
-  aura,
-  seed,
-}: {
-  color: string;
-  emojiId: number;
-  aura?: string;
-  seed: MatchSeedRecord;
-}): Match => buildFreshMatchRecord({ color, emojiId, aura, seed });
-
-const getSeedFromPersistedMatch = (
-  match: Match | null | undefined,
-): MatchSeedRecord | null => {
-  if (!match || typeof match.fen !== "string" || match.fen === "") {
-    return null;
-  }
-  return {
-    gameVariant: getStoredGameVariantForPersistence(match.gameVariant),
-    fen: match.fen,
-  };
-};
-
-const buildMirroredMatchFromHost = ({
-  color,
-  emojiId,
-  aura,
-  hostMatch,
-}: {
-  color: string;
-  emojiId: number;
-  aura?: string;
-  hostMatch: Match;
-}): Match => ({
-  ...buildFreshMatch({
-    color,
-    emojiId,
-    aura,
-    seed:
-      getSeedFromPersistedMatch(hostMatch) ??
-      buildGameSeedForStoredVariant(hostMatch.gameVariant),
-  }),
-  status: hostMatch.status ?? "",
-  flatMovesString: hostMatch.flatMovesString ?? "",
-  timer: hostMatch.timer ?? "",
-});
 const LEADERBOARD_ENTRY_LIMIT = 99;
 const wagerDebugLogsEnabled = import.meta.env.DEV;
 const EVENT_SYNC_COOLDOWN_ACTIVE_MS = 700;
@@ -430,6 +376,11 @@ class Connection {
   private pendingInviteCreation: {
     inviteId: string;
     promise: Promise<boolean>;
+  } | null = null;
+  private pendingRematchProposal: {
+    contextId: number;
+    inviteId: string;
+    operationId: string;
   } | null = null;
   private inFlightEventSyncById = new Map<string, Promise<EventSyncResponse>>();
   private eventSyncParticipantCacheById = new Map<
@@ -1170,6 +1121,7 @@ class Connection {
     this.detachFromMatchSession();
     this.detachFromProfileSession();
     this.pendingInviteCreation = null;
+    this.pendingRematchProposal = null;
     this.loginUid = null;
     this.setSameProfilePlayerUid(null);
     this.cleanupWagerObserver();
@@ -1186,6 +1138,7 @@ class Connection {
   }
 
   public detachFromMatchSession(): void {
+    this.pendingRematchProposal = null;
     this.bumpSessionEpoch();
     this.beginConnectAttempt();
     this.clearActiveContext("detach-match-session");
@@ -1366,11 +1319,13 @@ class Connection {
     return user.getIdToken(forceRefresh);
   };
 
-  private getUserBoundAuthTokenProvider(): AuthTokenProvider & {
+  private getUserBoundAuthTokenProvider(
+    expectedUid?: string,
+  ): AuthTokenProvider & {
     readonly assertCurrentUser: () => void;
   } {
     const user = this.auth.currentUser;
-    if (!user) {
+    if (!user || (expectedUid !== undefined && user.uid !== expectedUid)) {
       throw new Error("Failed to authenticate user");
     }
     return createUserBoundAuthTokenProvider(user, () => this.auth.currentUser);
@@ -1723,20 +1678,41 @@ class Connection {
     ) {
       return;
     }
-    const endingAsHost = this.latestInvite.hostId === writableContext.actorUid;
-    const currentRematchesString = endingAsHost
-      ? this.latestInvite.hostRematches
-      : this.latestInvite.guestRematches;
-    const updatedRematchesString = currentRematchesString
-      ? currentRematchesString + "x"
-      : "x";
-    set(
-      ref(
-        this.db,
-        `invites/${writableContext.inviteId}/${endingAsHost ? "hostRematches" : "guestRematches"}`,
-      ),
-      updatedRematchesString,
+    const sessionGuard = this.createMatchContextGuard(
+      writableContext.inviteId,
+      writableContext.matchId,
     );
+    let tokenProvider: AuthTokenProvider & {
+      readonly assertCurrentUser: () => void;
+    };
+    try {
+      tokenProvider = this.getUserBoundAuthTokenProvider(
+        writableContext.loginUid,
+      );
+    } catch {
+      return;
+    }
+    void endRematchViaApi(
+      {
+        operationId: crypto.randomUUID(),
+        inviteId: writableContext.inviteId,
+      },
+      tokenProvider,
+    )
+      .then((response) => {
+        tokenProvider.assertCurrentUser();
+        if (!sessionGuard() || !this.latestInvite) {
+          return;
+        }
+        if (this.latestInvite.hostId === response.actorUid) {
+          this.latestInvite.hostRematches = response.rematches;
+        } else {
+          this.latestInvite.guestRematches = response.rematches;
+        }
+      })
+      .catch((error) => {
+        console.error("Error ending rematch series:", error);
+      });
   }
 
   public sendRematchProposal(): void {
@@ -1744,13 +1720,23 @@ class Connection {
       undefined,
       "sendRematchProposal",
     );
-    if (!writableContext) {
+    if (!writableContext || this.pendingRematchProposal) {
       return;
     }
     const sessionGuard = this.createMatchContextGuard(
       writableContext.inviteId,
       writableContext.matchId,
     );
+    let tokenProvider: AuthTokenProvider & {
+      readonly assertCurrentUser: () => void;
+    };
+    try {
+      tokenProvider = this.getUserBoundAuthTokenProvider(
+        writableContext.loginUid,
+      );
+    } catch {
+      return;
+    }
     const newRematchProposalIndex =
       this.getRematchIndexAvailableForNewProposal();
     if (!newRematchProposalIndex || !this.latestInvite) {
@@ -1762,76 +1748,42 @@ class Connection {
       ? this.getCachedHistoricalMatchPair(previousMatchId)
       : null;
 
-    this.stopObservingAllMatches();
-    this.cleanupRematchObservers();
-    this.cleanupInviteReactionObserver();
-    this.cleanupWagerObserver();
-
-    const proposingAsHost =
-      this.latestInvite.hostId === writableContext.actorUid;
-    const emojiId = getPlayersEmojiId();
-    const proposalIndexIsEven = parseInt(newRematchProposalIndex, 10) % 2 === 0;
-    const initialGuestColor =
-      this.latestInvite.hostColor === "white" ? "black" : "white";
-    const newColor = proposalIndexIsEven
-      ? proposingAsHost
-        ? this.latestInvite.hostColor
-        : initialGuestColor
-      : proposingAsHost
-        ? initialGuestColor
-        : this.latestInvite.hostColor;
-    const currentHostRematches = this.latestInvite.hostRematches;
-    const currentGuestRematches = this.latestInvite.guestRematches;
     const inviteId = writableContext.inviteId;
-    const nextMatchId = inviteId + newRematchProposalIndex;
-    const opponentId = this.getOpponentId(writableContext.actorUid) || null;
+    const operationId = crypto.randomUUID();
+    this.pendingRematchProposal = {
+      contextId: writableContext.contextId,
+      inviteId,
+      operationId,
+    };
 
     void (async () => {
-      const nextMatchSeed = await this.resolveRematchSeed(
-        nextMatchId,
-        opponentId,
+      const response = await proposeRematchViaApi(
+        {
+          operationId,
+          inviteId,
+          emojiId: getPlayersEmojiId(),
+          aura: storage.getPlayerEmojiAura(""),
+        },
+        tokenProvider,
       );
+      if (this.pendingRematchProposal?.operationId === operationId) {
+        this.pendingRematchProposal = null;
+      }
+      tokenProvider.assertCurrentUser();
       if (!sessionGuard()) {
         return;
       }
-
-      const nextMatch = buildFreshMatch({
-        color: newColor,
-        emojiId,
-        aura: storage.getPlayerEmojiAura(""),
-        seed: nextMatchSeed,
-      });
-
-      let newRematchesProposalsString = "";
-      const updates: { [key: string]: any } = {};
-      updates[`players/${writableContext.actorUid}/matches/${nextMatchId}`] =
-        nextMatch;
-
-      if (proposingAsHost) {
-        newRematchesProposalsString = currentHostRematches
-          ? currentHostRematches + ";" + newRematchProposalIndex
-          : newRematchProposalIndex;
-        updates[`invites/${inviteId}/hostRematches`] =
-          newRematchesProposalsString;
-      } else {
-        newRematchesProposalsString = currentGuestRematches
-          ? currentGuestRematches + ";" + newRematchProposalIndex
-          : newRematchProposalIndex;
-        updates[`invites/${inviteId}/guestRematches`] =
-          newRematchesProposalsString;
-      }
-
-      await update(ref(this.db), updates);
-      if (!sessionGuard()) {
-        return;
-      }
-
+      this.stopObservingAllMatches();
+      this.cleanupRematchObservers();
+      this.cleanupInviteReactionObserver();
+      this.cleanupWagerObserver();
+      const nextMatch = response.match as Match;
       this.myMatch = nextMatch;
       const rematchContext = this.buildRuntimeContext(
         inviteId,
-        nextMatchId,
+        response.matchId,
         writableContext.loginUid,
-        writableContext.actorUid,
+        response.actorUid,
         writableContext.role,
         true,
         this.sessionEpoch,
@@ -1842,10 +1794,10 @@ class Connection {
       this.observeRematchOrEndMatchIndicators(rematchContext);
       this.observeWagers(rematchContext);
       if (this.latestInvite) {
-        if (proposingAsHost) {
-          this.latestInvite.hostRematches = newRematchesProposalsString;
+        if (this.latestInvite.hostId === response.actorUid) {
+          this.latestInvite.hostRematches = response.rematches;
         } else {
-          this.latestInvite.guestRematches = newRematchesProposalsString;
+          this.latestInvite.guestRematches = response.rematches;
         }
       }
       console.log("Successfully updated match and rematches");
@@ -1856,6 +1808,13 @@ class Connection {
         previousMatchPair,
       );
     })().catch((error) => {
+      if (this.pendingRematchProposal?.operationId === operationId) {
+        this.pendingRematchProposal = null;
+      }
+      if (!sessionGuard()) {
+        return;
+      }
+      this.maybeRefreshContextAfterRematchMetadata(writableContext);
       if (!sessionGuard()) {
         return;
       }
@@ -2225,9 +2184,10 @@ class Connection {
   public async automatch(): Promise<StartAutomatchResponse> {
     try {
       await this.ensureAuthenticated();
+      const tokenProvider = this.getUserBoundAuthTokenProvider();
       const emojiId = getPlayersEmojiId();
       const aura = storage.getPlayerEmojiAura("");
-      return startAutomatchViaApi({ emojiId, aura }, this.getAuthApiToken);
+      return startAutomatchViaApi({ emojiId, aura }, tokenProvider);
     } catch (error) {
       console.error("Error calling automatch:", error);
       throw error;
@@ -2237,7 +2197,7 @@ class Connection {
   public async cancelAutomatch(): Promise<any> {
     try {
       await this.ensureAuthenticated();
-      return cancelAutomatchViaApi(this.getAuthApiToken);
+      return cancelAutomatchViaApi(this.getUserBoundAuthTokenProvider());
     } catch (error) {
       console.error("Error canceling automatch:", error);
       throw error;
@@ -5078,6 +5038,12 @@ class Connection {
     if (!this.isContextActive(context.contextId, context.sessionEpoch)) {
       return;
     }
+    if (
+      this.pendingRematchProposal?.inviteId === context.inviteId &&
+      this.pendingRematchProposal.contextId === context.contextId
+    ) {
+      return;
+    }
     if (!context.canWrite || !context.actorUid) {
       return;
     }
@@ -5182,62 +5148,6 @@ class Connection {
     return { actorUid: null, role: "watch" };
   }
 
-  private async createGuestMatchFromHost(
-    hostId: string,
-    guestId: string,
-    matchId: string,
-    epoch: number,
-    connectAttemptId: number,
-  ): Promise<Match | null> {
-    const opponentsMatchSnapshot = await get(
-      ref(this.db, `players/${hostId}/matches/${matchId}`),
-    );
-    if (!this.isConnectAttemptActive(connectAttemptId, epoch)) {
-      return null;
-    }
-    const opponentsMatch = opponentsMatchSnapshot.val() as Match | null;
-    if (!opponentsMatch) {
-      return null;
-    }
-    const match = buildMirroredMatchFromHost({
-      color: this.oppositeColor(opponentsMatch.color) ?? "black",
-      emojiId: getPlayersEmojiId(),
-      aura: storage.getPlayerEmojiAura(""),
-      hostMatch: opponentsMatch,
-    });
-    await set(ref(this.db, `players/${guestId}/matches/${matchId}`), match);
-    if (!this.isConnectAttemptActive(connectAttemptId, epoch)) {
-      return null;
-    }
-    return match;
-  }
-
-  private async resolveRematchSeed(
-    nextMatchId: string,
-    opponentId: string | null,
-  ): Promise<MatchSeedRecord> {
-    if (opponentId) {
-      try {
-        const existingMatchSnapshot = await get(
-          ref(this.db, `players/${opponentId}/matches/${nextMatchId}`),
-        );
-        const existingSeed = getSeedFromPersistedMatch(
-          existingMatchSnapshot.val() as Match | null,
-        );
-        if (existingSeed) {
-          return existingSeed;
-        }
-      } catch (error) {
-        console.warn("Failed to load existing rematch seed", {
-          nextMatchId,
-          opponentId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-    return buildDeterministicGameSeed(`rematch:${nextMatchId}`);
-  }
-
   public connectToGame(uid: string, inviteId: string, autojoin: boolean): void {
     const isPendingLocalInviteCreation =
       this.pendingInviteCreation?.inviteId === inviteId;
@@ -5251,14 +5161,49 @@ class Connection {
     const connectAttemptId = this.connectAttemptId;
     const isConnectActive = () =>
       this.isConnectAttemptActive(connectAttemptId, connectEpoch);
+    let tokenProvider: AuthTokenProvider & {
+      readonly assertCurrentUser: () => void;
+    };
+    try {
+      tokenProvider = this.getUserBoundAuthTokenProvider(uid);
+    } catch {
+      return;
+    }
 
-    const resolveInvite = cachedInvite
-      ? Promise.resolve(cachedInvite)
-      : this.fetchInviteWithPendingCreation(
+    const resolveInvite = (async () => {
+      if (cachedInvite) {
+        return cachedInvite;
+      }
+      try {
+        return await this.fetchInviteWithPendingCreation(
           inviteId,
           connectEpoch,
           connectAttemptId,
         );
+      } catch (error) {
+        if (!autojoin || !isAutoInviteId(inviteId)) {
+          throw error;
+        }
+      }
+      await joinInviteViaApi(
+        {
+          operationId: crypto.randomUUID(),
+          inviteId,
+          emojiId: getPlayersEmojiId(),
+          aura: storage.getPlayerEmojiAura(""),
+        },
+        tokenProvider,
+      );
+      tokenProvider.assertCurrentUser();
+      if (!isConnectActive()) {
+        return null;
+      }
+      return this.fetchInviteWithPendingCreation(
+        inviteId,
+        connectEpoch,
+        connectAttemptId,
+      );
+    })();
 
     void resolveInvite
       .then(async (inviteData) => {
@@ -5294,36 +5239,31 @@ class Connection {
           }
         }
         if (shouldAutojoinAsGuest) {
-          const guestIdRef = ref(this.db, `invites/${inviteId}/guestId`);
           try {
-            const guestJoinResult = await runTransaction(
-              guestIdRef,
-              (currentGuestId) => {
-                if (
-                  typeof currentGuestId === "string" &&
-                  currentGuestId !== ""
-                ) {
-                  return;
-                }
-                return uid;
+            const joinResult = await joinInviteViaApi(
+              {
+                operationId: crypto.randomUUID(),
+                inviteId,
+                emojiId: getPlayersEmojiId(),
+                aura: storage.getPlayerEmojiAura(""),
               },
-              { applyLocally: false },
+              tokenProvider,
             );
+            tokenProvider.assertCurrentUser();
             if (!isConnectActive()) {
               return;
             }
-            const resolvedGuestId = guestJoinResult.snapshot.val();
-            if (typeof resolvedGuestId === "string" && resolvedGuestId !== "") {
-              workingInvite.guestId = resolvedGuestId;
-            } else if (guestJoinResult.committed) {
-              workingInvite.guestId = uid;
+            if (joinResult.guestId) {
+              workingInvite.guestId = joinResult.guestId;
             }
           } catch {
             if (!isConnectActive()) {
               return;
             }
             try {
-              const guestIdSnapshot = await get(guestIdRef);
+              const guestIdSnapshot = await get(
+                ref(this.db, `invites/${inviteId}/guestId`),
+              );
               if (!isConnectActive()) {
                 return;
               }
@@ -5363,19 +5303,23 @@ class Connection {
             return;
           }
           myMatch = myMatchSnapshot.val() as Match | null;
-          if (
-            !myMatch &&
-            role === "guest" &&
-            workingInvite.hostId &&
-            workingInvite.guestId === actorUid
-          ) {
-            myMatch = await this.createGuestMatchFromHost(
-              workingInvite.hostId,
-              actorUid,
-              matchId,
-              connectEpoch,
-              connectAttemptId,
-            );
+          if (!myMatch) {
+            try {
+              const ensured = await ensureMatchViaApi(
+                {
+                  operationId: crypto.randomUUID(),
+                  inviteId,
+                  matchId,
+                  emojiId: getPlayersEmojiId(),
+                  aura: storage.getPlayerEmojiAura(""),
+                },
+                tokenProvider,
+              );
+              tokenProvider.assertCurrentUser();
+              myMatch = ensured.match as Match;
+            } catch (error) {
+              console.error("Failed to ensure participant match", error);
+            }
           }
           if (!isConnectActive()) {
             return;
@@ -5515,30 +5459,21 @@ class Connection {
   }
 
   public async createInvite(uid: string, inviteId: string): Promise<boolean> {
-    const hostColor = pickHostColor();
-    const emojiId = getPlayersEmojiId();
-    const matchSeed = buildRandomGameSeed();
-
-    const invite: Invite = {
-      version: CONTROLLER_VERSION,
-      hostId: uid,
-      hostColor,
-      guestId: null,
-      wagers: {},
-    };
-
-    const match = buildFreshMatch({
-      color: hostColor,
-      emojiId,
-      aura: storage.getPlayerEmojiAura(""),
-      seed: matchSeed,
-    });
-
-    const updates: { [key: string]: any } = {};
-    updates[`players/${uid}/matches/${inviteId}`] = match;
-    updates[`invites/${inviteId}`] = invite;
     try {
-      await update(ref(this.db), updates);
+      const tokenProvider = this.getUserBoundAuthTokenProvider(uid);
+      const response = await createInviteViaApi(
+        {
+          operationId: crypto.randomUUID(),
+          inviteId,
+          emojiId: getPlayersEmojiId(),
+          aura: storage.getPlayerEmojiAura(""),
+        },
+        tokenProvider,
+      );
+      tokenProvider.assertCurrentUser();
+      if (response.hostId !== uid || response.inviteId !== inviteId) {
+        throw new Error("invite-create-response-mismatch");
+      }
     } catch (error) {
       console.error("Error creating match and invite:", error);
       return false;

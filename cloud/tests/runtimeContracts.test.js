@@ -16,13 +16,7 @@ const httpExportNames = [];
 
 const taskQueueExportNames = [];
 
-const eventExportNames = [
-  "projectProfileGamesOnInviteCreated",
-  "projectProfileGamesOnInviteGuestIdChanged",
-  "projectProfileGamesOnInviteGuestRematchesChanged",
-  "projectProfileGamesOnInviteHostRematchesChanged",
-  "projectProfileGamesOnMatchCreated",
-];
+const eventExportNames = [];
 
 const expectedExportNames = [
   ...callableExportNames,
@@ -35,6 +29,7 @@ const expectedSharedExports = {
   "./auth": "./auth.js",
   "./event-prizes": "./event-prizes.js",
   "./events": "./events.js",
+  "./game-sessions": "./game-sessions.js",
   "./game-variants": "./game-variants.js",
   "./ids": "./ids.js",
   "./match-protocol": "./match-protocol.js",
@@ -101,40 +96,6 @@ Object.assign(expectedEndpointContracts, {
     concurrency: 1,
     secrets: ["EVENT_PRIZE_ADMIN_PRIVATE_KEY", "HELIUS_RPC_API_KEY"],
   }),
-  projectProfileGamesOnInviteCreated: eventContract({
-    eventType: "google.firebase.database.ref.v1.created",
-    pathPatterns: { ref: "invites/{inviteId}", instance: "*" },
-    retry: true,
-  }),
-  projectProfileGamesOnInviteGuestIdChanged: eventContract({
-    eventType: "google.firebase.database.ref.v1.written",
-    pathPatterns: { ref: "invites/{inviteId}/guestId", instance: "*" },
-    retry: true,
-  }),
-  projectProfileGamesOnInviteHostRematchesChanged: eventContract({
-    eventType: "google.firebase.database.ref.v1.written",
-    pathPatterns: {
-      ref: "invites/{inviteId}/hostRematches",
-      instance: "*",
-    },
-    retry: true,
-  }),
-  projectProfileGamesOnInviteGuestRematchesChanged: eventContract({
-    eventType: "google.firebase.database.ref.v1.written",
-    pathPatterns: {
-      ref: "invites/{inviteId}/guestRematches",
-      instance: "*",
-    },
-    retry: true,
-  }),
-  projectProfileGamesOnMatchCreated: eventContract({
-    eventType: "google.firebase.database.ref.v1.created",
-    pathPatterns: {
-      ref: "players/{loginUid}/matches/{matchId}",
-      instance: "*",
-    },
-    retry: true,
-  }),
 });
 
 const normalizeEndpoint = (endpoint) => {
@@ -192,7 +153,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 6);
+  assert.equal(expectedExportNames.length, 1);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

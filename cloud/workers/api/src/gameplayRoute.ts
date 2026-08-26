@@ -1,4 +1,12 @@
 import {
+  isCreateInviteRequest,
+  isEndRematchRequest,
+  isEnsureMatchRequest,
+  isJoinInviteRequest,
+  isProposeRematchRequest,
+} from "@mons/shared/game-sessions";
+import { isAutoInviteId } from "@mons/shared/ids";
+import {
   inferAutomatchStateHint,
   isRemoveNavigationGameRequest,
   isStartAutomatchRequest,
@@ -92,16 +100,31 @@ import {
 import { buildAutomatchProfileGameProjectionOutboxUpdates } from "./profileGameProjectionOutbox.ts";
 import type { TelegramProjectionTask } from "./telegramProjectionTasks.ts";
 import type { ProfileGameProjectionTask } from "./profileGameProjectionTasks.ts";
+import {
+  createManualInvite,
+  endRematchSeries,
+  enforceGameSessionMutationRateLimit,
+  ensureParticipantMatch,
+  joinInvite,
+  proposeRematch,
+  withGameSessionMutationLease,
+  type GameSessionMutationDependencies,
+} from "./gameSessionMutations.ts";
 
 const MAX_NAVIGATION_DELETE_ATTEMPTS = 3;
 
 export const GAMEPLAY_PATHS = new Set([
   "/automatch/cancel",
   "/automatch/start",
+  "/invites/create",
+  "/invites/join",
+  "/matches/ensure",
   "/matches/timer/claim",
   "/matches/timer/start",
   "/navigation/games/remove",
   "/ratings/update",
+  "/rematches/end",
+  "/rematches/propose",
   "/wagers/proposals/accept",
   "/wagers/proposals/cancel",
   "/wagers/proposals/decline",
@@ -119,11 +142,15 @@ type QueuedAutomatchCandidate = {
 
 type QueuedAutomatch = {
   inviteId: string | null;
+  profileId?: string;
   telegramDeliveryVersion?: number | null;
+  timestamp?: number;
+  uid?: string;
 };
 
 export type GameplayRouteDependencies = {
   automatch?: AutomatchDependencies;
+  gameSession?: GameSessionMutationDependencies;
   logFailure?: (kind: string) => void;
   repository?: GameplayRepository;
   rating?: RatingUpdateDependencies;
@@ -275,11 +302,6 @@ export async function cancelAutomatch(
     return { ok: false };
   }
   const inviteId = queued.inviteId;
-  if (
-    normalizeString(await repository.getRtdbPath(`invites/${inviteId}/guestId`))
-  ) {
-    return { ok: false };
-  }
   const usesTelegramDeliveryV2 =
     queued.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION;
   const profileGameProjectionTask = createAutomatchProfileGameProjectionTask(
@@ -322,7 +344,34 @@ export async function cancelAutomatch(
       }),
     );
   }
-  await repository.patchRtdbRoot(canceledUpdates);
+  const canceled = await withGameSessionMutationLease(
+    inviteId,
+    profileGameProjectionTask.requestId,
+    repository,
+    async () => {
+      const [currentQueueValue, currentGuestId] = await Promise.all([
+        repository.getRtdbPath(`automatch/${inviteId}`),
+        repository.getRtdbPath(`invites/${inviteId}/guestId`),
+      ]);
+      const currentQueue = toRecord(currentQueueValue);
+      const queueIsCurrent =
+        currentQueue !== null &&
+        normalizeString(currentQueue.uid) === queued.uid &&
+        normalizeString(currentQueue.profileId) === queued.profileId &&
+        finiteTimestamp(currentQueue.timestamp) === queued.timestamp &&
+        (currentQueue.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION
+          ? TELEGRAM_AUTOMATCH_VERSION
+          : null) === queued.telegramDeliveryVersion;
+      if (normalizeString(currentGuestId) || !queueIsCurrent) {
+        return false;
+      }
+      await repository.patchRtdbRoot(canceledUpdates);
+      return true;
+    },
+  );
+  if (!canceled) {
+    return { ok: false };
+  }
   if (projectionTask) {
     await enqueueAutomatchProjection(projectionTask, dependencies);
   }
@@ -330,62 +379,7 @@ export async function cancelAutomatch(
     profileGameProjectionTask,
     dependencies,
   );
-  if (
-    !normalizeString(
-      await repository.getRtdbPath(`invites/${inviteId}/guestId`),
-    )
-  ) {
-    return { ok: true };
-  }
-  const matchedUpdates: Record<string, unknown> = {
-    [`invites/${inviteId}/automatchStateHint`]: "matched",
-    [`invites/${inviteId}/automatchCanceledAt`]: null,
-  };
-  const matchedProfileGameProjectionTask =
-    createAutomatchProfileGameProjectionTask(inviteId, dependencies);
-  const matchedProjectionTask = usesTelegramDeliveryV2
-    ? createAutomatchProjectionTask(
-        inviteId,
-        dependencies,
-        matchedProfileGameProjectionTask.requestId,
-      )
-    : null;
-  Object.assign(
-    matchedUpdates,
-    buildAutomatchProfileGameProjectionOutboxUpdates({
-      inviteId,
-      requestId: matchedProfileGameProjectionTask.requestId,
-      timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
-    }),
-  );
-  if (usesTelegramDeliveryV2) {
-    Object.assign(
-      matchedUpdates,
-      buildAutomatchTelegramLifecycleUpdates({
-        inviteId,
-        lifecycle: "matched",
-        timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
-        generation: firebaseRtdbIncrement(1),
-      }),
-    );
-    Object.assign(
-      matchedUpdates,
-      buildAutomatchTelegramProjectionOutboxUpdates({
-        inviteId,
-        requestId: matchedProjectionTask?.requestId || "",
-        timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
-      }),
-    );
-  }
-  await repository.patchRtdbRoot(matchedUpdates);
-  if (matchedProjectionTask) {
-    await enqueueAutomatchProjection(matchedProjectionTask, dependencies);
-  }
-  await enqueueAutomatchProfileGameProjection(
-    matchedProfileGameProjectionTask,
-    dependencies,
-  );
-  return { ok: false };
+  return { ok: true };
 }
 
 function skippedNavigationResponse(
@@ -496,6 +490,36 @@ async function readGameplayBody(
   }
   if (pathname === "/automatch/start") {
     if (!isStartAutomatchRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
+  }
+  if (pathname === "/invites/create") {
+    if (!isCreateInviteRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
+  }
+  if (pathname === "/invites/join") {
+    if (!isJoinInviteRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
+  }
+  if (pathname === "/matches/ensure") {
+    if (!isEnsureMatchRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
+  }
+  if (pathname === "/rematches/propose") {
+    if (!isProposeRematchRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
+  }
+  if (pathname === "/rematches/end") {
+    if (!isEndRematchRequest(body)) {
       throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
     }
     return body;
@@ -693,6 +717,12 @@ export async function handleGameplayRoute(
         dependencies.rating?.enqueueTelegramProjection ||
         defaultEnqueueTelegramProjection,
     };
+    const gameSessionDependencies: GameSessionMutationDependencies = {
+      ...dependencies.gameSession,
+      enqueueProfileGameProjection:
+        dependencies.gameSession?.enqueueProfileGameProjection ||
+        defaultEnqueueProfileGameProjection,
+    };
     let response;
     if (pathname === "/automatch/cancel") {
       response = await cancelAutomatch(
@@ -709,6 +739,84 @@ export async function handleGameplayRoute(
         body,
         repository,
         automatchDependencies,
+      );
+    } else if (pathname === "/invites/create") {
+      if (!isCreateInviteRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      await enforceGameSessionMutationRateLimit(
+        env.AUTH_RATE_LIMITER,
+        identity.uid,
+      );
+      response = await createManualInvite(
+        identity,
+        body,
+        repository,
+        gameSessionDependencies,
+      );
+    } else if (pathname === "/invites/join") {
+      if (!isJoinInviteRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      await enforceGameSessionMutationRateLimit(
+        env.AUTH_RATE_LIMITER,
+        identity.uid,
+      );
+      const joinResponse = await joinInvite(
+        identity,
+        body,
+        repository,
+        gameSessionDependencies,
+      );
+      response = joinResponse;
+      if (joinResponse.joined && isAutoInviteId(body.inviteId)) {
+        await defaultEnqueueTelegramProjection({
+          kind: "automatch-telegram-projection",
+          inviteId: body.inviteId,
+          requestId: body.operationId,
+        });
+      }
+    } else if (pathname === "/matches/ensure") {
+      if (!isEnsureMatchRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      await enforceGameSessionMutationRateLimit(
+        env.AUTH_RATE_LIMITER,
+        identity.uid,
+      );
+      response = await ensureParticipantMatch(
+        identity,
+        body,
+        repository,
+        gameSessionDependencies,
+      );
+    } else if (pathname === "/rematches/propose") {
+      if (!isProposeRematchRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      await enforceGameSessionMutationRateLimit(
+        env.AUTH_RATE_LIMITER,
+        identity.uid,
+      );
+      response = await proposeRematch(
+        identity,
+        body,
+        repository,
+        gameSessionDependencies,
+      );
+    } else if (pathname === "/rematches/end") {
+      if (!isEndRematchRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      await enforceGameSessionMutationRateLimit(
+        env.AUTH_RATE_LIMITER,
+        identity.uid,
+      );
+      response = await endRematchSeries(
+        identity,
+        body,
+        repository,
+        gameSessionDependencies,
       );
     } else if (pathname === "/matches/timer/start") {
       if (!isStartMatchTimerRequest(body)) {

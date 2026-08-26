@@ -244,7 +244,7 @@ export async function processAutomatchProfileGameProjection(
     if (!outbox || outbox.requestId !== task.requestId) {
       return "stale";
     }
-    await runtime.recomputeInviteProjection(task.inviteId, "automatch-queue", {
+    await runtime.recomputeInviteProjection(task.inviteId, outbox.reason, {
       eventTimestampMs: outbox.sourceUpdatedAtMs,
     });
     return (await settleAutomatchProfileGameProjectionOutbox(task, rtdb))
@@ -774,6 +774,10 @@ async function repairInvalidAutomatchSweepEntry(
           schemaVersion: PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
           status: "pending",
           requestId,
+          reason:
+            typeof record?.reason === "string" && record.reason.trim()
+              ? record.reason.trim()
+              : "automatch-queue",
           sourceUpdatedAtMs:
             typeof sourceUpdatedAtMs === "number" &&
             Number.isFinite(sourceUpdatedAtMs) &&

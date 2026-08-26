@@ -16,6 +16,7 @@ export const PROFILE_LINK_PROFILE_GAME_PROJECTION_LOCK_ROOT =
 
 export type AutomatchProfileGameProjectionOutbox = {
   lastQueuedAtMs: number;
+  reason: string;
   requestId: string;
   schemaVersion: number;
   sourceUpdatedAtMs: number;
@@ -83,6 +84,7 @@ export function getProfileLinkProfileGameProjectionLockPath(
 
 export function buildAutomatchProfileGameProjectionOutboxUpdates(input: {
   inviteId: string;
+  reason?: string;
   requestId: string;
   timestamp: unknown;
 }): Record<string, unknown> {
@@ -91,6 +93,10 @@ export function buildAutomatchProfileGameProjectionOutboxUpdates(input: {
       schemaVersion: PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
       status: "pending",
       requestId: input.requestId,
+      reason:
+        typeof input.reason === "string" && input.reason.trim()
+          ? input.reason.trim()
+          : "automatch-queue",
       sourceUpdatedAtMs: input.timestamp,
       lastQueuedAtMs: input.timestamp,
     },
@@ -172,6 +178,10 @@ export function parseAutomatchProfileGameProjectionOutbox(
   const record = toRecord(value);
   const sourceUpdatedAtMs = record?.sourceUpdatedAtMs;
   const lastQueuedAtMs = record?.lastQueuedAtMs;
+  const reason =
+    typeof record?.reason === "string" && record.reason.trim()
+      ? record.reason.trim()
+      : "automatch-queue";
   return record?.schemaVersion === PROFILE_GAME_PROJECTION_SCHEMA_VERSION &&
     record.status === "pending" &&
     typeof record.requestId === "string" &&
@@ -186,6 +196,7 @@ export function parseAutomatchProfileGameProjectionOutbox(
         schemaVersion: record.schemaVersion,
         status: record.status,
         requestId: record.requestId,
+        reason,
         sourceUpdatedAtMs: Math.floor(sourceUpdatedAtMs),
         lastQueuedAtMs: Math.floor(lastQueuedAtMs),
       }

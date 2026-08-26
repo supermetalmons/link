@@ -80,6 +80,27 @@ test("player reads expose gameplay state without exposing wager operations", () 
   assert.equal(players.$userId.mining._wagerOps, undefined);
 });
 
+test("structural gameplay writes are Worker-owned while live match updates remain", () => {
+  const invites = databaseRules.rules.invites.$inviteId;
+  const player = databaseRules.rules.players.$userId;
+  assert.equal(invites[".write"], undefined);
+  assert.equal(invites.guestId[".write"], undefined);
+  assert.equal(invites.hostRematches[".write"], undefined);
+  assert.equal(invites.guestRematches[".write"], undefined);
+  assert.match(invites.reactions.$playerId[".write"], /auth != null/);
+  assert.equal(player[".write"], undefined);
+  assert.match(player.matches.$matchId[".write"], /data\.exists\(\)/);
+  assert.match(player.matches.$matchId[".write"], /newData\.exists\(\)/);
+  assert.deepEqual(databaseRules.rules.gameplayMutationReceipts[".indexOn"], [
+    "completedAtMs",
+  ]);
+  assert.deepEqual(
+    databaseRules.rules.gameplayMutationReceiptExpirations[".indexOn"],
+    ["completedAtMs"],
+  );
+  assert.equal(databaseRules.rules.gameplayMutationLocks, undefined);
+});
+
 test("timer coordination roots are protected and fence live match writes", () => {
   assert.deepEqual(databaseRules.rules.matchTimerClaims, {
     ".read": false,

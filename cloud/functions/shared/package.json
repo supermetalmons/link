@@ -8,6 +8,7 @@
     "./event-prizes": "./event-prizes.js",
     "./events": "./events.js",
     "./game-variants": "./game-variants.js",
+    "./game-sessions": "./game-sessions.js",
     "./ids": "./ids.js",
     "./match-protocol": "./match-protocol.js",
     "./mining": "./mining.js",

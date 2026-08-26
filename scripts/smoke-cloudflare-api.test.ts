@@ -111,6 +111,11 @@ test("smokes public, unauthenticated, and internal routes", async () => {
     }
     if (
       [
+        "/invites/create",
+        "/invites/join",
+        "/matches/ensure",
+        "/rematches/propose",
+        "/rematches/end",
         "/events/create",
         "/events/start/postpone",
         "/events/matches/winners/disqualify",
@@ -140,7 +145,7 @@ test("smokes public, unauthenticated, and internal routes", async () => {
     },
   );
 
-  assert.equal(requests.length, 14);
+  assert.equal(requests.length, 19);
   assert.deepEqual(logs, ["[api-smoke] Passed https://api.mons.link"]);
 });
 

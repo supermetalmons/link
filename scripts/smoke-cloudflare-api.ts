@@ -233,6 +233,11 @@ async function smokeApi(
   }
 
   for (const path of [
+    "/invites/create",
+    "/invites/join",
+    "/matches/ensure",
+    "/rematches/propose",
+    "/rematches/end",
     "/events/create",
     "/events/start/postpone",
     "/events/matches/winners/disqualify",

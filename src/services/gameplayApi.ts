@@ -1,4 +1,22 @@
 import {
+  MAX_GAME_SESSION_RESPONSE_BYTES,
+  isCreateInviteResponse,
+  isEndRematchResponse,
+  isEnsureMatchResponse,
+  isJoinInviteResponse,
+  isProposeRematchResponse,
+  type CreateInviteRequest,
+  type CreateInviteResponse,
+  type EndRematchRequest,
+  type EndRematchResponse,
+  type EnsureMatchRequest,
+  type EnsureMatchResponse,
+  type JoinInviteRequest,
+  type JoinInviteResponse,
+  type ProposeRematchRequest,
+  type ProposeRematchResponse,
+} from "@mons/shared/game-sessions";
+import {
   isCancelAutomatchResponse,
   isRemoveNavigationGameResponse,
   isStartAutomatchResponse,
@@ -60,13 +78,13 @@ import {
   type SyncEventStateRequest,
   type SyncEventStateResponse,
 } from "@mons/shared/events";
-import type { AuthTokenProvider } from "./authApi";
+import { AuthApiError, type AuthTokenProvider } from "./authApi";
 
 const GAMEPLAY_API_ROOT = "https://api.mons.link";
 const GAMEPLAY_API_TIMEOUT_MS = 30_000;
 const RATING_API_TIMEOUT_MS = 60_000;
 const RATING_BUSY_RETRY_DELAY_MS = 31_000;
-const GAMEPLAY_API_MAX_RESPONSE_BYTES = 64 * 1024;
+const GAMEPLAY_API_MAX_RESPONSE_BYTES = MAX_GAME_SESSION_RESPONSE_BYTES;
 
 type RatingRetryOptions = {
   now?: () => number;
@@ -181,6 +199,7 @@ async function gameplayMutation<T>(
             "Gameplay request timed out.",
           );
         }
+        tokenProvider.assertCurrentUser?.();
         const response = await fetch(`${GAMEPLAY_API_ROOT}${path}`, {
           method: "POST",
           headers: {
@@ -206,10 +225,14 @@ async function gameplayMutation<T>(
             "Gameplay service is unavailable.",
           );
         }
+        tokenProvider.assertCurrentUser?.();
         return payload;
       } catch (error) {
         if (error instanceof GameplayApiError) {
           throw error;
+        }
+        if (error instanceof AuthApiError) {
+          throw new GameplayApiError(error.code, error.message, error.details);
         }
         throw new GameplayApiError(
           "unavailable",
@@ -228,14 +251,62 @@ async function gameplayMutation<T>(
   }
 }
 
+async function retryGameSessionMutation<T>(
+  path: string,
+  body: unknown,
+  tokenProvider: AuthTokenProvider,
+  validate: (value: unknown) => value is T,
+  retryUnavailable: boolean,
+): Promise<T> {
+  const deadlineAt = Date.now() + GAMEPLAY_API_TIMEOUT_MS;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      throw new GameplayApiError("unavailable", "Gameplay request timed out.");
+    }
+    try {
+      return await gameplayMutation(
+        path,
+        body,
+        tokenProvider,
+        validate,
+        remainingMs,
+      );
+    } catch (error) {
+      const busy =
+        error instanceof GameplayApiError &&
+        error.code === "aborted" &&
+        (error.message === "invite-busy" ||
+          error.message === "invite-lease-lost");
+      const unavailable =
+        retryUnavailable &&
+        error instanceof GameplayApiError &&
+        error.code === "unavailable";
+      if ((!busy && !unavailable) || attempt === 2) {
+        throw error;
+      }
+      const delayMs = 100 * (attempt + 1);
+      if (Date.now() + delayMs >= deadlineAt) {
+        throw new GameplayApiError(
+          "unavailable",
+          "Gameplay request timed out.",
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw new GameplayApiError("unavailable", "Gameplay service is unavailable.");
+}
+
 export function cancelAutomatchViaApi(
   tokenProvider: AuthTokenProvider,
 ): Promise<CancelAutomatchResponse> {
-  return gameplayMutation(
+  return retryGameSessionMutation(
     "/automatch/cancel",
     {},
     tokenProvider,
     isCancelAutomatchResponse,
+    false,
   );
 }
 
@@ -243,11 +314,77 @@ export function startAutomatchViaApi(
   request: StartAutomatchRequest,
   tokenProvider: AuthTokenProvider,
 ): Promise<StartAutomatchResponse> {
-  return gameplayMutation(
+  return retryGameSessionMutation(
     "/automatch/start",
     request,
     tokenProvider,
     isStartAutomatchResponse,
+    false,
+  );
+}
+
+export function createInviteViaApi(
+  request: CreateInviteRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<CreateInviteResponse> {
+  return retryGameSessionMutation(
+    "/invites/create",
+    request,
+    tokenProvider,
+    isCreateInviteResponse,
+    true,
+  );
+}
+
+export function joinInviteViaApi(
+  request: JoinInviteRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<JoinInviteResponse> {
+  return retryGameSessionMutation(
+    "/invites/join",
+    request,
+    tokenProvider,
+    isJoinInviteResponse,
+    true,
+  );
+}
+
+export function proposeRematchViaApi(
+  request: ProposeRematchRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<ProposeRematchResponse> {
+  return retryGameSessionMutation(
+    "/rematches/propose",
+    request,
+    tokenProvider,
+    isProposeRematchResponse,
+    true,
+  );
+}
+
+export function endRematchViaApi(
+  request: EndRematchRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<EndRematchResponse> {
+  return retryGameSessionMutation(
+    "/rematches/end",
+    request,
+    tokenProvider,
+    isEndRematchResponse,
+    true,
+  );
+}
+
+export function ensureMatchViaApi(
+  request: EnsureMatchRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<EnsureMatchResponse> {
+  return retryGameSessionMutation(
+    "/matches/ensure",
+    request,
+    tokenProvider,
+    isEnsureMatchResponse,
+    true,
   );
 }
 

@@ -1,6 +1,6 @@
 # Cloudflare deployment
 
-Run commands from the repository root with Node.js 24 or newer. Firebase operations are documented in [cloud operations](../cloud/README.md).
+Run commands from the repository root with Node.js 24 and Java 21 or newer. Firebase operations are documented in [cloud operations](../cloud/README.md).
 
 ## Source of truth
 
@@ -18,9 +18,11 @@ npx wrangler secret put <NAME> --config cloud/workers/api/wrangler.jsonc
 
 ## Validation
 
-Install dependencies with `npm ci`, then run:
+Install dependencies, then run:
 
 ```sh
+npm ci
+npm ci --prefix cloud/functions
 npm run check:all
 ```
 
@@ -45,7 +47,7 @@ npm run smoke:api -- --base-url https://api.mons.link --smoke-sol <known-wallet>
 
 `upload:api` uses `wrangler versions upload --strict`; it does not send traffic to the candidate. `promote:api` deploys the explicit Version ID to 100% of traffic without prompting. `deploy:api:triggers` applies the tracked route, Cron, and Queue consumer configuration. Routine code-only releases may omit the trigger command when that configuration is unchanged.
 
-`mons-link-profile-game-projection` is the permanent rating, automatch, event, and profile-link projector Queue. Automatch mutations atomically persist `profileGameProjectionOutbox/automatch/{inviteId}` before enqueueing. Event mutations accumulate every pre-mutation owner under `profileGameProjectionOutbox/event/{eventId}` in the same RTDB commit as the event and use a separate per-event projection lock. Profile-link changes atomically persist `profileGameProjectionOutbox/profile/{loginUid}`, accumulate stale profile owners, and use request-fenced per-login and per-invite locks. The five-minute Worker schedule repairs malformed automatch, event, and profile-link markers, preserving recoverable cleanup owners, repairs rating completion markers, claims pending markers by `lastQueuedAtMs`, and re-enqueues all four task kinds. Monitor Queue consumption, pending marker age, `event_profile_game_projection_*`, `profile_link_profile_game_projection_*`, and `profile_game_projection_*` logs.
+`mons-link-profile-game-projection` is the permanent rating, manual invite, automatch, event, and profile-link projector Queue. Manual game-session and automatch mutations atomically persist `profileGameProjectionOutbox/automatch/{inviteId}` before enqueueing; the namespace retains its historical name for in-flight compatibility. Manual mutations also persist seven-day UUID receipts while per-invite leases serialize structural writes. Event mutations accumulate every pre-mutation owner under `profileGameProjectionOutbox/event/{eventId}` in the same RTDB commit as the event and use a separate per-event projection lock. Profile-link changes atomically persist `profileGameProjectionOutbox/profile/{loginUid}`, accumulate stale profile owners, and use request-fenced per-login and per-invite locks. The five-minute Worker schedule repairs malformed automatch, event, and profile-link markers, preserving recoverable cleanup owners, repairs rating completion markers, removes expired mutation receipts, claims pending markers by `lastQueuedAtMs`, and re-enqueues all four task kinds. Monitor Queue consumption, pending marker age, `game_session_*`, `event_profile_game_projection_*`, `profile_link_profile_game_projection_*`, and `profile_game_projection_*` logs.
 
 `mons-link-telegram-projection` owns automatch, rating, and event Telegram projections. Event mutations persist `telegramProjectionOutbox/event/{eventId}` and increment a durable per-event generation before enqueueing. The consumer serializes each event with `eventTelegramProjectionLocks`, generation-fences desired and projection-state commits, advances state only after dispatch succeeds, and clears only the exact request marker it processed. The five-minute schedule claims pending markers by `updatedAtMs`; monitor `firstQueuedAtMs`, `telegram_projection_queue_*`, and `telegram_projection_event_sweep_failed`.
 
@@ -86,6 +88,21 @@ npx wrangler rollback <known-good-version-id> --config wrangler.jsonc
 ```
 
 ## Browser mutation cutover
+
+Manual invite creation, guest joining, match creation, and rematch metadata are Worker-owned mutations. Browser writes are restricted to established match updates and reactions. `withdrawEventPrize` is the only deployed Firebase Function.
+
+For the single-window structural-game cutover, retain the previous Firebase source and rules for rollback, then release in this order:
+
+1. Promote and smoke the API Worker version.
+2. Promote the frontend Worker version that uses the five game-session routes.
+3. Canary create, join, propose, end, and reconnect match repair with a signed-in account.
+4. Deploy Realtime Database rules with `npx firebase deploy --config cloud/firebase.json --only database --project mons-link`.
+5. Repeat the signed-in canary with the restrictive rules active.
+6. Reconcile Firebase Functions with `npx firebase deploy --config cloud/firebase.json --only functions --force --project mons-link` so the five retired database triggers are deleted.
+
+Already-open frontend tabs from before the cutover must reload after the rules close. After trigger deletion, rollback restores the previous five Firebase triggers first, the previous database rules second, the frontend version third, and the API Worker version last.
+
+## Profile and event-prize mutation cutover
 
 Profile customization and event-prize selection are Worker-owned mutations. Their Firebase reads and live subscriptions remain active, but direct browser writes are denied by the tracked Firestore and Realtime Database rules. Avatar and aura changes use one atomic `emojiAndAura` mutation.
 

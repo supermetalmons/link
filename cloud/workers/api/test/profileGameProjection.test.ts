@@ -152,6 +152,7 @@ function automatchOutbox(
     schemaVersion: 1,
     status: "pending",
     requestId,
+    reason: "automatch-queue",
     sourceUpdatedAtMs,
     lastQueuedAtMs,
   };

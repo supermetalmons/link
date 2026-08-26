@@ -71,10 +71,15 @@
         ".indexOn": ["lastQueuedAtMs"]
       }
     },
+    "gameplayMutationReceipts": {
+      ".indexOn": ["completedAtMs"]
+    },
+    "gameplayMutationReceiptExpirations": {
+      ".indexOn": ["completedAtMs"]
+    },
     "invites": {
       "$inviteId": {
         ".read": "(data.child('hostId').exists() && data.child('guestId').exists()) || (auth != null && (!data.child('password').exists() || auth.uid === data.child('hostId').val() || (data.child('hostId').exists() && ((auth.token.profileId != null && root.child('players').child(data.child('hostId').val()).child('profile').val() === auth.token.profileId) || (root.child('players').child(auth.uid).child('profile').exists() && root.child('players').child(data.child('hostId').val()).child('profile').val() === root.child('players').child(auth.uid).child('profile').val())))))",
-        ".write": "(auth != null && !data.exists()) || (auth != null && data.exists() && data.child('password').exists() && newData.child('password').val() === data.child('password').val() && newData.child('hostId').val() === data.child('hostId').val() && !data.child('guestId').exists() && newData.child('guestId').val() === auth.uid && newData.child('version').val() === data.child('version').val() && newData.child('hostColor').val() === data.child('hostColor').val())",
 
         "hostId": {
           ".validate": "auth.uid === newData.val() || newData.val() === data.val()"
@@ -82,22 +87,18 @@
 
         "password": {
           ".read": "auth != null && auth.uid === data.parent().child('hostId').val()",
-          ".write": "auth != null && !data.exists() && newData.isString() && data.parent().child('hostId').val() === auth.uid",
           ".validate": "newData.isString()"
         },
 
         "guestId": {
-          ".write": "auth != null && !data.exists() && newData.isString() && auth.uid === newData.val()",
           ".validate": "newData.isString() && auth.uid === newData.val() && newData.val() != data.parent().child('hostId').val() && (!data.parent().child('password').exists() || (data.parent().child('password').exists() && newData.parent().child('password').val() === data.parent().child('password').val())) && (!root.child('players').child(newData.val()).child('profile').exists() || !root.child('players').child(data.parent().child('hostId').val()).child('profile').exists() || root.child('players').child(newData.val()).child('profile').val() != root.child('players').child(data.parent().child('hostId').val()).child('profile').val())"
         },
 
         "guestRematches": {
-          ".write": "!data.parent().child('eventId').exists() && (auth.uid === data.parent().child('guestId').val() || (auth.token.profileId != null && root.child('players').child(data.parent().child('guestId').val()).child('profile').val() === auth.token.profileId) || (root.child('players').child(auth.uid).child('profile').exists() && root.child('players').child(data.parent().child('guestId').val()).child('profile').val() === root.child('players').child(auth.uid).child('profile').val()))",
           ".validate": "newData.isString() && (!data.exists() || newData.val().contains(data.val()))"
         },
 
         "hostRematches": {
-          ".write": "!data.parent().child('eventId').exists() && (auth.uid === data.parent().child('hostId').val() || (auth.token.profileId != null && root.child('players').child(data.parent().child('hostId').val()).child('profile').val() === auth.token.profileId) || (root.child('players').child(auth.uid).child('profile').exists() && root.child('players').child(data.parent().child('hostId').val()).child('profile').val() === root.child('players').child(auth.uid).child('profile').val()))",
           ".validate": "newData.isString() && (!data.exists() || newData.val().contains(data.val()))"
         },
         "reactions": {
@@ -128,7 +129,6 @@
     },
     "players": {
       "$userId": {
-        ".write": "auth != null && (auth.uid === $userId || auth.token.admin === true || (data.child('profile').exists() && data.child('profile').val() === auth.token.profileId) || (data.child('profile').exists() && root.child('players').child(auth.uid).child('profile').exists() && data.child('profile').val() === root.child('players').child(auth.uid).child('profile').val()))",
         ".validate": "newData.exists() && newData.child('matches').exists() && (auth.token.admin === true || ((!data.child('profile').exists() && !newData.child('profile').exists()) || (data.child('profile').exists() && newData.child('profile').val() === data.child('profile').val())))",
         "mining": {
           ".write": "auth != null && auth.token.admin === true",
@@ -141,6 +141,7 @@
         "matches": {
           ".read": true,
           "$matchId": {
+            ".write": "auth != null && data.exists() && newData.exists() && (auth.uid === $userId || auth.token.admin === true || (data.parent().parent().child('profile').exists() && data.parent().parent().child('profile').val() === auth.token.profileId) || (data.parent().parent().child('profile').exists() && root.child('players').child(auth.uid).child('profile').exists() && data.parent().parent().child('profile').val() === root.child('players').child(auth.uid).child('profile').val()))",
             "fen": {
               ".validate": "newData.isString() && newData.val().length > 0"
             },

@@ -36,6 +36,7 @@ const identity: FirebaseIdentity = {
 function repository(
   overrides: Partial<GameplayRepository> = {},
 ): GameplayRepository {
+  const transactionValues = new Map<string, unknown>();
   return {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
@@ -52,7 +53,14 @@ function repository(
     getMiningSnapshot: async () => null,
     getRtdbPath: async () => null,
     patchRtdbRoot: async () => undefined,
-    transactRtdbPath: async () => ({ committed: false, value: null }),
+    transactRtdbPath: async (path, updater) => {
+      const current = transactionValues.get(path) ?? null;
+      const result = applyTransaction(updater, current);
+      if (result.committed) {
+        transactionValues.set(path, result.value);
+      }
+      return result;
+    },
     ...overrides,
   };
 }
@@ -149,9 +157,19 @@ test("cancels the newest UID automatch with exact v2 multipath updates", async (
           return {
             "auto-older": { timestamp: 1 },
             "auto-newer": {
+              uid: identity.uid,
+              profileId: "profile-1",
               timestamp: 2,
               telegramDeliveryVersion: 2,
             },
+          };
+        }
+        if (path === "automatch/auto-newer") {
+          return {
+            uid: identity.uid,
+            profileId: "profile-1",
+            timestamp: 2,
+            telegramDeliveryVersion: 2,
           };
         }
         if (path === "invites/auto-newer/guestId") {
@@ -172,7 +190,7 @@ test("cancels the newest UID automatch with exact v2 multipath updates", async (
     },
   );
   assert.deepEqual(result, { ok: true });
-  assert.equal(guestReads, 2);
+  assert.equal(guestReads, 1);
   assert.deepEqual(profileProjectionTasks, [
     {
       kind: "automatch-profile-game-projection",
@@ -189,6 +207,7 @@ test("cancels the newest UID automatch with exact v2 multipath updates", async (
         schemaVersion: 1,
         status: "pending",
         requestId: "request-canceled",
+        reason: "automatch-queue",
         sourceUpdatedAtMs: { ".sv": "timestamp" },
         lastQueuedAtMs: { ".sv": "timestamp" },
       },
@@ -207,11 +226,9 @@ test("cancels the newest UID automatch with exact v2 multipath updates", async (
   ]);
 });
 
-test("uses profile fallback and restores matched state after a guest race", async () => {
+test("skips cancellation when a guest wins the invite lease race", async () => {
   const patches: Array<Record<string, unknown>> = [];
   const profileProjectionTasks: unknown[] = [];
-  let guestReads = 0;
-  const requestIds = ["request-canceled", "request-matched"];
   const result = await cancelAutomatch(
     identity,
     repository({
@@ -226,17 +243,24 @@ test("uses profile fallback and restores matched state after a guest race", asyn
         if (path === "automatch" && query?.orderBy === "profileId") {
           return {
             "auto-race": {
+              uid: "host-uid",
               profileId: "profile-1",
+              timestamp: 1,
               telegramDeliveryVersion: 2,
             },
           };
         }
         if (path === "invites/auto-race") return { hostId: "host-uid" };
         if (path === "players/host-uid/profile") return "profile-1";
-        if (path === "invites/auto-race/guestId") {
-          guestReads++;
-          return guestReads === 1 ? null : "guest-uid";
+        if (path === "automatch/auto-race") {
+          return {
+            uid: "host-uid",
+            profileId: "profile-1",
+            timestamp: 1,
+            telegramDeliveryVersion: 2,
+          };
         }
+        if (path === "invites/auto-race/guestId") return "guest-uid";
         assert.fail(`unexpected RTDB path ${path}`);
       },
       patchRtdbRoot: async (updates) => {
@@ -244,48 +268,15 @@ test("uses profile fallback and restores matched state after a guest race", asyn
       },
     }),
     {
-      createProjectionRequestId: () => requestIds.shift() || "unexpected",
+      createProjectionRequestId: () => "request-canceled",
       enqueueProfileGameProjection: async (task) => {
         profileProjectionTasks.push(task);
       },
     },
   );
   assert.deepEqual(result, { ok: false });
-  assert.equal(patches.length, 2);
-  assert.deepEqual(profileProjectionTasks, [
-    {
-      kind: "automatch-profile-game-projection",
-      inviteId: "auto-race",
-      requestId: "request-canceled",
-    },
-    {
-      kind: "automatch-profile-game-projection",
-      inviteId: "auto-race",
-      requestId: "request-matched",
-    },
-  ]);
-  assert.deepEqual(patches[1], {
-    "invites/auto-race/automatchStateHint": "matched",
-    "invites/auto-race/automatchCanceledAt": null,
-    "profileGameProjectionOutbox/automatch/auto-race": {
-      schemaVersion: 1,
-      status: "pending",
-      requestId: "request-matched",
-      sourceUpdatedAtMs: { ".sv": "timestamp" },
-      lastQueuedAtMs: { ".sv": "timestamp" },
-    },
-    "telegramAutomatches/auto-race/lifecycle": "matched",
-    "telegramAutomatches/auto-race/updatedAtMs": { ".sv": "timestamp" },
-    "telegramAutomatches/auto-race/generation": {
-      ".sv": { increment: 1 },
-    },
-    "telegramProjectionOutbox/automatch/auto-race": {
-      schemaVersion: 1,
-      status: "pending",
-      requestId: "request-matched",
-      updatedAtMs: { ".sv": "timestamp" },
-    },
-  });
+  assert.deepEqual(patches, []);
+  assert.deepEqual(profileProjectionTasks, []);
 });
 
 test("returns false without writes for missing queues and existing guests", async () => {
@@ -308,6 +299,7 @@ test("returns false without writes for missing queues and existing guests", asyn
       getRtdbPath: async (path) => {
         if (path === "players/firebase-uid/profile") return "profile";
         if (path === "automatch") return { invite: {} };
+        if (path === "automatch/invite") return {};
         if (path === "invites/invite/guestId") return "guest";
         return null;
       },
@@ -329,7 +321,22 @@ test("keeps legacy automatch cancellation free of Telegram v2 updates", async ()
       getRtdbPath: async (path) => {
         if (path === "players/firebase-uid/profile") return "profile";
         if (path === "automatch") {
-          return { "auto-legacy": { telegramDeliveryVersion: 1 } };
+          return {
+            "auto-legacy": {
+              uid: identity.uid,
+              profileId: "profile",
+              timestamp: 1,
+              telegramDeliveryVersion: 1,
+            },
+          };
+        }
+        if (path === "automatch/auto-legacy") {
+          return {
+            uid: identity.uid,
+            profileId: "profile",
+            timestamp: 1,
+            telegramDeliveryVersion: 1,
+          };
         }
         if (path === "invites/auto-legacy/guestId") return null;
         return null;
@@ -355,6 +362,7 @@ test("keeps legacy automatch cancellation free of Telegram v2 updates", async ()
         schemaVersion: 1,
         status: "pending",
         requestId: "legacy-request",
+        reason: "automatch-queue",
         sourceUpdatedAtMs: { ".sv": "timestamp" },
         lastQueuedAtMs: { ".sv": "timestamp" },
       },
@@ -660,6 +668,149 @@ test("committed gameplay does not wait for projection Queues", async () => {
       kind: "automatch-profile-game-projection",
       inviteId: "auto_aaaaaaaaaaa",
       requestId: "request-1",
+    },
+  ]);
+});
+
+test("routes strict authenticated structural game-session mutations", async () => {
+  const patches: Record<string, unknown>[] = [];
+  const tasks: unknown[] = [];
+  const response = await handleGameplayRoute(
+    request("/invites/create", {
+      body: {
+        operationId: "00000000-0000-4000-8000-000000000001",
+        inviteId: "abcdefghijk",
+        emojiId: 7,
+        aura: "rainbow",
+      },
+    }),
+    env,
+    context(),
+    {
+      gameSession: {
+        createOwnerId: () => "owner-1",
+        enqueueProfileGameProjection: async (task) => {
+          tasks.push(task);
+        },
+        now: () => 1_000,
+        random: () => 0,
+      },
+      repository: repository({
+        patchRtdbRoot: async (updates) => {
+          patches.push(updates);
+        },
+      }),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    inviteId: "abcdefghijk",
+    hostId: identity.uid,
+    matchId: "abcdefghijk",
+  });
+  assert.equal(patches.length, 1);
+  assert.deepEqual(tasks, [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "abcdefghijk",
+      requestId: "00000000-0000-4000-8000-000000000001",
+    },
+  ]);
+
+  const malformed = await handleGameplayRoute(
+    request("/rematches/end", {
+      body: { inviteId: "abcdefghijk" },
+    }),
+    env,
+    context(),
+    { verifyIdentity: async () => identity },
+  );
+  assert.equal(malformed.status, 400);
+});
+
+test("pending auto-link joins enqueue Telegram projection immediately", async () => {
+  const background: Promise<unknown>[] = [];
+  const telegramTasks: unknown[] = [];
+  const inviteId = "auto_abcdefghi";
+  const response = await handleGameplayRoute(
+    request("/invites/join", {
+      body: {
+        operationId: "00000000-0000-4000-8000-000000000002",
+        inviteId,
+        emojiId: 7,
+        aura: "rainbow",
+      },
+    }),
+    {
+      ...env,
+      TELEGRAM_PROJECTION_QUEUE: {
+        ...env.TELEGRAM_PROJECTION_QUEUE,
+        send: async (task) => {
+          telegramTasks.push(task);
+          return {
+            metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+          };
+        },
+      },
+    },
+    context(background),
+    {
+      gameSession: {
+        createOwnerId: () => "owner-1",
+        enqueueProfileGameProjection: async () => undefined,
+        now: () => 1_000,
+      },
+      repository: repository({
+        getRtdbPath: async (path) => {
+          if (path === `invites/${inviteId}`) {
+            return {
+              hostId: "host-uid",
+              hostColor: "white",
+              guestId: null,
+            };
+          }
+          if (path === `players/${identity.uid}/profile`) {
+            return identity.profileId;
+          }
+          if (path === "players/host-uid/profile") return "host-profile";
+          if (path === `players/${identity.uid}/matches/${inviteId}`) {
+            return null;
+          }
+          if (path === `players/host-uid/matches/${inviteId}`) {
+            return {
+              version: 2,
+              color: "white",
+              emojiId: 1,
+              aura: "",
+              gameVariant: "Classic",
+              fen: new Game().toFen(),
+              status: "",
+              flatMovesString: "",
+              timer: "",
+            };
+          }
+          if (path === `automatch/${inviteId}`) {
+            return {
+              uid: "host-uid",
+              telegramDeliveryVersion: 2,
+            };
+          }
+          return null;
+        },
+      }),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(background.length, 1);
+  await Promise.all(background);
+  assert.deepEqual(telegramTasks, [
+    {
+      kind: "automatch-telegram-projection",
+      inviteId,
+      requestId: "00000000-0000-4000-8000-000000000002",
     },
   ]);
 });

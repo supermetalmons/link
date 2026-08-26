@@ -2,7 +2,7 @@
 
 Run commands from the repository root. See the repository [architecture and command map](../README.md) for package boundaries and the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md) for API release, maintenance, and rollback procedures.
 
-Firebase retains the five manual invite and match projection triggers, event-prize withdrawal, and the existing Firebase data stores. The API Worker owns auth, profile and leaderboard reads, profile customization, username mutation, mining, gameplay, event-prize selection and canonical projection, profile-link catch-up, rating-, automatch-, and event-driven profile-game projection, event control and progress Workflows, X callback, event Telegram projection, and Worker-backed Telegram delivery.
+Firebase retains event-prize withdrawal and the existing Firebase data stores. The API Worker owns manual invite, join, match creation, and rematch mutations; auth; profile and leaderboard reads; profile customization; username mutation; mining; gameplay; event-prize selection and canonical projection; profile-link catch-up; rating-, invite-, automatch-, and event-driven profile-game projection; event control and progress Workflows; X callback; event Telegram projection; and Worker-backed Telegram delivery.
 
 ## Setup
 
@@ -10,8 +10,9 @@ Firebase retains the five manual invite and match projection triggers, event-pri
 npm ci
 npm ci --prefix cloud/functions
 npm ci --prefix cloud/admin
-npm install -g firebase-tools
 ```
+
+The Realtime Database emulator requires Java 21 or newer.
 
 Use Application Default Credentials for admin tools:
 
@@ -47,7 +48,7 @@ npm --prefix cloud/functions run deploy:safe -- <function-name> --project mons-l
 
 ## Profile-game projection recovery
 
-`mons-link-profile-game-projection` permanently owns rating, automatch, event, and profile-link projections. Producers persist durable markers before enqueueing, and the five-minute Worker schedule repairs and re-enqueues stale markers while request fencing preserves newer work and recoverable cleanup owners.
+`mons-link-profile-game-projection` permanently owns rating, manual invite, automatch, event, and profile-link projections. Manual game-session mutations use per-invite leases and UUID receipts, then atomically persist their source writes and the historically named `profileGameProjectionOutbox/automatch/{inviteId}` marker. Producers persist durable markers before enqueueing, and the five-minute Worker schedule repairs and re-enqueues stale markers while request fencing preserves newer work and recoverable cleanup owners. The same schedule removes game-session mutation receipts after seven days.
 
 Investigate stuck work through Queue consumption, pending marker age, and projection logs. Do not purge the Queue, delete a pending outbox, manually delete profile documents, or manually rewrite canonical profile-event prizes.
 
