@@ -572,7 +572,61 @@ test("profile-link catchup ignores failures from a superseded owner", async () =
   assert.equal(attempts, 2);
 });
 
-test("profile-link catchup retries blocked projections without stale cleanup", async () => {
+test("profile-link catchup accepts an unprofiled opponent without stale cleanup", async () => {
+  const result = await processProfileLinkCatchup(
+    {
+      eventLabel: "test",
+      loginUid: "login-1",
+      profileId: "target-profile",
+    },
+    {
+      readCurrentProfileLink: async () => "target-profile",
+      readMatches: async () => ({
+        exists: () => true,
+        val: () => ({ "match-1": {} }),
+      }),
+      recomputeInviteProjection: async () => ({
+        blockedReason: "unresolved-owner-profile",
+        ownerProfileIds: ["target-profile"],
+        sourceCleanupSafe: false,
+      }),
+      resolveInviteIdFromMatchId: async () => "invite-1",
+      withInviteProjectionLock: runWithoutProjectionLock,
+    },
+  );
+  assert.equal(result.processed, 1);
+  assert.equal(result.failed, 0);
+  assert.equal(result.didConverge, true);
+});
+
+test("profile-link catchup retries when the current owner is unresolved", async () => {
+  await assert.rejects(
+    processProfileLinkCatchup(
+      {
+        eventLabel: "test",
+        loginUid: "login-1",
+        profileId: "target-profile",
+      },
+      {
+        readCurrentProfileLink: async () => "target-profile",
+        readMatches: async () => ({
+          exists: () => true,
+          val: () => ({ "match-1": {} }),
+        }),
+        recomputeInviteProjection: async () => ({
+          blockedReason: "unresolved-owner-profile",
+          ownerProfileIds: ["different-profile"],
+          sourceCleanupSafe: false,
+        }),
+        resolveInviteIdFromMatchId: async () => "invite-1",
+        withInviteProjectionLock: runWithoutProjectionLock,
+      },
+    ),
+    /profile-link-catchup-incomplete/,
+  );
+});
+
+test("profile-link catchup retries blocked projections with stale cleanup", async () => {
   const originalFirestore = firebaseAdmin.firestore;
   let deletes = 0;
   const firestore = {
@@ -607,6 +661,7 @@ test("profile-link catchup retries blocked projections without stale cleanup", a
           }),
           recomputeInviteProjection: async () => ({
             blockedReason: "unresolved-owner-profile",
+            ownerProfileIds: ["target-profile"],
             sourceCleanupSafe: false,
           }),
           resolveInviteIdFromMatchId: async () => "invite-1",
@@ -1165,6 +1220,32 @@ for (const [status, inviteState] of [
     assert.equal(result.blockedReason, "unresolved-opponent-emoji");
   });
 }
+
+test("unresolved opponent emoji takes precedence over an unresolved owner", async () => {
+  const inviteId = "merge-unprofiled-opponent-invite";
+  const { deletes, result, sets } = await runInviteProjection({
+    cleanupProfileIds: ["merge-unprofiled-host"],
+    eventTimestampMs: 3000,
+    invite: {
+      guestId: "merge-unprofiled-guest-login",
+      hostId: "merge-unprofiled-host-login",
+    },
+    inviteId,
+    mergeTargets: {},
+    profileLinks: {
+      "merge-unprofiled-host-login": "merge-unprofiled-host",
+    },
+    profiles: {
+      "merge-unprofiled-host": { custom: { emoji: 11 }, username: "Host" },
+    },
+    projections: {},
+  });
+  assert.deepEqual(deletes, []);
+  assert.deepEqual(sets, []);
+  assert.deepEqual(result.ownerProfileIds, ["merge-unprofiled-host"]);
+  assert.equal(result.sourceCleanupSafe, false);
+  assert.equal(result.blockedReason, "unresolved-opponent-emoji");
+});
 
 test("a repaired opponent profile unblocks a warm retry", async () => {
   const input = {

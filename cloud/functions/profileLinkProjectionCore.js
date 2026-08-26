@@ -209,7 +209,20 @@ const createProfileLinkProjectionCore = ({
                 preserveListSortAt: true,
               }),
             );
-            if (result?.sourceCleanupSafe === false) {
+            const unresolvedOwnerIsSafe = Boolean(
+              result?.sourceCleanupSafe === false &&
+              result.blockedReason === "unresolved-owner-profile" &&
+              Array.isArray(result.ownerProfileIds) &&
+              result.ownerProfileIds.some(
+                (ownerProfileId) =>
+                  normalizeString(ownerProfileId) === profileId,
+              ) &&
+              cleanupIds.every(
+                (cleanupProfileId) =>
+                  normalizeString(cleanupProfileId) === profileId,
+              ),
+            );
+            if (result?.sourceCleanupSafe === false && !unresolvedOwnerIsSafe) {
               throw new Error(
                 `projector:profile-link-catchup-blocked:${result.blockedReason || "source-cleanup-unsafe"}`,
               );

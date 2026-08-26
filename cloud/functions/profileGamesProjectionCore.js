@@ -587,7 +587,7 @@ const createProfileGamesProjectionCore = ({
               : sourceOpponentEmoji;
       if (requiresResolvedOpponentEmoji && opponentEmoji === null) {
         sourceCleanupSafe = false;
-        blockedReason ||= "unresolved-opponent-emoji";
+        blockedReason = "unresolved-opponent-emoji";
         skippedCount += 1;
         continue;
       }
