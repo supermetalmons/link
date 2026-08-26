@@ -87,21 +87,6 @@ Rollback with an explicit known-good version:
 npx wrangler rollback <known-good-version-id> --config wrangler.jsonc
 ```
 
-## Browser mutation cutover
-
-Manual invite creation, guest joining, match creation, and rematch metadata are Worker-owned mutations. Browser writes are restricted to established match updates and reactions. `withdrawEventPrize` is the only deployed Firebase Function.
-
-For the single-window structural-game cutover, retain the previous Firebase source and rules for rollback, then release in this order:
-
-1. Promote and smoke the API Worker version.
-2. Promote the frontend Worker version that uses the five game-session routes.
-3. Canary create, join, propose, end, and reconnect match repair with a signed-in account.
-4. Deploy Realtime Database rules with `npx firebase deploy --config cloud/firebase.json --only database --project mons-link`.
-5. Repeat the signed-in canary with the restrictive rules active.
-6. Reconcile Firebase Functions with `npx firebase deploy --config cloud/firebase.json --only functions --force --project mons-link` so the five retired database triggers are deleted.
-
-Already-open frontend tabs from before the cutover must reload after the rules close. After trigger deletion, rollback restores the previous five Firebase triggers first, the previous database rules second, the frontend version third, and the API Worker version last.
-
 ## Profile and event-prize mutation cutover
 
 Profile customization and event-prize selection are Worker-owned mutations. Their Firebase reads and live subscriptions remain active, but direct browser writes are denied by the tracked Firestore and Realtime Database rules. Avatar and aura changes use one atomic `emojiAndAura` mutation.
