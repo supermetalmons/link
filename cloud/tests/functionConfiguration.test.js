@@ -4,13 +4,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
-const { withdrawEventPrize } = require("../functions/eventPrizeWithdrawal");
-const { buildHeliusRpcUrl } = require("../functions/heliusRpc");
-
-const getSecretKeys = (callable) =>
-  (callable.__endpoint.secretEnvironmentVariables || [])
-    .map((secret) => secret.key)
-    .sort();
+const { getRpcUrl } = require("../functions/eventPrizes/solana");
 
 const runModuleLoadingCheck = (source) => {
   const result = spawnSync(process.execPath, ["-e", source], {
@@ -19,19 +13,15 @@ const runModuleLoadingCheck = (source) => {
   assert.equal(result.status, 0, result.stderr || result.stdout);
 };
 
-test("binds the event-prize withdrawal secrets", () => {
-  assert.deepEqual(getSecretKeys(withdrawEventPrize), [
-    "EVENT_PRIZE_ADMIN_PRIVATE_KEY",
-    "HELIUS_RPC_API_KEY",
-  ]);
-});
-
-test("builds the Helius RPC URL from a normalized secret value", () => {
+test("builds the Helius RPC URL from an injected secret value", () => {
   assert.equal(
-    buildHeliusRpcUrl(" key/+value "),
+    getRpcUrl(" key/+value "),
     "https://mainnet.helius-rpc.com/?api-key=key%2F%2Bvalue",
   );
-  assert.equal(buildHeliusRpcUrl(""), "");
+  assert.throws(
+    () => getRpcUrl(""),
+    (error) => error.code === "failed-precondition",
+  );
 });
 
 test("does not load Solana transfer dependencies with the Functions entry point", () => {

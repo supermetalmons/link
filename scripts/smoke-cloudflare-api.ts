@@ -243,6 +243,8 @@ async function smokeApi(
     "/events/start/postpone",
     "/events/matches/winners/disqualify",
     "/events/prize-selections/toggle",
+    "/events/prizes/withdrawals",
+    "/events/prizes/withdrawals/status",
     "/events/state/sync",
     "/profiles/custom",
   ]) {

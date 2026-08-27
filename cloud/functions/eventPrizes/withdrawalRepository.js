@@ -1,7 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
-const { HttpsError } = require("firebase-functions/v2/https");
+const { EventPrizeWithdrawalError: HttpsError } = require("./errors");
 const { runRtdbDecisionTransaction } = require("../rtdbDecisionTransaction");
 const {
   decideWithdrawalClaim,

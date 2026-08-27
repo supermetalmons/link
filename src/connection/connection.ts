@@ -37,7 +37,6 @@ import {
   didGetPlayerProfile,
   setupPlayerId,
 } from "../game/board";
-import { getFunctions, Functions, httpsCallable } from "firebase/functions";
 import {
   Match,
   Invite,
@@ -78,6 +77,7 @@ import {
 } from "../services/wagerMaterialsService";
 import { rocksMiningService } from "../services/rocksMiningService";
 import { mineRockViaApi } from "../services/miningApi";
+import { withdrawEventPrizeViaApi } from "../services/eventPrizeApi";
 import {
   editUsernameViaApi,
   getProfileByIdViaApi,
@@ -322,7 +322,6 @@ class Connection {
   private auth: Auth;
   private db: Database;
   private firestore: Firestore;
-  private functions: Functions;
 
   private hostRematchesRef: any = null;
   private guestRematchesRef: any = null;
@@ -712,7 +711,6 @@ class Connection {
     this.auth = getAuth(this.app);
     this.db = getDatabase(this.app);
     this.firestore = getFirestore(this.app);
-    this.functions = getFunctions(this.app);
   }
 
   private cloneWagerState(
@@ -2838,39 +2836,12 @@ class Connection {
   ): Promise<EventPrizeWithdrawalResponse> {
     try {
       await this.ensureAuthenticated();
-      const withdrawEventPrizeFunction = httpsCallable(
-        this.functions,
-        "withdrawEventPrize",
-        { timeout: 135_000 },
-      );
-      const payload = {
+      return await withdrawEventPrizeViaApi(
         eventId,
         prizeId,
         solanaAddress,
-      };
-      let response;
-      try {
-        response = await withdrawEventPrizeFunction(payload);
-      } catch (error) {
-        const errorCode =
-          error &&
-          typeof error === "object" &&
-          "code" in error &&
-          typeof error.code === "string"
-            ? error.code.replace(/^functions\//, "")
-            : "";
-        if (
-          errorCode !== "unavailable" &&
-          errorCode !== "deadline-exceeded" &&
-          errorCode !== "internal" &&
-          errorCode !== "unknown"
-        ) {
-          throw error;
-        }
-        await this.delay(750);
-        response = await withdrawEventPrizeFunction(payload);
-      }
-      return response.data as EventPrizeWithdrawalResponse;
+        this.getUserBoundAuthTokenProvider(),
+      );
     } catch (error) {
       console.error("Error withdrawing event prize:", error);
       throw error;

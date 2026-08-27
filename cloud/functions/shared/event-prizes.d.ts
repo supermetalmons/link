@@ -51,6 +51,41 @@ export type ToggleEventPrizeSelectionResponse = {
   selectedPrizeId: EventPrizeId | null;
 };
 
+export type EventPrizeWithdrawalRequest = {
+  eventId: EventPrizeEventId;
+  prizeId: EventPrizeId;
+  solanaAddress: string;
+};
+
+export type EventPrizeWithdrawalStatusRequest = {
+  eventId: EventPrizeEventId;
+  operationId: string;
+  prizeId: EventPrizeId;
+};
+
+export type EventPrizeWithdrawalProcessingResponse = {
+  ok: true;
+  status: "processing";
+  operationId: string;
+  eventId: EventPrizeEventId;
+  prizeId: EventPrizeId;
+};
+
+export type EventPrizeWithdrawalCompletedResponse = {
+  ok: true;
+  status: "completed";
+  operationId: string;
+  eventId: EventPrizeEventId;
+  prizeId: EventPrizeId;
+  assetAddress: string;
+  recipientAddress: string;
+  transactionSignature: string;
+};
+
+export type EventPrizeWithdrawalResponse =
+  | EventPrizeWithdrawalProcessingResponse
+  | EventPrizeWithdrawalCompletedResponse;
+
 export const EVENT_PRIZE_CONFIGS: Readonly<
   Record<EventPrizeEventId, EventPrizeConfig>
 >;
@@ -74,6 +109,24 @@ export function isEventPrizeId(
 export function isEventPrizeStandard(
   value: unknown,
 ): value is EventPrizeStandard;
+export function isEventPrizeWithdrawalCompletedResponse(
+  value: unknown,
+): value is EventPrizeWithdrawalCompletedResponse;
+export function isEventPrizeWithdrawalOperationId(
+  value: unknown,
+): value is string;
+export function isEventPrizeWithdrawalProcessingResponse(
+  value: unknown,
+): value is EventPrizeWithdrawalProcessingResponse;
+export function isEventPrizeWithdrawalRequest(
+  value: unknown,
+): value is EventPrizeWithdrawalRequest;
+export function isEventPrizeWithdrawalResponse(
+  value: unknown,
+): value is EventPrizeWithdrawalResponse;
+export function isEventPrizeWithdrawalStatusRequest(
+  value: unknown,
+): value is EventPrizeWithdrawalStatusRequest;
 export function isToggleEventPrizeSelectionRequest(
   value: unknown,
 ): value is ToggleEventPrizeSelectionRequest;

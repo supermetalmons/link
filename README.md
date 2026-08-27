@@ -4,17 +4,17 @@ mons.link is a browser game backed by Firebase and two Cloudflare Workers. The r
 
 ## Project map
 
-| Path                      | Responsibility                                                                               | Runtime                       |
-| ------------------------- | -------------------------------------------------------------------------------------------- | ----------------------------- |
-| `src/`                    | React UI, game orchestration, Firebase client, assets, and browser services                  | Vite / browser                |
-| `test/`                   | Client behavior and contract tests                                                           | Node test runner              |
-| `cloud/functions/`        | Event-prize withdrawal plus portable backend modules shared with the API Worker              | Firebase Functions / CommonJS |
-| `cloud/functions/shared/` | Browser-safe `@mons/shared/*` contract subpaths                                              | CommonJS package              |
-| `cloud/workers/api/`      | NFT, profile, customization, leaderboard, gameplay, event, ratings, mining, auth, and X APIs | Cloudflare Workers            |
-| `cloud/admin/`            | Manually invoked production administration tools                                             | Node / Firebase Admin         |
-| `scripts/`                | Deployment, repository maintenance, architecture, and tooling contracts                      | Node and Bash                 |
+| Path                      | Responsibility                                                                               | Runtime               |
+| ------------------------- | -------------------------------------------------------------------------------------------- | --------------------- |
+| `src/`                    | React UI, game orchestration, Firebase client, assets, and browser services                  | Vite / browser        |
+| `test/`                   | Client behavior and contract tests                                                           | Node test runner      |
+| `cloud/functions/`        | Portable backend modules shared with the API Worker                                          | CommonJS              |
+| `cloud/functions/shared/` | Browser-safe `@mons/shared/*` contract subpaths                                              | CommonJS package      |
+| `cloud/workers/api/`      | NFT, profile, customization, leaderboard, gameplay, event, ratings, mining, auth, and X APIs | Cloudflare Workers    |
+| `cloud/admin/`            | Manually invoked production administration tools                                             | Node / Firebase Admin |
+| `scripts/`                | Deployment, repository maintenance, architecture, and tooling contracts                      | Node and Bash         |
 
-The frontend Worker is configured by `wrangler.jsonc`. The API Worker has its independent configuration under `cloud/workers/api/`. Firebase configuration, rules, indexes, and deployment entrypoints remain under `cloud/`.
+The frontend Worker is configured by `wrangler.jsonc`. The API Worker has its independent configuration under `cloud/workers/api/`. Firebase retains authentication and data storage, with rules and indexes under `cloud/`; no Firebase Functions are deployed.
 
 ## Setup and development
 
@@ -47,7 +47,7 @@ Copy `.env.example` to `.env.local` only when local overrides are needed. Local 
 | `npm run check:api`           | Format, lint, typecheck, test, type-generation check, and dry-run the API Worker.                                        |
 | `npm run check:tooling`       | Validate deployment drivers, project contracts, admin parsing, repository cleanup fixtures, and dependency architecture. |
 | `npm run test:database-rules` | Run structural gameplay authorization against the Realtime Database emulator.                                            |
-| `npm run check:all`           | Run the repository-wide validation gate, including Firebase Functions tests.                                             |
+| `npm run check:all`           | Run the repository-wide validation gate, including portable cloud runtime tests.                                         |
 | `npm run format:check`        | Check repository formatting without writing files.                                                                       |
 
 ### Deployment and maintenance
@@ -66,7 +66,7 @@ Production deployment commands, token handling, smoke checks, and rollback proce
 ## Package boundaries
 
 - `@mons/shared` is the only local runtime package dependency at the root and preserves its public subpath exports for both browser and backend consumers.
-- The remaining event-prize Firebase Function stays in a separate CommonJS package with its own install, test, and safe-deployment lifecycle.
+- Portable CommonJS cloud modules stay separately installable for their test lifecycle and Worker bundling boundaries.
 - Cloud admin tools remain independently installable so Firebase Admin credentials are never required for browser or Worker development.
 - TypeScript and framework type declarations are build-only root development dependencies.
 

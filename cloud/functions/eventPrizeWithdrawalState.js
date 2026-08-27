@@ -1,6 +1,5 @@
 "use strict";
 
-const bs58 = require("bs58");
 const {
   filterProjectableEventPrizeAssignments,
   getCompletedEventPrizeProjectionCleanupRequest,
@@ -18,12 +17,35 @@ const WITHDRAWAL_LEASE_MS = 5 * 60 * 1000;
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 
+const BASE58_ALPHABET =
+  "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
 const decodeBase58Bytes = (value) => {
-  try {
-    return bs58.default.decode(normalizeString(value));
-  } catch {
-    return null;
+  const encoded = normalizeString(value);
+  if (!encoded) return null;
+  const bytes = [0];
+  for (const character of encoded) {
+    const digit = BASE58_ALPHABET.indexOf(character);
+    if (digit < 0) return null;
+    let carry = digit;
+    for (let index = 0; index < bytes.length; index += 1) {
+      carry += bytes[index] * 58;
+      bytes[index] = carry & 0xff;
+      carry >>= 8;
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff);
+      carry >>= 8;
+    }
   }
+  for (
+    let index = 0;
+    encoded[index] === "1" && index < encoded.length - 1;
+    index += 1
+  ) {
+    bytes.push(0);
+  }
+  return Uint8Array.from(bytes.reverse());
 };
 
 const normalizeSolanaAddress = (value) => {

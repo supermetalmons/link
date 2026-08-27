@@ -2,7 +2,7 @@
 
 Run commands from the repository root. See the repository [architecture and command map](../README.md) for package boundaries and the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md) for API release, maintenance, and rollback procedures.
 
-Firebase retains event-prize withdrawal and the existing Firebase data stores. The API Worker owns manual invite, join, match creation, and rematch mutations; auth; profile and leaderboard reads; profile customization; username mutation; mining; gameplay; event-prize selection and canonical projection; profile-link catch-up; rating-, invite-, automatch-, and event-driven profile-game projection; event control and progress Workflows; X callback; event Telegram projection; and Worker-backed Telegram delivery.
+Firebase retains authentication and the existing data stores. The API Worker owns manual invite, join, match creation, and rematch mutations; auth; profile and leaderboard reads; profile customization; username mutation; mining; gameplay; event-prize selection, withdrawal, and canonical projection; profile-link catch-up; rating-, invite-, automatch-, and event-driven profile-game projection; event control and progress Workflows; X callback; event Telegram projection; and Worker-backed Telegram delivery.
 
 ## Setup
 
@@ -20,7 +20,7 @@ Use Application Default Credentials for admin tools:
 gcloud auth application-default login
 ```
 
-## Firebase releases
+## Firebase rule releases
 
 Preview the complete release without starting a Firebase process:
 
@@ -28,17 +28,13 @@ Preview the complete release without starting a Firebase process:
 npm run deploy:firebase -- --project mons-link --dry-run
 ```
 
-Deploy Realtime Database rules, exported functions, Firestore rules, and indexes, then reconcile the deployed Functions manifest:
+Deploy Realtime Database rules followed by Firestore rules and indexes:
 
 ```sh
 npm run deploy:firebase -- --project mons-link
 ```
 
-The full release reconciles deployed Functions with the current export manifest. Review the dry-run first. Use a positional maintenance deployment when full reconciliation is not intended:
-
-```sh
-npm --prefix cloud/functions run deploy:safe -- <function-name> --project mons-link
-```
+The Firebase configuration intentionally has no Functions codebase. Review the dry-run first; the release helper cannot create or reconcile Cloud Functions.
 
 ## Auth maintenance and recovery
 

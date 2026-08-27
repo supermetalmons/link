@@ -10,7 +10,7 @@ const functionsDirectory = path.resolve(__dirname, "../functions");
 const functionsIndexPath = path.join(functionsDirectory, "index.js");
 const sharedDirectory = path.join(functionsDirectory, "shared");
 
-const callableExportNames = ["withdrawEventPrize"];
+const callableExportNames = [];
 
 const httpExportNames = [];
 
@@ -88,16 +88,6 @@ const expectedEndpointContracts = Object.fromEntries(
   callableExportNames.map((name) => [name, callableContract()]),
 );
 
-Object.assign(expectedEndpointContracts, {
-  withdrawEventPrize: callableContract({
-    availableMemoryMb: 512,
-    timeoutSeconds: 120,
-    maxInstances: 3,
-    concurrency: 1,
-    secrets: ["EVENT_PRIZE_ADMIN_PRIVATE_KEY", "HELIUS_RPC_API_KEY"],
-  }),
-});
-
 const normalizeEndpoint = (endpoint) => {
   const config = compactObject({
     availableMemoryMb: endpoint.availableMemoryMb,
@@ -153,7 +143,7 @@ const normalizeEndpoint = (endpoint) => {
 
 test("preserves the Firebase deployment export ABI", () => {
   const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 1);
+  assert.equal(expectedExportNames.length, 0);
   assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
 });
 

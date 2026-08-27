@@ -99,6 +99,11 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       name: "mons-link-event-progress",
       class_name: "EventProgressWorkflow",
     },
+    {
+      binding: "EVENT_PRIZE_WITHDRAWAL_WORKFLOW",
+      name: "mons-link-event-prize-withdrawal",
+      class_name: "EventPrizeWithdrawalWorkflow",
+    },
   ]);
   assert.deepEqual(Object.keys(config.vars || {}).sort(), [
     "APPLE_AUDIENCES",
@@ -128,6 +133,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       "HELIUS_RPC_API_KEY",
       "RATING_SERVICE_ACCOUNT_EMAIL",
       "RATING_SERVICE_ACCOUNT_PRIVATE_KEY",
+      "EVENT_PRIZE_ADMIN_PRIVATE_KEY",
       "TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET",
       "TELEGRAM_BOT_TOKEN",
       "TELEGRAM_EXTRA_CHAT_ID",
@@ -227,6 +233,13 @@ test("Wrangler release environment contains no active values", () => {
   assert.deepEqual(activeLines, []);
 });
 
+test("Firebase configuration deploys data rules without a Functions codebase", () => {
+  const config = readJson<Record<string, unknown>>("cloud/firebase.json");
+  assert.equal(Object.hasOwn(config, "functions"), false);
+  assert.equal(typeof config.database, "object");
+  assert.equal(typeof config.firestore, "object");
+});
+
 test("package manifests preserve public scripts and deployment command vectors", () => {
   const rootPackage = readJson<PackageManifest>("package.json");
   const functionsPackage = readJson<PackageManifest>(
@@ -324,19 +337,13 @@ test("package manifests preserve public scripts and deployment command vectors",
       "prepare:firebase":
         "npm --prefix cloud/functions ci && npm --prefix cloud/functions test",
       "deploy:firebase":
-        "npm run prepare:firebase && node cloud/functions/scripts/deploy-safe.js --include-non-functions",
+        "npm run prepare:firebase && node --experimental-strip-types scripts/deploy-firebase.ts",
       deploy: "node --experimental-strip-types scripts/deploy-cloudflare.ts",
       "repo-clean": "bash scripts/repo-clean.sh",
     },
   );
   assert.deepEqual(functionsPackage.scripts, {
-    serve: "firebase emulators:start --only functions",
-    shell: "firebase functions:shell",
-    start: "npm run shell",
     test: "node --experimental-strip-types --test ../tests/*.test.js",
-    deploy: "npm test && npm run deploy:safe -- --include-non-functions",
-    "deploy:safe": "node ./scripts/deploy-safe.js",
-    logs: "firebase functions:log",
   });
   assert.deepEqual(adminPackage.scripts, {
     "recover:telegram": "node recoverTelegramDelivery.js",
@@ -432,25 +439,14 @@ test("API Worker preserves its runtime export surface", () => {
 
 test("remaining deployment CLIs preserve their offline modes", () => {
   const { parseArgs: parseFirebaseArgs } = require(
-    resolve(repositoryRoot, "cloud/functions/scripts/deploy-safe.js"),
+    resolve(repositoryRoot, "scripts/deploy-firebase.ts"),
   ) as {
     parseArgs: (argv: string[]) => Record<string, unknown>;
   };
-  assert.deepEqual(
-    parseFirebaseArgs([
-      "--dry-run",
-      "--include-non-functions",
-      "--project",
-      "mons-link",
-    ]),
-    {
-      batchSize: 10,
-      dryRun: true,
-      includeNonFunctions: true,
-      project: "mons-link",
-      functionNames: [],
-    },
-  );
+  assert.deepEqual(parseFirebaseArgs(["--dry-run", "--project", "mons-link"]), {
+    dryRun: true,
+    project: "mons-link",
+  });
 
   const frontendHelp = spawnSync(
     process.execPath,
@@ -476,6 +472,7 @@ test("remaining deployment CLIs preserve their offline modes", () => {
 test("operations documentation cross-links package and deployment guides", () => {
   const rootReadme = readText("README.md");
   const cloudReadme = readText("cloud/README.md");
+  const deploymentGuide = readText("scripts/deploy-cloudflare.md");
 
   assert.match(
     rootReadme,
@@ -492,6 +489,18 @@ test("operations documentation cross-links package and deployment guides", () =>
   );
   assert.equal(existsSync(resolve(repositoryRoot, "cloud/.prettierrc")), false);
   assert.equal(existsSync(resolve(repositoryRoot, ".prettierrc")), true);
+  assert.match(
+    deploymentGuide,
+    /workflows trigger mons-link-event-prize-withdrawal --id "\$event_prize_preflight_id"/,
+  );
+  assert.match(
+    deploymentGuide,
+    /workflows instances describe mons-link-event-prize-withdrawal "\$event_prize_preflight_id"/,
+  );
+  assert.doesNotMatch(
+    deploymentGuide,
+    /workflows instances describe mons-link-event-prize-withdrawal latest/,
+  );
 });
 
 test("profile claim synchronization uses the Worker route", () => {
@@ -535,7 +544,7 @@ test("provider verification and auth mutations use Worker routes", () => {
   }
 });
 
-test("client Firebase callables retain only prize withdrawal", () => {
+test("client prize withdrawal uses only the Worker API", () => {
   const connection = readText("src/connection/connection.ts");
   const callableNames = Array.from(
     connection.matchAll(/httpsCallable\(\s*this\.functions\s*,\s*"([^"]+)"/g),
@@ -546,5 +555,9 @@ test("client Firebase callables retain only prize withdrawal", () => {
     callableNames.length,
     Array.from(connection.matchAll(/\bhttpsCallable\s*\(/g)).length,
   );
-  assert.deepEqual(callableNames, ["withdrawEventPrize"]);
+  assert.deepEqual(callableNames, []);
+  assert.doesNotMatch(connection, /firebase\/functions/);
+  const eventPrizeApi = readText("src/services/eventPrizeApi.ts");
+  assert.match(eventPrizeApi, /\/events\/prizes\/withdrawals/);
+  assert.match(eventPrizeApi, /\/events\/prizes\/withdrawals\/status/);
 });

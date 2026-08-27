@@ -1,12 +1,6 @@
 "use strict";
 
-const { HttpsError } = require("firebase-functions/v2/https");
-const admin = require("../firebaseAdmin");
-const { readProfileByLoginUid } = require("../profileLookup");
-const {
-  removeMatchingProfileEventPrizeAssignment,
-  resolveCanonicalProfilePath,
-} = require("../profileEventPrizeProjection");
+const { EventPrizeWithdrawalError: HttpsError } = require("./errors");
 const {
   buildWithdrawalCompletionUpdates,
   getWithdrawalProjectionProfileIds,
@@ -15,12 +9,15 @@ const {
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 
-const reconcileCompletedWithdrawalProjections = async ({
-  withdrawal,
-  profileIds,
-  eventId,
-  prizeId,
-}) => {
+const reconcileCompletedWithdrawalProjections = async (
+  { withdrawal, profileIds, eventId, prizeId },
+  dependencies,
+) => {
+  const {
+    admin,
+    removeMatchingProfileEventPrizeAssignment,
+    resolveCanonicalProfilePath,
+  } = dependencies;
   const knownProfileIds = getWithdrawalProjectionProfileIds({
     withdrawal,
     profileIds,
@@ -45,27 +42,37 @@ const reconcileCompletedWithdrawalProjections = async ({
   );
 };
 
-const attemptCompletedWithdrawalProjectionReconciliation = async (args) => {
+const attemptCompletedWithdrawalProjectionReconciliation = async (
+  args,
+  dependencies,
+) => {
   try {
-    await reconcileCompletedWithdrawalProjections(args);
+    await reconcileCompletedWithdrawalProjections(args, dependencies);
   } catch (error) {
-    console.warn("event-prize-withdrawal-projection-cleanup-failed", {
-      eventId: args.eventId,
-      prizeId: args.prizeId,
-      errorType: normalizeString(error?.name) || "Error",
-    });
+    console.warn(
+      JSON.stringify({
+        event: "event_prize_withdrawal_projection_cleanup_failed",
+        eventId: args.eventId,
+        prizeId: args.prizeId,
+        errorType: normalizeString(error?.name) || "Error",
+      }),
+    );
   }
 };
 
-const finalizeWithdrawal = async ({
-  withdrawal,
-  profileId,
-  eventId,
-  prizeId,
-  assetAddress,
-  recipientAddress,
-  transactionSignature,
-}) => {
+const finalizeWithdrawal = async (
+  {
+    withdrawal,
+    profileId,
+    eventId,
+    prizeId,
+    assetAddress,
+    recipientAddress,
+    transactionSignature,
+  },
+  dependencies,
+) => {
+  const { admin, readProfileByLoginUid } = dependencies;
   const requesterUid = normalizeString(withdrawal.requesterUid);
   if (!requesterUid) {
     throw new HttpsError(
@@ -82,11 +89,14 @@ const finalizeWithdrawal = async ({
     canonicalProfileId =
       normalizeString(canonicalProfileSnapshot?.id) || canonicalProfileId;
   } catch {
-    console.warn("event-prize-withdrawal-profile-refresh-failed", {
-      eventId,
-      prizeId,
-      profileId: canonicalProfileId,
-    });
+    console.warn(
+      JSON.stringify({
+        event: "event_prize_withdrawal_profile_refresh_failed",
+        eventId,
+        prizeId,
+        profileId: canonicalProfileId,
+      }),
+    );
   }
   if (!canonicalProfileId) {
     throw new HttpsError("internal", "The prize profile is unavailable.");
@@ -95,7 +105,7 @@ const finalizeWithdrawal = async ({
     withdrawal,
     profileIds: [profileId, canonicalProfileId],
   });
-  const completedAtMs = Date.now();
+  const completedAtMs = (dependencies.now || Date.now)();
   const { completed, updates } = buildWithdrawalCompletionUpdates({
     withdrawal,
     profileId: canonicalProfileId,
@@ -107,12 +117,15 @@ const finalizeWithdrawal = async ({
     completedAtMs,
   });
   await admin.database().ref().update(updates);
-  await attemptCompletedWithdrawalProjectionReconciliation({
-    withdrawal: completed,
-    profileIds: projectionProfileIds,
-    eventId,
-    prizeId,
-  });
+  await reconcileCompletedWithdrawalProjections(
+    {
+      withdrawal: completed,
+      profileIds: projectionProfileIds,
+      eventId,
+      prizeId,
+    },
+    dependencies,
+  );
   return completed;
 };
 

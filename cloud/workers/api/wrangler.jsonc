@@ -35,6 +35,7 @@
       "HELIUS_RPC_API_KEY",
       "RATING_SERVICE_ACCOUNT_EMAIL",
       "RATING_SERVICE_ACCOUNT_PRIVATE_KEY",
+      "EVENT_PRIZE_ADMIN_PRIVATE_KEY",
       "TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET",
       "TELEGRAM_BOT_TOKEN",
       "TELEGRAM_EXTRA_CHAT_ID",
@@ -70,6 +71,11 @@
       "binding": "EVENT_PROGRESS_WORKFLOW",
       "name": "mons-link-event-progress",
       "class_name": "EventProgressWorkflow",
+    },
+    {
+      "binding": "EVENT_PRIZE_WITHDRAWAL_WORKFLOW",
+      "name": "mons-link-event-prize-withdrawal",
+      "class_name": "EventPrizeWithdrawalWorkflow",
     },
   ],
   "queues": {

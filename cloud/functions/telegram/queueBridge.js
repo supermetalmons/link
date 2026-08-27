@@ -1,7 +1,6 @@
 "use strict";
 
 const { createHmac } = require("node:crypto");
-const { defineSecret } = require("firebase-functions/params");
 const {
   TELEGRAM_DESIRED_TASK_KIND,
   TELEGRAM_MANUAL_RECOVERY_TASK_KIND,
@@ -15,7 +14,6 @@ const { validateTelegramMessageKey } = require("./desiredStateCore");
 const TELEGRAM_DELIVERY_BRIDGE_URL =
   "https://api.mons.link/internal/telegram/delivery";
 const TELEGRAM_BRIDGE_TIMEOUT_MS = 5_000;
-const telegramQueueBridgeSecret = defineSecret("TELEGRAM_QUEUE_BRIDGE_SECRET");
 
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
@@ -31,7 +29,7 @@ const enqueueTelegramDeliveryTask = async (
     bridgeUrl = TELEGRAM_DELIVERY_BRIDGE_URL,
     fetchImpl = globalThis.fetch,
     now = Date.now,
-    secret = telegramQueueBridgeSecret.value(),
+    secret = "",
     timeoutMs = TELEGRAM_BRIDGE_TIMEOUT_MS,
   } = {},
 ) => {
@@ -136,5 +134,4 @@ module.exports = {
   createTelegramManualRecoveryDispatcher,
   enqueueTelegramDeliveryTask,
   signTelegramBridgeRequest,
-  telegramQueueBridgeSecret,
 };

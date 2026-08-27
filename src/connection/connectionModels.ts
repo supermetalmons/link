@@ -6,7 +6,10 @@ import type {
   AutomatchStateHint,
   NavigationStatus as SharedNavigationStatus,
 } from "@mons/shared/navigation";
-import type { EventPrizeId as SharedEventPrizeId } from "@mons/shared/event-prizes";
+import type {
+  EventPrizeId as SharedEventPrizeId,
+  EventPrizeWithdrawalCompletedResponse,
+} from "@mons/shared/event-prizes";
 import type { PlayerProfile as SharedPlayerProfile } from "@mons/shared/profiles";
 
 export interface Match {
@@ -174,15 +177,8 @@ export type EventPrizeAssignments = Partial<
 
 export type ProfileEventPrizes = Record<string, EventPrizeAssignment>;
 
-export interface EventPrizeWithdrawalResponse {
-  ok: true;
-  status: "completed";
-  eventId: string;
-  prizeId: EventPrizeId;
-  assetAddress: string;
-  recipientAddress: string;
-  transactionSignature: string;
-}
+export type EventPrizeWithdrawalResponse =
+  EventPrizeWithdrawalCompletedResponse;
 
 export interface EventRecord {
   schemaVersion: number;

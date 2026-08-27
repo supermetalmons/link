@@ -1,17 +1,12 @@
 "use strict";
 
-const { HttpsError } = require("firebase-functions/v2/https");
-const { defineSecret } = require("firebase-functions/params");
+const { EventPrizeWithdrawalError: HttpsError } = require("./errors");
 const { isEventPrizeStandard } = require("@mons/shared/event-prizes");
-const { getHeliusRpcUrl } = require("../heliusRpc");
 const {
   EVENT_PRIZE_ADMIN_WALLET,
   decodeAdminSecretKey,
 } = require("../eventPrizeWithdrawalState");
 
-const EVENT_PRIZE_ADMIN_PRIVATE_KEY = defineSecret(
-  "EVENT_PRIZE_ADMIN_PRIVATE_KEY",
-);
 const CONFIRMATION_COMMITMENT = "confirmed";
 const CONFIRMATION_TIMEOUT_MS = 45 * 1000;
 const SEND_TRANSACTION_TIMEOUT_MS = 10 * 1000;
@@ -96,8 +91,12 @@ const loadSolanaDependencies = (standard) => {
   return compressedSolanaDependencies;
 };
 
-const getRpcUrl = () => {
-  const rpcUrl = getHeliusRpcUrl();
+const getRpcUrl = (heliusRpcApiKey) => {
+  const normalizedApiKey =
+    typeof heliusRpcApiKey === "string" ? heliusRpcApiKey.trim() : "";
+  const rpcUrl = normalizedApiKey
+    ? `https://mainnet.helius-rpc.com/?api-key=${encodeURIComponent(normalizedApiKey)}`
+    : "";
   if (!rpcUrl) {
     throw new HttpsError(
       "failed-precondition",
@@ -107,10 +106,13 @@ const getRpcUrl = () => {
   return rpcUrl;
 };
 
-const createEventPrizeUmi = (standard) => {
+const createEventPrizeUmi = (
+  standard,
+  { adminPrivateKey, heliusRpcApiKey } = {},
+) => {
   const dependencies = loadSolanaDependencies(standard);
   const { createSignerFromKeypair, createUmi, signerIdentity } = dependencies;
-  const secretKey = decodeAdminSecretKey(EVENT_PRIZE_ADMIN_PRIVATE_KEY.value());
+  const secretKey = decodeAdminSecretKey(adminPrivateKey);
   if (!secretKey) {
     throw new HttpsError(
       "failed-precondition",
@@ -119,7 +121,7 @@ const createEventPrizeUmi = (standard) => {
   }
   const plugin =
     standard === "core" ? dependencies.mplCore() : dependencies.mplBubblegum();
-  const umi = createUmi(getRpcUrl(), {
+  const umi = createUmi(getRpcUrl(heliusRpcApiKey), {
     commitment: CONFIRMATION_COMMITMENT,
   }).use(plugin);
   const keypair = umi.eddsa.createKeypairFromSecretKey(secretKey);
@@ -137,10 +139,10 @@ const createEventPrizeUmi = (standard) => {
 module.exports = {
   CONFIRMATION_COMMITMENT,
   CONFIRMATION_TIMEOUT_MS,
-  EVENT_PRIZE_ADMIN_PRIVATE_KEY,
   SEND_TRANSACTION_TIMEOUT_MS,
   SIGNATURE_STATUS_TIMEOUT_MS,
   TRANSACTION_STATUS_RETRY_DELAYS_MS,
   createEventPrizeUmi,
+  getRpcUrl,
   loadSolanaDependencies,
 };

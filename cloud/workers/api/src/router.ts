@@ -29,6 +29,11 @@ import {
 } from "./profileRoute.ts";
 import type { WorkerExecutionContext } from "./firebaseAuth.ts";
 import { EVENT_PATHS, handleEventRoute } from "./eventRoute.ts";
+import {
+  EVENT_PRIZE_WITHDRAWAL_PATH,
+  EVENT_PRIZE_WITHDRAWAL_STATUS_PATH,
+  handleEventPrizeWithdrawalRoute,
+} from "./eventPrizeWithdrawal.ts";
 
 const RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
 
@@ -83,6 +88,15 @@ export async function handleRequest(
       return jsonResponse({ ok: false, error: "unavailable" }, 503);
     }
     return handleEventRoute(request, env, ctx);
+  }
+  if (
+    pathname === EVENT_PRIZE_WITHDRAWAL_PATH ||
+    pathname === EVENT_PRIZE_WITHDRAWAL_STATUS_PATH
+  ) {
+    if (!ctx) {
+      return jsonResponse({ ok: false, error: "unavailable" }, 503);
+    }
+    return handleEventPrizeWithdrawalRoute(request, env, ctx);
   }
   if (pathname === "/mining/rock") {
     if (!ctx) {

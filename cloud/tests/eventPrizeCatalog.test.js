@@ -16,8 +16,52 @@ const {
   isEventPrizeEvent,
   isEventPrizeId,
   isEventPrizeStandard,
+  isEventPrizeWithdrawalCompletedResponse,
+  isEventPrizeWithdrawalProcessingResponse,
+  isEventPrizeWithdrawalRequest,
+  isEventPrizeWithdrawalStatusRequest,
 } = require("@mons/shared/event-prizes");
 const databaseRules = require("../database.rules.json");
+
+test("withdrawal contracts require exact Worker request and response shapes", () => {
+  const operationId = `epw_${"a".repeat(64)}`;
+  const request = {
+    eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+    prizeId: "1092",
+    solanaAddress: "11111111111111111111111111111111",
+  };
+  assert.equal(isEventPrizeWithdrawalRequest(request), true);
+  assert.equal(
+    isEventPrizeWithdrawalRequest({ ...request, extra: true }),
+    false,
+  );
+  assert.equal(
+    isEventPrizeWithdrawalStatusRequest({
+      eventId: request.eventId,
+      operationId,
+      prizeId: request.prizeId,
+    }),
+    true,
+  );
+  const processing = {
+    ok: true,
+    status: "processing",
+    operationId,
+    eventId: request.eventId,
+    prizeId: request.prizeId,
+  };
+  assert.equal(isEventPrizeWithdrawalProcessingResponse(processing), true);
+  assert.equal(
+    isEventPrizeWithdrawalCompletedResponse({
+      ...processing,
+      status: "completed",
+      assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+      recipientAddress: request.solanaAddress,
+      transactionSignature: "signature",
+    }),
+    true,
+  );
+});
 
 test("preserves the legacy Core prize catalog", () => {
   const config = getEventPrizeConfig(LEGACY_CORE_PRIZES_EVENT_ID);

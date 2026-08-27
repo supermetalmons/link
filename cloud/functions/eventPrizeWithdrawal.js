@@ -1,7 +1,5 @@
 "use strict";
 
-const { onCall } = require("firebase-functions/v2/https");
-const { HELIUS_RPC_API_KEY } = require("./heliusRpc");
 const {
   buildCompressedTransferBuilder,
   loadPrizeAssetState,
@@ -15,10 +13,7 @@ const {
   reconcileSubmittedAssetState,
   recoverSubmittedWithdrawal,
 } = require("./eventPrizes/submissionRecovery");
-const {
-  EVENT_PRIZE_ADMIN_PRIVATE_KEY,
-  loadSolanaDependencies,
-} = require("./eventPrizes/solana");
+const { loadSolanaDependencies } = require("./eventPrizes/solana");
 const {
   buildSubmittedTransaction,
   deserializePersistedSubmittedTransaction,
@@ -35,17 +30,6 @@ const {
   discardDefinitiveSubmittedTransaction,
   persistSubmittedTransaction,
 } = require("./eventPrizes/withdrawalRepository");
-
-const withdrawEventPrize = onCall(
-  {
-    secrets: [EVENT_PRIZE_ADMIN_PRIVATE_KEY, HELIUS_RPC_API_KEY],
-    timeoutSeconds: 120,
-    memory: "512MiB",
-    maxInstances: 3,
-    concurrency: 1,
-  },
-  handleWithdrawEventPrize,
-);
 
 module.exports = {
   acquireWithdrawalClaim,
@@ -66,5 +50,4 @@ module.exports = {
   validateCompressedPrizeAsset,
   validatePrizeAssignment,
   waitForSubmittedTransactionStatus,
-  withdrawEventPrize,
 };

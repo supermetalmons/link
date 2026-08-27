@@ -1,6 +1,6 @@
 "use strict";
 
-const { HttpsError } = require("firebase-functions/v2/https");
+const { EventPrizeWithdrawalError: HttpsError } = require("./errors");
 const { persistSubmittedTransaction } = require("./withdrawalRepository");
 const {
   CONFIRMATION_COMMITMENT,
@@ -255,14 +255,20 @@ const sendAndConfirmSubmittedTransaction = async ({
     if (status.kind !== "confirmed") {
       throw sendError || status.error || error;
     }
-    console.info("event-prize-withdrawal-confirmation-reconciled", {
-      transactionSignature: submitted.transactionSignature,
-    });
+    console.info(
+      JSON.stringify({
+        event: "event_prize_withdrawal_confirmation_reconciled",
+        transactionSignature: submitted.transactionSignature,
+      }),
+    );
   }
   if (sendError) {
-    console.info("event-prize-withdrawal-send-reconciled", {
-      transactionSignature: submitted.transactionSignature,
-    });
+    console.info(
+      JSON.stringify({
+        event: "event_prize_withdrawal_send_reconciled",
+        transactionSignature: submitted.transactionSignature,
+      }),
+    );
   }
 };
 

@@ -1,6 +1,6 @@
 "use strict";
 
-const { HttpsError } = require("firebase-functions/v2/https");
+const { EventPrizeWithdrawalError: HttpsError } = require("./errors");
 const {
   EVENT_PRIZE_ADMIN_WALLET,
   normalizeSolanaAddress,

@@ -32,7 +32,6 @@ test("preserves the event-prize withdrawal facade", () => {
     "validateCompressedPrizeAsset",
     "validatePrizeAssignment",
     "waitForSubmittedTransactionStatus",
-    "withdrawEventPrize",
   ]);
 });
 

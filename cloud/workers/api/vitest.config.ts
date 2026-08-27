@@ -17,11 +17,31 @@ export default defineConfig(async () => ({
     }),
   ],
   test: {
+    server: {
+      deps: {
+        inline: [
+          "@metaplex-foundation/umi-bundle-defaults",
+          "@metaplex-foundation/umi-eddsa-web3js",
+          "@solana/web3.js",
+          /@metaplex-foundation\/.*/,
+          /@noble\/.*/,
+          /@solana\/.*/,
+        ],
+      },
+    },
     deps: {
       optimizer: {
         ssr: {
           enabled: true,
-          include: ["@spruceid/siwe-parser"],
+          include: [
+            "@metaplex-foundation/mpl-bubblegum",
+            "@metaplex-foundation/mpl-core",
+            "@metaplex-foundation/umi",
+            "@metaplex-foundation/umi-bundle-defaults",
+            "@metaplex-foundation/umi-eddsa-web3js",
+            "@solana/web3.js",
+            "@spruceid/siwe-parser",
+          ],
         },
       },
     },

@@ -1,5 +1,7 @@
 "use strict";
 
+const { isValidSolanaAddress } = require("./solana");
+
 const LEGACY_CORE_PRIZES_EVENT_ID = "NN3eRzoZo80";
 const COMPRESSED_PRIZES_EVENT_ID = "FRkdorMWaYW";
 const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID = "VOxalSrexcA";
@@ -243,6 +245,54 @@ const isToggleEventPrizeSelectionResponse = (value) =>
   (value.selectedPrizeId === null ||
     isEventPrizeId(value.eventId, value.selectedPrizeId));
 
+const isEventPrizeWithdrawalOperationId = (value) =>
+  typeof value === "string" && /^epw_[0-9a-f]{64}$/.test(value);
+
+const isEventPrizeWithdrawalRequest = (value) =>
+  isExactRecord(value, ["eventId", "prizeId", "solanaAddress"]) &&
+  isEventPrizeId(value.eventId, value.prizeId) &&
+  typeof value.solanaAddress === "string" &&
+  isValidSolanaAddress(value.solanaAddress);
+
+const isEventPrizeWithdrawalStatusRequest = (value) =>
+  isExactRecord(value, ["eventId", "operationId", "prizeId"]) &&
+  isEventPrizeId(value.eventId, value.prizeId) &&
+  isEventPrizeWithdrawalOperationId(value.operationId);
+
+const isEventPrizeWithdrawalProcessingResponse = (value) =>
+  isExactRecord(value, ["eventId", "ok", "operationId", "prizeId", "status"]) &&
+  value.ok === true &&
+  value.status === "processing" &&
+  isEventPrizeId(value.eventId, value.prizeId) &&
+  isEventPrizeWithdrawalOperationId(value.operationId);
+
+const isEventPrizeWithdrawalCompletedResponse = (value) =>
+  isExactRecord(value, [
+    "assetAddress",
+    "eventId",
+    "ok",
+    "operationId",
+    "prizeId",
+    "recipientAddress",
+    "status",
+    "transactionSignature",
+  ]) &&
+  value.ok === true &&
+  value.status === "completed" &&
+  isEventPrizeId(value.eventId, value.prizeId) &&
+  isEventPrizeWithdrawalOperationId(value.operationId) &&
+  typeof value.assetAddress === "string" &&
+  isValidSolanaAddress(value.assetAddress) &&
+  typeof value.recipientAddress === "string" &&
+  isValidSolanaAddress(value.recipientAddress) &&
+  typeof value.transactionSignature === "string" &&
+  value.transactionSignature.trim() === value.transactionSignature &&
+  value.transactionSignature.length > 0;
+
+const isEventPrizeWithdrawalResponse = (value) =>
+  isEventPrizeWithdrawalProcessingResponse(value) ||
+  isEventPrizeWithdrawalCompletedResponse(value);
+
 module.exports = {
   ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID,
   ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID,
@@ -256,6 +306,12 @@ module.exports = {
   isEventPrizeEvent,
   isEventPrizeId,
   isEventPrizeStandard,
+  isEventPrizeWithdrawalCompletedResponse,
+  isEventPrizeWithdrawalOperationId,
+  isEventPrizeWithdrawalProcessingResponse,
+  isEventPrizeWithdrawalRequest,
+  isEventPrizeWithdrawalResponse,
+  isEventPrizeWithdrawalStatusRequest,
   isToggleEventPrizeSelectionRequest,
   isToggleEventPrizeSelectionResponse,
 };

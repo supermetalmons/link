@@ -65,6 +65,7 @@ const {
   copyProfileEventPrizeAssignment,
   removeProfileEventPrizeAssignmentIfWithdrawalCompleted,
   removeMatchingProfileEventPrizeAssignment,
+  resolveCanonicalProfilePath,
 } = require("../functions/profileEventPrizeProjection");
 const admin = require("../functions/firebaseAdmin");
 
@@ -73,6 +74,11 @@ const prizeId = "1092";
 const assetAddress = getEventPrizeAssetAddress(eventId, prizeId);
 const profileId = "profile";
 const recipientAddress = "11111111111111111111111111111111";
+const projectionDependencies = () => ({
+  admin,
+  removeMatchingProfileEventPrizeAssignment,
+  resolveCanonicalProfilePath,
+});
 
 test("re-exports the shared event-prize projection policy", () => {
   const withdrawalState = require("../functions/eventPrizeWithdrawalState");
@@ -2204,18 +2210,24 @@ test("completed retries reconcile old and current profile projections", async (t
     profileId: originalProfileId,
     entitledProfileId: originalProfileId,
   };
-  await reconcileCompletedWithdrawalProjections({
-    withdrawal,
-    profileIds: [currentProfileId],
-    eventId,
-    prizeId,
-  });
-  await reconcileCompletedWithdrawalProjections({
-    withdrawal,
-    profileIds: [currentProfileId],
-    eventId,
-    prizeId,
-  });
+  await reconcileCompletedWithdrawalProjections(
+    {
+      withdrawal,
+      profileIds: [currentProfileId],
+      eventId,
+      prizeId,
+    },
+    projectionDependencies(),
+  );
+  await reconcileCompletedWithdrawalProjections(
+    {
+      withdrawal,
+      profileIds: [currentProfileId],
+      eventId,
+      prizeId,
+    },
+    projectionDependencies(),
+  );
 
   assert.equal(
     assignments.get(`profileEventPrizes/${originalProfileId}/${eventId}`),
@@ -2261,15 +2273,18 @@ test("completed reconciliation cleans every profile in a merge chain", async (t)
     }),
   });
 
-  await reconcileCompletedWithdrawalProjections({
-    withdrawal: {
-      profileId: targetProfileId,
-      entitledProfileId: sourceProfileId,
+  await reconcileCompletedWithdrawalProjections(
+    {
+      withdrawal: {
+        profileId: targetProfileId,
+        entitledProfileId: sourceProfileId,
+      },
+      profileIds: [],
+      eventId,
+      prizeId,
     },
-    profileIds: [],
-    eventId,
-    prizeId,
-  });
+    projectionDependencies(),
+  );
 
   profileIds.forEach((candidateProfileId) => {
     assert.equal(
@@ -2296,12 +2311,15 @@ test("projection cleanup failures remain retryable", async (t) => {
   });
 
   await assert.rejects(
-    reconcileCompletedWithdrawalProjections({
-      withdrawal: { profileId },
-      profileIds: [],
-      eventId,
-      prizeId,
-    }),
+    reconcileCompletedWithdrawalProjections(
+      {
+        withdrawal: { profileId },
+        profileIds: [],
+        eventId,
+        prizeId,
+      },
+      projectionDependencies(),
+    ),
     /database unavailable/,
   );
 });

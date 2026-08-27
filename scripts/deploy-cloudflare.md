@@ -61,6 +61,41 @@ npx wrangler workflows instances describe mons-link-event-progress latest --conf
 
 Before retiring the legacy Firebase event-progress functions, verify that `processEventProgress` has no pending Cloud Tasks and that `eventProgressFallback` is empty. The Cloudflare outbox is private and indexed by `lastQueuedAtMs` for bounded recovery sweeps.
 
+`mons-link-event-prize-withdrawal` owns durable Solana prize transfers. The authenticated API admits a deterministic instance per event prize, while the existing RTDB withdrawal record remains the ownership, lease, submitted-transaction, and completion source of truth. The browser polls the authenticated status route; a browser timeout never terminates the Workflow.
+
+Set the wallet key as an encrypted Worker secret through a protected file:
+
+```sh
+(
+  set -e
+  umask 077
+  event_prize_key_file="$(mktemp)"
+  trap 'rm -f "$event_prize_key_file"' EXIT
+  firebase functions:secrets:access EVENT_PRIZE_ADMIN_PRIVATE_KEY --project mons-link > "$event_prize_key_file"
+  test -s "$event_prize_key_file"
+  npx wrangler secret put EVENT_PRIZE_ADMIN_PRIVATE_KEY --config cloud/workers/api/wrangler.jsonc < "$event_prize_key_file"
+)
+```
+
+After promoting a candidate API version and before switching the frontend, run the read-only runtime preflight and inspect its result:
+
+```sh
+event_prize_preflight_id="preflight-$(date -u +%Y%m%d%H%M%S)-$$"
+npx wrangler workflows trigger mons-link-event-prize-withdrawal --id "$event_prize_preflight_id" --params '{"schemaVersion":1,"kind":"preflight"}' --config cloud/workers/api/wrangler.jsonc
+npx wrangler workflows instances describe mons-link-event-prize-withdrawal "$event_prize_preflight_id" --config cloud/workers/api/wrangler.jsonc
+```
+
+The preflight must complete with `{"ok":true,"status":"ready"}`. It verifies the encrypted wallet identity, both Metaplex runtimes, and a read-only Helius RPC request without building or sending a transaction.
+
+For the production cutover, promote and smoke the API, pass the Workflow preflight, promote and smoke the frontend, then remove the retired callable in the same maintenance window:
+
+```sh
+firebase functions:delete withdrawEventPrize --project mons-link --force
+firebase functions:list --project mons-link
+```
+
+Keep the Firebase wallet secret through the rollback window. Rollback restores the previous Firebase Function first, the previous frontend Version second, and the previous API Worker Version last.
+
 Rollback always targets a reviewed Version ID:
 
 ```sh

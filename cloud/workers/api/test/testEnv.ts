@@ -78,6 +78,8 @@ export const TELEGRAM_TEST_ENV = {
   AUTH_MUTATIONS_DISABLED: "false" as unknown as Env["AUTH_MUTATIONS_DISABLED"],
   AUTH_RATE_LIMITER: rateLimit,
   EVENT_PROGRESS_WORKFLOW: workflow,
+  EVENT_PRIZE_ADMIN_PRIVATE_KEY: "test-event-prize-private-key",
+  EVENT_PRIZE_WITHDRAWAL_WORKFLOW: workflow,
   FIREBASE_RTDB_URL: "https://mons-link-default-rtdb.firebaseio.com",
   FIRESTORE_SERVICE_ACCOUNT_EMAIL: "firestore@example.iam.gserviceaccount.com",
   FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",

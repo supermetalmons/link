@@ -1,5 +1,11 @@
 const admin = require("./firebaseAdmin");
-const { HttpsError } = require("firebase-functions/v2/https");
+
+class ProfileLookupError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
 
 const readProfileByLoginUid = async (uid, selectedFields = []) => {
   let query = admin
@@ -15,7 +21,10 @@ const readProfileByLoginUid = async (uid, selectedFields = []) => {
     return null;
   }
   if (snapshot.size > 1) {
-    throw new HttpsError("failed-precondition", "login-profile-conflict");
+    throw new ProfileLookupError(
+      "failed-precondition",
+      "login-profile-conflict",
+    );
   }
   return snapshot.docs[0];
 };

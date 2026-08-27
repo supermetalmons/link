@@ -1,13 +1,10 @@
 "use strict";
 
-const { HttpsError } = require("firebase-functions/v2/https");
+const { EventPrizeWithdrawalError: HttpsError } = require("./errors");
 const {
   getEventPrizeDefinition,
   isEventPrizeStandard,
 } = require("@mons/shared/event-prizes");
-const admin = require("../firebaseAdmin");
-const { readProfileByLoginUid } = require("../profileLookup");
-const { resolveCanonicalProfileId } = require("../profileEventPrizeProjection");
 const {
   EVENT_PRIZE_ADMIN_WALLET,
   getEventPrizeWithdrawalPath,
@@ -21,14 +18,13 @@ const {
   loadPrizeAssetState,
 } = require("./assets");
 const {
-  attemptCompletedWithdrawalProjectionReconciliation,
   finalizeWithdrawal,
+  reconcileCompletedWithdrawalProjections,
 } = require("./projectionReconciliation");
 const {
   inspectSubmittedWithdrawal,
   reconcileSubmittedAssetState,
 } = require("./submissionRecovery");
-const { createEventPrizeUmi } = require("./solana");
 const {
   buildSubmittedTransaction,
   isDefinitiveSubmittedTransactionFailure,
@@ -38,7 +34,6 @@ const {
   acquireWithdrawalClaim,
   discardDefinitiveSubmittedTransaction,
   markWithdrawalBlocked,
-  releaseProcessingClaim,
 } = require("./withdrawalRepository");
 
 const normalizeString = (value) =>
@@ -73,7 +68,7 @@ const validatePrizeAssignment = ({
   return place;
 };
 
-const handleWithdrawEventPrize = async (request) => {
+const handleWithdrawEventPrize = async (request, dependencies) => {
   if (!request.auth) {
     throw new HttpsError(
       "unauthenticated",
@@ -115,6 +110,13 @@ const handleWithdrawEventPrize = async (request) => {
       "Choose a destination other than the prize wallet.",
     );
   }
+
+  const {
+    admin,
+    createEventPrizeUmi,
+    readProfileByLoginUid,
+    resolveCanonicalProfileId,
+  } = dependencies;
 
   const profileSnapshot = await readProfileByLoginUid(request.auth.uid, []);
   const profileId = normalizeString(profileSnapshot?.id);
@@ -162,12 +164,15 @@ const handleWithdrawEventPrize = async (request) => {
         "Prize withdrawal is unavailable.",
       );
     }
-    await attemptCompletedWithdrawalProjectionReconciliation({
-      withdrawal: existingWithdrawal,
-      profileIds: [profileId],
-      eventId,
-      prizeId,
-    });
+    await reconcileCompletedWithdrawalProjections(
+      {
+        withdrawal: existingWithdrawal,
+        profileIds: [profileId],
+        eventId,
+        prizeId,
+      },
+      dependencies,
+    );
     return buildCompletedResponse(existingWithdrawal);
   }
 
@@ -209,12 +214,15 @@ const handleWithdrawEventPrize = async (request) => {
     canonicalRecordSourceProfileId: existingProfileId,
   });
   if (claim.completed) {
-    await attemptCompletedWithdrawalProjectionReconciliation({
-      withdrawal: claim.completed,
-      profileIds: [profileId],
-      eventId,
-      prizeId,
-    });
+    await reconcileCompletedWithdrawalProjections(
+      {
+        withdrawal: claim.completed,
+        profileIds: [profileId],
+        eventId,
+        prizeId,
+      },
+      dependencies,
+    );
     return buildCompletedResponse(claim.completed);
   }
 
@@ -223,15 +231,18 @@ const handleWithdrawEventPrize = async (request) => {
   let submitted = null;
   const completeWithdrawal = async (transactionSignature) =>
     buildCompletedResponse(
-      await finalizeWithdrawal({
-        withdrawal,
-        profileId,
-        eventId,
-        prizeId,
-        assetAddress,
-        recipientAddress,
-        transactionSignature,
-      }),
+      await finalizeWithdrawal(
+        {
+          withdrawal,
+          profileId,
+          eventId,
+          prizeId,
+          assetAddress,
+          recipientAddress,
+          transactionSignature,
+        },
+        dependencies,
+      ),
     );
   const blockWithdrawal = async (observedOwner, message) => {
     await markWithdrawalBlocked({ withdrawalRef, leaseId, observedOwner });
@@ -326,12 +337,15 @@ const handleWithdrawEventPrize = async (request) => {
     const completedResponse = await completeWithdrawal(
       submitted.transactionSignature,
     );
-    console.info("event-prize-withdrawal-completed", {
-      eventId,
-      prizeId,
-      profileId,
-      transactionSignature: submitted.transactionSignature,
-    });
+    console.info(
+      JSON.stringify({
+        event: "event_prize_withdrawal_completed",
+        eventId,
+        prizeId,
+        profileId,
+        transactionSignature: submitted.transactionSignature,
+      }),
+    );
     return completedResponse;
   } catch (error) {
     if (submitted && isDefinitiveSubmittedTransactionFailure(error)) {
@@ -345,12 +359,15 @@ const handleWithdrawEventPrize = async (request) => {
         if (discardError instanceof HttpsError) {
           throw discardError;
         }
-        console.error("event-prize-withdrawal-discard-failed", {
-          eventId,
-          prizeId,
-          profileId,
-          errorType: normalizeString(discardError?.name) || "Error",
-        });
+        console.error(
+          JSON.stringify({
+            event: "event_prize_withdrawal_discard_failed",
+            eventId,
+            prizeId,
+            profileId,
+            errorType: normalizeString(discardError?.name) || "Error",
+          }),
+        );
         throw new HttpsError(
           "unavailable",
           "Prize withdrawal failed. Please try again.",
@@ -361,19 +378,19 @@ const handleWithdrawEventPrize = async (request) => {
         "Prize transfer failed. Please try again.",
       );
     }
-    if (!submitted && withdrawal?.status !== "submitted") {
-      await releaseProcessingClaim({ withdrawalRef, leaseId }).catch(() => {});
-    }
     if (error instanceof HttpsError) {
       throw error;
     }
-    console.error("event-prize-withdrawal-failed", {
-      eventId,
-      prizeId,
-      profileId,
-      phase: submitted ? "submitted" : "processing",
-      errorType: normalizeString(error?.name) || "Error",
-    });
+    console.error(
+      JSON.stringify({
+        event: "event_prize_withdrawal_failed",
+        eventId,
+        prizeId,
+        profileId,
+        phase: submitted ? "submitted" : "processing",
+        errorType: normalizeString(error?.name) || "Error",
+      }),
+    );
     throw new HttpsError(
       "unavailable",
       "Prize withdrawal failed. Please try again.",

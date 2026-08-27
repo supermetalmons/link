@@ -1,6 +1,6 @@
 "use strict";
 
-const { HttpsError } = require("firebase-functions/v2/https");
+const { EventPrizeWithdrawalError: HttpsError } = require("./errors");
 const { normalizeSolanaAddress } = require("../eventPrizeWithdrawalState");
 const { CONFIRMATION_COMMITMENT, loadSolanaDependencies } = require("./solana");
 
