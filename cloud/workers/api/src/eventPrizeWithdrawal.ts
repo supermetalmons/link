@@ -56,6 +56,15 @@ import {
   type GameplayRepository,
 } from "./gameplayRepository.ts";
 import { readBoundedJson } from "./http.ts";
+import {
+  canonicalEventPrizeWithdrawalStorageMode,
+  createD1EventPrizeWithdrawalStore,
+  listEventPrizeWithdrawalShadowRepairs,
+  parseEventPrizeWithdrawalPath,
+  readEventPrizeWithdrawalStorageControl,
+  readEventPrizeWithdrawalStorageMode,
+  type EventPrizeWithdrawalStore,
+} from "./eventPrizeWithdrawalD1.ts";
 
 export const EVENT_PRIZE_WITHDRAWAL_PATH = "/events/prizes/withdrawals";
 export const EVENT_PRIZE_WITHDRAWAL_STATUS_PATH =
@@ -118,6 +127,10 @@ type EventPrizeRuntimeDependencies = {
   };
   createEventPrizeUmi(standard: "compressed" | "core"): unknown;
   now(): number;
+  readWithdrawal(
+    eventId: string,
+    prizeId: string,
+  ): Promise<Record<string, unknown> | null>;
   readProfileByLoginUid(uid: string): Promise<{ id: string } | null>;
   removeMatchingProfileEventPrizeAssignment(input: {
     targetRef: RtdbReference;
@@ -128,10 +141,15 @@ type EventPrizeRuntimeDependencies = {
   resolveCanonicalProfilePath(profileId: string): Promise<string[]>;
 };
 
+type EventPrizeGameplayRepository = Pick<
+  GameplayRepository,
+  "getRtdbPath" | "patchRtdbRoot" | "transactRtdbPath"
+>;
+
 type RouteDependencies = {
   firestore?: AuthFirestoreClient;
   now?: () => number;
-  repository?: GameplayRepository;
+  repository?: EventPrizeGameplayRepository;
   verifyIdentity?: (
     request: Request,
     ctx: WorkerExecutionContext,
@@ -199,14 +217,136 @@ function createRtdbReference(
   };
 }
 
-export function createEventPrizeRuntimeDependencies(
+function createFirebaseEventPrizeWithdrawalStore(
+  repository: EventPrizeGameplayRepository,
+): EventPrizeWithdrawalStore {
+  return {
+    acknowledgeShadowPaths: async () => undefined,
+    async get(eventId, prizeId) {
+      return toRecord(
+        await repository.getRtdbPath(
+          getEventPrizeWithdrawalPath(eventId, prizeId),
+        ),
+      );
+    },
+    reference(eventId, prizeId) {
+      return createRtdbReference(
+        repository,
+        getEventPrizeWithdrawalPath(eventId, prizeId),
+      );
+    },
+    replacePaths: (updates) => repository.patchRtdbRoot(updates),
+  };
+}
+
+function createEventPrizeAdmin(
+  repository: EventPrizeGameplayRepository,
+  withdrawalStore: EventPrizeWithdrawalStore,
+  usesD1: boolean,
+): EventPrizeRuntimeDependencies["admin"] {
+  const mirrorWithdrawalUpdates = async (
+    updates: Record<string, unknown>,
+  ): Promise<void> => {
+    try {
+      await repository.patchRtdbRoot(updates);
+      await withdrawalStore.acknowledgeShadowPaths(updates);
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          event: "event_prize_withdrawal_shadow_write_failed",
+          errorType: cleanString(toRecord(error)?.name) || "Error",
+        }),
+      );
+    }
+  };
+  return {
+    database: () => ({
+      ref: (path = "") => {
+        const identity = parseEventPrizeWithdrawalPath(path);
+        if (identity) {
+          const withdrawalReference = withdrawalStore.reference(
+            identity.eventId,
+            identity.prizeId,
+          );
+          if (!usesD1) return withdrawalReference;
+          return {
+            once: (event) => withdrawalReference.once(event),
+            async transaction(updater, onComplete, applyLocally) {
+              const result = await withdrawalReference.transaction(
+                updater,
+                onComplete,
+                applyLocally,
+              );
+              if (result.committed) {
+                await mirrorWithdrawalUpdates({
+                  [path]: result.snapshot.val(),
+                });
+              }
+              return result;
+            },
+            async update(updates) {
+              await withdrawalReference.update(updates);
+              const current = await withdrawalReference.once("value");
+              await mirrorWithdrawalUpdates({ [path]: current.val() });
+            },
+          };
+        }
+        const reference = createRtdbReference(repository, path);
+        if (!usesD1 || path) return reference;
+        return {
+          ...reference,
+          async update(updates) {
+            const withdrawalUpdates: Record<string, unknown> = {};
+            const firebaseUpdates: Record<string, unknown> = {};
+            for (const [updatePath, value] of Object.entries(updates)) {
+              if (parseEventPrizeWithdrawalPath(updatePath)) {
+                withdrawalUpdates[updatePath] = value;
+              } else {
+                firebaseUpdates[updatePath] = value;
+              }
+            }
+            if (
+              Object.keys(withdrawalUpdates).length > 0 &&
+              Object.keys(firebaseUpdates).length > 0
+            ) {
+              throw new TypeError("cross-storage-root-update");
+            }
+            if (Object.keys(withdrawalUpdates).length > 0) {
+              await withdrawalStore.replacePaths(withdrawalUpdates);
+              await mirrorWithdrawalUpdates(withdrawalUpdates);
+              return;
+            }
+            await repository.patchRtdbRoot(firebaseUpdates);
+          },
+        };
+      },
+    }),
+  };
+}
+
+export async function createEventPrizeRuntimeDependencies(
   env: Env,
   {
     firestore = createAuthFirestoreClient(env),
     now = Date.now,
     repository = createGameplayRepository(env),
   }: Pick<RouteDependencies, "firestore" | "now" | "repository"> = {},
-): EventPrizeRuntimeDependencies {
+): Promise<EventPrizeRuntimeDependencies> {
+  const storageMode = await readEventPrizeWithdrawalStorageMode(
+    env.EVENT_PRIZE_WITHDRAWALS_DB,
+  );
+  if (storageMode === "frozen") {
+    throw new EventPrizeWithdrawalError(
+      "unavailable",
+      "Prize withdrawals are temporarily unavailable.",
+    );
+  }
+  const withdrawalStore =
+    storageMode === "d1"
+      ? createD1EventPrizeWithdrawalStore(env.EVENT_PRIZE_WITHDRAWALS_DB, {
+          now,
+        })
+      : createFirebaseEventPrizeWithdrawalStore(repository);
   const readProfileByLoginUid = async (uid: string) => {
     const profiles = await firestore.query(
       "users",
@@ -233,17 +373,18 @@ export function createEventPrizeRuntimeDependencies(
         )?.fields || null,
     });
   return {
-    admin: {
-      database: () => ({
-        ref: (path = "") => createRtdbReference(repository, path),
-      }),
-    },
+    admin: createEventPrizeAdmin(
+      repository,
+      withdrawalStore,
+      storageMode === "d1",
+    ),
     createEventPrizeUmi: (standard) =>
       createConfiguredEventPrizeUmi(standard, {
         adminPrivateKey: env.EVENT_PRIZE_ADMIN_PRIVATE_KEY,
         heliusRpcApiKey: env.HELIUS_RPC_API_KEY,
       }),
     now,
+    readWithdrawal: withdrawalStore.get,
     readProfileByLoginUid,
     async removeMatchingProfileEventPrizeAssignment({
       targetRef,
@@ -267,6 +408,35 @@ export function createEventPrizeRuntimeDependencies(
     },
     resolveCanonicalProfilePath,
   };
+}
+
+export async function repairEventPrizeWithdrawalShadows(
+  env: Env,
+  dependencies: { repository?: EventPrizeGameplayRepository } = {},
+): Promise<number> {
+  const control = await readEventPrizeWithdrawalStorageControl(
+    env.EVENT_PRIZE_WITHDRAWALS_DB,
+  );
+  if (canonicalEventPrizeWithdrawalStorageMode(control) !== "d1") return 0;
+  const repairs = await listEventPrizeWithdrawalShadowRepairs(
+    env.EVENT_PRIZE_WITHDRAWALS_DB,
+  );
+  if (repairs.length === 0) return 0;
+  const updates = Object.fromEntries(
+    repairs.map((repair) => [repair.path, repair.value]),
+  );
+  const repository = dependencies.repository || createGameplayRepository(env);
+  await repository.patchRtdbRoot(updates);
+  await createD1EventPrizeWithdrawalStore(
+    env.EVENT_PRIZE_WITHDRAWALS_DB,
+  ).acknowledgeShadowPaths(updates);
+  console.info(
+    JSON.stringify({
+      event: "event_prize_withdrawal_shadow_repair_completed",
+      repaired: repairs.length,
+    }),
+  );
+  return repairs.length;
 }
 
 function errorStatus(code: string): number {
@@ -462,7 +632,6 @@ async function resolveOwnedWithdrawal(
   eventId: string,
   prizeId: string,
   runtime: EventPrizeRuntimeDependencies,
-  repository: GameplayRepository,
 ): Promise<{
   canonicalRecordProfileId: string;
   profileId: string;
@@ -473,9 +642,7 @@ async function resolveOwnedWithdrawal(
   if (!profileId) {
     throw new EventPrizeWithdrawalError("not-found", "profile-not-found");
   }
-  const withdrawal = toRecord(
-    await repository.getRtdbPath(getEventPrizeWithdrawalPath(eventId, prizeId)),
-  );
+  const withdrawal = await runtime.readWithdrawal(eventId, prizeId);
   if (!withdrawal) {
     return { canonicalRecordProfileId: "", profileId, withdrawal: null };
   }
@@ -515,7 +682,7 @@ async function admitWithdrawal(
   },
   operationId: string,
   runtime: EventPrizeRuntimeDependencies,
-  repository: GameplayRepository,
+  repository: EventPrizeGameplayRepository,
 ): Promise<EventPrizeWithdrawalCompletedResponse | PendingWithdrawalAdmission> {
   const prize = getEventPrizeDefinition(request.eventId, request.prizeId);
   const assetAddress = normalizeSolanaAddress(prize?.assetAddress);
@@ -552,7 +719,6 @@ async function admitWithdrawal(
       request.eventId,
       request.prizeId,
       runtime,
-      repository,
     );
   if (
     withdrawal &&
@@ -661,12 +827,11 @@ async function admitWithdrawal(
 
 export async function resolveEventPrizeWithdrawalExecutionParams(
   params: EventPrizeWithdrawalWorkflowParams,
-  repository: Pick<GameplayRepository, "getRtdbPath">,
+  runtime: Pick<EventPrizeRuntimeDependencies, "readWithdrawal">,
 ): Promise<EventPrizeWithdrawalWorkflowParams> {
-  const withdrawal = toRecord(
-    await repository.getRtdbPath(
-      getEventPrizeWithdrawalPath(params.eventId, params.prizeId),
-    ),
+  const withdrawal = await runtime.readWithdrawal(
+    params.eventId,
+    params.prizeId,
   );
   const prize = getEventPrizeDefinition(params.eventId, params.prizeId);
   const currentRecipientAddress = normalizeSolanaAddress(
@@ -722,13 +887,13 @@ export async function executeEventPrizeWithdrawal(
   > = {},
 ): Promise<EventPrizeWithdrawalCompletedResponse> {
   const repository = dependencies.repository || createGameplayRepository(env);
-  const runtime = createEventPrizeRuntimeDependencies(env, {
+  const runtime = await createEventPrizeRuntimeDependencies(env, {
     ...dependencies,
     repository,
   });
   const executionParams = await resolveEventPrizeWithdrawalExecutionParams(
     params,
-    repository,
+    runtime,
   );
   const executionRuntime: EventPrizeRuntimeDependencies = {
     ...runtime,
@@ -782,7 +947,7 @@ export async function handleEventPrizeWithdrawalRoute(
       throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
     }
     const repository = dependencies.repository || createGameplayRepository(env);
-    const runtime = createEventPrizeRuntimeDependencies(env, {
+    const runtime = await createEventPrizeRuntimeDependencies(env, {
       firestore: dependencies.firestore,
       now: dependencies.now,
       repository,
@@ -847,7 +1012,6 @@ export async function handleEventPrizeWithdrawalRoute(
         body.eventId,
         body.prizeId,
         runtime,
-        repository,
       );
       if (!owned.withdrawal) {
         const assignment = await repository.getRtdbPath(
@@ -902,7 +1066,6 @@ export async function handleEventPrizeWithdrawalRoute(
           body.eventId,
           body.prizeId,
           runtime,
-          repository,
         );
         if (
           owned.withdrawal &&

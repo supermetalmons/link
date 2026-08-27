@@ -135,6 +135,12 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       database_id: "71b03cec-ffc1-42fd-a36e-0320369af85a",
       migrations_dir: "telegram-migrations",
     },
+    {
+      binding: "EVENT_PRIZE_WITHDRAWALS_DB",
+      database_name: "mons-link-event-prize-withdrawals",
+      database_id: "3815453d-a81b-441c-b941-bcdf78c52cf3",
+      migrations_dir: "event-prize-withdrawal-migrations",
+    },
   ]);
   assert.deepEqual(config.secrets, {
     required: [

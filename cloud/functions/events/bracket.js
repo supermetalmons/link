@@ -50,6 +50,15 @@ const createEventBracketRuntime = (dependencies = {}) => {
   const resolveProfileEventPrizeOwnerId =
     dependencies.resolveProfileEventPrizeOwnerId ||
     (async ({ profileId }) => profileId);
+  const readEventPrizeWithdrawals =
+    dependencies.readEventPrizeWithdrawals ||
+    (async (eventId) => {
+      const snapshot = await admin
+        .database()
+        .ref(`eventPrizeWithdrawals/${eventId}`)
+        .once("value");
+      return snapshot.val() || {};
+    });
   const EVENT_MATCH_RESOLVE_CONCURRENCY = 4;
 
   const normalizeString = (value) =>
@@ -347,14 +356,10 @@ const createEventBracketRuntime = (dependencies = {}) => {
     eventId,
     assignments,
   }) => {
-    const withdrawalsSnapshot = await admin
-      .database()
-      .ref(`eventPrizeWithdrawals/${eventId}`)
-      .once("value");
     const projectableAssignments = filterProjectableEventPrizeAssignments({
       eventId,
       assignments,
-      withdrawals: withdrawalsSnapshot.val() || {},
+      withdrawals: await readEventPrizeWithdrawals(eventId),
     });
     const canonicalAssignments = {};
     const canonicalProfileIds = new Set();
@@ -452,11 +457,7 @@ const createEventBracketRuntime = (dependencies = {}) => {
     eventId,
     assignments,
   }) => {
-    const withdrawalsSnapshot = await admin
-      .database()
-      .ref(`eventPrizeWithdrawals/${eventId}`)
-      .once("value");
-    const withdrawals = withdrawalsSnapshot.val() || {};
+    const withdrawals = await readEventPrizeWithdrawals(eventId);
     await Promise.all(
       Object.values(assignments || {}).map(async (assignment) => {
         if (

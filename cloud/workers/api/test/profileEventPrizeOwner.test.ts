@@ -148,6 +148,41 @@ test("reconciles canonical prize projections without changing event history", as
   );
 });
 
+test("uses injected canonical withdrawals when filtering prize projections", async () => {
+  const eventId = "NN3eRzoZo80";
+  const prizeId = "1092";
+  const values = new Map<string, unknown>();
+  const runtime = createEventBracketRuntime({
+    admin: createAdmin(values),
+    readEventPrizeWithdrawals: async () => ({
+      [prizeId]: {
+        assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+        eventId,
+        prizeId,
+        status: "completed",
+      },
+    }),
+    resolveProfileEventPrizeOwnerId: async () => "target-profile",
+  });
+
+  assert.deepEqual(
+    await runtime.reconcileProfileEventPrizeAssignments({
+      assignments: {
+        1: {
+          eventId,
+          profileId: "source-profile",
+          place: 1,
+          prizeId,
+          assignedAtMs: 100,
+        },
+      },
+      eventId,
+    }),
+    { didChange: false, settled: true },
+  );
+  assert.equal(values.size, 0);
+});
+
 test("does not overwrite a canonical prize assignment inserted concurrently", async () => {
   const eventId = "NN3eRzoZo80";
   const targetPath = `profileEventPrizes/target-profile/${eventId}`;

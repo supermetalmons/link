@@ -8,6 +8,7 @@ Run commands from the repository root with Node.js 24 and Java 21 or newer. Fire
 - `cloud/workers/api/wrangler.jsonc` owns the API Worker routes, variables, bindings, Queues, Workflows, consumers, and Cron schedule.
 - `cloud/workers/api/auth-state-migrations/` owns the `mons-link-auth-state` D1 schema for auth intents and X redirect flows.
 - `cloud/workers/api/telegram-migrations/` owns the `mons-link-telegram` D1 schema for Telegram delivery, recovery, and announcement receipts.
+- `cloud/workers/api/event-prize-withdrawal-migrations/` owns the `mons-link-event-prize-withdrawals` D1 schema and storage-mode fence for Solana prize withdrawals.
 - `cloud/workers/api/release.env` stays empty. It prevents release commands from loading developer environment files.
 - Encrypted secrets stay in Cloudflare. Their required names are declared in the API Wrangler configuration.
 - Do not edit production Worker configuration in the Cloudflare Dashboard. Review and deploy the tracked configuration.
@@ -70,6 +71,43 @@ npm run smoke:api -- --base-url https://api.mons.link --smoke-sol <known-wallet>
 
 `upload:api` uses `wrangler versions upload --strict`; it does not send traffic to the candidate. `promote:api` deploys the explicit Version ID to 100% of traffic without prompting. `deploy:api:triggers` applies the tracked route, Cron, and Queue consumer configuration. Routine code-only releases may omit the trigger command when that configuration is unchanged.
 
+## Event-prize withdrawal D1 cutover
+
+`mons-link-event-prize-withdrawals` is the canonical ownership, lease, submitted-transaction, and completion store after cutover. The API Worker reads its storage mode once per request or Workflow attempt. `firebase` keeps the candidate on the existing RTDB records, `frozen` blocks new admissions and Workflow attempts, and `d1` uses D1 while maintaining an RTDB rollback shadow. D1 triggers persist exact shadow-repair markers, and the five-minute Worker schedule retries them until RTDB acknowledges the same record version.
+
+Apply the schema before uploading a Worker version with the binding:
+
+```sh
+npx wrangler d1 migrations apply mons-link-event-prize-withdrawals --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run migrate:event-prize-withdrawals-d1 -- --dry-run --project mons-link
+```
+
+Upload, smoke, and promote the hybrid candidate while the control row remains in `firebase`. Run the read-only Workflow preflight, then enter the short maintenance window:
+
+```sh
+npm run migrate:event-prize-withdrawals-d1 -- --freeze --project mons-link
+npm run migrate:event-prize-withdrawals-d1 -- --dry-run --project mons-link
+npm run migrate:event-prize-withdrawals-d1 -- --final --project mons-link
+```
+
+After freezing, wait at least five minutes and repeat the dry run until `activeLeases` is zero. `--final` requires a Firebase-origin freeze, rejects active leases, imports an exact RTDB snapshot, verifies its content digest and record count against D1, and changes the mode to `d1` only after verification. It does not delete the RTDB source. Run the Workflow preflight again after the mode changes.
+
+If the cutover must stop while frozen, restore the exact pre-freeze mode:
+
+```sh
+npm run migrate:event-prize-withdrawals-d1 -- --abort --project mons-link
+```
+
+For a rollback to a Firebase-only Worker version, first freeze the hybrid version, wait until the dry run reports no active leases, verify the D1 and RTDB shadow match, and switch the control row back before changing Worker traffic:
+
+```sh
+npm run migrate:event-prize-withdrawals-d1 -- --freeze --project mons-link
+npm run migrate:event-prize-withdrawals-d1 -- --dry-run --project mons-link
+npm run migrate:event-prize-withdrawals-d1 -- --rollback --project mons-link
+```
+
+Never roll back to a Firebase-only version while the control row remains `d1`. A later D1 cutover must repeat the freeze and final import so D1 includes any Firebase-era changes.
+
 Apply the Telegram D1 schema before uploading a Worker version that includes the `TELEGRAM_DB` binding:
 
 ```sh
@@ -99,7 +137,7 @@ npx wrangler workflows instances describe mons-link-event-progress latest --conf
 
 Before retiring the legacy Firebase event-progress functions, verify that `processEventProgress` has no pending Cloud Tasks and that `eventProgressFallback` is empty. The Cloudflare outbox is private and indexed by `lastQueuedAtMs` for bounded recovery sweeps.
 
-`mons-link-event-prize-withdrawal` owns durable Solana prize transfers. The authenticated API admits a deterministic instance per event prize, while the existing RTDB withdrawal record remains the ownership, lease, submitted-transaction, and completion source of truth. The browser polls the authenticated status route; a browser timeout never terminates the Workflow.
+`mons-link-event-prize-withdrawal` owns durable Solana prize transfers. The authenticated API admits a deterministic instance per event prize, while `mons-link-event-prize-withdrawals` D1 owns the withdrawal state after the fenced cutover. The browser polls the authenticated status route; a browser timeout never terminates the Workflow.
 
 Set the wallet key as an encrypted Worker secret through a protected file:
 

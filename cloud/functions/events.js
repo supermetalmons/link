@@ -37,6 +37,7 @@ const createEventRuntime = (dependencies) => {
   const enqueueEventProgressTask = dependencies.enqueueEventProgressTask;
   const resolveProfileEventPrizeOwnerId =
     dependencies.resolveProfileEventPrizeOwnerId;
+  const readEventPrizeWithdrawals = dependencies.readEventPrizeWithdrawals;
   const {
     acquireEventLockWithRetry,
     isEventLockStillOwned,
@@ -60,7 +61,11 @@ const createEventRuntime = (dependencies) => {
     resolveEventPrizeAssignments,
     resolveRoundMatchState,
     resolveRoundMatchesWithConcurrency,
-  } = createEventBracketRuntime({ admin, resolveProfileEventPrizeOwnerId });
+  } = createEventBracketRuntime({
+    admin,
+    readEventPrizeWithdrawals,
+    resolveProfileEventPrizeOwnerId,
+  });
   const HttpsError = EventRuntimeError;
   const EVENT_SYNC_THROTTLE_WINDOW_MS = 500;
 

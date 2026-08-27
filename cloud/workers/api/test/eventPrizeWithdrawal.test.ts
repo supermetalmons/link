@@ -268,7 +268,12 @@ test("uses the current processing admission when a Workflow retries", async () =
       recipientAddress,
       requesterUid: uid,
     },
-    state.value,
+    {
+      readWithdrawal: async (candidateEventId, candidatePrizeId) =>
+        (state.values.get(
+          `eventPrizeWithdrawals/${candidateEventId}/${candidatePrizeId}`,
+        ) as Record<string, unknown> | undefined) ?? null,
+    },
   );
 
   assert.equal(resolved.recipientAddress, nextRecipientAddress);

@@ -592,6 +592,31 @@ test("missing recovery jobs are already complete", async () => {
   assert.equal(await recovery.recoverProfile("missing-profile"), true);
 });
 
+test("does not read withdrawal control until prize recovery needs it", () => {
+  const memory = memoryFirestore([]);
+  let prepares = 0;
+  const baseWithdrawalDb: D1Database =
+    TELEGRAM_TEST_ENV.EVENT_PRIZE_WITHDRAWALS_DB;
+  const withdrawalDb = {
+    batch: <T>(statements: D1PreparedStatement[]) =>
+      baseWithdrawalDb.batch<T>(statements),
+    dump: () => baseWithdrawalDb.dump(),
+    exec: (query: string) => baseWithdrawalDb.exec(query),
+    prepare: (query: string) => {
+      prepares += 1;
+      return baseWithdrawalDb.prepare(query);
+    },
+    withSession: (
+      constraintOrBookmark?: D1SessionBookmark | D1SessionConstraint,
+    ) => baseWithdrawalDb.withSession(constraintOrBookmark),
+  } satisfies D1Database;
+  createAuthRecoveryService(TELEGRAM_TEST_ENV as Env, {
+    ...externalDependencies(memory.client),
+    withdrawalDb,
+  });
+  assert.equal(prepares, 0);
+});
+
 test("keeps an empty caller job as a short merge barrier", async () => {
   let nowMs = 100;
   const job = newAuthRecoveryJob("profile-1", [], [], nowMs);

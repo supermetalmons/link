@@ -12,6 +12,7 @@ import {
 } from "./gameplayRepository.ts";
 import { createEventTelegramProjectionRepository } from "./eventTelegramProjectionProducer.ts";
 import { createEventProfileGameProjectionRepository } from "./eventProfileGameProjectionProducer.ts";
+import { createCanonicalEventPrizeWithdrawalReader } from "./eventPrizeWithdrawalD1.ts";
 import { createProfileEventPrizeOwnerResolver } from "./profileEventPrizeOwner.ts";
 import {
   createEventRuntime,
@@ -658,6 +659,19 @@ export function createWorkflowEventRuntime(env: Env, signal: AbortSignal) {
       },
     },
   });
+  const readEventPrizeWithdrawals = createCanonicalEventPrizeWithdrawalReader(
+    env.EVENT_PRIZE_WITHDRAWALS_DB,
+    async (eventId) => {
+      const value = await repository.getRtdbPath(
+        `eventPrizeWithdrawals/${eventId}`,
+        undefined,
+        signal,
+      );
+      return value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, Record<string, unknown>>)
+        : {};
+    },
+  );
   return {
     repository,
     runtime: createEventRuntime({
@@ -667,6 +681,7 @@ export function createWorkflowEventRuntime(env: Env, signal: AbortSignal) {
       },
       eventLockManager: lockManager,
       getProfileByLoginId: async () => ({}),
+      readEventPrizeWithdrawals,
       resolveProfileEventPrizeOwnerId: createProfileEventPrizeOwnerResolver(
         env,
         { rtdb: repository, signal },

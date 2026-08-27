@@ -84,6 +84,18 @@ const telegramDb = {
   prepare: () => telegramStatement,
 } satisfies D1Database;
 
+const eventPrizeWithdrawalStatement: D1PreparedStatement = {
+  all: d1Statement.all,
+  bind: () => eventPrizeWithdrawalStatement,
+  raw: d1Statement.raw,
+  run: d1Statement.run,
+  first: async <T>() => ({ storage_mode: "firebase" }) as T,
+};
+const eventPrizeWithdrawalsDb = {
+  ...profileGamesDb,
+  prepare: () => eventPrizeWithdrawalStatement,
+} satisfies D1Database;
+
 export const TELEGRAM_TEST_ENV = {
   APPLE_AUDIENCES: "link.mons",
   AUTH_RECOVERY_QUEUE: queue,
@@ -92,6 +104,7 @@ export const TELEGRAM_TEST_ENV = {
   AUTH_RATE_LIMITER: rateLimit,
   EVENT_PROGRESS_WORKFLOW: workflow,
   EVENT_PRIZE_ADMIN_PRIVATE_KEY: "test-event-prize-private-key",
+  EVENT_PRIZE_WITHDRAWALS_DB: eventPrizeWithdrawalsDb,
   EVENT_PRIZE_WITHDRAWAL_WORKFLOW: workflow,
   FIREBASE_RTDB_URL: "https://mons-link-default-rtdb.firebaseio.com",
   FIRESTORE_SERVICE_ACCOUNT_EMAIL: "firestore@example.iam.gserviceaccount.com",

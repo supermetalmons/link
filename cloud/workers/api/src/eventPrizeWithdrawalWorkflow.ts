@@ -57,7 +57,7 @@ type WorkflowDependencies = {
 };
 
 async function preflightEventPrizeWithdrawal(env: Env): Promise<void> {
-  const runtime = createEventPrizeRuntimeDependencies(env);
+  const runtime = await createEventPrizeRuntimeDependencies(env);
   const core = toRecord(runtime.createEventPrizeUmi("core"));
   const compressed = toRecord(runtime.createEventPrizeUmi("compressed"));
   const coreRpc = toRecord(core?.rpc);

@@ -44,6 +44,11 @@ import {
   getProfileGameProjection,
   listProfileGameProjectionPage,
 } from "./profileGamesD1.ts";
+import {
+  canonicalEventPrizeWithdrawalStorageMode,
+  createD1EventPrizeWithdrawalStore,
+  readEventPrizeWithdrawalStorageControl,
+} from "./eventPrizeWithdrawalD1.ts";
 
 export const AUTH_RECOVERY_QUEUE_NAME = "mons-link-auth-recovery";
 export const AUTH_RECOVERY_JOBS_COLLECTION = "authRecoveryJobs";
@@ -81,6 +86,7 @@ type AuthRecoveryDependencies = {
   now?: () => number;
   rtdb?: FirebaseRtdbClient;
   signal?: AbortSignal;
+  withdrawalDb?: D1Database;
 };
 
 function record(value: unknown): Record<string, unknown> {
@@ -453,6 +459,29 @@ export function createAuthRecoveryService(
   const logger = dependencies.logger || console;
   const now = dependencies.now || Date.now;
   const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
+  const withdrawalDb =
+    dependencies.withdrawalDb || env.EVENT_PRIZE_WITHDRAWALS_DB;
+  let withdrawalMode: Promise<"d1" | "firebase"> | null = null;
+  const getWithdrawalMode = () => {
+    withdrawalMode ||= readEventPrizeWithdrawalStorageControl(withdrawalDb)
+      .then(canonicalEventPrizeWithdrawalStorageMode)
+      .catch((error) => {
+        withdrawalMode = null;
+        throw error;
+      });
+    return withdrawalMode;
+  };
+  const d1Withdrawals = createD1EventPrizeWithdrawalStore(withdrawalDb, {
+    now,
+  });
+  const readWithdrawal = async (eventId: string, prizeId: string) =>
+    (await getWithdrawalMode()) === "d1"
+      ? d1Withdrawals.get(eventId, prizeId)
+      : rtdb.getPath(
+          `eventPrizeWithdrawals/${eventId}/${prizeId}`,
+          undefined,
+          dependencies.signal,
+        );
 
   const mutateJob = async (
     profileId: string,
@@ -537,11 +566,7 @@ export function createAuthRecoveryService(
       if (!prizeId) {
         return false;
       }
-      const withdrawal = await rtdb.getPath(
-        `eventPrizeWithdrawals/${eventId}/${prizeId}`,
-        undefined,
-        dependencies.signal,
-      );
+      const withdrawal = await readWithdrawal(eventId, prizeId);
       if (!isCompletedPrizeWithdrawal(withdrawal, eventId, prizeId)) {
         return false;
       }
