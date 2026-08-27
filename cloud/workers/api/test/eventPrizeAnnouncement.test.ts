@@ -4,7 +4,7 @@ import {
   EVENT_PRIZE_ANNOUNCEMENT_PATH,
   handleEventPrizeAnnouncement,
 } from "../src/eventPrizeAnnouncement.ts";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import type { TelegramAnnouncementRepository } from "../src/telegramD1.ts";
 import { handleFetch } from "../src/workerHandler.ts";
 import { createTelegramBridgeSignature } from "../src/telegramBridgeAuth.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
@@ -31,31 +31,47 @@ const env = {
   X_CLIENT_SECRET: "test-x-secret",
 } as Env;
 
-function memoryRtdbClient(): FirebaseRtdbClient {
-  const values = new Map<string, unknown>();
+function memoryAnnouncementRepository(): TelegramAnnouncementRepository {
+  const values = new Map<
+    string,
+    {
+      createdAtMs: number;
+      messageIds: number[] | null;
+      payloadDigest: string;
+      status: string;
+      updatedAtMs: number;
+    }
+  >();
   return {
-    getPath: async (path) => values.get(path) ?? null,
-    patchRoot: async () => {},
-    transactPath: async (path, updater) => {
-      const current = values.get(path) ?? null;
-      const output = updater(current) as {
-        commit?: boolean;
-        decision?: string;
-        value?: unknown;
-      };
-      if (output.commit === false) {
-        return {
-          committed: false,
-          decision: output.decision,
-          value: current,
-        };
+    get: async (requestId) => values.get(requestId) ?? null,
+    async reserve(input) {
+      const existing = values.get(input.requestId);
+      if (existing) return existing;
+      values.set(input.requestId, {
+        payloadDigest: input.payloadDigest,
+        status: "sending",
+        messageIds: null,
+        createdAtMs: input.createdAtMs,
+        updatedAtMs: input.createdAtMs,
+      });
+      return "reserved";
+    },
+    async storeOutcome(input) {
+      const current = values.get(input.requestId);
+      if (
+        !current ||
+        current.payloadDigest !== input.payloadDigest ||
+        current.status !== "sending"
+      ) {
+        return false;
       }
-      values.set(path, output.value);
-      return {
-        committed: true,
-        decision: output.decision,
-        value: output.value,
-      };
+      values.set(input.requestId, {
+        ...current,
+        status: input.status,
+        updatedAtMs: input.updatedAtMs,
+        messageIds: input.messageIds ?? null,
+      });
+      return true;
     },
   };
 }
@@ -100,7 +116,7 @@ test("sends the exact album with normalized configuration and stores the receipt
     },
     {
       now: () => NOW_MS,
-      rtdbClient: memoryRtdbClient(),
+      repository: memoryAnnouncementRepository(),
       send: async (input) => {
         sent = input;
         return {
@@ -247,7 +263,7 @@ test("maps Telegram failures and rejects incomplete success receipts", async () 
       env,
       {
         now: () => NOW_MS,
-        rtdbClient: memoryRtdbClient(),
+        repository: memoryAnnouncementRepository(),
         send: async () => candidate.result,
         logError: () => {},
       },
@@ -257,11 +273,11 @@ test("maps Telegram failures and rejects incomplete success receipts", async () 
 });
 
 test("replays a completed request without sending twice", async () => {
-  const rtdbClient = memoryRtdbClient();
+  const repository = memoryAnnouncementRepository();
   let sends = 0;
   const dependencies = {
     now: () => NOW_MS,
-    rtdbClient,
+    repository,
     send: async () => {
       sends += 1;
       return {
@@ -300,9 +316,9 @@ test("fails closed before sending when configuration or persistence is unavailab
     env,
     {
       now: () => NOW_MS,
-      rtdbClient: {
-        ...memoryRtdbClient(),
-        transactPath: async () => {
+      repository: {
+        ...memoryAnnouncementRepository(),
+        reserve: async () => {
           throw new Error("unavailable");
         },
       },
@@ -319,14 +335,14 @@ test("fails closed before sending when configuration or persistence is unavailab
 });
 
 test("treats thrown sends as uncertain and does not permit replay", async () => {
-  const rtdbClient = memoryRtdbClient();
+  const repository = memoryAnnouncementRepository();
   let sends = 0;
   const first = await handleEventPrizeAnnouncement(
     await signedRequest(DATA),
     env,
     {
       now: () => NOW_MS,
-      rtdbClient,
+      repository,
       send: async () => {
         sends += 1;
         throw new Error("ambiguous transport");
@@ -337,7 +353,7 @@ test("treats thrown sends as uncertain and does not permit replay", async () => 
   const replay = await handleEventPrizeAnnouncement(
     await signedRequest(DATA),
     env,
-    { now: () => NOW_MS, rtdbClient, logError: () => {} },
+    { now: () => NOW_MS, repository, logError: () => {} },
   );
   assert.equal(first.status, 409);
   assert.equal(replay.status, 409);

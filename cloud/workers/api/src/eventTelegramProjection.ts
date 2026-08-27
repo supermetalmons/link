@@ -24,6 +24,7 @@ import type {
   EventTelegramProjectionTask,
   TelegramProjectionTask,
 } from "./telegramProjectionTasks.ts";
+import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
 import type { InitialTelegramDelivery } from "./telegramDeliveryTasks.ts";
 
 const EVENT_TELEGRAM_PROJECTION_OWNER_UID = "event-telegram-projector";
@@ -94,7 +95,7 @@ async function settleEventOutbox(
       return { value: null, decision: "cleared" };
     },
   );
-  return result.committed;
+  return result.committed === true;
 }
 
 function createProjectionLockManager(rtdb: FirebaseRtdbClient) {
@@ -139,7 +140,33 @@ async function commitFencedProjectionUpdate(
     }
     return { value, decision: "projection-committed" };
   });
-  return result.committed;
+  return result.committed === true;
+}
+
+async function commitFencedDesiredUpdate(
+  telegram: TelegramRepository,
+  path: string,
+  value: unknown,
+  generation: number,
+): Promise<boolean> {
+  const prefix = "telegramMessages/";
+  const suffix = "/desired";
+  const messageKey =
+    path.startsWith(prefix) && path.endsWith(suffix)
+      ? path.slice(prefix.length, -suffix.length)
+      : "";
+  if (!messageKey) throw new TypeError("invalid Telegram desired path");
+  const result = await telegram.transactMessage(messageKey, (current) => {
+    const record = asObject(current);
+    if (persistedProjectionGeneration(record.desired) > generation) {
+      return { commit: false, decision: "newer-projection" };
+    }
+    return {
+      value: { ...record, desired: value },
+      decision: "projection-committed",
+    };
+  });
+  return result.committed === true;
 }
 
 export async function processEventProjectionTask(
@@ -148,6 +175,7 @@ export async function processEventProjectionTask(
   rating: RatingProjectionRepository,
   enqueueDelivery: (input: InitialTelegramDelivery) => Promise<unknown>,
   now: () => number,
+  telegram?: TelegramRepository,
 ): Promise<string> {
   const outbox = parseEventProjectionOutbox(
     await rtdb.getPath(getEventTelegramProjectionOutboxPath(task.eventId)),
@@ -222,7 +250,10 @@ export async function processEventProjectionTask(
       await refreshLock();
       const committedDesiredUpdates: Record<string, unknown> = {};
       for (const [path, value] of Object.entries(desiredUpdates)) {
-        if (await commitFencedProjectionUpdate(rtdb, path, value, generation)) {
+        const committed = telegram
+          ? await commitFencedDesiredUpdate(telegram, path, value, generation)
+          : await commitFencedProjectionUpdate(rtdb, path, value, generation);
+        if (committed) {
           committedDesiredUpdates[path] = value;
         }
       }

@@ -1103,14 +1103,14 @@ test("the shared projection core has no Firebase runtime dependencies", () => {
   assert.equal(source.includes("queueBridge"), false);
 });
 
-test("RTDB rules index Worker event outboxes and deny client projection writes", () => {
+test("RTDB rules retain event outboxes without Telegram delivery records", () => {
   const rules = JSON.parse(fs.readFileSync(databaseRulesPath, "utf8"));
   assert.deepEqual(rules.rules.telegramProjectionOutbox.event[".indexOn"], [
     "updatedAtMs",
   ]);
   assert.equal(rules.rules.eventTelegramProjectionLocks, undefined);
   assert.equal(rules.rules.eventTelegramProjections, undefined);
-  assert.equal(rules.rules.telegramMessages["$messageKey"].desired, undefined);
+  assert.equal(rules.rules.telegramMessages, undefined);
   assert.equal(rules.rules.events["$eventId"][".write"], false);
 });
 

@@ -8,7 +8,7 @@ import {
   hasValidTelegramBridgeSignature,
   MAX_TIMESTAMP_SKEW_SECONDS,
 } from "./telegramBridgeAuth.ts";
-import { enqueueTelegramDeliveryTask } from "./telegramDeliveryTasks.ts";
+import { readTelegramStorageMode } from "./telegramD1.ts";
 
 const MAX_BRIDGE_BODY_BYTES = 8 * 1024;
 const BRIDGE_KEYS = new Set([
@@ -63,8 +63,10 @@ export async function handleTelegramBridge(
   env: Env,
   {
     now = Date.now,
+    readStorageMode = readTelegramStorageMode,
   }: {
     now?: () => number;
+    readStorageMode?: typeof readTelegramStorageMode;
   } = {},
 ): Promise<Response> {
   if (request.method !== "POST") {
@@ -93,19 +95,16 @@ export async function handleTelegramBridge(
   ) {
     return bridgeResponse(401, "unauthenticated");
   }
-  let payload: TelegramTaskPayload;
   try {
-    payload = parseInitialTask(body);
+    parseInitialTask(body);
   } catch {
     return bridgeResponse(400, "invalid-request");
   }
-  try {
-    await enqueueTelegramDeliveryTask(env, payload);
-  } catch {
-    console.error(JSON.stringify({ event: "telegram_bridge_enqueue_failed" }));
-    return bridgeResponse(503, "unavailable");
+  const storageMode = await readStorageMode(env.TELEGRAM_DB);
+  if (storageMode === "frozen") {
+    return bridgeResponse(503, "telegram-frozen");
   }
-  return bridgeResponse(202);
+  return bridgeResponse(410, "telegram-command-required");
 }
 
 export {

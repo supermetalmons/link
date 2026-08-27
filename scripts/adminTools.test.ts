@@ -84,13 +84,15 @@ test("both leaderboard entrypoints parse arguments and preserve delivery keys", 
     assert.match(source, /parseBridgeSecretFile\(argv\)/);
     assert.match(source, /parseLeaderboardArgs\(remainingArgs\)/);
     assert.match(source, /initAdmin\(adminArgs\)/);
-    assert.match(source, /dispatchDelivery/);
+    assert.match(source, /sendCommand/);
+    assert.match(source, /randomUUID/);
     assert.match(
       source,
       new RegExp(`createLeaderboardHeading\\("${metric}", limit\\)`),
     );
     assert.match(source, new RegExp(key));
     assert.match(source, /parseMode: "HTML"/);
+    assert.equal(source.includes('ref("telegramMessages")'), false);
     assert.match(source, /if \(require\.main === module\)/);
   }
 });

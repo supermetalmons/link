@@ -6,6 +6,7 @@ const {
   createTelegramDeliveryDispatcher,
   createTelegramManualRecoveryDispatcher,
   enqueueTelegramDeliveryTask,
+  sendTelegramCommand,
 } = require("../functions/telegram/queueBridge");
 
 const MAX_BRIDGE_SECRET_BYTES = 8 * 1024;
@@ -62,6 +63,12 @@ const createDispatchers = (secret, dependencies = {}) => {
     dispatchManualRecovery: createTelegramManualRecoveryDispatcher({
       enqueueTask,
     }),
+    sendCommand: (command) =>
+      sendTelegramCommand(command, {
+        fetchImpl: dependencies.fetchImpl,
+        now: dependencies.now,
+        secret,
+      }),
   };
 };
 

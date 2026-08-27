@@ -353,84 +353,18 @@ test("validates Firebase-safe logical message keys", () => {
   }
 });
 
-test("queue APIs persist desired state before explicit dispatch", async () => {
-  let updates;
-  const dispatched = [];
-  const database = {
-    ref() {
-      return {
-        async update(value) {
-          updates = value;
-        },
-      };
-    },
-  };
-  const result = await queueTelegramSend(
-    {
-      messageKey: "admin:test:1",
-      destination: "community",
-      instanceKey: "admin:test:1",
-      text: "notice",
-      sourceRevision: "1",
-    },
-    {
-      database,
-      dispatchDelivery: async (input) => {
-        assert.ok(updates);
-        dispatched.push(input);
-        return { enqueued: true, taskId: "task-1" };
-      },
-    },
-  );
-  assert.equal(result.messageKey, "admin:test:1");
-  assert.equal(result.revision, result.desired.revision);
-  assert.deepEqual(updates, {
-    "telegramMessages/admin:test:1/desired": result.desired,
-  });
-  assert.deepEqual(dispatched, [
-    {
-      messageKey: "admin:test:1",
-      revision: result.revision,
-      generation: `desired:${result.revision}`,
-    },
-  ]);
-  assert.deepEqual(result.dispatch, { enqueued: true, taskId: "task-1" });
-});
-
-test("queue APIs report a durable pending message after dispatch failure", async () => {
-  let updates;
+test("legacy RTDB queue APIs fail closed after D1 cutover", async () => {
   await assert.rejects(
     () =>
-      queueTelegramSend(
-        {
-          messageKey: "admin:test:pending",
-          destination: "community",
-          instanceKey: "admin:test:pending",
-          text: "notice",
-          sourceRevision: "1",
-        },
-        {
-          database: {
-            ref: () => ({
-              update: async (value) => {
-                updates = value;
-              },
-            }),
-          },
-          dispatchDelivery: async () => {
-            throw new Error("bridge-unavailable");
-          },
-        },
-      ),
-    (error) => {
-      assert.equal(error.code, "telegram-delivery-pending");
-      assert.equal(error.messageKey, "admin:test:pending");
-      assert.match(error.message, /Do not rerun/);
-      assert.match(error.message, /operator intervention/);
-      return true;
-    },
+      queueTelegramSend({
+        messageKey: "admin:test:1",
+        destination: "community",
+        instanceKey: "admin:test:1",
+        text: "notice",
+        sourceRevision: "1",
+      }),
+    /telegram-d1-command-required/,
   );
-  assert.ok(updates["telegramMessages/admin:test:pending/desired"]);
 });
 
 test("delivers a new send and persists its receipt", async () => {

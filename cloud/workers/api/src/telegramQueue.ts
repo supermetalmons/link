@@ -16,7 +16,11 @@ import {
   sendTelegramMessage,
   type TelegramClient,
 } from "../../../functions/telegram/client.js";
-import { createFirebaseRtdbRepository } from "./firebaseRtdb.ts";
+import {
+  createD1TelegramRepository,
+  readTelegramStorageMode,
+  type TelegramStorageMode,
+} from "./telegramD1.ts";
 import {
   createGameplayRepository,
   type GameplayRepository,
@@ -29,6 +33,7 @@ import {
 const MAX_QUEUE_DELAY_SECONDS = 24 * 60 * 60;
 const MIN_DISPATCH_INTERVAL_MS = 1_000;
 const MAX_INFRASTRUCTURE_RETRY_DELAY_SECONDS = 60;
+const TELEGRAM_FROZEN_RETRY_SECONDS = 60;
 
 const defaultSleep = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
@@ -114,11 +119,12 @@ export async function handleTelegramQueueMessage(
   message: Message<unknown>,
   env: Env,
   {
-    createRepository = createFirebaseRtdbRepository,
+    createRepository,
     createEngine = createTelegramDeliveryEngine,
     createGameplay = createGameplayRepository,
     logger = console,
     now = Date.now,
+    readStorageMode,
     resumeSettlement = resumeWagerSettlement,
     sleep = defaultSleep,
   }: {
@@ -128,6 +134,7 @@ export async function handleTelegramQueueMessage(
     logger?: Pick<Console, "error" | "info">;
     now?: () => number;
     resumeSettlement?: typeof resumeWagerSettlement;
+    readStorageMode?: (db: D1Database) => Promise<TelegramStorageMode>;
     sleep?: (milliseconds: number) => Promise<void>;
   } = {},
 ): Promise<void> {
@@ -165,6 +172,14 @@ export async function handleTelegramQueueMessage(
     }
     return;
   }
+  const storageMode = await (readStorageMode || readTelegramStorageMode)(
+    env.TELEGRAM_DB,
+  );
+  if (storageMode === "frozen") {
+    message.retry({ delaySeconds: TELEGRAM_FROZEN_RETRY_SECONDS });
+    logger.info(JSON.stringify({ event: "telegram_queue_frozen" }));
+    return;
+  }
   const startedAtMs = now();
   let payloadValidated = false;
   let messageKey = "unknown";
@@ -173,7 +188,9 @@ export async function handleTelegramQueueMessage(
     payloadValidated = true;
     messageKey = payload.messageKey;
     const engine = createEngine({
-      repository: createRepository(env),
+      repository: createRepository
+        ? createRepository(env)
+        : createD1TelegramRepository(env.TELEGRAM_DB, { now }),
       client: createTelegramClient(env),
       resolveDestination: () => env.TELEGRAM_EXTRA_CHAT_ID.trim(),
       now,
@@ -247,6 +264,7 @@ export {
   MAX_INFRASTRUCTURE_RETRY_DELAY_SECONDS,
   MAX_QUEUE_DELAY_SECONDS,
   MIN_DISPATCH_INTERVAL_MS,
+  TELEGRAM_FROZEN_RETRY_SECONDS,
   createRetryScheduler,
   infrastructureRetryDelaySeconds,
   logicalDelaySeconds,

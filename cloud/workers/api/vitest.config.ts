@@ -15,6 +15,9 @@ export default defineConfig(async () => ({
           TEST_D1_MIGRATIONS: await readD1Migrations(
             join(import.meta.dirname, "migrations"),
           ),
+          TEST_TELEGRAM_D1_MIGRATIONS: await readD1Migrations(
+            join(import.meta.dirname, "telegram-migrations"),
+          ),
         },
       },
     }),

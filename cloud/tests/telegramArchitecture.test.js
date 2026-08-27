@@ -225,7 +225,7 @@ test("Worker tests exercise the production event projector", () => {
   assert.equal(source.includes("successor marker survives"), true);
 });
 
-test("admin Telegram scripts use durable aliases and document ADC setup", () => {
+test("admin Telegram scripts use signed commands and durable aliases", () => {
   const scripts = [
     ["shootingStarAlert.js", "admin:shooting-star:", "silent: true"],
     ["topGpWithEmojis.js", "admin:top-gp:", 'parseMode: "HTML"'],
@@ -233,14 +233,23 @@ test("admin Telegram scripts use durable aliases and document ADC setup", () => 
   ];
   for (const [fileName, keyPrefix, option] of scripts) {
     const source = fs.readFileSync(path.join(adminRoot, fileName), "utf8");
-    assert.match(source, /queueTelegramSend/);
+    assert.match(source, /sendCommand/);
     assert.match(source, /destination: "community"/);
     assert.equal(source.includes(keyPrefix), true);
     assert.equal(source.includes(option), true);
-    assert.match(source, /ADC_FAILURE_MESSAGE/);
     assert.match(source, /parseBridgeSecretFile/);
-    assert.match(source, /dispatchDelivery/);
+    assert.match(source, /randomUUID/);
+    assert.equal(source.includes('ref("telegramMessages")'), false);
     assert.equal(source.includes("../functions/.env"), false);
+  }
+  const shootingSource = fs.readFileSync(
+    path.join(adminRoot, "shootingStarAlert.js"),
+    "utf8",
+  );
+  assert.equal(shootingSource.includes("ADC_FAILURE_MESSAGE"), false);
+  for (const fileName of ["topGpWithEmojis.js", "topMpWithEmojis.js"]) {
+    const source = fs.readFileSync(path.join(adminRoot, fileName), "utf8");
+    assert.match(source, /ADC_FAILURE_MESSAGE/);
   }
   const adminSource = fs.readFileSync(
     path.join(adminRoot, "_admin.js"),

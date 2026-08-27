@@ -2,6 +2,7 @@ import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 import { createGoogleAccessToken } from "./googleAuth.ts";
 import { createTelegramRepository } from "../../../functions/telegram/repositoryCore.js";
 import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
+import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
 
 const FIREBASE_DATABASE_SCOPE =
   "https://www.googleapis.com/auth/firebase.database";
@@ -138,39 +139,6 @@ function queryDatabaseUrl(
   return url.toString();
 }
 
-function validateDecisionOutput(output: unknown):
-  | { commit: false; decision?: string }
-  | {
-      commit: true;
-      value: unknown;
-      decision?: string;
-    } {
-  if (!output || typeof output !== "object" || Array.isArray(output)) {
-    throw new TypeError("RTDB transaction decision must return an object");
-  }
-  const candidate = output as {
-    commit?: unknown;
-    decision?: unknown;
-    value?: unknown;
-  };
-  const hasValue = Object.hasOwn(output, "value");
-  const decision =
-    typeof candidate.decision === "string" ? candidate.decision : undefined;
-  if (candidate.commit === false) {
-    if (hasValue) {
-      throw new TypeError("RTDB logical abort must not include value");
-    }
-    return { commit: false, decision };
-  }
-  if (Object.hasOwn(output, "commit")) {
-    throw new TypeError("RTDB write decision must omit commit");
-  }
-  if (!hasValue || candidate.value === undefined) {
-    throw new TypeError("RTDB write decision requires a defined value");
-  }
-  return { commit: true, value: candidate.value, decision };
-}
-
 export function createFirebaseRtdbClient(
   env: Env,
   {
@@ -283,7 +251,7 @@ export function createFirebaseRtdbClient(
           MAX_RTDB_BODY_BYTES,
           () => new FirebaseRtdbFailure(),
         );
-        const decision = validateDecisionOutput(updater(current));
+        const decision = validateTelegramTransactionDecision(updater(current));
         if (!decision.commit) {
           return {
             committed: false,
@@ -338,5 +306,6 @@ export {
   databaseRoot,
   databaseUrl,
   queryDatabaseUrl,
-  validateDecisionOutput,
 };
+
+export { validateTelegramTransactionDecision as validateDecisionOutput };

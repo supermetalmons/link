@@ -13,16 +13,10 @@ const {
 
 test("Telegram admin bridge arguments require a bounded secret file", () => {
   assert.deepEqual(
-    parseBridgeSecretFile([
-      "--project",
-      "mons-link",
-      "--bridge-secret-file",
-      "/secure/bridge",
-      "15",
-    ]),
+    parseBridgeSecretFile(["--bridge-secret-file", "/secure/bridge", "15"]),
     {
       bridgeSecretFile: "/secure/bridge",
-      remainingArgs: ["--project", "mons-link", "15"],
+      remainingArgs: ["15"],
     },
   );
   assert.equal(
@@ -41,7 +35,7 @@ test("Telegram admin bridge arguments require a bounded secret file", () => {
   );
 });
 
-test("manual recovery arguments default to dry-run and validate actions", () => {
+test("manual recovery arguments default to dry-run and reject Firebase flags", () => {
   assert.deepEqual(
     parseRecoveryArgs([
       "--message-key",
@@ -52,12 +46,9 @@ test("manual recovery arguments default to dry-run and validate actions", () => 
       "77",
       "--bridge-secret-file",
       "/secure/bridge",
-      "--project",
-      "mons-link",
     ]),
     {
       action: "confirm-send-applied",
-      adminArgs: ["--project", "mons-link"],
       bridgeSecretFile: "/secure/bridge",
       dryRun: true,
       messageId: 77,
@@ -71,8 +62,8 @@ test("manual recovery arguments default to dry-run and validate actions", () => 
         "key",
         "--action",
         "abandon",
-        "--message-id",
-        "77",
+        "--project",
+        "mons-link",
         "--bridge-secret-file",
         "/secure/bridge",
       ]),
@@ -80,54 +71,34 @@ test("manual recovery arguments default to dry-run and validate actions", () => 
   );
 });
 
-const recoveryDatabase = () => {
-  const record = {
-    delivery: {
-      status: "uncertain",
-      sendInFlight: { attemptId: "attempt-1" },
+test("manual recovery dry-run delegates to the signed command endpoint", async () => {
+  const commands = [];
+  const result = await recoverTelegramDelivery(
+    {
+      action: "confirm-send-absent",
+      dryRun: true,
+      messageKey: "key",
     },
-  };
-  const snapshot = (value) => ({ val: () => value });
-  return {
-    record,
-    database: {
-      ref(path) {
-        assert.equal(path, "telegramMessages/key");
-        return {
-          once: async () => snapshot(record),
-          async transaction(updater) {
-            const next = updater(structuredClone(record));
-            if (next === undefined) {
-              return { committed: false, snapshot: snapshot(record) };
-            }
-            for (const key of Object.keys(record)) {
-              delete record[key];
-            }
-            Object.assign(record, next);
-            return { committed: true, snapshot: snapshot(record) };
-          },
-          child(childPath) {
-            return {
-              async set(value) {
-                record[childPath] = value;
-              },
-              async once() {
-                if (childPath === "delivery/status") {
-                  return snapshot(record.delivery.status);
-                }
-                return snapshot(record[childPath] || null);
-              },
-            };
-          },
-        };
+    {
+      sendCommand: async (command) => {
+        commands.push(command);
+        return { ok: true, dryRun: true, ...command };
       },
     },
-  };
-};
+  );
+  assert.deepEqual(commands, [
+    {
+      kind: "recovery-preview",
+      messageKey: "key",
+      action: "confirm-send-absent",
+    },
+  ]);
+  assert.equal(result.dryRun, true);
+});
 
-test("manual recovery writes, dispatches, and returns the matching result", async () => {
-  const state = recoveryDatabase();
-  const dispatched = [];
+test("manual recovery requests and polls the exact accepted result", async () => {
+  const commands = [];
+  const requestId = "18ea8b32-ca88-4492-8ecb-42f87670a901";
   const result = await recoverTelegramDelivery(
     {
       action: "confirm-send-absent",
@@ -135,118 +106,80 @@ test("manual recovery writes, dispatches, and returns the matching result", asyn
       messageKey: "key",
     },
     {
-      database: state.database,
-      randomId: () => "request-1",
-      dispatchManualRecovery: async (input) => {
-        dispatched.push(input);
-        state.record.manualRecoveryResult = {
-          requestId: "request-1",
-          action: "confirm-send-absent",
-          status: "accepted",
-        };
-      },
+      randomId: () => requestId,
       now: () => 1_000,
       sleepImpl: async () => undefined,
+      sendCommand: async (command) => {
+        commands.push(command);
+        return command.kind === "recovery-request"
+          ? { ok: true, requestId }
+          : {
+              ok: true,
+              requestId,
+              status: "accepted",
+              deliveryStatus: "pending",
+            };
+      },
     },
   );
-  assert.deepEqual(state.record.manualRecovery, {
-    requestId: "request-1",
-    action: "confirm-send-absent",
-  });
-  assert.deepEqual(dispatched, [
-    { messageKey: "key", requestId: "request-1", generation: "operator" },
+  assert.deepEqual(commands, [
+    {
+      kind: "recovery-request",
+      requestId,
+      messageKey: "key",
+      action: "confirm-send-absent",
+    },
+    { kind: "recovery-status", messageKey: "key", requestId },
   ]);
   assert.deepEqual(result, {
     ok: true,
     dryRun: false,
     messageKey: "key",
-    requestId: "request-1",
+    requestId,
     action: "confirm-send-absent",
     status: "accepted",
-    deliveryStatus: "uncertain",
+    deliveryStatus: "pending",
   });
 });
 
-test("manual recovery leaves the durable request pending when dispatch fails", async () => {
-  const state = recoveryDatabase();
+test("manual recovery reports a possibly pending request after bridge failure", async () => {
+  const requestId = "18ea8b32-ca88-4492-8ecb-42f87670a901";
   await assert.rejects(
     () =>
       recoverTelegramDelivery(
         { action: "abandon", dryRun: false, messageKey: "key" },
         {
-          database: state.database,
-          randomId: () => "request-2",
-          dispatchManualRecovery: async () => {
+          randomId: () => requestId,
+          sendCommand: async () => {
             throw new Error("bridge-unavailable");
           },
         },
       ),
-    /remains pending/,
+    /may remain pending/,
   );
-  assert.deepEqual(state.record.manualRecovery, {
-    requestId: "request-2",
-    action: "abandon",
-  });
 });
 
-test("manual recovery resumes the same pending request without replacing it", async () => {
-  const state = recoveryDatabase();
-  state.record.manualRecovery = {
-    requestId: "existing-request",
-    action: "abandon",
-  };
-  const dispatched = [];
+test("manual recovery resumes the request ID returned by the server", async () => {
+  const proposed = "18ea8b32-ca88-4492-8ecb-42f87670a901";
+  const existing = "28ea8b32-ca88-4492-8ecb-42f87670a902";
+  const commands = [];
   await recoverTelegramDelivery(
     { action: "abandon", dryRun: false, messageKey: "key" },
     {
-      database: state.database,
-      randomId: () => "replacement-request",
-      dispatchManualRecovery: async (input) => {
-        dispatched.push(input);
-        state.record.manualRecoveryResult = {
-          requestId: "existing-request",
-          action: "abandon",
-          status: "accepted",
-        };
-      },
+      randomId: () => proposed,
       now: () => 1_000,
       sleepImpl: async () => undefined,
+      sendCommand: async (command) => {
+        commands.push(command);
+        return command.kind === "recovery-request"
+          ? { requestId: existing }
+          : { requestId: existing, status: "accepted" };
+      },
     },
   );
-  assert.equal(state.record.manualRecovery.requestId, "existing-request");
-  assert.deepEqual(dispatched, [
-    {
-      messageKey: "key",
-      requestId: "existing-request",
-      generation: "operator",
-    },
-  ]);
-});
-
-test("manual recovery refuses to overwrite a conflicting pending request", async () => {
-  const state = recoveryDatabase();
-  state.record.manualRecovery = {
-    requestId: "existing-request",
-    action: "abandon",
-  };
-  let dispatches = 0;
-  await assert.rejects(
-    () =>
-      recoverTelegramDelivery(
-        {
-          action: "confirm-send-absent",
-          dryRun: false,
-          messageKey: "key",
-        },
-        {
-          database: state.database,
-          dispatchManualRecovery: async () => {
-            dispatches += 1;
-          },
-        },
-      ),
-    /already pending/,
-  );
-  assert.equal(state.record.manualRecovery.requestId, "existing-request");
-  assert.equal(dispatches, 0);
+  assert.deepEqual(commands[1], {
+    kind: "recovery-status",
+    messageKey: "key",
+    requestId: existing,
+  });
 });

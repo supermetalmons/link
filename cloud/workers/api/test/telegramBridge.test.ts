@@ -54,7 +54,7 @@ async function signedRequest(
   });
 }
 
-test("accepts a valid signed initial task and awaits the queue binding", async () => {
+test("retires valid signed legacy delivery requests without enqueueing", async () => {
   const sent: unknown[] = [];
   const env = queueEnv(async (message) => {
     sent.push(message);
@@ -67,8 +67,8 @@ test("accepts a valid signed initial task and awaits the queue binding", async (
     env,
     { now: () => NOW_MS },
   );
-  assert.equal(response.status, 202);
-  assert.deepEqual(sent, [payload]);
+  assert.equal(response.status, 410);
+  assert.deepEqual(sent, []);
 });
 
 test("rejects missing, stale, and tampered signatures", async () => {
@@ -115,7 +115,7 @@ test("strictly validates initial task payloads after authentication", async () =
   }
 });
 
-test("rejects oversized bodies and reports queue unavailability", async () => {
+test("rejects oversized bodies before retiring valid requests", async () => {
   const oversized = JSON.stringify({
     ...payload,
     generation: "x".repeat(9000),
@@ -128,13 +128,13 @@ test("rejects oversized bodies and reports queue unavailability", async () => {
     env,
     { now: () => NOW_MS },
   );
-  const unavailableResponse = await handleTelegramBridge(
+  const retiredResponse = await handleTelegramBridge(
     await signedRequest(JSON.stringify(payload)),
     env,
     { now: () => NOW_MS },
   );
   assert.equal(oversizedResponse.status, 400);
-  assert.equal(unavailableResponse.status, 503);
+  assert.equal(retiredResponse.status, 410);
 });
 
 test("rejects unsupported methods without reading a body", async () => {
@@ -143,4 +143,19 @@ test("rejects unsupported methods without reading a body", async () => {
     queueEnv(TELEGRAM_TEST_ENV.TELEGRAM_DELIVERY_QUEUE.send),
   );
   assert.equal(response.status, 405);
+});
+
+test("freezes or retires the legacy bridge based on storage mode", async () => {
+  const env = queueEnv(TELEGRAM_TEST_ENV.TELEGRAM_DELIVERY_QUEUE.send);
+  const body = JSON.stringify(payload);
+  const frozen = await handleTelegramBridge(await signedRequest(body), env, {
+    now: () => NOW_MS,
+    readStorageMode: async () => "frozen",
+  });
+  const retired = await handleTelegramBridge(await signedRequest(body), env, {
+    now: () => NOW_MS,
+    readStorageMode: async () => "d1",
+  });
+  assert.equal(frozen.status, 503);
+  assert.equal(retired.status, 410);
 });

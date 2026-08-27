@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+const { randomUUID } = require("node:crypto");
 const {
   ADC_FAILURE_MESSAGE,
   addApplicationDefaultCredentialHelp,
@@ -7,7 +8,6 @@ const {
   cleanupAdmin,
 } = require("./_admin");
 const { getDisplayNameFromAddress } = require("../functions/utils");
-const { queueTelegramSend } = require("../functions/telegramDelivery");
 const {
   createLeaderboardHeading,
   parseLeaderboardArgs,
@@ -49,25 +49,18 @@ async function logTopMpWithEmojis(
         rank += 1;
       }
       console.log(output);
-      const sourceId = admin.database().ref("telegramMessages").push().key;
-      if (!sourceId) {
-        throw new Error("Could not allocate a Telegram message ID.");
-      }
-      await queueTelegramSend(
-        {
-          messageKey: `admin:top-mp:${sourceId}`,
-          destination: "community",
-          instanceKey: sourceId,
-          text: output,
-          parseMode: "HTML",
-          silent: false,
-          sourceRevision: sourceId,
-        },
-        {
-          dispatchDelivery: dependencies.dispatchDelivery,
-          generation: `admin:top-mp:${sourceId}`,
-        },
-      );
+      const sourceId = randomUUID();
+      await dependencies.sendCommand({
+        kind: "send",
+        messageKey: `admin:top-mp:${sourceId}`,
+        generation: `admin:top-mp:${sourceId}`,
+        destination: "community",
+        instanceKey: sourceId,
+        text: output,
+        parseMode: "HTML",
+        silent: false,
+        sourceRevision: sourceId,
+      });
       return;
     } finally {
       await cleanupAdmin();
@@ -79,10 +72,8 @@ async function logTopMpWithEmojis(
 async function main(argv = process.argv.slice(2)) {
   const { bridgeSecretFile, remainingArgs } = parseBridgeSecretFile(argv);
   const { adminArgs, limit } = parseLeaderboardArgs(remainingArgs);
-  const { dispatchDelivery } = createDispatchers(
-    readBridgeSecret(bridgeSecretFile),
-  );
-  await logTopMpWithEmojis(limit, adminArgs, { dispatchDelivery });
+  const { sendCommand } = createDispatchers(readBridgeSecret(bridgeSecretFile));
+  await logTopMpWithEmojis(limit, adminArgs, { sendCommand });
 }
 
 if (require.main === module) {

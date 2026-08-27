@@ -25,6 +25,12 @@
       "database_id": "4defcd85-d1cf-4306-af4e-fb3cca5e1970",
       "migrations_dir": "auth-state-migrations",
     },
+    {
+      "binding": "TELEGRAM_DB",
+      "database_name": "mons-link-telegram",
+      "database_id": "71b03cec-ffc1-42fd-a36e-0320369af85a",
+      "migrations_dir": "telegram-migrations",
+    },
   ],
   "routes": [
     {

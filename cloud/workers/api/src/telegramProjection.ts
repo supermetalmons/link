@@ -37,6 +37,13 @@ import {
   enqueueInitialTelegramDelivery,
   type InitialTelegramDelivery,
 } from "./telegramDeliveryTasks.ts";
+import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
+import { createTelegramRepository } from "../../../functions/telegram/repositoryCore.js";
+import {
+  createD1TelegramRepository,
+  readTelegramStorageMode,
+  type TelegramStorageMode,
+} from "./telegramD1.ts";
 import {
   processEventProjectionTask,
   sweepEventTelegramProjections,
@@ -58,9 +65,11 @@ type ProjectionLogger = Pick<Console, "error" | "info">;
 type ProjectionDependencies = {
   createRating?: (env: Env) => RatingProjectionRepository;
   createRtdb?: (env: Env) => FirebaseRtdbClient;
+  createTelegram?: (env: Env) => TelegramRepository;
   enqueueDelivery?: (input: InitialTelegramDelivery) => Promise<unknown>;
   logger?: ProjectionLogger;
   now?: () => number;
+  readStorageMode?: (db: D1Database) => Promise<TelegramStorageMode>;
 };
 
 type AutomatchProjectionResult = {
@@ -123,6 +132,10 @@ async function readAutomatchInputs(
 async function projectAutomatchSource(
   inviteId: string,
   rtdb: FirebaseRtdbClient,
+  telegram: TelegramRepository = createTelegramRepository({
+    getPath: rtdb.getPath,
+    transactPath: rtdb.transactPath,
+  }),
 ): Promise<AutomatchProjectionResult> {
   let input = await readAutomatchInputs(inviteId, rtdb);
   for (let attempt = 0; attempt < PROJECTION_INPUT_RETRIES; attempt += 1) {
@@ -135,8 +148,8 @@ async function projectAutomatchSource(
       return { status: "invalid" };
     }
     const desired = projectionDesired(projection);
-    const transaction = await rtdb.transactPath(
-      `telegramMessages/${projection.messageKey}`,
+    const transaction = await telegram.transactMessage(
+      projection.messageKey,
       (current) => {
         const decision = evaluateAutomatchProjectionUpdate(current, projection);
         if (!decision.allowed) {
@@ -205,6 +218,10 @@ async function processAutomatchTask(
   rtdb: FirebaseRtdbClient,
   enqueueDelivery: (input: InitialTelegramDelivery) => Promise<unknown>,
   now: () => number,
+  telegram: TelegramRepository = createTelegramRepository({
+    getPath: rtdb.getPath,
+    transactPath: rtdb.transactPath,
+  }),
 ): Promise<string> {
   const outbox = parseOutbox(
     await rtdb.getPath(getAutomatchTelegramProjectionOutboxPath(task.inviteId)),
@@ -212,7 +229,11 @@ async function processAutomatchTask(
   if (!outbox || outbox.requestId !== task.requestId) {
     return "stale";
   }
-  const projection = await projectAutomatchSource(task.inviteId, rtdb);
+  const projection = await projectAutomatchSource(
+    task.inviteId,
+    rtdb,
+    telegram,
+  );
   if (projection.status === "invalid") {
     await settleAutomatchOutbox(rtdb, task, "dead", now, "invalid-source");
     return "dead";
@@ -234,6 +255,10 @@ async function processRatingTask(
   rating: RatingProjectionRepository,
   enqueueDelivery: (input: InitialTelegramDelivery) => Promise<unknown>,
   now: () => number,
+  telegram: TelegramRepository = createTelegramRepository({
+    getPath: rtdb.getPath,
+    transactPath: rtdb.transactPath,
+  }),
 ): Promise<string> {
   const update = await rating.readRatingUpdate(task.operationId);
   if (!update || update.telegramProjectionState !== "pending") {
@@ -271,7 +296,11 @@ async function processRatingTask(
     );
     return "dead";
   }
-  const projection = await projectAutomatchSource(update.inviteId, rtdb);
+  const projection = await projectAutomatchSource(
+    update.inviteId,
+    rtdb,
+    telegram,
+  );
   if (projection.status === "invalid") {
     await rating.markRatingTelegramProjection(
       task.operationId,
@@ -323,11 +352,28 @@ export async function handleTelegramProjectionMessage(
     dependencies.enqueueDelivery ||
     ((input: InitialTelegramDelivery) =>
       enqueueInitialTelegramDelivery(env, input));
+  const storageMode = await (
+    dependencies.readStorageMode || readTelegramStorageMode
+  )(env.TELEGRAM_DB);
+  if (storageMode === "frozen") {
+    message.retry({ delaySeconds: 60 });
+    logger.info(JSON.stringify({ event: "telegram_projection_queue_frozen" }));
+    return;
+  }
   try {
     const rtdb = createRtdb(env);
+    const telegram = dependencies.createTelegram
+      ? dependencies.createTelegram(env)
+      : createD1TelegramRepository(env.TELEGRAM_DB, { now });
     let status: string;
     if (task.kind === "automatch-telegram-projection") {
-      status = await processAutomatchTask(task, rtdb, enqueueDelivery, now);
+      status = await processAutomatchTask(
+        task,
+        rtdb,
+        enqueueDelivery,
+        now,
+        telegram,
+      );
     } else if (task.kind === "event-telegram-projection") {
       status = await processEventProjectionTask(
         task,
@@ -335,6 +381,7 @@ export async function handleTelegramProjectionMessage(
         createRating(env),
         enqueueDelivery,
         now,
+        telegram,
       );
     } else {
       status = await processRatingTask(
@@ -343,6 +390,7 @@ export async function handleTelegramProjectionMessage(
         createRating(env),
         enqueueDelivery,
         now,
+        telegram,
       );
     }
     message.ack();
@@ -657,6 +705,10 @@ export async function handleTelegramProjectionSweep(
   _controller: ScheduledController,
   env: Env,
 ): Promise<void> {
+  if ((await readTelegramStorageMode(env.TELEGRAM_DB)) === "frozen") {
+    console.info(JSON.stringify({ event: "telegram_projection_sweep_frozen" }));
+    return;
+  }
   const result = await sweepTelegramProjections(env);
   console.info(
     JSON.stringify({

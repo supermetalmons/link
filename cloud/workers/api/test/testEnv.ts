@@ -72,6 +72,18 @@ const profileGamesDb = {
   },
 } satisfies D1Database;
 
+const telegramStatement: D1PreparedStatement = {
+  all: d1Statement.all,
+  bind: () => telegramStatement,
+  raw: d1Statement.raw,
+  run: d1Statement.run,
+  first: async <T>() => ({ storage_mode: "d1" }) as T,
+};
+const telegramDb = {
+  ...profileGamesDb,
+  prepare: () => telegramStatement,
+} satisfies D1Database;
+
 export const TELEGRAM_TEST_ENV = {
   APPLE_AUDIENCES: "link.mons",
   AUTH_RECOVERY_QUEUE: queue,
@@ -95,6 +107,7 @@ export const TELEGRAM_TEST_ENV = {
   TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET: "test-announcement-secret",
   TELEGRAM_BOT_TOKEN: "test-telegram-token",
   TELEGRAM_DELIVERY_QUEUE: queue,
+  TELEGRAM_DB: telegramDb,
   TELEGRAM_PROJECTION_QUEUE: queue,
   TELEGRAM_EXTRA_CHAT_ID: "test-telegram-chat",
   TELEGRAM_FIREBASE_SERVICE_ACCOUNT_EMAIL:

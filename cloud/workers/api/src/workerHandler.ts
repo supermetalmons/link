@@ -34,6 +34,10 @@ import {
 } from "./profileGameProjectionTasks.ts";
 import { sweepGameSessionMutationReceipts } from "./gameSessionMutations.ts";
 import { sweepExpiredAuthState } from "./authStateD1.ts";
+import {
+  handleTelegramCommand,
+  TELEGRAM_COMMAND_PATH,
+} from "./telegramCommand.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
 export type { ProviderFetch } from "./provider.ts";
@@ -50,6 +54,9 @@ export function handleFetch(
   }
   if (pathname === "/internal/telegram/delivery") {
     return handleTelegramBridge(request, env);
+  }
+  if (pathname === TELEGRAM_COMMAND_PATH) {
+    return handleTelegramCommand(request, env);
   }
   return handleRequest(request, env, {}, ctx);
 }

@@ -47,11 +47,6 @@
       ".read": false,
       ".write": false
     },
-    "telegramMessages": {
-      "$messageKey": {
-        ".read": "auth != null && auth.token.admin === true"
-      }
-    },
     "telegramProjectionOutbox": {
       "automatch": {
         ".indexOn": ["updatedAtMs"]

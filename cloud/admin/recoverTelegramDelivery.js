@@ -4,13 +4,6 @@
 
 const { randomUUID } = require("node:crypto");
 const {
-  ADC_FAILURE_MESSAGE,
-  addApplicationDefaultCredentialHelp,
-  admin,
-  cleanupAdmin,
-  initAdmin,
-} = require("./_admin");
-const {
   createDispatchers,
   parseBridgeSecretFile,
   readBridgeSecret,
@@ -26,28 +19,15 @@ const RECOVERY_ACTIONS = new Set([
   "confirm-send-applied",
   "abandon",
 ]);
-const VALUE_FLAGS = new Set([
-  "--action",
-  "--database-url",
-  "--message-id",
-  "--message-key",
-  "--project",
-]);
+const VALUE_FLAGS = new Set(["--action", "--message-id", "--message-key"]);
 const USAGE =
-  "Usage: npm run recover:telegram -- --message-key <key> --action <confirm-send-absent|confirm-send-applied|abandon> [--message-id <id>] --bridge-secret-file <path> [--project <id>] [--database-url <url>] [--dry-run | --execute]";
+  "Usage: npm run recover:telegram -- --message-key <key> --action <confirm-send-absent|confirm-send-applied|abandon> [--message-id <id>] --bridge-secret-file <path> [--dry-run | --execute]";
 
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
 
-const isSameRecovery = (request, options) =>
-  normalizeString(request?.action) === options.action &&
-  (options.messageId === undefined
-    ? request?.messageId === undefined
-    : Number(request?.messageId) === options.messageId);
-
 const parseArgs = (argv) => {
   const { bridgeSecretFile, remainingArgs } = parseBridgeSecretFile(argv);
-  const adminArgs = [];
   let action = "";
   let dryRun = true;
   let messageId;
@@ -56,31 +36,19 @@ const parseArgs = (argv) => {
   for (let index = 0; index < remainingArgs.length; index += 1) {
     const arg = remainingArgs[index];
     if (arg === "--dry-run" || arg === "--execute") {
-      if (modeSet) {
-        throw new TypeError(USAGE);
-      }
+      if (modeSet) throw new TypeError(USAGE);
       modeSet = true;
       dryRun = arg === "--dry-run";
       continue;
     }
-    if (!VALUE_FLAGS.has(arg)) {
-      throw new TypeError(USAGE);
-    }
+    if (!VALUE_FLAGS.has(arg)) throw new TypeError(USAGE);
     const value = remainingArgs[++index];
-    if (!value || value.startsWith("--")) {
-      throw new TypeError(USAGE);
-    }
-    if (arg === "--project" || arg === "--database-url") {
-      adminArgs.push(arg, value);
-    } else if (arg === "--message-key") {
-      if (messageKey) {
-        throw new TypeError(USAGE);
-      }
+    if (!value || value.startsWith("--")) throw new TypeError(USAGE);
+    if (arg === "--message-key") {
+      if (messageKey) throw new TypeError(USAGE);
       messageKey = validateTelegramMessageKey(value);
     } else if (arg === "--action") {
-      if (action) {
-        throw new TypeError(USAGE);
-      }
+      if (action) throw new TypeError(USAGE);
       action = normalizeString(value);
     } else {
       if (messageId !== undefined || !/^\d+$/.test(value)) {
@@ -101,7 +69,6 @@ const parseArgs = (argv) => {
   }
   return {
     action,
-    adminArgs,
     bridgeSecretFile,
     dryRun,
     messageId,
@@ -115,97 +82,56 @@ const sleep = (milliseconds) =>
 const recoverTelegramDelivery = async (
   options,
   {
-    database = admin.database(),
-    dispatchManualRecovery,
     now = Date.now,
     randomId = randomUUID,
+    sendCommand,
     sleepImpl = sleep,
   } = {},
 ) => {
-  if (typeof dispatchManualRecovery !== "function") {
-    throw new TypeError("dispatchManualRecovery is required");
+  if (typeof sendCommand !== "function") {
+    throw new TypeError("sendCommand is required");
   }
   const messageKey = validateTelegramMessageKey(options.messageKey);
-  const messageRef = database.ref(`telegramMessages/${messageKey}`);
-  const snapshot = await messageRef.once("value");
-  const record = snapshot.val() || {};
-  const attemptId = normalizeString(record.delivery?.sendInFlight?.attemptId);
-  if (record.delivery?.status !== "uncertain" || !attemptId) {
-    throw new Error("Telegram delivery is not awaiting manual recovery.");
-  }
-  const proposedRequest = {
-    requestId: randomId(),
+  const recovery = {
+    messageKey,
     action: options.action,
     ...(options.messageId === undefined
       ? {}
       : { messageId: options.messageId }),
   };
   if (options.dryRun) {
-    return {
-      ok: true,
-      dryRun: true,
-      messageKey,
-      request: proposedRequest,
-    };
+    return sendCommand({ kind: "recovery-preview", ...recovery });
   }
-  const transaction = await messageRef.transaction((current) => {
-    const currentRecord = current || {};
-    const currentAttemptId = normalizeString(
-      currentRecord.delivery?.sendInFlight?.attemptId,
-    );
-    if (currentRecord.delivery?.status !== "uncertain" || !currentAttemptId) {
-      return undefined;
-    }
-    const pendingRequestId = normalizeString(
-      currentRecord.manualRecovery?.requestId,
-    );
-    const processedRequestId = normalizeString(
-      currentRecord.delivery?.lastRecoveryRequestId,
-    );
-    if (pendingRequestId && pendingRequestId !== processedRequestId) {
-      return undefined;
-    }
-    return { ...currentRecord, manualRecovery: proposedRequest };
-  });
-  const persisted = transaction.snapshot.val() || {};
-  const persistedAttemptId = normalizeString(
-    persisted.delivery?.sendInFlight?.attemptId,
-  );
-  if (persisted.delivery?.status !== "uncertain" || !persistedAttemptId) {
-    throw new Error("Telegram delivery is not awaiting manual recovery.");
-  }
-  const request = persisted.manualRecovery || {};
-  const requestId = normalizeString(request.requestId);
-  if (!requestId || !isSameRecovery(request, options)) {
-    throw new Error("Another manual recovery request is already pending.");
-  }
+  const proposedRequestId = randomId();
+  let requested;
   try {
-    await dispatchManualRecovery({
-      messageKey,
-      requestId,
-      generation: "operator",
+    requested = await sendCommand({
+      kind: "recovery-request",
+      requestId: proposedRequestId,
+      ...recovery,
     });
   } catch (error) {
     throw new Error(
-      `Manual recovery ${requestId} remains pending. Retry the same recover:telegram command.`,
+      `Manual recovery ${proposedRequestId} may remain pending. Retry the same recover:telegram command.`,
       { cause: error },
     );
   }
+  const requestId = normalizeString(requested?.requestId);
+  if (!requestId) throw new Error("Manual recovery request was not accepted.");
   const deadlineAtMs = now() + RECOVERY_TIMEOUT_MS;
   while (now() < deadlineAtMs) {
-    const resultSnapshot = await messageRef
-      .child("manualRecoveryResult")
-      .once("value");
-    const result = resultSnapshot.val() || {};
-    if (normalizeString(result.requestId) === requestId) {
-      if (result.status !== "accepted") {
-        throw new Error(
-          `Manual recovery was rejected: ${normalizeString(result.code) || "unknown"}.`,
-        );
-      }
-      const deliverySnapshot = await messageRef
-        .child("delivery/status")
-        .once("value");
+    let result;
+    try {
+      result = await sendCommand({
+        kind: "recovery-status",
+        messageKey,
+        requestId,
+      });
+    } catch (error) {
+      if (error?.status !== 404) throw error;
+      result = { status: "pending" };
+    }
+    if (result?.status === "accepted") {
       return {
         ok: true,
         dryRun: false,
@@ -213,8 +139,13 @@ const recoverTelegramDelivery = async (
         requestId,
         action: options.action,
         status: result.status,
-        deliveryStatus: deliverySnapshot.val() || null,
+        deliveryStatus: result.deliveryStatus ?? null,
       };
+    }
+    if (result?.status && result.status !== "pending") {
+      throw new Error(
+        `Manual recovery was rejected: ${normalizeString(result.code) || "unknown"}.`,
+      );
     }
     await sleepImpl(POLL_INTERVAL_MS);
   }
@@ -225,26 +156,17 @@ const recoverTelegramDelivery = async (
 
 const main = async (argv = process.argv.slice(2)) => {
   const options = parseArgs(argv);
-  const { dispatchManualRecovery } = createDispatchers(
+  const { sendCommand } = createDispatchers(
     readBridgeSecret(options.bridgeSecretFile),
   );
-  if (!initAdmin(options.adminArgs)) {
-    throw new Error(ADC_FAILURE_MESSAGE);
-  }
-  try {
-    console.log(
-      JSON.stringify(
-        await recoverTelegramDelivery(options, { dispatchManualRecovery }),
-      ),
-    );
-  } finally {
-    await cleanupAdmin();
-  }
+  console.log(
+    JSON.stringify(await recoverTelegramDelivery(options, { sendCommand })),
+  );
 };
 
 if (require.main === module) {
   main().catch((error) => {
-    console.error(addApplicationDefaultCredentialHelp(error));
+    console.error(error);
     process.exitCode = 1;
   });
 }

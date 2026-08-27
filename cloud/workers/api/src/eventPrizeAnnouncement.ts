@@ -7,18 +7,18 @@ import {
   type TelegramFailure,
   type TelegramResult,
 } from "../../../functions/telegram/client.js";
-import {
-  createFirebaseRtdbClient,
-  type FirebaseRtdbClient,
-} from "./firebaseRtdb.ts";
 import { readBoundedBody } from "./http.ts";
 import { hasValidTelegramBridgeSignature } from "./telegramBridgeAuth.ts";
+import {
+  createD1TelegramAnnouncementRepository,
+  readTelegramStorageMode,
+  type TelegramAnnouncementRepository,
+} from "./telegramD1.ts";
 
 export const EVENT_PRIZE_ANNOUNCEMENT_PATH =
   "/internal/telegram/event-prize-announcement";
 export const MAX_EVENT_PRIZE_ANNOUNCEMENT_BODY_BYTES = 8 * 1024;
 
-const ANNOUNCEMENT_RECORD_ROOT = "telegramEventPrizeAnnouncements";
 const REQUEST_KEYS = new Set(["announcement", "eventId", "requestId"]);
 const REQUEST_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -26,12 +26,6 @@ const REQUEST_ID_PATTERN =
 type AnnouncementRequest = {
   announcement: EventPrizeAnnouncement;
   requestId: string;
-};
-
-type AnnouncementRecord = {
-  messageIds: number[] | null;
-  payloadDigest: string;
-  status: string;
 };
 
 type Reservation =
@@ -44,7 +38,7 @@ type EventPrizeAnnouncementDependencies = {
   logError?: (record: Record<string, unknown>) => void;
   logSuccess?: (record: Record<string, unknown>) => void;
   now?: () => number;
-  rtdbClient?: FirebaseRtdbClient;
+  repository?: TelegramAnnouncementRepository;
   send?: typeof sendTelegramMediaGroup;
 };
 
@@ -59,19 +53,6 @@ function parseMessageIds(value: unknown): number[] | null {
     value.length > 0 &&
     value.every((messageId) => Number.isInteger(messageId) && messageId > 0)
     ? value
-    : null;
-}
-
-function parseAnnouncementRecord(value: unknown): AnnouncementRecord | null {
-  const record = toRecord(value);
-  return record &&
-    typeof record.payloadDigest === "string" &&
-    typeof record.status === "string"
-    ? {
-        payloadDigest: record.payloadDigest,
-        status: record.status,
-        messageIds: parseMessageIds(record.messageIds),
-      }
     : null;
 }
 
@@ -180,37 +161,19 @@ async function createPayloadDigest(
   ).join("");
 }
 
-function announcementRecordPath(requestId: string): string {
-  return `${ANNOUNCEMENT_RECORD_ROOT}/${requestId}`;
-}
-
 async function reserveAnnouncement(
-  client: FirebaseRtdbClient,
+  repository: TelegramAnnouncementRepository,
   request: AnnouncementRequest,
   payloadDigest: string,
   nowMs: number,
 ): Promise<Reservation> {
-  const result = await client.transactPath(
-    announcementRecordPath(request.requestId),
-    (current) => {
-      if (current !== null && current !== undefined) {
-        return { commit: false, decision: "exists" };
-      }
-      return {
-        value: {
-          payloadDigest,
-          status: "sending",
-          createdAtMs: nowMs,
-          updatedAtMs: nowMs,
-        },
-        decision: "reserved",
-      };
-    },
-  );
-  if (result.committed) {
-    return { kind: "reserved" };
-  }
-  const record = parseAnnouncementRecord(result.value);
+  const reserved = await repository.reserve({
+    requestId: request.requestId,
+    payloadDigest,
+    createdAtMs: nowMs,
+  });
+  if (reserved === "reserved") return { kind: "reserved" };
+  const record = reserved;
   if (!record || record.payloadDigest !== payloadDigest) {
     return { kind: "conflict" };
   }
@@ -221,40 +184,24 @@ async function reserveAnnouncement(
 }
 
 async function storeAnnouncementOutcome(
-  client: FirebaseRtdbClient,
+  repository: TelegramAnnouncementRepository,
   request: AnnouncementRequest,
   payloadDigest: string,
   status: string,
   nowMs: number,
   messageIds?: number[],
 ): Promise<boolean> {
-  const result = await client.transactPath(
-    announcementRecordPath(request.requestId),
-    (current) => {
-      const record = parseAnnouncementRecord(current);
-      if (
-        !record ||
-        record.payloadDigest !== payloadDigest ||
-        record.status !== "sending"
-      ) {
-        return { commit: false, decision: "reservation-lost" };
-      }
-      return {
-        value: {
-          ...toRecord(current),
-          status,
-          updatedAtMs: nowMs,
-          ...(messageIds ? { messageIds } : {}),
-        },
-        decision: "stored",
-      };
-    },
-  );
-  return result.committed;
+  return repository.storeOutcome({
+    requestId: request.requestId,
+    payloadDigest,
+    status,
+    updatedAtMs: nowMs,
+    ...(messageIds ? { messageIds } : {}),
+  });
 }
 
 async function storeOutcomeWithoutThrowing(
-  client: FirebaseRtdbClient,
+  repository: TelegramAnnouncementRepository,
   request: AnnouncementRequest,
   payloadDigest: string,
   status: string,
@@ -263,7 +210,7 @@ async function storeOutcomeWithoutThrowing(
 ): Promise<boolean> {
   try {
     return await storeAnnouncementOutcome(
-      client,
+      repository,
       request,
       payloadDigest,
       status,
@@ -291,7 +238,7 @@ function successResponse(
 async function sendAnnouncement(
   request: AnnouncementRequest,
   env: Env,
-  client: FirebaseRtdbClient,
+  repository: TelegramAnnouncementRepository,
   payloadDigest: string,
   dependencies: EventPrizeAnnouncementDependencies,
 ): Promise<Response> {
@@ -306,7 +253,7 @@ async function sendAnnouncement(
     });
   } catch {
     await storeOutcomeWithoutThrowing(
-      client,
+      repository,
       request,
       payloadDigest,
       "uncertain",
@@ -320,7 +267,7 @@ async function sendAnnouncement(
   }
   if (!result.ok) {
     await storeOutcomeWithoutThrowing(
-      client,
+      repository,
       request,
       payloadDigest,
       result.classification,
@@ -334,7 +281,7 @@ async function sendAnnouncement(
     messageIds.length !== request.announcement.imageUrls.length
   ) {
     await storeOutcomeWithoutThrowing(
-      client,
+      repository,
       request,
       payloadDigest,
       "uncertain",
@@ -350,7 +297,7 @@ async function sendAnnouncement(
   }
   if (
     !(await storeOutcomeWithoutThrowing(
-      client,
+      repository,
       request,
       payloadDigest,
       "sent",
@@ -436,14 +383,22 @@ export async function handleEventPrizeAnnouncement(
     );
     return announcementResponse(503, failureBody("telegram-unavailable"));
   }
-  const client = dependencies.rtdbClient || createFirebaseRtdbClient(env);
+  const storageMode = await readTelegramStorageMode(env.TELEGRAM_DB);
+  if (storageMode === "frozen") {
+    return announcementResponse(503, failureBody("telegram-frozen"), {
+      "Retry-After": "60",
+    });
+  }
+  const repository =
+    dependencies.repository ||
+    createD1TelegramAnnouncementRepository(env.TELEGRAM_DB);
   const payloadDigest = await createPayloadDigest(
     announcementRequest.announcement,
   );
   let reservation: Reservation;
   try {
     reservation = await reserveAnnouncement(
-      client,
+      repository,
       announcementRequest,
       payloadDigest,
       (dependencies.now || Date.now)(),
@@ -470,7 +425,7 @@ export async function handleEventPrizeAnnouncement(
   return sendAnnouncement(
     announcementRequest,
     env,
-    client,
+    repository,
     payloadDigest,
     dependencies,
   );
