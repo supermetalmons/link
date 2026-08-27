@@ -8,6 +8,7 @@ import {
 import { isAutoInviteId } from "@mons/shared/ids";
 import {
   inferAutomatchStateHint,
+  isReadNavigationGamesRequest,
   isRemoveNavigationGameRequest,
   isStartAutomatchRequest,
   type CancelAutomatchResponse,
@@ -110,6 +111,7 @@ import {
   withGameSessionMutationLease,
   type GameSessionMutationDependencies,
 } from "./gameSessionMutations.ts";
+import { readProfileGamesPage } from "./profileGamesD1.ts";
 
 const MAX_NAVIGATION_DELETE_ATTEMPTS = 3;
 
@@ -121,6 +123,7 @@ export const GAMEPLAY_PATHS = new Set([
   "/matches/ensure",
   "/matches/timer/claim",
   "/matches/timer/start",
+  "/navigation/games/read",
   "/navigation/games/remove",
   "/ratings/update",
   "/rematches/end",
@@ -152,6 +155,8 @@ export type GameplayRouteDependencies = {
   automatch?: AutomatchDependencies;
   gameSession?: GameSessionMutationDependencies;
   logFailure?: (kind: string) => void;
+  profileGamesDb?: D1Database;
+  readNavigationPage?: typeof readProfileGamesPage;
   repository?: GameplayRepository;
   rating?: RatingUpdateDependencies;
   ratingRepository?: RatingRepository;
@@ -230,6 +235,33 @@ async function resolveProfileId(
     }
   } catch {}
   return normalizeString(identity.profileId);
+}
+
+async function resolveNavigationProfileId(
+  identity: FirebaseIdentity,
+  repository: GameplayRepository,
+): Promise<string> {
+  let rtdbAvailable = true;
+  try {
+    const linkedProfileId = normalizeString(
+      await repository.getRtdbPath(`players/${identity.uid}/profile`),
+    );
+    if (linkedProfileId) return linkedProfileId;
+  } catch {
+    rtdbAvailable = false;
+  }
+  try {
+    return normalizeString(
+      await repository.findProfileId(identity.uid, identity.idToken),
+    );
+  } catch {
+    if (rtdbAvailable) return "";
+    throw new AuthApiFailure(
+      503,
+      "unavailable",
+      "profile-ownership-unavailable",
+    );
+  }
 }
 
 async function inviteHostMatchesProfile(
@@ -394,7 +426,7 @@ export async function removeNavigationGame(
   inviteId: string,
   repository: GameplayRepository,
 ): Promise<RemoveNavigationGameResponse> {
-  const profileId = await resolveProfileId(identity, repository);
+  const profileId = await resolveNavigationProfileId(identity, repository);
   if (!profileId) {
     return skippedNavigationResponse(inviteId, "profile-unresolved");
   }
@@ -490,6 +522,12 @@ async function readGameplayBody(
   }
   if (pathname === "/automatch/start") {
     if (!isStartAutomatchRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
+  }
+  if (pathname === "/navigation/games/read") {
+    if (!isReadNavigationGamesRequest(body)) {
       throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
     }
     return body;
@@ -845,6 +883,19 @@ export async function handleGameplayRoute(
           defaultEnqueueEventProgress,
         signal: dependencies.timer?.signal || request.signal,
       });
+    } else if (pathname === "/navigation/games/read") {
+      if (!isReadNavigationGamesRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      const profileId = await resolveNavigationProfileId(identity, repository);
+      response = profileId
+        ? await (dependencies.readNavigationPage || readProfileGamesPage)(
+            dependencies.profileGamesDb || env.PROFILE_GAMES_DB,
+            profileId,
+            body.limit,
+            body.cursor,
+          )
+        : { ok: true, items: [], nextCursor: null, hasMore: false };
     } else if (pathname === "/navigation/games/remove") {
       response = await removeNavigationGame(
         identity,

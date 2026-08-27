@@ -33,6 +33,14 @@ function firestoreDocument(
 
 test("Worker projection adapter preserves the shared projector document contract", async () => {
   const writes: AuthFirestoreWrite[][] = [];
+  const commitOrder: string[] = [];
+  const d1 = {
+    ...TELEGRAM_TEST_ENV.PROFILE_GAMES_DB,
+    async batch(statements: D1PreparedStatement[]) {
+      commitOrder.push("d1");
+      return TELEGRAM_TEST_ENV.PROFILE_GAMES_DB.batch(statements);
+    },
+  } satisfies D1Database;
   const profiles = new Map([
     [
       `${firestoreRoot}/users/host-profile`,
@@ -52,6 +60,7 @@ test("Worker projection adapter preserves the shared projector document contract
   const firestore = {
     batchGet: async () => new Map(),
     commitWrites: async (batch) => {
+      commitOrder.push("firestore");
       writes.push(batch);
     },
     createDocumentId: () => "document-id",
@@ -83,8 +92,10 @@ test("Worker projection adapter preserves the shared projector document contract
     getRtdbPath: async (path: string) => values.get(path) ?? null,
   } satisfies Pick<GameplayRepository, "getRtdbPath">;
   const runtime = createProfileGameProjectionRuntime(TELEGRAM_TEST_ENV, {
+    d1,
     firestore,
     rtdb,
+    storageMode: "dual",
     wait: async () => undefined,
   });
 
@@ -97,6 +108,7 @@ test("Worker projection adapter preserves the shared projector document contract
     },
   );
   assert.equal(result.writes, 2);
+  assert.deepEqual(commitOrder, ["d1", "firestore"]);
   assert.equal(writes.length, 1);
   assert.equal(writes[0].length, 2);
   for (const write of writes[0]) {
@@ -174,6 +186,7 @@ test("Worker event projection adapter writes and deletes exact Firestore documen
   const runtime = createEventProfileGameProjectionRuntime(TELEGRAM_TEST_ENV, {
     firestore,
     rtdb,
+    storageMode: "dual",
     wait: async () => undefined,
   });
   const result = await runtime.reconcileEventProjection("event-1", [

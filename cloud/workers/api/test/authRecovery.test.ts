@@ -67,6 +67,25 @@ function document(
   };
 }
 
+function navigationGameFields(inviteId: string) {
+  return {
+    entityType: "game",
+    inviteId,
+    kind: "direct",
+    status: "waiting",
+    sortBucket: 30,
+    listSortAt: 10,
+    updatedAt: 10,
+    hostLoginId: "login-1",
+    guestLoginId: null,
+    opponentProfileId: null,
+    opponentName: null,
+    opponentEmoji: null,
+    automatchStateHint: null,
+    isPendingAutomatch: false,
+  };
+}
+
 function memoryFirestore(seed: AuthFirestoreDocument[]) {
   const documents = new Map(seed.map((entry) => [entry.name, entry]));
   const commitBatches: AuthFirestoreWrite[][] = [];
@@ -345,7 +364,7 @@ test("profile claim changes persist a recoverable link marker before enqueue", a
   assert.equal(logs.length, 1);
 });
 
-test("copies each source game and deletes it in the same commit", async () => {
+test("copies each legacy source game to D1 before deleting Firestore", async () => {
   let nowMs = 1_000;
   const job = {
     ...newAuthRecoveryJob("target-profile", [], ["source-profile"], 0),
@@ -360,11 +379,12 @@ test("copies each source game and deletes it in the same commit", async () => {
     targetProfileId: "target-profile",
   });
   const gameName = `${AUTH_FIRESTORE_DATABASE_ROOT}/documents/users/source-profile/games/invite-1`;
+  const gameFields = navigationGameFields("invite-1");
   const game: AuthFirestoreDocument = {
     id: "invite-1",
     name: gameName,
-    fields: { listSortAt: 10, status: "ended" },
-    rawFields: encodeFields({ listSortAt: 10, status: "ended" }),
+    fields: gameFields,
+    rawFields: encodeFields(gameFields),
     updateTime: "2026-08-23T00:00:00Z",
   };
   const memory = memoryFirestore([
@@ -389,7 +409,7 @@ test("copies each source game and deletes it in the same commit", async () => {
         "update" in write &&
         write.update.name.endsWith("/users/target-profile/games/invite-1"),
     ),
-    true,
+    false,
   );
   assert.equal(memory.documents.has(gameName), false);
   assert.equal(await recovery.recoverProfile("target-profile"), false);
@@ -445,11 +465,12 @@ test("drains a game written after the source parent is deleted", async () => {
   );
 
   const lateGameName = `${AUTH_FIRESTORE_DATABASE_ROOT}/documents/users/source-profile/games/late-invite`;
+  const lateGameFields = navigationGameFields("late-invite");
   memory.documents.set(lateGameName, {
     id: "late-invite",
     name: lateGameName,
-    fields: { listSortAt: 10, status: "ended" },
-    rawFields: encodeFields({ listSortAt: 10, status: "ended" }),
+    fields: lateGameFields,
+    rawFields: encodeFields(lateGameFields),
     updateTime: "2026-08-23T00:00:02Z",
   });
 
@@ -459,7 +480,7 @@ test("drains a game written after the source parent is deleted", async () => {
     memory.documents.has(
       `${AUTH_FIRESTORE_DATABASE_ROOT}/documents/users/target-profile/games/late-invite`,
     ),
-    true,
+    false,
   );
   assert.deepEqual(
     memory.documents.get(authRecoveryJobName("target-profile"))?.fields

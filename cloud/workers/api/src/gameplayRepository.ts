@@ -26,6 +26,12 @@ import {
   toFirestoreRecord,
   type FirestoreRestDocument,
 } from "./firestoreRest.ts";
+import {
+  deleteD1NavigationGame,
+  getD1NavigationGame,
+  readProfileGamesStorageMode,
+  type ProfileGamesStorageMode,
+} from "./profileGamesD1.ts";
 
 const FIRESTORE_PROJECT_ID = "mons-link";
 const FIRESTORE_DATABASE_ID = "(default)";
@@ -294,10 +300,12 @@ export type GameplayRepository = {
 };
 
 type GameplayRepositoryDependencies = {
+  d1?: D1Database;
   fetcher?: typeof fetch;
   getAccessToken?: typeof createGoogleAccessToken;
   now?: () => number;
   rtdbClient?: FirebaseRtdbClient;
+  storageMode?: ProfileGamesStorageMode;
   timeoutMs?: number;
 };
 
@@ -605,9 +613,11 @@ function encodeWagerTransferLedger(input: WagerTransferInput): unknown {
 export function createGameplayRepository(
   env: Env,
   {
+    d1 = env.PROFILE_GAMES_DB,
     fetcher = fetch,
     getAccessToken = createGoogleAccessToken,
     now = Date.now,
+    storageMode = readProfileGamesStorageMode(env),
     timeoutMs = FIRESTORE_TIMEOUT_MS,
     rtdbClient = createFirebaseRtdbClient(env, {
       credentials: {
@@ -976,6 +986,9 @@ export function createGameplayRepository(
     },
 
     async getNavigationGame(profileId, inviteId, firebaseIdToken) {
+      if (storageMode === "d1") {
+        return getD1NavigationGame(d1, profileId, inviteId);
+      }
       const response = await fetchWithTimeout(
         `${FIRESTORE_DOCUMENTS_ROOT}/${documentPath(profileId, inviteId)}`,
         { headers: { Authorization: `Bearer ${firebaseIdToken}` } },
@@ -1050,6 +1063,15 @@ export function createGameplayRepository(
     },
 
     async deleteNavigationGame(profileId, inviteId, updateTime) {
+      const d1Result = await deleteD1NavigationGame(
+        d1,
+        profileId,
+        inviteId,
+        now,
+      );
+      if (storageMode === "d1") {
+        return d1Result;
+      }
       const url = new URL(
         `${FIRESTORE_DOCUMENTS_ROOT}/${documentPath(profileId, inviteId)}`,
       );

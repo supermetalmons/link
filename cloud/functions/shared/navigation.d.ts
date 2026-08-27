@@ -8,6 +8,66 @@ export interface NavigationOrderingItem {
   listSortAtMs: number;
 }
 
+export type NavigationGameStatus = Exclude<NavigationStatus, "dismissed">;
+export type NavigationEventStatus = Exclude<NavigationStatus, "pending">;
+
+export interface NavigationGameItem extends NavigationOrderingItem {
+  entityType: "game";
+  inviteId: string;
+  kind: "auto" | "direct";
+  status: NavigationGameStatus;
+  hostLoginId: string | null;
+  guestLoginId: string | null;
+  opponentProfileId: string | null;
+  opponentName: string | null;
+  opponentEmoji: number | null;
+  automatchStateHint: AutomatchStateHint | null;
+  isPendingAutomatch: boolean;
+  isFallback?: boolean;
+  isOptimistic?: boolean;
+}
+
+export interface EventNavigationPreviewParticipant {
+  profileId: string | null;
+  displayName: string | null;
+  emojiId: number | null;
+  aura: string | null;
+}
+
+export interface NavigationEventItem extends NavigationOrderingItem {
+  entityType: "event";
+  eventId: string;
+  status: NavigationEventStatus;
+  startAtMs: number | null;
+  updatedAtMs: number | null;
+  endedAtMs: number | null;
+  participantCount: number;
+  participantPreview: EventNavigationPreviewParticipant[];
+  winnerDisplayName: string | null;
+  isFallback?: boolean;
+  isOptimistic?: boolean;
+}
+
+export type NavigationItem = NavigationGameItem | NavigationEventItem;
+
+export interface NavigationGamesCursor {
+  sortBucket: number;
+  listSortAtMs: number;
+  id: string;
+}
+
+export interface ReadNavigationGamesRequest {
+  limit: number;
+  cursor: NavigationGamesCursor | null;
+}
+
+export interface ReadNavigationGamesResponse {
+  ok: true;
+  items: NavigationItem[];
+  nextCursor: NavigationGamesCursor | null;
+  hasMore: boolean;
+}
+
 export type AutomatchStateHint = "pending" | "matched" | "canceled";
 
 export interface AutomatchStateHintInput {
@@ -75,6 +135,20 @@ export function compareNavigationItems<T extends NavigationOrderingItem>(
   left: T,
   right: T,
 ): number;
+export function mapProfileGameProjection(
+  value: unknown,
+  fallbackProjectionId: string,
+): NavigationItem | null;
+export function isNavigationItem(value: unknown): value is NavigationItem;
+export function isNavigationGamesCursor(
+  value: unknown,
+): value is NavigationGamesCursor;
+export function isReadNavigationGamesRequest(
+  value: unknown,
+): value is ReadNavigationGamesRequest;
+export function isReadNavigationGamesResponse(
+  value: unknown,
+): value is ReadNavigationGamesResponse;
 export function isStartAutomatchRequest(
   value: unknown,
 ): value is StartAutomatchRequest;

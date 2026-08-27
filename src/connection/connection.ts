@@ -16,20 +16,7 @@ import {
   get,
   runTransaction,
 } from "firebase/database";
-import {
-  getFirestore,
-  Firestore,
-  collection,
-  query,
-  limit,
-  getDocs,
-  orderBy,
-  doc,
-  onSnapshot,
-  startAfter,
-  QueryDocumentSnapshot,
-  DocumentData,
-} from "firebase/firestore";
+import { getFirestore, Firestore, doc, onSnapshot } from "firebase/firestore";
 import {
   didFindInviteThatCanBeJoined,
   didReceiveInviteReactionUpdate,
@@ -113,6 +100,7 @@ import {
   joinInviteViaApi,
   removeEventParticipantViaApi,
   removeNavigationGameViaApi,
+  readNavigationGamesViaApi,
   resolveWagerOutcomeViaApi,
   sendWagerProposalViaApi,
   startAutomatchViaApi,
@@ -146,6 +134,7 @@ import {
 import {
   getNavigationSortBucket,
   normalizeStrictAutomatchStateHint,
+  type NavigationGamesCursor,
   type StartAutomatchResponse,
 } from "@mons/shared/navigation";
 import { isAutoInviteId } from "@mons/shared/ids";
@@ -199,7 +188,6 @@ import {
   mapEventPrizeAssignment,
   normalizeEventPrizeId,
 } from "./eventMappers";
-import { mapFirestoreGameDocToNavigationItem } from "./navigationMappers";
 import {
   normalizeFiniteNumber,
   normalizeString,
@@ -207,6 +195,7 @@ import {
 } from "./valueNormalizers";
 import { ObserverRegistry } from "./observerRegistry";
 import { transition } from "../session/sessionTransitionPort";
+import { startNavigationGamesPolling } from "./navigationGamesPoller";
 
 const getStoredAuthPresentation = (): {
   emoji: number;
@@ -235,6 +224,8 @@ const EVENT_SYNC_PARTICIPANT_CACHE_TTL_MS = 3000;
 const EVENT_SYNC_PARTICIPANT_NEGATIVE_CACHE_TTL_MS = 800;
 const EVENT_SYNC_RETRY_DELAYS_MS = [150, 300] as const;
 const MAX_PROFILE_MERGE_REDIRECT_HOPS = 4;
+const NAVIGATION_GAMES_POLL_INTERVAL_MS = 5_000;
+const NAVIGATION_GAMES_MAX_CONSECUTIVE_FAILURES = 3;
 
 const normalizeProfileMergeTargetId = (value: unknown): string | null => {
   const profileId = typeof value === "string" ? value.trim() : "";
@@ -248,8 +239,7 @@ type EventCreateOptions = {
   announceOnTelegram?: boolean;
 };
 
-export type NavigationGamesPageCursor =
-  QueryDocumentSnapshot<DocumentData> | null;
+export type NavigationGamesPageCursor = NavigationGamesCursor | null;
 
 interface NavigationGamesPageResult {
   items: NavigationItem[];
@@ -373,6 +363,7 @@ class Connection {
   private sessionEpoch = 0;
   private authUnsubscribers = new Set<() => void>();
   private authBootstrapPromise: Promise<void> | null = null;
+  private navigationGamesRefreshListeners = new Set<() => void>();
   private pendingInviteCreation: {
     inviteId: string;
     promise: Promise<boolean>;
@@ -1701,6 +1692,7 @@ class Connection {
     )
       .then((response) => {
         tokenProvider.assertCurrentUser();
+        this.notifyNavigationGamesChanged();
         if (!sessionGuard() || !this.latestInvite) {
           return;
         }
@@ -1766,6 +1758,7 @@ class Connection {
         },
         tokenProvider,
       );
+      this.notifyNavigationGamesChanged();
       if (this.pendingRematchProposal?.operationId === operationId) {
         this.pendingRematchProposal = null;
       }
@@ -2187,7 +2180,12 @@ class Connection {
       const tokenProvider = this.getUserBoundAuthTokenProvider();
       const emojiId = getPlayersEmojiId();
       const aura = storage.getPlayerEmojiAura("");
-      return startAutomatchViaApi({ emojiId, aura }, tokenProvider);
+      const response = await startAutomatchViaApi(
+        { emojiId, aura },
+        tokenProvider,
+      );
+      this.notifyNavigationGamesChanged();
+      return response;
     } catch (error) {
       console.error("Error calling automatch:", error);
       throw error;
@@ -2197,7 +2195,11 @@ class Connection {
   public async cancelAutomatch(): Promise<any> {
     try {
       await this.ensureAuthenticated();
-      return cancelAutomatchViaApi(this.getUserBoundAuthTokenProvider());
+      const response = await cancelAutomatchViaApi(
+        this.getUserBoundAuthTokenProvider(),
+      );
+      this.notifyNavigationGamesChanged();
+      return response;
     } catch (error) {
       console.error("Error canceling automatch:", error);
       throw error;
@@ -2216,10 +2218,12 @@ class Connection {
     }
     try {
       await this.ensureAuthenticated();
-      return removeNavigationGameViaApi(
+      const response = await removeNavigationGameViaApi(
         { inviteId: normalizedInviteId },
         this.getAuthApiToken,
       );
+      this.notifyNavigationGamesChanged();
+      return response;
     } catch (error) {
       console.error("Error removing waiting navigation game:", error);
       throw error;
@@ -2257,6 +2261,7 @@ class Connection {
         requestPayload,
         this.getAuthApiToken,
       );
+      this.notifyNavigationGamesChanged();
       return {
         ok: data.ok,
         eventId: data.eventId,
@@ -2274,6 +2279,7 @@ class Connection {
     try {
       await this.ensureAuthenticated();
       const data = await joinEventViaApi({ eventId }, this.getAuthApiToken);
+      this.notifyNavigationGamesChanged();
       return {
         ok: data.ok,
         eventId: data.eventId,
@@ -2310,6 +2316,7 @@ class Connection {
         },
         this.getAuthApiToken,
       );
+      this.notifyNavigationGamesChanged();
       return {
         ok: data.ok,
         eventId: data.eventId,
@@ -2337,6 +2344,7 @@ class Connection {
         { eventId, participantProfileId },
         this.getAuthApiToken,
       );
+      this.notifyNavigationGamesChanged();
       return {
         ok: data.ok,
         eventId: data.eventId,
@@ -2364,6 +2372,7 @@ class Connection {
         { eventId, matchKey },
         this.getAuthApiToken,
       );
+      this.notifyNavigationGamesChanged();
       return {
         ok: data.ok,
         eventId: data.eventId,
@@ -2945,11 +2954,8 @@ class Connection {
     return compareNavigationItemsByDisplayOrder(a, b);
   }
 
-  private mapFirestoreGameDocToNavigationItem(
-    rawData: Record<string, unknown>,
-    fallbackInviteId: string,
-  ): NavigationItem | null {
-    return mapFirestoreGameDocToNavigationItem(rawData, fallbackInviteId);
+  private notifyNavigationGamesChanged(): void {
+    this.navigationGamesRefreshListeners.forEach((refresh) => refresh());
   }
 
   private normalizeEventPrizeId(
@@ -2998,148 +3004,57 @@ class Connection {
     };
   }
 
-  public async getProfileGamesFirestorePage(
+  public async getProfileGamesPage(
     maxItems: number,
     cursor: NavigationGamesPageCursor = null,
   ): Promise<NavigationGamesPageResult> {
     await this.ensureAuthenticated();
-
-    const profileId = this.getLocalProfileId();
-    if (!profileId) {
-      return {
-        items: [],
-        nextCursor: null,
-        hasMore: false,
-      };
-    }
-
     const boundedLimit =
-      Number.isFinite(maxItems) && maxItems > 0 ? Math.floor(maxItems) : 40;
-    const gamesCollectionRef = collection(
-      this.firestore,
-      "users",
-      profileId,
-      "games",
+      Number.isFinite(maxItems) && maxItems > 0
+        ? Math.min(100, Math.floor(maxItems))
+        : 40;
+    return readNavigationGamesViaApi(
+      { limit: boundedLimit, cursor },
+      this.getAuthApiToken,
     );
-    const baseQuery =
-      cursor === null
-        ? query(
-            gamesCollectionRef,
-            orderBy("sortBucket", "asc"),
-            orderBy("listSortAt", "desc"),
-            limit(boundedLimit + 1),
-          )
-        : query(
-            gamesCollectionRef,
-            orderBy("sortBucket", "asc"),
-            orderBy("listSortAt", "desc"),
-            startAfter(cursor),
-            limit(boundedLimit + 1),
-          );
-
-    const snapshot = await getDocs(baseQuery);
-    const visibleDocs = snapshot.docs.slice(0, boundedLimit);
-    const items: NavigationItem[] = [];
-    visibleDocs.forEach((docSnapshot) => {
-      const mapped = this.mapFirestoreGameDocToNavigationItem(
-        docSnapshot.data() as Record<string, unknown>,
-        docSnapshot.id,
-      );
-      if (mapped) {
-        items.push(mapped);
-      }
-    });
-
-    items.sort((a, b) => this.compareNavigationItems(a, b));
-
-    return {
-      items,
-      nextCursor:
-        visibleDocs.length > 0 ? visibleDocs[visibleDocs.length - 1] : cursor,
-      hasMore: snapshot.docs.length > boundedLimit,
-    };
   }
 
-  public subscribeProfileGamesFirestore(
+  public subscribeProfileGames(
     maxItems: number,
     onUpdate: (items: NavigationItem[]) => void,
     onError?: (error: unknown) => void,
     onPageMeta?: (result: NavigationGamesPageResult) => void,
   ): () => void {
-    let unsubscribe: (() => void) | null = null;
-    let disposed = false;
     const sessionGuard = this.createSessionGuard();
     const boundedLimit =
-      Number.isFinite(maxItems) && maxItems > 0 ? Math.floor(maxItems) : 40;
-
-    void this.ensureAuthenticated()
-      .then(() => {
-        if (disposed || !sessionGuard()) {
-          return;
-        }
-        const profileId = this.getLocalProfileId();
-        if (!profileId) {
-          onUpdate([]);
-          return;
-        }
-
-        const gamesQuery = query(
-          collection(this.firestore, "users", profileId, "games"),
-          orderBy("sortBucket", "asc"),
-          orderBy("listSortAt", "desc"),
-          limit(boundedLimit + 1),
-        );
-
-        unsubscribe = onSnapshot(
-          gamesQuery,
-          (snapshot) => {
-            if (disposed || !sessionGuard()) {
-              return;
-            }
-            const visibleDocs = snapshot.docs.slice(0, boundedLimit);
-            const items: NavigationItem[] = [];
-            visibleDocs.forEach((docSnapshot) => {
-              const mapped = this.mapFirestoreGameDocToNavigationItem(
-                docSnapshot.data() as Record<string, unknown>,
-                docSnapshot.id,
-              );
-              if (mapped) {
-                items.push(mapped);
-              }
-            });
-            items.sort((a, b) => this.compareNavigationItems(a, b));
-            onUpdate(items);
-            onPageMeta?.({
-              items,
-              nextCursor:
-                visibleDocs.length > 0
-                  ? visibleDocs[visibleDocs.length - 1]
-                  : null,
-              hasMore: snapshot.docs.length > boundedLimit,
-            });
-          },
-          (error) => {
-            if (disposed || !sessionGuard()) {
-              return;
-            }
-            onError?.(error);
-          },
-        );
-      })
-      .catch((error) => {
-        if (disposed || !sessionGuard()) {
-          return;
-        }
-        onError?.(error);
-      });
-
-    return () => {
-      disposed = true;
-      if (unsubscribe) {
-        unsubscribe();
-        unsubscribe = null;
-      }
-    };
+      Number.isFinite(maxItems) && maxItems > 0
+        ? Math.min(100, Math.floor(maxItems))
+        : 40;
+    return startNavigationGamesPolling({
+      addInvalidationListener: (listener) => {
+        this.navigationGamesRefreshListeners.add(listener);
+        return () => this.navigationGamesRefreshListeners.delete(listener);
+      },
+      addVisibilityListener: (listener) => {
+        if (typeof document === "undefined") return () => {};
+        document.addEventListener("visibilitychange", listener);
+        return () => document.removeEventListener("visibilitychange", listener);
+      },
+      clearTimer: (timer) => clearTimeout(timer),
+      intervalMs: NAVIGATION_GAMES_POLL_INTERVAL_MS,
+      isActive: sessionGuard,
+      isVisible: () =>
+        typeof document === "undefined" ||
+        document.visibilityState === "visible",
+      load: () => this.getProfileGamesPage(boundedLimit),
+      maxConsecutiveFailures: NAVIGATION_GAMES_MAX_CONSECUTIVE_FAILURES,
+      onError: (error) => onError?.(error),
+      onUpdate: (page) => {
+        onUpdate(page.items);
+        onPageMeta?.(page);
+      },
+      setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+    });
   }
 
   private async getInviteForFallback(
@@ -3503,7 +3418,7 @@ class Connection {
         return { ok: false };
       }
       const opponentId = this.getOpponentId(writableContext.actorUid);
-      return updateRatingsViaApi(
+      const response = await updateRatingsViaApi(
         {
           playerId: writableContext.actorUid,
           inviteId: writableContext.inviteId,
@@ -3516,6 +3431,8 @@ class Connection {
             this.auth.currentUser?.uid === writableContext.loginUid,
         },
       );
+      this.notifyNavigationGamesChanged();
+      return response;
     } catch (error) {
       console.error("Error updating ratings:", error);
       throw error;
@@ -5195,6 +5112,7 @@ class Connection {
         tokenProvider,
       );
       tokenProvider.assertCurrentUser();
+      this.notifyNavigationGamesChanged();
       if (!isConnectActive()) {
         return null;
       }
@@ -5250,6 +5168,7 @@ class Connection {
               tokenProvider,
             );
             tokenProvider.assertCurrentUser();
+            this.notifyNavigationGamesChanged();
             if (!isConnectActive()) {
               return;
             }
@@ -5474,6 +5393,7 @@ class Connection {
       if (response.hostId !== uid || response.inviteId !== inviteId) {
         throw new Error("invite-create-response-mismatch");
       }
+      this.notifyNavigationGamesChanged();
     } catch (error) {
       console.error("Error creating match and invite:", error);
       return false;

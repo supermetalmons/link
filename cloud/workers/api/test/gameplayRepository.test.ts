@@ -679,6 +679,7 @@ test("reads with the Firebase token and conditionally deletes with gameplay cred
   const credentials: Array<{ email: string; privateKeyPem: string }> = [];
   const repository = createGameplayRepository(env, {
     rtdbClient,
+    storageMode: "dual",
     getAccessToken: async (_env, options) => {
       if (!options?.credentials) {
         assert.fail("missing gameplay credentials");
@@ -777,6 +778,7 @@ test("classifies missing and conflicting conditional deletes", async () => {
   ];
   const repository = createGameplayRepository(env, {
     rtdbClient,
+    storageMode: "dual",
     getAccessToken: async () => "token",
     fetcher: async () => responses.shift() as Response,
   });
@@ -809,6 +811,7 @@ test("fails closed on malformed, oversized, rejected, and unavailable responses"
   for (const fetcher of fetchers) {
     const repository = createGameplayRepository(env, {
       rtdbClient,
+      storageMode: "dual",
       fetcher,
     });
     await assert.rejects(

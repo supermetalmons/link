@@ -30,6 +30,48 @@ const workflow = {
   get: async () => workflowInstance,
 } satisfies Workflow;
 
+const d1Meta = {
+  changed_db: false,
+  changes: 0,
+  duration: 0,
+  last_row_id: 0,
+  rows_read: 0,
+  rows_written: 0,
+  size_after: 0,
+};
+async function d1Raw<T = unknown[]>(options: {
+  columnNames: true;
+}): Promise<[string[], ...T[]]>;
+async function d1Raw<T = unknown[]>(options?: {
+  columnNames?: false;
+}): Promise<T[]>;
+async function d1Raw<T = unknown[]>(options?: {
+  columnNames?: boolean;
+}): Promise<T[] | [string[], ...T[]]> {
+  return options?.columnNames ? [[]] : [];
+}
+const d1Statement: D1PreparedStatement = {
+  all: async () => ({ success: true, results: [], meta: d1Meta }),
+  bind: () => d1Statement,
+  first: async () => null,
+  raw: d1Raw,
+  run: async () => ({ success: true, results: [], meta: d1Meta }),
+};
+const profileGamesDb = {
+  batch: async (statements: D1PreparedStatement[]) =>
+    statements.map(() => ({
+      success: true as const,
+      results: [],
+      meta: d1Meta,
+    })),
+  dump: async () => new ArrayBuffer(0),
+  exec: async () => ({ count: 0, duration: 0 }),
+  prepare: () => d1Statement,
+  withSession: () => {
+    throw new Error("test-profile-games-db-not-configured");
+  },
+} satisfies D1Database;
+
 export const TELEGRAM_TEST_ENV = {
   APPLE_AUDIENCES: "link.mons",
   AUTH_RECOVERY_QUEUE: queue,
@@ -44,6 +86,8 @@ export const TELEGRAM_TEST_ENV = {
   HELIUS_RPC_API_KEY: "test-helius-key",
   NFT_RATE_LIMITER: rateLimit,
   PROFILE_GAME_PROJECTION_QUEUE: queue,
+  PROFILE_GAMES_DB: profileGamesDb,
+  PROFILE_GAMES_STORAGE_MODE: "d1",
   RATING_SERVICE_ACCOUNT_EMAIL: "rating@example.iam.gserviceaccount.com",
   RATING_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET: "test-announcement-secret",

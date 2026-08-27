@@ -25,6 +25,13 @@ import {
   type GameplayRepository,
 } from "./gameplayRepository.ts";
 import { firestoreTimestampFromMillis } from "./firestoreRest.ts";
+import {
+  commitProfileGameProjectionWrites,
+  getProfileGameProjection,
+  readProfileGamesStorageMode,
+  type ProfileGamesStorageMode,
+  type ProjectionWrite as D1ProjectionWrite,
+} from "./profileGamesD1.ts";
 
 type ProjectionRtdbRepository = Pick<GameplayRepository, "getRtdbPath">;
 
@@ -49,10 +56,12 @@ export type EventProfileGameProjectionRuntime = {
 };
 
 type ProfileGameProjectionDependencies = {
+  d1?: D1Database;
   firestore?: AuthFirestoreClient;
   logger?: Pick<Console, "error">;
   now?: () => number;
   rtdb?: ProjectionRtdbRepository;
+  storageMode?: ProfileGamesStorageMode;
   wait?: (milliseconds: number) => Promise<void>;
 };
 
@@ -108,12 +117,34 @@ function toEventFirestoreWrite(write: EventProjectionWrite) {
   return authUpdateWrite(name, write.data);
 }
 
+function toD1ProjectionWrite(
+  write: ProjectionWrite | EventProjectionWrite,
+  storageMode: ProfileGamesStorageMode,
+): D1ProjectionWrite {
+  return {
+    type: write.type,
+    profileId: write.profileId,
+    projectionId:
+      "inviteId" in write ? write.inviteId : `event_${write.eventId}`,
+    ...(write.data ? { data: write.data } : {}),
+    ...(write.type === "update" && "updateTime" in write
+      ? { updateTime: write.updateTime }
+      : {}),
+    ...(write.type === "create" && storageMode === "d1"
+      ? { requireAbsent: true }
+      : {}),
+  };
+}
+
 export function createProfileGameProjectionRuntime(
   env: Env,
   dependencies: ProfileGameProjectionDependencies = {},
 ): ProfileGameProjectionRuntime {
   const firestore = dependencies.firestore || createAuthFirestoreClient(env);
   const rtdb = dependencies.rtdb || createGameplayRepository(env);
+  const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
+  const storageMode =
+    dependencies.storageMode || readProfileGamesStorageMode(env);
   const logger: Pick<Console, "error"> = dependencies.logger || {
     error(message, ...optionalParams) {
       const context = optionalParams[0];
@@ -130,7 +161,14 @@ export function createProfileGameProjectionRuntime(
   };
   const repository: ProfileGamesProjectionRepository = {
     async commitProjectionWrites(writes) {
-      await firestore.commitWrites(writes.map(toFirestoreWrite));
+      await commitProfileGameProjectionWrites(
+        d1,
+        writes.map((write) => toD1ProjectionWrite(write, storageMode)),
+        dependencies.now,
+      );
+      if (storageMode === "dual") {
+        await firestore.commitWrites(writes.map(toFirestoreWrite));
+      }
     },
 
     async findProfileByLogin(loginUid) {
@@ -162,6 +200,9 @@ export function createProfileGameProjectionRuntime(
     },
 
     async getProjection(profileId, inviteId) {
+      if (storageMode === "d1") {
+        return getProfileGameProjection(d1, profileId, inviteId);
+      }
       const projection = await firestore.get(
         projectionDocumentName(profileId, inviteId),
       );
@@ -186,9 +227,19 @@ export function createEventProfileGameProjectionRuntime(
 ): EventProfileGameProjectionRuntime {
   const firestore = dependencies.firestore || createAuthFirestoreClient(env);
   const rtdb = dependencies.rtdb || createGameplayRepository(env);
+  const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
+  const storageMode =
+    dependencies.storageMode || readProfileGamesStorageMode(env);
   const repository: EventProfileGameProjectionRepository = {
     async commitProjectionWrites(writes) {
-      await firestore.commitWrites(writes.map(toEventFirestoreWrite));
+      await commitProfileGameProjectionWrites(
+        d1,
+        writes.map((write) => toD1ProjectionWrite(write, storageMode)),
+        dependencies.now,
+      );
+      if (storageMode === "dual") {
+        await firestore.commitWrites(writes.map(toEventFirestoreWrite));
+      }
     },
 
     async getEvent(eventId) {

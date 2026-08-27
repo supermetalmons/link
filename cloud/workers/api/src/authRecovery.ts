@@ -39,6 +39,13 @@ import {
   parseProfileLinkProfileGameProjectionOutbox,
 } from "./profileGameProjectionOutbox.ts";
 import type { ProfileLinkProfileGameProjectionTask } from "./profileGameProjectionTasks.ts";
+import {
+  commitProfileGameProjectionWrites,
+  getProfileGameProjection,
+  listProfileGameProjectionPage,
+  readProfileGamesStorageMode,
+  type ProfileGamesStorageMode,
+} from "./profileGamesD1.ts";
 
 export const AUTH_RECOVERY_QUEUE_NAME = "mons-link-auth-recovery";
 export const AUTH_RECOVERY_JOBS_COLLECTION = "authRecoveryJobs";
@@ -70,11 +77,13 @@ export type AuthRecoveryJob = {
 type AuthRecoveryDependencies = {
   authClient?: FirebaseAuthAdminClient;
   buildPrizeCopy?: typeof buildPrizeCopy;
+  d1?: D1Database;
   firestore?: AuthFirestoreClient;
   logger?: Pick<Console, "error" | "info">;
   now?: () => number;
   rtdb?: FirebaseRtdbClient;
   signal?: AbortSignal;
+  storageMode?: ProfileGamesStorageMode;
 };
 
 function record(value: unknown): Record<string, unknown> {
@@ -446,6 +455,9 @@ export function createAuthRecoveryService(
     });
   const logger = dependencies.logger || console;
   const now = dependencies.now || Date.now;
+  const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
+  const storageMode =
+    dependencies.storageMode || readProfileGamesStorageMode(env);
 
   const mutateJob = async (
     profileId: string,
@@ -639,23 +651,95 @@ export function createAuthRecoveryService(
     job: AuthRecoveryJob,
     sourceProfileId: string,
   ): Promise<void> => {
+    const d1SourcePage = await listProfileGameProjectionPage(
+      d1,
+      sourceProfileId,
+    );
+    if (d1SourcePage.length > 0) {
+      const targets = await Promise.all(
+        d1SourcePage.map((game) =>
+          getProfileGameProjection(d1, job.profileId, game.projectionId),
+        ),
+      );
+      const writes = d1SourcePage.flatMap((game, index) => {
+        const current = targets[index];
+        const copy =
+          !current || mergeFreshness(game.data) >= mergeFreshness(current.data)
+            ? [
+                {
+                  type: current ? ("update" as const) : ("create" as const),
+                  profileId: job.profileId,
+                  projectionId: game.projectionId,
+                  data: { ...game.data, ownerProfileId: job.profileId },
+                  ...(current
+                    ? { updateTime: current.updateTime }
+                    : { requireAbsent: true }),
+                },
+              ]
+            : [];
+        return [
+          ...copy,
+          {
+            type: "delete" as const,
+            profileId: sourceProfileId,
+            projectionId: game.projectionId,
+            updateTime: game.updateTime,
+          },
+        ];
+      });
+      await commitProfileGameProjectionWrites(d1, writes, now);
+      await mutateJob(job.profileId, (live) =>
+        live.sourceProfileIds[0] === sourceProfileId &&
+        live.sourcePhase === "games"
+          ? { ...live, phaseStartedAtMs: now(), updatedAtMs: now() }
+          : undefined,
+      );
+      return;
+    }
     const sourcePage = await firestore.listPage(
       `users/${sourceProfileId}`,
       "games",
     );
     if (sourcePage.documents.length > 0) {
+      const d1Targets = await Promise.all(
+        sourcePage.documents.map((game) =>
+          getProfileGameProjection(d1, job.profileId, game.id),
+        ),
+      );
+      const d1Writes = sourcePage.documents.flatMap((game, index) => {
+        const current = d1Targets[index];
+        return !current ||
+          mergeFreshness(game.fields) >= mergeFreshness(current.data)
+          ? [
+              {
+                type: current ? ("update" as const) : ("create" as const),
+                profileId: job.profileId,
+                projectionId: game.id,
+                data: { ...game.fields, ownerProfileId: job.profileId },
+                ...(current
+                  ? { updateTime: current.updateTime }
+                  : { requireAbsent: true }),
+              },
+            ]
+          : [];
+      });
+      await commitProfileGameProjectionWrites(d1, d1Writes, now);
       const targetName = authDocumentName("users", job.profileId);
       const targetNames = sourcePage.documents.map(
         (game) => `${targetName}/games/${game.id}`,
       );
-      const targets = await firestore.batchGet(targetNames);
+      const targets =
+        storageMode === "dual"
+          ? await firestore.batchGet(targetNames)
+          : new Map<string, null>();
       const writes: AuthFirestoreWrite[] = [];
       for (const game of sourcePage.documents) {
         const targetGameName = `${targetName}/games/${game.id}`;
         const current = targets.get(targetGameName) || null;
         if (
-          !current ||
-          mergeFreshness(game.fields) >= mergeFreshness(current.fields)
+          storageMode === "dual" &&
+          (!current ||
+            mergeFreshness(game.fields) >= mergeFreshness(current.fields))
         ) {
           writes.push({
             update: { name: targetGameName, fields: game.rawFields },
@@ -701,6 +785,22 @@ export function createAuthRecoveryService(
     job: AuthRecoveryJob,
     sourceProfileId: string,
   ): Promise<void> => {
+    if (
+      (await listProfileGameProjectionPage(d1, sourceProfileId, 1)).length > 0
+    ) {
+      await mutateJob(job.profileId, (live) =>
+        live.sourceProfileIds[0] === sourceProfileId &&
+        live.sourcePhase === "finalize"
+          ? {
+              ...live,
+              sourcePhase: "games",
+              phaseStartedAtMs: now(),
+              updatedAtMs: now(),
+            }
+          : undefined,
+      );
+      return;
+    }
     const sourcePage = await firestore.listPage(
       `users/${sourceProfileId}`,
       "games",

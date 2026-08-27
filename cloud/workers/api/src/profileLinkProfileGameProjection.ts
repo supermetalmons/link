@@ -18,15 +18,22 @@ import {
   projectionDocumentName,
   type ProfileGameProjectionRuntime,
 } from "./profileGameProjectionRepository.ts";
+import {
+  commitProfileGameProjectionWrites,
+  readProfileGamesStorageMode,
+  type ProfileGamesStorageMode,
+} from "./profileGamesD1.ts";
 
 export type ProfileLinkProjectionSummary = CoreProfileLinkProjectionSummary;
 
 export type ProfileLinkProjectionRuntimeDependencies = {
+  d1?: D1Database;
   firestore?: Pick<AuthFirestoreClient, "commitWrites" | "get">;
   logger?: Pick<Console, "error" | "info">;
   now?: () => number;
   projection?: ProfileGameProjectionRuntime;
   rtdb?: Pick<GameplayRepository, "getRtdbPath">;
+  storageMode?: ProfileGamesStorageMode;
   wait?: (milliseconds: number) => Promise<void>;
   withInviteProjectionLock<T>(
     inviteId: string,
@@ -54,6 +61,9 @@ export function createProfileLinkProjectionRuntime(
 } {
   const firestore = dependencies.firestore || createAuthFirestoreClient(env);
   const rtdb = dependencies.rtdb || createGameplayRepository(env);
+  const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
+  const storageMode =
+    dependencies.storageMode || readProfileGamesStorageMode(env);
   const projection =
     dependencies.projection || createProfileGameProjectionRuntime(env);
   const repository: ProfileLinkProjectionRepository = {
@@ -61,11 +71,22 @@ export function createProfileLinkProjectionRuntime(
       if (inviteIds.length === 0) {
         return 0;
       }
-      await firestore.commitWrites(
-        inviteIds.map((inviteId) =>
-          authDeleteWrite(projectionDocumentName(profileId, inviteId)),
-        ),
+      await commitProfileGameProjectionWrites(
+        d1,
+        inviteIds.map((inviteId) => ({
+          type: "delete",
+          profileId,
+          projectionId: inviteId,
+        })),
+        dependencies.now,
       );
+      if (storageMode === "dual") {
+        await firestore.commitWrites(
+          inviteIds.map((inviteId) =>
+            authDeleteWrite(projectionDocumentName(profileId, inviteId)),
+          ),
+        );
+      }
       return inviteIds.length;
     },
     getCurrentProfileLink: (loginUid) =>

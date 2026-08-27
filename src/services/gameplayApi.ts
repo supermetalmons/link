@@ -18,9 +18,12 @@ import {
 } from "@mons/shared/game-sessions";
 import {
   isCancelAutomatchResponse,
+  isReadNavigationGamesResponse,
   isRemoveNavigationGameResponse,
   isStartAutomatchResponse,
   type CancelAutomatchResponse,
+  type ReadNavigationGamesRequest,
+  type ReadNavigationGamesResponse,
   type RemoveNavigationGameRequest,
   type RemoveNavigationGameResponse,
   type StartAutomatchRequest,
@@ -397,6 +400,18 @@ export function removeNavigationGameViaApi(
     request,
     tokenProvider,
     isRemoveNavigationGameResponse,
+  );
+}
+
+export function readNavigationGamesViaApi(
+  request: ReadNavigationGamesRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<ReadNavigationGamesResponse> {
+  return gameplayMutation(
+    "/navigation/games/read",
+    request,
+    tokenProvider,
+    isReadNavigationGamesResponse,
   );
 }
 

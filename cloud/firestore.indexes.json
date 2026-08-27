@@ -1,20 +1,6 @@
 {
   "indexes": [
     {
-      "collectionGroup": "games",
-      "queryScope": "COLLECTION",
-      "fields": [
-        {
-          "fieldPath": "sortBucket",
-          "order": "ASCENDING"
-        },
-        {
-          "fieldPath": "listSortAt",
-          "order": "DESCENDING"
-        }
-      ]
-    },
-    {
       "collectionGroup": "ratingUpdates",
       "queryScope": "COLLECTION",
       "fields": [
@@ -57,20 +43,5 @@
       ]
     }
   ],
-  "fieldOverrides": [
-    {
-      "collectionGroup": "games",
-      "fieldPath": "inviteId",
-      "indexes": [
-        {
-          "queryScope": "COLLECTION_GROUP",
-          "order": "ASCENDING"
-        },
-        {
-          "queryScope": "COLLECTION_GROUP",
-          "order": "DESCENDING"
-        }
-      ]
-    }
-  ]
+  "fieldOverrides": []
 }

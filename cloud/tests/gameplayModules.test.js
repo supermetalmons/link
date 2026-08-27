@@ -59,15 +59,15 @@ test("automatch REST queries retain their RTDB indexes", () => {
         index.fields[1]?.fieldPath === "profileGameProjectionUpdatedAtMs",
     ),
   );
-  assert.ok(
+  assert.equal(
+    firestoreIndexes.indexes.some((index) => index.collectionGroup === "games"),
+    false,
+  );
+  assert.equal(
     firestoreIndexes.fieldOverrides.some(
-      (override) =>
-        override.collectionGroup === "games" &&
-        override.fieldPath === "inviteId" &&
-        override.indexes.some(
-          (index) => index.queryScope === "COLLECTION_GROUP",
-        ),
+      (override) => override.collectionGroup === "games",
     ),
+    false,
   );
 });
 

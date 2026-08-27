@@ -550,6 +550,25 @@ test("re-reads navigation games after conflicts and bounds retries", async () =>
   assert.equal(attempts, 3);
 });
 
+test("fails closed before removing a D1 game when ownership is unavailable", async () => {
+  await assert.rejects(
+    () =>
+      removeNavigationGame(
+        identity,
+        "invite-1",
+        repository({
+          getRtdbPath: async () => {
+            throw new Error("rtdb-unavailable");
+          },
+          findProfileId: async () => {
+            throw new Error("firestore-unavailable");
+          },
+        }),
+      ),
+    /profile-ownership-unavailable/,
+  );
+});
+
 test("routes authenticated CORS and rejects methods before authentication", async () => {
   const preflight = await handleGameplayRoute(
     request("/automatch/cancel", { method: "OPTIONS" }),
@@ -1643,6 +1662,16 @@ test("authenticates before body parsing and sanitizes route failures", async () 
     ],
     ["/navigation/games/remove", {}],
     ["/navigation/games/remove", { inviteId: "unsafe/key" }],
+    ["/navigation/games/read", {}],
+    ["/navigation/games/read", { limit: 0, cursor: null }],
+    ["/navigation/games/read", { limit: 101, cursor: null }],
+    [
+      "/navigation/games/read",
+      {
+        limit: 80,
+        cursor: { sortBucket: 30, listSortAtMs: 100, id: "unsafe/key" },
+      },
+    ],
     ["/wagers/proposals/cancel", {}],
     ["/wagers/proposals/cancel", { inviteId: "invite", matchId: "unsafe/key" }],
     ["/wagers/proposals/accept", {}],
@@ -1728,4 +1757,75 @@ test("authenticates before body parsing and sanitizes route failures", async () 
   });
   assert.deepEqual(failures, ["gameplay-service-unavailable"]);
   assert.doesNotMatch(JSON.stringify(payload), /private|token|uid/);
+});
+
+test("reads only the authenticated caller profile from D1", async () => {
+  let received:
+    | {
+        profileId: string;
+        limit: number;
+        cursor: unknown;
+      }
+    | undefined;
+  const response = await handleGameplayRoute(
+    request("/navigation/games/read", {
+      body: {
+        limit: 80,
+        cursor: { sortBucket: 30, listSortAtMs: 1_000, id: "invite-1" },
+      },
+    }),
+    env,
+    context(),
+    {
+      repository: repository({
+        getRtdbPath: async (path) =>
+          path === "players/firebase-uid/profile" ? "profile-from-rtdb" : null,
+      }),
+      readNavigationPage: async (_db, profileId, limit, cursor) => {
+        received = { profileId, limit, cursor };
+        return { ok: true, items: [], nextCursor: null, hasMore: false };
+      },
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    items: [],
+    nextCursor: null,
+    hasMore: false,
+  });
+  assert.deepEqual(received, {
+    profileId: "profile-from-rtdb",
+    limit: 80,
+    cursor: { sortBucket: 30, listSortAtMs: 1_000, id: "invite-1" },
+  });
+});
+
+test("fails closed when navigation profile ownership is unavailable", async () => {
+  let reads = 0;
+  const response = await handleGameplayRoute(
+    request("/navigation/games/read", {
+      body: { limit: 80, cursor: null },
+    }),
+    env,
+    context(),
+    {
+      repository: repository({
+        getRtdbPath: async () => {
+          throw new Error("rtdb-unavailable");
+        },
+        findProfileId: async () => {
+          throw new Error("firestore-unavailable");
+        },
+      }),
+      readNavigationPage: async () => {
+        reads += 1;
+        return { ok: true, items: [], nextCursor: null, hasMore: false };
+      },
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 503);
+  assert.equal(reads, 0);
 });

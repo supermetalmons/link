@@ -33,6 +33,7 @@ const {
   joinInviteViaApi,
   removeEventParticipantViaApi,
   removeNavigationGameViaApi,
+  readNavigationGamesViaApi,
   resolveWagerOutcomeViaApi,
   sendWagerProposalViaApi,
   startAutomatchViaApi,
@@ -68,6 +69,8 @@ const {
   isCancelAutomatchResponse,
   isRemoveNavigationGameRequest,
   isRemoveNavigationGameResponse,
+  isReadNavigationGamesRequest,
+  isReadNavigationGamesResponse,
   isStartAutomatchRequest,
   isStartAutomatchResponse,
 } = await import("@mons/shared/navigation");
@@ -860,6 +863,33 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
     },
     {
       ok: true,
+      items: [
+        {
+          id: "invite-1",
+          entityType: "game",
+          inviteId: "invite-1",
+          kind: "direct",
+          status: "waiting",
+          sortBucket: 30,
+          listSortAtMs: 1_000,
+          hostLoginId: "host",
+          guestLoginId: null,
+          opponentProfileId: null,
+          opponentName: null,
+          opponentEmoji: null,
+          automatchStateHint: null,
+          isPendingAutomatch: false,
+        },
+      ],
+      nextCursor: {
+        sortBucket: 30,
+        listSortAtMs: 1_000,
+        id: "invite-1",
+      },
+      hasMore: false,
+    },
+    {
+      ok: true,
       eventId: "event-1",
       participant: {
         profileId: "profile-1",
@@ -933,6 +963,14 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       inviteId: "invite-1",
     },
   );
+  const readRequest = { limit: 80, cursor: null };
+  const readResponse = await readNavigationGamesViaApi(
+    readRequest,
+    async () => "firebase-token",
+  );
+  assert.equal(isReadNavigationGamesRequest(readRequest), true);
+  assert.equal(isReadNavigationGamesResponse(readResponse), true);
+  assert.equal(readResponse.items[0].id, "invite-1");
   const participant = {
     profileId: "profile-1",
     loginUid: "login-1",
@@ -1043,6 +1081,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       "https://api.mons.link/automatch/start",
       "https://api.mons.link/automatch/cancel",
       "https://api.mons.link/navigation/games/remove",
+      "https://api.mons.link/navigation/games/read",
       "https://api.mons.link/events/participants/join",
       "https://api.mons.link/events/participants/remove",
       "https://api.mons.link/matches/timer/start",
@@ -1060,6 +1099,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       { emojiId: 7, aura: "rainbow" },
       {},
       { inviteId: "invite-1" },
+      { limit: 80, cursor: null },
       { eventId: "event-1" },
       { eventId: "event-1", participantProfileId: "profile-2" },
       {

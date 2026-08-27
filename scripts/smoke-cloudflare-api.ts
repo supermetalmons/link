@@ -236,6 +236,7 @@ async function smokeApi(
     "/invites/create",
     "/invites/join",
     "/matches/ensure",
+    "/navigation/games/read",
     "/rematches/propose",
     "/rematches/end",
     "/events/create",

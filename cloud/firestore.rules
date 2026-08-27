@@ -8,11 +8,5 @@ service cloud.firestore {
       allow read: if request.auth != null;
       allow update: if false;
     }
-    match /users/{userId}/games/{inviteId} {
-      allow read: if request.auth != null
-        && get(/databases/$(database)/documents/users/$(userId)).data.logins != null
-        && get(/databases/$(database)/documents/users/$(userId)).data.logins.hasAll([request.auth.uid]);
-      allow write: if false;
-    }
   }
 }
