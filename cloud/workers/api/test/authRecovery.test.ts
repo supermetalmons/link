@@ -165,7 +165,24 @@ function externalDependencies(firestore: AuthFirestoreClient) {
       return { committed: true, value: decision.value };
     },
   };
-  return { authClient, claims, firestore, queries, reads, rtdb, values };
+  const withdrawalStore = {
+    get: async (eventId: string, prizeId: string) => {
+      const value = values.get(`eventPrizeWithdrawals/${eventId}/${prizeId}`);
+      return value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)
+        : null;
+    },
+  };
+  return {
+    authClient,
+    claims,
+    firestore,
+    queries,
+    reads,
+    rtdb,
+    values,
+    withdrawalStore,
+  };
 }
 
 function queueMessage(body: unknown) {
@@ -592,7 +609,7 @@ test("missing recovery jobs are already complete", async () => {
   assert.equal(await recovery.recoverProfile("missing-profile"), true);
 });
 
-test("does not read withdrawal control until prize recovery needs it", () => {
+test("does not read withdrawal D1 until prize recovery needs it", () => {
   const memory = memoryFirestore([]);
   let prepares = 0;
   const baseWithdrawalDb: D1Database =

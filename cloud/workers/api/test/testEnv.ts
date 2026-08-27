@@ -89,7 +89,8 @@ const eventPrizeWithdrawalStatement: D1PreparedStatement = {
   bind: () => eventPrizeWithdrawalStatement,
   raw: d1Statement.raw,
   run: d1Statement.run,
-  first: async <T>() => ({ storage_mode: "firebase" }) as T,
+  first: async <T>() =>
+    ({ storage_mode: "d1", previous_storage_mode: null }) as T,
 };
 const eventPrizeWithdrawalsDb = {
   ...profileGamesDb,

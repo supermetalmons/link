@@ -2,19 +2,13 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import {
-  canonicalEventPrizeWithdrawalStorageMode,
-  createCanonicalEventPrizeWithdrawalReader,
+  createD1EventPrizeWithdrawalReader,
   createD1EventPrizeWithdrawalStore,
-  listEventPrizeWithdrawalShadowRepairs,
-  MAX_SHADOW_REPAIR_PAGE_SIZE,
   MAX_TRANSACTION_ATTEMPTS,
   readEventPrizeWithdrawalStorageControl,
   readEventPrizeWithdrawalStorageMode,
 } from "../src/eventPrizeWithdrawalD1.ts";
-import {
-  createEventPrizeRuntimeDependencies,
-  repairEventPrizeWithdrawalShadows,
-} from "../src/eventPrizeWithdrawal.ts";
+import { createEventPrizeRuntimeDependencies } from "../src/eventPrizeWithdrawal.ts";
 
 const testEnv = env as Env & {
   TEST_EVENT_PRIZE_WITHDRAWAL_D1_MIGRATIONS: D1Migration[];
@@ -47,11 +41,8 @@ describe("event prize withdrawal D1 repository", () => {
         "DELETE FROM event_prize_withdrawals",
       ),
       testEnv.EVENT_PRIZE_WITHDRAWALS_DB.prepare(
-        "DELETE FROM event_prize_withdrawal_shadow_repairs",
-      ),
-      testEnv.EVENT_PRIZE_WITHDRAWALS_DB.prepare(
         `UPDATE event_prize_withdrawal_runtime_control
-         SET storage_mode = 'firebase', source_digest = NULL,
+         SET storage_mode = 'd1', source_digest = NULL,
              source_record_count = NULL, source_exported_at_ms = NULL,
              cutover_at_ms = NULL, previous_storage_mode = NULL,
              updated_at_ms = 1
@@ -104,7 +95,7 @@ describe("event prize withdrawal D1 repository", () => {
     });
   });
 
-  it("replaces completed records and reports storage control mode", async () => {
+  it("replaces completed records and reports D1 storage control mode", async () => {
     const store = createD1EventPrizeWithdrawalStore(
       testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
       { now: () => 300 },
@@ -124,57 +115,19 @@ describe("event prize withdrawal D1 repository", () => {
     });
     await expect(
       readEventPrizeWithdrawalStorageMode(testEnv.EVENT_PRIZE_WITHDRAWALS_DB),
-    ).resolves.toBe("firebase");
+    ).resolves.toBe("d1");
     await testEnv.EVENT_PRIZE_WITHDRAWALS_DB.prepare(
       `UPDATE event_prize_withdrawal_runtime_control
-       SET storage_mode = 'd1'
+       SET storage_mode = 'frozen', previous_storage_mode = 'd1'
        WHERE singleton = 1`,
     ).run();
     await expect(
       readEventPrizeWithdrawalStorageMode(testEnv.EVENT_PRIZE_WITHDRAWALS_DB),
-    ).resolves.toBe("d1");
+    ).resolves.toBe("frozen");
   });
 
-  it("re-enqueues canonical state after a stale mirror arrives last", async () => {
-    const store = createD1EventPrizeWithdrawalStore(
-      testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
-      { now: () => 300 },
-    );
-    const path = `eventPrizeWithdrawals/${eventId}/${prizeId}`;
-    const older = processing(100);
-    const newer = { ...processing(200), leaseId: "lease-2" };
-    await store.replacePaths({ [path]: older });
-    await store.replacePaths({ [path]: newer });
-    await store.acknowledgeShadowPaths({ [path]: newer });
-    expect(
-      await listEventPrizeWithdrawalShadowRepairs(
-        testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
-      ),
-    ).toHaveLength(0);
-    await store.acknowledgeShadowPaths({ [path]: older });
-    expect(
-      await listEventPrizeWithdrawalShadowRepairs(
-        testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
-      ),
-    ).toEqual([
-      {
-        eventId,
-        prizeId,
-        path,
-        value: newer,
-      },
-    ]);
-  });
-
-  it("bounds repair pages below the Free-plan D1 query limit", async () => {
+  it("retains bounded optimistic retries", () => {
     expect(MAX_TRANSACTION_ATTEMPTS).toBe(12);
-    expect(MAX_SHADOW_REPAIR_PAGE_SIZE).toBe(4);
-    await expect(
-      listEventPrizeWithdrawalShadowRepairs(
-        testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
-        MAX_SHADOW_REPAIR_PAGE_SIZE + 1,
-      ),
-    ).rejects.toThrow("invalid-event-prize-withdrawal-shadow-limit");
   });
 
   it("reads event reconciliation state from the canonical store", async () => {
@@ -189,20 +142,14 @@ describe("event prize withdrawal D1 repository", () => {
     ).replacePaths({
       [`eventPrizeWithdrawals/${eventId}/${prizeId}`]: current,
     });
-    let firebaseReads = 0;
-    const readEvent = createCanonicalEventPrizeWithdrawalReader(
+    const readEvent = createD1EventPrizeWithdrawalReader(
       testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
-      async () => {
-        firebaseReads += 1;
-        return { [prizeId]: processing(100) };
-      },
     );
 
     await expect(readEvent(eventId)).resolves.toEqual({ [prizeId]: current });
-    expect(firebaseReads).toBe(0);
   });
 
-  it("routes withdrawal references through D1 and fails closed while frozen", async () => {
+  it("routes withdrawal references only through D1 and fails closed while frozen", async () => {
     await testEnv.EVENT_PRIZE_WITHDRAWALS_DB.prepare(
       `UPDATE event_prize_withdrawal_runtime_control
        SET storage_mode = 'd1'
@@ -210,14 +157,12 @@ describe("event prize withdrawal D1 repository", () => {
     ).run();
     const path = `eventPrizeWithdrawals/${eventId}/${prizeId}`;
     const firebaseValues = new Map<string, unknown>();
-    let shadowFailure = false;
-    let shadowWrites = 0;
+    let firebaseWrites = 0;
     const repository = {
       getRtdbPath: async (candidatePath: string) =>
         firebaseValues.get(candidatePath) ?? null,
       patchRtdbRoot: async (updates: Record<string, unknown>) => {
-        shadowWrites += 1;
-        if (shadowFailure) throw new Error("shadow-unavailable");
+        firebaseWrites += 1;
         for (const [candidatePath, value] of Object.entries(updates)) {
           if (value === null) firebaseValues.delete(candidatePath);
           else firebaseValues.set(candidatePath, value);
@@ -258,13 +203,11 @@ describe("event prize withdrawal D1 repository", () => {
     expect(await runtime.readWithdrawal(eventId, prizeId)).toEqual(
       processing(500),
     );
-    expect(firebaseValues.get(path)).toEqual(processing(500));
-    shadowFailure = true;
-    const writesBeforeRead = shadowWrites;
+    expect(firebaseValues.has(path)).toBe(false);
+    expect(firebaseWrites).toBe(0);
     await expect(runtime.readWithdrawal(eventId, prizeId)).resolves.toEqual(
       processing(500),
     );
-    expect(shadowWrites).toBe(writesBeforeRead);
     await expect(
       runtime.admin
         .database()
@@ -274,20 +217,7 @@ describe("event prize withdrawal D1 repository", () => {
           updatedAtMs: 550,
         })),
     ).resolves.toMatchObject({ committed: true });
-    expect(
-      await listEventPrizeWithdrawalShadowRepairs(
-        testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
-      ),
-    ).toHaveLength(1);
-    shadowFailure = false;
-    await expect(
-      repairEventPrizeWithdrawalShadows(testEnv, { repository }),
-    ).resolves.toBe(1);
-    expect(
-      await listEventPrizeWithdrawalShadowRepairs(
-        testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
-      ),
-    ).toHaveLength(0);
+    expect(firebaseWrites).toBe(0);
     await runtime.admin
       .database()
       .ref()
@@ -302,22 +232,62 @@ describe("event prize withdrawal D1 repository", () => {
     expect(await runtime.readWithdrawal(eventId, prizeId)).toMatchObject({
       status: "completed",
     });
-    expect(firebaseValues.get(path)).toMatchObject({ status: "completed" });
+    expect(firebaseValues.has(path)).toBe(false);
+    expect(firebaseWrites).toBe(0);
 
     await testEnv.EVENT_PRIZE_WITHDRAWALS_DB.prepare(
       `UPDATE event_prize_withdrawal_runtime_control
        SET storage_mode = 'frozen', previous_storage_mode = 'd1'
        WHERE singleton = 1`,
     ).run();
-    expect(
-      canonicalEventPrizeWithdrawalStorageMode(
-        await readEventPrizeWithdrawalStorageControl(
-          testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
-        ),
+    await expect(
+      readEventPrizeWithdrawalStorageControl(
+        testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
       ),
-    ).toBe("d1");
+    ).resolves.toEqual({
+      storageMode: "frozen",
+      previousStorageMode: "d1",
+    });
     await expect(
       createEventPrizeRuntimeDependencies(testEnv, { repository }),
     ).rejects.toMatchObject({ code: "unavailable" });
+  });
+
+  it("applies the permanent D1 schema and rejects Firebase control state", async () => {
+    const schema = await testEnv.EVENT_PRIZE_WITHDRAWALS_DB.prepare(
+      `SELECT name, type FROM sqlite_schema
+       WHERE name LIKE 'event_prize_withdrawal%'
+       ORDER BY type, name`,
+    ).all<{ name: string; type: string }>();
+    expect(schema.results).toEqual([
+      { name: "event_prize_withdrawal_runtime_control", type: "table" },
+      { name: "event_prize_withdrawals", type: "table" },
+    ]);
+    await expect(
+      testEnv.EVENT_PRIZE_WITHDRAWALS_DB.prepare(
+        `UPDATE event_prize_withdrawal_runtime_control
+         SET storage_mode = 'firebase'
+         WHERE singleton = 1`,
+      ).run(),
+    ).rejects.toThrow();
+  });
+
+  it("fails closed when storage control is missing", async () => {
+    await testEnv.EVENT_PRIZE_WITHDRAWALS_DB.prepare(
+      "DELETE FROM event_prize_withdrawal_runtime_control WHERE singleton = 1",
+    ).run();
+    try {
+      await expect(
+        readEventPrizeWithdrawalStorageControl(
+          testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
+        ),
+      ).rejects.toThrow("invalid-event-prize-withdrawal-storage-mode");
+    } finally {
+      await testEnv.EVENT_PRIZE_WITHDRAWALS_DB.prepare(
+        `INSERT INTO event_prize_withdrawal_runtime_control (
+           singleton, storage_mode, updated_at_ms, previous_storage_mode
+         ) VALUES (1, 'd1', 1, NULL)`,
+      ).run();
+    }
   });
 });

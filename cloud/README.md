@@ -4,7 +4,7 @@ Run commands from the repository root. See the repository [architecture and comm
 
 Firebase retains authentication and the existing data stores. The API Worker owns manual invite, join, match creation, and rematch mutations; auth; profile and leaderboard reads; profile customization; username mutation; mining; gameplay; event-prize selection, withdrawal, and canonical projection; profile-link catch-up; rating-, invite-, automatch-, and event-driven profile-game projection; event control and progress Workflows; X callback; event Telegram projection; and Worker-backed Telegram delivery.
 
-Event-prize withdrawal ownership, leases, persisted Solana submissions, and completion records live in `mons-link-event-prize-withdrawals` D1 after cutover. RTDB retains a repairable compatibility shadow of committed transitions for reviewed rollback to Firebase-only Worker versions; it is not the canonical read source while the D1 control row is in `d1` mode.
+Event-prize withdrawal ownership, leases, persisted Solana submissions, and completion records live exclusively in `mons-link-event-prize-withdrawals` D1. RTDB has no withdrawal shadow, and Firebase-backed Worker versions are not valid rollback targets.
 
 ## Setup
 

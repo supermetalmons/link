@@ -76,7 +76,7 @@ export function createEventBracketRuntime(dependencies: {
     eventId: string;
     profileId: string;
   }) => Promise<string>;
-  readEventPrizeWithdrawals?: (
+  readEventPrizeWithdrawals: (
     eventId: string,
   ) => Promise<Record<string, Record<string, unknown>>>;
 }): EventBracketRuntime;

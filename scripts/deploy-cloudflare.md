@@ -71,42 +71,29 @@ npm run smoke:api -- --base-url https://api.mons.link --smoke-sol <known-wallet>
 
 `upload:api` uses `wrangler versions upload --strict`; it does not send traffic to the candidate. `promote:api` deploys the explicit Version ID to 100% of traffic without prompting. `deploy:api:triggers` applies the tracked route, Cron, and Queue consumer configuration. Routine code-only releases may omit the trigger command when that configuration is unchanged.
 
-## Event-prize withdrawal D1 cutover
+## Event-prize withdrawal D1 operations
 
-`mons-link-event-prize-withdrawals` is the canonical ownership, lease, submitted-transaction, and completion store after cutover. The API Worker reads its storage mode once per request or Workflow attempt. `firebase` keeps the candidate on the existing RTDB records, `frozen` blocks new admissions and Workflow attempts, and `d1` uses D1 while maintaining an RTDB rollback shadow. D1 triggers persist exact shadow-repair markers, and the five-minute Worker schedule retries them until RTDB acknowledges the same record version.
+`mons-link-event-prize-withdrawals` permanently owns event-prize withdrawal admission, leases, submitted Solana transactions, and completion records. The runtime accepts only `d1` and `frozen`: `d1` serves requests and Workflow attempts, while `frozen` fails them closed during maintenance. Event reconciliation and auth recovery continue to read canonical D1 state while withdrawals are frozen.
 
-Apply the schema before uploading a Worker version with the binding:
+Inspect or change the maintenance gate without logging withdrawal contents:
 
 ```sh
+npm run manage:event-prize-withdrawals -- --status
+npm run manage:event-prize-withdrawals -- --freeze
+npm run manage:event-prize-withdrawals -- --resume
+```
+
+Freeze and resume are idempotent. After freezing, wait at least five minutes and confirm `activeLeases` is zero before schema or Worker maintenance. Missing or invalid control state fails closed.
+
+Migration `0004_retire_firebase_shadow.sql` removes the retired repair table and triggers and permanently rejects Firebase storage mode. Promote and smoke a D1-only Worker while frozen before applying it:
+
+```sh
+npx wrangler d1 time-travel info mons-link-event-prize-withdrawals --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env --json
 npx wrangler d1 migrations apply mons-link-event-prize-withdrawals --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npm run migrate:event-prize-withdrawals-d1 -- --dry-run --project mons-link
+npm run manage:event-prize-withdrawals -- --status
 ```
 
-Upload, smoke, and promote the hybrid candidate while the control row remains in `firebase`. Run the read-only Workflow preflight, then enter the short maintenance window:
-
-```sh
-npm run migrate:event-prize-withdrawals-d1 -- --freeze --project mons-link
-npm run migrate:event-prize-withdrawals-d1 -- --dry-run --project mons-link
-npm run migrate:event-prize-withdrawals-d1 -- --final --project mons-link
-```
-
-After freezing, wait at least five minutes and repeat the dry run until `activeLeases` is zero. `--final` requires a Firebase-origin freeze, rejects active leases, imports an exact RTDB snapshot, verifies its content digest and record count against D1, and changes the mode to `d1` only after verification. It does not delete the RTDB source. Run the Workflow preflight again after the mode changes.
-
-If the cutover must stop while frozen, restore the exact pre-freeze mode:
-
-```sh
-npm run migrate:event-prize-withdrawals-d1 -- --abort --project mons-link
-```
-
-For a rollback to a Firebase-only Worker version, first freeze the hybrid version, wait until the dry run reports no active leases, verify the D1 and RTDB shadow match, and switch the control row back before changing Worker traffic:
-
-```sh
-npm run migrate:event-prize-withdrawals-d1 -- --freeze --project mons-link
-npm run migrate:event-prize-withdrawals-d1 -- --dry-run --project mons-link
-npm run migrate:event-prize-withdrawals-d1 -- --rollback --project mons-link
-```
-
-Never roll back to a Firebase-only version while the control row remains `d1`. A later D1 cutover must repeat the freeze and final import so D1 includes any Firebase-era changes.
+After this migration, Firebase and hybrid Worker versions are invalid rollback targets. Roll back only to a retained D1-only Version ID or fix forward, and keep the D1 database intact.
 
 Apply the Telegram D1 schema before uploading a Worker version that includes the `TELEGRAM_DB` binding:
 
@@ -137,7 +124,7 @@ npx wrangler workflows instances describe mons-link-event-progress latest --conf
 
 Before retiring the legacy Firebase event-progress functions, verify that `processEventProgress` has no pending Cloud Tasks and that `eventProgressFallback` is empty. The Cloudflare outbox is private and indexed by `lastQueuedAtMs` for bounded recovery sweeps.
 
-`mons-link-event-prize-withdrawal` owns durable Solana prize transfers. The authenticated API admits a deterministic instance per event prize, while `mons-link-event-prize-withdrawals` D1 owns the withdrawal state after the fenced cutover. The browser polls the authenticated status route; a browser timeout never terminates the Workflow.
+`mons-link-event-prize-withdrawal` owns durable Solana prize transfers. The authenticated API admits a deterministic instance per event prize, while `mons-link-event-prize-withdrawals` D1 permanently owns the withdrawal state. The browser polls the authenticated status route; a browser timeout never terminates the Workflow.
 
 Set the wallet key as an encrypted Worker secret through a protected file:
 
@@ -163,14 +150,13 @@ npx wrangler workflows instances describe mons-link-event-prize-withdrawal "$eve
 
 The preflight must complete with `{"ok":true,"status":"ready"}`. It verifies the encrypted wallet identity, both Metaplex runtimes, and a read-only Helius RPC request without building or sending a transaction.
 
-For the production cutover, promote and smoke the API, pass the Workflow preflight, promote and smoke the frontend, then remove the retired callable in the same maintenance window:
+The retired Firebase callable must remain absent:
 
 ```sh
-firebase functions:delete withdrawEventPrize --project mons-link --force
 firebase functions:list --project mons-link
 ```
 
-Keep the Firebase wallet secret through the rollback window. Rollback restores the previous Firebase Function first, the previous frontend Version second, and the previous API Worker Version last.
+Do not restore the Firebase callable or route withdrawal state back to RTDB during rollback. Restore only a reviewed D1-only API Worker version.
 
 Rollback always targets a reviewed Version ID:
 

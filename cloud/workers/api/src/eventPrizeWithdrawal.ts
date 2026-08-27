@@ -57,11 +57,8 @@ import {
 } from "./gameplayRepository.ts";
 import { readBoundedJson } from "./http.ts";
 import {
-  canonicalEventPrizeWithdrawalStorageMode,
   createD1EventPrizeWithdrawalStore,
-  listEventPrizeWithdrawalShadowRepairs,
   parseEventPrizeWithdrawalPath,
-  readEventPrizeWithdrawalStorageControl,
   readEventPrizeWithdrawalStorageMode,
   type EventPrizeWithdrawalStore,
 } from "./eventPrizeWithdrawalD1.ts";
@@ -150,6 +147,7 @@ type RouteDependencies = {
   firestore?: AuthFirestoreClient;
   now?: () => number;
   repository?: EventPrizeGameplayRepository;
+  withdrawalStore?: EventPrizeWithdrawalStore;
   verifyIdentity?: (
     request: Request,
     ctx: WorkerExecutionContext,
@@ -217,48 +215,10 @@ function createRtdbReference(
   };
 }
 
-function createFirebaseEventPrizeWithdrawalStore(
-  repository: EventPrizeGameplayRepository,
-): EventPrizeWithdrawalStore {
-  return {
-    acknowledgeShadowPaths: async () => undefined,
-    async get(eventId, prizeId) {
-      return toRecord(
-        await repository.getRtdbPath(
-          getEventPrizeWithdrawalPath(eventId, prizeId),
-        ),
-      );
-    },
-    reference(eventId, prizeId) {
-      return createRtdbReference(
-        repository,
-        getEventPrizeWithdrawalPath(eventId, prizeId),
-      );
-    },
-    replacePaths: (updates) => repository.patchRtdbRoot(updates),
-  };
-}
-
 function createEventPrizeAdmin(
   repository: EventPrizeGameplayRepository,
   withdrawalStore: EventPrizeWithdrawalStore,
-  usesD1: boolean,
 ): EventPrizeRuntimeDependencies["admin"] {
-  const mirrorWithdrawalUpdates = async (
-    updates: Record<string, unknown>,
-  ): Promise<void> => {
-    try {
-      await repository.patchRtdbRoot(updates);
-      await withdrawalStore.acknowledgeShadowPaths(updates);
-    } catch (error) {
-      console.error(
-        JSON.stringify({
-          event: "event_prize_withdrawal_shadow_write_failed",
-          errorType: cleanString(toRecord(error)?.name) || "Error",
-        }),
-      );
-    }
-  };
   return {
     database: () => ({
       ref: (path = "") => {
@@ -268,55 +228,33 @@ function createEventPrizeAdmin(
             identity.eventId,
             identity.prizeId,
           );
-          if (!usesD1) return withdrawalReference;
-          return {
-            once: (event) => withdrawalReference.once(event),
-            async transaction(updater, onComplete, applyLocally) {
-              const result = await withdrawalReference.transaction(
-                updater,
-                onComplete,
-                applyLocally,
-              );
-              if (result.committed) {
-                await mirrorWithdrawalUpdates({
-                  [path]: result.snapshot.val(),
-                });
-              }
-              return result;
-            },
-            async update(updates) {
-              await withdrawalReference.update(updates);
-              const current = await withdrawalReference.once("value");
-              await mirrorWithdrawalUpdates({ [path]: current.val() });
-            },
-          };
+          return withdrawalReference;
         }
         const reference = createRtdbReference(repository, path);
-        if (!usesD1 || path) return reference;
+        if (path) return reference;
         return {
           ...reference,
           async update(updates) {
             const withdrawalUpdates: Record<string, unknown> = {};
-            const firebaseUpdates: Record<string, unknown> = {};
+            const rtdbUpdates: Record<string, unknown> = {};
             for (const [updatePath, value] of Object.entries(updates)) {
               if (parseEventPrizeWithdrawalPath(updatePath)) {
                 withdrawalUpdates[updatePath] = value;
               } else {
-                firebaseUpdates[updatePath] = value;
+                rtdbUpdates[updatePath] = value;
               }
             }
             if (
               Object.keys(withdrawalUpdates).length > 0 &&
-              Object.keys(firebaseUpdates).length > 0
+              Object.keys(rtdbUpdates).length > 0
             ) {
               throw new TypeError("cross-storage-root-update");
             }
             if (Object.keys(withdrawalUpdates).length > 0) {
               await withdrawalStore.replacePaths(withdrawalUpdates);
-              await mirrorWithdrawalUpdates(withdrawalUpdates);
               return;
             }
-            await repository.patchRtdbRoot(firebaseUpdates);
+            await repository.patchRtdbRoot(rtdbUpdates);
           },
         };
       },
@@ -330,7 +268,11 @@ export async function createEventPrizeRuntimeDependencies(
     firestore = createAuthFirestoreClient(env),
     now = Date.now,
     repository = createGameplayRepository(env),
-  }: Pick<RouteDependencies, "firestore" | "now" | "repository"> = {},
+    withdrawalStore: withdrawalStoreOverride,
+  }: Pick<
+    RouteDependencies,
+    "firestore" | "now" | "repository" | "withdrawalStore"
+  > = {},
 ): Promise<EventPrizeRuntimeDependencies> {
   const storageMode = await readEventPrizeWithdrawalStorageMode(
     env.EVENT_PRIZE_WITHDRAWALS_DB,
@@ -342,11 +284,8 @@ export async function createEventPrizeRuntimeDependencies(
     );
   }
   const withdrawalStore =
-    storageMode === "d1"
-      ? createD1EventPrizeWithdrawalStore(env.EVENT_PRIZE_WITHDRAWALS_DB, {
-          now,
-        })
-      : createFirebaseEventPrizeWithdrawalStore(repository);
+    withdrawalStoreOverride ||
+    createD1EventPrizeWithdrawalStore(env.EVENT_PRIZE_WITHDRAWALS_DB, { now });
   const readProfileByLoginUid = async (uid: string) => {
     const profiles = await firestore.query(
       "users",
@@ -373,11 +312,7 @@ export async function createEventPrizeRuntimeDependencies(
         )?.fields || null,
     });
   return {
-    admin: createEventPrizeAdmin(
-      repository,
-      withdrawalStore,
-      storageMode === "d1",
-    ),
+    admin: createEventPrizeAdmin(repository, withdrawalStore),
     createEventPrizeUmi: (standard) =>
       createConfiguredEventPrizeUmi(standard, {
         adminPrivateKey: env.EVENT_PRIZE_ADMIN_PRIVATE_KEY,
@@ -408,35 +343,6 @@ export async function createEventPrizeRuntimeDependencies(
     },
     resolveCanonicalProfilePath,
   };
-}
-
-export async function repairEventPrizeWithdrawalShadows(
-  env: Env,
-  dependencies: { repository?: EventPrizeGameplayRepository } = {},
-): Promise<number> {
-  const control = await readEventPrizeWithdrawalStorageControl(
-    env.EVENT_PRIZE_WITHDRAWALS_DB,
-  );
-  if (canonicalEventPrizeWithdrawalStorageMode(control) !== "d1") return 0;
-  const repairs = await listEventPrizeWithdrawalShadowRepairs(
-    env.EVENT_PRIZE_WITHDRAWALS_DB,
-  );
-  if (repairs.length === 0) return 0;
-  const updates = Object.fromEntries(
-    repairs.map((repair) => [repair.path, repair.value]),
-  );
-  const repository = dependencies.repository || createGameplayRepository(env);
-  await repository.patchRtdbRoot(updates);
-  await createD1EventPrizeWithdrawalStore(
-    env.EVENT_PRIZE_WITHDRAWALS_DB,
-  ).acknowledgeShadowPaths(updates);
-  console.info(
-    JSON.stringify({
-      event: "event_prize_withdrawal_shadow_repair_completed",
-      repaired: repairs.length,
-    }),
-  );
-  return repairs.length;
 }
 
 function errorStatus(code: string): number {
@@ -883,7 +789,7 @@ export async function executeEventPrizeWithdrawal(
   params: EventPrizeWithdrawalWorkflowParams,
   dependencies: Pick<
     RouteDependencies,
-    "firestore" | "now" | "repository"
+    "firestore" | "now" | "repository" | "withdrawalStore"
   > = {},
 ): Promise<EventPrizeWithdrawalCompletedResponse> {
   const repository = dependencies.repository || createGameplayRepository(env);
@@ -951,6 +857,7 @@ export async function handleEventPrizeWithdrawalRoute(
       firestore: dependencies.firestore,
       now: dependencies.now,
       repository,
+      withdrawalStore: dependencies.withdrawalStore,
     });
     const workflow =
       dependencies.workflow || env.EVENT_PRIZE_WITHDRAWAL_WORKFLOW;

@@ -103,6 +103,7 @@ test("reconciles canonical prize projections without changing event history", as
   const values = new Map<string, unknown>();
   const runtime = createEventBracketRuntime({
     admin: createAdmin(values),
+    readEventPrizeWithdrawals: async () => ({}),
     resolveProfileEventPrizeOwnerId: async () => "target-profile",
   });
   const assignment = {
@@ -202,6 +203,7 @@ test("does not overwrite a canonical prize assignment inserted concurrently", as
         inserted = true;
       }
     }),
+    readEventPrizeWithdrawals: async () => ({}),
     resolveProfileEventPrizeOwnerId: async () => "target-profile",
   });
   await assert.rejects(
@@ -226,6 +228,7 @@ test("rejects two awards that collapse to one canonical profile", async () => {
   const eventId = "NN3eRzoZo80";
   const runtime = createEventBracketRuntime({
     admin: createAdmin(new Map()),
+    readEventPrizeWithdrawals: async () => ({}),
     resolveProfileEventPrizeOwnerId: async () => "canonical-profile",
   });
   await assert.rejects(

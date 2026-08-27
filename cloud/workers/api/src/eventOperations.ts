@@ -25,7 +25,7 @@ import {
   createEventAdminAdapter,
   ensureEventProgressWorkflow,
 } from "./eventProgress.ts";
-import { createCanonicalEventPrizeWithdrawalReader } from "./eventPrizeWithdrawalD1.ts";
+import { createD1EventPrizeWithdrawalReader } from "./eventPrizeWithdrawalD1.ts";
 import { createProfileEventPrizeOwnerResolver } from "./profileEventPrizeOwner.ts";
 
 export const EVENT_CONTROL_TIMEOUT_MS = 30_000;
@@ -165,18 +165,8 @@ function createRuntime(
         {}
       );
     },
-    readEventPrizeWithdrawals: createCanonicalEventPrizeWithdrawalReader(
+    readEventPrizeWithdrawals: createD1EventPrizeWithdrawalReader(
       env.EVENT_PRIZE_WITHDRAWALS_DB,
-      async (eventId) => {
-        const value = await repository.getRtdbPath(
-          `eventPrizeWithdrawals/${eventId}`,
-          undefined,
-          signal,
-        );
-        return value && typeof value === "object" && !Array.isArray(value)
-          ? (value as Record<string, Record<string, unknown>>)
-          : {};
-      },
     ),
     resolveProfileEventPrizeOwnerId,
     now: dependencies.now,

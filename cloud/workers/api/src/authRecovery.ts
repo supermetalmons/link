@@ -45,9 +45,8 @@ import {
   listProfileGameProjectionPage,
 } from "./profileGamesD1.ts";
 import {
-  canonicalEventPrizeWithdrawalStorageMode,
   createD1EventPrizeWithdrawalStore,
-  readEventPrizeWithdrawalStorageControl,
+  type EventPrizeWithdrawalStore,
 } from "./eventPrizeWithdrawalD1.ts";
 
 export const AUTH_RECOVERY_QUEUE_NAME = "mons-link-auth-recovery";
@@ -87,6 +86,7 @@ type AuthRecoveryDependencies = {
   rtdb?: FirebaseRtdbClient;
   signal?: AbortSignal;
   withdrawalDb?: D1Database;
+  withdrawalStore?: Pick<EventPrizeWithdrawalStore, "get">;
 };
 
 function record(value: unknown): Record<string, unknown> {
@@ -461,27 +461,11 @@ export function createAuthRecoveryService(
   const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
   const withdrawalDb =
     dependencies.withdrawalDb || env.EVENT_PRIZE_WITHDRAWALS_DB;
-  let withdrawalMode: Promise<"d1" | "firebase"> | null = null;
-  const getWithdrawalMode = () => {
-    withdrawalMode ||= readEventPrizeWithdrawalStorageControl(withdrawalDb)
-      .then(canonicalEventPrizeWithdrawalStorageMode)
-      .catch((error) => {
-        withdrawalMode = null;
-        throw error;
-      });
-    return withdrawalMode;
-  };
-  const d1Withdrawals = createD1EventPrizeWithdrawalStore(withdrawalDb, {
-    now,
-  });
+  const d1Withdrawals =
+    dependencies.withdrawalStore ||
+    createD1EventPrizeWithdrawalStore(withdrawalDb, { now });
   const readWithdrawal = async (eventId: string, prizeId: string) =>
-    (await getWithdrawalMode()) === "d1"
-      ? d1Withdrawals.get(eventId, prizeId)
-      : rtdb.getPath(
-          `eventPrizeWithdrawals/${eventId}/${prizeId}`,
-          undefined,
-          dependencies.signal,
-        );
+    d1Withdrawals.get(eventId, prizeId);
 
   const mutateJob = async (
     profileId: string,

@@ -10,6 +10,7 @@ import {
   type EventPrizeWithdrawalWorkflowInput,
 } from "../src/eventPrizeWithdrawal.ts";
 import type { AuthFirestoreClient } from "../src/authFirestore.ts";
+import type { EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
@@ -95,7 +96,57 @@ function repository() {
       };
     },
   };
-  return { value, values };
+  const withdrawalStore: EventPrizeWithdrawalStore = {
+    async get(candidateEventId, candidatePrizeId) {
+      return (
+        (values.get(
+          `eventPrizeWithdrawals/${candidateEventId}/${candidatePrizeId}`,
+        ) as Record<string, unknown> | undefined) ?? null
+      );
+    },
+    reference(candidateEventId, candidatePrizeId) {
+      const path = `eventPrizeWithdrawals/${candidateEventId}/${candidatePrizeId}`;
+      const read = () => values.get(path) ?? null;
+      return {
+        async once() {
+          const current = read();
+          return {
+            exists: () => current !== null && current !== undefined,
+            val: () => current,
+          };
+        },
+        async transaction(updater) {
+          const current = read();
+          const next = updater(current);
+          if (next === undefined) {
+            return {
+              committed: false,
+              snapshot: { exists: () => current !== null, val: () => current },
+            };
+          }
+          if (next === null) values.delete(path);
+          else values.set(path, next);
+          return {
+            committed: true,
+            snapshot: { exists: () => next !== null, val: () => next },
+          };
+        },
+        async update(updates) {
+          values.set(path, {
+            ...((read() as Record<string, unknown> | null) || {}),
+            ...updates,
+          });
+        },
+      };
+    },
+    async replacePaths(updates) {
+      for (const [path, next] of Object.entries(updates)) {
+        if (next === null) values.delete(path);
+        else values.set(path, next);
+      }
+    },
+  };
+  return { value, values, withdrawalStore };
 }
 
 function workflow(
@@ -231,6 +282,7 @@ test("rejects an invalid completed record before projection cleanup", async () =
     {
       firestore: firestore(),
       repository: state.value,
+      withdrawalStore: state.withdrawalStore,
       verifyIdentity,
     },
   );
@@ -335,7 +387,11 @@ test("completed execution retries projection cleanup failures", async () => {
         recipientAddress,
         requesterUid: uid,
       },
-      { firestore: firestore(), repository: failingRepository },
+      {
+        firestore: firestore(),
+        repository: failingRepository,
+        withdrawalStore: state.withdrawalStore,
+      },
     ),
     /database unavailable/,
   );
@@ -373,6 +429,7 @@ test("duplicate starts preserve an active executor lease", async () => {
       firestore: firestore(),
       now: () => 1_000,
       repository: state.value,
+      withdrawalStore: state.withdrawalStore,
       verifyIdentity,
       workflow: binding,
     },
@@ -421,6 +478,7 @@ test("alternate logins preserve the canonical active intent", async () => {
       firestore: firestore(),
       now: () => 1_000,
       repository: state.value,
+      withdrawalStore: state.withdrawalStore,
       verifyIdentity,
       workflow: binding,
     },
@@ -466,6 +524,7 @@ test("processing intent stays locked after its executor lease expires", async ()
       firestore: firestore(),
       now: () => 3_000,
       repository: state.value,
+      withdrawalStore: state.withdrawalStore,
       verifyIdentity,
       workflow: binding,
     },
@@ -503,6 +562,7 @@ test("keeps polling while a retryable Workflow has released its claim", async ()
     {
       firestore: firestore(),
       repository: state.value,
+      withdrawalStore: state.withdrawalStore,
       verifyIdentity,
       workflow: binding,
     },
@@ -546,6 +606,7 @@ test("marks errored Workflows as terminal", async () => {
     {
       firestore: firestore(),
       repository: state.value,
+      withdrawalStore: state.withdrawalStore,
       verifyIdentity,
       workflow: binding,
     },
@@ -568,6 +629,7 @@ test("starts and polls one authenticated withdrawal Workflow", async () => {
   const dependencies = {
     firestore: firestore(),
     repository: state.value,
+    withdrawalStore: state.withdrawalStore,
     verifyIdentity,
     workflow: binding,
   };
@@ -656,6 +718,7 @@ test("replaces a retained errored Workflow with the current request", async () =
     {
       firestore: firestore(),
       repository: state.value,
+      withdrawalStore: state.withdrawalStore,
       verifyIdentity,
       workflow: binding,
     },
@@ -704,6 +767,7 @@ test("replaces a retained completed failure", async () => {
     {
       firestore: firestore(),
       repository: state.value,
+      withdrawalStore: state.withdrawalStore,
       verifyIdentity,
       workflow: binding,
     },
@@ -728,6 +792,7 @@ test("does not revive a terminated Workflow and releases its new claim", async (
     {
       firestore: firestore(),
       repository: state.value,
+      withdrawalStore: state.withdrawalStore,
       verifyIdentity,
       workflow: binding,
     },

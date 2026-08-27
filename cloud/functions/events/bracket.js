@@ -52,12 +52,8 @@ const createEventBracketRuntime = (dependencies = {}) => {
     (async ({ profileId }) => profileId);
   const readEventPrizeWithdrawals =
     dependencies.readEventPrizeWithdrawals ||
-    (async (eventId) => {
-      const snapshot = await admin
-        .database()
-        .ref(`eventPrizeWithdrawals/${eventId}`)
-        .once("value");
-      return snapshot.val() || {};
+    (async () => {
+      throw new Error("readEventPrizeWithdrawals dependency is required");
     });
   const EVENT_MATCH_RESOLVE_CONCURRENCY = 4;
 

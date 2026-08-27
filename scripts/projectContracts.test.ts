@@ -342,6 +342,8 @@ test("package manifests preserve public scripts and deployment command vectors",
       "promote:api": rootPackage.scripts?.["promote:api"],
       "deploy:api:triggers": rootPackage.scripts?.["deploy:api:triggers"],
       "smoke:api": rootPackage.scripts?.["smoke:api"],
+      "manage:event-prize-withdrawals":
+        rootPackage.scripts?.["manage:event-prize-withdrawals"],
       "prepare:firebase": rootPackage.scripts?.["prepare:firebase"],
       "deploy:firebase": rootPackage.scripts?.["deploy:firebase"],
       deploy: rootPackage.scripts?.deploy,
@@ -364,6 +366,8 @@ test("package manifests preserve public scripts and deployment command vectors",
         "wrangler triggers deploy --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
       "smoke:api":
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/smoke-cloudflare-api.ts",
+      "manage:event-prize-withdrawals":
+        "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-event-prize-withdrawals.ts",
       "prepare:firebase":
         "npm --prefix cloud/functions ci && npm --prefix cloud/functions test",
       "deploy:firebase":
@@ -531,6 +535,12 @@ test("operations documentation cross-links package and deployment guides", () =>
     deploymentGuide,
     /workflows instances describe mons-link-event-prize-withdrawal latest/,
   );
+  assert.match(
+    deploymentGuide,
+    /npm run manage:event-prize-withdrawals -- --freeze/,
+  );
+  assert.doesNotMatch(deploymentGuide, /migrate:event-prize-withdrawals-d1/);
+  assert.doesNotMatch(deploymentGuide, /Firebase-only Worker version/);
 });
 
 test("profile claim synchronization uses the Worker route", () => {

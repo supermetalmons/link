@@ -38,7 +38,6 @@ import {
   handleTelegramCommand,
   TELEGRAM_COMMAND_PATH,
 } from "./telegramCommand.ts";
-import { repairEventPrizeWithdrawalShadows } from "./eventPrizeWithdrawal.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
 export type { ProviderFetch } from "./provider.ts";
@@ -75,7 +74,6 @@ async function handleScheduled(
       now: () => controller.scheduledTime,
     }),
     sweepExpiredAuthState(env.AUTH_STATE_DB, controller.scheduledTime),
-    repairEventPrizeWithdrawalShadows(env),
   ]);
   const failure = results.find(
     (result): result is PromiseRejectedResult => result.status === "rejected",
