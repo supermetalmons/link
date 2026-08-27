@@ -73,6 +73,24 @@ describe("auth state D1 repository", () => {
     ]);
   });
 
+  it("indexes scheduled cleanup predicates", async () => {
+    const indexes = await testEnv.AUTH_STATE_DB.prepare(
+      `SELECT name FROM sqlite_schema
+       WHERE type = 'index'
+         AND name IN (
+           'idx_auth_intents_uncompacted_expires',
+           'idx_x_redirect_flows_terminal_updated',
+           'idx_x_redirect_flows_uncompacted_expires'
+         )
+       ORDER BY name`,
+    ).all<{ name: string }>();
+    expect(indexes.results.map(({ name }) => name)).toEqual([
+      "idx_auth_intents_uncompacted_expires",
+      "idx_x_redirect_flows_terminal_updated",
+      "idx_x_redirect_flows_uncompacted_expires",
+    ]);
+  });
+
   it("creates and reads exact intents while bounding ID collisions", async () => {
     const repository = createAuthStateRepository(testEnv.AUTH_STATE_DB);
     const document = authIntent();
