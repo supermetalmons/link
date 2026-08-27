@@ -16,7 +16,6 @@ import {
   get,
   runTransaction,
 } from "firebase/database";
-import { getFirestore, Firestore, doc, onSnapshot } from "firebase/firestore";
 import {
   didFindInviteThatCanBeJoined,
   didReceiveInviteReactionUpdate,
@@ -43,7 +42,6 @@ import {
   InviteReaction,
   Reaction,
   PlayerProfile,
-  PlayerMiningData,
   PlayerMiningMaterials,
   MINING_MATERIAL_NAMES,
   MiningMaterialName,
@@ -60,7 +58,10 @@ import {
   EventPrizeWithdrawalResponse,
   ProfileEventPrizes,
 } from "./connectionModels";
-import { resolvePlayerProfile } from "./playerProfileLookup";
+import {
+  resolvePlayerProfile,
+  resolvePlayerProfileWithRetry,
+} from "./playerProfileLookup";
 import { storage } from "../utils/storage";
 import { generateNewInviteId } from "../utils/misc";
 import {
@@ -120,10 +121,7 @@ import {
   decrementLifecycleCounter,
   incrementLifecycleCounter,
 } from "../lifecycle/lifecycleDiagnostics";
-import {
-  normalizeMiningSnapshot,
-  type MineRockResponse,
-} from "@mons/shared/mining";
+import type { MineRockResponse } from "@mons/shared/mining";
 import {
   createInviteCandidatesFromMatchId,
   deriveLatestMatchId,
@@ -207,15 +205,6 @@ const getStoredAuthPresentation = (): {
   );
 };
 
-const normalizeMiningData = (source: any): PlayerMiningData =>
-  normalizeMiningSnapshot({
-    lastRockDate: source?.lastRockDate,
-    materials:
-      source && typeof source === "object"
-        ? (source.materials ?? source)
-        : undefined,
-  });
-
 const LEADERBOARD_ENTRY_LIMIT = 99;
 const wagerDebugLogsEnabled = import.meta.env.DEV;
 const EVENT_SYNC_COOLDOWN_ACTIVE_MS = 700;
@@ -223,14 +212,9 @@ const EVENT_SYNC_COOLDOWN_SCHEDULED_MS = 1500;
 const EVENT_SYNC_PARTICIPANT_CACHE_TTL_MS = 3000;
 const EVENT_SYNC_PARTICIPANT_NEGATIVE_CACHE_TTL_MS = 800;
 const EVENT_SYNC_RETRY_DELAYS_MS = [150, 300] as const;
-const MAX_PROFILE_MERGE_REDIRECT_HOPS = 4;
+const PROFILE_LOOKUP_RETRY_DELAY_MS = 1_000;
 const NAVIGATION_GAMES_POLL_INTERVAL_MS = 5_000;
 const NAVIGATION_GAMES_MAX_CONSECUTIVE_FAILURES = 3;
-
-const normalizeProfileMergeTargetId = (value: unknown): string | null => {
-  const profileId = typeof value === "string" ? value.trim() : "";
-  return profileId || null;
-};
 
 export type EventScheduleTimezone = SharedEventScheduleTimezone;
 export type { EventCreateDateTimePayload } from "@mons/shared/events";
@@ -321,7 +305,6 @@ class Connection {
   private app: FirebaseApp;
   private auth: Auth;
   private db: Database;
-  private firestore: Firestore;
 
   private hostRematchesRef: any = null;
   private guestRematchesRef: any = null;
@@ -710,7 +693,6 @@ class Connection {
     this.app = initializeApp(firebaseConfig);
     this.auth = getAuth(this.app);
     this.db = getDatabase(this.app);
-    this.firestore = getFirestore(this.app);
   }
 
   private cloneWagerState(
@@ -1191,36 +1173,6 @@ class Connection {
     new Map();
   private materialLeaderboardCacheTime: number = 0;
   private static LEADERBOARD_CACHE_TTL = 60000;
-
-  private docToProfile(doc: any, includeTutorialState = false): PlayerProfile {
-    const data = doc.data();
-    const mining = normalizeMiningData(data.mining);
-    return {
-      id: doc.id,
-      username: data.username || null,
-      eth: data.eth || null,
-      sol: data.sol || null,
-      rating: data.rating || 1500,
-      nonce: data.nonce === undefined ? -1 : data.nonce,
-      totalManaPoints: data.totalManaPoints ?? 0,
-      win: data.win ?? true,
-      emoji: data.custom?.emoji ?? emojis.getEmojiIdFromString(doc.id),
-      aura: data.custom?.aura,
-      cardBackgroundId: data.custom?.cardBackgroundId,
-      cardSubtitleId: data.custom?.cardSubtitleId,
-      profileCounter: data.custom?.profileCounter,
-      profileMons: data.custom?.profileMons,
-      cardStickers: data.custom?.cardStickers,
-      feb2026UniqueOpponentsCount: data.feb2026UniqueOpponentsCount ?? 0,
-      completedProblemIds: includeTutorialState
-        ? data.custom?.completedProblems
-        : undefined,
-      isTutorialCompleted: includeTutorialState
-        ? data.custom?.tutorialCompleted
-        : undefined,
-      mining,
-    };
-  }
 
   private async fetchAllMaterialLeaderboards(): Promise<void> {
     const leaderboards = await Promise.all(
@@ -5702,127 +5654,76 @@ class Connection {
       );
     }
     let linkedProfileId: string | null = null;
-    const visitedProfileIds = new Set<string>();
-    let observedProfileId: string | null = null;
     let unsubscribeProfileRef: (() => void) | null = null;
-    let unsubscribeProfileDoc: (() => void) | null = null;
-    let profileLookupRequest: { profileId: string } | null = null;
-    const stopObservingProfileDoc = () => {
-      observedProfileId = null;
-      profileLookupRequest = null;
-      const unsubscribe = unsubscribeProfileDoc;
-      unsubscribeProfileDoc = null;
-      if (unsubscribe) {
-        unsubscribe();
-        decrementLifecycleCounter("connectionObservers");
-      }
-    };
+    let lookupGeneration = 0;
     const cleanupProfileObserver = () => {
+      lookupGeneration += 1;
       const unsubscribe = unsubscribeProfileRef;
       unsubscribeProfileRef = null;
       unsubscribe?.();
-      stopObservingProfileDoc();
     };
     const isProfileObserverCurrent = () =>
       this.profileObserverCleanups.get(playerId) === cleanupProfileObserver;
-    const recoverProfileByLoginId = (profileId: string): void => {
-      if (profileLookupRequest?.profileId === profileId) {
+    const resolveLinkedProfile = (profileId: string): void => {
+      const generation = ++lookupGeneration;
+      let tokenProvider: AuthTokenProvider & {
+        readonly assertCurrentUser: () => void;
+      };
+      try {
+        tokenProvider = this.getUserBoundAuthTokenProvider();
+      } catch {
+        this.stopObservingProfile(playerId);
         return;
       }
-      const request = { profileId };
-      profileLookupRequest = request;
-      void this.getProfileByLoginId(playerId)
+      const isLookupCurrent = () =>
+        lookupGeneration === generation &&
+        linkedProfileId === profileId &&
+        isObserverActive() &&
+        isProfileObserverCurrent();
+      void resolvePlayerProfileWithRetry(
+        playerId,
+        {
+          readLinkedProfileId: async () => profileId,
+          getProfileById: (linkedProfileId) => {
+            if (!isLookupCurrent()) {
+              throw new Error("profile-lookup-cancelled");
+            }
+            return getProfileByIdViaApi(linkedProfileId, tokenProvider);
+          },
+          getProfileByLoginId: (loginId) => {
+            if (!isLookupCurrent()) {
+              throw new Error("profile-lookup-cancelled");
+            }
+            return getProfileByLoginIdViaApi(loginId, tokenProvider);
+          },
+        },
+        isLookupCurrent,
+        () => this.delay(PROFILE_LOOKUP_RETRY_DELAY_MS),
+      )
         .then((profile) => {
-          if (
-            profileLookupRequest !== request ||
-            observedProfileId !== profileId ||
-            profile.id === profileId ||
-            !isObserverActive() ||
-            !isProfileObserverCurrent()
-          ) {
+          if (!profile) {
+            return;
+          }
+          tokenProvider.assertCurrentUser();
+          if (!isLookupCurrent()) {
             return;
           }
           this.stopObservingProfile(playerId);
           didGetPlayerProfile(profile, playerId, isOwnProfile);
         })
-        .catch(() => {})
-        .finally(() => {
-          if (profileLookupRequest === request) {
-            profileLookupRequest = null;
+        .catch((error) => {
+          if (!isLookupCurrent()) {
+            return;
           }
-        });
-    };
-
-    const observeProfileDoc = (profileId: string): void => {
-      if (observedProfileId === profileId && unsubscribeProfileDoc) {
-        return;
-      }
-      stopObservingProfileDoc();
-      observedProfileId = profileId;
-      let unsubscribe: () => void;
-      try {
-        unsubscribe = onSnapshot(
-          doc(this.firestore, "users", profileId),
-          { includeMetadataChanges: true },
-          (profileSnapshot) => {
-            if (
-              !isObserverActive() ||
-              observedProfileId !== profileId ||
-              profileSnapshot.metadata.fromCache
-            ) {
-              return;
-            }
-            if (!profileSnapshot.exists()) {
-              recoverProfileByLoginId(profileId);
-              return;
-            }
-            const mergedIntoProfileId = normalizeProfileMergeTargetId(
-              profileSnapshot.data().mergedIntoProfileId,
-            );
-            if (mergedIntoProfileId) {
-              if (
-                visitedProfileIds.has(mergedIntoProfileId) ||
-                visitedProfileIds.size > MAX_PROFILE_MERGE_REDIRECT_HOPS
-              ) {
-                this.stopObservingProfile(playerId);
-                console.error("Invalid player profile merge redirect");
-                return;
-              }
-              visitedProfileIds.add(mergedIntoProfileId);
-              observeProfileDoc(mergedIntoProfileId);
-              return;
-            }
-            const profile = this.docToProfile(profileSnapshot, true);
+          try {
+            tokenProvider.assertCurrentUser();
+          } catch {
             this.stopObservingProfile(playerId);
-            didGetPlayerProfile(profile, playerId, isOwnProfile);
-          },
-          (error) => {
-            if (!isObserverActive() || observedProfileId !== profileId) {
-              return;
-            }
-            this.stopObservingProfile(playerId);
-            console.error("Error observing player profile:", error);
-          },
-        );
-      } catch (error) {
-        if (
-          this.profileObserverCleanups.has(playerId) &&
-          observedProfileId === profileId
-        ) {
+            return;
+          }
           this.stopObservingProfile(playerId);
-        }
-        console.error("Error observing player profile:", error);
-        return;
-      }
-      if (
-        !this.profileObserverCleanups.has(playerId) ||
-        observedProfileId !== profileId
-      ) {
-        unsubscribe();
-        return;
-      }
-      unsubscribeProfileDoc = unsubscribe;
-      incrementLifecycleCounter("connectionObservers");
+          console.error("Error observing player profile:", error);
+        });
     };
 
     this.profileObserverCleanups.set(playerId, cleanupProfileObserver);
@@ -5835,17 +5736,14 @@ class Connection {
       const profileId = this.normalizeStringOrNull(snapshot.val());
       if (!profileId) {
         linkedProfileId = null;
-        visitedProfileIds.clear();
-        stopObservingProfileDoc();
+        lookupGeneration += 1;
         return;
       }
       if (linkedProfileId === profileId) {
         return;
       }
       linkedProfileId = profileId;
-      visitedProfileIds.clear();
-      visitedProfileIds.add(profileId);
-      observeProfileDoc(profileId);
+      resolveLinkedProfile(profileId);
     });
     if (this.profileObserverCleanups.get(playerId) !== cleanupProfileObserver) {
       unsubscribe();
@@ -5917,5 +5815,3 @@ class Connection {
 }
 
 export const connection = new Connection();
-
-const emojis = (await import("../content/emojis")).emojis;

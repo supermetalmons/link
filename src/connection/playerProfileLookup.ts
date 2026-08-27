@@ -23,13 +23,37 @@ export const resolvePlayerProfile = async (
   } catch {}
 
   if (linkedProfileId) {
-    try {
-      const profile = await lookup.getProfileById(linkedProfileId);
-      if (profile) {
-        return profile;
-      }
-    } catch {}
+    const profile = await lookup.getProfileById(linkedProfileId);
+    if (profile) {
+      return profile;
+    }
   }
 
   return lookup.getProfileByLoginId(loginId);
+};
+
+export const resolvePlayerProfileWithRetry = async (
+  loginId: string,
+  lookup: PlayerProfileLookup,
+  isCurrent: () => boolean,
+  wait: () => Promise<void>,
+): Promise<PlayerProfile | null> => {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (!isCurrent()) {
+      return null;
+    }
+    try {
+      const profile = await resolvePlayerProfile(loginId, lookup);
+      return isCurrent() ? profile : null;
+    } catch (error) {
+      if (!isCurrent()) {
+        return null;
+      }
+      if (attempt === 1) {
+        throw error;
+      }
+      await wait();
+    }
+  }
+  return null;
 };

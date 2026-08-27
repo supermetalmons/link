@@ -115,10 +115,29 @@ function collectDependencyMetadata(path: string): DependencyMetadata {
     ) {
       dynamic.push(node.arguments[0].text);
     }
+    if (
+      typescript.isCallExpression(node) &&
+      typescript.isIdentifier(node.expression) &&
+      node.expression.text === "require" &&
+      node.arguments.length === 1 &&
+      typescript.isStringLiteralLike(node.arguments[0])
+    ) {
+      dynamic.push(node.arguments[0].text);
+    }
     typescript.forEachChild(node, visit);
   }
   visit(source);
   return { runtimeStatic, allStatic, dynamic };
+}
+
+function isFirestoreDependency(specifier: string): boolean {
+  return [
+    "@firebase/firestore",
+    "firebase/compat/firestore",
+    "firebase/firestore",
+  ].some(
+    (prefix) => specifier === prefix || specifier.startsWith(`${prefix}/`),
+  );
 }
 
 const sourceFiles = collectSourceFiles(sourceRoot);
@@ -316,6 +335,23 @@ test("client static imports including type-only edges are acyclic", () => {
 
 test("client mixed static and literal dynamic imports are acyclic", () => {
   assertAcyclic("mixed");
+});
+
+test("client does not depend on Firestore", () => {
+  const importers = sourceFiles
+    .filter((path) =>
+      dependencySpecifiers(path, "mixed").some(isFirestoreDependency),
+    )
+    .map(displayPath);
+
+  assert.deepEqual(importers, []);
+  for (const specifier of [
+    "@firebase/firestore",
+    "firebase/compat/firestore",
+    "firebase/firestore/lite",
+  ]) {
+    assert.equal(isFirestoreDependency(specifier), true);
+  }
 });
 
 test("client mixed graph includes no-substitution template imports", () => {
