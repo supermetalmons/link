@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  XFlowConflict,
+  AuthStateConflict as XFlowConflict,
   type XFlowRepository,
   type XRedirectFlow,
-} from "../src/firestore.ts";
+} from "../src/authStateD1.ts";
 import { handleXCallback } from "../src/xCallback.ts";
 import { XProviderFailure, type XOAuthProvider } from "../src/xProvider.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const FLOW_ID = "abcdefghijklmnopqrstuvwx";
 const CALLBACK_URL = `https://api.mons.link/auth/x/callback?state=${FLOW_ID}`;
-const UPDATE_TIME = "2026-08-22T00:00:00Z";
+const REVISION = 1;
 
 const env = {
   ...TELEGRAM_TEST_ENV,
@@ -26,16 +26,26 @@ const env = {
 
 function flow(overrides: Partial<XRedirectFlow> = {}): XRedirectFlow {
   return {
-    returnUrl: "https://mons.link/settings?tab=identity",
+    callbackUri: "https://api.mons.link/auth/x/callback",
+    codeChallenge: "challenge",
+    codeVerifier: "verifier",
+    completedAtMs: 0,
     consentSource: "settings",
-    status: "created",
+    createdAtMs: 900_000,
     errorCode: "",
     expiresAtMs: 1_500_000,
-    createdAtMs: 900_000,
-    callbackUri: "https://api.mons.link/auth/x/callback",
-    codeVerifier: "verifier",
+    flowId: FLOW_ID,
+    intentId: "abcdefghijklmnopqrstuvwx",
+    method: "x",
     processingStartedAtMs: 0,
-    updateTime: UPDATE_TIME,
+    result: null,
+    returnUrl: "https://mons.link/settings?tab=identity",
+    revision: REVISION,
+    status: "created",
+    uid: "firebase-uid",
+    updatedAtMs: 900_000,
+    xUserId: "",
+    xUsername: "",
     ...overrides,
   };
 }
@@ -45,10 +55,10 @@ function createRepository(
   updates: Array<Record<string, unknown>> = [],
 ): XFlowRepository {
   return {
-    getFlow: async () => value,
-    updateFlow: async (_flowId, update) => {
+    getXFlow: async () => value,
+    updateXFlow: async (_flowId, update) => {
       updates.push(update);
-      return "2026-08-22T00:00:01Z";
+      return 2;
     },
   };
 }
@@ -82,10 +92,10 @@ function redirectParameters(response: Response) {
 
 test("rejects unsupported methods and invalid states before dependencies", async () => {
   const repository: XFlowRepository = {
-    getFlow: async () => {
+    getXFlow: async () => {
       throw new Error("must not read");
     },
-    updateFlow: async () => {
+    updateXFlow: async () => {
       throw new Error("must not write");
     },
   };
@@ -110,8 +120,8 @@ test("returns a bounded not-found response for an unknown flow", async () => {
   assertSecurityHeaders(response);
 });
 
-test("redirects verified and completed flows without calling X or Firestore writes", async () => {
-  for (const status of ["verified", "completed"]) {
+test("redirects verified and completed flows without calling X or auth-state writes", async () => {
+  for (const status of ["verified", "completed"] as const) {
     let providerCalls = 0;
     const updates: Array<Record<string, unknown>> = [];
     const response = await handleXCallback(new Request(CALLBACK_URL), env, {
@@ -216,7 +226,6 @@ test("persists expiration, X denial, and missing-code failures", async () => {
 
 test("claims a callback before exchanging its single-use code", async () => {
   let current = flow();
-  let version = 0;
   let exchanges = 0;
   let initialReads = 0;
   let releaseInitialReads!: () => void;
@@ -228,7 +237,7 @@ test("claims a callback before exchanging its single-use code", async () => {
     releaseExchange = resolve;
   });
   const repository: XFlowRepository = {
-    getFlow: async () => {
+    getXFlow: async () => {
       const snapshot = structuredClone(current);
       if (initialReads < 2) {
         initialReads++;
@@ -239,21 +248,25 @@ test("claims a callback before exchanging its single-use code", async () => {
       }
       return snapshot;
     },
-    updateFlow: async (_flowId, update, updateTime) => {
-      if (updateTime !== current.updateTime) {
+    updateXFlow: async (_flowId, update, revision) => {
+      if (revision !== current.revision) {
         throw new XFlowConflict();
       }
-      version++;
       current = {
         ...current,
         ...update,
+        completedAtMs:
+          typeof update.completedAtMs === "number" ? update.completedAtMs : 0,
+        errorCode: typeof update.errorCode === "string" ? update.errorCode : "",
         processingStartedAtMs:
           typeof update.processingStartedAtMs === "number"
             ? update.processingStartedAtMs
             : 0,
-        updateTime: `2026-08-22T00:00:0${version}Z`,
+        revision: current.revision + 1,
+        xUserId: typeof update.xUserId === "string" ? update.xUserId : "",
+        xUsername: typeof update.xUsername === "string" ? update.xUsername : "",
       };
-      return current.updateTime;
+      return current.revision;
     },
   };
   const provider = createProvider({
@@ -353,7 +366,7 @@ test("returns a completed redirect when a claimed callback loses its final write
     flow(),
     flow({
       status: "completed",
-      updateTime: "2026-08-22T00:00:02Z",
+      revision: 3,
     }),
   ];
   let exchanges = 0;
@@ -364,16 +377,16 @@ test("returns a completed redirect when a claimed callback loses its final write
     env,
     {
       repository: {
-        getFlow: async () => values.shift() || null,
-        updateFlow: async (_flowId, update, updateTime) => {
+        getXFlow: async () => values.shift() || null,
+        updateXFlow: async (_flowId, update, revision) => {
           writes++;
           if (writes === 1) {
             assert.equal(update.status, "processing");
-            assert.equal(updateTime, UPDATE_TIME);
-            return "2026-08-22T00:00:01Z";
+            assert.equal(revision, REVISION);
+            return 2;
           }
           assert.equal(update.status, "verified");
-          assert.equal(updateTime, "2026-08-22T00:00:01Z");
+          assert.equal(revision, 2);
           throw new XFlowConflict();
         },
       },
@@ -399,29 +412,32 @@ test("returns a completed redirect when a claimed callback loses its final write
 
 test("retries a transient final write without re-exchanging the code", async () => {
   let current = flow();
-  let version = 0;
   let exchanges = 0;
   let verifiedWrites = 0;
   const repository: XFlowRepository = {
-    getFlow: async () => structuredClone(current),
-    updateFlow: async (_flowId, update, updateTime) => {
-      if (updateTime !== current.updateTime) {
+    getXFlow: async () => structuredClone(current),
+    updateXFlow: async (_flowId, update, revision) => {
+      if (revision !== current.revision) {
         throw new XFlowConflict();
       }
       if (update.status === "verified" && verifiedWrites++ === 0) {
         throw new Error("transient-write-failure");
       }
-      version++;
       current = {
         ...current,
         ...update,
+        completedAtMs:
+          typeof update.completedAtMs === "number" ? update.completedAtMs : 0,
+        errorCode: typeof update.errorCode === "string" ? update.errorCode : "",
         processingStartedAtMs:
           typeof update.processingStartedAtMs === "number"
             ? update.processingStartedAtMs
             : 0,
-        updateTime: `2026-08-22T00:00:0${version}Z`,
+        revision: current.revision + 1,
+        xUserId: typeof update.xUserId === "string" ? update.xUserId : "",
+        xUsername: typeof update.xUsername === "string" ? update.xUsername : "",
       };
-      return current.updateTime;
+      return current.revision;
     },
   };
   const response = await handleXCallback(
@@ -536,14 +552,14 @@ test("persists sanitized provider failures without logging credentials", async (
   assert.equal(response.status, 302);
 });
 
-test("fails closed on Firestore read and write failures", async () => {
+test("fails closed on auth-state read and write failures", async () => {
   const logged: string[] = [];
   const readFailure = await handleXCallback(new Request(CALLBACK_URL), env, {
     repository: {
-      getFlow: async () => {
+      getXFlow: async () => {
         throw new Error("private-read-detail");
       },
-      updateFlow: async () => UPDATE_TIME,
+      updateXFlow: async () => REVISION,
     },
     logFailure: (kind) => logged.push(kind),
   });
@@ -556,8 +572,8 @@ test("fails closed on Firestore read and write failures", async () => {
     env,
     {
       repository: {
-        getFlow: async () => flow(),
-        updateFlow: async () => {
+        getXFlow: async () => flow(),
+        updateXFlow: async () => {
           throw new Error("private-write-detail");
         },
       },
@@ -566,7 +582,7 @@ test("fails closed on Firestore read and write failures", async () => {
   );
   assert.equal(writeFailure.status, 503);
   assert.equal(writeFailure.headers.get("location"), null);
-  assert.deepEqual(logged, ["firestore-read", "firestore-update"]);
+  assert.deepEqual(logged, ["auth-state-read", "auth-state-update"]);
 });
 
 test("falls back to mons.link for an unsafe stored return URL", async () => {

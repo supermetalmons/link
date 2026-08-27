@@ -123,6 +123,12 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       database_id: "6bca5681-364e-473f-a2b3-bcd66140c560",
       migrations_dir: "migrations",
     },
+    {
+      binding: "AUTH_STATE_DB",
+      database_name: "mons-link-auth-state",
+      database_id: "4defcd85-d1cf-4306-af4e-fb3cca5e1970",
+      migrations_dir: "auth-state-migrations",
+    },
   ]);
   assert.deepEqual(config.secrets, {
     required: [
@@ -222,6 +228,18 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     },
     traces: { enabled: false },
   });
+});
+
+test("ephemeral auth state does not use Firestore collection paths", () => {
+  for (const path of [
+    "cloud/workers/api/src/authIdentity.ts",
+    "cloud/workers/api/src/authMutations.ts",
+    "cloud/workers/api/src/authRoutes.ts",
+    "cloud/workers/api/src/firestore.ts",
+    "cloud/workers/api/src/xCallback.ts",
+  ]) {
+    assert.doesNotMatch(readText(path), /authIntents|xAuthRedirectFlows/);
+  }
 });
 
 test("Wrangler release environment contains no active values", () => {

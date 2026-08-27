@@ -1,22 +1,31 @@
 const assert: typeof import("node:assert/strict") = require("node:assert/strict");
 const test: typeof import("node:test") = require("node:test");
-const { parseArgs, smokeApi } = require("./smoke-cloudflare-api.ts") as {
-  parseArgs: (argv: string[]) => {
-    baseUrl: string;
-    smokeSol: string;
-  };
-  smokeApi: (
-    options: {
+const { parseArgs, smokeApi, smokeAuthenticatedAuthState } =
+  require("./smoke-cloudflare-api.ts") as {
+    parseArgs: (argv: string[]) => {
       baseUrl: string;
       smokeSol: string;
-    },
-    dependencies: {
-      fetch: typeof fetch;
-      randomState: () => string;
-      log: (message: string) => void;
-    },
-  ) => Promise<void>;
-};
+    };
+    smokeApi: (
+      options: {
+        baseUrl: string;
+        smokeSol: string;
+      },
+      dependencies: {
+        fetch: typeof fetch;
+        randomState: () => string;
+        log: (message: string) => void;
+      },
+    ) => Promise<void>;
+    smokeAuthenticatedAuthState: (
+      baseUrl: string,
+      dependencies: {
+        fetch: typeof fetch;
+        randomState: () => string;
+        log: (message: string) => void;
+      },
+    ) => Promise<void>;
+  };
 
 const WALLET = "11111111111111111111111111111111";
 const EMPTY_NFTS = {
@@ -107,7 +116,37 @@ test("smokes public, unauthenticated, and internal routes", async () => {
       });
     }
     if (url.endsWith("/auth/intents")) {
+      if (new Headers(init?.headers).has("Authorization")) {
+        return json(
+          {
+            ok: true,
+            intentId: "abcdefghijklmnopqrstuvwx",
+            nonce: "nonce",
+            state: "state",
+            expiresAtMs: 2_000_000,
+          },
+          200,
+        );
+      }
       return json({ error: "unauthenticated" }, 401);
+    }
+    if (url.endsWith("/auth/x/flows")) {
+      return json(
+        {
+          ok: true,
+          flowId: "zyxwvutsrqponmlkjihgfedc",
+          authUrl:
+            "https://x.com/i/oauth2/authorize?state=zyxwvutsrqponmlkjihgfedc",
+          expiresAtMs: 2_000_000,
+        },
+        200,
+      );
+    }
+    if (url.includes("identitytoolkit.googleapis.com/v1/accounts:signUp")) {
+      return json({ idToken: "firebase-id-token", localId: "smoke-uid" }, 200);
+    }
+    if (url.includes("identitytoolkit.googleapis.com/v1/accounts:delete")) {
+      return json({}, 200);
     }
     if (
       [
@@ -148,7 +187,7 @@ test("smokes public, unauthenticated, and internal routes", async () => {
     },
   );
 
-  assert.equal(requests.length, 22);
+  assert.equal(requests.length, 26);
   assert.deepEqual(logs, ["[api-smoke] Passed https://api.mons.link"]);
 });
 
@@ -162,4 +201,27 @@ test("fails on a malformed or cacheable response", async () => {
     }),
     /cacheable/,
   );
+});
+
+test("deletes an anonymous smoke user after an incomplete signup response", async () => {
+  let deleted = false;
+  await assert.rejects(
+    smokeAuthenticatedAuthState("https://api.mons.link", {
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.includes("accounts:signUp")) {
+          return json({ idToken: "firebase-id-token" }, 200);
+        }
+        if (url.includes("accounts:delete")) {
+          deleted = true;
+          return json({}, 200);
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      },
+      randomState: () => "abcdefghijklmnopqrstuvwx",
+      log: () => undefined,
+    }),
+    /incomplete/,
+  );
+  assert.equal(deleted, true);
 });

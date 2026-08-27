@@ -10,12 +10,11 @@ import {
 } from "../src/authMutations.ts";
 import type { AuthIdentityService } from "../src/authIdentity.ts";
 import {
-  AuthFirestoreConflict,
-  encodeFields,
-  type AuthFirestoreClient,
-  type AuthFirestoreDocument,
-  type AuthFirestoreWrite,
-} from "../src/authFirestore.ts";
+  AuthStateConflict,
+  type AuthStateRepository,
+  type XFlowUpdate,
+  type XRedirectFlow,
+} from "../src/authStateD1.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 import { prepareSiweMessage } from "../../../../src/connection/siweMessage.ts";
 
@@ -449,43 +448,58 @@ test("resumes Apple linking after its operation consumed the intent", async () =
 });
 
 function firestoreDocument(
-  collection: string,
+  _collection: string,
   id: string,
   fields: Record<string, unknown>,
   updateTime = "2026-08-22T00:00:00Z",
-): AuthFirestoreDocument {
+): XRedirectFlow {
+  const revision = Number(updateTime.match(/:(\d{2})Z$/)?.[1] || 0) + 1;
   return {
-    id,
-    name: `projects/mons-link/databases/(default)/documents/${collection}/${id}`,
-    fields,
-    rawFields: {},
-    updateTime,
+    callbackUri: "https://api.mons.link/auth/x/callback",
+    codeChallenge: "challenge",
+    codeVerifier: "verifier",
+    completedAtMs: 0,
+    consentSource: "signin",
+    createdAtMs: Date.now(),
+    errorCode: "",
+    expiresAtMs: Date.now() + 60_000,
+    flowId: id,
+    intentId: INTENT_ID,
+    method: "x",
+    processingStartedAtMs: 0,
+    result: null,
+    returnUrl: "https://mons.link/",
+    status: "created",
+    uid: identity.uid,
+    updatedAtMs: Date.now(),
+    xUserId: "",
+    xUsername: "",
+    ...(fields as Partial<XRedirectFlow>),
+    revision,
   };
 }
 
+type StateWrite = { expectedRevision: number; updates: XFlowUpdate };
+
 function firestore(
-  flow: AuthFirestoreDocument,
+  flow: XRedirectFlow,
   writes: unknown[],
-): AuthFirestoreClient {
+): AuthStateRepository {
   return {
-    batchGet: async () => new Map(),
-    commitWrites: async (input) => {
-      writes.push(...input);
-    },
-    createDocumentId: () => "profile-1",
-    get: async () => flow,
-    listPage: async () => ({ documents: [], nextPageToken: "" }),
-    query: async () => [],
-    runTransaction: async () => {
-      throw new Error("unexpected transaction");
+    consumeAuthIntent: async () => true,
+    createAuthIntent: async () => "created",
+    createXFlow: async () => "created",
+    getAuthIntent: async () => null,
+    getXFlow: async () => flow,
+    updateXFlow: async (_flowId, updates, expectedRevision) => {
+      writes.push({ expectedRevision, updates } satisfies StateWrite);
+      return expectedRevision + 1;
     },
   };
 }
 
 function storedFlowResult(write: unknown): unknown {
-  const candidate = write as AuthFirestoreWrite;
-  assert.ok("update" in candidate);
-  return candidate.update.fields.result;
+  return (write as StateWrite).updates.result;
 }
 
 test("prepares X verification before linking", async () => {
@@ -501,7 +515,7 @@ test("prepares X verification before linking", async () => {
     env,
     ctx,
     {
-      firestore: firestore(
+      stateRepository: firestore(
         firestoreDocument("xAuthRedirectFlows", FLOW_ID, {
           uid: identity.uid,
           status: "verified",
@@ -528,16 +542,10 @@ test("prepares X verification before linking", async () => {
   assert.equal(response.ok, true);
   assert.deepEqual(phases, [`prepare:x:${INTENT_ID}`, "link"]);
   assert.equal(writes.length, 1);
-  assert.deepEqual((writes[0] as AuthFirestoreWrite).currentDocument, {
-    updateTime: "2026-08-22T00:00:00Z",
-  });
+  assert.equal((writes[0] as StateWrite).expectedRevision, 1);
   assert.deepEqual(storedFlowResult(writes[0]), {
-    mapValue: {
-      fields: encodeFields({
-        profileId: profile.profileId,
-        opId: `x-redirect:${FLOW_ID}`,
-      }),
-    },
+    profileId: profile.profileId,
+    opId: `x-redirect:${FLOW_ID}`,
   });
 });
 
@@ -553,7 +561,7 @@ test("does not trim stored X flow UIDs", async () => {
       env,
       ctx,
       {
-        firestore: firestore(
+        stateRepository: firestore(
           firestoreDocument("xAuthRedirectFlows", FLOW_ID, {
             uid: ` ${identity.uid} `,
             status: "verified",
@@ -587,7 +595,7 @@ test("replays and persists completed X flows without consuming again", async () 
     env,
     ctx,
     {
-      firestore: firestore(
+      stateRepository: firestore(
         firestoreDocument("xAuthRedirectFlows", FLOW_ID, {
           uid: identity.uid,
           status: "verified",
@@ -611,11 +619,10 @@ test("replays and persists completed X flows without consuming again", async () 
   assert.equal(response.ok, true);
   assert.equal(consumes, 0);
   assert.equal(writes.length, 1);
-  assert.deepEqual((writes[0] as AuthFirestoreWrite).currentDocument, {
-    updateTime: "2026-08-22T00:00:00Z",
-  });
+  assert.equal((writes[0] as StateWrite).expectedRevision, 1);
   assert.deepEqual(storedFlowResult(writes[0]), {
-    mapValue: { fields: encodeFields({ ...profile }) },
+    profileId: profile.profileId,
+    opId: profile.opId,
   });
 });
 
@@ -649,21 +656,22 @@ test("re-evaluates a verified callback after an expiry conflict", async () => {
   const refreshedVerified = firestoreDocument(
     "xAuthRedirectFlows",
     FLOW_ID,
-    { ...verified.fields, updatedAtMs: nowMs + 1 },
+    { ...verified, updatedAtMs: nowMs + 1 },
     "2026-08-22T00:00:02Z",
   );
-  const writes: AuthFirestoreWrite[] = [];
+  const writes: StateWrite[] = [];
   let reads = 0;
   const client = firestore(initial, writes);
-  client.get = async () => {
+  client.getXFlow = async () => {
     reads++;
     return reads === 1 ? initial : reads === 2 ? verified : refreshedVerified;
   };
-  client.commitWrites = async (input) => {
-    writes.push(...input);
+  client.updateXFlow = async (_flowId, updates, expectedRevision) => {
+    writes.push({ expectedRevision, updates });
     if (writes.length <= 2) {
-      throw new AuthFirestoreConflict();
+      throw new AuthStateConflict();
     }
+    return expectedRevision + 1;
   };
 
   const response = await handleAuthMutation(
@@ -676,7 +684,7 @@ test("re-evaluates a verified callback after an expiry conflict", async () => {
     env,
     ctx,
     {
-      firestore: client,
+      stateRepository: client,
       identityService: service({ peekVerifyReplay: async () => profile }),
       now: () => nowMs,
     },
@@ -685,22 +693,12 @@ test("re-evaluates a verified callback after an expiry conflict", async () => {
   assert.equal(response.ok, true);
   assert.equal(reads, 3);
   assert.deepEqual(
-    writes.map((write) =>
-      "update" in write ? write.update.fields.status : undefined,
-    ),
-    [
-      { stringValue: "failed" },
-      { stringValue: "completed" },
-      { stringValue: "completed" },
-    ],
+    writes.map((write) => write.updates.status),
+    ["failed", "completed", "completed"],
   );
   assert.deepEqual(
-    writes.map((write) => write.currentDocument),
-    [
-      { updateTime: "2026-08-22T00:00:00Z" },
-      { updateTime: "2026-08-22T00:00:01Z" },
-      { updateTime: "2026-08-22T00:00:02Z" },
-    ],
+    writes.map((write) => write.expectedRevision),
+    [1, 2, 3],
   );
 });
 
@@ -724,21 +722,22 @@ test("lets successful X completion supersede a concurrent expiry failure", async
     "xAuthRedirectFlows",
     FLOW_ID,
     {
-      ...initial.fields,
+      ...initial,
       status: "failed",
       errorCode: "x-redirect-flow-expired",
     },
     "2026-08-22T00:00:01Z",
   );
-  const writes: AuthFirestoreWrite[] = [];
+  const writes: StateWrite[] = [];
   let reads = 0;
   const client = firestore(initial, writes);
-  client.get = async () => (reads++ === 0 ? initial : failed);
-  client.commitWrites = async (input) => {
-    writes.push(...input);
+  client.getXFlow = async () => (reads++ === 0 ? initial : failed);
+  client.updateXFlow = async (_flowId, updates, expectedRevision) => {
+    writes.push({ expectedRevision, updates });
     if (writes.length === 1) {
-      throw new AuthFirestoreConflict();
+      throw new AuthStateConflict();
     }
+    return expectedRevision + 1;
   };
 
   const response = await handleAuthMutation(
@@ -751,7 +750,7 @@ test("lets successful X completion supersede a concurrent expiry failure", async
     env,
     ctx,
     {
-      firestore: client,
+      stateRepository: client,
       identityService: service(),
       now: () => nowMs,
     },
@@ -760,17 +759,12 @@ test("lets successful X completion supersede a concurrent expiry failure", async
   assert.equal(response.ok, true);
   assert.equal(reads, 2);
   assert.deepEqual(
-    writes.map((write) =>
-      "update" in write ? write.update.fields.status : undefined,
-    ),
-    [{ stringValue: "completed" }, { stringValue: "completed" }],
+    writes.map((write) => write.updates.status),
+    ["completed", "completed"],
   );
   assert.deepEqual(
-    writes.map((write) => write.currentDocument),
-    [
-      { updateTime: "2026-08-22T00:00:00Z" },
-      { updateTime: "2026-08-22T00:00:01Z" },
-    ],
+    writes.map((write) => write.expectedRevision),
+    [1, 2],
   );
 });
 
@@ -794,19 +788,19 @@ test("preserves other concurrent X terminal failures", async () => {
     "xAuthRedirectFlows",
     FLOW_ID,
     {
-      ...initial.fields,
+      ...initial,
       status: "failed",
       errorCode: "x-token-exchange-failed",
     },
     "2026-08-22T00:00:01Z",
   );
-  const writes: AuthFirestoreWrite[] = [];
+  const writes: StateWrite[] = [];
   let reads = 0;
   const client = firestore(initial, writes);
-  client.get = async () => (reads++ === 0 ? initial : failed);
-  client.commitWrites = async (input) => {
-    writes.push(...input);
-    throw new AuthFirestoreConflict();
+  client.getXFlow = async () => (reads++ === 0 ? initial : failed);
+  client.updateXFlow = async (_flowId, updates, expectedRevision) => {
+    writes.push({ expectedRevision, updates });
+    throw new AuthStateConflict();
   };
 
   await assert.rejects(
@@ -820,7 +814,7 @@ test("preserves other concurrent X terminal failures", async () => {
       env,
       ctx,
       {
-        firestore: client,
+        stateRepository: client,
         identityService: service(),
         now: () => nowMs,
       },
@@ -859,14 +853,14 @@ test("returns a concurrently completed X replay after a write conflict", async (
     },
     "2026-08-22T00:00:01Z",
   );
-  const writes: AuthFirestoreWrite[] = [];
+  const writes: StateWrite[] = [];
   let reads = 0;
   let refreshes = 0;
   const client = firestore(initial, writes);
-  client.get = async () => (reads++ === 0 ? initial : completed);
-  client.commitWrites = async (input) => {
-    writes.push(...input);
-    throw new AuthFirestoreConflict();
+  client.getXFlow = async () => (reads++ === 0 ? initial : completed);
+  client.updateXFlow = async (_flowId, updates, expectedRevision) => {
+    writes.push({ expectedRevision, updates });
+    throw new AuthStateConflict();
   };
 
   const response = await handleAuthMutation(
@@ -879,7 +873,7 @@ test("returns a concurrently completed X replay after a write conflict", async (
     env,
     ctx,
     {
-      firestore: client,
+      stateRepository: client,
       identityService: service({
         peekVerifyReplay: async () => profile,
         refreshCompletedVerifyResult: async () => {
@@ -895,9 +889,7 @@ test("returns a concurrently completed X replay after a write conflict", async (
   assert.equal(reads, 2);
   assert.equal(refreshes, 1);
   assert.equal(writes.length, 1);
-  assert.deepEqual(writes[0].currentDocument, {
-    updateTime: "2026-08-22T00:00:00Z",
-  });
+  assert.equal(writes[0].expectedRevision, 1);
 });
 
 test("rejects a completed X flow after live ownership validation fails", async () => {
@@ -913,7 +905,7 @@ test("rejects a completed X flow after live ownership validation fails", async (
       env,
       ctx,
       {
-        firestore: firestore(
+        stateRepository: firestore(
           firestoreDocument("xAuthRedirectFlows", FLOW_ID, {
             uid: identity.uid,
             status: "completed",

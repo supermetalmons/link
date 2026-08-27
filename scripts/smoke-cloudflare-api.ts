@@ -6,6 +6,8 @@ const {
 const MAX_BODY_BYTES = 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
 const ORIGIN = "https://mons.link";
+const FIREBASE_API_KEY = "AIzaSyC8Ihr4kDd34z-RXe8XTBCFtFbXebifo5Y";
+const FIREBASE_IDENTITY_ROOT = "https://identitytoolkit.googleapis.com/v1";
 const PREVIEW_HOST_PATTERN =
   /^[0-9a-f]{8}-mons-link-api\.lil-org\.workers\.dev$/;
 
@@ -140,6 +142,118 @@ async function request(
   return { response, body };
 }
 
+async function firebaseIdentityRequest(
+  operation: "accounts:delete" | "accounts:signUp",
+  body: Record<string, unknown>,
+  dependencies: Dependencies,
+): Promise<Record<string, unknown>> {
+  const url = new URL(`${FIREBASE_IDENTITY_ROOT}/${operation}`);
+  url.searchParams.set("key", FIREBASE_API_KEY);
+  const response = await dependencies.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Origin: ORIGIN,
+      Referer: `${ORIGIN}/`,
+    },
+    body: JSON.stringify(body),
+    redirect: "manual",
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  const responseBody = await readBody(response);
+  if (response.status !== 200) {
+    throw new Error(
+      `Firebase anonymous smoke session returned ${response.status}.`,
+    );
+  }
+  const payload = parseJson(responseBody);
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("Firebase anonymous smoke response was invalid.");
+  }
+  return payload as Record<string, unknown>;
+}
+
+async function smokeAuthenticatedAuthState(
+  baseUrl: string,
+  dependencies: Dependencies,
+): Promise<void> {
+  const session = await firebaseIdentityRequest(
+    "accounts:signUp",
+    { returnSecureToken: true },
+    dependencies,
+  );
+  const idToken =
+    typeof session.idToken === "string" ? session.idToken.trim() : "";
+  const localId =
+    typeof session.localId === "string" ? session.localId.trim() : "";
+  if (!idToken) {
+    throw new Error("Firebase anonymous smoke response was incomplete.");
+  }
+  try {
+    if (!localId) {
+      throw new Error("Firebase anonymous smoke response was incomplete.");
+    }
+    const headers = {
+      Authorization: `Bearer ${idToken}`,
+      Origin: ORIGIN,
+      "Content-Type": "application/json",
+    };
+    const intent = await request(
+      `${baseUrl}/auth/intents`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ method: "x" }),
+      },
+      200,
+      dependencies,
+    );
+    const intentPayload = parseJson(intent.body) as Record<string, unknown>;
+    const intentId =
+      typeof intentPayload?.intentId === "string" ? intentPayload.intentId : "";
+    if (
+      intentPayload?.ok !== true ||
+      !/^[A-Za-z0-9_-]{24}$/.test(intentId) ||
+      !Number.isSafeInteger(intentPayload.expiresAtMs)
+    ) {
+      throw new Error("Authenticated auth-intent smoke response was invalid.");
+    }
+    const flow = await request(
+      `${baseUrl}/auth/x/flows`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          consentSource: "signin",
+          intentId,
+          returnUrl: "https://mons.link/",
+        }),
+      },
+      200,
+      dependencies,
+    );
+    const flowPayload = parseJson(flow.body) as Record<string, unknown>;
+    const flowId =
+      typeof flowPayload?.flowId === "string" ? flowPayload.flowId : "";
+    let authUrl: URL;
+    try {
+      authUrl = new URL(String(flowPayload?.authUrl || ""));
+    } catch {
+      throw new Error("Authenticated X-flow smoke response was invalid.");
+    }
+    if (
+      flowPayload?.ok !== true ||
+      !/^[A-Za-z0-9_-]{24}$/.test(flowId) ||
+      authUrl.origin !== "https://x.com" ||
+      authUrl.searchParams.get("state") !== flowId
+    ) {
+      throw new Error("Authenticated X-flow smoke response was invalid.");
+    }
+  } finally {
+    await firebaseIdentityRequest("accounts:delete", { idToken }, dependencies);
+  }
+}
+
 async function smokeApi(
   options: Options,
   dependencies: Dependencies = {
@@ -231,6 +345,7 @@ async function smokeApi(
   ) {
     throw new Error("Auth smoke response was invalid.");
   }
+  await smokeAuthenticatedAuthState(options.baseUrl, dependencies);
 
   for (const path of [
     "/invites/create",
@@ -311,4 +426,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, smokeApi };
+module.exports = { parseArgs, smokeApi, smokeAuthenticatedAuthState };

@@ -9,6 +9,9 @@ export default defineConfig(async () => ({
       wrangler: { configPath: "./wrangler.jsonc" },
       miniflare: {
         bindings: {
+          TEST_AUTH_STATE_D1_MIGRATIONS: await readD1Migrations(
+            join(import.meta.dirname, "auth-state-migrations"),
+          ),
           TEST_D1_MIGRATIONS: await readD1Migrations(
             join(import.meta.dirname, "migrations"),
           ),

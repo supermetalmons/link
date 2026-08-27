@@ -40,6 +40,8 @@ The Firebase configuration intentionally has no Functions codebase. Review the d
 
 `AUTH_MUTATIONS_DISABLED` in `cloud/workers/api/wrangler.jsonc` is the only auth maintenance switch. Change and release it as reviewed Worker configuration; do not create environment-specific copies or Dashboard overrides.
 
+New auth intents and X redirect flows are stored in the `mons-link-auth-state` D1 database through `AUTH_STATE_DB`; legacy verified, completed, and failed X flows were backfilled during cutover. Firebase Auth, profile documents, profile merge state, and auth operation replay records remain in Firebase. The D1 state is consume-once and revision-fenced. After a one-hour grace, the Worker schedule removes expired created/processing rows and compacts obsolete proof material; verified/completed/failed replays are retained for 30 days. Do not manually edit or delete active rows.
+
 `mons-link-auth-recovery` is the permanent recovery Queue. Its consumer applies `authRecoveryJobs` idempotently, and the scheduled sweep re-enqueues stale jobs. Investigate a stuck job without purging the Queue or deleting its job record.
 
 ## Profile-game projection recovery

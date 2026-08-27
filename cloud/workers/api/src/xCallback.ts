@@ -4,11 +4,12 @@ import {
   type XConsentSource,
 } from "@mons/shared/x-redirect";
 import {
-  createXFlowRepository,
-  XFlowConflict,
+  AuthStateConflict,
+  createAuthStateRepository,
+  type XFlowUpdate,
   type XFlowRepository,
   type XRedirectFlow,
-} from "./firestore.ts";
+} from "./authStateD1.ts";
 import {
   createXOAuthProvider,
   XProviderFailure,
@@ -124,7 +125,8 @@ export async function handleXCallback(
     return textResponse("Missing or invalid state.", 400);
   }
 
-  const repository = overrides.repository || createXFlowRepository(env);
+  const repository =
+    overrides.repository || createAuthStateRepository(env.AUTH_STATE_DB);
   const provider = overrides.provider || createXOAuthProvider(env);
   const now = overrides.now || Date.now;
   const logFailure =
@@ -135,9 +137,9 @@ export async function handleXCallback(
 
   let flow;
   try {
-    flow = await repository.getFlow(flowId);
+    flow = await repository.getXFlow(flowId);
   } catch {
-    logFailure("firestore-read");
+    logFailure("auth-state-read");
     return textResponse("Service Unavailable", 503);
   }
   if (!flow) {
@@ -158,15 +160,15 @@ export async function handleXCallback(
   const consentSource = normalizeServerXConsentSource(flow.consentSource);
   const updateFlow = async (
     expectedFlow: XRedirectFlow,
-    updates: Record<string, string | number | null>,
-  ): Promise<{ response: Response } | { updateTime: string }> => {
+    updates: XFlowUpdate,
+  ): Promise<{ response: Response } | { revision: number }> => {
     let writeError: unknown;
     try {
       return {
-        updateTime: await repository.updateFlow(
+        revision: await repository.updateXFlow(
           flowId,
           updates,
-          expectedFlow.updateTime,
+          expectedFlow.revision,
         ),
       };
     } catch (error) {
@@ -174,25 +176,33 @@ export async function handleXCallback(
     }
     if (
       updates.status !== "processing" &&
-      !(writeError instanceof XFlowConflict)
+      !(writeError instanceof AuthStateConflict)
     ) {
       try {
         return {
-          updateTime: await repository.updateFlow(
+          revision: await repository.updateXFlow(
             flowId,
             updates,
-            expectedFlow.updateTime,
+            expectedFlow.revision,
           ),
         };
       } catch (error) {
         writeError = error;
       }
     }
+    if (writeError instanceof AuthStateConflict) {
+      console.info(
+        JSON.stringify({
+          event: "auth_state_conflict",
+          operation: "x_callback",
+        }),
+      );
+    }
     let current: XRedirectFlow | null;
     try {
-      current = await repository.getFlow(flowId);
+      current = await repository.getXFlow(flowId);
     } catch {
-      logFailure("firestore-read");
+      logFailure("auth-state-read");
       return { response: textResponse("Service Unavailable", 503) };
     }
     if (!current) {
@@ -202,8 +212,8 @@ export async function handleXCallback(
     if (authoritativeRedirect) {
       return { response: authoritativeRedirect };
     }
-    if (!(writeError instanceof XFlowConflict)) {
-      logFailure("firestore-update");
+    if (!(writeError instanceof AuthStateConflict)) {
+      logFailure("auth-state-update");
     }
     return {
       response: textResponse("Authorization is still processing.", 503, {
@@ -282,9 +292,9 @@ export async function handleXCallback(
   }
   flow = {
     ...flow,
-    status: "processing",
+    status: "processing" as const,
     processingStartedAtMs,
-    updateTime: claim.updateTime,
+    revision: claim.revision,
   };
 
   let authenticatedUser;

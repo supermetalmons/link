@@ -11,6 +11,7 @@ import {
   encodeFields,
 } from "../src/authFirestore.ts";
 import { createAuthIdentityService } from "../src/authIdentity.ts";
+import type { AuthStateRepository } from "../src/authStateD1.ts";
 import {
   authRecoveryJobName,
   newAuthRecoveryJob,
@@ -53,6 +54,8 @@ function decodeFields(fields: Record<string, unknown>) {
 function collectionOf(name: string): string {
   return name.split("/documents/")[1]?.split("/")[0] || "";
 }
+
+const authStates = new WeakMap<AuthFirestoreClient, AuthStateRepository>();
 
 function memoryFirestore(
   seed: Array<{
@@ -159,7 +162,46 @@ function memoryFirestore(
       return operation.result;
     },
   };
-  return { client, documents };
+  const authState: AuthStateRepository = {
+    async consumeAuthIntent(input) {
+      const name = authDocumentName("authIntents", input.intentId);
+      const document = documents.get(name);
+      if (
+        !document ||
+        document.fields.uid !== input.uid ||
+        document.fields.method !== input.method ||
+        document.fields.consumedAtMs !== null
+      ) {
+        return false;
+      }
+      document.fields.consumedAtMs = input.consumedAtMs;
+      document.fields.consumedByOpId = input.consumedByOpId;
+      return true;
+    },
+    createAuthIntent: async () => "created",
+    createXFlow: async () => "created",
+    async getAuthIntent(intentId) {
+      const fields = documents.get(
+        authDocumentName("authIntents", intentId),
+      )?.fields;
+      if (!fields) return null;
+      return {
+        consumedAtMs: Number(fields.consumedAtMs) || 0,
+        consumedByOpId: String(fields.consumedByOpId || ""),
+        createdAtMs: Number(fields.createdAtMs) || 1,
+        expiresAtMs: Number(fields.expiresAtMs) || 0,
+        intentId,
+        method: fields.method as AuthMethodKey,
+        nonce: String(fields.nonce || ""),
+        state: String(fields.state || "state"),
+        uid: String(fields.uid || ""),
+      };
+    },
+    getXFlow: async () => null,
+    updateXFlow: async () => 2,
+  };
+  authStates.set(client, authState);
+  return { authState, client, documents };
 }
 
 function dependencies(firestore: AuthFirestoreClient) {
@@ -191,6 +233,7 @@ function dependencies(firestore: AuthFirestoreClient) {
   };
   return {
     authClient,
+    authState: authStates.get(firestore),
     claims,
     firestore,
     rtdb,

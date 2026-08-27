@@ -19,6 +19,12 @@
       "database_id": "6bca5681-364e-473f-a2b3-bcd66140c560",
       "migrations_dir": "migrations",
     },
+    {
+      "binding": "AUTH_STATE_DB",
+      "database_name": "mons-link-auth-state",
+      "database_id": "4defcd85-d1cf-4306-af4e-fb3cca5e1970",
+      "migrations_dir": "auth-state-migrations",
+    },
   ],
   "routes": [
     {

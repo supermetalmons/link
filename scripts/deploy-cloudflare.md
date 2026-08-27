@@ -6,6 +6,7 @@ Run commands from the repository root with Node.js 24 and Java 21 or newer. Fire
 
 - `wrangler.jsonc` owns the frontend Worker configuration.
 - `cloud/workers/api/wrangler.jsonc` owns the API Worker routes, variables, bindings, Queues, Workflows, consumers, and Cron schedule.
+- `cloud/workers/api/auth-state-migrations/` owns the `mons-link-auth-state` D1 schema for auth intents and X redirect flows.
 - `cloud/workers/api/release.env` stays empty. It prevents release commands from loading developer environment files.
 - Encrypted secrets stay in Cloudflare. Their required names are declared in the API Wrangler configuration.
 - Do not edit production Worker configuration in the Cloudflare Dashboard. Review and deploy the tracked configuration.
@@ -27,6 +28,27 @@ npm run check:all
 ```
 
 This validates the frontend, API Worker, Wrangler types and configuration, tooling, and Firebase functions.
+
+## Auth state D1 cutover
+
+`mons-link-auth-state` is the sole store for new auth intents and X redirect flows. It uses the `AUTH_STATE_DB` binding and does not use read replication. Apply and verify its schema before uploading a D1-backed candidate:
+
+```sh
+npx wrangler d1 migrations apply mons-link-auth-state --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 execute mons-link-auth-state --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env --command "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('auth_intents', 'x_redirect_flows') ORDER BY name"
+```
+
+The 2026-08-27 cutover backfilled all legacy verified, completed, and failed X flows plus their referenced intents. Runtime reads remain D1-only. Before uploading a D1-backed candidate, upload and retain a version of the current production source with `AUTH_MUTATIONS_DISABLED=true`; do not give it traffic yet. Upload and smoke the D1-backed candidate with the tracked final value `AUTH_MUTATIONS_DISABLED=false`.
+
+Promote the retained maintenance version to 100%, verify auth POST routes return `auth-mutations-disabled`, and wait ten full minutes. Then promote the exact tested D1-backed Version ID and run the authenticated API smoke. Verify only table counts so nonce, state, and OAuth verifier values never enter operator logs:
+
+```sh
+npx wrangler d1 execute mons-link-auth-state --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env --command "SELECT 'auth_intents' AS table_name, COUNT(*) AS row_count FROM auth_intents UNION ALL SELECT 'x_redirect_flows', COUNT(*) FROM x_redirect_flows"
+```
+
+If the D1-backed version is unhealthy, immediately promote the retained maintenance Version ID rather than an auth-enabled Firestore version. Keep the D1 database intact. Fix forward, or wait another ten minutes before restoring an auth-enabled Firestore version. Expired legacy Firestore documents are intentionally not deleted by this migration.
+
+The five-minute Worker schedule removes expired created/processing flows and orphaned intents after a one-hour replay grace. It compacts expired proof material from verified/completed/failed rows after one hour and retains those terminal replays for 30 days.
 
 ## API Worker release
 

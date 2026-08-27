@@ -7,12 +7,15 @@ import {
   normalizeServerXConsentSource,
   type XRedirectStartResponse,
 } from "@mons/shared/x-redirect";
+import { createAuthRepository, type AuthRepository } from "./firestore.ts";
 import {
-  createAuthRepository,
-  type AuthRepository,
+  AuthStateConflict,
+  AuthStateFailure,
+  createAuthStateRepository,
   type AuthIntentDocument,
+  type AuthStateRepository,
   type XRedirectFlowDocument,
-} from "./firestore.ts";
+} from "./authStateD1.ts";
 import {
   verifyFirebaseRequest,
   type FirebaseIdentity,
@@ -56,6 +59,7 @@ export type AuthRouteDependencies = {
   profileClaim?: ProfileClaimDependencies;
   randomBytes?: (length: number) => Uint8Array;
   repository?: AuthRepository;
+  stateRepository?: AuthStateRepository;
   mutation?: AuthMutationDependencies;
   verifyIdentity?: (
     request: Request,
@@ -107,7 +111,7 @@ async function handleBeginIntent(
   request: Request,
   env: Env,
   identity: FirebaseIdentity,
-  repository: AuthRepository,
+  repository: AuthStateRepository,
   dependencies: AuthRouteDependencies,
 ): Promise<AuthIntentResponse> {
   const body = await parseBody(request);
@@ -156,7 +160,7 @@ async function handleBeginXFlow(
   request: Request,
   env: Env,
   identity: FirebaseIdentity,
-  repository: AuthRepository,
+  repository: AuthStateRepository,
   dependencies: AuthRouteDependencies,
 ): Promise<XRedirectStartResponse> {
   const body = await parseBody(request);
@@ -267,6 +271,9 @@ export async function handleAuthRoute(
       );
     }
     const repository = dependencies.repository || createAuthRepository(env);
+    const stateRepository =
+      dependencies.stateRepository ||
+      createAuthStateRepository(env.AUTH_STATE_DB);
     if (
       pathname === "/auth/methods/apple/verify" ||
       pathname === "/auth/methods/eth/verify" ||
@@ -280,13 +287,11 @@ export async function handleAuthRoute(
         `auth-mutation:${operation}:${identity.uid}`,
       );
       return authJsonResponse(
-        await handleAuthMutation(
-          request,
-          identity,
-          env,
-          ctx,
-          dependencies.mutation,
-        ),
+        await handleAuthMutation(request, identity, env, ctx, {
+          ...dependencies.mutation,
+          stateRepository:
+            dependencies.mutation?.stateRepository || stateRepository,
+        }),
         200,
         corsHeaders,
       );
@@ -304,7 +309,7 @@ export async function handleAuthRoute(
           request,
           env,
           identity,
-          repository,
+          stateRepository,
           dependencies,
         ),
         200,
@@ -328,7 +333,7 @@ export async function handleAuthRoute(
           request,
           env,
           identity,
-          repository,
+          stateRepository,
           dependencies,
         ),
         200,
@@ -339,11 +344,17 @@ export async function handleAuthRoute(
   } catch (error) {
     const failure = toAuthApiFailure(error);
     if (failure.status >= 500) {
+      const kind =
+        error instanceof AuthStateConflict
+          ? "auth-state-conflict"
+          : error instanceof AuthStateFailure
+            ? "auth-state-unavailable"
+            : failure.message;
       (
         dependencies.logFailure ||
         ((kind) =>
           console.error(JSON.stringify({ event: "auth_route_failure", kind })))
-      )(failure.message);
+      )(kind);
     }
     return authErrorResponse(failure, corsHeaders);
   }

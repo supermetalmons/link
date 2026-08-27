@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { AuthRepository } from "../src/firestore.ts";
 import type {
   AuthIntentDocument,
-  AuthRepository,
+  AuthIntentRecord,
+  AuthStateRepository,
   XRedirectFlowDocument,
-} from "../src/firestore.ts";
+} from "../src/authStateD1.ts";
+import { AuthStateFailure } from "../src/authStateD1.ts";
 import { handleAuthRoute } from "../src/authRoutes.ts";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
@@ -44,14 +47,6 @@ function request(
 
 function repository(overrides: Partial<AuthRepository> = {}): AuthRepository {
   return {
-    createAuthIntent: async () => "created",
-    createXFlow: async () => "created",
-    getAuthIntent: async () => ({
-      consumedAtMs: 0,
-      expiresAtMs: 2_000_000,
-      method: "x",
-      uid: "firebase-uid",
-    }),
     getLinkedAuthMethods: async () => ({
       ok: true,
       profileId: null,
@@ -64,6 +59,45 @@ function repository(overrides: Partial<AuthRepository> = {}): AuthRepository {
       linkedMethods: { apple: false, eth: false, sol: false, x: false },
       appleLinked: false,
     }),
+    ...overrides,
+  };
+}
+
+function stateRepository(
+  overrides: Partial<AuthStateRepository> = {},
+): AuthStateRepository {
+  return {
+    consumeAuthIntent: async () => true,
+    createAuthIntent: async () => "created",
+    createXFlow: async () => "created",
+    getAuthIntent: async () => ({
+      consumedAtMs: 0,
+      consumedByOpId: "",
+      createdAtMs: 1_000_000,
+      expiresAtMs: 2_000_000,
+      intentId: X_INTENT_ID,
+      method: "x",
+      nonce: "nonce",
+      state: "state",
+      uid: "firebase-uid",
+    }),
+    getXFlow: async () => null,
+    updateXFlow: async () => 2,
+    ...overrides,
+  };
+}
+
+function intent(overrides: Partial<AuthIntentRecord> = {}): AuthIntentRecord {
+  return {
+    consumedAtMs: 0,
+    consumedByOpId: "",
+    createdAtMs: 1_000_000,
+    expiresAtMs: 2_000_000,
+    intentId: X_INTENT_ID,
+    method: "x",
+    nonce: "nonce",
+    state: "state",
+    uid: "firebase-uid",
     ...overrides,
   };
 }
@@ -235,7 +269,7 @@ test("creates exact auth intents for every supported method", async () => {
       {
         now: () => 1_000_000,
         randomBytes: deterministicBytes,
-        repository: repository({
+        stateRepository: stateRepository({
           createAuthIntent: async (document) => {
             documents.push(document);
             return "created";
@@ -270,7 +304,7 @@ test("validates intent bodies, fails closed, and bounds ID collisions", async ()
       request("/auth/intents", "POST", body),
       env,
       ctx,
-      { repository: repository(), verifyIdentity },
+      { stateRepository: stateRepository(), verifyIdentity },
     );
     assert.equal(response.status, 400);
   }
@@ -282,7 +316,7 @@ test("validates intent bodies, fails closed, and bounds ID collisions", async ()
       AUTH_RATE_LIMITER: { limit: async () => ({ success: false }) },
     } as Env,
     ctx,
-    { repository: repository(), verifyIdentity },
+    { stateRepository: stateRepository(), verifyIdentity },
   );
   assert.equal(denied.status, 429);
 
@@ -297,7 +331,7 @@ test("validates intent bodies, fails closed, and bounds ID collisions", async ()
       },
     } as Env,
     ctx,
-    { repository: repository(), verifyIdentity },
+    { stateRepository: stateRepository(), verifyIdentity },
   );
   assert.equal(unavailable.status, 503);
   assert.equal(
@@ -312,7 +346,7 @@ test("validates intent bodies, fails closed, and bounds ID collisions", async ()
     ctx,
     {
       randomBytes: deterministicBytes,
-      repository: repository({
+      stateRepository: stateRepository({
         createAuthIntent: async () => {
           attempts++;
           return "exists";
@@ -522,7 +556,7 @@ test("creates an exact X flow with bounded intent and PKCE state", async () => {
     {
       now: () => 1_000_000,
       randomBytes: deterministicBytes,
-      repository: repository({
+      stateRepository: stateRepository({
         createXFlow: async (document) => {
           created.push(document);
           return "created";
@@ -575,7 +609,7 @@ test("keeps only exact account-owned preview X return URLs", async () => {
       {
         now: () => 1_000_000,
         randomBytes: deterministicBytes,
-        repository: repository({
+        stateRepository: stateRepository({
           createXFlow: async (document) => {
             created.push(document);
             return "created";
@@ -599,7 +633,7 @@ test("rate limits X flow reads and creation", async () => {
     } as Env,
     ctx,
     {
-      repository: repository({
+      stateRepository: stateRepository({
         getAuthIntent: async () => {
           intentReads++;
           return null;
@@ -624,7 +658,7 @@ test("rate limits X flow reads and creation", async () => {
       },
     } as Env,
     ctx,
-    { repository: repository(), verifyIdentity },
+    { stateRepository: stateRepository(), verifyIdentity },
   );
   assert.equal(invalid.status, 400);
   assert.equal(rateCalls, 0);
@@ -633,44 +667,24 @@ test("rate limits X flow reads and creation", async () => {
 test("rejects missing, foreign, wrong-method, and stale X intents", async () => {
   const cases: Array<{
     testEnv?: Env;
-    intent: Awaited<ReturnType<AuthRepository["getAuthIntent"]>>;
+    intent: AuthIntentRecord | null;
     status: number;
   }> = [
     { intent: null, status: 409 },
     {
-      intent: {
-        consumedAtMs: 0,
-        expiresAtMs: 2_000_000,
-        method: "x",
-        uid: "other-user",
-      },
+      intent: intent({ uid: "other-user" }),
       status: 403,
     },
     {
-      intent: {
-        consumedAtMs: 0,
-        expiresAtMs: 2_000_000,
-        method: "eth",
-        uid: "firebase-uid",
-      },
+      intent: intent({ method: "eth" }),
       status: 409,
     },
     {
-      intent: {
-        consumedAtMs: 1,
-        expiresAtMs: 2_000_000,
-        method: "x",
-        uid: "firebase-uid",
-      },
+      intent: intent({ consumedAtMs: 1 }),
       status: 409,
     },
     {
-      intent: {
-        consumedAtMs: 0,
-        expiresAtMs: 999_999,
-        method: "x",
-        uid: "firebase-uid",
-      },
+      intent: intent({ expiresAtMs: 999_999 }),
       status: 409,
     },
   ];
@@ -681,7 +695,9 @@ test("rejects missing, foreign, wrong-method, and stale X intents", async () => 
       ctx,
       {
         now: () => 1_000_000,
-        repository: repository({ getAuthIntent: async () => entry.intent }),
+        stateRepository: stateRepository({
+          getAuthIntent: async () => entry.intent,
+        }),
         verifyIdentity,
       },
     );
@@ -701,7 +717,7 @@ test("falls back unsafe X return URLs and sanitizes repository failures", async 
     {
       now: () => 1_000_000,
       randomBytes: deterministicBytes,
-      repository: repository({
+      stateRepository: stateRepository({
         createXFlow: async (document) => {
           created.push(document);
           return "created";
@@ -734,6 +750,24 @@ test("falls back unsafe X return URLs and sanitizes repository failures", async 
     JSON.stringify(await responseJson(failed)).includes("private"),
     false,
   );
+
+  const stateLogs: string[] = [];
+  const stateFailed = await handleAuthRoute(
+    request("/auth/intents", "POST", { method: "x" }),
+    env,
+    ctx,
+    {
+      logFailure: (kind) => stateLogs.push(kind),
+      stateRepository: stateRepository({
+        createAuthIntent: async () => {
+          throw new AuthStateFailure();
+        },
+      }),
+      verifyIdentity,
+    },
+  );
+  assert.equal(stateFailed.status, 503);
+  assert.deepEqual(stateLogs, ["auth-state-unavailable"]);
 });
 
 test("rate limits and dispatches auth mutations after Firebase authentication", async () => {

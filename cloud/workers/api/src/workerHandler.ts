@@ -33,6 +33,7 @@ import {
   type ProfileGameProjectionTask,
 } from "./profileGameProjectionTasks.ts";
 import { sweepGameSessionMutationReceipts } from "./gameSessionMutations.ts";
+import { sweepExpiredAuthState } from "./authStateD1.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
 export type { ProviderFetch } from "./provider.ts";
@@ -65,6 +66,7 @@ async function handleScheduled(
     sweepGameSessionMutationReceipts(env, {
       now: () => controller.scheduledTime,
     }),
+    sweepExpiredAuthState(env.AUTH_STATE_DB, controller.scheduledTime),
   ]);
   const failure = results.find(
     (result): result is PromiseRejectedResult => result.status === "rejected",

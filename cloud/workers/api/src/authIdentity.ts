@@ -22,6 +22,11 @@ import {
 import { PROFILE_MERGE_TARGETS_COLLECTION } from "../../../functions/profileMergeTargets.js";
 import { AuthApiFailure } from "./authErrors.ts";
 import {
+  createAuthStateRepository,
+  type AuthIntentRecord,
+  type AuthStateRepository,
+} from "./authStateD1.ts";
+import {
   type AuthFirestoreClient,
   type AuthFirestoreDocument,
   type AuthFirestoreTransaction,
@@ -151,6 +156,7 @@ export type AuthIdentityService = {
 
 type ServiceDependencies = {
   authClient?: FirebaseAuthAdminClient;
+  authState?: AuthStateRepository;
   firestore?: AuthFirestoreClient;
   now?: () => number;
   randomInteger?: (maximum: number) => number;
@@ -402,6 +408,8 @@ export function createAuthIdentityService(
   env: Env,
   dependencies: ServiceDependencies = {},
 ): AuthIdentityService {
+  const authState =
+    dependencies.authState || createAuthStateRepository(env.AUTH_STATE_DB);
   let accessToken: Promise<string> | null = null;
   const accessTokenProvider = () => {
     accessToken ||= createGoogleAccessToken(env, {
@@ -1824,7 +1832,7 @@ export function createAuthIdentityService(
   };
 
   const parseIntent = (
-    intent: AuthFirestoreDocument | null,
+    intent: AuthIntentRecord | null,
     uid: string,
     method: AuthMethodKey,
     allowConsumed = false,
@@ -1832,16 +1840,16 @@ export function createAuthIdentityService(
     if (!intent) {
       authFailure(409, "failed-precondition", "intent-not-found");
     }
-    if (readStoredFirebaseUid(intent.fields.uid) !== uid) {
+    if (readStoredFirebaseUid(intent.uid) !== uid) {
       authFailure(403, "permission-denied", "intent-user-mismatch");
     }
-    if (cleanString(intent.fields.method) !== method) {
+    if (cleanString(intent.method) !== method) {
       authFailure(409, "failed-precondition", "intent-method-mismatch");
     }
-    const consumedAtMs = finiteNumber(intent.fields.consumedAtMs, 0);
-    const consumedByOpId = cleanString(intent.fields.consumedByOpId);
+    const consumedAtMs = finiteNumber(intent.consumedAtMs, 0);
+    const consumedByOpId = cleanString(intent.consumedByOpId);
     if (
-      finiteNumber(intent.fields.expiresAtMs, 0) < now() &&
+      finiteNumber(intent.expiresAtMs, 0) < now() &&
       !(allowConsumed && consumedAtMs > 0)
     ) {
       authFailure(504, "deadline-exceeded", "intent-expired");
@@ -1852,9 +1860,9 @@ export function createAuthIdentityService(
     return {
       uid,
       method,
-      nonce: cleanString(intent.fields.nonce),
+      nonce: cleanString(intent.nonce),
       consumedAtMs,
-      expiresAtMs: finiteNumber(intent.fields.expiresAtMs, 0),
+      expiresAtMs: finiteNumber(intent.expiresAtMs, 0),
       ...(consumedByOpId ? { consumedByOpId } : {}),
     };
   };
@@ -1865,9 +1873,7 @@ export function createAuthIdentityService(
     intentId: string,
     opId?: string,
   ): Promise<AuthIntent> => {
-    const intent = await firestore.get(
-      authDocumentName("authIntents", cleanString(intentId)),
-    );
+    const intent = await authState.getAuthIntent(cleanString(intentId));
     const parsed = parseIntent(intent, uid, method, Boolean(opId));
     if (parsed.consumedAtMs <= 0) {
       return parsed;
@@ -1901,31 +1907,31 @@ export function createAuthIdentityService(
     return parsed;
   };
 
-  const consumeIntent = (
+  const consumeIntent = async (
     uid: string,
     method: AuthMethodKey,
     intentId: string,
     opId?: string,
-  ): Promise<AuthIntent> =>
-    firestore.runTransaction(async (transaction) => {
-      const name = authDocumentName("authIntents", cleanString(intentId));
-      const intent = getOne(await transaction.batchGet([name]), name);
-      const result = parseIntent(intent, uid, method);
-      return {
-        result,
-        writes: [
-          authUpdateWrite(
-            name,
-            {
-              consumedAtMs: now(),
-              consumedByOpId: cleanString(opId) || null,
-            },
-            ["consumedAtMs", "consumedByOpId"],
-            true,
-          ),
-        ],
-      };
+  ): Promise<AuthIntent> => {
+    const normalizedIntentId = cleanString(intentId);
+    const intent = await authState.getAuthIntent(normalizedIntentId);
+    const result = parseIntent(intent, uid, method);
+    const consumed = await authState.consumeAuthIntent({
+      consumedAtMs: now(),
+      consumedByOpId: cleanString(opId) || null,
+      intentId: normalizedIntentId,
+      method,
+      uid,
     });
+    if (!consumed) {
+      return parseIntent(
+        await authState.getAuthIntent(normalizedIntentId),
+        uid,
+        method,
+      );
+    }
+    return result;
+  };
 
   const startVerifiedMethod = async (
     input: LinkInput,

@@ -75,6 +75,7 @@ const profileGamesDb = {
 export const TELEGRAM_TEST_ENV = {
   APPLE_AUDIENCES: "link.mons",
   AUTH_RECOVERY_QUEUE: queue,
+  AUTH_STATE_DB: profileGamesDb,
   AUTH_MUTATIONS_DISABLED: "false" as unknown as Env["AUTH_MUTATIONS_DISABLED"],
   AUTH_RATE_LIMITER: rateLimit,
   EVENT_PROGRESS_WORKFLOW: workflow,

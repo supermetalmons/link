@@ -16,13 +16,12 @@ import { verifyAppleIdToken } from "./appleAuth.ts";
 import { AuthApiFailure } from "./authErrors.ts";
 import { isAllowedAuthOrigin } from "./authHttp.ts";
 import {
-  authDocumentName,
-  authUpdateWrite,
-  AuthFirestoreConflict,
-  createAuthFirestoreClient,
-  type AuthFirestoreClient,
-  type AuthFirestoreDocument,
-} from "./authFirestore.ts";
+  AuthStateConflict,
+  createAuthStateRepository,
+  type AuthStateRepository,
+  type XFlowUpdate,
+  type XRedirectFlow,
+} from "./authStateD1.ts";
 import {
   createAuthIdentityService,
   type AuthIdentityService,
@@ -40,10 +39,10 @@ const AUTH_MUTATION_MAX_BODY_BYTES = 16 * 1024;
 const AUTH_MUTATION_DEADLINE_MS = 40_000;
 
 export type AuthMutationDependencies = {
-  firestore?: AuthFirestoreClient;
   identityService?: AuthIdentityService;
   now?: () => number;
   operationDeadlineMs?: number;
+  stateRepository?: AuthStateRepository;
   verifyApple?: typeof verifyAppleIdToken;
 };
 
@@ -121,7 +120,7 @@ function validateSiweLocation(data: {
 }
 
 function isExpiredFlow(
-  fields: Record<string, unknown>,
+  fields: Pick<XRedirectFlow, "createdAtMs" | "expiresAtMs">,
   nowMs: number,
 ): boolean {
   const expiresAtMs = Number(fields.expiresAtMs);
@@ -149,6 +148,7 @@ async function executeAuthMutation(
   const service =
     dependencies.identityService ||
     createAuthIdentityService(env, {
+      authState: dependencies.stateRepository,
       signal: operationSignal,
     });
   if (pathname === "/auth/methods/sol/verify") {
@@ -337,12 +337,11 @@ async function executeAuthMutation(
   if (!isXAuthCompletionRequest(payload)) {
     invalidRequest();
   }
-  const firestore =
-    dependencies.firestore ||
-    createAuthFirestoreClient(env, { signal: operationSignal });
-  const flowName = authDocumentName("xAuthRedirectFlows", payload.flowId);
-  const loadFlow = async (): Promise<AuthFirestoreDocument> => {
-    const flow = await firestore.get(flowName);
+  const stateRepository =
+    dependencies.stateRepository ||
+    createAuthStateRepository(env.AUTH_STATE_DB);
+  const loadFlow = async (): Promise<XRedirectFlow> => {
+    const flow = await stateRepository.getXFlow(payload.flowId);
     if (!flow) {
       throw new AuthApiFailure(
         409,
@@ -353,11 +352,11 @@ async function executeAuthMutation(
     return flow;
   };
   const completedFlowResult = async (
-    flow: AuthFirestoreDocument,
+    flow: XRedirectFlow,
   ): Promise<AuthProfileResponse> => {
-    const xUserId = cleanString(flow.fields.xUserId);
+    const xUserId = cleanString(flow.xUserId);
     const opId = `x-redirect:${payload.flowId}`;
-    const storedResult = authProfileReference(flow.fields.result);
+    const storedResult = authProfileReference(flow.result);
     if (!xUserId || !storedResult) {
       throw new AuthApiFailure(
         409,
@@ -382,65 +381,59 @@ async function executeAuthMutation(
       "x-redirect-result-stale",
     );
   };
-  const writeTerminalFlow = (
-    flow: AuthFirestoreDocument,
-    fields: Record<string, unknown>,
-    fieldPaths: string[],
-  ) =>
-    firestore.commitWrites([
-      authUpdateWrite(flowName, fields, fieldPaths, {
-        updateTime: flow.updateTime,
-      }),
-    ]);
+  const writeTerminalFlow = (flow: XRedirectFlow, fields: XFlowUpdate) =>
+    stateRepository.updateXFlow(payload.flowId, fields, flow.revision);
   const commitTerminalFlow = async (
-    flow: AuthFirestoreDocument,
-    fields: Record<string, unknown>,
-    fieldPaths: string[],
+    flow: XRedirectFlow,
+    fields: XFlowUpdate,
   ): Promise<AuthProfileResponse | null> => {
     try {
-      await writeTerminalFlow(flow, fields, fieldPaths);
+      await writeTerminalFlow(flow, fields);
       return null;
     } catch (error) {
-      if (!(error instanceof AuthFirestoreConflict)) {
+      if (!(error instanceof AuthStateConflict)) {
         throw error;
       }
+      console.info(
+        JSON.stringify({
+          event: "auth_state_conflict",
+          operation: "x_flow_completion",
+        }),
+      );
       const current = await loadFlow();
-      if (readStoredFirebaseUid(current.fields.uid) !== identity.uid) {
+      if (readStoredFirebaseUid(current.uid) !== identity.uid) {
         throw new AuthApiFailure(
           403,
           "permission-denied",
           "x-redirect-flow-user-mismatch",
         );
       }
-      const status = cleanString(current.fields.status);
+      const status = cleanString(current.status);
       if (status === "completed") {
         return completedFlowResult(current);
       }
       if (status === "failed") {
         if (
           fields.status === "completed" &&
-          cleanString(current.fields.errorCode) === "x-redirect-flow-expired"
+          cleanString(current.errorCode) === "x-redirect-flow-expired"
         ) {
-          await writeTerminalFlow(current, fields, fieldPaths);
+          await writeTerminalFlow(current, fields);
           return null;
         }
         throw new AuthApiFailure(
           409,
           "failed-precondition",
-          cleanString(current.fields.errorCode) || "x-redirect-failed",
+          cleanString(current.errorCode) || "x-redirect-failed",
         );
       }
       if (
         status === "verified" &&
-        cleanString(current.fields.intentId) ===
-          cleanString(flow.fields.intentId) &&
-        cleanString(current.fields.xUserId) ===
-          cleanString(flow.fields.xUserId) &&
-        cleanString(current.fields.xUsername) ===
-          cleanString(flow.fields.xUsername) &&
-        current.fields.consentSource === flow.fields.consentSource
+        cleanString(current.intentId) === cleanString(flow.intentId) &&
+        cleanString(current.xUserId) === cleanString(flow.xUserId) &&
+        cleanString(current.xUsername) === cleanString(flow.xUsername) &&
+        current.consentSource === flow.consentSource
       ) {
-        await writeTerminalFlow(current, fields, fieldPaths);
+        await writeTerminalFlow(current, fields);
         return null;
       }
       throw error;
@@ -449,14 +442,14 @@ async function executeAuthMutation(
   let flow = await loadFlow();
   let refreshedFlow = false;
   while (true) {
-    if (readStoredFirebaseUid(flow.fields.uid) !== identity.uid) {
+    if (readStoredFirebaseUid(flow.uid) !== identity.uid) {
       throw new AuthApiFailure(
         403,
         "permission-denied",
         "x-redirect-flow-user-mismatch",
       );
     }
-    const status = cleanString(flow.fields.status);
+    const status = cleanString(flow.status);
     if (status === "completed") {
       return completedFlowResult(flow);
     }
@@ -464,14 +457,14 @@ async function executeAuthMutation(
       throw new AuthApiFailure(
         409,
         "failed-precondition",
-        cleanString(flow.fields.errorCode) || "x-redirect-failed",
+        cleanString(flow.errorCode) || "x-redirect-failed",
       );
     }
     if (status === "verified") {
       break;
     }
     const expiredAtMs = (dependencies.now || Date.now)();
-    if (!isExpiredFlow(flow.fields, expiredAtMs)) {
+    if (!isExpiredFlow(flow, expiredAtMs)) {
       throw new AuthApiFailure(
         409,
         "failed-precondition",
@@ -479,17 +472,13 @@ async function executeAuthMutation(
       );
     }
     try {
-      await writeTerminalFlow(
-        flow,
-        {
-          status: "failed",
-          errorCode: "x-redirect-flow-expired",
-          updatedAtMs: expiredAtMs,
-        },
-        ["status", "errorCode", "updatedAtMs"],
-      );
+      await writeTerminalFlow(flow, {
+        status: "failed",
+        errorCode: "x-redirect-flow-expired",
+        updatedAtMs: expiredAtMs,
+      });
     } catch (error) {
-      if (error instanceof AuthFirestoreConflict && !refreshedFlow) {
+      if (error instanceof AuthStateConflict && !refreshedFlow) {
         refreshedFlow = true;
         flow = await loadFlow();
         continue;
@@ -503,8 +492,8 @@ async function executeAuthMutation(
     );
   }
   const nowMs = (dependencies.now || Date.now)();
-  const xUserId = cleanString(flow.fields.xUserId);
-  const intentId = cleanString(flow.fields.intentId);
+  const xUserId = cleanString(flow.xUserId);
+  const intentId = cleanString(flow.intentId);
   if (!intentId || !xUserId) {
     throw new AuthApiFailure(
       409,
@@ -516,17 +505,13 @@ async function executeAuthMutation(
   const replay = await service.peekVerifyReplay(opId, "x", identity.uid);
   if (replay) {
     return (
-      (await commitTerminalFlow(
-        flow,
-        {
-          status: "completed",
-          result: replay,
-          completedAtMs: nowMs,
-          updatedAtMs: nowMs,
-          errorCode: null,
-        },
-        ["status", "result", "completedAtMs", "updatedAtMs", "errorCode"],
-      )) || replay
+      (await commitTerminalFlow(flow, {
+        status: "completed",
+        result: { profileId: replay.profileId, opId: replay.opId },
+        completedAtMs: nowMs,
+        updatedAtMs: nowMs,
+        errorCode: null,
+      })) || replay
     );
   }
   const input = {
@@ -538,9 +523,8 @@ async function executeAuthMutation(
     intentId,
     requestEmoji: payload.emoji,
     requestAura: payload.aura,
-    xUsername: cleanString(flow.fields.xUsername) || null,
-    consentSource:
-      flow.fields.consentSource === "settings" ? "settings" : "signin",
+    xUsername: cleanString(flow.xUsername) || null,
+    consentSource: flow.consentSource === "settings" ? "settings" : "signin",
     opId,
   } as const;
   let response: AuthProfileResponse;
@@ -551,15 +535,11 @@ async function executeAuthMutation(
       (await service.linkVerifiedMethod(input));
   } catch (error) {
     if (error instanceof AuthApiFailure && error.message === "intent-expired") {
-      const racedResult = await commitTerminalFlow(
-        flow,
-        {
-          status: "failed",
-          errorCode: "x-redirect-flow-expired",
-          updatedAtMs: nowMs,
-        },
-        ["status", "errorCode", "updatedAtMs"],
-      );
+      const racedResult = await commitTerminalFlow(flow, {
+        status: "failed",
+        errorCode: "x-redirect-flow-expired",
+        updatedAtMs: nowMs,
+      });
       if (racedResult) {
         return racedResult;
       }
@@ -573,20 +553,16 @@ async function executeAuthMutation(
   }
   const completedAtMs = (dependencies.now || Date.now)();
   return (
-    (await commitTerminalFlow(
-      flow,
-      {
-        status: "completed",
-        result: {
-          profileId: response.profileId,
-          opId: response.opId,
-        },
-        completedAtMs,
-        updatedAtMs: completedAtMs,
-        errorCode: null,
+    (await commitTerminalFlow(flow, {
+      status: "completed",
+      result: {
+        profileId: response.profileId,
+        opId: response.opId,
       },
-      ["status", "result", "completedAtMs", "updatedAtMs", "errorCode"],
-    )) || response
+      completedAtMs,
+      updatedAtMs: completedAtMs,
+      errorCode: null,
+    })) || response
   );
 }
 
