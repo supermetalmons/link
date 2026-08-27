@@ -43,8 +43,6 @@ import {
   commitProfileGameProjectionWrites,
   getProfileGameProjection,
   listProfileGameProjectionPage,
-  readProfileGamesStorageMode,
-  type ProfileGamesStorageMode,
 } from "./profileGamesD1.ts";
 
 export const AUTH_RECOVERY_QUEUE_NAME = "mons-link-auth-recovery";
@@ -83,7 +81,6 @@ type AuthRecoveryDependencies = {
   now?: () => number;
   rtdb?: FirebaseRtdbClient;
   signal?: AbortSignal;
-  storageMode?: ProfileGamesStorageMode;
 };
 
 function record(value: unknown): Record<string, unknown> {
@@ -456,8 +453,6 @@ export function createAuthRecoveryService(
   const logger = dependencies.logger || console;
   const now = dependencies.now || Date.now;
   const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
-  const storageMode =
-    dependencies.storageMode || readProfileGamesStorageMode(env);
 
   const mutateJob = async (
     profileId: string,
@@ -687,76 +682,7 @@ export function createAuthRecoveryService(
           },
         ];
       });
-      await commitProfileGameProjectionWrites(d1, writes, now);
-      await mutateJob(job.profileId, (live) =>
-        live.sourceProfileIds[0] === sourceProfileId &&
-        live.sourcePhase === "games"
-          ? { ...live, phaseStartedAtMs: now(), updatedAtMs: now() }
-          : undefined,
-      );
-      return;
-    }
-    const sourcePage = await firestore.listPage(
-      `users/${sourceProfileId}`,
-      "games",
-    );
-    if (sourcePage.documents.length > 0) {
-      const d1Targets = await Promise.all(
-        sourcePage.documents.map((game) =>
-          getProfileGameProjection(d1, job.profileId, game.id),
-        ),
-      );
-      const d1Writes = sourcePage.documents.flatMap((game, index) => {
-        const current = d1Targets[index];
-        return !current ||
-          mergeFreshness(game.fields) >= mergeFreshness(current.data)
-          ? [
-              {
-                type: current ? ("update" as const) : ("create" as const),
-                profileId: job.profileId,
-                projectionId: game.id,
-                data: { ...game.fields, ownerProfileId: job.profileId },
-                ...(current
-                  ? { updateTime: current.updateTime }
-                  : { requireAbsent: true }),
-              },
-            ]
-          : [];
-      });
-      await commitProfileGameProjectionWrites(d1, d1Writes, now);
-      const targetName = authDocumentName("users", job.profileId);
-      const targetNames = sourcePage.documents.map(
-        (game) => `${targetName}/games/${game.id}`,
-      );
-      const targets =
-        storageMode === "dual"
-          ? await firestore.batchGet(targetNames)
-          : new Map<string, null>();
-      const writes: AuthFirestoreWrite[] = [];
-      for (const game of sourcePage.documents) {
-        const targetGameName = `${targetName}/games/${game.id}`;
-        const current = targets.get(targetGameName) || null;
-        if (
-          storageMode === "dual" &&
-          (!current ||
-            mergeFreshness(game.fields) >= mergeFreshness(current.fields))
-        ) {
-          writes.push({
-            update: { name: targetGameName, fields: game.rawFields },
-            updateMask: { fieldPaths: Object.keys(game.rawFields) },
-            currentDocument: current?.updateTime
-              ? { updateTime: current.updateTime }
-              : { exists: false },
-          });
-        }
-        writes.push(
-          authDeleteWrite(
-            game.name,
-            game.updateTime ? { updateTime: game.updateTime } : true,
-          ),
-        );
-      }
-      await firestore.commitWrites(writes);
+      await commitProfileGameProjectionWrites(d1, writes);
       await mutateJob(job.profileId, (live) =>
         live.sourceProfileIds[0] === sourceProfileId &&
         live.sourcePhase === "games"
@@ -788,24 +714,6 @@ export function createAuthRecoveryService(
     if (
       (await listProfileGameProjectionPage(d1, sourceProfileId, 1)).length > 0
     ) {
-      await mutateJob(job.profileId, (live) =>
-        live.sourceProfileIds[0] === sourceProfileId &&
-        live.sourcePhase === "finalize"
-          ? {
-              ...live,
-              sourcePhase: "games",
-              phaseStartedAtMs: now(),
-              updatedAtMs: now(),
-            }
-          : undefined,
-      );
-      return;
-    }
-    const sourcePage = await firestore.listPage(
-      `users/${sourceProfileId}`,
-      "games",
-    );
-    if (sourcePage.documents.length > 0) {
       await mutateJob(job.profileId, (live) =>
         live.sourceProfileIds[0] === sourceProfileId &&
         live.sourcePhase === "finalize"

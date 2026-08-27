@@ -43,12 +43,9 @@ describe("profile game projection D1 repository", () => {
   });
 
   beforeEach(async () => {
-    await env.PROFILE_GAMES_DB.batch([
-      env.PROFILE_GAMES_DB.prepare("DELETE FROM profile_game_projections"),
-      env.PROFILE_GAMES_DB.prepare(
-        "DELETE FROM profile_game_projection_tombstones",
-      ),
-    ]);
+    await env.PROFILE_GAMES_DB.prepare(
+      "DELETE FROM profile_game_projections",
+    ).run();
   });
 
   it("normalizes timestamps and upserts projection payloads", async () => {
@@ -285,7 +282,7 @@ describe("profile game projection D1 repository", () => {
     ).rejects.toThrow();
   });
 
-  it("atomically tombstones deletes and conditionally removes waiting games", async () => {
+  it("conditionally removes waiting games", async () => {
     await commitProfileGameProjectionWrites(env.PROFILE_GAMES_DB, [
       {
         type: "merge",
@@ -308,18 +305,8 @@ describe("profile game projection D1 repository", () => {
         env.PROFILE_GAMES_DB,
         "profile-1",
         "waiting",
-        () => 3_000,
       ),
     ).toBe("deleted");
-    expect(
-      await env.PROFILE_GAMES_DB.prepare(
-        `SELECT deleted_at_ms
-         FROM profile_game_projection_tombstones
-         WHERE profile_id = ? AND projection_id = ?`,
-      )
-        .bind("profile-1", "waiting")
-        .first("deleted_at_ms"),
-    ).toBe(3_000);
   });
 
   it("uses the covering pagination index", async () => {

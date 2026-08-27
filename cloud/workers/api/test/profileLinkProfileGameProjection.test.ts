@@ -8,7 +8,6 @@ test("profile-link projection reads match and invite keys without full values", 
   const reads: Array<{ path: string; query?: FirebaseRtdbQuery }> = [];
   const runtime = createProfileLinkProjectionRuntime(TELEGRAM_TEST_ENV as Env, {
     firestore: {
-      commitWrites: async () => undefined,
       get: async () => null,
     },
     logger: { error() {}, info() {} },

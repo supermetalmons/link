@@ -3,16 +3,11 @@ import test from "node:test";
 import type {
   AuthFirestoreClient,
   AuthFirestoreDocument,
-  AuthFirestoreWrite,
 } from "../src/authFirestore.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
-import { decodeFirestoreFields } from "../src/gameplayRepository.ts";
 import {
   createEventProfileGameProjectionRuntime,
   createProfileGameProjectionRuntime,
-  eventProjectionDocumentName,
-  projectionDocumentName,
-  timestampFromMillis,
 } from "../src/profileGameProjectionRepository.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
@@ -31,13 +26,13 @@ function firestoreDocument(
   };
 }
 
-test("Worker projection adapter preserves the shared projector document contract", async () => {
-  const writes: AuthFirestoreWrite[][] = [];
-  const commitOrder: string[] = [];
+test("Worker projection adapter writes the shared projector contract to D1", async () => {
+  let d1Batches = 0;
+  let firestoreCommits = 0;
   const d1 = {
     ...TELEGRAM_TEST_ENV.PROFILE_GAMES_DB,
     async batch(statements: D1PreparedStatement[]) {
-      commitOrder.push("d1");
+      d1Batches += 1;
       return TELEGRAM_TEST_ENV.PROFILE_GAMES_DB.batch(statements);
     },
   } satisfies D1Database;
@@ -59,9 +54,8 @@ test("Worker projection adapter preserves the shared projector document contract
   ]);
   const firestore = {
     batchGet: async () => new Map(),
-    commitWrites: async (batch) => {
-      commitOrder.push("firestore");
-      writes.push(batch);
+    commitWrites: async () => {
+      firestoreCommits += 1;
     },
     createDocumentId: () => "document-id",
     get: async (name) => profiles.get(name) || null,
@@ -95,7 +89,6 @@ test("Worker projection adapter preserves the shared projector document contract
     d1,
     firestore,
     rtdb,
-    storageMode: "dual",
     wait: async () => undefined,
   });
 
@@ -108,41 +101,12 @@ test("Worker projection adapter preserves the shared projector document contract
     },
   );
   assert.equal(result.writes, 2);
-  assert.deepEqual(commitOrder, ["d1", "firestore"]);
-  assert.equal(writes.length, 1);
-  assert.equal(writes[0].length, 2);
-  for (const write of writes[0]) {
-    assert.equal("update" in write, true);
-    if ("update" in write) {
-      assert.deepEqual(write.update.fields.updatedAt, {
-        timestampValue: "1970-01-01T00:00:00.500Z",
-      });
-      assert.deepEqual(write.update.fields.listSortAt, {
-        timestampValue: "1970-01-01T00:00:00.500Z",
-      });
-    }
-  }
-  const decoded = writes[0].map((write) =>
-    "update" in write ? decodeFirestoreFields(write.update.fields) : null,
-  );
-  assert.deepEqual(decoded.map((fields) => fields?.ownerProfileId).sort(), [
-    "guest-profile",
-    "host-profile",
-  ]);
-  for (const fields of decoded) {
-    assert.equal(fields?.schemaVersion, 2);
-    assert.equal(fields?.status, "active");
-    assert.deepEqual(fields?.updatedAt, timestampFromMillis(500));
-    assert.equal(fields?.lastEventReason, "invite-match-rating-updated");
-  }
-  assert.equal(
-    projectionDocumentName("host-profile", "auto_aaaaaaaaaaa"),
-    `${firestoreRoot}/users/host-profile/games/auto_aaaaaaaaaaa`,
-  );
+  assert.equal(d1Batches, 1);
+  assert.equal(firestoreCommits, 0);
 });
 
-test("Worker event projection adapter writes and deletes exact Firestore documents", async () => {
-  const writes: AuthFirestoreWrite[][] = [];
+test("Worker event projection adapter writes and deletes through D1", async () => {
+  let firestoreCommits = 0;
   const documents = new Map([
     [
       `${firestoreRoot}/profileMergeTargets/source-profile`,
@@ -157,8 +121,8 @@ test("Worker event projection adapter writes and deletes exact Firestore documen
   ]);
   const firestore = {
     batchGet: async () => new Map(),
-    commitWrites: async (batch) => {
-      writes.push(batch);
+    commitWrites: async () => {
+      firestoreCommits += 1;
     },
     createDocumentId: () => "document-id",
     get: async (name) => documents.get(name) || null,
@@ -186,7 +150,6 @@ test("Worker event projection adapter writes and deletes exact Firestore documen
   const runtime = createEventProfileGameProjectionRuntime(TELEGRAM_TEST_ENV, {
     firestore,
     rtdb,
-    storageMode: "dual",
     wait: async () => undefined,
   });
   const result = await runtime.reconcileEventProjection("event-1", [
@@ -198,21 +161,5 @@ test("Worker event projection adapter writes and deletes exact Firestore documen
     status: "projected",
     written: 1,
   });
-  assert.equal(writes.length, 1);
-  assert.equal(writes[0].length, 3);
-  assert.equal(
-    "update" in writes[0][0] ? writes[0][0].update.name : "",
-    eventProjectionDocumentName("target-profile", "event-1"),
-  );
-  assert.deepEqual(
-    "update" in writes[0][0] ? writes[0][0].update.fields.updatedAt : null,
-    { timestampValue: "1970-01-01T00:00:00.500Z" },
-  );
-  assert.deepEqual(
-    writes[0].slice(1).map((write) => ("delete" in write ? write.delete : "")),
-    [
-      eventProjectionDocumentName("source-profile", "event-1"),
-      eventProjectionDocumentName("stale-profile", "event-1"),
-    ],
-  );
+  assert.equal(firestoreCommits, 0);
 });

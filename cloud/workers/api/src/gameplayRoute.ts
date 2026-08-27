@@ -113,8 +113,6 @@ import {
 } from "./gameSessionMutations.ts";
 import { readProfileGamesPage } from "./profileGamesD1.ts";
 
-const MAX_NAVIGATION_DELETE_ATTEMPTS = 3;
-
 export const GAMEPLAY_PATHS = new Set([
   "/automatch/cancel",
   "/automatch/start",
@@ -452,53 +450,39 @@ export async function removeNavigationGame(
   ) {
     return skippedNavigationResponse(inviteId, "pending-automatch");
   }
-  for (let attempt = 0; attempt < MAX_NAVIGATION_DELETE_ATTEMPTS; attempt++) {
-    const game = await repository.getNavigationGame(
-      profileId,
-      inviteId,
-      identity.idToken,
-    );
-    if (!game) {
-      return {
-        ...skippedNavigationResponse(inviteId, "not-found"),
-        deleted: false,
-      };
-    }
-    if (game.status !== "waiting") {
-      return {
-        ...skippedNavigationResponse(
-          inviteId,
-          game.status ? `status-${game.status}` : "status-missing",
-        ),
-        deleted: false,
-      };
-    }
-    const result = await repository.deleteNavigationGame(
-      profileId,
-      inviteId,
-      game.updateTime,
-    );
-    if (result === "deleted") {
-      return {
+  const game = await repository.getNavigationGame(
+    profileId,
+    inviteId,
+    identity.idToken,
+  );
+  if (!game) {
+    return {
+      ...skippedNavigationResponse(inviteId, "not-found"),
+      deleted: false,
+    };
+  }
+  if (game.status !== "waiting") {
+    return {
+      ...skippedNavigationResponse(
+        inviteId,
+        game.status ? `status-${game.status}` : "status-missing",
+      ),
+      deleted: false,
+    };
+  }
+  const result = await repository.deleteNavigationGame(profileId, inviteId);
+  return result === "deleted"
+    ? {
         ok: true,
         skipped: false,
         deleted: true,
         reason: null,
         inviteId,
-      };
-    }
-    if (result === "missing") {
-      return {
+      }
+    : {
         ...skippedNavigationResponse(inviteId, "not-found"),
         deleted: false,
       };
-    }
-  }
-  throw new AuthApiFailure(
-    503,
-    "unavailable",
-    "navigation-game-write-conflict",
-  );
 }
 
 async function readGameplayBody(
@@ -983,7 +967,6 @@ export async function handleGameplayRoute(
 
 export {
   MAX_FIREBASE_KEY_BYTES,
-  MAX_NAVIGATION_DELETE_ATTEMPTS,
   isSafeFirebaseKey,
   readGameplayBody,
   resolveProfileId,

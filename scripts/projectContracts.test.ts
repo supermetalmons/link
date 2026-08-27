@@ -104,7 +104,6 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     "APPLE_AUDIENCES",
     "AUTH_MUTATIONS_DISABLED",
     "FIREBASE_RTDB_URL",
-    "PROFILE_GAMES_STORAGE_MODE",
   ]);
   assert.equal(config.vars?.APPLE_AUDIENCES, "link.mons");
   assert.match(config.vars?.AUTH_MUTATIONS_DISABLED || "", /^(?:true|false)$/);
@@ -112,7 +111,6 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     config.vars?.FIREBASE_RTDB_URL,
     "https://mons-link-default-rtdb.firebaseio.com",
   );
-  assert.equal(config.vars?.PROFILE_GAMES_STORAGE_MODE, "d1");
   assert.deepEqual(config.d1_databases, [
     {
       binding: "PROFILE_GAMES_DB",
@@ -301,7 +299,6 @@ test("package manifests preserve public scripts and deployment command vectors",
       "promote:api": rootPackage.scripts?.["promote:api"],
       "deploy:api:triggers": rootPackage.scripts?.["deploy:api:triggers"],
       "smoke:api": rootPackage.scripts?.["smoke:api"],
-      "migrate:profile-games": rootPackage.scripts?.["migrate:profile-games"],
       "prepare:firebase": rootPackage.scripts?.["prepare:firebase"],
       "deploy:firebase": rootPackage.scripts?.["deploy:firebase"],
       deploy: rootPackage.scripts?.deploy,
@@ -324,8 +321,6 @@ test("package manifests preserve public scripts and deployment command vectors",
         "wrangler triggers deploy --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
       "smoke:api":
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/smoke-cloudflare-api.ts",
-      "migrate:profile-games":
-        "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/migrate-profile-games-d1.ts",
       "prepare:firebase":
         "npm --prefix cloud/functions ci && npm --prefix cloud/functions test",
       "deploy:firebase":

@@ -29,8 +29,6 @@ import {
 import {
   deleteD1NavigationGame,
   getD1NavigationGame,
-  readProfileGamesStorageMode,
-  type ProfileGamesStorageMode,
 } from "./profileGamesD1.ts";
 
 const FIRESTORE_PROJECT_ID = "mons-link";
@@ -48,10 +46,9 @@ type FirestoreDocument = FirestoreRestDocument;
 
 export type NavigationGameDocument = {
   status: string | null;
-  updateTime: string;
 };
 
-export type NavigationGameDeleteResult = "conflict" | "deleted" | "missing";
+export type NavigationGameDeleteResult = "deleted" | "missing";
 
 export type WagerTransferInput = {
   appliedAtMs: number;
@@ -262,7 +259,6 @@ export type GameplayRepository = {
   deleteNavigationGame: (
     profileId: string,
     inviteId: string,
-    updateTime: string,
   ) => Promise<NavigationGameDeleteResult>;
   findProfileId: (
     uid: string,
@@ -305,7 +301,6 @@ type GameplayRepositoryDependencies = {
   getAccessToken?: typeof createGoogleAccessToken;
   now?: () => number;
   rtdbClient?: FirebaseRtdbClient;
-  storageMode?: ProfileGamesStorageMode;
   timeoutMs?: number;
 };
 
@@ -349,11 +344,8 @@ function encodeFirestoreFields(
   return firestoreCodec.encodeFields(fields);
 }
 
-function documentPath(profileId: string, inviteId?: string): string {
-  const profilePath = `users/${encodeURIComponent(profileId)}`;
-  return inviteId === undefined
-    ? profilePath
-    : `${profilePath}/games/${encodeURIComponent(inviteId)}`;
+function documentPath(profileId: string): string {
+  return `users/${encodeURIComponent(profileId)}`;
 }
 
 function parseProfileQuery(value: unknown): string | null {
@@ -440,24 +432,6 @@ export function parseGameplayProfileQuery(
     };
   }
   return null;
-}
-
-function parseNavigationGame(value: unknown): NavigationGameDocument {
-  const document = toRecord(value);
-  const fields = toRecord(document?.fields);
-  const statusValue = toRecord(fields?.status);
-  const updateTime =
-    typeof document?.updateTime === "string" ? document.updateTime.trim() : "";
-  if (!fields || !updateTime) {
-    throw new GameplayRepositoryFailure();
-  }
-  return {
-    status:
-      typeof statusValue?.stringValue === "string"
-        ? statusValue.stringValue
-        : null,
-    updateTime,
-  };
 }
 
 function readFirestoreMapFields(value: unknown): Record<string, unknown> {
@@ -617,7 +591,6 @@ export function createGameplayRepository(
     fetcher = fetch,
     getAccessToken = createGoogleAccessToken,
     now = Date.now,
-    storageMode = readProfileGamesStorageMode(env),
     timeoutMs = FIRESTORE_TIMEOUT_MS,
     rtdbClient = createFirebaseRtdbClient(env, {
       credentials: {
@@ -630,22 +603,7 @@ export function createGameplayRepository(
     }),
   }: GameplayRepositoryDependencies = {},
 ): GameplayRepository {
-  let serviceAccessToken: Promise<string> | null = null;
   let firestoreAccessToken: Promise<string> | null = null;
-  const getServiceAccessToken = () => {
-    serviceAccessToken ||= getAccessToken(env, {
-      credentials: {
-        email: env.GAMEPLAY_SERVICE_ACCOUNT_EMAIL,
-        privateKeyPem: env.GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY,
-      },
-      fetcher,
-      now,
-      timeoutMs,
-    }).catch(() => {
-      throw new GameplayRepositoryFailure();
-    });
-    return serviceAccessToken;
-  };
   const getFirestoreAccessToken = () => {
     firestoreAccessToken ||= getAccessToken(env, {
       fetcher,
@@ -985,29 +943,8 @@ export function createGameplayRepository(
       );
     },
 
-    async getNavigationGame(profileId, inviteId, firebaseIdToken) {
-      if (storageMode === "d1") {
-        return getD1NavigationGame(d1, profileId, inviteId);
-      }
-      const response = await fetchWithTimeout(
-        `${FIRESTORE_DOCUMENTS_ROOT}/${documentPath(profileId, inviteId)}`,
-        { headers: { Authorization: `Bearer ${firebaseIdToken}` } },
-      );
-      if (response.status === 404) {
-        await cancelResponseBody(response);
-        return null;
-      }
-      if (!response.ok) {
-        await cancelResponseBody(response);
-        throw new GameplayRepositoryFailure();
-      }
-      return parseNavigationGame(
-        await readBoundedJsonValue(
-          response,
-          MAX_FIRESTORE_BODY_BYTES,
-          () => new GameplayRepositoryFailure(),
-        ),
-      );
+    async getNavigationGame(profileId, inviteId, _firebaseIdToken) {
+      return getD1NavigationGame(d1, profileId, inviteId);
     },
 
     async getMiningMaterials(profileId, firebaseIdToken) {
@@ -1062,49 +999,8 @@ export function createGameplayRepository(
       );
     },
 
-    async deleteNavigationGame(profileId, inviteId, updateTime) {
-      const d1Result = await deleteD1NavigationGame(
-        d1,
-        profileId,
-        inviteId,
-        now,
-      );
-      if (storageMode === "d1") {
-        return d1Result;
-      }
-      const url = new URL(
-        `${FIRESTORE_DOCUMENTS_ROOT}/${documentPath(profileId, inviteId)}`,
-      );
-      url.searchParams.set("currentDocument.updateTime", updateTime);
-      const response = await fetchWithTimeout(url.toString(), {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${await getServiceAccessToken()}` },
-      });
-      if (response.ok) {
-        await cancelResponseBody(response);
-        return "deleted";
-      }
-      if (response.status === 404) {
-        await cancelResponseBody(response);
-        return "missing";
-      }
-      if (response.status === 409 || response.status === 412) {
-        await cancelResponseBody(response);
-        return "conflict";
-      }
-      if (response.status === 400) {
-        const body = await readBoundedJsonValue(
-          response,
-          MAX_FIRESTORE_BODY_BYTES,
-          () => new GameplayRepositoryFailure(),
-        );
-        if (isPreconditionConflict(body)) {
-          return "conflict";
-        }
-        throw new GameplayRepositoryFailure();
-      }
-      await cancelResponseBody(response);
-      throw new GameplayRepositoryFailure();
+    async deleteNavigationGame(profileId, inviteId) {
+      return deleteD1NavigationGame(d1, profileId, inviteId);
     },
   };
 }
@@ -1935,7 +1831,6 @@ export {
   documentPath,
   encodeFirestoreFields,
   isPreconditionConflict,
-  parseNavigationGame,
   parseProfileQuery,
   ratingProfileFromDocument,
   ratingUpdateFromDocument,

@@ -1,0 +1,1 @@
+DROP TABLE profile_game_projection_tombstones;

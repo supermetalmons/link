@@ -130,7 +130,7 @@ test("paginates subcollection documents and decodes exact values", async () => {
     fetcher: async (input) => {
       const url = new URL(String(input));
       pages++;
-      const id = pages === 1 ? "game-1" : "game-2";
+      const id = pages === 1 ? "item-1" : "item-2";
       assert.equal(url.searchParams.get("pageSize"), "100");
       if (pages === 2) {
         assert.equal(url.searchParams.get("pageToken"), "next-page");
@@ -138,7 +138,7 @@ test("paginates subcollection documents and decodes exact values", async () => {
       return json({
         documents: [
           {
-            name: `projects/mons-link/databases/(default)/documents/users/profile-1/games/${id}`,
+            name: `projects/mons-link/databases/(default)/documents/users/profile-1/items/${id}`,
             fields: {
               score: { integerValue: String(pages) },
               large: { integerValue: "9223372036854775807" },
@@ -155,10 +155,10 @@ test("paginates subcollection documents and decodes exact values", async () => {
       });
     },
   });
-  const firstPage = await client.listPage("users/profile-1", "games");
+  const firstPage = await client.listPage("users/profile-1", "items");
   const secondPage = await client.listPage(
     "users/profile-1",
-    "games",
+    "items",
     firstPage.nextPageToken,
   );
   const documents = [...firstPage.documents, ...secondPage.documents];
@@ -166,7 +166,7 @@ test("paginates subcollection documents and decodes exact values", async () => {
     documents.map((document) => [document.id, document.fields]),
     [
       [
-        "game-1",
+        "item-1",
         {
           score: 1,
           large: { __firestoreInteger: "9223372036854775807" },
@@ -175,7 +175,7 @@ test("paginates subcollection documents and decodes exact values", async () => {
         },
       ],
       [
-        "game-2",
+        "item-2",
         {
           score: 2,
           large: { __firestoreInteger: "9223372036854775807" },

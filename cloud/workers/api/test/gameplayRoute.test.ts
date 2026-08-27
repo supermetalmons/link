@@ -11,8 +11,6 @@ import {
 import type { FirebaseIdentity } from "../src/firebaseAuth.ts";
 import type {
   GameplayRepository,
-  NavigationGameDeleteResult,
-  NavigationGameDocument,
   RatingRepository,
 } from "../src/gameplayRepository.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
@@ -469,7 +467,6 @@ test("preserves every navigation precondition outcome", async () => {
         getRtdbPath: basePaths,
         getNavigationGame: async () => ({
           status: "active",
-          updateTime: "one",
         }),
       },
       expected: {
@@ -492,62 +489,6 @@ test("preserves every navigation precondition outcome", async () => {
       entry.name,
     );
   }
-});
-
-test("re-reads navigation games after conflicts and bounds retries", async () => {
-  const reads: NavigationGameDocument[] = [
-    { status: "waiting", updateTime: "one" },
-    { status: "waiting", updateTime: "two" },
-  ];
-  const deletes: NavigationGameDeleteResult[] = ["conflict", "deleted"];
-  const result = await removeNavigationGame(
-    identity,
-    "invite-1",
-    repository({
-      getRtdbPath: async (path) => {
-        if (path === "players/firebase-uid/profile") return "profile-1";
-        if (path === "invites/invite-1") return {};
-        return null;
-      },
-      getNavigationGame: async () => reads.shift() as NavigationGameDocument,
-      deleteNavigationGame: async (_profile, _invite, updateTime) => {
-        assert.equal(updateTime, deletes.length === 2 ? "one" : "two");
-        return deletes.shift() as NavigationGameDeleteResult;
-      },
-    }),
-  );
-  assert.deepEqual(result, {
-    ok: true,
-    skipped: false,
-    deleted: true,
-    reason: null,
-    inviteId: "invite-1",
-  });
-
-  let attempts = 0;
-  await assert.rejects(
-    () =>
-      removeNavigationGame(
-        identity,
-        "invite-1",
-        repository({
-          getRtdbPath: async (path) => {
-            if (path === "players/firebase-uid/profile") return "profile-1";
-            if (path === "invites/invite-1") return {};
-            return null;
-          },
-          getNavigationGame: async () => ({
-            status: "waiting",
-            updateTime: String(++attempts),
-          }),
-          deleteNavigationGame: async () => "conflict",
-        }),
-      ),
-    (error: unknown) =>
-      error instanceof Error &&
-      error.message === "navigation-game-write-conflict",
-  );
-  assert.equal(attempts, 3);
 });
 
 test("fails closed before removing a D1 game when ownership is unavailable", async () => {

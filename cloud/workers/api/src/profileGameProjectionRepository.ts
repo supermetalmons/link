@@ -12,11 +12,8 @@ import {
   type RecomputeInviteProjectionResult,
 } from "../../../functions/profileGamesProjectionCore.js";
 import {
-  AUTH_FIRESTORE_DATABASE_ROOT,
-  authDeleteWrite,
   authDocumentName,
   authFieldFilter,
-  authUpdateWrite,
   createAuthFirestoreClient,
   type AuthFirestoreClient,
 } from "./authFirestore.ts";
@@ -28,8 +25,6 @@ import { firestoreTimestampFromMillis } from "./firestoreRest.ts";
 import {
   commitProfileGameProjectionWrites,
   getProfileGameProjection,
-  readProfileGamesStorageMode,
-  type ProfileGamesStorageMode,
   type ProjectionWrite as D1ProjectionWrite,
 } from "./profileGamesD1.ts";
 
@@ -61,65 +56,11 @@ type ProfileGameProjectionDependencies = {
   logger?: Pick<Console, "error">;
   now?: () => number;
   rtdb?: ProjectionRtdbRepository;
-  storageMode?: ProfileGamesStorageMode;
   wait?: (milliseconds: number) => Promise<void>;
 };
 
-function projectionDocumentName(profileId: string, inviteId: string): string {
-  if (
-    !profileId ||
-    !inviteId ||
-    profileId.includes("/") ||
-    inviteId.includes("/")
-  ) {
-    throw new TypeError("invalid profile game projection document id");
-  }
-  return `${AUTH_FIRESTORE_DATABASE_ROOT}/documents/users/${profileId}/games/${inviteId}`;
-}
-
-function eventProjectionDocumentName(
-  profileId: string,
-  eventId: string,
-): string {
-  return projectionDocumentName(profileId, `event_${eventId}`);
-}
-
-function toFirestoreWrite(write: ProjectionWrite) {
-  const name = projectionDocumentName(write.profileId, write.inviteId);
-  if (write.type === "delete") {
-    return authDeleteWrite(name);
-  }
-  if (!write.data) {
-    throw new TypeError("profile game projection write data is required");
-  }
-  if (write.type === "create") {
-    return authUpdateWrite(name, write.data, Object.keys(write.data), false);
-  }
-  if (write.type === "update") {
-    if (!write.updateTime) {
-      throw new TypeError("profile game projection update time is required");
-    }
-    return authUpdateWrite(name, write.data, Object.keys(write.data), {
-      updateTime: write.updateTime,
-    });
-  }
-  return authUpdateWrite(name, write.data);
-}
-
-function toEventFirestoreWrite(write: EventProjectionWrite) {
-  const name = eventProjectionDocumentName(write.profileId, write.eventId);
-  if (write.type === "delete") {
-    return authDeleteWrite(name);
-  }
-  if (!write.data) {
-    throw new TypeError("event profile-game projection data is required");
-  }
-  return authUpdateWrite(name, write.data);
-}
-
 function toD1ProjectionWrite(
   write: ProjectionWrite | EventProjectionWrite,
-  storageMode: ProfileGamesStorageMode,
 ): D1ProjectionWrite {
   return {
     type: write.type,
@@ -130,9 +71,7 @@ function toD1ProjectionWrite(
     ...(write.type === "update" && "updateTime" in write
       ? { updateTime: write.updateTime }
       : {}),
-    ...(write.type === "create" && storageMode === "d1"
-      ? { requireAbsent: true }
-      : {}),
+    ...(write.type === "create" ? { requireAbsent: true } : {}),
   };
 }
 
@@ -143,8 +82,6 @@ export function createProfileGameProjectionRuntime(
   const firestore = dependencies.firestore || createAuthFirestoreClient(env);
   const rtdb = dependencies.rtdb || createGameplayRepository(env);
   const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
-  const storageMode =
-    dependencies.storageMode || readProfileGamesStorageMode(env);
   const logger: Pick<Console, "error"> = dependencies.logger || {
     error(message, ...optionalParams) {
       const context = optionalParams[0];
@@ -163,12 +100,8 @@ export function createProfileGameProjectionRuntime(
     async commitProjectionWrites(writes) {
       await commitProfileGameProjectionWrites(
         d1,
-        writes.map((write) => toD1ProjectionWrite(write, storageMode)),
-        dependencies.now,
+        writes.map(toD1ProjectionWrite),
       );
-      if (storageMode === "dual") {
-        await firestore.commitWrites(writes.map(toFirestoreWrite));
-      }
     },
 
     async findProfileByLogin(loginUid) {
@@ -200,15 +133,7 @@ export function createProfileGameProjectionRuntime(
     },
 
     async getProjection(profileId, inviteId) {
-      if (storageMode === "d1") {
-        return getProfileGameProjection(d1, profileId, inviteId);
-      }
-      const projection = await firestore.get(
-        projectionDocumentName(profileId, inviteId),
-      );
-      return projection
-        ? { data: projection.fields, updateTime: projection.updateTime }
-        : null;
+      return getProfileGameProjection(d1, profileId, inviteId);
     },
 
     getRtdbPath: (path) => rtdb.getRtdbPath(path),
@@ -228,18 +153,12 @@ export function createEventProfileGameProjectionRuntime(
   const firestore = dependencies.firestore || createAuthFirestoreClient(env);
   const rtdb = dependencies.rtdb || createGameplayRepository(env);
   const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
-  const storageMode =
-    dependencies.storageMode || readProfileGamesStorageMode(env);
   const repository: EventProfileGameProjectionRepository = {
     async commitProjectionWrites(writes) {
       await commitProfileGameProjectionWrites(
         d1,
-        writes.map((write) => toD1ProjectionWrite(write, storageMode)),
-        dependencies.now,
+        writes.map(toD1ProjectionWrite),
       );
-      if (storageMode === "dual") {
-        await firestore.commitWrites(writes.map(toEventFirestoreWrite));
-      }
     },
 
     async getEvent(eventId) {
@@ -273,10 +192,3 @@ export function createEventProfileGameProjectionRuntime(
     wait: dependencies.wait,
   });
 }
-
-export {
-  eventProjectionDocumentName,
-  firestoreTimestampFromMillis as timestampFromMillis,
-  projectionDocumentName,
-  toEventFirestoreWrite,
-};

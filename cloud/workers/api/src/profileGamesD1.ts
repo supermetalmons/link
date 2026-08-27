@@ -5,8 +5,6 @@ import {
   type ReadNavigationGamesResponse,
 } from "@mons/shared/navigation";
 
-export type ProfileGamesStorageMode = "dual" | "d1";
-
 type ProjectionWrite = {
   type: "create" | "delete" | "merge" | "update";
   profileId: string;
@@ -98,47 +96,15 @@ const ASSERT_DELETE_VERSION_SQL = `
   )
 `;
 
-const DELETE_TOMBSTONE_SQL = `
-  DELETE FROM profile_game_projection_tombstones
-  WHERE profile_id = ? AND projection_id = ?
-    AND EXISTS (
-      SELECT 1
-      FROM profile_game_projections
-      WHERE profile_id = ? AND projection_id = ? AND payload_json = ?
-    )
-`;
-
 const DELETE_PROJECTION_SQL = `
   DELETE FROM profile_game_projections
   WHERE profile_id = ? AND projection_id = ?
-`;
-
-const UPSERT_TOMBSTONE_SQL = `
-  INSERT INTO profile_game_projection_tombstones (
-    profile_id,
-    projection_id,
-    deleted_at_ms
-  ) VALUES (?, ?, ?)
-  ON CONFLICT (profile_id, projection_id) DO UPDATE SET
-    deleted_at_ms = excluded.deleted_at_ms
 `;
 
 function toRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
-}
-
-export function readProfileGamesStorageMode(env: {
-  PROFILE_GAMES_STORAGE_MODE: string;
-}): ProfileGamesStorageMode {
-  if (
-    env.PROFILE_GAMES_STORAGE_MODE !== "dual" &&
-    env.PROFILE_GAMES_STORAGE_MODE !== "d1"
-  ) {
-    throw new Error("invalid-profile-games-storage-mode");
-  }
-  return env.PROFILE_GAMES_STORAGE_MODE;
 }
 
 export function projectionTimestampMillis(value: unknown): number {
@@ -276,26 +242,13 @@ function upsertStatements(
     row.updated_at_ms,
     row.payload_json,
   ];
-  return [
-    ...assertions,
-    db.prepare(sql).bind(...values),
-    db
-      .prepare(DELETE_TOMBSTONE_SQL)
-      .bind(
-        row.profile_id,
-        row.projection_id,
-        row.profile_id,
-        row.projection_id,
-        row.payload_json,
-      ),
-  ];
+  return [...assertions, db.prepare(sql).bind(...values)];
 }
 
 function deleteStatements(
   db: D1Database,
   profileId: string,
   projectionId: string,
-  deletedAtMs: number,
   expectedVersion: number | null,
 ): D1PreparedStatement[] {
   if (expectedVersion !== null) {
@@ -304,15 +257,9 @@ function deleteStatements(
         .prepare(ASSERT_DELETE_VERSION_SQL)
         .bind(profileId, projectionId, expectedVersion),
       db.prepare(DELETE_PROJECTION_SQL).bind(profileId, projectionId),
-      db
-        .prepare(UPSERT_TOMBSTONE_SQL)
-        .bind(profileId, projectionId, deletedAtMs),
     ];
   }
-  return [
-    db.prepare(DELETE_PROJECTION_SQL).bind(profileId, projectionId),
-    db.prepare(UPSERT_TOMBSTONE_SQL).bind(profileId, projectionId, deletedAtMs),
-  ];
+  return [db.prepare(DELETE_PROJECTION_SQL).bind(profileId, projectionId)];
 }
 
 function parseProjectionVersion(value: string | undefined): number | null {
@@ -324,10 +271,8 @@ function parseProjectionVersion(value: string | undefined): number | null {
 export async function commitProfileGameProjectionWrites(
   db: D1Database,
   writes: ProjectionWrite[],
-  now: () => number = Date.now,
 ): Promise<void> {
   if (writes.length === 0) return;
-  const deletedAtMs = Math.max(1, Math.floor(now()));
   const statements: D1PreparedStatement[] = [];
   writes.forEach((write) => {
     const expectedVersion = parseProjectionVersion(write.updateTime);
@@ -337,7 +282,6 @@ export async function commitProfileGameProjectionWrites(
           db,
           write.profileId,
           write.projectionId,
-          deletedAtMs,
           expectedVersion,
         ),
       );
@@ -512,48 +456,31 @@ export async function getD1NavigationGame(
   db: D1Database,
   profileId: string,
   projectionId: string,
-): Promise<{ status: string | null; updateTime: string } | null> {
+): Promise<{ status: string | null } | null> {
   const row = await db
     .prepare(
-      `SELECT status, version
+      `SELECT status
        FROM profile_game_projections
        WHERE profile_id = ? AND projection_id = ?`,
     )
     .bind(profileId, projectionId)
-    .first<{ status: string; version: number }>();
-  return row ? { status: row.status, updateTime: String(row.version) } : null;
+    .first<{ status: string }>();
+  return row ? { status: row.status } : null;
 }
 
 export async function deleteD1NavigationGame(
   db: D1Database,
   profileId: string,
   projectionId: string,
-  now: () => number = Date.now,
 ): Promise<"deleted" | "missing"> {
-  const deletedAtMs = Math.max(1, Math.floor(now()));
-  const results = await db.batch([
-    db
-      .prepare(
-        `INSERT INTO profile_game_projection_tombstones (
-           profile_id,
-           projection_id,
-           deleted_at_ms
-         )
-         SELECT profile_id, projection_id, ?
-         FROM profile_game_projections
-         WHERE profile_id = ? AND projection_id = ? AND status = 'waiting'
-         ON CONFLICT (profile_id, projection_id) DO UPDATE SET
-           deleted_at_ms = excluded.deleted_at_ms`,
-      )
-      .bind(deletedAtMs, profileId, projectionId),
-    db
-      .prepare(
-        `DELETE FROM profile_game_projections
-         WHERE profile_id = ? AND projection_id = ? AND status = 'waiting'`,
-      )
-      .bind(profileId, projectionId),
-  ]);
-  return results[1]?.meta.changes ? "deleted" : "missing";
+  const result = await db
+    .prepare(
+      `DELETE FROM profile_game_projections
+       WHERE profile_id = ? AND projection_id = ? AND status = 'waiting'`,
+    )
+    .bind(profileId, projectionId)
+    .run();
+  return result.meta.changes ? "deleted" : "missing";
 }
 
 export type { ProjectionRow, ProjectionWrite };

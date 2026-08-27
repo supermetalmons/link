@@ -44,7 +44,6 @@
     "promote:api": "wrangler versions deploy --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env --percentage 100 --yes",
     "deploy:api:triggers": "wrangler triggers deploy --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
     "smoke:api": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/smoke-cloudflare-api.ts",
-    "migrate:profile-games": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/migrate-profile-games-d1.ts",
     "format:check:tooling": "prettier --check \"scripts/**/*.{ts,md}\" \"cloud/admin/**/*.js\" README.md cloud/README.md eslint.config.mjs package.json --ignore-unknown",
     "lint:tooling": "eslint \"scripts/**/*.ts\" \"cloud/admin/**/*.js\"",
     "typecheck:tooling": "tsc --noEmit -p scripts/tsconfig.json",

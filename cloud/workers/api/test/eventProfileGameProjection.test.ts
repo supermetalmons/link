@@ -64,7 +64,7 @@ test("event owner plans write canonical owners before raw cleanup paths", () => 
   );
 });
 
-test("event projection preserves the Firestore payload and stale-owner cleanup", async () => {
+test("event projection preserves the payload and stale-owner cleanup", async () => {
   const { core, writes } = runtime({
     mergeTargets: {
       source: { targetProfileId: "target" },

@@ -17,8 +17,7 @@ registerHooks({
 
 const { mapDatabaseEventRecord, mapEventPrizeAssignment } =
   await import("../src/connection/eventMappers.ts");
-const { mapFirestoreGameDocToNavigationItem } =
-  await import("../src/connection/navigationMappers.ts");
+const { mapProfileGameProjection } = await import("@mons/shared/navigation");
 const {
   normalizeFiniteNumber,
   normalizeString,
@@ -38,7 +37,7 @@ test("normalizes primitive Firebase and Firestore values", () => {
 
 test("maps navigation games with legacy aliases and validation", () => {
   assert.deepEqual(
-    mapFirestoreGameDocToNavigationItem(
+    mapProfileGameProjection(
       {
         kind: "auto",
         status: "active",
@@ -66,7 +65,7 @@ test("maps navigation games with legacy aliases and validation", () => {
     },
   );
   assert.equal(
-    mapFirestoreGameDocToNavigationItem(
+    mapProfileGameProjection(
       { status: "ended", opponentEmoji: null },
       "invite-2",
     ),
@@ -76,13 +75,13 @@ test("maps navigation games with legacy aliases and validation", () => {
 
 test("maps event navigation previews and rejects pending projections", () => {
   assert.equal(
-    mapFirestoreGameDocToNavigationItem(
+    mapProfileGameProjection(
       { entityType: "event", eventId: "event-1", status: "pending" },
       "fallback",
     ),
     null,
   );
-  const item = mapFirestoreGameDocToNavigationItem(
+  const item = mapProfileGameProjection(
     {
       entityType: "event",
       eventId: "event-1",

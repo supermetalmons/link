@@ -49,26 +49,6 @@ npm run smoke:api -- --base-url https://api.mons.link --smoke-sol <known-wallet>
 
 `mons-link-profile-game-projection` is the permanent rating, manual invite, automatch, event, and profile-link projector Queue. Manual game-session and automatch mutations atomically persist `profileGameProjectionOutbox/automatch/{inviteId}` before enqueueing; the namespace retains its historical name for in-flight compatibility. Manual mutations also persist seven-day UUID receipts while per-invite leases serialize structural writes. Event mutations accumulate every pre-mutation owner under `profileGameProjectionOutbox/event/{eventId}` in the same RTDB commit as the event and use a separate per-event projection lock. Profile-link changes atomically persist `profileGameProjectionOutbox/profile/{loginUid}`, accumulate stale profile owners, and use request-fenced per-login and per-invite locks. The five-minute Worker schedule repairs malformed automatch, event, and profile-link markers, preserving recoverable cleanup owners, repairs rating completion markers, removes expired mutation receipts, claims pending markers by `lastQueuedAtMs`, and re-enqueues all four task kinds. Monitor Queue consumption, pending marker age, `game_session_*`, `event_profile_game_projection_*`, `profile_link_profile_game_projection_*`, and `profile_game_projection_*` logs.
 
-## Profile game D1 cutover
-
-`mons-link-profile-games` owns the former `users/{profileId}/games` read model. `PROFILE_GAMES_STORAGE_MODE=d1` keeps all projection reads, writes, merge recovery, and user removals in D1. Apply migrations before uploading a Worker version:
-
-```sh
-npx wrangler d1 migrations apply mons-link-profile-games --remote --config cloud/workers/api/wrangler.jsonc
-npm run migrate:profile-games -- backfill --dry-run --project mons-link
-npm run migrate:profile-games -- backfill --execute --project mons-link
-npm run migrate:profile-games -- verify --project mons-link
-```
-
-After a clean backfill verification, promote and smoke the D1-primary API, canary signed-in navigation reads and waiting-game deletion, then preview and execute cleanup:
-
-```sh
-npm run migrate:profile-games -- cleanup-firestore --dry-run --project mons-link
-npm run migrate:profile-games -- cleanup-firestore --execute --project mons-link
-```
-
-Only after the Firestore collection-group count is zero may the obsolete `games` rules and indexes be removed.
-
 `mons-link-telegram-projection` owns automatch, rating, and event Telegram projections. Event mutations persist `telegramProjectionOutbox/event/{eventId}` and increment a durable per-event generation before enqueueing. The consumer serializes each event with `eventTelegramProjectionLocks`, generation-fences desired and projection-state commits, advances state only after dispatch succeeds, and clears only the exact request marker it processed. The five-minute schedule claims pending markers by `updatedAtMs`; monitor `firstQueuedAtMs`, `telegram_projection_queue_*`, and `telegram_projection_event_sweep_failed`.
 
 The retired Firebase functions `projectEventTelegramOnCreated` and `projectEventTelegramOnUpdated` must not remain deployed in steady state. A rollback briefly restores the compatible database rules and both functions from the pre-cutover source before rolling the API Worker back, so every event mutation always has a projector owner.
