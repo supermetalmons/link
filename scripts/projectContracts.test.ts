@@ -251,6 +251,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.deepEqual(config.triggers, { crons: ["*/5 * * * *"] });
   assert.deepEqual(config.observability, {
     enabled: true,
+    head_sampling_rate: 0.1,
     logs: {
       enabled: true,
       head_sampling_rate: 0.1,
