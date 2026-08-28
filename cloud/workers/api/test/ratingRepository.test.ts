@@ -161,8 +161,12 @@ test("queries profiles with dedicated rating credentials", async () => {
 
 test("masks February replay reads to the legacy challenge field", async () => {
   let sawMask = false;
+  const projectedProfileIds: string[] = [];
   const repository = createRatingRepository(env, gameplayRepository(), {
     getAccessToken: async () => "token",
+    projectionCommitted: (profileId) => {
+      projectedProfileIds.push(profileId);
+    },
     fetcher: async (input, init = {}) => {
       const url = String(input);
       const body = init.body ? JSON.parse(String(init.body)) : {};
@@ -194,6 +198,7 @@ test("masks February replay reads to the legacy challenge field", async () => {
     "profile-opponent",
   );
   assert.equal(sawMask, true);
+  assert.deepEqual(projectedProfileIds, ["profile-player", "profile-opponent"]);
 });
 
 test("acquires the legacy-compatible lease in a Firestore transaction", async () => {
@@ -430,8 +435,13 @@ test("refreshes lease time after transaction conflicts", async () => {
 
 test("finalizes both profiles and the projector record atomically", async () => {
   const commits: Array<Record<string, unknown>> = [];
+  const projectedProfileIds: string[] = [];
   const repository = createRatingRepository(env, gameplayRepository(), {
     getAccessToken: async () => "token",
+    projectionCommitted: async (profileId) => {
+      projectedProfileIds.push(profileId);
+      throw new Error("queue unavailable");
+    },
     fetcher: async (input, init = {}) => {
       const url = String(input);
       const body = init.body ? JSON.parse(String(init.body)) : {};
@@ -495,7 +505,12 @@ test("finalizes both profiles and the projector record atomically", async () => 
   );
   const writes = commits[0].writes as Array<Record<string, unknown>>;
   assert.equal(writes.length, 3);
-  const ratingWrite = writes[2].update as Record<string, unknown>;
+  assert.deepEqual(projectedProfileIds, ["profile-player", "profile-opponent"]);
+  const ratingWrite = (writes.find(
+    (write) =>
+      (write.update as Record<string, unknown> | undefined)?.name ===
+      operationName,
+  )?.update || {}) as Record<string, unknown>;
   assert.equal(ratingWrite.name, operationName);
   assert.deepEqual(
     decodeFirestoreFields(ratingWrite.fields as Record<string, unknown>),

@@ -28,6 +28,7 @@ const MAX_RECONCILIATION_ATTEMPTS = 3;
 export type ProfileClaimDependencies = {
   authClient?: FirebaseAuthAdminClient;
   logCleanupFailure?: (kind: string) => void;
+  profileProjectionCommitted?: (profileId: string) => Promise<void> | void;
   repository?: Pick<AuthRepository, "getProfileClaimSource">;
   rtdbClient?: Pick<FirebaseRtdbClient, "getPath" | "patchRoot">;
   syncCurrentCallerProfile?: AuthIdentityService["syncCurrentCallerProfile"];
@@ -86,7 +87,9 @@ export async function syncProfileClaim(
       ));
   const syncCurrentCallerProfile =
     dependencies.syncCurrentCallerProfile ||
-    createAuthIdentityService(env).syncCurrentCallerProfile;
+    createAuthIdentityService(env, {
+      profileProjectionCommitted: dependencies.profileProjectionCommitted,
+    }).syncCurrentCallerProfile;
 
   const cleanupMissingProfile = async (): Promise<void> => {
     const [user, profileLink] = await Promise.all([

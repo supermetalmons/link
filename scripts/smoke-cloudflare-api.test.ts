@@ -1,14 +1,24 @@
 const assert: typeof import("node:assert/strict") = require("node:assert/strict");
+const {
+  chmodSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+}: typeof import("node:fs") = require("node:fs");
+const { tmpdir }: typeof import("node:os") = require("node:os");
+const { join }: typeof import("node:path") = require("node:path");
 const test: typeof import("node:test") = require("node:test");
 const { parseArgs, smokeApi, smokeAuthenticatedAuthState } =
   require("./smoke-cloudflare-api.ts") as {
     parseArgs: (argv: string[]) => {
       baseUrl: string;
+      smokeProfile: { loginId: string; profileId: string };
       smokeSol: string;
     };
     smokeApi: (
       options: {
         baseUrl: string;
+        smokeProfile: { loginId: string; profileId: string };
         smokeSol: string;
       },
       dependencies: {
@@ -19,6 +29,7 @@ const { parseArgs, smokeApi, smokeAuthenticatedAuthState } =
     ) => Promise<void>;
     smokeAuthenticatedAuthState: (
       baseUrl: string,
+      smokeProfile: { loginId: string; profileId: string },
       dependencies: {
         fetch: typeof fetch;
         randomState: () => string;
@@ -28,11 +39,28 @@ const { parseArgs, smokeApi, smokeAuthenticatedAuthState } =
   };
 
 const WALLET = "11111111111111111111111111111111";
+const LOGIN = "known-login";
+const SMOKE_PROFILE = { loginId: LOGIN, profileId: "profile-1" };
 const EMPTY_NFTS = {
   ok: true,
   specials: [],
   swagpack_avatars: [],
   swagpack_reactions: [],
+};
+const PROFILE = {
+  id: "profile-1",
+  nonce: 1,
+  rating: 1500,
+  totalManaPoints: 0,
+  win: true,
+  emoji: 1,
+  username: null,
+  eth: null,
+  sol: null,
+  mining: {
+    lastRockDate: null,
+    materials: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+  },
 };
 function json(
   body: unknown,
@@ -45,33 +73,83 @@ function json(
   });
 }
 
+function profileFixture(): { cleanup(): void; path: string } {
+  const directory = mkdtempSync(join(tmpdir(), "mons-link-smoke-"));
+  const path = join(directory, "profile.json");
+  writeFileSync(path, JSON.stringify(SMOKE_PROFILE), { mode: 0o600 });
+  return {
+    path,
+    cleanup: () => rmSync(directory, { recursive: true, force: true }),
+  };
+}
+
 test("parses only production and canonical preview smoke targets", () => {
-  assert.deepEqual(
-    parseArgs(["--base-url", "https://api.mons.link/", "--smoke-sol", WALLET]),
-    { baseUrl: "https://api.mons.link", smokeSol: WALLET },
-  );
-  assert.deepEqual(
-    parseArgs([
-      "--base-url",
-      "https://12ab34cd-mons-link-api.lil-org.workers.dev",
-      "--smoke-sol",
-      WALLET,
-    ]),
-    {
-      baseUrl: "https://12ab34cd-mons-link-api.lil-org.workers.dev",
-      smokeSol: WALLET,
-    },
-  );
-  for (const target of [
-    "http://api.mons.link",
-    "https://evil.example",
-    "https://api.mons.link/path",
-    "https://user@api.mons.link",
-  ]) {
+  const fixture = profileFixture();
+  try {
+    assert.deepEqual(
+      parseArgs([
+        "--base-url",
+        "https://api.mons.link/",
+        "--smoke-sol",
+        WALLET,
+        "--smoke-profile-fixture",
+        fixture.path,
+      ]),
+      {
+        baseUrl: "https://api.mons.link",
+        smokeProfile: SMOKE_PROFILE,
+        smokeSol: WALLET,
+      },
+    );
+    assert.deepEqual(
+      parseArgs([
+        "--base-url",
+        "https://12ab34cd-mons-link-api.lil-org.workers.dev",
+        "--smoke-sol",
+        WALLET,
+        "--smoke-profile-fixture",
+        fixture.path,
+      ]),
+      {
+        baseUrl: "https://12ab34cd-mons-link-api.lil-org.workers.dev",
+        smokeProfile: SMOKE_PROFILE,
+        smokeSol: WALLET,
+      },
+    );
+    for (const target of [
+      "http://api.mons.link",
+      "https://evil.example",
+      "https://api.mons.link/path",
+      "https://user@api.mons.link",
+    ]) {
+      assert.throws(
+        () =>
+          parseArgs([
+            "--base-url",
+            target,
+            "--smoke-sol",
+            WALLET,
+            "--smoke-profile-fixture",
+            fixture.path,
+          ]),
+        /Usage:/,
+      );
+    }
+    chmodSync(fixture.path, 0o644);
     assert.throws(
-      () => parseArgs(["--base-url", target, "--smoke-sol", WALLET]),
+      () =>
+        parseArgs([
+          "--base-url",
+          "https://api.mons.link",
+          "--smoke-sol",
+          WALLET,
+          "--smoke-profile-fixture",
+          fixture.path,
+        ]),
       /Usage:/,
     );
+  } finally {
+    fixture.cleanup();
   }
 });
 
@@ -142,6 +220,18 @@ test("smokes public, unauthenticated, and internal routes", async () => {
         200,
       );
     }
+    if (url.endsWith("/leaderboards/read")) {
+      return json({ ok: true, profiles: [PROFILE] }, 200);
+    }
+    if (url.endsWith("/profiles/lookup")) {
+      return json(
+        {
+          ok: true,
+          profile: PROFILE,
+        },
+        200,
+      );
+    }
     if (url.includes("identitytoolkit.googleapis.com/v1/accounts:signUp")) {
       return json({ idToken: "firebase-id-token", localId: "smoke-uid" }, 200);
     }
@@ -179,7 +269,11 @@ test("smokes public, unauthenticated, and internal routes", async () => {
   const logs: string[] = [];
 
   await smokeApi(
-    { baseUrl: "https://api.mons.link", smokeSol: WALLET },
+    {
+      baseUrl: "https://api.mons.link",
+      smokeProfile: SMOKE_PROFILE,
+      smokeSol: WALLET,
+    },
     {
       fetch: fetchStub,
       randomState: () => "abcdefghijklmnopqrstuvwx",
@@ -187,12 +281,16 @@ test("smokes public, unauthenticated, and internal routes", async () => {
     },
   );
 
-  assert.equal(requests.length, 26);
+  assert.equal(requests.length, 35);
   assert.deepEqual(logs, ["[api-smoke] Passed https://api.mons.link"]);
 });
 
 test("fails on a malformed or cacheable response", async () => {
-  const base = { baseUrl: "https://api.mons.link", smokeSol: WALLET };
+  const base = {
+    baseUrl: "https://api.mons.link",
+    smokeProfile: SMOKE_PROFILE,
+    smokeSol: WALLET,
+  };
   await assert.rejects(
     smokeApi(base, {
       fetch: async () => new Response(null, { status: 204 }),
@@ -206,7 +304,7 @@ test("fails on a malformed or cacheable response", async () => {
 test("deletes an anonymous smoke user after an incomplete signup response", async () => {
   let deleted = false;
   await assert.rejects(
-    smokeAuthenticatedAuthState("https://api.mons.link", {
+    smokeAuthenticatedAuthState("https://api.mons.link", SMOKE_PROFILE, {
       fetch: async (input) => {
         const url = String(input);
         if (url.includes("accounts:signUp")) {

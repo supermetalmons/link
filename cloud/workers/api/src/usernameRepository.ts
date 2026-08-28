@@ -43,6 +43,7 @@ type UsernameRepositoryDependencies = {
   getAccessToken?: typeof createGoogleAccessToken;
   maxTransactionAttempts?: number;
   now?: () => number;
+  projectionCommitted?: (profileId: string) => Promise<void> | void;
   timeoutMs?: number;
 };
 
@@ -143,6 +144,7 @@ export function createUsernameRepository(
     getAccessToken = createGoogleAccessToken,
     maxTransactionAttempts = MAX_TRANSACTION_ATTEMPTS,
     now = Date.now,
+    projectionCommitted,
     timeoutMs = FIRESTORE_TIMEOUT_MS,
   }: UsernameRepositoryDependencies = {},
 ): UsernameRepository {
@@ -151,6 +153,15 @@ export function createUsernameRepository(
       ? maxTransactionAttempts
       : MAX_TRANSACTION_ATTEMPTS;
   let accessToken: Promise<string> | null = null;
+  const notifyProfileProjection = async (profileId: string): Promise<void> => {
+    try {
+      await projectionCommitted?.(profileId);
+    } catch {
+      console.error(
+        JSON.stringify({ event: "profile_read_projection_enqueue_failed" }),
+      );
+    }
+  };
   const token = () => {
     accessToken ||= getAccessToken(env, {
       credentials: {
@@ -377,6 +388,7 @@ export function createUsernameRepository(
             );
             const result = await commit(transaction, writes);
             if (result === "committed") {
+              await notifyProfileProjection(profileId);
               return "updated";
             }
             if (attempt === attempts - 1) {
@@ -564,6 +576,7 @@ export function createUsernameRepository(
           );
           const result = await commit(transaction, writes);
           if (result === "committed") {
+            await notifyProfileProjection(profileId);
             return "updated";
           }
           if (attempt === attempts - 1) {

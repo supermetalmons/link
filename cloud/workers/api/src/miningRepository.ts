@@ -35,6 +35,7 @@ type MiningRepositoryDependencies = {
   fetcher?: typeof fetch;
   getAccessToken?: typeof createGoogleAccessToken;
   now?: () => number;
+  projectionCommitted?: (profileId: string) => Promise<void> | void;
   timeoutMs?: number;
 };
 
@@ -134,10 +135,20 @@ export function createMiningRepository(
     fetcher = fetch,
     getAccessToken = createGoogleAccessToken,
     now = Date.now,
+    projectionCommitted,
     timeoutMs = FIRESTORE_TIMEOUT_MS,
   }: MiningRepositoryDependencies = {},
 ): MiningRepository {
   let accessToken: Promise<string> | null = null;
+  const notifyProfileProjection = async (profileId: string): Promise<void> => {
+    try {
+      await projectionCommitted?.(profileId);
+    } catch {
+      console.error(
+        JSON.stringify({ event: "profile_read_projection_enqueue_failed" }),
+      );
+    }
+  };
 
   const fetchWithTimeout = async (
     input: string,
@@ -214,6 +225,7 @@ export function createMiningRepository(
       });
       if (response.ok) {
         await cancelResponseBody(response);
+        await notifyProfileProjection(profileId);
         return "updated";
       }
       if (response.status === 409 || response.status === 412) {

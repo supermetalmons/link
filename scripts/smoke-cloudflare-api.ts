@@ -1,7 +1,12 @@
 const { randomBytes } = require("node:crypto");
+const { readFileSync, statSync } = require("node:fs");
 const {
   isExactNftApiResponse,
 }: typeof import("@mons/shared/nfts") = require("@mons/shared/nfts");
+const {
+  isLeaderboardReadResponse,
+  isProfileLookupResponse,
+}: typeof import("@mons/shared/profiles") = require("@mons/shared/profiles");
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -13,7 +18,12 @@ const PREVIEW_HOST_PATTERN =
 
 type Options = {
   baseUrl: string;
+  smokeProfile: ProfileSmokeFixture;
   smokeSol: string;
+};
+type ProfileSmokeFixture = {
+  loginId: string;
+  profileId: string;
 };
 type Dependencies = {
   fetch: typeof fetch;
@@ -22,7 +32,50 @@ type Dependencies = {
 };
 
 function usage(): string {
-  return "Usage: npm run smoke:api -- --base-url <https-url> --smoke-sol <wallet>";
+  return "Usage: npm run smoke:api -- --base-url <https-url> --smoke-sol <wallet> --smoke-profile-fixture <protected-json-file>";
+}
+
+function readProfileSmokeFixture(path: string): ProfileSmokeFixture {
+  let value: unknown;
+  try {
+    const stat = statSync(path);
+    if (!stat.isFile() || stat.size > 4_096 || (stat.mode & 0o077) !== 0) {
+      throw new Error("invalid-profile-smoke-fixture");
+    }
+    value = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch {
+    throw new TypeError(usage());
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(usage());
+  }
+  const fields = value as Record<string, unknown>;
+  const loginId = typeof fields.loginId === "string" ? fields.loginId : "";
+  const profileId =
+    typeof fields.profileId === "string" ? fields.profileId : "";
+  const loginCharacters = Array.from(loginId);
+  const invalidControl = [...loginCharacters, ...Array.from(profileId)].some(
+    (character) => {
+      const code = character.codePointAt(0) || 0;
+      return code <= 0x1f || code === 0x7f;
+    },
+  );
+  if (
+    Object.keys(fields).length !== 2 ||
+    !loginId ||
+    loginId !== loginId.trim() ||
+    loginCharacters.length > 128 ||
+    !profileId ||
+    profileId !== profileId.trim() ||
+    new TextEncoder().encode(profileId).byteLength > 1_500 ||
+    profileId.includes("/") ||
+    profileId === "." ||
+    profileId === ".." ||
+    invalidControl
+  ) {
+    throw new TypeError(usage());
+  }
+  return { loginId, profileId };
 }
 
 function normalizeBaseUrl(value: string): string {
@@ -50,12 +103,15 @@ function normalizeBaseUrl(value: string): string {
 
 function parseArgs(argv: string[]): Options {
   let baseUrl = "";
+  let smokeProfile: ProfileSmokeFixture | null = null;
   let smokeSol = "";
   for (let index = 0; index < argv.length; index += 1) {
     const name = argv[index];
     const value = argv[index + 1];
     if (
-      (name !== "--base-url" && name !== "--smoke-sol") ||
+      (name !== "--base-url" &&
+        name !== "--smoke-sol" &&
+        name !== "--smoke-profile-fixture") ||
       !value ||
       value.startsWith("--")
     ) {
@@ -65,15 +121,18 @@ function parseArgs(argv: string[]): Options {
     if (name === "--base-url") {
       if (baseUrl) throw new TypeError(usage());
       baseUrl = normalizeBaseUrl(value);
-    } else {
+    } else if (name === "--smoke-sol") {
       if (smokeSol) throw new TypeError(usage());
       smokeSol = value.trim();
+    } else {
+      if (smokeProfile) throw new TypeError(usage());
+      smokeProfile = readProfileSmokeFixture(value);
     }
   }
-  if (!baseUrl || !smokeSol) {
+  if (!baseUrl || !smokeSol || !smokeProfile) {
     throw new TypeError(usage());
   }
-  return { baseUrl, smokeSol };
+  return { baseUrl, smokeProfile, smokeSol };
 }
 
 async function readBody(response: Response): Promise<string> {
@@ -175,6 +234,7 @@ async function firebaseIdentityRequest(
 
 async function smokeAuthenticatedAuthState(
   baseUrl: string,
+  smokeProfile: ProfileSmokeFixture,
   dependencies: Dependencies,
 ): Promise<void> {
   const session = await firebaseIdentityRequest(
@@ -248,6 +308,71 @@ async function smokeAuthenticatedAuthState(
       authUrl.searchParams.get("state") !== flowId
     ) {
       throw new Error("Authenticated X-flow smoke response was invalid.");
+    }
+    let lookupProfileId = "";
+    for (const type of [
+      "rating",
+      "mp",
+      "dust",
+      "slime",
+      "gum",
+      "metal",
+      "ice",
+    ] as const) {
+      const leaderboard = await request(
+        `${baseUrl}/leaderboards/read`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ type }),
+        },
+        200,
+        dependencies,
+      );
+      const leaderboardPayload = parseJson(leaderboard.body);
+      if (!isLeaderboardReadResponse(leaderboardPayload)) {
+        throw new Error("Profile leaderboard smoke response was invalid.");
+      }
+      if (type === "rating") {
+        lookupProfileId = leaderboardPayload.profiles[0]?.id || "";
+      }
+    }
+    if (!lookupProfileId) {
+      throw new Error("Profile leaderboard smoke returned no profiles.");
+    }
+    const profileLookup = await request(
+      `${baseUrl}/profiles/lookup`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ kind: "profile", id: lookupProfileId }),
+      },
+      200,
+      dependencies,
+    );
+    const profileLookupPayload = parseJson(profileLookup.body);
+    if (
+      !isProfileLookupResponse(profileLookupPayload) ||
+      profileLookupPayload.profile?.id !== lookupProfileId
+    ) {
+      throw new Error("Profile ID lookup smoke response was invalid.");
+    }
+    const loginLookup = await request(
+      `${baseUrl}/profiles/lookup`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ kind: "login", id: smokeProfile.loginId }),
+      },
+      200,
+      dependencies,
+    );
+    const loginLookupPayload = parseJson(loginLookup.body);
+    if (
+      !isProfileLookupResponse(loginLookupPayload) ||
+      loginLookupPayload.profile?.id !== smokeProfile.profileId
+    ) {
+      throw new Error("Profile login lookup smoke response was invalid.");
     }
   } finally {
     await firebaseIdentityRequest("accounts:delete", { idToken }, dependencies);
@@ -345,7 +470,11 @@ async function smokeApi(
   ) {
     throw new Error("Auth smoke response was invalid.");
   }
-  await smokeAuthenticatedAuthState(options.baseUrl, dependencies);
+  await smokeAuthenticatedAuthState(
+    options.baseUrl,
+    options.smokeProfile,
+    dependencies,
+  );
 
   for (const path of [
     "/invites/create",
@@ -426,4 +555,9 @@ if (require.main === module) {
   });
 }
 
-module.exports = { parseArgs, smokeApi, smokeAuthenticatedAuthState };
+module.exports = {
+  parseArgs,
+  readProfileSmokeFixture,
+  smokeApi,
+  smokeAuthenticatedAuthState,
+};

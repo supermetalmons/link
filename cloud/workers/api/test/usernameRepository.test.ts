@@ -153,6 +153,7 @@ function createHarness({
 function repository(
   harness: ReturnType<typeof createHarness>,
   maxTransactionAttempts = 5,
+  projectionCommitted?: (profileId: string) => Promise<void> | void,
 ) {
   let accessTokenCalls = 0;
   const value = createUsernameRepository(env, {
@@ -167,6 +168,7 @@ function repository(
     },
     maxTransactionAttempts,
     now: () => 1_700_000_000_000,
+    projectionCommitted,
   });
   return {
     get accessTokenCalls() {
@@ -177,6 +179,7 @@ function repository(
 }
 
 test("claims a username and removes owned and stale indexes atomically", async () => {
+  const projectedProfileIds: string[] = [];
   const harness = createHarness({
     indexes: [
       index("old", "profile-1"),
@@ -185,7 +188,9 @@ test("claims a username and removes owned and stale indexes atomically", async (
     ],
     users: [user("stale-profile", { username: "" })],
   });
-  const subject = repository(harness);
+  const subject = repository(harness, 5, (profileId) => {
+    projectedProfileIds.push(profileId);
+  });
 
   assert.equal(
     await subject.value.editUsername("firebase-uid", "Mons"),
@@ -212,6 +217,7 @@ test("claims a username and removes owned and stale indexes atomically", async (
     updates.map(({ update }) => update.name),
     [`${DATABASE_ROOT}/usernameIndex/mons`, `${DATABASE_ROOT}/users/profile-1`],
   );
+  assert.deepEqual(projectedProfileIds, ["profile-1"]);
   assert.deepEqual(updates[0].update.fields, {
     lookupKey: { stringValue: "mons" },
     profileId: { stringValue: "profile-1" },
@@ -275,7 +281,9 @@ test("clears the username and only its owned indexes", async () => {
   const harness = createHarness({
     indexes: [index("old", "profile-1"), index("Old", "different-profile")],
   });
-  const subject = repository(harness);
+  const subject = repository(harness, 5, async () => {
+    throw new Error("queue unavailable");
+  });
 
   assert.equal(await subject.value.editUsername("firebase-uid", ""), "updated");
   const writes = harness.commits[0].writes as Array<Record<string, unknown>>;
@@ -283,14 +291,21 @@ test("clears the username and only its owned indexes", async () => {
     writes.filter((write) => write.delete).map((write) => write.delete),
     [`${DATABASE_ROOT}/usernameIndex/old`],
   );
-  assert.deepEqual(writes.at(-1), {
-    update: {
-      name: `${DATABASE_ROOT}/users/profile-1`,
-      fields: { username: { stringValue: "" } },
+  assert.deepEqual(
+    writes.find(
+      (write) =>
+        (write.update as StoredDocument | undefined)?.name ===
+        `${DATABASE_ROOT}/users/profile-1`,
+    ),
+    {
+      update: {
+        name: `${DATABASE_ROOT}/users/profile-1`,
+        fields: { username: { stringValue: "" } },
+      },
+      updateMask: { fieldPaths: ["username", "usernameLookupKey"] },
+      currentDocument: { exists: true },
     },
-    updateMask: { fieldPaths: ["username", "usernameLookupKey"] },
-    currentDocument: { exists: true },
-  });
+  );
 });
 
 test("retries conflicts with the prior transaction and bounds exhaustion", async () => {

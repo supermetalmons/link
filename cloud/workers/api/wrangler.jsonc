@@ -11,6 +11,7 @@
     "APPLE_AUDIENCES": "link.mons",
     "AUTH_MUTATIONS_DISABLED": "false",
     "FIREBASE_RTDB_URL": "https://mons-link-default-rtdb.firebaseio.com",
+    "PROFILE_READ_MODE": "firestore",
   },
   "d1_databases": [
     {
@@ -36,6 +37,12 @@
       "database_name": "mons-link-event-prize-withdrawals",
       "database_id": "3815453d-a81b-441c-b941-bcdf78c52cf3",
       "migrations_dir": "event-prize-withdrawal-migrations",
+    },
+    {
+      "binding": "PROFILE_DB",
+      "database_name": "mons-link-profiles",
+      "database_id": "15a77eea-19da-45a7-8433-9b4a22d371da",
+      "migrations_dir": "profile-migrations",
     },
   ],
   "routes": [
@@ -114,6 +121,10 @@
         "binding": "PROFILE_GAME_PROJECTION_QUEUE",
         "queue": "mons-link-profile-game-projection",
       },
+      {
+        "binding": "PROFILE_PROJECTION_QUEUE",
+        "queue": "mons-link-profile-projection",
+      },
     ],
     "consumers": [
       {
@@ -147,6 +158,13 @@
         "max_retries": 3,
         "max_concurrency": 5,
       },
+      {
+        "queue": "mons-link-profile-projection",
+        "max_batch_size": 5,
+        "max_batch_timeout": 1,
+        "max_retries": 1,
+        "max_concurrency": 1,
+      },
     ],
   },
   "triggers": {
@@ -156,7 +174,7 @@
     "enabled": true,
     "logs": {
       "enabled": true,
-      "head_sampling_rate": 0.1,
+      "head_sampling_rate": 1,
       "invocation_logs": false,
       "persist": true,
     },

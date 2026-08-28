@@ -60,12 +60,16 @@ export function createProfileCustomizationRepository(
   env: Env,
   dependencies: {
     firestore?: AuthFirestoreClient;
+    projectionCommitted?: (profileId: string) => Promise<void> | void;
     signal?: AbortSignal;
   } = {},
 ): ProfileCustomizationRepository {
   const firestore =
     dependencies.firestore ||
-    createAuthFirestoreClient(env, { signal: dependencies.signal });
+    createAuthFirestoreClient(env, {
+      signal: dependencies.signal,
+      profileProjectionCommitted: dependencies.projectionCommitted,
+    });
   return {
     async updateCustomization(uid, request, authorize) {
       return firestore.runTransaction(async (transaction) => {
@@ -76,14 +80,20 @@ export function createProfileCustomizationRepository(
           ["logins", "sol", "eth", "mergedIntoProfileId"],
         );
         if (profiles.length === 0) {
-          return { result: "profile-not-found" as const, writes: [] };
+          return {
+            result: "profile-not-found" as const,
+            writes: [],
+          };
         }
         if (
           profiles.length > 1 ||
           (typeof profiles[0].fields.mergedIntoProfileId === "string" &&
             profiles[0].fields.mergedIntoProfileId.trim())
         ) {
-          return { result: "login-profile-conflict" as const, writes: [] };
+          return {
+            result: "login-profile-conflict" as const,
+            writes: [],
+          };
         }
         const profile = profileFromDocument(profiles[0]);
         await authorize(profile);

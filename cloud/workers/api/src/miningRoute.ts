@@ -23,6 +23,7 @@ import {
   type MiningRepository,
 } from "./miningRepository.ts";
 import { readBoundedJson } from "./http.ts";
+import { scheduleProfileReadProjection } from "./profileReadProjection.ts";
 
 const MAX_WRITE_ATTEMPTS = 3;
 
@@ -167,7 +168,12 @@ export async function handleMiningRoute(
     )(request, ctx);
     await enforceMiningRateLimit(env, identity.uid);
     const input = await parseMineRockRequest(request);
-    const repository = dependencies.repository || createMiningRepository(env);
+    const repository =
+      dependencies.repository ||
+      createMiningRepository(env, {
+        projectionCommitted: (profileId) =>
+          scheduleProfileReadProjection(ctx, env, profileId),
+      });
     return authJsonResponse(
       await mineRock(
         input,

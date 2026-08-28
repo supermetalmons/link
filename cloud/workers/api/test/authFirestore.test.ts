@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  authDeleteWrite,
   authDocumentName,
   authUpdateWrite,
   createAuthFirestoreClient,
@@ -81,8 +82,12 @@ test("retries Firestore transaction conflicts with the prior transaction", async
   const calls: Array<{ input: string; body: Record<string, unknown> }> = [];
   let begins = 0;
   let commits = 0;
+  const profileIds: string[] = [];
   const client = createAuthFirestoreClient(env, {
     getAccessToken: async () => "google-token",
+    profileProjectionCommitted: (profileId) => {
+      profileIds.push(profileId);
+    },
     fetcher: async (input, init) => {
       const body = init?.body
         ? (JSON.parse(String(init.body)) as Record<string, unknown>)
@@ -107,7 +112,7 @@ test("retries Firestore transaction conflicts with the prior transaction", async
   const result = await client.runTransaction(async () => ({
     result: "done",
     writes: [
-      authUpdateWrite(authDocumentName("authOps", "op-1"), {
+      authUpdateWrite(authDocumentName("users", "profile-1"), {
         status: "started",
       }),
     ],
@@ -115,6 +120,7 @@ test("retries Firestore transaction conflicts with the prior transaction", async
   assert.equal(result, "done");
   assert.equal(begins, 2);
   assert.equal(commits, 2);
+  assert.deepEqual(profileIds, ["profile-1"]);
   const secondBegin = calls.filter((call) =>
     call.input.endsWith(":beginTransaction"),
   )[1];
@@ -132,6 +138,7 @@ test("paginates subcollection documents and decodes exact values", async () => {
       pages++;
       const id = pages === 1 ? "item-1" : "item-2";
       assert.equal(url.searchParams.get("pageSize"), "100");
+      assert.deepEqual(url.searchParams.getAll("mask.fieldPaths"), ["nonce"]);
       if (pages === 2) {
         assert.equal(url.searchParams.get("pageToken"), "next-page");
       }
@@ -155,11 +162,14 @@ test("paginates subcollection documents and decodes exact values", async () => {
       });
     },
   });
-  const firstPage = await client.listPage("users/profile-1", "items");
+  const firstPage = await client.listPage("users/profile-1", "items", "", [
+    "nonce",
+  ]);
   const secondPage = await client.listPage(
     "users/profile-1",
     "items",
     firstPage.nextPageToken,
+    ["nonce"],
   );
   const documents = [...firstPage.documents, ...secondPage.documents];
   assert.deepEqual(
@@ -230,4 +240,122 @@ test("accepts valid large documents and projects query fields", async () => {
   const document = await client.get(authDocumentName("users", "profile-1"));
   assert.equal(document?.fields.payload, large);
   await client.query("users", {}, 100, ["username"], "profile-0");
+});
+
+test("notifies affected profiles after committing user mutations", async () => {
+  const profileIds: string[] = [];
+  let writes: Array<Record<string, unknown>> = [];
+  const client = createAuthFirestoreClient(env, {
+    getAccessToken: async () => "google-token",
+    profileProjectionCommitted: (profileId) => {
+      profileIds.push(profileId);
+    },
+    fetcher: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        writes: Array<Record<string, unknown>>;
+      };
+      writes = body.writes;
+      return json({});
+    },
+  });
+  await client.commitWrites([
+    authUpdateWrite(
+      authDocumentName("users", "profile-1"),
+      { username: "Mons" },
+      ["username"],
+      true,
+    ),
+  ]);
+  assert.equal(writes.length, 1);
+  assert.deepEqual(profileIds, ["profile-1"]);
+});
+
+test("notifies deleted profiles without adding Firestore writes", async () => {
+  const profileIds: string[] = [];
+  let writes: Array<Record<string, unknown>> = [];
+  const client = createAuthFirestoreClient(env, {
+    getAccessToken: async () => "google-token",
+    profileProjectionCommitted: (profileId) => {
+      profileIds.push(profileId);
+    },
+    fetcher: async (_input, init) => {
+      writes = (JSON.parse(String(init?.body)) as { writes: typeof writes })
+        .writes;
+      return json({});
+    },
+  });
+  await client.commitWrites([
+    authDeleteWrite(authDocumentName("users", "profile-1"), true),
+  ]);
+  assert.equal(writes.length, 1);
+  assert.deepEqual(profileIds, ["profile-1"]);
+});
+
+test("keeps ordinary 400-write chunks and notifies each committed profile", async () => {
+  const commitSizes: number[] = [];
+  let tasks = 0;
+  const client = createAuthFirestoreClient(env, {
+    getAccessToken: async () => "google-token",
+    profileProjectionCommitted: () => {
+      tasks++;
+    },
+    fetcher: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as { writes: unknown[] };
+      commitSizes.push(body.writes.length);
+      return json({});
+    },
+  });
+  await client.commitWrites(
+    Array.from({ length: 401 }, (_, index) =>
+      authUpdateWrite(authDocumentName("users", `profile-${index}`), {
+        username: `user-${index}`,
+      }),
+    ),
+  );
+  await client.commitWrites(
+    Array.from({ length: 400 }, (_, index) =>
+      authUpdateWrite(authDocumentName("metadata", `entry-${index}`), {
+        value: index,
+      }),
+    ),
+  );
+  assert.deepEqual(commitSizes, [400, 1, 400]);
+  assert.equal(tasks, 401);
+});
+
+test("deduplicates transaction notifications and ignores enqueue failures", async () => {
+  const profileIds: string[] = [];
+  let writes: unknown[] = [];
+  const client = createAuthFirestoreClient(env, {
+    getAccessToken: async () => "google-token",
+    profileProjectionCommitted: async (profileId) => {
+      profileIds.push(profileId);
+      throw new Error("queue unavailable");
+    },
+    fetcher: async (input, init) => {
+      if (String(input).endsWith(":beginTransaction")) {
+        return json({ transaction: "transaction-1" });
+      }
+      if (String(input).endsWith(":commit")) {
+        writes = (JSON.parse(String(init?.body)) as { writes: unknown[] })
+          .writes;
+        return json({});
+      }
+      throw new Error(`unexpected ${String(input)}`);
+    },
+  });
+  const result = await client.runTransaction(async () => ({
+    result: "committed",
+    writes: [
+      authUpdateWrite(authDocumentName("users", "profile-1"), { nonce: 1 }),
+      authUpdateWrite(authDocumentName("users", "profile-1"), { rating: 2 }),
+      authUpdateWrite(
+        `${authDocumentName("users", "profile-1")}/items/item-1`,
+        { value: 3 },
+      ),
+    ],
+  }));
+  assert.equal(result, "committed");
+  assert.equal(writes.length, 3);
+  assert.deepEqual(profileIds, ["profile-1"]);
 });

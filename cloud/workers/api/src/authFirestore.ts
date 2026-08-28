@@ -71,6 +71,7 @@ export type AuthFirestoreClient = {
     parent: string,
     collectionId: string,
     pageToken?: string,
+    fieldPaths?: string[],
   ) => Promise<AuthFirestorePage>;
   query: (
     collectionId: string,
@@ -189,6 +190,7 @@ export function createAuthFirestoreClient(
     getAccessToken = createGoogleAccessToken,
     maxTransactionAttempts = MAX_TRANSACTION_ATTEMPTS,
     now = Date.now,
+    profileProjectionCommitted,
     signal,
     timeoutMs = FIRESTORE_TIMEOUT_MS,
   }: {
@@ -197,6 +199,7 @@ export function createAuthFirestoreClient(
     getAccessToken?: typeof createGoogleAccessToken;
     maxTransactionAttempts?: number;
     now?: () => number;
+    profileProjectionCommitted?: (profileId: string) => Promise<void> | void;
     signal?: AbortSignal;
     timeoutMs?: number;
   } = {},
@@ -317,15 +320,47 @@ export function createAuthFirestoreClient(
     transaction?: string,
   ): Promise<"committed" | "conflict"> => transport.commit(writes, transaction);
   const attempts = Math.max(1, Math.floor(maxTransactionAttempts));
+  const userDocumentPrefix = `${AUTH_FIRESTORE_DATABASE_ROOT}/documents/users/`;
+  const profileIdForWrite = (write: AuthFirestoreWrite): string | null => {
+    const name = "update" in write ? write.update.name : write.delete;
+    if (!name.startsWith(userDocumentPrefix)) {
+      return null;
+    }
+    const profileId = name.slice(userDocumentPrefix.length);
+    return profileId && !profileId.includes("/") ? profileId : null;
+  };
+  const notifyProfileProjections = async (
+    profileIds: Iterable<string>,
+  ): Promise<void> => {
+    if (!profileProjectionCommitted) {
+      return;
+    }
+    for (const profileId of new Set(profileIds)) {
+      try {
+        await profileProjectionCommitted(profileId);
+      } catch {
+        console.error(
+          JSON.stringify({ event: "profile_read_projection_enqueue_failed" }),
+        );
+      }
+    }
+  };
 
   return {
     batchGet: (names) => batchGet(names),
     async commitWrites(writes) {
       for (let index = 0; index < writes.length; index += 400) {
-        const result = await commit(writes.slice(index, index + 400));
+        const chunk = writes.slice(index, index + 400);
+        const result = await commit(chunk);
         if (result !== "committed") {
           throw new AuthFirestoreConflict();
         }
+        await notifyProfileProjections(
+          chunk.flatMap((write) => {
+            const profileId = profileIdForWrite(write);
+            return profileId ? [profileId] : [];
+          }),
+        );
       }
     },
     createDocumentId: secureAlphanumericId,
@@ -341,7 +376,7 @@ export function createAuthFirestoreClient(
         await readJson(response, MAX_FIRESTORE_DOCUMENT_BODY_BYTES),
       );
     },
-    async listPage(parent, collectionId, pageToken = "") {
+    async listPage(parent, collectionId, pageToken = "", fieldPaths = []) {
       const base = parent
         ? `${AUTH_FIRESTORE_DOCUMENTS_ROOT}/${parent}/${collectionId}`
         : `${AUTH_FIRESTORE_DOCUMENTS_ROOT}/${collectionId}`;
@@ -350,10 +385,15 @@ export function createAuthFirestoreClient(
       if (pageToken) {
         url.searchParams.set("pageToken", pageToken);
       }
+      for (const fieldPath of fieldPaths) {
+        url.searchParams.append("mask.fieldPaths", fieldPath);
+      }
       const body = toRecord(
         await readJson(
           await request(url.toString()),
-          MAX_FIRESTORE_BATCH_BODY_BYTES,
+          fieldPaths.length
+            ? MAX_FIRESTORE_METADATA_BODY_BYTES
+            : MAX_FIRESTORE_BATCH_BODY_BYTES,
         ),
       );
       const page = body?.documents === undefined ? [] : body.documents;
@@ -404,6 +444,12 @@ export function createAuthFirestoreClient(
           }
           const outcome = await commit(operation.writes, id);
           if (outcome === "committed") {
+            await notifyProfileProjections(
+              operation.writes.flatMap((write) => {
+                const profileId = profileIdForWrite(write);
+                return profileId ? [profileId] : [];
+              }),
+            );
             return operation.result;
           }
           retryTransaction = id;

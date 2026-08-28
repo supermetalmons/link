@@ -4,6 +4,8 @@ Run commands from the repository root. See the repository [architecture and comm
 
 Firebase retains authentication and the existing data stores. The API Worker owns manual invite, join, match creation, and rematch mutations; auth; profile and leaderboard reads; profile customization; username mutation; mining; gameplay; event-prize selection, withdrawal, and canonical projection; profile-link catch-up; rating-, invite-, automatch-, and event-driven profile-game projection; event control and progress Workflows; X callback; event Telegram projection; and Worker-backed Telegram delivery.
 
+Profile lookup and leaderboard responses are projected into `mons-link-profiles` D1 through the `mons-link-profile-projection` Queue. Firestore `users` remains canonical. The tracked `PROFILE_READ_MODE` selects either Firestore or D1; invalid values fail closed and D1 errors never fall back to Firestore. See the Cloudflare deployment guide for reconciliation, verification, cutover, and rollback.
+
 Event-prize withdrawal ownership, leases, persisted Solana submissions, and completion records live exclusively in `mons-link-event-prize-withdrawals` D1. RTDB has no withdrawal shadow, and Firebase-backed Worker versions are not valid rollback targets.
 
 ## Setup
@@ -45,6 +47,12 @@ The Firebase configuration intentionally has no Functions codebase. Review the d
 New auth intents and X redirect flows are stored in the `mons-link-auth-state` D1 database through `AUTH_STATE_DB`; legacy verified, completed, and failed X flows were backfilled during cutover. Firebase Auth, profile documents, profile merge state, and auth operation replay records remain in Firebase. The D1 state is consume-once and revision-fenced. After a one-hour grace, the Worker schedule removes expired created/processing rows and compacts obsolete proof material; verified/completed/failed replays are retained for 30 days. Do not manually edit or delete active rows.
 
 `mons-link-auth-recovery` is the permanent recovery Queue. Its consumer applies `authRecoveryJobs` idempotently, and the scheduled sweep re-enqueues stale jobs. Investigate a stuck job without purging the Queue or deleting its job record.
+
+## Profile read-model recovery
+
+The profile read-model Queue carries best-effort profile ID notifications after committed Firestore mutations. Its consumer always rereads the canonical profile before applying a version-fenced D1 projection. Every five minutes, the Worker scans Firestore profile metadata, repairs missing or mismatched projections, and rechecks apparent deletions before applying version-fenced tombstones. Any `profile_projection_failures` row blocks all D1 profile and leaderboard reads until a current valid projection or confirmed deletion clears it.
+
+Cron reconciliation is the durable recovery path. Investigate failed scheduled invocations, Queue backlog, projection errors, and failure rows; do not purge the Queue or manually rewrite D1 projection state. The retired Firestore outbox documents and index and the inactive profile projection DLQ remain in place only for rollback compatibility.
 
 ## Profile-game projection recovery
 

@@ -187,10 +187,15 @@ test("parses only the profile fields used by gameplay", () => {
 
 test("applies one atomic idempotent settlement transfer", async () => {
   const requests: Array<{ input: string; init: RequestInit }> = [];
+  const projectedProfileIds: string[] = [];
   const fingerprint = "settlement-fingerprint";
   let committed = false;
   const repository = createGameplayRepository(env, {
     rtdbClient,
+    projectionCommitted: async (profileId) => {
+      projectedProfileIds.push(profileId);
+      throw new Error("queue unavailable");
+    },
     getAccessToken: async (_env, options) => {
       assert.equal(options?.credentials, undefined);
       return "firestore-access-token";
@@ -232,6 +237,7 @@ test("applies one atomic idempotent settlement transfer", async () => {
   };
   assert.equal(await repository.applyWagerTransferOnce(input), "applied");
   assert.equal(await repository.applyWagerTransferOnce(input), "replayed");
+  assert.deepEqual(projectedProfileIds, ["winner", "loser"]);
   assert.equal(requests.length, 5);
   for (const entry of requests) {
     assert.equal(
@@ -240,52 +246,60 @@ test("applies one atomic idempotent settlement transfer", async () => {
     );
   }
   assert.equal(requests[3].input.endsWith("/documents:commit"), true);
-  assert.deepEqual(JSON.parse(String(requests[3].init.body)), {
-    writes: [
-      {
-        update: {
-          name: "projects/mons-link/databases/(default)/documents/wagerSettlements/operation-id",
-          fields: {
-            appliedAtMs: { integerValue: "100" },
-            count: { integerValue: "2" },
-            fingerprint: { stringValue: fingerprint },
-            loserProfileId: { stringValue: "loser" },
-            material: { stringValue: "dust" },
-            operationId: { stringValue: "operation-id" },
-            winnerProfileId: { stringValue: "winner" },
+  const commitBody = JSON.parse(String(requests[3].init.body));
+  assert.deepEqual(
+    {
+      writes: commitBody.writes.slice(0, 3),
+      transaction: commitBody.transaction,
+    },
+    {
+      writes: [
+        {
+          update: {
+            name: "projects/mons-link/databases/(default)/documents/wagerSettlements/operation-id",
+            fields: {
+              appliedAtMs: { integerValue: "100" },
+              count: { integerValue: "2" },
+              fingerprint: { stringValue: fingerprint },
+              loserProfileId: { stringValue: "loser" },
+              material: { stringValue: "dust" },
+              operationId: { stringValue: "operation-id" },
+              winnerProfileId: { stringValue: "winner" },
+            },
           },
+          currentDocument: { exists: false },
         },
-        currentDocument: { exists: false },
-      },
-      {
-        transform: {
-          document:
-            "projects/mons-link/databases/(default)/documents/users/winner",
-          fieldTransforms: [
-            {
-              fieldPath: "mining.materials.dust",
-              increment: { integerValue: "2" },
-            },
-          ],
+        {
+          transform: {
+            document:
+              "projects/mons-link/databases/(default)/documents/users/winner",
+            fieldTransforms: [
+              {
+                fieldPath: "mining.materials.dust",
+                increment: { integerValue: "2" },
+              },
+            ],
+          },
+          currentDocument: { exists: true },
         },
-        currentDocument: { exists: true },
-      },
-      {
-        transform: {
-          document:
-            "projects/mons-link/databases/(default)/documents/users/loser",
-          fieldTransforms: [
-            {
-              fieldPath: "mining.materials.dust",
-              increment: { integerValue: "-2" },
-            },
-          ],
+        {
+          transform: {
+            document:
+              "projects/mons-link/databases/(default)/documents/users/loser",
+            fieldTransforms: [
+              {
+                fieldPath: "mining.materials.dust",
+                increment: { integerValue: "-2" },
+              },
+            ],
+          },
+          currentDocument: { exists: true },
         },
-        currentDocument: { exists: true },
-      },
-    ],
-    transaction: "wager-transaction",
-  });
+      ],
+      transaction: "wager-transaction",
+    },
+  );
+  assert.equal(commitBody.writes.length, 3);
 });
 
 test("rejects malformed profile merge targets during settlement", async () => {
@@ -454,7 +468,7 @@ test("retries against canonical profiles when a merge races settlement", async (
   assert.equal(commitBody.transaction, "canonical-transaction-2");
   assert.deepEqual(
     writes
-      .slice(1)
+      .filter((write) => write.transform)
       .map((write) =>
         String((write.transform as Record<string, unknown>).document),
       ),

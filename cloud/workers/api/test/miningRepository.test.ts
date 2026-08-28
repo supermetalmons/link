@@ -98,11 +98,16 @@ test("parses mining profiles and normalizes absent mining fields", () => {
 
 test("queries with the Firebase token and patches with one Google token", async () => {
   const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+  const projectedProfileIds: string[] = [];
   let accessTokenCalls = 0;
   const repository = createMiningRepository(env, {
     getAccessToken: async () => {
       accessTokenCalls++;
       return "google-access-token";
+    },
+    projectionCommitted: async (profileId) => {
+      projectedProfileIds.push(profileId);
+      throw new Error("queue unavailable");
     },
     fetcher: async (input, init) => {
       requests.push({ input, init });
@@ -131,6 +136,7 @@ test("queries with the Firebase token and patches with one Google token", async 
   );
   assert.equal(accessTokenCalls, 1);
   assert.equal(requests.length, 2);
+  assert.deepEqual(projectedProfileIds, ["profile-1"]);
 
   const queryRequest = requests[0];
   assert.equal(

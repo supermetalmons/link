@@ -23,10 +23,9 @@ import {
   type ProfileCustomizationRepository,
 } from "./profileCustomizationRepository.ts";
 import { authorizeProfileCustomization } from "./profileCustomizationPolicy.ts";
-import {
-  createProfileRepository,
-  type ProfileRepository,
-} from "./profileRepository.ts";
+import { type ProfileRepository } from "./profileRepository.ts";
+import { createConfiguredProfileRepository } from "./profileReadRepository.ts";
+import { scheduleProfileReadProjection } from "./profileReadProjection.ts";
 import {
   createUsernameRepository,
   type UsernameRepository,
@@ -127,7 +126,11 @@ export async function handleProfileRoute(
         return authJsonResponse(response, 200, corsHeaders);
       }
       const usernameRepository =
-        dependencies.usernameRepository || createUsernameRepository(env);
+        dependencies.usernameRepository ||
+        createUsernameRepository(env, {
+          projectionCommitted: (profileId) =>
+            scheduleProfileReadProjection(ctx, env, profileId),
+        });
       const outcome = await usernameRepository.editUsername(
         identity.uid,
         username,
@@ -168,7 +171,11 @@ export async function handleProfileRoute(
         AbortSignal.timeout(PROFILE_CUSTOMIZATION_TIMEOUT_MS);
       const customizationRepository =
         dependencies.customizationRepository ||
-        createProfileCustomizationRepository(env, { signal });
+        createProfileCustomizationRepository(env, {
+          signal,
+          projectionCommitted: (profileId) =>
+            scheduleProfileReadProjection(ctx, env, profileId),
+        });
       signal.throwIfAborted();
       const outcome = await customizationRepository.updateCustomization(
         identity.uid,
@@ -195,7 +202,8 @@ export async function handleProfileRoute(
       );
     }
 
-    const repository = dependencies.repository || createProfileRepository();
+    const repository =
+      dependencies.repository || createConfiguredProfileRepository(env);
 
     if (pathname === "/profiles/lookup") {
       if (!isProfileLookupRequest(body)) {

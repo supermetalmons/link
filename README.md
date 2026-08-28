@@ -14,7 +14,7 @@ mons.link is a browser game backed by Firebase and two Cloudflare Workers. The r
 | `cloud/admin/`            | Manually invoked production administration tools                                             | Node / Firebase Admin |
 | `scripts/`                | Deployment, repository maintenance, architecture, and tooling contracts                      | Node and Bash         |
 
-The frontend Worker is configured by `wrangler.jsonc`. The API Worker has its independent configuration under `cloud/workers/api/`. Firebase retains authentication and data storage, with rules and indexes under `cloud/`; no Firebase Functions are deployed.
+The frontend Worker is configured by `wrangler.jsonc`. The API Worker has its independent configuration under `cloud/workers/api/`. Firebase retains authentication and canonical profile data, while profile lookups and leaderboards can use the reconciled D1 read model. Firebase rules and indexes live under `cloud/`; no Firebase Functions are deployed.
 
 ## Setup and development
 
@@ -42,13 +42,14 @@ Copy `.env.example` to `.env.local` only when local overrides are needed. Local 
 
 ### API and tooling
 
-| Command                       | Purpose                                                                                                                  |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `npm run check:api`           | Format, lint, typecheck, test, type-generation check, and dry-run the API Worker.                                        |
-| `npm run check:tooling`       | Validate deployment drivers, project contracts, admin parsing, repository cleanup fixtures, and dependency architecture. |
-| `npm run test:database-rules` | Run structural gameplay authorization against the Realtime Database emulator.                                            |
-| `npm run check:all`           | Run the repository-wide validation gate, including portable cloud runtime tests.                                         |
-| `npm run format:check`        | Check repository formatting without writing files.                                                                       |
+| Command                                      | Purpose                                                                                                                  |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `npm run check:api`                          | Format, lint, typecheck, test, type-generation check, and dry-run the API Worker.                                        |
+| `npm run check:tooling`                      | Validate deployment drivers, project contracts, admin parsing, repository cleanup fixtures, and dependency architecture. |
+| `npm run migrate:profile-reads -- --dry-run` | Validate the Firestore-to-D1 profile read-model backfill without writing.                                                |
+| `npm run test:database-rules`                | Run structural gameplay authorization against the Realtime Database emulator.                                            |
+| `npm run check:all`                          | Run the repository-wide validation gate, including portable cloud runtime tests.                                         |
+| `npm run format:check`                       | Check repository formatting without writing files.                                                                       |
 
 ### Deployment and maintenance
 

@@ -112,6 +112,7 @@ import {
   type GameSessionMutationDependencies,
 } from "./gameSessionMutations.ts";
 import { readProfileGamesPage } from "./profileGamesD1.ts";
+import { scheduleProfileReadProjection } from "./profileReadProjection.ts";
 
 export const GAMEPLAY_PATHS = new Set([
   "/automatch/cancel",
@@ -674,7 +675,11 @@ export async function handleGameplayRoute(
       await enforceWagerOutcomeRateLimit(env.AUTH_RATE_LIMITER, identity.uid);
     }
     const body = await readGameplayBody(request, pathname);
-    const repository = dependencies.repository || createGameplayRepository(env);
+    const projectionCommitted = (profileId: string) =>
+      scheduleProfileReadProjection(ctx, env, profileId);
+    const repository =
+      dependencies.repository ||
+      createGameplayRepository(env, { projectionCommitted });
     const defaultEnqueueEventProgress = async (plan: EventProgressPlan) => {
       ctx.waitUntil(
         ensureEventProgressWorkflow(env.EVENT_PROGRESS_WORKFLOW, plan).catch(
@@ -894,7 +899,7 @@ export async function handleGameplayRoute(
         identity,
         body,
         dependencies.ratingRepository ||
-          createRatingRepository(env, repository),
+          createRatingRepository(env, repository, { projectionCommitted }),
         ratingDependencies,
       );
     } else if (pathname === "/wagers/proposals/send") {

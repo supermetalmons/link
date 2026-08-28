@@ -159,6 +159,7 @@ type ServiceDependencies = {
   authState?: AuthStateRepository;
   firestore?: AuthFirestoreClient;
   now?: () => number;
+  profileProjectionCommitted?: (profileId: string) => Promise<void> | void;
   randomInteger?: (maximum: number) => number;
   rtdb?: FirebaseRtdbClient;
   signal?: AbortSignal;
@@ -424,11 +425,15 @@ export function createAuthIdentityService(
     dependencies.firestore ||
     createAuthFirestoreClient(env, {
       accessTokenProvider,
+      profileProjectionCommitted: dependencies.profileProjectionCommitted,
       signal: dependencies.signal,
     });
   const durableFirestore =
     dependencies.firestore ||
-    createAuthFirestoreClient(env, { accessTokenProvider });
+    createAuthFirestoreClient(env, {
+      accessTokenProvider,
+      profileProjectionCommitted: dependencies.profileProjectionCommitted,
+    });
   const authClient =
     dependencies.authClient ||
     createFirebaseAuthAdminClient(env, { signal: dependencies.signal });
@@ -445,6 +450,7 @@ export function createAuthIdentityService(
     authClient,
     firestore: durableFirestore,
     now,
+    profileProjectionCommitted: dependencies.profileProjectionCommitted,
     rtdb,
     signal: dependencies.signal,
   });

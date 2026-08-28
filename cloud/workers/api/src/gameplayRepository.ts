@@ -300,6 +300,7 @@ type GameplayRepositoryDependencies = {
   fetcher?: typeof fetch;
   getAccessToken?: typeof createGoogleAccessToken;
   now?: () => number;
+  projectionCommitted?: (profileId: string) => Promise<void> | void;
   rtdbClient?: FirebaseRtdbClient;
   timeoutMs?: number;
 };
@@ -309,6 +310,7 @@ type RatingRepositoryDependencies = {
   getAccessToken?: typeof createGoogleAccessToken;
   maxTransactionAttempts?: number;
   now?: () => number;
+  projectionCommitted?: (profileId: string) => Promise<void> | void;
   timeoutMs?: number;
 };
 
@@ -591,6 +593,7 @@ export function createGameplayRepository(
     fetcher = fetch,
     getAccessToken = createGoogleAccessToken,
     now = Date.now,
+    projectionCommitted,
     timeoutMs = FIRESTORE_TIMEOUT_MS,
     rtdbClient = createFirebaseRtdbClient(env, {
       credentials: {
@@ -603,6 +606,15 @@ export function createGameplayRepository(
     }),
   }: GameplayRepositoryDependencies = {},
 ): GameplayRepository {
+  const notifyProfileProjection = async (profileId: string): Promise<void> => {
+    try {
+      await projectionCommitted?.(profileId);
+    } catch {
+      console.error(
+        JSON.stringify({ event: "profile_read_projection_enqueue_failed" }),
+      );
+    }
+  };
   let firestoreAccessToken: Promise<string> | null = null;
   const getFirestoreAccessToken = () => {
     firestoreAccessToken ||= getAccessToken(env, {
@@ -829,6 +841,14 @@ export function createGameplayRepository(
                 currentDocument: { exists: true },
               },
             );
+            const result = await wagerTransport.commit(writes, transaction);
+            if (result === "committed") {
+              await notifyProfileProjection(winnerProfileId);
+              await notifyProfileProjection(loserProfileId);
+              return "applied";
+            }
+            retryTransaction = transaction;
+            continue;
           }
           const result = await wagerTransport.commit(writes, transaction);
           if (result === "committed") {
@@ -1013,11 +1033,21 @@ export function createRatingRepository(
     getAccessToken = createGoogleAccessToken,
     maxTransactionAttempts = MAX_RATING_TRANSACTION_ATTEMPTS,
     now = Date.now,
+    projectionCommitted,
     timeoutMs = FIRESTORE_TIMEOUT_MS,
   }: RatingRepositoryDependencies = {},
 ): RatingProjectionRepository &
   RatingEventProgressRepository &
   RatingProfileGameProjectionRepository {
+  const notifyProfileProjection = async (profileId: string): Promise<void> => {
+    try {
+      await projectionCommitted?.(profileId);
+    } catch {
+      console.error(
+        JSON.stringify({ event: "profile_read_projection_enqueue_failed" }),
+      );
+    }
+  };
   const attempts =
     Number.isInteger(maxTransactionAttempts) && maxTransactionAttempts > 0
       ? maxTransactionAttempts
@@ -1316,9 +1346,10 @@ export function createRatingRepository(
             ["feb2026UniqueOpponents"],
           );
           const writes: Array<Record<string, unknown>> = [];
-          for (const [name, otherProfileId] of [
-            [playerDocumentName, opponentProfileId],
-            [opponentDocumentName, playerProfileId],
+          const projectionProfileIds: string[] = [];
+          for (const [name, profileId, otherProfileId] of [
+            [playerDocumentName, playerProfileId, opponentProfileId],
+            [opponentDocumentName, opponentProfileId, playerProfileId],
           ] as const) {
             const document = documents.get(name);
             if (!document) {
@@ -1340,6 +1371,7 @@ export function createRatingRepository(
                 true,
               ),
             );
+            projectionProfileIds.push(profileId);
           }
           if (writes.length === 0) {
             await rollback(transaction);
@@ -1347,6 +1379,9 @@ export function createRatingRepository(
           }
           const result = await commit(transaction, writes);
           if (result === "committed") {
+            await Promise.all(
+              projectionProfileIds.map(notifyProfileProjection),
+            );
             return;
           }
           retryTransaction = transaction;
@@ -1388,6 +1423,7 @@ export function createRatingRepository(
           const opponent = await queryProfile(input.opponentId, transaction);
           const plan = buildPlan(player, opponent);
           const writes: Array<Record<string, unknown>> = [];
+          const projectionProfileIds = new Set<string>();
           if (player && plan.playerUpdate) {
             writes.push(
               updateWrite(
@@ -1396,6 +1432,7 @@ export function createRatingRepository(
                 true,
               ),
             );
+            projectionProfileIds.add(player.profileId);
           }
           if (opponent && plan.opponentUpdate) {
             writes.push(
@@ -1405,10 +1442,14 @@ export function createRatingRepository(
                 true,
               ),
             );
+            projectionProfileIds.add(opponent.profileId);
           }
           writes.push(updateWrite(name, plan.ratingUpdate, true));
           const result = await commit(transaction, writes);
           if (result === "committed") {
+            await Promise.all(
+              Array.from(projectionProfileIds, notifyProfileProjection),
+            );
             return { status: "committed", data: plan.repairData };
           }
           retryTransaction = transaction;

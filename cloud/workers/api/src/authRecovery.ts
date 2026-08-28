@@ -39,6 +39,7 @@ import {
   parseProfileLinkProfileGameProjectionOutbox,
 } from "./profileGameProjectionOutbox.ts";
 import type { ProfileLinkProfileGameProjectionTask } from "./profileGameProjectionTasks.ts";
+import { enqueueProfileReadProjection } from "./profileReadProjection.ts";
 import {
   commitProfileGameProjectionWrites,
   getProfileGameProjection,
@@ -83,6 +84,7 @@ type AuthRecoveryDependencies = {
   firestore?: AuthFirestoreClient;
   logger?: Pick<Console, "error" | "info">;
   now?: () => number;
+  profileProjectionCommitted?: (profileId: string) => Promise<void> | void;
   rtdb?: FirebaseRtdbClient;
   signal?: AbortSignal;
   withdrawalDb?: D1Database;
@@ -443,6 +445,7 @@ export function createAuthRecoveryService(
     dependencies.firestore ||
     createAuthFirestoreClient(env, {
       accessTokenProvider,
+      profileProjectionCommitted: dependencies.profileProjectionCommitted,
       signal: dependencies.signal,
     });
   const authClient =
@@ -966,7 +969,10 @@ export async function handleAuthRecoveryMessage(
   message: Message<unknown>,
   env: Env,
   recover = (profileId: string) =>
-    createAuthRecoveryService(env).recoverProfile(profileId),
+    createAuthRecoveryService(env, {
+      profileProjectionCommitted: (profileId) =>
+        enqueueProfileReadProjection(env, profileId),
+    }).recoverProfile(profileId),
 ): Promise<void> {
   const task = parseAuthRecoveryTask(message.body);
   if (!task) {

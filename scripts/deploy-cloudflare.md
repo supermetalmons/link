@@ -9,6 +9,7 @@ Run commands from the repository root with Node.js 24 and Java 21 or newer. Fire
 - `cloud/workers/api/auth-state-migrations/` owns the `mons-link-auth-state` D1 schema for auth intents and X redirect flows.
 - `cloud/workers/api/telegram-migrations/` owns the `mons-link-telegram` D1 schema for Telegram delivery, recovery, and announcement receipts.
 - `cloud/workers/api/event-prize-withdrawal-migrations/` owns the `mons-link-event-prize-withdrawals` D1 schema and storage-mode fence for Solana prize withdrawals.
+- `cloud/workers/api/profile-migrations/` owns the `mons-link-profiles` D1 read-model schema for profile lookup and leaderboards.
 - `cloud/workers/api/release.env` stays empty. It prevents release commands from loading developer environment files.
 - Encrypted secrets stay in Cloudflare. Their required names are declared in the API Wrangler configuration.
 - Do not edit production Worker configuration in the Cloudflare Dashboard. Review and deploy the tracked configuration.
@@ -54,11 +55,39 @@ The five-minute Worker schedule removes expired created/processing flows and orp
 
 ## API Worker release
 
+Apply the profile read-model schema before releasing a Worker version that includes `PROFILE_DB`:
+
+```sh
+npx wrangler d1 migrations apply mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+`PROFILE_READ_MODE` is tracked in `cloud/workers/api/wrangler.jsonc` and accepts only `firestore` or `d1`. Invalid values fail closed. Keep it on `firestore` while validating projection delivery and reconciliation, then promote the exact verified code in `d1` mode. Do not create a Dashboard override.
+
+Backfill and verify without printing profile contents. The helper is locked to the production `mons-link` Firebase project because its Wrangler target is the production D1 database:
+
+```sh
+npm run migrate:profile-reads -- --dry-run --project mons-link
+npm run migrate:profile-reads -- --execute --project mons-link
+npm run migrate:profile-reads -- --verify --project mons-link
+```
+
+The `mons-link-profile-projection` Queue carries deduplicated profile IDs after committed Worker mutations. Delivery is best effort: the consumer rereads Firestore and applies the latest version, while the five-minute schedule scans all Firestore profile metadata and re-enqueues missing or version-mismatched projections in batches of at most 100. Apparent deletions are rechecked against Firestore before a version-fenced tombstone is applied. Queue messages receive one platform retry; Cron reconciliation is the durable recovery path.
+
+Any `profile_projection_failures` row makes all D1 profile and leaderboard reads return the sanitized profile-service error. D1 read errors never fall back to Firestore. Retain the existing outbox documents and index, profile projection DLQ, tombstones, failure table, Queue, migrations, and D1 data for rollback compatibility, but do not use them as active recovery mechanisms.
+
+First upload and promote the simplified Worker with tracked mode `firestore`, deploy its triggers, and record that Version ID for rollback. Require two consecutive successful five-minute reconciliation runs, an empty active Queue backlog, no projection failures, matching profile/login/version counts and digests, and successful profile, login, and all seven leaderboard smoke checks. Then change the tracked mode to `d1`, regenerate Worker types, run `npm run check:api`, `npm run check:tooling`, and `npm run check:all`, and upload and smoke that exact candidate before promoting it. After promotion, smoke production and rerun remote verification.
+
+Keep custom Worker log sampling at `1` through this validation and cutover window so every reconciliation summary is retained. Reduce it only in a separately reviewed release after D1 production verification is complete.
+
+Rollback by promoting the retained simplified `firestore`-mode Version ID. Keep all profile projection infrastructure and data intact so reconciliation continues while reads are rolled back.
+
 Upload and smoke a version before it receives traffic:
+
+Create a `0600` JSON fixture outside the repository containing `{"loginId":"...","profileId":"..."}` for one mapping read from canonical Firestore `users` data through Firebase Admin. Never derive the expected mapping from D1. The smoke reads the fixture without printing either identifier.
 
 ```sh
 npm run upload:api
-npm run smoke:api -- --base-url <version-preview-url> --smoke-sol <known-wallet>
+npm run smoke:api -- --base-url <version-preview-url> --smoke-sol <known-wallet> --smoke-profile-fixture <protected-profile-fixture>
 ```
 
 Record the Version ID printed by Wrangler. Promote that exact version, apply reviewed triggers, and smoke production:
@@ -66,8 +95,10 @@ Record the Version ID printed by Wrangler. Promote that exact version, apply rev
 ```sh
 npm run promote:api -- --version-id <version-id>
 npm run deploy:api:triggers
-npm run smoke:api -- --base-url https://api.mons.link --smoke-sol <known-wallet>
+npm run smoke:api -- --base-url https://api.mons.link --smoke-sol <known-wallet> --smoke-profile-fixture <protected-profile-fixture>
 ```
+
+Remove the protected fixture immediately after the production smoke. Use a shell trap so failed preview or production smoke runs also remove it.
 
 `upload:api` uses `wrangler versions upload --strict`; it does not send traffic to the candidate. `promote:api` deploys the explicit Version ID to 100% of traffic without prompting. `deploy:api:triggers` applies the tracked route, Cron, and Queue consumer configuration. Routine code-only releases may omit the trigger command when that configuration is unchanged.
 

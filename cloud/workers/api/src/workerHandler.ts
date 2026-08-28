@@ -38,6 +38,14 @@ import {
   handleTelegramCommand,
   TELEGRAM_COMMAND_PATH,
 } from "./telegramCommand.ts";
+import {
+  handleProfileReadProjectionQueue,
+  reconcileProfileReadProjections,
+} from "./profileReadProjection.ts";
+import {
+  PROFILE_READ_PROJECTION_QUEUE_NAME,
+  type ProfileReadProjectionQueueTask,
+} from "./profileReadProjectionTasks.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
 export type { ProviderFetch } from "./provider.ts";
@@ -74,6 +82,7 @@ async function handleScheduled(
       now: () => controller.scheduledTime,
     }),
     sweepExpiredAuthState(env.AUTH_STATE_DB, controller.scheduledTime),
+    reconcileProfileReadProjections(env),
   ]);
   const failure = results.find(
     (result): result is PromiseRejectedResult => result.status === "rejected",
@@ -95,6 +104,9 @@ export default {
     if (batch.queue === PROFILE_GAME_PROJECTION_QUEUE_NAME) {
       return handleProfileGameProjectionQueue(batch, env);
     }
+    if (batch.queue === PROFILE_READ_PROJECTION_QUEUE_NAME) {
+      return handleProfileReadProjectionQueue(batch, env);
+    }
     return handleTelegramQueue(batch, env);
   },
   scheduled: handleScheduled,
@@ -105,4 +117,5 @@ export default {
   | TelegramTaskPayload
   | WagerSettlementRetryTask
   | TelegramProjectionTask
+  | ProfileReadProjectionQueueTask
 >;

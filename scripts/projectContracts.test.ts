@@ -109,6 +109,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     "APPLE_AUDIENCES",
     "AUTH_MUTATIONS_DISABLED",
     "FIREBASE_RTDB_URL",
+    "PROFILE_READ_MODE",
   ]);
   assert.equal(config.vars?.APPLE_AUDIENCES, "link.mons");
   assert.match(config.vars?.AUTH_MUTATIONS_DISABLED || "", /^(?:true|false)$/);
@@ -116,6 +117,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     config.vars?.FIREBASE_RTDB_URL,
     "https://mons-link-default-rtdb.firebaseio.com",
   );
+  assert.equal(config.vars?.PROFILE_READ_MODE, "firestore");
   assert.deepEqual(config.d1_databases, [
     {
       binding: "PROFILE_GAMES_DB",
@@ -140,6 +142,12 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       database_name: "mons-link-event-prize-withdrawals",
       database_id: "3815453d-a81b-441c-b941-bcdf78c52cf3",
       migrations_dir: "event-prize-withdrawal-migrations",
+    },
+    {
+      binding: "PROFILE_DB",
+      database_name: "mons-link-profiles",
+      database_id: "15a77eea-19da-45a7-8433-9b4a22d371da",
+      migrations_dir: "profile-migrations",
     },
   ]);
   assert.deepEqual(config.secrets, {
@@ -194,6 +202,10 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
         binding: "PROFILE_GAME_PROJECTION_QUEUE",
         queue: "mons-link-profile-game-projection",
       },
+      {
+        binding: "PROFILE_PROJECTION_QUEUE",
+        queue: "mons-link-profile-projection",
+      },
     ],
     consumers: [
       {
@@ -227,6 +239,13 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
         max_retries: 3,
         max_concurrency: 5,
       },
+      {
+        queue: "mons-link-profile-projection",
+        max_batch_size: 5,
+        max_batch_timeout: 1,
+        max_retries: 1,
+        max_concurrency: 1,
+      },
     ],
   });
   assert.deepEqual(config.triggers, { crons: ["*/5 * * * *"] });
@@ -234,7 +253,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     enabled: true,
     logs: {
       enabled: true,
-      head_sampling_rate: 0.1,
+      head_sampling_rate: 1,
       invocation_logs: false,
       persist: true,
     },
@@ -344,6 +363,7 @@ test("package manifests preserve public scripts and deployment command vectors",
       "smoke:api": rootPackage.scripts?.["smoke:api"],
       "manage:event-prize-withdrawals":
         rootPackage.scripts?.["manage:event-prize-withdrawals"],
+      "migrate:profile-reads": rootPackage.scripts?.["migrate:profile-reads"],
       "prepare:firebase": rootPackage.scripts?.["prepare:firebase"],
       "deploy:firebase": rootPackage.scripts?.["deploy:firebase"],
       deploy: rootPackage.scripts?.deploy,
@@ -368,6 +388,8 @@ test("package manifests preserve public scripts and deployment command vectors",
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/smoke-cloudflare-api.ts",
       "manage:event-prize-withdrawals":
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-event-prize-withdrawals.ts",
+      "migrate:profile-reads":
+        "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/migrate-profile-reads.ts",
       "prepare:firebase":
         "npm --prefix cloud/functions ci && npm --prefix cloud/functions test",
       "deploy:firebase":

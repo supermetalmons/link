@@ -18,6 +18,9 @@ export default defineConfig(async () => ({
           TEST_EVENT_PRIZE_WITHDRAWAL_D1_MIGRATIONS: await readD1Migrations(
             join(import.meta.dirname, "event-prize-withdrawal-migrations"),
           ),
+          TEST_PROFILE_D1_MIGRATIONS: await readD1Migrations(
+            join(import.meta.dirname, "profile-migrations"),
+          ),
           TEST_TELEGRAM_D1_MIGRATIONS: await readD1Migrations(
             join(import.meta.dirname, "telegram-migrations"),
           ),
