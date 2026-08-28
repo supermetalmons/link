@@ -117,7 +117,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     config.vars?.FIREBASE_RTDB_URL,
     "https://mons-link-default-rtdb.firebaseio.com",
   );
-  assert.equal(config.vars?.PROFILE_READ_MODE, "firestore");
+  assert.equal(config.vars?.PROFILE_READ_MODE, "d1");
   assert.deepEqual(config.d1_databases, [
     {
       binding: "PROFILE_GAMES_DB",
