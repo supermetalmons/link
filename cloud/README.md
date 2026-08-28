@@ -50,7 +50,7 @@ New auth intents and X redirect flows are stored in the `mons-link-auth-state` D
 
 ## Profile read-model recovery
 
-The profile read-model Queue carries best-effort profile ID notifications after committed Firestore mutations. Its consumer always rereads the canonical profile before applying a version-fenced D1 projection. Every five minutes, the Worker scans Firestore profile metadata, repairs missing or mismatched projections, and rechecks apparent deletions before applying version-fenced tombstones. Any `profile_projection_failures` row blocks all D1 profile and leaderboard reads until a current valid projection or confirmed deletion clears it.
+The profile read-model Queue carries best-effort profile ID notifications after committed Firestore mutations. Its consumer always rereads the canonical profile before applying a version-fenced D1 projection. Every five minutes, the Worker scans Firestore profile metadata, repairs missing or mismatched projections, and rechecks apparent deletions before applying version-fenced tombstones. A relevant `profile_projection_failures` row fences the affected profile or login read, while any failure row globally fences leaderboards. Validation fences persist until the canonical profile is corrected or the projection schema changes.
 
 Cron reconciliation is the durable recovery path. Investigate failed scheduled invocations, Queue backlog, projection errors, and failure rows; do not purge the Queue or manually rewrite D1 projection state. The retired Firestore outbox documents and index and the inactive profile projection DLQ remain in place only for rollback compatibility.
 

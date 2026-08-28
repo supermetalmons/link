@@ -13,6 +13,7 @@ import {
 } from "./profileD1.ts";
 import {
   createProfileProjection,
+  createProfileProjectionFailureLoginMetadata,
   parseFirestoreUpdateTime,
   PROFILE_PROJECTION_SCHEMA_VERSION,
   ProfileProjectionValidationError,
@@ -88,6 +89,7 @@ function isCurrentProjectionSchema(
 async function processProfileDocument(
   profileId: string,
   document: AuthFirestoreDocument | null,
+  firestore: AuthFirestoreClient,
   db: D1Database,
   nowMs: number,
 ): Promise<ProjectionStatus> {
@@ -105,11 +107,16 @@ async function processProfileDocument(
       return "projected";
     } catch (error) {
       if (error instanceof ProfileProjectionValidationError) {
+        const loginMetadata = createProfileProjectionFailureLoginMetadata(
+          document.fields,
+        );
         await commitProfileProjectionFailure(
           db,
           profileId,
           parseFirestoreUpdateTime(document.updateTime),
           nowMs,
+          loginMetadata.loginUids,
+          loginMetadata.complete,
         );
       }
       throw error;
@@ -125,6 +132,21 @@ async function processProfileDocument(
   const sourceVersion = latestKnownVersion(state);
   if (!sourceVersion) {
     return "stale";
+  }
+  const name = authDocumentName(PROFILE_COLLECTION, profileId);
+  const recheckedDocuments = await firestore.batchGet([name]);
+  if (!recheckedDocuments.has(name)) {
+    throw new TypeError("missing-profile-read-projection-source");
+  }
+  const recheckedDocument = recheckedDocuments.get(name) || null;
+  if (recheckedDocument) {
+    return processProfileDocument(
+      profileId,
+      recheckedDocument,
+      firestore,
+      db,
+      nowMs,
+    );
   }
   await commitProfileDeletion(
     db,
@@ -154,6 +176,7 @@ export async function processProfileReadProjectionTask(
   return processProfileDocument(
     parsed.profileId,
     documents.get(name) || null,
+    firestore,
     dependencies.db || env.PROFILE_DB,
     (dependencies.now || Date.now)(),
   );
@@ -261,6 +284,7 @@ export async function handleProfileReadProjectionQueue(
       const status = await processProfileDocument(
         profileId,
         documents.get(name) || null,
+        firestore,
         db,
         now(),
       );
@@ -359,6 +383,11 @@ function profilesNeedingReconciliation(
     if (state.failureVersion) {
       if (
         !sameVersion(state.failureVersion, sourceVersion) ||
+        !state.failureLoginUidsSourceVersion ||
+        !sameVersion(
+          state.failureVersion,
+          state.failureLoginUidsSourceVersion,
+        ) ||
         !isCurrentProjectionSchema(
           state.failureVersion,
           state.failureSchemaVersion,
@@ -371,6 +400,7 @@ function profilesNeedingReconciliation(
     }
     if (
       !state.profile ||
+      state.profile.isDeleted ||
       !sameVersion(state.profile.sourceVersion, sourceVersion) ||
       !isCurrentProjectionSchema(
         state.profile.sourceVersion,

@@ -80,6 +80,14 @@ type Options = {
   project: string;
 };
 
+export type ProfileVerificationSummary = {
+  digest: string;
+  loginDigest: string;
+  logins: number;
+  profiles: number;
+  versionDigest: string;
+};
+
 function record(value: unknown): JsonRecord | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonRecord)
@@ -114,6 +122,14 @@ export function parseArgs(argv: string[]): Options {
     throw new Error(`profile migration only supports ${FIREBASE_PROJECT}`);
   }
   return { mode, project };
+}
+
+export function assertProductionFirestoreEnvironment(
+  environment: { FIRESTORE_EMULATOR_HOST?: string } = process.env,
+): void {
+  if ((environment.FIRESTORE_EMULATOR_HOST || "").length > 0) {
+    throw new Error("profile migration cannot use the Firestore emulator");
+  }
 }
 
 function updateTime(timestamp: FirestoreTimestamp): string {
@@ -563,13 +579,7 @@ async function queryRows(
   return result[0] || [];
 }
 
-async function d1Digest(client: D1Client): Promise<{
-  digest: string;
-  loginDigest: string;
-  logins: number;
-  profiles: number;
-  versionDigest: string;
-}> {
+async function d1Digest(client: D1Client): Promise<ProfileVerificationSummary> {
   const countRows = await queryRows(client, {
     sql: "SELECT (SELECT COUNT(*) FROM profiles WHERE is_deleted = 0) AS profiles, (SELECT COUNT(*) FROM profile_logins_v2) AS logins, (SELECT COUNT(*) FROM profile_projection_failures) AS failures",
   });
@@ -773,7 +783,9 @@ async function d1Digest(client: D1Client): Promise<{
   };
 }
 
-function sourceSummary(projections: ProfileProjection[]) {
+function sourceSummary(
+  projections: ProfileProjection[],
+): ProfileVerificationSummary {
   return {
     profiles: projections.length,
     logins: projections.reduce(
@@ -800,6 +812,35 @@ function sourceSummary(projections: ProfileProjection[]) {
   };
 }
 
+function sameVerificationSummary(
+  left: ProfileVerificationSummary,
+  right: ProfileVerificationSummary,
+): boolean {
+  return (
+    left.profiles === right.profiles &&
+    left.logins === right.logins &&
+    left.digest === right.digest &&
+    left.loginDigest === right.loginDigest &&
+    left.versionDigest === right.versionDigest
+  );
+}
+
+export async function readBracketedVerification(
+  readSource: () => Promise<ProfileVerificationSummary>,
+  readTarget: () => Promise<ProfileVerificationSummary>,
+): Promise<{
+  source: ProfileVerificationSummary;
+  target: ProfileVerificationSummary;
+}> {
+  const sourceBefore = await readSource();
+  const target = await readTarget();
+  const sourceAfter = await readSource();
+  if (!sameVerificationSummary(sourceBefore, sourceAfter)) {
+    throw new Error("profile source changed during D1 verification");
+  }
+  return { source: sourceAfter, target };
+}
+
 function assertVerificationMatch(
   source: ReturnType<typeof sourceSummary>,
   target: Awaited<ReturnType<typeof d1Digest>>,
@@ -816,6 +857,7 @@ function assertVerificationMatch(
 }
 
 export async function execute(argv = process.argv.slice(2)): Promise<void> {
+  assertProductionFirestoreEnvironment();
   const options = parseArgs(argv);
   if (!adminSupport.initAdmin(["--project", options.project])) {
     throw new Error("failed to initialize Firebase Admin");
@@ -841,15 +883,17 @@ export async function execute(argv = process.argv.slice(2)): Promise<void> {
     let previous = "";
     let target: Awaited<ReturnType<typeof d1Digest>> | null = null;
     for (let pass = 0; pass < 2; pass++) {
-      const source = sourceSummary(await readSourceProfiles());
-      const currentTarget = await d1Digest(client);
-      assertVerificationMatch(source, currentTarget);
-      const fingerprint = JSON.stringify({ source, target: currentTarget });
+      const verification = await readBracketedVerification(
+        async () => sourceSummary(await readSourceProfiles()),
+        async () => d1Digest(client),
+      );
+      assertVerificationMatch(verification.source, verification.target);
+      const fingerprint = JSON.stringify(verification);
       if (pass === 1 && fingerprint !== previous) {
         throw new Error("profile D1 verification was not stable");
       }
       previous = fingerprint;
-      target = currentTarget;
+      target = verification.target;
     }
     if (!target) {
       throw new Error("profile D1 verification failed");

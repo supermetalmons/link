@@ -29,6 +29,11 @@ export type ProfileProjection = {
   sourceVersion: FirestoreUpdateVersion;
 };
 
+export type ProfileProjectionFailureLoginMetadata = {
+  complete: boolean;
+  loginUids: string[];
+};
+
 type ProfileProjectionInput = {
   fields: Record<string, unknown>;
   profileId: string;
@@ -80,6 +85,49 @@ function stringArray(value: unknown): string[] | undefined {
     return undefined;
   }
   return value;
+}
+
+const FAILURE_LOGIN_ID_LIMIT = 1_000;
+const FAILURE_LOGIN_JSON_BYTE_LIMIT = 64 * 1_024;
+
+function isLookupQueryableLoginId(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    !value ||
+    value.trim() !== value ||
+    Array.from(value).length > 128
+  ) {
+    return false;
+  }
+  return !Array.from(value).some((character) => {
+    const code = character.codePointAt(0) || 0;
+    return code <= 0x1f || code === 0x7f;
+  });
+}
+
+export function createProfileProjectionFailureLoginMetadata(
+  fields: Record<string, unknown>,
+): ProfileProjectionFailureLoginMetadata {
+  if (!Object.hasOwn(fields, "logins") || !Array.isArray(fields.logins)) {
+    return { complete: true, loginUids: [] };
+  }
+  const loginUids = new Set<string>();
+  for (const loginUid of fields.logins) {
+    if (isLookupQueryableLoginId(loginUid)) {
+      loginUids.add(loginUid);
+      if (loginUids.size > FAILURE_LOGIN_ID_LIMIT) {
+        return { complete: false, loginUids: [] };
+      }
+    }
+  }
+  const normalized = Array.from(loginUids).sort();
+  if (
+    new TextEncoder().encode(JSON.stringify(normalized)).byteLength >
+    FAILURE_LOGIN_JSON_BYTE_LIMIT
+  ) {
+    return { complete: false, loginUids: [] };
+  }
+  return { complete: true, loginUids: normalized };
 }
 
 function profileProjectionLogins(fields: Record<string, unknown>): string[] {

@@ -3,6 +3,7 @@ import test from "node:test";
 import { createProfileProjection } from "../cloud/workers/api/src/profileProjectionModel.ts";
 import {
   assertMigrationCommandSucceeded,
+  assertProductionFirestoreEnvironment,
   compareUtf8,
   MAX_PROFILE_VERIFY_BATCH_BYTES,
   MAX_PROFILE_VERIFY_BATCH_ROWS,
@@ -11,7 +12,19 @@ import {
   profileLoginMappingDigest,
   profileSourceVersionDigest,
   profileVerificationBatches,
+  readBracketedVerification,
+  type ProfileVerificationSummary,
 } from "./migrate-profile-reads.ts";
+
+const verificationSummary = (
+  digest = "digest-a",
+): ProfileVerificationSummary => ({
+  digest,
+  loginDigest: "login-digest",
+  logins: 2,
+  profiles: 1,
+  versionDigest: "version-digest",
+});
 
 test("bounds full-payload verification batches", () => {
   assert.equal(MAX_PROFILE_VERIFY_BATCH_BYTES, 1_000_000);
@@ -49,6 +62,25 @@ test("parses one exact profile migration mode", () => {
   assert.throws(() => parseArgs(["--unknown"]));
 });
 
+test("rejects Firestore emulator configuration without exposing it", () => {
+  assert.doesNotThrow(() =>
+    assertProductionFirestoreEnvironment({ FIRESTORE_EMULATOR_HOST: "" }),
+  );
+  assert.throws(
+    () =>
+      assertProductionFirestoreEnvironment({
+        FIRESTORE_EMULATOR_HOST: "private-emulator:8080",
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message === "profile migration cannot use the Firestore emulator" &&
+      !error.message.includes("private-emulator"),
+  );
+  assert.throws(() =>
+    assertProductionFirestoreEnvironment({ FIRESTORE_EMULATOR_HOST: " " }),
+  );
+});
+
 test("builds idempotent parameterized profile import statements", async () => {
   const projection = await createProfileProjection({
     profileId: "profile-1",
@@ -75,6 +107,7 @@ test("builds idempotent parameterized profile import statements", async () => {
     1,
   );
   assert.match(sql, /json_each/);
+  assert.doesNotMatch(sql, /\bDELETE FROM profiles\b/);
   assert.doesNotMatch(sql, /private-login|private-user|profile-1/);
   assert.equal(statements.length, 4);
   assert.ok(
@@ -105,11 +138,43 @@ test("parameterized import accepts large valid profile payloads", async () => {
   });
   const statements = profileImportStatements(projection, 1_000);
   assert.ok(
-    statements[0]?.params?.some(
-      (value) => typeof value === "string" && value.length > 200_000,
+    statements.some((statement) =>
+      statement.params?.some(
+        (value) => typeof value === "string" && value.length > 200_000,
+      ),
     ),
   );
   assert.ok(statements.every(({ sql }) => sql.length < 10_000));
+});
+
+test("brackets a target digest with matching source summaries", async () => {
+  const order: string[] = [];
+  const summary = verificationSummary();
+  const result = await readBracketedVerification(
+    async () => {
+      order.push("source");
+      return summary;
+    },
+    async () => {
+      order.push("target");
+      return summary;
+    },
+  );
+  assert.deepEqual(order, ["source", "target", "source"]);
+  assert.deepEqual(result, { source: summary, target: summary });
+});
+
+test("rejects a source change around a target digest", async () => {
+  let sourceRead = 0;
+  await assert.rejects(
+    () =>
+      readBracketedVerification(
+        async () =>
+          verificationSummary(sourceRead++ === 0 ? "before" : "after"),
+        async () => verificationSummary("target"),
+      ),
+    /profile source changed during D1 verification/,
+  );
 });
 
 test("uses SQLite-compatible UTF-8 binary identifier ordering", () => {

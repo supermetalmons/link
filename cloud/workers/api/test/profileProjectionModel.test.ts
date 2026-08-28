@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createProfileProjection,
+  createProfileProjectionFailureLoginMetadata,
   parseFirestoreUpdateTime,
   PROFILE_PROJECTION_SCHEMA_VERSION,
 } from "../src/profileProjectionModel.ts";
@@ -136,5 +137,42 @@ test("rejects malformed login mappings instead of clearing them", async () => {
       }),
       /invalid-profile-logins/,
     );
+  }
+});
+
+test("extracts valid login IDs from malformed projection fields", () => {
+  assert.deepEqual(
+    createProfileProjectionFailureLoginMetadata({
+      logins: ["login-2", 7, "", " login-3", "login-1", null, "login-2"],
+    }),
+    { complete: true, loginUids: ["login-1", "login-2"] },
+  );
+  assert.deepEqual(
+    createProfileProjectionFailureLoginMetadata({ logins: "login-1" }),
+    { complete: true, loginUids: [] },
+  );
+  assert.deepEqual(createProfileProjectionFailureLoginMetadata({}), {
+    complete: true,
+    loginUids: [],
+  });
+});
+
+test("compacts oversized failure metadata without changing active projections", async () => {
+  const tooMany = Array.from({ length: 1_001 }, (_, index) => `login-${index}`);
+  const tooManyBytes = Array.from(
+    { length: 140 },
+    (_, index) => `${String(index).padStart(3, "0")}${"😀".repeat(125)}`,
+  );
+  for (const logins of [tooMany, tooManyBytes]) {
+    assert.deepEqual(createProfileProjectionFailureLoginMetadata({ logins }), {
+      complete: false,
+      loginUids: [],
+    });
+    const projection = await createProfileProjection({
+      profileId: "profile-1",
+      updateTime: "2026-08-27T12:00:00Z",
+      fields: { logins },
+    });
+    assert.equal(projection.logins.length, logins.length);
   }
 });

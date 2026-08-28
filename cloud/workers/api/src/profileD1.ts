@@ -4,6 +4,7 @@ import {
   type LeaderboardReadType,
 } from "@mons/shared/profiles";
 import {
+  createProfileProjectionFailureLoginMetadata,
   PROFILE_PROJECTION_SCHEMA_VERSION,
   profileWithoutTutorialState,
   type FirestoreUpdateVersion,
@@ -25,6 +26,9 @@ type ProfileRow = {
 type ProfileReconciliationRow = {
   is_deleted: number | null;
   is_failure: number;
+  login_uids_complete: number | null;
+  login_uids_source_nanos: number | null;
+  login_uids_source_seconds: number | null;
   profile_id: string;
   projection_schema_source_nanos: number;
   projection_schema_source_seconds: number;
@@ -34,6 +38,8 @@ type ProfileReconciliationRow = {
 };
 
 export type ProfileReconciliationState = {
+  failureLoginUidsComplete: boolean | null;
+  failureLoginUidsSourceVersion: FirestoreUpdateVersion | null;
   failureSchemaSourceVersion: FirestoreUpdateVersion | null;
   failureSchemaVersion: number | null;
   failureVersion: FirestoreUpdateVersion | null;
@@ -109,6 +115,15 @@ const UPSERT_PROFILE_SQL = `
       AND profiles.is_deleted = 0
       AND excluded.projection_schema_version >= profiles.projection_schema_version
     )
+`;
+
+const DELETE_MATCHING_TOMBSTONE_SQL = `
+  DELETE FROM profiles
+  WHERE profile_id = ?
+    AND source_update_seconds = ?
+    AND source_update_nanos = ?
+    AND is_deleted = 1
+    AND projection_schema_version <= ?
 `;
 
 const DELETE_PROFILE_SQL = `
@@ -224,11 +239,14 @@ const UPSERT_PROJECTION_FAILURE_SQL = `
     source_update_nanos,
     recorded_at_ms,
     login_uids_json,
+    login_uids_source_seconds,
+    login_uids_source_nanos,
+    login_uids_complete,
     projection_schema_version,
     projection_schema_source_seconds,
     projection_schema_source_nanos
   )
-  SELECT ?, ?, ?, ?, '[]', ?, ?, ?
+  SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
   WHERE NOT EXISTS (
     SELECT 1
     FROM profiles
@@ -254,7 +272,10 @@ const UPSERT_PROJECTION_FAILURE_SQL = `
     source_update_seconds = excluded.source_update_seconds,
     source_update_nanos = excluded.source_update_nanos,
     recorded_at_ms = excluded.recorded_at_ms,
-    login_uids_json = '[]',
+    login_uids_json = excluded.login_uids_json,
+    login_uids_source_seconds = excluded.login_uids_source_seconds,
+    login_uids_source_nanos = excluded.login_uids_source_nanos,
+    login_uids_complete = excluded.login_uids_complete,
     projection_schema_version = excluded.projection_schema_version,
     projection_schema_source_seconds = excluded.projection_schema_source_seconds,
     projection_schema_source_nanos = excluded.projection_schema_source_nanos
@@ -270,11 +291,23 @@ const UPSERT_PROJECTION_FAILURE_SQL = `
               excluded.projection_schema_version > profile_projection_failures.projection_schema_version
               OR (
                 excluded.projection_schema_version = profile_projection_failures.projection_schema_version
-                AND excluded.projection_schema_source_seconds = excluded.source_update_seconds
-                AND excluded.projection_schema_source_nanos = excluded.source_update_nanos
                 AND (
-                  profile_projection_failures.projection_schema_source_seconds != profile_projection_failures.source_update_seconds
-                  OR profile_projection_failures.projection_schema_source_nanos != profile_projection_failures.source_update_nanos
+                  (
+                    excluded.projection_schema_source_seconds = excluded.source_update_seconds
+                    AND excluded.projection_schema_source_nanos = excluded.source_update_nanos
+                    AND (
+                      profile_projection_failures.projection_schema_source_seconds != profile_projection_failures.source_update_seconds
+                      OR profile_projection_failures.projection_schema_source_nanos != profile_projection_failures.source_update_nanos
+                    )
+                  )
+                  OR (
+                    excluded.login_uids_source_seconds = excluded.source_update_seconds
+                    AND excluded.login_uids_source_nanos = excluded.source_update_nanos
+                    AND (
+                      profile_projection_failures.login_uids_source_seconds != profile_projection_failures.source_update_seconds
+                      OR profile_projection_failures.login_uids_source_nanos != profile_projection_failures.source_update_nanos
+                    )
+                  )
                 )
               )
             )
@@ -377,6 +410,14 @@ export async function commitProfileProjection(
   ] as const;
   const statements: D1PreparedStatement[] = [
     db
+      .prepare(DELETE_MATCHING_TOMBSTONE_SQL)
+      .bind(
+        projection.profile.id,
+        projection.sourceVersion.seconds,
+        projection.sourceVersion.nanos,
+        projection.schemaVersion,
+      ),
+    db
       .prepare(UPSERT_PROFILE_SQL)
       .bind(
         projection.profile.id,
@@ -436,6 +477,8 @@ export async function commitProfileProjectionFailure(
   profileId: string,
   sourceVersion: FirestoreUpdateVersion,
   recordedAtMs: number,
+  loginUids: readonly unknown[] = [],
+  loginUidsComplete = true,
 ): Promise<void> {
   if (
     !profileId ||
@@ -445,10 +488,18 @@ export async function commitProfileProjectionFailure(
     sourceVersion.nanos < 0 ||
     sourceVersion.nanos >= 1_000_000_000 ||
     !Number.isSafeInteger(recordedAtMs) ||
-    recordedAtMs <= 0
+    recordedAtMs <= 0 ||
+    typeof loginUidsComplete !== "boolean"
   ) {
     throw new TypeError("invalid-profile-projection-failure");
   }
+  const boundedMetadata = createProfileProjectionFailureLoginMetadata({
+    logins: loginUids,
+  });
+  const loginMetadata =
+    loginUidsComplete && boundedMetadata.complete
+      ? boundedMetadata
+      : { complete: false, loginUids: [] };
   await db
     .prepare(UPSERT_PROJECTION_FAILURE_SQL)
     .bind(
@@ -456,6 +507,10 @@ export async function commitProfileProjectionFailure(
       sourceVersion.seconds,
       sourceVersion.nanos,
       recordedAtMs,
+      JSON.stringify(loginMetadata.loginUids),
+      sourceVersion.seconds,
+      sourceVersion.nanos,
+      Number(loginMetadata.complete),
       PROFILE_PROJECTION_SCHEMA_VERSION,
       sourceVersion.seconds,
       sourceVersion.nanos,
@@ -554,6 +609,9 @@ export async function readProfileReconciliationState(
        projection_schema_source_seconds,
        projection_schema_source_nanos,
        projection_schema_version,
+       NULL AS login_uids_source_seconds,
+       NULL AS login_uids_source_nanos,
+       NULL AS login_uids_complete,
        is_deleted,
        0 AS is_failure
      FROM profiles
@@ -566,6 +624,9 @@ export async function readProfileReconciliationState(
        projection_schema_source_seconds,
        projection_schema_source_nanos,
        projection_schema_version,
+       login_uids_source_seconds,
+       login_uids_source_nanos,
+       login_uids_complete,
        NULL AS is_deleted,
        1 AS is_failure
      FROM profile_projection_failures
@@ -591,11 +652,24 @@ export async function readProfileReconciliationState(
       !Number.isSafeInteger(row.projection_schema_version) ||
       row.projection_schema_version <= 0 ||
       (row.is_failure !== 0 && row.is_failure !== 1) ||
-      (row.is_failure === 0 && row.is_deleted !== 0 && row.is_deleted !== 1)
+      (row.is_failure === 0 &&
+        ((row.is_deleted !== 0 && row.is_deleted !== 1) ||
+          row.login_uids_source_seconds !== null ||
+          row.login_uids_source_nanos !== null ||
+          row.login_uids_complete !== null)) ||
+      (row.is_failure === 1 &&
+        (row.is_deleted !== null ||
+          !Number.isSafeInteger(row.login_uids_source_seconds) ||
+          !Number.isSafeInteger(row.login_uids_source_nanos) ||
+          Number(row.login_uids_source_nanos) < 0 ||
+          Number(row.login_uids_source_nanos) >= 1_000_000_000 ||
+          (row.login_uids_complete !== 0 && row.login_uids_complete !== 1)))
     ) {
       throw new ProfileRepositoryFailure();
     }
     const state = states.get(row.profile_id) || {
+      failureLoginUidsComplete: null,
+      failureLoginUidsSourceVersion: null,
       failureSchemaSourceVersion: null,
       failureSchemaVersion: null,
       failureVersion: null,
@@ -610,6 +684,11 @@ export async function readProfileReconciliationState(
       nanos: row.projection_schema_source_nanos,
     };
     if (row.is_failure === 1) {
+      state.failureLoginUidsComplete = row.login_uids_complete === 1;
+      state.failureLoginUidsSourceVersion = {
+        seconds: Number(row.login_uids_source_seconds),
+        nanos: Number(row.login_uids_source_nanos),
+      };
       state.failureVersion = sourceVersion;
       state.failureSchemaVersion = row.projection_schema_version;
       state.failureSchemaSourceVersion = schemaSourceVersion;
@@ -661,6 +740,47 @@ export function createD1ProfileRepository(db: D1Database): ProfileRepository {
       throw new ProfileRepositoryFailure();
     }
   };
+  const assertProfileHealthy = async (profileId: string): Promise<void> => {
+    if (
+      await db
+        .prepare(
+          "SELECT 1 FROM profile_projection_failures WHERE profile_id = ? LIMIT 1",
+        )
+        .bind(profileId)
+        .first()
+    ) {
+      throw new ProfileRepositoryFailure();
+    }
+  };
+  const assertLoginHealthy = async (loginId: string): Promise<void> => {
+    if (
+      await db
+        .prepare(
+          `SELECT 1
+           FROM profile_projection_failures AS failures
+           WHERE failures.login_uids_source_seconds != failures.source_update_seconds
+           OR failures.login_uids_source_nanos != failures.source_update_nanos
+           OR failures.login_uids_complete != 1
+           OR json_type(failures.login_uids_json) != 'array'
+           OR EXISTS (
+             SELECT 1
+             FROM json_each(failures.login_uids_json) AS login_uids
+             WHERE login_uids.type = 'text' AND login_uids.value = ?
+           )
+           OR EXISTS (
+             SELECT 1
+             FROM profile_logins_v2
+             WHERE profile_logins_v2.login_uid = ?
+               AND profile_logins_v2.profile_id = failures.profile_id
+           )
+           LIMIT 1`,
+        )
+        .bind(loginId, loginId)
+        .first()
+    ) {
+      throw new ProfileRepositoryFailure();
+    }
+  };
   const getRow = (profileId: string) =>
     db
       .prepare(
@@ -680,6 +800,7 @@ export function createD1ProfileRepository(db: D1Database): ProfileRepository {
         return null;
       }
       visited.add(currentProfileId);
+      await assertProfileHealthy(currentProfileId);
       const row = await getRow(currentProfileId);
       if (!row) {
         return null;
@@ -694,12 +815,11 @@ export function createD1ProfileRepository(db: D1Database): ProfileRepository {
 
   return {
     async getProfileById(profileId) {
-      await assertAllHealthy();
       return getById(profileId);
     },
 
     async getProfileByLoginId(loginId) {
-      await assertAllHealthy();
+      await assertLoginHealthy(loginId);
       const row = await db
         .prepare(
           `SELECT

@@ -253,7 +253,7 @@ describe("profile D1 read model", () => {
     ).toBeNull();
   });
 
-  it("prevents equal-version resurrection and permits a newer recreation", async () => {
+  it("revives an exact equal-version tombstone and permits newer writes", async () => {
     const sourceVersion = { seconds: SOURCE_SECONDS, nanos: 100 };
     await commitProfileProjection(
       testEnv.PROFILE_DB,
@@ -277,9 +277,11 @@ describe("profile D1 read model", () => {
     );
     const repository = createD1ProfileRepository(testEnv.PROFILE_DB);
     expect(
-      await repository.getProfileById("profile-deleted", "token"),
-    ).toBeNull();
-    expect(await repository.getProfileByLoginId("equal", "token")).toBeNull();
+      (await repository.getProfileById("profile-deleted", "token"))?.username,
+    ).toBe("equal");
+    expect((await repository.getProfileByLoginId("equal", "token"))?.id).toBe(
+      "profile-deleted",
+    );
 
     await commitProfileProjection(
       testEnv.PROFILE_DB,
@@ -296,6 +298,44 @@ describe("profile D1 read model", () => {
     expect((await repository.getProfileByLoginId("new", "token"))?.id).toBe(
       "profile-deleted",
     );
+  });
+
+  it("does not revive an equal-version future-schema tombstone", async () => {
+    const sourceVersion = { seconds: SOURCE_SECONDS, nanos: 100 };
+    await commitProfileProjection(
+      testEnv.PROFILE_DB,
+      await projection("profile-future", fields(), 100),
+      1_000,
+    );
+    await commitProfileDeletion(
+      testEnv.PROFILE_DB,
+      "profile-future",
+      sourceVersion,
+      2_000,
+    );
+    await testEnv.PROFILE_DB.prepare(
+      "UPDATE profiles SET projection_schema_version = ? WHERE profile_id = ?",
+    )
+      .bind(PROFILE_PROJECTION_SCHEMA_VERSION + 1, "profile-future")
+      .run();
+
+    await commitProfileProjection(
+      testEnv.PROFILE_DB,
+      await projection("profile-future", fields({ username: "current" }), 100),
+      3_000,
+    );
+
+    expect(
+      await createD1ProfileRepository(testEnv.PROFILE_DB).getProfileById(
+        "profile-future",
+        "token",
+      ),
+    ).toBeNull();
+    expect(
+      (await readProfileReconciliationState(testEnv.PROFILE_DB)).get(
+        "profile-future",
+      )?.profile?.schemaVersion,
+    ).toBe(PROFILE_PROJECTION_SCHEMA_VERSION + 1);
   });
 
   it("applies deletion only to the observed profile version", async () => {
@@ -321,10 +361,14 @@ describe("profile D1 read model", () => {
     ).toBe("profile-current");
   });
 
-  it("uses one global failure gate and fences stale failures", async () => {
+  it("scopes failure fences by dependency and keeps leaderboards global", async () => {
     await commitProfileProjection(
       testEnv.PROFILE_DB,
-      await projection("profile-invalid", fields(), 100),
+      await projection(
+        "profile-invalid",
+        fields({ logins: ["login-invalid-old"] }),
+        100,
+      ),
       1_000,
     );
     await commitProfileProjection(
@@ -336,11 +380,21 @@ describe("profile D1 read model", () => {
       ),
       1_000,
     );
+    await commitProfileProjection(
+      testEnv.PROFILE_DB,
+      await projection(
+        "profile-source",
+        fields({ logins: [], mergedIntoProfileId: "profile-invalid" }),
+        100,
+      ),
+      1_000,
+    );
     await commitProfileProjectionFailure(
       testEnv.PROFILE_DB,
       "profile-invalid",
       { seconds: SOURCE_SECONDS, nanos: 200 },
       2_000,
+      ["login-invalid-new", 7, "", "login-invalid-new"],
     );
     await commitProfileProjectionFailure(
       testEnv.PROFILE_DB,
@@ -349,15 +403,53 @@ describe("profile D1 read model", () => {
       2_000,
     );
     const repository = createD1ProfileRepository(testEnv.PROFILE_DB);
+    expect(
+      (await repository.getProfileById("profile-healthy", "token"))?.username,
+    ).toBe("healthy");
+    expect(
+      (await repository.getProfileByLoginId("login-healthy", "token"))?.id,
+    ).toBe("profile-healthy");
     await expect(
-      repository.getProfileById("profile-healthy", "token"),
+      repository.getProfileById("profile-invalid", "token"),
     ).rejects.toThrow("profile-repository-unavailable");
     await expect(
-      repository.getProfileByLoginId("login-healthy", "token"),
+      repository.getProfileById("profile-source", "token"),
     ).rejects.toThrow("profile-repository-unavailable");
+    await expect(
+      repository.getProfileByLoginId("login-invalid-old", "token"),
+    ).rejects.toThrow("profile-repository-unavailable");
+    await expect(
+      repository.getProfileByLoginId("login-invalid-new", "token"),
+    ).rejects.toThrow("profile-repository-unavailable");
+    expect(
+      await repository.getProfileByLoginId("login-unrelated", "token"),
+    ).toBeNull();
     await expect(repository.readLeaderboard("rating", "token")).rejects.toThrow(
       "profile-repository-unavailable",
     );
+    expect(
+      await testEnv.PROFILE_DB.prepare(
+        `SELECT
+           login_uids_json,
+           login_uids_source_seconds,
+           login_uids_source_nanos,
+           login_uids_complete
+         FROM profile_projection_failures
+         WHERE profile_id = ?`,
+      )
+        .bind("profile-invalid")
+        .first<{
+          login_uids_complete: number;
+          login_uids_json: string;
+          login_uids_source_nanos: number;
+          login_uids_source_seconds: number;
+        }>(),
+    ).toEqual({
+      login_uids_complete: 1,
+      login_uids_json: '["login-invalid-new"]',
+      login_uids_source_nanos: 200,
+      login_uids_source_seconds: SOURCE_SECONDS,
+    });
 
     await commitProfileProjection(
       testEnv.PROFILE_DB,
@@ -369,10 +461,179 @@ describe("profile D1 read model", () => {
       3_000,
     );
     expect(
-      (await repository.getProfileById("profile-healthy", "token"))?.username,
-    ).toBe("healthy");
+      (await repository.getProfileById("profile-source", "token"))?.username,
+    ).toBe("repaired");
+    await expect(
+      repository.readLeaderboard("rating", "token"),
+    ).resolves.toBeDefined();
     const states = await readProfileReconciliationState(testEnv.PROFILE_DB);
     expect(states.get("profile-healthy")?.failureVersion).toBeNull();
+  });
+
+  it("allows unrelated logins through complete empty failure metadata", async () => {
+    await commitProfileProjectionFailure(
+      testEnv.PROFILE_DB,
+      "profile-failure-only",
+      { seconds: SOURCE_SECONDS, nanos: 100 },
+      1_000,
+    );
+
+    expect(
+      await testEnv.PROFILE_DB.prepare(
+        `SELECT
+           login_uids_json,
+           login_uids_source_seconds,
+           login_uids_source_nanos,
+           login_uids_complete
+         FROM profile_projection_failures
+         WHERE profile_id = ?`,
+      )
+        .bind("profile-failure-only")
+        .first<{
+          login_uids_complete: number;
+          login_uids_json: string;
+          login_uids_source_nanos: number;
+          login_uids_source_seconds: number;
+        }>(),
+    ).toEqual({
+      login_uids_complete: 1,
+      login_uids_json: "[]",
+      login_uids_source_nanos: 100,
+      login_uids_source_seconds: SOURCE_SECONDS,
+    });
+    expect(
+      await createD1ProfileRepository(testEnv.PROFILE_DB).getProfileByLoginId(
+        "login-unrelated",
+        "token",
+      ),
+    ).toBeNull();
+  });
+
+  it("defaults legacy metadata stale and upgrades it at the same version", async () => {
+    const sourceVersion = { seconds: SOURCE_SECONDS, nanos: 100 };
+    await testEnv.PROFILE_DB.prepare(
+      `INSERT INTO profile_projection_failures (
+         profile_id,
+         source_update_seconds,
+         source_update_nanos,
+         recorded_at_ms,
+         login_uids_json,
+         projection_schema_version,
+         projection_schema_source_seconds,
+         projection_schema_source_nanos
+       ) VALUES (?, ?, ?, ?, '[]', ?, ?, ?)`,
+    )
+      .bind(
+        "profile-legacy-failure",
+        sourceVersion.seconds,
+        sourceVersion.nanos,
+        1_000,
+        PROFILE_PROJECTION_SCHEMA_VERSION,
+        sourceVersion.seconds,
+        sourceVersion.nanos,
+      )
+      .run();
+    expect(
+      await testEnv.PROFILE_DB.prepare(
+        `SELECT
+           login_uids_source_seconds,
+           login_uids_source_nanos,
+           login_uids_complete
+         FROM profile_projection_failures
+         WHERE profile_id = ?`,
+      )
+        .bind("profile-legacy-failure")
+        .first(),
+    ).toEqual({
+      login_uids_complete: 0,
+      login_uids_source_nanos: 0,
+      login_uids_source_seconds: -1,
+    });
+    await expect(
+      testEnv.PROFILE_DB.prepare(
+        "UPDATE profile_projection_failures SET login_uids_complete = 2 WHERE profile_id = ?",
+      )
+        .bind("profile-legacy-failure")
+        .run(),
+    ).rejects.toThrow();
+    await expect(
+      testEnv.PROFILE_DB.prepare(
+        "UPDATE profile_projection_failures SET login_uids_source_nanos = -1 WHERE profile_id = ?",
+      )
+        .bind("profile-legacy-failure")
+        .run(),
+    ).rejects.toThrow();
+    const repository = createD1ProfileRepository(testEnv.PROFILE_DB);
+    await expect(
+      repository.getProfileByLoginId("login-unrelated", "token"),
+    ).rejects.toThrow("profile-repository-unavailable");
+
+    await commitProfileProjectionFailure(
+      testEnv.PROFILE_DB,
+      "profile-legacy-failure",
+      sourceVersion,
+      2_000,
+      ["login-current"],
+    );
+    expect(
+      await testEnv.PROFILE_DB.prepare(
+        `SELECT
+           login_uids_json,
+           login_uids_source_seconds,
+           login_uids_source_nanos,
+           login_uids_complete
+         FROM profile_projection_failures
+         WHERE profile_id = ?`,
+      )
+        .bind("profile-legacy-failure")
+        .first(),
+    ).toEqual({
+      login_uids_complete: 1,
+      login_uids_json: '["login-current"]',
+      login_uids_source_nanos: sourceVersion.nanos,
+      login_uids_source_seconds: sourceVersion.seconds,
+    });
+    expect(
+      await repository.getProfileByLoginId("login-unrelated", "token"),
+    ).toBeNull();
+    await expect(
+      repository.getProfileByLoginId("login-current", "token"),
+    ).rejects.toThrow("profile-repository-unavailable");
+  });
+
+  it("stores oversized failure metadata as a compact global marker", async () => {
+    const sourceVersion = { seconds: SOURCE_SECONDS, nanos: 100 };
+    await commitProfileProjectionFailure(
+      testEnv.PROFILE_DB,
+      "profile-oversized-failure",
+      sourceVersion,
+      1_000,
+      Array.from({ length: 1_001 }, (_, index) => `login-${index}`),
+    );
+    expect(
+      await testEnv.PROFILE_DB.prepare(
+        `SELECT
+           login_uids_json,
+           login_uids_source_seconds,
+           login_uids_source_nanos,
+           login_uids_complete
+         FROM profile_projection_failures
+         WHERE profile_id = ?`,
+      )
+        .bind("profile-oversized-failure")
+        .first(),
+    ).toEqual({
+      login_uids_complete: 0,
+      login_uids_json: "[]",
+      login_uids_source_nanos: sourceVersion.nanos,
+      login_uids_source_seconds: sourceVersion.seconds,
+    });
+    await expect(
+      createD1ProfileRepository(testEnv.PROFILE_DB).getProfileByLoginId(
+        "login-unrelated",
+        "token",
+      ),
+    ).rejects.toThrow("profile-repository-unavailable");
   });
 
   it("clears a failure fence after confirmed deletion", async () => {
@@ -420,6 +681,7 @@ describe("profile D1 read model", () => {
     );
     expect(state?.failureVersion?.nanos).toBe(200);
     expect(state?.failureSchemaSourceVersion?.nanos).toBe(100);
+    expect(state?.failureLoginUidsSourceVersion?.nanos).toBe(100);
 
     await commitProfileProjectionFailure(
       testEnv.PROFILE_DB,
@@ -432,6 +694,7 @@ describe("profile D1 read model", () => {
     );
     expect(state?.failureSchemaVersion).toBe(PROFILE_PROJECTION_SCHEMA_VERSION);
     expect(state?.failureSchemaSourceVersion).toEqual(state?.failureVersion);
+    expect(state?.failureLoginUidsSourceVersion).toEqual(state?.failureVersion);
   });
 
   it("retains a failure fence when deletion loses its CAS race", async () => {

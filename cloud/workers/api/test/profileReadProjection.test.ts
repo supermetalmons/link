@@ -33,6 +33,9 @@ const D1_META = {
 type ReconciliationRow = {
   is_deleted: number | null;
   is_failure: number;
+  login_uids_complete: number | null;
+  login_uids_source_nanos: number | null;
+  login_uids_source_seconds: number | null;
   profile_id: string;
   projection_schema_source_nanos: number;
   projection_schema_source_seconds: number;
@@ -96,18 +99,26 @@ function firestoreClient({
 function d1Database(
   rows: unknown[] = [],
   options: {
+    all?: () => Promise<void>;
     batch?: () => Promise<void>;
+    onBind?: (sql: string, values: unknown[]) => void;
     run?: () => Promise<void>;
   } = {},
 ): D1Database {
-  const prepare = (_sql: string): D1PreparedStatement => {
+  const prepare = (sql: string): D1PreparedStatement => {
     const statement: D1PreparedStatement = {
-      all: async <T>() => ({
-        success: true,
-        results: rows as T[],
-        meta: D1_META,
-      }),
-      bind: () => statement,
+      all: async <T>() => {
+        await options.all?.();
+        return {
+          success: true,
+          results: rows as T[],
+          meta: D1_META,
+        };
+      },
+      bind: (...values) => {
+        options.onBind?.(sql, values);
+        return statement;
+      },
       first: async () => null,
       raw: d1Raw,
       run: async <T>() => {
@@ -235,6 +246,15 @@ test("Queue consumer batch-reads and deduplicates current profiles", async () =>
 test("missing profiles use current D1 state for a CAS tombstone", async () => {
   const profileName = authDocumentName("users", "profile-1");
   let deletions = 0;
+  let reads = 0;
+  const firestore = firestoreClient({
+    documents: new Map([[profileName, null]]),
+  });
+  const batchGet = firestore.batchGet;
+  firestore.batchGet = async (names) => {
+    reads++;
+    return batchGet(names);
+  };
   const status = await processProfileReadProjectionTask(
     { profileId: "profile-1" },
     TELEGRAM_TEST_ENV as Env,
@@ -247,6 +267,9 @@ test("missing profiles use current D1 state for a CAS tombstone", async () => {
             source_update_nanos: 200,
             is_deleted: 0,
             is_failure: 0,
+            login_uids_complete: null,
+            login_uids_source_nanos: null,
+            login_uids_source_seconds: null,
             projection_schema_source_seconds: 1_787_832_000,
             projection_schema_source_nanos: 200,
             projection_schema_version: PROFILE_PROJECTION_SCHEMA_VERSION,
@@ -258,22 +281,82 @@ test("missing profiles use current D1 state for a CAS tombstone", async () => {
           },
         },
       ),
-      firestore: firestoreClient({ documents: new Map([[profileName, null]]) }),
+      firestore,
       now: () => 1_000,
     },
   );
   assert.equal(status, "deleted");
   assert.equal(deletions, 1);
+  assert.equal(reads, 2);
+});
+
+test("rechecks Firestore after capturing D1 state before deletion", async () => {
+  const profile = profileDocument(
+    "profile-1",
+    "2026-08-27T12:00:00.000000200Z",
+  );
+  const events: string[] = [];
+  let firestoreReads = 0;
+  const firestore = firestoreClient();
+  firestore.batchGet = async () => {
+    firestoreReads++;
+    events.push(`firestore-${firestoreReads}`);
+    return new Map([[profile.name, firestoreReads === 1 ? null : profile]]);
+  };
+  const status = await processProfileReadProjectionTask(
+    { profileId: profile.id },
+    TELEGRAM_TEST_ENV as Env,
+    {
+      db: d1Database(
+        [
+          {
+            profile_id: profile.id,
+            source_update_seconds: 1_787_832_000,
+            source_update_nanos: 100,
+            is_deleted: 0,
+            is_failure: 0,
+            login_uids_complete: null,
+            login_uids_source_nanos: null,
+            login_uids_source_seconds: null,
+            projection_schema_source_seconds: 1_787_832_000,
+            projection_schema_source_nanos: 100,
+            projection_schema_version: PROFILE_PROJECTION_SCHEMA_VERSION,
+          },
+        ],
+        {
+          all: async () => {
+            events.push("d1");
+          },
+          batch: async () => {
+            events.push("projection");
+          },
+        },
+      ),
+      firestore,
+      now: () => 1_000,
+    },
+  );
+
+  assert.equal(status, "projected");
+  assert.deepEqual(events, ["firestore-1", "d1", "firestore-2", "projection"]);
 });
 
 test("invalid projections write a failure fence and are acknowledged", async () => {
   const profile = profileDocument("profile-1", "2026-08-27T12:00:00Z", {
-    logins: ["login-1", 7],
+    logins: ["login-2", 7, "", "login-1", "login-2"],
   });
   let failureWrites = 0;
+  let failureLoginIds = "";
+  let failureLoginMetadata: unknown[] = [];
   const queued = message({ profileId: "profile-1" });
   await handleProfileReadProjectionMessage(queued, TELEGRAM_TEST_ENV as Env, {
     db: d1Database([], {
+      onBind: (sql, values) => {
+        if (sql.includes("INSERT INTO profile_projection_failures")) {
+          failureLoginIds = String(values[4]);
+          failureLoginMetadata = values.slice(5, 8);
+        }
+      },
       run: async () => {
         failureWrites++;
       },
@@ -285,6 +368,36 @@ test("invalid projections write a failure fence and are acknowledged", async () 
     now: () => 1_000,
   });
   assert.equal(failureWrites, 1);
+  assert.equal(failureLoginIds, '["login-1","login-2"]');
+  assert.deepEqual(failureLoginMetadata, [1_787_832_000, 0, 1]);
+  assert.equal(queued.acknowledgements, 1);
+});
+
+test("oversized failure logins write a compact global marker", async () => {
+  const profile = profileDocument("profile-1", "2026-08-27T12:00:00Z", {
+    logins: [
+      ...Array.from({ length: 1_001 }, (_, index) => `login-${index}`),
+      7,
+    ],
+  });
+  let failureLoginMetadata: unknown[] = [];
+  const queued = message({ profileId: "profile-1" });
+  await handleProfileReadProjectionMessage(queued, TELEGRAM_TEST_ENV as Env, {
+    db: d1Database([], {
+      onBind: (sql, values) => {
+        if (sql.includes("INSERT INTO profile_projection_failures")) {
+          failureLoginMetadata = values.slice(4, 8);
+        }
+      },
+    }),
+    firestore: firestoreClient({
+      documents: new Map([[profile.name, profile]]),
+    }),
+    logger: { info: () => undefined, error: () => undefined },
+    now: () => 1_000,
+  });
+
+  assert.deepEqual(failureLoginMetadata, ["[]", 1_787_832_000, 0, 0]);
   assert.equal(queued.acknowledgements, 1);
 });
 
@@ -323,9 +436,15 @@ test("reconciliation compares profiles, failures, and deletion candidates", asyn
         "failure-schema-source-stale",
         "2026-08-27T12:00:00.000000800Z",
       ),
+      profileDocument("failure-login-stale", "2026-08-27T12:00:00.000000900Z"),
+      profileDocument(
+        "failure-login-oversized",
+        "2026-08-27T12:00:00.000000901Z",
+      ),
       profileDocument("schema-old", "2026-08-27T12:00:00.000000500Z"),
       profileDocument("schema-source-stale", "2026-08-27T12:00:00.000000600Z"),
       profileDocument("stale", "2026-08-27T12:00:00.000000200Z"),
+      profileDocument("tombstone", "2026-08-27T12:00:00.000000100Z"),
     ],
     nextPageToken: "",
   };
@@ -348,6 +467,9 @@ test("reconciliation compares profiles, failures, and deletion candidates", asyn
     projection_schema_version: PROFILE_PROJECTION_SCHEMA_VERSION,
     is_deleted: isDeleted === null ? null : Number(isDeleted),
     is_failure: Number(isFailure),
+    login_uids_complete: Number(isFailure) === 1 ? 1 : null,
+    login_uids_source_nanos: Number(isFailure) === 1 ? Number(nanos) : null,
+    login_uids_source_seconds: Number(isFailure) === 1 ? 1_787_832_000 : null,
   }));
   rows.push(
     {
@@ -359,6 +481,9 @@ test("reconciliation compares profiles, failures, and deletion candidates", asyn
       projection_schema_version: 1,
       is_deleted: null,
       is_failure: 1,
+      login_uids_complete: 1,
+      login_uids_source_nanos: 700,
+      login_uids_source_seconds: 1_787_832_000,
     },
     {
       profile_id: "failure-schema-source-stale",
@@ -369,6 +494,35 @@ test("reconciliation compares profiles, failures, and deletion candidates", asyn
       projection_schema_version: PROFILE_PROJECTION_SCHEMA_VERSION,
       is_deleted: null,
       is_failure: 1,
+      login_uids_complete: 1,
+      login_uids_source_nanos: 800,
+      login_uids_source_seconds: 1_787_832_000,
+    },
+    {
+      profile_id: "failure-login-stale",
+      source_update_seconds: 1_787_832_000,
+      source_update_nanos: 900,
+      projection_schema_source_seconds: 1_787_832_000,
+      projection_schema_source_nanos: 900,
+      projection_schema_version: PROFILE_PROJECTION_SCHEMA_VERSION,
+      is_deleted: null,
+      is_failure: 1,
+      login_uids_complete: 0,
+      login_uids_source_nanos: 0,
+      login_uids_source_seconds: -1,
+    },
+    {
+      profile_id: "failure-login-oversized",
+      source_update_seconds: 1_787_832_000,
+      source_update_nanos: 901,
+      projection_schema_source_seconds: 1_787_832_000,
+      projection_schema_source_nanos: 901,
+      projection_schema_version: PROFILE_PROJECTION_SCHEMA_VERSION,
+      is_deleted: null,
+      is_failure: 1,
+      login_uids_complete: 0,
+      login_uids_source_nanos: 901,
+      login_uids_source_seconds: 1_787_832_000,
     },
     {
       profile_id: "schema-old",
@@ -379,6 +533,9 @@ test("reconciliation compares profiles, failures, and deletion candidates", asyn
       projection_schema_version: 1,
       is_deleted: 0,
       is_failure: 0,
+      login_uids_complete: null,
+      login_uids_source_nanos: null,
+      login_uids_source_seconds: null,
     },
     {
       profile_id: "schema-source-stale",
@@ -389,6 +546,9 @@ test("reconciliation compares profiles, failures, and deletion candidates", asyn
       projection_schema_version: PROFILE_PROJECTION_SCHEMA_VERSION,
       is_deleted: 0,
       is_failure: 0,
+      login_uids_complete: null,
+      login_uids_source_nanos: null,
+      login_uids_source_seconds: null,
     },
   );
   const queued: unknown[] = [];
@@ -408,9 +568,10 @@ test("reconciliation compares profiles, failures, and deletion candidates", asyn
     firestore,
     logger: { info: () => undefined, error: () => undefined },
   });
-  assert.equal(count, 9);
+  assert.equal(count, 11);
   assert.deepEqual(queued, [
     { profileId: "deleted" },
+    { profileId: "failure-login-stale" },
     { profileId: "failure-only" },
     { profileId: "failure-schema-old" },
     { profileId: "failure-schema-source-stale" },
@@ -419,6 +580,7 @@ test("reconciliation compares profiles, failures, and deletion candidates", asyn
     { profileId: "schema-old" },
     { profileId: "schema-source-stale" },
     { profileId: "stale" },
+    { profileId: "tombstone" },
   ]);
   assert.deepEqual(listCalls, [
     ["", "users", "", ["nonce"]],
@@ -436,6 +598,9 @@ test("reconciliation sends at most 100 profile IDs per Queue batch", async () =>
     projection_schema_version: PROFILE_PROJECTION_SCHEMA_VERSION,
     is_deleted: 0,
     is_failure: 0,
+    login_uids_complete: null,
+    login_uids_source_nanos: null,
+    login_uids_source_seconds: null,
   }));
   const batchSizes: number[] = [];
   const env = queueEnv(async (messages) => {
@@ -465,6 +630,9 @@ test("reconciliation logs and propagates Queue failures", async () => {
           source_update_nanos: 100,
           is_deleted: 0,
           is_failure: 0,
+          login_uids_complete: null,
+          login_uids_source_nanos: null,
+          login_uids_source_seconds: null,
           projection_schema_source_seconds: 1_787_832_000,
           projection_schema_source_nanos: 100,
           projection_schema_version: PROFILE_PROJECTION_SCHEMA_VERSION,
