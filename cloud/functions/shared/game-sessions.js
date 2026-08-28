@@ -58,6 +58,12 @@ const isJoinInviteRequest = (value) =>
   isBaseRequest(value, ["operationId", "inviteId", "emojiId", "aura"]) &&
   isPresentation(value);
 
+const isResolveInviteRoleRequest = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, ["inviteId"]) &&
+  typeof value.inviteId === "string" &&
+  isSafeFirebaseKey(value.inviteId);
+
 const isProposeRematchRequest = isJoinInviteRequest;
 
 const isEndRematchRequest = (value) =>
@@ -125,6 +131,34 @@ const isJoinInviteResponse = (value) =>
     ? value.guestId !== null && value.matchId === value.inviteId
     : value.matchId === null);
 
+const isResolveInviteRoleResponse = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, [
+    "ok",
+    "inviteId",
+    "hostId",
+    "guestId",
+    "actorUid",
+    "role",
+  ]) &&
+  value.ok === true &&
+  typeof value.inviteId === "string" &&
+  isSafeFirebaseKey(value.inviteId) &&
+  typeof value.hostId === "string" &&
+  isSafeFirebaseKey(value.hostId) &&
+  (value.guestId === null ||
+    (typeof value.guestId === "string" && isSafeFirebaseKey(value.guestId))) &&
+  value.guestId !== value.hostId &&
+  (value.actorUid === null ||
+    (typeof value.actorUid === "string" &&
+      isSafeFirebaseKey(value.actorUid))) &&
+  (value.role === "host" || value.role === "guest" || value.role === "watch") &&
+  ((value.role === "host" && value.actorUid === value.hostId) ||
+    (value.role === "guest" &&
+      value.guestId !== null &&
+      value.actorUid === value.guestId) ||
+    (value.role === "watch" && value.actorUid === null));
+
 const isProposeRematchResponse = (value) =>
   isRecord(value) &&
   hasExactKeys(value, [
@@ -191,6 +225,8 @@ module.exports = {
   isGameSessionMatch: isMatchRecord,
   isJoinInviteRequest,
   isJoinInviteResponse,
+  isResolveInviteRoleRequest,
+  isResolveInviteRoleResponse,
   isProposeRematchRequest,
   isProposeRematchResponse,
 };

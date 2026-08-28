@@ -690,6 +690,108 @@ test("routes strict authenticated structural game-session mutations", async () =
   assert.equal(malformed.status, 400);
 });
 
+test("routes authoritative invite role reads without mutation rate limiting", async () => {
+  let rateLimitCalls = 0;
+  const roleEnv = {
+    ...env,
+    AUTH_RATE_LIMITER: {
+      limit: async () => {
+        rateLimitCalls += 1;
+        return { success: true };
+      },
+    },
+  } as Env;
+  const response = await handleGameplayRoute(
+    request("/invites/role/read", { body: { inviteId: "abcdefghijk" } }),
+    roleEnv,
+    context(),
+    {
+      repository: repository({
+        getRtdbPath: async (path) => {
+          if (path === "invites/abcdefghijk") {
+            return { hostId: "host-login", guestId: "guest-login" };
+          }
+          if (path === "players/firebase-uid/profile") return "profile-1";
+          if (path === "players/host-login/profile") return null;
+          if (path === "players/guest-login/profile") return "profile-1";
+          return null;
+        },
+      }),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    inviteId: "abcdefghijk",
+    hostId: "host-login",
+    guestId: "guest-login",
+    actorUid: "guest-login",
+    role: "guest",
+  });
+  assert.equal(rateLimitCalls, 0);
+
+  const invalid = await handleGameplayRoute(
+    request("/invites/role/read", {
+      body: { inviteId: "abcdefghijk", extra: true },
+    }),
+    env,
+    context(),
+    { verifyIdentity: async () => identity },
+  );
+  assert.equal(invalid.status, 400);
+
+  const missing = await handleGameplayRoute(
+    request("/invites/role/read", { body: { inviteId: "abcdefghijk" } }),
+    env,
+    context(),
+    {
+      repository: repository(),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(missing.status, 404);
+
+  const protectedInvite = await handleGameplayRoute(
+    request("/invites/role/read", { body: { inviteId: "abcdefghijk" } }),
+    env,
+    context(),
+    {
+      repository: repository({
+        getRtdbPath: async (path) => {
+          if (path === "invites/abcdefghijk") {
+            return {
+              hostId: "host-login",
+              guestId: null,
+              password: "secret",
+            };
+          }
+          if (path === "players/firebase-uid/profile") return "profile-1";
+          if (path === "players/host-login/profile") return "profile-host";
+          return null;
+        },
+      }),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(protectedInvite.status, 403);
+
+  const unavailable = await handleGameplayRoute(
+    request("/invites/role/read", { body: { inviteId: "abcdefghijk" } }),
+    env,
+    context(),
+    {
+      repository: repository({
+        getRtdbPath: async () => {
+          throw new Error("rtdb-unavailable");
+        },
+      }),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(unavailable.status, 503);
+});
+
 test("pending auto-link joins enqueue Telegram projection immediately", async () => {
   const background: Promise<unknown>[] = [];
   const telegramTasks: unknown[] = [];

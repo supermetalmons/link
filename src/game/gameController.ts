@@ -2702,10 +2702,8 @@ export function didClickBotStrengthControlButton() {
   syncBotStrengthControlButton();
 }
 
-export function handleFreshlySignedInProfileInGameIfNeeded(profileId: string) {
-  if (isWatchOnly) {
-    connection.seeIfFreshlySignedInProfileIsOneOfThePlayers(profileId);
-  }
+export function handleFreshlySignedInProfileInGameIfNeeded() {
+  void connection.seeIfFreshlySignedInProfileIsOneOfThePlayers();
 }
 
 export function didFindInviteThatCanBeJoined() {

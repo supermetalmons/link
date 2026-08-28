@@ -5,6 +5,7 @@ import {
   isEnsureMatchResponse,
   isJoinInviteResponse,
   isProposeRematchResponse,
+  isResolveInviteRoleResponse,
   type CreateInviteRequest,
   type CreateInviteResponse,
   type EndRematchRequest,
@@ -15,6 +16,8 @@ import {
   type JoinInviteResponse,
   type ProposeRematchRequest,
   type ProposeRematchResponse,
+  type ResolveInviteRoleRequest,
+  type ResolveInviteRoleResponse,
 } from "@mons/shared/game-sessions";
 import {
   isCancelAutomatchResponse,
@@ -348,6 +351,19 @@ export function joinInviteViaApi(
     request,
     tokenProvider,
     isJoinInviteResponse,
+    true,
+  );
+}
+
+export function readInviteRoleViaApi(
+  request: ResolveInviteRoleRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<ResolveInviteRoleResponse> {
+  return retryGameSessionMutation(
+    "/invites/role/read",
+    request,
+    tokenProvider,
+    isResolveInviteRoleResponse,
     true,
   );
 }

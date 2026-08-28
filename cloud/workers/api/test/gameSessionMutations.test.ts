@@ -6,6 +6,7 @@ import type {
   EnsureMatchRequest,
   JoinInviteRequest,
   ProposeRematchRequest,
+  ResolveInviteRoleRequest,
 } from "@mons/shared/game-sessions";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import type { FirebaseIdentity } from "../src/firebaseAuth.ts";
@@ -19,6 +20,7 @@ import {
   proposeRematch,
   refreshGameSessionMutationLease,
   releaseGameSessionMutationLease,
+  resolveInviteRole,
   sweepGameSessionMutationReceipts,
 } from "../src/gameSessionMutations.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
@@ -27,6 +29,7 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 const identity: FirebaseIdentity = {
   idToken: "firebase-token",
   profileId: "profile-1",
+  rawProfileIdClaim: "profile-1",
   uid: "login-1",
 };
 
@@ -134,6 +137,359 @@ function repository(initial: Record<string, unknown> = {}, nowMs = 1_000) {
 function presentation() {
   return { emojiId: 1, aura: "" };
 }
+
+test("resolves invite roles from authoritative participant links", async () => {
+  const request: ResolveInviteRoleRequest = { inviteId: "abcdefghijk" };
+  const base = {
+    "invites/abcdefghijk": {
+      hostId: "host-login",
+      guestId: "guest-login",
+    },
+    "players/host-login/profile": "profile-host",
+    "players/guest-login/profile": "profile-1",
+    "players/login-1/profile": "profile-1",
+  };
+
+  assert.deepEqual(
+    await resolveInviteRole(
+      { ...identity, uid: "host-login" },
+      request,
+      repository(base).repository,
+    ),
+    {
+      ok: true,
+      inviteId: request.inviteId,
+      hostId: "host-login",
+      guestId: "guest-login",
+      actorUid: "host-login",
+      role: "host",
+    },
+  );
+  assert.equal(
+    (await resolveInviteRole(identity, request, repository(base).repository))
+      .role,
+    "guest",
+  );
+  const alternateHost = repository({
+    ...base,
+    "players/login-1/profile": "profile-host",
+  });
+  assert.equal(
+    (await resolveInviteRole(identity, request, alternateHost.repository)).role,
+    "host",
+  );
+  const sharedProfile = repository({
+    ...base,
+    "players/host-login/profile": "profile-1",
+  });
+  assert.equal(
+    (await resolveInviteRole(identity, request, sharedProfile.repository)).role,
+    "host",
+  );
+  const recoveringIdentity = repository({
+    ...base,
+    "players/login-1/profile": "profile-stale",
+    "players/host-login/profile": "profile-1",
+  });
+  assert.equal(
+    (await resolveInviteRole(identity, request, recoveringIdentity.repository))
+      .role,
+    "host",
+  );
+  const unrelatedIdentity = repository({
+    ...base,
+    "players/login-1/profile": "profile-other",
+  });
+  assert.equal(
+    (
+      await resolveInviteRole(
+        {
+          ...identity,
+          profileId: "profile-other",
+          rawProfileIdClaim: "profile-other",
+        },
+        request,
+        unrelatedIdentity.repository,
+      )
+    ).role,
+    "watch",
+  );
+});
+
+test("resolves pending and anonymous invite roles without masking participants", async () => {
+  const request: ResolveInviteRoleRequest = { inviteId: "abcdefghijk" };
+  const pending = repository({
+    "invites/abcdefghijk": { hostId: "host-login", guestId: null },
+    "players/host-login/profile": "profile-host",
+    "players/login-1/profile": "profile-host",
+  });
+  assert.equal(
+    (
+      await resolveInviteRole(
+        { ...identity, profileId: "profile-host" },
+        request,
+        pending.repository,
+      )
+    ).role,
+    "host",
+  );
+
+  const anonymousHost = repository({
+    "invites/abcdefghijk": {
+      hostId: "anonymous-host",
+      guestId: "guest-login",
+    },
+    "players/guest-login/profile": "profile-1",
+    "players/login-1/profile": "profile-1",
+  });
+  const guest = await resolveInviteRole(
+    identity,
+    request,
+    anonymousHost.repository,
+  );
+  assert.equal(guest.role, "guest");
+  assert.equal(guest.actorUid, "guest-login");
+});
+
+test("uses only Firebase-rule-visible evidence for alternate invite roles", async () => {
+  const request: ResolveInviteRoleRequest = { inviteId: "abcdefghijk" };
+  const base = {
+    "invites/abcdefghijk": {
+      hostId: "host-login",
+      guestId: "guest-login",
+    },
+    "players/host-login/profile": "profile-host",
+    "players/guest-login/profile": "profile-guest",
+  };
+  const canonicalOnly = repository(base).repository;
+  canonicalOnly.findProfileId = async () => "profile-host";
+  assert.equal(
+    (
+      await resolveInviteRole(
+        { ...identity, profileId: "", uid: "alternate-login" },
+        request,
+        canonicalOnly,
+      )
+    ).role,
+    "watch",
+  );
+
+  assert.equal(
+    (
+      await resolveInviteRole(
+        {
+          ...identity,
+          profileId: "profile-host",
+          rawProfileIdClaim: "profile-host",
+          uid: "alternate-login",
+        },
+        request,
+        canonicalOnly,
+      )
+    ).role,
+    "host",
+  );
+
+  assert.equal(
+    (
+      await resolveInviteRole(
+        {
+          ...identity,
+          profileId: "profile-host",
+          rawProfileIdClaim: " profile-host ",
+          uid: "alternate-login",
+        },
+        request,
+        canonicalOnly,
+      )
+    ).role,
+    "watch",
+  );
+
+  const paddedMismatch = repository({
+    ...base,
+    "players/alternate-login/profile": " profile-host ",
+  }).repository;
+  assert.equal(
+    (
+      await resolveInviteRole(
+        { ...identity, profileId: "", uid: "alternate-login" },
+        request,
+        paddedMismatch,
+      )
+    ).role,
+    "watch",
+  );
+
+  const exactPaddedMatch = repository({
+    ...base,
+    "players/host-login/profile": " profile-host ",
+    "players/alternate-login/profile": " profile-host ",
+  }).repository;
+  assert.equal(
+    (
+      await resolveInviteRole(
+        { ...identity, profileId: "", uid: "alternate-login" },
+        request,
+        exactPaddedMatch,
+      )
+    ).role,
+    "host",
+  );
+
+  const guestUnavailable = repository(base).repository;
+  guestUnavailable.getRtdbPath = async (path) => {
+    if (path === "invites/abcdefghijk") return base["invites/abcdefghijk"];
+    if (path === "players/alternate-login/profile") return "profile-host";
+    if (path === "players/host-login/profile") return "profile-host";
+    if (path === "players/guest-login/profile") {
+      throw new Error("guest-profile-unavailable");
+    }
+    return null;
+  };
+  assert.equal(
+    (
+      await resolveInviteRole(
+        { ...identity, profileId: "", uid: "alternate-login" },
+        request,
+        guestUnavailable,
+      )
+    ).role,
+    "host",
+  );
+});
+
+test("preserves password-protected invite read access", async () => {
+  const request: ResolveInviteRoleRequest = { inviteId: "abcdefghijk" };
+  const pending = {
+    "invites/abcdefghijk": {
+      hostId: "host-login",
+      guestId: null,
+      password: "secret",
+    },
+    "players/host-login/profile": "profile-host",
+  };
+  await assert.rejects(
+    () =>
+      resolveInviteRole(
+        { ...identity, profileId: "profile-other" },
+        request,
+        repository(pending).repository,
+      ),
+    (error: unknown) => error instanceof AuthApiFailure && error.status === 403,
+  );
+  const hostAccess = repository({
+    ...pending,
+    "players/login-1/profile": "profile-host",
+  });
+  assert.equal(
+    (await resolveInviteRole(identity, request, hostAccess.repository)).role,
+    "host",
+  );
+
+  const completed = repository({
+    ...pending,
+    "invites/abcdefghijk": {
+      ...pending["invites/abcdefghijk"],
+      guestId: "guest-login",
+    },
+    "players/guest-login/profile": "profile-guest",
+  });
+  assert.equal(
+    (
+      await resolveInviteRole(
+        { ...identity, profileId: "profile-other" },
+        request,
+        completed.repository,
+      )
+    ).role,
+    "watch",
+  );
+});
+
+test("rejects missing, malformed, and unavailable invite role state", async () => {
+  const request: ResolveInviteRoleRequest = { inviteId: "abcdefghijk" };
+  await assert.rejects(
+    () => resolveInviteRole(identity, request, repository().repository),
+    (error: unknown) =>
+      error instanceof AuthApiFailure && error.message === "invite-not-found",
+  );
+  await assert.rejects(
+    () =>
+      resolveInviteRole(
+        identity,
+        request,
+        repository({
+          "invites/abcdefghijk": {
+            hostId: "unsafe/host",
+            guestId: null,
+          },
+        }).repository,
+      ),
+    (error: unknown) =>
+      error instanceof AuthApiFailure && error.message === "invite-invalid",
+  );
+  for (const malformedInvite of [
+    "corrupt",
+    { hostId: "host-login", guestId: { corrupt: true } },
+  ]) {
+    await assert.rejects(
+      () =>
+        resolveInviteRole(
+          identity,
+          request,
+          repository({
+            "invites/abcdefghijk": malformedInvite,
+          }).repository,
+        ),
+      (error: unknown) =>
+        error instanceof AuthApiFailure &&
+        error.status === 409 &&
+        error.message === "invite-invalid",
+    );
+  }
+  const unavailable = repository({
+    "invites/abcdefghijk": {
+      hostId: "host-login",
+      guestId: "guest-login",
+    },
+  }).repository;
+  unavailable.getRtdbPath = async () => {
+    throw new Error("rtdb-unavailable");
+  };
+  await assert.rejects(
+    () => resolveInviteRole(identity, request, unavailable),
+    /rtdb-unavailable/,
+  );
+
+  const ownershipUnavailable = repository({
+    "invites/abcdefghijk": {
+      hostId: "host-login",
+      guestId: "guest-login",
+    },
+  }).repository;
+  ownershipUnavailable.getRtdbPath = async (path) => {
+    if (path === "invites/abcdefghijk") {
+      return { hostId: "host-login", guestId: "guest-login" };
+    }
+    if (path === "players/alternate-login/profile") {
+      throw new Error("rtdb-unavailable");
+    }
+    return null;
+  };
+  ownershipUnavailable.findProfileId = async () => {
+    throw new Error("firestore-unavailable");
+  };
+  await assert.rejects(
+    () =>
+      resolveInviteRole(
+        { ...identity, profileId: "", uid: "alternate-login" },
+        request,
+        ownershipUnavailable,
+      ),
+    /profile-ownership-unavailable/,
+  );
+});
 
 test("serializes invite mutations with expiring owner-fenced leases", async () => {
   const state = repository();
@@ -291,6 +647,42 @@ test("joins a manual invite and persists the mirrored guest match", async () => 
       .color,
     "black",
   );
+});
+
+test("does not join a host through the same canonical merged profile", async () => {
+  const state = repository({
+    "invites/abcdefghijk": {
+      version: 2,
+      hostId: "host-login",
+      hostColor: "white",
+      guestId: null,
+    },
+    "players/host-login/profile": "source-profile",
+    "players/login-1/profile": "target-profile",
+    "players/host-login/matches/abcdefghijk": match("white"),
+  });
+  state.repository.findProfileId = async (uid) =>
+    uid === "host-login" || uid === identity.uid ? "target-profile" : null;
+
+  const response = await joinInvite(
+    identity,
+    {
+      operationId: ids.join,
+      inviteId: "abcdefghijk",
+      ...presentation(),
+    },
+    state.repository,
+    { createOwnerId: () => "owner", now: () => 1_000 },
+  );
+
+  assert.deepEqual(response, {
+    ok: true,
+    inviteId: "abcdefghijk",
+    guestId: null,
+    joined: false,
+    matchId: null,
+  });
+  assert.equal(state.values.get("invites/abcdefghijk/guestId"), undefined);
 });
 
 test("preserves pending automatch link joining and Telegram projection", async () => {

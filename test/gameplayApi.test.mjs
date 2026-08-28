@@ -34,6 +34,7 @@ const {
   removeEventParticipantViaApi,
   removeNavigationGameViaApi,
   readNavigationGamesViaApi,
+  readInviteRoleViaApi,
   resolveWagerOutcomeViaApi,
   sendWagerProposalViaApi,
   startAutomatchViaApi,
@@ -60,6 +61,8 @@ const {
   isJoinInviteResponse,
   isProposeRematchRequest,
   isProposeRematchResponse,
+  isResolveInviteRoleRequest,
+  isResolveInviteRoleResponse,
 } = await import("@mons/shared/game-sessions");
 const { MAX_MATCH_FEN_BYTES, MAX_MATCH_HISTORY_BYTES } =
   await import("@mons/shared/match-protocol");
@@ -301,6 +304,121 @@ test("sends the exact event prize selection mutation", async () => {
       selectedPrizeId: "1682",
     }),
     false,
+  );
+});
+
+test("reads the exact authenticated authoritative invite role", async () => {
+  const calls = [];
+  const response = {
+    ok: true,
+    inviteId: "abcdefghijk",
+    hostId: "host-login",
+    guestId: "guest-login",
+    actorUid: "guest-login",
+    role: "guest",
+  };
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input: String(input), init });
+    return jsonResponse(response);
+  };
+
+  assert.deepEqual(
+    await readInviteRoleViaApi(
+      { inviteId: "abcdefghijk" },
+      async () => "firebase-token",
+    ),
+    response,
+  );
+  assert.equal(calls[0].input, "https://api.mons.link/invites/role/read");
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    inviteId: "abcdefghijk",
+  });
+  assert.equal(
+    new Headers(calls[0].init.headers).get("Authorization"),
+    "Bearer firebase-token",
+  );
+  assert.equal(isResolveInviteRoleRequest({ inviteId: "abcdefghijk" }), true);
+  assert.equal(
+    isResolveInviteRoleRequest({ inviteId: "abcdefghijk", extra: true }),
+    false,
+  );
+  assert.equal(isResolveInviteRoleResponse(response), true);
+  assert.equal(
+    isResolveInviteRoleResponse({ ...response, role: "watch" }),
+    false,
+  );
+  assert.equal(
+    isResolveInviteRoleResponse({
+      ...response,
+      role: "watch",
+      actorUid: null,
+    }),
+    true,
+  );
+});
+
+test("retries one transient authoritative invite role failure", async () => {
+  let calls = 0;
+  const response = {
+    ok: true,
+    inviteId: "abcdefghijk",
+    hostId: "host-login",
+    guestId: null,
+    actorUid: "host-login",
+    role: "host",
+  };
+  globalThis.fetch = async () => {
+    calls += 1;
+    return calls === 1
+      ? jsonResponse(
+          {
+            ok: false,
+            error: "unavailable",
+            message: "profile-ownership-unavailable",
+          },
+          503,
+        )
+      : jsonResponse(response);
+  };
+
+  assert.deepEqual(
+    await readInviteRoleViaApi(
+      { inviteId: "abcdefghijk" },
+      async () => "firebase-token",
+    ),
+    response,
+  );
+  assert.equal(calls, 2);
+});
+
+test("rejects an invite role response after authentication changes", async () => {
+  const firstUser = {
+    uid: "first-user",
+    getIdToken: async () => "first-token",
+  };
+  const secondUser = {
+    uid: "second-user",
+    getIdToken: async () => "second-token",
+  };
+  let currentUser = firstUser;
+  globalThis.fetch = async () => {
+    currentUser = secondUser;
+    return jsonResponse({
+      ok: true,
+      inviteId: "abcdefghijk",
+      hostId: "host-login",
+      guestId: null,
+      actorUid: null,
+      role: "watch",
+    });
+  };
+
+  await assert.rejects(
+    readInviteRoleViaApi(
+      { inviteId: "abcdefghijk" },
+      createUserBoundAuthTokenProvider(firstUser, () => currentUser),
+    ),
+    /authentication-changed/,
   );
 });
 

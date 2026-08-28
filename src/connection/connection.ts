@@ -102,6 +102,7 @@ import {
   removeEventParticipantViaApi,
   removeNavigationGameViaApi,
   readNavigationGamesViaApi,
+  readInviteRoleViaApi,
   resolveWagerOutcomeViaApi,
   sendWagerProposalViaApi,
   startAutomatchViaApi,
@@ -312,7 +313,6 @@ class Connection {
   private inviteReactionsRef: any = null;
   private miningFrozenRef: any = null;
   private matchRefs: { [key: string]: any } = {};
-  private profileObserverCleanups = new Map<string, () => void>();
   private observerRegistry = new ObserverRegistry(
     (contextId, sessionEpoch) => this.isContextActive(contextId, sessionEpoch),
     (reason, contextId) => {
@@ -998,27 +998,38 @@ class Connection {
     }
   }
 
-  public async seeIfFreshlySignedInProfileIsOneOfThePlayers(
-    profileId: string,
-  ): Promise<void> {
+  public async seeIfFreshlySignedInProfileIsOneOfThePlayers(): Promise<void> {
     const routeState = getRouteStateSnapshot();
     const sessionGuard = this.createSessionGuard();
-    if (!this.latestInvite) {
+    if (!this.latestInvite || this.activeContext?.canWrite) {
       return;
     }
-    const match = await this.checkBothPlayerProfiles(
-      this.latestInvite.hostId,
-      this.latestInvite.guestId ?? "",
-      profileId,
-    );
+    const inviteId = this.inviteId ?? routeState.inviteId;
+    if (!inviteId) {
+      return;
+    }
+    let role: InviteRole;
+    try {
+      const tokenProvider = this.getUserBoundAuthTokenProvider();
+      const resolution = await readInviteRoleViaApi(
+        { inviteId },
+        tokenProvider,
+      );
+      tokenProvider.assertCurrentUser();
+      if (resolution.inviteId !== inviteId) {
+        throw new Error("invite-role-response-mismatch");
+      }
+      role = resolution.role;
+    } catch (error) {
+      if (sessionGuard()) {
+        console.error("Failed to resolve signed-in invite role", error);
+      }
+      return;
+    }
     if (!sessionGuard()) {
       return;
     }
-    if (match !== null) {
-      const inviteToReconnect = this.inviteId ?? routeState.inviteId;
-      if (!inviteToReconnect) {
-        return;
-      }
+    if (role !== "watch") {
       await Promise.resolve();
       if (!sessionGuard()) {
         return;
@@ -1026,11 +1037,11 @@ class Connection {
       await transition(
         {
           mode: "invite",
-          path: inviteToReconnect,
-          inviteId: inviteToReconnect,
+          path: inviteId,
+          inviteId,
           snapshotId: null,
           eventId: null,
-          autojoin: isAutoInviteId(inviteToReconnect),
+          autojoin: isAutoInviteId(inviteId),
         },
         { force: true },
       );
@@ -1157,16 +1168,35 @@ class Connection {
 
   private async getPlayerProfile(loginId: string): Promise<PlayerProfile> {
     return resolvePlayerProfile(loginId, {
-      readLinkedProfileId: async (playerLoginId) => {
-        const snapshot = await get(
-          ref(this.db, `players/${playerLoginId}/profile`),
-        );
-        return snapshot.val();
-      },
-      getProfileById: (profileId) => this.getProfileById(profileId),
       getProfileByLoginId: (playerLoginId) =>
         this.getProfileByLoginId(playerLoginId),
     });
+  }
+
+  private async getPlayerProfileWithRetry(
+    loginId: string,
+    isCurrent: () => boolean,
+  ): Promise<PlayerProfile | null> {
+    await this.ensureAuthenticated();
+    if (!isCurrent()) {
+      return null;
+    }
+    const tokenProvider = this.getUserBoundAuthTokenProvider();
+    return resolvePlayerProfileWithRetry(
+      loginId,
+      {
+        getProfileByLoginId: async (playerLoginId) => {
+          const profile = await getProfileByLoginIdViaApi(
+            playerLoginId,
+            tokenProvider,
+          );
+          tokenProvider.assertCurrentUser();
+          return profile;
+        },
+      },
+      isCurrent,
+      () => this.delay(PROFILE_LOOKUP_RETRY_DELAY_MS),
+    );
   }
 
   private materialLeaderboardCache: Map<MiningMaterialName, PlayerProfile[]> =
@@ -3981,65 +4011,6 @@ class Connection {
     return id === "" ? null : id;
   }
 
-  private getLocalLoginId(): string | null {
-    const id = storage.getLoginId("");
-    return id === "" ? null : id;
-  }
-
-  private async resolveLocalProfileId(
-    loginUid?: string | null,
-  ): Promise<string | null> {
-    const storedProfileId = this.getLocalProfileId();
-    const storedLoginUid = this.getLocalLoginId();
-    const normalizedLoginUid = this.normalizeStringOrNull(loginUid);
-    if (storedProfileId && !normalizedLoginUid) {
-      return storedProfileId;
-    }
-
-    if (!normalizedLoginUid) {
-      const claimedProfileId = this.normalizeStringOrNull(
-        await this.getCurrentProfileClaimId(),
-      );
-      if (claimedProfileId) {
-        return claimedProfileId;
-      }
-      return storedProfileId;
-    }
-
-    try {
-      const profileSnapshot = await get(
-        ref(this.db, `players/${normalizedLoginUid}/profile`),
-      );
-      const linkedProfileId = this.normalizeStringOrNull(profileSnapshot.val());
-      if (linkedProfileId) {
-        return linkedProfileId;
-      }
-    } catch {}
-
-    try {
-      const profile = await this.getProfileByLoginId(normalizedLoginUid);
-      return this.normalizeStringOrNull(profile.id);
-    } catch {}
-
-    const claimedProfileId = this.normalizeStringOrNull(
-      await this.getCurrentProfileClaimId(),
-    );
-    if (claimedProfileId) {
-      return claimedProfileId;
-    }
-
-    const canUseStoredProfileForLogin =
-      !!storedProfileId &&
-      (!normalizedLoginUid ||
-        !storedLoginUid ||
-        storedLoginUid === normalizedLoginUid);
-    if (canUseStoredProfileForLogin) {
-      return storedProfileId;
-    }
-
-    return null;
-  }
-
   private hydrateSameProfilePlayer(uid: string): void {
     const expectedEpoch = this.sessionEpoch;
     setupPlayerId(uid, false);
@@ -4061,19 +4032,17 @@ class Connection {
       this.sameProfileHydrationRequest === request &&
       this.isSessionEpochActive(expectedEpoch) &&
       this.sameProfilePlayerUid === uid;
-    this.getPlayerProfile(uid)
+    this.getPlayerProfileWithRetry(uid, isHydrationActive)
       .then((profile) => {
-        if (!isHydrationActive()) {
+        if (!profile || !isHydrationActive()) {
           return;
         }
-        this.stopObservingProfile(uid);
         didGetPlayerProfile(profile, uid, true);
       })
-      .catch(() => {
-        if (!isHydrationActive()) {
-          return;
+      .catch((error) => {
+        if (isHydrationActive()) {
+          console.error("Error getting own player profile:", error);
         }
-        this.observeProfile(uid, this.activeContext, true);
       })
       .finally(() => {
         if (this.sameProfileHydrationRequest !== request) {
@@ -4950,42 +4919,17 @@ class Connection {
 
   private async resolveActorUidForInvite(
     invite: Invite,
-    loginUid: string,
-    localProfileId: string | null,
-    epoch: number,
-    connectAttemptId: number,
+    inviteId: string,
+    tokenProvider: AuthTokenProvider,
   ): Promise<{ actorUid: string | null; role: InviteRole }> {
-    const hostId = invite.hostId;
-    const guestId = invite.guestId ?? null;
-    if (loginUid === hostId) {
-      return { actorUid: hostId, role: "host" };
+    const resolution = await readInviteRoleViaApi({ inviteId }, tokenProvider);
+    tokenProvider.assertCurrentUser?.();
+    if (resolution.inviteId !== inviteId) {
+      throw new Error("invite-role-response-mismatch");
     }
-    if (guestId && loginUid === guestId) {
-      return { actorUid: guestId, role: "guest" };
-    }
-    if (localProfileId) {
-      try {
-        const matchingUid = await this.checkBothPlayerProfiles(
-          hostId,
-          guestId ?? "",
-          localProfileId,
-        );
-        if (!this.isConnectAttemptActive(connectAttemptId, epoch)) {
-          return { actorUid: null, role: "watch" };
-        }
-        if (matchingUid === hostId) {
-          return { actorUid: hostId, role: "host" };
-        }
-        if (guestId && matchingUid === guestId) {
-          return { actorUid: guestId, role: "guest" };
-        }
-      } catch {
-        if (!this.isConnectAttemptActive(connectAttemptId, epoch)) {
-          return { actorUid: null, role: "watch" };
-        }
-      }
-    }
-    return { actorUid: null, role: "watch" };
+    invite.hostId = resolution.hostId;
+    invite.guestId = resolution.guestId;
+    return { actorUid: resolution.actorUid, role: resolution.role };
   }
 
   public connectToGame(uid: string, inviteId: string, autojoin: boolean): void {
@@ -4995,10 +4939,8 @@ class Connection {
       this.inviteId === inviteId && this.latestInvite
         ? { ...this.latestInvite }
         : null;
-    this.detachFromMatchSession();
-    this.loginUid = uid;
-    const connectEpoch = this.sessionEpoch;
-    const connectAttemptId = this.connectAttemptId;
+    let connectEpoch = this.sessionEpoch;
+    let connectAttemptId = this.beginConnectAttempt();
     const isConnectActive = () =>
       this.isConnectAttemptActive(connectAttemptId, connectEpoch);
     let tokenProvider: AuthTokenProvider & {
@@ -5024,6 +4966,9 @@ class Connection {
         if (!autojoin || !isAutoInviteId(inviteId)) {
           throw error;
         }
+      }
+      if (!isConnectActive()) {
+        return null;
       }
       await joinInviteViaApi(
         {
@@ -5053,6 +4998,8 @@ class Connection {
         }
         if (!inviteData) {
           console.log("No invite data found");
+          this.detachFromMatchSession();
+          this.loginUid = uid;
           if (isPendingLocalInviteCreation) {
             didFailToLoadPendingInvite();
           }
@@ -5060,25 +5007,19 @@ class Connection {
         }
 
         const workingInvite: Invite = { ...inviteData };
-        const localProfileId = await this.resolveLocalProfileId(uid);
+        let actorResolution = await this.resolveActorUidForInvite(
+          workingInvite,
+          inviteId,
+          tokenProvider,
+        );
         if (!isConnectActive()) {
           return;
         }
-        let shouldAutojoinAsGuest =
-          !workingInvite.guestId && workingInvite.hostId !== uid && autojoin;
-        if (shouldAutojoinAsGuest && localProfileId) {
-          const sameProfilePlayerUid = await this.checkBothPlayerProfiles(
-            workingInvite.hostId,
-            "",
-            localProfileId,
-          );
-          if (!isConnectActive()) {
-            return;
-          }
-          if (sameProfilePlayerUid === workingInvite.hostId) {
-            shouldAutojoinAsGuest = false;
-          }
-        }
+        const shouldAutojoinAsGuest =
+          actorResolution.role === "watch" &&
+          !workingInvite.guestId &&
+          workingInvite.hostId !== uid &&
+          autojoin;
         if (shouldAutojoinAsGuest) {
           try {
             const joinResult = await joinInviteViaApi(
@@ -5118,15 +5059,14 @@ class Connection {
               }
             } catch {}
           }
+          actorResolution = await this.resolveActorUidForInvite(
+            workingInvite,
+            inviteId,
+            tokenProvider,
+          );
         }
 
-        const { actorUid, role } = await this.resolveActorUidForInvite(
-          workingInvite,
-          uid,
-          localProfileId,
-          connectEpoch,
-          connectAttemptId,
-        );
+        const { actorUid, role } = actorResolution;
         if (!isConnectActive()) {
           return;
         }
@@ -5141,6 +5081,7 @@ class Connection {
           const myMatchSnapshot = await get(
             ref(this.db, `players/${actorUid}/matches/${matchId}`),
           );
+          tokenProvider.assertCurrentUser();
           if (!isConnectActive()) {
             return;
           }
@@ -5176,6 +5117,13 @@ class Connection {
             return;
           }
         }
+        if (!isConnectActive()) {
+          return;
+        }
+        this.detachFromMatchSession();
+        this.loginUid = uid;
+        connectEpoch = this.sessionEpoch;
+        connectAttemptId = this.connectAttemptId;
 
         this.latestInvite = workingInvite;
         this.myMatch = myMatch;
@@ -5254,7 +5202,7 @@ class Connection {
         if (isPendingLocalInviteCreation) {
           didFailToLoadPendingInvite();
         }
-        console.error("Failed to retrieve invite data:", error);
+        console.error("Failed to connect to invite:", error);
       });
   }
 
@@ -5599,12 +5547,11 @@ class Connection {
       },
     );
 
-    this.getPlayerProfile(playerId)
+    this.getPlayerProfileWithRetry(playerId, isObserverActive)
       .then((profile) => {
-        if (!isObserverActive()) {
+        if (!profile || !isObserverActive()) {
           return;
         }
-        this.stopObservingProfile(playerId);
         didGetPlayerProfile(profile, playerId, false);
       })
       .catch((error) => {
@@ -5612,186 +5559,7 @@ class Connection {
           return;
         }
         console.error("Error getting player profile:", error);
-        this.observeProfile(playerId, context);
       });
-  }
-
-  private stopObservingProfile(playerId: string): void {
-    const cleanup = this.profileObserverCleanups.get(playerId);
-    if (!cleanup) {
-      return;
-    }
-    this.profileObserverCleanups.delete(playerId);
-    cleanup();
-    decrementLifecycleCounter("connectionObservers");
-  }
-
-  private observeProfile(
-    playerId: string,
-    context: MatchRuntimeContext | null = this.activeContext,
-    isOwnProfile = false,
-  ): void {
-    const profileRef = ref(this.db, `players/${playerId}/profile`);
-    if (this.profileObserverCleanups.has(playerId)) {
-      return;
-    }
-    const observeEpoch = context?.sessionEpoch ?? this.sessionEpoch;
-    const contextId = context?.contextId ?? null;
-    const isObserverActive = () => {
-      if (contextId === null) {
-        return this.isSessionEpochActive(observeEpoch);
-      }
-      return this.isContextActive(contextId, observeEpoch);
-    };
-    if (context) {
-      this.unregisterObserverCleanup(context.contextId, `profile:${playerId}`);
-      this.registerObserverCleanup(
-        context.contextId,
-        `profile:${playerId}`,
-        () => {
-          this.stopObservingProfile(playerId);
-        },
-      );
-    }
-    let linkedProfileId: string | null = null;
-    let unsubscribeProfileRef: (() => void) | null = null;
-    let lookupGeneration = 0;
-    const cleanupProfileObserver = () => {
-      lookupGeneration += 1;
-      const unsubscribe = unsubscribeProfileRef;
-      unsubscribeProfileRef = null;
-      unsubscribe?.();
-    };
-    const isProfileObserverCurrent = () =>
-      this.profileObserverCleanups.get(playerId) === cleanupProfileObserver;
-    const resolveLinkedProfile = (profileId: string): void => {
-      const generation = ++lookupGeneration;
-      let tokenProvider: AuthTokenProvider & {
-        readonly assertCurrentUser: () => void;
-      };
-      try {
-        tokenProvider = this.getUserBoundAuthTokenProvider();
-      } catch {
-        this.stopObservingProfile(playerId);
-        return;
-      }
-      const isLookupCurrent = () =>
-        lookupGeneration === generation &&
-        linkedProfileId === profileId &&
-        isObserverActive() &&
-        isProfileObserverCurrent();
-      void resolvePlayerProfileWithRetry(
-        playerId,
-        {
-          readLinkedProfileId: async () => profileId,
-          getProfileById: (linkedProfileId) => {
-            if (!isLookupCurrent()) {
-              throw new Error("profile-lookup-cancelled");
-            }
-            return getProfileByIdViaApi(linkedProfileId, tokenProvider);
-          },
-          getProfileByLoginId: (loginId) => {
-            if (!isLookupCurrent()) {
-              throw new Error("profile-lookup-cancelled");
-            }
-            return getProfileByLoginIdViaApi(loginId, tokenProvider);
-          },
-        },
-        isLookupCurrent,
-        () => this.delay(PROFILE_LOOKUP_RETRY_DELAY_MS),
-      )
-        .then((profile) => {
-          if (!profile) {
-            return;
-          }
-          tokenProvider.assertCurrentUser();
-          if (!isLookupCurrent()) {
-            return;
-          }
-          this.stopObservingProfile(playerId);
-          didGetPlayerProfile(profile, playerId, isOwnProfile);
-        })
-        .catch((error) => {
-          if (!isLookupCurrent()) {
-            return;
-          }
-          try {
-            tokenProvider.assertCurrentUser();
-          } catch {
-            this.stopObservingProfile(playerId);
-            return;
-          }
-          this.stopObservingProfile(playerId);
-          console.error("Error observing player profile:", error);
-        });
-    };
-
-    this.profileObserverCleanups.set(playerId, cleanupProfileObserver);
-    incrementLifecycleCounter("connectionObservers");
-
-    const unsubscribe = onValue(profileRef, (snapshot) => {
-      if (!isObserverActive()) {
-        return;
-      }
-      const profileId = this.normalizeStringOrNull(snapshot.val());
-      if (!profileId) {
-        linkedProfileId = null;
-        lookupGeneration += 1;
-        return;
-      }
-      if (linkedProfileId === profileId) {
-        return;
-      }
-      linkedProfileId = profileId;
-      resolveLinkedProfile(profileId);
-    });
-    if (this.profileObserverCleanups.get(playerId) !== cleanupProfileObserver) {
-      unsubscribe();
-      return;
-    }
-    unsubscribeProfileRef = unsubscribe;
-  }
-
-  public async checkBothPlayerProfiles(
-    hostPlayerId: string,
-    guestPlayerId: string,
-    profileValue: string,
-  ): Promise<string | null> {
-    try {
-      const hostProfileRef = ref(this.db, `players/${hostPlayerId}/profile`);
-
-      if (guestPlayerId === "") {
-        const hostSnapshot = await get(hostProfileRef);
-        const hostProfile = hostSnapshot.val();
-
-        if (hostProfile === profileValue) {
-          return hostPlayerId;
-        }
-      } else {
-        const guestProfileRef = ref(
-          this.db,
-          `players/${guestPlayerId}/profile`,
-        );
-
-        const [hostSnapshot, guestSnapshot] = await Promise.all([
-          get(hostProfileRef),
-          get(guestProfileRef),
-        ]);
-
-        const hostProfile = hostSnapshot.val();
-        const guestProfile = guestSnapshot.val();
-
-        if (hostProfile === profileValue) {
-          return hostPlayerId;
-        } else if (guestProfile === profileValue) {
-          return guestPlayerId;
-        }
-      }
-
-      return null;
-    } catch {
-      return null;
-    }
   }
 
   private stopObservingAllMatches(): void {
@@ -5806,11 +5574,6 @@ class Connection {
     if (removedMatchCount > 0) {
       decrementLifecycleCounter("connectionObservers", removedMatchCount);
     }
-
-    this.profileObserverCleanups.forEach((_, key) => {
-      this.stopObservingProfile(key);
-      console.log(`Stopped observing profile for key ${key}`);
-    });
   }
 }
 

@@ -8,35 +8,42 @@ const {
 const { tmpdir }: typeof import("node:os") = require("node:os");
 const { join }: typeof import("node:path") = require("node:path");
 const test: typeof import("node:test") = require("node:test");
-const { parseArgs, smokeApi, smokeAuthenticatedAuthState } =
-  require("./smoke-cloudflare-api.ts") as {
-    parseArgs: (argv: string[]) => {
+const {
+  DEFAULT_SMOKE_PROFILE,
+  DEFAULT_SMOKE_SOL,
+  parseArgs,
+  smokeApi,
+  smokeAuthenticatedAuthState,
+} = require("./smoke-cloudflare-api.ts") as {
+  DEFAULT_SMOKE_PROFILE: { loginId: string; profileId: string };
+  DEFAULT_SMOKE_SOL: string;
+  parseArgs: (argv: string[]) => {
+    baseUrl: string;
+    smokeProfile: { loginId: string; profileId: string };
+    smokeSol: string;
+  };
+  smokeApi: (
+    options: {
       baseUrl: string;
       smokeProfile: { loginId: string; profileId: string };
       smokeSol: string;
-    };
-    smokeApi: (
-      options: {
-        baseUrl: string;
-        smokeProfile: { loginId: string; profileId: string };
-        smokeSol: string;
-      },
-      dependencies: {
-        fetch: typeof fetch;
-        randomState: () => string;
-        log: (message: string) => void;
-      },
-    ) => Promise<void>;
-    smokeAuthenticatedAuthState: (
-      baseUrl: string,
-      smokeProfile: { loginId: string; profileId: string },
-      dependencies: {
-        fetch: typeof fetch;
-        randomState: () => string;
-        log: (message: string) => void;
-      },
-    ) => Promise<void>;
-  };
+    },
+    dependencies: {
+      fetch: typeof fetch;
+      randomState: () => string;
+      log: (message: string) => void;
+    },
+  ) => Promise<void>;
+  smokeAuthenticatedAuthState: (
+    baseUrl: string,
+    smokeProfile: { loginId: string; profileId: string },
+    dependencies: {
+      fetch: typeof fetch;
+      randomState: () => string;
+      log: (message: string) => void;
+    },
+  ) => Promise<void>;
+};
 
 const WALLET = "11111111111111111111111111111111";
 const LOGIN = "known-login";
@@ -86,6 +93,11 @@ function profileFixture(): { cleanup(): void; path: string } {
 test("parses only production and canonical preview smoke targets", () => {
   const fixture = profileFixture();
   try {
+    assert.deepEqual(parseArgs(["--base-url", "https://api.mons.link/"]), {
+      baseUrl: "https://api.mons.link",
+      smokeProfile: DEFAULT_SMOKE_PROFILE,
+      smokeSol: DEFAULT_SMOKE_SOL,
+    });
     assert.deepEqual(
       parseArgs([
         "--base-url",
@@ -105,15 +117,11 @@ test("parses only production and canonical preview smoke targets", () => {
       parseArgs([
         "--base-url",
         "https://12ab34cd-mons-link-api.lil-org.workers.dev",
-        "--smoke-sol",
-        WALLET,
-        "--smoke-profile-fixture",
-        fixture.path,
       ]),
       {
         baseUrl: "https://12ab34cd-mons-link-api.lil-org.workers.dev",
-        smokeProfile: SMOKE_PROFILE,
-        smokeSol: WALLET,
+        smokeProfile: DEFAULT_SMOKE_PROFILE,
+        smokeSol: DEFAULT_SMOKE_SOL,
       },
     );
     for (const target of [
@@ -122,18 +130,7 @@ test("parses only production and canonical preview smoke targets", () => {
       "https://api.mons.link/path",
       "https://user@api.mons.link",
     ]) {
-      assert.throws(
-        () =>
-          parseArgs([
-            "--base-url",
-            target,
-            "--smoke-sol",
-            WALLET,
-            "--smoke-profile-fixture",
-            fixture.path,
-          ]),
-        /Usage:/,
-      );
+      assert.throws(() => parseArgs(["--base-url", target]), /Usage:/);
     }
     chmodSync(fixture.path, 0o644);
     assert.throws(
@@ -141,8 +138,6 @@ test("parses only production and canonical preview smoke targets", () => {
         parseArgs([
           "--base-url",
           "https://api.mons.link",
-          "--smoke-sol",
-          WALLET,
           "--smoke-profile-fixture",
           fixture.path,
         ]),
@@ -232,6 +227,15 @@ test("smokes public, unauthenticated, and internal routes", async () => {
         200,
       );
     }
+    if (
+      url.endsWith("/invites/role/read") &&
+      new Headers(init?.headers).has("Authorization")
+    ) {
+      return json(
+        { ok: false, error: "not-found", message: "invite-not-found" },
+        404,
+      );
+    }
     if (url.includes("identitytoolkit.googleapis.com/v1/accounts:signUp")) {
       return json({ idToken: "firebase-id-token", localId: "smoke-uid" }, 200);
     }
@@ -242,6 +246,7 @@ test("smokes public, unauthenticated, and internal routes", async () => {
       [
         "/invites/create",
         "/invites/join",
+        "/invites/role/read",
         "/matches/ensure",
         "/navigation/games/read",
         "/rematches/propose",
@@ -281,7 +286,7 @@ test("smokes public, unauthenticated, and internal routes", async () => {
     },
   );
 
-  assert.equal(requests.length, 35);
+  assert.equal(requests.length, 37);
   assert.deepEqual(logs, ["[api-smoke] Passed https://api.mons.link"]);
 });
 

@@ -4,6 +4,7 @@ import {
   isEnsureMatchRequest,
   isJoinInviteRequest,
   isProposeRematchRequest,
+  isResolveInviteRoleRequest,
 } from "@mons/shared/game-sessions";
 import { isAutoInviteId } from "@mons/shared/ids";
 import {
@@ -108,6 +109,7 @@ import {
   ensureParticipantMatch,
   joinInvite,
   proposeRematch,
+  resolveInviteRole,
   withGameSessionMutationLease,
   type GameSessionMutationDependencies,
 } from "./gameSessionMutations.ts";
@@ -119,6 +121,7 @@ export const GAMEPLAY_PATHS = new Set([
   "/automatch/start",
   "/invites/create",
   "/invites/join",
+  "/invites/role/read",
   "/matches/ensure",
   "/matches/timer/claim",
   "/matches/timer/start",
@@ -529,6 +532,12 @@ async function readGameplayBody(
     }
     return body;
   }
+  if (pathname === "/invites/role/read") {
+    if (!isResolveInviteRoleRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
+  }
   if (pathname === "/matches/ensure") {
     if (!isEnsureMatchRequest(body)) {
       throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
@@ -803,6 +812,11 @@ export async function handleGameplayRoute(
           requestId: body.operationId,
         });
       }
+    } else if (pathname === "/invites/role/read") {
+      if (!isResolveInviteRoleRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      response = await resolveInviteRole(identity, body, repository);
     } else if (pathname === "/matches/ensure") {
       if (!isEnsureMatchRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");

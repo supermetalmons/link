@@ -17,6 +17,8 @@ import {
   type JoinInviteResponse,
   type ProposeRematchRequest,
   type ProposeRematchResponse,
+  type ResolveInviteRoleRequest,
+  type ResolveInviteRoleResponse,
 } from "@mons/shared/game-sessions";
 import { isEventOwnedInvite } from "@mons/shared/events";
 import { createGameVariantHelpers } from "@mons/shared/game-variants";
@@ -46,7 +48,7 @@ import {
   FIREBASE_RTDB_SERVER_TIMESTAMP,
   firebaseRtdbIncrement,
 } from "./firebaseRtdb.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
   createGameplayRepository,
   type GameplayProfile,
@@ -581,6 +583,126 @@ async function resolveIdentityProfileId(
   return normalizeString(found) || normalizeString(identity.profileId);
 }
 
+async function readIdentityProfileLinkForRole(
+  identity: FirebaseIdentity,
+  repository: GameplayRepository,
+): Promise<string | null> {
+  try {
+    const value = await repository.getRtdbPath(
+      `players/${identity.uid}/profile`,
+    );
+    if (value === null || value === undefined) {
+      return null;
+    }
+    if (typeof value !== "string" || value === "") {
+      throw new Error("profile-link-invalid");
+    }
+    return value;
+  } catch {
+    throw profileOwnershipUnavailable();
+  }
+}
+
+function readParticipantProfileLink(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value !== "string" || value === "") {
+    throw failedPrecondition("profile-link-invalid");
+  }
+  return value;
+}
+
+function profileOwnershipUnavailable(): AuthApiFailure {
+  return new AuthApiFailure(
+    503,
+    "unavailable",
+    "profile-ownership-unavailable",
+  );
+}
+
+export async function resolveInviteRole(
+  identity: FirebaseIdentity,
+  request: ResolveInviteRoleRequest,
+  repository: GameplayRepository,
+): Promise<ResolveInviteRoleResponse> {
+  const storedInvite = await repository.getRtdbPath(
+    `invites/${request.inviteId}`,
+  );
+  if (storedInvite === null || storedInvite === undefined) {
+    throw new AuthApiFailure(404, "not-found", "invite-not-found");
+  }
+  const invite = toRecord(storedInvite);
+  if (!invite) {
+    throw failedPrecondition("invite-invalid");
+  }
+  const hostId = readStoredString(invite.hostId);
+  const storedGuestId = invite.guestId;
+  const guestId =
+    storedGuestId === null || storedGuestId === undefined
+      ? null
+      : readStoredString(storedGuestId);
+  const passwordProtected = Object.hasOwn(invite, "password");
+  if (
+    !isCanonicalFirebaseUid(hostId) ||
+    (guestId !== null &&
+      (!isCanonicalFirebaseUid(guestId) || guestId === hostId))
+  ) {
+    throw failedPrecondition("invite-invalid");
+  }
+  const response = (
+    actorUid: string | null,
+    role: "host" | "guest" | "watch",
+  ): ResolveInviteRoleResponse => {
+    if (passwordProtected && guestId === null && role === "watch") {
+      throw new AuthApiFailure(403, "permission-denied", "permission-denied");
+    }
+    return {
+      ok: true,
+      inviteId: request.inviteId,
+      hostId,
+      guestId,
+      actorUid,
+      role,
+    };
+  };
+  if (identity.uid === hostId) {
+    return response(hostId, "host");
+  }
+  if (guestId && identity.uid === guestId) {
+    return response(guestId, "guest");
+  }
+  const hostProfileId = readParticipantProfileLink(
+    await repository.getRtdbPath(`players/${hostId}/profile`),
+  );
+  const identityProfileClaim =
+    typeof identity.rawProfileIdClaim === "string"
+      ? identity.rawProfileIdClaim
+      : identity.profileId || null;
+  if (identityProfileClaim && hostProfileId === identityProfileClaim) {
+    return response(hostId, "host");
+  }
+  const identityProfileLink = await readIdentityProfileLinkForRole(
+    identity,
+    repository,
+  );
+  if (identityProfileLink && hostProfileId === identityProfileLink) {
+    return response(hostId, "host");
+  }
+  if (guestId) {
+    const guestProfileId = readParticipantProfileLink(
+      await repository.getRtdbPath(`players/${guestId}/profile`),
+    );
+    if (
+      (identityProfileClaim && guestProfileId === identityProfileClaim) ||
+      (identityProfileLink && guestProfileId === identityProfileLink)
+    ) {
+      return response(guestId, "guest");
+    }
+  }
+  return response(null, "watch");
+}
+
 async function resolveParticipant(
   identity: FirebaseIdentity,
   invite: Record<string, unknown>,
@@ -622,17 +744,24 @@ async function profilesMatch(
   otherUid: string,
   repository: GameplayRepository,
 ): Promise<boolean> {
-  const identityProfileId = await resolveIdentityProfileId(
-    identity,
-    repository,
-  );
-  if (!identityProfileId) {
-    return false;
+  const [identityCanonicalProfileId, otherCanonicalProfileId] =
+    await Promise.all([
+      repository.findProfileId(identity.uid, identity.idToken),
+      repository.findProfileId(otherUid, identity.idToken),
+    ]);
+  const identityCanonical = normalizeString(identityCanonicalProfileId);
+  const otherCanonical = normalizeString(otherCanonicalProfileId);
+  if (identityCanonical && otherCanonical) {
+    return identityCanonical === otherCanonical;
   }
+  const [identityProfileLink, otherProfileLink] = await Promise.all([
+    repository.getRtdbPath(`players/${identity.uid}/profile`),
+    repository.getRtdbPath(`players/${otherUid}/profile`),
+  ]);
+  const identityProfileId = normalizeString(identityProfileLink);
   return (
-    normalizeString(
-      await repository.getRtdbPath(`players/${otherUid}/profile`),
-    ) === identityProfileId
+    identityProfileId !== "" &&
+    identityProfileId === normalizeString(otherProfileLink)
   );
 }
 

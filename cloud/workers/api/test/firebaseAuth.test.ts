@@ -158,7 +158,12 @@ test("retains only a validated optional profile claim", async () => {
       fetcher: jwksFetch(publicJwk, { count: 0 }),
       now: () => NOW_MS,
     }),
-    { idToken: validToken, uid: "firebase-uid", profileId: "profile-1" },
+    {
+      idToken: validToken,
+      uid: "firebase-uid",
+      profileId: "profile-1",
+      rawProfileIdClaim: " profile-1 ",
+    },
   );
   const invalidContext = context();
   assert.deepEqual(

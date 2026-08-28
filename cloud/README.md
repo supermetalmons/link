@@ -6,6 +6,8 @@ Firebase retains authentication and the existing data stores. The API Worker own
 
 Profile lookup and leaderboard responses are projected into `mons-link-profiles` D1 through the `mons-link-profile-projection` Queue. Firestore `users` remains canonical. The tracked `PROFILE_READ_MODE` selects either Firestore or D1; invalid values fail closed and D1 errors never fall back to Firestore. See the Cloudflare deployment guide for reconciliation, verification, cutover, and rollback.
 
+The browser resolves login-linked profile presentation only through the authenticated profile API. The tracked production mode reads its D1 model, while Firestore mode remains the rollback path. Invite role and write ownership come from the authenticated gameplay API using authoritative RTDB links; browser code must not read or subscribe to `players/{uid}/profile`.
+
 Event-prize withdrawal ownership, leases, persisted Solana submissions, and completion records live exclusively in `mons-link-event-prize-withdrawals` D1. RTDB has no withdrawal shadow, and Firebase-backed Worker versions are not valid rollback targets.
 
 ## Setup

@@ -47,9 +47,7 @@ export interface GameConnectionPort {
     matchId: string,
     playerUid: string,
   ): PlayerColor | null;
-  seeIfFreshlySignedInProfileIsOneOfThePlayers(
-    profileId: string,
-  ): Promise<void>;
+  seeIfFreshlySignedInProfileIsOneOfThePlayers(): Promise<void>;
   connectToAutomatch(inviteId: string): void;
   automatch(): Promise<AutomatchResponse>;
   claimVictoryByTimer(): Promise<TimerClaimResponse>;

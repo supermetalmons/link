@@ -38,6 +38,17 @@ export type JoinInviteResponse = {
   matchId: string | null;
 };
 
+export type InviteRole = "host" | "guest" | "watch";
+export type ResolveInviteRoleRequest = { inviteId: string };
+export type ResolveInviteRoleResponse = {
+  ok: true;
+  inviteId: string;
+  hostId: string;
+  guestId: string | null;
+  actorUid: string | null;
+  role: InviteRole;
+};
+
 export type ProposeRematchRequest = GameSessionOperation &
   GameSessionPresentation;
 export type ProposeRematchResponse = {
@@ -84,6 +95,12 @@ export function isJoinInviteRequest(value: unknown): value is JoinInviteRequest;
 export function isJoinInviteResponse(
   value: unknown,
 ): value is JoinInviteResponse;
+export function isResolveInviteRoleRequest(
+  value: unknown,
+): value is ResolveInviteRoleRequest;
+export function isResolveInviteRoleResponse(
+  value: unknown,
+): value is ResolveInviteRoleResponse;
 export function isProposeRematchRequest(
   value: unknown,
 ): value is ProposeRematchRequest;

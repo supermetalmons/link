@@ -119,6 +119,6 @@ export function handleLoginSuccess(res: AuthProfileResponse): boolean {
     updateEmojiAndAuraIfNeeded(emoji.toString(), res.aura ?? undefined, false);
   }
 
-  handleFreshlySignedInProfileInGameIfNeeded(profileId);
+  handleFreshlySignedInProfileInGameIfNeeded();
   return true;
 }

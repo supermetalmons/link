@@ -85,11 +85,11 @@ Rollback by promoting the retained simplified `firestore`-mode Version ID. Keep 
 
 Upload and smoke a version before it receives traffic:
 
-Create a `0600` JSON fixture outside the repository containing `{"loginId":"...","profileId":"..."}` for one mapping read from canonical Firestore `users` data through Firebase Admin. Never derive the expected mapping from D1. The smoke reads the fixture without printing either identifier.
+The smoke command carries reviewed non-secret production defaults for one canonical login/profile mapping and one Solana wallet. Use `--smoke-sol` and `--smoke-profile-fixture` only when explicitly testing alternate values.
 
 ```sh
 npm run upload:api
-npm run smoke:api -- --base-url <version-preview-url> --smoke-sol <known-wallet> --smoke-profile-fixture <protected-profile-fixture>
+npm run smoke:api -- --base-url <version-preview-url>
 ```
 
 Record the Version ID printed by Wrangler. Promote that exact version, apply reviewed triggers, and smoke production:
@@ -97,10 +97,8 @@ Record the Version ID printed by Wrangler. Promote that exact version, apply rev
 ```sh
 npm run promote:api -- --version-id <version-id>
 npm run deploy:api:triggers
-npm run smoke:api -- --base-url https://api.mons.link --smoke-sol <known-wallet> --smoke-profile-fixture <protected-profile-fixture>
+npm run smoke:api -- --base-url https://api.mons.link
 ```
-
-Remove the protected fixture immediately after the production smoke. Use a shell trap so failed preview or production smoke runs also remove it.
 
 `upload:api` uses `wrangler versions upload --strict`; it does not send traffic to the candidate. `promote:api` deploys the explicit Version ID to 100% of traffic without prompting. `deploy:api:triggers` applies the tracked route, Cron, and Queue consumer configuration. Routine code-only releases may omit the trigger command when that configuration is unchanged.
 
@@ -198,6 +196,8 @@ npx wrangler rollback <known-good-version-id> --config cloud/workers/api/wrangle
 ```
 
 ## Frontend release
+
+When a frontend release depends on a new API route, promote and smoke the API Worker in production before uploading or promoting the frontend.
 
 Build and upload through the isolated frontend helper, then smoke the unique preview URL it prints:
 

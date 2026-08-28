@@ -15,6 +15,11 @@ const FIREBASE_API_KEY = "AIzaSyC8Ihr4kDd34z-RXe8XTBCFtFbXebifo5Y";
 const FIREBASE_IDENTITY_ROOT = "https://identitytoolkit.googleapis.com/v1";
 const PREVIEW_HOST_PATTERN =
   /^[0-9a-f]{8}-mons-link-api\.lil-org\.workers\.dev$/;
+const DEFAULT_SMOKE_SOL = "A87Upx1f1whNV5P8xQCK2YUTwE3uMYigjoKJAF3jiNpz";
+const DEFAULT_SMOKE_PROFILE = {
+  loginId: "BNuvfXQD5GUIuOx9fDW7hvIUhOr2",
+  profileId: "kPHDaCwH1DVqQ6oNRYRG",
+};
 
 type Options = {
   baseUrl: string;
@@ -32,7 +37,7 @@ type Dependencies = {
 };
 
 function usage(): string {
-  return "Usage: npm run smoke:api -- --base-url <https-url> --smoke-sol <wallet> --smoke-profile-fixture <protected-json-file>";
+  return "Usage: npm run smoke:api -- --base-url <https-url> [--smoke-sol <wallet>] [--smoke-profile-fixture <protected-json-file>]";
 }
 
 function readProfileSmokeFixture(path: string): ProfileSmokeFixture {
@@ -103,8 +108,10 @@ function normalizeBaseUrl(value: string): string {
 
 function parseArgs(argv: string[]): Options {
   let baseUrl = "";
-  let smokeProfile: ProfileSmokeFixture | null = null;
-  let smokeSol = "";
+  let smokeProfile: ProfileSmokeFixture = DEFAULT_SMOKE_PROFILE;
+  let smokeProfileOverridden = false;
+  let smokeSol = DEFAULT_SMOKE_SOL;
+  let smokeSolOverridden = false;
   for (let index = 0; index < argv.length; index += 1) {
     const name = argv[index];
     const value = argv[index + 1];
@@ -122,14 +129,16 @@ function parseArgs(argv: string[]): Options {
       if (baseUrl) throw new TypeError(usage());
       baseUrl = normalizeBaseUrl(value);
     } else if (name === "--smoke-sol") {
-      if (smokeSol) throw new TypeError(usage());
+      if (smokeSolOverridden) throw new TypeError(usage());
       smokeSol = value.trim();
+      smokeSolOverridden = true;
     } else {
-      if (smokeProfile) throw new TypeError(usage());
+      if (smokeProfileOverridden) throw new TypeError(usage());
       smokeProfile = readProfileSmokeFixture(value);
+      smokeProfileOverridden = true;
     }
   }
-  if (!baseUrl || !smokeSol || !smokeProfile) {
+  if (!baseUrl || !smokeSol) {
     throw new TypeError(usage());
   }
   return { baseUrl, smokeProfile, smokeSol };
@@ -374,6 +383,33 @@ async function smokeAuthenticatedAuthState(
     ) {
       throw new Error("Profile login lookup smoke response was invalid.");
     }
+    const roleInviteId = `smoke-${dependencies.randomState()}`;
+    const role = await request(
+      `${baseUrl}/invites/role/read`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ inviteId: roleInviteId }),
+      },
+      404,
+      dependencies,
+    );
+    const rolePayload = parseJson(role.body);
+    const roleRecord =
+      rolePayload &&
+      typeof rolePayload === "object" &&
+      !Array.isArray(rolePayload)
+        ? (rolePayload as Record<string, unknown>)
+        : null;
+    if (
+      !roleRecord ||
+      Object.keys(roleRecord).length !== 3 ||
+      roleRecord.ok !== false ||
+      roleRecord.error !== "not-found" ||
+      roleRecord.message !== "invite-not-found"
+    ) {
+      throw new Error("Invite role smoke response was invalid.");
+    }
   } finally {
     await firebaseIdentityRequest("accounts:delete", { idToken }, dependencies);
   }
@@ -479,6 +515,7 @@ async function smokeApi(
   for (const path of [
     "/invites/create",
     "/invites/join",
+    "/invites/role/read",
     "/matches/ensure",
     "/navigation/games/read",
     "/rematches/propose",
@@ -556,6 +593,8 @@ if (require.main === module) {
 }
 
 module.exports = {
+  DEFAULT_SMOKE_PROFILE,
+  DEFAULT_SMOKE_SOL,
   parseArgs,
   readProfileSmokeFixture,
   smokeApi,

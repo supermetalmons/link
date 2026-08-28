@@ -24,6 +24,7 @@ class FirebaseKeysFailure extends Error {}
 export type FirebaseIdentity = {
   idToken: string;
   profileId?: string;
+  rawProfileIdClaim?: string;
   uid: string;
 };
 
@@ -247,7 +248,15 @@ export async function verifyFirebaseRequest(
       throw new Error("invalid-token");
     }
     const profileId = readProfileIdClaim(payload.profileId);
-    return { idToken, uid, ...(profileId ? { profileId } : {}) };
+    const rawProfileIdClaim =
+      profileId && typeof payload.profileId === "string"
+        ? payload.profileId
+        : undefined;
+    return {
+      idToken,
+      uid,
+      ...(profileId ? { profileId, rawProfileIdClaim } : {}),
+    };
   } catch {
     throw new AuthApiFailure(401, "unauthenticated", "authentication-required");
   }
