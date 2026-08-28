@@ -14,6 +14,7 @@ import {
 import {
   createProfileProjection,
   parseFirestoreUpdateTime,
+  PROFILE_PROJECTION_SCHEMA_VERSION,
   ProfileProjectionValidationError,
   type FirestoreUpdateVersion,
 } from "./profileProjectionModel.ts";
@@ -70,6 +71,18 @@ function latestKnownVersion(
   return state.failureVersion
     ? laterVersion(state.profile.sourceVersion, state.failureVersion)
     : state.profile.sourceVersion;
+}
+
+function isCurrentProjectionSchema(
+  sourceVersion: FirestoreUpdateVersion,
+  schemaVersion: number | null,
+  schemaSourceVersion: FirestoreUpdateVersion | null,
+): boolean {
+  return (
+    schemaVersion === PROFILE_PROJECTION_SCHEMA_VERSION &&
+    schemaSourceVersion !== null &&
+    sameVersion(sourceVersion, schemaSourceVersion)
+  );
 }
 
 async function processProfileDocument(
@@ -344,14 +357,26 @@ function profilesNeedingReconciliation(
       continue;
     }
     if (state.failureVersion) {
-      if (!sameVersion(state.failureVersion, sourceVersion)) {
+      if (
+        !sameVersion(state.failureVersion, sourceVersion) ||
+        !isCurrentProjectionSchema(
+          state.failureVersion,
+          state.failureSchemaVersion,
+          state.failureSchemaSourceVersion,
+        )
+      ) {
         profileIds.add(profileId);
       }
       continue;
     }
     if (
       !state.profile ||
-      !sameVersion(state.profile.sourceVersion, sourceVersion)
+      !sameVersion(state.profile.sourceVersion, sourceVersion) ||
+      !isCurrentProjectionSchema(
+        state.profile.sourceVersion,
+        state.profile.schemaVersion,
+        state.profile.schemaSourceVersion,
+      )
     ) {
       profileIds.add(profileId);
     }

@@ -14,6 +14,8 @@ export type FirestoreUpdateVersion = {
   seconds: number;
 };
 
+export const PROFILE_PROJECTION_SCHEMA_VERSION = 2;
+
 export class ProfileProjectionValidationError extends TypeError {}
 
 export type ProfileProjection = {
@@ -21,6 +23,8 @@ export type ProfileProjection = {
   logins: string[];
   mergedIntoProfileId: string | null;
   profile: CompletePlayerProfile;
+  schemaVersion: typeof PROFILE_PROJECTION_SCHEMA_VERSION;
+  sortPresence: Record<"rating" | "mp" | MiningMaterialName, boolean>;
   sortValues: Record<"rating" | "mp" | MiningMaterialName, number | null>;
   sourceVersion: FirestoreUpdateVersion;
 };
@@ -54,15 +58,18 @@ function boolean(value: unknown): boolean | undefined {
 function sortNumber(
   fields: Record<string, unknown>,
   field: string,
-): number | null {
+): { present: boolean; value: number | null } {
   if (!Object.hasOwn(fields, field)) {
-    return null;
+    return { present: false, value: null };
+  }
+  if (fields[field] === null) {
+    return { present: true, value: null };
   }
   const value = number(fields[field]);
   if (value === undefined) {
     throw new ProfileProjectionValidationError("invalid-profile-sort-field");
   }
-  return value;
+  return { present: true, value };
 }
 
 function stringArray(value: unknown): string[] | undefined {
@@ -144,6 +151,8 @@ export async function profileProjectionDigest(input: {
   logins: string[];
   mergedIntoProfileId: string | null;
   profile: CompletePlayerProfile;
+  schemaVersion: number;
+  sortPresence: ProfileProjection["sortPresence"];
   sortValues: ProfileProjection["sortValues"];
 }): Promise<string> {
   const bytes = new TextEncoder().encode(JSON.stringify(canonicalize(input)));
@@ -204,14 +213,33 @@ export async function createProfileProjection({
   const logins = profileProjectionLogins(fields);
   const mergedIntoProfileId =
     string(fields.mergedIntoProfileId)?.trim() || null;
+  const ratingSort = sortNumber(fields, "rating");
+  const manaPointsSort = sortNumber(fields, "totalManaPoints");
+  const materialSorts = Object.fromEntries(
+    MATERIAL_KEYS.map((key) => [key, sortNumber(materials, key)]),
+  ) as Record<MiningMaterialName, ReturnType<typeof sortNumber>>;
   const sortValues: ProfileProjection["sortValues"] = {
-    rating: sortNumber(fields, "rating"),
-    mp: sortNumber(fields, "totalManaPoints"),
+    rating: ratingSort.value,
+    mp: manaPointsSort.value,
     ...Object.fromEntries(
-      MATERIAL_KEYS.map((key) => [key, sortNumber(materials, key)]),
+      MATERIAL_KEYS.map((key) => [key, materialSorts[key].value]),
     ),
   } as ProfileProjection["sortValues"];
-  const digestInput = { profile, logins, mergedIntoProfileId, sortValues };
+  const sortPresence: ProfileProjection["sortPresence"] = {
+    rating: ratingSort.present,
+    mp: manaPointsSort.present,
+    ...Object.fromEntries(
+      MATERIAL_KEYS.map((key) => [key, materialSorts[key].present]),
+    ),
+  } as ProfileProjection["sortPresence"];
+  const digestInput: Omit<ProfileProjection, "digest" | "sourceVersion"> = {
+    profile,
+    logins,
+    mergedIntoProfileId,
+    schemaVersion: PROFILE_PROJECTION_SCHEMA_VERSION,
+    sortPresence,
+    sortValues,
+  };
   return {
     ...digestInput,
     digest: await profileProjectionDigest(digestInput),

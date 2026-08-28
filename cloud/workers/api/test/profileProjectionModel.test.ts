@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   createProfileProjection,
   parseFirestoreUpdateTime,
+  PROFILE_PROJECTION_SCHEMA_VERSION,
 } from "../src/profileProjectionModel.ts";
 
 test("normalizes profile projection fields and preserves sort-field absence", async () => {
@@ -25,7 +26,58 @@ test("normalizes profile projection fields and preserves sort-field absence", as
   assert.equal(projection.sortValues.rating, null);
   assert.equal(projection.sortValues.dust, 4);
   assert.equal(projection.sortValues.slime, null);
+  assert.equal(projection.sortPresence.rating, false);
+  assert.equal(projection.sortPresence.dust, true);
+  assert.equal(projection.sortPresence.slime, false);
+  assert.equal(projection.schemaVersion, PROFILE_PROJECTION_SCHEMA_VERSION);
   assert.match(projection.digest, /^[0-9a-f]{64}$/);
+});
+
+test("preserves explicit nulls for all leaderboard sort fields", async () => {
+  const projection = await createProfileProjection({
+    profileId: "profile-null",
+    updateTime: "2026-08-27T12:00:00Z",
+    fields: {
+      rating: null,
+      totalManaPoints: null,
+      mining: {
+        materials: {
+          dust: null,
+          slime: null,
+          gum: null,
+          metal: null,
+          ice: null,
+        },
+      },
+    },
+  });
+  assert.deepEqual(projection.sortValues, {
+    rating: null,
+    mp: null,
+    dust: null,
+    slime: null,
+    gum: null,
+    metal: null,
+    ice: null,
+  });
+  assert.deepEqual(projection.sortPresence, {
+    rating: true,
+    mp: true,
+    dust: true,
+    slime: true,
+    gum: true,
+    metal: true,
+    ice: true,
+  });
+  assert.equal(projection.profile.rating, 1500);
+  assert.equal(projection.profile.totalManaPoints, 0);
+  assert.deepEqual(projection.profile.mining.materials, {
+    dust: 0,
+    slime: 0,
+    gum: 0,
+    metal: 0,
+    ice: 0,
+  });
 });
 
 test("projection digests are canonical for equivalent objects", async () => {
@@ -59,7 +111,7 @@ test("rejects malformed Firestore update timestamps", () => {
 
 test("rejects present nonnumeric leaderboard fields", async () => {
   for (const fields of [
-    { rating: null },
+    { rating: "1500" },
     { totalManaPoints: "5" },
     { mining: { materials: { dust: Number.NaN } } },
   ]) {

@@ -4,6 +4,7 @@ import {
   type LeaderboardReadType,
 } from "@mons/shared/profiles";
 import {
+  PROFILE_PROJECTION_SCHEMA_VERSION,
   profileWithoutTutorialState,
   type FirestoreUpdateVersion,
   type ProfileProjection,
@@ -25,14 +26,21 @@ type ProfileReconciliationRow = {
   is_deleted: number | null;
   is_failure: number;
   profile_id: string;
+  projection_schema_source_nanos: number;
+  projection_schema_source_seconds: number;
+  projection_schema_version: number;
   source_update_nanos: number;
   source_update_seconds: number;
 };
 
 export type ProfileReconciliationState = {
+  failureSchemaSourceVersion: FirestoreUpdateVersion | null;
+  failureSchemaVersion: number | null;
   failureVersion: FirestoreUpdateVersion | null;
   profile: {
     isDeleted: boolean;
+    schemaSourceVersion: FirestoreUpdateVersion;
+    schemaVersion: number;
     sourceVersion: FirestoreUpdateVersion;
   } | null;
 };
@@ -49,12 +57,22 @@ const UPSERT_PROFILE_SQL = `
     gum_sort,
     metal_sort,
     ice_sort,
+    rating_sort_present,
+    mana_points_sort_present,
+    dust_sort_present,
+    slime_sort_present,
+    gum_sort_present,
+    metal_sort_present,
+    ice_sort_present,
     source_update_seconds,
     source_update_nanos,
     source_digest,
     projected_at_ms,
-    is_deleted
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    is_deleted,
+    projection_schema_version,
+    projection_schema_source_seconds,
+    projection_schema_source_nanos
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
   ON CONFLICT (profile_id) DO UPDATE SET
     payload_json = excluded.payload_json,
     merged_into_profile_id = excluded.merged_into_profile_id,
@@ -65,21 +83,31 @@ const UPSERT_PROFILE_SQL = `
     gum_sort = excluded.gum_sort,
     metal_sort = excluded.metal_sort,
     ice_sort = excluded.ice_sort,
+    rating_sort_present = excluded.rating_sort_present,
+    mana_points_sort_present = excluded.mana_points_sort_present,
+    dust_sort_present = excluded.dust_sort_present,
+    slime_sort_present = excluded.slime_sort_present,
+    gum_sort_present = excluded.gum_sort_present,
+    metal_sort_present = excluded.metal_sort_present,
+    ice_sort_present = excluded.ice_sort_present,
     source_update_seconds = excluded.source_update_seconds,
     source_update_nanos = excluded.source_update_nanos,
     source_digest = excluded.source_digest,
     projected_at_ms = excluded.projected_at_ms,
-    is_deleted = 0
+    is_deleted = 0,
+    projection_schema_version = excluded.projection_schema_version,
+    projection_schema_source_seconds = excluded.projection_schema_source_seconds,
+    projection_schema_source_nanos = excluded.projection_schema_source_nanos
   WHERE excluded.source_update_seconds > profiles.source_update_seconds
     OR (
       excluded.source_update_seconds = profiles.source_update_seconds
-      AND (
-        excluded.source_update_nanos > profiles.source_update_nanos
-        OR (
-          excluded.source_update_nanos = profiles.source_update_nanos
-          AND profiles.is_deleted = 0
-        )
-      )
+      AND excluded.source_update_nanos > profiles.source_update_nanos
+    )
+    OR (
+      excluded.source_update_seconds = profiles.source_update_seconds
+      AND excluded.source_update_nanos = profiles.source_update_nanos
+      AND profiles.is_deleted = 0
+      AND excluded.projection_schema_version >= profiles.projection_schema_version
     )
 `;
 
@@ -95,12 +123,22 @@ const DELETE_PROFILE_SQL = `
     gum_sort,
     metal_sort,
     ice_sort,
+    rating_sort_present,
+    mana_points_sort_present,
+    dust_sort_present,
+    slime_sort_present,
+    gum_sort_present,
+    metal_sort_present,
+    ice_sort_present,
     source_update_seconds,
     source_update_nanos,
     source_digest,
     projected_at_ms,
-    is_deleted
-  ) VALUES (?, '{}', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, ?, 1)
+    is_deleted,
+    projection_schema_version,
+    projection_schema_source_seconds,
+    projection_schema_source_nanos
+  ) VALUES (?, '{}', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, 0, 0, 0, 0, 0, 0, ?, ?, ?, ?, 1, ?, ?, ?)
   ON CONFLICT (profile_id) DO UPDATE SET
     payload_json = '{}',
     merged_into_profile_id = NULL,
@@ -111,17 +149,27 @@ const DELETE_PROFILE_SQL = `
     gum_sort = NULL,
     metal_sort = NULL,
     ice_sort = NULL,
+    rating_sort_present = 0,
+    mana_points_sort_present = 0,
+    dust_sort_present = 0,
+    slime_sort_present = 0,
+    gum_sort_present = 0,
+    metal_sort_present = 0,
+    ice_sort_present = 0,
     source_update_seconds = excluded.source_update_seconds,
     source_update_nanos = excluded.source_update_nanos,
     source_digest = excluded.source_digest,
     projected_at_ms = excluded.projected_at_ms,
-    is_deleted = 1
+    is_deleted = 1,
+    projection_schema_version = excluded.projection_schema_version,
+    projection_schema_source_seconds = excluded.projection_schema_source_seconds,
+    projection_schema_source_nanos = excluded.projection_schema_source_nanos
   WHERE ? = 1
     AND profiles.source_update_seconds = ?
     AND profiles.source_update_nanos = ?
 `;
 
-const CURRENT_ACTIVE_SOURCE_SQL = `
+const CURRENT_ACTIVE_PROJECTION_SQL = `
   EXISTS (
     SELECT 1
     FROM profiles
@@ -129,6 +177,9 @@ const CURRENT_ACTIVE_SOURCE_SQL = `
       AND source_update_seconds = ?
       AND source_update_nanos = ?
       AND is_deleted = 0
+      AND projection_schema_version = ?
+      AND projection_schema_source_seconds = ?
+      AND projection_schema_source_nanos = ?
   )
 `;
 
@@ -149,8 +200,14 @@ const CLEAR_PROJECTION_FAILURE_SQL = `
     AND (
       source_update_seconds < ?
       OR (
-        source_update_seconds = ?
-        AND source_update_nanos <= ?
+      source_update_seconds = ?
+        AND (
+          source_update_nanos < ?
+          OR (
+            source_update_nanos = ?
+            AND projection_schema_version <= ?
+          )
+        )
       )
     )
 `;
@@ -166,9 +223,12 @@ const UPSERT_PROJECTION_FAILURE_SQL = `
     source_update_seconds,
     source_update_nanos,
     recorded_at_ms,
-    login_uids_json
+    login_uids_json,
+    projection_schema_version,
+    projection_schema_source_seconds,
+    projection_schema_source_nanos
   )
-  SELECT ?, ?, ?, ?, '[]'
+  SELECT ?, ?, ?, ?, '[]', ?, ?, ?
   WHERE NOT EXISTS (
     SELECT 1
     FROM profiles
@@ -179,7 +239,13 @@ const UPSERT_PROJECTION_FAILURE_SQL = `
           source_update_seconds = ?
           AND (
             source_update_nanos > ?
-            OR (source_update_nanos = ? AND is_deleted = 1)
+            OR (
+              source_update_nanos = ?
+              AND (
+                is_deleted = 1
+                OR projection_schema_version > ?
+              )
+            )
           )
         )
       )
@@ -188,12 +254,32 @@ const UPSERT_PROJECTION_FAILURE_SQL = `
     source_update_seconds = excluded.source_update_seconds,
     source_update_nanos = excluded.source_update_nanos,
     recorded_at_ms = excluded.recorded_at_ms,
-    login_uids_json = '[]'
+    login_uids_json = '[]',
+    projection_schema_version = excluded.projection_schema_version,
+    projection_schema_source_seconds = excluded.projection_schema_source_seconds,
+    projection_schema_source_nanos = excluded.projection_schema_source_nanos
   WHERE (
       excluded.source_update_seconds > profile_projection_failures.source_update_seconds
       OR (
         excluded.source_update_seconds = profile_projection_failures.source_update_seconds
-        AND excluded.source_update_nanos >= profile_projection_failures.source_update_nanos
+        AND (
+          excluded.source_update_nanos > profile_projection_failures.source_update_nanos
+          OR (
+            excluded.source_update_nanos = profile_projection_failures.source_update_nanos
+            AND (
+              excluded.projection_schema_version > profile_projection_failures.projection_schema_version
+              OR (
+                excluded.projection_schema_version = profile_projection_failures.projection_schema_version
+                AND excluded.projection_schema_source_seconds = excluded.source_update_seconds
+                AND excluded.projection_schema_source_nanos = excluded.source_update_nanos
+                AND (
+                  profile_projection_failures.projection_schema_source_seconds != profile_projection_failures.source_update_seconds
+                  OR profile_projection_failures.projection_schema_source_nanos != profile_projection_failures.source_update_nanos
+                )
+              )
+            )
+          )
+        )
       )
     )
     AND NOT EXISTS (
@@ -208,7 +294,10 @@ const UPSERT_PROJECTION_FAILURE_SQL = `
               source_update_nanos > excluded.source_update_nanos
               OR (
                 source_update_nanos = excluded.source_update_nanos
-                AND is_deleted = 1
+                AND (
+                  is_deleted = 1
+                  OR projection_schema_version > excluded.projection_schema_version
+                )
               )
             )
           )
@@ -228,6 +317,8 @@ function clearProjectionFailure(
       sourceVersion.seconds,
       sourceVersion.seconds,
       sourceVersion.nanos,
+      sourceVersion.nanos,
+      PROFILE_PROJECTION_SCHEMA_VERSION,
     );
 }
 
@@ -243,6 +334,8 @@ function clearProjectionFailureAfterDeletion(
       sourceVersion.seconds,
       sourceVersion.seconds,
       sourceVersion.nanos,
+      sourceVersion.nanos,
+      PROFILE_PROJECTION_SCHEMA_VERSION,
       profileId,
       sourceVersion.seconds,
       sourceVersion.nanos,
@@ -267,11 +360,18 @@ export async function commitProfileProjection(
   projection: ProfileProjection,
   projectedAtMs: number,
 ): Promise<void> {
-  if (!Number.isSafeInteger(projectedAtMs) || projectedAtMs <= 0) {
+  if (
+    projection.schemaVersion !== PROFILE_PROJECTION_SCHEMA_VERSION ||
+    !Number.isSafeInteger(projectedAtMs) ||
+    projectedAtMs <= 0
+  ) {
     throw new TypeError("invalid-profile-projected-at");
   }
   const version = [
     projection.profile.id,
+    projection.sourceVersion.seconds,
+    projection.sourceVersion.nanos,
+    projection.schemaVersion,
     projection.sourceVersion.seconds,
     projection.sourceVersion.nanos,
   ] as const;
@@ -289,25 +389,40 @@ export async function commitProfileProjection(
         projection.sortValues.gum,
         projection.sortValues.metal,
         projection.sortValues.ice,
+        Number(projection.sortPresence.rating),
+        Number(projection.sortPresence.mp),
+        Number(projection.sortPresence.dust),
+        Number(projection.sortPresence.slime),
+        Number(projection.sortPresence.gum),
+        Number(projection.sortPresence.metal),
+        Number(projection.sortPresence.ice),
         projection.sourceVersion.seconds,
         projection.sourceVersion.nanos,
         projection.digest,
         projectedAtMs,
+        projection.schemaVersion,
+        projection.sourceVersion.seconds,
+        projection.sourceVersion.nanos,
       ),
     db
       .prepare(
-        `DELETE FROM profile_logins WHERE profile_id = ? AND ${CURRENT_ACTIVE_SOURCE_SQL}`,
+        `DELETE FROM profile_logins_v2 WHERE profile_id = ? AND ${CURRENT_ACTIVE_PROJECTION_SQL}`,
       )
       .bind(projection.profile.id, ...version),
     db
       .prepare(
-        `INSERT OR IGNORE INTO profile_logins (login_uid, profile_id)
-         SELECT CAST(value AS TEXT), ?
+        `INSERT OR IGNORE INTO profile_logins_v2 (
+           login_uid,
+           profile_id,
+           projection_schema_version
+         )
+         SELECT CAST(value AS TEXT), ?, ?
          FROM json_each(?)
-         WHERE ${CURRENT_ACTIVE_SOURCE_SQL}`,
+         WHERE ${CURRENT_ACTIVE_PROJECTION_SQL}`,
       )
       .bind(
         projection.profile.id,
+        projection.schemaVersion,
         JSON.stringify(projection.logins),
         ...version,
       ),
@@ -341,11 +456,15 @@ export async function commitProfileProjectionFailure(
       sourceVersion.seconds,
       sourceVersion.nanos,
       recordedAtMs,
+      PROFILE_PROJECTION_SCHEMA_VERSION,
+      sourceVersion.seconds,
+      sourceVersion.nanos,
       profileId,
       sourceVersion.seconds,
       sourceVersion.seconds,
       sourceVersion.nanos,
       sourceVersion.nanos,
+      PROFILE_PROJECTION_SCHEMA_VERSION,
     )
     .run();
 }
@@ -391,13 +510,16 @@ export async function commitProfileDeletion(
         sourceVersion.nanos,
         "0".repeat(64),
         projectedAtMs,
+        PROFILE_PROJECTION_SCHEMA_VERSION,
+        sourceVersion.seconds,
+        sourceVersion.nanos,
         expectedProfileVersion ? 1 : 0,
         expectedProfileVersion?.seconds ?? 0,
         expectedProfileVersion?.nanos ?? 0,
       ),
     db
       .prepare(
-        `DELETE FROM profile_logins WHERE profile_id = ? AND ${CURRENT_DELETED_SOURCE_SQL}`,
+        `DELETE FROM profile_logins_v2 WHERE profile_id = ? AND ${CURRENT_DELETED_SOURCE_SQL}`,
       )
       .bind(profileId, ...version),
     clearProjectionFailureAfterDeletion(db, profileId, sourceVersion),
@@ -429,6 +551,9 @@ export async function readProfileReconciliationState(
        profile_id,
        source_update_seconds,
        source_update_nanos,
+       projection_schema_source_seconds,
+       projection_schema_source_nanos,
+       projection_schema_version,
        is_deleted,
        0 AS is_failure
      FROM profiles
@@ -438,6 +563,9 @@ export async function readProfileReconciliationState(
        profile_id,
        source_update_seconds,
        source_update_nanos,
+       projection_schema_source_seconds,
+       projection_schema_source_nanos,
+       projection_schema_version,
        NULL AS is_deleted,
        1 AS is_failure
      FROM profile_projection_failures
@@ -456,12 +584,20 @@ export async function readProfileReconciliationState(
       !Number.isSafeInteger(row.source_update_nanos) ||
       row.source_update_nanos < 0 ||
       row.source_update_nanos >= 1_000_000_000 ||
+      !Number.isSafeInteger(row.projection_schema_source_seconds) ||
+      !Number.isSafeInteger(row.projection_schema_source_nanos) ||
+      row.projection_schema_source_nanos < 0 ||
+      row.projection_schema_source_nanos >= 1_000_000_000 ||
+      !Number.isSafeInteger(row.projection_schema_version) ||
+      row.projection_schema_version <= 0 ||
       (row.is_failure !== 0 && row.is_failure !== 1) ||
       (row.is_failure === 0 && row.is_deleted !== 0 && row.is_deleted !== 1)
     ) {
       throw new ProfileRepositoryFailure();
     }
     const state = states.get(row.profile_id) || {
+      failureSchemaSourceVersion: null,
+      failureSchemaVersion: null,
       failureVersion: null,
       profile: null,
     };
@@ -469,11 +605,19 @@ export async function readProfileReconciliationState(
       seconds: row.source_update_seconds,
       nanos: row.source_update_nanos,
     };
+    const schemaSourceVersion = {
+      seconds: row.projection_schema_source_seconds,
+      nanos: row.projection_schema_source_nanos,
+    };
     if (row.is_failure === 1) {
       state.failureVersion = sourceVersion;
+      state.failureSchemaVersion = row.projection_schema_version;
+      state.failureSchemaSourceVersion = schemaSourceVersion;
     } else {
       state.profile = {
         isDeleted: row.is_deleted === 1,
+        schemaVersion: row.projection_schema_version,
+        schemaSourceVersion,
         sourceVersion,
       };
     }
@@ -482,22 +626,28 @@ export async function readProfileReconciliationState(
   return states;
 }
 
-function leaderboardColumn(type: LeaderboardReadType): string {
+function leaderboardColumns(type: LeaderboardReadType): {
+  present: string;
+  value: string;
+} {
   switch (type) {
     case "rating":
-      return "rating_sort";
+      return { present: "rating_sort_present", value: "rating_sort" };
     case "mp":
-      return "mana_points_sort";
+      return {
+        present: "mana_points_sort_present",
+        value: "mana_points_sort",
+      };
     case "dust":
-      return "dust_sort";
+      return { present: "dust_sort_present", value: "dust_sort" };
     case "slime":
-      return "slime_sort";
+      return { present: "slime_sort_present", value: "slime_sort" };
     case "gum":
-      return "gum_sort";
+      return { present: "gum_sort_present", value: "gum_sort" };
     case "metal":
-      return "metal_sort";
+      return { present: "metal_sort_present", value: "metal_sort" };
     case "ice":
-      return "ice_sort";
+      return { present: "ice_sort_present", value: "ice_sort" };
   }
 }
 
@@ -550,28 +700,34 @@ export function createD1ProfileRepository(db: D1Database): ProfileRepository {
 
     async getProfileByLoginId(loginId) {
       await assertAllHealthy();
-      const mapping = await db
+      const row = await db
         .prepare(
-          `SELECT profile_id
-           FROM profile_logins
-           WHERE login_uid = ?
-           ORDER BY profile_id ASC
+          `SELECT
+             profiles.profile_id,
+             profiles.payload_json,
+             profiles.merged_into_profile_id
+           FROM profile_logins_v2
+           INNER JOIN profiles
+             ON profiles.profile_id = profile_logins_v2.profile_id
+           WHERE profile_logins_v2.login_uid = ?
+             AND profiles.is_deleted = 0
+           ORDER BY profile_logins_v2.profile_id ASC
            LIMIT 1`,
         )
         .bind(loginId)
-        .first<{ profile_id: string }>();
-      return mapping ? getById(mapping.profile_id) : null;
+        .first<ProfileRow>();
+      return row ? parseProfile(row) : null;
     },
 
     async readLeaderboard(type) {
       await assertAllHealthy();
-      const column = leaderboardColumn(type);
+      const columns = leaderboardColumns(type);
       const result = await db
         .prepare(
           `SELECT profile_id, payload_json, merged_into_profile_id
            FROM profiles
-           WHERE is_deleted = 0 AND ${column} IS NOT NULL
-           ORDER BY ${column} DESC, profile_id DESC
+           WHERE is_deleted = 0 AND ${columns.present} = 1
+           ORDER BY ${columns.value} DESC, profile_id DESC
            LIMIT ?`,
         )
         .bind(LEADERBOARD_ENTRY_LIMIT)

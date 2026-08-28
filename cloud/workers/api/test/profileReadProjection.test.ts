@@ -12,6 +12,7 @@ import {
   processProfileReadProjectionTask,
   reconcileProfileReadProjections,
 } from "../src/profileReadProjection.ts";
+import { PROFILE_PROJECTION_SCHEMA_VERSION } from "../src/profileProjectionModel.ts";
 import {
   parseProfileReadProjectionTask,
   PROFILE_READ_PROJECTION_QUEUE_NAME,
@@ -33,6 +34,9 @@ type ReconciliationRow = {
   is_deleted: number | null;
   is_failure: number;
   profile_id: string;
+  projection_schema_source_nanos: number;
+  projection_schema_source_seconds: number;
+  projection_schema_version: number;
   source_update_nanos: number;
   source_update_seconds: number;
 };
@@ -243,6 +247,9 @@ test("missing profiles use current D1 state for a CAS tombstone", async () => {
             source_update_nanos: 200,
             is_deleted: 0,
             is_failure: 0,
+            projection_schema_source_seconds: 1_787_832_000,
+            projection_schema_source_nanos: 200,
+            projection_schema_version: PROFILE_PROJECTION_SCHEMA_VERSION,
           },
         ],
         {
@@ -311,6 +318,13 @@ test("reconciliation compares profiles, failures, and deletion candidates", asyn
   const secondPage = {
     documents: [
       profileDocument("repaired", "2026-08-27T12:00:00.000000400Z"),
+      profileDocument("failure-schema-old", "2026-08-27T12:00:00.000000700Z"),
+      profileDocument(
+        "failure-schema-source-stale",
+        "2026-08-27T12:00:00.000000800Z",
+      ),
+      profileDocument("schema-old", "2026-08-27T12:00:00.000000500Z"),
+      profileDocument("schema-source-stale", "2026-08-27T12:00:00.000000600Z"),
       profileDocument("stale", "2026-08-27T12:00:00.000000200Z"),
     ],
     nextPageToken: "",
@@ -329,9 +343,54 @@ test("reconciliation compares profiles, failures, and deletion candidates", asyn
     profile_id: String(profileId),
     source_update_seconds: 1_787_832_000,
     source_update_nanos: Number(nanos),
+    projection_schema_source_seconds: 1_787_832_000,
+    projection_schema_source_nanos: Number(nanos),
+    projection_schema_version: PROFILE_PROJECTION_SCHEMA_VERSION,
     is_deleted: isDeleted === null ? null : Number(isDeleted),
     is_failure: Number(isFailure),
   }));
+  rows.push(
+    {
+      profile_id: "failure-schema-old",
+      source_update_seconds: 1_787_832_000,
+      source_update_nanos: 700,
+      projection_schema_source_seconds: 1_787_832_000,
+      projection_schema_source_nanos: 700,
+      projection_schema_version: 1,
+      is_deleted: null,
+      is_failure: 1,
+    },
+    {
+      profile_id: "failure-schema-source-stale",
+      source_update_seconds: 1_787_832_000,
+      source_update_nanos: 800,
+      projection_schema_source_seconds: 1_787_832_000,
+      projection_schema_source_nanos: 700,
+      projection_schema_version: PROFILE_PROJECTION_SCHEMA_VERSION,
+      is_deleted: null,
+      is_failure: 1,
+    },
+    {
+      profile_id: "schema-old",
+      source_update_seconds: 1_787_832_000,
+      source_update_nanos: 500,
+      projection_schema_source_seconds: 1_787_832_000,
+      projection_schema_source_nanos: 500,
+      projection_schema_version: 1,
+      is_deleted: 0,
+      is_failure: 0,
+    },
+    {
+      profile_id: "schema-source-stale",
+      source_update_seconds: 1_787_832_000,
+      source_update_nanos: 600,
+      projection_schema_source_seconds: 1_787_832_000,
+      projection_schema_source_nanos: 500,
+      projection_schema_version: PROFILE_PROJECTION_SCHEMA_VERSION,
+      is_deleted: 0,
+      is_failure: 0,
+    },
+  );
   const queued: unknown[] = [];
   const env = queueEnv(async (messages) => {
     queued.push(...Array.from(messages, (entry) => entry.body));
@@ -349,12 +408,16 @@ test("reconciliation compares profiles, failures, and deletion candidates", asyn
     firestore,
     logger: { info: () => undefined, error: () => undefined },
   });
-  assert.equal(count, 5);
+  assert.equal(count, 9);
   assert.deepEqual(queued, [
     { profileId: "deleted" },
     { profileId: "failure-only" },
+    { profileId: "failure-schema-old" },
+    { profileId: "failure-schema-source-stale" },
     { profileId: "new" },
     { profileId: "repaired" },
+    { profileId: "schema-old" },
+    { profileId: "schema-source-stale" },
     { profileId: "stale" },
   ]);
   assert.deepEqual(listCalls, [
@@ -368,6 +431,9 @@ test("reconciliation sends at most 100 profile IDs per Queue batch", async () =>
     profile_id: `deleted-${String(index).padStart(3, "0")}`,
     source_update_seconds: 1_787_832_000,
     source_update_nanos: 100,
+    projection_schema_source_seconds: 1_787_832_000,
+    projection_schema_source_nanos: 100,
+    projection_schema_version: PROFILE_PROJECTION_SCHEMA_VERSION,
     is_deleted: 0,
     is_failure: 0,
   }));
@@ -399,6 +465,9 @@ test("reconciliation logs and propagates Queue failures", async () => {
           source_update_nanos: 100,
           is_deleted: 0,
           is_failure: 0,
+          projection_schema_source_seconds: 1_787_832_000,
+          projection_schema_source_nanos: 100,
+          projection_schema_version: PROFILE_PROJECTION_SCHEMA_VERSION,
         },
       ]),
       firestore: firestoreClient(),

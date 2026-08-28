@@ -118,7 +118,7 @@ export const TELEGRAM_TEST_ENV = {
   PROFILE_PROJECTION_QUEUE: queue,
   PROFILE_DB: profileGamesDb,
   PROFILE_GAMES_DB: profileGamesDb,
-  PROFILE_READ_MODE: "d1",
+  PROFILE_READ_MODE: "firestore",
   RATING_SERVICE_ACCOUNT_EMAIL: "rating@example.iam.gserviceaccount.com",
   RATING_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET: "test-announcement-secret",

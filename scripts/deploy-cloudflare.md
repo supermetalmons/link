@@ -61,6 +61,8 @@ Apply the profile read-model schema before releasing a Worker version that inclu
 npx wrangler d1 migrations apply mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
+Before applying profile migration `0005`, promote the tagged Firestore-mode rollback version. Keep reads on Firestore while the schema-v2 Worker reconciles and verification passes; only then promote D1 mode. After `0005`, do not roll back to a schema-v1 D1 version because it uses the retired login-mapping table.
+
 `PROFILE_READ_MODE` is tracked in `cloud/workers/api/wrangler.jsonc` and accepts only `firestore` or `d1`. Invalid values fail closed. Keep it on `firestore` while validating projection delivery and reconciliation, then promote the exact verified code in `d1` mode. Do not create a Dashboard override.
 
 Backfill and verify without printing profile contents. The helper is locked to the production `mons-link` Firebase project because its Wrangler target is the production D1 database:
@@ -77,7 +79,7 @@ Any `profile_projection_failures` row makes all D1 profile and leaderboard reads
 
 First upload and promote the simplified Worker with tracked mode `firestore`, deploy its triggers, and record that Version ID for rollback. Require two consecutive successful five-minute reconciliation runs, an empty active Queue backlog, no projection failures, matching profile/login/version counts and digests, and successful profile, login, and all seven leaderboard smoke checks. Then change the tracked mode to `d1`, regenerate Worker types, run `npm run check:api`, `npm run check:tooling`, and `npm run check:all`, and upload and smoke that exact candidate before promoting it. After promotion, smoke production and rerun remote verification.
 
-Keep custom Worker log sampling at `1` through this validation and cutover window so every reconciliation summary is retained. Reduce it only in a separately reviewed release after D1 production verification is complete.
+Use Git tag `profile-d1-firestore-26f7ab59` for the retained Firestore rollback source and `profile-d1-cutover-84135e82` for the initial D1 cutover source. Custom Worker logs use the steady-state `0.1` sampling rate after cutover verification.
 
 Rollback by promoting the retained simplified `firestore`-mode Version ID. Keep all profile projection infrastructure and data intact so reconciliation continues while reads are rolled back.
 

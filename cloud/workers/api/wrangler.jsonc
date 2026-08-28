@@ -11,7 +11,7 @@
     "APPLE_AUDIENCES": "link.mons",
     "AUTH_MUTATIONS_DISABLED": "false",
     "FIREBASE_RTDB_URL": "https://mons-link-default-rtdb.firebaseio.com",
-    "PROFILE_READ_MODE": "d1",
+    "PROFILE_READ_MODE": "firestore",
   },
   "d1_databases": [
     {
@@ -174,7 +174,7 @@
     "enabled": true,
     "logs": {
       "enabled": true,
-      "head_sampling_rate": 1,
+      "head_sampling_rate": 0.1,
       "invocation_logs": false,
       "persist": true,
     },

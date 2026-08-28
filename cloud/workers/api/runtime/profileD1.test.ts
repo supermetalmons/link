@@ -8,7 +8,10 @@ import {
   createD1ProfileRepository,
   readProfileReconciliationState,
 } from "../src/profileD1.ts";
-import { createProfileProjection } from "../src/profileProjectionModel.ts";
+import {
+  createProfileProjection,
+  PROFILE_PROJECTION_SCHEMA_VERSION,
+} from "../src/profileProjectionModel.ts";
 
 const testEnv = env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] };
 const SOURCE_SECONDS = 1_787_832_000;
@@ -59,6 +62,7 @@ describe("profile D1 read model", () => {
   beforeEach(async () => {
     await testEnv.PROFILE_DB.batch([
       testEnv.PROFILE_DB.prepare("DELETE FROM profile_projection_failures"),
+      testEnv.PROFILE_DB.prepare("DELETE FROM profile_logins_v2"),
       testEnv.PROFILE_DB.prepare("DELETE FROM profile_logins"),
       testEnv.PROFILE_DB.prepare("DELETE FROM profiles"),
     ]);
@@ -107,11 +111,146 @@ describe("profile D1 read model", () => {
       1_000,
     );
     const count = await testEnv.PROFILE_DB.prepare(
-      "SELECT COUNT(*) AS count FROM profile_logins WHERE profile_id = ?",
+      "SELECT COUNT(*) AS count FROM profile_logins_v2 WHERE profile_id = ?",
     )
       .bind("profile-many")
       .first<{ count: number }>();
     expect(count?.count).toBe(366);
+  });
+
+  it("fences delayed schema writes and repairs current login mappings", async () => {
+    const current = await projection(
+      "profile-fenced",
+      fields({ logins: ["current-login"], username: "current" }),
+      200,
+    );
+    await commitProfileProjection(testEnv.PROFILE_DB, current, 1_000);
+    const delayed = await projection(
+      "profile-fenced",
+      fields({ logins: ["delayed-login"], username: "delayed" }),
+      200,
+    );
+    await testEnv.PROFILE_DB.batch([
+      testEnv.PROFILE_DB.prepare(
+        `UPDATE profiles
+         SET payload_json = ?, source_digest = ?, projected_at_ms = ?
+         WHERE profile_id = ?`,
+      ).bind(
+        JSON.stringify(delayed.profile),
+        delayed.digest,
+        2_000,
+        "profile-fenced",
+      ),
+      testEnv.PROFILE_DB.prepare(
+        "DELETE FROM profile_logins WHERE profile_id = ?",
+      ).bind("profile-fenced"),
+      testEnv.PROFILE_DB.prepare(
+        "INSERT INTO profile_logins (login_uid, profile_id) VALUES (?, ?)",
+      ).bind("delayed-login", "profile-fenced"),
+    ]);
+    const repository = createD1ProfileRepository(testEnv.PROFILE_DB);
+    expect(
+      (await repository.getProfileById("profile-fenced", "token"))?.username,
+    ).toBe("current");
+    expect(
+      (await repository.getProfileByLoginId("current-login", "token"))?.id,
+    ).toBe("profile-fenced");
+    expect(
+      await repository.getProfileByLoginId("delayed-login", "token"),
+    ).toBeNull();
+
+    await testEnv.PROFILE_DB.prepare(
+      "DELETE FROM profile_logins_v2 WHERE profile_id = ?",
+    )
+      .bind("profile-fenced")
+      .run();
+    await commitProfileProjection(testEnv.PROFILE_DB, current, 3_000);
+    expect(
+      (await repository.getProfileByLoginId("current-login", "token"))?.id,
+    ).toBe("profile-fenced");
+  });
+
+  it("repairs a newer source written without current schema metadata", async () => {
+    await commitProfileProjection(
+      testEnv.PROFILE_DB,
+      await projection(
+        "profile-fenced",
+        fields({ logins: ["old-login"], username: "old" }),
+        100,
+      ),
+      1_000,
+    );
+    const staleWriter = await projection(
+      "profile-fenced",
+      fields({ logins: ["stale-writer"], username: "stale-writer" }),
+      200,
+    );
+    await testEnv.PROFILE_DB.prepare(
+      `UPDATE profiles
+       SET payload_json = ?, source_update_nanos = ?, source_digest = ?
+       WHERE profile_id = ?`,
+    )
+      .bind(
+        JSON.stringify(staleWriter.profile),
+        200,
+        staleWriter.digest,
+        "profile-fenced",
+      )
+      .run();
+    const staleState = (
+      await readProfileReconciliationState(testEnv.PROFILE_DB)
+    ).get("profile-fenced");
+    expect(staleState?.profile?.sourceVersion.nanos).toBe(200);
+    expect(staleState?.profile?.schemaSourceVersion.nanos).toBe(100);
+
+    const repaired = await projection(
+      "profile-fenced",
+      fields({ logins: ["repaired-login"], username: "repaired" }),
+      200,
+    );
+    await commitProfileProjection(testEnv.PROFILE_DB, repaired, 2_000);
+    const repository = createD1ProfileRepository(testEnv.PROFILE_DB);
+    expect(
+      (await repository.getProfileById("profile-fenced", "token"))?.username,
+    ).toBe("repaired");
+    expect(
+      (await repository.getProfileByLoginId("repaired-login", "token"))?.id,
+    ).toBe("profile-fenced");
+    const repairedState = (
+      await readProfileReconciliationState(testEnv.PROFILE_DB)
+    ).get("profile-fenced");
+    expect(repairedState?.profile?.schemaSourceVersion).toEqual(
+      repairedState?.profile?.sourceVersion,
+    );
+  });
+
+  it("clears current login mappings when a legacy write tombstones a row", async () => {
+    await commitProfileProjection(
+      testEnv.PROFILE_DB,
+      await projection(
+        "profile-deleted",
+        fields({ logins: ["current-login"] }),
+        100,
+      ),
+      1_000,
+    );
+    await testEnv.PROFILE_DB.prepare(
+      "UPDATE profiles SET is_deleted = 1 WHERE profile_id = ?",
+    )
+      .bind("profile-deleted")
+      .run();
+    const count = await testEnv.PROFILE_DB.prepare(
+      "SELECT COUNT(*) AS count FROM profile_logins_v2 WHERE profile_id = ?",
+    )
+      .bind("profile-deleted")
+      .first<{ count: number }>();
+    expect(count?.count).toBe(0);
+    expect(
+      await createD1ProfileRepository(testEnv.PROFILE_DB).getProfileByLoginId(
+        "current-login",
+        "token",
+      ),
+    ).toBeNull();
   });
 
   it("prevents equal-version resurrection and permits a newer recreation", async () => {
@@ -262,6 +401,39 @@ describe("profile D1 read model", () => {
     ).toBeNull();
   });
 
+  it("repairs failure schema metadata after a stale writer advances source", async () => {
+    await commitProfileProjectionFailure(
+      testEnv.PROFILE_DB,
+      "profile-invalid",
+      { seconds: SOURCE_SECONDS, nanos: 100 },
+      1_000,
+    );
+    await testEnv.PROFILE_DB.prepare(
+      `UPDATE profile_projection_failures
+       SET source_update_nanos = ?
+       WHERE profile_id = ?`,
+    )
+      .bind(200, "profile-invalid")
+      .run();
+    let state = (await readProfileReconciliationState(testEnv.PROFILE_DB)).get(
+      "profile-invalid",
+    );
+    expect(state?.failureVersion?.nanos).toBe(200);
+    expect(state?.failureSchemaSourceVersion?.nanos).toBe(100);
+
+    await commitProfileProjectionFailure(
+      testEnv.PROFILE_DB,
+      "profile-invalid",
+      { seconds: SOURCE_SECONDS, nanos: 200 },
+      2_000,
+    );
+    state = (await readProfileReconciliationState(testEnv.PROFILE_DB)).get(
+      "profile-invalid",
+    );
+    expect(state?.failureSchemaVersion).toBe(PROFILE_PROJECTION_SCHEMA_VERSION);
+    expect(state?.failureSchemaSourceVersion).toEqual(state?.failureVersion);
+  });
+
   it("retains a failure fence when deletion loses its CAS race", async () => {
     const failureVersion = { seconds: SOURCE_SECONDS, nanos: 200 };
     await commitProfileProjectionFailure(
@@ -288,6 +460,8 @@ describe("profile D1 read model", () => {
     ).get("profile-race");
     expect(state?.profile).toEqual({
       isDeleted: false,
+      schemaSourceVersion: { seconds: SOURCE_SECONDS, nanos: 100 },
+      schemaVersion: PROFILE_PROJECTION_SCHEMA_VERSION,
       sourceVersion: { seconds: SOURCE_SECONDS, nanos: 100 },
     });
     expect(state?.failureVersion).toEqual(failureVersion);
@@ -322,7 +496,12 @@ describe("profile D1 read model", () => {
     const state = (
       await readProfileReconciliationState(testEnv.PROFILE_DB)
     ).get("profile-deleted");
-    expect(state?.profile).toEqual({ isDeleted: true, sourceVersion });
+    expect(state?.profile).toEqual({
+      isDeleted: true,
+      schemaSourceVersion: sourceVersion,
+      schemaVersion: PROFILE_PROJECTION_SCHEMA_VERSION,
+      sourceVersion,
+    });
     expect(state?.failureVersion).toBeNull();
     expect(
       await createD1ProfileRepository(testEnv.PROFILE_DB).getProfileById(
@@ -359,6 +538,62 @@ describe("profile D1 read model", () => {
     ]);
     expect(leaderboard[0].completedProblemIds).toBeUndefined();
     expect(leaderboard[0].isTutorialCompleted).toBeUndefined();
+  });
+
+  it("orders explicit nulls after numbers and excludes missing fields", async () => {
+    const nullSortFields = fields({
+      rating: null,
+      totalManaPoints: null,
+      mining: {
+        materials: {
+          dust: null,
+          slime: null,
+          gum: null,
+          metal: null,
+          ice: null,
+        },
+      },
+    });
+    const missingSortFields: Record<string, unknown> = fields();
+    delete missingSortFields.rating;
+    delete missingSortFields.totalManaPoints;
+    missingSortFields.mining = { materials: {} };
+    await commitProfileProjection(
+      testEnv.PROFILE_DB,
+      await projection("profile-number", fields(), 100),
+      1_000,
+    );
+    await commitProfileProjection(
+      testEnv.PROFILE_DB,
+      await projection("profile-null-a", nullSortFields, 100),
+      1_000,
+    );
+    await commitProfileProjection(
+      testEnv.PROFILE_DB,
+      await projection("profile-null-z", nullSortFields, 100),
+      1_000,
+    );
+    await commitProfileProjection(
+      testEnv.PROFILE_DB,
+      await projection("profile-missing", missingSortFields, 100),
+      1_000,
+    );
+    const repository = createD1ProfileRepository(testEnv.PROFILE_DB);
+    for (const type of [
+      "rating",
+      "mp",
+      "dust",
+      "slime",
+      "gum",
+      "metal",
+      "ice",
+    ] as const) {
+      expect(
+        (await repository.readLeaderboard(type, "token")).map(
+          (profile) => profile.id,
+        ),
+      ).toEqual(["profile-number", "profile-null-z", "profile-null-a"]);
+    }
   });
 
   it("maps and limits all seven leaderboards", async () => {
@@ -429,7 +664,7 @@ describe("profile D1 read model", () => {
       "target",
     );
     expect((await repository.getProfileByLoginId("shared", "token"))?.id).toBe(
-      "target",
+      "source",
     );
   });
 });
