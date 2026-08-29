@@ -212,6 +212,7 @@ export type CanonicalWagerSettlement = {
   loserProfileId: string;
   material: MiningMaterialName;
   operationId: string;
+  outcome: "applied" | "insufficient-materials";
   revision: 1;
   winnerProfileId: string;
 };
@@ -374,6 +375,7 @@ type WagerRow = {
   loser_profile_id: string;
   material: string;
   operation_id: string;
+  outcome: string;
   revision: number;
   winner_profile_id: string;
 };
@@ -830,6 +832,7 @@ export function parseCanonicalWagerSettlementRow(
   if (
     !row ||
     !(MATERIAL_KEYS as readonly string[]).includes(row.material) ||
+    (row.outcome !== "applied" && row.outcome !== "insufficient-materials") ||
     row.revision !== 1
   ) {
     throw new CanonicalProfileCorruption();
@@ -842,6 +845,7 @@ export function parseCanonicalWagerSettlementRow(
     material: row.material as MiningMaterialName,
     count: safeInteger(row.count, 1),
     appliedAtMs: safeInteger(row.applied_at_ms),
+    outcome: row.outcome,
     revision: 1,
   };
 }
@@ -2422,8 +2426,8 @@ function mutationStatement(
         .prepare(
           `INSERT INTO wager_settlements (
              operation_id, fingerprint, winner_profile_id, loser_profile_id,
-             material, count, applied_at_ms, revision
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+             material, count, applied_at_ms, outcome, revision
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
         )
         .bind(
           mutation.value.operationId,
@@ -2433,6 +2437,7 @@ function mutationStatement(
           mutation.value.material,
           mutation.value.count,
           mutation.value.appliedAtMs,
+          mutation.value.outcome,
         );
   }
 }

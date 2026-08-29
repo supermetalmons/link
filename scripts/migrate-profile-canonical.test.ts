@@ -63,15 +63,22 @@ function sqliteD1Client(
 
 function database(): DatabaseSync {
   const value = new DatabaseSync(":memory:");
+  for (const migration of [
+    "0007_profile_canonical.sql",
+    "0008_wager_settlement_outcomes.sql",
+  ]) {
+    applyProfileMigration(value, migration);
+  }
+  return value;
+}
+
+function applyProfileMigration(value: DatabaseSync, migration: string): void {
   value.exec(
     readFileSync(
-      resolve(
-        "cloud/workers/api/profile-migrations/0007_profile_canonical.sql",
-      ),
+      resolve("cloud/workers/api/profile-migrations", migration),
       "utf8",
     ),
   );
-  return value;
 }
 
 function setImporting(value: DatabaseSync): void {
@@ -367,6 +374,88 @@ test("validates auth operations, ratings, and wager receipts", async () => {
     }),
     /malformed-integer-field/,
   );
+});
+
+test("migrates existing wager settlements to immutable applied outcomes", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    applyProfileMigration(db, "0007_profile_canonical.sql");
+    db.prepare(
+      `INSERT INTO wager_settlements (
+         operation_id, fingerprint, winner_profile_id, loser_profile_id,
+         material, count, applied_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "legacy-operation",
+      "legacy-fingerprint",
+      "winner-profile",
+      "loser-profile",
+      "dust",
+      1,
+      100,
+    );
+
+    applyProfileMigration(db, "0008_wager_settlement_outcomes.sql");
+
+    assert.deepEqual(
+      {
+        ...(db
+          .prepare(
+            `SELECT fingerprint, outcome
+             FROM wager_settlements WHERE operation_id = ?`,
+          )
+          .get("legacy-operation") as Record<string, unknown>),
+      },
+      {
+        fingerprint: "legacy-fingerprint",
+        outcome: "applied",
+      },
+    );
+    assert.throws(
+      () =>
+        db
+          .prepare(
+            `INSERT OR REPLACE INTO wager_settlements (
+               operation_id, fingerprint, winner_profile_id, loser_profile_id,
+               material, count, applied_at_ms, outcome
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            "legacy-operation",
+            "legacy-fingerprint",
+            "winner-profile",
+            "loser-profile",
+            "dust",
+            1,
+            100,
+            "insufficient-materials",
+          ),
+      /wager settlements are immutable/,
+    );
+    assert.throws(
+      () =>
+        db
+          .prepare(
+            `INSERT INTO wager_settlements (
+               operation_id, fingerprint, winner_profile_id, loser_profile_id,
+               material, count, applied_at_ms, outcome
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            "invalid-operation",
+            "invalid-fingerprint",
+            "winner-profile",
+            "loser-profile",
+            "dust",
+            1,
+            101,
+            "invalid",
+          ),
+      /CHECK constraint failed/,
+    );
+  } finally {
+    db.close();
+  }
 });
 
 test("normalizes rating fallbacks into exact canonical materialization", async () => {

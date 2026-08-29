@@ -11,8 +11,7 @@ import {
   type AuthRecoveryTask,
 } from "./authRecovery.ts";
 import {
-  handleTelegramQueueMessage,
-  parseWagerSettlementRetryTask,
+  handleTelegramQueue,
   type TelegramTaskPayload,
   type WagerSettlementRetryTask,
 } from "./telegramQueue.ts";
@@ -146,19 +145,7 @@ async function handleQueue(
   if (batch.queue === PROFILE_GAME_PROJECTION_QUEUE_NAME) {
     return handleProfileGameProjectionQueue(batch, env);
   }
-  let profileBackgroundEnabled: Promise<boolean> | null = null;
-  for (const message of batch.messages) {
-    if (parseWagerSettlementRetryTask(message.body)) {
-      profileBackgroundEnabled ||= profileBackgroundMutationsEnabled(env);
-      if (!(await profileBackgroundEnabled)) {
-        message.retry({
-          delaySeconds: PROFILE_WRITES_QUEUE_RETRY_DELAY_SECONDS,
-        });
-        continue;
-      }
-    }
-    await handleTelegramQueueMessage(message, env);
-  }
+  return handleTelegramQueue(batch, env);
 }
 
 export default {

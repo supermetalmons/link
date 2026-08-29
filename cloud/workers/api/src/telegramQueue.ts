@@ -25,15 +25,20 @@ import {
   createGameplayRepository,
   type GameplayRepository,
 } from "./gameplayRepository.ts";
+import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
+  classifyWagerSettlementRetry,
   resumeWagerSettlement,
+  type WagerSettlementResolution,
   type WagerSettlementRetryTask,
 } from "./wagerOutcome.ts";
+import { profileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
 
 const MAX_QUEUE_DELAY_SECONDS = 24 * 60 * 60;
 const MIN_DISPATCH_INTERVAL_MS = 1_000;
 const MAX_INFRASTRUCTURE_RETRY_DELAY_SECONDS = 60;
 const TELEGRAM_FROZEN_RETRY_SECONDS = 60;
+const WAGER_SETTLEMENT_RETRY_DELAY_SECONDS = 5 * 60;
 
 const defaultSleep = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
@@ -58,22 +63,59 @@ function toRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function isExactNonEmptyString(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.trim() === value && value.length > 0
+  );
+}
+
 function parseWagerSettlementRetryTask(
   value: unknown,
 ): WagerSettlementRetryTask | null {
   const task = toRecord(value);
-  return task?.kind === "wager-settlement" &&
-    typeof task.inviteId === "string" &&
-    typeof task.matchId === "string" &&
-    typeof task.operationId === "string" &&
-    Object.keys(task).length === 4
-    ? {
-        kind: "wager-settlement",
-        inviteId: task.inviteId,
-        matchId: task.matchId,
-        operationId: task.operationId,
-      }
-    : null;
+  if (
+    task?.kind !== "wager-settlement" ||
+    !isSafeFirebaseKey(task.inviteId) ||
+    !isSafeFirebaseKey(task.matchId) ||
+    typeof task.operationId !== "string"
+  ) {
+    return null;
+  }
+  if (Object.keys(task).length === 4) {
+    return {
+      kind: "wager-settlement",
+      inviteId: task.inviteId,
+      matchId: task.matchId,
+      operationId: task.operationId,
+    };
+  }
+  const resolution = toRecord(task.resolution);
+  if (
+    Object.keys(task).length !== 5 ||
+    !resolution ||
+    Object.keys(resolution).length !== 4 ||
+    !isExactNonEmptyString(resolution.winnerUid) ||
+    !isSafeFirebaseKey(resolution.winnerUid) ||
+    !isExactNonEmptyString(resolution.winnerProfileId) ||
+    !isExactNonEmptyString(resolution.loserUid) ||
+    !isSafeFirebaseKey(resolution.loserUid) ||
+    !isExactNonEmptyString(resolution.loserProfileId)
+  ) {
+    return null;
+  }
+  const parsedResolution: WagerSettlementResolution = {
+    winnerUid: resolution.winnerUid,
+    winnerProfileId: resolution.winnerProfileId,
+    loserUid: resolution.loserUid,
+    loserProfileId: resolution.loserProfileId,
+  };
+  return {
+    kind: "wager-settlement",
+    inviteId: task.inviteId,
+    matchId: task.matchId,
+    operationId: task.operationId,
+    resolution: parsedResolution,
+  };
 }
 
 function logicalDelaySeconds(scheduleTimeMs: number, nowMs: number): number {
@@ -115,6 +157,43 @@ function createRetryScheduler(
   };
 }
 
+async function deferWagerSettlement(
+  message: Message<unknown>,
+  task: WagerSettlementRetryTask,
+  env: Env,
+  logger: Pick<Console, "error" | "info">,
+  reason: string,
+  code?: string,
+): Promise<void> {
+  try {
+    await env.TELEGRAM_DELIVERY_QUEUE.send(task, {
+      delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS,
+    });
+    message.ack();
+    const entry = JSON.stringify({
+      event: "wager_settlement_queue_deferred",
+      operationId: task.operationId,
+      reason,
+      ...(code ? { code } : {}),
+    });
+    if (code) {
+      logger.error(entry);
+    } else {
+      logger.info(entry);
+    }
+  } catch (error) {
+    message.retry({ delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS });
+    logger.error(
+      JSON.stringify({
+        event: "wager_settlement_queue_defer_failed",
+        operationId: task.operationId,
+        reason,
+        code: error instanceof Error ? error.message : "unknown",
+      }),
+    );
+  }
+}
+
 export async function handleTelegramQueueMessage(
   message: Message<unknown>,
   env: Env,
@@ -122,8 +201,10 @@ export async function handleTelegramQueueMessage(
     createRepository,
     createEngine = createTelegramDeliveryEngine,
     createGameplay = (workerEnv) => createGameplayRepository(workerEnv),
+    classifySettlement = classifyWagerSettlementRetry,
     logger = console,
     now = Date.now,
+    profileMutationsEnabled = profileBackgroundMutationsEnabled,
     readStorageMode,
     resumeSettlement = resumeWagerSettlement,
     sleep = defaultSleep,
@@ -131,8 +212,10 @@ export async function handleTelegramQueueMessage(
     createRepository?: (env: Env) => TelegramRepository;
     createEngine?: TelegramEngineFactory;
     createGameplay?: (env: Env) => GameplayRepository;
+    classifySettlement?: typeof classifyWagerSettlementRetry;
     logger?: Pick<Console, "error" | "info">;
     now?: () => number;
+    profileMutationsEnabled?: typeof profileBackgroundMutationsEnabled;
     resumeSettlement?: typeof resumeWagerSettlement;
     readStorageMode?: (db: D1Database) => Promise<TelegramStorageMode>;
     sleep?: (milliseconds: number) => Promise<void>;
@@ -145,6 +228,46 @@ export async function handleTelegramQueueMessage(
       message.ack();
       logger.error(
         JSON.stringify({ event: "wager_settlement_queue_invalid_message" }),
+      );
+      return;
+    }
+    let mutationsEnabled = false;
+    try {
+      mutationsEnabled = await profileMutationsEnabled(env);
+    } catch {
+      mutationsEnabled = false;
+    }
+    if (!mutationsEnabled) {
+      try {
+        const status = await classifySettlement(task, createGameplay(env));
+        if (status === "completed" || status === "stale") {
+          message.ack();
+          logger.info(
+            JSON.stringify({
+              event: "wager_settlement_queue_processed",
+              operationId: task.operationId,
+              status,
+            }),
+          );
+          return;
+        }
+      } catch (error) {
+        await deferWagerSettlement(
+          message,
+          task,
+          env,
+          logger,
+          "classification-unavailable",
+          error instanceof Error ? error.message : "unknown",
+        );
+        return;
+      }
+      await deferWagerSettlement(
+        message,
+        task,
+        env,
+        logger,
+        "profile-writes-disabled",
       );
       return;
     }
@@ -265,6 +388,7 @@ export {
   MAX_QUEUE_DELAY_SECONDS,
   MIN_DISPATCH_INTERVAL_MS,
   TELEGRAM_FROZEN_RETRY_SECONDS,
+  WAGER_SETTLEMENT_RETRY_DELAY_SECONDS,
   createRetryScheduler,
   infrastructureRetryDelaySeconds,
   logicalDelaySeconds,

@@ -379,6 +379,7 @@ const TABLE_COLUMNS: Record<CanonicalTable, readonly string[]> = {
     "material",
     "count",
     "applied_at_ms",
+    "outcome",
     "revision",
   ],
 };
@@ -1655,6 +1656,7 @@ function addWagerSettlements(
       material,
       count,
       applied_at_ms: nonnegativeInteger(fields.appliedAtMs),
+      outcome: "applied",
       revision: 1,
     });
   }
@@ -3257,6 +3259,9 @@ export function validateCanonicalTarget(dataset: CanonicalDataset): void {
       row.applied_at_ms,
       "malformed-canonical-wager-settlement",
     );
+    if (row.outcome !== "applied" && row.outcome !== "insufficient-materials") {
+      fail("malformed-canonical-wager-settlement");
+    }
     validateCanonicalRevision(row, 1);
   }
 }

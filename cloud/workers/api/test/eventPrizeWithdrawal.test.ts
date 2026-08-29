@@ -180,6 +180,32 @@ function repository() {
   return { value, values, withdrawalStore };
 }
 
+function setRecoverableWithdrawal(
+  state: ReturnType<typeof repository>,
+  status: "processing" | "submitted",
+): void {
+  state.values.set(`eventPrizeWithdrawals/${eventId}/${prizeId}`, {
+    assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+    eventId,
+    leaseExpiresAtMs: 2_000,
+    leaseId: "workflow-lease",
+    place: 1,
+    prizeId,
+    profileId,
+    recipientAddress,
+    requesterUid: uid,
+    status,
+    ...(status === "submitted"
+      ? {
+          blockhash: "blockhash",
+          lastValidBlockHeight: 1,
+          signedTransactionBase64: "signed-transaction",
+          transactionSignature: "signature",
+        }
+      : {}),
+  });
+}
+
 test("read-only prize runtime preflight can inspect frozen storage", async () => {
   const state = repository();
   const env = {
@@ -204,14 +230,18 @@ function workflow(
   status: () => InstanceStatus,
   {
     createExisting = false,
+    getMissing = false,
     onCreate = () => undefined,
     onDelete = () => undefined,
+    onGet = () => undefined,
   }: {
     createExisting?: boolean;
+    getMissing?: boolean;
     onCreate?: (
       batch: WorkflowInstanceCreateOptions<EventPrizeWithdrawalWorkflowInput>[],
     ) => void;
     onDelete?: () => void;
+    onGet?: () => void;
   } = {},
 ) {
   const instance = {
@@ -231,7 +261,11 @@ function workflow(
       return createExisting ? [] : [instance];
     },
     deleteBatch: async () => ({ deleted: [], errors: [] }),
-    get: async () => instance,
+    get: async () => {
+      onGet();
+      if (getMissing) throw new Error("workflow-not-found");
+      return instance;
+    },
   } satisfies Workflow<EventPrizeWithdrawalWorkflowInput>;
 }
 
@@ -322,6 +356,44 @@ test("freezes withdrawal creation before parsing", async () => {
     message: "profile-writes-disabled",
   });
   assert.equal(requestValue.bodyUsed, false);
+});
+
+test("withdrawal storage freeze prevents terminated Workflow recreation", async () => {
+  const state = repository();
+  let creates = 0;
+  let deletes = 0;
+  const binding = workflow(() => ({ status: "terminated" }), {
+    createExisting: true,
+    onCreate: () => {
+      creates += 1;
+    },
+    onDelete: () => {
+      deletes += 1;
+    },
+  });
+  const response = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals", {
+      eventId,
+      prizeId,
+      solanaAddress: recipientAddress,
+    }),
+    {
+      ...TELEGRAM_TEST_ENV,
+      EVENT_PRIZE_WITHDRAWALS_DB: frozenWithdrawalDb(),
+      EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding,
+    },
+    context,
+    {
+      profileDb: canonicalProfileDb(),
+      repository: state.value,
+      withdrawalStore: state.withdrawalStore,
+      verifyIdentity,
+      workflow: binding,
+    },
+  );
+  assert.equal(response.status, 503);
+  assert.equal(creates, 0);
+  assert.equal(deletes, 0);
 });
 
 test("rejects an invalid completed record before projection cleanup", async () => {
@@ -687,6 +759,611 @@ test("marks errored Workflows as terminal", async () => {
   });
 });
 
+for (const durableStatus of ["processing", "submitted"] as const) {
+  test(`status polling recreates a missing ${durableStatus} Workflow`, async () => {
+    const state = repository();
+    if (durableStatus === "submitted") {
+      state.values.delete(`profileEventPrizes/${profileId}/${eventId}`);
+    }
+    setRecoverableWithdrawal(state, durableStatus);
+    const operationId = await buildEventPrizeWithdrawalOperationId(
+      eventId,
+      prizeId,
+    );
+    const batches: WorkflowInstanceCreateOptions<EventPrizeWithdrawalWorkflowInput>[][] =
+      [];
+    const binding = workflow(() => ({ status: "running" }), {
+      getMissing: true,
+      onCreate: (batch) => batches.push(batch),
+    });
+
+    const response = await handleEventPrizeWithdrawalRoute(
+      request("/events/prizes/withdrawals/status", {
+        eventId,
+        operationId,
+        prizeId,
+      }),
+      { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
+      context,
+      {
+        profileDb: canonicalProfileDb(),
+        repository: state.value,
+        withdrawalStore: state.withdrawalStore,
+        verifyIdentity,
+        workflow: binding,
+      },
+    );
+
+    assert.equal(response.status, 202);
+    assert.equal(batches.length, 1);
+    assert.deepEqual(batches[0][0].params, {
+      schemaVersion: 1,
+      kind: "withdrawal",
+      eventId,
+      operationId,
+      prizeId,
+      profileId,
+      recipientAddress,
+      requesterUid: uid,
+    });
+    const durable = state.values.get(
+      `eventPrizeWithdrawals/${eventId}/${prizeId}`,
+    ) as { status: string; transactionSignature?: string };
+    assert.equal(durable.status, durableStatus);
+    if (durableStatus === "submitted") {
+      assert.equal(durable.transactionSignature, "signature");
+    }
+  });
+}
+
+test("status polling retries missing Workflow creation without losing durable state", async () => {
+  const state = repository();
+  setRecoverableWithdrawal(state, "processing");
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  let createAttempts = 0;
+  const binding = workflow(() => ({ status: "running" }), {
+    getMissing: true,
+    onCreate: () => {
+      createAttempts += 1;
+      if (createAttempts === 1) throw new Error("workflow-create-failed");
+    },
+  });
+  const dependencies = {
+    profileDb: canonicalProfileDb(),
+    repository: state.value,
+    withdrawalStore: state.withdrawalStore,
+    verifyIdentity,
+    workflow: binding,
+  };
+
+  const first = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId,
+      prizeId,
+    }),
+    { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
+    context,
+    dependencies,
+  );
+  assert.equal(first.status, 503);
+  assert.deepEqual(
+    state.values.get(`eventPrizeWithdrawals/${eventId}/${prizeId}`),
+    {
+      assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+      eventId,
+      leaseExpiresAtMs: 2_000,
+      leaseId: "workflow-lease",
+      place: 1,
+      prizeId,
+      profileId,
+      recipientAddress,
+      requesterUid: uid,
+      status: "processing",
+    },
+  );
+
+  const second = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId,
+      prizeId,
+    }),
+    { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
+    context,
+    dependencies,
+  );
+  assert.equal(second.status, 202);
+  assert.equal(createAttempts, 2);
+});
+
+test("missing Workflow without durable state is terminal", async () => {
+  const state = repository();
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  let creates = 0;
+  const binding = workflow(() => ({ status: "running" }), {
+    getMissing: true,
+    onCreate: () => {
+      creates += 1;
+    },
+  });
+  const response = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId,
+      prizeId,
+    }),
+    { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
+    context,
+    {
+      profileDb: canonicalProfileDb(),
+      repository: state.value,
+      withdrawalStore: state.withdrawalStore,
+      verifyIdentity,
+      workflow: binding,
+    },
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(((await response.json()) as { details: unknown }).details, {
+    terminal: true,
+  });
+  assert.equal(creates, 0);
+});
+
+test("missing Workflow with an invalid durable place is terminal", async () => {
+  const state = repository();
+  setRecoverableWithdrawal(state, "submitted");
+  const withdrawalPath = `eventPrizeWithdrawals/${eventId}/${prizeId}`;
+  state.values.set(withdrawalPath, {
+    ...(state.values.get(withdrawalPath) as Record<string, unknown>),
+    place: 4,
+  });
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  let creates = 0;
+  const binding = workflow(() => ({ status: "running" }), {
+    getMissing: true,
+    onCreate: () => {
+      creates += 1;
+    },
+  });
+  const response = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId,
+      prizeId,
+    }),
+    { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
+    context,
+    {
+      profileDb: canonicalProfileDb(),
+      repository: state.value,
+      withdrawalStore: state.withdrawalStore,
+      verifyIdentity,
+      workflow: binding,
+    },
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(((await response.json()) as { details: unknown }).details, {
+    terminal: true,
+  });
+  assert.equal(creates, 0);
+});
+
+test("Workflow status failures do not recreate durable processing work", async () => {
+  const state = repository();
+  setRecoverableWithdrawal(state, "processing");
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  let creates = 0;
+  const binding = workflow(
+    () => {
+      throw new Error("workflow-status-failed");
+    },
+    {
+      onCreate: () => {
+        creates += 1;
+      },
+    },
+  );
+  const response = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId,
+      prizeId,
+    }),
+    { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
+    context,
+    {
+      profileDb: canonicalProfileDb(),
+      repository: state.value,
+      withdrawalStore: state.withdrawalStore,
+      verifyIdentity,
+      workflow: binding,
+    },
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(creates, 0);
+  assert.equal(
+    (
+      state.values.get(`eventPrizeWithdrawals/${eventId}/${prizeId}`) as {
+        leaseId: string;
+      }
+    ).leaseId,
+    "workflow-lease",
+  );
+});
+
+test("transient Workflow lookup failure preserves a submitted lease", async () => {
+  const state = repository();
+  setRecoverableWithdrawal(state, "submitted");
+  const withdrawalPath = `eventPrizeWithdrawals/${eventId}/${prizeId}`;
+  const before = structuredClone(state.values.get(withdrawalPath));
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  let gets = 0;
+  let creates = 0;
+  const binding = workflow(() => ({ status: "running" }), {
+    createExisting: true,
+    onCreate: () => {
+      creates += 1;
+    },
+    onGet: () => {
+      gets += 1;
+      if (gets === 1) throw new Error("workflow-get-failed");
+    },
+  });
+  const response = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId,
+      prizeId,
+    }),
+    { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
+    context,
+    {
+      profileDb: canonicalProfileDb(),
+      repository: state.value,
+      withdrawalStore: state.withdrawalStore,
+      verifyIdentity,
+      workflow: binding,
+    },
+  );
+
+  assert.equal(response.status, 202);
+  assert.equal(creates, 1);
+  assert.equal(gets, 2);
+  assert.deepEqual(state.values.get(withdrawalPath), before);
+});
+
+test("transient Workflow lookup failure does not replace an errored instance", async () => {
+  const state = repository();
+  setRecoverableWithdrawal(state, "processing");
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  let gets = 0;
+  let deletes = 0;
+  const batches: WorkflowInstanceCreateOptions<EventPrizeWithdrawalWorkflowInput>[][] =
+    [];
+  const binding = workflow(() => ({ status: "errored" }), {
+    createExisting: true,
+    onCreate: (batch) => batches.push(batch),
+    onDelete: () => {
+      deletes += 1;
+    },
+    onGet: () => {
+      gets += 1;
+      if (gets === 1) throw new Error("workflow-get-failed");
+    },
+  });
+  const response = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId,
+      prizeId,
+    }),
+    { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
+    context,
+    {
+      profileDb: canonicalProfileDb(),
+      repository: state.value,
+      withdrawalStore: state.withdrawalStore,
+      verifyIdentity,
+      workflow: binding,
+    },
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(((await response.json()) as { details: unknown }).details, {
+    terminal: true,
+  });
+  assert.equal(batches.length, 1);
+  assert.equal(deletes, 0);
+});
+
+test("transient Workflow lookup failure preserves a completed failure", async () => {
+  const state = repository();
+  setRecoverableWithdrawal(state, "processing");
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  let gets = 0;
+  let deletes = 0;
+  const batches: WorkflowInstanceCreateOptions<EventPrizeWithdrawalWorkflowInput>[][] =
+    [];
+  const binding = workflow(
+    () => ({
+      status: "complete",
+      output: {
+        ok: false,
+        status: "failed",
+        error: "failed-precondition",
+        message: "Simulation failed.",
+      },
+    }),
+    {
+      createExisting: true,
+      onCreate: (batch) => batches.push(batch),
+      onDelete: () => {
+        deletes += 1;
+      },
+      onGet: () => {
+        gets += 1;
+        if (gets === 1) throw new Error("workflow-get-failed");
+      },
+    },
+  );
+  const response = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId,
+      prizeId,
+    }),
+    { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
+    context,
+    {
+      profileDb: canonicalProfileDb(),
+      repository: state.value,
+      withdrawalStore: state.withdrawalStore,
+      verifyIdentity,
+      workflow: binding,
+    },
+  );
+
+  assert.equal(response.status, 412);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "failed-precondition",
+    message: "Simulation failed.",
+  });
+  assert.equal(batches.length, 1);
+  assert.equal(deletes, 0);
+});
+
+test("withdrawal storage freeze prevents missing Workflow recreation", async () => {
+  const state = repository();
+  setRecoverableWithdrawal(state, "processing");
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  let gets = 0;
+  let creates = 0;
+  const binding = workflow(() => ({ status: "running" }), {
+    getMissing: true,
+    onCreate: () => {
+      creates += 1;
+    },
+    onGet: () => {
+      gets += 1;
+    },
+  });
+  const response = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId,
+      prizeId,
+    }),
+    {
+      ...TELEGRAM_TEST_ENV,
+      EVENT_PRIZE_WITHDRAWALS_DB: frozenWithdrawalDb(),
+      EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding,
+    },
+    context,
+    {
+      profileDb: canonicalProfileDb(),
+      repository: state.value,
+      withdrawalStore: state.withdrawalStore,
+      verifyIdentity,
+      workflow: binding,
+    },
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(gets, 0);
+  assert.equal(creates, 0);
+});
+
+test("status polling recreates a terminated processing Workflow", async () => {
+  const state = repository();
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  state.values.set(`eventPrizeWithdrawals/${eventId}/${prizeId}`, {
+    assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+    eventId,
+    leaseExpiresAtMs: 2_000,
+    leaseId: "workflow-lease",
+    place: 1,
+    prizeId,
+    profileId: "retired-profile",
+    recipientAddress,
+    requesterUid: uid,
+    status: "processing",
+  });
+  let deletes = 0;
+  const batches: WorkflowInstanceCreateOptions<EventPrizeWithdrawalWorkflowInput>[][] =
+    [];
+  const binding = workflow(() => ({ status: "terminated" }), {
+    createExisting: true,
+    onCreate: (batch) => batches.push(batch),
+    onDelete: () => {
+      deletes += 1;
+    },
+  });
+  const response = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId,
+      prizeId,
+    }),
+    { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
+    context,
+    {
+      profileDb: canonicalProfileDb(),
+      repository: state.value,
+      withdrawalStore: state.withdrawalStore,
+      verifyIdentity,
+      workflow: binding,
+    },
+  );
+
+  assert.equal(response.status, 202);
+  assert.equal(deletes, 1);
+  assert.equal(batches.length, 1);
+  assert.deepEqual(batches[0][0].params, {
+    schemaVersion: 1,
+    kind: "withdrawal",
+    eventId,
+    operationId,
+    prizeId,
+    profileId: "retired-profile",
+    recipientAddress,
+    requesterUid: uid,
+  });
+});
+
+test("status polling recreates a terminated submitted Workflow", async () => {
+  const state = repository();
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  state.values.delete(`profileEventPrizes/${profileId}/${eventId}`);
+  state.values.set(`eventPrizeWithdrawals/${eventId}/${prizeId}`, {
+    assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+    blockhash: "blockhash",
+    eventId,
+    lastValidBlockHeight: 1,
+    leaseExpiresAtMs: 2_000,
+    leaseId: "workflow-lease",
+    place: 1,
+    prizeId,
+    profileId,
+    recipientAddress,
+    requesterUid: uid,
+    signedTransactionBase64: "signed-transaction",
+    status: "submitted",
+    transactionSignature: "signature",
+  });
+  let deletes = 0;
+  const batches: WorkflowInstanceCreateOptions<EventPrizeWithdrawalWorkflowInput>[][] =
+    [];
+  const binding = workflow(() => ({ status: "terminated" }), {
+    createExisting: true,
+    onCreate: (batch) => batches.push(batch),
+    onDelete: () => {
+      deletes += 1;
+    },
+  });
+  const response = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId,
+      prizeId,
+    }),
+    { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
+    context,
+    {
+      profileDb: canonicalProfileDb(),
+      repository: state.value,
+      withdrawalStore: state.withdrawalStore,
+      verifyIdentity,
+      workflow: binding,
+    },
+  );
+
+  assert.equal(response.status, 202);
+  assert.equal(deletes, 1);
+  assert.equal(batches.length, 1);
+  const submitted = state.values.get(
+    `eventPrizeWithdrawals/${eventId}/${prizeId}`,
+  ) as { status: string; transactionSignature: string };
+  assert.equal(submitted.status, "submitted");
+  assert.equal(submitted.transactionSignature, "signature");
+});
+
+test("keeps a terminated Workflow terminal without a processing record", async () => {
+  const state = repository();
+  let creates = 0;
+  let deletes = 0;
+  const binding = workflow(() => ({ status: "terminated" }), {
+    createExisting: true,
+    onCreate: () => {
+      creates += 1;
+    },
+    onDelete: () => {
+      deletes += 1;
+    },
+  });
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  const response = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId,
+      prizeId,
+    }),
+    { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
+    context,
+    {
+      profileDb: canonicalProfileDb(),
+      repository: state.value,
+      withdrawalStore: state.withdrawalStore,
+      verifyIdentity,
+      workflow: binding,
+    },
+  );
+
+  assert.equal(response.status, 503);
+  assert.deepEqual(((await response.json()) as { details: unknown }).details, {
+    terminal: true,
+  });
+  assert.equal(creates, 0);
+  assert.equal(deletes, 0);
+});
+
 test("starts and polls one authenticated withdrawal Workflow", async () => {
   const state = repository();
   let workflowStatus: InstanceStatus = { status: "running" };
@@ -857,11 +1534,15 @@ test("replaces a retained completed failure", async () => {
   assert.equal(deletes, 1);
 });
 
-test("replaces a retained terminated Workflow with the current request", async () => {
+test("recreates a retained terminated Workflow after storage resumes", async () => {
   const state = repository();
+  let creates = 0;
   let deletes = 0;
   const binding = workflow(() => ({ status: "terminated" }), {
     createExisting: true,
+    onCreate: () => {
+      creates += 1;
+    },
     onDelete: () => {
       deletes += 1;
     },
@@ -884,4 +1565,41 @@ test("replaces a retained terminated Workflow with the current request", async (
   );
   assert.equal(response.status, 202);
   assert.equal(deletes, 1);
+  assert.equal(creates, 2);
+});
+
+test("keeps paused Workflows paused", async () => {
+  for (const status of ["paused", "waitingForPause"] as const) {
+    const state = repository();
+    let deletes = 0;
+    const binding = workflow(() => ({ status }), {
+      createExisting: true,
+      onDelete: () => {
+        deletes += 1;
+      },
+    });
+    const response = await handleEventPrizeWithdrawalRoute(
+      request("/events/prizes/withdrawals", {
+        eventId,
+        prizeId,
+        solanaAddress: recipientAddress,
+      }),
+      { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
+      context,
+      {
+        profileDb: canonicalProfileDb(),
+        repository: state.value,
+        withdrawalStore: state.withdrawalStore,
+        verifyIdentity,
+        workflow: binding,
+      },
+    );
+    assert.equal(response.status, 412);
+    assert.deepEqual(await response.json(), {
+      ok: false,
+      error: "failed-precondition",
+      message: "Prize withdrawal is paused by an operator.",
+    });
+    assert.equal(deletes, 0);
+  }
 });

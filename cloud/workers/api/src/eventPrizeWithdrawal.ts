@@ -475,11 +475,7 @@ async function ensureWorkflow(
   let instance: WorkflowInstance | null = null;
   try {
     const instances = await workflow.createBatch([
-      {
-        id: params.operationId,
-        params,
-        retention: { successRetention: "1 day", errorRetention: "30 days" },
-      },
+      workflowCreateOptions(params),
     ]);
     instance = instances[0] || null;
   } catch (error) {
@@ -504,13 +500,7 @@ async function ensureWorkflow(
       return;
     }
     await instance.delete();
-    await workflow.createBatch([
-      {
-        id: params.operationId,
-        params,
-        retention: { successRetention: "1 day", errorRetention: "30 days" },
-      },
-    ]);
+    await workflow.createBatch([workflowCreateOptions(params)]);
     return;
   }
   if (status.status === "paused" || status.status === "waitingForPause") {
@@ -521,6 +511,41 @@ async function ensureWorkflow(
   }
   if (status.status === "unknown") {
     throw new Error("event-prize-withdrawal-workflow-unknown");
+  }
+}
+
+function workflowCreateOptions(
+  params: EventPrizeWithdrawalWorkflowParams,
+): WorkflowInstanceCreateOptions<EventPrizeWithdrawalWorkflowInput> {
+  return {
+    id: params.operationId,
+    params,
+    retention: { successRetention: "1 day", errorRetention: "30 days" },
+  };
+}
+
+async function ensureAdmittedWithdrawalWorkflow(
+  workflow: Workflow<EventPrizeWithdrawalWorkflowInput>,
+  admission: PendingWithdrawalAdmission,
+  runtime: Pick<EventPrizeRuntimeDependencies, "admin">,
+): Promise<void> {
+  try {
+    await ensureWorkflow(workflow, admission.params);
+  } catch (error) {
+    if (admission.releaseLeaseOnFailure) {
+      await releaseProcessingClaim({
+        withdrawalRef: runtime.admin
+          .database()
+          .ref(
+            getEventPrizeWithdrawalPath(
+              admission.params.eventId,
+              admission.params.prizeId,
+            ),
+          ),
+        leaseId: admission.leaseId,
+      }).catch(() => undefined);
+    }
+    throw error;
   }
 }
 
@@ -722,6 +747,87 @@ async function admitWithdrawal(
   };
 }
 
+async function resolveWithdrawalWorkflowRecovery(
+  identity: FirebaseIdentity,
+  request: {
+    eventId: EventPrizeEventId;
+    operationId: string;
+    prizeId: EventPrizeId;
+  },
+  runtime: EventPrizeRuntimeDependencies,
+): Promise<
+  EventPrizeWithdrawalCompletedResponse | EventPrizeWithdrawalWorkflowParams
+> {
+  const owned = await resolveOwnedWithdrawal(
+    identity,
+    request.eventId,
+    request.prizeId,
+    runtime,
+  );
+  if (
+    owned.withdrawal &&
+    isCompletedEventPrizeWithdrawal(
+      owned.withdrawal,
+      request.eventId,
+      request.prizeId,
+    )
+  ) {
+    return buildCompletedResponse(request.operationId, owned.withdrawal);
+  }
+  if (owned.withdrawal?.status === "blocked") {
+    throw new AuthApiFailure(
+      412,
+      "failed-precondition",
+      "This prize is unavailable for withdrawal.",
+    );
+  }
+  if (
+    owned.withdrawal?.status !== "processing" &&
+    owned.withdrawal?.status !== "submitted"
+  ) {
+    throw terminalWorkflowFailure();
+  }
+  const recipientAddress = normalizeSolanaAddress(
+    owned.withdrawal.recipientAddress,
+  );
+  const prize = getEventPrizeDefinition(request.eventId, request.prizeId);
+  const assetAddress = normalizeSolanaAddress(prize?.assetAddress);
+  const collectionAddress = normalizeSolanaAddress(prize?.collectionAddress);
+  const place = Number(owned.withdrawal.place);
+  const profileId = cleanString(owned.withdrawal.profileId);
+  const requesterUid = cleanString(owned.withdrawal.requesterUid);
+  if (
+    !prize ||
+    prize.claimAvailable !== true ||
+    !isEventPrizeStandard(prize.standard) ||
+    assetAddress !== cleanString(prize.assetAddress) ||
+    collectionAddress !== cleanString(prize.collectionAddress) ||
+    !isWithdrawalRecordForPrize(
+      owned.withdrawal,
+      request.eventId,
+      request.prizeId,
+      assetAddress,
+    ) ||
+    !recipientAddress ||
+    recipientAddress === EVENT_PRIZE_ADMIN_WALLET ||
+    ![1, 2, 3].includes(place) ||
+    !profileId ||
+    !requesterUid
+  ) {
+    throw terminalWorkflowFailure();
+  }
+  return {
+    schemaVersion: 1,
+    kind: "withdrawal",
+    eventId: request.eventId,
+    operationId: request.operationId,
+    prizeId: request.prizeId,
+    profileId,
+    recipientAddress,
+    requesterUid,
+  };
+}
+
 export async function resolveEventPrizeWithdrawalExecutionParams(
   params: EventPrizeWithdrawalWorkflowParams,
   runtime: Pick<EventPrizeRuntimeDependencies, "readWithdrawal">,
@@ -874,19 +980,7 @@ export async function handleEventPrizeWithdrawalRoute(
       if ("status" in admission) {
         return authJsonResponse(admission, 200, corsHeaders);
       }
-      try {
-        await ensureWorkflow(workflow, admission.params);
-      } catch (error) {
-        if (admission.releaseLeaseOnFailure) {
-          await releaseProcessingClaim({
-            withdrawalRef: runtime.admin
-              .database()
-              .ref(getEventPrizeWithdrawalPath(body.eventId, body.prizeId)),
-            leaseId: admission.leaseId,
-          }).catch(() => undefined);
-        }
-        throw error;
-      }
+      await ensureAdmittedWithdrawalWorkflow(workflow, admission, runtime);
       const processing: EventPrizeWithdrawalProcessingResponse = {
         ok: true,
         status: "processing",
@@ -946,18 +1040,40 @@ export async function handleEventPrizeWithdrawalRoute(
           "This prize is unavailable for withdrawal.",
         );
       }
-      let instance: WorkflowInstance;
+      let instance: WorkflowInstance | null = null;
       try {
         instance = await workflow.get(body.operationId);
       } catch {
-        throw new AuthApiFailure(
-          503,
-          "unavailable",
-          "Prize withdrawal service is unavailable.",
+        const recovery = await resolveWithdrawalWorkflowRecovery(
+          identity,
+          body,
+          runtime,
         );
+        if ("status" in recovery) {
+          return authJsonResponse(recovery, 200, corsHeaders);
+        }
+        let created = false;
+        try {
+          created =
+            (await workflow.createBatch([workflowCreateOptions(recovery)]))
+              .length > 0;
+        } catch {
+          created = false;
+        }
+        if (!created) {
+          try {
+            instance = await workflow.get(body.operationId);
+          } catch {
+            throw new AuthApiFailure(
+              503,
+              "unavailable",
+              "Prize withdrawal service is unavailable.",
+            );
+          }
+        }
       }
-      const status = await instance.status();
-      if (status.status === "complete") {
+      const status = instance ? await instance.status() : null;
+      if (status?.status === "complete") {
         const output = toRecord(status.output);
         if (output?.ok === false && output.status === "failed") {
           throw toEventPrizeApiFailure(output);
@@ -984,10 +1100,29 @@ export async function handleEventPrizeWithdrawalRoute(
         }
         throw terminalWorkflowFailure();
       }
-      if (status.status === "errored" || status.status === "terminated") {
+      if (status?.status === "errored") {
         throw terminalWorkflowFailure();
       }
-      if (status.status === "unknown") {
+      if (status?.status === "terminated") {
+        const recovery = await resolveWithdrawalWorkflowRecovery(
+          identity,
+          body,
+          runtime,
+        );
+        if ("status" in recovery) {
+          return authJsonResponse(recovery, 200, corsHeaders);
+        }
+        if (!instance) {
+          throw new AuthApiFailure(
+            503,
+            "unavailable",
+            "Prize withdrawal service is unavailable.",
+          );
+        }
+        await instance.delete();
+        await workflow.createBatch([workflowCreateOptions(recovery)]);
+      }
+      if (status?.status === "unknown") {
         throw new AuthApiFailure(
           503,
           "unavailable",

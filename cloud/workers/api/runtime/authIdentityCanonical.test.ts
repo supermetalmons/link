@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import { USERNAME_MAX_LENGTH } from "@mons/shared/usernames";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createAuthIdentityService } from "../src/authIdentity.ts";
 import { sweepExpiredCanonicalAuthCooldowns } from "../src/authIdentityCanonical.ts";
@@ -9,6 +10,7 @@ import { createProfileCustomizationRepository } from "../src/profileCustomizatio
 import {
   commitCanonicalPlan,
   materializeCanonicalProfile,
+  readCanonicalAuthOperation,
   readCanonicalMergeTarget,
   readCanonicalProfile,
   readCanonicalProfileAggregate,
@@ -252,6 +254,37 @@ async function resetCanonicalRows(db: D1Database): Promise<void> {
        END`,
     ),
   ]);
+}
+
+async function setCanonicalUsername(
+  profileId: string,
+  username: string | null,
+  updatedAtMs: number,
+): Promise<void> {
+  const snapshot = await readCanonicalProfile(
+    testBindings.PROFILE_DB,
+    profileId,
+  );
+  if (!snapshot) throw new Error("missing-username-profile");
+  await commitCanonicalPlan(testBindings.PROFILE_DB, {
+    expectations: [
+      {
+        kind: "profile-revision",
+        profileId,
+        revision: snapshot.revision,
+      },
+    ],
+    mutations: [
+      {
+        kind: "update-active-profile",
+        value: materializeCanonicalProfile({
+          ...snapshot,
+          profile: { ...snapshot.profile, username },
+          updatedAtMs,
+        }),
+      },
+    ],
+  });
 }
 
 describe("canonical auth and profile runtime", () => {
@@ -634,6 +667,474 @@ describe("canonical auth and profile runtime", () => {
       profileCounter: "gp",
       linkedMethods: { eth: true, sol: true },
     });
+  });
+
+  it("repairs Firebase ownership before returning a successful replay after a merge", async () => {
+    const firebase = firebaseState();
+    let nowMs = 1_000;
+    const service = createAuthIdentityService(d1Env, {
+      authClient: firebase.authClient,
+      now: () => nowMs,
+      randomInteger: () => 0,
+      rtdb: firebase.rtdb,
+    });
+    const xUserId = "successful-replay-x-user";
+    const source = await service.linkVerifiedMethod({
+      uid: "successful-replay-source-login",
+      method: "x",
+      methodValueRaw: xUserId,
+      normalizedMethodValue: xUserId,
+      intentId: "successful-replay-source-intent",
+      requestEmoji: 4,
+      requestAura: null,
+      opId: "successful-replay-source-operation",
+      xUsername: "ReplaySource",
+    });
+    nowMs = 2_000;
+    const target = await service.linkVerifiedMethod({
+      uid: "successful-replay-target-login",
+      method: "eth",
+      methodValueRaw: "0x7777777777777777777777777777777777777777",
+      normalizedMethodValue: "0x7777777777777777777777777777777777777777",
+      intentId: "successful-replay-target-intent",
+      requestEmoji: 4,
+      requestAura: null,
+      opId: "successful-replay-target-operation",
+    });
+    nowMs += 60_001;
+    const recovery = createAuthRecoveryService(d1Env, {
+      authClient: firebase.authClient,
+      now: () => nowMs,
+      profileDb: testBindings.PROFILE_DB,
+      rtdb: firebase.rtdb,
+    });
+    await recovery.recoverProfile(source.profileId);
+    await recovery.recoverProfile(target.profileId);
+    await expect(
+      service.linkVerifiedMethod({
+        uid: "successful-replay-target-login",
+        method: "x",
+        methodValueRaw: xUserId,
+        normalizedMethodValue: xUserId,
+        intentId: "successful-replay-merge-intent",
+        requestEmoji: 4,
+        requestAura: null,
+        opId: "successful-replay-merge-operation",
+        xUsername: "ReplaySource",
+      }),
+    ).resolves.toMatchObject({ profileId: target.profileId });
+    firebase.claims.set("successful-replay-source-login", {
+      profileId: source.profileId,
+    });
+    firebase.rtdbValues.set(
+      "players/successful-replay-source-login/profile",
+      source.profileId,
+    );
+
+    await expect(
+      service.peekVerifyReplay(
+        "successful-replay-source-operation",
+        "x",
+        "successful-replay-source-login",
+      ),
+    ).resolves.toMatchObject({ profileId: target.profileId });
+    expect(
+      firebase.claims.get("successful-replay-source-login")?.profileId,
+    ).toBe(target.profileId);
+    expect(
+      firebase.rtdbValues.get("players/successful-replay-source-login/profile"),
+    ).toBe(target.profileId);
+  });
+
+  it("heals a missing username before returning a successful X replay", async () => {
+    const firebase = firebaseState();
+    const uid = "successful-username-replay-login";
+    const opId = "successful-username-replay-operation";
+    const service = createAuthIdentityService(d1Env, {
+      authClient: firebase.authClient,
+      now: () => 2_500,
+      randomInteger: () => 0,
+      rtdb: firebase.rtdb,
+    });
+    const linked = await service.linkVerifiedMethod({
+      uid,
+      method: "x",
+      methodValueRaw: "successful-username-replay-x-user",
+      normalizedMethodValue: "successful-username-replay-x-user",
+      intentId: "successful-username-replay-intent",
+      requestEmoji: 4,
+      requestAura: null,
+      opId,
+      xUsername: "ReplayHandle",
+    });
+    await setCanonicalUsername(linked.profileId, null, 2_501);
+    firebase.claims.set(uid, { profileId: "stale-profile" });
+
+    await expect(
+      service.peekVerifyReplay(opId, "x", uid),
+    ).resolves.toMatchObject({
+      profileId: linked.profileId,
+      username: "ReplayHandle",
+    });
+    expect(
+      (await readCanonicalProfile(testBindings.PROFILE_DB, linked.profileId))
+        ?.profile.username,
+    ).toBe("ReplayHandle");
+    await expect(
+      readCanonicalAuthOperation(testBindings.PROFILE_DB, opId),
+    ).resolves.toMatchObject({ status: "success" });
+  });
+
+  it.each([
+    ["reserved", "anon"],
+    ["overlength", "X".repeat(USERNAME_MAX_LENGTH + 1)],
+  ] as const)(
+    "heals a %s social username through profile sync after replay expiry",
+    async (kind, invalidUsername) => {
+      const firebase = firebaseState();
+      let nowMs = 1_000;
+      const service = createAuthIdentityService(d1Env, {
+        authClient: firebase.authClient,
+        now: () => nowMs,
+        randomInteger: () => 0,
+        rtdb: firebase.rtdb,
+      });
+      const uid = `${kind}-social-username-login`;
+      const opId = `${kind}-social-username-operation`;
+      const xUserId = `${kind}-social-username-x-user`;
+      const linked = await service.linkVerifiedMethod({
+        uid,
+        method: "x",
+        methodValueRaw: xUserId,
+        normalizedMethodValue: xUserId,
+        intentId: `${kind}-social-username-intent`,
+        requestEmoji: 4,
+        requestAura: null,
+        opId,
+        xUsername: "SocialReplay",
+      });
+      await setCanonicalUsername(linked.profileId, invalidUsername, 2_000);
+      nowMs += 10 * 60 * 1_000 + 1;
+
+      await expect(
+        service.peekVerifyReplay(opId, "x", uid),
+      ).resolves.toBeNull();
+      await expect(
+        service.syncCurrentCallerProfile(uid),
+      ).resolves.toMatchObject({
+        profileId: linked.profileId,
+        linkedMethods: { x: true },
+      });
+      expect(
+        (await readCanonicalProfile(testBindings.PROFILE_DB, linked.profileId))
+          ?.profile.username,
+      ).toBe("SocialReplay");
+    },
+  );
+
+  it("uses a generated username when the X handle exceeds the app limit", async () => {
+    const firebase = firebaseState();
+    const service = createAuthIdentityService(d1Env, {
+      authClient: firebase.authClient,
+      now: () => 2_500,
+      randomInteger: () => 0,
+      rtdb: firebase.rtdb,
+    });
+    const preferred = "X".repeat(USERNAME_MAX_LENGTH + 1);
+
+    const linked = await service.linkVerifiedMethod({
+      uid: "overlong-x-username-login",
+      method: "x",
+      methodValueRaw: "overlong-x-username-user",
+      normalizedMethodValue: "overlong-x-username-user",
+      intentId: "overlong-x-username-intent",
+      requestEmoji: 4,
+      requestAura: null,
+      opId: "overlong-x-username-operation",
+      xUsername: preferred,
+    });
+
+    expect(linked.username).toBe("Aaaa000");
+    expect(linked.username).not.toBe(preferred);
+    if (!linked.username) throw new Error("missing-generated-username");
+    expect(linked.username.length).toBeLessThanOrEqual(USERNAME_MAX_LENGTH);
+  });
+
+  it.each([
+    "during repair",
+    "before success commit",
+    "profile change before success commit",
+  ] as const)(
+    "does not complete a failed replay across concurrent %s",
+    async (timing) => {
+      const firebase = firebaseState();
+      const uid = "removed-during-replay-login";
+      const xUserId = "removed-during-replay-x-user";
+      const opId = "removed-during-replay-x-operation";
+      const baseService = createAuthIdentityService(d1Env, {
+        authClient: firebase.authClient,
+        now: () => 3_000,
+        randomInteger: () => 0,
+        rtdb: firebase.rtdb,
+      });
+      const linked = await baseService.linkVerifiedMethod({
+        uid,
+        method: "eth",
+        methodValueRaw: "0x8888888888888888888888888888888888888888",
+        normalizedMethodValue: "0x8888888888888888888888888888888888888888",
+        intentId: "removed-during-replay-eth-intent",
+        requestEmoji: 4,
+        requestAura: null,
+        opId: "removed-during-replay-eth-operation",
+      });
+      const racedDb = failAfterMatchingBatch(
+        testBindings.PROFILE_DB,
+        (queries) =>
+          queries.some((query) =>
+            query.includes("INSERT INTO profile_auth_methods"),
+          ),
+        () => undefined,
+      );
+      const racedEnv = new Proxy(d1Env, {
+        get(target, property, receiver) {
+          return property === "PROFILE_DB"
+            ? racedDb
+            : Reflect.get(target, property, receiver);
+        },
+      });
+      const failedService = createAuthIdentityService(racedEnv, {
+        authClient: firebase.authClient,
+        now: () => 3_001,
+        randomInteger: () => 0,
+        rtdb: firebase.rtdb,
+      });
+      await expect(
+        failedService.linkVerifiedMethod({
+          uid,
+          method: "x",
+          methodValueRaw: xUserId,
+          normalizedMethodValue: xUserId,
+          intentId: "removed-during-replay-x-intent",
+          requestEmoji: 4,
+          requestAura: null,
+          opId,
+          xUsername: "ReplayRemoval",
+        }),
+      ).rejects.toThrow("ambiguous-d1-response");
+      await expect(
+        readCanonicalAuthOperation(testBindings.PROFILE_DB, opId),
+      ).resolves.toMatchObject({ status: "failed" });
+      let removed = false;
+      const removeMethod = async () => {
+        if (removed) return;
+        removed = true;
+        const aggregate = await readCanonicalProfileAggregate(
+          testBindings.PROFILE_DB,
+          linked.profileId,
+        );
+        const method = aggregate.authMethods.find(
+          (candidate) => candidate.method === "x",
+        );
+        if (!method) throw new Error("missing-replay-x-method");
+        await commitCanonicalPlan(testBindings.PROFILE_DB, {
+          expectations: [
+            {
+              kind: "auth-method-revision",
+              method: "x",
+              normalizedValue: method.normalizedValue,
+              profileId: linked.profileId,
+              revision: method.revision,
+            },
+          ],
+          mutations: [
+            {
+              kind: "delete-auth-method",
+              method: "x",
+              normalizedValue: method.normalizedValue,
+            },
+          ],
+        });
+      };
+      let profileChanged = false;
+      const changeProfile = async () => {
+        if (profileChanged) return;
+        profileChanged = true;
+        await setCanonicalUsername(linked.profileId, null, 3_003);
+      };
+      const authClient: FirebaseAuthAdminClient =
+        timing === "during repair"
+          ? {
+              getUser: firebase.authClient.getUser,
+              setCustomUserClaims: async (loginUid, claims) => {
+                await firebase.authClient.setCustomUserClaims(loginUid, claims);
+                await removeMethod();
+              },
+            }
+          : firebase.authClient;
+      if (timing === "during repair") {
+        firebase.claims.set(uid, { profileId: "stale-profile" });
+      }
+      const replayDb =
+        timing !== "during repair"
+          ? beforeMatchingBatch(
+              testBindings.PROFILE_DB,
+              (queries) =>
+                queries.some((query) =>
+                  query.includes("UPDATE profile_auth_operations SET"),
+                ),
+              timing === "before success commit" ? removeMethod : changeProfile,
+            )
+          : testBindings.PROFILE_DB;
+      const replayEnv = new Proxy(d1Env, {
+        get(target, property, receiver) {
+          return property === "PROFILE_DB"
+            ? replayDb
+            : Reflect.get(target, property, receiver);
+        },
+      });
+      const replayService = createAuthIdentityService(replayEnv, {
+        authClient,
+        now: () => 3_002,
+        randomInteger: () => 0,
+        rtdb: firebase.rtdb,
+      });
+
+      await expect(
+        replayService.peekVerifyReplay(opId, "x", uid),
+      ).resolves.toBeNull();
+      const aggregate = await readCanonicalProfileAggregate(
+        testBindings.PROFILE_DB,
+        linked.profileId,
+      );
+      if (timing === "profile change before success commit") {
+        expect(profileChanged).toBe(true);
+        expect(removed).toBe(false);
+        expect(
+          aggregate.authMethods.some((method) => method.method === "x"),
+        ).toBe(true);
+        expect(aggregate.profile?.profile.username).toBeNull();
+      } else {
+        expect(removed).toBe(true);
+        expect(
+          aggregate.authMethods.some((method) => method.method === "x"),
+        ).toBe(false);
+      }
+      await expect(
+        readCanonicalAuthOperation(testBindings.PROFILE_DB, opId),
+      ).resolves.toMatchObject({ status: "failed" });
+      if (timing === "profile change before success commit") {
+        await expect(
+          replayService.peekVerifyReplay(opId, "x", uid),
+        ).resolves.toMatchObject({ username: null });
+        await expect(
+          readCanonicalAuthOperation(testBindings.PROFILE_DB, opId),
+        ).resolves.toMatchObject({ status: "success" });
+      }
+    },
+  );
+
+  it("assigns the X username before completing an incomplete replay", async () => {
+    const firebase = firebaseState();
+    let ambiguities = 0;
+    const racedDb = failAfterMatchingBatch(
+      testBindings.PROFILE_DB,
+      (queries) =>
+        queries.some((query) =>
+          query.includes("INSERT INTO profile_auth_methods"),
+        ),
+      () => {
+        ambiguities++;
+      },
+    );
+    const racedEnv = new Proxy(d1Env, {
+      get(target, property, receiver) {
+        return property === "PROFILE_DB"
+          ? racedDb
+          : Reflect.get(target, property, receiver);
+      },
+    });
+    const service = createAuthIdentityService(racedEnv, {
+      authClient: firebase.authClient,
+      now: () => 4_000,
+      randomInteger: () => 0,
+      rtdb: firebase.rtdb,
+    });
+    const input = {
+      uid: "incomplete-x-login",
+      method: "x" as const,
+      methodValueRaw: "incomplete-x-user",
+      normalizedMethodValue: "incomplete-x-user",
+      intentId: "incomplete-x-intent",
+      requestEmoji: 4,
+      requestAura: null,
+      opId: "incomplete-x-operation",
+      xUsername: "RecoverHandle",
+    };
+    await expect(service.linkVerifiedMethod(input)).rejects.toThrow(
+      "ambiguous-d1-response",
+    );
+    expect(ambiguities).toBe(1);
+    expect(
+      (await readCanonicalProfileByLogin(testBindings.PROFILE_DB, input.uid))
+        ?.profile.username,
+    ).toBeNull();
+
+    await expect(
+      service.peekVerifyReplay(input.opId, "x", input.uid),
+    ).resolves.toMatchObject({ username: "RecoverHandle" });
+    expect(firebase.claims.get(input.uid)?.profileId).toBeTruthy();
+    expect(firebase.rtdbValues.get(`players/${input.uid}/profile`)).toBe(
+      firebase.claims.get(input.uid)?.profileId,
+    );
+  });
+
+  it("does not complete an expired incomplete replay", async () => {
+    const firebase = firebaseState();
+    let nowMs = 5_000;
+    const racedDb = failAfterMatchingBatch(
+      testBindings.PROFILE_DB,
+      (queries) =>
+        queries.some((query) =>
+          query.includes("INSERT INTO profile_auth_methods"),
+        ),
+      () => undefined,
+    );
+    const racedEnv = new Proxy(d1Env, {
+      get(target, property, receiver) {
+        return property === "PROFILE_DB"
+          ? racedDb
+          : Reflect.get(target, property, receiver);
+      },
+    });
+    const service = createAuthIdentityService(racedEnv, {
+      authClient: firebase.authClient,
+      now: () => nowMs,
+      randomInteger: () => 0,
+      rtdb: firebase.rtdb,
+    });
+    const input = {
+      uid: "expired-incomplete-x-login",
+      method: "x" as const,
+      methodValueRaw: "expired-incomplete-x-user",
+      normalizedMethodValue: "expired-incomplete-x-user",
+      intentId: "expired-incomplete-x-intent",
+      requestEmoji: 4,
+      requestAura: null,
+      opId: "expired-incomplete-x-operation",
+      xUsername: "ExpiredHandle",
+    };
+    await expect(service.linkVerifiedMethod(input)).rejects.toThrow(
+      "ambiguous-d1-response",
+    );
+    nowMs += 10 * 60 * 1_000 + 1;
+
+    await expect(
+      service.peekVerifyReplay(input.opId, "x", input.uid),
+    ).resolves.toBeNull();
+    expect(
+      (await readCanonicalProfileByLogin(testBindings.PROFILE_DB, input.uid))
+        ?.profile.username,
+    ).toBeNull();
   });
 
   it("repairs Firebase state before returning an ambiguous unlink replay", async () => {

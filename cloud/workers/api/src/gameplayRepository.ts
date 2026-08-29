@@ -33,6 +33,9 @@ export type WagerTransferInput = {
   winnerProfileId: string;
 };
 
+export type WagerTransferResult =
+  "applied" | "insufficient-materials" | "replayed";
+
 export type GameplayProfile = {
   aura: string;
   emoji: number | string;
@@ -223,7 +226,7 @@ export type RatingProfileGameProjectionRepository = RatingRepository & {
 export type GameplayRepository = {
   applyWagerTransferOnce: (
     input: WagerTransferInput,
-  ) => Promise<"applied" | "replayed">;
+  ) => Promise<WagerTransferResult>;
   deleteNavigationGame: (
     profileId: string,
     inviteId: string,

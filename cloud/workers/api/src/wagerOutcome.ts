@@ -27,6 +27,12 @@ import {
 } from "./wagerProposal.ts";
 
 const SETTLEMENT_VERSION = 1;
+export const WAGER_SETTLEMENT_INITIAL_RETRY_DELAY_SECONDS = 60;
+export const WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON =
+  "insufficient-materials";
+
+type WagerSettlementFailureReason =
+  typeof WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON;
 
 type MatchRecord = {
   color: "black" | "white" | null;
@@ -45,6 +51,7 @@ type SettlementRelease = {
 type SettlementBase = {
   claimedAtMs: number;
   completedAtMs: number | null;
+  failureReason: WagerSettlementFailureReason | null;
   fingerprint: string;
   operationId: string;
   state: "completed" | "pending";
@@ -78,12 +85,23 @@ export type WagerOutcomeDependencies = {
   signal?: AbortSignal;
 };
 
+export type WagerSettlementResolution = {
+  loserProfileId: string;
+  loserUid: string;
+  winnerProfileId: string;
+  winnerUid: string;
+};
+
 export type WagerSettlementRetryTask = {
   inviteId: string;
   kind: "wager-settlement";
   matchId: string;
   operationId: string;
+  resolution?: WagerSettlementResolution;
 };
+
+export type WagerSettlementRetryState =
+  "completed" | "pending" | "stale" | "unclaimed";
 
 function toRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -206,6 +224,7 @@ function parseSettlement(value: unknown): WagerSettlement | null {
   const settlement = toRecord(value);
   const state = settlement?.state;
   const completedAtMs = settlement?.completedAtMs;
+  const failureReason = settlement?.failureReason;
   if (
     settlement?.version !== SETTLEMENT_VERSION ||
     (state !== "pending" && state !== "completed") ||
@@ -217,6 +236,12 @@ function parseSettlement(value: unknown): WagerSettlement | null {
     (completedAtMs !== undefined &&
       completedAtMs !== null &&
       !Number.isSafeInteger(completedAtMs)) ||
+    (failureReason !== undefined &&
+      failureReason !== null &&
+      failureReason !== WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON) ||
+    (state === "pending" &&
+      failureReason !== undefined &&
+      failureReason !== null) ||
     (state === "completed" && !Number.isSafeInteger(completedAtMs))
   ) {
     return null;
@@ -230,6 +255,10 @@ function parseSettlement(value: unknown): WagerSettlement | null {
     completedAtMs: Number.isSafeInteger(completedAtMs)
       ? Number(completedAtMs)
       : null,
+    failureReason:
+      failureReason === WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON
+        ? failureReason
+        : null,
   };
   if (settlement.kind === "agreed") {
     const winnerUid = normalizeString(settlement.winnerUid);
@@ -257,7 +286,11 @@ function parseSettlement(value: unknown): WagerSettlement | null {
       : null;
   }
   const storedReleases = settlement.releases ?? [];
-  if (settlement.kind !== "proposals" || !Array.isArray(storedReleases)) {
+  if (
+    settlement.kind !== "proposals" ||
+    !Array.isArray(storedReleases) ||
+    base.failureReason
+  ) {
     return null;
   }
   const releases = storedReleases.map(parseRelease);
@@ -271,6 +304,17 @@ function parseSettlement(value: unknown): WagerSettlement | null {
       (release): release is SettlementRelease => release !== null,
     ),
   };
+}
+
+function readStoredSettlement(
+  wager: Record<string, unknown> | null,
+): WagerSettlement | null {
+  const rawSettlement = wager?.settlement;
+  const settlement = parseSettlement(rawSettlement);
+  if (rawSettlement !== null && rawSettlement !== undefined && !settlement) {
+    throw new Error("wager-settlement-malformed");
+  }
+  return settlement;
 }
 
 async function readMatchPair(
@@ -299,13 +343,7 @@ async function readMatchPair(
 
 function createSettlement(
   wager: Record<string, unknown>,
-  participants: {
-    opponentProfileId: string;
-    opponentUid: string;
-    playerProfileId: string;
-    playerUid: string;
-  },
-  result: "gg" | "win",
+  resolution: WagerSettlementResolution,
   operationId: string,
   nowMs: number,
 ): WagerSettlement {
@@ -320,32 +358,21 @@ function createSettlement(
   const material = normalizeString(agreement?.material);
   const count = normalizeCount(agreement?.count);
   if (isMaterialName(material) && count > 0) {
-    const winnerUid =
-      result === "win" ? participants.playerUid : participants.opponentUid;
-    const loserUid =
-      result === "win" ? participants.opponentUid : participants.playerUid;
-    const winnerProfileId =
-      result === "win"
-        ? participants.playerProfileId
-        : participants.opponentProfileId;
-    const loserProfileId =
-      result === "win"
-        ? participants.opponentProfileId
-        : participants.playerProfileId;
     const candidate = {
       ...base,
       kind: "agreed" as const,
-      winnerUid,
-      loserUid,
-      winnerProfileId,
-      loserProfileId,
+      ...resolution,
       material,
       count,
     };
-    return { ...candidate, fingerprint: settlementFingerprint(candidate) };
+    return {
+      ...candidate,
+      failureReason: null,
+      fingerprint: settlementFingerprint(candidate),
+    };
   }
   const proposals = toRecord(wager.proposals) || {};
-  const releases = [participants.playerUid, participants.opponentUid]
+  const releases = [resolution.winnerUid, resolution.loserUid]
     .map((uid) => parseRelease({ uid, ...toRecord(proposals[uid]) }))
     .filter((release): release is SettlementRelease => release !== null);
   const candidate = {
@@ -353,23 +380,23 @@ function createSettlement(
     kind: "proposals" as const,
     releases,
   };
-  return { ...candidate, fingerprint: settlementFingerprint(candidate) };
+  return {
+    ...candidate,
+    failureReason: null,
+    fingerprint: settlementFingerprint(candidate),
+  };
 }
 
 async function claimSettlement(
   wagerPath: string,
-  participants: {
-    opponentProfileId: string;
-    opponentUid: string;
-    playerProfileId: string;
-    playerUid: string;
-  },
-  result: "gg" | "win",
+  resolution: WagerSettlementResolution,
   operationId: string,
   nowMs: number,
   repository: GameplayRepository,
   signal?: AbortSignal,
-): Promise<"already-resolved" | "no-wager" | WagerSettlement> {
+): Promise<
+  "already-resolved" | "insufficient-materials" | "no-wager" | WagerSettlement
+> {
   let current: unknown;
   try {
     const transaction = await repository.transactRtdbPath(
@@ -379,21 +406,25 @@ async function claimSettlement(
         if (!wager) {
           return { commit: false, decision: "no-wager" };
         }
+        const existing = readStoredSettlement(wager);
         if (wager.resolved) {
           return { commit: false, decision: "already-resolved" };
         }
-        const existing = parseSettlement(wager.settlement);
         if (existing) {
           return {
             commit: false,
             decision:
-              existing.state === "completed" ? "already-resolved" : "resume",
+              existing.state !== "completed"
+                ? "resume"
+                : existing.failureReason ===
+                    WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON
+                  ? WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON
+                  : "already-resolved",
           };
         }
         const settlement = createSettlement(
           wager,
-          participants,
-          result,
+          resolution,
           operationId,
           nowMs,
         );
@@ -407,12 +438,26 @@ async function claimSettlement(
     if (transaction.decision === "already-resolved") {
       return "already-resolved";
     }
+    if (
+      transaction.decision === WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON
+    ) {
+      return WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON;
+    }
     current = transaction.value;
   } catch {
     current = await repository.getRtdbPath(wagerPath, undefined, signal);
   }
   const wager = toRecord(current);
-  const settlement = parseSettlement(wager?.settlement);
+  const settlement = readStoredSettlement(wager);
+  if (
+    settlement?.operationId === operationId &&
+    settlement.state === "completed"
+  ) {
+    return settlement.failureReason ===
+      WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON
+      ? WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON
+      : "already-resolved";
+  }
   if (
     !settlement ||
     settlement.operationId !== operationId ||
@@ -430,9 +475,11 @@ async function completeSettlement(
   repository: GameplayRepository,
   now: () => number,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<null | typeof WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON> {
+  const wagerPath = `invites/${inviteId}/wagers/${matchId}`;
+  let insufficientMaterials = false;
   if (settlement.kind === "agreed") {
-    await repository.applyWagerTransferOnce({
+    const transfer = await repository.applyWagerTransferOnce({
       operationId: settlement.operationId,
       fingerprint: settlement.fingerprint,
       winnerProfileId: settlement.winnerProfileId,
@@ -441,6 +488,7 @@ async function completeSettlement(
       count: settlement.count,
       appliedAtMs: now(),
     });
+    insufficientMaterials = transfer === "insufficient-materials";
     await releaseWagerSettlementReservation(
       repository,
       {
@@ -472,14 +520,17 @@ async function completeSettlement(
   }
 
   const completedAtMs = now();
-  const wagerPath = `invites/${inviteId}/wagers/${matchId}`;
   const updates: Record<string, unknown> = {
     [`${wagerPath}/settlement/state`]: "completed",
     [`${wagerPath}/settlement/completedAtMs`]: completedAtMs,
     [`${wagerPath}/proposals`]: null,
     [`invites/${inviteId}/matchesWagerResolutions/${matchId}`]: true,
   };
-  if (settlement.kind === "agreed") {
+  if (insufficientMaterials) {
+    updates[`${wagerPath}/settlement/failureReason`] =
+      WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON;
+    updates[`${wagerPath}/agreed`] = null;
+  } else if (settlement.kind === "agreed") {
     updates[`${wagerPath}/resolved`] = {
       winnerId: settlement.winnerUid,
       loserId: settlement.loserUid,
@@ -490,6 +541,50 @@ async function completeSettlement(
     };
   }
   await repository.patchRtdbRoot(updates, signal);
+  return insufficientMaterials
+    ? WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON
+    : null;
+}
+
+async function readWagerSettlementRetry(
+  task: WagerSettlementRetryTask,
+  repository: Pick<GameplayRepository, "getRtdbPath">,
+): Promise<
+  | { state: "completed" | "stale" }
+  | { state: "unclaimed" }
+  | { settlement: WagerSettlement; state: "pending" }
+> {
+  if (
+    parseInviteMatchIndex(task.inviteId, task.matchId) === null ||
+    !/^[a-f0-9]{64}$/.test(task.operationId)
+  ) {
+    return { state: "stale" };
+  }
+  const rawWager = await repository.getRtdbPath(
+    `invites/${task.inviteId}/wagers/${task.matchId}`,
+  );
+  if (rawWager === null || rawWager === undefined) {
+    return { state: "stale" };
+  }
+  const wager = toRecord(rawWager);
+  if (!wager) throw new Error("wager-settlement-malformed");
+  const settlement = readStoredSettlement(wager);
+  if (!settlement) {
+    if (wager.resolved) return { state: "stale" };
+    return task.resolution ? { state: "unclaimed" } : { state: "stale" };
+  }
+  if (settlement.operationId !== task.operationId) return { state: "stale" };
+  if (settlement.state === "completed") {
+    return { state: "completed" };
+  }
+  return { settlement, state: "pending" };
+}
+
+export async function classifyWagerSettlementRetry(
+  task: WagerSettlementRetryTask,
+  repository: Pick<GameplayRepository, "getRtdbPath">,
+): Promise<WagerSettlementRetryState> {
+  return (await readWagerSettlementRetry(task, repository)).state;
 }
 
 export async function resumeWagerSettlement(
@@ -497,23 +592,28 @@ export async function resumeWagerSettlement(
   repository: GameplayRepository,
   now: () => number = Date.now,
 ): Promise<"completed" | "stale"> {
-  if (
-    parseInviteMatchIndex(task.inviteId, task.matchId) === null ||
-    !/^[a-f0-9]{64}$/.test(task.operationId)
-  ) {
-    return "stale";
-  }
-  const wager = toRecord(
-    await repository.getRtdbPath(
+  const retry = await readWagerSettlementRetry(task, repository);
+  let settlement: WagerSettlement;
+  if (retry.state === "unclaimed") {
+    if (!task.resolution) return "stale";
+    const claimed = await claimSettlement(
       `invites/${task.inviteId}/wagers/${task.matchId}`,
-    ),
-  );
-  const settlement = parseSettlement(wager?.settlement);
-  if (!settlement || settlement.operationId !== task.operationId) {
-    return "stale";
-  }
-  if (settlement.state === "completed") {
-    return "completed";
+      task.resolution,
+      task.operationId,
+      now(),
+      repository,
+    );
+    if (claimed === WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON) {
+      return "completed";
+    }
+    if (claimed === "already-resolved" || claimed === "no-wager") {
+      return "stale";
+    }
+    settlement = claimed;
+  } else if (retry.state === "pending") {
+    settlement = retry.settlement;
+  } else {
+    return retry.state;
   }
   await completeSettlement(
     task.inviteId,
@@ -597,8 +697,19 @@ export async function resolveWagerOutcome(
     const markedWager = toRecord(
       await repository.getRtdbPath(wagerPath, undefined, dependencies.signal),
     );
-    const markedSettlement = parseSettlement(markedWager?.settlement);
+    const markedSettlement = readStoredSettlement(markedWager);
     const proposals = toRecord(markedWager?.proposals);
+    if (
+      markedSettlement?.state === "completed" &&
+      markedSettlement.failureReason ===
+        WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON
+    ) {
+      return {
+        ok: true,
+        reason: "no-wager",
+        mining: await mining(),
+      };
+    }
     if (
       !markedWager ||
       markedWager.resolved ||
@@ -621,10 +732,31 @@ export async function resolveWagerOutcome(
     request.matchId,
   );
   const now = dependencies.now || Date.now;
+  const resolution: WagerSettlementResolution =
+    result === "win"
+      ? {
+          winnerUid: participants.playerUid,
+          winnerProfileId: participants.playerProfileId,
+          loserUid: participants.opponentUid,
+          loserProfileId: participants.opponentProfileId,
+        }
+      : {
+          winnerUid: participants.opponentUid,
+          winnerProfileId: participants.opponentProfileId,
+          loserUid: participants.playerUid,
+          loserProfileId: participants.playerProfileId,
+        };
+  const task: WagerSettlementRetryTask = {
+    kind: "wager-settlement",
+    inviteId: request.inviteId,
+    matchId: request.matchId,
+    operationId,
+    resolution,
+  };
+  await dependencies.scheduleRetry?.(task);
   const settlement = await claimSettlement(
     wagerPath,
-    participants,
-    result,
+    resolution,
     operationId,
     now(),
     repository,
@@ -636,31 +768,24 @@ export async function resolveWagerOutcome(
   if (settlement === "already-resolved") {
     return { ok: true, reason: "already-resolved", mining: await mining() };
   }
-  const task: WagerSettlementRetryTask = {
-    kind: "wager-settlement",
-    inviteId: request.inviteId,
-    matchId: request.matchId,
-    operationId: settlement.operationId,
-  };
-  let scheduleFailure: unknown;
-  try {
-    await dependencies.scheduleRetry?.(task);
-  } catch (error) {
-    scheduleFailure = error;
+  if (settlement === WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON) {
+    return {
+      ok: true,
+      reason: "no-wager",
+      mining: await mining(),
+    };
   }
-  try {
-    await completeSettlement(
-      request.inviteId,
-      request.matchId,
-      settlement,
-      repository,
-      now,
-      dependencies.signal,
-    );
-  } catch (error) {
-    throw scheduleFailure || error;
-  }
-  return { ok: true, mining: await mining() };
+  const completion = await completeSettlement(
+    request.inviteId,
+    request.matchId,
+    settlement,
+    repository,
+    now,
+    dependencies.signal,
+  );
+  return completion
+    ? { ok: true, reason: "no-wager", mining: await mining() }
+    : { ok: true, mining: await mining() };
 }
 
 export {

@@ -1596,6 +1596,7 @@ describe("canonical profile D1 store", () => {
       material: "dust" as const,
       count: 3,
       appliedAtMs: 1_000,
+      outcome: "applied" as const,
       revision: 1 as const,
     };
     await commitCanonicalPlan(testEnv.PROFILE_DB, {

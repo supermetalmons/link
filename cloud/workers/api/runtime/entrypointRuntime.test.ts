@@ -113,7 +113,8 @@ describe("Worker entrypoint", () => {
     expect(tracked.retries).toEqual([{ delaySeconds: 300 }]);
   });
 
-  it("freezes wagers without blocking unrelated Telegram work", async () => {
+  it("acks stale wagers while frozen without blocking Telegram work", async () => {
+    const deferred: Array<{ body: unknown; options?: QueueSendOptions }> = [];
     const settlement = queueMessage({
       kind: "wager-settlement",
       inviteId: "invite-1",
@@ -126,10 +127,22 @@ describe("Worker entrypoint", () => {
         settlement.message,
         unrelated.message,
       ]),
-      withProfileControl(TELEGRAM_TEST_ENV as unknown as Env, "frozen"),
+      {
+        ...withProfileControl(TELEGRAM_TEST_ENV as unknown as Env, "frozen"),
+        TELEGRAM_DELIVERY_QUEUE: {
+          ...TELEGRAM_TEST_ENV.TELEGRAM_DELIVERY_QUEUE,
+          send: async (body, options) => {
+            deferred.push({ body, options });
+            return {
+              metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+            };
+          },
+        },
+      },
     );
-    expect(settlement.acknowledgements()).toBe(0);
-    expect(settlement.retries).toEqual([{ delaySeconds: 300 }]);
+    expect(settlement.acknowledgements()).toBe(1);
+    expect(settlement.retries).toEqual([]);
+    expect(deferred).toEqual([]);
     expect(unrelated.acknowledgements()).toBe(1);
     expect(unrelated.retries).toEqual([]);
   });

@@ -23,6 +23,7 @@ import {
   type CanonicalRatingUpdateSnapshot,
   type CanonicalRatingUpdateValue,
   type CanonicalSortKey,
+  type CanonicalWagerSettlement,
 } from "./profileCanonicalD1.ts";
 import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
 import {
@@ -46,6 +47,7 @@ import type {
   RatingProjectionRepository,
   RatingUpdateData,
   WagerTransferInput,
+  WagerTransferResult,
 } from "./gameplayRepository.ts";
 
 type CanonicalRepositoryOptions = {
@@ -419,6 +421,18 @@ function mapFailure(error: unknown, createFailure: () => Error): never {
   throw error instanceof CanonicalProfileConflict ? createFailure() : error;
 }
 
+function replayWagerSettlement(
+  settlement: CanonicalWagerSettlement,
+  fingerprint: string,
+): WagerTransferResult {
+  if (settlement.fingerprint !== fingerprint) {
+    throw new CanonicalProfileConflict();
+  }
+  return settlement.outcome === "insufficient-materials"
+    ? "insufficient-materials"
+    : "replayed";
+}
+
 export function createCanonicalGameplayRepository(
   db: D1Database,
   profileGamesDb: D1Database,
@@ -442,14 +456,12 @@ export function createCanonicalGameplayRepository(
         throw options.createFailure();
       }
       try {
-        if (
-          await readCanonicalWagerSettlement(
-            db,
-            input.operationId,
-            input.fingerprint,
-          )
-        ) {
-          return "replayed";
+        const existing = await readCanonicalWagerSettlement(
+          db,
+          input.operationId,
+        );
+        if (existing) {
+          return replayWagerSettlement(existing, input.fingerprint);
         }
       } catch {
         throw options.createFailure();
@@ -465,6 +477,7 @@ export function createCanonicalGameplayRepository(
           const expectations: CanonicalExpectation[] = [
             { kind: "wager-settlement-absent", operationId: input.operationId },
           ];
+          let outcome: "applied" | "insufficient-materials" = "applied";
           if (winner.profileId !== loser.profileId) {
             const material = input.material;
             const winnerMaterials = normalizeMaterials(
@@ -473,56 +486,65 @@ export function createCanonicalGameplayRepository(
             const loserMaterials = normalizeMaterials(
               loser.profile.mining.materials,
             );
-            const nextWinnerMaterials = {
-              ...winnerMaterials,
-              [material]: winnerMaterials[material] + input.count,
-            };
-            const nextLoserMaterials = {
-              ...loserMaterials,
-              [material]: loserMaterials[material] - input.count,
-            };
-            expectations.push(
-              {
-                kind: "profile-revision",
-                profileId: winner.profileId,
-                revision: winner.revision,
-              },
-              {
+            if (loserMaterials[material] < input.count) {
+              outcome = "insufficient-materials";
+              expectations.push({
                 kind: "profile-revision",
                 profileId: loser.profileId,
                 revision: loser.revision,
-              },
-            );
-            mutations.push(
-              {
-                kind: "update-active-profile",
-                value: patchCanonicalProfile(
-                  winner,
-                  {
-                    mining: {
-                      ...winner.profile.mining,
-                      materials: nextWinnerMaterials,
+              });
+            } else {
+              const nextWinnerMaterials = {
+                ...winnerMaterials,
+                [material]: winnerMaterials[material] + input.count,
+              };
+              const nextLoserMaterials = {
+                ...loserMaterials,
+                [material]: loserMaterials[material] - input.count,
+              };
+              expectations.push(
+                {
+                  kind: "profile-revision",
+                  profileId: winner.profileId,
+                  revision: winner.revision,
+                },
+                {
+                  kind: "profile-revision",
+                  profileId: loser.profileId,
+                  revision: loser.revision,
+                },
+              );
+              mutations.push(
+                {
+                  kind: "update-active-profile",
+                  value: patchCanonicalProfile(
+                    winner,
+                    {
+                      mining: {
+                        ...winner.profile.mining,
+                        materials: nextWinnerMaterials,
+                      },
                     },
-                  },
-                  input.appliedAtMs,
-                  [material],
-                ),
-              },
-              {
-                kind: "update-active-profile",
-                value: patchCanonicalProfile(
-                  loser,
-                  {
-                    mining: {
-                      ...loser.profile.mining,
-                      materials: nextLoserMaterials,
+                    input.appliedAtMs,
+                    [material],
+                  ),
+                },
+                {
+                  kind: "update-active-profile",
+                  value: patchCanonicalProfile(
+                    loser,
+                    {
+                      mining: {
+                        ...loser.profile.mining,
+                        materials: nextLoserMaterials,
+                      },
                     },
-                  },
-                  input.appliedAtMs,
-                  [material],
-                ),
-              },
-            );
+                    input.appliedAtMs,
+                    [material],
+                  ),
+                },
+              );
+            }
           }
           mutations.push({
             kind: "insert-wager-settlement",
@@ -534,21 +556,20 @@ export function createCanonicalGameplayRepository(
               material: input.material,
               count: input.count,
               appliedAtMs: input.appliedAtMs,
+              outcome,
               revision: 1,
             },
           });
           await commitCanonicalPlan(db, { expectations, mutations });
-          return "applied";
+          return outcome;
         } catch (error) {
           try {
-            if (
-              await readCanonicalWagerSettlement(
-                db,
-                input.operationId,
-                input.fingerprint,
-              )
-            ) {
-              return "replayed";
+            const existing = await readCanonicalWagerSettlement(
+              db,
+              input.operationId,
+            );
+            if (existing) {
+              return replayWagerSettlement(existing, input.fingerprint);
             }
           } catch {
             throw options.createFailure();

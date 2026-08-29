@@ -7,9 +7,13 @@ import type { FirebaseIdentity } from "../src/firebaseAuth.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import { handleGameplayRoute } from "../src/gameplayRoute.ts";
 import {
+  classifyWagerSettlementRetry,
   resumeWagerSettlement,
   resolveWagerMatchResult,
   resolveWagerOutcome,
+  WAGER_SETTLEMENT_INITIAL_RETRY_DELAY_SECONDS,
+  WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON,
+  type WagerSettlementRetryTask,
 } from "../src/wagerOutcome.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
@@ -29,6 +33,13 @@ const identity: FirebaseIdentity = {
   idToken: "firebase-token",
   profileId: "profile-host",
   uid: "host",
+};
+
+const hostWinResolution = {
+  winnerUid: "host",
+  winnerProfileId: "profile-host",
+  loserUid: "guest",
+  loserProfileId: "profile-guest",
 };
 
 const emptyMaterials = () => ({
@@ -65,11 +76,13 @@ type RepositoryState = {
   mining: Record<string, MiningSnapshot>;
   repository: GameplayRepository;
   transferCalls: number;
+  transferOutcome: "applied" | "insufficient-materials" | null;
   wager: Record<string, unknown> | null;
 };
 
 function createRepository({
   failFrozenOnce = false,
+  failPatchAfterCommitOnce = false,
   failPatchOnce = false,
   findProfileId,
   invite = { hostId: "host", guestId: "guest" },
@@ -83,6 +96,7 @@ function createRepository({
   wager = null,
 }: {
   failFrozenOnce?: boolean;
+  failPatchAfterCommitOnce?: boolean;
   failPatchOnce?: boolean;
   findProfileId?: (uid: string) => Promise<string | null>;
   invite?: unknown;
@@ -93,6 +107,7 @@ function createRepository({
   wager?: Record<string, unknown> | null;
 } = {}): RepositoryState {
   let failFrozen = failFrozenOnce;
+  let failPatchAfterCommit = failPatchAfterCommitOnce;
   let failPatch = failPatchOnce;
   let transferFingerprint = "";
   const state: Omit<RepositoryState, "repository"> = {
@@ -104,6 +119,7 @@ function createRepository({
     marker,
     mining: structuredClone(mining),
     transferCalls: 0,
+    transferOutcome: null,
     wager: structuredClone(wager),
   };
   const repository: GameplayRepository = {
@@ -111,9 +127,21 @@ function createRepository({
       state.transferCalls += 1;
       if (transferFingerprint) {
         assert.equal(input.fingerprint, transferFingerprint);
-        return "replayed";
+        return state.transferOutcome === "insufficient-materials"
+          ? "insufficient-materials"
+          : "replayed";
+      }
+      if (
+        input.winnerProfileId !== input.loserProfileId &&
+        state.mining[input.loserProfileId].materials[input.material] <
+          input.count
+      ) {
+        transferFingerprint = input.fingerprint;
+        state.transferOutcome = "insufficient-materials";
+        return "insufficient-materials";
       }
       transferFingerprint = input.fingerprint;
+      state.transferOutcome = "applied";
       state.appliedTransfers += 1;
       if (input.winnerProfileId !== input.loserProfileId) {
         state.mining[input.winnerProfileId].materials[input.material] +=
@@ -151,14 +179,24 @@ function createRepository({
         updates["invites/invite/matchesWagerResolutions/invite"] === true;
       if (state.wager) {
         state.wager.proposals = null;
+        if (updates["invites/invite/wagers/invite/agreed"] === null) {
+          state.wager.agreed = null;
+        }
         const settlement = state.wager.settlement as Record<string, unknown>;
         settlement.state = "completed";
         settlement.completedAtMs =
           updates["invites/invite/wagers/invite/settlement/completedAtMs"];
+        const failureReason =
+          updates["invites/invite/wagers/invite/settlement/failureReason"];
+        if (failureReason) settlement.failureReason = failureReason;
         if (updates["invites/invite/wagers/invite/resolved"]) {
           state.wager.resolved =
             updates["invites/invite/wagers/invite/resolved"];
         }
+      }
+      if (failPatchAfterCommit) {
+        failPatchAfterCommit = false;
+        throw new Error("ambiguous-patch-failure");
       }
     },
     transactRtdbPath: async (path, updater) => {
@@ -390,6 +428,294 @@ test("resumes after finalization failure without paying twice", async () => {
   assert.equal(state.marker, true);
 });
 
+test("cancels insufficient-material wagers without transferring balances", async () => {
+  const state = createRepository({
+    mining: {
+      "profile-host": snapshot(10),
+      "profile-guest": snapshot(1),
+    },
+    wager: { agreed: { material: "dust", count: 2 }, proposals: {} },
+  });
+
+  const response = await resolveWagerOutcome(
+    identity,
+    { inviteId: "invite", matchId: "invite" },
+    state.repository,
+    { now: () => 500, resolveResult: () => "win" },
+  );
+
+  const settlement = state.wager?.settlement as Record<string, unknown>;
+  const task = {
+    kind: "wager-settlement" as const,
+    inviteId: "invite",
+    matchId: "invite",
+    operationId: String(settlement.operationId),
+  };
+  assert.equal(state.appliedTransfers, 0);
+  assert.equal(state.transferCalls, 1);
+  assert.equal(state.transferOutcome, "insufficient-materials");
+  assert.deepEqual(state.mining, {
+    "profile-host": snapshot(10),
+    "profile-guest": snapshot(1),
+  });
+  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 0);
+  assert.equal((state.frozen.guest.frozen as Record<string, number>).dust, 0);
+  assert.equal(settlement.state, "completed");
+  assert.equal(
+    settlement.failureReason,
+    WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON,
+  );
+  assert.equal(state.wager?.resolved, undefined);
+  assert.equal(state.wager?.agreed, null);
+  assert.equal(state.wager?.proposals, null);
+  assert.equal(state.marker, true);
+  assert.deepEqual(response, {
+    ok: true,
+    reason: "no-wager",
+    mining: snapshot(10),
+  });
+  assert.deepEqual(
+    await resolveWagerOutcome(
+      identity,
+      { inviteId: "invite", matchId: "invite" },
+      state.repository,
+      { now: () => 600, resolveResult: () => "win" },
+    ),
+    response,
+  );
+  assert.equal(
+    await classifyWagerSettlementRetry(task, state.repository),
+    "completed",
+  );
+  assert.equal(
+    await resumeWagerSettlement(task, state.repository, () => 600),
+    "completed",
+  );
+  assert.equal(state.transferCalls, 1);
+});
+
+test("only new retry tasks can recover unclaimed wagers", async () => {
+  const operationId = "a".repeat(64);
+  const legacyTask = {
+    kind: "wager-settlement" as const,
+    inviteId: "invite",
+    matchId: "invite",
+    operationId,
+  };
+  const task = { ...legacyTask, resolution: hostWinResolution };
+  for (const wager of [
+    { agreed: { material: "dust", count: 2 } },
+    {},
+    { proposalRemovalOperations: { old: { count: 1 } } },
+  ]) {
+    const unclaimed = createRepository({ wager });
+    assert.equal(
+      await classifyWagerSettlementRetry(task, unclaimed.repository),
+      "unclaimed",
+    );
+    assert.equal(
+      await classifyWagerSettlementRetry(legacyTask, unclaimed.repository),
+      "stale",
+    );
+    assert.equal(
+      await resumeWagerSettlement(legacyTask, unclaimed.repository),
+      "stale",
+    );
+  }
+
+  const malformed = createRepository({
+    wager: {
+      settlement: {
+        version: 1,
+        state: "pending",
+        operationId,
+        fingerprint: "fingerprint",
+        claimedAtMs: 1,
+        failureReason: "insufficient-materials",
+        kind: "agreed",
+        winnerUid: "host",
+        loserUid: "guest",
+        winnerProfileId: "profile-host",
+        loserProfileId: "profile-guest",
+        material: "dust",
+        count: 2,
+      },
+    },
+  });
+  await assert.rejects(
+    classifyWagerSettlementRetry(task, malformed.repository),
+    /wager-settlement-malformed/,
+  );
+  await assert.rejects(
+    resolveWagerOutcome(
+      identity,
+      { inviteId: "invite", matchId: "invite" },
+      malformed.repository,
+      { resolveResult: () => "win" },
+    ),
+    /wager-settlement-malformed/,
+  );
+  assert.equal(
+    (malformed.wager?.settlement as Record<string, unknown>).failureReason,
+    "insufficient-materials",
+  );
+});
+
+test("recovers when HTTP stops after queueing but before the claim", async () => {
+  const state = createRepository({
+    wager: { agreed: { material: "dust", count: 2 } },
+  });
+  const tasks: WagerSettlementRetryTask[] = [];
+  const transact = state.repository.transactRtdbPath;
+  state.repository.transactRtdbPath = async (path, updater, signal) => {
+    if (path === "invites/invite/wagers/invite") {
+      throw new Error("claim-unavailable");
+    }
+    return transact(path, updater, signal);
+  };
+
+  await assert.rejects(() =>
+    resolveWagerOutcome(
+      identity,
+      { inviteId: "invite", matchId: "invite" },
+      state.repository,
+      {
+        now: () => 500,
+        resolveResult: () => "win",
+        scheduleRetry: async (task) => {
+          tasks.push(task);
+        },
+      },
+    ),
+  );
+  assert.equal(tasks.length, 1);
+  assert.deepEqual(tasks[0].resolution, hostWinResolution);
+  assert.equal(state.wager?.settlement, undefined);
+
+  state.repository.transactRtdbPath = transact;
+  assert.equal(
+    await classifyWagerSettlementRetry(tasks[0], state.repository),
+    "unclaimed",
+  );
+  assert.equal(
+    await resumeWagerSettlement(tasks[0], state.repository, () => 600),
+    "completed",
+  );
+  assert.equal(
+    await resumeWagerSettlement(tasks[0], state.repository, () => 700),
+    "completed",
+  );
+  assert.equal(state.appliedTransfers, 1);
+  assert.equal(state.transferCalls, 1);
+  assert.equal(state.marker, true);
+});
+
+test("autonomously cancels an unclaimed underfunded wager", async () => {
+  const state = createRepository({
+    mining: {
+      "profile-host": snapshot(10),
+      "profile-guest": snapshot(1),
+    },
+    wager: { agreed: { material: "dust", count: 2 } },
+  });
+  const task: WagerSettlementRetryTask = {
+    kind: "wager-settlement",
+    inviteId: "invite",
+    matchId: "invite",
+    operationId: "a".repeat(64),
+    resolution: hostWinResolution,
+  };
+
+  assert.equal(
+    await resumeWagerSettlement(task, state.repository, () => 500),
+    "completed",
+  );
+  assert.equal(state.appliedTransfers, 0);
+  assert.equal(state.transferOutcome, "insufficient-materials");
+  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 0);
+  assert.equal((state.frozen.guest.frozen as Record<string, number>).dust, 0);
+  assert.equal(
+    (state.wager?.settlement as Record<string, unknown>).failureReason,
+    WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON,
+  );
+  assert.equal(state.marker, true);
+});
+
+test("resumes insufficient-material cleanup from the durable outcome", async () => {
+  const state = createRepository({
+    failFrozenOnce: true,
+    mining: {
+      "profile-host": snapshot(10),
+      "profile-guest": snapshot(1),
+    },
+    wager: { agreed: { material: "dust", count: 2 } },
+  });
+  await assert.rejects(() =>
+    resolveWagerOutcome(
+      identity,
+      { inviteId: "invite", matchId: "invite" },
+      state.repository,
+      { now: () => 500, resolveResult: () => "win" },
+    ),
+  );
+  const settlement = state.wager?.settlement as Record<string, unknown>;
+  assert.equal(settlement.state, "pending");
+  assert.equal(settlement.failureReason, null);
+  const task = {
+    kind: "wager-settlement" as const,
+    inviteId: "invite",
+    matchId: "invite",
+    operationId: String(settlement.operationId),
+  };
+
+  assert.equal(
+    await resumeWagerSettlement(task, state.repository, () => 600),
+    "completed",
+  );
+  assert.equal(state.transferCalls, 2);
+  assert.equal(state.appliedTransfers, 0);
+  assert.equal(state.transferOutcome, "insufficient-materials");
+  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 0);
+  assert.equal((state.frozen.guest.frozen as Record<string, number>).dust, 0);
+  assert.equal(state.marker, true);
+});
+
+test("treats ambiguous insufficient-material finalization as completed", async () => {
+  const state = createRepository({
+    failPatchAfterCommitOnce: true,
+    mining: {
+      "profile-host": snapshot(10),
+      "profile-guest": snapshot(1),
+    },
+    wager: { agreed: { material: "dust", count: 2 } },
+  });
+  await assert.rejects(() =>
+    resolveWagerOutcome(
+      identity,
+      { inviteId: "invite", matchId: "invite" },
+      state.repository,
+      { now: () => 500, resolveResult: () => "win" },
+    ),
+  );
+  const settlement = state.wager?.settlement as Record<string, unknown>;
+  const task = {
+    kind: "wager-settlement" as const,
+    inviteId: "invite",
+    matchId: "invite",
+    operationId: String(settlement.operationId),
+  };
+  assert.equal(
+    await classifyWagerSettlementRetry(task, state.repository),
+    "completed",
+  );
+  assert.equal(
+    await resumeWagerSettlement(task, state.repository, () => 600),
+    "completed",
+  );
+  assert.equal(state.transferCalls, 1);
+  assert.equal(state.appliedTransfers, 0);
+});
+
 test("resumes a pending settlement without a browser session", async () => {
   const state = createRepository({
     failFrozenOnce: true,
@@ -406,18 +732,32 @@ test("resumes a pending settlement without a browser session", async () => {
   const operationId = String(
     (state.wager?.settlement as Record<string, unknown>).operationId,
   );
+  const task = {
+    kind: "wager-settlement" as const,
+    inviteId: "invite",
+    matchId: "invite",
+    operationId,
+  };
+  const transferCalls = state.transferCalls;
   assert.equal(
-    await resumeWagerSettlement(
-      {
-        kind: "wager-settlement",
-        inviteId: "invite",
-        matchId: "invite",
-        operationId,
-      },
-      state.repository,
-      () => 600,
-    ),
+    await classifyWagerSettlementRetry(task, state.repository),
+    "pending",
+  );
+  assert.equal(state.transferCalls, transferCalls);
+  assert.equal(
+    await resumeWagerSettlement(task, state.repository, () => 600),
     "completed",
+  );
+  assert.equal(
+    await classifyWagerSettlementRetry(task, state.repository),
+    "completed",
+  );
+  assert.equal(
+    await classifyWagerSettlementRetry(
+      { ...task, operationId: "b".repeat(64) },
+      state.repository,
+    ),
+    "stale",
   );
   assert.equal(state.appliedTransfers, 1);
   assert.equal(state.marker, true);
@@ -529,18 +869,25 @@ test("rate limits outcome requests before repository work", async () => {
 });
 
 test("queues a durable retry before settling", async () => {
-  const tasks: unknown[] = [];
+  const tasks: Array<{ options?: QueueSendOptions; task: unknown }> = [];
+  const order: string[] = [];
   const state = createRepository({
     wager: { agreed: { material: "dust", count: 2 } },
   });
+  const transact = state.repository.transactRtdbPath;
+  state.repository.transactRtdbPath = async (...args) => {
+    if (args[0] === "invites/invite/wagers/invite") order.push("claim");
+    return transact(...args);
+  };
   const response = await handleGameplayRoute(
     request({ inviteId: "invite", matchId: "invite" }),
     {
       ...env,
       TELEGRAM_DELIVERY_QUEUE: {
         ...TELEGRAM_TEST_ENV.TELEGRAM_DELIVERY_QUEUE,
-        send: async (task) => {
-          tasks.push(task);
+        send: async (task, options) => {
+          order.push("queue");
+          tasks.push({ task, options });
           return {
             metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
           };
@@ -557,12 +904,46 @@ test("queues a durable retry before settling", async () => {
   assert.equal(response.status, 200);
   assert.deepEqual(tasks, [
     {
-      kind: "wager-settlement",
-      inviteId: "invite",
-      matchId: "invite",
-      operationId: String(
-        (state.wager?.settlement as Record<string, unknown>).operationId,
-      ),
+      task: {
+        kind: "wager-settlement",
+        inviteId: "invite",
+        matchId: "invite",
+        operationId: String(
+          (state.wager?.settlement as Record<string, unknown>).operationId,
+        ),
+        resolution: hostWinResolution,
+      },
+      options: {
+        delaySeconds: WAGER_SETTLEMENT_INITIAL_RETRY_DELAY_SECONDS,
+      },
     },
   ]);
+  assert.deepEqual(order.slice(0, 2), ["queue", "claim"]);
+});
+
+test("does not claim a settlement when retry scheduling fails", async () => {
+  const originalWager = { agreed: { material: "dust", count: 2 } };
+  const state = createRepository({ wager: originalWager });
+  let claims = 0;
+  const transact = state.repository.transactRtdbPath;
+  state.repository.transactRtdbPath = async (...args) => {
+    if (args[0] === "invites/invite/wagers/invite") claims += 1;
+    return transact(...args);
+  };
+
+  await assert.rejects(() =>
+    resolveWagerOutcome(
+      identity,
+      { inviteId: "invite", matchId: "invite" },
+      state.repository,
+      {
+        resolveResult: () => "win",
+        scheduleRetry: async () => {
+          throw new Error("queue-unavailable");
+        },
+      },
+    ),
+  );
+  assert.equal(claims, 0);
+  assert.deepEqual(state.wager, originalWager);
 });

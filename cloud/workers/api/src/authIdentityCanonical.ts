@@ -15,6 +15,7 @@ import {
   buildUsernameLookupKey,
   isAlphanumericUsername,
   isReservedExplicitUsername,
+  USERNAME_MAX_LENGTH,
 } from "@mons/shared/usernames";
 import { AuthApiFailure } from "./authErrors.ts";
 import {
@@ -100,6 +101,11 @@ type CanonicalIdentityProfile = {
   aggregate: CanonicalProfileAggregateSnapshot;
   owner: CanonicalLoginOwnerSnapshot | null;
   profile: CanonicalProfileSnapshot;
+};
+
+type RepairedVerifiedCaller = {
+  identity: CanonicalIdentityProfile;
+  method: CanonicalAuthMethodSnapshot;
 };
 
 type CooldownPlan = {
@@ -1400,14 +1406,22 @@ export function createCanonicalAuthIdentityService(
     authFailure(409, "aborted", "profile-merged-retry");
   };
 
+  const hasValidUsername = (value: unknown): boolean => {
+    const username = cleanString(value);
+    return (
+      isAlphanumericUsername(username) &&
+      username.length <= USERNAME_MAX_LENGTH &&
+      !isReservedExplicitUsername(username)
+    );
+  };
+
   const assignUsername = async (
     uid: string,
     profile: CanonicalIdentityProfile,
     preferredUsername?: string | null,
   ): Promise<CanonicalIdentityProfile> => {
-    const current = profile.profile.profile.username || "";
     if (
-      (current && !isReservedExplicitUsername(current)) ||
+      hasValidUsername(profile.profile.profile.username) ||
       methodValue(profile.aggregate, "eth") ||
       methodValue(profile.aggregate, "sol")
     )
@@ -1415,6 +1429,7 @@ export function createCanonicalAuthIdentityService(
     const preferred = cleanString(preferredUsername);
     const preferredCandidate =
       isAlphanumericUsername(preferred) &&
+      preferred.length <= USERNAME_MAX_LENGTH &&
       !isReservedExplicitUsername(preferred)
         ? preferred
         : null;
@@ -1442,6 +1457,102 @@ export function createCanonicalAuthIdentityService(
       authFailure(409, "aborted", "profile-merged-retry");
     }
     authFailure(409, "aborted", "username-generation-exhausted");
+  };
+
+  const repairCallerProfile = async (
+    uid: string,
+  ): Promise<CanonicalIdentityProfile> => {
+    let profile = await repairCurrentCaller(uid);
+    const xMethod = methodFromAggregate(profile.aggregate, "x");
+    if (
+      (xMethod || methodFromAggregate(profile.aggregate, "apple")) &&
+      !hasValidUsername(profile.profile.profile.username) &&
+      !methodFromAggregate(profile.aggregate, "eth") &&
+      !methodFromAggregate(profile.aggregate, "sol")
+    ) {
+      await assignUsername(uid, profile, xMethod?.xUsername);
+      profile = await repairCurrentCaller(uid);
+    }
+    return profile;
+  };
+
+  const expectedMethod = (
+    profile: CanonicalIdentityProfile,
+    method: AuthMethodKey,
+    methodValueHash: string,
+  ): CanonicalAuthMethodSnapshot | null => {
+    const current = methodFromAggregate(profile.aggregate, method);
+    return current &&
+      methodValueHash &&
+      hashMethodValue(method, current.normalizedValue) === methodValueHash
+      ? current
+      : null;
+  };
+
+  const repairVerifiedCaller = async (
+    uid: string,
+    method: AuthMethodKey,
+    methodValueHash: string,
+  ): Promise<RepairedVerifiedCaller | null> => {
+    const current = await profileByLogin(uid);
+    if (!current || !expectedMethod(current, method, methodValueHash)) {
+      return null;
+    }
+    const identity = await repairCallerProfile(uid);
+    const liveMethod = expectedMethod(identity, method, methodValueHash);
+    return liveMethod ? { identity, method: liveMethod } : null;
+  };
+
+  const completeVerifySuccess = async (
+    operation: CanonicalAuthOperationSnapshot,
+    verified: RepairedVerifiedCaller,
+    result: AuthProfileResponse,
+  ): Promise<boolean> => {
+    if (
+      operation.kind !== "verify" ||
+      (operation.status !== "started" && operation.status !== "failed") ||
+      operation.method !== verified.method.method ||
+      cleanString(record(operation.meta).methodValueHash) !==
+        hashMethodValue(verified.method.method, verified.method.normalizedValue)
+    ) {
+      return false;
+    }
+    const value: CanonicalAuthOperationValue = {
+      ...operation,
+      status: "success",
+      result: record(result),
+      errorCode: null,
+      errorMessage: null,
+      updatedAtMs: now(),
+    };
+    try {
+      await commitCanonicalPlan(db, {
+        expectations: [
+          {
+            kind: "auth-operation-revision",
+            operationId: operation.operationId,
+            revision: operation.revision,
+          },
+          {
+            kind: "profile-revision",
+            profileId: verified.identity.profile.profileId,
+            revision: verified.identity.profile.revision,
+          },
+          {
+            kind: "auth-method-revision",
+            method: verified.method.method,
+            normalizedValue: verified.method.normalizedValue,
+            profileId: verified.method.profileId,
+            revision: verified.method.revision,
+          },
+        ],
+        mutations: [{ kind: "update-auth-operation", value }],
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof CanonicalProfileConflict) return false;
+      throw error;
+    }
   };
 
   const parseIntent = (
@@ -1529,7 +1640,7 @@ export function createCanonicalAuthIdentityService(
   const syncCurrentCallerProfile = async (
     uid: string,
   ): Promise<LinkedAuthMethodsResponse> => {
-    const profile = await repairCurrentCaller(uid);
+    const profile = await repairCallerProfile(uid);
     const methods = linkedMethods(profile.aggregate);
     return {
       ok: true,
@@ -1562,8 +1673,13 @@ export function createCanonicalAuthIdentityService(
         verifyMeta(input),
       );
       if (started.replay && isAuthProfileResponse(started.replay)) {
-        const repaired = await repairCurrentCaller(input.uid);
-        return profileResponse(repaired, input.uid, input.opId);
+        const completed = await repairVerifiedCaller(
+          input.uid,
+          input.method,
+          hashMethodValue(input.method, input.normalizedMethodValue),
+        );
+        if (!completed) authFailure(409, "aborted", "method-index-race-retry");
+        return profileResponse(completed.identity, input.uid, input.opId);
       }
       if (intent.consumedAtMs > 0) return null;
       try {
@@ -1592,11 +1708,13 @@ export function createCanonicalAuthIdentityService(
         verifyMeta(input),
       );
       if (started.replay && isAuthProfileResponse(started.replay)) {
-        return profileResponse(
-          await repairCurrentCaller(input.uid),
+        const completed = await repairVerifiedCaller(
           input.uid,
-          input.opId,
+          input.method,
+          hashMethodValue(input.method, input.normalizedMethodValue),
         );
+        if (!completed) authFailure(409, "aborted", "method-index-race-retry");
+        return profileResponse(completed.identity, input.uid, input.opId);
       }
       try {
         const current = await profileByLogin(input.uid);
@@ -1636,22 +1754,21 @@ export function createCanonicalAuthIdentityService(
           }
         }
         if (!linked) authFailure(409, "aborted", "method-index-race-retry");
-        let profile = await repairCurrentCaller(input.uid);
+        const verified = await repairVerifiedCaller(
+          input.uid,
+          input.method,
+          hashMethodValue(input.method, input.normalizedMethodValue),
+        );
+        if (!verified) authFailure(409, "aborted", "method-index-race-retry");
+        const response = profileResponse(
+          verified.identity,
+          input.uid,
+          input.opId,
+        );
         if (
-          methodValue(profile.aggregate, input.method) !==
-          input.normalizedMethodValue
+          !(await completeVerifySuccess(started.operation, verified, response))
         )
           authFailure(409, "aborted", "method-index-race-retry");
-        if (input.method === "apple" || input.method === "x") {
-          profile = await assignUsername(
-            input.uid,
-            profile,
-            input.method === "x" ? input.xUsername : null,
-          );
-          profile = await repairCurrentCaller(input.uid);
-        }
-        const response = profileResponse(profile, input.uid, input.opId);
-        await finishBestEffort(input.opId, { result: response });
         return response;
       } catch (error) {
         await finishBestEffort(input.opId, { error });
@@ -1662,26 +1779,31 @@ export function createCanonicalAuthIdentityService(
       const operation = await readCanonicalAuthOperation(db, opId);
       if (!operation) return null;
       operationContext(operation, "verify", method, uid);
-      const replay = await liveResponse(operation);
-      if (replay && isAuthProfileResponse(replay)) return replay;
-      if (operation.status === "started" || operation.status === "failed") {
-        const profile = await profileByLogin(uid);
-        const expectedHash = cleanString(
-          record(operation.meta).methodValueHash,
-        );
-        const current = profile ? methodValue(profile.aggregate, method) : "";
-        if (
-          profile &&
-          expectedHash &&
-          hashMethodValue(method, current) === expectedHash
-        ) {
-          const repaired = await repairCurrentCaller(uid);
-          const response = profileResponse(repaired, uid, opId);
-          await finishBestEffort(opId, { result: response });
-          return response;
-        }
+      if (now() - operation.updatedAtMs > AUTH_OP_REPLAY_TTL_MS) return null;
+      const isCompletedReplay =
+        operation.status === "success" &&
+        isAuthProfileResponse(operation.result);
+      if (
+        !isCompletedReplay &&
+        operation.status !== "started" &&
+        operation.status !== "failed"
+      ) {
+        return null;
       }
-      return null;
+      const verified = await repairVerifiedCaller(
+        uid,
+        method,
+        cleanString(record(operation.meta).methodValueHash),
+      );
+      if (!verified) return null;
+      const response = profileResponse(verified.identity, uid, opId);
+      if (
+        !isCompletedReplay &&
+        !(await completeVerifySuccess(operation, verified, response))
+      ) {
+        return null;
+      }
+      return response;
     },
     async refreshCompletedVerifyResult(
       result,
@@ -1700,9 +1822,13 @@ export function createCanonicalAuthIdentityService(
           hashMethodValue(method, normalized)
       )
         return null;
-      const profile = await repairCurrentCaller(uid);
-      return methodValue(profile.aggregate, method) === normalized
-        ? profileResponse(profile, uid, result.opId)
+      const verified = await repairVerifiedCaller(
+        uid,
+        method,
+        hashMethodValue(method, normalized),
+      );
+      return verified
+        ? profileResponse(verified.identity, uid, result.opId)
         : null;
     },
     syncCurrentCallerProfile,

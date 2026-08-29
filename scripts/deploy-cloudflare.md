@@ -55,7 +55,7 @@ The five-minute Worker schedule removes expired created/processing flows and orp
 
 ## API Worker release
 
-Upload and smoke a version before it receives traffic:
+Upload and smoke a version before it receives traffic. Follow the database-specific maintenance procedure below when a release depends on a new schema.
 
 The smoke command carries reviewed non-secret production defaults for one canonical login/profile mapping and one Solana wallet. Use `--smoke-sol` and `--smoke-profile-fixture` only when explicitly testing alternate values.
 
@@ -74,6 +74,42 @@ npm run smoke:api -- --base-url https://api.mons.link
 
 `upload:api` uses `wrangler versions upload --strict`; it does not send traffic to the candidate. `promote:api` deploys the explicit Version ID to 100% of traffic without prompting. `deploy:api:triggers` applies the tracked route, Cron, Workflow, and configured Queue consumer updates. Removing an omitted Queue consumer requires an explicit `wrangler queues consumer remove`. Routine code-only releases may omit trigger deployment when that configuration is unchanged.
 
+### Wager outcome migration `0008`
+
+This migration is forward-only. Validate locally, pause Telegram delivery, freeze profile writes, and wait five full minutes before applying it:
+
+```sh
+npm run check:all
+npx wrangler queues pause-delivery mons-link-telegram-delivery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run manage:profile-canonical -- --freeze
+# wait five full minutes
+npm run manage:profile-canonical -- --status
+npx wrangler d1 migrations list mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 migrations apply mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+The pending migration list must contain only the reviewed `0008_wager_settlement_outcomes.sql`. Upload the new Worker, run its read-only preview smoke, and promote that exact Version ID directly to 100%:
+
+```sh
+npm run upload:api
+npm run smoke:api -- --base-url <version-preview-url> --read-only --auth-token-fixture <protected-json-file>
+npm run promote:api -- --version-id <version-id>
+npm run deploy:api:triggers
+npm run smoke:api -- --base-url https://api.mons.link --read-only --auth-token-fixture <protected-json-file>
+```
+
+Verify only schema metadata, then resume profile writes and Telegram delivery:
+
+```sh
+npx wrangler d1 execute mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env --command "SELECT name, type, \"notnull\", dflt_value FROM pragma_table_info('wager_settlements') WHERE name = 'outcome'"
+npx wrangler d1 execute mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env --command "SELECT type, name, tbl_name, instr(sql, 'outcome IS NOT NEW.outcome') > 0 AS guards_outcome FROM sqlite_schema WHERE type = 'trigger' AND name = 'wager_settlements_reject_replace'"
+npm run manage:profile-canonical -- --resume
+npx wrangler queues resume-delivery mons-link-telegram-delivery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run smoke:api -- --base-url https://api.mons.link
+```
+
+Do not use `--verify-d1` for this routine post-cutover schema check. If any step fails after the freeze, leave profile writes frozen and Telegram delivery paused, then fix forward. Once writes resume, Worker versions predating `0008` are invalid deployment targets.
+
 ## Canonical profile D1 cutover
 
 This is a forward-only cutover implemented by two reviewed commits. Commit 1 is the
@@ -91,8 +127,12 @@ The shared control states are:
 
 Only `firestore → importing → frozen → active` and `active → frozen` are
 allowed. HTTP writes return `503 profile-writes-disabled` with `Retry-After:
-60` while blocked. Profile Queue messages retry without acknowledgement,
-profile Cron work pauses, and every mutating Workflow step rechecks control.
+60` while blocked. Profile Queue messages retry without acknowledgement, pending
+wager settlements self-requeue before acknowledgement, completed or stale wager
+tasks are acknowledged without mutation, profile Cron work pauses, and every
+mutating Workflow step rechecks control. Unclaimed and unreadable settlements
+also self-requeue while control is blocked. A failed replacement enqueue retries
+the current task; active failures use normal Queue retries.
 Auth-state expiry, game-receipt cleanup, and unrelated Telegram delivery remain
 independent. `AUTH_MUTATIONS_DISABLED` remains a separate auth-maintenance
 switch.
@@ -233,6 +273,8 @@ Firestore deployment configuration, and remaining audit-only migration code.
 ## Event-prize withdrawal D1 operations
 
 `mons-link-event-prize-withdrawals` permanently owns event-prize withdrawal admission, leases, submitted Solana transactions, and completion records. The runtime accepts only `d1` and `frozen`: `d1` serves requests and Workflow attempts, while `frozen` fails them closed during maintenance. Event reconciliation and auth recovery continue to read canonical D1 state while withdrawals are frozen.
+
+The storage freeze is the durable operator stop. Freeze storage before terminating any withdrawal Workflow. Resuming storage to `d1` explicitly authorizes retained terminated instances to be recreated from their durable D1 state, including instances terminated to drain the profile cutover.
 
 Inspect or change the maintenance gate without logging withdrawal contents:
 

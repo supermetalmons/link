@@ -93,6 +93,7 @@ import {
 import {
   enforceWagerOutcomeRateLimit,
   resolveWagerOutcome,
+  WAGER_SETTLEMENT_INITIAL_RETRY_DELAY_SECONDS,
   type WagerOutcomeDependencies,
 } from "./wagerOutcome.ts";
 import {
@@ -953,7 +954,9 @@ export async function handleGameplayRoute(
         scheduleRetry:
           dependencies.wagerOutcome?.scheduleRetry ||
           (async (task) => {
-            await env.TELEGRAM_DELIVERY_QUEUE.send(task);
+            await env.TELEGRAM_DELIVERY_QUEUE.send(task, {
+              delaySeconds: WAGER_SETTLEMENT_INITIAL_RETRY_DELAY_SECONDS,
+            });
           }),
         signal: dependencies.wagerOutcome?.signal || request.signal,
       });

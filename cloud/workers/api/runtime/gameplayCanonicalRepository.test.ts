@@ -16,6 +16,7 @@ import {
   materializeCanonicalProfile,
   readCanonicalLoginOwner,
   readCanonicalProfile,
+  readCanonicalWagerSettlement,
 } from "../src/profileCanonicalD1.ts";
 import { createProfileEventPrizeOwnerResolver } from "../src/profileEventPrizeOwner.ts";
 import { createProfileGameProjectionRuntime } from "../src/profileGameProjectionRepository.ts";
@@ -393,6 +394,127 @@ describe("canonical gameplay repositories", () => {
       (await readCanonicalProfile(testEnv.PROFILE_DB, "d1-game-loser"))?.profile
         .mining.materials.dust,
     ).toBe(7);
+  });
+
+  it("records insufficient materials with the raw fingerprint", async () => {
+    await insertProfile("d1-insufficient-winner", null, {
+      mining: {
+        lastRockDate: "2026-08-28",
+        materials: { dust: 4, slime: 0, gum: 0, metal: 0, ice: 0 },
+      },
+    });
+    await insertProfile("d1-insufficient-loser", null, {
+      mining: {
+        lastRockDate: "2026-08-28",
+        materials: { dust: 2, slime: 0, gum: 0, metal: 0, ice: 0 },
+      },
+    });
+    const repository = createGameplayRepository(
+      { ...testEnv, PROFILE_DB: failAfterFirstWrite(testEnv.PROFILE_DB) },
+      {
+        rtdbClient: rtdb,
+      },
+    );
+    const replayRepository = createGameplayRepository(testEnv, {
+      rtdbClient: rtdb,
+    });
+    const transfer = {
+      operationId: "d1-insufficient-wager",
+      fingerprint: "d1-insufficient-fingerprint",
+      winnerProfileId: "d1-insufficient-winner",
+      loserProfileId: "d1-insufficient-loser",
+      material: "dust" as const,
+      count: 3,
+      appliedAtMs: 3_000,
+    };
+
+    await expect(repository.applyWagerTransferOnce(transfer)).resolves.toBe(
+      "insufficient-materials",
+    );
+    await expect(
+      replayRepository.applyWagerTransferOnce(transfer),
+    ).resolves.toBe("insufficient-materials");
+
+    expect(
+      await readCanonicalProfile(testEnv.PROFILE_DB, "d1-insufficient-winner"),
+    ).toMatchObject({
+      revision: 1,
+      profile: { mining: { materials: { dust: 4 } } },
+    });
+    expect(
+      await readCanonicalProfile(testEnv.PROFILE_DB, "d1-insufficient-loser"),
+    ).toMatchObject({
+      revision: 1,
+      profile: { mining: { materials: { dust: 2 } } },
+    });
+    expect(
+      await testEnv.PROFILE_DB.prepare(
+        `SELECT fingerprint, outcome
+         FROM wager_settlements WHERE operation_id = ?`,
+      )
+        .bind("d1-insufficient-wager")
+        .first<{ fingerprint: string; outcome: string }>(),
+    ).toEqual({
+      fingerprint: "d1-insufficient-fingerprint",
+      outcome: "insufficient-materials",
+    });
+    expect(
+      await readCanonicalWagerSettlement(
+        testEnv.PROFILE_DB,
+        transfer.operationId,
+        transfer.fingerprint,
+      ),
+    ).toMatchObject({
+      fingerprint: transfer.fingerprint,
+      outcome: "insufficient-materials",
+    });
+    await expect(
+      replayRepository.applyWagerTransferOnce({
+        ...transfer,
+        fingerprint: "d1-insufficient-mismatch",
+      }),
+    ).rejects.toThrow("gameplay-repository-unavailable");
+    await expect(
+      readCanonicalWagerSettlement(
+        testEnv.PROFILE_DB,
+        transfer.operationId,
+        "d1-insufficient-mismatch",
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("keeps same-profile wager settlements net zero", async () => {
+    await insertProfile("d1-same-profile", null, {
+      mining: {
+        lastRockDate: "2026-08-28",
+        materials: { dust: 2, slime: 0, gum: 0, metal: 0, ice: 0 },
+      },
+    });
+    const repository = createGameplayRepository(testEnv, {
+      rtdbClient: rtdb,
+    });
+    const transfer = {
+      operationId: "d1-same-profile-wager",
+      fingerprint: "d1-same-profile-fingerprint",
+      winnerProfileId: "d1-same-profile",
+      loserProfileId: "d1-same-profile",
+      material: "dust" as const,
+      count: 3,
+      appliedAtMs: 3_000,
+    };
+
+    await expect(repository.applyWagerTransferOnce(transfer)).resolves.toBe(
+      "applied",
+    );
+    await expect(repository.applyWagerTransferOnce(transfer)).resolves.toBe(
+      "replayed",
+    );
+    expect(
+      await readCanonicalProfile(testEnv.PROFILE_DB, "d1-same-profile"),
+    ).toMatchObject({
+      revision: 1,
+      profile: { mining: { materials: { dust: 2 } } },
+    });
   });
 
   it("preserves raw gameplay emoji, rating zero, and null nonce semantics", async () => {

@@ -10,13 +10,17 @@ The browser resolves login-linked profile presentation only through the authenti
 
 Event-prize withdrawal ownership, leases, persisted Solana submissions, and completion records live exclusively in `mons-link-event-prize-withdrawals` D1. RTDB has no withdrawal shadow, and Firebase-backed Worker versions are not valid rollback targets.
 
+Withdrawal storage must be frozen before an operator terminates a withdrawal Workflow. Resuming storage to `d1` explicitly authorizes retained terminated instances to be recreated from their durable D1 state.
+
 ## Forward-only profile cutover
 
 The shared control row moves only through `firestore → importing → frozen → active`; `active → frozen` remains the permanent maintenance switch. The Commit 1 bridge writes only in `firestore`. The Commit 2 Worker writes only in `active`. Older bridge versions therefore stay blocked after import begins, including version-pinned Workflows.
 
-In blocked states, HTTP mutations return `503 profile-writes-disabled` with `Retry-After: 60`, profile Queue messages retry without acknowledgement, and profile sweeps pause. Auth-state expiry, game-receipt cleanup, and unrelated Telegram delivery continue. `AUTH_MUTATIONS_DISABLED` remains an independent auth-maintenance switch.
+In blocked states, HTTP mutations return `503 profile-writes-disabled` with `Retry-After: 60`, profile Queue messages retry without acknowledgement, and pending, unclaimed, or unreadable wager settlements self-requeue before acknowledgement. Completed and stale wager tasks are acknowledged without mutation. A failed replacement enqueue retries the current task; active settlement failures use normal Queue retries. Profile sweeps pause, while auth-state expiry, game-receipt cleanup, and unrelated Telegram delivery continue. `AUTH_MUTATIONS_DISABLED` remains an independent auth-maintenance switch.
 
 Commit 2 has no profile storage selector, legacy read-model Queue binding, or Datastore runtime credential. The retained Google identities are limited to Firebase Auth and RTDB.
+
+Wager settlement migration `0008` is forward-only. Its release pauses `mons-link-telegram-delivery`, freezes profile writes for five minutes, applies the schema, promotes the tested Worker directly to 100%, verifies schema metadata, and only then resumes writes and Queue delivery. After writes resume, Worker versions predating `0008` are invalid deployment targets. Failures remain frozen and are fixed forward.
 
 The additive schema and migration tool are present in the repository, but no remote schema application, import, Worker promotion, trigger change, IAM change, or production cutover is implied. The default migration mode is read-only:
 

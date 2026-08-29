@@ -125,6 +125,14 @@ test("wager contracts require exact request and response shapes", () => {
     true,
   );
   assert.equal(
+    isWagerOutcomeResolveResponse({
+      ok: true,
+      reason: "insufficient-materials",
+      mining: null,
+    }),
+    false,
+  );
+  assert.equal(
     isWagerOutcomeResolveResponse({ ok: false, reason: "match-not-found" }),
     true,
   );
