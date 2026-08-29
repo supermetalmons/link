@@ -345,13 +345,8 @@ describe("canonical gameplay repositories", () => {
         },
       ],
     });
-    let projectionCallbacks = 0;
     const repository = createGameplayRepository(testEnv, {
       rtdbClient: rtdb,
-      storageMode: "d1",
-      projectionCommitted: () => {
-        projectionCallbacks++;
-      },
     });
     expect(
       (await repository.getGameplayProfile("d1-game-login-winner", "unused"))
@@ -398,7 +393,6 @@ describe("canonical gameplay repositories", () => {
       (await readCanonicalProfile(testEnv.PROFILE_DB, "d1-game-loser"))?.profile
         .mining.materials.dust,
     ).toBe(7);
-    expect(projectionCallbacks).toBe(0);
   });
 
   it("preserves raw gameplay emoji, rating zero, and null nonce semantics", async () => {
@@ -439,11 +433,8 @@ describe("canonical gameplay repositories", () => {
     });
     const gameplay = createGameplayRepository(testEnv, {
       rtdbClient: rtdb,
-      storageMode: "d1",
     });
-    const rating = createRatingRepository(testEnv, gameplay, {
-      storageMode: "d1",
-    });
+    const rating = createRatingRepository(testEnv, gameplay);
     await expect(
       gameplay.getGameplayProfile(loginUid, "unused"),
     ).resolves.toMatchObject({
@@ -474,11 +465,9 @@ describe("canonical gameplay repositories", () => {
     );
     const gameplay = createGameplayRepository(testEnv, {
       rtdbClient: rtdb,
-      storageMode: "d1",
     });
     const rating = createRatingRepository(testEnv, gameplay, {
       now: () => 2_000,
-      storageMode: "d1",
     });
     const identity = {
       inviteId: "d1-rating-invite",
@@ -659,7 +648,6 @@ describe("canonical gameplay repositories", () => {
     });
     const gameplay = createGameplayRepository(testEnv, {
       rtdbClient: rtdb,
-      storageMode: "d1",
     });
     const rating = createCanonicalRatingRepository(
       testEnv.PROFILE_DB,
@@ -711,7 +699,6 @@ describe("canonical gameplay repositories", () => {
     await insertProfile("d1-created-opponent", "d1-created-opponent-login");
     const gameplay = createGameplayRepository(testEnv, {
       rtdbClient: rtdb,
-      storageMode: "d1",
     });
     const identity = {
       inviteId: "d1-created-invite",
@@ -794,7 +781,6 @@ describe("canonical gameplay repositories", () => {
     await insertProfile("d1-race-opponent", "d1-race-opponent-login");
     const gameplay = createGameplayRepository(testEnv, {
       rtdbClient: rtdb,
-      storageMode: "d1",
     });
     const identity = {
       inviteId: "d1-race-invite",
@@ -978,7 +964,6 @@ describe("canonical gameplay repositories", () => {
     await insertProfile("d1-ambiguous-opponent", "d1-ambiguous-login-opponent");
     const gameplay = createGameplayRepository(testEnv, {
       rtdbClient: rtdb,
-      storageMode: "d1",
     });
     const identity = {
       inviteId: "d1-ambiguous-invite",
@@ -1081,7 +1066,6 @@ describe("canonical gameplay repositories", () => {
       rtdb: {
         getRtdbPath: async (path) => rtdbValues.get(path) ?? null,
       },
-      storageMode: "d1",
       wait: async () => undefined,
     });
     await runtime.recomputeInviteProjection(
@@ -1105,7 +1089,6 @@ describe("canonical gameplay repositories", () => {
       rtdb: {
         getRtdbPath: async (path) => rtdbValues.get(path) ?? null,
       },
-      storageMode: "d1",
     });
     await expect(
       resolveOwner({ eventId: "event-1", profileId: "d1-project-host" }),

@@ -109,8 +109,8 @@ export async function createGoogleAccessToken(
   env: Env,
   {
     credentials = {
-      email: env.FIRESTORE_SERVICE_ACCOUNT_EMAIL,
-      privateKeyPem: env.FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY,
+      email: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL,
+      privateKeyPem: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY,
     },
     fetcher = fetch,
     now = Date.now,

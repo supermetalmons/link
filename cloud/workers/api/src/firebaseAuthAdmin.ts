@@ -107,8 +107,8 @@ export function createFirebaseAuthAdminClient(
     try {
       accessToken ||= getAccessToken(env, {
         credentials: {
-          email: env.FIRESTORE_SERVICE_ACCOUNT_EMAIL,
-          privateKeyPem: env.FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY,
+          email: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL,
+          privateKeyPem: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY,
         },
         fetcher,
         now,

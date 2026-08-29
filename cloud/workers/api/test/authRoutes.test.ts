@@ -21,8 +21,9 @@ const PREVIEW_ORIGIN = "https://8bdf84df-mons-link.lil-org.workers.dev";
 const env = {
   ...TELEGRAM_TEST_ENV,
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
-  FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
-  FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
+  FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL:
+    "identity@example.iam.gserviceaccount.com",
+  FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",
   NFT_RATE_LIMITER: { limit: async () => ({ success: true }) },
   X_CLIENT_ID: "x-client-id",
@@ -209,7 +210,7 @@ test("auth routes enforce methods and authentication before repository work", as
 test("profile control blocks POST auth work while preserving reads", async () => {
   let repositoryCalls = 0;
   let stateCalls = 0;
-  const frozenEnv = withProfileControl(env, "importing");
+  const frozenEnv = withProfileControl(env, "frozen");
   for (const path of [
     "/auth/intents",
     "/auth/methods/apple/verify",

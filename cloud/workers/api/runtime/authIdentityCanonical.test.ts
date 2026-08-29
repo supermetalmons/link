@@ -23,13 +23,7 @@ import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
 const testBindings = env as Env & {
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
 };
-const d1Env: Env = new Proxy(testBindings, {
-  get(target, property, receiver) {
-    return property === "PROFILE_STORAGE_MODE"
-      ? "d1"
-      : Reflect.get(target, property, receiver);
-  },
-});
+const d1Env = testBindings;
 
 async function readMergeSourceArchive(
   sourceProfileId: string,
@@ -853,7 +847,6 @@ describe("canonical auth and profile runtime", () => {
     await expect(
       createAuthRepository(d1Env, {
         d1: racedDb,
-        storageMode: "d1",
       }).getLinkedAuthMethods("auth-move-source-login", "unused"),
     ).resolves.toMatchObject({
       profileId: target.profileId,

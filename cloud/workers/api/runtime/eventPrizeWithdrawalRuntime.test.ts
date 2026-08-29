@@ -40,6 +40,28 @@ describe("event prize withdrawal Workflow", () => {
       testEnv.PROFILE_DB,
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
     );
+    await testEnv.PROFILE_DB.batch([
+      testEnv.PROFILE_DB.prepare(
+        `UPDATE profile_canonical_control
+         SET state = 'importing'
+         WHERE singleton = 1 AND state = 'firestore'`,
+      ),
+      testEnv.PROFILE_DB.prepare(
+        `UPDATE profile_canonical_control
+         SET import_digest = ?, import_plan_version = 1
+         WHERE singleton = 1 AND state = 'importing'`,
+      ).bind("0".repeat(64)),
+      testEnv.PROFILE_DB.prepare(
+        `UPDATE profile_canonical_control
+         SET state = 'frozen', imported_at_ms = 1
+         WHERE singleton = 1 AND state = 'importing'`,
+      ),
+      testEnv.PROFILE_DB.prepare(
+        `UPDATE profile_canonical_control
+         SET state = 'active'
+         WHERE singleton = 1 AND state = 'frozen'`,
+      ),
+    ]);
   });
 
   it("loads both prize standards in the Workers runtime", () => {
@@ -188,7 +210,7 @@ describe("event prize withdrawal Workflow", () => {
     ]);
   });
 
-  it("waits for bridge writes while keeping preflight usable", async () => {
+  it("waits for active profile writes while keeping preflight usable", async () => {
     let executions = 0;
     let preflights = 0;
     const operationId = await buildEventPrizeWithdrawalOperationId(
@@ -210,8 +232,8 @@ describe("event prize withdrawal Workflow", () => {
       timestamp: new Date(0),
       workflowName: "mons-link-event-prize-withdrawal",
     } as const;
-    for (const blockedEnv of ["importing", "frozen", "active"].map((state) =>
-      withProfileControl(env, state as "importing" | "frozen" | "active"),
+    for (const blockedEnv of ["firestore", "importing", "frozen"].map((state) =>
+      withProfileControl(env, state as "firestore" | "importing" | "frozen"),
     )) {
       const withdrawalStep = workflowStep();
       await expect(
@@ -288,8 +310,8 @@ describe("event prize withdrawal Workflow", () => {
       if (name === "wait for profile writes") {
         await testEnv.PROFILE_DB.prepare(
           `UPDATE profile_canonical_control
-           SET state = 'importing'
-           WHERE singleton = 1 AND state = 'firestore'`,
+           SET state = 'frozen'
+           WHERE singleton = 1 AND state = 'active'`,
         ).run();
       }
     });

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createEventBracketRuntime } from "../../../functions/events/bracket.js";
-import { authDocumentName } from "../src/authFirestore.ts";
 import { createProfileEventPrizeOwnerResolver } from "../src/profileEventPrizeOwner.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
@@ -32,34 +31,65 @@ function createAdmin(
   };
 }
 
-test("resolves direct and multi-hop profile prize owners", async () => {
-  const documents = new Map([
-    [
-      authDocumentName("profileMergeTargets", "source-profile"),
-      {
-        id: "source-profile",
-        name: authDocumentName("profileMergeTargets", "source-profile"),
-        fields: { targetProfileId: "middle-profile" },
-        rawFields: {},
-        updateTime: "update",
-      },
-    ],
-    [
-      authDocumentName("profileMergeTargets", "middle-profile"),
-      {
-        id: "middle-profile",
-        name: authDocumentName("profileMergeTargets", "middle-profile"),
-        fields: { targetProfileId: "target-profile" },
-        rawFields: {},
-        updateTime: "update",
-      },
-    ],
-  ]);
-  const resolve = createProfileEventPrizeOwnerResolver(TELEGRAM_TEST_ENV, {
-    firestore: {
-      get: async (name) => documents.get(name) || null,
-      query: async () => [],
+function canonicalProfileDb({
+  loginOwner,
+  mergeTargets = new Map<string, string>(),
+}: {
+  loginOwner?: string;
+  mergeTargets?: Map<string, string>;
+}): D1Database {
+  return {
+    ...TELEGRAM_TEST_ENV.PROFILE_DB,
+    prepare(query: string) {
+      let values: unknown[] = [];
+      let statement: D1PreparedStatement;
+      const base = TELEGRAM_TEST_ENV.PROFILE_DB.prepare("");
+      statement = {
+        all: base.all,
+        bind(...nextValues) {
+          values = nextValues;
+          return statement;
+        },
+        async first<T>() {
+          if (query.includes("profile_merge_targets")) {
+            const sourceProfileId = String(values[0] || "");
+            const targetProfileId = mergeTargets.get(sourceProfileId);
+            return targetProfileId
+              ? ({
+                  source_profile_id: sourceProfileId,
+                  target_profile_id: targetProfileId,
+                  merged_at_ms: 1,
+                  op_id: null,
+                } as T)
+              : null;
+          }
+          if (query.includes("profile_login_owners") && loginOwner) {
+            return {
+              login_uid: String(values[0] || ""),
+              profile_id: loginOwner,
+              revision: 1,
+              created_at_ms: 1,
+              updated_at_ms: 1,
+            } as T;
+          }
+          return null;
+        },
+        raw: base.raw,
+        run: base.run,
+      };
+      return statement;
     },
+  };
+}
+
+test("resolves direct and multi-hop profile prize owners", async () => {
+  const resolve = createProfileEventPrizeOwnerResolver(TELEGRAM_TEST_ENV, {
+    profileDb: canonicalProfileDb({
+      mergeTargets: new Map([
+        ["source-profile", "middle-profile"],
+        ["middle-profile", "target-profile"],
+      ]),
+    }),
     rtdb: { getRtdbPath: async () => null },
   });
   assert.equal(
@@ -72,18 +102,7 @@ test("resolves a participant login to its current profile", async () => {
   const signal = AbortSignal.timeout(1_000);
   let observedSignal: AbortSignal | undefined;
   const resolve = createProfileEventPrizeOwnerResolver(TELEGRAM_TEST_ENV, {
-    firestore: {
-      get: async () => null,
-      query: async () => [
-        {
-          id: "current-profile",
-          name: authDocumentName("users", "current-profile"),
-          fields: {},
-          rawFields: {},
-          updateTime: "update",
-        },
-      ],
-    },
+    profileDb: canonicalProfileDb({ loginOwner: "current-profile" }),
     rtdb: {
       getRtdbPath: async (_path, _query, requestSignal) => {
         observedSignal = requestSignal;

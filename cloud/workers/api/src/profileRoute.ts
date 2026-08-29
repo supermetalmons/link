@@ -29,7 +29,6 @@ import {
 import { authorizeProfileCustomization } from "./profileCustomizationPolicy.ts";
 import { type ProfileRepository } from "./profileRepository.ts";
 import { createConfiguredProfileRepository } from "./profileReadRepository.ts";
-import { scheduleProfileReadProjection } from "./profileReadProjection.ts";
 import {
   createUsernameRepository,
   type UsernameRepository,
@@ -136,11 +135,7 @@ export async function handleProfileRoute(
         return authJsonResponse(response, 200, corsHeaders);
       }
       const usernameRepository =
-        dependencies.usernameRepository ||
-        createUsernameRepository(env, {
-          projectionCommitted: (profileId) =>
-            scheduleProfileReadProjection(ctx, env, profileId),
-        });
+        dependencies.usernameRepository || createUsernameRepository(env);
       const outcome = await usernameRepository.editUsername(
         identity.uid,
         username,
@@ -183,8 +178,6 @@ export async function handleProfileRoute(
         dependencies.customizationRepository ||
         createProfileCustomizationRepository(env, {
           signal,
-          projectionCommitted: (profileId) =>
-            scheduleProfileReadProjection(ctx, env, profileId),
         });
       signal.throwIfAborted();
       const outcome = await customizationRepository.updateCustomization(

@@ -9,7 +9,7 @@ Run commands from the repository root with Node.js 24 and Java 21 or newer. Fire
 - `cloud/workers/api/auth-state-migrations/` owns the `mons-link-auth-state` D1 schema for auth intents and X redirect flows.
 - `cloud/workers/api/telegram-migrations/` owns the `mons-link-telegram` D1 schema for Telegram delivery, recovery, and announcement receipts.
 - `cloud/workers/api/event-prize-withdrawal-migrations/` owns the `mons-link-event-prize-withdrawals` D1 schema and storage-mode fence for Solana prize withdrawals.
-- `cloud/workers/api/profile-migrations/` owns both the retained profile read model and the additive canonical profile schema in `mons-link-profiles` D1.
+- `cloud/workers/api/profile-migrations/` owns the canonical profile schema in `mons-link-profiles` D1.
 - `cloud/workers/api/release.env` stays empty. It prevents release commands from loading developer environment files.
 - Encrypted secrets stay in Cloudflare. Their required names are declared in the API Wrangler configuration.
 - Do not edit production Worker configuration in the Cloudflare Dashboard. Review and deploy the tracked configuration.
@@ -72,7 +72,7 @@ npm run deploy:api:triggers
 npm run smoke:api -- --base-url https://api.mons.link
 ```
 
-`upload:api` uses `wrangler versions upload --strict`; it does not send traffic to the candidate. `promote:api` deploys the explicit Version ID to 100% of traffic without prompting. `deploy:api:triggers` applies the tracked route, Cron, and Queue consumer configuration. Routine code-only releases may omit the trigger command when that configuration is unchanged.
+`upload:api` uses `wrangler versions upload --strict`; it does not send traffic to the candidate. `promote:api` deploys the explicit Version ID to 100% of traffic without prompting. `deploy:api:triggers` applies the tracked route, Cron, Workflow, and configured Queue consumer updates. Removing an omitted Queue consumer requires an explicit `wrangler queues consumer remove`. Routine code-only releases may omit trigger deployment when that configuration is unchanged.
 
 ## Canonical profile D1 cutover
 
@@ -115,6 +115,26 @@ Apply the additive schema and deploy Commit 1 with control still in
 read-only smoke fixture and an explicit controlled mutation plus identical
 replay.
 
+```sh
+npx wrangler d1 migrations apply mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+# from the reviewed Commit 1 checkout
+npm run check:all
+npm run upload:api
+npm run promote:api -- --version-id <commit-1-version-id>
+npm run deploy:api:triggers
+npm run smoke:api -- --base-url https://api.mons.link
+# from the reviewed Commit 2 checkout
+npm run check:all
+npm run upload:api
+```
+
+Record the Commit 2 Version ID and preview URL without promoting it.
+
+The read-only smoke fixture is an untracked mode-`0600` JSON file containing
+exactly `{"idToken":"<existing Firebase ID token>"}` for the configured smoke
+profile. The smoke command refuses broader file permissions, malformed JSON, and
+extra fields, and never prints the token or profile contents.
+
 Begin the one-way maintenance window:
 
 ```sh
@@ -129,8 +149,20 @@ npm run manage:profile-canonical -- --begin-import
 
 Wait more than 15 minutes and inspect every page for both profile Workflow
 types. `rollingBack` and `unknown` are blockers: wait and re-inspect them. Do
-not continue until every remaining instance is `complete`, `errored`, or
+not terminate either state. Terminate remaining `queued`, `running`, `paused`,
+`waiting`, and `waitingForPause` instances by exact ID after their durable state
+is safe. Do not continue until every instance is `complete`, `errored`, or
 `terminated`.
+
+```sh
+for profile_workflow in mons-link-event-progress mons-link-event-prize-withdrawal; do
+  npx wrangler workflows instances list "$profile_workflow" --per-page 100 --page 1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+done
+npx wrangler workflows instances terminate <workflow-name> <instance-id> --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+Inspect page 2 and higher whenever a page contains 100 rows, then re-list every
+page after termination. Never treat `rollingBack` or `unknown` as drained.
 
 Run the one-shot import:
 
@@ -147,23 +179,51 @@ rerun the same command from batch one. A different digest or plan version fails
 closed. Private digests and identity values are never printed.
 
 While control is `frozen`, run Commit 2's preview read-only smoke, promote that
-exact D1-only version, and repeat the production read-only smoke. Then enable
-writes, run the controlled mutation and identical replay, and require exactly
-one application:
+exact D1-only version, deploy its tracked triggers, explicitly remove the old
+profile projection Queue consumer, and repeat the production read-only smoke:
+
+```sh
+npm run smoke:api -- --base-url <commit-2-preview-url> --read-only --auth-token-fixture <protected-json-file>
+npm run promote:api -- --version-id <commit-2-version-id>
+npm run deploy:api:triggers
+npx wrangler queues consumer remove mons-link-profile-projection mons-link-api --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues consumer list mons-link-profile-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run smoke:api -- --base-url https://api.mons.link --read-only --auth-token-fixture <protected-json-file>
+```
+
+The consumer listing must not contain `mons-link-api`.
+
+Then enable writes while withdrawals and the permanent Queues remain paused.
+Run the same reviewed mutation request twice, preserving its idempotency key
+when the route has one, verify the expected replay response, and prove its D1
+receipt or profile revision changed exactly once. Freeze immediately for the
+final invariant check:
 
 ```sh
 npm run manage:profile-canonical -- --resume
-# run the reviewed mutation and identical replay here
+# run the identical reviewed mutation request twice
+# verify one D1 receipt or one profile revision increment
 npm run manage:profile-canonical -- --freeze
 npm run migrate:profile-canonical -- --verify-d1
 npm run manage:profile-canonical -- --resume
 npm run smoke:api -- --base-url https://api.mons.link
 ```
 
-Resume withdrawals and all paused Queues only after verification and smoke
-pass. Revoke runtime Datastore permissions while retaining Firebase Auth and
-RTDB access. From `begin-import` onward, incidents freeze D1 and fix forward;
-a reviewed D1 Time Travel restore is exceptional and never restores a
+Resume withdrawals and only the four permanent Queues after verification and
+smoke pass. The retired `mons-link-profile-projection` Queue stays paused and
+has no Commit 2 consumer.
+
+```sh
+npm run manage:event-prize-withdrawals -- --resume
+npx wrangler queues resume-delivery mons-link-auth-recovery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues resume-delivery mons-link-profile-game-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues resume-delivery mons-link-telegram-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues resume-delivery mons-link-telegram-delivery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+Revoke runtime Datastore permissions while retaining Firebase Auth and RTDB
+access. From `begin-import` onward, incidents freeze D1 and fix forward; a
+reviewed D1 Time Travel restore is exceptional and never restores a
 Firestore-writing runtime.
 
 Keep Firestore deny-write/read-only for 30 days as an audit snapshot. It is not
@@ -287,7 +347,7 @@ npx wrangler rollback <known-good-version-id> --config wrangler.jsonc
 
 ## Profile and event-prize mutation cutover
 
-Profile customization and event-prize selection are Worker-owned mutations. Their Firebase reads and live subscriptions remain active, but direct browser writes are denied by the tracked Firestore and Realtime Database rules. Avatar and aura changes use one atomic `emojiAndAura` mutation.
+Profile customization and event-prize selection are Worker-owned mutations. Firebase Auth and RTDB reads remain active, while Firestore is audit-only after the profile cutover. Direct browser writes are denied by the tracked Firestore and Realtime Database rules. Avatar and aura changes use one atomic `emojiAndAura` mutation.
 
 Release changes to these mutations in this order:
 
@@ -299,20 +359,31 @@ Release changes to these mutations in this order:
 firebase deploy --only database,firestore:rules --project mons-link
 ```
 
-Do not use the full Firebase release for this rule-only cutover. If rollback is required after the rules close, restore the previous Firebase rules first, roll back the frontend Worker second, and roll back the API Worker last.
+Do not use the full Firebase release for this rule-only cutover. After profile import begins, any API fix must remain D1-only.
 
-When changing the profile mutation contract, first promote an API bridge that accepts both the old and new request shapes. Promote the new frontend next, then remove the old API shape. Retain the bridge Version ID; after the frontend switches, rollback starts by restoring the bridge API before restoring the old frontend.
+When changing the profile mutation contract, first promote a D1-only API compatibility version that accepts both request shapes. Promote the new frontend next, then remove the old API shape.
 
 ## IAM and secrets
 
 Use the dedicated Google identities already named by the required Worker secrets. Routine releases reuse their encrypted credentials; key creation and role changes are provisioning work, not deployment steps.
 
-- The auth identity named by `FIRESTORE_SERVICE_ACCOUNT_*` uses default-database-conditioned Datastore permissions plus `firebaseauth.users.get`, `firebaseauth.users.update`, `firebasedatabase.instances.get`, and `firebasedatabase.instances.update` for claim recovery.
-- The username identity uses only default-database-conditioned Datastore get, create, delete, list, and update permissions.
-- The rating role uses the same database condition without entity delete.
-- The gameplay identity has project-level `firebasedatabase.instances.get` and `firebasedatabase.instances.update`; its Firestore delete permission is conditioned on the default database.
+Before uploading Commit 2, install the retained Firebase Auth/RTDB identity under
+its final names without printing either value:
+
+```sh
+npx wrangler secret put FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL --config cloud/workers/api/wrangler.jsonc
+npx wrangler secret put FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY --config cloud/workers/api/wrangler.jsonc
+```
+
+- The identity named by `FIREBASE_IDENTITY_SERVICE_ACCOUNT_*` has only `firebaseauth.users.get`, `firebaseauth.users.update`, `firebasedatabase.instances.get`, and `firebasedatabase.instances.update` for token claims and RTDB convergence.
+- The gameplay identity retains only project-level `firebasedatabase.instances.get` and `firebasedatabase.instances.update`.
+- Firestore audit access belongs to an operator identity and is never a Worker secret or runtime permission.
 - Do not broaden these roles to Editor or Owner. Revoke an old service-account key only after its replacement Worker version is healthy.
 - Keep X, Telegram, Helius, and Google private-key values only as encrypted Worker secrets. `TELEGRAM_QUEUE_BRIDGE_SECRET` and `TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET` are distinct credentials.
+
+After Commit 2 is healthy and Datastore denial is proven, delete the retired
+`FIRESTORE_SERVICE_ACCOUNT_*`, `RATING_SERVICE_ACCOUNT_*`, and
+`USERNAME_SERVICE_ACCOUNT_*` Worker secrets through `wrangler secret delete`.
 
 The API smoke command covers NFT lookup, unauthenticated checks for both browser mutation routes, one auth route, the X callback, and one internal route without performing an authenticated mutation.
 

@@ -7,9 +7,6 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 test("profile-link projection reads match and invite keys without full values", async () => {
   const reads: Array<{ path: string; query?: FirebaseRtdbQuery }> = [];
   const runtime = createProfileLinkProjectionRuntime(TELEGRAM_TEST_ENV as Env, {
-    firestore: {
-      get: async () => null,
-    },
     logger: { error() {}, info() {} },
     projection: {
       async recomputeInviteProjection(inviteId, reason) {

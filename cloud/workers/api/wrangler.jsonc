@@ -11,8 +11,6 @@
     "APPLE_AUDIENCES": "link.mons",
     "AUTH_MUTATIONS_DISABLED": "false",
     "FIREBASE_RTDB_URL": "https://mons-link-default-rtdb.firebaseio.com",
-    "PROFILE_READ_MODE": "d1",
-    "PROFILE_STORAGE_MODE": "firestore",
   },
   "d1_databases": [
     {
@@ -54,13 +52,11 @@
   ],
   "secrets": {
     "required": [
-      "FIRESTORE_SERVICE_ACCOUNT_EMAIL",
-      "FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY",
+      "FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL",
+      "FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY",
       "GAMEPLAY_SERVICE_ACCOUNT_EMAIL",
       "GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY",
       "HELIUS_RPC_API_KEY",
-      "RATING_SERVICE_ACCOUNT_EMAIL",
-      "RATING_SERVICE_ACCOUNT_PRIVATE_KEY",
       "EVENT_PRIZE_ADMIN_PRIVATE_KEY",
       "TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET",
       "TELEGRAM_BOT_TOKEN",
@@ -68,8 +64,6 @@
       "TELEGRAM_FIREBASE_SERVICE_ACCOUNT_EMAIL",
       "TELEGRAM_FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY",
       "TELEGRAM_QUEUE_BRIDGE_SECRET",
-      "USERNAME_SERVICE_ACCOUNT_EMAIL",
-      "USERNAME_SERVICE_ACCOUNT_PRIVATE_KEY",
       "X_CLIENT_ID",
       "X_CLIENT_SECRET",
     ],
@@ -122,10 +116,6 @@
         "binding": "PROFILE_GAME_PROJECTION_QUEUE",
         "queue": "mons-link-profile-game-projection",
       },
-      {
-        "binding": "PROFILE_PROJECTION_QUEUE",
-        "queue": "mons-link-profile-projection",
-      },
     ],
     "consumers": [
       {
@@ -158,13 +148,6 @@
         "max_batch_timeout": 1,
         "max_retries": 100,
         "max_concurrency": 5,
-      },
-      {
-        "queue": "mons-link-profile-projection",
-        "max_batch_size": 5,
-        "max_batch_timeout": 1,
-        "max_retries": 100,
-        "max_concurrency": 1,
       },
     ],
   },

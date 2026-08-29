@@ -1,13 +1,11 @@
 import { ProfileWritesDisabledFailure } from "./authErrors.ts";
 import { readCanonicalControl } from "./profileCanonicalD1.ts";
-import { readProfileStorageMode } from "./profileStorageMode.ts";
 
 export async function profileBackgroundMutationsEnabled(
   env: Env,
 ): Promise<boolean> {
   try {
-    if (readProfileStorageMode(env) !== "firestore") return false;
-    return (await readCanonicalControl(env.PROFILE_DB)).state === "firestore";
+    return (await readCanonicalControl(env.PROFILE_DB)).state === "active";
   } catch {
     return false;
   }

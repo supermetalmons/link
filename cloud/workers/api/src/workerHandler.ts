@@ -39,14 +39,6 @@ import {
   handleTelegramCommand,
   TELEGRAM_COMMAND_PATH,
 } from "./telegramCommand.ts";
-import {
-  handleProfileReadProjectionQueue,
-  reconcileProfileReadProjections,
-} from "./profileReadProjection.ts";
-import {
-  PROFILE_READ_PROJECTION_QUEUE_NAME,
-  type ProfileReadProjectionQueueTask,
-} from "./profileReadProjectionTasks.ts";
 import { profileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
@@ -77,15 +69,15 @@ type ScheduledTasks = {
   eventProgress: () => Promise<unknown>;
   gameSessionReceipts: () => Promise<unknown>;
   profileGameProjection: () => Promise<unknown>;
-  profileReadReconciliation: () => Promise<unknown>;
   telegramProjection: () => Promise<unknown>;
 };
 
 const PROFILE_WRITES_QUEUE_RETRY_DELAY_SECONDS = 5 * 60;
 
-async function handleScheduled(
+export async function handleScheduled(
   controller: ScheduledController,
   env: Env,
+  overrides: Partial<ScheduledTasks> = {},
 ): Promise<void> {
   const profileWritesEnabled = profileBackgroundMutationsEnabled(env);
   const tasks: ScheduledTasks = {
@@ -99,8 +91,8 @@ async function handleScheduled(
       }),
     profileGameProjection: () =>
       handleProfileGameProjectionSweep(controller, env),
-    profileReadReconciliation: () => reconcileProfileReadProjections(env),
     telegramProjection: () => handleTelegramProjectionSweep(controller, env),
+    ...overrides,
   };
   const runProfileTask = async (task: () => Promise<unknown>) => {
     if (await profileWritesEnabled) {
@@ -114,7 +106,6 @@ async function handleScheduled(
     runProfileTask(tasks.telegramProjection),
     tasks.gameSessionReceipts(),
     tasks.authState(),
-    runProfileTask(tasks.profileReadReconciliation),
   ]);
   const failure = results.find(
     (result): result is PromiseRejectedResult => result.status === "rejected",
@@ -139,7 +130,6 @@ async function handleQueue(
   if (
     batch.queue === AUTH_RECOVERY_QUEUE_NAME ||
     batch.queue === PROFILE_GAME_PROJECTION_QUEUE_NAME ||
-    batch.queue === PROFILE_READ_PROJECTION_QUEUE_NAME ||
     batch.queue === TELEGRAM_PROJECTION_QUEUE_NAME
   ) {
     if (!(await profileBackgroundMutationsEnabled(env))) {
@@ -155,9 +145,6 @@ async function handleQueue(
   }
   if (batch.queue === PROFILE_GAME_PROJECTION_QUEUE_NAME) {
     return handleProfileGameProjectionQueue(batch, env);
-  }
-  if (batch.queue === PROFILE_READ_PROJECTION_QUEUE_NAME) {
-    return handleProfileReadProjectionQueue(batch, env);
   }
   let profileBackgroundEnabled: Promise<boolean> | null = null;
   for (const message of batch.messages) {
@@ -187,5 +174,4 @@ export default {
   | TelegramTaskPayload
   | WagerSettlementRetryTask
   | TelegramProjectionTask
-  | ProfileReadProjectionQueueTask
 >;

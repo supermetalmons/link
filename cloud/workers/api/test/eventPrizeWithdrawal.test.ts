@@ -10,7 +10,6 @@ import {
   resolveEventPrizeWithdrawalExecutionParams,
   type EventPrizeWithdrawalWorkflowInput,
 } from "../src/eventPrizeWithdrawal.ts";
-import type { AuthFirestoreClient } from "../src/authFirestore.ts";
 import type { EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
@@ -34,28 +33,47 @@ function frozenWithdrawalDb(): D1Database {
   } as unknown as D1Database;
 }
 
-function firestore(): AuthFirestoreClient {
-  const profile = {
-    fields: {},
-    id: profileId,
-    name: `projects/mons-link/databases/(default)/documents/users/${profileId}`,
-    rawFields: {},
-    updateTime: "2026-08-27T00:00:00Z",
-  };
+function canonicalProfileDb(): D1Database {
   return {
-    batchGet: async () => new Map(),
-    commitWrites: async () => undefined,
-    createDocumentId: () => "document-id",
-    get: async () => null,
-    listPage: async () => ({ documents: [], nextPageToken: "" }),
-    query: async () => [profile],
-    runTransaction: async (work) =>
-      (
-        await work({
-          batchGet: async () => new Map(),
-          query: async () => [profile],
-        })
-      ).result,
+    ...TELEGRAM_TEST_ENV.PROFILE_DB,
+    prepare(query: string) {
+      let values: unknown[] = [];
+      let statement: D1PreparedStatement;
+      statement = {
+        all: async () => ({
+          success: true,
+          results: [],
+          meta: {
+            changed_db: false,
+            changes: 0,
+            duration: 0,
+            last_row_id: 0,
+            rows_read: 0,
+            rows_written: 0,
+            size_after: 0,
+          },
+        }),
+        bind(...nextValues) {
+          values = nextValues;
+          return statement;
+        },
+        async first<T>() {
+          if (query.includes("profile_login_owners")) {
+            return {
+              login_uid: String(values[0] || uid),
+              profile_id: profileId,
+              revision: 1,
+              created_at_ms: 1,
+              updated_at_ms: 1,
+            } as T;
+          }
+          return null;
+        },
+        raw: TELEGRAM_TEST_ENV.PROFILE_DB.prepare("").raw,
+        run: TELEGRAM_TEST_ENV.PROFILE_DB.prepare("").run,
+      };
+      return statement;
+    },
   };
 }
 
@@ -292,7 +310,7 @@ test("freezes withdrawal creation before parsing", async () => {
   const requestValue = request("/events/prizes/withdrawals", {});
   const response = await handleEventPrizeWithdrawalRoute(
     requestValue,
-    withProfileControl(TELEGRAM_TEST_ENV as unknown as Env, "importing"),
+    withProfileControl(TELEGRAM_TEST_ENV as unknown as Env, "frozen"),
     context,
     { verifyIdentity },
   );
@@ -331,7 +349,7 @@ test("rejects an invalid completed record before projection cleanup", async () =
     TELEGRAM_TEST_ENV,
     context,
     {
-      firestore: firestore(),
+      profileDb: canonicalProfileDb(),
       repository: state.value,
       withdrawalStore: state.withdrawalStore,
       verifyIdentity,
@@ -439,7 +457,7 @@ test("completed execution retries projection cleanup failures", async () => {
         requesterUid: uid,
       },
       {
-        firestore: firestore(),
+        profileDb: canonicalProfileDb(),
         repository: failingRepository,
         withdrawalStore: state.withdrawalStore,
       },
@@ -477,7 +495,7 @@ test("duplicate starts preserve an active executor lease", async () => {
     },
     context,
     {
-      firestore: firestore(),
+      profileDb: canonicalProfileDb(),
       now: () => 1_000,
       repository: state.value,
       withdrawalStore: state.withdrawalStore,
@@ -526,7 +544,7 @@ test("alternate logins preserve the canonical active intent", async () => {
     },
     context,
     {
-      firestore: firestore(),
+      profileDb: canonicalProfileDb(),
       now: () => 1_000,
       repository: state.value,
       withdrawalStore: state.withdrawalStore,
@@ -572,7 +590,7 @@ test("processing intent stays locked after its executor lease expires", async ()
     },
     context,
     {
-      firestore: firestore(),
+      profileDb: canonicalProfileDb(),
       now: () => 3_000,
       repository: state.value,
       withdrawalStore: state.withdrawalStore,
@@ -611,7 +629,7 @@ test("keeps polling while a retryable Workflow has released its claim", async ()
     },
     context,
     {
-      firestore: firestore(),
+      profileDb: canonicalProfileDb(),
       repository: state.value,
       withdrawalStore: state.withdrawalStore,
       verifyIdentity,
@@ -655,7 +673,7 @@ test("marks errored Workflows as terminal", async () => {
     },
     context,
     {
-      firestore: firestore(),
+      profileDb: canonicalProfileDb(),
       repository: state.value,
       withdrawalStore: state.withdrawalStore,
       verifyIdentity,
@@ -678,7 +696,7 @@ test("starts and polls one authenticated withdrawal Workflow", async () => {
     EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding,
   };
   const dependencies = {
-    firestore: firestore(),
+    profileDb: canonicalProfileDb(),
     repository: state.value,
     withdrawalStore: state.withdrawalStore,
     verifyIdentity,
@@ -719,7 +737,7 @@ test("starts and polls one authenticated withdrawal Workflow", async () => {
       operationId: processing.operationId,
       prizeId,
     }),
-    withProfileControl(env, "active"),
+    withProfileControl(env, "frozen"),
     context,
     dependencies,
   );
@@ -779,7 +797,7 @@ test("replaces a retained errored Workflow with the current request", async () =
     { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
     context,
     {
-      firestore: firestore(),
+      profileDb: canonicalProfileDb(),
       repository: state.value,
       withdrawalStore: state.withdrawalStore,
       verifyIdentity,
@@ -828,7 +846,7 @@ test("replaces a retained completed failure", async () => {
     { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
     context,
     {
-      firestore: firestore(),
+      profileDb: canonicalProfileDb(),
       repository: state.value,
       withdrawalStore: state.withdrawalStore,
       verifyIdentity,
@@ -857,7 +875,7 @@ test("replaces a retained terminated Workflow with the current request", async (
     { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
     context,
     {
-      firestore: firestore(),
+      profileDb: canonicalProfileDb(),
       repository: state.value,
       withdrawalStore: state.withdrawalStore,
       verifyIdentity,

@@ -29,7 +29,6 @@ import {
   resumeWagerSettlement,
   type WagerSettlementRetryTask,
 } from "./wagerOutcome.ts";
-import { enqueueProfileReadProjection } from "./profileReadProjection.ts";
 
 const MAX_QUEUE_DELAY_SECONDS = 24 * 60 * 60;
 const MIN_DISPATCH_INTERVAL_MS = 1_000;
@@ -122,11 +121,7 @@ export async function handleTelegramQueueMessage(
   {
     createRepository,
     createEngine = createTelegramDeliveryEngine,
-    createGameplay = (workerEnv) =>
-      createGameplayRepository(workerEnv, {
-        projectionCommitted: (profileId) =>
-          enqueueProfileReadProjection(workerEnv, profileId),
-      }),
+    createGameplay = (workerEnv) => createGameplayRepository(workerEnv),
     logger = console,
     now = Date.now,
     readStorageMode,

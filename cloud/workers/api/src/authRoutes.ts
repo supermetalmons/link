@@ -49,7 +49,6 @@ import {
 } from "./authMutations.ts";
 import { authMutationsDisabled } from "./authPolicy.ts";
 import { secureAlphanumericId, secureRandomBytes } from "./authRandom.ts";
-import { scheduleProfileReadProjection } from "./profileReadProjection.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 
 const AUTH_INTENT_TTL_MS = 5 * 60 * 1_000;
@@ -324,8 +323,6 @@ export async function handleAuthRoute(
       return authJsonResponse(
         await syncProfileClaim(identity, env, {
           ...dependencies.profileClaim,
-          profileProjectionCommitted: (profileId) =>
-            scheduleProfileReadProjection(ctx, env, profileId),
           repository,
         }),
         200,

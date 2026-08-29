@@ -1,4 +1,3 @@
-import { PROFILE_MERGE_TARGETS_COLLECTION } from "../../../functions/profileMergeTargets.js";
 import {
   createEventProfileGameProjectionCore,
   type EventProfileGameProjectionRepository,
@@ -12,21 +11,9 @@ import {
   type RecomputeInviteProjectionResult,
 } from "../../../functions/profileGamesProjectionCore.js";
 import {
-  authDocumentName,
-  authFieldFilter,
-  createAuthFirestoreClient,
-  type AuthFirestoreClient,
-} from "./authFirestore.ts";
-import {
   createGameplayRepository,
   type GameplayRepository,
 } from "./gameplayRepository.ts";
-import { firestoreTimestampFromMillis } from "./firestoreRest.ts";
-import {
-  commitProfileGameProjectionWrites,
-  getProfileGameProjection,
-  type ProjectionWrite as D1ProjectionWrite,
-} from "./profileGamesD1.ts";
 import { canonicalProfileFields } from "./gameplayCanonicalRepository.ts";
 import {
   readCanonicalMergeTarget,
@@ -34,10 +21,10 @@ import {
   readCanonicalProfileByLogin,
 } from "./profileCanonicalD1.ts";
 import {
-  profileStorageUsesD1,
-  readProfileStorageMode,
-  type ProfileStorageMode,
-} from "./profileStorageMode.ts";
+  commitProfileGameProjectionWrites,
+  getProfileGameProjection,
+  type ProjectionWrite as D1ProjectionWrite,
+} from "./profileGamesD1.ts";
 
 type ProjectionRtdbRepository = Pick<GameplayRepository, "getRtdbPath">;
 
@@ -63,12 +50,10 @@ export type EventProfileGameProjectionRuntime = {
 
 type ProfileGameProjectionDependencies = {
   d1?: D1Database;
-  firestore?: AuthFirestoreClient;
   logger?: Pick<Console, "error">;
   now?: () => number;
   profileDb?: D1Database;
   rtdb?: ProjectionRtdbRepository;
-  storageMode?: ProfileStorageMode;
   wait?: (milliseconds: number) => Promise<void>;
 };
 
@@ -88,16 +73,23 @@ function toD1ProjectionWrite(
   };
 }
 
+function timestampFromMillis(millis: number): {
+  __firestoreTimestamp: string;
+} {
+  if (!Number.isFinite(millis)) {
+    throw new TypeError("invalid projection timestamp");
+  }
+  return {
+    __firestoreTimestamp: new Date(
+      Math.max(1, Math.floor(millis)),
+    ).toISOString(),
+  };
+}
+
 export function createProfileGameProjectionRuntime(
   env: Env,
   dependencies: ProfileGameProjectionDependencies = {},
 ): ProfileGameProjectionRuntime {
-  const useCanonical = profileStorageUsesD1(
-    dependencies.storageMode || readProfileStorageMode(env),
-  );
-  const firestore = useCanonical
-    ? dependencies.firestore
-    : dependencies.firestore || createAuthFirestoreClient(env);
   const profileDb = dependencies.profileDb || env.PROFILE_DB;
   const rtdb = dependencies.rtdb || createGameplayRepository(env);
   const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
@@ -124,51 +116,24 @@ export function createProfileGameProjectionRuntime(
     },
 
     async findProfileByLogin(loginUid) {
-      if (useCanonical) {
-        const profile = await readCanonicalProfileByLogin(profileDb, loginUid);
-        return profile
-          ? { id: profile.profileId, data: canonicalProfileFields(profile) }
-          : null;
-      }
-      const profiles = await firestore!.query(
-        "users",
-        authFieldFilter("logins", "ARRAY_CONTAINS", loginUid),
-        1,
-      );
-      return profiles[0]
-        ? { id: profiles[0].id, data: profiles[0].fields }
+      const profile = await readCanonicalProfileByLogin(profileDb, loginUid);
+      return profile
+        ? { id: profile.profileId, data: canonicalProfileFields(profile) }
         : null;
     },
 
     async getMergeTarget(profileId) {
-      if (useCanonical) {
-        const target = await readCanonicalMergeTarget(profileDb, profileId);
-        return target ? { targetProfileId: target.targetProfileId } : null;
-      }
-      return (
-        (
-          await firestore!.get(
-            authDocumentName(PROFILE_MERGE_TARGETS_COLLECTION, profileId),
-          )
-        )?.fields ?? null
-      );
+      const target = await readCanonicalMergeTarget(profileDb, profileId);
+      return target ? { targetProfileId: target.targetProfileId } : null;
     },
 
     async getProfile(profileId) {
-      if (useCanonical) {
-        const profile = await readCanonicalProfile(profileDb, profileId);
-        return profile
-          ? {
-              data: canonicalProfileFields(profile),
-              updateTime: String(profile.revision),
-            }
-          : null;
-      }
-      const profile = await firestore!.get(
-        authDocumentName("users", profileId),
-      );
+      const profile = await readCanonicalProfile(profileDb, profileId);
       return profile
-        ? { data: profile.fields, updateTime: profile.updateTime }
+        ? {
+            data: canonicalProfileFields(profile),
+            updateTime: String(profile.revision),
+          }
         : null;
     },
 
@@ -181,7 +146,7 @@ export function createProfileGameProjectionRuntime(
   return createProfileGamesProjectionCore({
     logger,
     repository,
-    timestampFromMillis: firestoreTimestampFromMillis,
+    timestampFromMillis,
     wait: dependencies.wait,
   });
 }
@@ -190,12 +155,6 @@ export function createEventProfileGameProjectionRuntime(
   env: Env,
   dependencies: ProfileGameProjectionDependencies = {},
 ): EventProfileGameProjectionRuntime {
-  const useCanonical = profileStorageUsesD1(
-    dependencies.storageMode || readProfileStorageMode(env),
-  );
-  const firestore = useCanonical
-    ? dependencies.firestore
-    : dependencies.firestore || createAuthFirestoreClient(env);
   const profileDb = dependencies.profileDb || env.PROFILE_DB;
   const rtdb = dependencies.rtdb || createGameplayRepository(env);
   const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
@@ -215,41 +174,24 @@ export function createEventProfileGameProjectionRuntime(
     },
 
     async getMergeTarget(profileId) {
-      if (useCanonical) {
-        const target = await readCanonicalMergeTarget(profileDb, profileId);
-        return target ? { targetProfileId: target.targetProfileId } : null;
-      }
-      return (
-        (
-          await firestore!.get(
-            authDocumentName(PROFILE_MERGE_TARGETS_COLLECTION, profileId),
-          )
-        )?.fields ?? null
-      );
+      const target = await readCanonicalMergeTarget(profileDb, profileId);
+      return target ? { targetProfileId: target.targetProfileId } : null;
     },
 
     async getProfile(profileId) {
-      if (useCanonical) {
-        const profile = await readCanonicalProfile(profileDb, profileId);
-        return profile
-          ? {
-              data: canonicalProfileFields(profile),
-              updateTime: String(profile.revision),
-            }
-          : null;
-      }
-      const profile = await firestore!.get(
-        authDocumentName("users", profileId),
-      );
+      const profile = await readCanonicalProfile(profileDb, profileId);
       return profile
-        ? { data: profile.fields, updateTime: profile.updateTime }
+        ? {
+            data: canonicalProfileFields(profile),
+            updateTime: String(profile.revision),
+          }
         : null;
     },
   };
   return createEventProfileGameProjectionCore({
     now: dependencies.now,
     repository,
-    timestampFromMillis: firestoreTimestampFromMillis,
+    timestampFromMillis,
     wait: dependencies.wait,
   });
 }

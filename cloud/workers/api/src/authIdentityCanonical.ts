@@ -86,10 +86,7 @@ const LINK_METHOD_MAX_ATTEMPTS = 3;
 const AUTO_NAME_MAX_ATTEMPTS = 30;
 const CANONICAL_AUTH_COMMIT_QUERY_BUDGET = 500;
 
-type CanonicalIdentityDependencies = Omit<
-  ServiceDependencies,
-  "firestore" | "profileProjectionCommitted"
-> & {
+type CanonicalIdentityDependencies = ServiceDependencies & {
   authClient?: FirebaseAuthAdminClient;
   rtdb?: FirebaseRtdbClient;
 };
@@ -607,8 +604,8 @@ export function createCanonicalAuthIdentityService(
     dependencies.rtdb ||
     createFirebaseRtdbClient(env, {
       credentials: {
-        email: env.FIRESTORE_SERVICE_ACCOUNT_EMAIL,
-        privateKeyPem: env.FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY,
+        email: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL,
+        privateKeyPem: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY,
       },
     });
   const now = dependencies.now || Date.now;

@@ -18,7 +18,6 @@ import {
 import {
   createAuthRepository,
   type AuthRepository,
-  LoginProfileConflict,
   type ProfileClaimSource,
 } from "./firestore.ts";
 import { getProfileLinkProfileGameProjectionOutboxPath } from "./profileGameProjectionOutbox.ts";
@@ -28,7 +27,6 @@ const MAX_RECONCILIATION_ATTEMPTS = 3;
 export type ProfileClaimDependencies = {
   authClient?: FirebaseAuthAdminClient;
   logCleanupFailure?: (kind: string) => void;
-  profileProjectionCommitted?: (profileId: string) => Promise<void> | void;
   repository?: Pick<AuthRepository, "getProfileClaimSource">;
   rtdbClient?: Pick<FirebaseRtdbClient, "getPath" | "patchRoot">;
   syncCurrentCallerProfile?: AuthIdentityService["syncCurrentCallerProfile"];
@@ -50,23 +48,8 @@ export async function syncProfileClaim(
   dependencies: ProfileClaimDependencies = {},
 ): Promise<LinkedAuthMethodsResponse> {
   const repository = dependencies.repository || createAuthRepository(env);
-  const readSource = async (): Promise<ProfileClaimSource> => {
-    try {
-      return await repository.getProfileClaimSource(
-        identity.uid,
-        identity.idToken,
-      );
-    } catch (error) {
-      if (error instanceof LoginProfileConflict) {
-        throw new AuthApiFailure(
-          409,
-          "failed-precondition",
-          "login-profile-conflict",
-        );
-      }
-      throw error;
-    }
-  };
+  const readSource = (): Promise<ProfileClaimSource> =>
+    repository.getProfileClaimSource(identity.uid, identity.idToken);
 
   let source = await readSource();
   const authClient =
@@ -75,8 +58,8 @@ export async function syncProfileClaim(
     dependencies.rtdbClient ||
     createFirebaseRtdbClient(env, {
       credentials: {
-        email: env.FIRESTORE_SERVICE_ACCOUNT_EMAIL,
-        privateKeyPem: env.FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY,
+        email: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL,
+        privateKeyPem: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY,
       },
     });
   const logCleanupFailure =
@@ -87,9 +70,7 @@ export async function syncProfileClaim(
       ));
   const syncCurrentCallerProfile =
     dependencies.syncCurrentCallerProfile ||
-    createAuthIdentityService(env, {
-      profileProjectionCommitted: dependencies.profileProjectionCommitted,
-    }).syncCurrentCallerProfile;
+    createAuthIdentityService(env).syncCurrentCallerProfile;
 
   const cleanupMissingProfile = async (): Promise<void> => {
     const [user, profileLink] = await Promise.all([

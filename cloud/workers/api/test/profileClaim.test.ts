@@ -7,15 +7,15 @@ import {
   type FirebaseAuthUser,
 } from "../src/firebaseAuthAdmin.ts";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
-import { LoginProfileConflict } from "../src/firestore.ts";
 import { syncProfileClaim as syncProfileClaimImpl } from "../src/profileClaim.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const env = {
   ...TELEGRAM_TEST_ENV,
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
-  FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
-  FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
+  FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL:
+    "worker@example.iam.gserviceaccount.com",
+  FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",
   NFT_RATE_LIMITER: { limit: async () => ({ success: true }) },
   X_CLIENT_ID: "test-x-client",
@@ -326,41 +326,6 @@ test("keeps missing-profile cleanup failures non-fatal and sanitized", async () 
   });
   assert.deepEqual(result, emptySource);
   assert.deepEqual(logs, ["firebase-auth-unavailable"]);
-});
-
-test("blocks conflicting profiles before Firebase Auth or RTDB work", async () => {
-  let authReads = 0;
-  let rtdbReads = 0;
-  await assert.rejects(
-    syncProfileClaim(identity, env, {
-      repository: {
-        getProfileClaimSource: async () => {
-          throw new LoginProfileConflict();
-        },
-      },
-      authClient: {
-        getUser: async () => {
-          authReads++;
-          return { uid: identity.uid, customClaims: {} };
-        },
-        setCustomUserClaims: async () => undefined,
-      },
-      rtdbClient: {
-        getPath: async () => {
-          rtdbReads++;
-          return null;
-        },
-        patchRoot: async () => undefined,
-      },
-    }),
-    (error: unknown) =>
-      error instanceof AuthApiFailure &&
-      error.status === 409 &&
-      error.code === "failed-precondition" &&
-      error.message === "login-profile-conflict",
-  );
-  assert.equal(authReads, 0);
-  assert.equal(rtdbReads, 0);
 });
 
 test("propagates caller repair failures when a profile exists", async () => {

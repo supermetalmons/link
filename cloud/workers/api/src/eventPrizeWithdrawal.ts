@@ -37,12 +37,6 @@ import {
   type AuthErrorCode,
 } from "./authErrors.ts";
 import {
-  authDocumentName,
-  authFieldFilter,
-  createAuthFirestoreClient,
-  type AuthFirestoreClient,
-} from "./authFirestore.ts";
-import {
   authJsonResponse,
   authPreflightResponse,
   getAuthCorsHeaders,
@@ -64,13 +58,9 @@ import {
   type EventPrizeWithdrawalStore,
 } from "./eventPrizeWithdrawalD1.ts";
 import {
+  readCanonicalLoginOwner,
   readCanonicalMergeTarget,
-  readCanonicalProfileByLogin,
 } from "./profileCanonicalD1.ts";
-import {
-  profileStorageUsesD1,
-  readProfileStorageMode,
-} from "./profileStorageMode.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 
 export const EVENT_PRIZE_WITHDRAWAL_PATH = "/events/prizes/withdrawals";
@@ -154,7 +144,6 @@ type EventPrizeGameplayRepository = Pick<
 >;
 
 type RouteDependencies = {
-  firestore?: AuthFirestoreClient;
   now?: () => number;
   profileDb?: D1Database;
   repository?: EventPrizeGameplayRepository;
@@ -277,20 +266,15 @@ export async function createEventPrizeRuntimeDependencies(
   env: Env,
   {
     allowFrozen = false,
-    firestore: firestoreOverride,
     now = Date.now,
     profileDb = env.PROFILE_DB,
     repository = createGameplayRepository(env),
     withdrawalStore: withdrawalStoreOverride,
   }: Pick<
     RouteDependencies,
-    "firestore" | "now" | "profileDb" | "repository" | "withdrawalStore"
+    "now" | "profileDb" | "repository" | "withdrawalStore"
   > & { allowFrozen?: boolean } = {},
 ): Promise<EventPrizeRuntimeDependencies> {
-  const useCanonical = profileStorageUsesD1(readProfileStorageMode(env));
-  const firestore = useCanonical
-    ? firestoreOverride
-    : firestoreOverride || createAuthFirestoreClient(env);
   const storageMode = await readEventPrizeWithdrawalStorageMode(
     env.EVENT_PRIZE_WITHDRAWALS_DB,
   );
@@ -304,38 +288,19 @@ export async function createEventPrizeRuntimeDependencies(
     withdrawalStoreOverride ||
     createD1EventPrizeWithdrawalStore(env.EVENT_PRIZE_WITHDRAWALS_DB, { now });
   const readProfileByLoginUid = async (uid: string) => {
-    if (useCanonical) {
-      const profile = await readCanonicalProfileByLogin(profileDb, uid);
-      return profile ? { id: profile.profileId } : null;
-    }
-    const profiles = await firestore!.query(
-      "users",
-      authFieldFilter("logins", "ARRAY_CONTAINS", uid),
-      2,
-      ["mergedIntoProfileId"],
-    );
-    if (profiles.length > 1) {
-      throw new EventPrizeWithdrawalError(
-        "failed-precondition",
-        "login-profile-conflict",
-      );
-    }
-    return profiles[0] ? { id: profiles[0].id } : null;
+    const owner = await readCanonicalLoginOwner(profileDb, uid);
+    return owner ? { id: owner.profileId } : null;
   };
   const resolveCanonicalProfilePath = (profileId: string) =>
     resolveProfileMergeTargetPath({
       profileId,
-      readMergeTarget: async (candidateProfileId: string) =>
-        useCanonical
-          ? await readCanonicalMergeTarget(profileDb, candidateProfileId).then(
-              (target) =>
-                target ? { targetProfileId: target.targetProfileId } : null,
-            )
-          : (
-              await firestore!.get(
-                authDocumentName("profileMergeTargets", candidateProfileId),
-              )
-            )?.fields || null,
+      readMergeTarget: async (candidateProfileId: string) => {
+        const target = await readCanonicalMergeTarget(
+          profileDb,
+          candidateProfileId,
+        );
+        return target ? { targetProfileId: target.targetProfileId } : null;
+      },
     });
   return {
     admin: createEventPrizeAdmin(repository, withdrawalStore),
@@ -815,7 +780,7 @@ export async function executeEventPrizeWithdrawal(
   params: EventPrizeWithdrawalWorkflowParams,
   dependencies: Pick<
     RouteDependencies,
-    "firestore" | "now" | "repository" | "withdrawalStore"
+    "now" | "profileDb" | "repository" | "withdrawalStore"
   > = {},
 ): Promise<EventPrizeWithdrawalCompletedResponse> {
   const repository = dependencies.repository || createGameplayRepository(env);
@@ -883,8 +848,8 @@ export async function handleEventPrizeWithdrawalRoute(
     }
     const repository = dependencies.repository || createGameplayRepository(env);
     const runtime = await createEventPrizeRuntimeDependencies(env, {
-      firestore: dependencies.firestore,
       now: dependencies.now,
+      profileDb: dependencies.profileDb,
       repository,
       withdrawalStore: dependencies.withdrawalStore,
     });

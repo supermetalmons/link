@@ -15,8 +15,9 @@ const REVISION = 1;
 
 const env = {
   ...TELEGRAM_TEST_ENV,
-  FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
-  FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
+  FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL:
+    "identity@example.iam.gserviceaccount.com",
+  FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
   NFT_RATE_LIMITER: { limit: async () => ({ success: true }) },
@@ -168,7 +169,7 @@ test("profile control blocks callback mutations", async () => {
   let providerCalls = 0;
   const response = await handleXCallback(
     new Request(`${CALLBACK_URL}&code=oauth-code`),
-    withProfileControl(env, "active"),
+    withProfileControl(env, "frozen"),
     {
       repository: createRepository(flow(), updates),
       provider: createProvider({

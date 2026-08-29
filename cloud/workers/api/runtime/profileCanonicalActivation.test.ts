@@ -19,7 +19,7 @@ function controlEnvironment(value: unknown): Env {
   return { ...testEnv, PROFILE_DB: database } as unknown as Env;
 }
 
-describe("Firestore profile maintenance bridge", () => {
+describe("canonical profile runtime control", () => {
   beforeAll(async () => {
     await applyD1Migrations(
       testEnv.PROFILE_DB,
@@ -27,15 +27,15 @@ describe("Firestore profile maintenance bridge", () => {
     );
   });
 
-  it("allows writes only before the forward-only import begins", async () => {
+  it("allows writes only while canonical D1 is active", async () => {
     expect(await readCanonicalControl(testEnv.PROFILE_DB)).toMatchObject({
       state: "firestore",
       importedAtMs: null,
     });
-    await expect(
-      assertProfileMutationAllowed(testEnv),
-    ).resolves.toBeUndefined();
-    expect(await profileBackgroundMutationsEnabled(testEnv)).toBe(true);
+    await expect(assertProfileMutationAllowed(testEnv)).rejects.toThrow(
+      "profile-writes-disabled",
+    );
+    expect(await profileBackgroundMutationsEnabled(testEnv)).toBe(false);
 
     await testEnv.PROFILE_DB.prepare(
       `UPDATE profile_canonical_control
@@ -68,14 +68,43 @@ describe("Firestore profile maintenance bridge", () => {
        SET state = 'active'
        WHERE singleton = 1 AND state = 'frozen'`,
     ).run();
+    await expect(
+      assertProfileMutationAllowed(testEnv),
+    ).resolves.toBeUndefined();
+    expect(await profileBackgroundMutationsEnabled(testEnv)).toBe(true);
+
+    await testEnv.PROFILE_DB.prepare(
+      `UPDATE profile_canonical_control
+       SET state = 'frozen'
+       WHERE singleton = 1 AND state = 'active'`,
+    ).run();
     await expect(assertProfileMutationAllowed(testEnv)).rejects.toThrow(
       "profile-writes-disabled",
     );
     expect(await profileBackgroundMutationsEnabled(testEnv)).toBe(false);
+
+    await testEnv.PROFILE_DB.prepare(
+      `UPDATE profile_canonical_control
+       SET state = 'active'
+       WHERE singleton = 1 AND state = 'frozen'`,
+    ).run();
+    expect(await profileBackgroundMutationsEnabled(testEnv)).toBe(true);
   });
 
   it("fails invalid and unreadable control state closed", async () => {
     for (const value of [
+      {
+        state: "firestore",
+        import_digest: null,
+        import_plan_version: null,
+        imported_at_ms: null,
+      },
+      {
+        state: "importing",
+        import_digest: null,
+        import_plan_version: null,
+        imported_at_ms: null,
+      },
       {
         state: "invalid",
         import_digest: null,
@@ -102,18 +131,12 @@ describe("Firestore profile maintenance bridge", () => {
     await expect(assertProfileMutationAllowed(unavailable)).rejects.toThrow(
       "profile-writes-disabled",
     );
-    const wrongBackend = {
-      ...controlEnvironment({
-        state: "firestore",
-        import_digest: null,
-        import_plan_version: null,
-        imported_at_ms: null,
-      }),
-      PROFILE_STORAGE_MODE: "d1",
-    } as unknown as Env;
-    expect(await profileBackgroundMutationsEnabled(wrongBackend)).toBe(false);
-    await expect(assertProfileMutationAllowed(wrongBackend)).rejects.toThrow(
-      "profile-writes-disabled",
-    );
+    const active = controlEnvironment({
+      state: "active",
+      import_digest: "0".repeat(64),
+      import_plan_version: 1,
+      imported_at_ms: 1,
+    });
+    expect(await profileBackgroundMutationsEnabled(active)).toBe(true);
   });
 });

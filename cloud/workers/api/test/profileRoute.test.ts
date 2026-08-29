@@ -22,8 +22,9 @@ const identity = { idToken: "firebase-id-token", uid: "firebase-uid" };
 const TELEGRAM_TEST_ENV = {
   ...BASE_ENV,
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
-  FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
-  FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
+  FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL:
+    "identity@example.iam.gserviceaccount.com",
+  FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",
   NFT_RATE_LIMITER: { limit: async () => ({ success: true }) },
   X_CLIENT_ID: "test-x-client",

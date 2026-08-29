@@ -276,7 +276,7 @@ test("canonical profile admin reader parses bounded profiles", async () => {
     query: async (sql: string, params: unknown[] = []) => {
       calls.push({ sql, params });
       if (sql.includes("profile_canonical_control")) {
-        return [{ state: "active", activated_at_ms: 1 }];
+        return [{ state: "active", imported_at_ms: 1 }];
       }
       return [
         {
@@ -312,7 +312,7 @@ test("canonical MP admin reader returns only projected scalars", async () => {
     CREATE TABLE profile_canonical_control (
       singleton INTEGER PRIMARY KEY,
       state TEXT NOT NULL,
-      activated_at_ms INTEGER
+      imported_at_ms INTEGER
     );
     INSERT INTO profile_canonical_control VALUES (1, 'active', 1);
     CREATE TABLE profile_records (
@@ -375,7 +375,7 @@ test("canonical GP admin reader preserves an explicitly null nonce", async () =>
   const reader = createProfileD1Reader({
     query: async (sql: string) =>
       sql.includes("profile_canonical_control")
-        ? [{ state: "frozen", activated_at_ms: 1 }]
+        ? [{ state: "frozen", imported_at_ms: 1 }]
         : [
             {
               gameplay_emoji: "",
@@ -389,12 +389,18 @@ test("canonical GP admin reader preserves an explicitly null nonce", async () =>
   assert.equal(profiles[0].emoji, "");
 });
 
-test("canonical profile admin reader gates activation and paginates addresses", async () => {
+test("canonical profile admin reader gates import finalization and paginates addresses", async () => {
   const { createProfileD1Reader } = require("../cloud/admin/_d1.js");
-  const inactive = createProfileD1Reader({
-    query: async () => [{ state: "importing", activated_at_ms: null }],
-  });
-  await assert.rejects(inactive.readLeaderboard("gp", 15), /not activated/);
+  for (const [state, importedAtMs] of [
+    ["firestore", null],
+    ["importing", null],
+    ["verifying", 1],
+  ] as const) {
+    const inactive = createProfileD1Reader({
+      query: async () => [{ state, imported_at_ms: importedAtMs }],
+    });
+    await assert.rejects(inactive.readLeaderboard("gp", 15), /not imported/);
+  }
 
   let addressPage = 0;
   const calls: Array<{ params: unknown[]; sql: string }> = [];
@@ -402,7 +408,7 @@ test("canonical profile admin reader gates activation and paginates addresses", 
     query: async (sql: string, params: unknown[] = []) => {
       calls.push({ sql, params });
       if (sql.includes("profile_canonical_control")) {
-        return [{ state: "verifying", activated_at_ms: 1 }];
+        return [{ state: "active", imported_at_ms: 1 }];
       }
       addressPage += 1;
       if (addressPage === 1) {

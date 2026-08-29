@@ -16,25 +16,6 @@ const identity = {
   profileId: "creator-profile",
 };
 
-function privateKeyPem(bytes: ArrayBuffer): string {
-  const base64 = Buffer.from(bytes).toString("base64");
-  return `-----BEGIN PRIVATE KEY-----\n${base64}\n-----END PRIVATE KEY-----`;
-}
-
-async function generatePrivateKeyPem(): Promise<string> {
-  const keys = (await crypto.subtle.generateKey(
-    {
-      name: "RSASSA-PKCS1-v1_5",
-      modulusLength: 2048,
-      publicExponent: new Uint8Array([1, 0, 1]),
-      hash: "SHA-256",
-    },
-    true,
-    ["sign", "verify"],
-  )) as CryptoKeyPair;
-  return privateKeyPem(await crypto.subtle.exportKey("pkcs8", keys.privateKey));
-}
-
 function getPath(root: Record<string, unknown>, path: string): unknown {
   if (!path) {
     return root;
@@ -218,6 +199,54 @@ function workflowEnvironment(
       },
       deleteBatch: async () => ({ deleted: [], errors: [] }),
       get: async () => (onGet ? onGet() : instance),
+    },
+  };
+}
+
+function withCanonicalMergeTarget(
+  env: Env,
+  sourceProfileId: string,
+  targetProfileId: string,
+): Env {
+  const baseDb = env.PROFILE_DB;
+  return {
+    ...env,
+    PROFILE_DB: {
+      batch: baseDb.batch.bind(baseDb),
+      dump: baseDb.dump.bind(baseDb),
+      exec: baseDb.exec.bind(baseDb),
+      prepare(query: string) {
+        const base = baseDb.prepare(query);
+        let values: unknown[] = [];
+        let statement: D1PreparedStatement;
+        statement = {
+          all: base.all,
+          bind(...nextValues) {
+            values = nextValues;
+            return statement;
+          },
+          async first<T>(column?: string) {
+            if (
+              query.includes("profile_merge_targets") &&
+              values[0] === sourceProfileId
+            ) {
+              return {
+                source_profile_id: sourceProfileId,
+                target_profile_id: targetProfileId,
+                merged_at_ms: 1,
+                op_id: null,
+              } as T;
+            }
+            return column === undefined
+              ? base.first<T>()
+              : base.first<T>(column);
+          },
+          raw: base.raw,
+          run: base.run,
+        };
+        return statement;
+      },
+      withSession: baseDb.withSession.bind(baseDb),
     },
   };
 }
@@ -563,7 +592,7 @@ test("repairs terminal prizes and rechecks ownership after commit", async () => 
   );
 });
 
-test("uses canonical prize ownership with an injected repository", async (t) => {
+test("uses canonical prize ownership with an injected repository", async () => {
   const eventId = "NN3eRzoZo80";
   const assignedAtMs = 500;
   const assignment = {
@@ -606,40 +635,12 @@ test("uses canonical prize ownership with an injected repository", async (t) => 
     },
   };
   const state = createRepository({ [`events/${eventId}`]: event });
-  const originalFetch = globalThis.fetch;
-  t.after(() => {
-    globalThis.fetch = originalFetch;
-  });
-  globalThis.fetch = async (input) => {
-    const url = String(input);
-    if (url === "https://oauth2.googleapis.com/token") {
-      return Response.json({ access_token: "access-token" });
-    }
-    const collectionPath = "/profileMergeTargets/";
-    const pathIndex = url.indexOf(collectionPath);
-    if (pathIndex < 0) {
-      throw new Error(`unexpected request: ${url}`);
-    }
-    const profileId = decodeURIComponent(
-      url.slice(pathIndex + collectionPath.length),
-    );
-    if (profileId !== identity.profileId) {
-      return new Response(null, { status: 404 });
-    }
-    return Response.json({
-      name: `projects/mons-link/databases/(default)/documents/profileMergeTargets/${identity.profileId}`,
-      updateTime: "2026-08-26T00:00:00Z",
-      fields: {
-        targetProfileId: { stringValue: "canonical-profile" },
-      },
-    });
-  };
-
   await syncEventState(
-    {
-      ...workflowEnvironment(() => undefined),
-      FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: await generatePrivateKeyPem(),
-    },
+    withCanonicalMergeTarget(
+      workflowEnvironment(() => undefined),
+      identity.profileId,
+      "canonical-profile",
+    ),
     identity,
     { eventId },
     {

@@ -1,6 +1,6 @@
 # mons cloud operations
 
-Run commands from the repository root. See the repository [architecture and command map](../README.md) for package boundaries and the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md) for API release, maintenance, and rollback procedures.
+Run commands from the repository root. See the repository [architecture and command map](../README.md) for package boundaries and the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md) for API release, maintenance, and forward-only cutover procedures.
 
 Firebase Auth and Realtime Database remain active. The API Worker owns manual invite, join, match creation, and rematch mutations; auth; profile and leaderboard reads; profile customization; username mutation; mining; gameplay; event-prize selection, withdrawal, and canonical projection; profile-link catch-up; rating-, invite-, automatch-, and event-driven profile-game projection; event control and progress Workflows; X callback; event Telegram projection; and Worker-backed Telegram delivery.
 
@@ -15,6 +15,8 @@ Event-prize withdrawal ownership, leases, persisted Solana submissions, and comp
 The shared control row moves only through `firestore → importing → frozen → active`; `active → frozen` remains the permanent maintenance switch. The Commit 1 bridge writes only in `firestore`. The Commit 2 Worker writes only in `active`. Older bridge versions therefore stay blocked after import begins, including version-pinned Workflows.
 
 In blocked states, HTTP mutations return `503 profile-writes-disabled` with `Retry-After: 60`, profile Queue messages retry without acknowledgement, and profile sweeps pause. Auth-state expiry, game-receipt cleanup, and unrelated Telegram delivery continue. `AUTH_MUTATIONS_DISABLED` remains an independent auth-maintenance switch.
+
+Commit 2 has no profile storage selector, legacy read-model Queue binding, or Datastore runtime credential. The retained Google identities are limited to Firebase Auth and RTDB.
 
 The additive schema and migration tool are present in the repository, but no remote schema application, import, Worker promotion, trigger change, IAM change, or production cutover is implied. The default migration mode is read-only:
 
@@ -34,7 +36,7 @@ npm ci --prefix cloud/admin
 
 The Realtime Database emulator requires Java 21 or newer.
 
-Use Application Default Credentials for admin tools:
+Use Application Default Credentials for Firebase Admin tools:
 
 ```sh
 gcloud auth application-default login
@@ -63,12 +65,6 @@ The Firebase configuration intentionally has no Functions codebase. Review the d
 New auth intents and X redirect flows are stored in the `mons-link-auth-state` D1 database through `AUTH_STATE_DB`; legacy verified, completed, and failed X flows were backfilled during that separate cutover. Firebase Auth remains active. Commit 1 profile documents and auth replays remain Firestore-backed; Commit 2 uses canonical D1 permanently. Auth-state D1 is consume-once and revision-fenced. After a one-hour grace, the Worker schedule removes expired created/processing rows and compacts obsolete proof material; verified/completed/failed replays are retained for 30 days. Do not manually edit or delete active rows.
 
 `mons-link-auth-recovery` is the permanent recovery Queue. Its consumer applies `authRecoveryJobs` idempotently, and the scheduled sweep re-enqueues stale jobs. Investigate a stuck job without purging the Queue or deleting its job record.
-
-## Profile read-model recovery
-
-While Commit 1 remains in control state `firestore`, the profile read-model Queue carries best-effort profile ID notifications after committed Firestore mutations. Its consumer rereads Firestore before applying a version-fenced D1 projection. Every five minutes in that state, the Worker scans Firestore profile metadata, repairs missing or mismatched projections, and rechecks apparent deletions before applying version-fenced tombstones. A relevant `profile_projection_failures` row fences the affected profile or login read, while any failure row globally fences leaderboards. Validation fences persist until the source profile is corrected or the projection schema changes.
-
-Cron reconciliation is the durable recovery path before canonical cutover. Investigate failed scheduled invocations, Queue backlog, projection errors, and failure rows; do not purge the Queue or manually rewrite D1 projection state. The Queue, failure fences, Firestore adapters, and read-model tables remain during the 30-day retention window; their cleanup is deferred and must not be folded into the initial cutover.
 
 ## Profile-game projection recovery
 

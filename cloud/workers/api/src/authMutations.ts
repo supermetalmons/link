@@ -34,7 +34,6 @@ import {
   readStoredFirebaseUid,
 } from "./authPolicy.ts";
 import { X_FLOW_TTL_MS } from "./xFlow.ts";
-import { scheduleProfileReadProjection } from "./profileReadProjection.ts";
 
 const AUTH_MUTATION_MAX_BODY_BYTES = 16 * 1024;
 const AUTH_MUTATION_DEADLINE_MS = 40_000;
@@ -150,8 +149,6 @@ async function executeAuthMutation(
     dependencies.identityService ||
     createAuthIdentityService(env, {
       authState: dependencies.stateRepository,
-      profileProjectionCommitted: (profileId) =>
-        scheduleProfileReadProjection(ctx, env, profileId),
       signal: operationSignal,
     });
   if (pathname === "/auth/methods/sol/verify") {

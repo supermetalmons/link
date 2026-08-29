@@ -239,6 +239,7 @@ test("parses only production and canonical preview smoke targets", () => {
 test("smokes public, unauthenticated, and internal routes", async () => {
   const requests: Array<{ authorized: boolean; method: string; url: string }> =
     [];
+  const leaderboardTypes: string[] = [];
   let nftPosts = 0;
   const fetchStub: typeof fetch = async (input, init) => {
     const url = String(input);
@@ -341,6 +342,7 @@ test("smokes public, unauthenticated, and internal routes", async () => {
       );
     }
     if (url.endsWith("/leaderboards/read")) {
+      leaderboardTypes.push(String(JSON.parse(String(init?.body))?.type || ""));
       return json({ ok: true, profiles: [PROFILE] }, 200);
     }
     if (url.endsWith("/profiles/lookup")) {
@@ -421,9 +423,19 @@ test("smokes public, unauthenticated, and internal routes", async () => {
   );
 
   assert.equal(requests.length, 39);
+  assert.deepEqual(leaderboardTypes, [
+    "rating",
+    "mp",
+    "dust",
+    "slime",
+    "gum",
+    "metal",
+    "ice",
+  ]);
   assert.deepEqual(logs, ["[api-smoke] Passed https://api.mons.link"]);
 
   requests.length = 0;
+  leaderboardTypes.length = 0;
   logs.length = 0;
   nftPosts = 0;
   await smokeApi(
@@ -441,6 +453,15 @@ test("smokes public, unauthenticated, and internal routes", async () => {
     },
   );
   assert.equal(requests.length, 36);
+  assert.deepEqual(leaderboardTypes, [
+    "rating",
+    "mp",
+    "dust",
+    "slime",
+    "gum",
+    "metal",
+    "ice",
+  ]);
   assert.equal(
     requests.some(
       ({ authorized, method, url }) =>

@@ -1,6 +1,4 @@
-import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import * as entrypoint from "../src/index.ts";
 import {
   createEventProgressWorkflowDependencies,
@@ -8,24 +6,23 @@ import {
 } from "../src/eventProgressWorkflow.ts";
 import { EventPrizeWithdrawalWorkflow } from "../src/eventPrizeWithdrawalWorkflow.ts";
 import { AUTH_RECOVERY_QUEUE_NAME } from "../src/authRecovery.ts";
-import { PROFILE_READ_PROJECTION_QUEUE_NAME } from "../src/profileReadProjectionTasks.ts";
-import worker from "../src/workerHandler.ts";
-
-const testEnv = env as Env & {
-  TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
-};
+import { PROFILE_GAME_PROJECTION_QUEUE_NAME } from "../src/profileGameProjectionTasks.ts";
+import { TELEGRAM_PROJECTION_QUEUE_NAME } from "../src/telegramProjectionTasks.ts";
+import worker, { handleScheduled } from "../src/workerHandler.ts";
+import { TELEGRAM_TEST_ENV, withProfileControl } from "../test/testEnv.ts";
 
 function queueMessage(body: unknown) {
+  let acknowledgements = 0;
   const retries: QueueRetryOptions[] = [];
   const message = {
     id: crypto.randomUUID(),
     timestamp: new Date(0),
     body,
     attempts: 1,
-    ack: () => undefined,
+    ack: () => acknowledgements++,
     retry: (options?: QueueRetryOptions) => retries.push(options || {}),
   } satisfies Message<unknown>;
-  return { message, retries };
+  return { acknowledgements: () => acknowledgements, message, retries };
 }
 
 function queueBatch(queue: string, messages: Message<unknown>[]) {
@@ -38,14 +35,13 @@ function queueBatch(queue: string, messages: Message<unknown>[]) {
   } satisfies MessageBatch<unknown>;
 }
 
-describe("Worker entrypoint", () => {
-  beforeAll(async () => {
-    await applyD1Migrations(
-      testEnv.PROFILE_DB,
-      testEnv.TEST_PROFILE_D1_MIGRATIONS,
-    );
-  });
+const controller = {
+  cron: "* * * * *",
+  noRetry: () => undefined,
+  scheduledTime: 1_000,
+} satisfies ScheduledController;
 
+describe("Worker entrypoint", () => {
   it("exports the Worker handler and Workflows", () => {
     expect(entrypoint.default).toBe(worker);
     expect(entrypoint.EventProgressWorkflow).toBe(EventProgressWorkflow);
@@ -57,13 +53,12 @@ describe("Worker entrypoint", () => {
     expect(typeof entrypoint.default.scheduled).toBe("function");
   });
 
-  it("blocks event progress after import begins", async () => {
-    await testEnv.PROFILE_DB.prepare(
-      `UPDATE profile_canonical_control
-       SET state = 'importing'
-       WHERE singleton = 1 AND state = 'firestore'`,
-    ).run();
-    const dependencies = createEventProgressWorkflowDependencies(testEnv);
+  it("rechecks active control inside mutating Workflow work", async () => {
+    const frozen = withProfileControl(
+      TELEGRAM_TEST_ENV as unknown as Env,
+      "frozen",
+    );
+    const dependencies = createEventProgressWorkflowDependencies(frozen);
     await expect(dependencies.acknowledge("outbox-1")).rejects.toThrow(
       "profile-writes-disabled",
     );
@@ -82,63 +77,95 @@ describe("Worker entrypoint", () => {
     ).rejects.toThrow("profile-writes-disabled");
   });
 
-  it("keeps old profile background work blocked after import", async () => {
-    const runtimeEnv = testEnv;
-    await testEnv.PROFILE_DB.prepare(
-      `UPDATE profile_canonical_control
-       SET state = 'importing'
-       WHERE singleton = 1 AND state = 'firestore'`,
-    ).run();
-    const recovery = queueMessage({ kind: "recovery" });
-    await worker.queue(
-      queueBatch(AUTH_RECOVERY_QUEUE_NAME, [recovery.message]),
-      runtimeEnv,
+  it("retries profile Queue messages without acknowledgement while frozen", async () => {
+    const frozen = withProfileControl(
+      TELEGRAM_TEST_ENV as unknown as Env,
+      "frozen",
     );
-    expect(recovery.retries).toEqual([{ delaySeconds: 300 }]);
+    for (const queue of [
+      AUTH_RECOVERY_QUEUE_NAME,
+      PROFILE_GAME_PROJECTION_QUEUE_NAME,
+      TELEGRAM_PROJECTION_QUEUE_NAME,
+    ]) {
+      const tracked = queueMessage({ kind: "task" });
+      await worker.queue(queueBatch(queue, [tracked.message]), frozen);
+      expect(tracked.acknowledgements(), queue).toBe(0);
+      expect(tracked.retries, queue).toEqual([{ delaySeconds: 300 }]);
+    }
+  });
 
-    const wager = queueMessage({
+  it("fails unreadable Queue control closed", async () => {
+    const tracked = queueMessage({ kind: "task" });
+    const unavailable = {
+      ...TELEGRAM_TEST_ENV,
+      PROFILE_DB: {
+        ...TELEGRAM_TEST_ENV.PROFILE_DB,
+        prepare() {
+          throw new Error("profile-control-unavailable");
+        },
+      } as unknown as D1Database,
+    } as unknown as Env;
+    await worker.queue(
+      queueBatch(AUTH_RECOVERY_QUEUE_NAME, [tracked.message]),
+      unavailable,
+    );
+    expect(tracked.acknowledgements()).toBe(0);
+    expect(tracked.retries).toEqual([{ delaySeconds: 300 }]);
+  });
+
+  it("freezes wagers without blocking unrelated Telegram work", async () => {
+    const settlement = queueMessage({
       kind: "wager-settlement",
       inviteId: "invite-1",
       matchId: "match-1",
       operationId: "operation-1",
     });
+    const unrelated = queueMessage({ kind: "invalid-telegram-task" });
     await worker.queue(
-      queueBatch("mons-link-telegram-delivery", [wager.message]),
-      runtimeEnv,
-    );
-    expect(wager.retries).toEqual([{ delaySeconds: 300 }]);
-
-    await testEnv.PROFILE_DB.prepare(
-      `UPDATE profile_canonical_control
-       SET import_digest = ?, import_plan_version = 1
-       WHERE singleton = 1 AND state = 'importing'`,
-    )
-      .bind("0".repeat(64))
-      .run();
-    await testEnv.PROFILE_DB.prepare(
-      `UPDATE profile_canonical_control
-       SET state = 'frozen', imported_at_ms = 1
-       WHERE singleton = 1 AND state = 'importing'`,
-    ).run();
-    const frozenProjection = queueMessage({ kind: "projection" });
-    await worker.queue(
-      queueBatch(PROFILE_READ_PROJECTION_QUEUE_NAME, [
-        frozenProjection.message,
+      queueBatch("mons-link-telegram-delivery", [
+        settlement.message,
+        unrelated.message,
       ]),
-      runtimeEnv,
+      withProfileControl(TELEGRAM_TEST_ENV as unknown as Env, "frozen"),
     );
-    expect(frozenProjection.retries).toEqual([{ delaySeconds: 300 }]);
+    expect(settlement.acknowledgements()).toBe(0);
+    expect(settlement.retries).toEqual([{ delaySeconds: 300 }]);
+    expect(unrelated.acknowledgements()).toBe(1);
+    expect(unrelated.retries).toEqual([]);
+  });
 
-    await testEnv.PROFILE_DB.prepare(
-      `UPDATE profile_canonical_control
-       SET state = 'active'
-       WHERE singleton = 1 AND state = 'frozen'`,
-    ).run();
-    const cutoverRecovery = queueMessage({ kind: "recovery" });
-    await worker.queue(
-      queueBatch(AUTH_RECOVERY_QUEUE_NAME, [cutoverRecovery.message]),
-      runtimeEnv,
+  it("pauses profile Cron work while independent sweeps continue", async () => {
+    const calls: string[] = [];
+    const tasks = {
+      authRecovery: async () => calls.push("authRecovery"),
+      authState: async () => calls.push("authState"),
+      eventProgress: async () => calls.push("eventProgress"),
+      gameSessionReceipts: async () => calls.push("gameSessionReceipts"),
+      profileGameProjection: async () => calls.push("profileGameProjection"),
+      telegramProjection: async () => calls.push("telegramProjection"),
+    };
+    await handleScheduled(
+      controller,
+      withProfileControl(TELEGRAM_TEST_ENV as unknown as Env, "frozen"),
+      tasks,
     );
-    expect(cutoverRecovery.retries).toEqual([{ delaySeconds: 300 }]);
+    expect(calls).toEqual(["gameSessionReceipts", "authState"]);
+
+    calls.length = 0;
+    await handleScheduled(
+      controller,
+      withProfileControl(TELEGRAM_TEST_ENV as unknown as Env, "active"),
+      tasks,
+    );
+    expect(new Set(calls)).toEqual(
+      new Set([
+        "authRecovery",
+        "authState",
+        "eventProgress",
+        "gameSessionReceipts",
+        "profileGameProjection",
+        "telegramProjection",
+      ]),
+    );
   });
 });

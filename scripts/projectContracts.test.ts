@@ -109,8 +109,6 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     "APPLE_AUDIENCES",
     "AUTH_MUTATIONS_DISABLED",
     "FIREBASE_RTDB_URL",
-    "PROFILE_READ_MODE",
-    "PROFILE_STORAGE_MODE",
   ]);
   assert.equal(config.vars?.APPLE_AUDIENCES, "link.mons");
   assert.match(config.vars?.AUTH_MUTATIONS_DISABLED || "", /^(?:true|false)$/);
@@ -118,8 +116,6 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     config.vars?.FIREBASE_RTDB_URL,
     "https://mons-link-default-rtdb.firebaseio.com",
   );
-  assert.equal(config.vars?.PROFILE_READ_MODE, "d1");
-  assert.equal(config.vars?.PROFILE_STORAGE_MODE, "firestore");
   assert.deepEqual(config.d1_databases, [
     {
       binding: "PROFILE_GAMES_DB",
@@ -154,13 +150,11 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   ]);
   assert.deepEqual(config.secrets, {
     required: [
-      "FIRESTORE_SERVICE_ACCOUNT_EMAIL",
-      "FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY",
+      "FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL",
+      "FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY",
       "GAMEPLAY_SERVICE_ACCOUNT_EMAIL",
       "GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY",
       "HELIUS_RPC_API_KEY",
-      "RATING_SERVICE_ACCOUNT_EMAIL",
-      "RATING_SERVICE_ACCOUNT_PRIVATE_KEY",
       "EVENT_PRIZE_ADMIN_PRIVATE_KEY",
       "TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET",
       "TELEGRAM_BOT_TOKEN",
@@ -168,8 +162,6 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       "TELEGRAM_FIREBASE_SERVICE_ACCOUNT_EMAIL",
       "TELEGRAM_FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY",
       "TELEGRAM_QUEUE_BRIDGE_SECRET",
-      "USERNAME_SERVICE_ACCOUNT_EMAIL",
-      "USERNAME_SERVICE_ACCOUNT_PRIVATE_KEY",
       "X_CLIENT_ID",
       "X_CLIENT_SECRET",
     ],
@@ -204,10 +196,6 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
         binding: "PROFILE_GAME_PROJECTION_QUEUE",
         queue: "mons-link-profile-game-projection",
       },
-      {
-        binding: "PROFILE_PROJECTION_QUEUE",
-        queue: "mons-link-profile-projection",
-      },
     ],
     consumers: [
       {
@@ -241,13 +229,6 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
         max_retries: 100,
         max_concurrency: 5,
       },
-      {
-        queue: "mons-link-profile-projection",
-        max_batch_size: 5,
-        max_batch_timeout: 1,
-        max_retries: 100,
-        max_concurrency: 1,
-      },
     ],
   });
   assert.deepEqual(config.triggers, { crons: ["*/5 * * * *"] });
@@ -262,6 +243,19 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     },
     traces: { enabled: false },
   });
+  const serialized = JSON.stringify(config);
+  for (const retired of [
+    "FIRESTORE_SERVICE_ACCOUNT_",
+    "RATING_SERVICE_ACCOUNT_",
+    "USERNAME_SERVICE_ACCOUNT_",
+    "PROFILE_STORAGE_MODE",
+    "PROFILE_READ_MODE",
+    "PROFILE_ACTIVATION_LOGIN_UID",
+    "PROFILE_PROJECTION_QUEUE",
+    "mons-link-profile-projection",
+  ]) {
+    assert.equal(serialized.includes(retired), false, retired);
+  }
 });
 
 test("ephemeral auth state does not use Firestore collection paths", () => {
@@ -490,7 +484,13 @@ test("API Worker preserves its runtime export surface", () => {
 
   assert.deepEqual(
     exportNames,
-    ["default", "extractIdFromJsonUri", "handleFetch", "handleRequest"].sort(),
+    [
+      "default",
+      "extractIdFromJsonUri",
+      "handleFetch",
+      "handleRequest",
+      "handleScheduled",
+    ].sort(),
   );
   assert.equal(typeof worker.extractIdFromJsonUri, "function");
   assert.equal(typeof worker.handleRequest, "function");
@@ -570,6 +570,29 @@ test("operations documentation cross-links package and deployment guides", () =>
   );
   assert.doesNotMatch(deploymentGuide, /migrate:event-prize-withdrawals-d1/);
   assert.doesNotMatch(deploymentGuide, /Firebase-only Worker version/);
+
+  const profileCutover = deploymentGuide.slice(
+    deploymentGuide.indexOf("## Canonical profile D1 cutover"),
+    deploymentGuide.indexOf("## Event-prize withdrawal D1 operations"),
+  );
+  assert.match(profileCutover, /two reviewed commits/);
+  assert.match(profileCutover, /Commit 2 is the permanent\s+D1-only Worker/);
+  assert.match(profileCutover, /rollingBack.*unknown.*blockers/s);
+  assert.match(profileCutover, /npm run deploy:api:triggers/);
+  assert.match(
+    profileCutover,
+    /queues consumer remove mons-link-profile-projection mons-link-api/,
+  );
+  assert.match(profileCutover, /reviewed mutation request twice/);
+  assert.match(profileCutover, /30 days as an audit snapshot/);
+  assert.doesNotMatch(
+    profileCutover,
+    /firestore-frozen|d1-frozen|activation|verifying|operation lease|rollback/i,
+  );
+  assert.doesNotMatch(
+    profileCutover,
+    /resume-delivery mons-link-profile-projection/,
+  );
 });
 
 test("profile claim synchronization uses the Worker route", () => {

@@ -167,27 +167,27 @@ function parseOptionalJsonNumber(value, type) {
 }
 
 function createProfileD1Reader({ query = createD1Query() } = {}) {
-  let activated;
-  const requireActivated = async () => {
-    activated ||= query(
-      `SELECT state, activated_at_ms
+  let imported;
+  const requireImported = async () => {
+    imported ||= query(
+      `SELECT state, imported_at_ms
        FROM profile_canonical_control
        WHERE singleton = 1`,
     ).then((rows) => {
       if (
         rows.length !== 1 ||
-        !["verifying", "active", "frozen"].includes(rows[0].state) ||
-        !Number.isSafeInteger(rows[0].activated_at_ms) ||
-        rows[0].activated_at_ms < 0
+        !["active", "frozen"].includes(rows[0].state) ||
+        !Number.isSafeInteger(rows[0].imported_at_ms) ||
+        rows[0].imported_at_ms < 0
       ) {
-        throw new Error("Canonical profile D1 is not activated.");
+        throw new Error("Canonical profile D1 is not imported.");
       }
     });
-    return activated;
+    return imported;
   };
   return {
     async listAddresses() {
-      await requireActivated();
+      await requireImported();
       const addresses = [];
       let cursorMethod = "";
       let cursorValue = "";
@@ -233,7 +233,7 @@ function createProfileD1Reader({ query = createD1Query() } = {}) {
       throw new Error("Canonical address page limit exceeded.");
     },
     async readLeaderboard(metric, limit) {
-      await requireActivated();
+      await requireImported();
       const order = metric === "gp" ? "nonce_sort" : "mana_points_sort";
       const presence =
         metric === "gp" ? "nonce_sort_present" : "mana_points_sort_present";

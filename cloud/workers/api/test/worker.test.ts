@@ -19,8 +19,9 @@ const HELIUS_MAX_PAGES_PER_COLLECTION = 3;
 const MAX_HELIUS_RESPONSE_BODY_BYTES = 8 * 1024 * 1024;
 const env = {
   ...TELEGRAM_TEST_ENV,
-  FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
-  FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
+  FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL:
+    "worker@example.iam.gserviceaccount.com",
+  FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: API_KEY,
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
   NFT_RATE_LIMITER: {

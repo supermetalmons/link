@@ -29,8 +29,9 @@ function envWithRateLimit(
   return {
     ...TELEGRAM_TEST_ENV,
     AUTH_RATE_LIMITER: { limit },
-    FIRESTORE_SERVICE_ACCOUNT_EMAIL: "worker@example.iam.gserviceaccount.com",
-    FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
+    FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL:
+      "identity@example.iam.gserviceaccount.com",
+    FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
     HELIUS_RPC_API_KEY: "test-helius-key",
     NFT_RATE_LIMITER: { limit: async () => ({ success: true }) },
     X_CLIENT_ID: "test-x-client",
@@ -195,7 +196,7 @@ test("freezes mining before rate limiting or repository work", async () => {
       rateLimitCalls++;
       return { success: true };
     }),
-    "active",
+    "frozen",
   );
   const mine = request(mineRequest());
   const response = await handleMiningRoute(mine, frozenEnv, ctx, {

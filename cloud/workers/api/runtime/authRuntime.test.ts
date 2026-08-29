@@ -16,7 +16,6 @@ import { prepareSiweMessage } from "../../../../src/connection/siweMessage.ts";
 
 const env = {
   APPLE_AUDIENCES: "link.mons",
-  PROFILE_STORAGE_MODE: "firestore",
 } as Env;
 const identity = { uid: "runtime-login", idToken: "firebase-token" };
 const nonce = "nonceABC123456789012345";
