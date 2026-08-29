@@ -57,17 +57,14 @@ import {
   FIREBASE_RTDB_SERVER_TIMESTAMP,
   firebaseRtdbIncrement,
 } from "./firebaseRtdb.ts";
-import {
-  MAX_FIREBASE_KEY_BYTES,
-  isSafeFirebaseKey,
-  isSafeFirestoreDocumentId,
-} from "./firebaseKeys.ts";
+import { MAX_FIREBASE_KEY_BYTES, isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
   createGameplayRepository,
   type GameplayRepository,
   createRatingRepository,
   type RatingRepository,
 } from "./gameplayRepository.ts";
+import { isSafeOperationId } from "./operationIds.ts";
 import { readBoundedJson } from "./http.ts";
 import {
   createAutomatchProfileGameProjectionTask,
@@ -647,7 +644,7 @@ async function readGameplayBody(
       !isSafeFirebaseKey(opponentId) ||
       !isSafeFirebaseKey(inviteId) ||
       !isSafeFirebaseKey(matchId) ||
-      !isSafeFirestoreDocumentId(`${inviteId}__${matchId}`)
+      !isSafeOperationId(`${inviteId}__${matchId}`)
     ) {
       throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
     }

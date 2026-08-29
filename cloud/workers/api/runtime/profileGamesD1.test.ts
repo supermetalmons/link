@@ -48,11 +48,9 @@ describe("profile game projection D1 repository", () => {
     ).run();
   });
 
-  it("normalizes timestamps and upserts projection payloads", async () => {
+  it("normalizes numeric timestamps and upserts projection payloads", async () => {
     const data = gameData("invite-1", 1_000);
-    data.updatedAt = {
-      __firestoreTimestamp: "1970-01-01T00:00:02.000Z",
-    } as never;
+    data.updatedAt = 2_000.75;
     const encoded = encodeProfileGameProjection("profile-1", "invite-1", data);
     expect(encoded.updated_at_ms).toBe(2_000);
 
@@ -97,6 +95,12 @@ describe("profile game projection D1 repository", () => {
       encodeProfileGameProjection("profile-1", "invite-1", {
         ...gameData("invite-1", 1_000),
         listSortAt: null,
+      }),
+    ).toThrow("invalid-profile-game-projection-list-sort");
+    expect(() =>
+      encodeProfileGameProjection("profile-1", "invite-1", {
+        ...gameData("invite-1", 1_000),
+        listSortAt: { timestamp: 1_000 },
       }),
     ).toThrow("invalid-profile-game-projection-list-sort");
   });

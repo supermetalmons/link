@@ -7,6 +7,7 @@ import {
   canonicalProfileFields,
   createCanonicalRatingRepository,
 } from "../src/gameplayCanonicalRepository.ts";
+import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import {
   createGameplayRepository,
   createRatingRepository,
@@ -239,33 +240,11 @@ async function resetCanonicalRows(db: D1Database): Promise<void> {
 
 describe("canonical gameplay repositories", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyRetiredProfileMigrations(
       testEnv.PROFILE_DB,
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
+      "c".repeat(64),
     );
-    const importDigest = "c".repeat(64);
-    await testEnv.PROFILE_DB.batch([
-      testEnv.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET state = 'importing'
-         WHERE singleton = 1 AND state = 'firestore'`,
-      ),
-      testEnv.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET import_digest = ?, import_plan_version = 1
-         WHERE singleton = 1 AND state = 'importing'`,
-      ).bind(importDigest),
-      testEnv.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET state = 'frozen', imported_at_ms = 1
-         WHERE singleton = 1 AND state = 'importing'`,
-      ),
-      testEnv.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET state = 'active'
-         WHERE singleton = 1 AND state = 'frozen'`,
-      ),
-    ]);
     await applyD1Migrations(
       testEnv.PROFILE_GAMES_DB,
       testEnv.TEST_D1_MIGRATIONS,

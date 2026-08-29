@@ -16,31 +16,19 @@ const {
   createProfileLinkProjectionCore,
   processWithConcurrency,
 } = require("../functions/profileLinkProjectionCore");
-const firebaseAdmin = require("../functions/firebaseAdmin");
 
 const runWithoutProjectionLock = async (_inviteId, work) => work();
 
 const processProfileLinkCatchup = async (input, dependencies) => {
-  const firestore = dependencies.firestore || null;
   const core = createProfileLinkProjectionCore({
     logger: { error: () => undefined, info: () => undefined },
     recomputeInviteProjection: dependencies.recomputeInviteProjection,
     resolveInviteIdFromMatchId: dependencies.resolveInviteIdFromMatchId,
     repository: {
       async deleteProfileGameProjections(profileId, inviteIds) {
-        if (!firestore) return 0;
-        const batch = firestore.batch();
-        inviteIds.forEach((inviteId) =>
-          batch.delete(
-            firestore
-              .collection("users")
-              .doc(profileId)
-              .collection("games")
-              .doc(inviteId),
-          ),
-        );
-        await batch.commit();
-        return inviteIds.length;
+        return dependencies.deleteProfileGameProjections
+          ? dependencies.deleteProfileGameProjections(profileId, inviteIds)
+          : 0;
       },
       getCurrentProfileLink: dependencies.readCurrentProfileLink,
       async getMatches(loginUid) {
@@ -48,18 +36,15 @@ const processProfileLinkCatchup = async (input, dependencies) => {
         return snapshot.exists() ? snapshot.val() || {} : null;
       },
       async getMergeTarget(profileId) {
-        if (!firestore) return null;
-        const snapshot = await firestore
-          .collection("profileMergeTargets")
-          .doc(profileId)
-          .get();
-        return snapshot.exists ? snapshot.data() || null : null;
+        return dependencies.getMergeTarget
+          ? dependencies.getMergeTarget(profileId)
+          : null;
       },
       inviteExists: async () => false,
       async profileExists(profileId) {
-        if (!firestore) return true;
-        return (await firestore.collection("users").doc(profileId).get())
-          .exists;
+        return dependencies.profileExists
+          ? dependencies.profileExists(profileId)
+          : true;
       },
     },
     withInviteProjectionLock: dependencies.withInviteProjectionLock,
@@ -89,7 +74,7 @@ const runEventProjection = async ({
       commitProjectionWrites: async (writes) => {
         for (const write of writes) {
           operations.push({
-            path: `users/${write.profileId}/games/event_${write.eventId}`,
+            path: `${write.profileId}/event_${write.eventId}`,
             type: write.type === "delete" ? "delete" : "set",
           });
         }
@@ -109,7 +94,6 @@ const runEventProjection = async ({
             }
           : null,
     },
-    timestampFromMillis: (millis) => ({ millis }),
   });
   try {
     const beforeOwnerProfileIds = Object.values(
@@ -143,13 +127,12 @@ const runInviteProjection = async ({
   const deletes = [];
   const sets = [];
   const currentUpdateTimes = { ...projectionUpdateTimes };
-  const timestampFromMillis = firebaseAdmin.firestore.Timestamp.fromMillis;
   const core = createProfileGamesProjectionCore({
     repository: {
       async commitProjectionWrites(writes) {
         beforeCommit?.({ currentUpdateTimes, projections });
         for (const write of writes) {
-          const path = `users/${write.profileId}/games/${inviteId}`;
+          const path = `${write.profileId}/${inviteId}`;
           if (write.type === "delete") {
             deletes.push(path);
             continue;
@@ -158,7 +141,7 @@ const runInviteProjection = async ({
             write.type === "update" &&
             write.updateTime !== currentUpdateTimes[write.profileId]
           ) {
-            throw new Error("firestore-precondition-failed");
+            throw new Error("projection-precondition-failed");
           }
           sets.push({
             data: write.data,
@@ -188,8 +171,7 @@ const runInviteProjection = async ({
         return data
           ? {
               data,
-              updateTime:
-                currentUpdateTimes[profileId] || timestampFromMillis(1),
+              updateTime: currentUpdateTimes[profileId] || "revision-1",
             }
           : null;
       },
@@ -198,7 +180,7 @@ const runInviteProjection = async ({
         if (data === null || data === undefined) {
           return null;
         }
-        currentUpdateTimes[profileId] ||= timestampFromMillis(1);
+        currentUpdateTimes[profileId] ||= "revision-1";
         return { data, updateTime: currentUpdateTimes[profileId] };
       },
       async getRtdbPath(path) {
@@ -210,7 +192,6 @@ const runInviteProjection = async ({
         throw new Error(`unexpected-path:${path}`);
       },
     },
-    timestampFromMillis,
   });
   const result = await core.recomputeInviteProjection(
     inviteId,
@@ -265,7 +246,7 @@ test("event projection writes every canonical owner before stale cleanup", async
     commits.map((commit) => commit.length),
     [450, 2],
   );
-  assert.equal(operations.at(-1).path, "users/stale-owner/games/event_event-1");
+  assert.equal(operations.at(-1).path, "stale-owner/event_event-1");
 });
 
 test("event projection does not write when a canonical owner is missing", async () => {
@@ -324,7 +305,6 @@ test("event owner paths are deduplicated and concurrency bounded", async () => {
       },
       getProfile: async () => null,
     },
-    timestampFromMillis: (millis) => millis,
   });
   const paths = await core.resolveProfilePaths([...ids, ...ids]);
   assert.equal(paths.size, ids.length);
@@ -362,7 +342,6 @@ test("event retries project live state while retaining stale owners for cleanup"
       getMergeTarget: async () => null,
       getProfile: async () => ({ data: {}, updateTime: "update" }),
     },
-    timestampFromMillis: (millis) => millis,
   });
   await core.reconcileEventProjection("event-1", [
     ...Object.values(beforeData.participants).map(({ profileId }) => profileId),
@@ -395,7 +374,6 @@ test("event retries converge when the live event changes during projection", asy
       getMergeTarget: async () => null,
       getProfile: async () => ({ data: {}, updateTime: "update" }),
     },
-    timestampFromMillis: (millis) => millis,
   });
   await core.reconcileEventProjection("event-1", [
     staleData.participants.stale.profileId,
@@ -524,53 +502,37 @@ test("profile-link catchup retries when the current owner is unresolved", async 
 });
 
 test("profile-link catchup retries blocked projections with stale cleanup", async () => {
-  const originalFirestore = firebaseAdmin.firestore;
   let deletes = 0;
-  const firestore = {
-    batch: () => ({
-      commit: async () => undefined,
-      delete: () => {
-        deletes += 1;
+  await assert.rejects(
+    processProfileLinkCatchup(
+      {
+        eventLabel: "test",
+        loginUid: "login-1",
+        profileId: "target-profile",
+        staleProfileId: "stale-profile",
       },
-    }),
-    collection: () => ({
-      doc: (profileId) => ({
-        collection: () => ({ doc: () => ({ profileId }) }),
-        get: async () => ({ data: () => null, exists: false }),
-      }),
-    }),
-  };
-  firebaseAdmin.firestore = () => firestore;
-  try {
-    await assert.rejects(
-      processProfileLinkCatchup(
-        {
-          eventLabel: "test",
-          loginUid: "login-1",
-          profileId: "target-profile",
-          staleProfileId: "stale-profile",
+      {
+        deleteProfileGameProjections: async (_profileId, inviteIds) => {
+          deletes += inviteIds.length;
+          return inviteIds.length;
         },
-        {
-          readCurrentProfileLink: async () => "target-profile",
-          readMatches: async () => ({
-            exists: () => true,
-            val: () => ({ "match-1": {} }),
-          }),
-          recomputeInviteProjection: async () => ({
-            blockedReason: "unresolved-owner-profile",
-            ownerProfileIds: ["target-profile"],
-            sourceCleanupSafe: false,
-          }),
-          resolveInviteIdFromMatchId: async () => "invite-1",
-          withInviteProjectionLock: runWithoutProjectionLock,
-        },
-      ),
-      /profile-link-catchup-incomplete/,
-    );
-    assert.equal(deletes, 0);
-  } finally {
-    firebaseAdmin.firestore = originalFirestore;
-  }
+        readCurrentProfileLink: async () => "target-profile",
+        readMatches: async () => ({
+          exists: () => true,
+          val: () => ({ "match-1": {} }),
+        }),
+        recomputeInviteProjection: async () => ({
+          blockedReason: "unresolved-owner-profile",
+          ownerProfileIds: ["target-profile"],
+          sourceCleanupSafe: false,
+        }),
+        resolveInviteIdFromMatchId: async () => "invite-1",
+        withInviteProjectionLock: runWithoutProjectionLock,
+      },
+    ),
+    /profile-link-catchup-incomplete/,
+  );
+  assert.equal(deletes, 0);
 });
 
 const runProfileLinkStaleCleanup = async ({
@@ -578,39 +540,6 @@ const runProfileLinkStaleCleanup = async ({
   targetProfileId,
 }) => {
   const deletes = [];
-  const firestore = {
-    batch: () => ({
-      commit: async () => undefined,
-      delete: (ref) => deletes.push(ref.path),
-    }),
-    collection: (collectionName) => ({
-      doc: (profileId) => {
-        if (collectionName === "profileMergeTargets") {
-          const data =
-            profileId === "stale-profile" && targetProfileId
-              ? { targetProfileId }
-              : null;
-          return {
-            get: async () => ({ data: () => data, exists: !!data }),
-          };
-        }
-        assert.equal(collectionName, "users");
-        return {
-          collection: (subcollectionName) => {
-            assert.equal(subcollectionName, "games");
-            return {
-              doc: (inviteId) => ({
-                path: `users/${profileId}/games/${inviteId}`,
-              }),
-            };
-          },
-          get: async () => ({
-            exists: profileId === "stale-profile" && sourceExists,
-          }),
-        };
-      },
-    }),
-  };
   await processProfileLinkCatchup(
     {
       eventLabel: "test",
@@ -619,7 +548,18 @@ const runProfileLinkStaleCleanup = async ({
       staleProfileId: "stale-profile",
     },
     {
-      firestore,
+      deleteProfileGameProjections: async (profileId, inviteIds) => {
+        inviteIds.forEach((inviteId) =>
+          deletes.push(`${profileId}/${inviteId}`),
+        );
+        return inviteIds.length;
+      },
+      getMergeTarget: async (candidateProfileId) =>
+        candidateProfileId === "stale-profile" && targetProfileId
+          ? { targetProfileId }
+          : null,
+      profileExists: async (candidateProfileId) =>
+        candidateProfileId === "stale-profile" && sourceExists,
       readCurrentProfileLink: async () => "target-profile",
       readMatches: async () => ({
         exists: () => true,
@@ -639,7 +579,7 @@ test("profile-link catchup cleans a deleted merge source", async () => {
       sourceExists: false,
       targetProfileId: "target-profile",
     }),
-    ["users/stale-profile/games/invite-1"],
+    ["stale-profile/invite-1"],
   );
 });
 
@@ -909,17 +849,17 @@ test("profile-link catchup uses the freshest matching source projection", async 
     },
   });
   const targetWrite = sets.find(
-    ({ path }) => path === `users/merge-fallback-target/games/${inviteId}`,
+    ({ path }) => path === `merge-fallback-target/${inviteId}`,
   );
   assert.ok(targetWrite);
   assert.equal(targetWrite.data.opponentEmoji, 9);
   assert.equal(targetWrite.data.opponentName, "Fresh guest");
-  assert.equal(targetWrite.data.listSortAt.toMillis(), 1500);
+  assert.equal(targetWrite.data.listSortAt, 1500);
   assert.equal(targetWrite.data.createdAt, 200);
   assert.equal(targetWrite.method, "create");
   assert.deepEqual(deletes.sort(), [
-    `users/merge-fallback-source-new/games/${inviteId}`,
-    `users/merge-fallback-source-old/games/${inviteId}`,
+    `merge-fallback-source-new/${inviteId}`,
+    `merge-fallback-source-old/${inviteId}`,
   ]);
   assert.equal(result.writes, 2);
   assert.equal(result.deletes, 2);
@@ -960,18 +900,17 @@ test("profile-link catchup preserves an existing canonical list timestamp", asyn
     },
   });
   const targetWrite = sets.find(
-    ({ path }) =>
-      path === `users/merge-existing-canonical-target/games/${inviteId}`,
+    ({ path }) => path === `merge-existing-canonical-target/${inviteId}`,
   );
-  assert.equal(targetWrite.data.listSortAt.toMillis(), 1000);
+  assert.equal(targetWrite.data.listSortAt, 1000);
   assert.equal(targetWrite.method, "update");
   assert.ok(targetWrite.precondition.lastUpdateTime);
 });
 
 test("profile-link catchup cannot overwrite a concurrent live sort update", async () => {
   const inviteId = "merge-concurrent-sort-invite";
-  const firstVersion = firebaseAdmin.firestore.Timestamp.fromMillis(1);
-  const liveVersion = firebaseAdmin.firestore.Timestamp.fromMillis(2);
+  const firstVersion = "revision-1";
+  const liveVersion = "revision-2";
   const projections = {
     "merge-concurrent-sort-target": {
       lastEventFingerprint: "stale",
@@ -1002,7 +941,7 @@ test("profile-link catchup cannot overwrite a concurrent live sort update", asyn
         "merge-concurrent-sort-target": firstVersion,
       },
     }),
-    /firestore-precondition-failed/,
+    /projection-precondition-failed/,
   );
   assert.equal(projections["merge-concurrent-sort-target"].listSortAt, 9000);
 });
@@ -1106,8 +1045,7 @@ for (const [status, inviteState] of [
     assert.deepEqual(deletes, []);
     assert.equal(
       sets.some(
-        ({ path }) =>
-          path === `users/merge-blocked-${status}-target/games/${inviteId}`,
+        ({ path }) => path === `merge-blocked-${status}-target/${inviteId}`,
       ),
       false,
     );
@@ -1222,9 +1160,7 @@ test("deleted invite cleanup is safe without resolved owners", async () => {
       "merge-deleted-owner-source": { ownerRole: "host" },
     },
   });
-  assert.deepEqual(deletes, [
-    `users/merge-deleted-owner-source/games/${inviteId}`,
-  ]);
+  assert.deepEqual(deletes, [`merge-deleted-owner-source/${inviteId}`]);
   assert.deepEqual(sets, []);
   assert.equal(result.sourceCleanupSafe, true);
 });

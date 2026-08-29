@@ -17,8 +17,6 @@ export function cleanUsername(value: unknown): string;
 export function buildUsernameLookupKey(username: unknown): string;
 export function isAlphanumericUsername(username: unknown): boolean;
 export function isReservedExplicitUsername(username: unknown): boolean;
-export function isSafeFirestoreDocIdSegment(value: unknown): boolean;
-export function getUsernameIndexDocIds(username: unknown): string[];
 export function isUsernameEditRequest(
   value: unknown,
 ): value is UsernameEditRequest;

@@ -27,8 +27,10 @@ import {
   type ProfileCustomizationRepository,
 } from "./profileCustomizationRepository.ts";
 import { authorizeProfileCustomization } from "./profileCustomizationPolicy.ts";
-import { type ProfileRepository } from "./profileRepository.ts";
-import { createConfiguredProfileRepository } from "./profileReadRepository.ts";
+import {
+  createProfileRepository,
+  type ProfileRepository,
+} from "./profileRepository.ts";
 import {
   createUsernameRepository,
   type UsernameRepository,
@@ -205,8 +207,7 @@ export async function handleProfileRoute(
       );
     }
 
-    const repository =
-      dependencies.repository || createConfiguredProfileRepository(env);
+    const repository = dependencies.repository || createProfileRepository(env);
 
     if (pathname === "/profiles/lookup") {
       if (!isProfileLookupRequest(body)) {
@@ -218,8 +219,8 @@ export async function handleProfileRoute(
       }
       const profile =
         body.kind === "login"
-          ? await repository.getProfileByLoginId(id, identity.idToken)
-          : await repository.getProfileById(id, identity.idToken);
+          ? await repository.getProfileByLoginId(id)
+          : await repository.getProfileById(id);
       const response: ProfileLookupResponse = { ok: true, profile };
       return authJsonResponse(response, 200, corsHeaders);
     }
@@ -230,7 +231,7 @@ export async function handleProfileRoute(
       }
       const response: LeaderboardReadResponse = {
         ok: true,
-        profiles: await repository.readLeaderboard(body.type, identity.idToken),
+        profiles: await repository.readLeaderboard(body.type),
       };
       return authJsonResponse(response, 200, corsHeaders);
     }

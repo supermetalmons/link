@@ -108,28 +108,9 @@ function toRecord(value: unknown): Record<string, unknown> | null {
 }
 
 export function projectionTimestampMillis(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.floor(value);
-  }
-  const record = toRecord(value);
-  if (!record) return 0;
-  if (typeof record.toMillis === "function") {
-    try {
-      const millis = (record.toMillis as () => number)();
-      if (Number.isFinite(millis)) return Math.floor(millis);
-    } catch {}
-  }
-  if (typeof record.__firestoreTimestamp === "string") {
-    const millis = Date.parse(record.__firestoreTimestamp);
-    if (Number.isFinite(millis)) return Math.floor(millis);
-  }
-  if (Number.isFinite(record._seconds)) {
-    const nanos = Number.isFinite(record._nanoseconds)
-      ? Number(record._nanoseconds)
-      : 0;
-    return Math.floor(Number(record._seconds) * 1000 + nanos / 1e6);
-  }
-  return 0;
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.floor(value)
+    : 0;
 }
 
 function normalizeProjectionJson(value: unknown, depth = 0): unknown {
@@ -144,8 +125,6 @@ function normalizeProjectionJson(value: unknown, depth = 0): unknown {
   if (Array.isArray(value)) {
     return value.map((entry) => normalizeProjectionJson(entry, depth + 1));
   }
-  const timestamp = projectionTimestampMillis(value);
-  if (timestamp > 0) return timestamp;
   const record = toRecord(value);
   if (!record) throw new TypeError("invalid-projection-value");
   return Object.fromEntries(
@@ -169,6 +148,23 @@ export function encodeProfileGameProjection(
   const listSortAtMs = projectionTimestampMillis(payload.listSortAt);
   if (!Number.isSafeInteger(listSortAtMs) || listSortAtMs <= 0) {
     throw new TypeError("invalid-profile-game-projection-list-sort");
+  }
+  payload.listSortAt = listSortAtMs;
+  for (const field of [
+    "automatchCanceledAt",
+    "createdAt",
+    "endedAt",
+    "lastEventAt",
+    "startAt",
+    "updatedAt",
+  ]) {
+    const value = payload[field];
+    if (value === null || value === undefined) continue;
+    const millis = projectionTimestampMillis(value);
+    if (!Number.isSafeInteger(millis) || millis <= 0) {
+      throw new TypeError("invalid-profile-game-projection-timestamp");
+    }
+    payload[field] = millis;
   }
   const item = mapProfileGameProjection(payload, projectionId);
   if (!item || item.id !== projectionId) {

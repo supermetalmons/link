@@ -167,27 +167,22 @@ function parseOptionalJsonNumber(value, type) {
 }
 
 function createProfileD1Reader({ query = createD1Query() } = {}) {
-  let imported;
-  const requireImported = async () => {
-    imported ||= query(
-      `SELECT state, imported_at_ms
+  let ready;
+  const requireReady = async () => {
+    ready ||= query(
+      `SELECT state
        FROM profile_canonical_control
        WHERE singleton = 1`,
     ).then((rows) => {
-      if (
-        rows.length !== 1 ||
-        !["active", "frozen"].includes(rows[0].state) ||
-        !Number.isSafeInteger(rows[0].imported_at_ms) ||
-        rows[0].imported_at_ms < 0
-      ) {
-        throw new Error("Canonical profile D1 is not imported.");
+      if (rows.length !== 1 || !["active", "frozen"].includes(rows[0].state)) {
+        throw new Error("Canonical profile D1 is unavailable.");
       }
     });
-    return imported;
+    return ready;
   };
   return {
     async listAddresses() {
-      await requireImported();
+      await requireReady();
       const addresses = [];
       let cursorMethod = "";
       let cursorValue = "";
@@ -233,7 +228,7 @@ function createProfileD1Reader({ query = createD1Query() } = {}) {
       throw new Error("Canonical address page limit exceeded.");
     },
     async readLeaderboard(metric, limit) {
-      await requireImported();
+      await requireReady();
       const order = metric === "gp" ? "nonce_sort" : "mana_points_sort";
       const presence =
         metric === "gp" ? "nonce_sort_present" : "mana_points_sort_present";

@@ -1,7 +1,5 @@
-import {
-  isSafeFirebaseKey,
-  isSafeFirestoreDocumentId,
-} from "./firebaseKeys.ts";
+import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeOperationId } from "./operationIds.ts";
 
 export const PROFILE_GAME_PROJECTION_QUEUE_NAME =
   "mons-link-profile-game-projection";
@@ -98,7 +96,7 @@ export function parseProfileGameProjectionTask(
   }
   return exactKeys(task, ["kind", "operationId"]) &&
     task.kind === "rating-profile-game-projection" &&
-    isSafeFirestoreDocumentId(task.operationId)
+    isSafeOperationId(task.operationId)
     ? { kind: task.kind, operationId: task.operationId }
     : null;
 }

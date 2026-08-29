@@ -6,17 +6,10 @@ const path = require("node:path");
 const test = require("node:test");
 
 const { batchReadWithRetry } = require("../functions/batchRead");
-const firebaseAdmin = require("../functions/firebaseAdmin");
 const {
   resolveMatchResult,
   resolveMatchWinner,
 } = require("../functions/matchOutcome");
-const { readProfileByLoginUid } = require("../functions/profileLookup");
-const {
-  emptyProfileSummary,
-  getProfileByLoginId,
-  profileSummaryFromDocument,
-} = require("../functions/profileSummaryLookup");
 const {
   getDisplayNameFromAddress,
   getTelegramEmojiTag,
@@ -25,53 +18,14 @@ const {
 const { customTelegramEmojis } = require("../functions/telegramEmojiData");
 const utils = require("../functions/utils");
 
-const withFirestore = async (firestore, callback) => {
-  const originalFirestore = firebaseAdmin.firestore;
-  firebaseAdmin.firestore = firestore;
-  try {
-    return await callback();
-  } finally {
-    firebaseAdmin.firestore = originalFirestore;
-  }
-};
-
-const createFirestoreQuery = (snapshot, calls) => {
-  const query = {
-    get: async () => {
-      calls.push(["get"]);
-      return snapshot;
-    },
-    limit: (count) => {
-      calls.push(["limit", count]);
-      return query;
-    },
-    select: (...fields) => {
-      calls.push(["select", ...fields]);
-      return query;
-    },
-    where: (...args) => {
-      calls.push(["where", ...args]);
-      return query;
-    },
-  };
-  return () => ({
-    collection: (name) => {
-      calls.push(["collection", name]);
-      return query;
-    },
-  });
-};
-
 test("utils preserves its compatibility export surface", () => {
   assert.deepEqual(Object.keys(utils), [
     "batchReadWithRetry",
-    "getProfileByLoginId",
     "getDisplayNameFromAddress",
     "getTelegramEmojiTag",
     "customTelegramEmojis",
   ]);
   assert.strictEqual(utils.batchReadWithRetry, batchReadWithRetry);
-  assert.strictEqual(utils.getProfileByLoginId, getProfileByLoginId);
   assert.strictEqual(
     utils.getDisplayNameFromAddress,
     getDisplayNameFromAddress,
@@ -206,114 +160,6 @@ test("batch reads retry only failed initial reads", async () => {
   assert.deepEqual(calls, [2, 1]);
   assert.equal(errors.length, 1);
   assert.equal(errors[0][0], "Error in initial batch read:");
-});
-
-test("profile summary mapping preserves defaults and custom precedence", () => {
-  const document = {
-    id: "profile-id",
-    data: () => ({
-      custom: { aura: "rainbow", emoji: 0 },
-      emoji: 10,
-      nonce: undefined,
-      rating: undefined,
-    }),
-  };
-
-  assert.deepEqual(profileSummaryFromDocument(document), {
-    nonce: -1,
-    rating: 1500,
-    eth: "",
-    sol: "",
-    username: "",
-    totalManaPoints: 0,
-    profileId: "profile-id",
-    emoji: 0,
-    aura: "rainbow",
-  });
-  assert.deepEqual(emptyProfileSummary(), {
-    eth: "",
-    sol: "",
-    profileId: "",
-    nonce: 0,
-    rating: 0,
-    username: "",
-    totalManaPoints: 0,
-    emoji: "",
-    aura: "",
-  });
-  assert.notStrictEqual(emptyProfileSummary(), emptyProfileSummary());
-});
-
-test("legacy summary lookup retains its single-result fallback behavior", async () => {
-  const calls = [];
-  const document = {
-    id: "profile-id",
-    data: () => ({ username: "player" }),
-  };
-  const firestore = createFirestoreQuery(
-    { docs: [document], empty: false, size: 1 },
-    calls,
-  );
-
-  const profile = await withFirestore(firestore, () =>
-    getProfileByLoginId("login-id"),
-  );
-
-  assert.equal(profile.profileId, "profile-id");
-  assert.equal(profile.username, "player");
-  assert.deepEqual(calls, [
-    ["collection", "users"],
-    ["where", "logins", "array-contains", "login-id"],
-    ["limit", 1],
-    ["get"],
-  ]);
-});
-
-test("strict and legacy profile lookups retain distinct failure policies", async () => {
-  const originalConsoleError = console.error;
-  console.error = () => {};
-  try {
-    const fallback = await withFirestore(
-      () => {
-        throw new Error("unavailable");
-      },
-      () => getProfileByLoginId("login-id"),
-    );
-    assert.deepEqual(fallback, emptyProfileSummary());
-
-    await assert.rejects(
-      withFirestore(
-        () => {
-          throw new Error("unavailable");
-        },
-        () => readProfileByLoginUid("login-id"),
-      ),
-      /unavailable/,
-    );
-  } finally {
-    console.error = originalConsoleError;
-  }
-
-  const calls = [];
-  const firestore = createFirestoreQuery(
-    { docs: [{ id: "a" }, { id: "b" }], empty: false, size: 2 },
-    calls,
-  );
-  await assert.rejects(
-    withFirestore(firestore, () =>
-      readProfileByLoginUid("login-id", ["username", "rating"]),
-    ),
-    (error) =>
-      error.code === "failed-precondition" &&
-      error.message.includes("login-profile-conflict"),
-  );
-  assert.deepEqual(calls, [
-    ["collection", "users"],
-    ["where", "logins", "array-contains", "login-id"],
-    ["limit", 2],
-    ["select", "username", "rating"],
-    ["get"],
-  ]);
 });
 
 test("match outcome exposes the folded result mapping asynchronously", async () => {

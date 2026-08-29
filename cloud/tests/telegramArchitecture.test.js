@@ -255,29 +255,15 @@ test("admin Telegram scripts use signed commands and durable aliases", () => {
   const d1Source = fs.readFileSync(path.join(adminRoot, "_d1.js"), "utf8");
   assert.match(d1Source, /CLOUDFLARE_API_TOKEN/);
   assert.match(d1Source, /D1 Read/);
-  assert.match(d1Source, /imported_at_ms/);
+  assert.match(d1Source, /\["active", "frozen"\]/);
   assert.equal(d1Source.includes('"verifying"'), false);
   assert.equal(d1Source.includes("activated_at_ms"), false);
-  const adminSource = fs.readFileSync(
-    path.join(adminRoot, "_admin.js"),
-    "utf8",
-  );
-  assert.match(adminSource, /getDatabase/);
-  assert.match(adminSource, /Application Default Credentials/);
 });
 
-test("admin credential failures include actionable ADC setup help", () => {
-  const {
-    ADC_FAILURE_MESSAGE,
-    addApplicationDefaultCredentialHelp,
-  } = require("../admin/_admin");
-  const credentialError = new Error("Could not load the default credentials");
-  const normalized = addApplicationDefaultCredentialHelp(credentialError);
-  assert.equal(normalized.message, ADC_FAILURE_MESSAGE);
-  assert.equal(normalized.cause, credentialError);
-
-  const unrelated = new Error("permission denied");
-  assert.equal(addApplicationDefaultCredentialHelp(unrelated), unrelated);
+test("admin tools no longer require Firebase Admin credentials", () => {
+  assert.equal(fs.existsSync(path.join(adminRoot, "_admin.js")), false);
+  const manifest = require("../admin/package.json");
+  assert.equal(manifest.dependencies?.["firebase-admin"], undefined);
 });
 
 test("event Telegram projection is no longer exported by Firebase", () => {

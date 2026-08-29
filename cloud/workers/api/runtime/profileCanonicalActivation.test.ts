@@ -1,11 +1,12 @@
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { readCanonicalControl } from "../src/profileCanonicalD1.ts";
 import {
   assertProfileMutationAllowed,
   profileBackgroundMutationsEnabled,
 } from "../src/profileCanonicalActivation.ts";
+import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const testEnv = env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] };
 
@@ -21,53 +22,17 @@ function controlEnvironment(value: unknown): Env {
 
 describe("canonical profile runtime control", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyRetiredProfileMigrations(
       testEnv.PROFILE_DB,
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
+      "0".repeat(64),
     );
   });
 
   it("allows writes only while canonical D1 is active", async () => {
-    expect(await readCanonicalControl(testEnv.PROFILE_DB)).toMatchObject({
-      state: "firestore",
-      importedAtMs: null,
+    expect(await readCanonicalControl(testEnv.PROFILE_DB)).toEqual({
+      state: "active",
     });
-    await expect(assertProfileMutationAllowed(testEnv)).rejects.toThrow(
-      "profile-writes-disabled",
-    );
-    expect(await profileBackgroundMutationsEnabled(testEnv)).toBe(false);
-
-    await testEnv.PROFILE_DB.prepare(
-      `UPDATE profile_canonical_control
-       SET state = 'importing'
-       WHERE singleton = 1 AND state = 'firestore'`,
-    ).run();
-    await expect(assertProfileMutationAllowed(testEnv)).rejects.toThrow(
-      "profile-writes-disabled",
-    );
-    expect(await profileBackgroundMutationsEnabled(testEnv)).toBe(false);
-
-    await testEnv.PROFILE_DB.prepare(
-      `UPDATE profile_canonical_control
-       SET import_digest = ?, import_plan_version = 1
-       WHERE singleton = 1 AND state = 'importing'`,
-    )
-      .bind("0".repeat(64))
-      .run();
-    await testEnv.PROFILE_DB.prepare(
-      `UPDATE profile_canonical_control
-       SET state = 'frozen', imported_at_ms = 1
-       WHERE singleton = 1 AND state = 'importing'`,
-    ).run();
-    await expect(assertProfileMutationAllowed(testEnv)).rejects.toThrow(
-      "profile-writes-disabled",
-    );
-
-    await testEnv.PROFILE_DB.prepare(
-      `UPDATE profile_canonical_control
-       SET state = 'active'
-       WHERE singleton = 1 AND state = 'frozen'`,
-    ).run();
     await expect(
       assertProfileMutationAllowed(testEnv),
     ).resolves.toBeUndefined();
@@ -91,26 +56,41 @@ describe("canonical profile runtime control", () => {
     expect(await profileBackgroundMutationsEnabled(testEnv)).toBe(true);
   });
 
+  it("retains canonical integrity after retiring legacy profile tables", async () => {
+    const legacyTables = await testEnv.PROFILE_DB.prepare(
+      `SELECT name FROM sqlite_schema
+       WHERE type = 'table'
+         AND name IN (
+           'profiles', 'profile_logins', 'profile_logins_v2',
+           'profile_projection_failures'
+         )`,
+    ).all<{ name: string }>();
+    expect(legacyTables.results).toEqual([]);
+    const canonicalTables = await testEnv.PROFILE_DB.prepare(
+      `SELECT name FROM sqlite_schema
+       WHERE type = 'table'
+         AND name IN (
+           'profile_records', 'profile_login_owners',
+           'profile_canonical_control'
+         )
+       ORDER BY name`,
+    ).all<{ name: string }>();
+    expect(canonicalTables.results.map(({ name }) => name)).toEqual([
+      "profile_canonical_control",
+      "profile_login_owners",
+      "profile_records",
+    ]);
+    const foreignKeyFailures = await testEnv.PROFILE_DB.prepare(
+      "PRAGMA foreign_key_check",
+    ).all();
+    expect(foreignKeyFailures.results).toEqual([]);
+  });
+
   it("fails invalid and unreadable control state closed", async () => {
     for (const value of [
-      {
-        state: "firestore",
-        import_digest: null,
-        import_plan_version: null,
-        imported_at_ms: null,
-      },
-      {
-        state: "importing",
-        import_digest: null,
-        import_plan_version: null,
-        imported_at_ms: null,
-      },
-      {
-        state: "invalid",
-        import_digest: null,
-        import_plan_version: null,
-        imported_at_ms: null,
-      },
+      { state: "legacy" },
+      { state: "pending" },
+      { state: "invalid" },
       null,
     ]) {
       const runtimeEnv = controlEnvironment(value);
@@ -133,9 +113,6 @@ describe("canonical profile runtime control", () => {
     );
     const active = controlEnvironment({
       state: "active",
-      import_digest: "0".repeat(64),
-      import_plan_version: 1,
-      imported_at_ms: 1,
     });
     expect(await profileBackgroundMutationsEnabled(active)).toBe(true);
   });

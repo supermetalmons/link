@@ -20,8 +20,11 @@ const {
 const {
   EVENT_LOCK_ROOT,
   EVENT_LOCK_TTL_MS,
-  createEventLockManager,
-} = require("../functions/eventLocks");
+  createEventLockManagerCore,
+} = require("../functions/events/lockManagerCore");
+const {
+  runRtdbDecisionTransaction,
+} = require("../functions/rtdbDecisionTransaction");
 
 const EVENT_ID = "EV2026";
 const NOW_MS = Date.UTC(2026, 7, 7, 12, 0, 0);
@@ -417,14 +420,15 @@ const createRuntimeLockManager = (
   lockRoot = EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
 ) => {
   let lockIndex = 0;
-  return createEventLockManager({
-    database,
+  return createEventLockManagerCore({
     now,
     createLockId: () => `runtime-lock-${++lockIndex}`,
     setInterval: () => ({ unref() {} }),
     clearInterval() {},
     logger: { error() {} },
     lockRoot,
+    transactPath: (path, updater) =>
+      runRtdbDecisionTransaction(database.ref(path), updater),
   });
 };
 

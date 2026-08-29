@@ -16,10 +16,10 @@ import {
   type FirebaseRtdbClient,
 } from "./firebaseRtdb.ts";
 import {
-  createAuthRepository,
-  type AuthRepository,
+  createAuthProfileRepository,
+  type AuthProfileRepository,
   type ProfileClaimSource,
-} from "./firestore.ts";
+} from "./authProfileRepository.ts";
 import { getProfileLinkProfileGameProjectionOutboxPath } from "./profileGameProjectionOutbox.ts";
 
 const MAX_RECONCILIATION_ATTEMPTS = 3;
@@ -27,7 +27,7 @@ const MAX_RECONCILIATION_ATTEMPTS = 3;
 export type ProfileClaimDependencies = {
   authClient?: FirebaseAuthAdminClient;
   logCleanupFailure?: (kind: string) => void;
-  repository?: Pick<AuthRepository, "getProfileClaimSource">;
+  repository?: Pick<AuthProfileRepository, "getProfileClaimSource">;
   rtdbClient?: Pick<FirebaseRtdbClient, "getPath" | "patchRoot">;
   syncCurrentCallerProfile?: AuthIdentityService["syncCurrentCallerProfile"];
 };
@@ -47,9 +47,10 @@ export async function syncProfileClaim(
   env: Env,
   dependencies: ProfileClaimDependencies = {},
 ): Promise<LinkedAuthMethodsResponse> {
-  const repository = dependencies.repository || createAuthRepository(env);
+  const repository =
+    dependencies.repository || createAuthProfileRepository(env);
   const readSource = (): Promise<ProfileClaimSource> =>
-    repository.getProfileClaimSource(identity.uid, identity.idToken);
+    repository.getProfileClaimSource(identity.uid);
 
   let source = await readSource();
   const authClient =

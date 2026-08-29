@@ -107,6 +107,15 @@ test("fails closed for malformed credentials and rejected exchanges", async () =
   );
   const { privateKeyPem: pem } = await generateKeyPair();
   await assert.rejects(
+    createServiceAccountAssertion({
+      email: "identity@example.iam.gserviceaccount.com",
+      privateKeyPem: pem,
+      nowMs: Date.now(),
+      scopes: [],
+    }),
+    GoogleAuthFailure,
+  );
+  await assert.rejects(
     createGoogleAccessToken(TELEGRAM_TEST_ENV as Env, {
       credentials: {
         email: TELEGRAM_TEST_ENV.FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL,

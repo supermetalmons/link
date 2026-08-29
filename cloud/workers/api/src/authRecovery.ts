@@ -1,4 +1,3 @@
-import { isSafeFirestoreDocIdSegment } from "@mons/shared/usernames";
 import {
   getEventPrizeDefinition,
   isEventPrizeId,
@@ -94,9 +93,7 @@ function exactDocumentId(value: unknown): string {
   if (typeof value !== "string" || value.trim() !== value) {
     return "";
   }
-  return isSafeFirestoreDocIdSegment(value) && isSafeFirebaseKey(value)
-    ? value
-    : "";
+  return isSafeFirebaseKey(value) ? value : "";
 }
 
 export function parseAuthRecoveryTask(value: unknown): AuthRecoveryTask | null {
@@ -246,12 +243,9 @@ export async function ensureFirebaseProfileClaim(
 }
 
 function timestampMillis(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.floor(value);
-  }
-  const timestamp = cleanString(record(value).__firestoreTimestamp);
-  const parsed = timestamp ? Date.parse(timestamp) : NaN;
-  return Number.isFinite(parsed) ? parsed : 0;
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.floor(value)
+    : 0;
 }
 
 function mergeFreshness(fields: Record<string, unknown>): number {

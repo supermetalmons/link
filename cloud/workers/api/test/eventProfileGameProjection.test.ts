@@ -44,7 +44,6 @@ function runtime(input: Parameters<typeof createRepository>[0]) {
     core: createEventProfileGameProjectionCore({
       now: () => 999,
       repository: state.repository,
-      timestampFromMillis: (millis) => ({ timestamp: Math.max(1, millis) }),
       wait: async () => undefined,
     }),
   };
@@ -115,11 +114,11 @@ test("event projection preserves the payload and stale-owner cleanup", async () 
     eventId: "event-1",
     status: "active",
     sortBucket: 40,
-    listSortAt: { timestamp: 110 },
+    listSortAt: 110,
     ownerProfileId: "target",
-    startAt: { timestamp: 100 },
-    updatedAt: { timestamp: 120 },
-    endedAt: { timestamp: 130 },
+    startAt: 100,
+    updatedAt: 120,
+    endedAt: 130,
     participantCount: 1,
     participantPreview: [
       {
@@ -214,7 +213,6 @@ test("event projection resolves owner paths with bounded concurrency", async () 
   };
   const core = createEventProfileGameProjectionCore({
     repository,
-    timestampFromMillis: (millis) => millis,
   });
   const paths = await core.resolveProfilePaths([...ids, ...ids]);
   assert.equal(paths.size, ids.length);

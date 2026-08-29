@@ -73,19 +73,6 @@ function toD1ProjectionWrite(
   };
 }
 
-function timestampFromMillis(millis: number): {
-  __firestoreTimestamp: string;
-} {
-  if (!Number.isFinite(millis)) {
-    throw new TypeError("invalid projection timestamp");
-  }
-  return {
-    __firestoreTimestamp: new Date(
-      Math.max(1, Math.floor(millis)),
-    ).toISOString(),
-  };
-}
-
 export function createProfileGameProjectionRuntime(
   env: Env,
   dependencies: ProfileGameProjectionDependencies = {},
@@ -146,7 +133,6 @@ export function createProfileGameProjectionRuntime(
   return createProfileGamesProjectionCore({
     logger,
     repository,
-    timestampFromMillis,
     wait: dependencies.wait,
   });
 }
@@ -191,7 +177,6 @@ export function createEventProfileGameProjectionRuntime(
   return createEventProfileGameProjectionCore({
     now: dependencies.now,
     repository,
-    timestampFromMillis,
     wait: dependencies.wait,
   });
 }

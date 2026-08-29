@@ -11,7 +11,6 @@
   "dependencies": {
     "@mons/shared": "file:shared",
     "bs58": "^6.0.0",
-    "firebase-admin": "^14.3.0",
     "mons-rules": "0.4.7"
   },
   "optionalDependencies": {

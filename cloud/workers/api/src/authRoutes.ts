@@ -7,7 +7,10 @@ import {
   normalizeServerXConsentSource,
   type XRedirectStartResponse,
 } from "@mons/shared/x-redirect";
-import { createAuthRepository, type AuthRepository } from "./firestore.ts";
+import {
+  createAuthProfileRepository,
+  type AuthProfileRepository,
+} from "./authProfileRepository.ts";
 import {
   AuthStateConflict,
   AuthStateFailure,
@@ -60,7 +63,7 @@ export type AuthRouteDependencies = {
   now?: () => number;
   profileClaim?: ProfileClaimDependencies;
   randomBytes?: (length: number) => Uint8Array;
-  repository?: AuthRepository;
+  repository?: AuthProfileRepository;
   stateRepository?: AuthStateRepository;
   mutation?: AuthMutationDependencies;
   verifyIdentity?: (
@@ -272,7 +275,8 @@ export async function handleAuthRoute(
         );
       }
     }
-    const repository = dependencies.repository || createAuthRepository(env);
+    const repository =
+      dependencies.repository || createAuthProfileRepository(env);
     const stateRepository =
       dependencies.stateRepository ||
       createAuthStateRepository(env.AUTH_STATE_DB);
@@ -300,7 +304,7 @@ export async function handleAuthRoute(
     }
     if (pathname === "/auth/methods") {
       return authJsonResponse(
-        await repository.getLinkedAuthMethods(identity.uid, identity.idToken),
+        await repository.getLinkedAuthMethods(identity.uid),
         200,
         corsHeaders,
       );

@@ -1,7 +1,6 @@
 import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-export const FIRESTORE_SCOPE = "https://www.googleapis.com/auth/datastore";
 const GOOGLE_TIMEOUT_MS = 5_000;
 const MAX_UPSTREAM_BODY_BYTES = 64 * 1024;
 
@@ -53,12 +52,12 @@ export async function createServiceAccountAssertion({
   email,
   privateKeyPem,
   nowMs,
-  scopes = [FIRESTORE_SCOPE],
+  scopes,
 }: {
   email: string;
   privateKeyPem: string;
   nowMs: number;
-  scopes?: readonly string[];
+  scopes: readonly string[];
 }): Promise<string> {
   const normalizedEmail = email.trim();
   const normalizedScopes = scopes.map((scope) => scope.trim()).filter(Boolean);
@@ -114,17 +113,17 @@ export async function createGoogleAccessToken(
     },
     fetcher = fetch,
     now = Date.now,
-    scopes = [FIRESTORE_SCOPE],
+    scopes,
     signal,
     timeoutMs = GOOGLE_TIMEOUT_MS,
   }: {
     credentials?: { email: string; privateKeyPem: string };
     fetcher?: typeof fetch;
     now?: () => number;
-    scopes?: readonly string[];
+    scopes: readonly string[];
     signal?: AbortSignal;
     timeoutMs?: number;
-  } = {},
+  },
 ): Promise<string> {
   const assertion = await createServiceAccountAssertion({
     email: credentials.email,

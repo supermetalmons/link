@@ -30,32 +30,6 @@ const isAlphanumericUsername = (username) =>
 const isReservedExplicitUsername = (username) =>
   buildUsernameLookupKey(username) === "anon";
 
-const isSafeFirestoreDocIdSegment = (value) => {
-  const cleaned = cleanUsername(value);
-  if (!cleaned || cleaned === "." || cleaned === "..") {
-    return false;
-  }
-  return !cleaned.includes("/");
-};
-
-const getUsernameIndexDocIds = (username) => {
-  const cleaned = cleanUsername(username);
-  if (!cleaned) {
-    return [];
-  }
-  const canonical = buildUsernameLookupKey(cleaned);
-  if (!isSafeFirestoreDocIdSegment(canonical)) {
-    return [];
-  }
-  if (canonical === cleaned) {
-    return [canonical];
-  }
-  if (!isSafeFirestoreDocIdSegment(cleaned)) {
-    return [canonical];
-  }
-  return [canonical, cleaned];
-};
-
 const isUsernameEditRequest = (value) =>
   isRecord(value) &&
   hasExactKeys(value, ["username"]) &&
@@ -85,8 +59,6 @@ module.exports = {
   buildUsernameLookupKey,
   isAlphanumericUsername,
   isReservedExplicitUsername,
-  isSafeFirestoreDocIdSegment,
-  getUsernameIndexDocIds,
   isUsernameEditRequest,
   isUsernameEditResponse,
 };

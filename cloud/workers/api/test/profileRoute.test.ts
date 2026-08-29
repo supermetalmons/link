@@ -140,7 +140,7 @@ test("applies authenticated CORS and rejects methods before authentication", asy
   assert.equal(verifications, 0);
 });
 
-test("accepts Firebase UID character limits and Firestore ID byte limits", () => {
+test("accepts Firebase UID character limits and profile ID byte limits", () => {
   assert.equal(validLookupId("login", "é".repeat(128)), true);
   assert.equal(validLookupId("login", "é".repeat(129)), false);
   assert.equal(validLookupId("profile", "é".repeat(750)), true);
@@ -346,19 +346,19 @@ test("preserves username validation and repository outcomes", async () => {
   }
 });
 
-test("returns exact lookup and leaderboard responses with the verified token", async () => {
-  const calls: Array<[string, string, string]> = [];
+test("returns exact lookup and leaderboard responses", async () => {
+  const calls: Array<[string, string]> = [];
   const testRepository = repository({
-    getProfileById: async (id, token) => {
-      calls.push(["profile", id, token]);
+    getProfileById: async (id) => {
+      calls.push(["profile", id]);
       return null;
     },
-    getProfileByLoginId: async (id, token) => {
-      calls.push(["login", id, token]);
+    getProfileByLoginId: async (id) => {
+      calls.push(["login", id]);
       return profile;
     },
-    readLeaderboard: async (type, token) => {
-      calls.push(["leaderboard", type, token]);
+    readLeaderboard: async (type) => {
+      calls.push(["leaderboard", type]);
       return [profile];
     },
   });
@@ -396,9 +396,9 @@ test("returns exact lookup and leaderboard responses with the verified token", a
     profiles: [profile],
   });
   assert.deepEqual(calls, [
-    ["login", "login-1", "firebase-id-token"],
-    ["profile", "profile-2", "firebase-id-token"],
-    ["leaderboard", "metal", "firebase-id-token"],
+    ["login", "login-1"],
+    ["profile", "profile-2"],
+    ["leaderboard", "metal"],
   ]);
 });
 
@@ -543,7 +543,7 @@ test("sanitizes repository failures and router dispatches both paths", async () 
       logFailure: (kind) => logged.push(kind),
       repository: repository({
         readLeaderboard: async () => {
-          throw new Error("private-firestore-detail");
+          throw new Error("private-storage-detail");
         },
       }),
       verifyIdentity: async () => identity,
@@ -565,7 +565,7 @@ test("sanitizes repository failures and router dispatches both paths", async () 
       logFailure: (kind) => logged.push(kind),
       usernameRepository: {
         editUsername: async () => {
-          throw new Error("private-firestore-detail");
+          throw new Error("private-storage-detail");
         },
       },
       verifyIdentity: async () => identity,
@@ -589,7 +589,7 @@ test("sanitizes repository failures and router dispatches both paths", async () 
     {
       customizationRepository: {
         updateCustomization: async () => {
-          throw new Error("private-firestore-detail");
+          throw new Error("private-storage-detail");
         },
       },
       logFailure: (kind) => logged.push(kind),

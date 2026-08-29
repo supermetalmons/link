@@ -2,9 +2,9 @@ import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 
-type ControlState = "firestore" | "importing" | "frozen" | "active";
-type Operation = "status" | "begin-import" | "freeze" | "resume";
-type Control = { importedAtMs: number | null; state: ControlState };
+type ControlState = "frozen" | "active";
+type Operation = "status" | "freeze" | "resume";
+type Control = { state: ControlState };
 type Dependencies = {
   log(message: string): void;
   readControl(): Control;
@@ -22,12 +22,7 @@ function parseArgs(argv: string[]): Operation {
     );
   }
   const value = argv[0]?.replace(/^--/, "") as Operation;
-  if (
-    value !== "status" &&
-    value !== "begin-import" &&
-    value !== "freeze" &&
-    value !== "resume"
-  ) {
+  if (value !== "status" && value !== "freeze" && value !== "resume") {
     throw new TypeError(
       "choose exactly one profile canonical control operation",
     );
@@ -39,8 +34,6 @@ function transition(operation: Exclude<Operation, "status">): {
   expected: readonly ControlState[];
   next: ControlState;
 } {
-  if (operation === "begin-import")
-    return { expected: ["firestore"], next: "importing" };
   if (operation === "freeze") return { expected: ["active"], next: "frozen" };
   return { expected: ["frozen"], next: "active" };
 }
@@ -67,7 +60,6 @@ function manageProfileCanonical(
     JSON.stringify({
       operation,
       state: control.state,
-      imported: control.importedAtMs !== null,
     }),
   );
 }
@@ -113,23 +105,13 @@ function runWrangler(command: string): Array<Record<string, unknown>> {
 
 function readRemoteControl(): Control {
   const row = runWrangler(
-    "SELECT state, imported_at_ms FROM profile_canonical_control WHERE singleton = 1",
+    "SELECT state FROM profile_canonical_control WHERE singleton = 1",
   )[0];
   const state = row?.state;
-  const importedAtMs = row?.imported_at_ms;
-  if (
-    (state !== "firestore" &&
-      state !== "importing" &&
-      state !== "active" &&
-      state !== "frozen") ||
-    ((state === "firestore" || state === "importing") &&
-      importedAtMs !== null) ||
-    ((state === "active" || state === "frozen") &&
-      (!Number.isSafeInteger(importedAtMs) || (importedAtMs as number) < 0))
-  ) {
+  if (state !== "active" && state !== "frozen") {
     throw new Error("invalid profile canonical control");
   }
-  return { state, importedAtMs: importedAtMs as number | null };
+  return { state };
 }
 
 function updateRemoteState(expected: ControlState, next: ControlState): void {

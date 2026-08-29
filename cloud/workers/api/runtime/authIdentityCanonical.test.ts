@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { USERNAME_MAX_LENGTH } from "@mons/shared/usernames";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createAuthIdentityService } from "../src/authIdentity.ts";
@@ -16,11 +16,12 @@ import {
   readCanonicalProfileAggregate,
   readCanonicalProfileByLogin,
 } from "../src/profileCanonicalD1.ts";
-import { createConfiguredProfileRepository } from "../src/profileReadRepository.ts";
+import { createProfileRepository } from "../src/profileRepository.ts";
 import { createUsernameRepository } from "../src/usernameRepository.ts";
-import { createAuthRepository } from "../src/firestore.ts";
+import { createAuthProfileRepository } from "../src/authProfileRepository.ts";
 import type { FirebaseAuthAdminClient } from "../src/firebaseAuthAdmin.ts";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const testBindings = env as Env & {
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
@@ -289,33 +290,11 @@ async function setCanonicalUsername(
 
 describe("canonical auth and profile runtime", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyRetiredProfileMigrations(
       testBindings.PROFILE_DB,
       testBindings.TEST_PROFILE_D1_MIGRATIONS,
+      "b".repeat(64),
     );
-    const importDigest = "b".repeat(64);
-    await testBindings.PROFILE_DB.batch([
-      testBindings.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET state = 'importing'
-         WHERE singleton = 1 AND state = 'firestore'`,
-      ),
-      testBindings.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET import_digest = ?, import_plan_version = 1
-         WHERE singleton = 1 AND state = 'importing'`,
-      ).bind(importDigest),
-      testBindings.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET state = 'frozen', imported_at_ms = 1
-         WHERE singleton = 1 AND state = 'importing'`,
-      ),
-      testBindings.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET state = 'active'
-         WHERE singleton = 1 AND state = 'frozen'`,
-      ),
-    ]);
   });
 
   beforeEach(async () => {
@@ -1346,9 +1325,9 @@ describe("canonical auth and profile runtime", () => {
       },
     );
     await expect(
-      createAuthRepository(d1Env, {
+      createAuthProfileRepository(d1Env, {
         d1: racedDb,
-      }).getLinkedAuthMethods("auth-move-source-login", "unused"),
+      }).getLinkedAuthMethods("auth-move-source-login"),
     ).resolves.toMatchObject({
       profileId: target.profileId,
       linkedMethods: { eth: true, sol: true },
@@ -1412,11 +1391,8 @@ describe("canonical auth and profile runtime", () => {
       ),
     ).toBe("updated");
 
-    const repository = createConfiguredProfileRepository(d1Env);
-    const profile = await repository.getProfileByLoginId(
-      "profile-login",
-      "unused",
-    );
+    const repository = createProfileRepository(d1Env);
+    const profile = await repository.getProfileByLoginId("profile-login");
     expect(profile).toMatchObject({
       id: linked.profileId,
       username: "CanonicalRenamed",
@@ -1424,10 +1400,7 @@ describe("canonical auth and profile runtime", () => {
       mining: { materials: { ice: 5 } },
     });
     await expect(
-      createAuthRepository(d1Env).getLinkedAuthMethods(
-        "profile-login",
-        "unused",
-      ),
+      createAuthProfileRepository(d1Env).getLinkedAuthMethods("profile-login"),
     ).resolves.toMatchObject({
       profileId: linked.profileId,
       linkedMethods: { sol: true },

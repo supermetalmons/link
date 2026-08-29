@@ -15,17 +15,8 @@ const {
   DEFAULT_LEADERBOARD_LIMIT,
   MAX_LEADERBOARD_LIMIT,
   createLeaderboardHeading,
-  parseLeaderboardArgs,
   parseLeaderboardLimit,
 } = require("../cloud/admin/leaderboardCli.js");
-const {
-  AUTH_COOLDOWN_COLLECTIONS,
-  PAGE_SIZE,
-  buildCleanupQuery,
-  cleanupCollection,
-  deleteDocuments,
-  parseArgs: parseCleanupArgs,
-} = require("../cloud/admin/cleanupAuthMethodRevocations.js");
 const {
   listUniqueAddresses,
   parseArgs: parseAddressArgs,
@@ -58,32 +49,6 @@ test("leaderboard CLIs reject unsafe or ambiguous limits", () => {
   }
 });
 
-test("leaderboard CLIs preserve Firebase Admin flags alongside a limit", () => {
-  assert.deepEqual(
-    parseLeaderboardArgs([
-      "--project",
-      "mons-link",
-      "25",
-      "--database-url",
-      "https://mons-link-default-rtdb.firebaseio.com",
-    ]),
-    {
-      adminArgs: [
-        "--project",
-        "mons-link",
-        "--database-url",
-        "https://mons-link-default-rtdb.firebaseio.com",
-      ],
-      limit: 25,
-    },
-  );
-  assert.deepEqual(parseLeaderboardArgs(["--project", "mons-link"]), {
-    adminArgs: ["--project", "mons-link"],
-    limit: DEFAULT_LEADERBOARD_LIMIT,
-  });
-  assert.throws(() => parseLeaderboardArgs(["--project"]), /requires a value/);
-});
-
 test("both leaderboard entrypoints parse arguments and preserve delivery keys", () => {
   for (const [filename, key, metric] of [
     ["topGpWithEmojis.js", "admin:top-gp:", "gp"],
@@ -94,7 +59,7 @@ test("both leaderboard entrypoints parse arguments and preserve delivery keys", 
       "utf8",
     );
     assert.match(source, /parseBridgeSecretFile\(argv\)/);
-    assert.match(source, /parseLeaderboardArgs\(remainingArgs\)/);
+    assert.match(source, /parseLeaderboardLimit\(remainingArgs\)/);
     assert.match(source, /createProfileD1Reader/);
     assert.match(source, /readLeaderboard/);
     assert.match(source, /sendCommand/);
@@ -111,7 +76,7 @@ test("both leaderboard entrypoints parse arguments and preserve delivery keys", 
   }
 });
 
-test("D1 leaderboard entrypoints reject Firebase targets and log counts only", async () => {
+test("D1 leaderboard entrypoints log counts only", async () => {
   for (const [filename, exportName, metric] of [
     ["topGpWithEmojis.js", "logTopGpWithEmojis", "gp"],
     ["topMpWithEmojis.js", "logTopMpWithEmojis", "mp"],
@@ -120,16 +85,11 @@ test("D1 leaderboard entrypoints reject Firebase targets and log counts only", a
       resolve(repositoryRoot, "cloud/admin", filename),
     )[exportName] as (
       limit: number,
-      adminArgs: string[],
       dependencies: Record<string, unknown>,
     ) => Promise<void>;
-    await assert.rejects(
-      entrypoint(1, ["--project", "staging"], {}),
-      /not supported/,
-    );
     const logs: string[] = [];
     let delivered = "";
-    await entrypoint(1, [], {
+    await entrypoint(1, {
       reader: {
         readLeaderboard: async () => [
           {
@@ -276,7 +236,7 @@ test("canonical profile admin reader parses bounded profiles", async () => {
     query: async (sql: string, params: unknown[] = []) => {
       calls.push({ sql, params });
       if (sql.includes("profile_canonical_control")) {
-        return [{ state: "active", imported_at_ms: 1 }];
+        return [{ state: "active" }];
       }
       return [
         {
@@ -311,10 +271,9 @@ test("canonical MP admin reader returns only projected scalars", async () => {
   database.exec(`
     CREATE TABLE profile_canonical_control (
       singleton INTEGER PRIMARY KEY,
-      state TEXT NOT NULL,
-      imported_at_ms INTEGER
+      state TEXT NOT NULL
     );
-    INSERT INTO profile_canonical_control VALUES (1, 'active', 1);
+    INSERT INTO profile_canonical_control VALUES (1, 'active');
     CREATE TABLE profile_records (
       profile_id TEXT PRIMARY KEY,
       state TEXT NOT NULL,
@@ -375,7 +334,7 @@ test("canonical GP admin reader preserves an explicitly null nonce", async () =>
   const reader = createProfileD1Reader({
     query: async (sql: string) =>
       sql.includes("profile_canonical_control")
-        ? [{ state: "frozen", imported_at_ms: 1 }]
+        ? [{ state: "frozen" }]
         : [
             {
               gameplay_emoji: "",
@@ -389,17 +348,13 @@ test("canonical GP admin reader preserves an explicitly null nonce", async () =>
   assert.equal(profiles[0].emoji, "");
 });
 
-test("canonical profile admin reader gates import finalization and paginates addresses", async () => {
+test("canonical profile admin reader requires an operational state and paginates addresses", async () => {
   const { createProfileD1Reader } = require("../cloud/admin/_d1.js");
-  for (const [state, importedAtMs] of [
-    ["firestore", null],
-    ["importing", null],
-    ["verifying", 1],
-  ] as const) {
+  for (const state of ["unknown", "retired", ""] as const) {
     const inactive = createProfileD1Reader({
-      query: async () => [{ state, imported_at_ms: importedAtMs }],
+      query: async () => [{ state }],
     });
-    await assert.rejects(inactive.readLeaderboard("gp", 15), /not imported/);
+    await assert.rejects(inactive.readLeaderboard("gp", 15), /unavailable/);
   }
 
   let addressPage = 0;
@@ -408,7 +363,7 @@ test("canonical profile admin reader gates import finalization and paginates add
     query: async (sql: string, params: unknown[] = []) => {
       calls.push({ sql, params });
       if (sql.includes("profile_canonical_control")) {
-        return [{ state: "active", imported_at_ms: 1 }];
+        return [{ state: "active" }];
       }
       addressPage += 1;
       if (addressPage === 1) {
@@ -431,243 +386,4 @@ test("canonical profile admin reader gates import finalization and paginates add
   assert.equal(addresses.length, 501);
   assert.deepEqual(calls[2].params.slice(0, 3), ["eth", "eth", "0499"]);
   assert.match(calls[1].sql, /LIMIT \?/);
-});
-
-test("auth cooldown cleanup covers both canonical collections", () => {
-  assert.deepEqual(AUTH_COOLDOWN_COLLECTIONS, [
-    "authMethodRevocations",
-    "authProfileMethodCooldowns",
-  ]);
-});
-
-test("auth cooldown cleanup defaults safe and requires explicit execution", () => {
-  assert.deepEqual(parseCleanupArgs([]), { dryRun: true });
-  assert.deepEqual(parseCleanupArgs(["--project", "mons-link"]), {
-    dryRun: true,
-  });
-  assert.deepEqual(
-    parseCleanupArgs([
-      "--project",
-      "mons-link",
-      "--database-url",
-      "https://mons-link-default-rtdb.firebaseio.com",
-    ]),
-    { dryRun: true },
-  );
-  assert.deepEqual(parseCleanupArgs(["--project", "mons-link", "--execute"]), {
-    dryRun: false,
-  });
-  for (const argv of [
-    ["--dry-rnu"],
-    ["--project"],
-    ["--project", "--execute"],
-    ["--dry-run", "--execute"],
-  ]) {
-    assert.throws(() => parseCleanupArgs(argv), /Usage/);
-  }
-});
-
-test("auth cooldown deletes require the scanned document version", async () => {
-  const deletes: unknown[][] = [];
-  let committed = false;
-  const firestore = {
-    batch: () => ({
-      delete: (...args: unknown[]) => deletes.push(args),
-      commit: async () => {
-        committed = true;
-      },
-    }),
-  };
-  const ref = { path: "authMethodRevocations/method" };
-  const updateTime = { seconds: 123 };
-
-  assert.equal(await deleteDocuments(firestore, [{ ref, updateTime }]), 1);
-  assert.deepEqual(deletes, [[ref, { lastUpdateTime: updateTime }]]);
-  assert.equal(committed, true);
-});
-
-test("auth cooldown recurring cleanup uses the retryAtMs index", () => {
-  const calls: unknown[][] = [];
-  const cursor = { id: "cursor" };
-  const query = {
-    where: (...args: unknown[]) => {
-      calls.push(["where", ...args]);
-      return query;
-    },
-    orderBy: (...args: unknown[]) => {
-      calls.push(["orderBy", ...args]);
-      return query;
-    },
-    startAfter: (...args: unknown[]) => {
-      calls.push(["startAfter", ...args]);
-      return query;
-    },
-    limit: (...args: unknown[]) => {
-      calls.push(["limit", ...args]);
-      return query;
-    },
-  };
-  const firestore = {
-    collection: (...args: unknown[]) => {
-      calls.push(["collection", ...args]);
-      return query;
-    },
-  };
-
-  assert.strictEqual(
-    buildCleanupQuery({
-      firestore,
-      collectionName: "authMethodRevocations",
-      lastDoc: cursor,
-      nowMs: 100,
-    }),
-    query,
-  );
-  assert.deepEqual(calls, [
-    ["collection", "authMethodRevocations"],
-    ["where", "retryAtMs", "<=", 100],
-    ["orderBy", "retryAtMs"],
-    ["startAfter", cursor],
-    ["limit", PAGE_SIZE],
-  ]);
-});
-
-test("auth cooldown cleanup reclassifies indexed candidates", async () => {
-  const docs = [
-    {
-      data: () => ({ retryAtMs: 50 }),
-      ref: { path: "authMethodRevocations/expired" },
-      updateTime: { id: "expired" },
-    },
-    {
-      data: () => ({ retryAtMs: 0, expiresAtMs: 200 }),
-      ref: { path: "authMethodRevocations/active-fallback" },
-      updateTime: { id: "active-fallback" },
-    },
-  ];
-  const deletes: unknown[][] = [];
-  let commits = 0;
-  const query = {
-    get: async () => ({ empty: false, size: docs.length, docs }),
-    limit: () => query,
-    orderBy: () => query,
-    where: () => query,
-  };
-  const firestore = {
-    batch: () => ({
-      delete: (...args: unknown[]) => deletes.push(args),
-      commit: async () => {
-        commits += 1;
-      },
-    }),
-    collection: () => query,
-  };
-
-  assert.deepEqual(
-    await cleanupCollection({
-      firestore,
-      collectionName: "authMethodRevocations",
-      dryRun: false,
-      nowMs: 100,
-    }),
-    {
-      collection: "authMethodRevocations",
-      candidatesScanned: 2,
-      expired: 1,
-      deleted: 1,
-    },
-  );
-  assert.deepEqual(deletes, [
-    [docs[0].ref, { lastUpdateTime: docs[0].updateTime }],
-  ]);
-  assert.equal(commits, 1);
-});
-
-test("auth cooldown dry-run reports indexed candidates without a batch", async () => {
-  const doc = {
-    data: () => ({ retryAtMs: 50 }),
-    ref: { path: "authMethodRevocations/expired" },
-    updateTime: { id: "expired" },
-  };
-  const query = {
-    get: async () => ({ empty: false, size: 1, docs: [doc] }),
-    limit: () => query,
-    orderBy: () => query,
-    where: () => query,
-  };
-  const firestore = {
-    batch: () => {
-      throw new Error("dry-run must not create a batch");
-    },
-    collection: () => query,
-  };
-
-  const summary = await cleanupCollection({
-    firestore,
-    collectionName: "authMethodRevocations",
-    dryRun: true,
-    nowMs: 100,
-  });
-
-  assert.equal(summary.candidatesScanned, 1);
-  assert.equal(summary.expired, 1);
-  assert.equal(summary.deleted, 0);
-});
-
-test("auth cooldown cleanup advances after a full page", async () => {
-  const docs = Array.from({ length: PAGE_SIZE }, (_, index) => ({
-    data: () => ({ retryAtMs: index + 1 }),
-    ref: { path: `authMethodRevocations/${index}` },
-    updateTime: { index },
-  }));
-  const snapshots = [
-    { empty: false, size: PAGE_SIZE, docs },
-    { empty: true, size: 0, docs: [] },
-  ];
-  const cursors: unknown[] = [];
-  const query = {
-    get: async () => snapshots.shift(),
-    limit: () => query,
-    orderBy: () => query,
-    startAfter: (cursor: unknown) => {
-      cursors.push(cursor);
-      return query;
-    },
-    where: () => query,
-  };
-  const firestore = {
-    collection: () => query,
-  };
-
-  const summary = await cleanupCollection({
-    firestore,
-    collectionName: "authMethodRevocations",
-    dryRun: true,
-    nowMs: PAGE_SIZE,
-  });
-
-  assert.equal(summary.candidatesScanned, PAGE_SIZE);
-  assert.equal(summary.expired, PAGE_SIZE);
-  assert.deepEqual(cursors, [docs[docs.length - 1]]);
-});
-
-test("auth cooldown mutation failures are not reported as successful", async () => {
-  const conflict = new Error("document changed");
-  const doc = {
-    ref: { path: "authMethodRevocations/conflict" },
-    updateTime: { id: "conflict" },
-  };
-  const firestore = {
-    batch: () => ({
-      delete: () => {},
-      commit: async () => {
-        throw conflict;
-      },
-    }),
-  };
-
-  await assert.rejects(
-    deleteDocuments(firestore, [doc]),
-    (error: unknown) => error === conflict,
-  );
 });

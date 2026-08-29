@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AuthRepository } from "../src/firestore.ts";
+import {
+  AuthProfileRepositoryFailure,
+  type AuthProfileRepository,
+} from "../src/authProfileRepository.ts";
 import type {
   AuthIntentDocument,
   AuthIntentRecord,
@@ -46,7 +49,9 @@ function request(
   });
 }
 
-function repository(overrides: Partial<AuthRepository> = {}): AuthRepository {
+function repository(
+  overrides: Partial<AuthProfileRepository> = {},
+): AuthProfileRepository {
   return {
     getLinkedAuthMethods: async () => ({
       ok: true,
@@ -115,6 +120,13 @@ function responseJson(response: Response): Promise<Record<string, unknown>> {
 function deterministicBytes(length: number): Uint8Array {
   return Uint8Array.from({ length }, (_, index) => index + 1);
 }
+
+test("preserves the profile repository failure contract", () => {
+  assert.equal(
+    new AuthProfileRepositoryFailure().message,
+    "profile-repository-unavailable",
+  );
+});
 
 test("auth routes apply exact origin-aware preflight policy", async () => {
   const preflight = await handleAuthRoute(
@@ -406,16 +418,16 @@ test("validates intent bodies, fails closed, and bounds ID collisions", async ()
   assert.equal(attempts, 3);
 });
 
-test("returns linked methods using the verified UID and original token", async () => {
-  const calls: string[][] = [];
+test("returns linked methods using the verified UID", async () => {
+  const calls: string[] = [];
   const response = await handleAuthRoute(
     request("/auth/methods", "GET"),
     env,
     ctx,
     {
       repository: repository({
-        getLinkedAuthMethods: async (uid, idToken) => {
-          calls.push([uid, idToken]);
+        getLinkedAuthMethods: async (uid) => {
+          calls.push(uid);
           return {
             ok: true,
             profileId: "profile-1",
@@ -428,7 +440,7 @@ test("returns linked methods using the verified UID and original token", async (
     },
   );
   assert.equal(response.status, 200);
-  assert.deepEqual(calls, [["firebase-uid", "firebase-id-token"]]);
+  assert.deepEqual(calls, ["firebase-uid"]);
   assert.deepEqual(await responseJson(response), {
     ok: true,
     profileId: "profile-1",
@@ -438,15 +450,15 @@ test("returns linked methods using the verified UID and original token", async (
 });
 
 test("synchronizes the profile claim through the authenticated POST route", async () => {
-  const calls: string[][] = [];
+  const calls: string[] = [];
   const response = await handleAuthRoute(
     request("/auth/profile-claim/sync", "POST", {}),
     env,
     ctx,
     {
       repository: repository({
-        getProfileClaimSource: async (uid, idToken) => {
-          calls.push([uid, idToken]);
+        getProfileClaimSource: async (uid) => {
+          calls.push(uid);
           return {
             ok: true,
             profileId: "profile-1",
@@ -488,10 +500,7 @@ test("synchronizes the profile claim through the authenticated POST route", asyn
     },
   );
   assert.equal(response.status, 200);
-  assert.deepEqual(calls, [
-    ["firebase-uid", "firebase-id-token"],
-    ["firebase-uid", "firebase-id-token"],
-  ]);
+  assert.deepEqual(calls, ["firebase-uid", "firebase-uid"]);
   assert.deepEqual(await responseJson(response), {
     ok: true,
     profileId: "profile-1",

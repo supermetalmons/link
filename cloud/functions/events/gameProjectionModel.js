@@ -12,32 +12,8 @@ const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 
 const readTimestampMillis = (value) => {
-  if (!value) {
-    return null;
-  }
   if (typeof value === "number" && Number.isFinite(value)) {
     return Math.floor(value);
-  }
-  if (typeof value.toMillis === "function") {
-    try {
-      const millis = value.toMillis();
-      return Number.isFinite(millis) ? Math.floor(millis) : null;
-    } catch {
-      return null;
-    }
-  }
-  if (typeof value === "object" && Number.isFinite(value._seconds)) {
-    const nanos = Number.isFinite(value._nanoseconds)
-      ? Number(value._nanoseconds)
-      : 0;
-    return Math.floor(Number(value._seconds) * 1000 + nanos / 1e6);
-  }
-  if (
-    typeof value === "object" &&
-    typeof value.__firestoreTimestamp === "string"
-  ) {
-    const millis = Date.parse(value.__firestoreTimestamp);
-    return Number.isFinite(millis) ? Math.floor(millis) : null;
   }
   return null;
 };

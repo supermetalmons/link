@@ -1,7 +1,5 @@
-import {
-  isSafeFirebaseKey,
-  isSafeFirestoreDocumentId,
-} from "./firebaseKeys.ts";
+import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeOperationId } from "./operationIds.ts";
 
 export const TELEGRAM_PROJECTION_QUEUE_NAME = "mons-link-telegram-projection";
 export const TELEGRAM_PROJECTION_SCHEMA_VERSION = 1;
@@ -69,7 +67,7 @@ export function parseTelegramProjectionTask(
   }
   if (task.kind === "rating-telegram-projection") {
     return exactKeys(task, ["kind", "operationId"]) &&
-      isSafeFirestoreDocumentId(task.operationId)
+      isSafeOperationId(task.operationId)
       ? { kind: task.kind, operationId: task.operationId }
       : null;
   }

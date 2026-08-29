@@ -503,7 +503,7 @@ test("fails closed before removing a D1 game when ownership is unavailable", asy
             throw new Error("rtdb-unavailable");
           },
           findProfileId: async () => {
-            throw new Error("firestore-unavailable");
+            throw new Error("profile-storage-unavailable");
           },
         }),
       ),
@@ -1909,7 +1909,7 @@ test("fails closed when navigation profile ownership is unavailable", async () =
           throw new Error("rtdb-unavailable");
         },
         findProfileId: async () => {
-          throw new Error("firestore-unavailable");
+          throw new Error("profile-storage-unavailable");
         },
       }),
       readNavigationPage: async () => {

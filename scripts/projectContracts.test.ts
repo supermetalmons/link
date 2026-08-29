@@ -263,7 +263,7 @@ test("ephemeral auth state does not use Firestore collection paths", () => {
     "cloud/workers/api/src/authIdentity.ts",
     "cloud/workers/api/src/authMutations.ts",
     "cloud/workers/api/src/authRoutes.ts",
-    "cloud/workers/api/src/firestore.ts",
+    "cloud/workers/api/src/authProfileRepository.ts",
     "cloud/workers/api/src/xCallback.ts",
   ]) {
     assert.doesNotMatch(readText(path), /authIntents|xAuthRedirectFlows/);
@@ -279,11 +279,21 @@ test("Wrangler release environment contains no active values", () => {
   assert.deepEqual(activeLines, []);
 });
 
-test("Firebase configuration deploys data rules without a Functions codebase", () => {
+test("Firebase configuration deploys only Realtime Database rules", () => {
   const config = readJson<Record<string, unknown>>("cloud/firebase.json");
   assert.equal(Object.hasOwn(config, "functions"), false);
   assert.equal(typeof config.database, "object");
-  assert.equal(typeof config.firestore, "object");
+  assert.equal(Object.hasOwn(config, "firestore"), false);
+  for (const path of [
+    "cloud/firestore.rules",
+    "cloud/firestore.indexes.json",
+    "scripts/migrate-profile-reads.ts",
+    "scripts/migrate-profile-canonical.ts",
+    "cloud/admin/_admin.js",
+    "cloud/admin/cleanupAuthMethodRevocations.js",
+  ]) {
+    assert.equal(existsSync(resolve(repositoryRoot, path)), false, path);
+  }
 });
 
 test("package manifests preserve public scripts and deployment command vectors", () => {
@@ -347,6 +357,8 @@ test("package manifests preserve public scripts and deployment command vectors",
       scriptName,
     );
   }
+  assert.equal(rootPackage.scripts?.["migrate:profile-reads"], undefined);
+  assert.equal(rootPackage.scripts?.["migrate:profile-canonical"], undefined);
   assert.deepEqual(
     {
       build: rootPackage.scripts?.build,
@@ -362,7 +374,6 @@ test("package manifests preserve public scripts and deployment command vectors",
         rootPackage.scripts?.["manage:event-prize-withdrawals"],
       "manage:profile-canonical":
         rootPackage.scripts?.["manage:profile-canonical"],
-      "migrate:profile-reads": rootPackage.scripts?.["migrate:profile-reads"],
       "prepare:firebase": rootPackage.scripts?.["prepare:firebase"],
       "deploy:firebase": rootPackage.scripts?.["deploy:firebase"],
       deploy: rootPackage.scripts?.deploy,
@@ -389,8 +400,6 @@ test("package manifests preserve public scripts and deployment command vectors",
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-event-prize-withdrawals.ts",
       "manage:profile-canonical":
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-profile-canonical.ts",
-      "migrate:profile-reads":
-        "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/migrate-profile-reads.ts",
       "prepare:firebase":
         "npm --prefix cloud/functions ci && npm --prefix cloud/functions test",
       "deploy:firebase":
@@ -402,6 +411,8 @@ test("package manifests preserve public scripts and deployment command vectors",
   assert.deepEqual(functionsPackage.scripts, {
     test: "node --experimental-strip-types --test ../tests/*.test.js",
   });
+  assert.equal(functionsPackage.dependencies?.["firebase-admin"], undefined);
+  assert.equal(adminPackage.dependencies?.["firebase-admin"], undefined);
   assert.deepEqual(adminPackage.scripts, {
     "recover:telegram": "node recoverTelegramDelivery.js",
     start: "node listAddresses.js",
@@ -571,28 +582,24 @@ test("operations documentation cross-links package and deployment guides", () =>
   assert.doesNotMatch(deploymentGuide, /migrate:event-prize-withdrawals-d1/);
   assert.doesNotMatch(deploymentGuide, /Firebase-only Worker version/);
 
-  const profileCutover = deploymentGuide.slice(
-    deploymentGuide.indexOf("## Canonical profile D1 cutover"),
+  const profileMaintenance = deploymentGuide.slice(
+    deploymentGuide.indexOf("## Canonical profile D1 maintenance"),
     deploymentGuide.indexOf("## Event-prize withdrawal D1 operations"),
   );
-  assert.match(profileCutover, /two reviewed commits/);
-  assert.match(profileCutover, /Commit 2 is the permanent\s+D1-only Worker/);
-  assert.match(profileCutover, /rollingBack.*unknown.*blockers/s);
-  assert.match(profileCutover, /npm run deploy:api:triggers/);
+  assert.match(profileMaintenance, /accepts only `active` and `frozen`/);
+  assert.match(profileMaintenance, /d1 time-travel info mons-link-profiles/);
+  assert.match(profileMaintenance, /d1 migrations apply mons-link-profiles/);
+  assert.match(profileMaintenance, /PRAGMA foreign_key_check/);
   assert.match(
-    profileCutover,
-    /queues consumer remove mons-link-profile-projection mons-link-api/,
+    profileMaintenance,
+    /queues pause-delivery mons-link-auth-recovery/,
   );
-  assert.match(profileCutover, /reviewed mutation request twice/);
-  assert.match(profileCutover, /30 days as an audit snapshot/);
-  assert.doesNotMatch(
-    profileCutover,
-    /firestore-frozen|d1-frozen|activation|verifying|operation lease|rollback/i,
+  assert.match(
+    profileMaintenance,
+    /queues resume-delivery mons-link-auth-recovery/,
   );
-  assert.doesNotMatch(
-    profileCutover,
-    /resume-delivery mons-link-profile-projection/,
-  );
+  assert.doesNotMatch(deploymentGuide, /migrate:profile-(?:reads|canonical)/);
+  assert.doesNotMatch(deploymentGuide, /--begin-import/);
 });
 
 test("profile claim synchronization uses the Worker route", () => {

@@ -155,7 +155,7 @@ function reachableRuntimeFiles(entry: string): string[] {
 
 test("the final Worker runtime has no Firestore profile transport or retired bindings", () => {
   const forbidden =
-    /(?:authFirestore|firestoreRest|firestore\.googleapis\.com|FIRESTORE_SERVICE_ACCOUNT_|RATING_SERVICE_ACCOUNT_|USERNAME_SERVICE_ACCOUNT_|PROFILE_STORAGE_MODE|PROFILE_READ_MODE|PROFILE_ACTIVATION_LOGIN_UID|PROFILE_PROJECTION_QUEUE)/;
+    /(?:authFirestore|firestoreRest|firestore\.googleapis\.com|googleapis\.com\/auth\/datastore|__firestoreTimestamp|isSafeFirestoreDocumentId|FIRESTORE_SCOPE|FIRESTORE_SERVICE_ACCOUNT_|RATING_SERVICE_ACCOUNT_|USERNAME_SERVICE_ACCOUNT_|PROFILE_STORAGE_MODE|PROFILE_READ_MODE|PROFILE_ACTIVATION_LOGIN_UID|PROFILE_PROJECTION_QUEUE)/;
   const violations = reachableRuntimeFiles(
     resolve(import.meta.dirname, "../src/index.ts"),
   )

@@ -4,7 +4,6 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const databaseRules = require("../database.rules.json");
-const firestoreIndexes = require("../firestore.indexes.json");
 const {
   buildOrderedMatchSubmissions,
   buildOrderedMoveHistory,
@@ -31,43 +30,6 @@ test("automatch REST queries retain their RTDB indexes", () => {
   assert.deepEqual(
     databaseRules.rules.profileGameProjectionOutbox.profile[".indexOn"],
     ["lastQueuedAtMs"],
-  );
-  assert.ok(
-    firestoreIndexes.indexes.some(
-      (index) =>
-        index.collectionGroup === "ratingUpdates" &&
-        index.queryScope === "COLLECTION" &&
-        index.fields[0]?.fieldPath === "telegramProjectionState" &&
-        index.fields[1]?.fieldPath === "telegramProjectionUpdatedAtMs",
-    ),
-  );
-  assert.ok(
-    firestoreIndexes.indexes.some(
-      (index) =>
-        index.collectionGroup === "ratingUpdates" &&
-        index.queryScope === "COLLECTION" &&
-        index.fields[0]?.fieldPath === "eventProgressState" &&
-        index.fields[1]?.fieldPath === "eventProgressUpdatedAtMs",
-    ),
-  );
-  assert.ok(
-    firestoreIndexes.indexes.some(
-      (index) =>
-        index.collectionGroup === "ratingUpdates" &&
-        index.queryScope === "COLLECTION" &&
-        index.fields[0]?.fieldPath === "profileGameProjectionState" &&
-        index.fields[1]?.fieldPath === "profileGameProjectionUpdatedAtMs",
-    ),
-  );
-  assert.equal(
-    firestoreIndexes.indexes.some((index) => index.collectionGroup === "games"),
-    false,
-  );
-  assert.equal(
-    firestoreIndexes.fieldOverrides.some(
-      (override) => override.collectionGroup === "games",
-    ),
-    false,
   );
 });
 

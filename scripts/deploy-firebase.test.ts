@@ -31,7 +31,7 @@ test("parses only explicit Firebase rule deployments", () => {
   }
 });
 
-test("dry-run previews database and Firestore without spawning", () => {
+test("dry-run previews only database rules without spawning", () => {
   const logs: string[] = [];
   let spawns = 0;
   deployFirebase(
@@ -48,11 +48,10 @@ test("dry-run previews database and Firestore without spawning", () => {
   assert.equal(spawns, 0);
   assert.deepEqual(logs, [
     "[firebase] firebase deploy --only database --project mons-link",
-    "[firebase] firebase deploy --only firestore --project mons-link",
   ]);
 });
 
-test("deploys only database and Firestore from the cloud directory", () => {
+test("deploys only database rules from the cloud directory", () => {
   const calls: Array<{ args: readonly string[]; cwd: string }> = [];
   deployFirebase(
     { dryRun: false, project: "mons-link" },
@@ -69,10 +68,6 @@ test("deploys only database and Firestore from the cloud directory", () => {
   assert.deepEqual(calls, [
     {
       args: ["deploy", "--only", "database", "--project", "mons-link"],
-      cwd: "/cloud",
-    },
-    {
-      args: ["deploy", "--only", "firestore", "--project", "mons-link"],
       cwd: "/cloud",
     },
   ]);

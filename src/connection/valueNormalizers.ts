@@ -24,18 +24,5 @@ export const readTimestampMillis = (value: unknown): number => {
   if (typeof value === "number" && Number.isFinite(value)) {
     return Math.floor(value);
   }
-  if (
-    value &&
-    typeof value === "object" &&
-    "toMillis" in value &&
-    typeof (value as { toMillis: unknown }).toMillis === "function"
-  ) {
-    try {
-      const millis = (value as { toMillis: () => number }).toMillis();
-      if (Number.isFinite(millis)) {
-        return Math.floor(millis);
-      }
-    } catch {}
-  }
   return 0;
 };

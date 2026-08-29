@@ -27,21 +27,20 @@ const defaultWait = (milliseconds) =>
 const createEventProfileGameProjectionCore = ({
   now = Date.now,
   repository,
-  timestampFromMillis,
   wait = defaultWait,
 }) => {
-  if (!repository || typeof timestampFromMillis !== "function") {
+  if (!repository) {
     throw new TypeError(
       "event profile-game projection dependencies are required",
     );
   }
 
-  const toTimestamp = (millis) => {
+  const toTimestampMillis = (millis) => {
     const normalized =
       typeof millis === "number" && Number.isFinite(millis)
         ? Math.floor(millis)
         : now();
-    return timestampFromMillis(Math.max(1, normalized));
+    return Math.max(1, normalized);
   };
 
   const readWithRetries = async (read) => {
@@ -166,20 +165,20 @@ const createEventProfileGameProjectionCore = ({
             eventId,
             status,
             sortBucket: SORT_BUCKETS[status],
-            listSortAt: toTimestamp(getListSortAtMs(eventData, status)),
+            listSortAt: toTimestampMillis(getListSortAtMs(eventData, status)),
             ownerProfileId,
             startAt:
               typeof eventData.startAtMs === "number"
-                ? toTimestamp(eventData.startAtMs)
+                ? toTimestampMillis(eventData.startAtMs)
                 : null,
-            updatedAt: toTimestamp(
+            updatedAt: toTimestampMillis(
               typeof eventData.updatedAtMs === "number"
                 ? eventData.updatedAtMs
                 : now(),
             ),
             endedAt:
               typeof eventData.endedAtMs === "number"
-                ? toTimestamp(eventData.endedAtMs)
+                ? toTimestampMillis(eventData.endedAtMs)
                 : null,
             participantCount: previewParticipants.length,
             participantPreview: previewParticipants.slice(

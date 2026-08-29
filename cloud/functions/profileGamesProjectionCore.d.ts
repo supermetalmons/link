@@ -51,7 +51,6 @@ export type RecomputeInviteProjectionResult = {
 export function createProfileGamesProjectionCore(dependencies: {
   logger?: Pick<Console, "error">;
   repository: ProfileGamesProjectionRepository;
-  timestampFromMillis(millis: number): unknown;
   wait?(milliseconds: number): Promise<void>;
 }): {
   recomputeInviteProjection(

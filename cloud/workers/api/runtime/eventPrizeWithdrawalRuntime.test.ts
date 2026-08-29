@@ -1,4 +1,4 @@
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
@@ -9,6 +9,7 @@ import {
 import { runEventPrizeWithdrawalWorkflow } from "../src/eventPrizeWithdrawalWorkflow.ts";
 import { loadSolanaDependencies } from "../../../functions/eventPrizes/solana.js";
 import { withProfileControl } from "../test/testEnv.ts";
+import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const testEnv = env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] };
 
@@ -36,32 +37,11 @@ function workflowStep(afterStep?: (name: string) => void | Promise<void>) {
 
 describe("event prize withdrawal Workflow", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyRetiredProfileMigrations(
       testEnv.PROFILE_DB,
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
+      "0".repeat(64),
     );
-    await testEnv.PROFILE_DB.batch([
-      testEnv.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET state = 'importing'
-         WHERE singleton = 1 AND state = 'firestore'`,
-      ),
-      testEnv.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET import_digest = ?, import_plan_version = 1
-         WHERE singleton = 1 AND state = 'importing'`,
-      ).bind("0".repeat(64)),
-      testEnv.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET state = 'frozen', imported_at_ms = 1
-         WHERE singleton = 1 AND state = 'importing'`,
-      ),
-      testEnv.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET state = 'active'
-         WHERE singleton = 1 AND state = 'frozen'`,
-      ),
-    ]);
   });
 
   it("loads both prize standards in the Workers runtime", () => {
@@ -232,9 +212,7 @@ describe("event prize withdrawal Workflow", () => {
       timestamp: new Date(0),
       workflowName: "mons-link-event-prize-withdrawal",
     } as const;
-    for (const blockedEnv of ["firestore", "importing", "frozen"].map((state) =>
-      withProfileControl(env, state as "firestore" | "importing" | "frozen"),
-    )) {
+    for (const blockedEnv of [withProfileControl(env, "frozen")]) {
       const withdrawalStep = workflowStep();
       await expect(
         runEventPrizeWithdrawalWorkflow(

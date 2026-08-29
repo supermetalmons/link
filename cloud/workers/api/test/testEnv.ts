@@ -75,13 +75,7 @@ const profileGamesDb = {
 const canonicalControlStatement: D1PreparedStatement = {
   all: d1Statement.all,
   bind: () => canonicalControlStatement,
-  first: async <T>() =>
-    ({
-      state: "active",
-      import_digest: "0".repeat(64),
-      import_plan_version: 1,
-      imported_at_ms: 1,
-    }) as T,
+  first: async <T>() => ({ state: "active" }) as T,
   raw: d1Statement.raw,
   run: d1Statement.run,
 };
@@ -155,24 +149,13 @@ export const TELEGRAM_TEST_ENV = {
 
 export function withProfileControl(
   environment: Env,
-  state: "firestore" | "importing" | "frozen" | "active",
+  state: "frozen" | "active",
 ): Env {
   let statement: D1PreparedStatement;
   statement = {
     all: d1Statement.all,
     bind: () => statement,
-    first: async <T>() =>
-      ({
-        state,
-        import_digest:
-          state === "firestore" || state === "importing"
-            ? null
-            : "0".repeat(64),
-        import_plan_version:
-          state === "firestore" || state === "importing" ? null : 1,
-        imported_at_ms:
-          state === "firestore" || state === "importing" ? null : 1,
-      }) as T,
+    first: async <T>() => ({ state }) as T,
     raw: d1Statement.raw,
     run: d1Statement.run,
   };

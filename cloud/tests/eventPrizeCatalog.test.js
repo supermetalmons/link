@@ -285,17 +285,11 @@ test("database rules keep selection reads and close direct writes", () => {
   );
 });
 
-test("firestore rules retain profile reads and close direct updates", () => {
-  const rules = fs.readFileSync(
-    path.resolve(__dirname, "..", "firestore.rules"),
-    "utf8",
+test("retired Firestore rules are absent", () => {
+  assert.equal(
+    fs.existsSync(path.resolve(__dirname, "..", "firestore.rules")),
+    false,
   );
-  assert.match(
-    rules,
-    /match \/users\/\{userId\}[\s\S]*allow read: if request\.auth != null;/,
-  );
-  assert.match(rules, /allow update: if false;/);
-  assert.doesNotMatch(rules, /validLeaderboardCustom/);
 });
 
 test("catalog membership rejects inherited keys and padded IDs", () => {

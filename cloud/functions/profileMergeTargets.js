@@ -1,6 +1,5 @@
 "use strict";
 
-const PROFILE_MERGE_TARGETS_COLLECTION = "profileMergeTargets";
 const MAX_PROFILE_MERGE_TARGET_HOPS = 32;
 
 const normalizeString = (value) =>
@@ -73,7 +72,6 @@ const orderProfileMergeCleanupIds = (profileIds, canonicalProfileIds) => {
 
 module.exports = {
   MAX_PROFILE_MERGE_TARGET_HOPS,
-  PROFILE_MERGE_TARGETS_COLLECTION,
   getProfileMergeTargetId,
   orderProfileMergeCleanupIds,
   resolveProfileMergeTargetId,

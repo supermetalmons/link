@@ -38,6 +38,7 @@ const {
   getEventPrizeAssetStandard,
   getWithdrawalProjectionProfileIds,
   isCompletedEventPrizeWithdrawal,
+  isMatchingProfileEventPrizeAssignment,
   normalizeSolanaAddress,
 } = require("../functions/eventPrizeWithdrawalState");
 const eventPrizeProjectionState = require("../functions/eventPrizeProjectionState");
@@ -62,22 +63,68 @@ const {
   waitForSubmittedTransactionStatus,
 } = require("../functions/eventPrizeWithdrawal");
 const {
-  copyProfileEventPrizeAssignment,
-  removeProfileEventPrizeAssignmentIfWithdrawalCompleted,
-  removeMatchingProfileEventPrizeAssignment,
-  resolveCanonicalProfilePath,
-} = require("../functions/profileEventPrizeProjection");
-const admin = require("../functions/firebaseAdmin");
+  resolveProfileMergeTargetPath,
+} = require("../functions/profileMergeTargets");
 
 const eventId = "NN3eRzoZo80";
 const prizeId = "1092";
 const assetAddress = getEventPrizeAssetAddress(eventId, prizeId);
 const profileId = "profile";
 const recipientAddress = "11111111111111111111111111111111";
-const projectionDependencies = () => ({
-  admin,
+const removeMatchingProfileEventPrizeAssignment = async ({
+  targetRef,
+  eventId: targetEventId,
+  prizeId: targetPrizeId,
+}) => {
+  const result = await targetRef.transaction((assignment) =>
+    isMatchingProfileEventPrizeAssignment(
+      assignment,
+      targetEventId,
+      targetPrizeId,
+    )
+      ? null
+      : (assignment ?? null),
+  );
+  return result.committed === true && result.snapshot.val() === null;
+};
+
+const createProjectionDependencies = ({
+  assignments = new Map(),
+  mergeTargets = {},
+  transactionError = null,
+} = {}) => ({
+  admin: {
+    database: () => ({
+      ref: (path) => ({
+        transaction: async (update) => {
+          if (transactionError) {
+            throw transactionError;
+          }
+          const next = update(assignments.get(path) ?? null);
+          if (next === undefined) {
+            return {
+              committed: false,
+              snapshot: { val: () => assignments.get(path) ?? null },
+            };
+          }
+          assignments.set(path, next);
+          return {
+            committed: true,
+            snapshot: { val: () => next },
+          };
+        },
+      }),
+    }),
+  },
   removeMatchingProfileEventPrizeAssignment,
-  resolveCanonicalProfilePath,
+  resolveCanonicalProfilePath: (candidateProfileId) =>
+    resolveProfileMergeTargetPath({
+      profileId: candidateProfileId,
+      readMergeTarget: async (currentProfileId) => {
+        const targetProfileId = mergeTargets[currentProfileId];
+        return targetProfileId ? { targetProfileId } : null;
+      },
+    }),
 });
 
 test("re-exports the shared event-prize projection policy", () => {
@@ -246,20 +293,6 @@ const createCompressedPrizeFixture = ({ collectionVerified = true } = {}) => {
     assetWithProof,
   };
 };
-
-const mockProfileMergeTargets = (targets) => () => ({
-  collection: () => ({
-    doc: (candidateProfileId) => ({
-      get: async () => {
-        const targetProfileId = targets[candidateProfileId];
-        return {
-          exists: Boolean(targetProfileId),
-          data: () => (targetProfileId ? { targetProfileId } : null),
-        };
-      },
-    }),
-  }),
-});
 
 const claim = (current, overrides = {}) =>
   decideWithdrawalClaim({
@@ -2168,13 +2201,7 @@ test("completion reconciliation includes every known profile exactly once", () =
   );
 });
 
-test("completed retries reconcile old and current profile projections", async (t) => {
-  const originalDatabase = admin.database;
-  const originalFirestore = admin.firestore;
-  t.after(() => {
-    admin.database = originalDatabase;
-    admin.firestore = originalFirestore;
-  });
+test("completed retries reconcile old and current profile projections", async () => {
   const originalProfileId = "profile-before-merge";
   const currentProfileId = "profile-after-merge";
   const assignments = new Map([
@@ -2187,23 +2214,9 @@ test("completed retries reconcile old and current profile projections", async (t
       { eventId, prizeId, profileId: currentProfileId, place: 1 },
     ],
   ]);
-  admin.database = () => ({
-    ref: (path) => ({
-      transaction: async (update) => {
-        const next = update(assignments.get(path) ?? null);
-        if (next === undefined) {
-          return { committed: false };
-        }
-        assignments.set(path, next);
-        return {
-          committed: true,
-          snapshot: { val: () => next },
-        };
-      },
-    }),
-  });
-  admin.firestore = mockProfileMergeTargets({
-    [originalProfileId]: currentProfileId,
+  const dependencies = createProjectionDependencies({
+    assignments,
+    mergeTargets: { [originalProfileId]: currentProfileId },
   });
 
   const withdrawal = {
@@ -2217,7 +2230,7 @@ test("completed retries reconcile old and current profile projections", async (t
       eventId,
       prizeId,
     },
-    projectionDependencies(),
+    dependencies,
   );
   await reconcileCompletedWithdrawalProjections(
     {
@@ -2226,7 +2239,7 @@ test("completed retries reconcile old and current profile projections", async (t
       eventId,
       prizeId,
     },
-    projectionDependencies(),
+    dependencies,
   );
 
   assert.equal(
@@ -2239,13 +2252,7 @@ test("completed retries reconcile old and current profile projections", async (t
   );
 });
 
-test("completed reconciliation cleans every profile in a merge chain", async (t) => {
-  const originalDatabase = admin.database;
-  const originalFirestore = admin.firestore;
-  t.after(() => {
-    admin.database = originalDatabase;
-    admin.firestore = originalFirestore;
-  });
+test("completed reconciliation cleans every profile in a merge chain", async () => {
   const sourceProfileId = "profile-source";
   const middleProfileId = "profile-middle";
   const targetProfileId = "profile-target";
@@ -2256,21 +2263,12 @@ test("completed reconciliation cleans every profile in a merge chain", async (t)
       { eventId, prizeId, profileId: candidateProfileId, place: 1 },
     ]),
   );
-  admin.firestore = mockProfileMergeTargets({
-    [sourceProfileId]: middleProfileId,
-    [middleProfileId]: targetProfileId,
-  });
-  admin.database = () => ({
-    ref: (path) => ({
-      transaction: async (update) => {
-        const next = update(assignments.get(path) ?? null);
-        assignments.set(path, next);
-        return {
-          committed: true,
-          snapshot: { val: () => next },
-        };
-      },
-    }),
+  const dependencies = createProjectionDependencies({
+    assignments,
+    mergeTargets: {
+      [sourceProfileId]: middleProfileId,
+      [middleProfileId]: targetProfileId,
+    },
   });
 
   await reconcileCompletedWithdrawalProjections(
@@ -2283,7 +2281,7 @@ test("completed reconciliation cleans every profile in a merge chain", async (t)
       eventId,
       prizeId,
     },
-    projectionDependencies(),
+    dependencies,
   );
 
   profileIds.forEach((candidateProfileId) => {
@@ -2294,22 +2292,7 @@ test("completed reconciliation cleans every profile in a merge chain", async (t)
   });
 });
 
-test("projection cleanup failures remain retryable", async (t) => {
-  const originalDatabase = admin.database;
-  const originalFirestore = admin.firestore;
-  t.after(() => {
-    admin.database = originalDatabase;
-    admin.firestore = originalFirestore;
-  });
-  admin.firestore = mockProfileMergeTargets({});
-  admin.database = () => ({
-    ref: () => ({
-      transaction: async () => {
-        throw new Error("database unavailable");
-      },
-    }),
-  });
-
+test("projection cleanup failures remain retryable", async () => {
   await assert.rejects(
     reconcileCompletedWithdrawalProjections(
       {
@@ -2318,171 +2301,12 @@ test("projection cleanup failures remain retryable", async (t) => {
         eventId,
         prizeId,
       },
-      projectionDependencies(),
+      createProjectionDependencies({
+        transactionError: new Error("database unavailable"),
+      }),
     ),
     /database unavailable/,
   );
-});
-
-test("a late profile projection removes itself after withdrawal completion", async (t) => {
-  const originalDatabase = admin.database;
-  t.after(() => {
-    admin.database = originalDatabase;
-  });
-  const assignment = { eventId, prizeId, profileId, place: 1 };
-  let currentAssignment = assignment;
-  admin.database = () => ({
-    ref: (path) => {
-      if (path === `eventPrizeWithdrawals/${eventId}/${prizeId}`) {
-        return {
-          once: async () => ({
-            val: () => ({
-              status: "completed",
-              eventId,
-              prizeId,
-              assetAddress,
-            }),
-          }),
-        };
-      }
-      assert.equal(path, `profileEventPrizes/${profileId}/${eventId}`);
-      return {
-        transaction: async (update) => {
-          currentAssignment = update(currentAssignment);
-          return {
-            committed: true,
-            snapshot: { val: () => currentAssignment },
-          };
-        },
-      };
-    },
-  });
-
-  assert.equal(
-    await removeProfileEventPrizeAssignmentIfWithdrawalCompleted({
-      profileId,
-      eventId,
-      assignment,
-    }),
-    true,
-  );
-  assert.equal(currentAssignment, null);
-});
-
-test("late cleanup preserves a newer assignment for another prize", async (t) => {
-  const originalDatabase = admin.database;
-  t.after(() => {
-    admin.database = originalDatabase;
-  });
-  const completedAssignment = { eventId, prizeId, profileId, place: 1 };
-  const currentAssignment = {
-    eventId,
-    prizeId: "1111",
-    profileId,
-    place: 2,
-  };
-  let storedAssignment = currentAssignment;
-  admin.database = () => ({
-    ref: (path) => {
-      if (path === `eventPrizeWithdrawals/${eventId}/${prizeId}`) {
-        return {
-          once: async () => ({
-            val: () => ({
-              status: "completed",
-              eventId,
-              prizeId,
-              assetAddress,
-            }),
-          }),
-        };
-      }
-      return {
-        transaction: async (update) => {
-          storedAssignment = update(storedAssignment);
-          return {
-            committed: true,
-            snapshot: { val: () => storedAssignment },
-          };
-        },
-      };
-    },
-  });
-
-  assert.equal(
-    await removeProfileEventPrizeAssignmentIfWithdrawalCompleted({
-      profileId,
-      eventId,
-      assignment: completedAssignment,
-    }),
-    true,
-  );
-  assert.deepEqual(storedAssignment, currentAssignment);
-});
-
-test("merge cleanup rechecks completion after an uncommitted copy", async (t) => {
-  const originalDatabase = admin.database;
-  t.after(() => {
-    admin.database = originalDatabase;
-  });
-  const sourceProfileId = "profile-before-merge";
-  const targetProfileId = "profile-after-merge";
-  const targetPath = `profileEventPrizes/${targetProfileId}/${eventId}`;
-  const withdrawalPath = `eventPrizeWithdrawals/${eventId}/${prizeId}`;
-  let markerReadCount = 0;
-  let targetAssignment = {
-    eventId,
-    prizeId,
-    profileId: targetProfileId,
-    place: 1,
-    assignedAtMs: 10,
-  };
-  admin.database = () => ({
-    ref: (path) => {
-      if (path === withdrawalPath) {
-        return {
-          once: async () => ({
-            val: () => {
-              markerReadCount += 1;
-              return markerReadCount === 1
-                ? { status: "submitted" }
-                : { status: "completed", eventId, prizeId, assetAddress };
-            },
-          }),
-        };
-      }
-      assert.equal(path, targetPath);
-      return {
-        transaction: async (update) => {
-          const next = update(targetAssignment);
-          if (next === undefined) {
-            return { committed: false };
-          }
-          targetAssignment = next;
-          return {
-            committed: true,
-            snapshot: { val: () => next },
-          };
-        },
-      };
-    },
-  });
-
-  const copied = await copyProfileEventPrizeAssignment({
-    sourceProfileId,
-    targetProfileId,
-    eventId,
-    sourceAssignment: {
-      eventId,
-      prizeId,
-      profileId: sourceProfileId,
-      place: 1,
-      assignedAtMs: 10,
-    },
-  });
-
-  assert.equal(copied, false);
-  assert.equal(markerReadCount, 2);
-  assert.equal(targetAssignment, null);
 });
 
 test("completed merge cleanup removes only the matching target projection", async () => {

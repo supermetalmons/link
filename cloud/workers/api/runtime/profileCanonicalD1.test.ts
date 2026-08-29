@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   getProfileFallbackEmojiId,
@@ -28,6 +28,7 @@ import {
   type CanonicalProfileValue,
   type CanonicalRatingUpdateValue,
 } from "../src/profileCanonicalD1.ts";
+import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const testEnv = env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] };
 
@@ -142,33 +143,11 @@ async function resetCanonicalRows(db: D1Database): Promise<void> {
 
 describe("canonical profile D1 store", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyRetiredProfileMigrations(
       testEnv.PROFILE_DB,
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
+      "a".repeat(64),
     );
-    const importDigest = "a".repeat(64);
-    await testEnv.PROFILE_DB.batch([
-      testEnv.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET state = 'importing'
-         WHERE singleton = 1 AND state = 'firestore'`,
-      ),
-      testEnv.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET import_digest = ?, import_plan_version = 1
-         WHERE singleton = 1 AND state = 'importing'`,
-      ).bind(importDigest),
-      testEnv.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET state = 'frozen', imported_at_ms = 1
-         WHERE singleton = 1 AND state = 'importing'`,
-      ),
-      testEnv.PROFILE_DB.prepare(
-        `UPDATE profile_canonical_control
-         SET state = 'active'
-         WHERE singleton = 1 AND state = 'frozen'`,
-      ),
-    ]);
   });
 
   beforeEach(async () => {

@@ -4,32 +4,22 @@ import {
 } from "@mons/shared/auth";
 import { readStableCanonicalProfileAggregateByLogin } from "./profileCanonicalD1.ts";
 
-export type AuthRepository = {
-  getLinkedAuthMethods: (
-    uid: string,
-    firebaseIdToken: string,
-  ) => Promise<LinkedAuthMethodsResponse>;
-  getProfileClaimSource: (
-    uid: string,
-    firebaseIdToken: string,
-  ) => Promise<ProfileClaimSource>;
+export type AuthProfileRepository = {
+  getLinkedAuthMethods: (uid: string) => Promise<LinkedAuthMethodsResponse>;
+  getProfileClaimSource: (uid: string) => Promise<ProfileClaimSource>;
 };
 
 export type ProfileClaimSource = LinkedAuthMethodsResponse;
 
-export class FirestoreFailure extends Error {
+export class AuthProfileRepositoryFailure extends Error {
   constructor() {
     super("profile-repository-unavailable");
   }
 }
 
-export class LoginProfileConflict extends Error {
-  constructor() {
-    super("login-profile-conflict");
-  }
-}
-
-function createCanonicalAuthRepository(db: D1Database): AuthRepository {
+function createCanonicalAuthProfileRepository(
+  db: D1Database,
+): AuthProfileRepository {
   const linkedMethodsResponse = async (
     uid: string,
   ): Promise<LinkedAuthMethodsResponse> => {
@@ -51,7 +41,7 @@ function createCanonicalAuthRepository(db: D1Database): AuthRepository {
     const aggregate = resolved.aggregate;
     const profile = aggregate.profile;
     if (!profile || resolved.owner.profileId !== profile.profileId) {
-      throw new FirestoreFailure();
+      throw new AuthProfileRepositoryFailure();
     }
     const methodValues = Object.fromEntries(
       aggregate.authMethods.map((method) => [method.method, method.rawValue]),
@@ -75,9 +65,11 @@ function createCanonicalAuthRepository(db: D1Database): AuthRepository {
   };
 }
 
-export function createAuthRepository(
+export function createAuthProfileRepository(
   env: Env,
   dependencies: { d1?: D1Database } = {},
-): AuthRepository {
-  return createCanonicalAuthRepository(dependencies.d1 || env.PROFILE_DB);
+): AuthProfileRepository {
+  return createCanonicalAuthProfileRepository(
+    dependencies.d1 || env.PROFILE_DB,
+  );
 }

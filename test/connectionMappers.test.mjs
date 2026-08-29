@@ -25,14 +25,14 @@ const {
   readTimestampMillis,
 } = await import("../src/connection/valueNormalizers.ts");
 
-test("normalizes primitive Firebase and Firestore values", () => {
+test("normalizes primitive Firebase values", () => {
   assert.equal(normalizeString("value"), "value");
   assert.equal(normalizeString(2), "");
   assert.equal(normalizeStringOrNull(""), null);
   assert.equal(normalizeFiniteNumber("12.9"), 12);
   assert.equal(normalizeFiniteNumber("bad", 7), 7);
-  assert.equal(readTimestampMillis({ toMillis: () => 42.9 }), 42);
-  assert.equal(readTimestampMillis({ toMillis: () => NaN }), 0);
+  assert.equal(readTimestampMillis(42.9), 42);
+  assert.equal(readTimestampMillis({}), 0);
 });
 
 test("maps navigation games with legacy aliases and validation", () => {
@@ -43,7 +43,7 @@ test("maps navigation games with legacy aliases and validation", () => {
         status: "active",
         opponentEmojiId: "25",
         opponentDisplayName: "guest",
-        listSortAt: { toMillis: () => 1234 },
+        listSortAt: 1234,
       },
       "invite-1",
     ),

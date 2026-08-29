@@ -29,13 +29,9 @@ const CANONICAL_SORT_KEYS = [
 
 export type CanonicalProfileState = "active" | "retiring";
 
-export type CanonicalControlState =
-  "firestore" | "importing" | "frozen" | "active";
+export type CanonicalControlState = "frozen" | "active";
 
 export type CanonicalControlSnapshot = {
-  importDigest: string | null;
-  importedAtMs: number | null;
-  importPlanVersion: number | null;
   state: CanonicalControlState;
 };
 
@@ -276,9 +272,6 @@ const CANONICAL_PUBLIC_PROFILE_COLUMNS = `
 `;
 
 type CanonicalControlRow = {
-  import_digest: string | null;
-  imported_at_ms: number | null;
-  import_plan_version: number | null;
   state: string;
 };
 
@@ -532,29 +525,10 @@ export function parseCanonicalControlRow(
   const row = record(value) as CanonicalControlRow | null;
   if (!row) throw new CanonicalProfileCorruption();
   const state = row.state;
-  if (
-    state !== "firestore" &&
-    state !== "importing" &&
-    state !== "active" &&
-    state !== "frozen"
-  ) {
+  if (state !== "active" && state !== "frozen") {
     throw new CanonicalProfileCorruption();
   }
-  const importDigest = nullableString(row.import_digest);
-  const importPlanVersion = nullableSafeInteger(row.import_plan_version, 1);
-  const importedAtMs = nullableSafeInteger(row.imported_at_ms);
-  const hasImportPlan = importDigest !== null && importPlanVersion !== null;
-  if (
-    (importDigest !== null && !/^[a-f0-9]{64}$/.test(importDigest)) ||
-    (importDigest === null) !== (importPlanVersion === null) ||
-    (state === "firestore" && (hasImportPlan || importedAtMs !== null)) ||
-    (state === "importing" && importedAtMs !== null) ||
-    ((state === "active" || state === "frozen") &&
-      (!hasImportPlan || importedAtMs === null))
-  ) {
-    throw new CanonicalProfileCorruption();
-  }
-  return { state, importDigest, importPlanVersion, importedAtMs };
+  return { state };
 }
 
 export function parseCanonicalPublicProfileRow(
@@ -1004,8 +978,7 @@ export async function readCanonicalControl(
 ): Promise<CanonicalControlSnapshot> {
   const row = await db
     .prepare(
-      `SELECT state, import_digest, import_plan_version, imported_at_ms
-       FROM profile_canonical_control
+      `SELECT state FROM profile_canonical_control
        WHERE singleton = 1`,
     )
     .first<CanonicalControlRow>();

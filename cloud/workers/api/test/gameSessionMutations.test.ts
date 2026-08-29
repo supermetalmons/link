@@ -478,7 +478,7 @@ test("rejects missing, malformed, and unavailable invite role state", async () =
     return null;
   };
   ownershipUnavailable.findProfileId = async () => {
-    throw new Error("firestore-unavailable");
+    throw new Error("profile-repository-unavailable");
   };
   await assert.rejects(
     () =>

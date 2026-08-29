@@ -1,6 +1,5 @@
 const DEFAULT_LEADERBOARD_LIMIT = 15;
 const MAX_LEADERBOARD_LIMIT = 90;
-const ADMIN_VALUE_FLAGS = new Set(["--project", "--database-url"]);
 
 function parseLeaderboardLimit(argv) {
   if (argv.length === 0) {
@@ -27,31 +26,6 @@ function parseLeaderboardLimit(argv) {
   return limit;
 }
 
-function parseLeaderboardArgs(argv) {
-  const adminArgs = [];
-  const limitArgs = [];
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (!ADMIN_VALUE_FLAGS.has(arg)) {
-      limitArgs.push(arg);
-      continue;
-    }
-
-    const value = argv[index + 1];
-    if (!value || value.startsWith("--")) {
-      throw new Error(`${arg} requires a value.`);
-    }
-    adminArgs.push(arg, value);
-    index += 1;
-  }
-
-  return {
-    adminArgs,
-    limit: parseLeaderboardLimit(limitArgs),
-  };
-}
-
 function createLeaderboardHeading(metric, limit) {
   return `<b>top ${limit} ${metric}</b>\n\n`;
 }
@@ -60,6 +34,5 @@ module.exports = {
   DEFAULT_LEADERBOARD_LIMIT,
   MAX_LEADERBOARD_LIMIT,
   createLeaderboardHeading,
-  parseLeaderboardArgs,
   parseLeaderboardLimit,
 };

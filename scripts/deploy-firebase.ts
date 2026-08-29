@@ -61,17 +61,15 @@ function deployFirebase(
     spawn: spawnSync,
   },
 ): void {
-  for (const target of ["database", "firestore"] as const) {
-    const args = ["deploy", "--only", target, "--project", options.project];
-    dependencies.log(`[firebase] firebase ${args.join(" ")}`);
-    if (options.dryRun) continue;
-    const result = dependencies.spawn("firebase", args, {
-      cwd: dependencies.cloudDirectory,
-      stdio: "inherit",
-    });
-    if (!result || result.status !== 0) {
-      throw new Error(`Firebase ${target} deployment failed.`);
-    }
+  const args = ["deploy", "--only", "database", "--project", options.project];
+  dependencies.log(`[firebase] firebase ${args.join(" ")}`);
+  if (options.dryRun) return;
+  const result = dependencies.spawn("firebase", args, {
+    cwd: dependencies.cloudDirectory,
+    stdio: "inherit",
+  });
+  if (!result || result.status !== 0) {
+    throw new Error("Firebase database deployment failed.");
   }
 }
 

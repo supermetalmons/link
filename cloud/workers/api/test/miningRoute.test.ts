@@ -7,7 +7,6 @@ import {
   type MiningSnapshot,
 } from "@mons/shared/mining";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import { FirestoreFailure } from "../src/firestore.ts";
 import { handleMiningRoute } from "../src/miningRoute.ts";
 import type {
   MiningProfile,
@@ -488,7 +487,7 @@ test("sanitizes unexpected repository failures", async () => {
       now: () => NOW_MS,
       repository: repository({
         getProfile: async () => {
-          throw new FirestoreFailure();
+          throw new Error("profile-repository-unavailable");
         },
       }),
       verifyIdentity,

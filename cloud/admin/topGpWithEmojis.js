@@ -4,7 +4,7 @@ const { createProfileD1Reader } = require("./_d1");
 const { getDisplayNameFromAddress } = require("../functions/telegramDisplay");
 const {
   createLeaderboardHeading,
-  parseLeaderboardArgs,
+  parseLeaderboardLimit,
 } = require("./leaderboardCli");
 const {
   createDispatchers,
@@ -12,14 +12,7 @@ const {
   readBridgeSecret,
 } = require("./telegramQueueCli");
 
-async function logTopGpWithEmojis(
-  limit = 15,
-  adminArgs = process.argv.slice(2),
-  dependencies = {},
-) {
-  if (adminArgs.length > 0) {
-    throw new TypeError("Firebase target flags are not supported.");
-  }
+async function logTopGpWithEmojis(limit = 15, dependencies = {}) {
   const reader = dependencies.reader || createProfileD1Reader();
   const profiles = await reader.readLeaderboard("gp", limit);
   let output = createLeaderboardHeading("gp", limit);
@@ -56,9 +49,9 @@ async function logTopGpWithEmojis(
 
 async function main(argv = process.argv.slice(2)) {
   const { bridgeSecretFile, remainingArgs } = parseBridgeSecretFile(argv);
-  const { adminArgs, limit } = parseLeaderboardArgs(remainingArgs);
+  const limit = parseLeaderboardLimit(remainingArgs);
   const { sendCommand } = createDispatchers(readBridgeSecret(bridgeSecretFile));
-  await logTopGpWithEmojis(limit, adminArgs, { sendCommand });
+  await logTopGpWithEmojis(limit, { sendCommand });
 }
 
 if (require.main === module) {

@@ -6,8 +6,11 @@ const {
   EVENT_LOCK_ROOT,
   EVENT_LOCK_REFRESH_INTERVAL_MS,
   EVENT_LOCK_TTL_MS,
-  createEventLockManager,
-} = require("../functions/eventLocks");
+  createEventLockManagerCore,
+} = require("../functions/events/lockManagerCore");
+const {
+  runRtdbDecisionTransaction,
+} = require("../functions/rtdbDecisionTransaction");
 
 const clone = (value) =>
   value === undefined ? undefined : structuredClone(value);
@@ -83,8 +86,7 @@ const createManager = ({
   lockRoot,
 }) => {
   let idIndex = 0;
-  return createEventLockManager({
-    database,
+  return createEventLockManagerCore({
     now,
     createLockId: () => ids[idIndex++] || `lock-${idIndex}`,
     sleep,
@@ -92,25 +94,47 @@ const createManager = ({
     clearInterval,
     logger: logger || { error() {} },
     lockRoot,
+    transactPath: (path, updater) =>
+      runRtdbDecisionTransaction(database.ref(path), updater),
   });
 };
 
 test("validates configured lock roots and preserves the core default", () => {
   const database = createColdDatabase();
   assert.throws(
-    () => createEventLockManager({ database, lockRoot: "" }),
+    () =>
+      createEventLockManagerCore({
+        createLockId: () => "lock",
+        lockRoot: "",
+        transactPath: async () => ({ committed: false, value: null }),
+      }),
     /lockRoot must be a non-empty string/,
   );
   assert.throws(
-    () => createEventLockManager({ database, lockRoot: "/locks" }),
+    () =>
+      createEventLockManagerCore({
+        createLockId: () => "lock",
+        lockRoot: "/locks",
+        transactPath: async () => ({ committed: false, value: null }),
+      }),
     /lockRoot must be a valid RTDB path/,
   );
   assert.throws(
-    () => createEventLockManager({ database, lockRoot: "locks/nested" }),
+    () =>
+      createEventLockManagerCore({
+        createLockId: () => "lock",
+        lockRoot: "locks/nested",
+        transactPath: async () => ({ committed: false, value: null }),
+      }),
     /lockRoot must be a valid RTDB path/,
   );
   assert.throws(
-    () => createEventLockManager({ database, lockRoot: "locks\u0001child" }),
+    () =>
+      createEventLockManagerCore({
+        createLockId: () => "lock",
+        lockRoot: "locks\u0001child",
+        transactPath: async () => ({ committed: false, value: null }),
+      }),
     /lockRoot must be a valid RTDB path/,
   );
   assert.equal(EVENT_LOCK_ROOT, "eventLocks");

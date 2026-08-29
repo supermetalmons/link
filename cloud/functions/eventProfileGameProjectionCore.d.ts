@@ -23,7 +23,6 @@ export type EventProjectionResult = {
 export function createEventProfileGameProjectionCore(dependencies: {
   now?: () => number;
   repository: EventProfileGameProjectionRepository;
-  timestampFromMillis(millis: number): unknown;
   wait?(milliseconds: number): Promise<void>;
 }): {
   projectEvent(

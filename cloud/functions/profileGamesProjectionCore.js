@@ -209,12 +209,19 @@ const findFreshestSourceProjectionData = ({
 const createProfileGamesProjectionCore = ({
   logger = console,
   repository,
-  timestampFromMillis,
   wait = delay,
 }) => {
-  if (!repository || typeof timestampFromMillis !== "function") {
+  if (!repository) {
     throw new TypeError("profile games projection dependencies are required");
   }
+
+  const toTimestampMillis = (value) => {
+    const millis = readTimestampMillis(value);
+    if (millis === null) {
+      throw new TypeError("invalid projection timestamp");
+    }
+    return Math.max(1, millis);
+  };
 
   const retry = (read) => readWithRetries(read, undefined, undefined, wait);
 
@@ -249,7 +256,7 @@ const createProfileGamesProjectionCore = ({
         rawProfileId = profile ? profile.id : null;
       } catch (error) {
         profileQueryReadError = error;
-        logger.error("projector:profile-resolve:firestore-read-failed", {
+        logger.error("projector:profile-resolve:profile-read-failed", {
           loginUid: normalizedLoginUid,
           attempts: READ_RETRY_ATTEMPTS,
           error: error && error.message ? error.message : error,
@@ -644,13 +651,15 @@ const createProfileGamesProjectionCore = ({
         existingListSortMs,
       });
       const existingCreatedAt =
-        (existingDocData && existingDocData.createdAt) ||
-        (sourceProjectionData && sourceProjectionData.createdAt) ||
-        null;
+        readTimestampMillis(existingDocData && existingDocData.createdAt) ??
+        readTimestampMillis(
+          sourceProjectionData && sourceProjectionData.createdAt,
+        );
       const existingEndedAt =
-        (existingDocData && existingDocData.endedAt) ||
-        (sourceProjectionData && sourceProjectionData.endedAt) ||
-        null;
+        readTimestampMillis(existingDocData && existingDocData.endedAt) ??
+        readTimestampMillis(
+          sourceProjectionData && sourceProjectionData.endedAt,
+        );
       const projectionDocData = {
         ...commonProjection,
         ownerProfileId,
@@ -662,17 +671,22 @@ const createProfileGamesProjectionCore = ({
         opponentDisplayName: opponentName,
         opponentEmoji,
         opponentEmojiId: opponentEmoji,
-        listSortAt: timestampFromMillis(nextListSortMs),
-        createdAt: existingCreatedAt || timestampFromMillis(nowMs),
-        updatedAt: timestampFromMillis(nowMs),
+        listSortAt: toTimestampMillis(nextListSortMs),
+        createdAt:
+          existingCreatedAt === null
+            ? toTimestampMillis(nowMs)
+            : toTimestampMillis(existingCreatedAt),
+        updatedAt: toTimestampMillis(nowMs),
         endedAt:
           status === "ended"
-            ? existingEndedAt || timestampFromMillis(nowMs)
+            ? existingEndedAt === null
+              ? toTimestampMillis(nowMs)
+              : toTimestampMillis(existingEndedAt)
             : null,
         lastEventFingerprint: nextFingerprint,
         lastEventType: normalizeString(reason) || null,
         lastEventReason: normalizeString(reason) || null,
-        lastEventAt: timestampFromMillis(nowMs),
+        lastEventAt: toTimestampMillis(nowMs),
       };
       writes.push({
         type:

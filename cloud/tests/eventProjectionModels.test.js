@@ -111,16 +111,8 @@ test("game projection status keeps automatch, event rating, and rematch preceden
 });
 
 test("game projection normalization preserves timestamps, identity display, and list order", () => {
-  assert.equal(
-    readTimestampMillis({ _seconds: 12, _nanoseconds: 500_000_000 }),
-    12_500,
-  );
-  assert.equal(
-    readTimestampMillis({
-      __firestoreTimestamp: "1970-01-01T00:00:12.500Z",
-    }),
-    12_500,
-  );
+  assert.equal(readTimestampMillis(12_500.9), 12_500);
+  assert.equal(readTimestampMillis({ milliseconds: 12_500 }), null);
   assert.equal(getProfileDisplayName({ username: " player " }), "player");
   assert.equal(
     getProfileDisplayName({ eth: "0x1234567890abcdef" }),
