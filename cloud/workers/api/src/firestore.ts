@@ -4,6 +4,12 @@ import {
   getLinkedAuthMethodsFromProfile,
   type LinkedAuthMethodsResponse,
 } from "@mons/shared/auth";
+import { readStableCanonicalProfileAggregateByLogin } from "./profileCanonicalD1.ts";
+import {
+  profileStorageUsesD1,
+  readProfileStorageMode,
+  type ProfileStorageMode,
+} from "./profileStorageMode.ts";
 
 const FIRESTORE_PROJECT_ID = "mons-link";
 const FIRESTORE_DATABASE_ID = "(default)";
@@ -29,7 +35,6 @@ export class FirestoreFailure extends Error {
     super("firestore-unavailable");
   }
 }
-
 export class LoginProfileConflict extends Error {
   constructor() {
     super("login-profile-conflict");
@@ -84,7 +89,7 @@ function readProfileField(
   return readFirestoreString(fields, name);
 }
 
-export function createAuthRepository(
+function createFirestoreAuthRepository(
   _env: Env,
   {
     fetcher = fetch,
@@ -190,4 +195,68 @@ export function createAuthRepository(
       return linkedMethodsResponse(profiles[0] || null);
     },
   };
+}
+
+function createCanonicalAuthRepository(db: D1Database): AuthRepository {
+  const linkedMethodsResponse = async (
+    uid: string,
+  ): Promise<LinkedAuthMethodsResponse> => {
+    const resolved = await readStableCanonicalProfileAggregateByLogin(db, uid);
+    if (!resolved) {
+      const linkedMethods = {
+        apple: false,
+        eth: false,
+        sol: false,
+        x: false,
+      };
+      return {
+        ok: true,
+        profileId: null,
+        linkedMethods,
+        appleLinked: false,
+      };
+    }
+    const aggregate = resolved.aggregate;
+    const profile = aggregate.profile;
+    if (!profile || resolved.owner.profileId !== profile.profileId) {
+      throw new FirestoreFailure();
+    }
+    const methodValues = Object.fromEntries(
+      aggregate.authMethods.map((method) => [method.method, method.rawValue]),
+    );
+    const linkedMethods = getLinkedAuthMethodsFromProfile({
+      appleSub: methodValues.apple,
+      eth: methodValues.eth,
+      sol: methodValues.sol,
+      xUserId: methodValues.x,
+    });
+    return {
+      ok: true,
+      profileId: profile.profileId,
+      linkedMethods,
+      appleLinked: linkedMethods.apple,
+    };
+  };
+  return {
+    getLinkedAuthMethods: (uid) => linkedMethodsResponse(uid),
+    getProfileClaimSource: (uid) => linkedMethodsResponse(uid),
+  };
+}
+
+export function createAuthRepository(
+  env: Env,
+  dependencies: {
+    d1?: D1Database;
+    fetcher?: typeof fetch;
+    getAccessToken?: typeof createGoogleAccessToken;
+    now?: () => number;
+    storageMode?: ProfileStorageMode;
+    timeoutMs?: number;
+  } = {},
+): AuthRepository {
+  const storageMode = dependencies.storageMode || readProfileStorageMode(env);
+  if (profileStorageUsesD1(storageMode)) {
+    return createCanonicalAuthRepository(dependencies.d1 || env.PROFILE_DB);
+  }
+  return createFirestoreAuthRepository(env, dependencies);
 }

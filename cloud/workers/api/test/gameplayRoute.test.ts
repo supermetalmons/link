@@ -13,7 +13,7 @@ import type {
   GameplayRepository,
   RatingRepository,
 } from "../src/gameplayRepository.ts";
-import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const env = {
   ...TELEGRAM_TEST_ENV,
@@ -572,6 +572,55 @@ test("routes authenticated CORS and rejects methods before authentication", asyn
     mode: "pending",
     matchedImmediately: false,
   });
+});
+
+test("freezes gameplay mutations while keeping gameplay reads available", async () => {
+  let repositoryWrites = 0;
+  const frozenEnv = withProfileControl(env, "importing");
+  const mutation = await handleGameplayRoute(
+    request("/automatch/cancel", { body: {} }),
+    frozenEnv,
+    context(),
+    {
+      repository: repository({
+        getRtdbPath: async () => {
+          repositoryWrites++;
+          return null;
+        },
+      }),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(mutation.status, 503);
+  assert.equal(mutation.headers.get("Retry-After"), "60");
+  assert.deepEqual(await mutation.json(), {
+    ok: false,
+    error: "unavailable",
+    message: "profile-writes-disabled",
+  });
+  assert.equal(repositoryWrites, 0);
+
+  const read = await handleGameplayRoute(
+    request("/navigation/games/read", {
+      body: { limit: 10, cursor: null },
+    }),
+    frozenEnv,
+    context(),
+    {
+      repository: repository({
+        getRtdbPath: async (path) =>
+          path === `players/${identity.uid}/profile` ? "profile-1" : null,
+      }),
+      readNavigationPage: async () => ({
+        ok: true,
+        items: [],
+        nextCursor: null,
+        hasMore: false,
+      }),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(read.status, 200);
 });
 
 test("committed gameplay does not wait for projection Queues", async () => {

@@ -13,6 +13,7 @@ import {
   type EventPrizeWithdrawalWorkflowInput,
   type EventPrizeWithdrawalWorkflowOutput,
 } from "./eventPrizeWithdrawal.ts";
+import { assertProfileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
 
 function toRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -57,7 +58,9 @@ type WorkflowDependencies = {
 };
 
 async function preflightEventPrizeWithdrawal(env: Env): Promise<void> {
-  const runtime = await createEventPrizeRuntimeDependencies(env);
+  const runtime = await createEventPrizeRuntimeDependencies(env, {
+    allowFrozen: true,
+  });
   const core = toRecord(runtime.createEventPrizeUmi("core"));
   const compressed = toRecord(runtime.createEventPrizeUmi("compressed"));
   const coreRpc = toRecord(core?.rpc);
@@ -98,6 +101,21 @@ export async function runEventPrizeWithdrawalWorkflow(
   if (!params) {
     throw new NonRetryableError("invalid-event-prize-withdrawal-payload");
   }
+  await step.do(
+    "wait for profile writes",
+    {
+      retries: {
+        limit: 10_000,
+        delay: "1 minute",
+        backoff: "constant",
+      },
+      timeout: "30 seconds",
+    } satisfies WorkflowStepConfig,
+    async () => {
+      await assertProfileBackgroundMutationsEnabled(env);
+      return { ready: true as const };
+    },
+  );
   const config = {
     retries: {
       limit: 3,
@@ -107,6 +125,7 @@ export async function runEventPrizeWithdrawalWorkflow(
     timeout: "2 minutes",
   } satisfies WorkflowStepConfig;
   return step.do("execute event prize withdrawal", config, async () => {
+    await assertProfileBackgroundMutationsEnabled(env);
     try {
       return await dependencies.execute(env, params);
     } catch (error) {

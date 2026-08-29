@@ -1,8 +1,14 @@
 const { randomBytes } = require("node:crypto");
 const { readFileSync, statSync } = require("node:fs");
 const {
+  isLinkedAuthMethodsResponse,
+}: typeof import("@mons/shared/auth") = require("@mons/shared/auth");
+const {
   isExactNftApiResponse,
 }: typeof import("@mons/shared/nfts") = require("@mons/shared/nfts");
+const {
+  isReadNavigationGamesResponse,
+}: typeof import("@mons/shared/navigation") = require("@mons/shared/navigation");
 const {
   isLeaderboardReadResponse,
   isProfileLookupResponse,
@@ -23,6 +29,8 @@ const DEFAULT_SMOKE_PROFILE = {
 
 type Options = {
   baseUrl: string;
+  readOnlyAuthToken?: string | null;
+  readOnly?: boolean;
   smokeProfile: ProfileSmokeFixture;
   smokeSol: string;
 };
@@ -37,7 +45,33 @@ type Dependencies = {
 };
 
 function usage(): string {
-  return "Usage: npm run smoke:api -- --base-url <https-url> [--smoke-sol <wallet>] [--smoke-profile-fixture <protected-json-file>]";
+  return "Usage: npm run smoke:api -- --base-url <https-url> [--read-only --auth-token-fixture <protected-json-file>] [--smoke-sol <wallet>] [--smoke-profile-fixture <protected-json-file>]";
+}
+
+function readAuthTokenFixture(path: string): string {
+  let value: unknown;
+  try {
+    const stat = statSync(path);
+    if (!stat.isFile() || stat.size > 16_384 || (stat.mode & 0o077) !== 0) {
+      throw new Error("invalid-auth-token-fixture");
+    }
+    value = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch {
+    throw new TypeError(usage());
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(usage());
+  }
+  const fields = value as Record<string, unknown>;
+  const idToken = typeof fields.idToken === "string" ? fields.idToken : "";
+  if (
+    Object.keys(fields).length !== 1 ||
+    idToken.length > 16_000 ||
+    !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(idToken)
+  ) {
+    throw new TypeError(usage());
+  }
+  return idToken;
 }
 
 function readProfileSmokeFixture(path: string): ProfileSmokeFixture {
@@ -108,15 +142,23 @@ function normalizeBaseUrl(value: string): string {
 
 function parseArgs(argv: string[]): Options {
   let baseUrl = "";
+  let readOnlyAuthToken: string | null = null;
+  let readOnly = false;
   let smokeProfile: ProfileSmokeFixture = DEFAULT_SMOKE_PROFILE;
   let smokeProfileOverridden = false;
   let smokeSol = DEFAULT_SMOKE_SOL;
   let smokeSolOverridden = false;
   for (let index = 0; index < argv.length; index += 1) {
     const name = argv[index];
+    if (name === "--read-only") {
+      if (readOnly) throw new TypeError(usage());
+      readOnly = true;
+      continue;
+    }
     const value = argv[index + 1];
     if (
       (name !== "--base-url" &&
+        name !== "--auth-token-fixture" &&
         name !== "--smoke-sol" &&
         name !== "--smoke-profile-fixture") ||
       !value ||
@@ -128,6 +170,9 @@ function parseArgs(argv: string[]): Options {
     if (name === "--base-url") {
       if (baseUrl) throw new TypeError(usage());
       baseUrl = normalizeBaseUrl(value);
+    } else if (name === "--auth-token-fixture") {
+      if (readOnlyAuthToken) throw new TypeError(usage());
+      readOnlyAuthToken = readAuthTokenFixture(value);
     } else if (name === "--smoke-sol") {
       if (smokeSolOverridden) throw new TypeError(usage());
       smokeSol = value.trim();
@@ -138,10 +183,10 @@ function parseArgs(argv: string[]): Options {
       smokeProfileOverridden = true;
     }
   }
-  if (!baseUrl || !smokeSol) {
+  if (!baseUrl || !smokeSol || readOnly !== (readOnlyAuthToken !== null)) {
     throw new TypeError(usage());
   }
-  return { baseUrl, smokeProfile, smokeSol };
+  return { baseUrl, readOnly, readOnlyAuthToken, smokeProfile, smokeSol };
 }
 
 async function readBody(response: Response): Promise<string> {
@@ -241,25 +286,70 @@ async function firebaseIdentityRequest(
   return payload as Record<string, unknown>;
 }
 
+async function smokeFrozenProfileWrite(
+  baseUrl: string,
+  idToken: string,
+  dependencies: Dependencies,
+): Promise<void> {
+  const result = await request(
+    `${baseUrl}/profiles/username`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        Origin: ORIGIN,
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    },
+    503,
+    dependencies,
+  );
+  let payload: unknown;
+  try {
+    payload = parseJson(result.body);
+  } catch {
+    throw new Error("Profile freeze smoke response was invalid.");
+  }
+  const fields =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : null;
+  if (
+    result.response.headers.get("Retry-After") !== "60" ||
+    !fields ||
+    Object.keys(fields).length !== 3 ||
+    fields.ok !== false ||
+    fields.error !== "unavailable" ||
+    fields.message !== "profile-writes-disabled"
+  ) {
+    throw new Error("Profile freeze smoke response was invalid.");
+  }
+}
+
 async function smokeAuthenticatedAuthState(
   baseUrl: string,
   smokeProfile: ProfileSmokeFixture,
   dependencies: Dependencies,
+  existingIdToken?: string,
 ): Promise<void> {
-  const session = await firebaseIdentityRequest(
-    "accounts:signUp",
-    { returnSecureToken: true },
-    dependencies,
-  );
+  const session = existingIdToken
+    ? null
+    : await firebaseIdentityRequest(
+        "accounts:signUp",
+        { returnSecureToken: true },
+        dependencies,
+      );
   const idToken =
-    typeof session.idToken === "string" ? session.idToken.trim() : "";
+    existingIdToken ||
+    (typeof session?.idToken === "string" ? session.idToken.trim() : "");
   const localId =
-    typeof session.localId === "string" ? session.localId.trim() : "";
+    typeof session?.localId === "string" ? session.localId.trim() : "";
   if (!idToken) {
     throw new Error("Firebase anonymous smoke response was incomplete.");
   }
   try {
-    if (!localId) {
+    if (!existingIdToken && !localId) {
       throw new Error("Firebase anonymous smoke response was incomplete.");
     }
     const headers = {
@@ -267,56 +357,78 @@ async function smokeAuthenticatedAuthState(
       Origin: ORIGIN,
       "Content-Type": "application/json",
     };
-    const intent = await request(
-      `${baseUrl}/auth/intents`,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ method: "x" }),
-      },
+    const methods = await request(
+      `${baseUrl}/auth/methods`,
+      { method: "GET", headers },
       200,
       dependencies,
     );
-    const intentPayload = parseJson(intent.body) as Record<string, unknown>;
-    const intentId =
-      typeof intentPayload?.intentId === "string" ? intentPayload.intentId : "";
+    const methodsPayload = parseJson(methods.body);
     if (
-      intentPayload?.ok !== true ||
-      !/^[A-Za-z0-9_-]{24}$/.test(intentId) ||
-      !Number.isSafeInteger(intentPayload.expiresAtMs)
+      !isLinkedAuthMethodsResponse(methodsPayload) ||
+      methodsPayload.profileId !==
+        (existingIdToken ? smokeProfile.profileId : null)
     ) {
-      throw new Error("Authenticated auth-intent smoke response was invalid.");
+      throw new Error("Auth ownership smoke response was invalid.");
     }
-    const flow = await request(
-      `${baseUrl}/auth/x/flows`,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          consentSource: "signin",
-          intentId,
-          returnUrl: "https://mons.link/",
-        }),
-      },
-      200,
-      dependencies,
-    );
-    const flowPayload = parseJson(flow.body) as Record<string, unknown>;
-    const flowId =
-      typeof flowPayload?.flowId === "string" ? flowPayload.flowId : "";
-    let authUrl: URL;
-    try {
-      authUrl = new URL(String(flowPayload?.authUrl || ""));
-    } catch {
-      throw new Error("Authenticated X-flow smoke response was invalid.");
-    }
-    if (
-      flowPayload?.ok !== true ||
-      !/^[A-Za-z0-9_-]{24}$/.test(flowId) ||
-      authUrl.origin !== "https://x.com" ||
-      authUrl.searchParams.get("state") !== flowId
-    ) {
-      throw new Error("Authenticated X-flow smoke response was invalid.");
+    if (existingIdToken) {
+      await smokeFrozenProfileWrite(baseUrl, idToken, dependencies);
+    } else {
+      const intent = await request(
+        `${baseUrl}/auth/intents`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ method: "x" }),
+        },
+        200,
+        dependencies,
+      );
+      const intentPayload = parseJson(intent.body) as Record<string, unknown>;
+      const intentId =
+        typeof intentPayload?.intentId === "string"
+          ? intentPayload.intentId
+          : "";
+      if (
+        intentPayload?.ok !== true ||
+        !/^[A-Za-z0-9_-]{24}$/.test(intentId) ||
+        !Number.isSafeInteger(intentPayload.expiresAtMs)
+      ) {
+        throw new Error(
+          "Authenticated auth-intent smoke response was invalid.",
+        );
+      }
+      const flow = await request(
+        `${baseUrl}/auth/x/flows`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            consentSource: "signin",
+            intentId,
+            returnUrl: "https://mons.link/",
+          }),
+        },
+        200,
+        dependencies,
+      );
+      const flowPayload = parseJson(flow.body) as Record<string, unknown>;
+      const flowId =
+        typeof flowPayload?.flowId === "string" ? flowPayload.flowId : "";
+      let authUrl: URL;
+      try {
+        authUrl = new URL(String(flowPayload?.authUrl || ""));
+      } catch {
+        throw new Error("Authenticated X-flow smoke response was invalid.");
+      }
+      if (
+        flowPayload?.ok !== true ||
+        !/^[A-Za-z0-9_-]{24}$/.test(flowId) ||
+        authUrl.origin !== "https://x.com" ||
+        authUrl.searchParams.get("state") !== flowId
+      ) {
+        throw new Error("Authenticated X-flow smoke response was invalid.");
+      }
     }
     let lookupProfileId = "";
     for (const type of [
@@ -383,6 +495,19 @@ async function smokeAuthenticatedAuthState(
     ) {
       throw new Error("Profile login lookup smoke response was invalid.");
     }
+    const navigation = await request(
+      `${baseUrl}/navigation/games/read`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ limit: 1, cursor: null }),
+      },
+      200,
+      dependencies,
+    );
+    if (!isReadNavigationGamesResponse(parseJson(navigation.body))) {
+      throw new Error("Navigation read smoke response was invalid.");
+    }
     const roleInviteId = `smoke-${dependencies.randomState()}`;
     const role = await request(
       `${baseUrl}/invites/role/read`,
@@ -411,7 +536,13 @@ async function smokeAuthenticatedAuthState(
       throw new Error("Invite role smoke response was invalid.");
     }
   } finally {
-    await firebaseIdentityRequest("accounts:delete", { idToken }, dependencies);
+    if (!existingIdToken) {
+      await firebaseIdentityRequest(
+        "accounts:delete",
+        { idToken },
+        dependencies,
+      );
+    }
   }
 }
 
@@ -423,6 +554,12 @@ async function smokeApi(
     log: console.log,
   },
 ): Promise<void> {
+  if (
+    (options.readOnly === true && !options.readOnlyAuthToken) ||
+    (options.readOnly !== true && !!options.readOnlyAuthToken)
+  ) {
+    throw new Error("Read-only smoke requires an existing auth token fixture.");
+  }
   const nftUrl = `${options.baseUrl}/nfts`;
   const preflight = await request(
     nftUrl,
@@ -510,6 +647,7 @@ async function smokeApi(
     options.baseUrl,
     options.smokeProfile,
     dependencies,
+    options.readOnlyAuthToken || undefined,
   );
 
   for (const path of [
@@ -596,7 +734,9 @@ module.exports = {
   DEFAULT_SMOKE_PROFILE,
   DEFAULT_SMOKE_SOL,
   parseArgs,
+  readAuthTokenFixture,
   readProfileSmokeFixture,
   smokeApi,
   smokeAuthenticatedAuthState,
+  smokeFrozenProfileWrite,
 };

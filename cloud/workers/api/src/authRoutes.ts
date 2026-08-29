@@ -24,6 +24,7 @@ import {
 import {
   AuthApiFailure,
   authErrorResponse,
+  isProfileWritesDisabledFailure,
   toAuthApiFailure,
 } from "./authErrors.ts";
 import {
@@ -46,9 +47,10 @@ import {
   handleAuthMutation,
   type AuthMutationDependencies,
 } from "./authMutations.ts";
-import { secureAlphanumericId, secureRandomBytes } from "./authRandom.ts";
 import { authMutationsDisabled } from "./authPolicy.ts";
+import { secureAlphanumericId, secureRandomBytes } from "./authRandom.ts";
 import { scheduleProfileReadProjection } from "./profileReadProjection.ts";
+import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 
 const AUTH_INTENT_TTL_MS = 5 * 60 * 1_000;
 const CREATE_ID_ATTEMPTS = 3;
@@ -261,15 +263,15 @@ export async function handleAuthRoute(
     const identity = await (
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
-    if (
-      request.method === "POST" &&
-      authMutationsDisabled(env.AUTH_MUTATIONS_DISABLED)
-    ) {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        "auth-mutations-disabled",
-      );
+    if (request.method === "POST") {
+      await assertProfileMutationAllowed(env);
+      if (authMutationsDisabled(env.AUTH_MUTATIONS_DISABLED)) {
+        throw new AuthApiFailure(
+          409,
+          "failed-precondition",
+          "auth-mutations-disabled",
+        );
+      }
     }
     const repository = dependencies.repository || createAuthRepository(env);
     const stateRepository =
@@ -346,7 +348,7 @@ export async function handleAuthRoute(
     throw new AuthApiFailure(404, "not-found", "not-found");
   } catch (error) {
     const failure = toAuthApiFailure(error);
-    if (failure.status >= 500) {
+    if (failure.status >= 500 && !isProfileWritesDisabledFailure(failure)) {
       const kind =
         error instanceof AuthStateConflict
           ? "auth-state-conflict"

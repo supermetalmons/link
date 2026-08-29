@@ -9,11 +9,22 @@ import {
   createGameplayRepository,
   type GameplayRepository,
 } from "./gameplayRepository.ts";
+import {
+  readCanonicalMergeTarget,
+  readCanonicalProfileByLogin,
+} from "./profileCanonicalD1.ts";
+import {
+  profileStorageUsesD1,
+  readProfileStorageMode,
+  type ProfileStorageMode,
+} from "./profileStorageMode.ts";
 
 type ProfileEventPrizeOwnerDependencies = {
   firestore?: Pick<AuthFirestoreClient, "get" | "query">;
+  profileDb?: D1Database;
   rtdb?: Pick<GameplayRepository, "getRtdbPath">;
   signal?: AbortSignal;
+  storageMode?: ProfileStorageMode;
 };
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -30,9 +41,14 @@ export function createProfileEventPrizeOwnerResolver(
   env: Env,
   dependencies: ProfileEventPrizeOwnerDependencies = {},
 ): (input: { eventId: string; profileId: string }) => Promise<string> {
-  const firestore =
-    dependencies.firestore ||
-    createAuthFirestoreClient(env, { signal: dependencies.signal });
+  const useCanonical = profileStorageUsesD1(
+    dependencies.storageMode || readProfileStorageMode(env),
+  );
+  const firestore = useCanonical
+    ? dependencies.firestore
+    : dependencies.firestore ||
+      createAuthFirestoreClient(env, { signal: dependencies.signal });
+  const profileDb = dependencies.profileDb || env.PROFILE_DB;
   const rtdb = dependencies.rtdb || createGameplayRepository(env);
   return async ({ eventId, profileId }) => {
     const sourceProfileId = cleanString(profileId);
@@ -42,11 +58,16 @@ export function createProfileEventPrizeOwnerResolver(
     const mergePath = await resolveProfileMergeTargetPath({
       profileId: sourceProfileId,
       readMergeTarget: async (candidateProfileId: string) =>
-        (
-          await firestore.get(
-            authDocumentName("profileMergeTargets", candidateProfileId),
-          )
-        )?.fields || null,
+        useCanonical
+          ? await readCanonicalMergeTarget(profileDb, candidateProfileId).then(
+              (target) =>
+                target ? { targetProfileId: target.targetProfileId } : null,
+            )
+          : (
+              await firestore!.get(
+                authDocumentName("profileMergeTargets", candidateProfileId),
+              )
+            )?.fields || null,
     });
     const mergeTargetProfileId = mergePath.at(-1) || sourceProfileId;
     if (mergeTargetProfileId !== sourceProfileId) {
@@ -63,7 +84,13 @@ export function createProfileEventPrizeOwnerResolver(
     if (!loginUid) {
       return sourceProfileId;
     }
-    const profiles = await firestore.query(
+    if (useCanonical) {
+      return (
+        (await readCanonicalProfileByLogin(profileDb, loginUid))?.profileId ||
+        sourceProfileId
+      );
+    }
+    const profiles = await firestore!.query(
       "users",
       authFieldFilter("logins", "ARRAY_CONTAINS", loginUid),
       2,

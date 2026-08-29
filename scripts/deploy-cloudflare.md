@@ -9,7 +9,7 @@ Run commands from the repository root with Node.js 24 and Java 21 or newer. Fire
 - `cloud/workers/api/auth-state-migrations/` owns the `mons-link-auth-state` D1 schema for auth intents and X redirect flows.
 - `cloud/workers/api/telegram-migrations/` owns the `mons-link-telegram` D1 schema for Telegram delivery, recovery, and announcement receipts.
 - `cloud/workers/api/event-prize-withdrawal-migrations/` owns the `mons-link-event-prize-withdrawals` D1 schema and storage-mode fence for Solana prize withdrawals.
-- `cloud/workers/api/profile-migrations/` owns the `mons-link-profiles` D1 read-model schema for profile lookup and leaderboards.
+- `cloud/workers/api/profile-migrations/` owns both the retained profile read model and the additive canonical profile schema in `mons-link-profiles` D1.
 - `cloud/workers/api/release.env` stays empty. It prevents release commands from loading developer environment files.
 - Encrypted secrets stay in Cloudflare. Their required names are declared in the API Wrangler configuration.
 - Do not edit production Worker configuration in the Cloudflare Dashboard. Review and deploy the tracked configuration.
@@ -55,34 +55,6 @@ The five-minute Worker schedule removes expired created/processing flows and orp
 
 ## API Worker release
 
-Apply the profile read-model schema before releasing a Worker version that includes `PROFILE_DB`:
-
-```sh
-npx wrangler d1 migrations apply mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-```
-
-Before applying profile migration `0005`, promote the tagged Firestore-mode rollback version. Keep reads on Firestore while the schema-v2 Worker reconciles and verification passes; only then promote D1 mode. After `0005`, do not roll back to a schema-v1 D1 version because it uses the retired login-mapping table.
-
-`PROFILE_READ_MODE` is tracked in `cloud/workers/api/wrangler.jsonc` and accepts only `firestore` or `d1`. Invalid values fail closed. Keep it on `firestore` while validating projection delivery and reconciliation, then promote the exact verified code in `d1` mode. Do not create a Dashboard override.
-
-Backfill and verify without printing profile contents. The helper is locked to the production `mons-link` Firebase project because its Wrangler target is the production D1 database:
-
-```sh
-npm run migrate:profile-reads -- --dry-run --project mons-link
-npm run migrate:profile-reads -- --execute --project mons-link
-npm run migrate:profile-reads -- --verify --project mons-link
-```
-
-The `mons-link-profile-projection` Queue carries deduplicated profile IDs after committed Worker mutations. Delivery is best effort: the consumer rereads Firestore and applies the latest version, while the five-minute schedule scans all Firestore profile metadata and re-enqueues missing or version-mismatched projections in batches of at most 100. Apparent deletions are rechecked against Firestore before a version-fenced tombstone is applied. Caught infrastructure failures are acknowledged and recovered by Cron reconciliation. Validation failures remain fenced until the canonical profile is corrected or the projection schema changes. The configured platform retry applies only when the consumer invocation fails unexpectedly.
-
-A relevant `profile_projection_failures` row makes the affected D1 profile or login read return the sanitized profile-service error, while any failure globally fences leaderboards. D1 read errors never fall back to Firestore. Retain the existing outbox documents and index, profile projection DLQ, tombstones, failure table, Queue, migrations, and D1 data for rollback compatibility, but do not use them as active recovery mechanisms.
-
-First upload and promote the simplified Worker with tracked mode `firestore`, deploy its triggers, and record that Version ID for rollback. Require two consecutive successful five-minute reconciliation runs, an empty active Queue backlog, no projection failures, matching profile/login/version counts and digests, and successful profile, login, and all seven leaderboard smoke checks. Then change the tracked mode to `d1`, regenerate Worker types, run `npm run check:api`, `npm run check:tooling`, and `npm run check:all`, and upload and smoke that exact candidate before promoting it. After promotion, smoke production and rerun remote verification.
-
-Use Git tag `profile-d1-firestore-26f7ab59` for the retained Firestore rollback source and `profile-d1-cutover-84135e82` for the initial D1 cutover source. Custom Worker logs use the steady-state `0.1` sampling rate after cutover verification.
-
-Rollback by promoting the retained simplified `firestore`-mode Version ID. Keep all profile projection infrastructure and data intact so reconciliation continues while reads are rolled back.
-
 Upload and smoke a version before it receives traffic:
 
 The smoke command carries reviewed non-secret production defaults for one canonical login/profile mapping and one Solana wallet. Use `--smoke-sol` and `--smoke-profile-fixture` only when explicitly testing alternate values.
@@ -101,6 +73,102 @@ npm run smoke:api -- --base-url https://api.mons.link
 ```
 
 `upload:api` uses `wrangler versions upload --strict`; it does not send traffic to the candidate. `promote:api` deploys the explicit Version ID to 100% of traffic without prompting. `deploy:api:triggers` applies the tracked route, Cron, and Queue consumer configuration. Routine code-only releases may omit the trigger command when that configuration is unchanged.
+
+## Canonical profile D1 cutover
+
+This is a forward-only cutover implemented by two reviewed commits. Commit 1 is the
+Firestore maintenance bridge and one-shot importer. Commit 2 is the permanent
+D1-only Worker. No profile runtime returns to Firestore after `begin-import`.
+
+The shared control states are:
+
+| State       | Commit 1 bridge                     | Commit 2 D1 Worker                  |
+| ----------- | ----------------------------------- | ----------------------------------- |
+| `firestore` | Reads and writes the current source | Not deployable in this state        |
+| `importing` | Reads continue; all writers freeze  | Not deployable in this state        |
+| `frozen`    | Reads continue; all writers freeze  | Canonical reads; all writers freeze |
+| `active`    | Old bridge writers remain blocked   | Canonical reads and writes          |
+
+Only `firestore → importing → frozen → active` and `active → frozen` are
+allowed. HTTP writes return `503 profile-writes-disabled` with `Retry-After:
+60` while blocked. Profile Queue messages retry without acknowledgement,
+profile Cron work pauses, and every mutating Workflow step rechecks control.
+Auth-state expiry, game-receipt cleanup, and unrelated Telegram delivery remain
+independent. `AUTH_MUTATIONS_DISABLED` remains a separate auth-maintenance
+switch.
+
+Run local validation and privacy-safe source preflight before the maintenance
+window:
+
+```sh
+npm run check:all
+npm run migrate:profile-canonical -- --dry-run --project mons-link
+```
+
+Dry-run builds the complete deterministic plan and validates ownership,
+topology, D1 row size, SQL, parameters, and serialized request batches without
+creating a D1 client or writing either store. Oversized legacy archives and all
+other blockers must be fixed before continuing.
+
+Apply the additive schema and deploy Commit 1 with control still in
+`firestore`. Upload Commit 2 but do not promote it yet. Prepare the protected
+read-only smoke fixture and an explicit controlled mutation plus identical
+replay.
+
+Begin the one-way maintenance window:
+
+```sh
+npx wrangler queues pause-delivery mons-link-auth-recovery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-profile-game-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-profile-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-telegram-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-telegram-delivery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run manage:event-prize-withdrawals -- --freeze
+npm run manage:profile-canonical -- --begin-import
+```
+
+Wait more than 15 minutes and inspect every page for both profile Workflow
+types. `rollingBack` and `unknown` are blockers: wait and re-inspect them. Do
+not continue until every remaining instance is `complete`, `errored`, or
+`terminated`.
+
+Run the one-shot import:
+
+```sh
+npm run migrate:profile-canonical -- --execute --project mons-link
+npm run migrate:profile-canonical -- --verify --project mons-link
+npm run migrate:profile-canonical -- --verify-d1
+```
+
+`--execute` reads Firestore twice, claims a private digest and plan version,
+runs guarded idempotent batches, rereads Firestore, verifies exact parity and
+query plans, then moves control from `importing` to `frozen`. If interrupted,
+rerun the same command from batch one. A different digest or plan version fails
+closed. Private digests and identity values are never printed.
+
+While control is `frozen`, run Commit 2's preview read-only smoke, promote that
+exact D1-only version, and repeat the production read-only smoke. Then enable
+writes, run the controlled mutation and identical replay, and require exactly
+one application:
+
+```sh
+npm run manage:profile-canonical -- --resume
+# run the reviewed mutation and identical replay here
+npm run manage:profile-canonical -- --freeze
+npm run migrate:profile-canonical -- --verify-d1
+npm run manage:profile-canonical -- --resume
+npm run smoke:api -- --base-url https://api.mons.link
+```
+
+Resume withdrawals and all paused Queues only after verification and smoke
+pass. Revoke runtime Datastore permissions while retaining Firebase Auth and
+RTDB access. From `begin-import` onward, incidents freeze D1 and fix forward;
+a reviewed D1 Time Travel restore is exceptional and never restores a
+Firestore-writing runtime.
+
+Keep Firestore deny-write/read-only for 30 days as an audit snapshot. It is not
+a runtime fallback. After the retention gate, remove the archived collections,
+Firestore deployment configuration, and remaining audit-only migration code.
 
 ## Event-prize withdrawal D1 operations
 
@@ -175,8 +243,8 @@ After promoting a candidate API version and before switching the frontend, run t
 
 ```sh
 event_prize_preflight_id="preflight-$(date -u +%Y%m%d%H%M%S)-$$"
-npx wrangler workflows trigger mons-link-event-prize-withdrawal --id "$event_prize_preflight_id" --params '{"schemaVersion":1,"kind":"preflight"}' --config cloud/workers/api/wrangler.jsonc
-npx wrangler workflows instances describe mons-link-event-prize-withdrawal "$event_prize_preflight_id" --config cloud/workers/api/wrangler.jsonc
+npx wrangler workflows trigger mons-link-event-prize-withdrawal '{"schemaVersion":1,"kind":"preflight"}' --id "$event_prize_preflight_id" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler workflows instances describe mons-link-event-prize-withdrawal "$event_prize_preflight_id" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
 The preflight must complete with `{"ok":true,"status":"ready"}`. It verifies the encrypted wallet identity, both Metaplex runtimes, and a read-only Helius RPC request without building or sending a transaction.

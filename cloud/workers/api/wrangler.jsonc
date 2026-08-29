@@ -12,6 +12,7 @@
     "AUTH_MUTATIONS_DISABLED": "false",
     "FIREBASE_RTDB_URL": "https://mons-link-default-rtdb.firebaseio.com",
     "PROFILE_READ_MODE": "d1",
+    "PROFILE_STORAGE_MODE": "firestore",
   },
   "d1_databases": [
     {
@@ -155,14 +156,14 @@
         "queue": "mons-link-profile-game-projection",
         "max_batch_size": 1,
         "max_batch_timeout": 1,
-        "max_retries": 3,
+        "max_retries": 100,
         "max_concurrency": 5,
       },
       {
         "queue": "mons-link-profile-projection",
         "max_batch_size": 5,
         "max_batch_timeout": 1,
-        "max_retries": 1,
+        "max_retries": 100,
         "max_concurrency": 1,
       },
     ],

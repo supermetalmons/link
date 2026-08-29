@@ -110,6 +110,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     "AUTH_MUTATIONS_DISABLED",
     "FIREBASE_RTDB_URL",
     "PROFILE_READ_MODE",
+    "PROFILE_STORAGE_MODE",
   ]);
   assert.equal(config.vars?.APPLE_AUDIENCES, "link.mons");
   assert.match(config.vars?.AUTH_MUTATIONS_DISABLED || "", /^(?:true|false)$/);
@@ -118,6 +119,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     "https://mons-link-default-rtdb.firebaseio.com",
   );
   assert.equal(config.vars?.PROFILE_READ_MODE, "d1");
+  assert.equal(config.vars?.PROFILE_STORAGE_MODE, "firestore");
   assert.deepEqual(config.d1_databases, [
     {
       binding: "PROFILE_GAMES_DB",
@@ -236,14 +238,14 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
         queue: "mons-link-profile-game-projection",
         max_batch_size: 1,
         max_batch_timeout: 1,
-        max_retries: 3,
+        max_retries: 100,
         max_concurrency: 5,
       },
       {
         queue: "mons-link-profile-projection",
         max_batch_size: 5,
         max_batch_timeout: 1,
-        max_retries: 1,
+        max_retries: 100,
         max_concurrency: 1,
       },
     ],
@@ -364,6 +366,8 @@ test("package manifests preserve public scripts and deployment command vectors",
       "smoke:api": rootPackage.scripts?.["smoke:api"],
       "manage:event-prize-withdrawals":
         rootPackage.scripts?.["manage:event-prize-withdrawals"],
+      "manage:profile-canonical":
+        rootPackage.scripts?.["manage:profile-canonical"],
       "migrate:profile-reads": rootPackage.scripts?.["migrate:profile-reads"],
       "prepare:firebase": rootPackage.scripts?.["prepare:firebase"],
       "deploy:firebase": rootPackage.scripts?.["deploy:firebase"],
@@ -389,6 +393,8 @@ test("package manifests preserve public scripts and deployment command vectors",
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/smoke-cloudflare-api.ts",
       "manage:event-prize-withdrawals":
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-event-prize-withdrawals.ts",
+      "manage:profile-canonical":
+        "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-profile-canonical.ts",
       "migrate:profile-reads":
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/migrate-profile-reads.ts",
       "prepare:firebase":
@@ -548,7 +554,7 @@ test("operations documentation cross-links package and deployment guides", () =>
   assert.equal(existsSync(resolve(repositoryRoot, ".prettierrc")), true);
   assert.match(
     deploymentGuide,
-    /workflows trigger mons-link-event-prize-withdrawal --id "\$event_prize_preflight_id"/,
+    /workflows trigger mons-link-event-prize-withdrawal '\{"schemaVersion":1,"kind":"preflight"\}' --id "\$event_prize_preflight_id"/,
   );
   assert.match(
     deploymentGuide,

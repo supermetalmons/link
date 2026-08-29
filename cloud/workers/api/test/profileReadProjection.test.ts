@@ -7,6 +7,7 @@ import {
   type AuthFirestorePage,
 } from "../src/authFirestore.ts";
 import {
+  enqueueProfileReadProjection,
   handleProfileReadProjectionMessage,
   handleProfileReadProjectionQueue,
   processProfileReadProjectionTask,
@@ -195,6 +196,30 @@ test("parses new and legacy profile tasks by validated profile ID", () => {
     parseProfileReadProjectionTask({ kind: "profile-read-projection-sweep" }),
     null,
   );
+});
+
+test("stops legacy projection enqueueing in canonical D1 modes", async () => {
+  let sends = 0;
+  const env = {
+    ...TELEGRAM_TEST_ENV,
+    PROFILE_PROJECTION_QUEUE: {
+      ...TELEGRAM_TEST_ENV.PROFILE_PROJECTION_QUEUE,
+      send: async () => {
+        sends += 1;
+        return { metadata: { metrics: { backlogBytes: 0, backlogCount: 0 } } };
+      },
+    },
+  } as unknown as Env;
+  await enqueueProfileReadProjection(
+    { ...env, PROFILE_STORAGE_MODE: "d1" } as unknown as Env,
+    "profile-1",
+  );
+  assert.equal(sends, 0);
+  await enqueueProfileReadProjection(
+    { ...env, PROFILE_STORAGE_MODE: "firestore" } as Env,
+    "profile-1",
+  );
+  assert.equal(sends, 1);
 });
 
 test("Queue consumer batch-reads and deduplicates current profiles", async () => {

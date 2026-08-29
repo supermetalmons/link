@@ -1,76 +1,97 @@
 #!/usr/bin/env node
 const fs = require("fs");
-const { admin, initAdmin, cleanupAdmin } = require("./_admin");
+const { createProfileD1Reader } = require("./_d1");
 
-async function listUniqueAddresses({ outEth, outSol }) {
-  const initialized = initAdmin();
-  if (initialized) {
-    try {
-      const firestore = admin.firestore();
-      const ethSet = new Set();
-      const solSet = new Set();
-      const pageSize = 1000;
-      let lastDoc = null;
-      let totalDocs = 0;
-      while (true) {
-        let q = firestore
-          .collection("users")
-          .orderBy(admin.firestore.FieldPath.documentId())
-          .limit(pageSize);
-        if (lastDoc) q = q.startAfter(lastDoc);
-        const snap = await q.get();
-        if (snap.empty) break;
-        for (const doc of snap.docs) {
-          totalDocs += 1;
-          const data = doc.data();
-          const eth = (data.eth || "").trim();
-          const sol = (data.sol || "").trim();
-          if (eth) ethSet.add(eth.toLowerCase());
-          if (sol) solSet.add(sol);
-        }
-        lastDoc = snap.docs[snap.docs.length - 1];
-        if (snap.size < pageSize) break;
-      }
-      const ethList = Array.from(ethSet).sort();
-      const solList = Array.from(solSet).sort();
-      if (outEth) {
-        fs.writeFileSync(outEth, ethList.join("\n") + "\n");
-        console.log(
-          `Wrote ${ethList.length} unique ETH addresses from ${totalDocs} user docs to ${outEth}`,
-        );
-      }
-      if (outSol) {
-        fs.writeFileSync(outSol, solList.join("\n") + "\n");
-        console.log(
-          `Wrote ${solList.length} unique SOL addresses from ${totalDocs} user docs to ${outSol}`,
-        );
-      }
-      if (!outEth && !outSol) {
-        console.log(`ETH (${ethList.length})`);
-        console.log(ethList.join("\n"));
-        console.log(`SOL (${solList.length})`);
-        console.log(solList.join("\n"));
-      }
-      return;
-    } finally {
-      await cleanupAdmin();
+const USAGE =
+  "Usage: node cloud/admin/listAddresses.js (--out-eth <new-file> | --out-sol <new-file>) [--out-eth <new-file>] [--out-sol <new-file>]";
+
+function parseArgs(argv) {
+  const options = { outEth: null, outSol: null };
+  const seen = new Set();
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (argument !== "--out-eth" && argument !== "--out-sol") {
+      throw new TypeError(USAGE);
+    }
+    if (seen.has(argument)) {
+      throw new TypeError(USAGE);
+    }
+    const value = argv[++index];
+    if (!value || value.startsWith("--")) {
+      throw new TypeError(USAGE);
+    }
+    seen.add(argument);
+    if (argument === "--out-eth") {
+      options.outEth = value;
+    } else {
+      options.outSol = value;
     }
   }
-  throw new Error(
-    "Failed to initialize Admin SDK with Application Default Credentials. Run gcloud auth application-default login.",
-  );
+  if (
+    (!options.outEth && !options.outSol) ||
+    (options.outEth && options.outEth === options.outSol)
+  ) {
+    throw new TypeError(USAGE);
+  }
+  return options;
+}
+
+function writeProtectedFile(path, values) {
+  fs.writeFileSync(path, `${values.join("\n")}\n`, {
+    encoding: "utf8",
+    flag: "wx",
+    mode: 0o600,
+  });
+}
+
+async function listUniqueAddresses({
+  outEth,
+  outSol,
+  reader,
+  log = console.log,
+  writeFile = writeProtectedFile,
+} = {}) {
+  if (!outEth && !outSol) {
+    throw new TypeError(USAGE);
+  }
+  const rows = await (reader || createProfileD1Reader()).listAddresses();
+  const ethSet = new Set();
+  const solSet = new Set();
+  for (const row of rows) {
+    if (row.method === "eth" && typeof row.value === "string") {
+      ethSet.add(row.value.trim().toLowerCase());
+    }
+    if (row.method === "sol" && typeof row.value === "string") {
+      solSet.add(row.value.trim());
+    }
+  }
+  const ethList = Array.from(ethSet).filter(Boolean).sort();
+  const solList = Array.from(solSet).filter(Boolean).sort();
+  if (outEth) {
+    writeFile(outEth, ethList);
+    log(`ETH addresses exported: ${ethList.length}`);
+  }
+  if (outSol) {
+    writeFile(outSol, solList);
+    log(`SOL addresses exported: ${solList.length}`);
+  }
 }
 
 async function main() {
-  const args = process.argv.slice(2);
-  const outEthIdx = args.indexOf("--out-eth");
-  const outSolIdx = args.indexOf("--out-sol");
-  const outEth = outEthIdx !== -1 ? args[outEthIdx + 1] : null;
-  const outSol = outSolIdx !== -1 ? args[outSolIdx + 1] : null;
-  await listUniqueAddresses({ outEth, outSol });
+  await listUniqueAddresses(parseArgs(process.argv.slice(2)));
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  USAGE,
+  listUniqueAddresses,
+  main,
+  parseArgs,
+  writeProtectedFile,
+};

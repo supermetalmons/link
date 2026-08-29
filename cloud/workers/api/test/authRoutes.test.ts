@@ -10,7 +10,7 @@ import type {
 import { AuthStateFailure } from "../src/authStateD1.ts";
 import { handleAuthRoute } from "../src/authRoutes.ts";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const ctx = {
   waitUntil: () => undefined,
@@ -206,11 +206,10 @@ test("auth routes enforce methods and authentication before repository work", as
   assert.equal(repositoryCalls, 0);
 });
 
-test("the global maintenance gate blocks POST auth mutations only", async () => {
-  const maintenanceEnv = {
-    ...env,
-    AUTH_MUTATIONS_DISABLED: "true",
-  } as unknown as Env;
+test("profile control blocks POST auth work while preserving reads", async () => {
+  let repositoryCalls = 0;
+  let stateCalls = 0;
+  const frozenEnv = withProfileControl(env, "importing");
   for (const path of [
     "/auth/intents",
     "/auth/methods/apple/verify",
@@ -223,30 +222,77 @@ test("the global maintenance gate blocks POST auth mutations only", async () => 
   ]) {
     const response = await handleAuthRoute(
       request(path, "POST", {}),
-      maintenanceEnv,
+      frozenEnv,
       ctx,
-      { repository: repository(), verifyIdentity },
+      {
+        repository: repository({
+          getLinkedAuthMethods: async () => {
+            repositoryCalls++;
+            throw new Error("unexpected");
+          },
+        }),
+        stateRepository: stateRepository({
+          createAuthIntent: async () => {
+            stateCalls++;
+            return "created";
+          },
+        }),
+        verifyIdentity,
+      },
     );
-    assert.equal(response.status, 409, path);
+    assert.equal(response.status, 503, path);
+    assert.equal(response.headers.get("Retry-After"), "60", path);
     assert.deepEqual(await responseJson(response), {
       ok: false,
-      error: "failed-precondition",
-      message: "auth-mutations-disabled",
+      error: "unavailable",
+      message: "profile-writes-disabled",
     });
   }
+  assert.equal(repositoryCalls, 0);
+  assert.equal(stateCalls, 0);
+
   const methods = await handleAuthRoute(
     request("/auth/methods", "GET"),
-    maintenanceEnv,
+    frozenEnv,
     ctx,
     { repository: repository(), verifyIdentity },
   );
   assert.equal(methods.status, 200);
   const preflight = await handleAuthRoute(
     request("/auth/intents", "OPTIONS"),
-    maintenanceEnv,
+    frozenEnv,
     ctx,
   );
   assert.equal(preflight.status, 204);
+});
+
+test("auth maintenance remains independent from profile control", async () => {
+  let stateCalls = 0;
+  const response = await handleAuthRoute(
+    request("/auth/intents", "POST", { method: "eth" }),
+    {
+      ...env,
+      AUTH_MUTATIONS_DISABLED: "true",
+    } as unknown as Env,
+    ctx,
+    {
+      repository: repository(),
+      stateRepository: stateRepository({
+        createAuthIntent: async () => {
+          stateCalls++;
+          return "created";
+        },
+      }),
+      verifyIdentity,
+    },
+  );
+  assert.equal(response.status, 409);
+  assert.deepEqual(await responseJson(response), {
+    ok: false,
+    error: "failed-precondition",
+    message: "auth-mutations-disabled",
+  });
+  assert.equal(stateCalls, 0);
 });
 
 test("creates exact auth intents for every supported method", async () => {

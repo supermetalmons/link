@@ -249,8 +249,12 @@ test("admin Telegram scripts use signed commands and durable aliases", () => {
   assert.equal(shootingSource.includes("ADC_FAILURE_MESSAGE"), false);
   for (const fileName of ["topGpWithEmojis.js", "topMpWithEmojis.js"]) {
     const source = fs.readFileSync(path.join(adminRoot, fileName), "utf8");
-    assert.match(source, /ADC_FAILURE_MESSAGE/);
+    assert.match(source, /createProfileD1Reader/);
+    assert.equal(source.includes("ADC_FAILURE_MESSAGE"), false);
   }
+  const d1Source = fs.readFileSync(path.join(adminRoot, "_d1.js"), "utf8");
+  assert.match(d1Source, /CLOUDFLARE_API_TOKEN/);
+  assert.match(d1Source, /D1 Read/);
   const adminSource = fs.readFileSync(
     path.join(adminRoot, "_admin.js"),
     "utf8",

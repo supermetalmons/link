@@ -16,7 +16,7 @@ import { prepareSiweMessage } from "../../../../src/connection/siweMessage.ts";
 
 const env = {
   APPLE_AUDIENCES: "link.mons",
-  AUTH_MUTATIONS_DISABLED: "false" as unknown as Env["AUTH_MUTATIONS_DISABLED"],
+  PROFILE_STORAGE_MODE: "firestore",
 } as Env;
 const identity = { uid: "runtime-login", idToken: "firebase-token" };
 const nonce = "nonceABC123456789012345";

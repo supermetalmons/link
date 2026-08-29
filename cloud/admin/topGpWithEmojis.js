@@ -1,13 +1,7 @@
 #!/usr/bin/env node
 const { randomUUID } = require("node:crypto");
-const {
-  ADC_FAILURE_MESSAGE,
-  addApplicationDefaultCredentialHelp,
-  admin,
-  initAdmin,
-  cleanupAdmin,
-} = require("./_admin");
-const { getDisplayNameFromAddress } = require("../functions/utils");
+const { createProfileD1Reader } = require("./_d1");
+const { getDisplayNameFromAddress } = require("../functions/telegramDisplay");
 const {
   createLeaderboardHeading,
   parseLeaderboardArgs,
@@ -23,50 +17,41 @@ async function logTopGpWithEmojis(
   adminArgs = process.argv.slice(2),
   dependencies = {},
 ) {
-  const initialized = initAdmin(adminArgs);
-  if (initialized) {
-    try {
-      const firestore = admin.firestore();
-      const snap = await firestore
-        .collection("users")
-        .orderBy("nonce", "desc")
-        .limit(limit)
-        .get();
-      let output = createLeaderboardHeading("gp", limit);
-      let rank = 1;
-      for (const doc of snap.docs) {
-        const data = doc.data();
-        const username = data.username || "";
-        const eth = data.eth || "";
-        const sol = data.sol || "";
-        const gp = data.nonce + 1;
-        const emoji =
-          data.custom && data.custom.emoji !== undefined
-            ? data.custom.emoji
-            : (data.emoji ?? "");
-        const name = getDisplayNameFromAddress(username, eth, sol, 0, emoji);
-        output += `${rank}. ${name} ${gp}\n\n`;
-        rank += 1;
-      }
-      console.log(output);
-      const sourceId = randomUUID();
-      await dependencies.sendCommand({
-        kind: "send",
-        messageKey: `admin:top-gp:${sourceId}`,
-        generation: `admin:top-gp:${sourceId}`,
-        destination: "community",
-        instanceKey: sourceId,
-        text: output,
-        parseMode: "HTML",
-        silent: false,
-        sourceRevision: sourceId,
-      });
-      return;
-    } finally {
-      await cleanupAdmin();
-    }
+  if (adminArgs.length > 0) {
+    throw new TypeError("Firebase target flags are not supported.");
   }
-  throw new Error(ADC_FAILURE_MESSAGE);
+  const reader = dependencies.reader || createProfileD1Reader();
+  const profiles = await reader.readLeaderboard("gp", limit);
+  let output = createLeaderboardHeading("gp", limit);
+  let rank = 1;
+  for (const data of profiles) {
+    const username = data.username || "";
+    const eth = data.eth || "";
+    const sol = data.sol || "";
+    const gp = data.nonce + 1;
+    const emoji = data.emoji ?? "";
+    const name = getDisplayNameFromAddress(username, eth, sol, 0, emoji);
+    output += `${rank}. ${name} ${gp}\n\n`;
+    rank += 1;
+  }
+  const sourceId = randomUUID();
+  await dependencies.sendCommand({
+    kind: "send",
+    messageKey: `admin:top-gp:${sourceId}`,
+    generation: `admin:top-gp:${sourceId}`,
+    destination: "community",
+    instanceKey: sourceId,
+    text: output,
+    parseMode: "HTML",
+    silent: false,
+    sourceRevision: sourceId,
+  });
+  (dependencies.log || console.log)(
+    JSON.stringify({
+      event: "admin_top_gp_dispatched",
+      count: profiles.length,
+    }),
+  );
 }
 
 async function main(argv = process.argv.slice(2)) {
@@ -78,7 +63,7 @@ async function main(argv = process.argv.slice(2)) {
 
 if (require.main === module) {
   main().catch((err) => {
-    console.error(addApplicationDefaultCredentialHelp(err));
+    console.error(err);
     process.exit(1);
   });
 }

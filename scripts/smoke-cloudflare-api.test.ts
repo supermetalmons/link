@@ -14,17 +14,22 @@ const {
   parseArgs,
   smokeApi,
   smokeAuthenticatedAuthState,
+  smokeFrozenProfileWrite,
 } = require("./smoke-cloudflare-api.ts") as {
   DEFAULT_SMOKE_PROFILE: { loginId: string; profileId: string };
   DEFAULT_SMOKE_SOL: string;
   parseArgs: (argv: string[]) => {
     baseUrl: string;
+    readOnly: boolean;
+    readOnlyAuthToken: string | null;
     smokeProfile: { loginId: string; profileId: string };
     smokeSol: string;
   };
   smokeApi: (
     options: {
       baseUrl: string;
+      readOnlyAuthToken?: string | null;
+      readOnly?: boolean;
       smokeProfile: { loginId: string; profileId: string };
       smokeSol: string;
     },
@@ -42,12 +47,23 @@ const {
       randomState: () => string;
       log: (message: string) => void;
     },
+    existingIdToken?: string,
+  ) => Promise<void>;
+  smokeFrozenProfileWrite: (
+    baseUrl: string,
+    idToken: string,
+    dependencies: {
+      fetch: typeof fetch;
+      randomState: () => string;
+      log: (message: string) => void;
+    },
   ) => Promise<void>;
 };
 
 const WALLET = "11111111111111111111111111111111";
 const LOGIN = "known-login";
 const SMOKE_PROFILE = { loginId: LOGIN, profileId: "profile-1" };
+const AUTH_TOKEN = "header.payload.signature";
 const EMPTY_NFTS = {
   ok: true,
   specials: [],
@@ -90,11 +106,24 @@ function profileFixture(): { cleanup(): void; path: string } {
   };
 }
 
+function authTokenFixture(): { cleanup(): void; path: string } {
+  const directory = mkdtempSync(join(tmpdir(), "mons-link-smoke-auth-"));
+  const path = join(directory, "auth.json");
+  writeFileSync(path, JSON.stringify({ idToken: AUTH_TOKEN }), { mode: 0o600 });
+  return {
+    path,
+    cleanup: () => rmSync(directory, { recursive: true, force: true }),
+  };
+}
+
 test("parses only production and canonical preview smoke targets", () => {
   const fixture = profileFixture();
+  const authFixture = authTokenFixture();
   try {
     assert.deepEqual(parseArgs(["--base-url", "https://api.mons.link/"]), {
       baseUrl: "https://api.mons.link",
+      readOnly: false,
+      readOnlyAuthToken: null,
       smokeProfile: DEFAULT_SMOKE_PROFILE,
       smokeSol: DEFAULT_SMOKE_SOL,
     });
@@ -109,6 +138,8 @@ test("parses only production and canonical preview smoke targets", () => {
       ]),
       {
         baseUrl: "https://api.mons.link",
+        readOnly: false,
+        readOnlyAuthToken: null,
         smokeProfile: SMOKE_PROFILE,
         smokeSol: WALLET,
       },
@@ -120,9 +151,53 @@ test("parses only production and canonical preview smoke targets", () => {
       ]),
       {
         baseUrl: "https://12ab34cd-mons-link-api.lil-org.workers.dev",
+        readOnly: false,
+        readOnlyAuthToken: null,
         smokeProfile: DEFAULT_SMOKE_PROFILE,
         smokeSol: DEFAULT_SMOKE_SOL,
       },
+    );
+    assert.deepEqual(
+      parseArgs([
+        "--base-url",
+        "https://api.mons.link/",
+        "--read-only",
+        "--auth-token-fixture",
+        authFixture.path,
+      ]),
+      {
+        baseUrl: "https://api.mons.link",
+        readOnly: true,
+        readOnlyAuthToken: AUTH_TOKEN,
+        smokeProfile: DEFAULT_SMOKE_PROFILE,
+        smokeSol: DEFAULT_SMOKE_SOL,
+      },
+    );
+    assert.throws(
+      () => parseArgs(["--base-url", "https://api.mons.link", "--read-only"]),
+      /Usage:/,
+    );
+    assert.throws(
+      () =>
+        parseArgs([
+          "--base-url",
+          "https://api.mons.link",
+          "--auth-token-fixture",
+          authFixture.path,
+        ]),
+      /Usage:/,
+    );
+    assert.throws(
+      () =>
+        parseArgs([
+          "--base-url",
+          "https://api.mons.link/",
+          "--read-only",
+          "--read-only",
+          "--auth-token-fixture",
+          authFixture.path,
+        ]),
+      /Usage:/,
     );
     for (const target of [
       "http://api.mons.link",
@@ -143,18 +218,36 @@ test("parses only production and canonical preview smoke targets", () => {
         ]),
       /Usage:/,
     );
+    chmodSync(authFixture.path, 0o644);
+    assert.throws(
+      () =>
+        parseArgs([
+          "--base-url",
+          "https://api.mons.link",
+          "--read-only",
+          "--auth-token-fixture",
+          authFixture.path,
+        ]),
+      /Usage:/,
+    );
   } finally {
     fixture.cleanup();
+    authFixture.cleanup();
   }
 });
 
 test("smokes public, unauthenticated, and internal routes", async () => {
-  const requests: Array<{ method: string; url: string }> = [];
+  const requests: Array<{ authorized: boolean; method: string; url: string }> =
+    [];
   let nftPosts = 0;
   const fetchStub: typeof fetch = async (input, init) => {
     const url = String(input);
     const method = init?.method || "GET";
-    requests.push({ method, url });
+    requests.push({
+      authorized: new Headers(init?.headers).has("Authorization"),
+      method,
+      url,
+    });
     assert.equal(init?.redirect, "manual");
     assert.equal(init?.signal instanceof AbortSignal, true);
 
@@ -215,6 +308,38 @@ test("smokes public, unauthenticated, and internal routes", async () => {
         200,
       );
     }
+    if (url.endsWith("/auth/methods")) {
+      const authorization = new Headers(init?.headers).get("Authorization");
+      return json(
+        {
+          ok: true,
+          profileId:
+            authorization === `Bearer ${AUTH_TOKEN}`
+              ? SMOKE_PROFILE.profileId
+              : null,
+          linkedMethods: { apple: false, eth: false, sol: false, x: false },
+          appleLinked: false,
+        },
+        200,
+      );
+    }
+    if (url.endsWith("/profiles/username")) {
+      const headers = new Headers(init?.headers);
+      assert.equal(method, "POST");
+      assert.equal(headers.get("Authorization"), `Bearer ${AUTH_TOKEN}`);
+      assert.equal(headers.get("Origin"), "https://mons.link");
+      assert.equal(headers.get("Content-Type"), "application/json");
+      assert.equal(init?.body, "{}");
+      return json(
+        {
+          ok: false,
+          error: "unavailable",
+          message: "profile-writes-disabled",
+        },
+        503,
+        { "Retry-After": "60" },
+      );
+    }
     if (url.endsWith("/leaderboards/read")) {
       return json({ ok: true, profiles: [PROFILE] }, 200);
     }
@@ -234,6 +359,15 @@ test("smokes public, unauthenticated, and internal routes", async () => {
       return json(
         { ok: false, error: "not-found", message: "invite-not-found" },
         404,
+      );
+    }
+    if (
+      url.endsWith("/navigation/games/read") &&
+      new Headers(init?.headers).has("Authorization")
+    ) {
+      return json(
+        { ok: true, items: [], nextCursor: null, hasMore: false },
+        200,
       );
     }
     if (url.includes("identitytoolkit.googleapis.com/v1/accounts:signUp")) {
@@ -286,8 +420,116 @@ test("smokes public, unauthenticated, and internal routes", async () => {
     },
   );
 
-  assert.equal(requests.length, 37);
+  assert.equal(requests.length, 39);
   assert.deepEqual(logs, ["[api-smoke] Passed https://api.mons.link"]);
+
+  requests.length = 0;
+  logs.length = 0;
+  nftPosts = 0;
+  await smokeApi(
+    {
+      baseUrl: "https://api.mons.link",
+      readOnlyAuthToken: AUTH_TOKEN,
+      readOnly: true,
+      smokeProfile: SMOKE_PROFILE,
+      smokeSol: WALLET,
+    },
+    {
+      fetch: fetchStub,
+      randomState: () => "abcdefghijklmnopqrstuvwx",
+      log: (message) => logs.push(message),
+    },
+  );
+  assert.equal(requests.length, 36);
+  assert.equal(
+    requests.some(
+      ({ authorized, method, url }) =>
+        authorized &&
+        method === "POST" &&
+        (url.endsWith("/auth/intents") || url.endsWith("/auth/x/flows")),
+    ),
+    false,
+  );
+  assert.equal(
+    requests.some(({ url }) => url.includes("identitytoolkit.googleapis.com")),
+    false,
+  );
+  assert.deepEqual(logs, ["[api-smoke] Passed https://api.mons.link"]);
+});
+
+test("probes frozen profile writes with an authenticated mutation-safe body", async () => {
+  let requests = 0;
+  await smokeFrozenProfileWrite("https://api.mons.link", AUTH_TOKEN, {
+    fetch: async (input, init) => {
+      requests++;
+      assert.equal(String(input), "https://api.mons.link/profiles/username");
+      assert.equal(init?.method, "POST");
+      const headers = new Headers(init?.headers);
+      assert.equal(headers.get("Authorization"), `Bearer ${AUTH_TOKEN}`);
+      assert.equal(headers.get("Origin"), "https://mons.link");
+      assert.equal(headers.get("Content-Type"), "application/json");
+      assert.equal(init?.body, "{}");
+      return json(
+        {
+          ok: false,
+          error: "unavailable",
+          message: "profile-writes-disabled",
+        },
+        503,
+        { "Retry-After": "60" },
+      );
+    },
+    randomState: () => "unused",
+    log: () => undefined,
+  });
+  assert.equal(requests, 1);
+});
+
+test("rejects malformed frozen profile write bodies", async () => {
+  for (const body of [
+    "{",
+    JSON.stringify({
+      ok: false,
+      error: "unavailable",
+      message: "profile-writes-disabled",
+      details: "unexpected",
+    }),
+  ]) {
+    await assert.rejects(
+      smokeFrozenProfileWrite("https://api.mons.link", AUTH_TOKEN, {
+        fetch: async () =>
+          new Response(body, {
+            status: 503,
+            headers: { "Cache-Control": "no-store", "Retry-After": "60" },
+          }),
+        randomState: () => "unused",
+        log: () => undefined,
+      }),
+      /Profile freeze smoke response was invalid/,
+    );
+  }
+});
+
+test("requires the exact frozen profile write retry delay", async () => {
+  for (const retryAfter of [null, "59"]) {
+    await assert.rejects(
+      smokeFrozenProfileWrite("https://api.mons.link", AUTH_TOKEN, {
+        fetch: async () =>
+          json(
+            {
+              ok: false,
+              error: "unavailable",
+              message: "profile-writes-disabled",
+            },
+            503,
+            retryAfter === null ? {} : { "Retry-After": retryAfter },
+          ),
+        randomState: () => "unused",
+        log: () => undefined,
+      }),
+      /Profile freeze smoke response was invalid/,
+    );
+  }
 });
 
 test("fails on a malformed or cacheable response", async () => {
@@ -304,6 +546,71 @@ test("fails on a malformed or cacheable response", async () => {
     }),
     /cacheable/,
   );
+});
+
+test("fails before requests when read-only auth is missing", async () => {
+  let requests = 0;
+  await assert.rejects(
+    smokeApi(
+      {
+        baseUrl: "https://api.mons.link",
+        readOnly: true,
+        smokeProfile: SMOKE_PROFILE,
+        smokeSol: WALLET,
+      },
+      {
+        fetch: async () => {
+          requests++;
+          throw new Error("unexpected-request");
+        },
+        randomState: () => "abcdefghijklmnopqrstuvwx",
+        log: () => undefined,
+      },
+    ),
+    /existing auth token fixture/,
+  );
+  assert.equal(requests, 0);
+});
+
+test("requires the read-only token to own the smoke profile", async () => {
+  let identityRequests = 0;
+  await assert.rejects(
+    smokeAuthenticatedAuthState(
+      "https://api.mons.link",
+      SMOKE_PROFILE,
+      {
+        fetch: async (input) => {
+          const url = String(input);
+          if (url.includes("identitytoolkit.googleapis.com")) {
+            identityRequests++;
+            throw new Error("unexpected-identity-request");
+          }
+          if (url.endsWith("/auth/methods")) {
+            return json(
+              {
+                ok: true,
+                profileId: "different-profile",
+                linkedMethods: {
+                  apple: false,
+                  eth: false,
+                  sol: false,
+                  x: false,
+                },
+                appleLinked: false,
+              },
+              200,
+            );
+          }
+          throw new Error(`Unexpected request: ${url}`);
+        },
+        randomState: () => "abcdefghijklmnopqrstuvwx",
+        log: () => undefined,
+      },
+      AUTH_TOKEN,
+    ),
+    /Auth ownership smoke response was invalid/,
+  );
+  assert.equal(identityRequests, 0);
 });
 
 test("deletes an anonymous smoke user after an incomplete signup response", async () => {

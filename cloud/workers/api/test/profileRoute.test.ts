@@ -12,7 +12,10 @@ import type {
   UsernameRepository,
 } from "../src/usernameRepository.ts";
 import { handleRequest } from "../src/router.ts";
-import { TELEGRAM_TEST_ENV as BASE_ENV } from "./testEnv.ts";
+import {
+  TELEGRAM_TEST_ENV as BASE_ENV,
+  withProfileControl,
+} from "./testEnv.ts";
 
 const ctx = { waitUntil: () => undefined };
 const identity = { idToken: "firebase-id-token", uid: "firebase-uid" };
@@ -239,6 +242,41 @@ test("authenticates before parsing and strictly validates request bodies", async
     assert.equal(response.status, 400);
   }
   assert.equal(reads, 0);
+});
+
+test("freezes profile writes while keeping profile reads available", async () => {
+  let usernameWrites = 0;
+  const frozenEnv = withProfileControl(TELEGRAM_TEST_ENV, "frozen");
+  const write = await handleProfileRoute(
+    request("/profiles/username", { username: "Mons" }),
+    frozenEnv,
+    ctx,
+    {
+      usernameRepository: {
+        editUsername: async () => {
+          usernameWrites++;
+          return "updated";
+        },
+      },
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(write.status, 503);
+  assert.equal(write.headers.get("Retry-After"), "60");
+  assert.deepEqual(await responseJson(write), {
+    ok: false,
+    error: "unavailable",
+    message: "profile-writes-disabled",
+  });
+  assert.equal(usernameWrites, 0);
+
+  const read = await handleProfileRoute(
+    request("/profiles/lookup", { kind: "profile", id: "profile-1" }),
+    frozenEnv,
+    ctx,
+    { repository: repository(), verifyIdentity: async () => identity },
+  );
+  assert.equal(read.status, 200);
 });
 
 test("preserves username validation and repository outcomes", async () => {

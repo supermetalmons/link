@@ -73,6 +73,11 @@ import {
   parseAuthRecoveryJob,
 } from "./authRecovery.ts";
 import { createGoogleAccessToken } from "./googleAuth.ts";
+import { createCanonicalAuthIdentityService } from "./authIdentityCanonical.ts";
+import {
+  profileStorageUsesD1,
+  readProfileStorageMode,
+} from "./profileStorageMode.ts";
 
 const AUTH_OP_REPLAY_TTL_MS = 10 * 60 * 1_000;
 const LINK_METHOD_MAX_ATTEMPTS = 3;
@@ -88,7 +93,7 @@ const PROVIDER_METADATA_FIELD_PATHS = {
   x: ["xUsername", "xLinkedAt", "xConsentAt", "xConsentSource"],
 } as const;
 
-type AuthIntent = {
+export type AuthIntent = {
   consumedByOpId?: string;
   consumedAtMs: number;
   expiresAtMs: number;
@@ -97,7 +102,7 @@ type AuthIntent = {
   uid: string;
 };
 
-type LinkInput = {
+export type LinkInput = {
   appleEmailMasked?: string | null;
   consentSource?: "signin" | "settings";
   method: AuthMethodKey;
@@ -154,7 +159,7 @@ export type AuthIdentityService = {
   ) => Promise<LinkedAuthMethodsResponse>;
 };
 
-type ServiceDependencies = {
+export type ServiceDependencies = {
   authClient?: FirebaseAuthAdminClient;
   authState?: AuthStateRepository;
   firestore?: AuthFirestoreClient;
@@ -405,7 +410,7 @@ function buildProfileMergePlan(
   };
 }
 
-export function createAuthIdentityService(
+function createFirestoreAuthIdentityService(
   env: Env,
   dependencies: ServiceDependencies = {},
 ): AuthIdentityService {
@@ -2260,4 +2265,17 @@ export function createAuthIdentityService(
       }
     },
   };
+}
+
+export function createAuthIdentityService(
+  env: Env,
+  dependencies: ServiceDependencies = {},
+): AuthIdentityService {
+  if (
+    !dependencies.firestore &&
+    profileStorageUsesD1(readProfileStorageMode(env))
+  ) {
+    return createCanonicalAuthIdentityService(env, dependencies);
+  }
+  return createFirestoreAuthIdentityService(env, dependencies);
 }

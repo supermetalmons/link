@@ -6,7 +6,11 @@ import {
   type ProfileCustomizationUpdateResponse,
   type ProfileLookupResponse,
 } from "@mons/shared/profiles";
-import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
+import {
+  AuthApiFailure,
+  authErrorResponse,
+  isProfileWritesDisabledFailure,
+} from "./authErrors.ts";
 import {
   authJsonResponse,
   authPreflightResponse,
@@ -38,6 +42,7 @@ import {
   isUsernameEditRequest,
   type UsernameEditResponse,
 } from "@mons/shared/usernames";
+import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 
 export const PROFILE_PATHS = new Set([
   "/leaderboards/read",
@@ -45,6 +50,8 @@ export const PROFILE_PATHS = new Set([
   "/profiles/lookup",
   "/profiles/username",
 ]);
+
+const PROFILE_WRITE_PATHS = new Set(["/profiles/custom", "/profiles/username"]);
 
 export type ProfileRouteDependencies = {
   logFailure?: (kind: string) => void;
@@ -103,6 +110,9 @@ export async function handleProfileRoute(
     const identity = await (
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
+    if (PROFILE_WRITE_PATHS.has(pathname)) {
+      await assertProfileMutationAllowed(env);
+    }
     const body = await parseBody(request);
 
     if (pathname === "/profiles/username") {
@@ -238,7 +248,7 @@ export async function handleProfileRoute(
       error instanceof AuthApiFailure
         ? error
         : new AuthApiFailure(503, "unavailable", "profile-service-unavailable");
-    if (failure.status >= 500) {
+    if (failure.status >= 500 && !isProfileWritesDisabledFailure(failure)) {
       (
         dependencies.logFailure ||
         ((kind) =>

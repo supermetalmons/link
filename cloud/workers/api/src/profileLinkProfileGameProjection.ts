@@ -17,6 +17,15 @@ import {
   type ProfileGameProjectionRuntime,
 } from "./profileGameProjectionRepository.ts";
 import { commitProfileGameProjectionWrites } from "./profileGamesD1.ts";
+import {
+  readCanonicalMergeTarget,
+  readCanonicalProfile,
+} from "./profileCanonicalD1.ts";
+import {
+  profileStorageUsesD1,
+  readProfileStorageMode,
+  type ProfileStorageMode,
+} from "./profileStorageMode.ts";
 
 export type ProfileLinkProjectionSummary = CoreProfileLinkProjectionSummary;
 
@@ -25,8 +34,10 @@ export type ProfileLinkProjectionRuntimeDependencies = {
   firestore?: Pick<AuthFirestoreClient, "get">;
   logger?: Pick<Console, "error" | "info">;
   now?: () => number;
+  profileDb?: D1Database;
   projection?: ProfileGameProjectionRuntime;
   rtdb?: Pick<GameplayRepository, "getRtdbPath">;
+  storageMode?: ProfileStorageMode;
   wait?: (milliseconds: number) => Promise<void>;
   withInviteProjectionLock<T>(
     inviteId: string,
@@ -52,7 +63,13 @@ export function createProfileLinkProjectionRuntime(
     sourceUpdatedAtMs: number;
   }): Promise<ProfileLinkProjectionSummary | null>;
 } {
-  const firestore = dependencies.firestore || createAuthFirestoreClient(env);
+  const useCanonical = profileStorageUsesD1(
+    dependencies.storageMode || readProfileStorageMode(env),
+  );
+  const firestore = useCanonical
+    ? dependencies.firestore
+    : dependencies.firestore || createAuthFirestoreClient(env);
+  const profileDb = dependencies.profileDb || env.PROFILE_DB;
   const rtdb = dependencies.rtdb || createGameplayRepository(env);
   const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
   const projection =
@@ -82,9 +99,13 @@ export function createProfileLinkProjectionRuntime(
       );
     },
     async getMergeTarget(profileId) {
+      if (useCanonical) {
+        const target = await readCanonicalMergeTarget(profileDb, profileId);
+        return target ? { targetProfileId: target.targetProfileId } : null;
+      }
       return (
         (
-          await firestore.get(
+          await firestore!.get(
             authDocumentName("profileMergeTargets", profileId),
           )
         )?.fields || null
@@ -97,7 +118,12 @@ export function createProfileLinkProjectionRuntime(
       return value !== null && value !== undefined;
     },
     async profileExists(profileId) {
-      return Boolean(await firestore.get(authDocumentName("users", profileId)));
+      if (useCanonical) {
+        return Boolean(await readCanonicalProfile(profileDb, profileId));
+      }
+      return Boolean(
+        await firestore!.get(authDocumentName("users", profileId)),
+      );
     },
   };
   const core = createProfileLinkProjectionCore({

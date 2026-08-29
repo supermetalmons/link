@@ -7,7 +7,11 @@ import {
   type MineRockRequest,
   type MineRockResponse,
 } from "@mons/shared/mining";
-import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
+import {
+  AuthApiFailure,
+  authErrorResponse,
+  isProfileWritesDisabledFailure,
+} from "./authErrors.ts";
 import {
   authJsonResponse,
   authPreflightResponse,
@@ -24,6 +28,7 @@ import {
 } from "./miningRepository.ts";
 import { readBoundedJson } from "./http.ts";
 import { scheduleProfileReadProjection } from "./profileReadProjection.ts";
+import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 
 const MAX_WRITE_ATTEMPTS = 3;
 
@@ -166,6 +171,7 @@ export async function handleMiningRoute(
     const identity = await (
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
+    await assertProfileMutationAllowed(env);
     await enforceMiningRateLimit(env, identity.uid);
     const input = await parseMineRockRequest(request);
     const repository =
@@ -189,7 +195,7 @@ export async function handleMiningRoute(
       error instanceof AuthApiFailure
         ? error
         : new AuthApiFailure(503, "unavailable", "mining-service-unavailable");
-    if (failure.status >= 500) {
+    if (failure.status >= 500 && !isProfileWritesDisabledFailure(failure)) {
       (
         dependencies.logFailure ||
         ((kind) =>

@@ -1,0 +1,1 @@
+export const PROFILE_BACKGROUND_SWEEP_LIMIT = 10;

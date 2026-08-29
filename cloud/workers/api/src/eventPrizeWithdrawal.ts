@@ -33,6 +33,7 @@ import {
 import {
   AuthApiFailure,
   authErrorResponse,
+  isProfileWritesDisabledFailure,
   type AuthErrorCode,
 } from "./authErrors.ts";
 import {
@@ -62,6 +63,15 @@ import {
   readEventPrizeWithdrawalStorageMode,
   type EventPrizeWithdrawalStore,
 } from "./eventPrizeWithdrawalD1.ts";
+import {
+  readCanonicalMergeTarget,
+  readCanonicalProfileByLogin,
+} from "./profileCanonicalD1.ts";
+import {
+  profileStorageUsesD1,
+  readProfileStorageMode,
+} from "./profileStorageMode.ts";
+import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 
 export const EVENT_PRIZE_WITHDRAWAL_PATH = "/events/prizes/withdrawals";
 export const EVENT_PRIZE_WITHDRAWAL_STATUS_PATH =
@@ -146,6 +156,7 @@ type EventPrizeGameplayRepository = Pick<
 type RouteDependencies = {
   firestore?: AuthFirestoreClient;
   now?: () => number;
+  profileDb?: D1Database;
   repository?: EventPrizeGameplayRepository;
   withdrawalStore?: EventPrizeWithdrawalStore;
   verifyIdentity?: (
@@ -265,19 +276,25 @@ function createEventPrizeAdmin(
 export async function createEventPrizeRuntimeDependencies(
   env: Env,
   {
-    firestore = createAuthFirestoreClient(env),
+    allowFrozen = false,
+    firestore: firestoreOverride,
     now = Date.now,
+    profileDb = env.PROFILE_DB,
     repository = createGameplayRepository(env),
     withdrawalStore: withdrawalStoreOverride,
   }: Pick<
     RouteDependencies,
-    "firestore" | "now" | "repository" | "withdrawalStore"
-  > = {},
+    "firestore" | "now" | "profileDb" | "repository" | "withdrawalStore"
+  > & { allowFrozen?: boolean } = {},
 ): Promise<EventPrizeRuntimeDependencies> {
+  const useCanonical = profileStorageUsesD1(readProfileStorageMode(env));
+  const firestore = useCanonical
+    ? firestoreOverride
+    : firestoreOverride || createAuthFirestoreClient(env);
   const storageMode = await readEventPrizeWithdrawalStorageMode(
     env.EVENT_PRIZE_WITHDRAWALS_DB,
   );
-  if (storageMode === "frozen") {
+  if (storageMode === "frozen" && !allowFrozen) {
     throw new EventPrizeWithdrawalError(
       "unavailable",
       "Prize withdrawals are temporarily unavailable.",
@@ -287,7 +304,11 @@ export async function createEventPrizeRuntimeDependencies(
     withdrawalStoreOverride ||
     createD1EventPrizeWithdrawalStore(env.EVENT_PRIZE_WITHDRAWALS_DB, { now });
   const readProfileByLoginUid = async (uid: string) => {
-    const profiles = await firestore.query(
+    if (useCanonical) {
+      const profile = await readCanonicalProfileByLogin(profileDb, uid);
+      return profile ? { id: profile.profileId } : null;
+    }
+    const profiles = await firestore!.query(
       "users",
       authFieldFilter("logins", "ARRAY_CONTAINS", uid),
       2,
@@ -305,11 +326,16 @@ export async function createEventPrizeRuntimeDependencies(
     resolveProfileMergeTargetPath({
       profileId,
       readMergeTarget: async (candidateProfileId: string) =>
-        (
-          await firestore.get(
-            authDocumentName("profileMergeTargets", candidateProfileId),
-          )
-        )?.fields || null,
+        useCanonical
+          ? await readCanonicalMergeTarget(profileDb, candidateProfileId).then(
+              (target) =>
+                target ? { targetProfileId: target.targetProfileId } : null,
+            )
+          : (
+              await firestore!.get(
+                authDocumentName("profileMergeTargets", candidateProfileId),
+              )
+            )?.fields || null,
     });
   return {
     admin: createEventPrizeAdmin(repository, withdrawalStore),
@@ -500,7 +526,11 @@ async function ensureWorkflow(
   }
   instance ||= await workflow.get(params.operationId);
   const status = await instance.status();
-  if (status.status === "errored" || status.status === "complete") {
+  if (
+    status.status === "errored" ||
+    status.status === "complete" ||
+    status.status === "terminated"
+  ) {
     const output = toRecord(status.output);
     if (
       status.status === "complete" &&
@@ -518,11 +548,7 @@ async function ensureWorkflow(
     ]);
     return;
   }
-  if (
-    status.status === "terminated" ||
-    status.status === "paused" ||
-    status.status === "waitingForPause"
-  ) {
+  if (status.status === "paused" || status.status === "waitingForPause") {
     throw new EventPrizeWithdrawalError(
       "failed-precondition",
       "Prize withdrawal is paused by an operator.",
@@ -846,6 +872,9 @@ export async function handleEventPrizeWithdrawalRoute(
     const identity = await (
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
+    if (pathname === EVENT_PRIZE_WITHDRAWAL_PATH) {
+      await assertProfileMutationAllowed(env);
+    }
     let body: unknown;
     try {
       body = await readBoundedJson(request);
@@ -1012,7 +1041,7 @@ export async function handleEventPrizeWithdrawalRoute(
     throw new AuthApiFailure(404, "not-found", "not-found");
   } catch (error) {
     const failure = toEventPrizeApiFailure(error);
-    if (failure.status >= 500) {
+    if (failure.status >= 500 && !isProfileWritesDisabledFailure(failure)) {
       console.error(
         JSON.stringify({
           event: "event_prize_withdrawal_route_failure",

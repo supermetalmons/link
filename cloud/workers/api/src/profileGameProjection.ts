@@ -37,8 +37,9 @@ import {
   createProfileLinkProjectionRuntime,
   type ProfileLinkProjectionSummary,
 } from "./profileLinkProfileGameProjection.ts";
+import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
 
-const PROFILE_GAME_PROJECTION_SWEEP_LIMIT = 100;
+const PROFILE_GAME_PROJECTION_SWEEP_LIMIT = PROFILE_BACKGROUND_SWEEP_LIMIT;
 const PROFILE_GAME_PROJECTION_SWEEP_CONCURRENCY = 10;
 const MAX_PROFILE_GAME_PROJECTION_RETRY_DELAY_SECONDS = 60;
 const PROFILE_GAME_PROJECTION_RECOVERY_DELAY_MS = 5 * 60 * 1_000;

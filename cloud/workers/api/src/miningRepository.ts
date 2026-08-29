@@ -6,6 +6,18 @@ import {
 import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 import { FirestoreFailure } from "./firestore.ts";
 import { createGoogleAccessToken } from "./googleAuth.ts";
+import {
+  CanonicalProfileConflict,
+  commitCanonicalPlan,
+  materializeCanonicalProfile,
+  readCanonicalLoginOwner,
+  readCanonicalProfile,
+  resolveCanonicalProfile,
+} from "./profileCanonicalD1.ts";
+import {
+  profileStorageUsesD1,
+  readProfileStorageMode,
+} from "./profileStorageMode.ts";
 
 const FIRESTORE_PROJECT_ID = "mons-link";
 const FIRESTORE_DATABASE_ID = "(default)";
@@ -44,7 +56,6 @@ function toRecord(value: unknown): Record<string, unknown> | null {
     ? (value as Record<string, unknown>)
     : null;
 }
-
 function readFirestoreNumber(value: unknown): number {
   const encoded = toRecord(value);
   const raw =
@@ -129,7 +140,7 @@ function isPreconditionConflict(value: unknown): boolean {
   return error?.status === "ABORTED" || error?.status === "FAILED_PRECONDITION";
 }
 
-export function createMiningRepository(
+function createFirestoreMiningRepository(
   env: Env,
   {
     fetcher = fetch,
@@ -247,4 +258,87 @@ export function createMiningRepository(
       throw new FirestoreFailure();
     },
   };
+}
+
+function canonicalRevision(value: string): number | null {
+  const match = /^d1:(\d+)$/.exec(value);
+  if (!match) return null;
+  const revision = Number(match[1]);
+  return Number.isSafeInteger(revision) && revision > 0 ? revision : null;
+}
+
+function createCanonicalMiningRepository(env: Env): MiningRepository {
+  return {
+    async getProfile(uid) {
+      const owner = await readCanonicalLoginOwner(env.PROFILE_DB, uid);
+      if (!owner) return null;
+      const profile = await resolveCanonicalProfile(
+        env.PROFILE_DB,
+        owner.profileId,
+      );
+      if (!profile || profile.state !== "active") return null;
+      return {
+        profileId: profile.profileId,
+        mining: normalizeMiningSnapshot(profile.profile.mining),
+        updateTime: `d1:${profile.revision}`,
+      };
+    },
+
+    async updateMining(profileId, mining, updateTime) {
+      const revision = canonicalRevision(updateTime);
+      if (revision === null) return "conflict";
+      const profile = await readCanonicalProfile(env.PROFILE_DB, profileId);
+      if (
+        !profile ||
+        profile.state !== "active" ||
+        profile.revision !== revision
+      ) {
+        return "conflict";
+      }
+      const sortPresence = {
+        ...profile.sortPresence,
+        ...Object.fromEntries(MATERIAL_KEYS.map((key) => [key, true])),
+      };
+      const sortValues = {
+        ...profile.sortValues,
+        ...Object.fromEntries(
+          MATERIAL_KEYS.map((key) => [key, mining.materials[key]]),
+        ),
+      };
+      const value = materializeCanonicalProfile({
+        profile: { ...profile.profile, mining },
+        state: profile.state,
+        mergedIntoProfileId: profile.mergedIntoProfileId,
+        legacyFields: profile.legacyFields,
+        createdAtMs: profile.createdAtMs,
+        updatedAtMs: Date.now(),
+        mergedAtMs: profile.mergedAtMs,
+        sortPresence,
+        sortValues,
+        winPresent: profile.winPresent,
+        emojiPresent: profile.emojiPresent,
+        gameplayEmoji: profile.gameplayEmoji,
+      });
+      try {
+        await commitCanonicalPlan(env.PROFILE_DB, {
+          expectations: [{ kind: "profile-revision", profileId, revision }],
+          mutations: [{ kind: "update-active-profile", value }],
+        });
+        return "updated";
+      } catch (error) {
+        if (error instanceof CanonicalProfileConflict) return "conflict";
+        throw error;
+      }
+    },
+  };
+}
+
+export function createMiningRepository(
+  env: Env,
+  dependencies: MiningRepositoryDependencies = {},
+): MiningRepository {
+  if (profileStorageUsesD1(readProfileStorageMode(env))) {
+    return createCanonicalMiningRepository(env);
+  }
+  return createFirestoreMiningRepository(env, dependencies);
 }

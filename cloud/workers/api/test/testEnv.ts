@@ -72,6 +72,27 @@ const profileGamesDb = {
   },
 } satisfies D1Database;
 
+const canonicalControlStatement: D1PreparedStatement = {
+  all: d1Statement.all,
+  bind: () => canonicalControlStatement,
+  first: async <T>() =>
+    ({
+      state: "firestore",
+      import_digest: null,
+      import_plan_version: null,
+      imported_at_ms: null,
+    }) as T,
+  raw: d1Statement.raw,
+  run: d1Statement.run,
+};
+const profileDb = {
+  ...profileGamesDb,
+  prepare: (query: string) =>
+    query.includes("profile_canonical_control")
+      ? canonicalControlStatement
+      : d1Statement,
+} satisfies D1Database;
+
 const telegramStatement: D1PreparedStatement = {
   all: d1Statement.all,
   bind: () => telegramStatement,
@@ -99,9 +120,9 @@ const eventPrizeWithdrawalsDb = {
 
 export const TELEGRAM_TEST_ENV = {
   APPLE_AUDIENCES: "link.mons",
+  AUTH_MUTATIONS_DISABLED: "false",
   AUTH_RECOVERY_QUEUE: queue,
   AUTH_STATE_DB: profileGamesDb,
-  AUTH_MUTATIONS_DISABLED: "false" as unknown as Env["AUTH_MUTATIONS_DISABLED"],
   AUTH_RATE_LIMITER: rateLimit,
   EVENT_PROGRESS_WORKFLOW: workflow,
   EVENT_PRIZE_ADMIN_PRIVATE_KEY: "test-event-prize-private-key",
@@ -116,9 +137,10 @@ export const TELEGRAM_TEST_ENV = {
   NFT_RATE_LIMITER: rateLimit,
   PROFILE_GAME_PROJECTION_QUEUE: queue,
   PROFILE_PROJECTION_QUEUE: queue,
-  PROFILE_DB: profileGamesDb,
+  PROFILE_DB: profileDb,
   PROFILE_GAMES_DB: profileGamesDb,
   PROFILE_READ_MODE: "d1",
+  PROFILE_STORAGE_MODE: "firestore",
   RATING_SERVICE_ACCOUNT_EMAIL: "rating@example.iam.gserviceaccount.com",
   RATING_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET: "test-announcement-secret",
@@ -136,3 +158,41 @@ export const TELEGRAM_TEST_ENV = {
   X_CLIENT_ID: "test-x-client-id",
   X_CLIENT_SECRET: "test-x-client-secret",
 } as const;
+
+export function withProfileControl(
+  environment: Env,
+  state: "firestore" | "importing" | "frozen" | "active",
+): Env {
+  let statement: D1PreparedStatement;
+  statement = {
+    all: d1Statement.all,
+    bind: () => statement,
+    first: async <T>() =>
+      ({
+        state,
+        import_digest:
+          state === "firestore" || state === "importing"
+            ? null
+            : "0".repeat(64),
+        import_plan_version:
+          state === "firestore" || state === "importing" ? null : 1,
+        imported_at_ms:
+          state === "firestore" || state === "importing" ? null : 1,
+      }) as T,
+    raw: d1Statement.raw,
+    run: d1Statement.run,
+  };
+  const database = {
+    batch: environment.PROFILE_DB.batch.bind(environment.PROFILE_DB),
+    dump: environment.PROFILE_DB.dump.bind(environment.PROFILE_DB),
+    exec: environment.PROFILE_DB.exec.bind(environment.PROFILE_DB),
+    prepare: (query: string) =>
+      query.includes("profile_canonical_control")
+        ? statement
+        : environment.PROFILE_DB.prepare(query),
+    withSession: environment.PROFILE_DB.withSession.bind(
+      environment.PROFILE_DB,
+    ),
+  } satisfies D1Database;
+  return { ...environment, PROFILE_DB: database };
+}

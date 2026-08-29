@@ -7,7 +7,7 @@ import {
 } from "../src/authStateD1.ts";
 import { handleXCallback } from "../src/xCallback.ts";
 import { XProviderFailure, type XOAuthProvider } from "../src/xProvider.ts";
-import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const FLOW_ID = "abcdefghijklmnopqrstuvwx";
 const CALLBACK_URL = `https://api.mons.link/auth/x/callback?state=${FLOW_ID}`;
@@ -163,25 +163,50 @@ test("redirects failed flows with the stored error", async () => {
   );
 });
 
-test("does not mutate an active flow during auth maintenance", async () => {
+test("profile control blocks callback mutations", async () => {
   const updates: Array<Record<string, unknown>> = [];
   let providerCalls = 0;
   const response = await handleXCallback(
     new Request(`${CALLBACK_URL}&code=oauth-code`),
-    { ...env, AUTH_MUTATIONS_DISABLED: "true" } as unknown as Env,
+    withProfileControl(env, "active"),
     {
       repository: createRepository(flow(), updates),
       provider: createProvider({
         exchangeCode: async () => {
-          providerCalls += 1;
+          providerCalls++;
           return "unused";
         },
       }),
     },
   );
   assert.equal(response.status, 503);
-  assert.equal(response.headers.get("retry-after"), "60");
+  assert.equal(response.headers.get("Retry-After"), "60");
+  assert.equal(await response.text(), "profile-writes-disabled");
   assert.deepEqual(updates, []);
+  assert.equal(providerCalls, 0);
+});
+
+test("auth maintenance blocks callbacks after the profile gate", async () => {
+  let providerCalls = 0;
+  const response = await handleXCallback(
+    new Request(`${CALLBACK_URL}&code=oauth-code`),
+    {
+      ...env,
+      AUTH_MUTATIONS_DISABLED: "true",
+    } as unknown as Env,
+    {
+      repository: createRepository(),
+      provider: createProvider({
+        exchangeCode: async () => {
+          providerCalls++;
+          return "unused";
+        },
+      }),
+    },
+  );
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("Retry-After"), "60");
+  assert.equal(await response.text(), "Auth maintenance in progress.");
   assert.equal(providerCalls, 0);
 });
 

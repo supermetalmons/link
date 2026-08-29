@@ -30,6 +30,15 @@ import {
   deleteD1NavigationGame,
   getD1NavigationGame,
 } from "./profileGamesD1.ts";
+import {
+  createCanonicalGameplayRepository,
+  createCanonicalRatingRepository,
+} from "./gameplayCanonicalRepository.ts";
+import {
+  profileStorageUsesD1,
+  readProfileStorageMode,
+  type ProfileStorageMode,
+} from "./profileStorageMode.ts";
 
 const FIRESTORE_PROJECT_ID = "mons-link";
 const FIRESTORE_DATABASE_ID = "(default)";
@@ -302,6 +311,7 @@ type GameplayRepositoryDependencies = {
   now?: () => number;
   projectionCommitted?: (profileId: string) => Promise<void> | void;
   rtdbClient?: FirebaseRtdbClient;
+  storageMode?: ProfileStorageMode;
   timeoutMs?: number;
 };
 
@@ -311,6 +321,7 @@ type RatingRepositoryDependencies = {
   maxTransactionAttempts?: number;
   now?: () => number;
   projectionCommitted?: (profileId: string) => Promise<void> | void;
+  storageMode?: ProfileStorageMode;
   timeoutMs?: number;
 };
 
@@ -604,8 +615,16 @@ export function createGameplayRepository(
       now,
       timeoutMs,
     }),
+    storageMode,
   }: GameplayRepositoryDependencies = {},
 ): GameplayRepository {
+  if (profileStorageUsesD1(storageMode || readProfileStorageMode(env))) {
+    return createCanonicalGameplayRepository(env.PROFILE_DB, d1, rtdbClient, {
+      createFailure: () => new GameplayRepositoryFailure(),
+      maxAttempts: MAX_WAGER_TRANSFER_TRANSACTION_ATTEMPTS,
+      now,
+    });
+  }
   const notifyProfileProjection = async (profileId: string): Promise<void> => {
     try {
       await projectionCommitted?.(profileId);
@@ -1034,6 +1053,7 @@ export function createRatingRepository(
     maxTransactionAttempts = MAX_RATING_TRANSACTION_ATTEMPTS,
     now = Date.now,
     projectionCommitted,
+    storageMode,
     timeoutMs = FIRESTORE_TIMEOUT_MS,
   }: RatingRepositoryDependencies = {},
 ): RatingProjectionRepository &
@@ -1052,6 +1072,13 @@ export function createRatingRepository(
     Number.isInteger(maxTransactionAttempts) && maxTransactionAttempts > 0
       ? maxTransactionAttempts
       : MAX_RATING_TRANSACTION_ATTEMPTS;
+  if (profileStorageUsesD1(storageMode || readProfileStorageMode(env))) {
+    return createCanonicalRatingRepository(env.PROFILE_DB, gameplayRepository, {
+      createFailure: () => new GameplayRepositoryFailure(),
+      maxAttempts: attempts,
+      now,
+    });
+  }
   const transport = createFirestoreRestTransport({
     createFailure: () => new GameplayRepositoryFailure(),
     documentsRoot: FIRESTORE_DOCUMENTS_ROOT,

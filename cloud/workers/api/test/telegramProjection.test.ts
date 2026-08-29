@@ -523,7 +523,7 @@ test("scheduled recovery batches both pending outbox kinds", async () => {
       orderBy: "updatedAtMs",
       startAt: 0,
       endAt: 600_000,
-      limitToFirst: 100,
+      limitToFirst: 10,
     });
     return {
       auto_example: {
@@ -752,7 +752,7 @@ test("recovery claims bounded pages sequentially", async () => {
   let activeClaims = 0;
   let maxActiveClaims = 0;
   rating.listDueRatingTelegramProjections = async (_updatedBeforeMs, limit) => {
-    assert.equal(limit, 100);
+    assert.equal(limit, 10);
     return Array.from({ length: limit }, (_, index) => ({
       operationId: `operation-${index}`,
       updateTime: `update-${index}`,

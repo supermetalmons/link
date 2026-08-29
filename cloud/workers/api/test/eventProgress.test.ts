@@ -20,17 +20,17 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 function workflowEnvironment({
   status = "waiting",
   onCreate = () => undefined,
-  onRestart = () => undefined,
+  onDelete = () => undefined,
 }: {
   status?: WorkflowInstanceStatus;
   onCreate?: () => void;
-  onRestart?: () => void;
+  onDelete?: () => void;
 } = {}): Env {
   const instance = {
     id: "event-progress-test",
-    delete: async () => undefined,
+    delete: async () => onDelete(),
     pause: async () => undefined,
-    restart: async () => onRestart(),
+    restart: async () => undefined,
     resume: async () => undefined,
     sendEvent: async () => undefined,
     status: async () => ({ status }),
@@ -82,14 +82,16 @@ async function validOutbox() {
   return { plan, value: { [plan.outboxId]: plan.outbox } };
 }
 
-test("restarts errored event progress Workflow instances", async () => {
+test("recreates terminal event progress Workflow instances", async () => {
   const outbox = await validOutbox();
   const repository = sweepRepository(outbox.value);
-  let restarts = 0;
+  let creates = 0;
+  let deletes = 0;
   await sweepEventProgress(
     workflowEnvironment({
       status: "errored",
-      onRestart: () => restarts++,
+      onCreate: () => creates++,
+      onDelete: () => deletes++,
     }),
     {
       now: () => 2_000,
@@ -97,8 +99,27 @@ test("restarts errored event progress Workflow instances", async () => {
       repository: repository.value,
     },
   );
-  assert.equal(restarts, 1);
+  assert.equal(creates, 2);
+  assert.equal(deletes, 1);
   assert.equal(repository.patches.length, 0);
+});
+
+test("recreates operator-terminated event progress Workflow instances", async () => {
+  const outbox = await validOutbox();
+  const repository = sweepRepository(outbox.value);
+  let deletes = 0;
+  await sweepEventProgress(
+    workflowEnvironment({
+      status: "terminated",
+      onDelete: () => deletes++,
+    }),
+    {
+      now: () => 2_000,
+      ratingRepository: null,
+      repository: repository.value,
+    },
+  );
+  assert.equal(deletes, 1);
 });
 
 test("removes outbox records for completed Workflow instances", async () => {

@@ -15,7 +15,12 @@ import {
   XProviderFailure,
   type XOAuthProvider,
 } from "./xProvider.ts";
+import {
+  PROFILE_WRITES_RETRY_AFTER_SECONDS,
+  ProfileWritesDisabledFailure,
+} from "./authErrors.ts";
 import { authMutationsDisabled } from "./authPolicy.ts";
+import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 import { safeXReturnUrl, X_FLOW_ID_PATTERN, X_FLOW_TTL_MS } from "./xFlow.ts";
 
 const X_CALLBACK_PROCESSING_LEASE_MS = 60_000;
@@ -150,12 +155,22 @@ export async function handleXCallback(
   if (existingRedirect) {
     return existingRedirect;
   }
+  try {
+    await assertProfileMutationAllowed(env);
+  } catch (error) {
+    if (error instanceof ProfileWritesDisabledFailure) {
+      return textResponse("profile-writes-disabled", 503, {
+        "Retry-After": String(PROFILE_WRITES_RETRY_AFTER_SECONDS),
+      });
+    }
+    logFailure("profile-storage-mode");
+    return textResponse("Service Unavailable", 503);
+  }
   if (authMutationsDisabled(env.AUTH_MUTATIONS_DISABLED)) {
     return textResponse("Auth maintenance in progress.", 503, {
       "Retry-After": "60",
     });
   }
-
   const returnUrl = safeXReturnUrl(flow.returnUrl);
   const consentSource = normalizeServerXConsentSource(flow.consentSource);
   const updateFlow = async (

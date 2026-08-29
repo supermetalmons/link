@@ -38,7 +38,11 @@ import {
   buildAutomatchTelegramProjectionOutboxUpdates,
   buildAutomatchTelegramLifecycleUpdates,
 } from "../../../functions/telegram/automatchSource.js";
-import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
+import {
+  AuthApiFailure,
+  authErrorResponse,
+  isProfileWritesDisabledFailure,
+} from "./authErrors.ts";
 import {
   authJsonResponse,
   authPreflightResponse,
@@ -115,6 +119,7 @@ import {
 } from "./gameSessionMutations.ts";
 import { readProfileGamesPage } from "./profileGamesD1.ts";
 import { scheduleProfileReadProjection } from "./profileReadProjection.ts";
+import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 
 export const GAMEPLAY_PATHS = new Set([
   "/automatch/cancel",
@@ -135,6 +140,11 @@ export const GAMEPLAY_PATHS = new Set([
   "/wagers/proposals/decline",
   "/wagers/proposals/send",
   "/wagers/outcomes/resolve",
+]);
+
+const GAMEPLAY_READ_PATHS = new Set([
+  "/invites/role/read",
+  "/navigation/games/read",
 ]);
 
 type QueuedAutomatchCandidate = {
@@ -680,6 +690,9 @@ export async function handleGameplayRoute(
     const identity = await (
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
+    if (!GAMEPLAY_READ_PATHS.has(pathname)) {
+      await assertProfileMutationAllowed(env);
+    }
     if (pathname === "/wagers/outcomes/resolve") {
       await enforceWagerOutcomeRateLimit(env.AUTH_RATE_LIMITER, identity.uid);
     }
@@ -971,7 +984,7 @@ export async function handleGameplayRoute(
             "unavailable",
             "gameplay-service-unavailable",
           );
-    if (failure.status >= 500) {
+    if (failure.status >= 500 && !isProfileWritesDisabledFailure(failure)) {
       (
         dependencies.logFailure ||
         ((kind) =>

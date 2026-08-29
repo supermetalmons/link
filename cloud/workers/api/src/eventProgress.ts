@@ -19,12 +19,13 @@ import {
   type EventProgressOutboxRecord,
 } from "../../../functions/events.js";
 import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
+import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
 
 const EVENT_PROGRESS_OUTBOX_ROOT = "eventProgressOutbox";
 const EVENT_PROGRESS_OUTBOX_DEAD_ROOT = "eventProgressOutboxDead";
 const EVENT_PROGRESS_SCHEMA_VERSION = 1;
 const EVENT_PROGRESS_WORKER_UID = "event-progress-worker";
-const EVENT_PROGRESS_SWEEP_LIMIT = 100;
+const EVENT_PROGRESS_SWEEP_LIMIT = PROFILE_BACKGROUND_SWEEP_LIMIT;
 const EVENT_PROGRESS_SWEEP_CONCURRENCY = 10;
 const EVENT_PROGRESS_TIMEOUT_MS = 30_000;
 const RATING_EVENT_PROGRESS_SCHEMA_VERSION = 1;
@@ -371,7 +372,8 @@ async function dispatchOutboxPlan(
   const instance = await env.EVENT_PROGRESS_WORKFLOW.get(plan.workflowId);
   const status = await instance.status();
   if (status.status === "errored" || status.status === "terminated") {
-    await instance.restart();
+    await instance.delete();
+    await ensureEventProgressWorkflow(env.EVENT_PROGRESS_WORKFLOW, plan);
     return;
   }
   if (status.status === "complete") {

@@ -11,7 +11,8 @@ import {
   type AuthRecoveryTask,
 } from "./authRecovery.ts";
 import {
-  handleTelegramQueue,
+  handleTelegramQueueMessage,
+  parseWagerSettlementRetryTask,
   type TelegramTaskPayload,
   type WagerSettlementRetryTask,
 } from "./telegramQueue.ts";
@@ -46,6 +47,7 @@ import {
   PROFILE_READ_PROJECTION_QUEUE_NAME,
   type ProfileReadProjectionQueueTask,
 } from "./profileReadProjectionTasks.ts";
+import { profileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
 export type { ProviderFetch } from "./provider.ts";
@@ -69,20 +71,50 @@ export function handleFetch(
   return handleRequest(request, env, {}, ctx);
 }
 
+type ScheduledTasks = {
+  authRecovery: () => Promise<unknown>;
+  authState: () => Promise<unknown>;
+  eventProgress: () => Promise<unknown>;
+  gameSessionReceipts: () => Promise<unknown>;
+  profileGameProjection: () => Promise<unknown>;
+  profileReadReconciliation: () => Promise<unknown>;
+  telegramProjection: () => Promise<unknown>;
+};
+
+const PROFILE_WRITES_QUEUE_RETRY_DELAY_SECONDS = 5 * 60;
+
 async function handleScheduled(
   controller: ScheduledController,
   env: Env,
 ): Promise<void> {
+  const profileWritesEnabled = profileBackgroundMutationsEnabled(env);
+  const tasks: ScheduledTasks = {
+    authRecovery: () => handleAuthRecoverySweep(controller, env),
+    authState: () =>
+      sweepExpiredAuthState(env.AUTH_STATE_DB, controller.scheduledTime),
+    eventProgress: () => sweepEventProgress(env),
+    gameSessionReceipts: () =>
+      sweepGameSessionMutationReceipts(env, {
+        now: () => controller.scheduledTime,
+      }),
+    profileGameProjection: () =>
+      handleProfileGameProjectionSweep(controller, env),
+    profileReadReconciliation: () => reconcileProfileReadProjections(env),
+    telegramProjection: () => handleTelegramProjectionSweep(controller, env),
+  };
+  const runProfileTask = async (task: () => Promise<unknown>) => {
+    if (await profileWritesEnabled) {
+      await task();
+    }
+  };
   const results = await Promise.allSettled([
-    handleAuthRecoverySweep(controller, env),
-    sweepEventProgress(env),
-    handleProfileGameProjectionSweep(controller, env),
-    handleTelegramProjectionSweep(controller, env),
-    sweepGameSessionMutationReceipts(env, {
-      now: () => controller.scheduledTime,
-    }),
-    sweepExpiredAuthState(env.AUTH_STATE_DB, controller.scheduledTime),
-    reconcileProfileReadProjections(env),
+    runProfileTask(tasks.authRecovery),
+    runProfileTask(tasks.eventProgress),
+    runProfileTask(tasks.profileGameProjection),
+    runProfileTask(tasks.telegramProjection),
+    tasks.gameSessionReceipts(),
+    tasks.authState(),
+    runProfileTask(tasks.profileReadReconciliation),
   ]);
   const failure = results.find(
     (result): result is PromiseRejectedResult => result.status === "rejected",
@@ -92,24 +124,62 @@ async function handleScheduled(
   }
 }
 
+function retryQueueMessages(batch: MessageBatch<unknown>): void {
+  for (const message of batch.messages) {
+    message.retry({
+      delaySeconds: PROFILE_WRITES_QUEUE_RETRY_DELAY_SECONDS,
+    });
+  }
+}
+
+async function handleQueue(
+  batch: MessageBatch<unknown>,
+  env: Env,
+): Promise<void> {
+  if (
+    batch.queue === AUTH_RECOVERY_QUEUE_NAME ||
+    batch.queue === PROFILE_GAME_PROJECTION_QUEUE_NAME ||
+    batch.queue === PROFILE_READ_PROJECTION_QUEUE_NAME ||
+    batch.queue === TELEGRAM_PROJECTION_QUEUE_NAME
+  ) {
+    if (!(await profileBackgroundMutationsEnabled(env))) {
+      retryQueueMessages(batch);
+      return;
+    }
+  }
+  if (batch.queue === AUTH_RECOVERY_QUEUE_NAME) {
+    return handleAuthRecoveryQueue(batch, env);
+  }
+  if (batch.queue === TELEGRAM_PROJECTION_QUEUE_NAME) {
+    return handleTelegramProjectionQueue(batch, env);
+  }
+  if (batch.queue === PROFILE_GAME_PROJECTION_QUEUE_NAME) {
+    return handleProfileGameProjectionQueue(batch, env);
+  }
+  if (batch.queue === PROFILE_READ_PROJECTION_QUEUE_NAME) {
+    return handleProfileReadProjectionQueue(batch, env);
+  }
+  let profileBackgroundEnabled: Promise<boolean> | null = null;
+  for (const message of batch.messages) {
+    if (parseWagerSettlementRetryTask(message.body)) {
+      profileBackgroundEnabled ||= profileBackgroundMutationsEnabled(env);
+      if (!(await profileBackgroundEnabled)) {
+        message.retry({
+          delaySeconds: PROFILE_WRITES_QUEUE_RETRY_DELAY_SECONDS,
+        });
+        continue;
+      }
+    }
+    await handleTelegramQueueMessage(message, env);
+  }
+}
+
 export default {
   fetch: handleFetch,
-  queue(batch, env) {
-    if (batch.queue === AUTH_RECOVERY_QUEUE_NAME) {
-      return handleAuthRecoveryQueue(batch, env);
-    }
-    if (batch.queue === TELEGRAM_PROJECTION_QUEUE_NAME) {
-      return handleTelegramProjectionQueue(batch, env);
-    }
-    if (batch.queue === PROFILE_GAME_PROJECTION_QUEUE_NAME) {
-      return handleProfileGameProjectionQueue(batch, env);
-    }
-    if (batch.queue === PROFILE_READ_PROJECTION_QUEUE_NAME) {
-      return handleProfileReadProjectionQueue(batch, env);
-    }
-    return handleTelegramQueue(batch, env);
+  queue: handleQueue,
+  scheduled(controller, env) {
+    return handleScheduled(controller, env);
   },
-  scheduled: handleScheduled,
 } satisfies ExportedHandler<
   Env,
   | AuthRecoveryTask

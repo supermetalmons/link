@@ -7,7 +7,7 @@ import { handleEventRoute } from "../src/eventRoute.ts";
 import { EVENT_CONTROL_TIMEOUT_MS } from "../src/eventOperations.ts";
 import { EVENT_OPERATION_TIMEOUT_MS } from "../src/eventParticipation.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
-import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const identity = {
   uid: "creator-login",
@@ -137,6 +137,42 @@ test("authenticates before parsing event request bodies", async () => {
     error: "unauthenticated",
     message: "authentication-required",
   });
+});
+
+test("freezes every authenticated event mutation before parsing", async () => {
+  const frozenEnv = withProfileControl(
+    TELEGRAM_TEST_ENV as unknown as Env,
+    "frozen",
+  );
+  for (const path of [
+    "/events/create",
+    "/events/matches/winners/disqualify",
+    "/events/participants/join",
+    "/events/participants/remove",
+    "/events/prize-selections/toggle",
+    "/events/start/postpone",
+    "/events/state/sync",
+  ]) {
+    const request = new Request(`https://api.mons.link${path}`, {
+      method: "POST",
+      headers: {
+        Origin: "https://mons.link",
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+    });
+    const response = await handleEventRoute(request, frozenEnv, ctx, {
+      verifyIdentity: async () => identity,
+    });
+    assert.equal(response.status, 503, path);
+    assert.equal(response.headers.get("Retry-After"), "60", path);
+    assert.deepEqual(await response.json(), {
+      ok: false,
+      error: "unavailable",
+      message: "profile-writes-disabled",
+    });
+    assert.equal(request.bodyUsed, false, path);
+  }
 });
 
 test("rejects wrong methods and strict-body violations", async () => {

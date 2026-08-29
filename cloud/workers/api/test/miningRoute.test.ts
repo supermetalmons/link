@@ -13,7 +13,7 @@ import type {
   MiningProfile,
   MiningRepository,
 } from "../src/miningRepository.ts";
-import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const NOW_MS = Date.UTC(2026, 7, 18, 12);
 const ctx = { waitUntil: () => undefined };
@@ -185,6 +185,38 @@ test("authenticates and rate limits before reading the request body", async () =
     (await responseJson(unavailable)).message,
     "rate-limit-unavailable",
   );
+});
+
+test("freezes mining before rate limiting or repository work", async () => {
+  let rateLimitCalls = 0;
+  let repositoryCalls = 0;
+  const frozenEnv = withProfileControl(
+    envWithRateLimit(async () => {
+      rateLimitCalls++;
+      return { success: true };
+    }),
+    "active",
+  );
+  const mine = request(mineRequest());
+  const response = await handleMiningRoute(mine, frozenEnv, ctx, {
+    repository: repository({
+      getProfile: async () => {
+        repositoryCalls++;
+        return profile();
+      },
+    }),
+    verifyIdentity,
+  });
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("Retry-After"), "60");
+  assert.deepEqual(await responseJson(response), {
+    ok: false,
+    error: "unavailable",
+    message: "profile-writes-disabled",
+  });
+  assert.equal(rateLimitCalls, 0);
+  assert.equal(repositoryCalls, 0);
+  assert.equal(mine.bodyUsed, false);
 });
 
 test("validates bounded request bodies before repository access", async () => {

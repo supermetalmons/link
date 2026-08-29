@@ -5,6 +5,16 @@ import {
 } from "@mons/shared/usernames";
 import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 import { createGoogleAccessToken } from "./googleAuth.ts";
+import {
+  CanonicalProfileConflict,
+  commitCanonicalPlan,
+  materializeCanonicalProfile,
+  readStableCanonicalProfileAggregateByLogin,
+} from "./profileCanonicalD1.ts";
+import {
+  profileStorageUsesD1,
+  readProfileStorageMode,
+} from "./profileStorageMode.ts";
 
 const FIRESTORE_PROJECT_ID = "mons-link";
 const FIRESTORE_DATABASE_ID = "(default)";
@@ -19,7 +29,6 @@ type FirestoreDocument = {
   fields: Record<string, unknown>;
   name: string;
 };
-
 type FirestoreWrite =
   | {
       delete: string;
@@ -137,7 +146,7 @@ function updateWrite(
   };
 }
 
-export function createUsernameRepository(
+function createFirestoreUsernameRepository(
   env: Env,
   {
     fetcher = fetch,
@@ -594,6 +603,141 @@ export function createUsernameRepository(
       throw new UsernameRepositoryFailure();
     },
   };
+}
+
+type CanonicalUsernameOwnerRow = {
+  profile_id: string;
+};
+
+function createCanonicalUsernameRepository(
+  env: Env,
+  {
+    maxTransactionAttempts = MAX_TRANSACTION_ATTEMPTS,
+    now = Date.now,
+  }: Pick<
+    UsernameRepositoryDependencies,
+    "maxTransactionAttempts" | "now"
+  > = {},
+): UsernameRepository {
+  const attempts =
+    Number.isInteger(maxTransactionAttempts) &&
+    Number(maxTransactionAttempts) > 0
+      ? Number(maxTransactionAttempts)
+      : MAX_TRANSACTION_ATTEMPTS;
+  return {
+    async editUsername(uid, username) {
+      const loginUid = uid.trim();
+      const nextUsername = username.trim();
+      if (!loginUid) {
+        throw new UsernameRepositoryFailure();
+      }
+      const updatedAtMs = now();
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        try {
+          const resolved = await readStableCanonicalProfileAggregateByLogin(
+            env.PROFILE_DB,
+            loginUid,
+          );
+          if (!resolved) return "profile-not-found";
+          const owner = resolved.owner;
+          const aggregate = resolved.aggregate;
+          const profile = aggregate.profile;
+          if (!profile) throw new UsernameRepositoryFailure();
+          const currentUsername = profile.profile.username || "";
+          if (currentUsername === nextUsername) return "updated";
+          if (!nextUsername) {
+            const methods = new Set(
+              aggregate.authMethods.map((method) => method.method),
+            );
+            if (
+              (methods.has("apple") || methods.has("x")) &&
+              !methods.has("eth") &&
+              !methods.has("sol")
+            ) {
+              return "cannot-clear";
+            }
+          }
+          const usernameKey = nextUsername
+            ? buildUsernameLookupKey(nextUsername)
+            : "";
+          let usernameOwnedByProfile = false;
+          if (usernameKey) {
+            const existing = await env.PROFILE_DB.prepare(
+              "SELECT profile_id FROM profile_records WHERE username_key = ?",
+            )
+              .bind(usernameKey)
+              .first<CanonicalUsernameOwnerRow>();
+            if (existing && existing.profile_id !== profile.profileId) {
+              return "taken";
+            }
+            usernameOwnedByProfile = existing?.profile_id === profile.profileId;
+          }
+          const nextProfile = materializeCanonicalProfile({
+            profile: {
+              ...profile.profile,
+              username: nextUsername || null,
+            },
+            state: profile.state,
+            mergedIntoProfileId: profile.mergedIntoProfileId,
+            legacyFields: profile.legacyFields,
+            createdAtMs: profile.createdAtMs,
+            updatedAtMs,
+            mergedAtMs: profile.mergedAtMs,
+            sortPresence: profile.sortPresence,
+            sortValues: profile.sortValues,
+            winPresent: profile.winPresent,
+            emojiPresent: profile.emojiPresent,
+            gameplayEmoji: profile.gameplayEmoji,
+          });
+          await commitCanonicalPlan(env.PROFILE_DB, {
+            expectations: [
+              {
+                kind: "profile-revision",
+                profileId: profile.profileId,
+                revision: profile.revision,
+              },
+              {
+                kind: "login-owner-revision",
+                loginUid,
+                profileId: owner.profileId,
+                revision: owner.revision,
+              },
+              ...(usernameKey
+                ? usernameOwnedByProfile
+                  ? ([
+                      {
+                        kind: "username-owner",
+                        usernameKey,
+                        profileId: profile.profileId,
+                        revision: profile.revision,
+                      },
+                    ] as const)
+                  : ([{ kind: "username-absent", usernameKey }] as const)
+                : []),
+            ],
+            mutations: [{ kind: "update-active-profile", value: nextProfile }],
+          });
+          return "updated";
+        } catch (error) {
+          if (error instanceof CanonicalProfileConflict) {
+            if (attempt < attempts - 1) continue;
+          }
+          throw new UsernameRepositoryFailure();
+        }
+      }
+      throw new UsernameRepositoryFailure();
+    },
+  };
+}
+
+export function createUsernameRepository(
+  env: Env,
+  dependencies: UsernameRepositoryDependencies = {},
+): UsernameRepository {
+  if (profileStorageUsesD1(readProfileStorageMode(env))) {
+    return createCanonicalUsernameRepository(env, dependencies);
+  }
+  return createFirestoreUsernameRepository(env, dependencies);
 }
 
 export {

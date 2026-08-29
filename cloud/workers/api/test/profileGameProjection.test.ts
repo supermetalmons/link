@@ -1252,7 +1252,7 @@ test("scheduled recovery claims, repairs, and batches valid projection records",
     limit,
   ) => {
     assert.equal(updatedBeforeMs, 600_000);
-    assert.equal(limit, 100);
+    assert.equal(limit, 10);
     return [
       {
         inviteId: "auto_aaaaaaaaaaa",
@@ -1452,7 +1452,7 @@ test("event recovery claims due outboxes and repairs malformed records", async (
       assert.deepEqual(query, {
         orderBy: "lastQueuedAtMs",
         startAt: "",
-        limitToFirst: 100,
+        limitToFirst: 10,
       });
       return null;
     },
@@ -1594,7 +1594,7 @@ test("automatch recovery claims due outboxes, repairs poison, and preserves sour
       assert.deepEqual(query, {
         orderBy: "lastQueuedAtMs",
         startAt: "",
-        limitToFirst: 100,
+        limitToFirst: 10,
       });
       return Object.fromEntries(
         [...values].filter(

@@ -17,7 +17,11 @@ import {
   type SyncEventStateRequest,
 } from "@mons/shared/events";
 import { normalizeFirebaseKey } from "@mons/shared/ids";
-import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
+import {
+  AuthApiFailure,
+  authErrorResponse,
+  isProfileWritesDisabledFailure,
+} from "./authErrors.ts";
 import {
   authJsonResponse,
   authPreflightResponse,
@@ -50,6 +54,7 @@ import {
   syncEventState,
   type EventControlDependencies,
 } from "./eventOperations.ts";
+import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 
 export const EVENT_PATHS = new Set([
   "/events/create",
@@ -172,6 +177,7 @@ export async function handleEventRoute(
     const identity = await (
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
+    await assertProfileMutationAllowed(env);
     const body = await readEventBody(request, pathname);
     const schedule = (work: Promise<void>) => ctx.waitUntil(work);
     const repository = createEventProfileGameProjectionRepository(
@@ -263,7 +269,7 @@ export async function handleEventRoute(
       error instanceof AuthApiFailure
         ? error
         : new AuthApiFailure(503, "unavailable", "event-service-unavailable");
-    if (failure.status >= 500) {
+    if (failure.status >= 500 && !isProfileWritesDisabledFailure(failure)) {
       (
         dependencies.logFailure ||
         ((kind) =>

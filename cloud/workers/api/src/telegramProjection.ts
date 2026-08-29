@@ -48,8 +48,9 @@ import {
   processEventProjectionTask,
   sweepEventTelegramProjections,
 } from "./eventTelegramProjection.ts";
+import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
 
-const PROJECTION_SWEEP_LIMIT = 100;
+const PROJECTION_SWEEP_LIMIT = PROFILE_BACKGROUND_SWEEP_LIMIT;
 const PROJECTION_INPUT_RETRIES = 5;
 const MAX_PROJECTION_RETRY_DELAY_SECONDS = 60;
 

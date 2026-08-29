@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildEventPrizeWithdrawalOperationId,
+  createEventPrizeRuntimeDependencies,
   createEventPrizeExecutionProfileReader,
   executeEventPrizeWithdrawal,
   handleEventPrizeWithdrawalRoute,
@@ -12,7 +13,7 @@ import {
 import type { AuthFirestoreClient } from "../src/authFirestore.ts";
 import type { EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
-import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const eventId = "NN3eRzoZo80";
 const prizeId = "1092";
@@ -20,6 +21,18 @@ const profileId = "profile-1";
 const uid = "login-1";
 const recipientAddress = "11111111111111111111111111111111";
 const adminAddress = "Ay1mgqJr6WmihsSYdMZ1dkHL5r25N7VhCGk7NpCJcPGi";
+
+function frozenWithdrawalDb(): D1Database {
+  return {
+    prepare: () =>
+      ({
+        first: async () => ({
+          previous_storage_mode: "d1",
+          storage_mode: "frozen",
+        }),
+      }) as unknown as D1PreparedStatement,
+  } as unknown as D1Database;
+}
 
 function firestore(): AuthFirestoreClient {
   const profile = {
@@ -149,6 +162,26 @@ function repository() {
   return { value, values, withdrawalStore };
 }
 
+test("read-only prize runtime preflight can inspect frozen storage", async () => {
+  const state = repository();
+  const env = {
+    ...TELEGRAM_TEST_ENV,
+    EVENT_PRIZE_WITHDRAWALS_DB: frozenWithdrawalDb(),
+  } as unknown as Env;
+  await assert.rejects(
+    createEventPrizeRuntimeDependencies(env, {
+      repository: state.value,
+      withdrawalStore: state.withdrawalStore,
+    }),
+  );
+  const runtime = await createEventPrizeRuntimeDependencies(env, {
+    allowFrozen: true,
+    repository: state.value,
+    withdrawalStore: state.withdrawalStore,
+  });
+  assert.equal(typeof runtime.createEventPrizeUmi, "function");
+});
+
 function workflow(
   status: () => InstanceStatus,
   {
@@ -253,6 +286,24 @@ test("returns invalid argument for malformed JSON", async () => {
     ((await response.json()) as { error: string }).error,
     "invalid-argument",
   );
+});
+
+test("freezes withdrawal creation before parsing", async () => {
+  const requestValue = request("/events/prizes/withdrawals", {});
+  const response = await handleEventPrizeWithdrawalRoute(
+    requestValue,
+    withProfileControl(TELEGRAM_TEST_ENV as unknown as Env, "importing"),
+    context,
+    { verifyIdentity },
+  );
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("Retry-After"), "60");
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "unavailable",
+    message: "profile-writes-disabled",
+  });
+  assert.equal(requestValue.bodyUsed, false);
 });
 
 test("rejects an invalid completed record before projection cleanup", async () => {
@@ -662,6 +713,18 @@ test("starts and polls one authenticated withdrawal Workflow", async () => {
   );
   assert.equal(pending.status, 202);
 
+  const frozenPending = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId: processing.operationId,
+      prizeId,
+    }),
+    withProfileControl(env, "active"),
+    context,
+    dependencies,
+  );
+  assert.equal(frozenPending.status, 202);
+
   state.values.set(`eventPrizeWithdrawals/${eventId}/${prizeId}`, {
     assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
     completedAtMs: 1,
@@ -776,10 +839,14 @@ test("replaces a retained completed failure", async () => {
   assert.equal(deletes, 1);
 });
 
-test("does not revive a terminated Workflow and releases its new claim", async () => {
+test("replaces a retained terminated Workflow with the current request", async () => {
   const state = repository();
+  let deletes = 0;
   const binding = workflow(() => ({ status: "terminated" }), {
     createExisting: true,
+    onDelete: () => {
+      deletes += 1;
+    },
   });
   const response = await handleEventPrizeWithdrawalRoute(
     request("/events/prizes/withdrawals", {
@@ -797,9 +864,6 @@ test("does not revive a terminated Workflow and releases its new claim", async (
       workflow: binding,
     },
   );
-  assert.equal(response.status, 412);
-  assert.equal(
-    state.values.get(`eventPrizeWithdrawals/${eventId}/${prizeId}`) ?? null,
-    null,
-  );
+  assert.equal(response.status, 202);
+  assert.equal(deletes, 1);
 });

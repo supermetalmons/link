@@ -24,6 +24,10 @@ import {
   type ProfileReadProjectionTask,
 } from "./profileReadProjectionTasks.ts";
 import type { WorkerExecutionContext } from "./firebaseAuth.ts";
+import {
+  profileStorageUsesD1,
+  readProfileStorageMode,
+} from "./profileStorageMode.ts";
 
 const PROFILE_COLLECTION = "users";
 const RECONCILIATION_FIELD_MASK = ["nonce"];
@@ -313,6 +317,7 @@ export async function enqueueProfileReadProjection(
   env: Env,
   profileId: string,
 ): Promise<void> {
+  if (profileStorageUsesD1(readProfileStorageMode(env))) return;
   await env.PROFILE_PROJECTION_QUEUE.send(createTask(profileId));
 }
 
@@ -320,6 +325,7 @@ async function enqueueProfileReadProjectionBatch(
   env: Env,
   profileIds: string[],
 ): Promise<void> {
+  if (profileStorageUsesD1(readProfileStorageMode(env))) return;
   await env.PROFILE_PROJECTION_QUEUE.sendBatch(
     profileIds.map((profileId) => ({ body: createTask(profileId) })),
   );

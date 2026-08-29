@@ -49,6 +49,20 @@ import {
   createD1EventPrizeWithdrawalStore,
   type EventPrizeWithdrawalStore,
 } from "./eventPrizeWithdrawalD1.ts";
+import {
+  CanonicalProfileConflict,
+  commitCanonicalPlan,
+  parseCanonicalAuthRecoveryRow,
+  readCanonicalMergeTarget,
+  readCanonicalProfileAggregate,
+  type CanonicalAuthRecoverySnapshot,
+  type CanonicalAuthRecoveryValue,
+} from "./profileCanonicalD1.ts";
+import {
+  profileStorageUsesD1,
+  readProfileStorageMode,
+} from "./profileStorageMode.ts";
+import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
 
 export const AUTH_RECOVERY_QUEUE_NAME = "mons-link-auth-recovery";
 export const AUTH_RECOVERY_JOBS_COLLECTION = "authRecoveryJobs";
@@ -84,6 +98,7 @@ type AuthRecoveryDependencies = {
   firestore?: AuthFirestoreClient;
   logger?: Pick<Console, "error" | "info">;
   now?: () => number;
+  profileDb?: D1Database;
   profileProjectionCommitted?: (profileId: string) => Promise<void> | void;
   rtdb?: FirebaseRtdbClient;
   signal?: AbortSignal;
@@ -427,7 +442,7 @@ function isCompletedPrizeWithdrawal(
   );
 }
 
-export function createAuthRecoveryService(
+function createFirestoreAuthRecoveryService(
   env: Env,
   dependencies: AuthRecoveryDependencies = {},
 ) {
@@ -904,7 +919,547 @@ export function createAuthRecoveryService(
   return { recoverProfile, removeLoginUid };
 }
 
+type CanonicalRecoveryJob = AuthRecoveryJob & { revision: number };
+
+function canonicalRecoveryJob(
+  snapshot: CanonicalAuthRecoverySnapshot,
+): CanonicalRecoveryJob {
+  return {
+    profileId: snapshot.profileId,
+    loginUids: snapshot.loginUids,
+    sourceProfileIds: snapshot.sourceProfileIds,
+    sourcePhase: snapshot.sourcePhase,
+    prizeCursor: snapshot.prizeCursor,
+    phaseStartedAtMs: snapshot.phaseStartedAtMs,
+    lastEnqueuedAtMs: snapshot.lastEnqueuedAtMs,
+    createdAtMs: snapshot.createdAtMs,
+    updatedAtMs: snapshot.updatedAtMs,
+    revision: snapshot.revision,
+  };
+}
+
+function canonicalRecoveryValue(
+  job: AuthRecoveryJob,
+): CanonicalAuthRecoveryValue {
+  return job;
+}
+
+async function mutateCanonicalRecoveryJob(
+  db: D1Database,
+  profileId: string,
+  update: (job: CanonicalRecoveryJob) => AuthRecoveryJob | null | undefined,
+): Promise<boolean> {
+  const aggregate = await readCanonicalProfileAggregate(db, profileId);
+  if (!aggregate.recovery) return true;
+  const job = canonicalRecoveryJob(aggregate.recovery);
+  const next = update(job);
+  if (next === undefined) return false;
+  await commitCanonicalPlan(db, {
+    expectations: [
+      {
+        kind: "auth-recovery-revision",
+        profileId,
+        revision: job.revision,
+      },
+    ],
+    mutations: [
+      next === null
+        ? { kind: "delete-auth-recovery", profileId }
+        : {
+            kind: "update-auth-recovery",
+            value: canonicalRecoveryValue(next),
+          },
+    ],
+  });
+  return next === null;
+}
+
+export async function enqueuePersistedCanonicalAuthRecovery(
+  env: Env,
+  db: D1Database,
+  profileId: string,
+  nowMs: number,
+): Promise<void> {
+  await enqueueAuthRecovery(env, profileId);
+  await mutateCanonicalRecoveryJob(db, profileId, (job) => ({
+    ...job,
+    lastEnqueuedAtMs: nowMs,
+    updatedAtMs: nowMs,
+  }));
+}
+
+function createCanonicalAuthRecoveryService(
+  env: Env,
+  dependencies: AuthRecoveryDependencies = {},
+) {
+  const db = dependencies.profileDb || env.PROFILE_DB;
+  const authClient =
+    dependencies.authClient ||
+    createFirebaseAuthAdminClient(env, { signal: dependencies.signal });
+  const rtdb =
+    dependencies.rtdb ||
+    createFirebaseRtdbClient(env, {
+      credentials: {
+        email: env.FIRESTORE_SERVICE_ACCOUNT_EMAIL,
+        privateKeyPem: env.FIRESTORE_SERVICE_ACCOUNT_PRIVATE_KEY,
+      },
+    });
+  const logger = dependencies.logger || console;
+  const now = dependencies.now || Date.now;
+  const profileGamesDb = dependencies.d1 || env.PROFILE_GAMES_DB;
+  const withdrawalDb =
+    dependencies.withdrawalDb || env.EVENT_PRIZE_WITHDRAWALS_DB;
+  const withdrawals =
+    dependencies.withdrawalStore ||
+    createD1EventPrizeWithdrawalStore(withdrawalDb, { now });
+
+  const removeLoginUid = (profileId: string, uid: string) =>
+    mutateCanonicalRecoveryJob(db, profileId, (job) => {
+      const loginUids = job.loginUids.filter((candidate) => candidate !== uid);
+      return loginUids.length === job.loginUids.length
+        ? undefined
+        : { ...job, loginUids, updatedAtMs: now() };
+    });
+
+  const copyPrize = async (
+    sourceProfileId: string,
+    targetProfileId: string,
+    eventId: string,
+    sourceAssignment: unknown,
+  ): Promise<void> => {
+    const assignment = (dependencies.buildPrizeCopy || buildPrizeCopy)(
+      sourceProfileId,
+      targetProfileId,
+      eventId,
+      sourceAssignment,
+    );
+    if (!assignment) throw new Error("auth-recovery-prize-invalid");
+    const prizeId = cleanString(assignment.prizeId);
+    const targetPath = `profileEventPrizes/${targetProfileId}/${eventId}`;
+    const existingTarget = await rtdb.getPath(
+      targetPath,
+      undefined,
+      dependencies.signal,
+    );
+    if (
+      existingTarget !== null &&
+      existingTarget !== undefined &&
+      !isEquivalentPrizeAssignment(existingTarget, assignment)
+    ) {
+      throw new Error("auth-recovery-prize-conflict");
+    }
+    const removeIfCompleted = async (): Promise<boolean> => {
+      if (!prizeId) return false;
+      const withdrawal = await withdrawals.get(eventId, prizeId);
+      if (!isCompletedPrizeWithdrawal(withdrawal, eventId, prizeId)) {
+        return false;
+      }
+      await rtdb.transactPath(
+        targetPath,
+        (current) =>
+          cleanString(record(current).eventId) === eventId &&
+          cleanString(record(current).prizeId) === prizeId
+            ? { value: null }
+            : { commit: false },
+        dependencies.signal,
+      );
+      return true;
+    };
+    if (await removeIfCompleted()) return;
+    await rtdb.transactPath(
+      targetPath,
+      (current) => {
+        if (current === null || current === undefined) {
+          return { value: assignment };
+        }
+        if (isEquivalentPrizeAssignment(current, assignment)) {
+          return { commit: false };
+        }
+        throw new Error("auth-recovery-prize-conflict");
+      },
+      dependencies.signal,
+    );
+    await removeIfCompleted();
+  };
+
+  const recoverClaims = async (job: CanonicalRecoveryJob): Promise<void> => {
+    for (const uid of job.loginUids
+      .filter(isCanonicalFirebaseUid)
+      .slice(0, CLAIM_PAGE_SIZE)) {
+      try {
+        await ensureFirebaseProfileClaim(uid, job.profileId, {
+          authClient,
+          enqueueProfileLinkProjection: (task) =>
+            env.PROFILE_GAME_PROJECTION_QUEUE.send(task),
+          logger,
+          now,
+          rtdb,
+          signal: dependencies.signal,
+        });
+        await removeLoginUid(job.profileId, uid);
+      } catch {
+        logger.error(JSON.stringify({ event: "auth_claim_recovery_pending" }));
+      }
+    }
+  };
+
+  const recoverPrizes = async (
+    job: CanonicalRecoveryJob,
+    sourceProfileId: string,
+  ): Promise<void> => {
+    const cursor = job.prizeCursor || "";
+    const source = record(
+      await rtdb.getPath(
+        `profileEventPrizes/${sourceProfileId}`,
+        {
+          orderBy: "$key",
+          ...(cursor ? { startAt: cursor } : {}),
+          limitToFirst: cursor
+            ? MERGE_PRIZE_RECOVERY_PAGE_SIZE + 2
+            : MERGE_PRIZE_RECOVERY_PAGE_SIZE + 1,
+        },
+        dependencies.signal,
+      ),
+    );
+    const remaining = Object.entries(source)
+      .filter(([eventId]) => eventId > cursor)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+    const page = remaining.slice(0, MERGE_PRIZE_RECOVERY_PAGE_SIZE);
+    for (const [eventId, assignment] of page) {
+      await copyPrize(sourceProfileId, job.profileId, eventId, assignment);
+    }
+    const complete = remaining.length <= page.length;
+    const nextCursor = page.at(-1)?.[0] || job.prizeCursor;
+    await mutateCanonicalRecoveryJob(db, job.profileId, (live) =>
+      live.sourceProfileIds[0] === sourceProfileId &&
+      live.sourcePhase === "prizes" &&
+      live.prizeCursor === job.prizeCursor
+        ? {
+            ...live,
+            sourcePhase: complete ? "games" : "prizes",
+            prizeCursor: nextCursor,
+            phaseStartedAtMs: complete ? now() : live.phaseStartedAtMs,
+            updatedAtMs: now(),
+          }
+        : undefined,
+    );
+  };
+
+  const recoverGames = async (
+    job: CanonicalRecoveryJob,
+    sourceProfileId: string,
+  ): Promise<void> => {
+    const sourcePage = await listProfileGameProjectionPage(
+      profileGamesDb,
+      sourceProfileId,
+    );
+    if (sourcePage.length > 0) {
+      const targets = await Promise.all(
+        sourcePage.map((game) =>
+          getProfileGameProjection(
+            profileGamesDb,
+            job.profileId,
+            game.projectionId,
+          ),
+        ),
+      );
+      const writes = sourcePage.flatMap((game, index) => {
+        const current = targets[index];
+        const copy =
+          !current || mergeFreshness(game.data) >= mergeFreshness(current.data)
+            ? [
+                {
+                  type: current ? ("update" as const) : ("create" as const),
+                  profileId: job.profileId,
+                  projectionId: game.projectionId,
+                  data: { ...game.data, ownerProfileId: job.profileId },
+                  ...(current
+                    ? { updateTime: current.updateTime }
+                    : { requireAbsent: true }),
+                },
+              ]
+            : [];
+        return [
+          ...copy,
+          {
+            type: "delete" as const,
+            profileId: sourceProfileId,
+            projectionId: game.projectionId,
+            updateTime: game.updateTime,
+          },
+        ];
+      });
+      await commitProfileGameProjectionWrites(profileGamesDb, writes);
+      await mutateCanonicalRecoveryJob(db, job.profileId, (live) =>
+        live.sourceProfileIds[0] === sourceProfileId &&
+        live.sourcePhase === "games"
+          ? { ...live, phaseStartedAtMs: now(), updatedAtMs: now() }
+          : undefined,
+      );
+      return;
+    }
+    if (now() - job.phaseStartedAtMs < MERGE_GAME_FINALIZE_DELAY_MS) return;
+    await mutateCanonicalRecoveryJob(db, job.profileId, (live) =>
+      live.sourceProfileIds[0] === sourceProfileId &&
+      live.sourcePhase === "games"
+        ? {
+            ...live,
+            sourcePhase: "finalize",
+            phaseStartedAtMs: now(),
+            updatedAtMs: now(),
+          }
+        : undefined,
+    );
+  };
+
+  const finalizeSource = async (
+    job: CanonicalRecoveryJob,
+    sourceProfileId: string,
+  ): Promise<void> => {
+    if (
+      (await listProfileGameProjectionPage(profileGamesDb, sourceProfileId, 1))
+        .length > 0
+    ) {
+      await mutateCanonicalRecoveryJob(db, job.profileId, (live) =>
+        live.sourceProfileIds[0] === sourceProfileId &&
+        live.sourcePhase === "finalize"
+          ? {
+              ...live,
+              sourcePhase: "games",
+              phaseStartedAtMs: now(),
+              updatedAtMs: now(),
+            }
+          : undefined,
+      );
+      return;
+    }
+    const target = await readCanonicalProfileAggregate(db, job.profileId);
+    const source = await readCanonicalProfileAggregate(db, sourceProfileId);
+    if (!target.profile || !target.recovery) return;
+    const live = canonicalRecoveryJob(target.recovery);
+    let currentProfileId = sourceProfileId;
+    let firstTargetProfileId = "";
+    let resolvesToTarget = false;
+    const mergeExpectations: Array<{
+      kind: "merge-target";
+      sourceProfileId: string;
+      targetProfileId: string;
+    }> = [];
+    const visited = new Set([sourceProfileId]);
+    for (let depth = 0; depth <= MAX_PROFILE_MERGE_TARGET_HOPS; depth++) {
+      const mapping = await readCanonicalMergeTarget(db, currentProfileId);
+      if (!mapping || visited.has(mapping.targetProfileId)) break;
+      mergeExpectations.push({
+        kind: "merge-target",
+        sourceProfileId: mapping.sourceProfileId,
+        targetProfileId: mapping.targetProfileId,
+      });
+      firstTargetProfileId ||= mapping.targetProfileId;
+      if (mapping.targetProfileId === job.profileId) {
+        resolvesToTarget = true;
+        break;
+      }
+      visited.add(mapping.targetProfileId);
+      currentProfileId = mapping.targetProfileId;
+    }
+    if (
+      live.sourceProfileIds[0] !== sourceProfileId ||
+      live.sourcePhase !== "finalize" ||
+      !resolvesToTarget ||
+      (source.profile &&
+        (source.profile.mergedIntoProfileId !== firstTargetProfileId ||
+          source.loginOwners.length > 0))
+    ) {
+      return;
+    }
+    const sourceProfileIds = source.profile
+      ? live.sourceProfileIds
+      : live.sourceProfileIds.slice(1);
+    const updated: AuthRecoveryJob = {
+      ...live,
+      sourceProfileIds,
+      sourcePhase: source.profile
+        ? "games"
+        : sourceProfileIds.length > 0
+          ? "prizes"
+          : "finalize",
+      prizeCursor: null,
+      phaseStartedAtMs: now(),
+      updatedAtMs: now(),
+    };
+    await commitCanonicalPlan(db, {
+      expectations: [
+        {
+          kind: "profile-revision",
+          profileId: target.profile.profileId,
+          revision: target.profile.revision,
+        },
+        {
+          kind: "auth-recovery-revision",
+          profileId: live.profileId,
+          revision: live.revision,
+        },
+        ...mergeExpectations,
+        ...(source.profile
+          ? ([
+              {
+                kind: "profile-revision",
+                profileId: sourceProfileId,
+                revision: source.profile.revision,
+              },
+            ] as const)
+          : []),
+      ],
+      mutations: [
+        ...(source.profile
+          ? ([
+              {
+                kind: "delete-retired-profile",
+                profileId: sourceProfileId,
+                targetProfileId: firstTargetProfileId,
+              },
+            ] as const)
+          : []),
+        {
+          kind: "update-auth-recovery",
+          value: canonicalRecoveryValue(updated),
+        },
+      ],
+    });
+  };
+
+  const recoverProfile = async (profileId: string): Promise<boolean> => {
+    const aggregate = await readCanonicalProfileAggregate(db, profileId);
+    if (!aggregate.recovery) return true;
+    let job = canonicalRecoveryJob(aggregate.recovery);
+    await recoverClaims(job);
+    const refreshed = await readCanonicalProfileAggregate(db, profileId);
+    if (!refreshed.recovery) return true;
+    job = canonicalRecoveryJob(refreshed.recovery);
+    if (job.loginUids.some(isCanonicalFirebaseUid)) return false;
+    if (job.sourceProfileIds.length === 0) {
+      if (job.loginUids.length !== 0) {
+        logger.error(JSON.stringify({ event: "auth_recovery_uid_invalid" }));
+        return false;
+      }
+      if (now() - job.updatedAtMs < MERGE_GAME_FINALIZE_DELAY_MS) return false;
+      return mutateCanonicalRecoveryJob(db, profileId, (live) =>
+        live.loginUids.length === 0 &&
+        live.sourceProfileIds.length === 0 &&
+        now() - live.updatedAtMs >= MERGE_GAME_FINALIZE_DELAY_MS
+          ? null
+          : undefined,
+      );
+    }
+    const sourceProfileId = job.sourceProfileIds[0];
+    try {
+      if (job.sourcePhase === "prizes") {
+        await recoverPrizes(job, sourceProfileId);
+      } else if (job.sourcePhase === "games") {
+        await recoverGames(job, sourceProfileId);
+      } else {
+        await finalizeSource(job, sourceProfileId);
+      }
+    } catch (error) {
+      if (!(error instanceof CanonicalProfileConflict)) {
+        logger.error(
+          JSON.stringify({
+            event:
+              error instanceof Error &&
+              error.message === "auth-recovery-prize-conflict"
+                ? "auth_recovery_prize_conflict"
+                : "auth_recovery_pending",
+          }),
+        );
+      }
+    }
+    return !(await readCanonicalProfileAggregate(db, profileId)).recovery;
+  };
+
+  return { recoverProfile, removeLoginUid };
+}
+
+export function createAuthRecoveryService(
+  env: Env,
+  dependencies: AuthRecoveryDependencies = {},
+) {
+  if (
+    !dependencies.firestore &&
+    profileStorageUsesD1(readProfileStorageMode(env))
+  ) {
+    return createCanonicalAuthRecoveryService(env, dependencies);
+  }
+  return createFirestoreAuthRecoveryService(env, dependencies);
+}
+
+async function sweepCanonicalAuthRecoveryJobs(
+  env: Env,
+  dependencies: Pick<
+    AuthRecoveryDependencies,
+    "logger" | "now" | "profileDb"
+  > = {},
+): Promise<number> {
+  const db = dependencies.profileDb || env.PROFILE_DB;
+  const logger = dependencies.logger || console;
+  const now = dependencies.now || Date.now;
+  const threshold = now() - STALE_ENQUEUE_MS;
+  let enqueued = 0;
+  let firstFailure: unknown;
+  const page = await db
+    .prepare(
+      `SELECT * FROM profile_auth_recovery_jobs
+       WHERE last_enqueued_at_ms <= ?
+       ORDER BY last_enqueued_at_ms, profile_id
+       LIMIT ?`,
+    )
+    .bind(threshold, PROFILE_BACKGROUND_SWEEP_LIMIT)
+    .all();
+  for (const row of page.results) {
+    const rawProfileId = cleanString(record(row).profile_id);
+    if (!rawProfileId) {
+      throw new Error("auth-recovery-job-invalid");
+    }
+    let job: CanonicalAuthRecoverySnapshot;
+    try {
+      job = parseCanonicalAuthRecoveryRow(row);
+    } catch {
+      logger.error(JSON.stringify({ event: "auth_recovery_job_invalid" }));
+      continue;
+    }
+    try {
+      await enqueuePersistedCanonicalAuthRecovery(
+        env,
+        db,
+        job.profileId,
+        now(),
+      );
+      enqueued++;
+    } catch (error) {
+      firstFailure ||= error;
+      logger.error(JSON.stringify({ event: "auth_recovery_enqueue_failure" }));
+    }
+  }
+  if (firstFailure) throw firstFailure;
+  return enqueued;
+}
+
 export async function sweepAuthRecoveryJobs(
+  env: Env,
+  dependencies: Pick<
+    AuthRecoveryDependencies,
+    "firestore" | "logger" | "now" | "profileDb"
+  > = {},
+): Promise<number> {
+  if (
+    !dependencies.firestore &&
+    profileStorageUsesD1(readProfileStorageMode(env))
+  ) {
+    return sweepCanonicalAuthRecoveryJobs(env, dependencies);
+  }
+  return sweepFirestoreAuthRecoveryJobs(env, dependencies);
+}
+
+async function sweepFirestoreAuthRecoveryJobs(
   env: Env,
   dependencies: Pick<
     AuthRecoveryDependencies,
