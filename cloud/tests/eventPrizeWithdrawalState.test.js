@@ -380,6 +380,21 @@ test("maps every configured prize to its asset address", () => {
   assert.equal(getEventPrizeAssetStandard("oXAceF6anag", "281"), "core");
   assert.equal(getEventPrizeAssetStandard("oXAceF6anag", "279"), "core");
   assert.equal(getEventPrizeAssetStandard("oXAceF6anag", "284"), "core");
+  assert.equal(
+    getEventPrizeAssetAddress("RpPjMNyrJJa", "217"),
+    "EW4bmQognpFTCuM28UcZAk2BWkXZuyDroWXEcKPbZxBg",
+  );
+  assert.equal(
+    getEventPrizeAssetAddress("RpPjMNyrJJa", "220"),
+    "qkG4PiwDKbpYiVorrvPyGCi7163EpPbk9xHw5rincmu",
+  );
+  assert.equal(
+    getEventPrizeAssetAddress("RpPjMNyrJJa", "221"),
+    "Ag6U9kBe6aPJyMtEzEqDpnGnmejBvAjPGFSPhXCW9Ba4",
+  );
+  assert.equal(getEventPrizeAssetStandard("RpPjMNyrJJa", "217"), "core");
+  assert.equal(getEventPrizeAssetStandard("RpPjMNyrJJa", "220"), "core");
+  assert.equal(getEventPrizeAssetStandard("RpPjMNyrJJa", "221"), "core");
 });
 
 test("routes claim-enabled Artifact Magazine 3 prizes through destination validation", async () => {
@@ -404,6 +419,21 @@ test("routes claim-enabled second Artifact Magazine 3 prizes through destination
       data: {
         eventId: "oXAceF6anag",
         prizeId: "281",
+      },
+    }),
+    (error) =>
+      error.code === "invalid-argument" &&
+      error.message === "A valid Solana address is required.",
+  );
+});
+
+test("routes claim-enabled Rare Weitsmans prizes through destination validation", async () => {
+  await assert.rejects(
+    handleWithdrawEventPrize({
+      auth: { uid: "uid" },
+      data: {
+        eventId: "RpPjMNyrJJa",
+        prizeId: "217",
       },
     }),
     (error) =>

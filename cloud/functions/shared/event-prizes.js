@@ -6,12 +6,15 @@ const LEGACY_CORE_PRIZES_EVENT_ID = "NN3eRzoZo80";
 const COMPRESSED_PRIZES_EVENT_ID = "FRkdorMWaYW";
 const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID = "VOxalSrexcA";
 const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID = "oXAceF6anag";
+const RARE_WEITSMANS_PRIZES_EVENT_ID = "RpPjMNyrJJa";
 const CORE_PRIZE_COLLECTION_ADDRESS =
   "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD";
 const COMPRESSED_PRIZE_COLLECTION_ADDRESS =
   "HpGDYGz6aRUs5qbvp1dmWGKTicQctX4PixfcouAQDCHF";
 const ARTIFACT_MAGAZINE_3_COLLECTION_ADDRESS =
   "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ";
+const RARE_WEITSMANS_COLLECTION_ADDRESS =
+  "3Rb9mG22dkAFVA8PVRgD76SiHUwUTK38Kq55NkrZuR2k";
 const SCARECROW_PRIZE_IMAGE_SIZE = Object.freeze({
   imageWidth: 420,
   imageHeight: 525,
@@ -23,6 +26,10 @@ const COMPRESSED_PRIZE_IMAGE_SIZE = Object.freeze({
 const ARTIFACT_MAGAZINE_3_IMAGE_SIZE = Object.freeze({
   imageWidth: 1320,
   imageHeight: 1320,
+});
+const RARE_WEITSMANS_IMAGE_SIZE = Object.freeze({
+  imageWidth: 1024,
+  imageHeight: 1024,
 });
 
 const createPrize = ({
@@ -176,6 +183,38 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
       }),
     ]),
   }),
+  [RARE_WEITSMANS_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: RARE_WEITSMANS_PRIZES_EVENT_ID,
+    prizes: Object.freeze([
+      createPrize({
+        ...RARE_WEITSMANS_IMAGE_SIZE,
+        id: "217",
+        imageUrl: "https://cdn.lil.org/player/rare_weitsmans/mid/217.webp",
+        assetAddress: "EW4bmQognpFTCuM28UcZAk2BWkXZuyDroWXEcKPbZxBg",
+        collectionAddress: RARE_WEITSMANS_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...RARE_WEITSMANS_IMAGE_SIZE,
+        id: "220",
+        imageUrl: "https://cdn.lil.org/player/rare_weitsmans/mid/220.webp",
+        assetAddress: "qkG4PiwDKbpYiVorrvPyGCi7163EpPbk9xHw5rincmu",
+        collectionAddress: RARE_WEITSMANS_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...RARE_WEITSMANS_IMAGE_SIZE,
+        id: "221",
+        imageUrl: "https://cdn.lil.org/player/rare_weitsmans/mid/221.webp",
+        assetAddress: "Ag6U9kBe6aPJyMtEzEqDpnGnmejBvAjPGFSPhXCW9Ba4",
+        collectionAddress: RARE_WEITSMANS_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
 });
 
 const EVENT_PRIZE_IDS = Object.freeze(
@@ -300,6 +339,7 @@ module.exports = {
   EVENT_PRIZE_CONFIGS,
   EVENT_PRIZE_IDS,
   LEGACY_CORE_PRIZES_EVENT_ID,
+  RARE_WEITSMANS_PRIZES_EVENT_ID,
   getEventPrizeConfig,
   getEventPrizeDefinition,
   getEventPrizeDefinitions,

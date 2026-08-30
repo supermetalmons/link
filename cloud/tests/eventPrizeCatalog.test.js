@@ -11,6 +11,7 @@ const {
   COMPRESSED_PRIZES_EVENT_ID,
   EVENT_PRIZE_IDS,
   LEGACY_CORE_PRIZES_EVENT_ID,
+  RARE_WEITSMANS_PRIZES_EVENT_ID,
   getEventPrizeConfig,
   getEventPrizeDefinition,
   isEventPrizeEvent,
@@ -166,6 +167,9 @@ test("maps the compressed event to the supplied prizes in fallback order", () =>
     "281",
     "279",
     "284",
+    "217",
+    "220",
+    "221",
   ]);
   for (const prize of config.prizes) {
     assert.equal(bs58.default.decode(prize.assetAddress).length, 32);
@@ -264,6 +268,57 @@ test("maps the second Artifact Magazine 3 event to claimable Core prizes", () =>
         imageHeight: 1320,
         assetAddress: "H7SFR6CSyZYcfpvF4rSoDDfuj2TMiwfqUuyXzS2tLvXa",
         collectionAddress: "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ",
+        standard: "core",
+        claimAvailable: true,
+      },
+    ],
+  );
+  for (const prize of config.prizes) {
+    assert.equal(bs58.default.decode(prize.assetAddress).length, 32);
+  }
+});
+
+test("maps the Rare Weitsmans event to claimable Core prizes", () => {
+  const config = getEventPrizeConfig(RARE_WEITSMANS_PRIZES_EVENT_ID);
+  assert.deepEqual(
+    config.prizes.map((prize) => ({
+      id: prize.id,
+      imageUrl: prize.imageUrl,
+      imageWidth: prize.imageWidth,
+      imageHeight: prize.imageHeight,
+      assetAddress: prize.assetAddress,
+      collectionAddress: prize.collectionAddress,
+      standard: prize.standard,
+      claimAvailable: prize.claimAvailable,
+    })),
+    [
+      {
+        id: "217",
+        imageUrl: "https://cdn.lil.org/player/rare_weitsmans/mid/217.webp",
+        imageWidth: 1024,
+        imageHeight: 1024,
+        assetAddress: "EW4bmQognpFTCuM28UcZAk2BWkXZuyDroWXEcKPbZxBg",
+        collectionAddress: "3Rb9mG22dkAFVA8PVRgD76SiHUwUTK38Kq55NkrZuR2k",
+        standard: "core",
+        claimAvailable: true,
+      },
+      {
+        id: "220",
+        imageUrl: "https://cdn.lil.org/player/rare_weitsmans/mid/220.webp",
+        imageWidth: 1024,
+        imageHeight: 1024,
+        assetAddress: "qkG4PiwDKbpYiVorrvPyGCi7163EpPbk9xHw5rincmu",
+        collectionAddress: "3Rb9mG22dkAFVA8PVRgD76SiHUwUTK38Kq55NkrZuR2k",
+        standard: "core",
+        claimAvailable: true,
+      },
+      {
+        id: "221",
+        imageUrl: "https://cdn.lil.org/player/rare_weitsmans/mid/221.webp",
+        imageWidth: 1024,
+        imageHeight: 1024,
+        assetAddress: "Ag6U9kBe6aPJyMtEzEqDpnGnmejBvAjPGFSPhXCW9Ba4",
+        collectionAddress: "3Rb9mG22dkAFVA8PVRgD76SiHUwUTK38Kq55NkrZuR2k",
         standard: "core",
         claimAvailable: true,
       },
