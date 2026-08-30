@@ -248,6 +248,7 @@ async function sendAnnouncement(
       chatId: env.TELEGRAM_EXTRA_CHAT_ID.trim(),
       imageUrls: request.announcement.imageUrls,
       text: request.announcement.text,
+      hasSpoiler: true,
       silent: false,
       token: env.TELEGRAM_BOT_TOKEN.trim(),
     });

@@ -308,6 +308,7 @@ const sendTelegramMediaGroup = async ({
   chatId,
   imageUrls,
   text,
+  hasSpoiler = false,
   silent = false,
   token,
   fetchImpl,
@@ -331,6 +332,7 @@ const sendTelegramMediaGroup = async ({
       media: normalizedImageUrls.map((imageUrl, index) => ({
         type: "photo",
         media: imageUrl,
+        ...(hasSpoiler ? { has_spoiler: true } : {}),
         ...(index === 0 ? { caption: text } : {}),
       })),
       disable_notification: silent,

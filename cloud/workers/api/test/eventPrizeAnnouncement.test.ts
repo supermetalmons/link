@@ -142,6 +142,7 @@ test("sends the exact album with normalized configuration and stores the receipt
       "https://cdn.lil.org/nft/card_nft/6793.webp",
     ],
     text: `${ANNOUNCEMENT}\n\n${EVENT_URL}`,
+    hasSpoiler: true,
     silent: false,
     token: "token",
   });

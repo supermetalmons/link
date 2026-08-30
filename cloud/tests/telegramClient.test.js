@@ -108,6 +108,39 @@ test("sends an exact Telegram media group with one plain-text caption", async ()
   });
 });
 
+test("adds a spoiler animation to every requested media-group photo", async () => {
+  let body;
+  const result = await sendTelegramMediaGroup({
+    chatId: "community-chat",
+    imageUrls: ["https://example.com/one.webp", "https://example.com/two.webp"],
+    text: "Spoiler prizes",
+    hasSpoiler: true,
+    token: "secret-token",
+    fetchImpl: async (_url, options) => {
+      body = JSON.parse(options.body);
+      return jsonResponse(200, {
+        ok: true,
+        result: [{ message_id: 41 }, { message_id: 42 }],
+      });
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(body.media, [
+    {
+      type: "photo",
+      media: "https://example.com/one.webp",
+      has_spoiler: true,
+      caption: "Spoiler prizes",
+    },
+    {
+      type: "photo",
+      media: "https://example.com/two.webp",
+      has_spoiler: true,
+    },
+  ]);
+});
+
 test("validates Telegram media group size and acknowledgements", async () => {
   await assert.rejects(
     () =>
