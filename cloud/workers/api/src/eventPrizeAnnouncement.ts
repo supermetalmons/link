@@ -19,7 +19,7 @@ export const EVENT_PRIZE_ANNOUNCEMENT_PATH =
   "/internal/telegram/event-prize-announcement";
 export const MAX_EVENT_PRIZE_ANNOUNCEMENT_BODY_BYTES = 8 * 1024;
 
-const REQUEST_KEYS = new Set(["announcement", "eventId", "requestId"]);
+const REQUEST_KEYS = new Set(["collectionName", "eventId", "requestId"]);
 const REQUEST_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -143,8 +143,8 @@ function parseAnnouncementRequest(body: string): AnnouncementRequest {
   return {
     requestId: value.requestId,
     announcement: buildEventPrizeAnnouncement({
+      collectionName: value.collectionName,
       eventId: value.eventId,
-      announcement: value.announcement,
     }),
   };
 }
@@ -249,6 +249,7 @@ async function sendAnnouncement(
       imageUrls: request.announcement.imageUrls,
       text: request.announcement.text,
       hasSpoiler: true,
+      parseMode: request.announcement.parseMode,
       silent: false,
       token: env.TELEGRAM_BOT_TOKEN.trim(),
     });

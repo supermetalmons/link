@@ -68,12 +68,11 @@ Investigate stuck work through Queue consumption, pending marker age, and projec
 
 Event Telegram projection runs through `mons-link-telegram-projection`. Every supported API or Workflow mutation writes `telegramProjectionOutbox/event/{eventId}` and increments `eventTelegramProjectionGenerations/{eventId}` atomically with the event update. The five-minute Worker schedule recovers pending markers; direct Firebase client event writes are disabled.
 
-Restore protected operator credentials only when needed:
+Restore the protected Queue bridge credential only when needed:
 
 ```sh
 umask 077
 firebase functions:secrets:access TELEGRAM_QUEUE_BRIDGE_SECRET --project mons-link > /secure/telegram-queue-bridge-secret
-firebase functions:secrets:access TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET --project mons-link > /secure/telegram-announcement-secret
 ```
 
 The Queue bridge and announcement bridge are separate credentials.
@@ -87,12 +86,13 @@ npm run recover:telegram -- --message-key <key> --action confirm-send-absent --b
 
 Use `confirm-send-applied --message-id <telegram-message-id>` when Telegram created the message, or `abandon` to retain the audit record and stop delivery.
 
-Smoke the event-prize route without publishing, then run the confirmed operation:
+Send a confirmed event-prize announcement with an explicit event and collection name:
 
 ```sh
-npm run announceEventPrizes -- --bridge-secret-file /secure/telegram-announcement-secret --smoke
-npm run announceEventPrizes -- --bridge-secret-file /secure/telegram-announcement-secret
+npm run announceEventPrizes -- <event-id> "<collection-name>"
 ```
+
+The command reads only `TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET` through the pinned Firebase CLI after confirmation. It never reads the Telegram bot token or chat ID.
 
 An uncertain Telegram response requires checking the group before retrying.
 

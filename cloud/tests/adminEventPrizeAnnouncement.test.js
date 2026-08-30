@@ -7,18 +7,26 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   ANNOUNCEMENT_URL,
+  FIREBASE_PROJECT_ID,
+  MAX_BRIDGE_SECRET_BYTES,
+  TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET,
+  formatEventPrizeAnnouncementPreview,
   parseAnnouncementArguments,
-  parseArgs,
   postEventPrizeAnnouncement,
-  readBridgeSecret,
+  readAnnouncementBridgeSecret,
   sendEventPrizeAnnouncement,
-  smokeEventPrizeAnnouncement,
 } = require("../admin/announceEventPrizes");
 
 const EVENT_ID = "FRkdorMWaYW";
-const ANNOUNCEMENT = "Win compressed NFTs";
+const COLLECTION_NAME = "Rare Weitsmans";
+const EVENT_URL = `https://mons.link/event/${EVENT_ID}`;
+const TEXT = `sunday mons treats — <tg-spoiler>${COLLECTION_NAME}</tg-spoiler>\n\n${EVENT_URL}`;
 const NOW_MS = Date.UTC(2026, 7, 20, 12);
 const REQUEST_ID = "123e4567-e89b-42d3-a456-426614174000";
+const DATA = Object.freeze({
+  eventId: EVENT_ID,
+  collectionName: COLLECTION_NAME,
+});
 
 test("root package exposes the requested announcement command", () => {
   const packageJson = JSON.parse(
@@ -30,82 +38,81 @@ test("root package exposes the requested announcement command", () => {
   );
 });
 
-test("requires a bridge secret and accepts interactive, positional, or smoke input", () => {
-  assert.equal(parseAnnouncementArguments([]), null);
-  assert.deepEqual(parseAnnouncementArguments([EVENT_ID, ANNOUNCEMENT]), {
+test("requires exactly an event ID and collection name", () => {
+  assert.deepEqual(parseAnnouncementArguments([EVENT_ID, COLLECTION_NAME]), {
     eventId: EVENT_ID,
-    announcement: ANNOUNCEMENT,
+    collectionName: COLLECTION_NAME,
   });
-  assert.deepEqual(parseArgs(["--bridge-secret-file", "/secure/bridge"]), {
-    bridgeSecretFile: "/secure/bridge",
-    input: null,
-    smoke: false,
-  });
-  assert.deepEqual(
-    parseArgs([
-      "--bridge-secret-file",
-      "/secure/bridge",
-      EVENT_ID,
-      ANNOUNCEMENT,
-    ]),
-    {
-      bridgeSecretFile: "/secure/bridge",
-      input: { eventId: EVENT_ID, announcement: ANNOUNCEMENT },
-      smoke: false,
-    },
-  );
-  assert.deepEqual(
-    parseArgs(["--smoke", "--bridge-secret-file", "/secure/bridge"]),
-    {
-      bridgeSecretFile: "/secure/bridge",
-      input: null,
-      smoke: true,
-    },
-  );
   for (const args of [
     [],
-    ["--bridge-secret-file"],
-    ["--bridge-secret-file", "/secure/bridge", EVENT_ID],
-    ["--bridge-secret-file", "/secure/bridge", "--smoke", EVENT_ID],
+    [EVENT_ID],
+    [EVENT_ID, COLLECTION_NAME, "extra"],
+    ["--smoke", COLLECTION_NAME],
+    [EVENT_ID, "--bridge-secret-file"],
   ]) {
-    assert.throws(() => parseArgs(args), TypeError);
+    assert.throws(() => parseAnnouncementArguments(args), TypeError);
   }
 });
 
-test("reads a protected bridge secret without exposing its value", async () => {
-  let read;
+test("formats the operator preview without exposing Telegram markup", () => {
   assert.equal(
-    await readBridgeSecret("/secure/bridge", {
-      readFile: (...args) => {
-        read = args;
-        return " secret-value\n";
-      },
+    formatEventPrizeAnnouncementPreview({
+      collectionName: COLLECTION_NAME,
+      eventUrl: EVENT_URL,
     }),
-    "secret-value",
-  );
-  assert.deepEqual(read, [path.resolve("/secure/bridge"), "utf8"]);
-  await assert.rejects(
-    () =>
-      readBridgeSecret("/secure/empty", {
-        readFile: () => "",
-      }),
-    /empty/,
-  );
-  assert.equal(
-    await readBridgeSecret("-", {
-      readStream: async () => "piped-secret",
-    }),
-    "piped-secret",
+    `sunday mons treats — [spoiler: ${COLLECTION_NAME}]\n\n${EVENT_URL}`,
   );
 });
 
-test("posts the exact body with a timestamped HMAC signature", async () => {
+test("reads only the bounded announcement bridge secret through Firebase", () => {
+  let invocation;
+  const secret = readAnnouncementBridgeSecret({
+    projectId: "test-project",
+    workingDirectory: "/workspace/cloud",
+    runCommand: (command, args, options) => {
+      invocation = { command, args, options };
+      return { status: 0, stdout: " bridge-secret\n" };
+    },
+  });
+  assert.equal(secret, "bridge-secret");
+  assert.deepEqual(invocation, {
+    command: "firebase",
+    args: [
+      "functions:secrets:access",
+      TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET,
+      "--project",
+      "test-project",
+    ],
+    options: {
+      cwd: "/workspace/cloud",
+      encoding: "utf8",
+      maxBuffer: MAX_BRIDGE_SECRET_BYTES,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  });
+  assert.equal(FIREBASE_PROJECT_ID, "mons-link");
+
+  for (const result of [
+    { status: 1, stdout: "", stderr: "private diagnostic" },
+    { status: null, stdout: "", error: new Error("private diagnostic") },
+    { status: 0, stdout: "" },
+    { status: 0, stdout: "x".repeat(MAX_BRIDGE_SECRET_BYTES + 1) },
+  ]) {
+    assert.throws(
+      () =>
+        readAnnouncementBridgeSecret({
+          runCommand: () => result,
+        }),
+      (error) =>
+        !String(error.message).includes("private diagnostic") &&
+        !String(error.message).includes("x".repeat(100)),
+    );
+  }
+});
+
+test("posts the exact collection payload with a timestamped HMAC signature", async () => {
   let request;
-  const input = {
-    eventId: EVENT_ID,
-    announcement: ANNOUNCEMENT,
-    requestId: REQUEST_ID,
-  };
+  const input = { ...DATA, requestId: REQUEST_ID };
   const result = await postEventPrizeAnnouncement(input, {
     secret: "bridge-secret",
     now: () => NOW_MS,
@@ -132,52 +139,46 @@ test("posts the exact body with a timestamped HMAC signature", async () => {
   assert.equal(result.status, 200);
 });
 
-test("returns the configured album result through the Worker", async () => {
-  let secretPath;
-  const result = await sendEventPrizeAnnouncement(
-    { eventId: EVENT_ID, announcement: ANNOUNCEMENT },
-    {
-      bridgeSecretFile: "/secure/bridge",
-      requestId: REQUEST_ID,
-      readSecret: async (filePath) => {
-        secretPath = filePath;
-        return "bridge-secret";
-      },
-      fetchImpl: async () =>
-        Response.json({
-          ok: true,
-          eventId: EVENT_ID,
-          eventUrl: `https://mons.link/event/${EVENT_ID}`,
-          messageIds: [41, 42, 43],
-        }),
+test("returns the formatted album result through the Worker", async () => {
+  let secretArguments;
+  const result = await sendEventPrizeAnnouncement(DATA, {
+    requestId: REQUEST_ID,
+    readSecret: async (...args) => {
+      secretArguments = args;
+      return "bridge-secret";
     },
-  );
+    fetchImpl: async () =>
+      Response.json({
+        ok: true,
+        eventId: EVENT_ID,
+        eventUrl: EVENT_URL,
+        messageIds: [41, 42, 43],
+      }),
+  });
 
-  assert.equal(secretPath, "/secure/bridge");
+  assert.deepEqual(secretArguments, []);
   assert.deepEqual(result, {
+    collectionName: COLLECTION_NAME,
     eventId: EVENT_ID,
-    eventUrl: `https://mons.link/event/${EVENT_ID}`,
+    eventUrl: EVENT_URL,
     imageUrls: [
       "https://cdn.lil.org/nft/card_nft/1866.webp",
       "https://cdn.lil.org/nft/card_nft/1682.webp",
       "https://cdn.lil.org/nft/card_nft/6793.webp",
     ],
-    text: `${ANNOUNCEMENT}\n\nhttps://mons.link/event/${EVENT_ID}`,
+    parseMode: "HTML",
+    text: TEXT,
     messageIds: [41, 42, 43],
   });
 });
 
 test("warns against retrying uncertain Worker and network outcomes", async () => {
   const call = (fetchImpl) =>
-    sendEventPrizeAnnouncement(
-      { eventId: EVENT_ID, announcement: ANNOUNCEMENT },
-      {
-        bridgeSecretFile: "/secure/bridge",
-        requestId: REQUEST_ID,
-        readSecret: async () => "bridge-secret",
-        fetchImpl,
-      },
-    );
+    sendEventPrizeAnnouncement(DATA, {
+      requestId: REQUEST_ID,
+      readSecret: async () => "bridge-secret",
+      fetchImpl,
+    });
   await assert.rejects(
     () =>
       call(async () =>
@@ -204,44 +205,22 @@ test("warns against retrying uncertain Worker and network outcomes", async () =>
 test("requires one message ID for every configured prize image", async () => {
   await assert.rejects(
     () =>
-      sendEventPrizeAnnouncement(
-        { eventId: EVENT_ID, announcement: ANNOUNCEMENT },
-        {
-          bridgeSecretFile: "/secure/bridge",
-          requestId: REQUEST_ID,
-          readSecret: async () => "bridge-secret",
-          fetchImpl: async () => Response.json({ ok: true, messageIds: [41] }),
-        },
-      ),
+      sendEventPrizeAnnouncement(DATA, {
+        requestId: REQUEST_ID,
+        readSecret: async () => "bridge-secret",
+        fetchImpl: async () => Response.json({ ok: true, messageIds: [41] }),
+      }),
     /Check the group before retrying/,
   );
 });
 
-test("runs an authenticated smoke without sending a configured event", async () => {
-  let posted;
-  const result = await smokeEventPrizeAnnouncement("/secure/bridge", {
-    readSecret: async () => "bridge-secret",
-    fetchImpl: async (_url, init) => {
-      posted = JSON.parse(init.body);
-      return Response.json(
-        { ok: false, error: "invalid-request" },
-        { status: 400 },
-      );
-    },
-  });
-  assert.deepEqual(posted, {
-    eventId: "__cloudflare_smoke__",
-    announcement: "smoke",
-    requestId: "00000000-0000-4000-8000-000000000000",
-  });
-  assert.deepEqual(result, { ok: true });
-});
-
-test("contains no Firebase secret access path", () => {
+test("keeps Firebase access scoped away from Telegram delivery credentials", () => {
   const source = fs.readFileSync(
     path.resolve(__dirname, "../admin/announceEventPrizes.js"),
     "utf8",
   );
-  assert.equal(source.includes("functions:secrets:access"), false);
-  assert.equal(source.includes("firebase"), false);
+  assert.equal(source.includes("functions:secrets:access"), true);
+  assert.equal(source.includes(TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET), true);
+  assert.equal(source.includes("TELEGRAM_BOT_TOKEN"), false);
+  assert.equal(source.includes("TELEGRAM_EXTRA_CHAT_ID"), false);
 });

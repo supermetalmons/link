@@ -309,6 +309,7 @@ const sendTelegramMediaGroup = async ({
   imageUrls,
   text,
   hasSpoiler = false,
+  parseMode = null,
   silent = false,
   token,
   fetchImpl,
@@ -333,7 +334,12 @@ const sendTelegramMediaGroup = async ({
         type: "photo",
         media: imageUrl,
         ...(hasSpoiler ? { has_spoiler: true } : {}),
-        ...(index === 0 ? { caption: text } : {}),
+        ...(index === 0
+          ? {
+              caption: text,
+              ...(parseMode ? { parse_mode: parseMode } : {}),
+            }
+          : {}),
       })),
       disable_notification: silent,
     },

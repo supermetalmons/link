@@ -115,6 +115,7 @@ test("adds a spoiler animation to every requested media-group photo", async () =
     imageUrls: ["https://example.com/one.webp", "https://example.com/two.webp"],
     text: "Spoiler prizes",
     hasSpoiler: true,
+    parseMode: "HTML",
     token: "secret-token",
     fetchImpl: async (_url, options) => {
       body = JSON.parse(options.body);
@@ -132,6 +133,7 @@ test("adds a spoiler animation to every requested media-group photo", async () =
       media: "https://example.com/one.webp",
       has_spoiler: true,
       caption: "Spoiler prizes",
+      parse_mode: "HTML",
     },
     {
       type: "photo",

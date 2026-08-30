@@ -11,14 +11,15 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const NOW_MS = Date.UTC(2026, 7, 20, 12);
 const EVENT_ID = "FRkdorMWaYW";
-const ANNOUNCEMENT = "Win compressed NFTs";
+const COLLECTION_NAME = "Rare Weitsmans";
 const EVENT_URL = `https://mons.link/event/${EVENT_ID}`;
+const TEXT = `sunday mons treats — <tg-spoiler>${COLLECTION_NAME}</tg-spoiler>\n\n${EVENT_URL}`;
 const REQUEST_ID = "123e4567-e89b-42d3-a456-426614174000";
 const SECRET = TELEGRAM_TEST_ENV.TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET;
 const DATA = {
   requestId: REQUEST_ID,
   eventId: EVENT_ID,
-  announcement: ANNOUNCEMENT,
+  collectionName: COLLECTION_NAME,
 };
 const env = {
   ...TELEGRAM_TEST_ENV,
@@ -141,8 +142,9 @@ test("sends the exact album with normalized configuration and stores the receipt
       "https://cdn.lil.org/nft/card_nft/1682.webp",
       "https://cdn.lil.org/nft/card_nft/6793.webp",
     ],
-    text: `${ANNOUNCEMENT}\n\n${EVENT_URL}`,
+    text: TEXT,
     hasSpoiler: true,
+    parseMode: "HTML",
     silent: false,
     token: "token",
   });
@@ -192,9 +194,9 @@ test("rejects missing, stale, and tampered announcement signatures", async () =>
 
 test("strictly validates request IDs and announcement bodies", async () => {
   for (const payload of [
-    { eventId: EVENT_ID, announcement: ANNOUNCEMENT },
+    { eventId: EVENT_ID, collectionName: COLLECTION_NAME },
     { ...DATA, requestId: "invalid" },
-    { ...DATA, announcement: "line one\nline two" },
+    { ...DATA, collectionName: "line one\nline two" },
     { ...DATA, eventId: "unknown" },
     { ...DATA, extra: true },
     "{",
@@ -207,7 +209,7 @@ test("strictly validates request IDs and announcement bodies", async () => {
     assert.equal(response.status, 400);
   }
   const oversized = await handleEventPrizeAnnouncement(
-    await signedRequest({ ...DATA, announcement: "x".repeat(9_000) }),
+    await signedRequest({ ...DATA, collectionName: "x".repeat(9_000) }),
     env,
     { now: () => NOW_MS },
   );
