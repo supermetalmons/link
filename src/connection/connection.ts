@@ -2785,7 +2785,7 @@ class Connection {
   public async toggleEventPrizeSelection(
     eventId: string,
     prizeId: string,
-  ): Promise<string | null> {
+  ): Promise<EventPrizeId | null> {
     const normalizedEventId = this.normalizeString(eventId).trim();
     const normalizedPrizeId = this.normalizeString(prizeId).trim();
     const profileId = storage.getProfileId("").trim();

@@ -158,6 +158,10 @@ import {
   clampDevStubPlayerCount,
   createStubEventRecord,
 } from "./devFixtures";
+import {
+  createEventPrizeSelectionCoordinator,
+  type EventPrizeSelectionCoordinator,
+} from "./prizeSelectionCoordinator";
 
 const getPrizeSelectionDensity = (
   avatarCount: number,
@@ -425,9 +429,12 @@ const EventModal: React.FC = () => {
   const activePrizeAvatarExitCleanupsRef = useRef<Map<string, () => void>>(
     new Map(),
   );
+  const prizeSelectionCoordinatorRef =
+    useRef<EventPrizeSelectionCoordinator | null>(null);
   const displayedEventRecord = devStubRecord ?? eventRecord;
   const eventPrizeConfig = getEventPrizeConfig(modalState.eventId);
   const eventPrizes = eventPrizeConfig?.prizes ?? EMPTY_EVENT_PRIZES;
+  const currentProfileId = storage.getProfileId("");
   const markPrizeImageLoaded = useCallback((prizeId: EventPrizeId) => {
     setLoadedPrizeImageIds((current) => {
       if (current.has(prizeId)) {
@@ -716,7 +723,9 @@ const EventModal: React.FC = () => {
     modalState.isOpen,
   ]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    prizeSelectionCoordinatorRef.current?.dispose();
+    prizeSelectionCoordinatorRef.current = null;
     clearPrizeAvatarExitAnimations();
     committedPrizeSelectionsRef.current = {};
     hasReceivedInitialPrizeSelectionsRef.current = false;
@@ -728,16 +737,37 @@ const EventModal: React.FC = () => {
     if (!modalState.isOpen || !modalState.eventId || !eventPrizeConfig) {
       return;
     }
-    return connection.subscribeToEventPrizeSelections(
+    const coordinator = currentProfileId
+      ? createEventPrizeSelectionCoordinator({
+          profileId: currentProfileId,
+          mutate: (prizeId) =>
+            connection.toggleEventPrizeSelection(
+              eventPrizeConfig.eventId,
+              prizeId,
+            ),
+          onPendingChange: setIsUpdatingPrizeSelection,
+          onSelectionsChange: applyEventPrizeSelections,
+        })
+      : null;
+    prizeSelectionCoordinatorRef.current = coordinator;
+    const unsubscribe = connection.subscribeToEventPrizeSelections(
       modalState.eventId,
-      applyEventPrizeSelections,
+      coordinator?.receiveAuthoritative ?? applyEventPrizeSelections,
       (error) => {
         console.error("Error subscribing to event prize selections:", error);
       },
     );
+    return () => {
+      unsubscribe();
+      coordinator?.dispose();
+      if (prizeSelectionCoordinatorRef.current === coordinator) {
+        prizeSelectionCoordinatorRef.current = null;
+      }
+    };
   }, [
     applyEventPrizeSelections,
     clearPrizeAvatarExitAnimations,
+    currentProfileId,
     eventPrizeConfig,
     modalState.eventId,
     modalState.isOpen,
@@ -1120,7 +1150,6 @@ const EventModal: React.FC = () => {
         })),
     ];
   }, [displayedEventRecord?.status, eventPrizeAssignments, eventPrizes]);
-  const currentProfileId = storage.getProfileId("");
   const eventUiState = useMemo(
     () => getCurrentUiState(displayedEventRecord, currentProfileId),
     [currentProfileId, displayedEventRecord],
@@ -1139,9 +1168,8 @@ const EventModal: React.FC = () => {
   const currentRoute = getCurrentRouteState();
 
   const handlePrizeSelectionClick = useCallback(
-    (prizeId: string) => {
+    (prizeId: EventPrizeId) => {
       if (
-        isUpdatingPrizeSelection ||
         devStubRecord ||
         !eventPrizeConfig ||
         !currentProfileId ||
@@ -1151,21 +1179,9 @@ const EventModal: React.FC = () => {
       ) {
         return;
       }
-      setIsUpdatingPrizeSelection(true);
-      void connection
-        .toggleEventPrizeSelection(eventPrizeConfig.eventId, prizeId)
-        .catch(() => {})
-        .finally(() => {
-          setIsUpdatingPrizeSelection(false);
-        });
+      prizeSelectionCoordinatorRef.current?.toggle(prizeId);
     },
-    [
-      currentProfileId,
-      devStubRecord,
-      eventRecord,
-      eventPrizeConfig,
-      isUpdatingPrizeSelection,
-    ],
+    [currentProfileId, devStubRecord, eventRecord, eventPrizeConfig],
   );
 
   useEffect(() => {
@@ -2196,7 +2212,11 @@ const EventModal: React.FC = () => {
               </TopBarTitle>
             )}
             {showTopBarEventPrizes && (
-              <PrizesRow role="group" aria-label="Event prizes">
+              <PrizesRow
+                role="group"
+                aria-label="Event prizes"
+                aria-busy={isUpdatingPrizeSelection ? "true" : undefined}
+              >
                 {displayedEventPrizes.map(({ prize, assignment }) => {
                   const selectedParticipants = participants.filter(
                     (participant) =>
@@ -2229,13 +2249,8 @@ const EventModal: React.FC = () => {
                         type="button"
                         $imageWidth={prize.imageWidth}
                         $imageHeight={prize.imageHeight}
-                        disabled={
-                          !canSelectEventPrize || isUpdatingPrizeSelection
-                        }
+                        disabled={!canSelectEventPrize}
                         aria-pressed={isSelected}
-                        aria-busy={
-                          isUpdatingPrizeSelection ? "true" : undefined
-                        }
                         aria-label={`${
                           canSelectEventPrize
                             ? `${actionLabel} ${prize.alt}`
