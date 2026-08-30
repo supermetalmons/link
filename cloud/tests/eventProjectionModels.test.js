@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
-  buildProjectionFingerprint,
+  buildPreviewParticipants,
   getListSortAtMs,
   mapEventStatusToNavigationStatus,
 } = require("../functions/events/eventProjectionModel");
@@ -17,7 +17,7 @@ const {
   shouldProjectInvite,
 } = require("../functions/events/gameProjectionModel");
 
-test("event projection fingerprints normalize status, ordering, and preview limits", () => {
+test("event projection previews normalize ordering and limits", () => {
   const participants = Object.fromEntries(
     Array.from({ length: 7 }, (_, index) => {
       const position = 7 - index;
@@ -32,30 +32,11 @@ test("event projection fingerprints normalize status, ordering, and preview limi
       ];
     }),
   );
-  const fingerprint = JSON.parse(
-    buildProjectionFingerprint({
-      status: "scheduled",
-      startAtMs: 2_000,
-      createdAtMs: 1_000,
-      participants,
-    }),
-  );
-
-  assert.equal(fingerprint.status, "waiting");
-  assert.equal(fingerprint.participantCount, 7);
+  const preview = buildPreviewParticipants(participants);
   assert.deepEqual(
-    fingerprint.participantPreview.map(({ profileId }) => profileId),
-    ["p1", "p2", "p3", "p4", "p5", "p6"],
+    preview.map(({ profileId }) => profileId),
+    ["p1", "p2", "p3", "p4", "p5", "p6", "p7"],
   );
-  assert.deepEqual(fingerprint.ownerProfileIds, [
-    "p1",
-    "p2",
-    "p3",
-    "p4",
-    "p5",
-    "p6",
-    "p7",
-  ]);
   assert.equal(mapEventStatusToNavigationStatus("active"), "active");
   assert.equal(getListSortAtMs({ startedAtMs: 300 }, "active"), 300);
 });

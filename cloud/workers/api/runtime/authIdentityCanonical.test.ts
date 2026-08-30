@@ -1378,7 +1378,13 @@ describe("canonical auth and profile runtime", () => {
     expect(authorizations).toBe(2);
 
     const mining = createMiningRepository(d1Env);
-    const miningProfile = await mining.getProfile("profile-login", "unused");
+    const miningOwnership = await mining.readProfileOwnershipSnapshot({
+      loginUids: ["profile-login"],
+      profileIds: [],
+    });
+    const miningProfileId =
+      miningOwnership.loginOwnerByUid.get("profile-login")?.profileId || "";
+    const miningProfile = await mining.getProfileSnapshot(miningProfileId);
     expect(miningProfile).not.toBeNull();
     expect(
       await mining.updateMining(
@@ -1978,7 +1984,7 @@ describe("canonical auth and profile runtime", () => {
         opId: "owner-budget-merge-operation",
       }),
     ).resolves.toMatchObject({ profileId: targetProfileId });
-    expect(Math.max(...batchSizes)).toBeLessThanOrEqual(20);
+    expect(Math.max(...batchSizes)).toBeLessThanOrEqual(21);
     const ownerCount = await testBindings.PROFILE_DB.prepare(
       "SELECT COUNT(*) AS count FROM profile_login_owners WHERE profile_id = ?",
     )

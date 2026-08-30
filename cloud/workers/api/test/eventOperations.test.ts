@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { AuthApiFailure } from "../src/authErrors.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type { ProfileOwnershipSnapshot } from "../src/profileOwnership.ts";
 import {
   createEvent,
   disqualifyEventMatchWinners,
@@ -10,10 +12,43 @@ import {
 } from "../src/eventOperations.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
-const identity = {
-  uid: "creator-login",
-  idToken: "firebase-token",
-  profileId: "creator-profile",
+const profileId = "creator-profile";
+const identity = { uid: "creator-login" };
+
+type TestGameplayRepository = GameplayRepository & {
+  findProfileId(uid: string): Promise<string | null>;
+  getGameplayProfile(
+    uid: string,
+    signal?: AbortSignal,
+  ): Promise<{
+    aura: string;
+    emoji: number | string;
+    eth: string;
+    profileId: string;
+    rating: number;
+    sol: string;
+    username: string;
+  } | null>;
+  getGameplayProfileOwnership(
+    uid: string,
+    signal?: AbortSignal,
+  ): Promise<{
+    loginUids: string[];
+    profile: {
+      aura: string;
+      emoji: number | string;
+      eth: string;
+      profileId: string;
+      rating: number;
+      sol: string;
+      username: string;
+    };
+  } | null>;
+  listProfileLoginUids(profileId: string): Promise<string[]>;
+  resolveCanonicalProfileId(profileId: string): Promise<string | null>;
+  resolveCanonicalProfileIds(
+    profileIds: string[],
+  ): Promise<Array<string | null>>;
 };
 
 function getPath(root: Record<string, unknown>, path: string): unknown {
@@ -61,19 +96,38 @@ function createRepository(initial: Record<string, unknown> = {}) {
     setPath(values, path, value);
   }
   const patches: Record<string, unknown>[] = [];
-  const repository: GameplayRepository = {
+  let repository: TestGameplayRepository;
+  repository = {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
-    findProfileId: async () => identity.profileId,
-    getGameplayProfile: async () => ({
+    findProfileId: async () => profileId,
+    listProfileLoginUids: async (candidateProfileId) =>
+      candidateProfileId === profileId
+        ? [identity.uid]
+        : [`${candidateProfileId}-login`],
+    getGameplayProfile: async (uid) => ({
       aura: "rainbow",
       emoji: 7,
       eth: "",
-      profileId: identity.profileId,
+      profileId:
+        uid === identity.uid
+          ? profileId
+          : uid.endsWith("-login")
+            ? uid.slice(0, -"-login".length)
+            : profileId,
       rating: 1500,
       sol: "",
       username: "ivan",
     }),
+    getGameplayProfileOwnership: async (uid, signal) => {
+      const profile = await repository.getGameplayProfile(uid, signal);
+      return profile
+        ? {
+            loginUids: await repository.listProfileLoginUids(profile.profileId),
+            profile,
+          }
+        : null;
+    },
     getMiningMaterials: async () => ({
       dust: 0,
       slime: 0,
@@ -83,6 +137,90 @@ function createRepository(initial: Record<string, unknown> = {}) {
     }),
     getMiningSnapshot: async () => null,
     getNavigationGame: async () => null,
+    resolveCanonicalProfileId: async (candidateProfileId) => candidateProfileId,
+    resolveCanonicalProfileIds: async (candidateProfileIds) =>
+      Promise.all(
+        candidateProfileIds.map((candidateProfileId) =>
+          repository.resolveCanonicalProfileId!(candidateProfileId),
+        ),
+      ),
+    async readProfileOwnershipSnapshot(query) {
+      const loginOwnerByUid = new Map<
+        string,
+        { profileId: string; revision: number } | null
+      >();
+      const profileById = new Map<
+        string,
+        {
+          profile: Awaited<
+            ReturnType<TestGameplayRepository["getGameplayProfile"]>
+          >;
+          revision: number;
+        }
+      >();
+      const loginUidsByProfileId = new Map<string, string[]>();
+      for (const uid of query.loginUids) {
+        const ownership = await repository.getGameplayProfileOwnership(uid);
+        if (!ownership) {
+          loginOwnerByUid.set(uid, null);
+          continue;
+        }
+        const ownerProfileId = ownership.profile.profileId;
+        loginOwnerByUid.set(uid, { profileId: ownerProfileId, revision: 1 });
+        profileById.set(ownerProfileId, {
+          profile: ownership.profile,
+          revision: 1,
+        });
+        loginUidsByProfileId.set(
+          ownerProfileId,
+          Array.from(
+            new Set([
+              ...(loginUidsByProfileId.get(ownerProfileId) || []),
+              ...ownership.loginUids,
+              uid,
+            ]),
+          ).sort(),
+        );
+      }
+      const resolved = await repository.resolveCanonicalProfileIds([
+        ...query.profileIds,
+      ]);
+      const canonicalProfileIdByProfileId = new Map<string, string | null>();
+      for (let index = 0; index < query.profileIds.length; index += 1) {
+        const sourceProfileId = query.profileIds[index];
+        const canonicalProfileId = resolved[index] || null;
+        canonicalProfileIdByProfileId.set(sourceProfileId, canonicalProfileId);
+        if (!canonicalProfileId) continue;
+        if (!profileById.has(canonicalProfileId)) {
+          profileById.set(canonicalProfileId, {
+            profile: {
+              aura: "",
+              emoji: 0,
+              eth: "",
+              profileId: canonicalProfileId,
+              rating: 1500,
+              sol: "",
+              username: canonicalProfileId,
+            },
+            revision: 1,
+          });
+        }
+        if (!loginUidsByProfileId.has(canonicalProfileId)) {
+          const uids =
+            await repository.listProfileLoginUids(canonicalProfileId);
+          loginUidsByProfileId.set(
+            canonicalProfileId,
+            [...new Set(uids)].sort(),
+          );
+        }
+      }
+      return {
+        canonicalProfileIdByProfileId,
+        loginOwnerByUid,
+        loginUidsByProfileId,
+        profileById,
+      } as ProfileOwnershipSnapshot;
+    },
     getRtdbPath: async (path) => getPath(values, path),
     patchRtdbRoot: async (updates) => {
       patches.push(updates);
@@ -129,13 +267,15 @@ function createRepository(initial: Record<string, unknown> = {}) {
   return { patches, repository, values };
 }
 
-function participant(profileId: string, joinedAtMs: number) {
+function participant(candidateProfileId: string, joinedAtMs: number) {
   return {
-    profileId,
+    profileId: candidateProfileId,
     loginUid:
-      profileId === identity.profileId ? identity.uid : `${profileId}-login`,
-    username: profileId,
-    displayName: profileId.toUpperCase(),
+      candidateProfileId === profileId
+        ? identity.uid
+        : `${candidateProfileId}-login`,
+    username: candidateProfileId,
+    displayName: candidateProfileId.toUpperCase(),
     emojiId: joinedAtMs,
     aura: null,
     joinedAtMs,
@@ -203,54 +343,6 @@ function workflowEnvironment(
   };
 }
 
-function withCanonicalMergeTarget(
-  env: Env,
-  sourceProfileId: string,
-  targetProfileId: string,
-): Env {
-  const baseDb = env.PROFILE_DB;
-  return {
-    ...env,
-    PROFILE_DB: {
-      batch: baseDb.batch.bind(baseDb),
-      dump: baseDb.dump.bind(baseDb),
-      exec: baseDb.exec.bind(baseDb),
-      prepare(query: string) {
-        const base = baseDb.prepare(query);
-        let values: unknown[] = [];
-        let statement: D1PreparedStatement;
-        statement = {
-          all: base.all,
-          bind(...nextValues) {
-            values = nextValues;
-            return statement;
-          },
-          async first<T>(column?: string) {
-            if (
-              query.includes("profile_merge_targets") &&
-              values[0] === sourceProfileId
-            ) {
-              return {
-                source_profile_id: sourceProfileId,
-                target_profile_id: targetProfileId,
-                merged_at_ms: 1,
-                op_id: null,
-              } as T;
-            }
-            return column === undefined
-              ? base.first<T>()
-              : base.first<T>(column);
-          },
-          raw: base.raw,
-          run: base.run,
-        };
-        return statement;
-      },
-      withSession: baseDb.withSession.bind(baseDb),
-    },
-  };
-}
-
 test("creates a scheduled event only after its Workflow exists", async () => {
   const order: string[] = [];
   const repository = createRepository();
@@ -283,6 +375,29 @@ test("creates a scheduled event only after its Workflow exists", async () => {
     (outboxEntry[1] as Record<string, unknown>).sourceKey,
     "start:aaaaaaaaaaa:301000",
   );
+});
+
+test("ignores stale Firebase profile claims when creating an event", async () => {
+  const state = createRepository();
+  const staleClaimIdentity = {
+    uid: identity.uid,
+    profileId: "forged-profile",
+  };
+  const response = await createEvent(
+    workflowEnvironment(() => undefined),
+    staleClaimIdentity,
+    { startsInMinutes: 5 },
+    {
+      repository: state.repository,
+      now: () => 1_000,
+      random: () => 0,
+      sleep: async () => undefined,
+    },
+  );
+  assert.equal(response.event.createdByProfileId, profileId);
+  const participants = response.event.participants as Record<string, unknown>;
+  assert.ok(participants[profileId]);
+  assert.equal(participants["forged-profile"], undefined);
 });
 
 test("does not persist event creation when Workflow creation fails", async () => {
@@ -320,7 +435,7 @@ test("postpones through a new Workflow and persists its outbox atomically", asyn
     startAtMs: 600_000,
     updatedAtMs: 100,
     createdByLoginUid: identity.uid,
-    createdByProfileId: identity.profileId,
+    createdByProfileId: profileId,
   };
   const repository = createRepository({ "events/event-1": event });
   let workflowCreates = 0;
@@ -347,6 +462,226 @@ test("postpones through a new Workflow and persists its outbox atomically", asyn
   );
 });
 
+test("direct creator UID postpones without reading D1 ownership", async () => {
+  const event = {
+    eventId: "event-1",
+    status: "scheduled",
+    startAtMs: 600_000,
+    updatedAtMs: 100,
+    createdByLoginUid: identity.uid,
+    createdByProfileId: profileId,
+  };
+  const state = createRepository({ "events/event-1": event });
+  state.repository.getGameplayProfile = async () => {
+    throw new Error("d1-unavailable");
+  };
+  state.repository.getGameplayProfileOwnership = async () => {
+    throw new Error("d1-unavailable");
+  };
+  state.repository.resolveCanonicalProfileId = async () => {
+    throw new Error("d1-unavailable");
+  };
+  const response = await postponeEventStart(
+    workflowEnvironment(() => undefined),
+    identity,
+    { eventId: "event-1", postponeByMinutes: 5 },
+    {
+      repository: state.repository,
+      now: () => 200_000,
+      random: () => 0,
+      sleep: async () => undefined,
+    },
+  );
+  assert.equal(response.startAtMs, 900_000);
+});
+
+test("alternate creator ownership fails from the snapshot under the event lock", async () => {
+  const event = {
+    eventId: "event-1",
+    status: "scheduled",
+    startAtMs: 600_000,
+    updatedAtMs: 100,
+    createdByLoginUid: "original-login",
+    createdByProfileId: profileId,
+  };
+  const state = createRepository({ "events/event-1": event });
+  state.repository.getGameplayProfileOwnership = async () => {
+    throw new Error("d1-unavailable");
+  };
+  let transactions = 0;
+  const transact = state.repository.transactRtdbPath;
+  state.repository.transactRtdbPath = async (...args) => {
+    transactions += 1;
+    return transact(...args);
+  };
+  await assert.rejects(
+    postponeEventStart(
+      workflowEnvironment(() => undefined),
+      { uid: "alternate-login" },
+      { eventId: "event-1", postponeByMinutes: 5 },
+      {
+        repository: state.repository,
+        now: () => 200_000,
+        random: () => 0,
+        sleep: async () => undefined,
+      },
+    ),
+    (error) =>
+      error instanceof AuthApiFailure &&
+      error.status === 503 &&
+      error.message === "profile-ownership-unavailable",
+  );
+  assert.ok(transactions > 0);
+  assert.deepEqual(state.patches, []);
+});
+
+test("authorizes an alternate creator through a canonical stored profile", async () => {
+  const event = {
+    eventId: "event-1",
+    status: "scheduled",
+    startAtMs: 600_000,
+    updatedAtMs: 100,
+    createdByLoginUid: "original-login",
+    createdByProfileId: "retired-profile",
+  };
+  const state = createRepository({ "events/event-1": event });
+  state.repository.getGameplayProfileOwnership = async () => ({
+    loginUids: ["alternate-login", "original-login"],
+    profile: {
+      aura: "rainbow",
+      emoji: 7,
+      eth: "",
+      profileId: "canonical-profile",
+      rating: 1500,
+      sol: "",
+      username: "ivan",
+    },
+  });
+  state.repository.resolveCanonicalProfileId = async (candidateProfileId) =>
+    candidateProfileId === "retired-profile"
+      ? "canonical-profile"
+      : candidateProfileId;
+  const response = await postponeEventStart(
+    workflowEnvironment(() => undefined),
+    { uid: "alternate-login" },
+    { eventId: "event-1", postponeByMinutes: 5 },
+    {
+      repository: state.repository,
+      now: () => 200_000,
+      random: () => 0,
+      sleep: async () => undefined,
+    },
+  );
+  assert.equal(response.startAtMs, 900_000);
+});
+
+test("checks alternate ownership before the final event lock and write", async () => {
+  const event = {
+    eventId: "event-1",
+    status: "scheduled",
+    startAtMs: 600_000,
+    updatedAtMs: 100,
+    createdByLoginUid: "original-login",
+    createdByProfileId: "retired-profile",
+  };
+  const state = createRepository({ "events/event-1": event });
+  const order: string[] = [];
+  state.repository.getGameplayProfileOwnership = async () => {
+    order.push("ownership");
+    return {
+      loginUids: ["alternate-login", "original-login"],
+      profile: {
+        aura: "rainbow",
+        emoji: 7,
+        eth: "",
+        profileId: "canonical-profile",
+        rating: 1500,
+        sol: "",
+        username: "ivan",
+      },
+    };
+  };
+  state.repository.resolveCanonicalProfileId = async (candidateProfileId) =>
+    candidateProfileId === "retired-profile"
+      ? "canonical-profile"
+      : candidateProfileId;
+  const transact = state.repository.transactRtdbPath;
+  state.repository.transactRtdbPath = async (path, updater, signal) => {
+    const result = await transact(path, updater, signal);
+    if (path === "eventLocks/event-1" && result.decision === "refreshed") {
+      order.push("lock");
+    }
+    return result;
+  };
+  const patch = state.repository.patchRtdbRoot;
+  state.repository.patchRtdbRoot = async (...args) => {
+    order.push("write");
+    return patch(...args);
+  };
+  const response = await postponeEventStart(
+    workflowEnvironment(() => undefined),
+    { uid: "alternate-login" },
+    { eventId: "event-1", postponeByMinutes: 5 },
+    {
+      repository: state.repository,
+      now: () => 200_000,
+      random: () => 0,
+      sleep: async () => undefined,
+    },
+  );
+  assert.equal(response.startAtMs, 900_000);
+  assert.deepEqual(order.slice(-3), ["ownership", "lock", "write"]);
+});
+
+test("rejects alternate creator access when login and profile disagree", async () => {
+  const event = {
+    eventId: "event-1",
+    status: "scheduled",
+    startAtMs: 600_000,
+    updatedAtMs: 100,
+    createdByLoginUid: "original-login",
+    createdByProfileId: "retired-profile",
+  };
+  const state = createRepository({ "events/event-1": event });
+  state.repository.getGameplayProfileOwnership = async () => ({
+    loginUids: ["alternate-login", "original-login"],
+    profile: {
+      aura: "rainbow",
+      emoji: 7,
+      eth: "",
+      profileId: "canonical-profile",
+      rating: 1500,
+      sol: "",
+      username: "ivan",
+    },
+  });
+  let transactions = 0;
+  const transact = state.repository.transactRtdbPath;
+  state.repository.transactRtdbPath = async (...args) => {
+    transactions += 1;
+    return transact(...args);
+  };
+  await assert.rejects(
+    postponeEventStart(
+      workflowEnvironment(() => undefined),
+      { uid: "alternate-login" },
+      { eventId: "event-1", postponeByMinutes: 5 },
+      {
+        repository: state.repository,
+        now: () => 200_000,
+        random: () => 0,
+        sleep: async () => undefined,
+      },
+    ),
+    (error) =>
+      error instanceof AuthApiFailure &&
+      error.status === 403 &&
+      error.message === "Only the event creator can postpone this event.",
+  );
+  assert.ok(transactions > 0);
+  assert.deepEqual(state.patches, []);
+});
+
 test("synchronizes a future scheduled event through the portable runtime", async () => {
   const event = {
     eventId: "event-1",
@@ -354,7 +689,7 @@ test("synchronizes a future scheduled event through the portable runtime", async
     startAtMs: 600_000,
     updatedAtMs: 100,
     createdByLoginUid: identity.uid,
-    createdByProfileId: identity.profileId,
+    createdByProfileId: profileId,
     participants: {},
   };
   const repository = createRepository({ "events/event-1": event });
@@ -377,9 +712,384 @@ test("synchronizes a future scheduled event through the portable runtime", async
   });
 });
 
+test("rejects duplicate canonical participants before starting an event", async () => {
+  const event = {
+    eventId: "event-1",
+    status: "scheduled",
+    startAtMs: 100,
+    updatedAtMs: 1,
+    createdByLoginUid: identity.uid,
+    createdByProfileId: "canonical-profile",
+    participants: {
+      "source-profile-1": {
+        ...participant("source-profile-1", 1),
+        loginUid: "merged-login",
+      },
+      "source-profile-2": {
+        ...participant("source-profile-2", 2),
+        loginUid: "merged-login",
+      },
+      "other-profile": participant("other-profile", 3),
+    },
+  };
+  const state = createRepository({ "events/event-1": event });
+  state.repository.resolveCanonicalProfileId = async (candidateProfileId) =>
+    candidateProfileId === "source-profile-1" ||
+    candidateProfileId === "source-profile-2"
+      ? "canonical-profile"
+      : candidateProfileId;
+  await assert.rejects(
+    syncEventState(
+      workflowEnvironment(() => undefined),
+      identity,
+      { eventId: "event-1" },
+      {
+        repository: state.repository,
+        now: () => 100,
+        random: () => 0,
+        sleep: async () => undefined,
+      },
+    ),
+    (error) =>
+      error instanceof AuthApiFailure &&
+      error.message === "profile-ownership-unavailable",
+  );
+  assert.deepEqual(state.patches, []);
+});
+
+test("rejects contradictory stored login and profile during synchronization", async () => {
+  const canonicalProfileId = "canonical-profile";
+  const storedProfileId = "retired-profile";
+  const storedLoginUid = "retired-profile-login";
+  const event = {
+    eventId: "event-1",
+    status: "scheduled",
+    startAtMs: 600_000,
+    updatedAtMs: 100,
+    createdByLoginUid: "unrelated-creator",
+    createdByProfileId: "unrelated-profile",
+    participants: {
+      [storedProfileId]: participant(storedProfileId, 1),
+    },
+  };
+  const state = createRepository({ "events/event-1": event });
+  const lookups: string[] = [];
+  state.repository.getGameplayProfile = async (uid) => {
+    lookups.push(uid);
+    if (uid !== "alternate-login" && uid !== storedLoginUid) {
+      return null;
+    }
+    return {
+      aura: "rainbow",
+      emoji: 7,
+      eth: "",
+      profileId: canonicalProfileId,
+      rating: 1500,
+      sol: "",
+      username: "ivan",
+    };
+  };
+  state.repository.listProfileLoginUids = async (candidateProfileId) =>
+    candidateProfileId === canonicalProfileId
+      ? ["alternate-login", storedLoginUid]
+      : [];
+  const staleClaimIdentity = {
+    uid: "alternate-login",
+    profileId: "forged-profile",
+  };
+  const response = await syncEventState(
+    workflowEnvironment(() => undefined),
+    staleClaimIdentity,
+    { eventId: "event-1" },
+    {
+      repository: state.repository,
+      now: () => 1_000,
+      random: () => 0,
+      sleep: async () => undefined,
+    },
+  );
+  assert.deepEqual(response, {
+    ok: true,
+    eventId: "event-1",
+    skipped: true,
+    reason: "not-participant",
+  });
+  assert.deepEqual(lookups, [
+    "alternate-login",
+    "unrelated-creator",
+    storedLoginUid,
+  ]);
+});
+
+test("uses a canonical stored source ID without a participant login", async () => {
+  const event = {
+    eventId: "event-1",
+    status: "scheduled",
+    startAtMs: 600_000,
+    updatedAtMs: 100,
+    createdByLoginUid: "unrelated-creator",
+    createdByProfileId: "unrelated-profile",
+    participants: {
+      "retired-profile": {
+        ...participant("retired-profile", 1),
+        loginUid: "",
+      },
+    },
+  };
+  const state = createRepository({ "events/event-1": event });
+  state.repository.getGameplayProfileOwnership = async () => ({
+    loginUids: ["alternate-login"],
+    profile: {
+      aura: "rainbow",
+      emoji: 7,
+      eth: "",
+      profileId: "canonical-profile",
+      rating: 1500,
+      sol: "",
+      username: "ivan",
+    },
+  });
+  state.repository.resolveCanonicalProfileId = async (candidateProfileId) =>
+    candidateProfileId === "retired-profile"
+      ? "canonical-profile"
+      : candidateProfileId;
+  const response = await syncEventState(
+    workflowEnvironment(() => undefined),
+    { uid: "alternate-login" },
+    { eventId: "event-1" },
+    {
+      repository: state.repository,
+      now: () => 1_000,
+      random: () => 0,
+      sleep: async () => undefined,
+    },
+  );
+  assert.ok("didChange" in response);
+  assert.equal(response.didChange, false);
+});
+
+test("bulk-resolves a maximum event participant set", async () => {
+  const participants = Object.fromEntries(
+    Array.from({ length: 32 }, (_, index) => [
+      `profile-${index}`,
+      participant(`profile-${index}`, index),
+    ]),
+  );
+  const event = {
+    eventId: "event-1",
+    status: "scheduled",
+    startAtMs: 600_000,
+    updatedAtMs: 100,
+    createdByLoginUid: "unrelated-creator",
+    createdByProfileId: "unrelated-profile",
+    participants,
+  };
+  const state = createRepository({ "events/event-1": event });
+  state.repository.getGameplayProfileOwnership = async (uid) => {
+    if (uid === "alternate-login") {
+      return {
+        loginUids: ["alternate-login"],
+        profile: {
+          aura: "",
+          emoji: 0,
+          eth: "",
+          profileId: "alternate-profile",
+          rating: 1500,
+          sol: "",
+          username: "alternate",
+        },
+      };
+    }
+    if (uid.endsWith("-login")) {
+      const ownerProfileId = uid.slice(0, -"-login".length);
+      return {
+        loginUids: [uid],
+        profile: {
+          aura: "",
+          emoji: 0,
+          eth: "",
+          profileId: ownerProfileId,
+          rating: 1500,
+          sol: "",
+          username: ownerProfileId,
+        },
+      };
+    }
+    return null;
+  };
+  state.repository.resolveCanonicalProfileId = async () => {
+    throw new Error("single-profile-resolution-must-not-run");
+  };
+  const batches: string[][] = [];
+  state.repository.resolveCanonicalProfileIds = async (profileIds) => {
+    batches.push(profileIds);
+    return profileIds;
+  };
+  const response = await syncEventState(
+    workflowEnvironment(() => undefined),
+    { uid: "alternate-login" },
+    { eventId: "event-1" },
+    {
+      repository: state.repository,
+      now: () => 1_000,
+      random: () => 0,
+      sleep: async () => undefined,
+    },
+  );
+  assert.deepEqual(response, {
+    ok: true,
+    eventId: "event-1",
+    skipped: true,
+    reason: "not-participant",
+  });
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0].length, 33);
+});
+
+test("reads alternate ownership once after acquiring the event lock", async () => {
+  const event = {
+    eventId: "event-1",
+    status: "scheduled",
+    startAtMs: 600_000,
+    updatedAtMs: 100,
+    createdByLoginUid: "unrelated-creator",
+    createdByProfileId: "unrelated-profile",
+    participants: {
+      "retired-profile": {
+        ...participant("retired-profile", 1),
+        loginUid: "",
+      },
+    },
+  };
+  const state = createRepository({ "events/event-1": event });
+  let lockAcquired = false;
+  let ownershipReads = 0;
+  state.repository.getGameplayProfileOwnership = async () => {
+    ownershipReads += 1;
+    return {
+      loginUids: ["alternate-login"],
+      profile: {
+        aura: "rainbow",
+        emoji: 7,
+        eth: "",
+        profileId: lockAcquired ? "new-profile" : "canonical-profile",
+        rating: 1500,
+        sol: "",
+        username: "ivan",
+      },
+    };
+  };
+  state.repository.resolveCanonicalProfileId = async (candidateProfileId) =>
+    candidateProfileId === "retired-profile"
+      ? "canonical-profile"
+      : candidateProfileId;
+  const transact = state.repository.transactRtdbPath;
+  state.repository.transactRtdbPath = async (path, updater, signal) => {
+    const result = await transact(path, updater, signal);
+    if (path === "eventLocks/event-1" && result.committed) {
+      lockAcquired = true;
+    }
+    return result;
+  };
+  const response = await syncEventState(
+    workflowEnvironment(() => undefined),
+    { uid: "alternate-login" },
+    { eventId: "event-1" },
+    {
+      repository: state.repository,
+      now: () => 1_000,
+      random: () => 0,
+      sleep: async () => undefined,
+    },
+  );
+  assert.deepEqual(response, {
+    ok: true,
+    eventId: "event-1",
+    skipped: true,
+    reason: "not-participant",
+  });
+  assert.equal(ownershipReads, 2);
+  assert.deepEqual(state.patches, []);
+});
+
+test("preserves direct participant UID synchronization without a D1 lookup", async () => {
+  const event = {
+    eventId: "event-1",
+    status: "scheduled",
+    startAtMs: 600_000,
+    updatedAtMs: 100,
+    createdByLoginUid: "unrelated-creator",
+    createdByProfileId: "unrelated-profile",
+    participants: { [profileId]: participant(profileId, 1) },
+  };
+  const state = createRepository({ "events/event-1": event });
+  let lookups = 0;
+  state.repository.getGameplayProfile = async () => {
+    lookups += 1;
+    throw new Error("d1-unavailable");
+  };
+  const response = await syncEventState(
+    workflowEnvironment(() => undefined),
+    identity,
+    { eventId: "event-1" },
+    {
+      repository: state.repository,
+      now: () => 1_000,
+      random: () => 0,
+      sleep: async () => undefined,
+    },
+  );
+  assert.ok("didChange" in response);
+  assert.equal(response.didChange, false);
+  assert.equal(lookups, 0);
+});
+
+test("fails closed under the event lock when D1 ownership is unavailable", async () => {
+  const event = {
+    eventId: "event-1",
+    status: "scheduled",
+    startAtMs: 600_000,
+    updatedAtMs: 100,
+    createdByLoginUid: "unrelated-creator",
+    createdByProfileId: "unrelated-profile",
+    participants: {
+      "retired-profile": participant("retired-profile", 1),
+    },
+  };
+  const state = createRepository({ "events/event-1": event });
+  let transactions = 0;
+  state.repository.getGameplayProfile = async () => {
+    throw new Error("d1-unavailable");
+  };
+  const transact = state.repository.transactRtdbPath;
+  state.repository.transactRtdbPath = async (...args) => {
+    transactions += 1;
+    return transact(...args);
+  };
+  await assert.rejects(
+    syncEventState(
+      workflowEnvironment(() => undefined),
+      { uid: "alternate-login" },
+      { eventId: "event-1" },
+      {
+        repository: state.repository,
+        now: () => 1_000,
+        random: () => 0,
+        sleep: async () => undefined,
+      },
+    ),
+    (error) =>
+      error instanceof AuthApiFailure &&
+      error.status === 503 &&
+      error.message === "profile-ownership-unavailable",
+  );
+  assert.ok(transactions > 0);
+  assert.deepEqual(state.patches, []);
+});
+
 test("disqualifies an active match and synchronizes the terminal state", async () => {
   const activeMatch = {
-    ...match("0_0", identity.profileId, "opponent"),
+    ...match("0_0", profileId, "opponent"),
     inviteId: "invite-1",
     status: "pending",
   };
@@ -389,11 +1099,11 @@ test("disqualifies an active match and synchronizes the terminal state", async (
     startAtMs: 1,
     updatedAtMs: 100,
     createdByLoginUid: identity.uid,
-    createdByProfileId: identity.profileId,
+    createdByProfileId: profileId,
     currentRoundIndex: 0,
     supportsThirdPlaceMatch: false,
     participants: {
-      [identity.profileId]: participant(identity.profileId, 1),
+      [profileId]: participant(profileId, 1),
       opponent: participant("opponent", 2),
     },
     rounds: {
@@ -431,11 +1141,11 @@ test("disqualifies an active match and synchronizes the terminal state", async (
 
 test("progresses resolved semifinal winners into an active final", async () => {
   const first = {
-    ...match("0_0", identity.profileId, "p2"),
+    ...match("0_0", profileId, "p2"),
     inviteId: "semifinal-1",
     status: "host",
     resolvedAtMs: 100,
-    winnerProfileId: identity.profileId,
+    winnerProfileId: profileId,
     loserProfileId: "p2",
   };
   const second = {
@@ -452,11 +1162,11 @@ test("progresses resolved semifinal winners into an active final", async () => {
     startAtMs: 1,
     updatedAtMs: 100,
     createdByLoginUid: identity.uid,
-    createdByProfileId: identity.profileId,
+    createdByProfileId: profileId,
     currentRoundIndex: 0,
     supportsThirdPlaceMatch: false,
     participants: Object.fromEntries(
-      [identity.profileId, "p2", "p3", "p4"].map((profileId, index) => [
+      [profileId, "p2", "p3", "p4"].map((profileId, index) => [
         profileId,
         participant(profileId, index + 1),
       ]),
@@ -494,27 +1204,143 @@ test("progresses resolved semifinal winners into an active final", async () => {
     state.values,
     "events/event-1/rounds/1/matches/1_0",
   ) as Record<string, unknown>;
-  assert.equal(final.hostProfileId, identity.profileId);
+  assert.equal(final.hostProfileId, profileId);
   assert.equal(final.guestProfileId, "p3");
   assert.equal(final.status, "pending");
   assert.equal(typeof final.inviteId, "string");
 });
 
-test("repairs terminal prizes and rechecks ownership after commit", async () => {
+test("uses one ownership snapshot for every later-round invite", async () => {
+  const participants = Object.fromEntries(
+    [profileId, "p2", "p3", "p4"].map((candidateProfileId, index) => [
+      candidateProfileId,
+      participant(candidateProfileId, index + 1),
+    ]),
+  );
+  const event = {
+    eventId: "event-1",
+    status: "active",
+    startAtMs: 1,
+    updatedAtMs: 100,
+    createdByLoginUid: identity.uid,
+    createdByProfileId: profileId,
+    currentRoundIndex: 1,
+    supportsThirdPlaceMatch: false,
+    participants,
+    rounds: {
+      1: {
+        status: "active",
+        completedAtMs: null,
+        matches: {
+          "1_0": match("1_0", profileId, "p2"),
+          "1_1": match("1_1", "p3", "p4"),
+        },
+      },
+    },
+  };
+  const state = createRepository({ "events/event-1": event });
+  let ownershipReads = 0;
+  state.repository.resolveCanonicalProfileIds = async (profileIds) => {
+    ownershipReads += 1;
+    return ownershipReads < 3
+      ? profileIds
+      : profileIds.map((candidateProfileId) =>
+          candidateProfileId === profileId ? "p2" : candidateProfileId,
+        );
+  };
+
+  const response = await syncEventState(
+    workflowEnvironment(() => undefined),
+    identity,
+    { eventId: "event-1" },
+    {
+      repository: state.repository,
+      now: () => 1_000,
+      random: () => 0,
+      sleep: async () => undefined,
+    },
+  );
+  assert.ok("didChange" in response && response.didChange);
+  assert.equal(ownershipReads, 1);
+  assert.ok(getPath(state.values, "invites"));
+});
+
+test("does not lock active prize selections when D1 ownership fails", async () => {
+  const eventId = "NN3eRzoZo80";
+  const final = {
+    ...match("0_0", profileId, "runner-up"),
+    inviteId: "final-invite",
+    status: "host",
+    resolvedAtMs: 500,
+    winnerProfileId: profileId,
+    loserProfileId: "runner-up",
+  };
+  const event = {
+    eventId,
+    status: "active",
+    startAtMs: 1,
+    updatedAtMs: 500,
+    createdByLoginUid: identity.uid,
+    createdByProfileId: profileId,
+    currentRoundIndex: 0,
+    supportsThirdPlaceMatch: false,
+    participants: {
+      [profileId]: participant(profileId, 1),
+      "runner-up": participant("runner-up", 2),
+    },
+    rounds: {
+      0: {
+        status: "active",
+        completedAtMs: null,
+        matches: { "0_0": final },
+      },
+    },
+  };
+  const state = createRepository({ [`events/${eventId}`]: event });
+  state.repository.resolveCanonicalProfileIds = async () => {
+    throw new Error("d1-unavailable");
+  };
+
+  await assert.rejects(
+    syncEventState(
+      workflowEnvironment(() => undefined),
+      identity,
+      { eventId },
+      {
+        repository: state.repository,
+        now: () => 1_000,
+        random: () => 0,
+        sleep: async () => undefined,
+      },
+    ),
+    (error) =>
+      error instanceof AuthApiFailure &&
+      error.status === 503 &&
+      error.message === "profile-ownership-unavailable",
+  );
+  assert.deepEqual(state.patches, []);
+  assert.equal(
+    getPath(state.values, `events/${eventId}/prizeSelectionsLockedAtMs`),
+    null,
+  );
+  assert.equal(getPath(state.values, `events/${eventId}/status`), "active");
+});
+
+test("projects terminal prizes from the locked ownership snapshot", async () => {
   const eventId = "NN3eRzoZo80";
   const assignedAtMs = 500;
   const final = {
-    ...match("0_0", identity.profileId, "runner-up"),
+    ...match("0_0", profileId, "runner-up"),
     inviteId: "final-invite",
     status: "host",
     resolvedAtMs: assignedAtMs,
-    winnerProfileId: identity.profileId,
+    winnerProfileId: profileId,
     loserProfileId: "runner-up",
   };
   const assignments = {
     1: {
       eventId,
-      profileId: identity.profileId,
+      profileId: profileId,
       place: 1,
       prizeId: "1092",
       assignedAtMs,
@@ -534,15 +1360,15 @@ test("repairs terminal prizes and rechecks ownership after commit", async () => 
     endedAtMs: assignedAtMs,
     updatedAtMs: assignedAtMs,
     createdByLoginUid: identity.uid,
-    createdByProfileId: identity.profileId,
+    createdByProfileId: profileId,
     currentRoundIndex: 0,
-    winnerProfileId: identity.profileId,
-    winnerDisplayName: identity.profileId.toUpperCase(),
+    winnerProfileId: profileId,
+    winnerDisplayName: profileId.toUpperCase(),
     prizeSelectionsLockedAtMs: assignedAtMs,
     prizeAssignments: assignments,
     supportsThirdPlaceMatch: false,
     participants: {
-      [identity.profileId]: participant(identity.profileId, 1),
+      [profileId]: participant(profileId, 1),
       "runner-up": participant("runner-up", 2),
     },
     rounds: {
@@ -560,14 +1386,6 @@ test("repairs terminal prizes and rechecks ownership after commit", async () => 
     { eventId },
     {
       repository: state.repository,
-      resolveProfileEventPrizeOwnerId: async ({ profileId }) =>
-        profileId === identity.profileId &&
-        getPath(
-          state.values,
-          `profileEventPrizes/${identity.profileId}/${eventId}`,
-        )
-          ? "canonical-profile"
-          : profileId,
       now: () => 1_000,
       random: () => 0,
       sleep: async () => undefined,
@@ -576,38 +1394,29 @@ test("repairs terminal prizes and rechecks ownership after commit", async () => 
   assert.ok("didChange" in response);
   assert.equal(response.didChange, true);
   assert.deepEqual(
-    getPath(
-      state.values,
-      `profileEventPrizes/${identity.profileId}/${eventId}`,
-    ),
+    getPath(state.values, `profileEventPrizes/${profileId}/${eventId}`),
     assignments[1],
   );
   assert.deepEqual(
     getPath(state.values, `profileEventPrizes/runner-up/${eventId}`),
     assignments[2],
   );
-  assert.deepEqual(
+  assert.equal(
     getPath(state.values, `profileEventPrizes/canonical-profile/${eventId}`),
-    { ...assignments[1], profileId: "canonical-profile" },
+    null,
   );
 });
 
-test("uses canonical prize ownership with an injected repository", async () => {
+test("uses one ownership snapshot while creating prize assignments", async () => {
   const eventId = "NN3eRzoZo80";
   const assignedAtMs = 500;
-  const assignment = {
-    eventId,
-    profileId: identity.profileId,
-    place: 1,
-    prizeId: "1092",
-    assignedAtMs,
-  };
   const final = {
-    ...match("0_0", identity.profileId, null),
+    ...match("0_0", profileId, "runner-up"),
     inviteId: "final-invite",
     status: "host",
     resolvedAtMs: assignedAtMs,
-    winnerProfileId: identity.profileId,
+    winnerProfileId: profileId,
+    loserProfileId: "runner-up",
   };
   const event = {
     eventId,
@@ -616,15 +1425,15 @@ test("uses canonical prize ownership with an injected repository", async () => {
     endedAtMs: assignedAtMs,
     updatedAtMs: assignedAtMs,
     createdByLoginUid: identity.uid,
-    createdByProfileId: identity.profileId,
+    createdByProfileId: profileId,
     currentRoundIndex: 0,
-    winnerProfileId: identity.profileId,
-    winnerDisplayName: identity.profileId.toUpperCase(),
+    winnerProfileId: profileId,
+    winnerDisplayName: profileId.toUpperCase(),
     prizeSelectionsLockedAtMs: assignedAtMs,
-    prizeAssignments: { 1: assignment },
     supportsThirdPlaceMatch: false,
     participants: {
-      [identity.profileId]: participant(identity.profileId, 1),
+      [profileId]: participant(profileId, 1),
+      "runner-up": participant("runner-up", 2),
     },
     rounds: {
       0: {
@@ -635,12 +1444,86 @@ test("uses canonical prize ownership with an injected repository", async () => {
     },
   };
   const state = createRepository({ [`events/${eventId}`]: event });
+  let ownershipReads = 0;
+  state.repository.resolveCanonicalProfileIds = async (profileIds) => {
+    ownershipReads += 1;
+    return ownershipReads === 1 ? profileIds : profileIds.map(() => profileId);
+  };
+
   await syncEventState(
-    withCanonicalMergeTarget(
-      workflowEnvironment(() => undefined),
-      identity.profileId,
-      "canonical-profile",
-    ),
+    workflowEnvironment(() => undefined),
+    identity,
+    { eventId },
+    {
+      repository: state.repository,
+      now: () => 1_000,
+      random: () => 0,
+      sleep: async () => undefined,
+    },
+  );
+  assert.equal(ownershipReads, 1);
+  assert.ok(getPath(state.values, `events/${eventId}/prizeAssignments`));
+});
+
+test("uses canonical prize ownership with an injected repository", async () => {
+  const eventId = "NN3eRzoZo80";
+  const assignedAtMs = 500;
+  const assignment = {
+    eventId,
+    profileId: profileId,
+    place: 1,
+    prizeId: "1092",
+    assignedAtMs,
+  };
+  const final = {
+    ...match("0_0", profileId, null),
+    inviteId: "final-invite",
+    status: "host",
+    resolvedAtMs: assignedAtMs,
+    winnerProfileId: profileId,
+  };
+  const event = {
+    eventId,
+    status: "ended",
+    startAtMs: 1,
+    endedAtMs: assignedAtMs,
+    updatedAtMs: assignedAtMs,
+    createdByLoginUid: identity.uid,
+    createdByProfileId: profileId,
+    currentRoundIndex: 0,
+    winnerProfileId: profileId,
+    winnerDisplayName: profileId.toUpperCase(),
+    prizeSelectionsLockedAtMs: assignedAtMs,
+    prizeAssignments: { 1: assignment },
+    supportsThirdPlaceMatch: false,
+    participants: {
+      [profileId]: participant(profileId, 1),
+    },
+    rounds: {
+      0: {
+        status: "completed",
+        completedAtMs: assignedAtMs,
+        matches: { "0_0": final },
+      },
+    },
+  };
+  const state = createRepository({ [`events/${eventId}`]: event });
+  state.repository.getGameplayProfileOwnership = async () => ({
+    loginUids: [identity.uid],
+    profile: {
+      aura: "",
+      emoji: 0,
+      eth: "",
+      profileId: "canonical-profile",
+      rating: 1500,
+      sol: "",
+      username: "creator",
+    },
+  });
+  state.repository.resolveCanonicalProfileId = async (candidateProfileId) =>
+    candidateProfileId === profileId ? "canonical-profile" : candidateProfileId;
+  await syncEventState(
+    workflowEnvironment(() => undefined),
     identity,
     { eventId },
     {
@@ -652,10 +1535,7 @@ test("uses canonical prize ownership with an injected repository", async () => {
   );
 
   assert.equal(
-    getPath(
-      state.values,
-      `profileEventPrizes/${identity.profileId}/${eventId}`,
-    ),
+    getPath(state.values, `profileEventPrizes/${profileId}/${eventId}`),
     null,
   );
   assert.deepEqual(

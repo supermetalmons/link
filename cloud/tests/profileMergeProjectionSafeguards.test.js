@@ -3,7 +3,6 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
-  buildEventProjectionOwnerPlan,
   createEventProfileGameProjectionCore,
 } = require("../functions/eventProfileGameProjectionCore");
 const {
@@ -19,38 +18,57 @@ const {
 
 const runWithoutProjectionLock = async (_inviteId, work) => work();
 
+const projectionOwnership = (entries, profiles = {}) => ({
+  profileIdByLoginUid: new Map(entries),
+  profileDataById: new Map(Object.entries(profiles)),
+});
+
+const eventOwnership = (
+  { loginUids, profileIds },
+  { canonicalProfileIds = {}, loginProfileIds = {} } = {},
+) => ({
+  canonicalProfileIdByProfileId: new Map(
+    profileIds.map((profileId) => [
+      profileId,
+      Object.hasOwn(canonicalProfileIds, profileId)
+        ? canonicalProfileIds[profileId]
+        : profileId,
+    ]),
+  ),
+  loginOwnerByUid: new Map(
+    loginUids.map((loginUid) => {
+      const profileId = loginProfileIds[loginUid] || null;
+      return [loginUid, profileId ? { profileId, revision: 1 } : null];
+    }),
+  ),
+});
+
 const processProfileLinkCatchup = async (input, dependencies) => {
   const core = createProfileLinkProjectionCore({
     logger: { error: () => undefined, info: () => undefined },
     recomputeInviteProjection: dependencies.recomputeInviteProjection,
     resolveInviteIdFromMatchId: dependencies.resolveInviteIdFromMatchId,
     repository: {
-      async deleteProfileGameProjections(profileId, inviteIds) {
-        return dependencies.deleteProfileGameProjections
-          ? dependencies.deleteProfileGameProjections(profileId, inviteIds)
-          : 0;
-      },
-      getCurrentProfileLink: dependencies.readCurrentProfileLink,
       async getMatches(loginUid) {
         const snapshot = await dependencies.readMatches(loginUid);
         return snapshot.exists() ? snapshot.val() || {} : null;
       },
-      async getMergeTarget(profileId) {
-        return dependencies.getMergeTarget
-          ? dependencies.getMergeTarget(profileId)
-          : null;
-      },
       inviteExists: async () => false,
-      async profileExists(profileId) {
-        return dependencies.profileExists
-          ? dependencies.profileExists(profileId)
-          : true;
+      async readProfileOwnershipSnapshot({ loginUids }) {
+        const entries = await Promise.all(
+          loginUids.map(async (loginUid) => [
+            loginUid,
+            await dependencies.readCurrentProfileLink(loginUid),
+          ]),
+        );
+        return projectionOwnership(entries);
       },
     },
     withInviteProjectionLock: dependencies.withInviteProjectionLock,
   });
   return core.processProfileLinkCatchup({
-    cleanupProfileIds: [input.staleProfileId].filter(Boolean),
+    cleanupProfileIds:
+      input.cleanupProfileIds || [input.staleProfileId].filter(Boolean),
     loginUid: input.loginUid,
     profileId: input.profileId,
     sourceUpdatedAtMs: 100,
@@ -60,15 +78,42 @@ const processProfileLinkCatchup = async (input, dependencies) => {
 const runEventProjection = async ({
   afterData,
   beforeData = null,
-  mergeTargets = {},
+  canonicalProfileIds = {},
+  loginProfileIds = {},
   options = {},
   profileIds = [],
-  retiredProfileIds = [],
 }) => {
   const existingProfileIds = new Set(profileIds);
-  const retiredIds = new Set(retiredProfileIds);
   const commits = [];
   const operations = [];
+  const eventData = {
+    ...afterData,
+    participants: Object.fromEntries(
+      Object.entries(afterData?.participants || {}).map(
+        ([key, participant]) => {
+          const profileId = participant.profileId || key;
+          return [
+            key,
+            {
+              ...participant,
+              loginUid: participant.loginUid || `login-${profileId}`,
+            },
+          ];
+        },
+      ),
+    ),
+  };
+  const participantLoginProfileIds = Object.fromEntries(
+    Object.values(eventData.participants).map((participant) => {
+      const profileId = participant.profileId;
+      const canonicalProfileId = Object.hasOwn(canonicalProfileIds, profileId)
+        ? canonicalProfileIds[profileId]
+        : existingProfileIds.has(profileId)
+          ? profileId
+          : null;
+      return [participant.loginUid, canonicalProfileId];
+    }),
+  );
   const core = createEventProfileGameProjectionCore({
     repository: {
       commitProjectionWrites: async (writes) => {
@@ -82,17 +127,24 @@ const runEventProjection = async ({
           commits.push(operations.slice(index, index + 450));
         }
       },
-      getEvent: async () => afterData,
-      getMergeTarget: async (profileId) => mergeTargets[profileId] ?? null,
-      getProfile: async (profileId) =>
-        existingProfileIds.has(profileId) || retiredIds.has(profileId)
-          ? {
-              data: retiredIds.has(profileId)
-                ? { mergedIntoProfileId: "canonical-profile" }
-                : {},
-              updateTime: `update-${profileId}`,
-            }
-          : null,
+      getEvent: async () => eventData,
+      readProfileOwnershipSnapshot: async (query) =>
+        eventOwnership(query, {
+          canonicalProfileIds: Object.fromEntries(
+            query.profileIds.map((profileId) => [
+              profileId,
+              Object.hasOwn(canonicalProfileIds, profileId)
+                ? canonicalProfileIds[profileId]
+                : existingProfileIds.has(profileId)
+                  ? profileId
+                  : null,
+            ]),
+          ),
+          loginProfileIds: {
+            ...participantLoginProfileIds,
+            ...loginProfileIds,
+          },
+        }),
     },
   });
   try {
@@ -101,7 +153,7 @@ const runEventProjection = async ({
     ).flatMap((participant) =>
       participant?.profileId ? [participant.profileId] : [],
     );
-    await core.projectEvent("event-1", afterData, [
+    await core.projectEvent("event-1", eventData, [
       ...beforeOwnerProfileIds,
       ...(options.cleanupOwnerProfileIds || []),
     ]);
@@ -158,23 +210,6 @@ const runInviteProjection = async ({
           });
         }
       },
-      async findProfileByLogin(loginUid) {
-        const profileId = profileLinks[loginUid];
-        const data = profiles[profileId];
-        return profileId && data ? { id: profileId, data } : null;
-      },
-      async getMergeTarget(profileId) {
-        return mergeTargets[profileId] ?? null;
-      },
-      async getProfile(profileId) {
-        const data = profiles[profileId];
-        return data
-          ? {
-              data,
-              updateTime: currentUpdateTimes[profileId] || "revision-1",
-            }
-          : null;
-      },
       async getProjection(profileId) {
         const data = projections[profileId];
         if (data === null || data === undefined) {
@@ -186,10 +221,40 @@ const runInviteProjection = async ({
       async getRtdbPath(path) {
         if (path === `invites/${inviteId}`) return invite;
         if (path === `automatch/${inviteId}`) return null;
-        const profileMatch = path.match(/^players\/(.+)\/profile$/);
-        if (profileMatch) return profileLinks[profileMatch[1]] ?? null;
+        if (/^players\/.+\/profile$/.test(path)) {
+          throw new Error("unexpected-rtdb-profile-owner-read");
+        }
         if (path.startsWith("players/")) return null;
         throw new Error(`unexpected-path:${path}`);
+      },
+      async readProfileOwnershipSnapshot({ loginUids }) {
+        const resolveProfileId = (loginUid) => {
+          let profileId = profileLinks[loginUid] || null;
+          const visited = new Set();
+          while (profileId && !visited.has(profileId)) {
+            visited.add(profileId);
+            const target = mergeTargets[profileId]?.targetProfileId;
+            if (!target) break;
+            profileId = target;
+          }
+          return profileId &&
+            profiles[profileId] &&
+            !profiles[profileId].mergedIntoProfileId
+            ? profileId
+            : null;
+        };
+        const entries = loginUids.map((loginUid) => [
+          loginUid,
+          resolveProfileId(loginUid),
+        ]);
+        return projectionOwnership(
+          entries,
+          Object.fromEntries(
+            Object.entries(profiles).filter(
+              ([, data]) => !data.mergedIntoProfileId,
+            ),
+          ),
+        );
       },
     },
   });
@@ -204,21 +269,6 @@ const runInviteProjection = async ({
   );
   return { deletes, result, sets };
 };
-
-test("event cleanup orders canonical writes ahead of raw merge paths", () => {
-  assert.deepEqual(
-    buildEventProjectionOwnerPlan({
-      afterOwnerPaths: [["source", "middle", "target"]],
-      beforeOwnerPaths: [["source", "middle", "target"]],
-      rawAfterOwnerProfileIds: ["source"],
-      rawBeforeOwnerProfileIds: ["source"],
-    }),
-    {
-      afterOwnerProfileIds: ["target"],
-      allOwnerProfileIds: ["target", "source", "middle"],
-    },
-  );
-});
 
 test("event projection writes every canonical owner before stale cleanup", async () => {
   const ownerProfileIds = Array.from(
@@ -260,14 +310,14 @@ test("event projection does not write when a canonical owner is missing", async 
       },
     }),
     (error) => {
-      assert.match(error.message, /projector:event-owner-missing/);
+      assert.match(error.message, /profile-ownership-unavailable/);
       assert.deepEqual(error.projectionOperations, []);
       return true;
     },
   );
 });
 
-test("event projection does not write to a retired owner", async () => {
+test("event projection does not write for contradictory ownership", async () => {
   await assert.rejects(
     runEventProjection({
       afterData: {
@@ -276,43 +326,51 @@ test("event projection does not write to a retired owner", async () => {
       beforeData: {
         participants: { stale: { profileId: "stale-owner" } },
       },
-      retiredProfileIds: ["retired-owner"],
+      canonicalProfileIds: { "retired-owner": "canonical-profile" },
+      loginProfileIds: {
+        "login-retired-owner": "different-profile",
+      },
+      profileIds: ["retired-owner"],
     }),
     (error) => {
-      assert.match(error.message, /projector:event-owner-retired/);
+      assert.match(error.message, /profile-ownership-unavailable/);
       assert.deepEqual(error.projectionOperations, []);
       return true;
     },
   );
 });
 
-test("event owner paths are deduplicated and concurrency bounded", async () => {
+test("event owners use one deduplicated ownership snapshot", async () => {
   const ids = Array.from({ length: 12 }, (_, index) => `profile-${index}`);
-  const reads = new Map();
-  let active = 0;
-  let maxActive = 0;
+  let ownershipReads = 0;
   const core = createEventProfileGameProjectionCore({
     repository: {
       commitProjectionWrites: async () => undefined,
       getEvent: async () => null,
-      getMergeTarget: async (profileId) => {
-        active += 1;
-        maxActive = Math.max(maxActive, active);
-        reads.set(profileId, (reads.get(profileId) || 0) + 1);
-        await new Promise((resolve) => setImmediate(resolve));
-        active -= 1;
-        return null;
+      readProfileOwnershipSnapshot: async (query) => {
+        ownershipReads += 1;
+        assert.deepEqual(query.profileIds, ids);
+        assert.deepEqual(
+          query.loginUids,
+          ids.map((profileId) => `login-${profileId}`),
+        );
+        return eventOwnership(query, {
+          loginProfileIds: Object.fromEntries(
+            ids.map((profileId) => [`login-${profileId}`, profileId]),
+          ),
+        });
       },
-      getProfile: async () => null,
     },
   });
-  const paths = await core.resolveProfilePaths([...ids, ...ids]);
-  assert.equal(paths.size, ids.length);
-  assert.equal(maxActive, 10);
-  assert.deepEqual(
-    Array.from(reads.values()),
-    ids.map(() => 1),
-  );
+  await core.projectEvent("event-1", {
+    participants: Object.fromEntries(
+      ids.map((profileId) => [
+        profileId,
+        { profileId, loginUid: `login-${profileId}` },
+      ]),
+    ),
+  });
+  assert.equal(ownershipReads, 1);
 });
 
 test("invite cleanup follows the resolved merge-target path", () => {
@@ -324,23 +382,105 @@ test("invite cleanup follows the resolved merge-target path", () => {
   });
 });
 
-test("event retries project live state while retaining stale owners for cleanup", async () => {
+test("invite projection ignores an RTDB profile shadow when D1 has no owner", async () => {
+  const inviteId = "d1-owner-missing-invite";
+  let rtdbProfileReads = 0;
+  const core = createProfileGamesProjectionCore({
+    repository: {
+      commitProjectionWrites: async () => undefined,
+      getProjection: async () => null,
+      async getRtdbPath(path) {
+        if (path === `invites/${inviteId}`) {
+          return { hostId: "host-login" };
+        }
+        if (path === `automatch/${inviteId}`) return null;
+        if (path === "players/host-login/profile") {
+          rtdbProfileReads += 1;
+          return "shadow-profile";
+        }
+        return null;
+      },
+      readProfileOwnershipSnapshot: async ({ loginUids }) =>
+        projectionOwnership(loginUids.map((loginUid) => [loginUid, null])),
+    },
+  });
+
+  const result = await core.recomputeInviteProjection(inviteId, "test", {
+    eventTimestampMs: 100,
+  });
+
+  assert.equal(rtdbProfileReads, 0);
+  assert.deepEqual(result.ownerProfileIds, []);
+  assert.equal(result.blockedReason, "unresolved-owner-profile");
+});
+
+test("invite projection retries D1 ownership failures without writing", async () => {
+  const inviteId = "d1-owner-failure-invite";
+  let ownerReads = 0;
+  let commits = 0;
+  const core = createProfileGamesProjectionCore({
+    logger: { error: () => undefined },
+    repository: {
+      commitProjectionWrites: async () => {
+        commits += 1;
+      },
+      readProfileOwnershipSnapshot: async () => {
+        ownerReads += 1;
+        throw new Error("d1-owner-unavailable");
+      },
+      getProjection: async () => null,
+      async getRtdbPath(path) {
+        if (path === `invites/${inviteId}`) {
+          return { hostId: "host-login" };
+        }
+        if (path === `automatch/${inviteId}`) return null;
+        if (/^players\/.+\/profile$/.test(path)) {
+          throw new Error("unexpected-rtdb-profile-owner-read");
+        }
+        return null;
+      },
+    },
+    wait: async () => undefined,
+  });
+
+  await assert.rejects(
+    core.recomputeInviteProjection(inviteId, "test", {
+      eventTimestampMs: 100,
+    }),
+    /d1-owner-unavailable/,
+  );
+  assert.equal(ownerReads, 1);
+  assert.equal(commits, 0);
+});
+
+test("event projection retains stale owners for cleanup", async () => {
   const beforeData = {
-    participants: { before: { profileId: "before-profile" } },
+    participants: {
+      before: { loginUid: "before-login", profileId: "before-profile" },
+    },
   };
   const afterData = {
-    participants: { after: { profileId: "stale-after-profile" } },
+    participants: {
+      after: {
+        loginUid: "stale-after-login",
+        profileId: "stale-after-profile",
+      },
+    },
   };
   const liveData = {
-    participants: { live: { profileId: "live-profile" } },
+    participants: {
+      live: { loginUid: "live-login", profileId: "live-profile" },
+    },
   };
   const commits = [];
   const core = createEventProfileGameProjectionCore({
     repository: {
       commitProjectionWrites: async (writes) => commits.push(writes),
       getEvent: async () => liveData,
-      getMergeTarget: async () => null,
-      getProfile: async () => ({ data: {}, updateTime: "update" }),
+      readProfileOwnershipSnapshot: async (query) =>
+        eventOwnership(query, {
+          loginProfileIds: { "live-login": "live-profile" },
+        }),
     },
   });
   await core.reconcileEventProjection("event-1", [
@@ -352,99 +492,51 @@ test("event retries project live state while retaining stale owners for cleanup"
     commits[0].map(({ type, profileId }) => ({ type, profileId })),
     [
       { type: "merge", profileId: "live-profile" },
+      { type: "delete", profileId: "live" },
       { type: "delete", profileId: "before-profile" },
       { type: "delete", profileId: "stale-after-profile" },
     ],
   );
 });
 
-test("event retries converge when the live event changes during projection", async () => {
-  const staleData = {
-    participants: { stale: { profileId: "stale-profile" } },
-  };
-  const intermediateData = {
-    participants: { intermediate: { profileId: "intermediate-profile" } },
-  };
-  const commits = [];
-  const liveStates = [intermediateData, null, null];
-  const core = createEventProfileGameProjectionCore({
+test("profile-link catchup bounds cleanup work to one ownership snapshot", async () => {
+  let ownerRead = 0;
+  let recomputed = 0;
+  const matches = Object.fromEntries(
+    Array.from({ length: 20 }, (_, index) => [`match-${index}`, {}]),
+  );
+  const core = createProfileLinkProjectionCore({
+    logger: { error: () => undefined, info: () => undefined },
+    recomputeInviteProjection: async () => {
+      recomputed += 1;
+      return { sourceCleanupSafe: true };
+    },
     repository: {
-      commitProjectionWrites: async (writes) => commits.push(writes),
-      getEvent: async () => (liveStates.length > 0 ? liveStates.shift() : null),
-      getMergeTarget: async () => null,
-      getProfile: async () => ({ data: {}, updateTime: "update" }),
+      getMatches: async () => matches,
+      inviteExists: async () => true,
+      readProfileOwnershipSnapshot: async ({ loginUids }) => {
+        ownerRead += 1;
+        return projectionOwnership(
+          loginUids.map((loginUid) => [loginUid, "profile-1"]),
+        );
+      },
     },
+    resolveInviteIdFromMatchId: async (matchId) => matchId,
+    withInviteProjectionLock: runWithoutProjectionLock,
   });
-  await core.reconcileEventProjection("event-1", [
-    staleData.participants.stale.profileId,
-  ]);
-  assert.deepEqual(
-    commits[1].map(({ type, profileId }) => ({ type, profileId })),
-    [
-      { type: "delete", profileId: "stale-profile" },
-      { type: "delete", profileId: "intermediate-profile" },
-    ],
-  );
-});
 
-test("profile-link catchup converges and cleans an intermediate live owner", async () => {
-  let liveProfileId = "initial-live-profile";
-  const cleanupRounds = [];
-  await processProfileLinkCatchup(
-    {
-      eventLabel: "test",
-      loginUid: "login-1",
-      profileId: "event-profile",
-    },
-    {
-      readCurrentProfileLink: async () => liveProfileId,
-      readMatches: async () => ({
-        exists: () => true,
-        val: () => ({ "match-1": {} }),
-      }),
-      recomputeInviteProjection: async (_inviteId, _reason, options) => {
-        cleanupRounds.push(options.cleanupProfileIds);
-        if (cleanupRounds.length === 1) {
-          liveProfileId = "final-live-profile";
-        }
-      },
-      resolveInviteIdFromMatchId: async () => "invite-1",
-      withInviteProjectionLock: runWithoutProjectionLock,
-    },
-  );
-  assert.deepEqual(cleanupRounds, [
-    ["event-profile", "initial-live-profile"],
-    ["event-profile", "initial-live-profile", "final-live-profile"],
-  ]);
-});
-
-test("profile-link catchup ignores failures from a superseded owner", async () => {
-  let liveProfileId = "initial-live-profile";
-  let attempts = 0;
-  await processProfileLinkCatchup(
-    {
-      eventLabel: "test",
-      loginUid: "login-1",
-      profileId: "event-profile",
-    },
-    {
-      readCurrentProfileLink: async () => liveProfileId,
-      readMatches: async () => ({
-        exists: () => true,
-        val: () => ({ "match-1": {} }),
-      }),
-      recomputeInviteProjection: async () => {
-        attempts += 1;
-        if (attempts === 1) {
-          liveProfileId = "final-live-profile";
-          throw new Error("superseded-owner-failure");
-        }
-      },
-      resolveInviteIdFromMatchId: async () => "invite-1",
-      withInviteProjectionLock: runWithoutProjectionLock,
-    },
-  );
-  assert.equal(attempts, 2);
+  const result = await core.processProfileLinkCatchup({
+    cleanupProfileIds: ["stale-profile"],
+    loginUid: "login-1",
+    profileId: "event-profile",
+    sourceUpdatedAtMs: 100,
+  });
+  assert.equal(ownerRead, 1);
+  assert.equal(recomputed, 1);
+  assert.equal(result.matchIdsScanned, 1);
+  assert.equal(result.inviteIdsResolved, 1);
+  assert.equal(result.didHitInviteCap, true);
+  assert.equal(result.nextMatchCursor, "match-0");
 });
 
 test("profile-link catchup accepts an unprofiled opponent without stale cleanup", async () => {
@@ -471,7 +563,6 @@ test("profile-link catchup accepts an unprofiled opponent without stale cleanup"
   );
   assert.equal(result.processed, 1);
   assert.equal(result.failed, 0);
-  assert.equal(result.didConverge, true);
 });
 
 test("profile-link catchup retries when the current owner is unresolved", async () => {
@@ -502,7 +593,6 @@ test("profile-link catchup retries when the current owner is unresolved", async 
 });
 
 test("profile-link catchup retries blocked projections with stale cleanup", async () => {
-  let deletes = 0;
   await assert.rejects(
     processProfileLinkCatchup(
       {
@@ -512,10 +602,6 @@ test("profile-link catchup retries blocked projections with stale cleanup", asyn
         staleProfileId: "stale-profile",
       },
       {
-        deleteProfileGameProjections: async (_profileId, inviteIds) => {
-          deletes += inviteIds.length;
-          return inviteIds.length;
-        },
         readCurrentProfileLink: async () => "target-profile",
         readMatches: async () => ({
           exists: () => true,
@@ -532,72 +618,6 @@ test("profile-link catchup retries blocked projections with stale cleanup", asyn
     ),
     /profile-link-catchup-incomplete/,
   );
-  assert.equal(deletes, 0);
-});
-
-const runProfileLinkStaleCleanup = async ({
-  sourceExists,
-  targetProfileId,
-}) => {
-  const deletes = [];
-  await processProfileLinkCatchup(
-    {
-      eventLabel: "test",
-      loginUid: "login-1",
-      profileId: "target-profile",
-      staleProfileId: "stale-profile",
-    },
-    {
-      deleteProfileGameProjections: async (profileId, inviteIds) => {
-        inviteIds.forEach((inviteId) =>
-          deletes.push(`${profileId}/${inviteId}`),
-        );
-        return inviteIds.length;
-      },
-      getMergeTarget: async (candidateProfileId) =>
-        candidateProfileId === "stale-profile" && targetProfileId
-          ? { targetProfileId }
-          : null,
-      profileExists: async (candidateProfileId) =>
-        candidateProfileId === "stale-profile" && sourceExists,
-      readCurrentProfileLink: async () => "target-profile",
-      readMatches: async () => ({
-        exists: () => true,
-        val: () => ({ "match-1": {} }),
-      }),
-      recomputeInviteProjection: async () => ({ sourceCleanupSafe: true }),
-      resolveInviteIdFromMatchId: async () => "invite-1",
-      withInviteProjectionLock: runWithoutProjectionLock,
-    },
-  );
-  return deletes;
-};
-
-test("profile-link catchup cleans a deleted merge source", async () => {
-  assert.deepEqual(
-    await runProfileLinkStaleCleanup({
-      sourceExists: false,
-      targetProfileId: "target-profile",
-    }),
-    ["stale-profile/invite-1"],
-  );
-});
-
-test("profile-link catchup retains projections until the merge source is deleted", async () => {
-  assert.deepEqual(
-    await runProfileLinkStaleCleanup({
-      sourceExists: true,
-      targetProfileId: "target-profile",
-    }),
-    [],
-  );
-  assert.deepEqual(
-    await runProfileLinkStaleCleanup({
-      sourceExists: false,
-      targetProfileId: "different-profile",
-    }),
-    [],
-  );
 });
 
 test("profile-link catchup advances one bounded 20-match page", async () => {
@@ -608,19 +628,25 @@ test("profile-link catchup advances one bounded 20-match page", async () => {
     ]),
   );
   let recomputed = 0;
+  let active = 0;
+  let maxActive = 0;
   const core = createProfileLinkProjectionCore({
     logger: { error: () => undefined, info: () => undefined },
     recomputeInviteProjection: async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setImmediate(resolve));
+      active -= 1;
       recomputed += 1;
       return { sourceCleanupSafe: true };
     },
     repository: {
-      deleteProfileGameProjections: async () => 0,
-      getCurrentProfileLink: async () => "profile-1",
       getMatches: async () => matches,
-      getMergeTarget: async () => null,
       inviteExists: async () => true,
-      profileExists: async () => true,
+      readProfileOwnershipSnapshot: async ({ loginUids }) =>
+        projectionOwnership(
+          loginUids.map((loginUid) => [loginUid, "profile-1"]),
+        ),
     },
     withInviteProjectionLock: runWithoutProjectionLock,
   });
@@ -633,6 +659,7 @@ test("profile-link catchup advances one bounded 20-match page", async () => {
   assert.equal(result.matchIdsScanned, 20);
   assert.equal(result.inviteIdsResolved, 20);
   assert.equal(recomputed, 20);
+  assert.equal(maxActive, 3);
   assert.equal(result.nextMatchCursor, "invite-019");
   const secondPage = await core.processProfileLinkCatchup({
     loginUid: "login-1",
@@ -666,12 +693,12 @@ test("profile-link catchup bounds scans with unresolved and duplicate invites", 
       return Number(matchId.slice(-2)) % 2 === 0 ? null : "shared-invite";
     },
     repository: {
-      deleteProfileGameProjections: async () => 0,
-      getCurrentProfileLink: async () => "profile-1",
       getMatches: async () => matches,
-      getMergeTarget: async () => null,
       inviteExists: async () => true,
-      profileExists: async () => true,
+      readProfileOwnershipSnapshot: async ({ loginUids }) =>
+        projectionOwnership(
+          loginUids.map((loginUid) => [loginUid, "profile-1"]),
+        ),
     },
     withInviteProjectionLock: runWithoutProjectionLock,
   });
@@ -696,15 +723,13 @@ test("profile-link catchup returns missing when the live link is gone", async ()
     logger: { error: () => undefined, info: () => undefined },
     recomputeInviteProjection: async () => ({ sourceCleanupSafe: true }),
     repository: {
-      deleteProfileGameProjections: async () => 0,
-      getCurrentProfileLink: async () => null,
       getMatches: async () => {
         matchReads += 1;
         return {};
       },
-      getMergeTarget: async () => null,
       inviteExists: async () => true,
-      profileExists: async () => true,
+      readProfileOwnershipSnapshot: async ({ loginUids }) =>
+        projectionOwnership(loginUids.map((loginUid) => [loginUid, null])),
     },
     withInviteProjectionLock: runWithoutProjectionLock,
   });
@@ -715,6 +740,35 @@ test("profile-link catchup returns missing when the live link is gone", async ()
       sourceUpdatedAtMs: 100,
     }),
     null,
+  );
+  assert.equal(matchReads, 0);
+});
+
+test("profile-link catchup propagates D1 ownership failures before match reads", async () => {
+  let matchReads = 0;
+  const core = createProfileLinkProjectionCore({
+    logger: { error: () => undefined, info: () => undefined },
+    recomputeInviteProjection: async () => ({ sourceCleanupSafe: true }),
+    repository: {
+      readProfileOwnershipSnapshot: async () => {
+        throw new Error("d1-owner-unavailable");
+      },
+      getMatches: async () => {
+        matchReads += 1;
+        return {};
+      },
+      inviteExists: async () => true,
+    },
+    withInviteProjectionLock: runWithoutProjectionLock,
+  });
+
+  await assert.rejects(
+    core.processProfileLinkCatchup({
+      loginUid: "login-1",
+      profileId: "profile-1",
+      sourceUpdatedAtMs: 100,
+    }),
+    /d1-owner-unavailable/,
   );
   assert.equal(matchReads, 0);
 });
@@ -731,15 +785,15 @@ test("profile-link catchup starts its budget after initial reads", async () => {
     },
     recomputeInviteProjection: async () => ({ sourceCleanupSafe: true }),
     repository: {
-      deleteProfileGameProjections: async () => 0,
-      getCurrentProfileLink: async () => "profile-1",
       getMatches: async () => {
         initialReadsComplete = true;
         return { "match-1": {} };
       },
-      getMergeTarget: async () => null,
       inviteExists: async () => true,
-      profileExists: async () => true,
+      readProfileOwnershipSnapshot: async ({ loginUids }) =>
+        projectionOwnership(
+          loginUids.map((loginUid) => [loginUid, "profile-1"]),
+        ),
     },
     withInviteProjectionLock: runWithoutProjectionLock,
   });
@@ -799,6 +853,10 @@ test("projection cleanup retries transient reads before returning", async () => 
 test("profile-link catchup uses the freshest matching source projection", async () => {
   const inviteId = "merge-fallback-invite";
   const { deletes, result, sets } = await runInviteProjection({
+    cleanupProfileIds: [
+      "merge-fallback-source-old",
+      "merge-fallback-source-new",
+    ],
     eventTimestampMs: 3000,
     invite: {
       guestId: "merge-fallback-guest-login",

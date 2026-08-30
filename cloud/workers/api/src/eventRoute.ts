@@ -36,7 +36,6 @@ import {
 } from "./eventParticipation.ts";
 import {
   verifyFirebaseRequest,
-  type FirebaseIdentity,
   type WorkerExecutionContext,
 } from "./firebaseAuth.ts";
 import {
@@ -55,6 +54,7 @@ import {
   type EventControlDependencies,
 } from "./eventOperations.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
 
 export const EVENT_PATHS = new Set([
   "/events/create",
@@ -73,7 +73,7 @@ export type EventRouteDependencies = {
   verifyIdentity?: (
     request: Request,
     ctx: WorkerExecutionContext,
-  ) => Promise<FirebaseIdentity>;
+  ) => Promise<RequestIdentity>;
   logFailure?: (kind: string) => void;
 };
 

@@ -52,6 +52,9 @@ test.beforeEach(async () => {
           },
         },
         players: {
+          alternate: {
+            profile: "profile-host",
+          },
           host: {
             profile: "profile-host",
             matches: { invite1: match() },
@@ -102,4 +105,14 @@ test("rules deny structural writes and preserve live participant writes", async 
       .set(match("fen-3", "move-more")),
   );
   assert.ok(true);
+});
+
+test("rules retain same-profile writes through an RTDB link without a custom claim", async () => {
+  const alternate = rules.authenticatedContext("alternate");
+  await assertSucceeds(
+    alternate
+      .database()
+      .ref("players/host/matches/invite1")
+      .set(match("fen-linked", "move-linked")),
+  );
 });

@@ -4,9 +4,16 @@ import type { FirebaseRtdbQuery } from "../src/firebaseRtdb.ts";
 import { createProfileLinkProjectionRuntime } from "../src/profileLinkProfileGameProjection.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
-test("profile-link projection reads match and invite keys without full values", async () => {
+test("profile-link projection reads a bounded match page", async () => {
   const reads: Array<{ path: string; query?: FirebaseRtdbQuery }> = [];
   const runtime = createProfileLinkProjectionRuntime(TELEGRAM_TEST_ENV as Env, {
+    readProfileOwnershipSnapshot: async ({ loginUids, profileIds }) => {
+      assert.deepEqual(loginUids, ["login-uid"]);
+      assert.deepEqual(profileIds, []);
+      return {
+        profileIdByLoginUid: new Map([["login-uid", "profile-id"]]),
+      };
+    },
     logger: { error() {}, info() {} },
     projection: {
       async recomputeInviteProjection(inviteId, reason) {
@@ -23,11 +30,11 @@ test("profile-link projection reads match and invite keys without full values", 
       async getRtdbPath(path, query) {
         reads.push({ path, query });
         if (path === "players/login-uid/profile") {
-          return "profile-id";
+          throw new Error("unexpected-rtdb-profile-owner-read");
         }
         if (path === "players/login-uid/matches") {
-          assert.deepEqual(query, { shallow: true });
-          return { "invite-id": true };
+          assert.deepEqual(query, { orderBy: "$key", limitToFirst: 21 });
+          return { "invite-id": {} };
         }
         if (path === "invites/invite-id") {
           assert.deepEqual(query, { shallow: true });
@@ -50,6 +57,10 @@ test("profile-link projection reads match and invite keys without full values", 
   });
 
   assert.equal(result?.processed, 1);
+  assert.equal(
+    reads.some(({ path }) => path === "players/login-uid/profile"),
+    false,
+  );
   assert.deepEqual(
     reads.filter(
       ({ path }) =>
@@ -58,7 +69,7 @@ test("profile-link projection reads match and invite keys without full values", 
     [
       {
         path: "players/login-uid/matches",
-        query: { shallow: true },
+        query: { orderBy: "$key", limitToFirst: 21 },
       },
       {
         path: "invites/invite-id",

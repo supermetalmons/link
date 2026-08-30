@@ -6,6 +6,7 @@ import {
 import {
   createProfileGamesProjectionCore,
   type ProfileGamesProjectionRepository,
+  type ProjectionOwnershipSnapshot,
   type ProjectionWrite,
   type RecomputeInviteProjectionOptions,
   type RecomputeInviteProjectionResult,
@@ -14,11 +15,10 @@ import {
   createGameplayRepository,
   type GameplayRepository,
 } from "./gameplayRepository.ts";
-import { canonicalProfileFields } from "./gameplayCanonicalRepository.ts";
 import {
-  readCanonicalMergeTarget,
-  readCanonicalProfile,
-  readCanonicalProfileByLogin,
+  readCanonicalProfileOwnershipSnapshot,
+  type CanonicalProfileOwnershipProfileSnapshot,
+  type CanonicalProfileOwnershipQuery,
 } from "./profileCanonicalD1.ts";
 import {
   commitProfileGameProjectionWrites,
@@ -73,6 +73,72 @@ function toD1ProjectionWrite(
   };
 }
 
+function projectionProfileData(
+  snapshot: CanonicalProfileOwnershipProfileSnapshot,
+): Record<string, unknown> {
+  const profile = snapshot.profile;
+  return {
+    eth: profile.eth || "",
+    sol: profile.sol || "",
+    username: profile.username || "",
+    ...(snapshot.emojiPresent
+      ? { custom: { emoji: profile.emoji } }
+      : snapshot.gameplayEmoji !== ""
+        ? { emoji: snapshot.gameplayEmoji }
+        : {}),
+  };
+}
+
+export async function readProjectionOwnershipSnapshot(
+  profileDb: D1Database,
+  query: CanonicalProfileOwnershipQuery,
+): Promise<ProjectionOwnershipSnapshot> {
+  const snapshot = await readCanonicalProfileOwnershipSnapshot(
+    profileDb,
+    query,
+  );
+  return Object.freeze({
+    profileIdByLoginUid: new Map(
+      [...snapshot.loginOwnerByUid].map(([loginUid, owner]) => [
+        loginUid,
+        owner?.profileId || null,
+      ]),
+    ),
+    profileDataById: new Map(
+      [...snapshot.profileById].map(([profileId, profile]) => [
+        profileId,
+        projectionProfileData(profile),
+      ]),
+    ),
+  });
+}
+
+export async function readEventProjectionOwnershipSnapshot(
+  profileDb: D1Database,
+  query: CanonicalProfileOwnershipQuery,
+) {
+  const snapshot = await readCanonicalProfileOwnershipSnapshot(
+    profileDb,
+    query,
+  );
+  return Object.freeze({
+    canonicalProfileIdByProfileId: new Map(
+      snapshot.canonicalProfileIdByProfileId,
+    ),
+    loginOwnerByUid: new Map(
+      [...snapshot.loginOwnerByUid].map(([loginUid, owner]) => [
+        loginUid,
+        owner
+          ? Object.freeze({
+              profileId: owner.profileId,
+              revision: owner.revision,
+            })
+          : null,
+      ]),
+    ),
+  });
+}
+
 export function createProfileGameProjectionRuntime(
   env: Env,
   dependencies: ProfileGameProjectionDependencies = {},
@@ -102,33 +168,14 @@ export function createProfileGameProjectionRuntime(
       );
     },
 
-    async findProfileByLogin(loginUid) {
-      const profile = await readCanonicalProfileByLogin(profileDb, loginUid);
-      return profile
-        ? { id: profile.profileId, data: canonicalProfileFields(profile) }
-        : null;
-    },
-
-    async getMergeTarget(profileId) {
-      const target = await readCanonicalMergeTarget(profileDb, profileId);
-      return target ? { targetProfileId: target.targetProfileId } : null;
-    },
-
-    async getProfile(profileId) {
-      const profile = await readCanonicalProfile(profileDb, profileId);
-      return profile
-        ? {
-            data: canonicalProfileFields(profile),
-            updateTime: String(profile.revision),
-          }
-        : null;
-    },
-
     async getProjection(profileId, inviteId) {
       return getProfileGameProjection(d1, profileId, inviteId);
     },
 
     getRtdbPath: (path) => rtdb.getRtdbPath(path),
+
+    readProfileOwnershipSnapshot: (query) =>
+      readProjectionOwnershipSnapshot(profileDb, query),
   };
   return createProfileGamesProjectionCore({
     logger,
@@ -159,20 +206,8 @@ export function createEventProfileGameProjectionRuntime(
         : null;
     },
 
-    async getMergeTarget(profileId) {
-      const target = await readCanonicalMergeTarget(profileDb, profileId);
-      return target ? { targetProfileId: target.targetProfileId } : null;
-    },
-
-    async getProfile(profileId) {
-      const profile = await readCanonicalProfile(profileDb, profileId);
-      return profile
-        ? {
-            data: canonicalProfileFields(profile),
-            updateTime: String(profile.revision),
-          }
-        : null;
-    },
+    readProfileOwnershipSnapshot: (query) =>
+      readEventProjectionOwnershipSnapshot(profileDb, query),
   };
   return createEventProfileGameProjectionCore({
     now: dependencies.now,

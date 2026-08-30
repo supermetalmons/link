@@ -33,7 +33,6 @@ export function createEventProgressWorkflowDependencies(
       return runtime.runEventSyncState({
         eventId: params.eventId,
         requesterUid: EVENT_PROGRESS_WORKER_UID,
-        auth: null,
         enforceParticipantGate: false,
         enforceThrottle: false,
         syncLog: {

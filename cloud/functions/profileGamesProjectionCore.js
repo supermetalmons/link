@@ -1,9 +1,6 @@
 "use strict";
 
-const {
-  orderProfileMergeCleanupIds,
-  resolveProfileMergeTargetPath,
-} = require("./profileMergeTargets");
+const { orderProfileMergeCleanupIds } = require("./profileMergeTargets");
 const { deriveLatestMatchId } = require("@mons/shared/rematches");
 const { inferAutomatchStateHint } = require("@mons/shared/navigation");
 const { isAutoInviteId } = require("@mons/shared/ids");
@@ -225,102 +222,46 @@ const createProfileGamesProjectionCore = ({
 
   const retry = (read) => readWithRetries(read, undefined, undefined, wait);
 
-  const resolveProfileForLogin = async (loginUid) => {
+  const resolveProfileForLogin = (ownership, loginUid) => {
     const normalizedLoginUid = normalizeString(loginUid);
     if (!normalizedLoginUid) {
       return { cleanupProfileIds: [], profileId: null };
     }
-
-    let rawProfileId = null;
-    let profileLinkReadError = null;
-    let profileQueryReadError = null;
-    try {
-      rawProfileId = normalizeString(
-        await retry(() =>
-          repository.getRtdbPath(`players/${normalizedLoginUid}/profile`),
-        ),
-      );
-    } catch (error) {
-      profileLinkReadError = error;
-      logger.error("projector:profile-resolve:rtdb-read-failed", {
-        loginUid: normalizedLoginUid,
-        attempts: READ_RETRY_ATTEMPTS,
-        error: error && error.message ? error.message : error,
-      });
+    if (
+      !ownership ||
+      !(ownership.profileIdByLoginUid instanceof Map) ||
+      !ownership.profileIdByLoginUid.has(normalizedLoginUid)
+    ) {
+      throw new TypeError("invalid projection ownership snapshot");
     }
-    if (!rawProfileId) {
-      try {
-        const profile = await retry(() =>
-          repository.findProfileByLogin(normalizedLoginUid),
-        );
-        rawProfileId = profile ? profile.id : null;
-      } catch (error) {
-        profileQueryReadError = error;
-        logger.error("projector:profile-resolve:profile-read-failed", {
-          loginUid: normalizedLoginUid,
-          attempts: READ_RETRY_ATTEMPTS,
-          error: error && error.message ? error.message : error,
-        });
-      }
-    }
-    if (!rawProfileId) {
-      if (profileQueryReadError || profileLinkReadError) {
-        throw profileQueryReadError || profileLinkReadError;
-      }
+    const profileId = normalizeString(
+      ownership.profileIdByLoginUid.get(normalizedLoginUid),
+    );
+    if (!profileId) {
       return { cleanupProfileIds: [], profileId: null };
     }
-
-    const resolvePath = () =>
-      resolveProfileMergeTargetPath({
-        profileId: rawProfileId,
-        readMergeTarget: (profileId) =>
-          retry(() => repository.getMergeTarget(profileId)),
-      });
-    let profilePath = await resolvePath();
-    let profileId = profilePath[profilePath.length - 1] || null;
-    let profile = profileId
-      ? await retry(() => repository.getProfile(profileId))
-      : null;
-    if (!profile || normalizeString(profile.data.mergedIntoProfileId)) {
-      const refreshedPath = await resolvePath();
-      profilePath = Array.from(new Set([...profilePath, ...refreshedPath]));
-      profileId = refreshedPath[refreshedPath.length - 1] || null;
-      profile = profileId
-        ? await retry(() => repository.getProfile(profileId))
-        : null;
-    }
-    if (!profile || normalizeString(profile.data.mergedIntoProfileId)) {
-      return {
-        cleanupProfileIds: Array.from(new Set(profilePath)),
-        profileId: null,
-      };
-    }
-    return buildResolvedProfile(profilePath);
+    return buildResolvedProfile([profileId]);
   };
 
-  const readProfileSummary = async (profileId) => {
+  const readProfileSummary = (ownership, profileId) => {
     const normalizedProfileId = normalizeString(profileId);
     if (!normalizedProfileId) {
       return null;
     }
-    try {
-      const profile = await retry(() =>
-        repository.getProfile(normalizedProfileId),
-      );
-      return profile
-        ? {
-            name: getProfileDisplayName(profile.data),
-            emoji: getProfileEmoji(profile.data),
-          }
-        : null;
-    } catch (error) {
-      logger.error("projector:profile-summary-read-failed", {
-        profileId: normalizedProfileId,
-        attempts: READ_RETRY_ATTEMPTS,
-        error: error && error.message ? error.message : error,
-      });
-      throw error;
+    if (
+      !ownership ||
+      !(ownership.profileDataById instanceof Map) ||
+      !ownership.profileDataById.has(normalizedProfileId)
+    ) {
+      throw new TypeError("invalid projection ownership snapshot");
     }
+    const profileData = ownership.profileDataById.get(normalizedProfileId);
+    return profileData
+      ? {
+          name: getProfileDisplayName(profileData),
+          emoji: getProfileEmoji(profileData),
+        }
+      : null;
   };
 
   const readLoginSummaryFromRtdbMatches = async (
@@ -390,10 +331,25 @@ const createProfileGamesProjectionCore = ({
     ]);
     const hostLoginId = normalizeString(inviteData && inviteData.hostId);
     const guestLoginId = normalizeString(inviteData && inviteData.guestId);
-    const [hostProfile, guestProfile] = await Promise.all([
-      resolveProfileForLogin(hostLoginId),
-      resolveProfileForLogin(guestLoginId),
-    ]);
+    const loginUids = Array.from(
+      new Set([hostLoginId, guestLoginId].filter(Boolean)),
+    );
+    let ownership;
+    try {
+      ownership = await repository.readProfileOwnershipSnapshot({
+        loginUids,
+        profileIds: [],
+      });
+    } catch (error) {
+      logger.error("projector:profile-resolve:profile-read-failed", {
+        loginUids,
+        attempts: 1,
+        error: error && error.message ? error.message : error,
+      });
+      throw error;
+    }
+    const hostProfile = resolveProfileForLogin(ownership, hostLoginId);
+    const guestProfile = resolveProfileForLogin(ownership, guestLoginId);
     const hostProfileId = hostProfile.profileId;
     const guestProfileId = guestProfile.profileId;
     const { cleanupProfileIds, ownerProfileIds } =
@@ -535,7 +491,7 @@ const createProfileGamesProjectionCore = ({
         requiresResolvedOpponentEmoji,
       });
       const opponentProfileSummary = ownerContext.opponentProfileId
-        ? await readProfileSummary(ownerContext.opponentProfileId)
+        ? readProfileSummary(ownership, ownerContext.opponentProfileId)
         : null;
       const existingOpponentName = normalizeString(
         existingDocData

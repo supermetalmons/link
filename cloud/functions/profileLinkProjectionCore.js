@@ -2,22 +2,11 @@
 
 const { createInviteCandidatesFromMatchId } = require("@mons/shared/rematches");
 const { normalizeString } = require("./events/gameProjectionModel");
-const { resolveProfileMergeTargetPath } = require("./profileMergeTargets");
 
 const PROFILE_LINK_CATCHUP_MAX_INVITES = 20;
-const PROFILE_LINK_CATCHUP_CONCURRENCY = 20;
+const PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP = 1;
+const PROFILE_LINK_CATCHUP_CONCURRENCY = 3;
 const PROFILE_LINK_CATCHUP_TIMEOUT_MS = 50000;
-const PROFILE_LINK_RECONCILE_ATTEMPTS = 3;
-
-const delay = async (milliseconds) => {
-  const duration =
-    Number.isFinite(milliseconds) && milliseconds > 0
-      ? Math.floor(milliseconds)
-      : 0;
-  if (duration > 0) {
-    await new Promise((resolve) => setTimeout(resolve, duration));
-  }
-};
 
 const processWithConcurrency = async (
   items,
@@ -59,7 +48,6 @@ const createProfileLinkProjectionCore = ({
   recomputeInviteProjection,
   repository,
   resolveInviteIdFromMatchId: resolveInviteIdOverride,
-  wait = delay,
   withInviteProjectionLock,
 }) => {
   if (
@@ -134,29 +122,49 @@ const createProfileLinkProjectionCore = ({
       cleanupProfileIds.map(normalizeString).filter(Boolean),
     );
     observedProfileIds.add(normalizedEventProfileId);
-    let profileId = normalizeString(
-      await repository.getCurrentProfileLink(normalizedLoginUid),
+    const ownership = await repository.readProfileOwnershipSnapshot({
+      loginUids: [normalizedLoginUid],
+      profileIds: [],
+    });
+    if (
+      !ownership ||
+      !(ownership.profileIdByLoginUid instanceof Map) ||
+      !ownership.profileIdByLoginUid.has(normalizedLoginUid)
+    ) {
+      throw new TypeError("invalid projection ownership snapshot");
+    }
+    const profileId = normalizeString(
+      ownership.profileIdByLoginUid.get(normalizedLoginUid),
     );
     if (!profileId) {
       return null;
     }
     observedProfileIds.add(profileId);
+    const cleanupIds = Array.from(observedProfileIds);
+    const matchLimit =
+      cleanupIds.length > 1
+        ? PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP
+        : PROFILE_LINK_CATCHUP_MAX_INVITES;
+    const normalizedMatchCursor = normalizeString(matchCursor) || "";
     const matches =
-      (await repository.getMatches(normalizedLoginUid)) || Object.create(null);
+      (await repository.getMatches(normalizedLoginUid, {
+        orderBy: "$key",
+        limitToFirst: matchLimit + (normalizedMatchCursor ? 2 : 1),
+        ...(normalizedMatchCursor ? { startAt: normalizedMatchCursor } : {}),
+      })) || Object.create(null);
     const startedAt = now();
     const shouldContinue = () =>
       now() - startedAt < PROFILE_LINK_CATCHUP_TIMEOUT_MS;
-    const normalizedMatchCursor = normalizeString(matchCursor) || "";
-    const pendingMatchIds = Object.keys(matches)
+    const pageMatchIds = Object.keys(matches)
       .sort()
       .filter((matchId) => matchId > normalizedMatchCursor);
-    const matchIds = pendingMatchIds.slice(0, PROFILE_LINK_CATCHUP_MAX_INVITES);
+    const matchIds = pageMatchIds.slice(0, matchLimit);
     const inviteExistenceCache = new Map();
     const inviteIds = [];
     const inviteSet = new Set();
     let lastScannedMatchId = null;
     let matchIdsScanned = 0;
-    let hasMoreMatches = pendingMatchIds.length > matchIds.length;
+    let hasMoreMatches = pageMatchIds.length > matchIds.length;
     for (const matchId of matchIds) {
       if (!shouldContinue()) {
         hasMoreMatches = true;
@@ -177,110 +185,57 @@ const createProfileLinkProjectionCore = ({
       throw new Error("projector:profile-link-catchup-no-progress");
     }
 
+    let attempted = 0;
     let processed = 0;
     let failed = 0;
-    let didConverge = false;
-    let convergenceAttempts = 0;
-    let successfulInviteIds = new Set();
-    for (
-      let attempt = 0;
-      attempt < PROFILE_LINK_RECONCILE_ATTEMPTS;
-      attempt += 1
-    ) {
-      convergenceAttempts = attempt + 1;
-      const cleanupIds = Array.from(observedProfileIds);
-      let attempted = 0;
-      let roundProcessed = 0;
-      let roundFailed = 0;
-      const roundSuccessful = new Set();
-      await processWithConcurrency(
-        inviteIds,
-        PROFILE_LINK_CATCHUP_CONCURRENCY,
-        async (inviteId) => {
-          if (!shouldContinue()) {
-            return;
-          }
-          attempted += 1;
-          try {
-            const result = await withInviteProjectionLock(inviteId, () =>
-              recomputeInviteProjection(inviteId, "profile-link-catchup", {
-                cleanupProfileIds: cleanupIds,
-                eventTimestampMs,
-                preserveListSortAt: true,
-              }),
+    await processWithConcurrency(
+      inviteIds,
+      PROFILE_LINK_CATCHUP_CONCURRENCY,
+      async (inviteId) => {
+        if (!shouldContinue()) {
+          return;
+        }
+        attempted += 1;
+        try {
+          const result = await withInviteProjectionLock(inviteId, () =>
+            recomputeInviteProjection(inviteId, "profile-link-catchup", {
+              cleanupProfileIds: cleanupIds,
+              eventTimestampMs,
+              preserveListSortAt: true,
+            }),
+          );
+          const unresolvedOwnerIsSafe = Boolean(
+            result?.sourceCleanupSafe === false &&
+            result.blockedReason === "unresolved-owner-profile" &&
+            Array.isArray(result.ownerProfileIds) &&
+            result.ownerProfileIds.some(
+              (ownerProfileId) => normalizeString(ownerProfileId) === profileId,
+            ) &&
+            cleanupIds.every(
+              (cleanupProfileId) =>
+                normalizeString(cleanupProfileId) === profileId,
+            ),
+          );
+          if (result?.sourceCleanupSafe === false && !unresolvedOwnerIsSafe) {
+            throw new Error(
+              `projector:profile-link-catchup-blocked:${result.blockedReason || "source-cleanup-unsafe"}`,
             );
-            const unresolvedOwnerIsSafe = Boolean(
-              result?.sourceCleanupSafe === false &&
-              result.blockedReason === "unresolved-owner-profile" &&
-              Array.isArray(result.ownerProfileIds) &&
-              result.ownerProfileIds.some(
-                (ownerProfileId) =>
-                  normalizeString(ownerProfileId) === profileId,
-              ) &&
-              cleanupIds.every(
-                (cleanupProfileId) =>
-                  normalizeString(cleanupProfileId) === profileId,
-              ),
-            );
-            if (result?.sourceCleanupSafe === false && !unresolvedOwnerIsSafe) {
-              throw new Error(
-                `projector:profile-link-catchup-blocked:${result.blockedReason || "source-cleanup-unsafe"}`,
-              );
-            }
-            roundSuccessful.add(inviteId);
-            roundProcessed += 1;
-          } catch (error) {
-            roundFailed += 1;
-            logger.error("projector:profile-link-catchup:recompute-failed", {
-              loginUid: normalizedLoginUid,
-              profileId,
-              inviteId,
-              error: error?.message || error,
-            });
           }
-        },
-        shouldContinue,
-      );
-      processed = roundProcessed;
-      failed = roundFailed;
-      successfulInviteIds = roundSuccessful;
-      if (attempted !== inviteIds.length) {
-        break;
-      }
-      const nextProfileId = normalizeString(
-        await repository.getCurrentProfileLink(normalizedLoginUid),
-      );
-      if (nextProfileId === profileId) {
-        didConverge = true;
-        break;
-      }
-      if (!nextProfileId) {
-        return null;
-      }
-      profileId = nextProfileId;
-      observedProfileIds.add(profileId);
-      await wait(0);
-    }
-
-    let staleCleanupDeleted = 0;
-    for (const staleProfileId of observedProfileIds) {
-      if (staleProfileId === profileId || successfulInviteIds.size === 0) {
-        continue;
-      }
-      const path = await resolveProfileMergeTargetPath({
-        profileId: staleProfileId,
-        readMergeTarget: repository.getMergeTarget,
-      });
-      if (path.length < 2 || path.at(-1) !== profileId) {
-        continue;
-      }
-      if (await repository.profileExists(staleProfileId)) {
-        continue;
-      }
-      staleCleanupDeleted += await repository.deleteProfileGameProjections(
-        staleProfileId,
-        Array.from(successfulInviteIds),
-      );
+          processed += 1;
+        } catch (error) {
+          failed += 1;
+          logger.error("projector:profile-link-catchup:recompute-failed", {
+            loginUid: normalizedLoginUid,
+            profileId,
+            inviteId,
+            error: error?.message || error,
+          });
+        }
+      },
+      shouldContinue,
+    );
+    if (attempted !== inviteIds.length || failed > 0) {
+      throw new Error("projector:profile-link-catchup-incomplete");
     }
 
     const summary = {
@@ -291,21 +246,12 @@ const createProfileLinkProjectionCore = ({
       inviteIdsResolved: inviteIds.length,
       processed,
       failed,
-      staleCleanupDeleted,
       didTimeout: !shouldContinue(),
       didHitInviteCap: hasMoreMatches,
       nextMatchCursor: hasMoreMatches ? lastScannedMatchId : null,
-      didConverge,
-      convergenceAttempts,
       elapsedMs: now() - startedAt,
     };
     logger.info("projector:profile-link-catchup:done", summary);
-    if (failed > 0) {
-      throw new Error("projector:profile-link-catchup-incomplete");
-    }
-    if (!didConverge) {
-      throw new Error("projector:profile-link-catchup-profile-changed");
-    }
     return summary;
   };
 
@@ -318,8 +264,8 @@ const createProfileLinkProjectionCore = ({
 module.exports = {
   PROFILE_LINK_CATCHUP_CONCURRENCY,
   PROFILE_LINK_CATCHUP_MAX_INVITES,
+  PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP,
   PROFILE_LINK_CATCHUP_TIMEOUT_MS,
-  PROFILE_LINK_RECONCILE_ATTEMPTS,
   createProfileLinkProjectionCore,
   processWithConcurrency,
 };

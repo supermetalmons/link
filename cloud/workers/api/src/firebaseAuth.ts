@@ -7,6 +7,7 @@ import {
 import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 import { AuthApiFailure } from "./authErrors.ts";
 import { isCanonicalFirebaseUid } from "./firebaseKeys.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
 
 const FIREBASE_PROJECT_ID = "mons-link";
 const FIREBASE_ISSUER = `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`;
@@ -20,13 +21,6 @@ const JWKS_REFRESH_COOLDOWN_MS = 30_000;
 const JWKS_FETCHED_AT_HEADER = "X-Firebase-JWKS-Fetched-At";
 
 class FirebaseKeysFailure extends Error {}
-
-export type FirebaseIdentity = {
-  idToken: string;
-  profileId?: string;
-  rawProfileIdClaim?: string;
-  uid: string;
-};
 
 export type FirebaseAuthDependencies = {
   cache?: Cache | null;
@@ -175,30 +169,11 @@ function readBearerToken(request: Request): string {
   return token;
 }
 
-function readProfileIdClaim(value: unknown): string | undefined {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const profileId = value.trim();
-  const hasControlCharacter = Array.from(profileId).some((character) => {
-    const code = character.codePointAt(0) || 0;
-    return code <= 0x1f || code === 0x7f;
-  });
-  if (
-    !profileId ||
-    new TextEncoder().encode(profileId).byteLength > 1_500 ||
-    hasControlCharacter
-  ) {
-    return undefined;
-  }
-  return profileId;
-}
-
 export async function verifyFirebaseRequest(
   request: Request,
   ctx: WorkerExecutionContext,
   dependencies: FirebaseAuthDependencies = {},
-): Promise<FirebaseIdentity> {
+): Promise<RequestIdentity> {
   const idToken = readBearerToken(request);
   let expectedKid: string;
   try {
@@ -247,19 +222,8 @@ export async function verifyFirebaseRequest(
     ) {
       throw new Error("invalid-token");
     }
-    const profileId = readProfileIdClaim(payload.profileId);
-    const rawProfileIdClaim =
-      profileId && typeof payload.profileId === "string"
-        ? payload.profileId
-        : undefined;
-    return {
-      idToken,
-      uid,
-      ...(profileId ? { profileId, rawProfileIdClaim } : {}),
-    };
+    return { uid };
   } catch {
     throw new AuthApiFailure(401, "unauthenticated", "authentication-required");
   }
 }
-
-export { readProfileIdClaim };

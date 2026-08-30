@@ -13,13 +13,13 @@ import {
 import { createEventTelegramProjectionRepository } from "./eventTelegramProjectionProducer.ts";
 import { createEventProfileGameProjectionRepository } from "./eventProfileGameProjectionProducer.ts";
 import { createD1EventPrizeWithdrawalReader } from "./eventPrizeWithdrawalD1.ts";
-import { createProfileEventPrizeOwnerResolver } from "./profileEventPrizeOwner.ts";
 import {
   createEventRuntime,
   type EventProgressOutboxRecord,
 } from "../../../functions/events.js";
 import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
 import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
+import { requireProfileOwnershipSnapshot } from "./profileOwnership.ts";
 
 const EVENT_PROGRESS_OUTBOX_ROOT = "eventProgressOutbox";
 const EVENT_PROGRESS_OUTBOX_DEAD_ROOT = "eventProgressOutboxDead";
@@ -672,12 +672,9 @@ export function createWorkflowEventRuntime(env: Env, signal: AbortSignal) {
         throw new Error("workflow-cannot-schedule-event-progress");
       },
       eventLockManager: lockManager,
-      getProfileByLoginId: async () => ({}),
+      readProfileOwnershipSnapshot: (query) =>
+        requireProfileOwnershipSnapshot(repository, query),
       readEventPrizeWithdrawals,
-      resolveProfileEventPrizeOwnerId: createProfileEventPrizeOwnerResolver(
-        env,
-        { rtdb: repository, signal },
-      ),
       random: secureRandom,
       sleep: (milliseconds) => scheduler.wait(milliseconds, { signal }),
     }),

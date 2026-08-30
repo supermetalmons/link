@@ -19,9 +19,12 @@ import type {
 import { MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
 import { resolveMatch } from "mons-rules";
 import { AuthApiFailure } from "./authErrors.ts";
-import type { FirebaseIdentity } from "./firebaseAuth.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import {
+  consumeWagerReservationOperation,
+  createWagerReservationOperationId,
+  ensureWagerAgreementLineageReady,
   releaseWagerSettlementReservation,
   resolveWagerParticipants,
 } from "./wagerProposal.ts";
@@ -43,8 +46,12 @@ type MatchRecord = {
 };
 
 type SettlementRelease = {
-  count: number;
-  material: MiningMaterialName;
+  legacy: {
+    count: number;
+    material: MiningMaterialName;
+  } | null;
+  reservationLineageVersion: 1 | null;
+  reservationOperationIds: string[];
   uid: string;
 };
 
@@ -64,6 +71,7 @@ type AgreedSettlement = SettlementBase & {
   loserProfileId: string;
   loserUid: string;
   material: MiningMaterialName;
+  releases: SettlementRelease[] | null;
   winnerProfileId: string;
   winnerUid: string;
 };
@@ -210,13 +218,57 @@ function settlementFingerprint(value: Record<string, unknown>): string {
   return JSON.stringify(value);
 }
 
+function parseReservationOperationIds(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const operationIds = value.map(normalizeString);
+  return operationIds.every(
+    (operationId, index) =>
+      /^[a-f0-9]{64}$/.test(operationId) &&
+      operationIds.indexOf(operationId) === index,
+  )
+    ? operationIds
+    : null;
+}
+
 function parseRelease(value: unknown): SettlementRelease | null {
   const release = toRecord(value);
   const uid = normalizeString(release?.uid);
   const material = normalizeString(release?.material);
   const count = normalizeCount(release?.count);
-  return uid && isMaterialName(material) && count > 0
-    ? { uid, material, count }
+  if (!uid) return null;
+  if (release?.reservationLineageVersion === 1) {
+    const operationIds = parseReservationOperationIds(
+      release.reservationOperationIds,
+    );
+    const storedLegacy = release.legacy;
+    if (operationIds === null) return null;
+    if (storedLegacy === undefined || storedLegacy === null) {
+      return {
+        uid,
+        legacy: null,
+        reservationLineageVersion: 1,
+        reservationOperationIds: operationIds,
+      };
+    }
+    const legacy = toRecord(storedLegacy);
+    const legacyMaterial = normalizeString(legacy?.material);
+    const legacyCount = normalizeCount(legacy?.count);
+    return isMaterialName(legacyMaterial) && legacyCount > 0
+      ? {
+          uid,
+          legacy: { material: legacyMaterial, count: legacyCount },
+          reservationLineageVersion: 1,
+          reservationOperationIds: operationIds,
+        }
+      : null;
+  }
+  return isMaterialName(material) && count > 0
+    ? {
+        uid,
+        legacy: { material, count },
+        reservationLineageVersion: null,
+        reservationOperationIds: [],
+      }
     : null;
 }
 
@@ -267,12 +319,21 @@ function parseSettlement(value: unknown): WagerSettlement | null {
     const loserProfileId = normalizeString(settlement.loserProfileId);
     const material = normalizeString(settlement.material);
     const count = normalizeCount(settlement.count);
+    const storedReleases = settlement.releases;
+    const releases = Array.isArray(storedReleases)
+      ? storedReleases.map(parseRelease)
+      : storedReleases === undefined || storedReleases === null
+        ? null
+        : [null];
     return winnerUid &&
       loserUid &&
       winnerProfileId &&
       loserProfileId &&
       isMaterialName(material) &&
-      count > 0
+      count > 0 &&
+      (releases === null ||
+        (releases.length === 2 &&
+          releases.every((release) => release !== null)))
       ? {
           ...base,
           kind: "agreed",
@@ -282,6 +343,10 @@ function parseSettlement(value: unknown): WagerSettlement | null {
           loserProfileId,
           material,
           count,
+          releases:
+            releases?.filter(
+              (release): release is SettlementRelease => release !== null,
+            ) || null,
         }
       : null;
   }
@@ -341,11 +406,52 @@ async function readMatchPair(
   return [parseMatchRecord(values[0]), parseMatchRecord(values[1])];
 }
 
+function parseLegacyReservation(value: unknown): SettlementRelease["legacy"] {
+  const record = toRecord(value);
+  const material = normalizeString(record?.material);
+  const count = normalizeCount(record?.count);
+  return isMaterialName(material) && count > 0 ? { material, count } : null;
+}
+
+function createLineageRelease(
+  uid: string,
+  operationIds: readonly string[],
+  legacy: SettlementRelease["legacy"],
+): SettlementRelease {
+  return {
+    uid,
+    legacy,
+    reservationLineageVersion: 1,
+    reservationOperationIds: [...operationIds],
+  };
+}
+
+async function createAcceptReservationOperationIdByUid(
+  inviteId: string,
+  matchId: string,
+  uids: readonly string[],
+): Promise<Record<string, string>> {
+  return Object.fromEntries(
+    await Promise.all(
+      [...new Set(uids)].map(async (uid) => [
+        uid,
+        await createWagerReservationOperationId(
+          "accept",
+          inviteId,
+          matchId,
+          uid,
+        ),
+      ]),
+    ),
+  );
+}
+
 function createSettlement(
   wager: Record<string, unknown>,
   resolution: WagerSettlementResolution,
   operationId: string,
   nowMs: number,
+  acceptReservationOperationIdByUid: Readonly<Record<string, string>>,
 ): WagerSettlement {
   const base = {
     version: 1 as const,
@@ -357,13 +463,52 @@ function createSettlement(
   const agreement = toRecord(wager.agreed);
   const material = normalizeString(agreement?.material);
   const count = normalizeCount(agreement?.count);
+  const proposerUid = normalizeString(agreement?.proposerId);
+  const accepterUid = normalizeString(agreement?.accepterId);
   if (isMaterialName(material) && count > 0) {
+    const agreementOperation = toRecord(wager.agreementOperation);
+    let releases: SettlementRelease[] | null = null;
+    if (agreementOperation?.reservationLineageVersion === 1) {
+      if (agreementOperation.reservationLineageReady !== true) {
+        throw new Error("wager-reservation-lineage-pending");
+      }
+      const proposerOperationIds = parseReservationOperationIds(
+        agreementOperation.proposerReservationOperationIds,
+      );
+      const accepterOperationIds = parseReservationOperationIds(
+        agreementOperation.accepterReservationOperationIds,
+      );
+      if (!proposerOperationIds || !accepterOperationIds) {
+        throw new Error("wager-reservation-lineage-invalid");
+      }
+      const proposerRelease = createLineageRelease(
+        proposerUid,
+        proposerOperationIds,
+        parseLegacyReservation(agreementOperation.proposerLegacyReservation),
+      );
+      const accepterRelease = createLineageRelease(
+        accepterUid,
+        accepterOperationIds,
+        parseLegacyReservation(agreementOperation.accepterLegacyReservation),
+      );
+      const releaseByUid = new Map([
+        [proposerRelease.uid, proposerRelease],
+        [accepterRelease.uid, accepterRelease],
+      ]);
+      const winnerRelease = releaseByUid.get(resolution.winnerUid);
+      const loserRelease = releaseByUid.get(resolution.loserUid);
+      if (!winnerRelease || !loserRelease) {
+        throw new Error("wager-reservation-lineage-invalid");
+      }
+      releases = [winnerRelease, loserRelease];
+    }
     const candidate = {
       ...base,
       kind: "agreed" as const,
       ...resolution,
       material,
       count,
+      releases,
     };
     return {
       ...candidate,
@@ -372,9 +517,24 @@ function createSettlement(
     };
   }
   const proposals = toRecord(wager.proposals) || {};
-  const releases = [resolution.winnerUid, resolution.loserUid]
-    .map((uid) => parseRelease({ uid, ...toRecord(proposals[uid]) }))
-    .filter((release): release is SettlementRelease => release !== null);
+  const releases = [resolution.winnerUid, resolution.loserUid].map((uid) => {
+    const proposal = toRecord(proposals[uid]);
+    const proposalReservationOperationId = normalizeString(
+      proposal?.reservationOperationId,
+    );
+    return createLineageRelease(
+      uid,
+      [
+        acceptReservationOperationIdByUid[uid],
+        ...(proposalReservationOperationId
+          ? [proposalReservationOperationId]
+          : []),
+      ],
+      proposal && !proposalReservationOperationId
+        ? parseLegacyReservation(proposal)
+        : null,
+    );
+  });
   const candidate = {
     ...base,
     kind: "proposals" as const,
@@ -392,6 +552,7 @@ async function claimSettlement(
   resolution: WagerSettlementResolution,
   operationId: string,
   nowMs: number,
+  acceptReservationOperationIdByUid: Readonly<Record<string, string>>,
   repository: GameplayRepository,
   signal?: AbortSignal,
 ): Promise<
@@ -427,6 +588,7 @@ async function claimSettlement(
           resolution,
           operationId,
           nowMs,
+          acceptReservationOperationIdByUid,
         );
         return { value: { ...wager, settlement } };
       },
@@ -478,6 +640,28 @@ async function completeSettlement(
 ): Promise<null | typeof WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON> {
   const wagerPath = `invites/${inviteId}/wagers/${matchId}`;
   let insufficientMaterials = false;
+  const release = async (entry: SettlementRelease) => {
+    for (const reservationOperationId of entry.reservationOperationIds) {
+      await consumeWagerReservationOperation(
+        repository,
+        entry.uid,
+        reservationOperationId,
+        true,
+      );
+    }
+    if (entry.legacy) {
+      await releaseWagerSettlementReservation(
+        repository,
+        {
+          operationId: settlement.operationId,
+          uid: entry.uid,
+          material: entry.legacy.material,
+          count: entry.legacy.count,
+        },
+        now,
+      );
+    }
+  };
   if (settlement.kind === "agreed") {
     const transfer = await repository.applyWagerTransferOnce({
       operationId: settlement.operationId,
@@ -489,34 +673,32 @@ async function completeSettlement(
       appliedAtMs: now(),
     });
     insufficientMaterials = transfer === "insufficient-materials";
-    await releaseWagerSettlementReservation(
-      repository,
-      {
-        operationId: settlement.operationId,
-        uid: settlement.winnerUid,
-        material: settlement.material,
-        count: settlement.count,
-      },
-      now,
-    );
-    await releaseWagerSettlementReservation(
-      repository,
-      {
-        operationId: settlement.operationId,
-        uid: settlement.loserUid,
-        material: settlement.material,
-        count: settlement.count,
-      },
-      now,
-    );
-  } else {
-    for (const release of settlement.releases) {
+    if (settlement.releases) {
+      for (const entry of settlement.releases) await release(entry);
+    } else {
       await releaseWagerSettlementReservation(
         repository,
-        { operationId: settlement.operationId, ...release },
+        {
+          operationId: settlement.operationId,
+          uid: settlement.winnerUid,
+          material: settlement.material,
+          count: settlement.count,
+        },
+        now,
+      );
+      await releaseWagerSettlementReservation(
+        repository,
+        {
+          operationId: settlement.operationId,
+          uid: settlement.loserUid,
+          material: settlement.material,
+          count: settlement.count,
+        },
         now,
       );
     }
+  } else {
+    for (const entry of settlement.releases) await release(entry);
   }
 
   const completedAtMs = now();
@@ -596,11 +778,21 @@ export async function resumeWagerSettlement(
   let settlement: WagerSettlement;
   if (retry.state === "unclaimed") {
     if (!task.resolution) return "stale";
+    await ensureWagerAgreementLineageReady(
+      repository,
+      `invites/${task.inviteId}/wagers/${task.matchId}`,
+      now,
+    );
     const claimed = await claimSettlement(
       `invites/${task.inviteId}/wagers/${task.matchId}`,
       task.resolution,
       task.operationId,
       now(),
+      await createAcceptReservationOperationIdByUid(
+        task.inviteId,
+        task.matchId,
+        [task.resolution.winnerUid, task.resolution.loserUid],
+      ),
       repository,
     );
     if (claimed === WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON) {
@@ -645,7 +837,7 @@ export async function enforceWagerOutcomeRateLimit(
 }
 
 export async function resolveWagerOutcome(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: WagerOutcomeResolveRequest,
   repository: GameplayRepository,
   dependencies: WagerOutcomeDependencies = {},
@@ -753,12 +945,20 @@ export async function resolveWagerOutcome(
     operationId,
     resolution,
   };
+  const acceptReservationOperationIdByUid =
+    await createAcceptReservationOperationIdByUid(
+      request.inviteId,
+      request.matchId,
+      [participants.playerUid, participants.opponentUid],
+    );
   await dependencies.scheduleRetry?.(task);
+  await ensureWagerAgreementLineageReady(repository, wagerPath, now);
   const settlement = await claimSettlement(
     wagerPath,
     resolution,
     operationId,
     now(),
+    acceptReservationOperationIdByUid,
     repository,
     dependencies.signal,
   );

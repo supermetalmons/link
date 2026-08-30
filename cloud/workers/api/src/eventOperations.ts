@@ -15,7 +15,6 @@ import {
 import { createEventRuntime } from "../../../functions/events.js";
 import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
 import { AuthApiFailure, type AuthErrorCode } from "./authErrors.ts";
-import type { FirebaseIdentity } from "./firebaseAuth.ts";
 import {
   createGameplayRepository,
   type GameplayRepository,
@@ -26,7 +25,8 @@ import {
   ensureEventProgressWorkflow,
 } from "./eventProgress.ts";
 import { createD1EventPrizeWithdrawalReader } from "./eventPrizeWithdrawalD1.ts";
-import { createProfileEventPrizeOwnerResolver } from "./profileEventPrizeOwner.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
+import { requireProfileOwnershipSnapshot } from "./profileOwnership.ts";
 
 export const EVENT_CONTROL_TIMEOUT_MS = 30_000;
 
@@ -34,10 +34,6 @@ export type EventControlDependencies = {
   now?: () => number;
   random?: () => number;
   repository?: GameplayRepository;
-  resolveProfileEventPrizeOwnerId?: (input: {
-    eventId: string;
-    profileId: string;
-  }) => Promise<string>;
   signal?: AbortSignal;
   sleep?: (milliseconds: number) => Promise<void>;
 };
@@ -99,22 +95,12 @@ export function toEventApiFailure(error: unknown): AuthApiFailure {
   return new AuthApiFailure(503, "unavailable", "event-service-unavailable");
 }
 
-function createRuntime(
-  env: Env,
-  identity: FirebaseIdentity,
-  dependencies: EventControlDependencies,
-) {
+function createRuntime(env: Env, dependencies: EventControlDependencies) {
   const signal =
     dependencies.signal || AbortSignal.timeout(EVENT_CONTROL_TIMEOUT_MS);
   const repository =
     dependencies.repository ||
     createGameplayRepository(env, { timeoutMs: EVENT_CONTROL_TIMEOUT_MS });
-  const resolveProfileEventPrizeOwnerId =
-    dependencies.resolveProfileEventPrizeOwnerId ||
-    createProfileEventPrizeOwnerResolver(env, {
-      rtdb: repository,
-      signal,
-    });
   const lockManager = createEventLockManagerCore({
     createLockId: () => crypto.randomUUID(),
     transactPath: (path, updater) =>
@@ -156,19 +142,11 @@ function createRuntime(
       return { outboxId: plan.outboxId, outbox: plan.outbox };
     },
     eventLockManager: lockManager,
-    getProfileByLoginId: async (uid) => {
-      if (uid !== identity.uid) {
-        throw new AuthApiFailure(403, "permission-denied", "permission-denied");
-      }
-      return (
-        (await repository.getGameplayProfile(uid, identity.idToken, signal)) ||
-        {}
-      );
-    },
+    readProfileOwnershipSnapshot: (query) =>
+      requireProfileOwnershipSnapshot(repository, query),
     readEventPrizeWithdrawals: createD1EventPrizeWithdrawalReader(
       env.EVENT_PRIZE_WITHDRAWALS_DB,
     ),
-    resolveProfileEventPrizeOwnerId,
     now: dependencies.now,
     random: dependencies.random || secureRandom,
     sleep:
@@ -178,30 +156,25 @@ function createRuntime(
 }
 
 function runtimeRequest(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   data: Record<string, unknown>,
 ) {
   return {
-    auth: {
-      uid: identity.uid,
-      token: identity.profileId ? { profileId: identity.profileId } : {},
-    },
+    auth: { uid: identity.uid },
     data,
   };
 }
 
 export async function createEvent(
   env: Env,
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: CreateEventRequest,
   dependencies: EventControlDependencies = {},
 ): Promise<CreateEventResponse> {
   try {
-    const response = await createRuntime(
-      env,
-      identity,
-      dependencies,
-    ).createEvent(runtimeRequest(identity, request));
+    const response = await createRuntime(env, dependencies).createEvent(
+      runtimeRequest(identity, request),
+    );
     if (!isCreateEventResponse(response)) {
       throw new AuthApiFailure(503, "unavailable", "event-service-unavailable");
     }
@@ -213,16 +186,14 @@ export async function createEvent(
 
 export async function postponeEventStart(
   env: Env,
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: PostponeEventStartRequest,
   dependencies: EventControlDependencies = {},
 ): Promise<PostponeEventStartResponse> {
   try {
-    const response = await createRuntime(
-      env,
-      identity,
-      dependencies,
-    ).postponeEventStart(runtimeRequest(identity, request));
+    const response = await createRuntime(env, dependencies).postponeEventStart(
+      runtimeRequest(identity, request),
+    );
     if (!isPostponeEventStartResponse(response)) {
       throw new AuthApiFailure(503, "unavailable", "event-service-unavailable");
     }
@@ -234,14 +205,13 @@ export async function postponeEventStart(
 
 export async function disqualifyEventMatchWinners(
   env: Env,
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: DisqualifyEventMatchWinnersRequest,
   dependencies: EventControlDependencies = {},
 ): Promise<DisqualifyEventMatchWinnersResponse> {
   try {
     const response = await createRuntime(
       env,
-      identity,
       dependencies,
     ).disqualifyEventMatchWinners(runtimeRequest(identity, request));
     if (!isDisqualifyEventMatchWinnersResponse(response)) {
@@ -255,16 +225,14 @@ export async function disqualifyEventMatchWinners(
 
 export async function syncEventState(
   env: Env,
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: SyncEventStateRequest,
   dependencies: EventControlDependencies = {},
 ): Promise<SyncEventStateResponse> {
   try {
-    const response = await createRuntime(
-      env,
-      identity,
-      dependencies,
-    ).syncEventState(runtimeRequest(identity, request));
+    const response = await createRuntime(env, dependencies).syncEventState(
+      runtimeRequest(identity, request),
+    );
     if (!isSyncEventStateResponse(response)) {
       throw new AuthApiFailure(503, "unavailable", "event-service-unavailable");
     }

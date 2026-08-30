@@ -557,6 +557,14 @@ test("operations documentation cross-links package and deployment guides", () =>
     cloudReadme,
     /\[Cloudflare deployment guide\]\(\.\.\/scripts\/deploy-cloudflare\.md\)/,
   );
+  assert.match(
+    cloudReadme,
+    /`PROFILE_DB\.profile_login_owners` is the sole source for Worker login UID to canonical profile ownership/,
+  );
+  assert.match(
+    cloudReadme,
+    /custom `profileId` claims and RTDB `players\/\{uid\}\/profile` links are non-authoritative compatibility shadows/,
+  );
   assert.equal(
     existsSync(resolve(repositoryRoot, "scripts/deploy-cloudflare.md")),
     true,
@@ -581,6 +589,30 @@ test("operations documentation cross-links package and deployment guides", () =>
   );
   assert.doesNotMatch(deploymentGuide, /migrate:event-prize-withdrawals-d1/);
   assert.doesNotMatch(deploymentGuide, /Firebase-only Worker version/);
+
+  const apiRelease = deploymentGuide.slice(
+    deploymentGuide.indexOf("## API Worker release"),
+    deploymentGuide.indexOf("## Canonical profile D1 maintenance"),
+  );
+  assert.match(
+    apiRelease,
+    /--base-url <version-preview-url> --read-only --auth-token-fixture \/secure\/api-smoke-auth\.json --smoke-profile-fixture \/secure\/api-smoke-profile\.json/,
+  );
+  assert.match(
+    apiRelease,
+    /--base-url https:\/\/api\.mons\.link --read-only --auth-token-fixture \/secure\/api-smoke-auth\.json --smoke-profile-fixture \/secure\/api-smoke-profile\.json/,
+  );
+  assert.match(apiRelease, /alternate-login invite-role authorization/);
+  assert.match(apiRelease, /"actorUid":"<stored-host-or-guest-uid>"/);
+  assert.match(apiRelease, /Both are release gates for preview and production/);
+  assert.doesNotMatch(apiRelease, /--sampling-rate\s+1(?:\s|$)/);
+  assert.doesNotMatch(apiRelease, /cleanupPageMatchCursor/);
+  assert.doesNotMatch(apiRelease, /COUNT\(\*\).*login_count/);
+  assert.match(
+    apiRelease,
+    /Rollback immediately to the previous tested Worker/,
+  );
+  assert.match(apiRelease, /changes no persistent schema/);
 
   const profileMaintenance = deploymentGuide.slice(
     deploymentGuide.indexOf("## Canonical profile D1 maintenance"),

@@ -38,6 +38,12 @@ const {
   setMatchSlotBlocked,
   setMatchSlotParticipant,
 } = require("./startTransitionCore");
+const {
+  getCanonicalProfileId,
+  profileOwnershipUnavailable,
+  resolveOwnedProfileReferences,
+  resolvePrizeProjectionOwnerId,
+} = require("./ownership");
 
 const createEventBracketRuntime = (dependencies = {}) => {
   const admin = dependencies.admin;
@@ -47,9 +53,6 @@ const createEventBracketRuntime = (dependencies = {}) => {
     dependencies.resolveMatchWinner || defaultResolveMatchWinner;
   const buildRandomGameSeed =
     dependencies.buildRandomGameSeed || defaultBuildRandomGameSeed;
-  const resolveProfileEventPrizeOwnerId =
-    dependencies.resolveProfileEventPrizeOwnerId ||
-    (async ({ profileId }) => profileId);
   const readEventPrizeWithdrawals =
     dependencies.readEventPrizeWithdrawals ||
     (async () => {
@@ -60,6 +63,73 @@ const createEventBracketRuntime = (dependencies = {}) => {
   const normalizeString = (value) =>
     typeof value === "string" && value.trim() !== "" ? value.trim() : "";
   const normalizeStringOrNull = (value) => normalizeString(value) || null;
+  const canonicalizePrizePlacementsAndSelections = (
+    placements,
+    value,
+    participantsById,
+    ownershipSnapshot,
+  ) => {
+    const selections =
+      value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    const placementEntries = Array.isArray(placements) ? placements : [];
+    const selectionEntries = Object.entries(selections);
+    const placementProfileIds = placementEntries.map((placement) =>
+      normalizeString(placement?.profileId),
+    );
+    const profileIds = placementProfileIds.concat(
+      selectionEntries.map(([profileId]) => profileId),
+    );
+    if (profileIds.length === 0) {
+      return { placements: [], selections: {} };
+    }
+    if (!ownershipSnapshot) throw profileOwnershipUnavailable();
+    const placementReferences = placementProfileIds.map((profileId) => {
+      const participant =
+        participantsById?.[profileId] ||
+        Object.values(participantsById || {}).find(
+          (candidate) =>
+            candidate &&
+            typeof candidate === "object" &&
+            normalizeString(candidate.profileId) === profileId,
+        );
+      return {
+        profileId,
+        loginUid: normalizeString(participant && participant.loginUid),
+      };
+    });
+    const canonicalPlacementProfileIds = resolveOwnedProfileReferences(
+      ownershipSnapshot,
+      placementReferences,
+    );
+    const canonicalPlacements = [];
+    for (let index = 0; index < placementEntries.length; index += 1) {
+      const canonicalProfileId = canonicalPlacementProfileIds[index];
+      canonicalPlacements.push({
+        ...placementEntries[index],
+        profileId: canonicalProfileId,
+      });
+    }
+    const canonicalSelections = {};
+    for (let index = 0; index < selectionEntries.length; index += 1) {
+      const canonicalProfileId = getCanonicalProfileId(
+        ownershipSnapshot,
+        selectionEntries[index][0],
+      );
+      if (!canonicalProfileId) throw profileOwnershipUnavailable();
+      const selection = selectionEntries[index][1];
+      if (
+        Object.hasOwn(canonicalSelections, canonicalProfileId) &&
+        canonicalSelections[canonicalProfileId] !== selection
+      ) {
+        throw profileOwnershipUnavailable();
+      }
+      canonicalSelections[canonicalProfileId] = selection;
+    }
+    return {
+      placements: canonicalPlacements,
+      selections: canonicalSelections,
+    };
+  };
 
   const toFiniteInteger = (value, fallback = 0) => {
     const numeric = typeof value === "number" ? value : Number(value);
@@ -70,10 +140,16 @@ const createEventBracketRuntime = (dependencies = {}) => {
   };
 
   const reconcileBracketMatchReadiness = (input) =>
-    reconcileBracketMatchReadinessCore({ ...input, buildRandomGameSeed });
+    reconcileBracketMatchReadinessCore({
+      ...input,
+      buildRandomGameSeed,
+    });
 
   const reconcileThirdPlaceMatchReadiness = (input) =>
-    reconcileThirdPlaceMatchReadinessCore({ ...input, buildRandomGameSeed });
+    reconcileThirdPlaceMatchReadinessCore({
+      ...input,
+      buildRandomGameSeed,
+    });
 
   const rebuildParticipantStatesFromRounds = ({
     participantsById,
@@ -349,8 +425,10 @@ const createEventBracketRuntime = (dependencies = {}) => {
   };
 
   const getProjectableEventPrizeAssignments = async ({
+    event,
     eventId,
     assignments,
+    ownershipSnapshot,
   }) => {
     const projectableAssignments = filterProjectableEventPrizeAssignments({
       eventId,
@@ -360,11 +438,13 @@ const createEventBracketRuntime = (dependencies = {}) => {
     const canonicalAssignments = {};
     const canonicalProfileIds = new Set();
     for (const [place, assignment] of Object.entries(projectableAssignments)) {
+      if (!ownershipSnapshot) throw profileOwnershipUnavailable();
       const sourceProfileId = normalizeString(assignment?.profileId);
       const canonicalProfileId = normalizeString(
-        await resolveProfileEventPrizeOwnerId({
-          eventId,
+        resolvePrizeProjectionOwnerId({
+          event,
           profileId: sourceProfileId,
+          snapshot: ownershipSnapshot,
         }),
       );
       if (!canonicalProfileId) {
@@ -389,14 +469,6 @@ const createEventBracketRuntime = (dependencies = {}) => {
     current?.prizeId === assignment?.prizeId &&
     Number(current?.assignedAtMs) === Number(assignment?.assignedAtMs);
 
-  const assignmentSetsMatch = (left, right) => {
-    const places = Object.keys(left);
-    return (
-      places.length === Object.keys(right).length &&
-      places.every((place) => assignmentsMatch(left[place], right[place]))
-    );
-  };
-
   const addEventPrizeAssignmentUpdates = async ({
     updates,
     eventId,
@@ -409,12 +481,16 @@ const createEventBracketRuntime = (dependencies = {}) => {
   };
 
   const reconcileProfileEventPrizeAssignments = async ({
+    event,
     eventId,
     assignments,
+    ownershipSnapshot,
   }) => {
     const projectableAssignments = await getProjectableEventPrizeAssignments({
+      event,
       eventId,
       assignments,
+      ownershipSnapshot,
     });
     const transactions = await Promise.all(
       Object.values(projectableAssignments).map(async (assignment) => {
@@ -436,22 +512,16 @@ const createEventBracketRuntime = (dependencies = {}) => {
           );
       }),
     );
-    const confirmedAssignments = await getProjectableEventPrizeAssignments({
-      eventId,
-      assignments,
-    });
     return {
       didChange: transactions.some((transaction) => transaction.committed),
-      settled: assignmentSetsMatch(
-        projectableAssignments,
-        confirmedAssignments,
-      ),
     };
   };
 
   const removeCompletedEventPrizeProjections = async ({
+    event,
     eventId,
     assignments,
+    ownershipSnapshot,
   }) => {
     const withdrawals = await readEventPrizeWithdrawals(eventId);
     await Promise.all(
@@ -465,10 +535,12 @@ const createEventBracketRuntime = (dependencies = {}) => {
         ) {
           return;
         }
+        if (!ownershipSnapshot) throw profileOwnershipUnavailable();
         const canonicalProfileId = normalizeString(
-          await resolveProfileEventPrizeOwnerId({
-            eventId,
+          resolvePrizeProjectionOwnerId({
+            event,
             profileId: normalizeString(assignment.profileId),
+            snapshot: ownershipSnapshot,
           }),
         );
         const profileIds = Array.from(
@@ -508,6 +580,8 @@ const createEventBracketRuntime = (dependencies = {}) => {
     participantsById,
     thirdPlaceMatch,
     assignedAtMs,
+    ownershipSnapshot,
+    prizeSelections,
   }) => {
     const placements = getEventPrizePlacements({
       event,
@@ -528,15 +602,17 @@ const createEventBracketRuntime = (dependencies = {}) => {
     ) {
       return { assignments: storedAssignments, didCreate: false };
     }
-    const selectionsSnapshot = await admin
-      .database()
-      .ref(`eventPrizeSelections/${eventId}`)
-      .once("value");
+    const canonical = canonicalizePrizePlacementsAndSelections(
+      placements,
+      prizeSelections,
+      participantsById,
+      ownershipSnapshot,
+    );
     return {
       assignments: buildEventPrizeAssignments({
         eventId,
-        placements,
-        selections: selectionsSnapshot.val() || {},
+        placements: canonical.placements,
+        selections: canonical.selections,
         assignedAtMs,
       }),
       didCreate: true,
@@ -654,7 +730,10 @@ const createEventBracketRuntime = (dependencies = {}) => {
     buildFixedBracketState: (input) =>
       buildFixedBracketStateCore({ ...input, buildRandomGameSeed }),
     buildScheduledEventDueUpdates: (input) =>
-      buildScheduledEventDueUpdatesCore({ ...input, buildRandomGameSeed }),
+      buildScheduledEventDueUpdatesCore({
+        ...input,
+        buildRandomGameSeed,
+      }),
     buildSeedToProfileId,
     createEmptyEventMatch,
     getEventPrizePlacements,

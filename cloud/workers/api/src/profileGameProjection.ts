@@ -18,6 +18,7 @@ import {
   parseAutomatchProfileGameProjectionOutbox,
   parseEventProfileGameProjectionOutbox,
   parseProfileLinkProfileGameProjectionOutbox,
+  salvageProfileLinkCleanupProfileIds,
 } from "./profileGameProjectionOutbox.ts";
 import {
   createEventProfileGameProjectionRuntime,
@@ -578,33 +579,12 @@ type InvalidEventSweepResult =
   | { kind: "repaired"; task: EventProfileGameProjectionTask };
 
 function salvageEventCleanupOwnerProfileIds(value: unknown): string[] {
-  const raw = toRecord(value)?.cleanupOwnerProfileIds;
-  const candidates =
-    typeof raw === "string"
-      ? [raw]
-      : Array.isArray(raw)
-        ? raw
-        : Object.keys(toRecord(raw) || {});
   return Array.from(
     new Set(
-      candidates.filter(
-        (profileId): profileId is string =>
-          typeof profileId === "string" && isSafeFirebaseKey(profileId),
-      ),
-    ),
-  );
-}
-
-function salvageProfileLinkCleanupProfileIds(value: unknown): string[] {
-  const raw = toRecord(value)?.cleanupProfileIds;
-  const candidates = Array.isArray(raw)
-    ? raw
-    : Object.keys(toRecord(raw) || {});
-  return Array.from(
-    new Set(
-      candidates.filter(
-        (profileId): profileId is string =>
-          typeof profileId === "string" && isSafeFirebaseKey(profileId),
+      Object.entries(
+        toRecord(toRecord(value)?.cleanupOwnerProfileIds) || {},
+      ).flatMap(([profileId, included]) =>
+        included === true && isSafeFirebaseKey(profileId) ? [profileId] : [],
       ),
     ),
   );

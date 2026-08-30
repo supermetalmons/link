@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Game } from "mons-rules";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import type { FirebaseIdentity } from "../src/firebaseAuth.ts";
+import type { RequestIdentity } from "../src/requestIdentity.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type {
+  ProfileOwnershipQuery,
+  ProfileOwnershipSnapshot,
+} from "../src/profileOwnership.ts";
 import {
   buildOrderedMoveHistory,
   claimMatchVictoryByTimer,
@@ -20,17 +24,18 @@ import { buildEventProgressPlan } from "../src/eventProgress.ts";
 
 type TimerRepository = Pick<
   GameplayRepository,
-  "getRtdbPath" | "transactRtdbPath"
+  "getRtdbPath" | "readProfileOwnershipSnapshot" | "transactRtdbPath"
 >;
 
 type ClaimTimerRepository = Pick<
   GameplayRepository,
-  "getRtdbPath" | "patchRtdbRoot" | "transactRtdbPath"
+  | "getRtdbPath"
+  | "patchRtdbRoot"
+  | "readProfileOwnershipSnapshot"
+  | "transactRtdbPath"
 >;
 
-const identity: FirebaseIdentity = {
-  idToken: "token",
-  profileId: "profile-1",
+const identity: RequestIdentity = {
   uid: "player-1",
 };
 
@@ -67,6 +72,53 @@ function gameState(
   };
 }
 
+function ownershipSnapshot(
+  query: ProfileOwnershipQuery,
+  ownerByUid: Readonly<Record<string, string | null>>,
+): ProfileOwnershipSnapshot {
+  const loginOwnerByUid = new Map(
+    query.loginUids.map((uid) => {
+      const profileId = ownerByUid[uid] || null;
+      return [uid, profileId ? { profileId, revision: 1 } : null] as const;
+    }),
+  );
+  const profileIds = new Set(
+    [...loginOwnerByUid.values()].flatMap((owner) =>
+      owner ? [owner.profileId] : [],
+    ),
+  );
+  return {
+    canonicalProfileIdByProfileId: new Map(),
+    loginOwnerByUid,
+    loginUidsByProfileId: new Map(
+      [...profileIds].map((profileId) => [
+        profileId,
+        Object.entries(ownerByUid)
+          .filter(([, value]) => value === profileId)
+          .map(([uid]) => uid)
+          .sort(),
+      ]),
+    ),
+    profileById: new Map(
+      [...profileIds].map((profileId) => [
+        profileId,
+        {
+          profile: {
+            aura: "",
+            emoji: "",
+            eth: "",
+            profileId,
+            rating: 1500,
+            sol: "",
+            username: "",
+          },
+          revision: 1,
+        },
+      ]),
+    ),
+  };
+}
+
 function repository({
   currentTimer = "",
   markerTimer = null,
@@ -95,12 +147,16 @@ function repository({
   const value: TimerRepository = {
     getRtdbPath: async (path) => {
       paths.push(path);
-      if (path === "players/player-1/profile") return profile;
       if (path === "players/player-1/matches/match-1") return player;
       if (path === "players/player-2/matches/match-1") return opponent;
       if (path === `invites/${inviteId}`) return invite;
       assert.fail(`unexpected RTDB path ${path}`);
     },
+    readProfileOwnershipSnapshot: async (query) =>
+      ownershipSnapshot(query, {
+        "login-2": "profile-1",
+        "player-1": typeof profile === "string" ? profile : null,
+      }),
     transactRtdbPath: async (path, updater) => {
       paths.push(path);
       const markerPath = path.startsWith(`${MATCH_TIMER_START_ROOT}/`);
@@ -173,7 +229,6 @@ function claimRepository({
     value: {
       getRtdbPath: async (path) => {
         paths.push(path);
-        if (path === "players/player-1/profile") return profile;
         if (path.startsWith("players/player-1/matches/")) {
           playerReads++;
           return playerReads === 1 || livePlayer === undefined
@@ -196,6 +251,11 @@ function claimRepository({
         }
         patches.push(updates);
       },
+      readProfileOwnershipSnapshot: async (query) =>
+        ownershipSnapshot(query, {
+          "login-2": "profile-1",
+          "player-1": typeof profile === "string" ? profile : null,
+        }),
       transactRtdbPath: async (path, updater) => {
         paths.push(path);
         const decision = updater(storedClaim) as {
@@ -335,6 +395,9 @@ test("retries only failed match reads once", async () => {
         value: decision.value,
       };
     },
+    readProfileOwnershipSnapshot: async () => {
+      assert.fail("direct UID authorization should not read ownership");
+    },
   };
   const response = await startMatchTimer(identity, request, value, {
     now: () => 1_000,
@@ -347,6 +410,15 @@ test("retries only failed match reads once", async () => {
 
 test("authorizes a same-profile login and rejects unrelated identities", async () => {
   const sameProfile = repository();
+  let ownershipReads = 0;
+  sameProfile.value.readProfileOwnershipSnapshot = async (query) => {
+    ownershipReads++;
+    assert.deepEqual(query.loginUids, ["login-2", "player-1"]);
+    return ownershipSnapshot(query, {
+      "login-2": "profile-1",
+      "player-1": "profile-1",
+    });
+  };
   const response = await startMatchTimer(
     { ...identity, uid: "login-2" },
     request,
@@ -354,7 +426,8 @@ test("authorizes a same-profile login and rejects unrelated identities", async (
     { resolveGame: () => gameState(), now: () => 0 },
   );
   assert.equal(response.ok, true);
-  assert.equal(sameProfile.paths[0], "players/player-1/profile");
+  assert.equal(ownershipReads, 1);
+  assert.ok(sameProfile.paths.every((path) => !path.endsWith("/profile")));
 
   const unrelated = repository({ profile: "profile-2" });
   await expectFailure(
@@ -452,6 +525,9 @@ test("concurrent starts converge on the first timer", async () => {
         value: decision.value,
       };
     },
+    readProfileOwnershipSnapshot: async () => {
+      assert.fail("direct UID authorization should not read ownership");
+    },
   };
   const [first, second] = await Promise.all([
     startMatchTimer(identity, request, value, {
@@ -506,6 +582,9 @@ test("advances one marker and rejects stale earlier turns", async () => {
         decision: decision.decision,
         value: decision.value,
       };
+    },
+    readProfileOwnershipSnapshot: async () => {
+      assert.fail("direct UID authorization should not read ownership");
     },
   };
   const dependencies = {
@@ -611,6 +690,9 @@ test("restores the first timer after the match record is cleared", async () => {
         decision: decision.decision,
         value: decision.value,
       };
+    },
+    readProfileOwnershipSnapshot: async () => {
+      assert.fail("direct UID authorization should not read ownership");
     },
   };
   const first = await startMatchTimer(identity, request, value, {
@@ -768,7 +850,7 @@ test("authorizes same-profile timer claims and rejects unrelated identities", as
     { now: () => 1_001, resolveGame: () => gameState() },
   );
   assert.equal(response.ok, true);
-  assert.equal(sameProfile.paths[0], "players/player-1/profile");
+  assert.ok(sameProfile.paths.every((path) => !path.endsWith("/profile")));
 
   const unrelated = claimRepository({ profile: "profile-2" });
   await expectFailure(

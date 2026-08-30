@@ -1,3 +1,5 @@
+import type { EventOwnershipSnapshot } from "./ownership.js";
+
 export type EventBracketAdmin = {
   database(): {
     ref(path?: string): {
@@ -34,12 +36,18 @@ export type EventBracketRuntime = {
     input: Record<string, unknown>,
   ): Record<string, unknown>;
   reconcileBracketMatchReadiness(
-    input: Record<string, unknown>,
+    input: Record<string, unknown> & {
+      ownershipSnapshot: EventOwnershipSnapshot;
+    },
   ): Promise<boolean>;
   reconcileProfileEventPrizeAssignments(
     input: Record<string, unknown>,
-  ): Promise<{ didChange: boolean; settled: boolean }>;
-  reconcileThirdPlaceMatchReadiness(input: Record<string, unknown>): Promise<{
+  ): Promise<{ didChange: boolean }>;
+  reconcileThirdPlaceMatchReadiness(
+    input: Record<string, unknown> & {
+      ownershipSnapshot: EventOwnershipSnapshot;
+    },
+  ): Promise<{
     didChange: boolean;
     thirdPlaceMatch: Record<string, unknown> | null;
   }>;
@@ -72,10 +80,6 @@ export function createEventBracketRuntime(dependencies: {
     match: unknown,
     opponentMatch: unknown,
   ) => Promise<{ winner: "player" | "opponent" | null; reason: string }>;
-  resolveProfileEventPrizeOwnerId?: (input: {
-    eventId: string;
-    profileId: string;
-  }) => Promise<string>;
   readEventPrizeWithdrawals: (
     eventId: string,
   ) => Promise<Record<string, Record<string, unknown>>>;

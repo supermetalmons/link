@@ -16,13 +16,21 @@ const {
   smokeAuthenticatedAuthState,
   smokeFrozenProfileWrite,
 } = require("./smoke-cloudflare-api.ts") as {
-  DEFAULT_SMOKE_PROFILE: { loginId: string; profileId: string };
+  DEFAULT_SMOKE_PROFILE: {
+    loginId: string;
+    profileId: string;
+    invite?: { actorUid: string; id: string; role: "guest" | "host" };
+  };
   DEFAULT_SMOKE_SOL: string;
   parseArgs: (argv: string[]) => {
     baseUrl: string;
     readOnly: boolean;
     readOnlyAuthToken: string | null;
-    smokeProfile: { loginId: string; profileId: string };
+    smokeProfile: {
+      loginId: string;
+      profileId: string;
+      invite?: { actorUid: string; id: string; role: "guest" | "host" };
+    };
     smokeSol: string;
   };
   smokeApi: (
@@ -30,7 +38,11 @@ const {
       baseUrl: string;
       readOnlyAuthToken?: string | null;
       readOnly?: boolean;
-      smokeProfile: { loginId: string; profileId: string };
+      smokeProfile: {
+        loginId: string;
+        profileId: string;
+        invite?: { actorUid: string; id: string; role: "guest" | "host" };
+      };
       smokeSol: string;
     },
     dependencies: {
@@ -41,7 +53,11 @@ const {
   ) => Promise<void>;
   smokeAuthenticatedAuthState: (
     baseUrl: string,
-    smokeProfile: { loginId: string; profileId: string },
+    smokeProfile: {
+      loginId: string;
+      profileId: string;
+      invite?: { actorUid: string; id: string; role: "guest" | "host" };
+    },
     dependencies: {
       fetch: typeof fetch;
       randomState: () => string;
@@ -62,8 +78,14 @@ const {
 
 const WALLET = "11111111111111111111111111111111";
 const LOGIN = "known-login";
-const SMOKE_PROFILE = { loginId: LOGIN, profileId: "profile-1" };
-const AUTH_TOKEN = "header.payload.signature";
+const SMOKE_PROFILE = {
+  loginId: LOGIN,
+  profileId: "profile-1",
+  invite: { actorUid: "host-login", id: "invite-1", role: "host" as const },
+};
+const AUTH_TOKEN = `header.${Buffer.from(
+  JSON.stringify({ sub: LOGIN }),
+).toString("base64url")}.signature`;
 const EMPTY_NFTS = {
   ok: true,
   specials: [],
@@ -106,10 +128,13 @@ function profileFixture(): { cleanup(): void; path: string } {
   };
 }
 
-function authTokenFixture(): { cleanup(): void; path: string } {
+function authTokenFixture(idToken = AUTH_TOKEN): {
+  cleanup(): void;
+  path: string;
+} {
   const directory = mkdtempSync(join(tmpdir(), "mons-link-smoke-auth-"));
   const path = join(directory, "auth.json");
-  writeFileSync(path, JSON.stringify({ idToken: AUTH_TOKEN }), { mode: 0o600 });
+  writeFileSync(path, JSON.stringify({ idToken }), { mode: 0o600 });
   return {
     path,
     cleanup: () => rmSync(directory, { recursive: true, force: true }),
@@ -164,12 +189,14 @@ test("parses only production and canonical preview smoke targets", () => {
         "--read-only",
         "--auth-token-fixture",
         authFixture.path,
+        "--smoke-profile-fixture",
+        fixture.path,
       ]),
       {
         baseUrl: "https://api.mons.link",
         readOnly: true,
         readOnlyAuthToken: AUTH_TOKEN,
-        smokeProfile: DEFAULT_SMOKE_PROFILE,
+        smokeProfile: SMOKE_PROFILE,
         smokeSol: DEFAULT_SMOKE_SOL,
       },
     );
@@ -324,23 +351,6 @@ test("smokes public, unauthenticated, and internal routes", async () => {
         200,
       );
     }
-    if (url.endsWith("/profiles/username")) {
-      const headers = new Headers(init?.headers);
-      assert.equal(method, "POST");
-      assert.equal(headers.get("Authorization"), `Bearer ${AUTH_TOKEN}`);
-      assert.equal(headers.get("Origin"), "https://mons.link");
-      assert.equal(headers.get("Content-Type"), "application/json");
-      assert.equal(init?.body, "{}");
-      return json(
-        {
-          ok: false,
-          error: "unavailable",
-          message: "profile-writes-disabled",
-        },
-        503,
-        { "Retry-After": "60" },
-      );
-    }
     if (url.endsWith("/leaderboards/read")) {
       leaderboardTypes.push(String(JSON.parse(String(init?.body))?.type || ""));
       return json({ ok: true, profiles: [PROFILE] }, 200);
@@ -358,6 +368,23 @@ test("smokes public, unauthenticated, and internal routes", async () => {
       url.endsWith("/invites/role/read") &&
       new Headers(init?.headers).has("Authorization")
     ) {
+      const authorization = new Headers(init?.headers).get("Authorization");
+      if (authorization === `Bearer ${AUTH_TOKEN}`) {
+        assert.deepEqual(JSON.parse(String(init?.body)), {
+          inviteId: SMOKE_PROFILE.invite.id,
+        });
+        return json(
+          {
+            ok: true,
+            inviteId: SMOKE_PROFILE.invite.id,
+            hostId: SMOKE_PROFILE.invite.actorUid,
+            guestId: null,
+            actorUid: SMOKE_PROFILE.invite.actorUid,
+            role: SMOKE_PROFILE.invite.role,
+          },
+          200,
+        );
+      }
       return json(
         { ok: false, error: "not-found", message: "invite-not-found" },
         404,
@@ -367,8 +394,34 @@ test("smokes public, unauthenticated, and internal routes", async () => {
       url.endsWith("/navigation/games/read") &&
       new Headers(init?.headers).has("Authorization")
     ) {
+      assert.deepEqual(JSON.parse(String(init?.body)), {
+        limit: 1,
+        cursor: null,
+      });
       return json(
-        { ok: true, items: [], nextCursor: null, hasMore: false },
+        {
+          ok: true,
+          items: [
+            {
+              id: SMOKE_PROFILE.invite.id,
+              entityType: "game",
+              inviteId: SMOKE_PROFILE.invite.id,
+              kind: "direct",
+              status: "waiting",
+              sortBucket: 30,
+              listSortAtMs: 1,
+              hostLoginId: SMOKE_PROFILE.invite.actorUid,
+              guestLoginId: null,
+              opponentProfileId: null,
+              opponentName: null,
+              opponentEmoji: null,
+              automatchStateHint: null,
+              isPendingAutomatch: false,
+            },
+          ],
+          nextCursor: null,
+          hasMore: false,
+        },
         200,
       );
     }
@@ -452,7 +505,7 @@ test("smokes public, unauthenticated, and internal routes", async () => {
       log: (message) => logs.push(message),
     },
   );
-  assert.equal(requests.length, 36);
+  assert.equal(requests.length, 35);
   assert.deepEqual(leaderboardTypes, [
     "rating",
     "mp",
@@ -470,6 +523,22 @@ test("smokes public, unauthenticated, and internal routes", async () => {
         (url.endsWith("/auth/intents") || url.endsWith("/auth/x/flows")),
     ),
     false,
+  );
+  assert.deepEqual(
+    Array.from(
+      new Set(
+        requests
+          .filter(({ authorized }) => authorized)
+          .map(({ method, url }) => `${method} ${new URL(url).pathname}`),
+      ),
+    ).sort(),
+    [
+      "GET /auth/methods",
+      "POST /invites/role/read",
+      "POST /leaderboards/read",
+      "POST /navigation/games/read",
+      "POST /profiles/lookup",
+    ].sort(),
   );
   assert.equal(
     requests.some(({ url }) => url.includes("identitytoolkit.googleapis.com")),
@@ -632,6 +701,87 @@ test("requires the read-only token to own the smoke profile", async () => {
     /Auth ownership smoke response was invalid/,
   );
   assert.equal(identityRequests, 0);
+});
+
+test("rejects a read-only token for a different login before requests", async () => {
+  const otherToken = `header.${Buffer.from(
+    JSON.stringify({ sub: "different-login" }),
+  ).toString("base64url")}.signature`;
+  let requests = 0;
+  await assert.rejects(
+    smokeAuthenticatedAuthState(
+      "https://api.mons.link",
+      SMOKE_PROFILE,
+      {
+        fetch: async () => {
+          requests++;
+          throw new Error("unexpected-request");
+        },
+        randomState: () => "unused",
+        log: () => undefined,
+      },
+      otherToken,
+    ),
+    /token subject did not match/,
+  );
+  assert.equal(requests, 0);
+});
+
+test("accepts an empty authenticated navigation projection", async () => {
+  await smokeAuthenticatedAuthState(
+    "https://api.mons.link",
+    SMOKE_PROFILE,
+    {
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.endsWith("/auth/methods")) {
+          return json(
+            {
+              ok: true,
+              profileId: SMOKE_PROFILE.profileId,
+              linkedMethods: {
+                apple: false,
+                eth: false,
+                sol: false,
+                x: false,
+              },
+              appleLinked: false,
+            },
+            200,
+          );
+        }
+        if (url.endsWith("/leaderboards/read")) {
+          return json({ ok: true, profiles: [PROFILE] }, 200);
+        }
+        if (url.endsWith("/profiles/lookup")) {
+          return json({ ok: true, profile: PROFILE }, 200);
+        }
+        if (url.endsWith("/navigation/games/read")) {
+          return json(
+            { ok: true, items: [], nextCursor: null, hasMore: false },
+            200,
+          );
+        }
+        if (url.endsWith("/invites/role/read")) {
+          return json(
+            {
+              ok: true,
+              inviteId: SMOKE_PROFILE.invite.id,
+              hostId: SMOKE_PROFILE.invite.actorUid,
+              guestId: null,
+              actorUid: SMOKE_PROFILE.invite.actorUid,
+              role: SMOKE_PROFILE.invite.role,
+            },
+            200,
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      },
+      randomState: () => "unused",
+      log: () => undefined,
+    },
+    AUTH_TOKEN,
+  );
 });
 
 test("deletes an anonymous smoke user after an incomplete signup response", async () => {

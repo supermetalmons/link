@@ -15,7 +15,6 @@ export class EventRuntimeError extends Error {
 export type EventRuntimeRequest = {
   auth: {
     uid: string;
-    token?: { profileId?: string };
   } | null;
   data: Record<string, unknown>;
 };
@@ -41,7 +40,6 @@ export type EventRuntime = {
   runEventSyncState(input: {
     eventId: string;
     requesterUid: string;
-    auth: EventRuntimeRequest["auth"];
     enforceParticipantGate: boolean;
     enforceThrottle: boolean;
     syncLog: Record<string, unknown>;
@@ -83,15 +81,15 @@ export function createEventRuntime(dependencies: {
     releaseEventLock(handle: Record<string, unknown>): Promise<boolean>;
     startEventLockHeartbeat(handle: Record<string, unknown>): () => void;
   };
-  getProfileByLoginId(uid: string): Promise<Record<string, unknown>>;
+  readProfileOwnershipSnapshot(query: {
+    loginUids: string[];
+    profileIds: string[];
+  }): Promise<EventOwnershipSnapshot>;
   readEventPrizeWithdrawals?: (
     eventId: string,
   ) => Promise<Record<string, Record<string, unknown>>>;
-  resolveProfileEventPrizeOwnerId(input: {
-    eventId: string;
-    profileId: string;
-  }): Promise<string>;
   now?: () => number;
   random: () => number;
   sleep(milliseconds: number): Promise<void>;
 }): EventRuntime;
+import type { EventOwnershipSnapshot } from "./events/ownership.js";

@@ -18,9 +18,9 @@ import {
 } from "./authHttp.ts";
 import {
   verifyFirebaseRequest,
-  type FirebaseIdentity,
   type WorkerExecutionContext,
 } from "./firebaseAuth.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
 import { readBoundedJson } from "./http.ts";
 import {
   createProfileCustomizationRepository,
@@ -64,7 +64,7 @@ export type ProfileRouteDependencies = {
   verifyIdentity?: (
     request: Request,
     ctx: WorkerExecutionContext,
-  ) => Promise<FirebaseIdentity>;
+  ) => Promise<RequestIdentity>;
 };
 
 const PROFILE_CUSTOMIZATION_TIMEOUT_MS = 12_000;

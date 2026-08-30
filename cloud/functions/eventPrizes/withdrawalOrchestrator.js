@@ -115,7 +115,7 @@ const handleWithdrawEventPrize = async (request, dependencies) => {
     admin,
     createEventPrizeUmi,
     readProfileByLoginUid,
-    resolveCanonicalProfileId,
+    resolveWithdrawalProfileId,
   } = dependencies;
 
   const profileSnapshot = await readProfileByLoginUid(request.auth.uid, []);
@@ -141,7 +141,7 @@ const handleWithdrawEventPrize = async (request, dependencies) => {
     existingProfileId !== profileId
   ) {
     canonicalRecordProfileId =
-      await resolveCanonicalProfileId(existingProfileId);
+      await resolveWithdrawalProfileId(existingProfileId);
     existingRecordOwnedByRequest = isWithdrawalRecordOwnedByRequest(
       existingWithdrawal,
       profileId,

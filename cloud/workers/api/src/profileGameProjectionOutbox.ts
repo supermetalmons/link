@@ -48,6 +48,18 @@ function toRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+export function salvageProfileLinkCleanupProfileIds(value: unknown): string[] {
+  const record = toRecord(value);
+  return Array.from(
+    new Set(
+      Object.entries(toRecord(record?.cleanupProfileIds) || {}).flatMap(
+        ([profileId, included]) =>
+          included === true && isSafeFirebaseKey(profileId) ? [profileId] : [],
+      ),
+    ),
+  );
+}
+
 export function getAutomatchProfileGameProjectionOutboxPath(
   inviteId: string,
 ): string {

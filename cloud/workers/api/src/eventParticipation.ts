@@ -19,13 +19,24 @@ import {
   type EventLockManager,
 } from "../../../functions/events/lockManagerCore.js";
 import { buildScheduledEventDueUpdatesCore } from "../../../functions/events/startTransitionCore.js";
+import {
+  buildEventOwnershipQuery,
+  directParticipantParticipation,
+  getCanonicalProfileId,
+  getLoginProfileId,
+  getOwnershipProfile,
+  requesterOwnsProfileReference,
+  resolveParticipantParticipation,
+  type EventOwnershipSnapshot,
+} from "../../../functions/events/ownership.js";
 import { getDisplayNameFromAddress } from "../../../functions/telegramDisplay.js";
 import { AuthApiFailure } from "./authErrors.ts";
-import type { FirebaseIdentity } from "./firebaseAuth.ts";
 import type {
   GameplayProfile,
   GameplayRepository,
 } from "./gameplayRepository.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
+import { requireProfileOwnershipSnapshot } from "./profileOwnership.ts";
 
 const EVENT_LOCK_ATTEMPTS = 40;
 const EVENT_LOCK_RETRY_DELAY_MS = 100;
@@ -34,10 +45,17 @@ const EVENT_RECONCILIATION_TIMEOUT_MS = 2_000;
 const gameVariantHelpers = createGameVariantHelpers(monsRules);
 
 type EventRecord = Record<string, unknown>;
+type EventDueTransition = {
+  didChange: boolean;
+  updates: Record<string, unknown>;
+};
 
 export type EventParticipationRepository = Pick<
   GameplayRepository,
-  "getGameplayProfile" | "getRtdbPath" | "patchRtdbRoot" | "transactRtdbPath"
+  | "getRtdbPath"
+  | "patchRtdbRoot"
+  | "readProfileOwnershipSnapshot"
+  | "transactRtdbPath"
 >;
 
 export type EventParticipationDependencies = {
@@ -45,7 +63,8 @@ export type EventParticipationDependencies = {
     eventId: string;
     event: EventRecord;
     nowMs: number;
-  }) => Promise<{ didChange: boolean; updates: Record<string, unknown> }>;
+    ownershipSnapshot?: EventOwnershipSnapshot | null;
+  }) => Promise<EventDueTransition>;
   lockManager?: EventLockManager;
   now?: () => number;
   random?: () => number;
@@ -129,33 +148,52 @@ function participantCount(event: EventRecord): number {
   ).length;
 }
 
-async function readProfile(
-  identity: FirebaseIdentity,
+async function loadOwnershipSnapshot(
+  event: EventRecord,
   repository: EventParticipationRepository,
-  signal: AbortSignal,
-): Promise<GameplayProfile> {
-  let profile: GameplayProfile | null;
+  extras: { loginUids?: string[]; profileIds?: string[] } = {},
+): Promise<EventOwnershipSnapshot> {
+  return requireProfileOwnershipSnapshot(
+    repository,
+    buildEventOwnershipQuery(event, extras),
+  );
+}
+
+function applyOwnershipPolicy<T>(operation: () => T): T {
   try {
-    profile = await repository.getGameplayProfile(
-      identity.uid,
-      identity.idToken,
-      signal,
-    );
-  } catch {
+    return operation();
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "profile-ownership-unavailable"
+    ) {
+      throw new AuthApiFailure(
+        503,
+        "unavailable",
+        "profile-ownership-unavailable",
+      );
+    }
+    throw error;
+  }
+}
+
+function directParticipantSnapshot(
+  value: unknown,
+  profileId: string,
+  loginUid: string,
+): EventParticipantSnapshot {
+  const participant = toRecord(value);
+  const normalized = participant
+    ? { ...participant, profileId, loginUid }
+    : null;
+  if (!isEventParticipantSnapshot(normalized)) {
     throw new AuthApiFailure(
       503,
       "unavailable",
       "event-participation-service-unavailable",
     );
   }
-  if (!profile?.profileId) {
-    throw new AuthApiFailure(
-      409,
-      "failed-precondition",
-      "Please sign in to join this event.",
-    );
-  }
-  return profile;
+  return normalized;
 }
 
 async function readEvent(
@@ -249,7 +287,7 @@ function isSameParticipant(
 
 async function persistDueTransition(
   eventId: string,
-  dueTransition: { didChange: boolean; updates: Record<string, unknown> },
+  dueTransition: EventDueTransition,
   repository: EventParticipationRepository,
   lockManager: EventLockManager,
   lockHandle: Parameters<EventLockManager["isEventLockStillOwned"]>[0],
@@ -337,24 +375,43 @@ async function persistRemoval(
   ]);
 }
 
-function createDueUpdatesBuilder(dependencies: EventParticipationDependencies) {
+function createDueUpdatesBuilder(
+  dependencies: EventParticipationDependencies,
+  repository: EventParticipationRepository,
+) {
   const random = dependencies.random || secureRandom;
-  return (
+  return async (
     input: Parameters<
       NonNullable<EventParticipationDependencies["buildDueUpdates"]>
     >[0],
-  ) =>
-    buildScheduledEventDueUpdatesCore({
-      ...input,
-      random,
-      buildRandomGameSeed: (source) =>
-        gameVariantHelpers.buildRandomGameSeed(source),
-    });
+  ) => {
+    try {
+      return await buildScheduledEventDueUpdatesCore({
+        ...input,
+        random,
+        buildRandomGameSeed: (source) =>
+          gameVariantHelpers.buildRandomGameSeed(source),
+        ownershipSnapshot: input.ownershipSnapshot || null,
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "profile-ownership-unavailable"
+      ) {
+        throw new AuthApiFailure(
+          503,
+          "unavailable",
+          "profile-ownership-unavailable",
+        );
+      }
+      throw error;
+    }
+  };
 }
 
 async function acquireLock(
   eventId: string,
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   lockManager: EventLockManager,
   message: string,
 ) {
@@ -373,20 +430,21 @@ async function acquireLock(
 }
 
 export async function joinEvent(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: JoinEventRequest,
   repository: EventParticipationRepository,
   dependencies: EventParticipationDependencies = {},
 ): Promise<JoinEventResponse> {
   const signal =
     dependencies.signal || AbortSignal.timeout(EVENT_OPERATION_TIMEOUT_MS);
-  const profile = await readProfile(identity, repository, signal);
   const eventId = request.eventId.trim();
   const now = dependencies.now || Date.now;
   const buildDueUpdates =
-    dependencies.buildDueUpdates || createDueUpdatesBuilder(dependencies);
+    dependencies.buildDueUpdates ||
+    createDueUpdatesBuilder(dependencies, repository);
   const lockManager =
     dependencies.lockManager || createDefaultLockManager(repository, signal);
+  await readEvent(eventId, repository, signal);
   const lockHandle = await acquireLock(
     eventId,
     identity,
@@ -396,7 +454,45 @@ export async function joinEvent(
   const stopHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
   try {
     const event = await readEvent(eventId, repository, signal);
+    const participants = toRecord(event.participants) || {};
     const nowMs = now();
+    const directParticipation = applyOwnershipPolicy(() =>
+      directParticipantParticipation(event, identity.uid),
+    );
+    let ownershipSnapshot: EventOwnershipSnapshot | null = null;
+    let profile: GameplayProfile | null = null;
+    let existingParticipantProfileId = directParticipation.profileId || "";
+    if (
+      !directParticipation.isParticipant ||
+      (typeof event.startAtMs === "number" && nowMs >= event.startAtMs)
+    ) {
+      ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
+        loginUids: [identity.uid],
+      });
+    }
+    if (!directParticipation.isParticipant) {
+      const ownerProfileId = applyOwnershipPolicy(() =>
+        getLoginProfileId(ownershipSnapshot!, identity.uid),
+      );
+      profile = ownerProfileId
+        ? (getOwnershipProfile(
+            ownershipSnapshot!,
+            ownerProfileId,
+          ) as GameplayProfile | null)
+        : null;
+      if (!profile) {
+        throw new AuthApiFailure(
+          409,
+          "failed-precondition",
+          "Please sign in to join this event.",
+        );
+      }
+      const ownedParticipation = applyOwnershipPolicy(() =>
+        resolveParticipantParticipation(event, identity.uid, ownershipSnapshot),
+      );
+      existingParticipantProfileId =
+        ownedParticipation.profileId || profile.profileId;
+    }
     if (event.status !== "scheduled") {
       throw new AuthApiFailure(
         409,
@@ -405,7 +501,12 @@ export async function joinEvent(
       );
     }
     if (typeof event.startAtMs === "number" && nowMs >= event.startAtMs) {
-      const dueTransition = await buildDueUpdates({ eventId, event, nowMs });
+      const dueTransition = await buildDueUpdates({
+        eventId,
+        event,
+        nowMs,
+        ownershipSnapshot,
+      });
       await persistDueTransition(
         eventId,
         dueTransition,
@@ -422,8 +523,9 @@ export async function joinEvent(
       );
     }
 
-    const participants = toRecord(event.participants) || {};
-    const existingParticipant = toRecord(participants[profile.profileId]);
+    const existingParticipant = toRecord(
+      participants[existingParticipantProfileId],
+    );
     if (
       !existingParticipant &&
       participantCount(event) >= MAX_EVENT_PARTICIPANTS
@@ -435,23 +537,40 @@ export async function joinEvent(
       );
     }
     const existingJoinedAtMs = existingParticipant?.joinedAtMs;
-    const participant = buildParticipant(
-      profile,
-      identity.uid,
-      typeof existingJoinedAtMs === "number" ? existingJoinedAtMs : nowMs,
-    );
-    participants[profile.profileId] = participant;
+    const participant = directParticipation.isParticipant
+      ? directParticipantSnapshot(
+          existingParticipant,
+          existingParticipantProfileId,
+          identity.uid,
+        )
+      : buildParticipant(
+          { ...profile!, profileId: existingParticipantProfileId },
+          identity.uid,
+          typeof existingJoinedAtMs === "number" ? existingJoinedAtMs : nowMs,
+        );
+    participants[existingParticipantProfileId] = participant;
     event.participants = participants;
     event.updatedAtMs = nowMs;
     const updates: Record<string, unknown> = {
-      [`events/${eventId}/participants/${profile.profileId}`]: participant,
+      [`events/${eventId}/participants/${existingParticipantProfileId}`]:
+        participant,
       [`events/${eventId}/updatedAtMs`]: nowMs,
     };
     const settleNowMs = now();
+    if (
+      !ownershipSnapshot &&
+      typeof event.startAtMs === "number" &&
+      settleNowMs >= event.startAtMs
+    ) {
+      ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
+        loginUids: [identity.uid],
+      });
+    }
     const dueTransition = await buildDueUpdates({
       eventId,
       event,
       nowMs: settleNowMs,
+      ownershipSnapshot,
     });
     let expectedTransitionStatus: "active" | "dismissed" | undefined;
     if (dueTransition.didChange) {
@@ -488,21 +607,22 @@ export async function joinEvent(
 }
 
 export async function removeEventParticipant(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: RemoveEventParticipantRequest,
   repository: EventParticipationRepository,
   dependencies: EventParticipationDependencies = {},
 ): Promise<RemoveEventParticipantResponse> {
   const signal =
     dependencies.signal || AbortSignal.timeout(EVENT_OPERATION_TIMEOUT_MS);
-  const profile = await readProfile(identity, repository, signal);
   const eventId = request.eventId.trim();
   const participantProfileId = request.participantProfileId.trim();
   const now = dependencies.now || Date.now;
   const buildDueUpdates =
-    dependencies.buildDueUpdates || createDueUpdatesBuilder(dependencies);
+    dependencies.buildDueUpdates ||
+    createDueUpdatesBuilder(dependencies, repository);
   const lockManager =
     dependencies.lockManager || createDefaultLockManager(repository, signal);
+  await readEvent(eventId, repository, signal);
   const lockHandle = await acquireLock(
     eventId,
     identity,
@@ -514,15 +634,33 @@ export async function removeEventParticipant(
     const event = await readEvent(eventId, repository, signal);
     const creatorLoginUid = normalizeString(event.createdByLoginUid);
     const creatorProfileId = normalizeString(event.createdByProfileId);
-    if (
-      identity.uid !== creatorLoginUid &&
-      profile.profileId !== creatorProfileId
-    ) {
-      throw new AuthApiFailure(
-        403,
-        "permission-denied",
-        "Only the event creator can remove participants.",
-      );
+    const participants = toRecord(event.participants) || {};
+    const targetParticipant = toRecord(participants[participantProfileId]);
+    const targetLoginUid = normalizeString(targetParticipant?.loginUid);
+    const targetProfileId =
+      normalizeString(targetParticipant?.profileId) || participantProfileId;
+    const directCreator = identity.uid === creatorLoginUid;
+    let ownershipSnapshot: EventOwnershipSnapshot | null = null;
+    if (!directCreator) {
+      ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
+        loginUids: [identity.uid],
+      });
+      if (
+        !applyOwnershipPolicy(() =>
+          requesterOwnsProfileReference({
+            requesterUid: identity.uid,
+            snapshot: ownershipSnapshot,
+            storedLoginUid: creatorLoginUid,
+            storedProfileId: creatorProfileId,
+          }),
+        )
+      ) {
+        throw new AuthApiFailure(
+          403,
+          "permission-denied",
+          "Only the event creator can remove participants.",
+        );
+      }
     }
     if (event.status !== "scheduled") {
       throw new AuthApiFailure(
@@ -543,7 +681,15 @@ export async function removeEventParticipant(
       );
     }
     if (nowMs >= event.startAtMs) {
-      const dueTransition = await buildDueUpdates({ eventId, event, nowMs });
+      ownershipSnapshot ||= await loadOwnershipSnapshot(event, repository, {
+        loginUids: [identity.uid],
+      });
+      const dueTransition = await buildDueUpdates({
+        eventId,
+        event,
+        nowMs,
+        ownershipSnapshot,
+      });
       await persistDueTransition(
         eventId,
         dueTransition,
@@ -559,8 +705,6 @@ export async function removeEventParticipant(
         "This event can no longer remove participants.",
       );
     }
-    const participants = toRecord(event.participants) || {};
-    const targetParticipant = toRecord(participants[participantProfileId]);
     if (!targetParticipant) {
       throw new AuthApiFailure(
         409,
@@ -568,10 +712,32 @@ export async function removeEventParticipant(
         "Selected participant was not found.",
       );
     }
-    if (
+    let targetIsCreator =
       participantProfileId === creatorProfileId ||
-      normalizeString(targetParticipant.loginUid) === creatorLoginUid
-    ) {
+      targetProfileId === creatorProfileId ||
+      targetLoginUid === creatorLoginUid;
+    if (!targetIsCreator && directCreator) {
+      const hasSeparateCreatorParticipant = Object.entries(participants).some(
+        ([candidateProfileId, value]) => {
+          if (candidateProfileId === participantProfileId) return false;
+          const candidate = toRecord(value);
+          return (
+            candidateProfileId === creatorProfileId ||
+            normalizeString(candidate?.profileId) === creatorProfileId ||
+            normalizeString(candidate?.loginUid) === creatorLoginUid
+          );
+        },
+      );
+      targetIsCreator = !hasSeparateCreatorParticipant;
+    }
+    if (!targetIsCreator && ownershipSnapshot) {
+      targetIsCreator = applyOwnershipPolicy(
+        () =>
+          getCanonicalProfileId(ownershipSnapshot!, targetProfileId) ===
+          getCanonicalProfileId(ownershipSnapshot!, creatorProfileId),
+      );
+    }
+    if (targetIsCreator) {
       throw new AuthApiFailure(
         409,
         "failed-precondition",
@@ -585,10 +751,14 @@ export async function removeEventParticipant(
     );
     const commitNowMs = now();
     if (commitNowMs >= event.startAtMs) {
+      ownershipSnapshot ||= await loadOwnershipSnapshot(event, repository, {
+        loginUids: [identity.uid],
+      });
       const dueTransition = await buildDueUpdates({
         eventId,
         event,
         nowMs: commitNowMs,
+        ownershipSnapshot,
       });
       await persistDueTransition(
         eventId,
@@ -624,14 +794,13 @@ export async function removeEventParticipant(
 }
 
 export async function toggleEventPrizeSelection(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: ToggleEventPrizeSelectionRequest,
   repository: EventParticipationRepository,
   dependencies: EventParticipationDependencies = {},
 ): Promise<ToggleEventPrizeSelectionResponse> {
   const signal =
     dependencies.signal || AbortSignal.timeout(EVENT_OPERATION_TIMEOUT_MS);
-  const profile = await readProfile(identity, repository, signal);
   const eventId = request.eventId;
   if (!isEventPrizeId(eventId, request.prizeId)) {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
@@ -639,6 +808,7 @@ export async function toggleEventPrizeSelection(
   const lockManager =
     dependencies.lockManager || createDefaultLockManager(repository, signal);
   const busyMessage = "Event is busy. Please try selecting again.";
+  await readEvent(eventId, repository, signal);
   const lockHandle = await acquireLock(
     eventId,
     identity,
@@ -665,20 +835,22 @@ export async function toggleEventPrizeSelection(
         "Prize selection is locked for this event.",
       );
     }
-    const participants = toRecord(event.participants) || {};
-    let participantProfileId = "";
-    if (toRecord(participants[profile.profileId])) {
-      participantProfileId = profile.profileId;
-    } else {
-      const matchingProfileIds = Object.entries(participants)
-        .filter(([, participant]) => {
-          const record = toRecord(participant);
-          return record && normalizeString(record.loginUid) === identity.uid;
-        })
-        .map(([profileId]) => profileId);
-      if (matchingProfileIds.length === 1) {
-        participantProfileId = matchingProfileIds[0];
-      }
+    const directParticipation = applyOwnershipPolicy(() =>
+      directParticipantParticipation(event, identity.uid),
+    );
+    let participantProfileId = directParticipation.profileId || "";
+    if (!directParticipation.isParticipant) {
+      const ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
+        loginUids: [identity.uid],
+      });
+      participantProfileId =
+        applyOwnershipPolicy(() =>
+          resolveParticipantParticipation(
+            event,
+            identity.uid,
+            ownershipSnapshot,
+          ),
+        ).profileId || "";
     }
     if (!participantProfileId) {
       throw new AuthApiFailure(

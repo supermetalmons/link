@@ -43,9 +43,9 @@ import {
 } from "./authHttp.ts";
 import {
   verifyFirebaseRequest,
-  type FirebaseIdentity,
   type WorkerExecutionContext,
 } from "./firebaseAuth.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
 import {
   createGameplayRepository,
   type GameplayRepository,
@@ -57,11 +57,15 @@ import {
   readEventPrizeWithdrawalStorageMode,
   type EventPrizeWithdrawalStore,
 } from "./eventPrizeWithdrawalD1.ts";
-import {
-  readCanonicalLoginOwner,
-  readCanonicalMergeTarget,
-} from "./profileCanonicalD1.ts";
+import { readCanonicalMergeTarget } from "./profileCanonicalD1.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
+import {
+  getCanonicalProfileId,
+  getLoginProfileId,
+  profileOwnershipUnavailable,
+  requireProfileOwnershipSnapshot,
+  type ProfileOwnershipReader,
+} from "./profileOwnership.ts";
 
 export const EVENT_PRIZE_WITHDRAWAL_PATH = "/events/prizes/withdrawals";
 export const EVENT_PRIZE_WITHDRAWAL_STATUS_PATH =
@@ -129,18 +133,22 @@ type EventPrizeRuntimeDependencies = {
     prizeId: string,
   ): Promise<Record<string, unknown> | null>;
   readProfileByLoginUid(uid: string): Promise<{ id: string } | null>;
+  readProfileOwnershipSnapshot: ProfileOwnershipReader["readProfileOwnershipSnapshot"];
   removeMatchingProfileEventPrizeAssignment(input: {
     targetRef: RtdbReference;
     eventId: string;
     prizeId: string;
   }): Promise<boolean>;
-  resolveCanonicalProfileId(profileId: string): Promise<string>;
+  resolveWithdrawalProfileId(profileId: string): Promise<string>;
   resolveCanonicalProfilePath(profileId: string): Promise<string[]>;
 };
 
 type EventPrizeGameplayRepository = Pick<
   GameplayRepository,
-  "getRtdbPath" | "patchRtdbRoot" | "transactRtdbPath"
+  | "getRtdbPath"
+  | "patchRtdbRoot"
+  | "readProfileOwnershipSnapshot"
+  | "transactRtdbPath"
 >;
 
 type RouteDependencies = {
@@ -151,7 +159,7 @@ type RouteDependencies = {
   verifyIdentity?: (
     request: Request,
     ctx: WorkerExecutionContext,
-  ) => Promise<FirebaseIdentity>;
+  ) => Promise<RequestIdentity>;
   workflow?: Workflow<EventPrizeWithdrawalWorkflowInput>;
 };
 
@@ -288,20 +296,29 @@ export async function createEventPrizeRuntimeDependencies(
     withdrawalStoreOverride ||
     createD1EventPrizeWithdrawalStore(env.EVENT_PRIZE_WITHDRAWALS_DB, { now });
   const readProfileByLoginUid = async (uid: string) => {
-    const owner = await readCanonicalLoginOwner(profileDb, uid);
-    return owner ? { id: owner.profileId } : null;
-  };
-  const resolveCanonicalProfilePath = (profileId: string) =>
-    resolveProfileMergeTargetPath({
-      profileId,
-      readMergeTarget: async (candidateProfileId: string) => {
-        const target = await readCanonicalMergeTarget(
-          profileDb,
-          candidateProfileId,
-        );
-        return target ? { targetProfileId: target.targetProfileId } : null;
-      },
+    const ownership = await requireProfileOwnershipSnapshot(repository, {
+      loginUids: [uid],
+      profileIds: [],
     });
+    const profileId = getLoginProfileId(ownership, uid);
+    return profileId ? { id: profileId } : null;
+  };
+  const resolveCanonicalProfilePath = async (profileId: string) => {
+    try {
+      return await resolveProfileMergeTargetPath({
+        profileId,
+        readMergeTarget: async (candidateProfileId: string) => {
+          const target = await readCanonicalMergeTarget(
+            profileDb,
+            candidateProfileId,
+          );
+          return target ? { targetProfileId: target.targetProfileId } : null;
+        },
+      });
+    } catch {
+      throw profileOwnershipUnavailable();
+    }
+  };
   return {
     admin: createEventPrizeAdmin(repository, withdrawalStore),
     createEventPrizeUmi: (standard) =>
@@ -312,6 +329,7 @@ export async function createEventPrizeRuntimeDependencies(
     now,
     readWithdrawal: withdrawalStore.get,
     readProfileByLoginUid,
+    readProfileOwnershipSnapshot: repository.readProfileOwnershipSnapshot,
     async removeMatchingProfileEventPrizeAssignment({
       targetRef,
       eventId,
@@ -328,9 +346,12 @@ export async function createEventPrizeRuntimeDependencies(
       );
       return result.committed && result.snapshot.val() === null;
     },
-    async resolveCanonicalProfileId(profileId) {
-      const path = await resolveCanonicalProfilePath(profileId);
-      return path.at(-1) || "";
+    async resolveWithdrawalProfileId(profileId) {
+      const ownership = await requireProfileOwnershipSnapshot(repository, {
+        loginUids: [],
+        profileIds: [profileId],
+      });
+      return getCanonicalProfileId(ownership, profileId) || "";
     },
     resolveCanonicalProfilePath,
   };
@@ -550,7 +571,7 @@ async function ensureAdmittedWithdrawalWorkflow(
 }
 
 async function resolveOwnedWithdrawal(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   eventId: string,
   prizeId: string,
   runtime: EventPrizeRuntimeDependencies,
@@ -559,33 +580,25 @@ async function resolveOwnedWithdrawal(
   profileId: string;
   withdrawal: Record<string, unknown> | null;
 }> {
-  const profile = await runtime.readProfileByLoginUid(identity.uid);
-  const profileId = cleanString(profile?.id);
+  const withdrawal = await runtime.readWithdrawal(eventId, prizeId);
+  const existingProfileId = cleanString(withdrawal?.profileId);
+  const ownership = await requireProfileOwnershipSnapshot(runtime, {
+    loginUids: [identity.uid],
+    profileIds: existingProfileId ? [existingProfileId] : [],
+  });
+  const profileId = getLoginProfileId(ownership, identity.uid) || "";
   if (!profileId) {
     throw new EventPrizeWithdrawalError("not-found", "profile-not-found");
   }
-  const withdrawal = await runtime.readWithdrawal(eventId, prizeId);
   if (!withdrawal) {
     return { canonicalRecordProfileId: "", profileId, withdrawal: null };
   }
-  const existingProfileId = cleanString(withdrawal.profileId);
-  let canonicalRecordProfileId = existingProfileId;
-  let owned = isWithdrawalRecordOwnedByRequest(
-    withdrawal,
-    profileId,
-    identity.uid,
-  );
-  if (!owned && existingProfileId && existingProfileId !== profileId) {
-    canonicalRecordProfileId =
-      await runtime.resolveCanonicalProfileId(existingProfileId);
-    owned = isWithdrawalRecordOwnedByRequest(
-      withdrawal,
-      profileId,
-      identity.uid,
-      canonicalRecordProfileId,
-      existingProfileId,
-    );
-  }
+  const canonicalRecordProfileId = existingProfileId
+    ? getCanonicalProfileId(ownership, existingProfileId) || ""
+    : "";
+  const owned = existingProfileId
+    ? canonicalRecordProfileId === profileId
+    : isWithdrawalRecordOwnedByRequest(withdrawal, profileId, identity.uid);
   if (!owned) {
     throw new EventPrizeWithdrawalError(
       "permission-denied",
@@ -595,8 +608,33 @@ async function resolveOwnedWithdrawal(
   return { canonicalRecordProfileId, profileId, withdrawal };
 }
 
+type OwnedWithdrawal = Awaited<ReturnType<typeof resolveOwnedWithdrawal>>;
+
+async function refreshOwnedWithdrawal(
+  eventId: string,
+  prizeId: string,
+  owned: OwnedWithdrawal,
+  runtime: Pick<EventPrizeRuntimeDependencies, "readWithdrawal">,
+): Promise<OwnedWithdrawal> {
+  const withdrawal = await runtime.readWithdrawal(eventId, prizeId);
+  if (!withdrawal) return { ...owned, withdrawal: null };
+  const recordProfileId = cleanString(withdrawal.profileId);
+  const previousRecordProfileId = cleanString(owned.withdrawal?.profileId);
+  if (
+    !recordProfileId ||
+    (recordProfileId !== owned.profileId &&
+      recordProfileId !== previousRecordProfileId)
+  ) {
+    throw new EventPrizeWithdrawalError(
+      "permission-denied",
+      "Prize withdrawal is unavailable.",
+    );
+  }
+  return { ...owned, withdrawal };
+}
+
 async function admitWithdrawal(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: {
     eventId: EventPrizeEventId;
     prizeId: EventPrizeId;
@@ -748,22 +786,15 @@ async function admitWithdrawal(
 }
 
 async function resolveWithdrawalWorkflowRecovery(
-  identity: FirebaseIdentity,
   request: {
     eventId: EventPrizeEventId;
     operationId: string;
     prizeId: EventPrizeId;
   },
-  runtime: EventPrizeRuntimeDependencies,
+  owned: OwnedWithdrawal,
 ): Promise<
   EventPrizeWithdrawalCompletedResponse | EventPrizeWithdrawalWorkflowParams
 > {
-  const owned = await resolveOwnedWithdrawal(
-    identity,
-    request.eventId,
-    request.prizeId,
-    runtime,
-  );
   if (
     owned.withdrawal &&
     isCompletedEventPrizeWithdrawal(
@@ -794,7 +825,7 @@ async function resolveWithdrawalWorkflowRecovery(
   const assetAddress = normalizeSolanaAddress(prize?.assetAddress);
   const collectionAddress = normalizeSolanaAddress(prize?.collectionAddress);
   const place = Number(owned.withdrawal.place);
-  const profileId = cleanString(owned.withdrawal.profileId);
+  const storedProfileId = cleanString(owned.withdrawal.profileId);
   const requesterUid = cleanString(owned.withdrawal.requesterUid);
   if (
     !prize ||
@@ -811,7 +842,7 @@ async function resolveWithdrawalWorkflowRecovery(
     !recipientAddress ||
     recipientAddress === EVENT_PRIZE_ADMIN_WALLET ||
     ![1, 2, 3].includes(place) ||
-    !profileId ||
+    !storedProfileId ||
     !requesterUid
   ) {
     throw terminalWorkflowFailure();
@@ -822,7 +853,7 @@ async function resolveWithdrawalWorkflowRecovery(
     eventId: request.eventId,
     operationId: request.operationId,
     prizeId: request.prizeId,
-    profileId,
+    profileId: owned.profileId,
     recipientAddress,
     requesterUid,
   };
@@ -830,34 +861,63 @@ async function resolveWithdrawalWorkflowRecovery(
 
 export async function resolveEventPrizeWithdrawalExecutionParams(
   params: EventPrizeWithdrawalWorkflowParams,
-  runtime: Pick<EventPrizeRuntimeDependencies, "readWithdrawal">,
+  runtime: Pick<
+    EventPrizeRuntimeDependencies,
+    "readProfileOwnershipSnapshot" | "readWithdrawal"
+  >,
 ): Promise<EventPrizeWithdrawalWorkflowParams> {
   const withdrawal = await runtime.readWithdrawal(
     params.eventId,
     params.prizeId,
   );
   const prize = getEventPrizeDefinition(params.eventId, params.prizeId);
-  const currentRecipientAddress = normalizeSolanaAddress(
+  const recordProfileId = cleanString(withdrawal?.profileId);
+  const recordRecipientAddress = normalizeSolanaAddress(
     withdrawal?.recipientAddress,
   );
-  const currentRequesterUid = cleanString(withdrawal?.requesterUid);
-  return withdrawal?.status === "processing" &&
-    prize &&
-    isWithdrawalRecordForPrize(
+  const recordRequesterUid = cleanString(withdrawal?.requesterUid);
+  const admittedRecipientAddress = normalizeSolanaAddress(
+    params.recipientAddress,
+  );
+  const status = cleanString(withdrawal?.status);
+  if (
+    !withdrawal ||
+    !prize ||
+    !["processing", "submitted", "completed"].includes(status) ||
+    !isWithdrawalRecordForPrize(
       withdrawal,
       params.eventId,
       params.prizeId,
       prize.assetAddress,
-    ) &&
-    currentRecipientAddress &&
-    currentRequesterUid
-    ? {
-        ...params,
-        profileId: cleanString(withdrawal.profileId) || params.profileId,
-        recipientAddress: currentRecipientAddress,
-        requesterUid: currentRequesterUid,
-      }
-    : params;
+    ) ||
+    !recordProfileId ||
+    !recordRecipientAddress ||
+    recordRecipientAddress !== admittedRecipientAddress ||
+    !recordRequesterUid
+  ) {
+    throw new EventPrizeWithdrawalError(
+      "permission-denied",
+      "Prize withdrawal is unavailable.",
+    );
+  }
+  const ownership = await requireProfileOwnershipSnapshot(runtime, {
+    loginUids: [],
+    profileIds: [params.profileId, recordProfileId],
+  });
+  const canonicalAdmittedProfileId =
+    getCanonicalProfileId(ownership, params.profileId) || "";
+  const canonicalRecordProfileId =
+    getCanonicalProfileId(ownership, recordProfileId) || "";
+  if (
+    !canonicalAdmittedProfileId ||
+    canonicalAdmittedProfileId !== canonicalRecordProfileId
+  ) {
+    throw new EventPrizeWithdrawalError(
+      "permission-denied",
+      "Prize withdrawal is unavailable.",
+    );
+  }
+  return { ...params, profileId: canonicalAdmittedProfileId };
 }
 
 export function createEventPrizeExecutionProfileReader(
@@ -865,19 +925,13 @@ export function createEventPrizeExecutionProfileReader(
     EventPrizeWithdrawalWorkflowParams,
     "profileId" | "requesterUid"
   >,
-  runtime: Pick<
-    EventPrizeRuntimeDependencies,
-    "readProfileByLoginUid" | "resolveCanonicalProfileId"
-  >,
+  runtime: Pick<EventPrizeRuntimeDependencies, "readProfileByLoginUid">,
 ): EventPrizeRuntimeDependencies["readProfileByLoginUid"] {
   return async (uid) => {
     if (uid !== params.requesterUid) {
       return runtime.readProfileByLoginUid(uid);
     }
-    const profileId =
-      cleanString(await runtime.resolveCanonicalProfileId(params.profileId)) ||
-      params.profileId;
-    return { id: profileId };
+    return { id: params.profileId };
   };
 }
 
@@ -904,6 +958,7 @@ export async function executeEventPrizeWithdrawal(
       executionParams,
       runtime,
     ),
+    resolveWithdrawalProfileId: async () => executionParams.profileId,
   };
   const result = await handleWithdrawEventPrize(
     {
@@ -1044,11 +1099,13 @@ export async function handleEventPrizeWithdrawalRoute(
       try {
         instance = await workflow.get(body.operationId);
       } catch {
-        const recovery = await resolveWithdrawalWorkflowRecovery(
-          identity,
-          body,
+        owned = await refreshOwnedWithdrawal(
+          body.eventId,
+          body.prizeId,
+          owned,
           runtime,
         );
+        const recovery = await resolveWithdrawalWorkflowRecovery(body, owned);
         if ("status" in recovery) {
           return authJsonResponse(recovery, 200, corsHeaders);
         }
@@ -1078,10 +1135,10 @@ export async function handleEventPrizeWithdrawalRoute(
         if (output?.ok === false && output.status === "failed") {
           throw toEventPrizeApiFailure(output);
         }
-        owned = await resolveOwnedWithdrawal(
-          identity,
+        owned = await refreshOwnedWithdrawal(
           body.eventId,
           body.prizeId,
+          owned,
           runtime,
         );
         if (
@@ -1104,11 +1161,13 @@ export async function handleEventPrizeWithdrawalRoute(
         throw terminalWorkflowFailure();
       }
       if (status?.status === "terminated") {
-        const recovery = await resolveWithdrawalWorkflowRecovery(
-          identity,
-          body,
+        owned = await refreshOwnedWithdrawal(
+          body.eventId,
+          body.prizeId,
+          owned,
           runtime,
         );
+        const recovery = await resolveWithdrawalWorkflowRecovery(body, owned);
         if ("status" in recovery) {
           return authJsonResponse(recovery, 200, corsHeaders);
         }
@@ -1146,6 +1205,7 @@ export async function handleEventPrizeWithdrawalRoute(
         JSON.stringify({
           event: "event_prize_withdrawal_route_failure",
           kind: failure.code,
+          reason: failure.message,
         }),
       );
     }

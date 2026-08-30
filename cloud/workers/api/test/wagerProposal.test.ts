@@ -10,28 +10,75 @@ import {
   isWagerProposalSendResponse,
 } from "@mons/shared/wagers";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import type { FirebaseIdentity } from "../src/firebaseAuth.ts";
+import type { RequestIdentity } from "../src/requestIdentity.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type {
+  ProfileOwnershipQuery,
+  ProfileOwnershipSnapshot,
+} from "../src/profileOwnership.ts";
 import {
   acceptWagerProposal,
   removeWagerProposal,
   sendWagerProposal,
 } from "../src/wagerProposal.ts";
 
-const identity: FirebaseIdentity = {
-  idToken: "firebase-token",
-  profileId: "profile-host",
+const identity: RequestIdentity = {
   uid: "host",
 };
+
+function ownershipSnapshot(
+  query: ProfileOwnershipQuery,
+  ownerForUid: (uid: string) => string | null = (uid) => `profile-${uid}`,
+): ProfileOwnershipSnapshot {
+  const loginOwnerByUid = new Map(
+    query.loginUids.map((uid) => {
+      const profileId = ownerForUid(uid);
+      return [uid, profileId ? { profileId, revision: 1 } : null] as const;
+    }),
+  );
+  const profileIds = new Set(
+    [...loginOwnerByUid.values()].flatMap((owner) =>
+      owner ? [owner.profileId] : [],
+    ),
+  );
+  return {
+    canonicalProfileIdByProfileId: new Map(),
+    loginOwnerByUid,
+    loginUidsByProfileId: new Map(
+      [...profileIds].map((profileId) => [
+        profileId,
+        query.loginUids
+          .filter((uid) => ownerForUid(uid) === profileId)
+          .slice()
+          .sort(),
+      ]),
+    ),
+    profileById: new Map(
+      [...profileIds].map((profileId) => [
+        profileId,
+        {
+          profile: {
+            aura: "",
+            emoji: "",
+            eth: "",
+            profileId,
+            rating: 1500,
+            sol: "",
+            username: "",
+          },
+          revision: 1,
+        },
+      ]),
+    ),
+  };
+}
 
 function repository(
   overrides: Partial<GameplayRepository> = {},
 ): GameplayRepository {
-  return {
+  const value: GameplayRepository = {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
-    findProfileId: async (uid) => `profile-${uid}`,
-    getGameplayProfile: async () => null,
     getNavigationGame: async () => null,
     getMiningMaterials: async () => ({
       dust: 10,
@@ -43,9 +90,11 @@ function repository(
     getMiningSnapshot: async () => null,
     getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
     patchRtdbRoot: async () => undefined,
+    readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
     transactRtdbPath: async () => ({ committed: false, value: null }),
     ...overrides,
   };
+  return value;
 }
 
 function applyTransaction(
@@ -276,25 +325,45 @@ test("send reserves materials and persists an exact proposal", async () => {
 
 test("send creates an automatic agreement and normalizes both reservations", async () => {
   const transactions: Array<{ path: string; value: unknown }> = [];
+  const mining: Record<string, unknown> = {
+    host: { frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 } },
+    guest: { frozen: { dust: 6, slime: 0, gum: 0, metal: 0, ice: 0 } },
+  };
+  let wager: unknown = {
+    proposals: {
+      guest: { material: "dust", count: "6", createdAt: 50 },
+    },
+    proposedBy: { guest: true },
+  };
   const result = await sendWagerProposal(
     identity,
     { inviteId: "invite", matchId: "match", material: "dust", count: 4 },
     repository({
+      getRtdbPath: async (path) => {
+        if (path === "invites/invite") {
+          return { hostId: "host", guestId: "guest" };
+        }
+        const uid = path.includes("/host/")
+          ? "host"
+          : path.includes("/guest/")
+            ? "guest"
+            : null;
+        return uid ? mining[uid] : wager;
+      },
       transactRtdbPath: async (path, updater) => {
-        const current =
-          path === "players/host/mining"
-            ? { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 }
-            : path === "players/guest/mining"
-              ? { dust: 6, slime: 0, gum: 0, metal: 0, ice: 0 }
-              : {
-                  proposals: {
-                    guest: { material: "dust", count: "6", createdAt: 50 },
-                  },
-                  proposedBy: { guest: true },
-                };
+        const uid = path.includes("/host/")
+          ? "host"
+          : path.includes("/guest/")
+            ? "guest"
+            : null;
+        const current = uid ? mining[uid] : wager;
         const transaction = path.startsWith("players/")
           ? applyMiningTransaction(updater, current)
           : applyTransaction(updater, current);
+        if (transaction.committed) {
+          if (uid) mining[uid] = transaction.value;
+          else wager = transaction.value;
+        }
         transactions.push({ path, value: transaction.value });
         return transaction;
       },
@@ -319,6 +388,7 @@ test("send creates an automatic agreement and normalizes both reservations", asy
       "players/host/mining",
       "invites/invite/wagers/match",
       "players/guest/mining",
+      "invites/invite/wagers/match",
     ],
   );
   assert.deepEqual(materialsOnly(transactions[2].value), {
@@ -368,7 +438,16 @@ test("send rolls back its reservation when the proposal is unavailable", async (
 test("accept reserves the available count and clears both proposals", async () => {
   const transactions: Array<{ path: string; value: unknown }> = [];
   const patches: Array<Record<string, unknown>> = [];
-  let reads = 0;
+  const mining: Record<string, unknown> = {
+    host: { frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 2 } },
+    guest: { frozen: { dust: 4, slime: 0, gum: 0, metal: 0, ice: 0 } },
+  };
+  let wager: unknown = {
+    proposals: {
+      guest: { material: "dust", count: 4, createdAt: 1 },
+      host: { material: "ice", count: 2, createdAt: 2 },
+    },
+  };
   const result = await acceptWagerProposal(
     identity,
     { inviteId: "invite", matchId: "match" },
@@ -380,35 +459,30 @@ test("accept reserves the available count and clears both proposals", async () =
         metal: 0,
         ice: 2,
       }),
-      getRtdbPath: async () => {
-        reads++;
-        return reads === 1
-          ? { hostId: "host", guestId: "guest" }
-          : {
-              proposals: {
-                guest: { material: "dust", count: 4, createdAt: 1 },
-                host: { material: "ice", count: 2, createdAt: 2 },
-              },
-            };
+      getRtdbPath: async (path) => {
+        if (path === "invites/invite") {
+          return { hostId: "host", guestId: "guest" };
+        }
+        if (path === "players/host/mining") return mining.host;
+        return wager;
       },
       patchRtdbRoot: async (updates) => {
         patches.push(updates);
       },
       transactRtdbPath: async (path, updater) => {
-        const current =
-          path === "players/host/mining"
-            ? { dust: 0, slime: 0, gum: 0, metal: 0, ice: 2 }
-            : path === "players/guest/mining"
-              ? { dust: 4, slime: 0, gum: 0, metal: 0, ice: 0 }
-              : {
-                  proposals: {
-                    guest: { material: "dust", count: 4, createdAt: 1 },
-                    host: { material: "ice", count: 2, createdAt: 2 },
-                  },
-                };
+        const uid = path.includes("/host/")
+          ? "host"
+          : path.includes("/guest/")
+            ? "guest"
+            : null;
+        const current = uid ? mining[uid] : wager;
         const transaction = path.startsWith("players/")
           ? applyMiningTransaction(updater, current)
           : applyTransaction(updater, current);
+        if (transaction.committed) {
+          if (uid) mining[uid] = transaction.value;
+          else wager = transaction.value;
+        }
         transactions.push({ path, value: transaction.value });
         return transaction;
       },
@@ -422,6 +496,7 @@ test("accept reserves the available count and clears both proposals", async () =
       "players/host/mining",
       "invites/invite/wagers/match",
       "players/guest/mining",
+      "invites/invite/wagers/match",
     ],
   );
   assert.deepEqual(materialsOnly(transactions[0].value), {
@@ -502,7 +577,10 @@ test("send and accept preserve exact domain failure reasons", async () => {
       expected: { ok: false, reason: "missing-opponent" },
     },
     {
-      repo: { findProfileId: async (uid) => (uid === "host" ? null : "p") },
+      repo: {
+        readProfileOwnershipSnapshot: async (query) =>
+          ownershipSnapshot(query, (uid) => (uid === "host" ? null : "p")),
+      },
       expected: { ok: false, reason: "profile-not-found" },
     },
     {
@@ -585,6 +663,287 @@ test("send and accept preserve exact domain failure reasons", async () => {
   );
 });
 
+test("same-canonical participants cannot create or accept a wager", async () => {
+  let miningReads = 0;
+  let transactions = 0;
+  const value = repository({
+    getMiningMaterials: async () => {
+      miningReads++;
+      return { dust: 10, slime: 10, gum: 10, metal: 10, ice: 10 };
+    },
+    getRtdbPath: async (path) =>
+      path === "invites/invite"
+        ? { hostId: "host", guestId: "guest" }
+        : { proposals: { guest: { material: "dust", count: 1 } } },
+    readProfileOwnershipSnapshot: async (query) =>
+      ownershipSnapshot(query, () => "shared-profile"),
+    transactRtdbPath: async () => {
+      transactions++;
+      return { committed: false, value: null };
+    },
+  });
+  assert.deepEqual(
+    await sendWagerProposal(
+      identity,
+      {
+        inviteId: "invite",
+        matchId: "match",
+        material: "dust",
+        count: 1,
+      },
+      value,
+    ),
+    { ok: false, reason: "proposal-unavailable" },
+  );
+  assert.deepEqual(
+    await acceptWagerProposal(
+      identity,
+      { inviteId: "invite", matchId: "match" },
+      value,
+    ),
+    { ok: false, reason: "proposal-unavailable" },
+  );
+  assert.equal(miningReads, 0);
+  assert.equal(transactions, 0);
+});
+
+test("releases a stranded send reservation after participants merge", async () => {
+  let merged = false;
+  let failWagerRead = true;
+  let ownershipReads = 0;
+  let wagerTransactions = 0;
+  let miningState: unknown = {
+    frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+  };
+  const value = repository({
+    getRtdbPath: async (path) => {
+      if (path === "invites/invite") {
+        return { hostId: "host", guestId: "guest" };
+      }
+      if (path === "players/host/mining") return miningState;
+      if (path === "invites/invite/wagers/match") {
+        if (failWagerRead) throw new Error("wager-read-unavailable");
+        return null;
+      }
+      return null;
+    },
+    readProfileOwnershipSnapshot: async (query) => {
+      ownershipReads++;
+      return ownershipSnapshot(query, (uid) =>
+        merged ? "shared-profile" : `profile-${uid}`,
+      );
+    },
+    transactRtdbPath: async (path, updater) => {
+      if (path === "players/host/mining") {
+        const transaction = applyMiningTransaction(updater, miningState);
+        if (transaction.committed) miningState = transaction.value;
+        return transaction;
+      }
+      wagerTransactions++;
+      throw new Error("wager-write-unavailable");
+    },
+  });
+  const input = {
+    inviteId: "invite",
+    matchId: "match",
+    material: "dust" as const,
+    count: 3,
+  };
+
+  await assert.rejects(() => sendWagerProposal(identity, input, value));
+  assert.equal(materialsOnly(miningState).dust, 3);
+
+  merged = true;
+  failWagerRead = false;
+  assert.deepEqual(await sendWagerProposal(identity, input, value), {
+    ok: false,
+    reason: "proposal-unavailable",
+  });
+  assert.equal(materialsOnly(miningState).dust, 0);
+  assert.deepEqual(await sendWagerProposal(identity, input, value), {
+    ok: false,
+    reason: "proposal-unavailable",
+  });
+  assert.equal(materialsOnly(miningState).dust, 0);
+  assert.equal(ownershipReads, 3);
+  assert.equal(wagerTransactions, 1);
+});
+
+test("changed send input replaces an unreferenced stranded reservation", async () => {
+  let miningState: unknown = {
+    frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+  };
+  let wager: unknown = null;
+  let failWagerWrite = true;
+  let failWagerRead = true;
+  const value = repository({
+    getRtdbPath: async (path) => {
+      if (path === "invites/invite") {
+        return { hostId: "host", guestId: "guest" };
+      }
+      if (path === "players/host/mining") return miningState;
+      if (path === "invites/invite/wagers/match") {
+        if (failWagerRead) throw new Error("wager-read-unavailable");
+        return wager;
+      }
+      return null;
+    },
+    transactRtdbPath: async (path, updater) => {
+      if (path === "players/host/mining") {
+        const transaction = applyMiningTransaction(updater, miningState);
+        if (transaction.committed) miningState = transaction.value;
+        return transaction;
+      }
+      if (failWagerWrite) throw new Error("wager-write-unavailable");
+      const transaction = applyTransaction(updater, wager);
+      if (transaction.committed) wager = transaction.value;
+      return transaction;
+    },
+  });
+
+  await assert.rejects(() =>
+    sendWagerProposal(
+      identity,
+      {
+        inviteId: "invite",
+        matchId: "match",
+        material: "dust",
+        count: 3,
+      },
+      value,
+    ),
+  );
+  assert.equal(materialsOnly(miningState).dust, 3);
+
+  failWagerWrite = false;
+  failWagerRead = false;
+  assert.deepEqual(
+    await sendWagerProposal(
+      identity,
+      {
+        inviteId: "invite",
+        matchId: "match",
+        material: "dust",
+        count: 1,
+      },
+      value,
+    ),
+    { ok: true, count: 1 },
+  );
+  assert.equal(materialsOnly(miningState).dust, 1);
+  assert.deepEqual(
+    await removeWagerProposal(
+      identity,
+      { inviteId: "invite", matchId: "match" },
+      "cancel",
+      value,
+    ),
+    { ok: true },
+  );
+  assert.equal(materialsOnly(miningState).dust, 0);
+});
+
+test("releases a stranded accept reservation after participants merge", async () => {
+  let merged = false;
+  let failReplayRead = true;
+  let ownershipReads = 0;
+  let wagerReads = 0;
+  let wagerTransactions = 0;
+  let miningState: unknown = {
+    frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+  };
+  const wager = {
+    proposals: {
+      guest: {
+        material: "dust",
+        count: 2,
+        operationId: "guest-proposal",
+      },
+    },
+  };
+  const value = repository({
+    getRtdbPath: async (path) => {
+      if (path === "invites/invite") {
+        return { hostId: "host", guestId: "guest" };
+      }
+      if (path === "players/host/mining") return miningState;
+      if (path === "invites/invite/wagers/match") {
+        wagerReads++;
+        if (failReplayRead && wagerReads > 1) {
+          throw new Error("wager-read-unavailable");
+        }
+        return wager;
+      }
+      return null;
+    },
+    readProfileOwnershipSnapshot: async (query) => {
+      ownershipReads++;
+      return ownershipSnapshot(query, (uid) =>
+        merged ? "shared-profile" : `profile-${uid}`,
+      );
+    },
+    transactRtdbPath: async (path, updater) => {
+      if (path === "players/host/mining") {
+        const transaction = applyMiningTransaction(updater, miningState);
+        if (transaction.committed) miningState = transaction.value;
+        return transaction;
+      }
+      wagerTransactions++;
+      throw new Error("wager-write-unavailable");
+    },
+  });
+  const input = { inviteId: "invite", matchId: "match" };
+
+  await assert.rejects(() => acceptWagerProposal(identity, input, value));
+  assert.equal(materialsOnly(miningState).dust, 2);
+
+  merged = true;
+  failReplayRead = false;
+  assert.deepEqual(await acceptWagerProposal(identity, input, value), {
+    ok: false,
+    reason: "proposal-unavailable",
+  });
+  assert.equal(materialsOnly(miningState).dust, 0);
+  assert.deepEqual(await acceptWagerProposal(identity, input, value), {
+    ok: false,
+    reason: "proposal-unavailable",
+  });
+  assert.equal(materialsOnly(miningState).dust, 0);
+  assert.equal(ownershipReads, 3);
+  assert.equal(wagerTransactions, 1);
+});
+
+test("ownership failure stops a wager before reservations", async () => {
+  let transactions = 0;
+  const value = repository({
+    readProfileOwnershipSnapshot: async () => {
+      throw new Error("d1-unavailable");
+    },
+    transactRtdbPath: async () => {
+      transactions++;
+      return { committed: false, value: null };
+    },
+  });
+  await assert.rejects(
+    () =>
+      sendWagerProposal(
+        identity,
+        {
+          inviteId: "invite",
+          matchId: "match",
+          material: "dust",
+          count: 1,
+        },
+        value,
+      ),
+    (error: unknown) =>
+      error instanceof AuthApiFailure &&
+      error.status === 503 &&
+      error.message === "profile-ownership-unavailable",
+  );
+  assert.equal(transactions, 0);
+});
+
 test("cancel removes the caller proposal and releases only its materials", async () => {
   const transactions: Array<{ path: string; value: unknown }> = [];
   const result = await removeWagerProposal(
@@ -592,9 +951,8 @@ test("cancel removes the caller proposal and releases only its materials", async
     { inviteId: "invite", matchId: "match" },
     "cancel",
     repository({
-      findProfileId: async (uid, token) => {
-        assert.equal(token, identity.idToken);
-        return `profile-${uid}`;
+      readProfileOwnershipSnapshot: async () => {
+        throw new Error("D1 should not be read for a direct participant");
       },
       transactRtdbPath: async (path, updater) => {
         const current = path.startsWith("invites/")
@@ -641,7 +999,7 @@ test("cancel removes the caller proposal and releases only its materials", async
 test("decline removes the opponent proposal and clamps frozen counts", async () => {
   const paths: string[] = [];
   const result = await removeWagerProposal(
-    { ...identity, profileId: "profile-guest", uid: "guest" },
+    { ...identity, uid: "guest" },
     { inviteId: "invite", matchId: "match" },
     "decline",
     repository({
@@ -663,14 +1021,23 @@ test("decline removes the opponent proposal and clamps frozen counts", async () 
   ]);
 });
 
-test("profile claims authorize linked logins with host precedence", async () => {
+test("canonical D1 ownership authorizes linked logins with host precedence", async () => {
   const paths: string[] = [];
+  let ownershipReads = 0;
   const result = await removeWagerProposal(
-    { idToken: "token", profileId: "shared-profile", uid: "linked-login" },
+    { uid: "linked-login" },
     { inviteId: "invite", matchId: "match" },
     "cancel",
     repository({
-      findProfileId: async () => "shared-profile",
+      readProfileOwnershipSnapshot: async (query) => {
+        ownershipReads++;
+        assert.deepEqual(query.loginUids, ["linked-login", "host", "guest"]);
+        return ownershipSnapshot(query, (uid) =>
+          uid === "linked-login" || uid === "host"
+            ? "shared-profile"
+            : "guest-profile",
+        );
+      },
       transactRtdbPath: async (path, updater) => {
         paths.push(path);
         return applyTransaction(
@@ -683,6 +1050,7 @@ test("profile claims authorize linked logins with host precedence", async () => 
     }),
   );
   assert.deepEqual(result, { ok: true });
+  assert.equal(ownershipReads, 1);
   assert.equal(paths[1], "players/host/mining");
 });
 
@@ -700,8 +1068,8 @@ test("returns exact domain outcomes without debug data", async () => {
       expected: { ok: false, reason: "missing-opponent" },
     },
     {
-      repo: { findProfileId: async (uid) => (uid === "host" ? null : "p") },
-      expected: { ok: false, reason: "profile-not-found" },
+      repo: {},
+      expected: { ok: false, reason: "proposal-missing" },
     },
     {
       repo: {
@@ -950,7 +1318,7 @@ test("accept and cancellation cannot both commit the same proposal", async () =>
   );
   await acceptSnapshot;
   const canceled = await removeWagerProposal(
-    { idToken: "token", profileId: "profile-guest", uid: "guest" },
+    { uid: "guest" },
     { inviteId: "invite", matchId: "match" },
     "cancel",
     repo,
@@ -1058,7 +1426,7 @@ test("rejects non-participants and sanitizes material release failures", async (
   await assert.rejects(
     () =>
       removeWagerProposal(
-        { idToken: "token", profileId: "other", uid: "other" },
+        { uid: "other" },
         { inviteId: "invite", matchId: "match" },
         "cancel",
         repository(),

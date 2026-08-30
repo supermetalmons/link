@@ -9,7 +9,7 @@ import type {
   ResolveInviteRoleRequest,
 } from "@mons/shared/game-sessions";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import type { FirebaseIdentity } from "../src/firebaseAuth.ts";
+import type { RequestIdentity } from "../src/requestIdentity.ts";
 import {
   GAME_SESSION_MUTATION_RECEIPT_SWEEP_LIMIT,
   acquireGameSessionMutationLease,
@@ -24,12 +24,13 @@ import {
   sweepGameSessionMutationReceipts,
 } from "../src/gameSessionMutations.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type {
+  ProfileOwnershipQuery,
+  ProfileOwnershipSnapshot,
+} from "../src/profileOwnership.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
-const identity: FirebaseIdentity = {
-  idToken: "firebase-token",
-  profileId: "profile-1",
-  rawProfileIdClaim: "profile-1",
+const identity: RequestIdentity = {
   uid: "login-1",
 };
 
@@ -72,22 +73,69 @@ function resolveServerValues(value: unknown, nowMs: number): unknown {
   );
 }
 
+function ownershipSnapshot(
+  query: ProfileOwnershipQuery,
+  ownerByUid: Readonly<Record<string, string | null>>,
+): ProfileOwnershipSnapshot {
+  const loginOwnerByUid = new Map(
+    query.loginUids.map((uid) => {
+      const profileId = ownerByUid[uid] || null;
+      return [uid, profileId ? { profileId, revision: 1 } : null] as const;
+    }),
+  );
+  const canonicalProfileIdByProfileId = new Map(
+    query.profileIds.map((profileId) => [profileId, profileId] as const),
+  );
+  const profileIds = new Set(
+    [
+      ...loginOwnerByUid.values(),
+      ...canonicalProfileIdByProfileId.values(),
+    ].flatMap((owner) =>
+      typeof owner === "string"
+        ? [owner]
+        : owner?.profileId
+          ? [owner.profileId]
+          : [],
+    ),
+  );
+  return {
+    canonicalProfileIdByProfileId,
+    loginOwnerByUid,
+    loginUidsByProfileId: new Map(
+      [...profileIds].map((profileId) => [
+        profileId,
+        Object.entries(ownerByUid)
+          .filter(([, ownerProfileId]) => ownerProfileId === profileId)
+          .map(([uid]) => uid)
+          .sort(),
+      ]),
+    ),
+    profileById: new Map(
+      [...profileIds].map((profileId) => [
+        profileId,
+        {
+          profile: {
+            aura: "",
+            emoji: 1,
+            eth: "",
+            profileId,
+            rating: 1500,
+            sol: "",
+            username: "Alice",
+          },
+          revision: 1,
+        },
+      ]),
+    ),
+  };
+}
+
 function repository(initial: Record<string, unknown> = {}, nowMs = 1_000) {
   const values = new Map(Object.entries(initial));
   const patches: Record<string, unknown>[] = [];
   const result: GameplayRepository = {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
-    findProfileId: async () => null,
-    getGameplayProfile: async () => ({
-      aura: "",
-      emoji: 1,
-      eth: "",
-      profileId: "profile-1",
-      rating: 1500,
-      sol: "",
-      username: "Alice",
-    }),
     getNavigationGame: async () => null,
     getMiningMaterials: async () => ({
       dust: 0,
@@ -109,6 +157,18 @@ function repository(initial: Record<string, unknown> = {}, nowMs = 1_000) {
         }
       }
     },
+    readProfileOwnershipSnapshot: async (query) =>
+      ownershipSnapshot(
+        query,
+        Object.fromEntries(
+          [...values].flatMap(([path, profileId]) => {
+            const match = /^players\/([^/]+)\/profile$/.exec(path);
+            return match && typeof profileId === "string"
+              ? [[match[1], profileId]]
+              : [];
+          }),
+        ),
+      ),
     transactRtdbPath: async (path, updater) => {
       const current = values.get(path) ?? null;
       const decision = updater(current) as {
@@ -191,6 +251,12 @@ test("resolves invite roles from authoritative participant links", async () => {
     "players/login-1/profile": "profile-stale",
     "players/host-login/profile": "profile-1",
   });
+  recoveringIdentity.repository.readProfileOwnershipSnapshot = async (query) =>
+    ownershipSnapshot(query, {
+      "login-1": "profile-1",
+      "host-login": "profile-1",
+      "guest-login": "profile-guest",
+    });
   assert.equal(
     (await resolveInviteRole(identity, request, recoveringIdentity.repository))
       .role,
@@ -205,8 +271,6 @@ test("resolves invite roles from authoritative participant links", async () => {
       await resolveInviteRole(
         {
           ...identity,
-          profileId: "profile-other",
-          rawProfileIdClaim: "profile-other",
         },
         request,
         unrelatedIdentity.repository,
@@ -224,13 +288,8 @@ test("resolves pending and anonymous invite roles without masking participants",
     "players/login-1/profile": "profile-host",
   });
   assert.equal(
-    (
-      await resolveInviteRole(
-        { ...identity, profileId: "profile-host" },
-        request,
-        pending.repository,
-      )
-    ).role,
+    (await resolveInviteRole({ ...identity }, request, pending.repository))
+      .role,
     "host",
   );
 
@@ -251,108 +310,84 @@ test("resolves pending and anonymous invite roles without masking participants",
   assert.equal(guest.actorUid, "guest-login");
 });
 
-test("uses only Firebase-rule-visible evidence for alternate invite roles", async () => {
+test("uses only canonical D1 evidence for alternate invite roles", async () => {
   const request: ResolveInviteRoleRequest = { inviteId: "abcdefghijk" };
   const base = {
     "invites/abcdefghijk": {
       hostId: "host-login",
       guestId: "guest-login",
     },
-    "players/host-login/profile": "profile-host",
-    "players/guest-login/profile": "profile-guest",
+    "players/alternate-login/profile": "stale-guest-shadow",
+    "players/host-login/profile": "stale-host-shadow",
+    "players/guest-login/profile": "stale-guest-shadow",
   };
-  const canonicalOnly = repository(base).repository;
-  canonicalOnly.findProfileId = async () => "profile-host";
+  const canonicalHost = repository(base).repository;
+  canonicalHost.readProfileOwnershipSnapshot = async (query) =>
+    ownershipSnapshot(query, {
+      "alternate-login": "profile-host",
+      "host-login": "profile-host",
+      "guest-login": "profile-guest",
+    });
   assert.equal(
     (
       await resolveInviteRole(
-        { ...identity, profileId: "", uid: "alternate-login" },
+        { ...identity, uid: "alternate-login" },
         request,
-        canonicalOnly,
-      )
-    ).role,
-    "watch",
-  );
-
-  assert.equal(
-    (
-      await resolveInviteRole(
-        {
-          ...identity,
-          profileId: "profile-host",
-          rawProfileIdClaim: "profile-host",
-          uid: "alternate-login",
-        },
-        request,
-        canonicalOnly,
+        canonicalHost,
       )
     ).role,
     "host",
   );
 
+  const canonicalGuest = repository(base).repository;
+  canonicalGuest.readProfileOwnershipSnapshot = async (query) =>
+    ownershipSnapshot(query, {
+      "alternate-login": "profile-guest",
+      "host-login": "profile-host",
+      "guest-login": "profile-guest",
+    });
   assert.equal(
     (
       await resolveInviteRole(
-        {
-          ...identity,
-          profileId: "profile-host",
-          rawProfileIdClaim: " profile-host ",
-          uid: "alternate-login",
-        },
+        { ...identity, uid: "alternate-login" },
         request,
-        canonicalOnly,
+        canonicalGuest,
+      )
+    ).role,
+    "guest",
+  );
+
+  const canonicalUnrelated = repository({
+    ...base,
+    "players/alternate-login/profile": "profile-host",
+  }).repository;
+  canonicalUnrelated.readProfileOwnershipSnapshot = async (query) =>
+    ownershipSnapshot(query, {
+      "alternate-login": "profile-other",
+      "host-login": "profile-host",
+      "guest-login": "profile-guest",
+    });
+  assert.equal(
+    (
+      await resolveInviteRole(
+        { ...identity, uid: "alternate-login" },
+        request,
+        canonicalUnrelated,
       )
     ).role,
     "watch",
   );
 
-  const paddedMismatch = repository({
-    ...base,
-    "players/alternate-login/profile": " profile-host ",
-  }).repository;
-  assert.equal(
-    (
-      await resolveInviteRole(
-        { ...identity, profileId: "", uid: "alternate-login" },
-        request,
-        paddedMismatch,
-      )
-    ).role,
-    "watch",
-  );
-
-  const exactPaddedMatch = repository({
-    ...base,
-    "players/host-login/profile": " profile-host ",
-    "players/alternate-login/profile": " profile-host ",
-  }).repository;
-  assert.equal(
-    (
-      await resolveInviteRole(
-        { ...identity, profileId: "", uid: "alternate-login" },
-        request,
-        exactPaddedMatch,
-      )
-    ).role,
-    "host",
-  );
-
-  const guestUnavailable = repository(base).repository;
-  guestUnavailable.getRtdbPath = async (path) => {
-    if (path === "invites/abcdefghijk") return base["invites/abcdefghijk"];
-    if (path === "players/alternate-login/profile") return "profile-host";
-    if (path === "players/host-login/profile") return "profile-host";
-    if (path === "players/guest-login/profile") {
-      throw new Error("guest-profile-unavailable");
-    }
-    return null;
+  canonicalHost.getRtdbPath = async (path) => {
+    assert.equal(path, "invites/abcdefghijk");
+    return base["invites/abcdefghijk"];
   };
   assert.equal(
     (
       await resolveInviteRole(
-        { ...identity, profileId: "", uid: "alternate-login" },
+        { ...identity, uid: "alternate-login" },
         request,
-        guestUnavailable,
+        canonicalHost,
       )
     ).role,
     "host",
@@ -372,7 +407,7 @@ test("preserves password-protected invite read access", async () => {
   await assert.rejects(
     () =>
       resolveInviteRole(
-        { ...identity, profileId: "profile-other" },
+        { ...identity },
         request,
         repository(pending).repository,
       ),
@@ -396,13 +431,8 @@ test("preserves password-protected invite read access", async () => {
     "players/guest-login/profile": "profile-guest",
   });
   assert.equal(
-    (
-      await resolveInviteRole(
-        { ...identity, profileId: "profile-other" },
-        request,
-        completed.repository,
-      )
-    ).role,
+    (await resolveInviteRole({ ...identity }, request, completed.repository))
+      .role,
     "watch",
   );
 });
@@ -477,13 +507,13 @@ test("rejects missing, malformed, and unavailable invite role state", async () =
     }
     return null;
   };
-  ownershipUnavailable.findProfileId = async () => {
+  ownershipUnavailable.readProfileOwnershipSnapshot = async () => {
     throw new Error("profile-repository-unavailable");
   };
   await assert.rejects(
     () =>
       resolveInviteRole(
-        { ...identity, profileId: "", uid: "alternate-login" },
+        { ...identity, uid: "alternate-login" },
         request,
         ownershipUnavailable,
       ),
@@ -661,8 +691,11 @@ test("does not join a host through the same canonical merged profile", async () 
     "players/login-1/profile": "target-profile",
     "players/host-login/matches/abcdefghijk": match("white"),
   });
-  state.repository.findProfileId = async (uid) =>
-    uid === "host-login" || uid === identity.uid ? "target-profile" : null;
+  state.repository.readProfileOwnershipSnapshot = async (query) =>
+    ownershipSnapshot(query, {
+      "host-login": "target-profile",
+      [identity.uid]: "target-profile",
+    });
 
   const response = await joinInvite(
     identity,
@@ -682,6 +715,48 @@ test("does not join a host through the same canonical merged profile", async () 
     joined: false,
     matchId: null,
   });
+  assert.equal(state.values.get("invites/abcdefghijk/guestId"), undefined);
+});
+
+test("checks merged invite owners after reading the locked invite", async () => {
+  const state = repository({
+    "invites/abcdefghijk": {
+      version: 2,
+      hostId: "host-login",
+      hostColor: "white",
+      guestId: null,
+    },
+    "players/host-login/matches/abcdefghijk": match("white"),
+  });
+  const readPath = state.repository.getRtdbPath;
+  let inviteRead = false;
+  let ownershipReads = 0;
+  state.repository.getRtdbPath = async (...args) => {
+    if (args[0] === "invites/abcdefghijk") inviteRead = true;
+    return readPath(...args);
+  };
+  state.repository.readProfileOwnershipSnapshot = async (query) => {
+    assert.equal(inviteRead, true);
+    ownershipReads++;
+    return ownershipSnapshot(query, {
+      [identity.uid]: "merged-profile",
+      "host-login": "merged-profile",
+    });
+  };
+
+  const response = await joinInvite(
+    identity,
+    {
+      operationId: ids.join,
+      inviteId: "abcdefghijk",
+      ...presentation(),
+    },
+    state.repository,
+    { createOwnerId: () => "owner", now: () => 1_000 },
+  );
+
+  assert.equal(response.joined, false);
+  assert.equal(ownershipReads, 1);
   assert.equal(state.values.get("invites/abcdefghijk/guestId"), undefined);
 });
 
@@ -803,10 +878,38 @@ test("proposes and ends rematches through participant-owned writes", async () =>
   );
 });
 
+test("does not propose a rematch between one canonical profile", async () => {
+  const state = repository({
+    "invites/abcdefghijk": {
+      version: 2,
+      hostId: identity.uid,
+      hostColor: "white",
+      guestId: "guest-login",
+    },
+    [`players/${identity.uid}/profile`]: "shared-profile",
+    "players/guest-login/profile": "shared-profile",
+  });
+  await assert.rejects(
+    () =>
+      proposeRematch(
+        identity,
+        {
+          operationId: ids.propose,
+          inviteId: "abcdefghijk",
+          ...presentation(),
+        },
+        state.repository,
+        { createOwnerId: () => "owner", now: () => 1_000 },
+      ),
+    (error: unknown) =>
+      error instanceof AuthApiFailure &&
+      error.message === "rematch-unavailable",
+  );
+  assert.equal(state.patches.length, 0);
+});
+
 test("ensures a missing match for an alternate login on the same profile", async () => {
-  const alternate: FirebaseIdentity = {
-    idToken: "alternate-token",
-    profileId: "profile-host",
+  const alternate: RequestIdentity = {
     uid: "alternate-login",
   };
   const state = repository({
@@ -819,6 +922,12 @@ test("ensures a missing match for an alternate login on the same profile", async
     "players/guest-login/profile": "profile-guest",
     "players/guest-login/matches/abcdefghijk": match("black"),
   });
+  state.repository.readProfileOwnershipSnapshot = async (query) =>
+    ownershipSnapshot(query, {
+      "alternate-login": "profile-host",
+      "host-login": "profile-host",
+      "guest-login": "profile-guest",
+    });
   const request: EnsureMatchRequest = {
     operationId: ids.ensure,
     inviteId: "abcdefghijk",

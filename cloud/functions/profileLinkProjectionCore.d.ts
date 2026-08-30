@@ -4,15 +4,21 @@ import type {
 } from "./profileGamesProjectionCore.js";
 
 export type ProfileLinkProjectionRepository = {
-  deleteProfileGameProjections(
-    profileId: string,
-    inviteIds: string[],
-  ): Promise<number>;
-  getCurrentProfileLink(loginUid: string): Promise<unknown>;
-  getMatches(loginUid: string): Promise<Record<string, unknown> | null>;
-  getMergeTarget(profileId: string): Promise<Record<string, unknown> | null>;
+  getMatches(
+    loginUid: string,
+    query: {
+      limitToFirst: number;
+      orderBy: "$key";
+      startAt?: string;
+    },
+  ): Promise<Record<string, unknown> | null>;
   inviteExists(inviteId: string): Promise<boolean>;
-  profileExists(profileId: string): Promise<boolean>;
+  readProfileOwnershipSnapshot(query: {
+    loginUids: readonly string[];
+    profileIds: readonly string[];
+  }): Promise<{
+    profileIdByLoginUid: ReadonlyMap<string, string | null>;
+  }>;
 };
 
 export type ProfileLinkProjectionSummary = {
@@ -23,11 +29,8 @@ export type ProfileLinkProjectionSummary = {
   inviteIdsResolved: number;
   processed: number;
   failed: number;
-  staleCleanupDeleted: number;
   didTimeout: boolean;
   didHitInviteCap: boolean;
-  didConverge: boolean;
-  convergenceAttempts: number;
   elapsedMs: number;
   nextMatchCursor: string | null;
 };
@@ -45,7 +48,6 @@ export function createProfileLinkProjectionCore(dependencies: {
     matchId: string,
     options: { inviteExistenceCache: Map<string, boolean | Promise<boolean>> },
   ): Promise<string | null>;
-  wait?(milliseconds: number): Promise<void>;
   withInviteProjectionLock<T>(
     inviteId: string,
     work: () => Promise<T>,
@@ -62,5 +64,5 @@ export function createProfileLinkProjectionCore(dependencies: {
 
 export const PROFILE_LINK_CATCHUP_CONCURRENCY: number;
 export const PROFILE_LINK_CATCHUP_MAX_INVITES: number;
+export const PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP: number;
 export const PROFILE_LINK_CATCHUP_TIMEOUT_MS: number;
-export const PROFILE_LINK_RECONCILE_ATTEMPTS: number;

@@ -12,6 +12,12 @@ import {
 } from "../src/eventPrizeWithdrawal.ts";
 import type { EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type {
+  ProfileOwnershipQuery,
+  ProfileOwnershipProfileSnapshot,
+  ProfileOwnershipReader,
+  ProfileOwnershipSnapshot,
+} from "../src/profileOwnership.ts";
 import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const eventId = "NN3eRzoZo80";
@@ -20,6 +26,76 @@ const profileId = "profile-1";
 const uid = "login-1";
 const recipientAddress = "11111111111111111111111111111111";
 const adminAddress = "Ay1mgqJr6WmihsSYdMZ1dkHL5r25N7VhCGk7NpCJcPGi";
+
+function ownershipReader({
+  canonicalProfileIds = new Map<string, string | null>(),
+  loginProfileIds = new Map<string, string | null>(),
+}: {
+  canonicalProfileIds?: Map<string, string | null>;
+  loginProfileIds?: Map<string, string | null>;
+} = {}): ProfileOwnershipReader {
+  return {
+    async readProfileOwnershipSnapshot(
+      query: ProfileOwnershipQuery,
+    ): Promise<ProfileOwnershipSnapshot> {
+      const loginOwnerByUid = new Map(
+        query.loginUids.map((loginUid) => {
+          const ownedProfileId = loginProfileIds.has(loginUid)
+            ? loginProfileIds.get(loginUid) || null
+            : profileId;
+          return [
+            loginUid,
+            ownedProfileId ? { profileId: ownedProfileId, revision: 1 } : null,
+          ] as const;
+        }),
+      );
+      const canonicalProfileIdByProfileId = new Map(
+        query.profileIds.map((candidateProfileId) => [
+          candidateProfileId,
+          canonicalProfileIds.has(candidateProfileId)
+            ? canonicalProfileIds.get(candidateProfileId) || null
+            : candidateProfileId,
+        ]),
+      );
+      const resolvedProfileIds = new Set<string>();
+      for (const owner of loginOwnerByUid.values()) {
+        if (owner) resolvedProfileIds.add(owner.profileId);
+      }
+      for (const candidateProfileId of canonicalProfileIdByProfileId.values()) {
+        if (candidateProfileId) resolvedProfileIds.add(candidateProfileId);
+      }
+      const loginUidsByProfileId = new Map<string, readonly string[]>();
+      const profileById = new Map<string, ProfileOwnershipProfileSnapshot>();
+      for (const resolvedProfileId of resolvedProfileIds) {
+        loginUidsByProfileId.set(
+          resolvedProfileId,
+          [...loginOwnerByUid]
+            .filter(([, owner]) => owner?.profileId === resolvedProfileId)
+            .map(([loginUid]) => loginUid)
+            .sort(),
+        );
+        profileById.set(resolvedProfileId, {
+          profile: {
+            aura: "",
+            emoji: 1,
+            eth: "",
+            profileId: resolvedProfileId,
+            rating: 1500,
+            sol: "",
+            username: "",
+          },
+          revision: 1,
+        });
+      }
+      return {
+        canonicalProfileIdByProfileId,
+        loginOwnerByUid,
+        loginUidsByProfileId,
+        profileById,
+      };
+    },
+  };
+}
 
 function frozenWithdrawalDb(): D1Database {
   return {
@@ -33,7 +109,9 @@ function frozenWithdrawalDb(): D1Database {
   } as unknown as D1Database;
 }
 
-function canonicalProfileDb(): D1Database {
+function canonicalProfileDb(
+  mergeTargets = new Map<string, string>(),
+): D1Database {
   return {
     ...TELEGRAM_TEST_ENV.PROFILE_DB,
     prepare(query: string) {
@@ -58,6 +136,18 @@ function canonicalProfileDb(): D1Database {
           return statement;
         },
         async first<T>() {
+          if (query.includes("profile_merge_targets")) {
+            const sourceProfileId = String(values[0] || "");
+            const targetProfileId = mergeTargets.get(sourceProfileId);
+            return targetProfileId
+              ? ({
+                  source_profile_id: sourceProfileId,
+                  target_profile_id: targetProfileId,
+                  merged_at_ms: 1,
+                  op_id: null,
+                } as T)
+              : null;
+          }
           if (query.includes("profile_login_owners")) {
             return {
               login_uid: String(values[0] || uid),
@@ -87,8 +177,8 @@ function repository() {
   const value: GameplayRepository = {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
-    findProfileId: async () => profileId,
-    getGameplayProfile: async () => null,
+    readProfileOwnershipSnapshot:
+      ownershipReader().readProfileOwnershipSnapshot,
     getMiningMaterials: async () => ({
       dust: 0,
       gum: 0,
@@ -432,24 +522,171 @@ test("rejects an invalid completed record before projection cleanup", async () =
   assert.deepEqual(state.values.get(assignmentPath), assignment);
 });
 
-test("uses the current processing admission when a Workflow retries", async () => {
+test("fails closed when stored withdrawal ownership cannot be canonicalized", async () => {
+  const state = repository();
+  state.value.readProfileOwnershipSnapshot = async () => {
+    throw new Error("D1 ownership unavailable");
+  };
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  state.values.set(`eventPrizeWithdrawals/${eventId}/${prizeId}`, {
+    eventId,
+    prizeId,
+    profileId: "retired-profile",
+    requesterUid: "retired-login",
+    status: "processing",
+  });
+  const response = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId,
+      prizeId,
+    }),
+    TELEGRAM_TEST_ENV,
+    context,
+    {
+      repository: state.value,
+      withdrawalStore: state.withdrawalStore,
+      verifyIdentity,
+    },
+  );
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "unavailable",
+    message: "profile-ownership-unavailable",
+  });
+});
+
+test("rejects a matching requester UID with a contradictory stored profile", async () => {
   const state = repository();
   const operationId = await buildEventPrizeWithdrawalOperationId(
     eventId,
     prizeId,
   );
-  const nextRecipientAddress = "Vote111111111111111111111111111111111111111";
+  const withdrawalPath = `eventPrizeWithdrawals/${eventId}/${prizeId}`;
+  state.values.set(withdrawalPath, {
+    eventId,
+    prizeId,
+    profileId: "other-profile",
+    requesterUid: uid,
+    status: "processing",
+  });
+  const before = structuredClone(state.values.get(withdrawalPath));
+  let workflowReads = 0;
+  const binding = workflow(() => ({ status: "running" }), {
+    onGet: () => {
+      workflowReads++;
+    },
+  });
+
+  const response = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId,
+      prizeId,
+    }),
+    { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
+    context,
+    {
+      profileDb: canonicalProfileDb(),
+      repository: state.value,
+      withdrawalStore: state.withdrawalStore,
+      verifyIdentity,
+      workflow: binding,
+    },
+  );
+
+  assert.equal(response.status, 403);
+  assert.equal(workflowReads, 0);
+  assert.deepEqual(state.values.get(withdrawalPath), before);
+});
+
+test("rejects a contradictory durable processing admission", async () => {
+  const state = repository();
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
   state.values.set(`eventPrizeWithdrawals/${eventId}/${prizeId}`, {
     assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
     eventId,
     place: 1,
     prizeId,
-    profileId,
-    recipientAddress: nextRecipientAddress,
+    profileId: "other-profile",
+    recipientAddress,
     requesterUid: uid,
     status: "processing",
   });
 
+  await assert.rejects(
+    resolveEventPrizeWithdrawalExecutionParams(
+      {
+        schemaVersion: 1,
+        kind: "withdrawal",
+        eventId,
+        operationId,
+        prizeId,
+        profileId,
+        recipientAddress,
+        requesterUid: uid,
+      },
+      {
+        readProfileOwnershipSnapshot:
+          ownershipReader().readProfileOwnershipSnapshot,
+        readWithdrawal: async (candidateEventId, candidatePrizeId) =>
+          (state.values.get(
+            `eventPrizeWithdrawals/${candidateEventId}/${candidatePrizeId}`,
+          ) as Record<string, unknown> | undefined) ?? null,
+      },
+    ),
+    (error) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "permission-denied",
+  );
+});
+
+test("validates processing ownership through a canonical merge", async () => {
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  const params = {
+    schemaVersion: 1,
+    kind: "withdrawal",
+    eventId,
+    operationId,
+    prizeId,
+    profileId: "retired-profile",
+    recipientAddress,
+    requesterUid: uid,
+  } as const;
+  const resolved = await resolveEventPrizeWithdrawalExecutionParams(params, {
+    readProfileOwnershipSnapshot: ownershipReader({
+      canonicalProfileIds: new Map([["retired-profile", "canonical-profile"]]),
+    }).readProfileOwnershipSnapshot,
+    readWithdrawal: async () => ({
+      assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+      eventId,
+      place: 1,
+      prizeId,
+      profileId: "retired-profile",
+      recipientAddress,
+      requesterUid: uid,
+      status: "processing",
+    }),
+  });
+  assert.equal(resolved.profileId, "canonical-profile");
+});
+
+test("lets an alternate canonical login execute an existing processing intent", async () => {
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
   const resolved = await resolveEventPrizeWithdrawalExecutionParams(
     {
       schemaVersion: 1,
@@ -459,32 +696,142 @@ test("uses the current processing admission when a Workflow retries", async () =
       prizeId,
       profileId,
       recipientAddress,
-      requesterUid: uid,
+      requesterUid: "alternate-login",
     },
     {
-      readWithdrawal: async (candidateEventId, candidatePrizeId) =>
-        (state.values.get(
-          `eventPrizeWithdrawals/${candidateEventId}/${candidatePrizeId}`,
-        ) as Record<string, unknown> | undefined) ?? null,
+      readProfileOwnershipSnapshot:
+        ownershipReader().readProfileOwnershipSnapshot,
+      readWithdrawal: async () => ({
+        assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+        eventId,
+        place: 1,
+        prizeId,
+        profileId,
+        recipientAddress,
+        requesterUid: "original-login",
+        status: "processing",
+      }),
     },
   );
-
-  assert.equal(resolved.recipientAddress, nextRecipientAddress);
+  assert.equal(resolved.requesterUid, "alternate-login");
+  assert.equal(resolved.profileId, profileId);
 });
 
-test("execution profile reads follow merges during transfer", async () => {
-  let canonicalProfileId = profileId;
+test("executes a processing capability without rereading the live owner", async () => {
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  const params = {
+    schemaVersion: 1,
+    kind: "withdrawal",
+    eventId,
+    operationId,
+    prizeId,
+    profileId,
+    recipientAddress,
+    requesterUid: uid,
+  } as const;
+  const resolved = await resolveEventPrizeWithdrawalExecutionParams(params, {
+    readProfileOwnershipSnapshot:
+      ownershipReader().readProfileOwnershipSnapshot,
+    readWithdrawal: async () => ({
+      assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+      eventId,
+      place: 1,
+      prizeId,
+      profileId,
+      recipientAddress,
+      requesterUid: uid,
+      status: "processing",
+    }),
+  });
+  assert.deepEqual(resolved, params);
+});
+
+test("fails closed when the admitted profile no longer exists", async () => {
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  await assert.rejects(
+    resolveEventPrizeWithdrawalExecutionParams(
+      {
+        schemaVersion: 1,
+        kind: "withdrawal",
+        eventId,
+        operationId,
+        prizeId,
+        profileId,
+        recipientAddress,
+        requesterUid: uid,
+      },
+      {
+        readProfileOwnershipSnapshot: ownershipReader({
+          canonicalProfileIds: new Map([[profileId, null]]),
+        }).readProfileOwnershipSnapshot,
+        readWithdrawal: async () => ({
+          assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+          eventId,
+          place: 1,
+          prizeId,
+          profileId,
+          recipientAddress,
+          requesterUid: uid,
+          status: "processing",
+        }),
+      },
+    ),
+    (error) =>
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "permission-denied",
+  );
+});
+
+test("preserves submitted reconciliation after the login is unlinked", async () => {
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  const params = {
+    schemaVersion: 1,
+    kind: "withdrawal",
+    eventId,
+    operationId,
+    prizeId,
+    profileId,
+    recipientAddress,
+    requesterUid: uid,
+  } as const;
+  const resolved = await resolveEventPrizeWithdrawalExecutionParams(params, {
+    readProfileOwnershipSnapshot:
+      ownershipReader().readProfileOwnershipSnapshot,
+    readWithdrawal: async () => ({
+      assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
+      eventId,
+      place: 1,
+      prizeId,
+      profileId,
+      recipientAddress,
+      requesterUid: uid,
+      status: "submitted",
+    }),
+  });
+  assert.deepEqual(resolved, params);
+});
+
+test("execution capability synthesizes only the admitted requester profile", async () => {
+  const runtime = {
+    readProfileByLoginUid: async (loginUid: string) => ({ id: loginUid }),
+  };
   const readProfile = createEventPrizeExecutionProfileReader(
     { profileId: "original-profile", requesterUid: uid },
-    {
-      readProfileByLoginUid: async () => null,
-      resolveCanonicalProfileId: async () => canonicalProfileId,
-    },
+    runtime,
   );
 
-  assert.deepEqual(await readProfile(uid), { id: profileId });
-  canonicalProfileId = "merged-profile";
-  assert.deepEqual(await readProfile(uid), { id: "merged-profile" });
+  assert.deepEqual(await readProfile(uid), { id: "original-profile" });
+  assert.deepEqual(await readProfile("other-login"), { id: "other-login" });
 });
 
 test("completed execution retries projection cleanup failures", async () => {
@@ -815,6 +1162,49 @@ for (const durableStatus of ["processing", "submitted"] as const) {
     }
   });
 }
+
+test("alternate canonical login recreates a missing processing Workflow", async () => {
+  const state = repository();
+  setRecoverableWithdrawal(state, "processing");
+  const withdrawalPath = `eventPrizeWithdrawals/${eventId}/${prizeId}`;
+  state.values.set(withdrawalPath, {
+    ...(state.values.get(withdrawalPath) as Record<string, unknown>),
+    requesterUid: "original-login",
+  });
+  const operationId = await buildEventPrizeWithdrawalOperationId(
+    eventId,
+    prizeId,
+  );
+  const batches: WorkflowInstanceCreateOptions<EventPrizeWithdrawalWorkflowInput>[][] =
+    [];
+  const binding = workflow(() => ({ status: "running" }), {
+    getMissing: true,
+    onCreate: (batch) => batches.push(batch),
+  });
+  const response = await handleEventPrizeWithdrawalRoute(
+    request("/events/prizes/withdrawals/status", {
+      eventId,
+      operationId,
+      prizeId,
+    }),
+    { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
+    context,
+    {
+      profileDb: canonicalProfileDb(),
+      repository: state.value,
+      withdrawalStore: state.withdrawalStore,
+      verifyIdentity: async () => ({ uid: "alternate-login" }),
+      workflow: binding,
+    },
+  );
+
+  assert.equal(response.status, 202);
+  assert.equal(batches.length, 1);
+  assert.equal(
+    (batches[0][0].params as { requesterUid: string }).requesterUid,
+    "original-login",
+  );
+});
 
 test("status polling retries missing Workflow creation without losing durable state", async () => {
   const state = repository();
@@ -1204,6 +1594,14 @@ test("withdrawal storage freeze prevents missing Workflow recreation", async () 
 
 test("status polling recreates a terminated processing Workflow", async () => {
   const state = repository();
+  const readOwnership = ownershipReader({
+    canonicalProfileIds: new Map([["retired-profile", profileId]]),
+  }).readProfileOwnershipSnapshot;
+  let ownershipReads = 0;
+  state.value.readProfileOwnershipSnapshot = async (query) => {
+    ownershipReads += 1;
+    return readOwnership(query);
+  };
   const operationId = await buildEventPrizeWithdrawalOperationId(
     eventId,
     prizeId,
@@ -1239,7 +1637,6 @@ test("status polling recreates a terminated processing Workflow", async () => {
     { ...TELEGRAM_TEST_ENV, EVENT_PRIZE_WITHDRAWAL_WORKFLOW: binding },
     context,
     {
-      profileDb: canonicalProfileDb(),
       repository: state.value,
       withdrawalStore: state.withdrawalStore,
       verifyIdentity,
@@ -1248,6 +1645,7 @@ test("status polling recreates a terminated processing Workflow", async () => {
   );
 
   assert.equal(response.status, 202);
+  assert.equal(ownershipReads, 1);
   assert.equal(deletes, 1);
   assert.equal(batches.length, 1);
   assert.deepEqual(batches[0][0].params, {
@@ -1256,7 +1654,7 @@ test("status polling recreates a terminated processing Workflow", async () => {
     eventId,
     operationId,
     prizeId,
-    profileId: "retired-profile",
+    profileId,
     recipientAddress,
     requesterUid: uid,
   });

@@ -9,7 +9,7 @@ import {
   FirebaseAuthAdminFailure,
   type FirebaseAuthAdminClient,
 } from "./firebaseAuthAdmin.ts";
-import type { FirebaseIdentity } from "./firebaseAuth.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
 import {
   createFirebaseRtdbClient,
   FirebaseRtdbFailure,
@@ -43,7 +43,7 @@ function cleanupFailureKind(error: unknown): string {
 }
 
 export async function syncProfileClaim(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   env: Env,
   dependencies: ProfileClaimDependencies = {},
 ): Promise<LinkedAuthMethodsResponse> {

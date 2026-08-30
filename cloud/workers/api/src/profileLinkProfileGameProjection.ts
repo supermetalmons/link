@@ -9,13 +9,9 @@ import {
 } from "./gameplayRepository.ts";
 import {
   createProfileGameProjectionRuntime,
+  readProjectionOwnershipSnapshot,
   type ProfileGameProjectionRuntime,
 } from "./profileGameProjectionRepository.ts";
-import { commitProfileGameProjectionWrites } from "./profileGamesD1.ts";
-import {
-  readCanonicalMergeTarget,
-  readCanonicalProfile,
-} from "./profileCanonicalD1.ts";
 
 export type ProfileLinkProjectionSummary = CoreProfileLinkProjectionSummary;
 
@@ -25,6 +21,7 @@ export type ProfileLinkProjectionRuntimeDependencies = {
   now?: () => number;
   profileDb?: D1Database;
   projection?: ProfileGameProjectionRuntime;
+  readProfileOwnershipSnapshot?: ProfileLinkProjectionRepository["readProfileOwnershipSnapshot"];
   rtdb?: Pick<GameplayRepository, "getRtdbPath">;
   wait?: (milliseconds: number) => Promise<void>;
   withInviteProjectionLock<T>(
@@ -65,32 +62,10 @@ export function createProfileLinkProjectionRuntime(
       wait: dependencies.wait,
     });
   const repository: ProfileLinkProjectionRepository = {
-    async deleteProfileGameProjections(profileId, inviteIds) {
-      if (inviteIds.length === 0) {
-        return 0;
-      }
-      await commitProfileGameProjectionWrites(
-        d1,
-        inviteIds.map((inviteId) => ({
-          type: "delete",
-          profileId,
-          projectionId: inviteId,
-        })),
-      );
-      return inviteIds.length;
-    },
-    getCurrentProfileLink: (loginUid) =>
-      rtdb.getRtdbPath(`players/${loginUid}/profile`),
-    async getMatches(loginUid) {
+    async getMatches(loginUid, query) {
       return toRecord(
-        await rtdb.getRtdbPath(`players/${loginUid}/matches`, {
-          shallow: true,
-        }),
+        await rtdb.getRtdbPath(`players/${loginUid}/matches`, query),
       );
-    },
-    async getMergeTarget(profileId) {
-      const target = await readCanonicalMergeTarget(profileDb, profileId);
-      return target ? { targetProfileId: target.targetProfileId } : null;
     },
     async inviteExists(inviteId) {
       const value = await rtdb.getRtdbPath(`invites/${inviteId}`, {
@@ -98,16 +73,16 @@ export function createProfileLinkProjectionRuntime(
       });
       return value !== null && value !== undefined;
     },
-    async profileExists(profileId) {
-      return Boolean(await readCanonicalProfile(profileDb, profileId));
-    },
+    readProfileOwnershipSnapshot: (query) =>
+      dependencies.readProfileOwnershipSnapshot
+        ? dependencies.readProfileOwnershipSnapshot(query)
+        : readProjectionOwnershipSnapshot(profileDb, query),
   };
   const core = createProfileLinkProjectionCore({
     logger: dependencies.logger,
     now: dependencies.now,
     recomputeInviteProjection: projection.recomputeInviteProjection,
     repository,
-    wait: dependencies.wait,
     withInviteProjectionLock: dependencies.withInviteProjectionLock,
   });
   return { process: core.processProfileLinkCatchup };

@@ -12,8 +12,9 @@ function repository(input: {
   return {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
-    findProfileId: async () => null,
-    getGameplayProfile: async () => null,
+    readProfileOwnershipSnapshot: async () => {
+      throw new Error("unexpected-profile-ownership-read");
+    },
     getMiningMaterials: async () => ({
       dust: 0,
       gum: 0,

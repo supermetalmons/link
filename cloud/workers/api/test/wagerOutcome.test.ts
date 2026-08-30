@@ -3,8 +3,16 @@ import test from "node:test";
 import type { MiningSnapshot } from "@mons/shared/mining";
 import { Game } from "mons-rules";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import type { FirebaseIdentity } from "../src/firebaseAuth.ts";
+import {
+  acceptWagerProposal,
+  sendWagerProposal,
+} from "../src/wagerProposal.ts";
+import type { RequestIdentity } from "../src/requestIdentity.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type {
+  ProfileOwnershipQuery,
+  ProfileOwnershipSnapshot,
+} from "../src/profileOwnership.ts";
 import { handleGameplayRoute } from "../src/gameplayRoute.ts";
 import {
   classifyWagerSettlementRetry,
@@ -29,9 +37,7 @@ const env = {
   X_CLIENT_SECRET: "test-x-secret",
 } as Env;
 
-const identity: FirebaseIdentity = {
-  idToken: "firebase-token",
-  profileId: "profile-host",
+const identity: RequestIdentity = {
   uid: "host",
 };
 
@@ -69,6 +75,56 @@ function applyTransaction(
     : { committed: true, decision: decision.decision, value: decision.value };
 }
 
+async function ownershipSnapshot(
+  query: ProfileOwnershipQuery,
+  profileIdForUid: (uid: string) => Promise<string | null>,
+): Promise<ProfileOwnershipSnapshot> {
+  const ownerEntries = await Promise.all(
+    query.loginUids.map(
+      async (uid) => [uid, await profileIdForUid(uid)] as const,
+    ),
+  );
+  const loginOwnerByUid = new Map(
+    ownerEntries.map(([uid, profileId]) => [
+      uid,
+      profileId ? { profileId, revision: 1 } : null,
+    ]),
+  );
+  const profileIds = new Set(
+    ownerEntries.flatMap(([, profileId]) => (profileId ? [profileId] : [])),
+  );
+  return {
+    canonicalProfileIdByProfileId: new Map(),
+    loginOwnerByUid,
+    loginUidsByProfileId: new Map(
+      [...profileIds].map((profileId) => [
+        profileId,
+        ownerEntries
+          .filter(([, value]) => value === profileId)
+          .map(([uid]) => uid)
+          .sort(),
+      ]),
+    ),
+    profileById: new Map(
+      [...profileIds].map((profileId) => [
+        profileId,
+        {
+          profile: {
+            aura: "",
+            emoji: "",
+            eth: "",
+            profileId,
+            rating: 1500,
+            sol: "",
+            username: "",
+          },
+          revision: 1,
+        },
+      ]),
+    ),
+  };
+}
+
 type RepositoryState = {
   appliedTransfers: number;
   frozen: Record<string, Record<string, unknown>>;
@@ -84,7 +140,7 @@ function createRepository({
   failFrozenOnce = false,
   failPatchAfterCommitOnce = false,
   failPatchOnce = false,
-  findProfileId,
+  profileIdForUid,
   invite = { hostId: "host", guestId: "guest" },
   marker = false,
   mining = {
@@ -98,7 +154,7 @@ function createRepository({
   failFrozenOnce?: boolean;
   failPatchAfterCommitOnce?: boolean;
   failPatchOnce?: boolean;
-  findProfileId?: (uid: string) => Promise<string | null>;
+  profileIdForUid?: (uid: string) => Promise<string | null>;
   invite?: unknown;
   marker?: boolean;
   mining?: Record<string, MiningSnapshot>;
@@ -142,8 +198,8 @@ function createRepository({
       }
       transferFingerprint = input.fingerprint;
       state.transferOutcome = "applied";
-      state.appliedTransfers += 1;
       if (input.winnerProfileId !== input.loserProfileId) {
+        state.appliedTransfers += 1;
         state.mining[input.winnerProfileId].materials[input.material] +=
           input.count;
         state.mining[input.loserProfileId].materials[input.material] -=
@@ -152,8 +208,6 @@ function createRepository({
       return "applied";
     },
     deleteNavigationGame: async () => "deleted",
-    findProfileId: findProfileId || (async (uid) => `profile-${uid}`),
-    getGameplayProfile: async () => null,
     getNavigationGame: async () => null,
     getMiningMaterials: async () => emptyMaterials(),
     getMiningSnapshot: async (profileId) =>
@@ -199,6 +253,11 @@ function createRepository({
         throw new Error("ambiguous-patch-failure");
       }
     },
+    readProfileOwnershipSnapshot: async (query) =>
+      ownershipSnapshot(
+        query,
+        profileIdForUid || (async (uid) => `profile-${uid}`),
+      ),
     transactRtdbPath: async (path, updater) => {
       if (path === "invites/invite/wagers/invite") {
         const result = applyTransaction(updater, state.wager);
@@ -284,7 +343,7 @@ test("preserves participant, match, no-wager, and legacy replay outcomes", async
       expected: { ok: false, reason: "invite-not-found" },
     },
     {
-      state: createRepository({ findProfileId: async () => null }),
+      state: createRepository({ profileIdForUid: async () => null }),
       expected: { ok: false, reason: "profile-not-found" },
     },
     {
@@ -371,6 +430,65 @@ for (const result of ["win", "gg"] as const) {
     });
   });
 }
+
+test("repairs reservation lineage before settling an agreement", async () => {
+  const state = createRepository({
+    wager: {
+      agreed: {
+        material: "dust",
+        count: 2,
+        total: 4,
+        proposerId: "guest",
+        accepterId: "host",
+        acceptedAt: 100,
+      },
+      agreementOperation: {
+        id: "a".repeat(64),
+        proposerReservedCount: 2,
+        reservationLineageVersion: 1,
+        reservationLineageReady: false,
+        reservationAdjustments: [],
+        proposerReservationOperationIds: [],
+        accepterReservationOperationIds: [],
+      },
+    },
+  });
+  await resolveWagerOutcome(
+    identity,
+    { inviteId: "invite", matchId: "invite" },
+    state.repository,
+    { now: () => 500, resolveResult: () => "win" },
+  );
+  assert.equal(state.transferCalls, 1);
+  assert.equal(state.marker, true);
+  assert.equal(
+    (state.wager?.agreementOperation as Record<string, unknown>)
+      .reservationLineageReady,
+    true,
+  );
+});
+
+test("settles merged-profile wagers without transferring materials", async () => {
+  const sharedMining = snapshot(10);
+  const state = createRepository({
+    mining: { "shared-profile": sharedMining },
+    profileIdForUid: async () => "shared-profile",
+    wager: { agreed: { material: "dust", count: 2 }, proposals: {} },
+  });
+  const response = await resolveWagerOutcome(
+    identity,
+    { inviteId: "invite", matchId: "invite" },
+    state.repository,
+    { now: () => 500, resolveResult: () => "win" },
+  );
+  assert.equal(state.transferCalls, 1);
+  assert.equal(state.appliedTransfers, 0);
+  assert.deepEqual(state.mining["shared-profile"], sharedMining);
+  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 0);
+  assert.equal((state.frozen.guest.frozen as Record<string, number>).dust, 0);
+  assert.equal(state.marker, true);
+  assert.deepEqual(response, { ok: true, mining: sharedMining });
+});
 
 test("retries a partial settlement without paying twice", async () => {
   const state = createRepository({
@@ -783,6 +901,166 @@ test("releases proposal-only reservations", async () => {
   assert.equal(state.marker, true);
 });
 
+test("proposal settlement consumes reservation lineage exactly once", async () => {
+  const state = createRepository({ wager: {} });
+  state.frozen.host = { frozen: emptyMaterials() };
+  state.repository.getMiningMaterials = async () => ({
+    ...emptyMaterials(),
+    dust: 10,
+  });
+
+  assert.deepEqual(
+    await sendWagerProposal(
+      { uid: "host" },
+      {
+        inviteId: "invite",
+        matchId: "invite",
+        material: "dust",
+        count: 2,
+      },
+      state.repository,
+    ),
+    { ok: true, count: 2 },
+  );
+  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 2);
+
+  await resolveWagerOutcome(
+    identity,
+    { inviteId: "invite", matchId: "invite" },
+    state.repository,
+    { now: () => 500, resolveResult: () => "win" },
+  );
+  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 0);
+
+  state.repository.readProfileOwnershipSnapshot = async (query) =>
+    ownershipSnapshot(query, async () => "shared-profile");
+  assert.deepEqual(
+    await sendWagerProposal(
+      { uid: "host" },
+      {
+        inviteId: "invite",
+        matchId: "invite",
+        material: "dust",
+        count: 2,
+      },
+      state.repository,
+    ),
+    { ok: false, reason: "proposal-unavailable" },
+  );
+  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 0);
+});
+
+test("agreed settlement tombstones reservation lineage against late replay", async () => {
+  const state = createRepository({ wager: {} });
+  state.frozen.host = { frozen: emptyMaterials() };
+  state.frozen.guest = { frozen: emptyMaterials() };
+  state.repository.getMiningMaterials = async () => ({
+    ...emptyMaterials(),
+    dust: 10,
+  });
+  const input = {
+    inviteId: "invite",
+    matchId: "invite",
+    material: "dust" as const,
+    count: 2,
+  };
+
+  assert.deepEqual(
+    await sendWagerProposal({ uid: "guest" }, input, state.repository),
+    { ok: true, count: 2 },
+  );
+  const agreed = await sendWagerProposal(
+    { uid: "host" },
+    input,
+    state.repository,
+  );
+  assert.equal(agreed.ok, true);
+  assert.equal("agreed" in agreed ? agreed.agreed?.count : null, 2);
+  await resolveWagerOutcome(
+    identity,
+    { inviteId: "invite", matchId: "invite" },
+    state.repository,
+    { now: () => 500, resolveResult: () => "win" },
+  );
+  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 0);
+  assert.equal((state.frozen.guest.frozen as Record<string, number>).dust, 0);
+
+  assert.equal(
+    (await sendWagerProposal({ uid: "host" }, input, state.repository)).ok,
+    true,
+  );
+  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 0);
+});
+
+test("proposal settlement consumes a hidden accept reservation", async () => {
+  const state = createRepository({ wager: {} });
+  state.frozen.host = { frozen: emptyMaterials() };
+  state.frozen.guest = { frozen: emptyMaterials() };
+  state.repository.getMiningMaterials = async () => ({
+    ...emptyMaterials(),
+    dust: 10,
+  });
+
+  assert.deepEqual(
+    await sendWagerProposal(
+      { uid: "guest" },
+      {
+        inviteId: "invite",
+        matchId: "invite",
+        material: "dust",
+        count: 2,
+      },
+      state.repository,
+    ),
+    { ok: true, count: 2 },
+  );
+
+  const read = state.repository.getRtdbPath;
+  const transact = state.repository.transactRtdbPath;
+  let wagerReads = 0;
+  state.repository.getRtdbPath = async (path, query, signal) => {
+    if (path === "invites/invite/wagers/invite" && ++wagerReads === 2) {
+      throw new Error("wager-read-unavailable");
+    }
+    return read(path, query, signal);
+  };
+  state.repository.transactRtdbPath = async (path, updater, signal) => {
+    if (path === "invites/invite/wagers/invite") {
+      throw new Error("wager-write-unavailable");
+    }
+    return transact(path, updater, signal);
+  };
+
+  await assert.rejects(() =>
+    acceptWagerProposal(
+      { uid: "host" },
+      { inviteId: "invite", matchId: "invite" },
+      state.repository,
+    ),
+  );
+  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 2);
+
+  state.repository.getRtdbPath = read;
+  state.repository.transactRtdbPath = transact;
+  await resolveWagerOutcome(
+    identity,
+    { inviteId: "invite", matchId: "invite" },
+    state.repository,
+    { now: () => 500, resolveResult: () => "win" },
+  );
+  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 0);
+  assert.equal((state.frozen.guest.frozen as Record<string, number>).dust, 0);
+  assert.deepEqual(
+    await acceptWagerProposal(
+      { uid: "host" },
+      { inviteId: "invite", matchId: "invite" },
+      state.repository,
+    ),
+    { ok: false, reason: "proposal-missing" },
+  );
+  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 0);
+});
+
 test("resumes an empty proposal settlement after RTDB drops empty values", async () => {
   const state = createRepository({
     failPatchOnce: true,
@@ -798,7 +1076,7 @@ test("resumes an empty proposal settlement after RTDB drops empty values", async
   );
   const pending = state.wager?.settlement as Record<string, unknown>;
   assert.equal(Object.hasOwn(pending, "completedAtMs"), false);
-  assert.equal(Object.hasOwn(pending, "releases"), false);
+  assert.equal(Array.isArray(pending.releases), true);
   await resolveWagerOutcome(
     identity,
     { inviteId: "invite", matchId: "invite" },

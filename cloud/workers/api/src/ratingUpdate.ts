@@ -28,7 +28,7 @@ import {
 } from "../../../functions/telegramDisplay.js";
 import { TELEGRAM_AUTOMATCH_VERSION } from "../../../functions/telegram/automatchSource.js";
 import { AuthApiFailure } from "./authErrors.ts";
-import type { FirebaseIdentity } from "./firebaseAuth.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
 import type {
   RatingCommitPlan,
   RatingProfile,
@@ -45,6 +45,11 @@ import {
   type ProfileGameProjectionTask,
   type RatingProfileGameProjectionTask,
 } from "./profileGameProjectionTasks.ts";
+import {
+  getLoginProfileId,
+  requireProfileOwnershipSnapshot,
+  type ProfileOwnershipSnapshot,
+} from "./profileOwnership.ts";
 import {
   buildEventProgressPlan,
   type EventProgressPlan,
@@ -304,7 +309,9 @@ function buildRatingPlan({
 }): RatingCommitPlan {
   const resolvedPlayer = player || emptyProfile();
   const resolvedOpponent = opponent || emptyProfile();
-  const canUpdateRatings = !!player && !!opponent;
+  const canUpdateRatings = Boolean(
+    player && opponent && player.profileId !== opponent.profileId,
+  );
   const eventMetadata = getRatingEventMetadata(invite);
   const shouldApplyRatingDelta =
     canUpdateRatings && !eventMetadata.isEventMatch;
@@ -425,6 +432,7 @@ function buildRatingPlan({
     ? `${winnerDisplayName} ${winnerNewRating}↑ ${loserDisplayName} ${loserNewRating}↓${suffix}`
     : `${winnerDisplayName} ↑ ${loserDisplayName}${suffix}`;
   const shouldUpdateFebruaryChallenge =
+    canUpdateRatings &&
     bothPlayersMoved &&
     !eventMetadata.isEventMatch &&
     nowMs >= FEB_CHALLENGE_START_UTC &&
@@ -491,21 +499,24 @@ function buildRatingPlan({
 }
 
 async function authorizePlayer(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   playerId: string,
+  opponentId: string,
   repository: RatingRepository,
-): Promise<void> {
+): Promise<ProfileOwnershipSnapshot | null> {
   if (identity.uid === playerId) {
-    return;
+    return null;
   }
-  const profile = await repository.getRatingProfile(playerId);
-  if (
-    !profile ||
-    !identity.profileId ||
-    identity.profileId !== profile.profileId
-  ) {
+  const ownership = await requireProfileOwnershipSnapshot(repository, {
+    loginUids: [identity.uid, playerId, opponentId],
+    profileIds: [],
+  });
+  const identityProfileId = getLoginProfileId(ownership, identity.uid);
+  const playerProfileId = getLoginProfileId(ownership, playerId);
+  if (!identityProfileId || identityProfileId !== playerProfileId) {
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
   }
+  return ownership;
 }
 
 async function repairRatingSideEffects(
@@ -568,7 +579,7 @@ async function dispatchEventProgress(
 }
 
 export async function updateRatings(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: RatingUpdateRequest,
   repository: RatingRepository,
   dependencies: RatingUpdateDependencies = {},
@@ -579,7 +590,12 @@ export async function updateRatings(
   if (parseInviteMatchIndex(request.inviteId, request.matchId) === null) {
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
   }
-  await authorizePlayer(identity, request.playerId, repository);
+  await authorizePlayer(
+    identity,
+    request.playerId,
+    request.opponentId,
+    repository,
+  );
   const operationId = `${request.inviteId}__${request.matchId}`;
   const [inviteValue, completed] = await Promise.all([
     repository.getRtdbPath(`invites/${request.inviteId}`),

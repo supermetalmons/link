@@ -23,6 +23,15 @@ const {
   hasDateTimeScheduleRequest,
   resolveScheduledDateTimeStartAtMs,
 } = require("./events/scheduling");
+const {
+  buildEventOwnershipQuery,
+  directRequesterParticipation,
+  getLoginProfileId,
+  getOwnershipProfile,
+  profileOwnershipUnavailable,
+  requesterOwnsProfileReference,
+  resolveRequesterParticipation,
+} = require("./events/ownership");
 
 class EventRuntimeError extends Error {
   constructor(code, message) {
@@ -33,10 +42,9 @@ class EventRuntimeError extends Error {
 
 const createEventRuntime = (dependencies) => {
   const admin = dependencies.admin;
-  const getProfileByLoginId = dependencies.getProfileByLoginId;
+  const readProfileOwnershipSnapshot =
+    dependencies.readProfileOwnershipSnapshot;
   const enqueueEventProgressTask = dependencies.enqueueEventProgressTask;
-  const resolveProfileEventPrizeOwnerId =
-    dependencies.resolveProfileEventPrizeOwnerId;
   const readEventPrizeWithdrawals = dependencies.readEventPrizeWithdrawals;
   const {
     acquireEventLockWithRetry,
@@ -64,7 +72,6 @@ const createEventRuntime = (dependencies) => {
   } = createEventBracketRuntime({
     admin,
     readEventPrizeWithdrawals,
-    resolveProfileEventPrizeOwnerId,
   });
   const HttpsError = EventRuntimeError;
   const EVENT_SYNC_THROTTLE_WINDOW_MS = 500;
@@ -100,55 +107,25 @@ const createEventRuntime = (dependencies) => {
   const generateEventId = () =>
     randomAlphanumeric(INVITE_ID_RANDOM_LENGTH, dependencies.random);
 
-  const resolveRequesterParticipation = (event, auth) => {
-    const participants =
-      event && event.participants && typeof event.participants === "object"
-        ? event.participants
-        : {};
-    const requesterUid = normalizeString(auth && auth.uid);
-    const claimedProfileId = normalizeString(
-      auth && auth.token ? auth.token.profileId : "",
-    );
-    if (
-      claimedProfileId &&
-      participants[claimedProfileId] &&
-      typeof participants[claimedProfileId] === "object"
-    ) {
-      return {
-        isParticipant: true,
-        profileId: claimedProfileId,
-      };
+  const loadOwnershipSnapshot = async (event, extras = {}) => {
+    if (typeof readProfileOwnershipSnapshot !== "function") {
+      throw profileOwnershipUnavailable();
     }
-    for (const [profileId, participant] of Object.entries(participants)) {
-      if (!participant || typeof participant !== "object") {
-        continue;
-      }
+    try {
+      return await readProfileOwnershipSnapshot(
+        buildEventOwnershipQuery(event, extras),
+      );
+    } catch (error) {
       if (
-        claimedProfileId &&
-        normalizeString(participant.profileId) === claimedProfileId
+        error &&
+        typeof error === "object" &&
+        error.code === "unavailable" &&
+        error.message === "profile-ownership-unavailable"
       ) {
-        return {
-          isParticipant: true,
-          profileId,
-        };
+        throw error;
       }
-      if (normalizeString(participant.loginUid) === requesterUid) {
-        return {
-          isParticipant: true,
-          profileId,
-        };
-      }
+      throw profileOwnershipUnavailable();
     }
-    if (normalizeString(event && event.createdByLoginUid) === requesterUid) {
-      return {
-        isParticipant: true,
-        profileId: normalizeString(event && event.createdByProfileId) || null,
-      };
-    }
-    return {
-      isParticipant: false,
-      profileId: null,
-    };
   };
 
   const buildParticipantSnapshot = (profile, loginUid, joinedAtMs) => {
@@ -171,32 +148,22 @@ const createEventRuntime = (dependencies) => {
     };
   };
 
-  const ensurePilotEventCreator = async (uid) => {
-    const profile = await getProfileByLoginId(uid);
-    const username = normalizeUsername(profile.username);
-    const profileId = normalizeString(profile.profileId);
-    if (!profileId) {
+  const ensurePilotEventCreator = (uid, ownershipSnapshot) => {
+    const profileId = getLoginProfileId(ownershipSnapshot, uid);
+    const profile = profileId
+      ? getOwnershipProfile(ownershipSnapshot, profileId)
+      : null;
+    if (!profileId || !profile) {
       throw new HttpsError(
         "failed-precondition",
         "Event creation requires a signed-in profile.",
       );
     }
+    const username = normalizeUsername(profile.username);
     if (!isMonsLinkAdmin(username)) {
       throw new HttpsError(
         "permission-denied",
         "Only approved pilot users can create pilot events.",
-      );
-    }
-    return profile;
-  };
-
-  const ensureNonAnonProfile = async (uid) => {
-    const profile = await getProfileByLoginId(uid);
-    const profileId = normalizeString(profile.profileId);
-    if (!profileId) {
-      throw new HttpsError(
-        "failed-precondition",
-        "Please sign in to join this event.",
       );
     }
     return profile;
@@ -306,7 +273,14 @@ const createEventRuntime = (dependencies) => {
       );
     }
 
-    const creatorProfile = await ensurePilotEventCreator(request.auth.uid);
+    const ownershipSnapshot = await loadOwnershipSnapshot(
+      {},
+      { loginUids: [request.auth.uid] },
+    );
+    const creatorProfile = ensurePilotEventCreator(
+      request.auth.uid,
+      ownershipSnapshot,
+    );
     const createdAtMs = getNowMs();
     const requestData =
       request.data && typeof request.data === "object" ? request.data : {};
@@ -407,8 +381,13 @@ const createEventRuntime = (dependencies) => {
       );
     }
 
-    const profile = await ensureNonAnonProfile(request.auth.uid);
-    const profileId = normalizeString(profile.profileId);
+    const initialEventSnapshot = await admin
+      .database()
+      .ref(`events/${eventId}`)
+      .once("value");
+    if (!initialEventSnapshot.exists()) {
+      throw new HttpsError("not-found", "Event not found.");
+    }
     const lockHandle = await acquireEventLockWithRetry(
       eventId,
       request.auth.uid,
@@ -436,9 +415,21 @@ const createEventRuntime = (dependencies) => {
       const event = cloneValue(eventSnapshot.val() || {});
       const creatorLoginUid = normalizeString(event.createdByLoginUid);
       const creatorProfileId = normalizeString(event.createdByProfileId);
+      const nowMs = getNowMs();
+      const directCreator = request.auth.uid === creatorLoginUid;
+      const ownershipSnapshot =
+        directCreator && nowMs < event.startAtMs
+          ? null
+          : await loadOwnershipSnapshot(event, {
+              loginUids: [request.auth.uid],
+            });
       if (
-        request.auth.uid !== creatorLoginUid &&
-        profileId !== creatorProfileId
+        !requesterOwnsProfileReference({
+          requesterUid: request.auth.uid,
+          snapshot: ownershipSnapshot,
+          storedLoginUid: creatorLoginUid,
+          storedProfileId: creatorProfileId,
+        })
       ) {
         throw new HttpsError(
           "permission-denied",
@@ -451,8 +442,6 @@ const createEventRuntime = (dependencies) => {
           "Only scheduled events can be postponed.",
         );
       }
-
-      const nowMs = getNowMs();
       if (
         typeof event.startAtMs !== "number" ||
         !Number.isFinite(event.startAtMs)
@@ -467,8 +456,16 @@ const createEventRuntime = (dependencies) => {
           eventId,
           event,
           nowMs,
+          ownershipSnapshot,
         });
         if (dueTransition.didChange) {
+          const lockOwned = await isEventLockStillOwned(lockHandle);
+          if (!lockOwned) {
+            throw new HttpsError(
+              "unavailable",
+              "Event is busy. Please try postponing again.",
+            );
+          }
           await admin.database().ref().update(dueTransition.updates);
         }
         throw new HttpsError(
@@ -559,8 +556,6 @@ const createEventRuntime = (dependencies) => {
           "The function must be called while authenticated.",
         );
       }
-      await ensurePilotEventCreator(request.auth.uid);
-
       if (!eventId) {
         throw new HttpsError("invalid-argument", "eventId is required.");
       }
@@ -595,6 +590,10 @@ const createEventRuntime = (dependencies) => {
           throw new HttpsError("not-found", "Event not found.");
         }
         const event = cloneValue(eventSnapshot.val() || {});
+        const ownershipSnapshot = await loadOwnershipSnapshot(event, {
+          loginUids: [request.auth.uid],
+        });
+        ensurePilotEventCreator(request.auth.uid, ownershipSnapshot);
         if (normalizeString(event.status) !== "active") {
           throw new HttpsError(
             "failed-precondition",
@@ -699,7 +698,6 @@ const createEventRuntime = (dependencies) => {
         syncResult = await runEventSyncState({
           eventId,
           requesterUid: request.auth.uid,
-          auth: request.auth,
           enforceParticipantGate: false,
           enforceThrottle: false,
           syncLog,
@@ -740,7 +738,6 @@ const createEventRuntime = (dependencies) => {
   const runEventSyncState = async ({
     eventId,
     requesterUid,
-    auth,
     enforceParticipantGate,
     enforceThrottle,
     syncLog,
@@ -756,39 +753,6 @@ const createEventRuntime = (dependencies) => {
       if (!eventSnapshot.exists()) {
         throw new HttpsError("not-found", "Event not found.");
       }
-      const initialEvent = cloneValue(eventSnapshot.val() || {});
-
-      if (enforceParticipantGate) {
-        const requesterParticipation = resolveRequesterParticipation(
-          initialEvent,
-          auth,
-        );
-        syncLog.requesterProfileId = requesterParticipation.profileId;
-        if (!requesterParticipation.isParticipant) {
-          syncLog.skipped = true;
-          syncLog.reason = "not-participant";
-          return buildSkippedSyncResponse({
-            eventId,
-            reason: "not-participant",
-          });
-        }
-      }
-
-      if (enforceThrottle) {
-        const syncThrottle = await tryAcquireEventSyncThrottle(
-          eventId,
-          requesterUid,
-        );
-        if (!syncThrottle) {
-          syncLog.skipped = true;
-          syncLog.reason = "rate-limited";
-          return buildSkippedSyncResponse({
-            eventId,
-            reason: "rate-limited",
-          });
-        }
-      }
-
       lockHandle = await acquireEventLockWithRetry(eventId, requesterUid, {
         attempts: 10,
         delayMs: 100,
@@ -811,10 +775,43 @@ const createEventRuntime = (dependencies) => {
         throw new HttpsError("not-found", "Event not found.");
       }
       const event = cloneValue(lockedEventSnapshot.val() || {});
+      const nowMs = getNowMs();
+      let prizeSelections = {};
+      if (
+        isEventPrizeEvent(eventId) &&
+        (event.status === "active" || event.status === "ended")
+      ) {
+        const selectionsSnapshot = await admin
+          .database()
+          .ref(`eventPrizeSelections/${eventId}`)
+          .once("value");
+        prizeSelections =
+          selectionsSnapshot.val() &&
+          typeof selectionsSnapshot.val() === "object"
+            ? cloneValue(selectionsSnapshot.val())
+            : {};
+      }
+      const directParticipation = enforceParticipantGate
+        ? directRequesterParticipation(event, requesterUid)
+        : null;
+      const needsOwnershipSnapshot =
+        event.status === "active" ||
+        (event.status === "scheduled" &&
+          typeof event.startAtMs === "number" &&
+          nowMs >= event.startAtMs) ||
+        (event.status === "ended" && isEventPrizeEvent(eventId)) ||
+        (enforceParticipantGate && !directParticipation?.isParticipant);
+      const ownershipSnapshot = needsOwnershipSnapshot
+        ? await loadOwnershipSnapshot(event, {
+            loginUids: enforceParticipantGate ? [requesterUid] : [],
+            profileIds: Object.keys(prizeSelections),
+          })
+        : null;
       if (enforceParticipantGate) {
         const lockedRequesterParticipation = resolveRequesterParticipation(
           event,
-          auth,
+          requesterUid,
+          ownershipSnapshot,
         );
         syncLog.requesterProfileId = lockedRequesterParticipation.profileId;
         if (!lockedRequesterParticipation.isParticipant) {
@@ -826,7 +823,20 @@ const createEventRuntime = (dependencies) => {
           });
         }
       }
-      const nowMs = getNowMs();
+      if (enforceThrottle) {
+        const syncThrottle = await tryAcquireEventSyncThrottle(
+          eventId,
+          requesterUid,
+        );
+        if (!syncThrottle) {
+          syncLog.skipped = true;
+          syncLog.reason = "rate-limited";
+          return buildSkippedSyncResponse({
+            eventId,
+            reason: "rate-limited",
+          });
+        }
+      }
       const updates = {};
       let didChange = false;
       let eventPrizeAssignmentsForProjectionCleanup = null;
@@ -836,6 +846,7 @@ const createEventRuntime = (dependencies) => {
           eventId,
           event,
           nowMs,
+          ownershipSnapshot,
         });
         Object.assign(updates, dueTransition.updates);
         didChange = dueTransition.didChange;
@@ -917,6 +928,7 @@ const createEventRuntime = (dependencies) => {
             nowMs,
             participantsById: participants,
             inviteUpdates,
+            ownershipSnapshot,
           })
         ) {
           roundsChanged = true;
@@ -930,6 +942,7 @@ const createEventRuntime = (dependencies) => {
             participantsById: participants,
             inviteUpdates,
             thirdPlaceMatch,
+            ownershipSnapshot,
           });
           thirdPlaceMatch = thirdPlaceResult.thirdPlaceMatch;
           if (thirdPlaceResult.didChange) {
@@ -989,18 +1002,8 @@ const createEventRuntime = (dependencies) => {
             : null;
           if (isEventPrizeEvent(eventId)) {
             if (typeof event.prizeSelectionsLockedAtMs !== "number") {
-              const lockOwned = await isEventLockStillOwned(lockHandle);
-              if (!lockOwned) {
-                throw new HttpsError(
-                  "aborted",
-                  "Event lock expired while assigning prizes.",
-                );
-              }
               event.prizeSelectionsLockedAtMs = nowMs;
-              await admin
-                .database()
-                .ref(`events/${eventId}/prizeSelectionsLockedAtMs`)
-                .set(nowMs);
+              updates[`events/${eventId}/prizeSelectionsLockedAtMs`] = nowMs;
             }
             const prizeAssignmentResult = await resolveEventPrizeAssignments({
               eventId,
@@ -1009,6 +1012,8 @@ const createEventRuntime = (dependencies) => {
               participantsById: participants,
               thirdPlaceMatch,
               assignedAtMs: event.endedAtMs,
+              ownershipSnapshot,
+              prizeSelections,
             });
             if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
               eventPrizeAssignmentsForProjectionCleanup =
@@ -1176,6 +1181,8 @@ const createEventRuntime = (dependencies) => {
             thirdPlaceMatch,
             assignedAtMs:
               typeof event.endedAtMs === "number" ? event.endedAtMs : nowMs,
+            ownershipSnapshot,
+            prizeSelections,
           });
           if (Object.keys(prizeAssignmentResult.assignments).length > 0) {
             eventPrizeAssignmentsForProjectionCleanup =
@@ -1222,29 +1229,19 @@ const createEventRuntime = (dependencies) => {
         await admin.database().ref().update(updates);
       }
       if (eventPrizeAssignmentsForProjectionCleanup) {
-        let projectionSettled = false;
-        for (let attempt = 0; attempt <= 3; attempt += 1) {
-          if (!(await isEventLockStillOwned(lockHandle))) {
-            break;
-          }
-          const projectionResult = await reconcileProfileEventPrizeAssignments({
-            eventId,
-            assignments: eventPrizeAssignmentsForProjectionCleanup,
-          });
-          if (projectionResult.didChange) {
-            didChange = true;
-          }
-          if (projectionResult.settled) {
-            projectionSettled = true;
-            break;
-          }
-        }
-        if (!projectionSettled) {
+        if (!(await isEventLockStillOwned(lockHandle))) {
           throw new HttpsError(
             "aborted",
-            "Event prize ownership changed during projection.",
+            "Event lock expired while projecting prizes.",
           );
         }
+        const projectionResult = await reconcileProfileEventPrizeAssignments({
+          event,
+          eventId,
+          assignments: eventPrizeAssignmentsForProjectionCleanup,
+          ownershipSnapshot,
+        });
+        if (projectionResult.didChange) didChange = true;
       }
       const projectionCleanupRequest =
         getCompletedEventPrizeProjectionCleanupRequest({
@@ -1253,7 +1250,17 @@ const createEventRuntime = (dependencies) => {
           assignments: eventPrizeAssignmentsForProjectionCleanup,
         });
       if (projectionCleanupRequest) {
-        await removeCompletedEventPrizeProjections(projectionCleanupRequest);
+        if (!(await isEventLockStillOwned(lockHandle))) {
+          throw new HttpsError(
+            "aborted",
+            "Event lock expired while cleaning prize projections.",
+          );
+        }
+        await removeCompletedEventPrizeProjections({
+          ...projectionCleanupRequest,
+          event,
+          ownershipSnapshot,
+        });
       }
 
       const refreshedSnapshot = await admin
@@ -1304,7 +1311,6 @@ const createEventRuntime = (dependencies) => {
       return await runEventSyncState({
         eventId,
         requesterUid: request.auth.uid,
-        auth: request.auth,
         enforceParticipantGate: true,
         enforceThrottle: true,
         syncLog,

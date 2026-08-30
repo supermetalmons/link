@@ -4,15 +4,19 @@ import { Game } from "mons-rules";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import {
   cancelAutomatch,
-  getQueuedAutomatchCandidates,
   handleGameplayRoute,
   removeNavigationGame,
 } from "../src/gameplayRoute.ts";
-import type { FirebaseIdentity } from "../src/firebaseAuth.ts";
+import type { RequestIdentity } from "../src/requestIdentity.ts";
 import type {
+  GameplayProfile,
   GameplayRepository,
   RatingRepository,
 } from "../src/gameplayRepository.ts";
+import type {
+  ProfileOwnershipQuery,
+  ProfileOwnershipSnapshot,
+} from "../src/profileOwnership.ts";
 import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const env = {
@@ -27,11 +31,85 @@ const env = {
   X_CLIENT_SECRET: "test-x-secret",
 } as Env;
 
-const identity: FirebaseIdentity = {
-  idToken: "firebase-token",
-  profileId: "claim-profile",
+const identity: RequestIdentity = {
   uid: "firebase-uid",
 };
+
+type OwnershipState = Readonly<{
+  aliasesByProfileId?: Readonly<Record<string, readonly string[]>>;
+  ownerByUid?: Readonly<Record<string, string | null>>;
+  profilesById?: Readonly<Record<string, GameplayProfile>>;
+}>;
+
+function gameplayProfile(profileId: string): GameplayProfile {
+  return {
+    aura: "",
+    emoji: 1,
+    eth: "",
+    profileId,
+    rating: 0,
+    sol: "",
+    username: "",
+  };
+}
+
+function ownershipSnapshot(
+  query: ProfileOwnershipQuery,
+  state: OwnershipState = {},
+): ProfileOwnershipSnapshot {
+  const ownerByUid = new Map(
+    query.loginUids.map((uid) => {
+      const profileId = state.ownerByUid?.[uid] ?? null;
+      return [uid, profileId ? { profileId, revision: 1 } : null] as const;
+    }),
+  );
+  const canonicalByProfileId = new Map(
+    query.profileIds.map((profileId) => [profileId, profileId] as const),
+  );
+  const canonicalProfileIds = new Set([
+    ...[...ownerByUid.values()].flatMap((owner) =>
+      owner ? [owner.profileId] : [],
+    ),
+    ...canonicalByProfileId.values(),
+  ]);
+  return {
+    canonicalProfileIdByProfileId: canonicalByProfileId,
+    loginOwnerByUid: ownerByUid,
+    loginUidsByProfileId: new Map(
+      [...canonicalProfileIds].map((profileId) => [
+        profileId,
+        state.aliasesByProfileId?.[profileId] ||
+          [...ownerByUid]
+            .filter(([, owner]) => owner?.profileId === profileId)
+            .map(([uid]) => uid),
+      ]),
+    ),
+    profileById: new Map(
+      [...canonicalProfileIds].map((profileId) => [
+        profileId,
+        {
+          profile:
+            state.profilesById?.[profileId] || gameplayProfile(profileId),
+          revision: 1,
+        },
+      ]),
+    ),
+  };
+}
+
+function ownershipForLogins(
+  query: ProfileOwnershipQuery,
+  ownerForUid: (uid: string) => string | null,
+  state: Omit<OwnershipState, "ownerByUid"> = {},
+): ProfileOwnershipSnapshot {
+  return ownershipSnapshot(query, {
+    ...state,
+    ownerByUid: Object.fromEntries(
+      query.loginUids.map((uid) => [uid, ownerForUid(uid)]),
+    ),
+  });
+}
+
 function repository(
   overrides: Partial<GameplayRepository> = {},
 ): GameplayRepository {
@@ -39,8 +117,7 @@ function repository(
   return {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
-    findProfileId: async () => null,
-    getGameplayProfile: async () => null,
+    readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
     getNavigationGame: async () => null,
     getMiningMaterials: async () => ({
       dust: 10,
@@ -103,82 +180,55 @@ function request(
   });
 }
 
-test("normalizes queued candidates and selects newest valid records first", () => {
-  assert.deepEqual(
-    getQueuedAutomatchCandidates({
-      older: {
-        uid: " login ",
-        profileId: " profile ",
-        timestamp: "10.9",
-        telegramDeliveryVersion: 2,
-      },
-      newer: {
-        uid: "other",
-        timestamp: 20,
-        telegramDeliveryVersion: 1,
-      },
-      "unsafe/key": { timestamp: 30 },
-    }),
-    [
-      {
-        inviteId: "newer",
-        uid: "other",
-        profileId: "",
-        timestamp: 20,
-        telegramDeliveryVersion: null,
-      },
-      {
-        inviteId: "older",
-        uid: "login",
-        profileId: "profile",
-        timestamp: 10,
-        telegramDeliveryVersion: 2,
-      },
-    ],
-  );
-  assert.deepEqual(getQueuedAutomatchCandidates(null), []);
-});
-
-test("cancels the newest UID automatch with exact v2 multipath updates", async () => {
+test("cancels the deterministic UID automatch with exact v2 multipath updates", async () => {
   const patches: Array<Record<string, unknown>> = [];
   const profileProjectionTasks: unknown[] = [];
   let guestReads = 0;
+  let queueExists = true;
   const result = await cancelAutomatch(
     identity,
     repository({
+      readProfileOwnershipSnapshot: async () => {
+        throw new Error("D1 should not be read for a direct UID queue");
+      },
       getRtdbPath: async (path, query) => {
-        if (path === "players/firebase-uid/profile") return "profile-1";
         if (path === "automatch") {
           assert.deepEqual(query, {
             orderBy: "uid",
             equalTo: "firebase-uid",
+            limitToFirst: 2,
           });
-          return {
-            "auto-older": { timestamp: 1 },
-            "auto-newer": {
-              uid: identity.uid,
-              profileId: "profile-1",
-              timestamp: 2,
-              telegramDeliveryVersion: 2,
-            },
-          };
+          return queueExists
+            ? {
+                "auto-newer": {
+                  uid: identity.uid,
+                  profileId: "profile-1",
+                  timestamp: 2,
+                  telegramDeliveryVersion: 2,
+                },
+              }
+            : null;
         }
         if (path === "automatch/auto-newer") {
-          return {
-            uid: identity.uid,
-            profileId: "profile-1",
-            timestamp: 2,
-            telegramDeliveryVersion: 2,
-          };
+          return queueExists
+            ? {
+                uid: identity.uid,
+                profileId: "profile-1",
+                timestamp: 2,
+                telegramDeliveryVersion: 2,
+              }
+            : null;
         }
         if (path === "invites/auto-newer/guestId") {
           guestReads++;
           return null;
         }
+        if (path === "invites/auto-newer/hostId") return identity.uid;
         assert.fail(`unexpected RTDB path ${path}`);
       },
       patchRtdbRoot: async (updates) => {
         patches.push(updates);
+        if (updates["automatch/auto-newer"] === null) queueExists = false;
       },
     }),
     {
@@ -225,32 +275,78 @@ test("cancels the newest UID automatch with exact v2 multipath updates", async (
   ]);
 });
 
+test("cancels every queue owned by merged logins", async () => {
+  const queues = new Map<string, Record<string, unknown>>([
+    ["auto-direct", { uid: identity.uid, timestamp: 2 }],
+    ["auto-alias", { uid: "alias-uid", timestamp: 1 }],
+  ]);
+  const result = await cancelAutomatch(
+    identity,
+    repository({
+      readProfileOwnershipSnapshot: async (query) =>
+        ownershipForLogins(
+          query,
+          (uid) =>
+            uid === identity.uid || uid === "alias-uid" ? "profile-1" : null,
+          { aliasesByProfileId: { "profile-1": [identity.uid, "alias-uid"] } },
+        ),
+      getRtdbPath: async (path, query) => {
+        if (path === "automatch") {
+          const matches = [...queues].filter(
+            ([, value]) => value.uid === query?.equalTo,
+          );
+          return matches.length ? Object.fromEntries(matches) : null;
+        }
+        const queue = /^automatch\/(.+)$/.exec(path);
+        if (queue) return queues.get(queue[1]) || null;
+        const invite = /^invites\/(.+)\/(guestId|hostId)$/.exec(path);
+        if (invite) {
+          return invite[2] === "guestId"
+            ? null
+            : queues.get(invite[1])?.uid || null;
+        }
+        return null;
+      },
+      patchRtdbRoot: async (updates) => {
+        for (const [path, value] of Object.entries(updates)) {
+          const queue = /^automatch\/(.+)$/.exec(path);
+          if (queue && value === null) queues.delete(queue[1]);
+        }
+      },
+    }),
+    { createProjectionRequestId: () => crypto.randomUUID() },
+  );
+  assert.deepEqual(result, { ok: true });
+  assert.equal(queues.size, 0);
+});
+
 test("skips cancellation when a guest wins the invite lease race", async () => {
   const patches: Array<Record<string, unknown>> = [];
   const profileProjectionTasks: unknown[] = [];
   const result = await cancelAutomatch(
     identity,
     repository({
-      findProfileId: async (uid, token) => {
-        assert.equal(uid, identity.uid);
-        assert.equal(token, identity.idToken);
-        return "profile-1";
-      },
+      readProfileOwnershipSnapshot: async (query) =>
+        ownershipForLogins(
+          query,
+          (uid) =>
+            uid === identity.uid || uid === "host-uid" ? "profile-1" : null,
+          { aliasesByProfileId: { "profile-1": [identity.uid, "host-uid"] } },
+        ),
       getRtdbPath: async (path, query) => {
-        if (path === "players/firebase-uid/profile") return null;
-        if (path === "automatch" && query?.orderBy === "uid") return null;
-        if (path === "automatch" && query?.orderBy === "profileId") {
-          return {
-            "auto-race": {
-              uid: "host-uid",
-              profileId: "profile-1",
-              timestamp: 1,
-              telegramDeliveryVersion: 2,
-            },
-          };
+        if (path === "automatch") {
+          assert.ok(query);
+          return query?.equalTo === "host-uid"
+            ? {
+                "auto-race": {
+                  uid: "host-uid",
+                  profileId: "profile-1",
+                  timestamp: 1,
+                  telegramDeliveryVersion: 2,
+                },
+              }
+            : null;
         }
-        if (path === "invites/auto-race") return { hostId: "host-uid" };
-        if (path === "players/host-uid/profile") return "profile-1";
         if (path === "automatch/auto-race") {
           return {
             uid: "host-uid",
@@ -260,6 +356,7 @@ test("skips cancellation when a guest wins the invite lease race", async () => {
           };
         }
         if (path === "invites/auto-race/guestId") return "guest-uid";
+        if (path === "invites/auto-race/hostId") return "host-uid";
         assert.fail(`unexpected RTDB path ${path}`);
       },
       patchRtdbRoot: async (updates) => {
@@ -276,6 +373,121 @@ test("skips cancellation when a guest wins the invite lease race", async () => {
   assert.deepEqual(result, { ok: false });
   assert.deepEqual(patches, []);
   assert.deepEqual(profileProjectionTasks, []);
+});
+
+test("shared cancellation rejects changed queue timestamps and versions", async (t) => {
+  const discovered = {
+    uid: identity.uid,
+    timestamp: 1,
+    telegramDeliveryVersion: 2,
+  };
+  for (const [name, current] of [
+    ["timestamp", { ...discovered, timestamp: 2 }],
+    ["version", { ...discovered, telegramDeliveryVersion: 1 }],
+  ] as const) {
+    await t.test(name, async () => {
+      let patches = 0;
+      const tasks: unknown[] = [];
+      const result = await cancelAutomatch(
+        identity,
+        repository({
+          getRtdbPath: async (path, query) => {
+            if (path === "automatch") {
+              assert.deepEqual(query, {
+                orderBy: "uid",
+                equalTo: identity.uid,
+                limitToFirst: 2,
+              });
+              return { auto_changed: discovered };
+            }
+            if (path === "automatch/auto_changed") return current;
+            if (path === "invites/auto_changed/guestId") return null;
+            if (path === "invites/auto_changed/hostId") return identity.uid;
+            assert.fail(`unexpected RTDB path ${path}`);
+          },
+          patchRtdbRoot: async () => {
+            patches += 1;
+          },
+        }),
+        {
+          createProjectionRequestId: () => "changed-request",
+          enqueueProfileGameProjection: async (task) => {
+            tasks.push(task);
+          },
+          enqueueTelegramProjection: async (task) => {
+            tasks.push(task);
+          },
+        },
+      );
+      assert.deepEqual(result, { ok: false });
+      assert.equal(patches, 0);
+      assert.deepEqual(tasks, []);
+    });
+  }
+});
+
+test("cancels an alternate-login legacy queue without a root scan", async () => {
+  const queries: unknown[] = [];
+  const patches: Array<Record<string, unknown>> = [];
+  let ownershipChanged = false;
+  let ownershipReads = 0;
+  let queueExists = true;
+  const result = await cancelAutomatch(
+    identity,
+    repository({
+      readProfileOwnershipSnapshot: async (query) => {
+        ownershipReads++;
+        if (ownershipChanged) {
+          throw new Error("ownership must not be revalidated");
+        }
+        return ownershipForLogins(
+          query,
+          (uid) =>
+            uid === identity.uid || uid === "legacy-login" ? "profile-1" : null,
+          {
+            aliasesByProfileId: {
+              "profile-1": [identity.uid, "legacy-login"],
+            },
+          },
+        );
+      },
+      getRtdbPath: async (path, query) => {
+        if (path === "automatch") {
+          queries.push(query);
+          return query?.equalTo === "legacy-login" && queueExists
+            ? {
+                "auto-alias": {
+                  uid: "legacy-login",
+                  profileId: "",
+                  timestamp: 1,
+                },
+              }
+            : null;
+        }
+        if (path === "automatch/auto-alias") {
+          ownershipChanged = true;
+          return {
+            uid: "legacy-login",
+            profileId: "",
+            timestamp: 1,
+          };
+        }
+        if (path === "invites/auto-alias/guestId") return null;
+        if (path === "invites/auto-alias/hostId") return "legacy-login";
+        assert.fail(`unexpected RTDB path ${path}`);
+      },
+      patchRtdbRoot: async (updates) => {
+        patches.push(updates);
+        if (updates["automatch/auto-alias"] === null) queueExists = false;
+      },
+    }),
+    { createProjectionRequestId: () => "request-canceled" },
+  );
+  assert.deepEqual(result, { ok: true });
+  assert.equal(queries.length, 5);
+  assert.equal(ownershipReads, 1);
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0]["automatch/auto-alias"], null);
 });
 
 test("returns false without writes for missing queues and existing guests", async () => {
@@ -314,20 +526,23 @@ test("returns false without writes for missing queues and existing guests", asyn
 test("keeps legacy automatch cancellation free of Telegram v2 updates", async () => {
   const patches: Array<Record<string, unknown>> = [];
   const profileProjectionTasks: unknown[] = [];
+  let queueExists = true;
   const result = await cancelAutomatch(
     identity,
     repository({
       getRtdbPath: async (path) => {
         if (path === "players/firebase-uid/profile") return "profile";
         if (path === "automatch") {
-          return {
-            "auto-legacy": {
-              uid: identity.uid,
-              profileId: "profile",
-              timestamp: 1,
-              telegramDeliveryVersion: 1,
-            },
-          };
+          return queueExists
+            ? {
+                "auto-legacy": {
+                  uid: identity.uid,
+                  profileId: "profile",
+                  timestamp: 1,
+                  telegramDeliveryVersion: 1,
+                },
+              }
+            : null;
         }
         if (path === "automatch/auto-legacy") {
           return {
@@ -338,10 +553,12 @@ test("keeps legacy automatch cancellation free of Telegram v2 updates", async ()
           };
         }
         if (path === "invites/auto-legacy/guestId") return null;
+        if (path === "invites/auto-legacy/hostId") return identity.uid;
         return null;
       },
       patchRtdbRoot: async (updates) => {
         patches.push(updates);
+        if (updates["automatch/auto-legacy"] === null) queueExists = false;
       },
     }),
     {
@@ -385,15 +602,18 @@ test("preserves every navigation precondition outcome", async () => {
   };
   const cases: Array<{
     name: string;
-    identity?: FirebaseIdentity;
+    identity?: RequestIdentity;
     inviteId?: string;
     repo: Partial<GameplayRepository>;
     expected: unknown;
   }> = [
     {
       name: "profile unresolved",
-      identity: { idToken: "firebase-token", uid: "firebase-uid" },
-      repo: { getRtdbPath: async () => null, findProfileId: async () => null },
+      identity: { uid: "firebase-uid" },
+      repo: {
+        getRtdbPath: async () => null,
+        readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
+      },
       expected: {
         ok: true,
         skipped: true,
@@ -484,7 +704,11 @@ test("preserves every navigation precondition outcome", async () => {
       await removeNavigationGame(
         entry.identity || identity,
         entry.inviteId || "invite-1",
-        repository(entry.repo),
+        repository({
+          readProfileOwnershipSnapshot: async (query) =>
+            ownershipForLogins(query, () => "profile-1"),
+          ...entry.repo,
+        }),
       ),
       entry.expected,
       entry.name,
@@ -502,7 +726,7 @@ test("fails closed before removing a D1 game when ownership is unavailable", asy
           getRtdbPath: async () => {
             throw new Error("rtdb-unavailable");
           },
-          findProfileId: async () => {
+          readProfileOwnershipSnapshot: async () => {
             throw new Error("profile-storage-unavailable");
           },
         }),
@@ -556,10 +780,14 @@ test("routes authenticated CORS and rejects methods before authentication", asyn
     context(),
     {
       repository: repository({
-        getGameplayProfile: async () => null,
+        readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
         getRtdbPath: async (path, query) => {
           assert.equal(path, "automatch");
-          assert.deepEqual(query, { orderBy: "$key", limitToFirst: 1 });
+          assert.deepEqual(query, {
+            orderBy: "uid",
+            equalTo: identity.uid,
+            limitToFirst: 2,
+          });
           return { auto_existing: { uid: identity.uid } };
         },
       }),
@@ -663,7 +891,7 @@ test("committed gameplay does not wait for projection Queues", async () => {
         random: () => 0,
       },
       repository: repository({
-        getGameplayProfile: async () => null,
+        readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
         getRtdbPath: async () => null,
       }),
       verifyIdentity: async () => identity,
@@ -757,13 +985,18 @@ test("routes authoritative invite role reads without mutation rate limiting", as
     context(),
     {
       repository: repository({
+        readProfileOwnershipSnapshot: async (query) =>
+          ownershipForLogins(query, (uid) =>
+            uid === identity.uid || uid === "guest-login"
+              ? "profile-1"
+              : uid === "host-login"
+                ? "profile-host"
+                : null,
+          ),
         getRtdbPath: async (path) => {
           if (path === "invites/abcdefghijk") {
             return { hostId: "host-login", guestId: "guest-login" };
           }
-          if (path === "players/firebase-uid/profile") return "profile-1";
-          if (path === "players/host-login/profile") return null;
-          if (path === "players/guest-login/profile") return "profile-1";
           return null;
         },
       }),
@@ -875,6 +1108,10 @@ test("pending auto-link joins enqueue Telegram projection immediately", async ()
         now: () => 1_000,
       },
       repository: repository({
+        readProfileOwnershipSnapshot: async (query) =>
+          ownershipForLogins(query, (uid) =>
+            uid === identity.uid ? "host-profile" : `profile-${uid}`,
+          ),
         getRtdbPath: async (path) => {
           if (path === `invites/${inviteId}`) {
             return {
@@ -883,10 +1120,6 @@ test("pending auto-link joins enqueue Telegram projection immediately", async ()
               guestId: null,
             };
           }
-          if (path === `players/${identity.uid}/profile`) {
-            return identity.profileId;
-          }
-          if (path === "players/host-uid/profile") return "host-profile";
           if (path === `players/${identity.uid}/matches/${inviteId}`) {
             return null;
           }
@@ -942,7 +1175,7 @@ test("routes exact authenticated rating updates without a new rate limit", async
       assert.equal(plan.ratingUpdate.status, "done");
       return { status: "committed", data: plan.repairData };
     },
-    getRatingProfile: async () => null,
+    readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
     getRtdbPath: async (path) => {
       if (
         path ===
@@ -1419,7 +1652,8 @@ test("routes wager cancellation and decline to their exact proposal owners", asy
       context(),
       {
         repository: repository({
-          findProfileId: async (uid) => `profile-${uid}`,
+          readProfileOwnershipSnapshot: async (query) =>
+            ownershipForLogins(query, (uid) => `profile-${uid}`),
           getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
           transactRtdbPath: async (transactionPath, updater) => {
             transactionPaths.push(transactionPath);
@@ -1441,8 +1675,6 @@ test("routes wager cancellation and decline to their exact proposal owners", asy
           },
         }),
         verifyIdentity: async () => ({
-          idToken: "token",
-          profileId: "profile-host",
           uid: "host",
         }),
       },
@@ -1476,9 +1708,9 @@ test("routes wager send and accept through the authenticated gameplay surface", 
     context(),
     {
       repository: repository({
-        findProfileId: async (uid) => `profile-${uid}`,
-        getMiningMaterials: async (_profileId, token) => {
-          assert.equal(token, "token");
+        readProfileOwnershipSnapshot: async (query) =>
+          ownershipForLogins(query, (uid) => `profile-${uid}`),
+        getMiningMaterials: async (_profileId) => {
           return { dust: 2, slime: 0, gum: 0, metal: 0, ice: 0 };
         },
         getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
@@ -1493,8 +1725,6 @@ test("routes wager send and accept through the authenticated gameplay surface", 
           ),
       }),
       verifyIdentity: async () => ({
-        idToken: "token",
-        profileId: "profile-host",
         uid: "host",
       }),
       wager: { now: () => 100 },
@@ -1503,7 +1733,12 @@ test("routes wager send and accept through the authenticated gameplay surface", 
   assert.equal(send.status, 200);
   assert.deepEqual(await send.json(), { ok: true, count: 2 });
 
-  let reads = 0;
+  let acceptWager: unknown = {
+    proposals: { guest: { material: "dust", count: 2 } },
+  };
+  let acceptMining: unknown = {
+    frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+  };
   const accept = await handleGameplayRoute(
     request("/wagers/proposals/accept", {
       body: { inviteId: "invite", matchId: "match" },
@@ -1512,7 +1747,8 @@ test("routes wager send and accept through the authenticated gameplay surface", 
     context(),
     {
       repository: repository({
-        findProfileId: async (uid) => `profile-${uid}`,
+        readProfileOwnershipSnapshot: async (query) =>
+          ownershipForLogins(query, (uid) => `profile-${uid}`),
         getMiningMaterials: async () => ({
           dust: 2,
           slime: 0,
@@ -1520,25 +1756,26 @@ test("routes wager send and accept through the authenticated gameplay surface", 
           metal: 0,
           ice: 0,
         }),
-        getRtdbPath: async () => {
-          reads++;
-          return reads === 1
-            ? { hostId: "host", guestId: "guest" }
-            : { proposals: { guest: { material: "dust", count: 2 } } };
+        getRtdbPath: async (path) => {
+          if (path === "invites/invite") {
+            return { hostId: "host", guestId: "guest" };
+          }
+          if (path === "players/host/mining") return acceptMining;
+          return acceptWager;
         },
-        transactRtdbPath: async (path, updater) =>
-          applyTransaction(
+        transactRtdbPath: async (path, updater) => {
+          const result = applyTransaction(
             updater,
-            path.startsWith("players/")
-              ? {
-                  frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
-                }
-              : { proposals: { guest: { material: "dust", count: 2 } } },
-          ),
+            path.startsWith("players/") ? acceptMining : acceptWager,
+          );
+          if (result.committed) {
+            if (path.startsWith("players/")) acceptMining = result.value;
+            else acceptWager = result.value;
+          }
+          return result;
+        },
       }),
       verifyIdentity: async () => ({
-        idToken: "token",
-        profileId: "profile-host",
         uid: "host",
       }),
       wager: { now: () => 200 },
@@ -1557,12 +1794,11 @@ test("returns wager permission and infrastructure failures without details", asy
     context(),
     {
       repository: repository({
-        findProfileId: async (uid) => `profile-${uid}`,
+        readProfileOwnershipSnapshot: async (query) =>
+          ownershipForLogins(query, (uid) => `profile-${uid}`),
         getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
       }),
       verifyIdentity: async () => ({
-        idToken: "token",
-        profileId: "profile-other",
         uid: "other",
       }),
     },
@@ -1586,7 +1822,8 @@ test("returns wager permission and infrastructure failures without details", asy
     {
       logFailure: (kind) => routeFailures.push(kind),
       repository: repository({
-        findProfileId: async (uid) => `profile-${uid}`,
+        readProfileOwnershipSnapshot: async (query) =>
+          ownershipForLogins(query, (uid) => `profile-${uid}`),
         getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
         transactRtdbPath: async (_path, updater) => {
           transactions++;
@@ -1601,8 +1838,6 @@ test("returns wager permission and infrastructure failures without details", asy
         },
       }),
       verifyIdentity: async () => ({
-        idToken: "token",
-        profileId: "profile-host",
         uid: "host",
       }),
       wager: {
@@ -1622,6 +1857,9 @@ test("returns wager permission and infrastructure failures without details", asy
   assert.equal(materialFailures.length, 1);
 
   let sendTransactions = 0;
+  let sendMining: unknown = {
+    frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+  };
   const sendFailure = await handleGameplayRoute(
     request("/wagers/proposals/send", {
       body: {
@@ -1635,7 +1873,8 @@ test("returns wager permission and infrastructure failures without details", asy
     context(),
     {
       repository: repository({
-        findProfileId: async (uid) => `profile-${uid}`,
+        readProfileOwnershipSnapshot: async (query) =>
+          ownershipForLogins(query, (uid) => `profile-${uid}`),
         getMiningMaterials: async () => ({
           dust: 1,
           slime: 0,
@@ -1643,23 +1882,30 @@ test("returns wager permission and infrastructure failures without details", asy
           metal: 0,
           ice: 0,
         }),
-        getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
-        transactRtdbPath: async (_path, updater) => {
+        getRtdbPath: async (path) => {
+          if (path === "invites/invite") {
+            return { hostId: "host", guestId: "guest" };
+          }
+          if (path === "players/host/mining") return sendMining;
+          if (path === "invites/invite/wagers/match") {
+            return { proposedBy: { host: true } };
+          }
+          return null;
+        },
+        transactRtdbPath: async (path, updater) => {
           sendTransactions++;
           if (sendTransactions === 3) {
             throw new Error("private-rollback-detail");
           }
-          return applyTransaction(
-            updater,
-            sendTransactions === 1
-              ? { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 }
-              : { proposedBy: { host: true } },
-          );
+          if (path === "players/host/mining") {
+            const result = applyTransaction(updater, sendMining);
+            if (result.committed) sendMining = result.value;
+            return result;
+          }
+          return applyTransaction(updater, { proposedBy: { host: true } });
         },
       }),
       verifyIdentity: async () => ({
-        idToken: "token",
-        profileId: "profile-host",
         uid: "host",
       }),
     },
@@ -1833,10 +2079,9 @@ test("authenticates before body parsing and sanitizes route failures", async () 
         getRtdbPath: async () => {
           throw new Error("private-upstream-detail");
         },
-        findProfileId: async () => null,
+        readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
       }),
       verifyIdentity: async () => ({
-        idToken: "token",
         uid: "uid-with-no-claim",
       }),
     },
@@ -1871,8 +2116,11 @@ test("reads only the authenticated caller profile from D1", async () => {
     context(),
     {
       repository: repository({
-        getRtdbPath: async (path) =>
-          path === "players/firebase-uid/profile" ? "profile-from-rtdb" : null,
+        readProfileOwnershipSnapshot: async (query) =>
+          ownershipForLogins(query, () => "profile-from-d1"),
+        getRtdbPath: async (path) => {
+          assert.fail(`unexpected RTDB read ${path}`);
+        },
       }),
       readNavigationPage: async (_db, profileId, limit, cursor) => {
         received = { profileId, limit, cursor };
@@ -1889,7 +2137,7 @@ test("reads only the authenticated caller profile from D1", async () => {
     hasMore: false,
   });
   assert.deepEqual(received, {
-    profileId: "profile-from-rtdb",
+    profileId: "profile-from-d1",
     limit: 80,
     cursor: { sortBucket: 30, listSortAtMs: 1_000, id: "invite-1" },
   });
@@ -1908,7 +2156,7 @@ test("fails closed when navigation profile ownership is unavailable", async () =
         getRtdbPath: async () => {
           throw new Error("rtdb-unavailable");
         },
-        findProfileId: async () => {
+        readProfileOwnershipSnapshot: async () => {
           throw new Error("profile-storage-unavailable");
         },
       }),

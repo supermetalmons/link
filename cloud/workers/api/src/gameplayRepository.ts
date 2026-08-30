@@ -13,6 +13,10 @@ import {
   createCanonicalGameplayRepository,
   createCanonicalRatingRepository,
 } from "./gameplayCanonicalRepository.ts";
+import type {
+  ProfileOwnershipProfile,
+  ProfileOwnershipReader,
+} from "./profileOwnership.ts";
 
 const MAX_RATING_TRANSACTION_ATTEMPTS = 5;
 const MAX_WAGER_TRANSFER_TRANSACTION_ATTEMPTS = 5;
@@ -36,15 +40,7 @@ export type WagerTransferInput = {
 export type WagerTransferResult =
   "applied" | "insufficient-materials" | "replayed";
 
-export type GameplayProfile = {
-  aura: string;
-  emoji: number | string;
-  eth: string;
-  profileId: string;
-  rating: number;
-  sol: string;
-  username: string;
-};
+export type GameplayProfile = ProfileOwnershipProfile;
 
 export type RatingProfile = GameplayProfile & {
   feb2026UniqueOpponents: string[];
@@ -149,7 +145,7 @@ export type RatingFinalizeResult =
 
 export type RatingRepository = Pick<
   GameplayRepository,
-  "getRtdbPath" | "patchRtdbRoot"
+  "getRtdbPath" | "patchRtdbRoot" | "readProfileOwnershipSnapshot"
 > & {
   applyFebruaryChallengeReplay: (
     playerProfileId: string,
@@ -162,7 +158,6 @@ export type RatingRepository = Pick<
       opponent: RatingProfile | null,
     ) => RatingCommitPlan,
   ) => Promise<RatingFinalizeResult>;
-  getRatingProfile: (uid: string) => Promise<RatingProfile | null>;
   readRatingUpdate: (operationId: string) => Promise<RatingUpdateData | null>;
   tryAcquireRatingLease: (
     input: RatingLeaseInput,
@@ -223,7 +218,7 @@ export type RatingProfileGameProjectionRepository = RatingRepository & {
   ) => Promise<void>;
 };
 
-export type GameplayRepository = {
+export type GameplayRepository = ProfileOwnershipReader & {
   applyWagerTransferOnce: (
     input: WagerTransferInput,
   ) => Promise<WagerTransferResult>;
@@ -231,24 +226,11 @@ export type GameplayRepository = {
     profileId: string,
     inviteId: string,
   ) => Promise<NavigationGameDeleteResult>;
-  findProfileId: (
-    uid: string,
-    firebaseIdToken: string,
-  ) => Promise<string | null>;
-  getGameplayProfile: (
-    uid: string,
-    firebaseIdToken: string,
-    signal?: AbortSignal,
-  ) => Promise<GameplayProfile | null>;
   getNavigationGame: (
     profileId: string,
     inviteId: string,
-    firebaseIdToken: string,
   ) => Promise<NavigationGameDocument | null>;
-  getMiningMaterials: (
-    profileId: string,
-    firebaseIdToken: string,
-  ) => Promise<MiningMaterials>;
+  getMiningMaterials: (profileId: string) => Promise<MiningMaterials>;
   getMiningSnapshot: (profileId: string) => Promise<MiningSnapshot | null>;
   getRtdbPath: (
     path: string,

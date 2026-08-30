@@ -227,6 +227,61 @@ export type CanonicalResolvedProfileAggregateSnapshot = {
   owner: CanonicalLoginOwnerSnapshot;
 };
 
+export type CanonicalProfileOwnershipQuery = Readonly<{
+  loginUids: readonly string[];
+  profileIds: readonly string[];
+}>;
+
+export type CanonicalProfileOwnershipProfileSnapshot =
+  CanonicalPublicProfileSnapshot & {
+    revision: number;
+  };
+
+export type CanonicalProfileOwnershipSnapshot = Readonly<{
+  canonicalProfileIdByProfileId: ReadonlyMap<string, string | null>;
+  loginOwnerByUid: ReadonlyMap<
+    string,
+    Readonly<{
+      profileId: string;
+      revision: number;
+    }> | null
+  >;
+  loginOwnersByProfileId: ReadonlyMap<
+    string,
+    readonly CanonicalLoginOwnerSnapshot[]
+  >;
+  profileById: ReadonlyMap<string, CanonicalProfileOwnershipProfileSnapshot>;
+}>;
+
+type CanonicalOwnershipResolutionRow = {
+  chain_profile_id: string | null;
+  depth: number | null;
+  merge_target_merged_at_ms: number | null;
+  merge_target_op_id: string | null;
+  merge_target_profile_id: string | null;
+  merged_into_profile_id: string | null;
+  owner_created_at_ms: number | null;
+  owner_revision: number | null;
+  owner_updated_at_ms: number | null;
+  profile_revision: number | null;
+  profile_state: string | null;
+  request_index: number;
+  request_key: string;
+  root_profile_id: string | null;
+};
+
+type CanonicalOwnershipProfileRow = PublicProfileRow & {
+  revision: number;
+};
+
+type CanonicalOwnershipOwnerRow = {
+  owner_created_at_ms: number | null;
+  owner_login_uid: string | null;
+  owner_profile_id: string | null;
+  owner_revision: number | null;
+  owner_updated_at_ms: number | null;
+};
+
 type PublicProfileRow = {
   dust_sort: number | null;
   dust_sort_present: number;
@@ -270,6 +325,13 @@ const CANONICAL_PUBLIC_PROFILE_COLUMNS = `
   dust_sort_present, slime_sort_present, gum_sort_present,
   metal_sort_present, ice_sort_present, win_present, emoji_present
 `;
+
+const CANONICAL_OWNERSHIP_PROFILE_COLUMNS = [
+  ...CANONICAL_PUBLIC_PROFILE_COLUMNS.split(",").map(
+    (column) => `profile.${column.trim()}`,
+  ),
+  "profile.revision",
+].join(", ");
 
 type CanonicalControlRow = {
   state: string;
@@ -1385,6 +1447,511 @@ export async function readStableCanonicalProfileAggregate(
   });
 }
 
+function canonicalOwnershipInputs(
+  values: readonly string[],
+  errorCode: string,
+): string[] {
+  if (values.some((value) => typeof value !== "string" || value === "")) {
+    throw new TypeError(errorCode);
+  }
+  return [...new Set(values)];
+}
+
+function canonicalOwnershipResolutionStatement(
+  db: D1Database,
+  requestKeys: readonly string[],
+  kind: "login" | "profile",
+): D1PreparedStatement {
+  const roots =
+    kind === "login"
+      ? `SELECT
+           requested.request_index,
+           requested.request_key,
+           owner.profile_id AS root_profile_id,
+           owner.revision AS owner_revision,
+           owner.created_at_ms AS owner_created_at_ms,
+           owner.updated_at_ms AS owner_updated_at_ms
+         FROM requested
+         LEFT JOIN profile_login_owners owner
+           ON owner.login_uid = requested.request_key`
+      : `SELECT
+           request_index,
+           request_key,
+           request_key AS root_profile_id,
+           NULL AS owner_revision,
+           NULL AS owner_created_at_ms,
+           NULL AS owner_updated_at_ms
+         FROM requested`;
+  return db
+    .prepare(
+      `WITH RECURSIVE
+       requested(request_index, request_key) AS (
+         SELECT CAST(key AS INTEGER), CAST(value AS TEXT)
+         FROM json_each(?)
+       ),
+       roots AS (${roots}),
+       chain(
+         request_index,
+         request_key,
+         root_profile_id,
+         chain_profile_id,
+         depth
+       ) AS (
+         SELECT
+           request_index,
+           request_key,
+           root_profile_id,
+           root_profile_id,
+           0
+         FROM roots
+         WHERE root_profile_id IS NOT NULL
+         UNION ALL
+         SELECT
+           chain.request_index,
+           chain.request_key,
+           chain.root_profile_id,
+           target.target_profile_id,
+           chain.depth + 1
+         FROM chain
+         JOIN profile_merge_targets target
+           ON target.source_profile_id = chain.chain_profile_id
+         WHERE chain.depth <= ?
+       )
+       SELECT
+         roots.request_index,
+         roots.request_key,
+         roots.root_profile_id,
+         roots.owner_revision,
+         roots.owner_created_at_ms,
+         roots.owner_updated_at_ms,
+         chain.chain_profile_id,
+         chain.depth,
+         profile.revision AS profile_revision,
+         profile.state AS profile_state,
+         profile.merged_into_profile_id,
+         target.target_profile_id AS merge_target_profile_id,
+         target.merged_at_ms AS merge_target_merged_at_ms,
+         target.op_id AS merge_target_op_id
+       FROM roots
+       LEFT JOIN chain
+         ON chain.request_index = roots.request_index
+       LEFT JOIN profile_records profile
+         ON profile.profile_id = chain.chain_profile_id
+       LEFT JOIN profile_merge_targets target
+         ON target.source_profile_id = chain.chain_profile_id
+       ORDER BY roots.request_index ASC, chain.depth ASC`,
+    )
+    .bind(
+      JSON.stringify(requestKeys),
+      CANONICAL_PROFILE_INTERNAL_REDIRECT_LIMIT,
+    );
+}
+
+type ParsedCanonicalOwnershipResolution = Readonly<{
+  owner: CanonicalLoginOwnerSnapshot | null;
+  profileId: string;
+}> | null;
+
+function parseCanonicalOwnershipResolutions(
+  rows: readonly CanonicalOwnershipResolutionRow[],
+  requestKeys: readonly string[],
+  kind: "login" | "profile",
+): ParsedCanonicalOwnershipResolution[] {
+  const grouped = requestKeys.map(
+    () => [] as CanonicalOwnershipResolutionRow[],
+  );
+  for (const row of rows) {
+    const requestIndex = safeInteger(row.request_index);
+    if (
+      requestIndex >= requestKeys.length ||
+      row.request_key !== requestKeys[requestIndex]
+    ) {
+      throw new CanonicalProfileCorruption();
+    }
+    grouped[requestIndex].push(row);
+  }
+  return grouped.map((group, requestIndex) => {
+    if (group.length === 0) throw new CanonicalProfileCorruption();
+    const requestKey = requestKeys[requestIndex];
+    const rootProfileId = nullableString(group[0].root_profile_id);
+    if (!rootProfileId) {
+      if (
+        kind !== "login" ||
+        group.length !== 1 ||
+        group[0].owner_revision !== null ||
+        group[0].owner_created_at_ms !== null ||
+        group[0].owner_updated_at_ms !== null ||
+        group[0].chain_profile_id !== null ||
+        group[0].depth !== null
+      ) {
+        throw new CanonicalProfileCorruption();
+      }
+      return null;
+    }
+    const owner =
+      kind === "login"
+        ? parseCanonicalLoginOwnerRow({
+            login_uid: requestKey,
+            profile_id: rootProfileId,
+            revision: group[0].owner_revision,
+            created_at_ms: group[0].owner_created_at_ms,
+            updated_at_ms: group[0].owner_updated_at_ms,
+          })
+        : null;
+    if (
+      kind === "profile" &&
+      (group[0].owner_revision !== null ||
+        group[0].owner_created_at_ms !== null ||
+        group[0].owner_updated_at_ms !== null)
+    ) {
+      throw new CanonicalProfileCorruption();
+    }
+    const visited = new Set<string>();
+    let canonicalProfileId: string | null = null;
+    for (let index = 0; index < group.length; index += 1) {
+      const row = group[index];
+      if (
+        row.request_key !== requestKey ||
+        row.root_profile_id !== rootProfileId ||
+        row.owner_revision !== group[0].owner_revision ||
+        row.owner_created_at_ms !== group[0].owner_created_at_ms ||
+        row.owner_updated_at_ms !== group[0].owner_updated_at_ms
+      ) {
+        throw new CanonicalProfileCorruption();
+      }
+      const depth = safeInteger(row.depth);
+      const profileId = nonempty(row.chain_profile_id);
+      if (
+        depth !== index ||
+        depth > CANONICAL_PROFILE_INTERNAL_REDIRECT_LIMIT ||
+        visited.has(profileId)
+      ) {
+        throw new CanonicalProfileCorruption();
+      }
+      visited.add(profileId);
+      const profileState = row.profile_state;
+      const hasProfile = row.profile_revision !== null;
+      if (hasProfile !== (profileState !== null)) {
+        throw new CanonicalProfileCorruption();
+      }
+      const mergedIntoProfileId = nullableString(row.merged_into_profile_id);
+      const mergeTargetProfileId = nullableString(row.merge_target_profile_id);
+      if (!hasProfile) {
+        if (mergedIntoProfileId !== null) {
+          throw new CanonicalProfileCorruption();
+        }
+        if (!mergeTargetProfileId) {
+          if (
+            index === 0 &&
+            kind === "profile" &&
+            row.merge_target_merged_at_ms === null &&
+            row.merge_target_op_id === null &&
+            group.length === 1
+          ) {
+            return null;
+          }
+          throw new CanonicalProfileCorruption();
+        }
+        safeInteger(row.merge_target_merged_at_ms);
+        nullableString(row.merge_target_op_id);
+        if (
+          index + 1 >= group.length ||
+          group[index + 1].chain_profile_id !== mergeTargetProfileId
+        ) {
+          throw new CanonicalProfileCorruption();
+        }
+        continue;
+      }
+      if (profileState !== "active" && profileState !== "retiring") {
+        throw new CanonicalProfileCorruption();
+      }
+      safeInteger(row.profile_revision, 1);
+      if (mergeTargetProfileId) {
+        safeInteger(row.merge_target_merged_at_ms);
+        nullableString(row.merge_target_op_id);
+        if (
+          profileState !== "retiring" ||
+          mergedIntoProfileId !== mergeTargetProfileId ||
+          index + 1 >= group.length ||
+          group[index + 1].chain_profile_id !== mergeTargetProfileId
+        ) {
+          throw new CanonicalProfileCorruption();
+        }
+        continue;
+      }
+      if (
+        row.merge_target_merged_at_ms !== null ||
+        row.merge_target_op_id !== null ||
+        profileState !== "active" ||
+        mergedIntoProfileId !== null ||
+        index + 1 !== group.length
+      ) {
+        throw new CanonicalProfileCorruption();
+      }
+      canonicalProfileId = profileId;
+    }
+    if (!canonicalProfileId) throw new CanonicalProfileCorruption();
+    return { owner, profileId: canonicalProfileId };
+  });
+}
+
+function canonicalOwnershipTerminalsCte(): string {
+  return `WITH RECURSIVE
+          requested_login(request_key) AS (
+            SELECT CAST(value AS TEXT) FROM json_each(?)
+          ),
+          requested_profile(request_key) AS (
+            SELECT CAST(value AS TEXT) FROM json_each(?)
+          ),
+          roots(root_profile_id) AS (
+            SELECT owner.profile_id
+            FROM requested_login requested
+            JOIN profile_login_owners owner
+              ON owner.login_uid = requested.request_key
+            UNION
+            SELECT request_key FROM requested_profile
+          ),
+          chain(chain_profile_id, depth) AS (
+            SELECT root_profile_id, 0 FROM roots
+            UNION ALL
+            SELECT target.target_profile_id, chain.depth + 1
+            FROM chain
+            JOIN profile_merge_targets target
+              ON target.source_profile_id = chain.chain_profile_id
+            WHERE chain.depth <= ?
+          ),
+          terminals(profile_id) AS (
+            SELECT DISTINCT chain.chain_profile_id
+            FROM chain
+            LEFT JOIN profile_merge_targets target
+              ON target.source_profile_id = chain.chain_profile_id
+            WHERE target.source_profile_id IS NULL
+          )`;
+}
+
+function bindCanonicalOwnershipTerminals(
+  statement: D1PreparedStatement,
+  loginUids: readonly string[],
+  profileIds: readonly string[],
+): D1PreparedStatement {
+  return statement.bind(
+    JSON.stringify(loginUids),
+    JSON.stringify(profileIds),
+    CANONICAL_PROFILE_INTERNAL_REDIRECT_LIMIT,
+  );
+}
+
+function canonicalOwnershipProfilesStatement(
+  db: D1Database,
+  loginUids: readonly string[],
+  profileIds: readonly string[],
+): D1PreparedStatement {
+  return bindCanonicalOwnershipTerminals(
+    db.prepare(
+      `${canonicalOwnershipTerminalsCte()}
+       SELECT ${CANONICAL_OWNERSHIP_PROFILE_COLUMNS}
+       FROM terminals
+       JOIN profile_records profile ON profile.profile_id = terminals.profile_id
+       ORDER BY profile.profile_id ASC`,
+    ),
+    loginUids,
+    profileIds,
+  );
+}
+
+function canonicalOwnershipOwnersStatement(
+  db: D1Database,
+  loginUids: readonly string[],
+  profileIds: readonly string[],
+): D1PreparedStatement {
+  return bindCanonicalOwnershipTerminals(
+    db.prepare(
+      `${canonicalOwnershipTerminalsCte()}
+       SELECT
+         owner.login_uid AS owner_login_uid,
+         owner.profile_id AS owner_profile_id,
+         owner.revision AS owner_revision,
+         owner.created_at_ms AS owner_created_at_ms,
+         owner.updated_at_ms AS owner_updated_at_ms
+       FROM terminals
+       JOIN profile_login_owners owner
+         ON owner.profile_id = terminals.profile_id
+       ORDER BY owner.profile_id ASC, owner.login_uid ASC`,
+    ),
+    loginUids,
+    profileIds,
+  );
+}
+
+function parseCanonicalOwnershipProfiles(
+  rows: readonly CanonicalOwnershipProfileRow[],
+): Map<string, CanonicalProfileOwnershipProfileSnapshot> {
+  const profileById = new Map<
+    string,
+    CanonicalProfileOwnershipProfileSnapshot
+  >();
+  for (const row of rows) {
+    const profile = {
+      ...parseCanonicalPublicProfileRow(row),
+      revision: safeInteger(row.revision, 1),
+    };
+    if (
+      profile.state !== "active" ||
+      profile.mergedIntoProfileId !== null ||
+      profileById.has(profile.profileId)
+    ) {
+      throw new CanonicalProfileCorruption();
+    }
+    profileById.set(profile.profileId, profile);
+  }
+  return profileById;
+}
+
+function parseCanonicalOwnershipOwners(
+  rows: readonly CanonicalOwnershipOwnerRow[],
+  profileById: ReadonlyMap<string, CanonicalProfileOwnershipProfileSnapshot>,
+): {
+  aggregateOwnerByUid: Map<string, CanonicalLoginOwnerSnapshot>;
+  loginOwnersByProfileId: Map<string, readonly CanonicalLoginOwnerSnapshot[]>;
+} {
+  const mutableOwners = new Map<string, CanonicalLoginOwnerSnapshot[]>();
+  for (const profileId of profileById.keys()) {
+    mutableOwners.set(profileId, []);
+  }
+  const aggregateOwnerByUid = new Map<string, CanonicalLoginOwnerSnapshot>();
+  for (const row of rows) {
+    const owner = parseCanonicalLoginOwnerRow({
+      login_uid: row.owner_login_uid,
+      profile_id: row.owner_profile_id,
+      revision: row.owner_revision,
+      created_at_ms: row.owner_created_at_ms,
+      updated_at_ms: row.owner_updated_at_ms,
+    });
+    const owners = mutableOwners.get(owner.profileId);
+    if (!owners || aggregateOwnerByUid.has(owner.loginUid)) {
+      throw new CanonicalProfileCorruption();
+    }
+    aggregateOwnerByUid.set(owner.loginUid, owner);
+    owners.push(owner);
+  }
+  const loginOwnersByProfileId = new Map<
+    string,
+    readonly CanonicalLoginOwnerSnapshot[]
+  >();
+  for (const [profileId, owners] of mutableOwners) {
+    loginOwnersByProfileId.set(profileId, Object.freeze(owners));
+  }
+  return { aggregateOwnerByUid, loginOwnersByProfileId };
+}
+
+export async function readCanonicalProfileOwnershipSnapshot(
+  db: D1Database,
+  query: CanonicalProfileOwnershipQuery,
+): Promise<CanonicalProfileOwnershipSnapshot> {
+  const loginUids = canonicalOwnershipInputs(
+    query.loginUids,
+    "invalid-canonical-login-ownership-input",
+  );
+  const profileIds = canonicalOwnershipInputs(
+    query.profileIds,
+    "invalid-canonical-profile-ownership-input",
+  );
+  if (loginUids.length === 0 && profileIds.length === 0) {
+    return Object.freeze({
+      canonicalProfileIdByProfileId: new Map(),
+      loginOwnerByUid: new Map(),
+      loginOwnersByProfileId: new Map(),
+      profileById: new Map(),
+    });
+  }
+  const results = await db.batch<
+    | CanonicalOwnershipOwnerRow
+    | CanonicalOwnershipProfileRow
+    | CanonicalOwnershipResolutionRow
+  >([
+    canonicalOwnershipResolutionStatement(db, loginUids, "login"),
+    canonicalOwnershipResolutionStatement(db, profileIds, "profile"),
+    canonicalOwnershipProfilesStatement(db, loginUids, profileIds),
+    canonicalOwnershipOwnersStatement(db, loginUids, profileIds),
+  ]);
+  const loginResolutions = parseCanonicalOwnershipResolutions(
+    results[0].results as CanonicalOwnershipResolutionRow[],
+    loginUids,
+    "login",
+  );
+  const profileResolutions = parseCanonicalOwnershipResolutions(
+    results[1].results as CanonicalOwnershipResolutionRow[],
+    profileIds,
+    "profile",
+  );
+  const profileById = parseCanonicalOwnershipProfiles(
+    results[2].results as CanonicalOwnershipProfileRow[],
+  );
+  const { aggregateOwnerByUid, loginOwnersByProfileId } =
+    parseCanonicalOwnershipOwners(
+      results[3].results as CanonicalOwnershipOwnerRow[],
+      profileById,
+    );
+  const canonicalProfileIds = new Set<string>();
+  const loginOwnerByUid = new Map<
+    string,
+    Readonly<{ profileId: string; revision: number }> | null
+  >();
+  for (let index = 0; index < loginUids.length; index += 1) {
+    const loginUid = loginUids[index];
+    const resolution = loginResolutions[index];
+    if (!resolution) {
+      loginOwnerByUid.set(loginUid, null);
+      continue;
+    }
+    const owner = resolution.owner;
+    if (!owner || owner.profileId !== resolution.profileId) {
+      throw new CanonicalProfileCorruption();
+    }
+    const aggregateOwner = aggregateOwnerByUid.get(loginUid);
+    if (
+      !aggregateOwner ||
+      aggregateOwner.profileId !== resolution.profileId ||
+      aggregateOwner.revision !== owner.revision
+    ) {
+      throw new CanonicalProfileCorruption();
+    }
+    canonicalProfileIds.add(resolution.profileId);
+    loginOwnerByUid.set(
+      loginUid,
+      Object.freeze({
+        profileId: resolution.profileId,
+        revision: owner.revision,
+      }),
+    );
+  }
+  const canonicalProfileIdByProfileId = new Map<string, string | null>();
+  for (let index = 0; index < profileIds.length; index += 1) {
+    const profileId = profileIds[index];
+    const resolution = profileResolutions[index];
+    if (resolution?.owner) throw new CanonicalProfileCorruption();
+    const canonicalProfileId = resolution?.profileId || null;
+    canonicalProfileIdByProfileId.set(profileId, canonicalProfileId);
+    if (canonicalProfileId) canonicalProfileIds.add(canonicalProfileId);
+  }
+  if (
+    profileById.size !== canonicalProfileIds.size ||
+    loginOwnersByProfileId.size !== canonicalProfileIds.size ||
+    [...canonicalProfileIds].some(
+      (profileId) =>
+        !profileById.has(profileId) || !loginOwnersByProfileId.has(profileId),
+    )
+  ) {
+    throw new CanonicalProfileCorruption();
+  }
+  return Object.freeze({
+    canonicalProfileIdByProfileId,
+    loginOwnerByUid,
+    loginOwnersByProfileId,
+    profileById,
+  });
+}
+
 export async function readStableCanonicalProfileAggregateByLogin(
   db: D1Database,
   loginUid: string,
@@ -1507,6 +2074,11 @@ export type CanonicalExpectation =
     }
   | {
       kind: "february-opponent-absent";
+      opponentProfileId: string;
+      profileId: string;
+    }
+  | {
+      kind: "canonical-february-opponent-absent";
       opponentProfileId: string;
       profileId: string;
     }
@@ -1755,6 +2327,38 @@ export function buildCanonicalGuardStatements(
              WHERE profile_id = ? AND opponent_profile_id = ?
            )`,
           [expectation.profileId, expectation.opponentProfileId],
+        );
+      case "canonical-february-opponent-absent":
+        return guardStatement(
+          db,
+          `EXISTS (
+             WITH RECURSIVE opponent_chain(current_profile_id, depth) AS (
+               SELECT opponent_profile_id, 0
+               FROM profile_february_opponents
+               WHERE profile_id = ?
+               UNION ALL
+               SELECT mapping.target_profile_id, opponent_chain.depth + 1
+               FROM opponent_chain
+               JOIN profile_merge_targets AS mapping
+                 ON mapping.source_profile_id = opponent_chain.current_profile_id
+               WHERE opponent_chain.depth <= ?
+             )
+             SELECT 1
+             FROM opponent_chain
+             LEFT JOIN profile_merge_targets AS mapping
+               ON mapping.source_profile_id = opponent_chain.current_profile_id
+             WHERE opponent_chain.depth > ?
+                OR (
+                  mapping.source_profile_id IS NULL
+                  AND opponent_chain.current_profile_id = ?
+                )
+           )`,
+          [
+            expectation.profileId,
+            CANONICAL_PROFILE_INTERNAL_REDIRECT_LIMIT,
+            CANONICAL_PROFILE_INTERNAL_REDIRECT_LIMIT,
+            expectation.opponentProfileId,
+          ],
         );
       case "february-opponent":
         return guardStatement(
@@ -2494,6 +3098,48 @@ function validateCanonicalCommitPlan(plan: CanonicalCommitPlan): void {
   const requireExpectation = (covered: boolean): void => {
     if (!covered) throw new TypeError("unsafe-canonical-commit-plan");
   };
+  const ownerMoveProfileIds = new Set<string>();
+  for (const mutation of plan.mutations) {
+    if (mutation.kind !== "move-login-owner-set") continue;
+    if (
+      ownerMoveProfileIds.has(mutation.sourceProfileId) ||
+      ownerMoveProfileIds.has(mutation.targetProfileId)
+    ) {
+      throw new TypeError("unsafe-canonical-commit-plan");
+    }
+    ownerMoveProfileIds.add(mutation.sourceProfileId);
+    ownerMoveProfileIds.add(mutation.targetProfileId);
+  }
+  if (
+    plan.mutations.some((mutation) => {
+      if (mutation.kind === "insert-login-owner") {
+        return ownerMoveProfileIds.has(mutation.value.profileId);
+      }
+      if (
+        mutation.kind !== "update-login-owner" &&
+        mutation.kind !== "delete-login-owner"
+      ) {
+        return false;
+      }
+      const loginUid =
+        mutation.kind === "update-login-owner"
+          ? mutation.value.loginUid
+          : mutation.loginUid;
+      const current = plan.expectations.find(
+        (expectation) =>
+          expectation.kind === "login-owner-revision" &&
+          expectation.loginUid === loginUid,
+      );
+      return (
+        (mutation.kind === "update-login-owner" &&
+          ownerMoveProfileIds.has(mutation.value.profileId)) ||
+        (current?.kind === "login-owner-revision" &&
+          ownerMoveProfileIds.has(current.profileId))
+      );
+    })
+  ) {
+    throw new TypeError("unsafe-canonical-commit-plan");
+  }
   const lifecycleProfileIds = new Set<string>();
   const requireUniqueLifecycleProfile = (profileId: string): void => {
     if (!profileId || lifecycleProfileIds.has(profileId)) {

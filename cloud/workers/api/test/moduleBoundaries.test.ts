@@ -42,6 +42,104 @@ test("canonical D1 modules have no direct Firestore runtime dependency", () => {
 const repositoryRoot = resolve(import.meta.dirname, "../../../..");
 const runtimeExtensions = [".ts", ".tsx", ".js", ".mjs", ".cjs"];
 
+const expectedProfileShadowMatches: Record<string, string[]> = {
+  "cloud/workers/api/src/authRecovery.ts": [
+    "players/${uid}/profile",
+    "players/${uid}/profile",
+  ],
+  "cloud/workers/api/src/profileClaim.ts": [
+    "players/${identity.uid}/profile",
+    "players/${identity.uid}/profile",
+  ],
+  "cloud/workers/api/src/profileGameProjection.ts": [
+    "players/${loginUid}/profile",
+  ],
+};
+
+test("Worker ownership ignores Firebase profile claims and RTDB profile shadows", () => {
+  const sourcePaths = reachableRuntimeFiles(
+    resolve(import.meta.dirname, "../src/index.ts"),
+  );
+  const requestClaimViolations = sourcePaths
+    .filter((path) =>
+      /\b(?:auth\.token\.profileId|identity\.profileId|rawProfileIdClaim)\b/.test(
+        readFileSync(path, "utf8"),
+      ),
+    )
+    .map((path) => relative(repositoryRoot, path));
+  assert.deepEqual(requestClaimViolations, []);
+
+  const rtdbProfileShadowPattern =
+    /players\/(?:\$\{[^}\r\n]+\}|[^/"'`\r\n]+)\/profile\b/g;
+  const profileShadowMatches = Object.fromEntries(
+    sourcePaths.flatMap((path) => {
+      const matches = readFileSync(path, "utf8").match(
+        rtdbProfileShadowPattern,
+      );
+      return matches?.length
+        ? [[relative(repositoryRoot, path), matches] as const]
+        : [];
+    }),
+  );
+  assert.deepEqual(profileShadowMatches, expectedProfileShadowMatches);
+});
+
+test("event progress installs the shared ownership snapshot", () => {
+  const source = readFileSync(
+    resolve(import.meta.dirname, "../src/eventProgress.ts"),
+    "utf8",
+  );
+  assert.match(source, /readProfileOwnershipSnapshot:\s*\(query\)\s*=>/);
+  assert.match(source, /requireProfileOwnershipSnapshot\(repository, query\)/);
+});
+
+test("ownership consumers cannot restore legacy APIs or final fences", () => {
+  const sourcePaths = reachableRuntimeFiles(
+    resolve(import.meta.dirname, "../src/index.ts"),
+  );
+  const forbidden =
+    /(?:findProfileId|findProfileIds|listProfileLoginUids|getGameplayProfile|getGameplayProfileOwnership|resolveCanonicalProfileId|resolveCanonicalProfileIds|readStableCanonicalLoginOwnerships|readStableCanonicalProfileIds|readStableOwnershipResolution|assertOwnershipResolutionUnchanged|assertAutomatchOwnerUnchanged|ownershipExpectations|cleanupPageMatchCursor|cleanupPageProfileIds|CANONICAL_PROFILE_LOGIN_OWNER_LIMIT|PROFILE_PATH_RESOLVE_CONCURRENCY|resolveProfilePaths)/;
+  const violations = sourcePaths
+    .filter((path) => forbidden.test(readFileSync(path, "utf8")))
+    .map((path) => relative(repositoryRoot, path));
+  assert.deepEqual(violations, []);
+
+  const repositorySource = readFileSync(
+    resolve(import.meta.dirname, "../src/gameplayRepository.ts"),
+    "utf8",
+  );
+  assert.match(
+    repositorySource,
+    /export type GameplayRepository = ProfileOwnershipReader/,
+  );
+  assert.doesNotMatch(
+    repositorySource,
+    /\b(?:findProfileId|findProfileIds|listProfileLoginUids|getGameplayProfile|getGameplayProfileOwnership|resolveCanonicalProfileId|resolveCanonicalProfileIds)\b/,
+  );
+
+  const eventProjectionCore = readFileSync(
+    resolve(
+      import.meta.dirname,
+      "../../../functions/eventProfileGameProjectionCore.js",
+    ),
+    "utf8",
+  );
+  const eventProjectionRepository = readFileSync(
+    resolve(import.meta.dirname, "../src/profileGameProjectionRepository.ts"),
+    "utf8",
+  );
+  assert.match(eventProjectionCore, /readProfileOwnershipSnapshot/);
+  assert.doesNotMatch(eventProjectionCore, /\b(?:getMergeTarget|getProfile)\b/);
+  assert.match(
+    eventProjectionRepository,
+    /readEventProjectionOwnershipSnapshot/,
+  );
+  assert.doesNotMatch(
+    eventProjectionRepository,
+    /\b(?:readCanonicalMergeTarget|readCanonicalProfile)\b/,
+  );
+});
+
 function isTypeOnlyImport(
   declaration: import("typescript").ImportDeclaration,
 ): boolean {

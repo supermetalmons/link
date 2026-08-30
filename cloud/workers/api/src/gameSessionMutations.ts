@@ -43,7 +43,7 @@ import {
 } from "../../../functions/telegram/automatchSource.js";
 import { getDisplayNameFromAddress } from "../../../functions/telegramDisplay.js";
 import { AuthApiFailure } from "./authErrors.ts";
-import type { FirebaseIdentity } from "./firebaseAuth.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
 import {
   FIREBASE_RTDB_SERVER_TIMESTAMP,
   firebaseRtdbIncrement,
@@ -59,6 +59,13 @@ import type {
   AutomatchProfileGameProjectionTask,
   ProfileGameProjectionTask,
 } from "./profileGameProjectionTasks.ts";
+import {
+  getLoginProfileId,
+  getOwnershipProfile,
+  loginsShareProfile,
+  requireProfileOwnershipSnapshot,
+  type ProfileOwnershipSnapshot,
+} from "./profileOwnership.ts";
 
 const GAME_SESSION_MUTATION_LOCK_ROOT = "gameplayMutationLocks";
 const GAME_SESSION_MUTATION_RECEIPT_ROOT = "gameplayMutationReceipts";
@@ -121,6 +128,7 @@ type GameSessionMutationDependencies = {
 type ParticipantResolution = {
   actorUid: string;
   opponentUid: string;
+  ownership: ProfileOwnershipSnapshot | null;
   role: "guest" | "host";
 };
 
@@ -565,64 +573,8 @@ async function runGameSessionMutation<T extends GameSessionResponse>(
   }
 }
 
-async function resolveIdentityProfileId(
-  identity: FirebaseIdentity,
-  repository: GameplayRepository,
-): Promise<string> {
-  const linked = normalizeString(
-    await repository
-      .getRtdbPath(`players/${identity.uid}/profile`)
-      .catch(() => null),
-  );
-  if (linked) {
-    return linked;
-  }
-  const found = await repository
-    .findProfileId(identity.uid, identity.idToken)
-    .catch(() => null);
-  return normalizeString(found) || normalizeString(identity.profileId);
-}
-
-async function readIdentityProfileLinkForRole(
-  identity: FirebaseIdentity,
-  repository: GameplayRepository,
-): Promise<string | null> {
-  try {
-    const value = await repository.getRtdbPath(
-      `players/${identity.uid}/profile`,
-    );
-    if (value === null || value === undefined) {
-      return null;
-    }
-    if (typeof value !== "string" || value === "") {
-      throw new Error("profile-link-invalid");
-    }
-    return value;
-  } catch {
-    throw profileOwnershipUnavailable();
-  }
-}
-
-function readParticipantProfileLink(value: unknown): string | null {
-  if (value === null || value === undefined) {
-    return null;
-  }
-  if (typeof value !== "string" || value === "") {
-    throw failedPrecondition("profile-link-invalid");
-  }
-  return value;
-}
-
-function profileOwnershipUnavailable(): AuthApiFailure {
-  return new AuthApiFailure(
-    503,
-    "unavailable",
-    "profile-ownership-unavailable",
-  );
-}
-
 export async function resolveInviteRole(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: ResolveInviteRoleRequest,
   repository: GameplayRepository,
 ): Promise<ResolveInviteRoleResponse> {
@@ -672,39 +624,30 @@ export async function resolveInviteRole(
   if (guestId && identity.uid === guestId) {
     return response(guestId, "guest");
   }
-  const hostProfileId = readParticipantProfileLink(
-    await repository.getRtdbPath(`players/${hostId}/profile`),
-  );
-  const identityProfileClaim =
-    typeof identity.rawProfileIdClaim === "string"
-      ? identity.rawProfileIdClaim
-      : identity.profileId || null;
-  if (identityProfileClaim && hostProfileId === identityProfileClaim) {
+  const ownershipUids = guestId
+    ? [identity.uid, hostId, guestId]
+    : [identity.uid, hostId];
+  const ownership = await requireProfileOwnershipSnapshot(repository, {
+    loginUids: ownershipUids,
+    profileIds: [],
+  });
+  const identityProfileId = getLoginProfileId(ownership, identity.uid);
+  const hostProfileId = getLoginProfileId(ownership, hostId);
+  const guestProfileId = guestId ? getLoginProfileId(ownership, guestId) : null;
+  if (!identityProfileId) {
+    return response(null, "watch");
+  }
+  if (hostProfileId === identityProfileId) {
     return response(hostId, "host");
   }
-  const identityProfileLink = await readIdentityProfileLinkForRole(
-    identity,
-    repository,
-  );
-  if (identityProfileLink && hostProfileId === identityProfileLink) {
-    return response(hostId, "host");
-  }
-  if (guestId) {
-    const guestProfileId = readParticipantProfileLink(
-      await repository.getRtdbPath(`players/${guestId}/profile`),
-    );
-    if (
-      (identityProfileClaim && guestProfileId === identityProfileClaim) ||
-      (identityProfileLink && guestProfileId === identityProfileLink)
-    ) {
-      return response(guestId, "guest");
-    }
+  if (guestId && guestProfileId === identityProfileId) {
+    return response(guestId, "guest");
   }
   return response(null, "watch");
 }
 
 async function resolveParticipant(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   invite: Record<string, unknown>,
   repository: GameplayRepository,
 ): Promise<ParticipantResolution> {
@@ -714,55 +657,48 @@ async function resolveParticipant(
     throw failedPrecondition("missing-opponent");
   }
   if (identity.uid === hostUid) {
-    return { actorUid: hostUid, opponentUid: guestUid, role: "host" };
+    return {
+      actorUid: hostUid,
+      opponentUid: guestUid,
+      ownership: null,
+      role: "host",
+    };
   }
   if (identity.uid === guestUid) {
-    return { actorUid: guestUid, opponentUid: hostUid, role: "guest" };
+    return {
+      actorUid: guestUid,
+      opponentUid: hostUid,
+      ownership: null,
+      role: "guest",
+    };
   }
-  const identityProfileId = await resolveIdentityProfileId(
-    identity,
-    repository,
-  );
+  const ownership = await requireProfileOwnershipSnapshot(repository, {
+    loginUids: [identity.uid, hostUid, guestUid],
+    profileIds: [],
+  });
+  const identityProfileId = getLoginProfileId(ownership, identity.uid);
+  const hostProfileId = getLoginProfileId(ownership, hostUid);
+  const guestProfileId = getLoginProfileId(ownership, guestUid);
   if (!identityProfileId) {
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
   }
-  const [hostProfileId, guestProfileId] = await Promise.all([
-    repository.getRtdbPath(`players/${hostUid}/profile`),
-    repository.getRtdbPath(`players/${guestUid}/profile`),
-  ]);
-  if (normalizeString(hostProfileId) === identityProfileId) {
-    return { actorUid: hostUid, opponentUid: guestUid, role: "host" };
+  if (hostProfileId === identityProfileId) {
+    return {
+      actorUid: hostUid,
+      opponentUid: guestUid,
+      ownership,
+      role: "host",
+    };
   }
-  if (normalizeString(guestProfileId) === identityProfileId) {
-    return { actorUid: guestUid, opponentUid: hostUid, role: "guest" };
+  if (guestProfileId === identityProfileId) {
+    return {
+      actorUid: guestUid,
+      opponentUid: hostUid,
+      ownership,
+      role: "guest",
+    };
   }
   throw new AuthApiFailure(403, "permission-denied", "permission-denied");
-}
-
-async function profilesMatch(
-  identity: FirebaseIdentity,
-  otherUid: string,
-  repository: GameplayRepository,
-): Promise<boolean> {
-  const [identityCanonicalProfileId, otherCanonicalProfileId] =
-    await Promise.all([
-      repository.findProfileId(identity.uid, identity.idToken),
-      repository.findProfileId(otherUid, identity.idToken),
-    ]);
-  const identityCanonical = normalizeString(identityCanonicalProfileId);
-  const otherCanonical = normalizeString(otherCanonicalProfileId);
-  if (identityCanonical && otherCanonical) {
-    return identityCanonical === otherCanonical;
-  }
-  const [identityProfileLink, otherProfileLink] = await Promise.all([
-    repository.getRtdbPath(`players/${identity.uid}/profile`),
-    repository.getRtdbPath(`players/${otherUid}/profile`),
-  ]);
-  const identityProfileId = normalizeString(identityProfileLink);
-  return (
-    identityProfileId !== "" &&
-    identityProfileId === normalizeString(otherProfileLink)
-  );
 }
 
 function ensureMutableInvite(invite: Record<string, unknown>): void {
@@ -772,7 +708,7 @@ function ensureMutableInvite(invite: Record<string, unknown>): void {
 }
 
 export async function createManualInvite(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: CreateInviteRequest,
   repository: GameplayRepository,
   dependencies: GameSessionMutationDependencies = {},
@@ -820,30 +756,27 @@ export async function createManualInvite(
   );
 }
 
-function emptyGameplayProfile(
-  identity: FirebaseIdentity,
-  request: JoinInviteRequest,
-): GameplayProfile {
+function emptyGameplayProfile(request: JoinInviteRequest): GameplayProfile {
   return {
     aura: request.aura,
     emoji: request.emojiId,
     eth: "",
-    profileId: normalizeString(identity.profileId),
+    profileId: "",
     rating: 0,
     sol: "",
     username: "",
   };
 }
 
-async function joiningProfile(
-  identity: FirebaseIdentity,
+function joiningProfile(
+  identity: RequestIdentity,
   request: JoinInviteRequest,
-  repository: GameplayRepository,
-): Promise<GameplayProfile> {
+  ownership: ProfileOwnershipSnapshot,
+): GameplayProfile {
+  const profileId = getLoginProfileId(ownership, identity.uid);
   return (
-    (await repository
-      .getGameplayProfile(identity.uid, identity.idToken)
-      .catch(() => null)) || emptyGameplayProfile(identity, request)
+    (profileId && getOwnershipProfile(ownership, profileId)?.profile) ||
+    emptyGameplayProfile(request)
   );
 }
 
@@ -887,7 +820,7 @@ function automatchJoinUpdates(
 }
 
 export async function joinInvite(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: JoinInviteRequest,
   repository: GameplayRepository,
   dependencies: GameSessionMutationDependencies = {},
@@ -914,10 +847,27 @@ export async function joinInvite(
       if (currentGuestUid && !isSafeFirebaseKey(currentGuestUid)) {
         throw failedPrecondition("invite-invalid");
       }
-      const joinedExisting =
-        currentGuestUid !== "" &&
-        (currentGuestUid === identity.uid ||
-          (await profilesMatch(identity, currentGuestUid, repository)));
+      let ownership: ProfileOwnershipSnapshot | null = null;
+      const readOwnership = async () => {
+        ownership ||= await requireProfileOwnershipSnapshot(repository, {
+          loginUids: [
+            identity.uid,
+            hostUid,
+            ...(currentGuestUid ? [currentGuestUid] : []),
+          ],
+          profileIds: [],
+        });
+        return ownership;
+      };
+      let joinedExisting =
+        currentGuestUid !== "" && currentGuestUid === identity.uid;
+      if (currentGuestUid && !joinedExisting) {
+        joinedExisting = loginsShareProfile(
+          await readOwnership(),
+          identity.uid,
+          currentGuestUid,
+        );
+      }
       if (currentGuestUid && !joinedExisting) {
         return {
           response: {
@@ -929,11 +879,11 @@ export async function joinInvite(
           },
         };
       }
-      if (
+      const joiningHost =
         !currentGuestUid &&
         (identity.uid === hostUid ||
-          (await profilesMatch(identity, hostUid, repository)))
-      ) {
+          loginsShareProfile(await readOwnership(), identity.uid, hostUid));
+      if (joiningHost) {
         return {
           response: {
             ok: true,
@@ -994,7 +944,11 @@ export async function joinInvite(
             await repository.getRtdbPath(`automatch/${request.inviteId}`),
           ) ||
           {};
-        const profile = await joiningProfile(identity, request, repository);
+        const profile = joiningProfile(
+          identity,
+          request,
+          await readOwnership(),
+        );
         Object.assign(
           updates,
           automatchJoinUpdates(
@@ -1061,7 +1015,7 @@ function rematchColor(
 }
 
 export async function proposeRematch(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: ProposeRematchRequest,
   repository: GameplayRepository,
   dependencies: GameSessionMutationDependencies = {},
@@ -1085,6 +1039,21 @@ export async function proposeRematch(
         invite,
         repository,
       );
+      const ownership =
+        participant.ownership ||
+        (await requireProfileOwnershipSnapshot(repository, {
+          loginUids: [participant.actorUid, participant.opponentUid],
+          profileIds: [],
+        }));
+      if (
+        loginsShareProfile(
+          ownership,
+          participant.actorUid,
+          participant.opponentUid,
+        )
+      ) {
+        throw failedPrecondition("rematch-unavailable");
+      }
       const index = nextRematchIndex(invite, participant.role);
       if (!index) {
         throw failedPrecondition("rematch-unavailable");
@@ -1136,7 +1105,7 @@ export async function proposeRematch(
 }
 
 export async function endRematchSeries(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: EndRematchRequest,
   repository: GameplayRepository,
   dependencies: GameSessionMutationDependencies = {},
@@ -1192,7 +1161,7 @@ export async function endRematchSeries(
 }
 
 export async function ensureParticipantMatch(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: EnsureMatchRequest,
   repository: GameplayRepository,
   dependencies: GameSessionMutationDependencies = {},

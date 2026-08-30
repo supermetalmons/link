@@ -11,18 +11,22 @@ export type ProjectionWrite = {
   updateTime?: string;
 };
 
+export type ProjectionOwnershipSnapshot = {
+  profileDataById: ReadonlyMap<string, Record<string, unknown>>;
+  profileIdByLoginUid: ReadonlyMap<string, string | null>;
+};
+
 export type ProfileGamesProjectionRepository = {
   commitProjectionWrites(writes: ProjectionWrite[]): Promise<void>;
-  findProfileByLogin(
-    loginUid: string,
-  ): Promise<{ id: string; data: Record<string, unknown> } | null>;
-  getMergeTarget(profileId: string): Promise<Record<string, unknown> | null>;
-  getProfile(profileId: string): Promise<ProjectionDocument | null>;
   getProjection(
     profileId: string,
     inviteId: string,
   ): Promise<ProjectionDocument | null>;
   getRtdbPath(path: string): Promise<unknown>;
+  readProfileOwnershipSnapshot(query: {
+    loginUids: readonly string[];
+    profileIds: readonly string[];
+  }): Promise<ProjectionOwnershipSnapshot>;
 };
 
 export type RecomputeInviteProjectionOptions = {

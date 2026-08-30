@@ -67,7 +67,7 @@ function jwksFetch(jwk: JWK, calls: { count: number }): typeof fetch {
   };
 }
 
-test("verifies an exact Firebase ID token and returns only UID plus token", async () => {
+test("verifies an exact Firebase ID token and returns only UID", async () => {
   const { privateKey, publicJwk } = await signingKey();
   const token = await signToken(privateKey);
   const { ctx } = context();
@@ -76,7 +76,7 @@ test("verifies an exact Firebase ID token and returns only UID plus token", asyn
     fetcher: jwksFetch(publicJwk, { count: 0 }),
     now: () => NOW_MS,
   });
-  assert.deepEqual(identity, { idToken: token, uid: "firebase-uid" });
+  assert.deepEqual(identity, { uid: "firebase-uid" });
 });
 
 test("rejects noncanonical and malformed Firebase UIDs", async () => {
@@ -121,7 +121,7 @@ test("applies the Firebase UID UTF-16 length limit", async () => {
       fetcher: jwksFetch(publicJwk, { count: 0 }),
       now: () => NOW_MS,
     }),
-    { idToken: validToken, uid: validUid },
+    { uid: validUid },
   );
 
   const invalidUid = "😀".repeat(65);
@@ -143,37 +143,24 @@ test("applies the Firebase UID UTF-16 length limit", async () => {
   );
 });
 
-test("retains only a validated optional profile claim", async () => {
+test("discards stale, forged, and malformed profile claims", async () => {
   const { privateKey, publicJwk } = await signingKey();
-  const validToken = await signToken(privateKey, {
-    profileId: " profile-1 ",
-  });
-  const invalidToken = await signToken(privateKey, {
-    profileId: `profile-${"x".repeat(1_500)}`,
-  });
-  const validContext = context();
-  assert.deepEqual(
-    await verifyFirebaseRequest(request(validToken), validContext.ctx, {
-      cache: null,
-      fetcher: jwksFetch(publicJwk, { count: 0 }),
-      now: () => NOW_MS,
-    }),
-    {
-      idToken: validToken,
-      uid: "firebase-uid",
-      profileId: "profile-1",
-      rawProfileIdClaim: " profile-1 ",
-    },
-  );
-  const invalidContext = context();
-  assert.deepEqual(
-    await verifyFirebaseRequest(request(invalidToken), invalidContext.ctx, {
-      cache: null,
-      fetcher: jwksFetch(publicJwk, { count: 0 }),
-      now: () => NOW_MS,
-    }),
-    { idToken: invalidToken, uid: "firebase-uid" },
-  );
+  for (const profileId of [
+    "stale-profile",
+    "forged-other-profile",
+    `profile-${"x".repeat(1_500)}`,
+  ]) {
+    const token = await signToken(privateKey, { profileId });
+    const { ctx } = context();
+    assert.deepEqual(
+      await verifyFirebaseRequest(request(token), ctx, {
+        cache: null,
+        fetcher: jwksFetch(publicJwk, { count: 0 }),
+        now: () => NOW_MS,
+      }),
+      { uid: "firebase-uid" },
+    );
+  }
 });
 
 test("rejects missing, malformed, oversized, invalid, and unknown-key tokens", async () => {

@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  buildEventProjectionOwnerPlan,
   createEventProfileGameProjectionCore,
   type EventProfileGameProjectionRepository,
   type EventProjectionWrite,
 } from "../../../functions/eventProfileGameProjectionCore.js";
 
 function createRepository(input: {
+  canonicalProfileIds?: Record<string, string | null>;
   events?: Array<Record<string, unknown> | null>;
-  mergeTargets?: Record<string, Record<string, unknown> | null>;
-  profiles?: Record<string, Record<string, unknown> | null>;
+  loginProfileIds?: Record<string, string | null>;
 }) {
   const writes: EventProjectionWrite[][] = [];
   const events = input.events || [null];
@@ -24,14 +23,23 @@ function createRepository(input: {
       eventReadIndex += 1;
       return events[index];
     },
-    async getMergeTarget(profileId) {
-      return input.mergeTargets?.[profileId] ?? null;
-    },
-    async getProfile(profileId) {
-      const profile = input.profiles?.[profileId];
-      return profile === undefined || profile === null
-        ? null
-        : { data: profile, updateTime: `update-${profileId}` };
+    async readProfileOwnershipSnapshot(query) {
+      return {
+        canonicalProfileIdByProfileId: new Map(
+          query.profileIds.map((profileId) => [
+            profileId,
+            Object.hasOwn(input.canonicalProfileIds || {}, profileId)
+              ? input.canonicalProfileIds?.[profileId] || null
+              : null,
+          ]),
+        ),
+        loginOwnerByUid: new Map(
+          query.loginUids.map((loginUid) => {
+            const profileId = input.loginProfileIds?.[loginUid] || null;
+            return [loginUid, profileId ? { profileId, revision: 1 } : null];
+          }),
+        ),
+      };
     },
   };
   return { repository, writes };
@@ -49,28 +57,13 @@ function runtime(input: Parameters<typeof createRepository>[0]) {
   };
 }
 
-test("event owner plans write canonical owners before raw cleanup paths", () => {
-  assert.deepEqual(
-    buildEventProjectionOwnerPlan({
-      afterOwnerPaths: [["source", "middle", "target"]],
-      cleanupOwnerPaths: [["stale", "target"]],
-      rawAfterOwnerProfileIds: ["source"],
-    }),
-    {
-      afterOwnerProfileIds: ["target"],
-      allOwnerProfileIds: ["target", "source", "middle", "stale"],
-    },
-  );
-});
-
 test("event projection preserves the payload and stale-owner cleanup", async () => {
   const { core, writes } = runtime({
-    mergeTargets: {
-      source: { targetProfileId: "target" },
-      target: null,
+    canonicalProfileIds: {
+      source: "target",
       stale: null,
     },
-    profiles: { target: {} },
+    loginProfileIds: { "login-1": "target" },
   });
   const result = await core.projectEvent(
     "event-1",
@@ -84,6 +77,7 @@ test("event projection preserves the payload and stale-owner cleanup", async () 
       participants: {
         source: {
           profileId: "source",
+          loginUid: "login-1",
           displayName: "Player",
           emojiId: 7,
           aura: "gold",
@@ -122,7 +116,7 @@ test("event projection preserves the payload and stale-owner cleanup", async () 
     participantCount: 1,
     participantPreview: [
       {
-        profileId: "source",
+        profileId: "target",
         displayName: "Player",
         emojiId: 7,
         aura: "gold",
@@ -134,33 +128,40 @@ test("event projection preserves the payload and stale-owner cleanup", async () 
 
 test("event projection refuses missing and retired canonical owners", async () => {
   const missing = runtime({
-    mergeTargets: { source: { targetProfileId: "missing" } },
-    profiles: {},
+    canonicalProfileIds: { source: null },
+    loginProfileIds: { "login-1": null },
   });
   await assert.rejects(
     () =>
       missing.core.projectEvent("event-1", {
-        participants: { source: { profileId: "source" } },
+        participants: {
+          source: { loginUid: "login-1", profileId: "source" },
+        },
       }),
-    /projector:event-owner-missing:missing/,
+    /profile-ownership-unavailable/,
   );
   assert.deepEqual(missing.writes, []);
 
   const retired = runtime({
-    profiles: { retired: { mergedIntoProfileId: "canonical" } },
+    canonicalProfileIds: { retired: "canonical" },
+    loginProfileIds: { "login-1": "other-profile" },
   });
   await assert.rejects(
     () =>
       retired.core.projectEvent("event-1", {
-        participants: { retired: { profileId: "retired" } },
+        participants: {
+          retired: { loginUid: "login-1", profileId: "retired" },
+        },
       }),
-    /projector:event-owner-retired:retired/,
+    /profile-ownership-unavailable/,
   );
   assert.deepEqual(retired.writes, []);
 });
 
 test("missing events delete every accumulated cleanup owner", async () => {
-  const { core, writes } = runtime({ profiles: {} });
+  const { core, writes } = runtime({
+    canonicalProfileIds: { a: null, b: null },
+  });
   assert.deepEqual(await core.reconcileEventProjection("event-1", ["a", "b"]), {
     deleted: 2,
     ownerProfileIds: [],
@@ -173,48 +174,74 @@ test("missing events delete every accumulated cleanup owner", async () => {
   ]);
 });
 
-test("live reconciliation retains every observed owner until state converges", async () => {
+test("live reconciliation projects one immutable event read", async () => {
   const { core, writes } = runtime({
     events: [
-      { participants: { first: { profileId: "first" } } },
-      { participants: { second: { profileId: "second" } } },
-      { participants: { second: { profileId: "second" } } },
+      {
+        participants: {
+          first: { loginUid: "login-first", profileId: "first" },
+        },
+      },
+      {
+        participants: {
+          second: { loginUid: "login-second", profileId: "second" },
+        },
+      },
+      {
+        participants: {
+          second: { loginUid: "login-second", profileId: "second" },
+        },
+      },
     ],
-    profiles: { first: {}, second: {} },
+    canonicalProfileIds: {
+      first: "first",
+      second: "second",
+      stale: null,
+    },
+    loginProfileIds: {
+      "login-first": "first",
+      "login-second": "second",
+    },
   });
   const result = await core.reconcileEventProjection("event-1", ["stale"]);
   assert.equal(result.status, "projected");
-  assert.equal(writes.length, 2);
+  assert.equal(writes.length, 1);
   assert.deepEqual(
-    writes[1].map(({ type, profileId }) => ({ type, profileId })),
+    writes[0].map(({ type, profileId }) => ({ type, profileId })),
     [
-      { type: "merge", profileId: "second" },
+      { type: "merge", profileId: "first" },
       { type: "delete", profileId: "stale" },
-      { type: "delete", profileId: "first" },
     ],
   );
 });
 
-test("event projection resolves owner paths with bounded concurrency", async () => {
-  const ids = Array.from({ length: 12 }, (_, index) => `profile-${index}`);
-  let active = 0;
-  let maximum = 0;
+test("event projection reads one ownership snapshot", async () => {
+  let ownershipReads = 0;
   const repository: EventProfileGameProjectionRepository = {
     commitProjectionWrites: async () => undefined,
     getEvent: async () => null,
-    getMergeTarget: async () => {
-      active += 1;
-      maximum = Math.max(maximum, active);
-      await new Promise((resolve) => setImmediate(resolve));
-      active -= 1;
-      return null;
+    readProfileOwnershipSnapshot: async ({ loginUids, profileIds }) => {
+      ownershipReads += 1;
+      return {
+        canonicalProfileIdByProfileId: new Map(
+          profileIds.map((profileId) => [profileId, profileId]),
+        ),
+        loginOwnerByUid: new Map(
+          loginUids.map((loginUid) => [
+            loginUid,
+            { profileId: loginUid.replace("login", "profile"), revision: 1 },
+          ]),
+        ),
+      };
     },
-    getProfile: async () => null,
   };
   const core = createEventProfileGameProjectionCore({
     repository,
   });
-  const paths = await core.resolveProfilePaths([...ids, ...ids]);
-  assert.equal(paths.size, ids.length);
-  assert.equal(maximum, 10);
+  await core.projectEvent("event-1", {
+    participants: {
+      "profile-1": { loginUid: "login-1", profileId: "profile-1" },
+    },
+  });
+  assert.equal(ownershipReads, 1);
 });

@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createEventBracketRuntime } from "../../../functions/events/bracket.js";
-import { createProfileEventPrizeOwnerResolver } from "../src/profileEventPrizeOwner.ts";
-import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import type { EventOwnershipSnapshot } from "../../../functions/events/ownership.js";
 
 function snapshot(value: unknown) {
   return { exists: () => value !== null, val: () => value };
@@ -31,99 +30,48 @@ function createAdmin(
   };
 }
 
-function canonicalProfileDb({
-  loginOwner,
-  mergeTargets = new Map<string, string>(),
-}: {
-  loginOwner?: string;
-  mergeTargets?: Map<string, string>;
-}): D1Database {
+function prizeOwnership(
+  entries: Array<[string, string]>,
+): EventOwnershipSnapshot {
+  const profileIds = Array.from(
+    new Set(entries.map(([, profileId]) => profileId)),
+  );
   return {
-    ...TELEGRAM_TEST_ENV.PROFILE_DB,
-    prepare(query: string) {
-      let values: unknown[] = [];
-      let statement: D1PreparedStatement;
-      const base = TELEGRAM_TEST_ENV.PROFILE_DB.prepare("");
-      statement = {
-        all: base.all,
-        bind(...nextValues) {
-          values = nextValues;
-          return statement;
+    canonicalProfileIdByProfileId: new Map(entries),
+    loginOwnerByUid: new Map(),
+    loginUidsByProfileId: new Map(
+      profileIds.map((profileId) => [profileId, []]),
+    ),
+    profileById: new Map(
+      profileIds.map((profileId) => [
+        profileId,
+        {
+          profile: {
+            aura: "",
+            emoji: 1,
+            eth: "",
+            profileId,
+            rating: 1500,
+            sol: "",
+            username: "",
+          },
+          revision: 1,
         },
-        async first<T>() {
-          if (query.includes("profile_merge_targets")) {
-            const sourceProfileId = String(values[0] || "");
-            const targetProfileId = mergeTargets.get(sourceProfileId);
-            return targetProfileId
-              ? ({
-                  source_profile_id: sourceProfileId,
-                  target_profile_id: targetProfileId,
-                  merged_at_ms: 1,
-                  op_id: null,
-                } as T)
-              : null;
-          }
-          if (query.includes("profile_login_owners") && loginOwner) {
-            return {
-              login_uid: String(values[0] || ""),
-              profile_id: loginOwner,
-              revision: 1,
-              created_at_ms: 1,
-              updated_at_ms: 1,
-            } as T;
-          }
-          return null;
-        },
-        raw: base.raw,
-        run: base.run,
-      };
-      return statement;
-    },
+      ]),
+    ),
   };
 }
 
-test("resolves direct and multi-hop profile prize owners", async () => {
-  const resolve = createProfileEventPrizeOwnerResolver(TELEGRAM_TEST_ENV, {
-    profileDb: canonicalProfileDb({
-      mergeTargets: new Map([
-        ["source-profile", "middle-profile"],
-        ["middle-profile", "target-profile"],
-      ]),
-    }),
-    rtdb: { getRtdbPath: async () => null },
-  });
-  assert.equal(
-    await resolve({ eventId: "event-1", profileId: "source-profile" }),
-    "target-profile",
-  );
-});
-
-test("resolves a participant login to its current profile", async () => {
-  const signal = AbortSignal.timeout(1_000);
-  let observedSignal: AbortSignal | undefined;
-  const resolve = createProfileEventPrizeOwnerResolver(TELEGRAM_TEST_ENV, {
-    profileDb: canonicalProfileDb({ loginOwner: "current-profile" }),
-    rtdb: {
-      getRtdbPath: async (_path, _query, requestSignal) => {
-        observedSignal = requestSignal;
-        return { loginUid: "login-1" };
-      },
-    },
-    signal,
-  });
-  assert.equal(
-    await resolve({ eventId: "event-1", profileId: "source-profile" }),
-    "current-profile",
-  );
-  assert.equal(observedSignal, signal);
-});
+const emptyEvent = { participants: {} };
+const mergedPrizeOwnership = prizeOwnership([
+  ["source-profile", "target-profile"],
+]);
 
 test("reconciles canonical prize projections without changing event history", async () => {
   const values = new Map<string, unknown>();
   const runtime = createEventBracketRuntime({
     admin: createAdmin(values),
     readEventPrizeWithdrawals: async () => ({}),
-    resolveProfileEventPrizeOwnerId: async () => "target-profile",
   });
   const assignment = {
     eventId: "NN3eRzoZo80",
@@ -148,9 +96,11 @@ test("reconciles canonical prize projections without changing event history", as
   );
   const firstResult = await runtime.reconcileProfileEventPrizeAssignments({
     assignments: { 1: assignment },
+    event: emptyEvent,
     eventId: assignment.eventId,
+    ownershipSnapshot: mergedPrizeOwnership,
   });
-  assert.deepEqual(firstResult, { didChange: true, settled: true });
+  assert.deepEqual(firstResult, { didChange: true });
   assert.deepEqual(
     values.get(`profileEventPrizes/target-profile/${assignment.eventId}`),
     { ...assignment, profileId: "target-profile" },
@@ -162,9 +112,11 @@ test("reconciles canonical prize projections without changing event history", as
   assert.deepEqual(
     await runtime.reconcileProfileEventPrizeAssignments({
       assignments: { 1: assignment },
+      event: emptyEvent,
       eventId: assignment.eventId,
+      ownershipSnapshot: mergedPrizeOwnership,
     }),
-    { didChange: false, settled: true },
+    { didChange: false },
   );
 });
 
@@ -182,7 +134,6 @@ test("uses injected canonical withdrawals when filtering prize projections", asy
         status: "completed",
       },
     }),
-    resolveProfileEventPrizeOwnerId: async () => "target-profile",
   });
 
   assert.deepEqual(
@@ -196,9 +147,11 @@ test("uses injected canonical withdrawals when filtering prize projections", asy
           assignedAtMs: 100,
         },
       },
+      event: emptyEvent,
       eventId,
+      ownershipSnapshot: mergedPrizeOwnership,
     }),
-    { didChange: false, settled: true },
+    { didChange: false },
   );
   assert.equal(values.size, 0);
 });
@@ -223,7 +176,6 @@ test("does not overwrite a canonical prize assignment inserted concurrently", as
       }
     }),
     readEventPrizeWithdrawals: async () => ({}),
-    resolveProfileEventPrizeOwnerId: async () => "target-profile",
   });
   await assert.rejects(
     runtime.reconcileProfileEventPrizeAssignments({
@@ -236,7 +188,9 @@ test("does not overwrite a canonical prize assignment inserted concurrently", as
           assignedAtMs: 100,
         },
       },
+      event: emptyEvent,
       eventId,
+      ownershipSnapshot: mergedPrizeOwnership,
     }),
     /profile-event-prize-conflict/,
   );
@@ -248,7 +202,6 @@ test("rejects two awards that collapse to one canonical profile", async () => {
   const runtime = createEventBracketRuntime({
     admin: createAdmin(new Map()),
     readEventPrizeWithdrawals: async () => ({}),
-    resolveProfileEventPrizeOwnerId: async () => "canonical-profile",
   });
   await assert.rejects(
     runtime.reconcileProfileEventPrizeAssignments({
@@ -268,7 +221,12 @@ test("rejects two awards that collapse to one canonical profile", async () => {
           assignedAtMs: 100,
         },
       },
+      event: emptyEvent,
       eventId,
+      ownershipSnapshot: prizeOwnership([
+        ["source-a", "canonical-profile"],
+        ["source-b", "canonical-profile"],
+      ]),
     }),
     /profile-event-prize-conflict/,
   );

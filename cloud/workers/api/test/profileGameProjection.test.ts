@@ -26,6 +26,7 @@ import {
   parseAutomatchProfileGameProjectionOutbox,
   parseEventProfileGameProjectionOutbox,
   parseProfileLinkProfileGameProjectionOutbox,
+  salvageProfileLinkCleanupProfileIds,
 } from "../src/profileGameProjectionOutbox.ts";
 import type {
   EventProfileGameProjectionRuntime,
@@ -79,7 +80,6 @@ function ratingRepository(
     applyFebruaryChallengeReplay: async () => undefined,
     claimRatingProfileGameProjection: async () => true,
     finalizeRatingUpdate: async () => ({ status: "lost" }),
-    getRatingProfile: async () => null,
     getRtdbPath: async () => state.marker ?? null,
     listDueRatingProfileGameProjections: async () => [],
     markRatingProfileGameProjection: async (
@@ -96,6 +96,12 @@ function ratingRepository(
     patchRtdbRoot: async (updates) => {
       state.patches.push(updates);
     },
+    readProfileOwnershipSnapshot: async () => ({
+      canonicalProfileIdByProfileId: new Map(),
+      loginOwnerByUid: new Map(),
+      loginUidsByProfileId: new Map(),
+      profileById: new Map(),
+    }),
     readRatingUpdate: async () => data,
     tryAcquireRatingLease: async () => ({ status: "busy", data: null }),
   };
@@ -442,7 +448,10 @@ test("profile-link outboxes preserve current and cleanup profiles", () => {
   );
   assert.deepEqual(
     parseProfileLinkProfileGameProjectionOutbox(omittedCleanup),
-    { ...profileLinkOutbox(), cleanupProfileIds: [] },
+    {
+      ...profileLinkOutbox(),
+      cleanupProfileIds: [],
+    },
   );
   for (const invalid of [
     null,
@@ -453,6 +462,16 @@ test("profile-link outboxes preserve current and cleanup profiles", () => {
   ]) {
     assert.equal(parseProfileLinkProfileGameProjectionOutbox(invalid), null);
   }
+  assert.deepEqual(
+    salvageProfileLinkCleanupProfileIds({
+      cleanupProfileIds: {
+        "older-profile": true,
+        "ignored-profile": false,
+        "unsafe/path": true,
+      },
+    }),
+    ["older-profile"],
+  );
 });
 
 test("automatch projection uses the immutable source timestamp and exact-clears", async () => {
@@ -604,7 +623,11 @@ test("profile-link recovery rebuilds malformed markers from the live link", asyn
   let current: unknown = {
     status: "bad",
     profileId: "stale-profile",
-    cleanupProfileIds: { "older-profile": true, "unsafe/path": true },
+    cleanupProfileIds: {
+      "ignored-profile": false,
+      "older-profile": true,
+      "unsafe/path": true,
+    },
   };
   const result = await repairInvalidProfileLinkSweepEntry(
     {
@@ -1364,22 +1387,20 @@ test("event recovery normalizes every non-null malformed marker", async () => {
       {
         status: "bad",
         cleanupOwnerProfileIds: {
+          "owner-true": true,
           "owner-object": false,
           "unsafe/path": true,
         },
       },
-      ["owner-object"],
+      ["owner-true"],
     ],
-    [
-      { status: "bad", cleanupOwnerProfileIds: "owner-string" },
-      ["owner-string"],
-    ],
+    [{ status: "bad", cleanupOwnerProfileIds: "owner-string" }, []],
     [
       {
         status: "bad",
         cleanupOwnerProfileIds: ["owner-array", "unsafe/path", 7],
       },
-      ["owner-array"],
+      [],
     ],
     ["corrupt", []],
     [false, []],
@@ -1511,7 +1532,7 @@ test("event recovery claims due outboxes and repairs malformed records", async (
     status: "pending",
     requestId: "repair-bad",
     lastQueuedAtMs: 600_000,
-    cleanupOwnerProfileIds: { "stale-profile": true },
+    cleanupOwnerProfileIds: {},
   });
   assert.deepEqual(values.get("event-negative"), {
     schemaVersion: 1,

@@ -17,6 +17,11 @@ const {
   parseEventMatchKey,
 } = require("@mons/shared/events");
 const { getEventParticipantIds } = require("./participants");
+const {
+  canonicalizeEventParticipants,
+  profileOwnershipUnavailable,
+  resolveOwnedProfileReferences,
+} = require("./ownership");
 
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
@@ -230,6 +235,7 @@ const createInviteForMatch = async ({
   inviteUpdates,
   random,
   buildRandomGameSeed,
+  ownershipSnapshot,
 }) => {
   if (isMatchSlotBlocked(match, "host") || isMatchSlotBlocked(match, "guest")) {
     return false;
@@ -239,6 +245,17 @@ const createInviteForMatch = async ({
   if (!hostLoginUid || !guestLoginUid || normalizeString(match.inviteId)) {
     return false;
   }
+  if (!ownershipSnapshot) throw profileOwnershipUnavailable();
+  resolveOwnedProfileReferences(ownershipSnapshot, [
+    {
+      loginUid: hostLoginUid,
+      profileId: normalizeString(match.hostProfileId),
+    },
+    {
+      loginUid: guestLoginUid,
+      profileId: normalizeString(match.guestProfileId),
+    },
+  ]);
   const inviteId = buildAutoInviteId(random);
   const hostColor = pickHostColor(random);
   const guestColor = hostColor === "white" ? "black" : "white";
@@ -279,6 +296,7 @@ const reconcileThirdPlaceMatchReadiness = async ({
   random,
   buildRandomGameSeed,
   allowInviteCreation = true,
+  ownershipSnapshot,
 }) => {
   if (!thirdPlaceMatch || typeof thirdPlaceMatch !== "object") {
     return { didChange: false, thirdPlaceMatch: null };
@@ -351,6 +369,7 @@ const reconcileThirdPlaceMatchReadiness = async ({
         inviteUpdates,
         random,
         buildRandomGameSeed,
+        ownershipSnapshot,
       })) || didChange;
     return { didChange, thirdPlaceMatch };
   }
@@ -397,6 +416,7 @@ const reconcileBracketMatchReadiness = async ({
   inviteUpdates,
   random,
   buildRandomGameSeed,
+  ownershipSnapshot,
 }) => {
   const sortedRoundIndexes = getSortedRoundIndexes(rounds);
   let didChange = false;
@@ -465,6 +485,7 @@ const reconcileBracketMatchReadiness = async ({
               inviteUpdates,
               random,
               buildRandomGameSeed,
+              ownershipSnapshot,
             })
           ) {
             didChange = true;
@@ -628,6 +649,7 @@ const buildFixedBracketState = async ({
   enableThirdPlace = false,
   random,
   buildRandomGameSeed,
+  ownershipSnapshot,
 }) => {
   const bracketSize = getEventBracketSize(participantIds.length);
   const roundCount = Math.max(1, Math.round(Math.log2(bracketSize)));
@@ -672,6 +694,7 @@ const buildFixedBracketState = async ({
             inviteUpdates,
             random,
             buildRandomGameSeed,
+            ownershipSnapshot,
           });
         } else if (hostProfileId || guestProfileId) {
           applyMatchResolution(
@@ -697,6 +720,7 @@ const buildFixedBracketState = async ({
     inviteUpdates,
     random,
     buildRandomGameSeed,
+    ownershipSnapshot,
   });
   if (enableThirdPlace && participantIds.length >= 4 && roundCount >= 2) {
     thirdPlaceMatch = createEmptyEventMatch(THIRD_PLACE_MATCH_KEY);
@@ -709,6 +733,7 @@ const buildFixedBracketState = async ({
       thirdPlaceMatch,
       random,
       buildRandomGameSeed,
+      ownershipSnapshot,
     });
   }
   const { earliestUnresolvedRoundIndex } = recomputeRoundStatuses({
@@ -732,6 +757,7 @@ const buildScheduledEventDueUpdatesCore = async ({
   nowMs,
   random = Math.random,
   buildRandomGameSeed,
+  ownershipSnapshot,
 }) => {
   if (typeof buildRandomGameSeed !== "function") {
     throw new TypeError("buildRandomGameSeed is required");
@@ -742,9 +768,37 @@ const buildScheduledEventDueUpdatesCore = async ({
   if (typeof event.startAtMs !== "number" || nowMs < event.startAtMs) {
     return { didChange: false, updates: {} };
   }
-  const participantIds = getEventParticipantIds(event);
+  const storedParticipantIds = getEventParticipantIds(event);
+  if (storedParticipantIds.length < 2) {
+    Object.assign(event, {
+      status: "dismissed",
+      endedAtMs: nowMs,
+      updatedAtMs: nowMs,
+      winnerProfileId: null,
+      winnerDisplayName: null,
+    });
+    return {
+      didChange: true,
+      updates: {
+        [`events/${eventId}/status`]: event.status,
+        [`events/${eventId}/endedAtMs`]: event.endedAtMs,
+        [`events/${eventId}/updatedAtMs`]: event.updatedAtMs,
+        [`events/${eventId}/winnerProfileId`]: null,
+        [`events/${eventId}/winnerDisplayName`]: null,
+      },
+    };
+  }
+  if (!ownershipSnapshot) throw profileOwnershipUnavailable();
+  const canonicalParticipants = canonicalizeEventParticipants(
+    event,
+    ownershipSnapshot,
+  );
+  const participantsById = canonicalParticipants.participantsById;
+  const participantIds = getEventParticipantIds({
+    participants: participantsById,
+  });
+  event.participants = participantsById;
   if (participantIds.length >= 2) {
-    const participantsById = event.participants || {};
     const supportsThirdPlaceMatch = hasThirdPlaceMatchField(event);
     const bracket = await buildFixedBracketState({
       eventId,
@@ -754,6 +808,7 @@ const buildScheduledEventDueUpdatesCore = async ({
       enableThirdPlace: supportsThirdPlaceMatch,
       random,
       buildRandomGameSeed,
+      ownershipSnapshot,
     });
     Object.assign(event, {
       status: "active",
@@ -777,29 +832,16 @@ const buildScheduledEventDueUpdatesCore = async ({
         [`events/${eventId}/bracketSize`]: event.bracketSize,
         [`events/${eventId}/roundCount`]: event.roundCount,
         [`events/${eventId}/rounds`]: bracket.rounds,
+        ...(canonicalParticipants.didChange
+          ? { [`events/${eventId}/participants`]: participantsById }
+          : {}),
         ...(supportsThirdPlaceMatch
           ? { [`events/${eventId}/thirdPlaceMatch`]: bracket.thirdPlaceMatch }
           : {}),
       },
     };
   }
-  Object.assign(event, {
-    status: "dismissed",
-    endedAtMs: nowMs,
-    updatedAtMs: nowMs,
-    winnerProfileId: null,
-    winnerDisplayName: null,
-  });
-  return {
-    didChange: true,
-    updates: {
-      [`events/${eventId}/status`]: event.status,
-      [`events/${eventId}/endedAtMs`]: event.endedAtMs,
-      [`events/${eventId}/updatedAtMs`]: event.updatedAtMs,
-      [`events/${eventId}/winnerProfileId`]: null,
-      [`events/${eventId}/winnerDisplayName`]: null,
-    },
-  };
+  throw profileOwnershipUnavailable();
 };
 
 module.exports = {

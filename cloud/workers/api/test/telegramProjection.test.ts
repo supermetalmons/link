@@ -104,7 +104,6 @@ function ratingRepository(
     applyFebruaryChallengeReplay: async () => undefined,
     claimRatingTelegramProjection: async () => true,
     finalizeRatingUpdate: async () => ({ status: "lost" }),
-    getRatingProfile: async () => null,
     getRtdbPath: async () => null,
     listDueRatingTelegramProjections: async (updatedBeforeMs) =>
       data && (data.telegramProjectionUpdatedAtMs || 0) <= updatedBeforeMs
@@ -124,6 +123,9 @@ function ratingRepository(
       marks.push({ state, ...(reason ? { reason } : {}) });
     },
     patchRtdbRoot: async () => undefined,
+    readProfileOwnershipSnapshot: async () => {
+      throw new Error("unexpected-profile-ownership-read");
+    },
     readRatingUpdate: async () => data,
     tryAcquireRatingLease: async () => ({ status: "busy", data: null }),
   };

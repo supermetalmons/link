@@ -9,14 +9,11 @@ import { EVENT_OPERATION_TIMEOUT_MS } from "../src/eventParticipation.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
-const identity = {
-  uid: "creator-login",
-  idToken: "firebase-token",
-  profileId: "creator-profile",
-};
+const profileId = "creator-profile";
+const identity = { uid: "creator-login" };
 
 const participant = {
-  profileId: "creator-profile",
+  profileId,
   loginUid: "creator-login",
   username: "creator",
   displayName: "creator",
@@ -55,16 +52,54 @@ function createRepository(): GameplayRepository {
   return {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
-    findProfileId: async () => identity.profileId,
-    getGameplayProfile: async () => ({
-      profileId: identity.profileId,
-      username: "creator",
-      eth: "",
-      sol: "",
-      rating: 1500,
-      emoji: 7,
-      aura: "rainbow",
-    }),
+    readProfileOwnershipSnapshot: async (query) => {
+      const canonicalProfileIdByProfileId = new Map(
+        query.profileIds.map((candidateProfileId) => [
+          candidateProfileId,
+          candidateProfileId,
+        ]),
+      );
+      const loginOwnerByUid = new Map(
+        query.loginUids.map((uid) => [
+          uid,
+          uid === identity.uid ? { profileId, revision: 1 } : null,
+        ]),
+      );
+      const canonicalIds = new Set([
+        ...canonicalProfileIdByProfileId.values(),
+        profileId,
+      ]);
+      return {
+        canonicalProfileIdByProfileId,
+        loginOwnerByUid,
+        loginUidsByProfileId: new Map(
+          [...canonicalIds].map((candidateProfileId) => [
+            candidateProfileId,
+            candidateProfileId === profileId ? [identity.uid] : [],
+          ]),
+        ),
+        profileById: new Map(
+          [...canonicalIds].map((candidateProfileId) => [
+            candidateProfileId,
+            {
+              profile: {
+                profileId: candidateProfileId,
+                username:
+                  candidateProfileId === profileId
+                    ? "creator"
+                    : candidateProfileId,
+                eth: "",
+                sol: "",
+                rating: 1500,
+                emoji: 7,
+                aura: "rainbow",
+              },
+              revision: 1,
+            },
+          ]),
+        ),
+      };
+    },
     getNavigationGame: async () => null,
     getMiningMaterials: async () => ({
       dust: 0,
@@ -81,8 +116,8 @@ function createRepository(): GameplayRepository {
             status: "scheduled",
             startAtMs: 10_000,
             createdByLoginUid: identity.uid,
-            createdByProfileId: identity.profileId,
-            participants: { [identity.profileId]: participant },
+            createdByProfileId: profileId,
+            participants: { [profileId]: participant },
           }
         : null,
     patchRtdbRoot: async () => undefined,
@@ -294,9 +329,9 @@ test("returns strict join and removal responses", async () => {
           status: "scheduled",
           startAtMs: 10_000,
           createdByLoginUid: identity.uid,
-          createdByProfileId: identity.profileId,
+          createdByProfileId: profileId,
           participants: {
-            [identity.profileId]: participant,
+            [profileId]: participant,
             "target-profile": {
               ...participant,
               profileId: "target-profile",
@@ -325,7 +360,7 @@ test("returns a strict event prize selection response", async () => {
       ? {
           eventId,
           status: "active",
-          participants: { [identity.profileId]: participant },
+          participants: { [profileId]: participant },
         }
       : null;
   repository.transactRtdbPath = async (_path, updater) => {

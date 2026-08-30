@@ -21,9 +21,9 @@ import {
 } from "./authStateD1.ts";
 import {
   verifyFirebaseRequest,
-  type FirebaseIdentity,
   type WorkerExecutionContext,
 } from "./firebaseAuth.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
 import {
   AuthApiFailure,
   authErrorResponse,
@@ -69,7 +69,7 @@ export type AuthRouteDependencies = {
   verifyIdentity?: (
     request: Request,
     ctx: WorkerExecutionContext,
-  ) => Promise<FirebaseIdentity>;
+  ) => Promise<RequestIdentity>;
 };
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -115,7 +115,7 @@ async function enforceAuthRateLimit(env: Env, key: string): Promise<void> {
 async function handleBeginIntent(
   request: Request,
   env: Env,
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   repository: AuthStateRepository,
   dependencies: AuthRouteDependencies,
 ): Promise<AuthIntentResponse> {
@@ -164,7 +164,7 @@ async function handleBeginIntent(
 async function handleBeginXFlow(
   request: Request,
   env: Env,
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   repository: AuthStateRepository,
   dependencies: AuthRouteDependencies,
 ): Promise<XRedirectStartResponse> {

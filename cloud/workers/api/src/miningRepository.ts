@@ -7,10 +7,14 @@ import {
   CanonicalProfileConflict,
   commitCanonicalPlan,
   materializeCanonicalProfile,
-  readCanonicalLoginOwner,
+  readCanonicalProfileOwnershipSnapshot,
   readCanonicalProfile,
   resolveCanonicalProfile,
 } from "./profileCanonicalD1.ts";
+import type {
+  ProfileOwnershipReader,
+  ProfileOwnershipSnapshot,
+} from "./profileOwnership.ts";
 
 export type MiningProfile = {
   mining: MiningSnapshot;
@@ -18,11 +22,8 @@ export type MiningProfile = {
   updateTime: string;
 };
 
-export type MiningRepository = {
-  getProfile: (
-    uid: string,
-    firebaseIdToken: string,
-  ) => Promise<MiningProfile | null>;
+export type MiningRepository = ProfileOwnershipReader & {
+  getProfileSnapshot: (profileId: string) => Promise<MiningProfile | null>;
   updateMining: (
     profileId: string,
     mining: MiningSnapshot,
@@ -42,15 +43,54 @@ function canonicalRevision(value: string): number | null {
   return Number.isSafeInteger(revision) && revision > 0 ? revision : null;
 }
 
+async function readOwnershipSnapshot(
+  db: D1Database,
+  query: Parameters<ProfileOwnershipReader["readProfileOwnershipSnapshot"]>[0],
+): Promise<ProfileOwnershipSnapshot> {
+  const snapshot = await readCanonicalProfileOwnershipSnapshot(db, query);
+  return Object.freeze({
+    canonicalProfileIdByProfileId: new Map(
+      snapshot.canonicalProfileIdByProfileId,
+    ),
+    loginOwnerByUid: new Map(snapshot.loginOwnerByUid),
+    loginUidsByProfileId: new Map(
+      [...snapshot.loginOwnersByProfileId].map(([profileId, owners]) => [
+        profileId,
+        Object.freeze(owners.map((owner) => owner.loginUid)),
+      ]),
+    ),
+    profileById: new Map(
+      [...snapshot.profileById].map(([profileId, value]) => [
+        profileId,
+        Object.freeze({
+          profile: Object.freeze({
+            aura: value.profile.aura || "",
+            emoji: value.gameplayEmoji,
+            eth: value.profile.eth || "",
+            profileId,
+            rating:
+              value.sortPresence.rating && value.sortValues.rating !== null
+                ? value.sortValues.rating
+                : 1500,
+            sol: value.profile.sol || "",
+            username: value.profile.username || "",
+          }),
+          revision: value.revision,
+        }),
+      ]),
+    ),
+  });
+}
+
 export function createMiningRepository(
   env: Env,
   { d1 = env.PROFILE_DB, now = Date.now }: MiningRepositoryDependencies = {},
 ): MiningRepository {
   return {
-    async getProfile(uid) {
-      const owner = await readCanonicalLoginOwner(d1, uid);
-      if (!owner) return null;
-      const profile = await resolveCanonicalProfile(d1, owner.profileId);
+    readProfileOwnershipSnapshot: (query) => readOwnershipSnapshot(d1, query),
+
+    async getProfileSnapshot(profileId) {
+      const profile = await resolveCanonicalProfile(d1, profileId);
       if (!profile || profile.state !== "active") return null;
       return {
         profileId: profile.profileId,

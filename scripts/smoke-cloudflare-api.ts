@@ -4,6 +4,12 @@ const {
   isLinkedAuthMethodsResponse,
 }: typeof import("@mons/shared/auth") = require("@mons/shared/auth");
 const {
+  isResolveInviteRoleResponse,
+}: typeof import("@mons/shared/game-sessions") = require("@mons/shared/game-sessions");
+const {
+  isSafeFirebaseKey,
+}: typeof import("@mons/shared/ids") = require("@mons/shared/ids");
+const {
   isExactNftApiResponse,
 }: typeof import("@mons/shared/nfts") = require("@mons/shared/nfts");
 const {
@@ -37,6 +43,11 @@ type Options = {
 type ProfileSmokeFixture = {
   loginId: string;
   profileId: string;
+  invite?: {
+    actorUid: string;
+    id: string;
+    role: "guest" | "host";
+  };
 };
 type Dependencies = {
   fetch: typeof fetch;
@@ -74,6 +85,21 @@ function readAuthTokenFixture(path: string): string {
   return idToken;
 }
 
+function readTokenSubject(idToken: string): string {
+  try {
+    const payload = JSON.parse(
+      Buffer.from(idToken.split(".")[1] || "", "base64url").toString("utf8"),
+    ) as unknown;
+    const subject =
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>).sub
+        : null;
+    return typeof subject === "string" ? subject.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
 function readProfileSmokeFixture(path: string): ProfileSmokeFixture {
   let value: unknown;
   try {
@@ -92,6 +118,29 @@ function readProfileSmokeFixture(path: string): ProfileSmokeFixture {
   const loginId = typeof fields.loginId === "string" ? fields.loginId : "";
   const profileId =
     typeof fields.profileId === "string" ? fields.profileId : "";
+  const inviteFields =
+    fields.invite &&
+    typeof fields.invite === "object" &&
+    !Array.isArray(fields.invite)
+      ? (fields.invite as Record<string, unknown>)
+      : null;
+  const invite: {
+    actorUid: string;
+    id: string;
+    role: "guest" | "host" | null;
+  } | null = inviteFields
+    ? {
+        actorUid:
+          typeof inviteFields.actorUid === "string"
+            ? inviteFields.actorUid
+            : "",
+        id: typeof inviteFields.id === "string" ? inviteFields.id : "",
+        role:
+          inviteFields.role === "host" || inviteFields.role === "guest"
+            ? inviteFields.role
+            : null,
+      }
+    : null;
   const loginCharacters = Array.from(loginId);
   const invalidControl = [...loginCharacters, ...Array.from(profileId)].some(
     (character) => {
@@ -100,7 +149,9 @@ function readProfileSmokeFixture(path: string): ProfileSmokeFixture {
     },
   );
   if (
-    Object.keys(fields).length !== 2 ||
+    (Object.keys(fields).length !== 2 && Object.keys(fields).length !== 3) ||
+    (Object.keys(fields).length === 3 && !inviteFields) ||
+    (inviteFields !== null && Object.keys(inviteFields).length !== 3) ||
     !loginId ||
     loginId !== loginId.trim() ||
     loginCharacters.length > 128 ||
@@ -110,11 +161,28 @@ function readProfileSmokeFixture(path: string): ProfileSmokeFixture {
     profileId.includes("/") ||
     profileId === "." ||
     profileId === ".." ||
-    invalidControl
+    invalidControl ||
+    (invite !== null &&
+      (!isSafeFirebaseKey(invite.id) ||
+        !isSafeFirebaseKey(invite.actorUid) ||
+        !invite.role ||
+        invite.actorUid === loginId))
   ) {
     throw new TypeError(usage());
   }
-  return { loginId, profileId };
+  return {
+    loginId,
+    profileId,
+    ...(invite?.role
+      ? {
+          invite: {
+            actorUid: invite.actorUid,
+            id: invite.id,
+            role: invite.role,
+          },
+        }
+      : {}),
+  };
 }
 
 function normalizeBaseUrl(value: string): string {
@@ -183,7 +251,14 @@ function parseArgs(argv: string[]): Options {
       smokeProfileOverridden = true;
     }
   }
-  if (!baseUrl || !smokeSol || readOnly !== (readOnlyAuthToken !== null)) {
+  if (
+    !baseUrl ||
+    !smokeSol ||
+    readOnly !== (readOnlyAuthToken !== null) ||
+    (readOnly && !smokeProfile.invite) ||
+    (readOnlyAuthToken !== null &&
+      readTokenSubject(readOnlyAuthToken) !== smokeProfile.loginId)
+  ) {
     throw new TypeError(usage());
   }
   return { baseUrl, readOnly, readOnlyAuthToken, smokeProfile, smokeSol };
@@ -333,6 +408,15 @@ async function smokeAuthenticatedAuthState(
   dependencies: Dependencies,
   existingIdToken?: string,
 ): Promise<void> {
+  if (existingIdToken && !smokeProfile.invite) {
+    throw new Error("Read-only smoke requires an alternate invite fixture.");
+  }
+  if (
+    existingIdToken &&
+    readTokenSubject(existingIdToken) !== smokeProfile.loginId
+  ) {
+    throw new Error("Read-only token subject did not match the smoke login.");
+  }
   const session = existingIdToken
     ? null
     : await firebaseIdentityRequest(
@@ -371,9 +455,7 @@ async function smokeAuthenticatedAuthState(
     ) {
       throw new Error("Auth ownership smoke response was invalid.");
     }
-    if (existingIdToken) {
-      await smokeFrozenProfileWrite(baseUrl, idToken, dependencies);
-    } else {
+    if (!existingIdToken) {
       const intent = await request(
         `${baseUrl}/auth/intents`,
         {
@@ -505,10 +587,13 @@ async function smokeAuthenticatedAuthState(
       200,
       dependencies,
     );
-    if (!isReadNavigationGamesResponse(parseJson(navigation.body))) {
+    const navigationPayload = parseJson(navigation.body);
+    if (!isReadNavigationGamesResponse(navigationPayload)) {
       throw new Error("Navigation read smoke response was invalid.");
     }
-    const roleInviteId = `smoke-${dependencies.randomState()}`;
+    const roleFixture = existingIdToken ? smokeProfile.invite : null;
+    const roleInviteId =
+      roleFixture?.id || `smoke-${dependencies.randomState()}`;
     const role = await request(
       `${baseUrl}/invites/role/read`,
       {
@@ -516,10 +601,21 @@ async function smokeAuthenticatedAuthState(
         headers,
         body: JSON.stringify({ inviteId: roleInviteId }),
       },
-      404,
+      roleFixture ? 200 : 404,
       dependencies,
     );
     const rolePayload = parseJson(role.body);
+    if (roleFixture) {
+      if (
+        !isResolveInviteRoleResponse(rolePayload) ||
+        rolePayload.inviteId !== roleFixture.id ||
+        rolePayload.actorUid !== roleFixture.actorUid ||
+        rolePayload.role !== roleFixture.role
+      ) {
+        throw new Error("Invite role ownership smoke response was invalid.");
+      }
+      return;
+    }
     const roleRecord =
       rolePayload &&
       typeof rolePayload === "object" &&

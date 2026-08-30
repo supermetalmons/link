@@ -9,13 +9,17 @@ import { MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
 import glicko2 from "glicko2";
 import { Color, Game } from "mons-rules";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import type { FirebaseIdentity } from "../src/firebaseAuth.ts";
+import type { RequestIdentity } from "../src/requestIdentity.ts";
 import type {
   RatingCommitPlan,
   RatingProfile,
   RatingRepository,
   RatingUpdateData,
 } from "../src/gameplayRepository.ts";
+import type {
+  ProfileOwnershipQuery,
+  ProfileOwnershipSnapshot,
+} from "../src/profileOwnership.ts";
 import {
   FEB_CHALLENGE_START_UTC,
   buildRatingPlan,
@@ -31,9 +35,7 @@ const request = {
   matchId: "auto_aaaaaaaaaaa",
 };
 
-const identity: FirebaseIdentity = {
-  idToken: "firebase-token",
-  profileId: "profile-player",
+const identity: RequestIdentity = {
   uid: "player",
 };
 
@@ -90,6 +92,57 @@ function completedData(
   };
 }
 
+function ownershipSnapshot(
+  query: ProfileOwnershipQuery,
+  playerProfile: RatingProfile | null,
+  opponentProfile: RatingProfile | null,
+): ProfileOwnershipSnapshot {
+  const ownerByUid: Record<string, RatingProfile | null> = {
+    [request.playerId]: playerProfile,
+    "alternate-login": playerProfile,
+    [request.opponentId]: opponentProfile,
+  };
+  const loginOwnerByUid = new Map(
+    query.loginUids.map((uid) => {
+      const owner = ownerByUid[uid];
+      return [
+        uid,
+        owner ? { profileId: owner.profileId, revision: 1 } : null,
+      ] as const;
+    }),
+  );
+  const profiles = new Map(
+    [playerProfile, opponentProfile].flatMap((value) =>
+      value ? [[value.profileId, value] as const] : [],
+    ),
+  );
+  const requestedProfileIds = new Set(
+    [...loginOwnerByUid.values()].flatMap((owner) =>
+      owner ? [owner.profileId] : [],
+    ),
+  );
+  return {
+    canonicalProfileIdByProfileId: new Map(),
+    loginOwnerByUid,
+    loginUidsByProfileId: new Map(
+      [...requestedProfileIds].map((profileId) => [
+        profileId,
+        Object.entries(ownerByUid)
+          .filter(([, value]) => value?.profileId === profileId)
+          .map(([uid]) => uid)
+          .sort(),
+      ]),
+    ),
+    profileById: new Map(
+      [...requestedProfileIds].map((profileId) => {
+        const value = profiles.get(profileId);
+        if (!value) throw new Error("missing-test-profile");
+        return [profileId, { profile: value, revision: 1 }];
+      }),
+    ),
+  };
+}
+
 function createRepository({
   completed = false,
   invite = {
@@ -123,8 +176,6 @@ function createRepository({
       finalPlan = buildPlan(playerProfile, opponentProfile);
       return { status: "committed", data: finalPlan.repairData };
     },
-    getRatingProfile: async (uid) =>
-      uid === request.playerId ? playerProfile : opponentProfile,
     getRtdbPath: async (path) => {
       if (
         path ===
@@ -146,6 +197,8 @@ function createRepository({
     patchRtdbRoot: async (updates) => {
       patches.push(updates);
     },
+    readProfileOwnershipSnapshot: async (query) =>
+      ownershipSnapshot(query, playerProfile, opponentProfile),
     readRatingUpdate: async () => {
       operationReads++;
       return ratingDone ? completedData() : null;
@@ -283,6 +336,26 @@ test("completes rating records without profile writes when profiles are absent",
   assert.equal(built.ratingUpdate.canUpdateRatings, false);
   assert.equal(built.ratingUpdate.didApplyRatingDelta, false);
   assert.equal(built.ratingUpdate.status, "done");
+});
+
+test("completes merged-profile ratings without profile or challenge writes", () => {
+  const built = buildRatingPlan({
+    invite: {},
+    matchId: request.matchId,
+    nowMs: FEB_CHALLENGE_START_UTC + 1,
+    opponent: profile("shared-profile", { username: "Bob" }),
+    opponentMatch: match("black", { status: "surrendered" }),
+    player: profile("shared-profile", { username: "Alice" }),
+    playerMatch: match("white"),
+    request,
+    result: "win",
+  });
+  assert.equal(built.playerUpdate, null);
+  assert.equal(built.opponentUpdate, null);
+  assert.equal(built.ratingUpdate.status, "done");
+  assert.equal(built.ratingUpdate.canUpdateRatings, false);
+  assert.equal(built.ratingUpdate.didApplyRatingDelta, false);
+  assert.equal(built.repairData.shouldUpdateFebruaryChallenge, false);
 });
 
 test("resolves surrender and timer outcomes for both players", () => {
@@ -555,8 +628,31 @@ test("bounds busy leases and preserves the skipped response", async () => {
   assert.equal(state.getFinalized(), 0);
 });
 
-test("authorizes the direct login or exact profile claim only", async () => {
+test("direct rating authorization does not read ownership", async () => {
+  const state = createRepository();
+  state.repository.readProfileOwnershipSnapshot = async () => {
+    throw new Error("d1-unavailable");
+  };
+  assert.deepEqual(await updateRatings(identity, request, state.repository), {
+    ok: true,
+  });
+  assert.equal(state.getAttempts(), 1);
+  assert.equal(state.getFinalized(), 1);
+});
+
+test("authorizes direct and canonical same-profile logins only", async () => {
   const sameProfile = createRepository();
+  let ownershipReads = 0;
+  const readOwnership = sameProfile.repository.readProfileOwnershipSnapshot;
+  sameProfile.repository.readProfileOwnershipSnapshot = async (query) => {
+    ownershipReads++;
+    assert.deepEqual(query.loginUids, [
+      "alternate-login",
+      request.playerId,
+      request.opponentId,
+    ]);
+    return readOwnership(query);
+  };
   assert.deepEqual(
     await updateRatings(
       { ...identity, uid: "alternate-login" },
@@ -565,11 +661,12 @@ test("authorizes the direct login or exact profile claim only", async () => {
     ),
     { ok: true },
   );
+  assert.equal(ownershipReads, 1);
   const unrelated = createRepository();
   await assert.rejects(
     () =>
       updateRatings(
-        { ...identity, uid: "alternate-login", profileId: "other-profile" },
+        { ...identity, uid: "unrelated-login" },
         request,
         unrelated.repository,
       ),

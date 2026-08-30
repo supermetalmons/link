@@ -112,40 +112,9 @@ const getOwnerProfileIds = (participants) => {
   );
 };
 
-const buildProjectionFingerprint = (eventData) => {
-  if (!eventData || typeof eventData !== "object") {
-    return "null";
-  }
-  const participants =
-    eventData.participants && typeof eventData.participants === "object"
-      ? eventData.participants
-      : {};
-  const status = mapEventStatusToNavigationStatus(
-    normalizeString(eventData.status),
-  );
-  const fullPreviewParticipants = buildPreviewParticipants(participants);
-  const participantPreview = fullPreviewParticipants.slice(
-    0,
-    NAVIGATION_PARTICIPANT_PREVIEW_LIMIT,
-  );
-  const ownerProfileIds = getOwnerProfileIds(participants).sort();
-  return JSON.stringify({
-    status,
-    sortBucket: SORT_BUCKETS[status],
-    listSortAtMs: getListSortAtMs(eventData, status),
-    startAtMs: normalizeFiniteNumberOrNull(eventData.startAtMs),
-    endedAtMs: normalizeFiniteNumberOrNull(eventData.endedAtMs),
-    winnerDisplayName: normalizeString(eventData.winnerDisplayName),
-    participantCount: fullPreviewParticipants.length,
-    participantPreview,
-    ownerProfileIds,
-  });
-};
-
 module.exports = {
   NAVIGATION_PARTICIPANT_PREVIEW_LIMIT,
   buildPreviewParticipants,
-  buildProjectionFingerprint,
   getListSortAtMs,
   getOwnerProfileIds,
   mapEventStatusToNavigationStatus,

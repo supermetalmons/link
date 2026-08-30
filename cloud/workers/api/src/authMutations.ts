@@ -26,7 +26,7 @@ import {
   createAuthIdentityService,
   type AuthIdentityService,
 } from "./authIdentity.ts";
-import type { FirebaseIdentity } from "./firebaseAuth.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
 import { readBoundedJson } from "./http.ts";
 import {
   cleanString,
@@ -137,7 +137,7 @@ function isExpiredFlow(
 
 async function executeAuthMutation(
   request: Request,
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   env: Env,
   ctx: Pick<ExecutionContext, "waitUntil">,
   dependencies: AuthMutationDependencies,
@@ -568,7 +568,7 @@ async function executeAuthMutation(
 
 export async function handleAuthMutation(
   request: Request,
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   env: Env,
   ctx: Pick<ExecutionContext, "waitUntil">,
   dependencies: AuthMutationDependencies = {},

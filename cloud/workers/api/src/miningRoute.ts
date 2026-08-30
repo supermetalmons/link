@@ -19,15 +19,19 @@ import {
 } from "./authHttp.ts";
 import {
   verifyFirebaseRequest,
-  type FirebaseIdentity,
   type WorkerExecutionContext,
 } from "./firebaseAuth.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
 import {
   createMiningRepository,
   type MiningRepository,
 } from "./miningRepository.ts";
 import { readBoundedJson } from "./http.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
+import {
+  getLoginProfileId,
+  requireProfileOwnershipSnapshot,
+} from "./profileOwnership.ts";
 
 const MAX_WRITE_ATTEMPTS = 3;
 
@@ -38,7 +42,7 @@ export type MiningRouteDependencies = {
   verifyIdentity?: (
     request: Request,
     ctx: WorkerExecutionContext,
-  ) => Promise<FirebaseIdentity>;
+  ) => Promise<RequestIdentity>;
 };
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -105,15 +109,23 @@ async function enforceMiningRateLimit(env: Env, uid: string): Promise<void> {
 
 async function mineRock(
   request: MineRockRequest,
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   repository: MiningRepository,
   nowMs: number,
 ): Promise<MineRockResponse> {
   if (!dateIsInRange(request.date, nowMs)) {
     return { ok: false, reason: "date-out-of-range" };
   }
+  const ownership = await requireProfileOwnershipSnapshot(repository, {
+    loginUids: [identity.uid],
+    profileIds: [],
+  });
+  const profileId = getLoginProfileId(ownership, identity.uid);
+  if (!profileId) {
+    return { ok: false, reason: "profile-not-found" };
+  }
   for (let attempt = 0; attempt < MAX_WRITE_ATTEMPTS; attempt++) {
-    const profile = await repository.getProfile(identity.uid, identity.idToken);
+    const profile = await repository.getProfileSnapshot(profileId);
     if (!profile) {
       return { ok: false, reason: "profile-not-found" };
     }

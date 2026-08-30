@@ -19,7 +19,6 @@ import {
   readCanonicalProfile,
   readCanonicalWagerSettlement,
 } from "../src/profileCanonicalD1.ts";
-import { createProfileEventPrizeOwnerResolver } from "../src/profileEventPrizeOwner.ts";
 import { createProfileGameProjectionRuntime } from "../src/profileGameProjectionRepository.ts";
 import { getProfileGameProjection } from "../src/profileGamesD1.ts";
 
@@ -198,6 +197,59 @@ async function insertProfile(
   });
 }
 
+async function retireProfileInto(
+  sourceProfileId: string,
+  targetProfileId: string,
+  mergedAtMs: number,
+  opId: string,
+) {
+  const [source, target] = await Promise.all([
+    readCanonicalProfile(testEnv.PROFILE_DB, sourceProfileId),
+    readCanonicalProfile(testEnv.PROFILE_DB, targetProfileId),
+  ]);
+  if (!source || !target) throw new Error("missing-merge-profile");
+  await commitCanonicalPlan(testEnv.PROFILE_DB, {
+    expectations: [
+      {
+        kind: "profile-revision",
+        profileId: sourceProfileId,
+        revision: source.revision,
+      },
+      {
+        kind: "profile-revision",
+        profileId: targetProfileId,
+        revision: target.revision,
+      },
+      { kind: "merge-target-absent", sourceProfileId },
+    ],
+    mutations: [
+      {
+        kind: "retire-profile-with-redirect",
+        profile: materializeCanonicalProfile({
+          profile: source.profile,
+          createdAtMs: source.createdAtMs,
+          updatedAtMs: mergedAtMs,
+          state: "retiring",
+          mergedAtMs,
+          mergedIntoProfileId: targetProfileId,
+          sortPresence: source.sortPresence,
+          sortValues: source.sortValues,
+          winPresent: source.winPresent,
+          emojiPresent: source.emojiPresent,
+          gameplayEmoji: source.gameplayEmoji,
+        }),
+        redirect: {
+          sourceProfileId,
+          targetProfileId,
+          mergedAtMs,
+          opId,
+          sourceLegacyFields: source.legacyFields,
+        },
+      },
+    ],
+  });
+}
+
 async function resetCanonicalRows(db: D1Database): Promise<void> {
   await db.batch([
     db.prepare("DELETE FROM rating_updates"),
@@ -328,13 +380,22 @@ describe("canonical gameplay repositories", () => {
     const repository = createGameplayRepository(testEnv, {
       rtdbClient: rtdb,
     });
+    const ownership = await repository.readProfileOwnershipSnapshot({
+      loginUids: ["d1-game-login-winner", "d1-game-login-loser"],
+      profileIds: ["d1-game-source"],
+    });
+    expect(ownership.profileById.get("d1-game-winner")?.profile.profileId).toBe(
+      "d1-game-winner",
+    );
     expect(
-      (await repository.getGameplayProfile("d1-game-login-winner", "unused"))
-        ?.profileId,
-    ).toBe("d1-game-winner");
-    expect(
-      await repository.findProfileId("d1-game-login-loser", "unused"),
+      ownership.loginOwnerByUid.get("d1-game-login-loser")?.profileId,
     ).toBe("d1-game-loser");
+    expect(ownership.loginUidsByProfileId.get("d1-game-winner")).toEqual([
+      "d1-game-login-winner",
+    ]);
+    expect(ownership.canonicalProfileIdByProfileId.get("d1-game-source")).toBe(
+      "d1-game-winner",
+    );
 
     const transfer = {
       operationId: "d1-game-wager",
@@ -496,7 +557,7 @@ describe("canonical gameplay repositories", () => {
     });
   });
 
-  it("preserves raw gameplay emoji, rating zero, and null nonce semantics", async () => {
+  it("preserves raw gameplay emoji and rating zero in ownership snapshots", async () => {
     const profileId = "d1-raw-gameplay-profile";
     const loginUid = "d1-raw-gameplay-login";
     const value = materializeCanonicalProfile({
@@ -536,17 +597,312 @@ describe("canonical gameplay repositories", () => {
       rtdbClient: rtdb,
     });
     const rating = createRatingRepository(testEnv, gameplay);
+    const gameplayOwnership = await gameplay.readProfileOwnershipSnapshot({
+      loginUids: [loginUid],
+      profileIds: [],
+    });
+    expect(gameplayOwnership.profileById.get(profileId)?.profile).toMatchObject(
+      {
+        emoji: "",
+        rating: 0,
+      },
+    );
+    const ratingOwnership = await rating.readProfileOwnershipSnapshot({
+      loginUids: [loginUid],
+      profileIds: [],
+    });
+    expect(ratingOwnership.profileById.get(profileId)?.profile).toMatchObject({
+      emoji: "",
+      rating: 0,
+    });
+  });
+
+  it("replays February opponents through deleted merge sources", async () => {
+    const sourceProfileId = "d1-feb-source";
+    const targetProfileId = "d1-feb-target";
+    const opponentProfileId = "d1-feb-opponent";
+    await insertProfile(sourceProfileId, null);
+    await insertProfile(targetProfileId, "d1-feb-target-login");
+    await insertProfile(opponentProfileId, "d1-feb-opponent-login");
+    const source = await readCanonicalProfile(
+      testEnv.PROFILE_DB,
+      sourceProfileId,
+    );
+    const target = await readCanonicalProfile(
+      testEnv.PROFILE_DB,
+      targetProfileId,
+    );
+    if (!source || !target) throw new Error("missing-february-profiles");
+    await commitCanonicalPlan(testEnv.PROFILE_DB, {
+      expectations: [
+        {
+          kind: "profile-revision",
+          profileId: source.profileId,
+          revision: source.revision,
+        },
+        {
+          kind: "profile-revision",
+          profileId: target.profileId,
+          revision: target.revision,
+        },
+        { kind: "merge-target-absent", sourceProfileId },
+      ],
+      mutations: [
+        {
+          kind: "retire-profile-with-redirect",
+          profile: materializeCanonicalProfile({
+            profile: source.profile,
+            createdAtMs: source.createdAtMs,
+            updatedAtMs: 2_000,
+            state: "retiring",
+            mergedAtMs: 2_000,
+            mergedIntoProfileId: targetProfileId,
+            sortPresence: source.sortPresence,
+            sortValues: source.sortValues,
+            winPresent: source.winPresent,
+            emojiPresent: source.emojiPresent,
+          }),
+          redirect: {
+            sourceProfileId,
+            targetProfileId,
+            mergedAtMs: 2_000,
+            opId: "d1-feb-merge",
+            sourceLegacyFields: source.legacyFields,
+          },
+        },
+      ],
+    });
+    const retired = await readCanonicalProfile(
+      testEnv.PROFILE_DB,
+      sourceProfileId,
+    );
+    if (!retired) throw new Error("missing-retired-february-profile");
+    await commitCanonicalPlan(testEnv.PROFILE_DB, {
+      expectations: [
+        {
+          kind: "profile-revision",
+          profileId: sourceProfileId,
+          revision: retired.revision,
+        },
+        { kind: "merge-target", sourceProfileId, targetProfileId },
+      ],
+      mutations: [
+        {
+          kind: "delete-retired-profile",
+          profileId: sourceProfileId,
+          targetProfileId,
+        },
+      ],
+    });
+    const gameplay = createGameplayRepository(testEnv, { rtdbClient: rtdb });
+    const rating = createRatingRepository(testEnv, gameplay, {
+      now: () => 3_000,
+    });
     await expect(
-      gameplay.getGameplayProfile(loginUid, "unused"),
-    ).resolves.toMatchObject({
-      emoji: "",
-      rating: 0,
+      rating.applyFebruaryChallengeReplay(sourceProfileId, opponentProfileId),
+    ).resolves.toBeUndefined();
+    await expect(
+      rating.applyFebruaryChallengeReplay(sourceProfileId, targetProfileId),
+    ).resolves.toBeUndefined();
+    expect(
+      (await readCanonicalProfile(testEnv.PROFILE_DB, targetProfileId))?.profile
+        .feb2026UniqueOpponentsCount,
+    ).toBe(1);
+    expect(
+      (await readCanonicalProfile(testEnv.PROFILE_DB, opponentProfileId))
+        ?.profile.feb2026UniqueOpponentsCount,
+    ).toBe(1);
+  });
+
+  it("does not recount an opponent after that opponent merges", async () => {
+    const playerProfileId = "d1-feb-existing-player";
+    const sourceOpponentProfileId = "d1-feb-existing-source";
+    const targetOpponentProfileId = "d1-feb-existing-target";
+    await insertProfile(playerProfileId, "d1-feb-existing-player-login");
+    await insertProfile(sourceOpponentProfileId, null);
+    await insertProfile(targetOpponentProfileId, null);
+    const gameplay = createGameplayRepository(testEnv, { rtdbClient: rtdb });
+    const rating = createRatingRepository(testEnv, gameplay, {
+      now: () => 3_000,
     });
-    await expect(rating.getRatingProfile(loginUid)).resolves.toMatchObject({
-      emoji: "",
-      nonce: 0,
-      rating: 0,
+
+    await rating.applyFebruaryChallengeReplay(
+      playerProfileId,
+      sourceOpponentProfileId,
+    );
+    await retireProfileInto(
+      sourceOpponentProfileId,
+      targetOpponentProfileId,
+      2_000,
+      "d1-feb-existing-merge",
+    );
+    await rating.applyFebruaryChallengeReplay(
+      playerProfileId,
+      sourceOpponentProfileId,
+    );
+
+    expect(
+      (await readCanonicalProfile(testEnv.PROFILE_DB, playerProfileId))?.profile
+        .feb2026UniqueOpponentsCount,
+    ).toBe(1);
+    expect(
+      (await readCanonicalProfile(testEnv.PROFILE_DB, targetOpponentProfileId))
+        ?.profile.feb2026UniqueOpponentsCount,
+    ).toBe(1);
+  });
+
+  it("fences an opponent merge during February replay", async () => {
+    const playerProfileId = "d1-feb-fenced-player";
+    const sourceOpponentProfileId = "d1-feb-fenced-source";
+    const targetOpponentProfileId = "d1-feb-fenced-target";
+    await insertProfile(playerProfileId, "d1-feb-fenced-player-login");
+    await insertProfile(sourceOpponentProfileId, null);
+    await insertProfile(targetOpponentProfileId, null);
+    const gameplay = createGameplayRepository(testEnv, { rtdbClient: rtdb });
+    await createRatingRepository(testEnv, gameplay, {
+      now: () => 2_000,
+    }).applyFebruaryChallengeReplay(playerProfileId, sourceOpponentProfileId);
+    const racedDb = beforeMatchingBatch(
+      testEnv.PROFILE_DB,
+      (queries) =>
+        queries.some((query) =>
+          query.includes("INSERT INTO profile_february_opponents"),
+        ),
+      () =>
+        retireProfileInto(
+          sourceOpponentProfileId,
+          targetOpponentProfileId,
+          3_000,
+          "d1-feb-fenced-merge",
+        ),
+    );
+    const rating = createCanonicalRatingRepository(racedDb, gameplay, {
+      createFailure: () => new Error("rating-unavailable"),
+      maxAttempts: 5,
+      now: () => 4_000,
     });
+
+    await rating.applyFebruaryChallengeReplay(
+      playerProfileId,
+      targetOpponentProfileId,
+    );
+
+    expect(
+      (await readCanonicalProfile(testEnv.PROFILE_DB, playerProfileId))?.profile
+        .feb2026UniqueOpponentsCount,
+    ).toBe(1);
+    expect(
+      (await readCanonicalProfile(testEnv.PROFILE_DB, targetOpponentProfileId))
+        ?.profile.feb2026UniqueOpponentsCount,
+    ).toBe(1);
+  });
+
+  it("re-resolves February profiles that merge after ownership resolution", async () => {
+    const sourceProfileId = "d1-feb-race-source";
+    const targetProfileId = "d1-feb-race-target";
+    const opponentProfileId = "d1-feb-race-opponent";
+    await insertProfile(sourceProfileId, "d1-feb-race-source-login");
+    await insertProfile(targetProfileId, null);
+    await insertProfile(opponentProfileId, "d1-feb-race-opponent-login");
+    const racedDb = beforeMatchingBatch(
+      testEnv.PROFILE_DB,
+      (queries) =>
+        queries.some((query) =>
+          query.includes("SELECT * FROM profile_records WHERE profile_id = ?"),
+        ),
+      async () => {
+        const source = await readCanonicalProfile(
+          testEnv.PROFILE_DB,
+          sourceProfileId,
+        );
+        const target = await readCanonicalProfile(
+          testEnv.PROFILE_DB,
+          targetProfileId,
+        );
+        const owner = await readCanonicalLoginOwner(
+          testEnv.PROFILE_DB,
+          "d1-feb-race-source-login",
+        );
+        if (!source || !target || !owner) {
+          throw new Error("missing-february-race-profiles");
+        }
+        await commitCanonicalPlan(testEnv.PROFILE_DB, {
+          expectations: [
+            {
+              kind: "profile-revision",
+              profileId: sourceProfileId,
+              revision: source.revision,
+            },
+            {
+              kind: "profile-revision",
+              profileId: targetProfileId,
+              revision: target.revision,
+            },
+            {
+              kind: "login-owner-revision",
+              loginUid: owner.loginUid,
+              profileId: owner.profileId,
+              revision: owner.revision,
+            },
+            { kind: "merge-target-absent", sourceProfileId },
+          ],
+          mutations: [
+            {
+              kind: "retire-profile-with-redirect",
+              profile: materializeCanonicalProfile({
+                profile: source.profile,
+                createdAtMs: source.createdAtMs,
+                updatedAtMs: 2_000,
+                state: "retiring",
+                mergedAtMs: 2_000,
+                mergedIntoProfileId: targetProfileId,
+                sortPresence: source.sortPresence,
+                sortValues: source.sortValues,
+                winPresent: source.winPresent,
+                emojiPresent: source.emojiPresent,
+              }),
+              redirect: {
+                sourceProfileId,
+                targetProfileId,
+                mergedAtMs: 2_000,
+                opId: "d1-feb-race-merge",
+                sourceLegacyFields: source.legacyFields,
+              },
+            },
+            {
+              kind: "update-login-owner",
+              value: {
+                loginUid: owner.loginUid,
+                profileId: targetProfileId,
+                createdAtMs: owner.createdAtMs,
+                updatedAtMs: 2_000,
+              },
+            },
+          ],
+        });
+      },
+    );
+    const gameplay = createGameplayRepository(testEnv, { rtdbClient: rtdb });
+    const rating = createCanonicalRatingRepository(racedDb, gameplay, {
+      createFailure: () => new Error("rating-unavailable"),
+      maxAttempts: 5,
+      now: () => 3_000,
+    });
+    await expect(
+      rating.applyFebruaryChallengeReplay(sourceProfileId, opponentProfileId),
+    ).resolves.toBeUndefined();
+    expect(
+      (await readCanonicalProfile(testEnv.PROFILE_DB, sourceProfileId))?.profile
+        .feb2026UniqueOpponentsCount,
+    ).toBe(0);
+    expect(
+      (await readCanonicalProfile(testEnv.PROFILE_DB, targetProfileId))?.profile
+        .feb2026UniqueOpponentsCount,
+    ).toBe(1);
+    expect(
+      (await readCanonicalProfile(testEnv.PROFILE_DB, opponentProfileId))
+        ?.profile.feb2026UniqueOpponentsCount,
+    ).toBe(1);
   });
 
   it("leases and atomically finalizes ratings with all pending projections", async () => {
@@ -1143,7 +1499,7 @@ describe("canonical gameplay repositories", () => {
     ).toBe(1499);
   });
 
-  it("feeds profile projection and prize-owner readers from canonical D1", async () => {
+  it("feeds profile projection from canonical D1", async () => {
     await insertProfile("d1-project-host", "d1-project-login-host", {
       username: "D1Host",
       emoji: 7,
@@ -1181,18 +1537,5 @@ describe("canonical gameplay repositories", () => {
         "auto_bbbbbbbbbbb",
       ),
     ).not.toBeNull();
-
-    rtdbValues.set("events/event-1/participants/d1-project-host", {
-      loginUid: "d1-project-login-guest",
-    });
-    const resolveOwner = createProfileEventPrizeOwnerResolver(testEnv, {
-      profileDb: testEnv.PROFILE_DB,
-      rtdb: {
-        getRtdbPath: async (path) => rtdbValues.get(path) ?? null,
-      },
-    });
-    await expect(
-      resolveOwner({ eventId: "event-1", profileId: "d1-project-host" }),
-    ).resolves.toBe("d1-project-guest");
   });
 });

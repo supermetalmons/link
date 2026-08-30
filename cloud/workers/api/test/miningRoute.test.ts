@@ -12,11 +12,12 @@ import type {
   MiningProfile,
   MiningRepository,
 } from "../src/miningRepository.ts";
+import type { ProfileOwnershipSnapshot } from "../src/profileOwnership.ts";
 import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const NOW_MS = Date.UTC(2026, 7, 18, 12);
 const ctx = { waitUntil: () => undefined };
-const identity = { idToken: "firebase-id-token", uid: "firebase-uid" };
+const identity = { uid: "firebase-uid" };
 
 function envWithRateLimit(
   limit: (
@@ -67,11 +68,47 @@ function profile(
   return { profileId: "profile-1", mining, updateTime };
 }
 
+function ownershipSnapshot(
+  profileId: string | null = "profile-1",
+): ProfileOwnershipSnapshot {
+  return {
+    canonicalProfileIdByProfileId: new Map(),
+    loginOwnerByUid: new Map([
+      [identity.uid, profileId ? { profileId, revision: 1 } : null],
+    ]),
+    loginUidsByProfileId: new Map(
+      profileId ? [[profileId, [identity.uid]]] : [],
+    ),
+    profileById: new Map(
+      profileId
+        ? [
+            [
+              profileId,
+              {
+                profile: {
+                  aura: "",
+                  emoji: "",
+                  eth: "",
+                  profileId,
+                  rating: 1500,
+                  sol: "",
+                  username: "",
+                },
+                revision: 1,
+              },
+            ],
+          ]
+        : [],
+    ),
+  };
+}
+
 function repository(
   overrides: Partial<MiningRepository> = {},
 ): MiningRepository {
   return {
-    getProfile: async () => profile(),
+    getProfileSnapshot: async () => profile(),
+    readProfileOwnershipSnapshot: async () => ownershipSnapshot(),
     updateMining: async () => "updated",
     ...overrides,
   };
@@ -200,7 +237,7 @@ test("freezes mining before rate limiting or repository work", async () => {
   const mine = request(mineRequest());
   const response = await handleMiningRoute(mine, frozenEnv, ctx, {
     repository: repository({
-      getProfile: async () => {
+      getProfileSnapshot: async () => {
         repositoryCalls++;
         return profile();
       },
@@ -222,7 +259,7 @@ test("freezes mining before rate limiting or repository work", async () => {
 test("validates bounded request bodies before repository access", async () => {
   let repositoryCalls = 0;
   const testRepository = repository({
-    getProfile: async () => {
+    getProfileSnapshot: async () => {
       repositoryCalls++;
       return profile();
     },
@@ -289,7 +326,7 @@ test("preserves every business failure response", async () => {
     {
       now: () => NOW_MS,
       repository: repository({
-        getProfile: async () => {
+        getProfileSnapshot: async () => {
           profileReads++;
           return profile();
         },
@@ -309,7 +346,9 @@ test("preserves every business failure response", async () => {
     ctx,
     {
       now: () => NOW_MS,
-      repository: repository({ getProfile: async () => null }),
+      repository: repository({
+        readProfileOwnershipSnapshot: async () => ownershipSnapshot(null),
+      }),
       verifyIdentity,
     },
   );
@@ -329,7 +368,7 @@ test("preserves every business failure response", async () => {
     {
       now: () => NOW_MS,
       repository: repository({
-        getProfile: async () => profile(alreadyMinedState),
+        getProfileSnapshot: async () => profile(alreadyMinedState),
       }),
       verifyIdentity,
     },
@@ -374,7 +413,7 @@ test("writes exact first and subsequent mining snapshots", async () => {
       {
         now: () => NOW_MS,
         repository: repository({
-          getProfile: async () => profile(state),
+          getProfileSnapshot: async () => profile(state),
           updateMining: async (profileId, mining, updateTime) => {
             updates.push({ profileId, mining, updateTime });
             return "updated";
@@ -414,6 +453,7 @@ test("re-reads after conflicts and bounds optimistic retries", async () => {
     materials: materials(1, 1, 1, 1, 1),
   };
   const input = mineRequest(state);
+  let ownershipReads = 0;
   let reads = 0;
   let writes = 0;
   const recovered = await handleMiningRoute(
@@ -423,7 +463,7 @@ test("re-reads after conflicts and bounds optimistic retries", async () => {
     {
       now: () => NOW_MS,
       repository: repository({
-        getProfile: async () => {
+        getProfileSnapshot: async () => {
           reads++;
           return profile(
             {
@@ -436,6 +476,10 @@ test("re-reads after conflicts and bounds optimistic retries", async () => {
             `2026-08-18T10:00:0${reads}Z`,
           );
         },
+        readProfileOwnershipSnapshot: async () => {
+          ownershipReads++;
+          return ownershipSnapshot();
+        },
         updateMining: async () => {
           writes++;
           return writes < 3 ? "conflict" : "updated";
@@ -445,6 +489,7 @@ test("re-reads after conflicts and bounds optimistic retries", async () => {
     },
   );
   assert.equal(recovered.status, 200);
+  assert.equal(ownershipReads, 1);
   assert.equal(reads, 3);
   assert.equal(writes, 3);
   assert.equal(
@@ -462,7 +507,7 @@ test("re-reads after conflicts and bounds optimistic retries", async () => {
       logFailure: (kind) => logged.push(kind),
       now: () => NOW_MS,
       repository: repository({
-        getProfile: async () => profile(state),
+        getProfileSnapshot: async () => profile(state),
         updateMining: async () => "conflict",
       }),
       verifyIdentity,
@@ -476,7 +521,7 @@ test("re-reads after conflicts and bounds optimistic retries", async () => {
   assert.deepEqual(logged, ["mining-write-conflict"]);
 });
 
-test("sanitizes unexpected repository failures", async () => {
+test("fails closed when canonical profile ownership is unavailable", async () => {
   const logged: string[] = [];
   const response = await handleMiningRoute(
     request(mineRequest()),
@@ -486,7 +531,7 @@ test("sanitizes unexpected repository failures", async () => {
       logFailure: (kind) => logged.push(kind),
       now: () => NOW_MS,
       repository: repository({
-        getProfile: async () => {
+        readProfileOwnershipSnapshot: async () => {
           throw new Error("profile-repository-unavailable");
         },
       }),
@@ -497,7 +542,7 @@ test("sanitizes unexpected repository failures", async () => {
   assert.deepEqual(await responseJson(response), {
     ok: false,
     error: "unavailable",
-    message: "mining-service-unavailable",
+    message: "profile-ownership-unavailable",
   });
-  assert.deepEqual(logged, ["mining-service-unavailable"]);
+  assert.deepEqual(logged, ["profile-ownership-unavailable"]);
 });

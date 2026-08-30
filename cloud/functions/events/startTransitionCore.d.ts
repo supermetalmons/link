@@ -1,3 +1,5 @@
+import type { EventOwnershipSnapshot } from "./ownership.js";
+
 export type ScheduledEventTransitionResult = {
   didChange: boolean;
   updates: Record<string, unknown>;
@@ -6,6 +8,7 @@ export type ScheduledEventTransitionResult = {
 export type EventStartTransitionDependencies = {
   random?: () => number;
   buildRandomGameSeed(random?: () => number): unknown | Promise<unknown>;
+  ownershipSnapshot: EventOwnershipSnapshot | null;
 };
 
 export function buildFixedBracketState(input: {
@@ -16,6 +19,7 @@ export function buildFixedBracketState(input: {
   enableThirdPlace?: boolean;
   random?: () => number;
   buildRandomGameSeed(random?: () => number): unknown | Promise<unknown>;
+  ownershipSnapshot: EventOwnershipSnapshot;
 }): Promise<{
   bracketSize: number;
   roundCount: number;
@@ -32,3 +36,18 @@ export function buildScheduledEventDueUpdatesCore(
     nowMs: number;
   } & EventStartTransitionDependencies,
 ): Promise<ScheduledEventTransitionResult>;
+
+export function reconcileBracketMatchReadiness(
+  input: Record<string, unknown> & {
+    ownershipSnapshot: EventOwnershipSnapshot;
+  },
+): Promise<boolean>;
+
+export function reconcileThirdPlaceMatchReadiness(
+  input: Record<string, unknown> & {
+    ownershipSnapshot: EventOwnershipSnapshot;
+  },
+): Promise<{
+  didChange: boolean;
+  thirdPlaceMatch: Record<string, unknown> | null;
+}>;

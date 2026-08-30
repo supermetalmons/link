@@ -34,11 +34,6 @@ import {
   type RatingUpdateRequest,
 } from "@mons/shared/ratings";
 import {
-  TELEGRAM_AUTOMATCH_VERSION,
-  buildAutomatchTelegramProjectionOutboxUpdates,
-  buildAutomatchTelegramLifecycleUpdates,
-} from "../../../functions/telegram/automatchSource.js";
-import {
   AuthApiFailure,
   authErrorResponse,
   isProfileWritesDisabledFailure,
@@ -50,13 +45,9 @@ import {
 } from "./authHttp.ts";
 import {
   verifyFirebaseRequest,
-  type FirebaseIdentity,
   type WorkerExecutionContext,
 } from "./firebaseAuth.ts";
-import {
-  FIREBASE_RTDB_SERVER_TIMESTAMP,
-  firebaseRtdbIncrement,
-} from "./firebaseRtdb.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
 import { MAX_FIREBASE_KEY_BYTES, isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
   createGameplayRepository,
@@ -67,10 +58,7 @@ import {
 import { isSafeOperationId } from "./operationIds.ts";
 import { readBoundedJson } from "./http.ts";
 import {
-  createAutomatchProfileGameProjectionTask,
-  createAutomatchProjectionTask,
-  enqueueAutomatchProfileGameProjection,
-  enqueueAutomatchProjection,
+  cancelOwnedQueuedAutomatches,
   startAutomatch,
   type AutomatchDependencies,
 } from "./automatch.ts";
@@ -101,7 +89,6 @@ import {
   ensureEventProgressWorkflow,
   type EventProgressPlan,
 } from "./eventProgress.ts";
-import { buildAutomatchProfileGameProjectionOutboxUpdates } from "./profileGameProjectionOutbox.ts";
 import type { TelegramProjectionTask } from "./telegramProjectionTasks.ts";
 import type { ProfileGameProjectionTask } from "./profileGameProjectionTasks.ts";
 import {
@@ -112,11 +99,14 @@ import {
   joinInvite,
   proposeRematch,
   resolveInviteRole,
-  withGameSessionMutationLease,
   type GameSessionMutationDependencies,
 } from "./gameSessionMutations.ts";
 import { readProfileGamesPage } from "./profileGamesD1.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
+import {
+  getLoginProfileId,
+  requireProfileOwnershipSnapshot,
+} from "./profileOwnership.ts";
 
 export const GAMEPLAY_PATHS = new Set([
   "/automatch/cancel",
@@ -144,22 +134,6 @@ const GAMEPLAY_READ_PATHS = new Set([
   "/navigation/games/read",
 ]);
 
-type QueuedAutomatchCandidate = {
-  inviteId: string;
-  profileId: string;
-  telegramDeliveryVersion: number | null;
-  timestamp: number;
-  uid: string;
-};
-
-type QueuedAutomatch = {
-  inviteId: string | null;
-  profileId?: string;
-  telegramDeliveryVersion?: number | null;
-  timestamp?: number;
-  uid?: string;
-};
-
 export type GameplayRouteDependencies = {
   automatch?: AutomatchDependencies;
   gameSession?: GameSessionMutationDependencies;
@@ -175,7 +149,7 @@ export type GameplayRouteDependencies = {
   verifyIdentity?: (
     request: Request,
     ctx: WorkerExecutionContext,
-  ) => Promise<FirebaseIdentity>;
+  ) => Promise<RequestIdentity>;
 };
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -188,239 +162,29 @@ function normalizeString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function finiteTimestamp(value: unknown): number {
-  const parsed =
-    typeof value === "number" || typeof value === "string" ? Number(value) : 0;
-  return Number.isFinite(parsed) ? Math.floor(parsed) : 0;
-}
-
-export function getQueuedAutomatchCandidates(
-  value: unknown,
-): QueuedAutomatchCandidate[] {
-  const records = toRecord(value);
-  if (!records) {
-    return [];
-  }
-  return Object.entries(records)
-    .reduce<QueuedAutomatchCandidate[]>((candidates, [inviteId, raw]) => {
-      const payload = toRecord(raw) || {};
-      if (!isSafeFirebaseKey(inviteId)) {
-        return candidates;
-      }
-      candidates.push({
-        inviteId,
-        uid: normalizeString(payload.uid),
-        profileId: normalizeString(payload.profileId),
-        timestamp: finiteTimestamp(payload.timestamp),
-        telegramDeliveryVersion:
-          payload.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION
-            ? TELEGRAM_AUTOMATCH_VERSION
-            : null,
-      });
-      return candidates;
-    }, [])
-    .sort((left, right) => right.timestamp - left.timestamp);
-}
-
 async function resolveProfileId(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   repository: GameplayRepository,
 ): Promise<string> {
-  try {
-    const linkedProfileId = normalizeString(
-      await repository.getRtdbPath(`players/${identity.uid}/profile`),
-    );
-    if (linkedProfileId) {
-      return linkedProfileId;
-    }
-  } catch {}
-  try {
-    const profileId = await repository.findProfileId(
-      identity.uid,
-      identity.idToken,
-    );
-    if (profileId) {
-      return profileId;
-    }
-  } catch {}
-  return normalizeString(identity.profileId);
-}
-
-async function resolveNavigationProfileId(
-  identity: FirebaseIdentity,
-  repository: GameplayRepository,
-): Promise<string> {
-  let rtdbAvailable = true;
-  try {
-    const linkedProfileId = normalizeString(
-      await repository.getRtdbPath(`players/${identity.uid}/profile`),
-    );
-    if (linkedProfileId) return linkedProfileId;
-  } catch {
-    rtdbAvailable = false;
-  }
-  try {
-    return normalizeString(
-      await repository.findProfileId(identity.uid, identity.idToken),
-    );
-  } catch {
-    if (rtdbAvailable) return "";
-    throw new AuthApiFailure(
-      503,
-      "unavailable",
-      "profile-ownership-unavailable",
-    );
-  }
-}
-
-async function inviteHostMatchesProfile(
-  inviteId: string,
-  profileId: string,
-  repository: GameplayRepository,
-): Promise<boolean> {
-  try {
-    const invite = toRecord(
-      await repository.getRtdbPath(`invites/${inviteId}`),
-    );
-    const hostUid = normalizeString(invite?.hostId);
-    if (!hostUid) {
-      return false;
-    }
-    const hostProfileId = normalizeString(
-      await repository.getRtdbPath(`players/${hostUid}/profile`),
-    );
-    return hostProfileId !== "" && hostProfileId === profileId;
-  } catch {
-    return false;
-  }
-}
-
-async function resolveQueuedAutomatch(
-  uid: string,
-  profileId: string,
-  repository: GameplayRepository,
-): Promise<QueuedAutomatch> {
-  const byUid = getQueuedAutomatchCandidates(
-    await repository.getRtdbPath("automatch", {
-      orderBy: "uid",
-      equalTo: uid,
-    }),
-  );
-  if (byUid.length > 0) {
-    return byUid[0];
-  }
-  if (!profileId) {
-    return { inviteId: null };
-  }
-  const byProfile = getQueuedAutomatchCandidates(
-    await repository.getRtdbPath("automatch", {
-      orderBy: "profileId",
-      equalTo: profileId,
-    }),
-  );
-  for (const candidate of byProfile) {
-    if (
-      await inviteHostMatchesProfile(candidate.inviteId, profileId, repository)
-    ) {
-      return candidate;
-    }
-  }
-  return { inviteId: null };
+  const ownership = await requireProfileOwnershipSnapshot(repository, {
+    loginUids: [identity.uid],
+    profileIds: [],
+  });
+  return getLoginProfileId(ownership, identity.uid) || "";
 }
 
 export async function cancelAutomatch(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   repository: GameplayRepository,
   dependencies: AutomatchDependencies = {},
 ): Promise<CancelAutomatchResponse> {
-  const profileId = await resolveProfileId(identity, repository);
-  const queued = await resolveQueuedAutomatch(
-    identity.uid,
-    profileId,
-    repository,
-  );
-  if (!queued.inviteId) {
-    return { ok: false };
-  }
-  const inviteId = queued.inviteId;
-  const usesTelegramDeliveryV2 =
-    queued.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION;
-  const profileGameProjectionTask = createAutomatchProfileGameProjectionTask(
-    inviteId,
-    dependencies,
-  );
-  const projectionTask = usesTelegramDeliveryV2
-    ? createAutomatchProjectionTask(
-        inviteId,
-        dependencies,
-        profileGameProjectionTask.requestId,
-      )
-    : null;
-  const canceledUpdates: Record<string, unknown> = {
-    [`automatch/${inviteId}`]: null,
-    [`invites/${inviteId}/automatchStateHint`]: "canceled",
-    [`invites/${inviteId}/automatchCanceledAt`]: FIREBASE_RTDB_SERVER_TIMESTAMP,
-    ...buildAutomatchProfileGameProjectionOutboxUpdates({
-      inviteId,
-      requestId: profileGameProjectionTask.requestId,
-      timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
-    }),
+  return {
+    ok: await cancelOwnedQueuedAutomatches(
+      identity.uid,
+      repository,
+      dependencies,
+    ),
   };
-  if (usesTelegramDeliveryV2) {
-    Object.assign(
-      canceledUpdates,
-      buildAutomatchTelegramLifecycleUpdates({
-        inviteId,
-        lifecycle: "canceled",
-        timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
-        generation: firebaseRtdbIncrement(1),
-      }),
-    );
-    Object.assign(
-      canceledUpdates,
-      buildAutomatchTelegramProjectionOutboxUpdates({
-        inviteId,
-        requestId: projectionTask?.requestId || "",
-        timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
-      }),
-    );
-  }
-  const canceled = await withGameSessionMutationLease(
-    inviteId,
-    profileGameProjectionTask.requestId,
-    repository,
-    async () => {
-      const [currentQueueValue, currentGuestId] = await Promise.all([
-        repository.getRtdbPath(`automatch/${inviteId}`),
-        repository.getRtdbPath(`invites/${inviteId}/guestId`),
-      ]);
-      const currentQueue = toRecord(currentQueueValue);
-      const queueIsCurrent =
-        currentQueue !== null &&
-        normalizeString(currentQueue.uid) === queued.uid &&
-        normalizeString(currentQueue.profileId) === queued.profileId &&
-        finiteTimestamp(currentQueue.timestamp) === queued.timestamp &&
-        (currentQueue.telegramDeliveryVersion === TELEGRAM_AUTOMATCH_VERSION
-          ? TELEGRAM_AUTOMATCH_VERSION
-          : null) === queued.telegramDeliveryVersion;
-      if (normalizeString(currentGuestId) || !queueIsCurrent) {
-        return false;
-      }
-      await repository.patchRtdbRoot(canceledUpdates);
-      return true;
-    },
-  );
-  if (!canceled) {
-    return { ok: false };
-  }
-  if (projectionTask) {
-    await enqueueAutomatchProjection(projectionTask, dependencies);
-  }
-  await enqueueAutomatchProfileGameProjection(
-    profileGameProjectionTask,
-    dependencies,
-  );
-  return { ok: true };
 }
 
 function skippedNavigationResponse(
@@ -431,11 +195,11 @@ function skippedNavigationResponse(
 }
 
 export async function removeNavigationGame(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   inviteId: string,
   repository: GameplayRepository,
 ): Promise<RemoveNavigationGameResponse> {
-  const profileId = await resolveNavigationProfileId(identity, repository);
+  const profileId = await resolveProfileId(identity, repository);
   if (!profileId) {
     return skippedNavigationResponse(inviteId, "profile-unresolved");
   }
@@ -461,11 +225,7 @@ export async function removeNavigationGame(
   ) {
     return skippedNavigationResponse(inviteId, "pending-automatch");
   }
-  const game = await repository.getNavigationGame(
-    profileId,
-    inviteId,
-    identity.idToken,
-  );
+  const game = await repository.getNavigationGame(profileId, inviteId);
   if (!game) {
     return {
       ...skippedNavigationResponse(inviteId, "not-found"),
@@ -896,7 +656,7 @@ export async function handleGameplayRoute(
       if (!isReadNavigationGamesRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
-      const profileId = await resolveNavigationProfileId(identity, repository);
+      const profileId = await resolveProfileId(identity, repository);
       response = profileId
         ? await (dependencies.readNavigationPage || readProfileGamesPage)(
             dependencies.profileGamesDb || env.PROFILE_GAMES_DB,
@@ -997,5 +757,4 @@ export {
   isSafeFirebaseKey,
   readGameplayBody,
   resolveProfileId,
-  resolveQueuedAutomatch,
 };

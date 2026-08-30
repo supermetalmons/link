@@ -21,7 +21,7 @@ import {
 import {
   buildProfileLinkProfileGameProjectionOutbox,
   getProfileLinkProfileGameProjectionOutboxPath,
-  parseProfileLinkProfileGameProjectionOutbox,
+  salvageProfileLinkCleanupProfileIds,
 } from "./profileGameProjectionOutbox.ts";
 import type { ProfileLinkProfileGameProjectionTask } from "./profileGameProjectionTasks.ts";
 import {
@@ -176,12 +176,16 @@ export async function ensureFirebaseProfileClaim(
     const requestId = dependencies.createRequestId
       ? dependencies.createRequestId()
       : crypto.randomUUID();
-    const existingOutbox =
-      parseProfileLinkProfileGameProjectionOutbox(existingOutboxValue);
     const previousProfileId = exactDocumentId(profileLink);
+    const recordedProfileId = exactDocumentId(
+      record(existingOutboxValue).profileId,
+    );
     const cleanupProfileIds = Array.from(
       new Set([
-        ...(existingOutbox?.cleanupProfileIds || []),
+        ...salvageProfileLinkCleanupProfileIds(existingOutboxValue),
+        ...(recordedProfileId && recordedProfileId !== profileId
+          ? [recordedProfileId]
+          : []),
         ...(previousProfileId && previousProfileId !== profileId
           ? [previousProfileId]
           : []),

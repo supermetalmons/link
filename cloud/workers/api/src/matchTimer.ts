@@ -26,13 +26,17 @@ import {
 } from "@mons/shared/rematches";
 import { Color, Game } from "mons-rules";
 import { AuthApiFailure } from "./authErrors.ts";
-import type { FirebaseIdentity } from "./firebaseAuth.ts";
+import type { RequestIdentity } from "./requestIdentity.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import {
   buildEventProgressPlan,
   type EventProgressPlan,
 } from "./eventProgress.ts";
+import {
+  getLoginProfileId,
+  requireProfileOwnershipSnapshot,
+} from "./profileOwnership.ts";
 
 const MATCH_TIMER_CLAIM_LEASE_MS = 30_000;
 const MATCH_TIMER_CLAIM_SIDE_EFFECT_ATTEMPTS = 3;
@@ -81,12 +85,15 @@ export type MatchTimerDependencies = {
 
 type MatchTimerRepository = Pick<
   GameplayRepository,
-  "getRtdbPath" | "transactRtdbPath"
+  "getRtdbPath" | "readProfileOwnershipSnapshot" | "transactRtdbPath"
 >;
 
 type MatchTimerClaimRepository = Pick<
   GameplayRepository,
-  "getRtdbPath" | "patchRtdbRoot" | "transactRtdbPath"
+  | "getRtdbPath"
+  | "patchRtdbRoot"
+  | "readProfileOwnershipSnapshot"
+  | "transactRtdbPath"
 >;
 
 type MatchTimerRequest =
@@ -216,7 +223,7 @@ export function resolveMatchTimerGame(
 }
 
 async function authorizePlayer(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   playerId: string,
   repository: MatchTimerRepository,
   signal: AbortSignal,
@@ -224,16 +231,14 @@ async function authorizePlayer(
   if (identity.uid === playerId) {
     return;
   }
-  const linkedProfileId = await repository.getRtdbPath(
-    `players/${playerId}/profile`,
-    undefined,
-    signal,
-  );
-  if (
-    typeof linkedProfileId !== "string" ||
-    !identity.profileId ||
-    linkedProfileId.trim() !== identity.profileId
-  ) {
+  signal.throwIfAborted();
+  const ownership = await requireProfileOwnershipSnapshot(repository, {
+    loginUids: [identity.uid, playerId],
+    profileIds: [],
+  });
+  const identityProfileId = getLoginProfileId(ownership, identity.uid);
+  const playerProfileId = getLoginProfileId(ownership, playerId);
+  if (!identityProfileId || identityProfileId !== playerProfileId) {
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
   }
 }
@@ -400,7 +405,7 @@ async function releasePendingClaimFence(
 }
 
 export async function startMatchTimer(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: StartMatchTimerRequest,
   repository: MatchTimerRepository,
   dependencies: MatchTimerDependencies = {},
@@ -522,7 +527,7 @@ export async function startMatchTimer(
 }
 
 export async function claimMatchVictoryByTimer(
-  identity: FirebaseIdentity,
+  identity: RequestIdentity,
   request: ClaimMatchVictoryByTimerRequest,
   repository: MatchTimerClaimRepository,
   dependencies: MatchTimerDependencies = {},

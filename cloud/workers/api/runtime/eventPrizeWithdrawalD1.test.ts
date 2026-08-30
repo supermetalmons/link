@@ -159,6 +159,9 @@ describe("event prize withdrawal D1 repository", () => {
     const firebaseValues = new Map<string, unknown>();
     let firebaseWrites = 0;
     const repository = {
+      readProfileOwnershipSnapshot: async () => {
+        throw new Error("unexpected-profile-ownership-read");
+      },
       getRtdbPath: async (candidatePath: string) =>
         firebaseValues.get(candidatePath) ?? null,
       patchRtdbRoot: async (updates: Record<string, unknown>) => {

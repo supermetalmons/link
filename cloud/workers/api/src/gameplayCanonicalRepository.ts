@@ -8,6 +8,7 @@ import {
   commitCanonicalPlan,
   materializeCanonicalProfile,
   parseCanonicalRatingUpdateRow,
+  readCanonicalProfileOwnershipSnapshot,
   readCanonicalRatingUpdate,
   readStableCanonicalProfileAggregate,
   readStableCanonicalProfileAggregateByLogin,
@@ -16,6 +17,8 @@ import {
   CanonicalProfileConflict,
   type CanonicalLoginOwnerSnapshot,
   type CanonicalProfileAggregateSnapshot,
+  type CanonicalProfileOwnershipProfileSnapshot,
+  type CanonicalProfileOwnershipSnapshot,
   type CanonicalProfileSnapshot,
   type CanonicalProfileValue,
   type CanonicalExpectation,
@@ -49,6 +52,7 @@ import type {
   WagerTransferInput,
   WagerTransferResult,
 } from "./gameplayRepository.ts";
+import type { ProfileOwnershipSnapshot } from "./profileOwnership.ts";
 
 type CanonicalRepositoryOptions = {
   createFailure(): Error;
@@ -92,6 +96,20 @@ function projectionVersion(value: unknown): number | null {
 
 function retryCount(value: number): number {
   return Number.isInteger(value) && value > 0 ? value : 5;
+}
+
+async function canonicalProfileIds(
+  db: D1Database,
+  profileIds: readonly string[],
+): Promise<Array<string | null>> {
+  const snapshot = await readCanonicalProfileOwnershipSnapshot(db, {
+    loginUids: [],
+    profileIds,
+  });
+  return profileIds.map(
+    (profileId) =>
+      snapshot.canonicalProfileIdByProfileId.get(profileId) || null,
+  );
 }
 
 function canonicalProfileFields(
@@ -151,7 +169,9 @@ function canonicalProfileFields(
 
 export { canonicalProfileFields };
 
-function gameplayProfile(snapshot: CanonicalProfileSnapshot): GameplayProfile {
+function gameplayProfile(
+  snapshot: CanonicalProfileOwnershipProfileSnapshot | CanonicalProfileSnapshot,
+): GameplayProfile {
   const profile = snapshot.profile;
   return {
     aura: profile.aura || "",
@@ -165,6 +185,32 @@ function gameplayProfile(snapshot: CanonicalProfileSnapshot): GameplayProfile {
     sol: profile.sol || "",
     username: profile.username || "",
   };
+}
+
+function gameplayOwnershipSnapshot(
+  snapshot: CanonicalProfileOwnershipSnapshot,
+): ProfileOwnershipSnapshot {
+  return Object.freeze({
+    canonicalProfileIdByProfileId: new Map(
+      snapshot.canonicalProfileIdByProfileId,
+    ),
+    loginOwnerByUid: new Map(snapshot.loginOwnerByUid),
+    loginUidsByProfileId: new Map(
+      [...snapshot.loginOwnersByProfileId].map(([profileId, owners]) => [
+        profileId,
+        Object.freeze(owners.map((owner) => owner.loginUid)),
+      ]),
+    ),
+    profileById: new Map(
+      [...snapshot.profileById].map(([profileId, profile]) => [
+        profileId,
+        Object.freeze({
+          profile: Object.freeze(gameplayProfile(profile)),
+          revision: profile.revision,
+        }),
+      ]),
+    ),
+  });
 }
 
 type StableLoginAggregate = {
@@ -206,16 +252,6 @@ function ratingProfileFromAggregate(
     totalManaPoints: profile.totalManaPoints,
     username: profile.username || "",
   };
-}
-
-async function ratingProfileByLogin(
-  db: D1Database,
-  loginUid: string,
-  maxAttempts = 5,
-): Promise<RatingProfile | null> {
-  return ratingProfileFromAggregate(
-    (await aggregateByLogin(db, loginUid, maxAttempts)).aggregate,
-  );
 }
 
 function profileValueFromSnapshot(
@@ -582,21 +618,11 @@ export function createCanonicalGameplayRepository(
       throw options.createFailure();
     },
 
-    async findProfileId(uid) {
+    async readProfileOwnershipSnapshot(query) {
       try {
-        return (
-          (await aggregateByLogin(db, uid, attempts)).aggregate?.profile
-            ?.profileId || null
+        return gameplayOwnershipSnapshot(
+          await readCanonicalProfileOwnershipSnapshot(db, query),
         );
-      } catch {
-        throw options.createFailure();
-      }
-    },
-
-    async getGameplayProfile(uid) {
-      try {
-        const aggregate = (await aggregateByLogin(db, uid, attempts)).aggregate;
-        return aggregate?.profile ? gameplayProfile(aggregate.profile) : null;
       } catch {
         throw options.createFailure();
       }
@@ -765,14 +791,7 @@ export function createCanonicalRatingRepository(
   return {
     getRtdbPath: gameplay.getRtdbPath,
     patchRtdbRoot: gameplay.patchRtdbRoot,
-
-    async getRatingProfile(uid) {
-      try {
-        return await ratingProfileByLogin(db, uid, attempts);
-      } catch {
-        throw options.createFailure();
-      }
-    },
+    readProfileOwnershipSnapshot: gameplay.readProfileOwnershipSnapshot,
 
     readRatingUpdate: readOperation,
 
@@ -979,30 +998,79 @@ export function createCanonicalRatingRepository(
     },
 
     async applyFebruaryChallengeReplay(playerProfileId, opponentProfileId) {
-      if (
-        !playerProfileId ||
-        !opponentProfileId ||
-        playerProfileId === opponentProfileId
-      ) {
+      if (!playerProfileId || !opponentProfileId) {
         return;
       }
       for (let attempt = 0; attempt < attempts; attempt++) {
+        let resolvedProfileIds: Array<string | null>;
+        try {
+          resolvedProfileIds = await canonicalProfileIds(db, [
+            playerProfileId,
+            opponentProfileId,
+          ]);
+        } catch (error) {
+          mapFailure(error, options.createFailure);
+        }
+        const [resolvedPlayerProfileId, resolvedOpponentProfileId] =
+          resolvedProfileIds;
+        if (
+          !resolvedPlayerProfileId ||
+          !resolvedOpponentProfileId ||
+          resolvedPlayerProfileId === resolvedOpponentProfileId
+        ) {
+          return;
+        }
         const [player, opponent] = await Promise.all([
-          readStableCanonicalProfileAggregate(db, playerProfileId),
-          readStableCanonicalProfileAggregate(db, opponentProfileId),
+          readStableCanonicalProfileAggregate(db, resolvedPlayerProfileId),
+          readStableCanonicalProfileAggregate(db, resolvedOpponentProfileId),
         ]);
+        if (
+          player.profile?.state !== "active" ||
+          player.profile.profileId !== resolvedPlayerProfileId ||
+          opponent.profile?.state !== "active" ||
+          opponent.profile.profileId !== resolvedOpponentProfileId
+        ) {
+          continue;
+        }
+        const storedOpponentProfileIds = Array.from(
+          new Set([
+            ...player.februaryOpponentProfileIds,
+            ...opponent.februaryOpponentProfileIds,
+          ]),
+        );
+        let resolvedStoredOpponentProfileIds: Array<string | null>;
+        try {
+          resolvedStoredOpponentProfileIds = await canonicalProfileIds(
+            db,
+            storedOpponentProfileIds,
+          );
+        } catch (error) {
+          mapFailure(error, options.createFailure);
+        }
+        const canonicalOpponentByStoredId = new Map(
+          storedOpponentProfileIds.map((storedProfileId, index) => [
+            storedProfileId,
+            resolvedStoredOpponentProfileIds[index] || storedProfileId,
+          ]),
+        );
         const changes = [
-          [player, opponentProfileId],
-          [opponent, playerProfileId],
+          [player, resolvedOpponentProfileId],
+          [opponent, resolvedPlayerProfileId],
         ] as const;
         const expectations: CanonicalExpectation[] = [];
         const mutations: CanonicalMutation[] = [];
         for (const [aggregate, otherProfileId] of changes) {
           const snapshot = aggregate.profile;
-          if (
-            !snapshot ||
-            aggregate.februaryOpponentProfileIds.includes(otherProfileId)
-          ) {
+          const canonicalOpponentProfileIds = new Set(
+            aggregate.februaryOpponentProfileIds
+              .map(
+                (storedProfileId) =>
+                  canonicalOpponentByStoredId.get(storedProfileId) ||
+                  storedProfileId,
+              )
+              .filter((profileId) => profileId !== snapshot?.profileId),
+          );
+          if (!snapshot || canonicalOpponentProfileIds.has(otherProfileId)) {
             continue;
           }
           expectations.push({
@@ -1012,6 +1080,11 @@ export function createCanonicalRatingRepository(
           });
           expectations.push({
             kind: "february-opponent-absent",
+            profileId: snapshot.profileId,
+            opponentProfileId: otherProfileId,
+          });
+          expectations.push({
+            kind: "canonical-february-opponent-absent",
             profileId: snapshot.profileId,
             opponentProfileId: otherProfileId,
           });

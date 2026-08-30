@@ -6,6 +6,7 @@ const {
   applyMatchResolution,
   buildFixedBracketState,
   buildSeedToProfileId,
+  createEventBracketRuntime,
   createEmptyEventMatch,
   getEventPrizePlacements,
   rebuildParticipantStatesFromRounds,
@@ -22,6 +23,59 @@ const participant = (profileId, joinedAtMs) => ({
   aura: null,
   joinedAtMs,
 });
+
+const ownershipSnapshot = (
+  participantsById,
+  { canonicalProfileIds = {}, loginOwners = {} } = {},
+) => {
+  const canonicalProfileIdByProfileId = new Map();
+  const loginOwnerByUid = new Map();
+  const loginUidsByProfileId = new Map();
+  const profileById = new Map();
+  for (const [key, value] of Object.entries(participantsById)) {
+    const storedProfileId = value.profileId || key;
+    for (const profileId of [key, storedProfileId]) {
+      const canonicalProfileId = Object.hasOwn(canonicalProfileIds, profileId)
+        ? canonicalProfileIds[profileId]
+        : profileId;
+      canonicalProfileIdByProfileId.set(profileId, canonicalProfileId);
+      if (canonicalProfileId && !profileById.has(canonicalProfileId)) {
+        profileById.set(canonicalProfileId, {
+          profile: {
+            aura: "",
+            emoji: 0,
+            eth: "",
+            profileId: canonicalProfileId,
+            rating: 1500,
+            sol: "",
+            username: canonicalProfileId,
+          },
+          revision: 1,
+        });
+        loginUidsByProfileId.set(canonicalProfileId, []);
+      }
+    }
+    const ownerProfileId = Object.hasOwn(loginOwners, value.loginUid)
+      ? loginOwners[value.loginUid]
+      : canonicalProfileIdByProfileId.get(storedProfileId);
+    loginOwnerByUid.set(
+      value.loginUid,
+      ownerProfileId ? { profileId: ownerProfileId, revision: 1 } : null,
+    );
+    if (ownerProfileId) {
+      loginUidsByProfileId.set(ownerProfileId, [
+        ...(loginUidsByProfileId.get(ownerProfileId) || []),
+        value.loginUid,
+      ]);
+    }
+  }
+  return {
+    canonicalProfileIdByProfileId,
+    loginOwnerByUid,
+    loginUidsByProfileId,
+    profileById,
+  };
+};
 
 test("seed assignment shuffles the full participant pool without username priority", () => {
   const seedToProfileId = buildSeedToProfileId({
@@ -179,6 +233,7 @@ test("fixed brackets represent byes without changing invite or round shapes", as
     participantsById,
     nowMs: 1_800_000_000_000,
     enableThirdPlace: false,
+    ownershipSnapshot: ownershipSnapshot(participantsById),
   });
   const firstRoundMatches = Object.values(bracket.rounds["0"].matches);
 
@@ -194,6 +249,105 @@ test("fixed brackets represent byes without changing invite or round shapes", as
     1,
   );
   assert.equal(Object.keys(bracket.inviteUpdates).length, 3);
+});
+
+test("rejects a later-round invite when its participants have merged", async () => {
+  const participantsById = {
+    p1: participant("p1", 1),
+    p2: participant("p2", 2),
+  };
+  const final = createEmptyEventMatch("1_0");
+  setMatchSlotParticipant(final, "host", participantsById.p1);
+  setMatchSlotParticipant(final, "guest", participantsById.p2);
+  const inviteUpdates = {};
+  const runtime = createEventBracketRuntime({
+    buildRandomGameSeed: async () => ({
+      gameVariant: "Classic",
+      fen: "start-fen",
+    }),
+  });
+
+  await assert.rejects(
+    runtime.reconcileBracketMatchReadiness({
+      eventId: "event-test",
+      rounds: { 1: { matches: { "1_0": final } } },
+      nowMs: 1_800_000_000_000,
+      participantsById,
+      inviteUpdates,
+      ownershipSnapshot: ownershipSnapshot(participantsById, {
+        canonicalProfileIds: { p1: "merged-profile", p2: "merged-profile" },
+        loginOwners: {
+          "p1-login": "merged-profile",
+          "p2-login": "merged-profile",
+        },
+      }),
+    }),
+    /profile-ownership-unavailable/,
+  );
+  assert.equal(final.inviteId, null);
+  assert.deepEqual(inviteUpdates, {});
+});
+
+test("rejects a later-round invite when a stored login owns another profile", async () => {
+  const participantsById = {
+    p1: participant("p1", 1),
+    p2: participant("p2", 2),
+  };
+  const final = createEmptyEventMatch("1_0");
+  setMatchSlotParticipant(final, "host", participantsById.p1);
+  setMatchSlotParticipant(final, "guest", participantsById.p2);
+  const inviteUpdates = {};
+  const runtime = createEventBracketRuntime({
+    buildRandomGameSeed: async () => ({
+      gameVariant: "Classic",
+      fen: "start-fen",
+    }),
+  });
+
+  await assert.rejects(
+    runtime.reconcileBracketMatchReadiness({
+      eventId: "event-test",
+      rounds: { 1: { matches: { "1_0": final } } },
+      nowMs: 1_800_000_000_000,
+      participantsById,
+      inviteUpdates,
+      ownershipSnapshot: ownershipSnapshot(participantsById, {
+        loginOwners: { "p1-login": "p2" },
+      }),
+    }),
+    /profile-ownership-unavailable/,
+  );
+  assert.equal(final.inviteId, null);
+  assert.deepEqual(inviteUpdates, {});
+});
+
+test("creates a later-round invite from one ownership snapshot", async () => {
+  const participantsById = {
+    p1: participant("p1", 1),
+    p2: participant("p2", 2),
+  };
+  const final = createEmptyEventMatch("1_0");
+  setMatchSlotParticipant(final, "host", participantsById.p1);
+  setMatchSlotParticipant(final, "guest", participantsById.p2);
+  const runtime = createEventBracketRuntime({
+    buildRandomGameSeed: async () => ({
+      gameVariant: "Classic",
+      fen: "start-fen",
+    }),
+  });
+
+  assert.equal(
+    await runtime.reconcileBracketMatchReadiness({
+      eventId: "event-test",
+      rounds: { 1: { matches: { "1_0": final } } },
+      nowMs: 1_800_000_000_000,
+      participantsById,
+      inviteUpdates: {},
+      ownershipSnapshot: ownershipSnapshot(participantsById),
+    }),
+    true,
+  );
+  assert.ok(final.inviteId);
 });
 
 test("prize placement follows final and third-place results and rejects a disqualified winner", () => {
@@ -247,5 +401,93 @@ test("prize placement follows final and third-place results and rejects a disqua
       thirdPlaceMatch,
     }),
     [],
+  );
+});
+
+test("prize assignment preserves a winner selection after a post-start merge", async () => {
+  const eventId = "NN3eRzoZo80";
+  const selections = { "source-profile": "1514" };
+  const runtime = createEventBracketRuntime();
+  const participantsById = {
+    "source-profile": participant("source-profile", 1),
+    "second-profile": participant("second-profile", 2),
+  };
+  const input = {
+    eventId,
+    event: { winnerProfileId: "source-profile" },
+    rounds: {
+      0: {
+        matches: {
+          "0_0": {
+            status: "host",
+            hostProfileId: "source-profile",
+            guestProfileId: "second-profile",
+            winnerProfileId: "source-profile",
+            loserProfileId: "second-profile",
+          },
+        },
+      },
+    },
+    participantsById,
+    thirdPlaceMatch: null,
+    assignedAtMs: 100,
+    ownershipSnapshot: ownershipSnapshot(participantsById, {
+      canonicalProfileIds: { "source-profile": "winner-profile" },
+      loginOwners: { "source-profile-login": "winner-profile" },
+    }),
+    prizeSelections: selections,
+  };
+  const result = await runtime.resolveEventPrizeAssignments(input);
+
+  assert.equal(result.assignments["1"].profileId, "winner-profile");
+  assert.equal(result.assignments["1"].prizeId, "1514");
+
+  selections["winner-profile"] = "1092";
+  await assert.rejects(
+    runtime.resolveEventPrizeAssignments(input),
+    /profile-ownership-unavailable/,
+  );
+});
+
+test("prize assignment rejects duplicate canonical placements", async () => {
+  const runtime = createEventBracketRuntime();
+  const participantsById = {
+    "source-profile": participant("source-profile", 1),
+    "target-profile": participant("target-profile", 2),
+  };
+
+  await assert.rejects(
+    runtime.resolveEventPrizeAssignments({
+      eventId: "NN3eRzoZo80",
+      event: { winnerProfileId: "source-profile" },
+      rounds: {
+        0: {
+          matches: {
+            "0_0": {
+              status: "host",
+              hostProfileId: "source-profile",
+              guestProfileId: "target-profile",
+              winnerProfileId: "source-profile",
+              loserProfileId: "target-profile",
+            },
+          },
+        },
+      },
+      participantsById,
+      thirdPlaceMatch: null,
+      assignedAtMs: 100,
+      ownershipSnapshot: ownershipSnapshot(participantsById, {
+        canonicalProfileIds: {
+          "source-profile": "merged-profile",
+          "target-profile": "merged-profile",
+        },
+        loginOwners: {
+          "source-profile-login": "merged-profile",
+          "target-profile-login": "merged-profile",
+        },
+      }),
+      prizeSelections: {},
+    }),
+    /profile-ownership-unavailable/,
   );
 });

@@ -7,6 +7,7 @@ Run commands from the repository root with Node.js 24 and Java 21 or newer. Fire
 - `wrangler.jsonc` owns the frontend Worker configuration.
 - `cloud/workers/api/wrangler.jsonc` owns the API Worker routes, variables, bindings, Queues, Workflows, consumers, and Cron schedule.
 - The migration directories under `cloud/workers/api/` own the five D1 schemas.
+- `PROFILE_DB.profile_login_owners` is authoritative for Worker login UID to canonical profile ownership. Firebase custom claims and RTDB profile links are non-authoritative browser-rule and recovery shadows.
 - `cloud/workers/api/release.env` stays empty so release commands never load developer environment files.
 - Encrypted secrets stay in Cloudflare; required names are declared in the API Wrangler configuration.
 - `cloud/firebase.json` owns only Realtime Database rules. Firestore and Firebase Functions are retired and are not rollback targets.
@@ -26,20 +27,41 @@ The complete gate validates the frontend, API Worker, generated bindings, deploy
 
 ## API Worker release
 
-Upload and smoke a candidate before it receives traffic:
+Before uploading, confirm canonical profile writes are active and the ownership database has no foreign-key violations:
+
+```sh
+npm run manage:profile-canonical -- --status
+npx wrangler d1 execute mons-link-profiles --remote --command "PRAGMA foreign_key_check" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+The status must be `active`, and the foreign-key validation must return no rows.
+
+Create mode-`0600` smoke fixtures outside the repository: an auth fixture containing only `{"idToken":"<existing-linked-login-token>"}` and a profile fixture containing `{"loginId":"<alternate-login-uid>","profileId":"<canonical-profile-id>","invite":{"id":"<existing-invite-id>","actorUid":"<stored-host-or-guest-uid>","role":"host"}}`. Use `"guest"` when appropriate. The token subject must equal `loginId`; `actorUid` must be a different login owned by the same D1 profile. Upload the candidate, then run both the standard smoke and the authenticated read-only ownership smoke before it receives traffic:
 
 ```sh
 npm run upload:api
 npm run smoke:api -- --base-url <version-preview-url>
+npm run smoke:api -- --base-url <version-preview-url> --read-only --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
 ```
 
-Record the Version ID printed by Wrangler. Promote that exact version, apply reviewed triggers, and smoke production:
+Record the Version ID printed by Wrangler. Promote that exact version, apply reviewed triggers, and repeat both smokes against production:
 
 ```sh
 npm run promote:api -- --version-id <version-id>
 npm run deploy:api:triggers
 npm run smoke:api -- --base-url https://api.mons.link
+npm run smoke:api -- --base-url https://api.mons.link --read-only --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
 ```
+
+The standard smoke covers public and temporary anonymous-auth behavior. The authenticated read-only smoke verifies the existing login's D1 ownership, profile lookups, navigation, and alternate-login invite-role authorization without creating auth state. Both are release gates for preview and production.
+
+Tail the promoted version at full sampling during the production smokes and for at least 15 minutes afterward:
+
+```sh
+npx wrangler tail mons-link-api --version-id <version-id> --search profile-ownership-unavailable --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+Rollback immediately to the previous tested Worker if the authenticated production smoke fails. Otherwise rollback if ownership failures recur across multiple real requests during that window or the Worker 5xx rate rises above its pre-deploy baseline. The rollback is code-only and needs no D1 restore because this release changes no persistent schema.
 
 `upload:api` does not send traffic to the candidate. `promote:api` deploys an explicit Version ID to 100%. `deploy:api:triggers` applies routes, Cron, Workflows, and configured Queue consumers. Removing an omitted Queue consumer remains an explicit operator action.
 
