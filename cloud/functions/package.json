@@ -11,10 +11,10 @@
   "dependencies": {
     "@mons/shared": "file:shared",
     "bs58": "^6.0.0",
-    "mons-rules": "0.4.7"
+    "mons-rules": "0.4.9"
   },
   "optionalDependencies": {
-    "utf-8-validate": "5.0.10"
+    "utf-8-validate": "6.0.6"
   },
   "overrides": {
     "@metaplex-foundation/mpl-token-metadata": "3.4.0",

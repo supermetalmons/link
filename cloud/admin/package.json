@@ -6,7 +6,7 @@
     "node": "^22.13.0 || >=24.0.0"
   },
   "dependencies": {
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   },
   "scripts": {
     "recover:telegram": "node recoverTelegramDelivery.js",
