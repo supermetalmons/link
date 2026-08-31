@@ -17,6 +17,11 @@ import type {
   ProfileOwnershipQuery,
   ProfileOwnershipSnapshot,
 } from "../src/profileOwnership.ts";
+import {
+  createOperationId,
+  createWagerReservationOperationId,
+  operationFingerprint,
+} from "../src/wagerReservationOperations.ts";
 import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const env = {
@@ -170,6 +175,58 @@ function applyTransaction(
   return decision.commit === false
     ? { committed: false, decision: decision.decision, value: current }
     : { committed: true, decision: decision.decision, value: decision.value };
+}
+
+async function modernWagerProposal(
+  uid: string,
+  material: "dust" | "slime" | "gum" | "metal" | "ice",
+  count: number,
+) {
+  return {
+    material,
+    count,
+    createdAt: 1,
+    operationId: await createOperationId(
+      "send",
+      "invite",
+      "match",
+      uid,
+      material,
+      String(count),
+    ),
+    reservationOperationId: await createWagerReservationOperationId(
+      "send",
+      "invite",
+      "match",
+      uid,
+    ),
+  };
+}
+
+function miningWithProposal(
+  proposal: Awaited<ReturnType<typeof modernWagerProposal>>,
+) {
+  return {
+    frozen: {
+      dust: proposal.material === "dust" ? proposal.count : 0,
+      slime: proposal.material === "slime" ? proposal.count : 0,
+      gum: proposal.material === "gum" ? proposal.count : 0,
+      metal: proposal.material === "metal" ? proposal.count : 0,
+      ice: proposal.material === "ice" ? proposal.count : 0,
+    },
+    _wagerOps: {
+      [proposal.reservationOperationId]: {
+        appliedAtMs: 1,
+        count: proposal.count,
+        deltas: { [proposal.material]: proposal.count },
+        fingerprint: operationFingerprint(
+          "send-reserve",
+          proposal.material,
+          proposal.count,
+        ),
+      },
+    },
+  };
 }
 
 function context(
@@ -1663,6 +1720,15 @@ test("routes wager cancellation and decline to their exact proposal owners", asy
     path: "/wagers/proposals/cancel" | "/wagers/proposals/decline",
   ) => {
     const transactionPaths: string[] = [];
+    const hostProposal = await modernWagerProposal("host", "dust", 1);
+    const guestProposal = await modernWagerProposal("guest", "ice", 2);
+    let wager: unknown = {
+      proposals: { host: hostProposal, guest: guestProposal },
+    };
+    const mining: Record<string, unknown> = {
+      host: miningWithProposal(hostProposal),
+      guest: miningWithProposal(guestProposal),
+    };
     const response = await handleGameplayRoute(
       request(path, { body: { inviteId: "invite", matchId: "match" } }),
       env,
@@ -1671,24 +1737,26 @@ test("routes wager cancellation and decline to their exact proposal owners", asy
         repository: wagerRepository({
           readProfileOwnershipSnapshot: async (query) =>
             ownershipForLogins(query, (uid) => `profile-${uid}`),
-          getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
+          getRtdbPath: async (readPath) => {
+            if (readPath === "invites/invite") {
+              return { hostId: "host", guestId: "guest" };
+            }
+            if (readPath === "players/host/mining") return mining.host;
+            if (readPath === "players/guest/mining") return mining.guest;
+            return wager;
+          },
           transactRtdbPath: async (transactionPath, updater) => {
             transactionPaths.push(transactionPath);
+            const uid = transactionPath.includes("/host/") ? "host" : "guest";
             const current = transactionPath.startsWith("invites/")
-              ? {
-                  proposals: {
-                    host: { material: "dust", count: 1 },
-                    guest: { material: "ice", count: 2 },
-                  },
-                }
-              : { dust: 2, slime: 0, gum: 0, metal: 0, ice: 3 };
-            const decision = updater(current) as {
-              commit?: boolean;
-              value?: unknown;
-            };
-            return decision.commit === false
-              ? { committed: false, value: current }
-              : { committed: true, value: decision.value };
+              ? wager
+              : mining[uid];
+            const result = applyTransaction(updater, current);
+            if (result.committed) {
+              if (transactionPath.startsWith("invites/")) wager = result.value;
+              else mining[uid] = result.value;
+            }
+            return result;
           },
         }),
         verifyIdentity: async () => ({
@@ -1704,9 +1772,11 @@ test("routes wager cancellation and decline to their exact proposal owners", asy
   assert.deepEqual(await run("/wagers/proposals/cancel"), [
     "invites/invite/wagers/match",
     "players/host/mining",
+    "players/host/mining",
   ]);
   assert.deepEqual(await run("/wagers/proposals/decline"), [
     "invites/invite/wagers/match",
+    "players/guest/mining",
     "players/guest/mining",
   ]);
 });
@@ -1750,12 +1820,12 @@ test("routes wager send and accept through the authenticated gameplay surface", 
   assert.equal(send.status, 200);
   assert.deepEqual(await send.json(), { ok: true, count: 2 });
 
-  let acceptWager: unknown = {
-    proposals: { guest: { material: "dust", count: 2 } },
-  };
+  const guestProposal = await modernWagerProposal("guest", "dust", 2);
+  let acceptWager: unknown = { proposals: { guest: guestProposal } };
   let acceptMining: unknown = {
     frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
   };
+  let guestMining: unknown = miningWithProposal(guestProposal);
   const accept = await handleGameplayRoute(
     request("/wagers/proposals/accept", {
       body: { inviteId: "invite", matchId: "match" },
@@ -1778,15 +1848,22 @@ test("routes wager send and accept through the authenticated gameplay surface", 
             return { hostId: "host", guestId: "guest" };
           }
           if (path === "players/host/mining") return acceptMining;
+          if (path === "players/guest/mining") return guestMining;
           return acceptWager;
         },
         transactRtdbPath: async (path, updater) => {
+          const isGuestMining = path === "players/guest/mining";
           const result = applyTransaction(
             updater,
-            path.startsWith("players/") ? acceptMining : acceptWager,
+            isGuestMining
+              ? guestMining
+              : path.startsWith("players/")
+                ? acceptMining
+                : acceptWager,
           );
           if (result.committed) {
-            if (path.startsWith("players/")) acceptMining = result.value;
+            if (isGuestMining) guestMining = result.value;
+            else if (path.startsWith("players/")) acceptMining = result.value;
             else acceptWager = result.value;
           }
           return result;
@@ -1857,6 +1934,9 @@ test("returns wager permission and infrastructure failures without details", asy
   const routeFailures: string[] = [];
   const materialFailures: Array<Record<string, unknown>> = [];
   let transactions = 0;
+  const failureProposal = await modernWagerProposal("host", "dust", 1);
+  let failureWager: unknown = { proposals: { host: failureProposal } };
+  let failureMining: unknown = miningWithProposal(failureProposal);
   const unavailable = await handleGameplayRoute(
     request("/wagers/proposals/cancel", {
       body: { inviteId: "invite", matchId: "match" },
@@ -1868,17 +1948,27 @@ test("returns wager permission and infrastructure failures without details", asy
       repository: wagerRepository({
         readProfileOwnershipSnapshot: async (query) =>
           ownershipForLogins(query, (uid) => `profile-${uid}`),
-        getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
-        transactRtdbPath: async (_path, updater) => {
+        getRtdbPath: async (path) => {
+          if (path === "invites/invite") {
+            return { hostId: "host", guestId: "guest" };
+          }
+          if (path === "players/host/mining") return failureMining;
+          return failureWager;
+        },
+        transactRtdbPath: async (path, updater) => {
           transactions++;
-          if (transactions === 2) {
+          if (transactions === 3) {
             throw new Error("private-upstream-detail");
           }
-          const current = {
-            proposals: { host: { material: "dust", count: 1 } },
-          };
-          const decision = updater(current) as { value?: unknown };
-          return { committed: true, value: decision.value };
+          const current = path.startsWith("players/")
+            ? failureMining
+            : failureWager;
+          const result = applyTransaction(updater, current);
+          if (result.committed) {
+            if (path.startsWith("players/")) failureMining = result.value;
+            else failureWager = result.value;
+          }
+          return result;
         },
       }),
       verifyIdentity: async () => ({

@@ -25,11 +25,10 @@ import {
   consumeWagerReservationOperation,
   createWagerReservationOperationId,
   ensureWagerAgreementLineageReady,
-  releaseWagerSettlementReservation,
   resolveWagerParticipants,
 } from "./wagerProposal.ts";
 
-const SETTLEMENT_VERSION = 1;
+const SETTLEMENT_VERSION = 2;
 export const WAGER_SETTLEMENT_INITIAL_RETRY_DELAY_SECONDS = 60;
 export const WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON =
   "insufficient-materials";
@@ -46,11 +45,6 @@ type MatchRecord = {
 };
 
 type SettlementRelease = {
-  legacy: {
-    count: number;
-    material: MiningMaterialName;
-  } | null;
-  reservationLineageVersion: 1 | null;
   reservationOperationIds: string[];
   uid: string;
 };
@@ -71,7 +65,7 @@ type AgreedSettlement = SettlementBase & {
   loserProfileId: string;
   loserUid: string;
   material: MiningMaterialName;
-  releases: SettlementRelease[] | null;
+  releases: SettlementRelease[];
   winnerProfileId: string;
   winnerUid: string;
 };
@@ -221,11 +215,12 @@ function settlementFingerprint(value: Record<string, unknown>): string {
 function parseReservationOperationIds(value: unknown): string[] | null {
   if (!Array.isArray(value)) return null;
   const operationIds = value.map(normalizeString);
-  return operationIds.every(
-    (operationId, index) =>
-      /^[a-f0-9]{64}$/.test(operationId) &&
-      operationIds.indexOf(operationId) === index,
-  )
+  return operationIds.length > 0 &&
+    operationIds.every(
+      (operationId, index) =>
+        /^[a-f0-9]{64}$/.test(operationId) &&
+        operationIds.indexOf(operationId) === index,
+    )
     ? operationIds
     : null;
 }
@@ -233,42 +228,16 @@ function parseReservationOperationIds(value: unknown): string[] | null {
 function parseRelease(value: unknown): SettlementRelease | null {
   const release = toRecord(value);
   const uid = normalizeString(release?.uid);
-  const material = normalizeString(release?.material);
-  const count = normalizeCount(release?.count);
-  if (!uid) return null;
-  if (release?.reservationLineageVersion === 1) {
-    const operationIds = parseReservationOperationIds(
-      release.reservationOperationIds,
-    );
-    const storedLegacy = release.legacy;
-    if (operationIds === null) return null;
-    if (storedLegacy === undefined || storedLegacy === null) {
-      return {
-        uid,
-        legacy: null,
-        reservationLineageVersion: 1,
-        reservationOperationIds: operationIds,
-      };
-    }
-    const legacy = toRecord(storedLegacy);
-    const legacyMaterial = normalizeString(legacy?.material);
-    const legacyCount = normalizeCount(legacy?.count);
-    return isMaterialName(legacyMaterial) && legacyCount > 0
-      ? {
-          uid,
-          legacy: { material: legacyMaterial, count: legacyCount },
-          reservationLineageVersion: 1,
-          reservationOperationIds: operationIds,
-        }
-      : null;
-  }
-  return isMaterialName(material) && count > 0
-    ? {
-        uid,
-        legacy: { material, count },
-        reservationLineageVersion: null,
-        reservationOperationIds: [],
-      }
+  const operationIds = parseReservationOperationIds(
+    release?.reservationOperationIds,
+  );
+  return release &&
+    Object.keys(release).length === 2 &&
+    Object.hasOwn(release, "uid") &&
+    Object.hasOwn(release, "reservationOperationIds") &&
+    uid &&
+    operationIds
+    ? { uid, reservationOperationIds: operationIds }
     : null;
 }
 
@@ -322,18 +291,15 @@ function parseSettlement(value: unknown): WagerSettlement | null {
     const storedReleases = settlement.releases;
     const releases = Array.isArray(storedReleases)
       ? storedReleases.map(parseRelease)
-      : storedReleases === undefined || storedReleases === null
-        ? null
-        : [null];
+      : [null];
     return winnerUid &&
       loserUid &&
       winnerProfileId &&
       loserProfileId &&
       isMaterialName(material) &&
       count > 0 &&
-      (releases === null ||
-        (releases.length === 2 &&
-          releases.every((release) => release !== null)))
+      releases.length === 2 &&
+      releases.every((release) => release !== null)
       ? {
           ...base,
           kind: "agreed",
@@ -343,10 +309,9 @@ function parseSettlement(value: unknown): WagerSettlement | null {
           loserProfileId,
           material,
           count,
-          releases:
-            releases?.filter(
-              (release): release is SettlementRelease => release !== null,
-            ) || null,
+          releases: releases.filter(
+            (release): release is SettlementRelease => release !== null,
+          ),
         }
       : null;
   }
@@ -406,22 +371,12 @@ async function readMatchPair(
   return [parseMatchRecord(values[0]), parseMatchRecord(values[1])];
 }
 
-function parseLegacyReservation(value: unknown): SettlementRelease["legacy"] {
-  const record = toRecord(value);
-  const material = normalizeString(record?.material);
-  const count = normalizeCount(record?.count);
-  return isMaterialName(material) && count > 0 ? { material, count } : null;
-}
-
 function createLineageRelease(
   uid: string,
   operationIds: readonly string[],
-  legacy: SettlementRelease["legacy"],
 ): SettlementRelease {
   return {
     uid,
-    legacy,
-    reservationLineageVersion: 1,
     reservationOperationIds: [...operationIds],
   };
 }
@@ -454,7 +409,7 @@ function createSettlement(
   acceptReservationOperationIdByUid: Readonly<Record<string, string>>,
 ): WagerSettlement {
   const base = {
-    version: 1 as const,
+    version: 2 as const,
     state: "pending" as const,
     operationId,
     claimedAtMs: nowMs,
@@ -467,41 +422,44 @@ function createSettlement(
   const accepterUid = normalizeString(agreement?.accepterId);
   if (isMaterialName(material) && count > 0) {
     const agreementOperation = toRecord(wager.agreementOperation);
-    let releases: SettlementRelease[] | null = null;
-    if (agreementOperation?.reservationLineageVersion === 1) {
-      if (agreementOperation.reservationLineageReady !== true) {
-        throw new Error("wager-reservation-lineage-pending");
-      }
-      const proposerOperationIds = parseReservationOperationIds(
-        agreementOperation.proposerReservationOperationIds,
-      );
-      const accepterOperationIds = parseReservationOperationIds(
-        agreementOperation.accepterReservationOperationIds,
-      );
-      if (!proposerOperationIds || !accepterOperationIds) {
-        throw new Error("wager-reservation-lineage-invalid");
-      }
-      const proposerRelease = createLineageRelease(
-        proposerUid,
-        proposerOperationIds,
-        parseLegacyReservation(agreementOperation.proposerLegacyReservation),
-      );
-      const accepterRelease = createLineageRelease(
-        accepterUid,
-        accepterOperationIds,
-        parseLegacyReservation(agreementOperation.accepterLegacyReservation),
-      );
-      const releaseByUid = new Map([
-        [proposerRelease.uid, proposerRelease],
-        [accepterRelease.uid, accepterRelease],
-      ]);
-      const winnerRelease = releaseByUid.get(resolution.winnerUid);
-      const loserRelease = releaseByUid.get(resolution.loserUid);
-      if (!winnerRelease || !loserRelease) {
-        throw new Error("wager-reservation-lineage-invalid");
-      }
-      releases = [winnerRelease, loserRelease];
+    if (agreementOperation?.reservationLineageVersion !== 1) {
+      throw new Error("wager-reservation-lineage-invalid");
     }
+    if (agreementOperation.reservationLineageReady !== true) {
+      throw new Error("wager-reservation-lineage-pending");
+    }
+    const proposerOperationIds = parseReservationOperationIds(
+      agreementOperation.proposerReservationOperationIds,
+    );
+    const accepterOperationIds = parseReservationOperationIds(
+      agreementOperation.accepterReservationOperationIds,
+    );
+    if (
+      !proposerOperationIds ||
+      !accepterOperationIds ||
+      Object.hasOwn(agreementOperation, "proposerLegacyReservation") ||
+      Object.hasOwn(agreementOperation, "accepterLegacyReservation")
+    ) {
+      throw new Error("wager-reservation-lineage-invalid");
+    }
+    const proposerRelease = createLineageRelease(
+      proposerUid,
+      proposerOperationIds,
+    );
+    const accepterRelease = createLineageRelease(
+      accepterUid,
+      accepterOperationIds,
+    );
+    const releaseByUid = new Map([
+      [proposerRelease.uid, proposerRelease],
+      [accepterRelease.uid, accepterRelease],
+    ]);
+    const winnerRelease = releaseByUid.get(resolution.winnerUid);
+    const loserRelease = releaseByUid.get(resolution.loserUid);
+    if (!winnerRelease || !loserRelease) {
+      throw new Error("wager-reservation-lineage-invalid");
+    }
+    const releases = [winnerRelease, loserRelease];
     const candidate = {
       ...base,
       kind: "agreed" as const,
@@ -522,18 +480,20 @@ function createSettlement(
     const proposalReservationOperationId = normalizeString(
       proposal?.reservationOperationId,
     );
-    return createLineageRelease(
-      uid,
-      [
-        acceptReservationOperationIdByUid[uid],
-        ...(proposalReservationOperationId
-          ? [proposalReservationOperationId]
-          : []),
-      ],
-      proposal && !proposalReservationOperationId
-        ? parseLegacyReservation(proposal)
-        : null,
-    );
+    const proposalOperationId = normalizeString(proposal?.operationId);
+    if (
+      proposal &&
+      (!/^[a-f0-9]{64}$/.test(proposalReservationOperationId) ||
+        !/^[a-f0-9]{64}$/.test(proposalOperationId))
+    ) {
+      throw new Error("wager-reservation-lineage-invalid");
+    }
+    return createLineageRelease(uid, [
+      acceptReservationOperationIdByUid[uid],
+      ...(proposalReservationOperationId
+        ? [proposalReservationOperationId]
+        : []),
+    ]);
   });
   const candidate = {
     ...base,
@@ -649,18 +609,6 @@ async function completeSettlement(
         true,
       );
     }
-    if (entry.legacy) {
-      await releaseWagerSettlementReservation(
-        repository,
-        {
-          operationId: settlement.operationId,
-          uid: entry.uid,
-          material: entry.legacy.material,
-          count: entry.legacy.count,
-        },
-        now,
-      );
-    }
   };
   if (settlement.kind === "agreed") {
     const transfer = await repository.applyWagerTransferOnce({
@@ -673,30 +621,7 @@ async function completeSettlement(
       appliedAtMs: now(),
     });
     insufficientMaterials = transfer === "insufficient-materials";
-    if (settlement.releases) {
-      for (const entry of settlement.releases) await release(entry);
-    } else {
-      await releaseWagerSettlementReservation(
-        repository,
-        {
-          operationId: settlement.operationId,
-          uid: settlement.winnerUid,
-          material: settlement.material,
-          count: settlement.count,
-        },
-        now,
-      );
-      await releaseWagerSettlementReservation(
-        repository,
-        {
-          operationId: settlement.operationId,
-          uid: settlement.loserUid,
-          material: settlement.material,
-          count: settlement.count,
-        },
-        now,
-      );
-    }
+    for (const entry of settlement.releases) await release(entry);
   } else {
     for (const entry of settlement.releases) await release(entry);
   }

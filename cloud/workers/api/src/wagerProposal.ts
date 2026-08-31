@@ -30,12 +30,11 @@ import {
   createWagerReservationOperationId,
   frozenOperationState,
   operationFingerprint,
+  readFrozenOperationForUid,
   recoverUnreferencedWagerReservation,
   releaseUnreferencedWagerReservation,
-  releaseWagerSettlementReservation,
   reserveAcceptedMaterialsOnce,
   reserveFrozenMaterialsOnce,
-  updateFrozenMaterialsOnce,
   type WagerMutationContext,
 } from "./wagerReservationOperations.ts";
 
@@ -73,6 +72,13 @@ type WagerProposalTransition = {
   value?: Record<string, unknown>;
 };
 
+type ModernProposalLineage = {
+  count: number;
+  material: MiningMaterialName;
+  operationId: string;
+  reservationOperationId: string;
+};
+
 const WAGER_CRITICAL_PHASE_TIMEOUT_MS = 30_000;
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -83,6 +89,55 @@ function toRecord(value: unknown): Record<string, unknown> | null {
 
 function normalizeString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function validOperationId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
+async function readModernProposalLineage(
+  repository: GameplayRepository,
+  input: {
+    inviteId: string;
+    matchId: string;
+    proposal: unknown;
+    uid: string;
+  },
+): Promise<ModernProposalLineage | null> {
+  const proposal = toRecord(input.proposal);
+  const material = normalizeString(proposal?.material);
+  const count = normalizeCount(proposal?.count);
+  if (!proposal || !isMaterialName(material) || count <= 0) return null;
+  const reservationOperationId = await createWagerReservationOperationId(
+    "send",
+    input.inviteId,
+    input.matchId,
+    input.uid,
+  );
+  if (proposal.reservationOperationId !== reservationOperationId) return null;
+  const reservation = await readFrozenOperationForUid(
+    repository,
+    input.uid,
+    reservationOperationId,
+  );
+  if (
+    reservation?.kind !== "send-reserve" ||
+    reservation.material !== material ||
+    reservation.count !== count
+  ) {
+    return null;
+  }
+  const operationId = await createOperationId(
+    "send",
+    input.inviteId,
+    input.matchId,
+    input.uid,
+    material,
+    String(reservation.requestedCount),
+  );
+  return proposal.operationId === operationId
+    ? { material, count, operationId, reservationOperationId }
+    : null;
 }
 
 async function resolveWagerParticipantUids(
@@ -176,6 +231,7 @@ function transitionWagerProposal(
     material: MiningMaterialName;
     now: number;
     opponentAdjustmentOperationId: string;
+    opponentProposal: ModernProposalLineage | null;
     operationId: string;
     opponentUid: string;
     playerUid: string;
@@ -212,6 +268,16 @@ function transitionWagerProposal(
     opponentProposal.material === input.material &&
     opponentCount > 0
   ) {
+    if (
+      !input.opponentProposal ||
+      input.opponentProposal.material !== input.material ||
+      input.opponentProposal.count !== opponentCount ||
+      opponentProposal.operationId !== input.opponentProposal.operationId ||
+      opponentProposal.reservationOperationId !==
+        input.opponentProposal.reservationOperationId
+    ) {
+      return { decision: "unavailable" };
+    }
     const acceptedCount = Math.min(input.reservedCount, opponentCount);
     if (acceptedCount <= 0) {
       return { decision: "unavailable" };
@@ -225,9 +291,9 @@ function transitionWagerProposal(
       acceptedAt: input.now,
     };
     proposedBy[input.playerUid] = true;
-    const opponentReservationOperationId = normalizeString(
-      opponentProposal.reservationOperationId,
-    );
+    const opponentReservationOperationId =
+      input.opponentProposal.reservationOperationId;
+    const opponentOperationId = input.opponentProposal.operationId;
     const reservationAdjustments = [
       ...(acceptedCount !== input.reservedCount
         ? [
@@ -261,8 +327,7 @@ function transitionWagerProposal(
         agreed: agreement,
         agreementOperation: {
           id: input.operationId,
-          proposerOperationId:
-            normalizeString(opponentProposal.operationId) || null,
+          proposerOperationId: opponentOperationId,
           proposerReservedCount: opponentCount,
           reservationLineageVersion: 1,
           reservationLineageReady: reservationAdjustments.length === 0,
@@ -275,18 +340,8 @@ function transitionWagerProposal(
           ],
           proposerReservationOperationIds: [
             input.opponentAdjustmentOperationId,
-            ...(opponentReservationOperationId
-              ? [opponentReservationOperationId]
-              : []),
+            opponentReservationOperationId,
           ],
-          ...(opponentReservationOperationId
-            ? {}
-            : {
-                proposerLegacyReservation: {
-                  material: input.material,
-                  count: opponentCount,
-                },
-              }),
         },
       },
     };
@@ -471,6 +526,26 @@ async function sendWagerProposalUnlocked(
     }
     return { ok: false, reason: "proposal-unavailable" };
   }
+  const wagerBefore = toRecord(await repository.getRtdbPath(wagerPath));
+  const opponentProposalBefore = toRecord(
+    toRecord(wagerBefore?.proposals)?.[participants.opponentUid],
+  );
+  const opponentProposalCount = normalizeCount(opponentProposalBefore?.count);
+  let opponentProposal: ModernProposalLineage | null = null;
+  if (
+    opponentProposalBefore?.material === request.material &&
+    opponentProposalCount > 0
+  ) {
+    opponentProposal = await readModernProposalLineage(repository, {
+      inviteId: request.inviteId,
+      matchId: request.matchId,
+      proposal: opponentProposalBefore,
+      uid: participants.opponentUid,
+    });
+    if (!opponentProposal) {
+      return { ok: false, reason: "proposal-unavailable" };
+    }
+  }
   const expectedReservationFingerprint = operationFingerprint(
     "send-reserve",
     request.material,
@@ -519,6 +594,7 @@ async function sendWagerProposalUnlocked(
           opponentUid: participants.opponentUid,
           material: request.material,
           opponentAdjustmentOperationId,
+          opponentProposal,
           reservedCount,
           operationId,
           now: now(),
@@ -681,12 +757,27 @@ async function acceptWagerProposalUnlocked(
     return { ok: false, reason: "insufficient-materials" };
   }
   const ownProposal = toRecord(proposals[participants.playerUid]);
-  const ownReservationOperationId = normalizeString(
-    ownProposal?.reservationOperationId,
-  );
-  const opponentReservationOperationId = normalizeString(
-    opponentProposal.reservationOperationId,
-  );
+  const opponentLineage = await readModernProposalLineage(repository, {
+    inviteId: request.inviteId,
+    matchId: request.matchId,
+    proposal: opponentProposal,
+    uid: participants.opponentUid,
+  });
+  const ownLineage = ownProposal
+    ? await readModernProposalLineage(repository, {
+        inviteId: request.inviteId,
+        matchId: request.matchId,
+        proposal: ownProposal,
+        uid: participants.playerUid,
+      })
+    : null;
+  if (!opponentLineage || (ownProposal && !ownLineage)) {
+    return { ok: false, reason: "proposal-unavailable" };
+  }
+  const opponentReservationOperationId = opponentLineage.reservationOperationId;
+  const opponentProposalOperationId = opponentLineage.operationId;
+  const ownReservationOperationId = ownLineage?.reservationOperationId || "";
+  const ownProposalOperationId = ownLineage?.operationId || "";
   const totalMaterials = await repository.getMiningMaterials(
     participants.playerProfileId,
   );
@@ -741,11 +832,15 @@ async function acceptWagerProposalUnlocked(
         const opponentMatches =
           currentOpponentProposal?.material === material &&
           normalizeCount(currentOpponentProposal.count) === proposedCount &&
+          normalizeString(currentOpponentProposal.operationId) ===
+            opponentProposalOperationId &&
           normalizeString(currentOpponentProposal.reservationOperationId) ===
             opponentReservationOperationId;
         const ownMatches = ownProposal
           ? currentOwnProposal?.material === ownMaterial &&
             normalizeCount(currentOwnProposal.count) === ownCount &&
+            normalizeString(currentOwnProposal.operationId) ===
+              ownProposalOperationId &&
             normalizeString(currentOwnProposal.reservationOperationId) ===
               ownReservationOperationId
           : !currentOwnProposal;
@@ -779,8 +874,7 @@ async function acceptWagerProposalUnlocked(
             proposals: null,
             agreementOperation: {
               id: operationId,
-              proposerOperationId:
-                normalizeString(currentOpponentProposal.operationId) || null,
+              proposerOperationId: opponentProposalOperationId,
               proposerReservedCount: proposedCount,
               reservationLineageVersion: 1,
               reservationLineageReady: reservationAdjustments.length === 0,
@@ -795,26 +889,8 @@ async function acceptWagerProposalUnlocked(
               ],
               proposerReservationOperationIds: [
                 proposerAdjustmentOperationId,
-                ...(opponentReservationOperationId
-                  ? [opponentReservationOperationId]
-                  : []),
+                opponentReservationOperationId,
               ],
-              ...(!ownProposal || ownReservationOperationId
-                ? {}
-                : {
-                    accepterLegacyReservation: {
-                      material: ownMaterial,
-                      count: ownCount,
-                    },
-                  }),
-              ...(opponentReservationOperationId
-                ? {}
-                : {
-                    proposerLegacyReservation: {
-                      material,
-                      count: proposedCount,
-                    },
-                  }),
             },
           },
         };
@@ -848,9 +924,28 @@ async function removeProposal(
   matchId: string,
   proposalUid: string,
   operationId: string,
+  expectedReservationOperationId: string,
   mutation: WagerMutationContext,
 ): Promise<Record<string, unknown> | null> {
   const wagerPath = `invites/${inviteId}/wagers/${matchId}`;
+  const wagerBefore = toRecord(await repository.getRtdbPath(wagerPath));
+  const proposalBefore = toRecord(
+    toRecord(wagerBefore?.proposals)?.[proposalUid],
+  );
+  if (
+    !wagerBefore?.agreed &&
+    !wagerBefore?.resolved &&
+    !wagerBefore?.settlement &&
+    proposalBefore &&
+    !(await readModernProposalLineage(repository, {
+      inviteId,
+      matchId,
+      proposal: proposalBefore,
+      uid: proposalUid,
+    }))
+  ) {
+    throw new Error("wager-removal-operation-invalid");
+  }
   let wagerAfter: unknown;
   await mutation.refreshLease();
   try {
@@ -860,8 +955,13 @@ async function removeProposal(
         const wager = toRecord(current);
         const removalOperations =
           toRecord(wager?.proposalRemovalOperations) || {};
-        if (toRecord(removalOperations[operationId])) {
-          return { commit: false, decision: "replayed" };
+        const replayOperation = toRecord(removalOperations[operationId]);
+        if (replayOperation) {
+          return replayOperation.reservationOperationId ===
+            expectedReservationOperationId &&
+            validOperationId(replayOperation.proposalOperationId)
+            ? { commit: false, decision: "replayed" }
+            : { commit: false, decision: "proposal-invalid" };
         }
         const proposals = toRecord(wager?.proposals);
         const proposal = toRecord(proposals?.[proposalUid]);
@@ -875,6 +975,16 @@ async function removeProposal(
         ) {
           return { commit: false, decision: "proposal-missing" };
         }
+        const proposalOperationId = normalizeString(proposal.operationId);
+        const reservationOperationId = normalizeString(
+          proposal.reservationOperationId,
+        );
+        if (
+          !validOperationId(proposalOperationId) ||
+          reservationOperationId !== expectedReservationOperationId
+        ) {
+          return { commit: false, decision: "proposal-invalid" };
+        }
         const nextProposals = { ...proposals };
         delete nextProposals[proposalUid];
         const nextWager = { ...wager };
@@ -886,17 +996,17 @@ async function removeProposal(
         nextWager.proposalRemovalOperations = {
           ...removalOperations,
           [operationId]: {
-            material: proposal.material,
-            count: normalizeCount(proposal.count),
-            proposalOperationId: normalizeString(proposal.operationId) || null,
-            reservationOperationId:
-              normalizeString(proposal.reservationOperationId) || null,
+            proposalOperationId,
+            reservationOperationId,
           },
         };
         return { value: nextWager };
       },
       mutation.createCriticalPhaseSignal(),
     );
+    if (result.decision === "proposal-invalid") {
+      throw new Error("wager-removal-operation-invalid");
+    }
     wagerAfter = result.value;
   } catch {
     wagerAfter = await repository.getRtdbPath(wagerPath);
@@ -960,7 +1070,6 @@ async function removeWagerProposalUnlocked(
   if ("ok" in participants) {
     return participants;
   }
-  const now = dependencies.now || Date.now;
   const proposalUid =
     action === "cancel" ? participants.playerUid : participants.opponentUid;
   const operationId = await createOperationId(
@@ -969,20 +1078,29 @@ async function removeWagerProposalUnlocked(
     request.matchId,
     proposalUid,
   );
+  const proposalReservationOperationId =
+    await createWagerReservationOperationId(
+      "send",
+      request.inviteId,
+      request.matchId,
+      proposalUid,
+    );
   const proposal = await removeProposal(
     repository,
     request.inviteId,
     request.matchId,
     proposalUid,
     operationId,
+    proposalReservationOperationId,
     mutation,
   );
   if (!proposal) {
     return { ok: false, reason: "proposal-missing" };
   }
-  const material = normalizeString(proposal.material);
-  const count = normalizeCount(proposal.count);
-  if (!isMaterialName(material) || count <= 0) {
+  if (
+    proposal.reservationOperationId !== proposalReservationOperationId ||
+    !validOperationId(proposal.proposalOperationId)
+  ) {
     throw new Error("wager-removal-operation-invalid");
   }
   try {
@@ -993,35 +1111,18 @@ async function removeWagerProposalUnlocked(
         request.matchId,
         proposalUid,
       );
-    const proposalReservationOperationId = normalizeString(
-      proposal.reservationOperationId,
-    );
-    if (proposalReservationOperationId) {
-      await releaseUnreferencedWagerReservation(repository, {
-        playerUid: proposalUid,
-        mutation,
-        reservationOperationId: acceptReservationOperationId,
-        wagerPath: `invites/${request.inviteId}/wagers/${request.matchId}`,
-      });
-      await releaseUnreferencedWagerReservation(repository, {
-        playerUid: proposalUid,
-        mutation,
-        reservationOperationId: proposalReservationOperationId,
-        wagerPath: `invites/${request.inviteId}/wagers/${request.matchId}`,
-      });
-    } else {
-      await mutation.refreshLease();
-      await updateFrozenMaterialsOnce(
-        repository,
-        proposalUid,
-        await createOperationId(operationId, "release"),
-        "proposal-release",
-        { [material]: -count },
-        now,
-        undefined,
-        mutation.createCriticalPhaseSignal(),
-      );
-    }
+    await releaseUnreferencedWagerReservation(repository, {
+      playerUid: proposalUid,
+      mutation,
+      reservationOperationId: acceptReservationOperationId,
+      wagerPath: `invites/${request.inviteId}/wagers/${request.matchId}`,
+    });
+    await releaseUnreferencedWagerReservation(repository, {
+      playerUid: proposalUid,
+      mutation,
+      reservationOperationId: proposalReservationOperationId,
+      wagerPath: `invites/${request.inviteId}/wagers/${request.matchId}`,
+    });
   } catch {
     (
       dependencies.logMaterialReleaseFailure ||
@@ -1042,7 +1143,6 @@ export {
   consumeWagerReservationOperation,
   createWagerReservationOperationId,
   ensureWagerAgreementLineageReady,
-  releaseWagerSettlementReservation,
   removeProposal,
   resolveWagerParticipants,
 };

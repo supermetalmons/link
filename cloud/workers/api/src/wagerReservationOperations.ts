@@ -31,15 +31,12 @@ export type ReservationOperationKind =
   | "send-reserve"
   | "send-self-adjustment";
 
-export type WagerFrozenOperationKind =
-  ReservationOperationKind | "proposal-release" | "settlement-release";
+export type WagerFrozenOperationKind = ReservationOperationKind;
 
 export type FrozenDeltaOperationKind =
   | "accept-proposer-adjustment"
-  | "proposal-release"
   | "send-proposer-adjustment"
-  | "send-self-adjustment"
-  | "settlement-release";
+  | "send-self-adjustment";
 
 type ParsedOperationBase = FrozenOperationRecord & {
   expectedDeltas: Partial<MiningMaterials>;
@@ -68,15 +65,8 @@ type ParsedAdjustmentOperation = ParsedOperationBase & {
     | "send-self-adjustment";
 };
 
-type ParsedReleaseOperation = ParsedOperationBase & {
-  kind: "proposal-release" | "settlement-release";
-};
-
 export type ParsedFrozenOperation =
-  | ParsedAcceptReservation
-  | ParsedAdjustmentOperation
-  | ParsedReleaseOperation
-  | ParsedSendReservation;
+  ParsedAcceptReservation | ParsedAdjustmentOperation | ParsedSendReservation;
 
 export type FrozenOperationState =
   | { status: "absent" }
@@ -292,8 +282,6 @@ export function parseFrozenOperation(
       "accept-proposer-adjustment",
       "send-proposer-adjustment",
       "send-self-adjustment",
-      "proposal-release",
-      "settlement-release",
     ].includes(kind) ||
     hasCount ||
     !hasDeltas ||
@@ -314,13 +302,10 @@ export function parseFrozenOperation(
   ) {
     return null;
   }
-  const parsedBase = base(deltas);
-  return kind === "proposal-release" || kind === "settlement-release"
-    ? { ...parsedBase, kind }
-    : {
-        ...parsedBase,
-        kind: kind as ParsedAdjustmentOperation["kind"],
-      };
+  return {
+    ...base(deltas),
+    kind: kind as ParsedAdjustmentOperation["kind"],
+  };
 }
 
 function storedFrozenOperation(
@@ -749,33 +734,6 @@ export async function recoverUnreferencedWagerReservation(
     throw new Error("wager-operation-unavailable");
   }
   await releaseUnreferencedWagerReservation(repository, input);
-}
-
-export async function releaseWagerSettlementReservation(
-  repository: GameplayRepository,
-  input: {
-    count: number;
-    material: MiningMaterialName;
-    operationId: string;
-    uid: string;
-  },
-  now: () => number,
-): Promise<void> {
-  const operationId = await createOperationId(
-    "settlement-release",
-    input.operationId,
-    input.uid,
-    input.material,
-    String(input.count),
-  );
-  await updateFrozenMaterialsOnce(
-    repository,
-    input.uid,
-    operationId,
-    "settlement-release",
-    { [input.material]: -input.count },
-    now,
-  );
 }
 
 export async function reserveFrozenMaterialsOnce(

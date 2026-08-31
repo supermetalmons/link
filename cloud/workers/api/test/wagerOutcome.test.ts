@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import type { MiningSnapshot } from "@mons/shared/mining";
 import { Game } from "mons-rules";
@@ -58,6 +59,130 @@ const emptyMaterials = () => ({
   metal: 0,
   ice: 0,
 });
+
+function operationId(...parts: string[]): string {
+  return createHash("sha256").update(parts.join("\u0000")).digest("hex");
+}
+
+function addSendReservation(
+  frozenByUid: Record<string, Record<string, unknown>>,
+  uid: string,
+  inviteId: string,
+  matchId: string,
+  material: string,
+  count: number,
+): string {
+  const reservationOperationId = operationId(
+    "reservation",
+    "send",
+    inviteId,
+    matchId,
+    uid,
+  );
+  const mining = frozenByUid[uid];
+  const operations = (mining._wagerOps ||= {}) as Record<string, unknown>;
+  operations[reservationOperationId] = {
+    appliedAtMs: 1,
+    count,
+    deltas: { [material]: count },
+    fingerprint: JSON.stringify([
+      "send-reserve",
+      material,
+      count,
+      0,
+      0,
+      0,
+      0,
+      0,
+    ]),
+  };
+  return reservationOperationId;
+}
+
+function modernizeWagerState(state: Omit<RepositoryState, "repository">): void {
+  const wager = state.wager;
+  if (!wager || wager.resolved) return;
+  const proposals = wager.proposals as
+    Record<string, Record<string, unknown>> | undefined;
+  for (const [uid, proposal] of Object.entries(proposals || {})) {
+    const material = String(proposal.material);
+    const count = Number(proposal.count);
+    proposal.operationId = operationId(
+      "send",
+      "invite",
+      "invite",
+      uid,
+      material,
+      String(count),
+    );
+    proposal.reservationOperationId = addSendReservation(
+      state.frozen,
+      uid,
+      "invite",
+      "invite",
+      material,
+      count,
+    );
+  }
+  const agreement = wager.agreed as Record<string, unknown> | undefined;
+  if (!agreement || wager.agreementOperation) return;
+  const material = String(agreement.material);
+  const count = Number(agreement.count);
+  const proposerUid = String(agreement.proposerId || "guest");
+  const accepterUid = String(agreement.accepterId || "host");
+  Object.assign(agreement, {
+    total: count * 2,
+    proposerId: proposerUid,
+    accepterId: accepterUid,
+    acceptedAt: agreement.acceptedAt ?? 1,
+  });
+  const agreementOperationId = operationId(
+    "send",
+    "invite",
+    "invite",
+    accepterUid,
+    material,
+    String(count),
+  );
+  const proposerReservationOperationId = addSendReservation(
+    state.frozen,
+    proposerUid,
+    "invite",
+    "invite",
+    material,
+    count,
+  );
+  const accepterReservationOperationId = addSendReservation(
+    state.frozen,
+    accepterUid,
+    "invite",
+    "invite",
+    material,
+    count,
+  );
+  wager.agreementOperation = {
+    id: agreementOperationId,
+    proposerOperationId: operationId(
+      "send",
+      "invite",
+      "invite",
+      proposerUid,
+      material,
+      String(count),
+    ),
+    proposerReservedCount: count,
+    reservationLineageVersion: 1,
+    reservationLineageReady: true,
+    accepterReservationOperationIds: [
+      operationId(agreementOperationId, "self-adjustment"),
+      accepterReservationOperationId,
+    ],
+    proposerReservationOperationIds: [
+      operationId(agreementOperationId, "proposer-adjustment"),
+      proposerReservationOperationId,
+    ],
+  };
+}
 
 const snapshot = (dust: number, slime = 0): MiningSnapshot => ({
   lastRockDate: "2026-08-20",
@@ -146,6 +271,7 @@ function createRepository({
   profileIdForUid,
   invite = { hostId: "host", guestId: "guest" },
   marker = false,
+  modernizeWager = true,
   mining = {
     "profile-host": snapshot(10),
     "profile-guest": snapshot(5),
@@ -160,6 +286,7 @@ function createRepository({
   profileIdForUid?: (uid: string) => Promise<string | null>;
   invite?: unknown;
   marker?: boolean;
+  modernizeWager?: boolean;
   mining?: Record<string, MiningSnapshot>;
   opponentMatch?: unknown;
   playerMatch?: unknown;
@@ -182,6 +309,7 @@ function createRepository({
     transferOutcome: null,
     wager: structuredClone(wager),
   };
+  if (modernizeWager) modernizeWagerState(state);
   const repository: GameplayRepository = {
     applyWagerTransferOnce: async (input) => {
       state.transferCalls += 1;
@@ -345,7 +473,7 @@ test("rejects match IDs outside the invite series", async () => {
   assert.equal(reads, 0);
 });
 
-test("preserves participant, match, no-wager, and legacy replay outcomes", async () => {
+test("preserves participant, match, no-wager, and historical replay outcomes", async () => {
   const cases = [
     {
       state: createRepository({ invite: null }),
@@ -431,6 +559,10 @@ for (const result of ["win", "gg"] as const) {
     assert.equal(
       (state.wager?.settlement as Record<string, unknown>).state,
       "completed",
+    );
+    assert.equal(
+      (state.wager?.settlement as Record<string, unknown>).version,
+      2,
     );
     assert.deepEqual(response, {
       ok: true,
@@ -692,6 +824,34 @@ test("only new retry tasks can recover unclaimed wagers", async () => {
   assert.equal(
     (malformed.wager?.settlement as Record<string, unknown>).failureReason,
     "insufficient-materials",
+  );
+});
+
+test("rejects the legacy settlement schema", async () => {
+  const task = {
+    kind: "wager-settlement" as const,
+    inviteId: "invite",
+    matchId: "invite",
+    operationId: "a".repeat(64),
+    resolution: hostWinResolution,
+  };
+  const state = createRepository({
+    modernizeWager: false,
+    wager: {
+      settlement: {
+        version: 1,
+        state: "pending",
+        operationId: task.operationId,
+        fingerprint: "legacy",
+        claimedAtMs: 1,
+        kind: "proposals",
+        releases: [],
+      },
+    },
+  });
+  await assert.rejects(
+    classifyWagerSettlementRetry(task, state.repository),
+    /wager-settlement-malformed/,
   );
 });
 
@@ -1075,7 +1235,7 @@ test("proposal settlement consumes a hidden accept reservation", async () => {
   assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 0);
 });
 
-test("settles equal legacy proposals with a no-op accept reservation", async () => {
+test("settles equal modern proposals with a no-op accept reservation", async () => {
   const state = createRepository({
     wager: {
       proposals: {
@@ -1151,72 +1311,23 @@ test("settles equal legacy proposals with a no-op accept reservation", async () 
   assert.equal(state.appliedTransfers, 1);
 });
 
-test("readies unequal legacy proposer lineage across send and accept", async () => {
-  for (const mode of ["send", "accept"] as const) {
-    const legacyOperationId = "a".repeat(64);
-    const state = createRepository({
-      wager: {
-        proposals: {
-          guest: {
-            material: "dust",
-            count: 3,
-            ...(mode === "send" ? { operationId: legacyOperationId } : {}),
-          },
-        },
+test("rejects proposals without modern operation lineage", async () => {
+  const state = createRepository({
+    modernizeWager: false,
+    wager: {
+      proposals: {
+        guest: { material: "dust", count: 3, createdAt: 1 },
       },
-    });
-    state.frozen.host = { frozen: emptyMaterials() };
-    state.frozen.guest = {
-      frozen: { ...emptyMaterials(), dust: 3 },
-    };
-    state.repository.getMiningMaterials = async () => ({
-      ...emptyMaterials(),
-      dust: mode === "send" ? 10 : 2,
-    });
-    const transact = state.repository.transactRtdbPath;
-    state.repository.transactRtdbPath = async (path, updater, signal) => {
-      const result = await transact(path, updater, signal);
-      if (path === "invites/invite/wagers/invite" && result.committed) {
-        const operation = state.wager?.agreementOperation as
-          Record<string, unknown> | undefined;
-        if (operation?.proposerOperationId === null) {
-          delete operation.proposerOperationId;
-        }
-      }
-      return result;
-    };
-
-    const response =
-      mode === "send"
-        ? await sendWagerProposal(
-            { uid: "host" },
-            {
-              inviteId: "invite",
-              matchId: "invite",
-              material: "dust",
-              count: 2,
-            },
-            state.repository,
-          )
-        : await acceptWagerProposal(
-            { uid: "host" },
-            { inviteId: "invite", matchId: "invite" },
-            state.repository,
-          );
-
-    assert.equal(response.ok, true);
-    assert.equal(response.count, 2);
-    const agreementOperation = state.wager?.agreementOperation as Record<
-      string,
-      unknown
-    >;
-    assert.equal(agreementOperation.reservationLineageReady, true);
-    assert.equal(
-      agreementOperation.proposerOperationId,
-      mode === "send" ? legacyOperationId : undefined,
-    );
-    assert.equal((state.frozen.guest.frozen as Record<string, number>).dust, 2);
-  }
+    },
+  });
+  assert.deepEqual(
+    await acceptWagerProposal(
+      { uid: "host" },
+      { inviteId: "invite", matchId: "invite" },
+      state.repository,
+    ),
+    { ok: false, reason: "proposal-unavailable" },
+  );
 });
 
 test("rejects omitted agreement adjustments when either reservation is larger", async () => {
@@ -1820,6 +1931,7 @@ test("claims the live agreement instead of a stale proposal snapshot", async () 
   state.repository.transactRtdbPath = async (path, updater, signal) => {
     if (path === "invites/invite/wagers/invite") {
       state.wager = { agreed: { material: "dust", count: 2 } };
+      modernizeWagerState(state);
     }
     return transact(path, updater, signal);
   };
@@ -1928,6 +2040,7 @@ test("queues a durable retry before settling", async () => {
 test("does not claim a settlement when retry scheduling fails", async () => {
   const originalWager = { agreed: { material: "dust", count: 2 } };
   const state = createRepository({ wager: originalWager });
+  const expectedWager = structuredClone(state.wager);
   let claims = 0;
   const transact = state.repository.transactRtdbPath;
   state.repository.transactRtdbPath = async (...args) => {
@@ -1949,5 +2062,5 @@ test("does not claim a settlement when retry scheduling fails", async () => {
     ),
   );
   assert.equal(claims, 0);
-  assert.deepEqual(state.wager, originalWager);
+  assert.deepEqual(state.wager, expectedWager);
 });

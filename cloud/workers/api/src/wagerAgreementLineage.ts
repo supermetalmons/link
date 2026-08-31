@@ -32,11 +32,6 @@ type LineageContext = {
   selfAdjustmentOperationId: string;
 };
 
-type ProposerLineage = {
-  hasModernReservation: boolean;
-  operationIds: unknown;
-};
-
 function toRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -143,7 +138,7 @@ async function createLineageContext(
 async function validateProposerLineage(
   repository: GameplayRepository,
   context: LineageContext,
-): Promise<ProposerLineage | null> {
+): Promise<boolean> {
   const {
     agreement,
     agreementOperation,
@@ -153,61 +148,33 @@ async function validateProposerLineage(
     proposerReservationOperationId,
   } = context;
   const operationIds = agreementOperation.proposerReservationOperationIds;
-  const hasModernReservation =
-    Array.isArray(operationIds) &&
-    operationIds.includes(proposerReservationOperationId);
-  const legacyReservation = toPlainRecord(
-    agreementOperation.proposerLegacyReservation,
-  );
-  if (hasModernReservation === Boolean(legacyReservation)) return null;
-  if (hasModernReservation) {
-    const reservation = await readFrozenOperationForUid(
-      repository,
-      agreement.proposerId,
-      proposerReservationOperationId,
-    );
-    if (
-      reservation?.kind !== "send-reserve" ||
-      reservation.material !== agreement.material ||
-      reservation.count !== proposerCount ||
-      agreementOperation.proposerOperationId !==
-        (await createOperationId(
-          "send",
-          inviteId,
-          matchId,
-          agreement.proposerId,
-          agreement.material,
-          String(reservation.requestedCount),
-        ))
-    ) {
-      return null;
-    }
-  } else if (
-    !legacyReservation ||
-    !hasExactKeys(legacyReservation, ["material", "count"]) ||
-    legacyReservation.material !== agreement.material ||
-    legacyReservation.count !== proposerCount ||
-    (agreementOperation.proposerOperationId !== undefined &&
-      agreementOperation.proposerOperationId !== null &&
-      !validOperationId(agreementOperation.proposerOperationId))
+  if (
+    !Array.isArray(operationIds) ||
+    operationIds.length !== 2 ||
+    operationIds[0] !== context.proposerAdjustmentOperationId ||
+    operationIds[1] !== proposerReservationOperationId ||
+    Object.hasOwn(agreementOperation, "proposerLegacyReservation")
   ) {
-    return null;
+    return false;
   }
-  return { hasModernReservation, operationIds };
-}
-
-function hasExpectedProposerOperationIds(
-  context: LineageContext,
-  proposer: ProposerLineage,
-): boolean {
-  const { operationIds } = proposer;
+  const reservation = await readFrozenOperationForUid(
+    repository,
+    agreement.proposerId,
+    proposerReservationOperationId,
+  );
   return Boolean(
-    Array.isArray(operationIds) &&
-    operationIds[0] === context.proposerAdjustmentOperationId &&
-    (proposer.hasModernReservation
-      ? operationIds.length === 2 &&
-        operationIds[1] === context.proposerReservationOperationId
-      : operationIds.length === 1),
+    reservation?.kind === "send-reserve" &&
+    reservation.material === agreement.material &&
+    reservation.count === proposerCount &&
+    agreementOperation.proposerOperationId ===
+      (await createOperationId(
+        "send",
+        inviteId,
+        matchId,
+        agreement.proposerId,
+        agreement.material,
+        String(reservation.requestedCount),
+      )),
   );
 }
 
@@ -286,9 +253,6 @@ async function validateAcceptedAccepter(
     agreement.accepterId,
     acceptReservationOperationId,
   );
-  const legacyReservation = toPlainRecord(
-    agreementOperation.accepterLegacyReservation,
-  );
   const ownReservationOperationId = await createWagerReservationOperationId(
     "send",
     inviteId,
@@ -318,20 +282,14 @@ async function validateAcceptedAccepter(
     reservation.material !== agreement.material ||
     reservation.requestedCount !== proposerCount ||
     reservation.count !== agreement.count ||
+    Object.hasOwn(agreementOperation, "accepterLegacyReservation") ||
     (!hasOwnReservation
-      ? operationIds.length !== 1 || legacyReservation !== null
-      : operationIds.length === 2 &&
-          operationIds[1] === ownReservationOperationId
-        ? legacyReservation !== null ||
-          ownReservation?.kind !== "send-reserve" ||
-          ownReservation.material !== reservation.ownMaterial ||
-          ownReservation.count !== reservation.ownCount
-        : operationIds.length === 1
-          ? !legacyReservation ||
-            !hasExactKeys(legacyReservation, ["material", "count"]) ||
-            legacyReservation.material !== reservation.ownMaterial ||
-            legacyReservation.count !== reservation.ownCount
-          : true)
+      ? operationIds.length !== 1
+      : operationIds.length !== 2 ||
+        operationIds[1] !== ownReservationOperationId ||
+        ownReservation?.kind !== "send-reserve" ||
+        ownReservation.material !== reservation.ownMaterial ||
+        ownReservation.count !== reservation.ownCount)
   ) {
     return null;
   }
@@ -411,8 +369,7 @@ async function expectedReservationAdjustments(
     agreementOperation,
   );
   if (!context) return null;
-  const proposer = await validateProposerLineage(repository, context);
-  if (!proposer || !hasExpectedProposerOperationIds(context, proposer)) {
+  if (!(await validateProposerLineage(repository, context))) {
     return null;
   }
   const accepter = await validateAccepterLineage(repository, context);
