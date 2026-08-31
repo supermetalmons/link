@@ -69,6 +69,7 @@ const isWagerProposalSendRequest = (value) =>
   isMaterialName(value.material) &&
   typeof value.count === "number" &&
   Number.isFinite(value.count) &&
+  Number.isSafeInteger(normalizeCount(value.count)) &&
   normalizeCount(value.count) > 0;
 
 const isWagerOutcomeResolveRequest = (value) =>

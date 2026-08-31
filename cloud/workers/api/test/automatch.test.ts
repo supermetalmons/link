@@ -8,6 +8,7 @@ import {
   startAutomatch,
 } from "../src/automatch.ts";
 import { AuthApiFailure } from "../src/authErrors.ts";
+import { cancelAutomatch } from "../src/gameplayRoute.ts";
 import type { RequestIdentity } from "../src/requestIdentity.ts";
 import {
   FIREBASE_RTDB_SERVER_TIMESTAMP,
@@ -876,7 +877,15 @@ test("shared cancellation reconciles an ambiguous committed patch", async () => 
     data: { uid: identity.uid, timestamp: 1, telegramDeliveryVersion: 2 },
   };
   let queue: unknown = queued.data;
+  let invite: Record<string, unknown> = {
+    hostId: identity.uid,
+    guestId: null,
+    automatchStateHint: "pending",
+    automatchCanceledAt: null,
+  };
+  let outboxRequestId: string | null = null;
   let patches = 0;
+  const waits: number[] = [];
   const profileTasks: unknown[] = [];
   const telegramTasks: unknown[] = [];
   const canceled = await cancelQueuedAutomatch(
@@ -884,13 +893,23 @@ test("shared cancellation reconciles an ambiguous committed patch", async () => 
     repository({
       getRtdbPath: async (path) => {
         if (path === `automatch/${queued.inviteId}`) return queue;
-        if (path === `invites/${queued.inviteId}/guestId`) return null;
-        if (path === `invites/${queued.inviteId}/hostId`) return identity.uid;
+        if (path === `invites/${queued.inviteId}`) return invite;
+        if (path === `invites/${queued.inviteId}/guestId`) {
+          return invite.guestId;
+        }
+        if (path === `invites/${queued.inviteId}/hostId`) {
+          return invite.hostId;
+        }
+        if (
+          path ===
+          `profileGameProjectionOutbox/automatch/${queued.inviteId}/requestId`
+        ) {
+          return outboxRequestId;
+        }
         assert.fail(`unexpected path ${path}`);
       },
       patchRtdbRoot: async () => {
         patches += 1;
-        queue = null;
         throw new Error("response-lost-after-commit");
       },
     }),
@@ -902,11 +921,26 @@ test("shared cancellation reconciles an ambiguous committed patch", async () => 
       enqueueTelegramProjection: async (task) => {
         telegramTasks.push(task);
       },
+      wait: async (milliseconds) => {
+        waits.push(milliseconds);
+        if (waits.length < 18) return;
+        queue = null;
+        invite = {
+          ...invite,
+          automatchStateHint: "canceled",
+          automatchCanceledAt: 2,
+        };
+        outboxRequestId = "ambiguous-cancel";
+      },
     },
   );
 
   assert.equal(canceled, true);
   assert.equal(patches, 1);
+  assert.deepEqual(
+    waits,
+    Array.from({ length: 18 }, () => 50),
+  );
   assert.deepEqual(profileTasks, [
     {
       kind: "automatch-profile-game-projection",
@@ -921,6 +955,583 @@ test("shared cancellation reconciles an ambiguous committed patch", async () => 
       requestId: "ambiguous-cancel",
     },
   ]);
+});
+
+test("uses a final fresh proof read after cancellation polling stops", async () => {
+  const queued = {
+    inviteId: "auto_final_reconciliation",
+    data: { uid: identity.uid, timestamp: 1, telegramDeliveryVersion: 2 },
+  };
+  const operation = new AbortController();
+  let pollingSignal: AbortSignal | undefined;
+  let finalSignal: AbortSignal | undefined;
+  let committed = false;
+  let waits = 0;
+  const profileTasks: unknown[] = [];
+  const telegramTasks: unknown[] = [];
+
+  const canceled = await cancelQueuedAutomatch(
+    queued,
+    repository({
+      getRtdbPath: async (path, _query, signal) => {
+        assert.ok(signal);
+        if (signal !== operation.signal) {
+          if (!pollingSignal) {
+            pollingSignal = signal;
+          } else if (signal !== pollingSignal) {
+            finalSignal = signal;
+            committed = true;
+          }
+        }
+        if (path === `automatch/${queued.inviteId}`) {
+          return committed ? null : queued.data;
+        }
+        if (path === `invites/${queued.inviteId}/guestId`) return null;
+        if (path === `invites/${queued.inviteId}/hostId`) return identity.uid;
+        if (path === `invites/${queued.inviteId}`) {
+          return committed
+            ? {
+                hostId: identity.uid,
+                guestId: null,
+                automatchStateHint: "canceled",
+                automatchCanceledAt: 2,
+              }
+            : {
+                hostId: identity.uid,
+                guestId: null,
+                automatchStateHint: "pending",
+                automatchCanceledAt: null,
+              };
+        }
+        if (
+          path ===
+          `profileGameProjectionOutbox/automatch/${queued.inviteId}/requestId`
+        ) {
+          return committed ? "final-reconciliation" : null;
+        }
+        assert.fail(`unexpected path ${path}`);
+      },
+      patchRtdbRoot: async (_updates, signal) => {
+        assert.equal(signal, operation.signal);
+        throw new Error("response-lost-before-visible");
+      },
+    }),
+    {
+      createProjectionRequestId: () => "final-reconciliation",
+      enqueueProfileGameProjection: async (task) => {
+        profileTasks.push(task);
+      },
+      enqueueTelegramProjection: async (task) => {
+        telegramTasks.push(task);
+      },
+      wait: async (milliseconds, signal) => {
+        assert.equal(milliseconds, 50);
+        assert.equal(signal, pollingSignal);
+        waits += 1;
+        if (waits === 20) throw new Error("polling-window-ended");
+      },
+    },
+    operation.signal,
+  );
+
+  assert.equal(canceled, true);
+  assert.equal(waits, 20);
+  assert.ok(pollingSignal);
+  assert.ok(finalSignal);
+  assert.notEqual(finalSignal, pollingSignal);
+  assert.equal(finalSignal.aborted, false);
+  assert.deepEqual(profileTasks, [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: queued.inviteId,
+      requestId: "final-reconciliation",
+    },
+  ]);
+  assert.deepEqual(telegramTasks, [
+    {
+      kind: "automatch-telegram-projection",
+      inviteId: queued.inviteId,
+      requestId: "final-reconciliation",
+    },
+  ]);
+});
+
+test("reconciles a committed cancellation after the operation signal aborts", async () => {
+  const queued = {
+    inviteId: "auto_aborted_commit",
+    data: { uid: identity.uid, timestamp: 1, telegramDeliveryVersion: 2 },
+  };
+  const operation = new AbortController();
+  let queue: unknown = queued.data;
+  let invite: Record<string, unknown> = {
+    hostId: identity.uid,
+    guestId: null,
+    automatchStateHint: "pending",
+    automatchCanceledAt: null,
+  };
+  let outboxRequestId: string | null = null;
+  const reconciliationSignals: AbortSignal[] = [];
+  const profileTasks: unknown[] = [];
+  const telegramTasks: unknown[] = [];
+
+  const canceled = await cancelQueuedAutomatch(
+    queued,
+    repository({
+      getRtdbPath: async (path, _query, signal) => {
+        assert.ok(signal);
+        if (path === `automatch/${queued.inviteId}`) {
+          if (queue === null) reconciliationSignals.push(signal);
+          else assert.equal(signal, operation.signal);
+          return queue;
+        }
+        if (path === `invites/${queued.inviteId}/guestId`) {
+          assert.equal(signal, operation.signal);
+          return invite.guestId;
+        }
+        if (path === `invites/${queued.inviteId}/hostId`) {
+          assert.equal(signal, operation.signal);
+          return invite.hostId;
+        }
+        if (path === `invites/${queued.inviteId}`) {
+          reconciliationSignals.push(signal);
+          return invite;
+        }
+        if (
+          path ===
+          `profileGameProjectionOutbox/automatch/${queued.inviteId}/requestId`
+        ) {
+          reconciliationSignals.push(signal);
+          return outboxRequestId;
+        }
+        assert.fail(`unexpected path ${path}`);
+      },
+      patchRtdbRoot: async (_updates, signal) => {
+        assert.equal(signal, operation.signal);
+        queue = null;
+        invite = {
+          ...invite,
+          automatchStateHint: "canceled",
+          automatchCanceledAt: 2,
+        };
+        outboxRequestId = "aborted-commit";
+        operation.abort();
+        throw new Error("response-lost-after-commit");
+      },
+    }),
+    {
+      createProjectionRequestId: () => "aborted-commit",
+      enqueueProfileGameProjection: async (task) => {
+        profileTasks.push(task);
+      },
+      enqueueTelegramProjection: async (task) => {
+        telegramTasks.push(task);
+      },
+      wait: async () => assert.fail("unexpected reconciliation wait"),
+    },
+    operation.signal,
+  );
+
+  assert.equal(canceled, true);
+  assert.equal(operation.signal.aborted, true);
+  assert.equal(reconciliationSignals.length, 3);
+  assert.equal(new Set(reconciliationSignals).size, 1);
+  assert.notEqual(reconciliationSignals[0], operation.signal);
+  assert.equal(reconciliationSignals[0]?.aborted, false);
+  assert.deepEqual(profileTasks, [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: queued.inviteId,
+      requestId: "aborted-commit",
+    },
+  ]);
+  assert.deepEqual(telegramTasks, [
+    {
+      kind: "automatch-telegram-projection",
+      inviteId: queued.inviteId,
+      requestId: "aborted-commit",
+    },
+  ]);
+});
+
+test("public cancellation succeeds when its only queue committed before abort", async () => {
+  const inviteId = "auto_public_aborted_commit";
+  const operation = new AbortController();
+  let queue: Record<string, Record<string, unknown>> | null = {
+    [inviteId]: {
+      uid: identity.uid,
+      timestamp: 1,
+      telegramDeliveryVersion: 2,
+    },
+  };
+  let invite: Record<string, unknown> = {
+    hostId: identity.uid,
+    guestId: null,
+    automatchStateHint: "pending",
+    automatchCanceledAt: null,
+  };
+  let outboxRequestId: string | null = null;
+  let queueQueries = 0;
+  const profileTasks: unknown[] = [];
+  const telegramTasks: unknown[] = [];
+
+  const result = await cancelAutomatch(
+    identity,
+    repository({
+      getRtdbPath: async (path, _query, signal) => {
+        signal?.throwIfAborted();
+        if (path === "automatch") {
+          queueQueries += 1;
+          return queue;
+        }
+        if (path === `automatch/${inviteId}`) {
+          return queue?.[inviteId] || null;
+        }
+        if (path === `invites/${inviteId}/guestId`) return invite.guestId;
+        if (path === `invites/${inviteId}/hostId`) return invite.hostId;
+        if (path === `invites/${inviteId}`) return invite;
+        if (
+          path === `profileGameProjectionOutbox/automatch/${inviteId}/requestId`
+        ) {
+          return outboxRequestId;
+        }
+        assert.fail(`unexpected path ${path}`);
+      },
+      patchRtdbRoot: async (updates, signal) => {
+        assert.equal(signal, operation.signal);
+        queue = null;
+        invite = {
+          ...invite,
+          automatchStateHint: "canceled",
+          automatchCanceledAt: 2,
+        };
+        outboxRequestId = (
+          updates[`profileGameProjectionOutbox/automatch/${inviteId}`] as {
+            requestId: string;
+          }
+        ).requestId;
+        operation.abort();
+        throw new Error("response-lost-after-commit");
+      },
+    }),
+    {
+      createProjectionRequestId: () => "public-aborted-commit",
+      enqueueProfileGameProjection: async (task) => {
+        profileTasks.push(task);
+      },
+      enqueueTelegramProjection: async (task) => {
+        telegramTasks.push(task);
+      },
+      signal: operation.signal,
+      wait: async () => assert.fail("unexpected reconciliation wait"),
+    },
+  );
+
+  assert.deepEqual(result, { ok: true });
+  assert.equal(queueQueries, 2);
+  assert.deepEqual(profileTasks, [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId,
+      requestId: "public-aborted-commit",
+    },
+  ]);
+  assert.deepEqual(telegramTasks, [
+    {
+      kind: "automatch-telegram-projection",
+      inviteId,
+      requestId: "public-aborted-commit",
+    },
+  ]);
+});
+
+test("public cancellation succeeds when the last of two queues commits before abort", async () => {
+  const inviteIds = ["auto_public_first", "auto_public_last"];
+  const operation = new AbortController();
+  let queue: Record<string, Record<string, unknown>> | null =
+    Object.fromEntries(
+      inviteIds.map((inviteId, index) => [
+        inviteId,
+        {
+          uid: identity.uid,
+          timestamp: index + 1,
+          telegramDeliveryVersion: 2,
+        },
+      ]),
+    );
+  const invites: Record<
+    string,
+    {
+      automatchCanceledAt: number | null;
+      automatchStateHint: string;
+      guestId: string | null;
+      hostId: string;
+    }
+  > = Object.fromEntries(
+    inviteIds.map((inviteId) => [
+      inviteId,
+      {
+        hostId: identity.uid,
+        guestId: null,
+        automatchStateHint: "pending",
+        automatchCanceledAt: null,
+      },
+    ]),
+  );
+  const outboxRequestIds = new Map<string, string>();
+  let patches = 0;
+  let queueQueries = 0;
+
+  const result = await cancelAutomatch(
+    identity,
+    repository({
+      getRtdbPath: async (path, _query, signal) => {
+        signal?.throwIfAborted();
+        if (path === "automatch") {
+          queueQueries += 1;
+          if (signal !== operation.signal) {
+            await new Promise((resolve) => setTimeout(resolve, 1_100));
+            signal?.throwIfAborted();
+          }
+          return queue;
+        }
+        for (const inviteId of inviteIds) {
+          if (path === `automatch/${inviteId}`) {
+            return queue?.[inviteId] || null;
+          }
+          if (path === `invites/${inviteId}/guestId`) {
+            return invites[inviteId].guestId;
+          }
+          if (path === `invites/${inviteId}/hostId`) {
+            return invites[inviteId].hostId;
+          }
+          if (path === `invites/${inviteId}`) return invites[inviteId];
+          if (
+            path ===
+            `profileGameProjectionOutbox/automatch/${inviteId}/requestId`
+          ) {
+            return outboxRequestIds.get(inviteId) || null;
+          }
+        }
+        assert.fail(`unexpected path ${path}`);
+      },
+      patchRtdbRoot: async (updates, signal) => {
+        assert.equal(signal, operation.signal);
+        const inviteId = inviteIds.find(
+          (candidate) => updates[`automatch/${candidate}`] === null,
+        );
+        assert.ok(inviteId);
+        if (queue) {
+          delete queue[inviteId];
+          if (Object.keys(queue).length === 0) queue = null;
+        }
+        invites[inviteId] = {
+          ...invites[inviteId],
+          automatchStateHint: "canceled",
+          automatchCanceledAt: 2,
+        };
+        outboxRequestIds.set(
+          inviteId,
+          (
+            updates[`profileGameProjectionOutbox/automatch/${inviteId}`] as {
+              requestId: string;
+            }
+          ).requestId,
+        );
+        patches += 1;
+        if (patches === inviteIds.length) {
+          operation.abort();
+          throw new Error("response-lost-after-commit");
+        }
+      },
+    }),
+    {
+      createProjectionRequestId: (() => {
+        let requestId = 0;
+        return () => `public-two-${++requestId}`;
+      })(),
+      signal: operation.signal,
+      wait: async () => assert.fail("unexpected reconciliation wait"),
+    },
+  );
+
+  assert.deepEqual(result, { ok: true });
+  assert.equal(queue, null);
+  assert.equal(patches, 2);
+  assert.equal(queueQueries, 3);
+});
+
+test("public cancellation does not hide a third queued match after abort", async () => {
+  const inviteIds = ["auto_hidden_a", "auto_hidden_b", "auto_hidden_c"];
+  const operation = new AbortController();
+  const queues = new Map(
+    inviteIds.map((inviteId, index) => [
+      inviteId,
+      { uid: identity.uid, timestamp: index + 1 },
+    ]),
+  );
+  const invites: Record<
+    string,
+    {
+      automatchCanceledAt: number | null;
+      automatchStateHint: string;
+      guestId: string | null;
+      hostId: string;
+    }
+  > = Object.fromEntries(
+    inviteIds.map((inviteId) => [
+      inviteId,
+      {
+        hostId: identity.uid,
+        guestId: null,
+        automatchStateHint: "pending",
+        automatchCanceledAt: null,
+      },
+    ]),
+  );
+  const outboxRequestIds = new Map<string, string>();
+  let patches = 0;
+
+  await assert.rejects(
+    cancelAutomatch(
+      identity,
+      repository({
+        getRtdbPath: async (path, query, signal) => {
+          signal?.throwIfAborted();
+          if (path === "automatch") {
+            return Object.fromEntries(
+              [...queues]
+                .filter(([, value]) => value.uid === query?.equalTo)
+                .sort(([left], [right]) => left.localeCompare(right))
+                .slice(0, Number(query?.limitToFirst)),
+            );
+          }
+          for (const inviteId of inviteIds) {
+            if (path === `automatch/${inviteId}`) {
+              return queues.get(inviteId) || null;
+            }
+            if (path === `invites/${inviteId}/guestId`) {
+              return invites[inviteId].guestId;
+            }
+            if (path === `invites/${inviteId}/hostId`) {
+              return invites[inviteId].hostId;
+            }
+            if (path === `invites/${inviteId}`) return invites[inviteId];
+            if (
+              path ===
+              `profileGameProjectionOutbox/automatch/${inviteId}/requestId`
+            ) {
+              return outboxRequestIds.get(inviteId) || null;
+            }
+          }
+          assert.fail(`unexpected path ${path}`);
+        },
+        patchRtdbRoot: async (updates) => {
+          const inviteId = inviteIds.find(
+            (candidate) => updates[`automatch/${candidate}`] === null,
+          );
+          assert.ok(inviteId);
+          queues.delete(inviteId);
+          invites[inviteId] = {
+            ...invites[inviteId],
+            automatchStateHint: "canceled",
+            automatchCanceledAt: 2,
+          };
+          outboxRequestIds.set(
+            inviteId,
+            (
+              updates[`profileGameProjectionOutbox/automatch/${inviteId}`] as {
+                requestId: string;
+              }
+            ).requestId,
+          );
+          patches += 1;
+          if (patches === 2) {
+            operation.abort();
+            throw new Error("response-lost-after-commit");
+          }
+        },
+      }),
+      {
+        createProjectionRequestId: (() => {
+          let requestId = 0;
+          return () => `public-hidden-${++requestId}`;
+        })(),
+        signal: operation.signal,
+        wait: async () => assert.fail("unexpected reconciliation wait"),
+      },
+    ),
+    (error) => error === operation.signal.reason,
+  );
+
+  assert.equal(patches, 2);
+  assert.deepEqual([...queues.keys()], ["auto_hidden_c"]);
+});
+
+test("ambiguous cancellation rejects a competing match", async () => {
+  const queued = {
+    inviteId: "auto_competing_match",
+    data: { uid: identity.uid, timestamp: 1, telegramDeliveryVersion: 2 },
+  };
+  let queue: unknown = queued.data;
+  let invite: Record<string, unknown> = {
+    hostId: identity.uid,
+    guestId: null,
+    automatchStateHint: "pending",
+    automatchCanceledAt: null,
+  };
+  let outboxRequestId: string | null = null;
+  const patchError = new Error("cancel-patch-failed");
+  const profileTasks: unknown[] = [];
+  const telegramTasks: unknown[] = [];
+
+  await assert.rejects(
+    cancelQueuedAutomatch(
+      queued,
+      repository({
+        getRtdbPath: async (path) => {
+          if (path === `automatch/${queued.inviteId}`) return queue;
+          if (path === `invites/${queued.inviteId}`) return invite;
+          if (path === `invites/${queued.inviteId}/guestId`) {
+            return invite.guestId;
+          }
+          if (path === `invites/${queued.inviteId}/hostId`) {
+            return invite.hostId;
+          }
+          if (
+            path ===
+            `profileGameProjectionOutbox/automatch/${queued.inviteId}/requestId`
+          ) {
+            return outboxRequestId;
+          }
+          assert.fail(`unexpected path ${path}`);
+        },
+        patchRtdbRoot: async () => {
+          queue = null;
+          invite = {
+            ...invite,
+            guestId: "different-player",
+            automatchStateHint: "matched",
+          };
+          outboxRequestId = "competing-match";
+          throw patchError;
+        },
+      }),
+      {
+        createProjectionRequestId: () => "ambiguous-cancel",
+        enqueueProfileGameProjection: async (task) => {
+          profileTasks.push(task);
+        },
+        enqueueTelegramProjection: async (task) => {
+          telegramTasks.push(task);
+        },
+        wait: async () => undefined,
+      },
+    ),
+    (error) => error === patchError,
+  );
+
+  assert.deepEqual(profileTasks, []);
+  assert.deepEqual(telegramTasks, []);
 });
 
 test("bounds repeated duplicate convergence to 512 cancellation attempts", async () => {

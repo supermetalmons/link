@@ -165,6 +165,26 @@ function runtimeRequest(
   };
 }
 
+async function enforceEventSyncRateLimit(
+  rateLimiter: RateLimit,
+  uid: string,
+  eventId: string,
+): Promise<void> {
+  let outcome: RateLimitOutcome;
+  try {
+    outcome = await rateLimiter.limit({ key: `event-sync:${uid}:${eventId}` });
+  } catch {
+    throw new AuthApiFailure(503, "unavailable", "rate-limit-unavailable");
+  }
+  if (!outcome.success) {
+    throw new AuthApiFailure(
+      429,
+      "resource-exhausted",
+      "Too many event sync attempts.",
+    );
+  }
+}
+
 export async function createEvent(
   env: Env,
   identity: RequestIdentity,
@@ -230,8 +250,14 @@ export async function syncEventState(
   dependencies: EventControlDependencies = {},
 ): Promise<SyncEventStateResponse> {
   try {
+    const eventId = request.eventId.trim();
+    await enforceEventSyncRateLimit(
+      env.AUTH_RATE_LIMITER,
+      identity.uid,
+      eventId,
+    );
     const response = await createRuntime(env, dependencies).syncEventState(
-      runtimeRequest(identity, request),
+      runtimeRequest(identity, { ...request, eventId }),
     );
     if (!isSyncEventStateResponse(response)) {
       throw new AuthApiFailure(503, "unavailable", "event-service-unavailable");

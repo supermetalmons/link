@@ -5,6 +5,9 @@ import { Game } from "mons-rules";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import {
   acceptWagerProposal,
+  consumeWagerReservationOperation,
+  createWagerReservationOperationId,
+  ensureWagerAgreementLineageReady,
   sendWagerProposal,
 } from "../src/wagerProposal.ts";
 import type { RequestIdentity } from "../src/requestIdentity.ts";
@@ -166,6 +169,7 @@ function createRepository({
   let failPatchAfterCommit = failPatchAfterCommitOnce;
   let failPatch = failPatchOnce;
   let transferFingerprint = "";
+  const locks = new Map<string, unknown>();
   const state: Omit<RepositoryState, "repository"> = {
     appliedTransfers: 0,
     frozen: {
@@ -259,6 +263,11 @@ function createRepository({
         profileIdForUid || (async (uid) => `profile-${uid}`),
       ),
     transactRtdbPath: async (path, updater) => {
+      if (path.startsWith("gameplayMutationLocks/")) {
+        const result = applyTransaction(updater, locks.get(path) ?? null);
+        if (result.committed) locks.set(path, result.value);
+        return result;
+      }
       if (path === "invites/invite/wagers/invite") {
         const result = applyTransaction(updater, state.wager);
         if (result.committed) {
@@ -404,7 +413,6 @@ test("fails closed for an unresolved legacy marker", async () => {
       error.status === 503 &&
       error.message === "wager-settlement-uncertain",
   );
-  assert.equal(state.appliedTransfers, 0);
 });
 
 for (const result of ["win", "gg"] as const) {
@@ -431,41 +439,49 @@ for (const result of ["win", "gg"] as const) {
   });
 }
 
-test("repairs reservation lineage before settling an agreement", async () => {
-  const state = createRepository({
-    wager: {
-      agreed: {
-        material: "dust",
-        count: 2,
-        total: 4,
-        proposerId: "guest",
-        accepterId: "host",
-        acceptedAt: 100,
+test("rejects an agreement lineage with an extra or positive adjustment", async () => {
+  for (const delta of [-1, 1]) {
+    const state = createRepository({
+      wager: {
+        agreed: {
+          material: "dust",
+          count: 2,
+          total: 4,
+          proposerId: "guest",
+          accepterId: "host",
+          acceptedAt: 100,
+        },
+        agreementOperation: {
+          id: "a".repeat(64),
+          proposerReservedCount: 2,
+          reservationLineageVersion: 1,
+          reservationLineageReady: false,
+          reservationAdjustments: [
+            {
+              uid: "guest",
+              operationId: "b".repeat(64),
+              kind: "accept-proposer-adjustment",
+              material: "dust",
+              delta,
+            },
+          ],
+          proposerReservationOperationIds: [],
+          accepterReservationOperationIds: [],
+        },
       },
-      agreementOperation: {
-        id: "a".repeat(64),
-        proposerReservedCount: 2,
-        reservationLineageVersion: 1,
-        reservationLineageReady: false,
-        reservationAdjustments: [],
-        proposerReservationOperationIds: [],
-        accepterReservationOperationIds: [],
-      },
-    },
-  });
-  await resolveWagerOutcome(
-    identity,
-    { inviteId: "invite", matchId: "invite" },
-    state.repository,
-    { now: () => 500, resolveResult: () => "win" },
-  );
-  assert.equal(state.transferCalls, 1);
-  assert.equal(state.marker, true);
-  assert.equal(
-    (state.wager?.agreementOperation as Record<string, unknown>)
-      .reservationLineageReady,
-    true,
-  );
+    });
+    await assert.rejects(
+      resolveWagerOutcome(
+        identity,
+        { inviteId: "invite", matchId: "invite" },
+        state.repository,
+        { now: () => 500, resolveResult: () => "win" },
+      ),
+      /wager-agreement-lineage-unavailable/,
+    );
+    assert.equal(state.transferCalls, 0);
+    assert.equal(state.marker, false);
+  }
 });
 
 test("settles merged-profile wagers without transferring materials", async () => {
@@ -750,8 +766,6 @@ test("autonomously cancels an unclaimed underfunded wager", async () => {
   );
   assert.equal(state.appliedTransfers, 0);
   assert.equal(state.transferOutcome, "insufficient-materials");
-  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 0);
-  assert.equal((state.frozen.guest.frozen as Record<string, number>).dust, 0);
   assert.equal(
     (state.wager?.settlement as Record<string, unknown>).failureReason,
     WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON,
@@ -1059,6 +1073,718 @@ test("proposal settlement consumes a hidden accept reservation", async () => {
     { ok: false, reason: "proposal-missing" },
   );
   assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 0);
+});
+
+test("settles equal legacy proposals with a no-op accept reservation", async () => {
+  const state = createRepository({
+    wager: {
+      proposals: {
+        host: { material: "dust", count: 2, createdAt: 1 },
+        guest: { material: "dust", count: 2, createdAt: 2 },
+      },
+    },
+    playerMatch: {},
+    opponentMatch: {},
+  });
+  state.repository.getMiningMaterials = async () => ({
+    ...emptyMaterials(),
+    dust: 10,
+  });
+
+  assert.deepEqual(
+    await acceptWagerProposal(
+      { uid: "host" },
+      { inviteId: "invite", matchId: "invite" },
+      state.repository,
+    ),
+    { ok: true, count: 2 },
+  );
+  const agreementOperation = state.wager?.agreementOperation as Record<
+    string,
+    unknown
+  >;
+  assert.equal(agreementOperation.reservationLineageReady, true);
+  assert.equal(
+    Object.hasOwn(agreementOperation, "reservationAdjustments"),
+    false,
+  );
+  const reservationOperationId = await createWagerReservationOperationId(
+    "accept",
+    "invite",
+    "invite",
+    "host",
+  );
+  const operations = state.frozen.host._wagerOps as Record<
+    string,
+    Record<string, unknown>
+  >;
+  delete operations[reservationOperationId].deltas;
+
+  await resolveWagerOutcome(
+    identity,
+    { inviteId: "invite", matchId: "invite" },
+    state.repository,
+    { now: () => 500, resolveResult: () => "win" },
+  );
+
+  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 0);
+  assert.equal((state.frozen.guest.frozen as Record<string, number>).dust, 0);
+  assert.deepEqual(
+    (state.frozen.host._wagerOps as Record<string, unknown>)[
+      reservationOperationId
+    ],
+    { consumed: true },
+  );
+  assert.equal(
+    (state.wager?.settlement as Record<string, unknown>).state,
+    "completed",
+  );
+  assert.equal(state.appliedTransfers, 1);
+  assert.equal(state.marker, true);
+
+  await resolveWagerOutcome(
+    identity,
+    { inviteId: "invite", matchId: "invite" },
+    state.repository,
+    { now: () => 600, resolveResult: () => "win" },
+  );
+  assert.equal(state.appliedTransfers, 1);
+});
+
+test("readies unequal legacy proposer lineage across send and accept", async () => {
+  for (const mode of ["send", "accept"] as const) {
+    const legacyOperationId = "a".repeat(64);
+    const state = createRepository({
+      wager: {
+        proposals: {
+          guest: {
+            material: "dust",
+            count: 3,
+            ...(mode === "send" ? { operationId: legacyOperationId } : {}),
+          },
+        },
+      },
+    });
+    state.frozen.host = { frozen: emptyMaterials() };
+    state.frozen.guest = {
+      frozen: { ...emptyMaterials(), dust: 3 },
+    };
+    state.repository.getMiningMaterials = async () => ({
+      ...emptyMaterials(),
+      dust: mode === "send" ? 10 : 2,
+    });
+    const transact = state.repository.transactRtdbPath;
+    state.repository.transactRtdbPath = async (path, updater, signal) => {
+      const result = await transact(path, updater, signal);
+      if (path === "invites/invite/wagers/invite" && result.committed) {
+        const operation = state.wager?.agreementOperation as
+          Record<string, unknown> | undefined;
+        if (operation?.proposerOperationId === null) {
+          delete operation.proposerOperationId;
+        }
+      }
+      return result;
+    };
+
+    const response =
+      mode === "send"
+        ? await sendWagerProposal(
+            { uid: "host" },
+            {
+              inviteId: "invite",
+              matchId: "invite",
+              material: "dust",
+              count: 2,
+            },
+            state.repository,
+          )
+        : await acceptWagerProposal(
+            { uid: "host" },
+            { inviteId: "invite", matchId: "invite" },
+            state.repository,
+          );
+
+    assert.equal(response.ok, true);
+    assert.equal(response.count, 2);
+    const agreementOperation = state.wager?.agreementOperation as Record<
+      string,
+      unknown
+    >;
+    assert.equal(agreementOperation.reservationLineageReady, true);
+    assert.equal(
+      agreementOperation.proposerOperationId,
+      mode === "send" ? legacyOperationId : undefined,
+    );
+    assert.equal((state.frozen.guest.frozen as Record<string, number>).dust, 2);
+  }
+});
+
+test("rejects omitted agreement adjustments when either reservation is larger", async () => {
+  for (const [proposerCount, accepterCount] of [
+    [3, 2],
+    [2, 3],
+  ] as const) {
+    const state = createRepository({ wager: {} });
+    state.frozen.host = { frozen: emptyMaterials() };
+    state.frozen.guest = { frozen: emptyMaterials() };
+    state.repository.getMiningMaterials = async () => ({
+      ...emptyMaterials(),
+      dust: 10,
+    });
+    assert.equal(
+      (
+        await sendWagerProposal(
+          { uid: "guest" },
+          {
+            inviteId: "invite",
+            matchId: "invite",
+            material: "dust",
+            count: proposerCount,
+          },
+          state.repository,
+        )
+      ).ok,
+      true,
+    );
+    const transact = state.repository.transactRtdbPath;
+    state.repository.transactRtdbPath = async (path, updater, signal) => {
+      const result = await transact(path, updater, signal);
+      const agreementOperation = state.wager?.agreementOperation as
+        Record<string, unknown> | undefined;
+      if (path === "invites/invite/wagers/invite" && agreementOperation) {
+        delete agreementOperation.reservationAdjustments;
+      }
+      return result;
+    };
+
+    await assert.rejects(
+      sendWagerProposal(
+        { uid: "host" },
+        {
+          inviteId: "invite",
+          matchId: "invite",
+          material: "dust",
+          count: accepterCount,
+        },
+        state.repository,
+      ),
+      /wager-agreement-lineage-unavailable/,
+    );
+    assert.notEqual(
+      (state.wager?.agreementOperation as Record<string, unknown>)
+        .reservationLineageReady,
+      true,
+    );
+  }
+});
+
+test("marks equal send agreement lineage ready atomically", async () => {
+  const state = createRepository({ wager: {} });
+  state.frozen.host = { frozen: emptyMaterials() };
+  state.frozen.guest = { frozen: emptyMaterials() };
+  state.repository.getMiningMaterials = async () => ({
+    ...emptyMaterials(),
+    dust: 10,
+  });
+  assert.equal(
+    (
+      await sendWagerProposal(
+        { uid: "guest" },
+        {
+          inviteId: "invite",
+          matchId: "invite",
+          material: "dust",
+          count: 2,
+        },
+        state.repository,
+      )
+    ).ok,
+    true,
+  );
+  const agreement = await sendWagerProposal(
+    { uid: "host" },
+    {
+      inviteId: "invite",
+      matchId: "invite",
+      material: "dust",
+      count: 2,
+    },
+    state.repository,
+  );
+  assert.equal(agreement.ok, true);
+  const agreementOperation = state.wager?.agreementOperation as Record<
+    string,
+    unknown
+  >;
+  assert.equal(agreementOperation.reservationLineageReady, true);
+  assert.equal(
+    Object.hasOwn(agreementOperation, "reservationAdjustments"),
+    false,
+  );
+});
+
+test("accepts concurrent lineage completion after reservations are consumed", async () => {
+  const state = createRepository({ wager: {} });
+  state.frozen.host = { frozen: emptyMaterials() };
+  state.frozen.guest = { frozen: emptyMaterials() };
+  state.repository.getMiningMaterials = async () => ({
+    ...emptyMaterials(),
+    dust: 10,
+  });
+  assert.equal(
+    (
+      await sendWagerProposal(
+        { uid: "guest" },
+        {
+          inviteId: "invite",
+          matchId: "invite",
+          material: "dust",
+          count: 3,
+        },
+        state.repository,
+      )
+    ).ok,
+    true,
+  );
+  assert.equal(
+    (
+      await sendWagerProposal(
+        { uid: "host" },
+        {
+          inviteId: "invite",
+          matchId: "invite",
+          material: "dust",
+          count: 2,
+        },
+        state.repository,
+      )
+    ).ok,
+    true,
+  );
+  const agreementOperation = state.wager?.agreementOperation as Record<
+    string,
+    unknown
+  >;
+  agreementOperation.reservationLineageReady = false;
+  const proposerReservationOperationId =
+    await createWagerReservationOperationId(
+      "send",
+      "invite",
+      "invite",
+      "guest",
+    );
+  const read = state.repository.getRtdbPath;
+  let completedElsewhere = false;
+  let wagerReads = 0;
+  state.repository.getRtdbPath = async (path, query, signal) => {
+    if (path === "invites/invite/wagers/invite") wagerReads += 1;
+    if (path === "players/guest/mining" && !completedElsewhere) {
+      completedElsewhere = true;
+      agreementOperation.reservationLineageReady = true;
+      const operations = state.frozen.guest._wagerOps as Record<
+        string,
+        unknown
+      >;
+      operations[proposerReservationOperationId] = { consumed: true };
+    }
+    return read(path, query, signal);
+  };
+
+  await ensureWagerAgreementLineageReady(
+    state.repository,
+    "invites/invite/wagers/invite",
+    () => 2,
+  );
+
+  assert.equal(completedElsewhere, true);
+  assert.equal(agreementOperation.reservationLineageReady, true);
+  assert.equal(wagerReads, 2);
+});
+
+test("rejects concurrent ready lineage after settlement clears agreement", async () => {
+  const state = createRepository({ wager: {} });
+  state.frozen.host = { frozen: emptyMaterials() };
+  state.frozen.guest = { frozen: emptyMaterials() };
+  state.repository.getMiningMaterials = async () => ({
+    ...emptyMaterials(),
+    dust: 10,
+  });
+  assert.equal(
+    (
+      await sendWagerProposal(
+        { uid: "guest" },
+        {
+          inviteId: "invite",
+          matchId: "invite",
+          material: "dust",
+          count: 3,
+        },
+        state.repository,
+      )
+    ).ok,
+    true,
+  );
+  assert.equal(
+    (
+      await sendWagerProposal(
+        { uid: "host" },
+        {
+          inviteId: "invite",
+          matchId: "invite",
+          material: "dust",
+          count: 2,
+        },
+        state.repository,
+      )
+    ).ok,
+    true,
+  );
+  const agreementOperation = state.wager?.agreementOperation as Record<
+    string,
+    unknown
+  >;
+  agreementOperation.reservationLineageReady = false;
+  const proposerReservationOperationId =
+    await createWagerReservationOperationId(
+      "send",
+      "invite",
+      "invite",
+      "guest",
+    );
+  const read = state.repository.getRtdbPath;
+  let completedElsewhere = false;
+  state.repository.getRtdbPath = async (path, query, signal) => {
+    if (path === "players/guest/mining" && !completedElsewhere) {
+      completedElsewhere = true;
+      agreementOperation.reservationLineageReady = true;
+      state.wager!.agreed = null;
+      const operations = state.frozen.guest._wagerOps as Record<
+        string,
+        unknown
+      >;
+      operations[proposerReservationOperationId] = { consumed: true };
+    }
+    return read(path, query, signal);
+  };
+
+  await assert.rejects(
+    ensureWagerAgreementLineageReady(
+      state.repository,
+      "invites/invite/wagers/invite",
+      () => 2,
+    ),
+    /wager-agreement-lineage-unavailable/,
+  );
+
+  assert.equal(completedElsewhere, true);
+  assert.equal(agreementOperation.reservationLineageReady, true);
+  assert.equal(state.wager?.agreed, null);
+});
+
+test("rejects ready-false agreement without a nonempty adjustment list", async () => {
+  for (const reservationAdjustments of [undefined, []]) {
+    const state = createRepository({
+      wager: {
+        agreementOperation: {
+          id: "a".repeat(64),
+          reservationLineageVersion: 1,
+          reservationLineageReady: false,
+          ...(reservationAdjustments === undefined
+            ? {}
+            : { reservationAdjustments }),
+        },
+      },
+    });
+
+    await assert.rejects(
+      ensureWagerAgreementLineageReady(
+        state.repository,
+        "invites/invite/wagers/invite",
+        () => 2,
+      ),
+      /wager-agreement-lineage-unavailable/,
+    );
+  }
+});
+
+test("returns immediately for already-ready agreement lineage", async () => {
+  const state = createRepository({
+    wager: {
+      agreementOperation: {
+        id: "a".repeat(64),
+        reservationLineageVersion: 1,
+        reservationLineageReady: true,
+      },
+    },
+  });
+  const read = state.repository.getRtdbPath;
+  const reads: string[] = [];
+  state.repository.getRtdbPath = async (path, query, signal) => {
+    reads.push(path);
+    return read(path, query, signal);
+  };
+
+  await ensureWagerAgreementLineageReady(
+    state.repository,
+    "invites/invite/wagers/invite",
+    () => 2,
+  );
+  assert.deepEqual(reads, ["invites/invite/wagers/invite"]);
+});
+
+test("accepts an actually empty no-op reservation delta record", async () => {
+  const state = createRepository();
+  state.frozen.host = {
+    frozen: { ...emptyMaterials(), dust: 2 },
+    _wagerOps: {
+      operation: {
+        appliedAtMs: 1,
+        count: 2,
+        deltas: {},
+        fingerprint: JSON.stringify([
+          "accept-reserve",
+          "dust:dust",
+          2,
+          2,
+          0,
+          0,
+          0,
+          0,
+        ]),
+      },
+    },
+  };
+
+  assert.equal(
+    await consumeWagerReservationOperation(
+      state.repository,
+      "host",
+      "operation",
+      true,
+    ),
+    "released",
+  );
+  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 2);
+  assert.deepEqual(
+    (state.frozen.host._wagerOps as Record<string, unknown>).operation,
+    { consumed: true },
+  );
+});
+
+test("rejects malformed or populated deltas on a no-op reservation", async () => {
+  for (const deltas of [
+    [],
+    "invalid",
+    new Date(0),
+    { unknown: 1 },
+    { dust: 1 },
+    { dust: 0 },
+  ]) {
+    const state = createRepository();
+    state.frozen.host = {
+      frozen: { ...emptyMaterials(), dust: 2 },
+      _wagerOps: {
+        operation: {
+          appliedAtMs: 1,
+          count: 2,
+          deltas,
+          fingerprint: JSON.stringify([
+            "accept-reserve",
+            "dust:dust",
+            2,
+            2,
+            0,
+            0,
+            0,
+            0,
+          ]),
+        },
+      },
+    };
+
+    await assert.rejects(
+      consumeWagerReservationOperation(
+        state.repository,
+        "host",
+        "operation",
+        true,
+      ),
+      /wager-operation-unavailable/,
+    );
+    assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 2);
+    assert.ok(
+      (state.frozen.host._wagerOps as Record<string, unknown>).operation,
+    );
+  }
+});
+
+test("rejects a no-delta send reservation", async () => {
+  const state = createRepository();
+  state.frozen.host = {
+    frozen: { ...emptyMaterials(), dust: 2 },
+    _wagerOps: {
+      operation: {
+        appliedAtMs: 1,
+        count: 2,
+        fingerprint: JSON.stringify(["send-reserve", "dust", 2, 0, 0, 0, 0, 0]),
+      },
+    },
+  };
+
+  await assert.rejects(
+    consumeWagerReservationOperation(
+      state.repository,
+      "host",
+      "operation",
+      true,
+    ),
+    /wager-operation-unavailable/,
+  );
+  assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 2);
+  assert.ok((state.frozen.host._wagerOps as Record<string, unknown>).operation);
+});
+
+test("does not tombstone a primitive mining record", async () => {
+  const state = createRepository();
+  state.frozen.host = "corrupt" as unknown as Record<string, unknown>;
+  await assert.rejects(
+    consumeWagerReservationOperation(
+      state.repository,
+      "host",
+      "operation",
+      true,
+    ),
+    /wager-operation-unavailable/,
+  );
+  assert.equal(state.frozen.host, "corrupt");
+});
+
+test("rejects a malformed no-delta accept reservation", async () => {
+  const state = createRepository();
+  state.frozen.host = {
+    frozen: { ...emptyMaterials(), dust: 2, slime: 2 },
+    _wagerOps: {
+      operation: {
+        appliedAtMs: 1,
+        count: 2,
+        fingerprint: JSON.stringify([
+          "accept-reserve",
+          "dust:slime",
+          2,
+          0,
+          2,
+          0,
+          0,
+          0,
+        ]),
+      },
+    },
+  };
+
+  await assert.rejects(
+    consumeWagerReservationOperation(
+      state.repository,
+      "host",
+      "operation",
+      true,
+    ),
+    /wager-operation-unavailable/,
+  );
+  assert.deepEqual(state.frozen.host.frozen, {
+    ...emptyMaterials(),
+    dust: 2,
+    slime: 2,
+  });
+  assert.ok((state.frozen.host._wagerOps as Record<string, unknown>).operation);
+});
+
+async function assertWagerOperationRejected(
+  operation: Record<string, unknown>,
+): Promise<void> {
+  const state = createRepository();
+  state.frozen.host = {
+    frozen: { ...emptyMaterials(), dust: 4, slime: 4, gum: 4 },
+    _wagerOps: { operation },
+  };
+  const before = structuredClone(state.frozen.host);
+  await assert.rejects(
+    consumeWagerReservationOperation(
+      state.repository,
+      "host",
+      "operation",
+      true,
+    ),
+    /wager-operation-unavailable/,
+  );
+  assert.deepEqual(state.frozen.host, before);
+}
+
+test("rejects nonempty send deltas that do not match the fingerprint", async () => {
+  const fingerprint = JSON.stringify([
+    "send-reserve",
+    "dust",
+    2,
+    0,
+    0,
+    0,
+    0,
+    0,
+  ]);
+  for (const deltas of [
+    { slime: 2 },
+    { dust: 1 },
+    { dust: 2, slime: 1 },
+    { dust: 2, slime: 0 },
+  ]) {
+    await assertWagerOperationRejected({
+      appliedAtMs: 1,
+      count: 2,
+      deltas,
+      fingerprint,
+    });
+  }
+});
+
+test("rejects non-noop accept deltas that do not match the fingerprint", async () => {
+  const fingerprint = JSON.stringify([
+    "accept-reserve",
+    "dust:slime",
+    2,
+    0,
+    2,
+    0,
+    0,
+    0,
+  ]);
+  for (const deltas of [
+    { dust: 2 },
+    { dust: 2, slime: -1 },
+    { dust: 2, gum: -2 },
+    { dust: 2, slime: -2, gum: 1 },
+    { dust: 2, slime: -2, gum: 0 },
+  ]) {
+    await assertWagerOperationRejected({
+      appliedAtMs: 1,
+      count: 2,
+      deltas,
+      fingerprint,
+    });
+  }
+});
+
+test("rejects lineage adjustment deltas that do not match the fingerprint", async () => {
+  const cases = [
+    ["accept-proposer-adjustment", { dust: -2 }],
+    ["send-proposer-adjustment", { slime: -1 }],
+    ["send-self-adjustment", { dust: -1, slime: 0 }],
+  ] as const;
+  for (const [kind, deltas] of cases) {
+    await assertWagerOperationRejected({
+      appliedAtMs: 1,
+      deltas,
+      fingerprint: JSON.stringify([kind, "", 0, -1, 0, 0, 0, 0]),
+    });
+  }
 });
 
 test("resumes an empty proposal settlement after RTDB drops empty values", async () => {

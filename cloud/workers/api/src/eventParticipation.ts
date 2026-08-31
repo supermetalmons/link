@@ -1,5 +1,6 @@
 import { createGameVariantHelpers } from "@mons/shared/game-variants";
 import {
+  isEventPrizeEvent,
   isEventPrizeId,
   type ToggleEventPrizeSelectionRequest,
   type ToggleEventPrizeSelectionResponse,
@@ -64,6 +65,7 @@ export type EventParticipationDependencies = {
     event: EventRecord;
     nowMs: number;
     ownershipSnapshot?: EventOwnershipSnapshot | null;
+    prizeSelections?: unknown;
   }) => Promise<EventDueTransition>;
   lockManager?: EventLockManager;
   now?: () => number;
@@ -210,6 +212,35 @@ async function readEvent(
   return cloneEvent(value);
 }
 
+async function readPrizeSelections(
+  eventId: string,
+  repository: EventParticipationRepository,
+  signal: AbortSignal,
+): Promise<unknown> {
+  if (!isEventPrizeEvent(eventId)) return undefined;
+  const selections = await repository.getRtdbPath(
+    `eventPrizeSelections/${eventId}`,
+    undefined,
+    signal,
+  );
+  return selections === null || selections === undefined
+    ? {}
+    : structuredClone(selections);
+}
+
+function createPrizeSelectionLoader(
+  eventId: string,
+  repository: EventParticipationRepository,
+  signal: AbortSignal,
+): () => Promise<unknown> {
+  let pending: Promise<unknown> | null = null;
+  return () => (pending ??= readPrizeSelections(eventId, repository, signal));
+}
+
+function getPrizeSelectionProfileIds(value: unknown): string[] {
+  return Object.keys(toRecord(value) || {});
+}
+
 function createDefaultLockManager(
   repository: EventParticipationRepository,
   signal: AbortSignal,
@@ -283,6 +314,24 @@ function isSameParticipant(
   return (Object.keys(expected) as Array<keyof EventParticipantSnapshot>).every(
     (key) => value[key] === expected[key],
   );
+}
+
+function participantFromCanonicalParent(
+  value: unknown,
+  loginUid: string,
+): EventParticipantSnapshot {
+  const matches = Object.entries(toRecord(value) || {}).filter(
+    ([, participant]) =>
+      normalizeString(toRecord(participant)?.loginUid) === loginUid,
+  );
+  if (matches.length !== 1) {
+    throw new AuthApiFailure(
+      503,
+      "unavailable",
+      "event-participation-service-unavailable",
+    );
+  }
+  return directParticipantSnapshot(matches[0][1], matches[0][0], loginUid);
 }
 
 async function persistDueTransition(
@@ -455,19 +504,56 @@ export async function joinEvent(
   try {
     const event = await readEvent(eventId, repository, signal);
     const participants = toRecord(event.participants) || {};
+    const loadPrizeSelections = createPrizeSelectionLoader(
+      eventId,
+      repository,
+      signal,
+    );
     const nowMs = now();
+    if (
+      event.status === "scheduled" &&
+      typeof event.startAtMs === "number" &&
+      nowMs >= event.startAtMs &&
+      participantCount(event) < 2
+    ) {
+      const prizeSelections = await loadPrizeSelections();
+      const dueTransition = await buildDueUpdates({
+        eventId,
+        event,
+        nowMs,
+        ownershipSnapshot: null,
+        prizeSelections,
+      });
+      await persistDueTransition(
+        eventId,
+        dueTransition,
+        repository,
+        lockManager,
+        lockHandle,
+        signal,
+        "Event is busy. Please try joining again.",
+      );
+      throw new AuthApiFailure(
+        409,
+        "failed-precondition",
+        "This event is no longer accepting participants.",
+      );
+    }
     const directParticipation = applyOwnershipPolicy(() =>
       directParticipantParticipation(event, identity.uid),
     );
     let ownershipSnapshot: EventOwnershipSnapshot | null = null;
+    let prizeSelections: unknown;
     let profile: GameplayProfile | null = null;
     let existingParticipantProfileId = directParticipation.profileId || "";
     if (
       !directParticipation.isParticipant ||
       (typeof event.startAtMs === "number" && nowMs >= event.startAtMs)
     ) {
+      prizeSelections = await loadPrizeSelections();
       ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
         loginUids: [identity.uid],
+        profileIds: getPrizeSelectionProfileIds(prizeSelections),
       });
     }
     if (!directParticipation.isParticipant) {
@@ -506,6 +592,7 @@ export async function joinEvent(
         event,
         nowMs,
         ownershipSnapshot,
+        prizeSelections,
       });
       await persistDueTransition(
         eventId,
@@ -557,13 +644,15 @@ export async function joinEvent(
       [`events/${eventId}/updatedAtMs`]: nowMs,
     };
     const settleNowMs = now();
-    if (
-      !ownershipSnapshot &&
-      typeof event.startAtMs === "number" &&
-      settleNowMs >= event.startAtMs
-    ) {
+    const isDueAtSettle =
+      typeof event.startAtMs === "number" && settleNowMs >= event.startAtMs;
+    if (isDueAtSettle) {
+      prizeSelections = await loadPrizeSelections();
+    }
+    if (!ownershipSnapshot && isDueAtSettle) {
       ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
         loginUids: [identity.uid],
+        profileIds: getPrizeSelectionProfileIds(prizeSelections),
       });
     }
     const dueTransition = await buildDueUpdates({
@@ -571,6 +660,7 @@ export async function joinEvent(
       event,
       nowMs: settleNowMs,
       ownershipSnapshot,
+      prizeSelections: isDueAtSettle ? prizeSelections : undefined,
     });
     let expectedTransitionStatus: "active" | "dismissed" | undefined;
     if (dueTransition.didChange) {
@@ -586,14 +676,25 @@ export async function joinEvent(
       }
       expectedTransitionStatus = transitionStatus;
     }
+    let storedParticipant = participant;
+    const participantsPath = `events/${eventId}/participants`;
+    if (Object.hasOwn(updates, participantsPath)) {
+      delete updates[
+        `events/${eventId}/participants/${existingParticipantProfileId}`
+      ];
+      storedParticipant = participantFromCanonicalParent(
+        updates[participantsPath],
+        participant.loginUid,
+      );
+    }
     await requireOwnedLock(
       lockManager,
       lockHandle,
       "Event is busy. Please try joining again.",
     );
-    const storedParticipant = await persistJoin(
+    storedParticipant = await persistJoin(
       eventId,
-      participant,
+      storedParticipant,
       updates,
       expectedTransitionStatus,
       repository,
@@ -640,10 +741,18 @@ export async function removeEventParticipant(
     const targetProfileId =
       normalizeString(targetParticipant?.profileId) || participantProfileId;
     const directCreator = identity.uid === creatorLoginUid;
+    const loadPrizeSelections = createPrizeSelectionLoader(
+      eventId,
+      repository,
+      signal,
+    );
     let ownershipSnapshot: EventOwnershipSnapshot | null = null;
+    let prizeSelections: unknown;
     if (!directCreator) {
+      prizeSelections = await loadPrizeSelections();
       ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
         loginUids: [identity.uid],
+        profileIds: getPrizeSelectionProfileIds(prizeSelections),
       });
       if (
         !applyOwnershipPolicy(() =>
@@ -680,15 +789,24 @@ export async function removeEventParticipant(
         "This event cannot be updated right now.",
       );
     }
-    if (nowMs >= event.startAtMs) {
-      ownershipSnapshot ||= await loadOwnershipSnapshot(event, repository, {
-        loginUids: [identity.uid],
-      });
+    const startAtMs = event.startAtMs;
+    const persistDueTransitionIfNeeded = async (
+      dueNowMs: number,
+    ): Promise<boolean> => {
+      if (dueNowMs < startAtMs) return false;
+      prizeSelections = await loadPrizeSelections();
+      if (!ownershipSnapshot && participantCount(event) >= 2) {
+        ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
+          loginUids: [identity.uid],
+          profileIds: getPrizeSelectionProfileIds(prizeSelections),
+        });
+      }
       const dueTransition = await buildDueUpdates({
         eventId,
         event,
-        nowMs,
+        nowMs: dueNowMs,
         ownershipSnapshot,
+        prizeSelections,
       });
       await persistDueTransition(
         eventId,
@@ -699,6 +817,9 @@ export async function removeEventParticipant(
         signal,
         "Event is busy. Please try removing again.",
       );
+      return true;
+    };
+    if (await persistDueTransitionIfNeeded(nowMs)) {
       throw new AuthApiFailure(
         409,
         "failed-precondition",
@@ -750,25 +871,7 @@ export async function removeEventParticipant(
       "Event is busy. Please try removing again.",
     );
     const commitNowMs = now();
-    if (commitNowMs >= event.startAtMs) {
-      ownershipSnapshot ||= await loadOwnershipSnapshot(event, repository, {
-        loginUids: [identity.uid],
-      });
-      const dueTransition = await buildDueUpdates({
-        eventId,
-        event,
-        nowMs: commitNowMs,
-        ownershipSnapshot,
-      });
-      await persistDueTransition(
-        eventId,
-        dueTransition,
-        repository,
-        lockManager,
-        lockHandle,
-        signal,
-        "Event is busy. Please try removing again.",
-      );
+    if (await persistDueTransitionIfNeeded(commitNowMs)) {
       throw new AuthApiFailure(
         409,
         "failed-precondition",

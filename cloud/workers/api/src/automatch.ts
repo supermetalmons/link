@@ -36,7 +36,10 @@ import type {
   GameplayProfile,
   GameplayRepository,
 } from "./gameplayRepository.ts";
-import { buildAutomatchProfileGameProjectionOutboxUpdates } from "./profileGameProjectionOutbox.ts";
+import {
+  buildAutomatchProfileGameProjectionOutboxUpdates,
+  getAutomatchProfileGameProjectionOutboxPath,
+} from "./profileGameProjectionOutbox.ts";
 import type {
   AutomatchProfileGameProjectionTask,
   ProfileGameProjectionTask,
@@ -65,6 +68,9 @@ const AUTOMATCH_OWNER_LOCK_MAX_RETRY_MS = 1_000;
 const AUTOMATCH_LOGIN_UID_QUERY_CONCURRENCY = 10;
 const AUTOMATCH_UID_LOOKUP_LIMIT = 2;
 const AUTOMATCH_OWNER_LOGIN_UID_LIMIT = 512;
+const AUTOMATCH_CANCELLATION_RECONCILE_TIMEOUT_MS = 1_000;
+const AUTOMATCH_CANCELLATION_RECONCILE_DELAY_MS = 50;
+const AUTOMATCH_CANCELLATION_FINAL_READ_TIMEOUT_MS = 250;
 const gameVariantHelpers = createGameVariantHelpers(monsRules);
 
 type AutomatchDependencies = {
@@ -81,7 +87,7 @@ type AutomatchDependencies = {
   now?: () => number;
   random?: RandomSource;
   signal?: AbortSignal;
-  wait?: (milliseconds: number) => Promise<void>;
+  wait?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
 };
 
 export type QueuedAutomatch = {
@@ -207,6 +213,22 @@ export async function findOwnedQueuedAutomatches(
   }
   signal?.throwIfAborted();
   return allCandidates.sort(compareQueuedAutomatches);
+}
+
+async function didClearOwnedQueuedAutomatches(
+  loginUids: readonly string[],
+  repository: GameplayRepository,
+): Promise<boolean> {
+  try {
+    const queued = await findOwnedQueuedAutomatches(
+      loginUids,
+      repository,
+      AbortSignal.timeout(AUTOMATCH_TOTAL_TIMEOUT_MS),
+    );
+    return queued.length === 0;
+  } catch {
+    return false;
+  }
 }
 
 export async function findOwnedQueuedAutomatch(
@@ -350,6 +372,77 @@ function automatchTelegramDeliveryVersion(value: unknown): number | null {
     : null;
 }
 
+async function readAutomatchCancellationProof(
+  inviteId: string,
+  expectedUid: string,
+  requestId: string,
+  repository: GameplayRepository,
+  signal: AbortSignal,
+): Promise<boolean> {
+  try {
+    const [queueValue, inviteValue, outboxRequestId] = await Promise.all([
+      repository.getRtdbPath(`automatch/${inviteId}`, undefined, signal),
+      repository.getRtdbPath(`invites/${inviteId}`, undefined, signal),
+      repository.getRtdbPath(
+        `${getAutomatchProfileGameProjectionOutboxPath(inviteId)}/requestId`,
+        undefined,
+        signal,
+      ),
+    ]);
+    const invite = toRecord(inviteValue);
+    return Boolean(
+      queueValue === null &&
+      normalizeString(invite?.hostId) === expectedUid &&
+      !normalizeString(invite?.guestId) &&
+      invite?.automatchStateHint === "canceled" &&
+      typeof invite.automatchCanceledAt === "number" &&
+      Number.isFinite(invite.automatchCanceledAt) &&
+      normalizeString(outboxRequestId) === requestId,
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function didCommitAutomatchCancellation(
+  inviteId: string,
+  expectedUid: string,
+  requestId: string,
+  repository: GameplayRepository,
+  signal: AbortSignal,
+  wait: (milliseconds: number, signal: AbortSignal) => Promise<void>,
+): Promise<boolean> {
+  for (
+    let elapsedMs = 0;
+    elapsedMs < AUTOMATCH_CANCELLATION_RECONCILE_TIMEOUT_MS;
+    elapsedMs += AUTOMATCH_CANCELLATION_RECONCILE_DELAY_MS
+  ) {
+    if (
+      await readAutomatchCancellationProof(
+        inviteId,
+        expectedUid,
+        requestId,
+        repository,
+        signal,
+      )
+    ) {
+      return true;
+    }
+    try {
+      await wait(AUTOMATCH_CANCELLATION_RECONCILE_DELAY_MS, signal);
+    } catch {
+      break;
+    }
+  }
+  return readAutomatchCancellationProof(
+    inviteId,
+    expectedUid,
+    requestId,
+    repository,
+    AbortSignal.timeout(AUTOMATCH_CANCELLATION_FINAL_READ_TIMEOUT_MS),
+  );
+}
+
 export async function cancelQueuedAutomatch(
   queued: QueuedAutomatch,
   repository: GameplayRepository,
@@ -449,10 +542,23 @@ export async function cancelQueuedAutomatch(
     );
   } catch (error) {
     if (!patchAttempted) throw error;
-    const current = await repository
-      .getRtdbPath(`automatch/${queued.inviteId}`, undefined, signal)
-      .catch(() => undefined);
-    if (current !== null) throw error;
+    const reconciliationSignal = AbortSignal.timeout(
+      AUTOMATCH_CANCELLATION_RECONCILE_TIMEOUT_MS,
+    );
+    if (
+      !(await didCommitAutomatchCancellation(
+        queued.inviteId,
+        expectedUid,
+        profileGameProjectionTask.requestId,
+        repository,
+        reconciliationSignal,
+        dependencies.wait ||
+          ((milliseconds, waitSignal) =>
+            scheduler.wait(milliseconds, { signal: waitSignal })),
+      ))
+    ) {
+      throw error;
+    }
     canceled = true;
   }
   if (!canceled) return false;
@@ -573,34 +679,55 @@ export async function cancelOwnedQueuedAutomatches(
     async () => {
       let canceledAny = false;
       let attempts = 0;
+      let lastPassFullyCanceled = false;
       let previousBlockedSignature = "";
       while (true) {
-        const queued = await findOwnedQueuedAutomatches(
-          requester.loginUids,
-          repository,
-          signal,
-        );
+        let queued: QueuedAutomatch[];
+        try {
+          queued = await findOwnedQueuedAutomatches(
+            requester.loginUids,
+            repository,
+            signal,
+          );
+        } catch (error) {
+          if (
+            lastPassFullyCanceled &&
+            signal.aborted &&
+            (await didClearOwnedQueuedAutomatches(
+              requester.loginUids,
+              repository,
+            ))
+          ) {
+            return canceledAny;
+          }
+          throw error;
+        }
+        lastPassFullyCanceled = false;
         if (queued.length === 0) return canceledAny;
+        let allCandidatesCanceled = true;
         let madeProgress = false;
         for (const candidate of queued) {
           if (attempts >= AUTOMATCH_OWNER_LOGIN_UID_LIMIT) {
             throw profileOwnershipUnavailable();
           }
           attempts += 1;
-          if (
-            await cancelQueuedAutomatch(
-              candidate,
-              repository,
-              dependencies,
-              signal,
-            )
-          ) {
+          const canceled = await cancelQueuedAutomatch(
+            candidate,
+            repository,
+            dependencies,
+            signal,
+          );
+          if (canceled) {
             canceledAny = true;
             madeProgress = true;
+          } else {
+            allCandidatesCanceled = false;
           }
         }
         if (madeProgress) {
+          if (queued.length === 1) return true;
           previousBlockedSignature = "";
+          lastPassFullyCanceled = allCandidatesCanceled;
           continue;
         }
         const blockedSignature = JSON.stringify(

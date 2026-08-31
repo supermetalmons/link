@@ -146,18 +146,14 @@ const createProfileLinkProjectionCore = ({
         ? PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP
         : PROFILE_LINK_CATCHUP_MAX_INVITES;
     const normalizedMatchCursor = normalizeString(matchCursor) || "";
-    const matches =
-      (await repository.getMatches(normalizedLoginUid, {
-        orderBy: "$key",
-        limitToFirst: matchLimit + (normalizedMatchCursor ? 2 : 1),
-        ...(normalizedMatchCursor ? { startAt: normalizedMatchCursor } : {}),
-      })) || Object.create(null);
+    const allMatchIds =
+      (await repository.getMatchIds(normalizedLoginUid)) || [];
     const startedAt = now();
     const shouldContinue = () =>
       now() - startedAt < PROFILE_LINK_CATCHUP_TIMEOUT_MS;
-    const pageMatchIds = Object.keys(matches)
-      .sort()
-      .filter((matchId) => matchId > normalizedMatchCursor);
+    const pageMatchIds = allMatchIds
+      .filter((matchId) => matchId > normalizedMatchCursor)
+      .sort();
     const matchIds = pageMatchIds.slice(0, matchLimit);
     const inviteExistenceCache = new Map();
     const inviteIds = [];

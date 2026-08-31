@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { LEGACY_CORE_PRIZES_EVENT_ID } from "@mons/shared/event-prizes";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import type { ProfileOwnershipSnapshot } from "../src/profileOwnership.ts";
@@ -462,6 +463,103 @@ test("postpones through a new Workflow and persists its outbox atomically", asyn
   );
 });
 
+test("overdue postpone migrates prize selections in its transition update", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const event = {
+    eventId,
+    status: "scheduled",
+    startAtMs: 100,
+    updatedAtMs: 1,
+    createdByLoginUid: identity.uid,
+    createdByProfileId: profileId,
+    participants: {
+      "retired-profile": {
+        ...participant("retired-profile", 1),
+        loginUid: identity.uid,
+      },
+      opponent: participant("opponent", 2),
+    },
+  };
+  const state = createRepository({
+    [`events/${eventId}`]: event,
+    [`eventPrizeSelections/${eventId}/retired-profile`]: "1092",
+  });
+  state.repository.resolveCanonicalProfileId = async (candidateProfileId) =>
+    candidateProfileId === "retired-profile" ? profileId : candidateProfileId;
+
+  await assert.rejects(
+    postponeEventStart(
+      workflowEnvironment(() => undefined),
+      identity,
+      { eventId, postponeByMinutes: 5 },
+      {
+        repository: state.repository,
+        now: () => 100,
+        random: () => 0,
+        sleep: async () => undefined,
+      },
+    ),
+    (error) =>
+      error instanceof AuthApiFailure &&
+      error.status === 409 &&
+      error.message === "This event can no longer be postponed.",
+  );
+  const transition = state.patches.find(
+    (patch) => patch[`events/${eventId}/status`] === "active",
+  );
+  assert.ok(transition);
+  assert.deepEqual(transition[`eventPrizeSelections/${eventId}`], {
+    [profileId]: "1092",
+  });
+  assert.ok(transition[`events/${eventId}/participants`]);
+});
+
+test("direct overdue postpone dismisses a one-player prize event without D1", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const event = {
+    eventId,
+    status: "scheduled",
+    startAtMs: 100,
+    updatedAtMs: 1,
+    createdByLoginUid: identity.uid,
+    createdByProfileId: profileId,
+    participants: { [profileId]: participant(profileId, 1) },
+  };
+  const state = createRepository({
+    [`events/${eventId}`]: event,
+    [`eventPrizeSelections/${eventId}/${profileId}`]: "1092",
+  });
+  let ownershipReads = 0;
+  state.repository.readProfileOwnershipSnapshot = async () => {
+    ownershipReads += 1;
+    throw new Error("d1-unavailable");
+  };
+
+  await assert.rejects(
+    postponeEventStart(
+      workflowEnvironment(() => undefined),
+      identity,
+      { eventId, postponeByMinutes: 5 },
+      {
+        repository: state.repository,
+        now: () => 100,
+        random: () => 0,
+        sleep: async () => undefined,
+      },
+    ),
+    (error) =>
+      error instanceof AuthApiFailure &&
+      error.status === 409 &&
+      error.message === "This event can no longer be postponed.",
+  );
+  const transition = state.patches.find(
+    (patch) => patch[`events/${eventId}/status`] === "dismissed",
+  );
+  assert.ok(transition);
+  assert.equal(transition[`eventPrizeSelections/${eventId}`], null);
+  assert.equal(ownershipReads, 0);
+});
+
 test("direct creator UID postpones without reading D1 ownership", async () => {
   const event = {
     eventId: "event-1",
@@ -682,6 +780,120 @@ test("rejects alternate creator access when login and profile disagree", async (
   assert.deepEqual(state.patches, []);
 });
 
+test("rate limits public event sync before runtime I/O", async () => {
+  const keys: string[] = [];
+  const environment = {
+    ...workflowEnvironment(() => undefined),
+    AUTH_RATE_LIMITER: {
+      limit: async ({ key }: RateLimitOptions) => {
+        keys.push(key);
+        return { success: false };
+      },
+    },
+  } as Env;
+  const state = createRepository();
+  let runtimeIo = 0;
+  state.repository.getRtdbPath = async () => {
+    runtimeIo += 1;
+    throw new Error("unexpected-rtdb-read");
+  };
+  state.repository.readProfileOwnershipSnapshot = async () => {
+    runtimeIo += 1;
+    throw new Error("unexpected-d1-read");
+  };
+  state.repository.transactRtdbPath = async () => {
+    runtimeIo += 1;
+    throw new Error("unexpected-lock");
+  };
+
+  await assert.rejects(
+    syncEventState(
+      environment,
+      identity,
+      { eventId: "event-1" },
+      {
+        repository: state.repository,
+      },
+    ),
+    (error) =>
+      error instanceof AuthApiFailure &&
+      error.status === 429 &&
+      error.code === "resource-exhausted" &&
+      error.message === "Too many event sync attempts.",
+  );
+  assert.deepEqual(keys, ["event-sync:creator-login:event-1"]);
+  assert.equal(runtimeIo, 0);
+});
+
+test("normalizes event IDs before applying the public sync limit", async () => {
+  const keys: string[] = [];
+  const environment = {
+    ...workflowEnvironment(() => undefined),
+    AUTH_RATE_LIMITER: {
+      limit: async ({ key }: RateLimitOptions) => {
+        keys.push(key);
+        return { success: false };
+      },
+    },
+  } as Env;
+
+  for (const eventId of ["event-1", "  event-1  "]) {
+    await assert.rejects(
+      syncEventState(environment, identity, { eventId }),
+      (error) =>
+        error instanceof AuthApiFailure &&
+        error.status === 429 &&
+        error.code === "resource-exhausted",
+    );
+  }
+  assert.deepEqual(keys, [
+    "event-sync:creator-login:event-1",
+    "event-sync:creator-login:event-1",
+  ]);
+});
+
+test("fails closed before event sync runtime creation when limiting fails", async () => {
+  const environment = {
+    ...workflowEnvironment(() => undefined),
+    AUTH_RATE_LIMITER: {
+      limit: async () => {
+        throw new Error("limiter-unavailable");
+      },
+    },
+  } as Env;
+  const state = createRepository();
+  let runtimeIo = 0;
+  state.repository.getRtdbPath = async () => {
+    runtimeIo += 1;
+    throw new Error("unexpected-rtdb-read");
+  };
+  state.repository.readProfileOwnershipSnapshot = async () => {
+    runtimeIo += 1;
+    throw new Error("unexpected-d1-read");
+  };
+  state.repository.transactRtdbPath = async () => {
+    runtimeIo += 1;
+    throw new Error("unexpected-lock");
+  };
+
+  await assert.rejects(
+    syncEventState(
+      environment,
+      identity,
+      { eventId: "event-1" },
+      {
+        repository: state.repository,
+      },
+    ),
+    (error) =>
+      error instanceof AuthApiFailure &&
+      error.status === 503 &&
+      error.code === "unavailable" &&
+      error.message === "rate-limit-unavailable",
+  );
+  assert.equal(runtimeIo, 0);
+});
+
 test("synchronizes a future scheduled event through the portable runtime", async () => {
   const event = {
     eventId: "event-1",
@@ -710,6 +922,100 @@ test("synchronizes a future scheduled event through the portable runtime", async
     didChange: false,
     event,
   });
+});
+
+test("due public sync migrates prize selections with its start update", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const event = {
+    eventId,
+    status: "scheduled",
+    startAtMs: 100,
+    updatedAtMs: 1,
+    createdByLoginUid: identity.uid,
+    createdByProfileId: profileId,
+    participants: {
+      "retired-profile": {
+        ...participant("retired-profile", 1),
+        loginUid: identity.uid,
+      },
+      opponent: participant("opponent", 2),
+    },
+  };
+  const state = createRepository({
+    [`events/${eventId}`]: event,
+    [`eventPrizeSelections/${eventId}/retired-profile`]: "1092",
+  });
+  let ownershipReads = 0;
+  state.repository.resolveCanonicalProfileIds = async (profileIds) => {
+    ownershipReads += 1;
+    return profileIds.map((candidateProfileId) =>
+      candidateProfileId === "retired-profile" ? profileId : candidateProfileId,
+    );
+  };
+
+  const response = await syncEventState(
+    workflowEnvironment(() => undefined),
+    identity,
+    { eventId },
+    {
+      repository: state.repository,
+      now: () => 100,
+      random: () => 0,
+      sleep: async () => undefined,
+    },
+  );
+  assert.ok("didChange" in response && response.didChange);
+  const transition = state.patches.find(
+    (patch) => patch[`events/${eventId}/status`] === "active",
+  );
+  assert.ok(transition);
+  assert.deepEqual(transition[`eventPrizeSelections/${eventId}`], {
+    [profileId]: "1092",
+  });
+  assert.ok(transition[`events/${eventId}/participants`]);
+  assert.equal(ownershipReads, 1);
+});
+
+test("direct public sync dismisses a one-player prize event without D1", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const event = {
+    eventId,
+    status: "scheduled",
+    startAtMs: 100,
+    updatedAtMs: 1,
+    createdByLoginUid: identity.uid,
+    createdByProfileId: profileId,
+    participants: { [profileId]: participant(profileId, 1) },
+  };
+  const state = createRepository({
+    [`events/${eventId}`]: event,
+    [`eventPrizeSelections/${eventId}/${profileId}`]: "1092",
+  });
+  let ownershipReads = 0;
+  state.repository.readProfileOwnershipSnapshot = async () => {
+    ownershipReads += 1;
+    throw new Error("d1-unavailable");
+  };
+
+  const response = await syncEventState(
+    workflowEnvironment(() => undefined),
+    identity,
+    { eventId },
+    {
+      repository: state.repository,
+      now: () => 100,
+      random: () => 0,
+      sleep: async () => undefined,
+    },
+  );
+  assert.ok("didChange" in response && response.didChange);
+  assert.equal(response.event.status, "dismissed");
+  const transition = state.patches.find(
+    (patch) => patch[`events/${eventId}/status`] === "dismissed",
+  );
+  assert.ok(transition);
+  assert.equal(transition[`eventPrizeSelections/${eventId}`], null);
+  assert.equal(ownershipReads, 0);
 });
 
 test("rejects duplicate canonical participants before starting an event", async () => {
@@ -1263,6 +1569,79 @@ test("uses one ownership snapshot for every later-round invite", async () => {
   assert.ok("didChange" in response && response.didChange);
   assert.equal(ownershipReads, 1);
   assert.ok(getPath(state.values, "invites"));
+});
+
+test("preserves queried legacy selections for active and ended prize events", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  for (const status of ["active", "ended"] as const) {
+    const final = {
+      ...match("0_0", profileId, "runner-up"),
+      inviteId: "final-invite",
+      status: "host",
+      resolvedAtMs: 500,
+      winnerProfileId: profileId,
+      loserProfileId: "runner-up",
+    };
+    const event = {
+      eventId,
+      status,
+      startAtMs: 1,
+      endedAtMs: status === "ended" ? 500 : null,
+      updatedAtMs: 500,
+      createdByLoginUid: identity.uid,
+      createdByProfileId: profileId,
+      currentRoundIndex: 0,
+      winnerProfileId: status === "ended" ? profileId : null,
+      winnerDisplayName: status === "ended" ? profileId.toUpperCase() : null,
+      prizeSelectionsLockedAtMs: status === "ended" ? 500 : null,
+      supportsThirdPlaceMatch: false,
+      participants: {
+        [profileId]: participant(profileId, 1),
+        "runner-up": participant("runner-up", 2),
+      },
+      rounds: {
+        0: {
+          status: status === "ended" ? "completed" : "active",
+          completedAtMs: status === "ended" ? 500 : null,
+          matches: { "0_0": final },
+        },
+      },
+    };
+    const state = createRepository({
+      [`events/${eventId}`]: event,
+      [`eventPrizeSelections/${eventId}/legacy-selection-profile`]: "1514",
+    });
+    let queriedProfileIds: string[] = [];
+    let ownershipReads = 0;
+    state.repository.resolveCanonicalProfileIds = async (profileIds) => {
+      ownershipReads += 1;
+      queriedProfileIds = profileIds;
+      return profileIds.map((candidateProfileId) =>
+        candidateProfileId === "legacy-selection-profile"
+          ? profileId
+          : candidateProfileId,
+      );
+    };
+
+    await syncEventState(
+      workflowEnvironment(() => undefined),
+      identity,
+      { eventId },
+      {
+        repository: state.repository,
+        now: () => 1_000,
+        random: () => 0,
+        sleep: async () => undefined,
+      },
+    );
+
+    assert.equal(
+      getPath(state.values, `events/${eventId}/prizeAssignments/1/prizeId`),
+      "1514",
+    );
+    assert.ok(queriedProfileIds.includes("legacy-selection-profile"));
+    assert.equal(ownershipReads, 1);
+  }
 });
 
 test("does not lock active prize selections when D1 ownership fails", async () => {

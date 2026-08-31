@@ -4,7 +4,7 @@ import type { FirebaseRtdbQuery } from "../src/firebaseRtdb.ts";
 import { createProfileLinkProjectionRuntime } from "../src/profileLinkProfileGameProjection.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
-test("profile-link projection reads a bounded match page", async () => {
+test("profile-link projection reads match keys with one unfiltered shallow query", async () => {
   const reads: Array<{ path: string; query?: FirebaseRtdbQuery }> = [];
   const runtime = createProfileLinkProjectionRuntime(TELEGRAM_TEST_ENV as Env, {
     readProfileOwnershipSnapshot: async ({ loginUids, profileIds }) => {
@@ -33,8 +33,8 @@ test("profile-link projection reads a bounded match page", async () => {
           throw new Error("unexpected-rtdb-profile-owner-read");
         }
         if (path === "players/login-uid/matches") {
-          assert.deepEqual(query, { orderBy: "$key", limitToFirst: 21 });
-          return { "invite-id": {} };
+          assert.deepEqual(query, { shallow: true });
+          return { "invite-id": true };
         }
         if (path === "invites/invite-id") {
           assert.deepEqual(query, { shallow: true });
@@ -69,7 +69,7 @@ test("profile-link projection reads a bounded match page", async () => {
     [
       {
         path: "players/login-uid/matches",
-        query: { orderBy: "$key", limitToFirst: 21 },
+        query: { shallow: true },
       },
       {
         path: "invites/invite-id",

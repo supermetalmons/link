@@ -93,6 +93,21 @@ const createEventRuntime = (dependencies) => {
 
   const cloneValue = (value) => JSON.parse(JSON.stringify(value));
 
+  const readPrizeSelections = async (eventId) => {
+    const selectionsSnapshot = await admin
+      .database()
+      .ref(`eventPrizeSelections/${eventId}`)
+      .once("value");
+    const selections = selectionsSnapshot.val();
+    if (selections === null || selections === undefined) return {};
+    return typeof selections === "object" ? cloneValue(selections) : selections;
+  };
+
+  const getPrizeSelectionProfileIds = (value) =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? Object.keys(value)
+      : [];
+
   const buildEventDisplayName = (profile) => {
     return getDisplayNameFromAddress(
       profile.username ?? "",
@@ -416,12 +431,21 @@ const createEventRuntime = (dependencies) => {
       const creatorLoginUid = normalizeString(event.createdByLoginUid);
       const creatorProfileId = normalizeString(event.createdByProfileId);
       const nowMs = getNowMs();
+      const prizeSelections =
+        isEventPrizeEvent(eventId) &&
+        normalizeString(event.status) === "scheduled" &&
+        typeof event.startAtMs === "number" &&
+        nowMs >= event.startAtMs
+          ? await readPrizeSelections(eventId)
+          : undefined;
       const directCreator = request.auth.uid === creatorLoginUid;
+      const dueParticipantCount = getEventParticipantIds(event).length;
       const ownershipSnapshot =
-        directCreator && nowMs < event.startAtMs
+        directCreator && (nowMs < event.startAtMs || dueParticipantCount < 2)
           ? null
           : await loadOwnershipSnapshot(event, {
               loginUids: [request.auth.uid],
+              profileIds: getPrizeSelectionProfileIds(prizeSelections),
             });
       if (
         !requesterOwnsProfileReference({
@@ -457,6 +481,7 @@ const createEventRuntime = (dependencies) => {
           event,
           nowMs,
           ownershipSnapshot,
+          prizeSelections,
         });
         if (dueTransition.didChange) {
           const lockOwned = await isEventLockStillOwned(lockHandle);
@@ -776,35 +801,33 @@ const createEventRuntime = (dependencies) => {
       }
       const event = cloneValue(lockedEventSnapshot.val() || {});
       const nowMs = getNowMs();
-      let prizeSelections = {};
+      let prizeSelections;
       if (
         isEventPrizeEvent(eventId) &&
-        (event.status === "active" || event.status === "ended")
+        (event.status === "active" ||
+          event.status === "ended" ||
+          (event.status === "scheduled" &&
+            typeof event.startAtMs === "number" &&
+            nowMs >= event.startAtMs))
       ) {
-        const selectionsSnapshot = await admin
-          .database()
-          .ref(`eventPrizeSelections/${eventId}`)
-          .once("value");
-        prizeSelections =
-          selectionsSnapshot.val() &&
-          typeof selectionsSnapshot.val() === "object"
-            ? cloneValue(selectionsSnapshot.val())
-            : {};
+        prizeSelections = await readPrizeSelections(eventId);
       }
       const directParticipation = enforceParticipantGate
         ? directRequesterParticipation(event, requesterUid)
         : null;
+      const scheduledEventIsDue =
+        event.status === "scheduled" &&
+        typeof event.startAtMs === "number" &&
+        nowMs >= event.startAtMs;
       const needsOwnershipSnapshot =
         event.status === "active" ||
-        (event.status === "scheduled" &&
-          typeof event.startAtMs === "number" &&
-          nowMs >= event.startAtMs) ||
+        (scheduledEventIsDue && getEventParticipantIds(event).length >= 2) ||
         (event.status === "ended" && isEventPrizeEvent(eventId)) ||
         (enforceParticipantGate && !directParticipation?.isParticipant);
       const ownershipSnapshot = needsOwnershipSnapshot
         ? await loadOwnershipSnapshot(event, {
             loginUids: enforceParticipantGate ? [requesterUid] : [],
-            profileIds: Object.keys(prizeSelections),
+            profileIds: getPrizeSelectionProfileIds(prizeSelections),
           })
         : null;
       if (enforceParticipantGate) {
@@ -847,6 +870,7 @@ const createEventRuntime = (dependencies) => {
           event,
           nowMs,
           ownershipSnapshot,
+          prizeSelections,
         });
         Object.assign(updates, dueTransition.updates);
         didChange = dueTransition.didChange;

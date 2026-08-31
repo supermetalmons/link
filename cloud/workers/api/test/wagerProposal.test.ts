@@ -18,6 +18,8 @@ import type {
 } from "../src/profileOwnership.ts";
 import {
   acceptWagerProposal,
+  consumeWagerReservationOperation,
+  createWagerReservationOperationId,
   removeWagerProposal,
   sendWagerProposal,
 } from "../src/wagerProposal.ts";
@@ -76,6 +78,10 @@ function ownershipSnapshot(
 function repository(
   overrides: Partial<GameplayRepository> = {},
 ): GameplayRepository {
+  const locks = new Map<string, unknown>();
+  const transactRtdbPath =
+    overrides.transactRtdbPath ||
+    (async () => ({ committed: false, value: null }));
   const value: GameplayRepository = {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
@@ -91,8 +97,15 @@ function repository(
     getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
     patchRtdbRoot: async () => undefined,
     readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
-    transactRtdbPath: async () => ({ committed: false, value: null }),
     ...overrides,
+    transactRtdbPath: async (path, updater, signal) => {
+      if (path.startsWith("gameplayMutationLocks/")) {
+        const result = applyTransaction(updater, locks.get(path) ?? null);
+        if (result.committed) locks.set(path, result.value);
+        return result;
+      }
+      return transactRtdbPath(path, updater, signal);
+    },
   };
   return value;
 }
@@ -244,6 +257,15 @@ test("wager contracts require exact request and response shapes", () => {
     }),
     false,
   );
+  assert.equal(
+    isWagerProposalSendRequest({
+      inviteId: "invite",
+      matchId: "match",
+      material: "dust",
+      count: Number.MAX_SAFE_INTEGER + 1,
+    }),
+    false,
+  );
   assert.equal(isWagerProposalSendResponse({ ok: true, count: 2 }), true);
   assert.equal(
     isWagerProposalSendResponse({
@@ -321,6 +343,32 @@ test("send reserves materials and persists an exact proposal", async () => {
   assert.equal(wager.proposals.host.createdAt, 100);
   assert.equal(typeof wager.proposals.host.operationId, "string");
   assert.deepEqual(wager.proposedBy, { host: true });
+});
+
+test("send fences its initial reservation with a fresh critical-phase signal", async () => {
+  const controller = new AbortController();
+  const miningSignals: Array<AbortSignal | undefined> = [];
+  await sendWagerProposal(
+    identity,
+    { inviteId: "invite", matchId: "match", material: "dust", count: 1 },
+    repository({
+      transactRtdbPath: async (path, updater, signal) => {
+        if (path.startsWith("players/")) {
+          miningSignals.push(signal);
+          return applyMiningTransaction(updater, {
+            dust: 0,
+            slime: 0,
+            gum: 0,
+            metal: 0,
+            ice: 0,
+          });
+        }
+        return applyTransaction(updater, null);
+      },
+    }),
+    { createCriticalPhaseSignal: () => controller.signal },
+  );
+  assert.deepEqual(miningSignals, [controller.signal]);
 });
 
 test("send creates an automatic agreement and normalizes both reservations", async () => {
@@ -435,6 +483,56 @@ test("send rolls back its reservation when the proposal is unavailable", async (
   assert.equal(materialsOnly(frozen).dust, 0);
 });
 
+test("send rejects a canonical reservation ID with the wrong operation kind", async () => {
+  const reservationOperationId = await createWagerReservationOperationId(
+    "send",
+    "invite",
+    "match",
+    "host",
+  );
+  const mining = {
+    frozen: { dust: 1, slime: 0, gum: 0, metal: 0, ice: 0 },
+    _wagerOps: {
+      [reservationOperationId]: {
+        appliedAtMs: 1,
+        count: 1,
+        deltas: { dust: 1 },
+        fingerprint: JSON.stringify([
+          "accept-reserve",
+          "dust:",
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+        ]),
+      },
+    },
+  };
+  let miningWrites = 0;
+  await assert.rejects(
+    sendWagerProposal(
+      identity,
+      { inviteId: "invite", matchId: "match", material: "dust", count: 1 },
+      repository({
+        getRtdbPath: async (path) =>
+          path === "invites/invite"
+            ? { hostId: "host", guestId: "guest" }
+            : path.startsWith("players/")
+              ? mining
+              : null,
+        transactRtdbPath: async (path, updater) => {
+          if (path.startsWith("players/")) miningWrites += 1;
+          return applyTransaction(updater, mining);
+        },
+      }),
+    ),
+    /wager-operation-unavailable/,
+  );
+  assert.equal(miningWrites, 0);
+});
+
 test("accept reserves the available count and clears both proposals", async () => {
   const transactions: Array<{ path: string; value: unknown }> = [];
   const patches: Array<Record<string, unknown>> = [];
@@ -538,7 +636,7 @@ test("accept rolls back its exact reservation after an agreement race", async ()
     repository({
       getRtdbPath: async () => {
         reads++;
-        return reads === 1
+        return reads <= 2
           ? { hostId: "host", guestId: "guest" }
           : { proposals: { guest: { material: "dust", count: 3 } } };
       },
@@ -628,7 +726,7 @@ test("send and accept preserve exact domain failure reasons", async () => {
         repository({
           getRtdbPath: async () => {
             reads++;
-            return reads === 1 ? { hostId: "host", guestId: "guest" } : wager;
+            return reads <= 2 ? { hostId: "host", guestId: "guest" } : wager;
           },
         }),
       ),
@@ -651,7 +749,7 @@ test("send and accept preserve exact domain failure reasons", async () => {
         }),
         getRtdbPath: async () => {
           reads++;
-          return reads === 1
+          return reads <= 2
             ? { hostId: "host", guestId: "guest" }
             : { proposals: { guest: { material: "dust", count: 2 } } };
         },
@@ -841,6 +939,505 @@ test("changed send input replaces an unreferenced stranded reservation", async (
     { ok: true },
   );
   assert.equal(materialsOnly(miningState).dust, 0);
+});
+
+test("changed send cleanup cannot release a competing proposal", async () => {
+  const reservationOperationId = await createWagerReservationOperationId(
+    "send",
+    "invite",
+    "match",
+    "host",
+  );
+  let wager: unknown = null;
+  let miningState: unknown = {
+    frozen: { dust: 3, slime: 0, gum: 0, metal: 0, ice: 0 },
+    _wagerOps: {
+      [reservationOperationId]: {
+        appliedAtMs: 1,
+        count: 3,
+        deltas: { dust: 3 },
+        fingerprint: JSON.stringify(["send-reserve", "dust", 3, 0, 0, 0, 0, 0]),
+      },
+    },
+  };
+  let resumeCleanup: (() => void) | undefined;
+  const cleanupGate = new Promise<void>((resolve) => {
+    resumeCleanup = resolve;
+  });
+  let cleanupStarted: (() => void) | undefined;
+  const sawCleanup = new Promise<void>((resolve) => {
+    cleanupStarted = resolve;
+  });
+  let pauseCleanup = true;
+  const repo = repository({
+    getRtdbPath: async (path) => {
+      if (path === "invites/invite") {
+        return { hostId: "host", guestId: "guest" };
+      }
+      if (path === "players/host/mining") return miningState;
+      return wager;
+    },
+    transactRtdbPath: async (path, updater) => {
+      if (path === "players/host/mining") {
+        if (pauseCleanup) {
+          cleanupStarted?.();
+          await cleanupGate;
+          pauseCleanup = false;
+        }
+        const result = applyMiningTransaction(updater, miningState);
+        if (result.committed) miningState = result.value;
+        return result;
+      }
+      const result = applyTransaction(updater, wager);
+      if (result.committed) wager = result.value;
+      return result;
+    },
+  });
+  const changed = sendWagerProposal(
+    identity,
+    {
+      inviteId: "invite",
+      matchId: "match",
+      material: "dust",
+      count: 1,
+    },
+    repo,
+  );
+  await sawCleanup;
+  let resumeRetry: (() => void) | undefined;
+  const retryGate = new Promise<void>((resolve) => {
+    resumeRetry = resolve;
+  });
+  let retryStarted: (() => void) | undefined;
+  const sawRetry = new Promise<void>((resolve) => {
+    retryStarted = resolve;
+  });
+  const competing = sendWagerProposal(
+    identity,
+    {
+      inviteId: "invite",
+      matchId: "match",
+      material: "dust",
+      count: 3,
+    },
+    repo,
+    {
+      wait: async () => {
+        retryStarted?.();
+        await retryGate;
+      },
+    },
+  );
+  await sawRetry;
+  resumeCleanup?.();
+  assert.deepEqual(await changed, { ok: true, count: 1 });
+  resumeRetry?.();
+  assert.deepEqual(await competing, {
+    ok: false,
+    reason: "proposal-unavailable",
+  });
+  assert.equal(materialsOnly(miningState).dust, 1);
+});
+
+test("replay fences a reservation against a delayed cleanup commit", async () => {
+  const reservationOperationId = await createWagerReservationOperationId(
+    "send",
+    "invite",
+    "match",
+    "host",
+  );
+  let wager: unknown = null;
+  let miningState: unknown = {
+    frozen: { dust: 3, slime: 0, gum: 0, metal: 0, ice: 0 },
+    _wagerOps: {
+      [reservationOperationId]: {
+        appliedAtMs: 1,
+        count: 3,
+        deltas: { dust: 3 },
+        fingerprint: JSON.stringify(["send-reserve", "dust", 3, 0, 0, 0, 0, 0]),
+      },
+    },
+  };
+  let miningRevision = 0;
+  let delayedCleanup: { expectedRevision: number; value: unknown } | undefined;
+  let delayNextMiningCommit = true;
+  const repo = repository({
+    getRtdbPath: async (path) => {
+      if (path === "invites/invite") {
+        return { hostId: "host", guestId: "guest" };
+      }
+      if (path === "players/host/mining") return miningState;
+      return wager;
+    },
+    transactRtdbPath: async (path, updater) => {
+      if (path === "players/host/mining") {
+        const result = applyMiningTransaction(updater, miningState);
+        if (delayNextMiningCommit) {
+          delayNextMiningCommit = false;
+          delayedCleanup = {
+            expectedRevision: miningRevision,
+            value: result.value,
+          };
+          throw new Error("ambiguous-cleanup");
+        }
+        if (result.committed) {
+          miningState = result.value;
+          miningRevision += 1;
+        }
+        return result;
+      }
+      const result = applyTransaction(updater, wager);
+      if (result.committed) wager = result.value;
+      return result;
+    },
+  });
+
+  await assert.rejects(
+    sendWagerProposal(
+      identity,
+      {
+        inviteId: "invite",
+        matchId: "match",
+        material: "dust",
+        count: 1,
+      },
+      repo,
+      { now: () => 100 },
+    ),
+    /ambiguous-cleanup/,
+  );
+
+  assert.deepEqual(
+    await sendWagerProposal(
+      identity,
+      {
+        inviteId: "invite",
+        matchId: "match",
+        material: "dust",
+        count: 3,
+      },
+      repo,
+      { now: () => 100 },
+    ),
+    { ok: true, count: 3 },
+  );
+
+  assert.ok(delayedCleanup);
+  const delayedCleanupCommitted =
+    miningRevision === delayedCleanup.expectedRevision;
+  if (delayedCleanupCommitted) {
+    miningState = delayedCleanup.value;
+    miningRevision += 1;
+  }
+  assert.equal(delayedCleanupCommitted, false);
+  assert.equal(materialsOnly(miningState).dust, 3);
+  assert.ok(
+    (
+      (miningState as Record<string, unknown>)._wagerOps as Record<
+        string,
+        unknown
+      >
+    )[reservationOperationId],
+  );
+  assert.equal(
+    (wager as { proposals: Record<string, Record<string, unknown>> }).proposals
+      .host.reservationOperationId,
+    reservationOperationId,
+  );
+});
+
+test("ambiguous replay accepts a newer exact reservation fence", async () => {
+  const reservationOperationId = await createWagerReservationOperationId(
+    "send",
+    "invite",
+    "match",
+    "host",
+  );
+  let wager: unknown = null;
+  let miningState: unknown = {
+    frozen: { dust: 1, slime: 0, gum: 0, metal: 0, ice: 0 },
+    _wagerOps: {
+      [reservationOperationId]: {
+        appliedAtMs: 1,
+        count: 1,
+        deltas: { dust: 1 },
+        fingerprint: JSON.stringify(["send-reserve", "dust", 1, 0, 0, 0, 0, 0]),
+      },
+    },
+  };
+  let loseReplayResponse = true;
+  const repo = repository({
+    getRtdbPath: async (path) => {
+      if (path === "invites/invite") {
+        return { hostId: "host", guestId: "guest" };
+      }
+      if (path === "players/host/mining") return miningState;
+      return wager;
+    },
+    transactRtdbPath: async (path, updater) => {
+      if (path === "players/host/mining") {
+        const result = applyMiningTransaction(updater, miningState);
+        if (result.committed) miningState = result.value;
+        if (loseReplayResponse) {
+          loseReplayResponse = false;
+          const operations = (miningState as Record<string, unknown>)
+            ._wagerOps as Record<string, Record<string, unknown>> | undefined;
+          assert.ok(operations?.[reservationOperationId]);
+          operations[reservationOperationId].appliedAtMs =
+            Number(operations[reservationOperationId].appliedAtMs) + 1;
+          throw new Error("ambiguous-replay");
+        }
+        return result;
+      }
+      const result = applyTransaction(updater, wager);
+      if (result.committed) wager = result.value;
+      return result;
+    },
+  });
+
+  assert.deepEqual(
+    await sendWagerProposal(
+      identity,
+      {
+        inviteId: "invite",
+        matchId: "match",
+        material: "dust",
+        count: 1,
+      },
+      repo,
+      { now: () => 100 },
+    ),
+    { ok: true, count: 1 },
+  );
+  assert.equal(materialsOnly(miningState).dust, 1);
+  assert.equal(
+    (wager as { proposals: Record<string, Record<string, unknown>> }).proposals
+      .host.reservationOperationId,
+    reservationOperationId,
+  );
+});
+
+test("expired wager holder cannot clean up after a lease takeover", async () => {
+  const reservationOperationId = await createWagerReservationOperationId(
+    "send",
+    "invite",
+    "match",
+    "host",
+  );
+  let nowMs = 0;
+  let wager: unknown = null;
+  const mining: Record<string, unknown> = {
+    host: {
+      frozen: { dust: 3, slime: 0, gum: 0, metal: 0, ice: 0 },
+      _wagerOps: {
+        [reservationOperationId]: {
+          appliedAtMs: 1,
+          count: 3,
+          deltas: { dust: 3 },
+          fingerprint: JSON.stringify([
+            "send-reserve",
+            "dust",
+            3,
+            0,
+            0,
+            0,
+            0,
+            0,
+          ]),
+        },
+      },
+    },
+    guest: {
+      frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+    },
+  };
+  let resumeStaleRead: (() => void) | undefined;
+  const staleReadGate = new Promise<void>((resolve) => {
+    resumeStaleRead = resolve;
+  });
+  let staleReadStarted: (() => void) | undefined;
+  const sawStaleRead = new Promise<void>((resolve) => {
+    staleReadStarted = resolve;
+  });
+  let pauseStaleRead = true;
+  const repo = repository({
+    getRtdbPath: async (path) => {
+      if (path === "invites/invite") {
+        return { hostId: "host", guestId: "guest" };
+      }
+      if (path === "invites/invite/wagers/match") {
+        if (pauseStaleRead) {
+          pauseStaleRead = false;
+          const snapshot = structuredClone(wager);
+          staleReadStarted?.();
+          await staleReadGate;
+          return snapshot;
+        }
+        return wager;
+      }
+      const uid = path.includes("/host/") ? "host" : "guest";
+      return mining[uid];
+    },
+    transactRtdbPath: async (path, updater) => {
+      if (path === "invites/invite/wagers/match") {
+        const result = applyTransaction(updater, wager);
+        if (result.committed) wager = result.value;
+        return result;
+      }
+      const uid = path.includes("/host/") ? "host" : "guest";
+      const result = applyMiningTransaction(updater, mining[uid]);
+      if (result.committed) mining[uid] = result.value;
+      return result;
+    },
+  });
+  const stale = sendWagerProposal(
+    identity,
+    {
+      inviteId: "invite",
+      matchId: "match",
+      material: "dust",
+      count: 1,
+    },
+    repo,
+    { now: () => nowMs },
+  );
+  await sawStaleRead;
+  nowMs = 60_001;
+  assert.deepEqual(
+    await sendWagerProposal(
+      { uid: "guest" },
+      {
+        inviteId: "invite",
+        matchId: "match",
+        material: "slime",
+        count: 1,
+      },
+      repo,
+      { now: () => nowMs },
+    ),
+    { ok: true, count: 1 },
+  );
+  resumeStaleRead?.();
+  await assert.rejects(stale, /invite-lease-lost/);
+  assert.equal(materialsOnly(mining.host).dust, 3);
+  assert.equal(
+    (
+      (mining.host as Record<string, unknown>)._wagerOps as Record<
+        string,
+        unknown
+      >
+    )[reservationOperationId] !== undefined,
+    true,
+  );
+  const guestProposal = (wager as { proposals: Record<string, unknown> })
+    .proposals.guest as Record<string, unknown>;
+  assert.equal(guestProposal.material, "slime");
+  assert.equal(guestProposal.count, 1);
+  assert.equal(typeof guestProposal.reservationOperationId, "string");
+});
+
+test("timed out wager phase cannot commit after a lease takeover", async () => {
+  let nowMs = 0;
+  let wager: unknown = null;
+  const mining: Record<string, unknown> = {
+    host: { frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 } },
+    guest: { frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 } },
+  };
+  const phaseController = new AbortController();
+  let phaseStarted: (() => void) | undefined;
+  const sawPhase = new Promise<void>((resolve) => {
+    phaseStarted = resolve;
+  });
+  let recoveryStarted: (() => void) | undefined;
+  const sawRecovery = new Promise<void>((resolve) => {
+    recoveryStarted = resolve;
+  });
+  let resumeRecovery: (() => void) | undefined;
+  const recoveryGate = new Promise<void>((resolve) => {
+    resumeRecovery = resolve;
+  });
+  let pauseRecovery = false;
+  let stallPhase = true;
+  const repo = repository({
+    getRtdbPath: async (path) => {
+      if (path === "invites/invite") {
+        return { hostId: "host", guestId: "guest" };
+      }
+      if (path === "invites/invite/wagers/match") {
+        if (pauseRecovery) {
+          pauseRecovery = false;
+          const snapshot = structuredClone(wager);
+          recoveryStarted?.();
+          await recoveryGate;
+          return snapshot;
+        }
+        return wager;
+      }
+      const uid = path.includes("/host/") ? "host" : "guest";
+      return mining[uid];
+    },
+    transactRtdbPath: async (path, updater, signal) => {
+      if (path === "invites/invite/wagers/match") {
+        if (stallPhase) {
+          stallPhase = false;
+          assert.equal(signal, phaseController.signal);
+          pauseRecovery = true;
+          phaseStarted?.();
+          await new Promise<never>((_resolve, reject) => {
+            signal?.addEventListener("abort", () => reject(signal.reason), {
+              once: true,
+            });
+          });
+        }
+        const result = applyTransaction(updater, wager);
+        if (result.committed) wager = result.value;
+        return result;
+      }
+      const uid = path.includes("/host/") ? "host" : "guest";
+      const result = applyMiningTransaction(updater, mining[uid]);
+      if (result.committed) mining[uid] = result.value;
+      return result;
+    },
+  });
+  const stale = sendWagerProposal(
+    identity,
+    {
+      inviteId: "invite",
+      matchId: "match",
+      material: "dust",
+      count: 1,
+    },
+    repo,
+    {
+      createCriticalPhaseSignal: () => phaseController.signal,
+      now: () => nowMs,
+    },
+  );
+  await sawPhase;
+  nowMs = 30_000;
+  phaseController.abort(new DOMException("phase-timeout", "TimeoutError"));
+  await sawRecovery;
+  nowMs = 60_001;
+  assert.deepEqual(
+    await sendWagerProposal(
+      { uid: "guest" },
+      {
+        inviteId: "invite",
+        matchId: "match",
+        material: "slime",
+        count: 1,
+      },
+      repo,
+      { now: () => nowMs },
+    ),
+    { ok: true, count: 1 },
+  );
+  resumeRecovery?.();
+  await assert.rejects(stale, /invite-lease-lost/);
+  assert.equal(materialsOnly(mining.host).dust, 1);
+  const proposals = (wager as { proposals: Record<string, unknown> }).proposals;
+  assert.equal(proposals.host, undefined);
+  assert.equal((proposals.guest as Record<string, unknown>).material, "slime");
 });
 
 test("releases a stranded accept reservation after participants merge", async () => {
@@ -1050,7 +1647,7 @@ test("canonical D1 ownership authorizes linked logins with host precedence", asy
     }),
   );
   assert.deepEqual(result, { ok: true });
-  assert.equal(ownershipReads, 1);
+  assert.equal(ownershipReads, 2);
   assert.equal(paths[1], "players/host/mining");
 });
 
@@ -1131,8 +1728,12 @@ test("send reconciles an ambiguous wager write without reserving twice", async (
   };
   let throwAfterCommit = true;
   const repo = repository({
-    getRtdbPath: async (path) =>
-      path === "invites/invite" ? { hostId: "host", guestId: "guest" } : wager,
+    getRtdbPath: async (path) => {
+      if (path === "invites/invite")
+        return { hostId: "host", guestId: "guest" };
+      if (path.startsWith("players/")) return frozen;
+      return wager;
+    },
     transactRtdbPath: async (path, updater) => {
       if (path.startsWith("players/")) {
         const result = applyMiningTransaction(updater, frozen);
@@ -1268,68 +1869,134 @@ test("send replay does not release a proposal already canceled", async () => {
   assert.equal(materialsOnly(frozen.host).dust, 5);
 });
 
-test("accept and cancellation cannot both commit the same proposal", async () => {
+test("cancel retry preserves a later accepted reservation", async () => {
+  const sendReservationOperationId = await createWagerReservationOperationId(
+    "send",
+    "invite",
+    "match",
+    "host",
+  );
+  const acceptReservationOperationId = await createWagerReservationOperationId(
+    "accept",
+    "invite",
+    "match",
+    "host",
+  );
   let wager: Record<string, unknown> = {
-    proposals: { guest: { material: "dust", count: 3 } },
+    proposals: {
+      host: {
+        material: "ice",
+        count: 2,
+        operationId: "host-proposal",
+        reservationOperationId: sendReservationOperationId,
+      },
+      guest: { material: "dust", count: 2, operationId: "guest-proposal" },
+    },
   };
   const frozen: Record<string, unknown> = {
-    host: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
-    guest: { dust: 3, slime: 0, gum: 0, metal: 0, ice: 0 },
+    host: {
+      frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 2 },
+      _wagerOps: {
+        [sendReservationOperationId]: {
+          appliedAtMs: 1,
+          count: 2,
+          deltas: { ice: 2 },
+          fingerprint: JSON.stringify([
+            "send-reserve",
+            "ice",
+            2,
+            0,
+            0,
+            0,
+            0,
+            0,
+          ]),
+        },
+      },
+    },
+    guest: { frozen: { dust: 2, slime: 0, gum: 0, metal: 0, ice: 0 } },
   };
-  let releaseReservation: (() => void) | undefined;
-  const reservationGate = new Promise<void>((resolve) => {
-    releaseReservation = resolve;
-  });
-  let sawAcceptSnapshot: (() => void) | undefined;
-  const acceptSnapshot = new Promise<void>((resolve) => {
-    sawAcceptSnapshot = resolve;
-  });
-  let pauseAccept = true;
+  let failRelease = true;
   const repo = repository({
     getRtdbPath: async (path) => {
       if (path === "invites/invite") {
         return { hostId: "host", guestId: "guest" };
       }
-      if (pauseAccept) {
-        sawAcceptSnapshot?.();
-      }
+      if (path === "players/host/mining") return frozen.host;
       return structuredClone(wager);
     },
     transactRtdbPath: async (path, updater) => {
-      if (path === "players/host/mining" && pauseAccept) {
-        await reservationGate;
-        pauseAccept = false;
-      }
       if (path === "invites/invite/wagers/match") {
         const result = applyTransaction(updater, wager);
         if (result.committed) wager = result.value as Record<string, unknown>;
         return result;
       }
       const uid = path.includes("/host/") ? "host" : "guest";
+      if (path === "players/host/mining" && failRelease) {
+        const preview = applyMiningTransaction(updater, frozen[uid]);
+        if (preview.committed) {
+          failRelease = false;
+          throw new Error("release-unavailable");
+        }
+        return preview;
+      }
       const result = applyMiningTransaction(updater, frozen[uid]);
       if (result.committed) frozen[uid] = result.value;
       return result;
     },
   });
-  const accepting = acceptWagerProposal(
-    identity,
-    { inviteId: "invite", matchId: "match" },
-    repo,
+  const request = { inviteId: "invite", matchId: "match" };
+  await assert.rejects(
+    removeWagerProposal(identity, request, "cancel", repo, {
+      logMaterialReleaseFailure: () => undefined,
+    }),
+    /wager-material-release-failed/,
   );
-  await acceptSnapshot;
-  const canceled = await removeWagerProposal(
-    { uid: "guest" },
-    { inviteId: "invite", matchId: "match" },
-    "cancel",
-    repo,
+
+  assert.deepEqual(
+    await acceptWagerProposal(identity, request, repo, { now: () => 2 }),
+    { ok: true, count: 2 },
   );
-  releaseReservation?.();
-  const accepted = await accepting;
-  assert.deepEqual(canceled, { ok: true });
-  assert.deepEqual(accepted, { ok: false, reason: "proposal-unavailable" });
-  assert.equal(wager.agreed, undefined);
-  assert.equal(materialsOnly(frozen.guest).dust, 0);
-  assert.equal(materialsOnly(frozen.host).dust, 0);
+  assert.deepEqual(
+    await removeWagerProposal(identity, request, "cancel", repo),
+    { ok: true },
+  );
+
+  const agreementOperation = wager.agreementOperation as Record<
+    string,
+    unknown
+  >;
+  assert.equal(agreementOperation.reservationLineageReady, true);
+  assert.deepEqual(agreementOperation.accepterReservationOperationIds, [
+    acceptReservationOperationId,
+  ]);
+  const operations = (frozen.host as Record<string, unknown>)
+    ._wagerOps as Record<string, unknown>;
+  assert.ok(operations[acceptReservationOperationId]);
+  assert.equal(operations[sendReservationOperationId], undefined);
+  assert.deepEqual(materialsOnly(frozen.host), {
+    dust: 2,
+    slime: 0,
+    gum: 0,
+    metal: 0,
+    ice: 0,
+  });
+  assert.equal(
+    await consumeWagerReservationOperation(
+      repo,
+      "host",
+      acceptReservationOperationId,
+      true,
+    ),
+    "released",
+  );
+  assert.deepEqual(materialsOnly(frozen.host), {
+    dust: 0,
+    slime: 0,
+    gum: 0,
+    metal: 0,
+    ice: 0,
+  });
 });
 
 test("cancellation retries a failed material release from its durable record", async () => {
@@ -1391,8 +2058,14 @@ test("accept replay completes a failed proposer adjustment once", async () => {
       metal: 0,
       ice: 0,
     }),
-    getRtdbPath: async (path) =>
-      path === "invites/invite" ? { hostId: "host", guestId: "guest" } : wager,
+    getRtdbPath: async (path) => {
+      if (path === "invites/invite")
+        return { hostId: "host", guestId: "guest" };
+      if (path.startsWith("players/")) {
+        return frozen[path.includes("/host/") ? "host" : "guest"];
+      }
+      return wager;
+    },
     transactRtdbPath: async (path, updater) => {
       if (path.startsWith("invites/")) {
         const result = applyTransaction(updater, wager);
@@ -1423,16 +2096,23 @@ test("accept replay completes a failed proposer adjustment once", async () => {
 });
 
 test("rejects non-participants and sanitizes material release failures", async () => {
+  const outsiderPaths: string[] = [];
   await assert.rejects(
     () =>
       removeWagerProposal(
         { uid: "other" },
         { inviteId: "invite", matchId: "match" },
         "cancel",
-        repository(),
+        repository({
+          transactRtdbPath: async (path) => {
+            outsiderPaths.push(path);
+            return { committed: false, value: null };
+          },
+        }),
       ),
     (error: unknown) => error instanceof AuthApiFailure && error.status === 403,
   );
+  assert.deepEqual(outsiderPaths, []);
 
   const logs: Array<Record<string, unknown>> = [];
   let transactions = 0;

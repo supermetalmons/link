@@ -9,6 +9,7 @@ export type EventStartTransitionDependencies = {
   random?: () => number;
   buildRandomGameSeed(random?: () => number): unknown | Promise<unknown>;
   ownershipSnapshot: EventOwnershipSnapshot | null;
+  prizeSelections?: unknown;
 };
 
 export function buildFixedBracketState(input: {

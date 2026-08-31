@@ -16,9 +16,11 @@ const {
   getEventBracketSize,
   parseEventMatchKey,
 } = require("@mons/shared/events");
+const { isEventPrizeEvent } = require("@mons/shared/event-prizes");
 const { getEventParticipantIds } = require("./participants");
 const {
   canonicalizeEventParticipants,
+  canonicalizeEventPrizeSelections,
   profileOwnershipUnavailable,
   resolveOwnedProfileReferences,
 } = require("./ownership");
@@ -758,6 +760,7 @@ const buildScheduledEventDueUpdatesCore = async ({
   random = Math.random,
   buildRandomGameSeed,
   ownershipSnapshot,
+  prizeSelections,
 }) => {
   if (typeof buildRandomGameSeed !== "function") {
     throw new TypeError("buildRandomGameSeed is required");
@@ -770,6 +773,14 @@ const buildScheduledEventDueUpdatesCore = async ({
   }
   const storedParticipantIds = getEventParticipantIds(event);
   if (storedParticipantIds.length < 2) {
+    const shouldClearPrizeSelections =
+      isEventPrizeEvent(eventId) &&
+      prizeSelections !== undefined &&
+      prizeSelections !== null &&
+      (!prizeSelections ||
+        typeof prizeSelections !== "object" ||
+        Array.isArray(prizeSelections) ||
+        Object.keys(prizeSelections).length > 0);
     Object.assign(event, {
       status: "dismissed",
       endedAtMs: nowMs,
@@ -780,6 +791,9 @@ const buildScheduledEventDueUpdatesCore = async ({
     return {
       didChange: true,
       updates: {
+        ...(shouldClearPrizeSelections
+          ? { [`eventPrizeSelections/${eventId}`]: null }
+          : {}),
         [`events/${eventId}/status`]: event.status,
         [`events/${eventId}/endedAtMs`]: event.endedAtMs,
         [`events/${eventId}/updatedAtMs`]: event.updatedAtMs,
@@ -788,6 +802,26 @@ const buildScheduledEventDueUpdatesCore = async ({
       },
     };
   }
+  const prizeSelectionResult = isEventPrizeEvent(eventId)
+    ? (() => {
+        if (prizeSelections === undefined) {
+          throw profileOwnershipUnavailable();
+        }
+        return canonicalizeEventPrizeSelections(
+          event,
+          prizeSelections,
+          ownershipSnapshot,
+        );
+      })()
+    : { didChange: false, selectionsByProfileId: {} };
+  const prizeSelectionUpdates = prizeSelectionResult.didChange
+    ? {
+        [`eventPrizeSelections/${eventId}`]:
+          Object.keys(prizeSelectionResult.selectionsByProfileId).length > 0
+            ? prizeSelectionResult.selectionsByProfileId
+            : null,
+      }
+    : {};
   if (!ownershipSnapshot) throw profileOwnershipUnavailable();
   const canonicalParticipants = canonicalizeEventParticipants(
     event,
@@ -825,6 +859,7 @@ const buildScheduledEventDueUpdatesCore = async ({
       didChange: true,
       updates: {
         ...bracket.inviteUpdates,
+        ...prizeSelectionUpdates,
         [`events/${eventId}/status`]: event.status,
         [`events/${eventId}/startedAtMs`]: event.startedAtMs,
         [`events/${eventId}/updatedAtMs`]: event.updatedAtMs,

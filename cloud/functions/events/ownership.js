@@ -234,6 +234,81 @@ const canonicalizeEventParticipants = (event, snapshot) => {
   return { didChange, participantsById };
 };
 
+const canonicalizeEventPrizeSelections = (event, value, snapshot) => {
+  const isSelectionRecord =
+    value && typeof value === "object" && !Array.isArray(value);
+  const selections = isSelectionRecord ? value : {};
+  const selectionEntries = Object.entries(selections);
+  if (selectionEntries.length === 0) {
+    return {
+      didChange: value !== undefined && value !== null && !isSelectionRecord,
+      selectionsByProfileId: {},
+    };
+  }
+  const entries = participantEntries(event);
+  if (entries.length === 0) {
+    return { didChange: true, selectionsByProfileId: {} };
+  }
+  if (!snapshot) throw profileOwnershipUnavailable();
+  const readCanonicalProfileId = (profileIdInput) => {
+    const profileId = normalizeString(profileIdInput);
+    if (!profileId) return "";
+    if (snapshot.canonicalProfileIdByProfileId?.has(profileId)) {
+      return normalizeString(
+        snapshot.canonicalProfileIdByProfileId.get(profileId),
+      );
+    }
+    return snapshot.profileById?.has(profileId) ? profileId : "";
+  };
+  const participantCandidates = entries.map((entry) => ({
+    entry,
+    canonicalProfileId: readCanonicalProfileId(entry.profileId),
+  }));
+  const selectionsByProfileId = {};
+  for (const [sourceProfileId, selection] of selectionEntries) {
+    const normalizedSourceProfileId = normalizeString(sourceProfileId);
+    if (!normalizedSourceProfileId) continue;
+    const sourceCanonicalProfileId = readCanonicalProfileId(
+      normalizedSourceProfileId,
+    );
+    const matchingEntries = participantCandidates.filter(
+      ({ entry, canonicalProfileId }) =>
+        entry.key === normalizedSourceProfileId ||
+        entry.profileId === normalizedSourceProfileId ||
+        (sourceCanonicalProfileId &&
+          canonicalProfileId === sourceCanonicalProfileId),
+    );
+    if (matchingEntries.length === 0) continue;
+    let canonicalProfileId = "";
+    for (const { entry } of matchingEntries) {
+      const resolvedProfileId = resolveOwnedProfileReferences(snapshot, [
+        { loginUid: entry.loginUid, profileId: entry.profileId },
+      ])[0];
+      if (canonicalProfileId && canonicalProfileId !== resolvedProfileId) {
+        throw profileOwnershipUnavailable();
+      }
+      canonicalProfileId = resolvedProfileId;
+    }
+    if (!canonicalProfileId) continue;
+    if (
+      Object.hasOwn(selectionsByProfileId, canonicalProfileId) &&
+      selectionsByProfileId[canonicalProfileId] !== selection
+    ) {
+      throw profileOwnershipUnavailable();
+    }
+    selectionsByProfileId[canonicalProfileId] = selection;
+  }
+  const canonicalEntries = Object.entries(selectionsByProfileId);
+  const didChange =
+    canonicalEntries.length !== selectionEntries.length ||
+    selectionEntries.some(
+      ([profileId, selection]) =>
+        !Object.hasOwn(selectionsByProfileId, profileId) ||
+        selectionsByProfileId[profileId] !== selection,
+    );
+  return { didChange, selectionsByProfileId };
+};
+
 const resolvePrizeProjectionOwnerId = ({
   event,
   profileId: profileIdInput,
@@ -246,7 +321,6 @@ const resolvePrizeProjectionOwnerId = ({
     ({ profileId: storedProfileId }) =>
       getCanonicalProfileId(snapshot, storedProfileId) === canonicalProfileId,
   );
-  if (participants.length > 1) throw profileOwnershipUnavailable();
   for (const participant of participants) {
     if (
       participant.loginUid &&
@@ -261,6 +335,7 @@ const resolvePrizeProjectionOwnerId = ({
 module.exports = {
   buildEventOwnershipQuery,
   canonicalizeEventParticipants,
+  canonicalizeEventPrizeSelections,
   directParticipantParticipation,
   directRequesterParticipation,
   getCanonicalProfileId,

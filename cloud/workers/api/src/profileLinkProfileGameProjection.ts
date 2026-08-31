@@ -62,10 +62,13 @@ export function createProfileLinkProjectionRuntime(
       wait: dependencies.wait,
     });
   const repository: ProfileLinkProjectionRepository = {
-    async getMatches(loginUid, query) {
-      return toRecord(
-        await rtdb.getRtdbPath(`players/${loginUid}/matches`, query),
+    async getMatchIds(loginUid) {
+      const matches = toRecord(
+        await rtdb.getRtdbPath(`players/${loginUid}/matches`, {
+          shallow: true,
+        }),
       );
+      return matches ? Object.keys(matches) : [];
     },
     async inviteExists(inviteId) {
       const value = await rtdb.getRtdbPath(`invites/${inviteId}`, {

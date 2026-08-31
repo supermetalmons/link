@@ -141,6 +141,23 @@ function repository(
   };
 }
 
+function wagerRepository(
+  overrides: Partial<GameplayRepository> = {},
+): GameplayRepository {
+  const value = repository(overrides);
+  const transactRtdbPath = value.transactRtdbPath;
+  const locks = new Map<string, unknown>();
+  value.transactRtdbPath = async (path, updater, signal) => {
+    if (path.startsWith("gameplayMutationLocks/")) {
+      const result = applyTransaction(updater, locks.get(path) ?? null);
+      if (result.committed) locks.set(path, result.value);
+      return result;
+    }
+    return transactRtdbPath(path, updater, signal);
+  };
+  return value;
+}
+
 function applyTransaction(
   updater: (current: unknown) => unknown,
   current: unknown,
@@ -484,7 +501,7 @@ test("cancels an alternate-login legacy queue without a root scan", async () => 
     { createProjectionRequestId: () => "request-canceled" },
   );
   assert.deepEqual(result, { ok: true });
-  assert.equal(queries.length, 5);
+  assert.equal(queries.length, 3);
   assert.equal(ownershipReads, 1);
   assert.equal(patches.length, 1);
   assert.equal(patches[0]["automatch/auto-alias"], null);
@@ -1651,7 +1668,7 @@ test("routes wager cancellation and decline to their exact proposal owners", asy
       env,
       context(),
       {
-        repository: repository({
+        repository: wagerRepository({
           readProfileOwnershipSnapshot: async (query) =>
             ownershipForLogins(query, (uid) => `profile-${uid}`),
           getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
@@ -1707,7 +1724,7 @@ test("routes wager send and accept through the authenticated gameplay surface", 
     env,
     context(),
     {
-      repository: repository({
+      repository: wagerRepository({
         readProfileOwnershipSnapshot: async (query) =>
           ownershipForLogins(query, (uid) => `profile-${uid}`),
         getMiningMaterials: async (_profileId) => {
@@ -1746,7 +1763,7 @@ test("routes wager send and accept through the authenticated gameplay surface", 
     env,
     context(),
     {
-      repository: repository({
+      repository: wagerRepository({
         readProfileOwnershipSnapshot: async (query) =>
           ownershipForLogins(query, (uid) => `profile-${uid}`),
         getMiningMaterials: async () => ({
@@ -1785,6 +1802,33 @@ test("routes wager send and accept through the authenticated gameplay surface", 
   assert.deepEqual(await accept.json(), { ok: true, count: 2 });
 });
 
+test("rejects an unsafe wager count before repository work", async () => {
+  let reads = 0;
+  const response = await handleGameplayRoute(
+    request("/wagers/proposals/send", {
+      body: {
+        inviteId: "invite",
+        matchId: "match",
+        material: "dust",
+        count: Number.MAX_SAFE_INTEGER + 1,
+      },
+    }),
+    env,
+    context(),
+    {
+      repository: wagerRepository({
+        getRtdbPath: async () => {
+          reads += 1;
+          return null;
+        },
+      }),
+      verifyIdentity: async () => ({ uid: "host" }),
+    },
+  );
+  assert.equal(response.status, 400);
+  assert.equal(reads, 0);
+});
+
 test("returns wager permission and infrastructure failures without details", async () => {
   const forbidden = await handleGameplayRoute(
     request("/wagers/proposals/cancel", {
@@ -1793,7 +1837,7 @@ test("returns wager permission and infrastructure failures without details", asy
     env,
     context(),
     {
-      repository: repository({
+      repository: wagerRepository({
         readProfileOwnershipSnapshot: async (query) =>
           ownershipForLogins(query, (uid) => `profile-${uid}`),
         getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
@@ -1821,7 +1865,7 @@ test("returns wager permission and infrastructure failures without details", asy
     context(),
     {
       logFailure: (kind) => routeFailures.push(kind),
-      repository: repository({
+      repository: wagerRepository({
         readProfileOwnershipSnapshot: async (query) =>
           ownershipForLogins(query, (uid) => `profile-${uid}`),
         getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
@@ -1872,7 +1916,7 @@ test("returns wager permission and infrastructure failures without details", asy
     env,
     context(),
     {
-      repository: repository({
+      repository: wagerRepository({
         readProfileOwnershipSnapshot: async (query) =>
           ownershipForLogins(query, (uid) => `profile-${uid}`),
         getMiningMaterials: async () => ({

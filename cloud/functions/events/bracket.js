@@ -39,7 +39,7 @@ const {
   setMatchSlotParticipant,
 } = require("./startTransitionCore");
 const {
-  getCanonicalProfileId,
+  canonicalizeEventPrizeSelections,
   profileOwnershipUnavailable,
   resolveOwnedProfileReferences,
   resolvePrizeProjectionOwnerId,
@@ -72,14 +72,10 @@ const createEventBracketRuntime = (dependencies = {}) => {
     const selections =
       value && typeof value === "object" && !Array.isArray(value) ? value : {};
     const placementEntries = Array.isArray(placements) ? placements : [];
-    const selectionEntries = Object.entries(selections);
     const placementProfileIds = placementEntries.map((placement) =>
       normalizeString(placement?.profileId),
     );
-    const profileIds = placementProfileIds.concat(
-      selectionEntries.map(([profileId]) => profileId),
-    );
-    if (profileIds.length === 0) {
+    if (placementEntries.length === 0) {
       return { placements: [], selections: {} };
     }
     if (!ownershipSnapshot) throw profileOwnershipUnavailable();
@@ -101,30 +97,49 @@ const createEventBracketRuntime = (dependencies = {}) => {
       ownershipSnapshot,
       placementReferences,
     );
-    const canonicalPlacements = [];
-    for (let index = 0; index < placementEntries.length; index += 1) {
-      const canonicalProfileId = canonicalPlacementProfileIds[index];
-      canonicalPlacements.push({
-        ...placementEntries[index],
-        profileId: canonicalProfileId,
-      });
-    }
-    const canonicalSelections = {};
-    for (let index = 0; index < selectionEntries.length; index += 1) {
-      const canonicalProfileId = getCanonicalProfileId(
-        ownershipSnapshot,
-        selectionEntries[index][0],
+    const canonicalPlacements = placementEntries.map((placement, index) => ({
+      ...placement,
+      profileId: canonicalPlacementProfileIds[index],
+    }));
+    const placementProfileIdSet = new Set(placementProfileIds);
+    const participantEntries = Object.entries(participantsById || {});
+    const participantProfileIds = ([profileId, participant]) =>
+      [
+        normalizeString(profileId),
+        normalizeString(participant && participant.profileId),
+      ].filter(Boolean);
+    const isPlacementParticipant = ([profileId, participant]) =>
+      placementProfileIdSet.has(normalizeString(profileId)) ||
+      placementProfileIdSet.has(
+        normalizeString(participant && participant.profileId),
       );
-      if (!canonicalProfileId) throw profileOwnershipUnavailable();
-      const selection = selectionEntries[index][1];
-      if (
-        Object.hasOwn(canonicalSelections, canonicalProfileId) &&
-        canonicalSelections[canonicalProfileId] !== selection
-      ) {
-        throw profileOwnershipUnavailable();
-      }
-      canonicalSelections[canonicalProfileId] = selection;
-    }
+    const placementParticipantEntries = participantEntries.filter(
+      isPlacementParticipant,
+    );
+    const placementParticipantProfileIds = new Set(
+      placementParticipantEntries.flatMap(participantProfileIds),
+    );
+    const unplacedParticipantProfileIds = new Set(
+      participantEntries
+        .filter((entry) => !isPlacementParticipant(entry))
+        .flatMap((entry) =>
+          participantProfileIds(entry).filter(
+            (candidateProfileId) =>
+              !placementParticipantProfileIds.has(candidateProfileId),
+          ),
+        ),
+    );
+    const placementSelections = Object.fromEntries(
+      Object.entries(selections).filter(
+        ([profileId]) =>
+          !unplacedParticipantProfileIds.has(normalizeString(profileId)),
+      ),
+    );
+    const canonicalSelections = canonicalizeEventPrizeSelections(
+      { participants: Object.fromEntries(placementParticipantEntries) },
+      placementSelections,
+      ownershipSnapshot,
+    ).selectionsByProfileId;
     return {
       placements: canonicalPlacements,
       selections: canonicalSelections,

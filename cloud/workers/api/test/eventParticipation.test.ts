@@ -638,7 +638,11 @@ test("rejects missing profiles, missing events, full events, and active events",
         event: scheduledEvent({ participants: {} }),
         profile: null,
       }).repository,
-      { lockManager: lock.manager, buildDueUpdates: noDueTransition },
+      {
+        lockManager: lock.manager,
+        now: () => 100,
+        buildDueUpdates: noDueTransition,
+      },
     ),
     409,
     "Please sign in to join this event.",
@@ -715,6 +719,232 @@ test("persists an overdue transition before rejecting a late join", async () => 
     },
   ]);
   assert.equal(lock.released(), 1);
+});
+
+test("late join migrates prize selections in the due transition update", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const event = scheduledEvent({
+    eventId,
+    startAtMs: 100,
+    participants: {
+      "retired-profile": participant("retired-profile", identity.uid, 1),
+      opponent: participant("opponent", "opponent-login", 2),
+    },
+  });
+  const state = createRepository({
+    event,
+    canonicalProfileIds: {
+      "retired-profile": profileId,
+      "legacy-selection-profile": profileId,
+    },
+    pathValues: {
+      [`eventPrizeSelections/${eventId}`]: {
+        "legacy-selection-profile": "1092",
+      },
+    },
+  });
+  let ownershipReads = 0;
+  let queriedProfileIds: readonly string[] = [];
+  const readOwnership = state.repository.readProfileOwnershipSnapshot;
+  state.repository.readProfileOwnershipSnapshot = async (query) => {
+    ownershipReads += 1;
+    queriedProfileIds = query.profileIds;
+    return readOwnership(query);
+  };
+
+  await expectFailure(
+    joinEvent(identity, { eventId }, state.repository, {
+      lockManager: createLockManager().manager,
+      now: () => 100,
+      random: () => 0,
+    }),
+    409,
+    "This event is no longer accepting participants.",
+  );
+  const transition = state.patches.find(
+    (patch) => patch[`events/${eventId}/status`] === "active",
+  );
+  assert.ok(transition);
+  assert.deepEqual(transition[`eventPrizeSelections/${eventId}`], {
+    [profileId]: "1092",
+  });
+  assert.ok(transition[`events/${eventId}/participants`]);
+  assert.equal(ownershipReads, 1);
+  assert.ok(queriedProfileIds.includes("legacy-selection-profile"));
+});
+
+test("late join dismisses a one-player prize event before profile ownership", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const state = createRepository({
+    event: scheduledEvent({
+      eventId,
+      startAtMs: 100,
+      participants: { [profileId]: creatorParticipant(1) },
+    }),
+    pathValues: {
+      [`eventPrizeSelections/${eventId}`]: { [profileId]: "1092" },
+    },
+  });
+  let ownershipReads = 0;
+  state.repository.readProfileOwnershipSnapshot = async () => {
+    ownershipReads += 1;
+    throw new Error("d1-unavailable");
+  };
+
+  await expectFailure(
+    joinEvent({ uid: "late-login" }, { eventId }, state.repository, {
+      lockManager: createLockManager().manager,
+      now: () => 100,
+      random: () => 0,
+    }),
+    409,
+    "This event is no longer accepting participants.",
+  );
+  const transition = state.patches.find(
+    (patch) => patch[`events/${eventId}/status`] === "dismissed",
+  );
+  assert.ok(transition);
+  assert.equal(transition[`eventPrizeSelections/${eventId}`], null);
+  assert.equal(ownershipReads, 0);
+});
+
+test("memoizes prize selections when a join crosses the start deadline", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const alternateProfile = {
+    ...creatorProfile,
+    profileId: "alternate-profile",
+  };
+  const selections = { [profileId]: "1092" };
+  const state = createRepository({
+    event: scheduledEvent({
+      eventId,
+      startAtMs: 101,
+      participants: {
+        [profileId]: creatorParticipant(1),
+        opponent: participant("opponent", "opponent-login", 2),
+      },
+    }),
+    profilesByUid: { "alternate-login": alternateProfile },
+    pathValues: { [`eventPrizeSelections/${eventId}`]: selections },
+  });
+  const getRtdbPath = state.repository.getRtdbPath;
+  let selectionReads = 0;
+  state.repository.getRtdbPath = async (...args) => {
+    if (args[0] === `eventPrizeSelections/${eventId}`) selectionReads += 1;
+    return getRtdbPath(...args);
+  };
+  const times = [100, 101];
+
+  const response = await joinEvent(
+    { uid: "alternate-login" },
+    { eventId },
+    state.repository,
+    {
+      lockManager: createLockManager().manager,
+      now: () => times.shift() ?? 101,
+      buildDueUpdates: async (input) => {
+        assert.deepEqual(input.prizeSelections, selections);
+        return {
+          didChange: true,
+          updates: {
+            [`events/${eventId}/status`]: "active",
+            [`events/${eventId}/updatedAtMs`]: 101,
+          },
+        };
+      },
+    },
+  );
+
+  assert.equal(response.participant.profileId, alternateProfile.profileId);
+  assert.equal(selectionReads, 1);
+});
+
+test("deadline-crossing join persists and reconciles its canonical participant", async () => {
+  const canonicalProfileId = "canonical-profile";
+  const retiredProfileId = "retired-profile";
+  const retiredParticipant = participant(retiredProfileId, identity.uid, 1);
+  const canonicalParticipant = {
+    ...retiredParticipant,
+    profileId: canonicalProfileId,
+  };
+  const state = createRepository({
+    event: scheduledEvent({
+      startAtMs: 101,
+      createdByProfileId: retiredProfileId,
+      participants: {
+        [retiredProfileId]: retiredParticipant,
+        opponent: participant("opponent", "opponent-login", 2),
+      },
+    }),
+    profile: { ...creatorProfile, profileId: canonicalProfileId },
+    canonicalProfileIds: { [retiredProfileId]: canonicalProfileId },
+    pathValues: {
+      [`events/event-1/participants/${canonicalProfileId}`]:
+        canonicalParticipant,
+      "events/event-1/status": "active",
+      "events/event-1/updatedAtMs": 101,
+    },
+    patchError: new Error("ambiguous-join"),
+  });
+  const patchRtdbRoot = state.repository.patchRtdbRoot;
+  const getRtdbPath = state.repository.getRtdbPath;
+  const reconciliationPaths: string[] = [];
+  let patchAttempted = false;
+  state.repository.patchRtdbRoot = async (updates, signal) => {
+    const paths = Object.keys(updates);
+    assert.equal(
+      paths.some((parent, index) =>
+        paths.some(
+          (child, childIndex) =>
+            index !== childIndex && child.startsWith(`${parent}/`),
+        ),
+      ),
+      false,
+    );
+    patchAttempted = true;
+    return patchRtdbRoot(updates, signal);
+  };
+  state.repository.getRtdbPath = async (path, query, signal) => {
+    if (patchAttempted) reconciliationPaths.push(path);
+    return getRtdbPath(path, query, signal);
+  };
+  const times = [100, 101];
+
+  const response = await joinEvent(
+    identity,
+    { eventId: "event-1" },
+    state.repository,
+    {
+      lockManager: createLockManager().manager,
+      now: () => times.shift() ?? 101,
+      random: () => 0,
+    },
+  );
+
+  assert.deepEqual(response.participant, canonicalParticipant);
+  assert.equal(state.patches.length, 1);
+  const update = state.patches[0];
+  assert.equal(
+    Object.hasOwn(update, `events/event-1/participants/${retiredProfileId}`),
+    false,
+  );
+  assert.deepEqual(
+    (update["events/event-1/participants"] as Record<string, unknown>)[
+      canonicalProfileId
+    ],
+    canonicalParticipant,
+  );
+  assert.ok(
+    reconciliationPaths.includes(
+      `events/event-1/participants/${canonicalProfileId}`,
+    ),
+  );
+  assert.equal(
+    reconciliationPaths.includes(
+      `events/event-1/participants/${retiredProfileId}`,
+    ),
+    false,
+  );
 });
 
 test("does not persist an overdue transition after losing the lock", async () => {
@@ -930,6 +1160,103 @@ test("removes a non-creator participant and its prize selection", async () => {
     },
   ]);
   assert.equal(lock.released(), 1);
+});
+
+test("late removal migrates prize selections in the due transition update", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const event = scheduledEvent({
+    eventId,
+    startAtMs: 100,
+    participants: {
+      "retired-profile": participant("retired-profile", identity.uid, 1),
+      opponent: participant("opponent", "opponent-login", 2),
+    },
+  });
+  const state = createRepository({
+    event,
+    canonicalProfileIds: {
+      "retired-profile": profileId,
+      "legacy-selection-profile": profileId,
+    },
+    pathValues: {
+      [`eventPrizeSelections/${eventId}`]: {
+        "legacy-selection-profile": "1092",
+      },
+    },
+  });
+  let ownershipReads = 0;
+  let queriedProfileIds: readonly string[] = [];
+  const readOwnership = state.repository.readProfileOwnershipSnapshot;
+  state.repository.readProfileOwnershipSnapshot = async (query) => {
+    ownershipReads += 1;
+    queriedProfileIds = query.profileIds;
+    return readOwnership(query);
+  };
+
+  await expectFailure(
+    removeEventParticipant(
+      identity,
+      { eventId, participantProfileId: "opponent" },
+      state.repository,
+      {
+        lockManager: createLockManager().manager,
+        now: () => 100,
+        random: () => 0,
+      },
+    ),
+    409,
+    "This event can no longer remove participants.",
+  );
+  const transition = state.patches.find(
+    (patch) => patch[`events/${eventId}/status`] === "active",
+  );
+  assert.ok(transition);
+  assert.deepEqual(transition[`eventPrizeSelections/${eventId}`], {
+    [profileId]: "1092",
+  });
+  assert.ok(transition[`events/${eventId}/participants`]);
+  assert.equal(ownershipReads, 1);
+  assert.ok(queriedProfileIds.includes("legacy-selection-profile"));
+});
+
+test("late removal dismisses a one-player prize event without D1", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const state = createRepository({
+    event: scheduledEvent({
+      eventId,
+      startAtMs: 100,
+      participants: { [profileId]: creatorParticipant(1) },
+    }),
+    pathValues: {
+      [`eventPrizeSelections/${eventId}`]: { [profileId]: "1092" },
+    },
+  });
+  let ownershipReads = 0;
+  state.repository.readProfileOwnershipSnapshot = async () => {
+    ownershipReads += 1;
+    throw new Error("d1-unavailable");
+  };
+
+  await expectFailure(
+    removeEventParticipant(
+      identity,
+      { eventId, participantProfileId: "missing-profile" },
+      state.repository,
+      {
+        lockManager: createLockManager().manager,
+        now: () => 100,
+        random: () => 0,
+      },
+    ),
+    409,
+    "This event can no longer remove participants.",
+  );
+  const transition = state.patches.find(
+    (patch) => patch[`events/${eventId}/status`] === "dismissed",
+  );
+  assert.ok(transition);
+  assert.equal(transition[`eventPrizeSelections/${eventId}`], null);
+  assert.equal(ownershipReads, 0);
 });
 
 test("direct creator UID removal does not read D1 ownership", async () => {
@@ -1248,6 +1575,7 @@ test("fails from the ownership snapshot after acquiring an event lock", async ()
   await expectFailure(
     joinEvent(identity, { eventId: "event-1" }, repository, {
       lockManager: lock.manager,
+      now: () => 100,
       buildDueUpdates: noDueTransition,
     }),
     503,

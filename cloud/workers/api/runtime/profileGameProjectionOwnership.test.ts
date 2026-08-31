@@ -362,8 +362,8 @@ describe("D1-authoritative profile game projection ownership", () => {
             throw new Error("unexpected-rtdb-profile-owner-read");
           }
           if (path === `players/${loginUid}/matches`) {
-            expect(query).toEqual({ orderBy: "$key", limitToFirst: 21 });
-            return { [inviteId]: {} };
+            expect(query).toEqual({ shallow: true });
+            return { [inviteId]: true };
           }
           if (path === `invites/${inviteId}`) {
             expect(query).toEqual({ shallow: true });
@@ -517,13 +517,10 @@ describe("D1-authoritative profile game projection ownership", () => {
       rtdb: {
         async getRtdbPath(path, query) {
           if (path === `players/${hostLoginUids[0]}/matches`) {
-            const sorted = [...inviteIds].sort();
-            const startAt =
-              typeof query?.startAt === "string" ? query.startAt : "";
-            const page = sorted
-              .filter((inviteId) => inviteId >= startAt)
-              .slice(0, Number(query?.limitToFirst));
-            return Object.fromEntries(page.map((inviteId) => [inviteId, {}]));
+            expect(query).toEqual({ shallow: true });
+            return Object.fromEntries(
+              [...inviteIds].reverse().map((inviteId) => [inviteId, true]),
+            );
           }
           const inviteIndex = inviteIds.findIndex(
             (inviteId) => path === `invites/${inviteId}`,

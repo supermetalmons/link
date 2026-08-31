@@ -4,14 +4,7 @@ import type {
 } from "./profileGamesProjectionCore.js";
 
 export type ProfileLinkProjectionRepository = {
-  getMatches(
-    loginUid: string,
-    query: {
-      limitToFirst: number;
-      orderBy: "$key";
-      startAt?: string;
-    },
-  ): Promise<Record<string, unknown> | null>;
+  getMatchIds(loginUid: string): Promise<string[]>;
   inviteExists(inviteId: string): Promise<boolean>;
   readProfileOwnershipSnapshot(query: {
     loginUids: readonly string[];

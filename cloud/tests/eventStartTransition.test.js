@@ -4,6 +4,9 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { createSeededRandom } = require("../functions/shared/ids");
 const {
+  LEGACY_CORE_PRIZES_EVENT_ID,
+} = require("../functions/shared/event-prizes");
+const {
   buildScheduledEventDueUpdatesCore,
 } = require("../functions/events/startTransitionCore");
 
@@ -103,6 +106,17 @@ const transition = (count) => {
   });
 };
 
+const prizeTransition = (event, prizeSelections, snapshot) =>
+  buildScheduledEventDueUpdatesCore({
+    eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+    event,
+    nowMs: 100,
+    random: createSeededRandom("prize-selections"),
+    buildRandomGameSeed: () => ({ gameVariant: "Classic", fen: "start-fen" }),
+    ownershipSnapshot: snapshot,
+    prizeSelections,
+  });
+
 test("dismisses overdue events with fewer than two participants", async () => {
   for (const count of [0, 1]) {
     const result = await transition(count);
@@ -199,6 +213,136 @@ test("uses one ownership snapshot for the complete bracket decision", async () =
   snapshot.canonicalProfileIdByProfileId.set("profile-1", "profile-0");
   assert.equal(result.updates["events/event-1/status"], "active");
   assert.equal("assertOwnershipUnchanged" in result, false);
+});
+
+test("moves prize selections with canonical participant rekeying", async () => {
+  const event = createEvent(2);
+  event.participants["source-key"] = {
+    ...event.participants["profile-0"],
+    profileId: "embedded-profile",
+  };
+  delete event.participants["profile-0"];
+  const snapshot = ownershipSnapshot(event, {
+    canonicalProfileIds: { "embedded-profile": "canonical-profile" },
+  });
+  const result = await prizeTransition(
+    event,
+    { "source-key": "1092" },
+    snapshot,
+  );
+
+  assert.deepEqual(
+    result.updates[`eventPrizeSelections/${LEGACY_CORE_PRIZES_EVENT_ID}`],
+    { "canonical-profile": "1092" },
+  );
+  assert.ok(
+    result.updates[`events/${LEGACY_CORE_PRIZES_EVENT_ID}/participants`][
+      "canonical-profile"
+    ],
+  );
+});
+
+test("collapses equal participant selection aliases", async () => {
+  const event = createEvent(2);
+  event.participants["source-key"] = {
+    ...event.participants["profile-0"],
+    profileId: "embedded-profile",
+  };
+  delete event.participants["profile-0"];
+  const snapshot = ownershipSnapshot(event, {
+    canonicalProfileIds: { "embedded-profile": "canonical-profile" },
+  });
+  const result = await prizeTransition(
+    event,
+    {
+      "source-key": "1092",
+      "embedded-profile": "1092",
+      "canonical-profile": "1092",
+    },
+    snapshot,
+  );
+
+  assert.deepEqual(
+    result.updates[`eventPrizeSelections/${LEGACY_CORE_PRIZES_EVENT_ID}`],
+    { "canonical-profile": "1092" },
+  );
+});
+
+test("rejects conflicting participant selection aliases without mutation", async () => {
+  const event = createEvent(2);
+  event.participants["source-key"] = {
+    ...event.participants["profile-0"],
+    profileId: "embedded-profile",
+  };
+  delete event.participants["profile-0"];
+  const originalEvent = structuredClone(event);
+  const snapshot = ownershipSnapshot(event, {
+    canonicalProfileIds: { "embedded-profile": "canonical-profile" },
+  });
+
+  await assert.rejects(
+    prizeTransition(
+      event,
+      { "source-key": "1092", "canonical-profile": "1111" },
+      snapshot,
+    ),
+    /profile-ownership-unavailable/,
+  );
+  assert.deepEqual(event, originalEvent);
+});
+
+test("drops selections that do not belong to current participants", async () => {
+  const event = createEvent(2);
+  const result = await prizeTransition(
+    event,
+    { "removed-profile": "1092" },
+    ownershipSnapshot(event),
+  );
+
+  assert.equal(
+    result.updates[`eventPrizeSelections/${LEGACY_CORE_PRIZES_EVENT_ID}`],
+    null,
+  );
+});
+
+test("requires selections for configured prize events due to start", async () => {
+  const event = createEvent(2);
+  const originalEvent = structuredClone(event);
+
+  await assert.rejects(
+    buildScheduledEventDueUpdatesCore({
+      eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+      event,
+      nowMs: 100,
+      random: createSeededRandom("missing-prize-selections"),
+      buildRandomGameSeed: () => ({
+        gameVariant: "Classic",
+        fen: "start-fen",
+      }),
+      ownershipSnapshot: ownershipSnapshot(event),
+    }),
+    /profile-ownership-unavailable/,
+  );
+  assert.deepEqual(event, originalEvent);
+});
+
+test("dismisses one-participant prize events without ownership canonicalization", async () => {
+  for (const [prizeSelections, snapshot] of [
+    [{ "legacy-selection": "1092" }, null],
+    ["malformed-selections", {}],
+  ]) {
+    const event = createEvent(1);
+    const result = await prizeTransition(event, prizeSelections, snapshot);
+
+    assert.equal(
+      result.updates[`events/${LEGACY_CORE_PRIZES_EVENT_ID}/status`],
+      "dismissed",
+    );
+    assert.equal(
+      result.updates[`eventPrizeSelections/${LEGACY_CORE_PRIZES_EVENT_ID}`],
+      null,
+    );
+  }
 });
 
 test("leaves future and already-transitioned events unchanged", async () => {

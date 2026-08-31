@@ -406,12 +406,20 @@ test("prize placement follows final and third-place results and rejects a disqua
 
 test("prize assignment preserves a winner selection after a post-start merge", async () => {
   const eventId = "NN3eRzoZo80";
-  const selections = { "source-profile": "1514" };
+  const selections = { "legacy-selection-profile": "1514" };
   const runtime = createEventBracketRuntime();
   const participantsById = {
     "source-profile": participant("source-profile", 1),
     "second-profile": participant("second-profile", 2),
   };
+  const snapshot = ownershipSnapshot(participantsById, {
+    canonicalProfileIds: { "source-profile": "winner-profile" },
+    loginOwners: { "source-profile-login": "winner-profile" },
+  });
+  snapshot.canonicalProfileIdByProfileId.set(
+    "legacy-selection-profile",
+    "winner-profile",
+  );
   const input = {
     eventId,
     event: { winnerProfileId: "source-profile" },
@@ -431,10 +439,7 @@ test("prize assignment preserves a winner selection after a post-start merge", a
     participantsById,
     thirdPlaceMatch: null,
     assignedAtMs: 100,
-    ownershipSnapshot: ownershipSnapshot(participantsById, {
-      canonicalProfileIds: { "source-profile": "winner-profile" },
-      loginOwners: { "source-profile-login": "winner-profile" },
-    }),
+    ownershipSnapshot: snapshot,
     prizeSelections: selections,
   };
   const result = await runtime.resolveEventPrizeAssignments(input);
@@ -442,11 +447,245 @@ test("prize assignment preserves a winner selection after a post-start merge", a
   assert.equal(result.assignments["1"].profileId, "winner-profile");
   assert.equal(result.assignments["1"].prizeId, "1514");
 
+  selections["source-profile"] = "1514";
+  const collapsed = await runtime.resolveEventPrizeAssignments(input);
+  assert.equal(collapsed.assignments["1"].prizeId, "1514");
+
   selections["winner-profile"] = "1092";
   await assert.rejects(
     runtime.resolveEventPrizeAssignments(input),
     /profile-ownership-unavailable/,
   );
+});
+
+test("prize assignment ignores unrelated participants merged after start", async () => {
+  const runtime = createEventBracketRuntime();
+  const participantsById = {
+    p1: participant("p1", 1),
+    p2: participant("p2", 2),
+    p3: participant("p3", 3),
+    p4: participant("p4", 4),
+    p5: participant("p5", 5),
+  };
+
+  const result = await runtime.resolveEventPrizeAssignments({
+    eventId: "NN3eRzoZo80",
+    event: { winnerProfileId: "p1" },
+    rounds: {
+      0: {
+        matches: {
+          "0_0": {
+            status: "host",
+            hostProfileId: "p1",
+            guestProfileId: "p2",
+            winnerProfileId: "p1",
+            loserProfileId: "p2",
+          },
+        },
+      },
+    },
+    participantsById,
+    thirdPlaceMatch: null,
+    assignedAtMs: 100,
+    ownershipSnapshot: ownershipSnapshot(participantsById, {
+      canonicalProfileIds: { p4: "merged-profile", p5: "merged-profile" },
+      loginOwners: {
+        "p4-login": "merged-profile",
+        "p5-login": "merged-profile",
+      },
+    }),
+    prizeSelections: { p1: "1514" },
+  });
+
+  assert.equal(result.assignments["1"].profileId, "p1");
+  assert.equal(result.assignments["1"].prizeId, "1514");
+});
+
+test("prize assignment ignores an unplaced participant merged into the winner", async () => {
+  const runtime = createEventBracketRuntime();
+  const participantsById = {
+    p1: participant("p1", 1),
+    p2: participant("p2", 2),
+    p3: participant("p3", 3),
+    p4: participant("p4", 4),
+  };
+  const input = {
+    eventId: "NN3eRzoZo80",
+    event: { winnerProfileId: "p1" },
+    rounds: {
+      0: {
+        matches: {
+          "0_0": {
+            status: "host",
+            hostProfileId: "p1",
+            guestProfileId: "p2",
+            winnerProfileId: "p1",
+            loserProfileId: "p2",
+          },
+        },
+      },
+    },
+    participantsById,
+    thirdPlaceMatch: null,
+    assignedAtMs: 100,
+    ownershipSnapshot: ownershipSnapshot(participantsById, {
+      canonicalProfileIds: {
+        p1: "winner-profile",
+        p4: "winner-profile",
+      },
+      loginOwners: {
+        "p1-login": "winner-profile",
+        "p4-login": "winner-profile",
+      },
+    }),
+    prizeSelections: { p4: "1514" },
+  };
+
+  const unplacedOnly = await runtime.resolveEventPrizeAssignments(input);
+  assert.equal(unplacedOnly.assignments["1"].profileId, "winner-profile");
+  assert.equal(unplacedOnly.assignments["1"].prizeId, "1092");
+
+  input.prizeSelections = { p1: "1514", p4: "1092" };
+  const conflicting = await runtime.resolveEventPrizeAssignments(input);
+  assert.equal(conflicting.assignments["1"].prizeId, "1514");
+});
+
+test("prize projection accepts an unplaced participant merged into the winner", async () => {
+  const eventId = "NN3eRzoZo80";
+  const projected = [];
+  const runtime = createEventBracketRuntime({
+    admin: {
+      database: () => ({
+        ref: (path) => ({
+          transaction: async (updater) => {
+            const value = updater(null);
+            projected.push({ path, value });
+            return { committed: value !== undefined };
+          },
+        }),
+      }),
+    },
+    readEventPrizeWithdrawals: async () => ({}),
+  });
+  const participantsById = {
+    p1: participant("p1", 1),
+    p2: participant("p2", 2),
+    p3: participant("p3", 3),
+    p4: participant("p4", 4),
+  };
+  const event = {
+    winnerProfileId: "p1",
+    participants: participantsById,
+  };
+  const rounds = {
+    0: {
+      matches: {
+        "0_0": {
+          status: "host",
+          hostProfileId: "p1",
+          guestProfileId: "p2",
+          winnerProfileId: "p1",
+          loserProfileId: "p2",
+        },
+      },
+    },
+  };
+  const snapshot = ownershipSnapshot(participantsById, {
+    canonicalProfileIds: {
+      p1: "winner-profile",
+      p4: "winner-profile",
+    },
+    loginOwners: {
+      "p1-login": "winner-profile",
+      "p4-login": "winner-profile",
+    },
+  });
+  const assignmentResult = await runtime.resolveEventPrizeAssignments({
+    eventId,
+    event,
+    rounds,
+    participantsById,
+    thirdPlaceMatch: null,
+    assignedAtMs: 100,
+    ownershipSnapshot: snapshot,
+    prizeSelections: { p1: "1514", p4: "1092" },
+  });
+
+  const projectionResult = await runtime.reconcileProfileEventPrizeAssignments({
+    event,
+    eventId,
+    assignments: assignmentResult.assignments,
+    ownershipSnapshot: snapshot,
+  });
+
+  assert.equal(projectionResult.didChange, true);
+  assert.deepEqual(
+    projected.find(
+      ({ path }) => path === `profileEventPrizes/winner-profile/${eventId}`,
+    ),
+    {
+      path: `profileEventPrizes/winner-profile/${eventId}`,
+      value: assignmentResult.assignments["1"],
+    },
+  );
+});
+
+test("prize assignment ignores an unplaced selection after its login is unlinked", async () => {
+  const runtime = createEventBracketRuntime();
+  const participantsById = {
+    p1: participant("p1", 1),
+    p2: participant("p2", 2),
+    p3: participant("p3", 3),
+    p4: participant("p4", 4),
+  };
+
+  const result = await runtime.resolveEventPrizeAssignments({
+    eventId: "NN3eRzoZo80",
+    event: { winnerProfileId: "p1" },
+    rounds: {
+      0: {
+        matches: {
+          "0_0": {
+            status: "host",
+            hostProfileId: "p1",
+            guestProfileId: "p2",
+            winnerProfileId: "p1",
+            loserProfileId: "p2",
+          },
+        },
+      },
+    },
+    participantsById,
+    thirdPlaceMatch: null,
+    assignedAtMs: 100,
+    ownershipSnapshot: ownershipSnapshot(participantsById, {
+      loginOwners: { "p4-login": null },
+    }),
+    prizeSelections: { p4: "1514" },
+  });
+
+  assert.deepEqual(
+    Object.values(result.assignments).map(({ profileId }) => profileId),
+    ["p1", "p2", "p3"],
+  );
+});
+
+test("prize assignment ignores selections when there are no placements", async () => {
+  const result = await createEventBracketRuntime().resolveEventPrizeAssignments(
+    {
+      eventId: "NN3eRzoZo80",
+      event: {},
+      rounds: {},
+      participantsById: { p1: participant("p1", 1) },
+      thirdPlaceMatch: null,
+      assignedAtMs: 100,
+      ownershipSnapshot: null,
+      prizeSelections: { p1: "1514" },
+    },
+  );
+
+  assert.deepEqual(result.assignments, {});
+  assert.equal(result.didCreate, true);
 });
 
 test("prize assignment rejects duplicate canonical placements", async () => {

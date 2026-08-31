@@ -429,22 +429,31 @@ export async function withGameSessionMutationLease<T>(
   inviteId: string,
   operationId: string,
   repository: Pick<GameplayRepository, "transactRtdbPath">,
-  work: () => Promise<T>,
+  work: (refresh: () => Promise<void>) => Promise<T>,
   dependencies: Pick<
     GameSessionMutationDependencies,
     "createOwnerId" | "logger" | "now"
   > = {},
 ): Promise<T> {
   const ownerId = (dependencies.createOwnerId || (() => crypto.randomUUID()))();
+  const now = dependencies.now || Date.now;
   await acquireGameSessionMutationLease(
     inviteId,
     operationId,
     ownerId,
     repository,
-    (dependencies.now || Date.now)(),
+    now(),
   );
   try {
-    return await work();
+    return await work(() =>
+      refreshGameSessionMutationLease(
+        inviteId,
+        operationId,
+        ownerId,
+        repository,
+        now(),
+      ),
+    );
   } finally {
     try {
       await releaseGameSessionMutationLease(inviteId, ownerId, repository);

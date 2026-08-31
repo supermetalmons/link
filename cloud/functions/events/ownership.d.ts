@@ -29,6 +29,14 @@ export function canonicalizeEventParticipants(
   event: Record<string, unknown>,
   snapshot: EventOwnershipSnapshot,
 ): { didChange: boolean; participantsById: Record<string, unknown> };
+export function canonicalizeEventPrizeSelections(
+  event: Record<string, unknown>,
+  value: unknown,
+  snapshot: EventOwnershipSnapshot | null,
+): {
+  didChange: boolean;
+  selectionsByProfileId: Record<string, unknown>;
+};
 export function directRequesterParticipation(
   event: Record<string, unknown>,
   requesterUid: string,
