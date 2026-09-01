@@ -129,8 +129,6 @@ export const TELEGRAM_TEST_ENV = {
   GAMEPLAY_SERVICE_ACCOUNT_EMAIL: "gameplay@example.iam.gserviceaccount.com",
   GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",
-  HISTORICAL_MATCH_RTDB_FALLBACK_ENABLED: "false",
-  HISTORICAL_MATCH_RATE_LIMITER: rateLimit,
   NFT_RATE_LIMITER: rateLimit,
   PROFILE_GAME_PROJECTION_QUEUE: queue,
   PROFILE_DB: profileDb,

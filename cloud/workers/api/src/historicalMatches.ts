@@ -8,7 +8,6 @@ import {
   movesFromFlatString,
   parseGameFromMatchData,
 } from "@mons/shared/match-protocol";
-import { getHistoricalMatchIds } from "@mons/shared/rematches";
 import { MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
 import { Color, Game } from "mons-rules";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
@@ -23,12 +22,6 @@ export type HistoricalMatchDescriptor = {
   matchId: string;
   source: HistoricalMatchSource;
 };
-
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
 
 const normalizeHistoricalMatch = normalizeHistoricalMatchRecord;
 
@@ -142,14 +135,4 @@ export function buildTransitionHistoricalMatchPair(input: {
     hostMatch.timer === MATCH_TIMER_TERMINAL ||
     guestMatch.timer === MATCH_TIMER_TERMINAL;
   return externallyFinal || replay.winner !== undefined ? stablePair : null;
-}
-
-export function isHistoricalMatchId(
-  inviteId: string,
-  matchId: string,
-  inviteValue: unknown,
-): boolean {
-  return getHistoricalMatchIds(inviteId, toRecord(inviteValue)).includes(
-    matchId,
-  );
 }

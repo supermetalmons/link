@@ -11,7 +11,6 @@
     "APPLE_AUDIENCES": "link.mons",
     "AUTH_MUTATIONS_DISABLED": "false",
     "FIREBASE_RTDB_URL": "https://mons-link-default-rtdb.firebaseio.com",
-    "HISTORICAL_MATCH_RTDB_FALLBACK_ENABLED": "false",
   },
   "d1_databases": [
     {
@@ -83,14 +82,6 @@
       "namespace_id": "1616095644",
       "simple": {
         "limit": 20,
-        "period": 60,
-      },
-    },
-    {
-      "name": "HISTORICAL_MATCH_RATE_LIMITER",
-      "namespace_id": "1616095645",
-      "simple": {
-        "limit": 120,
         "period": 60,
       },
     },

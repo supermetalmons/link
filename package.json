@@ -51,7 +51,6 @@
     "migrate:telegram-d1": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/migrate-telegram-delivery.ts",
     "manage:profile-canonical": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-profile-canonical.ts",
     "manage:event-prize-withdrawals": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-event-prize-withdrawals.ts",
-    "backfill:historical-matches": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/backfill-historical-matches.ts",
     "format:check:tooling": "prettier --check \"scripts/**/*.{ts,md}\" \"cloud/admin/**/*.js\" README.md cloud/README.md eslint.config.mjs package.json --ignore-unknown",
     "lint:tooling": "eslint \"scripts/**/*.ts\" \"cloud/admin/**/*.js\"",
     "typecheck:tooling": "tsc --noEmit -p scripts/tsconfig.json",

@@ -42,15 +42,14 @@ Copy `.env.example` to `.env.local` only when local overrides are needed. Local 
 
 ### API and tooling
 
-| Command                                                                                       | Purpose                                                                                                                  |
-| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `npm run check:api`                                                                           | Format, lint, typecheck, test, type-generation check, and dry-run the API Worker.                                        |
-| `npm run check:tooling`                                                                       | Validate deployment drivers, project contracts, admin parsing, repository cleanup fixtures, and dependency architecture. |
-| `npm run manage:profile-canonical -- --status`                                                | Read the canonical D1 writer-control state without exposing profile data.                                                |
-| `npm run backfill:historical-matches -- --project mons-link --base-url https://api.mons.link` | Preview the historical-match D1 backfill.                                                                                |
-| `npm run test:database-rules`                                                                 | Run structural gameplay authorization against the Realtime Database emulator.                                            |
-| `npm run check:all`                                                                           | Run the repository-wide validation gate, including portable cloud runtime tests.                                         |
-| `npm run format:check`                                                                        | Check repository formatting without writing files.                                                                       |
+| Command                                        | Purpose                                                                                                                  |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `npm run check:api`                            | Format, lint, typecheck, test, type-generation check, and dry-run the API Worker.                                        |
+| `npm run check:tooling`                        | Validate deployment drivers, project contracts, admin parsing, repository cleanup fixtures, and dependency architecture. |
+| `npm run manage:profile-canonical -- --status` | Read the canonical D1 writer-control state without exposing profile data.                                                |
+| `npm run test:database-rules`                  | Run structural gameplay authorization against the Realtime Database emulator.                                            |
+| `npm run check:all`                            | Run the repository-wide validation gate, including portable cloud runtime tests.                                         |
+| `npm run format:check`                         | Check repository formatting without writing files.                                                                       |
 
 ### Deployment and maintenance
 
