@@ -12,6 +12,8 @@ Ownership-dependent operations use one D1 snapshot for each authorization decisi
 
 The browser resolves login-linked profile presentation only through the authenticated profile API. Invite role and write ownership come from the authenticated gameplay API using canonical D1 ownership; browser code must not read or subscribe to `players/{uid}/profile`.
 
+Historical rematch snapshots are read through the public Worker endpoint and stored immutably in `mons-link-profile-games` D1. Rated snapshots take precedence over transition and legacy-backfill snapshots. `HISTORICAL_MATCH_RTDB_FALLBACK_ENABLED` is a tracked migration switch; leave it enabled only while the documented backfill is incomplete. Active match synchronization remains in RTDB.
+
 Event-prize withdrawal ownership, leases, persisted Solana submissions, and completion records live exclusively in `mons-link-event-prize-withdrawals` D1. RTDB has no withdrawal shadow.
 
 Withdrawal storage must be frozen before an operator terminates a withdrawal Workflow. Resuming storage to `d1` explicitly authorizes retained terminated instances to be recreated from their durable D1 state.

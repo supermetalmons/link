@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Color, Game, GameVariant } from "mons-rules";
 import type {
   RatingProfileGameProjectionRepository,
   RatingUpdateData,
@@ -20,6 +21,7 @@ import {
   sweepRatingProfileGameProjections,
 } from "../src/profileGameProjection.ts";
 import {
+  buildAutomatchProfileGameProjectionOutboxMergeUpdates,
   buildAutomatchProfileGameProjectionOutboxUpdates,
   buildEventProfileGameProjectionOutboxUpdates,
   buildProfileLinkProfileGameProjectionOutbox,
@@ -40,10 +42,16 @@ import {
   type ProfileLinkProfileGameProjectionTask,
   type ProfileGameProjectionTask,
 } from "../src/profileGameProjectionTasks.ts";
+import { buildTransitionHistoricalMatchPair } from "../src/historicalMatches.ts";
 import worker from "../src/workerHandler.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const operationId = "auto_aaaaaaaaaaa__auto_aaaaaaaaaaa";
+const transitionFen = new Game().toFen();
+const silentLogger = {
+  error: () => undefined,
+  info: () => undefined,
+};
 
 function ratingUpdate(
   overrides: Partial<RatingUpdateData> = {},
@@ -380,6 +388,173 @@ test("automatch outboxes preserve source and recovery timestamps", () => {
   ]) {
     assert.equal(parseAutomatchProfileGameProjectionOutbox(invalid), null);
   }
+  const merged = buildAutomatchProfileGameProjectionOutboxMergeUpdates({
+    historicalMatches: [
+      {
+        finalizedAtMs: 50,
+        guestPlayerId: "guest",
+        hostPlayerId: "host",
+        matchId: "auto_aaaaaaaaaaa",
+        source: "transition",
+      },
+      {
+        finalizedAtMs: 150,
+        guestPlayerId: "guest",
+        hostPlayerId: "host",
+        matchId: "auto_aaaaaaaaaaa1",
+        source: "transition",
+      },
+    ],
+    inviteId: "auto_aaaaaaaaaaa",
+    requestId: "request-new",
+    timestamp: 200,
+  });
+  assert.deepEqual(
+    Object.keys(merged)
+      .filter((key) => key.includes("/historicalMatches/"))
+      .map((key) => key.split("/historicalMatches/")[1])
+      .sort(),
+    ["auto_aaaaaaaaaaa", "auto_aaaaaaaaaaa1"],
+  );
+});
+
+test("transition archives require complete terminal consistent pairs", () => {
+  const hostMatch = {
+    version: 2,
+    color: "white" as const,
+    emojiId: 1,
+    aura: "",
+    gameVariant: "Classic",
+    fen: transitionFen,
+    status: "surrendered",
+    flatMovesString: "",
+    timer: "",
+  };
+  const guestMatch = {
+    ...hostMatch,
+    color: "black" as const,
+    emojiId: 2,
+    status: "",
+  };
+  const input = {
+    matchId: "auto_aaaaaaaaaaa",
+    hostPlayerId: "host",
+    guestPlayerId: "guest",
+    hostMatch,
+    guestMatch,
+  };
+  assert.ok(buildTransitionHistoricalMatchPair(input));
+  assert.equal(
+    buildTransitionHistoricalMatchPair({ ...input, guestMatch: null }),
+    null,
+  );
+  assert.equal(
+    buildTransitionHistoricalMatchPair({
+      ...input,
+      hostMatch: { ...hostMatch, status: "" },
+    }),
+    null,
+  );
+  assert.equal(
+    buildTransitionHistoricalMatchPair({
+      ...input,
+      guestMatch: { ...guestMatch, color: "white" },
+    }),
+    null,
+  );
+  const normalizedVariant = buildTransitionHistoricalMatchPair({
+    ...input,
+    guestMatch: { ...guestMatch, gameVariant: "SwappedManaRows" },
+  });
+  assert.equal(normalizedVariant?.hostMatch?.gameVariant, "Classic");
+  assert.equal(normalizedVariant?.guestMatch?.gameVariant, "Classic");
+
+  const unrelatedGame = new Game();
+  const unrelatedMove = unrelatedGame.suggestMove("fast");
+  assert.ok(unrelatedMove);
+  unrelatedGame.playFen(unrelatedMove.inputFen);
+  assert.equal(
+    buildTransitionHistoricalMatchPair({
+      ...input,
+      guestMatch: { ...guestMatch, fen: unrelatedGame.toFen() },
+    }),
+    null,
+  );
+
+  const swappedFen = new Game({
+    variant: GameVariant.SwappedManaRows,
+  }).toFen();
+  const canonicalVariant = buildTransitionHistoricalMatchPair({
+    ...input,
+    hostMatch: {
+      ...hostMatch,
+      gameVariant: "x".repeat(257),
+      fen: swappedFen,
+    },
+    guestMatch: {
+      ...guestMatch,
+      gameVariant: GameVariant.SwappedManaRows,
+      fen: swappedFen,
+    },
+  });
+  assert.equal(
+    canonicalVariant?.hostMatch?.gameVariant,
+    GameVariant.SwappedManaRows,
+  );
+  assert.equal(
+    canonicalVariant?.guestMatch?.gameVariant,
+    GameVariant.SwappedManaRows,
+  );
+
+  const completedGame = new Game();
+  const moves = { white: [] as string[], black: [] as string[] };
+  let whiteFen = completedGame.toFen();
+  let blackFen = completedGame.toFen();
+  for (let turn = 0; turn < 400 && completedGame.winner === undefined; turn++) {
+    const color = completedGame.activeColor;
+    const suggestion = completedGame.suggestMove("fast");
+    assert.ok(suggestion);
+    completedGame.playFen(suggestion.inputFen);
+    if (color === Color.White) {
+      moves.white.push(suggestion.inputFen);
+      whiteFen = completedGame.toFen();
+    } else {
+      moves.black.push(suggestion.inputFen);
+      blackFen = completedGame.toFen();
+    }
+  }
+  assert.notEqual(completedGame.winner, undefined);
+  assert.equal(
+    buildTransitionHistoricalMatchPair({
+      ...input,
+      hostMatch: {
+        ...hostMatch,
+        status: "",
+        flatMovesString: moves.white.join("-"),
+      },
+      guestMatch: {
+        ...guestMatch,
+        flatMovesString: moves.black.join("-"),
+      },
+    }),
+    null,
+  );
+  assert.ok(
+    buildTransitionHistoricalMatchPair({
+      ...input,
+      hostMatch: {
+        ...hostMatch,
+        fen: whiteFen,
+        status: "",
+        flatMovesString: moves.white.join("-"),
+      },
+      guestMatch: {
+        ...guestMatch,
+        fen: blackFen,
+        flatMovesString: moves.black.join("-"),
+      },
+    }),
+  );
 });
 
 test("event outboxes preserve accumulated cleanup owners", () => {
@@ -522,6 +697,334 @@ test("automatch projection uses the immutable source timestamp and exact-clears"
     "stale",
   );
   assert.equal(calls.length, 1);
+});
+
+test("automatch projection archives accumulated historical descriptors", async () => {
+  const outboxPath = "profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa";
+  const descriptor = {
+    finalizedAtMs: 150,
+    guestPlayerId: "guest",
+    hostPlayerId: "host",
+    source: "transition",
+  };
+  const values = new Map<string, unknown>([
+    [
+      outboxPath,
+      {
+        ...automatchOutbox(),
+        historicalMatches: { auto_aaaaaaaaaaa: descriptor },
+      },
+    ],
+    [
+      "players/host/matches/auto_aaaaaaaaaaa",
+      {
+        version: 2,
+        color: "white",
+        emojiId: 1,
+        aura: "",
+        gameVariant: "Classic",
+        fen: transitionFen,
+        status: "surrendered",
+        flatMovesString: "",
+        timer: "",
+      },
+    ],
+    [
+      "players/guest/matches/auto_aaaaaaaaaaa",
+      {
+        version: 2,
+        color: "black",
+        emojiId: 2,
+        aura: "",
+        gameVariant: "Classic",
+        fen: transitionFen,
+        status: "",
+        flatMovesString: "",
+        timer: "",
+      },
+    ],
+  ]);
+  const archived: unknown[] = [];
+  const rtdb = projectionLockRtdb(values);
+  assert.equal(
+    await processAutomatchProfileGameProjection(automatchTask(), rtdb, {
+      archiveHistoricalMatch: async (input) => {
+        archived.push(input);
+      },
+      hasHistoricalMatch: async () => true,
+      recomputeInviteProjection: async () => ({
+        inviteId: "auto_aaaaaaaaaaa",
+        ok: true,
+        reason: "automatch-queue",
+        skipped: 0,
+        sourceCleanupSafe: true,
+      }),
+    }),
+    "projected",
+  );
+  assert.equal(archived.length, 1);
+  assert.equal(
+    (archived[0] as { pair: { matchId: string } }).pair.matchId,
+    "auto_aaaaaaaaaaa",
+  );
+  assert.equal(values.get(outboxPath), null);
+});
+
+test("automatch projection settles descriptors already archived in D1", async () => {
+  const outboxPath = "profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa";
+  const values = new Map<string, unknown>([
+    [
+      outboxPath,
+      {
+        ...automatchOutbox(),
+        historicalMatches: {
+          auto_aaaaaaaaaaa: {
+            finalizedAtMs: 150,
+            guestPlayerId: "guest",
+            hostPlayerId: "host",
+            source: "transition",
+          },
+        },
+      },
+    ],
+  ]);
+  let archived = 0;
+  assert.equal(
+    await processAutomatchProfileGameProjection(
+      automatchTask(),
+      projectionLockRtdb(values),
+      {
+        archiveHistoricalMatch: async () => {
+          archived++;
+        },
+        hasHistoricalMatch: async () => true,
+        recomputeInviteProjection: async () => ({
+          inviteId: "auto_aaaaaaaaaaa",
+          ok: true,
+          reason: "automatch-queue",
+          skipped: 0,
+          sourceCleanupSafe: true,
+        }),
+      },
+      "owner",
+      () => 300,
+      silentLogger,
+    ),
+    "projected",
+  );
+  assert.equal(archived, 0);
+  assert.equal(values.get(outboxPath), null);
+});
+
+test("automatch projection retries partial sources even when D1 has a row", async () => {
+  const outboxPath = "profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa";
+  const values = new Map<string, unknown>([
+    [
+      outboxPath,
+      {
+        ...automatchOutbox(),
+        historicalMatches: {
+          auto_aaaaaaaaaaa: {
+            finalizedAtMs: 150,
+            guestPlayerId: "guest",
+            hostPlayerId: "host",
+            source: "transition",
+          },
+        },
+      },
+    ],
+    [
+      "players/host/matches/auto_aaaaaaaaaaa",
+      {
+        version: 2,
+        color: "white",
+        emojiId: 1,
+        aura: "",
+        gameVariant: "Classic",
+        fen: transitionFen,
+        status: "surrendered",
+        flatMovesString: "",
+        timer: "",
+      },
+    ],
+  ]);
+  await assert.rejects(
+    processAutomatchProfileGameProjection(
+      automatchTask(),
+      projectionLockRtdb(values),
+      {
+        archiveHistoricalMatch: async () => {
+          throw new Error("must-not-archive-partial");
+        },
+        hasHistoricalMatch: async () => true,
+        recomputeInviteProjection: async () => ({
+          inviteId: "auto_aaaaaaaaaaa",
+          ok: true,
+          reason: "automatch-queue",
+          skipped: 0,
+          sourceCleanupSafe: true,
+        }),
+      },
+      "owner",
+      () => 300,
+      silentLogger,
+    ),
+    /historical-match-source-unavailable/,
+  );
+  assert.notEqual(values.get(outboxPath), null);
+});
+
+test("automatch projection settles historical descriptors in bounded batches", async () => {
+  const outboxPath = "profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa";
+  const matchIds = Array.from({ length: 11 }, (_, index) =>
+    index === 0 ? "auto_aaaaaaaaaaa" : `auto_aaaaaaaaaaa${index}`,
+  );
+  const matchValue = {
+    version: 2,
+    color: "white",
+    emojiId: 1,
+    aura: "",
+    gameVariant: "Classic",
+    fen: transitionFen,
+    status: "surrendered",
+    flatMovesString: "",
+    timer: "",
+  };
+  const values = new Map<string, unknown>([
+    [
+      outboxPath,
+      {
+        ...automatchOutbox(),
+        historicalMatches: Object.fromEntries(
+          matchIds.map((matchId) => [
+            matchId,
+            {
+              finalizedAtMs: 150,
+              guestPlayerId: "guest",
+              hostPlayerId: "host",
+              source: "transition",
+            },
+          ]),
+        ),
+      },
+    ],
+    ...matchIds.flatMap((matchId) => [
+      [`players/host/matches/${matchId}`, matchValue] as const,
+      [
+        `players/guest/matches/${matchId}`,
+        { ...matchValue, color: "black" },
+      ] as const,
+    ]),
+  ]);
+  const archived: unknown[] = [];
+  assert.equal(
+    await processAutomatchProfileGameProjection(
+      automatchTask(),
+      projectionLockRtdb(values),
+      {
+        archiveHistoricalMatch: async (input) => {
+          archived.push(input);
+        },
+        recomputeInviteProjection: async () => ({
+          inviteId: "auto_aaaaaaaaaaa",
+          ok: true,
+          reason: "automatch-queue",
+          skipped: 0,
+          sourceCleanupSafe: true,
+        }),
+      },
+    ),
+    "continued",
+  );
+  assert.equal(archived.length, 5);
+  assert.equal(
+    parseAutomatchProfileGameProjectionOutbox(values.get(outboxPath))
+      ?.historicalMatches?.length,
+    6,
+  );
+});
+
+test("automatch projection settles later descriptors when an earlier one retries", async () => {
+  const inviteId = "auto_aaaaaaaaaaa";
+  const activeMatchId = inviteId;
+  const finalMatchId = `${inviteId}1`;
+  const outboxPath = `profileGameProjectionOutbox/automatch/${inviteId}`;
+  const matchValue = {
+    version: 2,
+    color: "white",
+    emojiId: 1,
+    aura: "",
+    gameVariant: "Classic",
+    fen: transitionFen,
+    status: "",
+    flatMovesString: "",
+    timer: "",
+  };
+  const values = new Map<string, unknown>([
+    [
+      outboxPath,
+      {
+        ...automatchOutbox(),
+        historicalMatches: {
+          [activeMatchId]: {
+            finalizedAtMs: 150,
+            guestPlayerId: "guest",
+            hostPlayerId: "host",
+            source: "transition",
+          },
+          [finalMatchId]: {
+            finalizedAtMs: 160,
+            guestPlayerId: "guest",
+            hostPlayerId: "host",
+            source: "transition",
+          },
+        },
+      },
+    ],
+    [`players/host/matches/${activeMatchId}`, matchValue],
+    [
+      `players/guest/matches/${activeMatchId}`,
+      { ...matchValue, color: "black" },
+    ],
+    [
+      `players/host/matches/${finalMatchId}`,
+      { ...matchValue, status: "surrendered" },
+    ],
+    [
+      `players/guest/matches/${finalMatchId}`,
+      { ...matchValue, color: "black" },
+    ],
+  ]);
+  const archived: string[] = [];
+  await assert.rejects(
+    processAutomatchProfileGameProjection(
+      automatchTask(),
+      projectionLockRtdb(values),
+      {
+        archiveHistoricalMatch: async ({ pair }) => {
+          archived.push(pair.matchId);
+        },
+        recomputeInviteProjection: async () => ({
+          inviteId,
+          ok: true,
+          reason: "automatch-queue",
+          skipped: 0,
+          sourceCleanupSafe: true,
+        }),
+      },
+      "owner",
+      () => 300,
+      silentLogger,
+    ),
+    /historical-match-source-unavailable/,
+  );
+  assert.deepEqual(archived, [finalMatchId]);
+  assert.deepEqual(
+    parseAutomatchProfileGameProjectionOutbox(
+      values.get(outboxPath),
+    )?.historicalMatches?.map(({ matchId }) => matchId),
+    [activeMatchId],
+  );
 });
 
 test("automatch projection serializes newer work behind the current invite", async () => {
@@ -902,6 +1405,124 @@ test("rating projection uses deterministic completion inputs and completes once"
     "stale",
   );
   assert.equal(calls.length, 1);
+});
+
+test("rating projection archives the frozen rating pair", async () => {
+  const match = {
+    version: 2,
+    color: "white" as const,
+    emojiId: 1,
+    aura: "",
+    gameVariant: "Classic",
+    fen: "fen",
+    status: "surrendered",
+    flatMovesString: "move",
+    timer: "",
+  };
+  const pair = {
+    matchId: "auto_aaaaaaaaaaa",
+    hostPlayerId: "host",
+    guestPlayerId: "guest",
+    hostMatch: match,
+    guestMatch: { ...match, color: "black" as const },
+  };
+  const archived: unknown[] = [];
+  const state = { marker: true, marks: [], patches: [] } as {
+    marker: unknown;
+    marks: Array<{ state: string; reason?: string }>;
+    patches: Array<Record<string, unknown>>;
+  };
+  assert.equal(
+    await processRatingProfileGameProjection(
+      operationId,
+      ratingRepository(
+        ratingUpdate({
+          historicalMatchArchiveVersion: 1,
+          historicalMatchPair: pair,
+        }),
+        state,
+      ),
+      {
+        archiveHistoricalMatch: async (input) => {
+          archived.push(input);
+        },
+        recomputeInviteProjection: async () => ({
+          inviteId: "auto_aaaaaaaaaaa",
+          ok: true,
+          reason: "invite-match-rating-updated",
+          skipped: 0,
+          sourceCleanupSafe: true,
+        }),
+      },
+      () => 300,
+      projectionLockRtdb(),
+    ),
+    "done",
+  );
+  assert.deepEqual(archived, [
+    {
+      finalizedAtMs: 200,
+      inviteId: "auto_aaaaaaaaaaa",
+      pair,
+      source: "rating",
+    },
+  ]);
+
+  const failedState = { marker: true, marks: [], patches: [] } as {
+    marker: unknown;
+    marks: Array<{ state: string; reason?: string }>;
+    patches: Array<Record<string, unknown>>;
+  };
+  await assert.rejects(
+    processRatingProfileGameProjection(
+      operationId,
+      ratingRepository(
+        ratingUpdate({
+          historicalMatchArchiveVersion: 1,
+          historicalMatchPair: pair,
+        }),
+        failedState,
+      ),
+      {
+        archiveHistoricalMatch: async () => {
+          throw new Error("archive-failed");
+        },
+        recomputeInviteProjection: async () => ({
+          inviteId: "auto_aaaaaaaaaaa",
+          ok: true,
+          reason: "invite-match-rating-updated",
+          skipped: 0,
+          sourceCleanupSafe: true,
+        }),
+      },
+      () => 300,
+      projectionLockRtdb(),
+    ),
+    /archive-failed/,
+  );
+  assert.deepEqual(failedState.marks, []);
+});
+
+test("new rating projections never complete without their frozen pair", async () => {
+  const state = { marker: true, marks: [], patches: [] } as {
+    marker: unknown;
+    marks: Array<{ state: string; reason?: string }>;
+    patches: Array<Record<string, unknown>>;
+  };
+  await assert.rejects(
+    processRatingProfileGameProjection(
+      operationId,
+      ratingRepository(
+        ratingUpdate({ historicalMatchArchiveVersion: 1 }),
+        state,
+      ),
+      runtime([]),
+      () => 300,
+      projectionLockRtdb(),
+    ),
+    /historical-match-pair-missing/,
+  );
+  assert.deepEqual(state.marks, []);
 });
 
 test("rating projection does not re-enter an active projection lock", async () => {

@@ -1,5 +1,6 @@
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 import { PROFILE_GAME_PROJECTION_SCHEMA_VERSION } from "./profileGameProjectionTasks.ts";
+import type { HistoricalMatchDescriptor } from "./historicalMatches.ts";
 
 export const AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT =
   "profileGameProjectionOutbox/automatch";
@@ -15,6 +16,7 @@ export const PROFILE_LINK_PROFILE_GAME_PROJECTION_LOCK_ROOT =
   "profileGameProjectionLocks/profile";
 
 export type AutomatchProfileGameProjectionOutbox = {
+  historicalMatches?: HistoricalMatchDescriptor[];
   lastQueuedAtMs: number;
   reason: string;
   requestId: string;
@@ -46,6 +48,41 @@ function toRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+export function salvageHistoricalMatchDescriptors(
+  value: unknown,
+): HistoricalMatchDescriptor[] {
+  const entries = Object.entries(
+    toRecord(toRecord(value)?.historicalMatches) || {},
+  );
+  return entries.flatMap(([matchId, raw]) => {
+    const record = toRecord(raw);
+    const finalizedAtMs = record?.finalizedAtMs;
+    const hostPlayerId = record?.hostPlayerId;
+    const guestPlayerId = record?.guestPlayerId;
+    const source = record?.source;
+    return isSafeFirebaseKey(matchId) &&
+      typeof hostPlayerId === "string" &&
+      isSafeFirebaseKey(hostPlayerId) &&
+      typeof guestPlayerId === "string" &&
+      isSafeFirebaseKey(guestPlayerId) &&
+      guestPlayerId !== hostPlayerId &&
+      typeof finalizedAtMs === "number" &&
+      Number.isSafeInteger(finalizedAtMs) &&
+      finalizedAtMs >= 0 &&
+      (source === "rating" || source === "transition" || source === "backfill")
+      ? [
+          {
+            matchId,
+            hostPlayerId,
+            guestPlayerId,
+            finalizedAtMs,
+            source,
+          },
+        ]
+      : [];
+  });
 }
 
 export function salvageProfileLinkCleanupProfileIds(value: unknown): string[] {
@@ -113,6 +150,38 @@ export function buildAutomatchProfileGameProjectionOutboxUpdates(input: {
       lastQueuedAtMs: input.timestamp,
     },
   };
+}
+
+export function buildAutomatchProfileGameProjectionOutboxMergeUpdates(input: {
+  historicalMatches?: HistoricalMatchDescriptor[];
+  inviteId: string;
+  reason?: string;
+  requestId: string;
+  timestamp: unknown;
+}): Record<string, unknown> {
+  const outboxPath = getAutomatchProfileGameProjectionOutboxPath(
+    input.inviteId,
+  );
+  const updates: Record<string, unknown> = {
+    [`${outboxPath}/schemaVersion`]: PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
+    [`${outboxPath}/status`]: "pending",
+    [`${outboxPath}/requestId`]: input.requestId,
+    [`${outboxPath}/reason`]:
+      typeof input.reason === "string" && input.reason.trim()
+        ? input.reason.trim()
+        : "automatch-queue",
+    [`${outboxPath}/sourceUpdatedAtMs`]: input.timestamp,
+    [`${outboxPath}/lastQueuedAtMs`]: input.timestamp,
+  };
+  for (const descriptor of input.historicalMatches || []) {
+    updates[`${outboxPath}/historicalMatches/${descriptor.matchId}`] = {
+      finalizedAtMs: descriptor.finalizedAtMs,
+      guestPlayerId: descriptor.guestPlayerId,
+      hostPlayerId: descriptor.hostPlayerId,
+      source: descriptor.source,
+    };
+  }
+  return updates;
 }
 
 export function buildEventProfileGameProjectionOutboxUpdates(input: {
@@ -194,6 +263,12 @@ export function parseAutomatchProfileGameProjectionOutbox(
     typeof record?.reason === "string" && record.reason.trim()
       ? record.reason.trim()
       : "automatch-queue";
+  const rawHistoricalMatches =
+    record?.historicalMatches === undefined
+      ? {}
+      : toRecord(record.historicalMatches);
+  const historicalMatches = salvageHistoricalMatchDescriptors(record);
+  const historicalEntryCount = Object.keys(rawHistoricalMatches || {}).length;
   return record?.schemaVersion === PROFILE_GAME_PROJECTION_SCHEMA_VERSION &&
     record.status === "pending" &&
     typeof record.requestId === "string" &&
@@ -203,7 +278,9 @@ export function parseAutomatchProfileGameProjectionOutbox(
     sourceUpdatedAtMs >= 0 &&
     typeof lastQueuedAtMs === "number" &&
     Number.isFinite(lastQueuedAtMs) &&
-    lastQueuedAtMs >= 0
+    lastQueuedAtMs >= 0 &&
+    rawHistoricalMatches !== null &&
+    historicalMatches.length === historicalEntryCount
     ? {
         schemaVersion: record.schemaVersion,
         status: record.status,
@@ -211,6 +288,7 @@ export function parseAutomatchProfileGameProjectionOutbox(
         reason,
         sourceUpdatedAtMs: Math.floor(sourceUpdatedAtMs),
         lastQueuedAtMs: Math.floor(lastQueuedAtMs),
+        ...(historicalMatches.length > 0 ? { historicalMatches } : {}),
       }
     : null;
 }

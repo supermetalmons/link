@@ -1,3 +1,4 @@
+import type { HistoricalMatchPair } from "@mons/shared/game-sessions";
 import type {
   MiningMaterialName,
   MiningMaterials,
@@ -56,7 +57,9 @@ export type RatingUpdateData = {
   eventProgressState?: string;
   eventProgressUpdatedAtMs?: number;
   eventProgressVersion?: number;
+  historicalMatchArchiveVersion?: number;
   inviteId: string;
+  historicalMatchPair?: HistoricalMatchPair;
   isEventMatch?: boolean;
   leaseExpiresAtMs: number;
   matchId: string;

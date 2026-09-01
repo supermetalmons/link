@@ -20,16 +20,19 @@ const {
     loginId: string;
     profileId: string;
     invite?: { actorUid: string; id: string; role: "guest" | "host" };
+    historicalMatch?: { inviteId: string; matchId: string };
   };
   DEFAULT_SMOKE_SOL: string;
   parseArgs: (argv: string[]) => {
     baseUrl: string;
     readOnly: boolean;
     readOnlyAuthToken: string | null;
+    requireHistory: boolean;
     smokeProfile: {
       loginId: string;
       profileId: string;
       invite?: { actorUid: string; id: string; role: "guest" | "host" };
+      historicalMatch?: { inviteId: string; matchId: string };
     };
     smokeSol: string;
   };
@@ -38,10 +41,12 @@ const {
       baseUrl: string;
       readOnlyAuthToken?: string | null;
       readOnly?: boolean;
+      requireHistory: boolean;
       smokeProfile: {
         loginId: string;
         profileId: string;
         invite?: { actorUid: string; id: string; role: "guest" | "host" };
+        historicalMatch?: { inviteId: string; matchId: string };
       };
       smokeSol: string;
     },
@@ -57,6 +62,7 @@ const {
       loginId: string;
       profileId: string;
       invite?: { actorUid: string; id: string; role: "guest" | "host" };
+      historicalMatch?: { inviteId: string; matchId: string };
     },
     dependencies: {
       fetch: typeof fetch;
@@ -82,6 +88,36 @@ const SMOKE_PROFILE = {
   loginId: LOGIN,
   profileId: "profile-1",
   invite: { actorUid: "host-login", id: "invite-1", role: "host" as const },
+};
+const HISTORICAL_MATCH = {
+  inviteId: "historygame",
+  matchId: "historygame1",
+};
+const SMOKE_PROFILE_WITH_HISTORY = {
+  ...SMOKE_PROFILE,
+  historicalMatch: HISTORICAL_MATCH,
+};
+const HISTORICAL_MATCH_RECORD = {
+  version: 2,
+  color: "white" as const,
+  emojiId: 1,
+  aura: "",
+  gameVariant: "Classic",
+  fen: "fen",
+  status: "surrendered",
+  flatMovesString: "move",
+  timer: "",
+};
+const HISTORICAL_MATCH_PAIR = {
+  matchId: HISTORICAL_MATCH.matchId,
+  hostPlayerId: "history-host",
+  guestPlayerId: "history-guest",
+  hostMatch: HISTORICAL_MATCH_RECORD,
+  guestMatch: {
+    ...HISTORICAL_MATCH_RECORD,
+    color: "black" as const,
+    emojiId: 2,
+  },
 };
 const AUTH_TOKEN = `header.${Buffer.from(
   JSON.stringify({ sub: LOGIN }),
@@ -118,10 +154,13 @@ function json(
   });
 }
 
-function profileFixture(): { cleanup(): void; path: string } {
+function profileFixture(value: unknown = SMOKE_PROFILE): {
+  cleanup(): void;
+  path: string;
+} {
   const directory = mkdtempSync(join(tmpdir(), "mons-link-smoke-"));
   const path = join(directory, "profile.json");
-  writeFileSync(path, JSON.stringify(SMOKE_PROFILE), { mode: 0o600 });
+  writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
   return {
     path,
     cleanup: () => rmSync(directory, { recursive: true, force: true }),
@@ -143,12 +182,14 @@ function authTokenFixture(idToken = AUTH_TOKEN): {
 
 test("parses only production and canonical preview smoke targets", () => {
   const fixture = profileFixture();
+  const historyFixture = profileFixture(SMOKE_PROFILE_WITH_HISTORY);
   const authFixture = authTokenFixture();
   try {
     assert.deepEqual(parseArgs(["--base-url", "https://api.mons.link/"]), {
       baseUrl: "https://api.mons.link",
       readOnly: false,
       readOnlyAuthToken: null,
+      requireHistory: false,
       smokeProfile: DEFAULT_SMOKE_PROFILE,
       smokeSol: DEFAULT_SMOKE_SOL,
     });
@@ -165,6 +206,7 @@ test("parses only production and canonical preview smoke targets", () => {
         baseUrl: "https://api.mons.link",
         readOnly: false,
         readOnlyAuthToken: null,
+        requireHistory: false,
         smokeProfile: SMOKE_PROFILE,
         smokeSol: WALLET,
       },
@@ -178,6 +220,7 @@ test("parses only production and canonical preview smoke targets", () => {
         baseUrl: "https://12ab34cd-mons-link-api.lil-org.workers.dev",
         readOnly: false,
         readOnlyAuthToken: null,
+        requireHistory: false,
         smokeProfile: DEFAULT_SMOKE_PROFILE,
         smokeSol: DEFAULT_SMOKE_SOL,
       },
@@ -196,7 +239,28 @@ test("parses only production and canonical preview smoke targets", () => {
         baseUrl: "https://api.mons.link",
         readOnly: true,
         readOnlyAuthToken: AUTH_TOKEN,
+        requireHistory: false,
         smokeProfile: SMOKE_PROFILE,
+        smokeSol: DEFAULT_SMOKE_SOL,
+      },
+    );
+    assert.deepEqual(
+      parseArgs([
+        "--base-url",
+        "https://api.mons.link/",
+        "--read-only",
+        "--auth-token-fixture",
+        authFixture.path,
+        "--smoke-profile-fixture",
+        historyFixture.path,
+        "--require-history",
+      ]),
+      {
+        baseUrl: "https://api.mons.link",
+        readOnly: true,
+        readOnlyAuthToken: AUTH_TOKEN,
+        requireHistory: true,
+        smokeProfile: SMOKE_PROFILE_WITH_HISTORY,
         smokeSol: DEFAULT_SMOKE_SOL,
       },
     );
@@ -211,6 +275,46 @@ test("parses only production and canonical preview smoke targets", () => {
           "https://api.mons.link",
           "--auth-token-fixture",
           authFixture.path,
+        ]),
+      /Usage:/,
+    );
+    assert.throws(
+      () =>
+        parseArgs([
+          "--base-url",
+          "https://api.mons.link",
+          "--smoke-profile-fixture",
+          historyFixture.path,
+          "--require-history",
+        ]),
+      /Usage:/,
+    );
+    assert.throws(
+      () =>
+        parseArgs([
+          "--base-url",
+          "https://api.mons.link",
+          "--read-only",
+          "--auth-token-fixture",
+          authFixture.path,
+          "--smoke-profile-fixture",
+          fixture.path,
+          "--require-history",
+        ]),
+      /Usage:/,
+    );
+    assert.throws(
+      () =>
+        parseArgs([
+          "--base-url",
+          "https://api.mons.link",
+          "--read-only",
+          "--auth-token-fixture",
+          authFixture.path,
+          "--smoke-profile-fixture",
+          historyFixture.path,
+          "--require-history",
+          "--require-history",
         ]),
       /Usage:/,
     );
@@ -259,6 +363,54 @@ test("parses only production and canonical preview smoke targets", () => {
     );
   } finally {
     fixture.cleanup();
+    historyFixture.cleanup();
+    authFixture.cleanup();
+  }
+});
+
+test("rejects malformed historical match smoke fixtures", () => {
+  const authFixture = authTokenFixture();
+  const values = [
+    {
+      ...SMOKE_PROFILE,
+      historicalMatch: { ...HISTORICAL_MATCH, extra: true },
+    },
+    {
+      ...SMOKE_PROFILE,
+      historicalMatch: { inviteId: "bad/id", matchId: "bad/id1" },
+    },
+    {
+      ...SMOKE_PROFILE,
+      historicalMatch: { inviteId: "historygame", matchId: "other" },
+    },
+    {
+      ...SMOKE_PROFILE,
+      historicalMatch: { inviteId: " historygame", matchId: " historygame1" },
+    },
+  ];
+  try {
+    for (const value of values) {
+      const fixture = profileFixture(value);
+      try {
+        assert.throws(
+          () =>
+            parseArgs([
+              "--base-url",
+              "https://api.mons.link",
+              "--read-only",
+              "--auth-token-fixture",
+              authFixture.path,
+              "--smoke-profile-fixture",
+              fixture.path,
+              "--require-history",
+            ]),
+          /Usage:/,
+        );
+      } finally {
+        fixture.cleanup();
+      }
+    }
+  } finally {
     authFixture.cleanup();
   }
 });
@@ -268,6 +420,12 @@ test("smokes public, unauthenticated, and internal routes", async () => {
     [];
   const leaderboardTypes: string[] = [];
   let nftPosts = 0;
+  let requiredHistoricalPayload: unknown = {
+    ok: true,
+    pair: HISTORICAL_MATCH_PAIR,
+  };
+  let requiredHistoricalStatus = 200;
+  let requiredHistoryCacheControl = "no-store";
   const fetchStub: typeof fetch = async (input, init) => {
     const url = String(input);
     const method = init?.method || "GET";
@@ -362,6 +520,29 @@ test("smokes public, unauthenticated, and internal routes", async () => {
           profile: PROFILE,
         },
         200,
+      );
+    }
+    if (url.includes("/matches/history?")) {
+      const historyUrl = new URL(url);
+      const isRequiredHistory =
+        historyUrl.searchParams.get("inviteId") === HISTORICAL_MATCH.inviteId &&
+        historyUrl.searchParams.get("matchId") === HISTORICAL_MATCH.matchId;
+      return new Response(
+        JSON.stringify(
+          isRequiredHistory
+            ? requiredHistoricalPayload
+            : { ok: true, pair: null },
+        ),
+        {
+          status: isRequiredHistory ? requiredHistoricalStatus : 200,
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": isRequiredHistory
+              ? requiredHistoryCacheControl
+              : "no-store",
+            "Content-Type": "application/json",
+          },
+        },
       );
     }
     if (
@@ -465,6 +646,7 @@ test("smokes public, unauthenticated, and internal routes", async () => {
   await smokeApi(
     {
       baseUrl: "https://api.mons.link",
+      requireHistory: false,
       smokeProfile: SMOKE_PROFILE,
       smokeSol: WALLET,
     },
@@ -475,7 +657,7 @@ test("smokes public, unauthenticated, and internal routes", async () => {
     },
   );
 
-  assert.equal(requests.length, 39);
+  assert.equal(requests.length, 40);
   assert.deepEqual(leaderboardTypes, [
     "rating",
     "mp",
@@ -496,7 +678,8 @@ test("smokes public, unauthenticated, and internal routes", async () => {
       baseUrl: "https://api.mons.link",
       readOnlyAuthToken: AUTH_TOKEN,
       readOnly: true,
-      smokeProfile: SMOKE_PROFILE,
+      requireHistory: true,
+      smokeProfile: SMOKE_PROFILE_WITH_HISTORY,
       smokeSol: WALLET,
     },
     {
@@ -505,7 +688,7 @@ test("smokes public, unauthenticated, and internal routes", async () => {
       log: (message) => logs.push(message),
     },
   );
-  assert.equal(requests.length, 35);
+  assert.equal(requests.length, 37);
   assert.deepEqual(leaderboardTypes, [
     "rating",
     "mp",
@@ -544,7 +727,90 @@ test("smokes public, unauthenticated, and internal routes", async () => {
     requests.some(({ url }) => url.includes("identitytoolkit.googleapis.com")),
     false,
   );
+  const historyRequests = requests.filter(({ url }) =>
+    url.includes("/matches/history?"),
+  );
+  assert.equal(historyRequests.length, 2);
+  assert.equal(
+    historyRequests.every(({ authorized }) => !authorized),
+    true,
+  );
   assert.deepEqual(logs, ["[api-smoke] Passed https://api.mons.link"]);
+
+  for (const payload of [
+    { ok: true, pair: null },
+    {
+      ok: true,
+      pair: { ...HISTORICAL_MATCH_PAIR, matchId: "different-match" },
+    },
+    { ok: true, pair: HISTORICAL_MATCH_PAIR, extra: true },
+  ]) {
+    requests.length = 0;
+    leaderboardTypes.length = 0;
+    logs.length = 0;
+    nftPosts = 0;
+    requiredHistoricalPayload = payload;
+    await assert.rejects(
+      smokeApi(
+        {
+          baseUrl: "https://api.mons.link",
+          readOnlyAuthToken: AUTH_TOKEN,
+          readOnly: true,
+          requireHistory: true,
+          smokeProfile: SMOKE_PROFILE_WITH_HISTORY,
+          smokeSol: WALLET,
+        },
+        {
+          fetch: fetchStub,
+          randomState: () => "abcdefghijklmnopqrstuvwx",
+          log: (message) => logs.push(message),
+        },
+      ),
+      /Required historical match smoke response was invalid/,
+    );
+  }
+  requiredHistoricalPayload = { ok: true, pair: HISTORICAL_MATCH_PAIR };
+  requiredHistoryCacheControl = "public, max-age=60";
+  nftPosts = 0;
+  await assert.rejects(
+    smokeApi(
+      {
+        baseUrl: "https://api.mons.link",
+        readOnlyAuthToken: AUTH_TOKEN,
+        readOnly: true,
+        requireHistory: true,
+        smokeProfile: SMOKE_PROFILE_WITH_HISTORY,
+        smokeSol: WALLET,
+      },
+      {
+        fetch: fetchStub,
+        randomState: () => "abcdefghijklmnopqrstuvwx",
+        log: () => undefined,
+      },
+    ),
+    /cacheable/,
+  );
+  requiredHistoryCacheControl = "no-store";
+  requiredHistoricalStatus = 503;
+  nftPosts = 0;
+  await assert.rejects(
+    smokeApi(
+      {
+        baseUrl: "https://api.mons.link",
+        readOnlyAuthToken: AUTH_TOKEN,
+        readOnly: true,
+        requireHistory: true,
+        smokeProfile: SMOKE_PROFILE_WITH_HISTORY,
+        smokeSol: WALLET,
+      },
+      {
+        fetch: fetchStub,
+        randomState: () => "abcdefghijklmnopqrstuvwx",
+        log: () => undefined,
+      },
+    ),
+    /returned 503/,
+  );
 });
 
 test("probes frozen profile writes with an authenticated mutation-safe body", async () => {
@@ -625,6 +891,7 @@ test("requires the exact frozen profile write retry delay", async () => {
 test("fails on a malformed or cacheable response", async () => {
   const base = {
     baseUrl: "https://api.mons.link",
+    requireHistory: false,
     smokeProfile: SMOKE_PROFILE,
     smokeSol: WALLET,
   };
@@ -645,6 +912,7 @@ test("fails before requests when read-only auth is missing", async () => {
       {
         baseUrl: "https://api.mons.link",
         readOnly: true,
+        requireHistory: false,
         smokeProfile: SMOKE_PROFILE,
         smokeSol: WALLET,
       },
@@ -658,6 +926,27 @@ test("fails before requests when read-only auth is missing", async () => {
       },
     ),
     /existing auth token fixture/,
+  );
+  await assert.rejects(
+    smokeApi(
+      {
+        baseUrl: "https://api.mons.link",
+        readOnly: true,
+        readOnlyAuthToken: AUTH_TOKEN,
+        requireHistory: true,
+        smokeProfile: SMOKE_PROFILE,
+        smokeSol: WALLET,
+      },
+      {
+        fetch: async () => {
+          requests++;
+          throw new Error("unexpected-request");
+        },
+        randomState: () => "abcdefghijklmnopqrstuvwx",
+        log: () => undefined,
+      },
+    ),
+    /authenticated historical match fixture/,
   );
   assert.equal(requests, 0);
 });

@@ -8,6 +8,7 @@ import type {
   ProposeRematchRequest,
   ResolveInviteRoleRequest,
 } from "@mons/shared/game-sessions";
+import { MAX_GAME_SESSION_GAME_VARIANT_BYTES } from "@mons/shared/game-sessions";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import type { RequestIdentity } from "../src/requestIdentity.ts";
 import {
@@ -17,6 +18,7 @@ import {
   endRematchSeries,
   ensureParticipantMatch,
   joinInvite,
+  nextRematchIndex,
   proposeRematch,
   refreshGameSessionMutationLease,
   releaseGameSessionMutationLease,
@@ -38,6 +40,7 @@ const ids = {
   create: "00000000-0000-4000-8000-000000000001",
   join: "00000000-0000-4000-8000-000000000002",
   propose: "00000000-0000-4000-8000-000000000003",
+  proposeGuest: "00000000-0000-4000-8000-000000000006",
   end: "00000000-0000-4000-8000-000000000004",
   ensure: "00000000-0000-4000-8000-000000000005",
 };
@@ -197,6 +200,17 @@ function repository(initial: Record<string, unknown> = {}, nowMs = 1_000) {
 function presentation() {
   return { emojiId: 1, aura: "" };
 }
+
+test("does not advance beyond the canonical rematch index range", () => {
+  const maximum = String(Number.MAX_SAFE_INTEGER);
+  assert.equal(
+    nextRematchIndex(
+      { hostRematches: maximum, guestRematches: maximum },
+      "host",
+    ),
+    null,
+  );
+});
 
 test("resolves invite roles from authoritative participant links", async () => {
   const request: ResolveInviteRoleRequest = { inviteId: "abcdefghijk" };
@@ -610,14 +624,11 @@ test("creates and replays one atomic manual invite mutation", async () => {
     identity.uid,
   );
   assert.ok(patch[`gameplayMutationReceiptExpirations/${ids.create}`]);
-  assert.deepEqual(patch["profileGameProjectionOutbox/automatch/abcdefghijk"], {
-    schemaVersion: 1,
-    status: "pending",
-    requestId: ids.create,
-    reason: "manual-invite-created",
-    sourceUpdatedAtMs: { ".sv": "timestamp" },
-    lastQueuedAtMs: { ".sv": "timestamp" },
-  });
+  const outboxPath = "profileGameProjectionOutbox/automatch/abcdefghijk";
+  assert.equal(patch[`${outboxPath}/schemaVersion`], 1);
+  assert.equal(patch[`${outboxPath}/status`], "pending");
+  assert.equal(patch[`${outboxPath}/requestId`], ids.create);
+  assert.equal(patch[`${outboxPath}/reason`], "manual-invite-created");
   assert.equal(tasks.length, 2);
   await assert.rejects(
     () =>
@@ -834,7 +845,13 @@ test("proposes and ends rematches through participant-owned writes", async () =>
     hostColor: "white",
     guestId: "guest-login",
   };
-  const proposed = repository({ "invites/abcdefghijk": baseInvite });
+  const proposed = repository({
+    "invites/abcdefghijk": baseInvite,
+    "players/guest-login/matches/abcdefghijk1": {
+      ...match("black"),
+      gameVariant: "x".repeat(MAX_GAME_SESSION_GAME_VARIANT_BYTES + 1),
+    },
+  });
   const proposeRequest: ProposeRematchRequest = {
     operationId: ids.propose,
     inviteId: "abcdefghijk",
@@ -848,7 +865,47 @@ test("proposes and ends rematches through participant-owned writes", async () =>
   );
   assert.equal(proposal.matchId, "abcdefghijk1");
   assert.equal(proposal.rematches, "1");
+  assert.equal(proposal.match.gameVariant, "Classic");
+  assert.equal(proposal.match.fen, match("black").fen);
+  assert.ok(
+    new TextEncoder().encode(proposal.match.gameVariant).byteLength <=
+      MAX_GAME_SESSION_GAME_VARIANT_BYTES,
+  );
   assert.ok(proposed.patches[0]["players/login-1/matches/abcdefghijk1"]);
+  assert.deepEqual(
+    proposed.patches[0][
+      "profileGameProjectionOutbox/automatch/abcdefghijk/historicalMatches/abcdefghijk"
+    ],
+    {
+      finalizedAtMs: 1_000,
+      guestPlayerId: "guest-login",
+      hostPlayerId: "login-1",
+      source: "transition",
+    },
+  );
+
+  const descriptorPath =
+    "profileGameProjectionOutbox/automatch/abcdefghijk/historicalMatches/abcdefghijk";
+  const firstDescriptor = {
+    finalizedAtMs: 1_000,
+    guestPlayerId: "guest-login",
+    hostPlayerId: "login-1",
+    source: "transition",
+  };
+  const secondProposal = repository({
+    "invites/abcdefghijk": { ...baseInvite, hostRematches: "1" },
+    "players/login-1/matches/abcdefghijk1": match("white"),
+    [descriptorPath]: firstDescriptor,
+  });
+  const guestProposal = await proposeRematch(
+    { uid: "guest-login" },
+    { ...proposeRequest, operationId: ids.proposeGuest },
+    secondProposal.repository,
+    { createOwnerId: () => "owner", now: () => 2_000 },
+  );
+  assert.equal(guestProposal.matchId, "abcdefghijk1");
+  assert.equal(Object.hasOwn(secondProposal.patches[0], descriptorPath), false);
+  assert.deepEqual(secondProposal.values.get(descriptorPath), firstDescriptor);
 
   const ended = repository({ "invites/abcdefghijk": baseInvite });
   const endRequest: EndRematchRequest = {
@@ -861,9 +918,21 @@ test("proposes and ends rematches through participant-owned writes", async () =>
   });
   assert.equal(end.rematches, "x");
   assert.equal(ended.patches[0]["invites/abcdefghijk/hostRematches"], "x");
+  assert.deepEqual(
+    ended.patches[0][
+      "profileGameProjectionOutbox/automatch/abcdefghijk/historicalMatches/abcdefghijk"
+    ],
+    {
+      finalizedAtMs: 1_000,
+      guestPlayerId: "guest-login",
+      hostPlayerId: "login-1",
+      source: "transition",
+    },
+  );
 
   const endedByGuest = repository({
     "invites/abcdefghijk": { ...baseInvite, guestRematches: "1x" },
+    [descriptorPath]: firstDescriptor,
   });
   const hostEnd = await endRematchSeries(
     identity,
@@ -874,7 +943,32 @@ test("proposes and ends rematches through participant-owned writes", async () =>
   assert.equal(hostEnd.rematches, "x");
   assert.equal(
     endedByGuest.patches[0]["invites/abcdefghijk/hostRematches"],
-    "x",
+    undefined,
+  );
+  assert.equal(Object.hasOwn(endedByGuest.patches[0], descriptorPath), false);
+  assert.deepEqual(endedByGuest.values.get(descriptorPath), firstDescriptor);
+  assert.equal(
+    endedByGuest.patches[0][
+      "profileGameProjectionOutbox/automatch/abcdefghijk/historicalMatches/abcdefghijk1"
+    ],
+    undefined,
+  );
+
+  const endedApproved = repository({
+    "invites/abcdefghijk": {
+      ...baseInvite,
+      hostRematches: "1",
+      guestRematches: "1",
+    },
+  });
+  await endRematchSeries(identity, endRequest, endedApproved.repository, {
+    createOwnerId: () => "owner",
+    now: () => 1_000,
+  });
+  assert.ok(
+    endedApproved.patches[0][
+      "profileGameProjectionOutbox/automatch/abcdefghijk/historicalMatches/abcdefghijk1"
+    ],
   );
 });
 

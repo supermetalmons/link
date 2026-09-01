@@ -1,11 +1,10 @@
 import {
-  MAX_GAME_SESSION_STATUS_BYTES,
-  MAX_GAME_SESSION_TIMER_BYTES,
   isCreateInviteResponse,
   isEndRematchResponse,
   isEnsureMatchResponse,
   isJoinInviteResponse,
   isProposeRematchResponse,
+  normalizeHistoricalMatchRecord,
   type CreateInviteRequest,
   type CreateInviteResponse,
   type EndRematchRequest,
@@ -26,10 +25,9 @@ import { isAutoInviteId, pickHostColor } from "@mons/shared/ids";
 import {
   CONTROLLER_VERSION,
   buildFreshMatchRecord,
-  isMatchFenWithinLimit,
-  isMatchHistoryWithinLimits,
 } from "@mons/shared/match-protocol";
 import {
+  getLatestApprovedRematchIndex,
   getLatestRematchIndex,
   parseInviteMatchIndex,
   parseRematchIndices,
@@ -54,7 +52,8 @@ import {
   type GameplayProfile,
   type GameplayRepository,
 } from "./gameplayRepository.ts";
-import { buildAutomatchProfileGameProjectionOutboxUpdates } from "./profileGameProjectionOutbox.ts";
+import { buildAutomatchProfileGameProjectionOutboxMergeUpdates } from "./profileGameProjectionOutbox.ts";
+import type { HistoricalMatchDescriptor } from "./historicalMatches.ts";
 import type {
   AutomatchProfileGameProjectionTask,
   ProfileGameProjectionTask,
@@ -110,6 +109,7 @@ type GameSessionMutationReceipt = {
 };
 
 type GameSessionMutationOutcome<T extends GameSessionResponse> = {
+  historicalMatches?: HistoricalMatchDescriptor[];
   projectReason?: string;
   response: T;
   updates?: Record<string, unknown>;
@@ -168,53 +168,9 @@ function mutationReceiptExpirationPath(operationId: string): string {
   return `${GAME_SESSION_MUTATION_RECEIPT_EXPIRATION_ROOT}/${operationId}`;
 }
 
-function isBoundedString(value: unknown, maxBytes: number): value is string {
-  return (
-    typeof value === "string" &&
-    new TextEncoder().encode(value).byteLength <= maxBytes
-  );
-}
-
 function normalizeMatch(value: unknown): GameSessionMatch | null {
-  const record = toRecord(value);
-  const color = record?.color;
-  const emojiId = Number(record?.emojiId);
-  const fen = typeof record?.fen === "string" ? record.fen : "";
-  const flatMovesString =
-    typeof record?.flatMovesString === "string" ? record.flatMovesString : "";
-  const status = typeof record?.status === "string" ? record.status : "";
-  const timer = typeof record?.timer === "string" ? record.timer : "";
-  if (
-    !record ||
-    (color !== "white" && color !== "black") ||
-    !Number.isSafeInteger(emojiId) ||
-    emojiId <= 0 ||
-    !fen ||
-    !isMatchFenWithinLimit(fen) ||
-    !isMatchHistoryWithinLimits(flatMovesString) ||
-    !isBoundedString(status, MAX_GAME_SESSION_STATUS_BYTES) ||
-    !isBoundedString(timer, MAX_GAME_SESSION_TIMER_BYTES)
-  ) {
-    return null;
-  }
-  return {
-    version: Number.isSafeInteger(record.version)
-      ? Number(record.version)
-      : CONTROLLER_VERSION,
-    color,
-    emojiId,
-    aura:
-      typeof record.aura === "string" && record.aura.length <= 32
-        ? record.aura
-        : "",
-    gameVariant: gameVariantHelpers.getStoredGameVariantForPersistence(
-      record.gameVariant,
-    ),
-    fen,
-    status,
-    flatMovesString,
-    timer,
-  };
+  const match = normalizeHistoricalMatchRecord(value);
+  return match?.fen ? match : null;
 }
 
 function buildMirroredMatch(
@@ -539,7 +495,8 @@ async function runGameSessionMutation<T extends GameSessionResponse>(
     if (outcome.projectReason) {
       Object.assign(
         updates,
-        buildAutomatchProfileGameProjectionOutboxUpdates({
+        buildAutomatchProfileGameProjectionOutboxMergeUpdates({
+          historicalMatches: outcome.historicalMatches,
           inviteId: request.inviteId,
           reason: outcome.projectReason,
           requestId: request.operationId,
@@ -1007,7 +964,11 @@ export function nextRematchIndex(
     }
     return own.length < other.length && own.length === 0 ? 1 : null;
   }
-  return own.length > other.length ? null : latestCommon + 1;
+  if (own.length > other.length) {
+    return null;
+  }
+  const nextIndex = latestCommon + 1;
+  return Number.isSafeInteger(nextIndex) ? nextIndex : null;
 }
 
 function rematchColor(
@@ -1091,6 +1052,11 @@ export async function proposeRematch(
       };
       const field =
         participant.role === "host" ? "hostRematches" : "guestRematches";
+      const opponentField =
+        participant.role === "host" ? "guestRematches" : "hostRematches";
+      const firstProposal = !parseRematchIndices(
+        invite[opponentField],
+      ).includes(index);
       const current = normalizeString(invite[field]);
       const rematches = current ? `${current};${index}` : String(index);
       return {
@@ -1103,6 +1069,22 @@ export async function proposeRematch(
           match,
         },
         projectReason: `manual-${field}-updated`,
+        ...(firstProposal
+          ? {
+              historicalMatches: [
+                {
+                  finalizedAtMs: (dependencies.now || Date.now)(),
+                  guestPlayerId: String(invite.guestId),
+                  hostPlayerId: String(invite.hostId),
+                  matchId:
+                    index === 1
+                      ? request.inviteId
+                      : `${request.inviteId}${index - 1}`,
+                  source: "transition" as const,
+                },
+              ],
+            }
+          : {}),
         updates: {
           [`invites/${request.inviteId}/${field}`]: rematches,
           [`players/${participant.actorUid}/matches/${matchId}`]: match,
@@ -1141,17 +1123,23 @@ export async function endRematchSeries(
       const field =
         participant.role === "host" ? "hostRematches" : "guestRematches";
       const current = normalizeString(invite[field]);
-      if (current.endsWith("x")) {
+      if (rematchSeriesEnded(invite)) {
         return {
           response: {
             ok: true,
             inviteId: request.inviteId,
             actorUid: participant.actorUid,
-            rematches: current,
+            rematches: current.endsWith("x") ? current : `${current}x`,
           },
         };
       }
       const rematches = `${current}x`;
+      const latestApprovedIndex = getLatestApprovedRematchIndex(invite);
+      const latestProposedIndex = getLatestRematchIndex(invite);
+      const matchId =
+        latestApprovedIndex === 0
+          ? request.inviteId
+          : `${request.inviteId}${latestApprovedIndex}`;
       return {
         response: {
           ok: true,
@@ -1160,6 +1148,19 @@ export async function endRematchSeries(
           rematches,
         },
         projectReason: `manual-${field}-ended`,
+        ...(latestApprovedIndex === latestProposedIndex
+          ? {
+              historicalMatches: [
+                {
+                  finalizedAtMs: (dependencies.now || Date.now)(),
+                  guestPlayerId: String(invite.guestId),
+                  hostPlayerId: String(invite.hostId),
+                  matchId,
+                  source: "transition" as const,
+                },
+              ],
+            }
+          : {}),
         updates: {
           [`invites/${request.inviteId}/${field}`]: rematches,
         },

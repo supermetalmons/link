@@ -34,6 +34,7 @@ const {
   removeEventParticipantViaApi,
   removeNavigationGameViaApi,
   readNavigationGamesViaApi,
+  readHistoricalMatchPairViaApi,
   readInviteRoleViaApi,
   resolveWagerOutcomeViaApi,
   sendWagerProposalViaApi,
@@ -121,6 +122,45 @@ const jsonResponse = (body, status = 200) =>
 
 test.afterEach(() => {
   globalThis.fetch = originalFetch;
+});
+
+test("reads public historical matches without an auth token", async () => {
+  const calls = [];
+  const match = {
+    version: 2,
+    color: "white",
+    emojiId: 1,
+    aura: "",
+    gameVariant: "Classic",
+    fen: "fen",
+    status: "surrendered",
+    flatMovesString: "move",
+    timer: "",
+  };
+  const pair = {
+    matchId: "abcdefghijk",
+    hostPlayerId: "host",
+    guestPlayerId: "guest",
+    hostMatch: match,
+    guestMatch: { ...match, color: "black", emojiId: 2 },
+  };
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input: String(input), init });
+    return jsonResponse({ ok: true, pair });
+  };
+  assert.deepEqual(
+    await readHistoricalMatchPairViaApi({
+      inviteId: "abcdefghijk",
+      matchId: "abcdefghijk",
+    }),
+    { ok: true, pair },
+  );
+  assert.equal(
+    calls[0].input,
+    "https://api.mons.link/matches/history?inviteId=abcdefghijk&matchId=abcdefghijk",
+  );
+  assert.equal(calls[0].init.method, "GET");
+  assert.equal(new Headers(calls[0].init.headers).has("Authorization"), false);
 });
 
 test("sends exact authenticated event-control mutations", async () => {

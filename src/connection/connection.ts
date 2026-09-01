@@ -112,6 +112,7 @@ import {
   updateRatingsViaApi,
   postponeEventStartViaApi,
   proposeRematchViaApi,
+  readHistoricalMatchPairViaApi,
 } from "../services/gameplayApi";
 import { compareNavigationItems as compareNavigationItemsByDisplayOrder } from "../services/navigationItemOrdering";
 import { resetNftCache } from "../services/nftCache";
@@ -137,6 +138,10 @@ import {
   type StartAutomatchResponse,
 } from "@mons/shared/navigation";
 import { isAutoInviteId } from "@mons/shared/ids";
+import {
+  isHistoricalMatchPair,
+  normalizeHistoricalMatchRecord,
+} from "@mons/shared/game-sessions";
 import type {
   EventCreateDateTimePayload,
   EventScheduleTimezone as SharedEventScheduleTimezone,
@@ -1981,30 +1986,15 @@ class Connection {
   public async loadHistoricalMatchPair(
     matchId: string,
   ): Promise<HistoricalMatchPair | null> {
-    if (!this.latestInvite || !matchId) {
+    if (!this.latestInvite || !this.inviteId || !matchId) {
       return null;
     }
-    await this.ensureAuthenticated();
-    const hostPlayerId = this.latestInvite.hostId;
-    const guestPlayerId = this.latestInvite.guestId ?? null;
-    const hostRef = ref(this.db, `players/${hostPlayerId}/matches/${matchId}`);
-    const guestRef = guestPlayerId
-      ? ref(this.db, `players/${guestPlayerId}/matches/${matchId}`)
-      : null;
-    const hostSnapshot = await get(hostRef);
-    const guestSnapshot = guestRef ? await get(guestRef) : null;
-    const hostMatch: Match | null = hostSnapshot.val();
-    const guestMatch: Match | null = guestSnapshot ? guestSnapshot.val() : null;
-    if (!hostMatch && !guestMatch) {
-      return null;
-    }
-    return {
-      matchId,
-      hostPlayerId,
-      guestPlayerId,
-      hostMatch,
-      guestMatch,
-    };
+    return (
+      await readHistoricalMatchPairViaApi({
+        inviteId: this.inviteId,
+        matchId,
+      })
+    ).pair;
   }
 
   public getCachedHistoricalMatchPair(
@@ -2034,13 +2024,14 @@ class Connection {
     if (!hostMatch && !guestMatch) {
       return null;
     }
-    return {
+    const pair = {
       matchId,
       hostPlayerId,
       guestPlayerId,
-      hostMatch: hostMatch ? { ...hostMatch } : null,
-      guestMatch: guestMatch ? { ...guestMatch } : null,
+      hostMatch: normalizeHistoricalMatchRecord(hostMatch),
+      guestMatch: normalizeHistoricalMatchRecord(guestMatch),
     };
+    return isHistoricalMatchPair(pair) ? pair : null;
   }
 
   private getRematchIndexAvailableForNewProposal(): string | null {

@@ -1,4 +1,5 @@
 import glicko2 from "glicko2";
+import type { HistoricalMatchPair } from "@mons/shared/game-sessions";
 import { isAutoInviteId } from "@mons/shared/ids";
 import {
   buildOrderedMoveHistory,
@@ -28,6 +29,10 @@ import {
 } from "../../../functions/telegramDisplay.js";
 import { TELEGRAM_AUTOMATCH_VERSION } from "../../../functions/telegram/automatchSource.js";
 import { AuthApiFailure } from "./authErrors.ts";
+import {
+  buildHistoricalMatchPair,
+  HISTORICAL_MATCH_ARCHIVE_VERSION,
+} from "./historicalMatches.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import type {
   RatingCommitPlan,
@@ -287,6 +292,7 @@ function wagerSuffix(invite: Record<string, unknown>, matchId: string): string {
 }
 
 function buildRatingPlan({
+  historicalMatchPair,
   invite,
   matchId,
   nowMs,
@@ -297,6 +303,7 @@ function buildRatingPlan({
   request,
   result,
 }: {
+  historicalMatchPair: HistoricalMatchPair;
   invite: Record<string, unknown>;
   matchId: string;
   nowMs: number;
@@ -456,6 +463,8 @@ function buildRatingPlan({
       playerId: request.playerId,
       opponentId: request.opponentId,
       status: "done",
+      historicalMatchArchiveVersion: HISTORICAL_MATCH_ARCHIVE_VERSION,
+      historicalMatchPair,
       result,
       canUpdateRatings,
       didApplyRatingDelta: shouldApplyRatingDelta,
@@ -646,6 +655,29 @@ export async function updateRatings(
   ]);
   const playerMatch = readMatchRecord(playerValue);
   const opponentMatch = readMatchRecord(opponentValue);
+  const hostPlayerId = typeof invite.hostId === "string" ? invite.hostId : "";
+  const guestPlayerId =
+    typeof invite.guestId === "string" ? invite.guestId : "";
+  const historicalMatchPair = buildHistoricalMatchPair({
+    matchId: request.matchId,
+    hostPlayerId,
+    guestPlayerId,
+    hostMatch:
+      request.playerId === hostPlayerId
+        ? playerValue
+        : request.opponentId === hostPlayerId
+          ? opponentValue
+          : null,
+    guestMatch:
+      request.playerId === guestPlayerId
+        ? playerValue
+        : request.opponentId === guestPlayerId
+          ? opponentValue
+          : null,
+  });
+  if (!historicalMatchPair) {
+    throw failedPrecondition("something is wrong with the game state.");
+  }
   const result = resolveRatingResult(playerMatch, opponentMatch);
   const ownerToken = (
     dependencies.createOwnerToken ||
@@ -691,6 +723,7 @@ export async function updateRatings(
     },
     (player, opponent) => {
       return buildRatingPlan({
+        historicalMatchPair,
         invite,
         matchId: request.matchId,
         nowMs: now(),

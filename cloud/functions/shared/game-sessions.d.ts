@@ -20,6 +20,26 @@ export type GameSessionMatch = {
   timer: string;
 };
 
+export type HistoricalMatchRecord = GameSessionMatch;
+
+export type HistoricalMatchPair = {
+  matchId: string;
+  hostPlayerId: string;
+  guestPlayerId: string | null;
+  hostMatch: HistoricalMatchRecord | null;
+  guestMatch: HistoricalMatchRecord | null;
+};
+
+export type ReadHistoricalMatchRequest = {
+  inviteId: string;
+  matchId: string;
+};
+
+export type ReadHistoricalMatchResponse = {
+  ok: true;
+  pair: HistoricalMatchPair | null;
+};
+
 export type CreateInviteRequest = GameSessionOperation &
   GameSessionPresentation;
 export type CreateInviteResponse = {
@@ -82,6 +102,7 @@ export type EnsureMatchResponse = {
 export const GAME_SESSION_OPERATION_ID_PATTERN: RegExp;
 export const MANUAL_INVITE_ID_PATTERN: RegExp;
 export const MAX_GAME_SESSION_RESPONSE_BYTES: number;
+export const MAX_GAME_SESSION_GAME_VARIANT_BYTES: 256;
 export const MAX_GAME_SESSION_STATUS_BYTES: number;
 export const MAX_GAME_SESSION_TIMER_BYTES: number;
 
@@ -118,3 +139,15 @@ export function isEnsureMatchResponse(
   value: unknown,
 ): value is EnsureMatchResponse;
 export function isGameSessionMatch(value: unknown): value is GameSessionMatch;
+export function isHistoricalMatchPair(
+  value: unknown,
+): value is HistoricalMatchPair;
+export function normalizeHistoricalMatchRecord(
+  value: unknown,
+): HistoricalMatchRecord | null;
+export function isReadHistoricalMatchRequest(
+  value: unknown,
+): value is ReadHistoricalMatchRequest;
+export function isReadHistoricalMatchResponse(
+  value: unknown,
+): value is ReadHistoricalMatchResponse;

@@ -4,6 +4,8 @@ const {
   isLinkedAuthMethodsResponse,
 }: typeof import("@mons/shared/auth") = require("@mons/shared/auth");
 const {
+  isReadHistoricalMatchRequest,
+  isReadHistoricalMatchResponse,
   isResolveInviteRoleResponse,
 }: typeof import("@mons/shared/game-sessions") = require("@mons/shared/game-sessions");
 const {
@@ -37,6 +39,7 @@ type Options = {
   baseUrl: string;
   readOnlyAuthToken?: string | null;
   readOnly?: boolean;
+  requireHistory: boolean;
   smokeProfile: ProfileSmokeFixture;
   smokeSol: string;
 };
@@ -48,6 +51,10 @@ type ProfileSmokeFixture = {
     id: string;
     role: "guest" | "host";
   };
+  historicalMatch?: {
+    inviteId: string;
+    matchId: string;
+  };
 };
 type Dependencies = {
   fetch: typeof fetch;
@@ -56,7 +63,7 @@ type Dependencies = {
 };
 
 function usage(): string {
-  return "Usage: npm run smoke:api -- --base-url <https-url> [--read-only --auth-token-fixture <protected-json-file>] [--smoke-sol <wallet>] [--smoke-profile-fixture <protected-json-file>]";
+  return "Usage: npm run smoke:api -- --base-url <https-url> [--read-only --auth-token-fixture <protected-json-file> [--require-history]] [--smoke-sol <wallet>] [--smoke-profile-fixture <protected-json-file>]";
 }
 
 function readAuthTokenFixture(path: string): string {
@@ -141,6 +148,31 @@ function readProfileSmokeFixture(path: string): ProfileSmokeFixture {
             : null,
       }
     : null;
+  const historicalMatchFields =
+    fields.historicalMatch &&
+    typeof fields.historicalMatch === "object" &&
+    !Array.isArray(fields.historicalMatch)
+      ? (fields.historicalMatch as Record<string, unknown>)
+      : null;
+  const historicalMatch = historicalMatchFields
+    ? {
+        inviteId:
+          typeof historicalMatchFields.inviteId === "string"
+            ? historicalMatchFields.inviteId
+            : "",
+        matchId:
+          typeof historicalMatchFields.matchId === "string"
+            ? historicalMatchFields.matchId
+            : "",
+      }
+    : null;
+  const fieldKeys = Object.keys(fields);
+  const allowedFieldKeys = new Set([
+    "loginId",
+    "profileId",
+    "invite",
+    "historicalMatch",
+  ]);
   const loginCharacters = Array.from(loginId);
   const invalidControl = [...loginCharacters, ...Array.from(profileId)].some(
     (character) => {
@@ -149,9 +181,18 @@ function readProfileSmokeFixture(path: string): ProfileSmokeFixture {
     },
   );
   if (
-    (Object.keys(fields).length !== 2 && Object.keys(fields).length !== 3) ||
-    (Object.keys(fields).length === 3 && !inviteFields) ||
+    fieldKeys.length < 2 ||
+    fieldKeys.length > 4 ||
+    fieldKeys.some((key) => !allowedFieldKeys.has(key)) ||
+    Object.hasOwn(fields, "invite") !== (inviteFields !== null) ||
+    Object.hasOwn(fields, "historicalMatch") !==
+      (historicalMatchFields !== null) ||
     (inviteFields !== null && Object.keys(inviteFields).length !== 3) ||
+    (historicalMatchFields !== null &&
+      (Object.keys(historicalMatchFields).length !== 2 ||
+        historicalMatch?.inviteId !== historicalMatch?.inviteId.trim() ||
+        historicalMatch?.matchId !== historicalMatch?.matchId.trim() ||
+        !isReadHistoricalMatchRequest(historicalMatch))) ||
     !loginId ||
     loginId !== loginId.trim() ||
     loginCharacters.length > 128 ||
@@ -179,6 +220,14 @@ function readProfileSmokeFixture(path: string): ProfileSmokeFixture {
             actorUid: invite.actorUid,
             id: invite.id,
             role: invite.role,
+          },
+        }
+      : {}),
+    ...(historicalMatch
+      ? {
+          historicalMatch: {
+            inviteId: historicalMatch.inviteId,
+            matchId: historicalMatch.matchId,
           },
         }
       : {}),
@@ -212,6 +261,7 @@ function parseArgs(argv: string[]): Options {
   let baseUrl = "";
   let readOnlyAuthToken: string | null = null;
   let readOnly = false;
+  let requireHistory = false;
   let smokeProfile: ProfileSmokeFixture = DEFAULT_SMOKE_PROFILE;
   let smokeProfileOverridden = false;
   let smokeSol = DEFAULT_SMOKE_SOL;
@@ -221,6 +271,11 @@ function parseArgs(argv: string[]): Options {
     if (name === "--read-only") {
       if (readOnly) throw new TypeError(usage());
       readOnly = true;
+      continue;
+    }
+    if (name === "--require-history") {
+      if (requireHistory) throw new TypeError(usage());
+      requireHistory = true;
       continue;
     }
     const value = argv[index + 1];
@@ -256,12 +311,21 @@ function parseArgs(argv: string[]): Options {
     !smokeSol ||
     readOnly !== (readOnlyAuthToken !== null) ||
     (readOnly && !smokeProfile.invite) ||
+    (requireHistory &&
+      (!readOnly || !readOnlyAuthToken || !smokeProfile.historicalMatch)) ||
     (readOnlyAuthToken !== null &&
       readTokenSubject(readOnlyAuthToken) !== smokeProfile.loginId)
   ) {
     throw new TypeError(usage());
   }
-  return { baseUrl, readOnly, readOnlyAuthToken, smokeProfile, smokeSol };
+  return {
+    baseUrl,
+    readOnly,
+    readOnlyAuthToken,
+    requireHistory,
+    smokeProfile,
+    smokeSol,
+  };
 }
 
 async function readBody(response: Response): Promise<string> {
@@ -642,6 +706,45 @@ async function smokeAuthenticatedAuthState(
   }
 }
 
+async function smokeHistoricalMatch(
+  baseUrl: string,
+  fixture: { inviteId: string; matchId: string },
+  requirePair: boolean,
+  dependencies: Dependencies,
+): Promise<void> {
+  const url = new URL(`${baseUrl}/matches/history`);
+  url.searchParams.set("inviteId", fixture.inviteId);
+  url.searchParams.set("matchId", fixture.matchId);
+  const result = await request(
+    url.href,
+    { method: "GET", headers: { Origin: ORIGIN } },
+    200,
+    dependencies,
+  );
+  let payload: unknown;
+  try {
+    payload = parseJson(result.body);
+  } catch {
+    throw new Error(
+      requirePair
+        ? "Required historical match smoke response was invalid."
+        : "Historical match smoke response was invalid.",
+    );
+  }
+  if (
+    result.response.headers.get("Access-Control-Allow-Origin") !== "*" ||
+    !isReadHistoricalMatchResponse(payload) ||
+    (payload.pair !== null && payload.pair.matchId !== fixture.matchId) ||
+    (requirePair && payload.pair === null)
+  ) {
+    throw new Error(
+      requirePair
+        ? "Required historical match smoke response was invalid."
+        : "Historical match smoke response was invalid.",
+    );
+  }
+}
+
 async function smokeApi(
   options: Options,
   dependencies: Dependencies = {
@@ -655,6 +758,16 @@ async function smokeApi(
     (options.readOnly !== true && !!options.readOnlyAuthToken)
   ) {
     throw new Error("Read-only smoke requires an existing auth token fixture.");
+  }
+  if (
+    options.requireHistory &&
+    (options.readOnly !== true ||
+      !options.readOnlyAuthToken ||
+      !options.smokeProfile.historicalMatch)
+  ) {
+    throw new Error(
+      "Required history smoke requires an authenticated historical match fixture.",
+    );
   }
   const nftUrl = `${options.baseUrl}/nfts`;
   const preflight = await request(
@@ -745,6 +858,21 @@ async function smokeApi(
     dependencies,
     options.readOnlyAuthToken || undefined,
   );
+
+  await smokeHistoricalMatch(
+    options.baseUrl,
+    { inviteId: "smokehistory", matchId: "smokehistory1" },
+    false,
+    dependencies,
+  );
+  if (options.requireHistory && options.smokeProfile.historicalMatch) {
+    await smokeHistoricalMatch(
+      options.baseUrl,
+      options.smokeProfile.historicalMatch,
+      true,
+      dependencies,
+    );
+  }
 
   for (const path of [
     "/invites/create",

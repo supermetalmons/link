@@ -11,6 +11,7 @@ import type {
   EventPrizeWithdrawalCompletedResponse,
 } from "@mons/shared/event-prizes";
 import type { PlayerProfile as SharedPlayerProfile } from "@mons/shared/profiles";
+import type { HistoricalMatchPair as SharedHistoricalMatchPair } from "@mons/shared/game-sessions";
 
 export interface Match {
   version: number;
@@ -56,13 +57,7 @@ export interface RematchSeriesDescriptor {
   matches: RematchSeriesMatchDescriptor[];
 }
 
-export interface HistoricalMatchPair {
-  matchId: string;
-  hostPlayerId: string;
-  guestPlayerId: string | null;
-  hostMatch: Match | null;
-  guestMatch: Match | null;
-}
+export type HistoricalMatchPair = SharedHistoricalMatchPair;
 
 export type NavigationItemStatus = SharedNavigationStatus;
 export type NavigationGameStatus = Exclude<SharedNavigationStatus, "dismissed">;

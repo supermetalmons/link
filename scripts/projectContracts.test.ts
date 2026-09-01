@@ -109,12 +109,17 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     "APPLE_AUDIENCES",
     "AUTH_MUTATIONS_DISABLED",
     "FIREBASE_RTDB_URL",
+    "HISTORICAL_MATCH_RTDB_FALLBACK_ENABLED",
   ]);
   assert.equal(config.vars?.APPLE_AUDIENCES, "link.mons");
   assert.match(config.vars?.AUTH_MUTATIONS_DISABLED || "", /^(?:true|false)$/);
   assert.equal(
     config.vars?.FIREBASE_RTDB_URL,
     "https://mons-link-default-rtdb.firebaseio.com",
+  );
+  assert.match(
+    config.vars?.HISTORICAL_MATCH_RTDB_FALLBACK_ENABLED || "",
+    /^(?:true|false)$/,
   );
   assert.deepEqual(config.d1_databases, [
     {
@@ -176,6 +181,11 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       name: "AUTH_RATE_LIMITER",
       namespace_id: "1616095644",
       simple: { limit: 20, period: 60 },
+    },
+    {
+      name: "HISTORICAL_MATCH_RATE_LIMITER",
+      namespace_id: "1616095645",
+      simple: { limit: 120, period: 60 },
     },
   ]);
   assert.deepEqual(config.queues, {
@@ -328,6 +338,7 @@ test("package manifests preserve public scripts and deployment command vectors",
     "promote:api",
     "deploy:api:triggers",
     "smoke:api",
+    "backfill:historical-matches",
     "format:check:tooling",
     "lint:tooling",
     "typecheck:tooling",
@@ -370,6 +381,8 @@ test("package manifests preserve public scripts and deployment command vectors",
       "promote:api": rootPackage.scripts?.["promote:api"],
       "deploy:api:triggers": rootPackage.scripts?.["deploy:api:triggers"],
       "smoke:api": rootPackage.scripts?.["smoke:api"],
+      "backfill:historical-matches":
+        rootPackage.scripts?.["backfill:historical-matches"],
       "manage:event-prize-withdrawals":
         rootPackage.scripts?.["manage:event-prize-withdrawals"],
       "manage:profile-canonical":
@@ -396,6 +409,8 @@ test("package manifests preserve public scripts and deployment command vectors",
         "wrangler triggers deploy --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
       "smoke:api":
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/smoke-cloudflare-api.ts",
+      "backfill:historical-matches":
+        "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/backfill-historical-matches.ts",
       "manage:event-prize-withdrawals":
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-event-prize-withdrawals.ts",
       "manage:profile-canonical":
@@ -604,15 +619,19 @@ test("operations documentation cross-links package and deployment guides", () =>
   );
   assert.match(apiRelease, /alternate-login invite-role authorization/);
   assert.match(apiRelease, /"actorUid":"<stored-host-or-guest-uid>"/);
+  assert.match(
+    apiRelease,
+    /"historicalMatch":\{"inviteId":"<existing-historical-invite-id>","matchId":"<existing-historical-match-id>"\}/,
+  );
   assert.match(apiRelease, /Both are release gates for preview and production/);
   assert.doesNotMatch(apiRelease, /--sampling-rate\s+1(?:\s|$)/);
   assert.doesNotMatch(apiRelease, /cleanupPageMatchCursor/);
   assert.doesNotMatch(apiRelease, /COUNT\(\*\).*login_count/);
   assert.match(
     apiRelease,
-    /Rollback immediately to the previous tested Worker/,
+    /Rollback immediately to the previous tested D1-compatible Worker/,
   );
-  assert.match(apiRelease, /changes no persistent schema/);
+  assert.match(apiRelease, /Additive migrations remain in place/);
 
   const profileMaintenance = deploymentGuide.slice(
     deploymentGuide.indexOf("## Canonical profile D1 maintenance"),
@@ -632,6 +651,47 @@ test("operations documentation cross-links package and deployment guides", () =>
   );
   assert.doesNotMatch(deploymentGuide, /migrate:profile-(?:reads|canonical)/);
   assert.doesNotMatch(deploymentGuide, /--begin-import/);
+
+  const historicalMaintenance = deploymentGuide.slice(
+    deploymentGuide.indexOf("## Historical match D1 migration"),
+    deploymentGuide.indexOf("## Event-prize withdrawal D1 operations"),
+  );
+  assert.match(historicalMaintenance, /paged `\/invites` 10 records at a time/);
+  assert.match(historicalMaintenance, /64 KiB UTF-8/);
+  assert.match(historicalMaintenance, /10,000 canonical tokens per field/);
+  assert.match(historicalMaintenance, /4,503 invites/);
+  assert.match(historicalMaintenance, /54\/53 bytes and 21\/21 tokens/);
+  assert.match(historicalMaintenance, /with zero outliers/);
+  assert.match(historicalMaintenance, /Any new outlier blocks this rollout/);
+  for (const command of [
+    `npx wrangler d1 migrations apply mons-link-profile-games --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env`,
+    `npm run backfill:historical-matches -- --project mons-link --base-url https://api.mons.link`,
+    `npm run backfill:historical-matches -- --project mons-link --base-url https://api.mons.link --execute --failure-file /secure/historical-match-backfill-failures.json`,
+    `npm run backfill:historical-matches -- --project mons-link --base-url https://api.mons.link --execute --start-at "<last-safe-cursor>" --failure-file /secure/historical-match-backfill-failures-02.json`,
+    `npx wrangler d1 execute mons-link-profile-games --remote --json --command "SELECT COUNT(*) AS total_snapshots, COUNT(CASE WHEN source_kind = 'rating' THEN 1 END) AS rating_snapshots, COUNT(CASE WHEN source_kind = 'transition' THEN 1 END) AS transition_snapshots, COUNT(CASE WHEN source_kind = 'backfill' THEN 1 END) AS backfill_snapshots, COUNT(CASE WHEN revision > 1 THEN 1 END) AS revised_snapshots FROM historical_match_pairs" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env`,
+    `npx wrangler d1 execute mons-link-profile-games --remote --json --command "SELECT COUNT(*) AS invalid_metadata_count FROM historical_match_pairs WHERE schema_version <> 1 OR revision < 1 OR finalized_at_ms < 0 OR archived_at_ms < finalized_at_ms OR json_type(snapshot_json) <> 'object' OR COALESCE(json_extract(snapshot_json, '$.matchId'), '') <> match_id" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env`,
+    `npx wrangler d1 execute mons-link-profiles --remote --json --command "SELECT COUNT(CASE WHEN profile_game_projection_state = 'pending' THEN 1 END) AS pending_profile_game_projections, COUNT(CASE WHEN json_extract(payload_json, '$.historicalMatchArchiveVersion') = 1 AND COALESCE(profile_game_projection_state, '') <> 'done' THEN 1 END) AS unresolved_historical_archives, COUNT(CASE WHEN json_extract(payload_json, '$.historicalMatchArchiveVersion') = 1 AND profile_game_projection_state = 'dead' THEN 1 END) AS dead_historical_archives FROM rating_updates" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env`,
+    `./node_modules/.bin/firebase database:get /profileGameProjectionOutbox/automatch --project mons-link | jq -c '. as $raw | (if $raw == null then {} else $raw end) as $root | (if ($root | type) == "object" then [$root[]] else [] end) as $rows | [$rows[] | if type == "object" then (if has("historicalMatches") then .historicalMatches else {} end) else null end] as $maps | {malformedRoot: (if ($root | type) == "object" then 0 else 1 end), malformedOutboxes: ([$maps[] | select(type != "object")] | length), unresolvedOutboxes: ([$maps[] | select(type == "object") | select(length > 0)] | length), unresolvedDescriptors: ([$maps[] | select(type == "object") | length] | add // 0)}'`,
+    `npm run smoke:api -- --base-url https://api.mons.link --read-only --require-history --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json`,
+    `npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search historical_match_read_failed --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env`,
+    `npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search historical_match_archive_descriptor_failed --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env`,
+    `npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search historical-match-conflict --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env`,
+    `npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search profile_game_projection_queue_failed --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env`,
+    `npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search profile_game_projection_queue_processed --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env`,
+    `npx wrangler tail mons-link-api --version-id <version-id> --format pretty --status error --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env`,
+  ]) {
+    assert.equal(historicalMaintenance.includes(command), true, command);
+  }
+  assert.match(
+    historicalMaintenance,
+    /If the reported cursor is `null`, omit `--start-at`/,
+  );
+  assert.match(historicalMaintenance, /Never reuse an existing failure file/);
+  assert.match(historicalMaintenance, /handled public-history 503 signal/);
+  assert.doesNotMatch(
+    historicalMaintenance,
+    /SELECT\s+\*\s+FROM\s+historical_match_pairs/i,
+  );
 });
 
 test("profile claim synchronization uses the Worker route", () => {

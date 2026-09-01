@@ -36,7 +36,7 @@ npx wrangler d1 execute mons-link-profiles --remote --command "PRAGMA foreign_ke
 
 The status must be `active`, and the foreign-key validation must return no rows.
 
-Create mode-`0600` smoke fixtures outside the repository: an auth fixture containing only `{"idToken":"<existing-linked-login-token>"}` and a profile fixture containing `{"loginId":"<alternate-login-uid>","profileId":"<canonical-profile-id>","invite":{"id":"<existing-invite-id>","actorUid":"<stored-host-or-guest-uid>","role":"host"}}`. Use `"guest"` when appropriate. The token subject must equal `loginId`; `actorUid` must be a different login owned by the same D1 profile. Upload the candidate, then run both the standard smoke and the authenticated read-only ownership smoke before it receives traffic:
+Create mode-`0600` smoke fixtures outside the repository: an auth fixture containing only `{"idToken":"<existing-linked-login-token>"}` and a profile fixture containing `{"loginId":"<alternate-login-uid>","profileId":"<canonical-profile-id>","invite":{"id":"<existing-invite-id>","actorUid":"<stored-host-or-guest-uid>","role":"host"},"historicalMatch":{"inviteId":"<existing-historical-invite-id>","matchId":"<existing-historical-match-id>"}}`. Use `"guest"` when appropriate. The token subject must equal `loginId`; `actorUid` must be a different login owned by the same D1 profile. The historical match must be a known non-null D1 snapshot. Upload the candidate, then run both the standard smoke and the authenticated read-only ownership smoke before it receives traffic:
 
 ```sh
 npm run upload:api
@@ -55,13 +55,13 @@ npm run smoke:api -- --base-url https://api.mons.link --read-only --auth-token-f
 
 The standard smoke covers public and temporary anonymous-auth behavior. The authenticated read-only smoke verifies the existing login's D1 ownership, profile lookups, navigation, and alternate-login invite-role authorization without creating auth state. Both are release gates for preview and production.
 
-Tail the promoted version at full sampling during the production smokes and for at least 15 minutes afterward:
+Tail the promoted version during the production smokes and for at least 15 minutes afterward. Treat the tail as focused real-time evidence, not a complete event ledger; filtering reduces but does not eliminate sampling under load:
 
 ```sh
 npx wrangler tail mons-link-api --version-id <version-id> --search profile-ownership-unavailable --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
-Rollback immediately to the previous tested Worker if the authenticated production smoke fails. Otherwise rollback if ownership failures recur across multiple real requests during that window or the Worker 5xx rate rises above its pre-deploy baseline. The rollback is code-only and needs no D1 restore because this release changes no persistent schema.
+Rollback immediately to the previous tested D1-compatible Worker if the authenticated production smoke fails. Otherwise rollback if ownership failures recur across multiple real requests during that window or the Worker 5xx rate rises above its pre-deploy baseline. Additive migrations remain in place and require no D1 restore.
 
 `upload:api` does not send traffic to the candidate. `promote:api` deploys an explicit Version ID to 100%. `deploy:api:triggers` applies routes, Cron, Workflows, and configured Queue consumers. Removing an omitted Queue consumer remains an explicit operator action.
 
@@ -103,6 +103,63 @@ npx wrangler queues resume-delivery mons-link-telegram-delivery --config cloud/w
 ```
 
 Canonical profile incidents freeze D1 and fix forward. `legacy_fields_json` contains retained migrated data and must remain intact.
+
+## Historical match D1 migration
+
+Apply the additive profile-games migration before uploading an API version that serves historical matches:
+
+```sh
+npx wrangler d1 migrations apply mons-link-profile-games --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+The completed counts-only production metadata audit paged `/invites` 10 records at a time and checked each `hostRematches` and `guestRematches` field against limits of 64 KiB UTF-8 and 10,000 canonical tokens per field. It inspected 4,503 invites. The host/guest maxima were 54/53 bytes and 21/21 tokens, with zero outliers. Zero outliers is a rollout gate. Any new outlier blocks this rollout and requires a separate remediation task; do not expand the migration to repair it.
+
+Release and smoke the API with `HISTORICAL_MATCH_RTDB_FALLBACK_ENABLED` set to `true`. Preview the complete invite scan, then execute it with a new protected failure report:
+
+```sh
+npm run backfill:historical-matches -- --project mons-link --base-url https://api.mons.link
+umask 077
+npm run backfill:historical-matches -- --project mons-link --base-url https://api.mons.link --execute --failure-file /secure/historical-match-backfill-failures.json
+```
+
+The final summary prints counts and the last safe cursor only. On failure, resolve the protected report, then rerun from the last safe cursor with a new failure-file path. The failed page is intentionally replayed, and D1 writes are idempotent:
+
+```sh
+umask 077
+npm run backfill:historical-matches -- --project mons-link --base-url https://api.mons.link --execute --start-at "<last-safe-cursor>" --failure-file /secure/historical-match-backfill-failures-02.json
+```
+
+If the reported cursor is `null`, omit `--start-at` and rerun from the beginning with a new failure-file path. Never reuse an existing failure file or paste its contents into commands or logs. Repeat until the final summary reports zero failures.
+
+Inspect aggregate state only; never select match identifiers or `snapshot_json`:
+
+```sh
+npx wrangler d1 execute mons-link-profile-games --remote --json --command "SELECT COUNT(*) AS total_snapshots, COUNT(CASE WHEN source_kind = 'rating' THEN 1 END) AS rating_snapshots, COUNT(CASE WHEN source_kind = 'transition' THEN 1 END) AS transition_snapshots, COUNT(CASE WHEN source_kind = 'backfill' THEN 1 END) AS backfill_snapshots, COUNT(CASE WHEN revision > 1 THEN 1 END) AS revised_snapshots FROM historical_match_pairs" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 execute mons-link-profile-games --remote --json --command "SELECT COUNT(*) AS invalid_metadata_count FROM historical_match_pairs WHERE schema_version <> 1 OR revision < 1 OR finalized_at_ms < 0 OR archived_at_ms < finalized_at_ms OR json_type(snapshot_json) <> 'object' OR COALESCE(json_extract(snapshot_json, '$.matchId'), '') <> match_id" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 execute mons-link-profiles --remote --json --command "SELECT COUNT(CASE WHEN profile_game_projection_state = 'pending' THEN 1 END) AS pending_profile_game_projections, COUNT(CASE WHEN json_extract(payload_json, '$.historicalMatchArchiveVersion') = 1 AND COALESCE(profile_game_projection_state, '') <> 'done' THEN 1 END) AS unresolved_historical_archives, COUNT(CASE WHEN json_extract(payload_json, '$.historicalMatchArchiveVersion') = 1 AND profile_game_projection_state = 'dead' THEN 1 END) AS dead_historical_archives FROM rating_updates" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+./node_modules/.bin/firebase database:get /profileGameProjectionOutbox/automatch --project mons-link | jq -c '. as $raw | (if $raw == null then {} else $raw end) as $root | (if ($root | type) == "object" then [$root[]] else [] end) as $rows | [$rows[] | if type == "object" then (if has("historicalMatches") then .historicalMatches else {} end) else null end] as $maps | {malformedRoot: (if ($root | type) == "object" then 0 else 1 end), malformedOutboxes: ([$maps[] | select(type != "object")] | length), unresolvedOutboxes: ([$maps[] | select(type == "object") | select(length > 0)] | length), unresolvedDescriptors: ([$maps[] | select(type == "object") | length] | add // 0)}'
+```
+
+`invalid_metadata_count` and every count reported by the final two commands must be zero before disabling fallback. Record the source counts for comparison after cutover.
+
+After the execute pass finishes with zero failures, release the frontend using the Worker history endpoint. After its observation window, change the tracked fallback variable to `false`, upload and promote an exact API version, repeat the standard production smoke, then require the protected historical fixture to return a non-null pair:
+
+```sh
+npm run smoke:api -- --base-url https://api.mons.link --read-only --require-history --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
+```
+
+Run each focused tail in a separate terminal during the execute pass, production smokes, cutover, and at least 15 minutes of live traffic:
+
+```sh
+npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search historical_match_read_failed --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search historical_match_archive_descriptor_failed --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search historical-match-conflict --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search profile_game_projection_queue_failed --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search profile_game_projection_queue_processed --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler tail mons-link-api --version-id <version-id> --format pretty --status error --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+`historical_match_read_failed` is the handled public-history 503 signal; `--status error` covers uncaught Worker failures and limits, not handled 5xx responses. Continue running the standard smoke to verify successful public reads. Any archive conflict, recurring Queue failure, unresolved count, unexpected null, or new history 5xx blocks cutover and requires a separate fix-forward task. The migration does not delete RTDB matches, and any previous Worker version must remain D1-compatible.
 
 ## Event-prize withdrawal D1 operations
 

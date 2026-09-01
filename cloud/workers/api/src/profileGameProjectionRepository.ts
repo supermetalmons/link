@@ -1,3 +1,4 @@
+import { type HistoricalMatchPair } from "@mons/shared/game-sessions";
 import {
   createEventProfileGameProjectionCore,
   type EventProfileGameProjectionRepository,
@@ -25,10 +26,22 @@ import {
   getProfileGameProjection,
   type ProjectionWrite as D1ProjectionWrite,
 } from "./profileGamesD1.ts";
+import {
+  readHistoricalMatchSnapshot,
+  writeHistoricalMatchSnapshot,
+} from "./historicalMatchesD1.ts";
+import type { HistoricalMatchSource } from "./historicalMatches.ts";
 
 type ProjectionRtdbRepository = Pick<GameplayRepository, "getRtdbPath">;
 
 export type ProfileGameProjectionRuntime = {
+  archiveHistoricalMatch?(input: {
+    finalizedAtMs: number;
+    inviteId: string;
+    pair: HistoricalMatchPair;
+    source: HistoricalMatchSource;
+  }): Promise<void>;
+  hasHistoricalMatch?(inviteId: string, matchId: string): Promise<boolean>;
   recomputeInviteProjection(
     inviteId: string,
     reason: string,
@@ -177,11 +190,28 @@ export function createProfileGameProjectionRuntime(
     readProfileOwnershipSnapshot: (query) =>
       readProjectionOwnershipSnapshot(profileDb, query),
   };
-  return createProfileGamesProjectionCore({
+  const projection = createProfileGamesProjectionCore({
     logger,
     repository,
     wait: dependencies.wait,
   });
+  return {
+    ...projection,
+    async hasHistoricalMatch(inviteId, matchId) {
+      return (
+        (await readHistoricalMatchSnapshot(d1, inviteId, matchId)) !== null
+      );
+    },
+    async archiveHistoricalMatch(input) {
+      await writeHistoricalMatchSnapshot(d1, {
+        ...input,
+        archivedAtMs: Math.max(
+          (dependencies.now || Date.now)(),
+          input.finalizedAtMs,
+        ),
+      });
+    },
+  };
 }
 
 export function createEventProfileGameProjectionRuntime(

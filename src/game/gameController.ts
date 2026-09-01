@@ -1130,10 +1130,11 @@ function buildLocalHistoricalPair(
   snapshot: LocalRematchSnapshot,
 ): HistoricalMatchPair {
   const resignedColor = snapshot.resignedColor;
-  const hostMatch: Match = {
+  const hostMatch: NonNullable<HistoricalMatchPair["hostMatch"]> = {
     version: 1,
     color: resignedColor ?? "white",
     emojiId: 0,
+    aura: "",
     gameVariant: snapshot.gameVariant,
     fen: snapshot.fen,
     status: resignedColor ? "surrendered" : "finished",

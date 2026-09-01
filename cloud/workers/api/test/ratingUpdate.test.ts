@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { isHistoricalMatchPair } from "@mons/shared/game-sessions";
 import { createRatingUpdater } from "@mons/shared/ratings";
 import {
   MAX_MATCH_FEN_BYTES,
@@ -51,6 +52,37 @@ function match(
     status: "",
     timer: "",
     ...overrides,
+  };
+}
+
+function historicalMatchPair() {
+  const fen = new Game().toFen();
+  return {
+    matchId: request.matchId,
+    hostPlayerId: request.playerId,
+    guestPlayerId: request.opponentId,
+    hostMatch: {
+      version: 2,
+      color: "white" as const,
+      emojiId: 1,
+      aura: "",
+      gameVariant: "Classic",
+      fen,
+      status: "",
+      flatMovesString: "move",
+      timer: "",
+    },
+    guestMatch: {
+      version: 2,
+      color: "black" as const,
+      emojiId: 2,
+      aura: "",
+      gameVariant: "Classic",
+      fen,
+      status: "surrendered",
+      flatMovesString: "move",
+      timer: "",
+    },
   };
 }
 
@@ -154,6 +186,8 @@ function createRepository({
   leaseStatus = "acquired" as "acquired" | "busy" | "done",
   playerProfile = profile("profile-player"),
   opponentProfile = profile("profile-opponent"),
+  playerMatchValue = match("white"),
+  opponentMatchValue = match("black", { status: "surrendered" }),
   ratingDone = completed,
 }: {
   completed?: boolean;
@@ -162,6 +196,8 @@ function createRepository({
   leaseStatus?: "acquired" | "busy" | "done";
   playerProfile?: RatingProfile | null;
   opponentProfile?: RatingProfile | null;
+  playerMatchValue?: unknown;
+  opponentMatchValue?: unknown;
   ratingDone?: boolean;
 } = {}) {
   const patches: Record<string, unknown>[] = [];
@@ -186,11 +222,11 @@ function createRepository({
       if (path === `invites/${request.inviteId}`) return invite;
       if (path === `players/${request.playerId}/matches/${request.matchId}`) {
         if (failMatchReads) throw new Error("match-read-failed");
-        return match("white");
+        return playerMatchValue;
       }
       if (path === `players/${request.opponentId}/matches/${request.matchId}`) {
         if (failMatchReads) throw new Error("match-read-failed");
-        return match("black", { status: "surrendered" });
+        return opponentMatchValue;
       }
       return null;
     },
@@ -228,6 +264,7 @@ test("builds exact non-event rating, mana, and Telegram fields", () => {
   const opponentMatch = match("black", { status: "surrendered" });
   const nowMs = Date.UTC(2026, 7, 21);
   const result = buildRatingPlan({
+    historicalMatchPair: historicalMatchPair(),
     invite: {
       telegramDeliveryVersion: 2,
       wagers: {
@@ -287,6 +324,7 @@ test("builds exact non-event rating, mana, and Telegram fields", () => {
 
 test("event ratings preserve win and mana without applying a rating delta", () => {
   const built = buildRatingPlan({
+    historicalMatchPair: historicalMatchPair(),
     invite: { eventOwned: true, eventId: "event-1" },
     matchId: request.matchId,
     nowMs: FEB_CHALLENGE_START_UTC + 1,
@@ -321,6 +359,7 @@ test("event ratings preserve win and mana without applying a rating delta", () =
 
 test("completes rating records without profile writes when profiles are absent", () => {
   const built = buildRatingPlan({
+    historicalMatchPair: historicalMatchPair(),
     invite: {},
     matchId: request.matchId,
     nowMs: Date.UTC(2026, 7, 21),
@@ -340,6 +379,7 @@ test("completes rating records without profile writes when profiles are absent",
 
 test("completes merged-profile ratings without profile or challenge writes", () => {
   const built = buildRatingPlan({
+    historicalMatchPair: historicalMatchPair(),
     invite: {},
     matchId: request.matchId,
     nowMs: FEB_CHALLENGE_START_UTC + 1,
@@ -395,6 +435,7 @@ test("scores a surrender from the valid match replica", () => {
     match("black", { status: "surrendered" }),
   );
   const built = buildRatingPlan({
+    historicalMatchPair: historicalMatchPair(),
     invite: {},
     matchId: request.matchId,
     nowMs: Date.UTC(2026, 7, 21),
@@ -476,6 +517,12 @@ test("updates once and persists exact repair markers", async () => {
   assert.equal(state.getFinalized(), 1);
   assert.equal(state.getAttempts(), 1);
   assert.equal(state.getFinalPlan()?.ratingUpdate.status, "done");
+  assert.equal(
+    state.getFinalPlan()?.ratingUpdate.historicalMatchArchiveVersion,
+    1,
+  );
+  const historical = state.getFinalPlan()?.ratingUpdate.historicalMatchPair;
+  assert.equal(isHistoricalMatchPair(historical), true);
   assert.equal(state.getOperationReads(), 1);
   assert.deepEqual(projectionTasks, [
     {
@@ -494,6 +541,33 @@ test("updates once and persists exact repair markers", async () => {
       [`invites/${request.inviteId}/matchesRatingUpdates/${request.matchId}`]: true,
     },
   ]);
+});
+
+test("freezes rating-valid matches with legacy presentation fields", async () => {
+  const state = createRepository({
+    playerMatchValue: match("white", {
+      aura: "x".repeat(33),
+      emojiId: 0,
+      fen: undefined,
+      status: "x".repeat(2_000),
+      timer: "x".repeat(2_000),
+    }),
+  });
+  assert.deepEqual(
+    await updateRatings(identity, request, state.repository, {
+      now: () => 2_000,
+    }),
+    { ok: true },
+  );
+  const frozen = state.getFinalPlan()?.ratingUpdate.historicalMatchPair;
+  assert.ok(isHistoricalMatchPair(frozen));
+  assert.ok(frozen.hostMatch);
+  assert.equal(frozen.hostMatch.emojiId, 0);
+  assert.equal(frozen.hostMatch.aura, "");
+  assert.equal(frozen.hostMatch.fen, "");
+  assert.equal(frozen.hostMatch.status, "");
+  assert.equal(frozen.hostMatch.timer, "");
+  assert.equal(frozen.guestMatch?.status, "surrendered");
 });
 
 test("event ratings persist and dispatch one deterministic progress outbox", async () => {

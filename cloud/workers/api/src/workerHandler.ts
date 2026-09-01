@@ -39,6 +39,10 @@ import {
   TELEGRAM_COMMAND_PATH,
 } from "./telegramCommand.ts";
 import { profileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
+import {
+  handleHistoricalMatchRoute,
+  HISTORICAL_MATCH_PATH,
+} from "./historicalMatchRoute.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
 export type { ProviderFetch } from "./provider.ts";
@@ -50,6 +54,9 @@ export function handleFetch(
   ctx: ExecutionContext,
 ): Promise<Response> {
   const pathname = new URL(request.url).pathname;
+  if (pathname === HISTORICAL_MATCH_PATH) {
+    return handleHistoricalMatchRoute(request, env);
+  }
   if (pathname === EVENT_PRIZE_ANNOUNCEMENT_PATH) {
     return handleEventPrizeAnnouncement(request, env);
   }

@@ -1,4 +1,8 @@
 import {
+  isHistoricalMatchPair,
+  type HistoricalMatchPair,
+} from "@mons/shared/game-sessions";
+import {
   MATERIAL_KEYS,
   normalizeMaterials,
   normalizeMiningSnapshot,
@@ -331,6 +335,19 @@ function patchCanonicalProfile(
 
 function ratingData(snapshot: CanonicalRatingUpdateSnapshot): RatingUpdateData {
   const fields = snapshot.payload;
+  const historicalMatchArchiveVersion = Object.hasOwn(
+    fields,
+    "historicalMatchArchiveVersion",
+  )
+    ? typeof fields.historicalMatchArchiveVersion === "number" &&
+      Number.isSafeInteger(fields.historicalMatchArchiveVersion)
+      ? fields.historicalMatchArchiveVersion
+      : -1
+    : undefined;
+  const historicalMatchPair: HistoricalMatchPair | undefined =
+    isHistoricalMatchPair(fields.historicalMatchPair)
+      ? fields.historicalMatchPair
+      : undefined;
   return {
     completedAtMs: number(fields.completedAtMs),
     eventId: string(fields.eventId),
@@ -339,7 +356,11 @@ function ratingData(snapshot: CanonicalRatingUpdateSnapshot): RatingUpdateData {
     eventProgressState: string(fields.eventProgressState),
     eventProgressUpdatedAtMs: number(fields.eventProgressUpdatedAtMs),
     eventProgressVersion: number(fields.eventProgressVersion),
+    ...(historicalMatchArchiveVersion === undefined
+      ? {}
+      : { historicalMatchArchiveVersion }),
     inviteId: string(fields.inviteId) || snapshot.inviteId,
+    ...(historicalMatchPair ? { historicalMatchPair } : {}),
     isEventMatch: fields.isEventMatch === true,
     leaseExpiresAtMs: snapshot.leaseExpiresAtMs,
     matchId: string(fields.matchId) || snapshot.matchId,

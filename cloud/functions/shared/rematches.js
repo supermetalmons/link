@@ -1,18 +1,26 @@
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : null;
 
+const parseCanonicalRematchIndex = (value) => {
+  if (typeof value !== "string" || !/^[1-9]\d*$/.test(value)) {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+};
+
 const parseRematchIndices = (rawValue) => {
   if (typeof rawValue !== "string" || rawValue === "") {
     return [];
   }
-  const normalized = rawValue.replace(/x+$/, "");
+  const normalized = rawValue.endsWith("x") ? rawValue.slice(0, -1) : rawValue;
   if (normalized === "") {
     return [];
   }
   return normalized
     .split(";")
-    .map((token) => Number.parseInt(token, 10))
-    .filter((value) => Number.isFinite(value) && value > 0);
+    .map(parseCanonicalRematchIndex)
+    .filter((value) => value !== null);
 };
 
 const rematchSeriesEnded = (inviteData) => {
@@ -40,7 +48,7 @@ const createInviteCandidatesFromMatchId = (matchId) => {
   const candidates = [];
   for (let splitIndex = matchId.length - 1; splitIndex > 0; splitIndex -= 1) {
     const suffix = matchId.slice(splitIndex);
-    if (!/^\d+$/.test(suffix)) {
+    if (parseCanonicalRematchIndex(suffix) === null) {
       continue;
     }
     const prefix = matchId.slice(0, splitIndex);
@@ -67,11 +75,7 @@ const parseInviteMatchIndex = (inviteId, matchId) => {
     return null;
   }
   const suffix = matchId.slice(inviteId.length);
-  if (!/^\d+$/.test(suffix)) {
-    return null;
-  }
-  const parsed = Number.parseInt(suffix, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  return parseCanonicalRematchIndex(suffix);
 };
 
 const getHintMatchIndex = (inviteId, latestMatchIdHint) => {
@@ -112,10 +116,53 @@ const getLatestRematchIndex = (inviteData, minimumIndex = 0) => {
   return maxIndex;
 };
 
+const getApprovedRematchIndices = (inviteData) => {
+  const hostIndices = parseRematchIndices(
+    inviteData ? inviteData.hostRematches : null,
+  );
+  const guestIndices = parseRematchIndices(
+    inviteData ? inviteData.guestRematches : null,
+  );
+  const approved = [];
+  for (
+    let index = 0;
+    index < Math.min(hostIndices.length, guestIndices.length);
+    index++
+  ) {
+    if (hostIndices[index] !== guestIndices[index]) break;
+    approved.push(hostIndices[index]);
+  }
+  return approved;
+};
+
+const getLatestApprovedRematchIndex = (inviteData) =>
+  getApprovedRematchIndices(inviteData).at(-1) || 0;
+
 const deriveLatestMatchId = (inviteId, inviteData, latestMatchIdHint) => {
   const hintedIndex = getHintMatchIndex(inviteId, latestMatchIdHint);
   const maxIndex = getLatestRematchIndex(inviteData, hintedIndex);
   return maxIndex > 0 ? `${inviteId}${maxIndex}` : inviteId;
+};
+
+const getHistoricalMatchIds = (inviteId, inviteData) => {
+  const normalizedInviteId = normalizeString(inviteId);
+  if (!normalizedInviteId || !inviteData || typeof inviteData !== "object") {
+    return [];
+  }
+  const approvedIndices = Array.from(
+    new Set(getApprovedRematchIndices(inviteData)),
+  );
+  const latestProposedIndex = getLatestRematchIndex(inviteData);
+  if (latestProposedIndex === 0) {
+    return rematchSeriesEnded(inviteData) ? [normalizedInviteId] : [];
+  }
+  const candidateIndices = [0, ...approvedIndices];
+  const historicalIndices = rematchSeriesEnded(inviteData)
+    ? candidateIndices
+    : candidateIndices.filter((index) => index < latestProposedIndex);
+  return historicalIndices.map((index) =>
+    index === 0 ? normalizedInviteId : `${normalizedInviteId}${index}`,
+  );
 };
 
 module.exports = {
@@ -126,5 +173,7 @@ module.exports = {
   parseInviteMatchIndex,
   getHintMatchIndex,
   getLatestRematchIndex,
+  getLatestApprovedRematchIndex,
   deriveLatestMatchId,
+  getHistoricalMatchIds,
 };

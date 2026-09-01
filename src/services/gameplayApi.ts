@@ -3,6 +3,7 @@ import {
   isCreateInviteResponse,
   isEndRematchResponse,
   isEnsureMatchResponse,
+  isReadHistoricalMatchResponse,
   isJoinInviteResponse,
   isProposeRematchResponse,
   isResolveInviteRoleResponse,
@@ -12,6 +13,8 @@ import {
   type EndRematchResponse,
   type EnsureMatchRequest,
   type EnsureMatchResponse,
+  type ReadHistoricalMatchRequest,
+  type ReadHistoricalMatchResponse,
   type JoinInviteRequest,
   type JoinInviteResponse,
   type ProposeRematchRequest,
@@ -254,6 +257,44 @@ async function gameplayMutation<T>(
     if (timeoutId !== undefined) {
       clearTimeout(timeoutId);
     }
+  }
+}
+
+export async function readHistoricalMatchPairViaApi(
+  request: ReadHistoricalMatchRequest,
+): Promise<ReadHistoricalMatchResponse> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(
+    () => controller.abort(),
+    GAMEPLAY_API_TIMEOUT_MS,
+  );
+  try {
+    const url = new URL(`${GAMEPLAY_API_ROOT}/matches/history`);
+    url.searchParams.set("inviteId", request.inviteId);
+    url.searchParams.set("matchId", request.matchId);
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    const payload = await readBoundedJson(response);
+    if (!response.ok) throw responseError(payload, response.status);
+    if (!isReadHistoricalMatchResponse(payload)) {
+      throw new GameplayApiError(
+        "unavailable",
+        "Gameplay service is unavailable.",
+      );
+    }
+    return payload;
+  } catch (error) {
+    if (error instanceof GameplayApiError) throw error;
+    throw new GameplayApiError(
+      "unavailable",
+      "Gameplay service is unavailable.",
+    );
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 

@@ -1,4 +1,10 @@
 import {
+  buildHistoricalMatchPair,
+  buildTransitionHistoricalMatchPair,
+  HISTORICAL_MATCH_ARCHIVE_VERSION,
+  type HistoricalMatchDescriptor,
+} from "./historicalMatches.ts";
+import {
   createGameplayRepository,
   createRatingRepository,
   type GameplayRepository,
@@ -18,6 +24,7 @@ import {
   parseAutomatchProfileGameProjectionOutbox,
   parseEventProfileGameProjectionOutbox,
   parseProfileLinkProfileGameProjectionOutbox,
+  salvageHistoricalMatchDescriptors,
   salvageProfileLinkCleanupProfileIds,
 } from "./profileGameProjectionOutbox.ts";
 import {
@@ -46,6 +53,87 @@ const MAX_PROFILE_GAME_PROJECTION_RETRY_DELAY_SECONDS = 60;
 const PROFILE_GAME_PROJECTION_RECOVERY_DELAY_MS = 5 * 60 * 1_000;
 const AUTOMATCH_PROFILE_GAME_PROJECTION_LOCK_MS = 15 * 60 * 1_000;
 const PROFILE_GAME_PROJECTION_LOCK_RELEASE_ATTEMPTS = 3;
+const HISTORICAL_MATCH_ARCHIVE_BATCH_SIZE = 5;
+
+async function archiveHistoricalDescriptor(
+  descriptor: HistoricalMatchDescriptor,
+  inviteId: string,
+  rtdb: ProfileGameProjectionRtdb,
+  runtime: ProfileGameProjectionRuntime,
+): Promise<void> {
+  const alreadyArchived = runtime.hasHistoricalMatch
+    ? await runtime.hasHistoricalMatch(inviteId, descriptor.matchId)
+    : false;
+  let hostMatch: unknown;
+  let guestMatch: unknown;
+  try {
+    [hostMatch, guestMatch] = await Promise.all([
+      rtdb.getRtdbPath(
+        `players/${descriptor.hostPlayerId}/matches/${descriptor.matchId}`,
+      ),
+      rtdb.getRtdbPath(
+        `players/${descriptor.guestPlayerId}/matches/${descriptor.matchId}`,
+      ),
+    ]);
+  } catch (error) {
+    if (alreadyArchived) return;
+    throw error;
+  }
+  if (hostMatch == null && guestMatch == null && alreadyArchived) return;
+  const buildPair =
+    descriptor.source === "transition"
+      ? buildTransitionHistoricalMatchPair
+      : buildHistoricalMatchPair;
+  const pair = buildPair({
+    matchId: descriptor.matchId,
+    hostPlayerId: descriptor.hostPlayerId,
+    guestPlayerId: descriptor.guestPlayerId,
+    hostMatch,
+    guestMatch,
+  });
+  if (!pair) throw new Error("historical-match-source-unavailable");
+  if (!runtime.archiveHistoricalMatch) {
+    throw new Error("historical-match-archive-unavailable");
+  }
+  await runtime.archiveHistoricalMatch({
+    finalizedAtMs: descriptor.finalizedAtMs,
+    inviteId,
+    pair,
+    source: descriptor.source,
+  });
+}
+
+async function settleHistoricalDescriptor(
+  task: AutomatchProfileGameProjectionTask,
+  descriptor: HistoricalMatchDescriptor,
+  rtdb: ProfileGameProjectionRtdb,
+): Promise<boolean> {
+  const result = await rtdb.transactRtdbPath(
+    getAutomatchProfileGameProjectionOutboxPath(task.inviteId),
+    (current) => {
+      const record = toRecord(current);
+      const outbox = parseAutomatchProfileGameProjectionOutbox(current);
+      if (!record || !outbox || outbox.requestId !== task.requestId) {
+        return { commit: false, decision: "superseded" };
+      }
+      const historicalMatches = {
+        ...(toRecord(record.historicalMatches) || {}),
+      };
+      if (!Object.hasOwn(historicalMatches, descriptor.matchId)) {
+        return { commit: false, decision: "changed" };
+      }
+      delete historicalMatches[descriptor.matchId];
+      const next = { ...record };
+      if (Object.keys(historicalMatches).length > 0) {
+        next.historicalMatches = historicalMatches;
+      } else {
+        delete next.historicalMatches;
+      }
+      return { value: next, decision: "settled" };
+    },
+  );
+  return result.committed;
+}
 
 type ProfileGameProjectionLogger = Pick<Console, "error" | "info">;
 type ProfileLinkProjectionResult = Pick<
@@ -128,7 +216,7 @@ function validRatingProjectionRecord(
   update: Awaited<
     ReturnType<RatingProfileGameProjectionRepository["readRatingUpdate"]>
   >,
-): update is NonNullable<typeof update> {
+): update is NonNullable<typeof update> & { completedAtMs: number } {
   return Boolean(
     update &&
     update.profileGameProjectionVersion ===
@@ -231,7 +319,8 @@ export async function processAutomatchProfileGameProjection(
   runtime: ProfileGameProjectionRuntime,
   ownerId: string = crypto.randomUUID(),
   now: () => number = Date.now,
-): Promise<"projected" | "stale" | "superseded"> {
+  logger: ProfileGameProjectionLogger = console,
+): Promise<"continued" | "projected" | "stale" | "superseded"> {
   const lock = {
     path: getAutomatchProfileGameProjectionLockPath(task.inviteId),
     requestId: task.requestId,
@@ -249,6 +338,45 @@ export async function processAutomatchProfileGameProjection(
     await runtime.recomputeInviteProjection(task.inviteId, outbox.reason, {
       eventTimestampMs: outbox.sourceUpdatedAtMs,
     });
+    const descriptors = (outbox.historicalMatches || []).slice(
+      0,
+      HISTORICAL_MATCH_ARCHIVE_BATCH_SIZE,
+    );
+    let firstArchiveFailure: unknown;
+    let archiveFailed = false;
+    for (const descriptor of descriptors) {
+      try {
+        await archiveHistoricalDescriptor(
+          descriptor,
+          task.inviteId,
+          rtdb,
+          runtime,
+        );
+        if (!(await settleHistoricalDescriptor(task, descriptor, rtdb))) {
+          return "superseded";
+        }
+      } catch (error) {
+        logger.error(
+          JSON.stringify({
+            event: "historical_match_archive_descriptor_failed",
+            inviteId: task.inviteId,
+            matchId: descriptor.matchId,
+            code: error instanceof Error ? error.message : "unknown",
+          }),
+        );
+        if (!archiveFailed) {
+          archiveFailed = true;
+          firstArchiveFailure = error;
+        }
+      }
+    }
+    if (archiveFailed) throw firstArchiveFailure;
+    if (
+      (outbox.historicalMatches || []).length >
+      HISTORICAL_MATCH_ARCHIVE_BATCH_SIZE
+    ) {
+      return "continued";
+    }
     return (await settleAutomatchProfileGameProjectionOutbox(task, rtdb))
       ? "projected"
       : "superseded";
@@ -750,6 +878,7 @@ async function repairInvalidAutomatchSweepEntry(
         return { value: null, decision: "removed-invalid" };
       }
       const sourceUpdatedAtMs = record?.sourceUpdatedAtMs;
+      const historicalMatches = salvageHistoricalMatchDescriptors(current);
       return {
         value: {
           schemaVersion: PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
@@ -766,6 +895,21 @@ async function repairInvalidAutomatchSweepEntry(
               ? Math.floor(sourceUpdatedAtMs)
               : nowMs,
           lastQueuedAtMs: nowMs,
+          ...(historicalMatches.length > 0
+            ? {
+                historicalMatches: Object.fromEntries(
+                  historicalMatches.map((descriptor) => [
+                    descriptor.matchId,
+                    {
+                      finalizedAtMs: descriptor.finalizedAtMs,
+                      guestPlayerId: descriptor.guestPlayerId,
+                      hostPlayerId: descriptor.hostPlayerId,
+                      source: descriptor.source,
+                    },
+                  ]),
+                ),
+              }
+            : {}),
         },
         decision: "repaired-invalid",
       };
@@ -828,6 +972,18 @@ export async function processRatingProfileGameProjection(
     );
     return "dead";
   }
+  if (
+    update.historicalMatchArchiveVersion !== undefined &&
+    update.historicalMatchArchiveVersion !== HISTORICAL_MATCH_ARCHIVE_VERSION
+  ) {
+    throw new Error("historical-match-archive-version-unsupported");
+  }
+  if (
+    update.historicalMatchArchiveVersion === HISTORICAL_MATCH_ARCHIVE_VERSION &&
+    !update.historicalMatchPair
+  ) {
+    throw new Error("historical-match-pair-missing");
+  }
   const lock = {
     path: getAutomatchProfileGameProjectionLockPath(update.inviteId),
   };
@@ -848,6 +1004,17 @@ export async function processRatingProfileGameProjection(
         latestMatchIdHint: update.matchId,
       },
     );
+    if (update.historicalMatchPair) {
+      if (!runtime.archiveHistoricalMatch) {
+        throw new Error("historical-match-archive-unavailable");
+      }
+      await runtime.archiveHistoricalMatch({
+        finalizedAtMs: update.completedAtMs,
+        inviteId: update.inviteId,
+        pair: update.historicalMatchPair,
+        source: "rating",
+      });
+    }
   } finally {
     await releaseProfileGameProjectionLock(lock, ownerId, rtdb);
   }
@@ -889,7 +1056,11 @@ export async function handleProfileGameProjectionMessage(
         runtime,
         ownerId,
         now,
+        logger,
       );
+      if (status === "continued") {
+        await env.PROFILE_GAME_PROJECTION_QUEUE.send(task);
+      }
     } else if (task.kind === "profile-link-profile-game-projection") {
       status = await processProfileLinkProfileGameProjection(
         task,
