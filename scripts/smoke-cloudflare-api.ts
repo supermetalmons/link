@@ -21,6 +21,15 @@ const {
   isLeaderboardReadResponse,
   isProfileLookupResponse,
 }: typeof import("@mons/shared/profiles") = require("@mons/shared/profiles");
+const {
+  EVENT_BOOKMARK_HEADER,
+  isEventSnapshotResponse,
+}: typeof import("@mons/shared/events") = require("@mons/shared/events");
+const {
+  isEventPrizeAssignmentRecord,
+  isEventPrizeId,
+  isProfileEventPrizesResponse,
+}: typeof import("@mons/shared/event-prizes") = require("@mons/shared/event-prizes");
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -40,6 +49,7 @@ type Options = {
   readOnlyAuthToken?: string | null;
   readOnly?: boolean;
   requireHistory: boolean;
+  requireEvents?: boolean;
   smokeProfile: ProfileSmokeFixture;
   smokeSol: string;
 };
@@ -55,6 +65,13 @@ type ProfileSmokeFixture = {
     inviteId: string;
     matchId: string;
   };
+  events?: {
+    assignedPrizeId: string;
+    currentId: string;
+    endedId: string;
+    selectionEventId?: string;
+    selectionPrizeId: string;
+  };
 };
 type Dependencies = {
   fetch: typeof fetch;
@@ -63,7 +80,7 @@ type Dependencies = {
 };
 
 function usage(): string {
-  return "Usage: npm run smoke:api -- --base-url <https-url> [--read-only --auth-token-fixture <protected-json-file> [--require-history]] [--smoke-sol <wallet>] [--smoke-profile-fixture <protected-json-file>]";
+  return "Usage: npm run smoke:api -- --base-url <https-url> [--read-only --auth-token-fixture <protected-json-file> [--require-history] [--require-events]] [--smoke-sol <wallet>] [--smoke-profile-fixture <protected-json-file>]";
 }
 
 function readAuthTokenFixture(path: string): string {
@@ -166,12 +183,45 @@ function readProfileSmokeFixture(path: string): ProfileSmokeFixture {
             : "",
       }
     : null;
+  const eventFields =
+    fields.events &&
+    typeof fields.events === "object" &&
+    !Array.isArray(fields.events)
+      ? (fields.events as Record<string, unknown>)
+      : null;
+  const events = eventFields
+    ? {
+        assignedPrizeId:
+          typeof eventFields.assignedPrizeId === "string"
+            ? eventFields.assignedPrizeId
+            : "",
+        currentId:
+          typeof eventFields.currentId === "string"
+            ? eventFields.currentId
+            : "",
+        endedId:
+          typeof eventFields.endedId === "string" ? eventFields.endedId : "",
+        ...(Object.hasOwn(eventFields, "selectionEventId")
+          ? {
+              selectionEventId:
+                typeof eventFields.selectionEventId === "string"
+                  ? eventFields.selectionEventId
+                  : "",
+            }
+          : {}),
+        selectionPrizeId:
+          typeof eventFields.selectionPrizeId === "string"
+            ? eventFields.selectionPrizeId
+            : "",
+      }
+    : null;
   const fieldKeys = Object.keys(fields);
   const allowedFieldKeys = new Set([
     "loginId",
     "profileId",
     "invite",
     "historicalMatch",
+    "events",
   ]);
   const loginCharacters = Array.from(loginId);
   const invalidControl = [...loginCharacters, ...Array.from(profileId)].some(
@@ -182,17 +232,33 @@ function readProfileSmokeFixture(path: string): ProfileSmokeFixture {
   );
   if (
     fieldKeys.length < 2 ||
-    fieldKeys.length > 4 ||
+    fieldKeys.length > 5 ||
     fieldKeys.some((key) => !allowedFieldKeys.has(key)) ||
     Object.hasOwn(fields, "invite") !== (inviteFields !== null) ||
     Object.hasOwn(fields, "historicalMatch") !==
       (historicalMatchFields !== null) ||
+    Object.hasOwn(fields, "events") !== (eventFields !== null) ||
     (inviteFields !== null && Object.keys(inviteFields).length !== 3) ||
     (historicalMatchFields !== null &&
       (Object.keys(historicalMatchFields).length !== 2 ||
         historicalMatch?.inviteId !== historicalMatch?.inviteId.trim() ||
         historicalMatch?.matchId !== historicalMatch?.matchId.trim() ||
         !isReadHistoricalMatchRequest(historicalMatch))) ||
+    (eventFields !== null &&
+      (Object.keys(eventFields).length !==
+        (Object.hasOwn(eventFields, "selectionEventId") ? 5 : 4) ||
+        !events ||
+        !isSafeFirebaseKey(events.currentId) ||
+        !isSafeFirebaseKey(events.endedId) ||
+        events.currentId === events.endedId ||
+        (events.selectionEventId !== undefined &&
+          events.selectionEventId !== events.currentId &&
+          events.selectionEventId !== events.endedId) ||
+        !isEventPrizeId(
+          events.selectionEventId ?? events.currentId,
+          events.selectionPrizeId,
+        ) ||
+        !isEventPrizeId(events.endedId, events.assignedPrizeId))) ||
     !loginId ||
     loginId !== loginId.trim() ||
     loginCharacters.length > 128 ||
@@ -231,6 +297,7 @@ function readProfileSmokeFixture(path: string): ProfileSmokeFixture {
           },
         }
       : {}),
+    ...(events ? { events } : {}),
   };
 }
 
@@ -262,6 +329,7 @@ function parseArgs(argv: string[]): Options {
   let readOnlyAuthToken: string | null = null;
   let readOnly = false;
   let requireHistory = false;
+  let requireEvents = false;
   let smokeProfile: ProfileSmokeFixture = DEFAULT_SMOKE_PROFILE;
   let smokeProfileOverridden = false;
   let smokeSol = DEFAULT_SMOKE_SOL;
@@ -276,6 +344,11 @@ function parseArgs(argv: string[]): Options {
     if (name === "--require-history") {
       if (requireHistory) throw new TypeError(usage());
       requireHistory = true;
+      continue;
+    }
+    if (name === "--require-events") {
+      if (requireEvents) throw new TypeError(usage());
+      requireEvents = true;
       continue;
     }
     const value = argv[index + 1];
@@ -313,6 +386,8 @@ function parseArgs(argv: string[]): Options {
     (readOnly && !smokeProfile.invite) ||
     (requireHistory &&
       (!readOnly || !readOnlyAuthToken || !smokeProfile.historicalMatch)) ||
+    (requireEvents &&
+      (!readOnly || !readOnlyAuthToken || !smokeProfile.events)) ||
     (readOnlyAuthToken !== null &&
       readTokenSubject(readOnlyAuthToken) !== smokeProfile.loginId)
   ) {
@@ -323,6 +398,7 @@ function parseArgs(argv: string[]): Options {
     readOnly,
     readOnlyAuthToken,
     requireHistory,
+    ...(requireEvents ? { requireEvents: true } : {}),
     smokeProfile,
     smokeSol,
   };
@@ -375,10 +451,70 @@ function parseJson(text: string): unknown {
   }
 }
 
+function commaSeparatedHeader(response: Response, name: string): Set<string> {
+  return new Set(
+    (response.headers.get(name) || "")
+      .split(",")
+      .map((value) => value.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+function assertEventReadCors(response: Response): void {
+  const exposedHeaders = commaSeparatedHeader(
+    response,
+    "Access-Control-Expose-Headers",
+  );
+  if (
+    response.headers.get("Access-Control-Allow-Origin") !== ORIGIN ||
+    !exposedHeaders.has("etag") ||
+    !exposedHeaders.has(EVENT_BOOKMARK_HEADER.toLowerCase())
+  ) {
+    throw new Error("Event CORS smoke failed.");
+  }
+}
+
+async function smokeEventReadPreflight(
+  url: string,
+  dependencies: Dependencies,
+): Promise<void> {
+  const result = await request(
+    url,
+    {
+      method: "OPTIONS",
+      headers: {
+        Origin: ORIGIN,
+        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers":
+          "Authorization, If-None-Match, X-D1-Bookmark",
+      },
+    },
+    204,
+    dependencies,
+  );
+  assertEventReadCors(result.response);
+  const allowedMethods = commaSeparatedHeader(
+    result.response,
+    "Access-Control-Allow-Methods",
+  );
+  const allowedHeaders = commaSeparatedHeader(
+    result.response,
+    "Access-Control-Allow-Headers",
+  );
+  if (
+    !allowedMethods.has("get") ||
+    !allowedHeaders.has("authorization") ||
+    !allowedHeaders.has("if-none-match") ||
+    !allowedHeaders.has(EVENT_BOOKMARK_HEADER.toLowerCase())
+  ) {
+    throw new Error("Event CORS smoke failed.");
+  }
+}
+
 async function request(
   url: string,
   init: RequestInit,
-  expectedStatus: number,
+  expectedStatus: number | readonly number[],
   dependencies: Dependencies,
 ): Promise<{ response: Response; body: string }> {
   const response = await dependencies.fetch(url, {
@@ -387,7 +523,10 @@ async function request(
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   const body = await readBody(response);
-  if (response.status !== expectedStatus) {
+  const expectedStatuses = Array.isArray(expectedStatus)
+    ? expectedStatus
+    : [expectedStatus];
+  if (!expectedStatuses.includes(response.status)) {
     throw new Error(`Smoke request returned ${response.status}.`);
   }
   assertNoStore(response);
@@ -466,11 +605,182 @@ async function smokeFrozenProfileWrite(
   }
 }
 
+async function smokeEventReads(
+  baseUrl: string,
+  idToken: string,
+  expectedProfileId: string | null,
+  eventFixture: ProfileSmokeFixture["events"] | undefined,
+  dependencies: Dependencies,
+): Promise<void> {
+  const eventId = `smoke-${dependencies.randomState()}`;
+  const url = new URL(`${baseUrl}/events/snapshot`);
+  url.searchParams.set("eventId", eventId);
+  const prizesUrl = `${baseUrl}/events/prizes`;
+  await smokeEventReadPreflight(url.href, dependencies);
+  await smokeEventReadPreflight(prizesUrl, dependencies);
+  const headers = { Authorization: `Bearer ${idToken}`, Origin: ORIGIN };
+  const snapshot = await request(
+    url.href,
+    { method: "GET", headers },
+    200,
+    dependencies,
+  );
+  const snapshotPayload = parseJson(snapshot.body);
+  const etag = snapshot.response.headers.get("ETag") || "";
+  const bookmark = snapshot.response.headers.get(EVENT_BOOKMARK_HEADER) || "";
+  assertEventReadCors(snapshot.response);
+  if (
+    !isEventSnapshotResponse(snapshotPayload) ||
+    snapshotPayload.eventId !== eventId ||
+    snapshotPayload.event !== null ||
+    snapshotPayload.revision !== 0 ||
+    !etag ||
+    !bookmark
+  ) {
+    throw new Error("Event snapshot smoke response was invalid.");
+  }
+  const conditionalSnapshot = await request(
+    url.href,
+    {
+      method: "GET",
+      headers: {
+        ...headers,
+        "If-None-Match": etag,
+        [EVENT_BOOKMARK_HEADER]: bookmark,
+      },
+    },
+    304,
+    dependencies,
+  );
+  assertEventReadCors(conditionalSnapshot.response);
+  if (
+    !conditionalSnapshot.response.headers.get("ETag") ||
+    !conditionalSnapshot.response.headers.get(EVENT_BOOKMARK_HEADER)
+  ) {
+    throw new Error("Event snapshot smoke response was invalid.");
+  }
+  const prizes = await request(
+    prizesUrl,
+    { method: "GET", headers },
+    200,
+    dependencies,
+  );
+  const prizesPayload = parseJson(prizes.body);
+  assertEventReadCors(prizes.response);
+  if (
+    !isProfileEventPrizesResponse(prizesPayload) ||
+    prizesPayload.profileId !== expectedProfileId ||
+    (eventFixture && prizesPayload.revision < 1) ||
+    (eventFixture &&
+      prizesPayload.prizes[eventFixture.endedId]?.prizeId !==
+        eventFixture.assignedPrizeId) ||
+    !prizes.response.headers.get("ETag") ||
+    !prizes.response.headers.get(EVENT_BOOKMARK_HEADER)
+  ) {
+    throw new Error("Event prizes smoke response was invalid.");
+  }
+  const prizesEtag = prizes.response.headers.get("ETag") || "";
+  const prizesBookmark =
+    prizes.response.headers.get(EVENT_BOOKMARK_HEADER) || "";
+  const conditionalPrizes = await request(
+    prizesUrl,
+    {
+      method: "GET",
+      headers: {
+        ...headers,
+        "If-None-Match": prizesEtag,
+        [EVENT_BOOKMARK_HEADER]: prizesBookmark,
+      },
+    },
+    eventFixture ? 304 : [200, 304],
+    dependencies,
+  );
+  assertEventReadCors(conditionalPrizes.response);
+  if (
+    !conditionalPrizes.response.headers.get("ETag") ||
+    !conditionalPrizes.response.headers.get(EVENT_BOOKMARK_HEADER)
+  ) {
+    throw new Error("Event prizes smoke response was invalid.");
+  }
+  if (conditionalPrizes.response.status === 200) {
+    const updatedPrizes = parseJson(conditionalPrizes.body);
+    if (
+      !isProfileEventPrizesResponse(updatedPrizes) ||
+      updatedPrizes.profileId !== expectedProfileId
+    ) {
+      throw new Error("Event prizes smoke response was invalid.");
+    }
+  }
+  for (const [fixtureEventId, expectedStatus] of eventFixture
+    ? ([
+        [eventFixture.currentId, "current"],
+        [eventFixture.endedId, "ended"],
+      ] as const)
+    : []) {
+    const fixtureUrl = new URL(`${baseUrl}/events/snapshot`);
+    fixtureUrl.searchParams.set("eventId", fixtureEventId);
+    const result = await request(
+      fixtureUrl.href,
+      { method: "GET", headers },
+      200,
+      dependencies,
+    );
+    const payload = parseJson(result.body);
+    assertEventReadCors(result.response);
+    const profileAssignment = eventFixture
+      ? prizesPayload.prizes[eventFixture.endedId]
+      : undefined;
+    const prizeAssignments =
+      payload &&
+      typeof payload === "object" &&
+      !Array.isArray(payload) &&
+      "event" in payload &&
+      payload.event &&
+      typeof payload.event === "object" &&
+      !Array.isArray(payload.event) &&
+      "prizeAssignments" in payload.event &&
+      payload.event.prizeAssignments &&
+      typeof payload.event.prizeAssignments === "object" &&
+      !Array.isArray(payload.event.prizeAssignments)
+        ? (payload.event.prizeAssignments as Record<string, unknown>)
+        : null;
+    const eventAssignment = profileAssignment
+      ? prizeAssignments?.[String(profileAssignment.place)]
+      : null;
+    if (
+      !isEventSnapshotResponse(payload) ||
+      payload.eventId !== fixtureEventId ||
+      !payload.event ||
+      payload.revision < 1 ||
+      (expectedStatus === "ended"
+        ? payload.event.status !== "ended"
+        : payload.event.status !== "scheduled" &&
+          payload.event.status !== "active") ||
+      (fixtureEventId ===
+        (eventFixture?.selectionEventId ?? eventFixture?.currentId) &&
+        payload.prizeSelections[expectedProfileId || ""] !==
+          eventFixture?.selectionPrizeId) ||
+      (expectedStatus === "ended" &&
+        (!profileAssignment ||
+          !isEventPrizeAssignmentRecord(eventAssignment) ||
+          eventAssignment.eventId !== profileAssignment.eventId ||
+          eventAssignment.profileId !== profileAssignment.profileId ||
+          eventAssignment.place !== profileAssignment.place ||
+          eventAssignment.prizeId !== profileAssignment.prizeId)) ||
+      !result.response.headers.get("ETag") ||
+      !result.response.headers.get(EVENT_BOOKMARK_HEADER)
+    ) {
+      throw new Error("Required event snapshot smoke response was invalid.");
+    }
+  }
+}
+
 async function smokeAuthenticatedAuthState(
   baseUrl: string,
   smokeProfile: ProfileSmokeFixture,
   dependencies: Dependencies,
   existingIdToken?: string,
+  eventFixture?: ProfileSmokeFixture["events"],
 ): Promise<void> {
   if (existingIdToken && !smokeProfile.invite) {
     throw new Error("Read-only smoke requires an alternate invite fixture.");
@@ -519,6 +829,13 @@ async function smokeAuthenticatedAuthState(
     ) {
       throw new Error("Auth ownership smoke response was invalid.");
     }
+    await smokeEventReads(
+      baseUrl,
+      idToken,
+      existingIdToken ? smokeProfile.profileId : null,
+      eventFixture,
+      dependencies,
+    );
     if (!existingIdToken) {
       const intent = await request(
         `${baseUrl}/auth/intents`,
@@ -769,6 +1086,16 @@ async function smokeApi(
       "Required history smoke requires an authenticated historical match fixture.",
     );
   }
+  if (
+    options.requireEvents === true &&
+    (options.readOnly !== true ||
+      !options.readOnlyAuthToken ||
+      !options.smokeProfile.events)
+  ) {
+    throw new Error(
+      "Required event smoke requires authenticated current and ended event fixtures.",
+    );
+  }
   const nftUrl = `${options.baseUrl}/nfts`;
   const preflight = await request(
     nftUrl,
@@ -857,6 +1184,7 @@ async function smokeApi(
     options.smokeProfile,
     dependencies,
     options.readOnlyAuthToken || undefined,
+    options.requireEvents ? options.smokeProfile.events : undefined,
   );
 
   await smokeHistoricalMatch(
@@ -962,5 +1290,6 @@ module.exports = {
   readProfileSmokeFixture,
   smokeApi,
   smokeAuthenticatedAuthState,
+  smokeEventReads,
   smokeFrozenProfileWrite,
 };

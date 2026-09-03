@@ -1,6 +1,6 @@
 # mons.link
 
-mons.link is a browser game backed by Firebase Auth, Realtime Database, and two Cloudflare Workers. The repository keeps the browser, backend, shared contracts, operational tools, and deployment drivers in their existing runtime boundaries.
+mons.link is a browser game backed by Firebase Auth, Cloudflare D1, Realtime Database for active gameplay, and two Cloudflare Workers. The repository keeps the browser, backend, shared contracts, operational tools, and deployment drivers in their existing runtime boundaries.
 
 ## Project map
 
@@ -14,7 +14,7 @@ mons.link is a browser game backed by Firebase Auth, Realtime Database, and two 
 | `cloud/admin/`            | Manually invoked production administration tools                                             | Node / D1          |
 | `scripts/`                | Deployment, repository maintenance, architecture, and tooling contracts                      | Node and Bash      |
 
-The frontend Worker is configured by `wrangler.jsonc`. The API Worker has its independent configuration under `cloud/workers/api/`. Firebase Auth and Realtime Database remain active, while canonical profile, auth-state, Telegram, projection, and withdrawal data are D1-backed. Realtime Database rules live under `cloud/`; Firestore and Firebase Functions are not deployed.
+The frontend Worker is configured by `wrangler.jsonc`. The API Worker has its independent configuration under `cloud/workers/api/`. Firebase Auth remains active, and Realtime Database retains active invites and match synchronization. Canonical event, profile, auth-state, Telegram, projection, and withdrawal data are D1-backed. Realtime Database rules live under `cloud/`; Firestore and Firebase Functions are not deployed.
 
 ## Setup and development
 

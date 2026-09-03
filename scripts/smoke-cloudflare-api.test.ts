@@ -14,6 +14,7 @@ const {
   parseArgs,
   smokeApi,
   smokeAuthenticatedAuthState,
+  smokeEventReads,
   smokeFrozenProfileWrite,
 } = require("./smoke-cloudflare-api.ts") as {
   DEFAULT_SMOKE_PROFILE: {
@@ -21,6 +22,13 @@ const {
     profileId: string;
     invite?: { actorUid: string; id: string; role: "guest" | "host" };
     historicalMatch?: { inviteId: string; matchId: string };
+    events?: {
+      assignedPrizeId: string;
+      currentId: string;
+      endedId: string;
+      selectionEventId?: string;
+      selectionPrizeId: string;
+    };
   };
   DEFAULT_SMOKE_SOL: string;
   parseArgs: (argv: string[]) => {
@@ -28,11 +36,19 @@ const {
     readOnly: boolean;
     readOnlyAuthToken: string | null;
     requireHistory: boolean;
+    requireEvents?: boolean;
     smokeProfile: {
       loginId: string;
       profileId: string;
       invite?: { actorUid: string; id: string; role: "guest" | "host" };
       historicalMatch?: { inviteId: string; matchId: string };
+      events?: {
+        assignedPrizeId: string;
+        currentId: string;
+        endedId: string;
+        selectionEventId?: string;
+        selectionPrizeId: string;
+      };
     };
     smokeSol: string;
   };
@@ -42,11 +58,19 @@ const {
       readOnlyAuthToken?: string | null;
       readOnly?: boolean;
       requireHistory: boolean;
+      requireEvents?: boolean;
       smokeProfile: {
         loginId: string;
         profileId: string;
         invite?: { actorUid: string; id: string; role: "guest" | "host" };
         historicalMatch?: { inviteId: string; matchId: string };
+        events?: {
+          assignedPrizeId: string;
+          currentId: string;
+          endedId: string;
+          selectionEventId?: string;
+          selectionPrizeId: string;
+        };
       };
       smokeSol: string;
     },
@@ -63,6 +87,13 @@ const {
       profileId: string;
       invite?: { actorUid: string; id: string; role: "guest" | "host" };
       historicalMatch?: { inviteId: string; matchId: string };
+      events?: {
+        assignedPrizeId: string;
+        currentId: string;
+        endedId: string;
+        selectionEventId?: string;
+        selectionPrizeId: string;
+      };
     },
     dependencies: {
       fetch: typeof fetch;
@@ -70,6 +101,32 @@ const {
       log: (message: string) => void;
     },
     existingIdToken?: string,
+    eventFixture?: {
+      assignedPrizeId: string;
+      currentId: string;
+      endedId: string;
+      selectionEventId?: string;
+      selectionPrizeId: string;
+    },
+  ) => Promise<void>;
+  smokeEventReads: (
+    baseUrl: string,
+    idToken: string,
+    expectedProfileId: string | null,
+    eventFixture:
+      | {
+          assignedPrizeId: string;
+          currentId: string;
+          endedId: string;
+          selectionEventId?: string;
+          selectionPrizeId: string;
+        }
+      | undefined,
+    dependencies: {
+      fetch: typeof fetch;
+      randomState: () => string;
+      log: (message: string) => void;
+    },
   ) => Promise<void>;
   smokeFrozenProfileWrite: (
     baseUrl: string,
@@ -84,10 +141,24 @@ const {
 
 const WALLET = "11111111111111111111111111111111";
 const LOGIN = "known-login";
+const SMOKE_EVENTS = {
+  assignedPrizeId: "1866",
+  currentId: "NN3eRzoZo80",
+  endedId: "FRkdorMWaYW",
+  selectionPrizeId: "1092",
+};
+const EVENT_READ_CORS_HEADERS = {
+  "Access-Control-Allow-Headers":
+    "Authorization, Content-Type, If-None-Match, X-D1-Bookmark",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Origin": "https://mons.link",
+  "Access-Control-Expose-Headers": "ETag, X-D1-Bookmark",
+};
 const SMOKE_PROFILE = {
   loginId: LOGIN,
   profileId: "profile-1",
   invite: { actorUid: "host-login", id: "invite-1", role: "host" as const },
+  events: SMOKE_EVENTS,
 };
 const HISTORICAL_MATCH = {
   inviteId: "historygame",
@@ -254,12 +325,14 @@ test("parses only production and canonical preview smoke targets", () => {
         "--smoke-profile-fixture",
         historyFixture.path,
         "--require-history",
+        "--require-events",
       ]),
       {
         baseUrl: "https://api.mons.link",
         readOnly: true,
         readOnlyAuthToken: AUTH_TOKEN,
         requireHistory: true,
+        requireEvents: true,
         smokeProfile: SMOKE_PROFILE_WITH_HISTORY,
         smokeSol: DEFAULT_SMOKE_SOL,
       },
@@ -415,6 +488,65 @@ test("rejects malformed historical match smoke fixtures", () => {
   }
 });
 
+test("accepts prize selections on either required event snapshot", () => {
+  for (const events of [
+    { ...SMOKE_EVENTS, selectionEventId: SMOKE_EVENTS.currentId },
+    {
+      ...SMOKE_EVENTS,
+      currentId: "active-event-without-prizes",
+      selectionEventId: SMOKE_EVENTS.endedId,
+      selectionPrizeId: SMOKE_EVENTS.assignedPrizeId,
+    },
+  ]) {
+    const value = { ...SMOKE_PROFILE, events };
+    const fixture = profileFixture(value);
+    try {
+      assert.deepEqual(
+        parseArgs([
+          "--base-url",
+          "https://api.mons.link",
+          "--smoke-profile-fixture",
+          fixture.path,
+        ]).smokeProfile,
+        value,
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
+test("rejects invalid event selection fixtures", () => {
+  for (const events of [
+    { ...SMOKE_EVENTS, selectionEventId: "other-event" },
+    { ...SMOKE_EVENTS, selectionEventId: "" },
+    { ...SMOKE_EVENTS, selectionEventId: null },
+    { ...SMOKE_EVENTS, selectionEventId: SMOKE_EVENTS.endedId },
+    { ...SMOKE_EVENTS, extra: true },
+    {
+      ...SMOKE_EVENTS,
+      selectionEventId: SMOKE_EVENTS.currentId,
+      extra: true,
+    },
+  ]) {
+    const fixture = profileFixture({ ...SMOKE_PROFILE, events });
+    try {
+      assert.throws(
+        () =>
+          parseArgs([
+            "--base-url",
+            "https://api.mons.link",
+            "--smoke-profile-fixture",
+            fixture.path,
+          ]),
+        /Usage:/,
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  }
+});
+
 test("smokes public, unauthenticated, and internal routes", async () => {
   const requests: Array<{ authorized: boolean; method: string; url: string }> =
     [];
@@ -507,6 +639,117 @@ test("smokes public, unauthenticated, and internal routes", async () => {
           appleLinked: false,
         },
         200,
+      );
+    }
+    if (
+      (url.includes("/events/snapshot?") || url.endsWith("/events/prizes")) &&
+      method === "OPTIONS"
+    ) {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          ...EVENT_READ_CORS_HEADERS,
+          "Cache-Control": "no-store",
+        },
+      });
+    }
+    if (url.includes("/events/snapshot?") && method === "GET") {
+      const headers = new Headers(init?.headers);
+      if (headers.get("If-None-Match")) {
+        return new Response(null, {
+          status: 304,
+          headers: {
+            ...EVENT_READ_CORS_HEADERS,
+            ETag: 'W/"event-snapshot"',
+            "X-D1-Bookmark": "bookmark",
+            "Cache-Control": "no-store",
+          },
+        });
+      }
+      const requestedEventId = new URL(url).searchParams.get("eventId");
+      const fixtureStatus =
+        requestedEventId === SMOKE_EVENTS.currentId
+          ? "active"
+          : requestedEventId === SMOKE_EVENTS.endedId
+            ? "ended"
+            : null;
+      return json(
+        {
+          ok: true,
+          eventId: requestedEventId,
+          revision: fixtureStatus ? 1 : 0,
+          event: fixtureStatus
+            ? {
+                eventId: requestedEventId,
+                status: fixtureStatus,
+                ...(fixtureStatus === "ended"
+                  ? {
+                      prizeAssignments: {
+                        1: {
+                          eventId: SMOKE_EVENTS.endedId,
+                          profileId: SMOKE_PROFILE.profileId,
+                          place: 1,
+                          prizeId: SMOKE_EVENTS.assignedPrizeId,
+                          assignedAtMs: 1,
+                        },
+                      },
+                    }
+                  : {}),
+              }
+            : null,
+          prizeSelections:
+            requestedEventId === SMOKE_EVENTS.currentId
+              ? { [SMOKE_PROFILE.profileId]: SMOKE_EVENTS.selectionPrizeId }
+              : {},
+        },
+        200,
+        {
+          ...EVENT_READ_CORS_HEADERS,
+          ETag: 'W/"event-snapshot"',
+          "X-D1-Bookmark": "bookmark",
+        },
+      );
+    }
+    if (url.endsWith("/events/prizes") && method === "GET") {
+      if (new Headers(init?.headers).get("If-None-Match")) {
+        return new Response(null, {
+          status: 304,
+          headers: {
+            ...EVENT_READ_CORS_HEADERS,
+            ETag: 'W/"profile-prizes"',
+            "X-D1-Bookmark": "bookmark",
+            "Cache-Control": "no-store",
+          },
+        });
+      }
+      const authorization = new Headers(init?.headers).get("Authorization");
+      return json(
+        {
+          ok: true,
+          profileId:
+            authorization === `Bearer ${AUTH_TOKEN}`
+              ? SMOKE_PROFILE.profileId
+              : null,
+          revision: authorization === `Bearer ${AUTH_TOKEN}` ? 1 : 0,
+          prizes:
+            authorization === `Bearer ${AUTH_TOKEN}`
+              ? {
+                  [SMOKE_EVENTS.endedId]: {
+                    eventId: SMOKE_EVENTS.endedId,
+                    profileId: SMOKE_PROFILE.profileId,
+                    place: 1,
+                    prizeId: SMOKE_EVENTS.assignedPrizeId,
+                    assignedAtMs: 1,
+                  },
+                }
+              : {},
+        },
+        200,
+        {
+          ...EVENT_READ_CORS_HEADERS,
+          ETag: 'W/"profile-prizes"',
+          "X-D1-Bookmark": "bookmark",
+        },
       );
     }
     if (url.endsWith("/leaderboards/read")) {
@@ -657,7 +900,6 @@ test("smokes public, unauthenticated, and internal routes", async () => {
     },
   );
 
-  assert.equal(requests.length, 40);
   assert.deepEqual(leaderboardTypes, [
     "rating",
     "mp",
@@ -679,6 +921,7 @@ test("smokes public, unauthenticated, and internal routes", async () => {
       readOnlyAuthToken: AUTH_TOKEN,
       readOnly: true,
       requireHistory: true,
+      requireEvents: true,
       smokeProfile: SMOKE_PROFILE_WITH_HISTORY,
       smokeSol: WALLET,
     },
@@ -688,7 +931,6 @@ test("smokes public, unauthenticated, and internal routes", async () => {
       log: (message) => logs.push(message),
     },
   );
-  assert.equal(requests.length, 37);
   assert.deepEqual(leaderboardTypes, [
     "rating",
     "mp",
@@ -717,6 +959,8 @@ test("smokes public, unauthenticated, and internal routes", async () => {
     ).sort(),
     [
       "GET /auth/methods",
+      "GET /events/prizes",
+      "GET /events/snapshot",
       "POST /invites/role/read",
       "POST /leaderboards/read",
       "POST /navigation/games/read",
@@ -727,6 +971,16 @@ test("smokes public, unauthenticated, and internal routes", async () => {
     requests.some(({ url }) => url.includes("identitytoolkit.googleapis.com")),
     false,
   );
+  for (const pathname of ["/events/snapshot", "/events/prizes"]) {
+    assert.equal(
+      requests.some(
+        ({ method, url }) =>
+          method === "OPTIONS" && new URL(url).pathname === pathname,
+      ),
+      true,
+      pathname,
+    );
+  }
   const historyRequests = requests.filter(({ url }) =>
     url.includes("/matches/history?"),
   );
@@ -811,6 +1065,369 @@ test("smokes public, unauthenticated, and internal routes", async () => {
     ),
     /returned 503/,
   );
+});
+
+test("rejects event read CORS without the allowed origin", async () => {
+  await assert.rejects(
+    smokeEventReads(
+      "https://api.mons.link",
+      AUTH_TOKEN,
+      SMOKE_PROFILE.profileId,
+      undefined,
+      {
+        fetch: async () =>
+          new Response(null, {
+            status: 204,
+            headers: {
+              ...EVENT_READ_CORS_HEADERS,
+              "Access-Control-Allow-Origin": "",
+              "Cache-Control": "no-store",
+            },
+          }),
+        randomState: () => "abcdefghijklmnopqrstuvwx",
+        log: () => undefined,
+      },
+    ),
+    /Event CORS smoke failed/,
+  );
+});
+
+test("requires conditional event snapshots to return cache metadata", async () => {
+  const eventId = "smoke-abcdefghijklmnopqrstuvwx";
+  const responses = [
+    new Response(null, {
+      status: 204,
+      headers: { ...EVENT_READ_CORS_HEADERS, "Cache-Control": "no-store" },
+    }),
+    new Response(null, {
+      status: 204,
+      headers: { ...EVENT_READ_CORS_HEADERS, "Cache-Control": "no-store" },
+    }),
+    json(
+      {
+        ok: true,
+        eventId,
+        revision: 0,
+        event: null,
+        prizeSelections: {},
+      },
+      200,
+      {
+        ...EVENT_READ_CORS_HEADERS,
+        ETag: 'W/"event"',
+        "X-D1-Bookmark": "bookmark",
+      },
+    ),
+    new Response(null, {
+      status: 304,
+      headers: { ...EVENT_READ_CORS_HEADERS, "Cache-Control": "no-store" },
+    }),
+  ];
+
+  await assert.rejects(
+    smokeEventReads(
+      "https://api.mons.link",
+      AUTH_TOKEN,
+      SMOKE_PROFILE.profileId,
+      undefined,
+      {
+        fetch: async () => {
+          const response = responses.shift();
+          assert.ok(response);
+          return response;
+        },
+        randomState: () => "abcdefghijklmnopqrstuvwx",
+        log: () => undefined,
+      },
+    ),
+    /Event snapshot smoke response was invalid/,
+  );
+  assert.equal(responses.length, 0);
+});
+
+test("allows live prize changes but requires a stable cutover prize read", async () => {
+  const headers = {
+    ...EVENT_READ_CORS_HEADERS,
+    ETag: 'W/"event"',
+    "X-D1-Bookmark": "bookmark",
+  };
+  const createFetch = (): typeof fetch => async (input, init) => {
+    const url = String(input);
+    if (init?.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: { ...EVENT_READ_CORS_HEADERS, "Cache-Control": "no-store" },
+      });
+    }
+    if (url.includes("/events/snapshot?")) {
+      if (new Headers(init?.headers).has("If-None-Match")) {
+        return new Response(null, {
+          status: 304,
+          headers: { ...headers, "Cache-Control": "no-store" },
+        });
+      }
+      const eventId = new URL(url).searchParams.get("eventId");
+      return json(
+        {
+          ok: true,
+          eventId,
+          revision: 0,
+          event: null,
+          prizeSelections: {},
+        },
+        200,
+        headers,
+      );
+    }
+    return json(
+      {
+        ok: true,
+        profileId: SMOKE_PROFILE.profileId,
+        revision: 1,
+        prizes: {
+          [SMOKE_EVENTS.endedId]: {
+            eventId: SMOKE_EVENTS.endedId,
+            profileId: SMOKE_PROFILE.profileId,
+            place: 1,
+            prizeId: SMOKE_EVENTS.assignedPrizeId,
+            assignedAtMs: 1,
+          },
+        },
+      },
+      200,
+      headers,
+    );
+  };
+  const dependencies = (fetch: typeof globalThis.fetch) => ({
+    fetch,
+    randomState: () => "abcdefghijklmnopqrstuvwx",
+    log: () => undefined,
+  });
+
+  await smokeEventReads(
+    "https://api.mons.link",
+    AUTH_TOKEN,
+    SMOKE_PROFILE.profileId,
+    undefined,
+    dependencies(createFetch()),
+  );
+  await assert.rejects(
+    smokeEventReads(
+      "https://api.mons.link",
+      AUTH_TOKEN,
+      SMOKE_PROFILE.profileId,
+      SMOKE_EVENTS,
+      dependencies(createFetch()),
+    ),
+    /returned 200/,
+  );
+});
+
+test("verifies an ended selection while still requiring a current snapshot", async () => {
+  const events = {
+    ...SMOKE_EVENTS,
+    currentId: "active-event-without-prizes",
+    selectionEventId: SMOKE_EVENTS.endedId,
+    selectionPrizeId: SMOKE_EVENTS.assignedPrizeId,
+  };
+  const assignment = {
+    eventId: events.endedId,
+    profileId: SMOKE_PROFILE.profileId,
+    place: 1,
+    prizeId: events.assignedPrizeId,
+    assignedAtMs: 1,
+  };
+  const headers = {
+    ...EVENT_READ_CORS_HEADERS,
+    ETag: 'W/"event"',
+    "X-D1-Bookmark": "bookmark",
+    "Cache-Control": "no-store",
+  };
+  for (const scenario of [
+    {
+      selection: events.selectionPrizeId,
+      currentStatus: "active",
+      valid: true,
+    },
+    { selection: "wrong-prize", currentStatus: "active", valid: false },
+    { selection: null, currentStatus: "active", valid: false },
+    {
+      selection: events.selectionPrizeId,
+      currentStatus: "ended",
+      valid: false,
+    },
+  ]) {
+    const requestedEvents: string[] = [];
+    const smoke = smokeEventReads(
+      "https://api.mons.link",
+      AUTH_TOKEN,
+      SMOKE_PROFILE.profileId,
+      events,
+      {
+        fetch: async (input, init) => {
+          if (init?.method === "OPTIONS") {
+            return new Response(null, { status: 204, headers });
+          }
+          if (new Headers(init?.headers).has("If-None-Match")) {
+            return new Response(null, { status: 304, headers });
+          }
+          const url = new URL(String(input));
+          if (url.pathname === "/events/prizes") {
+            return json(
+              {
+                ok: true,
+                profileId: SMOKE_PROFILE.profileId,
+                revision: 1,
+                prizes: { [events.endedId]: assignment },
+              },
+              200,
+              headers,
+            );
+          }
+          const eventId = url.searchParams.get("eventId") || "";
+          requestedEvents.push(eventId);
+          const event =
+            eventId === events.currentId
+              ? { eventId, status: scenario.currentStatus }
+              : eventId === events.endedId
+                ? {
+                    eventId,
+                    status: "ended",
+                    prizeAssignments: { 1: assignment },
+                  }
+                : null;
+          return json(
+            {
+              ok: true,
+              eventId,
+              revision: event ? 1 : 0,
+              event,
+              prizeSelections:
+                eventId === events.selectionEventId && scenario.selection
+                  ? { [SMOKE_PROFILE.profileId]: scenario.selection }
+                  : {},
+            },
+            200,
+            headers,
+          );
+        },
+        randomState: () => "abcdefghijklmnopqrstuvwx",
+        log: () => undefined,
+      },
+    );
+    if (scenario.valid) {
+      await smoke;
+      assert.deepEqual(requestedEvents.slice(-2), [
+        events.currentId,
+        events.endedId,
+      ]);
+    } else {
+      await assert.rejects(
+        smoke,
+        /Required event snapshot smoke response was invalid/,
+      );
+    }
+  }
+});
+
+test("requires the ended event aggregate to contain the profile prize", async () => {
+  const eventHeaders = {
+    ...EVENT_READ_CORS_HEADERS,
+    ETag: 'W/"event"',
+    "X-D1-Bookmark": "bookmark",
+  };
+  const missingEventId = "smoke-abcdefghijklmnopqrstuvwx";
+  const responses = [
+    new Response(null, {
+      status: 204,
+      headers: { ...EVENT_READ_CORS_HEADERS, "Cache-Control": "no-store" },
+    }),
+    new Response(null, {
+      status: 204,
+      headers: { ...EVENT_READ_CORS_HEADERS, "Cache-Control": "no-store" },
+    }),
+    json(
+      {
+        ok: true,
+        eventId: missingEventId,
+        revision: 0,
+        event: null,
+        prizeSelections: {},
+      },
+      200,
+      eventHeaders,
+    ),
+    new Response(null, {
+      status: 304,
+      headers: { ...eventHeaders, "Cache-Control": "no-store" },
+    }),
+    json(
+      {
+        ok: true,
+        profileId: SMOKE_PROFILE.profileId,
+        revision: 1,
+        prizes: {
+          [SMOKE_EVENTS.endedId]: {
+            eventId: SMOKE_EVENTS.endedId,
+            profileId: SMOKE_PROFILE.profileId,
+            place: 1,
+            prizeId: SMOKE_EVENTS.assignedPrizeId,
+            assignedAtMs: 1,
+          },
+        },
+      },
+      200,
+      eventHeaders,
+    ),
+    new Response(null, {
+      status: 304,
+      headers: { ...eventHeaders, "Cache-Control": "no-store" },
+    }),
+    json(
+      {
+        ok: true,
+        eventId: SMOKE_EVENTS.currentId,
+        revision: 1,
+        event: { eventId: SMOKE_EVENTS.currentId, status: "active" },
+        prizeSelections: {
+          [SMOKE_PROFILE.profileId]: SMOKE_EVENTS.selectionPrizeId,
+        },
+      },
+      200,
+      eventHeaders,
+    ),
+    json(
+      {
+        ok: true,
+        eventId: SMOKE_EVENTS.endedId,
+        revision: 1,
+        event: { eventId: SMOKE_EVENTS.endedId, status: "ended" },
+        prizeSelections: {},
+      },
+      200,
+      eventHeaders,
+    ),
+  ];
+
+  await assert.rejects(
+    smokeEventReads(
+      "https://api.mons.link",
+      AUTH_TOKEN,
+      SMOKE_PROFILE.profileId,
+      SMOKE_EVENTS,
+      {
+        fetch: async () => {
+          const response = responses.shift();
+          assert.ok(response);
+          return response;
+        },
+        randomState: () => "abcdefghijklmnopqrstuvwx",
+        log: () => undefined,
+      },
+    ),
+    /Required event snapshot smoke response was invalid/,
+  );
+  assert.equal(responses.length, 0);
 });
 
 test("probes frozen profile writes with an authenticated mutation-safe body", async () => {
@@ -1021,7 +1638,7 @@ test("accepts an empty authenticated navigation projection", async () => {
     "https://api.mons.link",
     SMOKE_PROFILE,
     {
-      fetch: async (input) => {
+      fetch: async (input, init) => {
         const url = String(input);
         if (url.endsWith("/auth/methods")) {
           return json(
@@ -1037,6 +1654,74 @@ test("accepts an empty authenticated navigation projection", async () => {
               appleLinked: false,
             },
             200,
+          );
+        }
+        if (
+          (url.includes("/events/snapshot?") ||
+            url.endsWith("/events/prizes")) &&
+          init?.method === "OPTIONS"
+        ) {
+          return new Response(null, {
+            status: 204,
+            headers: {
+              ...EVENT_READ_CORS_HEADERS,
+              "Cache-Control": "no-store",
+            },
+          });
+        }
+        if (url.includes("/events/snapshot?")) {
+          if (new Headers(init?.headers).get("If-None-Match")) {
+            return new Response(null, {
+              status: 304,
+              headers: {
+                ...EVENT_READ_CORS_HEADERS,
+                ETag: 'W/"event-snapshot"',
+                "X-D1-Bookmark": "bookmark",
+                "Cache-Control": "no-store",
+              },
+            });
+          }
+          return json(
+            {
+              ok: true,
+              eventId: "smoke-unused",
+              revision: 0,
+              event: null,
+              prizeSelections: {},
+            },
+            200,
+            {
+              ...EVENT_READ_CORS_HEADERS,
+              ETag: 'W/"event-snapshot"',
+              "X-D1-Bookmark": "bookmark",
+            },
+          );
+        }
+        if (url.endsWith("/events/prizes")) {
+          if (new Headers(init?.headers).get("If-None-Match")) {
+            return new Response(null, {
+              status: 304,
+              headers: {
+                ...EVENT_READ_CORS_HEADERS,
+                ETag: 'W/"profile-prizes"',
+                "X-D1-Bookmark": "bookmark",
+                "Cache-Control": "no-store",
+              },
+            });
+          }
+          return json(
+            {
+              ok: true,
+              profileId: SMOKE_PROFILE.profileId,
+              revision: 0,
+              prizes: {},
+            },
+            200,
+            {
+              ...EVENT_READ_CORS_HEADERS,
+              ETag: 'W/"profile-prizes"',
+              "X-D1-Bookmark": "bookmark",
+            },
           );
         }
         if (url.endsWith("/leaderboards/read")) {

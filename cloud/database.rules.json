@@ -7,34 +7,6 @@
       ".write": "auth != null && auth.token.admin === true",
       ".indexOn": ["uid", "profileId"]
     },
-    "events": {
-      ".indexOn": ["status"],
-      "$eventId": {
-        ".read": "auth != null",
-        ".write": false
-      }
-    },
-    "eventProgressOutbox": {
-      ".indexOn": ["lastQueuedAtMs"]
-    },
-    "eventPrizeSelections": {
-      "$eventId": {
-        ".read": "auth != null && root.child('events').child($eventId).exists()",
-        "$profileId": {
-          ".write": false
-        }
-      }
-    },
-    "profileEventPrizes": {
-      "$profileId": {
-        ".read": "auth != null && ((auth.token.profileId != null && auth.token.profileId === $profileId) || (root.child('players').child(auth.uid).child('profile').exists() && root.child('players').child(auth.uid).child('profile').val() === $profileId))",
-        ".write": false
-      }
-    },
-    "eventLocks": {
-      ".read": "auth != null && auth.token.admin === true",
-      ".write": "auth != null && auth.token.admin === true"
-    },
     "matchTimerClaims": {
       ".read": false,
       ".write": false
@@ -46,16 +18,10 @@
     "telegramProjectionOutbox": {
       "automatch": {
         ".indexOn": ["updatedAtMs"]
-      },
-      "event": {
-        ".indexOn": ["updatedAtMs"]
       }
     },
     "profileGameProjectionOutbox": {
       "automatch": {
-        ".indexOn": ["lastQueuedAtMs"]
-      },
-      "event": {
         ".indexOn": ["lastQueuedAtMs"]
       },
       "profile": {

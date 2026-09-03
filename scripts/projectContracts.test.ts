@@ -147,6 +147,12 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       database_id: "15a77eea-19da-45a7-8433-9b4a22d371da",
       migrations_dir: "profile-migrations",
     },
+    {
+      binding: "EVENT_DB",
+      database_name: "mons-link-events",
+      database_id: "1638d8f3-2890-4bf2-9b8a-16bb197e2b3b",
+      migrations_dir: "event-migrations",
+    },
   ]);
   assert.deepEqual(config.secrets, {
     required: [
@@ -373,6 +379,8 @@ test("package manifests preserve public scripts and deployment command vectors",
       "smoke:api": rootPackage.scripts?.["smoke:api"],
       "manage:event-prize-withdrawals":
         rootPackage.scripts?.["manage:event-prize-withdrawals"],
+      "manage:events": rootPackage.scripts?.["manage:events"],
+      "migrate:events-d1": rootPackage.scripts?.["migrate:events-d1"],
       "manage:profile-canonical":
         rootPackage.scripts?.["manage:profile-canonical"],
       "prepare:firebase": rootPackage.scripts?.["prepare:firebase"],
@@ -399,6 +407,10 @@ test("package manifests preserve public scripts and deployment command vectors",
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/smoke-cloudflare-api.ts",
       "manage:event-prize-withdrawals":
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-event-prize-withdrawals.ts",
+      "manage:events":
+        "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-events.ts",
+      "migrate:events-d1":
+        "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/migrate-events-d1.ts",
       "manage:profile-canonical":
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-profile-canonical.ts",
       "prepare:firebase":
@@ -610,6 +622,35 @@ test("operations documentation cross-links package and deployment guides", () =>
     /"historicalMatch":\{"inviteId":"<existing-historical-invite-id>","matchId":"<existing-historical-match-id>"\}/,
   );
   assert.match(apiRelease, /Both are release gates for preview and production/);
+  assert.ok(
+    apiRelease.indexOf("d1 migrations apply mons-link-profile-games --remote") <
+      apiRelease.indexOf("npm run upload:api"),
+  );
+  assert.match(apiRelease, /migration `0005`/);
+  assert.match(apiRelease, /Wait at least 15 minutes/);
+  const pauseProfileGameProjection = apiRelease.indexOf(
+    "queues pause-delivery mons-link-profile-game-projection",
+  );
+  const inspectEventProjectionLocks = apiRelease.indexOf(
+    'database:get "/profileGameProjectionLocks/event"',
+  );
+  const applyProfileGameFence = apiRelease.indexOf(
+    "d1 migrations apply mons-link-profile-games --remote",
+  );
+  const uploadApi = apiRelease.indexOf("npm run upload:api");
+  const promoteApi = apiRelease.indexOf("npm run promote:api");
+  const resumeProfileGameProjection = apiRelease.indexOf(
+    "queues resume-delivery mons-link-profile-game-projection",
+  );
+  assert.ok(pauseProfileGameProjection < inspectEventProjectionLocks);
+  assert.ok(inspectEventProjectionLocks < applyProfileGameFence);
+  assert.ok(applyProfileGameFence < uploadApi);
+  assert.ok(uploadApi < promoteApi);
+  assert.ok(promoteApi < resumeProfileGameProjection);
+  assert.ok(
+    apiRelease.indexOf("d1 migrations apply mons-link-events --remote") <
+      apiRelease.indexOf("npm run upload:api"),
+  );
   assert.doesNotMatch(apiRelease, /--sampling-rate\s+1(?:\s|$)/);
   assert.doesNotMatch(apiRelease, /cleanupPageMatchCursor/);
   assert.doesNotMatch(apiRelease, /COUNT\(\*\).*login_count/);
@@ -618,6 +659,126 @@ test("operations documentation cross-links package and deployment guides", () =>
     /Rollback immediately to the previous tested D1-compatible Worker/,
   );
   assert.match(apiRelease, /Additive migrations remain in place/);
+
+  const frontendRelease = deploymentGuide.slice(
+    deploymentGuide.indexOf("## Frontend release"),
+    deploymentGuide.indexOf("## Firebase rule release"),
+  );
+  assert.match(
+    frontendRelease,
+    /Before event D1 activation, record a tested frontend Version ID that uses Worker polling/,
+  );
+  assert.match(
+    frontendRelease,
+    /a frontend that reads the retired Firebase event paths is not a rollback target/,
+  );
+
+  const eventOperations = deploymentGuide.slice(
+    deploymentGuide.indexOf("## Event D1 migration and operations"),
+    deploymentGuide.indexOf("## Event-prize withdrawal D1 operations"),
+  );
+  assert.match(eventOperations, /"selectionPrizeId":"<selected-prize-id>"/);
+  assert.match(eventOperations, /"assignedPrizeId":"<assigned-prize-id>"/);
+  assert.match(eventOperations, /--require-history --require-events/);
+  assert.match(eventOperations, /COUNT\(\*\) AS pending_withdrawals/);
+  assert.match(
+    eventOperations,
+    /workflows instances terminate mons-link-event-prize-withdrawal/,
+  );
+  assert.match(
+    eventOperations,
+    /workflows instances terminate mons-link-event-progress/,
+  );
+  assert.match(
+    eventOperations,
+    /database:get "\/eventProgressOutbox\/<outbox-id>"/,
+  );
+  assert.equal(
+    (
+      eventOperations.match(
+        /workflows instances list mons-link-event-progress/g,
+      ) || []
+    ).length,
+    2,
+  );
+  assert.match(eventOperations, /no `processing` or `submitted` withdrawals/);
+  assert.match(
+    eventOperations,
+    /rejects visible prize assignments that match completed withdrawals/,
+  );
+  assert.match(eventOperations, /invalidates every earlier import proof/);
+  assert.match(eventOperations, /every outstanding write admission/);
+  assert.match(
+    eventOperations,
+    /manage:events -- --recover-stale-admission <admission-id>/,
+  );
+  assert.match(eventOperations, /Never bulk-delete admissions/);
+  assert.doesNotMatch(eventOperations, /--dead-letter-transition/);
+  assert.match(
+    eventOperations,
+    /fix the implementation or unavailable dependency forward/,
+  );
+  assert.match(
+    eventOperations,
+    /do not detach, delete, or dead-letter the intent/,
+  );
+  assert.match(
+    eventOperations,
+    /Successful transition receipts are immutable coordination evidence/,
+  );
+  assert.match(eventOperations, /there is no scheduled receipt deletion/);
+  assert.doesNotMatch(eventOperations, /time-travel.*mons-link-events/i);
+  assert.match(
+    eventOperations,
+    /Do not restore `EVENT_DB` alone with D1 Time Travel/,
+  );
+  assert.match(eventOperations, /fix forward while they remain frozen/);
+  for (const releaseStep of [
+    "npm run upload:api",
+    "npm run promote:api -- --version-id <version-id>",
+    "npm run deploy -- preview",
+    "npm run deploy -- production --version-id <version-id>",
+  ]) {
+    assert.equal(eventOperations.includes(releaseStep), true, releaseStep);
+  }
+  assert.ok(
+    eventOperations.indexOf("Before final freeze") <
+      eventOperations.indexOf("npm run manage:events -- --freeze"),
+  );
+  assert.ok(
+    eventOperations.indexOf(
+      "npm run manage:event-prize-withdrawals -- --freeze",
+    ) < eventOperations.indexOf("npm run manage:events -- --freeze"),
+  );
+  assert.ok(
+    eventOperations.indexOf(
+      "workflows instances terminate mons-link-event-prize-withdrawal",
+    ) < eventOperations.indexOf("npm run manage:events -- --freeze"),
+  );
+  assert.ok(
+    eventOperations.indexOf(
+      "workflows instances terminate mons-link-event-progress",
+    ) < eventOperations.indexOf("npm run manage:events -- --activate-d1"),
+  );
+  const inspectProgressOutbox = eventOperations.indexOf(
+    'database:get "/eventProgressOutbox/<outbox-id>"',
+  );
+  const terminateOldProgress = eventOperations.indexOf(
+    "workflows instances terminate mons-link-event-progress",
+  );
+  const relistProgress = eventOperations.lastIndexOf(
+    "workflows instances list mons-link-event-progress",
+  );
+  const finalEventImport = eventOperations.indexOf(
+    "npm run migrate:events-d1 -- --final",
+  );
+  assert.ok(inspectProgressOutbox < terminateOldProgress);
+  assert.ok(terminateOldProgress < relistProgress);
+  assert.ok(relistProgress < finalEventImport);
+  assert.match(
+    eventOperations,
+    /only after confirming the API Worker and frontend release prerequisites above remain deployed/,
+  );
 
   const profileMaintenance = deploymentGuide.slice(
     deploymentGuide.indexOf("## Canonical profile D1 maintenance"),
@@ -710,6 +871,21 @@ test("browser customization and prize selection mutations use Worker routes", ()
     connection,
     /runTransaction\([\s\S]{0,200}eventPrizeSelections/,
   );
+});
+
+test("browser event subscriptions use Worker polling without Firebase event paths", () => {
+  const connection = readText("src/connection/connection.ts");
+  const gameplayApi = readText("src/services/gameplayApi.ts");
+
+  for (const retiredPath of [
+    "eventPrizeSelections/",
+    "profileEventPrizes/",
+    "`events/${",
+  ]) {
+    assert.equal(connection.includes(retiredPath), false, retiredPath);
+  }
+  assert.match(gameplayApi, /\/events\/snapshot/);
+  assert.match(gameplayApi, /\/events\/prizes/);
 });
 
 test("provider verification and auth mutations use Worker routes", () => {

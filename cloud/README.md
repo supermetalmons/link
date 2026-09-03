@@ -2,7 +2,7 @@
 
 Run commands from the repository root. See the repository [architecture and command map](../README.md) for package boundaries and the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md) for API release and maintenance procedures.
 
-Firebase Auth and Realtime Database remain active. The API Worker owns manual invite, join, match creation, and rematch mutations; auth; profile and leaderboard reads; profile customization; username mutation; mining; gameplay; event-prize selection, withdrawal, and canonical projection; profile-link catch-up; rating-, invite-, automatch-, and event-driven profile-game projection; event control and progress Workflows; X callback; event Telegram projection; and Worker-backed Telegram delivery.
+Firebase Auth remains active. Realtime Database retains active invites and match synchronization. The API Worker owns manual invite, join, match creation, and rematch mutations; auth; profile and leaderboard reads; profile customization; username mutation; mining; gameplay; D1-backed events and prizes; profile-link catch-up; profile-game projection; event control and progress Workflows; X callback; event Telegram projection; and Worker-backed Telegram delivery.
 
 `mons-link-profiles` D1 permanently contains the canonical profile, ownership, auth, recovery, rating, wager, and transaction-guard tables. `PROFILE_DB.profile_login_owners` is the sole source for Worker login UID to canonical profile ownership, including merge-target resolution. There is no alternate profile store or fallback; an unreadable or corrupt ownership topology fails closed with `503 profile-ownership-unavailable`.
 
@@ -13,6 +13,8 @@ Ownership-dependent operations use one D1 snapshot for each authorization decisi
 The browser resolves login-linked profile presentation only through the authenticated profile API. Invite role and write ownership come from the authenticated gameplay API using canonical D1 ownership; browser code must not read or subscribe to `players/{uid}/profile`.
 
 Historical rematch snapshots are read through the public Worker endpoint and stored immutably in `mons-link-profile-games` D1. Rated snapshots take precedence over transition and legacy-backfill snapshots. D1 is the sole public-history source; there is no RTDB read-through or backfill path. Active match synchronization remains in RTDB.
+
+Event records, participants, prize selections, visible prize assignments, progress markers, and event-specific projection state live exclusively in `mons-link-events` D1 after activation. Browser event subscriptions poll authenticated Worker snapshots; RTDB has no event mirror.
 
 Event-prize withdrawal ownership, leases, persisted Solana submissions, and completion records live exclusively in `mons-link-event-prize-withdrawals` D1. RTDB has no withdrawal shadow.
 
@@ -38,7 +40,7 @@ npm ci --prefix cloud/functions
 npm ci --prefix cloud/admin
 ```
 
-The Realtime Database emulator requires Java 21 or newer.
+The Realtime Database emulator requires Java 21 or newer. Its rules cover active gameplay; canonical event-data paths are retired.
 
 ## Firebase rule releases
 
@@ -54,7 +56,21 @@ Deploy Realtime Database rules:
 npm run deploy:firebase -- --project mons-link
 ```
 
-The Firebase configuration contains only Realtime Database rules. Review the dry-run first; the release helper cannot create Firestore, Hosting, or Cloud Functions resources.
+The Firebase configuration contains only active-gameplay Realtime Database rules. Review the dry-run first; the release helper cannot create Firestore, Hosting, Cloud Functions, or event resources.
+
+## Event storage maintenance
+
+`mons-link-events` uses explicit `firebase`, `frozen`, and `d1` storage modes for migration, followed by `d1` and `frozen` only after activation:
+
+```sh
+npm run manage:events -- --status
+npm run manage:events -- --freeze
+npm run manage:events -- --return-to-firebase
+npm run manage:events -- --activate-d1
+npm run manage:events -- --resume-d1
+```
+
+The import tool supports `--preview`, `--stage`, and `--final`. Final import requires event, canonical-profile, and withdrawal storage to be frozen with no active event or projection leases. It preserves all event statuses, prize selections, visible assigned prizes, scheduled progress, and event projection recovery markers. Event status reports D1 lease rows as `d1ActiveLeases`; before cutover, the final migration separately checks RTDB event and projection leases. If status reports an expired write admission after its request has finished, recover only that named row with `npm run manage:events -- --recover-stale-admission <admission-id>`. Pending cross-store transitions remain fenced and retry automatically; fix their underlying code or dependency failure forward instead of detaching or dead-lettering them. Successful transition receipts are immutable coordination evidence retained in `eventTransitionReceipts`. See the deployment guide for the ordered cutover and explicit post-smoke Firebase deletion.
 
 ## Auth maintenance and recovery
 
