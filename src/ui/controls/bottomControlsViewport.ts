@@ -54,12 +54,16 @@ export const observeBottomControlsViewport = (
   viewport.addEventListener("scroll", scheduleUpdate);
   window.addEventListener("resize", scheduleUpdate);
   window.addEventListener("pageshow", scheduleUpdate);
+  window.addEventListener("focus", scheduleUpdate);
+  document.addEventListener("visibilitychange", scheduleUpdate);
 
   return () => {
     viewport.removeEventListener("resize", scheduleUpdate);
     viewport.removeEventListener("scroll", scheduleUpdate);
     window.removeEventListener("resize", scheduleUpdate);
     window.removeEventListener("pageshow", scheduleUpdate);
+    window.removeEventListener("focus", scheduleUpdate);
+    document.removeEventListener("visibilitychange", scheduleUpdate);
     if (frame !== null) {
       window.cancelAnimationFrame(frame);
     }

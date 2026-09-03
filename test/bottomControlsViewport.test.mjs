@@ -40,6 +40,10 @@ function harness(
   } = {},
 ) {
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const previousDocument = Object.getOwnPropertyDescriptor(
+    globalThis,
+    "document",
+  );
   const properties = new Map();
   const writes = [];
   const frames = new Map();
@@ -61,6 +65,7 @@ function harness(
       };
     },
   };
+  const document = eventTarget();
   const container = {
     style: {
       setProperty(name, value) {
@@ -93,6 +98,10 @@ function harness(
     configurable: true,
     value: window,
   });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: document,
+  });
   let cleanup = observeBottomControlsViewport(container, controls);
   const dispose = () => {
     cleanup?.();
@@ -105,11 +114,17 @@ function harness(
     } else {
       delete globalThis.window;
     }
+    if (previousDocument) {
+      Object.defineProperty(globalThis, "document", previousDocument);
+    } else {
+      delete globalThis.document;
+    }
   });
   return {
     controls,
     layout,
     viewport,
+    document,
     window,
     writes,
     frames,
@@ -143,6 +158,17 @@ test("a browser that already anchors controls above its toolbar needs no correct
   const h = harness(t, { fixedBottomEdge: 780, viewportHeight: 780 });
   assert.equal(h.controls.getBoundingClientRect().bottom, 770);
   assert.deepEqual(h.writes, []);
+});
+
+test("focus remeasures a resumed embedded browser viewport", (t) => {
+  const h = harness(t);
+  h.viewport.height = 780;
+  h.window.dispatch("focus");
+  h.flushFrame();
+
+  assert.equal(h.controls.getBoundingClientRect().bottom, 770);
+  assert.equal(h.properties.get(offsetProperty), "120px");
+  assert.equal(h.properties.get(viewportHeightProperty), "780px");
 });
 
 test("covered controls move above the toolbar with their original safe-area spacing", (t) => {
@@ -260,6 +286,8 @@ test("viewport and window event bursts share one animation frame", (t) => {
   h.viewport.dispatch("resize");
   h.viewport.dispatch("scroll");
   h.window.dispatch("resize");
+  h.window.dispatch("focus");
+  h.document.dispatch("visibilitychange");
   h.window.dispatch("pageshow");
   assert.equal(h.frames.size, 1);
   assert.equal(h.measurements(), 1);
@@ -273,8 +301,9 @@ test("viewport and window event bursts share one animation frame", (t) => {
 
 test("cleanup removes listeners, cancels pending work, and restores original placement", (t) => {
   const h = harness(t, { viewportHeight: 780 });
-  assert.equal(h.window.listenerCount(), 2);
+  assert.equal(h.window.listenerCount(), 3);
   assert.equal(h.viewport.listenerCount(), 2);
+  assert.equal(h.document.listenerCount(), 1);
   h.viewport.height = 700;
   h.viewport.dispatch("resize");
   assert.equal(h.frames.size, 1);
@@ -283,6 +312,7 @@ test("cleanup removes listeners, cancels pending work, and restores original pla
   h.dispose();
   assert.equal(h.window.listenerCount(), 0);
   assert.equal(h.viewport.listenerCount(), 0);
+  assert.equal(h.document.listenerCount(), 0);
   assert.equal(h.frames.size, 0);
   assert.equal(h.canceledFrames.length, 1);
   assert.equal(h.properties.has(offsetProperty), false);
