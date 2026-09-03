@@ -879,7 +879,6 @@ export const InventoryModal = React.forwardRef<
         setAreEventPrizesLoading(false);
       },
       () => {
-        setEventPrizes([]);
         setAreEventPrizesLoading(false);
       },
     );

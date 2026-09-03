@@ -31,11 +31,13 @@ const {
   ensureMatchViaApi,
   joinEventViaApi,
   joinInviteViaApi,
+  readEventSnapshotViaApi,
   removeEventParticipantViaApi,
   removeNavigationGameViaApi,
   readNavigationGamesViaApi,
   readHistoricalMatchPairViaApi,
   readInviteRoleViaApi,
+  readProfileEventPrizesViaApi,
   resolveWagerOutcomeViaApi,
   sendWagerProposalViaApi,
   startAutomatchViaApi,
@@ -48,6 +50,8 @@ const {
 } = await import("../src/services/gameplayApi.ts");
 const { createUserBoundAuthTokenProvider } =
   await import("../src/services/authApi.ts");
+const { createPollingAuthTokenProvider } =
+  await import("../src/connection/pollingAuthTokenProvider.ts");
 const {
   MAX_GAME_SESSION_RESPONSE_BYTES,
   MAX_GAME_SESSION_STATUS_BYTES,
@@ -92,11 +96,13 @@ const {
 } = await import("@mons/shared/wagers");
 const {
   MAX_EVENT_PARTICIPANT_TEXT_BYTES,
+  MAX_EVENT_READ_RESPONSE_BYTES,
   isCreateEventRequest,
   isCreateEventResponse,
   isDisqualifyEventMatchWinnersRequest,
   isDisqualifyEventMatchWinnersResponse,
   isEventParticipantSnapshot,
+  isEventSnapshotResponse,
   isJoinEventRequest,
   isJoinEventResponse,
   isRemoveEventParticipantRequest,
@@ -108,6 +114,9 @@ const {
 } = await import("@mons/shared/events");
 const {
   LEGACY_CORE_PRIZES_EVENT_ID,
+  isEventPrizeAssignmentRecord,
+  isEventPrizeAssignmentWireRecord,
+  isProfileEventPrizesResponse,
   isToggleEventPrizeSelectionRequest,
   isToggleEventPrizeSelectionResponse,
 } = await import("@mons/shared/event-prizes");
@@ -287,6 +296,405 @@ test("sends exact authenticated event-control mutations", async () => {
       reason: "locked",
     }),
     true,
+  );
+});
+
+test("reads conditional event snapshots and profile prizes with transport metadata", async () => {
+  const calls = [];
+  const event = {
+    eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+    status: "scheduled",
+  };
+  const snapshot = {
+    ok: true,
+    eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+    revision: 3,
+    event,
+    prizeSelections: { "profile-1": "1092" },
+  };
+  const profilePrizes = {
+    ok: true,
+    profileId: "profile-1",
+    revision: 0,
+    prizes: {},
+  };
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input: String(input), init });
+    if (calls.length === 1) {
+      return new Response(JSON.stringify(snapshot), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          ETag: 'W/"event-3"',
+          "X-D1-Bookmark": "bookmark-3",
+        },
+      });
+    }
+    return new Response(JSON.stringify(profilePrizes), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        ETag: 'W/"prizes-4"',
+        "X-D1-Bookmark": "bookmark-4",
+      },
+    });
+  };
+  const tokenProvider = Object.assign(async () => "firebase-token", {
+    assertCurrentUser: () => undefined,
+  });
+
+  assert.deepEqual(
+    await readEventSnapshotViaApi(
+      ` ${LEGACY_CORE_PRIZES_EVENT_ID} `,
+      tokenProvider,
+      {
+        etag: 'W/"event-2"',
+        bookmark: "bookmark-2",
+      },
+    ),
+    {
+      kind: "modified",
+      value: snapshot,
+      etag: 'W/"event-3"',
+      bookmark: "bookmark-3",
+    },
+  );
+  assert.deepEqual(
+    await readProfileEventPrizesViaApi(" profile-1 ", tokenProvider),
+    {
+      kind: "modified",
+      value: profilePrizes,
+      etag: 'W/"prizes-4"',
+      bookmark: "bookmark-4",
+    },
+  );
+  assert.equal(
+    calls[0].input,
+    `https://api.mons.link/events/snapshot?eventId=${LEGACY_CORE_PRIZES_EVENT_ID}`,
+  );
+  assert.equal(calls[1].input, "https://api.mons.link/events/prizes");
+  const headers = new Headers(calls[0].init.headers);
+  assert.equal(headers.get("Authorization"), "Bearer firebase-token");
+  assert.equal(headers.get("If-None-Match"), 'W/"event-2"');
+  assert.equal(headers.get("X-D1-Bookmark"), "bookmark-2");
+  assert.equal(calls[0].init.method, "GET");
+  assert.equal(calls[0].init.cache, "no-store");
+});
+
+test("rejects conditional responses for a different resource", async () => {
+  const headers = {
+    ETag: 'W/"event-1"',
+    "X-D1-Bookmark": "bookmark-1",
+  };
+  const responses = [
+    {
+      ok: true,
+      eventId: "event-2",
+      revision: 0,
+      event: null,
+      prizeSelections: {},
+    },
+    {
+      ok: true,
+      profileId: "profile-2",
+      revision: 0,
+      prizes: {},
+    },
+  ];
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify(responses.shift()), { status: 200, headers });
+
+  await assert.rejects(
+    readEventSnapshotViaApi("event-1", async () => "token"),
+    (error) =>
+      error instanceof GameplayApiError && error.code === "unavailable",
+  );
+  await assert.rejects(
+    readProfileEventPrizesViaApi("profile-1", async () => "token"),
+    (error) =>
+      error instanceof GameplayApiError && error.code === "unavailable",
+  );
+});
+
+test("rejects an unsolicited not-modified response without a cached validator", async () => {
+  let requestHeaders;
+  globalThis.fetch = async (_input, init) => {
+    requestHeaders = new Headers(init?.headers);
+    return new Response(null, {
+      status: 304,
+      headers: {
+        ETag: 'W/"event-1"',
+        "X-D1-Bookmark": "bookmark-1",
+      },
+    });
+  };
+
+  await assert.rejects(
+    readEventSnapshotViaApi("event-1", async () => "token"),
+    (error) =>
+      error instanceof GameplayApiError && error.code === "unavailable",
+  );
+  assert.equal(requestHeaders.has("If-None-Match"), false);
+});
+
+test("refreshes authentication once for conditional reads and fences the caller", async () => {
+  const forceRefreshValues = [];
+  const snapshot = {
+    ok: true,
+    eventId: "event-1",
+    revision: 0,
+    event: null,
+    prizeSelections: {},
+  };
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: "unauthenticated",
+          message: "authentication-required",
+        },
+        401,
+      );
+    }
+    return new Response(JSON.stringify(snapshot), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        ETag: 'W/"event-1"',
+        "X-D1-Bookmark": "bookmark-1",
+      },
+    });
+  };
+  let current = true;
+  const tokenProvider = Object.assign(
+    async (forceRefresh) => {
+      forceRefreshValues.push(forceRefresh);
+      return "token";
+    },
+    {
+      assertCurrentUser: () => {
+        if (!current) throw new Error("authentication-changed");
+      },
+    },
+  );
+  assert.equal(
+    (await readEventSnapshotViaApi("event-1", tokenProvider)).kind,
+    "modified",
+  );
+  assert.deepEqual(forceRefreshValues, [false, true]);
+
+  current = false;
+  await assert.rejects(
+    readEventSnapshotViaApi("event-1", tokenProvider),
+    (error) =>
+      error instanceof GameplayApiError && error.code === "unavailable",
+  );
+});
+
+test("aborts a conditional read without AbortSignal.any", async (t) => {
+  const abortSignalAny = Object.getOwnPropertyDescriptor(AbortSignal, "any");
+  Object.defineProperty(AbortSignal, "any", {
+    configurable: true,
+    value: undefined,
+  });
+  t.after(() => {
+    if (abortSignalAny) {
+      Object.defineProperty(AbortSignal, "any", abortSignalAny);
+    } else {
+      delete AbortSignal.any;
+    }
+  });
+  const controller = new AbortController();
+  let fetchCalls = 0;
+  let resolveAuthentication;
+  let boundProviderCalls = 0;
+  const authentication = new Promise((resolve) => {
+    resolveAuthentication = resolve;
+  });
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error("unexpected-fetch");
+  };
+  const tokenProvider = createPollingAuthTokenProvider({
+    ensureAuthenticated: () => authentication,
+    getUserBoundProvider: () => {
+      boundProviderCalls += 1;
+      return Object.assign(async () => "token", {
+        assertCurrentUser: () => undefined,
+      });
+    },
+    isSessionCurrent: () => true,
+    signal: controller.signal,
+  });
+  const request = readEventSnapshotViaApi("event-1", tokenProvider, {
+    signal: controller.signal,
+  });
+
+  controller.abort();
+
+  await assert.rejects(
+    request,
+    (error) =>
+      error instanceof GameplayApiError &&
+      error.code === "aborted" &&
+      error.message === "request-aborted",
+  );
+  resolveAuthentication();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(boundProviderCalls, 0);
+  assert.equal(fetchCalls, 0);
+});
+
+test("applies the conditional-read deadline to token acquisition", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    throw new Error("unexpected-fetch");
+  };
+  const request = readProfileEventPrizesViaApi(
+    "profile-1",
+    () => new Promise(() => undefined),
+  );
+  const rejection = assert.rejects(
+    request,
+    (error) =>
+      error instanceof GameplayApiError &&
+      error.code === "unavailable" &&
+      error.message === "Gameplay request timed out.",
+  );
+
+  t.mock.timers.runAll();
+
+  await rejection;
+  assert.equal(fetchCalls, 0);
+});
+
+test("applies the conditional-read deadline to response reading", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let requestSignal;
+  let bodyStarted;
+  const started = new Promise((resolve) => {
+    bodyStarted = resolve;
+  });
+  globalThis.fetch = async (_input, init) => {
+    requestSignal = init.signal;
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"ok":'));
+          bodyStarted();
+        },
+      }),
+      {
+        headers: {
+          ETag: 'W/"event-1"',
+          "X-D1-Bookmark": "bookmark-1",
+        },
+      },
+    );
+  };
+  const request = readEventSnapshotViaApi("event-1", async () => "token");
+  await started;
+  const rejection = assert.rejects(
+    request,
+    (error) =>
+      error instanceof GameplayApiError &&
+      error.code === "unavailable" &&
+      error.message === "Gameplay request timed out.",
+  );
+  assert.equal(requestSignal.aborted, false);
+
+  t.mock.timers.runAll();
+
+  await rejection;
+  assert.equal(requestSignal.aborted, true);
+});
+
+test("bounds conditional event responses and validates exact read contracts", async () => {
+  const assignment = {
+    eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+    profileId: "profile-1",
+    place: 1,
+    prizeId: "1092",
+    assignedAtMs: 10,
+  };
+  assert.equal(isEventPrizeAssignmentRecord(assignment), true);
+  const futureAssignment = {
+    ...assignment,
+    eventId: "future-event",
+    prizeId: "future-prize",
+  };
+  assert.equal(isEventPrizeAssignmentWireRecord(futureAssignment), true);
+  assert.equal(
+    isProfileEventPrizesResponse({
+      ok: true,
+      profileId: "profile-1",
+      revision: 2,
+      prizes: {
+        [LEGACY_CORE_PRIZES_EVENT_ID]: assignment,
+        "future-event": futureAssignment,
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    isProfileEventPrizesResponse({
+      ok: true,
+      profileId: null,
+      revision: 1,
+      prizes: {},
+    }),
+    false,
+  );
+  assert.equal(
+    isEventSnapshotResponse({
+      ok: true,
+      eventId: "missing-event",
+      revision: 0,
+      event: null,
+      prizeSelections: {},
+    }),
+    true,
+  );
+  assert.equal(
+    isEventSnapshotResponse({
+      ok: true,
+      eventId: "missing-event",
+      revision: 0,
+      event: null,
+      prizeSelections: {},
+      extra: true,
+    }),
+    false,
+  );
+  assert.equal(
+    isEventSnapshotResponse({
+      ok: true,
+      eventId: "future-event",
+      revision: 1,
+      event: { eventId: "future-event", status: "scheduled" },
+      prizeSelections: { "profile-1": "future-prize" },
+    }),
+    true,
+  );
+
+  globalThis.fetch = async () =>
+    new Response("{}", {
+      status: 200,
+      headers: {
+        "Content-Length": String(MAX_EVENT_READ_RESPONSE_BYTES + 1),
+        ETag: 'W/"event-1"',
+        "X-D1-Bookmark": "bookmark-1",
+      },
+    });
+  await assert.rejects(
+    readEventSnapshotViaApi("event-1", async () => "token"),
+    (error) =>
+      error instanceof GameplayApiError && error.code === "unavailable",
   );
 });
 

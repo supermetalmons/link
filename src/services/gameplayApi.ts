@@ -63,13 +63,19 @@ import {
   type RatingUpdateResponse,
 } from "@mons/shared/ratings";
 import {
+  isProfileEventPrizesResponse,
   isToggleEventPrizeSelectionResponse,
+  type ProfileEventPrizesResponse,
   type ToggleEventPrizeSelectionRequest,
   type ToggleEventPrizeSelectionResponse,
 } from "@mons/shared/event-prizes";
 import {
+  EVENT_BOOKMARK_HEADER,
+  EVENT_ETAG_HEADER,
+  MAX_EVENT_READ_RESPONSE_BYTES,
   isCreateEventResponse,
   isDisqualifyEventMatchWinnersResponse,
+  isEventSnapshotResponse,
   isJoinEventResponse,
   isPostponeEventStartResponse,
   isRemoveEventParticipantResponse,
@@ -78,6 +84,7 @@ import {
   type CreateEventResponse,
   type DisqualifyEventMatchWinnersRequest,
   type DisqualifyEventMatchWinnersResponse,
+  type EventSnapshotResponse,
   type JoinEventRequest,
   type JoinEventResponse,
   type PostponeEventStartRequest,
@@ -101,6 +108,25 @@ type RatingRetryOptions = {
   sleep?: (milliseconds: number) => Promise<void>;
 };
 
+export type ConditionalRead<T> =
+  | {
+      kind: "modified";
+      value: T;
+      etag: string;
+      bookmark: string;
+    }
+  | {
+      kind: "not-modified";
+      etag: string;
+      bookmark: string;
+    };
+
+export type ConditionalReadOptions = {
+  etag?: string | null;
+  bookmark?: string | null;
+  signal?: AbortSignal;
+};
+
 export class GameplayApiError extends Error {
   readonly code: string;
   readonly details?: unknown;
@@ -121,12 +147,12 @@ function cancelBody(response: Response): void {
   void response.body?.cancel().catch(() => undefined);
 }
 
-async function readBoundedJson(response: Response): Promise<unknown> {
+async function readBoundedJson(
+  response: Response,
+  maxBytes = GAMEPLAY_API_MAX_RESPONSE_BYTES,
+): Promise<unknown> {
   const contentLength = Number(response.headers.get("Content-Length"));
-  if (
-    Number.isFinite(contentLength) &&
-    contentLength > GAMEPLAY_API_MAX_RESPONSE_BYTES
-  ) {
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
     cancelBody(response);
     throw new GameplayApiError(
       "unavailable",
@@ -150,7 +176,7 @@ async function readBoundedJson(response: Response): Promise<unknown> {
         break;
       }
       bytesRead += value.byteLength;
-      if (bytesRead > GAMEPLAY_API_MAX_RESPONSE_BYTES) {
+      if (bytesRead > maxBytes) {
         throw new Error("oversized-response");
       }
       chunks.push(decoder.decode(value, { stream: true }));
@@ -163,6 +189,151 @@ async function readBoundedJson(response: Response): Promise<unknown> {
       "unavailable",
       "Gameplay service is unavailable.",
     );
+  }
+}
+
+function conditionalHeader(response: Response, name: string): string | null {
+  const value = response.headers.get(name)?.trim() || "";
+  return value && value.length <= 4_096 ? value : null;
+}
+
+async function conditionalGameplayRead<T>(
+  url: URL,
+  tokenProvider: AuthTokenProvider,
+  validate: (value: unknown) => value is T,
+  options: ConditionalReadOptions,
+): Promise<ConditionalRead<T>> {
+  if (options.signal?.aborted) {
+    throw new GameplayApiError("aborted", "request-aborted");
+  }
+  const controller = new AbortController();
+  let cancellationKind: "caller" | "timeout" | null = null;
+  let rejectCancellation: ((error: GameplayApiError) => void) | null = null;
+  const cancellation = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject;
+  });
+  const cancel = (kind: "caller" | "timeout") => {
+    if (cancellationKind) return;
+    cancellationKind = kind;
+    controller.abort();
+    rejectCancellation?.(
+      kind === "caller"
+        ? new GameplayApiError("aborted", "request-aborted")
+        : new GameplayApiError("unavailable", "Gameplay request timed out."),
+    );
+  };
+  const timeoutId = setTimeout(
+    () => cancel("timeout"),
+    GAMEPLAY_API_TIMEOUT_MS,
+  );
+  const handleCallerAbort = () => cancel("caller");
+  options.signal?.addEventListener("abort", handleCallerAbort, { once: true });
+  const run = async (): Promise<ConditionalRead<T>> => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const token = await tokenProvider(attempt === 1);
+        if (controller.signal.aborted) {
+          throw cancellationKind === "caller"
+            ? new GameplayApiError("aborted", "request-aborted")
+            : new GameplayApiError(
+                "unavailable",
+                "Gameplay request timed out.",
+              );
+        }
+        tokenProvider.assertCurrentUser?.();
+        const headers = new Headers({
+          Accept: "application/json",
+          Authorization: `Bearer ${token}`,
+        });
+        const etag = options.etag?.trim();
+        const bookmark = options.bookmark?.trim();
+        if (etag) headers.set("If-None-Match", etag);
+        if (bookmark) headers.set(EVENT_BOOKMARK_HEADER, bookmark);
+        const response = await fetch(url, {
+          method: "GET",
+          headers,
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (response.status === 401 && attempt === 0) {
+          cancelBody(response);
+          continue;
+        }
+        if (response.status === 304) {
+          const responseEtag = conditionalHeader(response, EVENT_ETAG_HEADER);
+          const responseBookmark = conditionalHeader(
+            response,
+            EVENT_BOOKMARK_HEADER,
+          );
+          if (!etag || !responseEtag || !responseBookmark) {
+            throw new GameplayApiError(
+              "unavailable",
+              "Gameplay service is unavailable.",
+            );
+          }
+          tokenProvider.assertCurrentUser?.();
+          return {
+            kind: "not-modified",
+            etag: responseEtag,
+            bookmark: responseBookmark,
+          };
+        }
+        const payload = await readBoundedJson(
+          response,
+          MAX_EVENT_READ_RESPONSE_BYTES,
+        );
+        if (!response.ok) throw responseError(payload, response.status);
+        const responseEtag = conditionalHeader(response, EVENT_ETAG_HEADER);
+        const responseBookmark = conditionalHeader(
+          response,
+          EVENT_BOOKMARK_HEADER,
+        );
+        if (!responseEtag || !responseBookmark) {
+          throw new GameplayApiError(
+            "unavailable",
+            "Gameplay service is unavailable.",
+          );
+        }
+        if (!validate(payload)) {
+          throw new GameplayApiError(
+            "unavailable",
+            "Gameplay service is unavailable.",
+          );
+        }
+        tokenProvider.assertCurrentUser?.();
+        return {
+          kind: "modified",
+          value: payload,
+          etag: responseEtag,
+          bookmark: responseBookmark,
+        };
+      } catch (error) {
+        if (cancellationKind === "caller") {
+          throw new GameplayApiError("aborted", "request-aborted");
+        }
+        if (cancellationKind === "timeout") {
+          throw new GameplayApiError(
+            "unavailable",
+            "Gameplay request timed out.",
+          );
+        }
+        if (error instanceof GameplayApiError) throw error;
+        if (error instanceof AuthApiError) {
+          throw new GameplayApiError(error.code, error.message, error.details);
+        }
+        throw new GameplayApiError(
+          "unavailable",
+          "Gameplay service is unavailable.",
+        );
+      }
+    }
+    throw new GameplayApiError("unauthenticated", "authentication-required");
+  };
+  try {
+    return await Promise.race([run(), cancellation]);
+  } finally {
+    clearTimeout(timeoutId);
+    options.signal?.removeEventListener("abort", handleCallerAbort);
   }
 }
 
@@ -296,6 +467,39 @@ export async function readHistoricalMatchPairViaApi(
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+export function readEventSnapshotViaApi(
+  eventId: string,
+  tokenProvider: AuthTokenProvider,
+  options: ConditionalReadOptions = {},
+): Promise<ConditionalRead<EventSnapshotResponse>> {
+  const normalizedEventId = eventId.trim();
+  const url = new URL(`${GAMEPLAY_API_ROOT}/events/snapshot`);
+  url.searchParams.set("eventId", normalizedEventId);
+  return conditionalGameplayRead(
+    url,
+    tokenProvider,
+    (value): value is EventSnapshotResponse =>
+      isEventSnapshotResponse(value) && value.eventId === normalizedEventId,
+    options,
+  );
+}
+
+export function readProfileEventPrizesViaApi(
+  profileId: string,
+  tokenProvider: AuthTokenProvider,
+  options: ConditionalReadOptions = {},
+): Promise<ConditionalRead<ProfileEventPrizesResponse>> {
+  const normalizedProfileId = profileId.trim();
+  return conditionalGameplayRead(
+    new URL(`${GAMEPLAY_API_ROOT}/events/prizes`),
+    tokenProvider,
+    (value): value is ProfileEventPrizesResponse =>
+      isProfileEventPrizesResponse(value) &&
+      value.profileId === normalizedProfileId,
+    options,
+  );
 }
 
 async function retryGameSessionMutation<T>(

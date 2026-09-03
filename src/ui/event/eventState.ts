@@ -24,7 +24,6 @@ export type EventAutoRecoveryReason =
 
 export const PENDING_JOIN_POLL_INTERVAL_MS = 350;
 export const PENDING_JOIN_POLL_TIMEOUT_MS = 60_000;
-export const EVENT_SUBSCRIBE_RETRY_DELAYS_MS = [600, 1600, 3200] as const;
 export const DEFAULT_NOW_REFRESH_MS = 30_000;
 export const POST_START_NOW_REFRESH_MS = 5_000;
 export const MAX_NOW_REFRESH_MS = 60_000;

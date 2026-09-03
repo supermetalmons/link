@@ -22,7 +22,6 @@ const {
   EVENT_AUTO_RECOVERY_DELAY_MS,
   EVENT_AUTO_RECOVERY_MAX_ATTEMPTS_PER_REASON,
   EVENT_AUTO_RECOVERY_MIN_GAP_MS,
-  EVENT_SUBSCRIBE_RETRY_DELAYS_MS,
   getDisplayedMatchSides,
   getEventAutoRecoveryReason,
   getEventNowRefreshDelayMs,
@@ -213,7 +212,6 @@ test("preserves event recovery reasons and retry timing", () => {
     ),
     "ended-missing-prize-assignments",
   );
-  assert.deepEqual(EVENT_SUBSCRIBE_RETRY_DELAYS_MS, [600, 1600, 3200]);
   assert.equal(EVENT_AUTO_RECOVERY_DELAY_MS, 1_000);
   assert.equal(EVENT_AUTO_RECOVERY_MIN_GAP_MS, 6_000);
   assert.equal(EVENT_AUTO_RECOVERY_MAX_ATTEMPTS_PER_REASON, 2);

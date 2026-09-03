@@ -15,8 +15,11 @@ registerHooks({
   },
 });
 
-const { mapDatabaseEventRecord, mapEventPrizeAssignment } =
-  await import("../src/connection/eventMappers.ts");
+const {
+  mapDatabaseEventRecord,
+  mapEventPrizeAssignment,
+  normalizeEventPrizeId,
+} = await import("../src/connection/eventMappers.ts");
 const { mapProfileGameProjection } = await import("@mons/shared/navigation");
 const {
   normalizeFiniteNumber,
@@ -143,6 +146,7 @@ test("maps nested event records and validates configured prizes", () => {
   assert.equal(event?.rounds["1"].matches.m1.matchKey, "m1");
   assert.equal(event?.prizeAssignments?.["1"]?.prizeId, "1092");
   assert.equal(event?.prizeAssignments?.["2"], undefined);
+  assert.equal(normalizeEventPrizeId("future-prize", "future-event"), null);
   assert.equal(
     mapEventPrizeAssignment(
       {

@@ -30,6 +30,11 @@ import {
 import type { WorkerExecutionContext } from "./firebaseAuth.ts";
 import { EVENT_PATHS, handleEventRoute } from "./eventRoute.ts";
 import {
+  EVENT_SNAPSHOT_PATH,
+  PROFILE_EVENT_PRIZES_PATH,
+  handleEventReadRoute,
+} from "./eventReadRoute.ts";
+import {
   EVENT_PRIZE_WITHDRAWAL_PATH,
   EVENT_PRIZE_WITHDRAWAL_STATUS_PATH,
   handleEventPrizeWithdrawalRoute,
@@ -62,6 +67,15 @@ export async function handleRequest(
   ctx?: WorkerExecutionContext,
 ): Promise<Response> {
   const pathname = new URL(request.url).pathname;
+  if (
+    pathname === EVENT_SNAPSHOT_PATH ||
+    pathname === PROFILE_EVENT_PRIZES_PATH
+  ) {
+    if (!ctx) {
+      return jsonResponse({ ok: false, error: "unavailable" }, 503);
+    }
+    return handleEventReadRoute(request, env, ctx);
+  }
   if (pathname === "/auth/x/callback") {
     return handleXCallback(request, env, dependencyOverrides.xCallback);
   }

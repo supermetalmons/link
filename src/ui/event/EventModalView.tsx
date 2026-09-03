@@ -44,7 +44,6 @@ import {
   EVENT_AUTO_RECOVERY_DELAY_MS,
   EVENT_AUTO_RECOVERY_MAX_ATTEMPTS_PER_REASON,
   EVENT_AUTO_RECOVERY_MIN_GAP_MS,
-  EVENT_SUBSCRIBE_RETRY_DELAYS_MS,
   PENDING_JOIN_POLL_INTERVAL_MS,
   PENDING_JOIN_POLL_TIMEOUT_MS,
   type BracketMatchAction,
@@ -617,61 +616,14 @@ const EventModal: React.FC = () => {
     }
 
     setIsLoading(true);
-    let isDisposed = false;
-    let retryAttempt = 0;
-    let retryTimeoutId: number | null = null;
-    let unsubscribe: (() => void) | null = null;
-
-    const clearRetryTimeout = () => {
-      if (retryTimeoutId === null) {
-        return;
-      }
-      window.clearTimeout(retryTimeoutId);
-      retryTimeoutId = null;
-    };
-
-    const attachSubscription = () => {
-      if (isDisposed) {
-        return;
-      }
-      unsubscribe?.();
-      unsubscribe = connection.subscribeToEvent(
-        eventId,
-        (nextEvent) => {
-          setEventRecord(nextEvent);
-          setIsLoading(false);
-          retryAttempt = 0;
-          clearRetryTimeout();
-        },
-        () => {
-          if (isDisposed) {
-            return;
-          }
-          setIsLoading(false);
-          if (
-            retryTimeoutId !== null ||
-            retryAttempt >= EVENT_SUBSCRIBE_RETRY_DELAYS_MS.length
-          ) {
-            return;
-          }
-          const delayMs = EVENT_SUBSCRIBE_RETRY_DELAYS_MS[retryAttempt];
-          retryAttempt += 1;
-          retryTimeoutId = window.setTimeout(() => {
-            retryTimeoutId = null;
-            setIsLoading(true);
-            attachSubscription();
-          }, delayMs);
-        },
-      );
-    };
-
-    attachSubscription();
-
-    return () => {
-      isDisposed = true;
-      clearRetryTimeout();
-      unsubscribe?.();
-    };
+    return connection.subscribeToEvent(
+      eventId,
+      (nextEvent) => {
+        setEventRecord(nextEvent);
+        setIsLoading(false);
+      },
+      () => setIsLoading(false),
+    );
   }, [modalState.eventId, modalState.isOpen]);
 
   useEffect(() => {

@@ -101,6 +101,8 @@ import {
   joinInviteViaApi,
   removeEventParticipantViaApi,
   removeNavigationGameViaApi,
+  readEventSnapshotViaApi,
+  readProfileEventPrizesViaApi,
   readNavigationGamesViaApi,
   readInviteRoleViaApi,
   resolveWagerOutcomeViaApi,
@@ -200,6 +202,8 @@ import {
 import { ObserverRegistry } from "./observerRegistry";
 import { transition } from "../session/sessionTransitionPort";
 import { startNavigationGamesPolling } from "./navigationGamesPoller";
+import { EventPollingRegistry } from "./eventPollingRegistry";
+import { createPollingAuthTokenProvider } from "./pollingAuthTokenProvider";
 
 const getStoredAuthPresentation = (): {
   emoji: number;
@@ -215,12 +219,33 @@ const LEADERBOARD_ENTRY_LIMIT = 99;
 const wagerDebugLogsEnabled = import.meta.env.DEV;
 const EVENT_SYNC_COOLDOWN_ACTIVE_MS = 700;
 const EVENT_SYNC_COOLDOWN_SCHEDULED_MS = 1500;
-const EVENT_SYNC_PARTICIPANT_CACHE_TTL_MS = 3000;
-const EVENT_SYNC_PARTICIPANT_NEGATIVE_CACHE_TTL_MS = 800;
 const EVENT_SYNC_RETRY_DELAYS_MS = [150, 300] as const;
 const PROFILE_LOOKUP_RETRY_DELAY_MS = 1_000;
 const NAVIGATION_GAMES_POLL_INTERVAL_MS = 5_000;
 const NAVIGATION_GAMES_MAX_CONSECUTIVE_FAILURES = 3;
+
+const mapKnownEventPrizeSelections = (
+  eventId: string,
+  selections: Readonly<Record<string, string>>,
+): EventPrizeSelections => {
+  const known: EventPrizeSelections = {};
+  for (const [profileId, value] of Object.entries(selections)) {
+    const prizeId = normalizeEventPrizeId(value, eventId);
+    if (prizeId) known[profileId] = prizeId;
+  }
+  return known;
+};
+
+const mapKnownProfileEventPrizes = (
+  prizes: Readonly<Record<string, unknown>>,
+): ProfileEventPrizes => {
+  const known: ProfileEventPrizes = {};
+  for (const [eventId, value] of Object.entries(prizes)) {
+    const assignment = mapEventPrizeAssignment(value, eventId);
+    if (assignment) known[eventId] = assignment;
+  }
+  return known;
+};
 
 export type EventScheduleTimezone = SharedEventScheduleTimezone;
 export type { EventCreateDateTimePayload } from "@mons/shared/events";
@@ -267,12 +292,6 @@ type EventSyncResponse = {
   event?: EventRecord | null;
 };
 
-type EventSyncParticipantMembershipCacheEntry = {
-  profileId: string;
-  checkedAtMs: number;
-  isParticipant: boolean;
-};
-
 type EventSyncCooldownCacheEntry = {
   responseAtMs: number;
   response: EventSyncResponse;
@@ -311,6 +330,7 @@ class Connection {
   private app: FirebaseApp;
   private auth: Auth;
   private db: Database;
+  private eventPollingRegistry: EventPollingRegistry;
 
   private hostRematchesRef: any = null;
   private guestRematchesRef: any = null;
@@ -361,16 +381,11 @@ class Connection {
     operationId: string;
   } | null = null;
   private inFlightEventSyncById = new Map<string, Promise<EventSyncResponse>>();
-  private eventSyncParticipantCacheById = new Map<
-    string,
-    EventSyncParticipantMembershipCacheEntry
-  >();
   private eventSyncCooldownCacheById = new Map<
     string,
     EventSyncCooldownCacheEntry
   >();
   private latestObservedEventById = new Map<string, EventRecord | null>();
-  private activeEventSubscriptionsById = new Map<string, number>();
   private moveSendRequestId = 0;
   private readonly moveSendRetryWindowMs = 60000;
   private readonly moveSendAttemptMaxTimeoutMs = 20000;
@@ -698,6 +713,31 @@ class Connection {
     this.app = initializeApp(firebaseConfig);
     this.auth = getAuth(this.app);
     this.db = getDatabase(this.app);
+    this.eventPollingRegistry = new EventPollingRegistry({
+      addVisibilityListener: (listener) => {
+        if (typeof document === "undefined") return () => undefined;
+        document.addEventListener("visibilitychange", listener);
+        return () => document.removeEventListener("visibilitychange", listener);
+      },
+      clearTimer: (timer) => clearTimeout(timer),
+      isVisible: () =>
+        typeof document === "undefined" ||
+        document.visibilityState !== "hidden",
+      loadEvent: (eventId, options) =>
+        readEventSnapshotViaApi(
+          eventId,
+          this.createPollingAuthTokenProvider(options.signal),
+          options,
+        ),
+      loadProfilePrizes: (profileId, options) =>
+        readProfileEventPrizesViaApi(
+          profileId,
+          this.createPollingAuthTokenProvider(options.signal),
+          options,
+        ),
+      onEventIdle: (eventId) => this.clearEventSyncCacheForId(eventId),
+      setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+    });
   }
 
   private cloneWagerState(
@@ -1307,6 +1347,20 @@ class Connection {
     return createUserBoundAuthTokenProvider(user, () => this.auth.currentUser);
   }
 
+  private createPollingAuthTokenProvider(
+    signal?: AbortSignal,
+  ): AuthTokenProvider & {
+    readonly assertCurrentUser: () => void;
+  } {
+    const sessionGuard = this.createSessionGuard();
+    return createPollingAuthTokenProvider({
+      ensureAuthenticated: () => this.ensureAuthenticated(),
+      getUserBoundProvider: () => this.getUserBoundAuthTokenProvider(),
+      isSessionCurrent: sessionGuard,
+      signal,
+    });
+  }
+
   public isCurrentAuthUser(uid: string): boolean {
     return this.auth.currentUser?.uid === uid;
   }
@@ -1476,6 +1530,7 @@ class Connection {
     const unsubscribe = onAuthStateChanged(this.auth, (user) => {
       const newUid = user?.uid ?? null;
       if (newUid !== this.currentUid) {
+        this.clearEventSyncCaches();
         this.currentUid = newUid;
         callback(newUid);
       }
@@ -2250,6 +2305,7 @@ class Connection {
     try {
       await this.ensureAuthenticated();
       const data = await joinEventViaApi({ eventId }, this.getAuthApiToken);
+      this.eventPollingRegistry.invalidateEvent(data.eventId);
       this.notifyNavigationGamesChanged();
       return {
         ok: data.ok,
@@ -2287,6 +2343,7 @@ class Connection {
         },
         this.getAuthApiToken,
       );
+      this.eventPollingRegistry.invalidateEvent(data.eventId);
       this.notifyNavigationGamesChanged();
       return {
         ok: data.ok,
@@ -2315,6 +2372,7 @@ class Connection {
         { eventId, participantProfileId },
         this.getAuthApiToken,
       );
+      this.eventPollingRegistry.invalidateEvent(data.eventId);
       this.notifyNavigationGamesChanged();
       return {
         ok: data.ok,
@@ -2343,6 +2401,7 @@ class Connection {
         { eventId, matchKey },
         this.getAuthApiToken,
       );
+      this.eventPollingRegistry.invalidateEvent(data.eventId);
       this.notifyNavigationGamesChanged();
       return {
         ok: data.ok,
@@ -2365,6 +2424,8 @@ class Connection {
     if (!normalizedEventId) {
       return { ok: false, skipped: true, event: null };
     }
+    const subscriptionToken =
+      this.eventPollingRegistry.getEventSubscriptionToken(normalizedEventId);
 
     const nowMs = Date.now();
     const cachedSyncResponse = this.readCachedEventSyncResponse(
@@ -2386,12 +2447,17 @@ class Connection {
         const isParticipant =
           await this.isLocalProfileEventParticipant(normalizedEventId);
         if (!isParticipant) {
-          return this.commitEventSyncResponse(normalizedEventId, {
-            ok: true,
-            skipped: true,
-            reason: "not-participant",
-            event: this.latestObservedEventById.get(normalizedEventId) ?? null,
-          });
+          return this.commitEventSyncResponse(
+            normalizedEventId,
+            {
+              ok: true,
+              skipped: true,
+              reason: "not-participant",
+              event:
+                this.latestObservedEventById.get(normalizedEventId) ?? null,
+            },
+            subscriptionToken,
+          );
         }
 
         const maxRetries = EVENT_SYNC_RETRY_DELAYS_MS.length;
@@ -2420,25 +2486,39 @@ class Connection {
             !this.shouldRetryEventSync(parsed.reason) ||
             attempt >= maxAttempts - 1
           ) {
-            return this.commitEventSyncResponse(normalizedEventId, parsed);
+            const response = this.commitEventSyncResponse(
+              normalizedEventId,
+              parsed,
+              subscriptionToken,
+            );
+            this.eventPollingRegistry.invalidateEvent(normalizedEventId);
+            return response;
           }
           await this.delay(EVENT_SYNC_RETRY_DELAYS_MS[attempt] || 300);
         }
 
-        return this.commitEventSyncResponse(normalizedEventId, {
-          ok: false,
-          skipped: true,
-          event: null,
-        });
+        return this.commitEventSyncResponse(
+          normalizedEventId,
+          {
+            ok: false,
+            skipped: true,
+            event: null,
+          },
+          subscriptionToken,
+        );
       } catch (error) {
         console.error("Error syncing event state:", error);
         throw error;
-      } finally {
-        this.inFlightEventSyncById.delete(normalizedEventId);
       }
     })();
 
     this.inFlightEventSyncById.set(normalizedEventId, syncPromise);
+    const releaseSync = () => {
+      if (this.inFlightEventSyncById.get(normalizedEventId) === syncPromise) {
+        this.inFlightEventSyncById.delete(normalizedEventId);
+      }
+    };
+    void syncPromise.then(releaseSync, releaseSync);
     return syncPromise;
   }
 
@@ -2529,7 +2609,16 @@ class Connection {
   private commitEventSyncResponse(
     eventId: string,
     response: EventSyncResponse,
+    subscriptionToken: object | null,
   ): EventSyncResponse {
+    if (
+      !this.eventPollingRegistry.isEventSubscriptionTokenCurrent(
+        eventId,
+        subscriptionToken,
+      )
+    ) {
+      return response;
+    }
     this.eventSyncCooldownCacheById.set(eventId, {
       responseAtMs: Date.now(),
       response,
@@ -2547,88 +2636,25 @@ class Connection {
     if (!profileId) {
       return true;
     }
-
-    const nowMs = Date.now();
     const observedEvent = this.latestObservedEventById.get(eventId) ?? null;
-    if (this.isLocalCreatorInEventRecord(observedEvent, profileId)) {
-      this.eventSyncParticipantCacheById.set(eventId, {
-        profileId,
-        checkedAtMs: nowMs,
-        isParticipant: true,
-      });
-      return true;
-    }
-
-    const cachedMembership = this.eventSyncParticipantCacheById.get(eventId);
-    const cacheTtlMs =
-      cachedMembership && cachedMembership.isParticipant
-        ? EVENT_SYNC_PARTICIPANT_CACHE_TTL_MS
-        : EVENT_SYNC_PARTICIPANT_NEGATIVE_CACHE_TTL_MS;
-    if (
-      cachedMembership &&
-      cachedMembership.profileId === profileId &&
-      nowMs - cachedMembership.checkedAtMs <= cacheTtlMs
-    ) {
-      return cachedMembership.isParticipant;
-    }
-
-    if (this.isParticipantInEventRecord(observedEvent, profileId)) {
-      this.eventSyncParticipantCacheById.set(eventId, {
-        profileId,
-        checkedAtMs: nowMs,
-        isParticipant: true,
-      });
-      return true;
-    }
-
-    try {
-      const participantSnapshot = await get(
-        ref(this.db, `events/${eventId}/participants/${profileId}`),
-      );
-      const isParticipant = participantSnapshot.exists();
-      const observedEvent = this.latestObservedEventById.get(eventId) ?? null;
-      if (!isParticipant && !observedEvent) {
-        return true;
-      }
-      this.eventSyncParticipantCacheById.set(eventId, {
-        profileId,
-        checkedAtMs: nowMs,
-        isParticipant,
-      });
-      return isParticipant;
-    } catch {
-      return true;
-    }
+    return (
+      !observedEvent ||
+      this.isLocalCreatorInEventRecord(observedEvent, profileId) ||
+      this.isParticipantInEventRecord(observedEvent, profileId)
+    );
   }
 
   private clearEventSyncCaches(): void {
     this.inFlightEventSyncById.clear();
-    this.eventSyncParticipantCacheById.clear();
     this.eventSyncCooldownCacheById.clear();
     this.latestObservedEventById.clear();
-    this.activeEventSubscriptionsById.clear();
+    this.eventPollingRegistry.reset();
   }
 
   private clearEventSyncCacheForId(eventId: string): void {
     this.inFlightEventSyncById.delete(eventId);
-    this.eventSyncParticipantCacheById.delete(eventId);
     this.eventSyncCooldownCacheById.delete(eventId);
     this.latestObservedEventById.delete(eventId);
-  }
-
-  private retainEventSubscription(eventId: string): void {
-    const nextCount = (this.activeEventSubscriptionsById.get(eventId) || 0) + 1;
-    this.activeEventSubscriptionsById.set(eventId, nextCount);
-  }
-
-  private releaseEventSubscription(eventId: string): void {
-    const currentCount = this.activeEventSubscriptionsById.get(eventId) || 0;
-    if (currentCount <= 1) {
-      this.activeEventSubscriptionsById.delete(eventId);
-      this.clearEventSyncCacheForId(eventId);
-      return;
-    }
-    this.activeEventSubscriptionsById.set(eventId, currentCount - 1);
   }
 
   public subscribeToEventPrizeSelections(
@@ -2641,64 +2667,12 @@ class Connection {
       onUpdate({});
       return () => {};
     }
-    const selectionsRef = ref(
-      this.db,
-      `eventPrizeSelections/${normalizedEventId}`,
+    return this.eventPollingRegistry.subscribeToEventPrizeSelections(
+      normalizedEventId,
+      (selections) =>
+        onUpdate(mapKnownEventPrizeSelections(normalizedEventId, selections)),
+      onError,
     );
-    let disposed = false;
-    let unsubscribe: (() => void) | null = null;
-    const sessionGuard = this.createSessionGuard();
-
-    void this.ensureAuthenticated()
-      .then(() => {
-        if (disposed || !sessionGuard()) {
-          return;
-        }
-        unsubscribe = onValue(
-          selectionsRef,
-          (snapshot) => {
-            if (disposed || !sessionGuard()) {
-              return;
-            }
-            const rawSelections = snapshot.val();
-            if (!rawSelections || typeof rawSelections !== "object") {
-              onUpdate({});
-              return;
-            }
-            const selections: EventPrizeSelections = {};
-            Object.entries(rawSelections as Record<string, unknown>).forEach(
-              ([profileId, prizeId]) => {
-                const normalizedProfileId = profileId.trim();
-                const normalizedPrizeId = this.normalizeEventPrizeId(
-                  prizeId,
-                  normalizedEventId,
-                );
-                if (normalizedProfileId && normalizedPrizeId) {
-                  selections[normalizedProfileId] = normalizedPrizeId;
-                }
-              },
-            );
-            onUpdate(selections);
-          },
-          (error) => {
-            if (disposed || !sessionGuard()) {
-              return;
-            }
-            onError?.(error);
-          },
-        );
-      })
-      .catch((error) => {
-        if (disposed || !sessionGuard()) {
-          return;
-        }
-        onError?.(error);
-      });
-
-    return () => {
-      disposed = true;
-      unsubscribe?.();
-    };
   }
 
   public subscribeToProfileEventPrizes(
@@ -2712,65 +2686,11 @@ class Connection {
       onUpdate({});
       return () => {};
     }
-    const prizesRef = ref(this.db, `profileEventPrizes/${normalizedProfileId}`);
-    let disposed = false;
-    let unsubscribe: (() => void) | null = null;
-    const sessionGuard = this.createSessionGuard();
-
-    void this.ensureAuthenticated()
-      .then(() => {
-        if (disposed || !sessionGuard()) {
-          return;
-        }
-        unsubscribe = onValue(
-          prizesRef,
-          (snapshot) => {
-            if (disposed || !sessionGuard()) {
-              return;
-            }
-            const rawPrizes = snapshot.val();
-            if (!rawPrizes || typeof rawPrizes !== "object") {
-              onUpdate({});
-              return;
-            }
-            const prizes: ProfileEventPrizes = {};
-            Object.entries(rawPrizes as Record<string, unknown>).forEach(
-              ([eventId, rawPrize]) => {
-                const normalizedEventId = eventId.trim();
-                const prize = this.mapEventPrizeAssignment(
-                  rawPrize,
-                  normalizedEventId,
-                );
-                if (
-                  normalizedEventId &&
-                  prize?.eventId === normalizedEventId &&
-                  prize.profileId === normalizedProfileId
-                ) {
-                  prizes[normalizedEventId] = prize;
-                }
-              },
-            );
-            onUpdate(prizes);
-          },
-          (error) => {
-            if (disposed || !sessionGuard()) {
-              return;
-            }
-            onError?.(error);
-          },
-        );
-      })
-      .catch((error) => {
-        if (disposed || !sessionGuard()) {
-          return;
-        }
-        onError?.(error);
-      });
-
-    return () => {
-      disposed = true;
-      unsubscribe?.();
-    };
+    return this.eventPollingRegistry.subscribeToProfileEventPrizes(
+      normalizedProfileId,
+      (response) => onUpdate(mapKnownProfileEventPrizes(response.prizes)),
+      onError,
+    );
   }
 
   public async toggleEventPrizeSelection(
@@ -2795,6 +2715,7 @@ class Connection {
         request,
         tokenProvider,
       );
+      this.eventPollingRegistry.invalidateEvent(response.eventId);
       return response.selectedPrizeId;
     } catch (error) {
       console.error("Error toggling event prize selection:", error);
@@ -2809,12 +2730,14 @@ class Connection {
   ): Promise<EventPrizeWithdrawalResponse> {
     try {
       await this.ensureAuthenticated();
-      return await withdrawEventPrizeViaApi(
+      const response = await withdrawEventPrizeViaApi(
         eventId,
         prizeId,
         solanaAddress,
         this.getUserBoundAuthTokenProvider(),
       );
+      this.eventPollingRegistry.invalidateProfileEventPrizes();
+      return response;
     } catch (error) {
       console.error("Error withdrawing event prize:", error);
       throw error;
@@ -2831,55 +2754,18 @@ class Connection {
       onUpdate(null);
       return () => {};
     }
-    const eventRef = ref(this.db, `events/${normalizedEventId}`);
-    let disposed = false;
-    let unsubscribe: (() => void) | null = null;
-    const sessionGuard = this.createSessionGuard();
-    this.retainEventSubscription(normalizedEventId);
-
-    void this.ensureAuthenticated()
-      .then(() => {
-        if (disposed || !sessionGuard()) {
-          return;
-        }
-        unsubscribe = onValue(
-          eventRef,
-          (snapshot) => {
-            if (disposed || !sessionGuard()) {
-              return;
-            }
-            if (!snapshot.exists()) {
-              this.latestObservedEventById.set(normalizedEventId, null);
-              onUpdate(null);
-              return;
-            }
-            const mappedEvent = this.mapDatabaseEventRecord(
-              snapshot.val(),
-              normalizedEventId,
-            );
-            this.latestObservedEventById.set(normalizedEventId, mappedEvent);
-            onUpdate(mappedEvent);
-          },
-          (error) => {
-            if (disposed || !sessionGuard()) {
-              return;
-            }
-            onError?.(error);
-          },
+    return this.eventPollingRegistry.subscribeToEvent(
+      normalizedEventId,
+      (rawEvent) => {
+        const mappedEvent = this.mapDatabaseEventRecord(
+          rawEvent,
+          normalizedEventId,
         );
-      })
-      .catch((error) => {
-        if (disposed || !sessionGuard()) {
-          return;
-        }
-        onError?.(error);
-      });
-
-    return () => {
-      disposed = true;
-      unsubscribe?.();
-      this.releaseEventSubscription(normalizedEventId);
-    };
+        this.latestObservedEventById.set(normalizedEventId, mappedEvent);
+        onUpdate(mappedEvent);
+      },
+      onError,
+    );
   }
 
   private normalizeStringOrNull(value: unknown): string | null {
@@ -2900,20 +2786,6 @@ class Connection {
 
   private notifyNavigationGamesChanged(): void {
     this.navigationGamesRefreshListeners.forEach((refresh) => refresh());
-  }
-
-  private normalizeEventPrizeId(
-    value: unknown,
-    eventId: string,
-  ): EventPrizeId | null {
-    return normalizeEventPrizeId(value, eventId);
-  }
-
-  private mapEventPrizeAssignment(
-    rawValue: unknown,
-    fallbackEventId: string,
-  ): ReturnType<typeof mapEventPrizeAssignment> {
-    return mapEventPrizeAssignment(rawValue, fallbackEventId);
   }
 
   private mapDatabaseEventRecord(
