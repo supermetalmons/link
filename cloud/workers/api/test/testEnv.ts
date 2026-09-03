@@ -119,6 +119,7 @@ export const TELEGRAM_TEST_ENV = {
   AUTH_STATE_DB: profileGamesDb,
   AUTH_RATE_LIMITER: rateLimit,
   EVENT_PROGRESS_WORKFLOW: workflow,
+  EVENT_DB: profileGamesDb,
   EVENT_PRIZE_ADMIN_PRIVATE_KEY: "test-event-prize-private-key",
   EVENT_PRIZE_WITHDRAWALS_DB: eventPrizeWithdrawalsDb,
   EVENT_PRIZE_WITHDRAWAL_WORKFLOW: workflow,

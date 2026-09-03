@@ -40,6 +40,14 @@ const EVENT_SCHEDULE_TIMEZONE_OPTIONS = Object.freeze([
 ]);
 const EVENT_POSTPONE_OPTIONS_MINUTES = Object.freeze([5, 10, 15]);
 const MAX_EVENT_PARTICIPANT_TEXT_BYTES = 256;
+const EVENT_BOOKMARK_HEADER = "X-D1-Bookmark";
+const EVENT_ETAG_HEADER = "ETag";
+const MAX_EVENT_READ_RESPONSE_BYTES = 640 * 1024;
+
+const isExactSafeFirebaseKey = (value) =>
+  typeof value === "string" &&
+  value.trim() === value &&
+  isSafeFirebaseKey(value);
 
 function buildEventMatchKey(roundIndex, matchIndex) {
   return `${roundIndex}_${matchIndex}`;
@@ -276,6 +284,39 @@ function isCreateEventResponse(value) {
   );
 }
 
+function isEventSnapshotResponse(value) {
+  if (
+    !isExactRecord(value, [
+      "ok",
+      "eventId",
+      "revision",
+      "event",
+      "prizeSelections",
+    ]) ||
+    value.ok !== true ||
+    !isExactSafeFirebaseKey(value.eventId) ||
+    !Number.isSafeInteger(value.revision) ||
+    value.revision < 0 ||
+    !value.prizeSelections ||
+    typeof value.prizeSelections !== "object" ||
+    Array.isArray(value.prizeSelections)
+  ) {
+    return false;
+  }
+  const prizeSelections = Object.entries(value.prizeSelections);
+  if (value.event === null) {
+    return value.revision === 0 && prizeSelections.length === 0;
+  }
+  return (
+    value.revision > 0 &&
+    isEventApiRecord(value.event, value.eventId) &&
+    prizeSelections.every(
+      ([profileId, prizeId]) =>
+        isExactSafeFirebaseKey(profileId) && isExactSafeFirebaseKey(prizeId),
+    )
+  );
+}
+
 function isPostponeEventStartResponse(value) {
   return (
     isExactRecord(value, [
@@ -348,10 +389,13 @@ function isDisqualifyEventMatchWinnersResponse(value) {
 
 module.exports = {
   EVENT_POSTPONE_OPTIONS_MINUTES,
+  EVENT_BOOKMARK_HEADER,
+  EVENT_ETAG_HEADER,
   EVENT_SCHEDULE_TIMEZONE_OPTIONS,
   EVENT_SCHEMA_VERSION,
   MAX_EVENT_PARTICIPANTS,
   MAX_EVENT_PARTICIPANT_TEXT_BYTES,
+  MAX_EVENT_READ_RESPONSE_BYTES,
   MAX_STARTS_IN_DAYS,
   MAX_STARTS_IN_MINUTES,
   MIN_STARTS_IN_MINUTES,
@@ -368,6 +412,7 @@ module.exports = {
   isDisqualifyEventMatchWinnersResponse,
   isEventOwnedInvite,
   isEventParticipantSnapshot,
+  isEventSnapshotResponse,
   isJoinEventRequest,
   isJoinEventResponse,
   isMonsLinkAdmin,

@@ -9,6 +9,8 @@ export default defineConfig(async () => ({
       wrangler: { configPath: "./wrangler.jsonc" },
       miniflare: {
         bindings: {
+          TEST_EVENT_RTDB_EMULATOR_HOST:
+            process.env.EVENT_CUTOVER_RTDB_EMULATOR_HOST || "",
           TEST_AUTH_STATE_D1_MIGRATIONS: await readD1Migrations(
             join(import.meta.dirname, "auth-state-migrations"),
           ),
@@ -17,6 +19,9 @@ export default defineConfig(async () => ({
           ),
           TEST_EVENT_PRIZE_WITHDRAWAL_D1_MIGRATIONS: await readD1Migrations(
             join(import.meta.dirname, "event-prize-withdrawal-migrations"),
+          ),
+          TEST_EVENT_D1_MIGRATIONS: await readD1Migrations(
+            join(import.meta.dirname, "event-migrations"),
           ),
           TEST_PROFILE_D1_MIGRATIONS: await readD1Migrations(
             join(import.meta.dirname, "profile-migrations"),
@@ -29,6 +34,7 @@ export default defineConfig(async () => ({
     }),
   ],
   test: {
+    maxWorkers: 4,
     server: {
       deps: {
         inline: [

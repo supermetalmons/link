@@ -12,10 +12,14 @@ const resolveLockRoot = (value) => {
     throw new TypeError("lockRoot must be a non-empty string");
   }
   const normalized = value.trim();
+  const segments = normalized.split("/");
   if (
     normalized.startsWith("/") ||
     normalized.endsWith("/") ||
-    /[.#$\[\]\/\u0000-\u001f\u007f]/.test(normalized)
+    segments.some(
+      (segment) =>
+        segment === "" || /[.#$\[\]\u0000-\u001f\u007f]/.test(segment),
+    )
   ) {
     throw new TypeError("lockRoot must be a valid RTDB path");
   }
@@ -61,6 +65,7 @@ const createEventLockManagerCore = (dependencies) => {
   const setIntervalFn = dependencies.setInterval || setInterval;
   const clearIntervalFn = dependencies.clearInterval || clearInterval;
   const logger = dependencies.logger || console;
+  const includeLegacyOwnerId = dependencies.includeLegacyOwnerId === true;
 
   const acquireEventLock = async (eventId, ownerUid) => {
     const path = `${lockRoot}/${eventId}`;
@@ -79,6 +84,7 @@ const createEventLockManagerCore = (dependencies) => {
         value: {
           lockId,
           ownerUid,
+          ...(includeLegacyOwnerId ? { ownerId: ownerUid } : {}),
           expiresAtMs: nowMs + EVENT_LOCK_TTL_MS,
           acquiredAtMs: nowMs,
           refreshedAtMs: nowMs,

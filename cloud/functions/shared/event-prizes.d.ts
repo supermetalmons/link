@@ -56,6 +56,26 @@ export type ToggleEventPrizeSelectionResponse = {
   selectedPrizeId: EventPrizeId | null;
 };
 
+export type EventPrizeAssignmentWireRecord = {
+  eventId: string;
+  profileId: string;
+  place: 1 | 2 | 3;
+  prizeId: string;
+  assignedAtMs: number;
+} & Record<string, unknown>;
+
+export type EventPrizeAssignmentRecord = EventPrizeAssignmentWireRecord & {
+  eventId: EventPrizeEventId;
+  prizeId: EventPrizeId;
+};
+
+export type ProfileEventPrizesResponse = {
+  ok: true;
+  profileId: string | null;
+  revision: number;
+  prizes: Record<string, EventPrizeAssignmentWireRecord>;
+};
+
 export type EventPrizeWithdrawalRequest = {
   eventId: EventPrizeEventId;
   prizeId: EventPrizeId;
@@ -138,3 +158,12 @@ export function isToggleEventPrizeSelectionRequest(
 export function isToggleEventPrizeSelectionResponse(
   value: unknown,
 ): value is ToggleEventPrizeSelectionResponse;
+export function isEventPrizeAssignmentRecord(
+  value: unknown,
+): value is EventPrizeAssignmentRecord;
+export function isEventPrizeAssignmentWireRecord(
+  value: unknown,
+): value is EventPrizeAssignmentWireRecord;
+export function isProfileEventPrizesResponse(
+  value: unknown,
+): value is ProfileEventPrizesResponse;

@@ -51,6 +51,7 @@ export function createEventLockManagerCore(dependencies: {
     updater: (current: unknown) => EventLockTransactionDecision,
   ) => Promise<EventLockTransactionResult>;
   createLockId(): string;
+  includeLegacyOwnerId?: boolean;
   lockRoot?: string;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;

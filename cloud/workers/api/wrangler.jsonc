@@ -43,6 +43,12 @@
       "database_id": "15a77eea-19da-45a7-8433-9b4a22d371da",
       "migrations_dir": "profile-migrations",
     },
+    {
+      "binding": "EVENT_DB",
+      "database_name": "mons-link-events",
+      "database_id": "1638d8f3-2890-4bf2-9b8a-16bb197e2b3b",
+      "migrations_dir": "event-migrations",
+    },
   ],
   "routes": [
     {

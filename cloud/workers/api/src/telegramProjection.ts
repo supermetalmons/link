@@ -16,10 +16,8 @@ import {
   shouldProjectRatingTelegramUpdate,
   type AutomatchTelegramProjection,
 } from "../../../functions/telegram/projectionCore.js";
-import {
-  createFirebaseRtdbClient,
-  type FirebaseRtdbClient,
-} from "./firebaseRtdb.ts";
+import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
+import { createEventRtdbClient } from "./eventRepository.ts";
 import {
   createGameplayRepository,
   createRatingRepository,
@@ -344,7 +342,7 @@ export async function handleTelegramProjectionMessage(
   }
   const createRtdb =
     dependencies.createRtdb ||
-    ((workerEnv: Env) => createFirebaseRtdbClient(workerEnv));
+    ((workerEnv: Env) => createEventRtdbClient(workerEnv));
   const createRating =
     dependencies.createRating ||
     ((workerEnv: Env) =>
@@ -420,7 +418,7 @@ export async function handleTelegramProjectionQueue(
   batch: MessageBatch<unknown>,
   env: Env,
 ): Promise<void> {
-  const rtdb = createFirebaseRtdbClient(env);
+  const rtdb = createEventRtdbClient(env);
   const rating = createRatingRepository(env, createGameplayRepository(env));
   for (const message of batch.messages) {
     await handleTelegramProjectionMessage(message, env, {
@@ -663,7 +661,7 @@ export async function sweepTelegramProjections(
   const now = dependencies.now || Date.now;
   const createRtdb =
     dependencies.createRtdb ||
-    ((workerEnv: Env) => createFirebaseRtdbClient(workerEnv));
+    ((workerEnv: Env) => createEventRtdbClient(workerEnv));
   const createRating =
     dependencies.createRating ||
     ((workerEnv: Env) =>

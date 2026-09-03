@@ -14,6 +14,15 @@ type ProjectionWrite = {
   updateTime?: string;
 };
 
+type EventProfileGameProjectionFence = {
+  eventId: string;
+  generation: number;
+};
+
+type ProjectionCommitOptions = {
+  eventFence?: EventProfileGameProjectionFence;
+};
+
 type ProjectionRow = {
   entity_type: string;
   list_sort_at_ms: number;
@@ -93,6 +102,16 @@ const ASSERT_DELETE_VERSION_SQL = `
     SELECT 1
     FROM profile_game_projections
     WHERE profile_id = ? AND projection_id = ? AND version = ?
+  )
+`;
+
+const ASSERT_EVENT_PROJECTION_FENCE_SQL = `
+  INSERT INTO profile_game_projection_write_guards (singleton)
+  SELECT 0
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM event_profile_game_projection_fences
+    WHERE event_id = ? AND generation = ?
   )
 `;
 
@@ -264,12 +283,51 @@ function parseProjectionVersion(value: string | undefined): number | null {
   return Number.isSafeInteger(version) ? version : null;
 }
 
+export async function reserveEventProfileGameProjectionFence(
+  db: D1Database,
+  eventId: string,
+): Promise<EventProfileGameProjectionFence> {
+  if (!eventId || eventId.trim() !== eventId || eventId.includes("/")) {
+    throw new TypeError("invalid-event-profile-game-projection-fence");
+  }
+  const row = await db
+    .prepare(
+      `INSERT INTO event_profile_game_projection_fences (event_id, generation)
+       VALUES (?, 1)
+       ON CONFLICT (event_id) DO UPDATE SET generation = generation + 1
+       RETURNING generation`,
+    )
+    .bind(eventId)
+    .first<{ generation: number }>();
+  if (!row || !Number.isSafeInteger(row.generation) || row.generation < 1) {
+    throw new TypeError("invalid-event-profile-game-projection-fence");
+  }
+  return { eventId, generation: row.generation };
+}
+
 export async function commitProfileGameProjectionWrites(
   db: D1Database,
   writes: ProjectionWrite[],
+  options: ProjectionCommitOptions = {},
 ): Promise<void> {
-  if (writes.length === 0) return;
   const statements: D1PreparedStatement[] = [];
+  if (options.eventFence) {
+    const { eventId, generation } = options.eventFence;
+    if (
+      !eventId ||
+      eventId.trim() !== eventId ||
+      eventId.includes("/") ||
+      !Number.isSafeInteger(generation) ||
+      generation < 1 ||
+      writes.some((write) => write.projectionId !== `event_${eventId}`)
+    ) {
+      throw new TypeError("invalid-event-profile-game-projection-fence");
+    }
+    statements.push(
+      db.prepare(ASSERT_EVENT_PROJECTION_FENCE_SQL).bind(eventId, generation),
+    );
+  }
+  if (writes.length === 0 && statements.length === 0) return;
   writes.forEach((write) => {
     const expectedVersion = parseProjectionVersion(write.updateTime);
     if (write.type === "delete") {
@@ -479,4 +537,9 @@ export async function deleteD1NavigationGame(
   return result.meta.changes ? "deleted" : "missing";
 }
 
-export type { ProjectionRow, ProjectionWrite };
+export type {
+  EventProfileGameProjectionFence,
+  ProjectionCommitOptions,
+  ProjectionRow,
+  ProjectionWrite,
+};

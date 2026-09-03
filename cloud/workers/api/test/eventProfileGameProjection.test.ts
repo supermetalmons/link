@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   createEventProfileGameProjectionCore,
   type EventProfileGameProjectionRepository,
+  type EventProjectionSourceFence,
   type EventProjectionWrite,
 } from "../../../functions/eventProfileGameProjectionCore.js";
 
@@ -12,11 +13,13 @@ function createRepository(input: {
   loginProfileIds?: Record<string, string | null>;
 }) {
   const writes: EventProjectionWrite[][] = [];
+  const sourceFences: Array<EventProjectionSourceFence | undefined> = [];
   const events = input.events || [null];
   let eventReadIndex = 0;
   const repository: EventProfileGameProjectionRepository = {
-    async commitProjectionWrites(nextWrites) {
+    async commitProjectionWrites(nextWrites, sourceFence) {
       writes.push(nextWrites);
+      sourceFences.push(sourceFence);
     },
     async getEvent() {
       const index = Math.min(eventReadIndex, events.length - 1);
@@ -42,7 +45,7 @@ function createRepository(input: {
       };
     },
   };
-  return { repository, writes };
+  return { repository, sourceFences, writes };
 }
 
 function runtime(input: Parameters<typeof createRepository>[0]) {
@@ -244,4 +247,25 @@ test("event projection reads one ownership snapshot", async () => {
     },
   });
   assert.equal(ownershipReads, 1);
+});
+
+test("event projection forwards its monotonic source fence to the commit", async () => {
+  const { core, sourceFences } = runtime({
+    canonicalProfileIds: { "profile-1": "profile-1" },
+    loginProfileIds: { "login-1": "profile-1" },
+  });
+  const sourceFence = { eventId: "event-1", generation: 3 };
+
+  await core.projectEvent(
+    "event-1",
+    {
+      participants: {
+        "profile-1": { loginUid: "login-1", profileId: "profile-1" },
+      },
+    },
+    [],
+    { sourceFence },
+  );
+
+  assert.deepEqual(sourceFences, [sourceFence]);
 });

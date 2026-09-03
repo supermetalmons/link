@@ -143,7 +143,27 @@ const createEventProfileGameProjectionCore = ({
     eventId,
     eventData,
     cleanupOwnerProfileIds = [],
+    options = {},
   ) => {
+    const assertCanCommit = options.assertCanCommit;
+    const sourceFence = options.sourceFence;
+    if (
+      assertCanCommit !== undefined &&
+      typeof assertCanCommit !== "function"
+    ) {
+      throw new TypeError("event projection commit guard must be a function");
+    }
+    if (
+      sourceFence !== undefined &&
+      (!sourceFence ||
+        typeof sourceFence !== "object" ||
+        Array.isArray(sourceFence) ||
+        sourceFence.eventId !== eventId ||
+        !Number.isSafeInteger(sourceFence.generation) ||
+        sourceFence.generation < 1)
+    ) {
+      throw new TypeError("event projection source fence is invalid");
+    }
     const participants =
       eventData?.participants && typeof eventData.participants === "object"
         ? eventData.participants
@@ -207,7 +227,10 @@ const createEventProfileGameProjectionCore = ({
         writes.push({ type: "delete", profileId, eventId });
       }
     }
-    await repository.commitProjectionWrites(writes);
+    if (assertCanCommit) {
+      await assertCanCommit();
+    }
+    await repository.commitProjectionWrites(writes, sourceFence);
     return {
       deleted: writes.filter((write) => write.type === "delete").length,
       ownerProfileIds: afterOwnerProfileIds,
@@ -218,6 +241,7 @@ const createEventProfileGameProjectionCore = ({
   const reconcileEventProjection = async (
     eventId,
     cleanupOwnerProfileIds = [],
+    options = {},
   ) => {
     const cleanupIds = new Set(
       cleanupOwnerProfileIds.map(normalizeString).filter(Boolean),
@@ -232,6 +256,7 @@ const createEventProfileGameProjectionCore = ({
       eventId,
       liveData,
       Array.from(cleanupIds),
+      options,
     );
     return {
       ...result,

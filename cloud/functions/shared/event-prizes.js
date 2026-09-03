@@ -1,5 +1,6 @@
 "use strict";
 
+const { isSafeFirebaseKey } = require("./ids");
 const { isValidSolanaAddress } = require("./solana");
 
 const LEGACY_CORE_PRIZES_EVENT_ID = "NN3eRzoZo80";
@@ -273,6 +274,28 @@ const isExactRecord = (value, keys) => {
   );
 };
 
+const isJsonValue = (value, depth = 0) => {
+  if (depth > 64) return false;
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
+    return true;
+  }
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) {
+    return value.every((entry) => isJsonValue(entry, depth + 1));
+  }
+  if (!value || typeof value !== "object") return false;
+  return Object.values(value).every((entry) => isJsonValue(entry, depth + 1));
+};
+
+const isExactSafeFirebaseKey = (value) =>
+  typeof value === "string" &&
+  value.trim() === value &&
+  isSafeFirebaseKey(value);
+
 const isToggleEventPrizeSelectionRequest = (value) =>
   isExactRecord(value, ["eventId", "prizeId"]) &&
   isEventPrizeId(value.eventId, value.prizeId);
@@ -283,6 +306,51 @@ const isToggleEventPrizeSelectionResponse = (value) =>
   isEventPrizeEvent(value.eventId) &&
   (value.selectedPrizeId === null ||
     isEventPrizeId(value.eventId, value.selectedPrizeId));
+
+const isEventPrizeAssignmentWireRecord = (value) =>
+  !!value &&
+  typeof value === "object" &&
+  !Array.isArray(value) &&
+  isJsonValue(value) &&
+  ["eventId", "profileId", "place", "prizeId", "assignedAtMs"].every((key) =>
+    Object.hasOwn(value, key),
+  ) &&
+  isExactSafeFirebaseKey(value.eventId) &&
+  isExactSafeFirebaseKey(value.profileId) &&
+  (value.place === 1 || value.place === 2 || value.place === 3) &&
+  isExactSafeFirebaseKey(value.prizeId) &&
+  Number.isSafeInteger(value.assignedAtMs) &&
+  value.assignedAtMs >= 0;
+
+const isEventPrizeAssignmentRecord = (value) =>
+  isEventPrizeAssignmentWireRecord(value) &&
+  isEventPrizeEvent(value.eventId) &&
+  isEventPrizeId(value.eventId, value.prizeId);
+
+const isProfileEventPrizesResponse = (value) => {
+  if (
+    !isExactRecord(value, ["ok", "profileId", "revision", "prizes"]) ||
+    value.ok !== true ||
+    (value.profileId !== null && !isExactSafeFirebaseKey(value.profileId)) ||
+    !Number.isSafeInteger(value.revision) ||
+    value.revision < 0 ||
+    !value.prizes ||
+    typeof value.prizes !== "object" ||
+    Array.isArray(value.prizes)
+  ) {
+    return false;
+  }
+  const prizes = Object.entries(value.prizes);
+  if (value.profileId === null) {
+    return value.revision === 0 && prizes.length === 0;
+  }
+  return prizes.every(
+    ([eventId, assignment]) =>
+      isEventPrizeAssignmentWireRecord(assignment) &&
+      assignment.eventId === eventId &&
+      assignment.profileId === value.profileId,
+  );
+};
 
 const isEventPrizeWithdrawalOperationId = (value) =>
   typeof value === "string" && /^epw_[0-9a-f]{64}$/.test(value);
@@ -343,6 +411,8 @@ module.exports = {
   getEventPrizeConfig,
   getEventPrizeDefinition,
   getEventPrizeDefinitions,
+  isEventPrizeAssignmentRecord,
+  isEventPrizeAssignmentWireRecord,
   isEventPrizeEvent,
   isEventPrizeId,
   isEventPrizeStandard,
@@ -352,6 +422,7 @@ module.exports = {
   isEventPrizeWithdrawalRequest,
   isEventPrizeWithdrawalResponse,
   isEventPrizeWithdrawalStatusRequest,
+  isProfileEventPrizesResponse,
   isToggleEventPrizeSelectionRequest,
   isToggleEventPrizeSelectionResponse,
 };

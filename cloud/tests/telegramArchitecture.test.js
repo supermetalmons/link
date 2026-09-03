@@ -200,16 +200,26 @@ test("event HTTP and Workflow runtimes install every outbox producer", () => {
       "utf8",
     );
     assert.equal(
-      source.includes("createEventTelegramProjectionRepository"),
-      true,
-      relativePath,
-    );
-    assert.equal(
-      source.includes("createEventProfileGameProjectionRepository"),
+      source.includes("createEventMutationRepository"),
       true,
       relativePath,
     );
   }
+  const composition = fs.readFileSync(
+    path.join(
+      repositoryRoot,
+      "cloud/workers/api/src/eventMutationRepository.ts",
+    ),
+    "utf8",
+  );
+  const telegramProducer = composition.indexOf(
+    "createEventTelegramProjectionRepository(",
+  );
+  const profileProducer = composition.indexOf(
+    "createEventProfileGameProjectionRepository(",
+  );
+  assert.ok(telegramProducer >= 0);
+  assert.ok(profileProducer > telegramProducer);
 });
 
 test("Worker tests exercise the production event projector", () => {

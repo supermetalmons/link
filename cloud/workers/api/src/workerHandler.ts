@@ -43,6 +43,8 @@ import {
   handleHistoricalMatchRoute,
   HISTORICAL_MATCH_PATH,
 } from "./historicalMatchRoute.ts";
+import { createGameplayRepository } from "./gameplayRepository.ts";
+import { recoverEventTransitionIntents } from "./eventRepository.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
 export type { ProviderFetch } from "./provider.ts";
@@ -73,6 +75,7 @@ type ScheduledTasks = {
   authRecovery: () => Promise<unknown>;
   authState: () => Promise<unknown>;
   eventProgress: () => Promise<unknown>;
+  eventTransitions: () => Promise<unknown>;
   gameSessionReceipts: () => Promise<unknown>;
   profileGameProjection: () => Promise<unknown>;
   telegramProjection: () => Promise<unknown>;
@@ -91,6 +94,10 @@ export async function handleScheduled(
     authState: () =>
       sweepExpiredAuthState(env.AUTH_STATE_DB, controller.scheduledTime),
     eventProgress: () => sweepEventProgress(env),
+    eventTransitions: () => {
+      const rawRtdbRepository = createGameplayRepository(env);
+      return recoverEventTransitionIntents(env, rawRtdbRepository);
+    },
     gameSessionReceipts: () =>
       sweepGameSessionMutationReceipts(env, {
         now: () => controller.scheduledTime,
@@ -108,6 +115,7 @@ export async function handleScheduled(
   const results = await Promise.allSettled([
     runProfileTask(tasks.authRecovery),
     runProfileTask(tasks.eventProgress),
+    runProfileTask(tasks.eventTransitions),
     runProfileTask(tasks.profileGameProjection),
     runProfileTask(tasks.telegramProjection),
     tasks.gameSessionReceipts(),

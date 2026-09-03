@@ -14,8 +14,11 @@ const {
   RARE_WEITSMANS_PRIZES_EVENT_ID,
   getEventPrizeConfig,
   getEventPrizeDefinition,
+  isEventPrizeAssignmentRecord,
+  isEventPrizeAssignmentWireRecord,
   isEventPrizeEvent,
   isEventPrizeId,
+  isProfileEventPrizesResponse,
   isEventPrizeStandard,
   isEventPrizeWithdrawalCompletedResponse,
   isEventPrizeWithdrawalProcessingResponse,
@@ -61,6 +64,57 @@ test("withdrawal contracts require exact Worker request and response shapes", ()
       transactionSignature: "signature",
     }),
     true,
+  );
+});
+
+test("profile prize responses preserve valid forward-compatible assignment fields", () => {
+  const assignment = {
+    eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+    profileId: "profile-1",
+    place: 1,
+    prizeId: "1092",
+    assignedAtMs: 100,
+    futureMetadata: { edition: 2, labels: ["winner"] },
+  };
+  assert.equal(isEventPrizeAssignmentRecord(assignment), true);
+  assert.equal(
+    isProfileEventPrizesResponse({
+      ok: true,
+      profileId: "profile-1",
+      revision: 1,
+      prizes: { [LEGACY_CORE_PRIZES_EVENT_ID]: assignment },
+    }),
+    true,
+  );
+  assert.equal(
+    isEventPrizeAssignmentRecord({ ...assignment, prizeId: "unknown" }),
+    false,
+  );
+  const futureAssignment = {
+    ...assignment,
+    eventId: "future-event",
+    prizeId: "future-prize",
+  };
+  assert.equal(isEventPrizeAssignmentWireRecord(futureAssignment), true);
+  assert.equal(
+    isProfileEventPrizesResponse({
+      ok: true,
+      profileId: "profile-1",
+      revision: 2,
+      prizes: { "future-event": futureAssignment },
+    }),
+    true,
+  );
+  assert.equal(
+    isEventPrizeAssignmentWireRecord({
+      ...futureAssignment,
+      prizeId: "bad/prize",
+    }),
+    false,
+  );
+  assert.equal(
+    isEventPrizeAssignmentRecord({ ...assignment, futureMetadata: undefined }),
+    false,
   );
 });
 
@@ -329,15 +383,9 @@ test("maps the Rare Weitsmans event to claimable Core prizes", () => {
   }
 });
 
-test("database rules keep selection reads and close direct writes", () => {
-  const selectionRules =
-    databaseRules.rules.eventPrizeSelections.$eventId.$profileId;
-  assert.equal(selectionRules[".write"], false);
-  assert.equal(selectionRules[".validate"], undefined);
-  assert.match(
-    databaseRules.rules.eventPrizeSelections.$eventId[".read"],
-    /auth != null/,
-  );
+test("database rules retire event prize selection access", () => {
+  assert.equal(databaseRules.rules.eventPrizeSelections, undefined);
+  assert.equal(databaseRules.rules.profileEventPrizes, undefined);
 });
 
 test("retired Firestore rules are absent", () => {

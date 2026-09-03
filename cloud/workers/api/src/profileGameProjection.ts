@@ -4,20 +4,22 @@ import {
   HISTORICAL_MATCH_ARCHIVE_VERSION,
   type HistoricalMatchDescriptor,
 } from "./historicalMatches.ts";
+import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
 import {
   createGameplayRepository,
   createRatingRepository,
   type GameplayRepository,
   type RatingProfileGameProjectionRepository,
 } from "./gameplayRepository.ts";
+import { createEventGameplayRepository } from "./eventRepository.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
   AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT,
+  EVENT_PROFILE_GAME_PROJECTION_LOCK_ROOT,
   EVENT_PROFILE_GAME_PROJECTION_OUTBOX_ROOT,
   PROFILE_LINK_PROFILE_GAME_PROJECTION_OUTBOX_ROOT,
   getAutomatchProfileGameProjectionLockPath,
   getAutomatchProfileGameProjectionOutboxPath,
-  getEventProfileGameProjectionLockPath,
   getEventProfileGameProjectionOutboxPath,
   getProfileLinkProfileGameProjectionLockPath,
   getProfileLinkProfileGameProjectionOutboxPath,
@@ -417,11 +419,16 @@ export async function processEventProfileGameProjection(
   if (!initialOutbox || initialOutbox.requestId !== task.requestId) {
     return "stale";
   }
-  const lock = {
-    path: getEventProfileGameProjectionLockPath(task.eventId),
-    requestId: task.requestId,
-  };
-  await acquireProfileGameProjectionLock(lock, ownerId, rtdb, now());
+  const lockManager = createEventLockManagerCore({
+    lockRoot: EVENT_PROFILE_GAME_PROJECTION_LOCK_ROOT,
+    createLockId: () => crypto.randomUUID(),
+    includeLegacyOwnerId: true,
+    transactPath: rtdb.transactRtdbPath,
+    now,
+  });
+  const lock = await lockManager.acquireEventLock(task.eventId, ownerId);
+  if (!lock) throw new Error("profile-game-projection-lock-busy");
+  const stopHeartbeat = lockManager.startEventLockHeartbeat(lock);
   try {
     const outbox = parseEventProfileGameProjectionOutbox(
       await rtdb.getRtdbPath(
@@ -434,12 +441,20 @@ export async function processEventProfileGameProjection(
     const result = await runtime.reconcileEventProjection(
       task.eventId,
       outbox.cleanupOwnerProfileIds,
+      {
+        assertCanCommit: async () => {
+          if (!(await lockManager.isEventLockStillOwned(lock))) {
+            throw new Error("profile-game-projection-lock-lost");
+          }
+        },
+      },
     );
     return (await settleEventProfileGameProjectionOutbox(task, rtdb))
       ? result.status
       : "superseded";
   } finally {
-    await releaseProfileGameProjectionLock(lock, ownerId, rtdb);
+    stopHeartbeat();
+    await lockManager.releaseEventLock(lock);
   }
 }
 
@@ -1043,7 +1058,7 @@ export async function handleProfileGameProjectionMessage(
     const ownerId = crypto.randomUUID();
     const rtdb = (
       dependencies.createRtdb ||
-      ((workerEnv: Env) => createGameplayRepository(workerEnv))
+      ((workerEnv: Env) => createEventGameplayRepository(workerEnv))
     )(env);
     const runtime = (
       dependencies.createRuntime || createProfileGameProjectionRuntime
@@ -1145,7 +1160,7 @@ export async function handleProfileGameProjectionQueue(
   batch: MessageBatch<unknown>,
   env: Env,
 ): Promise<void> {
-  const rtdb = createGameplayRepository(env);
+  const rtdb = createEventGameplayRepository(env);
   const rating = createRatingRepository(env, rtdb);
   const runtime = createProfileGameProjectionRuntime(env, { rtdb });
   const eventRuntime = createEventProfileGameProjectionRuntime(env, { rtdb });
@@ -1361,7 +1376,7 @@ export async function sweepEventProfileGameProjections(
   const dueBeforeMs = nowMs - PROFILE_GAME_PROJECTION_RECOVERY_DELAY_MS;
   const rtdb = (
     dependencies.createRtdb ||
-    ((workerEnv: Env) => createGameplayRepository(workerEnv))
+    ((workerEnv: Env) => createEventGameplayRepository(workerEnv))
   )(env);
   const [dueValue, malformedValue] = await Promise.all([
     rtdb.getRtdbPath(EVENT_PROFILE_GAME_PROJECTION_OUTBOX_ROOT, {

@@ -5,6 +5,11 @@ export type EventProjectionWrite = {
   data?: Record<string, unknown>;
 };
 
+export type EventProjectionSourceFence = {
+  eventId: string;
+  generation: number;
+};
+
 export type EventProjectionOwnershipSnapshot = Readonly<{
   canonicalProfileIdByProfileId: ReadonlyMap<string, string | null>;
   loginOwnerByUid: ReadonlyMap<
@@ -14,7 +19,10 @@ export type EventProjectionOwnershipSnapshot = Readonly<{
 }>;
 
 export type EventProfileGameProjectionRepository = {
-  commitProjectionWrites(writes: EventProjectionWrite[]): Promise<void>;
+  commitProjectionWrites(
+    writes: EventProjectionWrite[],
+    sourceFence?: EventProjectionSourceFence,
+  ): Promise<void>;
   getEvent(eventId: string): Promise<Record<string, unknown> | null>;
   readProfileOwnershipSnapshot(query: {
     loginUids: string[];
@@ -28,6 +36,11 @@ export type EventProjectionResult = {
   written: number;
 };
 
+export type EventProjectionCommitOptions = {
+  assertCanCommit?(): Promise<void>;
+  sourceFence?: EventProjectionSourceFence;
+};
+
 export function createEventProfileGameProjectionCore(dependencies: {
   now?: () => number;
   repository: EventProfileGameProjectionRepository;
@@ -37,10 +50,12 @@ export function createEventProfileGameProjectionCore(dependencies: {
     eventId: string,
     eventData: Record<string, unknown> | null,
     cleanupOwnerProfileIds?: string[],
+    options?: EventProjectionCommitOptions,
   ): Promise<EventProjectionResult>;
   reconcileEventProjection(
     eventId: string,
     cleanupOwnerProfileIds?: string[],
+    options?: EventProjectionCommitOptions,
   ): Promise<EventProjectionResult & { status: "missing" | "projected" }>;
 };
 

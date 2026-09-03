@@ -46,10 +46,8 @@ import {
   type WorkerExecutionContext,
 } from "./firebaseAuth.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
-import {
-  createGameplayRepository,
-  type GameplayRepository,
-} from "./gameplayRepository.ts";
+import type { GameplayRepository } from "./gameplayRepository.ts";
+import { createEventGameplayRepository } from "./eventRepository.ts";
 import { readBoundedJson } from "./http.ts";
 import {
   createD1EventPrizeWithdrawalStore,
@@ -276,7 +274,7 @@ export async function createEventPrizeRuntimeDependencies(
     allowFrozen = false,
     now = Date.now,
     profileDb = env.PROFILE_DB,
-    repository = createGameplayRepository(env),
+    repository = createEventGameplayRepository(env),
     withdrawalStore: withdrawalStoreOverride,
   }: Pick<
     RouteDependencies,
@@ -943,7 +941,8 @@ export async function executeEventPrizeWithdrawal(
     "now" | "profileDb" | "repository" | "withdrawalStore"
   > = {},
 ): Promise<EventPrizeWithdrawalCompletedResponse> {
-  const repository = dependencies.repository || createGameplayRepository(env);
+  const repository =
+    dependencies.repository || createEventGameplayRepository(env);
   const runtime = await createEventPrizeRuntimeDependencies(env, {
     ...dependencies,
     repository,
@@ -1007,7 +1006,8 @@ export async function handleEventPrizeWithdrawalRoute(
     } catch {
       throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
     }
-    const repository = dependencies.repository || createGameplayRepository(env);
+    const repository =
+      dependencies.repository || createEventGameplayRepository(env);
     const runtime = await createEventPrizeRuntimeDependencies(env, {
       now: dependencies.now,
       profileDb: dependencies.profileDb,

@@ -38,12 +38,9 @@ import {
   verifyFirebaseRequest,
   type WorkerExecutionContext,
 } from "./firebaseAuth.ts";
-import {
-  createGameplayRepository,
-  type GameplayRepository,
-} from "./gameplayRepository.ts";
-import { createEventTelegramProjectionRepository } from "./eventTelegramProjectionProducer.ts";
-import { createEventProfileGameProjectionRepository } from "./eventProfileGameProjectionProducer.ts";
+import type { GameplayRepository } from "./gameplayRepository.ts";
+import { EventWritesDisabled, assertEventWritesAllowed } from "./eventD1.ts";
+import { createEventMutationRepository } from "./eventMutationRepository.ts";
 import { readBoundedJson } from "./http.ts";
 import {
   createEvent,
@@ -67,6 +64,7 @@ export const EVENT_PATHS = new Set([
 ]);
 
 export type EventRouteDependencies = {
+  assertEventWrites?: () => Promise<void>;
   control?: EventControlDependencies;
   participation?: EventParticipationDependencies;
   repository?: GameplayRepository;
@@ -177,18 +175,18 @@ export async function handleEventRoute(
     const identity = await (
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
+    if (dependencies.assertEventWrites) {
+      await dependencies.assertEventWrites();
+    } else if (!dependencies.verifyIdentity) {
+      await assertEventWritesAllowed(env.EVENT_DB);
+    }
     await assertProfileMutationAllowed(env);
     const body = await readEventBody(request, pathname);
     const schedule = (work: Promise<void>) => ctx.waitUntil(work);
-    const repository = createEventProfileGameProjectionRepository(
-      env,
-      createEventTelegramProjectionRepository(
-        env,
-        dependencies.repository || createGameplayRepository(env),
-        { schedule },
-      ),
-      { schedule },
-    );
+    const repository = createEventMutationRepository(env, {
+      eventRepository: dependencies.repository,
+      schedule,
+    });
     const participation = {
       ...dependencies.participation,
       signal,
@@ -256,15 +254,20 @@ export async function handleEventRoute(
         signal,
       });
     }
-    ctx.waitUntil(
-      operation.then(
-        () => undefined,
-        () => undefined,
-      ),
-    );
     const response = await operation;
     return authJsonResponse(response, 200, corsHeaders);
   } catch (error) {
+    if (error instanceof EventWritesDisabled) {
+      return authJsonResponse(
+        {
+          ok: false,
+          error: "unavailable",
+          message: "event-writes-disabled",
+        },
+        503,
+        { ...corsHeaders, "Retry-After": "60" },
+      );
+    }
     const failure =
       error instanceof AuthApiFailure
         ? error

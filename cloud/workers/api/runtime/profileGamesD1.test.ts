@@ -7,6 +7,7 @@ import {
   encodeProfileGameProjection,
   getProfileGameProjection,
   readProfileGamesPage,
+  reserveEventProfileGameProjectionFence,
 } from "../src/profileGamesD1.ts";
 import {
   HistoricalMatchConflict,
@@ -36,6 +37,26 @@ function gameData(
     opponentEmoji: status === "active" ? 7 : null,
     automatchStateHint: null,
     isPendingAutomatch: false,
+  };
+}
+
+function eventData(eventId: string, updatedAt: number) {
+  return {
+    schemaVersion: 1,
+    source: "event-projector",
+    entityType: "event",
+    id: `event_${eventId}`,
+    eventId,
+    status: "waiting",
+    sortBucket: 30,
+    listSortAt: updatedAt,
+    ownerProfileId: "profile-1",
+    startAt: updatedAt,
+    updatedAt,
+    endedAt: null,
+    participantCount: 1,
+    participantPreview: [],
+    winnerDisplayName: "",
   };
 }
 
@@ -69,6 +90,9 @@ describe("profile game projection D1 repository", () => {
   });
 
   beforeEach(async () => {
+    await env.PROFILE_GAMES_DB.prepare(
+      "DELETE FROM event_profile_game_projection_fences",
+    ).run();
     await env.PROFILE_GAMES_DB.prepare(
       "DELETE FROM profile_game_projections",
     ).run();
@@ -380,6 +404,58 @@ describe("profile game projection D1 repository", () => {
         "sibling",
       ),
     ).not.toBeNull();
+  });
+
+  it("does not resurrect a removed event participant from an older projection fence", async () => {
+    const eventId = "event-1";
+    const projectionId = `event_${eventId}`;
+    const initialFence = await reserveEventProfileGameProjectionFence(
+      env.PROFILE_GAMES_DB,
+      eventId,
+    );
+    await commitProfileGameProjectionWrites(
+      env.PROFILE_GAMES_DB,
+      [
+        {
+          type: "merge",
+          profileId: "profile-1",
+          projectionId,
+          data: eventData(eventId, 1_000),
+        },
+      ],
+      { eventFence: initialFence },
+    );
+    const staleFence = await reserveEventProfileGameProjectionFence(
+      env.PROFILE_GAMES_DB,
+      eventId,
+    );
+    const removalFence = await reserveEventProfileGameProjectionFence(
+      env.PROFILE_GAMES_DB,
+      eventId,
+    );
+    await commitProfileGameProjectionWrites(
+      env.PROFILE_GAMES_DB,
+      [{ type: "delete", profileId: "profile-1", projectionId }],
+      { eventFence: removalFence },
+    );
+
+    await expect(
+      commitProfileGameProjectionWrites(
+        env.PROFILE_GAMES_DB,
+        [
+          {
+            type: "merge",
+            profileId: "profile-1",
+            projectionId,
+            data: eventData(eventId, 1_000),
+          },
+        ],
+        { eventFence: staleFence },
+      ),
+    ).rejects.toThrow();
+    await expect(
+      getProfileGameProjection(env.PROFILE_GAMES_DB, "profile-1", projectionId),
+    ).resolves.toBeNull();
   });
 
   it("keeps dual create retries convergent while supporting strict creates", async () => {

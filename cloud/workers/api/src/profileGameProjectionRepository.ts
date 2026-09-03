@@ -1,7 +1,9 @@
 import { type HistoricalMatchPair } from "@mons/shared/game-sessions";
 import {
   createEventProfileGameProjectionCore,
+  type EventProjectionCommitOptions,
   type EventProfileGameProjectionRepository,
+  type EventProjectionSourceFence,
   type EventProjectionWrite,
 } from "../../../functions/eventProfileGameProjectionCore.js";
 import {
@@ -24,6 +26,7 @@ import {
 import {
   commitProfileGameProjectionWrites,
   getProfileGameProjection,
+  reserveEventProfileGameProjectionFence,
   type ProjectionWrite as D1ProjectionWrite,
 } from "./profileGamesD1.ts";
 import {
@@ -53,6 +56,7 @@ export type EventProfileGameProjectionRuntime = {
   reconcileEventProjection(
     eventId: string,
     cleanupOwnerProfileIds?: string[],
+    options?: EventProjectionCommitOptions,
   ): Promise<{
     deleted: number;
     ownerProfileIds: string[];
@@ -222,10 +226,14 @@ export function createEventProfileGameProjectionRuntime(
   const rtdb = dependencies.rtdb || createGameplayRepository(env);
   const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
   const repository: EventProfileGameProjectionRepository = {
-    async commitProjectionWrites(writes) {
+    async commitProjectionWrites(
+      writes,
+      sourceFence?: EventProjectionSourceFence,
+    ) {
       await commitProfileGameProjectionWrites(
         d1,
         writes.map(toD1ProjectionWrite),
+        sourceFence ? { eventFence: sourceFence } : undefined,
       );
     },
 
@@ -239,9 +247,22 @@ export function createEventProfileGameProjectionRuntime(
     readProfileOwnershipSnapshot: (query) =>
       readEventProjectionOwnershipSnapshot(profileDb, query),
   };
-  return createEventProfileGameProjectionCore({
+  const projection = createEventProfileGameProjectionCore({
     now: dependencies.now,
     repository,
     wait: dependencies.wait,
   });
+  return {
+    async reconcileEventProjection(eventId, cleanupOwnerProfileIds, options) {
+      const sourceFence = await reserveEventProfileGameProjectionFence(
+        d1,
+        eventId,
+      );
+      return projection.reconcileEventProjection(
+        eventId,
+        cleanupOwnerProfileIds,
+        { ...options, sourceFence },
+      );
+    },
+  };
 }

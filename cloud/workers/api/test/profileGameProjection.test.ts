@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Color, Game, GameVariant } from "mons-rules";
+import { createEventProfileGameProjectionCore } from "../../../functions/eventProfileGameProjectionCore.js";
+import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
 import type {
   RatingProfileGameProjectionRepository,
   RatingUpdateData,
@@ -1234,6 +1236,91 @@ test("event projection preserves a superseding outbox", async () => {
   assert.deepEqual(
     values.get(outboxPath),
     eventOutbox("event-request-new", 400),
+  );
+});
+
+test("event projection cannot write after its lease is taken over", async () => {
+  const outboxPath = "profileGameProjectionOutbox/event/event-1";
+  const lockPath = "profileGameProjectionLocks/event/event-1";
+  const values = new Map<string, unknown>([
+    [outboxPath, eventOutbox("event-request-1", 200, [])],
+  ]);
+  const rtdb = projectionLockRtdb(values);
+  const writes: unknown[][] = [];
+  let nowMs = 0;
+  let tookOver = false;
+  const core = createEventProfileGameProjectionCore({
+    now: () => nowMs,
+    repository: {
+      async commitProjectionWrites(nextWrites) {
+        writes.push(nextWrites);
+      },
+      async getEvent() {
+        return {
+          eventId: "event-1",
+          status: "scheduled",
+          startAtMs: 100,
+          updatedAtMs: 100,
+          participants: {
+            "removed-profile": {
+              profileId: "removed-profile",
+              loginUid: "removed-login",
+            },
+          },
+        };
+      },
+      async readProfileOwnershipSnapshot({ loginUids, profileIds }) {
+        if (!tookOver) {
+          tookOver = true;
+          nowMs = 31_000;
+          const contender = createEventLockManagerCore({
+            createLockId: () => "successor-lock",
+            includeLegacyOwnerId: true,
+            lockRoot: "profileGameProjectionLocks/event",
+            now: () => nowMs,
+            transactPath: rtdb.transactRtdbPath,
+          });
+          assert.ok(
+            await contender.acquireEventLock("event-1", "successor-owner"),
+          );
+          values.delete(outboxPath);
+        }
+        return {
+          canonicalProfileIdByProfileId: new Map(
+            profileIds.map((profileId) => [
+              profileId,
+              profileId === "removed-profile" ? profileId : null,
+            ]),
+          ),
+          loginOwnerByUid: new Map(
+            loginUids.map((loginUid) => [
+              loginUid,
+              loginUid === "removed-login"
+                ? { profileId: "removed-profile", revision: 1 }
+                : null,
+            ]),
+          ),
+        };
+      },
+    },
+    wait: async () => undefined,
+  });
+
+  await assert.rejects(
+    processEventProfileGameProjection(
+      eventTask(),
+      rtdb,
+      core,
+      "stale-owner",
+      () => nowMs,
+    ),
+    /profile-game-projection-lock-lost/,
+  );
+  assert.deepEqual(writes, []);
+  assert.equal(values.has(outboxPath), false);
+  assert.equal(
+    (values.get(lockPath) as { ownerUid?: string })?.ownerUid,
+    "successor-owner",
   );
 });
 

@@ -5,13 +5,10 @@ import type {
   WorkflowStepConfig,
 } from "cloudflare:workers";
 import {
-  createGameplayRepository,
   createRatingRepository,
   type GameplayRepository,
   type RatingEventProgressRepository,
 } from "./gameplayRepository.ts";
-import { createEventTelegramProjectionRepository } from "./eventTelegramProjectionProducer.ts";
-import { createEventProfileGameProjectionRepository } from "./eventProfileGameProjectionProducer.ts";
 import { createD1EventPrizeWithdrawalReader } from "./eventPrizeWithdrawalD1.ts";
 import {
   createEventRuntime,
@@ -20,6 +17,8 @@ import {
 import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
 import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
 import { requireProfileOwnershipSnapshot } from "./profileOwnership.ts";
+import { createEventGameplayRepository } from "./eventRepository.ts";
+import { createEventMutationRepository } from "./eventMutationRepository.ts";
 
 const EVENT_PROGRESS_OUTBOX_ROOT = "eventProgressOutbox";
 const EVENT_PROGRESS_OUTBOX_DEAD_ROOT = "eventProgressOutboxDead";
@@ -523,7 +522,8 @@ export async function sweepEventProgress(
   env: Env,
   dependencies: EventProgressSweepDependencies = {},
 ): Promise<void> {
-  const repository = dependencies.repository || createGameplayRepository(env);
+  const repository =
+    dependencies.repository || createEventGameplayRepository(env);
   const now = dependencies.now || Date.now;
   const ratingRepository =
     dependencies.ratingRepository === null
@@ -638,11 +638,12 @@ export async function runEventProgressWorkflow(
   return result;
 }
 
-export function createWorkflowEventRuntime(env: Env, signal: AbortSignal) {
-  const repository = createEventProfileGameProjectionRepository(
-    env,
-    createEventTelegramProjectionRepository(env, createGameplayRepository(env)),
-  );
+export function createWorkflowEventRuntime(
+  env: Env,
+  signal: AbortSignal,
+  eventRepository = createEventGameplayRepository(env),
+) {
+  const repository = createEventMutationRepository(env, { eventRepository });
   const lockManager = createEventLockManagerCore({
     createLockId: () => crypto.randomUUID(),
     transactPath: (path, updater) =>

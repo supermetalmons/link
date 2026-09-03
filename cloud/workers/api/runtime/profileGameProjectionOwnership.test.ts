@@ -9,6 +9,7 @@ import {
   readCanonicalProfileAggregate,
 } from "../src/profileCanonicalD1.ts";
 import {
+  createEventProfileGameProjectionRuntime,
   createProfileGameProjectionRuntime,
   readProjectionOwnershipSnapshot,
 } from "../src/profileGameProjectionRepository.ts";
@@ -606,5 +607,41 @@ describe("D1-authoritative profile game projection ownership", () => {
       resolveInviteRole({ uid: alternateUid }, { inviteId }, repository),
     ).resolves.toMatchObject({ actorUid: hostUid, role: "host" });
     expect(reads).toEqual([`invites/${inviteId}`]);
+  });
+
+  it("reserves a monotonic fence before committing an event projection", async () => {
+    const eventId = "d1-fenced-event";
+    const profileId = "d1-fenced-event-profile";
+    const loginUid = "d1-fenced-event-login";
+    await insertProfileOwner(profileId, loginUid);
+    const runtime = createEventProfileGameProjectionRuntime(testEnv, {
+      rtdb: {
+        async getRtdbPath(path) {
+          expect(path).toBe(`events/${eventId}`);
+          return {
+            eventId,
+            status: "scheduled",
+            startAtMs: 100,
+            updatedAtMs: 100,
+            participants: {
+              [profileId]: { profileId, loginUid },
+            },
+          };
+        },
+      },
+      wait: async () => undefined,
+    });
+
+    await expect(
+      runtime.reconcileEventProjection(eventId),
+    ).resolves.toMatchObject({ status: "projected", written: 1 });
+    await expect(
+      testEnv.PROFILE_GAMES_DB.prepare(
+        `SELECT generation FROM event_profile_game_projection_fences
+         WHERE event_id = ?`,
+      )
+        .bind(eventId)
+        .first<number>("generation"),
+    ).resolves.toBe(1);
   });
 });

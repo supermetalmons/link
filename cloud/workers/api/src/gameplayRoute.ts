@@ -50,11 +50,11 @@ import {
 import type { RequestIdentity } from "./requestIdentity.ts";
 import { MAX_FIREBASE_KEY_BYTES, isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
-  createGameplayRepository,
   type GameplayRepository,
   createRatingRepository,
   type RatingRepository,
 } from "./gameplayRepository.ts";
+import { createEventGameplayRepository } from "./eventRepository.ts";
 import { isSafeOperationId } from "./operationIds.ts";
 import { readBoundedJson } from "./http.ts";
 import {
@@ -454,7 +454,8 @@ export async function handleGameplayRoute(
       await enforceWagerOutcomeRateLimit(env.AUTH_RATE_LIMITER, identity.uid);
     }
     const body = await readGameplayBody(request, pathname);
-    const repository = dependencies.repository || createGameplayRepository(env);
+    const repository =
+      dependencies.repository || createEventGameplayRepository(env);
     const defaultEnqueueEventProgress = async (plan: EventProgressPlan) => {
       ctx.waitUntil(
         ensureEventProgressWorkflow(env.EVENT_PROGRESS_WORKFLOW, plan).catch(

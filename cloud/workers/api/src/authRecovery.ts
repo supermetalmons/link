@@ -1,8 +1,9 @@
 import {
   getEventPrizeDefinition,
-  isEventPrizeId,
+  isEventPrizeAssignmentWireRecord,
   isEventPrizeStandard,
 } from "@mons/shared/event-prizes";
+import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
 import { MAX_PROFILE_MERGE_TARGET_HOPS } from "../../../functions/profileMergeTargets.js";
 import {
   type FirebaseAuthAdminClient,
@@ -12,12 +13,12 @@ import {
   type FirebaseRtdbClient,
   createFirebaseRtdbClient,
 } from "./firebaseRtdb.ts";
-import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
-  cleanString,
-  finiteNumber,
-  uniqueStoredFirebaseUids,
-} from "./authPolicy.ts";
+  createEventRtdbClient,
+  type EventRtdbClient,
+} from "./eventRepository.ts";
+import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { cleanString, uniqueStoredFirebaseUids } from "./authPolicy.ts";
 import {
   buildProfileLinkProfileGameProjectionOutbox,
   getProfileLinkProfileGameProjectionOutboxPath,
@@ -50,6 +51,8 @@ export const MERGE_PRIZE_RECOVERY_PAGE_SIZE = 20;
 const RETRY_DELAY_SECONDS = 60;
 const STALE_ENQUEUE_MS = 2 * 60 * 60 * 1_000;
 const CLAIM_PAGE_SIZE = 20;
+const AUTH_RECOVERY_EVENT_PRIZE_OWNER_UID = "auth-recovery-worker";
+const AUTH_RECOVERY_PRIZE_OPERATION_TIMEOUT_MS = 20_000;
 
 export type AuthRecoveryTask = {
   kind: "auth-profile-recovery";
@@ -77,7 +80,11 @@ type AuthRecoveryDependencies = {
   logger?: Pick<Console, "error" | "info">;
   now?: () => number;
   profileDb?: D1Database;
-  rtdb?: FirebaseRtdbClient;
+  prizeOperationTimeoutMs?: number;
+  rtdb?: FirebaseRtdbClient &
+    Partial<
+      Pick<EventRtdbClient, "transactStoredProfileEventPrizeWithEventLease">
+    >;
   signal?: AbortSignal;
   withdrawalDb?: D1Database;
   withdrawalStore?: Pick<EventPrizeWithdrawalStore, "get">;
@@ -259,20 +266,38 @@ function mergeFreshness(fields: Record<string, unknown>): number {
   );
 }
 
-function isEquivalentPrizeAssignment(
-  value: unknown,
-  expected: unknown,
-): boolean {
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    const fields = value as Record<string, unknown>;
+    return `{${Object.keys(fields)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(fields[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "";
+}
+
+function isSamePrizeAssignment(value: unknown, expected: unknown): boolean {
   const current = record(value);
   const assignment = record(expected);
   return (
-    cleanString(current.eventId) === cleanString(assignment.eventId) &&
-    cleanString(current.profileId) === cleanString(assignment.profileId) &&
-    finiteNumber(current.place, 0) === finiteNumber(assignment.place, -1) &&
-    cleanString(current.prizeId) === cleanString(assignment.prizeId) &&
-    finiteNumber(current.assignedAtMs, -1) ===
-      finiteNumber(assignment.assignedAtMs, -2)
+    current.eventId === assignment.eventId &&
+    current.profileId === assignment.profileId &&
+    current.place === assignment.place &&
+    current.prizeId === assignment.prizeId &&
+    current.assignedAtMs === assignment.assignedAtMs
   );
+}
+
+function withTimeoutSignal(
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): AbortSignal {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 }
 
 function buildPrizeCopy(
@@ -281,26 +306,17 @@ function buildPrizeCopy(
   eventId: string,
   value: unknown,
 ): Record<string, unknown> | null {
-  const assignment = record(value);
   const normalizedEventId = cleanString(eventId);
-  const prizeId = cleanString(assignment.prizeId);
-  const place = finiteNumber(assignment.place, 0);
-  const assignedAtMs = finiteNumber(assignment.assignedAtMs, NaN);
   if (
-    cleanString(assignment.eventId) !== normalizedEventId ||
-    cleanString(assignment.profileId) !== sourceProfileId ||
-    ![1, 2, 3].includes(place) ||
-    !isEventPrizeId(normalizedEventId, prizeId) ||
-    !Number.isFinite(assignedAtMs)
+    !isEventPrizeAssignmentWireRecord(value) ||
+    value.eventId !== normalizedEventId ||
+    value.profileId !== sourceProfileId
   ) {
     return null;
   }
   return {
-    eventId: normalizedEventId,
+    ...value,
     profileId: targetProfileId,
-    place,
-    prizeId,
-    assignedAtMs: Math.floor(assignedAtMs),
   };
 }
 
@@ -407,14 +423,25 @@ function createCanonicalAuthRecoveryService(
     createFirebaseAuthAdminClient(env, { signal: dependencies.signal });
   const rtdb =
     dependencies.rtdb ||
-    createFirebaseRtdbClient(env, {
-      credentials: {
-        email: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL,
-        privateKeyPem: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY,
-      },
-    });
+    createEventRtdbClient(
+      env,
+      createFirebaseRtdbClient(env, {
+        credentials: {
+          email: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL,
+          privateKeyPem: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY,
+        },
+      }),
+    );
   const logger = dependencies.logger || console;
   const now = dependencies.now || Date.now;
+  const prizeOperationTimeoutMs =
+    Number.isSafeInteger(dependencies.prizeOperationTimeoutMs) &&
+    Number(dependencies.prizeOperationTimeoutMs) > 0
+      ? Math.min(
+          Number(dependencies.prizeOperationTimeoutMs),
+          AUTH_RECOVERY_PRIZE_OPERATION_TIMEOUT_MS,
+        )
+      : AUTH_RECOVERY_PRIZE_OPERATION_TIMEOUT_MS;
   const profileGamesDb = dependencies.d1 || env.PROFILE_GAMES_DB;
   const withdrawalDb =
     dependencies.withdrawalDb || env.EVENT_PRIZE_WITHDRAWALS_DB;
@@ -434,61 +461,87 @@ function createCanonicalAuthRecoveryService(
     sourceProfileId: string,
     targetProfileId: string,
     eventId: string,
-    sourceAssignment: unknown,
   ): Promise<void> => {
-    const assignment = (dependencies.buildPrizeCopy || buildPrizeCopy)(
-      sourceProfileId,
-      targetProfileId,
-      eventId,
-      sourceAssignment,
-    );
-    if (!assignment) throw new Error("auth-recovery-prize-invalid");
-    const prizeId = cleanString(assignment.prizeId);
-    const targetPath = `profileEventPrizes/${targetProfileId}/${eventId}`;
-    const existingTarget = await rtdb.getPath(
-      targetPath,
-      undefined,
+    const signal = withTimeoutSignal(
       dependencies.signal,
+      prizeOperationTimeoutMs,
     );
-    if (
-      existingTarget !== null &&
-      existingTarget !== undefined &&
-      !isEquivalentPrizeAssignment(existingTarget, assignment)
-    ) {
-      throw new Error("auth-recovery-prize-conflict");
-    }
-    const removeIfCompleted = async (): Promise<boolean> => {
-      if (!prizeId) return false;
-      const withdrawal = await withdrawals.get(eventId, prizeId);
-      if (!isCompletedPrizeWithdrawal(withdrawal, eventId, prizeId)) {
-        return false;
-      }
-      await rtdb.transactPath(
-        targetPath,
-        (current) =>
+    const prizeLockManager = createEventLockManagerCore({
+      createLockId: () => crypto.randomUUID(),
+      now,
+      transactPath: (path, updater) => rtdb.transactPath(path, updater, signal),
+      releaseTransactPath: (path, updater) => rtdb.transactPath(path, updater),
+    });
+    const lock = await prizeLockManager.acquireEventLock(
+      eventId,
+      AUTH_RECOVERY_EVENT_PRIZE_OWNER_UID,
+    );
+    if (!lock) throw new Error("auth-recovery-prize-lock-busy");
+    const stopHeartbeat = prizeLockManager.startEventLockHeartbeat(lock);
+    try {
+      const sourceAssignment = await rtdb.getPath(
+        `profileEventPrizes/${sourceProfileId}/${eventId}`,
+        undefined,
+        signal,
+      );
+      const assignment = (dependencies.buildPrizeCopy || buildPrizeCopy)(
+        sourceProfileId,
+        targetProfileId,
+        eventId,
+        sourceAssignment,
+      );
+      if (!assignment) throw new Error("auth-recovery-prize-invalid");
+      const prizeId = cleanString(assignment.prizeId);
+      const targetPath = `profileEventPrizes/${targetProfileId}/${eventId}`;
+      const lockGuard = prizeLockManager.getEventLockGuard(lock);
+      const transactTarget = (updater: (current: unknown) => unknown) =>
+        rtdb.transactStoredProfileEventPrizeWithEventLease
+          ? rtdb.transactStoredProfileEventPrizeWithEventLease(
+              targetPath,
+              updater,
+              lockGuard,
+              signal,
+            )
+          : rtdb.transactPath(targetPath, updater, signal);
+      const assertPrizeLockOwned = async (): Promise<void> => {
+        if (!(await prizeLockManager.isEventLockStillOwned(lock))) {
+          throw new Error("auth-recovery-prize-lock-lost");
+        }
+      };
+      const removeIfCompleted = async (): Promise<boolean> => {
+        if (!prizeId) return false;
+        const withdrawal = await withdrawals.get(eventId, prizeId);
+        if (!isCompletedPrizeWithdrawal(withdrawal, eventId, prizeId)) {
+          return false;
+        }
+        await assertPrizeLockOwned();
+        await transactTarget((current) =>
           cleanString(record(current).eventId) === eventId &&
           cleanString(record(current).prizeId) === prizeId
             ? { value: null }
             : { commit: false },
-        dependencies.signal,
-      );
-      return true;
-    };
-    if (await removeIfCompleted()) return;
-    await rtdb.transactPath(
-      targetPath,
-      (current) => {
+        );
+        return true;
+      };
+      if (await removeIfCompleted()) return;
+      await assertPrizeLockOwned();
+      await transactTarget((current) => {
         if (current === null || current === undefined) {
           return { value: assignment };
         }
-        if (isEquivalentPrizeAssignment(current, assignment)) {
+        if (canonicalJson(current) === canonicalJson(assignment)) {
           return { commit: false };
         }
+        if (isSamePrizeAssignment(current, assignment)) {
+          return { value: assignment };
+        }
         throw new Error("auth-recovery-prize-conflict");
-      },
-      dependencies.signal,
-    );
-    await removeIfCompleted();
+      });
+      await removeIfCompleted();
+    } finally {
+      stopHeartbeat();
+      await prizeLockManager.releaseEventLock(lock);
+    }
   };
 
   const recoverClaims = async (job: CanonicalRecoveryJob): Promise<void> => {
@@ -512,11 +565,16 @@ function createCanonicalAuthRecoveryService(
     }
   };
 
-  const recoverPrizes = async (
-    job: CanonicalRecoveryJob,
+  const copyPrizePage = async (
     sourceProfileId: string,
-  ): Promise<void> => {
-    const cursor = job.prizeCursor || "";
+    targetProfileId: string,
+    prizeCursor: string | null,
+  ): Promise<{
+    complete: boolean;
+    copied: number;
+    nextCursor: string | null;
+  }> => {
+    const cursor = prizeCursor || "";
     const source = record(
       await rtdb.getPath(
         `profileEventPrizes/${sourceProfileId}`,
@@ -534,20 +592,34 @@ function createCanonicalAuthRecoveryService(
       .filter(([eventId]) => eventId > cursor)
       .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
     const page = remaining.slice(0, MERGE_PRIZE_RECOVERY_PAGE_SIZE);
-    for (const [eventId, assignment] of page) {
-      await copyPrize(sourceProfileId, job.profileId, eventId, assignment);
+    for (const [eventId] of page) {
+      await copyPrize(sourceProfileId, targetProfileId, eventId);
     }
-    const complete = remaining.length <= page.length;
-    const nextCursor = page.at(-1)?.[0] || job.prizeCursor;
+    return {
+      complete: remaining.length <= page.length,
+      copied: page.length,
+      nextCursor: page.at(-1)?.[0] || prizeCursor,
+    };
+  };
+
+  const recoverPrizes = async (
+    job: CanonicalRecoveryJob,
+    sourceProfileId: string,
+  ): Promise<void> => {
+    const page = await copyPrizePage(
+      sourceProfileId,
+      job.profileId,
+      job.prizeCursor,
+    );
     await mutateCanonicalRecoveryJob(db, job.profileId, (live) =>
       live.sourceProfileIds[0] === sourceProfileId &&
       live.sourcePhase === "prizes" &&
       live.prizeCursor === job.prizeCursor
         ? {
             ...live,
-            sourcePhase: complete ? "games" : "prizes",
-            prizeCursor: nextCursor,
-            phaseStartedAtMs: complete ? now() : live.phaseStartedAtMs,
+            sourcePhase: page.complete ? "games" : "prizes",
+            prizeCursor: page.nextCursor,
+            phaseStartedAtMs: page.complete ? now() : live.phaseStartedAtMs,
             updatedAtMs: now(),
           }
         : undefined,
@@ -614,6 +686,7 @@ function createCanonicalAuthRecoveryService(
         ? {
             ...live,
             sourcePhase: "finalize",
+            prizeCursor: null,
             phaseStartedAtMs: now(),
             updatedAtMs: now(),
           }
@@ -636,6 +709,25 @@ function createCanonicalAuthRecoveryService(
               ...live,
               sourcePhase: "games",
               phaseStartedAtMs: now(),
+              updatedAtMs: now(),
+            }
+          : undefined,
+      );
+      return;
+    }
+    const prizePage = await copyPrizePage(
+      sourceProfileId,
+      job.profileId,
+      job.prizeCursor,
+    );
+    if (!prizePage.complete || prizePage.copied > 0) {
+      await mutateCanonicalRecoveryJob(db, job.profileId, (live) =>
+        live.sourceProfileIds[0] === sourceProfileId &&
+        live.sourcePhase === "finalize" &&
+        live.prizeCursor === job.prizeCursor
+          ? {
+              ...live,
+              prizeCursor: prizePage.nextCursor,
               updatedAtMs: now(),
             }
           : undefined,

@@ -4,7 +4,7 @@ import {
   type WorkflowStep,
 } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
-import { createGameplayRepository } from "./gameplayRepository.ts";
+import { createEventGameplayRepository } from "./eventRepository.ts";
 import {
   createWorkflowEventRuntime,
   EVENT_PROGRESS_TIMEOUT_MS,
@@ -20,16 +20,23 @@ import { assertProfileBackgroundMutationsEnabled } from "./profileCanonicalActiv
 export function createEventProgressWorkflowDependencies(
   env: Env,
 ): EventProgressWorkflowDependencies {
+  let eventRepository:
+    ReturnType<typeof createEventGameplayRepository> | undefined;
+  const getEventRepository = () =>
+    (eventRepository ||= createEventGameplayRepository(env));
   return {
     acknowledge: async (outboxId) => {
       await assertProfileBackgroundMutationsEnabled(env);
-      const repository = createGameplayRepository(env);
-      await removeOutbox(repository, outboxId);
+      await removeOutbox(getEventRepository(), outboxId);
     },
     synchronize: async ({ instanceId, params }) => {
       await assertProfileBackgroundMutationsEnabled(env);
       const signal = AbortSignal.timeout(EVENT_PROGRESS_TIMEOUT_MS);
-      const { runtime } = createWorkflowEventRuntime(env, signal);
+      const { runtime } = createWorkflowEventRuntime(
+        env,
+        signal,
+        getEventRepository(),
+      );
       return runtime.runEventSyncState({
         eventId: params.eventId,
         requesterUid: EVENT_PROGRESS_WORKER_UID,

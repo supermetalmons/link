@@ -348,7 +348,7 @@ test("returns strict join and removal responses", async () => {
     eventId: "event-1",
     removedProfileId: "target-profile",
   });
-  assert.equal(background.length, 6);
+  assert.equal(background.length, 4);
   await Promise.all(background);
 });
 
@@ -412,46 +412,4 @@ test("rejects malformed event prize selections after authentication", async () =
     );
     assert.equal(response.status, 400);
   }
-});
-
-test("registers the complete mutation before it settles", async () => {
-  let finishPatch: () => void = () => undefined;
-  const patchGate = new Promise<void>((resolve) => {
-    finishPatch = resolve;
-  });
-  let registeredPromise: Promise<unknown> | undefined;
-  let markRegistered: () => void = () => undefined;
-  const registered = new Promise<void>((resolve) => {
-    markRegistered = resolve;
-  });
-  const repository = createRepository();
-  repository.patchRtdbRoot = () => patchGate;
-  const responsePromise = handleEventRoute(
-    new Request("https://api.mons.link/events/participants/join", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ eventId: "event-1" }),
-    }),
-    TELEGRAM_TEST_ENV,
-    {
-      waitUntil(promise) {
-        registeredPromise = promise;
-        markRegistered();
-      },
-    },
-    {
-      verifyIdentity: async () => identity,
-      repository,
-      participation: {
-        lockManager,
-        now: () => 100,
-        buildDueUpdates: async () => ({ didChange: false, updates: {} }),
-      },
-    },
-  );
-  await registered;
-  assert.ok(registeredPromise);
-  finishPatch();
-  assert.equal((await responsePromise).status, 200);
-  await registeredPromise;
 });

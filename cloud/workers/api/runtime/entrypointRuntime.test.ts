@@ -153,6 +153,7 @@ describe("Worker entrypoint", () => {
       authRecovery: async () => calls.push("authRecovery"),
       authState: async () => calls.push("authState"),
       eventProgress: async () => calls.push("eventProgress"),
+      eventTransitions: async () => calls.push("eventTransitions"),
       gameSessionReceipts: async () => calls.push("gameSessionReceipts"),
       profileGameProjection: async () => calls.push("profileGameProjection"),
       telegramProjection: async () => calls.push("telegramProjection"),
@@ -175,10 +176,45 @@ describe("Worker entrypoint", () => {
         "authRecovery",
         "authState",
         "eventProgress",
+        "eventTransitions",
         "gameSessionReceipts",
         "profileGameProjection",
         "telegramProjection",
       ]),
     );
+  });
+
+  it("runs all scheduled work and reports the first failure", async () => {
+    const calls: string[] = [];
+    const progressFailure = new Error("event-progress-failed");
+    const transitionFailure = new Error("poison-transition");
+    let thrown: unknown;
+    try {
+      await handleScheduled(
+        controller,
+        withProfileControl(TELEGRAM_TEST_ENV as unknown as Env, "active"),
+        {
+          authRecovery: async () => undefined,
+          authState: async () => undefined,
+          eventProgress: async () => {
+            calls.push("eventProgress");
+            throw progressFailure;
+          },
+          eventTransitions: async () => {
+            calls.push("eventTransitions");
+            throw transitionFailure;
+          },
+          gameSessionReceipts: async () => undefined,
+          profileGameProjection: async () => undefined,
+          telegramProjection: async () => undefined,
+        },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(new Set(calls)).toEqual(
+      new Set(["eventProgress", "eventTransitions"]),
+    );
+    expect(thrown).toBe(progressFailure);
   });
 });

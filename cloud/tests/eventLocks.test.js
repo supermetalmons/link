@@ -84,6 +84,7 @@ const createManager = ({
   clearInterval,
   logger,
   lockRoot,
+  includeLegacyOwnerId,
 }) => {
   let idIndex = 0;
   return createEventLockManagerCore({
@@ -94,6 +95,7 @@ const createManager = ({
     clearInterval,
     logger: logger || { error() {} },
     lockRoot,
+    includeLegacyOwnerId,
     transactPath: (path, updater) =>
       runRtdbDecisionTransaction(database.ref(path), updater),
   });
@@ -119,11 +121,17 @@ test("validates configured lock roots and preserves the core default", () => {
       }),
     /lockRoot must be a valid RTDB path/,
   );
+  const nested = createEventLockManagerCore({
+    createLockId: () => "lock",
+    lockRoot: "locks/nested",
+    transactPath: async () => ({ committed: false, value: null }),
+  });
+  assert.ok(nested);
   assert.throws(
     () =>
       createEventLockManagerCore({
         createLockId: () => "lock",
-        lockRoot: "locks/nested",
+        lockRoot: "locks//nested",
         transactPath: async () => ({ committed: false, value: null }),
       }),
     /lockRoot must be a valid RTDB path/,
@@ -162,6 +170,44 @@ test("acquires the legacy-compatible event lock schema through a cold transactio
     refreshedAtMs: 1_000,
   });
   assert.equal(database.transactionCalls[0].applyLocally, false);
+});
+
+test("profile projection leases interoperate with legacy ownerId consumers", async () => {
+  const path = "profileGameProjectionLocks/event/event-1";
+  const database = createColdDatabase();
+  const manager = createManager({
+    database,
+    now: () => 1_000,
+    lockRoot: "profileGameProjectionLocks/event",
+    includeLegacyOwnerId: true,
+  });
+  const handle = await manager.acquireEventLock("event-1", "new-owner");
+  assert.ok(handle);
+  assert.equal(database.read(path).ownerId, "new-owner");
+
+  const legacyAttempt = await runRtdbDecisionTransaction(
+    database.ref(path),
+    (current) =>
+      typeof current?.ownerId === "string" && current.expiresAtMs > 1_000
+        ? { commit: false, decision: "busy" }
+        : {
+            value: { ownerId: "legacy-contender", expiresAtMs: 901_000 },
+            decision: "acquired",
+          },
+  );
+  assert.equal(legacyAttempt.committed, false);
+  assert.equal(database.read(path).ownerId, "new-owner");
+
+  database.write(path, {
+    ownerId: "legacy-owner",
+    requestId: "legacy-request",
+    expiresAtMs: 2_000,
+  });
+  assert.equal(
+    await manager.acquireEventLock("event-1", "new-contender"),
+    null,
+  );
+  assert.equal(database.read(path).ownerId, "legacy-owner");
 });
 
 test("core and projection roots coexist while projection contenders exclude each other", async () => {

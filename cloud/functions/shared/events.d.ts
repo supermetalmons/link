@@ -19,6 +19,9 @@ export const MAX_STARTS_IN_MINUTES: 20160;
 export const MAX_EVENT_PARTICIPANTS: 32;
 export const MAX_EVENT_PARTICIPANT_TEXT_BYTES: 256;
 export const SCHEDULED_TIMEZONE_LOCAL: "local";
+export const EVENT_BOOKMARK_HEADER: "X-D1-Bookmark";
+export const EVENT_ETAG_HEADER: "ETag";
+export const MAX_EVENT_READ_RESPONSE_BYTES: number;
 
 export type EventScheduleTimezone = "local" | "ET" | "PT" | "CT";
 export type EventCreateDateTimePayload = {
@@ -61,6 +64,13 @@ export type CreateEventResponse = {
   eventId: string;
   event: EventApiRecord;
 };
+export type EventSnapshotResponse = {
+  ok: true;
+  eventId: string;
+  revision: number;
+  event: EventApiRecord | null;
+  prizeSelections: Record<string, string>;
+};
 export type PostponeEventStartResponse = CreateEventResponse & {
   postponeByMinutes: EventPostponeMinutes;
   startAtMs: number;
@@ -91,6 +101,9 @@ export function isCreateEventRequest(
 export function isCreateEventResponse(
   value: unknown,
 ): value is CreateEventResponse;
+export function isEventSnapshotResponse(
+  value: unknown,
+): value is EventSnapshotResponse;
 export function isPostponeEventStartRequest(
   value: unknown,
 ): value is PostponeEventStartRequest;

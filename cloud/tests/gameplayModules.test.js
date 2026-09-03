@@ -23,9 +23,9 @@ test("automatch REST queries retain their RTDB indexes", () => {
     databaseRules.rules.profileGameProjectionOutbox.automatch[".indexOn"],
     ["lastQueuedAtMs"],
   );
-  assert.deepEqual(
-    databaseRules.rules.profileGameProjectionOutbox.event[".indexOn"],
-    ["lastQueuedAtMs"],
+  assert.equal(
+    databaseRules.rules.profileGameProjectionOutbox.event,
+    undefined,
   );
   assert.deepEqual(
     databaseRules.rules.profileGameProjectionOutbox.profile[".indexOn"],
