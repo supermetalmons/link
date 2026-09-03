@@ -153,7 +153,10 @@ export const preloadPangchiuBoardPreview = () => {
 
 const BoardStylePicker = styled.div`
   position: fixed;
-  bottom: max(50px, calc(env(safe-area-inset-bottom) + 44px));
+  bottom: calc(
+    max(50px, calc(env(safe-area-inset-bottom) + 44px)) +
+      var(--bottom-controls-offset, 0px)
+  );
   left: 8px;
   background-color: var(--panel-light-90);
   backdrop-filter: blur(3px);
@@ -171,7 +174,10 @@ const BoardStylePicker = styled.div`
   z-index: 7;
 
   @media screen and (max-height: 453px) {
-    bottom: max(44px, calc(env(safe-area-inset-bottom) + 38px));
+    bottom: calc(
+      max(44px, calc(env(safe-area-inset-bottom) + 38px)) +
+        var(--bottom-controls-offset, 0px)
+    );
   }
 
   @media (prefers-color-scheme: dark) {

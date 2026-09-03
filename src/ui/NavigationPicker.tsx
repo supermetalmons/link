@@ -33,10 +33,16 @@ interface NavigationPickerProps {
 
 const NavigationPickerContainer = styled.div`
   position: fixed;
-  bottom: max(50px, calc(env(safe-area-inset-bottom) + 44px));
+  bottom: calc(
+    max(50px, calc(env(safe-area-inset-bottom) + 44px)) +
+      var(--bottom-controls-offset, 0px)
+  );
   right: 8px;
   height: 480px;
-  max-height: calc(100dvh - 120px - env(safe-area-inset-bottom));
+  max-height: calc(
+    min(100dvh, var(--bottom-controls-viewport-height, 100dvh)) -
+      120px - env(safe-area-inset-bottom)
+  );
   width: 150pt;
   display: flex;
   flex-direction: column;
@@ -54,7 +60,10 @@ const NavigationPickerContainer = styled.div`
   }
 
   @media screen and (max-height: 453px) {
-    bottom: max(44px, calc(env(safe-area-inset-bottom) + 38px));
+    bottom: calc(
+      max(44px, calc(env(safe-area-inset-bottom) + 38px)) +
+        var(--bottom-controls-offset, 0px)
+    );
   }
 `;
 

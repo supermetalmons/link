@@ -2,7 +2,9 @@ import styled, { keyframes } from "styled-components";
 
 export const ControlsContainer = styled.div`
   position: fixed;
-  bottom: max(10px, env(safe-area-inset-bottom));
+  bottom: calc(
+    max(10px, env(safe-area-inset-bottom)) + var(--bottom-controls-offset, 0px)
+  );
   right: 10px;
   left: 46px;
   display: flex;
@@ -10,7 +12,9 @@ export const ControlsContainer = styled.div`
   justify-content: flex-end;
 
   @media screen and (max-height: 453px) {
-    bottom: max(6px, env(safe-area-inset-bottom));
+    bottom: calc(
+      max(6px, env(safe-area-inset-bottom)) + var(--bottom-controls-offset, 0px)
+    );
   }
 
   @media screen and (orientation: portrait) {
@@ -41,7 +45,9 @@ export const BrushButton = styled.button<{
   $dimmed?: boolean;
 }>`
   position: fixed;
-  bottom: max(10px, env(safe-area-inset-bottom));
+  bottom: calc(
+    max(10px, env(safe-area-inset-bottom)) + var(--bottom-controls-offset, 0px)
+  );
   left: 9px;
   width: 32px;
   height: 32px;
@@ -65,7 +71,9 @@ export const BrushButton = styled.button<{
   overflow: visible;
 
   @media screen and (max-height: 453px) {
-    bottom: max(6px, env(safe-area-inset-bottom));
+    bottom: calc(
+      max(6px, env(safe-area-inset-bottom)) + var(--bottom-controls-offset, 0px)
+    );
   }
 
   @media screen and (orientation: portrait) {
@@ -596,7 +604,10 @@ export const ReactionPillsContainer = styled.div<{
   $animatedMaxHeight?: number;
 }>`
   position: fixed;
-  bottom: max(50px, calc(env(safe-area-inset-bottom) + 44px));
+  bottom: calc(
+    max(50px, calc(env(safe-area-inset-bottom) + 44px)) +
+      var(--bottom-controls-offset, 0px)
+  );
   right: 8px;
   background-color: var(--panel-light-90);
   backdrop-filter: blur(3px);
@@ -609,8 +620,8 @@ export const ReactionPillsContainer = styled.div<{
   width: min(90vw, 204px);
   max-height: ${(props) =>
     props.$animatedMaxHeight
-      ? `min(calc(100dvh - 120px - env(safe-area-inset-bottom)), ${props.$animatedMaxHeight}px)`
-      : "calc(100dvh - 120px - env(safe-area-inset-bottom))"};
+      ? `min(calc(min(100dvh, var(--bottom-controls-viewport-height, 100dvh)) - 120px - env(safe-area-inset-bottom)), ${props.$animatedMaxHeight}px)`
+      : "calc(min(100dvh, var(--bottom-controls-viewport-height, 100dvh)) - 120px - env(safe-area-inset-bottom))"};
   transition: max-height 0.16s ease-out;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
@@ -628,7 +639,10 @@ export const ReactionPillsContainer = styled.div<{
   }
 
   @media screen and (max-height: 453px) {
-    bottom: max(44px, calc(env(safe-area-inset-bottom) + 38px));
+    bottom: calc(
+      max(44px, calc(env(safe-area-inset-bottom) + 38px)) +
+        var(--bottom-controls-offset, 0px)
+    );
   }
 
   @media (prefers-color-scheme: dark) {

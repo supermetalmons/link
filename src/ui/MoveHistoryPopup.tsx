@@ -45,7 +45,10 @@ const PADDING_INDICES = Array.from(
 
 const MoveHistoryPopupContainer = styled.div`
   position: fixed;
-  bottom: max(50px, calc(env(safe-area-inset-bottom) + 44px));
+  bottom: calc(
+    max(50px, calc(env(safe-area-inset-bottom) + 44px)) +
+      var(--bottom-controls-offset, 0px)
+  );
   right: 8px;
   width: 150px;
   height: ${PICKER_HEIGHT}px;
@@ -63,7 +66,10 @@ const MoveHistoryPopupContainer = styled.div`
   }
 
   @media screen and (max-height: 453px) {
-    bottom: max(44px, calc(env(safe-area-inset-bottom) + 38px));
+    bottom: calc(
+      max(44px, calc(env(safe-area-inset-bottom) + 38px)) +
+        var(--bottom-controls-offset, 0px)
+    );
   }
 `;
 

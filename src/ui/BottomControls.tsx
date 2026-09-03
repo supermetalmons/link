@@ -166,6 +166,7 @@ import {
   type CloseNavigationAndAppearancePopupOptions,
 } from "./controls/bottomControlsPort";
 import { didDismissSomethingWithOutsideTapJustNow } from "./controls/outsideTapState";
+import { observeBottomControlsViewport } from "./controls/bottomControlsViewport";
 import {
   CANCEL_AUTOMATCH_REVEAL_DELAY_MS,
   NAVIGATION_PENDING_CANCEL_INTENT_TTL_MS,
@@ -1014,6 +1015,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   );
 
   const pickerRef = useRef<HTMLDivElement>(null);
+  const bottomControlsRef = useRef<HTMLDivElement>(null);
   const controlsContainerRef = useRef<HTMLDivElement>(null);
   const voiceReactionButtonRef = useRef<HTMLButtonElement>(null);
   const moveHistoryButtonRef = useRef<HTMLButtonElement>(null);
@@ -1043,6 +1045,16 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const moveHistoryPopupRef = useRef<HTMLDivElement>(null);
   const rematchSeriesSelectionLockRef = useRef(false);
   const endMatchGracePeriodTimeoutRef = useRef<number | null>(null);
+
+  useLayoutEffect(() => {
+    if (!bottomControlsRef.current || !controlsContainerRef.current) {
+      return;
+    }
+    return observeBottomControlsViewport(
+      bottomControlsRef.current,
+      controlsContainerRef.current,
+    );
+  }, []);
 
   const clearTrackedMatchScopedTimeout = useCallback(
     (timeoutId: number | null) => {
@@ -3376,7 +3388,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   });
 
   return (
-    <>
+    <div ref={bottomControlsRef} style={{ display: "contents" }}>
       <BrushButton
         ref={brushButtonRef}
         $dimmed={isBrushButtonDimmed}
@@ -3872,7 +3884,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
           </ResignConfirmation>
         )}
       </ControlsContainer>
-    </>
+    </div>
   );
 };
 
