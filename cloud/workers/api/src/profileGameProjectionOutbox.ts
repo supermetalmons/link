@@ -4,16 +4,12 @@ import type { HistoricalMatchDescriptor } from "./historicalMatches.ts";
 
 export const AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT =
   "profileGameProjectionOutbox/automatch";
-export const AUTOMATCH_PROFILE_GAME_PROJECTION_LOCK_ROOT =
-  "profileGameProjectionLocks/automatch";
 export const EVENT_PROFILE_GAME_PROJECTION_OUTBOX_ROOT =
   "profileGameProjectionOutbox/event";
 export const EVENT_PROFILE_GAME_PROJECTION_LOCK_ROOT =
   "profileGameProjectionLocks/event";
 export const PROFILE_LINK_PROFILE_GAME_PROJECTION_OUTBOX_ROOT =
   "profileGameProjectionOutbox/profile";
-export const PROFILE_LINK_PROFILE_GAME_PROJECTION_LOCK_ROOT =
-  "profileGameProjectionLocks/profile";
 
 export type AutomatchProfileGameProjectionOutbox = {
   historicalMatches?: HistoricalMatchDescriptor[];
@@ -103,12 +99,6 @@ export function getAutomatchProfileGameProjectionOutboxPath(
   return `${AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT}/${inviteId}`;
 }
 
-export function getAutomatchProfileGameProjectionLockPath(
-  inviteId: string,
-): string {
-  return `${AUTOMATCH_PROFILE_GAME_PROJECTION_LOCK_ROOT}/${inviteId}`;
-}
-
 export function getEventProfileGameProjectionOutboxPath(
   eventId: string,
 ): string {
@@ -123,12 +113,6 @@ export function getProfileLinkProfileGameProjectionOutboxPath(
   loginUid: string,
 ): string {
   return `${PROFILE_LINK_PROFILE_GAME_PROJECTION_OUTBOX_ROOT}/${loginUid}`;
-}
-
-export function getProfileLinkProfileGameProjectionLockPath(
-  loginUid: string,
-): string {
-  return `${PROFILE_LINK_PROFILE_GAME_PROJECTION_LOCK_ROOT}/${loginUid}`;
 }
 
 export function buildAutomatchProfileGameProjectionOutboxUpdates(input: {

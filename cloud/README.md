@@ -14,6 +14,8 @@ The browser resolves login-linked profile presentation only through the authenti
 
 Historical rematch snapshots are read through the public Worker endpoint and stored immutably in `mons-link-profile-games` D1. Rated snapshots take precedence over transition and legacy-backfill snapshots. D1 is the sole public-history source; there is no RTDB read-through or backfill path. Active match synchronization remains in RTDB.
 
+Background automatch, rating, and profile-link game projections share per-invite locks in `PROFILE_GAMES_DB.profile_game_projection_locks`. Profile-link processing also holds a per-login lock in the same table. Leases expire after 15 minutes, releases require the current owner, and the five-minute projection sweep removes at most 1,000 expired rows. Event projection leases remain in `EVENT_DB`. Pending automatch and profile-link projection records remain in RTDB. Changing between Firebase-lock and D1-lock Worker versions requires the paused-queue cutover in the deployment guide.
+
 Event records, participants, prize selections, visible prize assignments, progress markers, and event-specific projection state live exclusively in `mons-link-events` D1 after activation. Browser event subscriptions poll authenticated Worker snapshots; RTDB has no event mirror.
 
 Event-prize withdrawal ownership, leases, persisted Solana submissions, and completion records live exclusively in `mons-link-event-prize-withdrawals` D1. RTDB has no withdrawal shadow.

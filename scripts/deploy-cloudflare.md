@@ -102,6 +102,50 @@ Rollback targets only a reviewed D1-compatible Version ID:
 npx wrangler rollback <known-good-version-id> --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
+## Projection lock D1 cutover
+
+Migration `0006_profile_game_projection_locks.sql` moves the remaining invite and profile-link projection locks into `mons-link-profile-games`. Event projection leases already live in `mons-link-events`. No bindings, public APIs, Queue payloads, or triggers change. Pending-job records and active matches remain in their existing stores.
+
+Finish `npm run check:all`, record the current production Version ID, and verify both protected smoke fixtures against production before pausing delivery. Keep the validated source unchanged throughout the release. Use the standard and authenticated `--read-only --require-history` smoke commands from the API release section.
+
+```sh
+npx wrangler deployments list --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-profile-game-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+Record when the pause succeeds. Wait at least 15 minutes for in-flight consumers and outstanding calls to drain, then read both retired lock namespaces:
+
+```sh
+npx firebase database:get "/profileGameProjectionLocks/automatch" --project mons-link --instance mons-link-default-rtdb
+npx firebase database:get "/profileGameProjectionLocks/profile" --project mons-link --instance mons-link-default-rtdb
+```
+
+Do not continue until every retained lease has expired. Extend the wait if any `expiresAtMs` is still in the future, and investigate unreadable or malformed leases rather than assuming the namespace is drained. Gameplay and producers continue; game-list projections and historical archival accumulate for later processing. Scheduled sweeps enqueue work but do not acquire these locks. Do not purge the queue or pending-job records.
+
+With delivery still paused, apply the additive migration and upload the validated candidate:
+
+```sh
+npx wrangler d1 migrations apply mons-link-profile-games --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run upload:api
+```
+
+Run both preview smokes, promote the exact uploaded Version ID to 100% using `npm run promote:api -- --version-id <version-id>`, and run both production smokes. Keep delivery paused on any failure. No trigger deployment is needed for this release. Once both production smokes pass:
+
+```sh
+npx wrangler queues resume-delivery mons-link-profile-game-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search profile_game_projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+Observe at least 15 minutes. Confirm successful `profile_game_projection_queue_processed` records and backlog recovery. Investigate recurring `profile_game_projection_queue_failed` records with a lock failure code and `lockScope`, `profile_game_projection_lock_cleanup_failed`, and historical archive failures. Existing sampled logs are diagnostic evidence, not a complete ledger. Locks need no data import; expired Firebase lock records remain inert.
+
+Rollback across this storage boundary also requires a queue pause. Stop delivery, wait at least 15 minutes for D1 consumers to drain, and verify there are no unexpired D1 leases before restoring the recorded Firebase-lock version:
+
+```sh
+npx wrangler d1 execute mons-link-profile-games --remote --command "SELECT COUNT(*) AS active_locks FROM profile_game_projection_locks WHERE expires_at_ms > CAST(unixepoch('subsec') * 1000 AS INTEGER)" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+After rollback and both production smokes, resume delivery. Retain the additive D1 table. Never run Firebase-lock and D1-lock consumers concurrently. Before promotion, an aborted cutover can resume the recorded current version after confirming no candidate was promoted; the new table may remain installed.
+
 ## Canonical profile D1 maintenance
 
 The canonical profile control accepts only `active` and `frozen`. Freeze before schema maintenance and leave production frozen on any failure:
