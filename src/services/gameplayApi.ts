@@ -1,4 +1,5 @@
 import {
+  GAME_SESSION_OPERATION_ID_PATTERN,
   MAX_GAME_SESSION_RESPONSE_BYTES,
   isCreateInviteResponse,
   isEndRematchResponse,
@@ -564,9 +565,15 @@ export function cancelAutomatchViaApi(
 export function startAutomatchViaApi(
   request: StartAutomatchRequest,
   tokenProvider: AuthTokenProvider,
+  operationId: string,
 ): Promise<StartAutomatchResponse> {
+  if (!GAME_SESSION_OPERATION_ID_PATTERN.test(operationId)) {
+    return Promise.reject(
+      new GameplayApiError("invalid-argument", "invalid-request"),
+    );
+  }
   return retryGameSessionMutation(
-    "/automatch/start",
+    `/automatch/start?operationId=${encodeURIComponent(operationId)}`,
     request,
     tokenProvider,
     isStartAutomatchResponse,

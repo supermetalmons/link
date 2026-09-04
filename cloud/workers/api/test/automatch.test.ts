@@ -30,6 +30,7 @@ import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTe
 const identity: RequestIdentity = {
   uid: "guest-uid",
 };
+const AUTOMATCH_OPERATION_ID = "00000000-0000-4000-8000-000000000001";
 
 const coordinationByRepository = new WeakMap<
   GameplayRepository,
@@ -104,8 +105,80 @@ async function automatchOwnerLockId(owner: string): Promise<string> {
     byte.toString(16).padStart(2, "0"),
   ).join("")}`;
 }
-function request(emojiId = 1, aura = "") {
-  return { emojiId, aura };
+function request(emojiId = 1, aura = "", operationId = AUTOMATCH_OPERATION_ID) {
+  return { operationId, emojiId, aura };
+}
+
+function receiptFromUpdates(
+  updates: Record<string, unknown>,
+  operationId = AUTOMATCH_OPERATION_ID,
+): unknown {
+  return {
+    ...(updates[`gameplayMutationReceipts/${operationId}`] as Record<
+      string,
+      unknown
+    >),
+    completedAtMs: 1,
+  };
+}
+
+function storedAutomatchReceipt(
+  inviteId: string,
+  mode: "matched" | "pending" = "pending",
+  operationId = AUTOMATCH_OPERATION_ID,
+): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    aura: "",
+    completedAtMs: 1,
+    emojiId: 1,
+    inviteId,
+    kind: "automatch-start",
+    operationId,
+    profileProjectionRequestId: null,
+    requesterUid: identity.uid,
+    response: {
+      ok: true,
+      inviteId,
+      mode,
+      matchedImmediately: mode === "matched",
+    },
+    telegramProjection: false,
+  };
+}
+
+function assertPendingReceiptUpdates(
+  updates: Record<string, unknown>,
+  inviteId: string,
+  operationId = AUTOMATCH_OPERATION_ID,
+  requesterUid = identity.uid,
+): void {
+  assert.deepEqual(updates[`gameplayMutationReceipts/${operationId}`], {
+    schemaVersion: 1,
+    aura: "",
+    completedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+    emojiId: 1,
+    inviteId,
+    kind: "automatch-start",
+    operationId,
+    profileProjectionRequestId: null,
+    requesterUid,
+    response: {
+      ok: true,
+      inviteId,
+      mode: "pending",
+      matchedImmediately: false,
+    },
+    telegramProjection: false,
+  });
+  assert.deepEqual(
+    updates[`gameplayMutationReceiptExpirations/${operationId}`],
+    { completedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP },
+  );
+  assert.equal(
+    updates[`invites/${inviteId}/automatchOperationIds/${requesterUid}`],
+    operationId,
+  );
 }
 
 const profile: GameplayProfile = {
@@ -179,8 +252,17 @@ function ownershipSnapshot(
 
 function repository(
   overrides: Partial<GameplayRepository> = {},
+  readReceipt: (() => unknown) | null = null,
 ): GameplayRepository {
   const transactionValues = new Map<string, unknown>();
+  const receiptValues = new Map<string, unknown>();
+  const getRtdbPath = overrides.getRtdbPath;
+  const patchRtdbRoot = overrides.patchRtdbRoot;
+  const {
+    getRtdbPath: _ignoredGet,
+    patchRtdbRoot: _ignoredPatch,
+    ...remainingOverrides
+  } = overrides;
   return {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
@@ -194,8 +276,23 @@ function repository(
       ice: 10,
     }),
     getMiningSnapshot: async () => null,
-    getRtdbPath: async () => null,
-    patchRtdbRoot: async () => undefined,
+    getRtdbPath: async (path, query, signal) =>
+      path.startsWith("gameplayMutationReceipts/")
+        ? readReceipt
+          ? readReceipt()
+          : (receiptValues.get(path) ?? null)
+        : (getRtdbPath?.(path, query, signal) ?? null),
+    patchRtdbRoot: async (updates, signal) => {
+      for (const [path, value] of Object.entries(updates)) {
+        if (path.startsWith("gameplayMutationReceipts/")) {
+          receiptValues.set(path, {
+            ...(value as Record<string, unknown>),
+            completedAtMs: 1,
+          });
+        }
+      }
+      await patchRtdbRoot?.(updates, signal);
+    },
     transactRtdbPath: async (path, updater) => {
       const decision = updater(transactionValues.get(path) ?? null) as {
         commit?: boolean;
@@ -216,7 +313,7 @@ function repository(
         value: decision.value,
       };
     },
-    ...overrides,
+    ...remainingOverrides,
   };
 }
 
@@ -247,6 +344,9 @@ test("creates a pending automatch with profile metadata and exact roots", async 
     request(),
     repository({
       getRtdbPath: async (path, query) => {
+        if (path === `gameplayMutationReceipts/${AUTOMATCH_OPERATION_ID}`) {
+          return null;
+        }
         assert.equal(path, "automatch");
         if (query?.orderBy === "uid") {
           assert.deepEqual(query, {
@@ -297,12 +397,31 @@ test("creates a pending automatch with profile metadata and exact roots", async 
   assert.ok(updates);
   assert.deepEqual(Object.keys(updates).sort(), [
     "automatch/auto_aaaaaaaaaaa",
+    `gameplayMutationReceiptExpirations/${AUTOMATCH_OPERATION_ID}`,
+    `gameplayMutationReceipts/${AUTOMATCH_OPERATION_ID}`,
     "invites/auto_aaaaaaaaaaa",
     "players/guest-uid/matches/auto_aaaaaaaaaaa",
     "profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa",
     "telegramAutomatches/auto_aaaaaaaaaaa",
     "telegramProjectionOutbox/automatch/auto_aaaaaaaaaaa",
   ]);
+  const receipt = updates[
+    `gameplayMutationReceipts/${AUTOMATCH_OPERATION_ID}`
+  ] as Record<string, unknown>;
+  assert.equal(receipt.schemaVersion, 1);
+  assert.equal(receipt.kind, "automatch-start");
+  assert.equal(receipt.operationId, AUTOMATCH_OPERATION_ID);
+  assert.equal(receipt.requesterUid, identity.uid);
+  assert.equal(receipt.emojiId, 1);
+  assert.equal(receipt.aura, "");
+  assert.equal(receipt.inviteId, "auto_aaaaaaaaaaa");
+  assert.equal(receipt.profileProjectionRequestId, "request-1");
+  assert.equal(receipt.telegramProjection, true);
+  assert.deepEqual(receipt.response, result);
+  assert.deepEqual(
+    updates[`gameplayMutationReceiptExpirations/${AUTOMATCH_OPERATION_ID}`],
+    { completedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP },
+  );
   const queue = updates["automatch/auto_aaaaaaaaaaa"] as Record<
     string,
     unknown
@@ -353,6 +472,9 @@ test("creates a pending automatch with profile metadata and exact roots", async 
     password: "aaaaaaaaaaaaaaa",
     automatchStateHint: "pending",
     automatchCanceledAt: null,
+    automatchOperationIds: {
+      [identity.uid]: AUTOMATCH_OPERATION_ID,
+    },
     telegramDeliveryVersion: 2,
   });
   assert.equal(telegram.lifecycle, "pending");
@@ -526,7 +648,8 @@ test("automatch queue failures preserve the committed response and outboxes", as
   );
 });
 
-test("fails closed when canonical profile ownership is unavailable", async () => {
+test("fails closed before reading a queue when ownership is unavailable", async () => {
+  let queueReads = 0;
   let writes = 0;
   await assert.rejects(
     () =>
@@ -536,6 +659,10 @@ test("fails closed when canonical profile ownership is unavailable", async () =>
         repository({
           readProfileOwnershipSnapshot: async () => {
             throw new Error("profile-unavailable");
+          },
+          getRtdbPath: async () => {
+            queueReads++;
+            return { auto_existing: { uid: identity.uid } };
           },
           patchRtdbRoot: async () => {
             writes++;
@@ -548,6 +675,7 @@ test("fails closed when canonical profile ownership is unavailable", async () =>
       error.status === 503 &&
       error.message === "profile-ownership-unavailable",
   );
+  assert.equal(queueReads, 0);
   assert.equal(writes, 0);
 });
 
@@ -557,7 +685,7 @@ test("returns pending automatches for the same login or profile", async (t) => {
     ["profile", "stale-profile", "other-uid"],
   ] as const) {
     await t.test(name, async () => {
-      let writes = 0;
+      let updates: Record<string, unknown> = {};
       const result = await startAutomatch(
         identity,
         request(),
@@ -572,14 +700,24 @@ test("returns pending automatches for the same login or profile", async (t) => {
                 [profile.profileId]: [identity.uid, "other-uid"],
               },
             }),
-          getRtdbPath: async () => ({
-            auto_existing: {
+          getRtdbPath: async (path) => {
+            const queue = {
               profileId: queuedProfile,
               uid: queuedUid,
-            },
-          }),
-          patchRtdbRoot: async () => {
-            writes++;
+            };
+            if (path === "automatch") return { auto_existing: queue };
+            if (path === "automatch/auto_existing") return queue;
+            if (path === "invites/auto_existing") {
+              return {
+                hostId: queuedUid,
+                guestId: null,
+                automatchStateHint: "pending",
+              };
+            }
+            assert.fail(`unexpected path ${path}`);
+          },
+          patchRtdbRoot: async (value) => {
+            updates = value;
           },
         }),
       );
@@ -589,13 +727,55 @@ test("returns pending automatches for the same login or profile", async (t) => {
         mode: "pending",
         matchedImmediately: false,
       });
-      assert.equal(writes, 0);
+      assertPendingReceiptUpdates(updates, "auto_existing");
     });
   }
 });
 
+test("receipts a same-login queue that appears after owner convergence", async () => {
+  let updates: Record<string, unknown> = {};
+  let uidReads = 0;
+  const result = await startAutomatch(
+    identity,
+    request(),
+    repository({
+      getRtdbPath: async (path, query) => {
+        if (path === "automatch/auto_late") {
+          return { uid: identity.uid };
+        }
+        if (path === "invites/auto_late") {
+          return {
+            hostId: identity.uid,
+            guestId: null,
+            automatchStateHint: "pending",
+          };
+        }
+        assert.equal(path, "automatch");
+        if (query?.orderBy === "uid") {
+          uidReads++;
+          return null;
+        }
+        assert.deepEqual(query, { orderBy: "$key", limitToFirst: 1 });
+        return { auto_late: { uid: identity.uid } };
+      },
+      patchRtdbRoot: async (value) => {
+        updates = value;
+      },
+    }),
+  );
+
+  assert.deepEqual(result, {
+    ok: true,
+    inviteId: "auto_late",
+    mode: "pending",
+    matchedImmediately: false,
+  });
+  assert.equal(uidReads, 1);
+  assertPendingReceiptUpdates(updates, "auto_late");
+});
+
 test("finds another owned login queue before scanning for a match", async () => {
-  let writes = 0;
+  let updates: Record<string, unknown> = {};
   const queriedUids: unknown[] = [];
   const result = await startAutomatch(
     identity,
@@ -612,6 +792,20 @@ test("finds another owned login queue before scanning for a match", async () => 
           },
         }),
       getRtdbPath: async (path, query) => {
+        if (path === "automatch/auto_owned") {
+          return {
+            uid: "alternate-uid",
+            profileId: profile.profileId,
+            timestamp: 1,
+          };
+        }
+        if (path === "invites/auto_owned") {
+          return {
+            hostId: "alternate-uid",
+            guestId: null,
+            automatchStateHint: "pending",
+          };
+        }
         assert.equal(path, "automatch");
         assert.equal(query?.orderBy, "uid");
         queriedUids.push(query?.equalTo);
@@ -625,8 +819,8 @@ test("finds another owned login queue before scanning for a match", async () => 
             }
           : null;
       },
-      patchRtdbRoot: async () => {
-        writes++;
+      patchRtdbRoot: async (value) => {
+        updates = value;
       },
     }),
   );
@@ -637,8 +831,104 @@ test("finds another owned login queue before scanning for a match", async () => 
     mode: "pending",
     matchedImmediately: false,
   });
-  assert.equal(writes, 0);
-  assert.deepEqual(queriedUids, [identity.uid, "alternate-uid", identity.uid]);
+  assertPendingReceiptUpdates(updates, "auto_owned");
+  assert.deepEqual(queriedUids, ["alternate-uid", identity.uid]);
+});
+
+test("receipts a pending shortcut as matched when the guest wins the invite race", async () => {
+  let updates: Record<string, unknown> = {};
+  const result = await startAutomatch(
+    identity,
+    request(),
+    repository({
+      getRtdbPath: async (path) => {
+        if (path === "automatch") {
+          return { auto_race: { uid: identity.uid } };
+        }
+        if (path === "automatch/auto_race") return null;
+        if (path === "invites/auto_race") {
+          return {
+            hostId: identity.uid,
+            guestId: "matched-guest",
+            automatchStateHint: "matched",
+          };
+        }
+        assert.fail(`unexpected path ${path}`);
+      },
+      patchRtdbRoot: async (value) => {
+        updates = value;
+      },
+    }),
+  );
+
+  assert.deepEqual(result, {
+    ok: true,
+    inviteId: "auto_race",
+    mode: "matched",
+    matchedImmediately: true,
+  });
+  const receipt = updates[
+    `gameplayMutationReceipts/${AUTOMATCH_OPERATION_ID}`
+  ] as Record<string, unknown>;
+  assert.equal(receipt.inviteId, "auto_race");
+  assert.equal(receipt.profileProjectionRequestId, null);
+  assert.deepEqual(receipt.response, result);
+  assert.equal(
+    updates[`invites/auto_race/automatchOperationIds/${identity.uid}`],
+    AUTOMATCH_OPERATION_ID,
+  );
+});
+
+test("does not receipt a canceled pending shortcut", async () => {
+  let updates: Record<string, unknown> = {};
+  let ownerQueueReads = 0;
+  const result = await startAutomatch(
+    identity,
+    request(),
+    repository({
+      getRtdbPath: async (path, query) => {
+        if (path === "automatch") {
+          if (query?.orderBy === "uid" && ownerQueueReads++ === 0) {
+            return { auto_canceled: { uid: identity.uid } };
+          }
+          return null;
+        }
+        if (path === "automatch/auto_canceled") return null;
+        if (path === "invites/auto_canceled") {
+          return {
+            hostId: identity.uid,
+            guestId: null,
+            automatchStateHint: "canceled",
+          };
+        }
+        assert.fail(`unexpected path ${path}`);
+      },
+      patchRtdbRoot: async (value) => {
+        updates = value;
+      },
+    }),
+    { random: () => 0 },
+  );
+
+  assert.deepEqual(result, {
+    ok: true,
+    inviteId: "auto_aaaaaaaaaaa",
+    mode: "pending",
+    matchedImmediately: false,
+  });
+  assert.equal(
+    updates[`invites/auto_canceled/automatchOperationIds/${identity.uid}`],
+    undefined,
+  );
+  assert.equal(
+    (
+      updates[`gameplayMutationReceipts/${AUTOMATCH_OPERATION_ID}`] as Record<
+        string,
+        unknown
+      >
+    ).inviteId,
+    "auto_aaaaaaaaaaa",
+  );
 });
 
 test("uses the supplied ownership snapshot without revalidation", async () => {
@@ -768,6 +1058,7 @@ test("bounds automatch alias lookups", async () => {
 
 test("serializes concurrent starts for logins on the same profile", async () => {
   const queued = new Map<string, Record<string, unknown>>();
+  const invites = new Map<string, Record<string, unknown>>();
   let queueWrites = 0;
   const shared = repository({
     readProfileOwnershipSnapshot: async (query) =>
@@ -781,6 +1072,10 @@ test("serializes concurrent starts for logins on the same profile", async () => 
         },
       }),
     getRtdbPath: async (path, query) => {
+      const queueMatch = /^automatch\/([^/]+)$/.exec(path);
+      if (queueMatch) return queued.get(queueMatch[1]) || null;
+      const inviteMatch = /^invites\/([^/]+)$/.exec(path);
+      if (inviteMatch) return invites.get(inviteMatch[1]) || null;
       if (path !== "automatch") return null;
       const entries = Array.from(queued.entries()).filter(([, value]) =>
         query?.orderBy === "uid" ? value.uid === query.equalTo : true,
@@ -790,10 +1085,28 @@ test("serializes concurrent starts for logins on the same profile", async () => 
     patchRtdbRoot: async (updates) => {
       await new Promise((resolve) => setTimeout(resolve, 125));
       for (const [path, value] of Object.entries(updates)) {
-        const match = /^automatch\/([^/]+)$/.exec(path);
-        if (!match || !value || typeof value !== "object") continue;
-        queued.set(match[1], value as Record<string, unknown>);
-        queueWrites++;
+        const queueMatch = /^automatch\/([^/]+)$/.exec(path);
+        if (queueMatch && value && typeof value === "object") {
+          queued.set(queueMatch[1], value as Record<string, unknown>);
+          queueWrites++;
+        }
+        const inviteMatch = /^invites\/([^/]+)$/.exec(path);
+        if (inviteMatch && value && typeof value === "object") {
+          invites.set(inviteMatch[1], value as Record<string, unknown>);
+        }
+        const operationMatch =
+          /^invites\/([^/]+)\/automatchOperationIds\/([^/]+)$/.exec(path);
+        if (operationMatch) {
+          const invite = invites.get(operationMatch[1]) || {};
+          invites.set(operationMatch[1], {
+            ...invite,
+            automatchOperationIds: {
+              ...((invite.automatchOperationIds as Record<string, unknown>) ||
+                {}),
+              [operationMatch[2]]: value,
+            },
+          });
+        }
       }
     },
   });
@@ -804,10 +1117,15 @@ test("serializes concurrent starts for logins on the same profile", async () => 
       random: () => 0,
       wait,
     }),
-    startAutomatch({ uid: "second-uid" }, request(), shared, {
-      random: () => 0.5,
-      wait,
-    }),
+    startAutomatch(
+      { uid: "second-uid" },
+      request(1, "", "00000000-0000-4000-8000-000000000002"),
+      shared,
+      {
+        random: () => 0.5,
+        wait,
+      },
+    ),
   ]);
 
   assert.equal(queueWrites, 1);
@@ -818,6 +1136,69 @@ test("serializes concurrent starts for logins on the same profile", async () => 
   assert.equal(results[0].inviteId, results[1].inviteId);
   assert.equal(results[0].mode, "pending");
   assert.equal(results[1].mode, "pending");
+});
+
+test("serializes one operation while canonical ownership changes", async () => {
+  let linked = false;
+  let ownershipReads = 0;
+  let sourceWrites = 0;
+  let committedReceipt: unknown = null;
+  let releasePatch: () => void = () => undefined;
+  let markPatchEntered: () => void = () => undefined;
+  const patchEntered = new Promise<void>((resolve) => {
+    markPatchEntered = resolve;
+  });
+  const patchBlocked = new Promise<void>((resolve) => {
+    releasePatch = resolve;
+  });
+  const value = repository(
+    {
+      readProfileOwnershipSnapshot: async (query) => {
+        ownershipReads++;
+        return ownershipSnapshot(query, {
+          ownerByUid: { [identity.uid]: linked ? profile.profileId : null },
+          aliasesByProfileId: linked
+            ? { [profile.profileId]: [identity.uid] }
+            : {},
+        });
+      },
+      getRtdbPath: async (path) => {
+        if (path === "automatch") return null;
+        assert.fail(`unexpected path ${path}`);
+      },
+      patchRtdbRoot: async (updates) => {
+        sourceWrites++;
+        markPatchEntered();
+        await patchBlocked;
+        committedReceipt = receiptFromUpdates(updates);
+      },
+    },
+    () => committedReceipt,
+  );
+  const first = startAutomatch(identity, request(), value, { random: () => 0 });
+  await patchEntered;
+  linked = true;
+
+  await assert.rejects(
+    startAutomatch(identity, request(), value, { random: () => 0.5 }),
+    (error: unknown) =>
+      error instanceof AuthApiFailure &&
+      error.status === 409 &&
+      error.message === "invite-busy",
+  );
+  releasePatch();
+  const firstResult = await first;
+  const replayedResult = await startAutomatch(identity, request(), value, {
+    random: () => 0.5,
+  });
+
+  assert.deepEqual(replayedResult, firstResult);
+  assert.equal(sourceWrites, 1);
+  assert.equal(ownershipReads, 1);
+  assert.equal(
+    (committedReceipt as Record<string, unknown>).inviteId,
+    "auto_aaaaaaaaaaa",
+  );
 });
 
 test("converges pending queues after their owners merge", async () => {
@@ -870,7 +1251,10 @@ test("converges pending queues after their owners merge", async () => {
         }
         const queueMatch = /^automatch\/(.+)$/.exec(path);
         if (queueMatch) return queues.get(queueMatch[1]) || null;
-        const inviteMatch = /^invites\/(.+)\/(guestId|hostId)$/.exec(path);
+        const inviteRootMatch = /^invites\/([^/]+)$/.exec(path);
+        if (inviteRootMatch) return invites.get(inviteRootMatch[1]) || null;
+        const inviteMatch =
+          /^invites\/(.+)\/(guestId|hostId|automatchOperationIds)$/.exec(path);
         if (inviteMatch) {
           return invites.get(inviteMatch[1])?.[inviteMatch[2]] ?? null;
         }
@@ -911,8 +1295,14 @@ test("converges pending queues after their owners merge", async () => {
   assert.equal(ownershipReads, 1);
   assert.deepEqual([...queues.keys()], ["auto_newer"]);
   assert.equal(invites.get("auto_older")?.automatchStateHint, "canceled");
-  assert.equal(patches.length, 1);
+  assert.equal(patches.length, 2);
   assert.equal(patches[0]["automatch/auto_older"], null);
+  assertPendingReceiptUpdates(
+    patches[1],
+    "auto_newer",
+    AUTOMATCH_OPERATION_ID,
+    "first-uid",
+  );
   assert.deepEqual(profileTasks, [
     {
       kind: "automatch-profile-game-projection",
@@ -944,6 +1334,7 @@ test("repeatedly converges same-UID queues hidden behind the bounded query", asy
   const canceledInviteIds: string[] = [];
   const profileTasks: unknown[] = [];
   const telegramTasks: unknown[] = [];
+  let receiptUpdates: Record<string, unknown> = {};
   let requestId = 0;
   let uidQueries = 0;
 
@@ -967,13 +1358,24 @@ test("repeatedly converges same-UID queues hidden behind the bounded query", asy
         }
         const queueMatch = /^automatch\/(.+)$/.exec(path);
         if (queueMatch) return queues.get(queueMatch[1]) || null;
-        const inviteMatch = /^invites\/(.+)\/(guestId|hostId)$/.exec(path);
+        const inviteRootMatch = /^invites\/([^/]+)$/.exec(path);
+        if (inviteRootMatch) return invites.get(inviteRootMatch[1]) || null;
+        const inviteMatch =
+          /^invites\/(.+)\/(guestId|hostId|automatchOperationIds)$/.exec(path);
         if (inviteMatch) {
           return invites.get(inviteMatch[1])?.[inviteMatch[2]] ?? null;
         }
         assert.fail(`unexpected path ${path}`);
       },
       patchRtdbRoot: async (updates) => {
+        if (
+          Object.hasOwn(
+            updates,
+            `gameplayMutationReceipts/${AUTOMATCH_OPERATION_ID}`,
+          )
+        ) {
+          receiptUpdates = updates;
+        }
         for (const [path, value] of Object.entries(updates)) {
           const queueMatch = /^automatch\/(.+)$/.exec(path);
           if (queueMatch && value === null) {
@@ -1009,7 +1411,8 @@ test("repeatedly converges same-UID queues hidden behind the bounded query", asy
   });
   assert.deepEqual([...queues.keys()], ["auto_b"]);
   assert.deepEqual(canceledInviteIds, ["auto_a", "auto_c"]);
-  assert.equal(uidQueries, 4);
+  assert.equal(uidQueries, 3);
+  assertPendingReceiptUpdates(receiptUpdates, "auto_b");
   assert.deepEqual(
     profileTasks.map((task) => (task as { inviteId: string }).inviteId),
     ["auto_a", "auto_c"],
@@ -1898,7 +2301,10 @@ test("converges a candidate owner before consuming its surviving queue", async (
         }
         const queueMatch = /^automatch\/(.+)$/.exec(path);
         if (queueMatch) return queues.get(queueMatch[1]) || null;
-        const inviteMatch = /^invites\/(.+)\/(guestId|hostId)$/.exec(path);
+        const inviteRootMatch = /^invites\/([^/]+)$/.exec(path);
+        if (inviteRootMatch) return invites.get(inviteRootMatch[1]) || null;
+        const inviteMatch =
+          /^invites\/(.+)\/(guestId|hostId|automatchOperationIds)$/.exec(path);
         if (inviteMatch) {
           return invites.get(inviteMatch[1])?.[inviteMatch[2]] ?? null;
         }
@@ -1936,6 +2342,9 @@ test("converges a candidate owner before consuming its surviving queue", async (
   assert.deepEqual([...queues.keys()], []);
   assert.equal(invites.get("auto_older")?.automatchStateHint, "canceled");
   assert.equal(invites.get("auto_newer")?.guestId, identity.uid);
+  assert.deepEqual(invites.get("auto_newer")?.automatchOperationIds, {
+    [identity.uid]: AUTOMATCH_OPERATION_ID,
+  });
   assert.equal(patches.length, 2);
   assert.equal(patches[0]["automatch/auto_older"], null);
   assert.equal(patches[1]["automatch/auto_newer"], null);
@@ -1973,26 +2382,31 @@ test("backs off boundedly while the profile queue lock is busy", async () => {
   assert.ok(delays.every((delay) => delay <= 1_250));
 });
 
-test("returns an exact pending queue while canonical ownership is unavailable", async () => {
+test("replays a null-projection receipt before an ownership outage", async () => {
   let profileReads = 0;
+  const profileTasks: unknown[] = [];
+  const telegramTasks: unknown[] = [];
   const result = await startAutomatch(
     identity,
     request(),
-    repository({
-      readProfileOwnershipSnapshot: async () => {
-        profileReads++;
-        throw new Error("D1 unavailable");
+    repository(
+      {
+        readProfileOwnershipSnapshot: async () => {
+          profileReads++;
+          throw new Error("D1 unavailable");
+        },
       },
-      getRtdbPath: async (_path, query) => {
-        assert.deepEqual(query, {
-          orderBy: "uid",
-          equalTo: identity.uid,
-          limitToFirst: 2,
-        });
-        return { zzz_owned: { uid: identity.uid } };
+      () => storedAutomatchReceipt("zzz_owned"),
+    ),
+    {
+      enqueueProfileGameProjection: async (task) => {
+        profileTasks.push(task);
       },
-    }),
-    { logProfileFailure: () => undefined },
+      enqueueTelegramProjection: async (task) => {
+        telegramTasks.push(task);
+      },
+      logProfileFailure: () => undefined,
+    },
   );
   assert.deepEqual(result, {
     ok: true,
@@ -2000,12 +2414,14 @@ test("returns an exact pending queue while canonical ownership is unavailable", 
     mode: "pending",
     matchedImmediately: false,
   });
-  assert.equal(profileReads, 1);
+  assert.equal(profileReads, 0);
+  assert.deepEqual(profileTasks, []);
+  assert.deepEqual(telegramTasks, []);
 });
 
 test("returns pending when one pair snapshot has the same canonical owner", async () => {
   let ownershipReads = 0;
-  let writes = 0;
+  let updates: Record<string, unknown> = {};
   const result = await startAutomatch(
     identity,
     request(),
@@ -2041,11 +2457,17 @@ test("returns pending when one pair snapshot has the same canonical owner", asyn
         if (path === "automatch/auto_existing") {
           return { uid: "host-uid", profileId: "host-profile" };
         }
-        if (path === "invites/auto_existing/guestId") return null;
+        if (path === "invites/auto_existing") {
+          return {
+            hostId: "host-uid",
+            guestId: null,
+            automatchStateHint: "pending",
+          };
+        }
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async () => {
-        writes++;
+      patchRtdbRoot: async (value) => {
+        updates = value;
       },
     }),
   );
@@ -2057,7 +2479,7 @@ test("returns pending when one pair snapshot has the same canonical owner", asyn
     matchedImmediately: false,
   });
   assert.equal(ownershipReads, 2);
-  assert.equal(writes, 0);
+  assertPendingReceiptUpdates(updates, "auto_existing");
 });
 
 test("uses one pair snapshot through the RTDB match write", async () => {
@@ -2065,6 +2487,7 @@ test("uses one pair snapshot through the RTDB match write", async () => {
   let ownershipChanged = false;
   let ownershipReads = 0;
   let writes = 0;
+  let matchedUpdates: Record<string, unknown> = {};
   const result = await startAutomatch(
     identity,
     request(),
@@ -2101,13 +2524,18 @@ test("uses one pair snapshot through the RTDB match write", async () => {
           ownershipChanged = true;
           return { uid: "host-uid", profileId: "host-profile" };
         }
-        if (path === "invites/auto_snapshot/guestId") {
-          return committed ? identity.uid : null;
+        if (path === "invites/auto_snapshot") {
+          return {
+            hostId: "host-uid",
+            guestId: committed ? identity.uid : null,
+            automatchOperationIds: { "host-uid": "host-operation" },
+          };
         }
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async () => {
+      patchRtdbRoot: async (updates) => {
         writes++;
+        matchedUpdates = updates;
         committed = true;
       },
     }),
@@ -2121,6 +2549,14 @@ test("uses one pair snapshot through the RTDB match write", async () => {
   });
   assert.equal(ownershipReads, 2);
   assert.equal(writes, 1);
+  assert.deepEqual(
+    (matchedUpdates["invites/auto_snapshot"] as Record<string, unknown>)
+      .automatchOperationIds,
+    {
+      "host-uid": "host-operation",
+      [identity.uid]: AUTOMATCH_OPERATION_ID,
+    },
+  );
 });
 
 test("fails before the match patch when the pair snapshot is unavailable", async () => {
@@ -2199,9 +2635,13 @@ test("matches a different v2 candidate without rereading a known commit", async 
             profileId: "host-profile",
           };
         }
-        if (path === "invites/auto_existing/guestId") {
+        if (path === "invites/auto_existing") {
           guestReads++;
-          return guestReads === 1 ? null : "guest-uid";
+          return {
+            hostId: "host-uid",
+            guestId: guestReads === 1 ? null : identity.uid,
+            automatchOperationIds: { "host-uid": "host-operation" },
+          };
         }
         assert.fail(`unexpected path ${path}`);
       },
@@ -2238,6 +2678,10 @@ test("matches a different v2 candidate without rereading a known commit", async 
     password: "password",
     automatchStateHint: "matched",
     automatchCanceledAt: null,
+    automatchOperationIds: {
+      "host-uid": "host-operation",
+      [identity.uid]: AUTOMATCH_OPERATION_ID,
+    },
     telegramDeliveryVersion: 2,
   });
   const match = updates["players/guest-uid/matches/auto_existing"] as Record<
@@ -2303,7 +2747,13 @@ test("keeps legacy matches free of Telegram v2 updates", async () => {
         if (path === "automatch/auto_legacy") {
           return { uid: "host-uid" };
         }
-        return committed ? "guest-uid" : null;
+        if (path === "invites/auto_legacy") {
+          return {
+            hostId: "host-uid",
+            guestId: committed ? identity.uid : null,
+          };
+        }
+        return null;
       },
       patchRtdbRoot: async (value) => {
         updates = value;
@@ -2320,10 +2770,21 @@ test("keeps legacy matches free of Telegram v2 updates", async () => {
   assert.equal(result.ok, true);
   assert.deepEqual(Object.keys(updates).sort(), [
     "automatch/auto_legacy",
+    `gameplayMutationReceiptExpirations/${AUTOMATCH_OPERATION_ID}`,
+    `gameplayMutationReceipts/${AUTOMATCH_OPERATION_ID}`,
     "invites/auto_legacy",
     "players/guest-uid/matches/auto_legacy",
     "profileGameProjectionOutbox/automatch/auto_legacy",
   ]);
+  assert.equal(
+    (
+      updates[`gameplayMutationReceipts/${AUTOMATCH_OPERATION_ID}`] as Record<
+        string,
+        unknown
+      >
+    ).telegramProjection,
+    false,
+  );
   assert.deepEqual(
     updates["profileGameProjectionOutbox/automatch/auto_legacy"],
     {
@@ -2349,6 +2810,11 @@ test("keeps legacy matches free of Telegram v2 updates", async () => {
     ),
     false,
   );
+  assert.deepEqual(
+    (updates["invites/auto_legacy"] as Record<string, unknown>)
+      .automatchOperationIds,
+    { [identity.uid]: AUTOMATCH_OPERATION_ID },
+  );
 });
 
 test("bounds failed guest verification to four total attempts", async () => {
@@ -2373,7 +2839,10 @@ test("bounds failed guest verification to four total attempts", async () => {
         if (path === "automatch/auto_race") {
           return { uid: "host-uid" };
         }
-        return "other-guest";
+        if (path === "invites/auto_race") {
+          return { hostId: "host-uid", guestId: "other-guest" };
+        }
+        return null;
       },
       patchRtdbRoot: async (updates) => {
         writes.push(updates);
@@ -2381,7 +2850,7 @@ test("bounds failed guest verification to four total attempts", async () => {
     }),
   );
   assert.deepEqual(result, { ok: false });
-  assert.equal(queueReads, 10);
+  assert.equal(queueReads, 9);
   assert.equal(writes.length, 0);
 });
 
@@ -2406,6 +2875,12 @@ test("reconciles a committed match after an ambiguous patch failure", async () =
         }
         if (path === "automatch/auto_committed") {
           return { uid: "host-uid" };
+        }
+        if (path === "invites/auto_committed") {
+          return {
+            hostId: "host-uid",
+            guestId: committed ? identity.uid : null,
+          };
         }
         if (
           path ===
@@ -2457,6 +2932,12 @@ test("returns a proven match after the original signal aborts", async () => {
         }
         if (path === "automatch/auto_aborted_commit") {
           return { uid: "host-uid" };
+        }
+        if (path === "invites/auto_aborted_commit") {
+          return {
+            hostId: "host-uid",
+            guestId: committed ? identity.uid : null,
+          };
         }
         if (
           path ===
@@ -2517,6 +2998,9 @@ test("returns a resolved match without rereading through an aborted signal", asy
         if (path === "automatch/auto_resolved_commit") {
           return { uid: "host-uid" };
         }
+        if (path === "invites/auto_resolved_commit") {
+          return { hostId: "host-uid", guestId: null };
+        }
         return null;
       },
       patchRtdbRoot: async () => {
@@ -2534,36 +3018,44 @@ test("returns a resolved match without rereading through an aborted signal", asy
   });
 });
 
-test("rejects a matched guest without the same projection request", async () => {
+test("rejects a committed match with a conflicting receipt", async () => {
   let committed = false;
-  const value = repository({
-    getRtdbPath: async (path) => {
-      if (path === "automatch") {
-        return {
-          auto_unproven_release: {
-            uid: "host-uid",
-            hostColor: "white",
-            password: "password",
-            gameVariant: "Classic",
-          },
+  let receipt: unknown = null;
+  const value = repository(
+    {
+      getRtdbPath: async (path) => {
+        if (path === "automatch") {
+          return {
+            auto_unproven_release: {
+              uid: "host-uid",
+              hostColor: "white",
+              password: "password",
+              gameVariant: "Classic",
+            },
+          };
+        }
+        if (path === "automatch/auto_unproven_release") {
+          return { uid: "host-uid" };
+        }
+        if (path === "invites/auto_unproven_release") {
+          return {
+            hostId: "host-uid",
+            guestId: committed ? identity.uid : null,
+          };
+        }
+        return null;
+      },
+      patchRtdbRoot: async (updates) => {
+        receipt = {
+          ...(receiptFromUpdates(updates) as Record<string, unknown>),
+          aura: "different",
         };
-      }
-      if (path === "automatch/auto_unproven_release") {
-        return { uid: "host-uid" };
-      }
-      if (
-        path ===
-        "profileGameProjectionOutbox/automatch/auto_unproven_release/requestId"
-      ) {
-        return committed ? "different-request" : null;
-      }
-      return committed ? identity.uid : null;
+        committed = true;
+        throw new Error("response-lost-after-commit");
+      },
     },
-    patchRtdbRoot: async () => {
-      committed = true;
-      throw new Error("response-lost-after-commit");
-    },
-  });
+    () => receipt,
+  );
   const release = coordinationFor(value).mutationLocks.release;
   coordinationFor(value).mutationLocks.release = async (lock, ownerId) => {
     if (lock.lockId === "auto_unproven_release") {
@@ -2605,7 +3097,13 @@ test("returns a committed match despite release failure", async () => {
       if (path === "automatch/auto_release_committed") {
         return { uid: "host-uid" };
       }
-      return committed ? identity.uid : null;
+      if (path === "invites/auto_release_committed") {
+        return {
+          hostId: "host-uid",
+          guestId: committed ? identity.uid : null,
+        };
+      }
+      return null;
     },
     patchRtdbRoot: async () => {
       writes++;
@@ -2671,7 +3169,13 @@ test("returns one committed match when the owner lock release fails", async () =
       if (path === "automatch/auto_owner_release") {
         return { uid: "host-uid" };
       }
-      return committed ? identity.uid : null;
+      if (path === "invites/auto_owner_release") {
+        return {
+          hostId: "host-uid",
+          guestId: committed ? identity.uid : null,
+        };
+      }
+      return null;
     },
     patchRtdbRoot: async () => {
       writes++;
@@ -2700,6 +3204,43 @@ test("returns one committed match when the owner lock release fails", async () =
   assert.equal(writes, 1);
 });
 
+test("replays a committed result when the operation lock release is ambiguous", async () => {
+  let writes = 0;
+  const value = repository({
+    getRtdbPath: async (path) => {
+      if (path === "automatch") return null;
+      assert.fail(`unexpected path ${path}`);
+    },
+    patchRtdbRoot: async () => {
+      writes++;
+    },
+  });
+  const stores = coordinationFor(value);
+  const release = stores.mutationLocks.release;
+  stores.mutationLocks.release = async (lock, ownerId) => {
+    if (lock.lockId === `automatch-operation-${AUTOMATCH_OPERATION_ID}`) {
+      throw new GameSessionMutationLockFailure("release");
+    }
+    await release(lock, ownerId);
+  };
+
+  const first = await startAutomatch(identity, request(), value, {
+    random: () => 0,
+  });
+  const replay = await startAutomatch(identity, request(), value, {
+    random: () => 0.5,
+  });
+
+  assert.deepEqual(first, {
+    ok: true,
+    inviteId: "auto_aaaaaaaaaaa",
+    mode: "pending",
+    matchedImmediately: false,
+  });
+  assert.deepEqual(replay, first);
+  assert.equal(writes, 1);
+});
+
 test("does not retry an unconfirmed patch failure", async () => {
   let queueReads = 0;
   let writes = 0;
@@ -2708,33 +3249,123 @@ test("does not retry an unconfirmed patch failure", async () => {
       startAutomatch(
         identity,
         request(),
-        repository({
-          getRtdbPath: async (path) => {
-            if (path === "automatch") {
-              queueReads++;
-              return {
-                auto_unconfirmed: {
-                  uid: "host-uid",
-                  hostColor: "white",
-                  password: "password",
-                  gameVariant: "Classic",
-                },
-              };
-            }
-            if (path === "automatch/auto_unconfirmed") {
-              return { uid: "host-uid" };
-            }
-            return null;
+        repository(
+          {
+            getRtdbPath: async (path) => {
+              if (path === "automatch") {
+                queueReads++;
+                return {
+                  auto_unconfirmed: {
+                    uid: "host-uid",
+                    hostColor: "white",
+                    password: "password",
+                    gameVariant: "Classic",
+                  },
+                };
+              }
+              if (path === "automatch/auto_unconfirmed") {
+                return { uid: "host-uid" };
+              }
+              if (path === "invites/auto_unconfirmed") {
+                return { hostId: "host-uid", guestId: null };
+              }
+              return null;
+            },
+            patchRtdbRoot: async () => {
+              writes++;
+              throw new Error("unconfirmed-patch");
+            },
           },
-          patchRtdbRoot: async () => {
-            writes++;
-            throw new Error("unconfirmed-patch");
-          },
-        }),
+          () => null,
+        ),
       ),
     /unconfirmed-patch/,
   );
-  assert.equal(queueReads, 4);
+  assert.equal(queueReads, 3);
+  assert.equal(writes, 1);
+});
+
+test("replays an ambiguously committed match before creating another queue", async () => {
+  let committed = false;
+  let receipt: unknown = null;
+  let failReceiptProof = false;
+  let writes = 0;
+  const value = repository(
+    {
+      getRtdbPath: async (path, query) => {
+        if (path === "automatch") {
+          if (query?.orderBy === "uid" && query.equalTo === identity.uid) {
+            return null;
+          }
+          if (committed) return null;
+          return {
+            auto_receipt_replay: {
+              uid: "host-uid",
+              hostColor: "white",
+              password: "password",
+              gameVariant: "Classic",
+              telegramDeliveryVersion: 2,
+            },
+          };
+        }
+        if (path === "automatch/auto_receipt_replay") {
+          return committed ? null : { uid: "host-uid" };
+        }
+        if (path === "invites/auto_receipt_replay") {
+          return committed
+            ? { hostId: "host-uid", guestId: identity.uid }
+            : { hostId: "host-uid", guestId: null };
+        }
+        if (
+          path === "invites/auto_receipt_replay/guestId" ||
+          path ===
+            "profileGameProjectionOutbox/automatch/auto_receipt_replay/requestId"
+        ) {
+          if (committed) throw new Error("proof-unavailable");
+          return null;
+        }
+        return null;
+      },
+      patchRtdbRoot: async (updates) => {
+        writes++;
+        receipt = {
+          ...(updates[
+            `gameplayMutationReceipts/${AUTOMATCH_OPERATION_ID}`
+          ] as Record<string, unknown>),
+          completedAtMs: 1,
+        };
+        committed = true;
+        failReceiptProof = true;
+        throw new Error("response-lost-after-commit");
+      },
+    },
+    () => {
+      if (failReceiptProof) {
+        failReceiptProof = false;
+        throw new Error("proof-unavailable");
+      }
+      return receipt;
+    },
+  );
+  const automatchRequest = request();
+
+  await assert.rejects(
+    () => startAutomatch(identity, automatchRequest, value),
+    /response-lost-after-commit/,
+  );
+  assert.deepEqual(await startAutomatch(identity, automatchRequest, value), {
+    ok: true,
+    inviteId: "auto_receipt_replay",
+    mode: "matched",
+    matchedImmediately: true,
+  });
+  await assert.rejects(
+    () => startAutomatch(identity, request(2), value),
+    (error: unknown) =>
+      error instanceof AuthApiFailure &&
+      error.status === 409 &&
+      error.message === "operation-conflict",
+  );
   assert.equal(writes, 1);
 });
 

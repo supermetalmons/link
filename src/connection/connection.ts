@@ -59,7 +59,8 @@ import {
   ProfileEventPrizes,
 } from "./connectionModels";
 import { resolvePlayerProfileWithRetry } from "./playerProfileLookup";
-import { storage } from "../utils/storage";
+import { storage, type PendingAutomatchOperation } from "../utils/storage";
+import { withAutomatchOperationLock } from "./automatchOperationLock";
 import { generateNewInviteId } from "../utils/misc";
 import {
   getWagerState,
@@ -216,6 +217,7 @@ const EVENT_SYNC_RETRY_DELAYS_MS = [150, 300] as const;
 const PROFILE_LOOKUP_RETRY_DELAY_MS = 1_000;
 const NAVIGATION_GAMES_POLL_INTERVAL_MS = 5_000;
 const NAVIGATION_GAMES_MAX_CONSECUTIVE_FAILURES = 3;
+const AUTOMATCH_OPERATION_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 
 const mapKnownEventPrizeSelections = (
   eventId: string,
@@ -396,6 +398,60 @@ class Connection {
       return;
     }
     console.log(event, payload);
+  }
+
+  private clearPendingAutomatchRequest(
+    uid: string,
+    operationId?: string,
+  ): void {
+    const stored = storage.getPendingAutomatchOperation(uid);
+    if (operationId && stored?.operationId !== operationId) return;
+    storage.setPendingAutomatchOperation(uid, null);
+  }
+
+  private getPendingAutomatchRequest(uid: string): PendingAutomatchOperation {
+    const nowMs = Date.now();
+    const stored = storage.getPendingAutomatchOperation(uid);
+    if (
+      stored &&
+      nowMs >= stored.createdAtMs &&
+      nowMs - stored.createdAtMs <= AUTOMATCH_OPERATION_RETENTION_MS
+    ) {
+      return stored;
+    }
+    this.clearPendingAutomatchRequest(uid);
+    const operation: PendingAutomatchOperation = {
+      createdAtMs: nowMs,
+      operationId: crypto.randomUUID(),
+      request: {
+        emojiId: getPlayersEmojiId(),
+        aura: storage.getPlayerEmojiAura(""),
+      },
+      resolvedInviteId: null,
+      uid,
+    };
+    storage.setPendingAutomatchOperation(uid, operation);
+    return operation;
+  }
+
+  private reconcilePendingAutomatchRequest(
+    uid: string,
+    inviteId: string,
+    invite: Invite,
+  ): void {
+    void withAutomatchOperationLock(uid, async () => {
+      const pending = storage.getPendingAutomatchOperation(uid);
+      const observedOperationId = invite.automatchOperationIds?.[uid];
+      if (
+        pending &&
+        (pending.resolvedInviteId === inviteId ||
+          pending.operationId === observedOperationId)
+      ) {
+        this.clearPendingAutomatchRequest(uid, pending.operationId);
+      }
+    }).catch((error) => {
+      console.error("Failed to clear completed automatch operation", error);
+    });
   }
 
   private beginConnectAttempt(): number {
@@ -2189,15 +2245,33 @@ class Connection {
   public async automatch(): Promise<StartAutomatchResponse> {
     try {
       await this.ensureAuthenticated();
-      const tokenProvider = this.getUserBoundAuthTokenProvider();
-      const emojiId = getPlayersEmojiId();
-      const aura = storage.getPlayerEmojiAura("");
-      const response = await startAutomatchViaApi(
-        { emojiId, aura },
-        tokenProvider,
-      );
-      this.notifyNavigationGamesChanged();
-      return response;
+      const user = this.auth.currentUser;
+      if (!user) {
+        throw new Error("Failed to authenticate user");
+      }
+      return await withAutomatchOperationLock(user.uid, async () => {
+        const tokenProvider = this.getUserBoundAuthTokenProvider(user.uid);
+        const pendingRequest = this.getPendingAutomatchRequest(user.uid);
+        const response = await startAutomatchViaApi(
+          pendingRequest.request,
+          tokenProvider,
+          pendingRequest.operationId,
+        );
+        tokenProvider.assertCurrentUser();
+        if (!response.ok) {
+          this.clearPendingAutomatchRequest(
+            user.uid,
+            pendingRequest.operationId,
+          );
+        } else {
+          storage.setPendingAutomatchOperation(user.uid, {
+            ...pendingRequest,
+            resolvedInviteId: response.inviteId,
+          });
+        }
+        this.notifyNavigationGamesChanged();
+        return response;
+      });
     } catch (error) {
       console.error("Error calling automatch:", error);
       throw error;
@@ -2207,11 +2281,22 @@ class Connection {
   public async cancelAutomatch(): Promise<any> {
     try {
       await this.ensureAuthenticated();
-      const response = await cancelAutomatchViaApi(
-        this.getUserBoundAuthTokenProvider(),
-      );
-      this.notifyNavigationGamesChanged();
-      return response;
+      const user = this.auth.currentUser;
+      if (!user) {
+        throw new Error("Failed to authenticate user");
+      }
+      return await withAutomatchOperationLock(user.uid, async () => {
+        const pending = storage.getPendingAutomatchOperation(user.uid);
+        const operationId = pending?.operationId ?? null;
+        const tokenProvider = this.getUserBoundAuthTokenProvider(user.uid);
+        const response = await cancelAutomatchViaApi(tokenProvider);
+        tokenProvider.assertCurrentUser();
+        if (response.ok && operationId) {
+          this.clearPendingAutomatchRequest(user.uid, operationId);
+        }
+        this.notifyNavigationGamesChanged();
+        return response;
+      });
     } catch (error) {
       console.error("Error canceling automatch:", error);
       throw error;
@@ -4502,6 +4587,7 @@ class Connection {
         }
 
         const workingInvite: Invite = { ...inviteData };
+        this.reconcilePendingAutomatchRequest(uid, inviteId, workingInvite);
         let actorResolution = await this.resolveActorUidForInvite(
           workingInvite,
           inviteId,
@@ -4671,7 +4757,15 @@ class Connection {
               inviteRef,
               (snapshot) => {
                 const updatedInvite = snapshot.val() as Invite | null;
-                if (!updatedInvite || !updatedInvite.guestId) {
+                if (!updatedInvite) {
+                  return;
+                }
+                this.reconcilePendingAutomatchRequest(
+                  uid,
+                  inviteId,
+                  updatedInvite,
+                );
+                if (!updatedInvite.guestId) {
                   return;
                 }
                 if (this.latestInvite) {

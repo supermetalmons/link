@@ -92,11 +92,11 @@ Tail the promoted version during the production smokes and for at least 15 minut
 npx wrangler tail mons-link-api --version-id <version-id> --search profile-ownership-unavailable --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
-Rollback immediately to the previous tested D1-compatible Worker if the authenticated production smoke fails. Otherwise rollback if ownership failures recur across multiple real requests during that window or the Worker 5xx rate rises above its pre-deploy baseline. Additive migrations remain in place and require no D1 restore.
+Rollback immediately to the previous tested D1-compatible Worker if the authenticated production smoke fails. Otherwise rollback if ownership failures recur across multiple real requests during that window or the Worker 5xx rate rises above its pre-deploy baseline. After automatch activation, use only the exact compatible API recorded by the gameplay coordination cutover below. Additive migrations remain in place and require no D1 restore.
 
 `upload:api` does not send traffic to the candidate. `promote:api` deploys an explicit Version ID to 100%. `deploy:api:triggers` applies routes, Cron, Workflows, and configured Queue consumers. Removing an omitted Queue consumer remains an explicit operator action.
 
-Rollback targets only a reviewed D1-compatible Version ID:
+Rollback targets only a reviewed D1-compatible Version ID. After automatch activation, use the recorded version that retains required IDs, the operation-scoped D1 lease, and receipts for every successful path:
 
 ```sh
 npx wrangler rollback <known-good-version-id> --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
@@ -150,12 +150,15 @@ After rollback and both production smokes, resume delivery. Retain the additive 
 
 Migration `0007_gameplay_coordination.sql` made `mons-link-profile-games` D1 the permanent owner of gameplay leases and timer-start markers. Migration `0008_match_timer_reconciliation.sql` adds nullable opponent metadata and the reconciliation index. `matchTimerClaims`, active invites and matches, mutation receipts, and projection outboxes remain in RTDB. Keep the retired coordination roots and explicit `matchTimerStarts` deny rule unchanged, but never repopulate or reactivate those roots.
 
-Freeze profile/gameplay writes, drain D1 leases, and run the read-only preview. Record both timer digests, apply migration `0008`, then preview again and require the logical and physical timer-row digests to be unchanged while `hasOpponentIdColumn` changes from `false` to `true`. Upload the candidate only after that comparison passes.
+Record the current frontend and API version IDs as abort-only targets, then freeze profile/gameplay writes. Wait at least 65 seconds, verify that D1 gameplay leases are drained, and run the read-only preview. Record both timer digests, apply migration `0008`, then preview again and require the logical and physical timer-row digests to be unchanged while `hasOpponentIdColumn` changes from `false` to `true`. Upload the API candidate only after that comparison passes. Record each compatible candidate ID when its upload returns, before promoting it. While writes remain frozen, promote the exact frontend version that persists and sends automatch operation IDs, then promote the exact API version that requires those IDs. The old API safely ignores the frontend's new query parameter while the freeze prevents receiptless commits. The production API intentionally rejects browser tabs loaded before the frontend release; those users must reload.
+
+After `npm run deploy -- preview`, stop before production promotion. Open the exact frontend preview in every supported browser, wait for authentication, and duplicate it into a second tab. Trigger Automatch in both tabs and require both requests to use the same UUID query and return `503 profile-writes-disabled`; reload and retry once, requiring the same UUID and one surviving `pendingAutomatchOperation:<uid>` record. Confirm `navigator.locks` exists. Record the preview URL and results, and do not promote on any mismatch.
 
 ```sh
 npm run check:all
 npm run dry-run:api
 npm run deploy -- dry-run
+npx wrangler deployments list --config wrangler.jsonc
 npx wrangler deployments list --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 npm run manage:profile-canonical -- --freeze
 npm run manage:profile-canonical -- --status
@@ -164,14 +167,19 @@ npm run migrate:gameplay-coordination -- --preview --project mons-link
 npx wrangler d1 migrations apply mons-link-profile-games --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 npm run migrate:gameplay-coordination -- --preview --project mons-link
 npm run upload:api
-npm run smoke:api -- --base-url <version-preview-url> --read-only --require-history --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
-npm run promote:api -- --version-id <tested-d1-version-id>
+npm run smoke:api -- --base-url <version-preview-url> --read-only --require-history --require-automatch-operation-id --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
+npm run deploy -- preview
+npm run deploy -- production --version-id <tested-automatch-compatible-frontend-version-id>
+npm run promote:api -- --version-id <tested-automatch-compatible-api-version-id>
 npm run smoke:api -- --base-url https://api.mons.link --read-only --require-history --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
+npm run smoke:api -- --base-url https://api.mons.link --read-only --require-automatch-operation-id --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
 npm run manage:profile-canonical -- --resume
 npm run smoke:api -- --base-url https://api.mons.link
 ```
 
-Leave writes frozen if migration, preview smoke, promotion, or production smoke fails. Normal rollback promotes the recorded D1-compatible Worker and leaves additive migrations installed; D1 data incidents require a reviewed fix-forward because `PROFILE_GAMES_DB` also owns historical matches and projection state. Never restore coordination data to RTDB. Committed automatch operations return their known result if only lease release fails. All coordination failures without durable proof return sanitized `503` responses. After resuming, run mutable and authenticated smokes and observe gameplay 5xx and coordination failures for at least 15 minutes.
+Keep writes frozen through the preview-browser check and both authenticated production smokes if migration, any preview smoke, either promotion, or either production smoke fails. After resuming, immediately re-freeze if the standard smoke fails. The frontend reuses one exact unresolved automatch request for seven days, matching the RTDB receipt-retention window. A missing or duplicate operation ID is rejected before rate limiting or mutation; an old open tab therefore fails safely until it reloads. Every successful start, including an already-owned pending queue, has a replayable receipt. Run `--require-automatch-operation-id` only after the compatible API is live and while writes remain frozen: it verifies the freeze, requires missing ID `400 invalid-request`, and requires a fixed valid UUID to reach `503 profile-writes-disabled` without mutation.
+
+The recorded pre-release pair remains an abort target only while writes are frozen and before `--resume`. After resuming writes or accepting the first receipt-aware mutation, roll back only to the separately recorded compatible candidate pair: the API must retain required IDs, the operation-scoped D1 lease, and receipts for every successful path; the frontend must retain per-UID persistence, Web Locks, and exact invite correlation. If that pair is unavailable, keep profile/gameplay writes frozen and fix forward. Additive D1 migrations and RTDB receipt roots remain installed; never restore coordination data to RTDB. After resuming, run mutable and authenticated smokes and observe gameplay 5xx, stale-client `400` responses, receipt cleanup, and coordination failures for at least 15 minutes.
 
 ## Canonical profile D1 maintenance
 
@@ -335,7 +343,7 @@ npx wrangler d1 migrations apply mons-link-telegram --remote --config cloud/work
 
 ## Frontend release
 
-When a frontend release depends on API behavior, promote and smoke the API first. Upload and smoke a unique frontend preview:
+When a frontend release depends on API behavior, promote and smoke the API first. The first required automatch-operation-ID release is the documented exception: keep writes frozen and promote its compatible frontend before the requiring API. Upload and smoke a unique frontend preview:
 
 ```sh
 npm run deploy -- preview

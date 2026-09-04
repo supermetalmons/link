@@ -41,6 +41,7 @@ const env = {
 const identity: RequestIdentity = {
   uid: "firebase-uid",
 };
+const AUTOMATCH_OPERATION_ID = "00000000-0000-4000-8000-000000000001";
 
 const coordinationByRepository = new WeakMap<
   GameplayRepository,
@@ -886,7 +887,7 @@ test("routes authenticated CORS and rejects methods before authentication", asyn
   assert.equal(forbidden.status, 403);
 
   const started = await handleGameplayRoute(
-    request("/automatch/start", {
+    request(`/automatch/start?operationId=${AUTOMATCH_OPERATION_ID}`, {
       body: { emojiId: 7, aura: "rainbow" },
     }),
     env,
@@ -895,6 +896,19 @@ test("routes authenticated CORS and rejects methods before authentication", asyn
       repository: repository({
         readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
         getRtdbPath: async (path, query) => {
+          if (path.startsWith("gameplayMutationReceipts/")) {
+            return null;
+          }
+          if (path === "automatch/auto_existing") {
+            return { uid: identity.uid };
+          }
+          if (path === "invites/auto_existing") {
+            return {
+              hostId: identity.uid,
+              guestId: null,
+              automatchStateHint: "pending",
+            };
+          }
           assert.equal(path, "automatch");
           assert.deepEqual(query, {
             orderBy: "uid",
@@ -914,6 +928,140 @@ test("routes authenticated CORS and rejects methods before authentication", asyn
     mode: "pending",
     matchedImmediately: false,
   });
+});
+
+test("rejects invalid automatch operation IDs before rate limiting", async () => {
+  let rateLimitCalls = 0;
+  const rateLimitedEnv = {
+    ...env,
+    AUTH_RATE_LIMITER: {
+      limit: async () => {
+        rateLimitCalls++;
+        return { success: true };
+      },
+    },
+  } as Env;
+  for (const path of [
+    "/automatch/start",
+    "/automatch/start?operationId=invalid",
+    `/automatch/start?operationId=${AUTOMATCH_OPERATION_ID}&operationId=${AUTOMATCH_OPERATION_ID}`,
+  ]) {
+    const response = await handleGameplayRoute(
+      request(path, { body: { emojiId: 7, aura: "rainbow" } }),
+      rateLimitedEnv,
+      context(),
+      { verifyIdentity: async () => identity },
+    );
+    assert.equal(response.status, 400);
+  }
+  assert.equal(rateLimitCalls, 0);
+});
+
+test("validates automatch operation IDs before the frozen-write gate", async () => {
+  let rateLimitCalls = 0;
+  let repositoryReads = 0;
+  let repositoryWrites = 0;
+  const frozenEnv = withProfileControl(
+    {
+      ...env,
+      AUTH_RATE_LIMITER: {
+        limit: async () => {
+          rateLimitCalls++;
+          return { success: true };
+        },
+      },
+    } as Env,
+    "frozen",
+  );
+  const dependencies = {
+    repository: repository({
+      getRtdbPath: async () => {
+        repositoryReads++;
+        return null;
+      },
+      patchRtdbRoot: async () => {
+        repositoryWrites++;
+      },
+    }),
+    verifyIdentity: async () => identity,
+  };
+
+  const missing = await handleGameplayRoute(
+    request("/automatch/start", {
+      body: { emojiId: 7, aura: "rainbow" },
+    }),
+    frozenEnv,
+    context(),
+    dependencies,
+  );
+  assert.equal(missing.status, 400);
+  assert.deepEqual(await missing.json(), {
+    ok: false,
+    error: "invalid-argument",
+    message: "invalid-request",
+  });
+
+  const valid = await handleGameplayRoute(
+    request(`/automatch/start?operationId=${AUTOMATCH_OPERATION_ID}`, {
+      body: { emojiId: 7, aura: "rainbow" },
+    }),
+    frozenEnv,
+    context(),
+    dependencies,
+  );
+  assert.equal(valid.status, 503);
+  assert.equal(valid.headers.get("Retry-After"), "60");
+  assert.deepEqual(await valid.json(), {
+    ok: false,
+    error: "unavailable",
+    message: "profile-writes-disabled",
+  });
+  assert.equal(rateLimitCalls, 0);
+  assert.equal(repositoryReads, 0);
+  assert.equal(repositoryWrites, 0);
+});
+
+test("rejects a rate-limited automatch start before repository access", async () => {
+  let rateLimitCalls = 0;
+  let repositoryReads = 0;
+  let repositoryWrites = 0;
+  const response = await handleGameplayRoute(
+    request(`/automatch/start?operationId=${AUTOMATCH_OPERATION_ID}`, {
+      body: { emojiId: 7, aura: "rainbow" },
+    }),
+    {
+      ...env,
+      AUTH_RATE_LIMITER: {
+        limit: async (input) => {
+          rateLimitCalls++;
+          assert.deepEqual(input, { key: `game-session:${identity.uid}` });
+          return { success: false };
+        },
+      },
+    } as Env,
+    context(),
+    {
+      repository: repository({
+        getRtdbPath: async () => {
+          repositoryReads++;
+          return null;
+        },
+        patchRtdbRoot: async () => {
+          repositoryWrites++;
+        },
+      }),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 429);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "resource-exhausted",
+    message: "Too many game session attempts.",
+  });
+  assert.equal(rateLimitCalls, 1);
+  assert.equal(repositoryReads, 0);
+  assert.equal(repositoryWrites, 0);
 });
 
 test("freezes gameplay mutations while keeping gameplay reads available", async () => {
@@ -973,7 +1121,7 @@ test("committed gameplay does not wait for projection Queues", async () => {
   const background: Promise<unknown>[] = [];
   const profileProjectionTasks: unknown[] = [];
   const response = await handleGameplayRoute(
-    request("/automatch/start", {
+    request(`/automatch/start?operationId=${AUTOMATCH_OPERATION_ID}`, {
       body: { emojiId: 7, aura: "rainbow" },
     }),
     {
@@ -2221,7 +2369,15 @@ test("authenticates before body parsing and sanitizes route failures", async () 
     ["/automatch/cancel", { unexpected: true }],
     ["/automatch/start", {}],
     ["/automatch/start", { emojiId: 0, aura: "" }],
-    ["/automatch/start", { emojiId: 1, aura: "", extra: true }],
+    [
+      "/automatch/start",
+      {
+        emojiId: 1,
+        aura: "",
+        extra: true,
+      },
+    ],
+    ["/automatch/start?operationId=invalid", { emojiId: 1, aura: "" }],
     ["/matches/timer/start", {}],
     ["/matches/timer/claim", {}],
     [

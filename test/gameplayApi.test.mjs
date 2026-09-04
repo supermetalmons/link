@@ -122,6 +122,7 @@ const {
 } = await import("@mons/shared/event-prizes");
 
 const originalFetch = globalThis.fetch;
+const AUTOMATCH_OPERATION_ID = "00000000-0000-4000-8000-000000000001";
 
 const jsonResponse = (body, status = 200) =>
   new Response(JSON.stringify(body), {
@@ -1503,8 +1504,12 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
 
   assert.deepEqual(
     await startAutomatchViaApi(
-      { emojiId: 7, aura: "rainbow" },
+      {
+        emojiId: 7,
+        aura: "rainbow",
+      },
       async () => "firebase-token",
+      AUTOMATCH_OPERATION_ID,
     ),
     {
       ok: true,
@@ -1644,7 +1649,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
   assert.deepEqual(
     calls.map((call) => call.input),
     [
-      "https://api.mons.link/automatch/start",
+      `https://api.mons.link/automatch/start?operationId=${AUTOMATCH_OPERATION_ID}`,
       "https://api.mons.link/automatch/cancel",
       "https://api.mons.link/navigation/games/remove",
       "https://api.mons.link/navigation/games/read",
@@ -1662,7 +1667,10 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
   assert.deepEqual(
     calls.map((call) => JSON.parse(call.init.body)),
     [
-      { emojiId: 7, aura: "rainbow" },
+      {
+        emojiId: 7,
+        aura: "rainbow",
+      },
       {},
       { inviteId: "invite-1" },
       { limit: 80, cursor: null },
@@ -1701,6 +1709,15 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
     assert.equal(headers.get("Authorization"), "Bearer firebase-token");
     assert.equal(headers.get("Content-Type"), "application/json");
   }
+  await assert.rejects(
+    startAutomatchViaApi(
+      { emojiId: 7, aura: "rainbow" },
+      async () => "firebase-token",
+      "invalid",
+    ),
+    (error) =>
+      error instanceof GameplayApiError && error.code === "invalid-argument",
+  );
 
   assert.equal(isCancelAutomatchResponse({ ok: false }), true);
   assert.equal(isCancelAutomatchResponse({ ok: true, extra: true }), false);
@@ -1714,6 +1731,13 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
   assert.equal(
     isStartAutomatchRequest({
       emojiId: 0,
+      aura: "",
+    }),
+    false,
+  );
+  assert.equal(
+    isStartAutomatchRequest({
+      emojiId: Number.MAX_SAFE_INTEGER + 1,
       aura: "",
     }),
     false,
@@ -2054,7 +2078,11 @@ test("rejects malformed and oversized gameplay responses", async () => {
   ];
   globalThis.fetch = async () => responses.shift();
   await assert.rejects(
-    startAutomatchViaApi({ emojiId: 1, aura: "" }, async () => "token"),
+    startAutomatchViaApi(
+      { emojiId: 1, aura: "" },
+      async () => "token",
+      AUTOMATCH_OPERATION_ID,
+    ),
     GameplayApiError,
   );
   await assert.rejects(

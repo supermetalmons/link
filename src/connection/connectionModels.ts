@@ -35,6 +35,7 @@ export interface Invite {
   guestRematches?: string | null;
   automatchStateHint?: AutomatchStateHint | null;
   automatchCanceledAt?: number | null;
+  automatchOperationIds?: Record<string, string> | null;
   eventId?: string | null;
   eventRoundIndex?: number | null;
   eventMatchKey?: string | null;

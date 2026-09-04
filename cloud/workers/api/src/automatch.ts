@@ -10,6 +10,7 @@ import {
   buildFreshMatchRecord,
 } from "@mons/shared/match-protocol";
 import {
+  isStartAutomatchResponse,
   type StartAutomatchRequest,
   type StartAutomatchResponse,
 } from "@mons/shared/navigation";
@@ -32,6 +33,7 @@ import {
   FIREBASE_RTDB_SERVER_TIMESTAMP,
   firebaseRtdbIncrement,
 } from "./firebaseRtdb.ts";
+import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 import type {
   GameplayProfile,
   GameplayRepository,
@@ -50,6 +52,8 @@ import type {
   TelegramProjectionTask,
 } from "./telegramProjectionTasks.ts";
 import {
+  GAME_SESSION_MUTATION_RECEIPT_EXPIRATION_ROOT,
+  GAME_SESSION_MUTATION_RECEIPT_ROOT,
   GameSessionMutationLeaseReleaseFailure,
   withGameSessionMutationLease,
 } from "./gameSessionMutations.ts";
@@ -75,6 +79,7 @@ const AUTOMATCH_OWNER_LOGIN_UID_LIMIT = 512;
 const AUTOMATCH_CANCELLATION_RECONCILE_TIMEOUT_MS = 1_000;
 const AUTOMATCH_CANCELLATION_RECONCILE_DELAY_MS = 50;
 const AUTOMATCH_CANCELLATION_FINAL_READ_TIMEOUT_MS = 250;
+const AUTOMATCH_RECEIPT_KIND = "automatch-start";
 const gameVariantHelpers = createGameVariantHelpers(monsRules);
 
 type AutomatchDependencies = {
@@ -96,6 +101,10 @@ type AutomatchDependencies = {
   wait?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
 };
 
+export type StartAutomatchOperationRequest = StartAutomatchRequest & {
+  operationId: string;
+};
+
 export type QueuedAutomatch = {
   data: Record<string, unknown>;
   inviteId: string;
@@ -105,6 +114,25 @@ export type AutomatchRequesterSnapshot = Readonly<{
   loginUids: readonly string[];
   profile: GameplayProfile | null;
 }>;
+
+type SuccessfulStartAutomatchResponse = Extract<
+  StartAutomatchResponse,
+  { ok: true }
+>;
+
+type AutomatchReceipt = {
+  aura: string;
+  completedAtMs: number;
+  emojiId: number;
+  inviteId: string;
+  kind: typeof AUTOMATCH_RECEIPT_KIND;
+  operationId: string;
+  profileProjectionRequestId: string | null;
+  requesterUid: string;
+  response: SuccessfulStartAutomatchResponse;
+  schemaVersion: 1;
+  telegramProjection: boolean;
+};
 
 export function emptyAutomatchProfile(): GameplayProfile {
   return {
@@ -126,6 +154,111 @@ function toRecord(value: unknown): Record<string, unknown> | null {
 
 function normalizeString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function automatchReceiptPath(operationId: string): string {
+  return `${GAME_SESSION_MUTATION_RECEIPT_ROOT}/${operationId}`;
+}
+
+function automatchReceiptExpirationPath(operationId: string): string {
+  return `${GAME_SESSION_MUTATION_RECEIPT_EXPIRATION_ROOT}/${operationId}`;
+}
+
+function parseAutomatchReceipt(value: unknown): AutomatchReceipt | null {
+  const receipt = toRecord(value);
+  const response = receipt?.response;
+  if (
+    receipt?.schemaVersion !== 1 ||
+    receipt.kind !== AUTOMATCH_RECEIPT_KIND ||
+    typeof receipt.completedAtMs !== "number" ||
+    !Number.isFinite(receipt.completedAtMs) ||
+    typeof receipt.emojiId !== "number" ||
+    !Number.isSafeInteger(receipt.emojiId) ||
+    typeof receipt.aura !== "string" ||
+    typeof receipt.operationId !== "string" ||
+    !isSafeFirebaseKey(receipt.operationId) ||
+    typeof receipt.requesterUid !== "string" ||
+    !receipt.requesterUid ||
+    typeof receipt.inviteId !== "string" ||
+    !isSafeFirebaseKey(receipt.inviteId) ||
+    !(
+      receipt.profileProjectionRequestId === null ||
+      (typeof receipt.profileProjectionRequestId === "string" &&
+        isSafeFirebaseKey(receipt.profileProjectionRequestId))
+    ) ||
+    typeof receipt.telegramProjection !== "boolean" ||
+    !isStartAutomatchResponse(response) ||
+    !response.ok ||
+    response.inviteId !== receipt.inviteId
+  ) {
+    return null;
+  }
+  return {
+    schemaVersion: 1,
+    aura: receipt.aura,
+    completedAtMs: Math.floor(receipt.completedAtMs),
+    emojiId: receipt.emojiId,
+    inviteId: receipt.inviteId,
+    kind: AUTOMATCH_RECEIPT_KIND,
+    operationId: receipt.operationId,
+    profileProjectionRequestId: receipt.profileProjectionRequestId,
+    requesterUid: receipt.requesterUid,
+    response,
+    telegramProjection: receipt.telegramProjection,
+  };
+}
+
+function buildAutomatchReceiptUpdates(
+  requesterUid: string,
+  request: StartAutomatchOperationRequest,
+  response: SuccessfulStartAutomatchResponse,
+  profileProjectionRequestId: string | null,
+  telegramProjection: boolean,
+): Record<string, unknown> {
+  const completedAtMs = FIREBASE_RTDB_SERVER_TIMESTAMP;
+  return {
+    [automatchReceiptPath(request.operationId)]: {
+      schemaVersion: 1,
+      aura: request.aura,
+      completedAtMs,
+      emojiId: request.emojiId,
+      inviteId: response.inviteId,
+      kind: AUTOMATCH_RECEIPT_KIND,
+      operationId: request.operationId,
+      profileProjectionRequestId,
+      requesterUid,
+      response,
+      telegramProjection,
+    },
+    [automatchReceiptExpirationPath(request.operationId)]: {
+      completedAtMs,
+    },
+  };
+}
+
+async function readAutomatchReceipt(
+  requesterUid: string,
+  request: StartAutomatchOperationRequest,
+  repository: GameplayRepository,
+  signal?: AbortSignal,
+): Promise<AutomatchReceipt | null> {
+  const rawReceipt = await repository.getRtdbPath(
+    automatchReceiptPath(request.operationId),
+    undefined,
+    signal,
+  );
+  if (rawReceipt === null || rawReceipt === undefined) return null;
+  const receipt = parseAutomatchReceipt(rawReceipt);
+  if (
+    !receipt ||
+    receipt.operationId !== request.operationId ||
+    receipt.requesterUid !== requesterUid ||
+    receipt.emojiId !== request.emojiId ||
+    receipt.aura !== request.aura
+  ) {
+    throw new AuthApiFailure(409, "failed-precondition", "operation-conflict");
+  }
+  return receipt;
 }
 
 function finiteNumber(value: unknown): number {
@@ -289,6 +422,10 @@ async function automatchOwnerLockId(owner: string): Promise<string> {
   ).join("")}`;
 }
 
+function automatchOperationLockId(operationId: string): string {
+  return `automatch-operation-${operationId}`;
+}
+
 function secureRandom(): number {
   const values = new Uint32Array(1);
   crypto.getRandomValues(values);
@@ -379,6 +516,30 @@ async function enqueueAutomatchProjections(
   await enqueueAutomatchProfileGameProjection(profileTask, dependencies);
 }
 
+async function replayAutomatchReceipt(
+  receipt: AutomatchReceipt,
+  dependencies: AutomatchDependencies,
+): Promise<StartAutomatchResponse> {
+  if (receipt.profileProjectionRequestId) {
+    await enqueueAutomatchProjections(
+      receipt.telegramProjection
+        ? createAutomatchProjectionTask(
+            receipt.inviteId,
+            dependencies,
+            receipt.profileProjectionRequestId,
+          )
+        : null,
+      {
+        kind: "automatch-profile-game-projection",
+        inviteId: receipt.inviteId,
+        requestId: receipt.profileProjectionRequestId,
+      },
+      dependencies,
+    );
+  }
+  return receipt.response;
+}
+
 function automatchTimestamp(value: unknown): number {
   return Math.floor(finiteNumber(value));
 }
@@ -389,60 +550,22 @@ function automatchTelegramDeliveryVersion(value: unknown): number | null {
     : null;
 }
 
-async function didCommitPendingAutomatch(
-  inviteId: string,
-  expectedUid: string,
-  requestId: string,
+async function didCommitAutomatchReceipt(
+  requesterUid: string,
+  request: StartAutomatchOperationRequest,
+  expected: SuccessfulStartAutomatchResponse,
   repository: GameplayRepository,
 ): Promise<boolean> {
   try {
-    const signal = AbortSignal.timeout(
-      AUTOMATCH_CANCELLATION_RECONCILE_TIMEOUT_MS,
+    const receipt = await readAutomatchReceipt(
+      requesterUid,
+      request,
+      repository,
+      AbortSignal.timeout(AUTOMATCH_CANCELLATION_RECONCILE_TIMEOUT_MS),
     );
-    const [queueValue, inviteValue, outboxRequestId] = await Promise.all([
-      repository.getRtdbPath(`automatch/${inviteId}`, undefined, signal),
-      repository.getRtdbPath(`invites/${inviteId}`, undefined, signal),
-      repository.getRtdbPath(
-        `${getAutomatchProfileGameProjectionOutboxPath(inviteId)}/requestId`,
-        undefined,
-        signal,
-      ),
-    ]);
-    const queue = toRecord(queueValue);
-    const invite = toRecord(inviteValue);
-    return Boolean(
-      normalizeString(queue?.uid) === expectedUid &&
-      normalizeString(invite?.hostId) === expectedUid &&
-      !normalizeString(invite?.guestId) &&
-      invite?.automatchStateHint === "pending" &&
-      normalizeString(outboxRequestId) === requestId,
-    );
-  } catch {
-    return false;
-  }
-}
-
-async function didCommitMatchedAutomatch(
-  inviteId: string,
-  expectedGuestId: string,
-  requestId: string,
-  repository: GameplayRepository,
-): Promise<boolean> {
-  try {
-    const signal = AbortSignal.timeout(
-      AUTOMATCH_CANCELLATION_RECONCILE_TIMEOUT_MS,
-    );
-    const [guestId, outboxRequestId] = await Promise.all([
-      repository.getRtdbPath(`invites/${inviteId}/guestId`, undefined, signal),
-      repository.getRtdbPath(
-        `${getAutomatchProfileGameProjectionOutboxPath(inviteId)}/requestId`,
-        undefined,
-        signal,
-      ),
-    ]);
     return (
-      normalizeString(guestId) === expectedGuestId &&
-      normalizeString(outboxRequestId) === requestId
+      receipt?.response.inviteId === expected.inviteId &&
+      receipt.response.mode === expected.mode
     );
   } catch {
     return false;
@@ -861,7 +984,9 @@ function profileOrFallback(
   );
 }
 
-function matchedAutomatchResponse(inviteId: string): StartAutomatchResponse {
+function matchedAutomatchResponse(
+  inviteId: string,
+): SuccessfulStartAutomatchResponse {
   return {
     ok: true,
     inviteId,
@@ -870,7 +995,9 @@ function matchedAutomatchResponse(inviteId: string): StartAutomatchResponse {
   };
 }
 
-function pendingAutomatchResponse(inviteId: string): StartAutomatchResponse {
+function pendingAutomatchResponse(
+  inviteId: string,
+): SuccessfulStartAutomatchResponse {
   return {
     ok: true,
     inviteId,
@@ -879,9 +1006,100 @@ function pendingAutomatchResponse(inviteId: string): StartAutomatchResponse {
   };
 }
 
+function readAutomatchOperationIds(value: unknown): Record<string, string> {
+  const operationIds = toRecord(value);
+  if (!operationIds) return {};
+  const valid: [string, string][] = [];
+  for (const [uid, operationId] of Object.entries(operationIds)) {
+    if (
+      isSafeFirebaseKey(uid) &&
+      typeof operationId === "string" &&
+      isSafeFirebaseKey(operationId)
+    ) {
+      valid.push([uid, operationId]);
+    }
+  }
+  return Object.fromEntries(valid);
+}
+
+async function persistExistingAutomatchReceipt(
+  identity: RequestIdentity,
+  request: StartAutomatchOperationRequest,
+  inviteId: string,
+  ownerUids: readonly string[],
+  repository: GameplayRepository,
+  signal: AbortSignal,
+  dependencies: AutomatchDependencies,
+): Promise<SuccessfulStartAutomatchResponse | null> {
+  const owned = new Set(ownerUids);
+  let response: SuccessfulStartAutomatchResponse | null = null;
+  let patchAttempted = false;
+  try {
+    await withGameSessionMutationLease(
+      inviteId,
+      request.operationId,
+      dependencies.mutationLocks,
+      async () => {
+        const [queueValue, inviteValue] = await Promise.all([
+          repository.getRtdbPath(`automatch/${inviteId}`, undefined, signal),
+          repository.getRtdbPath(`invites/${inviteId}`, undefined, signal),
+        ]);
+        const queueUid = normalizeString(toRecord(queueValue)?.uid);
+        const invite = toRecord(inviteValue);
+        const hostId = normalizeString(invite?.hostId);
+        const guestId = normalizeString(invite?.guestId);
+        if (!invite || !owned.has(hostId)) return;
+        if (guestId) {
+          response = matchedAutomatchResponse(inviteId);
+        } else if (
+          queueUid &&
+          owned.has(queueUid) &&
+          hostId === queueUid &&
+          invite.automatchStateHint !== "canceled"
+        ) {
+          response = pendingAutomatchResponse(inviteId);
+        } else {
+          return;
+        }
+        await dependencies.assertMutationAllowed?.();
+        patchAttempted = true;
+        await repository.patchRtdbRoot(
+          {
+            ...buildAutomatchReceiptUpdates(
+              identity.uid,
+              request,
+              response,
+              null,
+              false,
+            ),
+            [`invites/${inviteId}/automatchOperationIds/${identity.uid}`]:
+              request.operationId,
+          },
+          signal,
+        );
+      },
+    );
+  } catch (error) {
+    if (!response || !patchAttempted) throw error;
+    const didCommit =
+      (error instanceof GameSessionMutationLeaseReleaseFailure &&
+        error.workCompleted) ||
+      (await didCommitAutomatchReceipt(
+        identity.uid,
+        request,
+        response,
+        repository,
+      ));
+    if (!didCommit) {
+      throw error;
+    }
+  }
+  return response;
+}
+
 async function attemptAutomatch(
   identity: RequestIdentity,
-  request: StartAutomatchRequest,
+  request: StartAutomatchOperationRequest,
   requester: AutomatchRequesterSnapshot,
   repository: GameplayRepository,
   random: RandomSource,
@@ -939,7 +1157,26 @@ async function attemptAutomatch(
       );
     }
     if (loginsShareProfile(pairOwnership, identity.uid, existingUid)) {
-      return pendingAutomatchResponse(existingSurvivor.inviteId);
+      const existing = await persistExistingAutomatchReceipt(
+        identity,
+        request,
+        existingSurvivor.inviteId,
+        existingLoginUids,
+        repository,
+        signal,
+        dependencies,
+      );
+      if (existing) return existing;
+      return attemptAutomatch(
+        identity,
+        request,
+        requester,
+        repository,
+        random,
+        signal,
+        retryCount + 1,
+        dependencies,
+      );
     }
     if (existingSurvivor.inviteId !== queued.inviteId) {
       return attemptAutomatch(
@@ -986,7 +1223,7 @@ async function attemptAutomatch(
     });
     const waitingText = `${name} is looking for a match https://mons.link ${getTelegramEmojiTag(AUTOMATCH_WAITING_EMOJI_ID)}`;
     const canceledText = `<i>${name} canceled an automatch</i>`;
-    const response: StartAutomatchResponse = {
+    const response: SuccessfulStartAutomatchResponse = {
       ok: true,
       inviteId,
       mode: "pending",
@@ -1035,6 +1272,9 @@ async function attemptAutomatch(
                 password,
                 automatchStateHint: "pending",
                 automatchCanceledAt: null,
+                automatchOperationIds: {
+                  [identity.uid]: request.operationId,
+                },
                 telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
               },
               [getAutomatchTelegramSourcePath(inviteId)]:
@@ -1054,23 +1294,30 @@ async function attemptAutomatch(
                 requestId: profileGameProjectionTask.requestId,
                 timestamp,
               }),
+              ...buildAutomatchReceiptUpdates(
+                identity.uid,
+                request,
+                response,
+                profileGameProjectionTask.requestId,
+                true,
+              ),
             },
             signal,
           );
         },
       );
     } catch (error) {
-      if (
-        !(error instanceof GameSessionMutationLeaseReleaseFailure) ||
-        !patchAttempted ||
-        (!error.workCompleted &&
-          !(await didCommitPendingAutomatch(
-            inviteId,
+      const didCommit =
+        (error instanceof GameSessionMutationLeaseReleaseFailure &&
+          error.workCompleted) ||
+        (patchAttempted &&
+          (await didCommitAutomatchReceipt(
             identity.uid,
-            profileGameProjectionTask.requestId,
+            request,
+            response,
             repository,
-          )))
-      ) {
+          )));
+      if (!didCommit) {
         throw error;
       }
       await enqueueAutomatchProjections(
@@ -1088,9 +1335,27 @@ async function attemptAutomatch(
     return response;
   }
 
-  const pendingResponse = pendingAutomatchResponse(queued.inviteId);
   if (existingUid === identity.uid) {
-    return pendingResponse;
+    const existing = await persistExistingAutomatchReceipt(
+      identity,
+      request,
+      queued.inviteId,
+      [identity.uid],
+      repository,
+      signal,
+      dependencies,
+    );
+    if (existing) return existing;
+    return attemptAutomatch(
+      identity,
+      request,
+      requester,
+      repository,
+      random,
+      signal,
+      retryCount + 1,
+      dependencies,
+    );
   }
 
   const matchSeed = gameVariantHelpers.buildGameSeedForStoredVariant(
@@ -1114,6 +1379,9 @@ async function attemptAutomatch(
     password: normalizeString(queued.data.password),
     automatchStateHint: "matched",
     automatchCanceledAt: null,
+    automatchOperationIds: {
+      [identity.uid]: request.operationId,
+    },
     ...(usesTelegramDeliveryV2
       ? { telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION }
       : {}),
@@ -1169,14 +1437,16 @@ async function attemptAutomatch(
       }),
     );
   }
-  const readGuestId = async () =>
-    normalizeString(
-      await repository.getRtdbPath(
-        `invites/${queued.inviteId}/guestId`,
-        undefined,
-        signal,
-      ),
-    );
+  Object.assign(
+    updates,
+    buildAutomatchReceiptUpdates(
+      identity.uid,
+      request,
+      matchedResponse,
+      profileGameProjectionTask.requestId,
+      usesTelegramDeliveryV2,
+    ),
+  );
   let matchResult: "matched" | "stale" = "stale";
   let patchAttempted = false;
   try {
@@ -1185,20 +1455,33 @@ async function attemptAutomatch(
       profileGameProjectionTask.requestId,
       dependencies.mutationLocks,
       async () => {
-        const [currentQueueValue, currentGuestId] = await Promise.all([
+        const [currentQueueValue, currentInviteValue] = await Promise.all([
           repository.getRtdbPath(
             `automatch/${queued.inviteId}`,
             undefined,
             signal,
           ),
-          readGuestId(),
+          repository.getRtdbPath(
+            `invites/${queued.inviteId}`,
+            undefined,
+            signal,
+          ),
         ]);
+        const currentInvite = toRecord(currentInviteValue);
         if (
           normalizeString(toRecord(currentQueueValue)?.uid) !== existingUid ||
-          currentGuestId
+          normalizeString(currentInvite?.hostId) !== existingUid ||
+          normalizeString(currentInvite?.guestId)
         ) {
           return "stale" as const;
         }
+        updates[`invites/${queued.inviteId}`] = {
+          ...invite,
+          automatchOperationIds: {
+            ...readAutomatchOperationIds(currentInvite?.automatchOperationIds),
+            [identity.uid]: request.operationId,
+          },
+        };
         await dependencies.assertMutationAllowed?.();
         patchAttempted = true;
         await repository.patchRtdbRoot(updates, signal);
@@ -1213,10 +1496,10 @@ async function attemptAutomatch(
       patchFailure instanceof GameSessionMutationLeaseReleaseFailure;
     const didCommit =
       (isReleaseFailure && patchFailure.workCompleted) ||
-      (await didCommitMatchedAutomatch(
-        queued.inviteId,
+      (await didCommitAutomatchReceipt(
         identity.uid,
-        profileGameProjectionTask.requestId,
+        request,
+        matchedResponse,
         repository,
       ));
     if (!didCommit) {
@@ -1244,41 +1527,22 @@ async function attemptAutomatch(
   return matchedResponse;
 }
 
-export async function startAutomatch(
+async function startAutomatchForCurrentOwner(
   identity: RequestIdentity,
-  request: StartAutomatchRequest,
+  request: StartAutomatchOperationRequest,
   repository: GameplayRepository,
+  signal: AbortSignal,
   dependencies: AutomatchDependencies,
 ): Promise<StartAutomatchResponse> {
-  const signal =
-    dependencies.signal || AbortSignal.timeout(AUTOMATCH_TOTAL_TIMEOUT_MS);
-  if (signal.aborted) {
-    return { ok: false };
-  }
-  const directQueue = await findOwnedQueuedAutomatch(
-    [identity.uid],
+  const requester = await readAutomatchRequesterSnapshot(
+    identity.uid,
     repository,
-    signal,
+    dependencies.logProfileFailure ||
+      (() =>
+        console.error(
+          JSON.stringify({ event: "automatch_profile_read_failure" }),
+        )),
   );
-  let requester: AutomatchRequesterSnapshot;
-  try {
-    requester = await readAutomatchRequesterSnapshot(
-      identity.uid,
-      repository,
-      directQueue
-        ? () => undefined
-        : dependencies.logProfileFailure ||
-            (() =>
-              console.error(
-                JSON.stringify({ event: "automatch_profile_read_failure" }),
-              )),
-    );
-  } catch (error) {
-    if (directQueue && normalizeString(directQueue.data.uid) === identity.uid) {
-      return pendingAutomatchResponse(directQueue.inviteId);
-    }
-    throw error;
-  }
   return withAutomatchOwnerLease(
     requester,
     identity.uid,
@@ -1286,6 +1550,15 @@ export async function startAutomatch(
     signal,
     dependencies,
     async () => {
+      const receipt = await readAutomatchReceipt(
+        identity.uid,
+        request,
+        repository,
+        signal,
+      );
+      if (receipt) {
+        return replayAutomatchReceipt(receipt, dependencies);
+      }
       const ownedSurvivor = await convergeOwnedQueuedAutomatches(
         requester.loginUids,
         repository,
@@ -1293,7 +1566,16 @@ export async function startAutomatch(
         dependencies,
       );
       if (ownedSurvivor) {
-        return pendingAutomatchResponse(ownedSurvivor.inviteId);
+        const existing = await persistExistingAutomatchReceipt(
+          identity,
+          request,
+          ownedSurvivor.inviteId,
+          requester.loginUids,
+          repository,
+          signal,
+          dependencies,
+        );
+        if (existing) return existing;
       }
       return attemptAutomatch(
         identity,
@@ -1307,6 +1589,63 @@ export async function startAutomatch(
       );
     },
   );
+}
+
+export async function startAutomatch(
+  identity: RequestIdentity,
+  request: StartAutomatchOperationRequest,
+  repository: GameplayRepository,
+  dependencies: AutomatchDependencies,
+): Promise<StartAutomatchResponse> {
+  const signal =
+    dependencies.signal || AbortSignal.timeout(AUTOMATCH_TOTAL_TIMEOUT_MS);
+  if (signal.aborted) {
+    return { ok: false };
+  }
+  const existingReceipt = await readAutomatchReceipt(
+    identity.uid,
+    request,
+    repository,
+    signal,
+  );
+  if (existingReceipt) {
+    return replayAutomatchReceipt(existingReceipt, dependencies);
+  }
+  let completedResponse: StartAutomatchResponse | undefined;
+  try {
+    return await withGameSessionMutationLease(
+      automatchOperationLockId(request.operationId),
+      request.operationId,
+      dependencies.mutationLocks,
+      async () => {
+        const receipt = await readAutomatchReceipt(
+          identity.uid,
+          request,
+          repository,
+          signal,
+        );
+        completedResponse = receipt
+          ? await replayAutomatchReceipt(receipt, dependencies)
+          : await startAutomatchForCurrentOwner(
+              identity,
+              request,
+              repository,
+              signal,
+              dependencies,
+            );
+        return completedResponse;
+      },
+    );
+  } catch (error) {
+    if (
+      error instanceof GameSessionMutationLeaseReleaseFailure &&
+      error.workCompleted &&
+      completedResponse
+    ) {
+      return completedResponse;
+    }
+    throw error;
+  }
 }
 
 export type { AutomatchDependencies };

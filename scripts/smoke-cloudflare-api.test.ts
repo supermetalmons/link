@@ -16,6 +16,7 @@ const {
   smokeAuthenticatedAuthState,
   smokeEventReads,
   smokeFrozenProfileWrite,
+  smokeRequiredAutomatchOperationId,
 } = require("./smoke-cloudflare-api.ts") as {
   DEFAULT_SMOKE_PROFILE: {
     loginId: string;
@@ -35,6 +36,7 @@ const {
     baseUrl: string;
     readOnly: boolean;
     readOnlyAuthToken: string | null;
+    requireAutomatchOperationId?: boolean;
     requireHistory: boolean;
     requireEvents?: boolean;
     smokeProfile: {
@@ -57,6 +59,7 @@ const {
       baseUrl: string;
       readOnlyAuthToken?: string | null;
       readOnly?: boolean;
+      requireAutomatchOperationId?: boolean;
       requireHistory: boolean;
       requireEvents?: boolean;
       smokeProfile: {
@@ -108,6 +111,7 @@ const {
       selectionEventId?: string;
       selectionPrizeId: string;
     },
+    requireAutomatchOperationId?: boolean,
   ) => Promise<void>;
   smokeEventReads: (
     baseUrl: string,
@@ -129,6 +133,15 @@ const {
     },
   ) => Promise<void>;
   smokeFrozenProfileWrite: (
+    baseUrl: string,
+    idToken: string,
+    dependencies: {
+      fetch: typeof fetch;
+      randomState: () => string;
+      log: (message: string) => void;
+    },
+  ) => Promise<void>;
+  smokeRequiredAutomatchOperationId: (
     baseUrl: string,
     idToken: string,
     dependencies: {
@@ -326,11 +339,13 @@ test("parses only production and canonical preview smoke targets", () => {
         historyFixture.path,
         "--require-history",
         "--require-events",
+        "--require-automatch-operation-id",
       ]),
       {
         baseUrl: "https://api.mons.link",
         readOnly: true,
         readOnlyAuthToken: AUTH_TOKEN,
+        requireAutomatchOperationId: true,
         requireHistory: true,
         requireEvents: true,
         smokeProfile: SMOKE_PROFILE_WITH_HISTORY,
@@ -348,6 +363,15 @@ test("parses only production and canonical preview smoke targets", () => {
           "https://api.mons.link",
           "--auth-token-fixture",
           authFixture.path,
+        ]),
+      /Usage:/,
+    );
+    assert.throws(
+      () =>
+        parseArgs([
+          "--base-url",
+          "https://api.mons.link",
+          "--require-automatch-operation-id",
         ]),
       /Usage:/,
     );
@@ -626,6 +650,21 @@ test("smokes public, unauthenticated, and internal routes", async () => {
         200,
       );
     }
+    if (
+      url.endsWith("/profiles/username") &&
+      new Headers(init?.headers).has("Authorization")
+    ) {
+      assert.equal(init?.body, "{}");
+      return json(
+        {
+          ok: false,
+          error: "unavailable",
+          message: "profile-writes-disabled",
+        },
+        503,
+        { "Retry-After": "60" },
+      );
+    }
     if (url.endsWith("/auth/methods")) {
       const authorization = new Headers(init?.headers).get("Authorization");
       return json(
@@ -639,6 +678,38 @@ test("smokes public, unauthenticated, and internal routes", async () => {
           appleLinked: false,
         },
         200,
+      );
+    }
+    if (
+      new URL(url).pathname === "/automatch/start" &&
+      new Headers(init?.headers).has("Authorization")
+    ) {
+      assert.deepEqual(JSON.parse(String(init?.body)), {
+        emojiId: 1,
+        aura: "",
+      });
+      if (new URL(url).searchParams.has("operationId")) {
+        assert.equal(
+          new URL(url).searchParams.get("operationId"),
+          "00000000-0000-4000-8000-000000000001",
+        );
+        return json(
+          {
+            ok: false,
+            error: "unavailable",
+            message: "profile-writes-disabled",
+          },
+          503,
+          { "Retry-After": "60" },
+        );
+      }
+      return json(
+        {
+          ok: false,
+          error: "invalid-argument",
+          message: "invalid-request",
+        },
+        400,
       );
     }
     if (
@@ -920,6 +991,7 @@ test("smokes public, unauthenticated, and internal routes", async () => {
       baseUrl: "https://api.mons.link",
       readOnlyAuthToken: AUTH_TOKEN,
       readOnly: true,
+      requireAutomatchOperationId: true,
       requireHistory: true,
       requireEvents: true,
       smokeProfile: SMOKE_PROFILE_WITH_HISTORY,
@@ -961,10 +1033,12 @@ test("smokes public, unauthenticated, and internal routes", async () => {
       "GET /auth/methods",
       "GET /events/prizes",
       "GET /events/snapshot",
+      "POST /automatch/start",
       "POST /invites/role/read",
       "POST /leaderboards/read",
       "POST /navigation/games/read",
       "POST /profiles/lookup",
+      "POST /profiles/username",
     ].sort(),
   );
   assert.equal(
@@ -1458,6 +1532,151 @@ test("probes frozen profile writes with an authenticated mutation-safe body", as
   assert.equal(requests, 1);
 });
 
+test("validates frozen automatch operation-ID behavior safely", async () => {
+  const requests: string[] = [];
+  await smokeRequiredAutomatchOperationId("https://api.mons.link", AUTH_TOKEN, {
+    fetch: async (input, init) => {
+      const url = String(input);
+      requests.push(url);
+      assert.equal(init?.method, "POST");
+      const headers = new Headers(init?.headers);
+      assert.equal(headers.get("Authorization"), `Bearer ${AUTH_TOKEN}`);
+      assert.equal(headers.get("Origin"), "https://mons.link");
+      assert.equal(headers.get("Content-Type"), "application/json");
+      if (url.endsWith("/profiles/username")) {
+        assert.equal(init?.body, "{}");
+        return json(
+          {
+            ok: false,
+            error: "unavailable",
+            message: "profile-writes-disabled",
+          },
+          503,
+          { "Retry-After": "60" },
+        );
+      }
+      const automatchUrl = new URL(url);
+      assert.equal(automatchUrl.pathname, "/automatch/start");
+      assert.deepEqual(JSON.parse(String(init?.body)), {
+        emojiId: 1,
+        aura: "",
+      });
+      if (automatchUrl.searchParams.has("operationId")) {
+        assert.equal(
+          automatchUrl.searchParams.get("operationId"),
+          "00000000-0000-4000-8000-000000000001",
+        );
+        return json(
+          {
+            ok: false,
+            error: "unavailable",
+            message: "profile-writes-disabled",
+          },
+          503,
+          { "Retry-After": "60" },
+        );
+      }
+      return json(
+        {
+          ok: false,
+          error: "invalid-argument",
+          message: "invalid-request",
+        },
+        400,
+      );
+    },
+    randomState: () => "unused",
+    log: () => undefined,
+  });
+  assert.deepEqual(requests, [
+    "https://api.mons.link/profiles/username",
+    "https://api.mons.link/automatch/start",
+    "https://api.mons.link/automatch/start?operationId=00000000-0000-4000-8000-000000000001",
+  ]);
+
+  let missingIdFailureRequests = 0;
+  await assert.rejects(
+    smokeRequiredAutomatchOperationId("https://api.mons.link", AUTH_TOKEN, {
+      fetch: async (input) => {
+        missingIdFailureRequests++;
+        return String(input).endsWith("/profiles/username")
+          ? json(
+              {
+                ok: false,
+                error: "unavailable",
+                message: "profile-writes-disabled",
+              },
+              503,
+              { "Retry-After": "60" },
+            )
+          : json({ ok: true }, 200);
+      },
+      randomState: () => "unused",
+      log: () => undefined,
+    }),
+    /returned 200/,
+  );
+  assert.equal(missingIdFailureRequests, 2);
+
+  let validIdFailureRequests = 0;
+  await assert.rejects(
+    smokeRequiredAutomatchOperationId("https://api.mons.link", AUTH_TOKEN, {
+      fetch: async (input) => {
+        validIdFailureRequests++;
+        const url = String(input);
+        if (url.endsWith("/profiles/username")) {
+          return json(
+            {
+              ok: false,
+              error: "unavailable",
+              message: "profile-writes-disabled",
+            },
+            503,
+            { "Retry-After": "60" },
+          );
+        }
+        if (!new URL(url).searchParams.has("operationId")) {
+          return json(
+            {
+              ok: false,
+              error: "invalid-argument",
+              message: "invalid-request",
+            },
+            400,
+          );
+        }
+        return json(
+          {
+            ok: false,
+            error: "unavailable",
+            message: "profile-writes-disabled",
+          },
+          503,
+          { "Retry-After": "30" },
+        );
+      },
+      randomState: () => "unused",
+      log: () => undefined,
+    }),
+    /valid operation-ID smoke response was invalid/,
+  );
+  assert.equal(validIdFailureRequests, 3);
+
+  let unsafeRequests = 0;
+  await assert.rejects(
+    smokeRequiredAutomatchOperationId("https://api.mons.link", AUTH_TOKEN, {
+      fetch: async () => {
+        unsafeRequests++;
+        return json({ ok: true }, 200);
+      },
+      randomState: () => "unused",
+      log: () => undefined,
+    }),
+    /returned 200/,
+  );
+  assert.equal(unsafeRequests, 1);
+});
+
 test("rejects malformed frozen profile write bodies", async () => {
   for (const body of [
     "{",
@@ -1564,6 +1783,26 @@ test("fails before requests when read-only auth is missing", async () => {
       },
     ),
     /authenticated historical match fixture/,
+  );
+  await assert.rejects(
+    smokeApi(
+      {
+        baseUrl: "https://api.mons.link",
+        requireAutomatchOperationId: true,
+        requireHistory: false,
+        smokeProfile: SMOKE_PROFILE,
+        smokeSol: WALLET,
+      },
+      {
+        fetch: async () => {
+          requests++;
+          throw new Error("unexpected-request");
+        },
+        randomState: () => "unused",
+        log: () => undefined,
+      },
+    ),
+    /automatch operation-ID smoke requires an existing auth token fixture/,
   );
   assert.equal(requests, 0);
 });

@@ -38,6 +38,7 @@ const FIREBASE_API_KEY = "AIzaSyC8Ihr4kDd34z-RXe8XTBCFtFbXebifo5Y";
 const FIREBASE_IDENTITY_ROOT = "https://identitytoolkit.googleapis.com/v1";
 const PREVIEW_HOST_PATTERN =
   /^[0-9a-f]{8}-mons-link-api\.lil-org\.workers\.dev$/;
+const AUTOMATCH_SMOKE_OPERATION_ID = "00000000-0000-4000-8000-000000000001";
 const DEFAULT_SMOKE_SOL = "A87Upx1f1whNV5P8xQCK2YUTwE3uMYigjoKJAF3jiNpz";
 const DEFAULT_SMOKE_PROFILE = {
   loginId: "BNuvfXQD5GUIuOx9fDW7hvIUhOr2",
@@ -48,6 +49,7 @@ type Options = {
   baseUrl: string;
   readOnlyAuthToken?: string | null;
   readOnly?: boolean;
+  requireAutomatchOperationId?: boolean;
   requireHistory: boolean;
   requireEvents?: boolean;
   smokeProfile: ProfileSmokeFixture;
@@ -80,7 +82,7 @@ type Dependencies = {
 };
 
 function usage(): string {
-  return "Usage: npm run smoke:api -- --base-url <https-url> [--read-only --auth-token-fixture <protected-json-file> [--require-history] [--require-events]] [--smoke-sol <wallet>] [--smoke-profile-fixture <protected-json-file>]";
+  return "Usage: npm run smoke:api -- --base-url <https-url> [--read-only --auth-token-fixture <protected-json-file> [--require-history] [--require-events] [--require-automatch-operation-id]] [--smoke-sol <wallet>] [--smoke-profile-fixture <protected-json-file>]";
 }
 
 function readAuthTokenFixture(path: string): string {
@@ -328,6 +330,7 @@ function parseArgs(argv: string[]): Options {
   let baseUrl = "";
   let readOnlyAuthToken: string | null = null;
   let readOnly = false;
+  let requireAutomatchOperationId = false;
   let requireHistory = false;
   let requireEvents = false;
   let smokeProfile: ProfileSmokeFixture = DEFAULT_SMOKE_PROFILE;
@@ -349,6 +352,11 @@ function parseArgs(argv: string[]): Options {
     if (name === "--require-events") {
       if (requireEvents) throw new TypeError(usage());
       requireEvents = true;
+      continue;
+    }
+    if (name === "--require-automatch-operation-id") {
+      if (requireAutomatchOperationId) throw new TypeError(usage());
+      requireAutomatchOperationId = true;
       continue;
     }
     const value = argv[index + 1];
@@ -388,6 +396,7 @@ function parseArgs(argv: string[]): Options {
       (!readOnly || !readOnlyAuthToken || !smokeProfile.historicalMatch)) ||
     (requireEvents &&
       (!readOnly || !readOnlyAuthToken || !smokeProfile.events)) ||
+    (requireAutomatchOperationId && (!readOnly || !readOnlyAuthToken)) ||
     (readOnlyAuthToken !== null &&
       readTokenSubject(readOnlyAuthToken) !== smokeProfile.loginId)
   ) {
@@ -397,6 +406,9 @@ function parseArgs(argv: string[]): Options {
     baseUrl,
     readOnly,
     readOnlyAuthToken,
+    ...(requireAutomatchOperationId
+      ? { requireAutomatchOperationId: true }
+      : {}),
     requireHistory,
     ...(requireEvents ? { requireEvents: true } : {}),
     smokeProfile,
@@ -775,12 +787,75 @@ async function smokeEventReads(
   }
 }
 
+async function smokeRequiredAutomatchOperationId(
+  baseUrl: string,
+  idToken: string,
+  dependencies: Dependencies,
+): Promise<void> {
+  await smokeFrozenProfileWrite(baseUrl, idToken, dependencies);
+  const requestInit = {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      Origin: ORIGIN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ emojiId: 1, aura: "" }),
+  };
+  const missingIdResult = await request(
+    `${baseUrl}/automatch/start`,
+    requestInit,
+    400,
+    dependencies,
+  );
+  const payload = parseJson(missingIdResult.body);
+  const fields =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : null;
+  if (
+    !fields ||
+    Object.keys(fields).length !== 3 ||
+    fields.ok !== false ||
+    fields.error !== "invalid-argument" ||
+    fields.message !== "invalid-request"
+  ) {
+    throw new Error("Automatch operation-ID smoke response was invalid.");
+  }
+  const validIdUrl = new URL(`${baseUrl}/automatch/start`);
+  validIdUrl.searchParams.set("operationId", AUTOMATCH_SMOKE_OPERATION_ID);
+  const validIdResult = await request(
+    validIdUrl.href,
+    requestInit,
+    503,
+    dependencies,
+  );
+  const validIdPayload = parseJson(validIdResult.body);
+  const validIdFields =
+    validIdPayload &&
+    typeof validIdPayload === "object" &&
+    !Array.isArray(validIdPayload)
+      ? (validIdPayload as Record<string, unknown>)
+      : null;
+  if (
+    validIdResult.response.headers.get("Retry-After") !== "60" ||
+    !validIdFields ||
+    Object.keys(validIdFields).length !== 3 ||
+    validIdFields.ok !== false ||
+    validIdFields.error !== "unavailable" ||
+    validIdFields.message !== "profile-writes-disabled"
+  ) {
+    throw new Error("Automatch valid operation-ID smoke response was invalid.");
+  }
+}
+
 async function smokeAuthenticatedAuthState(
   baseUrl: string,
   smokeProfile: ProfileSmokeFixture,
   dependencies: Dependencies,
   existingIdToken?: string,
   eventFixture?: ProfileSmokeFixture["events"],
+  requireAutomatchOperationId = false,
 ): Promise<void> {
   if (existingIdToken && !smokeProfile.invite) {
     throw new Error("Read-only smoke requires an alternate invite fixture.");
@@ -815,6 +890,9 @@ async function smokeAuthenticatedAuthState(
       Origin: ORIGIN,
       "Content-Type": "application/json",
     };
+    if (requireAutomatchOperationId) {
+      await smokeRequiredAutomatchOperationId(baseUrl, idToken, dependencies);
+    }
     const methods = await request(
       `${baseUrl}/auth/methods`,
       { method: "GET", headers },
@@ -1096,6 +1174,14 @@ async function smokeApi(
       "Required event smoke requires authenticated current and ended event fixtures.",
     );
   }
+  if (
+    options.requireAutomatchOperationId === true &&
+    (options.readOnly !== true || !options.readOnlyAuthToken)
+  ) {
+    throw new Error(
+      "Required automatch operation-ID smoke requires an existing auth token fixture.",
+    );
+  }
   const nftUrl = `${options.baseUrl}/nfts`;
   const preflight = await request(
     nftUrl,
@@ -1185,6 +1271,7 @@ async function smokeApi(
     dependencies,
     options.readOnlyAuthToken || undefined,
     options.requireEvents ? options.smokeProfile.events : undefined,
+    options.requireAutomatchOperationId === true,
   );
 
   await smokeHistoricalMatch(
@@ -1292,4 +1379,5 @@ module.exports = {
   smokeAuthenticatedAuthState,
   smokeEventReads,
   smokeFrozenProfileWrite,
+  smokeRequiredAutomatchOperationId,
 };

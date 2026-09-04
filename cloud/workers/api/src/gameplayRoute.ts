@@ -1,4 +1,5 @@
 import {
+  GAME_SESSION_OPERATION_ID_PATTERN,
   isCreateInviteRequest,
   isEndRematchRequest,
   isEnsureMatchRequest,
@@ -172,6 +173,17 @@ function toRecord(value: unknown): Record<string, unknown> | null {
 
 function normalizeString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function readAutomatchOperationId(request: Request): string {
+  const values = new URL(request.url).searchParams.getAll("operationId");
+  if (
+    values.length !== 1 ||
+    !GAME_SESSION_OPERATION_ID_PATTERN.test(values[0])
+  ) {
+    throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+  }
+  return values[0];
 }
 
 async function resolveProfileId(
@@ -459,6 +471,10 @@ export async function handleGameplayRoute(
     const identity = await (
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
+    const automatchOperationId =
+      pathname === "/automatch/start"
+        ? readAutomatchOperationId(request)
+        : null;
     if (!GAMEPLAY_READ_PATHS.has(pathname)) {
       await assertProfileMutationAllowed(env);
     }
@@ -566,9 +582,16 @@ export async function handleGameplayRoute(
       if (!isStartAutomatchRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
+      if (!automatchOperationId) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      await enforceGameSessionMutationRateLimit(
+        env.AUTH_RATE_LIMITER,
+        identity.uid,
+      );
       response = await startAutomatch(
         identity,
-        body,
+        { ...body, operationId: automatchOperationId },
         repository,
         automatchDependencies,
       );

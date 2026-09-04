@@ -331,7 +331,7 @@ const isReadNavigationGamesResponse = (value) =>
 const isStartAutomatchRequest = (value) =>
   isRecord(value) &&
   Object.keys(value).length === 2 &&
-  Number.isInteger(value.emojiId) &&
+  Number.isSafeInteger(value.emojiId) &&
   value.emojiId > 0 &&
   typeof value.aura === "string";
 

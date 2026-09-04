@@ -1,4 +1,10 @@
 import type { AssetsSet, BoardStyleSet } from "../content/boardStyleModels";
+import { GAME_SESSION_OPERATION_ID_PATTERN } from "@mons/shared/game-sessions";
+import { isSafeFirebaseKey } from "@mons/shared/ids";
+import {
+  isStartAutomatchRequest,
+  type StartAutomatchRequest,
+} from "@mons/shared/navigation";
 
 export type AuthIdentity = {
   profileId: string;
@@ -10,6 +16,16 @@ export type ReactionExtraStickerCache = AuthIdentity & {
   extraIds: number[];
   expiresAtMs: number;
 };
+
+export type PendingAutomatchOperation = {
+  createdAtMs: number;
+  operationId: string;
+  request: StartAutomatchRequest;
+  resolvedInviteId: string | null;
+  uid: string;
+};
+
+const PENDING_AUTOMATCH_OPERATION_PREFIX = "pendingAutomatchOperation:";
 
 const STORAGE_KEYS = {
   IS_MUTED: "isMuted",
@@ -113,6 +129,49 @@ function setItem<T>(key: StorageKey | string, value: T): void {
 }
 
 export const storage = {
+  getPendingAutomatchOperation: (
+    uid: string,
+  ): PendingAutomatchOperation | null => {
+    const value = getItem<unknown>(
+      `${PENDING_AUTOMATCH_OPERATION_PREFIX}${uid}`,
+      null,
+    );
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return null;
+    }
+    const operation = value as Record<string, unknown>;
+    if (
+      typeof operation.uid !== "string" ||
+      operation.uid !== uid ||
+      typeof operation.operationId !== "string" ||
+      !GAME_SESSION_OPERATION_ID_PATTERN.test(operation.operationId) ||
+      !(
+        operation.resolvedInviteId === null ||
+        (typeof operation.resolvedInviteId === "string" &&
+          isSafeFirebaseKey(operation.resolvedInviteId))
+      ) ||
+      !Number.isSafeInteger(operation.createdAtMs) ||
+      Number(operation.createdAtMs) <= 0 ||
+      !isStartAutomatchRequest(operation.request)
+    ) {
+      return null;
+    }
+    return {
+      createdAtMs: Number(operation.createdAtMs),
+      operationId: operation.operationId,
+      request: { ...operation.request },
+      resolvedInviteId: operation.resolvedInviteId,
+      uid: operation.uid,
+    };
+  },
+
+  setPendingAutomatchOperation: (
+    uid: string,
+    value: PendingAutomatchOperation | null,
+  ): void => {
+    setItem(`${PENDING_AUTOMATCH_OPERATION_PREFIX}${uid}`, value);
+  },
+
   getAuthIdentity: (): AuthIdentity => ({
     profileId: getItem(STORAGE_KEYS.PROFILE_ID, ""),
     ethAddress: getItem(STORAGE_KEYS.ETH_ADDRESS, ""),
@@ -419,6 +478,9 @@ export const storage = {
         localStorage.removeItem(key);
       }
     });
+    removeMatchingStorageKeys(localStorage, (key) =>
+      key.startsWith(PENDING_AUTOMATCH_OPERATION_PREFIX),
+    );
     removeMatchingStorageKeys(localStorage, shouldClearExternalUserStorageKey);
     removeMatchingStorageKeys(
       sessionStorage,
