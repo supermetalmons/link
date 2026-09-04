@@ -194,7 +194,7 @@ import {
   normalizeStringOrNull,
 } from "./valueNormalizers";
 import { ObserverRegistry } from "./observerRegistry";
-import { transition } from "../session/sessionTransitionPort";
+import { transition, transitionToHome } from "../session/sessionTransitionPort";
 import { startNavigationGamesPolling } from "./navigationGamesPoller";
 import { EventPollingRegistry } from "./eventPollingRegistry";
 import { createPollingAuthTokenProvider } from "./pollingAuthTokenProvider";
@@ -4588,6 +4588,17 @@ class Connection {
 
         const workingInvite: Invite = { ...inviteData };
         this.reconcilePendingAutomatchRequest(uid, inviteId, workingInvite);
+        if (
+          isAutoInviteId(inviteId) &&
+          workingInvite.automatchStateHint === "canceled" &&
+          !workingInvite.guestId
+        ) {
+          await transitionToHome({
+            forceMatchScopeReset: true,
+            replace: true,
+          });
+          return;
+        }
         let actorResolution = await this.resolveActorUidForInvite(
           workingInvite,
           inviteId,
@@ -4765,6 +4776,17 @@ class Connection {
                   inviteId,
                   updatedInvite,
                 );
+                if (
+                  isAutoInviteId(inviteId) &&
+                  updatedInvite.automatchStateHint === "canceled" &&
+                  !updatedInvite.guestId
+                ) {
+                  void transitionToHome({
+                    forceMatchScopeReset: true,
+                    replace: true,
+                  });
+                  return;
+                }
                 if (!updatedInvite.guestId) {
                   return;
                 }
