@@ -2419,6 +2419,39 @@ test("replays a null-projection receipt before an ownership outage", async () =>
   assert.deepEqual(telegramTasks, []);
 });
 
+test("replays receipts after RTDB omits their null projection ID", async () => {
+  for (const mode of ["pending", "matched"] as const) {
+    const receipt = storedAutomatchReceipt("auto_existing", mode);
+    delete receipt.profileProjectionRequestId;
+    let projections = 0;
+    const result = await startAutomatch(
+      identity,
+      request(),
+      repository(
+        {
+          readProfileOwnershipSnapshot: async () => {
+            assert.fail("replay must not read ownership");
+          },
+          patchRtdbRoot: async () => {
+            assert.fail("replay must not write");
+          },
+        },
+        () => receipt,
+      ),
+      {
+        enqueueProfileGameProjection: async () => {
+          projections++;
+        },
+        enqueueTelegramProjection: async () => {
+          projections++;
+        },
+      },
+    );
+    assert.deepEqual(result, receipt.response);
+    assert.equal(projections, 0);
+  }
+});
+
 test("returns pending when one pair snapshot has the same canonical owner", async () => {
   let ownershipReads = 0;
   let updates: Record<string, unknown> = {};

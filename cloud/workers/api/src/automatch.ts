@@ -167,6 +167,8 @@ function automatchReceiptExpirationPath(operationId: string): string {
 function parseAutomatchReceipt(value: unknown): AutomatchReceipt | null {
   const receipt = toRecord(value);
   const response = receipt?.response;
+  const profileProjectionRequestId =
+    receipt?.profileProjectionRequestId ?? null;
   if (
     receipt?.schemaVersion !== 1 ||
     receipt.kind !== AUTOMATCH_RECEIPT_KIND ||
@@ -182,9 +184,9 @@ function parseAutomatchReceipt(value: unknown): AutomatchReceipt | null {
     typeof receipt.inviteId !== "string" ||
     !isSafeFirebaseKey(receipt.inviteId) ||
     !(
-      receipt.profileProjectionRequestId === null ||
-      (typeof receipt.profileProjectionRequestId === "string" &&
-        isSafeFirebaseKey(receipt.profileProjectionRequestId))
+      profileProjectionRequestId === null ||
+      (typeof profileProjectionRequestId === "string" &&
+        isSafeFirebaseKey(profileProjectionRequestId))
     ) ||
     typeof receipt.telegramProjection !== "boolean" ||
     !isStartAutomatchResponse(response) ||
@@ -201,7 +203,7 @@ function parseAutomatchReceipt(value: unknown): AutomatchReceipt | null {
     inviteId: receipt.inviteId,
     kind: AUTOMATCH_RECEIPT_KIND,
     operationId: receipt.operationId,
-    profileProjectionRequestId: receipt.profileProjectionRequestId,
+    profileProjectionRequestId,
     requesterUid: receipt.requesterUid,
     response,
     telegramProjection: receipt.telegramProjection,
