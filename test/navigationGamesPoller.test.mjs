@@ -82,7 +82,7 @@ test("navigation polling refreshes immediately, pauses while hidden, and resumes
   assert.equal(polling.timers.size, 0);
 });
 
-test("navigation polling never overlaps and falls back after three later failures", async () => {
+test("navigation polling never overlaps and stops after three later failures", async () => {
   let resolveFirst;
   let attempts = 0;
   const polling = harness(() => {
@@ -110,7 +110,7 @@ test("navigation polling never overlaps and falls back after three later failure
   assert.equal(polling.timers.size, 0);
 });
 
-test("navigation polling retries three initial failures before fallback", async () => {
+test("navigation polling stops after three initial failures and a fresh subscription retries", async () => {
   let attempts = 0;
   const polling = harness(async () => {
     attempts += 1;
@@ -125,4 +125,10 @@ test("navigation polling retries three initial failures before fallback", async 
   assert.equal(attempts, 3);
   assert.equal(polling.errors.length, 1);
   assert.equal(polling.timers.size, 0);
+  polling.stop();
+
+  const reopened = harness(async () => "reopened");
+  await reopened.runNext();
+  assert.deepEqual(reopened.updates, ["reopened"]);
+  reopened.stop();
 });

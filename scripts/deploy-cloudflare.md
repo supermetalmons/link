@@ -146,6 +146,69 @@ npx wrangler d1 execute mons-link-profile-games --remote --command "SELECT COUNT
 
 After rollback and both production smokes, resume delivery. Retain the additive D1 table. Never run Firebase-lock and D1-lock consumers concurrently. Before promotion, an aborted cutover can resume the recorded current version after confirming no candidate was promoted; the new table may remain installed.
 
+## Gameplay coordination D1 cutover
+
+Migration `0007_gameplay_coordination.sql` moved `gameplayMutationLocks` and `matchTimerStarts` into `mons-link-profile-games`. Migration `0008_gameplay_coordination_control.sql` adds durable timer reconciliation metadata and a generation-fenced authority row. The API Worker declares its mode through the plain-text `GAMEPLAY_COORDINATION_AUTHORITY` binding. `matchTimerClaims`, active invites and matches, mutation receipts, and projection outboxes remain in RTDB. Keep the retired roots and the explicit `matchTimerStarts` deny rule through the rollback window.
+
+### Adopt the already-live D1 release
+
+Production already uses D1 coordination, but its current Worker predates the authority binding. Migration `0008` therefore starts `uninitialized` at generation `0`. Adoption is a separate one-time operation that accepts the missing binding only for the exact live D1 version, records its snapshot as D1 generation `1`, and does not rewrite timer rows.
+
+Before adoption, rebuild and upload the recorded RTDB rollback Worker with `GAMEPLAY_COORDINATION_AUTHORITY=rtdb`; retain its new Version ID without sending it traffic. Untagged legacy versions are not valid normal rollback or forward-migration sources.
+
+Run the write-free preview before applying `0008`; it detects the absent control and opponent column and prints the D1 timer count and digest. Record that digest plus the production API and frontend Version IDs. Validate unchanged source, freeze writes, wait at least 65 seconds, and verify neither RTDB nor D1 has an active gameplay lease.
+
+```sh
+npm run check:all
+npm run dry-run:api
+npm run deploy -- dry-run
+npx wrangler deployments list --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run manage:profile-canonical -- --freeze
+npm run manage:profile-canonical -- --status
+npx wrangler d1 execute mons-link-profile-games --remote --command "SELECT COUNT(*) AS active_leases FROM game_session_mutation_locks WHERE expires_at_ms > CAST(unixepoch('subsec') * 1000 AS INTEGER)" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run migrate:gameplay-coordination -- --preview --project mons-link
+npx wrangler d1 migrations apply mons-link-profile-games --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run migrate:gameplay-coordination -- --adopt-d1 --source-version-id <live-d1-version-id> --expected-timer-digest <preview-d1-timer-digest>
+npm run migrate:gameplay-coordination -- --preview --project mons-link
+npm run upload:api
+```
+
+The second preview must show the same D1 timer count and digest, with authority `d1` and generation `1`. Run the authenticated read-only smoke against the uploaded version preview, then promote that exact candidate carrying `GAMEPLAY_COORDINATION_AUTHORITY=d1`, smoke production while frozen, resume writes, and run the mutable smokes:
+
+```sh
+npm run smoke:api -- --base-url <version-preview-url> --read-only --require-history --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
+npm run promote:api -- --version-id <tested-d1-version-id>
+npm run smoke:api -- --base-url https://api.mons.link --read-only --require-history --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
+npm run manage:profile-canonical -- --resume
+npm run smoke:api -- --base-url https://api.mons.link
+```
+
+Leave writes frozen if adoption, the snapshot comparison, or a smoke fails. Do not use `--final` for adoption.
+
+### Normal rollback and forward transition
+
+The control row determines direction: `--rollback` requires authority `d1`; `--final` requires authority `rtdb`. The supplied Version ID must serve 100% of traffic, and its immutable version metadata must explicitly declare the same authority. Never split traffic across coordination modes.
+
+For rollback, freeze writes, wait at least 65 seconds, confirm no active D1 lease, and run preview. The rollback command exactly replaces the whole RTDB timer-marker root, verifies it against unchanged D1, and advances control to `rtdb` in a new generation. Promote the recorded RTDB-coordination Worker directly to 100%, smoke it while frozen, then resume.
+
+```sh
+npm run migrate:gameplay-coordination -- --rollback --source-version-id <current-d1-version-id>
+npm run promote:api -- --version-id <recorded-rtdb-version-id>
+```
+
+To move forward again, keep the RTDB-coordination Worker at 100%, freeze and drain, then run final. It takes two identical RTDB snapshots five seconds apart and transactionally exact-replaces D1 while advancing control to `d1`. Promote the exact tested D1 candidate directly to 100% only after verification.
+
+```sh
+npm run migrate:gameplay-coordination -- --final --source-version-id <current-rtdb-version-id>
+npm run promote:api -- --version-id <tested-d1-version-id>
+```
+
+If preview reports an empty source and a nonempty destination, stop and investigate. Only an intentional deletion may add `--allow-empty-source-digest <source-timer-digest>` copied from preview. Every successful transition increments the generation, including an empty-to-empty transition. On an ambiguous failure, leave writes frozen and rerun only when the durable control row still names the source authority; the exact destination and generation identify whether the prior command committed.
+
+After either transition, run the authenticated read-only smoke while frozen, resume, run the normal mutable and authenticated smokes, and observe gameplay 5xx responses and coordination failures for at least 15 minutes. Timer-marker terminal cleanup is eager where possible and is also repaired by the bounded five-minute D1 reconciliation sweep. Timer deadlines are absolute and continue aging during a freeze.
+
+Retain migrations `0007` and `0008` after rollback. Never delete `matchTimerClaims` or the legacy coordination roots as part of this release.
+
 ## Canonical profile D1 maintenance
 
 The canonical profile control accepts only `active` and `frozen`. Freeze before schema maintenance and leave production frozen on any failure:

@@ -17,20 +17,91 @@ import type {
   ProfileOwnershipSnapshot,
 } from "../src/profileOwnership.ts";
 import {
-  acceptWagerProposal,
+  acceptWagerProposal as acceptWagerProposalImpl,
   consumeWagerReservationOperation,
   createWagerReservationOperationId,
-  removeWagerProposal,
-  sendWagerProposal,
+  removeWagerProposal as removeWagerProposalImpl,
+  sendWagerProposal as sendWagerProposalImpl,
+  type WagerProposalAction,
+  type WagerProposalDependencies,
 } from "../src/wagerProposal.ts";
 import {
   createOperationId,
   operationFingerprint,
 } from "../src/wagerReservationOperations.ts";
+import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
 
 const identity: RequestIdentity = {
   uid: "host",
 };
+
+const coordinationByRepository = new WeakMap<
+  GameplayRepository,
+  ReturnType<typeof createMemoryGameplayCoordinationStores>
+>();
+
+function coordinationFor(repository: GameplayRepository) {
+  let coordination = coordinationByRepository.get(repository);
+  if (!coordination) {
+    coordination = createMemoryGameplayCoordinationStores();
+    coordinationByRepository.set(repository, coordination);
+  }
+  return coordination;
+}
+
+function wagerDependencies(
+  repository: GameplayRepository,
+  dependencies: Partial<WagerProposalDependencies> = {},
+): WagerProposalDependencies {
+  return {
+    mutationLocks: coordinationFor(repository).mutationLocks,
+    ...dependencies,
+  };
+}
+
+function sendWagerProposal(
+  identity: Parameters<typeof sendWagerProposalImpl>[0],
+  request: Parameters<typeof sendWagerProposalImpl>[1],
+  repository: GameplayRepository,
+  dependencies: Partial<WagerProposalDependencies> = {},
+) {
+  return sendWagerProposalImpl(
+    identity,
+    request,
+    repository,
+    wagerDependencies(repository, dependencies),
+  );
+}
+
+function acceptWagerProposal(
+  identity: Parameters<typeof acceptWagerProposalImpl>[0],
+  request: Parameters<typeof acceptWagerProposalImpl>[1],
+  repository: GameplayRepository,
+  dependencies: Partial<WagerProposalDependencies> = {},
+) {
+  return acceptWagerProposalImpl(
+    identity,
+    request,
+    repository,
+    wagerDependencies(repository, dependencies),
+  );
+}
+
+function removeWagerProposal(
+  identity: Parameters<typeof removeWagerProposalImpl>[0],
+  request: Parameters<typeof removeWagerProposalImpl>[1],
+  action: WagerProposalAction,
+  repository: GameplayRepository,
+  dependencies: Partial<WagerProposalDependencies> = {},
+) {
+  return removeWagerProposalImpl(
+    identity,
+    request,
+    action,
+    repository,
+    wagerDependencies(repository, dependencies),
+  );
+}
 
 function ownershipSnapshot(
   query: ProfileOwnershipQuery,
@@ -82,7 +153,6 @@ function ownershipSnapshot(
 function repository(
   overrides: Partial<GameplayRepository> = {},
 ): GameplayRepository {
-  const locks = new Map<string, unknown>();
   const transactRtdbPath =
     overrides.transactRtdbPath ||
     (async () => ({ committed: false, value: null }));
@@ -103,11 +173,10 @@ function repository(
     readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
     ...overrides,
     transactRtdbPath: async (path, updater, signal) => {
-      if (path.startsWith("gameplayMutationLocks/")) {
-        const result = applyTransaction(updater, locks.get(path) ?? null);
-        if (result.committed) locks.set(path, result.value);
-        return result;
-      }
+      assert.doesNotMatch(
+        path,
+        /^(?:gameplayMutationLocks|matchTimerStarts)\//,
+      );
       return transactRtdbPath(path, updater, signal);
     },
   };

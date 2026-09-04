@@ -10,17 +10,18 @@ import type {
 } from "../src/profileOwnership.ts";
 import {
   buildOrderedMoveHistory,
-  claimMatchVictoryByTimer,
+  claimMatchVictoryByTimer as claimMatchVictoryByTimerImpl,
   MAX_MATCH_FEN_BYTES,
   MAX_MATCH_HISTORY_BYTES,
   MAX_MATCH_HISTORY_ENTRIES,
-  MATCH_TIMER_START_ROOT,
   resolveMatchTimerGame,
-  startMatchTimer,
+  startMatchTimer as startMatchTimerImpl,
+  type MatchTimerDependencies,
   type MatchTimerGameState,
   type MatchTimerRecord,
 } from "../src/matchTimer.ts";
 import { buildEventProgressPlan } from "../src/eventProgress.ts";
+import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
 
 type TimerRepository = Pick<
   GameplayRepository,
@@ -45,6 +46,49 @@ const request = {
   matchId: "match-1",
   inviteId: "match-1",
 };
+
+type MatchTimerDependencyOverrides = Omit<
+  MatchTimerDependencies,
+  "timerStarts"
+>;
+
+const coordinationByRepository = new WeakMap<
+  object,
+  ReturnType<typeof createMemoryGameplayCoordinationStores>
+>();
+
+function coordination(repository: object) {
+  let stores = coordinationByRepository.get(repository);
+  if (!stores) {
+    stores = createMemoryGameplayCoordinationStores();
+    coordinationByRepository.set(repository, stores);
+  }
+  return stores;
+}
+
+function startMatchTimer(
+  actor: RequestIdentity,
+  timerRequest: typeof request,
+  repository: TimerRepository,
+  dependencies: MatchTimerDependencyOverrides = {},
+) {
+  return startMatchTimerImpl(actor, timerRequest, repository, {
+    ...dependencies,
+    timerStarts: coordination(repository).timerStarts,
+  });
+}
+
+function claimMatchVictoryByTimer(
+  actor: RequestIdentity,
+  timerRequest: typeof request,
+  repository: ClaimTimerRepository,
+  dependencies: MatchTimerDependencyOverrides = {},
+) {
+  return claimMatchVictoryByTimerImpl(actor, timerRequest, repository, {
+    ...dependencies,
+    timerStarts: coordination(repository).timerStarts,
+  });
+}
 
 function match(
   color: "white" | "black",
@@ -136,13 +180,14 @@ function repository({
   invite?: unknown;
   inviteId?: string;
 } = {}): {
+  coordination: ReturnType<typeof createMemoryGameplayCoordinationStores>;
   paths: string[];
   writes: Array<{ path: string; value: unknown }>;
   value: TimerRepository;
 } {
   const paths: string[] = [];
   const writes: Array<{ path: string; value: unknown }> = [];
-  let storedMarker = markerTimer;
+  const stores = createMemoryGameplayCoordinationStores();
   let storedTimer = currentTimer;
   const value: TimerRepository = {
     getRtdbPath: async (path) => {
@@ -159,8 +204,7 @@ function repository({
       }),
     transactRtdbPath: async (path, updater) => {
       paths.push(path);
-      const markerPath = path.startsWith(`${MATCH_TIMER_START_ROOT}/`);
-      const current = markerPath ? storedMarker : storedTimer;
+      const current = storedTimer;
       const decision = updater(current) as {
         commit?: boolean;
         decision?: string;
@@ -173,11 +217,7 @@ function repository({
           value: current,
         };
       }
-      if (markerPath) {
-        storedMarker = decision.value;
-      } else {
-        storedTimer = decision.value;
-      }
+      storedTimer = decision.value;
       writes.push({ path, value: decision.value });
       return {
         committed: true,
@@ -186,7 +226,23 @@ function repository({
       };
     },
   };
-  return { paths, writes, value };
+  const marker = markerTimer as {
+    timer?: unknown;
+    turnNumber?: unknown;
+  } | null;
+  if (
+    marker &&
+    typeof marker.timer === "string" &&
+    Number.isSafeInteger(marker.turnNumber)
+  ) {
+    stores.timerRows.set("player-1/match-1", {
+      timer: marker.timer,
+      turnNumber: Number(marker.turnNumber),
+      updatedAtMs: 0,
+    });
+  }
+  coordinationByRepository.set(value, stores);
+  return { coordination: stores, paths, writes, value };
 }
 
 function claimRepository({
@@ -208,6 +264,7 @@ function claimRepository({
   player?: unknown;
   profile?: unknown;
 } = {}): {
+  coordination: ReturnType<typeof createMemoryGameplayCoordinationStores>;
   patchAttempts: () => number;
   patches: Array<Record<string, unknown>>;
   paths: string[];
@@ -221,64 +278,68 @@ function claimRepository({
   let playerReads = 0;
   let opponentReads = 0;
   let storedClaim: unknown = initialClaim;
+  const value: ClaimTimerRepository = {
+    getRtdbPath: async (path) => {
+      paths.push(path);
+      if (path.startsWith("players/player-1/matches/")) {
+        playerReads++;
+        return playerReads === 1 || livePlayer === undefined
+          ? player
+          : livePlayer;
+      }
+      if (path.startsWith("players/player-2/matches/")) {
+        opponentReads++;
+        return opponentReads === 1 || liveOpponent === undefined
+          ? opponent
+          : liveOpponent;
+      }
+      if (path.startsWith("invites/")) return invite;
+      assert.fail(`unexpected RTDB path ${path}`);
+    },
+    patchRtdbRoot: async (updates) => {
+      patchAttempts++;
+      if (patchAttempts <= failPatchAttempts) {
+        throw new Error("patch-failed");
+      }
+      patches.push(updates);
+    },
+    readProfileOwnershipSnapshot: async (query) =>
+      ownershipSnapshot(query, {
+        "login-2": "profile-1",
+        "player-1": typeof profile === "string" ? profile : null,
+      }),
+    transactRtdbPath: async (path, updater) => {
+      paths.push(path);
+      const decision = updater(storedClaim) as {
+        commit?: boolean;
+        decision?: string;
+        value?: unknown;
+      };
+      if (decision.commit === false) {
+        return {
+          committed: false,
+          decision: decision.decision,
+          value: storedClaim,
+        };
+      }
+      storedClaim = decision.value;
+      transactions.push({ path, value: decision.value });
+      return {
+        committed: true,
+        decision: decision.decision,
+        value: decision.value,
+      };
+    },
+  };
+  const stores = createMemoryGameplayCoordinationStores();
+  coordinationByRepository.set(value, stores);
   return {
+    coordination: stores,
     patchAttempts: () => patchAttempts,
     patches,
     paths,
     transactions,
-    value: {
-      getRtdbPath: async (path) => {
-        paths.push(path);
-        if (path.startsWith("players/player-1/matches/")) {
-          playerReads++;
-          return playerReads === 1 || livePlayer === undefined
-            ? player
-            : livePlayer;
-        }
-        if (path.startsWith("players/player-2/matches/")) {
-          opponentReads++;
-          return opponentReads === 1 || liveOpponent === undefined
-            ? opponent
-            : liveOpponent;
-        }
-        if (path.startsWith("invites/")) return invite;
-        assert.fail(`unexpected RTDB path ${path}`);
-      },
-      patchRtdbRoot: async (updates) => {
-        patchAttempts++;
-        if (patchAttempts <= failPatchAttempts) {
-          throw new Error("patch-failed");
-        }
-        patches.push(updates);
-      },
-      readProfileOwnershipSnapshot: async (query) =>
-        ownershipSnapshot(query, {
-          "login-2": "profile-1",
-          "player-1": typeof profile === "string" ? profile : null,
-        }),
-      transactRtdbPath: async (path, updater) => {
-        paths.push(path);
-        const decision = updater(storedClaim) as {
-          commit?: boolean;
-          decision?: string;
-          value?: unknown;
-        };
-        if (decision.commit === false) {
-          return {
-            committed: false,
-            decision: decision.decision,
-            value: storedClaim,
-          };
-        }
-        storedClaim = decision.value;
-        transactions.push({ path, value: decision.value });
-        return {
-          committed: true,
-          decision: decision.decision,
-          value: decision.value,
-        };
-      },
-    },
+    value,
   };
 }
 
@@ -352,19 +413,22 @@ test("starts the timer for a directly authenticated player", async () => {
   });
   assert.deepEqual(repo.writes, [
     {
-      path: "matchTimerStarts/player-1/match-1",
-      value: { timer: "7;100500", turnNumber: 7 },
-    },
-    {
       path: "players/player-1/matches/match-1/timer",
       value: "7;100500",
     },
   ]);
+  assert.deepEqual(repo.coordination.timerRows.get("player-1/match-1"), {
+    timer: "7;100500",
+    turnNumber: 7,
+    updatedAtMs: 10_000,
+  });
   assert.deepEqual(repo.paths, [
     "players/player-1/matches/match-1",
     "players/player-2/matches/match-1",
     "invites/match-1",
-    "matchTimerStarts/player-1/match-1",
+    "players/player-1/matches/match-1",
+    "players/player-2/matches/match-1",
+    "invites/match-1",
     "players/player-1/matches/match-1/timer",
   ]);
 });
@@ -404,8 +468,8 @@ test("retries only failed match reads once", async () => {
     resolveGame: () => gameState(),
   });
   assert.equal(response.timer, "7;91500");
-  assert.equal(playerReads, 2);
-  assert.equal(opponentReads, 1);
+  assert.equal(playerReads, 3);
+  assert.equal(opponentReads, 2);
 });
 
 test("authorizes a same-profile login and rejects unrelated identities", async () => {
@@ -541,11 +605,10 @@ test("concurrent starts converge on the first timer", async () => {
   ]);
   assert.equal(first.timer, "7;91500");
   assert.equal(second.timer, first.timer);
-  assert.equal(writes, 2);
+  assert.equal(writes, 1);
 });
 
 test("advances one marker and rejects stale earlier turns", async () => {
-  const markerPath = "matchTimerStarts/player-1/match-1";
   const timerPath = "players/player-1/matches/match-1/timer";
   const stored = new Map<string, unknown>();
   let turnNumber = 7;
@@ -602,12 +665,13 @@ test("advances one marker and rejects stale earlier turns", async () => {
     "game state changed.",
   );
   assert.equal(latest.timer, "8;91500");
-  assert.deepEqual(stored.get(markerPath), {
+  assert.deepEqual(coordination(value).timerRows.get("player-1/match-1"), {
     timer: latest.timer,
     turnNumber: 8,
+    updatedAtMs: 1_000,
   });
   assert.equal(stored.get(timerPath), latest.timer);
-  assert.equal(stored.size, 2);
+  assert.equal(stored.size, 1);
 });
 
 test("replaces stale and malformed timers but never terminal state", async () => {
@@ -620,10 +684,6 @@ test("replaces stale and malformed timers but never terminal state", async () =>
     assert.equal(response.timer, "7;91500");
     assert.deepEqual(repo.writes, [
       {
-        path: "matchTimerStarts/player-1/match-1",
-        value: { timer: "7;91500", turnNumber: 7 },
-      },
-      {
         path: "players/player-1/matches/match-1/timer",
         value: "7;91500",
       },
@@ -631,6 +691,16 @@ test("replaces stale and malformed timers but never terminal state", async () =>
   }
 
   const terminal = repository({ currentTimer: "gg" });
+  terminal.coordination.timerRows.set("player-1/match-1", {
+    timer: "7;91500",
+    turnNumber: 7,
+    updatedAtMs: 1_000,
+  });
+  terminal.coordination.timerRows.set("player-2/match-1", {
+    timer: "7;91500",
+    turnNumber: 7,
+    updatedAtMs: 1_000,
+  });
   await expectFailure(
     () =>
       startMatchTimer(identity, request, terminal.value, {
@@ -641,20 +711,92 @@ test("replaces stale and malformed timers but never terminal state", async () =>
     "failed-precondition",
     "game is already over.",
   );
-  assert.deepEqual(terminal.writes, [
-    {
-      path: "matchTimerStarts/player-1/match-1",
-      value: { timer: "7;91500", turnNumber: 7 },
-    },
-    {
-      path: "matchTimerStarts/player-1/match-1",
-      value: null,
-    },
-  ]);
+  assert.deepEqual(terminal.writes, []);
+  assert.equal(terminal.coordination.timerRows.size, 0);
+});
+
+test("retries marker cleanup when a timer is already terminal", async () => {
+  const terminal = repository({
+    player: match("black", { timer: "gg" }),
+  });
+  terminal.coordination.timerRows.set("player-1/match-1", {
+    timer: "7;91500",
+    turnNumber: 7,
+    updatedAtMs: 1_000,
+  });
+  terminal.coordination.timerRows.set("player-2/match-1", {
+    timer: "7;91500",
+    turnNumber: 7,
+    updatedAtMs: 1_000,
+  });
+  const deletePair = terminal.coordination.timerStarts.deletePair;
+  let cleanupAttempts = 0;
+  terminal.coordination.timerStarts.deletePair = async (...args) => {
+    cleanupAttempts++;
+    if (cleanupAttempts === 1) throw new Error("timer-cleanup-failed");
+    return deletePair(...args);
+  };
+
+  await assert.rejects(
+    () =>
+      startMatchTimer(identity, request, terminal.value, {
+        now: () => 1_000,
+        resolveGame: () => gameState(),
+      }),
+    /timer-cleanup-failed/,
+  );
+  assert.equal(terminal.coordination.timerRows.size, 2);
+  await expectFailure(
+    () =>
+      startMatchTimer(identity, request, terminal.value, {
+        now: () => 1_001,
+        resolveGame: () => gameState(),
+      }),
+    409,
+    "failed-precondition",
+    "game is already over.",
+  );
+  assert.equal(cleanupAttempts, 2);
+  assert.equal(terminal.coordination.timerRows.size, 0);
+});
+
+test("cleans raw terminal markers before parsing a malformed peer", async () => {
+  const terminalPlayer = match("black", { timer: "gg" });
+  const malformedOpponent = { color: "white", fen: "" };
+  const startRepo = repository({
+    player: terminalPlayer,
+    opponent: malformedOpponent,
+  });
+  const claimRepo = claimRepository({
+    player: terminalPlayer,
+    opponent: malformedOpponent,
+  });
+  for (const stores of [startRepo.coordination, claimRepo.coordination]) {
+    for (const playerId of ["player-1", "player-2"]) {
+      stores.timerRows.set(`${playerId}/match-1`, {
+        timer: "7;1000",
+        turnNumber: 7,
+        updatedAtMs: 1,
+      });
+    }
+  }
+  await expectFailure(
+    () => startMatchTimer(identity, request, startRepo.value),
+    409,
+    "failed-precondition",
+    "game is already over.",
+  );
+  await expectFailure(
+    () => claimMatchVictoryByTimer(identity, request, claimRepo.value),
+    409,
+    "failed-precondition",
+    "something is wrong with the game state.",
+  );
+  assert.equal(startRepo.coordination.timerRows.size, 0);
+  assert.equal(claimRepo.coordination.timerRows.size, 0);
 });
 
 test("restores the first timer after the match record is cleared", async () => {
-  const markerPath = "matchTimerStarts/player-1/match-1";
   const timerPath = "players/player-1/matches/match-1/timer";
   const stored = new Map<string, unknown>();
   const value: TimerRepository = {
@@ -706,9 +848,10 @@ test("restores the first timer after the match record is cleared", async () => {
   });
   assert.equal(first.timer, "7;91500");
   assert.equal(restored.timer, first.timer);
-  assert.deepEqual(stored.get(markerPath), {
+  assert.deepEqual(coordination(value).timerRows.get("player-1/match-1"), {
     timer: first.timer,
     turnNumber: 7,
+    updatedAtMs: 1_000,
   });
   assert.equal(stored.get(timerPath), first.timer);
 });
@@ -754,6 +897,11 @@ test("preserves timer game-state preconditions", async () => {
       message: "game is already over.",
     },
     {
+      name: "opponent timer terminal",
+      opponent: match("white", { timer: "gg" }),
+      message: "game is already over.",
+    },
+    {
       name: "invalid history",
       state: gameState({ historyValid: false }),
       message: "something is wrong with the moves.",
@@ -769,6 +917,15 @@ test("preserves timer game-state preconditions", async () => {
       ...(entry.player === undefined ? {} : { player: entry.player }),
       ...(entry.opponent === undefined ? {} : { opponent: entry.opponent }),
     });
+    if (entry.message === "game is already over.") {
+      for (const playerId of ["player-1", "player-2"]) {
+        repo.coordination.timerRows.set(`${playerId}/match-1`, {
+          timer: "7;91500",
+          turnNumber: 7,
+          updatedAtMs: 1_000,
+        });
+      }
+    }
     await expectFailure(
       () =>
         startMatchTimer(identity, request, repo.value, {
@@ -779,6 +936,9 @@ test("preserves timer game-state preconditions", async () => {
       entry.message,
     );
     assert.deepEqual(repo.writes, [], entry.name);
+    if (entry.message === "game is already over.") {
+      assert.equal(repo.coordination.timerRows.size, 0, entry.name);
+    }
   }
 });
 
@@ -798,6 +958,13 @@ test("rejects excessive move-history entries before splitting", () => {
 
 test("claims an expired timer and clears both protected markers", async () => {
   const repo = claimRepository();
+  for (const playerId of ["player-1", "player-2"]) {
+    repo.coordination.timerRows.set(`${playerId}/match-1`, {
+      timer: "7;1000",
+      turnNumber: 7,
+      updatedAtMs: 1,
+    });
+  }
   const response = await claimMatchVictoryByTimer(
     identity,
     request,
@@ -821,10 +988,9 @@ test("claims an expired timer and clears both protected markers", async () => {
         claimedAtMs: 1_001,
         expiresAtMs: null,
       },
-      "matchTimerStarts/player-1/match-1": null,
-      "matchTimerStarts/player-2/match-1": null,
     },
   ]);
+  assert.equal(repo.coordination.timerRows.size, 0);
   assert.deepEqual(repo.transactions, [
     {
       path: "matchTimerClaims/match-1",
@@ -933,6 +1099,15 @@ test("preserves timer-claim game and deadline preconditions", async () => {
       ...(entry.player === undefined ? {} : { player: entry.player }),
       ...(entry.opponent === undefined ? {} : { opponent: entry.opponent }),
     });
+    if (entry.message === "game is already over.") {
+      for (const playerId of ["player-1", "player-2"]) {
+        repo.coordination.timerRows.set(`${playerId}/match-1`, {
+          timer: "7;1000",
+          turnNumber: 7,
+          updatedAtMs: 1,
+        });
+      }
+    }
     await expectFailure(
       () =>
         claimMatchVictoryByTimer(identity, request, repo.value, {
@@ -944,6 +1119,9 @@ test("preserves timer-claim game and deadline preconditions", async () => {
       entry.message,
     );
     assert.deepEqual(repo.patches, [], entry.name);
+    if (entry.message === "game is already over.") {
+      assert.equal(repo.coordination.timerRows.size, 0, entry.name);
+    }
   }
 });
 
@@ -977,6 +1155,11 @@ test("rejects invalid timer-claim ownership and repository writes", async () => 
   );
 
   const failingWrite = claimRepository({ failPatchAttempts: 3 });
+  failingWrite.coordination.timerRows.set("player-1/match-1", {
+    timer: "7;1000",
+    turnNumber: 7,
+    updatedAtMs: 1,
+  });
   await assert.rejects(
     () =>
       claimMatchVictoryByTimer(identity, request, failingWrite.value, {
@@ -986,6 +1169,92 @@ test("rejects invalid timer-claim ownership and repository writes", async () => 
     /patch-failed/,
   );
   assert.equal(failingWrite.patchAttempts(), 3);
+  assert.ok(failingWrite.coordination.timerRows.has("player-1/match-1"));
+});
+
+test("retains a D1 marker when the RTDB timer write fails", async () => {
+  const repo = repository();
+  repo.value.transactRtdbPath = async () => {
+    throw new Error("timer-write-failed");
+  };
+  await assert.rejects(
+    () =>
+      startMatchTimer(identity, request, repo.value, {
+        now: () => 1_000,
+        resolveGame: () => gameState(),
+      }),
+    /timer-write-failed/,
+  );
+  assert.deepEqual(repo.coordination.timerRows.get("player-1/match-1"), {
+    timer: "7;91500",
+    turnNumber: 7,
+    updatedAtMs: 1_000,
+  });
+});
+
+test("does not install a timer after the match becomes terminal", async () => {
+  const repo = repository();
+  const read = repo.value.getRtdbPath;
+  let opponentReads = 0;
+  repo.value.getRtdbPath = async (path, query, signal) => {
+    if (path === "players/player-2/matches/match-1") {
+      opponentReads++;
+      if (opponentReads > 1) {
+        repo.paths.push(path);
+        return match("white", { status: "surrendered" });
+      }
+    }
+    return read(path, query, signal);
+  };
+  repo.coordination.timerRows.set("player-2/match-1", {
+    timer: "7;91500",
+    turnNumber: 7,
+    updatedAtMs: 1_000,
+  });
+
+  await expectFailure(
+    () =>
+      startMatchTimer(identity, request, repo.value, {
+        now: () => 1_000,
+        resolveGame: () => gameState(),
+      }),
+    409,
+    "failed-precondition",
+    "game is already over.",
+  );
+  assert.deepEqual(repo.writes, []);
+  assert.equal(repo.coordination.timerRows.size, 0);
+});
+
+test("retains the stored deadline when mutation control freezes before the RTDB write", async () => {
+  const repo = repository();
+  let checks = 0;
+  await assert.rejects(
+    () =>
+      startMatchTimer(identity, request, repo.value, {
+        assertMutationAllowed: async () => {
+          checks++;
+          if (checks === 2) throw new Error("profile-writes-disabled");
+        },
+        now: () => 1_000,
+        resolveGame: () => gameState(),
+      }),
+    /profile-writes-disabled/,
+  );
+  assert.equal(checks, 2);
+  assert.equal(repo.writes.length, 0);
+  assert.deepEqual(repo.coordination.timerRows.get("player-1/match-1"), {
+    timer: "7;91500",
+    turnNumber: 7,
+    updatedAtMs: 1_000,
+  });
+  assert.deepEqual(
+    await startMatchTimer(identity, request, repo.value, {
+      now: () => 2_000,
+      resolveGame: () => gameState(),
+    }),
+    { ok: true, timer: "7;91500", duration: 90_000 },
+  );
 });
 
 test("aborts when the live match advances after validation", async () => {
@@ -1078,8 +1347,6 @@ test("creates the complete event progress outbox when none exists", async () => 
         claimedAtMs: 2_000,
         expiresAtMs: null,
       },
-      "matchTimerStarts/player-1/match-1": null,
-      "matchTimerStarts/player-2/match-1": null,
       "eventProgressOutbox/ep_63b21a5345d223c4862730817dae4ae1899564b989fb8f057490ae277c5d5a16":
         {
           schemaVersion: 1,
@@ -1154,8 +1421,6 @@ test("signals event progression with the deterministic Workflow identity", async
         claimedAtMs: 2_000,
         expiresAtMs: null,
       },
-      "matchTimerStarts/player-1/match-1": null,
-      "matchTimerStarts/player-2/match-1": null,
       "eventProgressOutbox/ep_63b21a5345d223c4862730817dae4ae1899564b989fb8f057490ae277c5d5a16":
         {
           schemaVersion: 1,
@@ -1193,4 +1458,40 @@ test("retries claim side effects and repairs a terminal replay", async () => {
   assert.deepEqual(response, { ok: true });
   assert.equal(repo.patchAttempts(), 3);
   assert.equal(repo.patches.length, 1);
+});
+
+test("repairs D1 marker cleanup from the terminal replay path", async () => {
+  const repo = claimRepository({
+    player: match("black", { timer: "gg" }),
+  });
+  repo.coordination.timerRows.set("player-1/match-1", {
+    timer: "7;1000",
+    turnNumber: 7,
+    updatedAtMs: 1,
+  });
+  const deletePair = repo.coordination.timerStarts.deletePair;
+  let cleanupAttempts = 0;
+  repo.coordination.timerStarts.deletePair = async (...args) => {
+    cleanupAttempts++;
+    if (cleanupAttempts === 1) throw new Error("timer-cleanup-failed");
+    return deletePair(...args);
+  };
+  await assert.rejects(
+    () =>
+      claimMatchVictoryByTimer(identity, request, repo.value, {
+        now: () => 2_000,
+        resolveGame: () => gameState(),
+      }),
+    /timer-cleanup-failed/,
+  );
+  assert.ok(repo.coordination.timerRows.has("player-1/match-1"));
+  assert.deepEqual(
+    await claimMatchVictoryByTimer(identity, request, repo.value, {
+      now: () => 2_001,
+      resolveGame: () => gameState(),
+    }),
+    { ok: true },
+  );
+  assert.equal(cleanupAttempts, 2);
+  assert.equal(repo.coordination.timerRows.size, 0);
 });

@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Game } from "mons-rules";
 import { AuthApiFailure } from "../src/authErrors.ts";
+import { GameSessionMutationLockFailure } from "../src/gameplayCoordinationD1.ts";
 import {
-  cancelAutomatch,
-  handleGameplayRoute,
+  cancelAutomatch as cancelAutomatchImpl,
+  handleGameplayRoute as handleGameplayRouteImpl,
   removeNavigationGame,
 } from "../src/gameplayRoute.ts";
 import type { RequestIdentity } from "../src/requestIdentity.ts";
@@ -23,6 +24,7 @@ import {
   operationFingerprint,
 } from "../src/wagerReservationOperations.ts";
 import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
+import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
 
 const env = {
   ...TELEGRAM_TEST_ENV,
@@ -39,6 +41,48 @@ const env = {
 const identity: RequestIdentity = {
   uid: "firebase-uid",
 };
+
+const coordinationByRepository = new WeakMap<
+  GameplayRepository,
+  ReturnType<typeof createMemoryGameplayCoordinationStores>
+>();
+
+function coordinationFor(repository: GameplayRepository) {
+  let coordination = coordinationByRepository.get(repository);
+  if (!coordination) {
+    coordination = createMemoryGameplayCoordinationStores();
+    coordinationByRepository.set(repository, coordination);
+  }
+  return coordination;
+}
+
+function cancelAutomatch(
+  identity: Parameters<typeof cancelAutomatchImpl>[0],
+  repository: GameplayRepository,
+  dependencies: Partial<Parameters<typeof cancelAutomatchImpl>[2]> = {},
+) {
+  return cancelAutomatchImpl(identity, repository, {
+    mutationLocks: coordinationFor(repository).mutationLocks,
+    ...dependencies,
+  });
+}
+
+function handleGameplayRoute(
+  request: Parameters<typeof handleGameplayRouteImpl>[0],
+  env: Parameters<typeof handleGameplayRouteImpl>[1],
+  ctx: Parameters<typeof handleGameplayRouteImpl>[2],
+  dependencies: Parameters<typeof handleGameplayRouteImpl>[3] = {},
+) {
+  const coordination =
+    dependencies.coordination ||
+    (dependencies.repository
+      ? coordinationFor(dependencies.repository)
+      : createMemoryGameplayCoordinationStores());
+  return handleGameplayRouteImpl(request, env, ctx, {
+    ...dependencies,
+    coordination,
+  });
+}
 
 type OwnershipState = Readonly<{
   aliasesByProfileId?: Readonly<Record<string, readonly string[]>>;
@@ -151,13 +195,8 @@ function wagerRepository(
 ): GameplayRepository {
   const value = repository(overrides);
   const transactRtdbPath = value.transactRtdbPath;
-  const locks = new Map<string, unknown>();
   value.transactRtdbPath = async (path, updater, signal) => {
-    if (path.startsWith("gameplayMutationLocks/")) {
-      const result = applyTransaction(updater, locks.get(path) ?? null);
-      if (result.committed) locks.set(path, result.value);
-      return result;
-    }
+    assert.doesNotMatch(path, /^(?:gameplayMutationLocks|matchTimerStarts)\//);
     return transactRtdbPath(path, updater, signal);
   };
   return value;
@@ -1042,6 +1081,78 @@ test("routes strict authenticated structural game-session mutations", async () =
   assert.equal(malformed.status, 400);
 });
 
+test("logs typed coordination failures while keeping responses sanitized", async () => {
+  const failures: Array<{ operation: string; store: string }> = [];
+  const coordination = createMemoryGameplayCoordinationStores();
+  coordination.mutationLocks.acquire = async () => {
+    throw new GameSessionMutationLockFailure("acquire");
+  };
+  const response = await handleGameplayRoute(
+    request("/invites/create", {
+      body: {
+        operationId: "00000000-0000-4000-8000-000000000001",
+        inviteId: "abcdefghijk",
+        emojiId: 7,
+        aura: "rainbow",
+      },
+    }),
+    env,
+    context(),
+    {
+      coordination,
+      logCoordinationFailure: (record) => failures.push(record),
+      repository: repository(),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "unavailable",
+    message: "gameplay-service-unavailable",
+  });
+  assert.deepEqual(failures, [
+    { operation: "acquire", store: "mutation-lock" },
+  ]);
+
+  const releaseCoordination = createMemoryGameplayCoordinationStores();
+  releaseCoordination.mutationLocks.release = async () => {
+    throw new GameSessionMutationLockFailure("release");
+  };
+  const releaseResponse = await handleGameplayRoute(
+    request("/invites/create", {
+      body: {
+        operationId: "00000000-0000-4000-8000-000000000002",
+        inviteId: "bcdefghijkl",
+        emojiId: 7,
+        aura: "rainbow",
+      },
+    }),
+    env,
+    context(),
+    {
+      coordination: releaseCoordination,
+      gameSession: {
+        logger: { error: () => undefined, info: () => undefined },
+        random: () => 0,
+      },
+      logCoordinationFailure: (record) => failures.push(record),
+      repository: repository(),
+      verifyIdentity: async () => identity,
+    },
+  );
+  assert.equal(releaseResponse.status, 503);
+  assert.deepEqual(await releaseResponse.json(), {
+    ok: false,
+    error: "unavailable",
+    message: "gameplay-service-unavailable",
+  });
+  assert.deepEqual(failures.at(-1), {
+    operation: "release",
+    store: "mutation-lock",
+  });
+});
+
 test("routes authoritative invite role reads without mutation rate limiting", async () => {
   let rateLimitCalls = 0;
   const roleEnv = {
@@ -1379,6 +1490,34 @@ test("routes match timer starts with rate limiting and idempotent storage", asyn
     },
   } as Env;
   const paths: string[] = [];
+  const timerRepository = repository({
+    getRtdbPath: async (path) => {
+      paths.push(path);
+      if (path === "invites/match-1") {
+        return { hostId: identity.uid, guestId: "opponent-uid" };
+      }
+      if (path.startsWith(`players/${identity.uid}/`)) {
+        return {
+          color: "black",
+          fen: "player-fen",
+          flatMovesString: "",
+          status: "",
+          timer: "4;12345",
+        };
+      }
+      return {
+        color: "white",
+        fen: "opponent-fen",
+        flatMovesString: "",
+        status: "",
+        timer: "",
+      };
+    },
+    transactRtdbPath: async (path, updater) => {
+      paths.push(path);
+      return applyTransaction(updater, "4;12345");
+    },
+  });
   const response = await handleGameplayRoute(
     request("/matches/timer/start", {
       body: {
@@ -1391,34 +1530,7 @@ test("routes match timer starts with rate limiting and idempotent storage", asyn
     timerEnv,
     context(),
     {
-      repository: repository({
-        getRtdbPath: async (path) => {
-          paths.push(path);
-          if (path === "invites/match-1") {
-            return { hostId: identity.uid, guestId: "opponent-uid" };
-          }
-          if (path.startsWith(`players/${identity.uid}/`)) {
-            return {
-              color: "black",
-              fen: "player-fen",
-              flatMovesString: "",
-              status: "",
-              timer: "4;12345",
-            };
-          }
-          return {
-            color: "white",
-            fen: "opponent-fen",
-            flatMovesString: "",
-            status: "",
-            timer: "",
-          };
-        },
-        transactRtdbPath: async (path, updater) => {
-          paths.push(path);
-          return applyTransaction(updater, "4;12345");
-        },
-      }),
+      repository: timerRepository,
       timer: {
         now: () => 1_000,
         resolveGame: () => ({
@@ -1442,14 +1554,74 @@ test("routes match timer starts with rate limiting and idempotent storage", asyn
     `players/${identity.uid}/matches/match-1`,
     "players/opponent-uid/matches/match-1",
     "invites/match-1",
-    `matchTimerStarts/${identity.uid}/match-1`,
+    `players/${identity.uid}/matches/match-1`,
+    "players/opponent-uid/matches/match-1",
+    "invites/match-1",
     `players/${identity.uid}/matches/match-1/timer`,
   ]);
+  assert.deepEqual(
+    coordinationFor(timerRepository).timerRows.get(`${identity.uid}/match-1`),
+    { timer: "4;12345", turnNumber: 4, updatedAtMs: 1_000 },
+  );
 });
 
 test("routes timer victory claims with a separate limit and terminal update", async () => {
   let rateLimitKey = "";
   const patches: Array<Record<string, unknown>> = [];
+  const timerRepository = repository({
+    getRtdbPath: async (path) => {
+      assert.doesNotMatch(path, /^matchTimerStarts\//);
+      if (path === "invites/match-1") {
+        return { hostId: identity.uid, guestId: "opponent-uid" };
+      }
+      if (path.startsWith(`players/${identity.uid}/`)) {
+        return {
+          color: "black",
+          fen: "player-fen",
+          flatMovesString: "",
+          status: "",
+          timer: "4;1000",
+        };
+      }
+      return {
+        color: "white",
+        fen: "opponent-fen",
+        flatMovesString: "",
+        status: "",
+        timer: "",
+      };
+    },
+    patchRtdbRoot: async (updates) => {
+      assert.equal(
+        Object.keys(updates).some((path) =>
+          path.startsWith("matchTimerStarts/"),
+        ),
+        false,
+      );
+      patches.push(updates);
+    },
+    transactRtdbPath: async (path, updater) => {
+      assert.doesNotMatch(path, /^matchTimerStarts\//);
+      return applyTransaction(updater, {
+        color: "black",
+        fen: "player-fen",
+        flatMovesString: "",
+        status: "",
+        timer: "4;1000",
+      });
+    },
+  });
+  const coordination = coordinationFor(timerRepository);
+  coordination.timerRows.set(`${identity.uid}/match-1`, {
+    timer: "4;1000",
+    turnNumber: 4,
+    updatedAtMs: 900,
+  });
+  coordination.timerRows.set("opponent-uid/match-1", {
+    timer: "4;1000",
+    turnNumber: 4,
+    updatedAtMs: 900,
+  });
   const response = await handleGameplayRoute(
     request("/matches/timer/claim", {
       body: {
@@ -1470,40 +1642,7 @@ test("routes timer victory claims with a separate limit and terminal update", as
     } as Env,
     context(),
     {
-      repository: repository({
-        getRtdbPath: async (path) => {
-          if (path === "invites/match-1") {
-            return { hostId: identity.uid, guestId: "opponent-uid" };
-          }
-          if (path.startsWith(`players/${identity.uid}/`)) {
-            return {
-              color: "black",
-              fen: "player-fen",
-              flatMovesString: "",
-              status: "",
-              timer: "4;1000",
-            };
-          }
-          return {
-            color: "white",
-            fen: "opponent-fen",
-            flatMovesString: "",
-            status: "",
-            timer: "",
-          };
-        },
-        patchRtdbRoot: async (updates) => {
-          patches.push(updates);
-        },
-        transactRtdbPath: async (_path, updater) =>
-          applyTransaction(updater, {
-            color: "black",
-            fen: "player-fen",
-            flatMovesString: "",
-            status: "",
-            timer: "4;1000",
-          }),
-      }),
+      repository: timerRepository,
       timer: {
         now: () => 1_001,
         resolveGame: () => ({
@@ -1532,10 +1671,9 @@ test("routes timer victory claims with a separate limit and terminal update", as
         claimedAtMs: 1_001,
         expiresAtMs: null,
       },
-      [`matchTimerStarts/${identity.uid}/match-1`]: null,
-      "matchTimerStarts/opponent-uid/match-1": null,
     },
   ]);
+  assert.equal(coordination.timerRows.size, 0);
 });
 
 test("rejects rate-limited timer claims before repository access", async () => {

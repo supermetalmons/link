@@ -52,6 +52,10 @@ import {
   type GameplayProfile,
   type GameplayRepository,
 } from "./gameplayRepository.ts";
+import {
+  GameSessionMutationLockFailure,
+  type GameSessionMutationLockStore,
+} from "./gameplayCoordinationD1.ts";
 import { buildAutomatchProfileGameProjectionOutboxMergeUpdates } from "./profileGameProjectionOutbox.ts";
 import type { HistoricalMatchDescriptor } from "./historicalMatches.ts";
 import type {
@@ -66,11 +70,9 @@ import {
   type ProfileOwnershipSnapshot,
 } from "./profileOwnership.ts";
 
-const GAME_SESSION_MUTATION_LOCK_ROOT = "gameplayMutationLocks";
 const GAME_SESSION_MUTATION_RECEIPT_ROOT = "gameplayMutationReceipts";
 const GAME_SESSION_MUTATION_RECEIPT_EXPIRATION_ROOT =
   "gameplayMutationReceiptExpirations";
-const GAME_SESSION_MUTATION_LOCK_MS = 60_000;
 const GAME_SESSION_MUTATION_RECEIPT_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const GAME_SESSION_MUTATION_RECEIPT_SWEEP_LIMIT = 1000;
 const gameVariantHelpers = createGameVariantHelpers(monsRules);
@@ -116,11 +118,13 @@ type GameSessionMutationOutcome<T extends GameSessionResponse> = {
 };
 
 type GameSessionMutationDependencies = {
+  assertMutationAllowed?: () => Promise<void>;
   createOwnerId?: () => string;
   enqueueProfileGameProjection?: (
     task: ProfileGameProjectionTask,
   ) => Promise<void>;
   logger?: Pick<Console, "error" | "info">;
+  mutationLocks: GameSessionMutationLockStore;
   now?: () => number;
   random?: () => number;
 };
@@ -154,10 +158,6 @@ function secureRandom(): number {
   const values = new Uint32Array(1);
   crypto.getRandomValues(values);
   return values[0] / 0x1_0000_0000;
-}
-
-function mutationLockPath(inviteId: string): string {
-  return `${GAME_SESSION_MUTATION_LOCK_ROOT}/${inviteId}`;
 }
 
 function mutationReceiptPath(operationId: string): string {
@@ -289,36 +289,22 @@ async function dispatchProjection(
 }
 
 export async function acquireGameSessionMutationLease(
-  inviteId: string,
+  lockId: string,
   operationId: string,
   ownerId: string,
-  repository: Pick<GameplayRepository, "transactRtdbPath">,
+  store: GameSessionMutationLockStore,
   nowMs: number,
 ): Promise<void> {
-  const result = await repository.transactRtdbPath(
-    mutationLockPath(inviteId),
-    (current) => {
-      const record = toRecord(current);
-      const expiresAtMs = Number(record?.expiresAtMs);
-      if (
-        typeof record?.ownerId === "string" &&
-        Number.isFinite(expiresAtMs) &&
-        expiresAtMs > nowMs
-      ) {
-        return { commit: false, decision: "busy" };
-      }
-      return {
-        value: {
-          ownerId,
-          operationId,
-          expiresAtMs: nowMs + GAME_SESSION_MUTATION_LOCK_MS,
-        },
-        decision: "acquired",
-      };
-    },
-  );
-  if (!result.committed) {
-    throw new AuthApiFailure(409, "aborted", "invite-busy");
+  try {
+    await store.acquire({ lockId, operationId }, ownerId, nowMs);
+  } catch (error) {
+    if (
+      error instanceof GameSessionMutationLockFailure &&
+      error.operation === "busy"
+    ) {
+      throw new AuthApiFailure(409, "aborted", "invite-busy");
+    }
+    throw error;
   }
 }
 
@@ -342,49 +328,63 @@ export async function enforceGameSessionMutationRateLimit(
 }
 
 export async function refreshGameSessionMutationLease(
-  inviteId: string,
+  lockId: string,
   operationId: string,
   ownerId: string,
-  repository: Pick<GameplayRepository, "transactRtdbPath">,
+  store: GameSessionMutationLockStore,
   nowMs: number,
 ): Promise<void> {
-  const result = await repository.transactRtdbPath(
-    mutationLockPath(inviteId),
-    (current) => {
-      const record = toRecord(current);
-      if (record?.ownerId !== ownerId || record.operationId !== operationId) {
-        return { commit: false, decision: "lost" };
-      }
-      return {
-        value: {
-          ...record,
-          expiresAtMs: nowMs + GAME_SESSION_MUTATION_LOCK_MS,
-        },
-        decision: "refreshed",
-      };
-    },
-  );
-  if (!result.committed) {
-    throw new AuthApiFailure(409, "aborted", "invite-lease-lost");
+  try {
+    await store.refresh({ lockId, operationId }, ownerId, nowMs);
+  } catch (error) {
+    if (
+      error instanceof GameSessionMutationLockFailure &&
+      error.operation === "lost"
+    ) {
+      throw new AuthApiFailure(409, "aborted", "invite-lease-lost");
+    }
+    throw error;
   }
 }
 
 export async function releaseGameSessionMutationLease(
-  inviteId: string,
+  lockId: string,
+  operationId: string,
   ownerId: string,
-  repository: Pick<GameplayRepository, "transactRtdbPath">,
+  store: GameSessionMutationLockStore,
 ): Promise<void> {
-  await repository.transactRtdbPath(mutationLockPath(inviteId), (current) =>
-    toRecord(current)?.ownerId === ownerId
-      ? { value: null, decision: "released" }
-      : { commit: false, decision: "not-owner" },
-  );
+  await store.release({ lockId, operationId }, ownerId);
+}
+
+export class GameSessionMutationLeaseReleaseFailure extends GameSessionMutationLockFailure {
+  readonly workCompleted: boolean;
+  readonly workError: unknown;
+
+  constructor(
+    releaseError: unknown,
+    workError: unknown,
+    workCompleted: boolean,
+  ) {
+    super("release", releaseError);
+    this.workCompleted = workCompleted;
+    this.workError = workError;
+  }
+}
+
+function leaseErrorCode(error: unknown): string {
+  if (error instanceof GameSessionMutationLockFailure) {
+    return error.operation;
+  }
+  if (error instanceof AuthApiFailure) {
+    return error.code;
+  }
+  return "unknown";
 }
 
 export async function withGameSessionMutationLease<T>(
-  inviteId: string,
+  lockId: string,
   operationId: string,
-  repository: Pick<GameplayRepository, "transactRtdbPath">,
+  store: GameSessionMutationLockStore,
   work: (refresh: () => Promise<void>) => Promise<T>,
   dependencies: Pick<
     GameSessionMutationDependencies,
@@ -394,35 +394,49 @@ export async function withGameSessionMutationLease<T>(
   const ownerId = (dependencies.createOwnerId || (() => crypto.randomUUID()))();
   const now = dependencies.now || Date.now;
   await acquireGameSessionMutationLease(
-    inviteId,
+    lockId,
     operationId,
     ownerId,
-    repository,
+    store,
     now(),
   );
+  let workCompleted = false;
+  let value: T | undefined;
+  let workError: unknown;
   try {
-    return await work(() =>
+    value = await work(() =>
       refreshGameSessionMutationLease(
-        inviteId,
+        lockId,
         operationId,
         ownerId,
-        repository,
+        store,
         now(),
       ),
     );
-  } finally {
-    try {
-      await releaseGameSessionMutationLease(inviteId, ownerId, repository);
-    } catch {
-      (dependencies.logger || console).error(
-        JSON.stringify({
-          event: "game_session_mutation_lock_release_failed",
-          inviteId,
-          operationId,
-        }),
-      );
-    }
+    workCompleted = true;
+  } catch (error) {
+    workError = error;
   }
+  try {
+    await releaseGameSessionMutationLease(lockId, operationId, ownerId, store);
+  } catch (releaseError) {
+    (dependencies.logger || console).error(
+      JSON.stringify({
+        event: "game_session_mutation_lock_release_failed",
+        inviteId: lockId,
+        operationId,
+        releaseCode: leaseErrorCode(releaseError),
+        workCode: workCompleted ? "none" : leaseErrorCode(workError),
+      }),
+    );
+    throw new GameSessionMutationLeaseReleaseFailure(
+      releaseError,
+      workCompleted ? undefined : workError,
+      workCompleted,
+    );
+  }
+  if (!workCompleted) throw workError;
+  return value as T;
 }
 
 async function runGameSessionMutation<T extends GameSessionResponse>(
@@ -434,109 +448,85 @@ async function runGameSessionMutation<T extends GameSessionResponse>(
   build: () => Promise<GameSessionMutationOutcome<T>>,
   dependencies: GameSessionMutationDependencies,
 ): Promise<T> {
-  const now = dependencies.now || Date.now;
-  const ownerId = (dependencies.createOwnerId || (() => crypto.randomUUID()))();
   const fingerprint = await mutationFingerprint(kind, request, requesterUid);
-  await acquireGameSessionMutationLease(
+  return withGameSessionMutationLease(
     request.inviteId,
     request.operationId,
-    ownerId,
-    repository,
-    now(),
-  );
-  try {
-    const rawReceipt = await repository.getRtdbPath(
-      mutationReceiptPath(request.operationId),
-    );
-    const existing = parseReceipt(rawReceipt);
-    if (rawReceipt !== null && rawReceipt !== undefined && !existing) {
-      throw failedPrecondition("operation-conflict");
-    }
-    if (existing) {
-      if (
-        existing.kind !== kind ||
-        existing.inviteId !== request.inviteId ||
-        existing.requesterUid !== requesterUid ||
-        existing.fingerprint !== fingerprint ||
-        !validateResponse(existing.response)
-      ) {
+    dependencies.mutationLocks,
+    async (refresh) => {
+      const rawReceipt = await repository.getRtdbPath(
+        mutationReceiptPath(request.operationId),
+      );
+      const existing = parseReceipt(rawReceipt);
+      if (rawReceipt !== null && rawReceipt !== undefined && !existing) {
         throw failedPrecondition("operation-conflict");
       }
-      if (existing.projectionRequestId) {
+      if (existing) {
+        if (
+          existing.kind !== kind ||
+          existing.inviteId !== request.inviteId ||
+          existing.requesterUid !== requesterUid ||
+          existing.fingerprint !== fingerprint ||
+          !validateResponse(existing.response)
+        ) {
+          throw failedPrecondition("operation-conflict");
+        }
+        if (existing.projectionRequestId) {
+          await dispatchProjection(
+            request.inviteId,
+            existing.projectionRequestId,
+            dependencies,
+          );
+        }
+        return existing.response;
+      }
+      const outcome = await build();
+      const projectionRequestId = outcome.projectReason
+        ? request.operationId
+        : null;
+      const updates: Record<string, unknown> = {
+        ...(outcome.updates || {}),
+        [mutationReceiptPath(request.operationId)]: {
+          schemaVersion: 1,
+          operationId: request.operationId,
+          kind,
+          inviteId: request.inviteId,
+          fingerprint,
+          projectionRequestId,
+          requesterUid,
+          response: outcome.response,
+          completedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+        },
+        [mutationReceiptExpirationPath(request.operationId)]: {
+          completedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+        },
+      };
+      if (outcome.projectReason) {
+        Object.assign(
+          updates,
+          buildAutomatchProfileGameProjectionOutboxMergeUpdates({
+            historicalMatches: outcome.historicalMatches,
+            inviteId: request.inviteId,
+            reason: outcome.projectReason,
+            requestId: request.operationId,
+            timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
+          }),
+        );
+      }
+      await dependencies.assertMutationAllowed?.();
+      await refresh();
+      await repository.patchRtdbRoot(updates);
+      if (projectionRequestId) {
         await dispatchProjection(
           request.inviteId,
-          existing.projectionRequestId,
+          projectionRequestId,
           dependencies,
         );
       }
-      return existing.response;
-    }
-    const outcome = await build();
-    const projectionRequestId = outcome.projectReason
-      ? request.operationId
-      : null;
-    const updates: Record<string, unknown> = {
-      ...(outcome.updates || {}),
-      [mutationReceiptPath(request.operationId)]: {
-        schemaVersion: 1,
-        operationId: request.operationId,
-        kind,
-        inviteId: request.inviteId,
-        fingerprint,
-        projectionRequestId,
-        requesterUid,
-        response: outcome.response,
-        completedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
-      },
-      [mutationReceiptExpirationPath(request.operationId)]: {
-        completedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
-      },
-    };
-    if (outcome.projectReason) {
-      Object.assign(
-        updates,
-        buildAutomatchProfileGameProjectionOutboxMergeUpdates({
-          historicalMatches: outcome.historicalMatches,
-          inviteId: request.inviteId,
-          reason: outcome.projectReason,
-          requestId: request.operationId,
-          timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
-        }),
-      );
-    }
-    await refreshGameSessionMutationLease(
-      request.inviteId,
-      request.operationId,
-      ownerId,
-      repository,
-      now(),
-    );
-    await repository.patchRtdbRoot(updates);
-    if (projectionRequestId) {
-      await dispatchProjection(
-        request.inviteId,
-        projectionRequestId,
-        dependencies,
-      );
-    }
-    return outcome.response;
-  } finally {
-    try {
-      await releaseGameSessionMutationLease(
-        request.inviteId,
-        ownerId,
-        repository,
-      );
-    } catch {
-      (dependencies.logger || console).error(
-        JSON.stringify({
-          event: "game_session_mutation_lock_release_failed",
-          inviteId: request.inviteId,
-          operationId: request.operationId,
-        }),
-      );
-    }
-  }
+      return outcome.response;
+    },
+    dependencies,
+  );
 }
 
 export async function resolveInviteRole(
@@ -677,7 +667,7 @@ export async function createManualInvite(
   identity: RequestIdentity,
   request: CreateInviteRequest,
   repository: GameplayRepository,
-  dependencies: GameSessionMutationDependencies = {},
+  dependencies: GameSessionMutationDependencies,
 ): Promise<CreateInviteResponse> {
   return runGameSessionMutation(
     "invite-create",
@@ -789,7 +779,7 @@ export async function joinInvite(
   identity: RequestIdentity,
   request: JoinInviteRequest,
   repository: GameplayRepository,
-  dependencies: GameSessionMutationDependencies = {},
+  dependencies: GameSessionMutationDependencies,
 ): Promise<JoinInviteResponse> {
   return runGameSessionMutation(
     "invite-join",
@@ -988,7 +978,7 @@ export async function proposeRematch(
   identity: RequestIdentity,
   request: ProposeRematchRequest,
   repository: GameplayRepository,
-  dependencies: GameSessionMutationDependencies = {},
+  dependencies: GameSessionMutationDependencies,
 ): Promise<ProposeRematchResponse> {
   return runGameSessionMutation(
     "rematch-propose",
@@ -1099,7 +1089,7 @@ export async function endRematchSeries(
   identity: RequestIdentity,
   request: EndRematchRequest,
   repository: GameplayRepository,
-  dependencies: GameSessionMutationDependencies = {},
+  dependencies: GameSessionMutationDependencies,
 ): Promise<EndRematchResponse> {
   return runGameSessionMutation(
     "rematch-end",
@@ -1174,7 +1164,7 @@ export async function ensureParticipantMatch(
   identity: RequestIdentity,
   request: EnsureMatchRequest,
   repository: GameplayRepository,
-  dependencies: GameSessionMutationDependencies = {},
+  dependencies: GameSessionMutationDependencies,
 ): Promise<EnsureMatchResponse> {
   return runGameSessionMutation(
     "match-ensure",
@@ -1293,8 +1283,6 @@ export async function sweepGameSessionMutationReceipts(
 }
 
 export {
-  GAME_SESSION_MUTATION_LOCK_MS,
-  GAME_SESSION_MUTATION_LOCK_ROOT,
   GAME_SESSION_MUTATION_RECEIPT_EXPIRATION_ROOT,
   GAME_SESSION_MUTATION_RECEIPT_RETENTION_MS,
   GAME_SESSION_MUTATION_RECEIPT_ROOT,

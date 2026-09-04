@@ -13,28 +13,181 @@ import { AuthApiFailure } from "../src/authErrors.ts";
 import type { RequestIdentity } from "../src/requestIdentity.ts";
 import {
   GAME_SESSION_MUTATION_RECEIPT_SWEEP_LIMIT,
-  acquireGameSessionMutationLease,
-  createManualInvite,
-  endRematchSeries,
-  ensureParticipantMatch,
-  joinInvite,
+  GameSessionMutationLeaseReleaseFailure,
+  acquireGameSessionMutationLease as acquireGameSessionMutationLeaseImpl,
+  createManualInvite as createManualInviteImpl,
+  endRematchSeries as endRematchSeriesImpl,
+  ensureParticipantMatch as ensureParticipantMatchImpl,
+  joinInvite as joinInviteImpl,
   nextRematchIndex,
-  proposeRematch,
-  refreshGameSessionMutationLease,
-  releaseGameSessionMutationLease,
+  proposeRematch as proposeRematchImpl,
+  refreshGameSessionMutationLease as refreshGameSessionMutationLeaseImpl,
+  releaseGameSessionMutationLease as releaseGameSessionMutationLeaseImpl,
   resolveInviteRole,
   sweepGameSessionMutationReceipts,
+  withGameSessionMutationLease,
+  type GameSessionMutationDependencies,
 } from "../src/gameSessionMutations.ts";
+import {
+  GameSessionMutationLockFailure,
+  type GameSessionMutationLockStore,
+} from "../src/gameplayCoordinationD1.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import type {
   ProfileOwnershipQuery,
   ProfileOwnershipSnapshot,
 } from "../src/profileOwnership.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
 
 const identity: RequestIdentity = {
   uid: "login-1",
 };
+
+type GameSessionDependencyOverrides = Omit<
+  GameSessionMutationDependencies,
+  "mutationLocks"
+>;
+
+const coordinationByRepository = new WeakMap<
+  GameplayRepository,
+  ReturnType<typeof createMemoryGameplayCoordinationStores>
+>();
+
+function coordination(repository: GameplayRepository) {
+  let stores = coordinationByRepository.get(repository);
+  if (!stores) {
+    stores = createMemoryGameplayCoordinationStores();
+    coordinationByRepository.set(repository, stores);
+  }
+  return stores;
+}
+
+function sessionDependencies(
+  repository: GameplayRepository,
+  dependencies: GameSessionDependencyOverrides = {},
+): GameSessionMutationDependencies {
+  return {
+    ...dependencies,
+    mutationLocks: coordination(repository).mutationLocks,
+  };
+}
+
+function createManualInvite(
+  actor: RequestIdentity,
+  request: CreateInviteRequest,
+  repository: GameplayRepository,
+  dependencies: GameSessionDependencyOverrides = {},
+) {
+  return createManualInviteImpl(
+    actor,
+    request,
+    repository,
+    sessionDependencies(repository, dependencies),
+  );
+}
+
+function joinInvite(
+  actor: RequestIdentity,
+  request: JoinInviteRequest,
+  repository: GameplayRepository,
+  dependencies: GameSessionDependencyOverrides = {},
+) {
+  return joinInviteImpl(
+    actor,
+    request,
+    repository,
+    sessionDependencies(repository, dependencies),
+  );
+}
+
+function proposeRematch(
+  actor: RequestIdentity,
+  request: ProposeRematchRequest,
+  repository: GameplayRepository,
+  dependencies: GameSessionDependencyOverrides = {},
+) {
+  return proposeRematchImpl(
+    actor,
+    request,
+    repository,
+    sessionDependencies(repository, dependencies),
+  );
+}
+
+function endRematchSeries(
+  actor: RequestIdentity,
+  request: EndRematchRequest,
+  repository: GameplayRepository,
+  dependencies: GameSessionDependencyOverrides = {},
+) {
+  return endRematchSeriesImpl(
+    actor,
+    request,
+    repository,
+    sessionDependencies(repository, dependencies),
+  );
+}
+
+function ensureParticipantMatch(
+  actor: RequestIdentity,
+  request: EnsureMatchRequest,
+  repository: GameplayRepository,
+  dependencies: GameSessionDependencyOverrides = {},
+) {
+  return ensureParticipantMatchImpl(
+    actor,
+    request,
+    repository,
+    sessionDependencies(repository, dependencies),
+  );
+}
+
+function acquireGameSessionMutationLease(
+  lockId: string,
+  operationId: string,
+  ownerId: string,
+  repository: GameplayRepository,
+  nowMs: number,
+) {
+  return acquireGameSessionMutationLeaseImpl(
+    lockId,
+    operationId,
+    ownerId,
+    coordination(repository).mutationLocks,
+    nowMs,
+  );
+}
+
+function refreshGameSessionMutationLease(
+  lockId: string,
+  operationId: string,
+  ownerId: string,
+  repository: GameplayRepository,
+  nowMs: number,
+) {
+  return refreshGameSessionMutationLeaseImpl(
+    lockId,
+    operationId,
+    ownerId,
+    coordination(repository).mutationLocks,
+    nowMs,
+  );
+}
+
+function releaseGameSessionMutationLease(
+  lockId: string,
+  operationId: string,
+  ownerId: string,
+  repository: GameplayRepository,
+) {
+  return releaseGameSessionMutationLeaseImpl(
+    lockId,
+    operationId,
+    ownerId,
+    coordination(repository).mutationLocks,
+  );
+}
 
 const ids = {
   create: "00000000-0000-4000-8000-000000000001",
@@ -558,6 +711,7 @@ test("serializes invite mutations with expiring owner-fenced leases", async () =
   );
   await releaseGameSessionMutationLease(
     "abcdefghijk",
+    ids.create,
     "wrong-owner",
     state.repository,
   );
@@ -579,6 +733,87 @@ test("serializes invite mutations with expiring owner-fenced leases", async () =
       ),
     (error: unknown) =>
       error instanceof AuthApiFailure && error.message === "invite-lease-lost",
+  );
+});
+
+test("surfaces release failure after successful leased work", async () => {
+  const coordination = createMemoryGameplayCoordinationStores();
+  const releaseFailure = new GameSessionMutationLockFailure("release");
+  const store: GameSessionMutationLockStore = {
+    ...coordination.mutationLocks,
+    release: async () => {
+      throw releaseFailure;
+    },
+  };
+  const logs: string[] = [];
+  await assert.rejects(
+    () =>
+      withGameSessionMutationLease(
+        "abcdefghijk",
+        ids.create,
+        store,
+        async () => "done",
+        {
+          createOwnerId: () => "owner-1",
+          logger: {
+            error: (message) => logs.push(String(message)),
+            info: () => undefined,
+          },
+          now: () => 100,
+        },
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof GameSessionMutationLeaseReleaseFailure);
+      assert.equal(error.operation, "release");
+      assert.equal(error.cause, releaseFailure);
+      assert.equal(error.workCompleted, true);
+      assert.equal(error.workError, undefined);
+      return true;
+    },
+  );
+  assert.equal(logs.length, 1);
+  assert.deepEqual(JSON.parse(logs[0]), {
+    event: "game_session_mutation_lock_release_failed",
+    inviteId: "abcdefghijk",
+    operationId: ids.create,
+    releaseCode: "release",
+    workCode: "none",
+  });
+});
+
+test("release failure wins while retaining a leased work failure", async () => {
+  const coordination = createMemoryGameplayCoordinationStores();
+  const workFailure = new Error("work-failed");
+  const releaseFailure = new GameSessionMutationLockFailure("release");
+  const store: GameSessionMutationLockStore = {
+    ...coordination.mutationLocks,
+    release: async () => {
+      throw releaseFailure;
+    },
+  };
+  await assert.rejects(
+    () =>
+      withGameSessionMutationLease(
+        "abcdefghijk",
+        ids.create,
+        store,
+        async () => {
+          throw workFailure;
+        },
+        {
+          createOwnerId: () => "owner-1",
+          logger: { error: () => undefined, info: () => undefined },
+          now: () => 100,
+        },
+      ),
+    (error: unknown) => {
+      assert.ok(error instanceof GameSessionMutationLeaseReleaseFailure);
+      assert.equal(error.operation, "release");
+      assert.equal(error.cause, releaseFailure);
+      assert.equal(error.workCompleted, false);
+      assert.equal(error.workError, workFailure);
+      return true;
+    },
   );
 });
 
@@ -652,6 +887,32 @@ test("creates and replays one atomic manual invite mutation", async () => {
     (error: unknown) =>
       error instanceof AuthApiFailure && error.message === "operation-conflict",
   );
+});
+
+test("rechecks mutation control immediately before the RTDB commit", async () => {
+  const state = repository();
+  await assert.rejects(
+    () =>
+      createManualInvite(
+        identity,
+        {
+          operationId: ids.create,
+          inviteId: "abcdefghijk",
+          ...presentation(),
+        },
+        state.repository,
+        {
+          assertMutationAllowed: async () => {
+            throw new Error("profile-writes-disabled");
+          },
+          now: () => 1_000,
+          random: () => 0,
+        },
+      ),
+    /profile-writes-disabled/,
+  );
+  assert.equal(state.patches.length, 0);
+  assert.equal(coordination(state.repository).lockRows.size, 0);
 });
 
 test("joins a manual invite and persists the mirrored guest match", async () => {

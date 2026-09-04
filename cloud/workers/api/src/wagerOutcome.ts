@@ -78,6 +78,7 @@ type ProposalSettlement = SettlementBase & {
 type WagerSettlement = AgreedSettlement | ProposalSettlement;
 
 export type WagerOutcomeDependencies = {
+  assertMutationAllowed?: () => Promise<void>;
   now?: () => number;
   resolveResult?: (
     player: MatchRecord,
@@ -515,10 +516,12 @@ async function claimSettlement(
   acceptReservationOperationIdByUid: Readonly<Record<string, string>>,
   repository: GameplayRepository,
   signal?: AbortSignal,
+  assertMutationAllowed?: () => Promise<void>,
 ): Promise<
   "already-resolved" | "insufficient-materials" | "no-wager" | WagerSettlement
 > {
   let current: unknown;
+  await assertMutationAllowed?.();
   try {
     const transaction = await repository.transactRtdbPath(
       wagerPath,
@@ -597,11 +600,13 @@ async function completeSettlement(
   repository: GameplayRepository,
   now: () => number,
   signal?: AbortSignal,
+  assertMutationAllowed?: () => Promise<void>,
 ): Promise<null | typeof WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON> {
   const wagerPath = `invites/${inviteId}/wagers/${matchId}`;
   let insufficientMaterials = false;
   const release = async (entry: SettlementRelease) => {
     for (const reservationOperationId of entry.reservationOperationIds) {
+      await assertMutationAllowed?.();
       await consumeWagerReservationOperation(
         repository,
         entry.uid,
@@ -611,6 +616,7 @@ async function completeSettlement(
     }
   };
   if (settlement.kind === "agreed") {
+    await assertMutationAllowed?.();
     const transfer = await repository.applyWagerTransferOnce({
       operationId: settlement.operationId,
       fingerprint: settlement.fingerprint,
@@ -647,6 +653,7 @@ async function completeSettlement(
       resolvedAt: completedAtMs,
     };
   }
+  await assertMutationAllowed?.();
   await repository.patchRtdbRoot(updates, signal);
   return insufficientMaterials
     ? WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON
@@ -698,6 +705,7 @@ export async function resumeWagerSettlement(
   task: WagerSettlementRetryTask,
   repository: GameplayRepository,
   now: () => number = Date.now,
+  assertMutationAllowed?: () => Promise<void>,
 ): Promise<"completed" | "stale"> {
   const retry = await readWagerSettlementRetry(task, repository);
   let settlement: WagerSettlement;
@@ -707,6 +715,7 @@ export async function resumeWagerSettlement(
       repository,
       `invites/${task.inviteId}/wagers/${task.matchId}`,
       now,
+      assertMutationAllowed,
     );
     const claimed = await claimSettlement(
       `invites/${task.inviteId}/wagers/${task.matchId}`,
@@ -719,6 +728,8 @@ export async function resumeWagerSettlement(
         [task.resolution.winnerUid, task.resolution.loserUid],
       ),
       repository,
+      undefined,
+      assertMutationAllowed,
     );
     if (claimed === WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON) {
       return "completed";
@@ -738,6 +749,8 @@ export async function resumeWagerSettlement(
     settlement,
     repository,
     now,
+    undefined,
+    assertMutationAllowed,
   );
   return "completed";
 }
@@ -799,6 +812,7 @@ export async function resolveWagerOutcome(
       "match-result-unavailable",
     );
   }
+  await dependencies.assertMutationAllowed?.();
 
   const mining = () =>
     repository.getMiningSnapshot(participants.playerProfileId);
@@ -877,7 +891,12 @@ export async function resolveWagerOutcome(
       [participants.playerUid, participants.opponentUid],
     );
   await dependencies.scheduleRetry?.(task);
-  await ensureWagerAgreementLineageReady(repository, wagerPath, now);
+  await ensureWagerAgreementLineageReady(
+    repository,
+    wagerPath,
+    now,
+    dependencies.assertMutationAllowed,
+  );
   const settlement = await claimSettlement(
     wagerPath,
     resolution,
@@ -886,6 +905,7 @@ export async function resolveWagerOutcome(
     acceptReservationOperationIdByUid,
     repository,
     dependencies.signal,
+    dependencies.assertMutationAllowed,
   );
   if (settlement === "no-wager") {
     return { ok: true, reason: "no-wager", mining: await mining() };
@@ -907,6 +927,7 @@ export async function resolveWagerOutcome(
     repository,
     now,
     dependencies.signal,
+    dependencies.assertMutationAllowed,
   );
   return completion
     ? { ok: true, reason: "no-wager", mining: await mining() }

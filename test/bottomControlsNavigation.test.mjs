@@ -159,7 +159,7 @@ test("move-history state follows the latest entry only while its popup is open",
   assert.equal(isMoveHistoryPopupFollowingLatest(), false);
 });
 
-test("navigation cache stays identity-scoped, sanitized, cloned, and bounded", () => {
+test("navigation cache stays profile-scoped, sanitized, cloned, and bounded", () => {
   const previousLocalStorage = Object.getOwnPropertyDescriptor(
     globalThis,
     "localStorage",
@@ -174,17 +174,17 @@ test("navigation cache stays identity-scoped, sanitized, cloned, and bounded", (
     },
   });
 
-  const scope = resolveNavigationGamesCacheScope("profile-1", "login-1");
+  const scope = resolveNavigationGamesCacheScope("profile-1");
   assert.deepEqual(scope, {
     kind: "profile",
     scopeId: "profile-1",
     scopeKey: "profile:profile-1",
   });
-  assert.equal(resolveNavigationGamesCacheScope("", "") ?? null, null);
-  assert.equal(
-    resolveNavigationGamesCacheScope("", "login-1")?.scopeKey,
-    "login:login-1",
-  );
+  assert.equal(resolveNavigationGamesCacheScope("") ?? null, null);
+  assert.deepEqual(readNavigationGamesCacheSnapshot(null), {
+    topGames: [],
+    pagedGames: [],
+  });
 
   const game = {
     id: "game-1",
@@ -195,14 +195,21 @@ test("navigation cache stays identity-scoped, sanitized, cloned, and bounded", (
     sortBucket: 30,
     listSortAtMs: 9,
   };
+  const fallbackGame = {
+    ...game,
+    id: "fallback-game",
+    inviteId: "fallback-invite",
+    isFallback: true,
+  };
   try {
     writeNavigationGamesRuntimeCache(
       scope,
-      [game, game, { id: "invalid" }],
+      [game, game, fallbackGame, { id: "invalid" }],
       [],
     );
     const runtimeSnapshot = readNavigationGamesCacheSnapshot(scope);
     assert.equal(runtimeSnapshot.topGames.length, 1);
+    assert.equal("isFallback" in runtimeSnapshot.topGames[0], false);
     runtimeSnapshot.topGames.length = 0;
     assert.equal(readNavigationGamesCacheSnapshot(scope).topGames.length, 1);
 
@@ -217,6 +224,20 @@ test("navigation cache stays identity-scoped, sanitized, cloned, and bounded", (
       persistedSnapshot.topGames.map(({ id }) => id),
       ["game-1"],
     );
+
+    values.set(
+      "navigationGamesTopCache:v3:profile:profile-1",
+      JSON.stringify({
+        version: 3,
+        updatedAtMs: Date.now(),
+        topGames: [fallbackGame, game],
+      }),
+    );
+    const legacySnapshot = readNavigationGamesCacheSnapshot(scope);
+    assert.deepEqual(
+      legacySnapshot.topGames.map(({ id }) => id),
+      ["game-1"],
+    );
   } finally {
     clearNavigationGamesRuntimeCacheScope(scope.scopeKey);
     if (previousLocalStorage) {
@@ -225,6 +246,112 @@ test("navigation cache stays identity-scoped, sanitized, cloned, and bounded", (
       delete globalThis.localStorage;
     }
   }
+});
+
+test("navigation UI keeps hydrated games when polling stops and pages only through D1", () => {
+  const source = readFileSync(
+    new URL("../src/ui/BottomControls.tsx", import.meta.url),
+    "utf8",
+  );
+  const subscriptionStart = source.indexOf(
+    "unsubscribe = connection.subscribeProfileGames",
+  );
+  const subscriptionEnd = source.indexOf(
+    "      (pageMeta) =>",
+    subscriptionStart,
+  );
+  const subscriptionHandlers = source.slice(subscriptionStart, subscriptionEnd);
+  const loadMoreStart = source.indexOf(
+    "const handleNavigationLoadMoreGames = () =>",
+  );
+  const loadMoreEnd = source.indexOf("  const handleShare", loadMoreStart);
+  const loadMore = source.slice(loadMoreStart, loadMoreEnd);
+
+  assert.ok(subscriptionStart > 0);
+  assert.ok(subscriptionEnd > subscriptionStart);
+  assert.match(
+    subscriptionHandlers,
+    /setNavigationHasMoreGames\(false\);\s*setNavigationGamesCursor\(null\);\s*stopAllNavigationLoading\(\);/,
+  );
+  assert.doesNotMatch(
+    subscriptionHandlers,
+    /setNavigationProjectedGames\(\[\]\)/,
+  );
+  assert.doesNotMatch(subscriptionHandlers, /setNavigationPagedGames\(\[\]\)/);
+  assert.match(loadMore, /\.getProfileGamesPage\(/);
+  assert.doesNotMatch(loadMore, /Fallback|getCurrentLoginFallbackGames/);
+  assert.match(source, /onRemoveGame=\{handleNavigationGameRemove\}/);
+});
+
+test("navigation UI resets profile-bound state before popup-specific work", () => {
+  const source = readFileSync(
+    new URL("../src/ui/BottomControls.tsx", import.meta.url),
+    "utf8",
+  );
+  const resetStart = source.indexOf(
+    "const previousCacheScope = navigationCacheScopeRef.current",
+  );
+  const popupClosedBranch = source.indexOf("if (!isNavigationPopupVisible)");
+  const resetSource = source.slice(resetStart, popupClosedBranch);
+  const eventPreviewStart = source.indexOf(
+    "const getEventCloudAvatarsFromNavigationSources",
+  );
+  const eventPreviewEnd = source.indexOf(
+    "interface BottomControlsProps",
+    eventPreviewStart,
+  );
+  const eventPreviewSource = source.slice(eventPreviewStart, eventPreviewEnd);
+
+  assert.ok(resetStart > 0);
+  assert.ok(popupClosedBranch > resetStart);
+  assert.match(
+    resetSource,
+    /navigationCacheScopeRef\.current = activeNavigationCacheScope/,
+  );
+  assert.match(resetSource, /navigationProfileScopeEpochRef\.current \+= 1/);
+  assert.match(resetSource, /setNavigationStateScopeKey\(null\)/);
+  assert.match(resetSource, /setNavigationProjectedGames\(\[\]\)/);
+  assert.match(resetSource, /setNavigationPagedGames\(\[\]\)/);
+  assert.match(resetSource, /setOptimisticPendingAutomatchItem\(null\)/);
+  assert.match(resetSource, /setIsCancelAutomatchDisabled\(false\)/);
+  assert.match(resetSource, /setNavigationRemovingInviteIds\(new Set\(\)\)/);
+  assert.match(resetSource, /setNavigationHasMoreGames\(false\)/);
+  assert.match(resetSource, /setNavigationGamesCursor\(null\)/);
+  assert.match(resetSource, /eventCloudSubscriptionEventIdRef\.current = null/);
+  assert.match(resetSource, /setLiveEventCloudAvatars\(\[\]\)/);
+  assert.match(
+    source,
+    /navigationStateScopeKey !== activeNavigationCacheScopeKey/,
+  );
+  assert.match(
+    eventPreviewSource,
+    /cacheScope: NavigationGamesCacheScope \| null/,
+  );
+  assert.match(
+    eventPreviewSource,
+    /readNavigationGamesCacheSnapshot\(cacheScope\)/,
+  );
+  assert.doesNotMatch(eventPreviewSource, /storage\.getProfileId/);
+  assert.match(
+    source,
+    /pagedNavigationGames,\s*activeNavigationCacheScope,\s*\)/,
+  );
+  assert.match(source, /navigationLoadMoreEpochRef\.current !== loadMoreEpoch/);
+  assert.match(source, /navigationLoadMoreEpochRef\.current === loadMoreEpoch/);
+
+  const cancelStart = source.indexOf(
+    "const handleCancelAutomatchClick = async",
+  );
+  const cancelEnd = source.indexOf(
+    "const getPrimaryActionButtonText",
+    cancelStart,
+  );
+  const cancelSource = source.slice(cancelStart, cancelEnd);
+  assert.match(cancelSource, /if \(!sessionGuard\(\)\) \{\s*return;/);
+  assert.match(
+    cancelSource,
+    /if \(isNavigationProfileScopeActive\(\)\) \{\s*setOptimisticPendingAutomatchItem\(null\);/,
+  );
 });
 
 test("control domains use neutral ports and contain no disabled badge path", () => {

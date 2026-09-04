@@ -129,6 +129,7 @@ export const TELEGRAM_TEST_ENV = {
   FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   GAMEPLAY_SERVICE_ACCOUNT_EMAIL: "gameplay@example.iam.gserviceaccount.com",
   GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
+  GAMEPLAY_COORDINATION_AUTHORITY: "d1",
   HELIUS_RPC_API_KEY: "test-helius-key",
   NFT_RATE_LIMITER: rateLimit,
   PROFILE_GAME_PROJECTION_QUEUE: queue,

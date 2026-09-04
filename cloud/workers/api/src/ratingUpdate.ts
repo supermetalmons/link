@@ -18,10 +18,7 @@ import {
   inviteMatchesPlayers,
   parseInviteMatchIndex,
 } from "@mons/shared/rematches";
-import {
-  MATCH_TIMER_START_ROOT,
-  MATCH_TIMER_TERMINAL,
-} from "@mons/shared/timers";
+import { MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
 import { Color, Game, resolveMatch } from "mons-rules";
 import {
   getDisplayNameFromAddress,
@@ -29,6 +26,7 @@ import {
 } from "../../../functions/telegramDisplay.js";
 import { TELEGRAM_AUTOMATCH_VERSION } from "../../../functions/telegram/automatchSource.js";
 import { AuthApiFailure } from "./authErrors.ts";
+import type { MatchTimerStartStore } from "./gameplayCoordinationD1.ts";
 import {
   buildHistoricalMatchPair,
   HISTORICAL_MATCH_ARCHIVE_VERSION,
@@ -89,6 +87,7 @@ type RatingMatchRecord = {
 type RatingResult = "gg" | "win";
 
 export type RatingUpdateDependencies = {
+  assertMutationAllowed?: () => Promise<void>;
   createOwnerToken?: (uid: string) => string;
   enqueueEventProgress?: (plan: EventProgressPlan) => Promise<void>;
   enqueueProfileGameProjection?: (
@@ -100,6 +99,7 @@ export type RatingUpdateDependencies = {
   ) => void;
   logProjectionFailure?: (task: RatingTelegramProjectionTask) => void;
   now?: () => number;
+  timerStarts: MatchTimerStartStore;
 };
 
 function toRecord(value: unknown): Record<string, unknown> | null {
@@ -532,6 +532,8 @@ async function repairRatingSideEffects(
   request: RatingUpdateRequest,
   data: RatingRepairData | null,
   repository: RatingRepository,
+  timerStarts: MatchTimerStartStore,
+  assertMutationAllowed: (() => Promise<void>) | undefined,
   eventId: string | null,
   nowMs: number,
 ): Promise<EventProgressPlan | null> {
@@ -545,15 +547,19 @@ async function repairRatingSideEffects(
         nowMs,
       )
     : null;
+  await assertMutationAllowed?.();
   await repository.patchRtdbRoot({
-    [`${MATCH_TIMER_START_ROOT}/${request.playerId}/${request.matchId}`]: null,
-    [`${MATCH_TIMER_START_ROOT}/${request.opponentId}/${request.matchId}`]:
-      null,
     [`invites/${request.inviteId}/matchesRatingUpdates/${request.matchId}`]: true,
     ...(progress
       ? { [`eventProgressOutbox/${progress.outboxId}`]: progress.outbox }
       : {}),
   });
+  await assertMutationAllowed?.();
+  await timerStarts.deletePair(
+    request.playerId,
+    request.opponentId,
+    request.matchId,
+  );
   if (
     data?.shouldUpdateFebruaryChallenge &&
     data.playerProfileId &&
@@ -591,7 +597,7 @@ export async function updateRatings(
   identity: RequestIdentity,
   request: RatingUpdateRequest,
   repository: RatingRepository,
-  dependencies: RatingUpdateDependencies = {},
+  dependencies: RatingUpdateDependencies,
 ): Promise<RatingUpdateResponse> {
   if (!isAutoInviteId(request.inviteId)) {
     return { ok: false };
@@ -633,6 +639,8 @@ export async function updateRatings(
       request,
       existing,
       repository,
+      dependencies.timerStarts,
+      dependencies.assertMutationAllowed,
       progressEventId,
       now(),
     );
@@ -697,6 +705,8 @@ export async function updateRatings(
       request,
       lease.data,
       repository,
+      dependencies.timerStarts,
+      dependencies.assertMutationAllowed,
       progressEventId,
       now(),
     );
@@ -743,6 +753,8 @@ export async function updateRatings(
     request,
     finalized.data,
     repository,
+    dependencies.timerStarts,
+    dependencies.assertMutationAllowed,
     progressEventId,
     now(),
   );

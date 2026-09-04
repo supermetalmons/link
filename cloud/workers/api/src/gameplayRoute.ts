@@ -54,6 +54,12 @@ import {
   createRatingRepository,
   type RatingRepository,
 } from "./gameplayRepository.ts";
+import {
+  createGameplayCoordinationStores,
+  GameSessionMutationLockFailure,
+  MatchTimerStartStoreFailure,
+  type GameplayCoordinationStores,
+} from "./gameplayCoordinationD1.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
 import { isSafeOperationId } from "./operationIds.ts";
 import { readBoundedJson } from "./http.ts";
@@ -135,16 +141,22 @@ const GAMEPLAY_READ_PATHS = new Set([
 ]);
 
 export type GameplayRouteDependencies = {
-  automatch?: AutomatchDependencies;
-  gameSession?: GameSessionMutationDependencies;
+  assertMutationAllowed?: () => Promise<void>;
+  automatch?: Partial<AutomatchDependencies>;
+  coordination?: GameplayCoordinationStores;
+  gameSession?: Partial<GameSessionMutationDependencies>;
+  logCoordinationFailure?: (record: {
+    operation: string;
+    store: "mutation-lock" | "timer-start";
+  }) => void;
   logFailure?: (kind: string) => void;
   profileGamesDb?: D1Database;
   readNavigationPage?: typeof readProfileGamesPage;
   repository?: GameplayRepository;
-  rating?: RatingUpdateDependencies;
+  rating?: Partial<RatingUpdateDependencies>;
   ratingRepository?: RatingRepository;
-  timer?: MatchTimerDependencies;
-  wager?: WagerProposalDependencies;
+  timer?: Partial<MatchTimerDependencies>;
+  wager?: Partial<WagerProposalDependencies>;
   wagerOutcome?: WagerOutcomeDependencies;
   verifyIdentity?: (
     request: Request,
@@ -176,7 +188,7 @@ async function resolveProfileId(
 export async function cancelAutomatch(
   identity: RequestIdentity,
   repository: GameplayRepository,
-  dependencies: AutomatchDependencies = {},
+  dependencies: AutomatchDependencies,
 ): Promise<CancelAutomatchResponse> {
   return {
     ok: await cancelOwnedQueuedAutomatches(
@@ -456,6 +468,12 @@ export async function handleGameplayRoute(
     const body = await readGameplayBody(request, pathname);
     const repository =
       dependencies.repository || createEventGameplayRepository(env);
+    const coordination =
+      dependencies.coordination ||
+      createGameplayCoordinationStores(env.PROFILE_GAMES_DB);
+    const assertMutationAllowed =
+      dependencies.assertMutationAllowed ||
+      (() => assertProfileMutationAllowed(env));
     const defaultEnqueueEventProgress = async (plan: EventProgressPlan) => {
       ctx.waitUntil(
         ensureEventProgressWorkflow(env.EVENT_PROGRESS_WORKFLOW, plan).catch(
@@ -501,15 +519,18 @@ export async function handleGameplayRoute(
     };
     const automatchDependencies: AutomatchDependencies = {
       ...dependencies.automatch,
+      assertMutationAllowed,
       enqueueProfileGameProjection:
         dependencies.automatch?.enqueueProfileGameProjection ||
         defaultEnqueueProfileGameProjection,
       enqueueTelegramProjection:
         dependencies.automatch?.enqueueTelegramProjection ||
         defaultEnqueueTelegramProjection,
+      mutationLocks: coordination.mutationLocks,
     };
     const ratingDependencies: RatingUpdateDependencies = {
       ...dependencies.rating,
+      assertMutationAllowed,
       enqueueEventProgress:
         dependencies.rating?.enqueueEventProgress ||
         defaultEnqueueEventProgress,
@@ -519,12 +540,20 @@ export async function handleGameplayRoute(
       enqueueTelegramProjection:
         dependencies.rating?.enqueueTelegramProjection ||
         defaultEnqueueTelegramProjection,
+      timerStarts: coordination.timerStarts,
     };
     const gameSessionDependencies: GameSessionMutationDependencies = {
       ...dependencies.gameSession,
+      assertMutationAllowed,
       enqueueProfileGameProjection:
         dependencies.gameSession?.enqueueProfileGameProjection ||
         defaultEnqueueProfileGameProjection,
+      mutationLocks: coordination.mutationLocks,
+    };
+    const wagerDependencies: WagerProposalDependencies = {
+      ...dependencies.wager,
+      assertMutationAllowed,
+      mutationLocks: coordination.mutationLocks,
     };
     let response;
     if (pathname === "/automatch/cancel") {
@@ -633,10 +662,12 @@ export async function handleGameplayRoute(
       await enforceMatchTimerRateLimit(env.AUTH_RATE_LIMITER, identity.uid);
       response = await startMatchTimer(identity, body, repository, {
         ...dependencies.timer,
+        assertMutationAllowed,
         enqueueEventProgress:
           dependencies.timer?.enqueueEventProgress ||
           defaultEnqueueEventProgress,
         signal: dependencies.timer?.signal || request.signal,
+        timerStarts: coordination.timerStarts,
       });
     } else if (pathname === "/matches/timer/claim") {
       if (!isClaimMatchVictoryByTimerRequest(body)) {
@@ -648,10 +679,12 @@ export async function handleGameplayRoute(
       );
       response = await claimMatchVictoryByTimer(identity, body, repository, {
         ...dependencies.timer,
+        assertMutationAllowed,
         enqueueEventProgress:
           dependencies.timer?.enqueueEventProgress ||
           defaultEnqueueEventProgress,
         signal: dependencies.timer?.signal || request.signal,
+        timerStarts: coordination.timerStarts,
       });
     } else if (pathname === "/navigation/games/read") {
       if (!isReadNavigationGamesRequest(body)) {
@@ -691,7 +724,7 @@ export async function handleGameplayRoute(
         identity,
         body,
         repository,
-        dependencies.wager,
+        wagerDependencies,
       );
     } else if (pathname === "/wagers/proposals/accept") {
       if (!isWagerProposalAcceptRequest(body)) {
@@ -701,7 +734,7 @@ export async function handleGameplayRoute(
         identity,
         body,
         repository,
-        dependencies.wager,
+        wagerDependencies,
       );
     } else if (pathname === "/wagers/outcomes/resolve") {
       if (!isWagerOutcomeResolveRequest(body)) {
@@ -709,6 +742,7 @@ export async function handleGameplayRoute(
       }
       response = await resolveWagerOutcome(identity, body, repository, {
         ...dependencies.wagerOutcome,
+        assertMutationAllowed,
         scheduleRetry:
           dependencies.wagerOutcome?.scheduleRetry ||
           (async (task) => {
@@ -727,11 +761,32 @@ export async function handleGameplayRoute(
         body,
         pathname.endsWith("/cancel") ? "cancel" : "decline",
         repository,
-        dependencies.wager,
+        wagerDependencies,
       );
     }
     return authJsonResponse(response, 200, corsHeaders);
   } catch (error) {
+    if (
+      error instanceof GameSessionMutationLockFailure ||
+      error instanceof MatchTimerStartStoreFailure
+    ) {
+      (
+        dependencies.logCoordinationFailure ||
+        ((record) =>
+          console.error(
+            JSON.stringify({
+              event: "gameplay_coordination_failure",
+              ...record,
+            }),
+          ))
+      )({
+        operation: error.operation,
+        store:
+          error instanceof GameSessionMutationLockFailure
+            ? "mutation-lock"
+            : "timer-start",
+      });
+    }
     const failure =
       error instanceof AuthApiFailure
         ? error

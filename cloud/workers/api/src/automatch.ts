@@ -36,6 +36,7 @@ import type {
   GameplayProfile,
   GameplayRepository,
 } from "./gameplayRepository.ts";
+import type { GameSessionMutationLockStore } from "./gameplayCoordinationD1.ts";
 import {
   buildAutomatchProfileGameProjectionOutboxUpdates,
   getAutomatchProfileGameProjectionOutboxPath,
@@ -48,7 +49,10 @@ import type {
   AutomatchTelegramProjectionTask,
   TelegramProjectionTask,
 } from "./telegramProjectionTasks.ts";
-import { withGameSessionMutationLease } from "./gameSessionMutations.ts";
+import {
+  GameSessionMutationLeaseReleaseFailure,
+  withGameSessionMutationLease,
+} from "./gameSessionMutations.ts";
 import {
   getLoginProfileId,
   getOwnershipProfile,
@@ -74,6 +78,7 @@ const AUTOMATCH_CANCELLATION_FINAL_READ_TIMEOUT_MS = 250;
 const gameVariantHelpers = createGameVariantHelpers(monsRules);
 
 type AutomatchDependencies = {
+  assertMutationAllowed?: () => Promise<void>;
   createProjectionRequestId?: () => string;
   enqueueProfileGameProjection?: (
     task: ProfileGameProjectionTask,
@@ -84,6 +89,7 @@ type AutomatchDependencies = {
     task: AutomatchProfileGameProjectionTask,
   ) => void;
   logProjectionFailure?: (task: AutomatchTelegramProjectionTask) => void;
+  mutationLocks: GameSessionMutationLockStore;
   now?: () => number;
   random?: RandomSource;
   signal?: AbortSignal;
@@ -362,6 +368,17 @@ export async function enqueueAutomatchProfileGameProjection(
   }
 }
 
+async function enqueueAutomatchProjections(
+  telegramTask: AutomatchTelegramProjectionTask | null,
+  profileTask: AutomatchProfileGameProjectionTask,
+  dependencies: AutomatchDependencies,
+): Promise<void> {
+  if (telegramTask) {
+    await enqueueAutomatchProjection(telegramTask, dependencies);
+  }
+  await enqueueAutomatchProfileGameProjection(profileTask, dependencies);
+}
+
 function automatchTimestamp(value: unknown): number {
   return Math.floor(finiteNumber(value));
 }
@@ -370,6 +387,39 @@ function automatchTelegramDeliveryVersion(value: unknown): number | null {
   return value === TELEGRAM_AUTOMATCH_VERSION
     ? TELEGRAM_AUTOMATCH_VERSION
     : null;
+}
+
+async function didCommitPendingAutomatch(
+  inviteId: string,
+  expectedUid: string,
+  requestId: string,
+  repository: GameplayRepository,
+): Promise<boolean> {
+  try {
+    const signal = AbortSignal.timeout(
+      AUTOMATCH_CANCELLATION_RECONCILE_TIMEOUT_MS,
+    );
+    const [queueValue, inviteValue, outboxRequestId] = await Promise.all([
+      repository.getRtdbPath(`automatch/${inviteId}`, undefined, signal),
+      repository.getRtdbPath(`invites/${inviteId}`, undefined, signal),
+      repository.getRtdbPath(
+        `${getAutomatchProfileGameProjectionOutboxPath(inviteId)}/requestId`,
+        undefined,
+        signal,
+      ),
+    ]);
+    const queue = toRecord(queueValue);
+    const invite = toRecord(inviteValue);
+    return Boolean(
+      normalizeString(queue?.uid) === expectedUid &&
+      normalizeString(invite?.hostId) === expectedUid &&
+      !normalizeString(invite?.guestId) &&
+      invite?.automatchStateHint === "pending" &&
+      normalizeString(outboxRequestId) === requestId,
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function readAutomatchCancellationProof(
@@ -446,7 +496,7 @@ async function didCommitAutomatchCancellation(
 export async function cancelQueuedAutomatch(
   queued: QueuedAutomatch,
   repository: GameplayRepository,
-  dependencies: AutomatchDependencies = {},
+  dependencies: AutomatchDependencies,
   signal: AbortSignal = dependencies.signal ||
     AbortSignal.timeout(AUTOMATCH_TOTAL_TIMEOUT_MS),
 ): Promise<boolean> {
@@ -473,7 +523,7 @@ export async function cancelQueuedAutomatch(
     canceled = await withGameSessionMutationLease(
       queued.inviteId,
       profileGameProjectionTask.requestId,
-      repository,
+      dependencies.mutationLocks,
       async () => {
         const [currentQueueValue, currentGuestId, currentHostId] =
           await Promise.all([
@@ -534,38 +584,49 @@ export async function cancelQueuedAutomatch(
             }),
           );
         }
+        await dependencies.assertMutationAllowed?.();
         patchAttempted = true;
         await repository.patchRtdbRoot(updates, signal);
         return true;
       },
-      {},
     );
   } catch (error) {
     if (!patchAttempted) throw error;
-    const reconciliationSignal = AbortSignal.timeout(
-      AUTOMATCH_CANCELLATION_RECONCILE_TIMEOUT_MS,
-    );
     if (
-      !(await didCommitAutomatchCancellation(
-        queued.inviteId,
-        expectedUid,
-        profileGameProjectionTask.requestId,
-        repository,
-        reconciliationSignal,
-        dependencies.wait ||
-          ((milliseconds, waitSignal) =>
-            scheduler.wait(milliseconds, { signal: waitSignal })),
-      ))
+      !(error instanceof GameSessionMutationLeaseReleaseFailure) ||
+      !error.workCompleted
     ) {
-      throw error;
+      const reconciliationSignal = AbortSignal.timeout(
+        AUTOMATCH_CANCELLATION_RECONCILE_TIMEOUT_MS,
+      );
+      if (
+        !(await didCommitAutomatchCancellation(
+          queued.inviteId,
+          expectedUid,
+          profileGameProjectionTask.requestId,
+          repository,
+          reconciliationSignal,
+          dependencies.wait ||
+            ((milliseconds, waitSignal) =>
+              scheduler.wait(milliseconds, { signal: waitSignal })),
+        ))
+      ) {
+        throw error;
+      }
     }
     canceled = true;
+    if (error instanceof GameSessionMutationLeaseReleaseFailure) {
+      await enqueueAutomatchProjections(
+        projectionTask,
+        profileGameProjectionTask,
+        dependencies,
+      );
+      return true;
+    }
   }
   if (!canceled) return false;
-  if (projectionTask) {
-    await enqueueAutomatchProjection(projectionTask, dependencies);
-  }
-  await enqueueAutomatchProfileGameProjection(
+  await enqueueAutomatchProjections(
+    projectionTask,
     profileGameProjectionTask,
     dependencies,
   );
@@ -618,15 +679,28 @@ async function withAutomatchOwnerLease<T>(
   const lockDeadlineMs = now() + AUTOMATCH_TOTAL_TIMEOUT_MS;
   let contentionAttempts = 0;
   while (true) {
+    const completed: { done: boolean; value?: T } = { done: false };
     try {
       return await withGameSessionMutationLease(
         lockId,
         crypto.randomUUID(),
-        repository,
-        work,
+        dependencies.mutationLocks,
+        async () => {
+          const value = await work();
+          completed.value = value;
+          completed.done = true;
+          return value;
+        },
         { now },
       );
     } catch (error) {
+      if (
+        error instanceof GameSessionMutationLeaseReleaseFailure &&
+        error.workCompleted &&
+        completed.done
+      ) {
+        return completed.value as T;
+      }
       const retryDelayMs = Math.min(
         AUTOMATCH_OWNER_LOCK_MAX_RETRY_MS,
         AUTOMATCH_OWNER_LOCK_MIN_RETRY_MS * 2 ** contentionAttempts,
@@ -651,7 +725,7 @@ async function withAutomatchOwnerLease<T>(
 export async function cancelOwnedQueuedAutomatches(
   uid: string,
   repository: GameplayRepository,
-  dependencies: AutomatchDependencies = {},
+  dependencies: AutomatchDependencies,
 ): Promise<boolean> {
   const signal =
     dependencies.signal || AbortSignal.timeout(AUTOMATCH_TOTAL_TIMEOUT_MS);
@@ -900,63 +974,87 @@ async function attemptAutomatch(
       dependencies,
       profileGameProjectionTask.requestId,
     );
-    await withGameSessionMutationLease(
-      inviteId,
-      profileGameProjectionTask.requestId,
-      repository,
-      async () => {
-        await repository.patchRtdbRoot(
-          {
-            [`players/${identity.uid}/matches/${inviteId}`]: match,
-            [`automatch/${inviteId}`]: {
-              uid: identity.uid,
-              rating: profile.rating,
-              timestamp,
-              username: profile.username,
-              ethAddress: profile.eth,
-              solAddress: profile.sol,
-              profileId: profile.profileId,
-              hostColor,
-              password,
-              emojiId,
-              gameVariant: matchSeed.gameVariant,
-              telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
-            },
-            [`invites/${inviteId}`]: {
-              version: CONTROLLER_VERSION,
-              hostId: identity.uid,
-              hostColor,
-              guestId: null,
-              password,
-              automatchStateHint: "pending",
-              automatchCanceledAt: null,
-              telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
-            },
-            [getAutomatchTelegramSourcePath(inviteId)]:
-              buildPendingAutomatchTelegramSource({
+    let patchAttempted = false;
+    try {
+      await withGameSessionMutationLease(
+        inviteId,
+        profileGameProjectionTask.requestId,
+        dependencies.mutationLocks,
+        async () => {
+          await dependencies.assertMutationAllowed?.();
+          patchAttempted = true;
+          await repository.patchRtdbRoot(
+            {
+              [`players/${identity.uid}/matches/${inviteId}`]: match,
+              [`automatch/${inviteId}`]: {
+                uid: identity.uid,
+                rating: profile.rating,
+                timestamp,
+                username: profile.username,
+                ethAddress: profile.eth,
+                solAddress: profile.sol,
+                profileId: profile.profileId,
+                hostColor,
+                password,
+                emojiId,
+                gameVariant: matchSeed.gameVariant,
+                telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
+              },
+              [`invites/${inviteId}`]: {
+                version: CONTROLLER_VERSION,
+                hostId: identity.uid,
+                hostColor,
+                guestId: null,
+                password,
+                automatchStateHint: "pending",
+                automatchCanceledAt: null,
+                telegramDeliveryVersion: TELEGRAM_AUTOMATCH_VERSION,
+              },
+              [getAutomatchTelegramSourcePath(inviteId)]:
+                buildPendingAutomatchTelegramSource({
+                  inviteId,
+                  waitingText,
+                  canceledText,
+                  timestamp,
+                }),
+              ...buildAutomatchTelegramProjectionOutboxUpdates({
                 inviteId,
-                waitingText,
-                canceledText,
+                requestId: projectionTask.requestId,
                 timestamp,
               }),
-            ...buildAutomatchTelegramProjectionOutboxUpdates({
-              inviteId,
-              requestId: projectionTask.requestId,
-              timestamp,
-            }),
-            ...buildAutomatchProfileGameProjectionOutboxUpdates({
-              inviteId,
-              requestId: profileGameProjectionTask.requestId,
-              timestamp,
-            }),
-          },
-          signal,
-        );
-      },
-      {},
-    );
-    await enqueueAutomatchProjection(projectionTask, dependencies);
-    await enqueueAutomatchProfileGameProjection(
+              ...buildAutomatchProfileGameProjectionOutboxUpdates({
+                inviteId,
+                requestId: profileGameProjectionTask.requestId,
+                timestamp,
+              }),
+            },
+            signal,
+          );
+        },
+      );
+    } catch (error) {
+      if (
+        !(error instanceof GameSessionMutationLeaseReleaseFailure) ||
+        !patchAttempted ||
+        (!error.workCompleted &&
+          !(await didCommitPendingAutomatch(
+            inviteId,
+            identity.uid,
+            profileGameProjectionTask.requestId,
+            repository,
+          )))
+      ) {
+        throw error;
+      }
+      await enqueueAutomatchProjections(
+        projectionTask,
+        profileGameProjectionTask,
+        dependencies,
+      );
+      return response;
+    }
+    await enqueueAutomatchProjections(
+      projectionTask,
       profileGameProjectionTask,
       dependencies,
     );
@@ -1058,7 +1156,7 @@ async function attemptAutomatch(
     matchResult = await withGameSessionMutationLease(
       queued.inviteId,
       profileGameProjectionTask.requestId,
-      repository,
+      dependencies.mutationLocks,
       async () => {
         const [currentQueueValue, currentGuestId] = await Promise.all([
           repository.getRtdbPath(
@@ -1074,23 +1172,38 @@ async function attemptAutomatch(
         ) {
           return "stale" as const;
         }
+        await dependencies.assertMutationAllowed?.();
         patchAttempted = true;
         await repository.patchRtdbRoot(updates, signal);
         return "matched" as const;
       },
-      {},
     );
   } catch (patchFailure) {
     if (!patchAttempted) {
       throw patchFailure;
     }
-    try {
-      if ((await readGuestId()) === identity.uid) {
-        matchResult = "matched";
-      }
-    } catch {}
+    if (
+      patchFailure instanceof GameSessionMutationLeaseReleaseFailure &&
+      patchFailure.workCompleted
+    ) {
+      matchResult = "matched";
+    } else {
+      try {
+        if ((await readGuestId()) === identity.uid) {
+          matchResult = "matched";
+        }
+      } catch {}
+    }
     if (matchResult !== "matched") {
       throw patchFailure;
+    }
+    if (patchFailure instanceof GameSessionMutationLeaseReleaseFailure) {
+      await enqueueAutomatchProjections(
+        projectionTask,
+        profileGameProjectionTask,
+        dependencies,
+      );
+      return matchedResponse;
     }
   }
   if (matchResult === "stale") {
@@ -1105,10 +1218,8 @@ async function attemptAutomatch(
       dependencies,
     );
   }
-  if (projectionTask) {
-    await enqueueAutomatchProjection(projectionTask, dependencies);
-  }
-  await enqueueAutomatchProfileGameProjection(
+  await enqueueAutomatchProjections(
+    projectionTask,
     profileGameProjectionTask,
     dependencies,
   );
@@ -1131,7 +1242,7 @@ export async function startAutomatch(
   identity: RequestIdentity,
   request: StartAutomatchRequest,
   repository: GameplayRepository,
-  dependencies: AutomatchDependencies = {},
+  dependencies: AutomatchDependencies,
 ): Promise<StartAutomatchResponse> {
   const signal =
     dependencies.signal || AbortSignal.timeout(AUTOMATCH_TOTAL_TIMEOUT_MS);

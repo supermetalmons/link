@@ -2,7 +2,6 @@ export const MATCH_TIMER_DURATION_MS: 90000;
 export const MATCH_TIMER_DURATION_SECONDS: 90;
 export const MATCH_TIMER_TERMINAL: "gg";
 export const MATCH_TIMER_CLAIM_ROOT: "matchTimerClaims";
-export const MATCH_TIMER_START_ROOT: "matchTimerStarts";
 
 export interface ParsedMatchTimer {
   turnNumber: number;

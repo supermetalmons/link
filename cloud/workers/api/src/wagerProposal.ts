@@ -16,6 +16,7 @@ import {
 import { AuthApiFailure } from "./authErrors.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import type { GameSessionMutationLockStore } from "./gameplayCoordinationD1.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import { withGameSessionMutationLease } from "./gameSessionMutations.ts";
 import { ensureWagerAgreementLineageReady } from "./wagerAgreementLineage.ts";
@@ -41,8 +42,10 @@ import {
 export type WagerProposalAction = "cancel" | "decline";
 
 export type WagerProposalDependencies = {
+  assertMutationAllowed?: () => Promise<void>;
   createCriticalPhaseSignal?: () => AbortSignal;
   logMaterialReleaseFailure?: (record: Record<string, unknown>) => void;
+  mutationLocks: GameSessionMutationLockStore;
   now?: () => number;
   wait?: (milliseconds: number) => Promise<void>;
 };
@@ -140,7 +143,7 @@ async function readModernProposalLineage(
     : null;
 }
 
-async function resolveWagerParticipantUids(
+export async function resolveWagerParticipantUids(
   identity: RequestIdentity,
   inviteId: string,
   repository: GameplayRepository,
@@ -170,13 +173,24 @@ async function resolveWagerParticipantUids(
   const identityProfileId = getLoginProfileId(ownership, identity.uid);
   const hostProfileId = getLoginProfileId(ownership, hostId);
   const guestProfileId = getLoginProfileId(ownership, guestId);
-  if (!hostProfileId || !guestProfileId) {
-    return { ok: false, reason: "profile-not-found" };
-  }
-  const isHost = identityProfileId === hostProfileId;
-  const isGuest = identityProfileId === guestProfileId;
+  const isHost =
+    !!identityProfileId &&
+    !!hostProfileId &&
+    identityProfileId === hostProfileId;
+  const isGuest =
+    !!identityProfileId &&
+    !!guestProfileId &&
+    identityProfileId === guestProfileId;
   if (!isHost && !isGuest) {
+    if (!hostProfileId || !guestProfileId) {
+      return { ok: false, reason: "profile-not-found" };
+    }
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
+  }
+  if (!hostProfileId || !guestProfileId) {
+    return isHost
+      ? { opponentUid: guestId, ownership, playerUid: hostId }
+      : { opponentUid: hostId, ownership, playerUid: guestId };
   }
   return isHost
     ? {
@@ -195,17 +209,11 @@ async function resolveWagerParticipantUids(
       };
 }
 
-async function resolveWagerParticipants(
-  identity: RequestIdentity,
-  inviteId: string,
+export async function resolveWagerParticipantProfiles(
+  participants: WagerParticipantUids | WagerParticipants,
   repository: GameplayRepository,
 ): Promise<WagerParticipants | WagerParticipantFailure> {
-  const participants = await resolveWagerParticipantUids(
-    identity,
-    inviteId,
-    repository,
-  );
-  if ("ok" in participants || "playerProfileId" in participants) {
+  if ("playerProfileId" in participants) {
     return participants;
   }
   const ownership =
@@ -223,6 +231,22 @@ async function resolveWagerParticipants(
     return { ok: false, reason: "profile-not-found" };
   }
   return { ...participants, ownership, playerProfileId, opponentProfileId };
+}
+
+async function resolveWagerParticipants(
+  identity: RequestIdentity,
+  inviteId: string,
+  repository: GameplayRepository,
+): Promise<WagerParticipants | WagerParticipantFailure> {
+  const participants = await resolveWagerParticipantUids(
+    identity,
+    inviteId,
+    repository,
+  );
+  if ("ok" in participants) {
+    return participants;
+  }
+  return resolveWagerParticipantProfiles(participants, repository);
 }
 
 function transitionWagerProposal(
@@ -384,14 +408,19 @@ async function runWagerMutationWithLease<T>(
       return await withGameSessionMutationLease(
         request.inviteId,
         operationId,
-        repository,
-        (refreshLease) =>
-          work({
+        dependencies.mutationLocks,
+        (refreshLease) => {
+          const guardedRefreshLease = async () => {
+            await dependencies.assertMutationAllowed?.();
+            await refreshLease();
+          };
+          return work({
             createCriticalPhaseSignal:
               dependencies.createCriticalPhaseSignal ||
               (() => AbortSignal.timeout(WAGER_CRITICAL_PHASE_TIMEOUT_MS)),
-            refreshLease,
-          }),
+            refreshLease: guardedRefreshLease,
+          });
+        },
         { now: dependencies.now },
       );
     } catch (error) {
@@ -412,7 +441,7 @@ export async function sendWagerProposal(
   identity: RequestIdentity,
   request: WagerProposalSendRequest,
   repository: GameplayRepository,
-  dependencies: WagerProposalDependencies = {},
+  dependencies: WagerProposalDependencies,
 ): Promise<WagerProposalSendResponse> {
   const authorization = await resolveWagerParticipantUids(
     identity,
@@ -654,7 +683,13 @@ async function sendWagerProposalUnlocked(
   if (!agreement) {
     throw new Error("wager-agreement-unavailable");
   }
-  await ensureWagerAgreementLineageReady(repository, wagerPath, now);
+  await dependencies.assertMutationAllowed?.();
+  await ensureWagerAgreementLineageReady(
+    repository,
+    wagerPath,
+    now,
+    dependencies.assertMutationAllowed,
+  );
   return { ok: true, count: agreement.count, agreed: agreement };
 }
 
@@ -662,7 +697,7 @@ export async function acceptWagerProposal(
   identity: RequestIdentity,
   request: WagerProposalAcceptRequest,
   repository: GameplayRepository,
-  dependencies: WagerProposalDependencies = {},
+  dependencies: WagerProposalDependencies,
 ): Promise<WagerProposalAcceptResponse> {
   const authorization = await resolveWagerParticipantUids(
     identity,
@@ -727,7 +762,13 @@ async function acceptWagerProposalUnlocked(
     replayOperation?.id === operationId &&
     isWagerAgreement(replayAgreement)
   ) {
-    await ensureWagerAgreementLineageReady(repository, wagerPath, now);
+    await dependencies.assertMutationAllowed?.();
+    await ensureWagerAgreementLineageReady(
+      repository,
+      wagerPath,
+      now,
+      dependencies.assertMutationAllowed,
+    );
     return { ok: true, count: replayAgreement.count };
   }
   await recoverUnreferencedWagerReservation(
@@ -914,7 +955,13 @@ async function acceptWagerProposalUnlocked(
     return { ok: false, reason: "proposal-unavailable" };
   }
 
-  await ensureWagerAgreementLineageReady(repository, wagerPath, now);
+  await dependencies.assertMutationAllowed?.();
+  await ensureWagerAgreementLineageReady(
+    repository,
+    wagerPath,
+    now,
+    dependencies.assertMutationAllowed,
+  );
   return { ok: true, count: agreement.count };
 }
 
@@ -1028,7 +1075,7 @@ export async function removeWagerProposal(
   request: WagerProposalRemovalRequest,
   action: WagerProposalAction,
   repository: GameplayRepository,
-  dependencies: WagerProposalDependencies = {},
+  dependencies: WagerProposalDependencies,
 ): Promise<WagerProposalRemovalResponse> {
   const authorization = await resolveWagerParticipantUids(
     identity,

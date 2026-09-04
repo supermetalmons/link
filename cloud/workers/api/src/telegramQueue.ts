@@ -40,6 +40,8 @@ const MAX_INFRASTRUCTURE_RETRY_DELAY_SECONDS = 60;
 const TELEGRAM_FROZEN_RETRY_SECONDS = 60;
 const WAGER_SETTLEMENT_RETRY_DELAY_SECONDS = 5 * 60;
 
+class WagerSettlementWritesDisabled extends Error {}
+
 const defaultSleep = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 
@@ -271,8 +273,20 @@ export async function handleTelegramQueueMessage(
       );
       return;
     }
+    const assertMutationAllowed = async () => {
+      let enabled = false;
+      try {
+        enabled = await profileMutationsEnabled(env);
+      } catch {}
+      if (!enabled) throw new WagerSettlementWritesDisabled();
+    };
     try {
-      const status = await resumeSettlement(task, createGameplay(env), now);
+      const status = await resumeSettlement(
+        task,
+        createGameplay(env),
+        now,
+        assertMutationAllowed,
+      );
       message.ack();
       logger.info(
         JSON.stringify({
@@ -282,6 +296,16 @@ export async function handleTelegramQueueMessage(
         }),
       );
     } catch (error) {
+      if (error instanceof WagerSettlementWritesDisabled) {
+        await deferWagerSettlement(
+          message,
+          task,
+          env,
+          logger,
+          "profile-writes-disabled",
+        );
+        return;
+      }
       message.retry({
         delaySeconds: infrastructureRetryDelaySeconds(message.attempts),
       });

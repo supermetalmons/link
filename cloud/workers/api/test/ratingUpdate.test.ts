@@ -26,8 +26,10 @@ import {
   buildRatingPlan,
   readMatchRecord,
   resolveRatingResult,
-  updateRatings,
+  updateRatings as updateRatingsImpl,
+  type RatingUpdateDependencies,
 } from "../src/ratingUpdate.ts";
+import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
 
 const request = {
   playerId: "player",
@@ -39,6 +41,34 @@ const request = {
 const identity: RequestIdentity = {
   uid: "player",
 };
+
+type RatingDependencyOverrides = Omit<RatingUpdateDependencies, "timerStarts">;
+
+const coordinationByRepository = new WeakMap<
+  RatingRepository,
+  ReturnType<typeof createMemoryGameplayCoordinationStores>
+>();
+
+function coordination(repository: RatingRepository) {
+  let stores = coordinationByRepository.get(repository);
+  if (!stores) {
+    stores = createMemoryGameplayCoordinationStores();
+    coordinationByRepository.set(repository, stores);
+  }
+  return stores;
+}
+
+function updateRatings(
+  actor: RequestIdentity,
+  ratingRequest: typeof request,
+  repository: RatingRepository,
+  dependencies: RatingDependencyOverrides = {},
+) {
+  return updateRatingsImpl(actor, ratingRequest, repository, {
+    ...dependencies,
+    timerStarts: coordination(repository).timerStarts,
+  });
+}
 
 function match(
   color: "white" | "black",
@@ -500,6 +530,16 @@ test("resolves a normally completed game through mons-rules", () => {
 
 test("updates once and persists exact repair markers", async () => {
   const state = createRepository();
+  for (const playerId of [request.playerId, request.opponentId]) {
+    coordination(state.repository).timerRows.set(
+      `${playerId}/${request.matchId}`,
+      {
+        timer: "7;1000",
+        turnNumber: 7,
+        updatedAtMs: 1,
+      },
+    );
+  }
   const projectionTasks: unknown[] = [];
   assert.deepEqual(
     await updateRatings(identity, request, state.repository, {
@@ -536,11 +576,10 @@ test("updates once and persists exact repair markers", async () => {
   ]);
   assert.deepEqual(state.patches, [
     {
-      [`matchTimerStarts/${request.playerId}/${request.matchId}`]: null,
-      [`matchTimerStarts/${request.opponentId}/${request.matchId}`]: null,
       [`invites/${request.inviteId}/matchesRatingUpdates/${request.matchId}`]: true,
     },
   ]);
+  assert.equal(coordination(state.repository).timerRows.size, 0);
 });
 
 test("freezes rating-valid matches with legacy presentation fields", async () => {
@@ -680,6 +719,33 @@ test("repairs completed replays without reacquiring or finalizing", async () => 
   assert.equal(state.getFinalized(), 0);
   assert.equal(state.getOperationReads(), 1);
   assert.equal(state.patches.length, 1);
+});
+
+test("repairs D1 timer marker cleanup on a completed replay", async () => {
+  const state = createRepository({ completed: true, failMatchReads: true });
+  const stores = coordination(state.repository);
+  stores.timerRows.set(`${request.playerId}/${request.matchId}`, {
+    timer: "7;1000",
+    turnNumber: 7,
+    updatedAtMs: 1,
+  });
+  const deletePair = stores.timerStarts.deletePair;
+  let cleanupAttempts = 0;
+  stores.timerStarts.deletePair = async (...args) => {
+    cleanupAttempts++;
+    if (cleanupAttempts === 1) throw new Error("timer-cleanup-failed");
+    return deletePair(...args);
+  };
+  await assert.rejects(
+    updateRatings(identity, request, state.repository),
+    /timer-cleanup-failed/,
+  );
+  assert.ok(stores.timerRows.has(`${request.playerId}/${request.matchId}`));
+  assert.deepEqual(await updateRatings(identity, request, state.repository), {
+    ok: true,
+  });
+  assert.equal(cleanupAttempts, 2);
+  assert.equal(stores.timerRows.size, 0);
 });
 
 test("repairs a done rating when the marker is missing and match reads fail", async () => {

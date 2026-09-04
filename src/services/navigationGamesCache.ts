@@ -5,10 +5,8 @@ import type {
 } from "../connection/connectionModels";
 import { normalizeStrictAutomatchStateHint } from "@mons/shared/navigation";
 
-type NavigationGamesScopeKind = "profile" | "login";
-
 export interface NavigationGamesCacheScope {
-  kind: NavigationGamesScopeKind;
+  kind: "profile";
   scopeId: string;
   scopeKey: string;
 }
@@ -84,6 +82,9 @@ const sanitizeNavigationGameItem = (value: unknown): NavigationItem | null => {
   }
 
   const raw = value as Record<string, unknown>;
+  if (raw.isFallback === true) {
+    return null;
+  }
   const entityType = raw.entityType === "event" ? "event" : "game";
   const id = typeof raw.id === "string" && raw.id !== "" ? raw.id : null;
 
@@ -145,7 +146,6 @@ const sanitizeNavigationGameItem = (value: unknown): NavigationItem | null => {
         participantPreview.length,
       participantPreview,
       winnerDisplayName: getNormalizedStringOrNull(raw.winnerDisplayName),
-      isFallback: getNormalizedBooleanOrUndefined(raw.isFallback),
       isOptimistic: getNormalizedBooleanOrUndefined(raw.isOptimistic),
     };
   }
@@ -199,7 +199,6 @@ const sanitizeNavigationGameItem = (value: unknown): NavigationItem | null => {
       typeof raw.isPendingAutomatch === "boolean"
         ? raw.isPendingAutomatch
         : status === "pending",
-    isFallback: getNormalizedBooleanOrUndefined(raw.isFallback),
     isOptimistic: getNormalizedBooleanOrUndefined(raw.isOptimistic),
   };
 };
@@ -242,21 +241,12 @@ const getPersistedTopCacheStorageKey = (
 
 export const resolveNavigationGamesCacheScope = (
   profileId: string,
-  loginId: string,
 ): NavigationGamesCacheScope | null => {
   if (typeof profileId === "string" && profileId !== "") {
     return {
       kind: "profile",
       scopeId: profileId,
       scopeKey: `profile:${profileId}`,
-    };
-  }
-
-  if (typeof loginId === "string" && loginId !== "") {
-    return {
-      kind: "login",
-      scopeId: loginId,
-      scopeKey: `login:${loginId}`,
     };
   }
 

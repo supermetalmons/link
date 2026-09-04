@@ -781,6 +781,7 @@ const getEventCloudAvatarsFromNavigationSources = (
   eventId: string,
   topGames: NavigationItem[],
   pagedGames: NavigationItem[],
+  cacheScope: NavigationGamesCacheScope | null,
 ): EventNavigationPreviewParticipant[] => {
   const eventNavId = `event_${eventId}`;
   const all = [...topGames, ...pagedGames];
@@ -788,10 +789,6 @@ const getEventCloudAvatarsFromNavigationSources = (
     (item) => item.entityType === "event" && item.id === eventNavId,
   );
   if (!eventItem || eventItem.entityType !== "event") {
-    const cacheScope = resolveNavigationGamesCacheScope(
-      storage.getProfileId(""),
-      storage.getLoginId(""),
-    );
     const cached = readNavigationGamesCacheSnapshot(cacheScope);
     const cachedAll = [...cached.topGames, ...cached.pagedGames];
     eventItem = cachedAll.find(
@@ -811,6 +808,12 @@ interface BottomControlsProps {
 const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const { authStatus, profileId, ethAddress, solAddress } = authState;
   const isAuthenticated = authStatus === "authenticated";
+  const activeNavigationCacheScope = useMemo(
+    () => resolveNavigationGamesCacheScope(profileId),
+    [profileId],
+  );
+  const activeNavigationCacheScopeKey =
+    activeNavigationCacheScope?.scopeKey ?? null;
   const [isEndMatchButtonVisible, setIsEndMatchButtonVisible] = useState(false);
   const [isEndMatchConfirmed, setIsEndMatchConfirmed] = useState(false);
   const [isInviteLinkButtonVisible, setIsInviteLinkButtonVisible] =
@@ -849,13 +852,11 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const [navigationHasMoreGames, setNavigationHasMoreGames] = useState(false);
   const [navigationGamesCursor, setNavigationGamesCursor] =
     useState<NavigationGamesPageCursor>(null);
-  const [navigationFallbackLimit, setNavigationFallbackLimit] = useState(
-    NAVIGATION_GAMES_PAGE_SIZE,
-  );
+  const [navigationStateScopeKey, setNavigationStateScopeKey] = useState<
+    string | null
+  >(null);
   const [optimisticPendingAutomatchItem, setOptimisticPendingAutomatchItem] =
     useState<NavigationGameItem | null>(null);
-  const [isNavigationFallbackScope, setIsNavigationFallbackScope] =
-    useState(false);
   const [navigationRemovingInviteIds, setNavigationRemovingInviteIds] =
     useState<Set<string>>(new Set());
   const [liveEventCloudAvatars, setLiveEventCloudAvatars] = useState<
@@ -992,13 +993,15 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     return initial as Record<MaterialName, number>;
   });
   const navigationHasPagedGamesRef = useRef(false);
+  const navigationLoadMoreEpochRef = useRef(0);
   const navigationLoadMoreInFlightRef = useRef(false);
   const topNavigationItemIdsRef = useRef<Set<string>>(new Set());
   const eventCloudSubscriptionEventIdRef = useRef<string | null>(null);
   const eventGameButtonStickyTimeoutRef = useRef<number | null>(null);
   const navigationCacheScopeRef = useRef<NavigationGamesCacheScope | null>(
-    null,
+    activeNavigationCacheScope,
   );
+  const navigationProfileScopeEpochRef = useRef(0);
   const navigationPopupEpochRef = useRef(0);
   const navigationSelectionEpochRef = useRef(0);
   const beginInviteFlowRef = useRef<
@@ -1639,6 +1642,40 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     holdEventGameButtonDuringLaunchTransition,
   ]);
 
+  useEffect(() => {
+    const previousCacheScope = navigationCacheScopeRef.current;
+    if (
+      previousCacheScope &&
+      previousCacheScope.scopeKey !== activeNavigationCacheScopeKey
+    ) {
+      clearNavigationGamesRuntimeCacheScope(previousCacheScope.scopeKey);
+    }
+    navigationCacheScopeRef.current = activeNavigationCacheScope;
+    navigationProfileScopeEpochRef.current += 1;
+    navigationPopupEpochRef.current += 1;
+    navigationSelectionEpochRef.current += 1;
+    navigationLoadMoreEpochRef.current += 1;
+    navigationLoadMoreInFlightRef.current = false;
+    navigationHasPagedGamesRef.current = false;
+    topNavigationItemIdsRef.current = new Set();
+    eventCloudSubscriptionEventIdRef.current = null;
+    setNavigationStateScopeKey(null);
+    setNavigationProjectedGames([]);
+    setNavigationPagedGames([]);
+    setOptimisticPendingAutomatchItem(null);
+    setIsCancelAutomatchDisabled(false);
+    setNavigationRemovingInviteIds(new Set());
+    setIsNavigationGamesLoading(false);
+    setIsNavigationGamesLoadingMore(false);
+    setNavigationHasMoreGames(false);
+    setNavigationGamesCursor(null);
+    setLiveEventCloudAvatars([]);
+  }, [activeNavigationCacheScope, activeNavigationCacheScopeKey]);
+
+  const hasActiveNavigationStateScope =
+    activeNavigationCacheScopeKey !== null &&
+    navigationStateScopeKey === activeNavigationCacheScopeKey;
+
   const isNavigationGameBeingRemoved = useCallback(
     (item: NavigationItem) =>
       item.entityType === "game" &&
@@ -1648,8 +1685,11 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   );
 
   const topNavigationGames = useMemo(() => {
-    const merged = navigationProjectedGames.slice();
+    const merged = hasActiveNavigationStateScope
+      ? navigationProjectedGames.slice()
+      : [];
     if (
+      hasActiveNavigationStateScope &&
       optimisticPendingAutomatchItem &&
       !merged.some((item) => item.id === optimisticPendingAutomatchItem.id)
     ) {
@@ -1661,6 +1701,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     visibleItems.sort(compareNavigationItemsByDisplayOrder);
     return visibleItems;
   }, [
+    hasActiveNavigationStateScope,
     isNavigationGameBeingRemoved,
     navigationProjectedGames,
     optimisticPendingAutomatchItem,
@@ -1672,7 +1713,10 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
 
   const pagedNavigationGames = useMemo(() => {
     const uniqueById = new Map<string, NavigationItem>();
-    navigationPagedGames.forEach((pagedItem) => {
+    const scopedPagedGames = hasActiveNavigationStateScope
+      ? navigationPagedGames
+      : [];
+    scopedPagedGames.forEach((pagedItem) => {
       if (!topNavigationItemIds.has(pagedItem.id)) {
         uniqueById.set(pagedItem.id, pagedItem);
       }
@@ -1683,6 +1727,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     visibleItems.sort(compareNavigationItemsByDisplayOrder);
     return visibleItems;
   }, [
+    hasActiveNavigationStateScope,
     isNavigationGameBeingRemoved,
     navigationPagedGames,
     topNavigationItemIds,
@@ -1695,7 +1740,11 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
 
   useEffect(() => {
     const scope = navigationCacheScopeRef.current;
-    if (!scope) {
+    if (
+      !scope ||
+      scope.scopeKey !== activeNavigationCacheScopeKey ||
+      navigationStateScopeKey !== activeNavigationCacheScopeKey
+    ) {
       return;
     }
     writeNavigationGamesRuntimeCache(
@@ -1708,7 +1757,12 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       topNavigationGames,
       NAVIGATION_GAMES_PAGE_SIZE,
     );
-  }, [topNavigationGames, pagedNavigationGames]);
+  }, [
+    activeNavigationCacheScopeKey,
+    navigationStateScopeKey,
+    pagedNavigationGames,
+    topNavigationGames,
+  ]);
 
   useEffect(() => {
     if (!optimisticPendingAutomatchItem) {
@@ -1731,10 +1785,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   ]);
 
   const hydrateNavigationGamesFromCache = useCallback(() => {
-    const cacheScope = resolveNavigationGamesCacheScope(
-      storage.getProfileId(""),
-      storage.getLoginId(""),
-    );
+    const cacheScope = activeNavigationCacheScope;
     const previousCacheScope = navigationCacheScopeRef.current;
     if (
       previousCacheScope &&
@@ -1745,20 +1796,18 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     navigationCacheScopeRef.current = cacheScope;
 
     const hydratedSnapshot = readNavigationGamesCacheSnapshot(cacheScope);
+    setNavigationStateScopeKey(cacheScope?.scopeKey ?? null);
     setNavigationProjectedGames(hydratedSnapshot.topGames);
     setNavigationPagedGames(hydratedSnapshot.pagedGames);
     const hasHydratedPagedGames = hydratedSnapshot.pagedGames.length > 0;
     navigationHasPagedGamesRef.current = hasHydratedPagedGames;
 
-    setIsNavigationFallbackScope(cacheScope?.kind !== "profile");
-
-    return { hasHydratedPagedGames };
-  }, []);
+    return { hasHydratedPagedGames, hasProfileScope: cacheScope !== null };
+  }, [activeNavigationCacheScope]);
 
   useEffect(() => {
     let disposed = false;
     let unsubscribe: (() => void) | null = null;
-    let switchedToFallback = false;
     const popupEpoch = navigationPopupEpochRef.current + 1;
     navigationPopupEpochRef.current = popupEpoch;
     const sessionGuard = connection.createSessionGuard();
@@ -1776,54 +1825,13 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       stopNavigationLoadMore();
     };
 
-    const loadFallbackGames = (maxItems: number) => {
-      setIsNavigationFallbackScope(true);
-      setNavigationGamesCursor(null);
-      stopNavigationLoadMore();
-      const requestedLimit = maxItems + 1;
-      void connection
-        .getCurrentLoginFallbackGames(requestedLimit)
-        .then((items) => {
-          if (!isPopupEpochActive()) {
-            return;
-          }
-          if (!sessionGuard()) {
-            stopAllNavigationLoading();
-            return;
-          }
-          const hasMore = items.length > maxItems;
-          const visibleItems = hasMore ? items.slice(0, maxItems) : items;
-          setNavigationProjectedGames(visibleItems);
-          if (!hasMore) {
-            setNavigationPagedGames([]);
-            navigationHasPagedGamesRef.current = false;
-          }
-          setNavigationHasMoreGames(hasMore);
-          stopNavigationInitialLoading();
-        })
-        .catch(() => {
-          if (!isPopupEpochActive()) {
-            return;
-          }
-          if (!sessionGuard()) {
-            stopAllNavigationLoading();
-            return;
-          }
-          setNavigationProjectedGames([]);
-          setNavigationHasMoreGames(false);
-          stopNavigationInitialLoading();
-        });
-    };
-
     if (!isNavigationPopupVisible) {
       setIsNavigationGamesLoading(false);
       navigationLoadMoreInFlightRef.current = false;
       setIsNavigationGamesLoadingMore(false);
-      setIsNavigationFallbackScope(false);
       setNavigationRemovingInviteIds(new Set());
       setNavigationHasMoreGames(false);
       setNavigationGamesCursor(null);
-      setNavigationFallbackLimit(NAVIGATION_GAMES_PAGE_SIZE);
       return () => {
         disposed = true;
         navigationPopupEpochRef.current += 1;
@@ -1834,7 +1842,17 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       };
     }
 
-    const { hasHydratedPagedGames } = hydrateNavigationGamesFromCache();
+    const { hasHydratedPagedGames, hasProfileScope } =
+      hydrateNavigationGamesFromCache();
+    if (!hasProfileScope) {
+      stopAllNavigationLoading();
+      setNavigationHasMoreGames(false);
+      setNavigationGamesCursor(null);
+      return () => {
+        disposed = true;
+        navigationPopupEpochRef.current += 1;
+      };
+    }
     let didAttemptWarmPagedRefresh = false;
 
     const maybeWarmRefreshPagedGames = (cursor: NavigationGamesPageCursor) => {
@@ -1845,6 +1863,8 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         return;
       }
       didAttemptWarmPagedRefresh = true;
+      const loadMoreEpoch = navigationLoadMoreEpochRef.current + 1;
+      navigationLoadMoreEpochRef.current = loadMoreEpoch;
       navigationLoadMoreInFlightRef.current = true;
 
       void connection
@@ -1896,15 +1916,15 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
           }
         })
         .finally(() => {
-          navigationLoadMoreInFlightRef.current = false;
+          if (navigationLoadMoreEpochRef.current === loadMoreEpoch) {
+            navigationLoadMoreInFlightRef.current = false;
+          }
         });
     };
 
     setIsNavigationGamesLoading(true);
     setIsNavigationGamesLoadingMore(false);
 
-    setIsNavigationFallbackScope(false);
-    setNavigationFallbackLimit(NAVIGATION_GAMES_PAGE_SIZE);
     unsubscribe = connection.subscribeProfileGames(
       NAVIGATION_GAMES_PAGE_SIZE,
       (items) => {
@@ -1913,18 +1933,6 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         }
         if (!sessionGuard()) {
           stopNavigationInitialLoading();
-          return;
-        }
-        if (
-          authStatus === "unauthenticated" &&
-          profileId === "" &&
-          items.length === 0
-        ) {
-          switchedToFallback = true;
-          unsubscribe?.();
-          unsubscribe = null;
-          setNavigationFallbackLimit(NAVIGATION_GAMES_PAGE_SIZE);
-          loadFallbackGames(NAVIGATION_GAMES_PAGE_SIZE);
           return;
         }
         setNavigationProjectedGames(items);
@@ -1942,13 +1950,12 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
           unsubscribe();
           unsubscribe = null;
         }
-        setNavigationFallbackLimit(NAVIGATION_GAMES_PAGE_SIZE);
-        loadFallbackGames(NAVIGATION_GAMES_PAGE_SIZE);
+        navigationPopupEpochRef.current += 1;
+        setNavigationHasMoreGames(false);
+        setNavigationGamesCursor(null);
+        stopAllNavigationLoading();
       },
       (pageMeta) => {
-        if (switchedToFallback) {
-          return;
-        }
         if (!isPopupEpochActive()) {
           return;
         }
@@ -2849,6 +2856,9 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
 
   const beginAutomatchFlow = useCallback(
     (options?: { skipSoundInit?: boolean }) => {
+      const navigationScopeKey = activeNavigationCacheScopeKey;
+      const navigationProfileScopeEpoch =
+        navigationProfileScopeEpochRef.current;
       clearPendingImmediateCancelAutomatchIntent();
       clearPendingDelayedCancelAutomatchIntent();
       pendingFreshAutomatchCancelRevealAtMs =
@@ -2862,6 +2872,14 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         soundPlayer.initializeOnUserInteraction(false);
       }
       didClickAutomatchButton((response) => {
+        if (
+          !navigationScopeKey ||
+          navigationCacheScopeRef.current?.scopeKey !== navigationScopeKey ||
+          navigationProfileScopeEpochRef.current !== navigationProfileScopeEpoch
+        ) {
+          pendingFreshAutomatchCancelRevealAtMs = 0;
+          return;
+        }
         const inviteId = response.ok ? response.inviteId : "";
         const mode = response.ok ? response.mode : "";
         if (mode === "pending" && inviteId) {
@@ -2885,7 +2903,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       setIsCancelAutomatchDisabled(false);
       setCancelAutomatchRevealVersion((value) => value + 1);
     },
-    [],
+    [activeNavigationCacheScopeKey],
   );
 
   const handleAutomatchClick = (event: React.MouseEvent<HTMLButtonElement>) => {
@@ -2898,6 +2916,12 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   ) => {
     event.stopPropagation();
     if (isCancelAutomatchDisabled) return;
+    const navigationScopeKey = activeNavigationCacheScopeKey;
+    const navigationProfileScopeEpoch = navigationProfileScopeEpochRef.current;
+    const isNavigationProfileScopeActive = () =>
+      navigationScopeKey !== null &&
+      navigationCacheScopeRef.current?.scopeKey === navigationScopeKey &&
+      navigationProfileScopeEpochRef.current === navigationProfileScopeEpoch;
     const sessionGuard = connection.createSessionGuard();
     setIsCancelAutomatchDisabled(true);
     try {
@@ -2906,7 +2930,9 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         return;
       }
       if (result && result.ok) {
-        setOptimisticPendingAutomatchItem(null);
+        if (isNavigationProfileScopeActive()) {
+          setOptimisticPendingAutomatchItem(null);
+        }
         dismissPendingAutomatchTransition();
         await transitionToHome({ forceMatchScopeReset: true });
       } else {
@@ -2993,7 +3019,8 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
 
   const handleNavigationGameRemove = useCallback(
     (inviteId: string) => {
-      if (isNavigationFallbackScope || !inviteId) {
+      const navigationScopeKey = activeNavigationCacheScopeKey;
+      if (!navigationScopeKey || !inviteId) {
         return;
       }
       if (navigationRemovingInviteIds.has(inviteId)) {
@@ -3001,6 +3028,11 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       }
 
       const sessionGuard = connection.createSessionGuard();
+      const navigationProfileScopeEpoch =
+        navigationProfileScopeEpochRef.current;
+      const isNavigationProfileScopeActive = () =>
+        navigationCacheScopeRef.current?.scopeKey === navigationScopeKey &&
+        navigationProfileScopeEpochRef.current === navigationProfileScopeEpoch;
       setNavigationRemovingInviteIds((prev) => {
         if (prev.has(inviteId)) {
           return prev;
@@ -3024,7 +3056,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       void connection
         .removeWaitingNavigationGame(inviteId)
         .then((result) => {
-          if (!sessionGuard()) {
+          if (!sessionGuard() || !isNavigationProfileScopeActive()) {
             return;
           }
 
@@ -3054,13 +3086,13 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
           clearRemovingFlag();
         })
         .catch(() => {
-          if (!sessionGuard()) {
+          if (!sessionGuard() || !isNavigationProfileScopeActive()) {
             return;
           }
           clearRemovingFlag();
         });
     },
-    [isNavigationFallbackScope, navigationRemovingInviteIds],
+    [activeNavigationCacheScopeKey, navigationRemovingInviteIds],
   );
 
   const handleNavigationProblemSelect = (problemId: string) => {
@@ -3099,6 +3131,8 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       return;
     }
 
+    const loadMoreEpoch = navigationLoadMoreEpochRef.current + 1;
+    navigationLoadMoreEpochRef.current = loadMoreEpoch;
     navigationLoadMoreInFlightRef.current = true;
     setIsNavigationGamesLoadingMore(true);
     const sessionGuard = connection.createSessionGuard();
@@ -3106,65 +3140,23 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     const isCallbackActive = () =>
       navigationPopupEpochRef.current === popupEpoch;
     const stopLoadMore = () => {
+      if (navigationLoadMoreEpochRef.current !== loadMoreEpoch) {
+        return;
+      }
       navigationLoadMoreInFlightRef.current = false;
       setIsNavigationGamesLoadingMore(false);
     };
 
-    if (!isNavigationFallbackScope) {
-      const nextCursor = navigationGamesCursor;
-      if (!nextCursor) {
-        setNavigationHasMoreGames(false);
-        stopLoadMore();
-        return;
-      }
-
-      void connection
-        .getProfileGamesPage(NAVIGATION_GAMES_LOAD_MORE_PAGE_SIZE, nextCursor)
-        .then((page) => {
-          if (!isCallbackActive()) {
-            stopLoadMore();
-            return;
-          }
-          if (!sessionGuard()) {
-            stopLoadMore();
-            return;
-          }
-          setNavigationPagedGames((previousItems) => {
-            const uniqueById = new Map<string, NavigationItem>();
-            previousItems.forEach((item) => uniqueById.set(item.id, item));
-            page.items.forEach((item) => uniqueById.set(item.id, item));
-            const mergedItems = Array.from(uniqueById.values());
-            navigationHasPagedGamesRef.current = mergedItems.some(
-              (item) => !topNavigationItemIdsRef.current.has(item.id),
-            );
-            return mergedItems;
-          });
-          setNavigationGamesCursor(page.nextCursor);
-          setNavigationHasMoreGames(page.hasMore);
-          stopLoadMore();
-        })
-        .catch(() => {
-          if (!isCallbackActive()) {
-            stopLoadMore();
-            return;
-          }
-          if (!sessionGuard()) {
-            stopLoadMore();
-            return;
-          }
-          setNavigationHasMoreGames(false);
-          stopLoadMore();
-        });
+    const nextCursor = navigationGamesCursor;
+    if (!nextCursor) {
+      setNavigationHasMoreGames(false);
+      stopLoadMore();
       return;
     }
 
-    const nextFallbackLimit =
-      navigationFallbackLimit + NAVIGATION_GAMES_LOAD_MORE_PAGE_SIZE;
-    const requestedLimit = nextFallbackLimit + 1;
-    setNavigationFallbackLimit(nextFallbackLimit);
     void connection
-      .getCurrentLoginFallbackGames(requestedLimit)
-      .then((items) => {
+      .getProfileGamesPage(NAVIGATION_GAMES_LOAD_MORE_PAGE_SIZE, nextCursor)
+      .then((page) => {
         if (!isCallbackActive()) {
           stopLoadMore();
           return;
@@ -3173,27 +3165,18 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
           stopLoadMore();
           return;
         }
-        const hasMore = items.length > nextFallbackLimit;
-        const visibleItems = hasMore
-          ? items.slice(0, nextFallbackLimit)
-          : items;
-        const nextProjectedItems = visibleItems.slice(
-          0,
-          NAVIGATION_GAMES_PAGE_SIZE,
-        );
-        const nextPagedItems = visibleItems.slice(NAVIGATION_GAMES_PAGE_SIZE);
-        setNavigationProjectedGames(nextProjectedItems);
-        setNavigationPagedGames(nextPagedItems);
-        const nextTopItemIds = new Set(
-          nextProjectedItems.map((item) => item.id),
-        );
-        if (optimisticPendingAutomatchItem) {
-          nextTopItemIds.add(optimisticPendingAutomatchItem.id);
-        }
-        navigationHasPagedGamesRef.current = nextPagedItems.some(
-          (item) => !nextTopItemIds.has(item.id),
-        );
-        setNavigationHasMoreGames(hasMore);
+        setNavigationPagedGames((previousItems) => {
+          const uniqueById = new Map<string, NavigationItem>();
+          previousItems.forEach((item) => uniqueById.set(item.id, item));
+          page.items.forEach((item) => uniqueById.set(item.id, item));
+          const mergedItems = Array.from(uniqueById.values());
+          navigationHasPagedGamesRef.current = mergedItems.some(
+            (item) => !topNavigationItemIdsRef.current.has(item.id),
+          );
+          return mergedItems;
+        });
+        setNavigationGamesCursor(page.nextCursor);
+        setNavigationHasMoreGames(page.hasMore);
         stopLoadMore();
       })
       .catch(() => {
@@ -3283,9 +3266,15 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         effectiveInviteEventId,
         topNavigationGames,
         pagedNavigationGames,
+        activeNavigationCacheScope,
       ),
     );
-  }, [effectiveInviteEventId, pagedNavigationGames, topNavigationGames]);
+  }, [
+    activeNavigationCacheScope,
+    effectiveInviteEventId,
+    pagedNavigationGames,
+    topNavigationGames,
+  ]);
 
   useEffect(() => {
     if (!effectiveInviteEventId || !isEventGameButtonVisible) {
@@ -3338,8 +3327,10 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       effectiveInviteEventId,
       topNavigationGames,
       pagedNavigationGames,
+      activeNavigationCacheScope,
     );
   }, [
+    activeNavigationCacheScope,
     effectiveInviteEventId,
     liveEventCloudAvatars,
     topNavigationGames,
@@ -3416,11 +3407,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
             isLoadingMoreGames={isNavigationGamesLoadingMore}
             hasMoreGames={navigationHasMoreGames}
             onSelectGame={handleNavigationGameSelect}
-            onRemoveGame={
-              !isNavigationFallbackScope
-                ? handleNavigationGameRemove
-                : undefined
-            }
+            onRemoveGame={handleNavigationGameRemove}
             removingGameInviteIds={navigationRemovingInviteIds}
             onSelectProblem={handleNavigationProblemSelect}
             onLoadMoreGames={handleNavigationLoadMoreGames}

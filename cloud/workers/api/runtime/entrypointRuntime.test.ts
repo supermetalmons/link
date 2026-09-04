@@ -154,7 +154,9 @@ describe("Worker entrypoint", () => {
       authState: async () => calls.push("authState"),
       eventProgress: async () => calls.push("eventProgress"),
       eventTransitions: async () => calls.push("eventTransitions"),
+      gameSessionLocks: async () => calls.push("gameSessionLocks"),
       gameSessionReceipts: async () => calls.push("gameSessionReceipts"),
+      matchTimerStarts: async () => calls.push("matchTimerStarts"),
       profileGameProjection: async () => calls.push("profileGameProjection"),
       telegramProjection: async () => calls.push("telegramProjection"),
     };
@@ -163,7 +165,9 @@ describe("Worker entrypoint", () => {
       withProfileControl(TELEGRAM_TEST_ENV as unknown as Env, "frozen"),
       tasks,
     );
-    expect(calls).toEqual(["gameSessionReceipts", "authState"]);
+    expect(new Set(calls)).toEqual(
+      new Set(["authState", "gameSessionLocks", "gameSessionReceipts"]),
+    );
 
     calls.length = 0;
     await handleScheduled(
@@ -177,7 +181,9 @@ describe("Worker entrypoint", () => {
         "authState",
         "eventProgress",
         "eventTransitions",
+        "gameSessionLocks",
         "gameSessionReceipts",
+        "matchTimerStarts",
         "profileGameProjection",
         "telegramProjection",
       ]),
@@ -204,7 +210,9 @@ describe("Worker entrypoint", () => {
             calls.push("eventTransitions");
             throw transitionFailure;
           },
+          gameSessionLocks: async () => undefined,
           gameSessionReceipts: async () => undefined,
+          matchTimerStarts: async () => undefined,
           profileGameProjection: async () => undefined,
           telegramProjection: async () => undefined,
         },

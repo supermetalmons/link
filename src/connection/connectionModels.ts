@@ -82,7 +82,6 @@ export interface NavigationGameItem {
   opponentEmoji: number | null;
   automatchStateHint: AutomatchStateHint | null;
   isPendingAutomatch: boolean;
-  isFallback?: boolean;
   isOptimistic?: boolean;
 }
 
@@ -106,7 +105,6 @@ export interface NavigationEventItem {
   participantCount: number;
   participantPreview: EventNavigationPreviewParticipant[];
   winnerDisplayName: string | null;
-  isFallback?: boolean;
   isOptimistic?: boolean;
 }
 

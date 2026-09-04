@@ -413,3 +413,26 @@ test("structural game-session mutations stay behind the gameplay API", () => {
   );
   assert.match(createInviteSource, /getUserBoundAuthTokenProvider\(uid\)/);
 });
+
+test("navigation history stays on the profile-scoped gameplay API", () => {
+  const connectionSource = readFileSync(
+    resolve(sourceRoot, "connection/connection.ts"),
+    "utf8",
+  );
+  const bottomControlsSource = readFileSync(
+    resolve(sourceRoot, "ui/BottomControls.tsx"),
+    "utf8",
+  );
+  const cacheSource = readFileSync(
+    resolve(sourceRoot, "services/navigationGamesCache.ts"),
+    "utf8",
+  );
+
+  assert.match(connectionSource, /readNavigationGamesViaApi/);
+  assert.doesNotMatch(connectionSource, /getCurrentLoginFallbackGames/);
+  assert.doesNotMatch(connectionSource, /navigation:fallback/);
+  assert.doesNotMatch(bottomControlsSource, /getCurrentLoginFallbackGames/);
+  assert.doesNotMatch(bottomControlsSource, /isNavigationFallbackScope/);
+  assert.doesNotMatch(cacheSource, /kind:\s*"login"/);
+  assert.doesNotMatch(cacheSource, /scopeKey:\s*`login:/);
+});

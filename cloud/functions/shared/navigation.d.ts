@@ -23,7 +23,6 @@ export interface NavigationGameItem extends NavigationOrderingItem {
   opponentEmoji: number | null;
   automatchStateHint: AutomatchStateHint | null;
   isPendingAutomatch: boolean;
-  isFallback?: boolean;
   isOptimistic?: boolean;
 }
 
@@ -44,7 +43,6 @@ export interface NavigationEventItem extends NavigationOrderingItem {
   participantCount: number;
   participantPreview: EventNavigationPreviewParticipant[];
   winnerDisplayName: string | null;
-  isFallback?: boolean;
   isOptimistic?: boolean;
 }
 

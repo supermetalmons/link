@@ -38,12 +38,20 @@ import {
   handleTelegramCommand,
   TELEGRAM_COMMAND_PATH,
 } from "./telegramCommand.ts";
-import { profileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
+import {
+  assertProfileMutationAllowed,
+  profileBackgroundMutationsEnabled,
+} from "./profileCanonicalActivation.ts";
 import {
   handleHistoricalMatchRoute,
   HISTORICAL_MATCH_PATH,
 } from "./historicalMatchRoute.ts";
 import { createGameplayRepository } from "./gameplayRepository.ts";
+import {
+  createGameSessionMutationLockStore,
+  createMatchTimerStartStore,
+} from "./gameplayCoordinationD1.ts";
+import { sweepMatchTimerStarts } from "./matchTimerStartSweep.ts";
 import { recoverEventTransitionIntents } from "./eventRepository.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
@@ -76,7 +84,9 @@ type ScheduledTasks = {
   authState: () => Promise<unknown>;
   eventProgress: () => Promise<unknown>;
   eventTransitions: () => Promise<unknown>;
+  gameSessionLocks: () => Promise<unknown>;
   gameSessionReceipts: () => Promise<unknown>;
+  matchTimerStarts: () => Promise<unknown>;
   profileGameProjection: () => Promise<unknown>;
   telegramProjection: () => Promise<unknown>;
 };
@@ -98,10 +108,34 @@ export async function handleScheduled(
       const rawRtdbRepository = createGameplayRepository(env);
       return recoverEventTransitionIntents(env, rawRtdbRepository);
     },
+    gameSessionLocks: async () => {
+      try {
+        return await createGameSessionMutationLockStore(
+          env.PROFILE_GAMES_DB,
+        ).deleteExpired(controller.scheduledTime);
+      } catch (error) {
+        console.error(
+          JSON.stringify({
+            event: "game_session_mutation_lock_cleanup_failed",
+            code: error instanceof Error ? error.message : "unknown",
+          }),
+        );
+        throw error;
+      }
+    },
     gameSessionReceipts: () =>
       sweepGameSessionMutationReceipts(env, {
         now: () => controller.scheduledTime,
       }),
+    matchTimerStarts: () =>
+      sweepMatchTimerStarts(
+        createMatchTimerStartStore(env.PROFILE_GAMES_DB),
+        createGameplayRepository(env),
+        {
+          assertMutationAllowed: () => assertProfileMutationAllowed(env),
+          now: () => controller.scheduledTime,
+        },
+      ),
     profileGameProjection: () =>
       handleProfileGameProjectionSweep(controller, env),
     telegramProjection: () => handleTelegramProjectionSweep(controller, env),
@@ -118,6 +152,8 @@ export async function handleScheduled(
     runProfileTask(tasks.eventTransitions),
     runProfileTask(tasks.profileGameProjection),
     runProfileTask(tasks.telegramProjection),
+    runProfileTask(tasks.matchTimerStarts),
+    tasks.gameSessionLocks(),
     tasks.gameSessionReceipts(),
     tasks.authState(),
   ]);

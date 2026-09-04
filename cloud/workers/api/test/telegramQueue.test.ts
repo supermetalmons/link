@@ -367,6 +367,42 @@ test("durably defers pending and unclaimed wagers while writes are disabled", as
   }
 });
 
+test("defers a wager that freezes at a settlement write boundary", async () => {
+  const queued = queueMessage(recoverableWagerTask);
+  const deferred: Array<{ body: unknown; options?: QueueSendOptions }> = [];
+  let controlReads = 0;
+  await handleTelegramQueueMessage(
+    queued.message,
+    envWithQueue(async (body, options) => {
+      deferred.push({ body, options });
+      return {
+        metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+      };
+    }),
+    {
+      createGameplay: () => unusedGameplayRepository,
+      logger: { error() {}, info() {} },
+      profileMutationsEnabled: async () => {
+        controlReads += 1;
+        return controlReads === 1;
+      },
+      resumeSettlement: async (_task, _repository, _now, assertAllowed) => {
+        await assertAllowed?.();
+        return "completed";
+      },
+    },
+  );
+  assert.equal(controlReads, 2);
+  assert.equal(queued.acknowledgements(), 1);
+  assert.deepEqual(queued.retries, []);
+  assert.deepEqual(deferred, [
+    {
+      body: recoverableWagerTask,
+      options: { delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS },
+    },
+  ]);
+});
+
 test("durably defers wagers when frozen-state classification is unavailable", async () => {
   const queued = queueMessage(recoverableWagerTask);
   const deferred: Array<{ body: unknown; options?: QueueSendOptions }> = [];

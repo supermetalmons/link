@@ -1,7 +1,6 @@
 import {
   MATCH_TIMER_DURATION_MS,
   MATCH_TIMER_CLAIM_ROOT,
-  MATCH_TIMER_START_ROOT,
   MATCH_TIMER_TERMINAL,
   formatMatchTimer,
   parseStrictMatchTimer,
@@ -28,6 +27,7 @@ import { Color, Game } from "mons-rules";
 import { AuthApiFailure } from "./authErrors.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import type { MatchTimerStartStore } from "./gameplayCoordinationD1.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import {
   buildEventProgressPlan,
@@ -58,6 +58,32 @@ export type MatchTimerGameState = {
   winner: "white" | "black" | undefined;
 };
 
+function matchIsTerminal(
+  player: MatchTimerRecord,
+  opponent: MatchTimerRecord,
+  game: MatchTimerGameState,
+): boolean {
+  return (
+    player.status === "surrendered" ||
+    opponent.status === "surrendered" ||
+    game.winner !== undefined ||
+    player.timer === MATCH_TIMER_TERMINAL ||
+    opponent.timer === MATCH_TIMER_TERMINAL
+  );
+}
+
+function matchStateMatches(
+  current: MatchTimerRecord,
+  expected: MatchTimerRecord,
+): boolean {
+  return (
+    current.color === expected.color &&
+    current.fen === expected.fen &&
+    current.flatMovesString === expected.flatMovesString &&
+    current.status === expected.status
+  );
+}
+
 type MatchTimerMarker = {
   timer: string;
   turnNumber: number;
@@ -74,8 +100,10 @@ type MatchTimerClaimFence = {
 };
 
 export type MatchTimerDependencies = {
+  assertMutationAllowed?: () => Promise<void>;
   enqueueEventProgress?: (plan: EventProgressPlan) => Promise<void>;
   now?: () => number;
+  timerStarts: MatchTimerStartStore;
   signal?: AbortSignal;
   resolveGame?: (
     player: MatchTimerRecord,
@@ -109,7 +137,7 @@ function toRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function readMatchTimerRecord(value: unknown): MatchTimerRecord {
+export function parseMatchTimerRecord(value: unknown): MatchTimerRecord | null {
   const record = toRecord(value);
   const color = record?.color;
   const fen = typeof record?.fen === "string" ? record.fen : "";
@@ -122,7 +150,7 @@ function readMatchTimerRecord(value: unknown): MatchTimerRecord {
     !isMatchFenWithinLimit(fen) ||
     !isMatchHistoryWithinLimits(flatMovesString)
   ) {
-    throw failedPrecondition("something is wrong with the game state.");
+    return null;
   }
   return {
     color,
@@ -131,6 +159,21 @@ function readMatchTimerRecord(value: unknown): MatchTimerRecord {
     status: typeof record.status === "string" ? record.status : "",
     timer: typeof record.timer === "string" ? record.timer : "",
   };
+}
+
+function readMatchTimerRecord(value: unknown): MatchTimerRecord {
+  const record = parseMatchTimerRecord(value);
+  if (!record) {
+    throw failedPrecondition("something is wrong with the game state.");
+  }
+  return record;
+}
+
+export function rawMatchTimerIsTerminal(value: unknown): boolean {
+  const record = toRecord(value);
+  return (
+    record?.status === "surrendered" || record?.timer === MATCH_TIMER_TERMINAL
+  );
 }
 
 function movesFromFlatString(value: string): string[] {
@@ -164,20 +207,6 @@ async function readMatchRecords(
     ),
   );
   return [values[0], values[1], values[2]];
-}
-
-function parseMatchTimerMarker(value: unknown): MatchTimerMarker | null {
-  const marker = toRecord(value);
-  const timer = typeof marker?.timer === "string" ? marker.timer : "";
-  const parsed = parseStrictMatchTimer(timer);
-  if (
-    !parsed ||
-    !Number.isSafeInteger(marker?.turnNumber) ||
-    marker?.turnNumber !== parsed.turnNumber
-  ) {
-    return null;
-  }
-  return { timer, turnNumber: parsed.turnNumber };
 }
 
 export function buildOrderedMoveHistory(
@@ -299,9 +328,6 @@ async function buildTimerClaimSideEffectUpdates(
       claimedAtMs: nowMs,
       expiresAtMs: null,
     },
-    [`${MATCH_TIMER_START_ROOT}/${request.playerId}/${request.matchId}`]: null,
-    [`${MATCH_TIMER_START_ROOT}/${request.opponentId}/${request.matchId}`]:
-      null,
   };
   const invite = toRecord(inviteValue);
   const eventId =
@@ -324,13 +350,31 @@ async function buildTimerClaimSideEffectUpdates(
   return { progress, updates };
 }
 
+async function deleteTimerStartMarkers(
+  request: Pick<StartMatchTimerRequest, "matchId" | "opponentId" | "playerId">,
+  dependencies: MatchTimerDependencies,
+): Promise<void> {
+  await dependencies.assertMutationAllowed?.();
+  await dependencies.timerStarts.deletePair(
+    request.playerId,
+    request.opponentId,
+    request.matchId,
+  );
+}
+
 async function persistClaimSideEffectsAndDispatch(
   sideEffects: Awaited<ReturnType<typeof buildTimerClaimSideEffectUpdates>>,
+  request: ClaimMatchVictoryByTimerRequest,
   repository: MatchTimerClaimRepository,
   signal: AbortSignal,
   dependencies: MatchTimerDependencies,
+  timerMarkersDeleted = false,
 ): Promise<void> {
+  await dependencies.assertMutationAllowed?.();
   await persistTimerClaimSideEffects(sideEffects.updates, repository, signal);
+  if (!timerMarkersDeleted) {
+    await deleteTimerStartMarkers(request, dependencies);
+  }
   if (sideEffects.progress && dependencies.enqueueEventProgress) {
     await dependencies.enqueueEventProgress(sideEffects.progress);
   }
@@ -408,7 +452,7 @@ export async function startMatchTimer(
   identity: RequestIdentity,
   request: StartMatchTimerRequest,
   repository: MatchTimerRepository,
-  dependencies: MatchTimerDependencies = {},
+  dependencies: MatchTimerDependencies,
 ): Promise<StartMatchTimerResponse> {
   const timeoutSignal = AbortSignal.timeout(MATCH_TIMER_OPERATION_TIMEOUT_MS);
   const signal = dependencies.signal
@@ -426,6 +470,13 @@ export async function startMatchTimer(
   ) {
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
   }
+  if (
+    rawMatchTimerIsTerminal(playerValue) ||
+    rawMatchTimerIsTerminal(opponentValue)
+  ) {
+    await deleteTimerStartMarkers(request, dependencies);
+    throw failedPrecondition("game is already over.");
+  }
   const player = readMatchTimerRecord(playerValue);
   const opponent = readMatchTimerRecord(opponentValue);
   if (player.color === opponent.color) {
@@ -435,13 +486,8 @@ export async function startMatchTimer(
     player,
     opponent,
   );
-  if (
-    player.status === "surrendered" ||
-    opponent.status === "surrendered" ||
-    game.winner !== undefined ||
-    player.timer === MATCH_TIMER_TERMINAL ||
-    opponent.timer === MATCH_TIMER_TERMINAL
-  ) {
+  if (matchIsTerminal(player, opponent, game)) {
+    await deleteTimerStartMarkers(request, dependencies);
     throw failedPrecondition("game is already over.");
   }
   if (!game.historyValid) {
@@ -463,28 +509,18 @@ export async function startMatchTimer(
     timer: timerCandidate,
     turnNumber: game.turnNumber,
   };
-  const markerPath = `${MATCH_TIMER_START_ROOT}/${request.playerId}/${request.matchId}`;
-  const markerTransaction = await repository.transactRtdbPath(
-    markerPath,
-    (current) => {
-      const marker = parseMatchTimerMarker(current);
-      if (marker && marker.turnNumber > game.turnNumber) {
-        return { commit: false, decision: "newer-turn" };
-      }
-      if (marker?.turnNumber === game.turnNumber) {
-        return { commit: false, decision: "already-started" };
-      }
-      return { decision: "started", value: markerCandidate };
-    },
-    signal,
+  await dependencies.assertMutationAllowed?.();
+  const marker = await dependencies.timerStarts.getOrAdvance(
+    request.playerId,
+    request.opponentId,
+    request.matchId,
+    markerCandidate,
+    nowMs,
   );
-  if (markerTransaction.decision === "newer-turn") {
+  if (marker.turnNumber > game.turnNumber) {
     throw failedPrecondition("game state changed.");
   }
-  const marker = markerTransaction.committed
-    ? markerCandidate
-    : parseMatchTimerMarker(markerTransaction.value);
-  if (!marker || marker.turnNumber !== game.turnNumber) {
+  if (marker.turnNumber !== game.turnNumber) {
     throw new AuthApiFailure(
       503,
       "unavailable",
@@ -492,6 +528,42 @@ export async function startMatchTimer(
     );
   }
   const timer = marker.timer;
+  const [freshPlayerValue, freshOpponentValue, freshInviteValue] =
+    await readMatchRecords(request, repository, signal);
+  if (
+    rawMatchTimerIsTerminal(freshPlayerValue) ||
+    rawMatchTimerIsTerminal(freshOpponentValue)
+  ) {
+    await deleteTimerStartMarkers(request, dependencies);
+    throw failedPrecondition("game is already over.");
+  }
+  const freshPlayer = readMatchTimerRecord(freshPlayerValue);
+  const freshOpponent = readMatchTimerRecord(freshOpponentValue);
+  const freshGame = (dependencies.resolveGame || resolveMatchTimerGame)(
+    freshPlayer,
+    freshOpponent,
+  );
+  if (matchIsTerminal(freshPlayer, freshOpponent, freshGame)) {
+    await deleteTimerStartMarkers(request, dependencies);
+    throw failedPrecondition("game is already over.");
+  }
+  const freshOpponentColor =
+    freshOpponent.color === "white" ? Color.White : Color.Black;
+  if (
+    !inviteMatchesPlayers(
+      freshInviteValue,
+      request.playerId,
+      request.opponentId,
+    ) ||
+    !matchStateMatches(freshPlayer, player) ||
+    !matchStateMatches(freshOpponent, opponent) ||
+    !freshGame.historyValid ||
+    freshGame.turnNumber !== game.turnNumber ||
+    freshGame.activeColor !== freshOpponentColor
+  ) {
+    throw failedPrecondition("game state changed.");
+  }
+  await dependencies.assertMutationAllowed?.();
   const timerTransaction = await repository.transactRtdbPath(
     `players/${request.playerId}/matches/${request.matchId}/timer`,
     (current) => {
@@ -510,14 +582,7 @@ export async function startMatchTimer(
     signal,
   );
   if (timerTransaction.decision === "terminal") {
-    await repository.transactRtdbPath(
-      markerPath,
-      (current) =>
-        current === null
-          ? { commit: false, decision: "missing" }
-          : { decision: "cleared", value: null },
-      signal,
-    );
+    await deleteTimerStartMarkers(request, dependencies);
     throw failedPrecondition("game is already over.");
   }
   if (timerTransaction.decision === "newer-turn") {
@@ -530,7 +595,7 @@ export async function claimMatchVictoryByTimer(
   identity: RequestIdentity,
   request: ClaimMatchVictoryByTimerRequest,
   repository: MatchTimerClaimRepository,
-  dependencies: MatchTimerDependencies = {},
+  dependencies: MatchTimerDependencies,
 ): Promise<ClaimMatchVictoryByTimerResponse> {
   const timeoutSignal = AbortSignal.timeout(MATCH_TIMER_OPERATION_TIMEOUT_MS);
   const signal = dependencies.signal
@@ -547,6 +612,12 @@ export async function claimMatchVictoryByTimer(
     parseInviteMatchIndex(request.inviteId, request.matchId) === null
   ) {
     throw new AuthApiFailure(403, "permission-denied", "permission-denied");
+  }
+  const timerMarkersDeleted =
+    rawMatchTimerIsTerminal(playerValue) ||
+    rawMatchTimerIsTerminal(opponentValue);
+  if (timerMarkersDeleted) {
+    await deleteTimerStartMarkers(request, dependencies);
   }
   const player = readMatchTimerRecord(playerValue);
   const opponent = readMatchTimerRecord(opponentValue);
@@ -576,9 +647,11 @@ export async function claimMatchVictoryByTimer(
         replayFence,
         replayedAtMs,
       ),
+      request,
       repository,
       signal,
       dependencies,
+      timerMarkersDeleted,
     );
     return { ok: true };
   }
@@ -588,6 +661,9 @@ export async function claimMatchVictoryByTimer(
     opponent.timer === MATCH_TIMER_TERMINAL ||
     game.winner !== undefined
   ) {
+    if (!timerMarkersDeleted) {
+      await deleteTimerStartMarkers(request, dependencies);
+    }
     throw failedPrecondition("game is already over.");
   }
   if (!game.historyValid) {
@@ -625,6 +701,7 @@ export async function claimMatchVictoryByTimer(
     turnNumber: game.turnNumber,
     expiresAtMs: nowMs + MATCH_TIMER_CLAIM_LEASE_MS,
   };
+  await dependencies.assertMutationAllowed?.();
   const claimTransaction = await repository.transactRtdbPath(
     claimPath,
     (current) => {
@@ -656,6 +733,7 @@ export async function claimMatchVictoryByTimer(
         claimFence,
         now(),
       ),
+      request,
       repository,
       signal,
       dependencies,
@@ -694,6 +772,7 @@ export async function claimMatchVictoryByTimer(
       claimFence,
       now(),
     ),
+    request,
     repository,
     signal,
     dependencies,
@@ -705,5 +784,4 @@ export {
   MAX_MATCH_FEN_BYTES,
   MAX_MATCH_HISTORY_BYTES,
   MAX_MATCH_HISTORY_ENTRIES,
-  MATCH_TIMER_START_ROOT,
 };

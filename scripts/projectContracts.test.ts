@@ -109,9 +109,11 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     "APPLE_AUDIENCES",
     "AUTH_MUTATIONS_DISABLED",
     "FIREBASE_RTDB_URL",
+    "GAMEPLAY_COORDINATION_AUTHORITY",
   ]);
   assert.equal(config.vars?.APPLE_AUDIENCES, "link.mons");
   assert.match(config.vars?.AUTH_MUTATIONS_DISABLED || "", /^(?:true|false)$/);
+  assert.equal(config.vars?.GAMEPLAY_COORDINATION_AUTHORITY, "d1");
   assert.equal(
     config.vars?.FIREBASE_RTDB_URL,
     "https://mons-link-default-rtdb.firebaseio.com",

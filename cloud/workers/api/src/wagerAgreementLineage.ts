@@ -440,6 +440,7 @@ export async function ensureWagerAgreementLineageReady(
   repository: GameplayRepository,
   wagerPath: string,
   now: () => number,
+  assertMutationAllowed?: () => Promise<void>,
 ): Promise<void> {
   const wager = toRecord(await repository.getRtdbPath(wagerPath));
   const agreementOperation = toRecord(wager?.agreementOperation);
@@ -466,6 +467,7 @@ export async function ensureWagerAgreementLineageReady(
     throw new Error("wager-agreement-lineage-unavailable");
   }
   for (const adjustment of adjustments) {
+    await assertMutationAllowed?.();
     await updateFrozenMaterialsOnce(
       repository,
       adjustment.uid,
@@ -475,6 +477,7 @@ export async function ensureWagerAgreementLineageReady(
       now,
     );
   }
+  await assertMutationAllowed?.();
   await markWagerAgreementLineageReady(
     repository,
     wagerPath,

@@ -2,7 +2,7 @@
 
 Run commands from the repository root. See the repository [architecture and command map](../README.md) for package boundaries and the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md) for API release and maintenance procedures.
 
-Firebase Auth remains active. Realtime Database retains active invites and match synchronization. The API Worker owns manual invite, join, match creation, and rematch mutations; auth; profile and leaderboard reads; profile customization; username mutation; mining; gameplay; D1-backed events and prizes; profile-link catch-up; profile-game projection; event control and progress Workflows; X callback; event Telegram projection; and Worker-backed Telegram delivery.
+Firebase Auth remains active. Realtime Database retains active invites, match synchronization, and `matchTimerClaims`. The API Worker owns manual invite, join, match creation, and rematch mutations; auth; profile and leaderboard reads; profile customization; username mutation; mining; gameplay; D1-backed events and prizes; profile-link catch-up; profile-game projection; event control and progress Workflows; X callback; event Telegram projection; and Worker-backed Telegram delivery.
 
 `mons-link-profiles` D1 permanently contains the canonical profile, ownership, auth, recovery, rating, wager, and transaction-guard tables. `PROFILE_DB.profile_login_owners` is the sole source for Worker login UID to canonical profile ownership, including merge-target resolution. There is no alternate profile store or fallback; an unreadable or corrupt ownership topology fails closed with `503 profile-ownership-unavailable`.
 
@@ -13,6 +13,8 @@ Ownership-dependent operations use one D1 snapshot for each authorization decisi
 The browser resolves login-linked profile presentation only through the authenticated profile API. Invite role and write ownership come from the authenticated gameplay API using canonical D1 ownership; browser code must not read or subscribe to `players/{uid}/profile`.
 
 Historical rematch snapshots are read through the public Worker endpoint and stored immutably in `mons-link-profile-games` D1. Rated snapshots take precedence over transition and legacy-backfill snapshots. D1 is the sole public-history source; there is no RTDB read-through or backfill path. Active match synchronization remains in RTDB.
+
+Manual game-session mutation locks and match-timer start markers live in `mons-link-profile-games` D1. Locks are 60-second owner-and-operation-fenced leases; the five-minute schedule removes at most 1,000 expired rows. Timer markers are removed eagerly on terminal and rating paths, and the same schedule durably reconciles a bounded oldest-first batch. `matchTimerClaims` stays in RTDB because Realtime Database Security Rules use it to fence direct browser match writes. The retired `gameplayMutationLocks` and `matchTimerStarts` roots and the explicit timer-start deny rule remain untouched during the rollback window.
 
 Background automatch, rating, and profile-link game projections share per-invite locks in `PROFILE_GAMES_DB.profile_game_projection_locks`. Profile-link processing also holds a per-login lock in the same table. Leases expire after 15 minutes, releases require the current owner, and the five-minute projection sweep removes at most 1,000 expired rows. Event projection leases remain in `EVENT_DB`. Pending automatch and profile-link projection records remain in RTDB. Changing between Firebase-lock and D1-lock Worker versions requires the paused-queue cutover in the deployment guide.
 
@@ -84,9 +86,28 @@ Auth intents and X redirect flows are stored in the `mons-link-auth-state` D1 da
 
 ## Profile-game projection recovery
 
-`mons-link-profile-game-projection` permanently owns rating, manual invite, automatch, event, and profile-link projections. Manual game-session mutations use per-invite leases and UUID receipts, then atomically persist their source writes and the historically named `profileGameProjectionOutbox/automatch/{inviteId}` marker. Producers persist durable markers before enqueueing, and the five-minute Worker schedule repairs and re-enqueues stale markers while request fencing preserves newer work and recoverable cleanup owners. The same schedule removes game-session mutation receipts after seven days.
+`mons-link-profile-game-projection` permanently owns rating, manual invite, automatch, event, and profile-link projections. Manual game-session mutations use D1 per-invite leases and UUID receipts, then atomically persist their RTDB source writes and the historically named `profileGameProjectionOutbox/automatch/{inviteId}` marker. Producers persist durable markers before enqueueing, and the five-minute Worker schedule repairs and re-enqueues stale markers while request fencing preserves newer work and recoverable cleanup owners. The same schedule removes game-session mutation receipts after seven days and expired D1 mutation leases in bounded batches.
 
 Investigate stuck work through Queue consumption, pending marker age, and projection logs. Do not purge the Queue, delete a pending outbox, manually delete profile documents, or manually rewrite canonical profile-event prizes.
+
+## Gameplay coordination migration
+
+Migration `0008_gameplay_coordination_control.sql` records the authoritative coordination store and its generation in D1. It starts `uninitialized` at generation `0`. The already-live D1 release must be adopted once under a write freeze with the D1 timer digest captured by preview:
+
+The migration tool stores private snapshots under ignored `.cache/gameplay-coordination-migration/` directories. Files use mode `0600`; stdout contains only counts, SHA-256 digests, and control metadata.
+
+```sh
+npm run migrate:gameplay-coordination -- --preview --project mons-link
+npm run migrate:gameplay-coordination -- --adopt-d1 --source-version-id <live-d1-version-id> --expected-timer-digest <preview-d1-timer-digest>
+npm run migrate:gameplay-coordination -- --final --source-version-id <rtdb-version-id>
+npm run migrate:gameplay-coordination -- --rollback --source-version-id <d1-version-id>
+```
+
+Preview reads and validates both snapshots without writing, including before `0008` adds the control and opponent column. Adoption requires frozen profile writes, drained RTDB and D1 leases, an unchanged D1 snapshot, the expected preview digest, and the exact live D1 Version ID at 100%. It records D1 generation `1` without rewriting timer rows.
+
+Final is allowed only from `rtdb`; rollback is allowed only from `d1`. Both require frozen profile writes, zero active D1 leases, and the supplied API Version ID at exactly 100%. The tool also inspects that immutable Worker version's `GAMEPLAY_COORDINATION_AUTHORITY` binding and requires it to match the source authority. Normal transitions reject a missing binding; only the explicit one-time D1 adoption accepts the currently live untagged version. Final also requires two identical RTDB snapshots and no unexpired RTDB leases.
+
+The source replaces the complete destination snapshot. Final performs the D1 replacement and control-generation advance in one transaction. Rollback replaces the whole RTDB `matchTimerStarts` root, verifies it and the unchanged D1 source, then advances control. If a source is empty while the destination is not, repeat the command with `--allow-empty-source-digest <preview-digest>` only after reviewing the preview. Ambiguous outcomes are resolved from the control generation and exact destination snapshot; failures leave writes frozen for a safe retry. Timer deadlines remain absolute wall-clock timestamps. The tool never moves `matchTimerClaims`, deletes either legacy root, or changes Firebase Rules.
 
 ## Telegram recovery and announcements
 

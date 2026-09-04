@@ -14,7 +14,7 @@ mons.link is a browser game backed by Firebase Auth, Cloudflare D1, Realtime Dat
 | `cloud/admin/`            | Manually invoked production administration tools                                             | Node / D1          |
 | `scripts/`                | Deployment, repository maintenance, architecture, and tooling contracts                      | Node and Bash      |
 
-The frontend Worker is configured by `wrangler.jsonc`. The API Worker has its independent configuration under `cloud/workers/api/`. Firebase Auth remains active, and Realtime Database retains active invites and match synchronization. Canonical event, profile, auth-state, Telegram, projection, and withdrawal data are D1-backed. Realtime Database rules live under `cloud/`; Firestore and Firebase Functions are not deployed.
+The frontend Worker is configured by `wrangler.jsonc`. The API Worker has its independent configuration under `cloud/workers/api/`. Firebase Auth remains active, and Realtime Database retains active invites, match synchronization, and timer-claim fences. Canonical event, profile, auth-state, Telegram, projection, withdrawal, game-session lock, and timer-start data are D1-backed. Navigation is served from the Worker and profile-game D1 cache without an RTDB reconstruction fallback. Realtime Database rules live under `cloud/`; Firestore and Firebase Functions are not deployed.
 
 ## Setup and development
 
@@ -42,14 +42,15 @@ Copy `.env.example` to `.env.local` only when local overrides are needed. Local 
 
 ### API and tooling
 
-| Command                                        | Purpose                                                                                                                  |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `npm run check:api`                            | Format, lint, typecheck, test, type-generation check, and dry-run the API Worker.                                        |
-| `npm run check:tooling`                        | Validate deployment drivers, project contracts, admin parsing, repository cleanup fixtures, and dependency architecture. |
-| `npm run manage:profile-canonical -- --status` | Read the canonical D1 writer-control state without exposing profile data.                                                |
-| `npm run test:database-rules`                  | Run structural gameplay authorization against the Realtime Database emulator.                                            |
-| `npm run check:all`                            | Run the repository-wide validation gate, including portable cloud runtime tests.                                         |
-| `npm run format:check`                         | Check repository formatting without writing files.                                                                       |
+| Command                                              | Purpose                                                                                                                  |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `npm run check:api`                                  | Format, lint, typecheck, test, type-generation check, and dry-run the API Worker.                                        |
+| `npm run check:tooling`                              | Validate deployment drivers, project contracts, admin parsing, repository cleanup fixtures, and dependency architecture. |
+| `npm run migrate:gameplay-coordination -- --preview` | Compare RTDB and D1 coordination snapshots without remote writes.                                                        |
+| `npm run manage:profile-canonical -- --status`       | Read the canonical D1 writer-control state without exposing profile data.                                                |
+| `npm run test:database-rules`                        | Run structural gameplay authorization against the Realtime Database emulator.                                            |
+| `npm run check:all`                                  | Run the repository-wide validation gate, including portable cloud runtime tests.                                         |
+| `npm run format:check`                               | Check repository formatting without writing files.                                                                       |
 
 ### Deployment and maintenance
 

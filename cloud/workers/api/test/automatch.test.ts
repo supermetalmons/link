@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  cancelQueuedAutomatch,
+  cancelQueuedAutomatch as cancelQueuedAutomatchImpl,
   emptyAutomatchProfile,
   findOwnedQueuedAutomatch,
   getFirstQueuedAutomatch,
-  startAutomatch,
+  startAutomatch as startAutomatchImpl,
+  type AutomatchDependencies,
 } from "../src/automatch.ts";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import { cancelAutomatch } from "../src/gameplayRoute.ts";
+import { GameSessionMutationLeaseReleaseFailure } from "../src/gameSessionMutations.ts";
+import { GameSessionMutationLockFailure } from "../src/gameplayCoordinationD1.ts";
+import { cancelAutomatch as cancelAutomatchImpl } from "../src/gameplayRoute.ts";
 import type { RequestIdentity } from "../src/requestIdentity.ts";
 import {
   FIREBASE_RTDB_SERVER_TIMESTAMP,
@@ -22,10 +25,85 @@ import type {
   ProfileOwnershipQuery,
   ProfileOwnershipSnapshot,
 } from "../src/profileOwnership.ts";
+import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
 
 const identity: RequestIdentity = {
   uid: "guest-uid",
 };
+
+const coordinationByRepository = new WeakMap<
+  GameplayRepository,
+  ReturnType<typeof createMemoryGameplayCoordinationStores>
+>();
+
+function coordinationFor(repository: GameplayRepository) {
+  let coordination = coordinationByRepository.get(repository);
+  if (!coordination) {
+    coordination = createMemoryGameplayCoordinationStores();
+    coordinationByRepository.set(repository, coordination);
+  }
+  return coordination;
+}
+
+function automatchDependencies(
+  repository: GameplayRepository,
+  dependencies: Partial<AutomatchDependencies> = {},
+): AutomatchDependencies {
+  return {
+    mutationLocks: coordinationFor(repository).mutationLocks,
+    ...dependencies,
+  };
+}
+
+function startAutomatch(
+  identity: Parameters<typeof startAutomatchImpl>[0],
+  request: Parameters<typeof startAutomatchImpl>[1],
+  repository: GameplayRepository,
+  dependencies: Partial<AutomatchDependencies> = {},
+) {
+  return startAutomatchImpl(
+    identity,
+    request,
+    repository,
+    automatchDependencies(repository, dependencies),
+  );
+}
+
+function cancelQueuedAutomatch(
+  queued: Parameters<typeof cancelQueuedAutomatchImpl>[0],
+  repository: GameplayRepository,
+  dependencies: Partial<AutomatchDependencies> = {},
+  signal?: AbortSignal,
+) {
+  return cancelQueuedAutomatchImpl(
+    queued,
+    repository,
+    automatchDependencies(repository, dependencies),
+    signal,
+  );
+}
+
+function cancelAutomatch(
+  identity: Parameters<typeof cancelAutomatchImpl>[0],
+  repository: GameplayRepository,
+  dependencies: Partial<AutomatchDependencies> = {},
+) {
+  return cancelAutomatchImpl(
+    identity,
+    repository,
+    automatchDependencies(repository, dependencies),
+  );
+}
+
+async function automatchOwnerLockId(owner: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(owner),
+  );
+  return `automatch-owner-${Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("")}`;
+}
 function request(emojiId = 1, aura = "") {
   return { emojiId, aura };
 }
@@ -283,6 +361,77 @@ test("creates a pending automatch with profile metadata and exact roots", async 
     String(telegram.waitingText),
     /Alice \(1512\).*looking for a match/,
   );
+});
+
+test("returns a committed pending automatch despite release failure", async () => {
+  const profileTasks: unknown[] = [];
+  const telegramTasks: unknown[] = [];
+  let committed = false;
+  const value = repository({
+    getRtdbPath: async (path) => {
+      if (!committed) return null;
+      if (path === "automatch/auto_aaaaaaaaaaa") {
+        return { uid: identity.uid };
+      }
+      if (path === "invites/auto_aaaaaaaaaaa") {
+        return {
+          hostId: identity.uid,
+          guestId: null,
+          automatchStateHint: "pending",
+        };
+      }
+      if (
+        path ===
+        "profileGameProjectionOutbox/automatch/auto_aaaaaaaaaaa/requestId"
+      ) {
+        return "pending-release";
+      }
+      return null;
+    },
+    patchRtdbRoot: async () => {
+      committed = true;
+      throw new Error("response-lost-after-commit");
+    },
+  });
+  const stores = coordinationFor(value);
+  const release = stores.mutationLocks.release;
+  stores.mutationLocks.release = async (lock, ownerId) => {
+    if (lock.lockId === "auto_aaaaaaaaaaa") {
+      throw new GameSessionMutationLockFailure("release");
+    }
+    await release(lock, ownerId);
+  };
+
+  const result = await startAutomatch(identity, request(), value, {
+    createProjectionRequestId: () => "pending-release",
+    enqueueProfileGameProjection: async (task) => {
+      profileTasks.push(task);
+    },
+    enqueueTelegramProjection: async (task) => {
+      telegramTasks.push(task);
+    },
+    random: () => 0,
+  });
+  assert.deepEqual(result, {
+    ok: true,
+    inviteId: "auto_aaaaaaaaaaa",
+    mode: "pending",
+    matchedImmediately: false,
+  });
+  assert.deepEqual(profileTasks, [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto_aaaaaaaaaaa",
+      requestId: "pending-release",
+    },
+  ]);
+  assert.deepEqual(telegramTasks, [
+    {
+      kind: "automatch-telegram-projection",
+      inviteId: "auto_aaaaaaaaaaa",
+      requestId: "pending-release",
+    },
+  ]);
 });
 
 test("uses client metadata without canonical ownership for an unlinked login", async () => {
@@ -953,6 +1102,122 @@ test("shared cancellation reconciles an ambiguous committed patch", async () => 
       kind: "automatch-telegram-projection",
       inviteId: queued.inviteId,
       requestId: "ambiguous-cancel",
+    },
+  ]);
+});
+
+test("requires commit proof after a lock release failure", async () => {
+  const queued = {
+    inviteId: "auto_release_failure",
+    data: { uid: identity.uid, timestamp: 1, telegramDeliveryVersion: 2 },
+  };
+  let patches = 0;
+  let proofReads = 0;
+  const value = repository({
+    getRtdbPath: async (path) => {
+      if (path === `automatch/${queued.inviteId}`) return queued.data;
+      if (path === `invites/${queued.inviteId}/guestId`) return null;
+      if (path === `invites/${queued.inviteId}/hostId`) return identity.uid;
+      if (path === `invites/${queued.inviteId}`) {
+        proofReads++;
+        return null;
+      }
+      if (
+        path ===
+        `profileGameProjectionOutbox/automatch/${queued.inviteId}/requestId`
+      ) {
+        return null;
+      }
+      assert.fail(`unexpected path ${path}`);
+    },
+    patchRtdbRoot: async () => {
+      patches++;
+      throw new Error("response-lost-without-commit");
+    },
+  });
+  coordinationFor(value).mutationLocks.release = async () => {
+    throw new GameSessionMutationLockFailure("release");
+  };
+
+  await assert.rejects(
+    () =>
+      cancelQueuedAutomatch(queued, value, {
+        wait: async () => undefined,
+      }),
+    (error: unknown) =>
+      error instanceof GameSessionMutationLeaseReleaseFailure &&
+      error.operation === "release",
+  );
+  assert.equal(patches, 1);
+  assert.ok(proofReads > 0);
+});
+
+test("returns successful cancellation after proving a committed release failure", async () => {
+  const queued = {
+    inviteId: "auto_dual_failure",
+    data: { uid: identity.uid, timestamp: 1, telegramDeliveryVersion: 2 },
+  };
+  let queue: unknown = queued.data;
+  let invite: Record<string, unknown> = {
+    hostId: identity.uid,
+    guestId: null,
+    automatchStateHint: "pending",
+    automatchCanceledAt: null,
+  };
+  let outboxRequestId: string | null = null;
+  const profileTasks: unknown[] = [];
+  const telegramTasks: unknown[] = [];
+  const value = repository({
+    getRtdbPath: async (path) => {
+      if (path === `automatch/${queued.inviteId}`) return queue;
+      if (path === `invites/${queued.inviteId}`) return invite;
+      if (path === `invites/${queued.inviteId}/guestId`) return invite.guestId;
+      if (path === `invites/${queued.inviteId}/hostId`) return invite.hostId;
+      if (
+        path ===
+        `profileGameProjectionOutbox/automatch/${queued.inviteId}/requestId`
+      ) {
+        return outboxRequestId;
+      }
+      assert.fail(`unexpected path ${path}`);
+    },
+    patchRtdbRoot: async () => {
+      queue = null;
+      invite = {
+        ...invite,
+        automatchStateHint: "canceled",
+        automatchCanceledAt: 2,
+      };
+      outboxRequestId = "dual-failure";
+      throw new Error("response-lost-after-commit");
+    },
+  });
+  coordinationFor(value).mutationLocks.release = async () => {
+    throw new GameSessionMutationLockFailure("release");
+  };
+
+  const canceled = await cancelQueuedAutomatch(queued, value, {
+    createProjectionRequestId: () => "dual-failure",
+    enqueueProfileGameProjection: async (task) => {
+      profileTasks.push(task);
+    },
+    enqueueTelegramProjection: async (task) => {
+      telegramTasks.push(task);
+    },
+  });
+  assert.equal(canceled, true);
+  assert.deepEqual(profileTasks, [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: queued.inviteId,
+      requestId: "dual-failure",
+    },
+  ]);
+  assert.deepEqual(telegramTasks, [
+    {
+      kind: "automatch-telegram-projection",
+      inviteId: queued.inviteId,
+      requestId: "dual-failure",
     },
   ]);
 });
@@ -1679,26 +1944,23 @@ test("converges a candidate owner before consuming its surviving queue", async (
 test("backs off boundedly while the profile queue lock is busy", async () => {
   let nowMs = 0;
   const delays: number[] = [];
+  const value = repository({ getRtdbPath: async () => null });
+  coordinationFor(value).lockRows.set(
+    await automatchOwnerLockId(`profile:${profile.profileId}`),
+    {
+      expiresAtMs: 60_000,
+      operationId: "existing-operation",
+      ownerId: "existing-owner",
+    },
+  );
   await assert.rejects(
-    startAutomatch(
-      identity,
-      request(),
-      repository({
-        getRtdbPath: async () => null,
-        transactRtdbPath: async () => ({
-          committed: false,
-          decision: "busy",
-          value: null,
-        }),
-      }),
-      {
-        now: () => nowMs,
-        wait: async (milliseconds) => {
-          delays.push(milliseconds);
-          nowMs += milliseconds;
-        },
+    startAutomatch(identity, request(), value, {
+      now: () => nowMs,
+      wait: async (milliseconds) => {
+        delays.push(milliseconds);
+        nowMs += milliseconds;
       },
-    ),
+    }),
     (error) =>
       error instanceof AuthApiFailure &&
       error.status === 409 &&
@@ -2156,6 +2418,122 @@ test("reconciles a committed match after an ambiguous patch failure", async () =
   assert.deepEqual(result, {
     ok: true,
     inviteId: "auto_committed",
+    mode: "matched",
+    matchedImmediately: true,
+  });
+  assert.equal(writes, 1);
+});
+
+test("returns a committed match despite release failure", async () => {
+  let committed = false;
+  let writes = 0;
+  const profileTasks: unknown[] = [];
+  const telegramTasks: unknown[] = [];
+  const value = repository({
+    getRtdbPath: async (path) => {
+      if (path === "automatch") {
+        return {
+          auto_release_committed: {
+            uid: "host-uid",
+            hostColor: "white",
+            password: "password",
+            gameVariant: "Classic",
+            telegramDeliveryVersion: 2,
+          },
+        };
+      }
+      if (path === "automatch/auto_release_committed") {
+        return { uid: "host-uid" };
+      }
+      return committed ? identity.uid : null;
+    },
+    patchRtdbRoot: async () => {
+      writes++;
+      committed = true;
+    },
+  });
+  const stores = coordinationFor(value);
+  const release = stores.mutationLocks.release;
+  stores.mutationLocks.release = async (lock, ownerId) => {
+    if (lock.lockId === "auto_release_committed") {
+      throw new GameSessionMutationLockFailure("release");
+    }
+    await release(lock, ownerId);
+  };
+
+  const result = await startAutomatch(identity, request(), value, {
+    createProjectionRequestId: () => "release-committed",
+    enqueueProfileGameProjection: async (task) => {
+      profileTasks.push(task);
+    },
+    enqueueTelegramProjection: async (task) => {
+      telegramTasks.push(task);
+    },
+  });
+  assert.deepEqual(result, {
+    ok: true,
+    inviteId: "auto_release_committed",
+    mode: "matched",
+    matchedImmediately: true,
+  });
+  assert.equal(writes, 1);
+  assert.deepEqual(profileTasks, [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto_release_committed",
+      requestId: "release-committed",
+    },
+  ]);
+  assert.deepEqual(telegramTasks, [
+    {
+      kind: "automatch-telegram-projection",
+      inviteId: "auto_release_committed",
+      requestId: "release-committed",
+    },
+  ]);
+});
+
+test("returns one committed match when the owner lock release fails", async () => {
+  let committed = false;
+  let writes = 0;
+  const value = repository({
+    getRtdbPath: async (path) => {
+      if (path === "automatch") {
+        return {
+          auto_owner_release: {
+            uid: "host-uid",
+            hostColor: "white",
+            password: "password",
+            gameVariant: "Classic",
+          },
+        };
+      }
+      if (path === "automatch/auto_owner_release") {
+        return { uid: "host-uid" };
+      }
+      return committed ? identity.uid : null;
+    },
+    patchRtdbRoot: async () => {
+      writes++;
+      committed = true;
+    },
+  });
+  const ownerLockId = await automatchOwnerLockId(
+    `profile:${profile.profileId}`,
+  );
+  const stores = coordinationFor(value);
+  const release = stores.mutationLocks.release;
+  stores.mutationLocks.release = async (lock, ownerId) => {
+    if (lock.lockId === ownerLockId) {
+      throw new GameSessionMutationLockFailure("release");
+    }
+    await release(lock, ownerId);
+  };
+
+  const result = await startAutomatch(identity, request(), value);
+  assert.deepEqual(result, {
+    ok: true,
+    inviteId: "auto_owner_release",
     mode: "matched",
     matchedImmediately: true,
   });

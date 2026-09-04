@@ -5,11 +5,12 @@ import type { MiningSnapshot } from "@mons/shared/mining";
 import { Game } from "mons-rules";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import {
-  acceptWagerProposal,
+  acceptWagerProposal as acceptWagerProposalImpl,
   consumeWagerReservationOperation,
   createWagerReservationOperationId,
   ensureWagerAgreementLineageReady,
-  sendWagerProposal,
+  sendWagerProposal as sendWagerProposalImpl,
+  type WagerProposalDependencies,
 } from "../src/wagerProposal.ts";
 import type { RequestIdentity } from "../src/requestIdentity.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
@@ -17,7 +18,7 @@ import type {
   ProfileOwnershipQuery,
   ProfileOwnershipSnapshot,
 } from "../src/profileOwnership.ts";
-import { handleGameplayRoute } from "../src/gameplayRoute.ts";
+import { handleGameplayRoute as handleGameplayRouteImpl } from "../src/gameplayRoute.ts";
 import {
   classifyWagerSettlementRetry,
   resumeWagerSettlement,
@@ -28,6 +29,7 @@ import {
   type WagerSettlementRetryTask,
 } from "../src/wagerOutcome.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
 
 const env = {
   ...TELEGRAM_TEST_ENV,
@@ -44,6 +46,75 @@ const env = {
 const identity: RequestIdentity = {
   uid: "host",
 };
+
+const coordinationByRepository = new WeakMap<
+  GameplayRepository,
+  ReturnType<typeof createMemoryGameplayCoordinationStores>
+>();
+
+function coordinationFor(repository: GameplayRepository) {
+  let coordination = coordinationByRepository.get(repository);
+  if (!coordination) {
+    coordination = createMemoryGameplayCoordinationStores();
+    coordinationByRepository.set(repository, coordination);
+  }
+  return coordination;
+}
+
+function wagerDependencies(
+  repository: GameplayRepository,
+  dependencies: Partial<WagerProposalDependencies> = {},
+): WagerProposalDependencies {
+  return {
+    mutationLocks: coordinationFor(repository).mutationLocks,
+    ...dependencies,
+  };
+}
+
+function sendWagerProposal(
+  identity: Parameters<typeof sendWagerProposalImpl>[0],
+  request: Parameters<typeof sendWagerProposalImpl>[1],
+  repository: GameplayRepository,
+  dependencies: Partial<WagerProposalDependencies> = {},
+) {
+  return sendWagerProposalImpl(
+    identity,
+    request,
+    repository,
+    wagerDependencies(repository, dependencies),
+  );
+}
+
+function acceptWagerProposal(
+  identity: Parameters<typeof acceptWagerProposalImpl>[0],
+  request: Parameters<typeof acceptWagerProposalImpl>[1],
+  repository: GameplayRepository,
+  dependencies: Partial<WagerProposalDependencies> = {},
+) {
+  return acceptWagerProposalImpl(
+    identity,
+    request,
+    repository,
+    wagerDependencies(repository, dependencies),
+  );
+}
+
+function handleGameplayRoute(
+  request: Parameters<typeof handleGameplayRouteImpl>[0],
+  env: Parameters<typeof handleGameplayRouteImpl>[1],
+  ctx: Parameters<typeof handleGameplayRouteImpl>[2],
+  dependencies: Parameters<typeof handleGameplayRouteImpl>[3] = {},
+) {
+  const coordination =
+    dependencies.coordination ||
+    (dependencies.repository
+      ? coordinationFor(dependencies.repository)
+      : createMemoryGameplayCoordinationStores());
+  return handleGameplayRouteImpl(request, env, ctx, {
+    ...dependencies,
+    coordination,
+  });
+}
 
 const hostWinResolution = {
   winnerUid: "host",
@@ -296,7 +367,6 @@ function createRepository({
   let failPatchAfterCommit = failPatchAfterCommitOnce;
   let failPatch = failPatchOnce;
   let transferFingerprint = "";
-  const locks = new Map<string, unknown>();
   const state: Omit<RepositoryState, "repository"> = {
     appliedTransfers: 0,
     frozen: {
@@ -391,11 +461,10 @@ function createRepository({
         profileIdForUid || (async (uid) => `profile-${uid}`),
       ),
     transactRtdbPath: async (path, updater) => {
-      if (path.startsWith("gameplayMutationLocks/")) {
-        const result = applyTransaction(updater, locks.get(path) ?? null);
-        if (result.committed) locks.set(path, result.value);
-        return result;
-      }
+      assert.doesNotMatch(
+        path,
+        /^(?:gameplayMutationLocks|matchTimerStarts)\//,
+      );
       if (path === "invites/invite/wagers/invite") {
         const result = applyTransaction(updater, state.wager);
         if (result.committed) {
@@ -521,6 +590,54 @@ test("preserves participant, match, no-wager, and historical replay outcomes", a
       entry.expected,
     );
   }
+});
+
+test("leaves terminal timer marker cleanup to the coordination sweep", async () => {
+  const state = createRepository();
+  const stores = coordinationFor(state.repository);
+  for (const playerId of ["host", "guest"]) {
+    stores.timerRows.set(`${playerId}/invite`, {
+      timer: "7;1000",
+      turnNumber: 7,
+      updatedAtMs: 1,
+    });
+  }
+  assert.deepEqual(
+    await resolveWagerOutcome(
+      identity,
+      { inviteId: "invite", matchId: "invite" },
+      state.repository,
+      { resolveResult: () => "win" },
+    ),
+    { ok: true, reason: "no-wager", mining: snapshot(10) },
+  );
+  assert.equal(stores.timerRows.size, 2);
+});
+
+test("freezes wager resolution at its write boundary", async () => {
+  const state = createRepository();
+  const stores = coordinationFor(state.repository);
+  stores.timerRows.set("host/invite", {
+    timer: "7;1000",
+    turnNumber: 7,
+    updatedAtMs: 1,
+  });
+  await assert.rejects(
+    () =>
+      resolveWagerOutcome(
+        identity,
+        { inviteId: "invite", matchId: "invite" },
+        state.repository,
+        {
+          assertMutationAllowed: async () => {
+            throw new Error("profile-writes-disabled");
+          },
+          resolveResult: () => "win",
+        },
+      ),
+    /profile-writes-disabled/,
+  );
+  assert.equal(stores.timerRows.size, 1);
 });
 
 test("fails closed for an unresolved legacy marker", async () => {
@@ -902,6 +1019,75 @@ test("recovers when HTTP stops after queueing but before the claim", async () =>
   assert.equal(state.appliedTransfers, 1);
   assert.equal(state.transferCalls, 1);
   assert.equal(state.marker, true);
+});
+
+test("stops HTTP settlement when writes freeze at the claim boundary", async () => {
+  const state = createRepository({
+    wager: { agreed: { material: "dust", count: 2 } },
+  });
+  const tasks: WagerSettlementRetryTask[] = [];
+  let checks = 0;
+  await assert.rejects(
+    resolveWagerOutcome(
+      identity,
+      { inviteId: "invite", matchId: "invite" },
+      state.repository,
+      {
+        assertMutationAllowed: async () => {
+          checks += 1;
+          if (checks === 2) throw new Error("profile-writes-disabled");
+        },
+        now: () => 500,
+        resolveResult: () => "win",
+        scheduleRetry: async (task) => {
+          tasks.push(task);
+        },
+      },
+    ),
+    /profile-writes-disabled/,
+  );
+  assert.equal(checks, 2);
+  assert.equal(tasks.length, 1);
+  assert.equal(state.wager?.settlement, undefined);
+  assert.equal(state.transferCalls, 0);
+  assert.equal(state.marker, false);
+});
+
+test("stops queued settlement when writes freeze before completion", async () => {
+  const state = createRepository({
+    failFrozenOnce: true,
+    wager: { agreed: { material: "dust", count: 2 } },
+  });
+  await assert.rejects(() =>
+    resolveWagerOutcome(
+      identity,
+      { inviteId: "invite", matchId: "invite" },
+      state.repository,
+      { now: () => 500, resolveResult: () => "win" },
+    ),
+  );
+  const settlement = state.wager?.settlement as Record<string, unknown>;
+  const task: WagerSettlementRetryTask = {
+    kind: "wager-settlement",
+    inviteId: "invite",
+    matchId: "invite",
+    operationId: String(settlement.operationId),
+  };
+  const transferCalls = state.transferCalls;
+  await assert.rejects(
+    resumeWagerSettlement(
+      task,
+      state.repository,
+      () => 600,
+      async () => {
+        throw new Error("profile-writes-disabled");
+      },
+    ),
+    /profile-writes-disabled/,
+  );
+  assert.equal(state.transferCalls, transferCalls);
+  assert.equal(settlement.state, "pending");
+  assert.equal(state.marker, false);
 });
 
 test("autonomously cancels an unclaimed underfunded wager", async () => {
