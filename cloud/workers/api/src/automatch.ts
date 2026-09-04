@@ -422,6 +422,33 @@ async function didCommitPendingAutomatch(
   }
 }
 
+async function didCommitMatchedAutomatch(
+  inviteId: string,
+  expectedGuestId: string,
+  requestId: string,
+  repository: GameplayRepository,
+): Promise<boolean> {
+  try {
+    const signal = AbortSignal.timeout(
+      AUTOMATCH_CANCELLATION_RECONCILE_TIMEOUT_MS,
+    );
+    const [guestId, outboxRequestId] = await Promise.all([
+      repository.getRtdbPath(`invites/${inviteId}/guestId`, undefined, signal),
+      repository.getRtdbPath(
+        `${getAutomatchProfileGameProjectionOutboxPath(inviteId)}/requestId`,
+        undefined,
+        signal,
+      ),
+    ]);
+    return (
+      normalizeString(guestId) === expectedGuestId &&
+      normalizeString(outboxRequestId) === requestId
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function readAutomatchCancellationProof(
   inviteId: string,
   expectedUid: string,
@@ -1182,29 +1209,20 @@ async function attemptAutomatch(
     if (!patchAttempted) {
       throw patchFailure;
     }
-    if (
-      patchFailure instanceof GameSessionMutationLeaseReleaseFailure &&
-      patchFailure.workCompleted
-    ) {
-      matchResult = "matched";
-    } else {
-      try {
-        if ((await readGuestId()) === identity.uid) {
-          matchResult = "matched";
-        }
-      } catch {}
-    }
-    if (matchResult !== "matched") {
+    const isReleaseFailure =
+      patchFailure instanceof GameSessionMutationLeaseReleaseFailure;
+    const didCommit =
+      (isReleaseFailure && patchFailure.workCompleted) ||
+      (await didCommitMatchedAutomatch(
+        queued.inviteId,
+        identity.uid,
+        profileGameProjectionTask.requestId,
+        repository,
+      ));
+    if (!didCommit) {
       throw patchFailure;
     }
-    if (patchFailure instanceof GameSessionMutationLeaseReleaseFailure) {
-      await enqueueAutomatchProjections(
-        projectionTask,
-        profileGameProjectionTask,
-        dependencies,
-      );
-      return matchedResponse;
-    }
+    matchResult = "matched";
   }
   if (matchResult === "stale") {
     return attemptAutomatch(
@@ -1223,19 +1241,7 @@ async function attemptAutomatch(
     profileGameProjectionTask,
     dependencies,
   );
-  if ((await readGuestId()) === identity.uid) {
-    return matchedResponse;
-  }
-  return attemptAutomatch(
-    identity,
-    request,
-    requester,
-    repository,
-    random,
-    signal,
-    retryCount + 1,
-    dependencies,
-  );
+  return matchedResponse;
 }
 
 export async function startAutomatch(

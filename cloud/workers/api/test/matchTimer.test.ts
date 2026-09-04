@@ -402,8 +402,17 @@ test("selects and verifies the later mons-rules state", () => {
 
 test("starts the timer for a directly authenticated player", async () => {
   const repo = repository();
+  let admissionChecks = 0;
+  let admitted = false;
   const response = await startMatchTimer(identity, request, repo.value, {
-    now: () => 10_000,
+    assertMutationAllowed: async () => {
+      admissionChecks++;
+      admitted = true;
+    },
+    now: () => {
+      assert.equal(admitted, true);
+      return 10_000;
+    },
     resolveGame: () => gameState(),
   });
   assert.deepEqual(response, {
@@ -417,6 +426,7 @@ test("starts the timer for a directly authenticated player", async () => {
       value: "7;100500",
     },
   ]);
+  assert.equal(admissionChecks, 1);
   assert.deepEqual(repo.coordination.timerRows.get("player-1/match-1"), {
     timer: "7;100500",
     turnNumber: 7,
@@ -430,6 +440,46 @@ test("starts the timer for a directly authenticated player", async () => {
     "players/player-2/matches/match-1",
     "invites/match-1",
     "players/player-1/matches/match-1/timer",
+  ]);
+});
+
+test("finishes the admitted RTDB write after the request signal aborts", async () => {
+  const repo = repository();
+  const controller = new AbortController();
+  const baseStore = repo.coordination.timerStarts;
+  const timerStarts: MatchTimerDependencies["timerStarts"] = {
+    ...baseStore,
+    async getOrAdvance(playerId, opponentId, matchId, candidate, updatedAtMs) {
+      const marker = await baseStore.getOrAdvance(
+        playerId,
+        opponentId,
+        matchId,
+        candidate,
+        updatedAtMs,
+      );
+      controller.abort();
+      return marker;
+    },
+  };
+  const transact = repo.value.transactRtdbPath;
+  repo.value.transactRtdbPath = async (path, updater, signal) => {
+    assert.equal(signal?.aborted, false);
+    return transact(path, updater, signal);
+  };
+
+  await assert.doesNotReject(() =>
+    startMatchTimerImpl(identity, request, repo.value, {
+      now: () => 10_000,
+      resolveGame: () => gameState(),
+      signal: controller.signal,
+      timerStarts,
+    }),
+  );
+  assert.deepEqual(repo.writes, [
+    {
+      path: "players/player-1/matches/match-1/timer",
+      value: "7;100500",
+    },
   ]);
 });
 
@@ -554,6 +604,69 @@ test("returns an existing same-turn timer without extending it", async () => {
     timer: "7;12345",
     duration: 90_000,
   });
+  assert.deepEqual(repo.writes, []);
+});
+
+test("uses a same-turn timer discovered in the fresh snapshot", async () => {
+  const repo = repository();
+  const read = repo.value.getRtdbPath;
+  let playerReads = 0;
+  repo.value.getRtdbPath = async (path, query, signal) => {
+    if (path === "players/player-1/matches/match-1") {
+      playerReads++;
+      if (playerReads === 2) {
+        repo.paths.push(path);
+        return match("black", { timer: "7;22222" });
+      }
+    }
+    return read(path, query, signal);
+  };
+
+  const response = await startMatchTimer(identity, request, repo.value, {
+    now: () => 99_000,
+    resolveGame: () => gameState(),
+  });
+
+  assert.equal(response.timer, "7;22222");
+  assert.deepEqual(repo.coordination.timerRows.get("player-1/match-1"), {
+    timer: "7;22222",
+    turnNumber: 7,
+    updatedAtMs: 99_000,
+  });
+  assert.deepEqual(repo.writes, [
+    {
+      path: "players/player-1/matches/match-1/timer",
+      value: "7;22222",
+    },
+  ]);
+});
+
+test("rejects a newer fresh timer before creating a marker", async () => {
+  const repo = repository();
+  const read = repo.value.getRtdbPath;
+  let playerReads = 0;
+  repo.value.getRtdbPath = async (path, query, signal) => {
+    if (path === "players/player-1/matches/match-1") {
+      playerReads++;
+      if (playerReads === 2) {
+        repo.paths.push(path);
+        return match("black", { timer: "8;22222" });
+      }
+    }
+    return read(path, query, signal);
+  };
+
+  await expectFailure(
+    () =>
+      startMatchTimer(identity, request, repo.value, {
+        now: () => 99_000,
+        resolveGame: () => gameState(),
+      }),
+    409,
+    "failed-precondition",
+    "game state changed.",
+  );
+  assert.equal(repo.coordination.timerRows.size, 0);
   assert.deepEqual(repo.writes, []);
 });
 
@@ -701,9 +814,14 @@ test("replaces stale and malformed timers but never terminal state", async () =>
     turnNumber: 7,
     updatedAtMs: 1_000,
   });
+  let admissionChecks = 0;
   await expectFailure(
     () =>
       startMatchTimer(identity, request, terminal.value, {
+        assertMutationAllowed: async () => {
+          admissionChecks++;
+          if (admissionChecks > 1) throw new Error("unexpected-gate-check");
+        },
         now: () => 1_000,
         resolveGame: () => gameState(),
       }),
@@ -711,6 +829,7 @@ test("replaces stale and malformed timers but never terminal state", async () =>
     "failed-precondition",
     "game is already over.",
   );
+  assert.equal(admissionChecks, 1);
   assert.deepEqual(terminal.writes, []);
   assert.equal(terminal.coordination.timerRows.size, 0);
 });
@@ -1226,7 +1345,7 @@ test("does not install a timer after the match becomes terminal", async () => {
   assert.equal(repo.coordination.timerRows.size, 0);
 });
 
-test("retains the stored deadline when mutation control freezes before the RTDB write", async () => {
+test("does not create a marker when final admission is rejected", async () => {
   const repo = repository();
   let checks = 0;
   await assert.rejects(
@@ -1234,27 +1353,16 @@ test("retains the stored deadline when mutation control freezes before the RTDB 
       startMatchTimer(identity, request, repo.value, {
         assertMutationAllowed: async () => {
           checks++;
-          if (checks === 2) throw new Error("profile-writes-disabled");
+          throw new Error("profile-writes-disabled");
         },
         now: () => 1_000,
         resolveGame: () => gameState(),
       }),
     /profile-writes-disabled/,
   );
-  assert.equal(checks, 2);
+  assert.equal(checks, 1);
   assert.equal(repo.writes.length, 0);
-  assert.deepEqual(repo.coordination.timerRows.get("player-1/match-1"), {
-    timer: "7;91500",
-    turnNumber: 7,
-    updatedAtMs: 1_000,
-  });
-  assert.deepEqual(
-    await startMatchTimer(identity, request, repo.value, {
-      now: () => 2_000,
-      resolveGame: () => gameState(),
-    }),
-    { ok: true, timer: "7;91500", duration: 90_000 },
-  );
+  assert.equal(repo.coordination.timerRows.size, 0);
 });
 
 test("aborts when the live match advances after validation", async () => {

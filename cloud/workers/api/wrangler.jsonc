@@ -11,7 +11,6 @@
     "APPLE_AUDIENCES": "link.mons",
     "AUTH_MUTATIONS_DISABLED": "false",
     "FIREBASE_RTDB_URL": "https://mons-link-default-rtdb.firebaseio.com",
-    "GAMEPLAY_COORDINATION_AUTHORITY": "d1",
   },
   "d1_databases": [
     {

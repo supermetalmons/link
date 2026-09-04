@@ -58,10 +58,7 @@ import {
   EventPrizeWithdrawalResponse,
   ProfileEventPrizes,
 } from "./connectionModels";
-import {
-  resolvePlayerProfile,
-  resolvePlayerProfileWithRetry,
-} from "./playerProfileLookup";
+import { resolvePlayerProfileWithRetry } from "./playerProfileLookup";
 import { storage } from "../utils/storage";
 import { generateNewInviteId } from "../utils/misc";
 import {
@@ -1205,13 +1202,6 @@ class Connection {
     }
     await this.ensureAuthenticated();
     return getProfileByIdViaApi(normalizedProfileId, this.getAuthApiToken);
-  }
-
-  private async getPlayerProfile(loginId: string): Promise<PlayerProfile> {
-    return resolvePlayerProfile(loginId, {
-      getProfileByLoginId: (playerLoginId) =>
-        this.getProfileByLoginId(playerLoginId),
-    });
   }
 
   private async getPlayerProfileWithRetry(

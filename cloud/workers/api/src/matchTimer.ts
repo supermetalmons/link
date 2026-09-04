@@ -497,37 +497,6 @@ export async function startMatchTimer(
   if (game.activeColor !== opponentColor) {
     throw failedPrecondition("can't start a timer on your own turn.");
   }
-  const nowMs = (dependencies.now || Date.now)();
-  const proposedTimer = formatMatchTimer(
-    game.turnNumber,
-    nowMs + MATCH_TIMER_DURATION_MS + TIMER_DEADLINE_GRACE_MS,
-  );
-  const storedTimer = parseStrictMatchTimer(player.timer);
-  const timerCandidate =
-    storedTimer?.turnNumber === game.turnNumber ? player.timer : proposedTimer;
-  const markerCandidate: MatchTimerMarker = {
-    timer: timerCandidate,
-    turnNumber: game.turnNumber,
-  };
-  await dependencies.assertMutationAllowed?.();
-  const marker = await dependencies.timerStarts.getOrAdvance(
-    request.playerId,
-    request.opponentId,
-    request.matchId,
-    markerCandidate,
-    nowMs,
-  );
-  if (marker.turnNumber > game.turnNumber) {
-    throw failedPrecondition("game state changed.");
-  }
-  if (marker.turnNumber !== game.turnNumber) {
-    throw new AuthApiFailure(
-      503,
-      "unavailable",
-      "gameplay-service-unavailable",
-    );
-  }
-  const timer = marker.timer;
   const [freshPlayerValue, freshOpponentValue, freshInviteValue] =
     await readMatchRecords(request, repository, signal);
   if (
@@ -563,7 +532,44 @@ export async function startMatchTimer(
   ) {
     throw failedPrecondition("game state changed.");
   }
+  const storedTimer = parseStrictMatchTimer(freshPlayer.timer);
+  if (storedTimer && storedTimer.turnNumber > freshGame.turnNumber) {
+    throw failedPrecondition("game state changed.");
+  }
+  signal.throwIfAborted();
   await dependencies.assertMutationAllowed?.();
+  signal.throwIfAborted();
+  const nowMs = (dependencies.now || Date.now)();
+  const proposedTimer = formatMatchTimer(
+    freshGame.turnNumber,
+    nowMs + MATCH_TIMER_DURATION_MS + TIMER_DEADLINE_GRACE_MS,
+  );
+  const markerCandidate: MatchTimerMarker = {
+    timer:
+      storedTimer?.turnNumber === freshGame.turnNumber
+        ? freshPlayer.timer
+        : proposedTimer,
+    turnNumber: freshGame.turnNumber,
+  };
+  const marker = await dependencies.timerStarts.getOrAdvance(
+    request.playerId,
+    request.opponentId,
+    request.matchId,
+    markerCandidate,
+    nowMs,
+  );
+  if (marker.turnNumber > freshGame.turnNumber) {
+    throw failedPrecondition("game state changed.");
+  }
+  if (marker.turnNumber !== freshGame.turnNumber) {
+    throw new AuthApiFailure(
+      503,
+      "unavailable",
+      "gameplay-service-unavailable",
+    );
+  }
+  const timer = marker.timer;
+  const commitSignal = AbortSignal.timeout(MATCH_TIMER_OPERATION_TIMEOUT_MS);
   const timerTransaction = await repository.transactRtdbPath(
     `players/${request.playerId}/matches/${request.matchId}/timer`,
     (current) => {
@@ -571,7 +577,7 @@ export async function startMatchTimer(
         return { commit: false, decision: "terminal" };
       }
       const parsed = parseStrictMatchTimer(current);
-      if (parsed && parsed.turnNumber > game.turnNumber) {
+      if (parsed && parsed.turnNumber > freshGame.turnNumber) {
         return { commit: false, decision: "newer-turn" };
       }
       if (current === timer) {
@@ -579,10 +585,14 @@ export async function startMatchTimer(
       }
       return { decision: "synchronized", value: timer };
     },
-    signal,
+    commitSignal,
   );
   if (timerTransaction.decision === "terminal") {
-    await deleteTimerStartMarkers(request, dependencies);
+    await dependencies.timerStarts.deletePair(
+      request.playerId,
+      request.opponentId,
+      request.matchId,
+    );
     throw failedPrecondition("game is already over.");
   }
   if (timerTransaction.decision === "newer-turn") {

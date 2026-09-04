@@ -2169,7 +2169,7 @@ test("fails before the match patch when the pair snapshot is unavailable", async
   assert.equal(writes, 0);
 });
 
-test("matches a different v2 candidate and verifies the persisted guest", async () => {
+test("matches a different v2 candidate without rereading a known commit", async () => {
   let updates: Record<string, unknown> = {};
   let guestReads = 0;
   const profileProjectionTasks: unknown[] = [];
@@ -2222,7 +2222,7 @@ test("matches a different v2 candidate and verifies the persisted guest", async 
     mode: "matched",
     matchedImmediately: true,
   });
-  assert.equal(guestReads, 2);
+  assert.equal(guestReads, 1);
   assert.deepEqual(profileProjectionTasks, [
     {
       kind: "automatch-profile-game-projection",
@@ -2388,6 +2388,7 @@ test("bounds failed guest verification to four total attempts", async () => {
 test("reconciles a committed match after an ambiguous patch failure", async () => {
   let writes = 0;
   let committed = false;
+  const requestId = "ambiguous-match";
   const result = await startAutomatch(
     identity,
     request(),
@@ -2406,6 +2407,12 @@ test("reconciles a committed match after an ambiguous patch failure", async () =
         if (path === "automatch/auto_committed") {
           return { uid: "host-uid" };
         }
+        if (
+          path ===
+          "profileGameProjectionOutbox/automatch/auto_committed/requestId"
+        ) {
+          return committed ? requestId : null;
+        }
         return committed ? "guest-uid" : null;
       },
       patchRtdbRoot: async () => {
@@ -2414,6 +2421,7 @@ test("reconciles a committed match after an ambiguous patch failure", async () =
         throw new Error("response-lost-after-commit");
       },
     }),
+    { createProjectionRequestId: () => requestId },
   );
   assert.deepEqual(result, {
     ok: true,
@@ -2422,6 +2430,158 @@ test("reconciles a committed match after an ambiguous patch failure", async () =
     matchedImmediately: true,
   });
   assert.equal(writes, 1);
+});
+
+test("returns a proven match after the original signal aborts", async () => {
+  const controller = new AbortController();
+  const requestId = "aborted-match";
+  let committed = false;
+  const projectionTasks: unknown[] = [];
+  const result = await startAutomatch(
+    identity,
+    request(),
+    repository({
+      getRtdbPath: async (path, _query, signal) => {
+        if (signal?.aborted) {
+          throw new Error("stale-signal-read");
+        }
+        if (path === "automatch") {
+          return {
+            auto_aborted_commit: {
+              uid: "host-uid",
+              hostColor: "white",
+              password: "password",
+              gameVariant: "Classic",
+            },
+          };
+        }
+        if (path === "automatch/auto_aborted_commit") {
+          return { uid: "host-uid" };
+        }
+        if (
+          path ===
+          "profileGameProjectionOutbox/automatch/auto_aborted_commit/requestId"
+        ) {
+          return committed ? requestId : null;
+        }
+        return committed ? identity.uid : null;
+      },
+      patchRtdbRoot: async () => {
+        committed = true;
+        controller.abort();
+        throw new Error("response-lost-after-commit");
+      },
+    }),
+    {
+      createProjectionRequestId: () => requestId,
+      enqueueProfileGameProjection: async (task) => {
+        projectionTasks.push(task);
+      },
+      signal: controller.signal,
+    },
+  );
+
+  assert.deepEqual(result, {
+    ok: true,
+    inviteId: "auto_aborted_commit",
+    mode: "matched",
+    matchedImmediately: true,
+  });
+  assert.deepEqual(projectionTasks, [
+    {
+      kind: "automatch-profile-game-projection",
+      inviteId: "auto_aborted_commit",
+      requestId,
+    },
+  ]);
+});
+
+test("returns a resolved match without rereading through an aborted signal", async () => {
+  const controller = new AbortController();
+  const result = await startAutomatch(
+    identity,
+    request(),
+    repository({
+      getRtdbPath: async (path, _query, signal) => {
+        if (signal?.aborted) throw new Error("stale-signal-read");
+        if (path === "automatch") {
+          return {
+            auto_resolved_commit: {
+              uid: "host-uid",
+              hostColor: "white",
+              password: "password",
+              gameVariant: "Classic",
+            },
+          };
+        }
+        if (path === "automatch/auto_resolved_commit") {
+          return { uid: "host-uid" };
+        }
+        return null;
+      },
+      patchRtdbRoot: async () => {
+        controller.abort();
+      },
+    }),
+    { signal: controller.signal },
+  );
+
+  assert.deepEqual(result, {
+    ok: true,
+    inviteId: "auto_resolved_commit",
+    mode: "matched",
+    matchedImmediately: true,
+  });
+});
+
+test("rejects a matched guest without the same projection request", async () => {
+  let committed = false;
+  const value = repository({
+    getRtdbPath: async (path) => {
+      if (path === "automatch") {
+        return {
+          auto_unproven_release: {
+            uid: "host-uid",
+            hostColor: "white",
+            password: "password",
+            gameVariant: "Classic",
+          },
+        };
+      }
+      if (path === "automatch/auto_unproven_release") {
+        return { uid: "host-uid" };
+      }
+      if (
+        path ===
+        "profileGameProjectionOutbox/automatch/auto_unproven_release/requestId"
+      ) {
+        return committed ? "different-request" : null;
+      }
+      return committed ? identity.uid : null;
+    },
+    patchRtdbRoot: async () => {
+      committed = true;
+      throw new Error("response-lost-after-commit");
+    },
+  });
+  const release = coordinationFor(value).mutationLocks.release;
+  coordinationFor(value).mutationLocks.release = async (lock, ownerId) => {
+    if (lock.lockId === "auto_unproven_release") {
+      throw new GameSessionMutationLockFailure("release");
+    }
+    await release(lock, ownerId);
+  };
+
+  await assert.rejects(
+    () =>
+      startAutomatch(identity, request(), value, {
+        createProjectionRequestId: () => "expected-request",
+      }),
+    (error: unknown) =>
+      error instanceof GameSessionMutationLeaseReleaseFailure &&
+      error.operation === "release" &&
+      !error.workCompleted,
+  );
 });
 
 test("returns a committed match despite release failure", async () => {

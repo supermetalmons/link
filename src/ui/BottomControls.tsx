@@ -226,6 +226,15 @@ let pendingDelayedCancelAutomatchIntentExpiresAtMs = 0;
 let pendingDelayedCancelAutomatchRevealAtMs = 0;
 let pendingFreshAutomatchCancelRevealAtMs = 0;
 
+const isNavigationScopeCurrent = (
+  currentScope: NavigationGamesCacheScope | null,
+  expectedScopeKey: string | null,
+  currentEpoch: number,
+  expectedEpoch: number,
+) =>
+  (currentScope?.scopeKey ?? null) === expectedScopeKey &&
+  currentEpoch === expectedEpoch;
+
 const STICKER_ID_WHITELIST: number[] = [
   ...VALID_REACTION_IDS,
   900316,
@@ -855,8 +864,11 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const [navigationStateScopeKey, setNavigationStateScopeKey] = useState<
     string | null
   >(null);
-  const [optimisticPendingAutomatchItem, setOptimisticPendingAutomatchItem] =
-    useState<NavigationGameItem | null>(null);
+  const [optimisticPendingAutomatch, setOptimisticPendingAutomatch] = useState<{
+    item: NavigationGameItem;
+    scopeKey: string | null;
+    scopeEpoch: number;
+  } | null>(null);
   const [navigationRemovingInviteIds, setNavigationRemovingInviteIds] =
     useState<Set<string>>(new Set());
   const [liveEventCloudAvatars, setLiveEventCloudAvatars] = useState<
@@ -1662,7 +1674,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     setNavigationStateScopeKey(null);
     setNavigationProjectedGames([]);
     setNavigationPagedGames([]);
-    setOptimisticPendingAutomatchItem(null);
+    setOptimisticPendingAutomatch(null);
     setIsCancelAutomatchDisabled(false);
     setNavigationRemovingInviteIds(new Set());
     setIsNavigationGamesLoading(false);
@@ -1676,6 +1688,17 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     activeNavigationCacheScopeKey !== null &&
     navigationStateScopeKey === activeNavigationCacheScopeKey;
 
+  const optimisticPendingAutomatchItem =
+    optimisticPendingAutomatch &&
+    isNavigationScopeCurrent(
+      activeNavigationCacheScope,
+      optimisticPendingAutomatch.scopeKey,
+      navigationProfileScopeEpochRef.current,
+      optimisticPendingAutomatch.scopeEpoch,
+    )
+      ? optimisticPendingAutomatch.item
+      : null;
+
   const isNavigationGameBeingRemoved = useCallback(
     (item: NavigationItem) =>
       item.entityType === "game" &&
@@ -1684,28 +1707,31 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     [navigationRemovingInviteIds],
   );
 
-  const topNavigationGames = useMemo(() => {
-    const merged = hasActiveNavigationStateScope
-      ? navigationProjectedGames.slice()
+  const scopedTopNavigationGames = useMemo(() => {
+    const visibleItems = hasActiveNavigationStateScope
+      ? navigationProjectedGames.filter(
+          (item) => !isNavigationGameBeingRemoved(item),
+        )
       : [];
-    if (
-      hasActiveNavigationStateScope &&
-      optimisticPendingAutomatchItem &&
-      !merged.some((item) => item.id === optimisticPendingAutomatchItem.id)
-    ) {
-      merged.push(optimisticPendingAutomatchItem);
-    }
-    const visibleItems = merged.filter(
-      (item) => !isNavigationGameBeingRemoved(item),
-    );
     visibleItems.sort(compareNavigationItemsByDisplayOrder);
     return visibleItems;
   }, [
     hasActiveNavigationStateScope,
     isNavigationGameBeingRemoved,
     navigationProjectedGames,
-    optimisticPendingAutomatchItem,
   ]);
+
+  const topNavigationGames = useMemo(() => {
+    const merged = scopedTopNavigationGames.slice();
+    if (
+      optimisticPendingAutomatchItem &&
+      !merged.some((item) => item.id === optimisticPendingAutomatchItem.id)
+    ) {
+      merged.push(optimisticPendingAutomatchItem);
+    }
+    merged.sort(compareNavigationItemsByDisplayOrder);
+    return merged;
+  }, [optimisticPendingAutomatchItem, scopedTopNavigationGames]);
 
   const topNavigationItemIds = useMemo(() => {
     return new Set(topNavigationGames.map((item) => item.id));
@@ -1749,19 +1775,19 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     }
     writeNavigationGamesRuntimeCache(
       scope,
-      topNavigationGames,
+      scopedTopNavigationGames,
       pagedNavigationGames,
     );
     writeNavigationGamesPersistedTopCache(
       scope,
-      topNavigationGames,
+      scopedTopNavigationGames,
       NAVIGATION_GAMES_PAGE_SIZE,
     );
   }, [
     activeNavigationCacheScopeKey,
     navigationStateScopeKey,
     pagedNavigationGames,
-    topNavigationGames,
+    scopedTopNavigationGames,
   ]);
 
   useEffect(() => {
@@ -1776,7 +1802,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         (item) => item.id === optimisticPendingAutomatchItem.id,
       )
     ) {
-      setOptimisticPendingAutomatchItem(null);
+      setOptimisticPendingAutomatch(null);
     }
   }, [
     navigationProjectedGames,
@@ -2426,6 +2452,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     forceImmediateCancelAutomatchRevealRef.current = false;
     automatchCancelRevealModeRef.current = "unset";
     automatchCancelRevealModeDeadlineRef.current = null;
+    setOptimisticPendingAutomatch(null);
     setAutomatchButtonTmpState(false);
     setIsCancelAutomatchVisible(false);
     setIsCancelAutomatchDisabled(false);
@@ -2859,6 +2886,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       const navigationScopeKey = activeNavigationCacheScopeKey;
       const navigationProfileScopeEpoch =
         navigationProfileScopeEpochRef.current;
+      const sessionGuard = connection.createSessionGuard();
       clearPendingImmediateCancelAutomatchIntent();
       clearPendingDelayedCancelAutomatchIntent();
       pendingFreshAutomatchCancelRevealAtMs =
@@ -2873,9 +2901,13 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
       }
       didClickAutomatchButton((response) => {
         if (
-          !navigationScopeKey ||
-          navigationCacheScopeRef.current?.scopeKey !== navigationScopeKey ||
-          navigationProfileScopeEpochRef.current !== navigationProfileScopeEpoch
+          !sessionGuard() ||
+          !isNavigationScopeCurrent(
+            navigationCacheScopeRef.current,
+            navigationScopeKey,
+            navigationProfileScopeEpochRef.current,
+            navigationProfileScopeEpoch,
+          )
         ) {
           pendingFreshAutomatchCancelRevealAtMs = 0;
           return;
@@ -2887,14 +2919,22 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
             inviteId,
             pendingFreshAutomatchCancelRevealAtMs,
           );
-          setOptimisticPendingAutomatchItem(
-            connection.createOptimisticPendingAutomatchItem(inviteId),
-          );
+          const item =
+            connection.createOptimisticPendingAutomatchItem(inviteId);
+          if (item) {
+            setOptimisticPendingAutomatch({
+              item,
+              scopeKey: navigationScopeKey,
+              scopeEpoch: navigationProfileScopeEpoch,
+            });
+          }
         } else if (mode === "matched") {
           clearPendingDelayedCancelAutomatchIntent();
-          setOptimisticPendingAutomatchItem(null);
+          setOptimisticPendingAutomatch(null);
         } else {
           clearPendingDelayedCancelAutomatchIntent();
+          setOptimisticPendingAutomatch(null);
+          dismissPendingAutomatchTransition();
         }
         pendingFreshAutomatchCancelRevealAtMs = 0;
       });
@@ -2918,28 +2958,31 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     if (isCancelAutomatchDisabled) return;
     const navigationScopeKey = activeNavigationCacheScopeKey;
     const navigationProfileScopeEpoch = navigationProfileScopeEpochRef.current;
-    const isNavigationProfileScopeActive = () =>
-      navigationScopeKey !== null &&
-      navigationCacheScopeRef.current?.scopeKey === navigationScopeKey &&
-      navigationProfileScopeEpochRef.current === navigationProfileScopeEpoch;
+    const isNavigationScopeActive = () =>
+      isNavigationScopeCurrent(
+        navigationCacheScopeRef.current,
+        navigationScopeKey,
+        navigationProfileScopeEpochRef.current,
+        navigationProfileScopeEpoch,
+      );
     const sessionGuard = connection.createSessionGuard();
+    const isCancelRequestCurrent = () =>
+      sessionGuard() && isNavigationScopeActive();
     setIsCancelAutomatchDisabled(true);
     try {
       const result = await connection.cancelAutomatch();
-      if (!sessionGuard()) {
+      if (!isCancelRequestCurrent()) {
         return;
       }
       if (result && result.ok) {
-        if (isNavigationProfileScopeActive()) {
-          setOptimisticPendingAutomatchItem(null);
-        }
+        setOptimisticPendingAutomatch(null);
         dismissPendingAutomatchTransition();
         await transitionToHome({ forceMatchScopeReset: true });
       } else {
         setIsCancelAutomatchDisabled(false);
       }
     } catch (_) {
-      if (!sessionGuard()) {
+      if (!isCancelRequestCurrent()) {
         return;
       }
       setIsCancelAutomatchDisabled(false);

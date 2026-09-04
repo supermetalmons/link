@@ -312,7 +312,7 @@ test("navigation UI resets profile-bound state before popup-specific work", () =
   assert.match(resetSource, /setNavigationStateScopeKey\(null\)/);
   assert.match(resetSource, /setNavigationProjectedGames\(\[\]\)/);
   assert.match(resetSource, /setNavigationPagedGames\(\[\]\)/);
-  assert.match(resetSource, /setOptimisticPendingAutomatchItem\(null\)/);
+  assert.match(resetSource, /setOptimisticPendingAutomatch\(null\)/);
   assert.match(resetSource, /setIsCancelAutomatchDisabled\(false\)/);
   assert.match(resetSource, /setNavigationRemovingInviteIds\(new Set\(\)\)/);
   assert.match(resetSource, /setNavigationHasMoreGames\(false\)/);
@@ -347,10 +347,113 @@ test("navigation UI resets profile-bound state before popup-specific work", () =
     cancelStart,
   );
   const cancelSource = source.slice(cancelStart, cancelEnd);
-  assert.match(cancelSource, /if \(!sessionGuard\(\)\) \{\s*return;/);
   assert.match(
     cancelSource,
-    /if \(isNavigationProfileScopeActive\(\)\) \{\s*setOptimisticPendingAutomatchItem\(null\);/,
+    /const isCancelRequestCurrent = \(\) =>\s*sessionGuard\(\) && isNavigationScopeActive\(\)/,
+  );
+  assert.equal(
+    cancelSource.match(/if \(!isCancelRequestCurrent\(\)\) \{/g)?.length,
+    2,
+  );
+  assert.match(
+    cancelSource,
+    /if \(result && result\.ok\) \{\s*setOptimisticPendingAutomatch\(null\);\s*dismissPendingAutomatchTransition\(\);\s*await transitionToHome/,
+  );
+});
+
+test("ownerless automatch state stays ephemeral and session scoped", () => {
+  const source = readFileSync(
+    new URL("../src/ui/BottomControls.tsx", import.meta.url),
+    "utf8",
+  );
+  const topStart = source.indexOf("const scopedTopNavigationGames = useMemo");
+  const topEnd = source.indexOf(
+    "const topNavigationItemIds = useMemo",
+    topStart,
+  );
+  const topSource = source.slice(topStart, topEnd);
+  const cacheStart = source.indexOf(
+    "writeNavigationGamesRuntimeCache(",
+    topEnd,
+  );
+  const cacheEnd = source.indexOf(
+    "const hydrateNavigationGamesFromCache",
+    cacheStart,
+  );
+  const cacheSource = source.slice(cacheStart, cacheEnd);
+  const beginStart = source.indexOf("const beginAutomatchFlow = useCallback");
+  const beginEnd = source.indexOf("const handleAutomatchClick", beginStart);
+  const beginSource = source.slice(beginStart, beginEnd);
+  const cancelStart = source.indexOf(
+    "const handleCancelAutomatchClick = async",
+  );
+  const cancelEnd = source.indexOf(
+    "const getPrimaryActionButtonText",
+    cancelStart,
+  );
+  const cancelSource = source.slice(cancelStart, cancelEnd);
+  const waitingStart = source.indexOf(
+    "const setAutomatchWaitingStateHandler = (waiting: boolean) =>",
+  );
+  const waitingEnd = source.indexOf(
+    "const setAutomatchEnabledHandler",
+    waitingStart,
+  );
+  const waitingSource = source.slice(waitingStart, waitingEnd);
+
+  assert.match(
+    topSource,
+    /const merged = scopedTopNavigationGames\.slice\(\);[\s\S]*?if \(\s*optimisticPendingAutomatchItem/,
+  );
+  assert.doesNotMatch(
+    topSource,
+    /hasActiveNavigationStateScope &&\s*optimisticPendingAutomatchItem/,
+  );
+  assert.match(
+    cacheSource,
+    /writeNavigationGamesRuntimeCache\(\s*scope,\s*scopedTopNavigationGames,/,
+  );
+  assert.match(
+    cacheSource,
+    /writeNavigationGamesPersistedTopCache\(\s*scope,\s*scopedTopNavigationGames,/,
+  );
+  assert.doesNotMatch(cacheSource, /scope,\s*topNavigationGames,/);
+
+  assert.match(
+    source,
+    /const isNavigationScopeCurrent = \([\s\S]*?\(currentScope\?\.scopeKey \?\? null\) === expectedScopeKey &&\s*currentEpoch === expectedEpoch;/,
+  );
+  for (const callbackSource of [beginSource, cancelSource]) {
+    assert.match(
+      callbackSource,
+      /isNavigationScopeCurrent\(\s*navigationCacheScopeRef\.current,\s*navigationScopeKey,\s*navigationProfileScopeEpochRef\.current,\s*navigationProfileScopeEpoch,/,
+    );
+  }
+  assert.match(
+    beginSource,
+    /const sessionGuard = connection\.createSessionGuard\(\)/,
+  );
+  assert.match(beginSource, /!sessionGuard\(\)/);
+  assert.doesNotMatch(beginSource, /!navigationScopeKey/);
+  assert.match(
+    beginSource,
+    /requestPendingDelayedCancelAutomatchIntent\([\s\S]*?setOptimisticPendingAutomatch\(\{\s*item,\s*scopeKey: navigationScopeKey,\s*scopeEpoch: navigationProfileScopeEpoch,/,
+  );
+  assert.match(
+    beginSource,
+    /else if \(mode === "matched"\) \{\s*clearPendingDelayedCancelAutomatchIntent\(\);\s*setOptimisticPendingAutomatch\(null\);/,
+  );
+  assert.match(
+    beginSource,
+    /else \{\s*clearPendingDelayedCancelAutomatchIntent\(\);\s*setOptimisticPendingAutomatch\(null\);\s*dismissPendingAutomatchTransition\(\);/,
+  );
+  assert.match(
+    source,
+    /const optimisticPendingAutomatchItem =\s*optimisticPendingAutomatch &&\s*isNavigationScopeCurrent\(\s*activeNavigationCacheScope,\s*optimisticPendingAutomatch\.scopeKey,\s*navigationProfileScopeEpochRef\.current,\s*optimisticPendingAutomatch\.scopeEpoch,/,
+  );
+  assert.match(
+    waitingSource,
+    /if \(waiting\) \{[\s\S]*?return;\s*\}[\s\S]*?setOptimisticPendingAutomatch\(null\)/,
   );
 });
 
