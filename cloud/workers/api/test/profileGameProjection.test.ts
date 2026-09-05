@@ -26,11 +26,8 @@ import {
   buildAutomatchProfileGameProjectionOutboxMergeUpdates,
   buildAutomatchProfileGameProjectionOutboxUpdates,
   buildEventProfileGameProjectionOutboxUpdates,
-  buildProfileLinkProfileGameProjectionOutbox,
   parseAutomatchProfileGameProjectionOutbox,
   parseEventProfileGameProjectionOutbox,
-  parseProfileLinkProfileGameProjectionOutbox,
-  salvageProfileLinkCleanupProfileIds,
 } from "../src/profileGameProjectionOutbox.ts";
 import type {
   EventProfileGameProjectionRuntime,
@@ -257,23 +254,6 @@ function eventTask(
     kind: "event-profile-game-projection",
     eventId: "event-1",
     requestId,
-  };
-}
-
-function profileLinkOutbox(
-  requestId = "profile-request-1",
-  lastQueuedAtMs = 200,
-  matchCursor: string | null = null,
-) {
-  return {
-    schemaVersion: 1,
-    status: "pending",
-    requestId,
-    profileId: "profile-1",
-    cleanupProfileIds: { "stale-profile": true },
-    matchCursor,
-    sourceUpdatedAtMs: 100,
-    lastQueuedAtMs,
   };
 }
 
@@ -732,57 +712,6 @@ test("event outboxes preserve accumulated cleanup owners", () => {
   ]) {
     assert.equal(parseEventProfileGameProjectionOutbox(invalid), null);
   }
-});
-
-test("profile-link outboxes preserve current and cleanup profiles", () => {
-  assert.deepEqual(
-    buildProfileLinkProfileGameProjectionOutbox({
-      cleanupProfileIds: ["stale-profile", "stale-profile"],
-      lastQueuedAtMs: 200,
-      profileId: "profile-1",
-      requestId: "profile-request-1",
-      sourceUpdatedAtMs: 100,
-    }),
-    profileLinkOutbox(),
-  );
-  assert.deepEqual(
-    parseProfileLinkProfileGameProjectionOutbox(profileLinkOutbox()),
-    {
-      ...profileLinkOutbox(),
-      cleanupProfileIds: ["stale-profile"],
-    },
-  );
-  const omittedCleanup = Object.fromEntries(
-    Object.entries(profileLinkOutbox()).filter(
-      ([key]) => key !== "cleanupProfileIds",
-    ),
-  );
-  assert.deepEqual(
-    parseProfileLinkProfileGameProjectionOutbox(omittedCleanup),
-    {
-      ...profileLinkOutbox(),
-      cleanupProfileIds: [],
-    },
-  );
-  for (const invalid of [
-    null,
-    { ...profileLinkOutbox(), profileId: "unsafe/path" },
-    { ...profileLinkOutbox(), requestId: "unsafe/path" },
-    { ...profileLinkOutbox(), cleanupProfileIds: { owner: false } },
-    { ...profileLinkOutbox(), sourceUpdatedAtMs: Number.NaN },
-  ]) {
-    assert.equal(parseProfileLinkProfileGameProjectionOutbox(invalid), null);
-  }
-  assert.deepEqual(
-    salvageProfileLinkCleanupProfileIds({
-      cleanupProfileIds: {
-        "older-profile": true,
-        "ignored-profile": false,
-        "unsafe/path": true,
-      },
-    }),
-    ["older-profile"],
-  );
 });
 
 test("automatch projection uses the immutable source timestamp and exact-clears", async () => {

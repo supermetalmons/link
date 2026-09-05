@@ -1,3 +1,4 @@
+import { createTelegramRepository } from "../../../functions/telegram/repositoryCore.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
@@ -65,7 +66,14 @@ function rtdbState(initial: Record<string, unknown>) {
       };
     },
   };
-  return { client, read: (path: string) => state.get(path) };
+  return {
+    client,
+    telegram: createTelegramRepository({
+      getPath: client.getPath,
+      transactPath: client.transactPath,
+    }),
+    read: (path: string) => state.get(path),
+  };
 }
 
 function ratingUpdate(
@@ -266,6 +274,7 @@ test("automatch projection persists desired state and clears its exact outbox", 
         );
       },
       () => 200,
+      store.telegram,
     ),
     "projected",
   );
@@ -307,6 +316,7 @@ test("automatch projection acknowledges stale work and dead-letters invalid sour
       stale.client,
       async () => undefined,
       () => 200,
+      stale.telegram,
     ),
     "stale",
   );
@@ -331,6 +341,7 @@ test("automatch projection acknowledges stale work and dead-letters invalid sour
       invalid.client,
       async () => undefined,
       () => 200,
+      invalid.telegram,
     ),
     "dead",
   );
@@ -371,6 +382,7 @@ test("rating projection merges once, projects the latest source, and completes",
       repository,
       async () => undefined,
       () => 300,
+      store.telegram,
     ),
     "projected",
   );
@@ -394,6 +406,7 @@ test("rating projection merges once, projects the latest source, and completes",
       repository,
       async () => undefined,
       () => 400,
+      store.telegram,
     ),
     "duplicate",
   );
@@ -432,6 +445,7 @@ test("projection dispatch failures preserve pending recovery markers", async () 
           throw new Error("queue-unavailable");
         },
         () => 200,
+        store.telegram,
       ),
     /queue-unavailable/,
   );
@@ -459,6 +473,7 @@ test("projection dispatch failures preserve pending recovery markers", async () 
           throw new Error("queue-unavailable");
         },
         () => 300,
+        store.telegram,
       ),
     /queue-unavailable/,
   );

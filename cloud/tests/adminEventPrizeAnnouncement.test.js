@@ -7,13 +7,10 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   ANNOUNCEMENT_URL,
-  FIREBASE_PROJECT_ID,
-  MAX_BRIDGE_SECRET_BYTES,
-  TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET,
   formatEventPrizeAnnouncementPreview,
+  main,
   parseAnnouncementArguments,
   postEventPrizeAnnouncement,
-  readAnnouncementBridgeSecret,
   sendEventPrizeAnnouncement,
 } = require("../admin/announceEventPrizes");
 
@@ -38,14 +35,32 @@ test("root package exposes the requested announcement command", () => {
   );
 });
 
-test("requires exactly an event ID and collection name", () => {
-  assert.deepEqual(parseAnnouncementArguments([EVENT_ID, COLLECTION_NAME]), {
-    eventId: EVENT_ID,
-    collectionName: COLLECTION_NAME,
-  });
+test("requires an event ID, collection name, and explicit bridge secret file", () => {
+  assert.deepEqual(
+    parseAnnouncementArguments([
+      EVENT_ID,
+      COLLECTION_NAME,
+      "--bridge-secret-file",
+      "/secure/announcement",
+    ]),
+    {
+      eventId: EVENT_ID,
+      collectionName: COLLECTION_NAME,
+      bridgeSecretFile: "/secure/announcement",
+    },
+  );
   for (const args of [
     [],
     [EVENT_ID],
+    [EVENT_ID, COLLECTION_NAME],
+    [
+      EVENT_ID,
+      COLLECTION_NAME,
+      "--bridge-secret-file",
+      "/secure/a",
+      "--bridge-secret-file",
+      "/secure/b",
+    ],
     [EVENT_ID, COLLECTION_NAME, "extra"],
     ["--smoke", COLLECTION_NAME],
     [EVENT_ID, "--bridge-secret-file"],
@@ -62,52 +77,6 @@ test("formats the operator preview without exposing Telegram markup", () => {
     }),
     `sunday mons treats — [spoiler: ${COLLECTION_NAME}]\n\n${EVENT_URL}`,
   );
-});
-
-test("reads only the bounded announcement bridge secret through Firebase", () => {
-  let invocation;
-  const secret = readAnnouncementBridgeSecret({
-    projectId: "test-project",
-    workingDirectory: "/workspace/cloud",
-    runCommand: (command, args, options) => {
-      invocation = { command, args, options };
-      return { status: 0, stdout: " bridge-secret\n" };
-    },
-  });
-  assert.equal(secret, "bridge-secret");
-  assert.deepEqual(invocation, {
-    command: "firebase",
-    args: [
-      "functions:secrets:access",
-      TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET,
-      "--project",
-      "test-project",
-    ],
-    options: {
-      cwd: "/workspace/cloud",
-      encoding: "utf8",
-      maxBuffer: MAX_BRIDGE_SECRET_BYTES,
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  });
-  assert.equal(FIREBASE_PROJECT_ID, "mons-link");
-
-  for (const result of [
-    { status: 1, stdout: "", stderr: "private diagnostic" },
-    { status: null, stdout: "", error: new Error("private diagnostic") },
-    { status: 0, stdout: "" },
-    { status: 0, stdout: "x".repeat(MAX_BRIDGE_SECRET_BYTES + 1) },
-  ]) {
-    assert.throws(
-      () =>
-        readAnnouncementBridgeSecret({
-          runCommand: () => result,
-        }),
-      (error) =>
-        !String(error.message).includes("private diagnostic") &&
-        !String(error.message).includes("x".repeat(100)),
-    );
-  }
 });
 
 test("posts the exact collection payload with a timestamped HMAC signature", async () => {
@@ -142,6 +111,7 @@ test("posts the exact collection payload with a timestamped HMAC signature", asy
 test("returns the formatted album result through the Worker", async () => {
   let secretArguments;
   const result = await sendEventPrizeAnnouncement(DATA, {
+    bridgeSecretFile: "/secure/announcement",
     requestId: REQUEST_ID,
     readSecret: async (...args) => {
       secretArguments = args;
@@ -156,7 +126,7 @@ test("returns the formatted album result through the Worker", async () => {
       }),
   });
 
-  assert.deepEqual(secretArguments, []);
+  assert.deepEqual(secretArguments, ["/secure/announcement"]);
   assert.deepEqual(result, {
     collectionName: COLLECTION_NAME,
     eventId: EVENT_ID,
@@ -214,13 +184,46 @@ test("requires one message ID for every configured prize image", async () => {
   );
 });
 
-test("keeps Firebase access scoped away from Telegram delivery credentials", () => {
-  const source = fs.readFileSync(
-    path.resolve(__dirname, "../admin/announceEventPrizes.js"),
-    "utf8",
-  );
-  assert.equal(source.includes("functions:secrets:access"), true);
-  assert.equal(source.includes(TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET), true);
-  assert.equal(source.includes("TELEGRAM_BOT_TOKEN"), false);
-  assert.equal(source.includes("TELEGRAM_EXTRA_CHAT_ID"), false);
+test("confirmation precedes credential access and signing", async () => {
+  for (const confirmation of ["no", "yes"]) {
+    const actions = [];
+    await main(
+      [
+        EVENT_ID,
+        COLLECTION_NAME,
+        "--bridge-secret-file",
+        "/secure/announcement",
+      ],
+      {
+        createPrompts: () => ({
+          question: async () => {
+            actions.push("confirm");
+            return confirmation;
+          },
+          close: () => actions.push("close"),
+        }),
+        output: { write: () => undefined },
+        readSecret: (filePath) => {
+          assert.equal(filePath, "/secure/announcement");
+          actions.push("secret");
+          return "bridge-secret";
+        },
+        fetchImpl: async (_url, init) => {
+          actions.push("send");
+          assert.deepEqual(Object.keys(JSON.parse(init.body)).sort(), [
+            "collectionName",
+            "eventId",
+            "requestId",
+          ]);
+          return Response.json({ ok: true, messageIds: [41, 42, 43] });
+        },
+      },
+    );
+    assert.deepEqual(
+      actions,
+      confirmation === "yes"
+        ? ["confirm", "secret", "send", "close"]
+        : ["confirm", "close"],
+    );
+  }
 });

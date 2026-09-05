@@ -62,8 +62,6 @@ export type FrozenOperationState =
   | { operation: ParsedFrozenOperation; status: "active" }
   | { status: "malformed" };
 
-const FROZEN_OPERATION_ROOT = "_wagerOps";
-
 function toRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -292,24 +290,12 @@ export function parseFrozenOperation(
   };
 }
 
-export function frozenOperationState(
-  value: unknown,
-  operationId: string,
-): FrozenOperationState {
-  if (value === null || value === undefined) return { status: "absent" };
-  const mining = toRecord(value);
-  if (!mining) return { status: "malformed" };
-  if (!Object.hasOwn(mining, FROZEN_OPERATION_ROOT)) {
-    return { status: "absent" };
-  }
-  const operations = toPlainRecord(mining[FROZEN_OPERATION_ROOT]);
-  if (!operations) return { status: "malformed" };
-  if (!Object.hasOwn(operations, operationId)) return { status: "absent" };
-  const raw = operations[operationId];
-  const record = toPlainRecord(raw);
+export function frozenOperationState(value: unknown): FrozenOperationState {
+  if (value === undefined) return { status: "absent" };
+  const record = toPlainRecord(value);
   if (record && Object.keys(record).length === 1 && record.consumed === true) {
     return { status: "consumed" };
   }
-  const operation = parseFrozenOperation(raw);
+  const operation = parseFrozenOperation(value);
   return operation ? { operation, status: "active" } : { status: "malformed" };
 }

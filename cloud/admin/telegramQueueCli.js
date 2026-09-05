@@ -36,17 +36,15 @@ const readBridgeSecret = (filePath, { readFile = fs.readFileSync } = {}) => {
   let value;
   try {
     value = readFile(path.resolve(filePath));
-  } catch (error) {
-    throw new Error("Could not read the Telegram queue bridge secret file.", {
-      cause: error,
-    });
+  } catch {
+    throw new Error("Could not read the Telegram bridge secret file.");
   }
   if (value.length > MAX_BRIDGE_SECRET_BYTES) {
-    throw new Error("Telegram queue bridge secret file is too large.");
+    throw new Error("Telegram bridge secret file is too large.");
   }
   const secret = String(value).trim();
   if (!secret) {
-    throw new Error("Telegram queue bridge secret file is empty.");
+    throw new Error("Telegram bridge secret file is empty.");
   }
   return secret;
 };

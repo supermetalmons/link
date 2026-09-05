@@ -1,17 +1,18 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
+import {
+  applyEventTestMigrations,
+  transitionEventStorageMode,
+} from "./eventTestMigrations.ts";
 import {
   acquireEventWriteAdmission,
   createEventTransitionIntent,
   listPendingEventTransitionIntents,
-  markEventImportVerified,
   patchEventOwnedPaths,
   readEventOwnedPath,
   readEventSnapshot,
   releaseEventWriteAdmission,
-  transitionEventStorageMode,
-  writeEventImportMetadata,
   type EventWriteAdmission,
 } from "../src/eventD1.ts";
 import {
@@ -66,7 +67,10 @@ async function withD1Admission<T>(
 
 describe("hybrid event repository", () => {
   beforeAll(async () => {
-    await applyD1Migrations(testEnv.EVENT_DB, testEnv.TEST_EVENT_D1_MIGRATIONS);
+    await applyEventTestMigrations(
+      testEnv.EVENT_DB,
+      testEnv.TEST_EVENT_D1_MIGRATIONS,
+    );
   });
 
   beforeEach(async () => {
@@ -83,7 +87,7 @@ describe("hybrid event repository", () => {
     ]);
   });
 
-  it("does not let admission release failures override Firebase write outcomes", async () => {
+  it("does not let admission release failures override D1 write outcomes", async () => {
     const effects: Record<string, unknown>[] = [];
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     await testEnv.EVENT_DB.prepare(
@@ -103,7 +107,7 @@ describe("hybrid event repository", () => {
       });
       const update = { [`events/${eventId}`]: eventRecord() };
       await expect(client.patchRoot(update)).resolves.toBeUndefined();
-      expect(effects).toEqual([update]);
+      expect(effects).toEqual([]);
       const failedClient = createEventRtdbClient(testEnv, {
         getPath: async () => null,
         patchRoot: async () => {
@@ -111,9 +115,11 @@ describe("hybrid event repository", () => {
         },
         transactPath: async () => ({ committed: false, value: null }),
       });
-      await expect(failedClient.patchRoot(update)).rejects.toThrow(
-        "firebase-write-failed",
-      );
+      await expect(
+        failedClient.patchRoot({
+          [`events/${eventId}`]: { ...eventRecord(), status: "invalid" },
+        }),
+      ).rejects.toThrow("invalid-event-record");
       expect(
         await testEnv.EVENT_DB.prepare(
           "SELECT COUNT(*) AS count FROM event_write_admissions",
@@ -132,7 +138,7 @@ describe("hybrid event repository", () => {
             expect.objectContaining({
               event: "event_write_admission_release_failed",
               admissionId: admission.admission_id,
-              admittedStorageMode: "firebase",
+              freezeGeneration: expect.any(Number),
               attempts: 1,
               context: "event-root-patch",
             }),
@@ -148,64 +154,6 @@ describe("hybrid event repository", () => {
       ).run();
       errors.mockRestore();
     }
-  });
-
-  it("holds a durable admission across Firebase writes before cutover", async () => {
-    let finishWrite!: () => void;
-    let markStarted!: () => void;
-    const started = new Promise<void>((resolve) => {
-      markStarted = resolve;
-    });
-    const pending = new Promise<void>((resolve) => {
-      finishWrite = resolve;
-    });
-    const client = createEventRtdbClient(testEnv, {
-      getPath: async () => null,
-      patchRoot: async () => {
-        markStarted();
-        await pending;
-      },
-      transactPath: async () => ({ committed: false, value: null }),
-    });
-    const write = client.patchRoot({ [`events/${eventId}`]: eventRecord() });
-    await started;
-    await expect(
-      transitionEventStorageMode(testEnv.EVENT_DB, {
-        expected: { storageMode: "firebase", previousStorageMode: null },
-        next: { storageMode: "frozen", previousStorageMode: "firebase" },
-        nowMs: 2,
-      }),
-    ).rejects.toThrow();
-    finishWrite();
-    await write;
-    const frozen = await transitionEventStorageMode(testEnv.EVENT_DB, {
-      expected: { storageMode: "firebase", previousStorageMode: null },
-      next: { storageMode: "frozen", previousStorageMode: "firebase" },
-      nowMs: 3,
-    });
-    const imported = await writeEventImportMetadata(testEnv.EVENT_DB, {
-      expectedStorageMode: "frozen",
-      sourceAssignmentCount: 0,
-      sourceDigest: "a".repeat(64),
-      sourceEventCount: 0,
-      sourceExportedAtMs: 3,
-      sourceSelectionCount: 0,
-      nowMs: 3,
-    });
-    await markEventImportVerified(testEnv.EVENT_DB, {
-      expectedFreezeGeneration: frozen.freezeGeneration,
-      sourceDigest: imported.sourceDigest!,
-      nowMs: 4,
-    });
-    await transitionEventStorageMode(testEnv.EVENT_DB, {
-      expected: {
-        storageMode: "frozen",
-        previousStorageMode: "firebase",
-      },
-      next: { storageMode: "d1", previousStorageMode: null },
-      cutoverAtMs: 5,
-      nowMs: 5,
-    });
   });
 
   it("publishes event projection metadata without an RTDB mirror", async () => {
@@ -794,21 +742,21 @@ describe("hybrid event repository", () => {
     await started;
     await expect(
       transitionEventStorageMode(testEnv.EVENT_DB, {
-        expected: { storageMode: "d1", previousStorageMode: null },
-        next: { storageMode: "frozen", previousStorageMode: "d1" },
+        expected: { storageMode: "d1" },
+        next: { storageMode: "frozen" },
         nowMs: Date.now(),
       }),
     ).rejects.toThrow();
     finishReplay();
     await expect(recovery).resolves.toBe(1);
     await transitionEventStorageMode(testEnv.EVENT_DB, {
-      expected: { storageMode: "d1", previousStorageMode: null },
-      next: { storageMode: "frozen", previousStorageMode: "d1" },
+      expected: { storageMode: "d1" },
+      next: { storageMode: "frozen" },
       nowMs: Date.now(),
     });
     await transitionEventStorageMode(testEnv.EVENT_DB, {
-      expected: { storageMode: "frozen", previousStorageMode: "d1" },
-      next: { storageMode: "d1", previousStorageMode: null },
+      expected: { storageMode: "frozen" },
+      next: { storageMode: "d1" },
       nowMs: Date.now(),
     });
   });
@@ -1091,11 +1039,15 @@ describe("hybrid event repository", () => {
       },
     });
     await transitionEventStorageMode(testEnv.EVENT_DB, {
-      expected: { storageMode: "d1", previousStorageMode: null },
-      next: { storageMode: "frozen", previousStorageMode: "d1" },
+      expected: { storageMode: "d1" },
+      next: { storageMode: "frozen" },
       nowMs: 10,
     });
     try {
+      await expect(client.getPath(`events/${eventId}`)).resolves.toBeNull();
+      await expect(
+        client.patchRoot({ [`events/${eventId}`]: eventRecord() }),
+      ).rejects.toThrow("event-writes-disabled");
       await expect(client.getPath("invites/invite-one")).resolves.toEqual({
         ok: true,
       });
@@ -1105,8 +1057,8 @@ describe("hybrid event repository", () => {
       ).resolves.toMatchObject({ committed: true });
     } finally {
       await transitionEventStorageMode(testEnv.EVENT_DB, {
-        expected: { storageMode: "frozen", previousStorageMode: "d1" },
-        next: { storageMode: "d1", previousStorageMode: null },
+        expected: { storageMode: "frozen" },
+        next: { storageMode: "d1" },
         nowMs: 11,
       });
     }

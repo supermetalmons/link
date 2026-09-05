@@ -1,5 +1,5 @@
 import {
-  attachFirebaseWagerFrozenStore,
+  attachMemoryWagerFrozenStore,
   createTestWagerReservationRuntime,
 } from "./wagerFrozenTestUtils.ts";
 import assert from "node:assert/strict";
@@ -17,7 +17,7 @@ import {
   type WagerProposalDependencies,
 } from "../src/wagerProposal.ts";
 import type { RequestIdentity } from "../src/requestIdentity.ts";
-import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type { TestGameplayRepository as GameplayRepository } from "./wagerFrozenTestUtils.ts";
 import type {
   ProfileOwnershipQuery,
   ProfileOwnershipSnapshot,
@@ -52,11 +52,13 @@ const identity: RequestIdentity = {
 };
 
 const coordinationByRepository = new WeakMap<
-  GameplayRepository,
+  import("../src/gameplayRepository.ts").GameplayRepository,
   ReturnType<typeof createMemoryGameplayCoordinationStores>
 >();
 
-function coordinationFor(repository: GameplayRepository) {
+function coordinationFor(
+  repository: import("../src/gameplayRepository.ts").GameplayRepository,
+) {
   let coordination = coordinationByRepository.get(repository);
   if (!coordination) {
     coordination = createMemoryGameplayCoordinationStores();
@@ -160,7 +162,7 @@ function addSendReservation(
     uid,
   );
   const mining = frozenByUid[uid];
-  const operations = (mining._wagerOps ||= {}) as Record<string, unknown>;
+  const operations = (mining.operations ||= {}) as Record<string, unknown>;
   operations[reservationOperationId] = {
     appliedAtMs: 1,
     count,
@@ -389,7 +391,10 @@ function createRepository({
     wager: structuredClone(wager),
   };
   if (modernizeWager) modernizeWagerState(state);
-  const repository: GameplayRepository = {
+  const repository: Omit<
+    GameplayRepository,
+    "getRtdbPath" | "transactRtdbPath"
+  > = {
     applyWagerTransferOnce: async (input) => {
       state.transferCalls += 1;
       if (transferFingerprint) {
@@ -423,7 +428,7 @@ function createRepository({
     getMiningMaterials: async () => emptyMaterials(),
     getMiningSnapshot: async (profileId) =>
       structuredClone(state.mining[profileId] ?? null),
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       if (path === "invites/invite") return invite;
       if (path === "players/host/matches/invite") return playerMatch;
       if (path === "players/guest/matches/invite") return opponentMatch;
@@ -431,7 +436,7 @@ function createRepository({
       if (path === "invites/invite/matchesWagerResolutions/invite") {
         return state.marker;
       }
-      const miningMatch = path.match(/^players\/([^/]+)\/mining$/);
+      const miningMatch = path.match(/^reservations\/([^/]+)$/);
       if (miningMatch) return state.frozen[miningMatch[1]];
       return null;
     },
@@ -469,7 +474,7 @@ function createRepository({
         query,
         profileIdForUid || (async (uid) => `profile-${uid}`),
       ),
-    transactRtdbPath: async (path, updater) => {
+    transactState: async (path, updater) => {
       assert.doesNotMatch(
         path,
         /^(?:gameplayMutationLocks|matchTimerStarts)\//,
@@ -507,7 +512,7 @@ function createRepository({
     },
   };
   return Object.assign(state, {
-    repository: attachFirebaseWagerFrozenStore(repository),
+    repository: attachMemoryWagerFrozenStore(repository),
   });
 }
 
@@ -537,7 +542,7 @@ test("uses the real rules engine for both player colors", () => {
 test("rejects match IDs outside the invite series", async () => {
   let reads = 0;
   const state = createRepository();
-  state.repository.getRtdbPath = async () => {
+  state.repository.readState = async () => {
     reads += 1;
     return null;
   };
@@ -988,8 +993,8 @@ test("recovers when HTTP stops after queueing but before the claim", async () =>
     wager: { agreed: { material: "dust", count: 2 } },
   });
   const tasks: WagerSettlementRetryTask[] = [];
-  const transact = state.repository.transactRtdbPath;
-  state.repository.transactRtdbPath = async (path, updater, signal) => {
+  const transact = state.repository.transactState;
+  state.repository.transactState = async (path, updater, signal) => {
     if (path === "invites/invite/wagers/invite") {
       throw new Error("claim-unavailable");
     }
@@ -1014,7 +1019,7 @@ test("recovers when HTTP stops after queueing but before the claim", async () =>
   assert.deepEqual(tasks[0].resolution, hostWinResolution);
   assert.equal(state.wager?.settlement, undefined);
 
-  state.repository.transactRtdbPath = transact;
+  state.repository.transactState = transact;
   assert.equal(
     await classifyWagerSettlementRetry(tasks[0], state.repository),
     "unclaimed",
@@ -1386,16 +1391,16 @@ test("proposal settlement consumes a hidden accept reservation", async () => {
     { ok: true, count: 2 },
   );
 
-  const read = state.repository.getRtdbPath;
-  const transact = state.repository.transactRtdbPath;
+  const read = state.repository.readState;
+  const transact = state.repository.transactState;
   let wagerReads = 0;
-  state.repository.getRtdbPath = async (path, query, signal) => {
+  state.repository.readState = async (path, query, signal) => {
     if (path === "invites/invite/wagers/invite" && ++wagerReads === 2) {
       throw new Error("wager-read-unavailable");
     }
     return read(path, query, signal);
   };
-  state.repository.transactRtdbPath = async (path, updater, signal) => {
+  state.repository.transactState = async (path, updater, signal) => {
     if (path === "invites/invite/wagers/invite") {
       throw new Error("wager-write-unavailable");
     }
@@ -1411,8 +1416,8 @@ test("proposal settlement consumes a hidden accept reservation", async () => {
   );
   assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 2);
 
-  state.repository.getRtdbPath = read;
-  state.repository.transactRtdbPath = transact;
+  state.repository.readState = read;
+  state.repository.transactState = transact;
   await resolveWagerOutcome(
     identity,
     { inviteId: "invite", matchId: "invite" },
@@ -1471,7 +1476,7 @@ test("settles equal modern proposals with a no-op accept reservation", async () 
     "invite",
     "host",
   );
-  const operations = state.frozen.host._wagerOps as Record<
+  const operations = state.frozen.host.operations as Record<
     string,
     Record<string, unknown>
   >;
@@ -1487,7 +1492,7 @@ test("settles equal modern proposals with a no-op accept reservation", async () 
   assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 0);
   assert.equal((state.frozen.guest.frozen as Record<string, number>).dust, 0);
   assert.deepEqual(
-    (state.frozen.host._wagerOps as Record<string, unknown>)[
+    (state.frozen.host.operations as Record<string, unknown>)[
       reservationOperationId
     ],
     { consumed: true },
@@ -1554,8 +1559,8 @@ test("rejects omitted agreement adjustments when either reservation is larger", 
       ).ok,
       true,
     );
-    const transact = state.repository.transactRtdbPath;
-    state.repository.transactRtdbPath = async (path, updater, signal) => {
+    const transact = state.repository.transactState;
+    state.repository.transactState = async (path, updater, signal) => {
       const result = await transact(path, updater, signal);
       const agreementOperation = state.wager?.agreementOperation as
         Record<string, unknown> | undefined;
@@ -1681,15 +1686,15 @@ test("accepts concurrent lineage completion after reservations are consumed", as
       "invite",
       "guest",
     );
-  const read = state.repository.getRtdbPath;
+  const read = state.repository.readState;
   let completedElsewhere = false;
   let wagerReads = 0;
-  state.repository.getRtdbPath = async (path, query, signal) => {
+  state.repository.readState = async (path, query, signal) => {
     if (path === "invites/invite/wagers/invite") wagerReads += 1;
-    if (path === "players/guest/mining" && !completedElsewhere) {
+    if (path === "reservations/guest" && !completedElsewhere) {
       completedElsewhere = true;
       agreementOperation.reservationLineageReady = true;
-      const operations = state.frozen.guest._wagerOps as Record<
+      const operations = state.frozen.guest.operations as Record<
         string,
         unknown
       >;
@@ -1759,14 +1764,14 @@ test("rejects concurrent ready lineage after settlement clears agreement", async
       "invite",
       "guest",
     );
-  const read = state.repository.getRtdbPath;
+  const read = state.repository.readState;
   let completedElsewhere = false;
-  state.repository.getRtdbPath = async (path, query, signal) => {
-    if (path === "players/guest/mining" && !completedElsewhere) {
+  state.repository.readState = async (path, query, signal) => {
+    if (path === "reservations/guest" && !completedElsewhere) {
       completedElsewhere = true;
       agreementOperation.reservationLineageReady = true;
       state.wager!.agreed = null;
-      const operations = state.frozen.guest._wagerOps as Record<
+      const operations = state.frozen.guest.operations as Record<
         string,
         unknown
       >;
@@ -1825,9 +1830,9 @@ test("returns immediately for already-ready agreement lineage", async () => {
       },
     },
   });
-  const read = state.repository.getRtdbPath;
+  const read = state.repository.readState;
   const reads: string[] = [];
-  state.repository.getRtdbPath = async (path, query, signal) => {
+  state.repository.readState = async (path, query, signal) => {
     reads.push(path);
     return read(path, query, signal);
   };
@@ -1844,7 +1849,7 @@ test("accepts an actually empty no-op reservation delta record", async () => {
   const state = createRepository();
   state.frozen.host = {
     frozen: { ...emptyMaterials(), dust: 2 },
-    _wagerOps: {
+    operations: {
       operation: {
         appliedAtMs: 1,
         count: 2,
@@ -1874,7 +1879,7 @@ test("accepts an actually empty no-op reservation delta record", async () => {
   );
   assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 2);
   assert.deepEqual(
-    (state.frozen.host._wagerOps as Record<string, unknown>).operation,
+    (state.frozen.host.operations as Record<string, unknown>).operation,
     { consumed: true },
   );
 });
@@ -1891,7 +1896,7 @@ test("rejects malformed or populated deltas on a no-op reservation", async () =>
     const state = createRepository();
     state.frozen.host = {
       frozen: { ...emptyMaterials(), dust: 2 },
-      _wagerOps: {
+      operations: {
         operation: {
           appliedAtMs: 1,
           count: 2,
@@ -1921,7 +1926,7 @@ test("rejects malformed or populated deltas on a no-op reservation", async () =>
     );
     assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 2);
     assert.ok(
-      (state.frozen.host._wagerOps as Record<string, unknown>).operation,
+      (state.frozen.host.operations as Record<string, unknown>).operation,
     );
   }
 });
@@ -1930,7 +1935,7 @@ test("rejects a no-delta send reservation", async () => {
   const state = createRepository();
   state.frozen.host = {
     frozen: { ...emptyMaterials(), dust: 2 },
-    _wagerOps: {
+    operations: {
       operation: {
         appliedAtMs: 1,
         count: 2,
@@ -1949,7 +1954,9 @@ test("rejects a no-delta send reservation", async () => {
     /wager-operation-unavailable/,
   );
   assert.equal((state.frozen.host.frozen as Record<string, number>).dust, 2);
-  assert.ok((state.frozen.host._wagerOps as Record<string, unknown>).operation);
+  assert.ok(
+    (state.frozen.host.operations as Record<string, unknown>).operation,
+  );
 });
 
 test("does not tombstone a primitive mining record", async () => {
@@ -1971,7 +1978,7 @@ test("rejects a malformed no-delta accept reservation", async () => {
   const state = createRepository();
   state.frozen.host = {
     frozen: { ...emptyMaterials(), dust: 2, slime: 2 },
-    _wagerOps: {
+    operations: {
       operation: {
         appliedAtMs: 1,
         count: 2,
@@ -2003,7 +2010,9 @@ test("rejects a malformed no-delta accept reservation", async () => {
     dust: 2,
     slime: 2,
   });
-  assert.ok((state.frozen.host._wagerOps as Record<string, unknown>).operation);
+  assert.ok(
+    (state.frozen.host.operations as Record<string, unknown>).operation,
+  );
 });
 
 async function assertWagerOperationRejected(
@@ -2012,7 +2021,7 @@ async function assertWagerOperationRejected(
   const state = createRepository();
   state.frozen.host = {
     frozen: { ...emptyMaterials(), dust: 4, slime: 4, gum: 4 },
-    _wagerOps: { operation },
+    operations: { operation },
   };
   const before = structuredClone(state.frozen.host);
   await assert.rejects(
@@ -2124,8 +2133,8 @@ test("claims the live agreement instead of a stale proposal snapshot", async () 
   const state = createRepository({
     wager: { proposals: { host: { material: "dust", count: 2 } } },
   });
-  const transact = state.repository.transactRtdbPath;
-  state.repository.transactRtdbPath = async (path, updater, signal) => {
+  const transact = state.repository.transactState;
+  state.repository.transactState = async (path, updater, signal) => {
     if (path === "invites/invite/wagers/invite") {
       state.wager = { agreed: { material: "dust", count: 2 } };
       modernizeWagerState(state);
@@ -2187,8 +2196,8 @@ test("queues a durable retry before settling", async () => {
   const state = createRepository({
     wager: { agreed: { material: "dust", count: 2 } },
   });
-  const transact = state.repository.transactRtdbPath;
-  state.repository.transactRtdbPath = async (...args) => {
+  const transact = state.repository.transactState;
+  state.repository.transactState = async (...args) => {
     if (args[0] === "invites/invite/wagers/invite") order.push("claim");
     return transact(...args);
   };
@@ -2239,8 +2248,8 @@ test("does not claim a settlement when retry scheduling fails", async () => {
   const state = createRepository({ wager: originalWager });
   const expectedWager = structuredClone(state.wager);
   let claims = 0;
-  const transact = state.repository.transactRtdbPath;
-  state.repository.transactRtdbPath = async (...args) => {
+  const transact = state.repository.transactState;
+  state.repository.transactState = async (...args) => {
     if (args[0] === "invites/invite/wagers/invite") claims += 1;
     return transact(...args);
   };

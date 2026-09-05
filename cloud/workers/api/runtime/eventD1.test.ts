@@ -1,6 +1,10 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
+import {
+  applyEventTestMigrations,
+  transitionEventStorageMode,
+} from "./eventTestMigrations.ts";
 import {
   acquireEventWriteAdmission,
   createEventTransitionIntent as createEventTransitionIntentRaw,
@@ -10,7 +14,6 @@ import {
   listDueEventProgressOutboxes,
   listDueEventTelegramProjectionOutboxes,
   listPendingEventTransitionIntents,
-  markEventImportVerified,
   patchEventOwnedPaths as patchEventOwnedPathsRaw,
   readEventOwnedPath,
   readEventRuntimeControl,
@@ -19,9 +22,7 @@ import {
   readProfileEventPrizes,
   releaseEventWriteAdmission,
   transactEventOwnedPath as transactEventOwnedPathRaw,
-  transitionEventStorageMode,
   validateEventAggregate,
-  writeEventImportMetadata,
 } from "../src/eventD1.ts";
 
 const testEnv = env as Env & { TEST_EVENT_D1_MIGRATIONS: D1Migration[] };
@@ -115,32 +116,10 @@ function createEventTransitionIntent(
 
 describe("event D1 store", () => {
   beforeAll(async () => {
-    await applyD1Migrations(testEnv.EVENT_DB, testEnv.TEST_EVENT_D1_MIGRATIONS);
-    const frozen = await transitionEventStorageMode(testEnv.EVENT_DB, {
-      expected: { storageMode: "firebase", previousStorageMode: null },
-      next: { storageMode: "frozen", previousStorageMode: "firebase" },
-      nowMs: 2,
-    });
-    const metadata = await writeEventImportMetadata(testEnv.EVENT_DB, {
-      expectedStorageMode: "frozen",
-      sourceAssignmentCount: 0,
-      sourceDigest: "a".repeat(64),
-      sourceEventCount: 0,
-      sourceExportedAtMs: 2,
-      sourceSelectionCount: 0,
-      nowMs: 2,
-    });
-    await markEventImportVerified(testEnv.EVENT_DB, {
-      expectedFreezeGeneration: frozen.freezeGeneration,
-      sourceDigest: metadata.sourceDigest!,
-      nowMs: 2,
-    });
-    await transitionEventStorageMode(testEnv.EVENT_DB, {
-      expected: { storageMode: "frozen", previousStorageMode: "firebase" },
-      next: { storageMode: "d1", previousStorageMode: null },
-      cutoverAtMs: 3,
-      nowMs: 3,
-    });
+    await applyEventTestMigrations(
+      testEnv.EVENT_DB,
+      testEnv.TEST_EVENT_D1_MIGRATIONS,
+    );
   });
 
   beforeEach(async () => {
@@ -155,14 +134,6 @@ describe("event D1 store", () => {
       testEnv.EVENT_DB.prepare("DELETE FROM event_progress_outboxes"),
       testEnv.EVENT_DB.prepare("DELETE FROM event_records"),
       testEnv.EVENT_DB.prepare("DELETE FROM profile_event_prize_revisions"),
-      testEnv.EVENT_DB.prepare(
-        `UPDATE event_runtime_control
-         SET source_digest = NULL, source_event_count = NULL,
-             source_selection_count = NULL, source_assignment_count = NULL,
-             source_exported_at_ms = NULL, cutover_at_ms = NULL,
-             updated_at_ms = 1
-         WHERE singleton = 1`,
-      ),
     ]);
   });
 
@@ -370,19 +341,17 @@ describe("event D1 store", () => {
   it("freezes and resumes active D1 storage", async () => {
     const before = await readEventRuntimeControl(testEnv.EVENT_DB);
     const frozen = await transitionEventStorageMode(testEnv.EVENT_DB, {
-      expected: { storageMode: "d1", previousStorageMode: null },
-      next: { storageMode: "frozen", previousStorageMode: "d1" },
+      expected: { storageMode: "d1" },
+      next: { storageMode: "frozen" },
       nowMs: 40,
     });
     expect(frozen).toMatchObject({
       storageMode: "frozen",
-      previousStorageMode: "d1",
       freezeGeneration: before.freezeGeneration + 1,
-      verifiedImportGeneration: null,
     });
     await transitionEventStorageMode(testEnv.EVENT_DB, {
-      expected: { storageMode: "frozen", previousStorageMode: "d1" },
-      next: { storageMode: "d1", previousStorageMode: null },
+      expected: { storageMode: "frozen" },
+      next: { storageMode: "d1" },
       nowMs: 50,
     });
   });
@@ -393,11 +362,13 @@ describe("event D1 store", () => {
       nowMs: 75,
       ttlMs: 1,
     });
-    expect(admission.storageMode).toBe("d1");
+    expect(admission.freezeGeneration).toBe(
+      (await readEventRuntimeControl(testEnv.EVENT_DB)).freezeGeneration,
+    );
     await expect(
       transitionEventStorageMode(testEnv.EVENT_DB, {
-        expected: { storageMode: "d1", previousStorageMode: null },
-        next: { storageMode: "frozen", previousStorageMode: "d1" },
+        expected: { storageMode: "d1" },
+        next: { storageMode: "frozen" },
         nowMs: 100,
       }),
     ).rejects.toThrow();
@@ -413,8 +384,8 @@ describe("event D1 store", () => {
       readEventSnapshot(testEnv.EVENT_DB, eventId),
     ).resolves.toMatchObject({ event: null, revision: 0 });
     await transitionEventStorageMode(testEnv.EVENT_DB, {
-      expected: { storageMode: "d1", previousStorageMode: null },
-      next: { storageMode: "frozen", previousStorageMode: "d1" },
+      expected: { storageMode: "d1" },
+      next: { storageMode: "frozen" },
       nowMs: 101,
     });
     await expect(
@@ -424,10 +395,40 @@ describe("event D1 store", () => {
       }),
     ).rejects.toThrow("event-writes-disabled");
     await transitionEventStorageMode(testEnv.EVENT_DB, {
-      expected: { storageMode: "frozen", previousStorageMode: "d1" },
-      next: { storageMode: "d1", previousStorageMode: null },
+      expected: { storageMode: "frozen" },
+      next: { storageMode: "d1" },
       nowMs: 103,
     });
+  });
+
+  it("rejects expired admissions and mismatched freeze generations", async () => {
+    const expired = await acquireEventWriteAdmission(testEnv.EVENT_DB, {
+      nowMs: 1,
+      ttlMs: 1,
+    });
+    const active = await acquireEventWriteAdmission(testEnv.EVENT_DB);
+    try {
+      for (const admission of [
+        expired,
+        { ...active, freezeGeneration: active.freezeGeneration + 1 },
+      ]) {
+        await expect(
+          patchEventOwnedPathsRaw(
+            testEnv.EVENT_DB,
+            {
+              [`events/${eventId}`]: eventRecord(),
+            },
+            { admission },
+          ),
+        ).rejects.toBeInstanceOf(EventD1Conflict);
+      }
+      await expect(
+        readEventSnapshot(testEnv.EVENT_DB, eventId),
+      ).resolves.toMatchObject({ event: null, revision: 0 });
+    } finally {
+      await releaseEventWriteAdmission(testEnv.EVENT_DB, expired);
+      await releaseEventWriteAdmission(testEnv.EVENT_DB, active);
+    }
   });
 
   it("persists and atomically publishes deterministic transition intents", async () => {

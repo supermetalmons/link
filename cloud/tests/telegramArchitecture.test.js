@@ -275,21 +275,3 @@ test("admin tools no longer require Firebase Admin credentials", () => {
   const manifest = require("../admin/package.json");
   assert.equal(manifest.dependencies?.["firebase-admin"], undefined);
 });
-
-test("event Telegram projection is no longer exported by Firebase", () => {
-  const functionIndex = require("../functions/index");
-  const exportNames = [
-    "projectEventTelegramOnCreated",
-    "projectEventTelegramOnUpdated",
-  ];
-  for (const exportName of exportNames) {
-    assert.equal(functionIndex[exportName], undefined, exportName);
-  }
-  assert.equal(
-    functionIndex.projectProfileGamesOnEventWritten,
-    undefined,
-    "projectProfileGamesOnEventWritten",
-  );
-  assert.equal(functionIndex.dispatchTelegramDelivery, undefined);
-  assert.equal(functionIndex.dispatchTelegramManualRecovery, undefined);
-});

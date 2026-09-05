@@ -1,7 +1,5 @@
 import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 import { createGoogleAccessToken } from "./googleAuth.ts";
-import { createTelegramRepository } from "../../../functions/telegram/repositoryCore.js";
-import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
 import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
 
 const FIREBASE_DATABASE_SCOPE =
@@ -284,17 +282,6 @@ export function createFirebaseRtdbClient(
       throw new FirebaseRtdbFailure();
     },
   };
-}
-
-export function createFirebaseRtdbRepository(
-  env: Env,
-  dependencies: Parameters<typeof createFirebaseRtdbClient>[1] = {},
-): TelegramRepository {
-  const client = createFirebaseRtdbClient(env, dependencies);
-  return createTelegramRepository({
-    getPath: client.getPath,
-    transactPath: client.transactPath,
-  });
 }
 
 export {

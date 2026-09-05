@@ -7,7 +7,6 @@
   "engines": {
     "node": "^22.13.0 || >=24.0.0"
   },
-  "main": "index.js",
   "dependencies": {
     "@mons/shared": "file:shared",
     "bs58": "^6.0.0",

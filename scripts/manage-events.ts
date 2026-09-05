@@ -3,10 +3,8 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 type JsonRecord = Record<string, unknown>;
-type StorageMode = "firebase" | "frozen" | "d1";
-type PreviousStorageMode = "firebase" | "d1" | null;
-type StorageManagementOperation =
-  "status" | "freeze" | "return-to-firebase" | "activate-d1" | "resume-d1";
+type StorageMode = "frozen" | "d1";
+type StorageManagementOperation = "status" | "freeze" | "resume-d1";
 type RecoverStaleAdmissionOperation = {
   admissionId: string;
   kind: "recover-stale-admission";
@@ -16,7 +14,7 @@ type ManagementOperation =
 
 type EventWriteAdmissionStatus = {
   admissionId: string;
-  admittedStorageMode: "firebase" | "d1";
+  freezeGeneration: number;
   createdAtMs: number;
   expired: boolean;
   expiresAtMs: number;
@@ -34,16 +32,8 @@ type PendingEventTransitionStatus = {
 };
 
 type EventControl = {
-  cutoverAtMs: number | null;
   freezeGeneration: number;
-  previousStorageMode: PreviousStorageMode;
-  sourceAssignedPrizeCount: number | null;
-  sourceDigest: string | null;
-  sourceEventCount: number | null;
-  sourceExportedAtMs: number | null;
-  sourceSelectionCount: number | null;
   storageMode: StorageMode;
-  verifiedImportGeneration: number | null;
 };
 
 type ManagementDependencies = {
@@ -59,9 +49,7 @@ type ManagementDependencies = {
     nowMs: number,
   ): boolean;
   updateControl(input: {
-    cutoverAtMs: number | null | undefined;
     expected: EventControl;
-    nextPreviousStorageMode: PreviousStorageMode;
     nextStorageMode: StorageMode;
     updatedAtMs: number;
   }): void;
@@ -103,104 +91,11 @@ function parseArgs(argv: string[]): ManagementOperation {
   if (
     operation !== "status" &&
     operation !== "freeze" &&
-    operation !== "return-to-firebase" &&
-    operation !== "activate-d1" &&
     operation !== "resume-d1"
   ) {
     throw new TypeError("choose exactly one event storage control operation");
   }
   return operation;
-}
-
-function sameMode(
-  control: EventControl,
-  storageMode: StorageMode,
-  previousStorageMode: PreviousStorageMode,
-): boolean {
-  return (
-    control.storageMode === storageMode &&
-    control.previousStorageMode === previousStorageMode
-  );
-}
-
-function hasVerifiedImport(control: EventControl): boolean {
-  return (
-    control.storageMode === "frozen" &&
-    control.previousStorageMode === "firebase" &&
-    control.freezeGeneration > 0 &&
-    control.verifiedImportGeneration === control.freezeGeneration &&
-    /^[0-9a-f]{64}$/.test(control.sourceDigest || "") &&
-    typeof control.sourceExportedAtMs === "number" &&
-    Number.isSafeInteger(control.sourceExportedAtMs) &&
-    control.sourceExportedAtMs > 0
-  );
-}
-
-function targetFor(
-  operation: Exclude<StorageManagementOperation, "status">,
-  control: EventControl,
-): {
-  cutoverAtMs: number | null | undefined;
-  previousStorageMode: PreviousStorageMode;
-  storageMode: StorageMode;
-} {
-  if (operation === "freeze") {
-    if (sameMode(control, "firebase", null)) {
-      return {
-        storageMode: "frozen",
-        previousStorageMode: "firebase",
-        cutoverAtMs: undefined,
-      };
-    }
-    if (sameMode(control, "d1", null)) {
-      return {
-        storageMode: "frozen",
-        previousStorageMode: "d1",
-        cutoverAtMs: undefined,
-      };
-    }
-    if (control.storageMode === "frozen") {
-      return {
-        storageMode: "frozen",
-        previousStorageMode: control.previousStorageMode,
-        cutoverAtMs: undefined,
-      };
-    }
-  }
-  if (operation === "return-to-firebase") {
-    if (
-      sameMode(control, "firebase", null) ||
-      sameMode(control, "frozen", "firebase")
-    ) {
-      return {
-        storageMode: "firebase",
-        previousStorageMode: null,
-        cutoverAtMs: null,
-      };
-    }
-  }
-  if (operation === "activate-d1") {
-    if (
-      sameMode(control, "d1", null) ||
-      sameMode(control, "frozen", "firebase")
-    ) {
-      return {
-        storageMode: "d1",
-        previousStorageMode: null,
-        cutoverAtMs: control.cutoverAtMs,
-      };
-    }
-  }
-  if (operation === "resume-d1") {
-    if (sameMode(control, "d1", null) || sameMode(control, "frozen", "d1")) {
-      return {
-        storageMode: "d1",
-        previousStorageMode: null,
-        cutoverAtMs: undefined,
-      };
-    }
-  }
-  throw new Error("event storage control transition rejected");
 }
 
 function manageEvents(
@@ -225,43 +120,22 @@ function manageEvents(
     }
     recoveredAdmissionId = admission.admissionId;
   } else if (operation !== "status") {
-    const target = targetFor(operation, control);
-    if (
-      operation === "freeze" &&
-      control.storageMode !== "frozen" &&
-      dependencies.writeAdmissions() !== 0
-    ) {
-      throw new Error("event storage freeze has write admissions");
-    }
-    if (operation === "activate-d1" && !sameMode(control, "d1", null)) {
-      if (!hasVerifiedImport(control)) {
-        throw new Error("event D1 activation verification failed");
-      }
+    const nextStorageMode = operation === "freeze" ? "frozen" : "d1";
+    if (control.storageMode !== nextStorageMode) {
       if (dependencies.writeAdmissions() !== 0) {
-        throw new Error("event D1 activation has write admissions");
+        throw new Error("event storage transition has write admissions");
       }
-      if (dependencies.activeLeases(nowMs) !== 0) {
-        throw new Error("event D1 activation has active leases");
-      }
-      if (control.cutoverAtMs === null) target.cutoverAtMs = nowMs;
-    }
-    if (
-      !sameMode(control, target.storageMode, target.previousStorageMode) ||
-      (target.cutoverAtMs !== undefined &&
-        target.cutoverAtMs !== control.cutoverAtMs)
-    ) {
+      const nextGeneration =
+        control.freezeGeneration + Number(nextStorageMode === "frozen");
       dependencies.updateControl({
         expected: control,
-        nextStorageMode: target.storageMode,
-        nextPreviousStorageMode: target.previousStorageMode,
-        cutoverAtMs: target.cutoverAtMs,
+        nextStorageMode,
         updatedAtMs: nowMs,
       });
       control = dependencies.readControl();
       if (
-        !sameMode(control, target.storageMode, target.previousStorageMode) ||
-        (target.cutoverAtMs !== undefined &&
-          target.cutoverAtMs !== control.cutoverAtMs)
+        control.storageMode !== nextStorageMode ||
+        control.freezeGeneration !== nextGeneration
       ) {
         throw new Error("event storage control transition failed");
       }
@@ -272,15 +146,7 @@ function manageEvents(
       operation: typeof operation === "string" ? operation : operation.kind,
       ...(recoveredAdmissionId ? { recoveredAdmissionId } : {}),
       storageMode: control.storageMode,
-      previousStorageMode: control.previousStorageMode,
       freezeGeneration: control.freezeGeneration,
-      sourceDigest: control.sourceDigest,
-      sourceEventCount: control.sourceEventCount,
-      sourceSelectionCount: control.sourceSelectionCount,
-      sourceAssignedPrizeCount: control.sourceAssignedPrizeCount,
-      sourceExportedAtMs: control.sourceExportedAtMs,
-      verifiedImportGeneration: control.verifiedImportGeneration,
-      cutoverAtMs: control.cutoverAtMs,
       writeAdmissions: dependencies.writeAdmissions(),
       writeAdmissionRows: dependencies.listWriteAdmissions(nowMs),
       pendingTransitions: dependencies.listPendingTransitions(),
@@ -351,43 +217,17 @@ function optionalTimestamp(value: unknown): number | null {
 
 function readRemoteControl(): EventControl {
   const row = runWrangler(
-    "SELECT storage_mode, previous_storage_mode, freeze_generation, verified_import_generation, source_digest, source_event_count, source_selection_count, source_assignment_count, source_exported_at_ms, cutover_at_ms FROM event_runtime_control WHERE singleton = 1",
+    "SELECT storage_mode, freeze_generation FROM event_runtime_control WHERE singleton = 1",
   )[0];
   const storageMode = row?.storage_mode;
-  const previous = row?.previous_storage_mode;
-  const sourceDigest = row?.source_digest;
+  const freezeGeneration = optionalCount(row?.freeze_generation);
   if (
-    (storageMode !== "firebase" &&
-      storageMode !== "frozen" &&
-      storageMode !== "d1") ||
-    (previous !== null &&
-      previous !== undefined &&
-      previous !== "firebase" &&
-      previous !== "d1") ||
-    (sourceDigest !== null &&
-      sourceDigest !== undefined &&
-      (typeof sourceDigest !== "string" ||
-        !/^[0-9a-f]{64}$/.test(sourceDigest)))
+    (storageMode !== "frozen" && storageMode !== "d1") ||
+    freezeGeneration === null
   ) {
     throw new Error("invalid event storage control");
   }
-  return {
-    storageMode,
-    previousStorageMode: previous === undefined ? null : previous,
-    freezeGeneration: optionalCount(row.freeze_generation) || 0,
-    sourceDigest:
-      sourceDigest === undefined || sourceDigest === null ? null : sourceDigest,
-    sourceEventCount: optionalCount(row.source_event_count),
-    sourceSelectionCount: optionalCount(row.source_selection_count),
-    sourceAssignedPrizeCount: optionalCount(row.source_assignment_count),
-    sourceExportedAtMs: optionalTimestamp(row.source_exported_at_ms),
-    verifiedImportGeneration: optionalCount(row.verified_import_generation),
-    cutoverAtMs: optionalTimestamp(row.cutover_at_ms),
-  };
-}
-
-function sqlValue(value: string | null): string {
-  return value === null ? "NULL" : `'${value}'`;
+  return { storageMode, freezeGeneration };
 }
 
 function sqlText(value: string): string {
@@ -395,20 +235,12 @@ function sqlText(value: string): string {
 }
 
 function updateRemoteControl({
-  cutoverAtMs,
   expected,
-  nextPreviousStorageMode,
   nextStorageMode,
   updatedAtMs,
 }: Parameters<ManagementDependencies["updateControl"]>[0]): void {
-  const cutover =
-    cutoverAtMs === undefined
-      ? "cutover_at_ms"
-      : cutoverAtMs === null
-        ? "NULL"
-        : String(cutoverAtMs);
   runWrangler(
-    `UPDATE event_runtime_control SET storage_mode = '${nextStorageMode}', previous_storage_mode = ${sqlValue(nextPreviousStorageMode)}, cutover_at_ms = ${cutover}, freeze_generation = CASE WHEN storage_mode != 'frozen' AND '${nextStorageMode}' = 'frozen' THEN freeze_generation + 1 ELSE freeze_generation END, verified_import_generation = CASE WHEN storage_mode != 'frozen' AND '${nextStorageMode}' = 'frozen' THEN NULL WHEN storage_mode = 'frozen' AND previous_storage_mode = 'firebase' AND '${nextStorageMode}' = 'firebase' THEN NULL ELSE verified_import_generation END, updated_at_ms = ${updatedAtMs} WHERE singleton = 1 AND storage_mode = '${expected.storageMode}' AND previous_storage_mode IS ${sqlValue(expected.previousStorageMode)} AND freeze_generation = ${expected.freezeGeneration}`,
+    `UPDATE event_runtime_control SET storage_mode = '${nextStorageMode}', freeze_generation = freeze_generation + ${Number(nextStorageMode === "frozen")}, updated_at_ms = ${updatedAtMs} WHERE singleton = 1 AND storage_mode = '${expected.storageMode}' AND freeze_generation = ${expected.freezeGeneration}`,
   );
 }
 
@@ -426,17 +258,18 @@ function readWriteAdmissions(): number {
 
 function readWriteAdmissionRows(_nowMs: number): EventWriteAdmissionStatus[] {
   const rows = runWrangler(
-    "SELECT admission_id, admitted_storage_mode, created_at_ms, expires_at_ms, CASE WHEN expires_at_ms <= unixepoch() * 1000 THEN 1 ELSE 0 END AS expired FROM event_write_admissions ORDER BY created_at_ms, admission_id",
+    "SELECT admission_id, freeze_generation, created_at_ms, expires_at_ms, CASE WHEN expires_at_ms <= unixepoch() * 1000 THEN 1 ELSE 0 END AS expired FROM event_write_admissions ORDER BY created_at_ms, admission_id",
   );
   return rows.map((row) => {
     const admissionId = row.admission_id;
-    const admittedStorageMode = row.admitted_storage_mode;
+    const freezeGeneration = Number(row.freeze_generation);
     const createdAtMs = Number(row.created_at_ms);
     const expiresAtMs = Number(row.expires_at_ms);
     const expired = Number(row.expired);
     if (
       !validAdmissionId(admissionId) ||
-      (admittedStorageMode !== "firebase" && admittedStorageMode !== "d1") ||
+      !Number.isSafeInteger(freezeGeneration) ||
+      freezeGeneration < 0 ||
       !Number.isSafeInteger(createdAtMs) ||
       createdAtMs < 0 ||
       !Number.isSafeInteger(expiresAtMs) ||
@@ -447,7 +280,7 @@ function readWriteAdmissionRows(_nowMs: number): EventWriteAdmissionStatus[] {
     }
     return {
       admissionId,
-      admittedStorageMode,
+      freezeGeneration,
       createdAtMs,
       expiresAtMs,
       expired: expired === 1,
@@ -460,7 +293,7 @@ function recoverRemoteStaleAdmission(
   _nowMs: number,
 ): boolean {
   const rows = runWrangler(
-    `DELETE FROM event_write_admissions WHERE admission_id = ${sqlText(admission.admissionId)} AND admitted_storage_mode = '${admission.admittedStorageMode}' AND created_at_ms = ${admission.createdAtMs} AND expires_at_ms = ${admission.expiresAtMs} AND expires_at_ms <= unixepoch() * 1000 RETURNING admission_id`,
+    `DELETE FROM event_write_admissions WHERE admission_id = ${sqlText(admission.admissionId)} AND freeze_generation = ${admission.freezeGeneration} AND created_at_ms = ${admission.createdAtMs} AND expires_at_ms = ${admission.expiresAtMs} AND expires_at_ms <= unixepoch() * 1000 RETURNING admission_id`,
   );
   return rows.length === 1 && rows[0]?.admission_id === admission.admissionId;
 }
@@ -557,10 +390,8 @@ if (
 
 export {
   execute,
-  hasVerifiedImport,
   manageEvents,
   parseArgs,
-  targetFor,
   type EventControl,
   type EventWriteAdmissionStatus,
   type ManagementDependencies,

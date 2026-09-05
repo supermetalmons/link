@@ -40,20 +40,7 @@ export function createWagerReservationRuntime(
   { now = Date.now, logFailure = console.error } = {},
 ): WagerReservationRuntime {
   const db = env.PROFILE_DB;
-  const readD1Control = async () => {
-    const control = await readWagerReservationControl(db);
-    if (
-      control.activatedAtMs === null ||
-      (control.storageMode !== "d1" &&
-        !(
-          control.storageMode === "frozen" &&
-          control.previousStorageMode === "d1"
-        ))
-    ) {
-      throw wagerReservationUnavailable();
-    }
-    return control;
-  };
+  const readControl = () => readWagerReservationControl(db);
   const readOnlyStore = createWagerFrozenD1Store(db, {
     writeGuards: () => {
       throw new Error("wager-read-store-is-read-only");
@@ -73,22 +60,20 @@ export function createWagerReservationRuntime(
       ) {
         throw new WagerClientUpdateRequired();
       }
-      await readD1Control();
+      await readControl();
     },
     async readBalance(playerUid) {
       for (let attempt = 0; attempt < 3; attempt++) {
-        const control = await readD1Control();
+        const control = await readControl();
         const balance = await readOnlyStore.readBalance(playerUid);
-        const after = await readD1Control();
+        const after = await readControl();
         if (control.freezeGeneration === after.freezeGeneration) return balance;
       }
       throw wagerReservationUnavailable();
     },
     async run(kind, work) {
-      await readD1Control();
       const admission = await acquireWagerReservationAdmission(db, kind, now());
       try {
-        if (admission.storageMode !== "d1") throw wagerReservationUnavailable();
         const store = createWagerFrozenD1Store(db, {
           now,
           writeGuards: () =>

@@ -20,7 +20,6 @@ import {
 export {
   createOperationId,
   createWagerReservationOperationId,
-  frozenOperationState,
   operationFingerprint,
   parseFrozenOperation,
   type FrozenOperationState,

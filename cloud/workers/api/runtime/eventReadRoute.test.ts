@@ -1,19 +1,17 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
 import {
-  handleEventReadRoute,
-  readFirebaseEvent,
-} from "../src/eventReadRoute.ts";
+  applyEventTestMigrations,
+  transitionEventStorageMode,
+} from "./eventTestMigrations.ts";
+import { handleEventReadRoute } from "../src/eventReadRoute.ts";
 import { handleEventRoute } from "../src/eventRoute.ts";
 import {
   acquireEventWriteAdmission,
   assertEventWritesAllowed,
-  markEventImportVerified,
   patchEventOwnedPaths,
   releaseEventWriteAdmission,
-  transitionEventStorageMode,
-  writeEventImportMetadata,
 } from "../src/eventD1.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 
@@ -39,35 +37,10 @@ function eventRecord() {
 
 describe("event read route", () => {
   beforeAll(async () => {
-    await applyD1Migrations(testEnv.EVENT_DB, testEnv.TEST_EVENT_D1_MIGRATIONS);
-    await transitionEventStorageMode(testEnv.EVENT_DB, {
-      expected: { storageMode: "firebase", previousStorageMode: null },
-      next: { storageMode: "frozen", previousStorageMode: "firebase" },
-      nowMs: 2,
-    });
-    const metadata = await writeEventImportMetadata(testEnv.EVENT_DB, {
-      expectedStorageMode: "frozen",
-      sourceAssignmentCount: 0,
-      sourceDigest: "a".repeat(64),
-      sourceEventCount: 0,
-      sourceExportedAtMs: 2,
-      sourceSelectionCount: 0,
-      nowMs: 2,
-    });
-    await markEventImportVerified(testEnv.EVENT_DB, {
-      expectedFreezeGeneration: metadata.freezeGeneration,
-      sourceDigest: metadata.sourceDigest!,
-      nowMs: 2,
-    });
-    await transitionEventStorageMode(testEnv.EVENT_DB, {
-      expected: {
-        storageMode: "frozen",
-        previousStorageMode: "firebase",
-      },
-      next: { storageMode: "d1", previousStorageMode: null },
-      cutoverAtMs: 3,
-      nowMs: 3,
-    });
+    await applyEventTestMigrations(
+      testEnv.EVENT_DB,
+      testEnv.TEST_EVENT_D1_MIGRATIONS,
+    );
   });
 
   beforeEach(async () => {
@@ -153,28 +126,6 @@ describe("event read route", () => {
     );
     expect(conditional.status).toBe(304);
     expect(await conditional.text()).toBe("");
-
-    const afterCutover = await handleEventReadRoute(
-      new Request(request.url, {
-        headers: {
-          Origin: "https://mons.link",
-          "X-D1-Bookmark": "firebase",
-        },
-      }),
-      testEnv,
-      { waitUntil() {} },
-      {
-        repository: {
-          getRtdbPath: async () => null,
-          readProfileOwnershipSnapshot: async () => {
-            throw new Error("unused");
-          },
-        },
-        verifyIdentity: async () => ({ uid: "login-one" }),
-      },
-    );
-    expect(afterCutover.status).toBe(200);
-    expect(afterCutover.headers.get("X-D1-Bookmark")).not.toBe("firebase");
   });
 
   it("serves conditional-read CORS preflight without authentication", async () => {
@@ -204,30 +155,6 @@ describe("event read route", () => {
     expect(response.headers.get("Access-Control-Expose-Headers")).toContain(
       "X-D1-Bookmark",
     );
-  });
-
-  it("stabilizes Firebase fallback snapshots before returning them", async () => {
-    const newerEvent = { ...eventRecord(), updatedAtMs: 200 };
-    const values = [
-      eventRecord(),
-      { [profileId]: "1092" },
-      newerEvent,
-      newerEvent,
-      { [profileId]: "1092" },
-      newerEvent,
-    ];
-    await expect(
-      readFirebaseEvent(
-        {
-          getRtdbPath: async () => values.shift() ?? null,
-        },
-        eventId,
-      ),
-    ).resolves.toMatchObject({
-      event: { updatedAtMs: 200 },
-      prizeSelections: { [profileId]: "1092" },
-    });
-    expect(values).toEqual([]);
   });
 
   it("rejects oversized event IDs before storage reads", async () => {
@@ -313,10 +240,66 @@ describe("event read route", () => {
     });
   });
 
+  it("includes a D1 bookmark for callers without a canonical profile", async () => {
+    const repository: Pick<
+      GameplayRepository,
+      "getRtdbPath" | "readProfileOwnershipSnapshot"
+    > = {
+      getRtdbPath: async () => null,
+      async readProfileOwnershipSnapshot() {
+        return {
+          loginOwnerByUid: new Map([["anonymous-login", null]]),
+          canonicalProfileIdByProfileId: new Map(),
+          loginUidsByProfileId: new Map(),
+          profileById: new Map(),
+        };
+      },
+    };
+    const dependencies = {
+      repository,
+      verifyIdentity: async () => ({ uid: "anonymous-login" }),
+    };
+    const response = await handleEventReadRoute(
+      new Request("https://api.mons.link/events/prizes", {
+        headers: { Origin: "https://mons.link" },
+      }),
+      testEnv,
+      { waitUntil() {} },
+      dependencies,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      profileId: null,
+      revision: 0,
+      prizes: {},
+    });
+    const etag = response.headers.get("ETag");
+    const bookmark = response.headers.get("X-D1-Bookmark");
+    expect(etag).toBeTruthy();
+    expect(bookmark).toBeTruthy();
+    const conditional = await handleEventReadRoute(
+      new Request("https://api.mons.link/events/prizes", {
+        headers: {
+          Origin: "https://mons.link",
+          "If-None-Match": etag || "",
+          "X-D1-Bookmark": bookmark || "",
+        },
+      }),
+      testEnv,
+      { waitUntil() {} },
+      dependencies,
+    );
+    expect(conditional.status).toBe(304);
+    expect(conditional.headers.get("ETag")).toBe(etag);
+    expect(conditional.headers.get("X-D1-Bookmark")).toBeTruthy();
+    expect(await conditional.text()).toBe("");
+  });
+
   it("rejects event mutations while D1 event storage is frozen", async () => {
     await transitionEventStorageMode(testEnv.EVENT_DB, {
-      expected: { storageMode: "d1", previousStorageMode: null },
-      next: { storageMode: "frozen", previousStorageMode: "d1" },
+      expected: { storageMode: "d1" },
+      next: { storageMode: "frozen" },
       nowMs: 4,
     });
     try {
@@ -342,8 +325,8 @@ describe("event read route", () => {
       });
     } finally {
       await transitionEventStorageMode(testEnv.EVENT_DB, {
-        expected: { storageMode: "frozen", previousStorageMode: "d1" },
-        next: { storageMode: "d1", previousStorageMode: null },
+        expected: { storageMode: "frozen" },
+        next: { storageMode: "d1" },
         nowMs: 5,
       });
     }

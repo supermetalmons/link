@@ -1,6 +1,5 @@
 "use strict";
 
-const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const test = require("node:test");
 const {
@@ -104,7 +103,6 @@ test("rules deny structural writes and preserve live participant writes", async 
       .ref("players/host/matches/invite1")
       .set(match("fen-3", "move-more")),
   );
-  assert.ok(true);
 });
 
 test("rules retain same-profile writes through an RTDB link without a custom claim", async () => {
@@ -117,16 +115,36 @@ test("rules retain same-profile writes through an RTDB link without a custom cla
   );
 });
 
-test("retired rating completion markers reject client and admin-claim writes", async () => {
+test("retired storage rejects root and child writes from participants and admin claims", async () => {
+  const writes = [
+    ["matchTimerStarts", { invite1: { startedAtMs: 1 } }],
+    ["matchTimerStarts/invite1", { startedAtMs: 1 }],
+    ["profileGameProjectionOutbox/profile", { host: { lastQueuedAtMs: 1 } }],
+    ["profileGameProjectionOutbox/profile/host", { lastQueuedAtMs: 1 }],
+    ["invites/invite1/matchesRatingUpdates", { invite1: true }],
+    ["invites/invite1/matchesRatingUpdates/invite1", true],
+    ["players/host/mining", { frozen: { dust: 1 } }],
+    [
+      "players/host/mining/frozen",
+      { dust: 1, slime: 0, gum: 0, metal: 0, ice: 0 },
+    ],
+    ["players/host/mining/frozen/dust", 1],
+    ["players/host/mining/_wagerOps", { operation1: { consumed: true } }],
+    ["players/host/mining/_wagerOps/operation1", { consumed: true }],
+  ];
   for (const context of [
     rules.authenticatedContext("host", { profileId: "profile-host" }),
+    rules.authenticatedContext("alternate", { profileId: "profile-host" }),
     rules.authenticatedContext("admin", { admin: true }),
   ]) {
+    for (const [path, value] of writes) {
+      await assertFails(context.database().ref(path).set(value));
+    }
     await assertFails(
-      context
-        .database()
-        .ref("invites/invite1/matchesRatingUpdates/invite1")
-        .set(true),
+      context.database().ref().update({
+        "players/host/matches/invite1/emojiId": 2,
+        "players/host/mining/frozen/dust": 1,
+      }),
     );
   }
 });
@@ -146,6 +164,7 @@ test("retired frozen reservations and operation records cannot be read directly"
     rules.authenticatedContext("host", { profileId: "profile-host" }),
     rules.authenticatedContext("alternate", { profileId: "profile-host" }),
     rules.authenticatedContext("guest", { profileId: "profile-guest" }),
+    rules.authenticatedContext("admin", { admin: true }),
   ]) {
     for (const path of [
       "players/host/mining",

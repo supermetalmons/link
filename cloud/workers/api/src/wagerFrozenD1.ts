@@ -103,8 +103,7 @@ export function createWagerFrozenD1Store(
     const value: WagerFrozenSnapshot = {
       frozen: balance.frozen,
       operation: frozenOperationState(
-        row.record_json === null ? null : { _wagerOps: { [operationId]: raw } },
-        operationId,
+        row.record_json === null ? undefined : raw,
       ),
     };
     return { value, revision: balance.revision };

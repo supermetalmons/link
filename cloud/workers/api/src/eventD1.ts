@@ -6,8 +6,7 @@ const EVENT_STATUSES = new Set(["scheduled", "active", "ended", "dismissed"]);
 const UTF8_ENCODER = new TextEncoder();
 
 export type EventD1Connection = Pick<D1Database, "batch" | "prepare">;
-export type EventStorageMode = "firebase" | "frozen" | "d1";
-export type EventPreviousStorageMode = "firebase" | "d1" | null;
+export type EventStorageMode = "frozen" | "d1";
 export type EventJsonRecord = Record<string, unknown>;
 export type EventPrizeAssignmentRecord = {
   assignedAtMs: number;
@@ -18,23 +17,15 @@ export type EventPrizeAssignmentRecord = {
 } & EventJsonRecord;
 
 export type EventRuntimeControl = {
-  cutoverAtMs: number | null;
   freezeGeneration: number;
-  previousStorageMode: EventPreviousStorageMode;
-  sourceAssignmentCount: number | null;
-  sourceDigest: string | null;
-  sourceEventCount: number | null;
-  sourceExportedAtMs: number | null;
-  sourceSelectionCount: number | null;
   storageMode: EventStorageMode;
   updatedAtMs: number;
-  verifiedImportGeneration: number | null;
 };
 
 export type EventWriteAdmission = {
   admissionId: string;
   expiresAtMs: number;
-  storageMode: Exclude<EventStorageMode, "frozen">;
+  freezeGeneration: number;
 };
 
 export type EventLeaseGuard = {
@@ -104,17 +95,9 @@ type AssignmentRow = {
 };
 
 type RuntimeControlRow = {
-  cutover_at_ms: number | null;
   freeze_generation: number;
-  previous_storage_mode: string | null;
-  source_assignment_count: number | null;
-  source_digest: string | null;
-  source_event_count: number | null;
-  source_exported_at_ms: number | null;
-  source_selection_count: number | null;
   storage_mode: string;
   updated_at_ms: number;
-  verified_import_generation: number | null;
 };
 
 type EventMutationState = {
@@ -519,39 +502,13 @@ function parseRuntimeControl(
   row: RuntimeControlRow | null,
 ): EventRuntimeControl {
   if (!row) throw new EventD1Failure("event-runtime-control-unavailable");
-  const storageMode = row.storage_mode;
-  const previousStorageMode = row.previous_storage_mode;
-  if (
-    (storageMode !== "firebase" &&
-      storageMode !== "frozen" &&
-      storageMode !== "d1") ||
-    (previousStorageMode !== null &&
-      previousStorageMode !== "firebase" &&
-      previousStorageMode !== "d1") ||
-    (storageMode === "frozen"
-      ? previousStorageMode === null
-      : previousStorageMode !== null)
-  ) {
-    throw new EventD1Failure("invalid-event-runtime-control");
-  }
-  if (row.source_digest !== null && !/^[a-f0-9]{64}$/.test(row.source_digest)) {
+  if (row.storage_mode !== "frozen" && row.storage_mode !== "d1") {
     throw new EventD1Failure("invalid-event-runtime-control");
   }
   return {
-    cutoverAtMs: nullableInteger(row.cutover_at_ms, 1),
     freezeGeneration: safeInteger(row.freeze_generation),
-    previousStorageMode,
-    sourceAssignmentCount: nullableInteger(row.source_assignment_count),
-    sourceDigest: row.source_digest,
-    sourceEventCount: nullableInteger(row.source_event_count),
-    sourceExportedAtMs: nullableInteger(row.source_exported_at_ms, 1),
-    sourceSelectionCount: nullableInteger(row.source_selection_count),
-    storageMode,
+    storageMode: row.storage_mode,
     updatedAtMs: safeInteger(row.updated_at_ms),
-    verifiedImportGeneration: nullableInteger(
-      row.verified_import_generation,
-      1,
-    ),
   };
 }
 
@@ -559,7 +516,9 @@ export async function readEventRuntimeControl(
   db: EventD1Connection,
 ): Promise<EventRuntimeControl> {
   const row = await db
-    .prepare("SELECT * FROM event_runtime_control WHERE singleton = 1")
+    .prepare(
+      "SELECT storage_mode, freeze_generation, updated_at_ms FROM event_runtime_control WHERE singleton = 1",
+    )
     .first<RuntimeControlRow>();
   return parseRuntimeControl(row);
 }
@@ -591,20 +550,22 @@ export async function acquireEventWriteAdmission(
   const result = await db
     .prepare(
       `INSERT INTO event_write_admissions (
-         admission_id, admitted_storage_mode, created_at_ms, expires_at_ms
+         admission_id, freeze_generation, created_at_ms, expires_at_ms
        )
-       SELECT ?, storage_mode, ?, ?
+       SELECT ?, freeze_generation, ?, ?
        FROM event_runtime_control
-       WHERE singleton = 1 AND storage_mode IN ('firebase', 'd1')
-       RETURNING admitted_storage_mode`,
+       WHERE singleton = 1 AND storage_mode = 'd1'
+       RETURNING freeze_generation`,
     )
     .bind(admissionId, nowMs, nowMs + ttlMs)
-    .all<{ admitted_storage_mode: string }>();
-  const storageMode = result.results[0]?.admitted_storage_mode;
-  if (storageMode !== "firebase" && storageMode !== "d1") {
-    throw new EventWritesDisabled();
-  }
-  return { admissionId, expiresAtMs: nowMs + ttlMs, storageMode };
+    .all<{ freeze_generation: number }>();
+  const freezeGeneration = result.results[0]?.freeze_generation;
+  if (freezeGeneration === undefined) throw new EventWritesDisabled();
+  return {
+    admissionId,
+    expiresAtMs: nowMs + ttlMs,
+    freezeGeneration: safeInteger(freezeGeneration),
+  };
 }
 
 export async function releaseEventWriteAdmission(
@@ -616,139 +577,6 @@ export async function releaseEventWriteAdmission(
     .bind(exactKey(admission.admissionId))
     .run();
   return result.meta.changes === 1;
-}
-
-function sameControlIdentity(
-  left: Pick<EventRuntimeControl, "storageMode" | "previousStorageMode">,
-  right: Pick<EventRuntimeControl, "storageMode" | "previousStorageMode">,
-): boolean {
-  return (
-    left.storageMode === right.storageMode &&
-    left.previousStorageMode === right.previousStorageMode
-  );
-}
-
-export async function transitionEventStorageMode(
-  db: EventD1Connection,
-  input: {
-    expected: Pick<EventRuntimeControl, "storageMode" | "previousStorageMode">;
-    next: Pick<EventRuntimeControl, "storageMode" | "previousStorageMode">;
-    cutoverAtMs?: number | null;
-    nowMs: number;
-  },
-): Promise<EventRuntimeControl> {
-  safeInteger(input.nowMs, 1);
-  const changed = await db
-    .prepare(
-      `UPDATE event_runtime_control
-       SET storage_mode = ?, previous_storage_mode = ?,
-           cutover_at_ms = COALESCE(?, cutover_at_ms),
-           freeze_generation = CASE
-             WHEN storage_mode != 'frozen' AND ? = 'frozen'
-             THEN freeze_generation + 1
-             ELSE freeze_generation
-           END,
-           verified_import_generation = CASE
-             WHEN storage_mode != 'frozen' AND ? = 'frozen' THEN NULL
-             WHEN storage_mode = 'frozen' AND previous_storage_mode = 'firebase'
-                  AND ? = 'firebase' THEN NULL
-             ELSE verified_import_generation
-           END,
-           updated_at_ms = ?
-       WHERE singleton = 1 AND storage_mode = ?
-         AND previous_storage_mode IS ?`,
-    )
-    .bind(
-      input.next.storageMode,
-      input.next.previousStorageMode,
-      input.cutoverAtMs ?? null,
-      input.next.storageMode,
-      input.next.storageMode,
-      input.next.storageMode,
-      input.nowMs,
-      input.expected.storageMode,
-      input.expected.previousStorageMode,
-    )
-    .run();
-  if (changed.meta.changes !== 1) throw new EventD1Conflict();
-  const control = await readEventRuntimeControl(db);
-  if (!sameControlIdentity(control, input.next)) throw new EventD1Conflict();
-  return control;
-}
-
-export async function writeEventImportMetadata(
-  db: EventD1Connection,
-  input: {
-    expectedStorageMode: EventStorageMode;
-    sourceAssignmentCount: number;
-    sourceDigest: string;
-    sourceEventCount: number;
-    sourceExportedAtMs: number;
-    sourceSelectionCount: number;
-    nowMs: number;
-  },
-): Promise<EventRuntimeControl> {
-  if (!/^[a-f0-9]{64}$/.test(input.sourceDigest)) {
-    throw new EventD1Failure("invalid-event-source-digest");
-  }
-  safeInteger(input.sourceAssignmentCount);
-  safeInteger(input.sourceEventCount);
-  safeInteger(input.sourceExportedAtMs, 1);
-  safeInteger(input.sourceSelectionCount);
-  safeInteger(input.nowMs, 1);
-  const updated = await db
-    .prepare(
-      `UPDATE event_runtime_control
-       SET source_digest = ?, source_event_count = ?,
-           source_selection_count = ?, source_assignment_count = ?,
-           source_exported_at_ms = ?, verified_import_generation = NULL,
-           updated_at_ms = ?
-       WHERE singleton = 1 AND storage_mode = ?`,
-    )
-    .bind(
-      input.sourceDigest,
-      input.sourceEventCount,
-      input.sourceSelectionCount,
-      input.sourceAssignmentCount,
-      input.sourceExportedAtMs,
-      input.nowMs,
-      input.expectedStorageMode,
-    )
-    .run();
-  if (updated.meta.changes !== 1) throw new EventD1Conflict();
-  return readEventRuntimeControl(db);
-}
-
-export async function markEventImportVerified(
-  db: EventD1Connection,
-  input: {
-    expectedFreezeGeneration: number;
-    sourceDigest: string;
-    nowMs: number;
-  },
-): Promise<EventRuntimeControl> {
-  const freezeGeneration = safeInteger(input.expectedFreezeGeneration, 1);
-  const nowMs = safeInteger(input.nowMs, 1);
-  if (!/^[a-f0-9]{64}$/.test(input.sourceDigest)) {
-    throw new EventD1Failure("invalid-event-source-digest");
-  }
-  const updated = await db
-    .prepare(
-      `UPDATE event_runtime_control
-       SET verified_import_generation = freeze_generation, updated_at_ms = ?
-       WHERE singleton = 1
-         AND storage_mode = 'frozen'
-         AND previous_storage_mode = 'firebase'
-         AND freeze_generation = ?
-         AND source_digest = ?
-         AND NOT EXISTS (
-           SELECT 1 FROM event_write_admissions
-         )`,
-    )
-    .bind(nowMs, freezeGeneration, input.sourceDigest)
-    .run();
-  if (updated.meta.changes !== 1) throw new EventD1Conflict();
-  return readEventRuntimeControl(db);
 }
 
 function guardStatement(
@@ -775,10 +603,14 @@ function eventWriteAdmissionGuard(
        FROM event_write_admissions AS admission
        JOIN event_runtime_control AS control ON control.singleton = 1
        WHERE admission.admission_id = ?
-         AND admission.admitted_storage_mode = 'd1'
+         AND admission.freeze_generation = ?
+         AND admission.freeze_generation = control.freeze_generation
+         AND admission.expires_at_ms > CAST(
+           (julianday('now') - 2440587.5) * 86400000 AS INTEGER
+         )
          AND control.storage_mode = 'd1'
      )`,
-    [admission.admissionId],
+    [admission.admissionId, admission.freezeGeneration],
   );
 }
 
@@ -1201,9 +1033,6 @@ async function patchEventOwnedPathsInternal(
   const eventRevisions: Record<string, number> = {};
   const profilePrizeRevisions: Record<string, number> = {};
 
-  if (options.admission.storageMode !== "d1") {
-    throw new EventD1Conflict("event-write-admission-mode-mismatch");
-  }
   guards.push(eventWriteAdmissionGuard(db, options.admission));
   if (options.eventLease) {
     guards.push(eventLeaseGuard(db, options.eventLease));
@@ -1846,9 +1675,6 @@ export async function transactEventCoordinationPath(
   updater: (current: unknown) => EventTransactionDecision,
   options: { admission: EventWriteAdmission },
 ): Promise<{ committed: boolean; decision?: string; value: unknown }> {
-  if (options.admission.storageMode !== "d1") {
-    throw new EventD1Conflict("event-write-admission-mode-mismatch");
-  }
   const runMutation = async (
     statement: D1PreparedStatement,
   ): Promise<D1Result> => {
@@ -2056,9 +1882,6 @@ export async function createEventTransitionIntent(
 ): Promise<void> {
   const intent = validateTransitionIntent(rawIntent);
   const encoded = encodeJson(intent);
-  if (options.admission.storageMode !== "d1") {
-    throw new EventD1Conflict("event-write-admission-mode-mismatch");
-  }
   try {
     await db.batch([
       eventWriteAdmissionGuard(db, options.admission),

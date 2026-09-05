@@ -24,20 +24,6 @@ test("builds the Helius RPC URL from an injected secret value", () => {
   );
 });
 
-test("does not load Solana transfer dependencies with the Functions entry point", () => {
-  const indexPath = path.resolve(__dirname, "../functions/index.js");
-  runModuleLoadingCheck(`
-    require(${JSON.stringify(indexPath)});
-    const loaded = Object.keys(require.cache).filter((modulePath) =>
-      modulePath.includes("/node_modules/@metaplex-foundation/") ||
-      modulePath.includes("/node_modules/@solana/web3.js/")
-    );
-    if (loaded.length > 0) {
-      throw new Error(loaded.join("\\n"));
-    }
-  `);
-});
-
 test("shared Solana loading excludes standard-specific SDKs", () => {
   const withdrawalPath = path.resolve(
     __dirname,

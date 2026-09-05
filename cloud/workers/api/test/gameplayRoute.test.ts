@@ -1,5 +1,6 @@
+import type { TestGameplayRepository as GameplayRepository } from "./wagerFrozenTestUtils.ts";
 import {
-  attachFirebaseWagerFrozenStore,
+  attachMemoryWagerFrozenStore,
   createTestWagerReservationRuntime,
 } from "./wagerFrozenTestUtils.ts";
 import assert from "node:assert/strict";
@@ -15,7 +16,6 @@ import {
 import type { RequestIdentity } from "../src/requestIdentity.ts";
 import type {
   GameplayProfile,
-  GameplayRepository,
   RatingRepository,
 } from "../src/gameplayRepository.ts";
 import type {
@@ -48,11 +48,13 @@ const identity: RequestIdentity = {
 const AUTOMATCH_OPERATION_ID = "00000000-0000-4000-8000-000000000001";
 
 const coordinationByRepository = new WeakMap<
-  GameplayRepository,
+  import("../src/gameplayRepository.ts").GameplayRepository,
   ReturnType<typeof createMemoryGameplayCoordinationStores>
 >();
 
-function coordinationFor(repository: GameplayRepository) {
+function coordinationFor(
+  repository: import("../src/gameplayRepository.ts").GameplayRepository,
+) {
   let coordination = coordinationByRepository.get(repository);
   if (!coordination) {
     coordination = createMemoryGameplayCoordinationStores();
@@ -173,7 +175,7 @@ function repository(
   overrides: Partial<GameplayRepository> = {},
 ): GameplayRepository {
   const transactionValues = new Map<string, unknown>();
-  const value: GameplayRepository = {
+  const value: Omit<GameplayRepository, "getRtdbPath" | "transactRtdbPath"> = {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
@@ -186,9 +188,9 @@ function repository(
       ice: 10,
     }),
     getMiningSnapshot: async () => null,
-    getRtdbPath: async () => null,
+    readState: async () => null,
     patchRtdbRoot: async () => undefined,
-    transactRtdbPath: async (path, updater) => {
+    transactState: async (path, updater) => {
       const current = transactionValues.get(path) ?? null;
       const result = applyTransaction(updater, current);
       if (result.committed) {
@@ -198,17 +200,17 @@ function repository(
     },
     ...overrides,
   };
-  return attachFirebaseWagerFrozenStore(value);
+  return attachMemoryWagerFrozenStore(value);
 }
 
 function wagerRepository(
   overrides: Partial<GameplayRepository> = {},
 ): GameplayRepository {
   const value = repository(overrides);
-  const transactRtdbPath = value.transactRtdbPath;
-  value.transactRtdbPath = async (path, updater, signal) => {
+  const transactState = value.transactState;
+  value.transactState = async (path, updater, signal) => {
     assert.doesNotMatch(path, /^(?:gameplayMutationLocks|matchTimerStarts)\//);
-    return transactRtdbPath(path, updater, signal);
+    return transactState(path, updater, signal);
   };
   return value;
 }
@@ -264,7 +266,7 @@ function miningWithProposal(
       metal: proposal.material === "metal" ? proposal.count : 0,
       ice: proposal.material === "ice" ? proposal.count : 0,
     },
-    _wagerOps: {
+    operations: {
       [proposal.reservationOperationId]: {
         appliedAtMs: 1,
         count: proposal.count,
@@ -315,7 +317,7 @@ test("cancels the deterministic UID automatch with exact v2 multipath updates", 
       readProfileOwnershipSnapshot: async () => {
         throw new Error("D1 should not be read for a direct UID queue");
       },
-      getRtdbPath: async (path, query) => {
+      readState: async (path, query) => {
         if (path === "automatch") {
           assert.deepEqual(query, {
             orderBy: "uid",
@@ -414,7 +416,7 @@ test("cancels every queue owned by merged logins", async () => {
             uid === identity.uid || uid === "alias-uid" ? "profile-1" : null,
           { aliasesByProfileId: { "profile-1": [identity.uid, "alias-uid"] } },
         ),
-      getRtdbPath: async (path, query) => {
+      readState: async (path, query) => {
         if (path === "automatch") {
           const matches = [...queues].filter(
             ([, value]) => value.uid === query?.equalTo,
@@ -457,7 +459,7 @@ test("skips cancellation when a guest wins the invite lease race", async () => {
             uid === identity.uid || uid === "host-uid" ? "profile-1" : null,
           { aliasesByProfileId: { "profile-1": [identity.uid, "host-uid"] } },
         ),
-      getRtdbPath: async (path, query) => {
+      readState: async (path, query) => {
         if (path === "automatch") {
           assert.ok(query);
           return query?.equalTo === "host-uid"
@@ -515,7 +517,7 @@ test("shared cancellation rejects changed queue timestamps and versions", async 
       const result = await cancelAutomatch(
         identity,
         repository({
-          getRtdbPath: async (path, query) => {
+          readState: async (path, query) => {
             if (path === "automatch") {
               assert.deepEqual(query, {
                 orderBy: "uid",
@@ -575,7 +577,7 @@ test("cancels an alternate-login legacy queue without a root scan", async () => 
           },
         );
       },
-      getRtdbPath: async (path, query) => {
+      readState: async (path, query) => {
         if (path === "automatch") {
           queries.push(query);
           return query?.equalTo === "legacy-login" && queueExists
@@ -619,7 +621,7 @@ test("returns false without writes for missing queues and existing guests", asyn
   const missing = await cancelAutomatch(
     identity,
     repository({
-      getRtdbPath: async (path) =>
+      readState: async (path) =>
         path === "players/firebase-uid/profile" ? "profile" : null,
       patchRtdbRoot: async () => {
         patches++;
@@ -631,7 +633,7 @@ test("returns false without writes for missing queues and existing guests", asyn
   const joined = await cancelAutomatch(
     identity,
     repository({
-      getRtdbPath: async (path) => {
+      readState: async (path) => {
         if (path === "players/firebase-uid/profile") return "profile";
         if (path === "automatch") return { invite: {} };
         if (path === "automatch/invite") return {};
@@ -654,7 +656,7 @@ test("keeps legacy automatch cancellation free of Telegram v2 updates", async ()
   const result = await cancelAutomatch(
     identity,
     repository({
-      getRtdbPath: async (path) => {
+      readState: async (path) => {
         if (path === "players/firebase-uid/profile") return "profile";
         if (path === "automatch") {
           return queueExists
@@ -735,7 +737,7 @@ test("preserves every navigation precondition outcome", async () => {
       name: "profile unresolved",
       identity: { uid: "firebase-uid" },
       repo: {
-        getRtdbPath: async () => null,
+        readState: async () => null,
         readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
       },
       expected: {
@@ -748,7 +750,7 @@ test("preserves every navigation precondition outcome", async () => {
     {
       name: "invite missing",
       repo: {
-        getRtdbPath: async (path) =>
+        readState: async (path) =>
           path === "players/firebase-uid/profile" ? "profile-1" : null,
       },
       expected: {
@@ -761,7 +763,7 @@ test("preserves every navigation precondition outcome", async () => {
     {
       name: "invite active",
       repo: {
-        getRtdbPath: async (path) =>
+        readState: async (path) =>
           path === "players/firebase-uid/profile"
             ? "profile-1"
             : path === "invites/invite-1"
@@ -779,7 +781,7 @@ test("preserves every navigation precondition outcome", async () => {
       name: "pending automatch",
       inviteId: "auto_invite1",
       repo: {
-        getRtdbPath: async (path) =>
+        readState: async (path) =>
           path === "players/firebase-uid/profile"
             ? "profile-1"
             : path === "invites/auto_invite1"
@@ -797,7 +799,7 @@ test("preserves every navigation precondition outcome", async () => {
     },
     {
       name: "game missing",
-      repo: { getRtdbPath: basePaths, getNavigationGame: async () => null },
+      repo: { readState: basePaths, getNavigationGame: async () => null },
       expected: {
         ok: true,
         skipped: true,
@@ -809,7 +811,7 @@ test("preserves every navigation precondition outcome", async () => {
     {
       name: "game active",
       repo: {
-        getRtdbPath: basePaths,
+        readState: basePaths,
         getNavigationGame: async () => ({
           status: "active",
         }),
@@ -847,7 +849,7 @@ test("fails closed before removing a D1 game when ownership is unavailable", asy
         identity,
         "invite-1",
         repository({
-          getRtdbPath: async () => {
+          readState: async () => {
             throw new Error("rtdb-unavailable");
           },
           readProfileOwnershipSnapshot: async () => {
@@ -905,7 +907,7 @@ test("routes authenticated CORS and rejects methods before authentication", asyn
     {
       repository: repository({
         readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
-        getRtdbPath: async (path, query) => {
+        readState: async (path, query) => {
           if (path.startsWith("gameplayMutationReceipts/")) {
             return null;
           }
@@ -985,7 +987,7 @@ test("validates automatch operation IDs before the frozen-write gate", async () 
   );
   const dependencies = {
     repository: repository({
-      getRtdbPath: async () => {
+      readState: async () => {
         repositoryReads++;
         return null;
       },
@@ -1052,7 +1054,7 @@ test("rejects a rate-limited automatch start before repository access", async ()
     context(),
     {
       repository: repository({
-        getRtdbPath: async () => {
+        readState: async () => {
           repositoryReads++;
           return null;
         },
@@ -1083,7 +1085,7 @@ test("freezes gameplay mutations while keeping gameplay reads available", async 
     context(),
     {
       repository: repository({
-        getRtdbPath: async () => {
+        readState: async () => {
           repositoryWrites++;
           return null;
         },
@@ -1108,7 +1110,7 @@ test("freezes gameplay mutations while keeping gameplay reads available", async 
     context(),
     {
       repository: repository({
-        getRtdbPath: async (path) =>
+        readState: async (path) =>
           path === `players/${identity.uid}/profile` ? "profile-1" : null,
       }),
       readNavigationPage: async () => ({
@@ -1163,7 +1165,7 @@ test("committed gameplay does not wait for projection Queues", async () => {
       },
       repository: repository({
         readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
-        getRtdbPath: async () => null,
+        readState: async () => null,
       }),
       verifyIdentity: async () => identity,
     },
@@ -1336,7 +1338,7 @@ test("routes authoritative invite role reads without mutation rate limiting", as
                 ? "profile-host"
                 : null,
           ),
-        getRtdbPath: async (path) => {
+        readState: async (path) => {
           if (path === "invites/abcdefghijk") {
             return { hostId: "host-login", guestId: "guest-login" };
           }
@@ -1384,7 +1386,7 @@ test("routes authoritative invite role reads without mutation rate limiting", as
     context(),
     {
       repository: repository({
-        getRtdbPath: async (path) => {
+        readState: async (path) => {
           if (path === "invites/abcdefghijk") {
             return {
               hostId: "host-login",
@@ -1408,7 +1410,7 @@ test("routes authoritative invite role reads without mutation rate limiting", as
     context(),
     {
       repository: repository({
-        getRtdbPath: async () => {
+        readState: async () => {
           throw new Error("rtdb-unavailable");
         },
       }),
@@ -1455,7 +1457,7 @@ test("pending auto-link joins enqueue Telegram projection immediately", async ()
           ownershipForLogins(query, (uid) =>
             uid === identity.uid ? "host-profile" : `profile-${uid}`,
           ),
-        getRtdbPath: async (path) => {
+        readState: async (path) => {
           if (path === `invites/${inviteId}`) {
             return {
               hostId: "host-uid",
@@ -1645,7 +1647,7 @@ test("routes match timer starts with rate limiting and idempotent storage", asyn
   } as Env;
   const paths: string[] = [];
   const timerRepository = repository({
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       paths.push(path);
       if (path === "invites/match-1") {
         return { hostId: identity.uid, guestId: "opponent-uid" };
@@ -1667,7 +1669,7 @@ test("routes match timer starts with rate limiting and idempotent storage", asyn
         timer: "",
       };
     },
-    transactRtdbPath: async (path, updater) => {
+    transactState: async (path, updater) => {
       paths.push(path);
       return applyTransaction(updater, "4;12345");
     },
@@ -1723,7 +1725,7 @@ test("routes timer victory claims with a separate limit and terminal update", as
   let rateLimitKey = "";
   const patches: Array<Record<string, unknown>> = [];
   const timerRepository = repository({
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       assert.doesNotMatch(path, /^matchTimerStarts\//);
       if (path === "invites/match-1") {
         return { hostId: identity.uid, guestId: "opponent-uid" };
@@ -1754,7 +1756,7 @@ test("routes timer victory claims with a separate limit and terminal update", as
       );
       patches.push(updates);
     },
-    transactRtdbPath: async (path, updater) => {
+    transactState: async (path, updater) => {
       assert.doesNotMatch(path, /^matchTimerStarts\//);
       return applyTransaction(updater, {
         color: "black",
@@ -1848,7 +1850,7 @@ test("rejects rate-limited timer claims before repository access", async () => {
     context(),
     {
       repository: repository({
-        getRtdbPath: async () => {
+        readState: async () => {
           reads++;
           return null;
         },
@@ -1881,7 +1883,7 @@ test("sanitizes timer claim repository failures", async () => {
     {
       logFailure: (kind) => failures.push(kind),
       repository: repository({
-        getRtdbPath: async (path) => {
+        readState: async (path) => {
           if (path === "invites/match-1") {
             return { hostId: identity.uid, guestId: "opponent-uid" };
           }
@@ -1904,7 +1906,7 @@ test("sanitizes timer claim repository failures", async () => {
         patchRtdbRoot: async () => {
           throw new Error("private-rtdb-detail");
         },
-        transactRtdbPath: async (_path, updater) =>
+        transactState: async (_path, updater) =>
           applyTransaction(updater, {
             color: "black",
             fen: "player-fen",
@@ -1954,7 +1956,7 @@ test("rejects rate-limited match timers before repository access", async () => {
     context(),
     {
       repository: repository({
-        getRtdbPath: async () => {
+        readState: async () => {
           reads++;
           return null;
         },
@@ -2029,15 +2031,15 @@ test("routes wager cancellation and decline to their exact proposal owners", asy
         repository: wagerRepository({
           readProfileOwnershipSnapshot: async (query) =>
             ownershipForLogins(query, (uid) => `profile-${uid}`),
-          getRtdbPath: async (readPath) => {
+          readState: async (readPath) => {
             if (readPath === "invites/invite") {
               return { hostId: "host", guestId: "guest" };
             }
-            if (readPath === "players/host/mining") return mining.host;
-            if (readPath === "players/guest/mining") return mining.guest;
+            if (readPath === "reservations/host") return mining.host;
+            if (readPath === "reservations/guest") return mining.guest;
             return wager;
           },
-          transactRtdbPath: async (transactionPath, updater) => {
+          transactState: async (transactionPath, updater) => {
             transactionPaths.push(transactionPath);
             const uid = transactionPath.includes("/host/") ? "host" : "guest";
             const current = transactionPath.startsWith("invites/")
@@ -2063,13 +2065,13 @@ test("routes wager cancellation and decline to their exact proposal owners", asy
 
   assert.deepEqual(await run("/wagers/proposals/cancel"), [
     "invites/invite/wagers/match",
-    "players/host/mining",
-    "players/host/mining",
+    "reservations/host",
+    "reservations/host",
   ]);
   assert.deepEqual(await run("/wagers/proposals/decline"), [
     "invites/invite/wagers/match",
-    "players/guest/mining",
-    "players/guest/mining",
+    "reservations/guest",
+    "reservations/guest",
   ]);
 });
 
@@ -2092,11 +2094,11 @@ test("routes wager send and accept through the authenticated gameplay surface", 
         getMiningMaterials: async (_profileId) => {
           return { dust: 2, slime: 0, gum: 0, metal: 0, ice: 0 };
         },
-        getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
-        transactRtdbPath: async (path, updater) =>
+        readState: async () => ({ hostId: "host", guestId: "guest" }),
+        transactState: async (path, updater) =>
           applyTransaction(
             updater,
-            path.startsWith("players/")
+            path.startsWith("reservations/")
               ? {
                   frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
                 }
@@ -2135,27 +2137,28 @@ test("routes wager send and accept through the authenticated gameplay surface", 
           metal: 0,
           ice: 0,
         }),
-        getRtdbPath: async (path) => {
+        readState: async (path) => {
           if (path === "invites/invite") {
             return { hostId: "host", guestId: "guest" };
           }
-          if (path === "players/host/mining") return acceptMining;
-          if (path === "players/guest/mining") return guestMining;
+          if (path === "reservations/host") return acceptMining;
+          if (path === "reservations/guest") return guestMining;
           return acceptWager;
         },
-        transactRtdbPath: async (path, updater) => {
-          const isGuestMining = path === "players/guest/mining";
+        transactState: async (path, updater) => {
+          const isGuestMining = path === "reservations/guest";
           const result = applyTransaction(
             updater,
             isGuestMining
               ? guestMining
-              : path.startsWith("players/")
+              : path.startsWith("reservations/")
                 ? acceptMining
                 : acceptWager,
           );
           if (result.committed) {
             if (isGuestMining) guestMining = result.value;
-            else if (path.startsWith("players/")) acceptMining = result.value;
+            else if (path.startsWith("reservations/"))
+              acceptMining = result.value;
             else acceptWager = result.value;
           }
           return result;
@@ -2186,7 +2189,7 @@ test("rejects an unsafe wager count before repository work", async () => {
     context(),
     {
       repository: wagerRepository({
-        getRtdbPath: async () => {
+        readState: async () => {
           reads += 1;
           return null;
         },
@@ -2209,7 +2212,7 @@ test("returns wager permission and infrastructure failures without details", asy
       repository: wagerRepository({
         readProfileOwnershipSnapshot: async (query) =>
           ownershipForLogins(query, (uid) => `profile-${uid}`),
-        getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
+        readState: async () => ({ hostId: "host", guestId: "guest" }),
       }),
       verifyIdentity: async () => ({
         uid: "other",
@@ -2240,24 +2243,24 @@ test("returns wager permission and infrastructure failures without details", asy
       repository: wagerRepository({
         readProfileOwnershipSnapshot: async (query) =>
           ownershipForLogins(query, (uid) => `profile-${uid}`),
-        getRtdbPath: async (path) => {
+        readState: async (path) => {
           if (path === "invites/invite") {
             return { hostId: "host", guestId: "guest" };
           }
-          if (path === "players/host/mining") return failureMining;
+          if (path === "reservations/host") return failureMining;
           return failureWager;
         },
-        transactRtdbPath: async (path, updater) => {
+        transactState: async (path, updater) => {
           transactions++;
           if (transactions === 3) {
             throw new Error("private-upstream-detail");
           }
-          const current = path.startsWith("players/")
+          const current = path.startsWith("reservations/")
             ? failureMining
             : failureWager;
           const result = applyTransaction(updater, current);
           if (result.committed) {
-            if (path.startsWith("players/")) failureMining = result.value;
+            if (path.startsWith("reservations/")) failureMining = result.value;
             else failureWager = result.value;
           }
           return result;
@@ -2308,22 +2311,22 @@ test("returns wager permission and infrastructure failures without details", asy
           metal: 0,
           ice: 0,
         }),
-        getRtdbPath: async (path) => {
+        readState: async (path) => {
           if (path === "invites/invite") {
             return { hostId: "host", guestId: "guest" };
           }
-          if (path === "players/host/mining") return sendMining;
+          if (path === "reservations/host") return sendMining;
           if (path === "invites/invite/wagers/match") {
             return { proposedBy: { host: true } };
           }
           return null;
         },
-        transactRtdbPath: async (path, updater) => {
+        transactState: async (path, updater) => {
           sendTransactions++;
           if (sendTransactions === 3) {
             throw new Error("private-rollback-detail");
           }
-          if (path === "players/host/mining") {
+          if (path === "reservations/host") {
             const result = applyTransaction(updater, sendMining);
             if (result.committed) sendMining = result.value;
             return result;
@@ -2354,7 +2357,7 @@ test("authenticates before body parsing and sanitizes route failures", async () 
     context(),
     {
       repository: repository({
-        getRtdbPath: async () => {
+        readState: async () => {
           repositoryReads++;
           return null;
         },
@@ -2513,7 +2516,7 @@ test("authenticates before body parsing and sanitizes route failures", async () 
     {
       logFailure: (kind) => failures.push(kind),
       repository: repository({
-        getRtdbPath: async () => {
+        readState: async () => {
           throw new Error("private-upstream-detail");
         },
         readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
@@ -2555,7 +2558,7 @@ test("reads only the authenticated caller profile from D1", async () => {
       repository: repository({
         readProfileOwnershipSnapshot: async (query) =>
           ownershipForLogins(query, () => "profile-from-d1"),
-        getRtdbPath: async (path) => {
+        readState: async (path) => {
           assert.fail(`unexpected RTDB read ${path}`);
         },
       }),
@@ -2590,7 +2593,7 @@ test("fails closed when navigation profile ownership is unavailable", async () =
     context(),
     {
       repository: repository({
-        getRtdbPath: async () => {
+        readState: async () => {
           throw new Error("rtdb-unavailable");
         },
         readProfileOwnershipSnapshot: async () => {

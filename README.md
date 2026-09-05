@@ -18,7 +18,7 @@ The frontend Worker is configured by `wrangler.jsonc`. The API Worker has its in
 
 ## Setup and development
 
-Use Node.js 24 and Java 21 or newer, then install the pinned root and Functions dependencies:
+Use Node.js 24 and Java 21 or newer, then install the pinned root and portable backend dependencies:
 
 ```sh
 npm ci
@@ -42,16 +42,14 @@ Copy `.env.example` to `.env.local` only when local overrides are needed. Local 
 
 ### API and tooling
 
-| Command                                              | Purpose                                                                                                                  |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `npm run check:api`                                  | Format, lint, typecheck, test, type-generation check, and dry-run the API Worker.                                        |
-| `npm run check:tooling`                              | Validate deployment drivers, project contracts, admin parsing, repository cleanup fixtures, and dependency architecture. |
-| `npm run migrate:gameplay-coordination -- --preview` | Compare RTDB and D1 coordination snapshots without remote writes.                                                        |
-| `npm run migrate:profile-link-catchup -- --preview`  | Inspect the retained profile-link outbox and rebuild its D1 import plan from canonical ownership without remote writes.  |
-| `npm run manage:profile-canonical -- --status`       | Read the canonical D1 writer-control state without exposing profile data.                                                |
-| `npm run test:database-rules`                        | Run structural gameplay authorization against the Realtime Database emulator.                                            |
-| `npm run check:all`                                  | Run the repository-wide validation gate, including portable cloud runtime tests.                                         |
-| `npm run format:check`                               | Check repository formatting without writing files.                                                                       |
+| Command                                        | Purpose                                                                                                                  |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `npm run check:api`                            | Format, lint, typecheck, test, type-generation check, and dry-run the API Worker.                                        |
+| `npm run check:tooling`                        | Validate deployment drivers, project contracts, admin parsing, repository cleanup fixtures, and dependency architecture. |
+| `npm run manage:profile-canonical -- --status` | Read the canonical D1 writer-control state without exposing profile data.                                                |
+| `npm run test:database-rules`                  | Run structural gameplay authorization against the Realtime Database emulator.                                            |
+| `npm run check:all`                            | Run the repository-wide validation gate, including portable cloud runtime tests.                                         |
+| `npm run format:check`                         | Check repository formatting without writing files.                                                                       |
 
 ### Deployment and maintenance
 

@@ -7,23 +7,7 @@ const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 
 const functionsDirectory = path.resolve(__dirname, "../functions");
-const functionsIndexPath = path.join(functionsDirectory, "index.js");
 const sharedDirectory = path.join(functionsDirectory, "shared");
-
-const callableExportNames = [];
-
-const httpExportNames = [];
-
-const taskQueueExportNames = [];
-
-const eventExportNames = [];
-
-const expectedExportNames = [
-  ...callableExportNames,
-  ...httpExportNames,
-  ...taskQueueExportNames,
-  ...eventExportNames,
-].sort();
 
 const expectedSharedExports = {
   "./auth": "./auth.js",
@@ -46,119 +30,6 @@ const expectedSharedExports = {
   "./x-redirect": "./x-redirect.js",
 };
 
-const isResetValue = (value) => value?.constructor?.name === "ResetValue";
-
-const compactObject = (value) =>
-  Object.fromEntries(
-    Object.entries(value).filter(
-      ([, entry]) =>
-        entry !== null && entry !== undefined && !isResetValue(entry),
-    ),
-  );
-
-const runtimeContract = (trigger, config = {}) => ({
-  platform: "gcfv2",
-  trigger,
-  config,
-});
-
-const callableContract = (config = {}) =>
-  runtimeContract({ type: "callable" }, config);
-
-const eventContract = ({ eventType, pathPatterns, retry, filters }) =>
-  runtimeContract({
-    type: "event",
-    eventType,
-    pathPatterns,
-    retry,
-    ...(filters ? { filters } : {}),
-  });
-
-const taskQueueContract = (config, retry, rateLimits) =>
-  runtimeContract(
-    {
-      type: "taskQueue",
-      retry,
-      rateLimits,
-    },
-    config,
-  );
-
-const expectedEndpointContracts = Object.fromEntries(
-  callableExportNames.map((name) => [name, callableContract()]),
-);
-
-const normalizeEndpoint = (endpoint) => {
-  const config = compactObject({
-    availableMemoryMb: endpoint.availableMemoryMb,
-    timeoutSeconds: endpoint.timeoutSeconds,
-    minInstances: endpoint.minInstances,
-    maxInstances: endpoint.maxInstances,
-    concurrency: endpoint.concurrency,
-    cpu: endpoint.cpu,
-    ingressSettings: endpoint.ingressSettings,
-    serviceAccountEmail: endpoint.serviceAccountEmail,
-    vpc: endpoint.vpc,
-  });
-
-  if (endpoint.secretEnvironmentVariables?.length) {
-    config.secrets = endpoint.secretEnvironmentVariables
-      .map(({ key }) => key)
-      .sort();
-  }
-
-  if (Object.keys(endpoint.labels || {}).length) {
-    config.labels = endpoint.labels;
-  }
-
-  let trigger;
-  if (endpoint.callableTrigger) {
-    trigger = { type: "callable" };
-  } else if (endpoint.httpsTrigger) {
-    trigger = {
-      type: "http",
-      invoker: [...(endpoint.httpsTrigger.invoker || [])].sort(),
-    };
-  } else if (endpoint.taskQueueTrigger) {
-    trigger = {
-      type: "taskQueue",
-      retry: compactObject(endpoint.taskQueueTrigger.retryConfig || {}),
-      rateLimits: compactObject(endpoint.taskQueueTrigger.rateLimits || {}),
-    };
-  } else if (endpoint.eventTrigger) {
-    const filters = endpoint.eventTrigger.eventFilters || {};
-    trigger = {
-      type: "event",
-      eventType: endpoint.eventTrigger.eventType,
-      pathPatterns: endpoint.eventTrigger.eventFilterPathPatterns || {},
-      retry: endpoint.eventTrigger.retry,
-      ...(Object.keys(filters).length ? { filters } : {}),
-    };
-  } else {
-    throw new Error("Unsupported Firebase endpoint trigger");
-  }
-
-  return runtimeContract(trigger, config);
-};
-
-test("preserves the Firebase deployment export ABI", () => {
-  const deployedFunctions = require(functionsIndexPath);
-  assert.equal(expectedExportNames.length, 0);
-  assert.deepEqual(Object.keys(deployedFunctions).sort(), expectedExportNames);
-});
-
-test("preserves normalized Firebase endpoint contracts", () => {
-  const deployedFunctions = require(functionsIndexPath);
-  const actualContracts = Object.fromEntries(
-    Object.entries(deployedFunctions).map(([name, callable]) => [
-      name,
-      normalizeEndpoint(callable.__endpoint),
-    ]),
-  );
-
-  assert.deepEqual(actualContracts, expectedEndpointContracts);
-});
-
 test("preserves the @mons/shared subpath export map and declarations", () => {
   const packageJson = JSON.parse(
     fs.readFileSync(path.join(sharedDirectory, "package.json"), "utf8"),
@@ -175,9 +46,9 @@ test("preserves the @mons/shared subpath export map and declarations", () => {
   }
 });
 
-test("keeps standard-specific Solana SDKs out of entry-point loading", () => {
+test("keeps standard-specific Solana SDKs out of portable module loading", () => {
   const script = `
-    require(${JSON.stringify(functionsIndexPath)});
+    require(${JSON.stringify(path.join(functionsDirectory, "eventPrizes/solana.js"))});
     const forbidden = [
       "/node_modules/@metaplex-foundation/mpl-core/",
       "/node_modules/@metaplex-foundation/mpl-bubblegum/",

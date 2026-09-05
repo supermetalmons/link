@@ -1,4 +1,4 @@
-import { attachFirebaseWagerFrozenStore } from "./wagerFrozenTestUtils.ts";
+import { attachMemoryWagerFrozenStore } from "./wagerFrozenTestUtils.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -12,7 +12,7 @@ import {
 } from "@mons/shared/wagers";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import type { RequestIdentity } from "../src/requestIdentity.ts";
-import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type { TestGameplayRepository as GameplayRepository } from "./wagerFrozenTestUtils.ts";
 import type {
   ProfileOwnershipQuery,
   ProfileOwnershipSnapshot,
@@ -37,11 +37,13 @@ const identity: RequestIdentity = {
 };
 
 const coordinationByRepository = new WeakMap<
-  GameplayRepository,
+  import("../src/gameplayRepository.ts").GameplayRepository,
   ReturnType<typeof createMemoryGameplayCoordinationStores>
 >();
 
-function coordinationFor(repository: GameplayRepository) {
+function coordinationFor(
+  repository: import("../src/gameplayRepository.ts").GameplayRepository,
+) {
   let coordination = coordinationByRepository.get(repository);
   if (!coordination) {
     coordination = createMemoryGameplayCoordinationStores();
@@ -154,10 +156,10 @@ function ownershipSnapshot(
 function repository(
   overrides: Partial<GameplayRepository> = {},
 ): GameplayRepository {
-  const transactRtdbPath =
-    overrides.transactRtdbPath ||
+  const transactState =
+    overrides.transactState ||
     (async () => ({ committed: false, value: null }));
-  const value: GameplayRepository = {
+  const value: Omit<GameplayRepository, "getRtdbPath" | "transactRtdbPath"> = {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     getNavigationGame: async () => null,
@@ -169,19 +171,19 @@ function repository(
       ice: 10,
     }),
     getMiningSnapshot: async () => null,
-    getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
+    readState: async () => ({ hostId: "host", guestId: "guest" }),
     patchRtdbRoot: async () => undefined,
     readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
     ...overrides,
-    transactRtdbPath: async (path, updater, signal) => {
+    transactState: async (path, updater, signal) => {
       assert.doesNotMatch(
         path,
         /^(?:gameplayMutationLocks|matchTimerStarts)\//,
       );
-      return transactRtdbPath(path, updater, signal);
+      return transactState(path, updater, signal);
     },
   };
-  return attachFirebaseWagerFrozenStore(value);
+  return attachMemoryWagerFrozenStore(value);
 }
 
 function applyTransaction(
@@ -263,7 +265,7 @@ function installSendReservation(
 ): Record<string, unknown> {
   const mining = miningValue as Record<string, unknown>;
   const root = "frozen" in mining ? mining : { frozen: mining };
-  const operations = ((root as Record<string, unknown>)._wagerOps ||=
+  const operations = ((root as Record<string, unknown>).operations ||=
     {}) as Record<string, unknown>;
   operations[proposal.reservationOperationId] = {
     appliedAtMs,
@@ -435,8 +437,8 @@ test("send reserves materials and persists an exact proposal", async () => {
     identity,
     { inviteId: "invite", matchId: "match", material: "dust", count: 4 },
     repository({
-      transactRtdbPath: async (path, updater) => {
-        const transaction = path.startsWith("players/")
+      transactState: async (path, updater) => {
+        const transaction = path.startsWith("reservations/")
           ? applyMiningTransaction(updater, {
               dust: 1,
               slime: 0,
@@ -454,7 +456,7 @@ test("send reserves materials and persists an exact proposal", async () => {
   assert.deepEqual(result, { ok: true, count: 4 });
   assert.deepEqual(
     transactions.map(({ path }) => path),
-    ["players/host/mining", "invites/invite/wagers/match"],
+    ["reservations/host", "invites/invite/wagers/match"],
   );
   assert.deepEqual(materialsOnly(transactions[0].value), {
     dust: 5,
@@ -481,8 +483,8 @@ test("send fences its initial reservation with a fresh critical-phase signal", a
     identity,
     { inviteId: "invite", matchId: "match", material: "dust", count: 1 },
     repository({
-      transactRtdbPath: async (path, updater, signal) => {
-        if (path.startsWith("players/")) {
+      transactState: async (path, updater, signal) => {
+        if (path.startsWith("reservations/")) {
           miningSignals.push(signal);
           return applyMiningTransaction(updater, {
             dust: 0,
@@ -518,25 +520,27 @@ test("send creates an automatic agreement and normalizes both reservations", asy
     identity,
     { inviteId: "invite", matchId: "match", material: "dust", count: 4 },
     repository({
-      getRtdbPath: async (path) => {
+      readState: async (path) => {
         if (path === "invites/invite") {
           return { hostId: "host", guestId: "guest" };
         }
-        const uid = path.includes("/host/")
-          ? "host"
-          : path.includes("/guest/")
-            ? "guest"
-            : null;
+        const uid =
+          path.split("/")[1] === "host"
+            ? "host"
+            : path.split("/")[1] === "guest"
+              ? "guest"
+              : null;
         return uid ? mining[uid] : wager;
       },
-      transactRtdbPath: async (path, updater) => {
-        const uid = path.includes("/host/")
-          ? "host"
-          : path.includes("/guest/")
-            ? "guest"
-            : null;
+      transactState: async (path, updater) => {
+        const uid =
+          path.split("/")[1] === "host"
+            ? "host"
+            : path.split("/")[1] === "guest"
+              ? "guest"
+              : null;
         const current = uid ? mining[uid] : wager;
-        const transaction = path.startsWith("players/")
+        const transaction = path.startsWith("reservations/")
           ? applyMiningTransaction(updater, current)
           : applyTransaction(updater, current);
         if (transaction.committed) {
@@ -564,9 +568,9 @@ test("send creates an automatic agreement and normalizes both reservations", asy
   assert.deepEqual(
     transactions.map(({ path }) => path),
     [
-      "players/host/mining",
+      "reservations/host",
       "invites/invite/wagers/match",
-      "players/guest/mining",
+      "reservations/guest",
       "invites/invite/wagers/match",
     ],
   );
@@ -583,8 +587,8 @@ test("send rolls back its reservation when the proposal is unavailable", async (
   const frozenValues: unknown[] = [];
   let frozen = { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 };
   const repo = repository({
-    transactRtdbPath: async (path, updater) => {
-      if (path.startsWith("players/")) {
+    transactState: async (path, updater) => {
+      if (path.startsWith("reservations/")) {
         const transaction = applyMiningTransaction(updater, frozen);
         frozen = transaction.value as typeof frozen;
         frozenValues.push(frozen);
@@ -623,7 +627,7 @@ test("send rejects a canonical reservation ID with the wrong operation kind", as
   );
   const mining = {
     frozen: { dust: 1, slime: 0, gum: 0, metal: 0, ice: 0 },
-    _wagerOps: {
+    operations: {
       [reservationOperationId]: {
         appliedAtMs: 1,
         count: 1,
@@ -647,14 +651,14 @@ test("send rejects a canonical reservation ID with the wrong operation kind", as
       identity,
       { inviteId: "invite", matchId: "match", material: "dust", count: 1 },
       repository({
-        getRtdbPath: async (path) =>
+        readState: async (path) =>
           path === "invites/invite"
             ? { hostId: "host", guestId: "guest" }
-            : path.startsWith("players/")
+            : path.startsWith("reservations/")
               ? mining
               : null,
-        transactRtdbPath: async (path, updater) => {
-          if (path.startsWith("players/")) miningWrites += 1;
+        transactState: async (path, updater) => {
+          if (path.startsWith("reservations/")) miningWrites += 1;
           return applyTransaction(updater, mining);
         },
       }),
@@ -671,21 +675,21 @@ test("automatic agreement rejects a proposal without its active reservation", as
     identity,
     { inviteId: "invite", matchId: "match", material: "dust", count: 2 },
     repository({
-      getRtdbPath: async (path) => {
+      readState: async (path) => {
         if (path === "invites/invite") {
           return { hostId: "host", guestId: "guest" };
         }
-        if (path === "players/host/mining") {
+        if (path === "reservations/host") {
           return { frozen: createEmptyMaterials() };
         }
-        if (path === "players/guest/mining") {
+        if (path === "reservations/guest") {
           return {
             frozen: { ...createEmptyMaterials(), dust: 2 },
           };
         }
         return { proposals: { guest: guestProposal } };
       },
-      transactRtdbPath: async () => {
+      transactState: async () => {
         transactions += 1;
         return { committed: false, value: null };
       },
@@ -723,25 +727,26 @@ test("accept reserves the available count and clears both proposals", async () =
         metal: 0,
         ice: 2,
       }),
-      getRtdbPath: async (path) => {
+      readState: async (path) => {
         if (path === "invites/invite") {
           return { hostId: "host", guestId: "guest" };
         }
-        if (path === "players/host/mining") return mining.host;
-        if (path === "players/guest/mining") return mining.guest;
+        if (path === "reservations/host") return mining.host;
+        if (path === "reservations/guest") return mining.guest;
         return wager;
       },
       patchRtdbRoot: async (updates) => {
         patches.push(updates);
       },
-      transactRtdbPath: async (path, updater) => {
-        const uid = path.includes("/host/")
-          ? "host"
-          : path.includes("/guest/")
-            ? "guest"
-            : null;
+      transactState: async (path, updater) => {
+        const uid =
+          path.split("/")[1] === "host"
+            ? "host"
+            : path.split("/")[1] === "guest"
+              ? "guest"
+              : null;
         const current = uid ? mining[uid] : wager;
-        const transaction = path.startsWith("players/")
+        const transaction = path.startsWith("reservations/")
           ? applyMiningTransaction(updater, current)
           : applyTransaction(updater, current);
         if (transaction.committed) {
@@ -758,9 +763,9 @@ test("accept reserves the available count and clears both proposals", async () =
   assert.deepEqual(
     transactions.map(({ path }) => path),
     [
-      "players/host/mining",
+      "reservations/host",
       "invites/invite/wagers/match",
-      "players/guest/mining",
+      "reservations/guest",
       "invites/invite/wagers/match",
     ],
   );
@@ -805,16 +810,16 @@ test("accept rolls back its exact reservation after an agreement race", async ()
     identity,
     { inviteId: "invite", matchId: "match" },
     repository({
-      getRtdbPath: async (path) => {
+      readState: async (path) => {
         if (path === "invites/invite") {
           return { hostId: "host", guestId: "guest" };
         }
-        if (path === "players/host/mining") return frozen;
-        if (path === "players/guest/mining") return guestMining;
+        if (path === "reservations/host") return frozen;
+        if (path === "reservations/guest") return guestMining;
         return { proposals: { guest: guestProposal } };
       },
-      transactRtdbPath: async (path, updater) => {
-        if (!path.startsWith("players/")) {
+      transactState: async (path, updater) => {
+        if (!path.startsWith("reservations/")) {
           return applyTransaction(updater, {
             agreed: { material: "dust", count: 3 },
             proposals: { guest: guestProposal },
@@ -841,21 +846,21 @@ test("accept rejects a proposal without its active reservation", async () => {
     identity,
     { inviteId: "invite", matchId: "match" },
     repository({
-      getRtdbPath: async (path) => {
+      readState: async (path) => {
         if (path === "invites/invite") {
           return { hostId: "host", guestId: "guest" };
         }
-        if (path === "players/host/mining") {
+        if (path === "reservations/host") {
           return { frozen: createEmptyMaterials() };
         }
-        if (path === "players/guest/mining") {
+        if (path === "reservations/guest") {
           return {
             frozen: { ...createEmptyMaterials(), dust: 2 },
           };
         }
         return { proposals: { guest: guestProposal } };
       },
-      transactRtdbPath: async () => {
+      transactState: async () => {
         transactions += 1;
         return { committed: false, value: null };
       },
@@ -871,11 +876,11 @@ test("send and accept preserve exact domain failure reasons", async () => {
     expected: unknown;
   }> = [
     {
-      repo: { getRtdbPath: async () => null },
+      repo: { readState: async () => null },
       expected: { ok: false, reason: "invite-not-found" },
     },
     {
-      repo: { getRtdbPath: async () => ({ hostId: "host" }) },
+      repo: { readState: async () => ({ hostId: "host" }) },
       expected: { ok: false, reason: "missing-opponent" },
     },
     {
@@ -894,7 +899,7 @@ test("send and accept preserve exact domain failure reasons", async () => {
           metal: 0,
           ice: 0,
         }),
-        transactRtdbPath: async (_path, updater) =>
+        transactState: async (_path, updater) =>
           applyTransaction(updater, null),
       },
       expected: { ok: false, reason: "insufficient-materials" },
@@ -928,7 +933,7 @@ test("send and accept preserve exact domain failure reasons", async () => {
         identity,
         { inviteId: "invite", matchId: "match" },
         repository({
-          getRtdbPath: async () => {
+          readState: async () => {
             reads++;
             return reads <= 2 ? { hostId: "host", guestId: "guest" } : wager;
           },
@@ -955,14 +960,14 @@ test("send and accept preserve exact domain failure reasons", async () => {
           metal: 0,
           ice: 0,
         }),
-        getRtdbPath: async (path) => {
+        readState: async (path) => {
           if (path === "invites/invite") {
             return { hostId: "host", guestId: "guest" };
           }
-          if (path === "players/guest/mining") return unavailableMining;
+          if (path === "reservations/guest") return unavailableMining;
           return { proposals: { guest: unavailableProposal } };
         },
-        transactRtdbPath: async (_path, updater) =>
+        transactState: async (_path, updater) =>
           applyTransaction(updater, null),
       }),
     ),
@@ -978,13 +983,13 @@ test("same-canonical participants cannot create or accept a wager", async () => 
       miningReads++;
       return { dust: 10, slime: 10, gum: 10, metal: 10, ice: 10 };
     },
-    getRtdbPath: async (path) =>
+    readState: async (path) =>
       path === "invites/invite"
         ? { hostId: "host", guestId: "guest" }
         : { proposals: { guest: { material: "dust", count: 1 } } },
     readProfileOwnershipSnapshot: async (query) =>
       ownershipSnapshot(query, () => "shared-profile"),
-    transactRtdbPath: async () => {
+    transactState: async () => {
       transactions++;
       return { committed: false, value: null };
     },
@@ -1024,11 +1029,11 @@ test("releases a stranded send reservation after participants merge", async () =
     frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
   };
   const value = repository({
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       if (path === "invites/invite") {
         return { hostId: "host", guestId: "guest" };
       }
-      if (path === "players/host/mining") return miningState;
+      if (path === "reservations/host") return miningState;
       if (path === "invites/invite/wagers/match") {
         wagerReads += 1;
         if (failWagerRead && wagerReads > 1) {
@@ -1044,8 +1049,8 @@ test("releases a stranded send reservation after participants merge", async () =
         merged ? "shared-profile" : `profile-${uid}`,
       );
     },
-    transactRtdbPath: async (path, updater) => {
-      if (path === "players/host/mining") {
+    transactState: async (path, updater) => {
+      if (path === "reservations/host") {
         const transaction = applyMiningTransaction(updater, miningState);
         if (transaction.committed) miningState = transaction.value;
         return transaction;
@@ -1089,11 +1094,11 @@ test("changed send input replaces an unreferenced stranded reservation", async (
   let failWagerRead = true;
   let wagerReads = 0;
   const value = repository({
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       if (path === "invites/invite") {
         return { hostId: "host", guestId: "guest" };
       }
-      if (path === "players/host/mining") return miningState;
+      if (path === "reservations/host") return miningState;
       if (path === "invites/invite/wagers/match") {
         wagerReads += 1;
         if (failWagerRead && wagerReads > 1) {
@@ -1103,8 +1108,8 @@ test("changed send input replaces an unreferenced stranded reservation", async (
       }
       return null;
     },
-    transactRtdbPath: async (path, updater) => {
-      if (path === "players/host/mining") {
+    transactState: async (path, updater) => {
+      if (path === "reservations/host") {
         const transaction = applyMiningTransaction(updater, miningState);
         if (transaction.committed) miningState = transaction.value;
         return transaction;
@@ -1168,7 +1173,7 @@ test("changed send cleanup cannot release a competing proposal", async () => {
   let wager: unknown = null;
   let miningState: unknown = {
     frozen: { dust: 3, slime: 0, gum: 0, metal: 0, ice: 0 },
-    _wagerOps: {
+    operations: {
       [reservationOperationId]: {
         appliedAtMs: 1,
         count: 3,
@@ -1187,15 +1192,15 @@ test("changed send cleanup cannot release a competing proposal", async () => {
   });
   let pauseCleanup = true;
   const repo = repository({
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       if (path === "invites/invite") {
         return { hostId: "host", guestId: "guest" };
       }
-      if (path === "players/host/mining") return miningState;
+      if (path === "reservations/host") return miningState;
       return wager;
     },
-    transactRtdbPath: async (path, updater) => {
-      if (path === "players/host/mining") {
+    transactState: async (path, updater) => {
+      if (path === "reservations/host") {
         if (pauseCleanup) {
           cleanupStarted?.();
           await cleanupGate;
@@ -1266,7 +1271,7 @@ test("replay fences a reservation against a delayed cleanup commit", async () =>
   let wager: unknown = null;
   let miningState: unknown = {
     frozen: { dust: 3, slime: 0, gum: 0, metal: 0, ice: 0 },
-    _wagerOps: {
+    operations: {
       [reservationOperationId]: {
         appliedAtMs: 1,
         count: 3,
@@ -1279,15 +1284,15 @@ test("replay fences a reservation against a delayed cleanup commit", async () =>
   let delayedCleanup: { expectedRevision: number; value: unknown } | undefined;
   let delayNextMiningCommit = true;
   const repo = repository({
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       if (path === "invites/invite") {
         return { hostId: "host", guestId: "guest" };
       }
-      if (path === "players/host/mining") return miningState;
+      if (path === "reservations/host") return miningState;
       return wager;
     },
-    transactRtdbPath: async (path, updater) => {
-      if (path === "players/host/mining") {
+    transactState: async (path, updater) => {
+      if (path === "reservations/host") {
         const result = applyMiningTransaction(updater, miningState);
         if (delayNextMiningCommit) {
           delayNextMiningCommit = false;
@@ -1350,7 +1355,7 @@ test("replay fences a reservation against a delayed cleanup commit", async () =>
   assert.equal(materialsOnly(miningState).dust, 3);
   assert.ok(
     (
-      (miningState as Record<string, unknown>)._wagerOps as Record<
+      (miningState as Record<string, unknown>).operations as Record<
         string,
         unknown
       >
@@ -1373,7 +1378,7 @@ test("ambiguous replay accepts a newer exact reservation fence", async () => {
   let wager: unknown = null;
   let miningState: unknown = {
     frozen: { dust: 1, slime: 0, gum: 0, metal: 0, ice: 0 },
-    _wagerOps: {
+    operations: {
       [reservationOperationId]: {
         appliedAtMs: 1,
         count: 1,
@@ -1384,21 +1389,21 @@ test("ambiguous replay accepts a newer exact reservation fence", async () => {
   };
   let loseReplayResponse = true;
   const repo = repository({
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       if (path === "invites/invite") {
         return { hostId: "host", guestId: "guest" };
       }
-      if (path === "players/host/mining") return miningState;
+      if (path === "reservations/host") return miningState;
       return wager;
     },
-    transactRtdbPath: async (path, updater) => {
-      if (path === "players/host/mining") {
+    transactState: async (path, updater) => {
+      if (path === "reservations/host") {
         const result = applyMiningTransaction(updater, miningState);
         if (result.committed) miningState = result.value;
         if (loseReplayResponse) {
           loseReplayResponse = false;
           const operations = (miningState as Record<string, unknown>)
-            ._wagerOps as Record<string, Record<string, unknown>> | undefined;
+            .operations as Record<string, Record<string, unknown>> | undefined;
           assert.ok(operations?.[reservationOperationId]);
           operations[reservationOperationId].appliedAtMs =
             Number(operations[reservationOperationId].appliedAtMs) + 1;
@@ -1446,7 +1451,7 @@ test("expired wager holder cannot clean up after a lease takeover", async () => 
   const mining: Record<string, unknown> = {
     host: {
       frozen: { dust: 3, slime: 0, gum: 0, metal: 0, ice: 0 },
-      _wagerOps: {
+      operations: {
         [reservationOperationId]: {
           appliedAtMs: 1,
           count: 3,
@@ -1478,7 +1483,7 @@ test("expired wager holder cannot clean up after a lease takeover", async () => 
   });
   let pauseStaleRead = true;
   const repo = repository({
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       if (path === "invites/invite") {
         return { hostId: "host", guestId: "guest" };
       }
@@ -1492,16 +1497,16 @@ test("expired wager holder cannot clean up after a lease takeover", async () => 
         }
         return wager;
       }
-      const uid = path.includes("/host/") ? "host" : "guest";
+      const uid = path.split("/")[1] === "host" ? "host" : "guest";
       return mining[uid];
     },
-    transactRtdbPath: async (path, updater) => {
+    transactState: async (path, updater) => {
       if (path === "invites/invite/wagers/match") {
         const result = applyTransaction(updater, wager);
         if (result.committed) wager = result.value;
         return result;
       }
-      const uid = path.includes("/host/") ? "host" : "guest";
+      const uid = path.split("/")[1] === "host" ? "host" : "guest";
       const result = applyMiningTransaction(updater, mining[uid]);
       if (result.committed) mining[uid] = result.value;
       return result;
@@ -1539,7 +1544,7 @@ test("expired wager holder cannot clean up after a lease takeover", async () => 
   assert.equal(materialsOnly(mining.host).dust, 3);
   assert.equal(
     (
-      (mining.host as Record<string, unknown>)._wagerOps as Record<
+      (mining.host as Record<string, unknown>).operations as Record<
         string,
         unknown
       >
@@ -1576,7 +1581,7 @@ test("timed out wager phase cannot commit after a lease takeover", async () => {
   let pauseRecovery = false;
   let stallPhase = true;
   const repo = repository({
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       if (path === "invites/invite") {
         return { hostId: "host", guestId: "guest" };
       }
@@ -1590,10 +1595,10 @@ test("timed out wager phase cannot commit after a lease takeover", async () => {
         }
         return wager;
       }
-      const uid = path.includes("/host/") ? "host" : "guest";
+      const uid = path.split("/")[1] === "host" ? "host" : "guest";
       return mining[uid];
     },
-    transactRtdbPath: async (path, updater, signal) => {
+    transactState: async (path, updater, signal) => {
       if (path === "invites/invite/wagers/match") {
         if (stallPhase) {
           stallPhase = false;
@@ -1610,7 +1615,7 @@ test("timed out wager phase cannot commit after a lease takeover", async () => {
         if (result.committed) wager = result.value;
         return result;
       }
-      const uid = path.includes("/host/") ? "host" : "guest";
+      const uid = path.split("/")[1] === "host" ? "host" : "guest";
       const result = applyMiningTransaction(updater, mining[uid]);
       if (result.committed) mining[uid] = result.value;
       return result;
@@ -1677,12 +1682,12 @@ test("releases a stranded accept reservation after participants merge", async ()
     },
   };
   const value = repository({
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       if (path === "invites/invite") {
         return { hostId: "host", guestId: "guest" };
       }
-      if (path === "players/host/mining") return miningState;
-      if (path === "players/guest/mining") return guestMining;
+      if (path === "reservations/host") return miningState;
+      if (path === "reservations/guest") return guestMining;
       if (path === "invites/invite/wagers/match") {
         wagerReads++;
         if (failReplayRead && wagerReads > 1) {
@@ -1698,8 +1703,8 @@ test("releases a stranded accept reservation after participants merge", async ()
         merged ? "shared-profile" : `profile-${uid}`,
       );
     },
-    transactRtdbPath: async (path, updater) => {
-      if (path === "players/host/mining") {
+    transactState: async (path, updater) => {
+      if (path === "reservations/host") {
         const transaction = applyMiningTransaction(updater, miningState);
         if (transaction.committed) miningState = transaction.value;
         return transaction;
@@ -1735,7 +1740,7 @@ test("ownership failure stops a wager before reservations", async () => {
     readProfileOwnershipSnapshot: async () => {
       throw new Error("d1-unavailable");
     },
-    transactRtdbPath: async () => {
+    transactState: async () => {
       transactions++;
       return { committed: false, value: null };
     },
@@ -1776,7 +1781,7 @@ test("cancel removes the caller proposal and releases only its materials", async
       readProfileOwnershipSnapshot: async () => {
         throw new Error("D1 should not be read for a direct participant");
       },
-      transactRtdbPath: async (path, updater) => {
+      transactState: async (path, updater) => {
         const current = path.startsWith("invites/")
           ? {
               proposals: {
@@ -1786,7 +1791,7 @@ test("cancel removes the caller proposal and releases only its materials", async
               proposedBy: { host: true, guest: true },
             }
           : mining;
-        const transaction = path.startsWith("players/")
+        const transaction = path.startsWith("reservations/")
           ? applyMiningTransaction(updater, current)
           : applyTransaction(updater, current);
         transactions.push({ path, value: transaction.value });
@@ -1797,11 +1802,7 @@ test("cancel removes the caller proposal and releases only its materials", async
   assert.deepEqual(result, { ok: true });
   assert.deepEqual(
     transactions.map(({ path }) => path),
-    [
-      "invites/invite/wagers/match",
-      "players/host/mining",
-      "players/host/mining",
-    ],
+    ["invites/invite/wagers/match", "reservations/host", "reservations/host"],
   );
   const wager = transactions[0].value as {
     proposals: Record<string, unknown>;
@@ -1834,7 +1835,7 @@ test("decline removes the opponent proposal and clamps frozen counts", async () 
     { inviteId: "invite", matchId: "match" },
     "decline",
     repository({
-      transactRtdbPath: async (path, updater) => {
+      transactState: async (path, updater) => {
         paths.push(path);
         return applyTransaction(
           updater,
@@ -1848,8 +1849,8 @@ test("decline removes the opponent proposal and clamps frozen counts", async () 
   assert.deepEqual(result, { ok: true });
   assert.deepEqual(paths, [
     "invites/invite/wagers/match",
-    "players/host/mining",
-    "players/host/mining",
+    "reservations/host",
+    "reservations/host",
   ]);
 });
 
@@ -1875,7 +1876,7 @@ test("canonical D1 ownership authorizes linked logins with host precedence", asy
             : "guest-profile",
         );
       },
-      transactRtdbPath: async (path, updater) => {
+      transactState: async (path, updater) => {
         paths.push(path);
         return applyTransaction(
           updater,
@@ -1888,10 +1889,7 @@ test("canonical D1 ownership authorizes linked logins with host precedence", asy
   );
   assert.deepEqual(result, { ok: true });
   assert.equal(ownershipReads, 2);
-  assert.deepEqual(paths.slice(1), [
-    "players/host/mining",
-    "players/host/mining",
-  ]);
+  assert.deepEqual(paths.slice(1), ["reservations/host", "reservations/host"]);
 });
 
 test("cancellation rejects cross-match reservation IDs", async () => {
@@ -1916,11 +1914,11 @@ test("cancellation rejects cross-match reservation IDs", async () => {
       { inviteId: "invite", matchId: "match" },
       "cancel",
       repository({
-        getRtdbPath: async (path) => {
+        readState: async (path) => {
           if (path === "invites/invite") {
             return { hostId: "host", guestId: "guest" };
           }
-          if (path === "players/host/mining") {
+          if (path === "reservations/host") {
             return installSendReservation(
               { frozen: { ...createEmptyMaterials(), dust: 1 } },
               otherProposal,
@@ -1928,7 +1926,7 @@ test("cancellation rejects cross-match reservation IDs", async () => {
           }
           return { proposals: { host: otherProposal } };
         },
-        transactRtdbPath: async () => {
+        transactState: async () => {
           domainTransactions += 1;
           return { committed: false, value: null };
         },
@@ -1971,12 +1969,12 @@ test("cancellation rejects a cross-match replay receipt", async () => {
       { inviteId: "invite", matchId: "match" },
       "cancel",
       repository({
-        getRtdbPath: async (path) =>
+        readState: async (path) =>
           path === "invites/invite"
             ? { hostId: "host", guestId: "guest" }
             : wager,
-        transactRtdbPath: async (path, updater) => {
-          if (path.startsWith("players/")) playerTransactions += 1;
+        transactState: async (path, updater) => {
+          if (path.startsWith("reservations/")) playerTransactions += 1;
           return applyTransaction(updater, wager);
         },
       }),
@@ -1992,11 +1990,11 @@ test("returns exact domain outcomes without debug data", async () => {
     expected: unknown;
   }> = [
     {
-      repo: { getRtdbPath: async () => null },
+      repo: { readState: async () => null },
       expected: { ok: false, reason: "invite-not-found" },
     },
     {
-      repo: { getRtdbPath: async () => ({ hostId: "host" }) },
+      repo: { readState: async () => ({ hostId: "host" }) },
       expected: { ok: false, reason: "missing-opponent" },
     },
     {
@@ -2005,14 +2003,14 @@ test("returns exact domain outcomes without debug data", async () => {
     },
     {
       repo: {
-        transactRtdbPath: async (_path, updater) =>
+        transactState: async (_path, updater) =>
           applyTransaction(updater, { agreed: { count: 1 }, proposals: {} }),
       },
       expected: { ok: false, reason: "proposal-missing" },
     },
     {
       repo: {
-        transactRtdbPath: async (_path, updater) =>
+        transactState: async (_path, updater) =>
           applyTransaction(updater, { resolved: true, proposals: {} }),
       },
       expected: { ok: false, reason: "proposal-missing" },
@@ -2038,8 +2036,8 @@ test("does not remove or release a proposal after agreement", async () => {
     { inviteId: "invite", matchId: "match" },
     "cancel",
     repository({
-      getRtdbPath: async () => ({ hostId: "host", guestId: "guest" }),
-      transactRtdbPath: async (_path, updater) => {
+      readState: async () => ({ hostId: "host", guestId: "guest" }),
+      transactState: async (_path, updater) => {
         transactions++;
         return applyTransaction(updater, {
           agreed: { material: "dust", count: 1 },
@@ -2064,22 +2062,22 @@ test("cancellation returns missing while settlement consumes a proposal", async 
     { inviteId: "invite", matchId: "match" },
     "cancel",
     repository({
-      getRtdbPath: async (path) => {
+      readState: async (path) => {
         if (path === "invites/invite") {
           return { hostId: "host", guestId: "guest" };
         }
-        if (path === "players/host/mining") {
+        if (path === "reservations/host") {
           return {
             frozen: createEmptyMaterials(),
-            _wagerOps: {
+            operations: {
               [hostProposal.reservationOperationId]: { consumed: true },
             },
           };
         }
         return wager;
       },
-      transactRtdbPath: async (path, updater) => {
-        if (path.startsWith("players/")) playerTransactions += 1;
+      transactState: async (path, updater) => {
+        if (path.startsWith("reservations/")) playerTransactions += 1;
         return applyTransaction(updater, wager);
       },
     }),
@@ -2099,14 +2097,14 @@ test("send reconciles an ambiguous wager write without reserving twice", async (
   };
   let throwAfterCommit = true;
   const repo = repository({
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       if (path === "invites/invite")
         return { hostId: "host", guestId: "guest" };
-      if (path.startsWith("players/")) return frozen;
+      if (path.startsWith("reservations/")) return frozen;
       return wager;
     },
-    transactRtdbPath: async (path, updater) => {
-      if (path.startsWith("players/")) {
+    transactState: async (path, updater) => {
+      if (path.startsWith("reservations/")) {
         const result = applyMiningTransaction(updater, frozen);
         if (result.committed) frozen = result.value;
         return result;
@@ -2150,17 +2148,17 @@ test("old operation markers remain idempotent after many later wagers", async ()
       metal: 0,
       ice: 0,
     }),
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       if (path === "invites/invite") {
         return { hostId: "host", guestId: "guest" };
       }
-      if (path === "players/host/mining") {
+      if (path === "reservations/host") {
         return mining;
       }
       return wagers.get(path.split("/").at(-1) || "") || null;
     },
-    transactRtdbPath: async (path, updater) => {
-      if (path === "players/host/mining") {
+    transactState: async (path, updater) => {
+      if (path === "reservations/host") {
         const result = applyTransaction(updater, mining);
         if (result.committed) mining = result.value;
         return result;
@@ -2200,21 +2198,21 @@ test("send replay does not release a proposal already canceled", async () => {
     guest: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
   };
   const repo = repository({
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       if (path === "invites/invite") {
         return { hostId: "host", guestId: "guest" };
       }
-      if (path === "players/host/mining") return frozen.host;
-      if (path === "players/guest/mining") return frozen.guest;
+      if (path === "reservations/host") return frozen.host;
+      if (path === "reservations/guest") return frozen.guest;
       return wager;
     },
-    transactRtdbPath: async (path, updater) => {
+    transactState: async (path, updater) => {
       if (path.startsWith("invites/")) {
         const result = applyTransaction(updater, wager);
         if (result.committed) wager = result.value;
         return result;
       }
-      const uid = path.includes("/host/") ? "host" : "guest";
+      const uid = path.split("/")[1] === "host" ? "host" : "guest";
       const result = applyMiningTransaction(updater, frozen[uid]);
       if (result.committed) frozen[uid] = result.value;
       return result;
@@ -2271,7 +2269,7 @@ test("cancel retry preserves a later accepted reservation", async () => {
   const frozen: Record<string, unknown> = {
     host: {
       frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 2 },
-      _wagerOps: {
+      operations: {
         [sendReservationOperationId]: {
           appliedAtMs: 1,
           count: 2,
@@ -2296,22 +2294,22 @@ test("cancel retry preserves a later accepted reservation", async () => {
   };
   let failRelease = true;
   const repo = repository({
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       if (path === "invites/invite") {
         return { hostId: "host", guestId: "guest" };
       }
-      if (path === "players/host/mining") return frozen.host;
-      if (path === "players/guest/mining") return frozen.guest;
+      if (path === "reservations/host") return frozen.host;
+      if (path === "reservations/guest") return frozen.guest;
       return structuredClone(wager);
     },
-    transactRtdbPath: async (path, updater) => {
+    transactState: async (path, updater) => {
       if (path === "invites/invite/wagers/match") {
         const result = applyTransaction(updater, wager);
         if (result.committed) wager = result.value as Record<string, unknown>;
         return result;
       }
-      const uid = path.includes("/host/") ? "host" : "guest";
-      if (path === "players/host/mining" && failRelease) {
+      const uid = path.split("/")[1] === "host" ? "host" : "guest";
+      if (path === "reservations/host" && failRelease) {
         const preview = applyMiningTransaction(updater, frozen[uid]);
         if (preview.committed) {
           failRelease = false;
@@ -2350,7 +2348,7 @@ test("cancel retry preserves a later accepted reservation", async () => {
     acceptReservationOperationId,
   ]);
   const operations = (frozen.host as Record<string, unknown>)
-    ._wagerOps as Record<string, unknown>;
+    .operations as Record<string, unknown>;
   assert.ok(operations[acceptReservationOperationId]);
   assert.equal(operations[sendReservationOperationId], undefined);
   assert.deepEqual(materialsOnly(frozen.host), {
@@ -2389,14 +2387,14 @@ test("cancellation retries a failed material release from its durable record", a
   );
   let failRelease = true;
   const repo = repository({
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       if (path === "invites/invite") {
         return { hostId: "host", guestId: "guest" };
       }
-      if (path === "players/host/mining") return frozen;
+      if (path === "reservations/host") return frozen;
       return wager;
     },
-    transactRtdbPath: async (path, updater) => {
+    transactState: async (path, updater) => {
       if (path.startsWith("invites/")) {
         const result = applyTransaction(updater, wager);
         if (result.committed) wager = result.value;
@@ -2446,21 +2444,21 @@ test("accept replay completes a failed proposer adjustment once", async () => {
       metal: 0,
       ice: 0,
     }),
-    getRtdbPath: async (path) => {
+    readState: async (path) => {
       if (path === "invites/invite")
         return { hostId: "host", guestId: "guest" };
-      if (path.startsWith("players/")) {
-        return frozen[path.includes("/host/") ? "host" : "guest"];
+      if (path.startsWith("reservations/")) {
+        return frozen[path.split("/")[1] === "host" ? "host" : "guest"];
       }
       return wager;
     },
-    transactRtdbPath: async (path, updater) => {
+    transactState: async (path, updater) => {
       if (path.startsWith("invites/")) {
         const result = applyTransaction(updater, wager);
         if (result.committed) wager = result.value;
         return result;
       }
-      const uid = path.includes("/host/") ? "host" : "guest";
+      const uid = path.split("/")[1] === "host" ? "host" : "guest";
       if (uid === "guest" && failAdjustment) {
         failAdjustment = false;
         throw new Error("adjustment-unavailable");
@@ -2492,7 +2490,7 @@ test("rejects non-participants and sanitizes material release failures", async (
         { inviteId: "invite", matchId: "match" },
         "cancel",
         repository({
-          transactRtdbPath: async (path) => {
+          transactState: async (path) => {
             outsiderPaths.push(path);
             return { committed: false, value: null };
           },
@@ -2517,14 +2515,14 @@ test("rejects non-participants and sanitizes material release failures", async (
         { inviteId: "invite", matchId: "match" },
         "cancel",
         repository({
-          getRtdbPath: async (path) => {
+          readState: async (path) => {
             if (path === "invites/invite") {
               return { hostId: "host", guestId: "guest" };
             }
-            if (path === "players/host/mining") return mining;
+            if (path === "reservations/host") return mining;
             return wager;
           },
-          transactRtdbPath: async (path, updater) => {
+          transactState: async (path, updater) => {
             transactions++;
             if (transactions === 3) {
               throw new Error("private-upstream-detail");

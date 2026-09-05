@@ -1,12 +1,12 @@
-# Shared browser, Worker, and Functions rules
+# Shared browser and backend rules
 
 `@mons/shared` is the canonical home for deterministic, side-effect-free rules
-used by the React browser app, the Cloudflare API Worker, and Firebase
-Functions.
+used by the React browser app, the Cloudflare API Worker, and portable backend
+modules.
 
-The package lives inside `cloud/functions` so Firebase's existing source
-boundary includes it automatically. The root app and Firebase Functions
-consume it through local `file:` dependencies, while Worker source is compiled
+The package lives inside `cloud/functions` alongside portable backend modules.
+The root app and backend modules consume it through local `file:` dependencies,
+while Worker source is compiled
 through the root toolchain. No generated copy or publish step is required.
 
 Keep shared modules:

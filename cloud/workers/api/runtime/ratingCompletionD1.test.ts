@@ -35,54 +35,23 @@ describe("D1 rating completion evidence", () => {
       testEnv.PROFILE_DB,
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
       "a".repeat(64),
-      { activateRatingCompletions: false },
+      {
+        legacyRatingCompletions: [
+          { inviteId: "legacy-invite", matchId: "legacy-match" },
+        ],
+      },
     );
-    await applyRetiredProfileMigrations(
-      testEnv.PROFILE_GAMES_DB,
-      testEnv.TEST_PROFILE_D1_MIGRATIONS,
-      "b".repeat(64),
-      { activateRatingCompletions: false },
-    );
-    await testEnv.PROFILE_DB.prepare(
-      "UPDATE profile_canonical_control SET state = 'frozen' WHERE singleton = 1",
-    ).run();
-    await testEnv.PROFILE_DB.prepare(
-      "UPDATE rating_completion_control SET source_digest = ?, source_count = 1 WHERE singleton = 1",
-    )
-      .bind("c".repeat(64))
-      .run();
-    await testEnv.PROFILE_DB.prepare(
-      "INSERT INTO legacy_rating_completions (invite_id, match_id, imported_at_ms) VALUES ('legacy-invite', 'legacy-match', 1)",
-    ).run();
-    await testEnv.PROFILE_DB.prepare(
-      "UPDATE rating_completion_control SET activated_at_ms = 2 WHERE singleton = 1",
-    ).run();
-    await testEnv.PROFILE_DB.prepare(
-      "UPDATE profile_canonical_control SET state = 'active' WHERE singleton = 1",
-    ).run();
   });
 
-  it("refuses completion checks before the legacy import is activated", async () => {
-    await insertRating(
-      "unactivated",
-      "unactivated",
-      "done",
-      undefined,
-      testEnv.PROFILE_GAMES_DB,
-    );
-    await expect(
-      readRatingCompletion(
-        testEnv.PROFILE_GAMES_DB,
-        "unactivated",
-        "unactivated",
-      ),
-    ).rejects.toMatchObject({
-      status: 503,
-      message: "rating-completions-unavailable",
-    });
-    await expect(
-      readRatingCompletion(testEnv.PROFILE_GAMES_DB, "missing", "missing"),
-    ).rejects.toMatchObject({ status: 503 });
+  it("uses permanent completion data without migration controls", async () => {
+    expect(
+      await testEnv.PROFILE_DB.prepare(
+        "SELECT COUNT(*) AS count FROM sqlite_schema WHERE name = 'rating_completion_control'",
+      ).first("count"),
+    ).toBe(0);
+    expect(
+      await readRatingCompletion(testEnv.PROFILE_DB, "missing", "missing"),
+    ).toBe(false);
   });
 
   it("recognizes committed ratings, but not processing or absent ratings", async () => {
@@ -184,7 +153,7 @@ describe("D1 rating completion evidence", () => {
     ).toBe(0);
   });
 
-  it("blocks legacy evidence edits and imports after activation", async () => {
+  it("keeps historical completion records immutable after finalization", async () => {
     await testEnv.PROFILE_DB.prepare(
       "UPDATE profile_canonical_control SET state = 'frozen' WHERE singleton = 1",
     ).run();
@@ -201,7 +170,7 @@ describe("D1 rating completion evidence", () => {
       ).rejects.toThrow();
       await expect(
         testEnv.PROFILE_DB.prepare(
-          "UPDATE rating_completion_control SET activated_at_ms = NULL WHERE singleton = 1",
+          "UPDATE legacy_rating_completions SET imported_at_ms = 3 WHERE invite_id = 'legacy-invite'",
         ).run(),
       ).rejects.toThrow();
     } finally {

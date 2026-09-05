@@ -8,8 +8,6 @@ export const EVENT_PROFILE_GAME_PROJECTION_OUTBOX_ROOT =
   "profileGameProjectionOutbox/event";
 export const EVENT_PROFILE_GAME_PROJECTION_LOCK_ROOT =
   "profileGameProjectionLocks/event";
-export const PROFILE_LINK_PROFILE_GAME_PROJECTION_OUTBOX_ROOT =
-  "profileGameProjectionOutbox/profile";
 
 export type AutomatchProfileGameProjectionOutbox = {
   historicalMatches?: HistoricalMatchDescriptor[];
@@ -26,17 +24,6 @@ export type EventProfileGameProjectionOutbox = {
   lastQueuedAtMs: number;
   requestId: string;
   schemaVersion: number;
-  status: "pending";
-};
-
-export type ProfileLinkProfileGameProjectionOutbox = {
-  cleanupProfileIds: string[];
-  lastQueuedAtMs: number;
-  matchCursor: string | null;
-  profileId: string;
-  requestId: string;
-  schemaVersion: number;
-  sourceUpdatedAtMs: number;
   status: "pending";
 };
 
@@ -81,18 +68,6 @@ export function salvageHistoricalMatchDescriptors(
   });
 }
 
-export function salvageProfileLinkCleanupProfileIds(value: unknown): string[] {
-  const record = toRecord(value);
-  return Array.from(
-    new Set(
-      Object.entries(toRecord(record?.cleanupProfileIds) || {}).flatMap(
-        ([profileId, included]) =>
-          included === true && isSafeFirebaseKey(profileId) ? [profileId] : [],
-      ),
-    ),
-  );
-}
-
 export function getAutomatchProfileGameProjectionOutboxPath(
   inviteId: string,
 ): string {
@@ -107,12 +82,6 @@ export function getEventProfileGameProjectionOutboxPath(
 
 export function getEventProfileGameProjectionLockPath(eventId: string): string {
   return `${EVENT_PROFILE_GAME_PROJECTION_LOCK_ROOT}/${eventId}`;
-}
-
-export function getProfileLinkProfileGameProjectionOutboxPath(
-  loginUid: string,
-): string {
-  return `${PROFILE_LINK_PROFILE_GAME_PROJECTION_OUTBOX_ROOT}/${loginUid}`;
 }
 
 export function buildAutomatchProfileGameProjectionOutboxUpdates(input: {
@@ -200,43 +169,6 @@ export function buildEventProfileGameProjectionOutboxUpdates(input: {
   return updates;
 }
 
-export function buildProfileLinkProfileGameProjectionOutbox(input: {
-  cleanupProfileIds: string[];
-  lastQueuedAtMs: number;
-  matchCursor?: string | null;
-  profileId: string;
-  requestId: string;
-  sourceUpdatedAtMs: number;
-}): Record<string, unknown> {
-  if (
-    !isSafeFirebaseKey(input.profileId) ||
-    !isSafeFirebaseKey(input.requestId) ||
-    !Number.isSafeInteger(input.lastQueuedAtMs) ||
-    input.lastQueuedAtMs < 0 ||
-    (input.matchCursor != null && !isSafeFirebaseKey(input.matchCursor)) ||
-    !Number.isSafeInteger(input.sourceUpdatedAtMs) ||
-    input.sourceUpdatedAtMs < 0
-  ) {
-    throw new TypeError("invalid profile link projection outbox input");
-  }
-  const cleanupProfileIds = Array.from(new Set(input.cleanupProfileIds));
-  if (cleanupProfileIds.some((profileId) => !isSafeFirebaseKey(profileId))) {
-    throw new TypeError("invalid profile link projection cleanup profile id");
-  }
-  return {
-    schemaVersion: PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
-    status: "pending",
-    requestId: input.requestId,
-    profileId: input.profileId,
-    cleanupProfileIds: Object.fromEntries(
-      cleanupProfileIds.map((profileId) => [profileId, true]),
-    ),
-    matchCursor: input.matchCursor ?? null,
-    sourceUpdatedAtMs: input.sourceUpdatedAtMs,
-    lastQueuedAtMs: input.lastQueuedAtMs,
-  };
-}
-
 export function parseAutomatchProfileGameProjectionOutbox(
   value: unknown,
 ): AutomatchProfileGameProjectionOutbox | null {
@@ -305,50 +237,6 @@ export function parseEventProfileGameProjectionOutbox(
         requestId: record.requestId,
         lastQueuedAtMs,
         cleanupOwnerProfileIds: cleanupEntries.map(([profileId]) => profileId),
-      }
-    : null;
-}
-
-export function parseProfileLinkProfileGameProjectionOutbox(
-  value: unknown,
-): ProfileLinkProfileGameProjectionOutbox | null {
-  const record = toRecord(value);
-  const cleanup =
-    record?.cleanupProfileIds === undefined
-      ? {}
-      : toRecord(record.cleanupProfileIds);
-  const cleanupEntries = cleanup ? Object.entries(cleanup) : [];
-  const sourceUpdatedAtMs = record?.sourceUpdatedAtMs;
-  const lastQueuedAtMs = record?.lastQueuedAtMs;
-  const matchCursor = record?.matchCursor ?? null;
-  return record?.schemaVersion === PROFILE_GAME_PROJECTION_SCHEMA_VERSION &&
-    record.status === "pending" &&
-    typeof record.requestId === "string" &&
-    isSafeFirebaseKey(record.requestId) &&
-    typeof record.profileId === "string" &&
-    isSafeFirebaseKey(record.profileId) &&
-    (matchCursor === null ||
-      (typeof matchCursor === "string" && isSafeFirebaseKey(matchCursor))) &&
-    cleanup !== null &&
-    cleanupEntries.every(
-      ([profileId, included]) =>
-        isSafeFirebaseKey(profileId) && included === true,
-    ) &&
-    typeof sourceUpdatedAtMs === "number" &&
-    Number.isSafeInteger(sourceUpdatedAtMs) &&
-    sourceUpdatedAtMs >= 0 &&
-    typeof lastQueuedAtMs === "number" &&
-    Number.isSafeInteger(lastQueuedAtMs) &&
-    lastQueuedAtMs >= 0
-    ? {
-        schemaVersion: record.schemaVersion,
-        status: record.status,
-        requestId: record.requestId,
-        profileId: record.profileId,
-        cleanupProfileIds: cleanupEntries.map(([profileId]) => profileId),
-        matchCursor,
-        sourceUpdatedAtMs,
-        lastQueuedAtMs,
       }
     : null;
 }

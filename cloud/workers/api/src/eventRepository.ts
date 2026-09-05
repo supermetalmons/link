@@ -23,7 +23,6 @@ import {
   transactEventOwnedPath,
   transactEventCoordinationPath,
   transactStoredProfileEventPrizePath,
-  type EventRuntimeControl,
   type EventTransitionIntent,
   type EventWriteAdmission,
 } from "./eventD1.ts";
@@ -113,7 +112,7 @@ async function withEventWriteAdmission<T>(
         JSON.stringify({
           event: "event_write_admission_release_failed",
           admissionId: admission.admissionId,
-          admittedStorageMode: admission.storageMode,
+          freezeGeneration: admission.freezeGeneration,
           attempts: 1,
           context,
           kind: failureKind,
@@ -223,13 +222,6 @@ async function transitionId(
     ),
   );
   return `et_${bytesToHex(digest)}`;
-}
-
-function activeReadMode(control: EventRuntimeControl): "firebase" | "d1" {
-  if (control.storageMode === "frozen") {
-    return control.previousStorageMode || "firebase";
-  }
-  return control.storageMode;
 }
 
 function transitionReceiptPath(transitionId: string): string {
@@ -473,9 +465,6 @@ export async function recoverEventTransitionIntents(
         env.EVENT_DB,
         "transition-recovery",
         async (admission) => {
-          if (admission.storageMode !== "d1") {
-            throw new EventWritesDisabled();
-          }
           await applyIntent(
             env.EVENT_DB,
             { getPath: base.getRtdbPath, patchRoot: base.patchRtdbRoot },
@@ -519,7 +508,6 @@ export function createEventRtdbClient(
   env: Env,
   base: EventRtdbBackend = createFirebaseRtdbClient(env),
 ): EventRtdbClient {
-  const control = () => readEventRuntimeControl(env.EVENT_DB);
   const transactPath = async (
     path: string,
     updater: (current: unknown) => unknown,
@@ -537,9 +525,6 @@ export function createEventRtdbClient(
       env.EVENT_DB,
       "event-path-transaction",
       async (admission) => {
-        if (admission.storageMode === "firebase") {
-          return base.transactPath(path, updater, signal);
-        }
         const storagePath = d1EventPath(path);
         if (
           storagePath.startsWith("eventLocks/") ||
@@ -588,86 +573,79 @@ export function createEventRtdbClient(
       if (!isEventOwnedPath(path)) {
         return base.getPath(path, query, signal);
       }
-      const state = await control();
-      if (activeReadMode(state) === "d1") {
-        const cleanPath = normalizedPath(path);
-        if (cleanPath === "events") {
-          const status = query?.equalTo;
-          if (
-            query?.orderBy !== "status" ||
-            (status !== "scheduled" &&
-              status !== "active" &&
-              status !== "ended" &&
-              status !== "dismissed")
-          ) {
-            throw new Error("event-d1-query-unsupported");
-          }
-          return listEventAggregates(env.EVENT_DB, {
-            status,
-            limit: query.limitToFirst || 1_000,
-          });
-        }
-        if (cleanPath === "eventProgressOutbox") {
-          const records = await listDueEventProgressOutboxes(
-            env.EVENT_DB,
-            typeof query?.endAt === "number"
-              ? query.endAt
-              : Number.MAX_SAFE_INTEGER,
-            query?.limitToFirst || 100,
-          );
-          return Object.fromEntries(
-            records.map(({ outboxId, record }) => [outboxId, record]),
-          );
-        }
-        if (cleanPath === "profileGameProjectionOutbox/event") {
-          if (query?.startAt === "") return {};
-          const records = await listDueEventProfileGameProjectionOutboxes(
-            env.EVENT_DB,
-            typeof query?.endAt === "number"
-              ? query.endAt
-              : Number.MAX_SAFE_INTEGER,
-            query?.limitToFirst || 100,
-          );
-          return Object.fromEntries(
-            records.map(({ eventId, record }) => [eventId, record]),
-          );
-        }
-        if (cleanPath === "telegramProjectionOutbox/event") {
-          const records = await listDueEventTelegramProjectionOutboxes(
-            env.EVENT_DB,
-            typeof query?.endAt === "number"
-              ? query.endAt
-              : Number.MAX_SAFE_INTEGER,
-            query?.limitToFirst || 100,
-          );
-          return Object.fromEntries(
-            records.map(({ eventId, record }) => [eventId, record]),
-          );
-        }
+      const cleanPath = normalizedPath(path);
+      if (cleanPath === "events") {
+        const status = query?.equalTo;
         if (
-          cleanPath.startsWith("profileEventPrizes/") &&
-          query?.orderBy === "$key"
+          query?.orderBy !== "status" ||
+          (status !== "scheduled" &&
+            status !== "active" &&
+            status !== "ended" &&
+            status !== "dismissed")
         ) {
-          const prizes = (await readEventOwnedPath(
-            env.EVENT_DB,
-            cleanPath,
-          )) as Record<string, unknown>;
-          const startAt =
-            typeof query.startAt === "string" ? query.startAt : "";
-          const entries = Object.entries(prizes || {})
-            .filter(([eventId]) => !startAt || eventId >= startAt)
-            .sort(([left], [right]) =>
-              left < right ? -1 : left > right ? 1 : 0,
-            )
-            .slice(0, query.limitToFirst || 100);
-          return Object.fromEntries(entries);
-        }
-        if (query && Object.keys(query).length > 0) {
           throw new Error("event-d1-query-unsupported");
         }
-        return readEventOwnedPath(env.EVENT_DB, d1EventPath(cleanPath));
+        return listEventAggregates(env.EVENT_DB, {
+          status,
+          limit: query.limitToFirst || 1_000,
+        });
       }
-      return base.getPath(path, query, signal);
+      if (cleanPath === "eventProgressOutbox") {
+        const records = await listDueEventProgressOutboxes(
+          env.EVENT_DB,
+          typeof query?.endAt === "number"
+            ? query.endAt
+            : Number.MAX_SAFE_INTEGER,
+          query?.limitToFirst || 100,
+        );
+        return Object.fromEntries(
+          records.map(({ outboxId, record }) => [outboxId, record]),
+        );
+      }
+      if (cleanPath === "profileGameProjectionOutbox/event") {
+        if (query?.startAt === "") return {};
+        const records = await listDueEventProfileGameProjectionOutboxes(
+          env.EVENT_DB,
+          typeof query?.endAt === "number"
+            ? query.endAt
+            : Number.MAX_SAFE_INTEGER,
+          query?.limitToFirst || 100,
+        );
+        return Object.fromEntries(
+          records.map(({ eventId, record }) => [eventId, record]),
+        );
+      }
+      if (cleanPath === "telegramProjectionOutbox/event") {
+        const records = await listDueEventTelegramProjectionOutboxes(
+          env.EVENT_DB,
+          typeof query?.endAt === "number"
+            ? query.endAt
+            : Number.MAX_SAFE_INTEGER,
+          query?.limitToFirst || 100,
+        );
+        return Object.fromEntries(
+          records.map(({ eventId, record }) => [eventId, record]),
+        );
+      }
+      if (
+        cleanPath.startsWith("profileEventPrizes/") &&
+        query?.orderBy === "$key"
+      ) {
+        const prizes = (await readEventOwnedPath(
+          env.EVENT_DB,
+          cleanPath,
+        )) as Record<string, unknown>;
+        const startAt = typeof query.startAt === "string" ? query.startAt : "";
+        const entries = Object.entries(prizes || {})
+          .filter(([eventId]) => !startAt || eventId >= startAt)
+          .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+          .slice(0, query.limitToFirst || 100);
+        return Object.fromEntries(entries);
+      }
+      if (query && Object.keys(query).length > 0) {
+        throw new Error("event-d1-query-unsupported");
+      }
+      return readEventOwnedPath(env.EVENT_DB, d1EventPath(cleanPath));
     },
     async patchRoot(updates, signal) {
       if (!Object.keys(updates).some(isEventOwnedPath)) {
@@ -678,10 +656,6 @@ export function createEventRtdbClient(
         env.EVENT_DB,
         "event-root-patch",
         async (admission) => {
-          if (admission.storageMode === "firebase") {
-            await base.patchRoot(updates, signal);
-            return;
-          }
           await patchD1EventState(
             env.EVENT_DB,
             base,

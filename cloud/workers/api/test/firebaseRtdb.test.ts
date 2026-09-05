@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createFirebaseRtdbClient,
-  createFirebaseRtdbRepository,
   FIREBASE_RTDB_SERVER_TIMESTAMP,
   FirebaseRtdbFailure,
   firebaseRtdbIncrement,
@@ -33,21 +32,21 @@ function jsonResponse(
   });
 }
 
-test("reads Telegram state through authenticated bounded REST requests", async () => {
+test("reads gameplay state through authenticated bounded REST requests", async () => {
   const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
-  const repository = createFirebaseRtdbRepository(env, {
+  const repository = createFirebaseRtdbClient(env, {
     getAccessToken: async () => "access-token",
     fetcher: async (input, init) => {
       requests.push({ input, init });
       return jsonResponse({ desired: { revision: "revision-1" } });
     },
   });
-  assert.deepEqual(await repository.getMessage("automatch:invite-1"), {
+  assert.deepEqual(await repository.getPath("telegramAutomatches/invite-1"), {
     desired: { revision: "revision-1" },
   });
   assert.equal(
     String(requests[0].input),
-    "https://mons-link-default-rtdb.firebaseio.com/telegramMessages/automatch%3Ainvite-1.json",
+    "https://mons-link-default-rtdb.firebaseio.com/telegramAutomatches/invite-1.json",
   );
   assert.equal(
     new Headers(requests[0].init?.headers).get("Authorization"),
@@ -168,7 +167,7 @@ test("commits and aborts ETag-backed transactions", async () => {
     jsonResponse({ value: 2 }, 200, { ETag: '"two"' }),
   ];
   const requests: RequestInit[] = [];
-  const repository = createFirebaseRtdbRepository(env, {
+  const repository = createFirebaseRtdbClient(env, {
     getAccessToken: async () => "access-token",
     fetcher: async (_input, init) => {
       requests.push(init || {});
@@ -177,11 +176,11 @@ test("commits and aborts ETag-backed transactions", async () => {
       return response;
     },
   });
-  const committed = await repository.transactMessage("key", (current) => ({
+  const committed = await repository.transactPath("key", (current) => ({
     value: { value: Number((current as { value: number }).value) + 1 },
     decision: "incremented",
   }));
-  const aborted = await repository.transactMessage("key", () => ({
+  const aborted = await repository.transactPath("key", () => ({
     commit: false,
     decision: "unchanged",
   }));
@@ -217,7 +216,7 @@ test("propagates cancellation through transaction reads and writes", async () =>
     },
   });
   await client.transactPath(
-    "matchTimerStarts/player/match",
+    "matchTimerClaims/match",
     () => ({ value: { timer: "1;1000" } }),
     controller.signal,
   );
@@ -237,7 +236,7 @@ test("retries conditional conflicts against fresh authoritative state", async ()
     jsonResponse({ value: 2 }, 200, { ETag: '"two"' }),
     jsonResponse({ value: 3 }),
   ];
-  const repository = createFirebaseRtdbRepository(env, {
+  const repository = createFirebaseRtdbClient(env, {
     getAccessToken: async () => "access-token",
     fetcher: async () => {
       const response = responses.shift();
@@ -245,7 +244,7 @@ test("retries conditional conflicts against fresh authoritative state", async ()
       return response;
     },
   });
-  const result = await repository.transactMessage("key", (current) => {
+  const result = await repository.transactPath("key", (current) => {
     values.push(current);
     return {
       value: { value: Number((current as { value: number }).value) + 1 },
@@ -256,7 +255,7 @@ test("retries conditional conflicts against fresh authoritative state", async ()
 });
 
 test("fails after transaction conflicts are exhausted", async () => {
-  const repository = createFirebaseRtdbRepository(env, {
+  const repository = createFirebaseRtdbClient(env, {
     getAccessToken: async () => "access-token",
     maxTransactionAttempts: 2,
     fetcher: async (_input, init) =>
@@ -265,28 +264,25 @@ test("fails after transaction conflicts are exhausted", async () => {
         : jsonResponse({}, 200, { ETag: '"etag"' }),
   });
   await assert.rejects(
-    () => repository.transactMessage("key", () => ({ value: {} })),
+    () => repository.transactPath("key", () => ({ value: {} })),
     FirebaseRtdbFailure,
   );
 });
 
 test("fails closed on oversized and unavailable RTDB responses", async () => {
-  const oversized = createFirebaseRtdbRepository(env, {
+  const oversized = createFirebaseRtdbClient(env, {
     getAccessToken: async () => "access-token",
     fetcher: async () =>
       new Response("{}", {
         headers: { "Content-Length": String(MAX_RTDB_BODY_BYTES + 1) },
       }),
   });
-  const unavailable = createFirebaseRtdbRepository(env, {
+  const unavailable = createFirebaseRtdbClient(env, {
     getAccessToken: async () => "access-token",
     fetcher: async () => {
       throw new Error("network unavailable");
     },
   });
-  await assert.rejects(() => oversized.getMessage("key"), FirebaseRtdbFailure);
-  await assert.rejects(
-    () => unavailable.getMessage("key"),
-    FirebaseRtdbFailure,
-  );
+  await assert.rejects(() => oversized.getPath("key"), FirebaseRtdbFailure);
+  await assert.rejects(() => unavailable.getPath("key"), FirebaseRtdbFailure);
 });

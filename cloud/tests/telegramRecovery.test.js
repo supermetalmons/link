@@ -35,6 +35,28 @@ test("Telegram admin bridge arguments require a bounded secret file", () => {
   );
 });
 
+test("bridge secret file failures do not expose file diagnostics or contents", () => {
+  for (const [readFile, message] of [
+    [
+      () => {
+        throw new Error("private path and diagnostic");
+      },
+      "Could not read the Telegram bridge secret file.",
+    ],
+    [() => Buffer.from("  "), "Telegram bridge secret file is empty."],
+    [() => Buffer.alloc(8193), "Telegram bridge secret file is too large."],
+  ]) {
+    assert.throws(
+      () => readBridgeSecret("/private/secret", { readFile }),
+      (error) => {
+        assert.equal(error.message, message);
+        assert.equal(error.cause, undefined);
+        return true;
+      },
+    );
+  }
+});
+
 test("manual recovery arguments default to dry-run and reject Firebase flags", () => {
   assert.deepEqual(
     parseRecoveryArgs([

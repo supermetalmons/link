@@ -12,6 +12,7 @@ const typescript: typeof import("typescript") = require("typescript");
 
 type PackageManifest = {
   name?: string;
+  main?: string;
   private?: boolean;
   type?: string;
   dependencies?: Record<string, string>;
@@ -380,7 +381,6 @@ test("package manifests preserve public scripts and deployment command vectors",
       "manage:event-prize-withdrawals":
         rootPackage.scripts?.["manage:event-prize-withdrawals"],
       "manage:events": rootPackage.scripts?.["manage:events"],
-      "migrate:events-d1": rootPackage.scripts?.["migrate:events-d1"],
       "manage:profile-canonical":
         rootPackage.scripts?.["manage:profile-canonical"],
       "prepare:firebase": rootPackage.scripts?.["prepare:firebase"],
@@ -409,8 +409,6 @@ test("package manifests preserve public scripts and deployment command vectors",
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-event-prize-withdrawals.ts",
       "manage:events":
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-events.ts",
-      "migrate:events-d1":
-        "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/migrate-events-d1.ts",
       "manage:profile-canonical":
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-profile-canonical.ts",
       "prepare:firebase":
@@ -421,6 +419,29 @@ test("package manifests preserve public scripts and deployment command vectors",
       "repo-clean": "bash scripts/repo-clean.sh",
     },
   );
+  assert.equal(functionsPackage.main, undefined);
+  assert.equal(
+    existsSync(resolve(repositoryRoot, "cloud/functions/index.js")),
+    false,
+  );
+  for (const [command, filename] of [
+    ["telegram-d1", "telegram-delivery"],
+    ["events-d1", "events-d1"],
+    ["gameplay-coordination", "gameplay-coordination"],
+    ["profile-link-catchup", "profile-link-catchup"],
+    ["rating-completions", "rating-completions"],
+    ["wager-reservations", "wager-reservations"],
+  ]) {
+    assert.equal(rootPackage.scripts?.[`migrate:${command}`], undefined);
+    for (const suffix of [".ts", ".test.ts"]) {
+      assert.equal(
+        existsSync(
+          resolve(repositoryRoot, `scripts/migrate-${filename}${suffix}`),
+        ),
+        false,
+      );
+    }
+  }
   assert.deepEqual(functionsPackage.scripts, {
     test: "node --experimental-strip-types --test ../tests/*.test.js",
   });
@@ -556,11 +577,10 @@ test("remaining deployment CLIs preserve their offline modes", () => {
   assert.match(frontendHelp.stdout, /npm run deploy -- production/);
 });
 
-test("operations documentation cross-links package and deployment guides", () => {
+test("operations documentation describes current releases and D1 maintenance", () => {
   const rootReadme = readText("README.md");
   const cloudReadme = readText("cloud/README.md");
-  const deploymentGuide = readText("scripts/deploy-cloudflare.md");
-
+  const guide = readText("scripts/deploy-cloudflare.md");
   assert.match(
     rootReadme,
     /\[Cloudflare deployment\]\(scripts\/deploy-cloudflare\.md\)/,
@@ -572,276 +592,98 @@ test("operations documentation cross-links package and deployment guides", () =>
   );
   assert.match(
     cloudReadme,
-    /`PROFILE_DB\.profile_login_owners` is the sole source for Worker login UID to canonical profile ownership/,
+    /`PROFILE_DB\.profile_login_owners` is the sole source/,
   );
   assert.match(
     cloudReadme,
     /custom `profileId` claims and RTDB `players\/\{uid\}\/profile` links are non-authoritative compatibility shadows/,
   );
-  assert.equal(
-    existsSync(resolve(repositoryRoot, "scripts/deploy-cloudflare.md")),
-    true,
+  for (const document of [rootReadme, cloudReadme, guide]) {
+    assert.doesNotMatch(
+      document,
+      /npm run migrate:|--return-to-firebase|--activate-d1|--recover-import|functions:secrets:access|wrangler rollback/,
+    );
+  }
+  const apiRelease = guide.slice(
+    guide.indexOf("## API Worker release"),
+    guide.indexOf("## Canonical profile D1 maintenance"),
   );
-  assert.equal(existsSync(resolve(repositoryRoot, "cloud/.prettierrc")), false);
-  assert.equal(existsSync(resolve(repositoryRoot, ".prettierrc")), true);
+  for (const command of [
+    "npm run manage:profile-canonical -- --freeze",
+    "npm run upload:api",
+    "npm run smoke:api -- --base-url <version-preview-url> --read-only --require-history --require-wager-frozen-read --require-wager-storage-version",
+    "npm run promote:api -- --version-id <version-id>",
+    "npm run deploy:api:triggers",
+    "npm run smoke:api -- --base-url https://api.mons.link --read-only --require-history",
+    "npm run manage:profile-canonical -- --resume",
+  ]) {
+    assert.equal(apiRelease.includes(command), true, command);
+  }
+  assert.ok(
+    apiRelease.indexOf("npm run upload:api") <
+      apiRelease.indexOf("npm run promote:api"),
+  );
+  assert.ok(
+    apiRelease.indexOf('"previews_enabled":false') <
+      apiRelease.indexOf("npm run manage:profile-canonical -- --resume"),
+  );
   assert.match(
-    deploymentGuide,
+    apiRelease,
+    /Production API `workers_dev` and `preview_urls` remain disabled/,
+  );
+  assert.match(apiRelease, /alternate-login invite-role authorization/);
+  assert.match(apiRelease, /Wait at least 15 minutes/);
+  for (const queue of [
+    "auth-recovery",
+    "profile-game-projection",
+    "telegram-projection",
+    "telegram-delivery",
+  ]) {
+    assert.equal(
+      apiRelease.includes(`queues pause-delivery mons-link-${queue}`),
+      true,
+    );
+    assert.equal(
+      apiRelease.includes(`queues resume-delivery mons-link-${queue}`),
+      true,
+    );
+  }
+  for (const command of [
+    "npm run manage:events -- --freeze",
+    "npm run manage:events -- --resume-d1",
+    "npm run manage:events -- --recover-stale-admission <admission-id>",
+    "npm run manage:wager-reservations -- --recover-admission <admission-id> --confirm-request-finished --confirm-source-reconciled",
+    "npm run manage:wager-reservations -- --resume-d1",
+    "npm run manage:event-prize-withdrawals -- --freeze",
+    "npm run deploy -- production --version-id <version-id>",
+    "npm run deploy:firebase -- --project mons-link --dry-run",
+    "PRAGMA foreign_key_check",
+  ]) {
+    assert.equal(guide.includes(command), true, command);
+  }
+  assert.match(
+    guide,
     /workflows trigger mons-link-event-prize-withdrawal '\{"schemaVersion":1,"kind":"preflight"\}' --id "\$event_prize_preflight_id"/,
   );
   assert.match(
-    deploymentGuide,
+    guide,
     /workflows instances describe mons-link-event-prize-withdrawal "\$event_prize_preflight_id"/,
   );
-  assert.doesNotMatch(
-    deploymentGuide,
-    /workflows instances describe mons-link-event-prize-withdrawal latest/,
-  );
+  assert.match(guide, /Never bulk-delete admissions/);
   assert.match(
-    deploymentGuide,
-    /npm run manage:event-prize-withdrawals -- --freeze/,
-  );
-  assert.doesNotMatch(deploymentGuide, /migrate:event-prize-withdrawals-d1/);
-  assert.doesNotMatch(deploymentGuide, /Firebase-only Worker version/);
-
-  const apiRelease = deploymentGuide.slice(
-    deploymentGuide.indexOf("## API Worker release"),
-    deploymentGuide.indexOf("## Canonical profile D1 maintenance"),
-  );
-  assert.match(
-    apiRelease,
-    /--base-url <version-preview-url> --read-only --require-history --auth-token-fixture \/secure\/api-smoke-auth\.json --smoke-profile-fixture \/secure\/api-smoke-profile\.json/,
-  );
-  assert.match(
-    apiRelease,
-    /--base-url https:\/\/api\.mons\.link --read-only --require-history --auth-token-fixture \/secure\/api-smoke-auth\.json --smoke-profile-fixture \/secure\/api-smoke-profile\.json/,
-  );
-  assert.match(apiRelease, /alternate-login invite-role authorization/);
-  assert.match(apiRelease, /"actorUid":"<stored-host-or-guest-uid>"/);
-  assert.match(
-    apiRelease,
-    /"historicalMatch":\{"inviteId":"<existing-historical-invite-id>","matchId":"<existing-historical-match-id>"\}/,
-  );
-  assert.match(apiRelease, /Both are release gates for preview and production/);
-  assert.ok(
-    apiRelease.indexOf("d1 migrations apply mons-link-profile-games --remote") <
-      apiRelease.indexOf("npm run upload:api"),
-  );
-  assert.match(apiRelease, /migration `0005`/);
-  assert.match(apiRelease, /Wait at least 15 minutes/);
-  const pauseProfileGameProjection = apiRelease.indexOf(
-    "queues pause-delivery mons-link-profile-game-projection",
-  );
-  const inspectEventProjectionLocks = apiRelease.indexOf(
-    'database:get "/profileGameProjectionLocks/event"',
-  );
-  const applyProfileGameFence = apiRelease.indexOf(
-    "d1 migrations apply mons-link-profile-games --remote",
-  );
-  const uploadApi = apiRelease.indexOf("npm run upload:api");
-  const promoteApi = apiRelease.indexOf("npm run promote:api");
-  const resumeProfileGameProjection = apiRelease.indexOf(
-    "queues resume-delivery mons-link-profile-game-projection",
-  );
-  assert.ok(pauseProfileGameProjection < inspectEventProjectionLocks);
-  assert.ok(inspectEventProjectionLocks < applyProfileGameFence);
-  assert.ok(applyProfileGameFence < uploadApi);
-  assert.ok(uploadApi < promoteApi);
-  assert.ok(promoteApi < resumeProfileGameProjection);
-  assert.ok(
-    apiRelease.indexOf("d1 migrations apply mons-link-events --remote") <
-      apiRelease.indexOf("npm run upload:api"),
-  );
-  assert.doesNotMatch(apiRelease, /--sampling-rate\s+1(?:\s|$)/);
-  assert.doesNotMatch(apiRelease, /cleanupPageMatchCursor/);
-  assert.doesNotMatch(apiRelease, /COUNT\(\*\).*login_count/);
-  assert.match(
-    apiRelease,
-    /Rollback immediately to the previous tested D1-compatible Worker/,
-  );
-  assert.match(apiRelease, /Additive migrations remain in place/);
-
-  const frontendRelease = deploymentGuide.slice(
-    deploymentGuide.indexOf("## Frontend release"),
-    deploymentGuide.indexOf("## Firebase rule release"),
-  );
-  assert.match(
-    frontendRelease,
-    /Before event D1 activation, record a tested frontend Version ID that uses Worker polling/,
-  );
-  assert.match(
-    frontendRelease,
-    /a frontend that reads the retired Firebase event paths is not a rollback target/,
-  );
-
-  const eventOperations = deploymentGuide.slice(
-    deploymentGuide.indexOf("## Event D1 migration and operations"),
-    deploymentGuide.indexOf("## Event-prize withdrawal D1 operations"),
-  );
-  assert.match(eventOperations, /"selectionPrizeId":"<selected-prize-id>"/);
-  assert.match(eventOperations, /"assignedPrizeId":"<assigned-prize-id>"/);
-  assert.match(eventOperations, /--require-history --require-events/);
-  assert.match(eventOperations, /COUNT\(\*\) AS pending_withdrawals/);
-  assert.match(
-    eventOperations,
-    /workflows instances terminate mons-link-event-prize-withdrawal/,
-  );
-  assert.match(
-    eventOperations,
-    /workflows instances terminate mons-link-event-progress/,
-  );
-  assert.match(
-    eventOperations,
-    /database:get "\/eventProgressOutbox\/<outbox-id>"/,
-  );
-  assert.equal(
-    (
-      eventOperations.match(
-        /workflows instances list mons-link-event-progress/g,
-      ) || []
-    ).length,
-    2,
-  );
-  assert.match(eventOperations, /no `processing` or `submitted` withdrawals/);
-  assert.match(
-    eventOperations,
-    /rejects visible prize assignments that match completed withdrawals/,
-  );
-  assert.match(eventOperations, /invalidates every earlier import proof/);
-  assert.match(eventOperations, /every outstanding write admission/);
-  assert.match(
-    eventOperations,
-    /manage:events -- --recover-stale-admission <admission-id>/,
-  );
-  assert.match(eventOperations, /Never bulk-delete admissions/);
-  assert.doesNotMatch(eventOperations, /--dead-letter-transition/);
-  assert.match(
-    eventOperations,
-    /fix the implementation or unavailable dependency forward/,
-  );
-  assert.match(
-    eventOperations,
-    /do not detach, delete, or dead-letter the intent/,
-  );
-  assert.match(
-    eventOperations,
+    guide,
     /Successful transition receipts are immutable coordination evidence/,
   );
-  assert.match(eventOperations, /there is no scheduled receipt deletion/);
-  assert.doesNotMatch(eventOperations, /time-travel.*mons-link-events/i);
+  assert.match(guide, /missing snapshot returns `pair: null`/);
+  assert.match(guide, /never reads RTDB or persists data/);
+  assert.match(guide, /no RTDB recovery or backfill path/);
   assert.match(
-    eventOperations,
-    /Do not restore `EVENT_DB` alone with D1 Time Travel/,
-  );
-  assert.match(eventOperations, /fix forward while they remain frozen/);
-  for (const releaseStep of [
-    "npm run upload:api",
-    "npm run promote:api -- --version-id <version-id>",
-    "npm run deploy -- preview",
-    "npm run deploy -- production --version-id <version-id>",
-  ]) {
-    assert.equal(eventOperations.includes(releaseStep), true, releaseStep);
-  }
-  assert.ok(
-    eventOperations.indexOf("Before final freeze") <
-      eventOperations.indexOf("npm run manage:events -- --freeze"),
-  );
-  assert.ok(
-    eventOperations.indexOf(
-      "npm run manage:event-prize-withdrawals -- --freeze",
-    ) < eventOperations.indexOf("npm run manage:events -- --freeze"),
-  );
-  assert.ok(
-    eventOperations.indexOf(
-      "workflows instances terminate mons-link-event-prize-withdrawal",
-    ) < eventOperations.indexOf("npm run manage:events -- --freeze"),
-  );
-  assert.ok(
-    eventOperations.indexOf(
-      "workflows instances terminate mons-link-event-progress",
-    ) < eventOperations.indexOf("npm run manage:events -- --activate-d1"),
-  );
-  const inspectProgressOutbox = eventOperations.indexOf(
-    'database:get "/eventProgressOutbox/<outbox-id>"',
-  );
-  const terminateOldProgress = eventOperations.indexOf(
-    "workflows instances terminate mons-link-event-progress",
-  );
-  const relistProgress = eventOperations.lastIndexOf(
-    "workflows instances list mons-link-event-progress",
-  );
-  const finalEventImport = eventOperations.indexOf(
-    "npm run migrate:events-d1 -- --final",
-  );
-  assert.ok(inspectProgressOutbox < terminateOldProgress);
-  assert.ok(terminateOldProgress < relistProgress);
-  assert.ok(relistProgress < finalEventImport);
-  assert.match(
-    eventOperations,
-    /only after confirming the API Worker and frontend release prerequisites above remain deployed/,
-  );
-
-  const profileMaintenance = deploymentGuide.slice(
-    deploymentGuide.indexOf("## Canonical profile D1 maintenance"),
-    deploymentGuide.indexOf("## Event-prize withdrawal D1 operations"),
-  );
-  assert.match(profileMaintenance, /accepts only `active` and `frozen`/);
-  assert.match(profileMaintenance, /d1 time-travel info mons-link-profiles/);
-  assert.match(profileMaintenance, /d1 migrations apply mons-link-profiles/);
-  assert.match(profileMaintenance, /PRAGMA foreign_key_check/);
-  assert.match(
-    profileMaintenance,
-    /queues pause-delivery mons-link-auth-recovery/,
+    cloudReadme,
+    /--bridge-secret-file \/Users\/ivan\/\.config\/mons-link\/secrets\/telegram-announcement/,
   );
   assert.match(
-    profileMaintenance,
-    /queues resume-delivery mons-link-auth-recovery/,
-  );
-  assert.doesNotMatch(deploymentGuide, /migrate:profile-(?:reads|canonical)/);
-  assert.doesNotMatch(deploymentGuide, /--begin-import/);
-
-  const historicalMaintenance = deploymentGuide.slice(
-    deploymentGuide.indexOf("## Historical match D1 operations"),
-    deploymentGuide.indexOf("## Event-prize withdrawal D1 operations"),
-  );
-  assert.match(historicalMaintenance, /D1 is the sole source/);
-  assert.match(historicalMaintenance, /missing snapshot returns `pair: null`/);
-  assert.match(historicalMaintenance, /never reads RTDB or persists data/);
-  assert.match(historicalMaintenance, /no RTDB recovery or backfill path/);
-  assert.match(
-    historicalMaintenance,
-    /authenticated `--require-history` smoke/,
-  );
-  for (const command of [
-    `npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search historical_match_read_failed --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env`,
-    `npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search historical_match_archive_descriptor_failed --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env`,
-    `npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search historical-match-conflict --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env`,
-    `npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search profile_game_projection_queue_failed --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env`,
-    `npx wrangler tail mons-link-api --version-id <version-id> --format pretty --status error --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env`,
-  ]) {
-    assert.equal(historicalMaintenance.includes(command), true, command);
-  }
-  assert.match(historicalMaintenance, /handled public-history 503 signal/);
-  assert.match(
-    historicalMaintenance,
-    /Historical RTDB match data remains untouched/,
-  );
-  assert.doesNotMatch(deploymentGuide, /backfill:historical-matches/);
-  assert.doesNotMatch(
-    deploymentGuide,
-    /HISTORICAL_MATCH_RTDB_FALLBACK_ENABLED/,
-  );
-  assert.doesNotMatch(deploymentGuide, /database:get \/invites/);
-  assert.equal(
-    existsSync(
-      resolve(repositoryRoot, "scripts/backfill-historical-matches.ts"),
-    ),
-    false,
-  );
-  assert.equal(
-    existsSync(
-      resolve(repositoryRoot, "scripts/backfill-historical-matches.test.ts"),
-    ),
-    false,
+    cloudReadme,
+    /--bridge-secret-file \/Users\/ivan\/\.config\/mons-link\/secrets\/telegram-queue/,
   );
 });
 

@@ -36,7 +36,6 @@ import {
   type InitialTelegramDelivery,
 } from "./telegramDeliveryTasks.ts";
 import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
-import { createTelegramRepository } from "../../../functions/telegram/repositoryCore.js";
 import {
   createD1TelegramRepository,
   readTelegramStorageMode,
@@ -131,10 +130,7 @@ async function readAutomatchInputs(
 async function projectAutomatchSource(
   inviteId: string,
   rtdb: FirebaseRtdbClient,
-  telegram: TelegramRepository = createTelegramRepository({
-    getPath: rtdb.getPath,
-    transactPath: rtdb.transactPath,
-  }),
+  telegram: TelegramRepository,
 ): Promise<AutomatchProjectionResult> {
   let input = await readAutomatchInputs(inviteId, rtdb);
   for (let attempt = 0; attempt < PROJECTION_INPUT_RETRIES; attempt += 1) {
@@ -217,10 +213,7 @@ async function processAutomatchTask(
   rtdb: FirebaseRtdbClient,
   enqueueDelivery: (input: InitialTelegramDelivery) => Promise<unknown>,
   now: () => number,
-  telegram: TelegramRepository = createTelegramRepository({
-    getPath: rtdb.getPath,
-    transactPath: rtdb.transactPath,
-  }),
+  telegram: TelegramRepository,
 ): Promise<string> {
   const outbox = parseOutbox(
     await rtdb.getPath(getAutomatchTelegramProjectionOutboxPath(task.inviteId)),
@@ -254,10 +247,7 @@ async function processRatingTask(
   rating: RatingProjectionRepository,
   enqueueDelivery: (input: InitialTelegramDelivery) => Promise<unknown>,
   now: () => number,
-  telegram: TelegramRepository = createTelegramRepository({
-    getPath: rtdb.getPath,
-    transactPath: rtdb.transactPath,
-  }),
+  telegram: TelegramRepository,
 ): Promise<string> {
   const update = await rating.readRatingUpdate(task.operationId);
   if (!update || update.telegramProjectionState !== "pending") {

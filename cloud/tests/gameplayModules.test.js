@@ -27,9 +27,9 @@ test("automatch REST queries retain their RTDB indexes", () => {
     databaseRules.rules.profileGameProjectionOutbox.event,
     undefined,
   );
-  assert.deepEqual(
-    databaseRules.rules.profileGameProjectionOutbox.profile[".indexOn"],
-    ["lastQueuedAtMs"],
+  assert.equal(
+    databaseRules.rules.profileGameProjectionOutbox.profile,
+    undefined,
   );
 });
 
@@ -38,8 +38,7 @@ test("player reads expose gameplay state without exposing retired wager storage"
   assert.equal(players[".read"], undefined);
   assert.equal(players.$userId.matches[".read"], true);
   assert.equal(players.$userId.profile[".read"], true);
-  assert.equal(players.$userId.mining.frozen[".read"], false);
-  assert.equal(players.$userId.mining._wagerOps, undefined);
+  assert.equal(players.$userId.mining, undefined);
 });
 
 test("structural gameplay writes are Worker-owned while live match updates remain", () => {
@@ -63,15 +62,12 @@ test("structural gameplay writes are Worker-owned while live match updates remai
   assert.equal(databaseRules.rules.gameplayMutationLocks, undefined);
 });
 
-test("timer coordination roots are protected and fence live match writes", () => {
+test("active timer claims fence live match writes", () => {
   assert.deepEqual(databaseRules.rules.matchTimerClaims, {
     ".read": false,
     ".write": false,
   });
-  assert.deepEqual(databaseRules.rules.matchTimerStarts, {
-    ".read": false,
-    ".write": false,
-  });
+  assert.equal(databaseRules.rules.matchTimerStarts, undefined);
   assert.equal(
     databaseRules.rules.players.$userId.matches.$matchId.timer[".validate"],
     "newData.isString() && (newData.val() === '' || newData.val() === data.val() || (auth != null && auth.token.admin === true))",
