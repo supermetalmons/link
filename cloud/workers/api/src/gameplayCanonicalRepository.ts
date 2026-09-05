@@ -57,6 +57,7 @@ import type {
   WagerTransferResult,
 } from "./gameplayRepository.ts";
 import type { ProfileOwnershipSnapshot } from "./profileOwnership.ts";
+import { readRatingCompletion } from "./ratingCompletionD1.ts";
 
 type CanonicalRepositoryOptions = {
   createFailure(): Error;
@@ -815,12 +816,30 @@ export function createCanonicalRatingRepository(
     readProfileOwnershipSnapshot: gameplay.readProfileOwnershipSnapshot,
 
     readRatingUpdate: readOperation,
+    hasCompletedRatingUpdate: (inviteId, matchId) =>
+      readRatingCompletion(db, inviteId, matchId),
 
     async tryAcquireRatingLease(input): Promise<RatingLeaseResult> {
       const operationId = `${input.inviteId}__${input.matchId}`;
+      if (await readRatingCompletion(db, input.inviteId, input.matchId)) {
+        const data = await readOperation(operationId);
+        if (
+          data &&
+          (data.inviteId !== input.inviteId || data.matchId !== input.matchId)
+        ) {
+          throw options.createFailure();
+        }
+        return { status: "done", data };
+      }
       for (let attempt = 0; attempt < attempts; attempt++) {
         const snapshot = await readCanonicalRatingUpdate(db, operationId);
         const data = snapshot ? ratingData(snapshot) : null;
+        if (
+          data &&
+          (data.inviteId !== input.inviteId || data.matchId !== input.matchId)
+        ) {
+          throw options.createFailure();
+        }
         if (data?.status === "done") return { status: "done", data };
         const attemptNowMs = options.now();
         if (
@@ -912,6 +931,12 @@ export function createCanonicalRatingRepository(
         );
         if (!operation) return { status: "lost" };
         const data = ratingData(operation);
+        if (
+          data.inviteId !== input.inviteId ||
+          data.matchId !== input.matchId
+        ) {
+          throw options.createFailure();
+        }
         if (data.status === "done") return { status: "replayed", data };
         if (
           data.status !== "processing" ||

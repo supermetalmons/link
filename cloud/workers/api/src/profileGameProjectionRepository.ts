@@ -34,6 +34,7 @@ import {
   writeHistoricalMatchSnapshot,
 } from "./historicalMatchesD1.ts";
 import type { HistoricalMatchSource } from "./historicalMatches.ts";
+import { readRatingCompletion } from "./ratingCompletionD1.ts";
 
 type ProjectionRtdbRepository = Pick<GameplayRepository, "getRtdbPath">;
 
@@ -190,6 +191,9 @@ export function createProfileGameProjectionRuntime(
     },
 
     getRtdbPath: (path) => rtdb.getRtdbPath(path),
+
+    hasCompletedRatingUpdate: (inviteId, matchId) =>
+      readRatingCompletion(profileDb, inviteId, matchId),
 
     readProfileOwnershipSnapshot: (query) =>
       readProjectionOwnershipSnapshot(profileDb, query),

@@ -14,6 +14,7 @@ const {
   getOwnerProfileIds,
   getProfileDisplayName,
   getProfileEmoji,
+  isEventOwnedInvite,
   normalizeString,
   pickListSortMillis,
   readEventTimestampMs,
@@ -369,11 +370,20 @@ const createProfileGamesProjectionCore = ({
       inviteData,
       options.latestMatchIdHint || null,
     );
+    const latestMatchRatingCompleted =
+      isEventOwnedInvite(inviteData) && latestMatchId
+        ? await retry(() =>
+            repository.hasCompletedRatingUpdate(
+              normalizedInviteId,
+              latestMatchId,
+            ),
+          )
+        : false;
     const status = deriveProjectionStatus({
       inviteId: normalizedInviteId,
       inviteData,
       automatchStateHint,
-      latestMatchId,
+      latestMatchRatingCompleted,
     });
     const shouldProject = shouldProjectInvite({
       inviteId: normalizedInviteId,

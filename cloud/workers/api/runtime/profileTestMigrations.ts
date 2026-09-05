@@ -6,6 +6,7 @@ export async function applyRetiredProfileMigrations(
   db: D1Database,
   migrations: D1Migration[],
   importDigest: string,
+  options: { activateRatingCompletions?: boolean } = {},
 ): Promise<void> {
   const retirementIndex = migrations.findIndex(
     (migration) => migration.name === RETIREMENT_MIGRATION,
@@ -34,6 +35,27 @@ export async function applyRetiredProfileMigrations(
     ),
   ]);
   await applyD1Migrations(db, migrations.slice(retirementIndex));
+  if (
+    options.activateRatingCompletions !== false &&
+    migrations.some(
+      (migration) => migration.name === "0013_rating_completions.sql",
+    )
+  ) {
+    await db
+      .prepare(
+        `UPDATE rating_completion_control
+       SET source_digest = ?, source_count = 0
+       WHERE singleton = 1 AND activated_at_ms IS NULL`,
+      )
+      .bind(importDigest)
+      .run();
+    await db
+      .prepare(
+        `UPDATE rating_completion_control SET activated_at_ms = 1
+       WHERE singleton = 1 AND activated_at_ms IS NULL`,
+      )
+      .run();
+  }
   await db
     .prepare(
       `UPDATE profile_canonical_control

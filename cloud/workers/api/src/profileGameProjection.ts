@@ -785,12 +785,8 @@ export async function processRatingProfileGameProjection(
   };
   await locks.acquire(lock, ownerId, now());
   try {
-    if (
-      (await rating.getRtdbPath(
-        `invites/${update.inviteId}/matchesRatingUpdates/${update.matchId}`,
-      )) !== true
-    ) {
-      throw new Error("profile-game-projection-marker-pending");
+    if (update.status !== "done") {
+      throw new Error("profile-game-projection-rating-pending");
     }
     await runtime.recomputeInviteProjection(
       update.inviteId,
@@ -1045,9 +1041,6 @@ export async function sweepRatingProfileGameProjections(
           );
           return;
         }
-        await rating.patchRtdbRoot({
-          [`invites/${record.inviteId}/matchesRatingUpdates/${record.matchId}`]: true,
-        });
         tasks.push({
           kind: "rating-profile-game-projection",
           operationId: record.operationId,

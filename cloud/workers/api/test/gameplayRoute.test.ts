@@ -1512,6 +1512,7 @@ test("routes exact authenticated rating updates without a new rate limit", async
   };
   const patches: Record<string, unknown>[] = [];
   const ratingRepository: RatingRepository = {
+    hasCompletedRatingUpdate: async () => false,
     applyFebruaryChallengeReplay: async () => undefined,
     finalizeRatingUpdate: async (_input, buildPlan) => {
       const plan = buildPlan(null, null);
@@ -1520,12 +1521,7 @@ test("routes exact authenticated rating updates without a new rate limit", async
     },
     readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
     getRtdbPath: async (path) => {
-      if (
-        path ===
-        `invites/${ratingRequest.inviteId}/matchesRatingUpdates/${ratingRequest.matchId}`
-      ) {
-        return false;
-      }
+      assert.doesNotMatch(path, /matchesRatingUpdates/);
       if (path === `invites/${ratingRequest.inviteId}`) {
         return {
           hostId: ratingRequest.playerId,
@@ -1594,7 +1590,7 @@ test("routes exact authenticated rating updates without a new rate limit", async
   );
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true });
-  assert.equal(patches.length, 1);
+  assert.equal(patches.length, 0);
   await Promise.all(background);
   assert.deepEqual(profileProjectionTasks, [
     {

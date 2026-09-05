@@ -181,6 +181,7 @@ const runInviteProjection = async ({
   const currentUpdateTimes = { ...projectionUpdateTimes };
   const core = createProfileGamesProjectionCore({
     repository: {
+      hasCompletedRatingUpdate: async () => false,
       async commitProjectionWrites(writes) {
         beforeCommit?.({ currentUpdateTimes, projections });
         for (const write of writes) {
@@ -387,6 +388,7 @@ test("invite projection ignores an RTDB profile shadow when D1 has no owner", as
   let rtdbProfileReads = 0;
   const core = createProfileGamesProjectionCore({
     repository: {
+      hasCompletedRatingUpdate: async () => false,
       commitProjectionWrites: async () => undefined,
       getProjection: async () => null,
       async getRtdbPath(path) {
@@ -421,6 +423,7 @@ test("invite projection retries D1 ownership failures without writing", async ()
   const core = createProfileGamesProjectionCore({
     logger: { error: () => undefined },
     repository: {
+      hasCompletedRatingUpdate: async () => false,
       commitProjectionWrites: async () => {
         commits += 1;
       },

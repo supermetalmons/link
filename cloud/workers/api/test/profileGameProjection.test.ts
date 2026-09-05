@@ -123,7 +123,6 @@ function ratingUpdate(
 function ratingRepository(
   data: RatingUpdateData | null,
   state: {
-    marker?: unknown;
     marks: Array<{ state: string; reason?: string }>;
     patches: Array<Record<string, unknown>>;
   },
@@ -132,7 +131,10 @@ function ratingRepository(
     applyFebruaryChallengeReplay: async () => undefined,
     claimRatingProfileGameProjection: async () => true,
     finalizeRatingUpdate: async () => ({ status: "lost" }),
-    getRtdbPath: async () => state.marker ?? null,
+    getRtdbPath: async (path) => {
+      assert.doesNotMatch(path, /matchesRatingUpdates/);
+      return null;
+    },
     listDueRatingProfileGameProjections: async () => [],
     markRatingProfileGameProjection: async (
       _operationId,
@@ -146,6 +148,11 @@ function ratingRepository(
       });
     },
     patchRtdbRoot: async (updates) => {
+      assert.ok(
+        Object.keys(updates).every(
+          (path) => !path.includes("matchesRatingUpdates"),
+        ),
+      );
       state.patches.push(updates);
     },
     readProfileOwnershipSnapshot: async () => ({
@@ -155,6 +162,7 @@ function ratingRepository(
       profileById: new Map(),
     }),
     readRatingUpdate: async () => data,
+    hasCompletedRatingUpdate: async () => data?.status === "done",
     tryAcquireRatingLease: async () => ({ status: "busy", data: null }),
   };
 }
@@ -1558,8 +1566,7 @@ test("rating projection uses deterministic completion inputs and completes once"
     options: Record<string, unknown>;
     reason: string;
   }> = [];
-  const state = { marker: true, marks: [], patches: [] } as {
-    marker: unknown;
+  const state = { marks: [], patches: [] } as {
     marks: Array<{ state: string; reason?: string }>;
     patches: Array<Record<string, unknown>>;
   };
@@ -1619,8 +1626,7 @@ test("rating projection archives the frozen rating pair", async () => {
     guestMatch: { ...match, color: "black" as const },
   };
   const archived: unknown[] = [];
-  const state = { marker: true, marks: [], patches: [] } as {
-    marker: unknown;
+  const state = { marks: [], patches: [] } as {
     marks: Array<{ state: string; reason?: string }>;
     patches: Array<Record<string, unknown>>;
   };
@@ -1660,8 +1666,7 @@ test("rating projection archives the frozen rating pair", async () => {
     },
   ]);
 
-  const failedState = { marker: true, marks: [], patches: [] } as {
-    marker: unknown;
+  const failedState = { marks: [], patches: [] } as {
     marks: Array<{ state: string; reason?: string }>;
     patches: Array<Record<string, unknown>>;
   };
@@ -1696,8 +1701,7 @@ test("rating projection archives the frozen rating pair", async () => {
 });
 
 test("new rating projections never complete without their frozen pair", async () => {
-  const state = { marker: true, marks: [], patches: [] } as {
-    marker: unknown;
+  const state = { marks: [], patches: [] } as {
     marks: Array<{ state: string; reason?: string }>;
     patches: Array<Record<string, unknown>>;
   };
@@ -1718,8 +1722,7 @@ test("new rating projections never complete without their frozen pair", async ()
 });
 
 test("rating projection does not re-enter an active projection lock", async () => {
-  const state = { marker: true, marks: [], patches: [] } as {
-    marker: unknown;
+  const state = { marks: [], patches: [] } as {
     marks: Array<{ state: string; reason?: string }>;
     patches: Array<Record<string, unknown>>;
   };
@@ -1770,8 +1773,7 @@ test("rating projection does not re-enter an active projection lock", async () =
 });
 
 test("rating projection keeps completion pending when lock release fails", async () => {
-  const state = { marker: true, marks: [], patches: [] } as {
-    marker: unknown;
+  const state = { marks: [], patches: [] } as {
     marks: Array<{ state: string; reason?: string }>;
     patches: Array<Record<string, unknown>>;
   };
@@ -1795,9 +1797,8 @@ test("rating projection keeps completion pending when lock release fails", async
   locks.release = release;
 });
 
-test("rating projection dead-letters invalid records and retries missing markers", async () => {
-  const invalidState = { marker: true, marks: [], patches: [] } as {
-    marker: unknown;
+test("rating projection dead-letters invalid records and retries uncommitted ratings", async () => {
+  const invalidState = { marks: [], patches: [] } as {
     marks: Array<{ state: string; reason?: string }>;
     patches: Array<Record<string, unknown>>;
   };
@@ -1818,8 +1819,7 @@ test("rating projection dead-letters invalid records and retries missing markers
     { state: "dead", reason: "invalid-record" },
   ]);
 
-  const missingState = { marker: null, marks: [], patches: [] } as {
-    marker: unknown;
+  const missingState = { marks: [], patches: [] } as {
     marks: Array<{ state: string; reason?: string }>;
     patches: Array<Record<string, unknown>>;
   };
@@ -1827,12 +1827,12 @@ test("rating projection dead-letters invalid records and retries missing markers
     () =>
       processRatingProfileGameProjection(
         operationId,
-        ratingRepository(ratingUpdate(), missingState),
+        ratingRepository(ratingUpdate({ status: "processing" }), missingState),
         runtime([]),
         () => 300,
         locks,
       ),
-    /marker-pending/,
+    /rating-pending/,
   );
   assert.deepEqual(missingState.marks, []);
 });
@@ -1983,8 +1983,7 @@ test("profile game projection Queue keeps exhausted infrastructure work pending"
     { kind: "rating-profile-game-projection", operationId },
     100,
   );
-  const state = { marker: true, marks: [], patches: [] } as {
-    marker: unknown;
+  const state = { marks: [], patches: [] } as {
     marks: Array<{ state: string; reason?: string }>;
     patches: Array<Record<string, unknown>>;
   };
@@ -2061,8 +2060,7 @@ test("scheduled recovery claims, repairs, and batches valid projection records",
     ...TELEGRAM_TEST_ENV,
     PROFILE_GAME_PROJECTION_QUEUE: queue,
   } satisfies Env;
-  const state = { marker: null, marks: [], patches: [] } as {
-    marker: unknown;
+  const state = { marks: [], patches: [] } as {
     marks: Array<{ state: string; reason?: string }>;
     patches: Array<Record<string, unknown>>;
   };
@@ -2105,11 +2103,7 @@ test("scheduled recovery claims, repairs, and batches valid projection records",
     1,
   );
   assert.deepEqual(claims.sort(), ["mismatch", operationId].sort());
-  assert.deepEqual(state.patches, [
-    {
-      "invites/auto_aaaaaaaaaaa/matchesRatingUpdates/auto_aaaaaaaaaaa": true,
-    },
-  ]);
+  assert.deepEqual(state.patches, []);
   assert.deepEqual(state.marks, [
     { state: "dead", reason: "invalid-recovery-marker" },
   ]);
@@ -2120,7 +2114,6 @@ test("scheduled recovery claims, repairs, and batches valid projection records",
 
 test("scheduled recovery bounds concurrent claims", async () => {
   const rating = ratingRepository(null, {
-    marker: null,
     marks: [],
     patches: [],
   });
@@ -2613,7 +2606,7 @@ test("automatch, rating, and nested profile-link work share one invite lock", as
     ),
     /lock-busy/,
   );
-  const state = { marker: true, marks: [], patches: [] };
+  const state = { marks: [], patches: [] };
   await assert.rejects(
     processRatingProfileGameProjection(
       operationId,
@@ -2718,7 +2711,7 @@ test("projection sweep cleans locks once and preserves enqueue work on cleanup f
       automatchOutbox("request-1", 1, 1),
     ],
   ]);
-  const state = { marker: true, marks: [], patches: [] };
+  const state = { marks: [], patches: [] };
   const logs: string[] = [];
   await assert.rejects(
     sweepProfileGameProjections(

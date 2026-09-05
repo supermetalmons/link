@@ -334,6 +334,79 @@ describe("D1-authoritative profile game projection ownership", () => {
     });
   });
 
+  it("ends event games from canonical D1 ratings and ignores Firebase markers", async () => {
+    const hostLoginId = "rating-projection-host-login";
+    const guestLoginId = "rating-projection-guest-login";
+    const hostProfileId = "rating-projection-host-profile";
+    const guestProfileId = "rating-projection-guest-profile";
+    await insertProfileOwner(hostProfileId, hostLoginId);
+    await insertProfileOwner(guestProfileId, guestLoginId);
+
+    const cases = [
+      { inviteId: "rated-event-game", status: "done", expected: "ended" },
+      {
+        inviteId: "processing-event-game",
+        status: "processing",
+        expected: "active",
+      },
+      { inviteId: "stale-marker-event-game", status: null, expected: "active" },
+    ] as const;
+    for (const entry of cases) {
+      if (entry.status) {
+        await testEnv.PROFILE_DB.prepare(
+          `INSERT INTO rating_updates (
+             operation_id, payload_json, status, invite_id, match_id,
+             player_id, opponent_id, owner_uid, owner_token, started_at_ms,
+             updated_at_ms, lease_expires_at_ms, completed_at_ms
+           ) VALUES (?, '{}', ?, ?, ?, ?, ?, ?, 'owner', 1, 2, 3, ?)`,
+        )
+          .bind(
+            `${entry.inviteId}__${entry.inviteId}`,
+            entry.status,
+            entry.inviteId,
+            entry.inviteId,
+            hostLoginId,
+            guestLoginId,
+            hostLoginId,
+            entry.status === "done" ? 2 : null,
+          )
+          .run();
+      }
+      const runtime = createProfileGameProjectionRuntime(testEnv, {
+        rtdb: {
+          async getRtdbPath(path) {
+            if (path === `invites/${entry.inviteId}`) {
+              return {
+                eventOwned: true,
+                hostId: hostLoginId,
+                guestId: guestLoginId,
+                ...(entry.status === "done"
+                  ? {}
+                  : { matchesRatingUpdates: { [entry.inviteId]: true } }),
+              };
+            }
+            if (path === `automatch/${entry.inviteId}`) return null;
+            throw new Error(`unexpected-rtdb-read:${path}`);
+          },
+        },
+        wait: async () => undefined,
+      });
+      await runtime.recomputeInviteProjection(entry.inviteId, "test", {
+        eventTimestampMs: 100,
+      });
+
+      for (const profileId of [hostProfileId, guestProfileId]) {
+        await expect(
+          getProfileGameProjection(
+            testEnv.PROFILE_GAMES_DB,
+            profileId,
+            entry.inviteId,
+          ),
+        ).resolves.toMatchObject({ data: { status: entry.expected } });
+      }
+    }
+  });
+
   it("uses D1 ownership during profile-link catch-up", async () => {
     const inviteId = "d1-catchup-invite";
     const loginUid = "d1-catchup-login";

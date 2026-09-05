@@ -243,12 +243,7 @@ function createRepository({
       return { status: "committed", data: finalPlan.repairData };
     },
     getRtdbPath: async (path) => {
-      if (
-        path ===
-        `invites/${request.inviteId}/matchesRatingUpdates/${request.matchId}`
-      ) {
-        return completed;
-      }
+      assert.doesNotMatch(path, /matchesRatingUpdates/);
       if (path === `invites/${request.inviteId}`) return invite;
       if (path === `players/${request.playerId}/matches/${request.matchId}`) {
         if (failMatchReads) throw new Error("match-read-failed");
@@ -261,7 +256,17 @@ function createRepository({
       return null;
     },
     patchRtdbRoot: async (updates) => {
+      assert.ok(
+        Object.keys(updates).every(
+          (path) => !path.includes("matchesRatingUpdates"),
+        ),
+      );
       patches.push(updates);
+    },
+    hasCompletedRatingUpdate: async (inviteId, matchId) => {
+      assert.equal(inviteId, request.inviteId);
+      assert.equal(matchId, request.matchId);
+      return completed || ratingDone;
     },
     readProfileOwnershipSnapshot: async (query) =>
       ownershipSnapshot(query, playerProfile, opponentProfile),
@@ -528,7 +533,7 @@ test("resolves a normally completed game through mons-rules", () => {
   );
 });
 
-test("updates once and persists exact repair markers", async () => {
+test("updates once without writing Firebase rating markers", async () => {
   const state = createRepository();
   for (const playerId of [request.playerId, request.opponentId]) {
     coordination(state.repository).timerRows.set(
@@ -574,11 +579,7 @@ test("updates once and persists exact repair markers", async () => {
       operationId: `${request.inviteId}__${request.matchId}`,
     },
   ]);
-  assert.deepEqual(state.patches, [
-    {
-      [`invites/${request.inviteId}/matchesRatingUpdates/${request.matchId}`]: true,
-    },
-  ]);
+  assert.deepEqual(state.patches, []);
   assert.equal(coordination(state.repository).timerRows.size, 0);
 });
 
@@ -718,7 +719,7 @@ test("repairs completed replays without reacquiring or finalizing", async () => 
   assert.equal(state.getAttempts(), 0);
   assert.equal(state.getFinalized(), 0);
   assert.equal(state.getOperationReads(), 1);
-  assert.equal(state.patches.length, 1);
+  assert.equal(state.patches.length, 0);
 });
 
 test("repairs D1 timer marker cleanup on a completed replay", async () => {
@@ -748,14 +749,59 @@ test("repairs D1 timer marker cleanup on a completed replay", async () => {
   assert.equal(stores.timerRows.size, 0);
 });
 
-test("repairs a done rating when the marker is missing and match reads fail", async () => {
+test("repairs a D1-completed rating without Firebase markers or match reads", async () => {
   const state = createRepository({ ratingDone: true, failMatchReads: true });
   assert.deepEqual(await updateRatings(identity, request, state.repository), {
     ok: true,
   });
   assert.equal(state.getAttempts(), 0);
   assert.equal(state.getFinalized(), 0);
-  assert.equal(state.patches.length, 1);
+  assert.equal(state.patches.length, 0);
+});
+
+test("preserves imported legacy completion without a canonical rating record", async () => {
+  const state = createRepository({
+    completed: true,
+    ratingDone: false,
+    failMatchReads: true,
+  });
+  assert.deepEqual(await updateRatings(identity, request, state.repository), {
+    ok: true,
+  });
+  assert.equal(state.getAttempts(), 0);
+  assert.equal(state.getFinalized(), 0);
+  assert.deepEqual(state.patches, []);
+});
+
+test("fails closed when D1 completion evidence is unavailable", async () => {
+  const state = createRepository({ ratingDone: true });
+  state.repository.hasCompletedRatingUpdate = async () => {
+    throw new AuthApiFailure(
+      503,
+      "unavailable",
+      "rating-completions-unavailable",
+    );
+  };
+  await assert.rejects(
+    updateRatings(identity, request, state.repository),
+    /rating-completions-unavailable/,
+  );
+  assert.equal(state.getAttempts(), 0);
+  assert.equal(state.getFinalized(), 0);
+  assert.deepEqual(state.patches, []);
+});
+
+test("rejects a done record belonging to another invite or match", async () => {
+  const state = createRepository();
+  state.repository.readRatingUpdate = async () =>
+    completedData({ matchId: "another-match" });
+  await assert.rejects(
+    updateRatings(identity, request, state.repository),
+    /rating-completion-conflict/,
+  );
+  assert.equal(state.getAttempts(), 0);
+  assert.equal(state.getFinalized(), 0);
+  assert.deepEqual(state.patches, []);
 });
 
 test("bounds busy leases and preserves the skipped response", async () => {

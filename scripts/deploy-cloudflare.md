@@ -383,6 +383,83 @@ Before activation, recover any stopped import, use `--return-to-firebase`, verif
 
 The final deployed runtime must read and write reservations only through D1 and reject Firebase storage mode; it never falls back to Firebase. Retain the preparatory bridge only as its immutable uploaded version and protected source artifact, with its API preview entry point disabled. Firebase reservation adapters retained in the repository are test fixtures only and must not be imported by the production runtime. After actual production activation and verification, remove the retired Firebase frozen-balance read rule. Keep the source mining data inert as migration evidence; this tool never deletes it.
 
+## Rating completion D1 cutover
+
+Profile migration `0013_rating_completions.sql` preserves historical `invites/{inviteId}/matchesRatingUpdates/{matchId}` evidence in `PROFILE_DB.legacy_rating_completions`. New completions come directly from canonical `rating_updates` rows with `status = 'done'`; no second marker is written. Rating requests, event projections, and profile-game projections read completion only from D1. The Worker rejects completion reads until `rating_completion_control` records a verified import, so do not promote the candidate before completing this cutover.
+
+Finish `npm run check:all`, including the importer interruption tests and D1 runtime tests. Upload the tested API candidate with production previews disabled and record its exact Version ID without promoting it. Record the current source API Version ID and deployment timestamp, a D1 Time Travel bookmark, and the existing delivery-pause state of all four profile Queues. Confirm older API versions cannot receive requests through preview URLs. Run the baseline authenticated production smoke and the structurally read-only preview:
+
+```sh
+npm run migrate:rating-completions -- --preview --project mons-link
+```
+
+Preview works before or after migration `0013`. The exporter uses the pinned Firebase CLI, the canonical project and instance, a shallow `/invites` inventory, and only each invite's `matchesRatingUpdates` child. It never exports player match history or complete invite payloads. Every valid `true` flag is retained, including legacy invite or match IDs without a canonical rating row. `false` flags remain in the source digest but are not completion evidence; malformed values block the import. Snapshots and SQL are saved under `.cache/rating-completion-migration/` in mode-`0700` directories with mode-`0600` files. Logs contain counts, digests, and artifact paths. Preserve the final artifacts outside the repository.
+
+Freeze canonical writes, pause all four Queues, and record when each pause succeeds. Preserve any preexisting pauses. Apply the additive migration while frozen:
+
+```sh
+npm run manage:profile-canonical -- --freeze
+npx wrangler queues pause-delivery mons-link-auth-recovery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-profile-game-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-telegram-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-telegram-delivery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 migrations apply mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 execute mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env --command "PRAGMA foreign_key_check; SELECT * FROM rating_completion_control; SELECT name FROM sqlite_master WHERE type = 'trigger' AND (tbl_name = 'legacy_rating_completions' OR tbl_name = 'rating_completion_control');" --json
+```
+
+Wait at least fifteen minutes after the last Queue pause, verify the rating and profile-game projection leases have drained, and confirm the old HTTP, Queue, and scheduled marker writers have finished. Create a mode-`0600` JSON evidence file using the format below. `bridgeVersionId` and `bridgeDeployedAtMs` refer to the currently deployed source Worker; this cutover does not require a separate bridge release. Replace every placeholder and zero with the recorded values. Set `legacyWritersDrained` only after checking the old entry points and writer activity; the tool verifies the current deployment, canonical freeze, lease counts, and recorded pause durations.
+
+```json
+{
+  "bridgeVersionId": "<source-api-version-id>",
+  "bridgeDeployedAtMs": 0,
+  "queuesPausedAtMs": {
+    "mons-link-auth-recovery": 0,
+    "mons-link-profile-game-projection": 0,
+    "mons-link-telegram-projection": 0,
+    "mons-link-telegram-delivery": 0
+  },
+  "legacyWritersDrained": true,
+  "recordedAtMs": 0
+}
+```
+
+Take the first source observation, then wait at least six minutes after that export completes before the final import. Keep the evidence file unchanged and use the first run's protected `observation.json`:
+
+```sh
+npm run migrate:rating-completions -- --observe --project mons-link --evidence-file <private-evidence.json>
+npm run migrate:rating-completions -- --final --project mons-link --evidence-file <private-evidence.json> --observation <observe-directory/observation.json>
+```
+
+Final requires identical source observations and the same deployed source Worker. It pins the source digest and completion count in D1, inserts every true marker in bounded idempotent batches, verifies the complete D1 pair set against the source, rereads Firebase to detect changes during import, and activates completion storage while writes remain frozen. It does not modify canonical rating rows, profiles, or Firebase. An empty source is a valid import. An interrupted import may be retried only with the identical source and evidence; committed rows retain their original import timestamps. A changed pinned source, unexpected D1 row, or failed verification leaves activation blocked. Keep writes frozen and reconcile that condition through a reviewed data repair; the importer cannot reset the claim, overwrite evidence, or delete rows to make verification pass. Inspect `rating_completion_control` and the private artifacts after an uncertain final response before retrying; an already committed activation is immutable and rejects another final import.
+
+Keep canonical writes frozen, all Queues paused, and API previews disabled after activation. Promote the exact D1 candidate to 100 percent and run the frozen authenticated production smoke. That smoke does not exercise rating completion; `/ratings/update` is blocked while frozen. Verify D1 evidence separately with this read-only query. Save it as `/secure/rating-completion-check.sql`, replace both placeholders with a known completed pair, and escape any apostrophe in those SQL values as `''`:
+
+```sql
+WITH requested(invite_id, match_id) AS (
+  VALUES ('<known-invite-id>', '<known-match-id>')
+)
+SELECT activated_at_ms,
+  EXISTS (
+    SELECT 1 FROM rating_updates r, requested q
+    WHERE r.operation_id = q.invite_id || '__' || q.match_id
+      AND r.invite_id = q.invite_id AND r.match_id = q.match_id
+      AND r.status = 'done'
+  ) OR EXISTS (
+    SELECT 1 FROM legacy_rating_completions r, requested q
+    WHERE r.invite_id = q.invite_id AND r.match_id = q.match_id
+  ) AS completed
+FROM rating_completion_control WHERE singleton = 1;
+```
+
+```sh
+npx wrangler d1 execute mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env --command "$(cat /secure/rating-completion-check.sql)" --json
+```
+
+Require exactly one row with `activated_at_ms > 0` and `completed = 1`; keep writes frozen on any other result. Only then resume canonical writes and Queues that were running before maintenance. Run the standard production smoke and observe rating requests, event advancement, profile-game projections, and Queue recovery for at least fifteen minutes. The retained Firebase markers must remain unchanged.
+
+Before activation, an abort may resume the source Worker after confirming no candidate is serving traffic; future import observations must be taken again. Once a source digest has been pinned, any intervening legacy writes can require reviewed reconciliation before retrying. After activation, never resume a Worker that writes or relies on Firebase completion markers. Roll back only to a tested candidate that preserves D1 completion reads and canonical rating completion semantics, keeping the additive tables installed; otherwise keep writes frozen and fix forward. Do not restore `PROFILE_DB` independently of gameplay effects or delete the retained Firebase markers during this cutover.
+
 ## Canonical profile D1 maintenance
 
 The canonical profile control accepts only `active` and `frozen`. Freeze before schema maintenance and leave production frozen on any failure:

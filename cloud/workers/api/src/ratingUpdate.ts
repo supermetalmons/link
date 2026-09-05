@@ -547,13 +547,12 @@ async function repairRatingSideEffects(
         nowMs,
       )
     : null;
-  await assertMutationAllowed?.();
-  await repository.patchRtdbRoot({
-    [`invites/${request.inviteId}/matchesRatingUpdates/${request.matchId}`]: true,
-    ...(progress
-      ? { [`eventProgressOutbox/${progress.outboxId}`]: progress.outbox }
-      : {}),
-  });
+  if (progress) {
+    await assertMutationAllowed?.();
+    await repository.patchRtdbRoot({
+      [`eventProgressOutbox/${progress.outboxId}`]: progress.outbox,
+    });
+  }
   await assertMutationAllowed?.();
   await timerStarts.deletePair(
     request.playerId,
@@ -614,9 +613,7 @@ export async function updateRatings(
   const operationId = `${request.inviteId}__${request.matchId}`;
   const [inviteValue, completed] = await Promise.all([
     repository.getRtdbPath(`invites/${request.inviteId}`),
-    repository.getRtdbPath(
-      `invites/${request.inviteId}/matchesRatingUpdates/${request.matchId}`,
-    ),
+    repository.hasCompletedRatingUpdate(request.inviteId, request.matchId),
   ]);
   const invite = toRecord(inviteValue);
   if (
@@ -634,6 +631,13 @@ export async function updateRatings(
       : null;
   const now = dependencies.now || Date.now;
   const existing = await repository.readRatingUpdate(operationId);
+  if (
+    existing &&
+    (existing.inviteId !== request.inviteId ||
+      existing.matchId !== request.matchId)
+  ) {
+    throw new AuthApiFailure(503, "unavailable", "rating-completion-conflict");
+  }
   if (completed === true || existing?.status === "done") {
     const progress = await repairRatingSideEffects(
       request,

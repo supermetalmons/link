@@ -70,6 +70,7 @@ function ratingRepository(): RatingProjectionRepository {
       throw new Error("unexpected-profile-ownership-read");
     },
     readRatingUpdate: async (): Promise<RatingUpdateData | null> => null,
+    hasCompletedRatingUpdate: async () => false,
     tryAcquireRatingLease: async () => ({ status: "busy", data: null }),
   };
 }

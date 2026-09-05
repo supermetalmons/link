@@ -79,34 +79,16 @@ const getEmojiId = (value) => {
   return null;
 };
 
-const eventMatchHasCompletedRatingUpdate = (inviteData, latestMatchId) => {
-  if (!isEventOwnedInvite(inviteData)) {
-    return false;
-  }
-  const normalizedLatestMatchId = normalizeString(latestMatchId);
-  if (!normalizedLatestMatchId) {
-    return false;
-  }
-  const matchesRatingUpdates =
-    inviteData && typeof inviteData.matchesRatingUpdates === "object"
-      ? inviteData.matchesRatingUpdates
-      : null;
-  if (!matchesRatingUpdates) {
-    return false;
-  }
-  return matchesRatingUpdates[normalizedLatestMatchId] === true;
-};
-
 const deriveProjectionStatus = ({
   inviteId,
   inviteData,
   automatchStateHint,
-  latestMatchId,
+  latestMatchRatingCompleted,
 }) => {
   if (rematchSeriesEnded(inviteData)) {
     return "ended";
   }
-  if (eventMatchHasCompletedRatingUpdate(inviteData, latestMatchId)) {
+  if (isEventOwnedInvite(inviteData) && latestMatchRatingCompleted === true) {
     return "ended";
   }
   const hasGuest = !!normalizeString(inviteData ? inviteData.guestId : null);

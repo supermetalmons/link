@@ -47,7 +47,7 @@ test("game projection status keeps automatch, event rating, and rematch preceden
       inviteId: "regular",
       inviteData: {},
       automatchStateHint: null,
-      latestMatchId: null,
+      latestMatchRatingCompleted: false,
     }),
     "waiting",
   );
@@ -56,7 +56,7 @@ test("game projection status keeps automatch, event rating, and rematch preceden
       inviteId: "auto_example",
       inviteData: {},
       automatchStateHint: "pending",
-      latestMatchId: null,
+      latestMatchRatingCompleted: false,
     }),
     "pending",
   );
@@ -65,19 +65,16 @@ test("game projection status keeps automatch, event rating, and rematch preceden
       inviteId: "regular",
       inviteData: { guestId: "guest" },
       automatchStateHint: null,
-      latestMatchId: null,
+      latestMatchRatingCompleted: false,
     }),
     "active",
   );
   assert.equal(
     deriveProjectionStatus({
       inviteId: "event-match",
-      inviteData: {
-        eventOwned: true,
-        matchesRatingUpdates: { match1: true },
-      },
+      inviteData: { eventOwned: true },
       automatchStateHint: null,
-      latestMatchId: "match1",
+      latestMatchRatingCompleted: true,
     }),
     "ended",
   );
@@ -89,6 +86,27 @@ test("game projection status keeps automatch, event rating, and rematch preceden
     }),
     false,
   );
+});
+
+test("game projection ignores Firebase rating markers and keeps ordinary games active", () => {
+  for (const inviteData of [
+    {
+      eventOwned: true,
+      guestId: "guest",
+      matchesRatingUpdates: { match1: true },
+    },
+    { guestId: "guest" },
+  ]) {
+    assert.equal(
+      deriveProjectionStatus({
+        inviteId: "regular",
+        inviteData,
+        automatchStateHint: null,
+        latestMatchRatingCompleted: !inviteData.eventOwned,
+      }),
+      "active",
+    );
+  }
 });
 
 test("game projection normalization preserves timestamps, identity display, and list order", () => {

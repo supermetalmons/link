@@ -163,6 +163,10 @@ export type RatingRepository = Pick<
     ) => RatingCommitPlan,
   ) => Promise<RatingFinalizeResult>;
   readRatingUpdate: (operationId: string) => Promise<RatingUpdateData | null>;
+  hasCompletedRatingUpdate: (
+    inviteId: string,
+    matchId: string,
+  ) => Promise<boolean>;
   tryAcquireRatingLease: (
     input: RatingLeaseInput,
   ) => Promise<RatingLeaseResult>;

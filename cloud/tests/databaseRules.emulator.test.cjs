@@ -117,6 +117,20 @@ test("rules retain same-profile writes through an RTDB link without a custom cla
   );
 });
 
+test("retired rating completion markers reject client and admin-claim writes", async () => {
+  for (const context of [
+    rules.authenticatedContext("host", { profileId: "profile-host" }),
+    rules.authenticatedContext("admin", { admin: true }),
+  ]) {
+    await assertFails(
+      context
+        .database()
+        .ref("invites/invite1/matchesRatingUpdates/invite1")
+        .set(true),
+    );
+  }
+});
+
 test("retired frozen reservations and operation records cannot be read directly", async () => {
   await rules.withSecurityRulesDisabled(async (context) => {
     await context
