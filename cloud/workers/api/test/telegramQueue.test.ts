@@ -1,16 +1,29 @@
+import { createTestWagerReservationRuntime } from "./wagerFrozenTestUtils.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
 import { MAX_FIREBASE_KEY_BYTES } from "../src/firebaseKeys.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import {
-  handleTelegramQueueMessage,
+  handleTelegramQueueMessage as handleTelegramQueueMessageImpl,
   infrastructureRetryDelaySeconds,
   logicalDelaySeconds,
   parseWagerSettlementRetryTask,
   WAGER_SETTLEMENT_RETRY_DELAY_SECONDS,
 } from "../src/telegramQueue.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+
+function handleTelegramQueueMessage(
+  message: Parameters<typeof handleTelegramQueueMessageImpl>[0],
+  env: Parameters<typeof handleTelegramQueueMessageImpl>[1],
+  dependencies: Parameters<typeof handleTelegramQueueMessageImpl>[2] = {},
+) {
+  return handleTelegramQueueMessageImpl(message, env, {
+    createWagerReservations: (_env, repository) =>
+      createTestWagerReservationRuntime(repository),
+    ...dependencies,
+  });
+}
 
 const task = {
   messageKey: "automatch:invite-1",
@@ -250,7 +263,12 @@ test("validates and processes durable wager settlement retries", async () => {
   );
   assert.equal(queued.acknowledgements(), 1);
   assert.deepEqual(queued.retries, []);
-  assert.deepEqual(resumed, [recoverableWagerTask, unusedGameplayRepository]);
+  assert.equal(resumed.length, 2);
+  assert.deepEqual(resumed[0], recoverableWagerTask);
+  assert.equal(
+    typeof (resumed[1] as GameplayRepository).wagerFrozen?.transact,
+    "function",
+  );
 });
 
 test("acknowledges malformed wager retry tasks", async () => {

@@ -62,6 +62,7 @@ import { rocksMiningService } from "../services/rocksMiningService";
 import {
   computeAvailableMaterials,
   getFrozenMaterials,
+  getFrozenMaterialsStatus,
   subscribeToFrozenMaterials,
 } from "../services/wagerMaterialsService";
 import { registerBoardTransientUiHandler } from "./uiSession";
@@ -1484,6 +1485,9 @@ const BoardComponent: React.FC = () => {
   );
   const [frozenMaterials, setFrozenMaterialsState] =
     useState(getFrozenMaterials());
+  const [frozenMaterialsStatus, setFrozenMaterialsStatus] = useState(
+    getFrozenMaterialsStatus,
+  );
   const [watchOnlySnapshot, setWatchOnlySnapshot] = useState(isWatchOnly);
   const [playerUidSnapshot, setPlayerUidSnapshot] = useState(
     playerSideMetadata.uid,
@@ -1825,10 +1829,14 @@ const BoardComponent: React.FC = () => {
       )
     : 0;
   const acceptLabel =
-    acceptCount > 0 && acceptCount < opponentCount
-      ? `Accept (${acceptCount})`
-      : "Accept";
-  const canAccept = acceptCount > 0;
+    frozenMaterialsStatus !== "ready"
+      ? frozenMaterialsStatus === "unavailable"
+        ? "Balance unavailable"
+        : "Checking balance"
+      : acceptCount > 0 && acceptCount < opponentCount
+        ? `Accept (${acceptCount})`
+        : "Accept";
+  const canAccept = frozenMaterialsStatus === "ready" && acceptCount > 0;
   const showOpponentActions =
     !wagerActionsLocked &&
     activeWagerPanelSide === "opponent" &&
@@ -1877,8 +1885,9 @@ const BoardComponent: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const unsubscribe = subscribeToFrozenMaterials((materials) => {
+    const unsubscribe = subscribeToFrozenMaterials((materials, status) => {
       setFrozenMaterialsState(materials);
+      setFrozenMaterialsStatus(status);
     });
     return () => {
       unsubscribe();

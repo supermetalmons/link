@@ -79,12 +79,27 @@ const canonicalControlStatement: D1PreparedStatement = {
   raw: d1Statement.raw,
   run: d1Statement.run,
 };
+const wagerControlStatement: D1PreparedStatement = {
+  all: d1Statement.all,
+  raw: d1Statement.raw,
+  run: d1Statement.run,
+  bind: () => wagerControlStatement,
+  first: async <T>() =>
+    ({
+      storage_mode: "firebase",
+      previous_storage_mode: null,
+      freeze_generation: 0,
+      activated_at_ms: null,
+    }) as T,
+};
 const profileDb = {
   ...profileGamesDb,
   prepare: (query: string) =>
-    query.includes("profile_canonical_control")
-      ? canonicalControlStatement
-      : d1Statement,
+    query.includes("wager_reservation_runtime_control")
+      ? wagerControlStatement
+      : query.includes("profile_canonical_control")
+        ? canonicalControlStatement
+        : d1Statement,
 } satisfies D1Database;
 
 const telegramStatement: D1PreparedStatement = {

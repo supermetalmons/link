@@ -1,4 +1,30 @@
-import type { MiningMaterialName, MiningSnapshot } from "./mining";
+import type {
+  MiningMaterialName,
+  MiningMaterials,
+  MiningSnapshot,
+} from "./mining";
+
+export const WAGER_STORAGE_VERSION_HEADER: "X-Mons-Wager-Storage-Version";
+export const WAGER_STORAGE_VERSION: "1";
+export const WAGER_FROZEN_READ_PATH: "/wagers/frozen/read";
+
+export interface WagerFrozenReadRequest {
+  playerUid: string;
+}
+
+export interface WagerFrozenReadResponse {
+  ok: true;
+  playerUid: string;
+  revision: number;
+  frozen: MiningMaterials;
+}
+
+export function isWagerFrozenReadRequest(
+  value: unknown,
+): value is WagerFrozenReadRequest;
+export function isWagerFrozenReadResponse(
+  value: unknown,
+): value is WagerFrozenReadResponse;
 
 export const WAGER_OUTCOME_RESOLVE_FAILURE_REASONS: readonly [
   "invite-not-found",

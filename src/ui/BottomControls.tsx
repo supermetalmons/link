@@ -125,6 +125,8 @@ import { subscribeToWagerState } from "../game/wagerState";
 import {
   computeAvailableMaterials,
   getFrozenMaterials,
+  getFrozenMaterialsStatus,
+  hasConfirmedFrozenMaterials,
   subscribeToFrozenMaterials,
 } from "../services/wagerMaterialsService";
 import { getStashedPlayerProfile } from "../utils/playerMetadata";
@@ -1025,6 +1027,12 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   const [wagerState, setWagerState] = useState<MatchWagerState | null>(null);
   const frozenMaterialsRef =
     useRef<Record<MaterialName, number>>(getFrozenMaterials());
+  const [frozenMaterialsStatus, setFrozenMaterialsStatus] = useState(
+    getFrozenMaterialsStatus,
+  );
+  const [hasFrozenSnapshot, setHasFrozenSnapshot] = useState(
+    hasConfirmedFrozenMaterials,
+  );
   const latestServiceMaterialsRef = useRef<Record<MaterialName, number>>(
     createEmptyMaterials(),
   );
@@ -1572,14 +1580,18 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
   }, []);
 
   useEffect(() => {
-    const unsubscribe = subscribeToFrozenMaterials((materials) => {
-      frozenMaterialsRef.current = materials;
-      const available = computeAvailableMaterials(
-        latestServiceMaterialsRef.current,
-        materials,
-      );
-      setMaterialAmounts(available);
-    });
+    const unsubscribe = subscribeToFrozenMaterials(
+      (materials, status, confirmed) => {
+        setFrozenMaterialsStatus(status);
+        setHasFrozenSnapshot(confirmed);
+        frozenMaterialsRef.current = materials;
+        const available = computeAvailableMaterials(
+          latestServiceMaterialsRef.current,
+          materials,
+        );
+        setMaterialAmounts(available);
+      },
+    );
     return unsubscribe;
   }, []);
 
@@ -2802,7 +2814,11 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
     !playerHasProposed;
   const wagerMaterial = wagerSelection.name;
   const wagerCount = wagerSelection.count;
-  const wagerReady = canSubmitWager && !!wagerMaterial && wagerCount > 0;
+  const wagerReady =
+    canSubmitWager &&
+    frozenMaterialsStatus === "ready" &&
+    !!wagerMaterial &&
+    wagerCount > 0;
 
   const handleWagerModeToggle = useCallback(() => {
     setIsWagerMode(true);
@@ -2810,6 +2826,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
 
   const handleMaterialSelect = useCallback(
     (name: MaterialName) => {
+      if (frozenMaterialsStatus !== "ready") return;
       const total = materialAmounts[name] ?? 0;
       if (total <= 0) return;
       setWagerSelection((prev) => {
@@ -2821,18 +2838,18 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         return { name, count: 1 };
       });
     },
-    [materialAmounts],
+    [materialAmounts, frozenMaterialsStatus],
   );
 
   const handleWagerSubmit = useCallback(() => {
-    if (!wagerMaterial || wagerCount === 0 || !canSubmitWager) {
+    if (!wagerMaterial || !wagerReady) {
       return;
     }
     setIsReactionPickerVisible(false);
     const material = wagerMaterial;
     const count = wagerCount;
     connection.sendWagerProposal(material, count).catch(() => {});
-  }, [canSubmitWager, wagerCount, wagerMaterial]);
+  }, [wagerReady, wagerCount, wagerMaterial]);
 
   const handleUndo = (
     event:
@@ -3777,7 +3794,13 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
                     opacity: wagerReady ? 1 : 0.6,
                   }}
                 >
-                  {wagerMaterial && wagerCount > 0 ? (
+                  {frozenMaterialsStatus !== "ready" ? (
+                    frozenMaterialsStatus === "unavailable" ? (
+                      "Balance unavailable"
+                    ) : (
+                      "Checking balance"
+                    )
+                  ) : wagerMaterial && wagerCount > 0 ? (
                     <>
                       <span>Propose</span>
                       <WagerButtonBadge>
@@ -3805,7 +3828,10 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
                       onTouchStart={
                         isMobile ? () => handleMaterialSelect(name) : undefined
                       }
-                      disabled={materialAmounts[name] <= 0}
+                      disabled={
+                        frozenMaterialsStatus !== "ready" ||
+                        materialAmounts[name] <= 0
+                      }
                       style={{ opacity: materialAmounts[name] > 0 ? 1 : 0.4 }}
                     >
                       {materialUrls[name] && (
@@ -3816,7 +3842,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
                         />
                       )}
                       <WagerMaterialAmount>
-                        {materialAmounts[name]}
+                        {hasFrozenSnapshot ? materialAmounts[name] : "—"}
                       </WagerMaterialAmount>
                     </WagerMaterialItem>
                   ))}

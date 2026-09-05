@@ -33,12 +33,12 @@ test("automatch REST queries retain their RTDB indexes", () => {
   );
 });
 
-test("player reads expose gameplay state without exposing wager operations", () => {
+test("player reads expose gameplay state without exposing retired wager storage", () => {
   const players = databaseRules.rules.players;
   assert.equal(players[".read"], undefined);
   assert.equal(players.$userId.matches[".read"], true);
   assert.equal(players.$userId.profile[".read"], true);
-  assert.equal(players.$userId.mining.frozen[".read"], true);
+  assert.equal(players.$userId.mining.frozen[".read"], false);
   assert.equal(players.$userId.mining._wagerOps, undefined);
 });
 

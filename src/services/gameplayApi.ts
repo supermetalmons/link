@@ -37,6 +37,11 @@ import {
   type StartAutomatchResponse,
 } from "@mons/shared/navigation";
 import {
+  WAGER_FROZEN_READ_PATH,
+  WAGER_STORAGE_VERSION,
+  WAGER_STORAGE_VERSION_HEADER,
+  isWagerFrozenReadRequest,
+  isWagerFrozenReadResponse,
   isWagerOutcomeResolveResponse,
   isWagerProposalAcceptResponse,
   isWagerProposalRemovalResponse,
@@ -49,6 +54,8 @@ import {
   type WagerProposalSendResponse,
   type WagerOutcomeResolveRequest,
   type WagerOutcomeResolveResponse,
+  type WagerFrozenReadRequest,
+  type WagerFrozenReadResponse,
 } from "@mons/shared/wagers";
 import {
   isClaimMatchVictoryByTimerResponse,
@@ -102,6 +109,13 @@ const GAMEPLAY_API_TIMEOUT_MS = 30_000;
 const RATING_API_TIMEOUT_MS = 60_000;
 const RATING_BUSY_RETRY_DELAY_MS = 31_000;
 const GAMEPLAY_API_MAX_RESPONSE_BYTES = MAX_GAME_SESSION_RESPONSE_BYTES;
+const WAGER_WRITE_PATHS = new Set([
+  "/wagers/proposals/send",
+  "/wagers/proposals/accept",
+  "/wagers/proposals/cancel",
+  "/wagers/proposals/decline",
+  "/wagers/outcomes/resolve",
+]);
 
 type RatingRetryOptions = {
   now?: () => number;
@@ -359,10 +373,20 @@ async function gameplayMutation<T>(
   tokenProvider: AuthTokenProvider,
   validate: (value: unknown) => value is T,
   timeoutMs = GAMEPLAY_API_TIMEOUT_MS,
+  options: { signal?: AbortSignal; maxResponseBytes?: number } = {},
 ): Promise<T> {
+  if (options.signal?.aborted) {
+    throw new GameplayApiError("aborted", "request-aborted");
+  }
   const controller = new AbortController();
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let rejectCancellation: (error: GameplayApiError) => void = () => {};
+  const handleCallerAbort = () => {
+    controller.abort();
+    rejectCancellation(new GameplayApiError("aborted", "request-aborted"));
+  };
   const deadline = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject;
     timeoutId = setTimeout(() => {
       controller.abort();
       reject(
@@ -370,6 +394,7 @@ async function gameplayMutation<T>(
       );
     }, timeoutMs);
   });
+  options.signal?.addEventListener("abort", handleCallerAbort, { once: true });
   const run = async (): Promise<T> => {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -387,6 +412,9 @@ async function gameplayMutation<T>(
             Accept: "application/json",
             Authorization: `Bearer ${token}`,
             "Content-Type": "application/json",
+            ...(WAGER_WRITE_PATHS.has(path)
+              ? { [WAGER_STORAGE_VERSION_HEADER]: WAGER_STORAGE_VERSION }
+              : {}),
           },
           body: JSON.stringify(body),
           cache: "no-store",
@@ -396,7 +424,10 @@ async function gameplayMutation<T>(
           cancelBody(response);
           continue;
         }
-        const payload = await readBoundedJson(response);
+        const payload = await readBoundedJson(
+          response,
+          options.maxResponseBytes,
+        );
         if (!response.ok) {
           throw responseError(payload, response.status);
         }
@@ -429,7 +460,29 @@ async function gameplayMutation<T>(
     if (timeoutId !== undefined) {
       clearTimeout(timeoutId);
     }
+    options.signal?.removeEventListener("abort", handleCallerAbort);
   }
+}
+
+export function readWagerFrozenViaApi(
+  request: WagerFrozenReadRequest,
+  tokenProvider: AuthTokenProvider,
+  options: { signal?: AbortSignal } = {},
+): Promise<WagerFrozenReadResponse> {
+  if (!isWagerFrozenReadRequest(request)) {
+    return Promise.reject(
+      new GameplayApiError("invalid-argument", "invalid-player-uid"),
+    );
+  }
+  return gameplayMutation(
+    WAGER_FROZEN_READ_PATH,
+    request,
+    tokenProvider,
+    (value): value is WagerFrozenReadResponse =>
+      isWagerFrozenReadResponse(value) && value.playerUid === request.playerUid,
+    GAMEPLAY_API_TIMEOUT_MS,
+    { ...options, maxResponseBytes: 4 * 1024 },
+  );
 }
 
 export async function readHistoricalMatchPairViaApi(

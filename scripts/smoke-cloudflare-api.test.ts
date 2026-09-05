@@ -17,6 +17,8 @@ const {
   smokeEventReads,
   smokeFrozenProfileWrite,
   smokeRequiredAutomatchOperationId,
+  smokeRequiredWagerFrozenRead,
+  smokeRequiredWagerStorageVersion,
 } = require("./smoke-cloudflare-api.ts") as {
   DEFAULT_SMOKE_PROFILE: {
     loginId: string;
@@ -37,6 +39,8 @@ const {
     readOnly: boolean;
     readOnlyAuthToken: string | null;
     requireAutomatchOperationId?: boolean;
+    requireWagerFrozenRead?: boolean;
+    requireWagerStorageVersion?: boolean;
     requireHistory: boolean;
     requireEvents?: boolean;
     smokeProfile: {
@@ -60,6 +64,8 @@ const {
       readOnlyAuthToken?: string | null;
       readOnly?: boolean;
       requireAutomatchOperationId?: boolean;
+      requireWagerFrozenRead?: boolean;
+      requireWagerStorageVersion?: boolean;
       requireHistory: boolean;
       requireEvents?: boolean;
       smokeProfile: {
@@ -133,6 +139,29 @@ const {
     },
   ) => Promise<void>;
   smokeFrozenProfileWrite: (
+    baseUrl: string,
+    idToken: string,
+    dependencies: {
+      fetch: typeof fetch;
+      randomState: () => string;
+      log: (message: string) => void;
+    },
+  ) => Promise<void>;
+  smokeRequiredWagerFrozenRead: (
+    baseUrl: string,
+    idToken: string,
+    smokeProfile: {
+      loginId: string;
+      profileId: string;
+      invite?: { actorUid: string; id: string; role: "guest" | "host" };
+    },
+    dependencies: {
+      fetch: typeof fetch;
+      randomState: () => string;
+      log: (message: string) => void;
+    },
+  ) => Promise<void>;
+  smokeRequiredWagerStorageVersion: (
     baseUrl: string,
     idToken: string,
     dependencies: {
@@ -650,6 +679,42 @@ test("smokes public, unauthenticated, and internal routes", async () => {
         200,
       );
     }
+    if (url.endsWith("/wagers/frozen/read")) {
+      const { playerUid } = JSON.parse(String(init?.body)) as {
+        playerUid: string;
+      };
+      assert.ok([LOGIN, SMOKE_PROFILE.invite.actorUid].includes(playerUid));
+      return json(
+        {
+          ok: true,
+          playerUid,
+          revision: 0,
+          frozen: { dust: 0, slime: 0, gum: 0, metal: 0, ice: 0 },
+        },
+        200,
+      );
+    }
+    if (new URL(url).pathname.startsWith("/wagers/")) {
+      assert.equal(init?.body, "{}");
+      return new Headers(init?.headers).has("X-Mons-Wager-Storage-Version")
+        ? json(
+            {
+              ok: false,
+              error: "unavailable",
+              message: "profile-writes-disabled",
+            },
+            503,
+            { "Retry-After": "60" },
+          )
+        : json(
+            {
+              ok: false,
+              error: "client-update-required",
+              message: "Reload this page to continue wagering.",
+            },
+            409,
+          );
+    }
     if (
       url.endsWith("/profiles/username") &&
       new Headers(init?.headers).has("Authorization")
@@ -1064,6 +1129,48 @@ test("smokes public, unauthenticated, and internal routes", async () => {
     true,
   );
   assert.deepEqual(logs, ["[api-smoke] Passed https://api.mons.link"]);
+
+  for (const gate of [
+    "requireWagerFrozenRead",
+    "requireWagerStorageVersion",
+  ] as const) {
+    requests.length = 0;
+    nftPosts = 0;
+    await smokeApi(
+      {
+        baseUrl: "https://api.mons.link",
+        readOnly: true,
+        readOnlyAuthToken: AUTH_TOKEN,
+        requireHistory: false,
+        smokeProfile: SMOKE_PROFILE,
+        smokeSol: WALLET,
+        [gate]: true,
+      },
+      {
+        fetch: fetchStub,
+        randomState: () => "abcdefghijklmnopqrstuvwx",
+        log: () => undefined,
+      },
+    );
+    assert.equal(
+      requests.filter(({ url }) => url.endsWith("/wagers/frozen/read")).length,
+      2,
+    );
+    assert.equal(
+      requests.filter(
+        ({ url }) =>
+          new URL(url).pathname.startsWith("/wagers/") &&
+          !url.endsWith("/wagers/frozen/read"),
+      ).length,
+      gate === "requireWagerStorageVersion" ? 10 : 0,
+    );
+    assert.equal(
+      requests.some(({ url }) =>
+        url.includes("identitytoolkit.googleapis.com"),
+      ),
+      false,
+    );
+  }
 
   for (const payload of [
     { ok: true, pair: null },
@@ -2018,4 +2125,342 @@ test("deletes an anonymous smoke user after an incomplete signup response", asyn
     /incomplete/,
   );
   assert.equal(deleted, true);
+});
+
+test("parses protected read-only wager release gates without changing defaults", () => {
+  const fixture = profileFixture();
+  const auth = authTokenFixture();
+  const base = [
+    "--base-url",
+    "https://api.mons.link",
+    "--read-only",
+    "--auth-token-fixture",
+    auth.path,
+    "--smoke-profile-fixture",
+    fixture.path,
+  ];
+  try {
+    assert.equal(
+      parseArgs([...base, "--require-wager-frozen-read"])
+        .requireWagerFrozenRead,
+      true,
+    );
+    assert.equal(
+      parseArgs([...base, "--require-wager-frozen-read"])
+        .requireWagerStorageVersion,
+      undefined,
+    );
+    const stronger = parseArgs([...base, "--require-wager-storage-version"]);
+    assert.equal(stronger.requireWagerFrozenRead, true);
+    assert.equal(stronger.requireWagerStorageVersion, true);
+    assert.equal(parseArgs(base).requireWagerFrozenRead, undefined);
+    assert.equal(parseArgs(base).requireWagerStorageVersion, undefined);
+    assert.equal(
+      parseArgs([
+        ...base,
+        "--require-wager-frozen-read",
+        "--require-wager-storage-version",
+      ]).requireWagerStorageVersion,
+      true,
+    );
+    for (const flag of [
+      "--require-wager-frozen-read",
+      "--require-wager-storage-version",
+    ]) {
+      assert.throws(
+        () => parseArgs(["--base-url", "https://api.mons.link", flag]),
+        /Usage:/,
+      );
+      assert.throws(() => parseArgs([...base, flag, flag]), /Usage:/);
+    }
+  } finally {
+    fixture.cleanup();
+    auth.cleanup();
+  }
+});
+
+test("rejects wager smoke gates before requests without their authenticated alternate fixture", async () => {
+  for (const flag of [
+    "requireWagerFrozenRead",
+    "requireWagerStorageVersion",
+  ] as const) {
+    for (const partial of [
+      {},
+      { readOnly: true },
+      {
+        readOnly: true,
+        readOnlyAuthToken: AUTH_TOKEN,
+        smokeProfile: { loginId: LOGIN, profileId: "profile-1" },
+      },
+      {
+        readOnly: true,
+        readOnlyAuthToken: AUTH_TOKEN,
+        smokeProfile: {
+          ...SMOKE_PROFILE,
+          invite: { ...SMOKE_PROFILE.invite, actorUid: LOGIN },
+        },
+      },
+    ]) {
+      let requests = 0;
+      await assert.rejects(
+        smokeApi(
+          {
+            baseUrl: "https://api.mons.link",
+            requireHistory: false,
+            smokeProfile: SMOKE_PROFILE,
+            smokeSol: WALLET,
+            [flag]: true,
+            ...partial,
+          },
+          {
+            fetch: async () => {
+              requests += 1;
+              throw new Error("unexpected-request");
+            },
+            randomState: () => "unused",
+            log: () => undefined,
+          },
+        ),
+        /fixture/,
+      );
+      assert.equal(requests, 0);
+    }
+  }
+});
+
+test("reads exact frozen balances for the login and alternate invite actor", async () => {
+  const requests: string[] = [];
+  await smokeRequiredWagerFrozenRead(
+    "https://api.mons.link",
+    AUTH_TOKEN,
+    SMOKE_PROFILE,
+    {
+      fetch: async (input, init) => {
+        assert.equal(String(input), "https://api.mons.link/wagers/frozen/read");
+        assert.equal(init?.method, "POST");
+        const headers = new Headers(init?.headers);
+        assert.equal(headers.get("Authorization"), `Bearer ${AUTH_TOKEN}`);
+        assert.equal(headers.get("Origin"), "https://mons.link");
+        assert.equal(headers.get("Content-Type"), "application/json");
+        assert.equal(headers.has("X-Mons-Wager-Storage-Version"), false);
+        const request = JSON.parse(String(init?.body)) as { playerUid: string };
+        assert.deepEqual(Object.keys(request), ["playerUid"]);
+        requests.push(request.playerUid);
+        return json(
+          {
+            ok: true,
+            playerUid: request.playerUid,
+            revision: requests.length - 1,
+            frozen: { dust: 2, slime: 0, gum: 3, metal: 0, ice: 0 },
+          },
+          200,
+        );
+      },
+      randomState: () => "unused",
+      log: () => undefined,
+    },
+  );
+  assert.deepEqual(requests, [LOGIN, SMOKE_PROFILE.invite.actorUid]);
+});
+
+test("rejects malformed, mismatched, unsafe, or cacheable frozen balance responses", async () => {
+  const valid = {
+    ok: true,
+    playerUid: LOGIN,
+    revision: 1,
+    frozen: { dust: 2, slime: 0, gum: 0, metal: 0, ice: 0 },
+  };
+  for (const payload of [
+    null,
+    { ...valid, playerUid: "another-login" },
+    { ...valid, revision: -1 },
+    { ...valid, revision: 1.5 },
+    { ...valid, revision: Number.MAX_SAFE_INTEGER + 1 },
+    { ...valid, frozen: { dust: 2 } },
+    { ...valid, frozen: { ...valid.frozen, dust: -1 } },
+    { ...valid, frozen: { ...valid.frozen, dust: 1.5 } },
+    {
+      ...valid,
+      frozen: { ...valid.frozen, dust: Number.MAX_SAFE_INTEGER + 1 },
+    },
+    { ...valid, frozen: { ...valid.frozen, extra: 1 } },
+    { ...valid, _wagerOps: {} },
+  ]) {
+    let requests = 0;
+    await assert.rejects(
+      smokeRequiredWagerFrozenRead(
+        "https://api.mons.link",
+        AUTH_TOKEN,
+        SMOKE_PROFILE,
+        {
+          fetch: async () => {
+            requests += 1;
+            return json(payload, 200);
+          },
+          randomState: () => "unused",
+          log: () => undefined,
+        },
+      ),
+      /frozen-read smoke response was invalid/,
+    );
+    assert.equal(requests, 1);
+  }
+  await assert.rejects(
+    smokeRequiredWagerFrozenRead(
+      "https://api.mons.link",
+      AUTH_TOKEN,
+      SMOKE_PROFILE,
+      {
+        fetch: async () => json(valid, 200, { "Cache-Control": "public" }),
+        randomState: () => "unused",
+        log: () => undefined,
+      },
+    ),
+    /cacheable/,
+  );
+});
+
+test("proves profile freeze before checking both storage-version gates on every wager route", async () => {
+  const requests: { path: string; version: string | null }[] = [];
+  await smokeRequiredWagerStorageVersion("https://api.mons.link", AUTH_TOKEN, {
+    fetch: async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const headers = new Headers(init?.headers);
+      const version = headers.get("X-Mons-Wager-Storage-Version");
+      requests.push({ path, version });
+      assert.equal(init?.method, "POST");
+      assert.equal(init?.body, "{}");
+      assert.equal(headers.get("Authorization"), `Bearer ${AUTH_TOKEN}`);
+      assert.equal(headers.get("Origin"), "https://mons.link");
+      assert.equal(headers.get("Content-Type"), "application/json");
+      if (path === "/profiles/username" || version === "1") {
+        return json(
+          {
+            ok: false,
+            error: "unavailable",
+            message: "profile-writes-disabled",
+          },
+          503,
+          { "Retry-After": "60" },
+        );
+      }
+      return json(
+        {
+          ok: false,
+          error: "client-update-required",
+          message: "Reload this page to continue wagering.",
+        },
+        409,
+      );
+    },
+    randomState: () => "unused",
+    log: () => undefined,
+  });
+  assert.deepEqual(requests, [
+    { path: "/profiles/username", version: null },
+    ...[
+      "/wagers/proposals/send",
+      "/wagers/proposals/accept",
+      "/wagers/proposals/cancel",
+      "/wagers/proposals/decline",
+      "/wagers/outcomes/resolve",
+    ].flatMap((path) => [
+      { path, version: null },
+      { path, version: "1" },
+    ]),
+  ]);
+});
+
+test("stops storage-version probes when freeze or version-gate evidence is invalid", async () => {
+  const frozen = () =>
+    json(
+      { ok: false, error: "unavailable", message: "profile-writes-disabled" },
+      503,
+      { "Retry-After": "60" },
+    );
+  const obsolete = () =>
+    json(
+      {
+        ok: false,
+        error: "client-update-required",
+        message: "Reload this page to continue wagering.",
+      },
+      409,
+    );
+  const cases = [
+    { responses: [json({ ok: true }, 200)], pattern: /returned 200/ },
+    { responses: [frozen(), frozen()], pattern: /returned 503/ },
+    {
+      responses: [
+        frozen(),
+        json(
+          {
+            ok: false,
+            error: "client-update-required",
+            message: "Reload this page to continue wagering.",
+            extra: true,
+          },
+          409,
+        ),
+      ],
+      pattern: /storage-version smoke response was invalid/,
+    },
+    {
+      responses: [
+        frozen(),
+        obsolete(),
+        json(
+          { ok: false, error: "unavailable", message: "wager-frozen" },
+          503,
+          { "Retry-After": "60" },
+        ),
+      ],
+      pattern: /storage-version smoke response was invalid/,
+    },
+    {
+      responses: [
+        frozen(),
+        obsolete(),
+        json(
+          {
+            ok: false,
+            error: "unavailable",
+            message: "profile-writes-disabled",
+          },
+          503,
+        ),
+      ],
+      pattern: /storage-version smoke response was invalid/,
+    },
+    {
+      responses: [
+        frozen(),
+        json(
+          {
+            ok: false,
+            error: "client-update-required",
+            message: "Reload this page to continue wagering.",
+          },
+          409,
+          { "Cache-Control": "public" },
+        ),
+      ],
+      pattern: /cacheable/,
+    },
+  ];
+  for (const fixture of cases) {
+    await assert.rejects(
+      smokeRequiredWagerStorageVersion("https://api.mons.link", AUTH_TOKEN, {
+        fetch: async () => {
+          const response = fixture.responses.shift();
+          assert.ok(response);
+          return response;
+        },
+        randomState: () => "unused",
+        log: () => undefined,
+      }),
+      fixture.pattern,
+    );
+    assert.equal(fixture.responses.length, 0);
+  }
 });

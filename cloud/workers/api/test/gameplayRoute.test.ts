@@ -1,3 +1,7 @@
+import {
+  attachFirebaseWagerFrozenStore,
+  createTestWagerReservationRuntime,
+} from "./wagerFrozenTestUtils.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Game } from "mons-rules";
@@ -82,6 +86,11 @@ function handleGameplayRoute(
   return handleGameplayRouteImpl(request, env, ctx, {
     ...dependencies,
     coordination,
+    wagerReservations:
+      dependencies.wagerReservations ||
+      (dependencies.repository
+        ? createTestWagerReservationRuntime(dependencies.repository)
+        : undefined),
   });
 }
 
@@ -164,7 +173,7 @@ function repository(
   overrides: Partial<GameplayRepository> = {},
 ): GameplayRepository {
   const transactionValues = new Map<string, unknown>();
-  return {
+  const value: GameplayRepository = {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
@@ -189,6 +198,7 @@ function repository(
     },
     ...overrides,
   };
+  return attachFirebaseWagerFrozenStore(value);
 }
 
 function wagerRepository(
@@ -2491,7 +2501,10 @@ test("authenticates before body parsing and sanitizes route failures", async () 
       request(path, { body }),
       env,
       context(),
-      { verifyIdentity: async () => identity },
+      {
+        verifyIdentity: async () => identity,
+        wagerReservations: createTestWagerReservationRuntime(repository()),
+      },
     );
     assert.equal(response.status, 400);
   }

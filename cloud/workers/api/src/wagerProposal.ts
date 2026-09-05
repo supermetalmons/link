@@ -1,3 +1,4 @@
+import { requireWagerFrozenStore } from "./wagerFrozenStore.ts";
 import {
   isMaterialName,
   normalizeCount,
@@ -29,7 +30,6 @@ import {
   consumeWagerReservationOperation,
   createOperationId,
   createWagerReservationOperationId,
-  frozenOperationState,
   operationFingerprint,
   readFrozenOperationForUid,
   recoverUnreferencedWagerReservation,
@@ -519,13 +519,12 @@ async function sendWagerProposalUnlocked(
     );
     return { ok: false, reason: "proposal-unavailable" };
   }
-  const existingMining = await repository.getRtdbPath(
-    `players/${participants.playerUid}/mining`,
-  );
-  const existingReservationState = frozenOperationState(
-    existingMining,
-    reservationOperationId,
-  );
+  const existingReservationState = (
+    await requireWagerFrozenStore(repository).read(
+      participants.playerUid,
+      reservationOperationId,
+    )
+  ).operation;
   if (existingReservationState.status === "malformed") {
     throw new Error("wager-operation-unavailable");
   }

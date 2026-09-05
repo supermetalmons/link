@@ -1,3 +1,4 @@
+import type { WagerFrozenStore } from "./wagerFrozenStore.ts";
 import type { HistoricalMatchPair } from "@mons/shared/game-sessions";
 import type {
   MiningMaterialName,
@@ -222,6 +223,7 @@ export type RatingProfileGameProjectionRepository = RatingRepository & {
 };
 
 export type GameplayRepository = ProfileOwnershipReader & {
+  wagerFrozen?: WagerFrozenStore;
   applyWagerTransferOnce: (
     input: WagerTransferInput,
   ) => Promise<WagerTransferResult>;
@@ -252,6 +254,7 @@ export type GameplayRepository = ProfileOwnershipReader & {
 };
 
 type GameplayRepositoryDependencies = {
+  wagerFrozen?: WagerFrozenStore;
   d1?: D1Database;
   fetcher?: typeof fetch;
   now?: () => number;
@@ -274,6 +277,7 @@ export function createGameplayRepository(
   env: Env,
   {
     d1 = env.PROFILE_GAMES_DB,
+    wagerFrozen,
     fetcher = fetch,
     now = Date.now,
     timeoutMs,
@@ -288,11 +292,14 @@ export function createGameplayRepository(
     }),
   }: GameplayRepositoryDependencies = {},
 ): GameplayRepository {
-  return createCanonicalGameplayRepository(env.PROFILE_DB, d1, rtdbClient, {
-    createFailure: () => new GameplayRepositoryFailure(),
-    maxAttempts: MAX_WAGER_TRANSFER_TRANSACTION_ATTEMPTS,
-    now,
-  });
+  return {
+    ...createCanonicalGameplayRepository(env.PROFILE_DB, d1, rtdbClient, {
+      createFailure: () => new GameplayRepositoryFailure(),
+      maxAttempts: MAX_WAGER_TRANSFER_TRANSACTION_ATTEMPTS,
+      now,
+    }),
+    wagerFrozen,
+  };
 }
 
 export function createRatingRepository(

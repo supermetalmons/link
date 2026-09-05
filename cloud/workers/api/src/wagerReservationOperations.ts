@@ -4,77 +4,36 @@ import {
   computeAcceptedReservation,
   computeAvailableCount,
   isMaterialName,
-  MATERIAL_KEYS,
   normalizeCount,
-  normalizeMaterials,
   type MiningMaterialName,
   type MiningMaterials,
 } from "@mons/shared/mining";
 import type { GameplayRepository } from "./gameplayRepository.ts";
+import { requireWagerFrozenStore } from "./wagerFrozenStore.ts";
+import {
+  operationFingerprint,
+  parseFrozenOperation,
+  type FrozenDeltaOperationKind,
+  type ParsedFrozenOperation,
+  type ReservationOperationKind,
+} from "./wagerFrozenRecords.ts";
+export {
+  createOperationId,
+  createWagerReservationOperationId,
+  frozenOperationState,
+  operationFingerprint,
+  parseFrozenOperation,
+  type FrozenOperationState,
+  type ParsedFrozenOperation,
+  type FrozenDeltaOperationKind,
+  type ReservationOperationKind,
+  type WagerFrozenOperationKind,
+} from "./wagerFrozenRecords.ts";
 
 export type WagerMutationContext = {
   createCriticalPhaseSignal: () => AbortSignal;
   refreshLease: () => Promise<void>;
 };
-
-type FrozenOperationRecord = {
-  appliedAtMs: number;
-  count?: number;
-  deltas: Partial<MiningMaterials>;
-  fingerprint: string;
-};
-
-export type ReservationOperationKind =
-  | "accept-proposer-adjustment"
-  | "accept-reserve"
-  | "send-proposer-adjustment"
-  | "send-reserve"
-  | "send-self-adjustment";
-
-export type WagerFrozenOperationKind = ReservationOperationKind;
-
-export type FrozenDeltaOperationKind =
-  | "accept-proposer-adjustment"
-  | "send-proposer-adjustment"
-  | "send-self-adjustment";
-
-type ParsedOperationBase = FrozenOperationRecord & {
-  expectedDeltas: Partial<MiningMaterials>;
-};
-
-type ParsedSendReservation = ParsedOperationBase & {
-  count: number;
-  kind: "send-reserve";
-  material: MiningMaterialName;
-  requestedCount: number;
-};
-
-type ParsedAcceptReservation = ParsedOperationBase & {
-  count: number;
-  kind: "accept-reserve";
-  material: MiningMaterialName;
-  ownCount?: number;
-  ownMaterial?: MiningMaterialName;
-  requestedCount: number;
-};
-
-type ParsedAdjustmentOperation = ParsedOperationBase & {
-  kind:
-    | "accept-proposer-adjustment"
-    | "send-proposer-adjustment"
-    | "send-self-adjustment";
-};
-
-export type ParsedFrozenOperation =
-  ParsedAcceptReservation | ParsedAdjustmentOperation | ParsedSendReservation;
-
-export type FrozenOperationState =
-  | { status: "absent" }
-  | { status: "consumed" }
-  | { operation: ParsedFrozenOperation; status: "active" }
-  | { status: "malformed" };
-
-const FROZEN_OPERATION_ROOT = "_wagerOps";
 
 function toRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -82,316 +41,8 @@ function toRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function toPlainRecord(value: unknown): Record<string, unknown> | null {
-  const record = toRecord(value);
-  if (!record) return null;
-  const prototype = Object.getPrototypeOf(record);
-  return prototype === Object.prototype || prototype === null ? record : null;
-}
-
 function normalizeString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
-}
-
-export async function createOperationId(...parts: string[]): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(parts.join("\u0000")),
-  );
-  return Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
-}
-
-export async function createWagerReservationOperationId(
-  kind: "accept" | "send",
-  inviteId: string,
-  matchId: string,
-  playerUid: string,
-): Promise<string> {
-  return createOperationId("reservation", kind, inviteId, matchId, playerUid);
-}
-
-export function operationFingerprint(
-  kind: WagerFrozenOperationKind,
-  material: string,
-  count: number,
-  deltas: Partial<MiningMaterials> = {},
-): string {
-  return JSON.stringify([
-    kind,
-    material,
-    count,
-    ...MATERIAL_KEYS.map((key) => deltas[key] || 0),
-  ]);
-}
-
-function exactMaterialDeltas(
-  value: unknown,
-  expected: Partial<MiningMaterials>,
-): value is Partial<MiningMaterials> {
-  const actual = toPlainRecord(value);
-  if (!actual) return false;
-  const actualKeys = Object.keys(actual);
-  const expectedKeys = Object.keys(expected);
-  return (
-    actualKeys.length === expectedKeys.length &&
-    actualKeys.every((material) => {
-      const delta = actual[material];
-      return (
-        isMaterialName(material) &&
-        Number.isSafeInteger(delta) &&
-        delta !== 0 &&
-        delta === expected[material]
-      );
-    })
-  );
-}
-
-export function parseFrozenOperation(
-  value: unknown,
-): ParsedFrozenOperation | null {
-  const operation = toPlainRecord(value);
-  if (!operation || typeof operation.fingerprint !== "string") return null;
-  const appliedAtMs = operation.appliedAtMs;
-  const storedFingerprint = operation.fingerprint;
-  if (
-    typeof appliedAtMs !== "number" ||
-    !Number.isSafeInteger(appliedAtMs) ||
-    appliedAtMs < 0
-  ) {
-    return null;
-  }
-  let fingerprint: unknown;
-  try {
-    fingerprint = JSON.parse(storedFingerprint);
-  } catch {
-    return null;
-  }
-  if (
-    !Array.isArray(fingerprint) ||
-    fingerprint.length !== MATERIAL_KEYS.length + 3 ||
-    typeof fingerprint[0] !== "string" ||
-    typeof fingerprint[1] !== "string" ||
-    !Number.isSafeInteger(fingerprint[2]) ||
-    fingerprint.slice(3).some((delta) => !Number.isSafeInteger(delta))
-  ) {
-    return null;
-  }
-  if (storedFingerprint !== JSON.stringify(fingerprint)) return null;
-  const kind = fingerprint[0];
-  const material = fingerprint[1];
-  const requestedCount = fingerprint[2];
-  const fingerprintDeltas = fingerprint.slice(3) as number[];
-  const hasCount = Object.hasOwn(operation, "count");
-  const count = operation.count;
-  const hasDeltas = Object.hasOwn(operation, "deltas");
-  const operationKeys = Object.keys(operation);
-  const activeKeys =
-    kind === "accept-reserve" && !hasDeltas
-      ? ["appliedAtMs", "count", "fingerprint"]
-      : hasCount
-        ? ["appliedAtMs", "count", "deltas", "fingerprint"]
-        : ["appliedAtMs", "deltas", "fingerprint"];
-  if (
-    operationKeys.length !== activeKeys.length ||
-    !operationKeys.every((key) => activeKeys.includes(key))
-  ) {
-    return null;
-  }
-  const base = (deltas: Partial<MiningMaterials>): ParsedOperationBase => ({
-    appliedAtMs,
-    ...(hasCount ? { count: count as number } : {}),
-    deltas,
-    expectedDeltas: deltas,
-    fingerprint: storedFingerprint,
-  });
-  if (kind === "send-reserve") {
-    if (
-      !hasCount ||
-      !hasDeltas ||
-      !isMaterialName(material) ||
-      requestedCount <= 0 ||
-      typeof count !== "number" ||
-      !Number.isSafeInteger(count) ||
-      count <= 0 ||
-      count > requestedCount ||
-      fingerprintDeltas.some((delta) => delta !== 0)
-    ) {
-      return null;
-    }
-    const deltas = { [material]: count as number };
-    return exactMaterialDeltas(operation.deltas, deltas)
-      ? {
-          ...base(deltas),
-          count,
-          kind,
-          material,
-          requestedCount,
-        }
-      : null;
-  }
-  if (kind === "accept-reserve") {
-    const [acceptedMaterial, ownMaterial, ...extra] = material.split(":");
-    if (
-      !hasCount ||
-      extra.length > 0 ||
-      !isMaterialName(acceptedMaterial) ||
-      (ownMaterial !== "" && !isMaterialName(ownMaterial)) ||
-      requestedCount <= 0 ||
-      typeof count !== "number" ||
-      !Number.isSafeInteger(count) ||
-      count <= 0 ||
-      count > requestedCount
-    ) {
-      return null;
-    }
-    const ownIndex = ownMaterial ? MATERIAL_KEYS.indexOf(ownMaterial) : -1;
-    const ownCount = ownIndex < 0 ? 0 : fingerprintDeltas[ownIndex];
-    if (
-      fingerprintDeltas.some(
-        (delta, index) => index !== ownIndex && delta !== 0,
-      ) ||
-      ownCount < 0 ||
-      (ownMaterial === "" ? ownCount !== 0 : ownCount <= 0)
-    ) {
-      return null;
-    }
-    const deltas: Partial<MiningMaterials> = {};
-    if (ownMaterial && ownCount > 0) deltas[ownMaterial] = -ownCount;
-    deltas[acceptedMaterial] = (deltas[acceptedMaterial] || 0) + count;
-    if (deltas[acceptedMaterial] === 0) delete deltas[acceptedMaterial];
-    if (
-      hasDeltas
-        ? !exactMaterialDeltas(operation.deltas, deltas)
-        : Object.keys(deltas).length !== 0
-    ) {
-      return null;
-    }
-    return {
-      ...base(deltas),
-      count,
-      kind,
-      material: acceptedMaterial,
-      ...(ownMaterial ? { ownCount, ownMaterial } : {}),
-      requestedCount,
-    };
-  }
-  if (
-    ![
-      "accept-proposer-adjustment",
-      "send-proposer-adjustment",
-      "send-self-adjustment",
-    ].includes(kind) ||
-    hasCount ||
-    !hasDeltas ||
-    material !== "" ||
-    requestedCount !== 0
-  ) {
-    return null;
-  }
-  const deltas: Partial<MiningMaterials> = {};
-  for (let index = 0; index < MATERIAL_KEYS.length; index += 1) {
-    const delta = fingerprintDeltas[index];
-    if (delta !== 0) deltas[MATERIAL_KEYS[index]] = delta;
-  }
-  if (
-    Object.keys(deltas).length !== 1 ||
-    Object.values(deltas)[0] >= 0 ||
-    !exactMaterialDeltas(operation.deltas, deltas)
-  ) {
-    return null;
-  }
-  return {
-    ...base(deltas),
-    kind: kind as ParsedAdjustmentOperation["kind"],
-  };
-}
-
-function storedFrozenOperation(
-  operation: ParsedFrozenOperation,
-): FrozenOperationRecord {
-  return {
-    appliedAtMs: operation.appliedAtMs,
-    ...(operation.count === undefined ? {} : { count: operation.count }),
-    deltas: operation.deltas,
-    fingerprint: operation.fingerprint,
-  };
-}
-
-export function frozenOperationState(
-  value: unknown,
-  operationId: string,
-): FrozenOperationState {
-  if (value === null || value === undefined) return { status: "absent" };
-  const mining = toRecord(value);
-  if (!mining) return { status: "malformed" };
-  if (!Object.hasOwn(mining, FROZEN_OPERATION_ROOT)) {
-    return { status: "absent" };
-  }
-  const operations = toPlainRecord(mining[FROZEN_OPERATION_ROOT]);
-  if (!operations) return { status: "malformed" };
-  if (!Object.hasOwn(operations, operationId)) return { status: "absent" };
-  const raw = operations[operationId];
-  const record = toPlainRecord(raw);
-  if (record && Object.keys(record).length === 1 && record.consumed === true) {
-    return { status: "consumed" };
-  }
-  const operation = parseFrozenOperation(raw);
-  return operation ? { operation, status: "active" } : { status: "malformed" };
-}
-
-function appendFrozenOperation(
-  current: unknown,
-  operationId: string,
-  operation: ParsedFrozenOperation,
-  materials: MiningMaterials,
-): Record<string, unknown> {
-  const mining = toRecord(current) || {};
-  const operations = toRecord(mining[FROZEN_OPERATION_ROOT]) || {};
-  return {
-    ...mining,
-    frozen: materials,
-    [FROZEN_OPERATION_ROOT]: {
-      ...operations,
-      [operationId]: storedFrozenOperation(operation),
-    },
-  };
-}
-
-function replaceFrozenOperation(
-  current: unknown,
-  operationId: string,
-  operation: ParsedFrozenOperation,
-): Record<string, unknown> {
-  const mining = toRecord(current) || {};
-  const operations = toPlainRecord(mining[FROZEN_OPERATION_ROOT]) || {};
-  return {
-    ...mining,
-    [FROZEN_OPERATION_ROOT]: {
-      ...operations,
-      [operationId]: storedFrozenOperation(operation),
-    },
-  };
-}
-
-function removeFrozenOperation(
-  current: unknown,
-  operationId: string,
-  materials: MiningMaterials,
-  retainTombstone: boolean,
-): Record<string, unknown> {
-  const mining = toRecord(current) || {};
-  const operations = { ...(toRecord(mining[FROZEN_OPERATION_ROOT]) || {}) };
-  if (retainTombstone) operations[operationId] = { consumed: true };
-  else delete operations[operationId];
-  const result: Record<string, unknown> = { ...mining, frozen: materials };
-  if (Object.keys(operations).length > 0) {
-    result[FROZEN_OPERATION_ROOT] = operations;
-  } else {
-    delete result[FROZEN_OPERATION_ROOT];
-  }
-  return result;
 }
 
 async function applyFrozenOperation(
@@ -407,14 +58,15 @@ async function applyFrozenOperation(
   now: () => number,
   signal?: AbortSignal,
 ): Promise<ParsedFrozenOperation | null> {
-  const miningPath = `players/${uid}/mining`;
+  const store = requireWagerFrozenStore(repository);
   let expectedAppliedAtMs: number | null = null;
   let result;
   try {
-    result = await repository.transactRtdbPath(
-      miningPath,
+    result = await store.transact(
+      uid,
+      operationId,
       (current) => {
-        const state = frozenOperationState(current, operationId);
+        const state = current.operation;
         if (state.status === "consumed") {
           return { commit: false, decision: "operation-consumed" };
         }
@@ -432,13 +84,16 @@ async function applyFrozenOperation(
           expectedAppliedAtMs = appliedAtMs;
           return {
             decision: "operation-replayed",
-            value: replaceFrozenOperation(current, operationId, {
-              ...state.operation,
-              appliedAtMs,
-            }),
+            value: {
+              frozen: current.frozen,
+              operation: {
+                status: "active",
+                operation: { ...state.operation, appliedAtMs },
+              },
+            },
           };
         }
-        const created = create(normalizeMaterials(toRecord(current)?.frozen));
+        const created = create(current.frozen);
         if (!created) {
           return { commit: false, decision: "operation-rejected" };
         }
@@ -453,19 +108,17 @@ async function applyFrozenOperation(
         }
         expectedAppliedAtMs = parsedOperation.appliedAtMs;
         return {
-          value: appendFrozenOperation(
-            current,
-            operationId,
-            parsedOperation,
-            created.materials,
-          ),
+          value: {
+            frozen: created.materials,
+            operation: { status: "active", operation: parsedOperation },
+          },
         };
       },
       signal,
     );
   } catch {
-    const current = await repository.getRtdbPath(miningPath);
-    const state = frozenOperationState(current, operationId);
+    const current = await store.read(uid, operationId);
+    const state = current.operation;
     if (state.status === "consumed") return null;
     if (
       state.status === "active" &&
@@ -482,7 +135,7 @@ async function applyFrozenOperation(
   }
   if (result.decision === "operation-rejected") return null;
   if (result.decision === "operation-consumed") return null;
-  const state = frozenOperationState(result.value, operationId);
+  const state = result.value.operation;
   if (
     state.status !== "active" ||
     state.operation.fingerprint !== fingerprint ||
@@ -526,12 +179,13 @@ export async function consumeWagerReservationOperation(
   retainTombstone = false,
   signal?: AbortSignal,
 ): Promise<"missing" | "released"> {
-  const miningPath = `players/${uid}/mining`;
+  const store = requireWagerFrozenStore(repository);
   try {
-    const result = await repository.transactRtdbPath(
-      miningPath,
+    const result = await store.transact(
+      uid,
+      operationId,
       (current) => {
-        const state = frozenOperationState(current, operationId);
+        const state = current.operation;
         if (state.status === "consumed") {
           return { commit: false, decision: "reservation-consumed" };
         }
@@ -542,12 +196,10 @@ export async function consumeWagerReservationOperation(
           if (retainTombstone) {
             return {
               decision: "reservation-tombstoned",
-              value: removeFrozenOperation(
-                current,
-                operationId,
-                normalizeMaterials(toRecord(current)?.frozen),
-                true,
-              ),
+              value: {
+                frozen: current.frozen,
+                operation: { status: "consumed" },
+              },
             };
           }
           return { commit: false, decision: "reservation-missing" };
@@ -556,17 +208,15 @@ export async function consumeWagerReservationOperation(
           return { commit: false, decision: "reservation-invalid" };
         }
         const materials = applyMaterialDeltas(
-          normalizeMaterials(toRecord(current)?.frozen),
+          current.frozen,
           invertFrozenDeltas(state.operation),
         );
         return {
           decision: "reservation-released",
-          value: removeFrozenOperation(
-            current,
-            operationId,
-            materials,
-            retainTombstone,
-          ),
+          value: {
+            frozen: materials,
+            operation: { status: retainTombstone ? "consumed" : "absent" },
+          },
         };
       },
       signal,
@@ -581,19 +231,14 @@ export async function consumeWagerReservationOperation(
     }
     throw new Error("wager-operation-unavailable");
   } catch (error) {
-    const current = await repository
-      .getRtdbPath(miningPath)
-      .catch(() => undefined);
-    if (
-      current !== undefined &&
-      frozenOperationState(current, operationId).status === "consumed"
-    ) {
+    const current = await store.read(uid, operationId).catch(() => undefined);
+    if (current !== undefined && current.operation.status === "consumed") {
       return "released";
     }
     if (
       !retainTombstone &&
       current !== undefined &&
-      frozenOperationState(current, operationId).status === "absent"
+      current.operation.status === "absent"
     ) {
       return "released";
     }
@@ -633,10 +278,9 @@ export async function readFrozenOperationForUid(
   uid: string,
   operationId: string,
 ): Promise<ParsedFrozenOperation | null> {
-  const state = frozenOperationState(
-    await repository.getRtdbPath(`players/${uid}/mining`),
-    operationId,
-  );
+  const state = (
+    await requireWagerFrozenStore(repository).read(uid, operationId)
+  ).operation;
   if (state.status === "malformed") {
     throw new Error("wager-operation-unavailable");
   }

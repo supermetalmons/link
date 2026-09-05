@@ -90,7 +90,7 @@
         "mining": {
           ".write": "auth != null && auth.token.admin === true",
           "frozen": {
-            ".read": true,
+            ".read": false,
             ".write": "auth != null && auth.token.admin === true",
             ".validate": "newData.hasChildren(['dust','slime','gum','metal','ice'])"
           }

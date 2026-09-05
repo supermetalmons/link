@@ -47,7 +47,11 @@ export function getAuthCorsHeaders(request: Request): Record<string, string> {
   }
   return {
     ...(origin ? { "Access-Control-Allow-Origin": origin } : {}),
-    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Access-Control-Allow-Headers": new URL(request.url).pathname.startsWith(
+      "/wagers/",
+    )
+      ? "Authorization, Content-Type, X-Mons-Wager-Storage-Version"
+      : "Authorization, Content-Type",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin",

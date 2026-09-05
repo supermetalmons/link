@@ -17,6 +17,9 @@ import {
   type RemoveNavigationGameResponse,
 } from "@mons/shared/navigation";
 import {
+  WAGER_FROZEN_READ_PATH,
+  isWagerFrozenReadRequest,
+  isWagerFrozenReadResponse,
   isWagerOutcomeResolveRequest,
   isWagerProposalAcceptRequest,
   isWagerProposalRemovalRequest,
@@ -111,11 +114,17 @@ import {
 import { readProfileGamesPage } from "./profileGamesD1.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 import {
+  createWagerReservationRuntime,
+  WagerClientUpdateRequired,
+  type WagerReservationRuntime,
+} from "./wagerReservationRuntime.ts";
+import {
   getLoginProfileId,
   requireProfileOwnershipSnapshot,
 } from "./profileOwnership.ts";
 
 export const GAMEPLAY_PATHS = new Set([
+  WAGER_FROZEN_READ_PATH,
   "/automatch/cancel",
   "/automatch/start",
   "/invites/create",
@@ -137,11 +146,13 @@ export const GAMEPLAY_PATHS = new Set([
 ]);
 
 const GAMEPLAY_READ_PATHS = new Set([
+  WAGER_FROZEN_READ_PATH,
   "/invites/role/read",
   "/navigation/games/read",
 ]);
 
 export type GameplayRouteDependencies = {
+  wagerReservations?: WagerReservationRuntime;
   assertMutationAllowed?: () => Promise<void>;
   automatch?: Partial<AutomatchDependencies>;
   coordination?: GameplayCoordinationStores;
@@ -292,6 +303,12 @@ async function readGameplayBody(
   }
   if (!body) {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+  }
+  if (pathname === WAGER_FROZEN_READ_PATH) {
+    if (!isWagerFrozenReadRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
   }
   if (pathname === "/automatch/cancel") {
     if (Object.keys(body).length !== 0) {
@@ -471,6 +488,16 @@ export async function handleGameplayRoute(
     const identity = await (
       dependencies.verifyIdentity || verifyFirebaseRequest
     )(request, ctx);
+    const repository =
+      dependencies.repository || createEventGameplayRepository(env);
+    const isWagerMutation =
+      pathname.startsWith("/wagers/") && pathname !== WAGER_FROZEN_READ_PATH;
+    const reservations =
+      isWagerMutation || pathname === WAGER_FROZEN_READ_PATH
+        ? dependencies.wagerReservations ||
+          createWagerReservationRuntime(env, repository)
+        : null;
+    if (isWagerMutation) await reservations?.assertClientVersion(request);
     const automatchOperationId =
       pathname === "/automatch/start"
         ? readAutomatchOperationId(request)
@@ -482,14 +509,62 @@ export async function handleGameplayRoute(
       await enforceWagerOutcomeRateLimit(env.AUTH_RATE_LIMITER, identity.uid);
     }
     const body = await readGameplayBody(request, pathname);
-    const repository =
-      dependencies.repository || createEventGameplayRepository(env);
+    if (pathname === WAGER_FROZEN_READ_PATH) {
+      if (!isWagerFrozenReadRequest(body) || !reservations) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      if (body.playerUid !== identity.uid) {
+        const ownership = await requireProfileOwnershipSnapshot(repository, {
+          loginUids: [identity.uid, body.playerUid],
+          profileIds: [],
+        });
+        const profileId = getLoginProfileId(ownership, identity.uid);
+        if (
+          !profileId ||
+          profileId !== getLoginProfileId(ownership, body.playerUid)
+        ) {
+          throw new AuthApiFailure(
+            403,
+            "permission-denied",
+            "wager-player-not-owned",
+          );
+        }
+      }
+      const balance = await reservations.readBalance(body.playerUid);
+      const response = { ok: true, playerUid: body.playerUid, ...balance };
+      if (!isWagerFrozenReadResponse(response)) {
+        throw new AuthApiFailure(
+          503,
+          "unavailable",
+          "wager-reservation-unavailable",
+        );
+      }
+      return authJsonResponse(response, 200, corsHeaders);
+    }
     const coordination =
       dependencies.coordination ||
       createGameplayCoordinationStores(env.PROFILE_GAMES_DB);
     const assertMutationAllowed =
       dependencies.assertMutationAllowed ||
       (() => assertProfileMutationAllowed(env));
+    const runWager = <T>(
+      work: (
+        admittedRepository: GameplayRepository,
+        guard: () => Promise<void>,
+      ) => Promise<T>,
+    ): Promise<T> => {
+      if (!reservations) throw new Error("wager-reservation-unavailable");
+      return reservations.run(
+        pathname,
+        async (admittedRepository, admissionGuard) => {
+          await reservations.assertClientVersion(request);
+          return work(admittedRepository, async () => {
+            await assertMutationAllowed();
+            await admissionGuard();
+          });
+        },
+      );
+    };
     const defaultEnqueueEventProgress = async (plan: EventProgressPlan) => {
       ctx.waitUntil(
         ensureEventProgressWorkflow(env.EVENT_PROGRESS_WORKFLOW, plan).catch(
@@ -743,52 +818,67 @@ export async function handleGameplayRoute(
       if (!isWagerProposalSendRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
-      response = await sendWagerProposal(
-        identity,
-        body,
-        repository,
-        wagerDependencies,
+      response = await runWager((admittedRepository, guard) =>
+        sendWagerProposal(identity, body, admittedRepository, {
+          ...wagerDependencies,
+          assertMutationAllowed: guard,
+        }),
       );
     } else if (pathname === "/wagers/proposals/accept") {
       if (!isWagerProposalAcceptRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
-      response = await acceptWagerProposal(
-        identity,
-        body,
-        repository,
-        wagerDependencies,
+      response = await runWager((admittedRepository, guard) =>
+        acceptWagerProposal(identity, body, admittedRepository, {
+          ...wagerDependencies,
+          assertMutationAllowed: guard,
+        }),
       );
     } else if (pathname === "/wagers/outcomes/resolve") {
       if (!isWagerOutcomeResolveRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
-      response = await resolveWagerOutcome(identity, body, repository, {
-        ...dependencies.wagerOutcome,
-        assertMutationAllowed,
-        scheduleRetry:
-          dependencies.wagerOutcome?.scheduleRetry ||
-          (async (task) => {
-            await env.TELEGRAM_DELIVERY_QUEUE.send(task, {
-              delaySeconds: WAGER_SETTLEMENT_INITIAL_RETRY_DELAY_SECONDS,
-            });
-          }),
-        signal: dependencies.wagerOutcome?.signal || request.signal,
-      });
+      response = await runWager((admittedRepository, guard) =>
+        resolveWagerOutcome(identity, body, admittedRepository, {
+          ...dependencies.wagerOutcome,
+          assertMutationAllowed: guard,
+          scheduleRetry:
+            dependencies.wagerOutcome?.scheduleRetry ||
+            (async (task) => {
+              await env.TELEGRAM_DELIVERY_QUEUE.send(task, {
+                delaySeconds: WAGER_SETTLEMENT_INITIAL_RETRY_DELAY_SECONDS,
+              });
+            }),
+          signal: dependencies.wagerOutcome?.signal || request.signal,
+        }),
+      );
     } else {
       if (!isWagerProposalRemovalRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
-      response = await removeWagerProposal(
-        identity,
-        body,
-        pathname.endsWith("/cancel") ? "cancel" : "decline",
-        repository,
-        wagerDependencies,
+      response = await runWager((admittedRepository, guard) =>
+        removeWagerProposal(
+          identity,
+          body,
+          pathname.endsWith("/cancel") ? "cancel" : "decline",
+          admittedRepository,
+          { ...wagerDependencies, assertMutationAllowed: guard },
+        ),
       );
     }
     return authJsonResponse(response, 200, corsHeaders);
   } catch (error) {
+    if (error instanceof WagerClientUpdateRequired) {
+      return authJsonResponse(
+        {
+          ok: false,
+          error: "client-update-required",
+          message: error.message,
+        },
+        409,
+        corsHeaders,
+      );
+    }
     if (
       error instanceof GameSessionMutationLockFailure ||
       error instanceof MatchTimerStartStoreFailure

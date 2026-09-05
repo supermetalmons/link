@@ -33,6 +33,10 @@ import {
   type WagerSettlementRetryTask,
 } from "./wagerOutcome.ts";
 import { profileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
+import {
+  createWagerReservationRuntime,
+  type WagerReservationRuntime,
+} from "./wagerReservationRuntime.ts";
 
 const MAX_QUEUE_DELAY_SECONDS = 24 * 60 * 60;
 const MIN_DISPATCH_INTERVAL_MS = 1_000;
@@ -207,6 +211,7 @@ export async function handleTelegramQueueMessage(
     logger = console,
     now = Date.now,
     profileMutationsEnabled = profileBackgroundMutationsEnabled,
+    createWagerReservations = createWagerReservationRuntime,
     readStorageMode,
     resumeSettlement = resumeWagerSettlement,
     sleep = defaultSleep,
@@ -218,6 +223,10 @@ export async function handleTelegramQueueMessage(
     logger?: Pick<Console, "error" | "info">;
     now?: () => number;
     profileMutationsEnabled?: typeof profileBackgroundMutationsEnabled;
+    createWagerReservations?: (
+      env: Env,
+      repository: GameplayRepository,
+    ) => WagerReservationRuntime;
     resumeSettlement?: typeof resumeWagerSettlement;
     readStorageMode?: (db: D1Database) => Promise<TelegramStorageMode>;
     sleep?: (milliseconds: number) => Promise<void>;
@@ -281,11 +290,14 @@ export async function handleTelegramQueueMessage(
       if (!enabled) throw new WagerSettlementWritesDisabled();
     };
     try {
-      const status = await resumeSettlement(
-        task,
+      const status = await createWagerReservations(
+        env,
         createGameplay(env),
-        now,
-        assertMutationAllowed,
+      ).run("wager-settlement", (admittedRepository, admissionGuard) =>
+        resumeSettlement(task, admittedRepository, now, async () => {
+          await assertMutationAllowed();
+          await admissionGuard();
+        }),
       );
       message.ack();
       logger.info(

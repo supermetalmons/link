@@ -1,3 +1,4 @@
+import { attachFirebaseWagerFrozenStore } from "./wagerFrozenTestUtils.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -180,7 +181,7 @@ function repository(
       return transactRtdbPath(path, updater, signal);
     },
   };
-  return value;
+  return attachFirebaseWagerFrozenStore(value);
 }
 
 function applyTransaction(

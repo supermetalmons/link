@@ -72,7 +72,9 @@ import {
   applyFrozenMaterialsDelta,
   computeAvailableMaterials,
   getFrozenMaterials,
+  getFrozenMaterialsStatus,
   setFrozenMaterials,
+  setFrozenMaterialsStatus,
 } from "../services/wagerMaterialsService";
 import { rocksMiningService } from "../services/rocksMiningService";
 import { mineRockViaApi } from "../services/miningApi";
@@ -103,6 +105,7 @@ import {
   readProfileEventPrizesViaApi,
   readNavigationGamesViaApi,
   readInviteRoleViaApi,
+  readWagerFrozenViaApi,
   resolveWagerOutcomeViaApi,
   sendWagerProposalViaApi,
   startAutomatchViaApi,
@@ -197,6 +200,9 @@ import { ObserverRegistry } from "./observerRegistry";
 import { transition, transitionToHome } from "../session/sessionTransitionPort";
 import { startNavigationGamesPolling } from "./navigationGamesPoller";
 import { EventPollingRegistry } from "./eventPollingRegistry";
+import { FrozenMaterialsPoller } from "./frozenMaterialsPoller";
+import { isWagerClientUpdateRequired, retryWagerApi } from "./wagerApiRetry";
+import { showNotificationBanner } from "../ui/identity/profileUiPort";
 import { createPollingAuthTokenProvider } from "./pollingAuthTokenProvider";
 
 const getStoredAuthPresentation = (): {
@@ -331,7 +337,8 @@ class Connection {
   private guestRematchesRef: any = null;
   private wagersRef: any = null;
   private inviteReactionsRef: any = null;
-  private miningFrozenRef: any = null;
+  private miningFrozenPoller: FrozenMaterialsPoller | null = null;
+  private miningFrozenLoginUid: string | null = null;
   private matchRefs: { [key: string]: any } = {};
   private observerRegistry = new ObserverRegistry(
     (contextId, sessionEpoch) => this.isContextActive(contextId, sessionEpoch),
@@ -847,48 +854,78 @@ class Connection {
     await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  private shouldRetryWagerResult(result: WagerApiResponse): boolean {
-    const reason = result.ok === false ? result.reason : "";
-    return (
-      reason === "proposal-unavailable" ||
-      reason === "proposal-missing" ||
-      reason === "match-not-found"
-    );
-  }
-
   private async callWagerApiWithRetry<T extends WagerApiResponse>(
     label: string,
     call: () => Promise<T>,
     maxAttempts = 3,
   ): Promise<T> {
-    let attempt = 0;
-    while (attempt < maxAttempts) {
-      attempt += 1;
-      try {
-        if (attempt > 1) {
-          console.log(`${label}:retry`, { attempt });
-        }
-        const data = await call();
-        if (
-          data &&
-          data.ok === false &&
-          this.shouldRetryWagerResult(data) &&
-          attempt < maxAttempts
-        ) {
-          await this.delay(160 * attempt);
-          continue;
-        }
-        return data;
-      } catch (error) {
-        if (attempt < maxAttempts) {
-          console.log(`${label}:retry`, { attempt, error });
-          await this.delay(180 * attempt);
-          continue;
-        }
-        throw error;
+    return retryWagerApi(call, {
+      delay: (milliseconds) => this.delay(milliseconds),
+      maxAttempts,
+      onRetry: (attempt, error) =>
+        console.log(`${label}:retry`, { attempt, error }),
+    });
+  }
+
+  private async runWagerMutation<T>(
+    action: (tokenProvider: AuthTokenProvider) => Promise<T>,
+    requiresSnapshot: boolean,
+  ): Promise<T | { ok: false }> {
+    const requestedContext = this.activeContext;
+    await this.ensureAuthenticated();
+    if (requestedContext !== this.activeContext) return { ok: false };
+    const context = this.requireWritableContext(undefined, "wager-mutation");
+    const poller = this.miningFrozenPoller;
+    if (!context || !poller) return { ok: false };
+    const boundTokenProvider = this.getUserBoundAuthTokenProvider(
+      context.loginUid,
+    );
+    const isCurrent = this.createWagerContextGuard(context);
+    const assertCurrentUser = () => {
+      boundTokenProvider.assertCurrentUser();
+      if (!isCurrent()) throw new Error("wager-session-changed");
+    };
+    const tokenProvider = Object.assign(
+      async (forceRefresh: boolean) => {
+        assertCurrentUser();
+        return boundTokenProvider(forceRefresh);
+      },
+      { assertCurrentUser },
+    );
+    try {
+      return await poller.runMutation(
+        () => {
+          tokenProvider.assertCurrentUser();
+          return action(tokenProvider);
+        },
+        { requiresSnapshot, isCurrent },
+      );
+    } catch (error) {
+      if (!isCurrent()) return { ok: false };
+      if (isWagerClientUpdateRequired(error)) {
+        showNotificationBanner(
+          "Reload to continue wagering",
+          "Tap here to reload this page.",
+          storage.getPlayerEmojiId("1"),
+          () => window.location.reload(),
+        );
       }
+      throw error;
     }
-    throw new Error("wager-retry-exhausted");
+  }
+
+  private createWagerContextGuard(
+    context: MatchRuntimeContext | null,
+  ): () => boolean {
+    if (!context) return () => false;
+    const matchGuard = this.createMatchContextGuard(
+      context.inviteId,
+      context.matchId,
+    );
+    return () =>
+      matchGuard() &&
+      this.auth.currentUser?.uid === context.loginUid &&
+      this.sameProfilePlayerUid === context.actorUid;
   }
 
   public setupConnection(
@@ -1207,7 +1244,7 @@ class Connection {
     resetPlayerMetadataCaches();
     ensResolver.resetEnsCache();
     resetLeaderboardCache();
-    setFrozenMaterials(null);
+    setFrozenMaterials(null, "idle");
     if (authSignOutError) {
       throw authSignOutError;
     }
@@ -1573,6 +1610,9 @@ class Connection {
       const newUid = user?.uid ?? null;
       if (newUid !== this.currentUid) {
         this.clearEventSyncCaches();
+        if (this.miningFrozenPoller && newUid !== this.miningFrozenLoginUid) {
+          this.setSameProfilePlayerUid(null);
+        }
         this.currentUid = newUid;
         callback(newUid);
       }
@@ -2973,27 +3013,30 @@ class Connection {
   }
 
   public async resolveWagerOutcome(isWin?: boolean): Promise<any> {
-    const sessionGuard = this.createSessionGuard();
+    const writableContext = this.requireWritableContext(
+      undefined,
+      "wagerOutcomeResolve",
+    );
+    if (!writableContext) return { ok: false };
+    const opponentId = this.getOpponentId(writableContext.actorUid);
+    if (!opponentId) return { ok: false };
+    const { inviteId, matchId, loginUid } = writableContext;
+    const isCurrentSession = this.createSessionGuard();
     const profileIdAtRequest = storage.getProfileId("");
+    const isCurrentProfile = () =>
+      this.auth.currentUser?.uid === loginUid &&
+      storage.getProfileId("") === profileIdAtRequest;
+    const matchGuard = this.createWagerContextGuard(writableContext);
     let restoreOptimisticState = (_state?: MatchWagerState | null) => {};
     try {
       await this.ensureAuthenticated();
-      const writableContext = this.requireWritableContext(
-        undefined,
-        "wagerOutcomeResolve",
-      );
-      if (!writableContext) {
-        return { ok: false };
-      }
-      const opponentId = this.getOpponentId(writableContext.actorUid);
-      if (!opponentId) {
-        return { ok: false };
-      }
-      const inviteId = writableContext.inviteId;
-      const matchId = writableContext.matchId;
-      const matchGuard = this.createMatchContextGuard(inviteId, matchId);
-      const previousWagerState = this.cloneWagerState(getWagerState());
-      const optimisticApplied = this.applyOptimisticWagerResolution(isWin);
+      if (!isCurrentProfile()) return { ok: false };
+      const tokenProvider = this.getUserBoundAuthTokenProvider(loginUid);
+      const previousWagerState = matchGuard()
+        ? this.cloneWagerState(getWagerState())
+        : null;
+      const optimisticApplied =
+        matchGuard() && this.applyOptimisticWagerResolution(isWin);
       restoreOptimisticState = (state = previousWagerState) => {
         if (!optimisticApplied) {
           return;
@@ -3011,7 +3054,7 @@ class Connection {
             inviteId,
             matchId,
           },
-          this.getAuthApiToken,
+          tokenProvider,
         ),
       );
       const responseData = data as WagerOutcomeResolveResponse | null;
@@ -3028,8 +3071,8 @@ class Connection {
       if (
         responseData?.ok === true &&
         responseData.mining &&
-        sessionGuard() &&
-        storage.getProfileId("") === profileIdAtRequest
+        isCurrentSession() &&
+        isCurrentProfile()
       ) {
         rocksMiningService.setFromServer(responseData.mining, {
           persist: true,
@@ -3037,15 +3080,38 @@ class Connection {
       }
       return responseData;
     } catch (error) {
+      if (!isCurrentProfile()) return { ok: false };
       restoreOptimisticState();
+      if (isWagerClientUpdateRequired(error)) {
+        showNotificationBanner(
+          "Reload to continue wagering",
+          "Tap here to reload this page.",
+          storage.getPlayerEmojiId("1"),
+          () => window.location.reload(),
+        );
+      }
       console.error("Error resolving wager outcome:", error);
       throw error;
+    } finally {
+      if (isCurrentProfile()) this.miningFrozenPoller?.refresh();
     }
   }
 
   public async sendWagerProposal(
     material: MiningMaterialName,
     count: number,
+  ): Promise<any> {
+    return this.runWagerMutation(
+      (tokenProvider) =>
+        this.performSendWagerProposal(material, count, tokenProvider),
+      true,
+    );
+  }
+
+  private async performSendWagerProposal(
+    material: MiningMaterialName,
+    count: number,
+    tokenProvider: AuthTokenProvider,
   ): Promise<any> {
     let prevState: MatchWagerState | null = null;
     let prevFrozen: Record<MiningMaterialName, number> | null = null;
@@ -3054,7 +3120,6 @@ class Connection {
     let sessionGuard: (() => boolean) | null = null;
     let playerUid: string | null = null;
     try {
-      await this.ensureAuthenticated();
       const writableContext = this.requireWritableContext(
         undefined,
         "sendWagerProposal",
@@ -3069,7 +3134,7 @@ class Connection {
         console.log("wager:send:skipped", { inviteId, matchId });
         return { ok: false };
       }
-      sessionGuard = this.createMatchContextGuard(inviteId, matchId);
+      sessionGuard = this.createWagerContextGuard(writableContext);
       const currentState = getWagerState();
       if (!currentState?.agreed && !currentState?.resolved) {
         const totalMaterials = rocksMiningService.getSnapshot().materials;
@@ -3108,7 +3173,7 @@ class Connection {
       const data = await this.callWagerApiWithRetry("wager:send", () =>
         sendWagerProposalViaApi(
           { inviteId, matchId, material, count },
-          this.getAuthApiToken,
+          tokenProvider,
         ),
       );
       if (!sessionGuard()) {
@@ -3207,6 +3272,15 @@ class Connection {
   }
 
   public async cancelWagerProposal(): Promise<any> {
+    return this.runWagerMutation(
+      (tokenProvider) => this.performCancelWagerProposal(tokenProvider),
+      false,
+    );
+  }
+
+  private async performCancelWagerProposal(
+    tokenProvider: AuthTokenProvider,
+  ): Promise<any> {
     let prevState: MatchWagerState | null = null;
     let prevFrozen: Record<MiningMaterialName, number> | null = null;
     let optimisticApplied = false;
@@ -3214,7 +3288,6 @@ class Connection {
     let sessionGuard: (() => boolean) | null = null;
     let playerUid: string | null = null;
     try {
-      await this.ensureAuthenticated();
       const writableContext = this.requireWritableContext(
         undefined,
         "cancelWagerProposal",
@@ -3229,7 +3302,7 @@ class Connection {
         console.log("wager:cancel:skipped", { inviteId, matchId });
         return { ok: false };
       }
-      sessionGuard = this.createMatchContextGuard(inviteId, matchId);
+      sessionGuard = this.createWagerContextGuard(writableContext);
       const currentState = getWagerState();
       const existingProposal = currentState?.proposals
         ? currentState.proposals[playerUid]
@@ -3255,7 +3328,7 @@ class Connection {
       }
       console.log("wager:cancel:start", { inviteId, matchId });
       const data = await this.callWagerApiWithRetry("wager:cancel", () =>
-        cancelWagerProposalViaApi({ inviteId, matchId }, this.getAuthApiToken),
+        cancelWagerProposalViaApi({ inviteId, matchId }, tokenProvider),
       );
       if (!sessionGuard()) {
         return { ok: false };
@@ -3299,13 +3372,21 @@ class Connection {
   }
 
   public async declineWagerProposal(): Promise<any> {
+    return this.runWagerMutation(
+      (tokenProvider) => this.performDeclineWagerProposal(tokenProvider),
+      false,
+    );
+  }
+
+  private async performDeclineWagerProposal(
+    tokenProvider: AuthTokenProvider,
+  ): Promise<any> {
     let prevState: MatchWagerState | null = null;
     let optimisticApplied = false;
     let opponentUid: string | null = null;
     let sessionGuard: (() => boolean) | null = null;
     let playerUid: string | null = null;
     try {
-      await this.ensureAuthenticated();
       const writableContext = this.requireWritableContext(
         undefined,
         "declineWagerProposal",
@@ -3320,7 +3401,7 @@ class Connection {
         console.log("wager:decline:skipped", { inviteId, matchId });
         return { ok: false };
       }
-      sessionGuard = this.createMatchContextGuard(inviteId, matchId);
+      sessionGuard = this.createWagerContextGuard(writableContext);
       opponentUid = this.getOpponentId(playerUid);
       const currentState = getWagerState();
       const existingProposal =
@@ -3345,7 +3426,7 @@ class Connection {
       }
       console.log("wager:decline:start", { inviteId, matchId });
       const data = await this.callWagerApiWithRetry("wager:decline", () =>
-        declineWagerProposalViaApi({ inviteId, matchId }, this.getAuthApiToken),
+        declineWagerProposalViaApi({ inviteId, matchId }, tokenProvider),
       );
       if (!sessionGuard()) {
         return { ok: false };
@@ -3384,6 +3465,15 @@ class Connection {
   }
 
   public async acceptWagerProposal(): Promise<any> {
+    return this.runWagerMutation(
+      (tokenProvider) => this.performAcceptWagerProposal(tokenProvider),
+      true,
+    );
+  }
+
+  private async performAcceptWagerProposal(
+    tokenProvider: AuthTokenProvider,
+  ): Promise<any> {
     let prevState: MatchWagerState | null = null;
     let prevFrozen: Record<MiningMaterialName, number> | null = null;
     let optimisticApplied = false;
@@ -3391,7 +3481,6 @@ class Connection {
     let opponentUid: string | null = null;
     let sessionGuard: (() => boolean) | null = null;
     try {
-      await this.ensureAuthenticated();
       const writableContext = this.requireWritableContext(
         undefined,
         "acceptWagerProposal",
@@ -3405,7 +3494,7 @@ class Connection {
         console.log("wager:accept:skipped", { inviteId, matchId });
         return { ok: false };
       }
-      sessionGuard = this.createMatchContextGuard(inviteId, matchId);
+      sessionGuard = this.createWagerContextGuard(writableContext);
       const playerUid = writableContext.actorUid;
       opponentUid = this.getOpponentId(playerUid);
       const currentState = getWagerState();
@@ -3467,7 +3556,7 @@ class Connection {
       }
       console.log("wager:accept:start", { inviteId, matchId });
       const data = await this.callWagerApiWithRetry("wager:accept", () =>
-        acceptWagerProposalViaApi({ inviteId, matchId }, this.getAuthApiToken),
+        acceptWagerProposalViaApi({ inviteId, matchId }, tokenProvider),
       );
       if (!sessionGuard()) {
         return { ok: false };
@@ -5000,6 +5089,7 @@ class Connection {
           this.latestInvite.wagers = wagers;
         }
         this.updateWagerStateForCurrentMatch();
+        this.miningFrozenPoller?.refresh();
       },
       undefined,
       () => {
@@ -5082,25 +5172,57 @@ class Connection {
   }
 
   private observeMiningFrozen(uid: string | null) {
-    if (this.miningFrozenRef) {
-      off(this.miningFrozenRef);
-      this.miningFrozenRef = null;
+    if (this.miningFrozenPoller) {
+      this.miningFrozenPoller.stop();
+      this.miningFrozenPoller = null;
+      this.miningFrozenLoginUid = null;
       decrementLifecycleCounter("connectionObservers");
     }
-    if (!uid) {
-      setFrozenMaterials(null);
-      return;
-    }
-    const miningRef = ref(this.db, `players/${uid}/mining/frozen`);
+    setFrozenMaterials(null, uid ? "loading" : "idle");
+    if (!uid) return;
     const observeEpoch = this.sessionEpoch;
-    this.miningFrozenRef = miningRef;
-    incrementLifecycleCounter("connectionObservers");
-    onValue(miningRef, (snapshot) => {
-      if (!this.isSessionEpochActive(observeEpoch)) {
-        return;
-      }
-      setFrozenMaterials(snapshot.val());
+    const loginUid = this.auth.currentUser?.uid;
+    if (!loginUid) return;
+    this.miningFrozenLoginUid = loginUid;
+    this.miningFrozenPoller = new FrozenMaterialsPoller({
+      playerUid: uid,
+      addVisibilityListener: (listener) => {
+        if (typeof document === "undefined") return () => {};
+        document.addEventListener("visibilitychange", listener);
+        return () => document.removeEventListener("visibilitychange", listener);
+      },
+      addOnlineListener: (listener) => {
+        if (typeof window === "undefined") return () => {};
+        window.addEventListener("online", listener);
+        return () => window.removeEventListener("online", listener);
+      },
+      clearTimer: (timer) => clearTimeout(timer),
+      isActive: () =>
+        this.isSessionEpochActive(observeEpoch) &&
+        this.sameProfilePlayerUid === uid &&
+        this.auth.currentUser?.uid === loginUid,
+      isVisible: () =>
+        typeof document === "undefined" ||
+        document.visibilityState !== "hidden",
+      load: (signal) =>
+        readWagerFrozenViaApi(
+          { playerUid: uid },
+          this.getUserBoundAuthTokenProvider(loginUid),
+          { signal },
+        ),
+      onPending: () =>
+        setFrozenMaterialsStatus(
+          getFrozenMaterialsStatus() === "loading" ? "loading" : "updating",
+        ),
+      onSnapshot: (snapshot) => setFrozenMaterials(snapshot.frozen, "ready"),
+      onError: (_error, confirmed, refreshRequired) =>
+        setFrozenMaterials(
+          confirmed?.frozen,
+          confirmed && !refreshRequired ? "ready" : "unavailable",
+        ),
+      setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
     });
+    incrementLifecycleCounter("connectionObservers");
   }
 
   private observeMatch(

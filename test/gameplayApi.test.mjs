@@ -38,6 +38,7 @@ const {
   readHistoricalMatchPairViaApi,
   readInviteRoleViaApi,
   readProfileEventPrizesViaApi,
+  readWagerFrozenViaApi,
   resolveWagerOutcomeViaApi,
   sendWagerProposalViaApi,
   startAutomatchViaApi,
@@ -89,6 +90,10 @@ const {
   isStartMatchTimerResponse,
 } = await import("@mons/shared/timers");
 const {
+  WAGER_STORAGE_VERSION_HEADER,
+  WAGER_STORAGE_VERSION,
+  isWagerFrozenReadRequest,
+  isWagerFrozenReadResponse,
   isWagerOutcomeResolveResponse,
   isWagerProposalAcceptResponse,
   isWagerProposalSendRequest,
@@ -132,6 +137,126 @@ const jsonResponse = (body, status = 200) =>
 
 test.afterEach(() => {
   globalThis.fetch = originalFetch;
+});
+
+const frozenResponse = (overrides = {}) => ({
+  ok: true,
+  playerUid: "actor",
+  revision: 2,
+  frozen: { dust: 3, slime: 2, gum: 1, metal: 0, ice: 0 },
+  ...overrides,
+});
+
+test("validates exact frozen-balance requests and authoritative snapshots", () => {
+  assert.equal(isWagerFrozenReadRequest({ playerUid: "actor" }), true);
+  for (const value of [
+    null,
+    {},
+    { playerUid: "actor", profileId: "other" },
+    { playerUid: " actor " },
+    { playerUid: "actors/other" },
+    { playerUid: "x".repeat(769) },
+  ])
+    assert.equal(isWagerFrozenReadRequest(value), false);
+  assert.equal(isWagerFrozenReadResponse(frozenResponse()), true);
+  assert.equal(
+    isWagerFrozenReadResponse(frozenResponse({ revision: 0 })),
+    true,
+  );
+  for (const revision of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "1"]) {
+    assert.equal(
+      isWagerFrozenReadResponse(frozenResponse({ revision })),
+      false,
+    );
+  }
+  for (const frozen of [
+    null,
+    {},
+    { ...frozenResponse().frozen, dust: -1 },
+    { ...frozenResponse().frozen, dust: 1.5 },
+    { ...frozenResponse().frozen, dust: Number.MAX_SAFE_INTEGER + 1 },
+    { ...frozenResponse().frozen, dust: "1" },
+    { ...frozenResponse().frozen, extra: 0 },
+  ])
+    assert.equal(isWagerFrozenReadResponse(frozenResponse({ frozen })), false);
+  assert.equal(
+    isWagerFrozenReadResponse({ ...frozenResponse(), operations: {} }),
+    false,
+  );
+});
+
+test("reads the actor balance through authenticated POST without a wager write header", async () => {
+  let call;
+  globalThis.fetch = async (url, init) => {
+    call = { url, init };
+    return jsonResponse(frozenResponse());
+  };
+  assert.deepEqual(
+    await readWagerFrozenViaApi({ playerUid: "actor" }, async () => "token"),
+    frozenResponse(),
+  );
+  assert.equal(call.url, "https://api.mons.link/wagers/frozen/read");
+  assert.equal(call.init.method, "POST");
+  assert.equal(call.init.cache, "no-store");
+  assert.deepEqual(JSON.parse(call.init.body), { playerUid: "actor" });
+  const headers = new Headers(call.init.headers);
+  assert.equal(headers.get("Authorization"), "Bearer token");
+  assert.equal(headers.get(WAGER_STORAGE_VERSION_HEADER), null);
+});
+
+test("rejects wrong-actor, malformed, oversized, and unavailable frozen snapshots", async () => {
+  const responses = [
+    jsonResponse(frozenResponse({ playerUid: "other" })),
+    jsonResponse(frozenResponse({ frozen: null })),
+    jsonResponse({ ok: false, error: "unavailable" }, 503),
+    new Response(" ".repeat(4097)),
+  ];
+  for (const response of responses) {
+    globalThis.fetch = async () => response;
+    await assert.rejects(
+      readWagerFrozenViaApi({ playerUid: "actor" }, async () => "token"),
+      (error) =>
+        error instanceof GameplayApiError && error.code === "unavailable",
+    );
+  }
+});
+
+test("frozen read cancellation interrupts pending authentication and prevents transport", async () => {
+  const controller = new AbortController();
+  let resolveToken;
+  const token = new Promise((resolve) => (resolveToken = resolve));
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches += 1;
+    return jsonResponse(frozenResponse());
+  };
+  const request = readWagerFrozenViaApi({ playerUid: "actor" }, () => token, {
+    signal: controller.signal,
+  });
+  controller.abort();
+  await assert.rejects(request, (error) => error.code === "aborted");
+  resolveToken("token");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fetches, 0);
+});
+
+test("frozen token refresh remains bound to the original login", async () => {
+  const user = { uid: "login", getIdToken: async () => "token" };
+  let currentUser = user;
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches += 1;
+    currentUser = { uid: "new-login", getIdToken: async () => "other-token" };
+    return jsonResponse({ error: "unauthenticated" }, 401);
+  };
+  await assert.rejects(
+    readWagerFrozenViaApi(
+      { playerUid: "actor" },
+      createUserBoundAuthTokenProvider(user, () => currentUser),
+    ),
+    (error) => error.code === "unauthenticated",
+  );
+  assert.equal(fetches, 1);
 });
 
 test("reads public historical matches without an auth token", async () => {
@@ -1708,6 +1833,10 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
     assert.equal(headers.get("Accept"), "application/json");
     assert.equal(headers.get("Authorization"), "Bearer firebase-token");
     assert.equal(headers.get("Content-Type"), "application/json");
+    assert.equal(
+      headers.get(WAGER_STORAGE_VERSION_HEADER),
+      String(call.input).includes("/wagers/") ? WAGER_STORAGE_VERSION : null,
+    );
   }
   await assert.rejects(
     startAutomatchViaApi(

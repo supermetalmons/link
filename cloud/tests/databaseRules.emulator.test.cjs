@@ -116,3 +116,30 @@ test("rules retain same-profile writes through an RTDB link without a custom cla
       .set(match("fen-linked", "move-linked")),
   );
 });
+
+test("retired frozen reservations and operation records cannot be read directly", async () => {
+  await rules.withSecurityRulesDisabled(async (context) => {
+    await context
+      .database()
+      .ref("players/host/mining")
+      .set({
+        frozen: { dust: 3, slime: 0, gum: 0, metal: 0, ice: 0 },
+        _wagerOps: { retired: { consumed: true } },
+      });
+  });
+  for (const context of [
+    rules.unauthenticatedContext(),
+    rules.authenticatedContext("host", { profileId: "profile-host" }),
+    rules.authenticatedContext("alternate", { profileId: "profile-host" }),
+    rules.authenticatedContext("guest", { profileId: "profile-guest" }),
+  ]) {
+    for (const path of [
+      "players/host/mining",
+      "players/host/mining/frozen",
+      "players/host/mining/frozen/dust",
+      "players/host/mining/_wagerOps",
+    ]) {
+      await assertFails(context.database().ref(path).once("value"));
+    }
+  }
+});

@@ -34,6 +34,8 @@ npx firebase emulators:exec --only database --project demo-mons-link-rules --con
 
 ## API Worker release
 
+After wager reservation cutover, production API version previews remain disabled. Temporary preview testing must follow the canonical-freeze and preview-retirement sequence in [wager reservation cutover](#wager-reservation-cutover), or use a separately protected preview environment. Do not re-enable production API previews while canonical writes are active.
+
 Before the first event D1 release, install withdrawal migration `0006` during withdrawal maintenance. Freeze withdrawals, wait at least five minutes, and confirm `activeLeases` is zero before applying the migration. Resume afterward so pending withdrawals can settle before the final event cutover.
 
 ```sh
@@ -59,7 +61,7 @@ npm run manage:profile-canonical -- --status
 npx wrangler d1 execute mons-link-profiles --remote --command "PRAGMA foreign_key_check" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
-The status must be `active`, and the foreign-key validation must return no rows.
+Before wager reservation activation, the status must be `active`, and the foreign-key validation must return no rows. After activation, keep canonical writes frozen for production-backed API preview testing and use the read-only candidate and promotion smoke sequence in [wager reservation cutover](#wager-reservation-cutover).
 
 Create mode-`0600` smoke fixtures outside the repository: an auth fixture containing only `{"idToken":"<existing-linked-login-token>"}` and a profile fixture containing `{"loginId":"<alternate-login-uid>","profileId":"<canonical-profile-id>","invite":{"id":"<existing-invite-id>","actorUid":"<stored-host-or-guest-uid>","role":"host"},"historicalMatch":{"inviteId":"<existing-historical-invite-id>","matchId":"<existing-historical-match-id>"}}`. Use `"guest"` when appropriate. The token subject must equal `loginId`; `actorUid` must be a different login owned by the same D1 profile. The historical match must be a known non-null D1 snapshot. Upload the candidate, then run both the standard smoke and the authenticated read-only ownership smoke before it receives traffic:
 
@@ -180,6 +182,132 @@ npm run smoke:api -- --base-url https://api.mons.link
 Keep writes frozen through the preview-browser check and both authenticated production smokes if migration, any preview smoke, either promotion, or either production smoke fails. After resuming, immediately re-freeze if the standard smoke fails. The frontend reuses one exact unresolved automatch request for seven days, matching the RTDB receipt-retention window. A missing or duplicate operation ID is rejected before rate limiting or mutation; an old open tab therefore fails safely until it reloads. Every successful start, including an already-owned pending queue, has a replayable receipt. Run `--require-automatch-operation-id` only after the compatible API is live and while writes remain frozen: it verifies the freeze, requires missing ID `400 invalid-request`, and requires a fixed valid UUID to reach `503 profile-writes-disabled` without mutation.
 
 The recorded pre-release pair remains an abort target only while writes are frozen and before `--resume`. After resuming writes or accepting the first receipt-aware mutation, roll back only to the separately recorded compatible candidate pair: the API must retain required IDs, the operation-scoped D1 lease, and receipts for every successful path; the frontend must retain per-UID persistence, Web Locks, and exact invite correlation. If that pair is unavailable, keep profile/gameplay writes frozen and fix forward. Additive D1 migrations and RTDB receipt roots remain installed; never restore coordination data to RTDB. After resuming, run mutable and authenticated smokes and observe gameplay 5xx, stale-client `400` responses, receipt cleanup, and coordination failures for at least 15 minutes.
+
+## Wager reservation cutover
+
+Profile migrations `0010_wager_frozen_reservations.sql` and `0011_wager_reservation_control.sql` add participant-UID reservation balances, operation records, the storage control, and tracked write admissions to `mons-link-profiles`. This migration preserves active proposals, agreements, pending settlements, and consumed operation tombstones. Do not cancel wagers, zero frozen balances, merge participant UIDs, or delete queue messages to simplify the import.
+
+Use one `WHEN` predicate and one `SELECT RAISE(...)` statement for each guard trigger in these remote D1 migrations. The verified remote migration executor split `CASE`-based trigger bodies; successful local SQLite execution alone does not verify that remote path. Check the installed tables and triggers after applying the migrations.
+
+Install the additive migrations using [canonical profile maintenance](#canonical-profile-d1-maintenance). Record the current API/frontend versions as preactivation abort targets. Upload and promote the bridge API, which supports explicit Firebase and D1 reservation modes, and the frontend, which polls Worker frozen snapshots and sends `X-Mons-Wager-Storage-Version: 1` on all five wager mutation routes. Use the standard API-first frontend release order. Keep storage in `firebase` during these releases and verify the exact API version serves 100 percent of traffic:
+
+```sh
+npm run manage:wager-reservations -- --status
+npx wrangler deployments list --json --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run smoke:api -- --base-url https://api.mons.link --read-only --require-wager-frozen-read --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
+npm run migrate:wager-reservations -- --preview --project mons-link
+```
+
+The frozen-read smoke fixture needs the caller's existing `loginId` and a linked alternate participant in `invite.actorUid`. Verify the frontend preview in two authenticated tabs, including a linked UID, an account switch, and a failed snapshot request. Failed or outdated snapshots must not appear as zero available materials, and late responses must not update a new identity's balance. Resume ordinary canonical maintenance after the bridge release passes its smokes. Allow the bridge to serve all production traffic for at least fifteen minutes before the final window; stop any access to old mutation-capable version previews and investigate evidence of legacy writes.
+
+For the final window, record each Queue's existing `settings.delivery_paused` value, then freeze canonical writes and pause all four profile-related Queues. Record the time each pause succeeds. Resume only Queues that this maintenance window paused; preserve any preexisting pause. Reservation freeze blocks new admissions while retained admissions show requests that have not finished:
+
+```sh
+npm run manage:profile-canonical -- --freeze
+npx wrangler queues pause-delivery mons-link-auth-recovery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-profile-game-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-telegram-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-telegram-delivery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run manage:wager-reservations -- --freeze
+npm run manage:wager-reservations -- --status
+```
+
+Do not export the first observation until `writeAdmissions` and `activeGameplayLeases` are zero. Expired or uncertain admissions still count. Queue pause does not terminate an invocation already running; final import requires at least fifteen minutes since the last of the four pauses. That wait covers the documented Queue-consumer duration limit. The six-minute source comparison below separately covers the existing RTDB transaction retry interval. Neither interval nor an empty bridge admission table proves that untracked legacy HTTP code could never resume: legacy-drain verification remains an explicit operational requirement. Keep writes frozen if the source changes or any older writer remains unexplained.
+
+Create a mode-`0600` JSON evidence file. Copy the exact latest deployment's version ID and `created_on` converted to Unix milliseconds. The queue timestamps are operator attestations of successful pauses; record all four, and set `legacyWritersDrained` only after checking the retired version entry points and legacy activity. Replace every zero below with the captured Unix-millisecond timestamp:
+
+```json
+{
+  "bridgeVersionId": "<exact-bridge-version-id>",
+  "bridgeDeployedAtMs": 0,
+  "queuesPausedAtMs": {
+    "mons-link-auth-recovery": 0,
+    "mons-link-profile-game-projection": 0,
+    "mons-link-telegram-projection": 0,
+    "mons-link-telegram-delivery": 0
+  },
+  "legacyWritersDrained": true,
+  "recordedAtMs": 0
+}
+```
+
+With explicit `GOOGLE_APPLICATION_CREDENTIALS`, the exporter authenticates once and reads at most four complete mining children concurrently. Credentials and OAuth tokens never appear in arguments, logs, or artifacts. Without explicit credentials, the exporter uses the pinned Firebase CLI. Both paths read a shallow `/players` inventory before and after the export; neither reads match histories. Preview and observation are read-only. Raw snapshots and SQL stay in protected artifact files; stdout prints only counts, digests, and the artifact directory.
+
+```sh
+npm run migrate:wager-reservations -- --observe --evidence-file /secure/wager-cutover.json
+```
+
+Keep that run's `observation.json`. At least six minutes after its export finishes, and at least fifteen minutes after all queues were paused, run final import with the unchanged evidence file:
+
+```sh
+npm run migrate:wager-reservations -- --final --evidence-file /secure/wager-cutover.json --observation <observation-run-directory>/observation.json
+npm run manage:wager-reservations -- --status
+```
+
+Final import checks the current 100-percent bridge deployment, canonical and reservation freezes, all admissions, gameplay leases, and the freeze generation. It claims one unique import attempt and invalidates earlier proof before reading source data. The second source digest must match the first. It replaces only the two new reservation tables in bounded SQL batches; every batch checks its attempt ID and freeze generation. D1 readback and a final Firebase source read must match before the tool atomically records proof and releases the attempt. Malformed records fail closed; valid sparse balances, orphan UIDs, legacy zero-delta records, and every consumed tombstone are retained. A failed import leaves storage frozen and its attempt retained.
+
+After stopping and investigating an interrupted import process, recover only its named attempt; this invalidates proof without changing reservation data. Expired write admissions require checking the original request has finished and reconciling any uncertain source effect before recovering the named row. Neither operation is an expiry-based automatic takeover:
+
+```sh
+npm run manage:wager-reservations -- --recover-import <attempt-id> --confirm-import-stopped
+npm run manage:wager-reservations -- --recover-admission <admission-id> --confirm-request-finished --confirm-source-reconciled
+```
+
+Activate only after the final import reports `verified: true`. Activation requires matching proof for the current freeze generation, no active import, no admissions, drained gameplay leases, canonical freeze, and the same complete bridge deployment. Keep canonical writes frozen while testing the activated reads and stale-client gate:
+
+```sh
+npm run manage:wager-reservations -- --activate-d1
+npm run smoke:api -- --base-url https://api.mons.link --read-only --require-wager-storage-version --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
+```
+
+Keep canonical writes frozen and Queues paused after activation. Prepare the final D1-only API candidate with `preview_urls: true` only for its temporary validation window. Changing that local flag alone does not enable previews for an existing script. Before uploading, enable them through the Worker subdomain API:
+
+```http
+POST https://api.cloudflare.com/client/v4/accounts/e25f90fc073ea309b54b8b5144bf28e0/workers/scripts/mons-link-api/subdomain
+Content-Type: application/json
+
+{"enabled":false,"previews_enabled":true}
+```
+
+Read back the same endpoint with `GET` and require `result.enabled === false` and `result.previews_enabled === true`. Keep writes frozen if either step fails. Then upload, test the exact candidate preview, promote its recorded Version ID, and repeat the authenticated smoke on the custom domain:
+
+```sh
+npm run upload:api
+npm run smoke:api -- --base-url <d1-only-version-preview-url> --read-only --require-history --require-wager-frozen-read --require-wager-storage-version --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
+npm run promote:api -- --version-id <d1-only-version-id>
+npm run smoke:api -- --base-url https://api.mons.link --read-only --require-history --require-wager-frozen-read --require-wager-storage-version --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
+```
+
+After both final-candidate smokes pass, set the tracked `cloud/workers/api/wrangler.jsonc` to `preview_urls: false` and retain `workers_dev: false`. Before resuming any writes, disable API previews for the entire script using the [Worker subdomain API](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/subdomain/methods/create/):
+
+```http
+POST https://api.cloudflare.com/client/v4/accounts/e25f90fc073ea309b54b8b5144bf28e0/workers/scripts/mons-link-api/subdomain
+Content-Type: application/json
+
+{"enabled":false,"previews_enabled":false}
+```
+
+Read back the same endpoint with `GET` and require `result.enabled === false` and `result.previews_enabled === false`. Verify the recorded bridge and older API version-preview URLs no longer invoke their Workers, then repeat the authenticated frozen-read smoke through `https://api.mons.link`. This script-wide change disables the `workers.dev` and version-preview entry points; it keeps the `api.mons.link` custom-domain route. Editing `preview_urls` locally alone does not retire already uploaded preview entry points. Keep writes frozen if the API toggle, readback, retired-preview check, or custom-domain smoke fails.
+
+For future API releases, leave production previews disabled while writes are active. Any temporary re-enablement can expose older uploaded versions as well as the candidate, so freeze canonical writes and follow the enabling API call and readback above before uploading. Complete candidate validation and promotion, disable previews again through the same API, and verify retirement before resuming. A separate protected preview environment is an alternative only when its protection and data isolation have been explicitly configured; this runbook does not automatically create or broaden preview access.
+
+After preview retirement and all frozen production checks pass, resume D1 reservation writes before canonical writes. This is safe after initial activation and also reopens reservations after incident recovery. Run the Queue resume commands below only for Queues recorded as running before this window:
+
+```sh
+npm run manage:wager-reservations -- --resume-d1
+npm run manage:profile-canonical -- --resume
+npx wrangler queues resume-delivery mons-link-auth-recovery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues resume-delivery mons-link-profile-game-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues resume-delivery mons-link-telegram-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues resume-delivery mons-link-telegram-delivery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run smoke:api -- --base-url https://api.mons.link --read-only --require-wager-frozen-read --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
+```
+
+The version-gate smoke requires canonical writes frozen: all five routes return `409 client-update-required` without the header and `503 profile-writes-disabled` with it. Queued settlement messages do not require the browser header. Observe snapshots, reservation failures, settlement retries, and queue recovery for at least fifteen minutes after resuming; test reserve, accept, remove, and replay with the designated smoke accounts when applicable. Re-freeze canonical and reservation writes on a failure.
+
+Before activation, recover any stopped import, use `--return-to-firebase`, verify the bridge reads, then resume canonical writes and queues to abort. After activation, `--return-to-firebase` is permanently rejected. Roll back only to a tested D1-compatible API/frontend pair; retain additive tables and fix data forward while frozen. Do not restore `PROFILE_DB` alone because canonical balances/settlement receipts and RTDB wager effects must remain consistent.
+
+The final deployed runtime must read and write reservations only through D1 and reject Firebase storage mode; it never falls back to Firebase. Retain the preparatory bridge only as its immutable uploaded version and protected source artifact, with its API preview entry point disabled. Firebase reservation adapters retained in the repository are test fixtures only and must not be imported by the production runtime. After actual production activation and verification, remove the retired Firebase frozen-balance read rule. Keep the source mining data inert as migration evidence; this tool never deletes it.
 
 ## Canonical profile D1 maintenance
 

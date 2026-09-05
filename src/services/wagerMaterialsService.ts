@@ -8,7 +8,14 @@ import type { MaterialName } from "./rocksMiningService";
 
 type FrozenMaterials = Record<MaterialName, number>;
 
-type FrozenListener = (materials: FrozenMaterials) => void;
+export type FrozenMaterialsStatus =
+  "idle" | "loading" | "ready" | "updating" | "unavailable";
+
+type FrozenListener = (
+  materials: FrozenMaterials,
+  status: FrozenMaterialsStatus,
+  hasConfirmedSnapshot: boolean,
+) => void;
 
 const createEmptyMaterials = (): FrozenMaterials =>
   createSharedEmptyMaterials();
@@ -18,28 +25,49 @@ const normalizeMaterials = (
 ): FrozenMaterials => normalizeSharedMaterials(source);
 
 let frozenMaterials = createEmptyMaterials();
+let status: FrozenMaterialsStatus = "idle";
+let hasConfirmedSnapshot = false;
 
 const listeners = new Set<FrozenListener>();
 
 const notify = () => {
   const snapshot = getFrozenMaterials();
-  listeners.forEach((listener) => listener(snapshot));
+  listeners.forEach((listener) =>
+    listener(snapshot, status, hasConfirmedSnapshot),
+  );
 };
 
 export const getFrozenMaterials = (): FrozenMaterials => {
   return { ...frozenMaterials };
 };
 
+export const getFrozenMaterialsStatus = (): FrozenMaterialsStatus => status;
+
+export const hasConfirmedFrozenMaterials = (): boolean => hasConfirmedSnapshot;
+
 export const setFrozenMaterials = (
   source?: Partial<Record<MaterialName, number>> | null,
+  nextStatus = status,
 ): void => {
   frozenMaterials = normalizeMaterials(source);
+  status = nextStatus;
+  if (status === "ready") hasConfirmedSnapshot = true;
+  else if (status === "loading" || status === "idle") {
+    hasConfirmedSnapshot = false;
+  }
+  notify();
+};
+
+export const setFrozenMaterialsStatus = (
+  nextStatus: FrozenMaterialsStatus,
+): void => {
+  status = nextStatus;
   notify();
 };
 
 export const subscribeToFrozenMaterials = (listener: FrozenListener) => {
   listeners.add(listener);
-  listener(getFrozenMaterials());
+  listener(getFrozenMaterials(), status, hasConfirmedSnapshot);
   return () => {
     listeners.delete(listener);
   };
@@ -60,5 +88,7 @@ export const computeAvailableMaterials = (
 
 export const resetWagerMaterialsState = () => {
   frozenMaterials = createEmptyMaterials();
+  status = "idle";
+  hasConfirmedSnapshot = false;
   notify();
 };

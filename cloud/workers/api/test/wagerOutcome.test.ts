@@ -1,3 +1,7 @@
+import {
+  attachFirebaseWagerFrozenStore,
+  createTestWagerReservationRuntime,
+} from "./wagerFrozenTestUtils.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
@@ -113,6 +117,11 @@ function handleGameplayRoute(
   return handleGameplayRouteImpl(request, env, ctx, {
     ...dependencies,
     coordination,
+    wagerReservations:
+      dependencies.wagerReservations ||
+      (dependencies.repository
+        ? createTestWagerReservationRuntime(dependencies.repository)
+        : undefined),
   });
 }
 
@@ -497,7 +506,9 @@ function createRepository({
       return result;
     },
   };
-  return Object.assign(state, { repository });
+  return Object.assign(state, {
+    repository: attachFirebaseWagerFrozenStore(repository),
+  });
 }
 
 test("uses the real rules engine for both player colors", () => {

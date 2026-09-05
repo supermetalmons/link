@@ -89,7 +89,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.equal(config.compatibility_date, "2026-08-09");
   assert.deepEqual(config.compatibility_flags, ["nodejs_compat"]);
   assert.equal(config.workers_dev, false);
-  assert.equal(config.preview_urls, true);
+  assert.equal(config.preview_urls, false);
   assert.deepEqual(config.routes, [
     { pattern: "api.mons.link", custom_domain: true },
   ]);

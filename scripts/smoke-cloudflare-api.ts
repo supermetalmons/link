@@ -31,6 +31,13 @@ const {
   isProfileEventPrizesResponse,
 }: typeof import("@mons/shared/event-prizes") = require("@mons/shared/event-prizes");
 
+const {
+  isWagerFrozenReadResponse,
+  WAGER_FROZEN_READ_PATH,
+  WAGER_STORAGE_VERSION,
+  WAGER_STORAGE_VERSION_HEADER,
+}: typeof import("@mons/shared/wagers") = require("@mons/shared/wagers");
+
 const MAX_BODY_BYTES = 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
 const ORIGIN = "https://mons.link";
@@ -50,6 +57,8 @@ type Options = {
   readOnlyAuthToken?: string | null;
   readOnly?: boolean;
   requireAutomatchOperationId?: boolean;
+  requireWagerFrozenRead?: boolean;
+  requireWagerStorageVersion?: boolean;
   requireHistory: boolean;
   requireEvents?: boolean;
   smokeProfile: ProfileSmokeFixture;
@@ -82,7 +91,7 @@ type Dependencies = {
 };
 
 function usage(): string {
-  return "Usage: npm run smoke:api -- --base-url <https-url> [--read-only --auth-token-fixture <protected-json-file> [--require-history] [--require-events] [--require-automatch-operation-id]] [--smoke-sol <wallet>] [--smoke-profile-fixture <protected-json-file>]";
+  return "Usage: npm run smoke:api -- --base-url <https-url> [--read-only --auth-token-fixture <protected-json-file> [--require-history] [--require-events] [--require-automatch-operation-id] [--require-wager-frozen-read] [--require-wager-storage-version]] [--smoke-sol <wallet>] [--smoke-profile-fixture <protected-json-file>]";
 }
 
 function readAuthTokenFixture(path: string): string {
@@ -331,6 +340,8 @@ function parseArgs(argv: string[]): Options {
   let readOnlyAuthToken: string | null = null;
   let readOnly = false;
   let requireAutomatchOperationId = false;
+  let requireWagerFrozenRead = false;
+  let requireWagerStorageVersion = false;
   let requireHistory = false;
   let requireEvents = false;
   let smokeProfile: ProfileSmokeFixture = DEFAULT_SMOKE_PROFILE;
@@ -357,6 +368,16 @@ function parseArgs(argv: string[]): Options {
     if (name === "--require-automatch-operation-id") {
       if (requireAutomatchOperationId) throw new TypeError(usage());
       requireAutomatchOperationId = true;
+      continue;
+    }
+    if (name === "--require-wager-frozen-read") {
+      if (requireWagerFrozenRead) throw new TypeError(usage());
+      requireWagerFrozenRead = true;
+      continue;
+    }
+    if (name === "--require-wager-storage-version") {
+      if (requireWagerStorageVersion) throw new TypeError(usage());
+      requireWagerStorageVersion = true;
       continue;
     }
     const value = argv[index + 1];
@@ -397,6 +418,10 @@ function parseArgs(argv: string[]): Options {
     (requireEvents &&
       (!readOnly || !readOnlyAuthToken || !smokeProfile.events)) ||
     (requireAutomatchOperationId && (!readOnly || !readOnlyAuthToken)) ||
+    ((requireWagerFrozenRead || requireWagerStorageVersion) &&
+      (!readOnly ||
+        !readOnlyAuthToken ||
+        !isSafeFirebaseKey(smokeProfile.loginId))) ||
     (readOnlyAuthToken !== null &&
       readTokenSubject(readOnlyAuthToken) !== smokeProfile.loginId)
   ) {
@@ -409,6 +434,10 @@ function parseArgs(argv: string[]): Options {
     ...(requireAutomatchOperationId
       ? { requireAutomatchOperationId: true }
       : {}),
+    ...(requireWagerFrozenRead || requireWagerStorageVersion
+      ? { requireWagerFrozenRead: true }
+      : {}),
+    ...(requireWagerStorageVersion ? { requireWagerStorageVersion: true } : {}),
     requireHistory,
     ...(requireEvents ? { requireEvents: true } : {}),
     smokeProfile,
@@ -849,6 +878,106 @@ async function smokeRequiredAutomatchOperationId(
   }
 }
 
+async function smokeRequiredWagerFrozenRead(
+  baseUrl: string,
+  idToken: string,
+  smokeProfile: ProfileSmokeFixture,
+  dependencies: Dependencies,
+): Promise<void> {
+  const actorUid = smokeProfile.invite?.actorUid;
+  if (
+    !isSafeFirebaseKey(smokeProfile.loginId) ||
+    !actorUid ||
+    !isSafeFirebaseKey(actorUid) ||
+    actorUid === smokeProfile.loginId ||
+    readTokenSubject(idToken) !== smokeProfile.loginId
+  ) {
+    throw new Error(
+      "Required wager frozen-read smoke requires an authenticated alternate invite fixture.",
+    );
+  }
+  for (const playerUid of [smokeProfile.loginId, actorUid]) {
+    const result = await request(
+      `${baseUrl}${WAGER_FROZEN_READ_PATH}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          Origin: ORIGIN,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ playerUid }),
+      },
+      200,
+      dependencies,
+    );
+    const payload = parseJson(result.body);
+    if (
+      !isWagerFrozenReadResponse(payload) ||
+      payload.playerUid !== playerUid
+    ) {
+      throw new Error("Required wager frozen-read smoke response was invalid.");
+    }
+  }
+}
+
+async function smokeRequiredWagerStorageVersion(
+  baseUrl: string,
+  idToken: string,
+  dependencies: Dependencies,
+): Promise<void> {
+  await smokeFrozenProfileWrite(baseUrl, idToken, dependencies);
+  for (const path of [
+    "/wagers/proposals/send",
+    "/wagers/proposals/accept",
+    "/wagers/proposals/cancel",
+    "/wagers/proposals/decline",
+    "/wagers/outcomes/resolve",
+  ]) {
+    for (const version of [null, WAGER_STORAGE_VERSION]) {
+      const result = await request(
+        `${baseUrl}${path}`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+            Origin: ORIGIN,
+            "Content-Type": "application/json",
+            ...(version === null
+              ? {}
+              : { [WAGER_STORAGE_VERSION_HEADER]: version }),
+          },
+          body: "{}",
+        },
+        version === null ? 409 : 503,
+        dependencies,
+      );
+      const payload = parseJson(result.body);
+      const fields =
+        payload && typeof payload === "object" && !Array.isArray(payload)
+          ? (payload as Record<string, unknown>)
+          : null;
+      if (
+        !fields ||
+        Object.keys(fields).length !== 3 ||
+        fields.ok !== false ||
+        fields.error !==
+          (version === null ? "client-update-required" : "unavailable") ||
+        fields.message !==
+          (version === null
+            ? "Reload this page to continue wagering."
+            : "profile-writes-disabled") ||
+        (version !== null &&
+          result.response.headers.get("Retry-After") !== "60")
+      ) {
+        throw new Error(
+          "Required wager storage-version smoke response was invalid.",
+        );
+      }
+    }
+  }
+}
+
 async function smokeAuthenticatedAuthState(
   baseUrl: string,
   smokeProfile: ProfileSmokeFixture,
@@ -1182,6 +1311,22 @@ async function smokeApi(
       "Required automatch operation-ID smoke requires an existing auth token fixture.",
     );
   }
+  if (
+    (options.requireWagerFrozenRead === true ||
+      options.requireWagerStorageVersion === true) &&
+    (options.readOnly !== true ||
+      !options.readOnlyAuthToken ||
+      !isSafeFirebaseKey(options.smokeProfile.loginId) ||
+      !options.smokeProfile.invite ||
+      !isSafeFirebaseKey(options.smokeProfile.invite.actorUid) ||
+      options.smokeProfile.invite.actorUid === options.smokeProfile.loginId ||
+      readTokenSubject(options.readOnlyAuthToken) !==
+        options.smokeProfile.loginId)
+  ) {
+    throw new Error(
+      "Required wager smoke requires an authenticated alternate invite fixture.",
+    );
+  }
   const nftUrl = `${options.baseUrl}/nfts`;
   const preflight = await request(
     nftUrl,
@@ -1273,6 +1418,25 @@ async function smokeApi(
     options.requireEvents ? options.smokeProfile.events : undefined,
     options.requireAutomatchOperationId === true,
   );
+
+  if (options.requireWagerStorageVersion && options.readOnlyAuthToken) {
+    await smokeRequiredWagerStorageVersion(
+      options.baseUrl,
+      options.readOnlyAuthToken,
+      dependencies,
+    );
+  }
+  if (
+    (options.requireWagerFrozenRead || options.requireWagerStorageVersion) &&
+    options.readOnlyAuthToken
+  ) {
+    await smokeRequiredWagerFrozenRead(
+      options.baseUrl,
+      options.readOnlyAuthToken,
+      options.smokeProfile,
+      dependencies,
+    );
+  }
 
   await smokeHistoricalMatch(
     options.baseUrl,
@@ -1380,4 +1544,6 @@ module.exports = {
   smokeEventReads,
   smokeFrozenProfileWrite,
   smokeRequiredAutomatchOperationId,
+  smokeRequiredWagerFrozenRead,
+  smokeRequiredWagerStorageVersion,
 };

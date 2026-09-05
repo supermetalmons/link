@@ -106,6 +106,23 @@ Preview is structurally read-only. It validates the retired RTDB roots and curre
 
 Rollback is limited to a D1-compatible Worker version with additive migrations left installed. After automatch activation, use only the separately recorded compatible API candidate that retains required IDs, the operation-scoped D1 lease, and receipts for every successful path. D1 data incidents require a reviewed fix-forward while writes remain frozen because `PROFILE_GAMES_DB` also owns historical matches and projection state. A committed automatch operation returns its receipted result; an unproven coordination failure returns a sanitized `503`.
 
+## Wager reservation storage
+
+`wager_frozen_balances` and `wager_frozen_operations` in `mons-link-profiles` permanently store reserved materials and their replay records. Rows remain keyed by participant login UID, including retained UIDs without a current canonical profile. Active operations, consumed tombstones, and pending settlements survive the cutover; total mining balances and settlement receipts also use canonical D1 storage.
+
+The production runtime requires activated D1 storage and never reads or writes the retired Firebase reservation subtree. It also permits balance reads while D1 reservation writes are frozen. The migration bridge used `firebase`, `frozen`, and `d1` control states; its source and immutable uploaded version remain migration evidence, and its Firebase adapter exists only in test fixtures. A complete HTTP wager mutation or queued settlement keeps its admission for its lifetime. Canonical profile freeze stops new wager work; reservation freeze closes admission while existing requests drain. Uncertain and expired admissions require explicit investigation. Wager settlement retries travel on `mons-link-telegram-delivery`, so that Queue is part of reservation maintenance.
+
+```sh
+npm run manage:wager-reservations -- --status
+npm run migrate:wager-reservations -- --preview --project mons-link
+```
+
+Preview reads a shallow player UID inventory and each player's complete mining child, validates the reservation fields, and writes private recovery artifacts under `.cache/wager-reservation-migration/`. With explicit `GOOGLE_APPLICATION_CREDENTIALS`, one authenticated export process reads four mining children concurrently by default; `WAGER_RESERVATION_SOURCE_CONCURRENCY` accepts values from 1 to 16. Environments without explicit credentials use the Firebase CLI. The tools never read match history or delete Firebase source data. Artifact files use mode `0600`; logs contain counts and digests.
+
+Follow the [wager reservation cutover](../scripts/deploy-cloudflare.md#wager-reservation-cutover) for the bridge release, queue pause evidence, two identical source observations at least six minutes apart, bounded import, and activation. Final import requires all four queues paused for at least fifteen minutes. Each final import claims a unique attempt ID; interrupted attempts block other imports and activation until the named stopped attempt is explicitly recovered. An import cannot publish proof for another runner's data.
+
+The browser reads authenticated `POST /wagers/frozen/read` snapshots every two seconds while visible and refreshes after wager actions. HTTP wager mutations require `X-Mons-Wager-Storage-Version: 1`; old browser tabs must reload before wagering. Queued settlement tasks remain compatible. D1 activation is irreversible: freeze and fix forward after activation, and roll back only to a tested D1-compatible API/frontend pair. The Firebase source remains inert evidence, with browser reads denied. Production API version previews remain disabled so retired versions cannot receive new requests through their preview URLs.
+
 ## Telegram recovery and announcements
 
 Event Telegram projection runs through `mons-link-telegram-projection`. Every supported API or Workflow mutation writes `telegramProjectionOutbox/event/{eventId}` and increments `eventTelegramProjectionGenerations/{eventId}` atomically with the event update. The five-minute Worker schedule recovers pending markers; direct Firebase client event writes are disabled.

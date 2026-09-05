@@ -1,8 +1,14 @@
 const {
+  MATERIAL_KEYS,
   isMaterialName,
   isMiningSnapshot,
   normalizeCount,
 } = require("./mining");
+const { isSafeFirebaseKey } = require("./ids");
+
+const WAGER_STORAGE_VERSION_HEADER = "X-Mons-Wager-Storage-Version";
+const WAGER_STORAGE_VERSION = "1";
+const WAGER_FROZEN_READ_PATH = "/wagers/frozen/read";
 
 const WAGER_PROPOSAL_REMOVAL_FAILURE_REASONS = Object.freeze([
   "invite-not-found",
@@ -50,6 +56,26 @@ const hasExactKeys = (value, expectedKeys) => {
     keys.every((key) => expectedKeys.includes(key))
   );
 };
+
+const isWagerFrozenReadRequest = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, ["playerUid"]) &&
+  isSafeFirebaseKey(value.playerUid) &&
+  value.playerUid === value.playerUid.trim();
+
+const isWagerFrozenReadResponse = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, ["ok", "playerUid", "revision", "frozen"]) &&
+  value.ok === true &&
+  isSafeFirebaseKey(value.playerUid) &&
+  value.playerUid === value.playerUid.trim() &&
+  Number.isSafeInteger(value.revision) &&
+  value.revision >= 0 &&
+  isRecord(value.frozen) &&
+  hasExactKeys(value.frozen, MATERIAL_KEYS) &&
+  MATERIAL_KEYS.every(
+    (key) => Number.isSafeInteger(value.frozen[key]) && value.frozen[key] >= 0,
+  );
 
 const isWagerProposalRemovalRequest = (value) =>
   isRecord(value) &&
@@ -182,12 +208,17 @@ const isWagerOutcomeResolveResponse = (value) => {
 };
 
 module.exports = {
+  WAGER_STORAGE_VERSION_HEADER,
+  WAGER_STORAGE_VERSION,
+  WAGER_FROZEN_READ_PATH,
   WAGER_OUTCOME_RESOLVE_FAILURE_REASONS,
   WAGER_OUTCOME_RESOLVE_SUCCESS_REASONS,
   WAGER_PROPOSAL_ACCEPT_FAILURE_REASONS,
   WAGER_PROPOSAL_REMOVAL_FAILURE_REASONS,
   WAGER_PROPOSAL_SEND_FAILURE_REASONS,
   isWagerAgreement,
+  isWagerFrozenReadRequest,
+  isWagerFrozenReadResponse,
   isWagerOutcomeResolveRequest,
   isWagerOutcomeResolveResponse,
   isWagerProposalAcceptRequest: isWagerProposalRemovalRequest,

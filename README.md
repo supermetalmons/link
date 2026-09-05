@@ -14,7 +14,7 @@ mons.link is a browser game backed by Firebase Auth, Cloudflare D1, Realtime Dat
 | `cloud/admin/`            | Manually invoked production administration tools                                             | Node / D1          |
 | `scripts/`                | Deployment, repository maintenance, architecture, and tooling contracts                      | Node and Bash      |
 
-The frontend Worker is configured by `wrangler.jsonc`. The API Worker has its independent configuration under `cloud/workers/api/`. Firebase Auth remains active, and Realtime Database retains active invites, match synchronization, and timer-claim fences. Canonical event, profile, auth-state, Telegram, projection, withdrawal, game-session lock, and timer-start data are D1-backed. Navigation is served from the Worker and profile-game D1 cache without an RTDB reconstruction fallback. Realtime Database rules live under `cloud/`; Firestore and Firebase Functions are not deployed.
+The frontend Worker is configured by `wrangler.jsonc`. The API Worker has its independent configuration under `cloud/workers/api/`. Firebase Auth remains active, and Realtime Database retains active invites, match synchronization, and timer-claim fences. Canonical event, profile, auth-state, Telegram, projection, withdrawal, frozen wager reservation, game-session lock, and timer-start data are D1-backed. Navigation is served from the Worker and profile-game D1 cache without an RTDB reconstruction fallback. Realtime Database rules live under `cloud/`; Firestore and Firebase Functions are not deployed.
 
 ## Setup and development
 
