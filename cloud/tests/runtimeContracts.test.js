@@ -22,6 +22,7 @@ const expectedSharedExports = {
   "./nfts": "./nfts.js",
   "./profiles": "./profiles.js",
   "./ratings": "./ratings.js",
+  "./reactions": "./reactions.js",
   "./rematches": "./rematches.js",
   "./solana": "./solana.js",
   "./timers": "./timers.js",

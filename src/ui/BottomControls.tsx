@@ -7,6 +7,10 @@ import React, {
   useMemo,
 } from "react";
 import { VALID_REACTION_IDS } from "@mons/shared/nfts";
+import {
+  FIXED_STICKER_IDS,
+  STICKER_ID_WHITELIST,
+} from "@mons/shared/reactions";
 import { MATCH_TIMER_DURATION_SECONDS } from "@mons/shared/timers";
 import { createEmptyMaterials } from "@mons/shared/mining";
 import {
@@ -237,30 +241,8 @@ const isNavigationScopeCurrent = (
   (currentScope?.scopeKey ?? null) === expectedScopeKey &&
   currentEpoch === expectedEpoch;
 
-const STICKER_ID_WHITELIST: number[] = [
-  ...VALID_REACTION_IDS,
-  900316,
-  900101,
-  900393,
-  90063,
-  900109,
-  900228,
-  900245,
-  900267,
-  900374,
-  900347,
-  900382,
-  900429,
-  900225,
-  900999,
-  900189,
-];
-const FIXED_STICKER_IDS: number[] = [
-  900316, 900101, 900393, 90063, 900109, 900228, 900245, 900189, 900267, 900374,
-  900347, 900382, 900429, 900225, 900999,
-];
 type StickerEntitlementState = {
-  stickerIds: number[];
+  stickerIds: readonly number[];
   ownerKey: string | null;
   expiresAtMs: number;
 };
@@ -393,7 +375,10 @@ const consumePendingDelayedCancelAutomatchIntent = (): number | null => {
   return null;
 };
 
-const mergeStickerIds = (base: number[], extra: number[]): number[] => {
+const mergeStickerIds = (
+  base: readonly number[],
+  extra: readonly number[],
+): number[] => {
   if (!extra.length) return base.slice();
   const seen = new Set<number>(base);
   const merged = base.slice();
@@ -422,7 +407,10 @@ const getSwagpackReactionStickerIds = (value: unknown): number[] => {
   return normalizeStickerIds(ids);
 };
 
-const areStickerIdArraysEqual = (left: number[], right: number[]): boolean => {
+const areStickerIdArraysEqual = (
+  left: readonly number[],
+  right: readonly number[],
+): boolean => {
   if (left.length !== right.length) return false;
   for (let i = 0; i < left.length; i += 1) {
     if (left[i] !== right[i]) return false;

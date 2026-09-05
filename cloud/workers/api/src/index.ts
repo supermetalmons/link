@@ -7,3 +7,4 @@ export {
 } from "./workerHandler.ts";
 export { EventProgressWorkflow } from "./eventProgressWorkflow.ts";
 export { EventPrizeWithdrawalWorkflow } from "./eventPrizeWithdrawalWorkflow.ts";
+export { InviteReactions } from "./inviteReactions.ts";

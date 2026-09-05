@@ -48,6 +48,7 @@
     "promote:api": "wrangler versions deploy --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env --percentage 100 --yes",
     "deploy:api:triggers": "wrangler triggers deploy --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env",
     "smoke:api": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/smoke-cloudflare-api.ts",
+    "smoke:reactions": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/smoke-cloudflare-reactions.ts",
     "manage:wager-reservations": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-wager-reservations.ts",
     "manage:events": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-events.ts",
     "manage:profile-canonical": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-profile-canonical.ts",
@@ -80,6 +81,7 @@
     "@types/node": "^26.4.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
+    "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^8.69.0",
     "@typescript-eslint/parser": "^8.69.0",
     "@vitejs/plugin-react": "^6.1.1",
@@ -95,7 +97,8 @@
     "vite": "^8.2.2",
     "vite-plugin-checker": "^0.14.5",
     "vitest": "^4.1.11",
-    "wrangler": "4.127.1"
+    "wrangler": "4.127.1",
+    "ws": "^8.21.3"
   },
   "overrides": {
     "@metaplex-foundation/mpl-token-metadata": "3.4.0",

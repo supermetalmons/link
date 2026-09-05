@@ -7,6 +7,20 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
+  "exports": {
+    "InviteReactions": {
+      "type": "durable-object",
+      "storage": "sqlite",
+    },
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "INVITE_REACTIONS",
+        "class_name": "InviteReactions",
+      },
+    ],
+  },
   "vars": {
     "APPLE_AUDIENCES": "link.mons",
     "AUTH_MUTATIONS_DISABLED": "false",
@@ -88,6 +102,14 @@
       "namespace_id": "1616095644",
       "simple": {
         "limit": 20,
+        "period": 60,
+      },
+    },
+    {
+      "name": "REACTION_RATE_LIMITER",
+      "namespace_id": "1616095645",
+      "simple": {
+        "limit": 60,
         "period": 60,
       },
     },

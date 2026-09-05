@@ -197,6 +197,11 @@ import {
   normalizeStringOrNull,
 } from "./valueNormalizers";
 import { ObserverRegistry } from "./observerRegistry";
+import { InviteReactionChannel } from "./inviteReactionChannel";
+import {
+  createInviteReactionSocketProtocols,
+  sendInviteReactionViaApi,
+} from "../services/inviteReactionsApi";
 import { transition, transitionToHome } from "../session/sessionTransitionPort";
 import { startNavigationGamesPolling } from "./navigationGamesPoller";
 import { EventPollingRegistry } from "./eventPollingRegistry";
@@ -336,7 +341,11 @@ class Connection {
   private hostRematchesRef: any = null;
   private guestRematchesRef: any = null;
   private wagersRef: any = null;
-  private inviteReactionsRef: any = null;
+  private inviteReactionSubscription: {
+    contextId: number;
+    channel: InviteReactionChannel;
+    stop: () => void;
+  } | null = null;
   private miningFrozenPoller: FrozenMaterialsPoller | null = null;
   private miningFrozenLoginUid: string | null = null;
   private matchRefs: { [key: string]: any } = {};
@@ -1608,6 +1617,9 @@ class Connection {
     incrementLifecycleCounter("connectionAuthSubscribers");
     const unsubscribe = onAuthStateChanged(this.auth, (user) => {
       const newUid = user?.uid ?? null;
+      if (this.activeContext && newUid !== this.activeContext.loginUid) {
+        this.cleanupInviteReactionObserver();
+      }
       if (newUid !== this.currentUid) {
         this.clearEventSyncCaches();
         if (this.miningFrozenPoller && newUid !== this.miningFrozenLoginUid) {
@@ -3818,21 +3830,39 @@ class Connection {
       undefined,
       "sendVoiceReaction",
     );
-    if (!writableContext) {
+    const subscription = this.inviteReactionSubscription;
+    if (
+      !writableContext ||
+      subscription?.contextId !== writableContext.contextId
+    ) {
       return;
     }
     const inviteReaction: InviteReaction = {
       ...reaction,
       matchId: writableContext.matchId,
     };
-    set(
-      ref(
-        this.db,
-        `invites/${writableContext.inviteId}/reactions/${writableContext.actorUid}`,
-      ),
+    let tokenProvider: AuthTokenProvider;
+    try {
+      tokenProvider = this.getUserBoundAuthTokenProvider(
+        writableContext.loginUid,
+      );
+    } catch {
+      return;
+    }
+    void sendInviteReactionViaApi(
+      writableContext.inviteId,
       inviteReaction,
+      tokenProvider,
+      { signal: subscription.channel.signal },
     ).catch((error) => {
-      console.error("Error sending voice reaction:", error);
+      if (
+        this.isContextActive(
+          writableContext.contextId,
+          writableContext.sessionEpoch,
+        )
+      ) {
+        console.error("Error sending reaction:", error);
+      }
     });
   }
 
@@ -4808,7 +4838,6 @@ class Connection {
 
         this.latestInvite = workingInvite;
         this.myMatch = myMatch;
-        didRecoverInviteReactions(workingInvite.reactions ?? null);
 
         const nextContext = this.buildRuntimeContext(
           inviteId,
@@ -4882,6 +4911,7 @@ class Connection {
                 if (this.latestInvite) {
                   this.latestInvite.guestId = updatedInvite.guestId;
                 }
+                this.inviteReactionSubscription?.channel.refresh();
                 this.observeMatch(updatedInvite.guestId, matchId, nextContext);
                 unregister?.();
               },
@@ -5106,40 +5136,71 @@ class Connection {
     if (!context) {
       return;
     }
-    const inviteReactionsRef = ref(
-      this.db,
-      `invites/${context.inviteId}/reactions`,
-    );
-    this.inviteReactionsRef = inviteReactionsRef;
-    this.observeContextValue(
-      context,
-      `invite-reactions:${context.inviteId}`,
-      inviteReactionsRef,
-      (snapshot) => {
-        const reactions = snapshot.val() as Record<
-          string,
-          InviteReaction
-        > | null;
-        if (this.latestInvite) {
-          this.latestInvite.reactions = reactions;
-        }
-        if (!reactions) {
-          return;
-        }
-        Object.entries(reactions).forEach(([senderUid, inviteReaction]) => {
-          if (!inviteReaction || typeof inviteReaction.uuid !== "string") {
-            return;
+    if (this.inviteReactionSubscription?.contextId === context.contextId)
+      return;
+    this.cleanupInviteReactionObserver();
+    const key = `invite-reactions:${context.inviteId}`;
+    const channel = new InviteReactionChannel({
+      inviteId: context.inviteId,
+      createSocket: (url, protocols) => new WebSocket(url, protocols),
+      getProtocols: context.canWrite
+        ? async (forceRefresh) => {
+            const tokenProvider = this.getUserBoundAuthTokenProvider(
+              context.loginUid,
+            );
+            const token = await tokenProvider(forceRefresh);
+            tokenProvider.assertCurrentUser();
+            return createInviteReactionSocketProtocols(token);
           }
-          didReceiveInviteReactionUpdate(inviteReaction, senderUid);
-        });
+        : undefined,
+      isActive: () =>
+        this.isContextActive(context.contextId, context.sessionEpoch) &&
+        this.isCurrentAuthUser(context.loginUid),
+      isOnline: () => typeof navigator === "undefined" || navigator.onLine,
+      canConnect: () =>
+        !!this.latestInvite?.hostId && !!this.latestInvite?.guestId,
+      addWakeListener: (listener) => {
+        if (typeof window === "undefined") return () => undefined;
+        const onVisibility = () => {
+          if (document.visibilityState === "visible") listener();
+        };
+        window.addEventListener("online", listener);
+        window.addEventListener("pageshow", listener);
+        document.addEventListener("visibilitychange", onVisibility);
+        return () => {
+          window.removeEventListener("online", listener);
+          window.removeEventListener("pageshow", listener);
+          document.removeEventListener("visibilitychange", onVisibility);
+        };
       },
-      undefined,
-      () => {
-        if (this.inviteReactionsRef === inviteReactionsRef) {
-          this.inviteReactionsRef = null;
-        }
-      },
-    );
+      onInitialSnapshot: didRecoverInviteReactions,
+      onReaction: didReceiveInviteReactionUpdate,
+      onError: (error) => console.error("Error receiving reactions:", error),
+      setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+      clearTimer: (timer) => clearTimeout(timer),
+      random: Math.random,
+    });
+    let stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      channel.stop();
+      this.unregisterObserverCleanup(context.contextId, key);
+      if (this.inviteReactionSubscription?.channel === channel) {
+        this.inviteReactionSubscription = null;
+      }
+      decrementLifecycleCounter("connectionObservers");
+    };
+    if (!this.registerObserverCleanup(context.contextId, key, stop)) {
+      channel.stop();
+      return;
+    }
+    this.inviteReactionSubscription = {
+      contextId: context.contextId,
+      channel,
+      stop,
+    };
+    incrementLifecycleCounter("connectionObservers");
   }
 
   private cleanupRematchObservers() {
@@ -5164,11 +5225,7 @@ class Connection {
   }
 
   private cleanupInviteReactionObserver() {
-    if (this.inviteReactionsRef) {
-      off(this.inviteReactionsRef);
-      this.inviteReactionsRef = null;
-      decrementLifecycleCounter("connectionObservers");
-    }
+    this.inviteReactionSubscription?.stop();
   }
 
   private observeMiningFrozen(uid: string | null) {

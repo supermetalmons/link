@@ -34,6 +34,9 @@ type WranglerConfig = {
   secrets?: { required?: string[] };
   vars?: Record<string, string>;
   d1_databases?: Array<Record<string, unknown>>;
+  durable_objects?: Record<string, unknown>;
+  exports?: Record<string, unknown>;
+  migrations?: Array<Record<string, unknown>>;
   ratelimits?: Array<Record<string, unknown>>;
   queues?: Record<string, unknown>;
   workflows?: Array<Record<string, unknown>>;
@@ -94,6 +97,13 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.deepEqual(config.routes, [
     { pattern: "api.mons.link", custom_domain: true },
   ]);
+  assert.deepEqual(config.exports, {
+    InviteReactions: { type: "durable-object", storage: "sqlite" },
+  });
+  assert.deepEqual(config.durable_objects, {
+    bindings: [{ name: "INVITE_REACTIONS", class_name: "InviteReactions" }],
+  });
+  assert.equal(config.migrations, undefined);
   assert.deepEqual(config.workflows, [
     {
       binding: "EVENT_PROGRESS_WORKFLOW",
@@ -183,6 +193,11 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       name: "AUTH_RATE_LIMITER",
       namespace_id: "1616095644",
       simple: { limit: 20, period: 60 },
+    },
+    {
+      name: "REACTION_RATE_LIMITER",
+      namespace_id: "1616095645",
+      simple: { limit: 60, period: 60 },
     },
   ]);
   assert.deepEqual(config.queues, {
@@ -489,6 +504,7 @@ test("shared package preserves every direct export subpath", () => {
     "./nfts": "./nfts.js",
     "./profiles": "./profiles.js",
     "./ratings": "./ratings.js",
+    "./reactions": "./reactions.js",
     "./rematches": "./rematches.js",
     "./solana": "./solana.js",
     "./timers": "./timers.js",
@@ -608,31 +624,61 @@ test("operations documentation describes current releases and D1 maintenance", (
     guide.indexOf("## API Worker release"),
     guide.indexOf("## Canonical profile D1 maintenance"),
   );
-  for (const command of [
+  let previousStepIndex = -1;
+  for (const step of [
     "npm run manage:profile-canonical -- --freeze",
+    "Wait at least 15 minutes",
+    "GET https://api.cloudflare.com/client/v4/accounts/e25f90fc073ea309b54b8b5144bf28e0/workers/scripts/mons-link-api/subdomain",
+    "Require `enabled: false` and `previews_enabled: false`",
     "npm run upload:api",
-    "npm run smoke:api -- --base-url <version-preview-url> --read-only --require-history --require-wager-frozen-read --require-wager-storage-version",
     "npm run promote:api -- --version-id <version-id>",
     "npm run deploy:api:triggers",
-    "npm run smoke:api -- --base-url https://api.mons.link --read-only --require-history",
+    "npm run smoke:api -- --base-url https://api.mons.link --read-only --require-history --require-wager-frozen-read --require-wager-storage-version",
+    "npm run smoke:reactions -- --base-url https://api.mons.link --invite-id <existing-paired-invite-id>",
     "npm run manage:profile-canonical -- --resume",
   ]) {
-    assert.equal(apiRelease.includes(command), true, command);
+    const stepIndex = apiRelease.indexOf(step);
+    assert.ok(stepIndex > previousStepIndex, step);
+    previousStepIndex = stepIndex;
   }
-  assert.ok(
-    apiRelease.indexOf("npm run upload:api") <
-      apiRelease.indexOf("npm run promote:api"),
-  );
-  assert.ok(
-    apiRelease.indexOf('"previews_enabled":false') <
-      apiRelease.indexOf("npm run manage:profile-canonical -- --resume"),
+  assert.doesNotMatch(
+    apiRelease,
+    /<version-preview-url>|(?:previews_enabled|preview_urls)"?\s*:\s*true/,
   );
   assert.match(
     apiRelease,
     /Production API `workers_dev` and `preview_urls` remain disabled/,
   );
+  assert.match(
+    apiRelease,
+    /Workers implementing a Durable Object do not receive version-preview URLs/,
+  );
   assert.match(apiRelease, /alternate-login invite-role authorization/);
   assert.match(apiRelease, /Wait at least 15 minutes/);
+  const reactionBootstrap = apiRelease.slice(
+    apiRelease.indexOf("### Initial reaction namespace and cutover"),
+    apiRelease.indexOf("### Read-only reaction smoke"),
+  );
+  assert.match(reactionBootstrap, /one-time exception to candidate upload/);
+  assert.match(reactionBootstrap, /already-provisioned, unchanged class/);
+  assert.match(reactionBootstrap, /Retain the API namespace/);
+  assert.ok(
+    reactionBootstrap.indexOf("wrangler deploy --dry-run --strict") <
+      reactionBootstrap.indexOf("wrangler deploy --strict"),
+  );
+  assert.ok(
+    reactionBootstrap.indexOf("wrangler deploy --strict") <
+      reactionBootstrap.indexOf("Release the frontend next"),
+  );
+  assert.ok(
+    reactionBootstrap.indexOf("Release the frontend next") <
+      reactionBootstrap.indexOf("npm run deploy:firebase"),
+  );
+  assert.match(
+    apiRelease,
+    /npm run smoke:reactions -- --base-url https:\/\/api\.mons\.link --invite-id <existing-paired-invite-id>/,
+  );
+  assert.match(apiRelease, /publishes no reaction/);
   for (const queue of [
     "auth-recovery",
     "profile-game-projection",
@@ -642,6 +688,10 @@ test("operations documentation describes current releases and D1 maintenance", (
     assert.equal(
       apiRelease.includes(`queues pause-delivery mons-link-${queue}`),
       true,
+    );
+    assert.ok(
+      apiRelease.indexOf(`queues pause-delivery mons-link-${queue}`) <
+        apiRelease.indexOf("Wait at least 15 minutes"),
     );
     assert.equal(
       apiRelease.includes(`queues resume-delivery mons-link-${queue}`),

@@ -1,5 +1,6 @@
 "use strict";
 
+const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const test = require("node:test");
 const {
@@ -86,14 +87,6 @@ test("rules deny structural writes and preserve live participant writes", async 
   await assertSucceeds(
     hostDb.ref("players/host/matches/invite1").set(match("fen-2", "move")),
   );
-  await assertSucceeds(
-    hostDb.ref("invites/invite1/reactions/host").set({
-      uuid: "reaction-1",
-      kind: "voice",
-      variation: 1,
-      matchId: "invite1",
-    }),
-  );
   const alternate = rules.authenticatedContext("alternate", {
     profileId: "profile-host",
   });
@@ -103,6 +96,56 @@ test("rules deny structural writes and preserve live participant writes", async 
       .ref("players/host/matches/invite1")
       .set(match("fen-3", "move-more")),
   );
+});
+
+test("retired reactions remain readable but reject every browser write", async () => {
+  const reaction = {
+    uuid: "retained-reaction",
+    kind: "voice",
+    variation: 1,
+    matchId: "invite1",
+  };
+  await rules.withSecurityRulesDisabled(async (context) => {
+    await context
+      .database()
+      .ref("invites/invite1/reactions/host")
+      .set(reaction);
+  });
+  for (const context of [
+    rules.unauthenticatedContext(),
+    rules.authenticatedContext("host", { profileId: "profile-host" }),
+    rules.authenticatedContext("guest", { profileId: "profile-guest" }),
+    rules.authenticatedContext("alternate", { profileId: "profile-host" }),
+    rules.authenticatedContext("alternate"),
+    rules.authenticatedContext("admin", { admin: true }),
+  ]) {
+    const database = context.database();
+    await assertSucceeds(
+      database.ref("invites/invite1/reactions/host").once("value"),
+    );
+    await assertFails(
+      database.ref("invites/invite1/reactions").set({ host: reaction }),
+    );
+    await assertFails(
+      database.ref("invites/invite1/reactions/host").set(reaction),
+    );
+    await assertFails(
+      database.ref("invites/invite1/reactions/host/variation").set(2),
+    );
+    await assertFails(database.ref("invites/invite1/reactions").remove());
+    await assertFails(
+      database.ref().update({
+        "players/host/matches/invite1/emojiId": 2,
+        "invites/invite1/reactions/host": reaction,
+      }),
+    );
+  }
+  const retained = await rules
+    .unauthenticatedContext()
+    .database()
+    .ref("invites/invite1/reactions/host")
+    .once("value");
+  assert.deepEqual(retained.val(), reaction);
 });
 
 test("rules retain same-profile writes through an RTDB link without a custom claim", async () => {

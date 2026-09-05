@@ -39,6 +39,11 @@ import {
   EVENT_PRIZE_WITHDRAWAL_STATUS_PATH,
   handleEventPrizeWithdrawalRoute,
 } from "./eventPrizeWithdrawal.ts";
+import {
+  handleInviteReactionRoute,
+  isInviteReactionPath,
+  type InviteReactionRouteDependencies,
+} from "./inviteReactionRoute.ts";
 
 const RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
 
@@ -62,11 +67,23 @@ export async function handleRequest(
     gameplay?: GameplayRouteDependencies;
     mining?: MiningRouteDependencies;
     profile?: ProfileRouteDependencies;
+    reactions?: InviteReactionRouteDependencies;
     xCallback?: XCallbackDependencyOverrides;
   } = {},
   ctx?: WorkerExecutionContext,
 ): Promise<Response> {
   const pathname = new URL(request.url).pathname;
+  if (isInviteReactionPath(pathname)) {
+    if (!ctx) {
+      return jsonResponse({ ok: false, error: "unavailable" }, 503);
+    }
+    return handleInviteReactionRoute(
+      request,
+      env,
+      ctx,
+      dependencyOverrides.reactions,
+    );
+  }
   if (
     pathname === EVENT_SNAPSHOT_PATH ||
     pathname === PROFILE_EVENT_PRIZES_PATH

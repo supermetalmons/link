@@ -12,6 +12,8 @@ import type {
 } from "@mons/shared/event-prizes";
 import type { PlayerProfile as SharedPlayerProfile } from "@mons/shared/profiles";
 import type { HistoricalMatchPair as SharedHistoricalMatchPair } from "@mons/shared/game-sessions";
+import type { Reaction } from "@mons/shared/reactions";
+export type { Reaction, InviteReaction } from "@mons/shared/reactions";
 
 export interface Match {
   version: number;
@@ -41,7 +43,6 @@ export interface Invite {
   eventMatchKey?: string | null;
   eventOwned?: boolean | null;
   wagers?: Record<string, MatchWagerState> | null;
-  reactions?: Record<string, InviteReaction> | null;
 }
 
 export interface RematchSeriesMatchDescriptor {
@@ -199,16 +200,6 @@ export interface EventRecord {
 }
 
 export type EventPrizeSelections = Record<string, EventPrizeId>;
-
-export interface Reaction {
-  uuid: string;
-  variation: number;
-  kind: string;
-}
-
-export interface InviteReaction extends Reaction {
-  matchId: string;
-}
 
 export const MINING_MATERIAL_NAMES = SHARED_MINING_MATERIAL_NAMES;
 

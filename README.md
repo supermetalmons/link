@@ -14,7 +14,7 @@ mons.link is a browser game backed by Firebase Auth, Cloudflare D1, Realtime Dat
 | `cloud/admin/`            | Manually invoked production administration tools                                             | Node / D1          |
 | `scripts/`                | Deployment, repository maintenance, architecture, and tooling contracts                      | Node and Bash      |
 
-The frontend Worker is configured by `wrangler.jsonc`. The API Worker has its independent configuration under `cloud/workers/api/`. Firebase Auth remains active, and Realtime Database retains active invites, match synchronization, and timer-claim fences. Canonical event, profile, auth-state, Telegram, projection, withdrawal, frozen wager reservation, game-session lock, and timer-start data are D1-backed. Navigation is served from the Worker and profile-game D1 cache without an RTDB reconstruction fallback. Realtime Database rules live under `cloud/`; Firestore and Firebase Functions are not deployed.
+The frontend Worker is configured by `wrangler.jsonc`. The API Worker has its independent configuration under `cloud/workers/api/`. Firebase Auth remains active, and Realtime Database retains active invites, match synchronization, and timer-claim fences. Voice and sticker reactions use one SQLite-backed `InviteReactions` Durable Object per invite with public read-only WebSocket subscriptions and authenticated HTTP publishing. Canonical event, profile, auth-state, Telegram, projection, withdrawal, frozen wager reservation, game-session lock, and timer-start data are D1-backed. Navigation is served from the Worker and profile-game D1 cache without an RTDB reconstruction fallback. Realtime Database rules live under `cloud/`; Firestore and Firebase Functions are not deployed.
 
 ## Setup and development
 
@@ -71,4 +71,4 @@ Production deployment commands, token handling, smoke checks, schema maintenance
 - Cloud admin tools remain independently installable and use explicit read-only D1 credentials.
 - TypeScript and framework type declarations are build-only root development dependencies.
 
-No release command is implied by a build or test command. Production changes use candidate uploads, explicit version promotion, and documented smoke checks.
+No release command is implied by a build or test command. Production changes use candidate uploads, explicit version promotion, and documented smoke checks. The initial reaction Durable Object namespace requires the reviewed API bootstrap in the deployment guide before the frontend release and final Firebase rules cutover.

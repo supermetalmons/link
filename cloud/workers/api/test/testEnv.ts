@@ -12,6 +12,18 @@ const rateLimit = {
   limit: async () => ({ success: true }),
 } satisfies RateLimit;
 
+const unexpectedInviteReactions = (): never => {
+  throw new Error("test-invite-reactions-not-configured");
+};
+const inviteReactions = {
+  newUniqueId: unexpectedInviteReactions,
+  idFromName: unexpectedInviteReactions,
+  idFromString: unexpectedInviteReactions,
+  get: unexpectedInviteReactions,
+  getByName: unexpectedInviteReactions,
+  jurisdiction: unexpectedInviteReactions,
+} satisfies Env["INVITE_REACTIONS"];
+
 const workflowInstance = {
   id: "test-workflow-instance",
   delete: async () => undefined,
@@ -133,6 +145,8 @@ export const TELEGRAM_TEST_ENV = {
   AUTH_RECOVERY_QUEUE: queue,
   AUTH_STATE_DB: profileGamesDb,
   AUTH_RATE_LIMITER: rateLimit,
+  REACTION_RATE_LIMITER: rateLimit,
+  INVITE_REACTIONS: inviteReactions,
   EVENT_PROGRESS_WORKFLOW: workflow,
   EVENT_DB: profileGamesDb,
   EVENT_PRIZE_ADMIN_PRIVATE_KEY: "test-event-prize-private-key",

@@ -46,12 +46,6 @@
         "hostRematches": {
           ".validate": "newData.isString() && (!data.exists() || newData.val().contains(data.val()))"
         },
-        "reactions": {
-          "$playerId": {
-            ".write": "auth != null && data.parent().parent().child('guestId').exists() && ((auth.uid === $playerId) || (auth.token.profileId != null && root.child('players').child($playerId).child('profile').val() === auth.token.profileId) || (root.child('players').child(auth.uid).child('profile').exists() && root.child('players').child($playerId).child('profile').val() === root.child('players').child(auth.uid).child('profile').val())) && ($playerId === data.parent().parent().child('hostId').val() || $playerId === data.parent().parent().child('guestId').val())",
-            ".validate": "newData.hasChildren(['uuid','kind','variation','matchId']) && newData.child('uuid').isString() && newData.child('kind').isString() && newData.child('variation').isNumber() && newData.child('matchId').isString()"
-          }
-        },
         "matchesWagerResolutions": {
           "$matchId": {
             ".write": "auth != null && auth.token.admin === true",

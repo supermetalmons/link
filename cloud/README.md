@@ -2,7 +2,7 @@
 
 Run commands from the repository root. See the repository [architecture and command map](../README.md) for package boundaries and the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md) for API release and maintenance procedures.
 
-Firebase Auth remains active. Realtime Database retains active invites, match synchronization, and `matchTimerClaims`. The API Worker owns manual invite, join, match creation, and rematch mutations; auth; profile and leaderboard reads; profile customization; username mutation; mining; gameplay; D1-backed events and prizes; profile-link catch-up; profile-game projection; event control and progress Workflows; X callback; event Telegram projection; and Worker-backed Telegram delivery.
+Firebase Auth remains active. Realtime Database retains active invites, match synchronization, and `matchTimerClaims`. The API Worker owns manual invite, join, match creation, and rematch mutations; reaction publishing and subscriptions; auth; profile and leaderboard reads; profile customization; username mutation; mining; gameplay; D1-backed events and prizes; profile-link catch-up; profile-game projection; event control and progress Workflows; X callback; event Telegram projection; and Worker-backed Telegram delivery.
 
 `mons-link-profiles` D1 permanently contains the canonical profile, ownership, auth, recovery, rating, wager, and transaction-guard tables. `PROFILE_DB.profile_login_owners` is the sole source for Worker login UID to canonical profile ownership, including merge-target resolution. There is no alternate profile store or fallback; an unreadable or corrupt ownership topology fails closed with `503 profile-ownership-unavailable`.
 
@@ -64,6 +64,8 @@ npm run deploy:firebase -- --project mons-link
 
 The Firebase configuration contains only active-gameplay Realtime Database rules. Review the dry-run first; the release helper cannot create Firestore, Hosting, Cloud Functions, or event resources.
 
+The reaction cutover rules reject writes to `invites/{inviteId}/reactions`, including participant, linked-login, and admin-claim writes. Release these rules only after the API Durable Object bootstrap, frontend release, and two-player/spectator reaction verification described in the deployment guide. Retain the old RTDB records; no import or deletion is required. Older clients must refresh or update to send and receive reactions.
+
 ## Event storage maintenance
 
 `mons-link-events` supports `d1` and `frozen` storage modes:
@@ -94,6 +96,16 @@ Investigate stuck work through Queue consumption, pending marker age, and projec
 ## Gameplay coordination
 
 `mons-link-profile-games` D1 owns gameplay mutation leases and timer-start markers. The bounded reconciliation sweep checks the opponent metadata before removing stale timer markers. Active match writes still depend on the RTDB `matchTimerClaims` fence. A committed automatch operation returns its receipted result; an unproven coordination failure returns a sanitized `503`.
+
+## Reaction delivery
+
+`INVITE_REACTIONS` binds the API Worker to `InviteReactions`, one SQLite-backed Durable Object per invite. The Worker checks paired invite membership and canonical D1 participant ownership before publishing `POST /invites/:inviteId/reactions`; spectators use the public `GET /invites/:inviteId/reactions/socket` with an allowed browser origin. The WebSocket accepts heartbeat messages only. Firebase still supplies identity tokens and live invite/match data for authorization.
+
+Each room reserves four connections for the host and four for the guest, alongside at most 248 spectators and eight spectator connections per IP. Players authenticate the socket handshake using their Firebase token in the WebSocket protocol header; the server echoes only `mons-reactions-v1` and forwards no credentials to the Durable Object. Participant admission uses a separate rate-limit bucket keyed by the resolved player UID. Connection tags retain these limits through hibernation.
+
+The object retains the latest reaction per player and uses hibernating WebSockets. Fresh game contexts suppress their initial snapshot; reconnecting contexts recover unseen reactions through the existing playback filters. There is no Firebase delivery fallback, reaction history import, or persistent outgoing queue. Failures affect reactions independently of active match synchronization.
+
+Use the read-only reaction smoke in the deployment guide to verify snapshots and heartbeat delivery without publishing to a game. Monitor socket connection failures, publish failures, rate-limit rejections, and browser reconnect frequency. Preserve Durable Object storage and its `exports` declaration during repairs.
 
 ## Wager reservation storage
 
