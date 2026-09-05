@@ -17,15 +17,11 @@ import {
   AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT,
   EVENT_PROFILE_GAME_PROJECTION_LOCK_ROOT,
   EVENT_PROFILE_GAME_PROJECTION_OUTBOX_ROOT,
-  PROFILE_LINK_PROFILE_GAME_PROJECTION_OUTBOX_ROOT,
   getAutomatchProfileGameProjectionOutboxPath,
   getEventProfileGameProjectionOutboxPath,
-  getProfileLinkProfileGameProjectionOutboxPath,
   parseAutomatchProfileGameProjectionOutbox,
   parseEventProfileGameProjectionOutbox,
-  parseProfileLinkProfileGameProjectionOutbox,
   salvageHistoricalMatchDescriptors,
-  salvageProfileLinkCleanupProfileIds,
 } from "./profileGameProjectionOutbox.ts";
 import {
   createEventProfileGameProjectionRuntime,
@@ -51,6 +47,10 @@ import {
   type ProfileGameProjectionLock,
   type ProfileGameProjectionLockStore,
 } from "./profileGameProjectionLocksD1.ts";
+import {
+  createProfileLinkCatchupStore,
+  type ProfileLinkCatchupStore,
+} from "./profileLinkCatchupD1.ts";
 import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
 
 const PROFILE_GAME_PROJECTION_SWEEP_LIMIT = PROFILE_BACKGROUND_SWEEP_LIMIT;
@@ -149,8 +149,14 @@ type ProfileGameProjectionRtdb = Pick<
   "getRtdbPath" | "transactRtdbPath"
 >;
 
+type ProfileLinkProjectionJobs = Pick<
+  ProfileLinkCatchupStore,
+  "read" | "listDue" | "claimDispatch" | "advance" | "settle" | "settleMissing"
+>;
+
 export type ProfileGameProjectionDependencies = {
   createLocks?: (env: Env) => ProfileGameProjectionLockStore;
+  createProfileLinkJobs?: (env: Env) => ProfileLinkProjectionJobs;
   createEventRuntime?: (env: Env) => EventProfileGameProjectionRuntime;
   createRating?: (env: Env) => RatingProfileGameProjectionRepository;
   createRtdb?: (env: Env) => ProfileGameProjectionRtdb;
@@ -188,15 +194,6 @@ type EventSweepCandidate = {
 type EventSweepEntry =
   | { kind: "candidate"; value: EventSweepCandidate }
   | { eventId: string; kind: "invalid" };
-
-type ProfileLinkSweepCandidate = {
-  lastQueuedAtMs: number;
-  task: ProfileLinkProfileGameProjectionTask;
-};
-
-type ProfileLinkSweepEntry =
-  | { kind: "candidate"; value: ProfileLinkSweepCandidate }
-  | { kind: "invalid"; loginUid: string };
 
 export type ProfileGameProjectionSweepResult = {
   automatch: number;
@@ -401,26 +398,9 @@ export async function processEventProfileGameProjection(
   }
 }
 
-export async function settleProfileLinkProfileGameProjectionOutbox(
-  task: ProfileLinkProfileGameProjectionTask,
-  rtdb: ProfileGameProjectionRtdb,
-): Promise<boolean> {
-  const result = await rtdb.transactRtdbPath(
-    getProfileLinkProfileGameProjectionOutboxPath(task.loginUid),
-    (current) => {
-      const outbox = parseProfileLinkProfileGameProjectionOutbox(current);
-      if (!outbox || outbox.requestId !== task.requestId) {
-        return { commit: false, decision: "stale" };
-      }
-      return { value: null, decision: "cleared" };
-    },
-  );
-  return result.committed;
-}
-
 export async function processProfileLinkProfileGameProjection(
   task: ProfileLinkProfileGameProjectionTask,
-  rtdb: ProfileGameProjectionRtdb,
+  jobs: ProfileLinkProjectionJobs,
   process: (input: {
     cleanupProfileIds: string[];
     loginUid: string;
@@ -436,12 +416,8 @@ export async function processProfileLinkProfileGameProjection(
   ownerId: string = crypto.randomUUID(),
   now: () => number = Date.now,
 ): Promise<"continued" | "missing" | "projected" | "stale" | "superseded"> {
-  const initialOutbox = parseProfileLinkProfileGameProjectionOutbox(
-    await rtdb.getRtdbPath(
-      getProfileLinkProfileGameProjectionOutboxPath(task.loginUid),
-    ),
-  );
-  if (!initialOutbox || initialOutbox.requestId !== task.requestId) {
+  const initialJob = await jobs.read(task.loginUid);
+  if (!initialJob || initialJob.requestId !== task.requestId) {
     return "stale";
   }
   const lock: ProfileGameProjectionLock = {
@@ -451,20 +427,16 @@ export async function processProfileLinkProfileGameProjection(
   };
   await locks.acquire(lock, ownerId, now());
   try {
-    const outbox = parseProfileLinkProfileGameProjectionOutbox(
-      await rtdb.getRtdbPath(
-        getProfileLinkProfileGameProjectionOutboxPath(task.loginUid),
-      ),
-    );
-    if (!outbox || outbox.requestId !== task.requestId) {
+    const job = await jobs.read(task.loginUid);
+    if (!job || job.requestId !== task.requestId) {
       return "stale";
     }
     const projection = await process({
-      cleanupProfileIds: outbox.cleanupProfileIds,
+      cleanupProfileIds: job.cleanupProfileIds,
       loginUid: task.loginUid,
-      matchCursor: outbox.matchCursor,
-      profileId: outbox.profileId,
-      sourceUpdatedAtMs: outbox.sourceUpdatedAtMs,
+      matchCursor: job.matchCursor,
+      profileId: job.profileId,
+      sourceUpdatedAtMs: job.sourceUpdatedAtMs,
       withInviteProjectionLock: async (inviteId, work) => {
         const inviteOwnerId = crypto.randomUUID();
         const inviteLock: ProfileGameProjectionLock = {
@@ -480,7 +452,11 @@ export async function processProfileLinkProfileGameProjection(
       },
     });
     if (!projection) {
-      return (await settleProfileLinkProfileGameProjectionOutbox(task, rtdb))
+      return (await jobs.settleMissing(
+        task.loginUid,
+        task.requestId,
+        job.matchCursor,
+      ))
         ? "missing"
         : "superseded";
     }
@@ -488,26 +464,16 @@ export async function processProfileLinkProfileGameProjection(
       throw new Error("profile-link-profile-game-projection-no-progress");
     }
     if (projection.nextMatchCursor) {
-      const continued = await rtdb.transactRtdbPath(
-        getProfileLinkProfileGameProjectionOutboxPath(task.loginUid),
-        (current) => {
-          const live = parseProfileLinkProfileGameProjectionOutbox(current);
-          if (!live || live.requestId !== task.requestId) {
-            return { commit: false, decision: "superseded" };
-          }
-          return {
-            value: {
-              ...toRecord(current),
-              matchCursor: projection.nextMatchCursor,
-              lastQueuedAtMs: now(),
-            },
-            decision: "continued",
-          };
-        },
+      const continued = await jobs.advance(
+        task.loginUid,
+        task.requestId,
+        job.matchCursor,
+        projection.nextMatchCursor,
+        now(),
       );
-      return continued.committed ? "continued" : "superseded";
+      return continued ? "continued" : "superseded";
     }
-    return (await settleProfileLinkProfileGameProjectionOutbox(task, rtdb))
+    return (await jobs.settle(task.loginUid, task.requestId, job.matchCursor))
       ? "projected"
       : "superseded";
   } finally {
@@ -555,26 +521,6 @@ function eventSweepEntries(value: unknown): EventSweepEntry[] {
   });
 }
 
-function profileLinkSweepEntries(value: unknown): ProfileLinkSweepEntry[] {
-  const records = toRecord(value) || {};
-  return Object.entries(records).map(([loginUid, raw]) => {
-    const outbox = parseProfileLinkProfileGameProjectionOutbox(raw);
-    return outbox && isSafeFirebaseKey(loginUid)
-      ? {
-          kind: "candidate",
-          value: {
-            lastQueuedAtMs: outbox.lastQueuedAtMs,
-            task: {
-              kind: "profile-link-profile-game-projection",
-              loginUid,
-              requestId: outbox.requestId,
-            },
-          },
-        }
-      : { kind: "invalid", loginUid };
-  });
-}
-
 async function claimAutomatchSweepCandidate(
   rtdb: ProfileGameProjectionRtdb,
   candidate: AutomatchSweepCandidate,
@@ -610,32 +556,6 @@ async function claimEventSweepCandidate(
     getEventProfileGameProjectionOutboxPath(candidate.task.eventId),
     (current) => {
       const outbox = parseEventProfileGameProjectionOutbox(current);
-      if (
-        !outbox ||
-        outbox.requestId !== candidate.task.requestId ||
-        outbox.lastQueuedAtMs !== candidate.lastQueuedAtMs ||
-        outbox.lastQueuedAtMs > nowMs
-      ) {
-        return { commit: false, decision: "not-due" };
-      }
-      return {
-        value: { ...toRecord(current), lastQueuedAtMs: nowMs },
-        decision: "claimed",
-      };
-    },
-  );
-  return result.committed;
-}
-
-async function claimProfileLinkSweepCandidate(
-  rtdb: ProfileGameProjectionRtdb,
-  candidate: ProfileLinkSweepCandidate,
-  nowMs: number,
-): Promise<boolean> {
-  const result = await rtdb.transactRtdbPath(
-    getProfileLinkProfileGameProjectionOutboxPath(candidate.task.loginUid),
-    (current) => {
-      const outbox = parseProfileLinkProfileGameProjectionOutbox(current);
       if (
         !outbox ||
         outbox.requestId !== candidate.task.requestId ||
@@ -717,83 +637,6 @@ async function repairInvalidEventSweepEntry(
         task: {
           kind: "event-profile-game-projection",
           eventId,
-          requestId,
-        },
-      }
-    : { kind: "removed" };
-}
-
-type InvalidProfileLinkSweepResult =
-  | { kind: "changed" }
-  | { kind: "removed" }
-  | { kind: "repaired"; task: ProfileLinkProfileGameProjectionTask };
-
-async function repairInvalidProfileLinkSweepEntry(
-  rtdb: ProfileGameProjectionRtdb,
-  loginUid: string,
-  nowMs: number,
-  createRequestId: () => string,
-): Promise<InvalidProfileLinkSweepResult> {
-  const safeLoginUid = isSafeFirebaseKey(loginUid);
-  const liveProfileId = safeLoginUid
-    ? await rtdb.getRtdbPath(`players/${loginUid}/profile`)
-    : null;
-  const safeProfileId =
-    typeof liveProfileId === "string" && isSafeFirebaseKey(liveProfileId)
-      ? liveProfileId
-      : "";
-  const requestId = safeLoginUid && safeProfileId ? createRequestId() : "";
-  const result = await rtdb.transactRtdbPath(
-    `${PROFILE_LINK_PROFILE_GAME_PROJECTION_OUTBOX_ROOT}/${loginUid}`,
-    (current) => {
-      if (
-        current === null ||
-        current === undefined ||
-        (parseProfileLinkProfileGameProjectionOutbox(current) && safeLoginUid)
-      ) {
-        return { commit: false, decision: "changed" };
-      }
-      if (!safeLoginUid || !safeProfileId) {
-        return { value: null, decision: "removed-invalid" };
-      }
-      const cleanupProfileIds = salvageProfileLinkCleanupProfileIds(current);
-      const recordedProfileId = toRecord(current)?.profileId;
-      if (
-        typeof recordedProfileId === "string" &&
-        isSafeFirebaseKey(recordedProfileId) &&
-        recordedProfileId !== safeProfileId
-      ) {
-        cleanupProfileIds.push(recordedProfileId);
-      }
-      return {
-        value: {
-          schemaVersion: PROFILE_GAME_PROJECTION_SCHEMA_VERSION,
-          status: "pending",
-          requestId,
-          profileId: safeProfileId,
-          cleanupProfileIds: Object.fromEntries(
-            Array.from(new Set(cleanupProfileIds)).map((profileId) => [
-              profileId,
-              true,
-            ]),
-          ),
-          matchCursor: null,
-          sourceUpdatedAtMs: nowMs,
-          lastQueuedAtMs: nowMs,
-        },
-        decision: "repaired-invalid",
-      };
-    },
-  );
-  if (!result.committed) {
-    return { kind: "changed" };
-  }
-  return safeLoginUid && safeProfileId
-    ? {
-        kind: "repaired",
-        task: {
-          kind: "profile-link-profile-game-projection",
-          loginUid,
           requestId,
         },
       }
@@ -1023,7 +866,11 @@ export async function handleProfileGameProjectionMessage(
     } else if (task.kind === "profile-link-profile-game-projection") {
       status = await processProfileLinkProfileGameProjection(
         task,
-        rtdb,
+        (
+          dependencies.createProfileLinkJobs ||
+          ((workerEnv: Env) =>
+            createProfileLinkCatchupStore(workerEnv.PROFILE_DB))
+        )(env),
         async (input) => {
           if (dependencies.processProfileLink) {
             return dependencies.processProfileLink(input);
@@ -1421,103 +1268,28 @@ export async function sweepProfileLinkProfileGameProjections(
   env: Env,
   dependencies: ProfileGameProjectionDependencies = {},
 ): Promise<number> {
-  const logger = dependencies.logger || console;
-  const now = dependencies.now || Date.now;
-  const createRequestId =
-    dependencies.createRequestId || (() => crypto.randomUUID());
-  const nowMs = now();
-  const dueBeforeMs = nowMs - PROFILE_GAME_PROJECTION_RECOVERY_DELAY_MS;
-  const rtdb = (
-    dependencies.createRtdb ||
-    ((workerEnv: Env) => createGameplayRepository(workerEnv))
+  const nowMs = (dependencies.now || Date.now)();
+  const jobs = (
+    dependencies.createProfileLinkJobs ||
+    ((workerEnv: Env) => createProfileLinkCatchupStore(workerEnv.PROFILE_DB))
   )(env);
-  const [dueValue, malformedValue] = await Promise.all([
-    rtdb.getRtdbPath(PROFILE_LINK_PROFILE_GAME_PROJECTION_OUTBOX_ROOT, {
-      orderBy: "lastQueuedAtMs",
-      endAt: dueBeforeMs,
-      limitToFirst: PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
-    }),
-    rtdb.getRtdbPath(PROFILE_LINK_PROFILE_GAME_PROJECTION_OUTBOX_ROOT, {
-      orderBy: "lastQueuedAtMs",
-      startAt: "",
-      limitToFirst: PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
-    }),
-  ]);
-  const entries = [
-    ...profileLinkSweepEntries(dueValue),
-    ...profileLinkSweepEntries(malformedValue),
-  ];
-  const invalidLoginUids = Array.from(
-    new Set(
-      entries.flatMap((entry) =>
-        entry.kind === "invalid" ? [entry.loginUid] : [],
-      ),
-    ),
+  const candidates = await jobs.listDue(
+    nowMs - PROFILE_GAME_PROJECTION_RECOVERY_DELAY_MS,
+    PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
   );
-  const failures: Error[] = [];
-  const repairedTasks: ProfileLinkProfileGameProjectionTask[] = [];
-  let invalidRemoved = 0;
-  for (const loginUid of invalidLoginUids) {
-    try {
-      const result = await repairInvalidProfileLinkSweepEntry(
-        rtdb,
-        loginUid,
-        nowMs,
-        createRequestId,
-      );
-      if (result.kind === "repaired") {
-        repairedTasks.push(result.task);
-      } else if (result.kind === "removed") {
-        invalidRemoved += 1;
-      }
-    } catch (error) {
-      failures.push(
-        error instanceof Error
-          ? error
-          : new Error("profile-link-profile-game-invalid-record-failed"),
-      );
-    }
-  }
-  if (repairedTasks.length > 0 || invalidRemoved > 0) {
-    logger.error(
-      JSON.stringify({
-        event: "profile_link_profile_game_invalid_outboxes_recovered",
-        repaired: repairedTasks.length,
-        removed: invalidRemoved,
-      }),
-    );
-  }
-  const candidateByLoginUid = new Map<string, ProfileLinkSweepCandidate>();
-  for (const entry of entries) {
-    if (entry.kind === "candidate") {
-      candidateByLoginUid.set(entry.value.task.loginUid, entry.value);
-    }
-  }
-  const claims = await collectSuccessfulClaims(
-    Array.from(candidateByLoginUid.values()),
-    (candidate) => claimProfileLinkSweepCandidate(rtdb, candidate, nowMs),
+  const claims = await collectSuccessfulClaims(candidates, (job) =>
+    jobs.claimDispatch(job.loginUid, job.requestId, job.lastQueuedAtMs, nowMs),
   );
-  const tasks: ProfileGameProjectionTask[] = [
-    ...repairedTasks,
-    ...claims.claimed.map(({ task }) => task),
-  ];
   await sendProfileGameProjectionTasks(
     env.PROFILE_GAME_PROJECTION_QUEUE,
-    tasks,
+    claims.claimed.map(({ loginUid, requestId }) => ({
+      kind: "profile-link-profile-game-projection",
+      loginUid,
+      requestId,
+    })),
   );
-  if (claims.failure) {
-    failures.push(claims.failure);
-  }
-  if (failures.length === 1) {
-    throw failures[0];
-  }
-  if (failures.length > 1) {
-    throw new AggregateError(
-      failures,
-      "profile-link-profile-game-projection-sweep-failed",
-    );
-  }
-  return tasks.length;
+  if (claims.failure) throw claims.failure;
+  return claims.claimed.length;
 }
 
 export async function sweepProfileGameProjections(
@@ -1597,12 +1369,8 @@ export {
   automatchSweepEntries,
   claimAutomatchSweepCandidate,
   claimEventSweepCandidate,
-  claimProfileLinkSweepCandidate,
   eventSweepEntries,
-  profileLinkSweepEntries,
   repairInvalidEventSweepEntry,
-  repairInvalidProfileLinkSweepEntry,
-  salvageProfileLinkCleanupProfileIds,
   salvageEventCleanupOwnerProfileIds,
   repairInvalidAutomatchSweepEntry,
   sendProfileGameProjectionTasks,

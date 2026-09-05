@@ -3019,11 +3019,96 @@ function mutationStatement(
   }
 }
 
+function profileLinkCatchupOwnerStatement(
+  db: D1Database,
+  source: { loginUid: string } | { profileId: string },
+  profileId: string,
+  nowMs: number,
+  skipUnchangedOwner: boolean,
+): D1PreparedStatement {
+  const byLogin = "loginUid" in source;
+  return db
+    .prepare(
+      `INSERT INTO profile_link_catchup_jobs (
+         login_uid, request_id, profile_id, cleanup_profile_ids_json,
+         match_cursor, source_updated_at_ms, last_queued_at_ms, revision
+       )
+       SELECT owner.login_uid, ?, ?,
+         (
+           SELECT json_group_array(profile_id) FROM (
+             SELECT profile_id FROM (
+               SELECT value AS profile_id
+               FROM json_each(COALESCE(job.cleanup_profile_ids_json, '[]'))
+               UNION SELECT job.profile_id WHERE job.profile_id IS NOT NULL
+               UNION SELECT owner.profile_id
+             ) WHERE profile_id != ? ORDER BY profile_id
+           )
+         ),
+         NULL, MAX(?, COALESCE(job.source_updated_at_ms, 0)), ?,
+         COALESCE(job.revision, 0) + 1
+       FROM profile_login_owners AS owner
+       LEFT JOIN profile_link_catchup_jobs AS job
+         ON job.login_uid = owner.login_uid
+       WHERE owner.${byLogin ? "login_uid" : "profile_id"} = ?
+         ${skipUnchangedOwner ? "AND owner.profile_id != ?" : ""}
+       ON CONFLICT (login_uid) DO UPDATE SET
+         request_id = excluded.request_id,
+         profile_id = excluded.profile_id,
+         cleanup_profile_ids_json = excluded.cleanup_profile_ids_json,
+         match_cursor = NULL,
+         source_updated_at_ms = excluded.source_updated_at_ms,
+         last_queued_at_ms = excluded.last_queued_at_ms,
+         revision = excluded.revision`,
+    )
+    .bind(
+      crypto.randomUUID(),
+      profileId,
+      profileId,
+      nowMs,
+      nowMs,
+      byLogin ? source.loginUid : source.profileId,
+      ...(skipUnchangedOwner ? [profileId] : []),
+    );
+}
+
 function mutationStatements(
   db: D1Database,
   mutation: CanonicalMutation,
 ): D1PreparedStatement[] {
   switch (mutation.kind) {
+    case "insert-login-owner":
+      return [
+        mutationStatement(db, mutation),
+        profileLinkCatchupOwnerStatement(
+          db,
+          { loginUid: mutation.value.loginUid },
+          mutation.value.profileId,
+          mutation.value.updatedAtMs,
+          false,
+        ),
+      ];
+    case "update-login-owner":
+      return [
+        profileLinkCatchupOwnerStatement(
+          db,
+          { loginUid: mutation.value.loginUid },
+          mutation.value.profileId,
+          mutation.value.updatedAtMs,
+          true,
+        ),
+        mutationStatement(db, mutation),
+      ];
+    case "move-login-owner-set":
+      return [
+        profileLinkCatchupOwnerStatement(
+          db,
+          { profileId: mutation.sourceProfileId },
+          mutation.targetProfileId,
+          mutation.updatedAtMs,
+          true,
+        ),
+        mutationStatement(db, mutation),
+      ];
     case "insert-active-profile":
       return [profileMutationStatement(db, mutation.value, true)];
     case "update-active-profile":
@@ -3490,6 +3575,9 @@ export function countCanonicalCommitStatements(
         plan.expectations.length +
         plan.mutations.reduce((count, mutation) => {
           switch (mutation.kind) {
+            case "insert-login-owner":
+            case "update-login-owner":
+            case "move-login-owner-set":
             case "update-active-profile":
             case "delete-retired-profile":
               return count + 2;

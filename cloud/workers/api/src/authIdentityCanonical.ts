@@ -53,6 +53,7 @@ import {
   ensureFirebaseProfileClaim,
   newAuthRecoveryJob,
 } from "./authRecovery.ts";
+import { createProfileLinkCatchupStore } from "./profileLinkCatchupD1.ts";
 import { secureAlphanumericId } from "./authRandom.ts";
 import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
 import {
@@ -1366,6 +1367,7 @@ export function createCanonicalAuthIdentityService(
       const profile = await acquireRecoveryBarrier(uid);
       await ensureFirebaseProfileClaim(uid, profile.profile.profileId, {
         authClient,
+        catchupStore: createProfileLinkCatchupStore(db),
         enqueueProfileLinkProjection: (task) =>
           env.PROFILE_GAME_PROJECTION_QUEUE.send(task),
         logger: console,

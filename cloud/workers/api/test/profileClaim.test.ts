@@ -22,7 +22,18 @@ const env = {
   X_CLIENT_SECRET: "test-x-secret",
 } as Env;
 
-const syncProfileClaim = syncProfileClaimImpl;
+const syncProfileClaim: typeof syncProfileClaimImpl = (
+  identity,
+  env,
+  dependencies,
+) =>
+  syncProfileClaimImpl(identity, env, {
+    catchupStore: {
+      read: async () => null,
+      settleMissing: async () => false,
+    },
+    ...dependencies,
+  });
 
 const identity = { idToken: "firebase-token", uid: "firebase-uid" };
 
@@ -149,7 +160,6 @@ test("delegates when a profile appears after no-profile cleanup", async () => {
   assert.deepEqual(clients.rtdbWrites, [
     {
       "players/firebase-uid/profile": null,
-      "profileGameProjectionOutbox/profile/firebase-uid": null,
     },
   ]);
   assert.deepEqual(clients.readState(), {
@@ -267,7 +277,7 @@ test("fails closed after bounded profile source instability", async () => {
   assert.deepEqual(clients.rtdbWrites, []);
 });
 
-test("removes stale profile state and its projection outbox", async () => {
+test("removes stale Firebase profile state without touching the retired outbox", async () => {
   const authWrites: Array<Record<string, unknown>> = [];
   const rtdbWrites: Array<Record<string, unknown>> = [];
   const result = await syncProfileClaim(identity, env, {
@@ -288,7 +298,6 @@ test("removes stale profile state and its projection outbox", async () => {
   assert.deepEqual(rtdbWrites, [
     {
       "players/firebase-uid/profile": null,
-      "profileGameProjectionOutbox/profile/firebase-uid": null,
     },
   ]);
 });
@@ -338,4 +347,59 @@ test("propagates caller repair failures when a profile exists", async () => {
     }),
     FirebaseAuthAdminFailure,
   );
+});
+
+test("missing-profile cleanup conditionally settles the observed D1 job", async () => {
+  const settlements: unknown[][] = [];
+  const result = await syncProfileClaim(identity, env, {
+    repository: { getProfileClaimSource: async () => emptySource },
+    authClient: authClient({ uid: identity.uid, customClaims: {} }, []),
+    rtdbClient: rtdbClient(null, []),
+    catchupStore: {
+      read: async () => ({
+        loginUid: identity.uid,
+        requestId: "observed-request",
+        profileId: "old-profile",
+        cleanupProfileIds: [],
+        matchCursor: "match-20",
+        sourceUpdatedAtMs: 100,
+        lastQueuedAtMs: 200,
+        revision: 1,
+      }),
+      settleMissing: async (...args) => {
+        settlements.push(args);
+        return false;
+      },
+    },
+  });
+  assert.deepEqual(result, emptySource);
+  assert.deepEqual(settlements, [
+    [identity.uid, "observed-request", "match-20"],
+  ]);
+});
+
+test("D1 cleanup failures retain pending work and do not clear Firebase state", async () => {
+  const authWrites: Array<Record<string, unknown>> = [];
+  const rtdbWrites: Array<Record<string, unknown>> = [];
+  const logs: string[] = [];
+  await syncProfileClaim(identity, env, {
+    repository: { getProfileClaimSource: async () => emptySource },
+    authClient: authClient(
+      { uid: identity.uid, customClaims: { profileId: "old-profile" } },
+      authWrites,
+    ),
+    rtdbClient: rtdbClient("old-profile", rtdbWrites),
+    catchupStore: {
+      read: async () => {
+        throw new Error("private-database-detail");
+      },
+      settleMissing: async () => {
+        throw new Error("unexpected-settlement");
+      },
+    },
+    logCleanupFailure: (kind) => logs.push(kind),
+  });
+  assert.deepEqual(authWrites, []);
+  assert.deepEqual(rtdbWrites, []);
+  assert.deepEqual(logs, ["profile-claim-cleanup-unavailable"]);
 });

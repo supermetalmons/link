@@ -148,6 +148,80 @@ npx wrangler d1 execute mons-link-profile-games --remote --command "SELECT COUNT
 
 After rollback and both production smokes, resume delivery. Retain the additive D1 table. Never run Firebase-lock and D1-lock consumers concurrently. Before promotion, an aborted cutover can resume the recorded current version after confirming no candidate was promoted; the new table may remain installed.
 
+## Profile-link catch-up D1 cutover
+
+Profile migration `0012_profile_link_catchup.sql` moves pending profile-link work into `PROFILE_DB.profile_link_catchup_jobs` in `mons-link-profiles`. Canonical owner changes create catch-up jobs in their D1 transaction. The Worker processes and sweeps D1 jobs exclusively; there is no storage toggle or Firebase fallback. The existing Queue payload and projection-lock table remain compatible. Retain `profileGameProjectionOutbox/profile` as an inert recovery export; this cutover never deletes or updates it.
+
+Finish `npm run check:all` and the local D1 plus RTDB emulator rehearsal before the maintenance window. Upload the tested API candidate with `workers_dev: false` and `preview_urls: false`, record its exact Version ID, and keep the source unchanged. Uploading the candidate must not promote it. Record the currently deployed source Version ID, its deployment time, a D1 Time Travel bookmark, and each of the four Queues' existing `settings.delivery_paused` values. Confirm that API script previews remain disabled and that no older source writer can still be invoked. Run the baseline production smokes, then inspect the read-only import plan:
+
+```sh
+npm run upload:api
+npx wrangler deployments list --json --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run migrate:profile-link-catchup -- --preview
+```
+
+The exporter uses the pinned Firebase CLI, the canonical project and instance, and only `/profileGameProjectionOutbox/profile`. Canonical ownership comes from active D1 profile records. No match history or profile payload is exported. Snapshots, owner mappings, SQL, and unresolved identifiers are written to mode-`0600` files under a mode-`0700` `.cache/profile-link-catchup-migration` run directory. Stdout contains only counts, digests, and the artifact path. Preserve the final run directory outside the repository after completion.
+
+The importer preserves the request ID, cursor, and timestamps of valid jobs already targeting their canonical owner. Stale or malformed jobs get a deterministic replacement request, a reset cursor, and the union of salvageable cleanup owners and prior target. The canonical target is excluded from cleanup. Invalid UIDs and records without a resolvable canonical owner block the cutover; inspect their protected artifacts and reconcile them before taking new observations. An empty source is a valid zero-job import. Pending auth recovery from the source release can also persist a D1 catch-up job before repairing a missing profile-link shadow; this recovery does not read or reactivate the retained outbox.
+
+Freeze canonical writes, pause all four Queues, and record when each pause succeeds. Preserve preexisting pauses when resuming later. Apply the additive schema while frozen, then confirm the canonical control remains `frozen` and there are no active projection leases:
+
+```sh
+npm run manage:profile-canonical -- --freeze
+npx wrangler queues pause-delivery mons-link-auth-recovery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-profile-game-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-telegram-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-telegram-delivery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 migrations apply mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run manage:profile-canonical -- --status
+npx wrangler d1 execute mons-link-profile-games --remote --command "SELECT COUNT(*) AS active_locks FROM profile_game_projection_locks WHERE expires_at_ms > CAST(unixepoch('subsec') * 1000 AS INTEGER)" --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+Wait at least fifteen minutes after the last successful Queue pause. Extend the wait for any retained active projection lease, and investigate any source writer that may still be running. The pause timestamps below are operator attestations; the tool validates their presence and elapsed time, and independently inspects frozen canonical state, zero active projection leases, and the current single-version 100-percent deployment. Queue pause does not terminate an already-running invocation.
+
+Create a mode-`0600` evidence file using the same shape as the wager cutover evidence. Here `bridgeVersionId` and `bridgeDeployedAtMs` identify the existing RTDB-writing source Worker, not the D1 candidate. Set `legacyWritersDrained` only after confirming the source writer drain and retired preview entry points. Replace each zero with its recorded Unix-millisecond timestamp:
+
+```json
+{
+  "bridgeVersionId": "<source-worker-version-id>",
+  "bridgeDeployedAtMs": 0,
+  "queuesPausedAtMs": {
+    "mons-link-auth-recovery": 0,
+    "mons-link-profile-game-projection": 0,
+    "mons-link-telegram-projection": 0,
+    "mons-link-telegram-delivery": 0
+  },
+  "legacyWritersDrained": true,
+  "recordedAtMs": 0
+}
+```
+
+Export the first observation after the lease and writer checks pass. At least six minutes after that export finishes, take the final snapshot using the unchanged evidence file. The source and canonical-owner digests must match. The six-minute quiet interval and fifteen-minute Queue drain are separate requirements:
+
+```sh
+npm run migrate:profile-link-catchup -- --observe --evidence-file /secure/profile-link-cutover.json
+npm run migrate:profile-link-catchup -- --final --evidence-file /secure/profile-link-cutover.json --observation <observation-run-directory>/observation.json
+npm run migrate:profile-link-catchup -- --verify --import-file <final-run-directory>/import.json
+```
+
+Final import claims a fresh attempt ID, invalidates prior verification, and exactly replaces only the new catch-up job table in bounded SQL batches. Every batch is guarded by the current attempt, frozen canonical control, and absence of activation. It verifies D1 row content and counts, rereads the full narrow RTDB source and canonical owner map, and only then records durable import proof. Any failed or interrupted import remains frozen and retains its attempt. Do not promote until both final import and verification report `verified: true`.
+
+For a stopped import, read its `import_attempt_id` from the protected final artifact's `importAttemptId` or the import-control row. Confirm the original runner is stopped before supplying `--resume-attempt <attempt-id>`. If the source changed, first run `--observe --evidence-file ... --resume-attempt <attempt-id>`, wait six minutes after the new export completes, then run `--final --evidence-file ... --observation <new-observation>/observation.json --resume-attempt <attempt-id>`. If the source is unchanged, the existing quiet observation may be reused. The new claim replaces the stopped attempt's ID, so all old batches remain fenced. No manual job deletion or control-table reset is needed.
+
+Keep canonical writes frozen, Queues paused, and API previews disabled. Promote the exact D1 candidate to 100 percent, inspect the deployment, and run the frozen production smoke. Activation recording requires a different Version ID from the source Worker and a promotion timestamp after the final export; it rereads D1 jobs, source, owners, and durable proof before permanently recording activation:
+
+```sh
+npm run promote:api -- --version-id <d1-candidate-version-id>
+npx wrangler deployments list --json --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run smoke:api -- --base-url https://api.mons.link --read-only --require-history --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
+npm run migrate:profile-link-catchup -- --verify --import-file <final-run-directory>/import.json --version-id <d1-candidate-version-id>
+npm run migrate:profile-link-catchup -- --record-activation --import-file <final-run-directory>/import.json --version-id <d1-candidate-version-id>
+```
+
+After the frozen smoke and activation succeed, resume canonical writes and only the Queues that were running before this window. Run the ordinary production smoke, then observe at least fifteen minutes of Queue recovery and normal account-link activity. Watch the D1 due-job backlog, profile-game projection failures, and ownership errors. Re-freeze on any regression. The retired RTDB root must remain unchanged; treat its deletion as a separate maintenance task after the observation period.
+
+Before the D1 candidate is promoted, an abort may resume the recorded source Worker and preserve the additive tables. Once it is promoted, keep writes frozen until activation or a verified preactivation abort is complete. After activation, never restore an RTDB-writing Worker or reimport the retained root; use only a tested D1-compatible rollback and repair data forward while frozen. The durable activation record permanently rejects legacy overwrite, including an otherwise valid old import artifact. Earlier projection-lock rollback instructions do not authorize crossing this catch-up storage boundary.
+
 ## Gameplay coordination D1 cutover
 
 Migration `0007_gameplay_coordination.sql` made `mons-link-profile-games` D1 the permanent owner of gameplay leases and timer-start markers. Migration `0008_match_timer_reconciliation.sql` adds nullable opponent metadata and the reconciliation index. `matchTimerClaims`, active invites and matches, mutation receipts, and projection outboxes remain in RTDB. Keep the retired coordination roots and explicit `matchTimerStarts` deny rule unchanged, but never repopulate or reactivate those roots.
@@ -450,7 +524,7 @@ The preflight must complete with `{"ok":true,"status":"ready"}`. It validates th
 
 ## Queue and Workflow operations
 
-`mons-link-profile-game-projection` owns rating, invite, automatch, event, and profile-link projections. `mons-link-telegram-projection` owns automatch, rating, and event Telegram projections. Durable RTDB outboxes are written atomically with their source mutations; do not purge Queues or delete pending outboxes during incidents.
+`mons-link-profile-game-projection` owns rating, invite, automatch, event, and profile-link projections. `mons-link-telegram-projection` owns automatch, rating, and event Telegram projections. Profile-link catch-up jobs are written atomically with canonical ownership changes in `PROFILE_DB`; their Queue dispatch is recovered by the scheduled D1 sweep. Other retained RTDB outboxes are written atomically with their source mutations. Do not purge Queues or delete pending jobs or outboxes during incidents.
 
 `mons-link-event-progress` owns scheduled event starts and retriable synchronization. Inspect every page of Workflow instances before schema maintenance when version-pinned work could still be active:
 

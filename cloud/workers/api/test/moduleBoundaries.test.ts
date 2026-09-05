@@ -51,9 +51,6 @@ const expectedProfileShadowMatches: Record<string, string[]> = {
     "players/${identity.uid}/profile",
     "players/${identity.uid}/profile",
   ],
-  "cloud/workers/api/src/profileGameProjection.ts": [
-    "players/${loginUid}/profile",
-  ],
 };
 
 test("Worker ownership ignores Firebase profile claims and RTDB profile shadows", () => {
@@ -82,6 +79,21 @@ test("Worker ownership ignores Firebase profile claims and RTDB profile shadows"
     }),
   );
   assert.deepEqual(profileShadowMatches, expectedProfileShadowMatches);
+});
+
+test("profile-link job coordination cannot use the retired Firebase outbox", () => {
+  const sourcePaths = reachableRuntimeFiles(
+    resolve(import.meta.dirname, "../src/index.ts"),
+  );
+  const violations = sourcePaths
+    .filter((path) => !path.endsWith("/profileGameProjectionOutbox.ts"))
+    .filter((path) =>
+      /profileGameProjectionOutbox\/profile|\b(?:getProfileLinkProfileGameProjectionOutboxPath|parseProfileLinkProfileGameProjectionOutbox|buildProfileLinkProfileGameProjectionOutbox|PROFILE_LINK_PROFILE_GAME_PROJECTION_OUTBOX_ROOT)\b/.test(
+        readFileSync(path, "utf8"),
+      ),
+    )
+    .map((path) => relative(repositoryRoot, path));
+  assert.deepEqual(violations, []);
 });
 
 test("event progress installs the shared ownership snapshot", () => {

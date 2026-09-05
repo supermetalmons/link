@@ -7,12 +7,26 @@ import {
 } from "../src/authRecovery.ts";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
 import type { EventRtdbClient } from "../src/eventRepository.ts";
+import type { ProfileLinkCatchupJob } from "../src/profileLinkCatchupD1.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
-test("claim repair preserves cleanup IDs from a malformed profile-link outbox", async () => {
-  const outboxPath = "profileGameProjectionOutbox/profile/firebase-uid";
-  const patches: Array<Record<string, unknown>> = [];
+function catchupJob(): ProfileLinkCatchupJob {
+  return {
+    loginUid: "firebase-uid",
+    requestId: "repair-request",
+    profileId: "current-profile",
+    cleanupProfileIds: ["older-profile", "previous-profile"],
+    matchCursor: null,
+    sourceUpdatedAtMs: 500,
+    lastQueuedAtMs: 0,
+    revision: 1,
+  };
+}
 
+test("claim repair durably records stale-owner cleanup before updating Firebase", async () => {
+  const operations: string[] = [];
+  const queued: unknown[] = [];
+  const job = catchupJob();
   await ensureFirebaseProfileClaim("firebase-uid", "current-profile", {
     authClient: {
       getUser: async () => ({
@@ -21,50 +35,224 @@ test("claim repair preserves cleanup IDs from a malformed profile-link outbox", 
       }),
       setCustomUserClaims: async () => undefined,
     },
+    catchupStore: {
+      mergeCleanup: async () => {
+        throw new Error("expected-missing-link-scheduling");
+      },
+      schedule: async (input) => {
+        assert.deepEqual(input, {
+          loginUid: "firebase-uid",
+          profileId: "current-profile",
+          cleanupProfileIds: ["previous-profile"],
+          requestId: "repair-request",
+          nowMs: 500,
+        });
+        operations.push("persist-job");
+        return job;
+      },
+    },
     createRequestId: () => "repair-request",
+    enqueueProfileLinkProjection: async (task) => {
+      operations.push("enqueue");
+      queued.push(task);
+    },
     now: () => 500,
     rtdb: {
       getPath: async (path) => {
-        if (path === "players/firebase-uid/profile") {
-          return "previous-profile";
-        }
-        assert.equal(path, outboxPath);
-        return {
-          status: "malformed",
-          profileId: "recorded-profile",
-          cleanupProfileIds: {
-            "ignored-profile": false,
-            "older-profile": true,
-            "page-profile": true,
-            "unsafe/path": true,
-          },
-        };
+        assert.equal(path, "players/firebase-uid/profile");
+        return "previous-profile";
       },
       patchRoot: async (updates) => {
-        patches.push(updates);
+        assert.deepEqual(updates, {
+          "players/firebase-uid/profile": "current-profile",
+        });
+        operations.push("repair-shadow");
       },
     },
   });
-
-  assert.deepEqual(patches, [
+  assert.deepEqual(operations, ["persist-job", "repair-shadow", "enqueue"]);
+  assert.deepEqual(queued, [
     {
-      "players/firebase-uid/profile": "current-profile",
-      [outboxPath]: {
-        schemaVersion: 1,
-        status: "pending",
-        requestId: "repair-request",
-        profileId: "current-profile",
-        cleanupProfileIds: {
-          "older-profile": true,
-          "page-profile": true,
-          "previous-profile": true,
-          "recorded-profile": true,
+      kind: "profile-link-profile-game-projection",
+      loginUid: "firebase-uid",
+      requestId: "repair-request",
+    },
+  ]);
+});
+
+test("claim repair does not overwrite Firebase when catch-up persistence fails", async () => {
+  const failure = new Error("d1-unavailable");
+  let firebaseWrites = 0;
+  await assert.rejects(
+    ensureFirebaseProfileClaim("firebase-uid", "current-profile", {
+      authClient: {
+        getUser: async () => ({ uid: "firebase-uid", customClaims: {} }),
+        setCustomUserClaims: async () => {
+          firebaseWrites++;
         },
-        matchCursor: null,
-        sourceUpdatedAtMs: 500,
-        lastQueuedAtMs: 500,
+      },
+      catchupStore: {
+        schedule: async () => {
+          throw failure;
+        },
+        mergeCleanup: async () => {
+          throw failure;
+        },
+      },
+      rtdb: {
+        getPath: async () => "previous-profile",
+        patchRoot: async () => {
+          firebaseWrites++;
+        },
+      },
+    }),
+    failure,
+  );
+  assert.equal(firebaseWrites, 0);
+});
+
+test("claim retry dispatches persisted catch-up after the Firebase shadow was already repaired", async () => {
+  const job = { ...catchupJob(), matchCursor: "match-20" };
+  let shadow = "previous-profile";
+  let failClaims = true;
+  const queued: unknown[] = [];
+  const cleanupInputs: string[][] = [];
+  const dependencies: Parameters<typeof ensureFirebaseProfileClaim>[2] = {
+    authClient: {
+      getUser: async () => ({ uid: "firebase-uid", customClaims: {} }),
+      setCustomUserClaims: async () => {
+        if (failClaims) throw new Error("firebase-auth-unavailable");
       },
     },
+    catchupStore: {
+      schedule: async (input) => {
+        cleanupInputs.push([...input.cleanupProfileIds]);
+        return job;
+      },
+      mergeCleanup: async (input) => {
+        cleanupInputs.push([...input.cleanupProfileIds]);
+        return job;
+      },
+    },
+    enqueueProfileLinkProjection: async (task) => {
+      queued.push(task);
+    },
+    rtdb: {
+      getPath: async () => shadow,
+      patchRoot: async () => {
+        shadow = "current-profile";
+      },
+    },
+  };
+  await assert.rejects(
+    ensureFirebaseProfileClaim("firebase-uid", "current-profile", dependencies),
+  );
+  assert.equal(shadow, "current-profile");
+  assert.deepEqual(queued, []);
+  failClaims = false;
+  await ensureFirebaseProfileClaim(
+    "firebase-uid",
+    "current-profile",
+    dependencies,
+  );
+  assert.deepEqual(cleanupInputs, [["previous-profile"], []]);
+  assert.equal(job.matchCursor, "match-20");
+  assert.deepEqual(queued, [
+    {
+      kind: "profile-link-profile-game-projection",
+      loginUid: "firebase-uid",
+      requestId: job.requestId,
+    },
+  ]);
+});
+
+test("claim repair leaves durable work recoverable when Queue dispatch fails", async () => {
+  const job = catchupJob();
+  const logs: string[] = [];
+  await ensureFirebaseProfileClaim("firebase-uid", "current-profile", {
+    authClient: {
+      getUser: async () => ({
+        uid: "firebase-uid",
+        customClaims: { profileId: "current-profile" },
+      }),
+      setCustomUserClaims: async () => undefined,
+    },
+    catchupStore: {
+      mergeCleanup: async () => job,
+      schedule: async () => {
+        throw new Error("unexpected-new-job");
+      },
+    },
+    enqueueProfileLinkProjection: async () => {
+      throw new Error("private-provider-detail");
+    },
+    logger: {
+      error: (message) => {
+        logs.push(String(message));
+      },
+    },
+    rtdb: {
+      getPath: async () => "current-profile",
+      patchRoot: async () => {
+        throw new Error("unexpected-shadow-write");
+      },
+    },
+  });
+  assert.deepEqual(
+    logs.map((value) => JSON.parse(value)),
+    [
+      {
+        event: "profile_link_profile_game_projection_enqueue_failed",
+        loginUid: "firebase-uid",
+      },
+    ],
+  );
+  assert.equal(job.requestId, "repair-request");
+});
+
+test("repair schedules legacy ownership recovery with a missing Firebase link and no outbox", async () => {
+  const operations: string[] = [];
+  const job = catchupJob();
+  await ensureFirebaseProfileClaim("firebase-uid", "current-profile", {
+    authClient: {
+      getUser: async () => ({ uid: "firebase-uid", customClaims: {} }),
+      setCustomUserClaims: async () => {
+        operations.push("repair-claims");
+      },
+    },
+    catchupStore: {
+      mergeCleanup: async () => {
+        throw new Error("missing-link-requires-durable-job");
+      },
+      schedule: async (input) => {
+        assert.deepEqual(input.cleanupProfileIds, []);
+        operations.push("persist-catchup");
+        return job;
+      },
+    },
+    rtdb: {
+      getPath: async (path) => {
+        assert.equal(path, "players/firebase-uid/profile");
+        return null;
+      },
+      patchRoot: async (updates) => {
+        assert.equal(operations[0], "persist-catchup");
+        assert.deepEqual(updates, {
+          "players/firebase-uid/profile": "current-profile",
+        });
+        operations.push("repair-link");
+      },
+    },
+    enqueueProfileLinkProjection: async (task) => {
+      assert.equal(task.requestId, job.requestId);
+      operations.push("dispatch");
+    },
+  });
+  assert.deepEqual(operations, [
+    "persist-catchup",
+    "repair-link",
+    "repair-claims",
+    "dispatch",
   ]);
 });
 

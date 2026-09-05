@@ -956,7 +956,7 @@ describe("canonical profile D1 store", () => {
         },
       ],
     };
-    expect(countCanonicalCommitStatements(plan)).toBe(5);
+    expect(countCanonicalCommitStatements(plan)).toBe(6);
     await expect(
       commitCanonicalPlan(testEnv.PROFILE_DB, {
         expectations: [

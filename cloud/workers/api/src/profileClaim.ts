@@ -20,12 +20,16 @@ import {
   type AuthProfileRepository,
   type ProfileClaimSource,
 } from "./authProfileRepository.ts";
-import { getProfileLinkProfileGameProjectionOutboxPath } from "./profileGameProjectionOutbox.ts";
+import {
+  createProfileLinkCatchupStore,
+  type ProfileLinkCatchupStore,
+} from "./profileLinkCatchupD1.ts";
 
 const MAX_RECONCILIATION_ATTEMPTS = 3;
 
 export type ProfileClaimDependencies = {
   authClient?: FirebaseAuthAdminClient;
+  catchupStore?: Pick<ProfileLinkCatchupStore, "read" | "settleMissing">;
   logCleanupFailure?: (kind: string) => void;
   repository?: Pick<AuthProfileRepository, "getProfileClaimSource">;
   rtdbClient?: Pick<FirebaseRtdbClient, "getPath" | "patchRoot">;
@@ -72,12 +76,22 @@ export async function syncProfileClaim(
   const syncCurrentCallerProfile =
     dependencies.syncCurrentCallerProfile ||
     createAuthIdentityService(env).syncCurrentCallerProfile;
+  const catchupStore =
+    dependencies.catchupStore || createProfileLinkCatchupStore(env.PROFILE_DB);
 
   const cleanupMissingProfile = async (): Promise<void> => {
-    const [user, profileLink] = await Promise.all([
+    const [user, profileLink, catchup] = await Promise.all([
       authClient.getUser(identity.uid),
       rtdbClient.getPath(`players/${identity.uid}/profile`),
+      catchupStore.read(identity.uid),
     ]);
+    if (catchup) {
+      await catchupStore.settleMissing(
+        identity.uid,
+        catchup.requestId,
+        catchup.matchCursor,
+      );
+    }
     const claims = { ...user.customClaims };
     const hasProfileClaim = Object.hasOwn(claims, "profileId");
     const writes: Promise<void>[] = [];
@@ -86,7 +100,6 @@ export async function syncProfileClaim(
       writes.push(
         rtdbClient.patchRoot({
           [`players/${identity.uid}/profile`]: null,
-          [getProfileLinkProfileGameProjectionOutboxPath(identity.uid)]: null,
         }),
       );
     }
