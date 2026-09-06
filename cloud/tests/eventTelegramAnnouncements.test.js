@@ -484,7 +484,7 @@ test("renders the exact upcoming template with DST-aware times and UTC date", ()
   assert.equal(
     renderUpcomingMessage(EVENT_ID, eventData, NOW_MS),
     [
-      "join sunday mons",
+      "sunday mons soon",
       "",
       "https://mons.link/event/EV2026",
       "",
@@ -515,12 +515,25 @@ test("omits the date and participant line when they are not applicable", () => {
   );
 });
 
-test("only an explicit Sunday Mons flag selects the Sunday heading", () => {
+test("only an explicit Sunday Mons flag selects the Sunday headings", () => {
   for (const isSundayMons of [true, false, undefined, null, "true", 1]) {
-    const projection = project(buildEvent({ isSundayMons }));
+    const scheduled = project(buildEvent({ isSundayMons }));
     assert.equal(
-      operationFor(projection, "upcoming").text.split("\n", 1)[0],
-      isSundayMons === true ? "join sunday mons" : "upcoming event",
+      operationFor(scheduled, "upcoming").text.split("\n", 1)[0],
+      isSundayMons === true ? "sunday mons soon" : "upcoming event",
+    );
+    const active = project(
+      buildEndedEvent({ isSundayMons, status: "active" }),
+      scheduled.state,
+    );
+    assert.equal(
+      operationFor(active, "started").text.split("\n", 1)[0],
+      isSundayMons === true ? "sunday mons starting now!" : "event started",
+    );
+    const ended = project(buildEndedEvent({ isSundayMons }), active.state);
+    assert.equal(
+      operationFor(ended, "ended").text.split("\n", 1)[0],
+      isSundayMons === true ? "good games" : "event complete",
     );
   }
 });
@@ -549,7 +562,7 @@ test("published headings survive flag changes and ordinary event edits", async (
       assert.equal(operation.operation, "edit");
       assert.equal(
         operation.text.split("\n", 1)[0],
-        isSundayMons ? "join sunday mons" : "upcoming event",
+        isSundayMons ? "sunday mons soon" : "upcoming event",
       );
       assert.match(operation.text, /10:30 AM PT \/ 1:30 PM ET \/ 5:30 PM UTC/);
       assert.match(operation.text, /&lt;Alice&gt; Bob$/);
@@ -995,7 +1008,7 @@ test("sends the exact ended template with ordered scores and podium", () => {
   assert.equal(
     ended.text,
     [
-      "event ended",
+      "event complete",
       "",
       "https://mons.link/event/EV2026",
       "",
@@ -1290,7 +1303,10 @@ for (const status of ["ended", "dismissed"]) {
     const ended = operationFor(terminal, "ended");
     if (status === "ended") {
       assert.equal(ended.operation, "send");
-      assert.equal(ended.text, "event ended\n\nhttps://mons.link/event/EV2026");
+      assert.equal(
+        ended.text,
+        "event complete\n\nhttps://mons.link/event/EV2026",
+      );
     } else {
       assert.equal(ended, undefined);
     }

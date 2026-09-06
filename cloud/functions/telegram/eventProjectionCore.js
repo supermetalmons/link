@@ -21,7 +21,8 @@ const EVENT_URL_ROOT = "https://mons.link/event";
 const EVENT_STATUS_SCHEDULED = "scheduled";
 const EVENT_STATUS_ENDED = "ended";
 const EVENT_STATUS_DISMISSED = "dismissed";
-const SUNDAY_MONS_UPCOMING_HEADING = "join sunday mons";
+const SUNDAY_MONS_UPCOMING_HEADING = "sunday mons soon";
+const LEGACY_SUNDAY_MONS_UPCOMING_HEADING = "join sunday mons";
 const DEFAULT_UPCOMING_HEADING = "upcoming event";
 
 const normalizeString = (value) =>
@@ -411,16 +412,25 @@ const renderUpcomingMessage = (
   return lines.join("\n");
 };
 
-const renderStartedMessage = (eventId, matchLines) => {
-  const lines = ["event started", "", `${EVENT_URL_ROOT}/${eventId}`];
+const renderStartedMessage = (
+  eventId,
+  matchLines,
+  heading = "event started",
+) => {
+  const lines = [heading, "", `${EVENT_URL_ROOT}/${eventId}`];
   if (Array.isArray(matchLines) && matchLines.length > 0) {
     lines.push("", ...matchLines);
   }
   return lines.join("\n");
 };
 
-const renderEndedMessage = (eventId, matchLines, placementLines) => {
-  const lines = ["event ended", "", `${EVENT_URL_ROOT}/${eventId}`];
+const renderEndedMessage = (
+  eventId,
+  matchLines,
+  placementLines,
+  heading = "event complete",
+) => {
+  const lines = [heading, "", `${EVENT_URL_ROOT}/${eventId}`];
   if (Array.isArray(matchLines) && matchLines.length > 0) {
     lines.push("", ...matchLines);
   }
@@ -494,7 +504,16 @@ const buildStartedState = (eventId, eventData, rawState = {}) => {
     .map((key) => nextLinesByKey[key])
     .filter((line) => typeof line === "string" && line !== "");
   return {
-    text: lines.length > 0 ? renderStartedMessage(eventId, lines) : null,
+    text:
+      lines.length > 0
+        ? renderStartedMessage(
+            eventId,
+            lines,
+            eventData?.isSundayMons === true
+              ? "sunday mons starting now!"
+              : "event started",
+          )
+        : null,
     startedMatchKeys: nextOrder,
     startedMatchLinesByKey: nextLinesByKey,
     appendedCount,
@@ -551,7 +570,12 @@ const buildEndedState = (eventId, eventData, resultsByKey = {}) => {
     return `${place}. ${resolveParticipantToken(participant)}`;
   });
   return {
-    text: renderEndedMessage(eventId, matchLines, placementLines),
+    text: renderEndedMessage(
+      eventId,
+      matchLines,
+      placementLines,
+      eventData?.isSundayMons === true ? "good games" : "event complete",
+    ),
     matchLines,
     placementLines,
   };
@@ -563,6 +587,7 @@ const hashProjection = (value) =>
 const parseUpcomingHeading = (text) => {
   const heading = normalizeText(text).split("\n", 1)[0];
   return heading === SUNDAY_MONS_UPCOMING_HEADING ||
+    heading === LEGACY_SUNDAY_MONS_UPCOMING_HEADING ||
     heading === DEFAULT_UPCOMING_HEADING
     ? heading
     : "";
@@ -657,7 +682,7 @@ const buildEventTelegramProjection = ({
     ? parseUpcomingHeading(upcoming.confirmedDesiredText) ||
       parseUpcomingHeading(state.upcomingText) ||
       parseUpcomingHeading(upcoming.desiredText) ||
-      SUNDAY_MONS_UPCOMING_HEADING
+      LEGACY_SUNDAY_MONS_UPCOMING_HEADING
     : undefined;
   const matchesActive = announcements.matches && active;
   const endedAnnouncementArmed =

@@ -185,7 +185,7 @@ test("a published heading survives a failed projection commit and later flag cha
   const staleProjection = state.read("eventTelegramProjections/event-1") as {
     upcomingText: string;
   };
-  assert.match(staleProjection.upcomingText, /^join sunday mons\n/);
+  assert.match(staleProjection.upcomingText, /^sunday mons soon\n/);
   state.write("events/event-1", { ...scheduledEvent(), isSundayMons: false });
   state.write(getEventTelegramProjectionOutboxPath(task.eventId), marker);
   await assert.rejects(
@@ -271,6 +271,15 @@ test("a legacy send racing projection retains its heading and retries participan
     nowMs: now(),
   });
   assert.equal(legacyProjection.action, "project");
+  const legacyUpcomingOperation = legacyProjection.operations.find(
+    (operation) => operation.channel === "upcoming",
+  );
+  assert.ok(legacyUpcomingOperation);
+  legacyUpcomingOperation.text = legacyUpcomingOperation.text.replace(
+    /^sunday mons soon\n/,
+    "join sunday mons\n",
+  );
+  legacyProjection.state.upcomingText = legacyUpcomingOperation.text;
   const desired = buildEventTelegramProjectionUpdates({
     eventId: task.eventId,
     projection: legacyProjection,
@@ -620,13 +629,13 @@ test("uncertain invites preserve lifecycle and manual recovery decisions", async
               assert.equal(progress.endedAnnouncementArmed, true);
             }
             if (status === "ended") {
-              assert.match(progress.endedText, /^event ended\n/);
+              assert.match(progress.endedText, /^event complete\n/);
             }
           }
           const expectedHeadings = [
             "upcoming event",
             ...(scenario.statuses.includes("active") ? ["event started"] : []),
-            ...(scenario.statuses.includes("ended") ? ["event ended"] : []),
+            ...(scenario.statuses.includes("ended") ? ["event complete"] : []),
           ];
           assert.deepEqual(
             sentTexts.map((text) => text.split("\n", 1)[0]),
@@ -957,7 +966,7 @@ test("rating read failures retain pending event work for a successful retry", as
   };
   assert.equal(
     message.desired.text,
-    "event ended\n\nhttps://mons.link/event/event-1\n\nAlice vs. Bob",
+    "event complete\n\nhttps://mons.link/event/event-1\n\nAlice vs. Bob",
   );
   assert.equal(
     (state.read(projectionPath) as { endedText: string }).endedText,

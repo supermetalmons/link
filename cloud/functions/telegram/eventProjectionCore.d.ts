@@ -78,15 +78,17 @@ export function renderUpcomingMessage(
   eventId: string,
   eventData: unknown,
   nowMs?: number,
-  heading?: "join sunday mons" | "upcoming event",
+  heading?: "sunday mons soon" | "join sunday mons" | "upcoming event",
 ): string | null;
 export function renderStartedMessage(
   eventId: string,
   matchLines?: string[],
+  heading?: "event started" | "sunday mons starting now!",
 ): string;
 export function renderEndedMessage(
   eventId: string,
   matchLines?: string[],
   placementLines?: string[],
+  heading?: "event complete" | "good games",
 ): string;
 export function formatPtEtUtcLine(startAtMs: number): string;
