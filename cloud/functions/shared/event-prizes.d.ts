@@ -47,6 +47,7 @@ export type EventPrizeDefinition = Readonly<{
 
 export type EventPrizeConfig = Readonly<{
   eventId: EventPrizeEventId;
+  collectionName: string;
   prizes: readonly EventPrizeDefinition[];
 }>;
 

@@ -148,7 +148,7 @@ Event creation accepts `telegramAnnouncements` with three required booleans: `in
 
 When `invite` is false, joins and postponements cannot send an invite. A confirmed delivery receipt for `event:<event-id>:upcoming`, with instance `event:<event-id>:upcoming:v2` and destination `community`, permits edit-only updates; a missing message is never replaced automatically. Manual invite sending remains a separate future operation. That sender must record the canonical delivery receipt and enqueue event projection after confirmation to refresh participants immediately; otherwise the next event mutation picks it up. Start/match updates and final results work independently of invite delivery.
 
-Operator bridge credentials are provisioned as protected local files. Pass their paths explicitly with `--bridge-secret-file`; commands do not load Firebase secrets or use an environment fallback. The standard files are `/Users/ivan/.config/mons-link/secrets/telegram-queue` and `/Users/ivan/.config/mons-link/secrets/telegram-announcement`. They contain separate credentials.
+The Queue operator bridge credential is provisioned in the protected local file `/Users/ivan/.config/mons-link/secrets/telegram-queue`. Pass its path explicitly with `--bridge-secret-file`; commands do not load Firebase secrets or use an environment fallback.
 
 Delivery and recovery records live in the `mons-link-telegram` D1 database. Ambiguous sends remain `uncertain` and are never retried automatically. Preview and execute one reviewed recovery action through the signed Worker command endpoint:
 
@@ -159,15 +159,11 @@ npm run recover:telegram -- --message-key <key> --action confirm-send-absent --b
 
 Use `confirm-send-applied --message-id <telegram-message-id>` when Telegram created the message, or `abandon` to retain the audit record and stop delivery.
 
-Send a confirmed event-prize announcement with an explicit event and collection name:
+Sunday Mons prize announcements send automatically one hour before the scheduled event start, independently of the invite, matches, and results settings. Only scheduled events with `isSundayMons === true` and prizes in the shared catalog qualify. The album keeps catalog prize order and spoiler-covers every photo. Its first caption uses the lowercased, HTML-escaped catalog collection name inside a Telegram spoiler, followed by `starting in 1 hour` and the event link with the automatch custom emoji.
 
-```sh
-npm run announceEventPrizes -- <event-id> "<collection-name>" --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-announcement
-```
+`EVENT_PROGRESS_WORKFLOW` sleeps until the announcement target; the existing event progress sweep discovers eligible events and recovers pending dispatches. Events first discovered after that target are skipped. Previously scheduled announcements have a 60-second delivery grace period. Before sending, the workflow checks the canonical event and catalog under the event lease. A postponement can schedule a new job for an unsent album; superseded jobs do nothing.
 
-The announcement command shows the preview and asks for confirmation before reading the supplied credential file and signing the request. It never reads the Telegram bot token or chat ID.
-
-An uncertain Telegram response requires checking the group before retrying.
+Each event has one permanent album delivery identity. Confirmed sends never resend, including after postponement. Only safely retryable Telegram failures can retry within the grace period; timeouts, interrupted sends, and ambiguous responses block automatic retries to prevent duplicate albums. Historical manual receipts remain valid. Prize announcements have no manual CLI or HTTP trigger and require no separate announcement bridge credential.
 
 ## Other admin tools
 

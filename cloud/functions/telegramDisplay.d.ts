@@ -1,3 +1,4 @@
+export const AUTOMATCH_WAITING_EMOJI_ID: "5355002036817525409";
 export function getTelegramEmojiTag(emojiId: unknown): string;
 export function getDisplayNameFromAddress(
   username: unknown,

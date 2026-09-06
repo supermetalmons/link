@@ -65,6 +65,7 @@ const createPrize = ({
 const EVENT_PRIZE_CONFIGS = Object.freeze({
   [LEGACY_CORE_PRIZES_EVENT_ID]: Object.freeze({
     eventId: LEGACY_CORE_PRIZES_EVENT_ID,
+    collectionName: "Scarecrow",
     prizes: Object.freeze([
       createPrize({
         ...SCARECROW_PRIZE_IMAGE_SIZE,
@@ -97,6 +98,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
   }),
   [COMPRESSED_PRIZES_EVENT_ID]: Object.freeze({
     eventId: COMPRESSED_PRIZES_EVENT_ID,
+    collectionName: "Card NFT",
     prizes: Object.freeze([
       createPrize({
         ...COMPRESSED_PRIZE_IMAGE_SIZE,
@@ -129,6 +131,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
   }),
   [ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID]: Object.freeze({
     eventId: ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID,
+    collectionName: "Artifact Magazine 3",
     prizes: Object.freeze([
       createPrize({
         ...ARTIFACT_MAGAZINE_3_IMAGE_SIZE,
@@ -161,6 +164,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
   }),
   [ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID]: Object.freeze({
     eventId: ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID,
+    collectionName: "Artifact Magazine 3",
     prizes: Object.freeze([
       createPrize({
         ...ARTIFACT_MAGAZINE_3_IMAGE_SIZE,
@@ -193,6 +197,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
   }),
   [RARE_WEITSMANS_PRIZES_EVENT_ID]: Object.freeze({
     eventId: RARE_WEITSMANS_PRIZES_EVENT_ID,
+    collectionName: "Rare Weitsmans",
     prizes: Object.freeze([
       createPrize({
         ...RARE_WEITSMANS_IMAGE_SIZE,
@@ -225,6 +230,7 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
   }),
   [PLANET_PEPPA_PRIZES_EVENT_ID]: Object.freeze({
     eventId: PLANET_PEPPA_PRIZES_EVENT_ID,
+    collectionName: "Planet Peppa",
     prizes: Object.freeze([
       createPrize({
         ...PLANET_PEPPA_IMAGE_SIZE,

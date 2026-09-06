@@ -61,7 +61,6 @@
     "check:tooling:core": "npm run lint:tooling && npm run typecheck:tooling && npm run test:tooling",
     "check:tooling": "npm run format:check:tooling && npm run check:tooling:core",
     "check:all": "npm run format:check && npm run check && npm run check:api:core && npm run check:tooling:core && npm run test:database-rules && npm --prefix cloud/functions test",
-    "announceEventPrizes": "node cloud/admin/announceEventPrizes.js",
     "recover:telegram": "node cloud/admin/recoverTelegramDelivery.js",
     "repo-clean": "bash scripts/repo-clean.sh",
     "format": "prettier --write . --ignore-unknown",

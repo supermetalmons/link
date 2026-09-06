@@ -1,434 +1,400 @@
 import {
   buildEventPrizeAnnouncement,
-  type EventPrizeAnnouncement,
+  EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS,
+  EVENT_PRIZE_ANNOUNCEMENT_LEAD_MS,
+  isEventPrizeAnnouncementEvent,
 } from "../../../functions/telegram/eventPrizeAnnouncement.js";
 import {
   sendTelegramMediaGroup,
-  type TelegramFailure,
+  TELEGRAM_HTTP_TIMEOUT_MS,
   type TelegramResult,
 } from "../../../functions/telegram/client.js";
-import { readBoundedBody } from "./http.ts";
-import { hasValidTelegramBridgeSignature } from "./telegramBridgeAuth.ts";
+import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
+import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
+import { readEventRuntimeControl } from "./eventD1.ts";
+import { createEventGameplayRepository } from "./eventRepository.ts";
+import type { GameplayRepository } from "./gameplayRepository.ts";
+import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { profileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
 import {
   createD1TelegramAnnouncementRepository,
+  createD1TelegramRepository,
   readTelegramStorageMode,
+  type TelegramAnnouncementRecord,
   type TelegramAnnouncementRepository,
 } from "./telegramD1.ts";
 
-export const EVENT_PRIZE_ANNOUNCEMENT_PATH =
-  "/internal/telegram/event-prize-announcement";
-export const MAX_EVENT_PRIZE_ANNOUNCEMENT_BODY_BYTES = 8 * 1024;
-
-const REQUEST_KEYS = new Set(["collectionName", "eventId", "requestId"]);
-const REQUEST_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-type AnnouncementRequest = {
-  announcement: EventPrizeAnnouncement;
-  requestId: string;
+export type EventPrizeAnnouncementDeliveryInput = {
+  eventId: string;
+  startAtMs: number;
+  runAtMs: number;
+  firstQueuedAtMs: number;
 };
 
-type Reservation =
-  | { kind: "reserved" }
-  | { kind: "conflict" }
-  | { kind: "duplicate" }
-  | { kind: "sent"; messageIds: number[] };
+export type EventPrizeAnnouncementDeliveryResult = {
+  status: "sent" | "skipped" | "uncertain" | "terminal" | "retryable";
+  reason?: string;
+  retryAtMs?: number;
+};
 
-type EventPrizeAnnouncementDependencies = {
-  logError?: (record: Record<string, unknown>) => void;
-  logSuccess?: (record: Record<string, unknown>) => void;
+export type EventPrizeAnnouncementDeliveryDependencies = {
+  controlsEnabled?: (env: Env) => Promise<boolean>;
+  eventRepository?: Pick<
+    GameplayRepository,
+    "getRtdbPath" | "transactRtdbPath"
+  >;
+  log?: (record: Record<string, unknown>) => void;
   now?: () => number;
   repository?: TelegramAnnouncementRepository;
+  retryControl?: Pick<
+    TelegramRepository,
+    "getRetryNotBeforeMs" | "extendRetryNotBeforeMs"
+  >;
   send?: typeof sendTelegramMediaGroup;
 };
 
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
+type AlbumPayload = {
+  chatId: string;
+  imageUrls: string[];
+  text: string;
+  parseMode: "HTML";
+  hasSpoiler: true;
+  silent: false;
+};
 
-function parseMessageIds(value: unknown): number[] | null {
-  return Array.isArray(value) &&
-    value.length > 0 &&
-    value.every((messageId) => Number.isInteger(messageId) && messageId > 0)
-    ? value
-    : null;
-}
-
-function announcementResponse(
-  status: number,
-  body: Record<string, unknown>,
-  headers?: HeadersInit,
-): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "Cache-Control": "no-store",
-      "Content-Type": "application/json; charset=utf-8",
-      "X-Content-Type-Options": "nosniff",
-      ...headers,
-    },
-  });
-}
-
-function failureBody(error: string, result?: TelegramFailure) {
-  return {
-    ok: false,
-    error,
-    ...(result
-      ? {
-          code: result.code,
-          description: result.description,
-          ...(result.retryAfterSeconds
-            ? { retryAfterSeconds: result.retryAfterSeconds }
-            : {}),
-        }
-      : {}),
-  };
-}
-
-function logFailure(
-  dependencies: EventPrizeAnnouncementDependencies,
-  request: AnnouncementRequest,
-  classification: string,
-  code: string,
-): void {
-  (
-    dependencies.logError || ((record) => console.error(JSON.stringify(record)))
-  )({
-    event: "event_prize_announcement_failed",
-    eventId: request.announcement.eventId,
-    requestId: request.requestId,
-    classification,
-    code,
-  });
-}
-
-function telegramFailureResponse(
-  result: TelegramFailure,
-  request: AnnouncementRequest,
-  dependencies: EventPrizeAnnouncementDependencies,
-): Response {
-  logFailure(dependencies, request, result.classification, result.code);
-  if (result.classification === "uncertain") {
-    return announcementResponse(
-      409,
-      failureBody("telegram-delivery-uncertain", result),
-    );
-  }
-  if (result.classification === "retryable") {
-    return announcementResponse(
-      503,
-      failureBody("telegram-unavailable", result),
-      result.retryAfterSeconds
-        ? { "Retry-After": String(result.retryAfterSeconds) }
-        : undefined,
-    );
-  }
-  return announcementResponse(502, failureBody("telegram-rejected", result));
-}
-
-function parseAnnouncementRequest(body: string): AnnouncementRequest {
-  const value = toRecord(JSON.parse(body) as unknown);
+function parsePayload(value: unknown): AlbumPayload | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const payload = value as Record<string, unknown>;
   if (
-    !value ||
-    Object.keys(value).length !== REQUEST_KEYS.size ||
-    Object.keys(value).some((key) => !REQUEST_KEYS.has(key)) ||
-    typeof value.requestId !== "string" ||
-    !REQUEST_ID_PATTERN.test(value.requestId)
+    typeof payload.chatId !== "string" ||
+    !payload.chatId.trim() ||
+    typeof payload.text !== "string" ||
+    !payload.text ||
+    payload.parseMode !== "HTML" ||
+    payload.hasSpoiler !== true ||
+    payload.silent !== false ||
+    !Array.isArray(payload.imageUrls) ||
+    payload.imageUrls.length < 2 ||
+    payload.imageUrls.length > 10 ||
+    !payload.imageUrls.every((url) => typeof url === "string" && url.trim())
   ) {
-    throw new TypeError("invalid-request");
+    return null;
   }
   return {
-    requestId: value.requestId,
-    announcement: buildEventPrizeAnnouncement({
-      collectionName: value.collectionName,
-      eventId: value.eventId,
-    }),
+    chatId: payload.chatId,
+    imageUrls: payload.imageUrls,
+    text: payload.text,
+    parseMode: "HTML",
+    hasSpoiler: true,
+    silent: false,
   };
 }
 
-async function createPayloadDigest(
-  announcement: EventPrizeAnnouncement,
-): Promise<string> {
+async function createPayloadDigest(payload: AlbumPayload): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(`${announcement.eventId}\0${announcement.text}`),
+    new TextEncoder().encode(JSON.stringify(payload)),
   );
   return Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
 }
 
-async function reserveAnnouncement(
-  repository: TelegramAnnouncementRepository,
-  request: AnnouncementRequest,
-  payloadDigest: string,
-  nowMs: number,
-): Promise<Reservation> {
-  const reserved = await repository.reserve({
-    requestId: request.requestId,
-    payloadDigest,
-    createdAtMs: nowMs,
-  });
-  if (reserved === "reserved") return { kind: "reserved" };
-  const record = reserved;
-  if (!record || record.payloadDigest !== payloadDigest) {
-    return { kind: "conflict" };
+async function controlsEnabled(env: Env): Promise<boolean> {
+  const [profileEnabled, telegramMode, eventControl] = await Promise.all([
+    profileBackgroundMutationsEnabled(env),
+    readTelegramStorageMode(env.TELEGRAM_DB),
+    readEventRuntimeControl(env.EVENT_DB),
+  ]);
+  return (
+    profileEnabled && telegramMode === "d1" && eventControl.storageMode === "d1"
+  );
+}
+
+function priorOutcome(
+  record: TelegramAnnouncementRecord | null,
+): EventPrizeAnnouncementDeliveryResult | null {
+  if (!record) return null;
+  if (record.status === "sent")
+    return { status: "sent", reason: "already-sent" };
+  if (record.status === "sending" || record.status === "uncertain") {
+    return { status: "uncertain", reason: "previous-send-unresolved" };
   }
-  if (record.status === "sent" && record.messageIds) {
-    return { kind: "sent", messageIds: record.messageIds };
+  if (record.status !== "retryable") {
+    return { status: "terminal", reason: "previous-send-rejected" };
   }
-  return { kind: "duplicate" };
+  return null;
 }
 
-async function storeAnnouncementOutcome(
-  repository: TelegramAnnouncementRepository,
-  request: AnnouncementRequest,
-  payloadDigest: string,
-  status: string,
-  nowMs: number,
-  messageIds?: number[],
-): Promise<boolean> {
-  return repository.storeOutcome({
-    requestId: request.requestId,
-    payloadDigest,
-    status,
-    updatedAtMs: nowMs,
-    ...(messageIds ? { messageIds } : {}),
-  });
-}
-
-async function storeOutcomeWithoutThrowing(
-  repository: TelegramAnnouncementRepository,
-  request: AnnouncementRequest,
-  payloadDigest: string,
-  status: string,
-  dependencies: EventPrizeAnnouncementDependencies,
-  messageIds?: number[],
-): Promise<boolean> {
-  try {
-    return await storeAnnouncementOutcome(
-      repository,
-      request,
-      payloadDigest,
-      status,
-      (dependencies.now || Date.now)(),
-      messageIds,
-    );
-  } catch {
-    logFailure(dependencies, request, "repository", "outcome-write-failed");
-    return false;
-  }
-}
-
-function successResponse(
-  request: AnnouncementRequest,
-  messageIds: number[],
-): Response {
-  return announcementResponse(200, {
-    ok: true,
-    eventId: request.announcement.eventId,
-    eventUrl: request.announcement.eventUrl,
-    messageIds,
-  });
-}
-
-async function sendAnnouncement(
-  request: AnnouncementRequest,
+export async function deliverEventPrizeAnnouncement(
   env: Env,
-  repository: TelegramAnnouncementRepository,
-  payloadDigest: string,
-  dependencies: EventPrizeAnnouncementDependencies,
-): Promise<Response> {
-  let result: TelegramResult;
-  try {
-    result = await (dependencies.send || sendTelegramMediaGroup)({
-      chatId: env.TELEGRAM_EXTRA_CHAT_ID.trim(),
-      imageUrls: request.announcement.imageUrls,
-      text: request.announcement.text,
-      hasSpoiler: true,
-      parseMode: request.announcement.parseMode,
-      silent: false,
-      token: env.TELEGRAM_BOT_TOKEN.trim(),
-    });
-  } catch {
-    await storeOutcomeWithoutThrowing(
-      repository,
-      request,
-      payloadDigest,
-      "uncertain",
-      dependencies,
-    );
-    logFailure(dependencies, request, "uncertain", "send-threw");
-    return announcementResponse(
-      409,
-      failureBody("telegram-delivery-uncertain"),
-    );
-  }
-  if (!result.ok) {
-    await storeOutcomeWithoutThrowing(
-      repository,
-      request,
-      payloadDigest,
-      result.classification,
-      dependencies,
-    );
-    return telegramFailureResponse(result, request, dependencies);
-  }
-  const messageIds = parseMessageIds(result.messageIds);
+  input: EventPrizeAnnouncementDeliveryInput,
+  dependencies: EventPrizeAnnouncementDeliveryDependencies = {},
+): Promise<EventPrizeAnnouncementDeliveryResult> {
+  const now = dependencies.now || Date.now;
+  const log =
+    dependencies.log || ((record) => console.info(JSON.stringify(record)));
+  const deadlineAtMs = input.runAtMs + EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS;
+  const retry = (
+    reason: string,
+    retryAtMs = now() + 1_000,
+  ): EventPrizeAnnouncementDeliveryResult =>
+    retryAtMs >= deadlineAtMs
+      ? { status: "skipped", reason: "delivery-window-expired" }
+      : { status: "retryable", reason, retryAtMs };
   if (
-    !messageIds ||
-    messageIds.length !== request.announcement.imageUrls.length
+    !isSafeFirebaseKey(input.eventId) ||
+    ![input.startAtMs, input.runAtMs, input.firstQueuedAtMs].every(
+      (value) => Number.isSafeInteger(value) && value > 0,
+    ) ||
+    input.runAtMs !== input.startAtMs - EVENT_PRIZE_ANNOUNCEMENT_LEAD_MS
   ) {
-    await storeOutcomeWithoutThrowing(
-      repository,
-      request,
-      payloadDigest,
-      "uncertain",
-      dependencies,
-    );
-    logFailure(dependencies, request, "uncertain", "missing-message-id");
-    return announcementResponse(409, {
-      ok: false,
-      error: "telegram-delivery-uncertain",
-      code: "missing-message-id",
-      description: "Telegram did not return every message ID.",
-    });
+    return { status: "skipped", reason: "invalid-schedule" };
   }
-  if (
-    !(await storeOutcomeWithoutThrowing(
-      repository,
-      request,
-      payloadDigest,
-      "sent",
-      dependencies,
-      messageIds,
-    ))
-  ) {
-    return announcementResponse(
-      409,
-      failureBody("telegram-delivery-uncertain"),
-    );
+  if (input.firstQueuedAtMs > input.runAtMs) {
+    return { status: "skipped", reason: "discovered-too-late" };
   }
-  (
-    dependencies.logSuccess ||
-    ((record) => console.info(JSON.stringify(record)))
-  )({
-    event: "event_prize_announcement_sent",
-    eventId: request.announcement.eventId,
-    requestId: request.requestId,
-    messageCount: messageIds.length,
-  });
-  return successResponse(request, messageIds);
-}
-
-export async function handleEventPrizeAnnouncement(
-  request: Request,
-  env: Env,
-  dependencies: EventPrizeAnnouncementDependencies = {},
-): Promise<Response> {
-  if (request.method !== "POST") {
-    return announcementResponse(405, {
-      ok: false,
-      error: "method-not-allowed",
-    });
+  if (now() < input.runAtMs) return retry("not-due", input.runAtMs);
+  if (now() >= deadlineAtMs) {
+    return { status: "skipped", reason: "delivery-window-expired" };
   }
-  let body: string;
+  const readControls = dependencies.controlsEnabled || controlsEnabled;
+  let enabled: boolean;
   try {
-    body = await readBoundedBody(
-      request,
-      MAX_EVENT_PRIZE_ANNOUNCEMENT_BODY_BYTES,
-    );
+    enabled = await readControls(env);
   } catch {
-    return announcementResponse(400, {
-      ok: false,
-      error: "invalid-request",
-    });
+    return retry("control-unavailable");
   }
-  const timestamp =
-    request.headers.get("X-Mons-Telegram-Timestamp")?.trim() || "";
-  const signature =
-    request.headers.get("X-Mons-Telegram-Signature")?.trim() || "";
-  const secret = env.TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET.trim();
-  if (
-    !secret ||
-    !(await hasValidTelegramBridgeSignature(
-      body,
-      secret,
-      timestamp,
-      signature,
-      (dependencies.now || Date.now)(),
-    ))
-  ) {
-    return announcementResponse(401, {
-      ok: false,
-      error: "unauthenticated",
-    });
-  }
-  let announcementRequest: AnnouncementRequest;
-  try {
-    announcementRequest = parseAnnouncementRequest(body);
-  } catch {
-    return announcementResponse(400, {
-      ok: false,
-      error: "invalid-request",
-    });
-  }
+  if (!enabled) return retry("writes-frozen");
   if (!env.TELEGRAM_BOT_TOKEN.trim() || !env.TELEGRAM_EXTRA_CHAT_ID.trim()) {
-    logFailure(
-      dependencies,
-      announcementRequest,
-      "configuration",
-      "unavailable",
-    );
-    return announcementResponse(503, failureBody("telegram-unavailable"));
-  }
-  const storageMode = await readTelegramStorageMode(env.TELEGRAM_DB);
-  if (storageMode === "frozen") {
-    return announcementResponse(503, failureBody("telegram-frozen"), {
-      "Retry-After": "60",
-    });
+    return retry("configuration-unavailable");
   }
   const repository =
     dependencies.repository ||
     createD1TelegramAnnouncementRepository(env.TELEGRAM_DB);
-  const payloadDigest = await createPayloadDigest(
-    announcementRequest.announcement,
-  );
-  let reservation: Reservation;
+  const retryControl =
+    dependencies.retryControl ||
+    createD1TelegramRepository(env.TELEGRAM_DB, { now });
+  const eventRepository =
+    dependencies.eventRepository || createEventGameplayRepository(env);
+  const lockManager = createEventLockManagerCore({
+    now,
+    createLockId: () => crypto.randomUUID(),
+    transactPath: (path, updater) =>
+      eventRepository.transactRtdbPath(path, updater),
+  });
+  let lock;
   try {
-    reservation = await reserveAnnouncement(
-      repository,
-      announcementRequest,
-      payloadDigest,
-      (dependencies.now || Date.now)(),
+    lock = await lockManager.acquireEventLock(
+      input.eventId,
+      "event-prize-announcement",
     );
   } catch {
-    logFailure(dependencies, announcementRequest, "repository", "unavailable");
-    return announcementResponse(503, failureBody("telegram-unavailable"));
+    return retry("event-lock-unavailable");
   }
-  if (reservation.kind === "conflict") {
-    return announcementResponse(400, failureBody("invalid-request"));
-  }
-  if (reservation.kind === "duplicate") {
-    return announcementResponse(
-      409,
-      failureBody("telegram-delivery-uncertain"),
+  if (!lock) return retry("event-locked");
+  const requestId = `event:${input.eventId}:prizes:v1`;
+  const attemptId = crypto.randomUUID();
+  let reservedDigest: string | null = null;
+  let sendStarted = false;
+  const outcome = async (
+    status: string,
+    errorCode?: string,
+    retryAtMs?: number,
+    messageIds?: number[],
+  ): Promise<boolean> => {
+    try {
+      return await repository.storeOutcome({
+        requestId,
+        payloadDigest: reservedDigest || "",
+        attemptId,
+        status,
+        updatedAtMs: now(),
+        ...(errorCode ? { errorCode } : {}),
+        ...(retryAtMs ? { retryAtMs } : {}),
+        ...(messageIds ? { messageIds } : {}),
+      });
+    } catch {
+      log({
+        event: "event_prize_announcement_outcome_failed",
+        eventId: input.eventId,
+        attemptId,
+      });
+      return false;
+    }
+  };
+  try {
+    const eventData = await eventRepository.getRtdbPath(
+      `events/${input.eventId}`,
     );
+    if (
+      !isEventPrizeAnnouncementEvent(input.eventId, eventData) ||
+      (eventData as { startAtMs?: unknown }).startAtMs !== input.startAtMs
+    ) {
+      return { status: "skipped", reason: "event-no-longer-eligible" };
+    }
+    const existing = await repository.get(requestId);
+    const previous = priorOutcome(existing);
+    if (previous) return previous;
+    const retryAtMs = Math.max(
+      existing?.retryAtMs || 0,
+      await retryControl.getRetryNotBeforeMs(),
+    );
+    if (retryAtMs > now()) return retry("retry-not-due", retryAtMs);
+    const announcement = buildEventPrizeAnnouncement({
+      eventId: input.eventId,
+    });
+    const payload =
+      existing?.startAtMs === input.startAtMs
+        ? parsePayload(existing.payload)
+        : {
+            chatId: env.TELEGRAM_EXTRA_CHAT_ID.trim(),
+            imageUrls: announcement.imageUrls,
+            text: announcement.text,
+            parseMode: announcement.parseMode,
+            hasSpoiler: true as const,
+            silent: false as const,
+          };
+    if (!payload)
+      return { status: "terminal", reason: "invalid-persisted-payload" };
+    const payloadDigest = await createPayloadDigest(payload);
+    if (
+      existing?.startAtMs === input.startAtMs &&
+      existing.payloadDigest !== payloadDigest
+    ) {
+      return { status: "terminal", reason: "persisted-payload-conflict" };
+    }
+    if (
+      !(await readControls(env)) ||
+      !(await lockManager.refreshEventLock(lock))
+    ) {
+      return retry("event-lock-or-control-changed");
+    }
+    if (now() >= deadlineAtMs)
+      return { status: "skipped", reason: "delivery-window-expired" };
+    const reservation = await repository.reserve({
+      requestId,
+      payloadDigest,
+      createdAtMs: now(),
+      attempt: {
+        ...input,
+        payload,
+        attemptId,
+        expectedAttemptId: existing?.attemptId || null,
+      },
+    });
+    if (reservation !== "reserved") {
+      return (
+        priorOutcome(reservation) ||
+        retry("reservation-changed", reservation.retryAtMs || now() + 1_000)
+      );
+    }
+    reservedDigest = payloadDigest;
+    if (
+      !(await readControls(env)) ||
+      !(await lockManager.refreshEventLock(lock))
+    ) {
+      const retryAtMs = now() + 1_000;
+      if (
+        !(await outcome(
+          "retryable",
+          "event-lock-or-control-changed",
+          retryAtMs,
+        ))
+      ) {
+        return { status: "uncertain", reason: "outcome-write-failed" };
+      }
+      return retry("event-lock-or-control-changed", retryAtMs);
+    }
+    const remainingMs = deadlineAtMs - now();
+    if (remainingMs <= 0) {
+      await outcome("retryable", "delivery-window-expired", now() + 1_000);
+      return { status: "skipped", reason: "delivery-window-expired" };
+    }
+    let result: TelegramResult;
+    try {
+      sendStarted = true;
+      result = await (dependencies.send || sendTelegramMediaGroup)({
+        ...payload,
+        token: env.TELEGRAM_BOT_TOKEN.trim(),
+        timeoutMs: Math.min(TELEGRAM_HTTP_TIMEOUT_MS, remainingMs),
+      });
+    } catch {
+      await outcome("uncertain", "send-threw");
+      return { status: "uncertain", reason: "send-threw" };
+    }
+    if (!result.ok) {
+      if (result.classification === "retryable") {
+        const delayMs = Math.max(
+          Math.min(
+            30_000,
+            1_000 * 2 ** Math.min(existing?.attemptCount || 0, 5),
+          ),
+          (result.retryAfterSeconds || 0) * 1_000,
+        );
+        const nextRetryAtMs = now() + delayMs;
+        if (!(await outcome("retryable", result.code, nextRetryAtMs))) {
+          return { status: "uncertain", reason: "outcome-write-failed" };
+        }
+        if (result.code === "rate-limited") {
+          try {
+            await retryControl.extendRetryNotBeforeMs(nextRetryAtMs);
+          } catch {
+            log({
+              event: "event_prize_announcement_retry_barrier_failed",
+              eventId: input.eventId,
+              attemptId,
+            });
+          }
+        }
+        return retry(result.code, nextRetryAtMs);
+      }
+      const status =
+        result.classification === "uncertain" ? "uncertain" : "terminal";
+      if (!(await outcome(status, result.code))) {
+        return { status: "uncertain", reason: "outcome-write-failed" };
+      }
+      return { status, reason: result.code };
+    }
+    const messageIds = result.messageIds;
+    if (
+      !Array.isArray(messageIds) ||
+      messageIds.length !== payload.imageUrls.length ||
+      !messageIds.every(
+        (messageId) => Number.isSafeInteger(messageId) && messageId > 0,
+      )
+    ) {
+      await outcome("uncertain", "missing-message-ids");
+      return { status: "uncertain", reason: "missing-message-ids" };
+    }
+    if (!(await outcome("sent", undefined, undefined, messageIds))) {
+      return { status: "uncertain", reason: "outcome-write-failed" };
+    }
+    log({
+      event: "event_prize_announcement_sent",
+      eventId: input.eventId,
+      attemptId,
+      messageCount: messageIds.length,
+    });
+    return { status: "sent" };
+  } catch {
+    if (reservedDigest) {
+      if (sendStarted) {
+        await outcome("uncertain", "delivery-outcome-failed");
+        return { status: "uncertain", reason: "delivery-outcome-failed" };
+      }
+      if (
+        !(await outcome(
+          "retryable",
+          "delivery-preparation-failed",
+          now() + 1_000,
+        ))
+      ) {
+        return { status: "uncertain", reason: "outcome-write-failed" };
+      }
+    }
+    return retry("delivery-preparation-failed");
+  } finally {
+    await lockManager.releaseEventLock(lock);
   }
-  if (reservation.kind === "sent") {
-    return reservation.messageIds.length ===
-      announcementRequest.announcement.imageUrls.length
-      ? successResponse(announcementRequest, reservation.messageIds)
-      : announcementResponse(409, failureBody("telegram-delivery-uncertain"));
-  }
-  return sendAnnouncement(
-    announcementRequest,
-    env,
-    repository,
-    payloadDigest,
-    dependencies,
-  );
 }

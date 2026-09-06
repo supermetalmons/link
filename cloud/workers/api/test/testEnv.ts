@@ -163,7 +163,6 @@ export const TELEGRAM_TEST_ENV = {
   PROFILE_GAME_PROJECTION_QUEUE: queue,
   PROFILE_DB: profileDb,
   PROFILE_GAMES_DB: profileGamesDb,
-  TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET: "test-announcement-secret",
   TELEGRAM_BOT_TOKEN: "test-telegram-token",
   TELEGRAM_DELIVERY_QUEUE: queue,
   TELEGRAM_DB: telegramDb,

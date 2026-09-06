@@ -173,7 +173,6 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       "GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY",
       "HELIUS_RPC_API_KEY",
       "EVENT_PRIZE_ADMIN_PRIVATE_KEY",
-      "TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET",
       "TELEGRAM_BOT_TOKEN",
       "TELEGRAM_EXTRA_CHAT_ID",
       "TELEGRAM_FIREBASE_SERVICE_ACCOUNT_EMAIL",
@@ -358,7 +357,6 @@ test("package manifests preserve public scripts and deployment command vectors",
     "check:tooling:core",
     "check:tooling",
     "check:all",
-    "announceEventPrizes",
     "recover:telegram",
     "repo-clean",
     "format",
@@ -382,6 +380,11 @@ test("package manifests preserve public scripts and deployment command vectors",
   assert.equal(rootPackage.scripts?.["migrate:profile-reads"], undefined);
   assert.equal(rootPackage.scripts?.["migrate:profile-canonical"], undefined);
   assert.equal(rootPackage.scripts?.["backfill:historical-matches"], undefined);
+  assert.equal(rootPackage.scripts?.announceEventPrizes, undefined);
+  assert.equal(
+    existsSync(resolve(repositoryRoot, "cloud/admin/announceEventPrizes.js")),
+    false,
+  );
   assert.deepEqual(
     {
       build: rootPackage.scripts?.build,
@@ -751,10 +754,8 @@ test("operations documentation describes current releases and D1 maintenance", (
   assert.match(guide, /missing snapshot returns `pair: null`/);
   assert.match(guide, /never reads RTDB or persists data/);
   assert.match(guide, /no RTDB recovery or backfill path/);
-  assert.match(
-    cloudReadme,
-    /--bridge-secret-file \/Users\/ivan\/\.config\/mons-link\/secrets\/telegram-announcement/,
-  );
+  assert.doesNotMatch(cloudReadme, /announceEventPrizes|telegram-announcement/);
+  assert.match(cloudReadme, /one hour before/);
   assert.match(
     cloudReadme,
     /--bridge-secret-file \/Users\/ivan\/\.config\/mons-link\/secrets\/telegram-queue/,

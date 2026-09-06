@@ -24,6 +24,7 @@ import {
   getAutomatchTelegramSourcePath,
 } from "../../../functions/telegram/automatchSource.js";
 import {
+  AUTOMATCH_WAITING_EMOJI_ID,
   getDisplayNameFromAddress,
   getTelegramEmojiTag,
 } from "../../../functions/telegramDisplay.js";
@@ -70,7 +71,6 @@ import {
 const MAX_AUTOMATCH_RETRY_COUNT = 3;
 export const AUTOMATCH_TOTAL_TIMEOUT_MS = 20_000;
 const AUTOMATCH_PASSWORD_LENGTH = 15;
-const AUTOMATCH_WAITING_EMOJI_ID = "5355002036817525409";
 const AUTOMATCH_OWNER_LOCK_MIN_RETRY_MS = 25;
 const AUTOMATCH_OWNER_LOCK_MAX_RETRY_MS = 1_000;
 const AUTOMATCH_LOGIN_UID_QUERY_CONCURRENCY = 10;

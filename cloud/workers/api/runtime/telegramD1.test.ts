@@ -136,6 +136,168 @@ describe("Telegram D1 repositories", () => {
     await expect(repository.get(input.requestId)).resolves.toMatchObject({
       messageIds: [10, 11],
       status: "sent",
+      eventId: null,
+      attemptId: null,
+    });
+  });
+
+  it("allows only one concurrent automatic album claim per event", async () => {
+    const repositories = Array.from({ length: 4 }, () =>
+      createD1TelegramAnnouncementRepository(testEnv.TELEGRAM_DB),
+    );
+    const input = {
+      requestId: "event:prize-event:prizes:v1",
+      payloadDigest: "album-digest",
+      createdAtMs: 1_000,
+      attempt: {
+        eventId: "prize-event",
+        startAtMs: 3_601_000,
+        runAtMs: 1_000,
+        firstQueuedAtMs: 500,
+        payload: { text: "album", imageUrls: ["a", "b"] },
+        attemptId: "attempt-a",
+        expectedAttemptId: null,
+      },
+    };
+    const results = await Promise.all(
+      repositories.map((repository, index) =>
+        repository.reserve({
+          ...input,
+          attempt: { ...input.attempt, attemptId: `attempt-${index}` },
+        }),
+      ),
+    );
+    expect(results.filter((result) => result === "reserved")).toHaveLength(1);
+    const receipt = await repositories[0].get(input.requestId);
+    expect(receipt).toMatchObject({
+      status: "sending",
+      eventId: "prize-event",
+      firstQueuedAtMs: 500,
+      attemptCount: 1,
+      payload: input.attempt.payload,
+    });
+    await expect(
+      repositories[0].reserve({
+        ...input,
+        createdAtMs: 1_000_000,
+        attempt: {
+          ...input.attempt,
+          expectedAttemptId: receipt!.attemptId!,
+        },
+      }),
+    ).resolves.toMatchObject({ status: "sending", attemptCount: 1 });
+  });
+
+  it("retries only due safe failures and fences outcomes from earlier attempts", async () => {
+    const repository = createD1TelegramAnnouncementRepository(
+      testEnv.TELEGRAM_DB,
+    );
+    const input = {
+      requestId: "event:retry-event:prizes:v1",
+      payloadDigest: "album-digest",
+      createdAtMs: 1_000,
+      attempt: {
+        eventId: "retry-event",
+        startAtMs: 3_601_000,
+        runAtMs: 1_000,
+        firstQueuedAtMs: 500,
+        payload: { text: "album", imageUrls: ["a", "b"] },
+        attemptId: "attempt-a",
+        expectedAttemptId: null,
+      },
+    };
+    await expect(repository.reserve(input)).resolves.toBe("reserved");
+    await expect(
+      repository.storeOutcome({
+        requestId: input.requestId,
+        payloadDigest: input.payloadDigest,
+        attemptId: "attempt-a",
+        status: "retryable",
+        retryAtMs: 4_000,
+        errorCode: "rate-limited",
+        updatedAtMs: 2_000,
+      }),
+    ).resolves.toBe(true);
+    const retry = {
+      ...input,
+      createdAtMs: 3_000,
+      attempt: {
+        ...input.attempt,
+        attemptId: "attempt-b",
+        expectedAttemptId: "attempt-a",
+      },
+    };
+    await expect(repository.reserve(retry)).resolves.toMatchObject({
+      status: "retryable",
+    });
+    await expect(
+      repository.reserve({ ...retry, createdAtMs: 4_000 }),
+    ).resolves.toBe("reserved");
+    await expect(
+      repository.storeOutcome({
+        requestId: input.requestId,
+        payloadDigest: input.payloadDigest,
+        attemptId: "attempt-a",
+        status: "sent",
+        messageIds: [10, 11],
+        updatedAtMs: 5_000,
+      }),
+    ).resolves.toBe(false);
+    await expect(
+      repository.storeOutcome({
+        requestId: input.requestId,
+        payloadDigest: input.payloadDigest,
+        attemptId: "attempt-b",
+        status: "sent",
+        messageIds: [12, 13],
+        updatedAtMs: 5_000,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      repository.reserve({ ...retry, createdAtMs: 10_000 }),
+    ).resolves.toMatchObject({
+      status: "sent",
+      messageIds: [12, 13],
+      attemptId: "attempt-b",
+      attemptCount: 2,
+      retryAtMs: null,
+    });
+  });
+
+  it("keeps uncertain albums reserved across cold repository instances", async () => {
+    const repository = createD1TelegramAnnouncementRepository(
+      testEnv.TELEGRAM_DB,
+    );
+    const input = {
+      requestId: "event:uncertain-event:prizes:v1",
+      payloadDigest: "album-digest",
+      createdAtMs: 1_000,
+      attempt: {
+        eventId: "uncertain-event",
+        startAtMs: 3_601_000,
+        runAtMs: 1_000,
+        firstQueuedAtMs: 500,
+        payload: { text: "album", imageUrls: ["a", "b"] },
+        attemptId: "attempt-a",
+        expectedAttemptId: null,
+      },
+    };
+    await repository.reserve(input);
+    await repository.storeOutcome({
+      requestId: input.requestId,
+      payloadDigest: input.payloadDigest,
+      attemptId: "attempt-a",
+      status: "uncertain",
+      errorCode: "timeout",
+      updatedAtMs: 2_000,
+    });
+    const cold = createD1TelegramAnnouncementRepository(testEnv.TELEGRAM_DB);
+    await expect(
+      cold.reserve({ ...input, createdAtMs: 10_000 }),
+    ).resolves.toMatchObject({
+      status: "uncertain",
+      errorCode: "timeout",
+      attemptCount: 1,
     });
   });
 

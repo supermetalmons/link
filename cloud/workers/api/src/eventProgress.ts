@@ -19,6 +19,7 @@ import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
 import { requireProfileOwnershipSnapshot } from "./profileOwnership.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
 import { createEventMutationRepository } from "./eventMutationRepository.ts";
+import { scheduleEventPrizeAnnouncement } from "./eventPrizeAnnouncementSchedule.ts";
 
 const EVENT_PROGRESS_OUTBOX_ROOT = "eventProgressOutbox";
 const EVENT_PROGRESS_OUTBOX_DEAD_ROOT = "eventProgressOutboxDead";
@@ -449,6 +450,13 @@ async function reconcileScheduledEvents(
         });
       }
       await dispatchOutboxPlan(env, repository, plan, now);
+      await scheduleEventPrizeAnnouncement(
+        env,
+        repository,
+        eventId,
+        event,
+        now(),
+      );
     },
   );
 }

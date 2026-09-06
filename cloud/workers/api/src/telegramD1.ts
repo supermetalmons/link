@@ -21,6 +21,25 @@ export type TelegramAnnouncementRecord = {
   payloadDigest: string;
   status: string;
   updatedAtMs: number;
+  eventId?: string | null;
+  startAtMs?: number | null;
+  runAtMs?: number | null;
+  firstQueuedAtMs?: number | null;
+  payload?: Record<string, unknown> | null;
+  attemptId?: string | null;
+  attemptCount?: number | null;
+  retryAtMs?: number | null;
+  errorCode?: string | null;
+};
+
+export type TelegramAnnouncementAttempt = {
+  eventId: string;
+  startAtMs: number;
+  runAtMs: number;
+  firstQueuedAtMs: number;
+  payload: Record<string, unknown>;
+  attemptId: string;
+  expectedAttemptId: string | null;
 };
 
 export type TelegramAnnouncementRepository = {
@@ -29,6 +48,7 @@ export type TelegramAnnouncementRepository = {
     createdAtMs: number;
     payloadDigest: string;
     requestId: string;
+    attempt?: TelegramAnnouncementAttempt;
   }): Promise<"reserved" | TelegramAnnouncementRecord>;
   storeOutcome(input: {
     messageIds?: number[];
@@ -36,6 +56,9 @@ export type TelegramAnnouncementRepository = {
     requestId: string;
     status: string;
     updatedAtMs: number;
+    attemptId?: string;
+    retryAtMs?: number;
+    errorCode?: string;
   }): Promise<boolean>;
 };
 
@@ -268,6 +291,15 @@ type AnnouncementRow = {
   payload_digest: string;
   status: string;
   updated_at_ms: number;
+  event_id: string | null;
+  start_at_ms: number | null;
+  run_at_ms: number | null;
+  first_queued_at_ms: number | null;
+  payload_json: string | null;
+  attempt_id: string | null;
+  attempt_count: number | null;
+  retry_at_ms: number | null;
+  error_code: string | null;
 };
 
 function parseMessageIds(value: string | null): number[] | null {
@@ -295,6 +327,16 @@ function decodeAnnouncement(row: AnnouncementRow): TelegramAnnouncementRecord {
     payloadDigest: row.payload_digest,
     status: row.status,
     updatedAtMs: safeInteger(row.updated_at_ms),
+    eventId: row.event_id,
+    startAtMs: row.start_at_ms,
+    runAtMs: row.run_at_ms,
+    firstQueuedAtMs: row.first_queued_at_ms,
+    payload:
+      row.payload_json === null ? null : parseJsonRecord(row.payload_json),
+    attemptId: row.attempt_id,
+    attemptCount: row.attempt_count,
+    retryAtMs: row.retry_at_ms,
+    errorCode: row.error_code,
   };
 }
 
@@ -306,7 +348,9 @@ export function createD1TelegramAnnouncementRepository(
       const row = await db
         .prepare(
           `SELECT payload_digest, status, message_ids_json,
-                  created_at_ms, updated_at_ms
+                  created_at_ms, updated_at_ms, event_id, start_at_ms,
+                  run_at_ms, first_queued_at_ms, payload_json, attempt_id,
+                  attempt_count, retry_at_ms, error_code
            FROM telegram_event_prize_announcements
            WHERE request_id = ?`,
         )
@@ -322,6 +366,48 @@ export function createD1TelegramAnnouncementRepository(
     get,
     async reserve(input) {
       try {
+        if (input.attempt) {
+          const attempt = input.attempt;
+          const result = await db
+            .prepare(
+              `INSERT INTO telegram_event_prize_announcements (
+                 request_id, payload_digest, status, message_ids_json,
+                 created_at_ms, updated_at_ms, event_id, start_at_ms,
+                 run_at_ms, first_queued_at_ms, payload_json,
+                 attempt_id, attempt_count, retry_at_ms, error_code
+               ) VALUES (?, ?, 'sending', NULL, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL)
+               ON CONFLICT (request_id) DO UPDATE SET
+                 payload_digest = excluded.payload_digest, status = 'sending',
+                 message_ids_json = NULL, updated_at_ms = excluded.updated_at_ms,
+                 start_at_ms = excluded.start_at_ms, run_at_ms = excluded.run_at_ms,
+                 first_queued_at_ms = excluded.first_queued_at_ms,
+                 payload_json = excluded.payload_json, attempt_id = excluded.attempt_id,
+                 attempt_count = telegram_event_prize_announcements.attempt_count + 1,
+                 retry_at_ms = NULL, error_code = NULL
+               WHERE telegram_event_prize_announcements.status = 'retryable'
+                 AND telegram_event_prize_announcements.event_id = excluded.event_id
+                 AND telegram_event_prize_announcements.attempt_id IS ?
+                 AND telegram_event_prize_announcements.retry_at_ms <= excluded.updated_at_ms`,
+            )
+            .bind(
+              input.requestId,
+              input.payloadDigest,
+              input.createdAtMs,
+              input.createdAtMs,
+              attempt.eventId,
+              attempt.startAtMs,
+              attempt.runAtMs,
+              attempt.firstQueuedAtMs,
+              encodeJsonRecord(attempt.payload),
+              attempt.attemptId,
+              attempt.expectedAttemptId,
+            )
+            .run();
+          if (result.meta.changes === 1) return "reserved";
+          const existing = await get(input.requestId);
+          if (!existing) throw new TelegramD1Failure();
+          return existing;
+        }
         const result = await db
           .prepare(
             `INSERT INTO telegram_event_prize_announcements (
@@ -351,15 +437,20 @@ export function createD1TelegramAnnouncementRepository(
         const result = await db
           .prepare(
             `UPDATE telegram_event_prize_announcements
-             SET status = ?, message_ids_json = ?, updated_at_ms = ?
-             WHERE request_id = ? AND payload_digest = ? AND status = 'sending'`,
+             SET status = ?, message_ids_json = ?, updated_at_ms = ?,
+                 retry_at_ms = ?, error_code = ?
+             WHERE request_id = ? AND payload_digest = ? AND status = 'sending'
+               AND attempt_id IS ?`,
           )
           .bind(
             input.status,
             input.messageIds ? JSON.stringify(input.messageIds) : null,
             input.updatedAtMs,
+            input.retryAtMs ?? null,
+            input.errorCode ?? null,
             input.requestId,
             input.payloadDigest,
+            input.attemptId ?? null,
           )
           .run();
         return result.meta.changes === 1;

@@ -1,60 +1,76 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { buildEventPrizeAnnouncement } from "../../../functions/telegram/eventPrizeAnnouncement.js";
+import type { TelegramResult } from "../../../functions/telegram/client.js";
 import {
-  EVENT_PRIZE_ANNOUNCEMENT_PATH,
-  handleEventPrizeAnnouncement,
+  deliverEventPrizeAnnouncement,
+  type EventPrizeAnnouncementDeliveryDependencies,
+  type EventPrizeAnnouncementDeliveryInput,
 } from "../src/eventPrizeAnnouncement.ts";
-import type { TelegramAnnouncementRepository } from "../src/telegramD1.ts";
-import { handleFetch } from "../src/workerHandler.ts";
-import { createTelegramBridgeSignature } from "../src/telegramBridgeAuth.ts";
+import type {
+  TelegramAnnouncementRecord,
+  TelegramAnnouncementRepository,
+} from "../src/telegramD1.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
-const NOW_MS = Date.UTC(2026, 7, 20, 12);
-const EVENT_ID = "FRkdorMWaYW";
-const COLLECTION_NAME = "Rare Weitsmans";
-const EVENT_URL = `https://mons.link/event/${EVENT_ID}`;
-const TEXT = `sunday mons treats — <tg-spoiler>${COLLECTION_NAME}</tg-spoiler>\n\n${EVENT_URL}`;
-const REQUEST_ID = "123e4567-e89b-42d3-a456-426614174000";
-const SECRET = TELEGRAM_TEST_ENV.TELEGRAM_ANNOUNCEMENT_BRIDGE_SECRET;
-const DATA = {
-  requestId: REQUEST_ID,
+const RUN_AT_MS = Date.UTC(2026, 8, 6, 12);
+const EVENT_ID = "z3oj52Iiime";
+const REQUEST_ID = `event:${EVENT_ID}:prizes:v1`;
+const INPUT: EventPrizeAnnouncementDeliveryInput = {
   eventId: EVENT_ID,
-  collectionName: COLLECTION_NAME,
+  startAtMs: RUN_AT_MS + 3_600_000,
+  runAtMs: RUN_AT_MS,
+  firstQueuedAtMs: RUN_AT_MS - 60_000,
+};
+const SUCCESS: TelegramResult = {
+  ok: true,
+  outcome: "sent",
+  messageIds: [101, 102, 103],
+  httpStatus: 200,
 };
 const env = {
   ...TELEGRAM_TEST_ENV,
-  AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
-  FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL:
-    "worker@example.iam.gserviceaccount.com",
-  FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
-  HELIUS_RPC_API_KEY: "test-helius-key",
-  NFT_RATE_LIMITER: { limit: async () => ({ success: true }) },
-  X_CLIENT_ID: "test-x-client",
-  X_CLIENT_SECRET: "test-x-secret",
+  TELEGRAM_BOT_TOKEN: " token\n",
+  TELEGRAM_EXTRA_CHAT_ID: " community-chat\n",
 } as Env;
 
-function memoryAnnouncementRepository(): TelegramAnnouncementRepository {
-  const values = new Map<
-    string,
-    {
-      createdAtMs: number;
-      messageIds: number[] | null;
-      payloadDigest: string;
-      status: string;
-      updatedAtMs: number;
-    }
-  >();
-  return {
+function memoryAnnouncementRepository() {
+  const values = new Map<string, TelegramAnnouncementRecord>();
+  const repository: TelegramAnnouncementRepository = {
     get: async (requestId) => values.get(requestId) ?? null,
     async reserve(input) {
-      const existing = values.get(input.requestId);
-      if (existing) return existing;
+      const current = values.get(input.requestId);
+      if (
+        current &&
+        (!input.attempt ||
+          current.status !== "retryable" ||
+          current.eventId !== input.attempt.eventId ||
+          current.attemptId !== input.attempt.expectedAttemptId ||
+          !current.retryAtMs ||
+          current.retryAtMs > input.createdAtMs)
+      ) {
+        return current;
+      }
       values.set(input.requestId, {
+        ...current,
         payloadDigest: input.payloadDigest,
         status: "sending",
         messageIds: null,
-        createdAtMs: input.createdAtMs,
+        createdAtMs: current?.createdAtMs || input.createdAtMs,
         updatedAtMs: input.createdAtMs,
+        ...(input.attempt
+          ? {
+              eventId: input.attempt.eventId,
+              startAtMs: input.attempt.startAtMs,
+              runAtMs: input.attempt.runAtMs,
+              firstQueuedAtMs: input.attempt.firstQueuedAtMs,
+              payload: input.attempt.payload,
+              attemptId: input.attempt.attemptId,
+              attemptCount: (current?.attemptCount || 0) + 1,
+              retryAtMs: null,
+              errorCode: null,
+            }
+          : {}),
       });
       return "reserved";
     },
@@ -63,7 +79,8 @@ function memoryAnnouncementRepository(): TelegramAnnouncementRepository {
       if (
         !current ||
         current.payloadDigest !== input.payloadDigest ||
-        current.status !== "sending"
+        current.status !== "sending" ||
+        (current.attemptId ?? null) !== (input.attemptId ?? null)
       ) {
         return false;
       }
@@ -72,306 +89,373 @@ function memoryAnnouncementRepository(): TelegramAnnouncementRepository {
         status: input.status,
         updatedAtMs: input.updatedAtMs,
         messageIds: input.messageIds ?? null,
+        retryAtMs: input.retryAtMs ?? null,
+        errorCode: input.errorCode ?? null,
       });
       return true;
     },
   };
+  return { values, repository };
 }
 
-async function signedRequest(
-  payload: unknown,
-  {
-    timestamp = String(Math.floor(NOW_MS / 1_000)),
-    signatureBody,
-  }: { timestamp?: string; signatureBody?: string } = {},
-): Promise<Request> {
-  const body = typeof payload === "string" ? payload : JSON.stringify(payload);
-  const signature = await createTelegramBridgeSignature(
-    signatureBody ?? body,
-    SECRET,
-    timestamp,
-  );
-  return new Request(`https://api.mons.link${EVENT_PRIZE_ANNOUNCEMENT_PATH}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Mons-Telegram-Signature": signature,
-      "X-Mons-Telegram-Timestamp": timestamp,
-    },
-    body,
-  });
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
-}
-
-test("sends the exact album with normalized configuration and stores the receipt", async () => {
-  let sent: Record<string, unknown> | undefined;
-  const successLogs: Record<string, unknown>[] = [];
-  const response = await handleEventPrizeAnnouncement(
-    await signedRequest(DATA),
-    {
-      ...env,
-      TELEGRAM_BOT_TOKEN: " token\n",
-      TELEGRAM_EXTRA_CHAT_ID: " community-chat\n",
-    },
-    {
-      now: () => NOW_MS,
-      repository: memoryAnnouncementRepository(),
-      send: async (input) => {
-        sent = input;
+function fixture() {
+  let nowMs = RUN_AT_MS;
+  let retryNotBeforeMs = 0;
+  let eventData: unknown = {
+    status: "scheduled",
+    startAtMs: INPUT.startAtMs,
+    isSundayMons: true,
+    telegramAnnouncements: { invite: false, matches: false, results: false },
+  };
+  const locks = new Map<string, unknown>();
+  const { values, repository } = memoryAnnouncementRepository();
+  const sends: Record<string, unknown>[] = [];
+  const logs: Record<string, unknown>[] = [];
+  const dependencies: EventPrizeAnnouncementDeliveryDependencies = {
+    now: () => nowMs,
+    controlsEnabled: async () => true,
+    eventRepository: {
+      getRtdbPath: async () => eventData,
+      transactRtdbPath: async (path, updater) => {
+        const current = locks.get(path) ?? null;
+        const result = updater(current) as {
+          commit?: false;
+          decision?: string;
+          value?: unknown;
+        };
+        if (result.commit === false) {
+          return {
+            committed: false,
+            decision: result.decision,
+            value: current,
+          };
+        }
+        if (result.value === null) locks.delete(path);
+        else locks.set(path, result.value);
         return {
-          ok: true,
-          outcome: "sent",
-          messageIds: [101, 102, 103],
-          httpStatus: 200,
+          committed: true,
+          decision: result.decision,
+          value: result.value,
         };
       },
-      logSuccess: (record) => successLogs.push(record),
     },
-  );
+    repository,
+    retryControl: {
+      getRetryNotBeforeMs: async () => retryNotBeforeMs,
+      extendRetryNotBeforeMs: async (candidate) =>
+        (retryNotBeforeMs = Math.max(retryNotBeforeMs, candidate)),
+    },
+    send: async (input) => {
+      assert.equal(locks.size, 1);
+      sends.push(input);
+      return SUCCESS;
+    },
+    log: (record) => logs.push(record),
+  };
+  return {
+    dependencies,
+    values,
+    sends,
+    locks,
+    logs,
+    setNow: (value: number) => void (nowMs = value),
+    setEvent: (value: unknown) => void (eventData = value),
+    retryNotBefore: () => retryNotBeforeMs,
+    deliver: (input = INPUT) =>
+      deliverEventPrizeAnnouncement(env, input, dependencies),
+  };
+}
 
-  assert.equal(response.status, 200);
-  assert.equal(response.headers.get("Cache-Control"), "no-store");
-  assert.equal(response.headers.get("X-Content-Type-Options"), "nosniff");
-  assert.deepEqual(sent, {
-    chatId: "community-chat",
-    imageUrls: [
-      "https://cdn.lil.org/nft/card_nft/1866.webp",
-      "https://cdn.lil.org/nft/card_nft/1682.webp",
-      "https://cdn.lil.org/nft/card_nft/6793.webp",
-    ],
-    text: TEXT,
-    hasSpoiler: true,
-    parseMode: "HTML",
-    silent: false,
-    token: "token",
-  });
-  assert.deepEqual(await json(response), {
-    ok: true,
-    eventId: EVENT_ID,
-    eventUrl: EVENT_URL,
-    messageIds: [101, 102, 103],
-  });
-  assert.deepEqual(successLogs, [
+test("sends a catalog album independently of event Telegram preferences and stores its receipt", async () => {
+  const state = fixture();
+  assert.deepEqual(await state.deliver(), { status: "sent" });
+  const announcement = buildEventPrizeAnnouncement({ eventId: EVENT_ID });
+  assert.deepEqual(state.sends, [
     {
-      event: "event_prize_announcement_sent",
-      eventId: EVENT_ID,
-      requestId: REQUEST_ID,
-      messageCount: 3,
+      chatId: "community-chat",
+      imageUrls: announcement.imageUrls,
+      text: announcement.text,
+      parseMode: "HTML",
+      hasSpoiler: true,
+      silent: false,
+      token: "token",
+      timeoutMs: 10_000,
     },
   ]);
+  const receipt = state.values.get(REQUEST_ID)!;
+  assert.equal(receipt.status, "sent");
+  assert.equal(receipt.eventId, EVENT_ID);
+  assert.equal(receipt.startAtMs, INPUT.startAtMs);
+  assert.equal(receipt.firstQueuedAtMs, INPUT.firstQueuedAtMs);
+  assert.deepEqual(receipt.messageIds, [101, 102, 103]);
+  assert.equal(receipt.attemptCount, 1);
+  assert.equal(state.locks.size, 0);
 });
 
-test("rejects missing, stale, and tampered announcement signatures", async () => {
-  const body = JSON.stringify(DATA);
-  const unsigned = await handleEventPrizeAnnouncement(
-    new Request(`https://api.mons.link${EVENT_PRIZE_ANNOUNCEMENT_PATH}`, {
-      method: "POST",
-      body,
-    }),
-    env,
-    { now: () => NOW_MS },
-  );
-  const stale = await handleEventPrizeAnnouncement(
-    await signedRequest(body, {
-      timestamp: String(Math.floor(NOW_MS / 1_000) - 301),
-    }),
-    env,
-    { now: () => NOW_MS },
-  );
-  const tampered = await handleEventPrizeAnnouncement(
-    await signedRequest(body, { signatureBody: `${body} ` }),
-    env,
-    { now: () => NOW_MS },
-  );
-  assert.deepEqual(
-    [unsigned.status, stale.status, tampered.status],
-    [401, 401, 401],
-  );
+test("rejects invalid, late-discovered and expired schedules without reserving delivery", async () => {
+  for (const [input, time, reason] of [
+    [{ ...INPUT, runAtMs: INPUT.runAtMs - 1 }, RUN_AT_MS, "invalid-schedule"],
+    [
+      { ...INPUT, firstQueuedAtMs: RUN_AT_MS + 1 },
+      RUN_AT_MS + 1,
+      "discovered-too-late",
+    ],
+    [INPUT, RUN_AT_MS + 60_000, "delivery-window-expired"],
+  ] as const) {
+    const state = fixture();
+    state.setNow(time);
+    assert.deepEqual(await state.deliver(input), { status: "skipped", reason });
+    assert.equal(state.values.size, 0);
+    assert.equal(state.sends.length, 0);
+  }
+  const early = fixture();
+  early.setNow(RUN_AT_MS - 100);
+  assert.deepEqual(await early.deliver(), {
+    status: "retryable",
+    reason: "not-due",
+    retryAtMs: RUN_AT_MS,
+  });
 });
 
-test("strictly validates request IDs and announcement bodies", async () => {
-  for (const payload of [
-    { eventId: EVENT_ID, collectionName: COLLECTION_NAME },
-    { ...DATA, requestId: "invalid" },
-    { ...DATA, collectionName: "line one\nline two" },
-    { ...DATA, eventId: "unknown" },
-    { ...DATA, extra: true },
-    "{",
+test("checks the canonical event type, status and scheduled start under the domain lease", async () => {
+  for (const event of [
+    null,
+    { status: "active", startAtMs: INPUT.startAtMs, isSundayMons: true },
+    { status: "scheduled", startAtMs: INPUT.startAtMs, isSundayMons: false },
+    { status: "scheduled", startAtMs: INPUT.startAtMs, isSundayMons: "true" },
+    {
+      status: "scheduled",
+      startAtMs: INPUT.startAtMs + 60_000,
+      isSundayMons: true,
+    },
   ]) {
-    const response = await handleEventPrizeAnnouncement(
-      await signedRequest(payload),
-      env,
-      { now: () => NOW_MS },
-    );
-    assert.equal(response.status, 400);
+    const state = fixture();
+    state.setEvent(event);
+    assert.deepEqual(await state.deliver(), {
+      status: "skipped",
+      reason: "event-no-longer-eligible",
+    });
+    assert.equal(state.sends.length, 0);
+    assert.equal(state.values.size, 0);
+    assert.equal(state.locks.size, 0);
   }
-  const oversized = await handleEventPrizeAnnouncement(
-    await signedRequest({ ...DATA, collectionName: "x".repeat(9_000) }),
-    env,
-    { now: () => NOW_MS },
+  const unknown = fixture();
+  assert.equal(
+    (await unknown.deliver({ ...INPUT, eventId: "unconfigured" })).status,
+    "skipped",
   );
-  assert.equal(oversized.status, 400);
 });
 
-test("maps Telegram failures and rejects incomplete success receipts", async () => {
-  const cases = [
-    {
-      result: {
-        ok: false as const,
-        classification: "uncertain" as const,
-        code: "timeout",
-        description: "request timed out",
-        httpStatus: null,
-        retryAfterSeconds: null,
-      },
-      status: 409,
-    },
-    {
-      result: {
-        ok: false as const,
-        classification: "retryable" as const,
-        code: "rate-limited",
-        description: "retry later",
-        httpStatus: 429,
-        retryAfterSeconds: 12,
-      },
-      status: 503,
-    },
-    {
-      result: {
-        ok: false as const,
-        classification: "terminal" as const,
-        code: "telegram-400",
-        description: "bad request",
-        httpStatus: 400,
-        retryAfterSeconds: null,
-      },
-      status: 502,
-    },
-    {
-      result: {
-        ok: true as const,
-        outcome: "sent" as const,
-        httpStatus: 200,
-        messageIds: [1],
-      },
-      status: 409,
-    },
-  ];
-  for (const candidate of cases) {
-    const response = await handleEventPrizeAnnouncement(
-      await signedRequest(DATA),
-      env,
-      {
-        now: () => NOW_MS,
-        repository: memoryAnnouncementRepository(),
-        send: async () => candidate.result,
-        logError: () => {},
-      },
-    );
-    assert.equal(response.status, candidate.status);
-  }
-});
-
-test("replays a completed request without sending twice", async () => {
-  const repository = memoryAnnouncementRepository();
+test("concurrent executions cannot send twice and successful delivery survives postponement", async () => {
+  const state = fixture();
+  let release!: () => void;
+  let entered!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const sending = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
   let sends = 0;
-  const dependencies = {
-    now: () => NOW_MS,
-    repository,
-    send: async () => {
-      sends += 1;
-      return {
-        ok: true as const,
-        outcome: "sent" as const,
-        messageIds: [101, 102, 103],
-        httpStatus: 200,
-      };
-    },
-    logSuccess: () => {},
+  state.dependencies.send = async () => {
+    sends++;
+    entered();
+    await pending;
+    return SUCCESS;
   };
-  const first = await handleEventPrizeAnnouncement(
-    await signedRequest(DATA),
-    env,
-    dependencies,
-  );
-  const replay = await handleEventPrizeAnnouncement(
-    await signedRequest(DATA),
-    env,
-    dependencies,
-  );
-  assert.equal(first.status, 200);
-  assert.equal(replay.status, 200);
+  const first = state.deliver();
+  await sending;
+  assert.equal((await state.deliver()).reason, "event-locked");
+  release();
+  assert.equal((await first).status, "sent");
+  assert.deepEqual(await state.deliver(), {
+    status: "sent",
+    reason: "already-sent",
+  });
+  const postponed = {
+    ...INPUT,
+    startAtMs: INPUT.startAtMs + 3_600_000,
+    runAtMs: RUN_AT_MS + 3_600_000,
+  };
+  state.setNow(postponed.runAtMs);
+  state.setEvent({
+    status: "scheduled",
+    startAtMs: postponed.startAtMs,
+    isSundayMons: true,
+  });
+  assert.equal((await state.deliver(postponed)).reason, "already-sent");
   assert.equal(sends, 1);
 });
 
-test("fails closed before sending when configuration or persistence is unavailable", async () => {
-  let sends = 0;
-  const missingConfig = await handleEventPrizeAnnouncement(
-    await signedRequest(DATA),
-    { ...env, TELEGRAM_BOT_TOKEN: "" },
-    { now: () => NOW_MS, logError: () => {} },
-  );
-  const unavailableRepository = await handleEventPrizeAnnouncement(
-    await signedRequest(DATA),
-    env,
-    {
-      now: () => NOW_MS,
-      repository: {
-        ...memoryAnnouncementRepository(),
-        reserve: async () => {
-          throw new Error("unavailable");
-        },
-      },
-      send: async () => {
-        sends += 1;
-        throw new Error("unexpected send");
-      },
-      logError: () => {},
-    },
-  );
-  assert.equal(missingConfig.status, 503);
-  assert.equal(unavailableRepository.status, 503);
-  assert.equal(sends, 0);
+test("safe failures persist retry time and attempt fencing while preserving the album payload", async () => {
+  const state = fixture();
+  state.dependencies.send = async () => ({
+    ok: false,
+    classification: "retryable",
+    code: "rate-limited",
+    description: "retry later",
+    httpStatus: 429,
+    retryAfterSeconds: 12,
+  });
+  const first = await state.deliver();
+  assert.deepEqual(first, {
+    status: "retryable",
+    reason: "rate-limited",
+    retryAtMs: RUN_AT_MS + 12_000,
+  });
+  const previous = structuredClone(state.values.get(REQUEST_ID)!);
+  assert.equal(previous.status, "retryable");
+  assert.equal(state.retryNotBefore(), RUN_AT_MS + 12_000);
+  assert.equal(state.locks.size, 0);
+  assert.equal((await state.deliver()).reason, "retry-not-due");
+  state.setNow(RUN_AT_MS + 12_000);
+  state.dependencies.send = async () => SUCCESS;
+  assert.equal((await state.deliver()).status, "sent");
+  const receipt = state.values.get(REQUEST_ID)!;
+  assert.deepEqual(receipt.payload, previous.payload);
+  assert.equal(receipt.attemptCount, 2);
+  assert.notEqual(receipt.attemptId, previous.attemptId);
 });
 
-test("treats thrown sends as uncertain and does not permit replay", async () => {
-  const repository = memoryAnnouncementRepository();
-  let sends = 0;
-  const first = await handleEventPrizeAnnouncement(
-    await signedRequest(DATA),
-    env,
+test("uncertain, thrown and incomplete sends are permanent automatic duplicate barriers", async () => {
+  for (const result of [
     {
-      now: () => NOW_MS,
-      repository,
-      send: async () => {
-        sends += 1;
-        throw new Error("ambiguous transport");
-      },
-      logError: () => {},
+      ok: false,
+      classification: "uncertain",
+      code: "timeout",
+      description: "timeout",
+      httpStatus: null,
+      retryAfterSeconds: null,
     },
-  );
-  const replay = await handleEventPrizeAnnouncement(
-    await signedRequest(DATA),
-    env,
-    { now: () => NOW_MS, repository, logError: () => {} },
-  );
-  assert.equal(first.status, 409);
-  assert.equal(replay.status, 409);
+    { ...SUCCESS, messageIds: [1] },
+    { ...SUCCESS, messageIds: [1, 2, 0] },
+    null,
+  ] satisfies Array<TelegramResult | null>) {
+    const state = fixture();
+    let sends = 0;
+    state.dependencies.send = async () => {
+      sends++;
+      if (result === null) throw new Error("send-failed");
+      return result;
+    };
+    assert.equal((await state.deliver()).status, "uncertain");
+    assert.equal((await state.deliver()).reason, "previous-send-unresolved");
+    assert.equal(sends, 1);
+    assert.equal(state.locks.size, 0);
+  }
+});
+
+test("successful send with lost persistence stays sending and cannot be retried", async () => {
+  const state = fixture();
+  state.dependencies.repository!.storeOutcome = async () => {
+    throw new Error("d1-unavailable");
+  };
+  assert.equal((await state.deliver()).status, "uncertain");
+  assert.equal(state.values.get(REQUEST_ID)?.status, "sending");
+  assert.equal((await state.deliver()).reason, "previous-send-unresolved");
+  assert.equal(state.sends.length, 1);
+});
+
+test("definitive rejection is terminal and is not retried", async () => {
+  const state = fixture();
+  let sends = 0;
+  state.dependencies.send = async () => {
+    sends++;
+    return {
+      ok: false,
+      classification: "terminal",
+      code: "telegram-400",
+      description: "bad media",
+      httpStatus: 400,
+      retryAfterSeconds: null,
+    };
+  };
+  assert.deepEqual(await state.deliver(), {
+    status: "terminal",
+    reason: "telegram-400",
+  });
+  assert.equal((await state.deliver()).status, "terminal");
   assert.equal(sends, 1);
 });
 
-test("the Worker entrypoint routes the internal announcement path", async () => {
-  const response = await handleFetch(
-    new Request(`https://api.mons.link${EVENT_PRIZE_ANNOUNCEMENT_PATH}`, {
-      method: "POST",
-      body: "{}",
-    }),
-    env,
-    {} as ExecutionContext,
+test("frozen or unreadable controls and missing configuration fail closed", async () => {
+  for (const readControls of [
+    async () => false,
+    async (): Promise<boolean> => {
+      throw new Error("control-unavailable");
+    },
+  ]) {
+    const state = fixture();
+    state.dependencies.controlsEnabled = readControls;
+    assert.equal((await state.deliver()).status, "retryable");
+    assert.equal(state.sends.length, 0);
+    assert.equal(state.values.size, 0);
+  }
+  const state = fixture();
+  assert.equal(
+    (
+      await deliverEventPrizeAnnouncement(
+        { ...env, TELEGRAM_BOT_TOKEN: "" },
+        INPUT,
+        state.dependencies,
+      )
+    ).reason,
+    "configuration-unavailable",
   );
-  assert.equal(response.status, 401);
+  assert.equal(state.sends.length, 0);
+});
+
+test("a control change after reservation remains safely retryable without sending", async () => {
+  const state = fixture();
+  let calls = 0;
+  state.dependencies.controlsEnabled = async () => ++calls < 3;
+  assert.equal((await state.deliver()).status, "retryable");
+  assert.equal(state.values.get(REQUEST_ID)?.status, "retryable");
+  assert.equal(state.sends.length, 0);
+  assert.equal(state.locks.size, 0);
+});
+
+test("checks the grace deadline after reservation and caps the Telegram timeout", async () => {
+  for (const remainingMs of [3, 0]) {
+    const state = fixture();
+    state.setNow(RUN_AT_MS + 50_000);
+    const reserve = state.dependencies.repository!.reserve;
+    state.dependencies.repository!.reserve = async (input) => {
+      const result = await reserve(input);
+      state.setNow(RUN_AT_MS + 60_000 - remainingMs);
+      return result;
+    };
+    const result = await state.deliver();
+    assert.equal(result.status, remainingMs ? "sent" : "skipped");
+    assert.equal(state.sends.length, remainingMs ? 1 : 0);
+    if (remainingMs) assert.equal(state.sends[0].timeoutMs, remainingMs);
+  }
+});
+
+test("an expired safe retry can use a new on-time postponed schedule without resetting sent identity", async () => {
+  const state = fixture();
+  state.dependencies.send = async () => ({
+    ok: false,
+    classification: "retryable",
+    code: "rate-limited",
+    description: "retry later",
+    httpStatus: 429,
+    retryAfterSeconds: 120,
+  });
+  assert.equal((await state.deliver()).status, "skipped");
+  assert.equal(state.values.get(REQUEST_ID)?.status, "retryable");
+  const postponed = {
+    ...INPUT,
+    startAtMs: INPUT.startAtMs + 3_600_000,
+    runAtMs: RUN_AT_MS + 3_600_000,
+  };
+  state.setNow(postponed.runAtMs);
+  state.setEvent({
+    status: "scheduled",
+    isSundayMons: true,
+    startAtMs: postponed.startAtMs,
+  });
+  state.dependencies.send = async () => SUCCESS;
+  assert.equal((await state.deliver(postponed)).status, "sent");
+  assert.equal(state.values.size, 1);
 });

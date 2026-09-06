@@ -1,6 +1,8 @@
 const { cropAddress } = require("@mons/shared/profiles");
 const { customTelegramEmojis } = require("./telegramEmojiData");
 
+const AUTOMATCH_WAITING_EMOJI_ID = "5355002036817525409";
+
 function resolveTelegramEmojiId(emoji) {
   const parsed = typeof emoji === "string" ? Number(emoji) : emoji;
   if (!Number.isInteger(parsed) || parsed <= 0) {
@@ -43,6 +45,7 @@ function getDisplayNameFromAddress(
 }
 
 module.exports = {
+  AUTOMATCH_WAITING_EMOJI_ID,
   getDisplayNameFromAddress,
   getTelegramEmojiTag,
   resolveTelegramEmojiId,

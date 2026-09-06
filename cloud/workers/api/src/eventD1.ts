@@ -1168,7 +1168,14 @@ async function patchEventOwnedPathsInternal(
              status = 'pending',
              run_at_ms = excluded.run_at_ms,
              last_queued_at_ms = excluded.last_queued_at_ms,
-             record_json = excluded.record_json`,
+             record_json = CASE
+               WHEN json_extract(excluded.record_json, '$.reason') = 'event-prize-announcement'
+               THEN json_set(excluded.record_json, '$.firstQueuedAtMs', MIN(
+                 json_extract(event_progress_outboxes.record_json, '$.firstQueuedAtMs'),
+                 json_extract(excluded.record_json, '$.firstQueuedAtMs')
+               ))
+               ELSE excluded.record_json
+             END`,
         )
         .bind(
           outboxId,

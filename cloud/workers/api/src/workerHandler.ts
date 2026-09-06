@@ -1,8 +1,4 @@
 import { handleRequest } from "./router.ts";
-import {
-  EVENT_PRIZE_ANNOUNCEMENT_PATH,
-  handleEventPrizeAnnouncement,
-} from "./eventPrizeAnnouncement.ts";
 import { handleTelegramBridge } from "./telegramBridge.ts";
 import {
   AUTH_RECOVERY_QUEUE_NAME,
@@ -66,9 +62,6 @@ export function handleFetch(
   const pathname = new URL(request.url).pathname;
   if (pathname === HISTORICAL_MATCH_PATH) {
     return handleHistoricalMatchRoute(request, env);
-  }
-  if (pathname === EVENT_PRIZE_ANNOUNCEMENT_PATH) {
-    return handleEventPrizeAnnouncement(request, env);
   }
   if (pathname === "/internal/telegram/delivery") {
     return handleTelegramBridge(request, env);

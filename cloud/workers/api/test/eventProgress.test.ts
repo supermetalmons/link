@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { buildEventPrizeAnnouncementPlan } from "../src/eventPrizeAnnouncementSchedule.ts";
 import type {
   WorkflowEvent,
   WorkflowInstanceStatus,
@@ -81,6 +82,53 @@ async function validOutbox() {
   );
   return { plan, value: { [plan.outboxId]: plan.outbox } };
 }
+
+test("scheduled-event sweep discovers prize announcements and retains their first scheduling time", async () => {
+  const eventId = "z3oj52Iiime";
+  const event = {
+    status: "scheduled",
+    isSundayMons: true,
+    startAtMs: 4_000_000,
+  };
+  let nowMs = 100_000;
+  const records = new Map<string, unknown>();
+  let creates = 0;
+  const repository: EventProgressSweepRepository = {
+    getRtdbPath: async (path) => {
+      if (path === "events") return { [eventId]: event };
+      if (path === "eventProgressOutbox") return {};
+      return records.get(path) ?? null;
+    },
+    patchRtdbRoot: async (updates) => {
+      for (const [path, value] of Object.entries(updates))
+        records.set(path, value);
+    },
+  };
+  const environment = workflowEnvironment({ onCreate: () => creates++ });
+  await sweepEventProgress(environment, {
+    now: () => nowMs,
+    repository,
+    ratingRepository: null,
+  });
+  const plan = await buildEventPrizeAnnouncementPlan(eventId, event, nowMs);
+  assert.ok(plan);
+  assert.deepEqual(
+    records.get(`eventProgressOutbox/${plan.outboxId}`),
+    plan.outbox,
+  );
+  assert.equal(creates, 2);
+  nowMs += 60_000;
+  await sweepEventProgress(environment, {
+    now: () => nowMs,
+    repository,
+    ratingRepository: null,
+  });
+  assert.deepEqual(
+    records.get(`eventProgressOutbox/${plan.outboxId}`),
+    plan.outbox,
+  );
+  assert.equal(creates, 4);
+});
 
 test("recreates terminal event progress Workflow instances", async () => {
   const outbox = await validOutbox();

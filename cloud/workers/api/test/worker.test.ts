@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   extractIdFromJsonUri,
+  handleFetch,
   handleRequest,
   type ProviderFetch,
 } from "../src/workerHandler.ts";
@@ -151,6 +152,29 @@ test("routes OPTIONS, rejected methods, and unknown paths without Helius", async
   assert.match(xCallback.headers.get("Cache-Control") || "", /no-store/);
   assert.equal(calls, 0);
   assert.equal(rateLimitCalls, 0);
+});
+
+test("removed manual event prize announcement route cannot send", async (t) => {
+  const providerFetch = t.mock.method(globalThis, "fetch", async () => {
+    throw new Error("removed route must not call a provider");
+  });
+  const request = new Request(
+    "https://api.mons.link/internal/telegram/event-prize-announcement",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        eventId: "z3oj52Iiime",
+        collectionName: "Planet Peppa",
+      }),
+    },
+  );
+
+  const response = await handleFetch(request, env, {} as ExecutionContext);
+
+  assert.equal(response.status, 404);
+  assert.equal(request.bodyUsed, false);
+  assert.equal(providerFetch.mock.callCount(), 0);
 });
 
 test("rate limits NFT posts before reading bodies or calling Helius", async () => {
