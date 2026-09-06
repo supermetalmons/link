@@ -1,3 +1,8 @@
+import type {
+  MatchPresentation,
+  MatchPresentationSnapshot,
+} from "./match-presentation";
+
 export interface Reaction {
   uuid: string;
   variation: number;
@@ -23,6 +28,26 @@ export type InviteReactionEvent = {
 
 export type InviteReactionMessage =
   InviteReactionSnapshot | InviteReactionEvent;
+export type InviteRoomSnapshot = {
+  schemaVersion: 2;
+  type: "snapshot";
+  reactions: Record<string, InviteReaction>;
+  presentation: MatchPresentationSnapshot;
+};
+export type InviteRoomReactionEvent = Omit<
+  InviteReactionEvent,
+  "schemaVersion"
+> & { schemaVersion: 2 };
+export type InviteRoomPresentationEvent = {
+  schemaVersion: 2;
+  type: "presentation";
+  presentation: MatchPresentation;
+};
+export type InviteRoomMessage =
+  | InviteReactionMessage
+  | InviteRoomSnapshot
+  | InviteRoomReactionEvent
+  | InviteRoomPresentationEvent;
 export type SendInviteReactionResponse = { ok: true };
 
 export const REACTION_PROTOCOL_VERSION: 1;
@@ -30,6 +55,7 @@ export const REACTION_MAX_MESSAGE_BYTES: 4096;
 export const REACTION_HEARTBEAT_REQUEST: "ping";
 export const REACTION_HEARTBEAT_RESPONSE: "pong";
 export const REACTION_SOCKET_PROTOCOL: "mons-reactions-v1";
+export const REACTION_SOCKET_PROTOCOL_V2: "mons-reactions-v2";
 export const REACTION_AUTH_PROTOCOL_PREFIX: "bearer.";
 export const FIXED_STICKER_IDS: readonly number[];
 export const STICKER_ID_WHITELIST: readonly number[];
@@ -44,6 +70,7 @@ export function isInviteReactionForInvite(
 export function isInviteReactionMessage(
   value: unknown,
 ): value is InviteReactionMessage;
+export function isInviteRoomMessage(value: unknown): value is InviteRoomMessage;
 export function isSendInviteReactionResponse(
   value: unknown,
 ): value is SendInviteReactionResponse;

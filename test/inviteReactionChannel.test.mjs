@@ -25,6 +25,8 @@ const {
 } = await import("../src/connection/inviteReactionChannel.ts");
 const { createInviteReactionSocketProtocols } =
   await import("../src/services/inviteReactionsApi.ts");
+const { MatchPresentationState } =
+  await import("../src/connection/matchPresentationState.ts");
 
 const reaction = (id = 1, overrides = {}) => ({
   uuid: `00000000-0000-4000-8000-${String(id).padStart(12, "0")}`,
@@ -47,6 +49,7 @@ const event = (value = reaction(), senderUid = "guest") => ({
 
 function harness({
   inviteId = "invite",
+  matchId,
   online = true,
   paired = true,
   createError = false,
@@ -60,8 +63,11 @@ function harness({
   const initial = [];
   const updates = [];
   const errors = [];
+  const presentationSnapshots = [];
+  const presentations = [];
   const channel = new InviteReactionChannel({
     inviteId,
+    matchId,
     createSocket(url, protocols) {
       if (createError) throw new Error("socket-construction-failed");
       const socket = {
@@ -108,6 +114,8 @@ function harness({
     onInitialSnapshot: (value) => initial.push(value),
     onReaction: (value, senderUid) =>
       updates.push({ reaction: value, senderUid }),
+    onPresentationSnapshot: (value) => presentationSnapshots.push(value),
+    onPresentation: (value) => presentations.push(value),
     onError: (error) => errors.push(error),
     setTimer(callback, delayMs) {
       const id = nextTimer++;
@@ -124,6 +132,8 @@ function harness({
     initial,
     updates,
     errors,
+    presentationSnapshots,
+    presentations,
     next() {
       const [id, timer] = timers.entries().next().value;
       timers.delete(id);
@@ -374,6 +384,14 @@ test("the actual Firebase auth callback tears down participant and spectator res
     };
     const dependencies = {
       InviteReactionChannel,
+      MatchPresentationState,
+      readMatchPresentationViaApi: async (_inviteId, matchId) => ({
+        ok: true,
+        presentation: { matchId, players: {} },
+      }),
+      updateMatchPresentationViaApi: () =>
+        assert.fail("unexpected presentation write"),
+      didReceiveMatchPresentationUpdate: () => undefined,
       createInviteReactionSocketProtocols,
       WebSocket: class {
         readyState = 0;
@@ -419,11 +437,14 @@ test("the actual Firebase auth callback tears down participant and spectator res
         contextId: 1,
         sessionEpoch: 1,
         inviteId: "invite",
+        matchId: "invite",
+        actorUid: canWrite ? "host" : null,
         loginUid: "original-login",
         canWrite,
       },
       latestInvite: { hostId: "host", guestId: "guest" },
       inviteReactionSubscription: null,
+      rememberMatchPresentation: () => undefined,
       isContextActive: () => true,
       isCurrentAuthUser(uid) {
         return this.auth.currentUser?.uid === uid;
@@ -456,10 +477,12 @@ test("the actual Firebase auth callback tears down participant and spectator res
     assert.deepEqual(
       socket.protocols,
       canWrite
-        ? ["mons-reactions-v1", "bearer.header.payload.signature"]
-        : undefined,
+        ? ["mons-reactions-v2", "bearer.header.payload.signature"]
+        : ["mons-reactions-v2"],
     );
     const signal = connection.inviteReactionSubscription.channel.signal;
+    const presentationSignal =
+      connection.inviteReactionSubscription.presentation.signal;
     const unsubscribe = connection.subscribeToAuthChanges(() => {
       assert.equal(signal.aborted, true);
     });
@@ -469,6 +492,7 @@ test("the actual Firebase auth callback tears down participant and spectator res
     connection.auth.currentUser = newUser;
     authCallback(newUser);
     assert.equal(signal.aborted, true);
+    assert.equal(presentationSignal.aborted, true);
     assert.equal(socket.closes, 1);
     assert.equal(socket.onmessage, null);
     assert.equal(timers.size, 0);
@@ -493,6 +517,141 @@ const deferred = () => {
   });
   return { promise, resolve, reject };
 };
+
+const presentation = (revision = 1, overrides = {}) => ({
+  matchId: "invite",
+  actorUid: "host",
+  emojiId: 1,
+  aura: "",
+  revision,
+  ...overrides,
+});
+const roomSnapshot = (value = presentation(), reactions = {}) => ({
+  schemaVersion: 2,
+  type: "snapshot",
+  reactions,
+  presentation: {
+    matchId: value.matchId,
+    players: { [value.actorUid]: value },
+  },
+});
+
+test("v2 spectators receive persistent appearance on initial connection and reconnect without replaying initial reactions", () => {
+  const h = harness({ matchId: "invite" });
+  h.next();
+  const socket = h.sockets[0];
+  assert.equal(new URL(socket.url).searchParams.get("matchId"), "invite");
+  assert.deepEqual(socket.protocols, ["mons-reactions-v2"]);
+  socket.receive(roomSnapshot(presentation(), { host: reaction() }));
+  assert.equal(h.presentationSnapshots.length, 1);
+  assert.equal(h.initial.length, 1);
+  assert.equal(h.updates.length, 0);
+  socket.receive({
+    schemaVersion: 2,
+    type: "presentation",
+    presentation: presentation(2),
+  });
+  assert.deepEqual(h.presentations, [presentation(2)]);
+  assert.equal(h.updates.length, 0);
+  socket.fail();
+  h.next();
+  h.sockets[1].receive(roomSnapshot(presentation(2), { host: reaction() }));
+  assert.equal(h.presentationSnapshots.length, 2);
+  assert.equal(h.initial.length, 1);
+  assert.equal(h.updates.length, 1);
+  h.channel.stop();
+});
+
+test("v2 participants preserve bearer protocols and reject missing, foreign, premature or oversized presentation frames", async () => {
+  for (const frame of [
+    snapshot(),
+    roomSnapshot(presentation(1, { matchId: "invite1" })),
+    { schemaVersion: 2, type: "presentation", presentation: presentation() },
+    " ".repeat(16385),
+  ]) {
+    const h = harness({
+      matchId: "invite",
+      getProtocols: async () =>
+        createInviteReactionSocketProtocols("header.payload.signature"),
+    });
+    h.next();
+    await flush();
+    const socket = h.sockets[0];
+    assert.deepEqual(socket.protocols, [
+      "mons-reactions-v2",
+      "bearer.header.payload.signature",
+    ]);
+    socket.receive(frame);
+    assert.equal(h.errors.length, 1);
+    assert.equal(h.presentations.length, 0);
+    assert.equal(h.presentationSnapshots.length, 0);
+    h.channel.stop();
+  }
+});
+
+test("v2 rematch contexts discard old socket callbacks and reject foreign presentation events", () => {
+  const old = harness({ matchId: "invite" });
+  old.next();
+  old.sockets[0].receive(roomSnapshot());
+  const late = old.sockets[0].onmessage;
+  old.channel.stop();
+  const next = harness({ matchId: "invite1" });
+  next.next();
+  next.sockets[0].receive(
+    roomSnapshot(presentation(1, { matchId: "invite1" })),
+  );
+  late({
+    data: JSON.stringify({
+      schemaVersion: 2,
+      type: "presentation",
+      presentation: presentation(2),
+    }),
+  });
+  assert.equal(old.presentations.length, 0);
+  next.sockets[0].receive({
+    schemaVersion: 2,
+    type: "presentation",
+    presentation: presentation(2),
+  });
+  assert.equal(next.presentations.length, 0);
+  assert.equal(next.errors.length, 1);
+  next.channel.stop();
+});
+
+test("v2 accepts maximal escaped match keys without relaxing the v1 frame limit", () => {
+  const matchId = '"'.repeat(768);
+  const host = "h".repeat(128);
+  const guest = "g".repeat(128);
+  const h = harness({ inviteId: matchId, matchId });
+  h.next();
+  const frame = {
+    schemaVersion: 2,
+    type: "snapshot",
+    reactions: {
+      [host]: reaction(1, { matchId }),
+      [guest]: reaction(2, { matchId }),
+    },
+    presentation: {
+      matchId,
+      players: {
+        [host]: presentation(1, { matchId, actorUid: host }),
+        [guest]: presentation(1, { matchId, actorUid: guest }),
+      },
+    },
+  };
+  const encoded = JSON.stringify(frame);
+  assert.ok(new TextEncoder().encode(encoded).byteLength > 4096);
+  assert.ok(new TextEncoder().encode(encoded).byteLength <= 16384);
+  h.sockets[0].receive(encoded);
+  assert.equal(h.errors.length, 0);
+  assert.equal(h.presentationSnapshots.length, 1);
+  h.channel.stop();
+  const legacy = harness();
+  legacy.next();
+  legacy.sockets[0].receive(" ".repeat(4097));
+  assert.equal(legacy.errors.length, 1);
+  legacy.channel.stop();
+});
 
 test("participant sockets await auth protocols and force-refresh authentication on reconnect", async () => {
   const pending = deferred();

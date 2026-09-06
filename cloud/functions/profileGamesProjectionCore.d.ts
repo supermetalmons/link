@@ -23,6 +23,11 @@ export type ProfileGamesProjectionRepository = {
     inviteId: string,
   ): Promise<ProjectionDocument | null>;
   getRtdbPath(path: string): Promise<unknown>;
+  getMatchEmoji?(
+    inviteId: string,
+    matchId: string,
+    loginUid: string,
+  ): Promise<number | null>;
   hasCompletedRatingUpdate(inviteId: string, matchId: string): Promise<boolean>;
   readProfileOwnershipSnapshot(query: {
     loginUids: readonly string[];

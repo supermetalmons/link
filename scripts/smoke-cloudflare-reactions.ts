@@ -5,21 +5,30 @@ const {
 const {
   isInviteReactionForInvite,
   isInviteReactionMessage,
+  isInviteRoomMessage,
+  REACTION_SOCKET_PROTOCOL_V2,
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
   REACTION_MAX_MESSAGE_BYTES,
 }: typeof import("@mons/shared/reactions") = require("@mons/shared/reactions");
+const {
+  parseInviteMatchIndex,
+}: typeof import("@mons/shared/rematches") = require("@mons/shared/rematches");
+const {
+  PRESENTATION_MAX_MESSAGE_BYTES,
+}: typeof import("@mons/shared/match-presentation") = require("@mons/shared/match-presentation");
 
 const TIMEOUT_MS = 10_000;
 const ORIGIN = "https://mons.link";
 const PREVIEW_HOST_PATTERN =
   /^[0-9a-f]{8}-mons-link-api\.lil-org\.workers\.dev$/;
 
-type Options = { baseUrl: string; inviteId: string };
+type Options = { baseUrl: string; inviteId: string; matchId?: string };
 type Dependencies = {
   connect: (
     url: string,
     options: import("ws").ClientOptions,
+    protocol?: string,
   ) => import("ws").WebSocket;
   log: (message: string) => void;
   setTimeout: typeof setTimeout;
@@ -27,7 +36,7 @@ type Dependencies = {
 };
 
 function usage(): string {
-  return "Usage: npm run smoke:reactions -- --base-url <https-api-url> --invite-id <existing-paired-invite-id>";
+  return "Usage: npm run smoke:reactions -- --base-url <https-api-url> --invite-id <existing-paired-invite-id> [--match-id <existing-match-id>]";
 }
 
 function validateOptions(options: Options): Options {
@@ -47,11 +56,18 @@ function validateOptions(options: Options): Options {
     url.hash ||
     (url.hostname !== "api.mons.link" &&
       !PREVIEW_HOST_PATTERN.test(url.hostname)) ||
-    normalizeFirebaseKey(options.inviteId) !== options.inviteId
+    normalizeFirebaseKey(options.inviteId) !== options.inviteId ||
+    (options.matchId !== undefined &&
+      (normalizeFirebaseKey(options.matchId) !== options.matchId ||
+        parseInviteMatchIndex(options.inviteId, options.matchId) === null))
   ) {
     throw new TypeError(usage());
   }
-  return { baseUrl: url.origin, inviteId: options.inviteId };
+  return {
+    baseUrl: url.origin,
+    inviteId: options.inviteId,
+    ...(options.matchId !== undefined ? { matchId: options.matchId } : {}),
+  };
 }
 
 function parseArgs(argv: string[]): Options {
@@ -60,7 +76,7 @@ function parseArgs(argv: string[]): Options {
     const key = argv[index];
     const value = argv[index + 1];
     if (
-      (key !== "--base-url" && key !== "--invite-id") ||
+      (key !== "--base-url" && key !== "--invite-id" && key !== "--match-id") ||
       !value ||
       values.has(key)
     ) {
@@ -71,6 +87,7 @@ function parseArgs(argv: string[]): Options {
   return validateOptions({
     baseUrl: values.get("--base-url") || "",
     inviteId: values.get("--invite-id") || "",
+    ...(values.has("--match-id") ? { matchId: values.get("--match-id")! } : {}),
   });
 }
 
@@ -83,16 +100,24 @@ async function smokeConnection(
     options.baseUrl,
   );
   url.protocol = "wss:";
+  if (options.matchId) url.searchParams.set("matchId", options.matchId);
+  const maxMessageBytes = options.matchId
+    ? PRESENTATION_MAX_MESSAGE_BYTES
+    : REACTION_MAX_MESSAGE_BYTES;
   await new Promise<void>((resolve, reject) => {
     let socket: import("ws").WebSocket;
     try {
-      socket = dependencies.connect(url.href, {
-        origin: ORIGIN,
-        followRedirects: false,
-        handshakeTimeout: TIMEOUT_MS,
-        maxPayload: REACTION_MAX_MESSAGE_BYTES,
-        perMessageDeflate: false,
-      });
+      socket = dependencies.connect(
+        url.href,
+        {
+          origin: ORIGIN,
+          followRedirects: false,
+          handshakeTimeout: TIMEOUT_MS,
+          maxPayload: maxMessageBytes,
+          perMessageDeflate: false,
+        },
+        options.matchId ? REACTION_SOCKET_PROTOCOL_V2 : undefined,
+      );
     } catch {
       reject(new Error("Reaction smoke could not open its WebSocket."));
       return;
@@ -137,7 +162,7 @@ async function smokeConnection(
       const bytes = Array.isArray(data)
         ? Buffer.concat(data)
         : Buffer.from(data as ArrayBuffer);
-      if (isBinary || bytes.byteLength > REACTION_MAX_MESSAGE_BYTES) {
+      if (isBinary || bytes.byteLength > maxMessageBytes) {
         finish(new Error("Reaction smoke received an invalid message."));
         return;
       }
@@ -154,17 +179,33 @@ async function smokeConnection(
         return;
       }
       if (
-        !isInviteReactionMessage(message) ||
+        !isInviteRoomMessage(message) ||
+        (options.matchId
+          ? message.schemaVersion !== 2 ||
+            socket.protocol !== REACTION_SOCKET_PROTOCOL_V2
+          : !isInviteReactionMessage(message)) ||
         (!snapshotReceived && message.type !== "snapshot") ||
         (snapshotReceived && message.type === "snapshot")
       ) {
         finish(new Error("Reaction smoke received an invalid message."));
         return;
       }
+      if (
+        message.schemaVersion === 2 &&
+        (message.type === "snapshot" || message.type === "presentation") &&
+        message.presentation.matchId !== options.matchId
+      ) {
+        finish(
+          new Error("Reaction smoke received another match's presentation."),
+        );
+        return;
+      }
       const reactions =
         message.type === "snapshot"
           ? Object.values(message.reactions)
-          : [message.reaction];
+          : message.type === "reaction"
+            ? [message.reaction]
+            : [];
       if (
         reactions.some(
           (reaction) => !isInviteReactionForInvite(options.inviteId, reaction),
@@ -188,7 +229,10 @@ async function smokeConnection(
 async function smokeReactions(
   options: Options,
   dependencies: Dependencies = {
-    connect: (url, options) => new WebSocket(url, options),
+    connect: (url, options, protocol) =>
+      protocol
+        ? new WebSocket(url, protocol, options)
+        : new WebSocket(url, options),
     log: (message) => console.log(message),
     setTimeout,
     clearTimeout,
@@ -198,7 +242,7 @@ async function smokeReactions(
   await smokeConnection(validated, dependencies);
   await smokeConnection(validated, dependencies);
   dependencies.log(
-    `[reactions-smoke] Passed read-only snapshot, heartbeat and reconnect on ${validated.baseUrl}`,
+    `[reactions-smoke] Passed read-only snapshot, heartbeat and reconnect${validated.matchId ? " with v2 match presentation" : ""} on ${validated.baseUrl}`,
   );
 }
 

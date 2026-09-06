@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   REACTION_AUTH_PROTOCOL_PREFIX,
   REACTION_SOCKET_PROTOCOL,
+  REACTION_SOCKET_PROTOCOL_V2,
   type InviteReaction,
 } from "@mons/shared/reactions";
 import { AuthApiFailure } from "../src/authErrors.ts";
@@ -657,4 +658,97 @@ test("fails closed on auth, rate limit and ownership failures and reports confli
     ).status,
     200,
   );
+});
+
+test("v2 sockets validate their match, seed presentation, and negotiate anonymous or participant admission", async () => {
+  for (const authenticated of [false, true]) {
+    const state = setup();
+    const ensured: unknown[] = [];
+    state.repository.getRtdbPath = async (path) => {
+      state.calls.reads.push(path);
+      return path === "invites/invite-one"
+        ? { hostId: "host-login", guestId: "guest-login" }
+        : { color: "white", emojiId: "1001", aura: "rainbow", fen: "position" };
+    };
+    state.dependencies.room!.ensurePresentations = async (matchId, seeds) => {
+      ensured.push({ matchId, seeds });
+      return { matchId, players: {} };
+    };
+    state.dependencies.room!.fetch = async (incoming) => {
+      state.socketRequests.push(incoming);
+      return new Response("upgrade", {
+        headers: {
+          "Sec-WebSocket-Protocol": incoming.headers.get(
+            "Sec-WebSocket-Protocol",
+          )!,
+        },
+      });
+    };
+    const response = await handleInviteReactionRoute(
+      request(true, {
+        path: "/invites/invite-one/reactions/socket?matchId=invite-one",
+        headers: {
+          "Sec-WebSocket-Protocol": authenticated
+            ? `${REACTION_SOCKET_PROTOCOL_V2}, ${REACTION_AUTH_PROTOCOL_PREFIX}${socketToken}`
+            : REACTION_SOCKET_PROTOCOL_V2,
+        },
+      }),
+      state.env,
+      ctx,
+      state.dependencies,
+    );
+    assert.equal(response.status, 200);
+    assert.equal(
+      response.headers.get("Sec-WebSocket-Protocol"),
+      REACTION_SOCKET_PROTOCOL_V2,
+    );
+    assert.equal(state.calls.auth, authenticated ? 1 : 0);
+    assert.equal(
+      state.socketRequests[0].headers.get("X-Mons-Presentation-Match"),
+      "invite-one",
+    );
+    assert.equal(
+      state.socketRequests[0].headers.get("X-Mons-Reaction-Role"),
+      authenticated ? "host" : "spectator",
+    );
+    assert.deepEqual(ensured, [
+      {
+        matchId: "invite-one",
+        seeds: {
+          "host-login": { emojiId: 1001, aura: "rainbow" },
+          "guest-login": { emojiId: 1001, aura: "rainbow" },
+        },
+      },
+    ]);
+  }
+});
+
+test("v2 rejects missing, extra, unrelated or unavailable match selections and v1 rejects queries", async () => {
+  const state = setup();
+  const prefix = "/invites/invite-one/reactions/socket";
+  for (const [path, protocol, expected] of [
+    [prefix, REACTION_SOCKET_PROTOCOL_V2, 400],
+    [`${prefix}?matchId=invite-one`, socketProtocols, 400],
+    [`${prefix}?matchId=other`, REACTION_SOCKET_PROTOCOL_V2, 400],
+    [
+      `${prefix}?matchId=invite-one&token=secret`,
+      REACTION_SOCKET_PROTOCOL_V2,
+      400,
+    ],
+    [
+      `${prefix}?matchId=invite-one&matchId=invite-one`,
+      REACTION_SOCKET_PROTOCOL_V2,
+      400,
+    ],
+    [`${prefix}?matchId=invite-one2`, REACTION_SOCKET_PROTOCOL_V2, 404],
+  ] as const) {
+    const response = await handleInviteReactionRoute(
+      request(true, { path, headers: { "Sec-WebSocket-Protocol": protocol } }),
+      state.env,
+      ctx,
+      state.dependencies,
+    );
+    assert.equal(response.status, expected);
+  }
+  assert.equal(state.calls.sockets, 0);
 });

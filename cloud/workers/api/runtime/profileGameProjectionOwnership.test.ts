@@ -334,6 +334,68 @@ describe("D1-authoritative profile game projection ownership", () => {
     });
   });
 
+  it("recomputes an anonymous opponent's rematch avatar from durable presentation", async () => {
+    const inviteId = "presentation-projection-invite";
+    const matchId = `${inviteId}1`;
+    const hostLoginId = "presentation-projection-host";
+    const guestLoginId = "presentation-projection-anon";
+    const hostProfileId = "presentation-projection-profile";
+    const guestSeed = { emojiId: 1, aura: "" };
+    await insertProfileOwner(hostProfileId, hostLoginId);
+    const runtime = createProfileGameProjectionRuntime(testEnv, {
+      rtdb: {
+        async getRtdbPath(path) {
+          if (path === `invites/${inviteId}`) {
+            return {
+              hostId: hostLoginId,
+              guestId: guestLoginId,
+              hostRematches: "1x",
+              guestRematches: "1x",
+            };
+          }
+          if (path === `automatch/${inviteId}`) return null;
+          if (path === `players/${guestLoginId}/matches/${matchId}`)
+            return guestSeed;
+          throw new Error(`unexpected-rtdb-read:${path}`);
+        },
+      },
+      wait: async () => undefined,
+    });
+    await runtime.recomputeInviteProjection(inviteId, "test", {
+      eventTimestampMs: 100,
+    });
+    await expect(
+      getProfileGameProjection(
+        testEnv.PROFILE_GAMES_DB,
+        hostProfileId,
+        inviteId,
+      ),
+    ).resolves.toMatchObject({ data: { opponentEmoji: 1 } });
+
+    const room = testEnv.INVITE_REACTIONS.getByName(inviteId);
+    await room.ensurePresentations(matchId, { [guestLoginId]: guestSeed });
+    await room.updatePresentation(guestLoginId, matchId, {
+      operationId: crypto.randomUUID(),
+      expectedRevision: 0,
+      emojiId: 7,
+      aura: "",
+    });
+    await runtime.recomputeInviteProjection(inviteId, "rating-completed", {
+      eventTimestampMs: 200,
+    });
+
+    await expect(
+      getProfileGameProjection(
+        testEnv.PROFILE_GAMES_DB,
+        hostProfileId,
+        inviteId,
+      ),
+    ).resolves.toMatchObject({
+      data: { latestMatchId: matchId, opponentEmoji: 7, status: "ended" },
+    });
+    expect(guestSeed).toEqual({ emojiId: 1, aura: "" });
+  });
+
   it("ends event games from canonical D1 ratings and ignores Firebase markers", async () => {
     const hostLoginId = "rating-projection-host-login";
     const guestLoginId = "rating-projection-guest-login";

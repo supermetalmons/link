@@ -1,6 +1,7 @@
 import type { PlayerColor } from "@mons/shared/ids";
 import type { StartAutomatchResponse } from "@mons/shared/navigation";
 import type { StartMatchTimerResponse } from "@mons/shared/timers";
+import type { MatchPresentation } from "@mons/shared/match-presentation";
 import type {
   HistoricalMatchPair,
   PlayerProfile,
@@ -16,6 +17,10 @@ type TimerClaimResponse = { ok: boolean };
 
 export interface GameConnectionPort {
   getActiveMatchId(): string | null;
+  getMatchPresentation(
+    matchId: string,
+    actorUid: string,
+  ): MatchPresentation | null;
   matchBelongsToCurrentInvite(matchId: string): boolean;
   rematchSeriesEndIsIndicated(): boolean | null;
   setWagerViewMatchId(matchId: string | null): void;

@@ -2,6 +2,7 @@ import {
   REACTION_MAX_MESSAGE_BYTES,
   REACTION_AUTH_PROTOCOL_PREFIX,
   REACTION_SOCKET_PROTOCOL,
+  REACTION_SOCKET_PROTOCOL_V2,
   isInviteReactionForInvite,
   isReactionSocketToken,
 } from "@mons/shared/reactions";
@@ -25,18 +26,25 @@ import { resolveInviteRole } from "./gameSessionMutations.ts";
 import { readBoundedJson } from "./http.ts";
 import type { InviteReactions } from "./inviteReactions.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
+import {
+  isPresentationMatchId,
+  readPresentationInvite,
+  readPresentationSeeds,
+  requirePresentationPair,
+} from "./matchPresentationAccess.ts";
 
 const REACTION_ROUTE_PATTERN = /^\/invites\/([^/]+)\/reactions(\/socket)?$/;
 
 function readSocketCredentials(request: Request): {
   token: string | null;
-  subprotocol: boolean;
+  protocol: string | null;
 } {
   const protocolHeader = request.headers.get("Sec-WebSocket-Protocol");
   const authorization = request.headers.get("Authorization");
   const invalid = () =>
     new AuthApiFailure(400, "invalid-argument", "invalid-reaction-auth");
   let protocolToken: string | null = null;
+  let negotiatedProtocol: string | null = null;
   if (protocolHeader !== null) {
     if (
       protocolHeader.length >
@@ -52,14 +60,23 @@ function readSocketCredentials(request: Request): {
     const bearer = protocols.find((protocol) =>
       protocol.startsWith(REACTION_AUTH_PROTOCOL_PREFIX),
     );
+    negotiatedProtocol = protocols.includes(REACTION_SOCKET_PROTOCOL_V2)
+      ? REACTION_SOCKET_PROTOCOL_V2
+      : protocols.includes(REACTION_SOCKET_PROTOCOL)
+        ? REACTION_SOCKET_PROTOCOL
+        : null;
     if (
-      protocols.length !== 2 ||
-      !protocols.includes(REACTION_SOCKET_PROTOCOL) ||
-      !bearer
+      !negotiatedProtocol ||
+      (bearer
+        ? protocols.length !== 2
+        : protocols.length !== 1 ||
+          negotiatedProtocol !== REACTION_SOCKET_PROTOCOL_V2)
     )
       throw invalid();
-    protocolToken = bearer.slice(REACTION_AUTH_PROTOCOL_PREFIX.length);
-    if (!isReactionSocketToken(protocolToken)) throw invalid();
+    if (bearer) {
+      protocolToken = bearer.slice(REACTION_AUTH_PROTOCOL_PREFIX.length);
+      if (!isReactionSocketToken(protocolToken)) throw invalid();
+    }
   }
   let headerToken: string | null = null;
   if (authorization !== null) {
@@ -71,7 +88,7 @@ function readSocketCredentials(request: Request): {
     throw invalid();
   return {
     token: protocolToken || headerToken,
-    subprotocol: protocolHeader !== null,
+    protocol: negotiatedProtocol,
   };
 }
 
@@ -92,7 +109,8 @@ async function reactionRateLimit(
 
 export type InviteReactionRouteDependencies = {
   repository?: GameplayRepository;
-  room?: Pick<InviteReactions, "fetch" | "publish">;
+  room?: Pick<InviteReactions, "fetch" | "publish"> &
+    Partial<Pick<InviteReactions, "ensurePresentations">>;
   verifyIdentity?: (
     request: Request,
     ctx: WorkerExecutionContext,
@@ -104,7 +122,11 @@ export function isInviteReactionPath(pathname: string): boolean {
   return REACTION_ROUTE_PATTERN.test(pathname);
 }
 
-function readRoute(request: Request): { inviteId: string; socket: boolean } {
+function readRoute(request: Request): {
+  inviteId: string;
+  socket: boolean;
+  matchId: string | null;
+} {
   const url = new URL(request.url);
   const match = url.pathname.match(REACTION_ROUTE_PATTERN);
   let inviteId = "";
@@ -116,11 +138,17 @@ function readRoute(request: Request): { inviteId: string; socket: boolean } {
   if (
     !isSafeFirebaseKey(inviteId) ||
     inviteId.trim() !== inviteId ||
-    url.search
+    (url.search &&
+      (!match?.[2] ||
+        url.searchParams.size !== 1 ||
+        !url.searchParams.has("matchId")))
   ) {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-invite-id");
   }
-  return { inviteId, socket: Boolean(match?.[2]) };
+  const matchId = url.searchParams.get("matchId");
+  if (matchId !== null && !isPresentationMatchId(inviteId, matchId))
+    throw new AuthApiFailure(400, "invalid-argument", "invalid-match-id");
+  return { inviteId, socket: Boolean(match?.[2]), matchId };
 }
 
 async function requirePairedInvite(
@@ -181,6 +209,16 @@ export async function handleInviteReactionRoute(
     const repository = dependencies.repository || createGameplayRepository(env);
     if (route.socket) {
       const credentials = readSocketCredentials(request);
+      if (
+        (credentials.protocol === REACTION_SOCKET_PROTOCOL_V2) !==
+        (route.matchId !== null)
+      ) {
+        throw new AuthApiFailure(
+          400,
+          "invalid-argument",
+          "invalid-reaction-protocol",
+        );
+      }
       let role: "host" | "guest" | "spectator" = "spectator";
       let rateKey = `reactions:connect:spectator:${ip}`;
       if (credentials.token) {
@@ -223,14 +261,34 @@ export async function handleInviteReactionRoute(
         await requirePairedInvite(repository, route.inviteId);
       const room =
         dependencies.room || env.INVITE_REACTIONS.getByName(route.inviteId);
+      if (route.matchId) {
+        const invite = await readPresentationInvite(repository, route.inviteId);
+        requirePresentationPair(invite);
+        const seeds = await readPresentationSeeds(
+          repository,
+          route.inviteId,
+          route.matchId,
+          invite,
+        );
+        if (!room.ensurePresentations)
+          throw new TypeError("presentation-room-unavailable");
+        await room.ensurePresentations(route.matchId, seeds);
+      }
       return await room.fetch(
         new Request("https://reactions.internal/socket", {
           headers: {
             Upgrade: "websocket",
             "X-Mons-Reaction-Role": role,
             "X-Mons-Reaction-IP": ip,
-            ...(credentials.subprotocol
-              ? { "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL }
+            ...(credentials.protocol
+              ? { "Sec-WebSocket-Protocol": credentials.protocol }
+              : {}),
+            ...(route.matchId
+              ? {
+                  "X-Mons-Presentation-Match": encodeURIComponent(
+                    route.matchId,
+                  ),
+                }
               : {}),
           },
         }),

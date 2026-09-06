@@ -10,6 +10,10 @@ export type GameInputRuntime = {
   didSelectInputModifier(inputModifier: InputModifier): void;
   canChangeEmoji(opponents: boolean): boolean;
   sendPlayerEmojiUpdate(newId: number, aura?: string): void;
+  getDisplayedMatchPresentation(actorUid: string): {
+    emojiId: number;
+    aura: string;
+  } | null;
   showItemsAfterChangingAssetsStyle(): void;
   cleanupCurrentInputs(): void;
   didClickInviteBotIntoLocalGameButton(): void;
@@ -65,6 +69,9 @@ export const gameInputRuntime: GameInputRuntime = {
   sendPlayerEmojiUpdate(newId, aura) {
     const { sendPlayerEmojiUpdate } = getRuntime();
     sendPlayerEmojiUpdate(newId, aura);
+  },
+  getDisplayedMatchPresentation(actorUid) {
+    return getRuntime().getDisplayedMatchPresentation(actorUid);
   },
   showItemsAfterChangingAssetsStyle() {
     const { showItemsAfterChangingAssetsStyle } = getRuntime();

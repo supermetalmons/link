@@ -499,6 +499,7 @@ test("shared package preserves every direct export subpath", () => {
     "./game-variants": "./game-variants.js",
     "./ids": "./ids.js",
     "./match-protocol": "./match-protocol.js",
+    "./match-presentation": "./match-presentation.js",
     "./mining": "./mining.js",
     "./navigation": "./navigation.js",
     "./nfts": "./nfts.js",

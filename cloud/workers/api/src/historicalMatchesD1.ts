@@ -99,6 +99,7 @@ export async function writeHistoricalMatchSnapshot(
   db: D1Database,
   input: {
     archivedAtMs: number;
+    expectedRevision?: number | null;
     finalizedAtMs: number;
     inviteId: string;
     pair: HistoricalMatchPair;
@@ -116,7 +117,11 @@ export async function writeHistoricalMatchSnapshot(
     !Number.isSafeInteger(input.finalizedAtMs) ||
     input.finalizedAtMs < 0 ||
     !Number.isSafeInteger(input.archivedAtMs) ||
-    input.archivedAtMs < input.finalizedAtMs
+    input.archivedAtMs < input.finalizedAtMs ||
+    (input.expectedRevision !== undefined &&
+      input.expectedRevision !== null &&
+      (!Number.isSafeInteger(input.expectedRevision) ||
+        input.expectedRevision < 1))
   ) {
     throw new TypeError("invalid-historical-match-snapshot");
   }
@@ -135,7 +140,8 @@ export async function writeHistoricalMatchSnapshot(
          schema_version = excluded.schema_version,
          revision = historical_match_pairs.revision + 1
        WHERE excluded.source_kind = 'rating'
-         AND historical_match_pairs.source_kind != 'rating'`,
+         AND historical_match_pairs.source_kind != 'rating'
+         AND (? IS NULL OR historical_match_pairs.revision = ?)`,
     )
     .bind(
       input.inviteId,
@@ -145,6 +151,8 @@ export async function writeHistoricalMatchSnapshot(
       input.finalizedAtMs,
       input.archivedAtMs,
       HISTORICAL_MATCH_SCHEMA_VERSION,
+      input.expectedRevision === null ? 0 : (input.expectedRevision ?? null),
+      input.expectedRevision === null ? 0 : (input.expectedRevision ?? null),
     )
     .run();
   const stored = await readHistoricalMatchSnapshot(
@@ -154,6 +162,9 @@ export async function writeHistoricalMatchSnapshot(
   );
   if (!stored) throw new HistoricalMatchCorruption();
   if (stored.source === "rating" && input.source !== "rating") return stored;
+  if (input.source === "rating" && stored.source !== "rating") {
+    throw new HistoricalMatchConflict();
+  }
   const storedPair = canonicalPair(stored.pair);
   if (!storedPair) throw new HistoricalMatchCorruption();
   if (JSON.stringify(storedPair) !== snapshotJson) {

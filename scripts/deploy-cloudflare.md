@@ -12,6 +12,7 @@ Run commands from the repository root with Node.js 24 and Java 21 or newer. Fire
 - Encrypted secrets stay in Cloudflare; required names are declared in the API Wrangler configuration.
 - `EVENT_DB` owns event records, participants, prize selections, visible assigned prizes, progress markers, and event-specific projection state. Active invites and matches remain in RTDB.
 - `INVITE_REACTIONS` owns voice/sticker reaction delivery through one SQLite-backed `InviteReactions` Durable Object per invite. Firebase reaction records are retained but no longer written after the final rules cutover.
+- The same Durable Object owns revisioned live match presentation and frozen historical appearance. Firebase matches retain immutable emoji/aura seeds; no extra Worker, namespace, or D1 migration is required.
 - `cloud/firebase.json` owns active-gameplay Realtime Database rules. Firestore, Firebase Functions, and canonical event-data RTDB paths are retired.
 
 Authenticate Wrangler locally or provide `CLOUDFLARE_API_TOKEN` through the process environment. Never put credentials in command arguments, source files, release files, or logs.
@@ -106,6 +107,27 @@ npm run deploy:firebase -- --project mons-link
 
 The new rules deny browser writes to `invites/{inviteId}/reactions`; retained records need no import or deletion. Older clients must refresh or update. API and frontend releases must precede this rules release, and mixed old/new clients do not share a reaction transport during the cutover. Observe connection/publish failures, rate-limit rejections and browser reconnect frequency for at least fifteen minutes after cutover. Retain the API namespace if the frontend must be repaired.
 
+### Match presentation cutover
+
+The presentation release adds tables and RPC methods to the existing `InviteReactions` namespace; retain its class export, binding, and stored data. Use the standard API candidate upload and explicit promotion procedure above. V1 reaction frames remain compatible while v2 adds a match-specific presentation snapshot and revisioned events. Do not enable a preview URL or repeat the initial namespace bootstrap for this additive change.
+
+After API promotion, run the existing v1 smoke and the v2 smoke with an explicitly selected paired invite and existing match:
+
+```sh
+npm run smoke:reactions -- --base-url https://api.mons.link --invite-id <existing-paired-invite-id> --match-id <existing-match-id>
+```
+
+Release the frontend after the API. In a dedicated test invite, verify emoji and aura changes between two players and an anonymous spectator; clearing an aura; rapid changes; linked-login updates; HTTP hydration while the host waits for a guest; and reconnect after a change. Verify rematches and event games, stale match/profile snapshots, and changing live appearance while viewing historical games. Confirm moves, timers, reactions, and surrender still work, and that archived appearance stays unchanged after a later live update.
+
+Only after those checks pass, dry-run and release Firebase rules:
+
+```sh
+npm run deploy:firebase -- --project mons-link --dry-run
+npm run deploy:firebase -- --project mons-link
+```
+
+These rules preserve both the values and existence of match `emojiId` and `aura` for all browser claims. They reject child updates, deletion, and whole-record changes, while service-side match creation retains its existing behavior. Older clients must refresh or update; old/new clients do not share live cosmetic updates during the cutover. Retain the Firebase seed fields and historical records without bulk backfill. Observe presentation GET/POST failures, revision conflicts, v2 reconnect frequency, Firebase permission errors, and historical projection retries for at least fifteen minutes. Repair forward while preserving the namespace, live presentations, and frozen snapshots.
+
 ### Read-only reaction smoke
 
 Choose an existing paired invite explicitly. This smoke uses no auth fixture, publishes no reaction, and never selects a game automatically:
@@ -115,6 +137,8 @@ npm run smoke:reactions -- --base-url https://api.mons.link --invite-id <existin
 ```
 
 The smoke connects as a spectator with `Origin: https://mons.link`, validates the versioned snapshot and invite membership of any reaction entries, sends only the application heartbeat, disconnects, and repeats to verify reconnect delivery. Each connection has a ten-second deadline and a 4 KiB message limit; redirects are disabled and output excludes reaction contents. An empty snapshot passes. A pending or missing invite, origin/upgrade rejection, malformed message, missing heartbeat, or premature disconnect fails the command. Run it on the API custom domain after promotion and before resuming writes. The default `smoke:api` command remains unchanged and never broadcasts reactions to a live game.
+
+Adding `--match-id <existing-match-id>` explicitly selects v2. The smoke requires successful v2 protocol negotiation, validates the selected match's presentation snapshot and any arriving presentation events within a 16 KiB envelope, and repeats after reconnect. The larger response bound accommodates maximum-length legacy match IDs; presentation mutation bodies retain a 4 KiB limit. The smoke never sends a presentation mutation, logs cosmetic values, or imports historical records. The server may lazily initialize missing presentation seeds while serving the snapshot. Omitting `--match-id` retains the v1 reaction-only smoke.
 
 Unit coverage for this command uses simulated sockets and timers in `npm run test:tooling`. It does not replace the two-player/spectator browser verification before the final rules cutover.
 

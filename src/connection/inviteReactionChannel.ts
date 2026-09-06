@@ -2,10 +2,16 @@ import {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
   REACTION_MAX_MESSAGE_BYTES,
+  REACTION_SOCKET_PROTOCOL_V2,
   isInviteReactionForInvite,
-  isInviteReactionMessage,
+  isInviteRoomMessage,
   type InviteReaction,
 } from "@mons/shared/reactions";
+import {
+  PRESENTATION_MAX_MESSAGE_BYTES,
+  type MatchPresentation,
+  type MatchPresentationSnapshot,
+} from "@mons/shared/match-presentation";
 import { getInviteReactionSocketUrl } from "../services/inviteReactionsApi";
 
 export const REACTION_RECONNECT_DELAYS_MS = [
@@ -28,6 +34,7 @@ type ReactionSocket = Pick<
 
 type InviteReactionChannelDependencies = {
   inviteId: string;
+  matchId?: string;
   createSocket: (url: string, protocols?: string[]) => ReactionSocket;
   getProtocols?: (forceRefresh: boolean) => Promise<string[]>;
   isActive: () => boolean;
@@ -36,6 +43,8 @@ type InviteReactionChannelDependencies = {
   addWakeListener: (listener: () => void) => () => void;
   onInitialSnapshot: (reactions: Record<string, InviteReaction>) => void;
   onReaction: (reaction: InviteReaction, senderUid: string) => void;
+  onPresentationSnapshot?: (snapshot: MatchPresentationSnapshot) => void;
+  onPresentation?: (presentation: MatchPresentation) => void;
   onError: (error: unknown) => void;
   setTimer: (callback: () => void, delayMs: number) => Timer;
   clearTimer: (timer: Timer) => void;
@@ -178,8 +187,18 @@ export class InviteReactionChannel {
         return;
       }
       try {
-        const socket = this.dependencies.createSocket(
+        const url = new URL(
           getInviteReactionSocketUrl(this.dependencies.inviteId),
+        );
+        if (this.dependencies.matchId) {
+          url.searchParams.set("matchId", this.dependencies.matchId);
+          protocols = [
+            REACTION_SOCKET_PROTOCOL_V2,
+            ...(protocols?.slice(1) ?? []),
+          ];
+        }
+        const socket = this.dependencies.createSocket(
+          url.toString(),
           protocols,
         );
         if (!isPreparing()) {
@@ -238,13 +257,19 @@ export class InviteReactionChannel {
     try {
       if (
         typeof data !== "string" ||
-        new TextEncoder().encode(data).byteLength > REACTION_MAX_MESSAGE_BYTES
+        new TextEncoder().encode(data).byteLength >
+          (this.dependencies.matchId
+            ? PRESENTATION_MAX_MESSAGE_BYTES
+            : REACTION_MAX_MESSAGE_BYTES)
       ) {
         throw new Error("invalid-reaction-message");
       }
       const message: unknown = JSON.parse(data);
-      if (!isInviteReactionMessage(message))
+      if (!isInviteRoomMessage(message))
         throw new Error("invalid-reaction-message");
+      if (this.dependencies.matchId && message.schemaVersion !== 2) {
+        throw new Error("invalid-room-version");
+      }
       if (message.type === "snapshot") {
         if (
           this.receivedSnapshot ||
@@ -258,6 +283,13 @@ export class InviteReactionChannel {
         this.connecting = false;
         this.failures = 0;
         this.clearTimer("responseTimer");
+        if (message.schemaVersion === 2) {
+          if (message.presentation.matchId !== this.dependencies.matchId) {
+            throw new Error("invalid-presentation-match");
+          }
+          this.dependencies.onPresentationSnapshot?.(message.presentation);
+          if (!this.isCurrent(socket)) return;
+        }
         if (!this.initialized) {
           this.initialized = true;
           this.dependencies.onInitialSnapshot(message.reactions);
@@ -270,6 +302,14 @@ export class InviteReactionChannel {
           }
         }
         if (this.isCurrent(socket)) this.scheduleHeartbeat(socket);
+      } else if (message.type === "presentation") {
+        if (
+          !this.receivedSnapshot ||
+          message.presentation.matchId !== this.dependencies.matchId
+        ) {
+          throw new Error("invalid-presentation-event");
+        }
+        this.dependencies.onPresentation?.(message.presentation);
       } else {
         if (
           !this.receivedSnapshot ||

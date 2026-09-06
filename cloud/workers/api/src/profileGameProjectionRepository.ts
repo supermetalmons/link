@@ -1,4 +1,5 @@
 import { type HistoricalMatchPair } from "@mons/shared/game-sessions";
+import { isMatchPresentationSnapshot } from "@mons/shared/match-presentation";
 import {
   createEventProfileGameProjectionCore,
   type EventProjectionCommitOptions,
@@ -29,11 +30,12 @@ import {
   reserveEventProfileGameProjectionFence,
   type ProjectionWrite as D1ProjectionWrite,
 } from "./profileGamesD1.ts";
-import {
-  readHistoricalMatchSnapshot,
-  writeHistoricalMatchSnapshot,
-} from "./historicalMatchesD1.ts";
+import { readHistoricalMatchSnapshot } from "./historicalMatchesD1.ts";
 import type { HistoricalMatchSource } from "./historicalMatches.ts";
+import {
+  archiveHistoricalMatchWithPresentation,
+  type FreezeHistoricalMatchPresentations,
+} from "./historicalMatchPresentation.ts";
 import { readRatingCompletion } from "./ratingCompletionD1.ts";
 
 type ProjectionRtdbRepository = Pick<GameplayRepository, "getRtdbPath">;
@@ -68,6 +70,7 @@ export type EventProfileGameProjectionRuntime = {
 
 type ProfileGameProjectionDependencies = {
   d1?: D1Database;
+  freezePresentations?: FreezeHistoricalMatchPresentations;
   logger?: Pick<Console, "error">;
   now?: () => number;
   profileDb?: D1Database;
@@ -192,6 +195,22 @@ export function createProfileGameProjectionRuntime(
 
     getRtdbPath: (path) => rtdb.getRtdbPath(path),
 
+    async getMatchEmoji(inviteId, matchId, loginUid) {
+      const snapshot =
+        await env.INVITE_REACTIONS.getByName(inviteId).getPresentationSnapshot(
+          matchId,
+        );
+      if (
+        !isMatchPresentationSnapshot(snapshot) ||
+        snapshot.matchId !== matchId
+      ) {
+        throw new Error("projection-presentation-unavailable");
+      }
+      return Object.hasOwn(snapshot.players, loginUid)
+        ? snapshot.players[loginUid].emojiId
+        : null;
+    },
+
     hasCompletedRatingUpdate: (inviteId, matchId) =>
       readRatingCompletion(profileDb, inviteId, matchId),
 
@@ -211,13 +230,22 @@ export function createProfileGameProjectionRuntime(
       );
     },
     async archiveHistoricalMatch(input) {
-      await writeHistoricalMatchSnapshot(d1, {
-        ...input,
-        archivedAtMs: Math.max(
-          (dependencies.now || Date.now)(),
-          input.finalizedAtMs,
-        ),
-      });
+      await archiveHistoricalMatchWithPresentation(
+        d1,
+        {
+          ...input,
+          archivedAtMs: Math.max(
+            (dependencies.now || Date.now)(),
+            input.finalizedAtMs,
+          ),
+        },
+        dependencies.freezePresentations ||
+          ((inviteId, matchId, seeds) =>
+            env.INVITE_REACTIONS.getByName(inviteId).freezePresentations(
+              matchId,
+              seeds,
+            )),
+      );
     },
   };
 }

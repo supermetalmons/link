@@ -3,12 +3,17 @@
 const { normalizeFirebaseKey } = require("./ids");
 const { VALID_REACTION_IDS } = require("./nfts");
 const { parseInviteMatchIndex } = require("./rematches");
+const {
+  isMatchPresentation,
+  isMatchPresentationSnapshot,
+} = require("./match-presentation");
 
 const REACTION_PROTOCOL_VERSION = 1;
 const REACTION_MAX_MESSAGE_BYTES = 4096;
 const REACTION_HEARTBEAT_REQUEST = "ping";
 const REACTION_HEARTBEAT_RESPONSE = "pong";
 const REACTION_SOCKET_PROTOCOL = "mons-reactions-v1";
+const REACTION_SOCKET_PROTOCOL_V2 = "mons-reactions-v2";
 const REACTION_AUTH_PROTOCOL_PREFIX = "bearer.";
 const FIXED_STICKER_IDS = Object.freeze([
   900316, 900101, 900393, 90063, 900109, 900228, 900245, 900189, 900267, 900374,
@@ -103,6 +108,34 @@ function isInviteReactionMessage(value) {
 const isSendInviteReactionResponse = (value) =>
   isRecord(value) && value.ok === true && hasExactKeys(value, ["ok"]);
 
+function isInviteRoomMessage(value) {
+  if (isInviteReactionMessage(value)) return true;
+  if (!isRecord(value) || value.schemaVersion !== 2) return false;
+  if (value.type === "presentation") {
+    return (
+      hasExactKeys(value, ["schemaVersion", "type", "presentation"]) &&
+      isMatchPresentation(value.presentation)
+    );
+  }
+  if (value.type === "snapshot") {
+    return (
+      hasExactKeys(value, [
+        "schemaVersion",
+        "type",
+        "reactions",
+        "presentation",
+      ]) &&
+      isInviteReactionMessage({
+        schemaVersion: 1,
+        type: "snapshot",
+        reactions: value.reactions,
+      }) &&
+      isMatchPresentationSnapshot(value.presentation)
+    );
+  }
+  return isInviteReactionMessage({ ...value, schemaVersion: 1 });
+}
+
 module.exports = {
   FIXED_STICKER_IDS,
   STICKER_ID_WHITELIST,
@@ -111,11 +144,13 @@ module.exports = {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
   REACTION_SOCKET_PROTOCOL,
+  REACTION_SOCKET_PROTOCOL_V2,
   REACTION_AUTH_PROTOCOL_PREFIX,
   isReaction,
   isReactionSocketToken,
   isInviteReaction,
   isInviteReactionForInvite,
   isInviteReactionMessage,
+  isInviteRoomMessage,
   isSendInviteReactionResponse,
 };

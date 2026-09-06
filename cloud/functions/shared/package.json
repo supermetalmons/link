@@ -11,6 +11,7 @@
     "./game-sessions": "./game-sessions.js",
     "./ids": "./ids.js",
     "./match-protocol": "./match-protocol.js",
+    "./match-presentation": "./match-presentation.js",
     "./mining": "./mining.js",
     "./navigation": "./navigation.js",
     "./nfts": "./nfts.js",

@@ -3,13 +3,18 @@ const { EventEmitter }: typeof import("node:events") = require("node:events");
 const test: typeof import("node:test") = require("node:test");
 const { parseArgs, smokeReactions } =
   require("./smoke-cloudflare-reactions.ts") as {
-    parseArgs: (argv: string[]) => { baseUrl: string; inviteId: string };
+    parseArgs: (argv: string[]) => {
+      baseUrl: string;
+      inviteId: string;
+      matchId?: string;
+    };
     smokeReactions: (
-      options: { baseUrl: string; inviteId: string },
+      options: { baseUrl: string; inviteId: string; matchId?: string },
       dependencies: {
         connect: (
           url: string,
           options: import("ws").ClientOptions,
+          protocol?: string,
         ) => import("ws").WebSocket;
         log: (message: string) => void;
         setTimeout: typeof setTimeout;
@@ -32,6 +37,7 @@ const SNAPSHOT = {
 };
 
 class FakeSocket extends EventEmitter {
+  protocol = "";
   sent: string[] = [];
   terminated = 0;
   respond = true;
@@ -57,13 +63,22 @@ function harness(
   },
 ) {
   const sockets: FakeSocket[] = [];
-  const requests: { url: string; options: import("ws").ClientOptions }[] = [];
+  const requests: {
+    url: string;
+    options: import("ws").ClientOptions;
+    protocol?: string;
+  }[] = [];
   const logs: string[] = [];
   const timers = new Map<NodeJS.Timeout, () => void>();
   const dependencies = {
-    connect: (url: string, options: import("ws").ClientOptions) => {
-      requests.push({ url, options });
+    connect: (
+      url: string,
+      options: import("ws").ClientOptions,
+      protocol?: string,
+    ) => {
+      requests.push({ url, options, protocol });
       const socket = new FakeSocket();
+      socket.protocol = protocol || "";
       sockets.push(socket);
       queueMicrotask(() => opened(socket));
       return socket as unknown as import("ws").WebSocket;
@@ -321,4 +336,114 @@ test("rejects invalid direct options before connecting and sanitizes constructor
     }),
     /could not open its WebSocket/,
   );
+});
+
+test("negotiates v2 and validates bounded match presentation on initial connection and reconnect", async () => {
+  const matchId = "invite11";
+  const presentation = {
+    matchId,
+    players: {
+      host: {
+        matchId,
+        actorUid: "host",
+        emojiId: 1001,
+        aura: "rainbow",
+        revision: 2,
+      },
+      guest: { matchId, actorUid: "guest", emojiId: 3, aura: "", revision: 0 },
+    },
+  };
+  const state = harness((socket) => {
+    socket.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({ ...SNAPSHOT, schemaVersion: 2, presentation }),
+      ),
+      false,
+    );
+    socket.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({
+          schemaVersion: 2,
+          type: "presentation",
+          presentation: presentation.players.host,
+        }),
+      ),
+      false,
+    );
+  });
+  const options = parseArgs([
+    "--base-url",
+    OPTIONS.baseUrl,
+    "--invite-id",
+    OPTIONS.inviteId,
+    "--match-id",
+    matchId,
+  ]);
+  await smokeReactions(options, state.dependencies);
+  assert.deepEqual(options, { ...OPTIONS, matchId });
+  assert.equal(state.requests.length, 2);
+  for (const request of state.requests) {
+    assert.equal(
+      request.url,
+      "wss://api.mons.link/invites/invite1/reactions/socket?matchId=invite11",
+    );
+    assert.equal(request.protocol, "mons-reactions-v2");
+    assert.equal(request.options.maxPayload, 16_384);
+  }
+  assert.deepEqual(
+    state.sockets.map((socket) => socket.sent),
+    [["ping"], ["ping"]],
+  );
+  assert.match(state.logs[0], /v2 match presentation/);
+  assert.equal(state.logs[0].includes("rainbow"), false);
+});
+
+test("rejects foreign presentation, missing v2 negotiation, and v1 downgrade", async () => {
+  for (const fixture of [
+    {
+      message: {
+        ...SNAPSHOT,
+        schemaVersion: 2,
+        presentation: { matchId: "other", players: {} },
+      },
+    },
+    {
+      message: {
+        ...SNAPSHOT,
+        schemaVersion: 2,
+        presentation: { matchId: "invite1", players: {} },
+      },
+      protocol: "",
+    },
+    { message: SNAPSHOT },
+  ]) {
+    const state = harness((socket) => {
+      if (fixture.protocol !== undefined) socket.protocol = fixture.protocol;
+      socket.emit(
+        "message",
+        Buffer.from(JSON.stringify(fixture.message)),
+        false,
+      );
+    });
+    await assert.rejects(
+      smokeReactions({ ...OPTIONS, matchId: "invite1" }, state.dependencies),
+      /invalid message|another match/,
+    );
+  }
+  for (const matchId of ["other", "invite1/1", "invite101", ""]) {
+    assert.throws(
+      () =>
+        parseArgs([
+          "--base-url",
+          OPTIONS.baseUrl,
+          "--invite-id",
+          OPTIONS.inviteId,
+          "--match-id",
+          matchId,
+        ]),
+      /Usage:/,
+    );
+  }
 });

@@ -474,6 +474,7 @@ let viewedRematchMatchId: string | null = null;
 let viewedRematchGame: MonsRules.Game | null = null;
 let viewedRematchPair: HistoricalMatchPair | null = null;
 let viewedRematchRequestToken = 0;
+let displayedHistoryViewId = 0;
 let currentGameVariant: StoredGameVariant = legacyDefaultGameVariant;
 type BoardViewMode = "activeLive" | "waitingLive" | "historicalView";
 let boardViewMode: BoardViewMode = "activeLive";
@@ -483,6 +484,7 @@ let moveHistoryFlipOverrideSessionId: number | null = null;
 let moveHistoryFlipOverrideEnabled = false;
 let moveHistoryFlipOverrideBaseBoardFlipped: boolean | null = null;
 const historicalMatchPairCache = new Map<string, HistoricalMatchPair | null>();
+const provisionalHistoricalMatchIds = new Set<string>();
 const historicalScoreCache = new Map<
   string,
   { white: number; black: number }
@@ -760,6 +762,7 @@ export function didSyncTutorialProgress() {
 bindTutorialProgressSyncHandler(didSyncTutorialProgress);
 
 function clearViewedRematchState() {
+  displayedHistoryViewId += 1;
   viewedRematchRequestToken += 1;
   viewedRematchMatchId = null;
   viewedRematchGame = null;
@@ -892,6 +895,7 @@ function enterWaitingLiveView() {
   Board.hideItemSelectionOrConfirmationOverlay();
   Board.setBoardFlipped(activeBoardShouldBeFlipped());
   applyBoardUiForCurrentView();
+  refreshDisplayedMatchPresentation();
   if (boardViewDebugLogsEnabled) {
     console.log("[board-view] entered waitingLive");
   }
@@ -909,6 +913,7 @@ function restoreLiveBoardView() {
   Board.hideItemSelectionOrConfirmationOverlay();
   Board.setBoardFlipped(activeBoardShouldBeFlipped());
   applyBoardUiForCurrentView();
+  refreshDisplayedMatchPresentation();
   if (boardViewMode === "activeLive") {
     setNewBoard(false);
     const didRestoreTimerState = applyTimerStateFromStashes(
@@ -984,6 +989,7 @@ function enterHistoricalView(
   if (!isBoardRenderSessionActive(sessionId)) {
     return false;
   }
+  displayedHistoryViewId += 1;
   boardViewMode = "historicalView";
   viewedRematchMatchId = matchId;
   connection.setWagerViewMatchId(matchId);
@@ -997,8 +1003,10 @@ function enterHistoricalView(
   Board.hideItemSelectionOrConfirmationOverlay();
   applyBoardUiForCurrentView();
   applyWagerState();
+  refreshDisplayedMatchPresentation();
   ensureBoardViewInvariants("enterHistoricalView");
   setNewBoard(true);
+  scheduleHistoricalMatchArchiveRefresh(matchId, displayedHistoryViewId);
   if (boardViewDebugLogsEnabled) {
     console.log(`[board-view] entered historicalView for ${matchId}`);
   }
@@ -1029,6 +1037,7 @@ function shouldPreserveHistoricalViewForCurrentInvite(): boolean {
 
 function clearRematchHistoryCaches() {
   historicalMatchPairCache.clear();
+  provisionalHistoricalMatchIds.clear();
   historicalScoreCache.clear();
   historicalMatchPairMissUntilByMatchId.clear();
   rematchScorePrefetchSignature = "";
@@ -1477,13 +1486,92 @@ function cacheHistoricalScore(
   return true;
 }
 
+function mergeHistoricalMatchPresentation(
+  pair: HistoricalMatchPair,
+  archivedPair: HistoricalMatchPair,
+): HistoricalMatchPair {
+  const merged = { ...pair };
+  for (const side of ["hostMatch", "guestMatch"] as const) {
+    const match = pair[side];
+    const actorUid =
+      side === "hostMatch" ? pair.hostPlayerId : pair.guestPlayerId;
+    const appearance =
+      actorUid === archivedPair.hostPlayerId
+        ? archivedPair.hostMatch
+        : actorUid === archivedPair.guestPlayerId
+          ? archivedPair.guestMatch
+          : null;
+    if (match && appearance)
+      merged[side] = {
+        ...match,
+        emojiId: appearance.emojiId,
+        aura: appearance.aura,
+      };
+  }
+  return merged;
+}
+
+function cacheProvisionalHistoricalMatchPair(pair: HistoricalMatchPair): void {
+  if (
+    historicalMatchPairCache.get(pair.matchId) &&
+    !provisionalHistoricalMatchIds.has(pair.matchId)
+  )
+    return;
+  historicalMatchPairCache.set(pair.matchId, pair);
+  provisionalHistoricalMatchIds.add(pair.matchId);
+  historicalMatchPairMissUntilByMatchId.delete(pair.matchId);
+}
+
+function scheduleHistoricalMatchArchiveRefresh(
+  matchId: string,
+  viewId: number,
+  delayMs = historicalMatchPairRetryDelayMs,
+): void {
+  if (!isOnlineGame || !provisionalHistoricalMatchIds.has(matchId)) return;
+  const sessionGuard = getSessionGuard();
+  const isSelected = () =>
+    sessionGuard() &&
+    displayedHistoryViewId === viewId &&
+    boardViewMode === "historicalView" &&
+    viewedRematchMatchId === matchId;
+  setManagedGameTimeout(
+    () => {
+      void ensureHistoricalMatchPair(matchId, { forceRefresh: true })
+        .then((pair) => {
+          if (!isSelected()) return;
+          if (provisionalHistoricalMatchIds.has(matchId)) {
+            scheduleHistoricalMatchArchiveRefresh(
+              matchId,
+              viewId,
+              historicalMatchPairMissCooldownMs,
+            );
+            return;
+          }
+          if (!pair || !viewedRematchPair) return;
+          viewedRematchPair = mergeHistoricalMatchPresentation(
+            viewedRematchPair,
+            pair,
+          );
+          refreshDisplayedMatchPresentation();
+          triggerMoveHistoryPopupReload();
+        })
+        .catch((error) =>
+          console.error("Error refreshing historical match appearance:", error),
+        );
+    },
+    delayMs,
+    isSelected,
+  );
+}
+
 async function ensureHistoricalMatchPair(
   matchId: string,
   options?: { forceRefresh?: boolean },
 ): Promise<HistoricalMatchPair | null> {
   const forceRefresh = options?.forceRefresh === true;
   const cachedPair = historicalMatchPairCache.get(matchId) ?? null;
-  if (!forceRefresh && historicalMatchPairCache.has(matchId)) {
+  const provisional = provisionalHistoricalMatchIds.has(matchId);
+  if (!forceRefresh && historicalMatchPairCache.has(matchId) && !provisional) {
     return cachedPair;
   }
   if (!forceRefresh) {
@@ -1491,31 +1579,37 @@ async function ensureHistoricalMatchPair(
     const missUntil = historicalMatchPairMissUntilByMatchId.get(matchId);
     if (missUntil !== undefined) {
       if (missUntil > now) {
-        return null;
+        return provisional ? cachedPair : null;
       }
       historicalMatchPairMissUntilByMatchId.delete(matchId);
     }
   }
   let pair: HistoricalMatchPair | null = null;
+  const sessionGuard = getSessionGuard();
   try {
     pair = await connection.loadHistoricalMatchPair(matchId);
   } catch {
     pair = null;
   }
+  if (!sessionGuard()) return null;
   if (pair) {
     historicalMatchPairCache.set(matchId, pair);
+    provisionalHistoricalMatchIds.delete(matchId);
     historicalMatchPairMissUntilByMatchId.delete(matchId);
     cacheHistoricalScore(matchId, pair);
     return pair;
   }
+  const latestCachedPair = historicalMatchPairCache.get(matchId) ?? null;
+  if (latestCachedPair && !provisionalHistoricalMatchIds.has(matchId))
+    return latestCachedPair;
   historicalMatchPairMissUntilByMatchId.set(
     matchId,
     Date.now() + historicalMatchPairMissCooldownMs,
   );
   if (!forceRefresh) {
-    return null;
+    return provisional ? latestCachedPair : null;
   }
-  return historicalMatchPairCache.get(matchId) ?? null;
+  return latestCachedPair;
 }
 
 function getMatchMovesByColor(
@@ -1899,6 +1993,8 @@ export async function didSelectRematchSeriesMatch(
         ) {
           pair = refreshedPair;
           historicalGame = refreshedHistoricalGame;
+        } else if (!provisionalHistoricalMatchIds.has(matchId)) {
+          pair = mergeHistoricalMatchPresentation(pair, refreshedPair);
         }
       }
     }
@@ -2564,8 +2660,7 @@ export function didJustCreateRematchProposalSuccessfully(
     previousMatchPair?.hostMatch && previousMatchPair?.guestMatch
   );
   if (previousMatchId && previousMatchPair && hasCompleteHistoricalPair) {
-    historicalMatchPairCache.set(previousMatchId, previousMatchPair);
-    historicalMatchPairMissUntilByMatchId.delete(previousMatchId);
+    cacheProvisionalHistoricalMatchPair(previousMatchPair);
   }
   if (previousMatchId) {
     historicalScoreCache.set(previousMatchId, {
@@ -5485,6 +5580,70 @@ function showNextProblem(problem: Problem) {
   didSelectPuzzle(problem);
 }
 
+function getDisplayedMatchPresentation(actorUid: string): {
+  emojiId: number;
+  aura: string;
+} | null {
+  if (!actorUid) return null;
+  const matchId =
+    boardViewMode === "historicalView"
+      ? viewedRematchMatchId
+      : connection.getActiveMatchId();
+  if (!matchId) return null;
+  if (boardViewMode !== "historicalView") {
+    return connection.getMatchPresentation(matchId, actorUid);
+  }
+  if (!isOnlineGame || !viewedRematchPair) return null;
+  const match =
+    actorUid === viewedRematchPair.hostPlayerId
+      ? viewedRematchPair.hostMatch
+      : actorUid === viewedRematchPair.guestPlayerId
+        ? viewedRematchPair.guestMatch
+        : null;
+  return match ? { emojiId: match.emojiId, aura: match.aura ?? "" } : null;
+}
+
+function refreshDisplayedMatchPresentation(): void {
+  for (const [isOpponentSide, metadata] of [
+    [false, Board.playerSideMetadata],
+    [true, Board.opponentSideMetadata],
+  ] as const) {
+    const presentation = getDisplayedMatchPresentation(metadata.uid);
+    if (presentation) {
+      Board.updateEmojiAndAuraIfNeeded(
+        String(presentation.emojiId),
+        presentation.aura,
+        isOpponentSide,
+      );
+    }
+  }
+}
+
+export function didReceiveMatchPresentationUpdate(
+  matchId: string,
+  actorUid: string,
+): void {
+  const displayedMatchId =
+    boardViewMode === "historicalView"
+      ? viewedRematchMatchId
+      : connection.getActiveMatchId();
+  if (
+    boardViewMode === "historicalView" ||
+    !displayedMatchId ||
+    matchId !== displayedMatchId
+  )
+    return;
+  const isOpponentSide = actorUid === Board.opponentSideMetadata.uid;
+  if (!isOpponentSide && actorUid !== Board.playerSideMetadata.uid) return;
+  const presentation = getDisplayedMatchPresentation(actorUid);
+  if (!presentation) return;
+  Board.updateEmojiAndAuraIfNeeded(
+    String(presentation.emojiId),
+    presentation.aura,
+    isOpponentSide,
+  );
+}
+
 export function didRecoverInviteReactions(
   reactions: Record<string, InviteReaction> | null | undefined,
 ) {
@@ -5818,6 +5977,7 @@ bindGameInputRuntime({
   didSelectInputModifier,
   canChangeEmoji,
   sendPlayerEmojiUpdate,
+  getDisplayedMatchPresentation,
   showItemsAfterChangingAssetsStyle,
   cleanupCurrentInputs,
   didClickInviteBotIntoLocalGameButton,

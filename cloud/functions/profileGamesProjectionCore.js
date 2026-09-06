@@ -265,7 +265,7 @@ const createProfileGamesProjectionCore = ({
       : null;
   };
 
-  const readLoginSummaryFromRtdbMatches = async (
+  const readLoginSummaryFromMatches = async (
     loginUid,
     latestMatchId,
     inviteId,
@@ -286,19 +286,32 @@ const createProfileGamesProjectionCore = ({
     );
     for (const candidateMatchId of candidateMatchIds) {
       try {
-        const matchData = await retry(() =>
-          repository.getRtdbPath(
-            `players/${normalizedLoginUid}/matches/${candidateMatchId}`,
-          ),
-        );
-        const emoji = getEmojiId(matchData && matchData.emojiId);
+        let emoji = repository.getMatchEmoji
+          ? getEmojiId(
+              await retry(() =>
+                repository.getMatchEmoji(
+                  normalizedInviteId,
+                  candidateMatchId,
+                  normalizedLoginUid,
+                ),
+              ),
+            )
+          : null;
+        if (emoji === null) {
+          const matchData = await retry(() =>
+            repository.getRtdbPath(
+              `players/${normalizedLoginUid}/matches/${candidateMatchId}`,
+            ),
+          );
+          emoji = getEmojiId(matchData && matchData.emojiId);
+        }
         if (emoji !== null) {
           const summary = { name: null, emoji };
           cache.set(cacheKey, summary);
           return summary;
         }
       } catch (error) {
-        logger.error("projector:login-summary-rtdb-read-failed", {
+        logger.error("projector:login-summary-read-failed", {
           loginUid: normalizedLoginUid,
           matchId: candidateMatchId,
           attempts: READ_RETRY_ATTEMPTS,
@@ -528,7 +541,7 @@ const createProfileGamesProjectionCore = ({
           : null;
       let opponentEmojiFromLogin = null;
       if (opponentEmojiFromProfile === null && ownerContext.opponentLoginId) {
-        const summary = await readLoginSummaryFromRtdbMatches(
+        const summary = await readLoginSummaryFromMatches(
           ownerContext.opponentLoginId,
           latestMatchId,
           normalizedInviteId,

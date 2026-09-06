@@ -101,11 +101,25 @@ Investigate stuck work through Queue consumption, pending marker age, and projec
 
 `INVITE_REACTIONS` binds the API Worker to `InviteReactions`, one SQLite-backed Durable Object per invite. The Worker checks paired invite membership and canonical D1 participant ownership before publishing `POST /invites/:inviteId/reactions`; spectators use the public `GET /invites/:inviteId/reactions/socket` with an allowed browser origin. The WebSocket accepts heartbeat messages only. Firebase still supplies identity tokens and live invite/match data for authorization.
 
-Each room reserves four connections for the host and four for the guest, alongside at most 248 spectators and eight spectator connections per IP. Players authenticate the socket handshake using their Firebase token in the WebSocket protocol header; the server echoes only `mons-reactions-v1` and forwards no credentials to the Durable Object. Participant admission uses a separate rate-limit bucket keyed by the resolved player UID. Connection tags retain these limits through hibernation.
+Each room reserves four connections for the host and four for the guest, alongside at most 248 spectators and eight spectator connections per IP. Players authenticate the socket handshake using their Firebase token in the WebSocket protocol header; the server echoes only the negotiated `mons-reactions-v1` or `mons-reactions-v2` protocol and forwards no credentials to the Durable Object. Participant admission uses a separate rate-limit bucket keyed by the resolved player UID. Connection tags retain these limits through hibernation.
 
 The object retains the latest reaction per player and uses hibernating WebSockets. Fresh game contexts suppress their initial snapshot; reconnecting contexts recover unseen reactions through the existing playback filters. There is no Firebase delivery fallback, reaction history import, or persistent outgoing queue. Failures affect reactions independently of active match synchronization.
 
 Use the read-only reaction smoke in the deployment guide to verify snapshots and heartbeat delivery without publishing to a game. Monitor socket connection failures, publish failures, rate-limit rejections, and browser reconnect frequency. Preserve Durable Object storage and its `exports` declaration during repairs.
+
+## Match presentation
+
+`GET` and `POST /invites/:inviteId/matches/:matchId/presentation` read and update live emoji/aura state in the existing invite Durable Object. The Worker resolves the authenticated login to the stored match actor using canonical D1 ownership. Public reads require a paired invite; an authenticated host can read and change their own appearance while waiting for a guest. Updates must target the actor's current match, including their pending rematch. Profile customization uses its existing API independently.
+
+The Worker initializes missing presentation rows from server-read Firebase match records, preserving those records as immutable seeds. A write includes a UUID `operationId`, `expectedRevision`, `emojiId`, and `aura`. Accepted writes advance the stored revision before broadcasting; a retry of the current accepted operation returns its result, and stale or changed operations return `409 presentation-conflict` with canonical state. Clients serialize and coalesce selections. An uncertain write keeps its original operation ID and revision until a newer server revision or an exact retry resolves it; newer selections wait without a retry loop. Pending work is discarded when leaving the game or changing identity. There is no Firebase write fallback.
+
+V2 subscriptions use `?matchId=<existing-match-id>` and `mons-reactions-v2`, plus the existing bearer subprotocol for players. Their bounded snapshots contain reactions and presentation for up to two actors. Anonymous spectators send only the v2 subprotocol. V1 sockets continue receiving their unchanged reaction messages. Presentation snapshots apply on every connection, separately from reaction playback and game processing. HTTP hydration also works before pairing and while a socket is unavailable.
+
+Game-list projections keep canonical profile avatars first. Opponents without a profile avatar use their current Durable Object presentation, falling back to the Firebase seed only when no presentation exists. Lookup failures retry projection instead of storing a stale avatar.
+
+The asynchronous profile-game archive captures immutable appearance in the Durable Object before writing a historical D1 pair. A retry reuses that capture; failures retry projection without undoing rating settlement. Existing archived cosmetics remain authoritative, including when a rated game snapshot replaces a transition snapshot. Later changes to the current finished game's live appearance do not rewrite history. Preserve both live and frozen presentation storage during repairs.
+
+After the ordered API, frontend, and Firebase rules cutover, browser writes cannot change or remove match `emojiId`/`aura`, including through whole-match writes or admin claims. Surrender writes only status and move transactions preserve the seed fields. Older clients must refresh or update. No historical backfill or Firebase record deletion is required.
 
 ## Wager reservation storage
 

@@ -1362,6 +1362,13 @@ function syncAvatarForCurrentMetadata(
     return;
   }
 
+  const presentation = gameInputRuntime.getDisplayedMatchPresentation(
+    metadata.uid,
+  );
+  if (presentation) {
+    metadata.emojiId = String(presentation.emojiId);
+    metadata.aura = presentation.aura;
+  }
   let emojiId = metadata.emojiId ?? "";
   let aura =
     metadata.aura ??
@@ -1536,9 +1543,15 @@ export function updateEmojiAndAuraIfNeeded(
   const targetMetadata = isOpponentSide
     ? opponentSideMetadata
     : playerSideMetadata;
+  const presentation = gameInputRuntime.getDisplayedMatchPresentation(
+    targetMetadata.uid,
+  );
   const currentId = targetMetadata.emojiId ?? "";
-  const nextId = newEmojiId ?? "";
+  const nextId = presentation
+    ? String(presentation.emojiId)
+    : (newEmojiId ?? "");
   const newAura =
+    presentation?.aura ??
     aura ??
     (!isOpponentSide && !gameInputRuntime.isWatchOnly
       ? storage.getPlayerEmojiAura("")
@@ -3856,21 +3869,7 @@ export function didClickAndChangePlayerEmoji(
   gameInputRuntime.sendPlayerEmojiUpdate(parseInt(newId), aura);
 
   if (!gameInputRuntime.isWatchOnly) {
-    playerSideMetadata.emojiId = newId;
-    if (aura !== undefined) {
-      playerSideMetadata.aura = aura;
-    }
-    const slotIsOpponent = slotIsOpponentForMetadataSide(false);
-    const avatar = slotIsOpponent ? opponentAvatar : playerAvatar;
-    if (avatar) {
-      SVG.setImageUrl(avatar, newEmojiUrl);
-      const visible =
-        (aura ?? storage.getPlayerEmojiAura("") ?? "") === "rainbow";
-      showRaibowAura(visible, newEmojiUrl, slotIsOpponent);
-      try {
-        updateAuraForAvatarElement(slotIsOpponent, avatar);
-      } catch {}
-    }
+    updateEmojiAndAuraIfNeeded(newId, aura, false);
   }
 }
 

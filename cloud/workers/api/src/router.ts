@@ -44,6 +44,11 @@ import {
   isInviteReactionPath,
   type InviteReactionRouteDependencies,
 } from "./inviteReactionRoute.ts";
+import {
+  handleMatchPresentationRoute,
+  isMatchPresentationPath,
+  type MatchPresentationRouteDependencies,
+} from "./matchPresentationRoute.ts";
 
 const RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
 
@@ -68,11 +73,21 @@ export async function handleRequest(
     mining?: MiningRouteDependencies;
     profile?: ProfileRouteDependencies;
     reactions?: InviteReactionRouteDependencies;
+    presentation?: MatchPresentationRouteDependencies;
     xCallback?: XCallbackDependencyOverrides;
   } = {},
   ctx?: WorkerExecutionContext,
 ): Promise<Response> {
   const pathname = new URL(request.url).pathname;
+  if (isMatchPresentationPath(pathname)) {
+    if (!ctx) return jsonResponse({ ok: false, error: "unavailable" }, 503);
+    return handleMatchPresentationRoute(
+      request,
+      env,
+      ctx,
+      dependencyOverrides.presentation,
+    );
+  }
   if (isInviteReactionPath(pathname)) {
     if (!ctx) {
       return jsonResponse({ ok: false, error: "unavailable" }, 503);

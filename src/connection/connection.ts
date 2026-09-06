@@ -10,7 +10,6 @@ import {
   getDatabase,
   Database,
   ref,
-  set,
   onValue,
   off,
   get,
@@ -20,6 +19,7 @@ import {
   didFindInviteThatCanBeJoined,
   didReceiveInviteReactionUpdate,
   didReceiveMatchUpdate,
+  didReceiveMatchPresentationUpdate,
   didRecoverInviteReactions,
   didRecoverMyMatch,
   enterWatchOnlyMode,
@@ -198,6 +198,12 @@ import {
 } from "./valueNormalizers";
 import { ObserverRegistry } from "./observerRegistry";
 import { InviteReactionChannel } from "./inviteReactionChannel";
+import { MatchPresentationState } from "./matchPresentationState";
+import type { MatchPresentation } from "@mons/shared/match-presentation";
+import {
+  readMatchPresentationViaApi,
+  updateMatchPresentationViaApi,
+} from "../services/matchPresentationApi";
 import {
   createInviteReactionSocketProtocols,
   sendInviteReactionViaApi,
@@ -344,8 +350,10 @@ class Connection {
   private inviteReactionSubscription: {
     contextId: number;
     channel: InviteReactionChannel;
+    presentation: MatchPresentationState;
     stop: () => void;
   } | null = null;
+  private matchPresentations = new Map<string, MatchPresentation>();
   private miningFrozenPoller: FrozenMaterialsPoller | null = null;
   private miningFrozenLoginUid: string | null = null;
   private matchRefs: { [key: string]: any } = {};
@@ -1269,6 +1277,7 @@ class Connection {
     this.cleanupWagerObserver();
     this.cleanupInviteReactionObserver();
     this.stopObservingAllMatches();
+    this.matchPresentations.clear();
     this.latestInvite = null;
     this.myMatch = null;
     this.inviteId = null;
@@ -3665,26 +3674,51 @@ class Connection {
     if (!writableContext || !this.myMatch) {
       return;
     }
-    this.myMatch.emojiId = newId;
-    this.myMatch.aura = aura ?? undefined;
-    set(
-      ref(
-        this.db,
-        `players/${writableContext.actorUid}/matches/${writableContext.matchId}/emojiId`,
-      ),
+    const subscription = this.inviteReactionSubscription;
+    if (subscription?.contextId !== writableContext.contextId) return;
+    const nextAura = aura ?? storage.getPlayerEmojiAura("");
+    subscription.presentation.update(
       newId,
-    ).catch((error) => {
-      console.error("Error updating emoji:", error);
-    });
-    if (this.myMatch.aura !== undefined) {
-      set(
-        ref(
-          this.db,
-          `players/${writableContext.actorUid}/matches/${writableContext.matchId}/aura`,
-        ),
-        this.myMatch.aura,
-      ).catch(() => {});
+      nextAura === "rainbow" ? "rainbow" : "",
+    );
+  }
+
+  private rememberMatchPresentation(presentation: MatchPresentation): void {
+    const key = `${presentation.matchId}/${presentation.actorUid}`;
+    const previous = this.matchPresentations.get(key);
+    if (!previous || presentation.revision > previous.revision) {
+      this.matchPresentations.set(key, presentation);
     }
+  }
+
+  public getMatchPresentation(
+    matchId: string,
+    actorUid: string,
+  ): MatchPresentation | null {
+    const subscription = this.inviteReactionSubscription;
+    if (
+      this.activeContext?.matchId === matchId &&
+      subscription?.contextId === this.activeContext.contextId
+    ) {
+      const presentation =
+        subscription.presentation.get(actorUid) ??
+        this.matchPresentations.get(`${matchId}/${actorUid}`);
+      if (presentation) return presentation;
+      const match =
+        this.activeContext.actorUid === actorUid
+          ? this.myMatch
+          : this.observedMatchSnapshots.get(`${matchId}_${actorUid}`);
+      if (match) {
+        return {
+          matchId,
+          actorUid,
+          emojiId: match.emojiId,
+          aura: match.aura ?? "",
+          revision: 0,
+        };
+      }
+    }
+    return this.matchPresentations.get(`${matchId}/${actorUid}`) ?? null;
   }
 
   private getLocalProfileId(): string | null {
@@ -4441,16 +4475,21 @@ class Connection {
       writableContext.inviteId,
       writableContext.matchId,
     );
-    set(
+    const status = this.myMatch.status;
+    runTransaction(
       ref(
         this.db,
         `players/${writableContext.actorUid}/matches/${writableContext.matchId}`,
       ),
-      this.myMatch,
+      (current: Match | null) => (current ? { ...current, status } : null),
+      { applyLocally: false },
     )
-      .then(() => {
+      .then((result) => {
         if (!sessionGuard()) {
           return;
+        }
+        if (!result.committed || !result.snapshot.exists()) {
+          throw new Error("match-status-update-aborted");
         }
         this.logContextEvent("ctx.write.success", {
           reason: "sendMatchUpdate",
@@ -5140,8 +5179,50 @@ class Connection {
       return;
     this.cleanupInviteReactionObserver();
     const key = `invite-reactions:${context.inviteId}`;
+    const isActive = () =>
+      this.isContextActive(context.contextId, context.sessionEpoch) &&
+      this.isCurrentAuthUser(context.loginUid);
+    const presentation = new MatchPresentationState({
+      matchId: context.matchId,
+      actorUid: context.canWrite ? context.actorUid : null,
+      isActive,
+      load: async (signal) => {
+        const response = await readMatchPresentationViaApi(
+          context.inviteId,
+          context.matchId,
+          context.canWrite
+            ? this.getUserBoundAuthTokenProvider(context.loginUid)
+            : undefined,
+          { signal },
+        );
+        if (isActive()) {
+          for (const value of Object.values(response.presentation.players)) {
+            this.rememberMatchPresentation(value);
+          }
+        }
+        return response.presentation;
+      },
+      save: async (request, signal) => {
+        const response = await updateMatchPresentationViaApi(
+          context.inviteId,
+          context.matchId,
+          request,
+          this.getUserBoundAuthTokenProvider(context.loginUid),
+          { signal },
+        );
+        if (isActive()) this.rememberMatchPresentation(response.presentation);
+        return response.presentation;
+      },
+      onChange: (actorUid) => {
+        if (isActive())
+          didReceiveMatchPresentationUpdate(context.matchId, actorUid);
+      },
+      onError: (error) =>
+        console.error("Error updating match appearance:", error),
+    });
     const channel = new InviteReactionChannel({
       inviteId: context.inviteId,
+      matchId: context.matchId,
       createSocket: (url, protocols) => new WebSocket(url, protocols),
       getProtocols: context.canWrite
         ? async (forceRefresh) => {
@@ -5153,29 +5234,44 @@ class Connection {
             return createInviteReactionSocketProtocols(token);
           }
         : undefined,
-      isActive: () =>
-        this.isContextActive(context.contextId, context.sessionEpoch) &&
-        this.isCurrentAuthUser(context.loginUid),
+      isActive,
       isOnline: () => typeof navigator === "undefined" || navigator.onLine,
       canConnect: () =>
         !!this.latestInvite?.hostId && !!this.latestInvite?.guestId,
       addWakeListener: (listener) => {
         if (typeof window === "undefined") return () => undefined;
-        const onVisibility = () => {
-          if (document.visibilityState === "visible") listener();
+        const wake = () => {
+          listener();
+          void presentation.refresh();
         };
-        window.addEventListener("online", listener);
-        window.addEventListener("pageshow", listener);
+        const onVisibility = () => {
+          if (document.visibilityState === "visible") wake();
+        };
+        window.addEventListener("online", wake);
+        window.addEventListener("pageshow", wake);
         document.addEventListener("visibilitychange", onVisibility);
         return () => {
-          window.removeEventListener("online", listener);
-          window.removeEventListener("pageshow", listener);
+          window.removeEventListener("online", wake);
+          window.removeEventListener("pageshow", wake);
           document.removeEventListener("visibilitychange", onVisibility);
         };
       },
       onInitialSnapshot: didRecoverInviteReactions,
       onReaction: didReceiveInviteReactionUpdate,
-      onError: (error) => console.error("Error receiving reactions:", error),
+      onPresentationSnapshot: (snapshot) => {
+        for (const value of Object.values(snapshot.players)) {
+          this.rememberMatchPresentation(value);
+        }
+        presentation.acceptSnapshot(snapshot);
+      },
+      onPresentation: (value) => {
+        this.rememberMatchPresentation(value);
+        presentation.accept(value);
+      },
+      onError: (error) => {
+        console.error("Error receiving reactions:", error);
+        void presentation.refresh();
+      },
       setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
       clearTimer: (timer) => clearTimeout(timer),
       random: Math.random,
@@ -5184,6 +5280,7 @@ class Connection {
     const stop = () => {
       if (stopped) return;
       stopped = true;
+      presentation.stop();
       channel.stop();
       this.unregisterObserverCleanup(context.contextId, key);
       if (this.inviteReactionSubscription?.channel === channel) {
@@ -5192,15 +5289,18 @@ class Connection {
       decrementLifecycleCounter("connectionObservers");
     };
     if (!this.registerObserverCleanup(context.contextId, key, stop)) {
+      presentation.stop();
       channel.stop();
       return;
     }
     this.inviteReactionSubscription = {
       contextId: context.contextId,
       channel,
+      presentation,
       stop,
     };
     incrementLifecycleCounter("connectionObservers");
+    void presentation.refresh();
   }
 
   private cleanupRematchObservers() {
