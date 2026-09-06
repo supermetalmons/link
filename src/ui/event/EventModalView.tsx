@@ -2229,6 +2229,7 @@ const EventModal: React.FC = () => {
                     <PrizeChoice key={prize.id}>
                       <PrizeChoiceButton
                         type="button"
+                        $concealed={areEventPrizesConcealed}
                         $imageWidth={prize.imageWidth}
                         $imageHeight={prize.imageHeight}
                         disabled={!canSelectEventPrize}
