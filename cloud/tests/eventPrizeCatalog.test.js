@@ -11,6 +11,7 @@ const {
   COMPRESSED_PRIZES_EVENT_ID,
   EVENT_PRIZE_IDS,
   LEGACY_CORE_PRIZES_EVENT_ID,
+  PLANET_PEPPA_PRIZES_EVENT_ID,
   RARE_WEITSMANS_PRIZES_EVENT_ID,
   getEventPrizeConfig,
   getEventPrizeDefinition,
@@ -24,6 +25,7 @@ const {
   isEventPrizeWithdrawalProcessingResponse,
   isEventPrizeWithdrawalRequest,
   isEventPrizeWithdrawalStatusRequest,
+  isToggleEventPrizeSelectionRequest,
 } = require("@mons/shared/event-prizes");
 const databaseRules = require("../database.rules.json");
 
@@ -224,6 +226,9 @@ test("maps the compressed event to the supplied prizes in fallback order", () =>
     "217",
     "220",
     "221",
+    "3727",
+    "3728",
+    "3729",
   ]);
   for (const prize of config.prizes) {
     assert.equal(bs58.default.decode(prize.assetAddress).length, 32);
@@ -380,6 +385,83 @@ test("maps the Rare Weitsmans event to claimable Core prizes", () => {
   );
   for (const prize of config.prizes) {
     assert.equal(bs58.default.decode(prize.assetAddress).length, 32);
+  }
+});
+
+test("maps the Planet Peppa event to claimable Core prizes", () => {
+  const config = getEventPrizeConfig(PLANET_PEPPA_PRIZES_EVENT_ID);
+  assert.equal(PLANET_PEPPA_PRIZES_EVENT_ID, "z3oj52Iiime");
+  assert.equal(config.eventId, PLANET_PEPPA_PRIZES_EVENT_ID);
+  assert.deepEqual(
+    config.prizes.map((prize) => ({
+      id: prize.id,
+      imageUrl: prize.imageUrl,
+      imageWidth: prize.imageWidth,
+      imageHeight: prize.imageHeight,
+      assetAddress: prize.assetAddress,
+      collectionAddress: prize.collectionAddress,
+      standard: prize.standard,
+      claimAvailable: prize.claimAvailable,
+    })),
+    [
+      {
+        id: "3727",
+        imageUrl: "https://cdn.lil.org/player/planet_peppa/3727.webp",
+        imageWidth: 1200,
+        imageHeight: 1200,
+        assetAddress: "DL9oCFuvGJghtzQLkffqgAMXGJadvCDYqzEVLYhazhHj",
+        collectionAddress: "9irtKRLZkY4MjFFQNZPX3o6ZTszfR8kXFJXPBUvEDo9v",
+        standard: "core",
+        claimAvailable: true,
+      },
+      {
+        id: "3728",
+        imageUrl: "https://cdn.lil.org/player/planet_peppa/3728.webp",
+        imageWidth: 1200,
+        imageHeight: 1200,
+        assetAddress: "4UAXpjnE67yzhNhm8k4VpSTWX8ssPTv3AzBmd9qLPnDM",
+        collectionAddress: "9irtKRLZkY4MjFFQNZPX3o6ZTszfR8kXFJXPBUvEDo9v",
+        standard: "core",
+        claimAvailable: true,
+      },
+      {
+        id: "3729",
+        imageUrl: "https://cdn.lil.org/player/planet_peppa/3729.webp",
+        imageWidth: 1200,
+        imageHeight: 1200,
+        assetAddress: "2M3NjoXRpK1irpGhwz65GHNeryv5TwqfAovEPCA5SX8A",
+        collectionAddress: "9irtKRLZkY4MjFFQNZPX3o6ZTszfR8kXFJXPBUvEDo9v",
+        standard: "core",
+        claimAvailable: true,
+      },
+    ],
+  );
+  assert.equal(isEventPrizeEvent(PLANET_PEPPA_PRIZES_EVENT_ID), true);
+  for (const prize of config.prizes) {
+    assert.equal(bs58.default.decode(prize.assetAddress).length, 32);
+    assert.equal(bs58.default.decode(prize.collectionAddress).length, 32);
+    assert.equal(isEventPrizeId(PLANET_PEPPA_PRIZES_EVENT_ID, prize.id), true);
+    assert.equal(
+      isEventPrizeId(RARE_WEITSMANS_PRIZES_EVENT_ID, prize.id),
+      false,
+    );
+    assert.equal(
+      isToggleEventPrizeSelectionRequest({
+        eventId: PLANET_PEPPA_PRIZES_EVENT_ID,
+        prizeId: prize.id,
+      }),
+      true,
+    );
+  }
+  for (const prizeId of ["217", "unknown", " 3727 "]) {
+    assert.equal(isEventPrizeId(PLANET_PEPPA_PRIZES_EVENT_ID, prizeId), false);
+    assert.equal(
+      isToggleEventPrizeSelectionRequest({
+        eventId: PLANET_PEPPA_PRIZES_EVENT_ID,
+        prizeId,
+      }),
+      false,
+    );
   }
 });
 

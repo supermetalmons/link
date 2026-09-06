@@ -8,6 +8,7 @@ const COMPRESSED_PRIZES_EVENT_ID = "FRkdorMWaYW";
 const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID = "VOxalSrexcA";
 const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID = "oXAceF6anag";
 const RARE_WEITSMANS_PRIZES_EVENT_ID = "RpPjMNyrJJa";
+const PLANET_PEPPA_PRIZES_EVENT_ID = "z3oj52Iiime";
 const CORE_PRIZE_COLLECTION_ADDRESS =
   "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD";
 const COMPRESSED_PRIZE_COLLECTION_ADDRESS =
@@ -16,6 +17,8 @@ const ARTIFACT_MAGAZINE_3_COLLECTION_ADDRESS =
   "36NQDyvCBqg4N1z5mZi2i4nW1K9ELdzmntMMKnqbChVZ";
 const RARE_WEITSMANS_COLLECTION_ADDRESS =
   "3Rb9mG22dkAFVA8PVRgD76SiHUwUTK38Kq55NkrZuR2k";
+const PLANET_PEPPA_COLLECTION_ADDRESS =
+  "9irtKRLZkY4MjFFQNZPX3o6ZTszfR8kXFJXPBUvEDo9v";
 const SCARECROW_PRIZE_IMAGE_SIZE = Object.freeze({
   imageWidth: 420,
   imageHeight: 525,
@@ -31,6 +34,10 @@ const ARTIFACT_MAGAZINE_3_IMAGE_SIZE = Object.freeze({
 const RARE_WEITSMANS_IMAGE_SIZE = Object.freeze({
   imageWidth: 1024,
   imageHeight: 1024,
+});
+const PLANET_PEPPA_IMAGE_SIZE = Object.freeze({
+  imageWidth: 1200,
+  imageHeight: 1200,
 });
 
 const createPrize = ({
@@ -211,6 +218,38 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
         imageUrl: "https://cdn.lil.org/player/rare_weitsmans/mid/221.webp",
         assetAddress: "Ag6U9kBe6aPJyMtEzEqDpnGnmejBvAjPGFSPhXCW9Ba4",
         collectionAddress: RARE_WEITSMANS_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
+  [PLANET_PEPPA_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: PLANET_PEPPA_PRIZES_EVENT_ID,
+    prizes: Object.freeze([
+      createPrize({
+        ...PLANET_PEPPA_IMAGE_SIZE,
+        id: "3727",
+        imageUrl: "https://cdn.lil.org/player/planet_peppa/3727.webp",
+        assetAddress: "DL9oCFuvGJghtzQLkffqgAMXGJadvCDYqzEVLYhazhHj",
+        collectionAddress: PLANET_PEPPA_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...PLANET_PEPPA_IMAGE_SIZE,
+        id: "3728",
+        imageUrl: "https://cdn.lil.org/player/planet_peppa/3728.webp",
+        assetAddress: "4UAXpjnE67yzhNhm8k4VpSTWX8ssPTv3AzBmd9qLPnDM",
+        collectionAddress: PLANET_PEPPA_COLLECTION_ADDRESS,
+        standard: "core",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...PLANET_PEPPA_IMAGE_SIZE,
+        id: "3729",
+        imageUrl: "https://cdn.lil.org/player/planet_peppa/3729.webp",
+        assetAddress: "2M3NjoXRpK1irpGhwz65GHNeryv5TwqfAovEPCA5SX8A",
+        collectionAddress: PLANET_PEPPA_COLLECTION_ADDRESS,
         standard: "core",
         claimAvailable: true,
       }),
@@ -407,6 +446,7 @@ module.exports = {
   EVENT_PRIZE_CONFIGS,
   EVENT_PRIZE_IDS,
   LEGACY_CORE_PRIZES_EVENT_ID,
+  PLANET_PEPPA_PRIZES_EVENT_ID,
   RARE_WEITSMANS_PRIZES_EVENT_ID,
   getEventPrizeConfig,
   getEventPrizeDefinition,

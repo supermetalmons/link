@@ -175,6 +175,38 @@ test("assigns Rare Weitsmans prizes by preference with the supplied fallback ord
   assert.equal(fallback["3"].prizeId, "221");
 });
 
+test("assigns Planet Peppa prizes by preference with the supplied fallback order", () => {
+  const eventId = "z3oj52Iiime";
+  const preferred = build(
+    {
+      first: "3729",
+      second: "3727",
+      third: "3728",
+    },
+    eventId,
+  );
+  assert.equal(preferred["1"].prizeId, "3729");
+  assert.equal(preferred["2"].prizeId, "3727");
+  assert.equal(preferred["3"].prizeId, "3728");
+
+  const conflict = build(
+    {
+      first: "3728",
+      second: "3728",
+      third: "3729",
+    },
+    eventId,
+  );
+  assert.equal(conflict["1"].prizeId, "3728");
+  assert.equal(conflict["2"].prizeId, "3727");
+  assert.equal(conflict["3"].prizeId, "3729");
+
+  const fallback = build({}, eventId);
+  assert.equal(fallback["1"].prizeId, "3727");
+  assert.equal(fallback["2"].prizeId, "3728");
+  assert.equal(fallback["3"].prizeId, "3729");
+});
+
 test("validates prize IDs against their configured event", () => {
   assert.equal(isEventPrizeId("NN3eRzoZo80", "1092"), true);
   assert.equal(isEventPrizeId("NN3eRzoZo80", "1866"), false);
@@ -186,6 +218,8 @@ test("validates prize IDs against their configured event", () => {
   assert.equal(isEventPrizeId("oXAceF6anag", "282"), false);
   assert.equal(isEventPrizeId("RpPjMNyrJJa", "217"), true);
   assert.equal(isEventPrizeId("RpPjMNyrJJa", "281"), false);
+  assert.equal(isEventPrizeId("z3oj52Iiime", "3727"), true);
+  assert.equal(isEventPrizeId("z3oj52Iiime", "217"), false);
   assert.deepEqual(build({ first: "1092" }, "unsupported"), {});
 });
 
