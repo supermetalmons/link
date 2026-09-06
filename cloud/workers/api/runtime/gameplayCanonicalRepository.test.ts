@@ -21,6 +21,7 @@ import {
 } from "../src/profileCanonicalD1.ts";
 import { createProfileGameProjectionRuntime } from "../src/profileGameProjectionRepository.ts";
 import { getProfileGameProjection } from "../src/profileGamesD1.ts";
+import { loadEndedMatchResults } from "../../../functions/telegram/eventProjectionCore.js";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
@@ -1053,6 +1054,138 @@ describe("canonical gameplay repositories", () => {
       telegramProjectionState: "done",
     });
   });
+
+  it.each([
+    {
+      label: "numeric",
+      player: 9,
+      opponent: 0,
+      expectedPlayer: 9,
+      expectedOpponent: 0,
+    },
+    {
+      label: "absent",
+      player: undefined,
+      opponent: undefined,
+      expectedPlayer: undefined,
+      expectedOpponent: undefined,
+    },
+    {
+      label: "null",
+      player: null,
+      opponent: null,
+      expectedPlayer: undefined,
+      expectedOpponent: undefined,
+    },
+    {
+      label: "strings",
+      player: "9",
+      opponent: "0",
+      expectedPlayer: undefined,
+      expectedOpponent: undefined,
+    },
+    {
+      label: "missing-player",
+      player: undefined,
+      opponent: 0,
+      expectedPlayer: undefined,
+      expectedOpponent: 0,
+    },
+    {
+      label: "missing-opponent",
+      player: 9,
+      opponent: undefined,
+      expectedPlayer: 9,
+      expectedOpponent: undefined,
+    },
+  ])(
+    "loads $label event scores through the canonical rating repository",
+    async ({ label, player, opponent, expectedPlayer, expectedOpponent }) => {
+      const gameplay = createGameplayRepository(testEnv, { rtdbClient: rtdb });
+      const rating = createRatingRepository(testEnv, gameplay, {
+        now: () => 2_000,
+      });
+      const inviteId = `d1-event-score-${label}`;
+      const identity = {
+        inviteId,
+        matchId: inviteId,
+        playerId: "d1-event-score-player",
+        opponentId: "d1-event-score-opponent",
+      };
+      const operationId = `${inviteId}__${inviteId}`;
+      const ownerToken = "d1-event-score-owner";
+      await expect(
+        rating.tryAcquireRatingLease({
+          ...identity,
+          ownerUid: identity.playerId,
+          ownerToken,
+          leaseMs: 30_000,
+        }),
+      ).resolves.toMatchObject({ status: "acquired" });
+      await expect(
+        rating.finalizeRatingUpdate(
+          { ...identity, operationId, ownerToken },
+          () => ({
+            playerUpdate: null,
+            opponentUpdate: null,
+            repairData: {
+              playerProfileId: "",
+              opponentProfileId: "",
+              shouldUpdateFebruaryChallenge: false,
+            },
+            ratingUpdate: {
+              status: "done",
+              completedAtMs: 2_000,
+              updatedAtMs: 2_000,
+              leaseExpiresAtMs: 2_000,
+              playerManaPoints: player,
+              opponentManaPoints: opponent,
+            },
+          }),
+        ),
+      ).resolves.toMatchObject({ status: "committed" });
+
+      const update = await rating.readRatingUpdate(operationId);
+      expect(update?.playerManaPoints).toBe(expectedPlayer);
+      expect(update?.opponentManaPoints).toBe(expectedOpponent);
+      expect(Object.hasOwn(update || {}, "playerManaPoints")).toBe(
+        expectedPlayer !== undefined,
+      );
+      expect(Object.hasOwn(update || {}, "opponentManaPoints")).toBe(
+        expectedOpponent !== undefined,
+      );
+
+      for (const playerIsHost of [true, false]) {
+        const event = {
+          rounds: {
+            0: {
+              matches: {
+                "0_0": {
+                  inviteId,
+                  hostLoginUid: playerIsHost
+                    ? identity.playerId
+                    : identity.opponentId,
+                  guestLoginUid: playerIsHost
+                    ? identity.opponentId
+                    : identity.playerId,
+                },
+              },
+            },
+          },
+        };
+        expect(await loadEndedMatchResults(event, rating)).toEqual({
+          "round:0:0_0":
+            expectedPlayer === undefined || expectedOpponent === undefined
+              ? { status: "unavailable" }
+              : {
+                  status: "scored",
+                  hostScore: playerIsHost ? expectedPlayer : expectedOpponent,
+                  guestScore: playerIsHost ? expectedOpponent : expectedPlayer,
+                },
+        });
+      }
+    },
+  );
 
   it("preserves imported rating timestamp fallbacks during projection writes", async () => {
     const operationId = "d1-imported-rating-invite__d1-imported-rating-match";

@@ -515,7 +515,7 @@ const buildEndedState = (eventId, eventData, resultsByKey = {}) => {
     ) {
       return `${matchup} (${result.hostScore} - ${result.guestScore})`;
     }
-    return `${matchup} (score unavailable)`;
+    return matchup;
   });
   const participantsById = Object.fromEntries(
     getParticipantRecords(eventData).map(({ profileId, participant }) => [

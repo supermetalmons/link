@@ -284,6 +284,81 @@ test("final score reads follow the results preference independently of the legac
   }
 });
 
+test("rating read failures retain pending event work for a successful retry", async () => {
+  const outboxPath = getEventTelegramProjectionOutboxPath(task.eventId);
+  const projectionPath = "eventTelegramProjections/event-1";
+  const armed = { endedAnnouncementArmed: true };
+  const state = store({
+    [outboxPath]: marker,
+    [projectionPath]: armed,
+    "events/event-1": {
+      ...scheduledEvent(),
+      status: "ended",
+      rounds: {
+        0: {
+          matches: {
+            "0_0": {
+              inviteId: "match-1",
+              hostLoginUid: "alice-login",
+              guestLoginUid: "bob-login",
+              hostDisplayName: "Alice",
+              guestDisplayName: "Bob",
+            },
+          },
+        },
+      },
+    },
+  });
+  const messages = store({});
+  const telegram = createTelegramRepository({
+    getPath: messages.client.getPath,
+    transactPath: messages.client.transactPath,
+  });
+  const messageKey = "event:event-1:ended";
+  const rating = ratingRepository();
+  let failRead = true;
+  let reads = 0;
+  rating.readRatingUpdate = async () => {
+    reads++;
+    if (failRead) throw new Error("rating-read-failed");
+    return null;
+  };
+  const deliveries: string[] = [];
+  const project = () =>
+    processEventProjectionTask(
+      task,
+      state.client,
+      rating,
+      async ({ messageKey }) => void deliveries.push(messageKey),
+      () => 200,
+      telegram,
+    );
+
+  await assert.rejects(project(), /rating-read-failed/);
+  assert.deepEqual(state.read(outboxPath), marker);
+  assert.deepEqual(state.read(projectionPath), armed);
+  assert.equal(await telegram.getMessage(messageKey), null);
+  assert.equal(state.read("eventTelegramProjectionLocks/event-1"), null);
+  assert.deepEqual(deliveries, []);
+
+  failRead = false;
+  assert.equal(await project(), "projected");
+  assert.equal(reads, 2);
+  assert.deepEqual(deliveries, [messageKey]);
+  assert.equal(state.read(outboxPath), null);
+  const message = (await telegram.getMessage(messageKey)) as {
+    desired: { text: string };
+  };
+  assert.equal(
+    message.desired.text,
+    "event ended\n\nhttps://mons.link/event/event-1\n\nAlice vs. Bob",
+  );
+  assert.equal(
+    (state.read(projectionPath) as { endedText: string }).endedText,
+    message.desired.text,
+  );
+});
+
 test("a successor marker survives completion of older work", async () => {
   const state = store({
     [getEventTelegramProjectionOutboxPath(task.eventId)]: marker,

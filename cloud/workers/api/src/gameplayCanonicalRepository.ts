@@ -366,10 +366,18 @@ function ratingData(snapshot: CanonicalRatingUpdateSnapshot): RatingUpdateData {
     leaseExpiresAtMs: snapshot.leaseExpiresAtMs,
     matchId: string(fields.matchId) || snapshot.matchId,
     opponentId: string(fields.opponentId) || snapshot.opponentId,
+    ...(typeof fields.opponentManaPoints === "number" &&
+    Number.isFinite(fields.opponentManaPoints)
+      ? { opponentManaPoints: fields.opponentManaPoints }
+      : {}),
     opponentProfileId:
       string(fields.opponentProfileId) || snapshot.opponentProfileId || "",
     ownerToken: string(fields.ownerToken) || snapshot.ownerToken,
     playerId: string(fields.playerId) || snapshot.playerId,
+    ...(typeof fields.playerManaPoints === "number" &&
+    Number.isFinite(fields.playerManaPoints)
+      ? { playerManaPoints: fields.playerManaPoints }
+      : {}),
     playerProfileId:
       string(fields.playerProfileId) || snapshot.playerProfileId || "",
     profileGameProjectionReason: string(fields.profileGameProjectionReason),

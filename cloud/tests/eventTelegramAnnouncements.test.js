@@ -968,58 +968,88 @@ test("renders an ended projection when a normal match score is unavailable", () 
     state: ARMED_PROJECTION_STATE,
     nowMs: NOW_MS,
   });
-  assert.match(
-    operationFor(projection, "ended").text,
-    /Alice&gt; vs\..*Dan \(score unavailable\)/,
+  assert.deepEqual(
+    operationFor(projection, "ended").text.split("\n").slice(4, 8),
+    [
+      `${ALICE_EMOJI} &lt;Alice&gt; vs. ${DAN_EMOJI} Dan`,
+      `${BOB_EMOJI} Bob &amp; Co vs. ${CAROL_EMOJI} Carol`,
+      `${ALICE_EMOJI} &lt;Alice&gt; vs. ${CAROL_EMOJI} Carol`,
+      `${BOB_EMOJI} Bob &amp; Co vs. ${DAN_EMOJI} Dan`,
+    ],
   );
 });
 
-test("loads host and guest scores from the completed rating result", async () => {
-  const eventData = buildEvent({
-    status: "ended",
+test("loads and renders valid completed scores or matchup-only fallbacks", async (t) => {
+  const eventData = buildEndedEvent({
     rounds: {
       0: {
         roundIndex: 0,
         matches: {
-          "0_0": {
-            inviteId: "auto_final",
-            hostLoginUid: "host-login",
-            guestLoginUid: "guest-login",
-          },
+          "0_0": buildEndedEvent().rounds[0].matches["0_0"],
         },
       },
     },
+    thirdPlaceMatch: null,
   });
-  const values = {
-    auto_final__auto_final: {
-      status: "done",
-      inviteId: "auto_final",
-      matchId: "auto_final",
-      playerId: "guest-login",
-      opponentId: "host-login",
-      playerManaPoints: 4,
-      opponentManaPoints: 9,
-    },
+  const completedResult = {
+    status: "done",
+    inviteId: "auto_1",
+    matchId: "auto_1",
+    playerId: "dan-login",
+    opponentId: "alice-login",
+    playerManaPoints: 4,
+    opponentManaPoints: 9,
   };
-  const paths = [];
-  const readRatingUpdate = async (id) => {
-    paths.push(id);
-    return values[id] || null;
-  };
-  const result = await loadEndedMatchResults(eventData, {
-    readRatingUpdate,
-  });
+  const matchup = `${ALICE_EMOJI} &lt;Alice&gt; vs. ${DAN_EMOJI} Dan`;
+  const cases = [
+    ["guest is rating player", completedResult, [9, 4]],
+    [
+      "host is rating player and guest has zero points",
+      {
+        ...completedResult,
+        playerId: "alice-login",
+        opponentId: "dan-login",
+        playerManaPoints: 9,
+        opponentManaPoints: 0,
+      },
+      [9, 0],
+    ],
+    ["missing result", null],
+    ["incomplete result", { ...completedResult, status: "pending" }],
+    ["missing score", { ...completedResult, playerManaPoints: undefined }],
+    ["non-numeric score", { ...completedResult, opponentManaPoints: "9" }],
+    ["non-finite score", { ...completedResult, playerManaPoints: Infinity }],
+    ["mismatched invite", { ...completedResult, inviteId: "other-invite" }],
+    ["mismatched match", { ...completedResult, matchId: "other-match" }],
+    ["mismatched player", { ...completedResult, playerId: "other-login" }],
+    ["mismatched opponent", { ...completedResult, opponentId: "other-login" }],
+  ];
 
-  assert.deepEqual(paths, ["auto_final__auto_final"]);
-  assert.deepEqual(result, {
-    "round:0:0_0": { status: "scored", hostScore: 9, guestScore: 4 },
-  });
-  delete values.auto_final__auto_final;
-  assert.deepEqual(
-    await loadEndedMatchResults(eventData, { readRatingUpdate }),
-    { "round:0:0_0": { status: "unavailable" } },
-  );
+  for (const [name, ratingResult, scores] of cases) {
+    await t.test(name, async () => {
+      const paths = [];
+      const result = await loadEndedMatchResults(eventData, {
+        readRatingUpdate: async (id) => {
+          paths.push(id);
+          return ratingResult;
+        },
+      });
 
+      assert.deepEqual(paths, ["auto_1__auto_1"]);
+      assert.deepEqual(result, {
+        "round:0:0_0": scores
+          ? { status: "scored", hostScore: scores[0], guestScore: scores[1] }
+          : { status: "unavailable" },
+      });
+      assert.deepEqual(
+        buildEndedState(EVENT_ID, eventData, result).matchLines,
+        [scores ? `${matchup} (${scores[0]} - ${scores[1]})` : matchup],
+      );
+    });
+  }
+});
+
+test("does not load rating results for disqualified matches", async () => {
   const disqualified = await loadEndedMatchResults(
     buildEvent({
       status: "ended",
@@ -1646,9 +1676,17 @@ test("missing normal scores do not block projection state", async () => {
 
   const projection = await projector(EVENT_ID, NOW_MS);
   assert.equal(projection.action, "project");
-  assert.match(
-    database.read(`telegramMessages/event:${EVENT_ID}:ended/desired`).text,
-    /score unavailable/,
+  assert.deepEqual(
+    database
+      .read(`telegramMessages/event:${EVENT_ID}:ended/desired`)
+      .text.split("\n")
+      .slice(4, 8),
+    [
+      `${ALICE_EMOJI} &lt;Alice&gt; vs. ${DAN_EMOJI} Dan`,
+      `${BOB_EMOJI} Bob &amp; Co vs. ${CAROL_EMOJI} Carol`,
+      `${ALICE_EMOJI} &lt;Alice&gt; vs. ${CAROL_EMOJI} Carol`,
+      `${BOB_EMOJI} Bob &amp; Co vs. ${DAN_EMOJI} Dan`,
+    ],
   );
   assert.equal(
     database.read(`${EVENT_TELEGRAM_PROJECTION_LOCK_ROOT}/${EVENT_ID}`),

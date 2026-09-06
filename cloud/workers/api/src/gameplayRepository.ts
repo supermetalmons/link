@@ -65,9 +65,11 @@ export type RatingUpdateData = {
   leaseExpiresAtMs: number;
   matchId: string;
   opponentId: string;
+  opponentManaPoints?: number;
   opponentProfileId: string;
   ownerToken: string;
   playerId: string;
+  playerManaPoints?: number;
   playerProfileId: string;
   profileGameProjectionReason?: string;
   profileGameProjectionState?: string;
