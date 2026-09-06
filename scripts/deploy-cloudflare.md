@@ -2,6 +2,16 @@
 
 Run commands from the repository root with Node.js 24 and Java 21 or newer. Firebase operations are documented in [cloud operations](../cloud/README.md).
 
+## Release policy
+
+Routine release is the default for content, styling, prize catalogs, and backward-compatible code fixes. Prepare and validate the affected candidates first, then use a maximum 60-second budget from the first production promotion through one bounded live verification pass. Finish as soon as verification passes. There are no fixed waits, write freezes, Queue pauses, drain checks, or extended log-tail sessions on this path.
+
+Builds, tests, and candidate uploads happen during preparation; reuse their successful results for the same source instead of repeating them during promotion. Cloudflare or network delays can exceed the budget: report the actual delay or failed check, resolve any uncertain promotion result, and never claim an unverified release succeeded. Do not add another observation window after a successful check.
+
+Use coordinated maintenance only when a specific operation requires exclusive access or cannot safely overlap old and new code: schema/data migrations, ownership or settlement protocol changes, incompatible Queue/Workflow payload changes, Durable Object lifecycle changes, or incident recovery. State the concrete reason, affected stores/Queues, drain condition, and required observation period before applying maintenance controls. The presence of D1, Queues, or Workflows alone does not make a release maintenance work. Historical cutover instructions below apply only to their named cutover.
+
+Deploy only affected Workers. Shared prize-catalog changes need both the API and frontend; frontend-only edits need only the frontend. Keep writes and Queue delivery running during routine releases, preserving any maintenance state that predates the task. Apply trigger changes only when their configuration actually changed.
+
 ## Source of truth
 
 - `wrangler.jsonc` owns the frontend Worker configuration.
@@ -19,6 +29,8 @@ Authenticate Wrangler locally or provide `CLOUDFLARE_API_TOKEN` through the proc
 
 ## Validation
 
+For routine releases, run the checks relevant to the change before promotion. Use focused prize tests and frontend/API typechecks for a catalog change; use the frontend build's checks for frontend edits. Reuse completed checks for unchanged source. Install dependencies only when missing or changed. Reserve the complete gate below for broad changes, dependencies/contracts, stateful behavior, and coordinated maintenance:
+
 ```sh
 npm ci
 npm ci --prefix cloud/functions
@@ -30,9 +42,25 @@ The complete gate validates the frontend, API Worker, generated bindings, deploy
 
 ## API Worker release
 
-For the initial reaction release, complete the namespace bootstrap and ordered cutover below. The standard version-upload sequence applies after that namespace exists and when the Durable Object lifecycle declaration is unchanged.
+This is the routine path after the existing namespace is provisioned, with no lifecycle or incompatible state change. Record the current version, upload the validated candidate during preparation, then promote its explicit Version ID and run the standard smoke once:
 
-Production API `workers_dev` and `preview_urls` remain disabled. [Workers implementing a Durable Object do not receive version-preview URLs](https://developers.cloudflare.com/workers/versions-and-deployments/preview-urls/#limitations). Validate locally before uploading, then promote the explicit Version ID and smoke the custom domain while canonical writes are frozen and all four Queues remain paused. Record the deployed version and Queue pause states before starting; preserve preexisting pauses.
+```sh
+npm run upload:api
+npm run promote:api -- --version-id <version-id>
+npm run smoke:api -- --base-url https://api.mons.link
+```
+
+Production API `workers_dev` and `preview_urls` remain disabled. [Workers implementing a Durable Object do not receive version-preview URLs](https://developers.cloudflare.com/workers/versions-and-deployments/preview-urls/#limitations). Verify the affected behavior on the custom domain after promotion. Use an existing protected auth fixture only when that behavior needs authentication; prepare or refresh it before promotion. For a prize-catalog release, confirm the scheduled event and supplied prize images on the updated frontend. Unrelated history, reservation, reaction, and migration checks are not routine release gates.
+
+Keep live verification within the remaining 60-second release budget. The smoke command has per-request timeouts rather than an overall deadline, so enforce the remaining budget at the command runner and report a timeout as incomplete verification. Once the smoke and affected-feature check pass, record the deployed IDs and finish. Existing sampled logs and recovery jobs continue normally. Investigate concrete failures; apply only the maintenance controls that the failure requires.
+
+`upload:api` sends no production traffic. `promote:api` requires an explicit Version ID and routes 100% of traffic to it. Trigger application is a separate operation for reviewed configuration changes.
+
+## Coordinated maintenance release
+
+This section is an exception for the concrete maintenance requirements in the release policy, not a prerequisite for routine API releases. The full profile/gameplay procedure below includes a 15-minute drain and a 15-minute observation period. Use those measures only when the maintenance plan requires them; narrower operations use the relevant storage-specific procedure. The initial reaction namespace bootstrap and historical ordered cutovers also use this path.
+
+Validate locally before uploading, then promote the explicit Version ID and smoke the custom domain while the maintenance plan's canonical writes are frozen and affected Queues remain paused. Record the deployed version and Queue pause states before starting; preserve preexisting pauses. The following full coordinated procedure pauses all four Queues.
 
 Create mode-`0600` smoke fixtures outside the repository: an auth fixture containing `{"idToken":"<existing-linked-login-token>"}` and a profile fixture containing `{"loginId":"<alternate-login-uid>","profileId":"<canonical-profile-id>","invite":{"id":"<existing-invite-id>","actorUid":"<stored-host-or-guest-uid>","role":"host"},"historicalMatch":{"inviteId":"<existing-historical-invite-id>","matchId":"<existing-historical-match-id>"}}`. Use `guest` when appropriate. The token subject must equal `loginId`; `actorUid` must be a different login owned by the same D1 profile. Use a known non-null D1 historical snapshot. The frozen-reservation smoke also needs that linked participant.
 
@@ -51,7 +79,7 @@ Wait at least 15 minutes after the last pause and verify admissions and active g
 GET https://api.cloudflare.com/client/v4/accounts/e25f90fc073ea309b54b8b5144bf28e0/workers/scripts/mons-link-api/subdomain
 ```
 
-Require `enabled: false` and `previews_enabled: false` before proceeding. Upload the candidate, promote its explicit Version ID to 100%, apply reviewed triggers, and run both smokes on the custom domain before resuming writes or Queues:
+Require `enabled: false` and `previews_enabled: false` before proceeding. Upload the candidate, promote its explicit Version ID to 100%, apply reviewed triggers only when their configuration changed, and run both smokes on the custom domain before resuming writes or Queues. Omit `deploy:api:triggers` when triggers are unchanged:
 
 ```sh
 npm run upload:api
@@ -96,7 +124,7 @@ npx wrangler deploy --dry-run --strict --config cloud/workers/api/wrangler.jsonc
 npx wrangler deploy --strict --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
-Record the returned Version ID and confirm the `InviteReactions` namespace and `INVITE_REACTIONS` binding were provisioned. Run the frozen custom-domain API smoke above and the read-only reaction smoke below. Keep writes frozen on failure and repair forward. A namespace lifecycle change prevents returning to a version from before that change; retain the live class export, binding, and stored reactions in any repair. Once the bootstrap is verified, resume canonical writes and only the Queues paused for this release, then repeat the standard and authenticated API smokes. Later releases use the guarded upload and explicit 100% promotion sequence above with the already-provisioned, unchanged class declaration, followed by custom-domain verification before resuming writes; stop if Cloudflare rejects a lifecycle change.
+Record the returned Version ID and confirm the `InviteReactions` namespace and `INVITE_REACTIONS` binding were provisioned. Run the frozen custom-domain API smoke above and the read-only reaction smoke below. Keep writes frozen on failure and repair forward. A namespace lifecycle change prevents returning to a version from before that change; retain the live class export, binding, and stored reactions in any repair. Once the bootstrap is verified, resume canonical writes and only the Queues paused for this release, then repeat the standard and authenticated API smokes. Later compatible releases with the already-provisioned, unchanged class declaration use the routine API Worker release path without repeating bootstrap maintenance; stop if Cloudflare rejects a lifecycle change.
 
 Release the frontend next using the normal frontend release procedure. In a dedicated test invite, verify voice and sticker reactions between two players and an anonymous spectator; linked-login publishing; rematches and event games; no initial snapshot playback; latest unseen reaction recovery after reconnect; sender echo suppression; and teardown after leaving the game or signing out. Ensure reaction failures leave gameplay usable. Only after those checks pass, preview and release the Firebase rules as the final cutover:
 
@@ -109,7 +137,7 @@ The new rules deny browser writes to `invites/{inviteId}/reactions`; retained re
 
 ### Match presentation cutover
 
-The presentation release adds tables and RPC methods to the existing `InviteReactions` namespace; retain its class export, binding, and stored data. Use the standard API candidate upload and explicit promotion procedure above. V1 reaction frames remain compatible while v2 adds a match-specific presentation snapshot and revisioned events. Do not enable a preview URL or repeat the initial namespace bootstrap for this additive change.
+This historical presentation cutover adds tables and RPC methods to the existing `InviteReactions` namespace and coordinates a Firebase rules change; retain its class export, binding, and stored data. Use the coordinated maintenance procedure for this cutover. V1 reaction frames remain compatible while v2 adds a match-specific presentation snapshot and revisioned events. Do not enable a preview URL or repeat the initial namespace bootstrap. Later compatible presentation fixes use the routine release path.
 
 After API promotion, run the existing v1 smoke and the v2 smoke with an explicitly selected paired invite and existing match:
 
@@ -136,7 +164,7 @@ Choose an existing paired invite explicitly. This smoke uses no auth fixture, pu
 npm run smoke:reactions -- --base-url https://api.mons.link --invite-id <existing-paired-invite-id>
 ```
 
-The smoke connects as a spectator with `Origin: https://mons.link`, validates the versioned snapshot and invite membership of any reaction entries, sends only the application heartbeat, disconnects, and repeats to verify reconnect delivery. Each connection has a ten-second deadline and a 4 KiB message limit; redirects are disabled and output excludes reaction contents. An empty snapshot passes. A pending or missing invite, origin/upgrade rejection, malformed message, missing heartbeat, or premature disconnect fails the command. Run it on the API custom domain after promotion and before resuming writes. The default `smoke:api` command remains unchanged and never broadcasts reactions to a live game.
+The smoke connects as a spectator with `Origin: https://mons.link`, validates the versioned snapshot and invite membership of any reaction entries, sends only the application heartbeat, disconnects, and repeats to verify reconnect delivery. Each connection has a ten-second deadline and a 4 KiB message limit; redirects are disabled and output excludes reaction contents. An empty snapshot passes. A pending or missing invite, origin/upgrade rejection, malformed message, missing heartbeat, or premature disconnect fails the command. Run it on the API custom domain after a release affecting reactions; when maintenance paused writes, run it before resuming them. The default `smoke:api` command remains unchanged and never broadcasts reactions to a live game.
 
 Adding `--match-id <existing-match-id>` explicitly selects v2. The smoke requires successful v2 protocol negotiation, validates the selected match's presentation snapshot and any arriving presentation events within a 16 KiB envelope, and repeats after reconnect. The larger response bound accommodates maximum-length legacy match IDs; presentation mutation bodies retain a 4 KiB limit. The smoke never sends a presentation mutation, logs cosmetic values, or imports historical records. The server may lazily initialize missing presentation seeds while serving the snapshot. Omitting `--match-id` retains the v1 reaction-only smoke.
 
@@ -176,9 +204,9 @@ Canonical profile incidents freeze D1 and fix forward. `legacy_fields_json` cont
 
 ## Historical match D1 operations
 
-`mons-link-profile-games` D1 is the sole source for the public historical-match endpoint. A missing snapshot returns `pair: null`; the endpoint never reads RTDB or persists data on a read miss. There is no RTDB recovery or backfill path. Every promoted API version must pass the authenticated `--require-history` smoke above using a known non-null D1 snapshot before canonical writes resume.
+`mons-link-profile-games` D1 is the sole source for the public historical-match endpoint. A missing snapshot returns `pair: null`; the endpoint never reads RTDB or persists data on a read miss. There is no RTDB recovery or backfill path. Releases affecting history or its projections must pass the authenticated `--require-history` smoke using a known non-null D1 snapshot. Prepare its fixture before promotion and include this check in the routine verification budget; for coordinated maintenance, run it before canonical writes resume. Unrelated catalog or frontend changes do not require this fixture.
 
-Tail historical reads and their rating- and transition-driven archival projections during production smokes and the observation window:
+During a relevant maintenance observation window or an investigation, tail historical reads and their rating- and transition-driven archival projections. Routine releases require no fixed observation window:
 
 ```sh
 npx wrangler tail mons-link-api --version-id <version-id> --format pretty --search historical_match_read_failed --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
@@ -279,14 +307,16 @@ npx wrangler d1 migrations apply mons-link-telegram --remote --config cloud/work
 
 ## Frontend release
 
-When the frontend depends on new API behavior, promote and smoke the API first. Upload and smoke a unique frontend preview, then promote that exact tested version without rebuilding:
+Prepare the frontend before starting the production release budget: `preview` performs an isolated build, its client checks, and a candidate upload. Avoid running the same build/checks separately first. Verify a unique frontend preview when the affected behavior works on that origin; existing Firebase referrer restrictions may block preview sign-in. In that case, use local fixture rendering for visual checks and verify the real affected page on `mons.link` immediately after promotion. Keep the existing auth restrictions.
+
+When the frontend depends on new API behavior, promote and smoke the API first. Promote the prepared frontend's exact tested version without rebuilding, then verify the affected live page once within the remaining 60-second release budget:
 
 ```sh
 npm run deploy -- preview
 npm run deploy -- production --version-id <version-id>
 ```
 
-Exercise current event polling and two-tab automatch behavior. Deploying a frontend does not refresh already open tabs; browser clients rejected by the operation-ID or wager-version gate must reload.
+Exercise current event polling or two-tab automatch behavior when the change affects those flows. For a prize-catalog update, verify the actual event's images and order without joining or changing prize selections. Finish after the targeted check; no log-tail wait is required. Deploying a frontend does not refresh already open tabs; browser clients rejected by the operation-ID or wager-version gate must reload.
 
 ## Firebase rule release
 

@@ -2,6 +2,8 @@
 
 Run commands from the repository root. See the repository [architecture and command map](../README.md) for package boundaries and the [Cloudflare deployment guide](../scripts/deploy-cloudflare.md) for API release and maintenance procedures.
 
+Routine releases keep canonical writes and Queue delivery active. Prepare validated candidates first, then promote and verify the affected behavior within the guide's 60-second release budget, with no fixed waits or extended monitoring. The freeze, drain, and recovery procedures below apply only when a concrete schema, state-compatibility, resource-lifecycle, or incident requirement calls for maintenance.
+
 Firebase Auth remains active. Realtime Database retains active invites, match synchronization, and `matchTimerClaims`. The API Worker owns manual invite, join, match creation, and rematch mutations; reaction publishing and subscriptions; auth; profile and leaderboard reads; profile customization; username mutation; mining; gameplay; D1-backed events and prizes; profile-link catch-up; profile-game projection; event control and progress Workflows; X callback; event Telegram projection; and Worker-backed Telegram delivery.
 
 `mons-link-profiles` D1 permanently contains the canonical profile, ownership, auth, recovery, rating, wager, and transaction-guard tables. `PROFILE_DB.profile_login_owners` is the sole source for Worker login UID to canonical profile ownership, including merge-target resolution. There is no alternate profile store or fallback; an unreadable or corrupt ownership topology fails closed with `503 profile-ownership-unavailable`.

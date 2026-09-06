@@ -64,6 +64,8 @@ Copy `.env.example` to `.env.local` only when local overrides are needed. Local 
 
 Production deployment commands, token handling, smoke checks, schema maintenance, and incident freezes are documented in [Cloudflare deployment](scripts/deploy-cloudflare.md). Firebase release, Telegram recovery, and admin operations are documented in [cloud operations](cloud/README.md).
 
+Routine releases are the default: prepare validated candidates, then promote and verify the affected behavior within a 60-second release budget. Keep writes and Queues running; fixed drain waits and extended monitoring belong only to a concrete coordinated-maintenance requirement. Build/upload latency is separate preparation work, and slow or failed provider operations must be reported rather than treated as success.
+
 `repo-clean` intentionally deletes non-kept local and remote branches, worktrees, and stashes. Its policy is tested only in disposable temporary repositories; review `scripts/repo-clean.sh` before invoking it in a real checkout.
 
 ## Package boundaries
@@ -73,4 +75,4 @@ Production deployment commands, token handling, smoke checks, schema maintenance
 - Cloud admin tools remain independently installable and use explicit read-only D1 credentials.
 - TypeScript and framework type declarations are build-only root development dependencies.
 
-No release command is implied by a build or test command. Production changes use candidate uploads, explicit version promotion, and documented smoke checks. The initial reaction Durable Object namespace requires the reviewed API bootstrap in the deployment guide before the frontend release and final Firebase rules cutover.
+No release command is implied by a build or test command. Production changes use candidate uploads, explicit version promotion, and targeted live checks. The initial reaction Durable Object namespace bootstrap and final Firebase rules cutover are historical one-time maintenance procedures; ordinary compatible releases use the routine path.

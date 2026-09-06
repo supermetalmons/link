@@ -621,12 +621,37 @@ test("operations documentation describes current releases and D1 maintenance", (
       /npm run migrate:|--return-to-firebase|--activate-d1|--recover-import|functions:secrets:access|wrangler rollback/,
     );
   }
-  const apiRelease = guide.slice(
-    guide.indexOf("## API Worker release"),
-    guide.indexOf("## Canonical profile D1 maintenance"),
+  const readSection = (heading: string): string => {
+    const start = guide.indexOf(`## ${heading}\n`);
+    assert.notEqual(start, -1, heading);
+    const end = guide.indexOf("\n## ", start + heading.length + 4);
+    return guide.slice(start, end === -1 ? undefined : end);
+  };
+  const assertOrderedSteps = (section: string, steps: string[]): void => {
+    let previousStepIndex = -1;
+    for (const step of steps) {
+      const stepIndex = section.indexOf(step);
+      assert.ok(stepIndex > previousStepIndex, step);
+      previousStepIndex = stepIndex;
+    }
+  };
+  const releasePolicy = readSection("Release policy");
+  assert.match(releasePolicy, /routine/i);
+  assert.match(releasePolicy, /60[- ]seconds?/);
+  assert.match(releasePolicy, /promotion/i);
+  assert.match(releasePolicy, /candidate/i);
+  const apiRelease = readSection("API Worker release");
+  assertOrderedSteps(apiRelease, [
+    "npm run upload:api",
+    "npm run promote:api -- --version-id <version-id>",
+    "npm run smoke:api -- --base-url https://api.mons.link",
+  ]);
+  assert.doesNotMatch(
+    apiRelease,
+    /npm run manage:[^\n]*--(?:freeze|resume)|queues (?:pause|resume)-delivery|(?:15|fifteen)[ -]minutes|npm run deploy:api:triggers|--require-wager-storage-version/,
   );
-  let previousStepIndex = -1;
-  for (const step of [
+  const maintenanceRelease = readSection("Coordinated maintenance release");
+  assertOrderedSteps(maintenanceRelease, [
     "npm run manage:profile-canonical -- --freeze",
     "Wait at least 15 minutes",
     "GET https://api.cloudflare.com/client/v4/accounts/e25f90fc073ea309b54b8b5144bf28e0/workers/scripts/mons-link-api/subdomain",
@@ -637,15 +662,13 @@ test("operations documentation describes current releases and D1 maintenance", (
     "npm run smoke:api -- --base-url https://api.mons.link --read-only --require-history --require-wager-frozen-read --require-wager-storage-version",
     "npm run smoke:reactions -- --base-url https://api.mons.link --invite-id <existing-paired-invite-id>",
     "npm run manage:profile-canonical -- --resume",
-  ]) {
-    const stepIndex = apiRelease.indexOf(step);
-    assert.ok(stepIndex > previousStepIndex, step);
-    previousStepIndex = stepIndex;
+  ]);
+  for (const section of [apiRelease, maintenanceRelease]) {
+    assert.doesNotMatch(
+      section,
+      /<version-preview-url>|(?:previews_enabled|preview_urls)"?\s*:\s*true/,
+    );
   }
-  assert.doesNotMatch(
-    apiRelease,
-    /<version-preview-url>|(?:previews_enabled|preview_urls)"?\s*:\s*true/,
-  );
   assert.match(
     apiRelease,
     /Production API `workers_dev` and `preview_urls` remain disabled/,
@@ -654,11 +677,11 @@ test("operations documentation describes current releases and D1 maintenance", (
     apiRelease,
     /Workers implementing a Durable Object do not receive version-preview URLs/,
   );
-  assert.match(apiRelease, /alternate-login invite-role authorization/);
-  assert.match(apiRelease, /Wait at least 15 minutes/);
-  const reactionBootstrap = apiRelease.slice(
-    apiRelease.indexOf("### Initial reaction namespace and cutover"),
-    apiRelease.indexOf("### Read-only reaction smoke"),
+  assert.match(maintenanceRelease, /alternate-login invite-role authorization/);
+  assert.match(maintenanceRelease, /Wait at least 15 minutes/);
+  const reactionBootstrap = maintenanceRelease.slice(
+    maintenanceRelease.indexOf("### Initial reaction namespace and cutover"),
+    maintenanceRelease.indexOf("### Match presentation cutover"),
   );
   assert.match(reactionBootstrap, /one-time exception to candidate upload/);
   assert.match(reactionBootstrap, /already-provisioned, unchanged class/);
@@ -676,10 +699,10 @@ test("operations documentation describes current releases and D1 maintenance", (
       reactionBootstrap.indexOf("npm run deploy:firebase"),
   );
   assert.match(
-    apiRelease,
+    maintenanceRelease,
     /npm run smoke:reactions -- --base-url https:\/\/api\.mons\.link --invite-id <existing-paired-invite-id>/,
   );
-  assert.match(apiRelease, /publishes no reaction/);
+  assert.match(maintenanceRelease, /publishes no reaction/);
   for (const queue of [
     "auth-recovery",
     "profile-game-projection",
@@ -687,15 +710,15 @@ test("operations documentation describes current releases and D1 maintenance", (
     "telegram-delivery",
   ]) {
     assert.equal(
-      apiRelease.includes(`queues pause-delivery mons-link-${queue}`),
+      maintenanceRelease.includes(`queues pause-delivery mons-link-${queue}`),
       true,
     );
     assert.ok(
-      apiRelease.indexOf(`queues pause-delivery mons-link-${queue}`) <
-        apiRelease.indexOf("Wait at least 15 minutes"),
+      maintenanceRelease.indexOf(`queues pause-delivery mons-link-${queue}`) <
+        maintenanceRelease.indexOf("Wait at least 15 minutes"),
     );
     assert.equal(
-      apiRelease.includes(`queues resume-delivery mons-link-${queue}`),
+      maintenanceRelease.includes(`queues resume-delivery mons-link-${queue}`),
       true,
     );
   }
