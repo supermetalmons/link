@@ -207,26 +207,62 @@ function hasExactOptionalKeys(value, requiredKeys, optionalKeys) {
   );
 }
 
+function resolveEventTelegramAnnouncements(input) {
+  const preferences = input.telegramAnnouncements;
+  if (
+    preferences &&
+    typeof preferences === "object" &&
+    !Array.isArray(preferences)
+  ) {
+    return {
+      invite: preferences.invite === true,
+      matches: preferences.matches === true,
+      results: preferences.results === true,
+    };
+  }
+  const enabled = input.announceOnTelegram === true;
+  return { invite: enabled, matches: enabled, results: enabled };
+}
+
+function isEventTelegramAnnouncements(value) {
+  return (
+    isExactRecord(value, ["invite", "matches", "results"]) &&
+    typeof value.invite === "boolean" &&
+    typeof value.matches === "boolean" &&
+    typeof value.results === "boolean"
+  );
+}
+
 function isCreateEventRequest(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    (value.announceOnTelegram !== undefined &&
+      typeof value.announceOnTelegram !== "boolean") ||
+    (value.telegramAnnouncements !== undefined &&
+      !isEventTelegramAnnouncements(value.telegramAnnouncements))
+  ) {
     return false;
   }
   if (
-    hasExactOptionalKeys(value, ["startsInMinutes"], ["announceOnTelegram"])
+    hasExactOptionalKeys(
+      value,
+      ["startsInMinutes"],
+      ["announceOnTelegram", "telegramAnnouncements"],
+    )
   ) {
     return (
       Number.isSafeInteger(value.startsInMinutes) &&
       value.startsInMinutes >= MIN_STARTS_IN_MINUTES &&
-      value.startsInMinutes <= MAX_STARTS_IN_MINUTES &&
-      (value.announceOnTelegram === undefined ||
-        typeof value.announceOnTelegram === "boolean")
+      value.startsInMinutes <= MAX_STARTS_IN_MINUTES
     );
   }
   if (
     !hasExactOptionalKeys(
       value,
       ["scheduledDate", "scheduledTime", "scheduledTimezone"],
-      ["announceOnTelegram", "localTimezoneIana"],
+      ["announceOnTelegram", "telegramAnnouncements", "localTimezoneIana"],
     )
   ) {
     return false;
@@ -238,9 +274,7 @@ function isCreateEventRequest(value) {
       (option) => option.value === value.scheduledTimezone,
     ) &&
     (value.localTimezoneIana === undefined ||
-      typeof value.localTimezoneIana === "string") &&
-    (value.announceOnTelegram === undefined ||
-      typeof value.announceOnTelegram === "boolean")
+      typeof value.localTimezoneIana === "string")
   );
 }
 
@@ -423,4 +457,5 @@ module.exports = {
   isSyncEventStateRequest,
   isSyncEventStateResponse,
   parseEventMatchKey,
+  resolveEventTelegramAnnouncements,
 };

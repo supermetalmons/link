@@ -1,3 +1,4 @@
+import { resolveEventTelegramAnnouncements } from "@mons/shared/events";
 import {
   EVENT_TELEGRAM_PROJECTION_GUARD_FIELD,
   EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
@@ -205,21 +206,28 @@ export async function processEventProjectionTask(
     const event = asObject(eventData);
     const state = asObject(rawState);
     const generation = readProjectionGeneration(rawGeneration);
-    const endedMatchResults =
-      event.announceOnTelegram === true &&
+    const announcements = resolveEventTelegramAnnouncements(event);
+    const upcomingMessageKey = `event:${task.eventId}:upcoming`;
+    const [upcomingMessage, endedMatchResults] = await Promise.all([
+      telegram
+        ? telegram.getMessage(upcomingMessageKey)
+        : rtdb.getPath(`telegramMessages/${upcomingMessageKey}`),
+      announcements.results &&
       event.status === "ended" &&
       state.endedAnnouncementArmed === true &&
       (typeof state.endedText !== "string" || state.endedText === "")
-        ? await loadEndedMatchResults(eventData, {
+        ? loadEndedMatchResults(eventData, {
             readRatingUpdate: (operationId) =>
               rating.readRatingUpdate(operationId),
           })
-        : {};
+        : {},
+    ]);
     const projection = buildEventTelegramProjection({
       eventId: task.eventId,
       eventData,
       endedMatchResults,
       state: rawState,
+      upcomingMessage,
       nowMs: now(),
     });
     if (projection.action !== "project") {

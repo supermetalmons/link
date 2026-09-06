@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const { resolveEventTelegramAnnouncements } = require("@mons/shared/events");
 const {
   EVENT_TELEGRAM_PROJECTION_GUARD_FIELD,
   EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
@@ -190,7 +191,7 @@ const createEventTelegramProjector = (dependencies = {}) => {
         await database.ref(`eventTelegramProjections/${eventId}`).once()
       ).val();
       const endedMatchResults =
-        eventData?.announceOnTelegram === true &&
+        resolveEventTelegramAnnouncements(eventData).results &&
         eventData?.status === "ended" &&
         rawState?.endedAnnouncementArmed === true &&
         !rawState?.endedText
@@ -203,6 +204,11 @@ const createEventTelegramProjector = (dependencies = {}) => {
         eventData,
         endedMatchResults,
         state: rawState,
+        upcomingMessage: (
+          await database
+            .ref(`telegramMessages/event:${eventId}:upcoming`)
+            .once()
+        ).val(),
         nowMs,
       });
       if (projection.action !== "project") {
@@ -245,12 +251,13 @@ const createEventTelegramProjector = (dependencies = {}) => {
   };
 };
 
-const project = (eventData, state = null, nowMs = NOW_MS) =>
+const project = (eventData, state = null, nowMs = NOW_MS, upcomingMessage) =>
   buildEventTelegramProjection({
     eventId: EVENT_ID,
     eventData,
     state,
     nowMs,
+    upcomingMessage,
   });
 
 const operationFor = (projection, channel) =>
@@ -546,6 +553,140 @@ test("participant changes edit the upcoming post and replace it if missing", () 
   assert.match(upcoming.text, /&lt;Alice&gt; Bob$/);
   assert.notEqual(second.signature, first.signature);
   assert.equal(project(eventData, second.state).action, "unchanged");
+});
+
+test("announcement preferences independently control each event stage", async (t) => {
+  for (let mask = 0; mask < 8; mask += 1) {
+    const telegramAnnouncements = {
+      invite: Boolean(mask & 1),
+      matches: Boolean(mask & 2),
+      results: Boolean(mask & 4),
+    };
+    await t.test(JSON.stringify(telegramAnnouncements), () => {
+      const scheduled = project(buildEvent({ telegramAnnouncements }));
+      assert.deepEqual(
+        scheduled.operations.map(({ channel }) => channel),
+        telegramAnnouncements.invite ? ["upcoming"] : [],
+      );
+      assert.equal(
+        scheduled.state.endedAnnouncementArmed,
+        telegramAnnouncements.results,
+      );
+      const started = project(
+        buildEndedEvent({ telegramAnnouncements, status: "active" }),
+        scheduled.state,
+      );
+      assert.equal(
+        Boolean(operationFor(started, "started")),
+        telegramAnnouncements.matches,
+      );
+      assert.equal(
+        operationFor(started, "upcoming")?.ifMissing,
+        telegramAnnouncements.invite ? "skip" : undefined,
+      );
+      const ended = project(
+        buildEndedEvent({ telegramAnnouncements }),
+        started.state,
+      );
+      assert.equal(
+        Boolean(operationFor(ended, "ended")),
+        telegramAnnouncements.results,
+      );
+      assert.equal(
+        operationFor(ended, "started")?.ifMissing,
+        telegramAnnouncements.matches ? "skip" : undefined,
+      );
+    });
+  }
+});
+
+test("withheld invites stay silent through joins and postponements", () => {
+  const telegramAnnouncements = { invite: false, matches: true, results: true };
+  const scheduled = project(buildEvent({ telegramAnnouncements }));
+  const joinedEvent = buildEvent({
+    telegramAnnouncements,
+    participants: buildEndedEvent().participants,
+  });
+  assert.equal(project(joinedEvent, scheduled.state).action, "unchanged");
+  const postponed = project(
+    { ...joinedEvent, startAtMs: START_AT_MS + 15 * 60_000 },
+    scheduled.state,
+  );
+  assert.deepEqual(postponed.operations, []);
+  assert.equal(postponed.state.upcomingText, "");
+});
+
+test("a confirmed manual invite unlocks edit-only participant updates", () => {
+  const eventData = buildEvent({
+    telegramAnnouncements: { invite: false, matches: false, results: false },
+    participants: buildEndedEvent().participants,
+  });
+  const hidden = project(eventData);
+  const applied = {
+    destination: "community",
+    instanceKey: `event:${EVENT_ID}:upcoming:v2`,
+    messageId: 42,
+  };
+  const upcomingMessage = { applied, delivery: { status: "pending" } };
+  const announced = project(eventData, hidden.state, NOW_MS, upcomingMessage);
+  const operation = operationFor(announced, "upcoming");
+  assert.equal(operation.operation, "edit");
+  assert.equal(operation.ifMissing, "skip");
+  assert.match(operation.text, /&lt;Alice&gt;/);
+  assert.match(operation.text, /Bob &amp; Co/);
+  assert.equal(
+    project(eventData, announced.state, NOW_MS, upcomingMessage).action,
+    "unchanged",
+  );
+  const missing = project(eventData, announced.state);
+  assert.equal(operationFor(missing, "upcoming").operation, "edit");
+  assert.equal(operationFor(missing, "upcoming").ifMissing, "skip");
+  assert.equal(project(eventData, missing.state).action, "unchanged");
+  for (const invalid of [
+    {},
+    { ...applied, messageId: 0 },
+    { ...applied, instanceKey: "event:other:upcoming:v2" },
+    { ...applied, destination: "events" },
+  ]) {
+    assert.equal(
+      project(eventData, hidden.state, NOW_MS, { applied: invalid }).action,
+      "unchanged",
+    );
+  }
+});
+
+test("pending manual invites stay hidden until sent and are suppressed after registration", () => {
+  const eventData = buildEvent({
+    telegramAnnouncements: { invite: false, matches: false, results: false },
+  });
+  const upcomingMessage = {
+    desired: {
+      destination: "community",
+      instanceKey: `event:${EVENT_ID}:upcoming:v2`,
+      operation: "send",
+      text: "manually queued event invitation",
+    },
+  };
+  const hidden = project(eventData, null, NOW_MS, upcomingMessage);
+  assert.deepEqual(hidden.operations, []);
+  assert.equal(hidden.state.upcomingText, "");
+  for (const status of ["active", "ended", "dismissed"]) {
+    const stopped = project(
+      { ...eventData, status },
+      hidden.state,
+      NOW_MS,
+      upcomingMessage,
+    );
+    const operation = operationFor(stopped, "upcoming");
+    assert.equal(operation.operation, "edit");
+    assert.equal(operation.ifMissing, "skip");
+    assert.equal(operation.text, upcomingMessage.desired.text);
+    assert.equal(
+      project({ ...eventData, status }, stopped.state, NOW_MS, upcomingMessage)
+        .action,
+      "unchanged",
+    );
+  }
 });
 
 test("starting an event suppresses an undelivered upcoming post and sends the match thread", () => {

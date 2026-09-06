@@ -116,6 +116,7 @@ const {
   isPostponeEventStartResponse,
   isSyncEventStateRequest,
   isSyncEventStateResponse,
+  resolveEventTelegramAnnouncements,
 } = await import("@mons/shared/events");
 const {
   LEGACY_CORE_PRIZES_EVENT_ID,
@@ -423,6 +424,123 @@ test("sends exact authenticated event-control mutations", async () => {
     }),
     true,
   );
+});
+
+test("sends granular Telegram announcements with either event schedule", async () => {
+  const telegramAnnouncements = { invite: false, matches: true, results: true };
+  const event = {
+    eventId: "event-1",
+    status: "scheduled",
+    telegramAnnouncements,
+  };
+  const calls = [];
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input: String(input), init });
+    return jsonResponse({ ok: true, eventId: "event-1", event });
+  };
+  for (const schedule of [
+    { startsInMinutes: 5 },
+    {
+      scheduledDate: "2026-09-06",
+      scheduledTime: "18:30",
+      scheduledTimezone: "local",
+      localTimezoneIana: "Europe/Istanbul",
+    },
+  ]) {
+    const request = { ...schedule, telegramAnnouncements };
+    assert.equal(isCreateEventRequest(request), true);
+    const response = await createEventViaApi(
+      request,
+      async () => "firebase-token",
+    );
+    assert.deepEqual(
+      response.event.telegramAnnouncements,
+      telegramAnnouncements,
+    );
+    assert.deepEqual(JSON.parse(calls.at(-1).init.body), request);
+  }
+});
+
+test("validates complete Telegram preferences and preserves legacy request compatibility", () => {
+  const allOff = { invite: false, matches: false, results: false };
+  const allOn = { invite: true, matches: true, results: true };
+  const delayedInvite = { invite: false, matches: true, results: true };
+  assert.deepEqual(resolveEventTelegramAnnouncements({}), allOff);
+  assert.deepEqual(
+    resolveEventTelegramAnnouncements({ announceOnTelegram: false }),
+    allOff,
+  );
+  assert.deepEqual(
+    resolveEventTelegramAnnouncements({ announceOnTelegram: true }),
+    allOn,
+  );
+  assert.deepEqual(
+    resolveEventTelegramAnnouncements({
+      announceOnTelegram: true,
+      telegramAnnouncements: allOff,
+    }),
+    allOff,
+  );
+  assert.deepEqual(
+    resolveEventTelegramAnnouncements({
+      announceOnTelegram: false,
+      telegramAnnouncements: delayedInvite,
+    }),
+    delayedInvite,
+  );
+  for (const schedule of [
+    { startsInMinutes: 5 },
+    {
+      scheduledDate: "2026-09-06",
+      scheduledTime: "18:30",
+      scheduledTimezone: "ET",
+    },
+  ]) {
+    for (const announceOnTelegram of [undefined, false, true]) {
+      assert.equal(
+        isCreateEventRequest({ ...schedule, announceOnTelegram }),
+        true,
+      );
+      for (const telegramAnnouncements of [allOff, allOn, delayedInvite]) {
+        assert.equal(
+          isCreateEventRequest({
+            ...schedule,
+            announceOnTelegram,
+            telegramAnnouncements,
+          }),
+          true,
+        );
+      }
+    }
+    for (const telegramAnnouncements of [
+      null,
+      false,
+      [],
+      {},
+      { invite: false, matches: true },
+      { ...delayedInvite, invite: "false" },
+      { ...delayedInvite, matches: 1 },
+      { ...delayedInvite, results: null },
+      { ...delayedInvite, other: true },
+    ]) {
+      assert.equal(
+        isCreateEventRequest({ ...schedule, telegramAnnouncements }),
+        false,
+      );
+    }
+    assert.equal(
+      isCreateEventRequest({ ...schedule, announceOnTelegram: "true" }),
+      false,
+    );
+    assert.equal(
+      isCreateEventRequest({
+        ...schedule,
+        telegramAnnouncements: allOn,
+        extra: true,
+      }),
+      false,
+    );
+  }
 });
 
 test("reads conditional event snapshots and profile prizes with transport metadata", async () => {

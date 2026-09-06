@@ -3,6 +3,10 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+  buildEventTelegramProjection,
+  buildEventTelegramProjectionUpdates,
+} = require("../functions/telegram/eventProjectionCore");
+const {
   buildTelegramDeleteDesired,
   buildTelegramDeleteUpdates,
   buildTelegramEditDesired,
@@ -1914,6 +1918,62 @@ test("handles missing edit targets according to ifMissing", async (t) => {
     assert.equal(sends, 1);
     assert.equal(repository.state.get("key").applied.messageId, 5);
   });
+});
+
+test("manual event invite updates never resend a missing or deleted message", async (t) => {
+  const eventId = "manual-event";
+  const messageKey = `event:${eventId}:upcoming`;
+  const applied = {
+    destination: "community",
+    chatId: "community-chat",
+    instanceKey: `${messageKey}:v2`,
+    messageId: 42,
+  };
+  const projection = buildEventTelegramProjection({
+    eventId,
+    eventData: {
+      telegramDeliveryVersion: 2,
+      telegramAnnouncements: { invite: false, matches: true, results: true },
+      status: "scheduled",
+      startAtMs: Date.UTC(2026, 7, 26, 17),
+      participants: {},
+      rounds: {},
+    },
+    upcomingMessage: { applied },
+    nowMs: Date.UTC(2026, 7, 25, 12),
+  });
+  const desired = buildEventTelegramProjectionUpdates({ eventId, projection })[
+    `telegramMessages/${messageKey}/desired`
+  ];
+  for (const deleted of [false, true]) {
+    await t.test(
+      deleted ? "deleted at Telegram" : "receipt disappeared",
+      async () => {
+        const repository = createRepository({
+          [messageKey]: { desired, ...(deleted ? { applied } : {}) },
+        });
+        let sends = 0;
+        const result = await createEngine({
+          repository,
+          client: createClient({
+            async editTelegramMessage() {
+              return {
+                ok: false,
+                classification: "missing",
+                code: "message-not-found",
+              };
+            },
+            async sendTelegramMessage() {
+              sends++;
+              return { ok: true, messageId: 43 };
+            },
+          }),
+        }).reconcile({ messageKey });
+        assert.equal(result.reason, "missing-skipped");
+        assert.equal(sends, 0);
+      },
+    );
+  }
 });
 
 test("stale cancellation preserves a different matched message", async () => {

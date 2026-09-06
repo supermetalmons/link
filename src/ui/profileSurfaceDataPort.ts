@@ -1,4 +1,7 @@
-import type { EventCreateDateTimePayload } from "@mons/shared/events";
+import type {
+  EventCreateDateTimePayload,
+  EventCreateOptions,
+} from "@mons/shared/events";
 import type {
   EventPrizeAssignment,
   EventPrizeWithdrawalResponse,
@@ -13,7 +16,7 @@ export type { EventCreateDateTimePayload } from "@mons/shared/events";
 export type ProfileSurfaceDataPort = {
   createEvent(
     schedule: number | EventCreateDateTimePayload,
-    options?: { announceOnTelegram?: boolean },
+    options?: EventCreateOptions,
   ): Promise<{ ok: boolean; eventId?: string; event?: EventRecord | null }>;
   getLeaderboard(type: LeaderboardType): Promise<PlayerProfile[]>;
   subscribeToProfileEventPrizes(
@@ -45,7 +48,7 @@ export const bindProfileSurfaceData = (
 
 export const createProfileEvent = (
   schedule: number | EventCreateDateTimePayload,
-  options?: { announceOnTelegram?: boolean },
+  options?: EventCreateOptions,
 ) => getPort().createEvent(schedule, options);
 
 export const getLeaderboardProfiles = (type: LeaderboardType) =>

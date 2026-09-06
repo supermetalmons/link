@@ -40,12 +40,21 @@ export const EVENT_SCHEDULE_TIMEZONE_OPTIONS: readonly [
 export type EventPostponeMinutes = 5 | 10 | 15;
 export const EVENT_POSTPONE_OPTIONS_MINUTES: readonly [5, 10, 15];
 
-export type CreateEventRequest =
-  | {
-      startsInMinutes: number;
-      announceOnTelegram?: boolean;
-    }
-  | (EventCreateDateTimePayload & { announceOnTelegram?: boolean });
+export type EventTelegramAnnouncements = {
+  invite: boolean;
+  matches: boolean;
+  results: boolean;
+};
+export type EventCreateOptions = {
+  announceOnTelegram?: boolean;
+  telegramAnnouncements?: EventTelegramAnnouncements;
+};
+export function resolveEventTelegramAnnouncements(input: {
+  announceOnTelegram?: unknown;
+  telegramAnnouncements?: unknown;
+}): EventTelegramAnnouncements;
+export type CreateEventRequest = EventCreateOptions &
+  ({ startsInMinutes: number } | EventCreateDateTimePayload);
 export type PostponeEventStartRequest = {
   eventId: string;
   postponeByMinutes: EventPostponeMinutes;

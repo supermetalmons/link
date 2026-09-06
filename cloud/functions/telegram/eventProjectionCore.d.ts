@@ -31,6 +31,7 @@ export function buildEventTelegramProjection(input: {
   eventData: unknown;
   endedMatchResults?: Record<string, unknown>;
   state?: unknown;
+  upcomingMessage?: unknown;
   nowMs?: number;
 }): EventTelegramProjection;
 export function buildEventTelegramProjectionUpdates(input: {

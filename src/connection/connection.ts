@@ -141,9 +141,11 @@ import {
   isHistoricalMatchPair,
   normalizeHistoricalMatchRecord,
 } from "@mons/shared/game-sessions";
-import type {
-  EventCreateDateTimePayload,
-  EventScheduleTimezone as SharedEventScheduleTimezone,
+import {
+  resolveEventTelegramAnnouncements,
+  type EventCreateOptions,
+  type EventCreateDateTimePayload,
+  type EventScheduleTimezone as SharedEventScheduleTimezone,
 } from "@mons/shared/events";
 import {
   normalizeAuthPresentation,
@@ -261,10 +263,6 @@ const mapKnownProfileEventPrizes = (
 
 export type EventScheduleTimezone = SharedEventScheduleTimezone;
 export type { EventCreateDateTimePayload } from "@mons/shared/events";
-
-type EventCreateOptions = {
-  announceOnTelegram?: boolean;
-};
 
 export type NavigationGamesPageCursor = NavigationGamesCursor | null;
 
@@ -2413,7 +2411,7 @@ class Connection {
             };
       const requestPayload = {
         ...requestPayloadBase,
-        announceOnTelegram: options.announceOnTelegram === true,
+        telegramAnnouncements: resolveEventTelegramAnnouncements(options),
       };
       const data = await createEventViaApi(
         requestPayload,

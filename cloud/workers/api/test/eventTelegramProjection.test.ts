@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createTelegramRepository } from "../../../functions/telegram/repositoryCore.js";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
 import {
   processEventProjectionTask,
@@ -150,6 +151,137 @@ test("missing events clear work without creating Telegram messages", async () =>
     state.read(getEventTelegramProjectionOutboxPath(task.eventId)),
     null,
   );
+});
+
+test("a manual invite receipt unlocks an edit through the Telegram repository and retries safely", async () => {
+  const state = store({
+    [getEventTelegramProjectionOutboxPath(task.eventId)]: marker,
+    "events/event-1": {
+      ...scheduledEvent(),
+      telegramAnnouncements: { invite: false, matches: true, results: true },
+    },
+  });
+  const messageKey = "event:event-1:upcoming";
+  const messagePath = `telegramMessages/${messageKey}`;
+  const messages = store({});
+  const telegram = createTelegramRepository({
+    getPath: messages.client.getPath,
+    transactPath: messages.client.transactPath,
+  });
+  let deliveries = 0;
+  await processEventProjectionTask(
+    task,
+    state.client,
+    ratingRepository(),
+    async () => void deliveries++,
+    () => 200,
+    telegram,
+  );
+  assert.equal(deliveries, 0);
+  const hiddenProjection = state.read("eventTelegramProjections/event-1");
+  const applied = {
+    destination: "community",
+    instanceKey: "event:event-1:upcoming:v2",
+    messageId: 42,
+  };
+  messages.write(messagePath, { applied, delivery: { status: "pending" } });
+  state.write(getEventTelegramProjectionOutboxPath(task.eventId), marker);
+  await assert.rejects(
+    processEventProjectionTask(
+      task,
+      state.client,
+      ratingRepository(),
+      async () => {
+        throw new Error("delivery-queue-unavailable");
+      },
+      () => 200,
+      telegram,
+    ),
+    /delivery-queue-unavailable/,
+  );
+  const pendingMessage = messages.read(messagePath) as {
+    applied: typeof applied;
+    desired: { operation: string; ifMissing: string; revision: string };
+  };
+  assert.equal(pendingMessage.desired.operation, "edit");
+  assert.equal(pendingMessage.desired.ifMissing, "skip");
+  assert.deepEqual(pendingMessage.applied, applied);
+  assert.deepEqual(
+    state.read("eventTelegramProjections/event-1"),
+    hiddenProjection,
+  );
+  assert.deepEqual(
+    state.read(getEventTelegramProjectionOutboxPath(task.eventId)),
+    marker,
+  );
+  await processEventProjectionTask(
+    task,
+    state.client,
+    ratingRepository(),
+    async (delivery) => {
+      assert.equal(delivery.revision, pendingMessage.desired.revision);
+      deliveries++;
+    },
+    () => 200,
+    telegram,
+  );
+  assert.equal(deliveries, 1);
+  assert.equal(state.read(messagePath), null);
+  assert.equal(
+    state.read(getEventTelegramProjectionOutboxPath(task.eventId)),
+    null,
+  );
+});
+
+test("final score reads follow the results preference independently of the legacy flag", async (t) => {
+  for (const results of [false, true]) {
+    await t.test(String(results), async () => {
+      const state = store({
+        [getEventTelegramProjectionOutboxPath(task.eventId)]: marker,
+        "events/event-1": {
+          ...scheduledEvent(),
+          announceOnTelegram: !results,
+          telegramAnnouncements: { invite: false, matches: false, results },
+          status: "ended",
+          participants: {
+            alice: { username: "Alice" },
+            bob: { username: "Bob" },
+          },
+          rounds: {
+            0: {
+              matches: {
+                "0_0": {
+                  inviteId: "match-1",
+                  status: "host",
+                  hostProfileId: "alice",
+                  guestProfileId: "bob",
+                  hostLoginUid: "alice-login",
+                  guestLoginUid: "bob-login",
+                },
+              },
+            },
+          },
+        },
+        "eventTelegramProjections/event-1": { endedAnnouncementArmed: true },
+      });
+      const reads: string[] = [];
+      const rating = ratingRepository();
+      rating.readRatingUpdate = async (operationId) => {
+        reads.push(operationId);
+        return null;
+      };
+      const deliveries: string[] = [];
+      await processEventProjectionTask(
+        task,
+        state.client,
+        rating,
+        async ({ messageKey }) => void deliveries.push(messageKey),
+        () => 200,
+      );
+      assert.deepEqual(reads, results ? ["match-1__match-1"] : []);
+      assert.deepEqual(deliveries, results ? ["event:event-1:ended"] : []);
+    });
+  }
 });
 
 test("a successor marker survives completion of older work", async () => {

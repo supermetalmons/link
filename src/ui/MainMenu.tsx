@@ -82,6 +82,7 @@ import {
   MIN_STARTS_IN_MINUTES,
   isMonsLinkAdmin,
   type EventScheduleTimezone,
+  type EventTelegramAnnouncements,
 } from "@mons/shared/events";
 import type { AuthState } from "../connection/authModels";
 import { InventoryModal } from "./InventoryModal";
@@ -101,6 +102,12 @@ const MATERIAL_BASE_URL = "https://cdn.lil.org/mons/rocks/materials";
 type LeaderboardSpecialType = keyof typeof LEADERBOARD_TYPE_ICON_URLS;
 
 type EventScheduleMode = "minutes" | "datetime";
+
+const EVENT_TELEGRAM_ANNOUNCEMENT_OPTIONS = [
+  { key: "invite", label: "Invite when created" },
+  { key: "matches", label: "Event start and match updates" },
+  { key: "results", label: "Final results" },
+] as const;
 
 const TOP_RIGHT_CONTROL_IDS = {
   info: "top-right-info-button",
@@ -628,11 +635,17 @@ const ExperimentalMenu = styled.div`
   flex-direction: column;
   gap: 12px;
   padding: 20px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--menuOverlayBackground);
   backdrop-filter: blur(3px);
   -webkit-backdrop-filter: blur(3px);
   border-radius: 0 0 10px 10px;
   z-index: 30000;
+
+  > * {
+    flex-shrink: 0;
+  }
 
   @media (prefers-color-scheme: dark) {
     background: var(--color-deep-gray);
@@ -664,6 +677,45 @@ const ToggleRow = styled.label`
   @media (prefers-color-scheme: dark) {
     color: var(--color-gray-f5);
   }
+`;
+
+const TelegramAnnouncements = styled.fieldset`
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  color: var(--color-gray-33);
+
+  legend {
+    padding: 0;
+    margin-bottom: 8px;
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    color: var(--color-gray-f5);
+  }
+`;
+
+const TelegramAnnouncementToggle = styled(ToggleRow)`
+  align-self: stretch;
+  line-height: 1.35;
+  cursor: pointer;
+
+  input {
+    flex-shrink: 0;
+    margin: 0;
+  }
+`;
+
+const TelegramAnnouncementsHint = styled.p`
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
 `;
 
 const ScheduleModeToggle = styled.div`
@@ -1398,7 +1450,12 @@ const MainMenu: React.FC = () => {
   );
   const [eventScheduledTimezone, setEventScheduledTimezone] =
     useState<EventScheduleTimezone>("local");
-  const [eventAnnounceOnTelegram, setEventAnnounceOnTelegram] = useState(false);
+  const [eventTelegramAnnouncements, setEventTelegramAnnouncements] =
+    useState<EventTelegramAnnouncements>({
+      invite: false,
+      matches: false,
+      results: false,
+    });
   const [isCreatingEvent, setIsCreatingEvent] = useState(false);
   const [eventCreateError, setEventCreateError] = useState("");
 
@@ -1560,7 +1617,11 @@ const MainMenu: React.FC = () => {
     setEventScheduledDate(defaults.date);
     setEventScheduledTime(defaults.time);
     setEventScheduledTimezone("local");
-    setEventAnnounceOnTelegram(false);
+    setEventTelegramAnnouncements({
+      invite: false,
+      matches: false,
+      results: false,
+    });
     setEventCreateError("");
   };
 
@@ -1622,7 +1683,7 @@ const MainMenu: React.FC = () => {
     setShowExperimental(false);
     openEventModalPendingCreate({ restoreHomeOnClose: false });
     void createProfileEvent(createRequest, {
-      announceOnTelegram: eventAnnounceOnTelegram,
+      telegramAnnouncements: eventTelegramAnnouncements,
     })
       .then((result) => {
         if (!result.ok || !result.eventId) {
@@ -1657,7 +1718,7 @@ const MainMenu: React.FC = () => {
     eventScheduledDate,
     eventScheduledTime,
     eventScheduledTimezone,
-    eventAnnounceOnTelegram,
+    eventTelegramAnnouncements,
   ]);
 
   const closeMainMenuPopupsHandler = useCallback(() => {
@@ -2020,6 +2081,32 @@ const MainMenu: React.FC = () => {
                             </ExperimentalSelect>
                           </>
                         )}
+                        <TelegramAnnouncements aria-describedby="event-telegram-announcements-hint">
+                          <legend>Telegram announcements</legend>
+                          {EVENT_TELEGRAM_ANNOUNCEMENT_OPTIONS.map(
+                            ({ key, label }) => (
+                              <TelegramAnnouncementToggle key={key}>
+                                <input
+                                  type="checkbox"
+                                  checked={eventTelegramAnnouncements[key]}
+                                  onChange={(event) => {
+                                    const checked = event.target.checked;
+                                    setEventTelegramAnnouncements(
+                                      (current) => ({
+                                        ...current,
+                                        [key]: checked,
+                                      }),
+                                    );
+                                  }}
+                                />
+                                {label}
+                              </TelegramAnnouncementToggle>
+                            ),
+                          )}
+                          <TelegramAnnouncementsHint id="event-telegram-announcements-hint">
+                            Once an invite is sent, it updates as people join.
+                          </TelegramAnnouncementsHint>
+                        </TelegramAnnouncements>
                         <ExperimentalActionButton
                           type="button"
                           onClick={handleCreateEvent}
@@ -2029,16 +2116,6 @@ const MainMenu: React.FC = () => {
                             ? "Creating Event..."
                             : "Create Event"}
                         </ExperimentalActionButton>
-                        <ToggleRow>
-                          <input
-                            type="checkbox"
-                            checked={eventAnnounceOnTelegram}
-                            onChange={(event) => {
-                              setEventAnnounceOnTelegram(event.target.checked);
-                            }}
-                          />
-                          announce on telegram
-                        </ToggleRow>
                       </>
                     )}
                     {eventCreateError !== "" && (

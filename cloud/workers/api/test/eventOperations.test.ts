@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { LEGACY_CORE_PRIZES_EVENT_ID } from "@mons/shared/event-prizes";
+import type { EventCreateOptions } from "@mons/shared/events";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import type { ProfileOwnershipSnapshot } from "../src/profileOwnership.ts";
@@ -366,6 +367,12 @@ test("creates a scheduled event only after its Workflow exists", async () => {
   assert.deepEqual(order, ["workflow", "patch"]);
   assert.equal(response.eventId, "aaaaaaaaaaa");
   assert.equal(response.event.status, "scheduled");
+  assert.deepEqual(response.event.telegramAnnouncements, {
+    invite: true,
+    matches: true,
+    results: true,
+  });
+  assert.equal(response.event.telegramDeliveryVersion, 2);
   const update = repository.patches[0];
   assert.deepEqual(update["events/aaaaaaaaaaa"], response.event);
   const outboxEntry = Object.entries(update).find(([path]) =>
@@ -376,6 +383,53 @@ test("creates a scheduled event only after its Workflow exists", async () => {
     (outboxEntry[1] as Record<string, unknown>).sourceKey,
     "start:aaaaaaaaaaa:301000",
   );
+});
+
+test("persists independent Telegram preferences including all-off and legacy defaults", async () => {
+  const allOff = { invite: false, matches: false, results: false };
+  const cases: Array<{
+    options: EventCreateOptions;
+    expected: NonNullable<EventCreateOptions["telegramAnnouncements"]>;
+  }> = [
+    { options: {}, expected: allOff },
+    { options: { announceOnTelegram: false }, expected: allOff },
+    {
+      options: { announceOnTelegram: true, telegramAnnouncements: allOff },
+      expected: allOff,
+    },
+  ];
+  for (const invite of [false, true]) {
+    for (const matches of [false, true]) {
+      for (const results of [false, true]) {
+        const telegramAnnouncements = { invite, matches, results };
+        cases.push({
+          options: { telegramAnnouncements },
+          expected: telegramAnnouncements,
+        });
+      }
+    }
+  }
+  for (const { options, expected } of cases) {
+    const state = createRepository();
+    const response = await createEvent(
+      workflowEnvironment(() => undefined),
+      identity,
+      { startsInMinutes: 5, ...options },
+      {
+        repository: state.repository,
+        now: () => 1_000,
+        random: () => 0,
+        sleep: async () => undefined,
+      },
+    );
+    assert.deepEqual(response.event.telegramAnnouncements, expected);
+    assert.equal(response.event.telegramDeliveryVersion, 2);
+    assert.equal(Object.hasOwn(response.event, "announceOnTelegram"), false);
+    assert.deepEqual(
+      state.patches[0][`events/${response.eventId}`],
+      response.event,
+    );
+  }
 });
 
 test("ignores stale Firebase profile claims when creating an event", async () => {

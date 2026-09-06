@@ -231,6 +231,33 @@ test("rejects wrong methods and strict-body violations", async () => {
   assert.equal(invalidBody.status, 400);
 });
 
+test("rejects malformed Telegram announcement preferences before event creation", async () => {
+  for (const telegramAnnouncements of [
+    null,
+    [],
+    { invite: false, matches: true },
+    { invite: false, matches: true, results: "true" },
+    { invite: false, matches: true, results: true, extra: true },
+  ]) {
+    const response = await handleEventRoute(
+      new Request("https://api.mons.link/events/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ startsInMinutes: 5, telegramAnnouncements }),
+      }),
+      TELEGRAM_TEST_ENV,
+      ctx,
+      { verifyIdentity: async () => identity },
+    );
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      ok: false,
+      error: "invalid-argument",
+      message: "invalid-request",
+    });
+  }
+});
+
 test("keeps participation and event-control deadlines separate", async () => {
   const timeoutDescriptor = Object.getOwnPropertyDescriptor(
     AbortSignal,

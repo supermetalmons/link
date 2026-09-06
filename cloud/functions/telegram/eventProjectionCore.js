@@ -8,7 +8,10 @@ const {
   buildTelegramSendUpdates,
 } = require("./desiredStateCore");
 const { getEventPrizePlacements } = require("../events/bracket");
-const { THIRD_PLACE_MATCH_KEY } = require("@mons/shared/events");
+const {
+  THIRD_PLACE_MATCH_KEY,
+  resolveEventTelegramAnnouncements,
+} = require("@mons/shared/events");
 
 const EVENT_TELEGRAM_PROJECTION_ROOT = "eventTelegramProjections";
 const EVENT_TELEGRAM_PROJECTION_LOCK_ROOT = "eventTelegramProjectionLocks";
@@ -339,21 +342,22 @@ const buildEventSignature = (eventData, nowMs = Date.now()) => {
   }
   const status = normalizeString(eventData.status) || EVENT_STATUS_SCHEDULED;
   const startAtMs = normalizePositiveNumberOrNull(eventData.startAtMs);
-  const active =
-    eventData.announceOnTelegram === true && !isTerminalStatus(status);
+  const announcements = resolveEventTelegramAnnouncements(eventData);
+  const active = !isTerminalStatus(status);
+  const upcomingEnabled = announcements.invite && active;
   const includeDateLine = Boolean(
-    active &&
+    upcomingEnabled &&
     status === EVENT_STATUS_SCHEDULED &&
     startAtMs &&
     shouldIncludeUtcDateLine(startAtMs, nowMs),
   );
   return JSON.stringify({
     deliveryVersion: EVENT_TELEGRAM_DELIVERY_VERSION,
-    announceOnTelegram: eventData.announceOnTelegram === true,
+    telegramAnnouncements: announcements,
     status,
     startAtMs: startAtMs || null,
     upcoming:
-      active && status === EVENT_STATUS_SCHEDULED && startAtMs
+      upcomingEnabled && status === EVENT_STATUS_SCHEDULED && startAtMs
         ? {
             ptEtUtcLine: formatPtEtUtcLine(startAtMs),
             includeDateLine,
@@ -361,7 +365,10 @@ const buildEventSignature = (eventData, nowMs = Date.now()) => {
             participantRenderKey: buildParticipantRenderKey(eventData),
           }
         : null,
-    startedMatchKey: active ? buildStartedThreadMatchKey(eventData) : "",
+    startedMatchKey:
+      announcements.matches && active
+        ? buildStartedThreadMatchKey(eventData)
+        : "",
   });
 };
 
@@ -544,21 +551,43 @@ const buildEndedState = (eventId, eventData, resultsByKey = {}) => {
 const hashProjection = (value) =>
   crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
+const parseUpcomingMessage = (eventId, raw) => {
+  const value = raw && typeof raw === "object" ? raw : {};
+  const matchesTarget = (record) =>
+    record &&
+    record.instanceKey === `event:${eventId}:upcoming:v2` &&
+    record.destination === "community";
+  return {
+    hasAppliedMessage: Boolean(
+      matchesTarget(value.applied) &&
+      Number.isSafeInteger(value.applied.messageId) &&
+      value.applied.messageId > 0,
+    ),
+    desiredText:
+      matchesTarget(value.desired) &&
+      (value.desired.operation === "send" || value.desired.operation === "edit")
+        ? normalizeText(value.desired.text)
+        : "",
+  };
+};
+
 const buildDesiredOperation = ({
   channel,
   eventId,
   previousText,
   desiredText,
   active,
+  allowSend = true,
 }) => {
   if (desiredText) {
+    const edit = Boolean(previousText || !allowSend);
     return {
-      operation: previousText ? "edit" : "send",
+      operation: edit ? "edit" : "send",
       channel,
       messageKey: `event:${eventId}:${channel}`,
       instanceKey: `event:${eventId}:${channel}:v2`,
       text: desiredText,
-      ifMissing: previousText ? "send" : null,
+      ifMissing: edit ? (allowSend ? "send" : "skip") : null,
     };
   }
   if (!active && previousText) {
@@ -579,6 +608,7 @@ const buildEventTelegramProjection = ({
   eventData,
   endedMatchResults = {},
   state: rawState,
+  upcomingMessage,
   nowMs = Date.now(),
 }) => {
   const normalizedEventId = normalizeString(eventId);
@@ -587,15 +617,25 @@ const buildEventTelegramProjection = ({
   }
   const state = parseProjectionState(rawState);
   const status = normalizeString(eventData.status) || EVENT_STATUS_SCHEDULED;
-  const enabled = eventData.announceOnTelegram === true;
-  const active = enabled && !isTerminalStatus(status);
-  const endedAnnouncementArmed = state.endedAnnouncementArmed || active;
+  const announcements = resolveEventTelegramAnnouncements(eventData);
+  const active = !isTerminalStatus(status);
+  const upcoming = parseUpcomingMessage(normalizedEventId, upcomingMessage);
+  const upcomingEnabled = announcements.invite || upcoming.hasAppliedMessage;
+  const previousUpcomingText =
+    state.upcomingText ||
+    (status !== EVENT_STATUS_SCHEDULED ? upcoming.desiredText : "");
+  const matchesActive = announcements.matches && active;
+  const endedAnnouncementArmed =
+    state.endedAnnouncementArmed || (announcements.results && active);
   const shouldRenderEnded =
-    enabled && status === EVENT_STATUS_ENDED && state.endedAnnouncementArmed;
-  const upcomingText = active
-    ? renderUpcomingMessage(normalizedEventId, eventData, nowMs)
-    : null;
-  const startedState = active
+    announcements.results &&
+    status === EVENT_STATUS_ENDED &&
+    state.endedAnnouncementArmed;
+  const upcomingText =
+    active && upcomingEnabled
+      ? renderUpcomingMessage(normalizedEventId, eventData, nowMs)
+      : null;
+  const startedState = matchesActive
     ? buildStartedState(normalizedEventId, eventData, state)
     : {
         text: state.startedText || null,
@@ -608,11 +648,12 @@ const buildEventTelegramProjection = ({
       ? { text: state.endedText }
       : buildEndedState(normalizedEventId, eventData, endedMatchResults)
     : { text: state.endedText || null };
-  const nextUpcomingText = upcomingText || state.upcomingText;
+  const nextUpcomingText = upcomingText || previousUpcomingText;
   const nextStartedText = startedState.text || state.startedText;
   const nextEndedText = endedState.text || state.endedText;
   const signature = hashProjection({
     source: buildEventSignature(eventData, nowMs),
+    upcomingEnabled,
     upcomingText: nextUpcomingText,
     startedText: nextStartedText,
     endedText: nextEndedText,
@@ -627,16 +668,17 @@ const buildEventTelegramProjection = ({
     buildDesiredOperation({
       channel: "upcoming",
       eventId: normalizedEventId,
-      previousText: state.upcomingText,
+      previousText: previousUpcomingText,
       desiredText: upcomingText,
       active: Boolean(upcomingText),
+      allowSend: announcements.invite,
     }),
     buildDesiredOperation({
       channel: "started",
       eventId: normalizedEventId,
       previousText: state.startedText,
-      desiredText: active ? startedState.text : null,
-      active: Boolean(active && startedState.text),
+      desiredText: matchesActive ? startedState.text : null,
+      active: Boolean(matchesActive && startedState.text),
     }),
     buildDesiredOperation({
       channel: "ended",

@@ -15,6 +15,7 @@ const {
   THIRD_PLACE_MATCH_KEY,
   isMonsLinkAdmin,
   parseEventMatchKey: parseMatchKey,
+  resolveEventTelegramAnnouncements,
 } = require("@mons/shared/events");
 const { createEventBracketRuntime } = require("./events/bracket");
 const { getEventParticipantIds } = require("./events/participants");
@@ -190,7 +191,7 @@ const createEventRuntime = (dependencies) => {
     creatorUid,
     startAtMs,
     createdAtMs,
-    announceOnTelegram,
+    telegramAnnouncements,
   }) => {
     const creatorParticipant = buildParticipantSnapshot(
       creatorProfile,
@@ -204,8 +205,8 @@ const createEventRuntime = (dependencies) => {
       createdAtMs,
       updatedAtMs: createdAtMs,
       startAtMs,
-      announceOnTelegram: announceOnTelegram === true,
-      ...(announceOnTelegram === true ? { telegramDeliveryVersion: 2 } : {}),
+      telegramAnnouncements,
+      telegramDeliveryVersion: 2,
       startedAtMs: null,
       endedAtMs: null,
       createdByProfileId: creatorParticipant.profileId,
@@ -299,7 +300,8 @@ const createEventRuntime = (dependencies) => {
     const createdAtMs = getNowMs();
     const requestData =
       request.data && typeof request.data === "object" ? request.data : {};
-    const announceOnTelegram = requestData.announceOnTelegram === true;
+    const telegramAnnouncements =
+      resolveEventTelegramAnnouncements(requestData);
     let startAtMs = 0;
 
     if (hasDateTimeScheduleRequest(requestData)) {
@@ -330,7 +332,7 @@ const createEventRuntime = (dependencies) => {
       creatorUid: request.auth.uid,
       startAtMs,
       createdAtMs,
-      announceOnTelegram,
+      telegramAnnouncements,
     });
 
     const sourceKey = `start:${eventId}:${startAtMs}`;
