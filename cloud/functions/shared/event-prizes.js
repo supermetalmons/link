@@ -3,6 +3,7 @@
 const { isSafeFirebaseKey } = require("./ids");
 const { isValidSolanaAddress } = require("./solana");
 
+const EVENT_PRIZE_REVEAL_WINDOW_MS = 3_600_000;
 const LEGACY_CORE_PRIZES_EVENT_ID = "NN3eRzoZo80";
 const COMPRESSED_PRIZES_EVENT_ID = "FRkdorMWaYW";
 const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID = "VOxalSrexcA";
@@ -305,6 +306,15 @@ const isEventPrizeId = (eventId, prizeId) =>
   normalizeString(prizeId) === prizeId &&
   Boolean(getEventPrizeDefinition(eventId, prizeId));
 
+const isEventPrizeRevealOpen = (status, startAtMs, nowMs) =>
+  status === "active" ||
+  status === "ended" ||
+  (status === "scheduled" &&
+    typeof startAtMs === "number" &&
+    Number.isFinite(startAtMs) &&
+    Number.isFinite(nowMs) &&
+    startAtMs - nowMs < EVENT_PRIZE_REVEAL_WINDOW_MS);
+
 const isEventPrizeStandard = (value) =>
   value === "core" || value === "compressed";
 
@@ -451,6 +461,7 @@ module.exports = {
   COMPRESSED_PRIZES_EVENT_ID,
   EVENT_PRIZE_CONFIGS,
   EVENT_PRIZE_IDS,
+  EVENT_PRIZE_REVEAL_WINDOW_MS,
   LEGACY_CORE_PRIZES_EVENT_ID,
   PLANET_PEPPA_PRIZES_EVENT_ID,
   RARE_WEITSMANS_PRIZES_EVENT_ID,
@@ -461,6 +472,7 @@ module.exports = {
   isEventPrizeAssignmentWireRecord,
   isEventPrizeEvent,
   isEventPrizeId,
+  isEventPrizeRevealOpen,
   isEventPrizeStandard,
   isEventPrizeWithdrawalCompletedResponse,
   isEventPrizeWithdrawalOperationId,

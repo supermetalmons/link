@@ -6,7 +6,11 @@ import type {
 } from "../../connection/connectionModels";
 import { storage } from "../../utils/storage";
 import { buildEventMatchKey, parseEventMatchKey } from "@mons/shared/events";
-import { isEventPrizeEvent } from "@mons/shared/event-prizes";
+import {
+  EVENT_PRIZE_REVEAL_WINDOW_MS,
+  isEventPrizeEvent,
+  isEventPrizeRevealOpen,
+} from "@mons/shared/event-prizes";
 
 export type EventUiState = {
   isJoined: boolean;
@@ -140,12 +144,31 @@ export const getEventNowRefreshDelayMs = (
   const minuteRemainderMs = deltaMs % MINUTE_MS;
   const untilNextMinuteBoundaryMs =
     minuteRemainderMs === 0 ? MINUTE_MS : minuteRemainderMs;
+  const untilPrizeRevealMs =
+    deltaMs >= EVENT_PRIZE_REVEAL_WINDOW_MS
+      ? deltaMs - EVENT_PRIZE_REVEAL_WINDOW_MS + NOW_REFRESH_BOUNDARY_FUDGE_MS
+      : Infinity;
 
   return Math.min(
     MAX_NOW_REFRESH_MS,
     untilNextMinuteBoundaryMs + NOW_REFRESH_BOUNDARY_FUDGE_MS,
+    untilPrizeRevealMs,
   );
 };
+
+export const canSelectEventPrize = (
+  event: EventRecord | null,
+  profileId: string,
+  nowMs: number,
+): boolean =>
+  !!(
+    event &&
+    profileId &&
+    event.participants[profileId] &&
+    event.prizeSelectionsLockedAtMs == null &&
+    (event.status === "scheduled" || event.status === "active") &&
+    isEventPrizeRevealOpen(event.status, event.startAtMs, nowMs)
+  );
 
 export const getParticipantCount = (event: EventRecord | null): number => {
   if (!event || !event.participants) {

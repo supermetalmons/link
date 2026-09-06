@@ -126,6 +126,8 @@ export const PrizeChoiceButton = styled.button<{
   $imageWidth: number;
   $imageHeight: number;
 }>`
+  position: relative;
+  isolation: isolate;
   width: 100%;
   height: auto;
   aspect-ratio: ${(props) => props.$imageWidth} /
@@ -141,14 +143,95 @@ export const PrizeChoiceButton = styled.button<{
   line-height: 0;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+
+  &:disabled {
+    cursor: default;
+  }
 `;
 
-export const PrizeImage = styled.img`
+export const PrizeImage = styled.img<{ $concealed?: boolean }>`
   display: block;
   min-width: 0;
   height: 100%;
   max-width: 100%;
   width: 100%;
+  filter: ${(props) => (props.$concealed ? "blur(10px)" : "none")};
+`;
+
+const mysteryPrizeFloat = keyframes`
+  0%, 100% {
+    opacity: 0.76;
+    transform: translate(-50%, -50%) translateY(2px) rotate(-7deg);
+  }
+
+  50% {
+    opacity: 1;
+    transform: translate(-50%, -50%) translateY(-2px) rotate(6deg);
+  }
+`;
+
+export const MysteryPrizeMarks = styled.span`
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  pointer-events: none;
+  color: #4f356f;
+  text-shadow:
+    0 1px 2px rgba(255, 255, 255, 0.95),
+    0 0 7px rgba(255, 255, 255, 0.8);
+
+  > span {
+    position: absolute;
+    font-family: inherit;
+    font-size: clamp(16px, 2.6vh, 22px);
+    font-weight: 800;
+    line-height: 1;
+    animation: ${mysteryPrizeFloat} 4s ease-in-out infinite;
+  }
+
+  > span:nth-child(1) {
+    left: 19%;
+    top: 24%;
+    animation-delay: -0.6s;
+  }
+
+  > span:nth-child(2) {
+    left: 78%;
+    top: 30%;
+    font-size: clamp(15px, 2.3vh, 19px);
+    animation-duration: 4.6s;
+    animation-delay: -2.3s;
+  }
+
+  > span:nth-child(3) {
+    left: 26%;
+    top: 74%;
+    font-size: clamp(14px, 2.1vh, 18px);
+    animation-duration: 3.8s;
+    animation-delay: -1.7s;
+  }
+
+  > span:nth-child(4) {
+    left: 77%;
+    top: 73%;
+    animation-duration: 4.3s;
+    animation-delay: -3.1s;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    color: #eadcff;
+    text-shadow:
+      0 1px 2px rgba(24, 12, 42, 0.95),
+      0 0 7px rgba(82, 45, 128, 0.85);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    > span {
+      animation: none;
+      opacity: 0.9;
+      transform: translate(-50%, -50%);
+    }
+  }
 `;
 
 export const PrizeSelectionAvatars = styled.div<{

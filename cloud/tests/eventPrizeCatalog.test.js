@@ -10,6 +10,7 @@ const {
   ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID,
   COMPRESSED_PRIZES_EVENT_ID,
   EVENT_PRIZE_IDS,
+  EVENT_PRIZE_REVEAL_WINDOW_MS,
   LEGACY_CORE_PRIZES_EVENT_ID,
   PLANET_PEPPA_PRIZES_EVENT_ID,
   RARE_WEITSMANS_PRIZES_EVENT_ID,
@@ -19,6 +20,7 @@ const {
   isEventPrizeAssignmentWireRecord,
   isEventPrizeEvent,
   isEventPrizeId,
+  isEventPrizeRevealOpen,
   isProfileEventPrizesResponse,
   isEventPrizeStandard,
   isEventPrizeWithdrawalCompletedResponse,
@@ -28,6 +30,38 @@ const {
   isToggleEventPrizeSelectionRequest,
 } = require("@mons/shared/event-prizes");
 const databaseRules = require("../database.rules.json");
+
+test("reveals scheduled prizes only inside the final hour", () => {
+  const nowMs = 10_000_000;
+  assert.equal(EVENT_PRIZE_REVEAL_WINDOW_MS, 3_600_000);
+  for (const [remainingMs, expected] of [
+    [3_600_001, false],
+    [3_600_000, false],
+    [3_599_999, true],
+    [0, true],
+    [-1, true],
+  ]) {
+    assert.equal(
+      isEventPrizeRevealOpen("scheduled", nowMs + remainingMs, nowMs),
+      expected,
+    );
+  }
+});
+
+test("keeps active and ended prizes revealed and rejects invalid schedules", () => {
+  for (const status of ["active", "ended"]) {
+    assert.equal(isEventPrizeRevealOpen(status, 10_000_000, 0), true);
+    assert.equal(isEventPrizeRevealOpen(status, null, 0), true);
+  }
+  for (const status of ["dismissed", "unknown", null, undefined]) {
+    assert.equal(isEventPrizeRevealOpen(status, 0, 0), false);
+  }
+  for (const startAtMs of [null, undefined, "1000", NaN, Infinity]) {
+    assert.equal(isEventPrizeRevealOpen("scheduled", startAtMs, 0), false);
+  }
+  assert.equal(isEventPrizeRevealOpen("scheduled", 1000, NaN), false);
+  assert.equal(isEventPrizeRevealOpen("scheduled", 1000, Infinity), false);
+});
 
 test("withdrawal contracts require exact Worker request and response shapes", () => {
   const operationId = `epw_${"a".repeat(64)}`;

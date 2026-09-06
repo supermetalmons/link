@@ -4,6 +4,7 @@ export const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID: "VOxalSrexcA";
 export const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID: "oXAceF6anag";
 export const RARE_WEITSMANS_PRIZES_EVENT_ID: "RpPjMNyrJJa";
 export const PLANET_PEPPA_PRIZES_EVENT_ID: "z3oj52Iiime";
+export const EVENT_PRIZE_REVEAL_WINDOW_MS: 3_600_000;
 
 export type EventPrizeEventId =
   | typeof LEGACY_CORE_PRIZES_EVENT_ID
@@ -137,6 +138,11 @@ export function isEventPrizeId(
   eventId: unknown,
   prizeId: unknown,
 ): prizeId is EventPrizeId;
+export function isEventPrizeRevealOpen(
+  status: unknown,
+  startAtMs: unknown,
+  nowMs: number,
+): boolean;
 export function isEventPrizeStandard(
   value: unknown,
 ): value is EventPrizeStandard;

@@ -2,6 +2,7 @@ import { createGameVariantHelpers } from "@mons/shared/game-variants";
 import {
   isEventPrizeEvent,
   isEventPrizeId,
+  isEventPrizeRevealOpen,
   type ToggleEventPrizeSelectionRequest,
   type ToggleEventPrizeSelectionResponse,
 } from "@mons/shared/event-prizes";
@@ -936,6 +937,23 @@ export async function toggleEventPrizeSelection(
         409,
         "failed-precondition",
         "Prize selection is locked for this event.",
+      );
+    }
+    const startAtMs =
+      event.status === "scheduled"
+        ? requireTimestamp(event.startAtMs)
+        : event.startAtMs;
+    if (
+      !isEventPrizeRevealOpen(
+        event.status,
+        startAtMs,
+        (dependencies.now ?? Date.now)(),
+      )
+    ) {
+      throw new AuthApiFailure(
+        409,
+        "failed-precondition",
+        "Prize selection opens less than one hour before the event starts.",
       );
     }
     const directParticipation = applyOwnershipPolicy(() =>

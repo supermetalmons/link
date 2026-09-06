@@ -43,7 +43,10 @@ import {
   EVENT_POSTPONE_OPTIONS_MINUTES,
   isMonsLinkAdmin,
 } from "@mons/shared/events";
-import { getEventPrizeConfig } from "@mons/shared/event-prizes";
+import {
+  getEventPrizeConfig,
+  isEventPrizeRevealOpen,
+} from "@mons/shared/event-prizes";
 import {
   EVENT_AUTO_RECOVERY_DELAY_MS,
   EVENT_AUTO_RECOVERY_MAX_ATTEMPTS_PER_REASON,
@@ -51,6 +54,7 @@ import {
   PENDING_JOIN_POLL_INTERVAL_MS,
   PENDING_JOIN_POLL_TIMEOUT_MS,
   type BracketMatchAction,
+  canSelectEventPrize as isEventPrizeSelectionAvailable,
   formatAbsoluteStart,
   formatRelativeStart,
   getActivePendingMatches,
@@ -126,6 +130,7 @@ import {
   EndedAwardSparkles,
   EndedAwardsRow,
   MatchAvatarSlot,
+  MysteryPrizeMarks,
   Overlay,
   OverlayStatus,
   ParticipantPill,
@@ -437,6 +442,11 @@ const EventModal: React.FC = () => {
   const displayedEventRecord = devStubRecord ?? eventRecord;
   const eventPrizeConfig = getEventPrizeConfig(modalState.eventId);
   const eventPrizes = eventPrizeConfig?.prizes ?? EMPTY_EVENT_PRIZES;
+  const areEventPrizesConcealed = !isEventPrizeRevealOpen(
+    displayedEventRecord?.status,
+    displayedEventRecord?.startAtMs,
+    nowMs,
+  );
   const currentProfileId = storage.getProfileId("");
   const markPrizeImageLoaded = useCallback((prizeId: EventPrizeId) => {
     setLoadedPrizeImageIds((current) => {
@@ -651,6 +661,9 @@ const EventModal: React.FC = () => {
       if (isDisposed) {
         return;
       }
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
       const currentNowMs = Date.now();
       setNowMs(currentNowMs);
       timeoutId = window.setTimeout(
@@ -663,10 +676,20 @@ const EventModal: React.FC = () => {
       );
     };
 
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") {
+        scheduleNextTick();
+      }
+    };
+
     scheduleNextTick();
+    window.addEventListener("focus", scheduleNextTick);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
 
     return () => {
       isDisposed = true;
+      window.removeEventListener("focus", scheduleNextTick);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
       if (timeoutId !== null) {
         window.clearTimeout(timeoutId);
       }
@@ -994,6 +1017,11 @@ const EventModal: React.FC = () => {
   useLayoutEffect(() => {
     committedPrizeSelectionsRef.current = eventPrizeSelections;
     isHydratingInitialPrizeSelectionsRef.current = false;
+    if (areEventPrizesConcealed) {
+      pendingPrizeAvatarAnimationsRef.current = null;
+      clearPrizeAvatarExitAnimations();
+      return;
+    }
     const pendingAnimations = pendingPrizeAvatarAnimationsRef.current;
     if (!pendingAnimations) {
       return;
@@ -1036,7 +1064,13 @@ const EventModal: React.FC = () => {
             enteringProfileIds: remainingEnteringProfileIds,
           }
         : null;
-  }, [eventPrizeSelections, loadedPrizeImageIds, participants]);
+  }, [
+    areEventPrizesConcealed,
+    clearPrizeAvatarExitAnimations,
+    eventPrizeSelections,
+    loadedPrizeImageIds,
+    participants,
+  ]);
   const removableScheduledParticipants = useMemo(() => {
     if (!eventRecord || eventRecord.status !== "scheduled") {
       return [];
@@ -1126,10 +1160,11 @@ const EventModal: React.FC = () => {
       if (
         devStubRecord ||
         !eventPrizeConfig ||
-        !currentProfileId ||
-        !eventRecord?.participants[currentProfileId] ||
-        eventRecord.prizeSelectionsLockedAtMs != null ||
-        (eventRecord.status !== "scheduled" && eventRecord.status !== "active")
+        !isEventPrizeSelectionAvailable(
+          eventRecord,
+          currentProfileId,
+          Date.now(),
+        )
       ) {
         return;
       }
@@ -2039,10 +2074,7 @@ const EventModal: React.FC = () => {
   const canSelectEventPrize = !!(
     showEventPrizes &&
     !devStubRecord &&
-    currentProfileId &&
-    eventRecord?.participants[currentProfileId] &&
-    eventRecord.prizeSelectionsLockedAtMs == null &&
-    (eventRecord.status === "scheduled" || eventRecord.status === "active")
+    isEventPrizeSelectionAvailable(eventRecord, currentProfileId, nowMs)
   );
   const topBarTitleText = devStubRecord
     ? ""
@@ -2200,24 +2232,40 @@ const EventModal: React.FC = () => {
                         $imageWidth={prize.imageWidth}
                         $imageHeight={prize.imageHeight}
                         disabled={!canSelectEventPrize}
-                        aria-pressed={isSelected}
-                        aria-label={`${
-                          canSelectEventPrize
-                            ? `${actionLabel} ${prize.alt}`
-                            : prize.alt
-                        }. ${selectionCountLabel}.${awardLabel}`}
+                        aria-pressed={
+                          areEventPrizesConcealed ? undefined : isSelected
+                        }
+                        aria-label={
+                          areEventPrizesConcealed
+                            ? "Mystery prize. Reveals less than one hour before the event starts."
+                            : `${
+                                canSelectEventPrize
+                                  ? `${actionLabel} ${prize.alt}`
+                                  : prize.alt
+                              }. ${selectionCountLabel}.${awardLabel}`
+                        }
                         onClick={() => handlePrizeSelectionClick(prize.id)}
                       >
                         <PrizeImage
+                          $concealed={areEventPrizesConcealed}
                           src={prize.imageUrl}
-                          alt={prize.alt}
+                          alt={areEventPrizesConcealed ? "" : prize.alt}
                           width={prize.imageWidth}
                           height={prize.imageHeight}
                           draggable={false}
                           onLoad={() => markPrizeImageLoaded(prize.id)}
                         />
+                        {areEventPrizesConcealed && (
+                          <MysteryPrizeMarks aria-hidden="true">
+                            <span>?</span>
+                            <span>?</span>
+                            <span>?</span>
+                            <span>?</span>
+                          </MysteryPrizeMarks>
+                        )}
                       </PrizeChoiceButton>
-                      {displayedEventRecord.status !== "ended" &&
+                      {!areEventPrizesConcealed &&
+                        displayedEventRecord.status !== "ended" &&
                         loadedPrizeImageIds.has(prize.id) &&
                         selectedParticipants.length > 0 && (
                           <PrizeSelectionAvatars

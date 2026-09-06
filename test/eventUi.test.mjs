@@ -22,6 +22,7 @@ const {
   EVENT_AUTO_RECOVERY_DELAY_MS,
   EVENT_AUTO_RECOVERY_MAX_ATTEMPTS_PER_REASON,
   EVENT_AUTO_RECOVERY_MIN_GAP_MS,
+  canSelectEventPrize,
   getDisplayedMatchSides,
   getEventAutoRecoveryReason,
   getEventNowRefreshDelayMs,
@@ -218,6 +219,107 @@ test("preserves event recovery reasons and retry timing", () => {
   assert.equal(getEventNowRefreshDelayMs("active", 100, 100), 30_000);
   assert.equal(getEventNowRefreshDelayMs("scheduled", 100, 100), 5_000);
   assert.equal(getEventNowRefreshDelayMs("scheduled", 61_000, 0), 1_050);
+});
+
+test("refreshes just after the strict prize reveal boundary", () => {
+  const nowMs = 1_000_000;
+  const hourMs = 3_600_000;
+
+  assert.equal(
+    getEventNowRefreshDelayMs("scheduled", nowMs + hourMs + 1, nowMs),
+    51,
+  );
+  assert.equal(
+    getEventNowRefreshDelayMs("scheduled", nowMs + hourMs, nowMs),
+    50,
+  );
+  assert.equal(
+    getEventNowRefreshDelayMs("scheduled", nowMs + hourMs - 1, nowMs),
+    60_000,
+  );
+  assert.equal(
+    getEventNowRefreshDelayMs("scheduled", nowMs + hourMs + 61_000, nowMs),
+    1_050,
+  );
+  assert.equal(getEventNowRefreshDelayMs("scheduled", null, nowMs), 30_000);
+  assert.equal(getEventNowRefreshDelayMs("scheduled", NaN, nowMs), 30_000);
+  assert.equal(getEventNowRefreshDelayMs("ended", nowMs, nowMs), 30_000);
+  assert.equal(getEventNowRefreshDelayMs(null, null, nowMs), 30_000);
+});
+
+test("allows prize selection only during the reveal window for unlocked participants", () => {
+  const nowMs = 1_000_000;
+  const hourMs = 3_600_000;
+  const event = eventRecord({
+    startAtMs: nowMs + hourMs,
+    participants: { p1: participant("p1", 1) },
+  });
+
+  for (const [offsetMs, expected] of [
+    [1, false],
+    [0, false],
+    [-1, true],
+  ]) {
+    assert.equal(
+      canSelectEventPrize(
+        { ...event, startAtMs: nowMs + hourMs + offsetMs },
+        "p1",
+        nowMs,
+      ),
+      expected,
+    );
+  }
+
+  const revealedEvent = { ...event, startAtMs: nowMs + hourMs - 1 };
+  assert.equal(canSelectEventPrize(null, "p1", nowMs), false);
+  assert.equal(canSelectEventPrize(revealedEvent, "", nowMs), false);
+  assert.equal(canSelectEventPrize(revealedEvent, "p2", nowMs), false);
+  assert.equal(
+    canSelectEventPrize(
+      { ...revealedEvent, prizeSelectionsLockedAtMs: 0 },
+      "p1",
+      nowMs,
+    ),
+    false,
+  );
+  assert.equal(
+    canSelectEventPrize(
+      { ...revealedEvent, startAtMs: nowMs - 1 },
+      "p1",
+      nowMs,
+    ),
+    true,
+  );
+  assert.equal(
+    canSelectEventPrize({ ...event, status: "active" }, "p1", nowMs),
+    true,
+  );
+  assert.equal(
+    canSelectEventPrize(
+      { ...event, status: "active", prizeSelectionsLockedAtMs: nowMs },
+      "p1",
+      nowMs,
+    ),
+    false,
+  );
+  for (const status of ["ended", "dismissed"]) {
+    assert.equal(
+      canSelectEventPrize({ ...revealedEvent, status }, "p1", nowMs),
+      false,
+    );
+  }
+  assert.equal(
+    canSelectEventPrize({ ...revealedEvent, startAtMs: NaN }, "p1", nowMs),
+    false,
+  );
+  assert.equal(
+    canSelectEventPrize(
+      { ...revealedEvent, startAtMs: nowMs + hourMs + 1 },
+      "p1",
+      nowMs,
+    ),
+    false,
+  );
 });
 
 test("preserves podium ordering and excludes a disqualified final winner", () => {

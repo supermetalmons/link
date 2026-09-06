@@ -1688,6 +1688,128 @@ test("toggles an event prize selection with the canonical participant", async ()
   assert.equal(lock.released(), 2);
 });
 
+test("rejects early prize changes without saving or clearing a preference", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const nowMs = 10_000_000;
+  for (const remainingMs of [3_600_001, 3_600_000]) {
+    for (const initialSelection of [null, "1092"]) {
+      const { repository } = createRepository({
+        event: scheduledEvent({ eventId, startAtMs: nowMs + remainingMs }),
+      });
+      let stored: unknown = initialSelection;
+      let transactions = 0;
+      repository.transactRtdbPath = async (_path, updater) => {
+        transactions++;
+        const decision = updater(stored);
+        assert.ok(
+          decision && typeof decision === "object" && "value" in decision,
+        );
+        stored = decision.value;
+        return { committed: true, value: stored };
+      };
+      const lock = createLockManager();
+      await expectFailure(
+        toggleEventPrizeSelection(
+          identity,
+          { eventId, prizeId: "1092" },
+          repository,
+          { lockManager: lock.manager, now: () => nowMs },
+        ),
+        409,
+        "Prize selection opens less than one hour before the event starts.",
+      );
+      assert.equal(transactions, 0);
+      assert.equal(stored, initialSelection);
+      assert.equal(lock.stopped(), 1);
+      assert.equal(lock.released(), 1);
+    }
+  }
+});
+
+test("accepts prize choices inside the final hour and after the event starts", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const nowMs = 10_000_000;
+  for (const event of [
+    scheduledEvent({ eventId, startAtMs: nowMs + 3_599_999 }),
+    scheduledEvent({ eventId, startAtMs: nowMs }),
+    scheduledEvent({ eventId, startAtMs: nowMs - 1 }),
+    scheduledEvent({ eventId, status: "active", startAtMs: null }),
+  ]) {
+    const { repository } = createRepository({ event });
+    let transactions = 0;
+    repository.transactRtdbPath = async (_path, updater) => {
+      transactions++;
+      const decision = updater(null);
+      assert.ok(
+        decision && typeof decision === "object" && "value" in decision,
+      );
+      return { committed: true, value: decision.value };
+    };
+    const response = await toggleEventPrizeSelection(
+      identity,
+      { eventId, prizeId: "1092" },
+      repository,
+      { lockManager: createLockManager().manager, now: () => nowMs },
+    );
+    assert.equal(response.selectedPrizeId, "1092");
+    assert.equal(transactions, 1);
+  }
+});
+
+test("uses the postponed start from the locked event read for prize selection", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  const nowMs = 10_000_000;
+  const event = scheduledEvent({ eventId, startAtMs: nowMs + 3_599_999 });
+  const { repository } = createRepository({ event });
+  let transactions = 0;
+  repository.transactRtdbPath = async () => {
+    transactions++;
+    return { committed: true, value: "1092" };
+  };
+  const lock = createLockManager({
+    onAcquire: () => {
+      event.startAtMs = nowMs + 3_600_000;
+    },
+  });
+  await expectFailure(
+    toggleEventPrizeSelection(
+      identity,
+      { eventId, prizeId: "1092" },
+      repository,
+      { lockManager: lock.manager, now: () => nowMs },
+    ),
+    409,
+    "Prize selection opens less than one hour before the event starts.",
+  );
+  assert.equal(transactions, 0);
+  assert.equal(lock.released(), 1);
+});
+
+test("rejects invalid scheduled prize timestamps before saving", async () => {
+  const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+  for (const startAtMs of [null, undefined, "1000", NaN, Infinity, -1, 0.5]) {
+    const { repository } = createRepository({
+      event: scheduledEvent({ eventId, startAtMs }),
+    });
+    let transactions = 0;
+    repository.transactRtdbPath = async () => {
+      transactions++;
+      return { committed: true, value: "1092" };
+    };
+    await expectFailure(
+      toggleEventPrizeSelection(
+        identity,
+        { eventId, prizeId: "1092" },
+        repository,
+        { lockManager: createLockManager().manager, now: () => 0 },
+      ),
+      503,
+      "event-participation-service-unavailable",
+    );
+    assert.equal(transactions, 0);
+  }
+});
+
 test("falls back to the unique participant owned by the verified login", async () => {
   const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
   const { repository } = createRepository({
