@@ -4,6 +4,8 @@ import {
   validateTelegramMessageKey,
 } from "../../../functions/telegram/desiredStateCore.js";
 import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
+import { refreshSundayMonsReminder } from "./eventReminderProjection.ts";
+import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 import { readBoundedBody } from "./http.ts";
 import {
   hasValidTelegramBridgeSignature,
@@ -65,8 +67,17 @@ type SmokeCommand = {
   requestId: string;
 };
 
+type EventReminderRefreshCommand = {
+  kind: "event-reminder-refresh";
+  eventId: string;
+};
+
 type TelegramCommand =
-  RecoveryCommand | RecoveryStatusCommand | SendCommand | SmokeCommand;
+  | EventReminderRefreshCommand
+  | RecoveryCommand
+  | RecoveryStatusCommand
+  | SendCommand
+  | SmokeCommand;
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -114,6 +125,20 @@ function parseCommand(body: string): TelegramCommand {
   const value = record(JSON.parse(body) as unknown);
   const kind = nonEmptyString(value?.kind);
   if (!value || !kind) throw new TypeError("invalid-command");
+  if (kind === "event-reminder-refresh") {
+    if (!exactKeys(value, ["kind", "eventId"])) {
+      throw new TypeError("invalid-command");
+    }
+    const eventId = value.eventId;
+    if (
+      typeof eventId !== "string" ||
+      eventId !== eventId.trim() ||
+      !isSafeFirebaseKey(eventId)
+    ) {
+      throw new TypeError("invalid-event-id");
+    }
+    return { kind, eventId };
+  }
   if (kind === "send") {
     if (
       !exactKeys(
@@ -460,10 +485,12 @@ export async function handleTelegramCommand(
   {
     now = Date.now,
     readStorageMode = readTelegramStorageMode,
+    refreshReminder = refreshSundayMonsReminder,
     repository: repositoryOverride,
   }: {
     now?: () => number;
     readStorageMode?: typeof readTelegramStorageMode;
+    refreshReminder?: typeof refreshSundayMonsReminder;
     repository?: TelegramRepository;
   } = {},
 ): Promise<Response> {
@@ -510,6 +537,23 @@ export async function handleTelegramCommand(
   const repository =
     repositoryOverride || createD1TelegramRepository(env.TELEGRAM_DB, { now });
   try {
+    if (command.kind === "event-reminder-refresh") {
+      const result = await refreshReminder(env, command.eventId);
+      if (result.status === "skipped") {
+        return commandResponse(409, {
+          ok: false,
+          error: result.reason || "reminder-not-eligible",
+        });
+      }
+      return commandResponse(202, {
+        ok: true,
+        eventId: command.eventId,
+        status: result.status,
+        messageKey: result.messageKey,
+        requestId: result.requestId,
+        ...(result.reason ? { reason: result.reason } : {}),
+      });
+    }
     if (command.kind === "send") {
       return await handleSend(command, repository, env);
     }

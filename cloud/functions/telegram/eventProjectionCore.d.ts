@@ -1,5 +1,5 @@
 export type EventTelegramProjectionOperation = {
-  channel: "upcoming" | "started" | "ended";
+  channel: "upcoming" | "reminder" | "started" | "ended";
   generation?: string;
   ifMissing: "send" | "skip" | null;
   instanceKey: string;
@@ -32,6 +32,7 @@ export function buildEventTelegramProjection(input: {
   endedMatchResults?: Record<string, unknown>;
   state?: unknown;
   upcomingMessage?: unknown;
+  reminderMessage?: unknown;
   nowMs?: number;
 }): EventTelegramProjection;
 export function buildEventTelegramProjectionUpdates(input: {

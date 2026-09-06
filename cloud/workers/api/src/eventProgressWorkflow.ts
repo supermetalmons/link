@@ -22,6 +22,7 @@ import {
   deliverEventPrizeAnnouncement,
   type EventPrizeAnnouncementDeliveryResult,
 } from "./eventPrizeAnnouncement.ts";
+import { refreshSundayMonsReminder } from "./eventReminderProjection.ts";
 
 export function createEventProgressWorkflowDependencies(
   env: Env,
@@ -80,6 +81,10 @@ export class EventProgressWorkflow extends WorkflowEntrypoint<
             repository.getRtdbPath(`eventProgressOutbox/${outboxId}`),
           deliver: (input) =>
             deliverEventPrizeAnnouncement(this.env, input, {
+              eventRepository: repository,
+            }),
+          refreshReminder: (eventId) =>
+            refreshSundayMonsReminder(this.env, eventId, {
               eventRepository: repository,
             }),
           acknowledge: async (outboxId) => {

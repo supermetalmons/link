@@ -292,7 +292,7 @@ export async function deliverEventPrizeAnnouncement(
     const announcement =
       kind === "prizes"
         ? buildEventPrizeAnnouncement({ eventId: input.eventId })
-        : buildSundayMonsReminder({ eventId: input.eventId });
+        : buildSundayMonsReminder({ eventId: input.eventId, eventData });
     const payload =
       existing?.startAtMs === input.startAtMs
         ? parsePayload(existing.payload, kind)

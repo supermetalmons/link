@@ -14,6 +14,7 @@ import type {
   EventPrizeAnnouncementDeliveryInput,
   EventPrizeAnnouncementDeliveryResult,
 } from "./eventPrizeAnnouncement.ts";
+import type { SundayMonsReminderRefreshResult } from "./eventReminderProjection.ts";
 
 export type EventPrizeAnnouncementWorkflowDependencies = {
   acknowledge(outboxId: string): Promise<void>;
@@ -21,6 +22,7 @@ export type EventPrizeAnnouncementWorkflowDependencies = {
     input: EventPrizeAnnouncementDeliveryInput,
   ): Promise<EventPrizeAnnouncementDeliveryResult>;
   readOutbox(outboxId: string): Promise<unknown>;
+  refreshReminder(eventId: string): Promise<SundayMonsReminderRefreshResult>;
   now?: () => number;
 };
 
@@ -103,6 +105,16 @@ export async function runEventAnnouncementWorkflow(
       break;
     }
     await step.sleepUntil(`retry ${stepName} ${attempt}`, retryAtMs);
+  }
+  if (kind === "reminder") {
+    await step.do(
+      "refresh sunday mons reminder participants",
+      {
+        retries: { limit: 12, delay: "1 second", backoff: "exponential" },
+        timeout: "30 seconds",
+      },
+      () => dependencies.refreshReminder(params.eventId),
+    );
   }
   await step.do(
     `acknowledge ${stepName} outbox`,

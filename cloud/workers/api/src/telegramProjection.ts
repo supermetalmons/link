@@ -37,8 +37,10 @@ import {
 } from "./telegramDeliveryTasks.ts";
 import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
 import {
+  createD1TelegramAnnouncementRepository,
   createD1TelegramRepository,
   readTelegramStorageMode,
+  type TelegramAnnouncementRepository,
   type TelegramStorageMode,
 } from "./telegramD1.ts";
 import {
@@ -64,6 +66,9 @@ type ProjectionDependencies = {
   createRating?: (env: Env) => RatingProjectionRepository;
   createRtdb?: (env: Env) => FirebaseRtdbClient;
   createTelegram?: (env: Env) => TelegramRepository;
+  createAnnouncements?: (
+    env: Env,
+  ) => Pick<TelegramAnnouncementRepository, "get">;
   enqueueDelivery?: (input: InitialTelegramDelivery) => Promise<unknown>;
   logger?: ProjectionLogger;
   now?: () => number;
@@ -371,6 +376,12 @@ export async function handleTelegramProjectionMessage(
         enqueueDelivery,
         now,
         telegram,
+        {
+          repository: dependencies.createAnnouncements
+            ? dependencies.createAnnouncements(env)
+            : createD1TelegramAnnouncementRepository(env.TELEGRAM_DB),
+          chatId: env.TELEGRAM_EXTRA_CHAT_ID.trim(),
+        },
       );
     } else {
       status = await processRatingTask(

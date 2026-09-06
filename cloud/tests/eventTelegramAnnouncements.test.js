@@ -19,6 +19,12 @@ const {
   splitEventTelegramProjectionUpdates,
 } = require("../functions/telegram/eventProjectionCore");
 const {
+  buildTelegramEditDesired,
+} = require("../functions/telegram/desiredStateCore");
+const {
+  buildSundayMonsReminder,
+} = require("../functions/telegram/sundayMonsReminder");
+const {
   EVENT_LOCK_ROOT,
   EVENT_LOCK_TTL_MS,
   createEventLockManagerCore,
@@ -251,13 +257,20 @@ const createEventTelegramProjector = (dependencies = {}) => {
   };
 };
 
-const project = (eventData, state = null, nowMs = NOW_MS, upcomingMessage) =>
+const project = (
+  eventData,
+  state = null,
+  nowMs = NOW_MS,
+  upcomingMessage,
+  reminderMessage,
+) =>
   buildEventTelegramProjection({
     eventId: EVENT_ID,
     eventData,
     state,
     nowMs,
     upcomingMessage,
+    reminderMessage,
   });
 
 const operationFor = (projection, channel) =>
@@ -274,6 +287,30 @@ const publishedUpcomingMessage = (projection) => {
       destination: desired.destination,
       instanceKey: desired.instanceKey,
       messageId: 42,
+      contentHash: desired.contentHash,
+      revision: desired.revision,
+    },
+  };
+};
+
+const publishedReminderMessage = (
+  text = buildSundayMonsReminder({ eventId: EVENT_ID }).text,
+) => {
+  const desired = buildTelegramEditDesired({
+    destination: "community",
+    instanceKey: `event:${EVENT_ID}:reminder:v2`,
+    text,
+    parseMode: "HTML",
+    ifMissing: "skip",
+    sourceRevision: "sent-reminder-receipt",
+  });
+  return {
+    desired,
+    applied: {
+      destination: desired.destination,
+      instanceKey: desired.instanceKey,
+      chatId: "-100123",
+      messageId: 23001,
       contentHash: desired.contentHash,
       revision: desired.revision,
     },
@@ -803,6 +840,203 @@ test("withheld invites stay silent through joins and postponements", () => {
   );
   assert.deepEqual(postponed.operations, []);
   assert.equal(postponed.state.upcomingText, "");
+});
+
+test("confirmed reminders acquire live participants independently of invitation settings", () => {
+  const eventData = buildEvent({
+    isSundayMons: true,
+    telegramAnnouncements: { invite: false, matches: false, results: false },
+    participants: buildEndedEvent().participants,
+  });
+  const hidden = project(eventData);
+  assert.deepEqual(hidden.operations, []);
+  const reminderMessage = publishedReminderMessage();
+  const announced = project(
+    eventData,
+    hidden.state,
+    NOW_MS,
+    undefined,
+    reminderMessage,
+  );
+  assert.deepEqual(
+    announced.operations.map(({ channel }) => channel),
+    ["reminder"],
+  );
+  const reminder = operationFor(announced, "reminder");
+  assert.equal(reminder.operation, "edit");
+  assert.equal(reminder.ifMissing, "skip");
+  assert.equal(reminder.messageKey, `event:${EVENT_ID}:reminder`);
+  assert.equal(reminder.instanceKey, `event:${EVENT_ID}:reminder:v2`);
+  assert.equal(
+    reminder.text,
+    buildSundayMonsReminder({ eventId: EVENT_ID, eventData }).text,
+  );
+  assert.ok(reminder.text.startsWith(reminderMessage.desired.text));
+  assert.equal(announced.state.reminderText, reminder.text);
+  assert.notEqual(announced.signature, hidden.signature);
+  assert.equal(
+    project(eventData, announced.state, NOW_MS, undefined, reminderMessage)
+      .action,
+    "unchanged",
+  );
+  const desired = buildEventTelegramProjectionUpdates({
+    eventId: EVENT_ID,
+    projection: announced,
+  })[`telegramMessages/event:${EVENT_ID}:reminder/desired`];
+  assert.equal(desired.operation, "edit");
+  assert.equal(desired.ifMissing, "skip");
+  assert.equal(desired.parseMode, "HTML");
+  assert.equal(desired.disableWebPagePreview, true);
+});
+
+test("reminders update for joins, participant edits, and drops below the invitation threshold", () => {
+  const eventData = buildEvent({
+    isSundayMons: true,
+    telegramAnnouncements: { invite: false, matches: false, results: false },
+    participants: {},
+  });
+  const reminderMessage = publishedReminderMessage();
+  const empty = project(eventData, null, NOW_MS, undefined, reminderMessage);
+  const singleEvent = { ...eventData, participants: buildEvent().participants };
+  assert.equal(
+    project(singleEvent, empty.state, NOW_MS, undefined, reminderMessage)
+      .action,
+    "unchanged",
+  );
+  const joinedEvent = {
+    ...singleEvent,
+    participants: {
+      ...singleEvent.participants,
+      bob: { displayName: "Bob", joinedAtMs: 200 },
+    },
+  };
+  const joined = project(
+    joinedEvent,
+    empty.state,
+    NOW_MS,
+    undefined,
+    reminderMessage,
+  );
+  assert.match(operationFor(joined, "reminder").text, /&lt;Alice&gt; Bob$/);
+  const changedEvent = {
+    ...joinedEvent,
+    participants: {
+      ...joinedEvent.participants,
+      bob: { username: "Bobby & Co", emojiId: 2, joinedAtMs: 200 },
+    },
+  };
+  const changed = project(
+    changedEvent,
+    joined.state,
+    NOW_MS,
+    undefined,
+    reminderMessage,
+  );
+  assert.notEqual(changed.signature, joined.signature);
+  assert.ok(
+    operationFor(changed, "reminder").text.endsWith(
+      `${BOB_EMOJI} Bobby &amp; Co`,
+    ),
+  );
+  const left = project(
+    singleEvent,
+    changed.state,
+    NOW_MS,
+    undefined,
+    reminderMessage,
+  );
+  assert.equal(
+    operationFor(left, "reminder").text,
+    reminderMessage.desired.text,
+  );
+  for (const projection of [empty, joined, changed, left]) {
+    assert.ok(
+      projection.operations.every(
+        ({ operation, ifMissing }) =>
+          operation === "edit" && ifMissing === "skip",
+      ),
+    );
+  }
+});
+
+test("unconfirmed or missing reminder targets never create a reminder", () => {
+  const eventData = buildEvent({
+    isSundayMons: true,
+    telegramAnnouncements: { invite: false, matches: false, results: false },
+    participants: buildEndedEvent().participants,
+  });
+  const message = publishedReminderMessage();
+  for (const reminderMessage of [
+    undefined,
+    { desired: message.desired },
+    { ...message, applied: {} },
+    { ...message, applied: { ...message.applied, messageId: 0 } },
+    { ...message, applied: { ...message.applied, messageId: 1.5 } },
+    { ...message, applied: { ...message.applied, destination: "events" } },
+    {
+      ...message,
+      applied: { ...message.applied, instanceKey: "event:other:reminder:v2" },
+    },
+  ]) {
+    const projection = project(
+      eventData,
+      { reminderText: message.desired.text },
+      NOW_MS,
+      undefined,
+      reminderMessage,
+    );
+    assert.deepEqual(projection.operations, []);
+  }
+});
+
+test("reminder target identity changes force an edit even when participant text is unchanged", () => {
+  const eventData = buildEvent({
+    telegramAnnouncements: { invite: false, matches: false, results: false },
+  });
+  const reminderMessage = publishedReminderMessage();
+  const first = project(eventData, null, NOW_MS, undefined, reminderMessage);
+  const replacement = project(eventData, first.state, NOW_MS, undefined, {
+    ...reminderMessage,
+    applied: { ...reminderMessage.applied, messageId: 23002 },
+  });
+  assert.notEqual(replacement.signature, first.signature);
+  assert.equal(operationFor(replacement, "reminder").operation, "edit");
+  assert.equal(operationFor(replacement, "reminder").ifMissing, "skip");
+});
+
+test("reminder participant text freezes after registration and retains its original heading", () => {
+  const eventData = buildEvent({
+    isSundayMons: true,
+    telegramAnnouncements: { invite: false, matches: false, results: false },
+    participants: buildEndedEvent().participants,
+  });
+  const message = publishedReminderMessage();
+  const scheduled = project(eventData, null, NOW_MS, undefined, message);
+  const published = publishedReminderMessage(scheduled.state.reminderText);
+  for (const status of ["active", "ended", "dismissed"]) {
+    const changed = {
+      ...eventData,
+      status,
+      isSundayMons: false,
+      participants: {},
+    };
+    const stopped = project(
+      changed,
+      scheduled.state,
+      NOW_MS,
+      undefined,
+      published,
+    );
+    const reminder = operationFor(stopped, "reminder");
+    assert.equal(reminder.operation, "edit");
+    assert.equal(reminder.ifMissing, "skip");
+    assert.equal(reminder.text, scheduled.state.reminderText);
+    assert.ok(reminder.text.startsWith("sunday mons in 3 hours!\n\n"));
+    assert.equal(
+      project(changed, stopped.state, NOW_MS, undefined, published).action,
+      "unchanged",
+    );
+  }
 });
 
 test("a confirmed manual invite unlocks edit-only participant updates", () => {

@@ -15,6 +15,9 @@ const {
   AUTOMATCH_WAITING_EMOJI_ID,
   getTelegramEmojiTag,
 } = require("../functions/telegramDisplay");
+const {
+  renderUpcomingMessage,
+} = require("../functions/telegram/eventProjectionCore");
 
 const PRIZE_EVENT_ID = "z3oj52Iiime";
 const NO_PRIZES_EVENT_ID = "sunday-no-prizes";
@@ -51,6 +54,55 @@ test("renders events without catalog prizes and normalizes outer whitespace", ()
   );
   assert.equal(isSundayMonsReminderEvent(NO_PRIZES_EVENT_ID, EVENT), true);
   assert.equal(isEventPrizeAnnouncementEvent(NO_PRIZES_EVENT_ID, EVENT), false);
+});
+
+test("uses the invitation participant threshold and exact shared formatting", () => {
+  const base = buildSundayMonsReminder({ eventId: PRIZE_EVENT_ID });
+  const alice = { username: "<Alice>", emojiId: 1, joinedAtMs: 100 };
+  for (const participants of [{}, { alice }]) {
+    assert.deepEqual(
+      buildSundayMonsReminder({
+        eventId: PRIZE_EVENT_ID,
+        eventData: { ...EVENT, participants },
+      }),
+      base,
+    );
+  }
+  const eventData = {
+    ...EVENT,
+    participants: {
+      bob: { displayName: "Bob & Co", emojiId: 2, joinedAtMs: 200 },
+      alice,
+    },
+  };
+  const reminder = buildSundayMonsReminder({
+    eventId: PRIZE_EVENT_ID,
+    eventData,
+  });
+  const participantLine =
+    '<tg-emoji emoji-id="5273900723417929741">&#11088;</tg-emoji> &lt;Alice&gt; <tg-emoji emoji-id="5273897076990696847">&#11088;</tg-emoji> Bob &amp; Co';
+  assert.equal(reminder.text, `${base.text}\n\n${participantLine}`);
+  assert.equal(
+    renderUpcomingMessage(PRIZE_EVENT_ID, eventData, EVENT.startAtMs)
+      .split("\n")
+      .at(-1),
+    participantLine,
+  );
+});
+
+test("shares deterministic joined order, display-name fallbacks, and anonymous names", () => {
+  const result = buildSundayMonsReminder({
+    eventId: PRIZE_EVENT_ID,
+    eventData: {
+      participants: {
+        z: { username: "Z", joinedAtMs: 100 },
+        b: { displayName: 'B "quoted"', emojiId: 999999, joinedAtMs: 50 },
+        a: { joinedAtMs: 50 },
+        invalid: null,
+      },
+    },
+  });
+  assert.ok(result.text.endsWith("\n\nanon B &quot;quoted&quot; Z"));
 });
 
 test("encodes event-key characters that would otherwise break the link or Telegram HTML", () => {

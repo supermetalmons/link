@@ -38,6 +38,8 @@ async function harness(
   let record: unknown = plan.outbox;
   let acknowledgements = 0;
   let sends = 0;
+  let refreshes = 0;
+  let refresh: () => Promise<void> = async () => undefined;
   let outcome: () => Promise<EventPrizeAnnouncementDeliveryResult> =
     async () => ({ status: "sent" });
   const sleeps: Array<{ name: string; timestamp: number }> = [];
@@ -87,6 +89,13 @@ async function harness(
         acknowledgements += 1;
         record = null;
       },
+      refreshReminder: async (requestedEventId) => {
+        assert.equal(requestedEventId, eventId);
+        assert.equal(acknowledgements, 0);
+        refreshes++;
+        await refresh();
+        return { status: "queued" };
+      },
     });
   return {
     plan,
@@ -104,6 +113,10 @@ async function harness(
     setOutcome: (value: typeof outcome) => {
       outcome = value;
     },
+    setRefresh: (value: typeof refresh) => {
+      refresh = value;
+    },
+    refreshes: () => refreshes,
     sends: () => sends,
     acknowledgements: () => acknowledgements,
   };
@@ -118,9 +131,11 @@ test("sleeps until the one-hour target, preserves discovery proof, and safely re
   assert.equal(state.configs[0].retries?.limit, 0);
   assert.equal(state.sends(), 1);
   assert.equal(state.acknowledgements(), 1);
+  assert.equal(state.refreshes(), 0);
   assert.deepEqual(await state.run(), { status: "sent" });
   assert.equal(state.sends(), 1);
   assert.equal(state.acknowledgements(), 1);
+  assert.equal(state.refreshes(), 0);
 });
 
 test("reminders without prizes use the three-hour identity and their own step names", async () => {
@@ -139,6 +154,42 @@ test("reminders without prizes use the three-hour identity and their own step na
   assert.equal(state.acknowledgements(), 1);
   assert.deepEqual(await state.run(), { status: "sent" });
   assert.equal(state.sends(), 1);
+  assert.equal(state.refreshes(), 1);
+});
+
+test("reminder projection retries after the send grace without repeating a completed send", async () => {
+  const state = await harness("reminder");
+  state.setRefresh(async () => {
+    if (state.refreshes() === 1)
+      throw new Error("projection-store-unavailable");
+  });
+  await assert.rejects(state.run(), /projection-store-unavailable/);
+  assert.equal(state.sends(), 1);
+  assert.equal(state.acknowledgements(), 0);
+  state.setNow(RUN_AT_MS + 120_000);
+  assert.deepEqual(await state.run(), { status: "sent" });
+  assert.equal(state.sends(), 1);
+  assert.equal(state.refreshes(), 2);
+  assert.equal(state.acknowledgements(), 1);
+  assert.deepEqual(await state.run(), { status: "sent" });
+  assert.equal(state.refreshes(), 2);
+});
+
+test("every reminder outcome checks the confirmed receipt before acknowledging, including expired replay", async () => {
+  for (const status of [
+    "sent",
+    "uncertain",
+    "terminal",
+    "skipped",
+    "expired",
+  ] as const) {
+    const state = await harness("reminder");
+    if (status === "expired") state.setNow(RUN_AT_MS + 60_000);
+    else state.setOutcome(async () => ({ status }));
+    await state.run();
+    assert.equal(state.refreshes(), 1);
+    assert.equal(state.acknowledgements(), 1);
+  }
 });
 
 test("reminders enforce the same discovery and grace limits", async () => {

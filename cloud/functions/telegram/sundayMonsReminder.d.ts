@@ -6,6 +6,10 @@ export type SundayMonsReminder = {
 };
 
 export const SUNDAY_MONS_REMINDER_LEAD_MS: 10800000;
+export function buildSundayMonsReminder(input: {
+  eventId: unknown;
+  eventData?: unknown;
+}): SundayMonsReminder;
 export function buildSundayMonsReminder(input: unknown): SundayMonsReminder;
 export function isSundayMonsReminderEvent(
   eventId: unknown,

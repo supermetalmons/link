@@ -252,3 +252,185 @@ test("delete-only smoke persists and queues without accepting arbitrary targets"
   assert.equal(message.desired?.operation, "delete");
   assert.equal(sent.length, 1);
 });
+
+test("signed reminder refreshes delegate only the event identity and can repeat", async () => {
+  const state = repositoryState();
+  const sent: unknown[] = [];
+  const env = commandEnv(sent);
+  const eventId = "z3oj52Iiime";
+  const calls: string[] = [];
+  const result = {
+    status: "queued" as const,
+    requestId: "reminder-refresh-1",
+    messageKey: `event:${eventId}:reminder`,
+  };
+  const dependencies = {
+    now: () => NOW_MS,
+    readStorageMode: async () => "d1" as const,
+    repository: state.repository,
+    async refreshReminder(actualEnv: Env, actualEventId: string) {
+      assert.equal(actualEnv, env);
+      calls.push(actualEventId);
+      return result;
+    },
+  };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await handleTelegramCommand(
+      await signedRequest({ kind: "event-reminder-refresh", eventId }),
+      env,
+      dependencies,
+    );
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), { ok: true, eventId, ...result });
+  }
+  assert.deepEqual(calls, [eventId, eventId]);
+  assert.equal(state.values.size, 0);
+  assert.equal(sent.length, 0);
+});
+
+test("reminder refreshes reject unsafe identities and arbitrary delivery fields", async () => {
+  const sent: unknown[] = [];
+  let calls = 0;
+  for (const candidate of [
+    {},
+    { eventId: null },
+    { eventId: 23001 },
+    { eventId: "" },
+    { eventId: " z3oj52Iiime " },
+    { eventId: "events/z3oj52Iiime" },
+    { eventId: "bad#event" },
+    { eventId: "bad\nevent" },
+    { eventId: "a".repeat(769) },
+    { eventId: "z3oj52Iiime", messageId: 23001 },
+    { eventId: "z3oj52Iiime", destination: "community" },
+    { eventId: "z3oj52Iiime", text: "replacement" },
+  ]) {
+    const response = await handleTelegramCommand(
+      await signedRequest({ kind: "event-reminder-refresh", ...candidate }),
+      commandEnv(sent),
+      {
+        now: () => NOW_MS,
+        async readStorageMode() {
+          assert.fail("invalid commands must not read storage controls");
+        },
+        async refreshReminder() {
+          calls += 1;
+          return { status: "skipped", reason: "reminder-not-confirmed" };
+        },
+      },
+    );
+    assert.equal(response.status, 400);
+  }
+  assert.equal(calls, 0);
+  assert.equal(sent.length, 0);
+});
+
+test("reminder refreshes require a signature and honor the Telegram freeze", async () => {
+  const command = { kind: "event-reminder-refresh", eventId: "z3oj52Iiime" };
+  const sent: unknown[] = [];
+  let calls = 0;
+  const dependencies = {
+    now: () => NOW_MS,
+    readStorageMode: async () => "frozen" as const,
+    async refreshReminder() {
+      calls += 1;
+      return { status: "skipped" as const, reason: "reminder-not-confirmed" };
+    },
+  };
+  const unsigned = await handleTelegramCommand(
+    new Request("https://api.mons.link/internal/telegram/command", {
+      method: "POST",
+      body: JSON.stringify(command),
+    }),
+    commandEnv(sent),
+    dependencies,
+  );
+  assert.equal(unsigned.status, 401);
+  const frozen = await handleTelegramCommand(
+    await signedRequest(command),
+    commandEnv(sent),
+    dependencies,
+  );
+  assert.equal(frozen.status, 503);
+  assert.deepEqual(await frozen.json(), {
+    ok: false,
+    error: "telegram-frozen",
+  });
+  assert.equal(calls, 0);
+  assert.equal(sent.length, 0);
+});
+
+test("reminder refreshes report eligibility failures without queueing a send", async () => {
+  const state = repositoryState();
+  const sent: unknown[] = [];
+  for (const reason of ["reminder-not-confirmed", "reminder-not-eligible"]) {
+    const response = await handleTelegramCommand(
+      await signedRequest({
+        kind: "event-reminder-refresh",
+        eventId: "z3oj52Iiime",
+      }),
+      commandEnv(sent),
+      {
+        now: () => NOW_MS,
+        readStorageMode: async () => "d1",
+        repository: state.repository,
+        refreshReminder: async () => ({ status: "skipped", reason }),
+      },
+    );
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { ok: false, error: reason });
+  }
+  assert.equal(state.values.size, 0);
+  assert.equal(sent.length, 0);
+});
+
+test("reminder refreshes retain accepted status when durable dispatch is deferred", async () => {
+  const sent: unknown[] = [];
+  const result = {
+    status: "queued" as const,
+    reason: "dispatch-deferred",
+    requestId: "reminder-refresh-1",
+    messageKey: "event:z3oj52Iiime:reminder",
+  };
+  const response = await handleTelegramCommand(
+    await signedRequest({
+      kind: "event-reminder-refresh",
+      eventId: "z3oj52Iiime",
+    }),
+    commandEnv(sent),
+    {
+      now: () => NOW_MS,
+      readStorageMode: async () => "d1",
+      refreshReminder: async () => result,
+    },
+  );
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    eventId: "z3oj52Iiime",
+    ...result,
+  });
+  assert.equal(sent.length, 0);
+});
+
+test("reminder refreshes surface disabled event writes as unavailable", async (t) => {
+  t.mock.method(console, "error", () => {});
+  const sent: unknown[] = [];
+  const response = await handleTelegramCommand(
+    await signedRequest({
+      kind: "event-reminder-refresh",
+      eventId: "z3oj52Iiime",
+    }),
+    commandEnv(sent),
+    {
+      now: () => NOW_MS,
+      readStorageMode: async () => "d1",
+      async refreshReminder() {
+        throw new Error("event-reminder-writes-disabled");
+      },
+    },
+  );
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { ok: false, error: "unavailable" });
+  assert.equal(sent.length, 0);
+});

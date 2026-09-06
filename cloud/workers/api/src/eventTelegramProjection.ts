@@ -28,6 +28,8 @@ import type {
 } from "./telegramProjectionTasks.ts";
 import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
 import type { InitialTelegramDelivery } from "./telegramDeliveryTasks.ts";
+import { adoptSundayMonsReminderMessage } from "./eventReminderProjection.ts";
+import type { TelegramAnnouncementRepository } from "./telegramD1.ts";
 
 const EVENT_TELEGRAM_PROJECTION_OWNER_UID = "event-telegram-projector";
 const EVENT_PROJECTION_SWEEP_LIMIT = 100;
@@ -230,6 +232,10 @@ export async function processEventProjectionTask(
   enqueueDelivery: (input: InitialTelegramDelivery) => Promise<unknown>,
   now: () => number,
   telegram?: TelegramRepository,
+  reminder?: {
+    repository: Pick<TelegramAnnouncementRepository, "get">;
+    chatId: string;
+  },
 ): Promise<string> {
   const outbox = parseEventProjectionOutbox(
     await rtdb.getPath(getEventTelegramProjectionOutboxPath(task.eventId)),
@@ -261,26 +267,52 @@ export async function processEventProjectionTask(
     const generation = readProjectionGeneration(rawGeneration);
     const announcements = resolveEventTelegramAnnouncements(event);
     const upcomingMessageKey = `event:${task.eventId}:upcoming`;
-    const [upcomingMessage, endedMatchResults] = await Promise.all([
-      telegram
-        ? telegram.getMessage(upcomingMessageKey)
-        : rtdb.getPath(`telegramMessages/${upcomingMessageKey}`),
-      announcements.results &&
-      event.status === "ended" &&
-      state.endedAnnouncementArmed === true &&
-      (typeof state.endedText !== "string" || state.endedText === "")
-        ? loadEndedMatchResults(eventData, {
-            readRatingUpdate: (operationId) =>
-              rating.readRatingUpdate(operationId),
-          })
-        : {},
-    ]);
+    const reminderMessageKey = `event:${task.eventId}:reminder`;
+    const readReminderMessage = async () => {
+      if (!telegram) {
+        return rtdb.getPath(`telegramMessages/${reminderMessageKey}`);
+      }
+      const current = await telegram.getMessage(reminderMessageKey);
+      if (
+        current != null ||
+        !reminder ||
+        event.status !== "scheduled" ||
+        event.isSundayMons !== true
+      ) {
+        return current;
+      }
+      return adoptSundayMonsReminderMessage({
+        eventId: task.eventId,
+        receipt: await reminder.repository.get(
+          `event:${task.eventId}:reminder:v1`,
+        ),
+        telegram,
+        chatId: reminder.chatId,
+      });
+    };
+    const [upcomingMessage, reminderMessage, endedMatchResults] =
+      await Promise.all([
+        telegram
+          ? telegram.getMessage(upcomingMessageKey)
+          : rtdb.getPath(`telegramMessages/${upcomingMessageKey}`),
+        readReminderMessage(),
+        announcements.results &&
+        event.status === "ended" &&
+        state.endedAnnouncementArmed === true &&
+        (typeof state.endedText !== "string" || state.endedText === "")
+          ? loadEndedMatchResults(eventData, {
+              readRatingUpdate: (operationId) =>
+                rating.readRatingUpdate(operationId),
+            })
+          : {},
+      ]);
     const projection = buildEventTelegramProjection({
       eventId: task.eventId,
       eventData,
       endedMatchResults,
       state: rawState,
       upcomingMessage,
+      reminderMessage,
       nowMs: now(),
     });
     if (projection.action !== "project") {
@@ -307,24 +339,35 @@ export async function processEventProjectionTask(
         throw new Error("event-telegram-lock-lost");
       }
     };
-    let upcomingDeferred = false;
+    const editableMessages = new Map([
+      [
+        `telegramMessages/${upcomingMessageKey}/desired`,
+        { textField: "upcomingText", message: upcomingMessage },
+      ],
+      [
+        `telegramMessages/${reminderMessageKey}/desired`,
+        { textField: "reminderText", message: reminderMessage },
+      ],
+    ]);
+    const deferredTextFields = new Set<string>();
     if (Object.keys(desiredUpdates).length > 0) {
       await refreshLock();
       const committedDesiredUpdates: Record<string, unknown> = {};
       for (const [path, value] of Object.entries(desiredUpdates)) {
+        const editable = editableMessages.get(path);
         const committed = telegram
           ? await commitFencedDesiredUpdate(
               telegram,
               path,
               value,
               generation,
-              path === `telegramMessages/${upcomingMessageKey}/desired`
-                ? asObject(asObject(upcomingMessage).applied)
+              editable
+                ? asObject(asObject(editable.message).applied)
                 : undefined,
             )
           : await commitFencedProjectionUpdate(rtdb, path, value, generation);
         if (committed === "deferred") {
-          upcomingDeferred = true;
+          deferredTextFields.add(editable!.textField);
         } else if (committed) {
           committedDesiredUpdates[path] = value;
         }
@@ -347,17 +390,21 @@ export async function processEventProjectionTask(
     const stateCommitted = await commitFencedProjectionUpdate(
       rtdb,
       statePath,
-      upcomingDeferred
+      deferredTextFields.size > 0
         ? {
             ...asObject(projectedState),
-            upcomingText:
-              typeof state.upcomingText === "string" ? state.upcomingText : "",
+            ...Object.fromEntries(
+              Array.from(deferredTextFields, (field) => [
+                field,
+                typeof state[field] === "string" ? state[field] : "",
+              ]),
+            ),
             lastProjectedSignature: "",
           }
         : projectedState,
       generation,
     );
-    if (upcomingDeferred) {
+    if (deferredTextFields.size > 0) {
       throw new Error("event-telegram-delivery-changed");
     }
     await settleEventOutbox(rtdb, task);

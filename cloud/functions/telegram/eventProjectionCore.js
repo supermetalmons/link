@@ -1,8 +1,13 @@
 "use strict";
 
 const crypto = require("node:crypto");
-const { getTelegramEmojiTag } = require("../telegramDisplay");
-const { customTelegramEmojis } = require("../telegramEmojiData");
+const {
+  buildParticipantRenderKey,
+  getParticipantRecords,
+  renderParticipantLine,
+  resolveParticipantToken,
+} = require("./eventParticipants");
+const { buildSundayMonsReminder } = require("./sundayMonsReminder");
 const {
   buildTelegramEditUpdates,
   buildTelegramSendUpdates,
@@ -46,14 +51,6 @@ const normalizePositiveNumberOrNull = (value) => {
   }
   return numeric;
 };
-
-const escapeHtml = (value) =>
-  String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 
 const toUtcDayKey = (timestampMs) => {
   const date = new Date(timestampMs);
@@ -105,80 +102,6 @@ const formatPtEtUtcLine = (startAtMs) => {
   const et = formatTimeInZone(startAtMs, "America/New_York");
   const utc = formatTimeInZone(startAtMs, "UTC");
   return `${pt} PT / ${et} ET / ${utc} UTC`;
-};
-
-const getParticipantRecords = (eventData) => {
-  const participants =
-    eventData &&
-    eventData.participants &&
-    typeof eventData.participants === "object"
-      ? eventData.participants
-      : {};
-  return Object.entries(participants)
-    .filter(
-      ([profileId, participant]) =>
-        typeof profileId === "string" &&
-        profileId.trim() !== "" &&
-        participant &&
-        typeof participant === "object",
-    )
-    .map(([profileId, participant]) => ({ profileId, participant }))
-    .sort((left, right) => {
-      const leftJoined = normalizePositiveNumberOrNull(
-        left.participant.joinedAtMs,
-      );
-      const rightJoined = normalizePositiveNumberOrNull(
-        right.participant.joinedAtMs,
-      );
-      const leftJoinedValue = leftJoined === null ? 0 : leftJoined;
-      const rightJoinedValue = rightJoined === null ? 0 : rightJoined;
-      if (leftJoinedValue !== rightJoinedValue) {
-        return leftJoinedValue - rightJoinedValue;
-      }
-      return left.profileId.localeCompare(right.profileId);
-    });
-};
-
-const buildParticipantRenderKey = (eventData) =>
-  getParticipantRecords(eventData)
-    .map(({ profileId, participant }) => {
-      const emojiId = normalizePositiveNumberOrNull(participant.emojiId);
-      const joinedAtMs = normalizePositiveNumberOrNull(participant.joinedAtMs);
-      const username = normalizeString(participant.username);
-      const displayName = normalizeString(participant.displayName);
-      return [
-        profileId,
-        username,
-        displayName,
-        emojiId === null ? "" : String(emojiId),
-        joinedAtMs === null ? "" : String(joinedAtMs),
-      ].join("|");
-    })
-    .join(";");
-
-const resolveParticipantName = (participant, fallbackDisplayName = "") => {
-  const username = normalizeString(participant && participant.username);
-  if (username) {
-    return username;
-  }
-  const displayName = normalizeString(participant && participant.displayName);
-  if (displayName) {
-    return displayName;
-  }
-  return normalizeString(fallbackDisplayName) || "anon";
-};
-
-const resolveParticipantToken = (participant, fallbackDisplayName = "") => {
-  const emoji = normalizePositiveNumberOrNull(
-    participant && participant.emojiId,
-  );
-  const customEmojiId =
-    emoji === null ? "" : normalizeString(customTelegramEmojis[emoji]);
-  const emojiTag = customEmojiId ? getTelegramEmojiTag(customEmojiId) : "";
-  const name = escapeHtml(
-    resolveParticipantName(participant, fallbackDisplayName),
-  );
-  return emojiTag ? `${emojiTag} ${name}` : name;
 };
 
 const getParticipantsByProfileId = (eventData) => {
@@ -400,14 +323,9 @@ const renderUpcomingMessage = (
   if (shouldIncludeUtcDateLine(startAtMs, nowMs)) {
     lines.push("", formatUtcDateLine(startAtMs));
   }
-  const participants = getParticipantRecords(eventData);
-  if (participants.length >= 2) {
-    const participantLine = participants
-      .map(({ participant }) => resolveParticipantToken(participant))
-      .join(" ");
-    if (participantLine) {
-      lines.push("", participantLine);
-    }
+  const participantLine = renderParticipantLine(eventData);
+  if (participantLine) {
+    lines.push("", participantLine);
   }
   return lines.join("\n");
 };
@@ -454,6 +372,7 @@ const parseProjectionState = (raw) => {
       : {};
   return {
     upcomingText: normalizeText(value.upcomingText),
+    reminderText: normalizeText(value.reminderText),
     startedText: normalizeText(value.startedText),
     endedText: normalizeText(value.endedText),
     endedAnnouncementArmed: value.endedAnnouncementArmed === true,
@@ -593,11 +512,11 @@ const parseUpcomingHeading = (text) => {
     : "";
 };
 
-const parseUpcomingMessage = (eventId, raw) => {
+const parseEventMessage = (eventId, channel, raw) => {
   const value = raw && typeof raw === "object" ? raw : {};
   const matchesTarget = (record) =>
     record &&
-    record.instanceKey === `event:${eventId}:upcoming:v2` &&
+    record.instanceKey === `event:${eventId}:${channel}:v2` &&
     record.destination === "community";
   const hasAppliedMessage = Boolean(
     matchesTarget(value.applied) &&
@@ -618,7 +537,19 @@ const parseUpcomingMessage = (eventId, raw) => {
         value.applied.revision === value.desired.revision))
       ? desiredText
       : "";
-  return { hasAppliedMessage, desiredText, confirmedDesiredText };
+  return {
+    hasAppliedMessage,
+    desiredText,
+    confirmedDesiredText,
+    identity: hasAppliedMessage
+      ? {
+          destination: value.applied.destination,
+          instanceKey: value.applied.instanceKey,
+          chatId: normalizeString(value.applied.chatId),
+          messageId: value.applied.messageId,
+        }
+      : null,
+  };
 };
 
 const buildDesiredOperation = ({
@@ -660,6 +591,7 @@ const buildEventTelegramProjection = ({
   endedMatchResults = {},
   state: rawState,
   upcomingMessage,
+  reminderMessage,
   nowMs = Date.now(),
 }) => {
   const normalizedEventId = normalizeString(eventId);
@@ -670,7 +602,16 @@ const buildEventTelegramProjection = ({
   const status = normalizeString(eventData.status) || EVENT_STATUS_SCHEDULED;
   const announcements = resolveEventTelegramAnnouncements(eventData);
   const active = !isTerminalStatus(status);
-  const upcoming = parseUpcomingMessage(normalizedEventId, upcomingMessage);
+  const upcoming = parseEventMessage(
+    normalizedEventId,
+    "upcoming",
+    upcomingMessage,
+  );
+  const reminder = parseEventMessage(
+    normalizedEventId,
+    "reminder",
+    reminderMessage,
+  );
   const upcomingEnabled = announcements.invite || upcoming.hasAppliedMessage;
   const previousUpcomingText =
     upcoming.confirmedDesiredText ||
@@ -684,6 +625,14 @@ const buildEventTelegramProjection = ({
       parseUpcomingHeading(upcoming.desiredText) ||
       LEGACY_SUNDAY_MONS_UPCOMING_HEADING
     : undefined;
+  const previousReminderText =
+    reminder.confirmedDesiredText ||
+    state.reminderText ||
+    (reminder.hasAppliedMessage ? reminder.desiredText : "");
+  const reminderText =
+    reminder.hasAppliedMessage && status === EVENT_STATUS_SCHEDULED
+      ? buildSundayMonsReminder({ eventId: normalizedEventId, eventData }).text
+      : null;
   const matchesActive = announcements.matches && active;
   const endedAnnouncementArmed =
     state.endedAnnouncementArmed || (announcements.results && active);
@@ -714,12 +663,15 @@ const buildEventTelegramProjection = ({
       : buildEndedState(normalizedEventId, eventData, endedMatchResults)
     : { text: state.endedText || null };
   const nextUpcomingText = upcomingText || previousUpcomingText;
+  const nextReminderText = reminderText || previousReminderText;
   const nextStartedText = startedState.text || state.startedText;
   const nextEndedText = endedState.text || state.endedText;
   const signature = hashProjection({
     source: buildEventSignature(eventData, nowMs),
     upcomingEnabled,
     upcomingText: nextUpcomingText,
+    reminderIdentity: reminder.identity,
+    reminderText: nextReminderText,
     startedText: nextStartedText,
     endedText: nextEndedText,
     endedAnnouncementArmed,
@@ -738,6 +690,15 @@ const buildEventTelegramProjection = ({
       active: Boolean(upcomingText),
       allowSend: announcements.invite,
       hasAppliedMessage: upcoming.hasAppliedMessage,
+    }),
+    buildDesiredOperation({
+      channel: "reminder",
+      eventId: normalizedEventId,
+      previousText: reminder.hasAppliedMessage ? previousReminderText : "",
+      desiredText: reminderText,
+      active: Boolean(reminderText),
+      allowSend: false,
+      hasAppliedMessage: reminder.hasAppliedMessage,
     }),
     buildDesiredOperation({
       channel: "started",
@@ -764,6 +725,7 @@ const buildEventTelegramProjection = ({
     state: {
       schemaVersion: EVENT_TELEGRAM_DELIVERY_VERSION,
       upcomingText: nextUpcomingText,
+      reminderText: nextReminderText,
       startedText: nextStartedText,
       endedText: nextEndedText,
       endedAnnouncementArmed,

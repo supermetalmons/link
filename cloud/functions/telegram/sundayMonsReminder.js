@@ -1,6 +1,7 @@
 "use strict";
 
 const { normalizeFirebaseKey } = require("@mons/shared/ids");
+const { renderParticipantLine } = require("./eventParticipants");
 const {
   AUTOMATCH_WAITING_EMOJI_ID,
   getTelegramEmojiTag,
@@ -36,18 +37,22 @@ const buildSundayMonsReminder = (input) => {
     throw new TypeError("eventId is required");
   }
   const keys = Object.keys(input);
-  if (keys.length !== 1 || keys[0] !== "eventId") {
-    throw new TypeError("eventId is the only supported argument");
+  if (
+    !Object.hasOwn(input, "eventId") ||
+    keys.some((key) => key !== "eventId" && key !== "eventData")
+  ) {
+    throw new TypeError("only eventId and eventData are supported arguments");
   }
   const eventId = normalizeEventId(input.eventId);
   if (!eventId) {
     throw new TypeError("eventId must be a valid event key");
   }
   const eventUrl = `https://mons.link/event/${encodeURIComponent(eventId)}`;
+  const participantLine = renderParticipantLine(input.eventData);
   return {
     eventId,
     eventUrl,
-    text: `sunday mons in 3 hours!\n\n${eventUrl} ${getTelegramEmojiTag(AUTOMATCH_WAITING_EMOJI_ID)}`,
+    text: `sunday mons in 3 hours!\n\n${eventUrl} ${getTelegramEmojiTag(AUTOMATCH_WAITING_EMOJI_ID)}${participantLine ? `\n\n${participantLine}` : ""}`,
     parseMode: "HTML",
   };
 };

@@ -558,6 +558,41 @@ test("reminds a Sunday event without prizes using one Telegram text message", as
   assert.equal(state.reminderSends.length, 1);
 });
 
+test("reminder delivery renders the participants from its locked canonical event snapshot", async () => {
+  const input = reminderInput();
+  const state = fixture(input);
+  const eventData = {
+    status: "scheduled",
+    startAtMs: input.startAtMs,
+    isSundayMons: true,
+    participants: {
+      ivan: {
+        profileId: "ivan",
+        displayName: "ivan",
+        emojiId: 47,
+        joinedAtMs: 1,
+      },
+      second: {
+        profileId: "second",
+        displayName: "Second <player>",
+        emojiId: 138,
+        joinedAtMs: 2,
+      },
+    },
+  };
+  state.setEvent(eventData);
+  assert.deepEqual(await state.deliver(), { status: "sent" });
+  const expected = buildSundayMonsReminder({
+    eventId: input.eventId,
+    eventData,
+  });
+  assert.equal(state.reminderSends[0].text, expected.text);
+  assert.match(String(state.reminderSends[0].text), /ivan/);
+  assert.match(String(state.reminderSends[0].text), /Second &lt;player&gt;/);
+  const receipt = state.values.get(`event:${input.eventId}:reminder:v1`)!;
+  assert.equal(receipt.payload?.text, expected.text);
+});
+
 test("reminder timing and strict Sunday eligibility are separate from prize eligibility", async () => {
   for (const event of [
     { status: "scheduled", isSundayMons: false, startAtMs: INPUT.startAtMs },
