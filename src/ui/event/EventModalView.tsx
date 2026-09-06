@@ -2226,7 +2226,10 @@ const EventModal: React.FC = () => {
                       } for place ${assignment.place}.`
                     : "";
                   return (
-                    <PrizeChoice key={prize.id}>
+                    <PrizeChoice
+                      key={prize.id}
+                      $concealed={areEventPrizesConcealed}
+                    >
                       <PrizeChoiceButton
                         type="button"
                         $concealed={areEventPrizesConcealed}

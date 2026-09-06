@@ -113,13 +113,23 @@ export const PrizesRow = styled.div`
   cursor: default;
 `;
 
-export const PrizeChoice = styled.div`
+export const PrizeChoice = styled.div<{ $concealed: boolean }>`
   width: ${PRIZE_IMAGE_WIDTH_CSS};
   min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 0;
+
+  ${(props) =>
+    props.$concealed &&
+    css`
+      filter: drop-shadow(0 4px 6px rgba(29, 24, 40, 0.16));
+
+      @media (prefers-color-scheme: dark) {
+        filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.4));
+      }
+    `}
 `;
 
 export const PrizeChoiceButton = styled.button<{
@@ -152,18 +162,13 @@ export const PrizeChoiceButton = styled.button<{
   ${(props) =>
     props.$concealed &&
     css`
-      overflow: hidden;
-      border-radius: 4px;
+      appearance: none;
+      -webkit-appearance: none;
+      clip-path: inset(0 round 8px);
       background: #f2f1f4;
-      box-shadow:
-        0 0 0 1px rgba(29, 24, 40, 0.08),
-        0 4px 12px rgba(29, 24, 40, 0.16);
 
       @media (prefers-color-scheme: dark) {
         background: #29262e;
-        box-shadow:
-          0 0 0 1px rgba(255, 255, 255, 0.14),
-          0 4px 12px rgba(0, 0, 0, 0.4);
       }
     `}
 `;
