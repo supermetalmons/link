@@ -3026,7 +3026,7 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
         pendingNavigationOpenedEventModalRequestSeqRef.current + 1;
       pendingNavigationOpenedEventModalRequestSeqRef.current = requestSeq;
       pendingNavigationOpenedEventModalRequestedAtMsRef.current = Date.now();
-      openEventModal(item.eventId, { restoreHomeOnClose: false });
+      openEventModal(item.eventId);
       if (
         pendingNavigationOpenedEventModalRequestSeqRef.current === requestSeq
       ) {
@@ -3472,18 +3472,12 @@ const BottomControls: React.FC<BottomControlsProps> = ({ authState }) => {
               <EventCloudButtonOuter
                 onClick={
                   !isMobile
-                    ? () =>
-                        openEventModal(effectiveInviteEventId as string, {
-                          restoreHomeOnClose: false,
-                        })
+                    ? () => openEventModal(effectiveInviteEventId as string)
                     : undefined
                 }
                 onTouchStart={
                   isMobile
-                    ? () =>
-                        openEventModal(effectiveInviteEventId as string, {
-                          restoreHomeOnClose: false,
-                        })
+                    ? () => openEventModal(effectiveInviteEventId as string)
                     : undefined
                 }
                 aria-label="Event"

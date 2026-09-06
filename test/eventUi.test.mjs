@@ -291,7 +291,31 @@ test("sizes event prize artwork from catalog image dimensions", () => {
   assert.equal(view.match(/height=\{prize\.imageHeight\}/g)?.length, 2);
 });
 
-test("preserves the controller façade and modal state transitions", async () => {
+test("preserves the controller façade and modal state transitions", async (t) => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  let location = new URL("https://mons.link/game-1");
+  const paths = [];
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      get location() {
+        return location;
+      },
+      history: {
+        pushState(_state, _title, path) {
+          paths.push(path);
+          location = new URL(path, location);
+        },
+      },
+    },
+  });
+  t.after(() => {
+    if (previousWindow) {
+      Object.defineProperty(globalThis, "window", previousWindow);
+    } else {
+      delete globalThis.window;
+    }
+  });
   assert.deepEqual(Object.keys(modalController).sort(), [
     "EVENT_MODAL_AUTH_Z_INDEX",
     "EVENT_MODAL_Z_INDEX",
@@ -300,25 +324,26 @@ test("preserves the controller façade and modal state transitions", async () =>
     "hasEventModalVisible",
     "openEventModal",
     "openEventModalPendingCreate",
+    "prepareEventModalGameLaunch",
     "setEventModalPendingCreateError",
     "subscribeToEventModalState",
+    "syncEventModalToRoute",
   ]);
-  await modalController.closeEventModal({ skipHomeTransition: true });
+  await modalController.closeEventModal();
   const states = [];
   const unsubscribe = modalController.subscribeToEventModalState((state) => {
     states.push(state);
   });
 
-  modalController.openEventModal(" event-1 ", { restoreHomeOnClose: true });
+  modalController.openEventModal(" event-1 ");
   assert.equal(modalController.getEventModalState().eventId, "event-1");
-  modalController.openEventModalPendingCreate({ restoreHomeOnClose: false });
+  modalController.openEventModalPendingCreate();
   modalController.setEventModalPendingCreateError(" ");
   assert.equal(
     modalController.getEventModalState().pendingCreateError,
     "Failed to create event.",
   );
   await modalController.closeEventModal({
-    skipHomeTransition: true,
     reason: "launch_game",
   });
   assert.equal(modalController.hasEventModalVisible(), false);
@@ -326,6 +351,17 @@ test("preserves the controller façade and modal state transitions", async () =>
     modalController.getEventModalState().lastCloseReason,
     "launch_game",
   );
-  assert.equal(states.length, 5);
+  assert.deepEqual(paths, ["/game-1?event=event-1", "/game-1"]);
+  assert.deepEqual(
+    states.map(({ isOpen, isPendingCreate }) => [isOpen, isPendingCreate]),
+    [
+      [false, false],
+      [true, false],
+      [false, false],
+      [true, true],
+      [true, true],
+      [false, false],
+    ],
+  );
   unsubscribe();
 });

@@ -1,4 +1,4 @@
-import { RouteState, getCurrentRouteState } from "./routeState";
+import { type RouteState, getCurrentRouteState } from "./routeState";
 
 type RouteEventSource = "init" | "push" | "replace" | "popstate";
 type RouteListener = (state: RouteState, source: RouteEventSource) => void;

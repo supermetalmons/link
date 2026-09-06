@@ -1681,7 +1681,7 @@ const MainMenu: React.FC = () => {
     setIsCreatingEvent(true);
     setIsMenuOpen(false);
     setShowExperimental(false);
-    openEventModalPendingCreate({ restoreHomeOnClose: false });
+    openEventModalPendingCreate();
     void createProfileEvent(createRequest, {
       telegramAnnouncements: eventTelegramAnnouncements,
     })
@@ -1694,7 +1694,7 @@ const MainMenu: React.FC = () => {
         if (!modalState.isOpen || !modalState.isPendingCreate) {
           return;
         }
-        openEventModal(result.eventId, { restoreHomeOnClose: false });
+        openEventModal(result.eventId);
       })
       .catch((error) => {
         const message =

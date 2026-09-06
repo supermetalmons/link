@@ -15,8 +15,13 @@ registerHooks({
   },
 });
 
-const { getCurrentRouteState, getRoutePathForTarget } =
-  await import("../src/navigation/routeState.ts");
+const {
+  getCurrentRouteState,
+  getCurrentViewUrl,
+  getRoutePathForTarget,
+  getRouteWithEventOverlay,
+  isSameBackgroundRoute,
+} = await import("../src/navigation/routeState.ts");
 const {
   buildDeterministicGameSeed,
   buildGameSeedForStoredVariant,
@@ -59,14 +64,14 @@ const routeTarget = (mode, values = {}) => ({
   ...values,
 });
 
-const readRoute = (pathname) => {
+const withLocation = (path, read) => {
   const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
   Object.defineProperty(globalThis, "window", {
     configurable: true,
-    value: { location: { pathname } },
+    value: { location: new URL(path, "https://mons.link") },
   });
   try {
-    return getCurrentRouteState();
+    return read();
   } finally {
     if (previousWindow) {
       Object.defineProperty(globalThis, "window", previousWindow);
@@ -75,6 +80,8 @@ const readRoute = (pathname) => {
     }
   }
 };
+
+const readRoute = (path) => withLocation(path, getCurrentRouteState);
 
 test("parses canonical client routes and auto-invite intent", () => {
   assert.deepEqual(readRoute("/"), routeTarget("home"));
@@ -136,6 +143,176 @@ test("builds canonical route paths and safely rejects malformed snapshots", () =
       snapshotId: null,
     }),
   );
+});
+
+test("round-trips event overlays independently of the background route", () => {
+  const eventId = "summer/round 1 + ☃&prize=gold";
+  const targets = [
+    routeTarget("home", { eventId }),
+    routeTarget("watch", { eventId }),
+    routeTarget("invite", { inviteId: "match-exact-1", eventId }),
+    routeTarget("invite", {
+      inviteId: "auto_ranked-exact-2",
+      autojoin: true,
+      eventId,
+    }),
+    routeTarget("snapshot", { snapshotId: "round/1 A", eventId }),
+    routeTarget("event", { eventId }),
+  ];
+
+  for (const target of targets) {
+    const route = readRoute(getRoutePathForTarget(target));
+    assert.equal(route.mode, target.mode);
+    assert.equal(route.eventId, eventId);
+    assert.equal(route.inviteId, target.inviteId);
+    assert.equal(route.snapshotId, target.snapshotId);
+    assert.equal(route.autojoin, target.autojoin);
+    assert.equal(isSameBackgroundRoute(route, target), true);
+  }
+
+  assert.equal(
+    getRoutePathForTarget(
+      routeTarget("invite", {
+        inviteId: "match-exact-1",
+        eventId: "summer-2026",
+      }),
+    ),
+    "/match-exact-1?event=summer-2026",
+  );
+  assert.equal(
+    getRoutePathForTarget(routeTarget("event", { eventId })),
+    `/event/${encodeURIComponent(eventId)}`,
+  );
+});
+
+test("treats blank overlay queries as closed and prioritizes legacy event paths", () => {
+  for (const suffix of ["", "?event", "?event=", "?event=%20%20%09"]) {
+    assert.equal(readRoute(`/match-1${suffix}`).eventId, null);
+  }
+  assert.equal(
+    readRoute("/match-1?event=%20summer-2026%20").eventId,
+    "summer-2026",
+  );
+  assert.equal(readRoute("/match-1?event=a%2Fb%2Bc%25").eventId, "a/b+c%");
+  assert.equal(
+    readRoute("/event/path-event?event=query-event").eventId,
+    "path-event",
+  );
+  assert.equal(readRoute("/event/round%2F1%20A").eventId, "round/1 A");
+  assert.equal(readRoute("/event/%E0%A4%A?event=query-event").eventId, null);
+});
+
+test("opening and closing overlays preserve match, watch, and snapshot backgrounds", () => {
+  for (const path of [
+    "/match-1",
+    "/auto_ranked-2",
+    "/watch",
+    "/snapshot/round%2F1",
+  ]) {
+    const background = readRoute(path);
+    const opened = getRouteWithEventOverlay(background, "event-a");
+    const switched = getRouteWithEventOverlay(opened, "event-b");
+    const closed = getRouteWithEventOverlay(switched, null);
+    assert.deepEqual(opened, { ...background, eventId: "event-a" });
+    assert.deepEqual(switched, { ...background, eventId: "event-b" });
+    assert.deepEqual(closed, background);
+    assert.equal(isSameBackgroundRoute(background, opened), true);
+    assert.equal(isSameBackgroundRoute(opened, switched), true);
+    assert.equal(isSameBackgroundRoute(switched, closed), true);
+  }
+
+  const lobby = readRoute("/");
+  const lobbyEvent = getRouteWithEventOverlay(lobby, "round/1");
+  assert.deepEqual(
+    lobbyEvent,
+    routeTarget("event", {
+      path: "event/round%2F1",
+      eventId: "round/1",
+    }),
+  );
+  assert.equal(isSameBackgroundRoute(lobby, lobbyEvent), true);
+  assert.deepEqual(getRouteWithEventOverlay(lobbyEvent, null), lobby);
+  assert.equal(getRouteWithEventOverlay(lobbyEvent, "   ").mode, "home");
+});
+
+test("background comparison detects game, snapshot, watch, and autojoin changes", () => {
+  const invite = readRoute("/match-1?event=a");
+  assert.equal(
+    isSameBackgroundRoute(invite, readRoute("/match-2?event=a")),
+    false,
+  );
+  assert.equal(
+    isSameBackgroundRoute(invite, { ...invite, autojoin: true }),
+    false,
+  );
+  assert.equal(
+    isSameBackgroundRoute(invite, readRoute("/watch?event=a")),
+    false,
+  );
+  assert.equal(isSameBackgroundRoute(invite, readRoute("/event/a")), false);
+  assert.equal(
+    isSameBackgroundRoute(readRoute("/event/a"), readRoute("/watch")),
+    false,
+  );
+  assert.equal(
+    isSameBackgroundRoute(
+      readRoute("/snapshot/one"),
+      readRoute("/snapshot/two"),
+    ),
+    false,
+  );
+  assert.equal(
+    isSameBackgroundRoute(readRoute("/snapshot/one"), readRoute("/one")),
+    false,
+  );
+  assert.equal(
+    isSameBackgroundRoute({ ...invite, path: "stale" }, invite),
+    true,
+  );
+});
+
+test("overlay URL changes preserve explicit query parameters and fragments", () => {
+  const suffix = {
+    search:
+      "?callback=abc%2B123&event=old&filter=one&filter=two&event=duplicate",
+    hash: "#round-3",
+  };
+  const background = readRoute("/match-1");
+  const opened = getRouteWithEventOverlay(background, "new event");
+  assert.equal(
+    getRoutePathForTarget(opened, suffix),
+    "/match-1?callback=abc%2B123&filter=one&filter=two&event=new+event#round-3",
+  );
+  assert.equal(
+    getRoutePathForTarget(background, suffix),
+    "/match-1?callback=abc%2B123&filter=one&filter=two#round-3",
+  );
+  assert.equal(
+    getRoutePathForTarget(
+      getRouteWithEventOverlay(readRoute("/"), "event-a"),
+      suffix,
+    ),
+    "/event/event-a?callback=abc%2B123&filter=one&filter=two#round-3",
+  );
+  assert.equal(getRoutePathForTarget(opened), "/match-1?event=new+event");
+});
+
+test("share URLs restore the current overlay and exact background without callback parameters", () => {
+  const paths = [
+    "/match-exact-1?event=summer-2026",
+    "/auto_ranked-exact-2?event=summer-2026",
+    "/watch?event=summer-2026",
+    "/snapshot/round%2F1?event=summer-2026",
+    "/event/round%2F1",
+    "/match-exact-1",
+  ];
+
+  for (const path of paths) {
+    const incidental = `${path}${path.includes("?") ? "&" : "?"}callback=private#callback-fragment`;
+    const shareUrl = withLocation(incidental, getCurrentViewUrl);
+    assert.equal(shareUrl, `https://mons.link${path}`);
+    assert.deepEqual(readRoute(shareUrl), readRoute(path));
+  }
 });
 
 test("keeps stored game-variant normalization and persistence compatible", () => {

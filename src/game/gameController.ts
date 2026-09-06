@@ -99,7 +99,6 @@ import { getSessionGuard } from "./matchSession";
 import { syncOwnProfileMiningState } from "../services/ownProfileMiningHydration";
 import { RouteState, getCurrentRouteState } from "../navigation/routeState";
 import { INVALID_SNAPSHOT_ROUTE_ERROR } from "../session/sessionErrors";
-import { closeEventModal, openEventModal } from "../ui/eventModalController";
 import {
   buildGameSeedForStoredVariant,
   buildRandomGameSeed,
@@ -2218,11 +2217,6 @@ export function didAttemptAuthentication() {
 export async function go(routeStateOverride?: RouteState) {
   const routeState = routeStateOverride ?? getCurrentRouteState();
   activeRouteState = routeState;
-  if (routeState.mode === "event" && routeState.eventId) {
-    openEventModal(routeState.eventId, { restoreHomeOnClose: true });
-  } else {
-    void closeEventModal({ skipHomeTransition: true, reason: "route_change" });
-  }
   clearAllManagedGameTimeouts();
   resetBotScoreReactionState();
   isGameWithBot = false;

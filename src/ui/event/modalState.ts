@@ -1,11 +1,16 @@
-import { transitionToHome } from "../../session/sessionTransitionPort";
+import { pushRoutePath } from "../../navigation/appNavigation";
+import {
+  getCurrentRouteState,
+  getRoutePathForTarget,
+  getRouteWithEventOverlay,
+  type RouteState,
+} from "../../navigation/routeState";
 
 export type EventModalCloseReason = "dismiss" | "launch_game" | "route_change";
 
 export type EventModalState = {
   isOpen: boolean;
   eventId: string | null;
-  restoreHomeOnClose: boolean;
   lastCloseReason: EventModalCloseReason | null;
   isPendingCreate: boolean;
   pendingCreateError: string | null;
@@ -19,13 +24,13 @@ type EventModalListener = (state: EventModalState) => void;
 let state: EventModalState = {
   isOpen: false,
   eventId: null,
-  restoreHomeOnClose: false,
   lastCloseReason: null,
   isPendingCreate: false,
   pendingCreateError: null,
 };
 
 const listeners = new Set<EventModalListener>();
+let pendingGameLaunchInviteId: string | null = null;
 
 const emit = () => {
   listeners.forEach((listener) => {
@@ -49,37 +54,110 @@ export const subscribeToEventModalState = (
   };
 };
 
-export const openEventModal = (
-  eventId: string,
-  options?: { restoreHomeOnClose?: boolean },
-): void => {
-  const normalizedEventId = typeof eventId === "string" ? eventId.trim() : "";
-  if (!normalizedEventId) {
-    return;
+const applyState = (nextState: EventModalState, path?: string): void => {
+  const previousState = state;
+  state = nextState;
+  try {
+    if (
+      path !== undefined &&
+      path !==
+        `${window.location.pathname}${window.location.search}${window.location.hash}`
+    ) {
+      pushRoutePath(path);
+    }
+  } catch (error) {
+    state = previousState;
+    throw error;
   }
-  state = {
+  if (state !== previousState) {
+    emit();
+  }
+};
+
+const getOverlayPath = (eventId: string | null): string | undefined => {
+  const route = getCurrentRouteState();
+  if (
+    route.eventId === eventId &&
+    (eventId !== null || route.mode !== "event")
+  ) {
+    return undefined;
+  }
+  return getRoutePathForTarget(
+    getRouteWithEventOverlay(route, eventId),
+    window.location,
+  );
+};
+
+const getOpenState = (eventId: string): EventModalState => {
+  if (state.isOpen && state.eventId === eventId && !state.isPendingCreate) {
+    return state;
+  }
+  return {
     isOpen: true,
-    eventId: normalizedEventId,
-    restoreHomeOnClose: options?.restoreHomeOnClose === true,
+    eventId,
     lastCloseReason: null,
     isPendingCreate: false,
     pendingCreateError: null,
   };
-  emit();
 };
 
-export const openEventModalPendingCreate = (options?: {
-  restoreHomeOnClose?: boolean;
-}): void => {
-  state = {
+const getClosedState = (reason: EventModalCloseReason): EventModalState => {
+  if (!state.isOpen) {
+    return state;
+  }
+  return {
+    isOpen: false,
+    eventId: null,
+    lastCloseReason: reason,
+    isPendingCreate: false,
+    pendingCreateError: null,
+  };
+};
+
+export const syncEventModalToRoute = (route: RouteState): void => {
+  if (route.eventId) {
+    if (state.eventId !== route.eventId) {
+      pendingGameLaunchInviteId = null;
+    }
+    applyState(getOpenState(route.eventId));
+    return;
+  }
+  const reason =
+    route.mode === "invite" &&
+    route.inviteId === pendingGameLaunchInviteId &&
+    pendingGameLaunchInviteId !== null
+      ? "launch_game"
+      : "route_change";
+  pendingGameLaunchInviteId = null;
+  applyState(getClosedState(reason));
+};
+
+export const prepareEventModalGameLaunch = (inviteId: string): void => {
+  pendingGameLaunchInviteId = state.isOpen ? inviteId : null;
+};
+
+export const openEventModal = (eventId: string): void => {
+  const normalizedEventId = typeof eventId === "string" ? eventId.trim() : "";
+  if (!normalizedEventId) {
+    return;
+  }
+  pendingGameLaunchInviteId = null;
+  applyState(
+    getOpenState(normalizedEventId),
+    getOverlayPath(normalizedEventId),
+  );
+};
+
+export const openEventModalPendingCreate = (): void => {
+  pendingGameLaunchInviteId = null;
+  applyState(getClosedState("dismiss"), getOverlayPath(null));
+  applyState({
     isOpen: true,
     eventId: null,
-    restoreHomeOnClose: options?.restoreHomeOnClose === true,
     lastCloseReason: null,
     isPendingCreate: true,
     pendingCreateError: null,
-  };
-  emit();
+  });
 };
 
 export const setEventModalPendingCreateError = (message: string): void => {
@@ -95,28 +173,11 @@ export const setEventModalPendingCreateError = (message: string): void => {
 };
 
 export const closeEventModal = async (options?: {
-  skipHomeTransition?: boolean;
   reason?: EventModalCloseReason;
 }): Promise<void> => {
   const closeReason: EventModalCloseReason = options?.reason ?? "dismiss";
-  const shouldRestoreHome =
-    state.isOpen &&
-    state.restoreHomeOnClose &&
-    options?.skipHomeTransition !== true;
-  state = {
-    isOpen: false,
-    eventId: null,
-    restoreHomeOnClose: false,
-    lastCloseReason: closeReason,
-    isPendingCreate: false,
-    pendingCreateError: null,
-  };
-  emit();
-  if (!shouldRestoreHome) {
-    return;
-  }
-  await Promise.resolve();
-  await transitionToHome();
+  pendingGameLaunchInviteId = null;
+  applyState(getClosedState(closeReason), getOverlayPath(null));
 };
 
 export const hasEventModalVisible = (): boolean => {

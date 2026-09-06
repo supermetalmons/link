@@ -120,7 +120,11 @@ import {
 import { resetNftCache } from "../services/nftCache";
 import { resetPlayerMetadataCaches } from "../utils/playerMetadataCache";
 import { resetLeaderboardCache } from "../ui/leaderboardCache";
-import { RouteState, getCurrentRouteState } from "../navigation/routeState";
+import {
+  RouteState,
+  getCurrentRouteState,
+  getCurrentViewUrl,
+} from "../navigation/routeState";
 import {
   decrementLifecycleCounter,
   incrementLifecycleCounter,
@@ -1021,12 +1025,14 @@ class Connection {
     this.writeLinkToClipboard(link, "failed-to-copy-invite-link");
   }
 
-  public writeEventLinkToClipboard(eventId: string): void {
+  public writeEventLinkToClipboard(eventId: string, link?: string): void {
     if (typeof window === "undefined" || !eventId) {
       return;
     }
-    const link = `${window.location.origin}/event/${eventId}`;
-    this.writeLinkToClipboard(link, "failed-to-copy-event-link");
+    this.writeLinkToClipboard(
+      link ?? getCurrentViewUrl(),
+      "failed-to-copy-event-link",
+    );
   }
 
   private writeLinkToClipboard(link: string, warningLabel: string): void {
@@ -1180,13 +1186,13 @@ class Connection {
       if (!sessionGuard()) {
         return;
       }
+      const latestRoute = getRouteStateSnapshot();
+      if (latestRoute.mode !== "invite" || latestRoute.inviteId !== inviteId) {
+        return;
+      }
       await transition(
         {
-          mode: "invite",
-          path: inviteId,
-          inviteId,
-          snapshotId: null,
-          eventId: null,
+          ...latestRoute,
           autojoin: isAutoInviteId(inviteId),
         },
         { force: true },

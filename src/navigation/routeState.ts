@@ -15,11 +15,7 @@ const normalizePath = (rawPath: string): string => {
   return rawPath.replace(/^\/|\/$/g, "");
 };
 
-const decodeSnapshotId = (snapshotPath: string): string | null => {
-  if (!snapshotPath.startsWith("snapshot/")) {
-    return null;
-  }
-  const encoded = snapshotPath.substring("snapshot/".length);
+const decodePathId = (encoded: string): string | null => {
   try {
     return decodeURIComponent(encoded);
   } catch {
@@ -27,15 +23,20 @@ const decodeSnapshotId = (snapshotPath: string): string | null => {
   }
 };
 
-const parseRouteState = (pathname: string): RouteState => {
+const normalizeEventId = (eventId: string | null): string | null => {
+  return eventId?.trim() || null;
+};
+
+const parseRouteState = (pathname: string, search: string): RouteState => {
   const path = normalizePath(pathname);
+  const eventId = normalizeEventId(new URLSearchParams(search).get("event"));
   if (path === "") {
     return {
       mode: "home",
       path,
       inviteId: null,
       snapshotId: null,
-      eventId: null,
+      eventId,
       autojoin: false,
     };
   }
@@ -45,18 +46,18 @@ const parseRouteState = (pathname: string): RouteState => {
       path,
       inviteId: null,
       snapshotId: null,
-      eventId: null,
+      eventId,
       autojoin: false,
     };
   }
   if (path.startsWith("event/")) {
-    const eventId = path.substring("event/".length);
+    const pathEventId = decodePathId(path.substring("event/".length));
     return {
       mode: "event",
       path,
       inviteId: null,
       snapshotId: null,
-      eventId: eventId || null,
+      eventId: normalizeEventId(pathEventId),
       autojoin: false,
     };
   }
@@ -65,8 +66,8 @@ const parseRouteState = (pathname: string): RouteState => {
       mode: "snapshot",
       path,
       inviteId: null,
-      snapshotId: decodeSnapshotId(path),
-      eventId: null,
+      snapshotId: decodePathId(path.substring("snapshot/".length)),
+      eventId,
       autojoin: false,
     };
   }
@@ -75,16 +76,16 @@ const parseRouteState = (pathname: string): RouteState => {
     path,
     inviteId: path,
     snapshotId: null,
-    eventId: null,
+    eventId,
     autojoin: isAutoInviteId(path),
   };
 };
 
 export const getCurrentRouteState = (): RouteState => {
-  return parseRouteState(window.location.pathname);
+  return parseRouteState(window.location.pathname, window.location.search);
 };
 
-export const getRoutePathForTarget = (target: RouteState): string => {
+const getBackgroundPath = (target: RouteState): string => {
   if (target.mode === "home") {
     return "/";
   }
@@ -92,11 +93,74 @@ export const getRoutePathForTarget = (target: RouteState): string => {
     return "/watch";
   }
   if (target.mode === "event") {
-    return `/event/${target.eventId ?? ""}`;
+    return `/event/${encodeURIComponent(target.eventId ?? "")}`;
   }
   if (target.mode === "snapshot") {
     const encoded = encodeURIComponent(target.snapshotId ?? "");
     return `/snapshot/${encoded}`;
   }
   return `/${target.inviteId ?? ""}`;
+};
+
+export const getRoutePathForTarget = (
+  target: RouteState,
+  suffix?: { search?: string; hash?: string },
+): string => {
+  const search = new URLSearchParams(suffix?.search);
+  search.delete("event");
+  const eventId = normalizeEventId(target.eventId);
+  if (target.mode !== "event" && eventId) {
+    search.set("event", eventId);
+  }
+  const query = search.toString();
+  const hash = suffix?.hash ?? "";
+  return `${getBackgroundPath(target)}${query ? `?${query}` : ""}${hash && !hash.startsWith("#") ? `#${hash}` : hash}`;
+};
+
+export const getRouteWithEventOverlay = (
+  route: RouteState,
+  eventId: string | null,
+): RouteState => {
+  const normalizedEventId = normalizeEventId(eventId);
+  if (route.mode === "home" || route.mode === "event") {
+    return {
+      mode: normalizedEventId ? "event" : "home",
+      path: normalizedEventId
+        ? `event/${encodeURIComponent(normalizedEventId)}`
+        : "",
+      inviteId: null,
+      snapshotId: null,
+      eventId: normalizedEventId,
+      autojoin: false,
+    };
+  }
+  return { ...route, eventId: normalizedEventId };
+};
+
+export const isSameBackgroundRoute = (
+  first: RouteState,
+  second: RouteState,
+): boolean => {
+  const firstIsLobby = first.mode === "home" || first.mode === "event";
+  const secondIsLobby = second.mode === "home" || second.mode === "event";
+  if (firstIsLobby || secondIsLobby) {
+    return firstIsLobby && secondIsLobby;
+  }
+  if (first.mode !== second.mode || first.autojoin !== second.autojoin) {
+    return false;
+  }
+  if (first.mode === "invite") {
+    return first.inviteId === second.inviteId;
+  }
+  if (first.mode === "snapshot") {
+    return first.snapshotId === second.snapshotId;
+  }
+  return true;
+};
+
+export const getCurrentViewUrl = (): string => {
+  return new URL(
+    getRoutePathForTarget(getCurrentRouteState()),
+    window.location.origin,
+  ).href;
 };

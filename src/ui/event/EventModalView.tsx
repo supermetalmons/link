@@ -22,12 +22,16 @@ import {
   EVENT_MODAL_Z_INDEX,
   type EventModalState,
   getEventModalState,
+  prepareEventModalGameLaunch,
   subscribeToEventModalState,
 } from "./modalState";
 import { emojis } from "../../content/emojis";
 import { storage } from "../../utils/storage";
 import { openProfileSignInPopupForEvent } from "../identity/profileUiPort";
-import { getCurrentRouteState } from "../../navigation/routeState";
+import {
+  getCurrentRouteState,
+  getCurrentViewUrl,
+} from "../../navigation/routeState";
 import {
   didDismissSomethingWithOutsideTapJustNow,
   didNotDismissAnythingWithOutsideTapJustNow,
@@ -1117,8 +1121,6 @@ const EventModal: React.FC = () => {
     () => getActivePendingMatches(eventRecord),
     [eventRecord],
   );
-  const currentRoute = getCurrentRouteState();
-
   const handlePrizeSelectionClick = useCallback(
     (prizeId: EventPrizeId) => {
       if (
@@ -1546,20 +1548,23 @@ const EventModal: React.FC = () => {
     [showDevHelperPanel, shouldKeepVisibleForOutsideDismiss],
   );
 
-  const copyEventLinkToClipboard = useCallback(() => {
-    if (!modalState.eventId || typeof window === "undefined") {
-      return;
-    }
-    connection.writeEventLinkToClipboard(modalState.eventId);
-    setCopyState("copied");
-    if (copyResetTimeoutRef.current !== null) {
-      window.clearTimeout(copyResetTimeoutRef.current);
-    }
-    copyResetTimeoutRef.current = window.setTimeout(() => {
-      copyResetTimeoutRef.current = null;
-      setCopyState("idle");
-    }, 1200);
-  }, [modalState.eventId]);
+  const copyEventLinkToClipboard = useCallback(
+    (link?: string) => {
+      if (!modalState.eventId || typeof window === "undefined") {
+        return;
+      }
+      connection.writeEventLinkToClipboard(modalState.eventId, link);
+      setCopyState("copied");
+      if (copyResetTimeoutRef.current !== null) {
+        window.clearTimeout(copyResetTimeoutRef.current);
+      }
+      copyResetTimeoutRef.current = window.setTimeout(() => {
+        copyResetTimeoutRef.current = null;
+        setCopyState("idle");
+      }, 1200);
+    },
+    [modalState.eventId],
+  );
 
   const handleCopyClick = useCallback(() => {
     copyEventLinkToClipboard();
@@ -1569,13 +1574,13 @@ const EventModal: React.FC = () => {
     if (!modalState.eventId || typeof window === "undefined") {
       return;
     }
-    const link = `${window.location.origin}/event/${modalState.eventId}`;
+    const link = getCurrentViewUrl();
     const shareData = {
       url: link,
       title: "Play Mons",
     };
     if (typeof navigator.share !== "function") {
-      copyEventLinkToClipboard();
+      copyEventLinkToClipboard(link);
       return;
     }
     if (typeof navigator.canShare === "function") {
@@ -1586,7 +1591,7 @@ const EventModal: React.FC = () => {
         canShareData = false;
       }
       if (!canShareData) {
-        copyEventLinkToClipboard();
+        copyEventLinkToClipboard(link);
         return;
       }
     }
@@ -1603,7 +1608,7 @@ const EventModal: React.FC = () => {
       if (errorName === "AbortError") {
         return;
       }
-      copyEventLinkToClipboard();
+      copyEventLinkToClipboard(link);
     }
   }, [copyEventLinkToClipboard, modalState.eventId]);
 
@@ -1628,25 +1633,18 @@ const EventModal: React.FC = () => {
       });
   }, [modalState.eventId]);
 
-  const openMatch = useCallback(
-    async (inviteId: string) => {
-      if (!inviteId) {
-        return;
-      }
-      await closeEventModal({
-        skipHomeTransition: true,
-        reason: "launch_game",
-      });
-      if (
-        currentRoute.mode === "invite" &&
-        currentRoute.inviteId === inviteId
-      ) {
-        return;
-      }
-      connection.connectToInvite(inviteId);
-    },
-    [currentRoute.inviteId, currentRoute.mode],
-  );
+  const openMatch = useCallback(async (inviteId: string) => {
+    if (!inviteId) {
+      return;
+    }
+    const currentRoute = getCurrentRouteState();
+    if (currentRoute.mode === "invite" && currentRoute.inviteId === inviteId) {
+      await closeEventModal({ reason: "launch_game" });
+      return;
+    }
+    prepareEventModalGameLaunch(inviteId);
+    connection.connectToInvite(inviteId);
+  }, []);
 
   const resolveParticipantProfile = useCallback(
     async (participant: EventParticipant) => {

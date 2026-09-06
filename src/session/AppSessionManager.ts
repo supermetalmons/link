@@ -12,10 +12,12 @@ import {
   subscribeToNavigationState,
 } from "../navigation/appNavigation";
 import {
-  RouteState,
+  type RouteState,
   getCurrentRouteState,
   getRoutePathForTarget,
+  isSameBackgroundRoute,
 } from "../navigation/routeState";
+import { syncEventModalToRoute } from "../ui/event/modalState";
 import { INVALID_SNAPSHOT_ROUTE_ERROR } from "./sessionErrors";
 import {
   bindSessionTransitionRuntime,
@@ -66,10 +68,6 @@ const routeStatesMatch = (a: RouteState, b: RouteState) => {
   );
 };
 
-const isLobbyRoute = (target: RouteState): boolean => {
-  return target.mode === "home" || target.mode === "event";
-};
-
 const mergeQueuedTransitionOptions = (
   existing?: SessionTransitionOptions,
   incoming?: SessionTransitionOptions,
@@ -113,17 +111,28 @@ const logTransition = (from: RouteState, to: RouteState) => {
 };
 
 const applyPathForTarget = (target: RouteState, replace = false) => {
-  const nextPath = getRoutePathForTarget(target);
-  if (window.location.pathname === nextPath) {
+  const nextPath = getRoutePathForTarget(
+    target,
+    isSameBackgroundRoute(getCurrentRouteState(), target)
+      ? window.location
+      : undefined,
+  );
+  if (
+    `${window.location.pathname}${window.location.search}${window.location.hash}` ===
+    nextPath
+  ) {
     return;
   }
   isApplyingNavigation = true;
-  if (replace) {
-    replaceRoutePath(nextPath);
-  } else {
-    pushRoutePath(nextPath);
+  try {
+    if (replace) {
+      replaceRoutePath(nextPath);
+    } else {
+      pushRoutePath(nextPath);
+    }
+  } finally {
+    isApplyingNavigation = false;
   }
-  isApplyingNavigation = false;
 };
 
 const bootstrapForRoute = async (target: RouteState) => {
@@ -132,22 +141,6 @@ const bootstrapForRoute = async (target: RouteState) => {
   await gameController.go(target);
   const mainGameLoadState = await import("../game/mainGameLoadState");
   mainGameLoadState.markMainGameLoaded();
-};
-
-const syncEventModalForLobbyTarget = async (target: RouteState) => {
-  const eventModalController = await import("../ui/eventModalController");
-  if (target.mode === "event" && target.eventId) {
-    eventModalController.openEventModal(target.eventId, {
-      restoreHomeOnClose: true,
-    });
-    return;
-  }
-  if (eventModalController.hasEventModalVisible()) {
-    await eventModalController.closeEventModal({
-      skipHomeTransition: true,
-      reason: "route_change",
-    });
-  }
 };
 
 const runTransition = async (
@@ -172,18 +165,17 @@ const runTransition = async (
   if (!options?.force && routeStatesMatch(from, target)) {
     return;
   }
-  const shouldUseLightweightLobbyTransition =
+  const shouldUseLightweightTransition =
     !options?.force &&
     !options?.resetProfileScope &&
-    isLobbyRoute(from) &&
-    isLobbyRoute(target);
+    isSameBackgroundRoute(from, target);
   isTransitioning = true;
-  if (shouldUseLightweightLobbyTransition) {
+  if (shouldUseLightweightTransition) {
     try {
       if (!options?.skipNavigation) {
         applyPathForTarget(target, options?.replace === true);
       }
-      await syncEventModalForLobbyTarget(target);
+      syncEventModalToRoute(target);
       currentTarget = target;
       logTransition(from, target);
     } catch (error) {
@@ -211,13 +203,14 @@ const runTransition = async (
   }
   incrementSessionEpoch();
   try {
+    if (!options?.skipNavigation) {
+      applyPathForTarget(target, options?.replace === true);
+    }
+    syncEventModalToRoute(target);
     const lifecycleManager = await import("../lifecycle/lifecycleManager");
     lifecycleManager.teardownMatchScope(target);
     if (options?.resetProfileScope) {
       lifecycleManager.teardownProfileScope();
-    }
-    if (!options?.skipNavigation) {
-      applyPathForTarget(target, options?.replace === true);
     }
     beginMatchSession();
     await bootstrapForRoute(target);
@@ -240,6 +233,7 @@ const runTransition = async (
       if (shouldRecoverToHome) {
         applyPathForTarget(recoveryTarget, true);
       }
+      syncEventModalToRoute(recoveryTarget);
       beginMatchSession();
       await bootstrapForRoute(recoveryTarget);
       currentTarget = recoveryTarget;
@@ -316,6 +310,7 @@ export const initializeAppSessionManager = () => {
     if (isApplyingNavigation) {
       return;
     }
+    syncEventModalToRoute(routeState);
     if (!isTransitioning && routeStatesMatch(routeState, currentTarget)) {
       return;
     }
