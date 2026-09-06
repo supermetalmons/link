@@ -104,6 +104,18 @@ test("maps event navigation previews and rejects pending projections", () => {
   assert.equal(item?.participantCount, 1);
 });
 
+test("maps Sunday Mons only from an explicit boolean flag", () => {
+  for (const eventId of ["NN3eRzoZo80", "ordinary-event"]) {
+    assert.equal(mapDatabaseEventRecord({}, eventId)?.isSundayMons, false);
+    for (const isSundayMons of [true, false, "true", 1, null]) {
+      assert.equal(
+        mapDatabaseEventRecord({ isSundayMons }, eventId)?.isSundayMons,
+        isSundayMons === true,
+      );
+    }
+  }
+});
+
 test("maps nested event records and validates configured prizes", () => {
   const eventId = "NN3eRzoZo80";
   const event = mapDatabaseEventRecord(

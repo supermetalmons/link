@@ -2417,6 +2417,7 @@ class Connection {
             };
       const requestPayload = {
         ...requestPayloadBase,
+        isSundayMons: options.isSundayMons === true,
         telegramAnnouncements: resolveEventTelegramAnnouncements(options),
       };
       const data = await createEventViaApi(

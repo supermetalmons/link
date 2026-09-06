@@ -21,6 +21,8 @@ const EVENT_URL_ROOT = "https://mons.link/event";
 const EVENT_STATUS_SCHEDULED = "scheduled";
 const EVENT_STATUS_ENDED = "ended";
 const EVENT_STATUS_DISMISSED = "dismissed";
+const SUNDAY_MONS_UPCOMING_HEADING = "join sunday mons";
+const DEFAULT_UPCOMING_HEADING = "upcoming event";
 
 const normalizeString = (value) =>
   typeof value === "string" && value.trim() !== "" ? value.trim() : "";
@@ -372,7 +374,14 @@ const buildEventSignature = (eventData, nowMs = Date.now()) => {
   });
 };
 
-const renderUpcomingMessage = (eventId, eventData, nowMs = Date.now()) => {
+const renderUpcomingMessage = (
+  eventId,
+  eventData,
+  nowMs = Date.now(),
+  heading = eventData?.isSundayMons === true
+    ? SUNDAY_MONS_UPCOMING_HEADING
+    : DEFAULT_UPCOMING_HEADING,
+) => {
   const status = normalizeString(eventData && eventData.status);
   const startAtMs = normalizePositiveNumberOrNull(
     eventData && eventData.startAtMs,
@@ -381,7 +390,7 @@ const renderUpcomingMessage = (eventId, eventData, nowMs = Date.now()) => {
     return null;
   }
   const lines = [
-    "join sunday mons",
+    heading,
     "",
     `${EVENT_URL_ROOT}/${eventId}`,
     "",
@@ -551,24 +560,40 @@ const buildEndedState = (eventId, eventData, resultsByKey = {}) => {
 const hashProjection = (value) =>
   crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
+const parseUpcomingHeading = (text) => {
+  const heading = normalizeText(text).split("\n", 1)[0];
+  return heading === SUNDAY_MONS_UPCOMING_HEADING ||
+    heading === DEFAULT_UPCOMING_HEADING
+    ? heading
+    : "";
+};
+
 const parseUpcomingMessage = (eventId, raw) => {
   const value = raw && typeof raw === "object" ? raw : {};
   const matchesTarget = (record) =>
     record &&
     record.instanceKey === `event:${eventId}:upcoming:v2` &&
     record.destination === "community";
-  return {
-    hasAppliedMessage: Boolean(
-      matchesTarget(value.applied) &&
-      Number.isSafeInteger(value.applied.messageId) &&
-      value.applied.messageId > 0,
-    ),
-    desiredText:
-      matchesTarget(value.desired) &&
-      (value.desired.operation === "send" || value.desired.operation === "edit")
-        ? normalizeText(value.desired.text)
-        : "",
-  };
+  const hasAppliedMessage = Boolean(
+    matchesTarget(value.applied) &&
+    Number.isSafeInteger(value.applied.messageId) &&
+    value.applied.messageId > 0,
+  );
+  const desiredText =
+    matchesTarget(value.desired) &&
+    (value.desired.operation === "send" || value.desired.operation === "edit")
+      ? normalizeText(value.desired.text)
+      : "";
+  const confirmedDesiredText =
+    hasAppliedMessage &&
+    desiredText &&
+    ((normalizeString(value.applied.contentHash) &&
+      value.applied.contentHash === value.desired.contentHash) ||
+      (normalizeString(value.applied.revision) &&
+        value.applied.revision === value.desired.revision))
+      ? desiredText
+      : "";
+  return { hasAppliedMessage, desiredText, confirmedDesiredText };
 };
 
 const buildDesiredOperation = ({
@@ -578,9 +603,10 @@ const buildDesiredOperation = ({
   desiredText,
   active,
   allowSend = true,
+  hasAppliedMessage = false,
 }) => {
   if (desiredText) {
-    const edit = Boolean(previousText || !allowSend);
+    const edit = Boolean(previousText || hasAppliedMessage || !allowSend);
     return {
       operation: edit ? "edit" : "send",
       channel,
@@ -622,8 +648,17 @@ const buildEventTelegramProjection = ({
   const upcoming = parseUpcomingMessage(normalizedEventId, upcomingMessage);
   const upcomingEnabled = announcements.invite || upcoming.hasAppliedMessage;
   const previousUpcomingText =
+    upcoming.confirmedDesiredText ||
     state.upcomingText ||
-    (status !== EVENT_STATUS_SCHEDULED ? upcoming.desiredText : "");
+    (upcoming.hasAppliedMessage || status !== EVENT_STATUS_SCHEDULED
+      ? upcoming.desiredText
+      : "");
+  const upcomingHeading = upcoming.hasAppliedMessage
+    ? parseUpcomingHeading(upcoming.confirmedDesiredText) ||
+      parseUpcomingHeading(state.upcomingText) ||
+      parseUpcomingHeading(upcoming.desiredText) ||
+      SUNDAY_MONS_UPCOMING_HEADING
+    : undefined;
   const matchesActive = announcements.matches && active;
   const endedAnnouncementArmed =
     state.endedAnnouncementArmed || (announcements.results && active);
@@ -633,7 +668,12 @@ const buildEventTelegramProjection = ({
     state.endedAnnouncementArmed;
   const upcomingText =
     active && upcomingEnabled
-      ? renderUpcomingMessage(normalizedEventId, eventData, nowMs)
+      ? renderUpcomingMessage(
+          normalizedEventId,
+          eventData,
+          nowMs,
+          upcomingHeading,
+        )
       : null;
   const startedState = matchesActive
     ? buildStartedState(normalizedEventId, eventData, state)
@@ -672,6 +712,7 @@ const buildEventTelegramProjection = ({
       desiredText: upcomingText,
       active: Boolean(upcomingText),
       allowSend: announcements.invite,
+      hasAppliedMessage: upcoming.hasAppliedMessage,
     }),
     buildDesiredOperation({
       channel: "started",

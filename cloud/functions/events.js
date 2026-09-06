@@ -191,6 +191,7 @@ const createEventRuntime = (dependencies) => {
     creatorUid,
     startAtMs,
     createdAtMs,
+    isSundayMons,
     telegramAnnouncements,
   }) => {
     const creatorParticipant = buildParticipantSnapshot(
@@ -205,6 +206,7 @@ const createEventRuntime = (dependencies) => {
       createdAtMs,
       updatedAtMs: createdAtMs,
       startAtMs,
+      isSundayMons,
       telegramAnnouncements,
       telegramDeliveryVersion: 2,
       startedAtMs: null,
@@ -300,6 +302,15 @@ const createEventRuntime = (dependencies) => {
     const createdAtMs = getNowMs();
     const requestData =
       request.data && typeof request.data === "object" ? request.data : {};
+    if (
+      Object.hasOwn(requestData, "isSundayMons") &&
+      typeof requestData.isSundayMons !== "boolean"
+    ) {
+      throw new HttpsError(
+        "invalid-argument",
+        "Sunday Mons must be a boolean.",
+      );
+    }
     const telegramAnnouncements =
       resolveEventTelegramAnnouncements(requestData);
     let startAtMs = 0;
@@ -332,6 +343,7 @@ const createEventRuntime = (dependencies) => {
       creatorUid: request.auth.uid,
       startAtMs,
       createdAtMs,
+      isSundayMons: requestData.isSundayMons === true,
       telegramAnnouncements,
     });
 

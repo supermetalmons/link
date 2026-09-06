@@ -78,6 +78,7 @@ export function renderUpcomingMessage(
   eventId: string,
   eventData: unknown,
   nowMs?: number,
+  heading?: "join sunday mons" | "upcoming event",
 ): string | null;
 export function renderStartedMessage(
   eventId: string,

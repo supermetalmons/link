@@ -263,6 +263,23 @@ const project = (eventData, state = null, nowMs = NOW_MS, upcomingMessage) =>
 const operationFor = (projection, channel) =>
   projection.operations.find((operation) => operation.channel === channel);
 
+const publishedUpcomingMessage = (projection) => {
+  const desired = buildEventTelegramProjectionUpdates({
+    eventId: EVENT_ID,
+    projection,
+  })[`telegramMessages/event:${EVENT_ID}:upcoming/desired`];
+  return {
+    desired,
+    applied: {
+      destination: desired.destination,
+      instanceKey: desired.instanceKey,
+      messageId: 42,
+      contentHash: desired.contentHash,
+      revision: desired.revision,
+    },
+  };
+};
+
 const clone = (value) =>
   value === undefined ? undefined : structuredClone(value);
 
@@ -448,6 +465,7 @@ const expectProjectionError = async (operation, code) => {
 
 test("renders the exact upcoming template with DST-aware times and UTC date", () => {
   const eventData = buildEvent({
+    isSundayMons: true,
     participants: {
       bob: {
         profileId: "bob",
@@ -488,13 +506,171 @@ test("omits the date and participant line when they are not applicable", () => {
       NOW_MS,
     ),
     [
-      "join sunday mons",
+      "upcoming event",
       "",
       "https://mons.link/event/EV2026",
       "",
       "10 AM PT / 1 PM ET / 5 PM UTC",
     ].join("\n"),
   );
+});
+
+test("only an explicit Sunday Mons flag selects the Sunday heading", () => {
+  for (const isSundayMons of [true, false, undefined, null, "true", 1]) {
+    const projection = project(buildEvent({ isSundayMons }));
+    assert.equal(
+      operationFor(projection, "upcoming").text.split("\n", 1)[0],
+      isSundayMons === true ? "join sunday mons" : "upcoming event",
+    );
+  }
+});
+
+test("published headings survive flag changes and ordinary event edits", async (t) => {
+  for (const isSundayMons of [true, false]) {
+    await t.test(String(isSundayMons), () => {
+      const eventData = buildEvent({ isSundayMons });
+      const first = project(eventData);
+      const message = publishedUpcomingMessage(first);
+      const changedType = { ...eventData, isSundayMons: !isSundayMons };
+      assert.equal(
+        project(changedType, first.state, NOW_MS, message).action,
+        "unchanged",
+      );
+      const changedEvent = {
+        ...changedType,
+        startAtMs: START_AT_MS + 30 * 60_000,
+        participants: {
+          ...eventData.participants,
+          bob: { profileId: "bob", username: "Bob", joinedAtMs: 200 },
+        },
+      };
+      const edited = project(changedEvent, first.state, NOW_MS, message);
+      const operation = operationFor(edited, "upcoming");
+      assert.equal(operation.operation, "edit");
+      assert.equal(
+        operation.text.split("\n", 1)[0],
+        isSundayMons ? "join sunday mons" : "upcoming event",
+      );
+      assert.match(operation.text, /10:30 AM PT \/ 1:30 PM ET \/ 5:30 PM UTC/);
+      assert.match(operation.text, /&lt;Alice&gt; Bob$/);
+      assert.equal(
+        project(changedEvent, edited.state, NOW_MS, message).action,
+        "unchanged",
+      );
+    });
+  }
+});
+
+test("backfilling a legacy published event does not create Telegram work", () => {
+  const legacy = project(buildEvent({ isSundayMons: true }));
+  const message = publishedUpcomingMessage(legacy);
+  assert.equal(
+    project(buildEvent(), legacy.state, NOW_MS, message).action,
+    "unchanged",
+  );
+  assert.equal(
+    project(buildEvent({ isSundayMons: true }), legacy.state, NOW_MS, message)
+      .action,
+    "unchanged",
+  );
+});
+
+test("an unsent invitation adopts the current event type", () => {
+  const pending = project(buildEvent({ isSundayMons: true }));
+  const { desired } = publishedUpcomingMessage(pending);
+  const next = project(buildEvent(), pending.state, NOW_MS, { desired });
+  const operation = operationFor(next, "upcoming");
+  assert.equal(operation.text.split("\n", 1)[0], "upcoming event");
+  assert.equal(operation.ifMissing, "send");
+});
+
+test("published desired text restores missing projection state with an edit", () => {
+  const original = project(buildEvent({ isSundayMons: true }));
+  const message = publishedUpcomingMessage(original);
+  const recovered = project(buildEvent(), null, NOW_MS, message);
+  const operation = operationFor(recovered, "upcoming");
+  assert.equal(operation.operation, "edit");
+  assert.equal(operation.text, message.desired.text);
+  assert.equal(
+    project(buildEvent(), recovered.state, NOW_MS, message).action,
+    "unchanged",
+  );
+});
+
+test("a confirmed desired heading wins over stale projection state", () => {
+  const stale = project(buildEvent({ isSundayMons: true }));
+  const sent = project(buildEvent());
+  const message = publishedUpcomingMessage(sent);
+  for (const confirmation of ["contentHash", "revision"]) {
+    const applied = {
+      destination: message.applied.destination,
+      instanceKey: message.applied.instanceKey,
+      messageId: message.applied.messageId,
+      [confirmation]: message.applied[confirmation],
+    };
+    const recovered = project(
+      buildEvent({ isSundayMons: true }),
+      stale.state,
+      NOW_MS,
+      { desired: message.desired, applied },
+    );
+    const operation = operationFor(recovered, "upcoming");
+    assert.equal(operation.operation, "edit");
+    assert.equal(operation.text, message.desired.text);
+  }
+});
+
+test("unconfirmed desired text cannot replace a published projection heading", () => {
+  const original = project(buildEvent({ isSundayMons: true }));
+  const pending = project(buildEvent());
+  const message = {
+    applied: publishedUpcomingMessage(original).applied,
+    desired: publishedUpcomingMessage(pending).desired,
+  };
+  assert.equal(
+    project(buildEvent(), original.state, NOW_MS, message).action,
+    "unchanged",
+  );
+  const recovered = project(
+    buildEvent({ isSundayMons: true }),
+    null,
+    NOW_MS,
+    message,
+  );
+  assert.equal(
+    operationFor(recovered, "upcoming").text.split("\n", 1)[0],
+    "upcoming event",
+  );
+});
+
+test("a legacy receipt without text preserves the Sunday heading", () => {
+  const { applied } = publishedUpcomingMessage(
+    project(buildEvent({ isSundayMons: true })),
+  );
+  const recovered = project(buildEvent(), null, NOW_MS, { applied });
+  const operation = operationFor(recovered, "upcoming");
+  assert.equal(operation.operation, "edit");
+  assert.equal(operation.text.split("\n", 1)[0], "join sunday mons");
+});
+
+test("invalid applied receipts do not preserve a queued Sunday heading", () => {
+  const pending = project(buildEvent({ isSundayMons: true }));
+  const message = publishedUpcomingMessage(pending);
+  for (const applied of [
+    {},
+    { ...message.applied, messageId: 0 },
+    { ...message.applied, destination: "events" },
+    { ...message.applied, instanceKey: "event:other:upcoming:v2" },
+  ]) {
+    const next = project(buildEvent(), pending.state, NOW_MS, {
+      desired: message.desired,
+      applied,
+    });
+    assert.equal(
+      operationFor(next, "upcoming").text.split("\n", 1)[0],
+      "upcoming event",
+    );
+  }
 });
 
 test("ignores Telegram-enabled v1 events without adopting them", () => {

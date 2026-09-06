@@ -46,6 +46,7 @@ export type EventTelegramAnnouncements = {
   results: boolean;
 };
 export type EventCreateOptions = {
+  isSundayMons?: boolean;
   announceOnTelegram?: boolean;
   telegramAnnouncements?: EventTelegramAnnouncements;
 };
@@ -67,6 +68,7 @@ export type SyncEventStateRequest = { eventId: string };
 export type EventApiRecord = Record<string, unknown> & {
   eventId: string;
   status: string;
+  isSundayMons?: boolean;
 };
 export type CreateEventResponse = {
   ok: true;

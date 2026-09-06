@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { LEGACY_CORE_PRIZES_EVENT_ID } from "@mons/shared/event-prizes";
-import type { EventCreateOptions } from "@mons/shared/events";
+import type {
+  CreateEventRequest,
+  EventCreateOptions,
+} from "@mons/shared/events";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import type { ProfileOwnershipSnapshot } from "../src/profileOwnership.ts";
@@ -429,6 +432,101 @@ test("persists independent Telegram preferences including all-off and legacy def
       state.patches[0][`events/${response.eventId}`],
       response.event,
     );
+  }
+});
+
+test("persists Sunday Mons independently of schedule and Telegram preferences through later mutations", async () => {
+  const schedules: CreateEventRequest[] = [
+    { startsInMinutes: 5 },
+    {
+      scheduledDate: "2026-09-07",
+      scheduledTime: "18:30",
+      scheduledTimezone: "ET",
+    },
+  ];
+  const options: EventCreateOptions[] = [
+    {},
+    { isSundayMons: false },
+    { isSundayMons: true },
+  ];
+  for (const schedule of schedules) {
+    for (const option of options) {
+      for (const announceOnTelegram of [false, true]) {
+        const state = createRepository();
+        const env = workflowEnvironment(() => undefined);
+        const dependencies = {
+          repository: state.repository,
+          now: () => Date.parse("2026-09-06T12:00:00Z"),
+          random: () => 0,
+          sleep: async () => undefined,
+        };
+        const response = await createEvent(
+          env,
+          identity,
+          { ...schedule, ...option, announceOnTelegram },
+          dependencies,
+        );
+        const expected = option.isSundayMons === true;
+        assert.equal(response.event.isSundayMons, expected);
+        assert.equal(
+          getPath(state.values, `events/${response.eventId}/isSundayMons`),
+          expected,
+        );
+        const postponed = await postponeEventStart(
+          env,
+          identity,
+          { eventId: response.eventId, postponeByMinutes: 5 },
+          dependencies,
+        );
+        assert.equal(postponed.event.isSundayMons, expected);
+        const synchronized = await syncEventState(
+          env,
+          identity,
+          { eventId: response.eventId },
+          { ...dependencies, now: () => postponed.startAtMs },
+        );
+        assert.ok("didChange" in synchronized && synchronized.didChange);
+        assert.equal(synchronized.event.status, "dismissed");
+        assert.equal(synchronized.event.isSundayMons, expected);
+        assert.equal(
+          getPath(state.values, `events/${response.eventId}/isSundayMons`),
+          expected,
+        );
+      }
+    }
+  }
+});
+
+test("rejects explicitly undefined Sunday Mons flags before creating a Workflow", async () => {
+  for (const schedule of [
+    { startsInMinutes: 5 },
+    {
+      scheduledDate: "2026-09-07",
+      scheduledTime: "18:30",
+      scheduledTimezone: "ET" as const,
+    },
+  ]) {
+    const state = createRepository();
+    let workflowCreates = 0;
+    await assert.rejects(
+      createEvent(
+        workflowEnvironment(() => workflowCreates++),
+        identity,
+        { ...schedule, isSundayMons: undefined },
+        {
+          repository: state.repository,
+          now: () => Date.parse("2026-09-06T12:00:00Z"),
+          random: () => 0,
+          sleep: async () => undefined,
+        },
+      ),
+      (error) =>
+        error instanceof AuthApiFailure &&
+        error.status === 400 &&
+        error.code === "invalid-argument",
+    );
+    assert.equal(workflowCreates, 0);
+    assert.deepEqual(state.patches, []);
   }
 });
 

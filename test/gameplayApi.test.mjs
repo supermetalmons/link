@@ -461,6 +461,81 @@ test("sends granular Telegram announcements with either event schedule", async (
   }
 });
 
+test("sends explicit Sunday Mons flags with either event schedule", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init) => {
+    const request = JSON.parse(init.body);
+    calls.push({ input: String(input), init });
+    return jsonResponse({
+      ok: true,
+      eventId: "event-1",
+      event: {
+        eventId: "event-1",
+        status: "scheduled",
+        isSundayMons: request.isSundayMons === true,
+      },
+    });
+  };
+  for (const schedule of [
+    { startsInMinutes: 5 },
+    {
+      scheduledDate: "2026-09-07",
+      scheduledTime: "18:30",
+      scheduledTimezone: "ET",
+    },
+  ]) {
+    for (const options of [
+      {},
+      { isSundayMons: false },
+      { isSundayMons: true },
+    ]) {
+      const request = { ...schedule, ...options };
+      assert.equal(isCreateEventRequest(request), true);
+      const response = await createEventViaApi(
+        request,
+        async () => "firebase-token",
+      );
+      assert.equal(response.event.isSundayMons, options.isSundayMons === true);
+      assert.deepEqual(JSON.parse(calls.at(-1).init.body), request);
+    }
+    for (const isSundayMons of [
+      undefined,
+      null,
+      "true",
+      "false",
+      0,
+      1,
+      [],
+      {},
+    ]) {
+      assert.equal(isCreateEventRequest({ ...schedule, isSundayMons }), false);
+    }
+  }
+});
+
+test("validates optional Sunday Mons response flags while accepting legacy events", () => {
+  for (const options of [{}, { isSundayMons: false }, { isSundayMons: true }]) {
+    assert.equal(
+      isCreateEventResponse({
+        ok: true,
+        eventId: "event-1",
+        event: { eventId: "event-1", status: "scheduled", ...options },
+      }),
+      true,
+    );
+  }
+  for (const isSundayMons of [undefined, null, "true", 0, [], {}]) {
+    assert.equal(
+      isCreateEventResponse({
+        ok: true,
+        eventId: "event-1",
+        event: { eventId: "event-1", status: "scheduled", isSundayMons },
+      }),
+      false,
+    );
+  }
+});
+
 test("validates complete Telegram preferences and preserves legacy request compatibility", () => {
   const allOff = { invite: false, matches: false, results: false };
   const allOn = { invite: true, matches: true, results: true };

@@ -241,6 +241,7 @@ export const mapDatabaseEventRecord = (
       rawData.status === "dismissed"
         ? rawData.status
         : "scheduled",
+    isSundayMons: rawData.isSundayMons === true,
     createdAtMs: normalizeFiniteNumber(rawData.createdAtMs, 0),
     updatedAtMs: normalizeFiniteNumber(rawData.updatedAtMs, 0),
     startAtMs: normalizeFiniteNumber(rawData.startAtMs, 0),

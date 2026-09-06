@@ -1,4 +1,5 @@
 import { resolveEventTelegramAnnouncements } from "@mons/shared/events";
+import { buildTelegramEditDesired } from "../../../functions/telegram/desiredStateCore.js";
 import {
   EVENT_TELEGRAM_PROJECTION_GUARD_FIELD,
   EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
@@ -149,7 +150,8 @@ async function commitFencedDesiredUpdate(
   path: string,
   value: unknown,
   generation: number,
-): Promise<boolean> {
+  expectedApplied?: Record<string, unknown>,
+): Promise<boolean | "deferred"> {
   const prefix = "telegramMessages/";
   const suffix = "/desired";
   const messageKey =
@@ -162,12 +164,63 @@ async function commitFencedDesiredUpdate(
     if (persistedProjectionGeneration(record.desired) > generation) {
       return { commit: false, decision: "newer-projection" };
     }
+    if (expectedApplied) {
+      const desired = asObject(value);
+      const delivery = asObject(record.delivery);
+      const abandoned = asObject(delivery.abandonedSend);
+      if (
+        delivery.status === "terminal" &&
+        asObject(delivery.lastError).code === "manually-abandoned" &&
+        abandoned.destination === desired.destination &&
+        abandoned.instanceKey === desired.instanceKey
+      ) {
+        return { commit: false, decision: "abandoned" };
+      }
+      const applied = asObject(record.applied);
+      if (
+        delivery.sendInFlight ||
+        [
+          "destination",
+          "instanceKey",
+          "messageId",
+          "contentHash",
+          "revision",
+        ].some((key) => applied[key] !== expectedApplied[key])
+      ) {
+        const previousDesired = asObject(record.desired);
+        if (
+          desired.operation === "edit" &&
+          desired.ifMissing === "skip" &&
+          previousDesired.destination === desired.destination &&
+          previousDesired.instanceKey === desired.instanceKey
+        ) {
+          return {
+            value: {
+              ...record,
+              desired: {
+                ...buildTelegramEditDesired({
+                  ...previousDesired,
+                  ifMissing: "skip",
+                  sourceRevision: desired.sourceRevision,
+                }),
+                [EVENT_TELEGRAM_PROJECTION_GUARD_FIELD]:
+                  desired[EVENT_TELEGRAM_PROJECTION_GUARD_FIELD],
+              },
+            },
+            decision: "delivery-changed",
+          };
+        }
+        return { commit: false, decision: "delivery-changed" };
+      }
+    }
     return {
       value: { ...record, desired: value },
       decision: "projection-committed",
     };
   });
-  return result.committed === true;
+  return result.decision === "delivery-changed"
+    ? "deferred"
+    : result.committed === true;
 }
 
 export async function processEventProjectionTask(
@@ -254,14 +307,25 @@ export async function processEventProjectionTask(
         throw new Error("event-telegram-lock-lost");
       }
     };
+    let upcomingDeferred = false;
     if (Object.keys(desiredUpdates).length > 0) {
       await refreshLock();
       const committedDesiredUpdates: Record<string, unknown> = {};
       for (const [path, value] of Object.entries(desiredUpdates)) {
         const committed = telegram
-          ? await commitFencedDesiredUpdate(telegram, path, value, generation)
+          ? await commitFencedDesiredUpdate(
+              telegram,
+              path,
+              value,
+              generation,
+              path === `telegramMessages/${upcomingMessageKey}/desired`
+                ? asObject(asObject(upcomingMessage).applied)
+                : undefined,
+            )
           : await commitFencedProjectionUpdate(rtdb, path, value, generation);
-        if (committed) {
+        if (committed === "deferred") {
+          upcomingDeferred = true;
+        } else if (committed) {
           committedDesiredUpdates[path] = value;
         }
       }
@@ -279,13 +343,23 @@ export async function processEventProjectionTask(
       );
     }
     await refreshLock();
-    const stateEntries = Object.entries(stateUpdates);
+    const [statePath, projectedState] = Object.entries(stateUpdates)[0];
     const stateCommitted = await commitFencedProjectionUpdate(
       rtdb,
-      stateEntries[0][0],
-      stateEntries[0][1],
+      statePath,
+      upcomingDeferred
+        ? {
+            ...asObject(projectedState),
+            upcomingText:
+              typeof state.upcomingText === "string" ? state.upcomingText : "",
+            lastProjectedSignature: "",
+          }
+        : projectedState,
       generation,
     );
+    if (upcomingDeferred) {
+      throw new Error("event-telegram-delivery-changed");
+    }
     await settleEventOutbox(rtdb, task);
     return stateCommitted ? "projected" : "superseded";
   } finally {

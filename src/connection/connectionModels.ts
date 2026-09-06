@@ -178,6 +178,7 @@ export type EventPrizeWithdrawalResponse =
 export interface EventRecord {
   schemaVersion: number;
   eventId: string;
+  isSundayMons: boolean;
   status: EventStatus;
   createdAtMs: number;
   updatedAtMs: number;

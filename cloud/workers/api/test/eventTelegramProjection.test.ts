@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {
+  createTelegramDeliveryEngine,
+  createTelegramLocalRetryBarrier,
+} from "../../../functions/telegram/deliveryEngine.js";
+import { buildTelegramSendDesired } from "../../../functions/telegram/desiredStateCore.js";
+import {
+  buildEventTelegramProjection,
+  buildEventTelegramProjectionUpdates,
+} from "../../../functions/telegram/eventProjectionCore.js";
 import { createTelegramRepository } from "../../../functions/telegram/repositoryCore.js";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
 import {
@@ -151,6 +160,603 @@ test("missing events clear work without creating Telegram messages", async () =>
     state.read(getEventTelegramProjectionOutboxPath(task.eventId)),
     null,
   );
+});
+
+test("a published heading survives a failed projection commit and later flag changes", async () => {
+  const state = store({
+    [getEventTelegramProjectionOutboxPath(task.eventId)]: marker,
+    "events/event-1": { ...scheduledEvent(), isSundayMons: true },
+  });
+  const messagePath = "telegramMessages/event:event-1:upcoming";
+  const messages = store({});
+  const telegram = createTelegramRepository({
+    getPath: messages.client.getPath,
+    transactPath: messages.client.transactPath,
+  });
+  const now = () => Date.UTC(2026, 7, 25, 12);
+  await processEventProjectionTask(
+    task,
+    state.client,
+    ratingRepository(),
+    async () => undefined,
+    now,
+    telegram,
+  );
+  const staleProjection = state.read("eventTelegramProjections/event-1") as {
+    upcomingText: string;
+  };
+  assert.match(staleProjection.upcomingText, /^join sunday mons\n/);
+  state.write("events/event-1", { ...scheduledEvent(), isSundayMons: false });
+  state.write(getEventTelegramProjectionOutboxPath(task.eventId), marker);
+  await assert.rejects(
+    processEventProjectionTask(
+      task,
+      state.client,
+      ratingRepository(),
+      async () => {
+        const message = messages.read(messagePath) as {
+          desired: {
+            destination: string;
+            instanceKey: string;
+            contentHash: string;
+            revision: string;
+            text: string;
+          };
+        };
+        assert.match(message.desired.text, /^upcoming event\n/);
+        messages.write(messagePath, {
+          ...message,
+          applied: {
+            destination: message.desired.destination,
+            instanceKey: message.desired.instanceKey,
+            contentHash: message.desired.contentHash,
+            revision: message.desired.revision,
+            messageId: 42,
+          },
+        });
+        throw new Error("delivery-queue-acknowledgement-lost");
+      },
+      now,
+      telegram,
+    ),
+    /delivery-queue-acknowledgement-lost/,
+  );
+  assert.deepEqual(
+    state.read("eventTelegramProjections/event-1"),
+    staleProjection,
+  );
+  state.write("events/event-1", { ...scheduledEvent(), isSundayMons: true });
+  let deliveries = 0;
+  assert.equal(
+    await processEventProjectionTask(
+      task,
+      state.client,
+      ratingRepository(),
+      async () => void deliveries++,
+      now,
+      telegram,
+    ),
+    "projected",
+  );
+  const recovered = messages.read(messagePath) as {
+    desired: { operation: string; text: string };
+  };
+  assert.equal(recovered.desired.operation, "edit");
+  assert.match(recovered.desired.text, /^upcoming event\n/);
+  assert.equal(deliveries, 1);
+  state.write("events/event-1", { ...scheduledEvent(), isSundayMons: false });
+  state.write(getEventTelegramProjectionOutboxPath(task.eventId), marker);
+  assert.equal(
+    await processEventProjectionTask(
+      task,
+      state.client,
+      ratingRepository(),
+      async () => void deliveries++,
+      now,
+      telegram,
+    ),
+    "unchanged",
+  );
+  assert.equal(deliveries, 1);
+});
+
+test("a legacy send racing projection retains its heading and retries participant updates", async (t) => {
+  const now = () => Date.UTC(2026, 7, 25, 12);
+  const messagePath = "telegramMessages/event:event-1:upcoming";
+  const projectionPath = "eventTelegramProjections/event-1";
+  const outboxPath = getEventTelegramProjectionOutboxPath(task.eventId);
+  const legacyProjection = buildEventTelegramProjection({
+    eventId: task.eventId,
+    eventData: { ...scheduledEvent(), isSundayMons: true },
+    nowMs: now(),
+  });
+  assert.equal(legacyProjection.action, "project");
+  const desired = buildEventTelegramProjectionUpdates({
+    eventId: task.eventId,
+    projection: legacyProjection,
+  })[`${messagePath}/desired`] as {
+    destination: string;
+    instanceKey: string;
+    contentHash: string;
+    revision: string;
+    text: string;
+  };
+  const deliveryIdentity = {
+    destination: desired.destination,
+    instanceKey: desired.instanceKey,
+    contentHash: desired.contentHash,
+    revision: desired.revision,
+  };
+  const applied = { ...deliveryIdentity, messageId: 42 };
+  const sending = {
+    desired,
+    delivery: {
+      sendInFlight: {
+        ...deliveryIdentity,
+        attemptId: "send-1",
+        chatId: "community-chat",
+        startedAtMs: now(),
+      },
+    },
+  };
+  const delivered = { desired, applied, delivery: { status: "delivered" } };
+
+  for (const race of [
+    "already sending",
+    "starts before commit",
+    "finishes before commit",
+    "finishes during transaction replay",
+  ]) {
+    await t.test(race, async () => {
+      const state = store({
+        [outboxPath]: marker,
+        [projectionPath]: legacyProjection.state,
+        "events/event-1": {
+          ...scheduledEvent(),
+          isSundayMons: false,
+          participants: {
+            alice: { username: "Alice", joinedAtMs: 1 },
+            bob: { username: "Bob", joinedAtMs: 2 },
+          },
+        },
+      });
+      const messages = store({
+        [messagePath]: race === "already sending" ? sending : { desired },
+      });
+      let interruptCommit = race !== "already sending";
+      const telegram = createTelegramRepository({
+        getPath: messages.client.getPath,
+        transactPath: async (path, updater) => {
+          if (path === messagePath && interruptCommit) {
+            interruptCommit = false;
+            if (race === "finishes during transaction replay") {
+              updater(messages.read(path));
+            }
+            messages.write(
+              path,
+              race === "starts before commit" ? sending : delivered,
+            );
+          }
+          return messages.client.transactPath(path, updater);
+        },
+      });
+      let deliveries = 0;
+      const project = () =>
+        processEventProjectionTask(
+          task,
+          state.client,
+          ratingRepository(),
+          async () => void deliveries++,
+          now,
+          telegram,
+        );
+
+      await assert.rejects(project(), /event-telegram-delivery-changed/);
+      assert.deepEqual(
+        messages.read(messagePath),
+        race === "already sending" || race === "starts before commit"
+          ? sending
+          : delivered,
+      );
+      const deferred = state.read(projectionPath) as {
+        upcomingText: string;
+        lastProjectedSignature: string;
+      };
+      assert.equal(deferred.upcomingText, legacyProjection.state.upcomingText);
+      assert.equal(deferred.lastProjectedSignature, "");
+      assert.deepEqual(state.read(outboxPath), marker);
+      assert.equal(state.read("eventTelegramProjectionLocks/event-1"), null);
+      assert.equal(deliveries, 0);
+
+      messages.write(messagePath, delivered);
+      assert.equal(await project(), "projected");
+      const recovered = messages.read(messagePath) as {
+        applied: typeof applied;
+        desired: { operation: string; text: string };
+      };
+      assert.deepEqual(recovered.applied, applied);
+      assert.equal(recovered.desired.operation, "edit");
+      assert.match(recovered.desired.text, /^join sunday mons\n/);
+      assert.match(recovered.desired.text, /Alice Bob$/);
+      assert.equal(state.read(outboxPath), null);
+      assert.equal(deliveries, 1);
+
+      state.write(outboxPath, marker);
+      assert.equal(await project(), "unchanged");
+      assert.equal(deliveries, 1);
+    });
+  }
+});
+
+test("uncertain invites preserve lifecycle and manual recovery decisions", async (t) => {
+  const scenarios = [
+    {
+      name: "confirmed applied after lifecycle announcements",
+      statuses: ["active", "active", "ended"],
+      action: "confirm-send-applied",
+    },
+    {
+      name: "confirmed absent after starting",
+      statuses: ["active"],
+      action: "confirm-send-absent",
+    },
+    {
+      name: "confirmed absent after ending",
+      statuses: ["active", "ended"],
+      action: "confirm-send-absent",
+    },
+    {
+      name: "confirmed absent after dismissal",
+      statuses: ["dismissed"],
+      action: "confirm-send-absent",
+    },
+    {
+      name: "confirmed absent while scheduled",
+      statuses: ["scheduled"],
+      action: "confirm-send-absent",
+    },
+    {
+      name: "abandoned after a deferred participant update",
+      statuses: ["scheduled"],
+      action: "abandon",
+    },
+  ];
+  for (const scenario of scenarios) {
+    for (const loseInitialProjection of [false, true]) {
+      await t.test(
+        `${scenario.name}, ${loseInitialProjection ? "missing" : "persisted"} projection state`,
+        async () => {
+          const outboxPath = getEventTelegramProjectionOutboxPath(task.eventId);
+          const projectionPath = "eventTelegramProjections/event-1";
+          const upcomingKey = "event:event-1:upcoming";
+          const upcomingPath = `telegramMessages/${upcomingKey}`;
+          const event = {
+            ...scheduledEvent(),
+            isSundayMons: false,
+            participants: {
+              alice: { username: "Alice", joinedAtMs: 1 },
+              bob: { username: "Bob", joinedAtMs: 2 },
+            },
+          };
+          const state = store({
+            [outboxPath]: marker,
+            "events/event-1": event,
+          });
+          const messages = store({});
+          const telegram = createTelegramRepository(messages.client);
+          const now = () => Date.UTC(2026, 7, 25, 12);
+          const pending: Array<{ messageKey: string; revision: string }> = [];
+          let failInitialEnqueue = loseInitialProjection;
+          const project = () =>
+            processEventProjectionTask(
+              task,
+              state.client,
+              ratingRepository(),
+              async (input) => {
+                pending.push(input);
+                if (failInitialEnqueue) {
+                  failInitialEnqueue = false;
+                  throw new Error("delivery-queue-acknowledgement-lost");
+                }
+              },
+              now,
+              telegram,
+            );
+          const sentTexts: string[] = [];
+          const editedTexts: string[] = [];
+          let attemptId = 0;
+          const engine = createTelegramDeliveryEngine({
+            repository: telegram,
+            now,
+            createOwnerToken: () => "owner-1",
+            createAttemptId: () => `attempt-${++attemptId}`,
+            resolveDestination: () => "community-chat",
+            scheduleRetry: async () => ({ scheduled: true }),
+            localRetryBarrier: createTelegramLocalRetryBarrier(),
+            logger: { error() {}, info() {} },
+            client: {
+              async sendTelegramMessage({ text }) {
+                sentTexts.push(String(text));
+                return sentTexts.length === 1
+                  ? {
+                      ok: false,
+                      classification: "uncertain",
+                      code: "timeout",
+                      description: "timeout",
+                      httpStatus: null,
+                      retryAfterSeconds: null,
+                    }
+                  : {
+                      ok: true,
+                      outcome: "sent",
+                      httpStatus: 200,
+                      messageId: 100 + sentTexts.length,
+                    };
+              },
+              async editTelegramMessage({ text }) {
+                editedTexts.push(String(text));
+                return { ok: true, outcome: "edited", httpStatus: 200 };
+              },
+              async deleteTelegramMessage() {
+                throw new Error("unexpected-delete");
+              },
+            },
+          });
+          const deliver = async (expectedStatuses: string[]) => {
+            for (const input of pending.splice(0)) {
+              const result = await engine.reconcile({
+                messageKey: input.messageKey,
+                requestedRevision: input.revision,
+              });
+              assert.ok(
+                expectedStatuses.includes(result.status),
+                `${input.messageKey}: ${result.status}`,
+              );
+            }
+          };
+          type InviteMessage = {
+            desired: {
+              operation: string;
+              ifMissing?: string;
+              text: string;
+              revision: string;
+              contentHash: string;
+              destination: string;
+              instanceKey: string;
+            };
+            applied?: { messageId: number };
+            delivery: {
+              status: string;
+              sendInFlight?: unknown;
+              abandonedSend?: unknown;
+            };
+          };
+          const readInvite = () => messages.read(upcomingPath) as InviteMessage;
+
+          if (loseInitialProjection) {
+            await assert.rejects(
+              project(),
+              /delivery-queue-acknowledgement-lost/,
+            );
+            assert.equal(state.read(projectionPath), null);
+          } else {
+            assert.equal(await project(), "projected");
+          }
+          assert.equal(pending.length, 1);
+          await deliver(["uncertain"]);
+          const uncertain = structuredClone(readInvite());
+          assert.equal(uncertain.delivery.status, "uncertain");
+          assert.ok(uncertain.delivery.sendInFlight);
+          assert.equal(
+            (messages.read("telegramDeliveryControl") as { apiGate?: unknown })
+              .apiGate,
+            undefined,
+          );
+          const rounds = {
+            0: {
+              roundIndex: 0,
+              matches: {
+                "0_0": {
+                  inviteId: "match-1",
+                  status: "pending",
+                  hostProfileId: "alice",
+                  guestProfileId: "bob",
+                  hostLoginUid: "alice-login",
+                  guestLoginUid: "bob-login",
+                },
+              },
+            },
+          };
+          const updatedParticipants = {
+            ...event.participants,
+            carol: { username: "Carol", joinedAtMs: 3 },
+          };
+          for (const status of scenario.statuses) {
+            state.write("events/event-1", {
+              ...event,
+              status,
+              rounds: status === "scheduled" ? {} : rounds,
+              participants: updatedParticipants,
+            });
+            state.write(outboxPath, marker);
+            await assert.rejects(project(), /event-telegram-delivery-changed/);
+            assert.ok(
+              pending.every(({ messageKey }) => messageKey !== upcomingKey),
+            );
+            await deliver(["delivered", "settled"]);
+            const deferred = readInvite();
+            assert.deepEqual(deferred.delivery, uncertain.delivery);
+            assert.equal(deferred.desired.text, uncertain.desired.text);
+            assert.equal(
+              deferred.desired.contentHash,
+              uncertain.desired.contentHash,
+            );
+            assert.equal(
+              deferred.desired.destination,
+              uncertain.desired.destination,
+            );
+            assert.equal(
+              deferred.desired.instanceKey,
+              uncertain.desired.instanceKey,
+            );
+            if (status === "scheduled") {
+              assert.deepEqual(deferred, uncertain);
+            } else {
+              assert.equal(deferred.desired.operation, "edit");
+              assert.equal(deferred.desired.ifMissing, "skip");
+            }
+            assert.deepEqual(state.read(outboxPath), marker);
+            assert.equal(
+              state.read("eventTelegramProjectionLocks/event-1"),
+              null,
+            );
+            const progress = state.read(projectionPath) as {
+              startedText: string;
+              endedText: string;
+              endedAnnouncementArmed: boolean;
+            };
+            if (status === "active" || status === "ended") {
+              assert.match(progress.startedText, /^event started\n/);
+              assert.equal(progress.endedAnnouncementArmed, true);
+            }
+            if (status === "ended") {
+              assert.match(progress.endedText, /^event ended\n/);
+            }
+          }
+          const expectedHeadings = [
+            "upcoming event",
+            ...(scenario.statuses.includes("active") ? ["event started"] : []),
+            ...(scenario.statuses.includes("ended") ? ["event ended"] : []),
+          ];
+          assert.deepEqual(
+            sentTexts.map((text) => text.split("\n", 1)[0]),
+            expectedHeadings,
+          );
+
+          const beforeRecovery = structuredClone(readInvite());
+          messages.write(upcomingPath, {
+            ...beforeRecovery,
+            manualRecovery: {
+              requestId: "recovery-1",
+              action: scenario.action,
+              ...(scenario.action === "confirm-send-applied"
+                ? { messageId: 42 }
+                : {}),
+            },
+          });
+          const recovery = await engine.reconcile({ messageKey: upcomingKey });
+          assert.equal(
+            recovery.status,
+            scenario.action === "abandon" ? "terminal" : "delivered",
+          );
+          const stillScheduled = scenario.statuses.at(-1) === "scheduled";
+          if (scenario.action === "confirm-send-absent" && !stillScheduled) {
+            assert.equal(recovery.reason, "missing-skipped");
+          }
+          assert.equal(await project(), "projected");
+          await deliver(["delivered", "settled"]);
+          const recovered = readInvite();
+          assert.equal(recovered.delivery.sendInFlight, undefined);
+          assert.equal(state.read(outboxPath), null);
+          if (scenario.action === "abandon") {
+            assert.deepEqual(recovered.desired, beforeRecovery.desired);
+            assert.equal(recovered.delivery.status, "terminal");
+            assert.ok(recovered.delivery.abandonedSend);
+            assert.equal(
+              (await engine.reconcile({ messageKey: upcomingKey })).status,
+              "settled",
+            );
+            const participantsAfterAbandon = {
+              ...updatedParticipants,
+              dave: { username: "Dave", joinedAtMs: 4 },
+            };
+            state.write("events/event-1", {
+              ...event,
+              participants: participantsAfterAbandon,
+            });
+            state.write(outboxPath, marker);
+            assert.equal(await project(), "projected");
+            assert.equal(pending.length, 0);
+            assert.deepEqual(readInvite(), recovered);
+            assert.equal(state.read(outboxPath), null);
+            assert.equal(
+              (await engine.reconcile({ messageKey: upcomingKey })).status,
+              "settled",
+            );
+            assert.equal(sentTexts.length, 1);
+            assert.deepEqual(editedTexts, []);
+
+            messages.write(upcomingPath, {
+              ...readInvite(),
+              desired: buildTelegramSendDesired({
+                ...recovered.desired,
+                sourceRevision: "admin-resend-1",
+              }),
+            });
+            assert.equal(
+              (await engine.reconcile({ messageKey: upcomingKey })).status,
+              "delivered",
+            );
+            const resent = readInvite();
+            assert.equal(resent.delivery.status, "delivered");
+            assert.equal(resent.applied?.messageId, 102);
+            assert.deepEqual(
+              resent.delivery.abandonedSend,
+              recovered.delivery.abandonedSend,
+            );
+            expectedHeadings.push("upcoming event");
+            state.write("events/event-1", {
+              ...event,
+              participants: {
+                ...participantsAfterAbandon,
+                erin: { username: "Erin", joinedAtMs: 5 },
+              },
+            });
+            state.write(outboxPath, marker);
+            assert.equal(await project(), "projected");
+            assert.equal(pending.length, 1);
+            assert.equal(pending[0].messageKey, upcomingKey);
+            await deliver(["delivered"]);
+            const resumed = readInvite();
+            assert.equal(resumed.desired.operation, "edit");
+            assert.match(resumed.desired.text, /Alice Bob Carol Dave Erin$/);
+            assert.equal(resumed.applied?.messageId, resent.applied?.messageId);
+            assert.deepEqual(editedTexts, [resumed.desired.text]);
+            assert.deepEqual(
+              resumed.delivery.abandonedSend,
+              recovered.delivery.abandonedSend,
+            );
+            assert.equal(sentTexts.length, 2);
+            assert.equal(state.read(outboxPath), null);
+          } else {
+            assert.equal(recovered.desired.operation, "edit");
+            if (stillScheduled) {
+              expectedHeadings.push("upcoming event");
+              assert.match(recovered.desired.text, /Alice Bob Carol$/);
+              assert.deepEqual(editedTexts, [recovered.desired.text]);
+              assert.equal(recovered.applied?.messageId, 102);
+            } else {
+              assert.equal(recovered.desired.text, uncertain.desired.text);
+              assert.equal(
+                recovered.applied?.messageId,
+                scenario.action === "confirm-send-applied" ? 42 : undefined,
+              );
+            }
+          }
+          assert.deepEqual(
+            sentTexts.map((text) => text.split("\n", 1)[0]),
+            expectedHeadings,
+          );
+          if (!stillScheduled) {
+            assert.deepEqual(editedTexts, []);
+          }
+          state.write(outboxPath, marker);
+          assert.equal(await project(), "unchanged");
+          assert.equal(pending.length, 0);
+        },
+      );
+    }
+  }
 });
 
 test("a manual invite receipt unlocks an edit through the Telegram repository and retries safely", async () => {

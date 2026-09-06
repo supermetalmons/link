@@ -99,6 +99,7 @@ export const createStubEventRecord = ({
     return {
       schemaVersion: source?.schemaVersion ?? 1,
       eventId: sourceEventId || fallbackEventId?.trim() || "dev_stub_event",
+      isSundayMons: source?.isSundayMons === true,
       status: "scheduled",
       createdAtMs: source?.createdAtMs ?? nowMs - 60_000,
       updatedAtMs: nowMs,
@@ -243,6 +244,7 @@ export const createStubEventRecord = ({
   return {
     schemaVersion: source?.schemaVersion ?? 1,
     eventId: sourceEventId || fallbackEventId?.trim() || "dev_stub_event",
+    isSundayMons: source?.isSundayMons === true,
     status: "ended",
     createdAtMs: source?.createdAtMs ?? nowMs - (roundCount + 3) * 60_000,
     updatedAtMs: nowMs,

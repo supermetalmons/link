@@ -1450,6 +1450,7 @@ const MainMenu: React.FC = () => {
   );
   const [eventScheduledTimezone, setEventScheduledTimezone] =
     useState<EventScheduleTimezone>("local");
+  const [isSundayMons, setIsSundayMons] = useState(false);
   const [eventTelegramAnnouncements, setEventTelegramAnnouncements] =
     useState<EventTelegramAnnouncements>({
       invite: false,
@@ -1617,6 +1618,7 @@ const MainMenu: React.FC = () => {
     setEventScheduledDate(defaults.date);
     setEventScheduledTime(defaults.time);
     setEventScheduledTimezone("local");
+    setIsSundayMons(false);
     setEventTelegramAnnouncements({
       invite: false,
       matches: false,
@@ -1683,6 +1685,7 @@ const MainMenu: React.FC = () => {
     setShowExperimental(false);
     openEventModalPendingCreate();
     void createProfileEvent(createRequest, {
+      isSundayMons,
       telegramAnnouncements: eventTelegramAnnouncements,
     })
       .then((result) => {
@@ -1718,6 +1721,7 @@ const MainMenu: React.FC = () => {
     eventScheduledDate,
     eventScheduledTime,
     eventScheduledTimezone,
+    isSundayMons,
     eventTelegramAnnouncements,
   ]);
 
@@ -2081,6 +2085,16 @@ const MainMenu: React.FC = () => {
                             </ExperimentalSelect>
                           </>
                         )}
+                        <ToggleRow>
+                          <input
+                            type="checkbox"
+                            checked={isSundayMons}
+                            onChange={(event) =>
+                              setIsSundayMons(event.target.checked)
+                            }
+                          />
+                          Sunday Mons
+                        </ToggleRow>
                         <TelegramAnnouncements aria-describedby="event-telegram-announcements-hint">
                           <legend>Telegram announcements</legend>
                           {EVENT_TELEGRAM_ANNOUNCEMENT_OPTIONS.map(

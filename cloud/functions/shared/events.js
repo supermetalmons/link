@@ -238,6 +238,8 @@ function isCreateEventRequest(value) {
     !value ||
     typeof value !== "object" ||
     Array.isArray(value) ||
+    (Object.hasOwn(value, "isSundayMons") &&
+      typeof value.isSundayMons !== "boolean") ||
     (value.announceOnTelegram !== undefined &&
       typeof value.announceOnTelegram !== "boolean") ||
     (value.telegramAnnouncements !== undefined &&
@@ -249,7 +251,7 @@ function isCreateEventRequest(value) {
     hasExactOptionalKeys(
       value,
       ["startsInMinutes"],
-      ["announceOnTelegram", "telegramAnnouncements"],
+      ["isSundayMons", "announceOnTelegram", "telegramAnnouncements"],
     )
   ) {
     return (
@@ -262,7 +264,12 @@ function isCreateEventRequest(value) {
     !hasExactOptionalKeys(
       value,
       ["scheduledDate", "scheduledTime", "scheduledTimezone"],
-      ["announceOnTelegram", "telegramAnnouncements", "localTimezoneIana"],
+      [
+        "isSundayMons",
+        "announceOnTelegram",
+        "telegramAnnouncements",
+        "localTimezoneIana",
+      ],
     )
   ) {
     return false;
@@ -305,7 +312,9 @@ function isEventApiRecord(value, eventId) {
     typeof value === "object" &&
     !Array.isArray(value) &&
     value.eventId === eventId &&
-    typeof value.status === "string"
+    typeof value.status === "string" &&
+    (!Object.hasOwn(value, "isSundayMons") ||
+      typeof value.isSundayMons === "boolean")
   );
 }
 

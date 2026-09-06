@@ -258,6 +258,36 @@ test("rejects malformed Telegram announcement preferences before event creation"
   }
 });
 
+test("rejects malformed Sunday Mons flags with either scheduling mode before event creation", async () => {
+  for (const schedule of [
+    { startsInMinutes: 5 },
+    {
+      scheduledDate: "2026-09-07",
+      scheduledTime: "18:30",
+      scheduledTimezone: "ET",
+    },
+  ]) {
+    for (const isSundayMons of [null, "true", "false", 0, 1, [], {}]) {
+      const response = await handleEventRoute(
+        new Request("https://api.mons.link/events/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...schedule, isSundayMons }),
+        }),
+        TELEGRAM_TEST_ENV,
+        ctx,
+        { verifyIdentity: async () => identity },
+      );
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), {
+        ok: false,
+        error: "invalid-argument",
+        message: "invalid-request",
+      });
+    }
+  }
+});
+
 test("keeps participation and event-control deadlines separate", async () => {
   const timeoutDescriptor = Object.getOwnPropertyDescriptor(
     AbortSignal,
