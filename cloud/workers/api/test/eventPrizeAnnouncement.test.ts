@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildEventPrizeAnnouncement } from "../../../functions/telegram/eventPrizeAnnouncement.js";
+import { buildSundayMonsReminder } from "../../../functions/telegram/sundayMonsReminder.js";
 import type { TelegramResult } from "../../../functions/telegram/client.js";
 import {
   deliverEventPrizeAnnouncement,
@@ -45,6 +46,7 @@ function memoryAnnouncementRepository() {
         (!input.attempt ||
           current.status !== "retryable" ||
           current.eventId !== input.attempt.eventId ||
+          (current.kind ?? "prizes") !== (input.attempt.kind ?? "prizes") ||
           current.attemptId !== input.attempt.expectedAttemptId ||
           !current.retryAtMs ||
           current.retryAtMs > input.createdAtMs)
@@ -61,6 +63,7 @@ function memoryAnnouncementRepository() {
         ...(input.attempt
           ? {
               eventId: input.attempt.eventId,
+              kind: input.attempt.kind ?? "prizes",
               startAtMs: input.attempt.startAtMs,
               runAtMs: input.attempt.runAtMs,
               firstQueuedAtMs: input.attempt.firstQueuedAtMs,
@@ -98,18 +101,19 @@ function memoryAnnouncementRepository() {
   return { values, repository };
 }
 
-function fixture() {
-  let nowMs = RUN_AT_MS;
+function fixture(input = INPUT) {
+  let nowMs = input.runAtMs;
   let retryNotBeforeMs = 0;
   let eventData: unknown = {
     status: "scheduled",
-    startAtMs: INPUT.startAtMs,
+    startAtMs: input.startAtMs,
     isSundayMons: true,
     telegramAnnouncements: { invite: false, matches: false, results: false },
   };
   const locks = new Map<string, unknown>();
   const { values, repository } = memoryAnnouncementRepository();
   const sends: Record<string, unknown>[] = [];
+  const reminderSends: Record<string, unknown>[] = [];
   const logs: Record<string, unknown>[] = [];
   const dependencies: EventPrizeAnnouncementDeliveryDependencies = {
     now: () => nowMs,
@@ -150,19 +154,25 @@ function fixture() {
       sends.push(input);
       return SUCCESS;
     },
+    sendMessage: async (input) => {
+      assert.equal(locks.size, 1);
+      reminderSends.push(input);
+      return { ok: true, outcome: "sent", messageId: 104, httpStatus: 200 };
+    },
     log: (record) => logs.push(record),
   };
   return {
     dependencies,
     values,
     sends,
+    reminderSends,
     locks,
     logs,
     setNow: (value: number) => void (nowMs = value),
     setEvent: (value: unknown) => void (eventData = value),
     retryNotBefore: () => retryNotBeforeMs,
-    deliver: (input = INPUT) =>
-      deliverEventPrizeAnnouncement(env, input, dependencies),
+    deliver: (request = input) =>
+      deliverEventPrizeAnnouncement(env, request, dependencies),
   };
 }
 
@@ -317,6 +327,58 @@ test("safe failures persist retry time and attempt fencing while preserving the 
   assert.notEqual(receipt.attemptId, previous.attemptId);
 });
 
+test("a retry barrier raised during reservation defers the album without leaving it sending", async () => {
+  for (const delayMs of [12_000, 120_000]) {
+    const state = fixture();
+    const reserve = state.dependencies.repository!.reserve;
+    state.dependencies.repository!.reserve = async (input) => {
+      const result = await reserve(input);
+      await state.dependencies.retryControl!.extendRetryNotBeforeMs(
+        RUN_AT_MS + delayMs,
+      );
+      return result;
+    };
+    assert.deepEqual(
+      await state.deliver(),
+      delayMs < 60_000
+        ? {
+            status: "retryable",
+            reason: "retry-not-due",
+            retryAtMs: RUN_AT_MS + delayMs,
+          }
+        : { status: "skipped", reason: "delivery-window-expired" },
+    );
+    assert.equal(state.sends.length, 0);
+    assert.equal(state.locks.size, 0);
+    assert.equal(state.values.get(REQUEST_ID)?.status, "retryable");
+    assert.equal(state.values.get(REQUEST_ID)?.retryAtMs, RUN_AT_MS + delayMs);
+    if (delayMs < 60_000) {
+      state.setNow(RUN_AT_MS + delayMs);
+      assert.deepEqual(await state.deliver(), { status: "sent" });
+      assert.equal(state.sends.length, 1);
+      assert.equal(state.values.get(REQUEST_ID)?.status, "sent");
+      assert.equal(state.values.get(REQUEST_ID)?.attemptCount, 2);
+    }
+  }
+});
+
+test("an unreadable final retry barrier leaves the reserved attempt safely retryable", async () => {
+  const state = fixture();
+  let reads = 0;
+  state.dependencies.retryControl!.getRetryNotBeforeMs = async () => {
+    if (++reads === 2) throw new Error("barrier-unavailable");
+    return 0;
+  };
+  assert.deepEqual(await state.deliver(), {
+    status: "retryable",
+    reason: "delivery-preparation-failed",
+    retryAtMs: RUN_AT_MS + 1_000,
+  });
+  assert.equal(state.sends.length, 0);
+  assert.equal(state.values.get(REQUEST_ID)?.status, "retryable");
+  assert.equal(state.locks.size, 0);
+});
+
 test("uncertain, thrown and incomplete sends are permanent automatic duplicate barriers", async () => {
   for (const result of [
     {
@@ -458,4 +520,174 @@ test("an expired safe retry can use a new on-time postponed schedule without res
   state.dependencies.send = async () => SUCCESS;
   assert.equal((await state.deliver(postponed)).status, "sent");
   assert.equal(state.values.size, 1);
+});
+
+function reminderInput(
+  eventId = EVENT_ID,
+): EventPrizeAnnouncementDeliveryInput {
+  return {
+    ...INPUT,
+    eventId,
+    kind: "reminder",
+    runAtMs: INPUT.startAtMs - 10_800_000,
+    firstQueuedAtMs: INPUT.startAtMs - 10_800_000 - 60_000,
+  };
+}
+
+test("reminds a Sunday event without prizes using one Telegram text message", async () => {
+  const input = reminderInput("sunday-without-prizes");
+  const state = fixture(input);
+  const reminder = buildSundayMonsReminder({ eventId: input.eventId });
+  assert.deepEqual(await state.deliver(), { status: "sent" });
+  assert.deepEqual(state.reminderSends, [
+    {
+      chatId: "community-chat",
+      text: reminder.text,
+      parseMode: "HTML",
+      silent: false,
+      token: "token",
+      timeoutMs: 10_000,
+    },
+  ]);
+  assert.equal(state.sends.length, 0);
+  const receipt = state.values.get(`event:${input.eventId}:reminder:v1`)!;
+  assert.equal(receipt.kind, "reminder");
+  assert.deepEqual(receipt.messageIds, [104]);
+  assert.equal(Object.hasOwn(receipt.payload!, "imageUrls"), false);
+  assert.equal((await state.deliver()).reason, "already-sent");
+  assert.equal(state.reminderSends.length, 1);
+});
+
+test("reminder timing and strict Sunday eligibility are separate from prize eligibility", async () => {
+  for (const event of [
+    { status: "scheduled", isSundayMons: false, startAtMs: INPUT.startAtMs },
+    { status: "scheduled", isSundayMons: "true", startAtMs: INPUT.startAtMs },
+    { status: "active", isSundayMons: true, startAtMs: INPUT.startAtMs },
+  ]) {
+    const state = fixture(reminderInput("sunday-without-prizes"));
+    state.setEvent(event);
+    assert.equal((await state.deliver()).reason, "event-no-longer-eligible");
+    assert.equal(state.reminderSends.length, 0);
+  }
+  const state = fixture(reminderInput());
+  assert.equal(
+    (await state.deliver({ ...INPUT, kind: "reminder" })).reason,
+    "invalid-schedule",
+  );
+  const late = {
+    ...reminderInput(),
+    firstQueuedAtMs: reminderInput().runAtMs + 1,
+  };
+  assert.equal((await state.deliver(late)).reason, "discovered-too-late");
+});
+
+test("sent or uncertain reminders do not consume the same event's prize announcement", async () => {
+  for (const uncertain of [false, true]) {
+    const state = fixture(reminderInput());
+    let reminders = 0;
+    state.dependencies.sendMessage = async () => {
+      reminders++;
+      return uncertain
+        ? {
+            ok: false,
+            classification: "uncertain",
+            code: "timeout",
+            description: "timeout",
+            httpStatus: null,
+            retryAfterSeconds: null,
+          }
+        : { ok: true, outcome: "sent", messageId: 104, httpStatus: 200 };
+    };
+    assert.equal(
+      (await state.deliver()).status,
+      uncertain ? "uncertain" : "sent",
+    );
+    assert.equal(
+      (await state.deliver()).reason,
+      uncertain ? "previous-send-unresolved" : "already-sent",
+    );
+    state.setNow(INPUT.runAtMs);
+    assert.deepEqual(await state.deliver(INPUT), { status: "sent" });
+    assert.equal(reminders, 1);
+    assert.equal(state.sends.length, 1);
+    assert.equal(state.values.size, 2);
+    assert.equal(
+      state.values.get(`event:${EVENT_ID}:reminder:v1`)?.status,
+      uncertain ? "uncertain" : "sent",
+    );
+    assert.equal(state.values.get(REQUEST_ID)?.status, "sent");
+  }
+});
+
+test("safe text retries keep their own payload and require the returned single message ID", async () => {
+  const input = reminderInput();
+  const state = fixture(input);
+  let attempts = 0;
+  state.dependencies.sendMessage = async () => {
+    attempts++;
+    return attempts === 1
+      ? {
+          ok: false,
+          classification: "retryable",
+          code: "network-error",
+          description: "connect failed",
+          httpStatus: null,
+          retryAfterSeconds: null,
+        }
+      : { ok: true, outcome: "sent", messageId: 104, httpStatus: 200 };
+  };
+  const first = await state.deliver();
+  assert.equal(first.status, "retryable");
+  const key = `event:${EVENT_ID}:reminder:v1`;
+  const payload = structuredClone(state.values.get(key)?.payload);
+  state.setNow(first.retryAtMs!);
+  assert.equal((await state.deliver()).status, "sent");
+  assert.deepEqual(state.values.get(key)?.payload, payload);
+  assert.equal(state.values.get(key)?.attemptCount, 2);
+  assert.equal(state.sends.length, 0);
+  const missingId = fixture(input);
+  missingId.dependencies.sendMessage = async () => SUCCESS;
+  assert.equal((await missingId.deliver()).status, "uncertain");
+  assert.equal((await missingId.deliver()).reason, "previous-send-unresolved");
+});
+
+test("old prize payloads retain their exact digest and do not require a kind field", async () => {
+  const state = fixture();
+  const announcement = buildEventPrizeAnnouncement({ eventId: EVENT_ID });
+  const payload = {
+    chatId: "community-chat",
+    imageUrls: announcement.imageUrls,
+    text: announcement.text,
+    parseMode: "HTML",
+    hasSpoiler: true,
+    silent: false,
+  };
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(JSON.stringify(payload)),
+  );
+  const payloadDigest = Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  state.values.set(REQUEST_ID, {
+    eventId: EVENT_ID,
+    startAtMs: INPUT.startAtMs,
+    runAtMs: INPUT.runAtMs,
+    firstQueuedAtMs: INPUT.firstQueuedAtMs,
+    status: "retryable",
+    createdAtMs: RUN_AT_MS - 1_000,
+    updatedAtMs: RUN_AT_MS - 1_000,
+    retryAtMs: RUN_AT_MS,
+    attemptId: "old-attempt",
+    attemptCount: 1,
+    payload,
+    payloadDigest,
+    messageIds: null,
+  });
+  assert.deepEqual(await state.deliver(), { status: "sent" });
+  assert.equal(state.values.get(REQUEST_ID)?.payloadDigest, payloadDigest);
+  assert.deepEqual(
+    Object.keys(state.values.get(REQUEST_ID)!.payload!),
+    Object.keys(payload),
+  );
 });

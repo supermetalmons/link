@@ -689,35 +689,38 @@ describe("event D1 store", () => {
     ).rejects.toBeInstanceOf(EventD1Conflict);
   });
 
-  it("retains the earliest prize announcement scheduling proof across competing upserts", async () => {
-    const outboxId = `ep_${"a".repeat(64)}`;
-    const marker = {
-      schemaVersion: 1,
-      eventId,
-      sourceKey: `prizes:${eventId}:3601000`,
-      reason: "event-prize-announcement",
-      runAtMs: 1000,
-      firstQueuedAtMs: 100,
-      lastQueuedAtMs: 100,
-    };
-    await patchEventOwnedPaths(testEnv.EVENT_DB, {
-      [`events/${eventId}`]: eventRecord(),
-      [`eventProgressOutbox/${outboxId}`]: marker,
-    });
-    await patchEventOwnedPaths(testEnv.EVENT_DB, {
-      [`eventProgressOutbox/${outboxId}`]: {
-        ...marker,
-        firstQueuedAtMs: 200,
-        lastQueuedAtMs: 300,
-      },
-    });
-    expect(
-      await readEventOwnedPath(
-        testEnv.EVENT_DB,
-        `eventProgressOutbox/${outboxId}`,
-      ),
-    ).toMatchObject({ firstQueuedAtMs: 100, lastQueuedAtMs: 300 });
-  });
+  it.each(["event-prize-announcement", "sunday-mons-reminder"])(
+    "retains the earliest %s scheduling proof across competing upserts",
+    async (reason) => {
+      const outboxId = `ep_${"a".repeat(64)}`;
+      const marker = {
+        schemaVersion: 1,
+        eventId,
+        sourceKey: `prizes:${eventId}:3601000`,
+        reason,
+        runAtMs: 1000,
+        firstQueuedAtMs: 100,
+        lastQueuedAtMs: 100,
+      };
+      await patchEventOwnedPaths(testEnv.EVENT_DB, {
+        [`events/${eventId}`]: eventRecord(),
+        [`eventProgressOutbox/${outboxId}`]: marker,
+      });
+      await patchEventOwnedPaths(testEnv.EVENT_DB, {
+        [`eventProgressOutbox/${outboxId}`]: {
+          ...marker,
+          firstQueuedAtMs: 200,
+          lastQueuedAtMs: 300,
+        },
+      });
+      expect(
+        await readEventOwnedPath(
+          testEnv.EVENT_DB,
+          `eventProgressOutbox/${outboxId}`,
+        ),
+      ).toMatchObject({ firstQueuedAtMs: 100, lastQueuedAtMs: 300 });
+    },
+  );
 
   it("rejects stale profile-prize, outbox, and Telegram-state writes", async () => {
     await patchEventOwnedPaths(testEnv.EVENT_DB, {

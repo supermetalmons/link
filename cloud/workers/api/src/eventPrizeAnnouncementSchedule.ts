@@ -1,7 +1,8 @@
 import {
-  EVENT_PRIZE_ANNOUNCEMENT_LEAD_MS,
-  isEventPrizeAnnouncementEvent,
-} from "../../../functions/telegram/eventPrizeAnnouncement.js";
+  EVENT_ANNOUNCEMENT_KINDS,
+  EVENT_ANNOUNCEMENT_SPECS,
+  type EventAnnouncementKind,
+} from "./eventAnnouncementKinds.ts";
 import {
   buildEventProgressPlan,
   ensureEventProgressWorkflow,
@@ -11,7 +12,10 @@ import {
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 
-export const EVENT_PRIZE_ANNOUNCEMENT_REASON = "event-prize-announcement";
+export const EVENT_PRIZE_ANNOUNCEMENT_REASON =
+  EVENT_ANNOUNCEMENT_SPECS.prizes.reason;
+export const SUNDAY_MONS_REMINDER_REASON =
+  EVENT_ANNOUNCEMENT_SPECS.reminder.reason;
 const SCHEDULE_FIELDS = new Set(["isSundayMons", "startAtMs", "status"]);
 
 type ScheduleRepository = Pick<
@@ -32,31 +36,42 @@ function toRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-export async function buildEventPrizeAnnouncementPlan(
+export async function buildEventAnnouncementPlan(
   eventId: string,
   event: unknown,
   nowMs: number,
+  kind: EventAnnouncementKind,
 ): Promise<EventProgressPlan | null> {
-  if (
-    !isSafeFirebaseKey(eventId) ||
-    !isEventPrizeAnnouncementEvent(eventId, event)
-  ) {
+  const spec = EVENT_ANNOUNCEMENT_SPECS[kind];
+  if (!isSafeFirebaseKey(eventId) || !spec.isEligible(eventId, event)) {
     return null;
   }
   const startAtMs = toRecord(event)?.startAtMs;
   if (typeof startAtMs !== "number") return null;
-  const runAtMs = startAtMs - EVENT_PRIZE_ANNOUNCEMENT_LEAD_MS;
+  const runAtMs = startAtMs - spec.leadMs;
   if (runAtMs < 0 || nowMs > runAtMs) return null;
   return buildEventProgressPlan(
     {
       eventId,
-      sourceKey: `prizes:${eventId}:${startAtMs}`,
-      reason: EVENT_PRIZE_ANNOUNCEMENT_REASON,
+      sourceKey: `${kind}:${eventId}:${startAtMs}`,
+      reason: spec.reason,
       runAtMs,
     },
     nowMs,
   );
 }
+
+export const buildEventPrizeAnnouncementPlan = (
+  eventId: string,
+  event: unknown,
+  nowMs: number,
+) => buildEventAnnouncementPlan(eventId, event, nowMs, "prizes");
+
+export const buildSundayMonsReminderPlan = (
+  eventId: string,
+  event: unknown,
+  nowMs: number,
+) => buildEventAnnouncementPlan(eventId, event, nowMs, "reminder");
 
 async function preserveSchedule(
   repository: ScheduleRepository,
@@ -74,17 +89,19 @@ async function preserveSchedule(
   return existing || plan;
 }
 
-export async function scheduleEventPrizeAnnouncement(
+async function scheduleEventAnnouncement(
   env: Env,
   repository: ScheduleRepository,
   eventId: string,
   event: unknown,
   nowMs: number,
+  kind: EventAnnouncementKind,
 ): Promise<void> {
-  const candidate = await buildEventPrizeAnnouncementPlan(
+  const candidate = await buildEventAnnouncementPlan(
     eventId,
     event,
     nowMs,
+    kind,
   );
   if (!candidate) return;
   const plan = await preserveSchedule(repository, candidate);
@@ -94,7 +111,35 @@ export async function scheduleEventPrizeAnnouncement(
   await ensureEventProgressWorkflow(env.EVENT_PROGRESS_WORKFLOW, plan);
 }
 
-export function createEventPrizeAnnouncementScheduleRepository(
+export const scheduleEventPrizeAnnouncement = (
+  env: Env,
+  repository: ScheduleRepository,
+  eventId: string,
+  event: unknown,
+  nowMs: number,
+) =>
+  scheduleEventAnnouncement(env, repository, eventId, event, nowMs, "prizes");
+
+export async function scheduleEventAnnouncements(
+  env: Env,
+  repository: ScheduleRepository,
+  eventId: string,
+  event: unknown,
+  nowMs: number,
+): Promise<void> {
+  const results = await Promise.allSettled(
+    EVENT_ANNOUNCEMENT_KINDS.map((kind) =>
+      scheduleEventAnnouncement(env, repository, eventId, event, nowMs, kind),
+    ),
+  );
+  const failures = results.flatMap((result) =>
+    result.status === "rejected" ? [result.reason] : [],
+  );
+  if (failures.length)
+    throw new AggregateError(failures, "event-announcement-scheduling-failed");
+}
+
+export function createEventAnnouncementScheduleRepository(
   env: Env,
   repository: GameplayRepository,
   dependencies: ScheduleDependencies = {},
@@ -137,15 +182,19 @@ export function createEventPrizeAnnouncementScheduleRepository(
             nextEvent[field] = updates[`${path}/${field}`];
           }
         }
-        const candidate = await buildEventPrizeAnnouncementPlan(
-          eventId,
-          nextEvent,
-          now(),
-        );
-        if (!candidate) continue;
-        const plan = await preserveSchedule(repository, candidate, signal);
-        nextUpdates[`eventProgressOutbox/${plan.outboxId}`] = plan.outbox;
-        plans.push(plan);
+        const discoveredAtMs = now();
+        for (const kind of EVENT_ANNOUNCEMENT_KINDS) {
+          const candidate = await buildEventAnnouncementPlan(
+            eventId,
+            nextEvent,
+            discoveredAtMs,
+            kind,
+          );
+          if (!candidate) continue;
+          const plan = await preserveSchedule(repository, candidate, signal);
+          nextUpdates[`eventProgressOutbox/${plan.outboxId}`] = plan.outbox;
+          plans.push(plan);
+        }
       }
       await repository.patchRtdbRoot(nextUpdates, signal);
       if (plans.length === 0) return;
@@ -155,8 +204,9 @@ export function createEventPrizeAnnouncementScheduleRepository(
           if (result.status === "rejected") {
             logger.error(
               JSON.stringify({
-                event: "event_prize_announcement_enqueue_failed",
+                event: "event_announcement_enqueue_failed",
                 eventId: plans[index].params.eventId,
+                reason: plans[index].params.reason,
               }),
             );
           }
@@ -171,3 +221,6 @@ export function createEventPrizeAnnouncementScheduleRepository(
     },
   };
 }
+
+export const createEventPrizeAnnouncementScheduleRepository =
+  createEventAnnouncementScheduleRepository;

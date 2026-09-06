@@ -1,15 +1,15 @@
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
-import {
-  EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS,
-  EVENT_PRIZE_ANNOUNCEMENT_LEAD_MS,
-} from "../../../functions/telegram/eventPrizeAnnouncement.js";
+import { EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS } from "../../../functions/telegram/eventPrizeAnnouncement.js";
 import {
   InvalidEventProgressPayloadError,
   parseEventProgressOutbox,
   parseEventProgressParams,
   type EventProgressWorkflowParams,
 } from "./eventProgress.ts";
-import { EVENT_PRIZE_ANNOUNCEMENT_REASON } from "./eventPrizeAnnouncementSchedule.ts";
+import {
+  EVENT_ANNOUNCEMENT_SPECS,
+  getEventAnnouncementKind,
+} from "./eventAnnouncementKinds.ts";
 import type {
   EventPrizeAnnouncementDeliveryInput,
   EventPrizeAnnouncementDeliveryResult,
@@ -24,34 +24,36 @@ export type EventPrizeAnnouncementWorkflowDependencies = {
   now?: () => number;
 };
 
-export async function runEventPrizeAnnouncementWorkflow(
+export async function runEventAnnouncementWorkflow(
   event: Readonly<WorkflowEvent<EventProgressWorkflowParams>>,
   step: WorkflowStep,
   dependencies: EventPrizeAnnouncementWorkflowDependencies,
 ): Promise<EventPrizeAnnouncementDeliveryResult> {
   const params = await parseEventProgressParams(event.payload);
+  const kind = getEventAnnouncementKind(params?.reason);
   if (
     !params ||
-    params.reason !== EVENT_PRIZE_ANNOUNCEMENT_REASON ||
+    !kind ||
     params.runAtMs === null ||
     params.sourceKey !==
-      `prizes:${params.eventId}:${params.runAtMs + EVENT_PRIZE_ANNOUNCEMENT_LEAD_MS}`
+      `${kind}:${params.eventId}:${params.runAtMs + EVENT_ANNOUNCEMENT_SPECS[kind].leadMs}`
   ) {
     throw new InvalidEventProgressPayloadError(
-      "invalid-event-prize-announcement-payload",
+      "invalid-event-announcement-payload",
     );
   }
   const now = dependencies.now || Date.now;
+  const { leadMs, stepName } = EVENT_ANNOUNCEMENT_SPECS[kind];
   const runAtMs = params.runAtMs;
   const deadline = runAtMs + EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS;
-  await step.sleepUntil("wait for prize announcement", runAtMs);
+  await step.sleepUntil(`wait for ${stepName}`, runAtMs);
   let result: EventPrizeAnnouncementDeliveryResult = {
     status: "skipped",
     reason: "expired",
   };
   for (let attempt = 0; attempt <= 60; attempt += 1) {
     result = await step.do(
-      `deliver prize announcement ${attempt}`,
+      `deliver ${stepName} ${attempt}`,
       { retries: { limit: 0, delay: "1 second" }, timeout: "30 seconds" },
       async () => {
         if (now() >= deadline)
@@ -72,12 +74,19 @@ export async function runEventPrizeAnnouncementWorkflow(
               reason: "not-scheduled-on-time",
             };
           }
-          return await dependencies.deliver({
+          const delivery = await dependencies.deliver({
+            ...(kind === "reminder" ? { kind } : {}),
             eventId: params.eventId,
-            startAtMs: runAtMs + EVENT_PRIZE_ANNOUNCEMENT_LEAD_MS,
+            startAtMs: runAtMs + leadMs,
             runAtMs,
             firstQueuedAtMs: plan.outbox.firstQueuedAtMs,
           });
+          return delivery.status === "retryable"
+            ? {
+                ...delivery,
+                retryAtMs: Math.max(delivery.retryAtMs || 0, now() + 1_000),
+              }
+            : delivery;
         } catch {
           return {
             status: "retryable" as const,
@@ -88,15 +97,15 @@ export async function runEventPrizeAnnouncementWorkflow(
       },
     );
     if (result.status !== "retryable") break;
-    const retryAtMs = Math.max(result.retryAtMs || 0, now() + 1_000);
+    const retryAtMs = result.retryAtMs ?? deadline;
     if (retryAtMs >= deadline || attempt === 60) {
       result = { status: "skipped", reason: "expired" };
       break;
     }
-    await step.sleepUntil(`retry prize announcement ${attempt}`, retryAtMs);
+    await step.sleepUntil(`retry ${stepName} ${attempt}`, retryAtMs);
   }
   await step.do(
-    "acknowledge prize announcement outbox",
+    `acknowledge ${stepName} outbox`,
     {
       retries: { limit: 12, delay: "1 second", backoff: "exponential" },
       timeout: "30 seconds",
@@ -108,3 +117,5 @@ export async function runEventPrizeAnnouncementWorkflow(
   );
   return result;
 }
+
+export const runEventPrizeAnnouncementWorkflow = runEventAnnouncementWorkflow;

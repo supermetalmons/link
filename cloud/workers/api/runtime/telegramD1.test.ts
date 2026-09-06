@@ -138,6 +138,7 @@ describe("Telegram D1 repositories", () => {
       status: "sent",
       eventId: null,
       attemptId: null,
+      kind: "prizes",
     });
   });
 
@@ -175,6 +176,7 @@ describe("Telegram D1 repositories", () => {
       firstQueuedAtMs: 500,
       attemptCount: 1,
       payload: input.attempt.payload,
+      kind: "prizes",
     });
     await expect(
       repositories[0].reserve({
@@ -298,6 +300,143 @@ describe("Telegram D1 repositories", () => {
       status: "uncertain",
       errorCode: "timeout",
       attemptCount: 1,
+    });
+  });
+
+  it("stores independent reminder and prize receipts for one event while retaining per-kind uniqueness", async () => {
+    const repository = createD1TelegramAnnouncementRepository(
+      testEnv.TELEGRAM_DB,
+    );
+    const prizes = {
+      requestId: "event:shared-event:prizes:v1",
+      payloadDigest: "album-digest",
+      createdAtMs: 1_000,
+      attempt: {
+        eventId: "shared-event",
+        startAtMs: 10_801_000,
+        runAtMs: 7_201_000,
+        firstQueuedAtMs: 500,
+        payload: { text: "album", imageUrls: ["a", "b"] },
+        attemptId: "prize-attempt",
+        expectedAttemptId: null,
+      },
+    };
+    const reminder = {
+      ...prizes,
+      requestId: "event:shared-event:reminder:v1",
+      payloadDigest: "reminder-digest",
+      attempt: {
+        ...prizes.attempt,
+        kind: "reminder" as const,
+        runAtMs: 1_000,
+        payload: { text: "reminder" },
+        attemptId: "reminder-attempt",
+      },
+    };
+    expect(
+      await Promise.all([
+        repository.reserve(prizes),
+        repository.reserve(reminder),
+      ]),
+    ).toEqual(["reserved", "reserved"]);
+    await repository.storeOutcome({
+      requestId: reminder.requestId,
+      payloadDigest: reminder.payloadDigest,
+      attemptId: reminder.attempt.attemptId,
+      status: "uncertain",
+      updatedAtMs: 2_000,
+    });
+    await repository.storeOutcome({
+      requestId: prizes.requestId,
+      payloadDigest: prizes.payloadDigest,
+      attemptId: prizes.attempt.attemptId,
+      status: "sent",
+      messageIds: [101, 102],
+      updatedAtMs: 7_202_000,
+    });
+    await expect(repository.get(reminder.requestId)).resolves.toMatchObject({
+      kind: "reminder",
+      status: "uncertain",
+    });
+    await expect(repository.get(prizes.requestId)).resolves.toMatchObject({
+      kind: "prizes",
+      status: "sent",
+      messageIds: [101, 102],
+    });
+    await expect(
+      repository.reserve({ ...reminder, requestId: "duplicate-reminder" }),
+    ).rejects.toThrow("telegram-d1-unavailable");
+    const row = await testEnv.TELEGRAM_DB.prepare(
+      "SELECT COUNT(*) AS count FROM telegram_event_prize_announcements WHERE event_id = ?",
+    )
+      .bind("shared-event")
+      .first<{ count: number }>();
+    expect(row?.count).toBe(2);
+  });
+
+  it("cannot change an existing retry receipt to a different announcement kind", async () => {
+    const repository = createD1TelegramAnnouncementRepository(
+      testEnv.TELEGRAM_DB,
+    );
+    const input = {
+      requestId: "event:kind-event:reminder:v1",
+      payloadDigest: "reminder-digest",
+      createdAtMs: 1_000,
+      attempt: {
+        kind: "reminder" as const,
+        eventId: "kind-event",
+        startAtMs: 10_801_000,
+        runAtMs: 1_000,
+        firstQueuedAtMs: 500,
+        payload: { text: "reminder" },
+        attemptId: "reminder-attempt",
+        expectedAttemptId: null,
+      },
+    };
+    await repository.reserve(input);
+    await repository.storeOutcome({
+      requestId: input.requestId,
+      payloadDigest: input.payloadDigest,
+      attemptId: input.attempt.attemptId,
+      status: "retryable",
+      retryAtMs: 2_000,
+      updatedAtMs: 1_500,
+    });
+    const retry = {
+      ...input,
+      createdAtMs: 2_000,
+      attempt: {
+        ...input.attempt,
+        attemptId: "retry-attempt",
+        expectedAttemptId: input.attempt.attemptId,
+      },
+    };
+    await expect(
+      repository.reserve({
+        ...retry,
+        attempt: { ...retry.attempt, kind: "prizes" },
+      }),
+    ).resolves.toMatchObject({
+      kind: "reminder",
+      status: "retryable",
+      attemptCount: 1,
+    });
+    await expect(repository.reserve(retry)).resolves.toBe("reserved");
+    await expect(
+      repository.storeOutcome({
+        requestId: retry.requestId,
+        payloadDigest: retry.payloadDigest,
+        attemptId: retry.attempt.attemptId,
+        status: "sent",
+        messageIds: [104],
+        updatedAtMs: 2_001,
+      }),
+    ).resolves.toBe(true);
+    await expect(repository.get(input.requestId)).resolves.toMatchObject({
+      kind: "reminder",
+      status: "sent",
+      messageIds: [104],
+      attemptCount: 2,
     });
   });
 

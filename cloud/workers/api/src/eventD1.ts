@@ -1169,7 +1169,7 @@ async function patchEventOwnedPathsInternal(
              run_at_ms = excluded.run_at_ms,
              last_queued_at_ms = excluded.last_queued_at_ms,
              record_json = CASE
-               WHEN json_extract(excluded.record_json, '$.reason') = 'event-prize-announcement'
+               WHEN json_extract(excluded.record_json, '$.reason') IN ('event-prize-announcement', 'sunday-mons-reminder')
                THEN json_set(excluded.record_json, '$.firstQueuedAtMs', MIN(
                  json_extract(event_progress_outboxes.record_json, '$.firstQueuedAtMs'),
                  json_extract(excluded.record_json, '$.firstQueuedAtMs')

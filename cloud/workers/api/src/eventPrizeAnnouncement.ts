@@ -1,11 +1,11 @@
 import {
   buildEventPrizeAnnouncement,
   EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS,
-  EVENT_PRIZE_ANNOUNCEMENT_LEAD_MS,
-  isEventPrizeAnnouncementEvent,
 } from "../../../functions/telegram/eventPrizeAnnouncement.js";
+import { buildSundayMonsReminder } from "../../../functions/telegram/sundayMonsReminder.js";
 import {
   sendTelegramMediaGroup,
+  sendTelegramMessage,
   TELEGRAM_HTTP_TIMEOUT_MS,
   type TelegramResult,
 } from "../../../functions/telegram/client.js";
@@ -15,6 +15,11 @@ import { readEventRuntimeControl } from "./eventD1.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import {
+  EVENT_ANNOUNCEMENT_KINDS,
+  EVENT_ANNOUNCEMENT_SPECS,
+  type EventAnnouncementKind,
+} from "./eventAnnouncementKinds.ts";
 import { profileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
 import {
   createD1TelegramAnnouncementRepository,
@@ -25,6 +30,7 @@ import {
 } from "./telegramD1.ts";
 
 export type EventPrizeAnnouncementDeliveryInput = {
+  kind?: EventAnnouncementKind;
   eventId: string;
   startAtMs: number;
   runAtMs: number;
@@ -51,6 +57,7 @@ export type EventPrizeAnnouncementDeliveryDependencies = {
     "getRetryNotBeforeMs" | "extendRetryNotBeforeMs"
   >;
   send?: typeof sendTelegramMediaGroup;
+  sendMessage?: typeof sendTelegramMessage;
 };
 
 type AlbumPayload = {
@@ -62,7 +69,19 @@ type AlbumPayload = {
   silent: false;
 };
 
-function parsePayload(value: unknown): AlbumPayload | null {
+type ReminderPayload = {
+  chatId: string;
+  text: string;
+  parseMode: "HTML";
+  silent: false;
+};
+
+type AnnouncementPayload = AlbumPayload | ReminderPayload;
+
+function parsePayload(
+  value: unknown,
+  kind: EventAnnouncementKind,
+): AnnouncementPayload | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const payload = value as Record<string, unknown>;
   if (
@@ -71,8 +90,26 @@ function parsePayload(value: unknown): AlbumPayload | null {
     typeof payload.text !== "string" ||
     !payload.text ||
     payload.parseMode !== "HTML" ||
+    payload.silent !== false
+  ) {
+    return null;
+  }
+  if (kind === "reminder") {
+    if (
+      Object.hasOwn(payload, "imageUrls") ||
+      Object.hasOwn(payload, "hasSpoiler")
+    ) {
+      return null;
+    }
+    return {
+      chatId: payload.chatId,
+      text: payload.text,
+      parseMode: "HTML",
+      silent: false,
+    };
+  }
+  if (
     payload.hasSpoiler !== true ||
-    payload.silent !== false ||
     !Array.isArray(payload.imageUrls) ||
     payload.imageUrls.length < 2 ||
     payload.imageUrls.length > 10 ||
@@ -90,7 +127,9 @@ function parsePayload(value: unknown): AlbumPayload | null {
   };
 }
 
-async function createPayloadDigest(payload: AlbumPayload): Promise<string> {
+async function createPayloadDigest(
+  payload: AnnouncementPayload,
+): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(JSON.stringify(payload)),
@@ -132,6 +171,11 @@ export async function deliverEventPrizeAnnouncement(
   dependencies: EventPrizeAnnouncementDeliveryDependencies = {},
 ): Promise<EventPrizeAnnouncementDeliveryResult> {
   const now = dependencies.now || Date.now;
+  const kind = input.kind ?? "prizes";
+  if (!EVENT_ANNOUNCEMENT_KINDS.includes(kind)) {
+    return { status: "skipped", reason: "invalid-kind" };
+  }
+  const specification = EVENT_ANNOUNCEMENT_SPECS[kind];
   const log =
     dependencies.log || ((record) => console.info(JSON.stringify(record)));
   const deadlineAtMs = input.runAtMs + EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS;
@@ -147,7 +191,7 @@ export async function deliverEventPrizeAnnouncement(
     ![input.startAtMs, input.runAtMs, input.firstQueuedAtMs].every(
       (value) => Number.isSafeInteger(value) && value > 0,
     ) ||
-    input.runAtMs !== input.startAtMs - EVENT_PRIZE_ANNOUNCEMENT_LEAD_MS
+    input.runAtMs !== input.startAtMs - specification.leadMs
   ) {
     return { status: "skipped", reason: "invalid-schedule" };
   }
@@ -187,13 +231,13 @@ export async function deliverEventPrizeAnnouncement(
   try {
     lock = await lockManager.acquireEventLock(
       input.eventId,
-      "event-prize-announcement",
+      specification.reason,
     );
   } catch {
     return retry("event-lock-unavailable");
   }
   if (!lock) return retry("event-locked");
-  const requestId = `event:${input.eventId}:prizes:v1`;
+  const requestId = `event:${input.eventId}:${kind}:v1`;
   const attemptId = crypto.randomUUID();
   let reservedDigest: string | null = null;
   let sendStarted = false;
@@ -217,6 +261,7 @@ export async function deliverEventPrizeAnnouncement(
     } catch {
       log({
         event: "event_prize_announcement_outcome_failed",
+        kind,
         eventId: input.eventId,
         attemptId,
       });
@@ -228,12 +273,15 @@ export async function deliverEventPrizeAnnouncement(
       `events/${input.eventId}`,
     );
     if (
-      !isEventPrizeAnnouncementEvent(input.eventId, eventData) ||
+      !specification.isEligible(input.eventId, eventData) ||
       (eventData as { startAtMs?: unknown }).startAtMs !== input.startAtMs
     ) {
       return { status: "skipped", reason: "event-no-longer-eligible" };
     }
     const existing = await repository.get(requestId);
+    if (existing && (existing.kind ?? "prizes") !== kind) {
+      return { status: "terminal", reason: "persisted-kind-conflict" };
+    }
     const previous = priorOutcome(existing);
     if (previous) return previous;
     const retryAtMs = Math.max(
@@ -241,20 +289,28 @@ export async function deliverEventPrizeAnnouncement(
       await retryControl.getRetryNotBeforeMs(),
     );
     if (retryAtMs > now()) return retry("retry-not-due", retryAtMs);
-    const announcement = buildEventPrizeAnnouncement({
-      eventId: input.eventId,
-    });
+    const announcement =
+      kind === "prizes"
+        ? buildEventPrizeAnnouncement({ eventId: input.eventId })
+        : buildSundayMonsReminder({ eventId: input.eventId });
     const payload =
       existing?.startAtMs === input.startAtMs
-        ? parsePayload(existing.payload)
-        : {
-            chatId: env.TELEGRAM_EXTRA_CHAT_ID.trim(),
-            imageUrls: announcement.imageUrls,
-            text: announcement.text,
-            parseMode: announcement.parseMode,
-            hasSpoiler: true as const,
-            silent: false as const,
-          };
+        ? parsePayload(existing.payload, kind)
+        : "imageUrls" in announcement
+          ? {
+              chatId: env.TELEGRAM_EXTRA_CHAT_ID.trim(),
+              imageUrls: announcement.imageUrls,
+              text: announcement.text,
+              parseMode: announcement.parseMode,
+              hasSpoiler: true as const,
+              silent: false as const,
+            }
+          : {
+              chatId: env.TELEGRAM_EXTRA_CHAT_ID.trim(),
+              text: announcement.text,
+              parseMode: announcement.parseMode,
+              silent: false as const,
+            };
     if (!payload)
       return { status: "terminal", reason: "invalid-persisted-payload" };
     const payloadDigest = await createPayloadDigest(payload);
@@ -278,6 +334,7 @@ export async function deliverEventPrizeAnnouncement(
       createdAtMs: now(),
       attempt: {
         ...input,
+        kind,
         payload,
         attemptId,
         expectedAttemptId: existing?.attemptId || null,
@@ -306,6 +363,13 @@ export async function deliverEventPrizeAnnouncement(
       }
       return retry("event-lock-or-control-changed", retryAtMs);
     }
+    const latestRetryAtMs = await retryControl.getRetryNotBeforeMs();
+    if (latestRetryAtMs > now()) {
+      if (!(await outcome("retryable", "retry-not-due", latestRetryAtMs))) {
+        return { status: "uncertain", reason: "outcome-write-failed" };
+      }
+      return retry("retry-not-due", latestRetryAtMs);
+    }
     const remainingMs = deadlineAtMs - now();
     if (remainingMs <= 0) {
       await outcome("retryable", "delivery-window-expired", now() + 1_000);
@@ -314,7 +378,11 @@ export async function deliverEventPrizeAnnouncement(
     let result: TelegramResult;
     try {
       sendStarted = true;
-      result = await (dependencies.send || sendTelegramMediaGroup)({
+      const send =
+        kind === "prizes"
+          ? dependencies.send || sendTelegramMediaGroup
+          : dependencies.sendMessage || sendTelegramMessage;
+      result = await send({
         ...payload,
         token: env.TELEGRAM_BOT_TOKEN.trim(),
         timeoutMs: Math.min(TELEGRAM_HTTP_TIMEOUT_MS, remainingMs),
@@ -342,6 +410,7 @@ export async function deliverEventPrizeAnnouncement(
           } catch {
             log({
               event: "event_prize_announcement_retry_barrier_failed",
+              kind,
               eventId: input.eventId,
               attemptId,
             });
@@ -356,12 +425,20 @@ export async function deliverEventPrizeAnnouncement(
       }
       return { status, reason: result.code };
     }
-    const messageIds = result.messageIds;
+    const messageIds =
+      kind === "prizes" ? result.messageIds : [result.messageId];
+    const expectedMessageCount =
+      "imageUrls" in payload && Array.isArray(payload.imageUrls)
+        ? payload.imageUrls.length
+        : 1;
     if (
       !Array.isArray(messageIds) ||
-      messageIds.length !== payload.imageUrls.length ||
+      messageIds.length !== expectedMessageCount ||
       !messageIds.every(
-        (messageId) => Number.isSafeInteger(messageId) && messageId > 0,
+        (messageId): messageId is number =>
+          typeof messageId === "number" &&
+          Number.isSafeInteger(messageId) &&
+          messageId > 0,
       )
     ) {
       await outcome("uncertain", "missing-message-ids");
@@ -372,6 +449,7 @@ export async function deliverEventPrizeAnnouncement(
     }
     log({
       event: "event_prize_announcement_sent",
+      kind,
       eventId: input.eventId,
       attemptId,
       messageCount: messageIds.length,

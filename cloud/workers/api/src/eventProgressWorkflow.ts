@@ -16,8 +16,8 @@ import {
   type EventProgressWorkflowParams,
 } from "./eventProgress.ts";
 import { assertProfileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
-import { EVENT_PRIZE_ANNOUNCEMENT_REASON } from "./eventPrizeAnnouncementSchedule.ts";
-import { runEventPrizeAnnouncementWorkflow } from "./eventPrizeAnnouncementWorkflow.ts";
+import { getEventAnnouncementKind } from "./eventAnnouncementKinds.ts";
+import { runEventAnnouncementWorkflow } from "./eventPrizeAnnouncementWorkflow.ts";
 import {
   deliverEventPrizeAnnouncement,
   type EventPrizeAnnouncementDeliveryResult,
@@ -73,9 +73,9 @@ export class EventProgressWorkflow extends WorkflowEntrypoint<
     | EventPrizeAnnouncementDeliveryResult
   > {
     try {
-      if (event.payload?.reason === EVENT_PRIZE_ANNOUNCEMENT_REASON) {
+      if (getEventAnnouncementKind(event.payload?.reason)) {
         const repository = createEventGameplayRepository(this.env);
-        return await runEventPrizeAnnouncementWorkflow(event, step, {
+        return await runEventAnnouncementWorkflow(event, step, {
           readOutbox: (outboxId) =>
             repository.getRtdbPath(`eventProgressOutbox/${outboxId}`),
           deliver: (input) =>

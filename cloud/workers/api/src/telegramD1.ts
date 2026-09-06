@@ -2,6 +2,7 @@ import type { TelegramRepository } from "../../../functions/telegram/deliveryEng
 import { createTelegramRepository } from "../../../functions/telegram/repositoryCore.js";
 import { validateTelegramMessageKey } from "../../../functions/telegram/desiredStateCore.js";
 import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
+import type { EventAnnouncementKind } from "./eventAnnouncementKinds.ts";
 
 const TELEGRAM_MESSAGE_PREFIX = "telegramMessages/";
 const TELEGRAM_DELIVERY_CONTROL_ROOT = "telegramDeliveryControl";
@@ -16,6 +17,7 @@ type JsonRow = {
 export type TelegramStorageMode = "d1" | "frozen";
 
 export type TelegramAnnouncementRecord = {
+  kind?: EventAnnouncementKind;
   createdAtMs: number;
   messageIds: number[] | null;
   payloadDigest: string;
@@ -33,6 +35,7 @@ export type TelegramAnnouncementRecord = {
 };
 
 export type TelegramAnnouncementAttempt = {
+  kind?: EventAnnouncementKind;
   eventId: string;
   startAtMs: number;
   runAtMs: number;
@@ -286,6 +289,7 @@ export function createD1TelegramRepository(
 }
 
 type AnnouncementRow = {
+  announcement_kind: EventAnnouncementKind;
   created_at_ms: number;
   message_ids_json: string | null;
   payload_digest: string;
@@ -322,6 +326,7 @@ function parseMessageIds(value: string | null): number[] | null {
 function decodeAnnouncement(row: AnnouncementRow): TelegramAnnouncementRecord {
   if (!row.payload_digest || !row.status) throw new TelegramD1Failure();
   return {
+    kind: row.announcement_kind,
     createdAtMs: safeInteger(row.created_at_ms),
     messageIds: parseMessageIds(row.message_ids_json),
     payloadDigest: row.payload_digest,
@@ -350,7 +355,7 @@ export function createD1TelegramAnnouncementRepository(
           `SELECT payload_digest, status, message_ids_json,
                   created_at_ms, updated_at_ms, event_id, start_at_ms,
                   run_at_ms, first_queued_at_ms, payload_json, attempt_id,
-                  attempt_count, retry_at_ms, error_code
+                  attempt_count, retry_at_ms, error_code, announcement_kind
            FROM telegram_event_prize_announcements
            WHERE request_id = ?`,
         )
@@ -374,8 +379,8 @@ export function createD1TelegramAnnouncementRepository(
                  request_id, payload_digest, status, message_ids_json,
                  created_at_ms, updated_at_ms, event_id, start_at_ms,
                  run_at_ms, first_queued_at_ms, payload_json,
-                 attempt_id, attempt_count, retry_at_ms, error_code
-               ) VALUES (?, ?, 'sending', NULL, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL)
+                 attempt_id, attempt_count, retry_at_ms, error_code, announcement_kind
+               ) VALUES (?, ?, 'sending', NULL, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, NULL, ?)
                ON CONFLICT (request_id) DO UPDATE SET
                  payload_digest = excluded.payload_digest, status = 'sending',
                  message_ids_json = NULL, updated_at_ms = excluded.updated_at_ms,
@@ -386,6 +391,7 @@ export function createD1TelegramAnnouncementRepository(
                  retry_at_ms = NULL, error_code = NULL
                WHERE telegram_event_prize_announcements.status = 'retryable'
                  AND telegram_event_prize_announcements.event_id = excluded.event_id
+                 AND telegram_event_prize_announcements.announcement_kind = excluded.announcement_kind
                  AND telegram_event_prize_announcements.attempt_id IS ?
                  AND telegram_event_prize_announcements.retry_at_ms <= excluded.updated_at_ms`,
             )
@@ -400,6 +406,7 @@ export function createD1TelegramAnnouncementRepository(
               attempt.firstQueuedAtMs,
               encodeJsonRecord(attempt.payload),
               attempt.attemptId,
+              attempt.kind ?? "prizes",
               attempt.expectedAttemptId,
             )
             .run();

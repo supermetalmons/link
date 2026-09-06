@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildEventPrizeAnnouncementPlan } from "../src/eventPrizeAnnouncementSchedule.ts";
+import {
+  buildEventPrizeAnnouncementPlan,
+  buildSundayMonsReminderPlan,
+} from "../src/eventPrizeAnnouncementSchedule.ts";
 import type {
   WorkflowEvent,
   WorkflowInstanceStatus,
@@ -83,12 +86,12 @@ async function validOutbox() {
   return { plan, value: { [plan.outboxId]: plan.outbox } };
 }
 
-test("scheduled-event sweep discovers prize announcements and retains their first scheduling time", async () => {
+test("scheduled-event sweep discovers both announcements and retains their first scheduling time", async () => {
   const eventId = "z3oj52Iiime";
   const event = {
     status: "scheduled",
     isSundayMons: true,
-    startAtMs: 4_000_000,
+    startAtMs: 30_000_000,
   };
   let nowMs = 100_000;
   const records = new Map<string, unknown>();
@@ -111,12 +114,18 @@ test("scheduled-event sweep discovers prize announcements and retains their firs
     ratingRepository: null,
   });
   const plan = await buildEventPrizeAnnouncementPlan(eventId, event, nowMs);
+  const reminder = await buildSundayMonsReminderPlan(eventId, event, nowMs);
   assert.ok(plan);
+  assert.ok(reminder);
   assert.deepEqual(
     records.get(`eventProgressOutbox/${plan.outboxId}`),
     plan.outbox,
   );
-  assert.equal(creates, 2);
+  assert.deepEqual(
+    records.get(`eventProgressOutbox/${reminder.outboxId}`),
+    reminder.outbox,
+  );
+  assert.equal(creates, 3);
   nowMs += 60_000;
   await sweepEventProgress(environment, {
     now: () => nowMs,
@@ -127,7 +136,103 @@ test("scheduled-event sweep discovers prize announcements and retains their firs
     records.get(`eventProgressOutbox/${plan.outboxId}`),
     plan.outbox,
   );
-  assert.equal(creates, 4);
+  assert.deepEqual(
+    records.get(`eventProgressOutbox/${reminder.outboxId}`),
+    reminder.outbox,
+  );
+  assert.equal(creates, 6);
+});
+
+test("both announcements survive slow start dispatch and all three jobs can fail independently", async () => {
+  for (const scenario of [
+    "slow-start",
+    "failed-start",
+    "failed-prize",
+    "failed-reminder",
+  ]) {
+    const targetMs = 10_000_000;
+    const eventId = "z3oj52Iiime";
+    const event = {
+      status: "scheduled",
+      isSundayMons: true,
+      startAtMs: targetMs + 10_800_000,
+    };
+    let nowMs = targetMs - 1_000;
+    let failedId: string | undefined;
+    const records = new Map<string, unknown>();
+    const created: string[] = [];
+    const prize = await buildEventPrizeAnnouncementPlan(eventId, event, nowMs);
+    const reminder = await buildSundayMonsReminderPlan(eventId, event, nowMs);
+    assert.ok(prize);
+    assert.ok(reminder);
+    const failureReason =
+      scenario === "failed-prize"
+        ? prize.params.reason
+        : scenario === "failed-reminder"
+          ? reminder.params.reason
+          : scenario === "failed-start"
+            ? "scheduled-start-reconciliation"
+            : null;
+    const repository: EventProgressSweepRepository = {
+      getRtdbPath: async (path) =>
+        path === "events"
+          ? { [eventId]: event }
+          : path === "eventProgressOutbox"
+            ? {}
+            : (records.get(path) ?? null),
+      patchRtdbRoot: async (updates) => {
+        for (const [path, value] of Object.entries(updates))
+          records.set(path, value);
+      },
+    };
+    const environment = workflowEnvironment();
+    const instance =
+      await environment.EVENT_PROGRESS_WORKFLOW.get("test-instance");
+    environment.EVENT_PROGRESS_WORKFLOW.createBatch = async (items) => {
+      return items.map((item) => {
+        if (item.params?.reason === failureReason) {
+          failedId = item.id;
+          throw new Error("dispatch-failed");
+        }
+        created.push(item.params!.reason);
+        return instance;
+      });
+    };
+    environment.EVENT_PROGRESS_WORKFLOW.get = async (id) => {
+      if (id === failedId) throw new Error("instance-missing");
+      instance.status = async () => {
+        nowMs += 1_500;
+        return { status: "waiting" };
+      };
+      return instance;
+    };
+    const run = () =>
+      sweepEventProgress(environment, {
+        now: () => nowMs,
+        repository,
+        ratingRepository: null,
+      });
+    if (scenario === "slow-start") await run();
+    else await assert.rejects(run(), /scheduled-event-reconciliation-failed/);
+    assert.deepEqual(
+      records.get(`eventProgressOutbox/${prize.outboxId}`),
+      prize.outbox,
+    );
+    assert.deepEqual(
+      records.get(`eventProgressOutbox/${reminder.outboxId}`),
+      reminder.outbox,
+    );
+    assert.deepEqual(
+      new Set(created),
+      new Set(
+        [
+          "scheduled-start-reconciliation",
+          prize.params.reason,
+          reminder.params.reason,
+        ].filter((reason) => reason !== failureReason),
+      ),
+    );
+  }
 });
 
 test("recreates terminal event progress Workflow instances", async () => {

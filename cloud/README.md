@@ -159,11 +159,19 @@ npm run recover:telegram -- --message-key <key> --action confirm-send-absent --b
 
 Use `confirm-send-applied --message-id <telegram-message-id>` when Telegram created the message, or `abandon` to retain the audit record and stop delivery.
 
-Sunday Mons prize announcements send automatically one hour before the scheduled event start, independently of the invite, matches, and results settings. Only scheduled events with `isSundayMons === true` and prizes in the shared catalog qualify. The album keeps catalog prize order and spoiler-covers every photo. Its first caption uses the lowercased, HTML-escaped catalog collection name inside a Telegram spoiler, followed by `starting in 1 hour` and the event link with the automatch custom emoji.
+Sunday Mons reminders send automatically three hours before the scheduled event start. Only scheduled events with `isSundayMons === true` and a valid start time qualify; prizes are not required. The standalone HTML message goes to the community destination with notifications enabled and link previews disabled:
 
-`EVENT_PROGRESS_WORKFLOW` sleeps until the announcement target; the existing event progress sweep discovers eligible events and recovers pending dispatches. Events first discovered after that target are skipped. Previously scheduled announcements have a 60-second delivery grace period. Before sending, the workflow checks the canonical event and catalog under the event lease. A postponement can schedule a new job for an unsent album; superseded jobs do nothing.
+```text
+sunday mons in 3 hours!
 
-Each event has one permanent album delivery identity. Confirmed sends never resend, including after postponement. Only safely retryable Telegram failures can retry within the grace period; timeouts, interrupted sends, and ambiguous responses block automatic retries to prevent duplicate albums. Historical manual receipts remain valid. Prize announcements have no manual CLI or HTTP trigger and require no separate announcement bridge credential.
+https://mons.link/event/{eventId} <tg-emoji emoji-id="5355002036817525409">&#11088;</tg-emoji>
+```
+
+Sunday Mons prize announcements send automatically one hour before the scheduled event start and additionally require prizes in the shared catalog. The album keeps catalog prize order and spoiler-covers every photo. Its first caption uses the lowercased, HTML-escaped catalog collection name inside a Telegram spoiler, followed by `starting in 1 hour` and the event link with the same automatch custom emoji. Both notifications operate independently of the invite, matches, and results settings, and an eligible prize event can receive both.
+
+`EVENT_PROGRESS_WORKFLOW` sleeps until each notification's target; the existing event progress sweep discovers eligible events and recovers pending dispatches. Event changes persist eligible scheduling markers atomically before dispatch. Events first discovered after a notification's target skip that notification; previously scheduled jobs have a 60-second delivery grace period. Before sending, the workflow checks the canonical event and any required prize catalog entry under the event lease. A postponement can schedule a new job for each unsent notification; superseded jobs do nothing.
+
+Each event has one permanent delivery identity per notification kind. A confirmed reminder or prize album never resends, including after postponement. Only safely retryable Telegram failures can retry within the grace period; timeouts, interrupted sends, and ambiguous responses block automatic retries to prevent duplicates. Historical manual prize receipts remain valid. These announcements have no manual CLI or HTTP trigger and require no separate announcement bridge credential. The reminder rollout requires only the API Worker and an additive Telegram D1 migration that records the notification kind and makes delivery uniqueness specific to each event and kind; no frontend or trigger deployment is needed.
 
 ## Other admin tools
 

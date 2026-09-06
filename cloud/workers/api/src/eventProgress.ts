@@ -19,7 +19,7 @@ import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
 import { requireProfileOwnershipSnapshot } from "./profileOwnership.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
 import { createEventMutationRepository } from "./eventMutationRepository.ts";
-import { scheduleEventPrizeAnnouncement } from "./eventPrizeAnnouncementSchedule.ts";
+import { scheduleEventAnnouncements } from "./eventPrizeAnnouncementSchedule.ts";
 
 const EVENT_PROGRESS_OUTBOX_ROOT = "eventProgressOutbox";
 const EVENT_PROGRESS_OUTBOX_DEAD_ROOT = "eventProgressOutboxDead";
@@ -418,6 +418,7 @@ async function reconcileScheduledEvents(
   if (!value) {
     return;
   }
+  const discoveredAtMs = now();
   await forEachConcurrent(
     Object.entries(value),
     EVENT_PROGRESS_SWEEP_CONCURRENCY,
@@ -432,31 +433,42 @@ async function reconcileScheduledEvents(
       ) {
         return;
       }
-      const plan = await buildEventProgressPlan(
-        {
+      const results = await Promise.allSettled([
+        scheduleEventAnnouncements(
+          env,
+          repository,
           eventId,
-          sourceKey: `start:${eventId}:${startAtMs}`,
-          reason: "scheduled-start-reconciliation",
-          runAtMs: startAtMs,
-        },
-        now(),
-      );
-      const existing = await repository.getRtdbPath(
-        `${EVENT_PROGRESS_OUTBOX_ROOT}/${plan.outboxId}`,
-      );
-      if (existing === null) {
-        await repository.patchRtdbRoot({
-          [`${EVENT_PROGRESS_OUTBOX_ROOT}/${plan.outboxId}`]: plan.outbox,
-        });
+          event,
+          discoveredAtMs,
+        ),
+        (async () => {
+          const plan = await buildEventProgressPlan(
+            {
+              eventId,
+              sourceKey: `start:${eventId}:${startAtMs}`,
+              reason: "scheduled-start-reconciliation",
+              runAtMs: startAtMs,
+            },
+            discoveredAtMs,
+          );
+          const existing = await repository.getRtdbPath(
+            `${EVENT_PROGRESS_OUTBOX_ROOT}/${plan.outboxId}`,
+          );
+          if (existing === null) {
+            await repository.patchRtdbRoot({
+              [`${EVENT_PROGRESS_OUTBOX_ROOT}/${plan.outboxId}`]: plan.outbox,
+            });
+          }
+          await dispatchOutboxPlan(env, repository, plan, now);
+        })(),
+      ]);
+      const failures = rejectedReasons(results);
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          "scheduled-event-reconciliation-failed",
+        );
       }
-      await dispatchOutboxPlan(env, repository, plan, now);
-      await scheduleEventPrizeAnnouncement(
-        env,
-        repository,
-        eventId,
-        event,
-        now(),
-      );
     },
   );
 }

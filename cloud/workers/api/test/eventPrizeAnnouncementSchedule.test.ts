@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildEventPrizeAnnouncementPlan,
+  buildSundayMonsReminderPlan,
   createEventPrizeAnnouncementScheduleRepository,
   EVENT_PRIZE_ANNOUNCEMENT_REASON,
   scheduleEventPrizeAnnouncement,
@@ -99,7 +100,7 @@ function wrapper(
   );
 }
 
-test("event creation commits its announcement marker atomically before dispatch", async () => {
+test("event creation commits both announcement markers atomically before dispatch", async () => {
   const commitStarted = Promise.withResolvers<void>();
   const allowCommit = Promise.withResolvers<void>();
   const memory = memoryRepository({}, async () => {
@@ -107,17 +108,23 @@ test("event creation commits its announcement marker atomically before dispatch"
     await allowCommit.promise;
   });
   const enqueued: EventProgressPlan[] = [];
-  const event = scheduledEvent();
-  const expected = await buildEventPrizeAnnouncementPlan(
-    EVENT_ID,
-    event,
-    NOW_MS,
+  const event = scheduledEvent({ startAtMs: 30_000_000 });
+  const prize = await buildEventPrizeAnnouncementPlan(EVENT_ID, event, NOW_MS);
+  const reminder = await buildSundayMonsReminderPlan(EVENT_ID, event, NOW_MS);
+  assert.ok(prize);
+  assert.ok(reminder);
+  const expected = [prize, reminder];
+  const markers = Object.fromEntries(
+    expected.map((plan) => [
+      `eventProgressOutbox/${plan.outboxId}`,
+      plan.outbox,
+    ]),
   );
-  assert.ok(expected);
-  const markerPath = `eventProgressOutbox/${expected.outboxId}`;
   const wrapped = wrapper(memory, async (plan) => {
     assert.deepEqual(memory.get(EVENT_PATH), event);
-    assert.deepEqual(memory.get(markerPath), plan.outbox);
+    for (const [path, value] of Object.entries(markers)) {
+      assert.deepEqual(memory.get(path), value);
+    }
     enqueued.push(plan);
   });
 
@@ -126,9 +133,9 @@ test("event creation commits its announcement marker atomically before dispatch"
     "invites/unrelated/status": "active",
   });
   await commitStarted.promise;
-  assert.deepEqual(enqueued, []);
+  assert.equal(enqueued.length, 0);
   assert.equal(memory.get(EVENT_PATH), null);
-  assert.equal(memory.get(markerPath), null);
+  assert.equal(memory.get("eventProgressOutbox"), null);
   allowCommit.resolve();
   await pending;
 
@@ -136,12 +143,17 @@ test("event creation commits its announcement marker atomically before dispatch"
     {
       [EVENT_PATH]: event,
       "invites/unrelated/status": "active",
-      [markerPath]: expected.outbox,
+      ...markers,
     },
   ]);
-  assert.deepEqual(enqueued, [expected]);
-  assert.equal(expected.params.reason, EVENT_PRIZE_ANNOUNCEMENT_REASON);
-  assert.equal(expected.params.runAtMs, TARGET_MS);
+  assert.deepEqual(
+    new Set(enqueued.map((plan) => plan.outboxId)),
+    new Set(expected.map((plan) => plan.outboxId)),
+  );
+  assert.equal(prize.params.reason, EVENT_PRIZE_ANNOUNCEMENT_REASON);
+  assert.equal(prize.params.runAtMs, 26_400_000);
+  assert.equal(reminder.params.runAtMs, 19_200_000);
+  assert.notEqual(prize.workflowId, reminder.workflowId);
 });
 
 test("failed event persistence cannot dispatch or leave a schedule without the event", async () => {
@@ -154,7 +166,9 @@ test("failed event persistence cannot dispatch or leave a schedule without the e
   });
 
   await assert.rejects(
-    wrapped.patchRtdbRoot({ [EVENT_PATH]: scheduledEvent() }),
+    wrapped.patchRtdbRoot({
+      [EVENT_PATH]: scheduledEvent({ startAtMs: 30_000_000 }),
+    }),
     /persistence-unavailable/,
   );
 
@@ -195,7 +209,13 @@ test("dispatch failure leaves the committed marker available for sweep recovery"
   );
   assert.deepEqual(
     logs.map((value) => JSON.parse(value)),
-    [{ event: "event_prize_announcement_enqueue_failed", eventId: EVENT_ID }],
+    [
+      {
+        event: "event_announcement_enqueue_failed",
+        eventId: EVENT_ID,
+        reason: EVENT_PRIZE_ANNOUNCEMENT_REASON,
+      },
+    ],
   );
 });
 
@@ -219,6 +239,184 @@ test("repeat scheduling preserves first queue time and the workflow identity", a
   assert.deepEqual(enqueued[1], enqueued[0]);
   assert.equal(enqueued[1].outbox.firstQueuedAtMs, NOW_MS);
   assert.equal(memory.patches.length, 2);
+});
+
+test("both notification kinds preserve their first scheduling proof on repeat writes", async () => {
+  let nowMs = NOW_MS;
+  const event = scheduledEvent({ startAtMs: 30_000_000 });
+  const memory = memoryRepository();
+  const enqueued: EventProgressPlan[] = [];
+  const wrapped = wrapper(
+    memory,
+    async (plan) => {
+      enqueued.push(plan);
+    },
+    () => nowMs,
+  );
+
+  await wrapped.patchRtdbRoot({ [EVENT_PATH]: event });
+  nowMs += 60_000;
+  await wrapped.patchRtdbRoot({ [`${EVENT_PATH}/startAtMs`]: event.startAtMs });
+
+  assert.equal(enqueued.length, 4);
+  const identities = new Set(enqueued.map((plan) => plan.workflowId));
+  assert.equal(identities.size, 2);
+  for (const workflowId of identities) {
+    const attempts = enqueued.filter((plan) => plan.workflowId === workflowId);
+    assert.deepEqual(attempts[1], attempts[0]);
+    assert.equal(attempts[1].outbox.firstQueuedAtMs, NOW_MS);
+  }
+});
+
+test("failure dispatching either kind leaves both markers and dispatches the other", async () => {
+  const event = scheduledEvent({ startAtMs: 30_000_000 });
+  const prize = await buildEventPrizeAnnouncementPlan(EVENT_ID, event, NOW_MS);
+  const reminder = await buildSundayMonsReminderPlan(EVENT_ID, event, NOW_MS);
+  assert.ok(prize);
+  assert.ok(reminder);
+  const plans = [prize, reminder];
+  for (const failing of plans) {
+    const memory = memoryRepository();
+    const attempted: string[] = [];
+    const dispatched: string[] = [];
+    const logs: unknown[] = [];
+    const wrapped = createEventPrizeAnnouncementScheduleRepository(
+      TELEGRAM_TEST_ENV,
+      memory.repository,
+      {
+        now: () => NOW_MS,
+        logger: { error: (value: unknown) => logs.push(value) },
+        enqueue: async (plan) => {
+          attempted.push(plan.workflowId);
+          if (plan.workflowId === failing.workflowId)
+            throw new Error("dispatch-unavailable");
+          dispatched.push(plan.workflowId);
+        },
+      },
+    );
+
+    await wrapped.patchRtdbRoot({ [EVENT_PATH]: event });
+
+    assert.deepEqual(
+      new Set(attempted),
+      new Set(plans.map((plan) => plan.workflowId)),
+    );
+    assert.deepEqual(
+      dispatched,
+      plans.filter((plan) => plan !== failing).map((plan) => plan.workflowId),
+    );
+    assert.equal(logs.length, 1);
+    for (const plan of plans) {
+      assert.deepEqual(
+        memory.get(`eventProgressOutbox/${plan.outboxId}`),
+        plan.outbox,
+      );
+    }
+  }
+});
+
+test("a Sunday Mons event without prizes schedules only its three-hour reminder", async () => {
+  const eventId = "sunday-without-prizes";
+  const event = scheduledEvent({
+    startAtMs: 30_000_000,
+    announceOnTelegram: false,
+  });
+  const memory = memoryRepository();
+  const enqueued: EventProgressPlan[] = [];
+  const wrapped = wrapper(memory, async (plan) => {
+    enqueued.push(plan);
+  });
+  const reminder = await buildSundayMonsReminderPlan(eventId, event, NOW_MS);
+  assert.ok(reminder);
+  assert.equal(
+    await buildEventPrizeAnnouncementPlan(eventId, event, NOW_MS),
+    null,
+  );
+
+  await wrapped.patchRtdbRoot({ [`events/${eventId}`]: event });
+
+  assert.deepEqual(enqueued, [reminder]);
+  assert.deepEqual(memory.patches, [
+    {
+      [`events/${eventId}`]: event,
+      [`eventProgressOutbox/${reminder.outboxId}`]: reminder.outbox,
+    },
+  ]);
+  assert.equal(reminder.params.runAtMs, 19_200_000);
+  assert.equal(reminder.outbox.firstQueuedAtMs, NOW_MS);
+});
+
+test("reminders require strict Sunday eligibility independently of prize metadata and toggles", async () => {
+  const event = scheduledEvent({ startAtMs: 30_000_000 });
+  for (const overrides of [
+    { isSundayMons: false },
+    { isSundayMons: "true" },
+    { isSundayMons: undefined },
+    { status: "active" },
+    { status: "ended" },
+    { status: "cancelled" },
+    { startAtMs: "30000000" },
+    { startAtMs: 30_000_000.5 },
+  ]) {
+    assert.equal(
+      await buildSundayMonsReminderPlan(
+        EVENT_ID,
+        { ...event, ...overrides },
+        NOW_MS,
+      ),
+      null,
+    );
+  }
+  for (const telegramAnnouncements of [
+    undefined,
+    { invite: false, matches: false, results: false },
+    { invite: true, matches: true, results: true },
+  ]) {
+    assert.ok(
+      await buildSundayMonsReminderPlan(
+        "sunday-without-prizes",
+        {
+          ...event,
+          telegramAnnouncements,
+          announceOnTelegram: false,
+        },
+        NOW_MS,
+      ),
+    );
+  }
+});
+
+test("missing the three-hour discovery cutoff still permits the independent prize album", async () => {
+  const event = scheduledEvent({ startAtMs: 30_000_000 });
+  const targetMs = 19_200_000;
+  const onTime = await buildSundayMonsReminderPlan(EVENT_ID, event, targetMs);
+  assert.ok(onTime);
+  assert.equal(onTime.outbox.firstQueuedAtMs, targetMs);
+  assert.equal(
+    await buildSundayMonsReminderPlan(EVENT_ID, event, targetMs + 1),
+    null,
+  );
+  const prize = await buildEventPrizeAnnouncementPlan(
+    EVENT_ID,
+    event,
+    targetMs + 1,
+  );
+  assert.ok(prize);
+  const memory = memoryRepository();
+  const enqueued: EventProgressPlan[] = [];
+  const wrapped = wrapper(
+    memory,
+    async (plan) => {
+      enqueued.push(plan);
+    },
+    () => targetMs + 1,
+  );
+
+  await wrapped.patchRtdbRoot({ [EVENT_PATH]: event });
+
+  assert.deepEqual(enqueued, [prize]);
+  assert.equal(memory.get(`eventProgressOutbox/${onTime.outboxId}`), null);
+  assert.equal(prize.outbox.firstQueuedAtMs, targetMs + 1);
 });
 
 test("partial changes evaluate the event after all scheduling fields are applied", async () => {
@@ -342,10 +540,14 @@ test("postponement creates a distinct schedule without overwriting the earlier m
     [`${EVENT_PATH}/startAtMs`]: START_AT_MS + 7_200_000,
   });
 
-  assert.equal(enqueued.length, 2);
-  assert.notEqual(enqueued[0].workflowId, enqueued[1].workflowId);
-  assert.notEqual(enqueued[0].outboxId, enqueued[1].outboxId);
-  assert.equal(enqueued[1].params.runAtMs, TARGET_MS + 7_200_000);
+  const prizes = enqueued.filter(
+    (plan) => plan.params.reason === EVENT_PRIZE_ANNOUNCEMENT_REASON,
+  );
+  assert.equal(enqueued.length, 3);
+  assert.equal(prizes.length, 2);
+  assert.notEqual(prizes[0].workflowId, prizes[1].workflowId);
+  assert.notEqual(prizes[0].outboxId, prizes[1].outboxId);
+  assert.equal(prizes[1].params.runAtMs, TARGET_MS + 7_200_000);
   for (const plan of enqueued) {
     assert.deepEqual(
       memory.get(`eventProgressOutbox/${plan.outboxId}`),

@@ -6,6 +6,7 @@ const {
   AUTOMATCH_WAITING_EMOJI_ID,
   getTelegramEmojiTag,
 } = require("../telegramDisplay");
+const { isSundayMonsReminderEvent } = require("./sundayMonsReminder");
 
 const EVENT_URL_ROOT = "https://mons.link/event/";
 const EVENT_PRIZE_ANNOUNCEMENT_PREFIX = "sunday mons treats — ";
@@ -37,14 +38,7 @@ const isValidPrizeConfig = (config) =>
 
 const isEventPrizeAnnouncementEvent = (eventId, eventData) =>
   Boolean(
-    normalizeFirebaseKey(eventId) &&
-    eventData &&
-    typeof eventData === "object" &&
-    !Array.isArray(eventData) &&
-    eventData.status === "scheduled" &&
-    eventData.isSundayMons === true &&
-    Number.isSafeInteger(eventData.startAtMs) &&
-    eventData.startAtMs > 0 &&
+    isSundayMonsReminderEvent(eventId, eventData) &&
     isValidPrizeConfig(getEventPrizeConfig(eventId)),
   );
 

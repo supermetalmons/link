@@ -5,7 +5,8 @@ import type {
   WorkflowStep,
   WorkflowStepConfig,
 } from "cloudflare:workers";
-import { buildEventPrizeAnnouncementPlan } from "../src/eventPrizeAnnouncementSchedule.ts";
+import { buildEventAnnouncementPlan } from "../src/eventPrizeAnnouncementSchedule.ts";
+import type { EventAnnouncementKind } from "../src/eventAnnouncementKinds.ts";
 import { runEventPrizeAnnouncementWorkflow } from "../src/eventPrizeAnnouncementWorkflow.ts";
 import {
   InvalidEventProgressPayloadError,
@@ -21,11 +22,16 @@ const EVENT = {
   startAtMs: RUN_AT_MS + 3_600_000,
 };
 
-async function harness() {
-  const plan = await buildEventPrizeAnnouncementPlan(
-    EVENT_ID,
-    EVENT,
+async function harness(
+  kind: EventAnnouncementKind = "prizes",
+  eventId = EVENT_ID,
+) {
+  const startAtMs = RUN_AT_MS + (kind === "prizes" ? 3_600_000 : 10_800_000);
+  const plan = await buildEventAnnouncementPlan(
+    eventId,
+    { ...EVENT, startAtMs },
     RUN_AT_MS - 1_000,
+    kind,
   );
   assert.ok(plan);
   let nowMs = RUN_AT_MS - 1_000;
@@ -68,8 +74,9 @@ async function harness() {
       },
       deliver: async (input) => {
         assert.deepEqual(input, {
-          eventId: EVENT_ID,
-          startAtMs: EVENT.startAtMs,
+          ...(kind === "reminder" ? { kind } : {}),
+          eventId,
+          startAtMs,
           runAtMs: RUN_AT_MS,
           firstQueuedAtMs: RUN_AT_MS - 1_000,
         });
@@ -116,6 +123,38 @@ test("sleeps until the one-hour target, preserves discovery proof, and safely re
   assert.equal(state.acknowledgements(), 1);
 });
 
+test("reminders without prizes use the three-hour identity and their own step names", async () => {
+  const state = await harness("reminder", "sunday-without-prizes");
+  assert.equal(state.plan.params.reason, "sunday-mons-reminder");
+  assert.equal(
+    state.plan.params.sourceKey,
+    `reminder:sunday-without-prizes:${RUN_AT_MS + 10_800_000}`,
+  );
+  assert.equal(state.plan.params.runAtMs, RUN_AT_MS);
+  assert.deepEqual(await state.run(), { status: "sent" });
+  assert.deepEqual(state.sleeps, [
+    { name: "wait for sunday mons reminder", timestamp: RUN_AT_MS },
+  ]);
+  assert.equal(state.sends(), 1);
+  assert.equal(state.acknowledgements(), 1);
+  assert.deepEqual(await state.run(), { status: "sent" });
+  assert.equal(state.sends(), 1);
+});
+
+test("reminders enforce the same discovery and grace limits", async () => {
+  for (const scenario of ["late", "expired", "within-grace"]) {
+    const state = await harness("reminder", "sunday-without-prizes");
+    if (scenario === "late")
+      state.setRecord({ ...state.plan.outbox, firstQueuedAtMs: RUN_AT_MS + 1 });
+    state.setNow(RUN_AT_MS + (scenario === "expired" ? 60_000 : 59_999));
+    assert.equal(
+      (await state.run()).status,
+      scenario === "within-grace" ? "sent" : "skipped",
+    );
+    assert.equal(state.sends(), scenario === "within-grace" ? 1 : 0);
+  }
+});
+
 test("retries only within the fixed grace and honors retryAtMs", async () => {
   const state = await harness();
   state.setOutcome(async () =>
@@ -127,6 +166,43 @@ test("retries only within the fixed grace and honors retryAtMs", async () => {
   assert.equal(state.sends(), 2);
   assert.equal(state.sleeps[1].timestamp, RUN_AT_MS + 20_000);
 });
+
+for (const kind of ["prizes", "reminder"] as const) {
+  test(`${kind}: replaying a sleep preserves the last valid retry and its completed result`, async () => {
+    const state = await harness(kind);
+    const retryStepName =
+      kind === "prizes"
+        ? "retry prize announcement 0"
+        : "retry sunday mons reminder 0";
+    state.setOutcome(async () =>
+      state.sends() === 1
+        ? { status: "retryable", retryAtMs: RUN_AT_MS + 59_000 }
+        : { status: "sent" },
+    );
+    const sleepUntil = state.step.sleepUntil;
+    let suspended = false;
+    state.step.sleepUntil = async (name, timestamp) => {
+      await sleepUntil(name, timestamp);
+      if (name === retryStepName && !suspended) {
+        suspended = true;
+        throw new Error("simulated-hibernation");
+      }
+    };
+    await assert.rejects(state.run(), /simulated-hibernation/);
+    assert.equal(state.sends(), 1);
+    assert.deepEqual(await state.run(), { status: "sent" });
+    assert.equal(state.sends(), 2);
+    assert.deepEqual(
+      state.sleeps
+        .filter(({ name }) => name === retryStepName)
+        .map(({ timestamp }) => timestamp),
+      [RUN_AT_MS + 59_000, RUN_AT_MS + 59_000],
+    );
+    state.setNow(RUN_AT_MS + 61_000);
+    assert.deepEqual(await state.run(), { status: "sent" });
+    assert.equal(state.sends(), 2);
+  });
+}
 
 test("a retry beyond the deadline expires without another send", async () => {
   const state = await harness();

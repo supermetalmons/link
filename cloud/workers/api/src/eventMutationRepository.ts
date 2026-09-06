@@ -2,7 +2,7 @@ import type { GameplayRepository } from "./gameplayRepository.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
 import { createEventProfileGameProjectionRepository } from "./eventProfileGameProjectionProducer.ts";
 import { createEventTelegramProjectionRepository } from "./eventTelegramProjectionProducer.ts";
-import { createEventPrizeAnnouncementScheduleRepository } from "./eventPrizeAnnouncementSchedule.ts";
+import { createEventAnnouncementScheduleRepository } from "./eventPrizeAnnouncementSchedule.ts";
 
 type EventMutationRepositoryOptions = {
   baseRepository?: GameplayRepository;
@@ -17,14 +17,14 @@ export function createEventMutationRepository(
   const eventRepository =
     options.eventRepository ||
     createEventGameplayRepository(env, options.baseRepository);
-  const prizeRepository = createEventPrizeAnnouncementScheduleRepository(
+  const announcementRepository = createEventAnnouncementScheduleRepository(
     env,
     eventRepository,
     { schedule: options.schedule },
   );
   const telegramRepository = createEventTelegramProjectionRepository(
     env,
-    prizeRepository,
+    announcementRepository,
     { schedule: options.schedule },
   );
   return createEventProfileGameProjectionRepository(env, telegramRepository, {
