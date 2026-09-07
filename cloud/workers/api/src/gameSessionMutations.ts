@@ -1032,19 +1032,29 @@ export async function proposeRematch(
         throw failedPrecondition("rematch-unavailable");
       }
       const matchId = `${request.inviteId}${index}`;
-      const opponentMatch = normalizeMatch(
-        await repository.getRtdbPath(
+      const matchPath = `players/${participant.actorUid}/matches/${matchId}`;
+      const [storedMatch, storedOpponent] = await Promise.all([
+        repository.getRtdbPath(matchPath),
+        repository.getRtdbPath(
           `players/${participant.opponentUid}/matches/${matchId}`,
         ),
-      );
+      ]);
+      const existingMatch = normalizeMatch(storedMatch);
+      const color = rematchColor(invite, participant.role, index);
+      if (
+        (storedMatch !== null && storedMatch !== undefined && !existingMatch) ||
+        (existingMatch && existingMatch.color !== color)
+      ) {
+        throw failedPrecondition("rematch-match-invalid");
+      }
+      const opponentMatch = normalizeMatch(storedOpponent);
       const seed = opponentMatch
         ? {
             gameVariant: opponentMatch.gameVariant,
             fen: opponentMatch.fen,
           }
         : gameVariantHelpers.buildDeterministicGameSeed(`rematch:${matchId}`);
-      const color = rematchColor(invite, participant.role, index);
-      const match: GameSessionMatch = {
+      const match: GameSessionMatch = existingMatch || {
         ...buildFreshMatchRecord({
           color,
           emojiId: request.emojiId,
@@ -1090,7 +1100,7 @@ export async function proposeRematch(
           : {}),
         updates: {
           [`invites/${request.inviteId}/${field}`]: rematches,
-          [`players/${participant.actorUid}/matches/${matchId}`]: match,
+          ...(existingMatch ? {} : { [matchPath]: match }),
         },
       };
     },
@@ -1258,6 +1268,11 @@ export async function sweepGameSessionMutationReceipts(
   } = {},
 ): Promise<number> {
   const cutoff = now() - GAME_SESSION_MUTATION_RECEIPT_RETENTION_MS;
+  const expired = await repository.automatchPersistence?.expireReceipts(
+    cutoff,
+    GAME_SESSION_MUTATION_RECEIPT_SWEEP_LIMIT,
+  );
+  if (expired !== null && expired !== undefined) return expired;
   const value = toRecord(
     await repository.getRtdbPath(
       GAME_SESSION_MUTATION_RECEIPT_EXPIRATION_ROOT,

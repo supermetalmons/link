@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import {
+  applyD1Migrations,
   evictDurableObject,
   runInDurableObject,
   type D1Migration,
@@ -23,7 +24,11 @@ import { handleRequest } from "../src/router.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 beforeAll(async () => {
-  const testEnv = env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] };
+  const testEnv = env as Env & {
+    TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
+    TEST_D1_MIGRATIONS: D1Migration[];
+  };
+  await applyD1Migrations(env.PROFILE_GAMES_DB, testEnv.TEST_D1_MIGRATIONS);
   await applyRetiredProfileMigrations(
     env.PROFILE_DB,
     testEnv.TEST_PROFILE_D1_MIGRATIONS,

@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import type { D1Migration } from "cloudflare:test";
+import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createEmptyMaterials } from "@mons/shared/mining";
 import type { CompletePlayerProfile } from "@mons/shared/profiles";
@@ -25,7 +25,10 @@ import {
 import { createMemoryGameplayCoordinationStores } from "../test/gameplayCoordinationTestUtils.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
-const testEnv = env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] };
+const testEnv = env as Env & {
+  TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
+  TEST_D1_MIGRATIONS: D1Migration[];
+};
 const now = () => 3_000_000;
 
 async function insertProfile(loginUid: string) {
@@ -194,6 +197,7 @@ async function fixture(failCompletedWrite = false) {
 
 describe("D1 wager gameplay integration", () => {
   beforeAll(async () => {
+    await applyD1Migrations(env.PROFILE_GAMES_DB, testEnv.TEST_D1_MIGRATIONS);
     await applyRetiredProfileMigrations(
       env.PROFILE_DB,
       testEnv.TEST_PROFILE_D1_MIGRATIONS,

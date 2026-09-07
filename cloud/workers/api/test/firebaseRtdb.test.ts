@@ -269,6 +269,37 @@ test("fails after transaction conflicts are exhausted", async () => {
   );
 });
 
+test("persists transaction audit before sending the conditional write", async () => {
+  const order: string[] = [];
+  const repository = createFirebaseRtdbClient(env, {
+    getAccessToken: async () => "access-token",
+    fetcher: async (_input, init) => {
+      if (init?.method === "PUT") {
+        order.push("put");
+        return jsonResponse({ revision: 2 });
+      }
+      return jsonResponse({ revision: 1 }, 200, { ETag: '"one"' });
+    },
+  });
+  const update = () => ({ value: { revision: 2 } });
+  await assert.rejects(
+    repository.transactPath("key", update, undefined, async () => {
+      throw new Error("audit-unavailable");
+    }),
+    /audit-unavailable/,
+  );
+  assert.equal(order.length, 0);
+  await repository.transactPath("key", update, undefined, async (attempt) => {
+    assert.deepEqual(attempt, {
+      current: { revision: 1 },
+      proposed: { revision: 2 },
+      etag: '"one"',
+    });
+    order.push("audit");
+  });
+  assert.deepEqual(order, ["audit", "put"]);
+});
+
 test("fails closed on oversized and unavailable RTDB responses", async () => {
   const oversized = createFirebaseRtdbClient(env, {
     getAccessToken: async () => "access-token",

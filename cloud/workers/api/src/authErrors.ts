@@ -62,7 +62,8 @@ export function authErrorResponse(
         ...headers,
         "Cache-Control": "no-store",
         "Content-Type": "application/json; charset=utf-8",
-        ...(error instanceof ProfileWritesDisabledFailure
+        ...(error instanceof ProfileWritesDisabledFailure ||
+        error.message === "automatch-persistence-frozen"
           ? {
               "Retry-After": String(PROFILE_WRITES_RETRY_AFTER_SECONDS),
             }

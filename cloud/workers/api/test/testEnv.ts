@@ -78,11 +78,53 @@ const profileGamesDb = {
     })),
   dump: async () => new ArrayBuffer(0),
   exec: async () => ({ count: 0, duration: 0 }),
-  prepare: () => d1Statement,
-  withSession: () => {
-    throw new Error("test-profile-games-db-not-configured");
-  },
+  prepare: (query: string): D1PreparedStatement =>
+    query.includes("automatch_runtime_control") ||
+    query.includes("automatch_write_admissions")
+      ? automatchStatement(query)
+      : d1Statement,
+  withSession: (): D1DatabaseSession => ({
+    prepare: (query: string): D1PreparedStatement =>
+      profileGamesDb.prepare(query),
+    batch: profileGamesDb.batch,
+    getBookmark: () => null,
+  }),
 } satisfies D1Database;
+
+function automatchStatement(
+  query: string,
+  bindings: unknown[] = [],
+): D1PreparedStatement {
+  return {
+    all: d1Statement.all,
+    raw: d1Statement.raw,
+    run: d1Statement.run,
+    bind: (...values) => automatchStatement(query, values),
+    first: async <T>() =>
+      (query.includes("INSERT INTO automatch_write_admissions")
+        ? {
+            admission_id: bindings[0],
+            kind: bindings[1],
+            created_at_ms: bindings[2],
+            backend: "rtdb",
+            epoch: 1,
+            freeze_generation: 0,
+          }
+        : {
+            backend: "rtdb",
+            state: "active",
+            epoch: 1,
+            freeze_generation: 0,
+            staged_at_ms: null,
+            candidate_version_id: null,
+            imported_at_ms: null,
+            source_digest: null,
+            import_digest: null,
+            activated_at_ms: null,
+            metadata_json: null,
+          }) as T,
+  };
+}
 
 const canonicalControlStatement: D1PreparedStatement = {
   all: d1Statement.all,

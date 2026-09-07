@@ -148,6 +148,78 @@ test("rules deny structural writes and preserve live participant writes", async 
   );
 });
 
+test("automatch source rejects browser root, child and multipath writes including admin", async () => {
+  const queued = { uid: "host", timestamp: 1234, password: "retained" };
+  await rules.withSecurityRulesDisabled(async (context) => {
+    await context.database().ref("automatch/auto1").set(queued);
+  });
+  for (const context of [
+    rules.unauthenticatedContext(),
+    rules.authenticatedContext("host", { profileId: "profile-host" }),
+    rules.authenticatedContext("admin", { admin: true }),
+  ]) {
+    const database = context.database();
+    await assertFails(database.ref("automatch").set({ auto2: queued }));
+    await assertFails(database.ref("automatch/auto1").remove());
+    await assertFails(database.ref("automatch/auto1/uid").set("guest"));
+    await assertFails(database.ref().update({ "automatch/auto1": null }));
+  }
+  const admin = rules.authenticatedContext("admin-reader", { admin: true });
+  assert.deepEqual(
+    (await admin.database().ref("automatch/auto1").get()).val(),
+    queued,
+  );
+});
+
+test("session creation evidence is immutable for every browser while moves preserve it", async () => {
+  const matchPath = "players/host/matches/invite1";
+  const marker = "creation-operation:host";
+  for (const storedMarker of [undefined, marker]) {
+    const initial = {
+      ...match(),
+      ...(storedMarker ? { sessionCreation: storedMarker } : {}),
+    };
+    await rules.withSecurityRulesDisabled(async (context) => {
+      await context.database().ref(matchPath).set(initial);
+    });
+    for (const context of [
+      rules.authenticatedContext("host", { profileId: "profile-host" }),
+      rules.authenticatedContext("alternate", { profileId: "profile-host" }),
+      rules.authenticatedContext("admin", { admin: true }),
+    ]) {
+      const database = context.database();
+      await assertFails(
+        database.ref(`${matchPath}/sessionCreation`).set("different"),
+      );
+      await assertFails(
+        database
+          .ref(matchPath)
+          .set({ ...initial, sessionCreation: "different" }),
+      );
+      await assertFails(
+        database.ref().update({
+          [`${matchPath}/sessionCreation`]: "different",
+          [`${matchPath}/status`]: "surrendered",
+        }),
+      );
+      if (storedMarker) {
+        await assertFails(
+          database.ref(`${matchPath}/sessionCreation`).remove(),
+        );
+        await assertFails(database.ref(matchPath).set(match()));
+      }
+      await assertSucceeds(
+        database
+          .ref(matchPath)
+          .set({ ...initial, fen: "fen-next", flatMovesString: "move" }),
+      );
+      await assertSucceeds(
+        database.ref(`${matchPath}/status`).set("surrendered"),
+      );
+    }
+  }
+});
+
 test("retired reactions remain readable but reject every browser write", async () => {
   const reaction = {
     uuid: "retained-reaction",

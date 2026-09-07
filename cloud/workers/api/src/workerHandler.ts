@@ -49,6 +49,7 @@ import {
 } from "./gameplayCoordinationD1.ts";
 import { sweepMatchTimerStarts } from "./matchTimerStartSweep.ts";
 import { recoverEventTransitionIntents } from "./eventRepository.ts";
+import { readAutomatchRuntimeControl } from "./automatchD1.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
 export type { ProviderFetch } from "./provider.ts";
@@ -79,6 +80,7 @@ type ScheduledTasks = {
   eventTransitions: () => Promise<unknown>;
   gameSessionLocks: () => Promise<unknown>;
   gameSessionReceipts: () => Promise<unknown>;
+  gameSessionTransitions: () => Promise<unknown>;
   matchTimerStarts: () => Promise<unknown>;
   profileGameProjection: () => Promise<unknown>;
   telegramProjection: () => Promise<unknown>;
@@ -92,6 +94,9 @@ export async function handleScheduled(
   overrides: Partial<ScheduledTasks> = {},
 ): Promise<void> {
   const profileWritesEnabled = profileBackgroundMutationsEnabled(env);
+  const persistenceWritesEnabled = readAutomatchRuntimeControl(
+    env.PROFILE_GAMES_DB,
+  ).then((control) => control.state === "active");
   const tasks: ScheduledTasks = {
     authRecovery: () => handleAuthRecoverySweep(controller, env),
     authState: () =>
@@ -120,6 +125,13 @@ export async function handleScheduled(
       sweepGameSessionMutationReceipts(env, {
         now: () => controller.scheduledTime,
       }),
+    gameSessionTransitions: async () => {
+      const repository = createGameplayRepository(env);
+      const result = await repository.automatchPersistence?.sweep();
+      if (result?.failed)
+        throw new Error("game-session-transition-recovery-failed");
+      return result;
+    },
     matchTimerStarts: () =>
       sweepMatchTimerStarts(
         createMatchTimerStartStore(env.PROFILE_GAMES_DB),
@@ -139,15 +151,19 @@ export async function handleScheduled(
       await task();
     }
   };
+  const runPersistenceTask = async (task: () => Promise<unknown>) => {
+    if (await persistenceWritesEnabled) await task();
+  };
   const results = await Promise.allSettled([
     runProfileTask(tasks.authRecovery),
     runProfileTask(tasks.eventProgress),
     runProfileTask(tasks.eventTransitions),
-    runProfileTask(tasks.profileGameProjection),
-    runProfileTask(tasks.telegramProjection),
+    runProfileTask(() => runPersistenceTask(tasks.profileGameProjection)),
+    runProfileTask(() => runPersistenceTask(tasks.telegramProjection)),
+    runProfileTask(() => runPersistenceTask(tasks.gameSessionTransitions)),
     runProfileTask(tasks.matchTimerStarts),
     tasks.gameSessionLocks(),
-    tasks.gameSessionReceipts(),
+    runPersistenceTask(tasks.gameSessionReceipts),
     tasks.authState(),
   ]);
   const failure = results.find(
@@ -170,6 +186,14 @@ async function handleQueue(
   batch: MessageBatch<unknown>,
   env: Env,
 ): Promise<void> {
+  if (
+    (batch.queue === PROFILE_GAME_PROJECTION_QUEUE_NAME ||
+      batch.queue === TELEGRAM_PROJECTION_QUEUE_NAME) &&
+    (await readAutomatchRuntimeControl(env.PROFILE_GAMES_DB)).state === "frozen"
+  ) {
+    retryQueueMessages(batch);
+    return;
+  }
   if (
     batch.queue === AUTH_RECOVERY_QUEUE_NAME ||
     batch.queue === PROFILE_GAME_PROJECTION_QUEUE_NAME ||

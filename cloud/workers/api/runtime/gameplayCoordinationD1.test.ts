@@ -249,8 +249,8 @@ describe("D1 gameplay coordination", () => {
              SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < ?
            )
            INSERT INTO game_session_mutation_locks
-             (lock_id, owner_id, operation_id, expires_at_ms)
-           SELECT 'expired-' || n, 'owner', 'operation', 100 FROM numbers`,
+             (lock_id, owner_id, operation_id, expires_at_ms, writer_generation)
+           SELECT 'expired-' || n, 'owner', 'operation', 100, 2 FROM numbers`,
         )
         .bind(GAME_SESSION_MUTATION_LOCK_SWEEP_LIMIT + 1)
         .run();

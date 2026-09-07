@@ -3,6 +3,7 @@ import {
   type FirebaseRtdbClient,
 } from "./firebaseRtdb.ts";
 import { createWagerStateRtdbClient } from "./wagerStateRepository.ts";
+import { createAutomatchPersistence } from "./automatchPersistence.ts";
 
 const INVITE_SOURCE_CLIENT_TTL_MS = 5 * 60 * 1_000;
 
@@ -26,9 +27,13 @@ export function createInviteSourceReader(
   let expiresAtMs = 0;
   return async (inviteId) => {
     if (!client || now() >= expiresAtMs) {
-      client = createWagerStateRtdbClient(env.PROFILE_DB, createClient(), {
-        now,
-      });
+      client = createWagerStateRtdbClient(
+        env.PROFILE_DB,
+        createAutomatchPersistence(env.PROFILE_GAMES_DB, createClient(), {
+          now,
+        }).client,
+        { now },
+      );
       expiresAtMs = now() + INVITE_SOURCE_CLIENT_TTL_MS;
     }
     try {

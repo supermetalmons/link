@@ -62,6 +62,11 @@ export type FirebaseRtdbClient = {
     path: string,
     updater: (current: unknown) => unknown,
     signal?: AbortSignal,
+    beforeWrite?: (attempt: {
+      current: unknown;
+      proposed: unknown;
+      etag: string;
+    }) => Promise<void>,
   ) => Promise<FirebaseRtdbTransactionResult>;
 };
 
@@ -234,7 +239,7 @@ export function createFirebaseRtdbClient(
         await notifyInviteSourceChanged(env, updates, committed);
       }
     },
-    async transactPath(path, updater, signal) {
+    async transactPath(path, updater, signal, beforeWrite) {
       const url = databaseUrl(root, path);
       for (let attempt = 0; attempt < maxTransactionAttempts; attempt += 1) {
         const readResponse = await authorizedFetch(
@@ -264,6 +269,7 @@ export function createFirebaseRtdbClient(
             value: current,
           };
         }
+        await beforeWrite?.({ current, proposed: decision.value, etag });
         let committed = false;
         let conflict = false;
         try {

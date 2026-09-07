@@ -1,3 +1,4 @@
+import { createAutomatchPersistence } from "./automatchPersistence.ts";
 import {
   createFirebaseRtdbClient,
   type FirebaseRtdbClient,
@@ -506,7 +507,10 @@ export function createEventGameplayRepository(
 
 export function createEventRtdbClient(
   env: Env,
-  base: EventRtdbBackend = createFirebaseRtdbClient(env),
+  base: EventRtdbBackend = createAutomatchPersistence(
+    env.PROFILE_GAMES_DB,
+    createFirebaseRtdbClient(env),
+  ).client,
 ): EventRtdbClient {
   const transactPath = async (
     path: string,
@@ -666,7 +670,8 @@ export function createEventRtdbClient(
         },
       );
     },
-    transactPath,
+    transactPath: (path, updater, signal) =>
+      transactPath(path, updater, signal),
     transactStoredProfileEventPrizeWithEventLease(
       path,
       updater,

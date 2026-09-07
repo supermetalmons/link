@@ -1,4 +1,9 @@
 import type { WagerFrozenStore } from "./wagerFrozenStore.ts";
+import { notifyInviteSourceChanged } from "./inviteWagersNotifications.ts";
+import {
+  createAutomatchPersistence,
+  type AutomatchPersistence,
+} from "./automatchPersistence.ts";
 import { createWagerStateRtdbClient } from "./wagerStateRepository.ts";
 import type { HistoricalMatchPair } from "@mons/shared/game-sessions";
 import type {
@@ -230,6 +235,7 @@ export type RatingProfileGameProjectionRepository = RatingRepository & {
 };
 
 export type GameplayRepository = ProfileOwnershipReader & {
+  automatchPersistence?: AutomatchPersistence;
   wagerFrozen?: WagerFrozenStore;
   applyWagerTransferOnce: (
     input: WagerTransferInput,
@@ -299,9 +305,18 @@ export function createGameplayRepository(
     }),
   }: GameplayRepositoryDependencies = {},
 ): GameplayRepository {
-  const source = createWagerStateRtdbClient(env.PROFILE_DB, rtdbClient, {
+  const automatchPersistence = createAutomatchPersistence(d1, rtdbClient, {
     now,
+    onCommitted: (inviteId) =>
+      notifyInviteSourceChanged(env, { [`invites/${inviteId}`]: true }, true),
   });
+  const source = createWagerStateRtdbClient(
+    env.PROFILE_DB,
+    automatchPersistence.client,
+    {
+      now,
+    },
+  );
   return {
     ...createCanonicalGameplayRepository(env.PROFILE_DB, d1, source, {
       createFailure: () => new GameplayRepositoryFailure(),
@@ -309,6 +324,7 @@ export function createGameplayRepository(
       now,
     }),
     wagerFrozen,
+    automatchPersistence,
   };
 }
 

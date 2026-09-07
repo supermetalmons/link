@@ -74,7 +74,8 @@
     "latest:root": "npx --yes npm-check-updates@latest -u --peer && npm install",
     "latest:functions": "npx --yes npm-check-updates@latest -u --peer --packageFile cloud/functions/package.json && npm install --prefix cloud/functions",
     "latest:admin": "npx --yes npm-check-updates@latest -u --peer --packageFile cloud/admin/package.json && npm install --prefix cloud/admin",
-    "latest": "npm run latest:root && npm run latest:functions && npm run latest:admin"
+    "latest": "npm run latest:root && npm run latest:functions && npm run latest:admin",
+    "manage:automatch-state": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-automatch-state.ts"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.1.2",

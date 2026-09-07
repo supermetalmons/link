@@ -203,13 +203,16 @@ export function createGameSessionMutationLockStore(
         const result = await db
           .prepare(
             `INSERT INTO game_session_mutation_locks
-               (lock_id, owner_id, operation_id, expires_at_ms)
-             VALUES (?, ?, ?, ?)
+               (lock_id, owner_id, operation_id, expires_at_ms, writer_generation)
+             VALUES (?, ?, ?, ?, 2)
              ON CONFLICT (lock_id) DO UPDATE SET
                owner_id = excluded.owner_id,
                operation_id = excluded.operation_id,
-               expires_at_ms = excluded.expires_at_ms
-             WHERE game_session_mutation_locks.expires_at_ms <= ?`,
+               expires_at_ms = excluded.expires_at_ms,
+               writer_generation = 2
+             WHERE game_session_mutation_locks.expires_at_ms <= ?
+               AND (game_session_mutation_locks.writer_generation = 2
+                 OR (SELECT enabled FROM game_session_legacy_fence WHERE singleton = 1) = 0)`,
           )
           .bind(
             lock.lockId,
@@ -242,6 +245,7 @@ export function createGameSessionMutationLockStore(
              WHERE lock_id = ?
                AND owner_id = ?
                AND operation_id = ?
+               AND writer_generation = 2
                AND expires_at_ms > ?`,
           )
           .bind(
@@ -303,7 +307,7 @@ export function createGameSessionMutationLockStore(
             `DELETE FROM game_session_mutation_locks
              WHERE lock_id IN (
                SELECT lock_id FROM game_session_mutation_locks
-               WHERE expires_at_ms <= ?
+               WHERE expires_at_ms <= ? AND writer_generation = 2
                ORDER BY expires_at_ms, lock_id
                LIMIT ?
              )`,

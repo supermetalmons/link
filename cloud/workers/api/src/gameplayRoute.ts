@@ -541,9 +541,17 @@ export async function handleGameplayRoute(
       }
       return authJsonResponse(response, 200, corsHeaders);
     }
-    const coordination =
+    const baseCoordination =
       dependencies.coordination ||
       createGameplayCoordinationStores(env.PROFILE_GAMES_DB);
+    const coordination = repository.automatchPersistence
+      ? {
+          ...baseCoordination,
+          mutationLocks: repository.automatchPersistence.decorateLocks(
+            baseCoordination.mutationLocks,
+          ),
+        }
+      : baseCoordination;
     const assertMutationAllowed =
       dependencies.assertMutationAllowed ||
       (() => assertProfileMutationAllowed(env));
@@ -583,6 +591,11 @@ export async function handleGameplayRoute(
     const defaultEnqueueTelegramProjection = async (
       task: TelegramProjectionTask,
     ) => {
+      if (
+        repository.automatchPersistence &&
+        !(await repository.automatchPersistence.writesEnabled())
+      )
+        return;
       ctx.waitUntil(
         env.TELEGRAM_PROJECTION_QUEUE.send(task).catch(() => {
           console.error(
@@ -597,6 +610,11 @@ export async function handleGameplayRoute(
     const defaultEnqueueProfileGameProjection = async (
       task: ProfileGameProjectionTask,
     ) => {
+      if (
+        repository.automatchPersistence &&
+        !(await repository.automatchPersistence.writesEnabled())
+      )
+        return;
       ctx.waitUntil(
         env.PROFILE_GAME_PROJECTION_QUEUE.send(task).catch(() => {
           console.error(

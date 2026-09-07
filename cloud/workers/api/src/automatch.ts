@@ -336,6 +336,15 @@ export async function findOwnedQueuedAutomatches(
   signal?: AbortSignal,
 ): Promise<QueuedAutomatch[]> {
   const uniqueLoginUids = Array.from(new Set(loginUids));
+  const stored = await repository.automatchPersistence?.readQueuedByLogins(
+    uniqueLoginUids,
+    signal,
+  );
+  if (stored !== undefined && stored !== null) {
+    return uniqueLoginUids
+      .flatMap((uid) => getQueuedAutomatchesForUid(stored, uid))
+      .sort(compareQueuedAutomatches);
+  }
   const allCandidates: QueuedAutomatch[] = [];
   for (
     let offset = 0;
@@ -821,6 +830,10 @@ async function withAutomatchOwnerLease<T>(
   dependencies: AutomatchDependencies,
   work: () => Promise<T>,
 ): Promise<T> {
+  await repository.automatchPersistence?.recoverLogins(
+    requester.loginUids,
+    signal,
+  );
   const lockId = await automatchOwnerLockId(
     requester.profile ? `profile:${requester.profile.profileId}` : `uid:${uid}`,
   );
