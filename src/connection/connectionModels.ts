@@ -13,6 +13,7 @@ import type {
 import type { PlayerProfile as SharedPlayerProfile } from "@mons/shared/profiles";
 import type { HistoricalMatchPair as SharedHistoricalMatchPair } from "@mons/shared/game-sessions";
 import type { Reaction } from "@mons/shared/reactions";
+import type { InviteMetadataSnapshot } from "@mons/shared/invite-metadata";
 export type { Reaction, InviteReaction } from "@mons/shared/reactions";
 
 export interface Match {
@@ -28,20 +29,10 @@ export interface Match {
   reaction?: Reaction;
 }
 
-export interface Invite {
-  version: number;
-  hostId: string;
-  hostColor: string;
-  guestId?: string | null;
-  hostRematches?: string | null;
-  guestRematches?: string | null;
-  automatchStateHint?: AutomatchStateHint | null;
-  automatchCanceledAt?: number | null;
-  automatchOperationIds?: Record<string, string> | null;
-  eventId?: string | null;
-  eventRoundIndex?: number | null;
-  eventMatchKey?: string | null;
-  eventOwned?: boolean | null;
+export interface Invite extends Omit<
+  InviteMetadataSnapshot,
+  "inviteId" | "revision"
+> {
   wagers?: Record<string, MatchWagerState> | null;
 }
 

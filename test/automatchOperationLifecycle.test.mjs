@@ -249,7 +249,7 @@ test("retains every successful start until its resolved invite is observed", () 
   );
   assert.match(
     connectSource,
-    /this\.reconcilePendingAutomatchRequest\(uid, inviteId, workingInvite\)/,
+    /this\.reconcilePendingAutomatchRequest\(\s*uid,\s*inviteId,\s*viewer\.automatchOperationId,?\s*\)/,
   );
 });
 

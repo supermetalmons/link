@@ -23,6 +23,7 @@ Deploy only affected Workers. Shared prize-catalog changes need both the API and
 - `EVENT_DB` owns event records, participants, prize selections, visible assigned prizes, progress markers, and event-specific projection state. Active invites and matches remain in RTDB.
 - `INVITE_REACTIONS` owns voice/sticker reaction delivery through one SQLite-backed `InviteReactions` Durable Object per invite. Firebase reaction records are retained but no longer written after the final rules cutover.
 - The same Durable Object owns revisioned live match presentation and frozen historical appearance. Firebase matches retain immutable emoji/aura seeds; no extra Worker, namespace, or D1 migration is required.
+- The same object serves revisioned invite/lobby/rematch metadata over a separate subscription. Invite source records remain in RTDB; a five-second alarm reconciles metadata only while its subscribers are connected.
 - `cloud/firebase.json` owns active-gameplay Realtime Database rules. Firestore, Firebase Functions, and canonical event-data RTDB paths are retired.
 
 Authenticate Wrangler locally or provide `CLOUDFLARE_API_TOKEN` through the process environment. Never put credentials in command arguments, source files, release files, or logs.
@@ -169,6 +170,18 @@ The smoke connects as a spectator with `Origin: https://mons.link`, validates th
 Adding `--match-id <existing-match-id>` explicitly selects v2. The smoke requires successful v2 protocol negotiation, validates the selected match's presentation snapshot and any arriving presentation events within a 16 KiB envelope, and repeats after reconnect. The larger response bound accommodates maximum-length legacy match IDs; presentation mutation bodies retain a 4 KiB limit. The smoke never sends a presentation mutation, logs cosmetic values, or imports historical records. The server may lazily initialize missing presentation seeds while serving the snapshot. Omitting `--match-id` retains the v1 reaction-only smoke.
 
 Unit coverage for this command uses simulated sockets and timers in `npm run test:tooling`. It does not replace the two-player/spectator browser verification before the final rules cutover.
+
+### Read-only invite metadata smoke
+
+Prepare an explicitly selected existing paired invite before production promotion. After promoting the API candidate, run:
+
+```sh
+npm run smoke:invite-metadata -- --base-url https://api.mons.link --invite-id <existing-paired-invite-id>
+```
+
+The command validates the public HTTP snapshot and anonymous viewer, connects with `mons-invite-metadata-v1`, checks the snapshot revision and heartbeat, then repeats the connection to verify reconnect delivery. One thirty-second deadline covers the entire command; also enforce the remaining routine release budget at the command runner. The smoke never selects a game automatically, sends a gameplay mutation, or logs invite contents. Serving reads initializes or refreshes the derived Durable Object snapshot without changing the canonical invite.
+
+Validate pending-host, linked-login, joining, cancellation, rematch, spectator, and recovery behavior in the API runtime and client tests during preparation. Existing reaction v1/v2 runtime coverage remains required because the namespace is shared. Upload both validated candidates before promoting the API, then the frontend, with no trigger deployment or Firebase rules change. The added snapshot table is compatible with existing reactions and requires no namespace lifecycle migration or maintenance controls.
 
 ## Canonical profile D1 maintenance
 

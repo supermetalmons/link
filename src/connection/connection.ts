@@ -204,6 +204,18 @@ import {
 } from "./valueNormalizers";
 import { ObserverRegistry } from "./observerRegistry";
 import { InviteReactionChannel } from "./inviteReactionChannel";
+import { InviteMetadataChannel } from "./inviteMetadataChannel";
+import { InviteMetadataState } from "./inviteMetadataState";
+import type {
+  InviteMetadataSnapshot,
+  InviteMetadataViewer,
+  ReadInviteMetadataResponse,
+} from "@mons/shared/invite-metadata";
+import {
+  createInviteMetadataSocketProtocols,
+  InviteMetadataApiError,
+  readInviteMetadataViaApi,
+} from "../services/inviteMetadataApi";
 import { MatchPresentationState } from "./matchPresentationState";
 import type { MatchPresentation } from "@mons/shared/match-presentation";
 import {
@@ -346,8 +358,14 @@ class Connection {
   private db: Database;
   private eventPollingRegistry: EventPollingRegistry;
 
-  private hostRematchesRef: any = null;
-  private guestRematchesRef: any = null;
+  private inviteMetadataState: InviteMetadataState | null = null;
+  private inviteMetadataViewer: InviteMetadataViewer | null = null;
+  private inviteMetadataBootstrapController: AbortController | null = null;
+  private inviteMetadataSubscription: {
+    contextId: number;
+    channel: InviteMetadataChannel;
+    stop: () => void;
+  } | null = null;
   private wagersRef: any = null;
   private inviteReactionSubscription: {
     contextId: number;
@@ -463,11 +481,10 @@ class Connection {
   private reconcilePendingAutomatchRequest(
     uid: string,
     inviteId: string,
-    invite: Invite,
+    observedOperationId: string | null,
   ): void {
     void withAutomatchOperationLock(uid, async () => {
       const pending = storage.getPendingAutomatchOperation(uid);
-      const observedOperationId = invite.automatchOperationIds?.[uid];
       if (
         pending &&
         (pending.resolvedInviteId === inviteId ||
@@ -481,6 +498,8 @@ class Connection {
   }
 
   private beginConnectAttempt(): number {
+    this.inviteMetadataBootstrapController?.abort();
+    this.inviteMetadataBootstrapController = null;
     this.connectAttemptId += 1;
     return this.connectAttemptId;
   }
@@ -1277,12 +1296,14 @@ class Connection {
     this.beginConnectAttempt();
     this.clearActiveContext("detach-match-session");
     this.clearAllObserverContexts("detach-match-session");
-    this.cleanupRematchObservers();
+    this.cleanupInviteMetadataObserver();
     this.cleanupWagerObserver();
     this.cleanupInviteReactionObserver();
     this.stopObservingAllMatches();
     this.matchPresentations.clear();
     this.latestInvite = null;
+    this.inviteMetadataState = null;
+    this.inviteMetadataViewer = null;
     this.myMatch = null;
     this.inviteId = null;
     this.matchId = null;
@@ -1631,6 +1652,7 @@ class Connection {
     const unsubscribe = onAuthStateChanged(this.auth, (user) => {
       const newUid = user?.uid ?? null;
       if (this.activeContext && newUid !== this.activeContext.loginUid) {
+        this.cleanupInviteMetadataObserver();
         this.cleanupInviteReactionObserver();
       }
       if (newUid !== this.currentUid) {
@@ -1843,14 +1865,23 @@ class Connection {
         if (!sessionGuard() || !this.latestInvite) {
           return;
         }
-        if (this.latestInvite.hostId === response.actorUid) {
-          this.latestInvite.hostRematches = response.rematches;
-        } else {
-          this.latestInvite.guestRematches = response.rematches;
+        this.inviteMetadataState?.confirmRematches(
+          response.actorUid,
+          response.rematches,
+        );
+        if (this.inviteMetadataState) {
+          this.applyInviteMetadata(
+            writableContext,
+            this.inviteMetadataState.snapshot,
+          );
         }
       })
       .catch((error) => {
         console.error("Error ending rematch series:", error);
+      })
+      .finally(() => {
+        if (sessionGuard())
+          this.inviteMetadataSubscription?.channel.requestRefresh();
       });
   }
 
@@ -1914,11 +1945,21 @@ class Connection {
         return;
       }
       this.stopObservingAllMatches();
-      this.cleanupRematchObservers();
+      this.cleanupInviteMetadataObserver();
       this.cleanupInviteReactionObserver();
       this.cleanupWagerObserver();
       const nextMatch = response.match as Match;
       this.myMatch = nextMatch;
+      this.inviteMetadataState?.confirmRematches(
+        response.actorUid,
+        response.rematches,
+      );
+      if (this.latestInvite && this.inviteMetadataState) {
+        this.latestInvite = {
+          ...this.inviteMetadataState.snapshot,
+          wagers: this.latestInvite.wagers,
+        };
+      }
       const rematchContext = this.buildRuntimeContext(
         inviteId,
         response.matchId,
@@ -1931,15 +1972,8 @@ class Connection {
       this.activateContext(rematchContext, "rematch-proposed");
       this.updateWagerStateForCurrentMatch();
       this.observeInviteReactions(rematchContext);
-      this.observeRematchOrEndMatchIndicators(rematchContext);
+      this.observeInviteMetadata(rematchContext);
       this.observeWagers(rematchContext);
-      if (this.latestInvite) {
-        if (this.latestInvite.hostId === response.actorUid) {
-          this.latestInvite.hostRematches = response.rematches;
-        } else {
-          this.latestInvite.guestRematches = response.rematches;
-        }
-      }
       console.log("Successfully updated match and rematches");
       didJustCreateRematchProposalSuccessfully(
         inviteId,
@@ -1954,6 +1988,7 @@ class Connection {
       if (!sessionGuard()) {
         return;
       }
+      this.inviteMetadataSubscription?.channel.requestRefresh();
       this.maybeRefreshContextAfterRematchMetadata(writableContext);
       if (!sessionGuard()) {
         return;
@@ -4629,15 +4664,30 @@ class Connection {
     inviteId: string,
     epoch: number,
     connectAttemptId: number,
-  ): Promise<Invite | null> {
-    const inviteRef = ref(this.db, `invites/${inviteId}`);
-    const initialSnapshot = await get(inviteRef);
+    tokenProvider: AuthTokenProvider,
+    signal: AbortSignal,
+  ): Promise<ReadInviteMetadataResponse | null> {
+    const read = async () => {
+      try {
+        return await readInviteMetadataViaApi(inviteId, tokenProvider, {
+          signal,
+        });
+      } catch (error) {
+        if (
+          error instanceof InviteMetadataApiError &&
+          error.code === "http-404"
+        ) {
+          return null;
+        }
+        throw error;
+      }
+    };
+    const initial = await read();
     if (!this.isConnectAttemptActive(connectAttemptId, epoch)) {
       return null;
     }
-    let inviteData: Invite | null = initialSnapshot.val();
-    if (inviteData && !this.hasPendingInviteCreationFor(inviteId)) {
-      return inviteData;
+    if (initial && !this.hasPendingInviteCreationFor(inviteId)) {
+      return initial;
     }
     const didWaitForPendingInvite = await this.waitForPendingInviteCreation(
       inviteId,
@@ -4649,30 +4699,14 @@ class Connection {
     ) {
       return null;
     }
-    if (inviteData) {
-      return inviteData;
+    if (initial) {
+      return initial;
     }
-    const refreshedSnapshot = await get(inviteRef);
+    const refreshed = await read();
     if (!this.isConnectAttemptActive(connectAttemptId, epoch)) {
       return null;
     }
-    inviteData = refreshedSnapshot.val();
-    return inviteData;
-  }
-
-  private async resolveActorUidForInvite(
-    invite: Invite,
-    inviteId: string,
-    tokenProvider: AuthTokenProvider,
-  ): Promise<{ actorUid: string | null; role: InviteRole }> {
-    const resolution = await readInviteRoleViaApi({ inviteId }, tokenProvider);
-    tokenProvider.assertCurrentUser?.();
-    if (resolution.inviteId !== inviteId) {
-      throw new Error("invite-role-response-mismatch");
-    }
-    invite.hostId = resolution.hostId;
-    invite.guestId = resolution.guestId;
-    return { actorUid: resolution.actorUid, role: resolution.role };
+    return refreshed;
   }
 
   public connectToGame(uid: string, inviteId: string, autojoin: boolean): void {
@@ -4682,10 +4716,15 @@ class Connection {
       this.inviteId === inviteId && this.latestInvite
         ? { ...this.latestInvite }
         : null;
+    const cachedMetadataState =
+      this.inviteMetadataState?.snapshot.inviteId === inviteId
+        ? this.inviteMetadataState
+        : null;
     let connectEpoch = this.sessionEpoch;
     let connectAttemptId = this.beginConnectAttempt();
     const isConnectActive = () =>
-      this.isConnectAttemptActive(connectAttemptId, connectEpoch);
+      this.isConnectAttemptActive(connectAttemptId, connectEpoch) &&
+      this.isCurrentAuthUser(uid);
     let tokenProvider: AuthTokenProvider & {
       readonly assertCurrentUser: () => void;
     };
@@ -4694,16 +4733,17 @@ class Connection {
     } catch {
       return;
     }
+    const controller = new AbortController();
+    this.inviteMetadataBootstrapController = controller;
 
     const resolveInvite = (async () => {
-      if (cachedInvite) {
-        return cachedInvite;
-      }
       try {
         return await this.fetchInviteWithPendingCreation(
           inviteId,
           connectEpoch,
           connectAttemptId,
+          tokenProvider,
+          controller.signal,
         );
       } catch (error) {
         if (!autojoin || !isAutoInviteId(inviteId)) {
@@ -4731,15 +4771,17 @@ class Connection {
         inviteId,
         connectEpoch,
         connectAttemptId,
+        tokenProvider,
+        controller.signal,
       );
     })();
 
     void resolveInvite
-      .then(async (inviteData) => {
+      .then(async (metadata) => {
         if (!isConnectActive()) {
           return;
         }
-        if (!inviteData) {
+        if (!metadata) {
           console.log("No invite data found");
           this.detachFromMatchSession();
           this.loginUid = uid;
@@ -4749,8 +4791,19 @@ class Connection {
           return;
         }
 
-        const workingInvite: Invite = { ...inviteData };
-        this.reconcilePendingAutomatchRequest(uid, inviteId, workingInvite);
+        const metadataState =
+          cachedMetadataState ?? new InviteMetadataState(metadata.snapshot);
+        metadataState.accept(metadata.snapshot);
+        let viewer = metadata.viewer;
+        let workingInvite: Invite = {
+          ...metadataState.snapshot,
+          wagers: cachedInvite?.wagers ?? null,
+        };
+        this.reconcilePendingAutomatchRequest(
+          uid,
+          inviteId,
+          viewer.automatchOperationId,
+        );
         if (
           isAutoInviteId(inviteId) &&
           workingInvite.automatchStateHint === "canceled" &&
@@ -4762,22 +4815,14 @@ class Connection {
           });
           return;
         }
-        let actorResolution = await this.resolveActorUidForInvite(
-          workingInvite,
-          inviteId,
-          tokenProvider,
-        );
-        if (!isConnectActive()) {
-          return;
-        }
         const shouldAutojoinAsGuest =
-          actorResolution.role === "watch" &&
+          viewer.role === "watch" &&
           !workingInvite.guestId &&
           workingInvite.hostId !== uid &&
           autojoin;
         if (shouldAutojoinAsGuest) {
           try {
-            const joinResult = await joinInviteViaApi(
+            await joinInviteViaApi(
               {
                 operationId: crypto.randomUUID(),
                 inviteId,
@@ -4791,39 +4836,53 @@ class Connection {
             if (!isConnectActive()) {
               return;
             }
-            if (joinResult.guestId) {
-              workingInvite.guestId = joinResult.guestId;
-            }
           } catch {
             if (!isConnectActive()) {
               return;
             }
-            try {
-              const guestIdSnapshot = await get(
-                ref(this.db, `invites/${inviteId}/guestId`),
-              );
-              if (!isConnectActive()) {
-                return;
-              }
-              const resolvedGuestId = guestIdSnapshot.val();
-              if (
-                typeof resolvedGuestId === "string" &&
-                resolvedGuestId !== ""
-              ) {
-                workingInvite.guestId = resolvedGuestId;
-              }
-            } catch {}
           }
-          actorResolution = await this.resolveActorUidForInvite(
-            workingInvite,
+          const refreshed = await readInviteMetadataViaApi(
             inviteId,
             tokenProvider,
+            {
+              signal: controller.signal,
+            },
           );
+          if (!isConnectActive()) return;
+          metadataState.accept(refreshed.snapshot);
+          viewer = refreshed.viewer;
+          workingInvite = {
+            ...metadataState.snapshot,
+            wagers: workingInvite.wagers,
+          };
+          this.reconcilePendingAutomatchRequest(
+            uid,
+            inviteId,
+            viewer.automatchOperationId,
+          );
+          if (
+            isAutoInviteId(inviteId) &&
+            workingInvite.automatchStateHint === "canceled" &&
+            !workingInvite.guestId
+          ) {
+            await transitionToHome({
+              forceMatchScopeReset: true,
+              replace: true,
+            });
+            return;
+          }
         }
 
-        const { actorUid, role } = actorResolution;
+        const { actorUid, role } = viewer;
         if (!isConnectActive()) {
           return;
+        }
+        if (!cachedInvite) {
+          const wagersSnapshot = await get(
+            ref(this.db, `invites/${inviteId}/wagers`),
+          );
+          if (!isConnectActive()) return;
+          workingInvite.wagers = wagersSnapshot.val();
         }
         const { matchId, hasPendingProposal } = this.getLatestMatchIdForActor(
           inviteId,
@@ -4881,6 +4940,8 @@ class Connection {
         connectAttemptId = this.connectAttemptId;
 
         this.latestInvite = workingInvite;
+        this.inviteMetadataState = metadataState;
+        this.inviteMetadataViewer = viewer;
         this.myMatch = myMatch;
 
         const nextContext = this.buildRuntimeContext(
@@ -4895,7 +4956,7 @@ class Connection {
         this.activateContext(nextContext, "connect-to-game");
         this.updateWagerStateForCurrentMatch();
         this.observeInviteReactions(nextContext);
-        this.observeRematchOrEndMatchIndicators(nextContext);
+        this.observeInviteMetadata(nextContext);
         this.observeWagers(nextContext);
 
         if (!canWrite) {
@@ -4922,44 +4983,6 @@ class Connection {
             this.observeMatch(workingInvite.guestId, matchId, nextContext);
           } else {
             didFindYourOwnInviteThatNobodyJoined(isAutoInviteId(inviteId));
-            const inviteRef = ref(this.db, `invites/${inviteId}`);
-            const observerKey = `invite-guest-join:${inviteId}:${matchId}`;
-            const unregister = this.observeContextValue(
-              nextContext,
-              observerKey,
-              inviteRef,
-              (snapshot) => {
-                const updatedInvite = snapshot.val() as Invite | null;
-                if (!updatedInvite) {
-                  return;
-                }
-                this.reconcilePendingAutomatchRequest(
-                  uid,
-                  inviteId,
-                  updatedInvite,
-                );
-                if (
-                  isAutoInviteId(inviteId) &&
-                  updatedInvite.automatchStateHint === "canceled" &&
-                  !updatedInvite.guestId
-                ) {
-                  void transitionToHome({
-                    forceMatchScopeReset: true,
-                    replace: true,
-                  });
-                  return;
-                }
-                if (!updatedInvite.guestId) {
-                  return;
-                }
-                if (this.latestInvite) {
-                  this.latestInvite.guestId = updatedInvite.guestId;
-                }
-                this.inviteReactionSubscription?.channel.refresh();
-                this.observeMatch(updatedInvite.guestId, matchId, nextContext);
-                unregister?.();
-              },
-            );
           }
         } else {
           this.observeMatch(workingInvite.hostId, matchId, nextContext);
@@ -5011,7 +5034,7 @@ class Connection {
     );
     this.activateContext(nextWatchContext, "watch-only-rematch-nav");
     this.observeInviteReactions(nextWatchContext);
-    this.observeRematchOrEndMatchIndicators(nextWatchContext);
+    this.observeInviteMetadata(nextWatchContext);
     this.observeWagers(nextWatchContext);
     this.updateWagerStateForCurrentMatch();
     this.stopObservingAllMatches();
@@ -5047,81 +5070,156 @@ class Connection {
     return true;
   }
 
-  private observeRematchOrEndMatchIndicators(
-    context: MatchRuntimeContext | null = this.activeContext,
-  ) {
+  private applyInviteMetadata(
+    context: MatchRuntimeContext,
+    snapshot: InviteMetadataSnapshot,
+    viewer?: InviteMetadataViewer,
+    notifyInitially = false,
+  ): void {
+    const state = this.inviteMetadataState;
+    const previous = this.latestInvite;
     if (
-      !context ||
-      !this.latestInvite ||
-      this.rematchSeriesEndIsIndicatedForInvite(this.latestInvite)
+      !state ||
+      !previous ||
+      !this.isContextActive(context.contextId, context.sessionEpoch) ||
+      !this.isCurrentAuthUser(context.loginUid) ||
+      !state.accept(snapshot)
     ) {
       return;
     }
+    if (viewer) this.inviteMetadataViewer = viewer;
+    const next = state.snapshot;
+    this.latestInvite = { ...next, wagers: previous.wagers };
+    this.reconcilePendingAutomatchRequest(
+      context.loginUid,
+      context.inviteId,
+      this.inviteMetadataViewer?.automatchOperationId ?? null,
+    );
+    if (
+      isAutoInviteId(context.inviteId) &&
+      next.automatchStateHint === "canceled" &&
+      !next.guestId
+    ) {
+      void transitionToHome({ forceMatchScopeReset: true, replace: true });
+      return;
+    }
+    const guestJoined = !previous.guestId && !!next.guestId;
+    if (
+      (viewer &&
+        (viewer.role !== context.role ||
+          viewer.actorUid !== context.actorUid)) ||
+      (guestJoined && !context.canWrite)
+    ) {
+      this.connectToGame(context.loginUid, context.inviteId, false);
+      return;
+    }
+    if (guestJoined && next.guestId) {
+      this.inviteReactionSubscription?.channel.refresh();
+      this.observeMatch(next.guestId, context.matchId, context);
+    }
+    const rematchesChanged =
+      previous.hostRematches !== next.hostRematches ||
+      previous.guestRematches !== next.guestRematches;
+    if (!rematchesChanged && !notifyInitially) return;
+    if (this.rematchSeriesEndIsIndicatedForInvite(next)) {
+      if (
+        notifyInitially ||
+        !this.rematchSeriesEndIsIndicatedForInvite(previous)
+      ) {
+        didReceiveRematchesSeriesEndIndicator();
+      }
+    } else if (next.hostRematches || next.guestRematches) {
+      didUpdateRematchSeriesMetadata();
+    }
+    if (this.isContextActive(context.contextId, context.sessionEpoch)) {
+      this.maybeRefreshContextAfterRematchMetadata(context);
+    }
+  }
 
-    const inviteId = context.inviteId;
-    const hostRef = ref(this.db, `invites/${inviteId}/hostRematches`);
-    this.hostRematchesRef = hostRef;
-    let unregisterHost: (() => void) | null = null;
-    let unregisterGuest: (() => void) | null = null;
-    const cleanupBothRematchObservers = () => {
-      unregisterHost?.();
-      unregisterHost = null;
-      unregisterGuest?.();
-      unregisterGuest = null;
+  private observeInviteMetadata(
+    context: MatchRuntimeContext | null = this.activeContext,
+  ): void {
+    if (!context || !this.inviteMetadataState) return;
+    if (this.inviteMetadataSubscription?.contextId === context.contextId)
+      return;
+    this.cleanupInviteMetadataObserver();
+    const key = `invite-metadata:${context.inviteId}`;
+    const isActive = () =>
+      this.isContextActive(context.contextId, context.sessionEpoch) &&
+      this.isCurrentAuthUser(context.loginUid);
+    let initialized = false;
+    const channel = new InviteMetadataChannel({
+      inviteId: context.inviteId,
+      createSocket: (url, protocols) => new WebSocket(url, protocols),
+      getProtocols: async (forceRefresh) => {
+        const tokenProvider = this.getUserBoundAuthTokenProvider(
+          context.loginUid,
+        );
+        const token = await tokenProvider(forceRefresh);
+        tokenProvider.assertCurrentUser();
+        return createInviteMetadataSocketProtocols(token);
+      },
+      readMetadata: (signal) =>
+        readInviteMetadataViaApi(
+          context.inviteId,
+          this.getUserBoundAuthTokenProvider(context.loginUid),
+          { signal },
+        ),
+      isActive,
+      isOnline: () => typeof navigator === "undefined" || navigator.onLine,
+      isVisible: () =>
+        typeof document === "undefined" ||
+        document.visibilityState === "visible",
+      addWakeListener: (listener) => {
+        if (typeof window === "undefined") return () => undefined;
+        window.addEventListener("online", listener);
+        window.addEventListener("offline", listener);
+        window.addEventListener("pageshow", listener);
+        document.addEventListener("visibilitychange", listener);
+        return () => {
+          window.removeEventListener("online", listener);
+          window.removeEventListener("offline", listener);
+          window.removeEventListener("pageshow", listener);
+          document.removeEventListener("visibilitychange", listener);
+        };
+      },
+      onSnapshot: (snapshot, viewer) => {
+        if (
+          !isActive() ||
+          snapshot.revision < (this.inviteMetadataState?.snapshot.revision ?? 0)
+        )
+          return;
+        const notifyInitially = !initialized;
+        initialized = true;
+        this.applyInviteMetadata(context, snapshot, viewer, notifyInitially);
+      },
+      onError: (error) =>
+        console.error("Error receiving invite metadata:", error),
+      setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+      clearTimer: (timer) => clearTimeout(timer),
+      random: Math.random,
+    });
+    let stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      channel.stop();
+      this.unregisterObserverCleanup(context.contextId, key);
+      if (this.inviteMetadataSubscription?.channel === channel) {
+        this.inviteMetadataSubscription = null;
+      }
+      decrementLifecycleCounter("connectionObservers");
     };
-    unregisterHost = this.observeContextValue(
-      context,
-      `invite-host-rematches:${inviteId}`,
-      hostRef,
-      (snapshot) => {
-        const rematchesString: string | null = snapshot.val();
-        if (!this.latestInvite || rematchesString === null) {
-          return;
-        }
-        this.latestInvite.hostRematches = rematchesString;
-        if (this.rematchSeriesEndIsIndicatedForInvite(this.latestInvite)) {
-          cleanupBothRematchObservers();
-          didReceiveRematchesSeriesEndIndicator();
-        } else {
-          didUpdateRematchSeriesMetadata();
-        }
-        this.maybeRefreshContextAfterRematchMetadata(context);
-      },
-      undefined,
-      () => {
-        if (this.hostRematchesRef === hostRef) {
-          this.hostRematchesRef = null;
-        }
-      },
-    );
-
-    const guestRef = ref(this.db, `invites/${inviteId}/guestRematches`);
-    this.guestRematchesRef = guestRef;
-    unregisterGuest = this.observeContextValue(
-      context,
-      `invite-guest-rematches:${inviteId}`,
-      guestRef,
-      (snapshot) => {
-        const rematchesString: string | null = snapshot.val();
-        if (!this.latestInvite || rematchesString === null) {
-          return;
-        }
-        this.latestInvite.guestRematches = rematchesString;
-        if (this.rematchSeriesEndIsIndicatedForInvite(this.latestInvite)) {
-          cleanupBothRematchObservers();
-          didReceiveRematchesSeriesEndIndicator();
-        } else {
-          didUpdateRematchSeriesMetadata();
-        }
-        this.maybeRefreshContextAfterRematchMetadata(context);
-      },
-      undefined,
-      () => {
-        if (this.guestRematchesRef === guestRef) {
-          this.guestRematchesRef = null;
-        }
-      },
-    );
+    if (!this.registerObserverCleanup(context.contextId, key, stop)) {
+      channel.stop();
+      return;
+    }
+    this.inviteMetadataSubscription = {
+      contextId: context.contextId,
+      channel,
+      stop,
+    };
+    incrementLifecycleCounter("connectionObservers");
   }
 
   private updateWagerStateForCurrentMatch() {
@@ -5308,17 +5406,8 @@ class Connection {
     void presentation.refresh();
   }
 
-  private cleanupRematchObservers() {
-    if (this.hostRematchesRef) {
-      off(this.hostRematchesRef);
-      this.hostRematchesRef = null;
-      decrementLifecycleCounter("connectionObservers");
-    }
-    if (this.guestRematchesRef) {
-      off(this.guestRematchesRef);
-      this.guestRematchesRef = null;
-      decrementLifecycleCounter("connectionObservers");
-    }
+  private cleanupInviteMetadataObserver() {
+    this.inviteMetadataSubscription?.stop();
   }
 
   private cleanupWagerObserver() {

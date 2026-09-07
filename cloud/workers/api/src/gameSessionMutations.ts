@@ -537,6 +537,20 @@ export async function resolveInviteRole(
   const storedInvite = await repository.getRtdbPath(
     `invites/${request.inviteId}`,
   );
+  return resolveInviteRoleFromSnapshot(
+    identity,
+    request,
+    storedInvite,
+    repository,
+  );
+}
+
+export async function resolveInviteRoleFromSnapshot(
+  identity: RequestIdentity,
+  request: ResolveInviteRoleRequest,
+  storedInvite: unknown,
+  repository: GameplayRepository,
+): Promise<ResolveInviteRoleResponse> {
   if (storedInvite === null || storedInvite === undefined) {
     throw new AuthApiFailure(404, "not-found", "invite-not-found");
   }

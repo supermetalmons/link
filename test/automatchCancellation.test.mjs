@@ -4,6 +4,7 @@ import test from "node:test";
 import ts from "typescript";
 import { isAutoInviteId } from "../cloud/functions/shared/ids.js";
 import { withAutomatchOperationLock } from "../src/connection/automatchOperationLock.ts";
+import { InviteMetadataState } from "../src/connection/inviteMetadataState.ts";
 
 const readClass = (path, name) => {
   const source = ts.createSourceFile(
@@ -27,7 +28,13 @@ const methods = [
   "isConnectAttemptActive",
   "isContextActive",
   "isSessionEpochActive",
+  "isCurrentAuthUser",
   "observeContextValue",
+  "registerObserverCleanup",
+  "unregisterObserverCleanup",
+  "observeInviteMetadata",
+  "cleanupInviteMetadataObserver",
+  "applyInviteMetadata",
   "buildRuntimeContext",
   "connectToGame",
 ].map((name) => {
@@ -83,6 +90,27 @@ function harness(invite, onMatchRead = () => {}) {
   };
   const noop = () => {};
   let currentInvite = invite;
+  let revision = 1;
+  const metadata = (value) => ({
+    ok: true,
+    snapshot: {
+      inviteId: INVITE_ID,
+      revision,
+      hostId: value.hostId,
+      hostColor: "white",
+      guestId: value.guestId,
+      hostRematches: "",
+      guestRematches: "",
+      automatchStateHint: value.automatchStateHint,
+      eventId: null,
+      eventOwned: false,
+    },
+    viewer: {
+      actorUid: UID,
+      role: "host",
+      automatchOperationId: value.automatchOperationIds?.[UID] ?? null,
+    },
+  });
   const Registry = instantiate(registrySource, "ObserverRegistry", {
     onValue: (path, callback) => {
       callbacks.set(path, callback);
@@ -98,10 +126,22 @@ function harness(invite, onMatchRead = () => {}) {
     "Connection",
     {
       storage,
+      InviteMetadataState,
+      InviteMetadataChannel: class {
+        constructor(dependencies) {
+          callbacks.set(dependencies.inviteId, dependencies.onSnapshot);
+          queueMicrotask(() => {
+            const response = metadata(currentInvite);
+            dependencies.onSnapshot(response.snapshot, response.viewer);
+          });
+        }
+        stop() {}
+      },
       withAutomatchOperationLock,
       isAutoInviteId,
       ref: (_db, path) => path,
-      get: async () => {
+      get: async (path) => {
+        if (path.endsWith("/wagers")) return { val: () => null };
         onMatchRead();
         return { val: () => ({ color: "white" }) };
       },
@@ -117,6 +157,8 @@ function harness(invite, onMatchRead = () => {}) {
       didRecoverMyMatch: noop,
       didDiscoverExistingRematchProposalWaitingForResponse: noop,
       didFailToLoadPendingInvite: noop,
+      incrementLifecycleCounter: noop,
+      decrementLifecycleCounter: noop,
       console: { log: noop, error: (...args) => events.errors.push(args) },
     },
   );
@@ -125,10 +167,10 @@ function harness(invite, onMatchRead = () => {}) {
     connectAttemptId: 0,
     nextContextId: 1,
     activeContext: null,
+    auth: { currentUser: { uid: UID } },
     db: {},
     getUserBoundAuthTokenProvider: () => ({ assertCurrentUser: noop }),
-    fetchInviteWithPendingCreation: async () => ({ ...invite }),
-    resolveActorUidForInvite: async () => ({ actorUid: UID, role: "host" }),
+    fetchInviteWithPendingCreation: async () => metadata(invite),
     getLatestMatchIdForActor: () => ({
       matchId: INVITE_ID,
       hasPendingProposal: false,
@@ -139,7 +181,8 @@ function harness(invite, onMatchRead = () => {}) {
     },
     updateWagerStateForCurrentMatch: noop,
     observeInviteReactions: noop,
-    observeRematchOrEndMatchIndicators: noop,
+    rematchSeriesEndIsIndicatedForInvite: () => false,
+    maybeRefreshContextAfterRematchMetadata: noop,
     observeWagers: noop,
     observeMatch: (uid) => events.matches.push(uid),
   });
@@ -158,15 +201,17 @@ function harness(invite, onMatchRead = () => {}) {
     settle,
     setInvite: (value) => {
       currentInvite = value;
+      revision++;
     },
     connect: async () => {
       instance.connectToGame(UID, INVITE_ID, true);
       await settle();
     },
     emit: async (value) => {
-      const callback = callbacks.get(`invites/${INVITE_ID}`);
+      const callback = callbacks.get(INVITE_ID);
       assert.ok(callback, "pending invite observer is registered");
-      callback({ val: () => value });
+      revision++;
+      callback(metadata(value).snapshot);
       await settle();
     },
   };

@@ -1,6 +1,7 @@
 import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 import { createGoogleAccessToken } from "./googleAuth.ts";
 import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
+import { notifyInviteMetadataChanged } from "./inviteMetadataNotifications.ts";
 
 const FIREBASE_DATABASE_SCOPE =
   "https://www.googleapis.com/auth/firebase.database";
@@ -226,6 +227,7 @@ export function createFirebaseRtdbClient(
         throw new FirebaseRtdbFailure();
       }
       await cancelResponseBody(response);
+      await notifyInviteMetadataChanged(env, updates);
     },
     async transactPath(path, updater, signal) {
       const url = databaseUrl(root, path);
@@ -273,10 +275,12 @@ export function createFirebaseRtdbClient(
           await cancelResponseBody(writeResponse);
           continue;
         }
+        const value = await readJson(writeResponse);
+        await notifyInviteMetadataChanged(env, { [path]: decision.value });
         return {
           committed: true,
           decision: decision.decision,
-          value: await readJson(writeResponse),
+          value,
         };
       }
       throw new FirebaseRtdbFailure();

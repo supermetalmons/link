@@ -351,6 +351,7 @@ test("the actual Firebase auth callback tears down participant and spectator res
     "subscribeToAuthChanges",
     "observeInviteReactions",
     "cleanupInviteReactionObserver",
+    "cleanupInviteMetadataObserver",
   ].map((name) => {
     const method = declaration.members.find(
       (node) => node.name?.getText(source) === name,

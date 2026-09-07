@@ -99,6 +99,18 @@ Investigate stuck work through Queue consumption, pending marker age, and projec
 
 `mons-link-profile-games` D1 owns gameplay mutation leases and timer-start markers. The bounded reconciliation sweep checks the opponent metadata before removing stale timer markers. Active match writes still depend on the RTDB `matchTimerClaims` fence. A committed automatch operation returns its receipted result; an unproven coordination failure returns a sanitized `503`.
 
+## Invite metadata delivery
+
+`GET /invites/:inviteId/metadata` returns a revisioned snapshot of participant IDs, host color, both rematch strings, automatch state, and event membership. Its viewer fields resolve the caller's canonical D1 role and expose only that login's automatch operation ID. Passwords, other logins' operation IDs, and wagers never enter the public snapshot. Paired invites allow public spectators; pending open invites require authentication, and pending private invites require host ownership, including linked logins.
+
+`GET /invites/:inviteId/metadata/socket` uses `mons-invite-metadata-v1` in the existing `InviteReactions` Durable Object. Metadata has separate admission limits and broadcasts from reaction v1/v2 and presentation traffic. HTTP reads and new sockets refresh canonical RTDB state; access checks and admission are tied to the same metadata revision and private-invite policy. The object persists the latest sanitized snapshot and increments its revision only when that snapshot changes.
+
+Successful invite metadata writes request an immediate refresh after the RTDB commit. Notification failure cannot fail a committed gameplay operation. While metadata sockets are connected, a persistent alarm reads the invite every five seconds, shared across all viewers, to recover missed notifications and changes from older Workflow versions. Source failure retains the last snapshot and the next alarm. Metadata polling stops when its last subscriber leaves, even if reaction sockets remain.
+
+The browser replaces direct invite and rematch reads with this API and subscription. It preserves separately observed wagers and live match data, applies both rematch fields together, and prevents stale snapshots from reversing confirmed proposals or reopening an ended series. A visible, online client uses five-second HTTP recovery while its socket is unavailable, with bounded error backoff and `Retry-After` support. There is no direct Firebase invite-read fallback. Auth or game-context changes release the metadata subscription and pending work.
+
+This is a transport migration: invite/rematch source records and mutation receipts remain in RTDB, with existing D1 leases and recovery protocols unchanged. Release the API before the frontend using the routine release path; no Firebase rules, queue, trigger, or namespace change is needed.
+
 ## Reaction delivery
 
 `INVITE_REACTIONS` binds the API Worker to `InviteReactions`, one SQLite-backed Durable Object per invite. The Worker checks paired invite membership and canonical D1 participant ownership before publishing `POST /invites/:inviteId/reactions`; spectators use the public `GET /invites/:inviteId/reactions/socket` with an allowed browser origin. The WebSocket accepts heartbeat messages only. Firebase still supplies identity tokens and live invite/match data for authorization.

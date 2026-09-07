@@ -101,15 +101,13 @@ test("browser connection code has no RTDB profile-link dependency", () => {
     /checkBothPlayerProfiles|resolveLocalProfileId|Number\.POSITIVE_INFINITY/,
   );
   assert.doesNotMatch(source, /loginUid === (?:hostId|guestId)/);
-  const roleRead = source.indexOf(
-    "let actorResolution = await this.resolveActorUidForInvite",
-  );
+  const roleRead = source.indexOf("let viewer = metadata.viewer;");
   const autojoinDecision = source.indexOf(
     "const shouldAutojoinAsGuest",
     roleRead,
   );
   const postJoinRoleRead = source.indexOf(
-    "actorResolution = await this.resolveActorUidForInvite",
+    "viewer = refreshed.viewer;",
     autojoinDecision,
   );
   const matchRead = source.indexOf(
