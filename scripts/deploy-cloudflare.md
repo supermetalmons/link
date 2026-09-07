@@ -4,9 +4,11 @@ Run commands from the repository root with Node.js 24 and Java 21 or newer. Fire
 
 ## Release policy
 
-Routine release is the default for content, styling, prize catalogs, and backward-compatible code fixes. Prepare and validate the affected candidates first, then use a maximum 60-second budget from the first production promotion through one bounded live verification pass. Finish as soon as verification passes. There are no fixed waits, write freezes, Queue pauses, drain checks, or extended log-tail sessions on this path.
+Routine release is the default for content, styling, prize catalogs, and backward-compatible code fixes. Routine releases have no overall time limit. Prepare and validate the affected candidates first, then promote and verify the affected behavior. Builds, tests, uploads, promotion, provider propagation, and required verification should take the time they need. Finish as soon as the required checks pass.
 
-Builds, tests, and candidate uploads happen during preparation; reuse their successful results for the same source instead of repeating them during promotion. Cloudflare or network delays can exceed the budget: report the actual delay or failed check, resolve any uncertain promotion result, and never claim an unverified release succeeded. Do not add another observation window after a successful check.
+Do not add verification-only waits or observation windows longer than 60 seconds, or chain short waits into extended monitoring. This restriction applies to added idle waiting or watching, not actual work, provider latency, or necessary retries. Prefer no artificial waits and do not add post-success observation. Routine releases do not require write freezes, Queue pauses, drain checks, or extended log-tail sessions.
+
+Builds, tests, and candidate uploads happen during preparation; reuse their successful results for the same source instead of repeating them during promotion. Do not impose an overall wall-clock cutoff, stop a progressing release, or request renewed approval solely because more than 60 seconds have elapsed. Resolve uncertain promotion results and retry relevant checks when propagation or a transient failure warrants it. Report unresolved failures and never claim an unverified release succeeded.
 
 Use coordinated maintenance only when a specific operation requires exclusive access or cannot safely overlap old and new code: schema/data migrations, ownership or settlement protocol changes, incompatible Queue/Workflow payload changes, Durable Object lifecycle changes, or incident recovery. State the concrete reason, affected stores/Queues, drain condition, and required observation period before applying maintenance controls. The presence of D1, Queues, or Workflows alone does not make a release maintenance work. Historical cutover instructions below apply only to their named cutover.
 
@@ -54,7 +56,7 @@ npm run smoke:api -- --base-url https://api.mons.link
 
 Production API `workers_dev` and `preview_urls` remain disabled. [Workers implementing a Durable Object do not receive version-preview URLs](https://developers.cloudflare.com/workers/versions-and-deployments/preview-urls/#limitations). Verify the affected behavior on the custom domain after promotion. Use an existing protected auth fixture only when that behavior needs authentication; prepare or refresh it before promotion. For a prize-catalog release, confirm the scheduled event and supplied prize images on the updated frontend. Unrelated history, reservation, reaction, and migration checks are not routine release gates.
 
-Keep live verification within the remaining 60-second release budget. The smoke command has per-request timeouts rather than an overall deadline, so enforce the remaining budget at the command runner and report a timeout as incomplete verification. Once the smoke and affected-feature check pass, record the deployed IDs and finish. Existing sampled logs and recovery jobs continue normally. Investigate concrete failures; apply only the maintenance controls that the failure requires.
+Keep existing request, connection, and smoke-command timeouts that detect stalled checks; do not wrap the release or promotion-and-verification sequence in an additional overall deadline. A check timeout means that check is incomplete, not that the release has run out of time. Resolve uncertain outcomes and retry relevant checks as needed. Once the smoke and affected-feature check pass, record the deployed IDs and finish. Existing sampled logs and recovery jobs continue normally. Investigate concrete failures; apply only the maintenance controls that the failure requires.
 
 `upload:api` sends no production traffic. `promote:api` requires an explicit Version ID and routes 100% of traffic to it. Trigger application is a separate operation for reviewed configuration changes.
 
@@ -180,7 +182,7 @@ Prepare an explicitly selected existing paired invite before production promotio
 npm run smoke:invite-metadata -- --base-url https://api.mons.link --invite-id <existing-paired-invite-id>
 ```
 
-The command validates the public HTTP snapshot and anonymous viewer, connects with `mons-invite-metadata-v1`, checks the snapshot revision and heartbeat, then repeats the connection to verify reconnect delivery. One thirty-second deadline covers the entire command; also enforce the remaining routine release budget at the command runner. The smoke never selects a game automatically, sends a gameplay mutation, or logs invite contents. Serving reads initializes or refreshes the derived Durable Object snapshot without changing the canonical invite.
+The command validates the public HTTP snapshot and anonymous viewer, connects with `mons-invite-metadata-v1`, checks the snapshot revision and heartbeat, then repeats the connection to verify reconnect delivery. Its existing thirty-second command timeout detects stalled checks and does not set an overall release deadline. The smoke never selects a game automatically, sends a gameplay mutation, or logs invite contents. Serving reads initializes or refreshes the derived Durable Object snapshot without changing the canonical invite.
 
 Validate pending-host, linked-login, joining, cancellation, rematch, spectator, and recovery behavior in the API runtime and client tests during preparation. Existing reaction v1/v2 runtime coverage remains required because the namespace is shared. Upload both validated candidates before promoting the API, then the frontend, with no trigger deployment or Firebase rules change. The added snapshot table is compatible with existing reactions and requires no namespace lifecycle migration or maintenance controls.
 
@@ -218,7 +220,7 @@ Canonical profile incidents freeze D1 and fix forward. `legacy_fields_json` cont
 
 ## Historical match D1 operations
 
-`mons-link-profile-games` D1 is the sole source for the public historical-match endpoint. A missing snapshot returns `pair: null`; the endpoint never reads RTDB or persists data on a read miss. There is no RTDB recovery or backfill path. Releases affecting history or its projections must pass the authenticated `--require-history` smoke using a known non-null D1 snapshot. Prepare its fixture before promotion and include this check in the routine verification budget; for coordinated maintenance, run it before canonical writes resume. Unrelated catalog or frontend changes do not require this fixture.
+`mons-link-profile-games` D1 is the sole source for the public historical-match endpoint. A missing snapshot returns `pair: null`; the endpoint never reads RTDB or persists data on a read miss. There is no RTDB recovery or backfill path. Releases affecting history or its projections must pass the authenticated `--require-history` smoke using a known non-null D1 snapshot. Prepare its fixture before promotion and include this check in the required live verification; for coordinated maintenance, run it before canonical writes resume. Unrelated catalog or frontend changes do not require this fixture.
 
 During a relevant maintenance observation window or an investigation, tail historical reads and their rating- and transition-driven archival projections. Routine releases require no fixed observation window:
 
@@ -321,9 +323,9 @@ npx wrangler d1 migrations apply mons-link-telegram --remote --config cloud/work
 
 ## Frontend release
 
-Prepare the frontend before starting the production release budget: `preview` performs an isolated build, its client checks, and a candidate upload. Avoid running the same build/checks separately first. Verify a unique frontend preview when the affected behavior works on that origin; existing Firebase referrer restrictions may block preview sign-in. In that case, use local fixture rendering for visual checks and verify the real affected page on `mons.link` immediately after promotion. Keep the existing auth restrictions.
+Prepare the frontend before production promotion: `preview` performs an isolated build, its client checks, and a candidate upload. Avoid running the same build/checks separately first. Verify a unique frontend preview when the affected behavior works on that origin; existing Firebase referrer restrictions may block preview sign-in. In that case, use local fixture rendering for visual checks and verify the real affected page on `mons.link` after promotion. Keep the existing auth restrictions.
 
-When the frontend depends on new API behavior, promote and smoke the API first. Promote the prepared frontend's exact tested version without rebuilding, then verify the affected live page once within the remaining 60-second release budget:
+When the frontend depends on new API behavior, promote and smoke the API first. Promote the prepared frontend's exact tested version without rebuilding, then verify the affected live page. Allow provider propagation and necessary rechecks to complete without an overall release deadline:
 
 ```sh
 npm run deploy -- preview

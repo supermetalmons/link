@@ -66,7 +66,7 @@ Copy `.env.example` to `.env.local` only when local overrides are needed. Local 
 
 Production deployment commands, token handling, smoke checks, schema maintenance, and incident freezes are documented in [Cloudflare deployment](scripts/deploy-cloudflare.md). Firebase release, Telegram recovery, and admin operations are documented in [cloud operations](cloud/README.md).
 
-Routine releases are the default: prepare validated candidates, then promote and verify the affected behavior within a 60-second release budget. Keep writes and Queues running; fixed drain waits and extended monitoring belong only to a concrete coordinated-maintenance requirement. Build/upload latency is separate preparation work, and slow or failed provider operations must be reported rather than treated as success.
+Routine releases have no overall time limit: prepare validated candidates, then promote and verify the affected behavior, allowing necessary work and provider propagation to take the time they need. Do not add verification-only waits or observation windows longer than 60 seconds; finish once the required checks pass. Keep writes and Queues running; fixed drain waits and extended monitoring belong only to a concrete coordinated-maintenance requirement. Resolve uncertain provider outcomes and report failed checks rather than treating elapsed time alone as a release failure.
 
 `repo-clean` intentionally deletes non-kept local and remote branches, worktrees, and stashes. Its policy is tested only in disposable temporary repositories; review `scripts/repo-clean.sh` before invoking it in a real checkout.
 

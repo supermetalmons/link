@@ -642,7 +642,11 @@ test("operations documentation describes current releases and D1 maintenance", (
   };
   const releasePolicy = readSection("Release policy");
   assert.match(releasePolicy, /routine/i);
-  assert.match(releasePolicy, /60[- ]seconds?/);
+  assert.match(releasePolicy, /Routine releases have no overall time limit/);
+  assert.match(
+    releasePolicy,
+    /verification-only waits or observation windows longer than 60 seconds/,
+  );
   assert.match(releasePolicy, /promotion/i);
   assert.match(releasePolicy, /candidate/i);
   const apiRelease = readSection("API Worker release");
