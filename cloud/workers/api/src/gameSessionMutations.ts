@@ -716,7 +716,6 @@ export async function createManualInvite(
             hostId: identity.uid,
             hostColor,
             guestId: null,
-            wagers: {},
           },
           [`players/${identity.uid}/matches/${request.inviteId}`]: match,
         },

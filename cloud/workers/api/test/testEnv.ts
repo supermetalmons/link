@@ -104,14 +104,42 @@ const wagerControlStatement: D1PreparedStatement = {
       activated_at_ms: null,
     }) as T,
 };
+const wagerStateActivation = {
+  activation_epoch: 1,
+  verified_at_ms: 1,
+  activated_at_ms: 1,
+  invite_id: null,
+  match_id: null,
+  wager_json: null,
+  resolution_marker: null,
+  revision: null,
+};
+const wagerStateStatement: D1PreparedStatement = {
+  all: async <T>() => ({
+    success: true,
+    results: [wagerStateActivation as T],
+    meta: d1Meta,
+  }),
+  raw: d1Statement.raw,
+  run: d1Statement.run,
+  bind: () => wagerStateStatement,
+  first: async <T>() => wagerStateActivation as T,
+};
 const profileDb = {
   ...profileGamesDb,
-  prepare: (query: string) =>
-    query.includes("wager_reservation_runtime_control")
-      ? wagerControlStatement
-      : query.includes("profile_canonical_control")
-        ? canonicalControlStatement
-        : d1Statement,
+  withSession: () => ({
+    prepare: (query: string): D1PreparedStatement => profileDb.prepare(query),
+    batch: profileGamesDb.batch,
+    getBookmark: () => null,
+  }),
+  prepare: (query: string): D1PreparedStatement =>
+    query.includes("wager_state_activation")
+      ? wagerStateStatement
+      : query.includes("wager_reservation_runtime_control")
+        ? wagerControlStatement
+        : query.includes("profile_canonical_control")
+          ? canonicalControlStatement
+          : d1Statement,
 } satisfies D1Database;
 
 const telegramStatement: D1PreparedStatement = {

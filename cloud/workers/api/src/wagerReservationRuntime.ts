@@ -5,6 +5,8 @@ import {
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 import { createWagerFrozenD1Store } from "./wagerFrozenD1.ts";
+import { createWagerStateRtdbClient } from "./wagerStateRepository.ts";
+import { notifyInviteSourceChanged } from "./inviteWagersNotifications.ts";
 import type { WagerFrozenBalance } from "./wagerFrozenStore.ts";
 import {
   acquireWagerReservationAdmission,
@@ -74,14 +76,35 @@ export function createWagerReservationRuntime(
     async run(kind, work) {
       const admission = await acquireWagerReservationAdmission(db, kind, now());
       try {
+        const writeGuards = () =>
+          wagerReservationAdmissionGuards(db, admission, now());
         const store = createWagerFrozenD1Store(db, {
           now,
-          writeGuards: () =>
-            wagerReservationAdmissionGuards(db, admission, now()),
+          writeGuards,
         });
+        const wagerState = createWagerStateRtdbClient(
+          db,
+          {
+            getPath: repository.getRtdbPath,
+            patchRoot: repository.patchRtdbRoot,
+            transactPath: repository.transactRtdbPath,
+          },
+          {
+            now,
+            writeGuards,
+            notify: (updates, committed) =>
+              notifyInviteSourceChanged(env, updates, committed),
+          },
+        );
         await assertAdmission(admission);
-        return await work({ ...repository, wagerFrozen: store }, () =>
-          assertAdmission(admission),
+        return await work(
+          {
+            ...repository,
+            wagerFrozen: store,
+            patchRtdbRoot: wagerState.patchRoot,
+            transactRtdbPath: wagerState.transactPath,
+          },
+          () => assertAdmission(admission),
         );
       } finally {
         await releaseWagerReservationAdmission(db, admission).catch(() => {

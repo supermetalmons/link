@@ -11,6 +11,7 @@ export type WagerReservationAdmission = {
   admissionId: string;
   freezeGeneration: number;
   expiresAtMs: number;
+  writerEpoch: 1;
 };
 
 type ControlRow = {
@@ -76,15 +77,22 @@ export function wagerReservationAdmissionGuards(
            SELECT 1 FROM wager_reservation_write_admissions AS admission
            JOIN wager_reservation_runtime_control AS reservation ON reservation.singleton = 1
            JOIN profile_canonical_control AS profile ON profile.singleton = 1
+           JOIN wager_state_activation AS wager_state ON wager_state.singleton = 1
            WHERE admission.admission_id = ?
              AND admission.freeze_generation = ? AND admission.expires_at_ms > ?
+             AND admission.writer_epoch = ? AND wager_state.activation_epoch = admission.writer_epoch
              AND admission.uncertain = 0
              AND reservation.storage_mode = 'd1'
              AND reservation.freeze_generation = admission.freeze_generation
              AND profile.state = 'active'
          )`,
       )
-      .bind(admission.admissionId, admission.freezeGeneration, now),
+      .bind(
+        admission.admissionId,
+        admission.freezeGeneration,
+        now,
+        admission.writerEpoch,
+      ),
   ];
 }
 
@@ -120,13 +128,14 @@ export async function acquireWagerReservationAdmission(
     admissionId: crypto.randomUUID(),
     freezeGeneration: control.freezeGeneration,
     expiresAtMs: now + ADMISSION_DURATION_MS,
+    writerEpoch: 1,
   };
   try {
     await db
       .prepare(
         `INSERT INTO wager_reservation_write_admissions (
-           admission_id, freeze_generation, kind, created_at_ms, expires_at_ms
-         ) VALUES (?, ?, ?, ?, ?)`,
+           admission_id, freeze_generation, kind, created_at_ms, expires_at_ms, writer_epoch
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         admission.admissionId,
@@ -134,15 +143,20 @@ export async function acquireWagerReservationAdmission(
         kind,
         now,
         admission.expiresAtMs,
+        admission.writerEpoch,
       )
       .run();
   } catch {
     const stored = await db
       .prepare(
         `SELECT admission_id FROM wager_reservation_write_admissions
-         WHERE admission_id = ? AND freeze_generation = ?`,
+         WHERE admission_id = ? AND freeze_generation = ? AND writer_epoch = ?`,
       )
-      .bind(admission.admissionId, admission.freezeGeneration)
+      .bind(
+        admission.admissionId,
+        admission.freezeGeneration,
+        admission.writerEpoch,
+      )
       .first<{ admission_id: string }>()
       .catch(() => null);
     if (!stored) {
@@ -162,8 +176,12 @@ export async function releaseWagerReservationAdmission(
   await db
     .prepare(
       `DELETE FROM wager_reservation_write_admissions
-       WHERE admission_id = ? AND freeze_generation = ? AND uncertain = 0`,
+       WHERE admission_id = ? AND freeze_generation = ? AND writer_epoch = ? AND uncertain = 0`,
     )
-    .bind(admission.admissionId, admission.freezeGeneration)
+    .bind(
+      admission.admissionId,
+      admission.freezeGeneration,
+      admission.writerEpoch,
+    )
     .run();
 }

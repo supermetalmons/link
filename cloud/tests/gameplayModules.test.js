@@ -49,6 +49,8 @@ test("structural gameplay writes are Worker-owned while live match updates remai
   assert.equal(invites.hostRematches[".write"], undefined);
   assert.equal(invites.guestRematches[".write"], undefined);
   assert.equal(invites.reactions, undefined);
+  assert.equal(invites.wagers, undefined);
+  assert.equal(invites.matchesWagerResolutions, undefined);
   assert.equal(player[".write"], undefined);
   assert.match(player.matches.$matchId[".write"], /data\.exists\(\)/);
   assert.match(player.matches.$matchId[".write"], /newData\.exists\(\)/);

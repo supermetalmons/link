@@ -26,7 +26,7 @@ Deploy only affected Workers. Shared prize-catalog changes need both the API and
 - `INVITE_REACTIONS` owns voice/sticker reaction delivery through one SQLite-backed `InviteReactions` Durable Object per invite. Firebase reaction records are retained but no longer written after the final rules cutover.
 - The same Durable Object owns revisioned live match presentation and frozen historical appearance. Firebase matches retain immutable emoji/aura seeds; no extra Worker, namespace, or D1 migration is required.
 - The same object serves revisioned invite/lobby/rematch metadata over a separate subscription. Invite source records remain in RTDB.
-- The same object serves invite-wide public wager snapshots over HTTP and `mons-invite-wagers-v1`. Wager source records and mutations remain in RTDB. Metadata and wagers share canonical source reads and one five-second reconciliation alarm while either channel has subscribers; their revisions, admission limits, and broadcasts remain separate.
+- The same object serves invite-wide public wager snapshots over HTTP and `mons-invite-wagers-v1`. `PROFILE_DB.invite_wager_states` owns wager source records and resolution markers; invite metadata remains in RTDB. Metadata and wagers share composed source reads and one five-second reconciliation alarm while either channel has subscribers; their revisions, admission limits, and broadcasts remain separate. Retained RTDB wagers never provide a read or write fallback.
 - `cloud/firebase.json` owns active-gameplay Realtime Database rules. Firestore, Firebase Functions, and canonical event-data RTDB paths are retired.
 
 Authenticate Wrangler locally or provide `CLOUDFLARE_API_TOKEN` through the process environment. Never put credentials in command arguments, source files, release files, or logs.
@@ -263,6 +263,88 @@ npm run manage:event-prize-withdrawals -- --resume
 npm run manage:profile-canonical -- --resume
 ```
 
+## Wager state D1 cutover
+
+This one-time migration moves `invites/{inviteId}/wagers/{matchId}` and `invites/{inviteId}/matchesWagerResolutions/{matchId}` into `PROFILE_DB.invite_wager_states`. Wager reservations, mining balances, and transfer receipts already live in D1. The storage change requires one continuous freeze because an old RTDB writer and a new D1 writer must never settle the same wager against different source state. Freeze canonical profiles and wager reservations and pause only `mons-link-telegram-delivery`, which carries settlement retries. Other Queues, event storage, invite metadata, and live Firebase match synchronization retain their existing controls. This targeted procedure replaces the generic historical drain and observation periods above: inspect actual admissions and leases, perform the required checks, and use no artificial waits or post-success monitoring window.
+
+Prepare the complete validation gate, rules dry run, protected smoke fixtures, and API candidate before freezing. Record the current deployed API version, the candidate Version ID, both writer controls, and the settlement Queue's pause state. Reuse validation for unchanged source. No frontend, trigger, or Durable Object namespace release is needed. Wager-state export/import/verify/activate require `CLOUDFLARE_API_TOKEN` in the process environment for parameterized D1 requests; supply no token through arguments or files in the repository. Preflight can use the existing Wrangler authentication and needs no new schema, freeze, or output directory.
+
+```sh
+npm run check:all
+node --experimental-strip-types scripts/deploy-firebase.ts --project mons-link --dry-run
+npm run manage:wager-state -- --preflight
+npm run smoke:wagers -- --base-url https://api.mons.link --prepare-fixtures --fixture /secure/wager-smoke.json
+npm run upload:api
+```
+
+Create the smoke fixture's parent directory with mode `0700` before preparation. Preparation writes a mode-`0600` fixture containing locally generated Solana signing seeds, Firebase refresh tokens, two new test-profile IDs, and three manual invite IDs. It funds each profile through its supported first-rock mining request for exactly one dust and leaves a pending host proposal in the cancellation invite. The other invites isolate decline and settlement because canceled or declined reservation lineages cannot be reused. No user-funded profile, D1 seed, blockchain transaction, rating update, automatch, event, or external announcement is used. Retain the fixture for every later phase; do not replace it after an uncertain request.
+
+Start the single freeze and pause settlement delivery only if it was active:
+
+```sh
+npm run manage:profile-canonical -- --freeze
+npm run manage:wager-reservations -- --freeze
+npx wrangler queues pause-delivery mons-link-telegram-delivery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run manage:profile-canonical -- --status
+npm run manage:wager-reservations -- --status
+```
+
+Require zero wager admissions and active gameplay leases before continuing. Investigate any expired or uncertain admission; recover it only after its request has finished and its RTDB and D1 effects have been reconciled. A timeout or expired lease alone does not prove that an old write finished. Preserve consumed reservation tombstones, pending settlements, balances, and transfer receipts throughout the procedure.
+
+Retire Firebase browser writes before export, including the nested admin grants, then apply the reviewed profile migration. Confirm the pending migration list contains only the expected wager-state migration `0016` before applying it. Retained Firebase records and their parent invite-read policy remain unchanged.
+
+```sh
+node --experimental-strip-types scripts/deploy-firebase.ts --project mons-link
+npx wrangler d1 migrations list mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 migrations apply mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run manage:wager-state -- --status
+```
+
+Export into a new protected directory outside the repository. The same directory resumes an interrupted export or import; never edit its manifest, source pages, or baseline evidence. `--firebase-credentials /secure/firebase-service-account.json` optionally selects a protected service-account file for preflight, export, verify, and activate; otherwise the CLI checks `GOOGLE_APPLICATION_CREDENTIALS` and then the existing Firebase CLI login. Pass only the credential file path; never log its contents or authentication tokens. The export preserves complete internal wager state and resolution markers, including historical matches and pending operations. Unknown nested wager fields are retained; a malformed nonobject wager aggregate must be reconciled before export.
+
+```sh
+npm run manage:wager-state -- --export --directory /secure/wager-state-cutover
+npm run manage:wager-state -- --import --directory /secure/wager-state-cutover
+npm run manage:wager-state -- --verify --directory /secure/wager-state-cutover --candidate-version-id <candidate-version-id>
+```
+
+Verification must prove complete source-to-D1 equality and unchanged reservation, balance, and transfer-receipt baseline, with all writer controls still frozen and admissions and leases drained. Review only counts, digests, and sanitized failure details in terminal output; retain the protected evidence directory. Resolve a mismatch before activation. Do not introduce a bridge version, dual writes, a Firebase fallback, or a temporary unfreeze to make progress.
+
+Activate D1 and immediately promote the exact verified candidate to 100% while the same freeze remains in effect. Activation repeats full source, destination, and baseline verification before advancing the immutable writer epoch from `0` to `1`. Old code cannot acquire a compatible wager admission after activation. Confirm the explicit candidate is the only deployed API version before resuming any writes.
+
+```sh
+npm run manage:wager-state -- --activate --directory /secure/wager-state-cutover --candidate-version-id <candidate-version-id>
+npm run promote:api -- --version-id <candidate-version-id>
+npm run manage:wager-state -- --status
+npm run smoke:api -- --base-url https://api.mons.link --read-only --require-history --require-wager-frozen-read --require-wager-storage-version --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
+npm run smoke:wagers -- --base-url https://api.mons.link --frozen-read --fixture /secure/wager-smoke.json
+npm run smoke:invite-metadata -- --base-url https://api.mons.link --invite-id <existing-paired-invite-id>
+npm run smoke:reactions -- --base-url https://api.mons.link --invite-id <existing-paired-invite-id>
+```
+
+While frozen, verify current and historical wager HTTP snapshots, wager WebSocket delivery and reconnect, and unchanged invite metadata, reaction, and presentation behavior. Confirm stored proposals, agreements, internal settlement state, and markers still match the import evidence. Confirm Firebase rules are deployed and preserve reads while rejecting legacy writes. A failure leaves the same freeze and Queue pause in place for repair; after activation, repair forward with D1-aware code and never promote a pre-cutover writer or revert the epoch.
+
+When those checks pass, resume reservations, then canonical profiles, and restore settlement delivery only if this cutover paused it. Preserve any freeze or Queue pause that predated the work.
+
+```sh
+npm run manage:wager-reservations -- --resume-d1
+npm run manage:profile-canonical -- --resume
+npx wrangler queues resume-delivery mons-link-telegram-delivery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npm run smoke:api -- --base-url https://api.mons.link
+npm run smoke:api -- --base-url https://api.mons.link --read-only --require-history --require-wager-frozen-read --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
+npm run smoke:wagers -- --base-url https://api.mons.link --active-lifecycle --fixture /secure/wager-smoke.json
+```
+
+The lifecycle opens wager sockets before each mutation, checks broadcasts and reconnect snapshots, replays each action, and verifies released reservations plus a single dust transfer from guest to host. The guest surrenders by writing only its own dedicated match status through the existing Firebase rules; no rating request is sent. A failed phase preserves its completed-step journal so an explicit rerun continues with the same identities, invites, and operation lineages. Keep historical wagers and live moves usable. Record the active epoch, deployed Version ID, verification digests/counts, and final control states, then finish. Keep the original Firebase records and protected export and smoke fixtures. Later compatible wager changes use the routine API release path.
+
+For an existing paired invite, HTTP/WebSocket snapshot and reconnect verification also has a read-only mode:
+
+```sh
+npm run smoke:wagers -- --base-url https://api.mons.link --read-only --invite-id <existing-paired-invite-id> --auth-token-fixture /secure/api-smoke-auth.json
+```
+
+Omit the auth fixture to verify public spectator reads. Each HTTP request and socket operation has its own deadline; there is no overall smoke-phase or release deadline and no artificial observation wait.
+
 ## Wager reservation D1 operations
 
 Frozen balances and operation records are current D1 application state. Preserve consumed operation tombstones and pending settlements. Freeze canonical profiles before reservation maintenance:
@@ -276,7 +358,7 @@ npm run manage:wager-reservations -- --resume-d1
 npm run manage:profile-canonical -- --resume
 ```
 
-Recover only an expired admission whose original request has finished and whose uncertain effects have been reconciled. Resume requires admissions and gameplay leases drained. Include `mons-link-telegram-delivery` in coordinated maintenance because it delivers settlement retries. Validate frozen reads and stale-client rejection while canonical writes remain frozen, then verify normal wagering after resume. Keep writes frozen and repair forward on failures; canonical balances and RTDB wager effects must stay consistent.
+Recover only an expired admission whose original request has finished and whose uncertain effects have been reconciled. Resume requires admissions and gameplay leases drained. Include `mons-link-telegram-delivery` in coordinated maintenance because it delivers settlement retries. Validate frozen reads and stale-client rejection while canonical writes remain frozen, then verify normal wagering after resume. Keep writes frozen and repair forward on failures; canonical balances, reservations, and wager settlement records must stay consistent.
 
 ## Event-prize withdrawal D1 operations
 

@@ -1,4 +1,5 @@
 import type { WagerFrozenStore } from "./wagerFrozenStore.ts";
+import { createWagerStateRtdbClient } from "./wagerStateRepository.ts";
 import type { HistoricalMatchPair } from "@mons/shared/game-sessions";
 import type {
   MiningMaterialName,
@@ -298,8 +299,11 @@ export function createGameplayRepository(
     }),
   }: GameplayRepositoryDependencies = {},
 ): GameplayRepository {
+  const source = createWagerStateRtdbClient(env.PROFILE_DB, rtdbClient, {
+    now,
+  });
   return {
-    ...createCanonicalGameplayRepository(env.PROFILE_DB, d1, rtdbClient, {
+    ...createCanonicalGameplayRepository(env.PROFILE_DB, d1, source, {
       createFailure: () => new GameplayRepositoryFailure(),
       maxAttempts: MAX_WAGER_TRANSFER_TRANSACTION_ATTEMPTS,
       now,

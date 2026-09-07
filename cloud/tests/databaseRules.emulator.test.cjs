@@ -208,6 +208,93 @@ test("rules retain same-profile writes through an RTDB link without a custom cla
   );
 });
 
+test("retired wager state and resolution markers retain invite reads and reject every browser write", async () => {
+  const wager = {
+    proposals: { host: { material: "dust", count: 2 } },
+    proposedBy: { host: true },
+    agreed: {
+      proposerId: "host",
+      accepterId: "guest",
+      material: "dust",
+      count: 2,
+    },
+    settlement: { operationId: "retained-settlement", state: "completed" },
+    resolved: {
+      winnerId: "host",
+      loserId: "guest",
+      material: "dust",
+      count: 2,
+    },
+  };
+  const wagerPath = "invites/invite1/wagers";
+  const markersPath = "invites/invite1/matchesWagerResolutions";
+  await rules.withSecurityRulesDisabled(async (context) => {
+    await context
+      .database()
+      .ref()
+      .update({
+        [wagerPath]: { invite1: wager },
+        [markersPath]: { invite1: true },
+      });
+  });
+  for (const context of [
+    rules.unauthenticatedContext(),
+    rules.authenticatedContext("host", { profileId: "profile-host" }),
+    rules.authenticatedContext("guest", { profileId: "profile-guest" }),
+    rules.authenticatedContext("alternate", { profileId: "profile-host" }),
+    rules.authenticatedContext("alternate"),
+    rules.authenticatedContext("admin", { admin: true }),
+  ]) {
+    const database = context.database();
+    for (const [path, expected] of [
+      [wagerPath, { invite1: wager }],
+      [`${wagerPath}/invite1`, wager],
+      [markersPath, { invite1: true }],
+      [`${markersPath}/invite1`, true],
+    ]) {
+      assert.deepEqual(
+        (await assertSucceeds(database.ref(path).once("value"))).val(),
+        expected,
+      );
+      await assertFails(database.ref(path).set(expected));
+      await assertFails(database.ref(path).remove());
+    }
+    await assertFails(database.ref(`${wagerPath}/invite2`).set(wager));
+    await assertFails(database.ref(`${markersPath}/invite2`).set(true));
+    await assertFails(
+      database.ref(`${wagerPath}/invite1/proposals/host/count`).set(3),
+    );
+    await assertFails(
+      database.ref(`${wagerPath}/invite1/proposals/host`).remove(),
+    );
+    await assertFails(
+      database.ref().update({
+        "players/host/matches/invite1/status": "surrendered",
+        [`${wagerPath}/invite1/settlement/state`]: "pending",
+        [`${markersPath}/invite2`]: true,
+      }),
+    );
+    const invite = (await database.ref("invites/invite1").once("value")).val();
+    await assertFails(
+      database.ref("invites/invite1").set({ ...invite, wagers: null }),
+    );
+    await assertFails(database.ref("invites/invite1").remove());
+  }
+  const database = rules.unauthenticatedContext().database();
+  assert.deepEqual((await database.ref(wagerPath).once("value")).val(), {
+    invite1: wager,
+  });
+  assert.deepEqual((await database.ref(markersPath).once("value")).val(), {
+    invite1: true,
+  });
+  assert.equal(
+    (
+      await database.ref("players/host/matches/invite1/status").once("value")
+    ).val(),
+    "",
+  );
+});
+
 test("match presentation seeds reject child, full-record, deletion and multi-path browser changes", async () => {
   for (const context of [
     rules.authenticatedContext("host", { profileId: "profile-host" }),

@@ -2,6 +2,7 @@ import {
   createFirebaseRtdbClient,
   type FirebaseRtdbClient,
 } from "./firebaseRtdb.ts";
+import { createWagerStateRtdbClient } from "./wagerStateRepository.ts";
 
 const INVITE_SOURCE_CLIENT_TTL_MS = 5 * 60 * 1_000;
 
@@ -17,7 +18,7 @@ export function createInviteSourceReader(
       }),
     now = Date.now,
   }: {
-    createClient?: () => Pick<FirebaseRtdbClient, "getPath">;
+    createClient?: () => FirebaseRtdbClient;
     now?: () => number;
   } = {},
 ): (inviteId: string) => Promise<unknown> {
@@ -25,7 +26,9 @@ export function createInviteSourceReader(
   let expiresAtMs = 0;
   return async (inviteId) => {
     if (!client || now() >= expiresAtMs) {
-      client = createClient();
+      client = createWagerStateRtdbClient(env.PROFILE_DB, createClient(), {
+        now,
+      });
       expiresAtMs = now() + INVITE_SOURCE_CLIENT_TTL_MS;
     }
     try {

@@ -1,6 +1,10 @@
 import { env } from "cloudflare:workers";
-import { evictDurableObject, runInDurableObject } from "cloudflare:test";
-import { afterEach, describe, expect, it } from "vitest";
+import {
+  evictDurableObject,
+  runInDurableObject,
+  type D1Migration,
+} from "cloudflare:test";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
@@ -18,6 +22,16 @@ import {
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { handleRequest } from "../src/router.ts";
+import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+
+beforeAll(async () => {
+  const testEnv = env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] };
+  await applyRetiredProfileMigrations(
+    env.PROFILE_DB,
+    testEnv.TEST_PROFILE_D1_MIGRATIONS,
+    "a".repeat(64),
+  );
+});
 
 const sockets: WebSocket[] = [];
 

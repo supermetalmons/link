@@ -5,6 +5,7 @@ const WAGER_FINALIZATION = "0014_finalize_wager_reservations.sql";
 
 type ProfileMigrationOptions = {
   activateRatingCompletions?: boolean;
+  activateWagerState?: boolean;
   legacyRatingCompletions?: Array<{ inviteId: string; matchId: string }>;
 };
 
@@ -126,6 +127,27 @@ export async function applyRetiredProfileMigrations(
         .bind(importDigest, importDigest, importDigest),
     ]);
     await applyD1Migrations(db, migrations.slice(finalizationIndex));
+    if (
+      options.activateWagerState !== false &&
+      migrations.some(
+        (migration) => migration.name === "0016_invite_wager_states.sql",
+      )
+    ) {
+      await db
+        .prepare(
+          `UPDATE wager_state_activation
+         SET activation_epoch = 1, source_digest = ?, import_digest = ?,
+             baseline_digest = ?, verified_baseline_digest = ?,
+             source_wager_count = 0, source_marker_count = 0,
+             source_row_count = 0, imported_row_count = 0,
+             verified_freeze_generation = (
+               SELECT freeze_generation FROM wager_reservation_runtime_control WHERE singleton = 1
+             ), verified_at_ms = 1, activated_at_ms = 1, candidate_version_id = 'schema-test'
+         WHERE singleton = 1 AND activation_epoch = 0`,
+        )
+        .bind(importDigest, importDigest, importDigest, importDigest)
+        .run();
+    }
     await db
       .prepare(
         `UPDATE wager_reservation_runtime_control

@@ -5,6 +5,7 @@ import {
   createInviteMetadataReader,
   normalizeInviteMetadata,
 } from "../src/inviteMetadata.ts";
+import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const inviteId = "metadata-invite";
 const invite = {
@@ -68,16 +69,22 @@ test("metadata normalization distinguishes missing sources from invalid and over
   }
 });
 
-test("metadata source reads are atomic at the invite root and refresh the bounded client cache", async () => {
+test("metadata source reads compose the invite root and refresh the bounded client cache", async () => {
   let nowMs = 0;
   let clients = 0;
   let fail = false;
   const paths: string[] = [];
-  const read = createInviteMetadataReader({} as Env, {
+  const read = createInviteMetadataReader(TELEGRAM_TEST_ENV, {
     now: () => nowMs,
     createClient: () => {
       clients++;
       return {
+        patchRoot: async () => {
+          throw new Error("unexpected-write");
+        },
+        transactPath: async () => {
+          throw new Error("unexpected-write");
+        },
         getPath: async (path) => {
           paths.push(path);
           if (fail) throw new Error("source-unavailable");
