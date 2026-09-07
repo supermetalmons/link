@@ -46,6 +46,14 @@ const names = [
   "connectToGame",
   "applyInviteMetadata",
   "observeInviteMetadata",
+  "observeWagers",
+  "updateWagerStateForCurrentMatch",
+  "setWagerViewMatchId",
+  "setLocalWagerState",
+  "beginWagerSnapshotMutation",
+  "runWagerMutation",
+  "createWagerContextGuard",
+  "restoreOptimisticWagerResolution",
   "cleanupInviteMetadataObserver",
   "cleanupInviteReactionObserver",
   "cleanupWagerObserver",
@@ -130,6 +138,7 @@ function harness({
   propose,
   end,
   onMetadata,
+  readWagers,
 } = {}) {
   const events = {
     reads: [],
@@ -142,6 +151,10 @@ function harness({
     metadata: [],
     errors: [],
     wagering: [],
+    wagerReads: [],
+    wagerChannels: [],
+    wagerStates: [],
+    frozenRefreshes: 0,
   };
   const cleanups = new Map();
   const counters = new Map();
@@ -149,12 +162,14 @@ function harness({
   let instance;
   let authCallback;
   let currentResponse = initial;
+  let publishedWagerState = null;
   const noop = () => undefined;
   const dependencies = {
     InviteMetadataState,
     InviteMetadataApiError,
     withAutomatchOperationLock,
     isAutoInviteId,
+    summarizeWagerState: (value) => value,
     parseRematchIndices,
     rematchSeriesEnded,
     storage: {
@@ -182,6 +197,43 @@ function harness({
       emit(value, viewer) {
         this.dependencies.onSnapshot(value, viewer);
       }
+    },
+    InviteWagersChannel: class {
+      constructor(dependencies) {
+        this.dependencies = dependencies;
+        this.controller = new AbortController();
+        this.signal = this.controller.signal;
+        this.stops = 0;
+        this.refreshes = 0;
+        events.wagerChannels.push(this);
+      }
+      stop() {
+        this.stops++;
+        this.controller.abort();
+      }
+      requestRefresh() {
+        this.refreshes++;
+      }
+      emit(
+        value,
+        source = "socket",
+        generation = this.dependencies.captureGeneration(),
+      ) {
+        this.dependencies.onSnapshot(value, {
+          source,
+          requestGeneration: generation,
+        });
+      }
+    },
+    createInviteWagersSocketProtocols: (token) => [
+      "mons-invite-wagers-v1",
+      `bearer.${token}`,
+    ],
+    readInviteWagersViaApi: async (inviteId, provider, options) => {
+      events.wagerReads.push({ inviteId, provider, signal: options.signal });
+      return readWagers
+        ? readWagers(events.wagerReads.length, options.signal)
+        : { ok: true, snapshot: { inviteId, revision: 1, wagers } };
     },
     readInviteMetadataViaApi: async (inviteId, provider, options) => {
       events.reads.push({ inviteId, provider, signal: options.signal });
@@ -214,10 +266,10 @@ function harness({
     get: async (path) => {
       events.firebaseReads.push(path);
       assert.ok(
-        path.endsWith("/wagers") || path.startsWith("players/"),
+        path.startsWith("players/"),
         `unexpected Firebase invite read: ${path}`,
       );
-      return { val: () => (path.endsWith("/wagers") ? wagers : match) };
+      return { val: () => match };
     },
     off: noop,
     getPlayersEmojiId: () => 1,
@@ -243,7 +295,20 @@ function harness({
     didJustCreateRematchProposalSuccessfully: () =>
       events.ui.push("proposal-created"),
     failedToCreateRematchProposal: () => events.ui.push("proposal-failed"),
-    setCurrentWagerMatch: noop,
+    setCurrentWagerMatch: () => {
+      publishedWagerState = null;
+    },
+    getWagerState: () => publishedWagerState,
+    setWagerState: (matchId, state) => {
+      publishedWagerState = state;
+      events.wagerStates.push({ matchId, state });
+    },
+    syncCurrentWagerMatchState: (matchId, state) => {
+      publishedWagerState = state;
+      events.wagerStates.push({ matchId, state });
+      events.wagering.push(instance.latestInvite?.wagers);
+    },
+    isWagerClientUpdateRequired: () => false,
     incrementLifecycleCounter: (key) =>
       counters.set(key, (counters.get(key) ?? 0) + 1),
     decrementLifecycleCounter: (key, count = 1) =>
@@ -274,6 +339,11 @@ function harness({
     observedMatchSnapshots: new Map(),
     matchPresentations: new Map(),
     optimisticResolvedMatchIds: new Set(),
+    pendingWagerMutations: new Set(),
+    inviteWagersSnapshot: null,
+    wagerSnapshotGeneration: 0,
+    wagerSnapshotRevisionFloor: -1,
+    wagerSnapshotNeedsReconciliation: false,
     getUserBoundAuthTokenProvider: (expectedUid = loginUid) => {
       events.auth.push(expectedUid);
       return Object.assign(async () => "header.payload.signature", {
@@ -285,12 +355,19 @@ function harness({
     waitForPendingInviteCreation: async () => false,
     notifyNavigationGamesChanged: noop,
     logContextEvent: noop,
-    setSameProfilePlayerUid: noop,
+    setSameProfilePlayerUid: (uid) => {
+      instance.sameProfilePlayerUid = uid;
+    },
+    ensureAuthenticated: async () => {},
+    miningFrozenPoller: {
+      refresh: () => {
+        events.frozenRefreshes++;
+      },
+      runMutation: async (action) => action(),
+    },
     clearEventSyncCaches: noop,
-    updateWagerStateForCurrentMatch: () =>
-      events.wagering.push(instance.latestInvite?.wagers),
+    logWagerDebug: noop,
     observeInviteReactions: noop,
-    observeWagers: noop,
     observeMatch: (uid, matchId) => events.observed.push([uid, matchId]),
     refreshTokenIfNeeded: async () => events.ui.push("refresh-claims"),
     getRematchIndexAvailableForNewProposal: () => 1,
@@ -327,6 +404,7 @@ function harness({
       assert.deepEqual(events.errors, []);
     },
     channel: () => events.channels.at(-1),
+    wagerChannel: () => events.wagerChannels.at(-1),
     authChange: (user) => {
       instance.auth.currentUser = user;
       authCallback(user);
@@ -338,16 +416,14 @@ test("metadata bootstrap preserves linked-login actors and loads existing wagers
   const wagers = { invite: { agreed: { count: 3 } } };
   const h = harness({ wagers });
   await h.connect();
-  assert.deepEqual(h.events.firebaseReads, [
-    "invites/invite/wagers",
-    "players/host/matches/invite",
-  ]);
+  assert.deepEqual(h.events.firebaseReads, ["players/host/matches/invite"]);
+  assert.equal(h.events.wagerReads.length, 1);
   assert.equal(h.instance.activeContext.loginUid, "login");
   assert.equal(h.instance.activeContext.actorUid, "host");
-  assert.strictEqual(h.events.wagering[0], wagers);
+  assert.deepEqual(h.events.wagering[0], wagers);
   assert.ok(h.events.ui.includes("refresh-claims"));
   h.channel().emit(snapshot({ revision: 2, hostRematches: "1" }));
-  assert.strictEqual(h.instance.latestInvite.wagers, wagers);
+  assert.deepEqual(h.instance.latestInvite.wagers, wagers);
   h.instance.detachFromMatchSession();
 });
 
@@ -423,10 +499,7 @@ test("uncertain manual joining recovers the authoritative viewer and paired meta
   });
   await h.connect(true);
   assert.equal(h.instance.activeContext.role, "guest");
-  assert.deepEqual(h.events.firebaseReads, [
-    "invites/invite/wagers",
-    "players/guest/matches/invite",
-  ]);
+  assert.deepEqual(h.events.firebaseReads, ["players/guest/matches/invite"]);
   h.instance.detachFromMatchSession();
 });
 
@@ -560,12 +633,15 @@ test("auth replacement tears down host and spectator metadata resources before c
     const h = harness({ initial: response(snapshot(), viewer) });
     await h.connect();
     const channel = h.channel();
+    const wagerChannel = h.wagerChannel();
     const before = h.instance.latestInvite;
-    const unsubscribe = h.instance.subscribeToAuthChanges(() =>
-      assert.equal(channel.signal.aborted, true),
-    );
+    const unsubscribe = h.instance.subscribeToAuthChanges(() => {
+      assert.equal(channel.signal.aborted, true);
+      assert.equal(wagerChannel.signal.aborted, true);
+    });
     h.authChange({ uid: "replacement" });
     assert.equal(channel.stops, 1);
+    assert.equal(wagerChannel.stops, 1);
     assert.equal(h.cleanups.size, 0);
     assert.equal(h.counters.get("connectionObservers"), 0);
     channel.emit(snapshot({ revision: 2, hostRematches: "1" }));
@@ -573,4 +649,358 @@ test("auth replacement tears down host and spectator metadata resources before c
     unsubscribe();
     h.instance.detachFromMatchSession();
   }
+});
+
+const wagerSnapshot = (revision, wagers = {}, inviteId = "invite") => ({
+  inviteId,
+  revision,
+  wagers,
+});
+const proposalState = (count) => ({
+  proposals: { host: { material: "dust", count } },
+});
+
+test("empty Worker wager bootstrap clears the displayed match without any Firebase wager read", async () => {
+  const h = harness({ wagers: {} });
+  await h.connect();
+  assert.deepEqual(h.instance.latestInvite.wagers, {});
+  assert.deepEqual(h.events.wagerStates.at(-1), {
+    matchId: "invite",
+    state: null,
+  });
+  assert.deepEqual(
+    h.events.wagerReads.map((read) => read.inviteId),
+    ["invite"],
+  );
+  h.instance.detachFromMatchSession();
+  assert.equal(h.wagerChannel().signal.aborted, true);
+  assert.equal(h.counters.get("connectionObservers"), 0);
+});
+
+test("detaching during wager bootstrap aborts the read and drops its late response", async () => {
+  const pending = deferred();
+  const h = harness({ readWagers: () => pending.promise });
+  h.instance.connectToGame("login", "invite", false);
+  await settle();
+  assert.equal(h.events.wagerReads.length, 1);
+  h.instance.detachFromMatchSession();
+  assert.equal(h.events.wagerReads[0].signal.aborted, true);
+  pending.resolve({ ok: true, snapshot: wagerSnapshot(2) });
+  await settle();
+  assert.equal(h.instance.activeContext, null);
+  assert.equal(h.events.wagerChannels.length, 0);
+  assert.equal(h.events.firebaseReads.length, 0);
+});
+
+test("account replacement during wager bootstrap never publishes the old account snapshot", async () => {
+  const pending = deferred();
+  const h = harness({ readWagers: () => pending.promise });
+  const unsubscribe = h.instance.subscribeToAuthChanges(() => {});
+  h.instance.connectToGame("login", "invite", false);
+  await settle();
+  h.authChange({ uid: "replacement" });
+  assert.equal(h.events.wagerReads[0].signal.aborted, true);
+  pending.resolve({ ok: true, snapshot: wagerSnapshot(2) });
+  await settle();
+  assert.equal(h.instance.activeContext, null);
+  assert.equal(h.events.wagerChannels.length, 0);
+  assert.equal(h.events.wagerStates.length, 0);
+  unsubscribe();
+});
+
+test("invite-wide wager snapshots update historical selection and empty snapshots clear it", async () => {
+  const h = harness({
+    wagers: { invite: proposalState(1), invite1: proposalState(2) },
+  });
+  await h.connect();
+  h.instance.setWagerViewMatchId("invite1");
+  assert.equal(h.events.wagerStates.at(-1).state.proposals.host.count, 2);
+  h.wagerChannel().emit(
+    wagerSnapshot(2, { invite: proposalState(3), invite1: proposalState(4) }),
+  );
+  assert.equal(h.instance.activeContext.matchId, "invite");
+  assert.deepEqual(h.events.wagerStates.at(-1), {
+    matchId: "invite1",
+    state: proposalState(4),
+  });
+  assert.equal(h.events.frozenRefreshes, 1);
+  h.wagerChannel().emit(wagerSnapshot(3));
+  assert.deepEqual(h.events.wagerStates.at(-1), {
+    matchId: "invite1",
+    state: null,
+  });
+  assert.deepEqual(h.instance.latestInvite.wagers, {});
+  h.instance.detachFromMatchSession();
+});
+
+test("internal-only revisions refresh frozen balances while duplicate and older snapshots do not", async () => {
+  const wagers = { invite: proposalState(1) };
+  const h = harness({ wagers });
+  await h.connect();
+  h.wagerChannel().emit(wagerSnapshot(2, wagers));
+  h.wagerChannel().emit(wagerSnapshot(2, wagers));
+  h.wagerChannel().emit(wagerSnapshot(1), "http");
+  assert.equal(h.events.frozenRefreshes, 1);
+  assert.deepEqual(h.instance.latestInvite.wagers, wagers);
+  assert.equal(h.instance.inviteWagersSnapshot.revision, 2);
+  h.instance.detachFromMatchSession();
+});
+
+test("a stale HTTP response cannot replace a newer socket snapshot", async () => {
+  const h = harness();
+  await h.connect();
+  h.wagerChannel().emit(wagerSnapshot(4, { invite: proposalState(4) }));
+  h.wagerChannel().emit(wagerSnapshot(3, { invite: proposalState(3) }), "http");
+  assert.equal(h.instance.inviteWagersSnapshot.revision, 4);
+  assert.deepEqual(h.instance.latestInvite.wagers.invite, proposalState(4));
+  h.instance.detachFromMatchSession();
+});
+
+test("mutation generations protect optimistic state and reconcile only a fresh authoritative HTTP snapshot", async () => {
+  const h = harness({ wagers: { invite: proposalState(1) } });
+  await h.connect();
+  const channel = h.wagerChannel();
+  const beforeMutation = channel.dependencies.captureGeneration();
+  const finish = h.instance.beginWagerSnapshotMutation(
+    h.instance.activeContext,
+  );
+  h.instance.setLocalWagerState(proposalState(9));
+  assert.deepEqual(
+    h.instance.inviteWagersSnapshot.wagers.invite,
+    proposalState(1),
+  );
+  channel.emit(wagerSnapshot(2, { invite: proposalState(2) }));
+  assert.deepEqual(h.instance.latestInvite.wagers.invite, proposalState(9));
+  finish();
+  assert.equal(channel.refreshes, 1);
+  channel.emit(
+    wagerSnapshot(2, { invite: proposalState(2) }),
+    "http",
+    beforeMutation,
+  );
+  channel.emit(wagerSnapshot(3, { invite: proposalState(3) }));
+  channel.emit(wagerSnapshot(2, { invite: proposalState(2) }), "http");
+  assert.deepEqual(h.instance.latestInvite.wagers.invite, proposalState(9));
+  assert.equal(channel.dependencies.needsHttpRefresh(), true);
+  channel.emit(wagerSnapshot(3, { invite: proposalState(3) }), "http");
+  assert.deepEqual(h.instance.latestInvite.wagers.invite, proposalState(3));
+  assert.equal(channel.dependencies.needsHttpRefresh(), false);
+  h.instance.detachFromMatchSession();
+});
+
+test("successful and failed mutations both reconcile optimistic changes at the same canonical revision", async () => {
+  for (const fails of [false, true]) {
+    const h = harness({ wagers: {} });
+    await h.connect();
+    const pending = deferred();
+    const channel = h.wagerChannel();
+    const mutation = h.instance.runWagerMutation(async () => {
+      h.instance.setLocalWagerState(proposalState(9));
+      return pending.promise;
+    }, false);
+    const completion = fails
+      ? assert.rejects(mutation, /mutation-failed/)
+      : mutation;
+    await settle();
+    assert.equal(h.instance.pendingWagerMutations.size, 1);
+    if (fails) pending.reject(new Error("mutation-failed"));
+    else pending.resolve({ ok: true });
+    await completion;
+    assert.equal(h.instance.pendingWagerMutations.size, 0);
+    assert.equal(channel.refreshes, 1);
+    channel.emit(wagerSnapshot(1), "http");
+    assert.deepEqual(h.instance.latestInvite.wagers, {});
+    assert.equal(h.events.wagerStates.at(-1).state, null);
+    h.instance.detachFromMatchSession();
+  }
+});
+
+test("overlapping mutations hold snapshots until every mutation finishes", async () => {
+  const h = harness({ wagers: {} });
+  await h.connect();
+  const first = h.instance.beginWagerSnapshotMutation(h.instance.activeContext);
+  const second = h.instance.beginWagerSnapshotMutation(
+    h.instance.activeContext,
+  );
+  h.instance.setLocalWagerState(proposalState(9));
+  first();
+  h.wagerChannel().emit(wagerSnapshot(2), "http");
+  assert.deepEqual(h.instance.latestInvite.wagers.invite, proposalState(9));
+  second();
+  h.wagerChannel().emit(wagerSnapshot(2), "http");
+  assert.deepEqual(h.instance.latestInvite.wagers, {});
+  h.instance.detachFromMatchSession();
+});
+
+test("rematch contexts retain historical wagers and refresh the new channel when an old settlement finishes", async () => {
+  const h = harness({
+    wagers: { invite: proposalState(1), invite1: proposalState(2) },
+  });
+  await h.connect();
+  const oldChannel = h.wagerChannel();
+  const finish = h.instance.beginWagerSnapshotMutation(
+    h.instance.activeContext,
+  );
+  h.instance.sendRematchProposal();
+  await settle();
+  assert.equal(oldChannel.stops, 1);
+  assert.equal(h.instance.activeContext.matchId, "invite1");
+  assert.deepEqual(h.events.wagerStates.at(-1), {
+    matchId: "invite1",
+    state: proposalState(2),
+  });
+  oldChannel.emit(wagerSnapshot(8));
+  assert.equal(h.instance.inviteWagersSnapshot.revision, 1);
+  finish();
+  assert.equal(h.wagerChannel().refreshes, 1);
+  h.wagerChannel().emit(
+    wagerSnapshot(2, { invite: proposalState(3), invite1: proposalState(2) }),
+    "http",
+  );
+  h.instance.setWagerViewMatchId("invite");
+  assert.deepEqual(h.events.wagerStates.at(-1).state, proposalState(3));
+  h.instance.detachFromMatchSession();
+  assert.equal(h.counters.get("connectionObservers"), 0);
+});
+
+test("reconnect keeps the latest wager snapshot received while metadata bootstrap is pending", async () => {
+  const pending = deferred();
+  const h = harness({
+    read: (attempt) => (attempt === 1 ? response() : pending.promise),
+  });
+  await h.connect();
+  h.instance.connectToGame("login", "invite", false);
+  h.wagerChannel().emit(wagerSnapshot(3, { invite: proposalState(3) }));
+  pending.resolve(response());
+  await settle();
+  assert.deepEqual(h.events.errors, []);
+  assert.equal(h.instance.inviteWagersSnapshot.revision, 3);
+  assert.deepEqual(h.instance.latestInvite.wagers.invite, proposalState(3));
+  assert.equal(h.events.wagerReads.length, 1);
+  h.instance.detachFromMatchSession();
+});
+
+test("same-invite reconnect preserves pending wager mutations and reconciles after completion", async () => {
+  for (const fails of [false, true]) {
+    const h = harness({ wagers: {} });
+    await h.connect();
+    const pending = deferred();
+    const mutation = h.instance.runWagerMutation(async () => {
+      h.instance.setLocalWagerState(proposalState(9));
+      return pending.promise;
+    }, false);
+    await settle();
+    const oldContext = h.instance.activeContext;
+    const oldChannel = h.wagerChannel();
+    h.instance.connectToGame("login", "invite", false);
+    await settle();
+    assert.deepEqual(h.events.errors, []);
+    assert.notEqual(
+      h.instance.activeContext.sessionEpoch,
+      oldContext.sessionEpoch,
+    );
+    assert.equal(oldChannel.stops, 1);
+    assert.equal(h.instance.pendingWagerMutations.size, 1);
+    const channel = h.wagerChannel();
+    const beforeCompletion = channel.dependencies.captureGeneration();
+    channel.emit(wagerSnapshot(1), "http");
+    assert.deepEqual(h.instance.latestInvite.wagers.invite, proposalState(9));
+    if (fails) pending.reject(new Error("mutation-failed"));
+    else pending.resolve({ ok: true });
+    await mutation;
+    assert.equal(h.instance.pendingWagerMutations.size, 0);
+    assert.equal(oldChannel.refreshes, 0);
+    assert.equal(channel.refreshes, 1);
+    assert.ok(channel.dependencies.captureGeneration() > beforeCompletion);
+    channel.emit(wagerSnapshot(1), "http", beforeCompletion);
+    assert.deepEqual(h.instance.latestInvite.wagers.invite, proposalState(9));
+    assert.equal(channel.dependencies.needsHttpRefresh(), true);
+    channel.emit(wagerSnapshot(1), "http");
+    assert.deepEqual(h.instance.latestInvite.wagers, {});
+    assert.equal(channel.dependencies.needsHttpRefresh(), false);
+    h.instance.detachFromMatchSession();
+    assert.equal(h.counters.get("connectionObservers"), 0);
+  }
+});
+
+test("an account switch invalidates old wager tickets even if that account reconnects again", async () => {
+  const h = harness({ wagers: {} });
+  await h.connect();
+  h.instance.subscribeToAuthChanges(() => {});
+  const pending = deferred();
+  const mutation = h.instance.runWagerMutation(
+    async () => pending.promise,
+    false,
+  );
+  await settle();
+  assert.equal(h.instance.pendingWagerMutations.size, 1);
+  h.authChange({ uid: "replacement" });
+  assert.equal(h.instance.pendingWagerMutations.size, 0);
+  h.authChange({ uid: "login" });
+  h.instance.connectToGame("login", "invite", false);
+  await settle();
+  const channel = h.wagerChannel();
+  pending.resolve({ ok: true });
+  await mutation;
+  assert.equal(channel.refreshes, 0);
+  h.instance.detachFromMatchSession();
+});
+
+test("stale settlement restoration cannot modify another invite even with a matching match ID", async () => {
+  const h = harness();
+  await h.connect();
+  const optimistic = { resolved: { optimistic: true } };
+  h.instance.setLocalWagerState(optimistic);
+  h.instance.restoreOptimisticWagerResolution(
+    "invite",
+    proposalState(1),
+    () => false,
+    () => false,
+  );
+  assert.deepEqual(h.instance.latestInvite.wagers.invite, optimistic);
+  h.instance.restoreOptimisticWagerResolution(
+    "invite",
+    proposalState(1),
+    () => false,
+    () => true,
+  );
+  assert.deepEqual(h.instance.latestInvite.wagers.invite, proposalState(1));
+  h.instance.detachFromMatchSession();
+});
+
+test("detaching invalidates pending mutation completion and stale channel callbacks without observer leaks", async () => {
+  const h = harness();
+  await h.connect();
+  const finish = h.instance.beginWagerSnapshotMutation(
+    h.instance.activeContext,
+  );
+  const channel = h.wagerChannel();
+  h.instance.detachFromMatchSession();
+  finish();
+  channel.emit(wagerSnapshot(9));
+  assert.equal(h.instance.latestInvite, null);
+  assert.equal(channel.refreshes, 0);
+  assert.equal(channel.stops, 1);
+  assert.equal(h.instance.pendingWagerMutations.size, 0);
+  assert.equal(h.counters.get("connectionObservers"), 0);
+  assert.equal(h.cleanups.size, 0);
+});
+
+test("a replacement account reconnecting to the same invite bootstraps its own canonical wager snapshot", async () => {
+  const h = harness({ wagers: {} });
+  await h.connect();
+  const finish = h.instance.beginWagerSnapshotMutation(
+    h.instance.activeContext,
+  );
+  h.instance.setLocalWagerState(proposalState(9));
+  h.instance.auth.currentUser = { uid: "replacement" };
+  h.instance.connectToGame("replacement", "invite", false);
+  await settle();
+  assert.deepEqual(h.events.errors, []);
+  assert.equal(h.instance.activeContext.loginUid, "replacement");
+  assert.equal(h.events.wagerReads.length, 2);
+  assert.deepEqual(h.instance.latestInvite.wagers, {});
+  finish();
+  assert.equal(h.wagerChannel().refreshes, 0);
+  h.instance.detachFromMatchSession();
 });

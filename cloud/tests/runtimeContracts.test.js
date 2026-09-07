@@ -17,6 +17,7 @@ const expectedSharedExports = {
   "./game-variants": "./game-variants.js",
   "./ids": "./ids.js",
   "./invite-metadata": "./invite-metadata.js",
+  "./invite-wagers": "./invite-wagers.js",
   "./match-protocol": "./match-protocol.js",
   "./match-presentation": "./match-presentation.js",
   "./mining": "./mining.js",

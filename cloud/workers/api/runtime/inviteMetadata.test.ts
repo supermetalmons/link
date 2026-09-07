@@ -15,10 +15,6 @@ import {
   REACTION_HEARTBEAT_RESPONSE,
   REACTION_SOCKET_PROTOCOL,
 } from "@mons/shared/reactions";
-import {
-  normalizeInviteMetadata,
-  type InviteMetadataReadResult,
-} from "../src/inviteMetadata.ts";
 
 type Room = DurableObjectStub<
   import("../src/inviteReactions.ts").InviteReactions
@@ -48,14 +44,11 @@ function deferred() {
 async function installSource(room: Room, source: Source) {
   await runInDurableObject(room, (instance) => {
     const target = instance as unknown as {
-      metadataReader: (inviteId: string) => Promise<InviteMetadataReadResult>;
+      inviteReader: (inviteId: string) => Promise<unknown>;
     };
-    target.metadataReader = async (inviteId) => {
+    target.inviteReader = async () => {
       source.reads++;
-      return normalizeInviteMetadata(
-        inviteId,
-        source.read ? await source.read() : source.value,
-      );
+      return source.read ? await source.read() : source.value;
     };
   });
 }
@@ -250,12 +243,12 @@ describe("durable invite metadata", () => {
     const { room, inviteId, source } = await fixture();
     await runInDurableObject(room, (instance, state) => {
       const target = instance as unknown as {
-        metadataReader: (id: string) => Promise<InviteMetadataReadResult>;
+        inviteReader: (id: string) => Promise<unknown>;
       };
-      target.metadataReader = async (id) => {
+      target.inviteReader = async () => {
         source.reads++;
         expect(await state.storage.getAlarm()).not.toBeNull();
-        return normalizeInviteMetadata(id, source.value);
+        return source.value;
       };
     });
     const client = acceptSocket(await metadataResponse(room, inviteId));
@@ -308,6 +301,7 @@ describe("durable invite metadata", () => {
     expect(nextAlarm).not.toBeNull();
     expect(nextAlarm!).toBeLessThanOrEqual(Date.now());
     expect(JSON.parse(await client.read()).snapshot.hostRematches).toBe("1");
+    await room.readMetadata(inviteId);
     expect(
       await runInDurableObject(room, (_instance, state) =>
         state.storage.getAlarm(),
@@ -426,7 +420,7 @@ describe("durable invite metadata", () => {
     expect(await closed).toBe(1008);
   });
 
-  it("reserves participant slots in each channel and enforces the 512 socket aggregate limit", async () => {
+  it("reserves participant capacity even when only legacy channels are connected", async () => {
     const { room, inviteId } = await fixture();
     const metadata = await Promise.all(
       Array.from({ length: 248 }, async (_, index) =>
@@ -438,7 +432,7 @@ describe("durable invite metadata", () => {
       ),
     );
     const reactions = await Promise.all(
-      Array.from({ length: 248 }, async (_, index) =>
+      Array.from({ length: 240 }, async (_, index) =>
         acceptSocket(
           await room.fetch("https://room.internal/socket", {
             headers: {
@@ -484,7 +478,7 @@ describe("durable invite metadata", () => {
         room,
         (_instance, state) => state.getWebSockets().length,
       ),
-    ).toBe(512);
+    ).toBe(504);
     expect(
       (
         await room.fetch("https://room.internal/socket", {

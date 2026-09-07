@@ -1,27 +1,18 @@
 import { normalizeFirebaseKey } from "@mons/shared/ids";
+import { changedInviteMetadataIds } from "./inviteMetadataNotifications.ts";
 import {
   notifyInviteRooms,
   type InviteRoomNotificationOptions,
 } from "./inviteRoomNotifications.ts";
 
-const METADATA_FIELDS = new Set([
-  "version",
+const WAGER_SOURCE_FIELDS = new Set([
+  "wagers",
   "hostId",
-  "hostColor",
   "guestId",
-  "hostRematches",
-  "guestRematches",
-  "automatchStateHint",
-  "automatchCanceledAt",
-  "automatchOperationIds",
-  "eventId",
-  "eventRoundIndex",
-  "eventMatchKey",
-  "eventOwned",
   "password",
 ]);
 
-export function changedInviteMetadataIds(
+export function changedInviteWagersIds(
   updates: Record<string, unknown>,
 ): string[] {
   const inviteIds = new Set<string>();
@@ -40,7 +31,7 @@ export function changedInviteMetadataIds(
       }
     } else if (
       normalizeFirebaseKey(parts[1]) === parts[1] &&
-      (parts.length === 2 || METADATA_FIELDS.has(parts[2]))
+      (parts.length === 2 || WAGER_SOURCE_FIELDS.has(parts[2]))
     ) {
       inviteIds.add(parts[1]);
     }
@@ -48,16 +39,42 @@ export function changedInviteMetadataIds(
   return [...inviteIds];
 }
 
-export function notifyInviteMetadataChanged(
+export function notifyInviteWagersChanged(
   env: Env,
   updates: Record<string, unknown>,
   options: InviteRoomNotificationOptions = {},
 ): Promise<void> {
   return notifyInviteRooms(
     env,
-    changedInviteMetadataIds(updates),
-    "notifyMetadataChanged",
-    "invite_metadata_notify_failed",
+    changedInviteWagersIds(updates),
+    "notifyWagersChanged",
+    "invite_wagers_notify_failed",
     options,
   );
+}
+
+export async function notifyInviteSourceChanged(
+  env: Env,
+  updates: Record<string, unknown>,
+  metadataCommitted: boolean,
+): Promise<void> {
+  const metadataIds = new Set(
+    metadataCommitted ? changedInviteMetadataIds(updates) : [],
+  );
+  await Promise.all([
+    notifyInviteRooms(
+      env,
+      [...metadataIds],
+      "notifyMetadataChanged",
+      "invite_metadata_notify_failed",
+    ),
+    notifyInviteRooms(
+      env,
+      changedInviteWagersIds(updates).filter(
+        (inviteId) => !metadataIds.has(inviteId),
+      ),
+      "notifyWagersChanged",
+      "invite_wagers_notify_failed",
+    ),
+  ]);
 }

@@ -1,10 +1,10 @@
 import {
-  INVITE_METADATA_MAX_MESSAGE_BYTES,
-  INVITE_METADATA_SOCKET_PROTOCOL,
-  isReadInviteMetadataResponse,
-  type ReadInviteMetadataResponse,
-} from "@mons/shared/invite-metadata";
-import { GAME_SESSION_OPERATION_ID_PATTERN } from "@mons/shared/game-sessions";
+  INVITE_WAGERS_MAX_MESSAGE_BYTES,
+  INVITE_WAGERS_SOCKET_PROTOCOL,
+  isReadInviteWagersResponse,
+  type ReadInviteWagersResponse,
+} from "@mons/shared/invite-wagers";
+import { isInviteMetadataSnapshot } from "@mons/shared/invite-metadata";
 import { AuthApiFailure, authErrorResponse } from "./authErrors.ts";
 import {
   authJsonResponse,
@@ -27,11 +27,11 @@ import type { InviteReactions } from "./inviteReactions.ts";
 import { readInviteSocketToken } from "./inviteSocketAuth.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 
-const METADATA_ROUTE_PATTERN = /^\/invites\/([^/]+)\/metadata(\/socket)?$/;
+const WAGERS_ROUTE_PATTERN = /^\/invites\/([^/]+)\/wagers(\/socket)?$/;
 
-export type InviteMetadataRouteDependencies = {
+export type InviteWagersRouteDependencies = {
   repository?: GameplayRepository;
-  room?: Pick<InviteReactions, "readMetadata" | "fetch">;
+  room?: Pick<InviteReactions, "readWagers" | "fetch">;
   verifyIdentity?: (
     request: Request,
     ctx: WorkerExecutionContext,
@@ -39,13 +39,13 @@ export type InviteMetadataRouteDependencies = {
   logFailure?: () => void;
 };
 
-export function isInviteMetadataPath(pathname: string): boolean {
-  return METADATA_ROUTE_PATTERN.test(pathname);
+export function isInviteWagersPath(pathname: string): boolean {
+  return WAGERS_ROUTE_PATTERN.test(pathname);
 }
 
 function readRoute(request: Request): { inviteId: string; socket: boolean } {
   const url = new URL(request.url);
-  const match = METADATA_ROUTE_PATTERN.exec(url.pathname);
+  const match = WAGERS_ROUTE_PATTERN.exec(url.pathname);
   let inviteId = "";
   try {
     inviteId = match ? decodeURIComponent(match[1]) : "";
@@ -62,11 +62,11 @@ function readRoute(request: Request): { inviteId: string; socket: boolean } {
   return { inviteId, socket: Boolean(match?.[2]) };
 }
 
-export async function handleInviteMetadataRoute(
+export async function handleInviteWagersRoute(
   request: Request,
   env: Env,
   ctx: WorkerExecutionContext,
-  dependencies: InviteMetadataRouteDependencies = {},
+  dependencies: InviteWagersRouteDependencies = {},
 ): Promise<Response> {
   let corsHeaders: Record<string, string> = { Vary: "Origin" };
   try {
@@ -99,8 +99,8 @@ export async function handleInviteMetadataRoute(
       }
       const token = readInviteSocketToken(
         request,
-        INVITE_METADATA_SOCKET_PROTOCOL,
-        "invalid-metadata-auth",
+        INVITE_WAGERS_SOCKET_PROTOCOL,
+        "invalid-wagers-auth",
       );
       identityRequest = token
         ? new Request(request.url, {
@@ -116,7 +116,7 @@ export async function handleInviteMetadataRoute(
       : null;
     const ip = request.headers.get("CF-Connecting-IP")?.trim() || "unknown";
     const limited = await env.REACTION_RATE_LIMITER.limit({
-      key: `metadata:${socket ? "connect" : "read"}:${identity ? `identity:${identity.uid}` : `spectator:${ip}`}`,
+      key: `wagers:${socket ? "connect" : "read"}:${identity ? `identity:${identity.uid}` : `spectator:${ip}`}`,
     });
     if (!limited.success) {
       return authJsonResponse(
@@ -134,20 +134,44 @@ export async function handleInviteMetadataRoute(
     }
     const room = dependencies.room || env.INVITE_REACTIONS.getByName(inviteId);
     for (let attempt = 0; attempt < 2; attempt++) {
-      const read = await room.readMetadata(inviteId);
+      const read = await room.readWagers(inviteId);
       if (read.status === "missing") {
         throw new AuthApiFailure(404, "not-found", "invite-not-found");
       }
       if (read.status !== "ok") {
-        throw new AuthApiFailure(409, "failed-precondition", "invite-invalid");
+        throw new AuthApiFailure(
+          503,
+          "unavailable",
+          "invite-wagers-unavailable",
+        );
       }
-      const source = {
-        ...read.snapshot,
-        ...(read.passwordProtected ? { password: true } : {}),
+      const body: ReadInviteWagersResponse = {
+        ok: true,
+        snapshot: read.snapshot,
       };
-      if (!identity && !read.snapshot.guestId) {
+      if (
+        !isReadInviteWagersResponse(body) ||
+        !isInviteMetadataSnapshot(read.metadata.snapshot) ||
+        read.metadata.status !== "ok" ||
+        typeof read.metadata.passwordProtected !== "boolean" ||
+        read.snapshot.inviteId !== inviteId ||
+        read.metadata.snapshot.inviteId !== inviteId ||
+        new TextEncoder().encode(JSON.stringify(body)).byteLength >
+          INVITE_WAGERS_MAX_MESSAGE_BYTES
+      ) {
+        throw new AuthApiFailure(
+          503,
+          "unavailable",
+          "invite-wagers-unavailable",
+        );
+      }
+      if (!identity && !read.metadata.snapshot.guestId) {
         throw new AuthApiFailure(403, "permission-denied", "permission-denied");
       }
+      const source = {
+        ...read.metadata.snapshot,
+        ...(read.metadata.passwordProtected ? { password: true } : {}),
+      };
       const role = identity
         ? await resolveInviteRoleFromSnapshot(
             identity,
@@ -156,48 +180,23 @@ export async function handleInviteMetadataRoute(
             repository,
           )
         : { role: "watch" as const, actorUid: null };
-      const operationId = identity
-        ? read.automatchOperationIds[identity.uid]
-        : null;
-      const body: ReadInviteMetadataResponse = {
-        ok: true,
-        snapshot: read.snapshot,
-        viewer: {
-          role: role.role,
-          actorUid: role.actorUid,
-          automatchOperationId:
-            typeof operationId === "string" &&
-            GAME_SESSION_OPERATION_ID_PATTERN.test(operationId)
-              ? operationId
-              : null,
-        },
-      };
-      if (
-        !isReadInviteMetadataResponse(body) ||
-        new TextEncoder().encode(JSON.stringify(body)).byteLength >
-          INVITE_METADATA_MAX_MESSAGE_BYTES
-      ) {
-        throw new AuthApiFailure(
-          503,
-          "unavailable",
-          "invite-metadata-unavailable",
-        );
-      }
       if (!socket) return authJsonResponse(body, 200, corsHeaders);
       const response = await room.fetch(
-        new Request("https://reactions.internal/metadata/socket", {
+        new Request("https://reactions.internal/wagers/socket", {
           headers: {
             Upgrade: "websocket",
-            "Sec-WebSocket-Protocol": INVITE_METADATA_SOCKET_PROTOCOL,
-            "X-Mons-Metadata-Invite": encodeURIComponent(inviteId),
-            "X-Mons-Metadata-Role":
+            "Sec-WebSocket-Protocol": INVITE_WAGERS_SOCKET_PROTOCOL,
+            "X-Mons-Wagers-Invite": encodeURIComponent(inviteId),
+            "X-Mons-Wagers-Role":
               role.role === "watch" ? "spectator" : role.role,
-            "X-Mons-Metadata-IP": ip,
-            "X-Mons-Metadata-Revision": String(read.snapshot.revision),
-            "X-Mons-Metadata-Protected": read.passwordProtected ? "1" : "0",
-            "X-Mons-Metadata-Authenticated": identity ? "1" : "0",
+            "X-Mons-Wagers-IP": ip,
+            "X-Mons-Wagers-Revision": String(read.snapshot.revision),
+            "X-Mons-Wagers-Protected": read.metadata.passwordProtected
+              ? "1"
+              : "0",
+            "X-Mons-Wagers-Authenticated": identity ? "1" : "0",
             ...(role.actorUid
-              ? { "X-Mons-Metadata-Actor": encodeURIComponent(role.actorUid) }
+              ? { "X-Mons-Wagers-Actor": encodeURIComponent(role.actorUid) }
               : {}),
           },
         }),
@@ -205,16 +204,16 @@ export async function handleInviteMetadataRoute(
       if (response.status !== 409) return response;
       await cancelResponseBody(response);
     }
-    throw new AuthApiFailure(503, "unavailable", "invite-metadata-unavailable");
+    throw new AuthApiFailure(503, "unavailable", "invite-wagers-unavailable");
   } catch (error) {
     if (error instanceof AuthApiFailure)
       return authErrorResponse(error, corsHeaders);
     (
       dependencies.logFailure ||
-      (() => console.error({ event: "invite_metadata_failure" }))
+      (() => console.error({ event: "invite_wagers_failure" }))
     )();
     return authErrorResponse(
-      new AuthApiFailure(503, "unavailable", "invite-metadata-unavailable"),
+      new AuthApiFailure(503, "unavailable", "invite-wagers-unavailable"),
       corsHeaders,
     );
   }

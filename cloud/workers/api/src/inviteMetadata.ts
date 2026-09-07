@@ -5,10 +5,7 @@ import {
   type InviteMetadataSnapshot,
 } from "@mons/shared/invite-metadata";
 import { isCanonicalFirebaseUid } from "./firebaseKeys.ts";
-import {
-  createFirebaseRtdbClient,
-  type FirebaseRtdbClient,
-} from "./firebaseRtdb.ts";
+import { createInviteSourceReader } from "./inviteSource.ts";
 
 export type InviteMetadataReadResult =
   | {
@@ -18,8 +15,6 @@ export type InviteMetadataReadResult =
       automatchOperationIds: Record<string, string>;
     }
   | { status: "missing" | "invalid" };
-
-const METADATA_SOURCE_CLIENT_TTL_MS = 5 * 60 * 1_000;
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -71,35 +66,9 @@ export function normalizeInviteMetadata(
 
 export function createInviteMetadataReader(
   env: Env,
-  {
-    createClient = () =>
-      createFirebaseRtdbClient(env, {
-        credentials: {
-          email: env.GAMEPLAY_SERVICE_ACCOUNT_EMAIL,
-          privateKeyPem: env.GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY,
-        },
-      }),
-    now = Date.now,
-  }: {
-    createClient?: () => Pick<FirebaseRtdbClient, "getPath">;
-    now?: () => number;
-  } = {},
+  dependencies: Parameters<typeof createInviteSourceReader>[1] = {},
 ): (inviteId: string) => Promise<InviteMetadataReadResult> {
-  let client: Pick<FirebaseRtdbClient, "getPath"> | null = null;
-  let expiresAtMs = 0;
-  return async (inviteId) => {
-    if (!client || now() >= expiresAtMs) {
-      client = createClient();
-      expiresAtMs = now() + METADATA_SOURCE_CLIENT_TTL_MS;
-    }
-    try {
-      return normalizeInviteMetadata(
-        inviteId,
-        await client.getPath(`invites/${inviteId}`),
-      );
-    } catch (error) {
-      client = null;
-      throw error;
-    }
-  };
+  const read = createInviteSourceReader(env, dependencies);
+  return async (inviteId) =>
+    normalizeInviteMetadata(inviteId, await read(inviteId));
 }

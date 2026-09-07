@@ -205,6 +205,12 @@ import {
 import { ObserverRegistry } from "./observerRegistry";
 import { InviteReactionChannel } from "./inviteReactionChannel";
 import { InviteMetadataChannel } from "./inviteMetadataChannel";
+import { InviteWagersChannel } from "./inviteWagersChannel";
+import type { InviteWagersSnapshot } from "@mons/shared/invite-wagers";
+import {
+  createInviteWagersSocketProtocols,
+  readInviteWagersViaApi,
+} from "../services/inviteWagersApi";
 import { InviteMetadataState } from "./inviteMetadataState";
 import type {
   InviteMetadataSnapshot,
@@ -361,12 +367,22 @@ class Connection {
   private inviteMetadataState: InviteMetadataState | null = null;
   private inviteMetadataViewer: InviteMetadataViewer | null = null;
   private inviteMetadataBootstrapController: AbortController | null = null;
+  private inviteBootstrapLoginUid: string | null = null;
   private inviteMetadataSubscription: {
     contextId: number;
     channel: InviteMetadataChannel;
     stop: () => void;
   } | null = null;
-  private wagersRef: any = null;
+  private inviteWagersSnapshot: InviteWagersSnapshot | null = null;
+  private wagerSnapshotGeneration = 0;
+  private wagerSnapshotRevisionFloor = -1;
+  private wagerSnapshotNeedsReconciliation = false;
+  private pendingWagerMutations = new Set<object>();
+  private inviteWagersSubscription: {
+    contextId: number;
+    channel: InviteWagersChannel;
+    stop: () => void;
+  } | null = null;
   private inviteReactionSubscription: {
     contextId: number;
     channel: InviteReactionChannel;
@@ -500,6 +516,7 @@ class Connection {
   private beginConnectAttempt(): number {
     this.inviteMetadataBootstrapController?.abort();
     this.inviteMetadataBootstrapController = null;
+    this.inviteBootstrapLoginUid = null;
     this.connectAttemptId += 1;
     return this.connectAttemptId;
   }
@@ -932,9 +949,14 @@ class Connection {
     );
     try {
       return await poller.runMutation(
-        () => {
+        async () => {
           tokenProvider.assertCurrentUser();
-          return action(tokenProvider);
+          const finish = this.beginWagerSnapshotMutation(context);
+          try {
+            return await action(tokenProvider);
+          } finally {
+            finish();
+          }
         },
         { requiresSnapshot, isCurrent },
       );
@@ -950,6 +972,24 @@ class Connection {
       }
       throw error;
     }
+  }
+
+  private beginWagerSnapshotMutation(context: MatchRuntimeContext): () => void {
+    const mutation = {};
+    this.pendingWagerMutations.add(mutation);
+    this.wagerSnapshotGeneration += 1;
+    this.wagerSnapshotNeedsReconciliation = true;
+    return () => {
+      if (!this.pendingWagerMutations.delete(mutation)) return;
+      this.wagerSnapshotGeneration += 1;
+      if (
+        this.activeContext?.inviteId === context.inviteId &&
+        this.activeContext.loginUid === context.loginUid &&
+        this.auth.currentUser?.uid === context.loginUid
+      ) {
+        this.inviteWagersSubscription?.channel.requestRefresh();
+      }
+    };
   }
 
   private createWagerContextGuard(
@@ -1304,6 +1344,11 @@ class Connection {
     this.latestInvite = null;
     this.inviteMetadataState = null;
     this.inviteMetadataViewer = null;
+    this.inviteWagersSnapshot = null;
+    this.wagerSnapshotGeneration += 1;
+    this.wagerSnapshotRevisionFloor = -1;
+    this.wagerSnapshotNeedsReconciliation = false;
+    this.pendingWagerMutations.clear();
     this.myMatch = null;
     this.inviteId = null;
     this.matchId = null;
@@ -1651,9 +1696,18 @@ class Connection {
     incrementLifecycleCounter("connectionAuthSubscribers");
     const unsubscribe = onAuthStateChanged(this.auth, (user) => {
       const newUid = user?.uid ?? null;
+      if (
+        this.inviteBootstrapLoginUid &&
+        newUid !== this.inviteBootstrapLoginUid
+      ) {
+        this.beginConnectAttempt();
+      }
       if (this.activeContext && newUid !== this.activeContext.loginUid) {
         this.cleanupInviteMetadataObserver();
+        this.cleanupWagerObserver();
         this.cleanupInviteReactionObserver();
+        this.pendingWagerMutations.clear();
+        this.wagerSnapshotGeneration += 1;
       }
       if (newUid !== this.currentUid) {
         this.clearEventSyncCaches();
@@ -1787,7 +1841,9 @@ class Connection {
     matchId: string,
     previousState: MatchWagerState | null,
     isActive: () => boolean,
+    isInviteActive: () => boolean,
   ): void {
+    if (!isInviteActive()) return;
     let restored = false;
     const wagers = this.latestInvite?.wagers;
     if (wagers?.[matchId]?.resolved?.optimistic) {
@@ -3087,11 +3143,20 @@ class Connection {
     const isCurrentProfile = () =>
       this.auth.currentUser?.uid === loginUid &&
       storage.getProfileId("") === profileIdAtRequest;
+    const isCurrentInvite = () =>
+      isCurrentSession() &&
+      isCurrentProfile() &&
+      this.activeContext?.inviteId === inviteId;
     const matchGuard = this.createWagerContextGuard(writableContext);
+    let finishSnapshotMutation = () => {};
     let restoreOptimisticState = (_state?: MatchWagerState | null) => {};
     try {
       await this.ensureAuthenticated();
       if (!isCurrentProfile()) return { ok: false };
+      if (isCurrentInvite()) {
+        finishSnapshotMutation =
+          this.beginWagerSnapshotMutation(writableContext);
+      }
       const tokenProvider = this.getUserBoundAuthTokenProvider(loginUid);
       const previousWagerState = matchGuard()
         ? this.cloneWagerState(getWagerState())
@@ -3102,7 +3167,12 @@ class Connection {
         if (!optimisticApplied) {
           return;
         }
-        this.restoreOptimisticWagerResolution(matchId, state, matchGuard);
+        this.restoreOptimisticWagerResolution(
+          matchId,
+          state,
+          matchGuard,
+          isCurrentInvite,
+        );
       };
       console.log("wager:resolve:start", {
         inviteId,
@@ -3132,8 +3202,7 @@ class Connection {
       if (
         responseData?.ok === true &&
         responseData.mining &&
-        isCurrentSession() &&
-        isCurrentProfile()
+        isCurrentInvite()
       ) {
         rocksMiningService.setFromServer(responseData.mining, {
           persist: true,
@@ -3154,6 +3223,7 @@ class Connection {
       console.error("Error resolving wager outcome:", error);
       throw error;
     } finally {
+      finishSnapshotMutation();
       if (isCurrentProfile()) this.miningFrozenPoller?.refresh();
     }
   }
@@ -4713,7 +4783,9 @@ class Connection {
     const isPendingLocalInviteCreation =
       this.pendingInviteCreation?.inviteId === inviteId;
     const cachedInvite =
-      this.inviteId === inviteId && this.latestInvite
+      this.inviteId === inviteId &&
+      this.activeContext?.loginUid === uid &&
+      this.latestInvite
         ? { ...this.latestInvite }
         : null;
     const cachedMetadataState =
@@ -4735,6 +4807,7 @@ class Connection {
     }
     const controller = new AbortController();
     this.inviteMetadataBootstrapController = controller;
+    this.inviteBootstrapLoginUid = uid;
 
     const resolveInvite = (async () => {
       try {
@@ -4799,6 +4872,7 @@ class Connection {
           ...metadataState.snapshot,
           wagers: cachedInvite?.wagers ?? null,
         };
+        let wagersSnapshot: InviteWagersSnapshot | null = null;
         this.reconcilePendingAutomatchRequest(
           uid,
           inviteId,
@@ -4878,11 +4952,14 @@ class Connection {
           return;
         }
         if (!cachedInvite) {
-          const wagersSnapshot = await get(
-            ref(this.db, `invites/${inviteId}/wagers`),
+          const response = await readInviteWagersViaApi(
+            inviteId,
+            tokenProvider,
+            { signal: controller.signal },
           );
           if (!isConnectActive()) return;
-          workingInvite.wagers = wagersSnapshot.val();
+          wagersSnapshot = response.snapshot;
+          workingInvite.wagers = { ...wagersSnapshot.wagers };
         }
         const { matchId, hasPendingProposal } = this.getLatestMatchIdForActor(
           inviteId,
@@ -4934,6 +5011,22 @@ class Connection {
         if (!isConnectActive()) {
           return;
         }
+        const reusingWagers =
+          this.inviteId === inviteId &&
+          this.activeContext?.loginUid === uid &&
+          !!this.latestInvite;
+        const needsWagerReconciliation =
+          reusingWagers && this.wagerSnapshotNeedsReconciliation;
+        const pendingWagerMutations = reusingWagers
+          ? [...this.pendingWagerMutations]
+          : [];
+        if (reusingWagers) {
+          workingInvite.wagers = this.latestInvite!.wagers;
+          wagersSnapshot = this.inviteWagersSnapshot;
+        }
+        const wagerRevisionFloor = reusingWagers
+          ? this.wagerSnapshotRevisionFloor
+          : (wagersSnapshot?.revision ?? -1);
         this.detachFromMatchSession();
         this.loginUid = uid;
         connectEpoch = this.sessionEpoch;
@@ -4942,6 +5035,11 @@ class Connection {
         this.latestInvite = workingInvite;
         this.inviteMetadataState = metadataState;
         this.inviteMetadataViewer = viewer;
+        this.inviteWagersSnapshot = wagersSnapshot;
+        this.wagerSnapshotRevisionFloor = wagerRevisionFloor;
+        this.wagerSnapshotNeedsReconciliation = needsWagerReconciliation;
+        for (const mutation of pendingWagerMutations)
+          this.pendingWagerMutations.add(mutation);
         this.myMatch = myMatch;
 
         const nextContext = this.buildRuntimeContext(
@@ -5242,34 +5340,106 @@ class Connection {
 
   private observeWagers(
     context: MatchRuntimeContext | null = this.activeContext,
-  ) {
-    if (!context) {
-      return;
-    }
-    const wagersRef = ref(this.db, `invites/${context.inviteId}/wagers`);
-    this.wagersRef = wagersRef;
-    this.observeContextValue(
-      context,
-      `invite-wagers:${context.inviteId}`,
-      wagersRef,
-      (snapshot) => {
-        const wagers = snapshot.val();
-        this.logWagerDebug("observe-wagers:update", {
-          availableMatchIds: wagers ? Object.keys(wagers) : [],
-        });
-        if (this.latestInvite) {
-          this.latestInvite.wagers = wagers;
+  ): void {
+    if (!context) return;
+    if (this.inviteWagersSubscription?.contextId === context.contextId) return;
+    this.cleanupWagerObserver();
+    const key = `invite-wagers:${context.inviteId}`;
+    const isActive = () =>
+      this.isContextActive(context.contextId, context.sessionEpoch) &&
+      this.isCurrentAuthUser(context.loginUid);
+    const channel = new InviteWagersChannel({
+      inviteId: context.inviteId,
+      createSocket: (url, protocols) => new WebSocket(url, protocols),
+      getProtocols: async (forceRefresh) => {
+        const tokenProvider = this.getUserBoundAuthTokenProvider(
+          context.loginUid,
+        );
+        const token = await tokenProvider(forceRefresh);
+        tokenProvider.assertCurrentUser();
+        return createInviteWagersSocketProtocols(token);
+      },
+      readWagers: (signal) =>
+        readInviteWagersViaApi(
+          context.inviteId,
+          this.getUserBoundAuthTokenProvider(context.loginUid),
+          { signal },
+        ),
+      captureGeneration: () => this.wagerSnapshotGeneration,
+      needsHttpRefresh: () => this.wagerSnapshotNeedsReconciliation,
+      isActive,
+      isOnline: () => typeof navigator === "undefined" || navigator.onLine,
+      isVisible: () =>
+        typeof document === "undefined" ||
+        document.visibilityState === "visible",
+      addWakeListener: (listener) => {
+        if (typeof window === "undefined") return () => undefined;
+        window.addEventListener("online", listener);
+        window.addEventListener("offline", listener);
+        window.addEventListener("pageshow", listener);
+        document.addEventListener("visibilitychange", listener);
+        return () => {
+          window.removeEventListener("online", listener);
+          window.removeEventListener("offline", listener);
+          window.removeEventListener("pageshow", listener);
+          document.removeEventListener("visibilitychange", listener);
+        };
+      },
+      onSnapshot: (snapshot, delivery) => {
+        if (!isActive() || snapshot.inviteId !== context.inviteId) return;
+        this.wagerSnapshotRevisionFloor = Math.max(
+          this.wagerSnapshotRevisionFloor,
+          snapshot.revision,
+        );
+        if (
+          !this.latestInvite ||
+          this.pendingWagerMutations.size > 0 ||
+          delivery.requestGeneration !== this.wagerSnapshotGeneration ||
+          snapshot.revision < this.wagerSnapshotRevisionFloor ||
+          (this.wagerSnapshotNeedsReconciliation &&
+            delivery.source !== "http") ||
+          (!this.wagerSnapshotNeedsReconciliation &&
+            snapshot.revision === this.inviteWagersSnapshot?.revision)
+        ) {
+          return;
         }
+        this.inviteWagersSnapshot = snapshot;
+        this.wagerSnapshotNeedsReconciliation = false;
+        this.latestInvite.wagers = { ...snapshot.wagers };
+        this.logWagerDebug("observe-wagers:update", {
+          availableMatchIds: Object.keys(snapshot.wagers),
+          revision: snapshot.revision,
+        });
         this.updateWagerStateForCurrentMatch();
         this.miningFrozenPoller?.refresh();
       },
-      undefined,
-      () => {
-        if (this.wagersRef === wagersRef) {
-          this.wagersRef = null;
-        }
-      },
-    );
+      onError: (error) =>
+        console.error("Error receiving invite wagers:", error),
+      setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+      clearTimer: (timer) => clearTimeout(timer),
+      random: Math.random,
+    });
+    let stopped = false;
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      channel.stop();
+      this.unregisterObserverCleanup(context.contextId, key);
+      if (this.inviteWagersSubscription?.channel === channel) {
+        this.inviteWagersSubscription = null;
+      }
+      decrementLifecycleCounter("connectionObservers");
+    };
+    if (!this.registerObserverCleanup(context.contextId, key, stop)) {
+      channel.stop();
+      return;
+    }
+    this.inviteWagersSubscription = {
+      contextId: context.contextId,
+      channel,
+      stop,
+    };
+    incrementLifecycleCounter("connectionObservers");
   }
 
   private observeInviteReactions(
@@ -5411,11 +5581,7 @@ class Connection {
   }
 
   private cleanupWagerObserver() {
-    if (this.wagersRef) {
-      off(this.wagersRef);
-      this.wagersRef = null;
-      decrementLifecycleCounter("connectionObservers");
-    }
+    this.inviteWagersSubscription?.stop();
   }
 
   private cleanupInviteReactionObserver() {

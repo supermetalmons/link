@@ -25,6 +25,7 @@ const names = new Set([
   "resolveWagerOutcome",
   "performResolveWagerOutcome",
   "runWagerMutation",
+  "beginWagerSnapshotMutation",
   "createWagerContextGuard",
   "createMatchContextGuard",
   "createSessionGuard",
@@ -90,6 +91,7 @@ function harness() {
   instance = Object.assign(new Constructor(), {
     activeContext: {
       contextId: 1,
+      sessionEpoch: 1,
       inviteId: "invite",
       matchId: "finished",
       loginUid: "login",
@@ -99,6 +101,8 @@ function harness() {
     auth: { currentUser: { uid: "login", getIdToken: async () => "token" } },
     sameProfilePlayerUid: "actor",
     sessionEpoch: 1,
+    pendingWagerMutations: new Set(),
+    wagerSnapshotGeneration: 0,
     ensureAuthenticated: async () => {},
     requireWritableContext: () => instance.activeContext,
     isSessionEpochActive: (epoch) => epoch === instance.sessionEpoch,
@@ -225,6 +229,22 @@ test("settlement completes after navigation without replacing newer inventory", 
   assert.deepEqual(await result, response);
   assert.deepEqual(h.requests, [{ inviteId: "invite", matchId: "finished" }]);
   assert.deepEqual(h.inventory, [newerInventory]);
+});
+
+test("settlement cannot replace inventory after the active invite changes within the same session", async (t) => {
+  const h = harness();
+  t.after(() => h.poller.stop());
+  const result = h.instance.resolveWagerOutcome(true);
+  await flush();
+  h.instance.activeContext = {
+    ...h.instance.activeContext,
+    contextId: 2,
+    inviteId: "other-invite",
+  };
+  h.pending.resolve(response);
+  assert.deepEqual(await result, response);
+  assert.deepEqual(h.requests, [{ inviteId: "invite", matchId: "finished" }]);
+  assert.deepEqual(h.inventory, []);
 });
 
 test("account and profile changes cannot receive an old inventory response", async (t) => {

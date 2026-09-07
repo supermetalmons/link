@@ -54,6 +54,11 @@ import {
   isInviteMetadataPath,
   type InviteMetadataRouteDependencies,
 } from "./inviteMetadataRoute.ts";
+import {
+  handleInviteWagersRoute,
+  isInviteWagersPath,
+  type InviteWagersRouteDependencies,
+} from "./inviteWagersRoute.ts";
 
 const RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
 
@@ -80,11 +85,21 @@ export async function handleRequest(
     reactions?: InviteReactionRouteDependencies;
     presentation?: MatchPresentationRouteDependencies;
     metadata?: InviteMetadataRouteDependencies;
+    wagers?: InviteWagersRouteDependencies;
     xCallback?: XCallbackDependencyOverrides;
   } = {},
   ctx?: WorkerExecutionContext,
 ): Promise<Response> {
   const pathname = new URL(request.url).pathname;
+  if (isInviteWagersPath(pathname)) {
+    if (!ctx) return jsonResponse({ ok: false, error: "unavailable" }, 503);
+    return handleInviteWagersRoute(
+      request,
+      env,
+      ctx,
+      dependencyOverrides.wagers,
+    );
+  }
   if (isInviteMetadataPath(pathname)) {
     if (!ctx) return jsonResponse({ ok: false, error: "unavailable" }, 503);
     return handleInviteMetadataRoute(

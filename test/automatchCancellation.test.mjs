@@ -141,10 +141,17 @@ function harness(invite, onMatchRead = () => {}) {
       isAutoInviteId,
       ref: (_db, path) => path,
       get: async (path) => {
-        if (path.endsWith("/wagers")) return { val: () => null };
+        assert.ok(
+          path.startsWith("players/"),
+          `unexpected Firebase read: ${path}`,
+        );
         onMatchRead();
         return { val: () => ({ color: "white" }) };
       },
+      readInviteWagersViaApi: async (inviteId) => ({
+        ok: true,
+        snapshot: { inviteId, revision: 1, wagers: {} },
+      }),
       getPlayersEmojiId: () => 1,
       transitionToHome: async (options) => {
         events.home.push(options);

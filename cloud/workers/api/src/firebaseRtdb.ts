@@ -1,7 +1,7 @@
 import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 import { createGoogleAccessToken } from "./googleAuth.ts";
 import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
-import { notifyInviteMetadataChanged } from "./inviteMetadataNotifications.ts";
+import { notifyInviteSourceChanged } from "./inviteWagersNotifications.ts";
 
 const FIREBASE_DATABASE_SCOPE =
   "https://www.googleapis.com/auth/firebase.database";
@@ -213,21 +213,26 @@ export function createFirebaseRtdbClient(
     async patchRoot(updates, signal) {
       const url = new URL(databaseUrl(root, ""));
       url.searchParams.set("print", "silent");
-      const response = await authorizedFetch(
-        url.toString(),
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(updates),
-        },
-        signal,
-      );
-      if (!response.ok) {
+      let committed = false;
+      try {
+        const response = await authorizedFetch(
+          url.toString(),
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(updates),
+          },
+          signal,
+        );
+        if (!response.ok) {
+          await cancelResponseBody(response);
+          throw new FirebaseRtdbFailure();
+        }
+        committed = true;
         await cancelResponseBody(response);
-        throw new FirebaseRtdbFailure();
+      } finally {
+        await notifyInviteSourceChanged(env, updates, committed);
       }
-      await cancelResponseBody(response);
-      await notifyInviteMetadataChanged(env, updates);
     },
     async transactPath(path, updater, signal) {
       const url = databaseUrl(root, path);
@@ -259,29 +264,42 @@ export function createFirebaseRtdbClient(
             value: current,
           };
         }
-        const writeResponse = await authorizedFetch(
-          url,
-          {
-            method: "PUT",
-            headers: {
-              "Content-Type": "application/json",
-              "If-Match": etag,
+        let committed = false;
+        let conflict = false;
+        try {
+          const writeResponse = await authorizedFetch(
+            url,
+            {
+              method: "PUT",
+              headers: {
+                "Content-Type": "application/json",
+                "If-Match": etag,
+              },
+              body: JSON.stringify(decision.value),
             },
-            body: JSON.stringify(decision.value),
-          },
-          signal,
-        );
-        if (writeResponse.status === 412) {
-          await cancelResponseBody(writeResponse);
-          continue;
+            signal,
+          );
+          if (writeResponse.status === 412) {
+            conflict = true;
+            await cancelResponseBody(writeResponse);
+            continue;
+          }
+          const value = await readJson(writeResponse);
+          committed = true;
+          return {
+            committed: true,
+            decision: decision.decision,
+            value,
+          };
+        } finally {
+          if (!conflict) {
+            await notifyInviteSourceChanged(
+              env,
+              { [path]: decision.value },
+              committed,
+            );
+          }
         }
-        const value = await readJson(writeResponse);
-        await notifyInviteMetadataChanged(env, { [path]: decision.value });
-        return {
-          committed: true,
-          decision: decision.decision,
-          value,
-        };
       }
       throw new FirebaseRtdbFailure();
     },

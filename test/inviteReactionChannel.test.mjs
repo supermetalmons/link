@@ -352,6 +352,7 @@ test("the actual Firebase auth callback tears down participant and spectator res
     "observeInviteReactions",
     "cleanupInviteReactionObserver",
     "cleanupInviteMetadataObserver",
+    "cleanupWagerObserver",
   ].map((name) => {
     const method = declaration.members.find(
       (node) => node.name?.getText(source) === name,
@@ -434,6 +435,8 @@ test("the actual Firebase auth callback tears down participant and spectator res
       auth: { currentUser: { uid: "original-login" } },
       currentUid: "original-login",
       authUnsubscribers: new Set(),
+      pendingWagerMutations: new Set([{}]),
+      wagerSnapshotGeneration: 0,
       activeContext: {
         contextId: 1,
         sessionEpoch: 1,
@@ -493,6 +496,8 @@ test("the actual Firebase auth callback tears down participant and spectator res
     connection.auth.currentUser = newUser;
     authCallback(newUser);
     assert.equal(signal.aborted, true);
+    assert.equal(connection.pendingWagerMutations.size, 0);
+    assert.equal(connection.wagerSnapshotGeneration, 1);
     assert.equal(presentationSignal.aborted, true);
     assert.equal(socket.closes, 1);
     assert.equal(socket.onmessage, null);

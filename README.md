@@ -18,7 +18,7 @@ The frontend Worker is configured by `wrangler.jsonc`. The API Worker has its in
 
 The same Durable Object owns live per-match emoji/aura updates, with revisioned HTTP mutations and v2 WebSocket snapshots. Firebase match records retain immutable appearance seeds. Historical D1 pairs capture appearance once during archival; later live changes do not alter those snapshots. The API and frontend must be released before the Firebase rules cutover that blocks legacy cosmetic writes.
 
-Invite/lobby and rematch reads use the API's metadata snapshots and a separate `mons-invite-metadata-v1` WebSocket subscription in the existing invite Durable Object. Canonical invite records remain in Realtime Database. Successful server mutations request immediate updates, and an alarm refreshes each subscribed invite every five seconds to recover missed notifications. Browser Realtime Database subscriptions remain only for live matches and wagers.
+Invite/lobby and rematch reads use the API's metadata snapshots and a separate `mons-invite-metadata-v1` WebSocket subscription in the existing invite Durable Object. Wager reads use invite-wide HTTP snapshots and `mons-invite-wagers-v1`, preserving historical rematch displays while excluding internal settlement records. Canonical invite and wager records remain in Realtime Database. Server mutations request immediate updates, and a shared alarm refreshes each subscribed invite every five seconds to recover missed notifications. Browser Realtime Database subscriptions remain only for live matches.
 
 ## Setup and development
 

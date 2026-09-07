@@ -23,7 +23,8 @@ Deploy only affected Workers. Shared prize-catalog changes need both the API and
 - `EVENT_DB` owns event records, participants, prize selections, visible assigned prizes, progress markers, and event-specific projection state. Active invites and matches remain in RTDB.
 - `INVITE_REACTIONS` owns voice/sticker reaction delivery through one SQLite-backed `InviteReactions` Durable Object per invite. Firebase reaction records are retained but no longer written after the final rules cutover.
 - The same Durable Object owns revisioned live match presentation and frozen historical appearance. Firebase matches retain immutable emoji/aura seeds; no extra Worker, namespace, or D1 migration is required.
-- The same object serves revisioned invite/lobby/rematch metadata over a separate subscription. Invite source records remain in RTDB; a five-second alarm reconciles metadata only while its subscribers are connected.
+- The same object serves revisioned invite/lobby/rematch metadata over a separate subscription. Invite source records remain in RTDB.
+- The same object serves invite-wide public wager snapshots over HTTP and `mons-invite-wagers-v1`. Wager source records and mutations remain in RTDB. Metadata and wagers share canonical source reads and one five-second reconciliation alarm while either channel has subscribers; their revisions, admission limits, and broadcasts remain separate.
 - `cloud/firebase.json` owns active-gameplay Realtime Database rules. Firestore, Firebase Functions, and canonical event-data RTDB paths are retired.
 
 Authenticate Wrangler locally or provide `CLOUDFLARE_API_TOKEN` through the process environment. Never put credentials in command arguments, source files, release files, or logs.
