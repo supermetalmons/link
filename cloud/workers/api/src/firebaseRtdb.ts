@@ -2,6 +2,7 @@ import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
 import { createGoogleAccessToken } from "./googleAuth.ts";
 import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
 import { notifyInviteSourceChanged } from "./inviteWagersNotifications.ts";
+import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
 
 const FIREBASE_DATABASE_SCOPE =
   "https://www.googleapis.com/auth/firebase.database";
@@ -25,6 +26,13 @@ export function firebaseRtdbIncrement(delta: number): Record<string, unknown> {
 export class FirebaseRtdbFailure extends Error {
   constructor() {
     super("firebase-rtdb-unavailable");
+  }
+}
+
+export class FirebaseRtdbPermissionDenied extends FirebaseRtdbFailure {
+  constructor() {
+    super();
+    this.message = "firebase-rtdb-permission-denied";
   }
 }
 
@@ -146,10 +154,16 @@ function queryDatabaseUrl(
 export function createFirebaseRtdbClient(
   env: Env,
   {
-    credentials = {
-      email: env.TELEGRAM_FIREBASE_SERVICE_ACCOUNT_EMAIL,
-      privateKeyPem: env.TELEGRAM_FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY,
-    },
+    scopedMatchSurrender,
+    credentials = scopedMatchSurrender
+      ? {
+          email: env.GAMEPLAY_SERVICE_ACCOUNT_EMAIL,
+          privateKeyPem: env.GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY,
+        }
+      : {
+          email: env.TELEGRAM_FIREBASE_SERVICE_ACCOUNT_EMAIL,
+          privateKeyPem: env.TELEGRAM_FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY,
+        },
     fetcher = fetch,
     getAccessToken: getAccessTokenOverride,
     maxTransactionAttempts = MAX_TRANSACTION_ATTEMPTS,
@@ -161,10 +175,34 @@ export function createFirebaseRtdbClient(
     getAccessToken?: () => Promise<string>;
     maxTransactionAttempts?: number;
     now?: () => number;
+    scopedMatchSurrender?: { playerId: string; matchId: string };
     timeoutMs?: number;
   } = {},
 ): FirebaseRtdbClient {
   const root = databaseRoot(env);
+  if (
+    scopedMatchSurrender !== undefined &&
+    (!scopedMatchSurrender ||
+      !isCanonicalFirebaseUid(scopedMatchSurrender.playerId) ||
+      !isSafeFirebaseKey(scopedMatchSurrender.matchId) ||
+      scopedMatchSurrender.matchId !== scopedMatchSurrender.matchId.trim())
+  ) {
+    throw new TypeError("invalid-match-surrender-scope");
+  }
+  const surrenderPath = scopedMatchSurrender
+    ? `players/${scopedMatchSurrender.playerId}/matches/${scopedMatchSurrender.matchId}`
+    : null;
+  const authOverride = scopedMatchSurrender
+    ? JSON.stringify({
+        uid: scopedMatchSurrender.playerId,
+        token: { workerSurrenderMatchId: scopedMatchSurrender.matchId },
+      })
+    : null;
+  const assertPath = (path: string): void => {
+    if (surrenderPath !== null && path !== surrenderPath) {
+      throw new TypeError("match-surrender-path-outside-scope");
+    }
+  };
   let accessToken: Promise<string> | null = null;
   const getAccessToken = () => {
     accessToken ||= getAccessTokenOverride
@@ -183,6 +221,11 @@ export function createFirebaseRtdbClient(
     init: RequestInit = {},
     signal?: AbortSignal,
   ): Promise<Response> => {
+    if (authOverride !== null) {
+      const url = new URL(input);
+      url.searchParams.set("auth_variable_override", authOverride);
+      input = url.toString();
+    }
     const headers = new Headers(init.headers);
     headers.set("Authorization", `Bearer ${await getAccessToken()}`);
     const requestSignal = signal
@@ -198,10 +241,30 @@ export function createFirebaseRtdbClient(
       throw new FirebaseRtdbFailure();
     }
   };
+  const throwResponseFailure = async (response: Response): Promise<never> => {
+    if (surrenderPath !== null && [401, 403].includes(response.status)) {
+      const value = await readBoundedJsonValue(
+        response,
+        MAX_RTDB_BODY_BYTES,
+        () => new FirebaseRtdbFailure(),
+      );
+      if (
+        value &&
+        typeof value === "object" &&
+        "error" in value &&
+        typeof value.error === "string" &&
+        /^permission denied\.?$/i.test(value.error.trim())
+      ) {
+        throw new FirebaseRtdbPermissionDenied();
+      }
+    } else {
+      await cancelResponseBody(response);
+    }
+    throw new FirebaseRtdbFailure();
+  };
   const readJson = async (response: Response): Promise<unknown> => {
     if (!response.ok) {
-      await cancelResponseBody(response);
-      throw new FirebaseRtdbFailure();
+      return throwResponseFailure(response);
     }
     return readBoundedJsonValue(
       response,
@@ -211,11 +274,15 @@ export function createFirebaseRtdbClient(
   };
   return {
     async getPath(path, query, signal) {
+      assertPath(path);
       return readJson(
         await authorizedFetch(queryDatabaseUrl(root, path, query), {}, signal),
       );
     },
     async patchRoot(updates, signal) {
+      if (surrenderPath !== null) {
+        throw new TypeError("match-surrender-multipath-write-forbidden");
+      }
       const url = new URL(databaseUrl(root, ""));
       url.searchParams.set("print", "silent");
       let committed = false;
@@ -240,6 +307,7 @@ export function createFirebaseRtdbClient(
       }
     },
     async transactPath(path, updater, signal, beforeWrite) {
+      assertPath(path);
       const url = databaseUrl(root, path);
       for (let attempt = 0; attempt < maxTransactionAttempts; attempt += 1) {
         const readResponse = await authorizedFetch(
@@ -248,8 +316,7 @@ export function createFirebaseRtdbClient(
           signal,
         );
         if (!readResponse.ok) {
-          await cancelResponseBody(readResponse);
-          throw new FirebaseRtdbFailure();
+          return throwResponseFailure(readResponse);
         }
         const etag = readResponse.headers.get("ETag");
         if (!etag) {
@@ -261,13 +328,25 @@ export function createFirebaseRtdbClient(
           MAX_RTDB_BODY_BYTES,
           () => new FirebaseRtdbFailure(),
         );
-        const decision = validateTelegramTransactionDecision(updater(current));
+        const decision = validateTelegramTransactionDecision(
+          updater(surrenderPath === null ? current : structuredClone(current)),
+        );
         if (!decision.commit) {
           return {
             committed: false,
             decision: decision.decision,
             value: current,
           };
+        }
+        const body = JSON.stringify(decision.value);
+        if (
+          surrenderPath !== null &&
+          (!current ||
+            typeof current !== "object" ||
+            Array.isArray(current) ||
+            body !== JSON.stringify({ ...current, status: "surrendered" }))
+        ) {
+          throw new TypeError("match-surrender-must-only-change-status");
         }
         await beforeWrite?.({ current, proposed: decision.value, etag });
         let committed = false;
@@ -281,7 +360,7 @@ export function createFirebaseRtdbClient(
                 "Content-Type": "application/json",
                 "If-Match": etag,
               },
-              body: JSON.stringify(decision.value),
+              body,
             },
             signal,
           );

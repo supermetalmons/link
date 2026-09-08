@@ -99,6 +99,19 @@ export type EnsureMatchResponse = {
   match: GameSessionMatch;
 };
 
+export type SurrenderMatchRequest = {
+  inviteId: string;
+  matchId: string;
+  playerId: string;
+};
+
+export type SurrenderMatchResponse = {
+  ok: true;
+  inviteId: string;
+  matchId: string;
+  actorUid: string;
+};
+
 export const GAME_SESSION_OPERATION_ID_PATTERN: RegExp;
 export const MANUAL_INVITE_ID_PATTERN: RegExp;
 export const MAX_GAME_SESSION_RESPONSE_BYTES: number;
@@ -138,6 +151,12 @@ export function isEnsureMatchRequest(
 export function isEnsureMatchResponse(
   value: unknown,
 ): value is EnsureMatchResponse;
+export function isSurrenderMatchRequest(
+  value: unknown,
+): value is SurrenderMatchRequest;
+export function isSurrenderMatchResponse(
+  value: unknown,
+): value is SurrenderMatchResponse;
 export function isGameSessionMatch(value: unknown): value is GameSessionMatch;
 export function isHistoricalMatchPair(
   value: unknown,

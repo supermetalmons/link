@@ -85,6 +85,30 @@ const isEnsureMatchRequest = (value) =>
   isSafeFirebaseKey(value.matchId) &&
   isPresentation(value);
 
+const isSurrenderMatchKey = (value) =>
+  typeof value === "string" &&
+  value === value.trim() &&
+  isSafeFirebaseKey(value);
+
+const isSurrenderMatchRequest = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, ["inviteId", "matchId", "playerId"]) &&
+  isSurrenderMatchKey(value.inviteId) &&
+  isSurrenderMatchKey(value.matchId) &&
+  isSurrenderMatchKey(value.playerId) &&
+  value.playerId.length <= 128 &&
+  parseInviteMatchIndex(value.inviteId, value.matchId) !== null;
+
+const isSurrenderMatchResponse = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, ["ok", "inviteId", "matchId", "actorUid"]) &&
+  value.ok === true &&
+  isSurrenderMatchRequest({
+    inviteId: value.inviteId,
+    matchId: value.matchId,
+    playerId: value.actorUid,
+  });
+
 const MATCH_RECORD_KEYS = [
   "version",
   "color",
@@ -319,6 +343,8 @@ module.exports = {
   isEndRematchResponse,
   isEnsureMatchRequest,
   isEnsureMatchResponse,
+  isSurrenderMatchRequest,
+  isSurrenderMatchResponse,
   isGameSessionMatch: isMatchRecord,
   isHistoricalMatchPair,
   isJoinInviteRequest,

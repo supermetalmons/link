@@ -3,6 +3,7 @@ import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import { Game, type Input } from "mons-rules";
 import { WebSocket } from "ws";
 import {
   GAME_SESSION_OPERATION_ID_PATTERN,
@@ -12,6 +13,7 @@ import {
   isGameSessionMatch,
   isJoinInviteResponse,
   isProposeRematchResponse,
+  isSurrenderMatchResponse,
 } from "@mons/shared/game-sessions";
 import { INVITE_ID_RANDOM_LENGTH, isSafeFirebaseKey } from "@mons/shared/ids";
 import {
@@ -40,7 +42,11 @@ const OPERATION_NAMES = [
   "end",
 ] as const;
 
-type Options = { baseUrl: string; output?: string };
+type Options = {
+  baseUrl: string;
+  output?: string;
+  surrenderRulesPending?: boolean;
+};
 type Session = { uid: string; idToken: string };
 type OperationName = (typeof OPERATION_NAMES)[number];
 type Operations = Record<OperationName, string>;
@@ -87,7 +93,7 @@ class SmokeFailure extends Error {
 }
 
 function usage(): string {
-  return "Usage: npm run smoke:invite-lifecycle -- --base-url <https-api-url> [--output <report-json-file>]";
+  return "Usage: npm run smoke:invite-lifecycle -- --base-url <https-api-url> [--output <report-json-file>] [--surrender-rules-pending]";
 }
 
 function validateOptions(options: Options): Options {
@@ -108,20 +114,29 @@ function validateOptions(options: Options): Options {
     (url.hostname !== "api.mons.link" &&
       !PREVIEW_HOST_PATTERN.test(url.hostname)) ||
     (options.output !== undefined &&
-      (!options.output.trim() || options.output.includes("\0")))
+      (!options.output.trim() || options.output.includes("\0"))) ||
+    (options.surrenderRulesPending !== undefined &&
+      typeof options.surrenderRulesPending !== "boolean")
   )
     throw new TypeError(usage());
   return {
     baseUrl: url.origin,
     ...(options.output ? { output: options.output } : {}),
+    ...(options.surrenderRulesPending ? { surrenderRulesPending: true } : {}),
   };
 }
 
 function parseArgs(argv: string[]): Options {
   const values = new Map<string, string>();
-  for (let index = 0; index < argv.length; index += 2) {
+  let surrenderRulesPending = false;
+  for (let index = 0; index < argv.length; index++) {
     const key = argv[index];
-    const value = argv[index + 1];
+    if (key === "--surrender-rules-pending") {
+      if (surrenderRulesPending) throw new TypeError(usage());
+      surrenderRulesPending = true;
+      continue;
+    }
+    const value = argv[++index];
     if (
       (key !== "--base-url" && key !== "--output") ||
       !value ||
@@ -133,6 +148,7 @@ function parseArgs(argv: string[]): Options {
   return validateOptions({
     baseUrl: values.get("--base-url") || "",
     output: values.get("--output"),
+    surrenderRulesPending,
   });
 }
 
@@ -673,32 +689,124 @@ async function verifyTimerRules(
 }
 
 async function verifyLiveMatch(
+  options: Options,
+  inviteId: string,
   host: Session,
   guest: Session,
   matchId: string,
   dependencies: Dependencies,
 ): Promise<void> {
-  const before = await readMatch(host.uid, matchId, host, dependencies);
-  const updated = await updateOwnedMatch(
-    host,
+  const hostMatch = await readMatch(host.uid, matchId, host, dependencies);
+  const game = Game.fromFen(String(hostMatch.value.fen));
+  if (!game)
+    throw new SmokeFailure("Lifecycle live match could not load its game.");
+  const mover = game.activeColor === hostMatch.value.color ? host : guest;
+  const opponent = mover === host ? guest : host;
+  const moved = await updateOwnedMatch(
+    mover,
     matchId,
-    (value) => ({ ...value, status: "surrendered" }),
+    (value) => {
+      const active = Game.fromFen(String(value.fen));
+      if (!active || active.activeColor !== value.color)
+        throw new SmokeFailure("Lifecycle mover did not own the active turn.");
+      const inputs: Input[] = [];
+      for (let step = 0; step < 8; step++) {
+        const next = active.preview(inputs);
+        if (next.kind === "complete") {
+          const played = active.play(inputs);
+          if (played.kind !== "complete") break;
+          return {
+            ...value,
+            fen: active.toFen(),
+            flatMovesString: value.flatMovesString
+              ? `${value.flatMovesString}-${played.inputFen}`
+              : played.inputFen,
+          };
+        }
+        const input =
+          next.kind === "awaiting-start" && next.positions[0]
+            ? ({ kind: "position", position: next.positions[0] } as const)
+            : next.kind === "awaiting-input"
+              ? next.options[0]?.input
+              : undefined;
+        if (!input) break;
+        inputs.push(input);
+      }
+      throw new SmokeFailure("Lifecycle could not produce a legal move.");
+    },
     dependencies,
   );
   if (
-    updated.sessionCreation !== before.value.sessionCreation ||
-    updated.fen !== before.value.fen ||
-    updated.flatMovesString !== before.value.flatMovesString
+    !isDeepStrictEqual(
+      (await readMatch(mover.uid, matchId, opponent, dependencies)).value,
+      moved,
+    )
+  )
+    throw new SmokeFailure("Lifecycle opponent read missed the legal move.");
+  const before = await readMatch(host.uid, matchId, host, dependencies);
+  await mutation(
+    options,
+    "/matches/surrender",
+    host,
+    { inviteId, matchId, playerId: host.uid },
+    isSurrenderMatchResponse,
+    (value) =>
+      value.inviteId === inviteId &&
+      value.matchId === matchId &&
+      value.actorUid === host.uid,
+    dependencies,
+  );
+  const observed = await readMatch(host.uid, matchId, guest, dependencies);
+  if (
+    !isDeepStrictEqual(observed.value, {
+      ...before.value,
+      status: "surrendered",
+    })
   )
     throw new SmokeFailure(
-      "Lifecycle live write changed immutable or gameplay state.",
+      "Lifecycle API surrender changed other state or was not observed by the opponent.",
     );
-  const observed = await readMatch(host.uid, matchId, guest, dependencies);
-  if (!isDeepStrictEqual(observed.value, updated))
-    throw new SmokeFailure(
-      "Lifecycle opponent read missed the live match update.",
+}
+
+async function verifySurrenderRules(
+  session: Session,
+  matchId: string,
+  dependencies: Dependencies,
+): Promise<void> {
+  const current = await readMatch(session.uid, matchId, session, dependencies);
+  const wholeUrl = matchUrl(session.uid, matchId, session);
+  const statusUrl = new URL(wholeUrl);
+  statusUrl.pathname = statusUrl.pathname.replace(/\.json$/, "/status.json");
+  const { status: _status, ...withoutStatus } = current.value;
+  for (const [url, body] of [
+    [statusUrl.href, "surrendered"],
+    [wholeUrl, { ...current.value, status: "surrendered" }],
+    [statusUrl.href, null],
+    [wholeUrl, withoutStatus],
+  ] as const) {
+    const result = await requestJson(
+      url,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      dependencies,
     );
-  await updateOwnedMatch(guest, matchId, (value) => value, dependencies);
+    if (!permissionDenied(result))
+      throw new SmokeFailure(
+        "Lifecycle surrender rule did not deny a direct client status write.",
+      );
+    if (
+      !isDeepStrictEqual(
+        (await readMatch(session.uid, matchId, session, dependencies)).value,
+        current.value,
+      )
+    )
+      throw new SmokeFailure(
+        "Lifecycle rejected client status write changed the match.",
+      );
+  }
 }
 
 async function verifyNoRtdbInvite(
@@ -858,8 +966,19 @@ async function runSmoke(
     report.checks.push("join-receipt-replay-and-live-metadata");
     await verifyTimerRules(host, inviteId, dependencies);
     report.checks.push("firebase-timer-and-claim-write-rules");
-    await verifyLiveMatch(host, guest, inviteId, dependencies);
-    report.checks.push("firebase-live-match-write-and-opponent-read");
+    if (!validated.surrenderRulesPending) {
+      await verifySurrenderRules(host, inviteId, dependencies);
+      report.checks.push("firebase-surrender-write-rules");
+    }
+    await verifyLiveMatch(
+      validated,
+      inviteId,
+      host,
+      guest,
+      inviteId,
+      dependencies,
+    );
+    report.checks.push("firebase-move-api-surrender-replay-and-opponent-read");
     const hostRematch = await mutation(
       validated,
       "/rematches/propose",
@@ -919,8 +1038,17 @@ async function runSmoke(
     );
     await channel.waitFor(snapshot);
     report.checks.push("both-rematch-receipts-and-live-metadata");
-    await verifyLiveMatch(host, guest, `${inviteId}1`, dependencies);
-    report.checks.push("firebase-rematch-write-and-opponent-read");
+    await verifyLiveMatch(
+      validated,
+      inviteId,
+      host,
+      guest,
+      `${inviteId}1`,
+      dependencies,
+    );
+    report.checks.push(
+      "firebase-rematch-move-api-surrender-replay-and-opponent-read",
+    );
     await mutation(
       validated,
       "/rematches/end",

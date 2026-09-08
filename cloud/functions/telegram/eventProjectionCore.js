@@ -7,7 +7,11 @@ const {
   renderParticipantLine,
   resolveParticipantToken,
 } = require("./eventParticipants");
-const { buildSundayMonsReminder } = require("./sundayMonsReminder");
+const {
+  SUNDAY_MONS_REMINDER_LEAD_MS,
+  buildSundayMonsReminder,
+  getSundayMonsReminderLeadMs,
+} = require("./sundayMonsReminder");
 const {
   buildTelegramEditUpdates,
   buildTelegramSendUpdates,
@@ -631,7 +635,24 @@ const buildEventTelegramProjection = ({
     (reminder.hasAppliedMessage ? reminder.desiredText : "");
   const reminderText =
     reminder.hasAppliedMessage && status === EVENT_STATUS_SCHEDULED
-      ? buildSundayMonsReminder({ eventId: normalizedEventId, eventData }).text
+      ? buildSundayMonsReminder({
+          eventId: normalizedEventId,
+          eventData,
+          leadMs:
+            getSundayMonsReminderLeadMs(
+              normalizedEventId,
+              reminder.confirmedDesiredText,
+            ) ||
+            getSundayMonsReminderLeadMs(
+              normalizedEventId,
+              state.reminderText,
+            ) ||
+            getSundayMonsReminderLeadMs(
+              normalizedEventId,
+              reminder.desiredText,
+            ) ||
+            SUNDAY_MONS_REMINDER_LEAD_MS,
+        }).text
       : null;
   const matchesActive = announcements.matches && active;
   const endedAnnouncementArmed =

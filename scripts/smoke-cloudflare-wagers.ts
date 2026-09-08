@@ -24,6 +24,8 @@ import {
   isCreateInviteResponse,
   isJoinInviteResponse,
   isGameSessionMatch,
+  isSurrenderMatchResponse,
+  type GameSessionMatch,
 } from "@mons/shared/game-sessions";
 import {
   INVITE_WAGERS_MAX_MESSAGE_BYTES,
@@ -139,6 +141,20 @@ function canonical(value: unknown): string {
 function equal(actual: unknown, expected: unknown, label: string): void {
   if (canonical(actual) !== canonical(expected))
     fail(`${label} did not match.`);
+}
+
+function isStoredMatch(
+  value: unknown,
+): value is GameSessionMatch & { sessionCreation?: string } {
+  const stored = record(value);
+  if (!stored) return false;
+  const { sessionCreation, ...match } = stored;
+  return (
+    isGameSessionMatch(match) &&
+    (sessionCreation === undefined ||
+      (typeof sessionCreation === "string" &&
+        /^[a-f0-9]{64}$/.test(sessionCreation)))
+  );
 }
 
 function usage(): never {
@@ -923,7 +939,7 @@ async function prepare(
         { headers: { Origin: ORIGIN, Referer: `${ORIGIN}/` } },
       );
       if (
-        !isGameSessionMatch(match) ||
+        !isStoredMatch(match) ||
         match.status !== "" ||
         match.flatMovesString !== "" ||
         match.timer !== ""
@@ -1109,29 +1125,35 @@ async function activeLifecycle(
             { headers: { Origin: ORIGIN, Referer: `${ORIGIN}/` } },
           );
           if (
-            !isGameSessionMatch(match) ||
+            !isStoredMatch(match) ||
             !["", "surrendered"].includes(match.status)
           )
-            fail("Dedicated guest match is not writable.");
-          url.pathname = url.pathname.replace(/\.json$/, "/status.json");
-          equal(
-            await requestJson(
+            fail("Dedicated guest match cannot surrender.");
+          for (let replay = 0; replay < 2; replay++) {
+            const result = await api(
               dependencies,
-              "Dedicated guest surrender",
-              url.href,
-              {
-                method: "PUT",
-                headers: {
-                  "Content-Type": "application/json",
-                  Origin: ORIGIN,
-                  Referer: `${ORIGIN}/`,
-                },
-                body: JSON.stringify("surrendered"),
-              },
-            ),
-            "surrendered",
-            "Guest surrender",
-          );
+              "/matches/surrender",
+              guest.idToken,
+              { ...input, playerId: guest.uid },
+            );
+            if (
+              !isSurrenderMatchResponse(result) ||
+              result.inviteId !== inviteId ||
+              result.matchId !== inviteId ||
+              result.actorUid !== guest.uid
+            )
+              fail("Dedicated guest surrender/replay failed.");
+            equal(
+              await requestJson(
+                dependencies,
+                "Dedicated guest surrendered match read",
+                url.href,
+                { headers: { Origin: ORIGIN, Referer: `${ORIGIN}/` } },
+              ),
+              { ...match, status: "surrendered" },
+              "Guest surrender preserved match state",
+            );
+          }
         });
         await step("settle:resolve", async () => {
           for (let replay = 0; replay < 2; replay++) {

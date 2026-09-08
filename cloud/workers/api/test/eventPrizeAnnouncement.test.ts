@@ -524,13 +524,14 @@ test("an expired safe retry can use a new on-time postponed schedule without res
 
 function reminderInput(
   eventId = EVENT_ID,
+  leadMs = 14_400_000,
 ): EventPrizeAnnouncementDeliveryInput {
   return {
     ...INPUT,
     eventId,
     kind: "reminder",
-    runAtMs: INPUT.startAtMs - 10_800_000,
-    firstQueuedAtMs: INPUT.startAtMs - 10_800_000 - 60_000,
+    runAtMs: INPUT.startAtMs - leadMs,
+    firstQueuedAtMs: INPUT.startAtMs - leadMs - 60_000,
   };
 }
 
@@ -556,6 +557,50 @@ test("reminds a Sunday event without prizes using one Telegram text message", as
   assert.equal(Object.hasOwn(receipt.payload!, "imageUrls"), false);
   assert.equal((await state.deliver()).reason, "already-sent");
   assert.equal(state.reminderSends.length, 1);
+});
+
+test("legacy three-hour delivery retains its timing, text, and single reminder receipt", async () => {
+  const input = reminderInput("sunday-without-prizes", 10_800_000);
+  const state = fixture(input);
+  state.setNow(input.runAtMs - 1);
+  assert.deepEqual(await state.deliver(), {
+    status: "retryable",
+    reason: "not-due",
+    retryAtMs: input.runAtMs,
+  });
+  assert.equal(state.reminderSends.length, 0);
+  state.setNow(input.runAtMs);
+  assert.deepEqual(await state.deliver(), { status: "sent" });
+  assert.match(String(state.reminderSends[0].text), /^sunday mons in 3 hours!/);
+  assert.match(
+    String(state.reminderSends[0].text),
+    /https:\/\/mons\.link\/event\/sunday-without-prizes/,
+  );
+  const receiptId = `event:${input.eventId}:reminder:v1`;
+  assert.deepEqual([...state.values.keys()], [receiptId]);
+  const receipt = state.values.get(receiptId)!;
+  assert.equal(receipt.startAtMs, input.startAtMs);
+  assert.equal(receipt.runAtMs, input.runAtMs);
+  assert.equal(receipt.firstQueuedAtMs, input.firstQueuedAtMs);
+  assert.equal(receipt.payload?.text, state.reminderSends[0].text);
+  assert.equal((await state.deliver()).reason, "already-sent");
+  assert.equal(state.reminderSends.length, 1);
+  assert.equal(state.sends.length, 0);
+});
+
+test("reminder delivery rejects unsupported lead times without reserving or sending", async () => {
+  for (const leadMs of [
+    3_600_000, 10_799_999, 10_800_001, 14_399_999, 14_400_001, 18_000_000,
+  ]) {
+    const state = fixture(reminderInput(EVENT_ID, leadMs));
+    assert.deepEqual(await state.deliver(), {
+      status: "skipped",
+      reason: "invalid-schedule",
+    });
+    assert.equal(state.reminderSends.length, 0);
+    assert.equal(state.values.size, 0);
+    assert.equal(state.locks.size, 0);
+  }
 });
 
 test("reminder delivery renders the participants from its locked canonical event snapshot", async () => {

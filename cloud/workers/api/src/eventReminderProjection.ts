@@ -2,7 +2,7 @@ import { buildTelegramEditDesired } from "../../../functions/telegram/desiredSta
 import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
 import { isV2TelegramEvent } from "../../../functions/telegram/eventProjectionCore.js";
 import {
-  buildSundayMonsReminder,
+  getSundayMonsReminderLeadMs,
   isSundayMonsReminderEvent,
 } from "../../../functions/telegram/sundayMonsReminder.js";
 import { readEventRuntimeControl } from "./eventD1.ts";
@@ -73,11 +73,7 @@ function confirmedReminder(
   ) {
     return null;
   }
-  const originalText = buildSundayMonsReminder({ eventId }).text;
-  if (
-    payload.text !== originalText &&
-    !payload.text.startsWith(`${originalText}\n\n`)
-  ) {
+  if (!getSundayMonsReminderLeadMs(eventId, payload.text)) {
     return null;
   }
   return {

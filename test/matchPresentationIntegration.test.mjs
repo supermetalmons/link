@@ -37,9 +37,12 @@ const functions = (source, names) =>
     })
     .join("\n");
 const compile = (source, dependencies, result) => {
-  const { outputText } = ts.transpileModule(source, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022 },
-  });
+  const { outputText } = ts.transpileModule(
+    source.replaceAll("import.meta.env.DEV", "false"),
+    {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    },
+  );
   return new Function(
     ...Object.keys(dependencies),
     `${outputText}\nreturn ${result};`,
@@ -48,10 +51,12 @@ const compile = (source, dependencies, result) => {
 const flush = () => new Promise((resolve) => setImmediate(resolve));
 const deferred = () => {
   let resolve;
-  const promise = new Promise((done) => {
+  let reject;
+  const promise = new Promise((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 };
 const appearance = (revision = 1, emojiId = 1, actorUid = "actor") => ({
   matchId: "invite",
@@ -101,7 +106,7 @@ function connectionHarness({ paired = true } = {}) {
       "rememberMatchPresentation",
       "getMatchPresentation",
       "updateEmoji",
-      "sendMatchUpdate",
+      "surrender",
     ])} }`,
     {
       MatchPresentationState,
@@ -119,11 +124,9 @@ function connectionHarness({ paired = true } = {}) {
       didReceiveInviteReactionUpdate: () => {},
       incrementLifecycleCounter: () => {},
       decrementLifecycleCounter: () => {},
-      ref: (_db, path) => path,
-      runTransaction: async (path, update, options) => {
-        const value = update({ ...storedMatch });
-        writes.push({ path, value, options });
-        return { committed: true, snapshot: { exists: () => value !== null } };
+      surrenderMatchViaApi: async (request) => {
+        writes.push(request);
+        return { ok: true, ...request, actorUid: request.playerId };
       },
       storage: { getPlayerEmojiAura: () => "" },
     },
@@ -156,7 +159,9 @@ function connectionHarness({ paired = true } = {}) {
     unregisterObserverCleanup: (_id, key) => cleanups.delete(key),
     getUserBoundAuthTokenProvider: (uid) => {
       assert.equal(uid, "login-alias");
-      return async () => "token";
+      return Object.assign(async () => "token", {
+        assertCurrentUser: () => {},
+      });
     },
     requireWritableContext() {
       return this.activeContext;
@@ -219,106 +224,233 @@ test("actual connection hydrates before pairing and isolates optimistic appearan
     2,
   );
   assert.equal(h.writes.length, 0);
-  h.connection.myMatch.status = "surrendered";
-  assert.equal(h.connection.sendMatchUpdate("invite"), true);
+  assert.equal(h.connection.surrender(), true);
   await flush();
   assert.deepEqual(h.writes, [
     {
-      path: "players/actor/matches/invite",
-      value: { ...seed, status: "surrendered" },
-      options: { applyLocally: false },
+      inviteId: "invite",
+      matchId: "invite",
+      playerId: "actor",
     },
   ]);
   h.connection.cleanupInviteReactionObserver();
 });
 
-test("surrender captures status while preserving the current record on every transaction retry", async () => {
-  const pending = deferred();
-  let transaction;
+function surrenderHarness() {
+  const pendingSurrender = deferred();
+  const requests = [];
   const events = [];
+  const reconnects = [];
+  const loginUser = { uid: "login-alias" };
+  const state = { currentUser: loginUser };
   const Constructor = compile(
-    `class Connection { ${methods(["sendMatchUpdate"])} }`,
+    `class Connection { ${methods([
+      "surrender",
+      "requireWritableContext",
+      "createMatchContextGuard",
+      "createSessionGuard",
+      "isSessionEpochActive",
+      "reconnectAfterMatchUpdateFailure",
+    ])} }`,
     {
-      ref: (_db, path) => path,
-      runTransaction: (path, update, options) => {
-        transaction = { path, update, options };
-        return pending.promise;
+      surrenderMatchViaApi: (request, tokenProvider) => {
+        requests.push({ request, tokenProvider });
+        return pendingSurrender.promise;
       },
     },
     "Connection",
   );
   const connection = Object.assign(new Constructor(), {
-    db: {},
-    myMatch: { status: "surrendered", emojiId: 1001, aura: "rainbow" },
-    requireWritableContext: () => ({
+    myMatch: {
+      fen: "current-fen",
+      flatMovesString: "current-moves",
+      status: "",
+      timer: "current-timer",
+      emojiId: 7,
+      aura: "rainbow",
+    },
+    sessionEpoch: 1,
+    activeContext: {
+      contextId: 1,
+      sessionEpoch: 1,
       inviteId: "invite",
       matchId: "invite",
+      loginUid: "login-alias",
       actorUid: "actor",
-    }),
-    createMatchContextGuard: () => () => true,
+      canWrite: true,
+    },
+    moveReconnectCooldownMs: 0,
+    moveReconnectLastAttemptAt: 0,
+    moveReconnectInFlight: false,
+    getUserBoundAuthTokenProvider: (expectedUid) => {
+      const assertCurrentUser = () => {
+        if (state.currentUser !== loginUser || expectedUid !== loginUser.uid) {
+          throw new Error("authentication-changed");
+        }
+      };
+      assertCurrentUser();
+      return Object.assign(async () => "token", { assertCurrentUser });
+    },
     logContextEvent: (event) => events.push(event),
+    signIn: async () => state.currentUser?.uid,
+    connectToGame: (...args) => reconnects.push(args),
   });
-  assert.equal(connection.sendMatchUpdate("invite"), true);
-  connection.myMatch.status = "changed-after-queueing";
-  assert.equal(transaction.path, "players/actor/matches/invite");
-  assert.deepEqual(transaction.options, { applyLocally: false });
-  assert.equal(transaction.update(null), null);
-  const current = {
-    fen: "server-fen",
-    flatMovesString: "server-moves",
-    status: "",
-    timer: "server-timer",
-    emojiId: 7,
-    aura: "",
-  };
-  assert.deepEqual(transaction.update(current), {
-    ...current,
-    status: "surrendered",
-  });
-  assert.deepEqual(transaction.update({ fen: "legacy", status: "" }), {
-    fen: "legacy",
-    status: "surrendered",
-  });
-  pending.resolve({ committed: true, snapshot: { exists: () => true } });
-  await flush();
-  assert.deepEqual(events, ["ctx.write.success"]);
-});
+  return { connection, pendingSurrender, requests, events, reconnects, state };
+}
 
-test("surrender reconnects after missing or aborted transactions", async () => {
-  for (const [committed, exists] of [
-    [false, true],
-    [true, false],
-  ]) {
-    const events = [];
-    const reconnects = [];
-    const Constructor = compile(
-      `class Connection { ${methods(["sendMatchUpdate"])} }`,
+test("surrender immediately updates only local status and queues the captured actor through the API", async () => {
+  const h = surrenderHarness();
+  const previous = { ...h.connection.myMatch };
+  assert.equal(h.connection.surrender(), true);
+  assert.deepEqual(h.connection.myMatch, {
+    ...previous,
+    status: "surrendered",
+  });
+  assert.deepEqual(
+    h.requests.map(({ request }) => request),
+    [
       {
-        ref: (_db, path) => path,
-        runTransaction: async () => ({
-          committed,
-          snapshot: { exists: () => exists },
-        }),
-      },
-      "Connection",
-    );
-    const connection = Object.assign(new Constructor(), {
-      db: {},
-      myMatch: { status: "surrendered" },
-      requireWritableContext: () => ({
         inviteId: "invite",
         matchId: "invite",
-        actorUid: "actor",
-      }),
-      createMatchContextGuard: () => () => true,
-      createSessionGuard: () => () => true,
-      logContextEvent: (event) => events.push(event),
-      reconnectAfterMatchUpdateFailure: (inviteId) => reconnects.push(inviteId),
-    });
-    assert.equal(connection.sendMatchUpdate("invite"), true);
+        playerId: "actor",
+      },
+    ],
+  );
+  assert.deepEqual(h.events, []);
+  h.connection.myMatch.fen = "newer-fen";
+  h.pendingSurrender.resolve({ ok: true });
+  await flush();
+  assert.equal(h.connection.myMatch.fen, "newer-fen");
+  assert.deepEqual(h.events, ["ctx.write.success"]);
+});
+
+test("surrender leaves local state unchanged without a match, writable context, or original login", () => {
+  for (const invalidate of [
+    (h) => {
+      h.connection.myMatch = null;
+    },
+    (h) => {
+      h.connection.activeContext = null;
+    },
+    (h) => {
+      h.connection.activeContext.canWrite = false;
+    },
+    (h) => {
+      h.state.currentUser = null;
+    },
+    (h) => {
+      h.state.currentUser = { uid: "login-alias" };
+    },
+  ]) {
+    const h = surrenderHarness();
+    invalidate(h);
+    const previous = structuredClone(h.connection.myMatch);
+    assert.equal(h.connection.surrender(), false);
+    assert.deepEqual(h.connection.myMatch, previous);
+    assert.equal(h.requests.length, 0);
+  }
+});
+
+test("surrender failure reconciles through reconnect without assuming the optimistic write failed", async () => {
+  const h = surrenderHarness();
+  assert.equal(h.connection.surrender(), true);
+  h.pendingSurrender.reject(new Error("Gameplay request timed out."));
+  await flush();
+  assert.equal(h.connection.myMatch.status, "surrendered");
+  assert.deepEqual(h.events, ["ctx.write.fail"]);
+  assert.deepEqual(h.reconnects, [["login-alias", "invite", false]]);
+});
+
+test("late surrender success and failure cannot affect a different match, context, session, or user", async () => {
+  for (const invalidate of [
+    (h) => {
+      h.connection.activeContext.matchId = "invite1";
+    },
+    (h) => {
+      h.connection.activeContext.contextId += 1;
+    },
+    (h) => {
+      h.connection.sessionEpoch += 1;
+    },
+    (h) => {
+      h.state.currentUser = null;
+    },
+    (h) => {
+      h.state.currentUser = { uid: "login-alias" };
+    },
+  ]) {
+    for (const reject of [false, true]) {
+      const h = surrenderHarness();
+      assert.equal(h.connection.surrender(), true);
+      invalidate(h);
+      h.connection.myMatch = { status: "", fen: "another-match" };
+      if (reject) h.pendingSurrender.reject(new Error("unavailable"));
+      else h.pendingSurrender.resolve({ ok: true });
+      await flush();
+      assert.deepEqual(h.events, []);
+      assert.deepEqual(h.reconnects, []);
+      assert.deepEqual(h.connection.myMatch, {
+        status: "",
+        fen: "another-match",
+      });
+    }
+  }
+});
+
+test("surrender recovery keeps the original guard while reconnect authentication is pending", async () => {
+  for (const invalidate of [
+    (h) => {
+      h.connection.activeContext.matchId = "invite1";
+    },
+    (h) => {
+      h.connection.sessionEpoch += 1;
+    },
+    (h) => {
+      h.state.currentUser = null;
+    },
+    (h) => {
+      h.state.currentUser = { uid: "login-alias" };
+    },
+  ]) {
+    const h = surrenderHarness();
+    const pendingSignIn = deferred();
+    h.connection.signIn = () => pendingSignIn.promise;
+    assert.equal(h.connection.surrender(), true);
+    h.pendingSurrender.reject(new Error("unavailable"));
     await flush();
-    assert.deepEqual(events, ["ctx.write.fail"]);
-    assert.deepEqual(reconnects, ["invite"]);
+    assert.deepEqual(h.events, ["ctx.write.fail"]);
+    invalidate(h);
+    pendingSignIn.resolve("login-alias");
+    await flush();
+    assert.deepEqual(h.reconnects, []);
+    assert.equal(h.connection.moveReconnectInFlight, false);
+  }
+});
+
+test("resign confirmation retains immediate UI handling only when submission was queued", async () => {
+  for (const writable of [false, true]) {
+    const h = surrenderHarness();
+    if (!writable) h.connection.myMatch = null;
+    const resignations = [];
+    const click = compile(
+      functions(sourceFile("../src/game/gameController.ts"), [
+        "didClickConfirmResignButton",
+      ]),
+      {
+        canHandleLiveBoardInput: () => true,
+        isOnlineGame: true,
+        connection: h.connection,
+        handleResignStatus: (...args) => resignations.push(args),
+      },
+      "didClickConfirmResignButton",
+    );
+    click();
+    assert.deepEqual(resignations, writable ? [[false, ""]] : []);
+    if (writable) {
+      h.pendingSurrender.resolve({ ok: true });
+      await flush();
+      assert.deepEqual(resignations, [[false, ""]]);
+    }
   }
 });
 

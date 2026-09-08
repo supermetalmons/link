@@ -9,6 +9,7 @@ import { buildEventAnnouncementPlan } from "../src/eventPrizeAnnouncementSchedul
 import type { EventAnnouncementKind } from "../src/eventAnnouncementKinds.ts";
 import { runEventPrizeAnnouncementWorkflow } from "../src/eventPrizeAnnouncementWorkflow.ts";
 import {
+  buildEventProgressPlan,
   InvalidEventProgressPayloadError,
   type EventProgressWorkflowParams,
 } from "../src/eventProgress.ts";
@@ -25,14 +26,31 @@ const EVENT = {
 async function harness(
   kind: EventAnnouncementKind = "prizes",
   eventId = EVENT_ID,
+  persistedLeadMs?: number,
 ) {
-  const startAtMs = RUN_AT_MS + (kind === "prizes" ? 3_600_000 : 10_800_000);
-  const plan = await buildEventAnnouncementPlan(
-    eventId,
-    { ...EVENT, startAtMs },
-    RUN_AT_MS - 1_000,
-    kind,
-  );
+  const startAtMs =
+    RUN_AT_MS +
+    (persistedLeadMs ?? (kind === "prizes" ? 3_600_000 : 14_400_000));
+  const plan =
+    persistedLeadMs === undefined
+      ? await buildEventAnnouncementPlan(
+          eventId,
+          { ...EVENT, startAtMs },
+          RUN_AT_MS - 1_000,
+          kind,
+        )
+      : await buildEventProgressPlan(
+          {
+            eventId,
+            sourceKey: `${kind}:${eventId}:${startAtMs}`,
+            reason:
+              kind === "prizes"
+                ? "event-prize-announcement"
+                : "sunday-mons-reminder",
+            runAtMs: RUN_AT_MS,
+          },
+          RUN_AT_MS - 1_000,
+        );
   assert.ok(plan);
   let nowMs = RUN_AT_MS - 1_000;
   let record: unknown = plan.outbox;
@@ -138,12 +156,12 @@ test("sleeps until the one-hour target, preserves discovery proof, and safely re
   assert.equal(state.refreshes(), 0);
 });
 
-test("reminders without prizes use the three-hour identity and their own step names", async () => {
+test("reminders without prizes use the four-hour identity and their own step names", async () => {
   const state = await harness("reminder", "sunday-without-prizes");
   assert.equal(state.plan.params.reason, "sunday-mons-reminder");
   assert.equal(
     state.plan.params.sourceKey,
-    `reminder:sunday-without-prizes:${RUN_AT_MS + 10_800_000}`,
+    `reminder:sunday-without-prizes:${RUN_AT_MS + 14_400_000}`,
   );
   assert.equal(state.plan.params.runAtMs, RUN_AT_MS);
   assert.deepEqual(await state.run(), { status: "sent" });
@@ -155,6 +173,42 @@ test("reminders without prizes use the three-hour identity and their own step na
   assert.deepEqual(await state.run(), { status: "sent" });
   assert.equal(state.sends(), 1);
   assert.equal(state.refreshes(), 1);
+});
+
+test("persisted three-hour reminders deliver at their original time and acknowledge the same identity", async () => {
+  const state = await harness("reminder", "sunday-without-prizes", 10_800_000);
+  const currentPlan = await buildEventAnnouncementPlan(
+    "sunday-without-prizes",
+    { ...EVENT, startAtMs: RUN_AT_MS + 10_800_000 },
+    RUN_AT_MS - 3_600_000 - 1_000,
+    "reminder",
+  );
+  assert.ok(currentPlan);
+  assert.equal(state.plan.workflowId, currentPlan.workflowId);
+  assert.equal(state.plan.outboxId, currentPlan.outboxId);
+  assert.equal(currentPlan.params.runAtMs, RUN_AT_MS - 3_600_000);
+  assert.deepEqual(await state.run(), { status: "sent" });
+  assert.deepEqual(state.sleeps, [
+    { name: "wait for sunday mons reminder", timestamp: RUN_AT_MS },
+  ]);
+  assert.equal(state.sends(), 1);
+  assert.equal(state.refreshes(), 1);
+  assert.equal(state.acknowledgements(), 1);
+  assert.deepEqual(await state.run(), { status: "sent" });
+  assert.equal(state.sends(), 1);
+  assert.equal(state.acknowledgements(), 1);
+});
+
+test("reminder workflows reject unsupported stored lead times before any step", async () => {
+  for (const leadMs of [
+    3_600_000, 10_799_999, 10_800_001, 14_399_999, 14_400_001, 18_000_000,
+  ]) {
+    const state = await harness("reminder", EVENT_ID, leadMs);
+    await assert.rejects(state.run(), InvalidEventProgressPayloadError);
+    assert.equal(state.sends(), 0);
+    assert.equal(state.sleeps.length, 0);
+    assert.equal(state.acknowledgements(), 0);
+  }
 });
 
 test("reminder projection retries after the send grace without repeating a completed send", async () => {

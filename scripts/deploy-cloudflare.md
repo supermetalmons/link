@@ -60,6 +60,22 @@ Keep existing request, connection, and smoke-command timeouts that detect stalle
 
 `upload:api` sends no production traffic. `promote:api` requires an explicit Version ID and routes 100% of traffic to it. Trigger application is a separate operation for reviewed configuration changes.
 
+## Surrender API and rules release
+
+The cutover completed on September 8, 2026 with API version `2e4d24c1-3948-4e8f-9725-3b866b27167b` and frontend version `48fe9424-8c55-421e-bc2e-e6c302e33a0f`, each serving 100% of traffic. The complete validation gate passed 2,592 tests. Production checks verified surrender/replay and opponent observation on initial matches and rematches, continued legal moves, direct status-write denials, and temporary Auth-session cleanup. The deployed Firebase rules matched the tested candidate. Release evidence is retained in `/private/tmp/mons-surrender-release-xNjHrQ`; unrelated in-progress Telegram edits were excluded from the release snapshot.
+
+The surrender API uses the existing gameplay service account with a per-match `auth_variable_override`. The override supplies the authorized actor UID and `workerSurrenderMatchId` only to the restricted Firebase REST transaction; it is never issued as a Firebase user claim. The transaction preserves all other match fields, and the existing timer-claim rule is checked atomically with the status write. There are no new resources or schema changes.
+
+Prepare API, frontend, tooling, and database-rule validation before promotion. Promote the API candidate first and run the standard API smoke. The isolated lifecycle smoke can verify moves, surrender/replay, and opponent observation before the rule cutover:
+
+```sh
+npm run smoke:invite-lifecycle -- --base-url https://api.mons.link --surrender-rules-pending
+```
+
+Promote the frontend candidate, then deploy the reviewed Firebase database rules through `npm run deploy:firebase -- --project mons-link`. Run the lifecycle smoke again without `--surrender-rules-pending`; its default also requires direct Firebase status changes and deletions to be rejected. It creates only controlled manual-game sessions and removes its temporary Auth sessions. Wager smoke tooling also submits surrender through the API, but a live wager test is not a required release check for this change.
+
+The rule cutover disables surrender from older clients, including clients with an admin claim. Move writes continue when status is unchanged. Preserve an API-capable frontend and API version as the rollback baseline after this cutover. Keep ordinary gameplay and Queue delivery active throughout; no write freeze or observation window is required.
+
 ## Coordinated maintenance release
 
 This section is an exception for the concrete maintenance requirements in the release policy, not a prerequisite for routine API releases. The full profile/gameplay procedure below includes a 15-minute drain and a 15-minute observation period. Use those measures only when the maintenance plan requires them; narrower operations use the relevant storage-specific procedure. The initial reaction namespace bootstrap and historical ordered cutovers also use this path.
@@ -174,7 +190,7 @@ Resume restores only gate states changed by this attempt, preserving prior freez
 
 For a repair after activation, validate and deploy a D1-aware repair as the sole 100% API version, then run `--resume --directory /secure/invite-source --candidate-version-id <repair-version>` with the same evidence directory. Adopting the repair version requires all three gates frozen and affected work drained; it preserves the original candidate, activation, and import evidence. Completion receipts use `resumed-<candidate-version-id>.json`, preserving earlier receipts. Interrupted resumes check only gates still awaiting restoration, so traffic in reopened scopes does not block the remaining gates.
 
-`smoke:invite-lifecycle` creates fresh temporary anonymous sessions and its own manual invite, so it needs no preexisting token or fixture. It verifies create/join/rematch/end receipt replay, metadata HTTP and authenticated WebSocket delivery, live Firebase match status synchronization, timer-rule denials, and absence of the new invite in Firebase after D1 activation. It then closes the series and deletes its temporary Auth accounts. It never calls automatch, rating, prize, event, or Telegram endpoints. An optional `--output /secure/unique-report.json` writes a new mode-0600 report exclusively; use a new path for each run.
+`smoke:invite-lifecycle` creates fresh temporary anonymous sessions and its own manual invite, so it needs no preexisting token or fixture. It verifies create/join/rematch/end receipt replay, metadata HTTP and authenticated WebSocket delivery, legal Firebase move writes, API surrender/replay and opponent observation, direct status-write and timer-rule denials, and absence of the new invite in Firebase after D1 activation. Before the surrender rules cutover, pass `--surrender-rules-pending` to omit only the direct status-write denial probes. It then closes the series and deletes its temporary Auth accounts. It never calls automatch, rating, prize, event, or Telegram endpoints. An optional `--output /secure/unique-report.json` writes a new mode-0600 report exclusively; use a new path for each run.
 
 Before activation only, `--abort --directory /secure/invite-source --candidate-version-id <candidate-version-id>` discards this attempt's unused D1 import and restores its own gate changes. A partial freeze before import can be aborted while source work remains unfinished, allowing that work to recover on the unchanged RTDB authority. Staged-data cleanup requires the same frozen generations and completed-work proof. The protected evidence remains; begin a later attempt in a new directory. Aborting activated D1 storage is rejected. The older automatch, login-discovery, and wager migration source operations also reject retained Firebase invite scans after activation; their status commands remain available.
 
@@ -452,7 +468,7 @@ npm run smoke:api -- --base-url https://api.mons.link --read-only --require-hist
 npm run smoke:wagers -- --base-url https://api.mons.link --active-lifecycle --fixture /secure/wager-smoke.json
 ```
 
-The lifecycle opens wager sockets before each mutation, checks broadcasts and reconnect snapshots, replays each action, and verifies released reservations plus a single dust transfer from guest to host. The guest surrenders by writing only its own dedicated match status through the existing Firebase rules; no rating request is sent. A failed phase preserves its completed-step journal so an explicit rerun continues with the same identities, invites, and operation lineages. Keep historical wagers and live moves usable. Record the active epoch, deployed Version ID, verification digests/counts, and final control states, then finish. Keep the original Firebase records and protected export and smoke fixtures. Later compatible wager changes use the routine API release path.
+The lifecycle opens wager sockets before each mutation, checks broadcasts and reconnect snapshots, replays each action, and verifies released reservations plus a single dust transfer from guest to host. The guest surrenders through the API, with replay and stored-field preservation checks; no rating request is sent. A failed phase preserves its completed-step journal so an explicit rerun continues with the same identities, invites, and operation lineages. Keep historical wagers and live moves usable. Record the active epoch, deployed Version ID, verification digests/counts, and final control states, then finish. Keep the original Firebase records and protected export and smoke fixtures. Later compatible wager changes use the routine API release path.
 
 For an existing paired invite, HTTP/WebSocket snapshot and reconnect verification also has a read-only mode:
 

@@ -6,6 +6,7 @@ import {
   isJoinInviteRequest,
   isProposeRematchRequest,
   isResolveInviteRoleRequest,
+  isSurrenderMatchRequest,
 } from "@mons/shared/game-sessions";
 import { isAutoInviteId } from "@mons/shared/ids";
 import {
@@ -79,6 +80,11 @@ import {
   startMatchTimer,
   type MatchTimerDependencies,
 } from "./matchTimer.ts";
+import { createFirebaseRtdbClient } from "./firebaseRtdb.ts";
+import {
+  surrenderMatch,
+  type SurrenderMatchDependencies,
+} from "./matchSurrender.ts";
 import {
   acceptWagerProposal,
   removeWagerProposal,
@@ -131,6 +137,7 @@ export const GAMEPLAY_PATHS = new Set([
   "/invites/join",
   "/invites/role/read",
   "/matches/ensure",
+  "/matches/surrender",
   "/matches/timer/claim",
   "/matches/timer/start",
   "/navigation/games/read",
@@ -168,6 +175,7 @@ export type GameplayRouteDependencies = {
   rating?: Partial<RatingUpdateDependencies>;
   ratingRepository?: RatingRepository;
   timer?: Partial<MatchTimerDependencies>;
+  surrender?: Partial<SurrenderMatchDependencies>;
   wager?: Partial<WagerProposalDependencies>;
   wagerOutcome?: WagerOutcomeDependencies;
   verifyIdentity?: (
@@ -348,6 +356,12 @@ async function readGameplayBody(
   }
   if (pathname === "/matches/ensure") {
     if (!isEnsureMatchRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
+  }
+  if (pathname === "/matches/surrender") {
+    if (!isSurrenderMatchRequest(body)) {
       throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
     }
     return body;
@@ -769,6 +783,22 @@ export async function handleGameplayRoute(
         repository,
         gameSessionDependencies,
       );
+    } else if (pathname === "/matches/surrender") {
+      if (!isSurrenderMatchRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      await enforceGameSessionMutationRateLimit(
+        env.AUTH_RATE_LIMITER,
+        identity.uid,
+      );
+      response = await surrenderMatch(identity, body, repository, {
+        createMatchClient:
+          dependencies.surrender?.createMatchClient ||
+          ((scope) =>
+            createFirebaseRtdbClient(env, { scopedMatchSurrender: scope })),
+        assertMutationAllowed,
+        signal: dependencies.surrender?.signal || request.signal,
+      });
     } else if (pathname === "/matches/timer/start") {
       if (!isStartMatchTimerRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");

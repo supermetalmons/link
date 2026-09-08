@@ -959,6 +959,52 @@ test("reminders update for joins, participant edits, and drops below the invitat
   }
 });
 
+test("legacy reminder participant edits preserve the sent or persisted three-hour heading", () => {
+  const eventData = buildEvent({
+    isSundayMons: true,
+    telegramAnnouncements: { invite: false, matches: false, results: false },
+    participants: buildEndedEvent().participants,
+  });
+  const legacyText = buildSundayMonsReminder({
+    eventId: EVENT_ID,
+    leadMs: 10_800_000,
+  }).text;
+  const legacyMessage = publishedReminderMessage(legacyText);
+  const pendingMessage = {
+    ...legacyMessage,
+    desired: publishedReminderMessage().desired,
+  };
+  for (const [message, state] of [
+    [legacyMessage, null],
+    [pendingMessage, { reminderText: legacyText }],
+  ]) {
+    const joined = project(eventData, state, NOW_MS, undefined, message);
+    const expectedText = buildSundayMonsReminder({
+      eventId: EVENT_ID,
+      eventData,
+      leadMs: 10_800_000,
+    }).text;
+    assert.equal(operationFor(joined, "reminder").text, expectedText);
+    const published = publishedReminderMessage(expectedText);
+    const left = project(
+      { ...eventData, participants: {} },
+      joined.state,
+      NOW_MS,
+      undefined,
+      published,
+    );
+    assert.equal(operationFor(left, "reminder").text, legacyText);
+    const stopped = project(
+      { ...eventData, status: "active" },
+      joined.state,
+      NOW_MS,
+      undefined,
+      published,
+    );
+    assert.equal(stopped.state.reminderText, expectedText);
+  }
+});
+
 test("unconfirmed or missing reminder targets never create a reminder", () => {
   const eventData = buildEvent({
     isSundayMons: true,
@@ -1031,7 +1077,7 @@ test("reminder participant text freezes after registration and retains its origi
     assert.equal(reminder.operation, "edit");
     assert.equal(reminder.ifMissing, "skip");
     assert.equal(reminder.text, scheduled.state.reminderText);
-    assert.ok(reminder.text.startsWith("sunday mons in 3 hours!\n\n"));
+    assert.ok(reminder.text.startsWith("sunday mons in 4 hours!\n\n"));
     assert.equal(
       project(changed, stopped.state, NOW_MS, undefined, published).action,
       "unchanged",

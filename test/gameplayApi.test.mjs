@@ -43,6 +43,7 @@ const {
   sendWagerProposalViaApi,
   startAutomatchViaApi,
   startMatchTimerViaApi,
+  surrenderMatchViaApi,
   syncEventStateViaApi,
   toggleEventPrizeSelectionViaApi,
   updateRatingsViaApi,
@@ -69,6 +70,8 @@ const {
   isProposeRematchResponse,
   isResolveInviteRoleRequest,
   isResolveInviteRoleResponse,
+  isSurrenderMatchRequest,
+  isSurrenderMatchResponse,
 } = await import("@mons/shared/game-sessions");
 const { MAX_MATCH_FEN_BYTES, MAX_MATCH_HISTORY_BYTES } =
   await import("@mons/shared/match-protocol");
@@ -1365,6 +1368,179 @@ test("sends exact structural game-session mutations with stable operation IDs", 
     false,
   );
   assert.equal(isEnsureMatchRequest({ ...ensureRequest, aura: null }), false);
+});
+
+const surrenderRequest = {
+  inviteId: "abcdefghijk",
+  matchId: "abcdefghijk1",
+  playerId: "original-player",
+};
+const surrenderResponse = {
+  ok: true,
+  inviteId: surrenderRequest.inviteId,
+  matchId: surrenderRequest.matchId,
+  actorUid: surrenderRequest.playerId,
+};
+
+test("sends only surrender identity through authenticated API requests and accepts duplicate success", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input: String(input), init });
+    return jsonResponse(surrenderResponse);
+  };
+  assert.equal(isSurrenderMatchRequest(surrenderRequest), true);
+  assert.equal(isSurrenderMatchResponse(surrenderResponse), true);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    assert.deepEqual(
+      await surrenderMatchViaApi(
+        surrenderRequest,
+        async () => "firebase-token",
+      ),
+      surrenderResponse,
+    );
+  }
+  for (const { input, init } of calls) {
+    assert.equal(input, "https://api.mons.link/matches/surrender");
+    assert.equal(init.method, "POST");
+    assert.equal(init.headers.Authorization, "Bearer firebase-token");
+    assert.equal(init.cache, "no-store");
+    assert.deepEqual(JSON.parse(init.body), surrenderRequest);
+    assert.equal(init.headers[WAGER_STORAGE_VERSION_HEADER], undefined);
+  }
+  for (const request of [
+    { ...surrenderRequest, playerId: "" },
+    { ...surrenderRequest, playerId: " original-player" },
+    { ...surrenderRequest, status: "surrendered" },
+    { ...surrenderRequest, fen: "client-fen" },
+  ]) {
+    assert.equal(isSurrenderMatchRequest(request), false);
+    await assert.rejects(
+      surrenderMatchViaApi(request, async () => "firebase-token"),
+      (error) =>
+        error instanceof GameplayApiError && error.code === "invalid-argument",
+    );
+  }
+  assert.equal(calls.length, 2);
+});
+
+test("surrender refreshes authentication once while retaining the original target", async () => {
+  const tokens = [];
+  const requests = [];
+  globalThis.fetch = async (_input, init) => {
+    requests.push(JSON.parse(init.body));
+    return requests.length === 1
+      ? jsonResponse({ error: "unauthenticated" }, 401)
+      : jsonResponse(surrenderResponse);
+  };
+  assert.deepEqual(
+    await surrenderMatchViaApi(surrenderRequest, async (forceRefresh) => {
+      tokens.push(forceRefresh);
+      return "firebase-token";
+    }),
+    surrenderResponse,
+  );
+  assert.deepEqual(tokens, [false, true]);
+  assert.deepEqual(requests, [surrenderRequest, surrenderRequest]);
+});
+
+test("surrender rejects malformed or mismatched success without retrying", async () => {
+  for (const response of [
+    { ...surrenderResponse, inviteId: "another-invite" },
+    { ...surrenderResponse, matchId: "abcdefghijk2" },
+    { ...surrenderResponse, actorUid: "another-player" },
+    { ...surrenderResponse, actorUid: "" },
+    { ok: true },
+  ]) {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return jsonResponse(response);
+    };
+    await assert.rejects(
+      surrenderMatchViaApi(surrenderRequest, async () => "firebase-token"),
+      (error) =>
+        error instanceof GameplayApiError && error.code === "unavailable",
+    );
+    assert.equal(calls, 1);
+  }
+});
+
+test("surrender preserves backend failures and does not retry an uncertain submission", async () => {
+  for (const failure of [
+    () => {
+      throw new Error("network-lost");
+    },
+    () => jsonResponse({ error: "unavailable" }, 503),
+    () =>
+      jsonResponse(
+        { error: "failed-precondition", message: "match-ended" },
+        409,
+      ),
+  ]) {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      return failure();
+    };
+    await assert.rejects(
+      surrenderMatchViaApi(surrenderRequest, async () => "firebase-token"),
+      GameplayApiError,
+    );
+    assert.equal(calls, 1);
+  }
+});
+
+test("surrender remains bound to the original user before transport, on token refresh, and after response", async () => {
+  for (const phase of ["token", "refresh", "response"]) {
+    let currentUser;
+    const originalUser = {
+      uid: "login-alias",
+      getIdToken: async () => {
+        if (phase === "token") currentUser = { uid: "login-alias" };
+        return "firebase-token";
+      },
+    };
+    currentUser = originalUser;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      currentUser = null;
+      return phase === "refresh"
+        ? jsonResponse({ error: "unauthenticated" }, 401)
+        : jsonResponse(surrenderResponse);
+    };
+    await assert.rejects(
+      surrenderMatchViaApi(
+        surrenderRequest,
+        createUserBoundAuthTokenProvider(originalUser, () => currentUser),
+      ),
+      /authentication-changed/,
+    );
+    assert.equal(calls, phase === "token" ? 0 : 1);
+  }
+});
+
+test("surrender applies the existing deadline to authentication and a pending response", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  let requestSignal;
+  globalThis.fetch = (_input, init) => {
+    calls += 1;
+    requestSignal = init.signal;
+    return new Promise(() => {});
+  };
+  for (const tokenProvider of [
+    () => new Promise(() => {}),
+    async () => "firebase-token",
+  ]) {
+    const request = surrenderMatchViaApi(surrenderRequest, tokenProvider);
+    const rejected = assert.rejects(request, /Gameplay request timed out/);
+    await Promise.resolve();
+    t.mock.timers.tick(30_000);
+    await rejected;
+  }
+  assert.equal(calls, 1);
+  assert.equal(requestSignal.aborted, true);
 });
 
 test("accepts the largest valid ensured match response", async () => {

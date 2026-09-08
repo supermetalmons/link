@@ -2,7 +2,10 @@ import {
   buildEventPrizeAnnouncement,
   EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS,
 } from "../../../functions/telegram/eventPrizeAnnouncement.js";
-import { buildSundayMonsReminder } from "../../../functions/telegram/sundayMonsReminder.js";
+import {
+  buildSundayMonsReminder,
+  isSundayMonsReminderLeadMs,
+} from "../../../functions/telegram/sundayMonsReminder.js";
 import {
   sendTelegramMediaGroup,
   sendTelegramMessage,
@@ -176,6 +179,7 @@ export async function deliverEventPrizeAnnouncement(
     return { status: "skipped", reason: "invalid-kind" };
   }
   const specification = EVENT_ANNOUNCEMENT_SPECS[kind];
+  const leadMs = input.startAtMs - input.runAtMs;
   const log =
     dependencies.log || ((record) => console.info(JSON.stringify(record)));
   const deadlineAtMs = input.runAtMs + EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS;
@@ -191,7 +195,9 @@ export async function deliverEventPrizeAnnouncement(
     ![input.startAtMs, input.runAtMs, input.firstQueuedAtMs].every(
       (value) => Number.isSafeInteger(value) && value > 0,
     ) ||
-    input.runAtMs !== input.startAtMs - specification.leadMs
+    (kind === "reminder"
+      ? !isSundayMonsReminderLeadMs(leadMs)
+      : leadMs !== specification.leadMs)
   ) {
     return { status: "skipped", reason: "invalid-schedule" };
   }
@@ -292,7 +298,11 @@ export async function deliverEventPrizeAnnouncement(
     const announcement =
       kind === "prizes"
         ? buildEventPrizeAnnouncement({ eventId: input.eventId })
-        : buildSundayMonsReminder({ eventId: input.eventId, eventData });
+        : buildSundayMonsReminder({
+            eventId: input.eventId,
+            eventData,
+            leadMs,
+          });
     const payload =
       existing?.startAtMs === input.startAtMs
         ? parsePayload(existing.payload, kind)

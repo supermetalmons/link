@@ -8,6 +8,8 @@ import {
   isJoinInviteResponse,
   isProposeRematchResponse,
   isResolveInviteRoleResponse,
+  isSurrenderMatchRequest,
+  isSurrenderMatchResponse,
   type CreateInviteRequest,
   type CreateInviteResponse,
   type EndRematchRequest,
@@ -22,6 +24,8 @@ import {
   type ProposeRematchResponse,
   type ResolveInviteRoleRequest,
   type ResolveInviteRoleResponse,
+  type SurrenderMatchRequest,
+  type SurrenderMatchResponse,
 } from "@mons/shared/game-sessions";
 import {
   isCancelAutomatchResponse,
@@ -709,6 +713,28 @@ export function ensureMatchViaApi(
     tokenProvider,
     isEnsureMatchResponse,
     true,
+  );
+}
+
+export function surrenderMatchViaApi(
+  request: SurrenderMatchRequest,
+  tokenProvider: AuthTokenProvider,
+): Promise<SurrenderMatchResponse> {
+  if (!isSurrenderMatchRequest(request)) {
+    return Promise.reject(
+      new GameplayApiError("invalid-argument", "invalid-surrender-request"),
+    );
+  }
+  const { inviteId, matchId, playerId } = request;
+  return gameplayMutation(
+    "/matches/surrender",
+    { inviteId, matchId, playerId },
+    tokenProvider,
+    (value): value is SurrenderMatchResponse =>
+      isSurrenderMatchResponse(value) &&
+      value.inviteId === inviteId &&
+      value.matchId === matchId &&
+      value.actorUid === playerId,
   );
 }
 

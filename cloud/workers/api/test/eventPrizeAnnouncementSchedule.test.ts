@@ -5,6 +5,7 @@ import {
   buildSundayMonsReminderPlan,
   createEventPrizeAnnouncementScheduleRepository,
   EVENT_PRIZE_ANNOUNCEMENT_REASON,
+  scheduleEventAnnouncements,
   scheduleEventPrizeAnnouncement,
 } from "../src/eventPrizeAnnouncementSchedule.ts";
 import {
@@ -152,7 +153,7 @@ test("event creation commits both announcement markers atomically before dispatc
   );
   assert.equal(prize.params.reason, EVENT_PRIZE_ANNOUNCEMENT_REASON);
   assert.equal(prize.params.runAtMs, 26_400_000);
-  assert.equal(reminder.params.runAtMs, 19_200_000);
+  assert.equal(reminder.params.runAtMs, 15_600_000);
   assert.notEqual(prize.workflowId, reminder.workflowId);
 });
 
@@ -268,6 +269,76 @@ test("both notification kinds preserve their first scheduling proof on repeat wr
   }
 });
 
+test("rediscovery preserves a persisted three-hour reminder without creating a four-hour duplicate", async () => {
+  const event = scheduledEvent({ startAtMs: 30_000_000 });
+  const legacy = await buildEventProgressPlan(
+    {
+      eventId: EVENT_ID,
+      sourceKey: `reminder:${EVENT_ID}:${event.startAtMs}`,
+      reason: "sunday-mons-reminder",
+      runAtMs: event.startAtMs - 10_800_000,
+    },
+    NOW_MS,
+  );
+  const current = await buildSundayMonsReminderPlan(EVENT_ID, event, NOW_MS);
+  assert.ok(current);
+  assert.equal(current.workflowId, legacy.workflowId);
+  assert.equal(current.outboxId, legacy.outboxId);
+  assert.equal(current.params.runAtMs, event.startAtMs - 14_400_000);
+
+  for (const mode of ["event-write", "sweep"] as const) {
+    const memory = memoryRepository({
+      events: { [EVENT_ID]: event },
+      eventProgressOutbox: { [legacy.outboxId]: legacy.outbox },
+    });
+    const dispatched: Array<{ id?: string; params?: unknown }> = [];
+    if (mode === "event-write") {
+      const wrapped = wrapper(memory, async (plan) => {
+        dispatched.push({ id: plan.workflowId, params: plan.params });
+      });
+      await wrapped.patchRtdbRoot({
+        [`${EVENT_PATH}/startAtMs`]: event.startAtMs,
+      });
+    } else {
+      const env: Env = {
+        ...TELEGRAM_TEST_ENV,
+        EVENT_PROGRESS_WORKFLOW: {
+          ...TELEGRAM_TEST_ENV.EVENT_PROGRESS_WORKFLOW,
+          createBatch: async (options) => {
+            dispatched.push(...options);
+            return [];
+          },
+        },
+      };
+      await scheduleEventAnnouncements(
+        env,
+        memory.repository,
+        EVENT_ID,
+        event,
+        NOW_MS + 1_000,
+      );
+    }
+    assert.deepEqual(
+      memory.get(`eventProgressOutbox/${legacy.outboxId}`),
+      legacy.outbox,
+      mode,
+    );
+    assert.deepEqual(
+      dispatched
+        .filter(({ id }) => id === legacy.workflowId)
+        .map(({ id, params }) => ({ id, params })),
+      [{ id: legacy.workflowId, params: legacy.params }],
+      mode,
+    );
+    assert.equal(dispatched.length, 2, mode);
+    assert.equal(
+      Object.keys(memory.get("eventProgressOutbox") as object).length,
+      2,
+      mode,
+    );
+  }
+});
+
 test("failure dispatching either kind leaves both markers and dispatches the other", async () => {
   const event = scheduledEvent({ startAtMs: 30_000_000 });
   const prize = await buildEventPrizeAnnouncementPlan(EVENT_ID, event, NOW_MS);
@@ -315,7 +386,7 @@ test("failure dispatching either kind leaves both markers and dispatches the oth
   }
 });
 
-test("a Sunday Mons event without prizes schedules only its three-hour reminder", async () => {
+test("a Sunday Mons event without prizes schedules only its four-hour reminder", async () => {
   const eventId = "sunday-without-prizes";
   const event = scheduledEvent({
     startAtMs: 30_000_000,
@@ -342,7 +413,7 @@ test("a Sunday Mons event without prizes schedules only its three-hour reminder"
       [`eventProgressOutbox/${reminder.outboxId}`]: reminder.outbox,
     },
   ]);
-  assert.equal(reminder.params.runAtMs, 19_200_000);
+  assert.equal(reminder.params.runAtMs, 15_600_000);
   assert.equal(reminder.outbox.firstQueuedAtMs, NOW_MS);
 });
 
@@ -386,9 +457,9 @@ test("reminders require strict Sunday eligibility independently of prize metadat
   }
 });
 
-test("missing the three-hour discovery cutoff still permits the independent prize album", async () => {
+test("missing the four-hour discovery cutoff still permits the independent prize album", async () => {
   const event = scheduledEvent({ startAtMs: 30_000_000 });
-  const targetMs = 19_200_000;
+  const targetMs = 15_600_000;
   const onTime = await buildSundayMonsReminderPlan(EVENT_ID, event, targetMs);
   assert.ok(onTime);
   assert.equal(onTime.outbox.firstQueuedAtMs, targetMs);

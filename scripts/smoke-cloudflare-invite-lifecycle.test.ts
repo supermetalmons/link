@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { Game } from "mons-rules";
 import { parseStrictMatchTimer } from "@mons/shared/timers";
 import { INVITE_METADATA_MAX_MESSAGE_BYTES } from "@mons/shared/invite-metadata";
 import { parseArgs, runSmoke } from "./smoke-cloudflare-invite-lifecycle.ts";
@@ -147,7 +148,7 @@ function harness(
     emojiId,
     aura: "",
     gameVariant: "Classic",
-    fen: matchId === INVITE ? "initial-seed" : "rematch-seed",
+    fen: new Game().toFen(),
     status: "",
     flatMovesString: "",
     timer: "",
@@ -185,9 +186,10 @@ function harness(
         assert.equal(body, null);
         return json({ error: "Permission denied" }, 401);
       }
-      const parts = /^\/players\/([^/]+)\/matches\/([^/]+)\.json$/.exec(
-        url.pathname,
-      );
+      const parts =
+        /^\/players\/([^/]+)\/matches\/([^/]+?)(\/status)?\.json$/.exec(
+          url.pathname,
+        );
       assert.ok(parts, "No unrelated Firebase paths are touched");
       const key = `${parts[1]}/${parts[2]}`;
       const match = matches.get(key);
@@ -199,6 +201,14 @@ function harness(
       }
       assert.equal(method, "PUT");
       assert.equal(uid, parts[1], "A participant writes only their own match");
+      if (
+        parts[3] ||
+        !body ||
+        typeof body !== "object" ||
+        !("status" in body) ||
+        body.status !== match.value.status
+      )
+        return json({ error: "Permission denied" }, 401);
       assert.ok(body && typeof body === "object" && "timer" in body);
       if (headers.get("If-Match") !== etag)
         return json(match.value, 412, { ETag: etag });
@@ -209,18 +219,31 @@ function harness(
         });
         return json({ error: "Permission denied" }, 401);
       }
-      const { status, timer, ...unchanged } = body as Match;
+      const { status, timer, fen, flatMovesString, ...unchanged } =
+        body as Match;
       const {
         status: _previous,
         timer: _previousTimer,
+        fen: previousFen,
+        flatMovesString: previousMoves,
         ...prior
       } = match.value;
       assert.deepEqual(
         unchanged,
         prior,
-        "The transaction preserves gameplay and creation markers",
+        "The transaction preserves presentation and creation markers",
       );
-      assert.ok(status === match.value.status || status === "surrendered");
+      assert.equal(status, match.value.status);
+      if (flatMovesString !== previousMoves) {
+        const game = Game.fromFen(previousFen)!;
+        assert.equal(game.activeColor, match.value.color);
+        assert.ok(flatMovesString.startsWith(previousMoves));
+        assert.equal(
+          game.playFen(flatMovesString.split("-").at(-1)!).kind,
+          "complete",
+        );
+        assert.equal(fen, game.toFen());
+      } else assert.equal(fen, previousFen);
       assert.ok(timer === match.value.timer || timer === "");
       match.value = structuredClone(body as Match);
       match.revision++;
@@ -245,6 +268,27 @@ function harness(
       });
     }
     assert.equal(method, "POST");
+    if (url.pathname === "/matches/surrender") {
+      assert.ok(body && typeof body === "object" && "matchId" in body);
+      assert.deepEqual(body, {
+        inviteId: INVITE,
+        matchId: body.matchId,
+        playerId: uid,
+      });
+      assert.ok(body.matchId === INVITE || body.matchId === `${INVITE}1`);
+      const match = matches.get(`${uid}/${body.matchId}`)!;
+      assert.ok(match);
+      if (match.value.status !== "surrendered") {
+        match.value.status = "surrendered";
+        match.revision++;
+      }
+      return json({
+        ok: true,
+        inviteId: INVITE,
+        matchId: body.matchId,
+        actorUid: uid,
+      });
+    }
     assert.ok(
       body &&
         typeof body === "object" &&
@@ -420,8 +464,15 @@ function harness(
   };
 }
 
-test("requires an explicit approved target and permits only an optional report destination", () => {
+test("requires an explicit approved target and supports a report and pre-rule API verification", () => {
   assert.deepEqual(parseArgs(["--base-url", `${API}/`]), { baseUrl: API });
+  assert.deepEqual(
+    parseArgs(["--surrender-rules-pending", "--base-url", API]),
+    {
+      baseUrl: API,
+      surrenderRulesPending: true,
+    },
+  );
   assert.deepEqual(
     parseArgs([
       "--base-url",
@@ -444,16 +495,32 @@ test("requires an explicit approved target and permits only an optional report d
     ["--base-url", `${API}?token=secret`],
     ["--base-url", API, "--password", "invented"],
     ["--base-url", API, "--auth-token", "secret"],
+    [
+      "--base-url",
+      API,
+      "--surrender-rules-pending",
+      "--surrender-rules-pending",
+    ],
+    ["--base-url", API, "--surrender-rules-pending", "true"],
   ])
     assert.throws(() => parseArgs(args), /Usage:/);
 });
 
-test("runs the isolated lifecycle, exact replays, live client writes, timer denials, and D1-only source proof", async () => {
+test("runs the isolated lifecycle, API surrender replay, legal client moves, timer and status denials, and D1-only source proof", async () => {
   const state = harness();
   const report = await runSmoke({ baseUrl: API }, state.dependencies);
   assert.equal(report.inviteId, INVITE);
   assert.deepEqual(report.matchIds, [INVITE, `${INVITE}1`]);
-  assert.equal(report.checks.length, 11);
+  assert.equal(report.checks.length, 12);
+  assert.ok(report.checks.includes("firebase-surrender-write-rules"));
+  assert.equal(
+    state.requests.filter(
+      (request) => request.url.pathname === "/matches/surrender",
+    ).length,
+    4,
+  );
+  assert.ok(state.matches.get(`${HOST}/${INVITE}`)?.value.flatMovesString);
+  assert.ok(state.matches.get(`${GUEST}/${INVITE}1`)?.value.flatMovesString);
   assert.equal(state.receipts.size, 5);
   assert.equal(state.source()?.hostRematches, "1x");
   assert.equal(state.source()?.guestRematches, "1");
@@ -482,6 +549,116 @@ test("runs the isolated lifecycle, exact replays, live client writes, timer deni
   assert.ok(!state.logs.join("\n").includes("idToken"));
   for (const token of TOKENS.values())
     assert.ok(!state.logs.join("\n").includes(token));
+});
+
+test("pre-rule verification skips only direct status probes and still verifies API surrender and legal moves", async () => {
+  const state = harness();
+  const report = await runSmoke(
+    { baseUrl: API, surrenderRulesPending: true },
+    state.dependencies,
+  );
+  assert.equal(report.checks.length, 11);
+  assert.ok(!report.checks.includes("firebase-surrender-write-rules"));
+  assert.equal(
+    state.requests.filter(
+      (request) => request.url.pathname === "/matches/surrender",
+    ).length,
+    4,
+  );
+  assert.ok(
+    state.requests.every(
+      (request) => !request.url.pathname.endsWith("/status.json"),
+    ),
+  );
+  assert.ok(state.matches.get(`${HOST}/${INVITE}`)?.value.flatMovesString);
+});
+
+test("each direct status-write shape must return an actual permission denial", async () => {
+  for (let target = 1; target <= 4; target++) {
+    let probes = 0;
+    const state = harness({
+      intercept(request, response) {
+        if (
+          request.url.pathname.startsWith("/players/") &&
+          request.method === "PUT" &&
+          !request.headers.has("If-Match") &&
+          ++probes === target
+        )
+          return json(request.body);
+        return response();
+      },
+    });
+    await assert.rejects(
+      runSmoke({ baseUrl: API }, state.dependencies),
+      /surrender rule did not deny/,
+    );
+    assert.equal(probes, target);
+    assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+    assert.equal(state.source()?.hostRematches, "x");
+  }
+});
+
+test("replays an uncertain API surrender without issuing a direct Firebase fallback", async () => {
+  let uncertain = false;
+  const state = harness({
+    intercept(request, response) {
+      const result = response();
+      if (request.url.pathname === "/matches/surrender" && !uncertain) {
+        uncertain = true;
+        throw new Error("lost surrender response");
+      }
+      return result;
+    },
+  });
+  await runSmoke({ baseUrl: API }, state.dependencies);
+  const surrenders = state.requests.filter(
+    (request) => request.url.pathname === "/matches/surrender",
+  );
+  assert.equal(surrenders.length, 5);
+  assert.deepEqual(surrenders[0].body, surrenders[1].body);
+  assert.deepEqual(surrenders[0].body, surrenders[2].body);
+  assert.equal(state.matches.get(`${HOST}/${INVITE}`)?.revision, 3);
+});
+
+test("rejects a surrender response for another participant and retains isolated cleanup", async () => {
+  const state = harness({
+    intercept(request, response) {
+      const result = response();
+      if (request.url.pathname === "/matches/surrender")
+        return json({
+          ok: true,
+          inviteId: INVITE,
+          matchId: INVITE,
+          actorUid: GUEST,
+        });
+      return result;
+    },
+  });
+  await assert.rejects(
+    runSmoke({ baseUrl: API }, state.dependencies),
+    /unexpected receipt/,
+  );
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+});
+
+test("rejects API surrender that changes another persisted match field", async () => {
+  let changed = false;
+  const state = harness({
+    intercept(request, response) {
+      const result = response();
+      if (request.url.pathname === "/matches/surrender" && !changed) {
+        changed = true;
+        state.matches.get(`${HOST}/${INVITE}`)!.value.sessionCreation =
+          "c".repeat(64);
+      }
+      return result;
+    },
+  });
+  await assert.rejects(
+    runSmoke({ baseUrl: API }, state.dependencies),
+    /API surrender changed other state/,
+  );
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
 });
 
 test("retries an uncertain mutation with the identical operation and never creates another fixture", async () => {
@@ -772,8 +949,8 @@ test("retries live match CAS conflicts against the newest ETag without overwriti
         request.method === "PUT" &&
         request.body &&
         typeof request.body === "object" &&
-        "status" in request.body &&
-        request.body.status === "surrendered"
+        "flatMovesString" in request.body &&
+        request.body.flatMovesString
       ) {
         conflicted = true;
         const match = state.matches.get(`${HOST}/${INVITE}`)!;

@@ -110,6 +110,7 @@ import {
   sendWagerProposalViaApi,
   startAutomatchViaApi,
   startMatchTimerViaApi,
+  surrenderMatchViaApi,
   syncEventStateViaApi,
   toggleEventPrizeSelectionViaApi,
   updateRatingsViaApi,
@@ -4014,15 +4015,63 @@ class Connection {
     if (!this.myMatch) {
       return false;
     }
-    const previousStatus = this.myMatch.status;
-    this.myMatch.status = "surrendered";
-    const didQueueUpdate = this.sendMatchUpdate(
+    const writableContext = this.requireWritableContext(
       this.activeContext?.matchId ?? null,
+      "surrender",
     );
-    if (!didQueueUpdate) {
-      this.myMatch.status = previousStatus;
+    if (!writableContext) {
       return false;
     }
+    const { inviteId, matchId, actorUid, loginUid, contextId, sessionEpoch } =
+      writableContext;
+    const matchGuard = this.createMatchContextGuard(inviteId, matchId);
+    let tokenProvider: AuthTokenProvider & {
+      readonly assertCurrentUser: () => void;
+    };
+    try {
+      tokenProvider = this.getUserBoundAuthTokenProvider(loginUid);
+      tokenProvider.assertCurrentUser();
+    } catch {
+      return false;
+    }
+    const requestIsCurrent = (): boolean => {
+      if (!matchGuard()) return false;
+      try {
+        tokenProvider.assertCurrentUser();
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    this.myMatch.status = "surrendered";
+    void surrenderMatchViaApi(
+      { inviteId, matchId, playerId: actorUid },
+      tokenProvider,
+    )
+      .then(() => {
+        if (!requestIsCurrent()) return;
+        this.logContextEvent("ctx.write.success", {
+          reason: "surrender",
+          inviteId,
+          matchId,
+          actorUid,
+          contextId,
+          sessionEpoch,
+        });
+      })
+      .catch((error) => {
+        if (!requestIsCurrent()) return;
+        this.logContextEvent("ctx.write.fail", {
+          reason: "surrender",
+          inviteId,
+          matchId,
+          actorUid,
+          contextId,
+          sessionEpoch,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        this.reconnectAfterMatchUpdateFailure(inviteId, requestIsCurrent);
+      });
     return true;
   }
 
@@ -4571,64 +4620,6 @@ class Connection {
         console.log("failed to get game info");
       }
     });
-  }
-
-  private sendMatchUpdate(expectedMatchId: string | null): boolean {
-    const writableContext = this.requireWritableContext(
-      expectedMatchId,
-      "sendMatchUpdate",
-    );
-    if (!writableContext || !this.myMatch) {
-      return false;
-    }
-    const sessionGuard = this.createMatchContextGuard(
-      writableContext.inviteId,
-      writableContext.matchId,
-    );
-    const status = this.myMatch.status;
-    runTransaction(
-      ref(
-        this.db,
-        `players/${writableContext.actorUid}/matches/${writableContext.matchId}`,
-      ),
-      (current: Match | null) => (current ? { ...current, status } : null),
-      { applyLocally: false },
-    )
-      .then((result) => {
-        if (!sessionGuard()) {
-          return;
-        }
-        if (!result.committed || !result.snapshot.exists()) {
-          throw new Error("match-status-update-aborted");
-        }
-        this.logContextEvent("ctx.write.success", {
-          reason: "sendMatchUpdate",
-          inviteId: writableContext.inviteId,
-          matchId: writableContext.matchId,
-          actorUid: writableContext.actorUid,
-          contextId: writableContext.contextId,
-          sessionEpoch: writableContext.sessionEpoch,
-        });
-      })
-      .catch((error) => {
-        if (!sessionGuard()) {
-          return;
-        }
-        this.logContextEvent("ctx.write.fail", {
-          reason: "sendMatchUpdate",
-          inviteId: writableContext.inviteId,
-          matchId: writableContext.matchId,
-          actorUid: writableContext.actorUid,
-          contextId: writableContext.contextId,
-          sessionEpoch: writableContext.sessionEpoch,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        this.reconnectAfterMatchUpdateFailure(
-          writableContext.inviteId,
-          this.createSessionGuard(),
-        );
-      });
-    return true;
   }
 
   private rematchSeriesEndIsIndicatedForInvite(

@@ -7,6 +7,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Game } from "mons-rules";
 import { AuthApiFailure } from "../src/authErrors.ts";
+import {
+  FirebaseRtdbFailure,
+  FirebaseRtdbPermissionDenied,
+  type FirebaseRtdbClient,
+} from "../src/firebaseRtdb.ts";
 import { GameSessionMutationLockFailure } from "../src/gameplayCoordinationD1.ts";
 import {
   cancelAutomatch as cancelAutomatchImpl,
@@ -2388,6 +2393,16 @@ test("authenticates before body parsing and sanitizes route failures", async () 
     ],
     ["/automatch/start?operationId=invalid", { emojiId: 1, aura: "" }],
     ["/matches/timer/start", {}],
+    ["/matches/surrender", {}],
+    [
+      "/matches/surrender",
+      {
+        inviteId: "invite",
+        matchId: "invite",
+        playerId: "player",
+        status: "surrendered",
+      },
+    ],
     ["/matches/timer/claim", {}],
     [
       "/matches/timer/claim",
@@ -2609,4 +2624,230 @@ test("fails closed when navigation profile ownership is unavailable", async () =
   );
   assert.equal(response.status, 503);
   assert.equal(reads, 0);
+});
+
+function surrenderFixture({
+  loginUid = identity.uid,
+  playerId = identity.uid,
+  inviteValue = { hostId: identity.uid, guestId: "guest" },
+  matchValue = {
+    fen: "fen",
+    flatMovesString: "moves",
+    status: "",
+    timer: "4;12345",
+    emojiId: 1,
+    aura: "seed",
+    sessionCreation: { operationId: "created" },
+    extra: { retained: true },
+  },
+  ownerByUid = {},
+}: {
+  loginUid?: string;
+  playerId?: string;
+  inviteValue?: unknown;
+  matchValue?: unknown;
+  ownerByUid?: Readonly<Record<string, string | null>>;
+} = {}) {
+  const stats = { writes: 0, scopedClients: 0 };
+  const body = { inviteId: "invite", matchId: "invite", playerId };
+  const client: Pick<FirebaseRtdbClient, "transactPath"> = {
+    async transactPath(path, updater, signal, beforeWrite) {
+      assert.equal(path, `players/${playerId}/matches/${body.matchId}`);
+      signal?.throwIfAborted();
+      const current = structuredClone(matchValue);
+      const result = applyTransaction(updater, current);
+      if (result.committed) {
+        await beforeWrite?.({
+          current,
+          proposed: result.value,
+          etag: '"etag"',
+        });
+        matchValue = result.value;
+        stats.writes++;
+      }
+      return result;
+    },
+  };
+  const dependencies: Parameters<typeof handleGameplayRoute>[3] = {
+    repository: repository({
+      readState: async (path) => {
+        assert.equal(path, "invites/invite");
+        return inviteValue;
+      },
+      readProfileOwnershipSnapshot: async (query) =>
+        ownershipSnapshot(query, { ownerByUid }),
+      transactState: async () => {
+        throw new Error("unrestricted-write");
+      },
+      patchRtdbRoot: async () => {
+        throw new Error("unrestricted-write");
+      },
+    }),
+    surrender: {
+      createMatchClient: (scope) => {
+        assert.deepEqual(scope, { playerId, matchId: body.matchId });
+        stats.scopedClients++;
+        return client;
+      },
+    },
+    verifyIdentity: async () => ({ uid: loginUid }),
+    logFailure: () => {},
+  };
+  return {
+    body,
+    client,
+    dependencies,
+    stats,
+    getMatch: () => matchValue,
+    call: (currentEnv = env) =>
+      handleGameplayRoute(
+        request("/matches/surrender", { body }),
+        currentEnv,
+        context(),
+        dependencies,
+      ),
+  };
+}
+
+test("surrender changes only status through the scoped client and replays without writing", async () => {
+  const h = surrenderFixture();
+  const before = structuredClone(h.getMatch());
+  let rateLimitKey = "";
+  const currentEnv = {
+    ...env,
+    AUTH_RATE_LIMITER: {
+      limit: async ({ key }: { key: string }) => {
+        rateLimitKey = key;
+        return { success: true };
+      },
+    },
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await h.call(currentEnv);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      ok: true,
+      inviteId: "invite",
+      matchId: "invite",
+      actorUid: identity.uid,
+    });
+  }
+  assert.deepEqual(h.getMatch(), {
+    ...(before as Record<string, unknown>),
+    status: "surrendered",
+  });
+  assert.equal(h.stats.writes, 1);
+  assert.equal(rateLimitKey, `game-session:${identity.uid}`);
+});
+
+test("surrender authorizes guest and canonical linked logins without Firebase profile shadows", async () => {
+  for (const playerId of [identity.uid, "guest"]) {
+    const h = surrenderFixture({
+      loginUid: "alternate",
+      playerId,
+      ownerByUid: { alternate: "owner", [playerId]: "owner" },
+    });
+    assert.equal((await h.call()).status, 200);
+    assert.equal(h.stats.writes, 1);
+  }
+  const guest = surrenderFixture({ loginUid: "guest", playerId: "guest" });
+  assert.equal((await guest.call()).status, 200);
+});
+
+test("surrender rejects unauthorized, missing and unrelated match requests before scoped writes", async () => {
+  for (const [h, status] of [
+    [surrenderFixture({ loginUid: "spectator" }), 403],
+    [
+      surrenderFixture({
+        loginUid: "alternate",
+        ownerByUid: { alternate: "other", [identity.uid]: "owner" },
+      }),
+      403,
+    ],
+    [surrenderFixture({ playerId: "unrelated" }), 403],
+    [surrenderFixture({ inviteValue: null }), 404],
+    [surrenderFixture({ inviteValue: [] }), 409],
+    [surrenderFixture({ matchValue: null }), 404],
+  ] as const) {
+    assert.equal((await h.call()).status, status);
+    assert.equal(h.stats.writes, 0);
+  }
+  const missingRematch = surrenderFixture();
+  missingRematch.body.matchId = "invite2";
+  assert.equal((await missingRematch.call()).status, 404);
+  assert.equal(missingRematch.stats.scopedClients, 0);
+  const knownRematch = surrenderFixture({
+    inviteValue: {
+      hostId: identity.uid,
+      guestId: "guest",
+      hostRematches: "1;2",
+      guestRematches: "1;2",
+    },
+  });
+  knownRematch.body.matchId = "invite2";
+  assert.equal((await knownRematch.call()).status, 200);
+});
+
+test("surrender maps rule rejection to a conflict and leaves provider failures unavailable", async () => {
+  for (const [error, status, code] of [
+    [new FirebaseRtdbPermissionDenied(), 409, "failed-precondition"],
+    [new FirebaseRtdbFailure(), 503, "unavailable"],
+  ] as const) {
+    const h = surrenderFixture();
+    h.client.transactPath = async () => {
+      throw error;
+    };
+    const response = await h.call();
+    assert.equal(response.status, status);
+    assert.equal(((await response.json()) as { error: string }).error, code);
+    assert.equal(h.stats.writes, 0);
+  }
+});
+
+test("a surrender commit with a lost response can be replayed without a second write", async () => {
+  const h = surrenderFixture();
+  const transact = h.client.transactPath;
+  h.client.transactPath = async (...args) => {
+    await transact(...args);
+    throw new FirebaseRtdbFailure();
+  };
+  assert.equal((await h.call()).status, 503);
+  h.client.transactPath = transact;
+  assert.equal((await h.call()).status, 200);
+  assert.equal(h.stats.writes, 1);
+});
+
+test("surrender observes auth, rate limit, ownership and mutation controls", async () => {
+  const unauthenticated = surrenderFixture();
+  unauthenticated.dependencies.verifyIdentity = async () => {
+    throw new AuthApiFailure(401, "unauthenticated", "authentication-required");
+  };
+  assert.equal((await unauthenticated.call()).status, 401);
+  assert.equal(unauthenticated.stats.scopedClients, 0);
+  const limited = surrenderFixture();
+  assert.equal(
+    (
+      await limited.call({
+        ...env,
+        AUTH_RATE_LIMITER: { limit: async () => ({ success: false }) },
+      })
+    ).status,
+    429,
+  );
+  assert.equal(limited.stats.scopedClients, 0);
+  const unavailable = surrenderFixture({ loginUid: "alternate" });
+  unavailable.dependencies.repository!.readProfileOwnershipSnapshot =
+    async () => {
+      throw new Error("ownership-unavailable");
+    };
+  assert.equal((await unavailable.call()).status, 503);
+  assert.equal(unavailable.stats.scopedClients, 0);
+  const frozen = surrenderFixture();
+  let checks = 0;
+  frozen.dependencies.assertMutationAllowed = async () => {
+    if (++checks > 1)
+      throw new AuthApiFailure(503, "unavailable", "profile-writes-disabled");
+  };
+  assert.equal((await frozen.call()).status, 503);
+  assert.equal(frozen.stats.writes, 0);
 });

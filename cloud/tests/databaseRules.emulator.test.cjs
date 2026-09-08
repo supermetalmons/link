@@ -3,8 +3,7 @@
 const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const test = require("node:test");
-const ts = require("typescript");
-const { runTransaction } = require("firebase/database");
+const { createMockUserToken } = require("@firebase/util");
 const {
   assertFails,
   assertSucceeds,
@@ -12,6 +11,8 @@ const {
 } = require("@firebase/rules-unit-testing");
 
 let rules;
+let createFirebaseRtdbClient;
+let FirebaseRtdbPermissionDenied;
 
 const match = (fen = "fen-1", flatMovesString = "") => ({
   version: 2,
@@ -25,55 +26,38 @@ const match = (fen = "fen-1", flatMovesString = "") => ({
   timer: "",
 });
 
-function surrenderClient(database, myMatch, matchId = "invite1") {
-  const source = ts.createSourceFile(
-    "connection.ts",
-    readFileSync("src/connection/connection.ts", "utf8"),
-    ts.ScriptTarget.Latest,
-    true,
-  );
-  const declaration = source.statements.find(
-    (node) => ts.isClassDeclaration(node) && node.name?.text === "Connection",
-  );
-  const method = declaration.members.find(
-    (node) => node.name?.getText(source) === "sendMatchUpdate",
-  );
-  const transactions = [];
-  const events = [];
-  const reconnects = [];
-  const output = ts.transpileModule(
-    `class Connection { ${method.getText(source)} }`,
-    { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
-  ).outputText;
-  const Constructor = new Function(
-    "ref",
-    "runTransaction",
-    `${output}\nreturn Connection;`,
-  )(
-    (_db, path) => database.ref(path),
-    (reference, update, options) => {
-      const transaction = runTransaction(reference, update, options);
-      transactions.push(transaction);
-      return transaction;
+function emulatorRestUrl(input) {
+  const url = new URL(input);
+  const emulator = rules.emulators.database;
+  url.protocol = "http:";
+  url.hostname = emulator.host;
+  url.port = String(emulator.port);
+  url.searchParams.set("ns", "demo-mons-link-rules");
+  return url;
+}
+
+function scopedSurrenderClient({
+  playerId = "host",
+  matchId = "invite1",
+  fetcher = fetch,
+} = {}) {
+  return createFirebaseRtdbClient(
+    { FIREBASE_RTDB_URL: "https://mons-link-default-rtdb.firebaseio.com" },
+    {
+      scopedMatchSurrender: { playerId, matchId },
+      getAccessToken: async () => "owner",
+      fetcher: (input, init) => fetcher(emulatorRestUrl(input), init),
     },
   );
-  const connection = Object.assign(new Constructor(), {
-    db: {},
-    myMatch,
-    requireWritableContext: () => ({
-      inviteId: "invite1",
-      matchId,
-      actorUid: "host",
-    }),
-    createMatchContextGuard: () => () => true,
-    createSessionGuard: () => () => true,
-    logContextEvent: (event) => events.push(event),
-    reconnectAfterMatchUpdateFailure: (inviteId) => reconnects.push(inviteId),
-  });
-  return { connection, transactions, events, reconnects };
+}
+
+function surrender(current) {
+  return { value: { ...current, status: "surrendered" } };
 }
 
 test.before(async () => {
+  ({ createFirebaseRtdbClient, FirebaseRtdbPermissionDenied } =
+    await import("../workers/api/src/firebaseRtdb.ts"));
   rules = await initializeTestEnvironment({
     projectId: "demo-mons-link-rules",
     database: {
@@ -213,9 +197,7 @@ test("session creation evidence is immutable for every browser while moves prese
           .ref(matchPath)
           .set({ ...initial, fen: "fen-next", flatMovesString: "move" }),
       );
-      await assertSucceeds(
-        database.ref(`${matchPath}/status`).set("surrendered"),
-      );
+      await assertFails(database.ref(`${matchPath}/status`).set("surrendered"));
     }
   }
 });
@@ -408,7 +390,7 @@ test("match presentation seeds reject child, full-record, deletion and multi-pat
   }
 });
 
-test("unchanged presentation seeds permit moves and status writes for every authorized browser identity", async () => {
+test("unchanged presentation seeds permit moves while browser surrender is rejected", async () => {
   let moveHistory = "";
   for (const context of [
     rules.authenticatedContext("host", { profileId: "profile-host" }),
@@ -421,118 +403,208 @@ test("unchanged presentation seeds permit moves and status writes for every auth
     await assertSucceeds(
       reference.set(match(`fen${moveHistory}`, moveHistory)),
     );
-    await assertSucceeds(reference.update({ status: "surrendered" }));
+    await assertFails(reference.update({ status: "surrendered" }));
     const stored = (await reference.once("value")).val();
     assert.equal(stored.emojiId, 1);
     assert.equal(stored.aura, "");
-    assert.equal(stored.status, "surrendered");
+    assert.equal(stored.status, "");
   }
 });
 
-test("surrender loads a cold match through transaction retries and rejects missing records", async () => {
-  const database = rules
-    .authenticatedContext("host", {
-      profileId: "profile-host",
-    })
-    .database();
-  const reference = database.ref("players/host/matches/invite1");
-  const original = (await reference.get()).val();
-  const client = surrenderClient(database, {
-    ...original,
-    status: "surrendered",
-    emojiId: 1001,
-    aura: "rainbow",
-  });
-  assert.equal(client.connection.sendMatchUpdate("invite1"), true);
-  const result = await assertSucceeds(client.transactions[0]);
-  assert.equal(result.committed, true);
-  assert.deepEqual(result.snapshot.val(), {
-    ...original,
-    status: "surrendered",
-  });
-  await new Promise(setImmediate);
-  assert.deepEqual(client.events, ["ctx.write.success"]);
-
-  const missing = surrenderClient(
-    database,
-    { ...match(), status: "surrendered" },
-    "missing",
-  );
-  assert.equal(missing.connection.sendMatchUpdate("missing"), true);
-  await assertFails(missing.transactions[0]);
-  await new Promise(setImmediate);
-  assert.deepEqual(missing.events, ["ctx.write.fail"]);
-  assert.deepEqual(missing.reconnects, ["invite1"]);
-  assert.equal(
-    (await database.ref("players/host/matches/missing").get()).exists(),
-    false,
-  );
+test("status changes, removal, and replacement require the Worker capability for every browser identity", async () => {
+  const path = "players/host/matches/invite1";
+  for (const storedStatus of [undefined, "", "surrendered"]) {
+    const initial = match();
+    if (storedStatus === undefined) delete initial.status;
+    else initial.status = storedStatus;
+    await rules.withSecurityRulesDisabled(async (context) => {
+      await context.database().ref(path).set(initial);
+    });
+    const changed = storedStatus === "surrendered" ? "" : "surrendered";
+    const withoutStatus = { ...initial };
+    delete withoutStatus.status;
+    for (const context of [
+      rules.unauthenticatedContext(),
+      rules.authenticatedContext("guest", { profileId: "profile-guest" }),
+      rules.authenticatedContext("host", { profileId: "profile-host" }),
+      rules.authenticatedContext("alternate", { profileId: "profile-host" }),
+      rules.authenticatedContext("alternate"),
+      rules.authenticatedContext("admin", { admin: true }),
+    ]) {
+      const database = context.database();
+      await assertFails(database.ref(`${path}/status`).set(changed));
+      await assertFails(
+        database.ref(path).set({ ...initial, status: changed }),
+      );
+      await assertFails(database.ref().update({ [`${path}/status`]: changed }));
+      if (storedStatus !== undefined) {
+        await assertFails(database.ref(`${path}/status`).remove());
+        await assertFails(database.ref(path).set(withoutStatus));
+        await assertFails(database.ref().update({ [`${path}/status`]: null }));
+      }
+    }
+    for (const context of [
+      rules.authenticatedContext("host", { profileId: "profile-host" }),
+      rules.authenticatedContext("alternate", { profileId: "profile-host" }),
+      rules.authenticatedContext("alternate"),
+      rules.authenticatedContext("admin", { admin: true }),
+    ]) {
+      const reference = context.database().ref(path);
+      await assertSucceeds(
+        reference.set({ ...initial, fen: "next-fen", flatMovesString: "move" }),
+      );
+      const stored = (await reference.get()).val();
+      assert.equal(Object.hasOwn(stored, "status"), storedStatus !== undefined);
+      assert.equal(stored.status, storedStatus);
+    }
+  }
 });
 
-test("surrender queues behind a stale pending move and preserves its state and presentation seeds", async () => {
-  const database = rules
-    .authenticatedContext("host", {
-      profileId: "profile-host",
-    })
-    .database();
-  const reference = database.ref("players/host/matches/invite1");
-  const terminalSnapshots = [];
-  reference.on("value", (snapshot) => {
-    const value = snapshot.val();
-    if (value?.status === "surrendered") terminalSnapshots.push(value);
+test("scoped OAuth REST surrender retries an ETag conflict without losing a concurrent move or timer", async () => {
+  const path = "players/host/matches/invite1";
+  const browser = rules.authenticatedContext("host").database();
+  let conflictInjected = false;
+  const writeStatuses = [];
+  const client = scopedSurrenderClient({
+    fetcher: async (url, init) => {
+      assert.deepEqual(
+        JSON.parse(url.searchParams.get("auth_variable_override")),
+        {
+          uid: "host",
+          token: { workerSurrenderMatchId: "invite1" },
+        },
+      );
+      assert.equal(
+        new Headers(init.headers).get("Authorization"),
+        "Bearer owner",
+      );
+      if (init.method === "PUT" && !conflictInjected) {
+        conflictInjected = true;
+        await browser
+          .ref(path)
+          .update({ fen: "fen-moved", flatMovesString: "move" });
+        await rules.withSecurityRulesDisabled(async (context) => {
+          await context
+            .database()
+            .ref(`${path}/timer`)
+            .set("concurrent-server-timer");
+        });
+      }
+      const response = await fetch(url, init);
+      if (init.method === "PUT") writeStatuses.push(response.status);
+      return response;
+    },
   });
-  try {
-    await reference.once("value");
-    database.goOffline();
-    const move = runTransaction(
-      reference,
-      (current) =>
-        current
-          ? { ...current, fen: "fen-after-move", flatMovesString: "move" }
-          : null,
-      { applyLocally: false },
-    );
+  const result = await client.transactPath(path, surrender);
+  assert.equal(result.committed, true);
+  assert.deepEqual(writeStatuses, [412, 200]);
+  assert.deepEqual(result.value, {
+    ...match("fen-moved", "move"),
+    status: "surrendered",
+    timer: "concurrent-server-timer",
+  });
+  assert.deepEqual((await browser.ref(path).get()).val(), result.value);
+});
+
+test("scoped REST surrender enforces timer claims atomically at its conditional write", async () => {
+  const path = "players/host/matches/invite1";
+  const claimPath = "matchTimerClaims/invite1";
+  const now = Date.now();
+  for (const [claim, allowed] of [
+    [null, true],
+    [{ status: "pending", expiresAtMs: now + 60_000 }, false],
+    [{ status: "claimed", expiresAtMs: null }, false],
+    [{ status: "pending", expiresAtMs: now - 1_000 }, true],
+    [{ status: "pending" }, false],
+    [{ status: "pending", expiresAtMs: "expired" }, false],
+    [{ status: "other", expiresAtMs: now - 1_000 }, false],
+    ["malformed", false],
+  ]) {
     await rules.withSecurityRulesDisabled(async (context) => {
       await context
         .database()
-        .ref("players/host/matches/invite1/timer")
-        .set("concurrent-server-timer");
+        .ref()
+        .update({ [path]: match(), [claimPath]: null });
     });
-    const client = surrenderClient(database, {
-      ...match("fen-after-move", "move"),
-      status: "surrendered",
-      emojiId: 1001,
-      aura: "rainbow",
+    let injected = false;
+    const client = scopedSurrenderClient({
+      fetcher: async (url, init) => {
+        if (init.method === "PUT" && !injected) {
+          injected = true;
+          await rules.withSecurityRulesDisabled(async (context) => {
+            await context.database().ref(claimPath).set(claim);
+          });
+        }
+        return fetch(url, init);
+      },
     });
-    assert.equal(client.connection.sendMatchUpdate("invite1"), true);
-    database.goOnline();
-    const [moved, surrendered] = await Promise.all([
-      assertSucceeds(move),
-      assertSucceeds(client.transactions[0]),
-    ]);
-    assert.equal(moved.committed, true);
-    assert.equal(surrendered.committed, true);
-    const expected = {
-      ...match("fen-after-move", "move"),
-      status: "surrendered",
-      timer: "concurrent-server-timer",
-    };
-    await rules.withSecurityRulesDisabled(async (context) => {
-      assert.deepEqual(
-        (
-          await context.database().ref("players/host/matches/invite1").get()
-        ).val(),
-        expected,
+    if (allowed) {
+      const result = await client.transactPath(path, surrender);
+      assert.equal(result.committed, true);
+    } else {
+      await assert.rejects(
+        client.transactPath(path, surrender),
+        FirebaseRtdbPermissionDenied,
       );
-    });
-    assert.ok(terminalSnapshots.length > 0);
-    for (const snapshot of terminalSnapshots)
-      assert.deepEqual(snapshot, expected);
-    assert.deepEqual(client.reconnects, []);
-  } finally {
-    reference.off();
-    database.goOnline();
+    }
+    assert.equal(injected, true);
+    const stored = (
+      await rules.unauthenticatedContext().database().ref(path).get()
+    ).val();
+    assert.equal(stored.status, allowed ? "surrendered" : "");
   }
+});
+
+test("REST overrides require the matching actor and match capability", async () => {
+  const path = "players/host/matches/invite1";
+  const url = emulatorRestUrl(
+    `https://mons-link-default-rtdb.firebaseio.com/${path}.json`,
+  );
+  for (const auth of [
+    { uid: "host" },
+    { uid: "host", token: { admin: true } },
+    { uid: "host", token: { workerSurrenderMatchId: "different" } },
+    { uid: "guest", token: { workerSurrenderMatchId: "invite1" } },
+    {
+      uid: "alternate",
+      token: { profileId: "profile-host", workerSurrenderMatchId: "invite1" },
+    },
+  ]) {
+    url.searchParams.set("auth_variable_override", JSON.stringify(auth));
+    const response = await fetch(url, {
+      method: "PUT",
+      headers: {
+        Authorization: "Bearer owner",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ...match(), status: "surrendered" }),
+    });
+    assert.ok([401, 403].includes(response.status));
+    assert.match((await response.json()).error, /permission denied/i);
+  }
+  url.searchParams.set(
+    "auth_variable_override",
+    JSON.stringify({
+      uid: "host",
+      token: { workerSurrenderMatchId: "invite1" },
+    }),
+  );
+  url.searchParams.set(
+    "auth",
+    createMockUserToken(
+      { sub: "host", iat: Math.floor(Date.now() / 1_000) },
+      "demo-mons-link-rules",
+    ),
+  );
+  const forged = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...match(), status: "surrendered" }),
+  });
+  assert.ok([400, 401, 403].includes(forged.status));
+  await forged.arrayBuffer();
+  const client = scopedSurrenderClient();
+  assert.equal((await client.transactPath(path, surrender)).committed, true);
 });
 
 test("legacy missing presentation fields must remain absent through browser writes", async () => {
@@ -560,7 +632,7 @@ test("legacy missing presentation fields must remain absent through browser writ
           flatMovesString: "legacy-move",
         }),
       );
-      await assertSucceeds(reference.update({ status: "surrendered" }));
+      await assertFails(reference.update({ status: "surrendered" }));
       const stored = (await reference.once("value")).val();
       for (const field of missingFields)
         assert.equal(Object.hasOwn(stored, field), false);

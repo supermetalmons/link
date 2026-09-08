@@ -5,7 +5,9 @@ const test = require("node:test");
 const {
   SUNDAY_MONS_REMINDER_LEAD_MS,
   buildSundayMonsReminder,
+  getSundayMonsReminderLeadMs,
   isSundayMonsReminderEvent,
+  isSundayMonsReminderLeadMs,
 } = require("../functions/telegram/sundayMonsReminder");
 const {
   buildEventPrizeAnnouncement,
@@ -27,12 +29,12 @@ const EVENT = Object.freeze({
   startAtMs: 1_800_000_000_000,
 });
 
-test("renders the exact three-hour reminder with the shared custom emoji", () => {
+test("renders the exact four-hour reminder with the shared custom emoji", () => {
   const result = buildSundayMonsReminder({ eventId: PRIZE_EVENT_ID });
   assert.deepEqual(result, {
     eventId: PRIZE_EVENT_ID,
     eventUrl: "https://mons.link/event/z3oj52Iiime",
-    text: 'sunday mons in 3 hours!\n\nhttps://mons.link/event/z3oj52Iiime <tg-emoji emoji-id="5355002036817525409">&#11088;</tg-emoji>',
+    text: 'sunday mons in 4 hours!\n\nhttps://mons.link/event/z3oj52Iiime <tg-emoji emoji-id="5355002036817525409">&#11088;</tg-emoji>',
     parseMode: "HTML",
   });
   assert.ok(
@@ -40,7 +42,7 @@ test("renders the exact three-hour reminder with the shared custom emoji", () =>
   );
   assert.equal(result.text.includes("tg-spoiler"), false);
   assert.equal(Object.hasOwn(result, "imageUrls"), false);
-  assert.equal(SUNDAY_MONS_REMINDER_LEAD_MS, 10_800_000);
+  assert.equal(SUNDAY_MONS_REMINDER_LEAD_MS, 14_400_000);
 });
 
 test("renders events without catalog prizes and normalizes outer whitespace", () => {
@@ -54,6 +56,52 @@ test("renders events without catalog prizes and normalizes outer whitespace", ()
   );
   assert.equal(isSundayMonsReminderEvent(NO_PRIZES_EVENT_ID, EVENT), true);
   assert.equal(isEventPrizeAnnouncementEvent(NO_PRIZES_EVENT_ID, EVENT), false);
+});
+
+test("recognizes only supported reminder leads and their exact event message bases", () => {
+  for (const leadMs of [10_800_000, 14_400_000]) {
+    assert.equal(isSundayMonsReminderLeadMs(leadMs), true);
+    const { text } = buildSundayMonsReminder({
+      eventId: PRIZE_EVENT_ID,
+      leadMs,
+    });
+    assert.ok(text.startsWith(`sunday mons in ${leadMs / 3_600_000} hours!`));
+    for (const suffix of ["", "\n\nAlice Bob"]) {
+      assert.equal(
+        getSundayMonsReminderLeadMs(PRIZE_EVENT_ID, text + suffix),
+        leadMs,
+      );
+    }
+    for (const invalid of [
+      null,
+      {},
+      ` ${text}`,
+      `${text} extra`,
+      text + "\nAlice",
+    ]) {
+      assert.equal(getSundayMonsReminderLeadMs(PRIZE_EVENT_ID, invalid), null);
+    }
+    assert.equal(getSundayMonsReminderLeadMs(NO_PRIZES_EVENT_ID, text), null);
+    assert.equal(getSundayMonsReminderLeadMs("event/child", text), null);
+  }
+  for (const leadMs of [null, "10800000", 3_600_000, 0, NaN, Infinity]) {
+    assert.equal(isSundayMonsReminderLeadMs(leadMs), false);
+    assert.throws(
+      () => buildSundayMonsReminder({ eventId: PRIZE_EVENT_ID, leadMs }),
+      TypeError,
+    );
+  }
+  assert.equal(isSundayMonsReminderLeadMs(undefined), false);
+  assert.equal(
+    getSundayMonsReminderLeadMs(
+      PRIZE_EVENT_ID,
+      buildSundayMonsReminder({ eventId: PRIZE_EVENT_ID }).text.replace(
+        "in 4 hours!",
+        "in 2 hours!",
+      ),
+    ),
+    null,
+  );
 });
 
 test("uses the invitation participant threshold and exact shared formatting", () => {

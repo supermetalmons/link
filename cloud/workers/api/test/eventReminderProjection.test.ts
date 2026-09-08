@@ -26,7 +26,9 @@ const event = {
   telegramAnnouncements: { invite: false, matches: false, results: false },
 };
 
-function sentReceipt(): TelegramAnnouncementRecord {
+function sentReceipt(
+  leadMs: 10800000 | 14400000 = 14_400_000,
+): TelegramAnnouncementRecord {
   return {
     eventId: EVENT_ID,
     kind: "reminder",
@@ -37,7 +39,7 @@ function sentReceipt(): TelegramAnnouncementRecord {
     messageIds: [23001],
     payload: {
       chatId: "community-chat",
-      text: buildSundayMonsReminder({ eventId: EVENT_ID }).text,
+      text: buildSundayMonsReminder({ eventId: EVENT_ID, leadMs }).text,
       parseMode: "HTML",
       silent: false,
     },
@@ -217,16 +219,28 @@ test("only a valid confirmed reminder for the exact event and destination can be
 });
 
 test("adopts reminders already containing participants from their actual sent text", async () => {
-  const receipt = sentReceipt();
-  receipt.payload!.text += "\n\n1. ivan";
-  const state = telegramStore();
-  const result = (await adoptSundayMonsReminderMessage({
-    eventId: EVENT_ID,
-    receipt,
-    telegram: state.telegram,
-    chatId: "community-chat",
-  })) as Record<string, Record<string, unknown>>;
-  assert.equal(result.desired.text, receipt.payload!.text);
+  for (const leadMs of [10_800_000, 14_400_000] as const) {
+    for (const suffix of ["", "\n\n1. ivan"]) {
+      const receipt = sentReceipt(leadMs);
+      receipt.payload!.text += suffix;
+      const state = telegramStore();
+      const result = (await adoptSundayMonsReminderMessage({
+        eventId: EVENT_ID,
+        receipt,
+        telegram: state.telegram,
+        chatId: "community-chat",
+      })) as Record<string, Record<string, unknown>>;
+      assert.equal(result.desired.text, receipt.payload!.text);
+    }
+  }
+});
+
+test("refresh accepts a confirmed legacy three-hour reminder receipt", async () => {
+  const state = fixture();
+  state.setReceipt(sentReceipt(10_800_000));
+  assert.equal((await state.refresh()).status, "queued");
+  assert.equal(state.writes.length, 1);
+  assert.equal(state.queued.length, 1);
 });
 
 test("refresh persists one atomic generation and outbox update before dispatch, even after the send grace", async () => {

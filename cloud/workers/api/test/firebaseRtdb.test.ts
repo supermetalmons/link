@@ -4,6 +4,7 @@ import {
   createFirebaseRtdbClient,
   FIREBASE_RTDB_SERVER_TIMESTAMP,
   FirebaseRtdbFailure,
+  FirebaseRtdbPermissionDenied,
   firebaseRtdbIncrement,
   MAX_RTDB_BODY_BYTES,
 } from "../src/firebaseRtdb.ts";
@@ -316,4 +317,236 @@ test("fails closed on oversized and unavailable RTDB responses", async () => {
   });
   await assert.rejects(() => oversized.getPath("key"), FirebaseRtdbFailure);
   await assert.rejects(() => unavailable.getPath("key"), FirebaseRtdbFailure);
+});
+
+test("scoped surrender authenticates with gameplay OAuth and retries only the authorized match", async () => {
+  const { privateKey } = await crypto.subtle.generateKey(
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-256",
+    },
+    true,
+    ["sign", "verify"],
+  );
+  const pem = Buffer.from(await crypto.subtle.exportKey("pkcs8", privateKey));
+  const original = { status: "", fen: "first", flatMovesString: "", aura: "" };
+  const moved = { ...original, fen: "second", flatMovesString: "move" };
+  const responses = [
+    jsonResponse(original, 200, { ETag: '"first"' }),
+    jsonResponse(moved, 412),
+    jsonResponse(moved, 200, { ETag: '"second"' }),
+    jsonResponse({ ...moved, status: "surrendered" }),
+  ];
+  const requests: RequestInit[] = [];
+  const scope = { playerId: "actor", matchId: "invite-1" };
+  const client = createFirebaseRtdbClient(
+    {
+      ...env,
+      GAMEPLAY_SERVICE_ACCOUNT_EMAIL:
+        "gameplay@example.iam.gserviceaccount.com",
+      GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\n${pem.toString("base64")}\n-----END PRIVATE KEY-----`,
+    },
+    {
+      scopedMatchSurrender: scope,
+      fetcher: async (input, init) => {
+        const url = new URL(String(input));
+        if (url.hostname === "oauth2.googleapis.com") {
+          const assertion = new URLSearchParams(String(init?.body)).get(
+            "assertion",
+          )!;
+          const payload = JSON.parse(
+            Buffer.from(assertion.split(".")[1], "base64url").toString(),
+          );
+          assert.equal(payload.iss, "gameplay@example.iam.gserviceaccount.com");
+          assert.equal(url.search, "");
+          return jsonResponse({ access_token: "gameplay-oauth" });
+        }
+        assert.equal(url.pathname, "/players/actor/matches/invite-1.json");
+        assert.deepEqual(
+          JSON.parse(url.searchParams.get("auth_variable_override")!),
+          { uid: "actor", token: { workerSurrenderMatchId: "invite-1" } },
+        );
+        assert.equal(
+          new Headers(init?.headers).get("Authorization"),
+          "Bearer gameplay-oauth",
+        );
+        requests.push(init || {});
+        const response = responses.shift();
+        assert.ok(response);
+        return response;
+      },
+    },
+  );
+  scope.playerId = "other";
+  scope.matchId = "other";
+  const result = await client.transactPath(
+    "players/actor/matches/invite-1",
+    (current) => ({
+      value: { ...(current as Record<string, unknown>), status: "surrendered" },
+    }),
+  );
+  assert.equal(result.committed, true);
+  assert.deepEqual(result.value, { ...moved, status: "surrendered" });
+  assert.deepEqual(JSON.parse(String(requests[3].body)), result.value);
+  assert.equal(new Headers(requests[3].headers).get("If-Match"), '"second"');
+});
+
+test("scoped surrender rejects invalid scopes, escaped paths, root writes and other mutations", async () => {
+  const path = "players/actor/matches/invite-1";
+  let requests = 0;
+  const options = {
+    getAccessToken: async () => "gameplay-oauth",
+    fetcher: async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requests++;
+      assert.notEqual(init?.method, "PUT");
+      return jsonResponse(
+        { status: "", fen: "first", presentation: { aura: "" } },
+        200,
+        { ETag: '"first"' },
+      );
+    },
+  };
+  for (const scope of [
+    null,
+    { playerId: "", matchId: "invite-1" },
+    { playerId: "actor/other", matchId: "invite-1" },
+    { playerId: "actor", matchId: "" },
+    { playerId: "actor", matchId: " invite-1" },
+    { playerId: "actor", matchId: "invite/other" },
+  ]) {
+    assert.throws(
+      () =>
+        createFirebaseRtdbClient(env, {
+          ...options,
+          scopedMatchSurrender: scope as { playerId: string; matchId: string },
+        }),
+      /invalid-match-surrender-scope/,
+    );
+  }
+  const client = createFirebaseRtdbClient(env, {
+    ...options,
+    scopedMatchSurrender: { playerId: "actor", matchId: "invite-1" },
+  });
+  for (const otherPath of [
+    "",
+    `${path}/status`,
+    `/${path}`,
+    `${path}/`,
+    "players/other/matches/invite-1",
+  ]) {
+    await assert.rejects(client.getPath(otherPath), /outside-scope/);
+    await assert.rejects(
+      client.transactPath(otherPath, () => ({ value: "surrendered" })),
+      /outside-scope/,
+    );
+  }
+  await assert.rejects(
+    client.patchRoot({ [`${path}/status`]: "surrendered" }),
+    /multipath-write-forbidden/,
+  );
+  assert.equal(requests, 0);
+  for (const mutate of [
+    (current: Record<string, unknown>) => ({ ...current, status: "" }),
+    (current: Record<string, unknown>) => ({
+      ...current,
+      status: "surrendered",
+      fen: "other",
+    }),
+    () => null,
+    (current: Record<string, unknown>) => {
+      current.fen = "other";
+      return { ...current, status: "surrendered" };
+    },
+    (current: Record<string, unknown>) => {
+      (current.presentation as Record<string, unknown>).aura = "forged";
+      return { ...current, status: "surrendered" };
+    },
+  ]) {
+    await assert.rejects(
+      client.transactPath(path, (current) => ({
+        value: mutate(current as Record<string, unknown>),
+      })),
+      /must-only-change-status/,
+    );
+  }
+});
+
+test("scoped surrender does not create missing matches or alter its validated body in an audit hook", async () => {
+  const path = "players/actor/matches/invite-1";
+  const original = { fen: "first", flatMovesString: "", status: "" };
+  let missing = true;
+  const client = createFirebaseRtdbClient(env, {
+    scopedMatchSurrender: { playerId: "actor", matchId: "invite-1" },
+    getAccessToken: async () => "gameplay-oauth",
+    fetcher: async (_input, init) => {
+      if (init?.method === "PUT") {
+        const value = JSON.parse(String(init.body));
+        assert.deepEqual(value, { ...original, status: "surrendered" });
+        return jsonResponse(value);
+      }
+      return jsonResponse(missing ? null : original, 200, { ETag: '"one"' });
+    },
+  });
+  await assert.rejects(
+    client.transactPath(path, () => ({
+      value: { ...original, status: "surrendered" },
+    })),
+    /must-only-change-status/,
+  );
+  missing = false;
+  const result = await client.transactPath(
+    path,
+    (current) => ({
+      value: { ...(current as Record<string, unknown>), status: "surrendered" },
+    }),
+    undefined,
+    async ({ proposed }) => {
+      (proposed as Record<string, unknown>).fen = "forged";
+    },
+  );
+  assert.deepEqual(result.value, { ...original, status: "surrendered" });
+});
+
+test("scoped surrender distinguishes rules denial from expired credentials and provider failures", async () => {
+  for (const [status, error, denied] of [
+    [401, "Permission denied", true],
+    [403, "Permission denied.", true],
+    [401, "Invalid auth token", false],
+    [403, "Service account access denied", false],
+    [503, "Permission denied", false],
+  ] as const) {
+    let reads = 0;
+    const client = createFirebaseRtdbClient(env, {
+      scopedMatchSurrender: { playerId: "actor", matchId: "invite-1" },
+      getAccessToken: async () => "gameplay-oauth",
+      fetcher: async (_input, init) => {
+        if (init?.method !== "PUT" && reads++ === 0) {
+          return jsonResponse({ fen: "first", status: "" }, 200, {
+            ETag: '"one"',
+          });
+        }
+        return jsonResponse({ error }, status);
+      },
+    });
+    const check = (failure: unknown) => {
+      assert.ok(failure instanceof FirebaseRtdbFailure);
+      assert.equal(failure instanceof FirebaseRtdbPermissionDenied, denied);
+      return true;
+    };
+    await assert.rejects(
+      client.transactPath("players/actor/matches/invite-1", (current) => ({
+        value: {
+          ...(current as Record<string, unknown>),
+          status: "surrendered",
+        },
+      })),
+      check,
+    );
+    await assert.rejects(
+      client.getPath("players/actor/matches/invite-1"),
+      check,
+    );
+  }
 });

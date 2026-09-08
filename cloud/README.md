@@ -193,10 +193,12 @@ npm run recover:telegram -- --message-key <key> --action confirm-send-absent --b
 
 Use `confirm-send-applied --message-id <telegram-message-id>` when Telegram created the message, or `abandon` to retain the audit record and stop delivery.
 
-Sunday Mons reminders send automatically three hours before the scheduled event start. Only scheduled events with `isSundayMons === true` and a valid start time qualify; prizes are not required. The standalone HTML message goes to the community destination with notifications enabled and link previews disabled:
+The reminder timing update was released on September 8, 2026 in API version `7a94cfb8-550d-45c1-9ab1-4399ea9b6e11`. Use this or a later compatible version for rollback once four-hour jobs exist; it accepts both stored three-hour and four-hour schedules. Validation and release evidence is retained in `/private/tmp/mons-reminder-release-x51eqD`.
+
+New Sunday Mons reminders send automatically four hours before the scheduled event start. Previously queued three-hour reminders retain their original schedule, and participant updates preserve the heading of already-sent messages. Only scheduled events with `isSundayMons === true` and a valid start time qualify; prizes are not required. The standalone HTML message goes to the community destination with notifications enabled and link previews disabled:
 
 ```text
-sunday mons in 3 hours!
+sunday mons in 4 hours!
 
 https://mons.link/event/{eventId} <tg-emoji emoji-id="5355002036817525409">&#11088;</tg-emoji>
 ```

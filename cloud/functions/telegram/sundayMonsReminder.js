@@ -7,7 +7,10 @@ const {
   getTelegramEmojiTag,
 } = require("../telegramDisplay");
 
-const SUNDAY_MONS_REMINDER_LEAD_MS = 10_800_000;
+const SUNDAY_MONS_REMINDER_LEAD_MS = 14_400_000;
+
+const isSundayMonsReminderLeadMs = (value) =>
+  value === 10_800_000 || value === SUNDAY_MONS_REMINDER_LEAD_MS;
 
 const normalizeEventId = (value) => {
   const eventId = normalizeFirebaseKey(value);
@@ -39,26 +42,46 @@ const buildSundayMonsReminder = (input) => {
   const keys = Object.keys(input);
   if (
     !Object.hasOwn(input, "eventId") ||
-    keys.some((key) => key !== "eventId" && key !== "eventData")
+    keys.some(
+      (key) => key !== "eventId" && key !== "eventData" && key !== "leadMs",
+    )
   ) {
-    throw new TypeError("only eventId and eventData are supported arguments");
+    throw new TypeError(
+      "only eventId, eventData and leadMs are supported arguments",
+    );
   }
   const eventId = normalizeEventId(input.eventId);
   if (!eventId) {
     throw new TypeError("eventId must be a valid event key");
+  }
+  const leadMs =
+    input.leadMs === undefined ? SUNDAY_MONS_REMINDER_LEAD_MS : input.leadMs;
+  if (!isSundayMonsReminderLeadMs(leadMs)) {
+    throw new TypeError("leadMs must be a supported reminder lead time");
   }
   const eventUrl = `https://mons.link/event/${encodeURIComponent(eventId)}`;
   const participantLine = renderParticipantLine(input.eventData);
   return {
     eventId,
     eventUrl,
-    text: `sunday mons in 3 hours!\n\n${eventUrl} ${getTelegramEmojiTag(AUTOMATCH_WAITING_EMOJI_ID)}${participantLine ? `\n\n${participantLine}` : ""}`,
+    text: `sunday mons in ${leadMs / 3_600_000} hours!\n\n${eventUrl} ${getTelegramEmojiTag(AUTOMATCH_WAITING_EMOJI_ID)}${participantLine ? `\n\n${participantLine}` : ""}`,
     parseMode: "HTML",
   };
+};
+
+const getSundayMonsReminderLeadMs = (eventId, text) => {
+  if (!normalizeEventId(eventId) || typeof text !== "string") return null;
+  for (const leadMs of [10_800_000, SUNDAY_MONS_REMINDER_LEAD_MS]) {
+    const base = buildSundayMonsReminder({ eventId, leadMs }).text;
+    if (text === base || text.startsWith(`${base}\n\n`)) return leadMs;
+  }
+  return null;
 };
 
 module.exports = {
   SUNDAY_MONS_REMINDER_LEAD_MS,
   buildSundayMonsReminder,
+  getSundayMonsReminderLeadMs,
+  isSundayMonsReminderLeadMs,
   isSundayMonsReminderEvent,
 };

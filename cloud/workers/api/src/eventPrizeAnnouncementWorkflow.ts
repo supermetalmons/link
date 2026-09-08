@@ -33,19 +33,28 @@ export async function runEventAnnouncementWorkflow(
 ): Promise<EventPrizeAnnouncementDeliveryResult> {
   const params = await parseEventProgressParams(event.payload);
   const kind = getEventAnnouncementKind(params?.reason);
+  let leadMs: number = kind ? EVENT_ANNOUNCEMENT_SPECS[kind].leadMs : 0;
+  if (
+    params &&
+    kind === "reminder" &&
+    params.runAtMs !== null &&
+    params.sourceKey ===
+      `reminder:${params.eventId}:${params.runAtMs + 10_800_000}`
+  ) {
+    leadMs = 10_800_000;
+  }
   if (
     !params ||
     !kind ||
     params.runAtMs === null ||
-    params.sourceKey !==
-      `${kind}:${params.eventId}:${params.runAtMs + EVENT_ANNOUNCEMENT_SPECS[kind].leadMs}`
+    params.sourceKey !== `${kind}:${params.eventId}:${params.runAtMs + leadMs}`
   ) {
     throw new InvalidEventProgressPayloadError(
       "invalid-event-announcement-payload",
     );
   }
   const now = dependencies.now || Date.now;
-  const { leadMs, stepName } = EVENT_ANNOUNCEMENT_SPECS[kind];
+  const { stepName } = EVENT_ANNOUNCEMENT_SPECS[kind];
   const runAtMs = params.runAtMs;
   const deadline = runAtMs + EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS;
   await step.sleepUntil(`wait for ${stepName}`, runAtMs);

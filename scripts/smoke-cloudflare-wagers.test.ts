@@ -241,6 +241,11 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
         });
       }
       if (url.hostname === "mons-link-default-rtdb.firebaseio.com") {
+        assert.equal(
+          method,
+          "GET",
+          "Surrender never writes directly to Firebase",
+        );
         const id = fixture.invites.settle.id;
         const role = ROLES.find(
           (value) =>
@@ -270,17 +275,9 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
                 : "",
             flatMovesString: "",
             timer: "",
+            sessionCreation: "a".repeat(64),
           });
         }
-        assert.equal(role, "guest");
-        assert.equal(method, "PUT");
-        assert.equal(
-          url.pathname,
-          `/players/guest-smoke/matches/${id}/status.json`,
-        );
-        assert.equal(body, "surrendered");
-        surrendered = true;
-        return response("surrendered");
       }
       assert.equal(url.origin, API_ROOT);
       assert.equal(headers.get("Origin"), "https://mons.link");
@@ -412,6 +409,23 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
           guestId: fixture.actors.guest.uid,
           matchId: inviteId,
           joined: true,
+        });
+      }
+      if (url.pathname === "/matches/surrender") {
+        assert.equal(method, "POST");
+        assert.equal(role, "guest");
+        assert.equal(inviteId, fixture.invites.settle.id);
+        assert.deepEqual(body, {
+          inviteId,
+          matchId: inviteId,
+          playerId: fixture.actors.guest.uid,
+        });
+        surrendered = true;
+        return response({
+          ok: true,
+          inviteId,
+          matchId: inviteId,
+          actorUid: fixture.actors.guest.uid,
         });
       }
       assert.ok(url.pathname.startsWith("/wagers/"));
@@ -850,7 +864,12 @@ test("active lifecycle uses separate proposal lineages, verifies broadcasts and 
   );
   assert.equal(
     mutations.filter((request) => request.method === "PUT").length,
-    1,
+    0,
+  );
+  assert.equal(
+    mutations.filter((request) => request.url.pathname === "/matches/surrender")
+      .length,
+    2,
   );
   assert.equal(
     mutations.filter(
@@ -862,7 +881,7 @@ test("active lifecycle uses separate proposal lineages, verifies broadcasts and 
     mutations.every(
       (request) =>
         request.url.pathname.startsWith("/wagers/") ||
-        request.url.hostname === "mons-link-default-rtdb.firebaseio.com",
+        request.url.pathname === "/matches/surrender",
     ),
   );
   const before = mutations.length;
@@ -881,6 +900,93 @@ test("active lifecycle uses separate proposal lineages, verifies broadcasts and 
       ),
   );
   assert.ok(before > 0);
+});
+
+test("an uncertain API surrender resumes the same fixture and never writes directly to Firebase", async () => {
+  const h = model();
+  const originalFetch = h.dependencies.fetch;
+  let uncertain = false;
+  h.dependencies.fetch = async (input, init) => {
+    const result = await originalFetch(input, init);
+    if (
+      new URL(String(input)).pathname === "/matches/surrender" &&
+      !uncertain
+    ) {
+      uncertain = true;
+      throw new Error("lost surrender response");
+    }
+    return result;
+  };
+  await assert.rejects(
+    activeLifecycle(h.fixture, () => undefined, h.dependencies),
+    /request failed/,
+  );
+  assert.ok(!h.fixture.steps.includes("settle:surrender"));
+  assert.equal(h.transfers, 0);
+  await activeLifecycle(h.fixture, () => undefined, h.dependencies);
+  assert.equal(h.fixture.stage, "complete");
+  assert.equal(h.transfers, 1);
+  const surrenders = h.requests.filter(
+    (request) => request.url.pathname === "/matches/surrender",
+  );
+  assert.equal(surrenders.length, 3);
+  assert.ok(
+    surrenders.every(
+      (request) =>
+        JSON.stringify(request.body) === JSON.stringify(surrenders[0].body),
+    ),
+  );
+  assert.ok(
+    h.requests.every(
+      (request) =>
+        request.url.hostname !== "mons-link-default-rtdb.firebaseio.com" ||
+        request.method === "GET",
+    ),
+  );
+});
+
+test("surrender validates the API actor before recording the step or resolving the wager", async () => {
+  const h = model();
+  const originalFetch = h.dependencies.fetch;
+  h.dependencies.fetch = async (input, init) => {
+    const result = await originalFetch(input, init);
+    if (new URL(String(input)).pathname === "/matches/surrender") {
+      const payload = await result.json();
+      return response({ ...payload, actorUid: h.fixture.actors.host.uid });
+    }
+    return result;
+  };
+  await assert.rejects(
+    activeLifecycle(h.fixture, () => undefined, h.dependencies),
+    /guest surrender\/replay failed/,
+  );
+  assert.ok(!h.fixture.steps.includes("settle:surrender"));
+  assert.equal(h.transfers, 0);
+});
+
+test("surrender checks persisted match fields including the creation marker before resolving the wager", async () => {
+  const h = model();
+  const originalFetch = h.dependencies.fetch;
+  let surrendered = false;
+  h.dependencies.fetch = async (input, init) => {
+    const result = await originalFetch(input, init);
+    const url = new URL(String(input));
+    if (url.pathname === "/matches/surrender") surrendered = true;
+    if (
+      url.hostname === "mons-link-default-rtdb.firebaseio.com" &&
+      surrendered
+    ) {
+      const payload = await result.json();
+      return response({ ...payload, sessionCreation: "b".repeat(64) });
+    }
+    return result;
+  };
+  await assert.rejects(
+    activeLifecycle(h.fixture, () => undefined, h.dependencies),
+    /surrender preserved match state did not match/,
+  );
+  assert.ok(!h.fixture.steps.includes("settle:surrender"));
+  assert.equal(h.transfers, 0);
 });
 
 test("an ambiguous settlement preserves the fixture and resumes only its idempotent resolution", async () => {

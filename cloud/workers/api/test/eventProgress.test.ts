@@ -223,7 +223,7 @@ test("both announcements survive slow start dispatch and all three jobs can fail
     const event = {
       status: "scheduled",
       isSundayMons: true,
-      startAtMs: targetMs + 10_800_000,
+      startAtMs: targetMs + 14_400_000,
     };
     let nowMs = targetMs - 1_000;
     let failedId: string | undefined;
