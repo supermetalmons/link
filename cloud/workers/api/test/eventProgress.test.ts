@@ -143,6 +143,74 @@ test("scheduled-event sweep discovers both announcements and retains their first
   assert.equal(creates, 6);
 });
 
+test("a failed concurrent dispatch keeps its sweep admitted until every other provider call settles", async () => {
+  const first = await buildEventProgressPlan(
+    { eventId: "event-1", reason: "test", sourceKey: "first" },
+    100,
+  );
+  const second = await buildEventProgressPlan(
+    { eventId: "event-1", reason: "test", sourceKey: "second" },
+    100,
+  );
+  const delayed = Promise.withResolvers<void>();
+  const started = Promise.withResolvers<void>();
+  const failed = Promise.withResolvers<void>();
+  const environment = workflowEnvironment();
+  const originalGet = environment.EVENT_PROGRESS_WORKFLOW.get;
+  environment.EVENT_PROGRESS_WORKFLOW.createBatch = async (items) => {
+    if (items[0].id === first.workflowId)
+      throw new Error("first-dispatch-failed");
+    started.resolve();
+    await delayed.promise;
+    return [];
+  };
+  environment.EVENT_PROGRESS_WORKFLOW.get = async (id) => {
+    if (id === first.workflowId) {
+      failed.resolve();
+      throw new Error("first-workflow-missing");
+    }
+    return originalGet(id);
+  };
+  let released = false;
+  const originalPrepare = environment.EVENT_DB.prepare;
+  environment.EVENT_DB = {
+    batch: environment.EVENT_DB.batch,
+    dump: environment.EVENT_DB.dump,
+    exec: environment.EVENT_DB.exec,
+    withSession: environment.EVENT_DB.withSession,
+    prepare: (query) => {
+      if (query.includes("DELETE FROM event_write_admissions")) released = true;
+      return originalPrepare(query);
+    },
+  };
+  const repository = sweepRepository({
+    [first.outboxId]: first.outbox,
+    [second.outboxId]: second.outbox,
+  });
+  let completed = false;
+  const sweep = sweepEventProgress(environment, {
+    repository: repository.value,
+    ratingRepository: null,
+  }).then(
+    () => {
+      completed = true;
+      return null;
+    },
+    (error: unknown) => {
+      completed = true;
+      return error;
+    },
+  );
+  await Promise.all([started.promise, failed.promise]);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(completed, false);
+  assert.equal(released, false);
+  delayed.resolve();
+  const error = await sweep;
+  assert(error instanceof Error && error.message === "first-dispatch-failed");
+  assert.equal(released, true);
+});
+
 test("both announcements survive slow start dispatch and all three jobs can fail independently", async () => {
   for (const scenario of [
     "slow-start",

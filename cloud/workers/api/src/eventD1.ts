@@ -47,16 +47,35 @@ export type ProfileEventPrizeSnapshot = {
   revision: number;
 };
 
-export type EventTransitionIntent = {
+type EventTransitionIntentBase = {
   canonicalUpdates: Record<string, unknown>;
   createdAtMs: number;
   eventId: string;
   expectedRevision: number;
   rtdbEffects: Record<string, unknown>;
-  schemaVersion: 1;
   transitionId: string;
   updatedAtMs: number;
 };
+
+export type EventInviteSourceMutation = {
+  current: {
+    inviteId: string;
+    value: Record<string, unknown> | null;
+    revision: number;
+  };
+  value: Record<string, unknown>;
+};
+
+export type EventTransitionIntent = EventTransitionIntentBase &
+  (
+    | { schemaVersion: 1 }
+    | {
+        schemaVersion: 2;
+        sourceEpoch: number;
+        payloadDigest: string;
+        inviteMutations: EventInviteSourceMutation[];
+      }
+  );
 
 export type EventOutboxRecord = Record<string, unknown>;
 
@@ -1864,7 +1883,7 @@ function validateTransitionIntent(
   value: EventTransitionIntent,
 ): EventTransitionIntent {
   if (
-    value.schemaVersion !== 1 ||
+    (value.schemaVersion !== 1 && value.schemaVersion !== 2) ||
     !exactKey(value.transitionId) ||
     !exactKey(value.eventId) ||
     !Number.isSafeInteger(value.expectedRevision) ||
@@ -1876,6 +1895,32 @@ function validateTransitionIntent(
     !Number.isSafeInteger(value.updatedAtMs) ||
     value.updatedAtMs < value.createdAtMs ||
     !isJsonValue(value)
+  ) {
+    throw new EventD1Failure("invalid-event-transition");
+  }
+  if (
+    value.schemaVersion === 2 &&
+    (!Number.isSafeInteger(value.sourceEpoch) ||
+      value.sourceEpoch < 1 ||
+      typeof value.payloadDigest !== "string" ||
+      !/^[a-f0-9]{64}$/.test(value.payloadDigest) ||
+      !Array.isArray(value.inviteMutations) ||
+      value.inviteMutations.length > 32 ||
+      value.inviteMutations.some(
+        (mutation) =>
+          !isRecord(mutation) ||
+          !isRecord(mutation.current) ||
+          !exactKey(mutation.current.inviteId) ||
+          !Number.isSafeInteger(mutation.current.revision) ||
+          mutation.current.revision < 0 ||
+          (mutation.current.value === null
+            ? mutation.current.revision !== 0
+            : !isRecord(mutation.current.value) ||
+              mutation.current.revision < 1) ||
+          !isRecord(mutation.value),
+      ) ||
+      new Set(value.inviteMutations.map(({ current }) => current.inviteId))
+        .size !== value.inviteMutations.length)
   ) {
     throw new EventD1Failure("invalid-event-transition");
   }

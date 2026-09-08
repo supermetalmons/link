@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { Readable, type Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { pathToFileURL } from "node:url";
+import { assertFirebaseInviteSourceAvailable } from "./invite-source-retirement.ts";
 import {
   canonicalJson,
   createFirebaseTokenProvider,
@@ -294,7 +295,7 @@ function openSpool(directory: string): { db: DatabaseSync; close(): void } {
 async function inventory(
   directory: string,
   path: string,
-  dependencies: Dependencies,
+  dependencies: Pick<Dependencies, "streamKeys">,
 ): Promise<Inventory> {
   const prefix = `keys-${digest(path)}`;
   const manifestFile = `${prefix}-complete.json`;
@@ -1115,6 +1116,8 @@ async function manageLoginMatchDiscovery(
   args: Arguments,
   dependencies: Dependencies,
 ): Promise<void> {
+  if (args.operation !== "status")
+    await assertFirebaseInviteSourceAvailable(dependencies.run);
   if (args.operation === "status") {
     const control = await readControl(dependencies);
     const counts = await dependencies.run(

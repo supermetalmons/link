@@ -575,17 +575,15 @@ export async function handleGameplayRoute(
     };
     const defaultEnqueueEventProgress = async (plan: EventProgressPlan) => {
       ctx.waitUntil(
-        ensureEventProgressWorkflow(env.EVENT_PROGRESS_WORKFLOW, plan).catch(
-          () => {
-            console.error(
-              JSON.stringify({
-                event: "event_progress_enqueue_failed",
-                eventId: plan.params.eventId,
-                sourceKey: plan.params.sourceKey,
-              }),
-            );
-          },
-        ),
+        ensureEventProgressWorkflow(env, plan).catch(() => {
+          console.error(
+            JSON.stringify({
+              event: "event_progress_enqueue_failed",
+              eventId: plan.params.eventId,
+              sourceKey: plan.params.sourceKey,
+            }),
+          );
+        }),
       );
     };
     const defaultEnqueueTelegramProjection = async (

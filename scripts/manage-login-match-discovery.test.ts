@@ -26,6 +26,19 @@ import { matchDiscoverySortKey } from "../cloud/functions/shared/login-match-dis
 
 const VERSION = "11111111-1111-4111-8111-111111111111";
 
+test("legacy discovery migration cannot scan retained Firebase invites after source activation", async (t) => {
+  const f = fixture(t);
+  f.db.exec(
+    "CREATE TABLE invite_source_control (singleton INTEGER, backend TEXT); INSERT INTO invite_source_control VALUES (1, 'd1');",
+  );
+  await assert.rejects(
+    f.command("preflight"),
+    /Firebase invite-source scans are retired/,
+  );
+  assert.equal(f.reads.length, 0);
+  await manageLoginMatchDiscovery({ operation: "status" }, f.dependencies);
+});
+
 function fixture(t: { after(callback: () => void): void }) {
   const directory = mkdtempSync(resolve(tmpdir(), "mons-discovery-test-"));
   const db = new DatabaseSync(":memory:");

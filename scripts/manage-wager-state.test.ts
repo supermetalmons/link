@@ -37,6 +37,19 @@ import {
 const VERSION = "ed41f283-8a34-4674-8bf4-a4774b1d0196";
 const NOW = 2_000_000;
 
+test("legacy wager migration rejects retained Firebase invite source after activation", async (t) => {
+  const h = harness(t);
+  h.db.exec(
+    "CREATE TABLE invite_source_control (singleton INTEGER, backend TEXT); INSERT INTO invite_source_control VALUES (1, 'd1');",
+  );
+  await assert.rejects(
+    h.perform("preflight"),
+    /Firebase invite-source scans are retired/,
+  );
+  assert.equal(h.sourceReads.length, 0);
+  await h.perform("status");
+});
+
 function sourceFixture(): Record<string, Record<string, unknown>> {
   return {
     a: {

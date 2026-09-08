@@ -273,40 +273,45 @@ describe("durable invite metadata", () => {
   });
 
   it("returns notifications while a source read is pending and preserves their immediate successor alarm", async () => {
-    const { room, inviteId, source } = await fixture();
-    const client = acceptSocket(await metadataResponse(room, inviteId));
-    await client.read();
-    const nextAlarm = await runInDurableObject(
-      room,
-      async (instance, state) => {
-        const began = deferred();
-        const release = deferred();
-        source.read = async () => {
-          const captured = source.value;
-          began.resolve();
-          await release.promise;
-          return captured;
-        };
-        const reading = instance.alarm();
-        await began.promise;
-        source.value = { ...invite, hostRematches: "1" };
-        await instance.notifyMetadataChanged(inviteId);
-        const scheduled = await state.storage.getAlarm();
-        source.read = undefined;
-        release.resolve();
-        await reading;
-        return scheduled;
-      },
-    );
-    expect(nextAlarm).not.toBeNull();
-    expect(nextAlarm!).toBeLessThanOrEqual(Date.now());
-    expect(JSON.parse(await client.read()).snapshot.hostRematches).toBe("1");
-    await room.readMetadata(inviteId);
-    expect(
-      await runInDurableObject(room, (_instance, state) =>
-        state.storage.getAlarm(),
-      ),
-    ).not.toBeNull();
+    const now = Date.now() + 24 * 60 * 60 * 1_000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const { room, inviteId, source } = await fixture();
+      const client = acceptSocket(await metadataResponse(room, inviteId));
+      await client.read();
+      const nextAlarm = await runInDurableObject(
+        room,
+        async (instance, state) => {
+          const began = deferred();
+          const release = deferred();
+          source.read = async () => {
+            const captured = source.value;
+            began.resolve();
+            await release.promise;
+            return captured;
+          };
+          const reading = instance.alarm();
+          await began.promise;
+          source.value = { ...invite, hostRematches: "1" };
+          await instance.notifyMetadataChanged(inviteId);
+          const scheduled = await state.storage.getAlarm();
+          source.read = undefined;
+          release.resolve();
+          await reading;
+          return scheduled;
+        },
+      );
+      expect(nextAlarm).toBe(now);
+      expect(JSON.parse(await client.read()).snapshot.hostRematches).toBe("1");
+      expect(await runDurableObjectAlarm(room)).toBe(true);
+      expect(
+        await runInDurableObject(room, (_instance, state) =>
+          state.storage.getAlarm(),
+        ),
+      ).toBe(now + INVITE_METADATA_REFRESH_MS);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("keeps recovery scheduled across upstream failures, then stops after the final metadata subscriber closes", async () => {

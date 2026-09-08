@@ -20,6 +20,12 @@ import { requireProfileOwnershipSnapshot } from "./profileOwnership.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
 import { createEventMutationRepository } from "./eventMutationRepository.ts";
 import { scheduleEventAnnouncements } from "./eventPrizeAnnouncementSchedule.ts";
+import {
+  acquireEventWriteAdmission,
+  EventWritesDisabled,
+  releaseEventWriteAdmission,
+  type EventWriteAdmission,
+} from "./eventD1.ts";
 
 const EVENT_PROGRESS_OUTBOX_ROOT = "eventProgressOutbox";
 const EVENT_PROGRESS_OUTBOX_DEAD_ROOT = "eventProgressOutboxDead";
@@ -316,7 +322,40 @@ export async function parseEventProgressParams(
   return plan?.params || null;
 }
 
-export async function ensureEventProgressWorkflow(
+async function withEventProgressDispatchAdmission(
+  db: D1Database,
+  work: () => Promise<void>,
+): Promise<void> {
+  let admission: EventWriteAdmission;
+  try {
+    admission = await acquireEventWriteAdmission(db);
+  } catch (error) {
+    if (error instanceof EventWritesDisabled) return;
+    throw error;
+  }
+  try {
+    await work();
+  } finally {
+    let failureKind: string | null = null;
+    try {
+      if (!(await releaseEventWriteAdmission(db, admission))) {
+        failureKind = "unconfirmed";
+      }
+    } catch (error) {
+      failureKind = error instanceof Error ? error.name : typeof error;
+    }
+    if (failureKind) {
+      console.error(
+        JSON.stringify({
+          event: "event_progress_dispatch_admission_release_failed",
+          kind: failureKind,
+        }),
+      );
+    }
+  }
+}
+
+async function ensureEventProgressWorkflowInstance(
   workflow: Workflow<EventProgressWorkflowParams>,
   plan: EventProgressPlan,
 ): Promise<void> {
@@ -335,6 +374,15 @@ export async function ensureEventProgressWorkflow(
       throw error;
     }
   }
+}
+
+export async function ensureEventProgressWorkflow(
+  env: Pick<Env, "EVENT_DB" | "EVENT_PROGRESS_WORKFLOW">,
+  plan: EventProgressPlan,
+): Promise<void> {
+  await withEventProgressDispatchAdmission(env.EVENT_DB, () =>
+    ensureEventProgressWorkflowInstance(env.EVENT_PROGRESS_WORKFLOW, plan),
+  );
 }
 
 async function removeOutbox(
@@ -368,12 +416,15 @@ async function dispatchOutboxPlan(
   plan: EventProgressPlan,
   now: () => number,
 ): Promise<void> {
-  await ensureEventProgressWorkflow(env.EVENT_PROGRESS_WORKFLOW, plan);
+  await ensureEventProgressWorkflowInstance(env.EVENT_PROGRESS_WORKFLOW, plan);
   const instance = await env.EVENT_PROGRESS_WORKFLOW.get(plan.workflowId);
   const status = await instance.status();
   if (status.status === "errored" || status.status === "terminated") {
     await instance.delete();
-    await ensureEventProgressWorkflow(env.EVENT_PROGRESS_WORKFLOW, plan);
+    await ensureEventProgressWorkflowInstance(
+      env.EVENT_PROGRESS_WORKFLOW,
+      plan,
+    );
     return;
   }
   if (status.status === "complete") {
@@ -401,7 +452,9 @@ async function forEachConcurrent<T>(
       }
     },
   );
-  await Promise.all(runners);
+  const results = await Promise.allSettled(runners);
+  const failure = results.find((result) => result.status === "rejected");
+  if (failure?.status === "rejected") throw failure.reason;
 }
 
 async function reconcileScheduledEvents(
@@ -541,6 +594,15 @@ function rejectedReasons(results: PromiseSettledResult<void>[]): unknown[] {
 export async function sweepEventProgress(
   env: Env,
   dependencies: EventProgressSweepDependencies = {},
+): Promise<void> {
+  await withEventProgressDispatchAdmission(env.EVENT_DB, () =>
+    sweepAdmittedEventProgress(env, dependencies),
+  );
+}
+
+async function sweepAdmittedEventProgress(
+  env: Env,
+  dependencies: EventProgressSweepDependencies,
 ): Promise<void> {
   const repository =
     dependencies.repository || createEventGameplayRepository(env);

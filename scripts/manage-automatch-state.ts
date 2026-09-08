@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { assertFirebaseInviteSourceAvailable } from "./invite-source-retirement.ts";
 import {
   canonicalJson,
   compareFirebaseKeys,
@@ -143,6 +144,7 @@ type AdmissionRow = {
   completedAtMs: number | null;
 };
 type Dependencies = {
+  assertInviteSourceAvailable?(): Promise<void>;
   readAdmissions(admissionId?: string): Promise<AdmissionRow[]>;
   readAdmissionPath(admission: AdmissionRow, path: string): Promise<unknown>;
   settleAdmission(admission: AdmissionRow): Promise<void>;
@@ -396,6 +398,8 @@ async function reconcileAdmission(
   if (!evidence || evidence.schemaVersion !== 1)
     throw new Error("invalid admission recovery evidence");
   const admission = parseAdmission(evidence.admission);
+  if (admission.backend === "rtdb")
+    await dependencies.assertInviteSourceAvailable?.();
   if (digest(admission) !== evidence.admissionDigest)
     throw new Error("admission evidence digest mismatch");
   const currentRows = await dependencies.readAdmissions(admission.admissionId);
@@ -415,7 +419,7 @@ async function reconcileAdmission(
       "admission changed after inspection; recover only the current exact proof",
     );
   const safePhase =
-    admission.phase === "prepared" ||
+    (admission.backend === "rtdb" && admission.phase === "prepared") ||
     (admission.phase === "completed" &&
       admission.completedAtMs !== null &&
       admission.completedAtMs >= admission.createdAtMs &&
@@ -431,13 +435,16 @@ async function reconcileAdmission(
         "uncertain admission requires finished-request evidence; age or a timeout is not completion evidence",
       );
     const expected = admissionTargetPaths(admission);
+    const noSourceEffects = evidence.noSourceEffects === true;
     if (
+      (evidence.noSourceEffects !== undefined &&
+        typeof evidence.noSourceEffects !== "boolean") ||
       !Array.isArray(evidence.sources) ||
-      evidence.sources.length < 1 ||
+      (evidence.sources.length === 0) !== noSourceEffects ||
       evidence.sources.length > 10000
     )
       throw new Error(
-        "uncertain admission requires a complete bounded target snapshot",
+        "uncertain admission requires a complete bounded target snapshot or explicit noSourceEffects with an empty source list",
       );
     const supplied = evidence.sources.map((value) => {
       const source = record(value);
@@ -453,7 +460,7 @@ async function reconcileAdmission(
     const paths = supplied.map((source) => source.path);
     if (new Set(paths).size !== paths.length)
       throw new Error("duplicate admission source evidence");
-    if (expected === null) {
+    if (expected === null || noSourceEffects) {
       const scope = record(evidence.scopeEvidence);
       if (
         !scope ||
@@ -463,9 +470,10 @@ async function reconcileAdmission(
         !scope.explanation.trim()
       )
         throw new Error(
-          "legacy admission without durable targets requires an audited complete request scope",
+          "admission without durable targets or source effects requires an audited complete request scope",
         );
-    } else if (expected.some((path) => !paths.includes(path)))
+    }
+    if (expected?.some((path) => !paths.includes(path)))
       throw new Error(
         "admission evidence omits a recorded write target or operation receipt",
       );
@@ -974,6 +982,8 @@ async function manageAutomatchState(
     const directory = privateDirectory(args.directory!);
     const admissions = await dependencies.readAdmissions();
     for (const admission of admissions) {
+      if (admission.backend === "rtdb")
+        await dependencies.assertInviteSourceAvailable?.();
       const paths = admissionTargetPaths(admission);
       const sources =
         paths === null
@@ -986,6 +996,7 @@ async function manageAutomatchState(
         requestFinishedAtMs: null,
         completionEvidence: null,
         scopeEvidence: null,
+        noSourceEffects: false,
         sources,
       };
       const path = resolve(directory, `admission-${digest(admission)}.json`);
@@ -1006,6 +1017,8 @@ async function manageAutomatchState(
     await reconcileAdmission(args.evidence!, dependencies);
     return;
   }
+  if (!["status", "freeze", "resume"].includes(args.operation))
+    await dependencies.assertInviteSourceAvailable?.();
   if (args.operation === "inspect-legacy") {
     const directory = privateDirectory(args.directory!);
     const rows = await dependencies.readLegacyRows();
@@ -1341,6 +1354,7 @@ function createSqlDependencies(
   return {
     ...remote,
     now,
+    assertInviteSourceAvailable: () => assertFirebaseInviteSourceAvailable(run),
     status,
     log: (value) => console.log(JSON.stringify(value)),
     async readAdmissions(admissionId) {
@@ -1370,8 +1384,11 @@ function createSqlDependencies(
       const root = [...ROOTS]
         .sort((left, right) => right.length - left.length)
         .find((root) => path === root || path.startsWith(`${root}/`));
-      if (admission.backend === "rtdb" || !root)
+      if (admission.backend === "rtdb" || !root) {
+        if (admission.backend === "rtdb" || path.startsWith("invites/"))
+          await assertFirebaseInviteSourceAvailable(run);
         return remote.readEvidencePath(path);
+      }
       const [key, ...nested] = path.slice(root.length + 1).split("/");
       if (!safeKey(key))
         throw new Error("D1 admission proof must identify an exact record");

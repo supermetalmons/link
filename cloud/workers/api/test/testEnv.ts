@@ -79,10 +79,13 @@ const profileGamesDb = {
   dump: async () => new ArrayBuffer(0),
   exec: async () => ({ count: 0, duration: 0 }),
   prepare: (query: string): D1PreparedStatement =>
-    query.includes("automatch_runtime_control") ||
-    query.includes("automatch_write_admissions")
-      ? automatchStatement(query)
-      : d1Statement,
+    query.includes("invite_source_control") ||
+    query.includes("invite_source_write_admissions")
+      ? inviteSourceStatement(query)
+      : query.includes("automatch_runtime_control") ||
+          query.includes("automatch_write_admissions")
+        ? automatchStatement(query)
+        : d1Statement,
   withSession: (): D1DatabaseSession => ({
     prepare: (query: string): D1PreparedStatement =>
       profileGamesDb.prepare(query),
@@ -90,6 +93,33 @@ const profileGamesDb = {
     getBookmark: () => null,
   }),
 } satisfies D1Database;
+
+function inviteSourceStatement(
+  query: string,
+  bindings: unknown[] = [],
+): D1PreparedStatement {
+  return {
+    all: d1Statement.all,
+    raw: d1Statement.raw,
+    run: d1Statement.run,
+    bind: (...values) => inviteSourceStatement(query, values),
+    first: async <T>() =>
+      (query.includes("INSERT INTO invite_source_write_admissions")
+        ? { admission_id: bindings[0] }
+        : {
+            backend: "rtdb",
+            state: "active",
+            epoch: 0,
+            freeze_generation: 0,
+            candidate_version_id: null,
+            source_digest: null,
+            import_digest: null,
+            verified_at_ms: null,
+            activated_at_ms: null,
+            metadata_json: null,
+          }) as T,
+  };
+}
 
 function automatchStatement(
   query: string,
@@ -196,6 +226,32 @@ const telegramDb = {
   prepare: () => telegramStatement,
 } satisfies D1Database;
 
+function eventAdmissionStatement(query: string): D1PreparedStatement {
+  return {
+    first: d1Statement.first,
+    raw: d1Statement.raw,
+    bind: () => eventAdmissionStatement(query),
+    all: async <T>() => ({
+      success: true,
+      results: [{ freeze_generation: 0 } as T],
+      meta: { ...d1Meta, changes: 1 },
+    }),
+    run: async <T>() => ({
+      success: true,
+      results: [] as T[],
+      meta: { ...d1Meta, changes: 1 },
+    }),
+  };
+}
+
+const eventDb = {
+  ...profileGamesDb,
+  prepare: (query: string): D1PreparedStatement =>
+    query.includes("event_write_admissions")
+      ? eventAdmissionStatement(query)
+      : profileGamesDb.prepare(query),
+} satisfies D1Database;
+
 const eventPrizeWithdrawalStatement: D1PreparedStatement = {
   all: d1Statement.all,
   bind: () => eventPrizeWithdrawalStatement,
@@ -218,7 +274,7 @@ export const TELEGRAM_TEST_ENV = {
   REACTION_RATE_LIMITER: rateLimit,
   INVITE_REACTIONS: inviteReactions,
   EVENT_PROGRESS_WORKFLOW: workflow,
-  EVENT_DB: profileGamesDb,
+  EVENT_DB: eventDb,
   EVENT_PRIZE_ADMIN_PRIVATE_KEY: "test-event-prize-private-key",
   EVENT_PRIZE_WITHDRAWALS_DB: eventPrizeWithdrawalsDb,
   EVENT_PRIZE_WITHDRAWAL_WORKFLOW: workflow,

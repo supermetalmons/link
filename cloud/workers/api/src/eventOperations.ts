@@ -138,7 +138,7 @@ function createRuntime(env: Env, dependencies: EventControlDependencies) {
         },
         (dependencies.now || Date.now)(),
       );
-      await ensureEventProgressWorkflow(env.EVENT_PROGRESS_WORKFLOW, plan);
+      await ensureEventProgressWorkflow(env, plan);
       return { outboxId: plan.outboxId, outbox: plan.outbox };
     },
     eventLockManager: lockManager,

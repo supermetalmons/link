@@ -51,6 +51,7 @@
     "smoke:reactions": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/smoke-cloudflare-reactions.ts",
     "smoke:wagers": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/smoke-cloudflare-wagers.ts",
     "smoke:invite-metadata": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/smoke-cloudflare-invite-metadata.ts",
+    "smoke:invite-lifecycle": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/smoke-cloudflare-invite-lifecycle.ts",
     "manage:wager-reservations": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-wager-reservations.ts",
     "manage:wager-state": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-wager-state.ts",
     "manage:events": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-events.ts",
@@ -76,7 +77,8 @@
     "latest:admin": "npx --yes npm-check-updates@latest -u --peer --packageFile cloud/admin/package.json && npm install --prefix cloud/admin",
     "latest": "npm run latest:root && npm run latest:functions && npm run latest:admin",
     "manage:automatch-state": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-automatch-state.ts",
-    "manage:login-match-discovery": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-login-match-discovery.ts"
+    "manage:login-match-discovery": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-login-match-discovery.ts",
+    "manage:invite-source": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-invite-source.ts"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.1.2",

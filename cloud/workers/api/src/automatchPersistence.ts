@@ -16,6 +16,15 @@ import {
 } from "./gameSessionTransitions.ts";
 import type { GameSessionMutationLockStore } from "./gameplayCoordinationD1.ts";
 import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
+import {
+  acquireInviteSourceAdmission,
+  createInviteSourceD1Store,
+  inviteSourcePath,
+  InviteSourceFailure,
+  readInviteSourceControl,
+  releaseInviteSourceAdmission,
+  type InviteSourceAdmission,
+} from "./inviteSourceD1.ts";
 
 export class AutomatchPersistenceFrozen extends AuthApiFailure {
   constructor() {
@@ -48,6 +57,7 @@ export function createAutomatchPersistence(
 ) {
   const held = new Map<string, GameSessionLeaseProof>();
   const store = createAutomatchD1Store(db, { now });
+  const inviteStore = createInviteSourceD1Store(db, { now });
   const reader = createGameSessionTransitions({
     db,
     rtdb: raw,
@@ -66,6 +76,7 @@ export function createAutomatchPersistence(
     work: (
       admission: AutomatchWriteAdmission,
       audit: ReturnType<typeof createAutomatchAdmissionAudit>,
+      inviteAdmission: InviteSourceAdmission,
     ) => Promise<T>,
   ): Promise<T> => {
     if ((await control()).state === "frozen") {
@@ -83,8 +94,10 @@ export function createAutomatchPersistence(
       throw error;
     });
     const audit = createAutomatchAdmissionAudit(db, admission, { now });
+    let inviteAdmission: InviteSourceAdmission | undefined;
     try {
-      const result = await work(admission, audit);
+      inviteAdmission = await acquireInviteSourceAdmission(db, kind, { now });
+      const result = await work(admission, audit, inviteAdmission);
       if (admission.backend === "rtdb") await audit.markCompleted();
       return result;
     } catch (error) {
@@ -95,10 +108,16 @@ export function createAutomatchPersistence(
       }
       throw error;
     } finally {
-      if (admission.backend === "d1") {
-        await releaseAutomatchWriteAdmission(db, admission);
-      } else {
-        await audit.releaseIfSafe();
+      try {
+        if (inviteAdmission) {
+          await releaseInviteSourceAdmission(db, inviteAdmission);
+        }
+      } finally {
+        if (admission.backend === "d1") {
+          await releaseAutomatchWriteAdmission(db, admission);
+        } else {
+          await audit.releaseIfSafe();
+        }
       }
     }
   };
@@ -120,20 +139,24 @@ export function createAutomatchPersistence(
       .bind(JSON.stringify([...new Set(keys)]))
       .all<{ resource_key: string }>();
     if (!pending.results.length) return false;
-    return write("session-transition-recovery", async (admission) => {
-      const transitions = createGameSessionTransitions({
-        db,
-        rtdb: raw,
-        store,
-        now,
-        onCommitted,
-        writeGuards: () => automatchAdmissionGuardStatements(db, admission),
-      });
-      for (const { resource_key } of pending.results) {
-        await transitions.recoverResource(resource_key, signal);
-      }
-      return true;
-    });
+    return write(
+      "session-transition-recovery",
+      async (admission, _audit, inviteAdmission) => {
+        const transitions = createGameSessionTransitions({
+          db,
+          rtdb: raw,
+          store,
+          now,
+          onCommitted,
+          writeGuards: () => automatchAdmissionGuardStatements(db, admission),
+          inviteAdmission,
+        });
+        for (const { resource_key } of pending.results) {
+          await transitions.recoverResource(resource_key, signal);
+        }
+        return true;
+      },
+    );
   };
   const recover = (key: string, signal?: AbortSignal) =>
     recoverResources([key], signal);
@@ -141,10 +164,18 @@ export function createAutomatchPersistence(
   const client: FirebaseRtdbClient = {
     async getPath(path, query, signal) {
       const owned = parseAutomatchPath(path);
+      const invite = inviteSourcePath(path);
       const resource = resourceForPath(path);
       if (!owned && !resource) return raw.getPath(path, query, signal);
       const mode = await control();
-      if (mode.backend === "rtdb") return raw.getPath(path, query, signal);
+      const inviteControl = invite ? await readInviteSourceControl(db) : null;
+      if (mode.backend === "rtdb") {
+        if (inviteControl?.backend === "d1")
+          throw new InviteSourceFailure(
+            "invite-source-session-backend-conflict",
+          );
+        return raw.getPath(path, query, signal);
+      }
       if (resource) {
         if (
           mode.state === "active" &&
@@ -156,47 +187,78 @@ export function createAutomatchPersistence(
       }
       const value = owned
         ? await store.getPath(path, query, signal)
-        : await raw.getPath(path, query, signal);
+        : inviteControl?.backend === "d1"
+          ? await inviteStore.getPath(path, query, signal)
+          : await raw.getPath(path, query, signal);
       if (resource) await reader.assertResourceAvailable(resource);
       return value;
     },
     async patchRoot(updates, signal) {
       const paths = Object.keys(updates);
       const owned = paths.filter((path) => parseAutomatchPath(path));
-      if (!owned.length) return raw.patchRoot(updates, signal);
-      return write("automatch-persistence-patch", async (admission, audit) => {
-        if (admission.backend === "rtdb") {
-          await audit.preparePatch(updates);
-          await audit.markDispatching();
-          return raw.patchRoot(updates, signal);
-        }
-        const guards = () => automatchAdmissionGuardStatements(db, admission);
-        if (owned.length !== paths.length) {
-          const transitions = createGameSessionTransitions({
-            db,
-            rtdb: raw,
-            store,
-            now,
-            onCommitted,
-            writeGuards: guards,
+      const invitePaths = paths.filter((path) => inviteSourcePath(path));
+      if (!owned.length && !invitePaths.length)
+        return raw.patchRoot(updates, signal);
+      return write(
+        "automatch-persistence-patch",
+        async (admission, audit, inviteAdmission) => {
+          if (!owned.length) {
+            if (inviteAdmission.backend === "d1")
+              throw new InviteSourceFailure(
+                "invite-source-transition-required",
+              );
+            return raw.patchRoot(updates, signal);
+          }
+          if (admission.backend === "rtdb") {
+            if (inviteAdmission.backend === "d1")
+              throw new InviteSourceFailure(
+                "invite-source-session-backend-conflict",
+              );
+            await audit.preparePatch(updates);
+            await audit.markDispatching();
+            return raw.patchRoot(updates, signal);
+          }
+          const guards = () => automatchAdmissionGuardStatements(db, admission);
+          if (owned.length !== paths.length) {
+            const transitions = createGameSessionTransitions({
+              db,
+              rtdb: raw,
+              store,
+              now,
+              onCommitted,
+              writeGuards: guards,
+              inviteAdmission,
+            });
+            return transitions.commit(updates, [...held.values()], signal);
+          }
+          const resources = owned.flatMap((path) => {
+            const resource = resourceForPath(path);
+            return resource ? [resource] : [];
           });
-          return transitions.commit(updates, [...held.values()], signal);
-        }
-        const resources = owned.flatMap((path) => {
-          const resource = resourceForPath(path);
-          return resource ? [resource] : [];
-        });
-        const guarded = createAutomatchD1Store(db, {
-          now,
-          writeGuards: () => [
-            ...guards(),
-            ...gameSessionResourceGuardStatements(db, resources),
-          ],
-        });
-        await guarded.patchRoot(updates, signal);
-      });
+          const guarded = createAutomatchD1Store(db, {
+            now,
+            writeGuards: () => [
+              ...guards(),
+              ...gameSessionResourceGuardStatements(db, resources),
+            ],
+          });
+          await guarded.patchRoot(updates, signal);
+        },
+      );
     },
     async transactPath(path, updater, signal) {
+      if (inviteSourcePath(path)) {
+        return write(
+          "invite-source-transaction",
+          async (_admission, _audit, inviteAdmission) => {
+            if (inviteAdmission.backend === "d1")
+              throw new InviteSourceFailure(
+                "invite-source-transition-required",
+              );
+            return raw.transactPath(path, updater, signal);
+          },
+        );
+      }
       if (!parseAutomatchPath(path)) {
         return raw.transactPath(path, updater, signal);
       }
@@ -239,7 +301,10 @@ export function createAutomatchPersistence(
       );
     },
     async writesEnabled() {
-      return (await control()).state === "active";
+      return (
+        (await control()).state === "active" &&
+        (await readInviteSourceControl(db)).state === "active"
+      );
     },
     async readQueuedByLogins(
       loginUids: readonly string[],
@@ -268,15 +333,18 @@ export function createAutomatchPersistence(
       if (mode.backend !== "d1" || mode.state === "frozen") {
         return { recovered: 0, failed: 0 };
       }
-      return write("session-transition-sweep", (admission) =>
-        createGameSessionTransitions({
-          db,
-          rtdb: raw,
-          store,
-          now,
-          onCommitted,
-          writeGuards: () => automatchAdmissionGuardStatements(db, admission),
-        }).sweep(limit),
+      return write(
+        "session-transition-sweep",
+        (admission, _audit, inviteAdmission) =>
+          createGameSessionTransitions({
+            db,
+            rtdb: raw,
+            store,
+            now,
+            onCommitted,
+            writeGuards: () => automatchAdmissionGuardStatements(db, admission),
+            inviteAdmission,
+          }).sweep(limit),
       );
     },
     decorateLocks(

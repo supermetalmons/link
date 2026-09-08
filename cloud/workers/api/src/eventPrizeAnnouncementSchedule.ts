@@ -108,7 +108,7 @@ async function scheduleEventAnnouncement(
   await repository.patchRtdbRoot({
     [`eventProgressOutbox/${plan.outboxId}`]: plan.outbox,
   });
-  await ensureEventProgressWorkflow(env.EVENT_PROGRESS_WORKFLOW, plan);
+  await ensureEventProgressWorkflow(env, plan);
 }
 
 export const scheduleEventPrizeAnnouncement = (
@@ -147,8 +147,7 @@ export function createEventAnnouncementScheduleRepository(
   const now = dependencies.now || Date.now;
   const enqueue =
     dependencies.enqueue ||
-    ((plan: EventProgressPlan) =>
-      ensureEventProgressWorkflow(env.EVENT_PROGRESS_WORKFLOW, plan));
+    ((plan: EventProgressPlan) => ensureEventProgressWorkflow(env, plan));
   const logger = dependencies.logger || console;
   return {
     ...repository,

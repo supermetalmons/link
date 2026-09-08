@@ -37,6 +37,18 @@ import {
   eventMatchCreationInviteIds,
   isPlayerMatchPath,
 } from "./eventLoginMatchDiscovery.ts";
+import {
+  applyInviteEventEffects,
+  prepareInviteEventIntent,
+} from "./inviteEventEffects.ts";
+import {
+  acquireInviteSourceAdmission,
+  inviteSourceAdmissionGuardStatements,
+  inviteSourceControlGuardStatements,
+  readInviteSourceControl,
+  releaseInviteSourceAdmission,
+} from "./inviteSourceD1.ts";
+import { notifyInviteSourceChanged } from "./inviteWagersNotifications.ts";
 
 const EVENT_OWNED_ROOTS = new Set([
   "events",
@@ -250,12 +262,38 @@ function sameTransitionIntent(
 ): boolean {
   return (
     left.transitionId === right.transitionId &&
+    left.schemaVersion === right.schemaVersion &&
     left.eventId === right.eventId &&
     left.expectedRevision === right.expectedRevision &&
     canonicalJson(left.canonicalUpdates) ===
       canonicalJson(right.canonicalUpdates) &&
-    canonicalJson(left.rtdbEffects) === canonicalJson(right.rtdbEffects)
+    canonicalJson(left.rtdbEffects) === canonicalJson(right.rtdbEffects) &&
+    (left.schemaVersion !== 2 ||
+      (right.schemaVersion === 2 &&
+        left.payloadDigest === right.payloadDigest &&
+        left.sourceEpoch === right.sourceEpoch &&
+        canonicalJson(left.inviteMutations) ===
+          canonicalJson(right.inviteMutations)))
   );
+}
+
+async function withInviteEffectsAdmission<T>(
+  db: D1Database,
+  work: (
+    control: Awaited<ReturnType<typeof readInviteSourceControl>>,
+  ) => Promise<T>,
+): Promise<T> {
+  const admission = await acquireInviteSourceAdmission(db, "event-transition");
+  try {
+    const control = await readInviteSourceControl(db);
+    await db.batch([
+      ...inviteSourceAdmissionGuardStatements(db, admission),
+      ...inviteSourceControlGuardStatements(db, control),
+    ]);
+    return await work(control);
+  } finally {
+    await releaseInviteSourceAdmission(db, admission);
+  }
 }
 
 function transitionApplicationLockPath(transitionId: string): string {
@@ -354,6 +392,8 @@ async function applyIntent(
   base: EventTransitionBackend,
   intent: EventTransitionIntent,
   admission: EventWriteAdmission,
+  raw: FirebaseRtdbClient,
+  onCommitted: (intent: EventTransitionIntent) => Promise<void>,
   signal?: AbortSignal,
 ): Promise<void> {
   let lock: Record<string, unknown> | null = null;
@@ -367,13 +407,23 @@ async function applyIntent(
     if (!sameTransitionIntent(currentIntent, intent)) {
       throw new Error("event-transition-identity-conflict");
     }
-    await ensureIntentEffects(base, currentIntent, signal);
-    await captureEventMatchDiscovery(
-      discoveryDb,
-      base.getPath,
-      eventMatchCreationInviteIds(currentIntent.rtdbEffects),
-      signal,
-    );
+    await withInviteEffectsAdmission(discoveryDb, async (control) => {
+      if (currentIntent.schemaVersion === 2) {
+        await applyInviteEventEffects(discoveryDb, raw, currentIntent, signal);
+      } else {
+        if (control.backend !== "rtdb") {
+          throw new Error("event-transition-legacy-source-disabled");
+        }
+        await ensureIntentEffects(base, currentIntent, signal);
+        await captureEventMatchDiscovery(
+          discoveryDb,
+          base.getPath,
+          eventMatchCreationInviteIds(currentIntent.rtdbEffects),
+          signal,
+        );
+      }
+    });
+    await onCommitted(currentIntent);
     await patchEventOwnedPaths(db, currentIntent.canonicalUpdates, {
       admission,
       expectedEventRevisions: {
@@ -404,6 +454,8 @@ async function patchD1EventState(
   base: EventTransitionBackend,
   updates: Record<string, unknown>,
   admission: EventWriteAdmission,
+  raw: FirebaseRtdbClient,
+  onCommitted: (intent: EventTransitionIntent) => Promise<void>,
   signal?: AbortSignal,
 ): Promise<void> {
   const { canonicalUpdates, rtdbEffects } = splitUpdates(updates);
@@ -426,54 +478,102 @@ async function patchD1EventState(
   ) {
     throw new Error("event-transition-receipt-path-reserved");
   }
-  const eventIds = eventIdsFromUpdates(canonicalUpdates);
-  if (eventIds.length !== 1) {
-    throw new Error("event-transition-must-target-one-event");
-  }
-  const eventId = eventIds[0];
-  const revision = (await readEventSnapshot(db, eventId)).revision;
-  if (revision < 1) {
-    if (eventMatchCreationInviteIds(rtdbEffects).length) {
-      throw new Error("event-match-creation-requires-transition");
+  await withInviteEffectsAdmission(discoveryDb, async (sourceControl) => {
+    const eventIds = eventIdsFromUpdates(canonicalUpdates);
+    if (eventIds.length !== 1) {
+      throw new Error("event-transition-must-target-one-event");
     }
-    await patchEventOwnedPaths(db, canonicalUpdates, { admission });
-    await base.patchRoot(rtdbEffects, signal);
-    return;
-  }
-  const id = await transitionId(eventId, revision, rtdbEffects);
-  const nowMs = Date.now();
-  const intent: EventTransitionIntent = {
-    schemaVersion: 1,
-    transitionId: id,
-    eventId,
-    expectedRevision: revision,
-    canonicalUpdates,
-    rtdbEffects,
-    createdAtMs: nowMs,
-    updatedAtMs: nowMs,
-  };
-  const existing = await readEventTransitionIntent(db, id);
-  if (
-    existing &&
-    (canonicalJson(existing.canonicalUpdates) !==
-      canonicalJson(canonicalUpdates) ||
-      canonicalJson(existing.rtdbEffects) !== canonicalJson(rtdbEffects) ||
-      existing.eventId !== eventId ||
-      existing.expectedRevision !== revision)
-  ) {
-    throw new Error("event-transition-identity-conflict");
-  }
-  const activeIntent = existing || intent;
-  if (!existing) {
-    await createEventTransitionIntent(db, activeIntent, { admission });
-  }
-  await applyIntent(db, discoveryDb, base, activeIntent, admission, signal);
+    const eventId = eventIds[0];
+    const revision = (await readEventSnapshot(db, eventId)).revision;
+    if (revision < 1) {
+      if (
+        eventMatchCreationInviteIds(rtdbEffects).length ||
+        Object.keys(rtdbEffects).some((path) =>
+          normalizedPath(path).startsWith("invites/"),
+        )
+      ) {
+        throw new Error("event-match-creation-requires-transition");
+      }
+      await patchEventOwnedPaths(db, canonicalUpdates, { admission });
+      await base.patchRoot(rtdbEffects, signal);
+      return;
+    }
+    const id = await transitionId(eventId, revision, rtdbEffects);
+    const nowMs = Date.now();
+    const intent: Extract<EventTransitionIntent, { schemaVersion: 1 }> = {
+      schemaVersion: 1,
+      transitionId: id,
+      eventId,
+      expectedRevision: revision,
+      canonicalUpdates,
+      rtdbEffects,
+      createdAtMs: nowMs,
+      updatedAtMs: nowMs,
+    };
+    const existing = await readEventTransitionIntent(db, id);
+    if (
+      existing &&
+      (canonicalJson(existing.canonicalUpdates) !==
+        canonicalJson(canonicalUpdates) ||
+        (existing.schemaVersion === 1 &&
+          canonicalJson(existing.rtdbEffects) !== canonicalJson(rtdbEffects)) ||
+        existing.eventId !== eventId ||
+        existing.expectedRevision !== revision)
+    ) {
+      throw new Error("event-transition-identity-conflict");
+    }
+    const activeIntent =
+      existing ||
+      (sourceControl.backend === "d1"
+        ? await prepareInviteEventIntent(discoveryDb, intent, signal)
+        : intent);
+    if (!existing) {
+      await createEventTransitionIntent(db, activeIntent, { admission });
+    }
+    await applyIntent(
+      db,
+      discoveryDb,
+      base,
+      activeIntent,
+      admission,
+      raw,
+      onCommitted,
+      signal,
+    );
+  });
+}
+
+function createEventRawClient(env: Env): FirebaseRtdbClient {
+  return createFirebaseRtdbClient(env, {
+    credentials: {
+      email: env.GAMEPLAY_SERVICE_ACCOUNT_EMAIL,
+      privateKeyPem: env.GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY,
+    },
+  });
+}
+
+async function notifyEventInviteEffects(
+  env: Env,
+  intent: EventTransitionIntent,
+): Promise<void> {
+  if (intent.schemaVersion !== 2) return;
+  await notifyInviteSourceChanged(
+    env,
+    Object.fromEntries(
+      intent.inviteMutations.map(({ current, value }) => [
+        `invites/${current.inviteId}`,
+        value,
+      ]),
+    ),
+    true,
+  );
 }
 
 export async function recoverEventTransitionIntents(
   env: Env,
   base: Pick<GameplayRepository, "getRtdbPath" | "patchRtdbRoot">,
   limit = 100,
+  raw: FirebaseRtdbClient = createEventRawClient(env),
 ): Promise<number> {
   const control = await readEventRuntimeControl(env.EVENT_DB);
   if (control.storageMode !== "d1") return 0;
@@ -492,6 +592,8 @@ export async function recoverEventTransitionIntents(
             { getPath: base.getRtdbPath, patchRoot: base.patchRtdbRoot },
             intent,
             admission,
+            raw,
+            (committed) => notifyEventInviteEffects(env, committed),
           );
         },
       );
@@ -530,8 +632,9 @@ export function createEventRtdbClient(
   env: Env,
   base: EventRtdbBackend = createAutomatchPersistence(
     env.PROFILE_GAMES_DB,
-    createFirebaseRtdbClient(env),
+    createEventRawClient(env),
   ).client,
+  raw: FirebaseRtdbClient = createEventRawClient(env),
 ): EventRtdbClient {
   const transactPath = async (
     path: string,
@@ -697,6 +800,8 @@ export function createEventRtdbClient(
             base,
             updates,
             admission,
+            raw,
+            (committed) => notifyEventInviteEffects(env, committed),
             signal,
           );
         },

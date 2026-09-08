@@ -7,6 +7,17 @@ import {
 import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 import { buildLoginMatchDiscoveryStatements } from "./loginMatchDiscoveryD1.ts";
+import {
+  acquireInviteSourceAdmission,
+  createInviteSourceD1Store,
+  inviteSourceAdmissionGuardStatements,
+  inviteSourceControlGuardStatements,
+  isEventOwnedInviteSource,
+  isInviteSourceRevisionConflict,
+  readInviteSourceControl,
+  releaseInviteSourceAdmission,
+  type InviteSourceMutation,
+} from "./inviteSourceD1.ts";
 
 export const GAME_SESSION_CREATION_FIELD = "sessionCreation";
 export const GAME_SESSION_TRANSITION_FIELD = "sessionTransition";
@@ -38,17 +49,24 @@ type InviteEffect = {
   updates: JsonRecord;
   marker: TransitionMarker;
 };
-type TransitionPayload = {
-  version: 1;
+type TransitionPayloadBase = {
   inviteId: string;
   transitionId: string;
   digest: string;
   resources: string[];
   mutations: AutomatchRecordMutation[];
   creations: MatchCreation[];
-  invite: InviteEffect;
   createdAtMs: number;
 };
+type TransitionPayload = TransitionPayloadBase &
+  (
+    | { version: 1; invite: InviteEffect }
+    | {
+        version: 2;
+        inviteSourceEpoch: number;
+        inviteMutations: InviteSourceMutation[];
+      }
+  );
 type TransitionRow = {
   transition_id: string;
   invite_id: string;
@@ -59,11 +77,20 @@ type TransitionStore = Pick<
   ReturnType<typeof createAutomatchD1Store>,
   "preparePatch" | "buildCommitStatements" | "buildRevisionGuardStatements"
 >;
+type InviteTransitionStore = Pick<
+  ReturnType<typeof createInviteSourceD1Store>,
+  "preparePatch" | "buildCommitStatements" | "buildRevisionGuardStatements"
+>;
+type InviteAdmission = Awaited<ReturnType<typeof acquireInviteSourceAdmission>>;
+type InviteControl = Awaited<ReturnType<typeof readInviteSourceControl>>;
+type InviteOperation = { admission: InviteAdmission; control: InviteControl };
 
 export type GameSessionTransitionsOptions = {
   db: D1Database;
   rtdb: Pick<FirebaseRtdbClient, "getPath" | "transactPath">;
   store?: TransitionStore;
+  inviteStore?: InviteTransitionStore;
+  inviteAdmission?: InviteAdmission;
   now?: () => number;
   createId?: () => string;
   onCommitted?: (inviteId: string) => Promise<void>;
@@ -359,7 +386,7 @@ function splitUpdates(updates: JsonRecord): {
 function readPayload(row: TransitionRow): TransitionPayload {
   const payload: TransitionPayload = JSON.parse(row.payload_json);
   if (
-    payload.version !== 1 ||
+    (payload.version !== 1 && payload.version !== 2) ||
     payload.transitionId !== row.transition_id ||
     payload.inviteId !== row.invite_id ||
     !Array.isArray(payload.resources) ||
@@ -367,6 +394,25 @@ function readPayload(row: TransitionRow): TransitionPayload {
     !Array.isArray(payload.creations)
   )
     fail("invalid-intent");
+  if (
+    payload.version === 2 &&
+    (!Number.isSafeInteger(payload.inviteSourceEpoch) ||
+      payload.inviteSourceEpoch < 1 ||
+      !Array.isArray(payload.inviteMutations) ||
+      payload.inviteMutations.length !== 1 ||
+      payload.inviteMutations.some(
+        ({ current, value }) =>
+          !current ||
+          current.inviteId !== payload.inviteId ||
+          !Number.isSafeInteger(current.revision) ||
+          current.revision < 0 ||
+          (current.value !== null && !record(current.value)) ||
+          !record(value) ||
+          isEventOwnedInviteSource(current.value) ||
+          isEventOwnedInviteSource(value),
+      ))
+  )
+    fail("invalid-invite-source-intent");
   return payload;
 }
 
@@ -374,11 +420,51 @@ export function createGameSessionTransitions({
   db,
   rtdb,
   store = createAutomatchD1Store(db),
+  inviteStore = createInviteSourceD1Store(db),
+  inviteAdmission,
   now = Date.now,
   createId = () => crypto.randomUUID(),
   onCommitted,
   writeGuards = () => [],
 }: GameSessionTransitionsOptions) {
+  const inviteGuards = ({ admission, control }: InviteOperation) => [
+    ...inviteSourceControlGuardStatements(db, control),
+    ...inviteSourceAdmissionGuardStatements(db, admission),
+  ];
+
+  async function assertInviteOperation(
+    operation: InviteOperation,
+  ): Promise<void> {
+    const current = await readInviteSourceControl(db);
+    if (
+      current.backend !== operation.control.backend ||
+      current.epoch !== operation.control.epoch ||
+      current.freezeGeneration !== operation.control.freezeGeneration ||
+      current.state !== "active"
+    )
+      fail("invite-source-control-changed");
+    await db.batch(inviteGuards(operation));
+  }
+
+  async function withInviteOperation<T>(
+    kind: string,
+    work: (operation: InviteOperation) => Promise<T>,
+  ): Promise<T> {
+    const admission =
+      inviteAdmission ||
+      (await acquireInviteSourceAdmission(db, kind, { now }));
+    try {
+      const operation = {
+        admission,
+        control: await readInviteSourceControl(db),
+      };
+      await assertInviteOperation(operation);
+      return await work(operation);
+    } finally {
+      if (!inviteAdmission) await releaseInviteSourceAdmission(db, admission);
+    }
+  }
+
   const read = (transitionId: string): Promise<TransitionRow | null> =>
     db
       .withSession("first-primary")
@@ -409,10 +495,20 @@ export function createGameSessionTransitions({
 
   async function materialize(
     payload: TransitionPayload,
+    operation: InviteOperation,
     signal?: AbortSignal,
   ): Promise<void> {
+    await assertInviteOperation(operation);
+    if (
+      (payload.version === 1 && operation.control.backend !== "rtdb") ||
+      (payload.version === 2 &&
+        (operation.control.backend !== "d1" ||
+          payload.inviteSourceEpoch !== operation.control.epoch))
+    )
+      fail("invite-source-backend-conflict");
     for (const creation of payload.creations) {
       signal?.throwIfAborted();
+      await assertInviteOperation(operation);
       await rtdb.transactPath(
         creation.path,
         (current) => {
@@ -435,7 +531,9 @@ export function createGameSessionTransitions({
         signal,
       );
     }
+    if (payload.version === 2) return;
     signal?.throwIfAborted();
+    await assertInviteOperation(operation);
     await rtdb.transactPath(
       `invites/${payload.inviteId}`,
       (current) => {
@@ -475,17 +573,19 @@ export function createGameSessionTransitions({
 
   async function applyState(
     row: TransitionRow,
+    operation: InviteOperation,
     signal?: AbortSignal,
   ): Promise<void> {
     if (row.status === "completed") return;
     const payload = readPayload(row);
     try {
-      await materialize(payload, signal);
+      await materialize(payload, operation, signal);
       signal?.throwIfAborted();
       const active = await read(payload.transitionId);
       if (!active || active.status === "completed") return;
       const statements = [
         ...(await writeGuards()),
+        ...inviteGuards(operation),
         db
           .prepare(
             `INSERT INTO game_session_transition_guards (singleton)
@@ -528,6 +628,9 @@ export function createGameSessionTransitions({
           now(),
         ),
         ...store.buildCommitStatements(payload.mutations, now()),
+        ...(payload.version === 2
+          ? inviteStore.buildCommitStatements(payload.inviteMutations, now())
+          : []),
         db
           .prepare(
             "UPDATE game_session_transitions SET status = 'completed', updated_at_ms = ?, last_error = NULL WHERE transition_id = ? AND status = 'pending'",
@@ -569,9 +672,10 @@ export function createGameSessionTransitions({
 
   async function apply(
     row: TransitionRow,
+    operation: InviteOperation,
     signal?: AbortSignal,
   ): Promise<void> {
-    await applyState(row, signal);
+    await applyState(row, operation, signal);
     try {
       await onCommitted?.(row.invite_id);
     } catch {}
@@ -581,15 +685,21 @@ export function createGameSessionTransitions({
     resourceKey: string,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    const row = await pendingResource(resourceKey);
-    if (!row) return false;
-    await apply(row, signal);
-    return true;
+    return withInviteOperation(
+      "session-transition-recovery",
+      async (operation) => {
+        const row = await pendingResource(resourceKey);
+        if (!row) return false;
+        await apply(row, operation, signal);
+        return true;
+      },
+    );
   }
 
-  async function commit(
+  async function prepareAndCommit(
     updates: JsonRecord,
     leases: readonly GameSessionLeaseProof[],
+    operation: InviteOperation,
     signal?: AbortSignal,
   ): Promise<void> {
     signal?.throwIfAborted();
@@ -599,25 +709,21 @@ export function createGameSessionTransitions({
       fail("invite-lease-required");
     if (new Set(leases.map((proof) => proof.lockId)).size !== leases.length)
       fail("duplicate-lease");
-    const rawInvite = await rtdb.getPath(
-      `invites/${split.inviteId}`,
-      undefined,
-      signal,
-    );
+    const rawInvite =
+      operation.control.backend === "rtdb"
+        ? await rtdb.getPath(`invites/${split.inviteId}`, undefined, signal)
+        : null;
     if (rawInvite !== null && rawInvite !== undefined && !record(rawInvite))
       fail("invalid-invite-source");
-    const currentInvite = record(rawInvite) ? rawInvite : null;
-    if (
-      currentInvite?.eventOwned === true ||
-      split.inviteUpdates.eventOwned === true
-    )
-      fail("event-owned-invite");
-    if (!currentInvite && !split.inviteUpdates.hostId) fail("invite-missing");
-    const expectedMarker = marker(
-      currentInvite?.[GAME_SESSION_TRANSITION_FIELD],
-    );
-    const sequence = (expectedMarker?.sequence || 0) + 1;
-    if (!Number.isSafeInteger(sequence)) fail("sequence-exhausted");
+    const legacyInvite = record(rawInvite) ? rawInvite : null;
+    const invitePatch = Object.keys(split.inviteUpdates).length
+      ? Object.fromEntries(
+          Object.entries(split.inviteUpdates).map(([field, value]) => [
+            `invites/${split.inviteId}/${field}`,
+            value,
+          ]),
+        )
+      : { [`invites/${split.inviteId}`]: {} };
     const createdAtMs = now();
     const transitionId = createId();
     if (
@@ -628,6 +734,33 @@ export function createGameSessionTransitions({
       fail("invalid-intent-id");
     for (let attempt = 0; attempt < MAX_PREPARATION_ATTEMPTS; attempt++) {
       signal?.throwIfAborted();
+      const inviteMutations =
+        operation.control.backend === "d1"
+          ? await inviteStore.preparePatch(invitePatch, createdAtMs, signal)
+          : [];
+      if (
+        operation.control.backend === "d1" &&
+        (inviteMutations.length !== 1 ||
+          inviteMutations[0].current.inviteId !== split.inviteId)
+      )
+        fail("invalid-invite-source-mutation");
+      const currentInvite =
+        operation.control.backend === "d1"
+          ? inviteMutations[0].current.value
+          : legacyInvite;
+      if (
+        isEventOwnedInviteSource(currentInvite) ||
+        isEventOwnedInviteSource(split.inviteUpdates) ||
+        inviteMutations.some(({ value }) => isEventOwnedInviteSource(value))
+      )
+        fail("event-owned-invite");
+      if (!currentInvite && !split.inviteUpdates.hostId) fail("invite-missing");
+      const expectedMarker =
+        operation.control.backend === "rtdb"
+          ? marker(currentInvite?.[GAME_SESSION_TRANSITION_FIELD])
+          : null;
+      const sequence = (expectedMarker?.sequence || 0) + 1;
+      if (!Number.isSafeInteger(sequence)) fail("sequence-exhausted");
       const mutations = await store.preparePatch(
         split.canonicalUpdates,
         createdAtMs,
@@ -667,6 +800,12 @@ export function createGameSessionTransitions({
         matchUpdates: split.matchUpdates,
         resources,
         createdAtMs,
+        ...(operation.control.backend === "d1"
+          ? {
+              inviteSourceEpoch: operation.control.epoch,
+              inviteMutations,
+            }
+          : {}),
       });
       const creations = await Promise.all(
         split.matchUpdates.map(async ({ path, value }) => ({
@@ -676,26 +815,35 @@ export function createGameSessionTransitions({
         })),
       );
       const payload: TransitionPayload = {
-        version: 1,
         inviteId: split.inviteId,
         transitionId,
         digest: contentDigest,
         resources,
         mutations,
         creations,
-        invite: {
-          existed: currentInvite !== null,
-          expectedMarker,
-          expectedFields,
-          updates: inviteUpdates,
-          marker: { sequence, transitionId, digest: contentDigest },
-        },
+        ...(operation.control.backend === "d1"
+          ? {
+              version: 2 as const,
+              inviteSourceEpoch: operation.control.epoch,
+              inviteMutations,
+            }
+          : {
+              version: 1 as const,
+              invite: {
+                existed: currentInvite !== null,
+                expectedMarker,
+                expectedFields,
+                updates: inviteUpdates,
+                marker: { sequence, transitionId, digest: contentDigest },
+              },
+            }),
         createdAtMs,
       };
       signal?.throwIfAborted();
       const leaseCheckMs = now();
       const statements = [
         ...(await writeGuards()),
+        ...inviteGuards(operation),
         db.prepare(`INSERT INTO game_session_transition_guards (singleton)
           SELECT 0 WHERE NOT EXISTS (
             SELECT 1 FROM automatch_runtime_control WHERE singleton = 1 AND backend = 'd1'
@@ -712,6 +860,7 @@ export function createGameSessionTransitions({
             .bind(proof.lockId, proof.operationId, proof.ownerId, leaseCheckMs),
         ),
         ...store.buildRevisionGuardStatements(mutations),
+        ...inviteStore.buildRevisionGuardStatements(inviteMutations),
         db
           .prepare(
             "INSERT INTO game_session_transitions (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, 'pending', ?, ?)",
@@ -737,7 +886,8 @@ export function createGameSessionTransitions({
         const existing = await read(transitionId);
         if (!existing) {
           if (
-            isAutomatchRevisionConflict(error) &&
+            (isAutomatchRevisionConflict(error) ||
+              isInviteSourceRevisionConflict(error)) &&
             attempt + 1 < MAX_PREPARATION_ATTEMPTS
           ) {
             continue;
@@ -748,13 +898,14 @@ export function createGameSessionTransitions({
       }
       const row = await read(transitionId);
       if (!row) fail("intent-missing");
-      await apply(row, signal);
+      await apply(row, operation, signal);
       return;
     }
   }
 
-  async function sweep(
-    limit = GAME_SESSION_TRANSITION_SWEEP_LIMIT,
+  async function sweepPrepared(
+    limit: number,
+    operation: InviteOperation,
   ): Promise<{ recovered: number; failed: number }> {
     if (
       !Number.isSafeInteger(limit) ||
@@ -773,7 +924,7 @@ export function createGameSessionTransitions({
     let failed = 0;
     for (const row of rows.results) {
       try {
-        await apply(row);
+        await apply(row, operation);
         recovered++;
       } catch {
         failed++;
@@ -781,6 +932,7 @@ export function createGameSessionTransitions({
     }
     await db.batch([
       ...(await writeGuards()),
+      ...inviteGuards(operation),
       db
         .prepare(
           `DELETE FROM game_session_transitions WHERE transition_id IN (
@@ -797,6 +949,20 @@ export function createGameSessionTransitions({
     ]);
     return { recovered, failed };
   }
+
+  const commit = (
+    updates: JsonRecord,
+    leases: readonly GameSessionLeaseProof[],
+    signal?: AbortSignal,
+  ) =>
+    withInviteOperation("session-transition-commit", (operation) =>
+      prepareAndCommit(updates, leases, operation, signal),
+    );
+
+  const sweep = (limit = GAME_SESSION_TRANSITION_SWEEP_LIMIT) =>
+    withInviteOperation("session-transition-sweep", (operation) =>
+      sweepPrepared(limit, operation),
+    );
 
   return { commit, recoverResource, assertResourceAvailable, sweep };
 }

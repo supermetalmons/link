@@ -34,6 +34,23 @@ import {
 
 const VERSION = "ed41f283-8a34-4674-8bf4-a4774b1d0196";
 const OTHER_VERSION = "ad41f283-8a34-4674-8bf4-a4774b1d0196";
+
+test("legacy automatch source operations reject activated D1 invite authority", async (t) => {
+  const h = harness(t);
+  h.db.exec(
+    "CREATE TABLE invite_source_control (singleton INTEGER, backend TEXT); INSERT INTO invite_source_control VALUES (1, 'd1');",
+  );
+  await assert.rejects(
+    h.command("preflight"),
+    /Firebase invite-source scans are retired/,
+  );
+  await assert.rejects(
+    h.command("stage", ["--candidate-version-id", VERSION]),
+    /Firebase invite-source scans are retired/,
+  );
+  await h.command("status");
+});
+
 function harness(t: test.TestContext) {
   const directory = mkdtempSync(resolve(tmpdir(), "automatch-migration-test-"));
   const db = new DatabaseSync(":memory:");
@@ -59,6 +76,7 @@ function harness(t: test.TestContext) {
     | ((sql: string, execute: () => RecordValue[]) => Promise<RecordValue[]>)
     | undefined;
   const calls: string[] = [];
+  const firebaseReads: string[] = [];
   const log: RecordValue[] = [];
   const sources: Record<Root, Record<string, unknown>> = {
     automatch: {
@@ -126,6 +144,7 @@ function harness(t: test.TestContext) {
     after: string | null,
     pageSize: number,
   ) => {
+    firebaseReads.push(root);
     const keys = Object.keys(sources[root])
       .sort(compareFirebaseKeys)
       .filter((key) => after === null || compareFirebaseKeys(key, after) >= 0)
@@ -152,9 +171,11 @@ function harness(t: test.TestContext) {
       },
       readSource,
       async readReference(inviteId, queue) {
+        firebaseReads.push(`invites/${inviteId}`);
         return normalizeReference(queue, invites[inviteId], matches[inviteId]);
       },
       async readEvidencePath(path) {
+        firebaseReads.push(path);
         if (path.startsWith("invites/")) return invites[path.slice(8)] || null;
         const root = [...ROOTS]
           .sort((a, b) => b.length - a.length)
@@ -210,6 +231,7 @@ function harness(t: test.TestContext) {
     invites,
     log,
     calls,
+    firebaseReads,
     dependencies,
     command,
     stage,
@@ -981,12 +1003,16 @@ function insertAdmission(
   h: ReturnType<typeof harness>,
   phase: string,
   proof: unknown = null,
+  backend = "rtdb",
+  admissionId = "admission-1",
 ) {
   h.db
     .prepare(
-      "INSERT INTO automatch_write_admissions (admission_id,epoch,freeze_generation,backend,kind,created_at_ms,phase,proof_json,audit_revision,updated_at_ms,completed_at_ms) VALUES ('admission-1',1,0,'rtdb','owned-patch',100,?,?,2,200,?)",
+      "INSERT INTO automatch_write_admissions (admission_id,epoch,freeze_generation,backend,kind,created_at_ms,phase,proof_json,audit_revision,updated_at_ms,completed_at_ms) VALUES (?,1,0,?,'owned-patch',100,?,?,2,200,?)",
     )
     .run(
+      admissionId,
+      backend,
       phase,
       proof === null ? null : canonicalJson(proof),
       phase === "completed" ? 200 : null,
@@ -1012,6 +1038,298 @@ function completeAdmissionEvidence(file: string) {
   writeFileSync(file, JSON.stringify(evidence));
   return evidence;
 }
+
+function activateD1Sources(h: ReturnType<typeof harness>) {
+  h.db.exec(
+    "UPDATE automatch_runtime_control SET backend = 'd1'; CREATE TABLE invite_source_control (singleton INTEGER, backend TEXT); INSERT INTO invite_source_control VALUES (1, 'd1');",
+  );
+}
+
+function completeNoSourceEffectsEvidence(file: string) {
+  const evidence = completeAdmissionEvidence(file);
+  evidence.noSourceEffects = true;
+  evidence.completionEvidence.explanation =
+    "The original request finished without dispatching source work.";
+  evidence.scopeEvidence = {
+    reference: "protected-trace:request-1",
+    explanation:
+      "The complete request trace proves no source work was dispatched.",
+  };
+  writeFileSync(file, JSON.stringify(evidence));
+  return evidence;
+}
+
+test("D1 no-source-effects recovery clears only the named orphan and replays without source reads", async (t) => {
+  for (const proof of [
+    null,
+    { schemaVersion: 1, kind: "patch", updates: {} },
+  ]) {
+    const h = harness(t);
+    activateD1Sources(h);
+    insertAdmission(h, "prepared", proof, "d1");
+    const file = await inspectAdmission(h);
+    completeNoSourceEffectsEvidence(file);
+    insertAdmission(h, "prepared", null, "d1", "admission-2");
+    const unrelated = await h.dependencies.readAdmissions("admission-2");
+    const control = (await h.dependencies.status()).control;
+    await h.command("reconcile-admission", ["--evidence", file]);
+    assert.equal(h.log.at(-1)?.resolution, "operator-reconciled");
+    assert.deepEqual(await h.dependencies.readAdmissions(), unrelated);
+    assert.deepEqual((await h.dependencies.status()).control, control);
+    await h.command("reconcile-admission", ["--evidence", file]);
+    assert.equal(h.log.at(-1)?.alreadyAbsent, true);
+    assert.deepEqual(await h.dependencies.readAdmissions(), unrelated);
+    assert.deepEqual(h.firebaseReads, []);
+    assert.equal(
+      h.calls.filter((sql) =>
+        sql.startsWith("DELETE FROM automatch_write_admissions"),
+      ).length,
+      1,
+    );
+  }
+});
+
+test("D1 no-source-effects recovery requires finished-request and complete scope evidence", async (t) => {
+  for (const missing of [
+    "completion",
+    "timestamp",
+    "scope-reference",
+    "scope-explanation",
+  ]) {
+    const h = harness(t);
+    activateD1Sources(h);
+    insertAdmission(h, "prepared", null, "d1");
+    const file = await inspectAdmission(h);
+    const evidence = completeNoSourceEffectsEvidence(file);
+    if (missing === "completion") evidence.completionEvidence = null;
+    if (missing === "timestamp") evidence.requestFinishedAtMs = null;
+    if (missing === "scope-reference") evidence.scopeEvidence.reference = "";
+    if (missing === "scope-explanation")
+      evidence.scopeEvidence.explanation = "";
+    writeFileSync(file, JSON.stringify(evidence));
+    const before = await h.dependencies.readAdmissions();
+    await assert.rejects(
+      h.command("reconcile-admission", ["--evidence", file]),
+      /finished-request evidence|request scope/,
+    );
+    assert.deepEqual(await h.dependencies.readAdmissions(), before);
+    assert.deepEqual(h.firebaseReads, []);
+  }
+});
+
+test("D1 no-source-effects recovery rejects recorded targets and nonempty source snapshots", async (t) => {
+  for (const contradiction of ["recorded-target", "source-snapshot"]) {
+    const h = harness(t);
+    activateD1Sources(h);
+    insertAdmission(
+      h,
+      "prepared",
+      contradiction === "recorded-target"
+        ? {
+            schemaVersion: 1,
+            kind: "patch",
+            updates: { "automatch/10": null },
+          }
+        : null,
+      "d1",
+    );
+    const file = await inspectAdmission(h);
+    const evidence = completeNoSourceEffectsEvidence(file);
+    evidence.sources =
+      contradiction === "recorded-target"
+        ? []
+        : [{ path: "automatch/10", digest: digest(null) }];
+    writeFileSync(file, JSON.stringify(evidence));
+    const before = await h.dependencies.readAdmissions();
+    await assert.rejects(
+      h.command("reconcile-admission", ["--evidence", file]),
+    );
+    assert.deepEqual(await h.dependencies.readAdmissions(), before);
+    assert.deepEqual(h.firebaseReads, []);
+    assert.ok(
+      !h.calls.some((sql) =>
+        sql.startsWith("DELETE FROM automatch_write_admissions"),
+      ),
+    );
+  }
+});
+
+test("D1 prepared admissions need completed-request scope and D1 source evidence after invite activation", async (t) => {
+  const h = harness(t);
+  activateD1Sources(h);
+  insertAdmission(h, "prepared", null, "d1");
+  const file = await inspectAdmission(h);
+  const template = JSON.parse(readFileSync(file, "utf8"));
+  assert.equal(template.admission.backend, "d1");
+  assert.equal(template.admission.proofJson, null);
+  assert.deepEqual(template.sources, []);
+  assert.deepEqual(h.firebaseReads, []);
+  await assert.rejects(
+    h.command("reconcile-admission", ["--evidence", file]),
+    /finished-request evidence/,
+  );
+  const evidence = completeAdmissionEvidence(file);
+  await assert.rejects(
+    h.command("reconcile-admission", ["--evidence", file]),
+    /complete bounded target snapshot/,
+  );
+  const receipt = {
+    kind: "automatch",
+    completedAtMs: 900,
+    response: { ok: true },
+  };
+  h.db
+    .prepare(
+      "INSERT INTO game_session_mutation_receipts (record_key,payload_json,revision,updated_at_ms) VALUES ('operation',?,1,900)",
+    )
+    .run(canonicalJson(receipt));
+  evidence.sources = [
+    { path: "gameplayMutationReceipts/operation", digest: digest(receipt) },
+  ];
+  writeFileSync(file, JSON.stringify(evidence));
+  await assert.rejects(
+    h.command("reconcile-admission", ["--evidence", file]),
+    /complete request scope/,
+  );
+  evidence.scopeEvidence = {
+    reference: "protected-trace:request-1",
+    explanation:
+      "Trace identifies this D1 receipt as the only attempted write.",
+  };
+  writeFileSync(file, JSON.stringify(evidence));
+  h.db.exec(
+    "UPDATE game_session_mutation_receipts SET payload_json = '{}' WHERE record_key = 'operation'",
+  );
+  await assert.rejects(
+    h.command("reconcile-admission", ["--evidence", file]),
+    /sources changed/,
+  );
+  assert.equal((await h.dependencies.status()).admissions, 1);
+  h.db
+    .prepare(
+      "UPDATE game_session_mutation_receipts SET payload_json = ? WHERE record_key = 'operation'",
+    )
+    .run(canonicalJson(receipt));
+  insertAdmission(h, "prepared", null, "d1", "admission-2");
+  const unrelated = await h.dependencies.readAdmissions("admission-2");
+  await h.command("reconcile-admission", ["--evidence", file]);
+  assert.deepEqual(await h.dependencies.readAdmissions(), unrelated);
+  assert.equal(h.log.at(-1)?.resolution, "operator-reconciled");
+  await h.command("reconcile-admission", ["--evidence", file]);
+  assert.equal(h.log.at(-1)?.alreadyAbsent, true);
+  assert.deepEqual(await h.dependencies.readAdmissions(), unrelated);
+  assert.deepEqual(h.firebaseReads, []);
+});
+
+test("D1 admission reconciliation rejects a tuple changed after inspection", async (t) => {
+  const h = harness(t);
+  activateD1Sources(h);
+  insertAdmission(h, "prepared", null, "d1");
+  const file = await inspectAdmission(h);
+  completeAdmissionEvidence(file);
+  h.db.exec(
+    "UPDATE automatch_write_admissions SET audit_revision = 3, updated_at_ms = 300 WHERE admission_id = 'admission-1'",
+  );
+  await assert.rejects(
+    h.command("reconcile-admission", ["--evidence", file]),
+    /changed after inspection/,
+  );
+  assert.equal((await h.dependencies.status()).admissions, 1);
+  assert.deepEqual(h.firebaseReads, []);
+});
+
+test("D1 admission proofs read owned snapshots from SQL and retain live player evidence access", async (t) => {
+  const h = harness(t);
+  activateD1Sources(h);
+  const receipt = { completedAtMs: 900, response: { ok: true } };
+  const expiration = { completedAtMs: 900 };
+  h.db
+    .prepare(
+      "INSERT INTO game_session_mutation_receipts (record_key,payload_json,revision,expiration_json,expiration_revision,updated_at_ms) VALUES ('operation',?,1,?,1,900)",
+    )
+    .run(canonicalJson(receipt), canonicalJson(expiration));
+  const updates = {
+    "automatch/10": null,
+    "gameplayMutationReceiptExpirations/operation": expiration,
+    "gameplayMutationReceipts/operation": receipt,
+  };
+  insertAdmission(
+    h,
+    "prepared",
+    { schemaVersion: 1, kind: "patch", updates },
+    "d1",
+  );
+  const file = await inspectAdmission(h);
+  const evidence = completeAdmissionEvidence(file);
+  assert.deepEqual(
+    evidence.sources,
+    Object.entries(updates).map(([path, value]) => ({
+      path,
+      digest: digest(value),
+    })),
+  );
+  assert.deepEqual(h.firebaseReads, []);
+  const [admission] = await h.dependencies.readAdmissions();
+  assert.equal(
+    await h.dependencies.readAdmissionPath(
+      admission,
+      "players/host/matches/10",
+    ),
+    null,
+  );
+  assert.deepEqual(h.firebaseReads, ["players/host/matches/10"]);
+  await h.command("reconcile-admission", ["--evidence", file]);
+  assert.equal((await h.dependencies.status()).admissions, 0);
+  assert.deepEqual(h.firebaseReads, ["players/host/matches/10"]);
+});
+
+test("D1 proof targeting retained invites is blocked before Firebase reads after activation", async (t) => {
+  const h = harness(t);
+  insertAdmission(
+    h,
+    "prepared",
+    { schemaVersion: 1, kind: "patch", updates: { "invites/10": null } },
+    "d1",
+  );
+  const file = await inspectAdmission(h);
+  completeAdmissionEvidence(file);
+  activateD1Sources(h);
+  h.firebaseReads.length = 0;
+  const [admission] = await h.dependencies.readAdmissions();
+  await assert.rejects(
+    h.dependencies.readAdmissionPath(admission, "invites/10"),
+    /Firebase invite-source scans are retired/,
+  );
+  await assert.rejects(
+    inspectAdmission(h),
+    /admission source evidence read failed/,
+  );
+  await assert.rejects(
+    h.command("reconcile-admission", ["--evidence", file]),
+    /admission source evidence read failed/,
+  );
+  assert.equal((await h.dependencies.status()).admissions, 1);
+  assert.deepEqual(h.firebaseReads, []);
+});
+
+test("RTDB admissions remain retired after invite activation even with safe-phase evidence", async (t) => {
+  for (const phase of ["prepared", "completed"]) {
+    const h = harness(t);
+    insertAdmission(h, phase);
+    const file = await inspectAdmission(h);
+    activateD1Sources(h);
+    await assert.rejects(
+      inspectAdmission(h),
+      /Firebase invite-source scans are retired/,
+    );
+    await assert.rejects(
+      h.command("reconcile-admission", ["--evidence", file]),
+      /Firebase invite-source scans are retired/,
+    );
+    assert.equal((await h.dependencies.status()).admissions, 1);
+    assert.deepEqual(h.firebaseReads, []);
+  }
+});
 
 test("completed and undispatched prepared admissions clear only their exact recorded proof and replay safely", async (t) => {
   for (const phase of ["completed", "prepared"]) {

@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import { assertFirebaseInviteSourceAvailable } from "./invite-source-retirement.ts";
 
 type JsonRecord = Record<string, unknown>;
 type Operation =
@@ -103,6 +104,7 @@ type Manifest = {
   pages: PageProof[];
 };
 type Dependencies = {
+  assertInviteSourceAvailable?(): Promise<void>;
   now(): number;
   log(value: JsonRecord): void;
   readMaintenance(): Promise<Maintenance>;
@@ -991,6 +993,8 @@ async function manageWagerState(
   args: Arguments,
   dependencies: Dependencies,
 ): Promise<void> {
+  if (args.operation !== "status")
+    await dependencies.assertInviteSourceAvailable?.();
   if (args.operation === "preflight") {
     const accumulator = sourceAccumulator();
     const states = {
@@ -1367,6 +1371,7 @@ function createSqlDependencies(
   };
   return {
     now,
+    assertInviteSourceAvailable: () => assertFirebaseInviteSourceAvailable(run),
     log: (value) => console.log(JSON.stringify(value)),
     readMaintenance,
     readActivation,

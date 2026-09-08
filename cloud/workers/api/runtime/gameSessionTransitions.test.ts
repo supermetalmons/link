@@ -10,6 +10,11 @@ import {
   type GameSessionLeaseProof,
 } from "../src/gameSessionTransitions.ts";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import {
+  acquireInviteSourceAdmission,
+  createInviteSourceD1Store,
+  releaseInviteSourceAdmission,
+} from "../src/inviteSourceD1.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
@@ -34,8 +39,11 @@ class MemoryRtdb implements Pick<
   afterWriteFailure: string | null = null;
   beforeWriteFailure: string | null = null;
   beforeWrite?: (path: string) => Promise<void>;
+  forbidInviteAccess = false;
 
   async getPath(path: string): Promise<unknown> {
+    if (this.forbidInviteAccess && path.startsWith("invites/"))
+      throw new Error("retired-rtdb-invite-access");
     return structuredClone(this.values.get(path) ?? null);
   }
 
@@ -170,6 +178,22 @@ function pendingCount() {
     .first<number>("count");
 }
 
+async function activateInviteSource(rtdb?: MemoryRtdb) {
+  await db
+    .prepare(
+      "UPDATE invite_source_control SET backend = 'd1', state = 'active', epoch = 1, verified_at_ms = 1, activated_at_ms = 1 WHERE singleton = 1",
+    )
+    .run();
+  if (rtdb) rtdb.forbidInviteAccess = true;
+  return createInviteSourceD1Store(db, { now: () => NOW });
+}
+
+function inviteAdmissionCount() {
+  return db
+    .prepare("SELECT COUNT(*) AS count FROM invite_source_write_admissions")
+    .first<number>("count");
+}
+
 function interleavePreparations(
   store: ReturnType<typeof createAutomatchD1Store>,
   afterPrepare: (attempt: number) => Promise<void>,
@@ -192,6 +216,11 @@ describe("recoverable D1 game-session transitions", () => {
 
   beforeEach(async () => {
     await db.batch([
+      db.prepare("DELETE FROM invite_source_write_admissions"),
+      db.prepare("DELETE FROM invite_sources"),
+      db.prepare(
+        "UPDATE invite_source_control SET backend = 'rtdb', state = 'active', epoch = 0, freeze_generation = 0, verified_at_ms = NULL, activated_at_ms = NULL WHERE singleton = 1",
+      ),
       db.prepare("DELETE FROM login_match_discovery"),
       db.prepare(
         "UPDATE login_match_discovery_control SET capture_enforced = 1, capture_version_id = '11111111-1111-4111-8111-111111111111', capture_started_at_ms = 1 WHERE singleton = 1",
@@ -208,6 +237,453 @@ describe("recoverable D1 game-session transitions", () => {
       db.prepare("DELETE FROM game_session_projection_outbox"),
       db.prepare("DELETE FROM game_session_mutation_receipts"),
     ]);
+  });
+
+  describe("D1 invite source", () => {
+    it("publishes source, receipts, and discovery together after create-only match effects", async () => {
+      const rtdb = new MemoryRtdb();
+      const source = await activateInviteSource(rtdb);
+      const store = createAutomatchD1Store(db);
+      rtdb.beforeWrite = async () => {
+        expect((await source.read(INVITE)).revision).toBe(0);
+        expect(
+          await store.getPath(`gameplayMutationReceipts/${OPERATION}`),
+        ).toBeNull();
+        expect(
+          await db
+            .prepare("SELECT COUNT(*) AS count FROM login_match_discovery")
+            .first("count"),
+        ).toBe(0);
+      };
+      await coordinator(rtdb).commit(createUpdates(), await leases());
+      expect(await source.read(INVITE)).toEqual({
+        inviteId: INVITE,
+        revision: 1,
+        value: {
+          hostId: HOST,
+          hostColor: "white",
+          automatchStateHint: "pending",
+        },
+      });
+      expect(
+        await store.getPath(`gameplayMutationReceipts/${OPERATION}`),
+      ).toMatchObject({ completedAtMs: NOW });
+      expect(
+        await db
+          .prepare(
+            "SELECT login_uid, match_id, invite_id FROM login_match_discovery",
+          )
+          .first(),
+      ).toEqual({ login_uid: HOST, match_id: INVITE, invite_id: INVITE });
+      const payload = JSON.parse(
+        (await db
+          .prepare("SELECT payload_json FROM game_session_transitions")
+          .first<string>("payload_json"))!,
+      );
+      expect(payload).toMatchObject({
+        version: 2,
+        inviteSourceEpoch: 1,
+        inviteMutations: [{ current: { inviteId: INVITE, revision: 0 } }],
+      });
+      expect(payload.invite).toBeUndefined();
+      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+      expect(await pendingCount()).toBe(0);
+      expect(await inviteAdmissionCount()).toBe(0);
+    });
+
+    it("recovers an uncertain creation without replaying advanced moves or the source revision", async () => {
+      const rtdb = new MemoryRtdb();
+      const source = await activateInviteSource(rtdb);
+      rtdb.afterWriteFailure = MATCH_PATH;
+      const transitions = coordinator(rtdb);
+      await expect(
+        transitions.commit(createUpdates(), await leases()),
+      ).rejects.toThrow("uncertain-applied-write");
+      expect((await source.read(INVITE)).revision).toBe(0);
+      const created = await rtdb.getPath(MATCH_PATH);
+      rtdb.values.set(MATCH_PATH, {
+        ...(isRecord(created) ? created : {}),
+        fen: "advanced",
+        flatMovesString: "a;b",
+      });
+      await transitions.recoverResource(
+        gameSessionOperationResource(OPERATION),
+      );
+      expect(await rtdb.getPath(MATCH_PATH)).toMatchObject({
+        fen: "advanced",
+        flatMovesString: "a;b",
+      });
+      expect(await transitions.recoverResource(INVITE)).toBe(false);
+      expect((await source.read(INVITE)).revision).toBe(1);
+      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+    });
+
+    it("preserves later source and live moves when another worker finishes a blocked creation", async () => {
+      const rtdb = new MemoryRtdb();
+      const source = await activateInviteSource(rtdb);
+      let release: () => void = () => {};
+      let entered: () => void = () => {};
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const reached = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      rtdb.beforeWrite = async () => {
+        rtdb.beforeWrite = undefined;
+        entered();
+        await blocked;
+      };
+      const original = coordinator(rtdb).commit(
+        createUpdates(),
+        await leases(),
+      );
+      await reached;
+      try {
+        await coordinator(rtdb).recoverResource(INVITE);
+        expect(await inviteAdmissionCount()).toBe(1);
+        const created = await rtdb.getPath(MATCH_PATH);
+        rtdb.values.set(MATCH_PATH, {
+          ...(isRecord(created) ? created : {}),
+          fen: "newer-position",
+          flatMovesString: "a;b;c",
+        });
+        await db.batch(
+          source.buildCommitStatements(
+            await source.preparePatch({
+              [`invites/${INVITE}/telegramDeliveryVersion`]: 3,
+            }),
+          ),
+        );
+      } finally {
+        release();
+      }
+      await original;
+      expect(await source.read(INVITE)).toMatchObject({
+        revision: 2,
+        value: { telegramDeliveryVersion: 3 },
+      });
+      expect(await rtdb.getPath(MATCH_PATH)).toMatchObject({
+        fen: "newer-position",
+        flatMovesString: "a;b;c",
+      });
+      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+      expect(await pendingCount()).toBe(0);
+      expect(await inviteAdmissionCount()).toBe(0);
+    });
+
+    it("rolls back source, receipt, outbox, and discovery when finalization fails", async () => {
+      const rtdb = new MemoryRtdb();
+      const source = await activateInviteSource(rtdb);
+      const transitions = coordinator(rtdb);
+      await db.exec(
+        "CREATE TRIGGER test_invite_finalization_failure BEFORE INSERT ON invite_sources BEGIN SELECT RAISE(ABORT, 'test-source-unavailable'); END;",
+      );
+      try {
+        await expect(
+          transitions.commit(createUpdates(), await leases()),
+        ).rejects.toThrow("test-source-unavailable");
+        expect((await source.read(INVITE)).revision).toBe(0);
+        for (const table of [
+          "game_session_mutation_receipts",
+          "game_session_projection_outbox",
+          "login_match_discovery",
+        ]) {
+          expect(
+            await db
+              .prepare(`SELECT COUNT(*) AS count FROM ${table}`)
+              .first("count"),
+          ).toBe(0);
+        }
+        expect(await pendingCount()).toBe(1);
+      } finally {
+        await db.exec("DROP TRIGGER test_invite_finalization_failure");
+      }
+      await transitions.recoverResource(INVITE);
+      expect((await source.read(INVITE)).revision).toBe(1);
+      expect(await pendingCount()).toBe(0);
+      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+    });
+
+    it("recognizes an uncertain D1 completion without applying its source twice", async () => {
+      const rtdb = new MemoryRtdb();
+      const source = await activateInviteSource(rtdb);
+      let finalizing = false;
+      let uncertainResponses = 0;
+      const uncertainDb = new Proxy(db, {
+        get(target, property) {
+          if (property === "batch") {
+            return async (statements: D1PreparedStatement[]) => {
+              const committed = await target.batch(statements);
+              if (finalizing) {
+                finalizing = false;
+                uncertainResponses++;
+                throw new Error("uncertain-d1-completion");
+              }
+              return committed;
+            };
+          }
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      await coordinator(rtdb, {
+        db: uncertainDb,
+        inviteStore: {
+          ...source,
+          buildCommitStatements(...args) {
+            finalizing = true;
+            return source.buildCommitStatements(...args);
+          },
+        },
+      }).commit(createUpdates(), await leases());
+      expect(uncertainResponses).toBe(1);
+      expect((await source.read(INVITE)).revision).toBe(1);
+      expect(await pendingCount()).toBe(0);
+      expect(await inviteAdmissionCount()).toBe(0);
+    });
+
+    it("preserves metadata and legacy provenance during rematch and match-only commits", async () => {
+      const rtdb = new MemoryRtdb();
+      const source = await activateInviteSource(rtdb);
+      const legacyMarker = {
+        sequence: 8,
+        transitionId: "legacy",
+        digest: "a".repeat(64),
+      };
+      await db
+        .prepare(
+          "INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 4, ?)",
+        )
+        .bind(
+          INVITE,
+          JSON.stringify({
+            hostId: HOST,
+            guestId: "guest",
+            hostRematches: "1",
+            guestRematches: "1",
+            password: "private",
+            sessionTransition: legacyMarker,
+          }),
+          NOW,
+        )
+        .run();
+      const proofs = await leases([INVITE]);
+      await coordinator(rtdb).commit(
+        {
+          [`invites/${INVITE}/hostRematches`]: "12",
+          [`players/${HOST}/matches/${INVITE}2`]: {
+            fen: "rematch-seed",
+            gameVariant: "v1",
+          },
+          ...receiptUpdates(),
+        },
+        proofs,
+      );
+      await coordinator(rtdb).commit(
+        {
+          [`players/guest/matches/${INVITE}2`]: {
+            fen: "guest-seed",
+            gameVariant: "v1",
+          },
+          ...receiptUpdates("ensure-operation"),
+        },
+        proofs,
+      );
+      expect(await source.read(INVITE)).toMatchObject({
+        revision: 6,
+        value: {
+          hostRematches: "12",
+          guestRematches: "1",
+          password: "private",
+          sessionTransition: legacyMarker,
+        },
+      });
+      expect(rtdb.writes.get(`players/${HOST}/matches/${INVITE}2`)).toBe(1);
+      expect(rtdb.writes.get(`players/guest/matches/${INVITE}2`)).toBe(1);
+    });
+
+    it("retries only preparation CAS conflicts with a stable identity and resolved timestamp", async () => {
+      const rtdb = new MemoryRtdb();
+      const source = await activateInviteSource(rtdb);
+      let attempts = 0;
+      let ids = 0;
+      let nowMs = NOW;
+      const updates = createUpdates();
+      await coordinator(rtdb, {
+        now: () => nowMs,
+        createId: () => `source-intent-${++ids}`,
+        inviteStore: {
+          ...source,
+          async preparePatch(...args) {
+            const mutations = await source.preparePatch(...args);
+            if (++attempts === 1) {
+              await db.batch(
+                source.buildCommitStatements(
+                  await source.preparePatch({
+                    [INVITE_PATH]: { hostId: HOST, telegramDeliveryVersion: 2 },
+                  }),
+                ),
+              );
+              nowMs++;
+            }
+            return mutations;
+          },
+        },
+      }).commit(
+        {
+          ...updates,
+          [INVITE_PATH]: {
+            ...updates[INVITE_PATH],
+            automatchCanceledAt: SERVER_TIMESTAMP,
+          },
+        },
+        await leases(),
+      );
+      expect(attempts).toBe(2);
+      expect(ids).toBe(1);
+      expect(await source.read(INVITE)).toMatchObject({
+        revision: 2,
+        value: { telegramDeliveryVersion: 2, automatchCanceledAt: NOW },
+      });
+      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+    });
+
+    it("retains the original source precondition and rematch seed during recovery", async () => {
+      const rtdb = new MemoryRtdb();
+      const source = await activateInviteSource(rtdb);
+      await db.batch(
+        source.buildCommitStatements(
+          await source.preparePatch({
+            [INVITE_PATH]: { hostId: HOST, guestId: "guest" },
+          }),
+        ),
+      );
+      const rematchPath = `players/${HOST}/matches/${INVITE}1`;
+      rtdb.afterWriteFailure = rematchPath;
+      const transitions = coordinator(rtdb);
+      await expect(
+        transitions.commit(
+          {
+            [`invites/${INVITE}/hostRematches`]: "1",
+            [rematchPath]: { fen: "fixed-rematch", gameVariant: "v1" },
+            ...receiptUpdates(),
+          },
+          await leases([INVITE]),
+        ),
+      ).rejects.toThrow("uncertain");
+      await db.batch(
+        source.buildCommitStatements(
+          await source.preparePatch({
+            [`invites/${INVITE}/guestId`]: "different-guest",
+          }),
+        ),
+      );
+      await expect(transitions.recoverResource(INVITE)).rejects.toThrow(
+        "invite_source_revision_guard",
+      );
+      expect(await source.read(INVITE)).toMatchObject({
+        revision: 2,
+        value: { guestId: "different-guest" },
+      });
+      expect(await rtdb.getPath(rematchPath)).toMatchObject({
+        fen: "fixed-rematch",
+      });
+      expect(rtdb.writes.get(rematchPath)).toBe(1);
+      expect(await pendingCount()).toBe(1);
+    });
+
+    it.each([
+      { eventOwned: true },
+      { eventId: "event-one", eventOwned: false },
+    ])(
+      "rejects existing and proposed event ownership %j before effects",
+      async (ownership) => {
+        const rtdb = new MemoryRtdb();
+        const source = await activateInviteSource(rtdb);
+        const proofs = await leases();
+        const updates = createUpdates();
+        await expect(
+          coordinator(rtdb).commit(
+            {
+              ...updates,
+              [INVITE_PATH]: { ...updates[INVITE_PATH], ...ownership },
+            },
+            proofs,
+          ),
+        ).rejects.toThrow("event-owned-invite");
+        await db.batch(
+          source.buildCommitStatements(
+            await source.preparePatch({
+              [INVITE_PATH]: { hostId: HOST, ...ownership },
+            }),
+          ),
+        );
+        await expect(coordinator(rtdb).commit(updates, proofs)).rejects.toThrow(
+          "event-owned-invite",
+        );
+        expect(rtdb.values.size).toBe(0);
+        expect(await pendingCount()).toBe(0);
+      },
+    );
+
+    it("rejects legacy recovery after activation without touching RTDB invites or matches", async () => {
+      const rtdb = new MemoryRtdb();
+      rtdb.beforeWriteFailure = MATCH_PATH;
+      const transitions = coordinator(rtdb);
+      await expect(
+        transitions.commit(createUpdates(), await leases()),
+      ).rejects.toThrow("before-write");
+      await activateInviteSource(rtdb);
+      await expect(transitions.recoverResource(INVITE)).rejects.toThrow(
+        "invite-source-backend-conflict",
+      );
+      expect(rtdb.values.size).toBe(0);
+      expect(await pendingCount()).toBe(1);
+    });
+
+    it("leaves supplied admissions owned by the coordinator and rejects a revoked admission", async () => {
+      const rtdb = new MemoryRtdb();
+      await activateInviteSource(rtdb);
+      const admission = await acquireInviteSourceAdmission(db, "coordinator", {
+        now: () => NOW,
+      });
+      const transitions = coordinator(rtdb, { inviteAdmission: admission });
+      await transitions.commit(createUpdates(), await leases());
+      expect(await inviteAdmissionCount()).toBe(1);
+      await releaseInviteSourceAdmission(db, admission);
+      await expect(transitions.recoverResource(INVITE)).rejects.toThrow(
+        "invite_source_control_guard",
+      );
+      expect(await inviteAdmissionCount()).toBe(0);
+      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+    });
+
+    it("does not retry a control change as a source revision conflict", async () => {
+      const rtdb = new MemoryRtdb();
+      const source = await activateInviteSource(rtdb);
+      let attempts = 0;
+      await expect(
+        coordinator(rtdb, {
+          inviteStore: {
+            ...source,
+            async preparePatch(...args) {
+              const mutations = await source.preparePatch(...args);
+              attempts++;
+              await db
+                .prepare(
+                  "UPDATE invite_source_control SET state = 'frozen', freeze_generation = freeze_generation + 1 WHERE singleton = 1",
+                )
+                .run();
+              return mutations;
+            },
+          },
+        }).commit(createUpdates(), await leases()),
+      ).rejects.toThrow("invite_source_control_guard");
+      expect(attempts).toBe(1);
+      expect(rtdb.values.size).toBe(0);
+      expect(await pendingCount()).toBe(0);
+    });
   });
 
   it("publishes concrete D1 state and receipt only after match and invite proof", async () => {
