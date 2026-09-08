@@ -1,10 +1,13 @@
 import {
   GAME_SESSION_OPERATION_ID_PATTERN,
   MAX_GAME_SESSION_RESPONSE_BYTES,
+  MATCH_SNAPSHOT_PATH,
   isCreateInviteResponse,
   isEndRematchResponse,
   isEnsureMatchResponse,
   isReadHistoricalMatchResponse,
+  isReadMatchSnapshotRequest,
+  isReadMatchSnapshotResponse,
   isJoinInviteResponse,
   isProposeRematchResponse,
   isResolveInviteRoleResponse,
@@ -18,6 +21,8 @@ import {
   type EnsureMatchResponse,
   type ReadHistoricalMatchRequest,
   type ReadHistoricalMatchResponse,
+  type ReadMatchSnapshotRequest,
+  type ReadMatchSnapshotResponse,
   type JoinInviteRequest,
   type JoinInviteResponse,
   type ProposeRematchRequest,
@@ -169,6 +174,7 @@ function cancelBody(response: Response): void {
 async function readBoundedJson(
   response: Response,
   maxBytes = GAMEPLAY_API_MAX_RESPONSE_BYTES,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   const contentLength = Number(response.headers.get("Content-Length"));
   if (Number.isFinite(contentLength) && contentLength > maxBytes) {
@@ -188,7 +194,15 @@ async function readBoundedJson(
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const chunks: string[] = [];
   let bytesRead = 0;
+  const cancelRead = () => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal?.addEventListener("abort", cancelRead, { once: true });
   try {
+    if (signal?.aborted) {
+      cancelRead();
+      throw new Error("request-aborted");
+    }
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
@@ -203,11 +217,13 @@ async function readBoundedJson(
     chunks.push(decoder.decode());
     return JSON.parse(chunks.join("")) as unknown;
   } catch {
-    void reader.cancel().catch(() => undefined);
+    cancelRead();
     throw new GameplayApiError(
       "unavailable",
       "Gameplay service is unavailable.",
     );
+  } finally {
+    signal?.removeEventListener("abort", cancelRead);
   }
 }
 
@@ -487,6 +503,91 @@ export function readWagerFrozenViaApi(
     GAMEPLAY_API_TIMEOUT_MS,
     { ...options, maxResponseBytes: 4 * 1024 },
   );
+}
+
+export async function readMatchSnapshotViaApi(
+  request: ReadMatchSnapshotRequest,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<ReadMatchSnapshotResponse> {
+  const timeoutMs = options.timeoutMs ?? GAMEPLAY_API_TIMEOUT_MS;
+  if (
+    !isReadMatchSnapshotRequest(request) ||
+    !Number.isFinite(timeoutMs) ||
+    timeoutMs <= 0
+  ) {
+    throw new GameplayApiError("invalid-argument", "invalid-request");
+  }
+  if (options.signal?.aborted) {
+    throw new GameplayApiError("aborted", "request-aborted");
+  }
+  const controller = new AbortController();
+  let cancellationError: GameplayApiError | null = null;
+  let rejectCancellation: (error: GameplayApiError) => void = () => {};
+  const cancellation = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject;
+  });
+  const cancel = (caller: boolean) => {
+    if (cancellationError) return;
+    cancellationError = caller
+      ? new GameplayApiError("aborted", "request-aborted")
+      : new GameplayApiError("unavailable", "Gameplay request timed out.");
+    controller.abort();
+    rejectCancellation(cancellationError);
+  };
+  const handleCallerAbort = () => cancel(true);
+  options.signal?.addEventListener("abort", handleCallerAbort, { once: true });
+  const timeoutId = setTimeout(
+    () => cancel(false),
+    Math.min(timeoutMs, GAMEPLAY_API_TIMEOUT_MS),
+  );
+  const run = async (): Promise<ReadMatchSnapshotResponse> => {
+    try {
+      const url = new URL(`${GAMEPLAY_API_ROOT}${MATCH_SNAPSHOT_PATH}`);
+      url.searchParams.set("playerId", request.playerId);
+      url.searchParams.set("matchId", request.matchId);
+      const response = await fetch(url, {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) {
+        cancelBody(response);
+        throw cancellationError;
+      }
+      const payload = await readBoundedJson(
+        response,
+        GAMEPLAY_API_MAX_RESPONSE_BYTES,
+        controller.signal,
+      );
+      if (cancellationError) throw cancellationError;
+      if (!response.ok) throw responseError(payload, response.status);
+      if (
+        !isReadMatchSnapshotResponse(payload) ||
+        payload.playerId !== request.playerId ||
+        payload.matchId !== request.matchId
+      ) {
+        throw new GameplayApiError(
+          "unavailable",
+          "Gameplay service is unavailable.",
+        );
+      }
+      return payload;
+    } catch (error) {
+      if (cancellationError) throw cancellationError;
+      if (error instanceof GameplayApiError) throw error;
+      throw new GameplayApiError(
+        "unavailable",
+        "Gameplay service is unavailable.",
+      );
+    }
+  };
+  try {
+    return await Promise.race([run(), cancellation]);
+  } finally {
+    clearTimeout(timeoutId);
+    options.signal?.removeEventListener("abort", handleCallerAbort);
+  }
 }
 
 export async function readHistoricalMatchPairViaApi(

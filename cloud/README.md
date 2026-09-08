@@ -16,6 +16,8 @@ The browser resolves login-linked profile presentation only through the authenti
 
 Historical rematch snapshots are read through the public Worker endpoint and stored immutably in `mons-link-profile-games` D1. Rated snapshots take precedence over transition snapshots. D1 is the sole public-history source; there is no RTDB read-through or backfill path. Active match synchronization remains in RTDB.
 
+The public `GET /matches/snapshot?playerId=…&matchId=…` endpoint serves one-time active-match reads for reconnect recovery and post-retry move verification. It reads only the requested `players/{playerId}/matches/{matchId}` path under the existing public Firebase rules, without service-account credentials. Responses are uncached and contain validated gameplay fields only. An absent Firebase record returns `match: null`; malformed records and upstream failures return `503` and never trigger a repair. Reads do not depend on canonical-write maintenance gates. Browser move transactions and live subscriptions still use RTDB.
+
 Rating completion evidence is read only from `mons-link-profiles` D1: canonical `rating_updates` rows with `status = 'done'` prove new completions, and `legacy_rating_completions` preserves historical completions without full rating records.
 
 Manual game-session mutation locks and match-timer start markers live in `mons-link-profile-games` D1. Locks are 60-second owner-and-operation-fenced leases; the five-minute schedule removes at most 1,000 expired rows. Timer markers are removed eagerly on terminal and rating paths, and the same schedule durably reconciles a bounded oldest-first batch. `matchTimerClaims` stays in RTDB because Realtime Database Security Rules use it to fence direct browser match writes.

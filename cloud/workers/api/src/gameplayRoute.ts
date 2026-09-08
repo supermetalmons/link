@@ -821,7 +821,7 @@ export async function handleGameplayRoute(
         env.AUTH_RATE_LIMITER,
         identity.uid,
       );
-      response = await claimMatchVictoryByTimer(identity, body, repository, {
+      const claim = claimMatchVictoryByTimer(identity, body, repository, {
         ...dependencies.timer,
         assertMutationAllowed,
         enqueueEventProgress:
@@ -830,6 +830,8 @@ export async function handleGameplayRoute(
         signal: dependencies.timer?.signal || request.signal,
         timerStarts: coordination.timerStarts,
       });
+      ctx.waitUntil(claim.catch(() => undefined));
+      response = await claim;
     } else if (pathname === "/navigation/games/read") {
       if (!isReadNavigationGamesRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");

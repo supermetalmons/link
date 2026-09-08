@@ -12,6 +12,7 @@ const {
 const GAME_SESSION_OPERATION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_GAME_SESSION_RESPONSE_BYTES = 640 * 1024;
+const MATCH_SNAPSHOT_PATH = "/matches/snapshot";
 const MAX_GAME_SESSION_GAME_VARIANT_BYTES = 256;
 const MAX_GAME_SESSION_STATUS_BYTES = 1024;
 const MAX_GAME_SESSION_TIMER_BYTES = 1024;
@@ -191,6 +192,65 @@ const normalizeHistoricalMatchRecord = (value) => {
   };
 };
 
+const isMatchSnapshotKey = (value) => {
+  if (!isSurrenderMatchKey(value)) return false;
+  try {
+    encodeURIComponent(value);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const isReadMatchSnapshotRequest = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, ["playerId", "matchId"]) &&
+  isMatchSnapshotKey(value.playerId) &&
+  value.playerId.length <= 128 &&
+  isMatchSnapshotKey(value.matchId);
+
+const normalizeMatchSnapshot = (value) => {
+  if (
+    !isRecord(value) ||
+    typeof value.fen !== "string" ||
+    value.fen === "" ||
+    (Object.hasOwn(value, "version") && !Number.isSafeInteger(value.version)) ||
+    (Object.hasOwn(value, "emojiId") &&
+      !(
+        (typeof value.emojiId === "number" ||
+          (typeof value.emojiId === "string" && value.emojiId.trim() !== "")) &&
+        Number.isSafeInteger(Number(value.emojiId))
+      )) ||
+    (Object.hasOwn(value, "aura") &&
+      (typeof value.aura !== "string" || value.aura.length > 32)) ||
+    (Object.hasOwn(value, "gameVariant") &&
+      !isBoundedString(
+        value.gameVariant,
+        MAX_GAME_SESSION_GAME_VARIANT_BYTES,
+      )) ||
+    (Object.hasOwn(value, "status") &&
+      !isBoundedString(value.status, MAX_GAME_SESSION_STATUS_BYTES)) ||
+    (Object.hasOwn(value, "flatMovesString") &&
+      !isMatchHistoryWithinLimits(value.flatMovesString)) ||
+    (Object.hasOwn(value, "timer") &&
+      !isBoundedString(value.timer, MAX_GAME_SESSION_TIMER_BYTES))
+  ) {
+    return null;
+  }
+  const match = normalizeHistoricalMatchRecord(value);
+  return isMatchRecord(match) ? match : null;
+};
+
+const isReadMatchSnapshotResponse = (value) =>
+  isRecord(value) &&
+  hasExactKeys(value, ["ok", "playerId", "matchId", "match"]) &&
+  value.ok === true &&
+  isReadMatchSnapshotRequest({
+    playerId: value.playerId,
+    matchId: value.matchId,
+  }) &&
+  (value.match === null || isMatchRecord(value.match));
+
 const isHistoricalMatchPair = (value) =>
   isRecord(value) &&
   hasExactKeys(value, [
@@ -334,6 +394,7 @@ module.exports = {
   GAME_SESSION_OPERATION_ID_PATTERN,
   MANUAL_INVITE_ID_PATTERN,
   MAX_GAME_SESSION_RESPONSE_BYTES,
+  MATCH_SNAPSHOT_PATH,
   MAX_GAME_SESSION_GAME_VARIANT_BYTES,
   MAX_GAME_SESSION_STATUS_BYTES,
   MAX_GAME_SESSION_TIMER_BYTES,
@@ -352,6 +413,9 @@ module.exports = {
   isResolveInviteRoleRequest,
   isResolveInviteRoleResponse,
   normalizeHistoricalMatchRecord,
+  normalizeMatchSnapshot,
+  isReadMatchSnapshotRequest,
+  isReadMatchSnapshotResponse,
   isReadHistoricalMatchRequest,
   isReadHistoricalMatchResponse,
   isProposeRematchRequest,

@@ -50,6 +50,8 @@ import {
 import { sweepMatchTimerStarts } from "./matchTimerStartSweep.ts";
 import { recoverEventTransitionIntents } from "./eventRepository.ts";
 import { readAutomatchRuntimeControl } from "./automatchD1.ts";
+import { MATCH_SNAPSHOT_PATH } from "@mons/shared/game-sessions";
+import { handleMatchSnapshotRoute } from "./matchSnapshotRoute.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
 export type { ProviderFetch } from "./provider.ts";
@@ -61,6 +63,9 @@ export function handleFetch(
   ctx: ExecutionContext,
 ): Promise<Response> {
   const pathname = new URL(request.url).pathname;
+  if (pathname === MATCH_SNAPSHOT_PATH) {
+    return handleMatchSnapshotRoute(request, env);
+  }
   if (pathname === HISTORICAL_MATCH_PATH) {
     return handleHistoricalMatchRoute(request, env);
   }

@@ -140,13 +140,26 @@ function harness(invite, onMatchRead = () => {}) {
       withAutomatchOperationLock,
       isAutoInviteId,
       ref: (_db, path) => path,
-      get: async (path) => {
-        assert.ok(
-          path.startsWith("players/"),
-          `unexpected Firebase read: ${path}`,
-        );
+      readMatchSnapshotViaApi: async ({ playerId, matchId }, options) => {
+        assert.equal(playerId, UID);
+        assert.equal(matchId, INVITE_ID);
+        assert.ok(options.signal instanceof AbortSignal);
         onMatchRead();
-        return { val: () => ({ color: "white" }) };
+        return {
+          ok: true,
+          playerId,
+          matchId,
+          match: {
+            version: 1,
+            color: "white",
+            emojiId: 1,
+            fen: "fen",
+            gameVariant: "classic",
+            status: "",
+            flatMovesString: "",
+            timer: "",
+          },
+        };
       },
       readInviteWagersViaApi: async (inviteId) => ({
         ok: true,

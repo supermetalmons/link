@@ -1729,6 +1729,7 @@ test("routes match timer starts with rate limiting and idempotent storage", asyn
 test("routes timer victory claims with a separate limit and terminal update", async () => {
   let rateLimitKey = "";
   const patches: Array<Record<string, unknown>> = [];
+  const retainedClaims: Promise<unknown>[] = [];
   const timerRepository = repository({
     readState: async (path) => {
       assert.doesNotMatch(path, /^matchTimerStarts\//);
@@ -1753,6 +1754,7 @@ test("routes timer victory claims with a separate limit and terminal update", as
       };
     },
     patchRtdbRoot: async (updates) => {
+      assert.equal(retainedClaims.length, 1);
       assert.equal(
         Object.keys(updates).some((path) =>
           path.startsWith("matchTimerStarts/"),
@@ -1801,7 +1803,7 @@ test("routes timer victory claims with a separate limit and terminal update", as
         },
       },
     } as Env,
-    context(),
+    context(retainedClaims),
     {
       repository: timerRepository,
       timer: {
@@ -1816,6 +1818,7 @@ test("routes timer victory claims with a separate limit and terminal update", as
       verifyIdentity: async () => identity,
     },
   );
+  await Promise.all(retainedClaims);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true });
   assert.equal(rateLimitKey, `timer-claim:${identity.uid}`);

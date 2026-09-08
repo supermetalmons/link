@@ -3,6 +3,10 @@ import { createGoogleAccessToken } from "./googleAuth.ts";
 import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
 import { notifyInviteSourceChanged } from "./inviteWagersNotifications.ts";
 import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import {
+  isReadMatchSnapshotRequest,
+  type ReadMatchSnapshotRequest,
+} from "@mons/shared/game-sessions";
 
 const FIREBASE_DATABASE_SCOPE =
   "https://www.googleapis.com/auth/firebase.database";
@@ -41,6 +45,8 @@ export type FirebaseRtdbCredentials = {
   privateKeyPem: string;
 };
 
+type FirebaseRtdbLocation = { FIREBASE_RTDB_URL: string };
+
 export type FirebaseRtdbQuery = {
   endAt?: string | number | boolean | null;
   equalTo?: string | number | boolean | null;
@@ -78,7 +84,7 @@ export type FirebaseRtdbClient = {
   ) => Promise<FirebaseRtdbTransactionResult>;
 };
 
-function databaseRoot(env: Env): string {
+function databaseRoot(env: FirebaseRtdbLocation): string {
   const raw = env.FIREBASE_RTDB_URL.trim().replace(/\/+$/, "");
   let url: URL;
   try {
@@ -149,6 +155,60 @@ function queryDatabaseUrl(
     url.searchParams.set("limitToFirst", String(query.limitToFirst));
   }
   return url.toString();
+}
+
+export async function readPublicFirebaseMatch(
+  env: FirebaseRtdbLocation,
+  request: ReadMatchSnapshotRequest,
+  {
+    fetcher = fetch,
+    signal,
+    timeoutMs = RTDB_TIMEOUT_MS,
+  }: {
+    fetcher?: typeof fetch;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  } = {},
+): Promise<unknown> {
+  if (!isReadMatchSnapshotRequest(request)) {
+    throw new TypeError("invalid-match-snapshot-request");
+  }
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new TypeError("invalid-match-snapshot-timeout");
+  }
+  const url = databaseUrl(
+    databaseRoot(env),
+    `players/${request.playerId}/matches/${request.matchId}`,
+  );
+  const timeoutSignal = AbortSignal.timeout(
+    Math.min(timeoutMs, RTDB_TIMEOUT_MS),
+  );
+  const requestSignal = signal
+    ? AbortSignal.any([signal, timeoutSignal])
+    : timeoutSignal;
+  try {
+    requestSignal.throwIfAborted();
+    const response = await fetcher(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      redirect: "manual",
+      signal: requestSignal,
+    });
+    if (!response.ok) {
+      await cancelResponseBody(response);
+      throw new FirebaseRtdbFailure();
+    }
+    const value = await readBoundedJsonValue(
+      response,
+      MAX_RTDB_BODY_BYTES,
+      () => new FirebaseRtdbFailure(),
+    );
+    requestSignal.throwIfAborted();
+    return value;
+  } catch {
+    throw new FirebaseRtdbFailure();
+  }
 }
 
 export function createFirebaseRtdbClient(

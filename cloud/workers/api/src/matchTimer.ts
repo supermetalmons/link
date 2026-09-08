@@ -701,6 +701,10 @@ export async function claimMatchVictoryByTimer(
     throw failedPrecondition(`can't claim yet, ${timeDelta} ms remaining`);
   }
 
+  await dependencies.assertMutationAllowed?.();
+  signal.throwIfAborted();
+  const commitSignal = AbortSignal.timeout(MATCH_TIMER_OPERATION_TIMEOUT_MS);
+  const claimStartedAtMs = now();
   const claimPath = `${MATCH_TIMER_CLAIM_ROOT}/${request.matchId}`;
   const claimFence: MatchTimerClaimFence = {
     status: "pending",
@@ -709,9 +713,8 @@ export async function claimMatchVictoryByTimer(
     inviteId: request.inviteId,
     timer: player.timer,
     turnNumber: game.turnNumber,
-    expiresAtMs: nowMs + MATCH_TIMER_CLAIM_LEASE_MS,
+    expiresAtMs: claimStartedAtMs + MATCH_TIMER_CLAIM_LEASE_MS,
   };
-  await dependencies.assertMutationAllowed?.();
   const claimTransaction = await repository.transactRtdbPath(
     claimPath,
     (current) => {
@@ -724,13 +727,13 @@ export async function claimMatchVictoryByTimer(
       if (
         value?.status === "pending" &&
         typeof value.expiresAtMs === "number" &&
-        value.expiresAtMs > nowMs
+        value.expiresAtMs > claimStartedAtMs
       ) {
         return { commit: false, decision: "busy" };
       }
       return { decision: "acquired", value: claimFence };
     },
-    signal,
+    commitSignal,
   );
   if (claimTransaction.decision === "busy") {
     throw failedPrecondition("game state changed.");
@@ -745,7 +748,7 @@ export async function claimMatchVictoryByTimer(
       ),
       request,
       repository,
-      signal,
+      commitSignal,
       dependencies,
     );
     return { ok: true };
@@ -753,9 +756,14 @@ export async function claimMatchVictoryByTimer(
 
   let freshValues: [unknown, unknown, unknown];
   try {
-    freshValues = await readMatchRecords(request, repository, signal);
+    freshValues = await readMatchRecords(request, repository, commitSignal);
   } catch (error) {
-    await releasePendingClaimFence(claimPath, claimFence, repository, signal);
+    await releasePendingClaimFence(
+      claimPath,
+      claimFence,
+      repository,
+      commitSignal,
+    );
     throw error;
   }
   const [freshPlayerValue, freshOpponentValue, freshInviteValue] = freshValues;
@@ -771,7 +779,12 @@ export async function claimMatchVictoryByTimer(
       );
   } catch {}
   if (!snapshotsMatch) {
-    await releasePendingClaimFence(claimPath, claimFence, repository, signal);
+    await releasePendingClaimFence(
+      claimPath,
+      claimFence,
+      repository,
+      commitSignal,
+    );
     throw failedPrecondition("game state changed.");
   }
 
@@ -784,7 +797,7 @@ export async function claimMatchVictoryByTimer(
     ),
     request,
     repository,
-    signal,
+    commitSignal,
     dependencies,
   );
   return { ok: true };

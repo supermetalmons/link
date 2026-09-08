@@ -111,7 +111,7 @@ test("browser connection code has no RTDB profile-link dependency", () => {
     autojoinDecision,
   );
   const matchRead = source.indexOf(
-    "const myMatchSnapshot = await get",
+    "const myMatchSnapshot = await readMatchSnapshotViaApi",
     postJoinRoleRead,
   );
   const authRecheck = source.indexOf(
@@ -145,4 +145,38 @@ test("browser connection code has no RTDB profile-link dependency", () => {
     controllerSource.indexOf("export function didFindInviteThatCanBeJoined"),
   );
   assert.doesNotMatch(freshSignInHandler, /isWatchOnly/);
+});
+
+test("browser match snapshots use the API while move transactions and live subscriptions retain RTDB", () => {
+  const source = readFileSync(
+    new URL("../src/connection/connection.ts", import.meta.url),
+    "utf8",
+  );
+  const methodSource = (name, nextName) => {
+    const start = source.indexOf(name);
+    const end = source.indexOf(nextName, start);
+    assert.ok(start >= 0 && end > start);
+    return source.slice(start, end);
+  };
+  const verification = methodSource(
+    "private async verifyMovePersistedAfterRetryWindow(",
+    "private getMoveRetryDelayMs(",
+  );
+  const reconnect = methodSource(
+    "public connectToGame(",
+    "public tryNavigateWatchOnlyToLatestApprovedMatch(",
+  );
+  for (const method of [verification, reconnect]) {
+    assert.match(method, /await readMatchSnapshotViaApi\(/);
+    assert.doesNotMatch(method, /\bget\s*\(/);
+  }
+  const move = methodSource(
+    "private async sendMoveAttempt(",
+    "private async verifyMovePersistedAfterRetryWindow(",
+  );
+  assert.match(move, /`players\/\$\{playerUid\}\/matches\/\$\{matchId\}`/);
+  assert.match(move, /runTransaction\(\s*matchRef,/);
+  const live = source.slice(source.indexOf("private observeMatch("));
+  assert.match(live, /`players\/\$\{playerId\}\/matches\/\$\{matchId\}`/);
+  assert.match(live, /onValue\(\s*matchRef,/);
 });

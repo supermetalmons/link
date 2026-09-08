@@ -139,10 +139,14 @@ function harness({
   end,
   onMetadata,
   readWagers,
+  readMatch,
+  ensureMatch,
 } = {}) {
   const events = {
     reads: [],
     firebaseReads: [],
+    matchReads: [],
+    ensuredMatches: [],
     auth: [],
     home: [],
     ui: [],
@@ -265,11 +269,21 @@ function harness({
     ref: (_db, path) => path,
     get: async (path) => {
       events.firebaseReads.push(path);
-      assert.ok(
-        path.startsWith("players/"),
-        `unexpected Firebase invite read: ${path}`,
-      );
-      return { val: () => match };
+      assert.fail(`unexpected Firebase read: ${path}`);
+    },
+    readMatchSnapshotViaApi: async (input, options) => {
+      events.matchReads.push({ ...input, ...options });
+      return {
+        ok: true,
+        ...input,
+        match: readMatch
+          ? await readMatch(events.matchReads.length, input, options)
+          : match,
+      };
+    },
+    ensureMatchViaApi: async (input, provider) => {
+      events.ensuredMatches.push(input);
+      return ensureMatch ? ensureMatch(input, provider) : { ok: true, match };
     },
     off: noop,
     getPlayersEmojiId: () => 1,
@@ -416,7 +430,12 @@ test("metadata bootstrap preserves linked-login actors and loads existing wagers
   const wagers = { invite: { agreed: { count: 3 } } };
   const h = harness({ wagers });
   await h.connect();
-  assert.deepEqual(h.events.firebaseReads, ["players/host/matches/invite"]);
+  assert.deepEqual(
+    h.events.matchReads.map(({ playerId, matchId }) => ({ playerId, matchId })),
+    [{ playerId: "host", matchId: "invite" }],
+  );
+  assert.ok(h.events.matchReads[0].signal instanceof AbortSignal);
+  assert.deepEqual(h.events.firebaseReads, []);
   assert.equal(h.events.wagerReads.length, 1);
   assert.equal(h.instance.activeContext.loginUid, "login");
   assert.equal(h.instance.activeContext.actorUid, "host");
@@ -426,6 +445,86 @@ test("metadata bootstrap preserves linked-login actors and loads existing wagers
   assert.deepEqual(h.instance.latestInvite.wagers, wagers);
   h.instance.detachFromMatchSession();
 });
+
+test("reconnect ensures a participant match only after a successful missing Worker snapshot", async () => {
+  const ensuredMatch = { ...match, fen: "ensured-fen" };
+  const h = harness({
+    readMatch: (attempt) => (attempt === 1 ? match : null),
+    ensureMatch: async () => ({ ok: true, match: ensuredMatch }),
+  });
+  await h.connect();
+  const previousContext = h.instance.activeContext;
+  h.instance.connectToGame("login", "invite", false);
+  await settle();
+  assert.deepEqual(h.events.errors, []);
+  assert.equal(h.events.matchReads.length, 2);
+  assert.equal(h.events.ensuredMatches.length, 1);
+  assert.equal(h.events.ensuredMatches[0].inviteId, "invite");
+  assert.equal(h.events.ensuredMatches[0].matchId, "invite");
+  assert.notEqual(h.instance.activeContext, previousContext);
+  assert.equal(h.instance.activeContext.actorUid, "host");
+  assert.deepEqual(h.instance.myMatch, ensuredMatch);
+  assert.equal(h.events.ui.filter((value) => value === "recover").length, 2);
+  assert.deepEqual(h.events.firebaseReads, []);
+  h.instance.detachFromMatchSession();
+});
+
+test("a failed Worker snapshot during reconnect preserves the session without ensuring or reading Firebase", async () => {
+  const h = harness({
+    readMatch: (attempt) => {
+      if (attempt > 1) throw new Error("snapshot-unavailable");
+      return match;
+    },
+  });
+  await h.connect();
+  const previousContext = h.instance.activeContext;
+  const previousChannel = h.channel();
+  h.instance.connectToGame("login", "invite", false);
+  await settle();
+  assert.equal(h.events.errors.length, 1);
+  assert.equal(h.events.errors[0][0], "Failed to connect to invite:");
+  assert.equal(h.events.errors[0][1].message, "snapshot-unavailable");
+  assert.equal(h.events.matchReads.length, 2);
+  assert.deepEqual(h.events.ensuredMatches, []);
+  assert.equal(h.instance.activeContext, previousContext);
+  assert.equal(h.channel(), previousChannel);
+  assert.deepEqual(h.instance.myMatch, match);
+  assert.equal(h.events.ui.filter((value) => value === "recover").length, 1);
+  assert.deepEqual(h.events.firebaseReads, []);
+  h.instance.detachFromMatchSession();
+});
+
+for (const invalidation of ["account replacement", "navigation"]) {
+  test(`a missing reconnect snapshot after ${invalidation} cannot ensure or restore the old match`, async () => {
+    const pending = deferred();
+    const h = harness({
+      readMatch: (attempt) => (attempt === 1 ? match : pending.promise),
+    });
+    await h.connect();
+    const unsubscribe = h.instance.subscribeToAuthChanges(() => {});
+    h.instance.connectToGame("login", "invite", false);
+    await settle();
+    assert.equal(h.events.matchReads.length, 2);
+    const { signal } = h.events.matchReads[1];
+    assert.equal(signal.aborted, false);
+    if (invalidation === "account replacement") {
+      h.authChange({ uid: "replacement" });
+    } else {
+      h.instance.detachFromMatchSession();
+    }
+    const contextAfterInvalidation = h.instance.activeContext;
+    assert.equal(signal.aborted, true);
+    pending.resolve(null);
+    await settle();
+    assert.deepEqual(h.events.errors, []);
+    assert.deepEqual(h.events.ensuredMatches, []);
+    assert.equal(h.instance.activeContext, contextAfterInvalidation);
+    assert.equal(h.events.ui.filter((value) => value === "recover").length, 1);
+    assert.deepEqual(h.events.firebaseReads, []);
+    unsubscribe();
+    h.instance.detachFromMatchSession();
+  });
+}
 
 test("private automatch denial joins before metadata retry and never reads the old invite root", async () => {
   const paired = response(snapshot({ inviteId: "auto_invite" }), {
@@ -477,6 +576,7 @@ test("a late bootstrap result after account replacement cannot activate a game",
   pending.resolve(response());
   await settle();
   assert.equal(h.instance.activeContext, null);
+  assert.equal(h.events.matchReads.length, 0);
   assert.equal(h.events.firebaseReads.length, 0);
   assert.equal(h.events.channels.length, 0);
 });
@@ -499,7 +599,11 @@ test("uncertain manual joining recovers the authoritative viewer and paired meta
   });
   await h.connect(true);
   assert.equal(h.instance.activeContext.role, "guest");
-  assert.deepEqual(h.events.firebaseReads, ["players/guest/matches/invite"]);
+  assert.deepEqual(
+    h.events.matchReads.map(({ playerId, matchId }) => ({ playerId, matchId })),
+    [{ playerId: "guest", matchId: "invite" }],
+  );
+  assert.deepEqual(h.events.firebaseReads, []);
   h.instance.detachFromMatchSession();
 });
 

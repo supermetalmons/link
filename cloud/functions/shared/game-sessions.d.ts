@@ -22,6 +22,18 @@ export type GameSessionMatch = {
 
 export type HistoricalMatchRecord = GameSessionMatch;
 
+export const MATCH_SNAPSHOT_PATH: "/matches/snapshot";
+
+export type ReadMatchSnapshotRequest = {
+  playerId: string;
+  matchId: string;
+};
+
+export type ReadMatchSnapshotResponse = ReadMatchSnapshotRequest & {
+  ok: true;
+  match: GameSessionMatch | null;
+};
+
 export type HistoricalMatchPair = {
   matchId: string;
   hostPlayerId: string;
@@ -164,6 +176,13 @@ export function isHistoricalMatchPair(
 export function normalizeHistoricalMatchRecord(
   value: unknown,
 ): HistoricalMatchRecord | null;
+export function normalizeMatchSnapshot(value: unknown): GameSessionMatch | null;
+export function isReadMatchSnapshotRequest(
+  value: unknown,
+): value is ReadMatchSnapshotRequest;
+export function isReadMatchSnapshotResponse(
+  value: unknown,
+): value is ReadMatchSnapshotResponse;
 export function isReadHistoricalMatchRequest(
   value: unknown,
 ): value is ReadHistoricalMatchRequest;

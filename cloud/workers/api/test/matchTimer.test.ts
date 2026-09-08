@@ -279,7 +279,8 @@ function claimRepository({
   let opponentReads = 0;
   let storedClaim: unknown = initialClaim;
   const value: ClaimTimerRepository = {
-    getRtdbPath: async (path) => {
+    getRtdbPath: async (path, _query, signal) => {
+      signal?.throwIfAborted();
       paths.push(path);
       if (path.startsWith("players/player-1/matches/")) {
         playerReads++;
@@ -296,7 +297,8 @@ function claimRepository({
       if (path.startsWith("invites/")) return invite;
       assert.fail(`unexpected RTDB path ${path}`);
     },
-    patchRtdbRoot: async (updates) => {
+    patchRtdbRoot: async (updates, signal) => {
+      signal?.throwIfAborted();
       patchAttempts++;
       if (patchAttempts <= failPatchAttempts) {
         throw new Error("patch-failed");
@@ -308,7 +310,8 @@ function claimRepository({
         "login-2": "profile-1",
         "player-1": typeof profile === "string" ? profile : null,
       }),
-    transactRtdbPath: async (path, updater) => {
+    transactRtdbPath: async (path, updater, signal) => {
+      signal?.throwIfAborted();
       paths.push(path);
       const decision = updater(storedClaim) as {
         commit?: boolean;
@@ -1124,6 +1127,116 @@ test("claims an expired timer and clears both protected markers", async () => {
       },
     },
   ]);
+});
+
+test("finishes a timer claim when the caller aborts before fence acknowledgment", async () => {
+  const repo = claimRepository();
+  const controller = new AbortController();
+  let nowMs = 1_001;
+  const transact = repo.value.transactRtdbPath;
+  repo.value.transactRtdbPath = async (path, updater, signal) => {
+    const result = await transact(path, updater, signal);
+    controller.abort();
+    signal?.throwIfAborted();
+    return result;
+  };
+  repo.coordination.timerRows.set("player-1/match-1", {
+    timer: "7;1000",
+    turnNumber: 7,
+    updatedAtMs: 1,
+  });
+
+  const response = await claimMatchVictoryByTimer(
+    identity,
+    request,
+    repo.value,
+    {
+      assertMutationAllowed: async () => {
+        nowMs = 5_001;
+      },
+      now: () => nowMs,
+      resolveGame: () => gameState(),
+      signal: controller.signal,
+    },
+  );
+
+  assert.deepEqual(response, { ok: true });
+  assert.equal(controller.signal.aborted, true);
+  assert.deepEqual(repo.transactions[0].value, {
+    playerId: request.playerId,
+    opponentId: request.opponentId,
+    inviteId: request.inviteId,
+    status: "pending",
+    timer: "7;1000",
+    turnNumber: 7,
+    expiresAtMs: 35_001,
+  });
+  assert.equal(repo.patches.length, 1);
+  assert.equal(repo.patches[0]["players/player-1/matches/match-1/timer"], "gg");
+  assert.equal(repo.coordination.timerRows.size, 0);
+});
+
+for (const failure of ["read-failed", "snapshot-changed"]) {
+  test(`releases the claim fence after caller cancellation and ${failure}`, async () => {
+    const repo = claimRepository({
+      liveOpponent:
+        failure === "snapshot-changed"
+          ? match("white", { flatMovesString: "new-move" })
+          : undefined,
+    });
+    const controller = new AbortController();
+    const transact = repo.value.transactRtdbPath;
+    repo.value.transactRtdbPath = async (path, updater, signal) => {
+      const result = await transact(path, updater, signal);
+      controller.abort();
+      signal?.throwIfAborted();
+      return result;
+    };
+    const read = repo.value.getRtdbPath;
+    repo.value.getRtdbPath = async (path, query, signal) => {
+      if (failure === "read-failed" && repo.transactions.length > 0) {
+        throw new Error("fresh-read-failed");
+      }
+      return read(path, query, signal);
+    };
+
+    await assert.rejects(
+      () =>
+        claimMatchVictoryByTimer(identity, request, repo.value, {
+          now: () => 1_001,
+          resolveGame: () => gameState(),
+          signal: controller.signal,
+        }),
+      failure === "read-failed" ? /fresh-read-failed/ : /game state changed/,
+    );
+
+    assert.equal(controller.signal.aborted, true);
+    assert.equal(repo.transactions.length, 2);
+    assert.deepEqual(repo.transactions[1], {
+      path: "matchTimerClaims/match-1",
+      value: null,
+    });
+    assert.deepEqual(repo.patches, []);
+  });
+}
+
+test("does not acquire a claim fence when the caller cancels during admission", async () => {
+  const repo = claimRepository();
+  const controller = new AbortController();
+
+  await assert.rejects(
+    () =>
+      claimMatchVictoryByTimer(identity, request, repo.value, {
+        assertMutationAllowed: async () => controller.abort(),
+        now: () => 1_001,
+        resolveGame: () => gameState(),
+        signal: controller.signal,
+      }),
+    { name: "AbortError" },
+  );
+
+  assert.deepEqual(repo.transactions, []);
+  assert.deepEqual(repo.patches, []);
 });
 
 test("authorizes same-profile timer claims and rejects unrelated identities", async () => {

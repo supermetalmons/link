@@ -36,6 +36,7 @@ const {
   removeNavigationGameViaApi,
   readNavigationGamesViaApi,
   readHistoricalMatchPairViaApi,
+  readMatchSnapshotViaApi,
   readInviteRoleViaApi,
   readProfileEventPrizesViaApi,
   readWagerFrozenViaApi,
@@ -261,6 +262,232 @@ test("frozen token refresh remains bound to the original login", async () => {
     (error) => error.code === "unauthenticated",
   );
   assert.equal(fetches, 1);
+});
+
+const matchSnapshotRequest = { playerId: "actor", matchId: "abcdefghijk" };
+const matchSnapshotResponse = (overrides = {}) => ({
+  ok: true,
+  ...matchSnapshotRequest,
+  match: {
+    version: 1,
+    color: "white",
+    emojiId: 1,
+    aura: "",
+    gameVariant: "Classic",
+    fen: "fen",
+    status: "",
+    flatMovesString: "move",
+    timer: "",
+  },
+  ...overrides,
+});
+
+test("reads public match snapshots and explicit absence without authentication or caching", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const caller = new AbortController();
+  const calls = [];
+  for (const payload of [
+    matchSnapshotResponse(),
+    matchSnapshotResponse({ match: null }),
+  ]) {
+    globalThis.fetch = async (input, init) => {
+      calls.push({ input: String(input), init });
+      return jsonResponse(payload);
+    };
+    assert.deepEqual(
+      await readMatchSnapshotViaApi(matchSnapshotRequest, {
+        signal: caller.signal,
+      }),
+      payload,
+    );
+  }
+  assert.equal(calls.length, 2);
+  for (const { input, init } of calls) {
+    assert.equal(
+      input,
+      "https://api.mons.link/matches/snapshot?playerId=actor&matchId=abcdefghijk",
+    );
+    assert.equal(init.method, "GET");
+    assert.equal(init.cache, "no-store");
+    assert.equal(new Headers(init.headers).has("Authorization"), false);
+    assert.equal(init.body, undefined);
+  }
+  caller.abort();
+  t.mock.timers.runAll();
+  for (const { init } of calls) assert.equal(init.signal.aborted, false);
+});
+
+test("rejects invalid match snapshot requests before transport", async () => {
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches += 1;
+    return jsonResponse(matchSnapshotResponse());
+  };
+  for (const request of [
+    { ...matchSnapshotRequest, playerId: " actor " },
+    { ...matchSnapshotRequest, playerId: "a/b" },
+    { ...matchSnapshotRequest, matchId: "" },
+    { ...matchSnapshotRequest, inviteId: "extra" },
+  ]) {
+    await assert.rejects(
+      readMatchSnapshotViaApi(request),
+      (error) => error.code === "invalid-argument",
+    );
+  }
+  for (const timeoutMs of [0, -1, NaN, Infinity]) {
+    await assert.rejects(
+      readMatchSnapshotViaApi(matchSnapshotRequest, { timeoutMs }),
+      (error) => error.code === "invalid-argument",
+    );
+  }
+  assert.equal(fetches, 0);
+});
+
+test("match snapshot failures never become absence or trigger retries", async () => {
+  const invalidResponses = [
+    jsonResponse(matchSnapshotResponse({ playerId: "other" })),
+    jsonResponse(matchSnapshotResponse({ matchId: "other" })),
+    jsonResponse(matchSnapshotResponse({ match: {} })),
+    jsonResponse({ ...matchSnapshotResponse(), extra: true }),
+    jsonResponse({ ok: true, ...matchSnapshotRequest }),
+    jsonResponse({ error: "unavailable" }, 503),
+    new Response("{malformed"),
+    new Response("x".repeat(MAX_GAME_SESSION_RESPONSE_BYTES + 1)),
+    new Response("{}", {
+      headers: {
+        "Content-Length": String(MAX_GAME_SESSION_RESPONSE_BYTES + 1),
+      },
+    }),
+  ];
+  let fetches = 0;
+  for (const response of invalidResponses) {
+    globalThis.fetch = async () => {
+      fetches += 1;
+      return response;
+    };
+    await assert.rejects(
+      readMatchSnapshotViaApi(matchSnapshotRequest),
+      (error) =>
+        error instanceof GameplayApiError && error.code === "unavailable",
+    );
+  }
+  assert.equal(fetches, invalidResponses.length);
+  globalThis.fetch = async () => {
+    fetches += 1;
+    return jsonResponse({ error: "unauthenticated" }, 401);
+  };
+  await assert.rejects(
+    readMatchSnapshotViaApi(matchSnapshotRequest),
+    (error) => error.code === "unauthenticated",
+  );
+  assert.equal(fetches, invalidResponses.length + 1);
+  globalThis.fetch = async () => {
+    throw new TypeError("network unavailable");
+  };
+  await assert.rejects(
+    readMatchSnapshotViaApi(matchSnapshotRequest),
+    (error) => error.code === "unavailable",
+  );
+});
+
+test("match snapshot cancellation aborts transport even when fetch ignores cancellation", async () => {
+  const caller = new AbortController();
+  let signal;
+  let resolveFetch;
+  let canceled = false;
+  globalThis.fetch = (_input, init) => {
+    signal = init.signal;
+    return new Promise((resolve) => (resolveFetch = resolve));
+  };
+  const request = readMatchSnapshotViaApi(matchSnapshotRequest, {
+    signal: caller.signal,
+  });
+  caller.abort();
+  await assert.rejects(request, (error) => error.code === "aborted");
+  assert.equal(signal.aborted, true);
+  resolveFetch(
+    new Response(
+      new ReadableStream({
+        cancel() {
+          canceled = true;
+        },
+      }),
+    ),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(canceled, true);
+  let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches += 1;
+  };
+  await assert.rejects(
+    readMatchSnapshotViaApi(matchSnapshotRequest, { signal: caller.signal }),
+    (error) => error.code === "aborted",
+  );
+  assert.equal(fetches, 0);
+});
+
+test("match snapshot deadline aborts fetch without relying on fetch rejection", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let signal;
+  let fetches = 0;
+  globalThis.fetch = (_input, init) => {
+    fetches += 1;
+    signal = init.signal;
+    return new Promise(() => {});
+  };
+  const request = readMatchSnapshotViaApi(matchSnapshotRequest, {
+    timeoutMs: 1200,
+  });
+  const rejected = assert.rejects(
+    request,
+    (error) =>
+      error.code === "unavailable" &&
+      error.message === "Gameplay request timed out.",
+  );
+  t.mock.timers.tick(1199);
+  assert.equal(signal.aborted, false);
+  t.mock.timers.tick(1);
+  await rejected;
+  assert.equal(signal.aborted, true);
+  assert.equal(fetches, 1);
+});
+
+test("match snapshot deadline and caller cancellation cover stalled response bodies", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const callerCanceled of [false, true]) {
+    const caller = new AbortController();
+    let signal;
+    let canceled = false;
+    globalThis.fetch = async (_input, init) => {
+      signal = init.signal;
+      return new Response(
+        new ReadableStream({
+          cancel() {
+            canceled = true;
+          },
+        }),
+      );
+    };
+    const request = readMatchSnapshotViaApi(matchSnapshotRequest, {
+      signal: caller.signal,
+    });
+    const rejected = assert.rejects(
+      request,
+      (error) => error.code === (callerCanceled ? "aborted" : "unavailable"),
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    if (callerCanceled) {
+      caller.abort();
+    } else {
+      t.mock.timers.tick(29_999);
+      assert.equal(signal.aborted, false);
+      t.mock.timers.tick(1);
+    }
+    await rejected;
+    assert.equal(signal.aborted, true);
+    assert.equal(canceled, true);
+  }
 });
 
 test("reads public historical matches without an auth token", async () => {

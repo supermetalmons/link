@@ -12,7 +12,6 @@ import {
   ref,
   onValue,
   off,
-  get,
   runTransaction,
 } from "firebase/database";
 import {
@@ -117,6 +116,7 @@ import {
   postponeEventStartViaApi,
   proposeRematchViaApi,
   readHistoricalMatchPairViaApi,
+  readMatchSnapshotViaApi,
 } from "../services/gameplayApi";
 import { resetNftCache } from "../services/nftCache";
 import { resetPlayerMetadataCaches } from "../utils/playerMetadataCache";
@@ -4128,6 +4128,7 @@ class Connection {
       sessionGuard() &&
       this.isContextActive(contextId, contextEpoch) &&
       !!activeContext &&
+      this.isCurrentAuthUser(activeContext.loginUid) &&
       activeContext.matchId === matchId &&
       activeContext.actorUid === playerUid
     );
@@ -4315,23 +4316,33 @@ class Connection {
         return false;
       }
       const attemptTimeoutMs = Math.min(remainingMs, 1200);
-      const matchRef = ref(this.db, `players/${playerUid}/matches/${matchId}`);
       try {
-        const verificationResult = await this.runMoveTransactionWithTimeout(
-          get(matchRef),
-          attemptTimeoutMs,
+        const verificationResult = await readMatchSnapshotViaApi(
+          { playerId: playerUid, matchId },
+          { timeoutMs: attemptTimeoutMs },
         );
-        if (!verificationResult.timedOut) {
-          const persistedMatch = verificationResult.value.val() as Match | null;
-          const persistedFlatMovesString =
-            persistedMatch?.flatMovesString ?? "";
-          if (
-            persistedMatch &&
-            persistedMatch.fen === expectedFen &&
-            persistedFlatMovesString === expectedFlatMovesString
-          ) {
-            return true;
-          }
+        if (
+          !this.shouldContinueCriticalMoveSend(
+            requestId,
+            matchId,
+            playerUid,
+            contextId,
+            contextEpoch,
+            sessionGuard,
+          ) ||
+          Date.now() - verificationStartedAt >=
+            this.moveSendPostRetryVerificationWindowMs
+        ) {
+          return false;
+        }
+        const persistedMatch = verificationResult.match;
+        const persistedFlatMovesString = persistedMatch?.flatMovesString ?? "";
+        if (
+          persistedMatch &&
+          persistedMatch.fen === expectedFen &&
+          persistedFlatMovesString === expectedFlatMovesString
+        ) {
+          return true;
         }
       } catch {}
       if (
@@ -4960,15 +4971,16 @@ class Connection {
         const canWrite = role !== "watch" && !!actorUid;
         let myMatch: Match | null = null;
         if (canWrite && actorUid) {
-          const myMatchSnapshot = await get(
-            ref(this.db, `players/${actorUid}/matches/${matchId}`),
+          const myMatchSnapshot = await readMatchSnapshotViaApi(
+            { playerId: actorUid, matchId },
+            { signal: controller.signal },
           );
           tokenProvider.assertCurrentUser();
           if (!isConnectActive()) {
             return;
           }
-          myMatch = myMatchSnapshot.val() as Match | null;
-          if (!myMatch) {
+          myMatch = myMatchSnapshot.match as Match | null;
+          if (myMatch === null) {
             try {
               const ensured = await ensureMatchViaApi(
                 {
