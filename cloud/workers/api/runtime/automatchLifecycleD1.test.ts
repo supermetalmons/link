@@ -23,6 +23,7 @@ import {
 import { createGameSessionMutationLockStore } from "../src/gameplayCoordinationD1.ts";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import { settleAutomatchProfileGameProjectionOutbox } from "../src/profileGameProjection.ts";
 import type {
   ProfileOwnershipQuery,
   ProfileOwnershipSnapshot,
@@ -527,6 +528,76 @@ describe("automatch lifecycle through D1 persistence", () => {
     expect(firebase.read(`invites/${outcomes[0].inviteId}`)).toMatchObject({
       automatchStateHint: "canceled",
     });
+    await assertSettled();
+  });
+
+  it("cancels once when a Queue consumer settles the outbox during preparation", async () => {
+    const firebase = new LiveFirebase();
+    const host = client(firebase, "host");
+    const pending = await start(host);
+    if (!pending.ok) throw new Error("expected-pending-invite");
+    const store = createAutomatchD1Store(db);
+    const outbox = await store.getPath(
+      `profileGameProjectionOutbox/automatch/${pending.inviteId}`,
+    );
+    if (!record(outbox)) throw new Error("expected-projection-outbox");
+    let preparing = false;
+    let preparations = 0;
+    const racingDb = new Proxy(db, {
+      get(target, property) {
+        if (property === "prepare") {
+          return (query: string) => {
+            if (query.startsWith("INSERT INTO game_session_transitions "))
+              preparing = true;
+            return target.prepare(query);
+          };
+        }
+        if (property === "batch") {
+          return async (statements: D1PreparedStatement[]) => {
+            if (preparing) {
+              preparing = false;
+              if (++preparations === 1) {
+                expect(
+                  await settleAutomatchProfileGameProjectionOutbox(
+                    {
+                      kind: "automatch-profile-game-projection",
+                      inviteId: pending.inviteId,
+                      requestId: String(outbox.requestId),
+                    },
+                    host.repository,
+                  ),
+                ).toBe(true);
+              }
+            }
+            return target.batch(statements);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const writes = firebase.writePaths.length;
+    const canceler = client(firebase, "host", racingDb);
+    expect(
+      await cancelAutomatch(
+        canceler.identity,
+        canceler.repository,
+        canceler.dependencies,
+      ),
+    ).toEqual({ ok: true });
+    expect(preparations).toBe(2);
+    expect(firebase.writePaths.slice(writes)).toEqual([
+      `invites/${pending.inviteId}`,
+    ]);
+    expect(firebase.read(`invites/${pending.inviteId}`)).toMatchObject({
+      automatchStateHint: "canceled",
+      sessionTransition: { sequence: 2 },
+    });
+    expect(await store.getPath(`automatch/${pending.inviteId}`)).toBeNull();
+    expect(
+      await store.getPath(`telegramAutomatches/${pending.inviteId}`),
+    ).toMatchObject({ lifecycle: "canceled", generation: 2 });
+    expect(canceler.queued).toHaveLength(2);
     await assertSettled();
   });
 

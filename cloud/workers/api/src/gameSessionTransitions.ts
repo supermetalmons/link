@@ -1,5 +1,6 @@
 import {
   createAutomatchD1Store,
+  isAutomatchRevisionConflict,
   parseAutomatchPath,
   type AutomatchRecordMutation,
 } from "./automatchD1.ts";
@@ -10,6 +11,7 @@ export const GAME_SESSION_CREATION_FIELD = "sessionCreation";
 export const GAME_SESSION_TRANSITION_FIELD = "sessionTransition";
 export const GAME_SESSION_TRANSITION_SWEEP_LIMIT = 10;
 export const GAME_SESSION_TRANSITION_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
+const MAX_PREPARATION_ATTEMPTS = 3;
 
 export type GameSessionLeaseProof = {
   lockId: string;
@@ -600,119 +602,131 @@ export function createGameSessionTransitions({
       !isSafeFirebaseKey(transitionId)
     )
       fail("invalid-intent-id");
-    const mutations = await store.preparePatch(
-      split.canonicalUpdates,
-      createdAtMs,
-      signal,
-    );
-    const resources = [
-      ...new Set([
-        ...leases.map((proof) => proof.lockId),
-        ...split.operationResources,
-        ...loginResources(mutations),
-      ]),
-    ].sort();
-    const inviteUpdates = Object.fromEntries(
-      Object.entries(split.inviteUpdates).map(([field, value]) => [
-        field,
-        resolveValue(value, readField(currentInvite, field), createdAtMs),
-      ]),
-    );
-    const expectedFields = Object.fromEntries(
-      [
+    for (let attempt = 0; attempt < MAX_PREPARATION_ATTEMPTS; attempt++) {
+      signal?.throwIfAborted();
+      const mutations = await store.preparePatch(
+        split.canonicalUpdates,
+        createdAtMs,
+        signal,
+      );
+      const resources = [
         ...new Set([
-          "hostId",
-          "guestId",
-          "eventOwned",
-          "eventId",
-          ...Object.keys(inviteUpdates),
+          ...leases.map((proof) => proof.lockId),
+          ...split.operationResources,
+          ...loginResources(mutations),
         ]),
-      ].map((field) => [field, readField(currentInvite, field)]),
-    );
-    const contentDigest = await digest({
-      transitionId,
-      inviteId: split.inviteId,
-      mutations,
-      inviteUpdates,
-      expectedFields,
-      expectedMarker,
-      matchUpdates: split.matchUpdates,
-      resources,
-      createdAtMs,
-    });
-    const creations = await Promise.all(
-      split.matchUpdates.map(async ({ path, value }) => ({
-        path,
-        value: resolveValue(value, null, createdAtMs) as JsonRecord,
-        marker: await digest({ transitionId, path, digest: contentDigest }),
-      })),
-    );
-    const payload: TransitionPayload = {
-      version: 1,
-      inviteId: split.inviteId,
-      transitionId,
-      digest: contentDigest,
-      resources,
-      mutations,
-      creations,
-      invite: {
-        existed: currentInvite !== null,
-        expectedMarker,
+      ].sort();
+      const inviteUpdates = Object.fromEntries(
+        Object.entries(split.inviteUpdates).map(([field, value]) => [
+          field,
+          resolveValue(value, readField(currentInvite, field), createdAtMs),
+        ]),
+      );
+      const expectedFields = Object.fromEntries(
+        [
+          ...new Set([
+            "hostId",
+            "guestId",
+            "eventOwned",
+            "eventId",
+            ...Object.keys(inviteUpdates),
+          ]),
+        ].map((field) => [field, readField(currentInvite, field)]),
+      );
+      const contentDigest = await digest({
+        transitionId,
+        inviteId: split.inviteId,
+        mutations,
+        inviteUpdates,
         expectedFields,
-        updates: inviteUpdates,
-        marker: { sequence, transitionId, digest: contentDigest },
-      },
-      createdAtMs,
-    };
-    signal?.throwIfAborted();
-    const leaseCheckMs = now();
-    const statements = [
-      ...(await writeGuards()),
-      db.prepare(`INSERT INTO game_session_transition_guards (singleton)
-        SELECT 0 WHERE NOT EXISTS (
-          SELECT 1 FROM automatch_runtime_control WHERE singleton = 1 AND backend = 'd1'
-        )`),
-      ...leases.map((proof) =>
-        db
-          .prepare(
-            `INSERT INTO game_session_transition_guards (singleton)
-        SELECT 0 WHERE NOT EXISTS (
-          SELECT 1 FROM game_session_mutation_locks
-          WHERE lock_id = ? AND operation_id = ? AND owner_id = ? AND expires_at_ms > ? AND writer_generation = 2
-        )`,
-          )
-          .bind(proof.lockId, proof.operationId, proof.ownerId, leaseCheckMs),
-      ),
-      ...store.buildRevisionGuardStatements(mutations),
-      db
-        .prepare(
-          "INSERT INTO game_session_transitions (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, 'pending', ?, ?)",
-        )
-        .bind(
-          transitionId,
-          split.inviteId,
-          canonical(payload),
-          createdAtMs,
-          createdAtMs,
+        expectedMarker,
+        matchUpdates: split.matchUpdates,
+        resources,
+        createdAtMs,
+      });
+      const creations = await Promise.all(
+        split.matchUpdates.map(async ({ path, value }) => ({
+          path,
+          value: resolveValue(value, null, createdAtMs) as JsonRecord,
+          marker: await digest({ transitionId, path, digest: contentDigest }),
+        })),
+      );
+      const payload: TransitionPayload = {
+        version: 1,
+        inviteId: split.inviteId,
+        transitionId,
+        digest: contentDigest,
+        resources,
+        mutations,
+        creations,
+        invite: {
+          existed: currentInvite !== null,
+          expectedMarker,
+          expectedFields,
+          updates: inviteUpdates,
+          marker: { sequence, transitionId, digest: contentDigest },
+        },
+        createdAtMs,
+      };
+      signal?.throwIfAborted();
+      const leaseCheckMs = now();
+      const statements = [
+        ...(await writeGuards()),
+        db.prepare(`INSERT INTO game_session_transition_guards (singleton)
+          SELECT 0 WHERE NOT EXISTS (
+            SELECT 1 FROM automatch_runtime_control WHERE singleton = 1 AND backend = 'd1'
+          )`),
+        ...leases.map((proof) =>
+          db
+            .prepare(
+              `INSERT INTO game_session_transition_guards (singleton)
+          SELECT 0 WHERE NOT EXISTS (
+            SELECT 1 FROM game_session_mutation_locks
+            WHERE lock_id = ? AND operation_id = ? AND owner_id = ? AND expires_at_ms > ? AND writer_generation = 2
+          )`,
+            )
+            .bind(proof.lockId, proof.operationId, proof.ownerId, leaseCheckMs),
         ),
-      ...resources.map((key) =>
+        ...store.buildRevisionGuardStatements(mutations),
         db
           .prepare(
-            "INSERT INTO game_session_transition_resources (resource_key, transition_id) VALUES (?, ?)",
+            "INSERT INTO game_session_transitions (transition_id, invite_id, payload_json, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, 'pending', ?, ?)",
           )
-          .bind(key, transitionId),
-      ),
-    ];
-    try {
-      await db.batch(statements);
-    } catch (error) {
-      const existing = await read(transitionId);
-      if (!existing || existing.payload_json !== canonical(payload))
-        throw error;
+          .bind(
+            transitionId,
+            split.inviteId,
+            canonical(payload),
+            createdAtMs,
+            createdAtMs,
+          ),
+        ...resources.map((key) =>
+          db
+            .prepare(
+              "INSERT INTO game_session_transition_resources (resource_key, transition_id) VALUES (?, ?)",
+            )
+            .bind(key, transitionId),
+        ),
+      ];
+      try {
+        await db.batch(statements);
+      } catch (error) {
+        const existing = await read(transitionId);
+        if (!existing) {
+          if (
+            isAutomatchRevisionConflict(error) &&
+            attempt + 1 < MAX_PREPARATION_ATTEMPTS
+          ) {
+            continue;
+          }
+          throw error;
+        }
+        if (existing.payload_json !== canonical(payload)) throw error;
+      }
+      const row = await read(transitionId);
+      if (!row) fail("intent-missing");
+      await apply(row, signal);
+      return;
     }
-    const row = await read(transitionId);
-    if (!row) fail("intent-missing");
-    await apply(row, signal);
   }
 
   async function sweep(

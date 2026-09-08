@@ -170,6 +170,21 @@ function pendingCount() {
     .first<number>("count");
 }
 
+function interleavePreparations(
+  store: ReturnType<typeof createAutomatchD1Store>,
+  afterPrepare: (attempt: number) => Promise<void>,
+) {
+  let attempts = 0;
+  return {
+    ...store,
+    async preparePatch(...args: Parameters<typeof store.preparePatch>) {
+      const mutations = await store.preparePatch(...args);
+      await afterPrepare(++attempts);
+      return mutations;
+    },
+  };
+}
+
 describe("recoverable D1 game-session transitions", () => {
   beforeAll(async () => {
     await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
@@ -367,6 +382,167 @@ describe("recoverable D1 game-session transitions", () => {
     expect(
       await store.getPath(`profileGameProjectionOutbox/automatch/${INVITE}`),
     ).toMatchObject({ requestId: OPERATION });
+  });
+
+  it("refreshes conflicted D1 snapshots while preserving the original transition identity and time", async () => {
+    const rtdb = new MemoryRtdb();
+    const store = createAutomatchD1Store(db, { writeGuards: () => [] });
+    const outboxPath = `profileGameProjectionOutbox/automatch/${INVITE}`;
+    await store.patchRoot({ [outboxPath]: { requestId: "older" } });
+    let nowMs = NOW;
+    let preparations = 0;
+    let ids = 0;
+    let inviteReads = 0;
+    const notifications: string[] = [];
+    await coordinator(rtdb, {
+      now: () => nowMs,
+      createId: () => `intent-${++ids}`,
+      onCommitted: async (inviteId) => {
+        notifications.push(inviteId);
+      },
+      rtdb: {
+        async getPath(path) {
+          inviteReads++;
+          return rtdb.getPath(path);
+        },
+        transactPath: rtdb.transactPath.bind(rtdb),
+      },
+      store: interleavePreparations(store, async (attempt) => {
+        preparations = attempt;
+        if (attempt !== 1) return;
+        await store.transactPath(outboxPath, () => ({
+          value: null,
+          decision: "cleared",
+        }));
+        nowMs++;
+      }),
+    }).commit(createUpdates(), await leases());
+    expect(preparations).toBe(2);
+    expect(ids).toBe(1);
+    expect(inviteReads).toBe(1);
+    expect(notifications).toEqual([INVITE]);
+    const payloadJson = await db
+      .prepare(
+        "SELECT payload_json FROM game_session_transitions WHERE transition_id = 'intent-1'",
+      )
+      .first<string>("payload_json");
+    const payload = JSON.parse(payloadJson!);
+    expect(payload.createdAtMs).toBe(NOW);
+    expect(payload.mutations).toContainEqual({
+      current: {
+        root: "profileGameProjectionOutbox/automatch",
+        key: INVITE,
+        value: null,
+        revision: 2,
+      },
+      value: {
+        requestId: OPERATION,
+        status: "pending",
+        lastQueuedAtMs: NOW,
+      },
+    });
+    expect(
+      await store.getPath(`gameplayMutationReceipts/${OPERATION}`),
+    ).toMatchObject({
+      completedAtMs: NOW,
+    });
+    expect(await rtdb.getPath(INVITE_PATH)).toMatchObject({
+      sessionTransition: { transitionId: "intent-1", digest: payload.digest },
+    });
+    expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+    expect(rtdb.writes.get(INVITE_PATH)).toBe(1);
+    expect(await pendingCount()).toBe(0);
+  });
+
+  it("bounds preparation conflicts to three attempts without publishing effects", async () => {
+    const rtdb = new MemoryRtdb();
+    const store = createAutomatchD1Store(db, { writeGuards: () => [] });
+    let preparations = 0;
+    const transitions = coordinator(rtdb, {
+      store: interleavePreparations(store, async (attempt) => {
+        preparations = attempt;
+        await store.patchRoot({
+          [`profileGameProjectionOutbox/automatch/${INVITE}`]: {
+            requestId: `concurrent-${attempt}`,
+          },
+        });
+      }),
+    });
+    await expect(
+      transitions.commit(createUpdates(), await leases()),
+    ).rejects.toThrow("automatch_revision_guard");
+    expect(preparations).toBe(3);
+    expect(rtdb.values.size).toBe(0);
+    expect(await pendingCount()).toBe(0);
+    await expect(
+      transitions.assertResourceAvailable(INVITE),
+    ).resolves.toBeUndefined();
+    expect(
+      await store.getPath(`gameplayMutationReceipts/${OPERATION}`),
+    ).toBeNull();
+  });
+
+  it.each(["lease", "abort", "database"])(
+    "stops a preparation retry when interrupted by %s failure",
+    async (failure) => {
+      const rtdb = new MemoryRtdb();
+      const store = createAutomatchD1Store(db, { writeGuards: () => [] });
+      const controller = new AbortController();
+      let preparations = 0;
+      let nowMs = NOW;
+      const transitions = coordinator(rtdb, {
+        now: () => nowMs,
+        writeGuards: () =>
+          failure === "database" && preparations === 2
+            ? [db.prepare("SELECT * FROM missing_transition_test_table")]
+            : [],
+        store: interleavePreparations(store, async (attempt) => {
+          preparations = attempt;
+          if (attempt === 1) {
+            await store.patchRoot({
+              [`profileGameProjectionOutbox/automatch/${INVITE}`]: {
+                requestId: "concurrent",
+              },
+            });
+          } else if (failure === "lease") {
+            nowMs = NOW + 60_000;
+          } else if (failure === "abort") {
+            controller.abort(new Error("test-abort"));
+          }
+        }),
+      });
+      await expect(
+        transitions.commit(createUpdates(), await leases(), controller.signal),
+      ).rejects.toThrow(
+        failure === "abort"
+          ? "test-abort"
+          : failure === "database"
+            ? "missing_transition_test_table"
+            : "CHECK constraint failed",
+      );
+      expect(preparations).toBe(2);
+      expect(rtdb.values.size).toBe(0);
+      expect(await pendingCount()).toBe(0);
+      await expect(
+        transitions.assertResourceAvailable(INVITE),
+      ).resolves.toBeUndefined();
+    },
+  );
+
+  it("does not prepare another intent after an RTDB materialization failure", async () => {
+    const rtdb = new MemoryRtdb();
+    const store = createAutomatchD1Store(db, { writeGuards: () => [] });
+    let preparations = 0;
+    rtdb.beforeWriteFailure = MATCH_PATH;
+    await expect(
+      coordinator(rtdb, {
+        store: interleavePreparations(store, async (attempt) => {
+          preparations = attempt;
+        }),
+      }).commit(createUpdates(), await leases()),
+    ).rejects.toThrow("before-write");
+    expect(preparations).toBe(1);
+    expect(await pendingCount()).toBe(1);
   });
 
   it("cannot reserve an expired, stolen, or legacy lease", async () => {
