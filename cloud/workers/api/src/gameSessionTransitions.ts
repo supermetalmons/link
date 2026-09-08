@@ -6,6 +6,7 @@ import {
 } from "./automatchD1.ts";
 import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { buildLoginMatchDiscoveryStatements } from "./loginMatchDiscoveryD1.ts";
 
 export const GAME_SESSION_CREATION_FIELD = "sessionCreation";
 export const GAME_SESSION_TRANSITION_FIELD = "sessionTransition";
@@ -502,6 +503,29 @@ export function createGameSessionTransitions({
           )`,
             )
             .bind(key, payload.transitionId),
+        ),
+        ...buildLoginMatchDiscoveryStatements(
+          db,
+          payload.creations.map((creation) => {
+            const [root, loginUid, matches, matchId, extra] = pathParts(
+              creation.path,
+            );
+            if (
+              root !== "players" ||
+              matches !== "matches" ||
+              !matchId ||
+              extra
+            )
+              fail("invalid-match-discovery-path");
+            return {
+              loginUid,
+              matchId,
+              inviteId: payload.inviteId,
+              resolution: "resolved",
+              provenance: "capture",
+            };
+          }),
+          now(),
         ),
         ...store.buildCommitStatements(payload.mutations, now()),
         db

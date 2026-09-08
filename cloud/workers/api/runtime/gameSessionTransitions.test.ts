@@ -192,6 +192,10 @@ describe("recoverable D1 game-session transitions", () => {
 
   beforeEach(async () => {
     await db.batch([
+      db.prepare("DELETE FROM login_match_discovery"),
+      db.prepare(
+        "UPDATE login_match_discovery_control SET capture_enforced = 1, capture_version_id = '11111111-1111-4111-8111-111111111111', capture_started_at_ms = 1 WHERE singleton = 1",
+      ),
       db.prepare(
         "UPDATE automatch_runtime_control SET backend = 'd1' WHERE singleton = 1",
       ),
@@ -210,6 +214,11 @@ describe("recoverable D1 game-session transitions", () => {
     const rtdb = new MemoryRtdb();
     const store = createAutomatchD1Store(db, { writeGuards: () => [] });
     rtdb.beforeWrite = async (path) => {
+      expect(
+        await db
+          .prepare("SELECT COUNT(*) AS count FROM login_match_discovery")
+          .first("count"),
+      ).toBe(0);
       expect(await store.getPath(`automatch/${INVITE}`)).toBeNull();
       expect(
         await store.getPath(`gameplayMutationReceipts/${OPERATION}`),
@@ -221,6 +230,18 @@ describe("recoverable D1 game-session transitions", () => {
         });
     };
     await coordinator(rtdb).commit(createUpdates(), await leases());
+    expect(
+      await db
+        .prepare(
+          "SELECT login_uid, match_id, invite_id, provenance FROM login_match_discovery",
+        )
+        .first(),
+    ).toEqual({
+      login_uid: HOST,
+      match_id: INVITE,
+      invite_id: INVITE,
+      provenance: "capture",
+    });
     expect(await store.getPath(`automatch/${INVITE}`)).toEqual({
       uid: HOST,
       timestamp: NOW,
@@ -240,6 +261,59 @@ describe("recoverable D1 game-session transitions", () => {
         )
         .first("count"),
     ).toBe(0);
+  });
+
+  it("keeps the receipt and projection outbox unpublished when discovery capture fails", async () => {
+    const rtdb = new MemoryRtdb();
+    const transitions = coordinator(rtdb);
+    await db
+      .prepare(
+        `CREATE TRIGGER test_discovery_capture_failure
+      BEFORE INSERT ON login_match_discovery
+      BEGIN SELECT RAISE(ABORT, 'test-discovery-unavailable'); END;`,
+      )
+      .run();
+    try {
+      await expect(
+        transitions.commit(createUpdates(), await leases()),
+      ).rejects.toThrow("test-discovery-unavailable");
+      expect(await pendingCount()).toBe(1);
+      expect(await rtdb.getPath(MATCH_PATH)).toMatchObject({ fen: "seed" });
+      expect(
+        await db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM game_session_mutation_receipts",
+          )
+          .first("count"),
+      ).toBe(0);
+      expect(
+        await db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM game_session_projection_outbox",
+          )
+          .first("count"),
+      ).toBe(0);
+    } finally {
+      await db.exec("DROP TRIGGER test_discovery_capture_failure");
+    }
+    await transitions.recoverResource(INVITE);
+    expect(await pendingCount()).toBe(0);
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM login_match_discovery")
+        .first("count"),
+    ).toBe(1);
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM game_session_mutation_receipts")
+        .first("count"),
+    ).toBe(1);
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM game_session_projection_outbox")
+        .first("count"),
+    ).toBe(1);
+    expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
   });
 
   it("keeps reservations after a failed RTDB write and recovers through login and operation keys", async () => {
@@ -686,7 +760,47 @@ describe("recoverable D1 game-session transitions", () => {
       fen: "mirrored",
       sessionCreation: expect.any(String),
     });
+    expect(
+      await db
+        .prepare(
+          "SELECT login_uid, match_id, invite_id FROM login_match_discovery",
+        )
+        .first(),
+    ).toEqual({
+      login_uid: HOST,
+      match_id: INVITE,
+      invite_id: INVITE,
+    });
   });
+
+  for (const matchId of [INVITE, `${INVITE}1`]) {
+    it(`captures the guest match path for ${matchId} independently of the caller login`, async () => {
+      const actorUid = "stored-guest-actor";
+      const rtdb = new MemoryRtdb();
+      rtdb.values.set(INVITE_PATH, { hostId: HOST, guestId: actorUid });
+      await coordinator(rtdb).commit(
+        {
+          [`players/${actorUid}/matches/${matchId}`]: {
+            fen: "guest-seed",
+            gameVariant: "v1",
+          },
+          ...receiptUpdates(),
+        },
+        await leases([INVITE]),
+      );
+      expect(
+        await db
+          .prepare(
+            "SELECT login_uid, match_id, invite_id FROM login_match_discovery",
+          )
+          .first(),
+      ).toEqual({
+        login_uid: actorUid,
+        match_id: matchId,
+        invite_id: INVITE,
+      });
+    });
+  }
 
   it("does not replace prepared preconditions or rematch seeds during recovery", async () => {
     const rtdb = new MemoryRtdb();

@@ -117,6 +117,38 @@ npx wrangler tail mons-link-api --version-id <version-id> --search profile-owner
 
 `upload:api` sends no production traffic. `promote:api` requires an explicit Version ID. `deploy:api:triggers` applies routes, Cron, Workflows and configured Queue consumers; removing an omitted consumer requires an explicit operator action. Existing D1 schema migrations remain the current schema history.
 
+### Account-link game discovery cutover
+
+The cutover completed on September 8, 2026: 9,664 resolved game mappings across 2,681 Firebase player records were verified and activated in D1. API version `51cc6aa9-7bab-4ab7-b788-33705f4049cc` includes the follow-up fix that lets ordinary session writes reach their existing journal. Use this version or a later capture-aware build for rollback; earlier cutover builds incorrectly rejected ordinary game creation. Current source requires active D1 discovery and has no Firebase discovery fallback. Later compatible changes use the routine API release path. The steps below document the initial staged cutover.
+
+This additive migration moves only account-link match-key discovery and historical invite resolution into `PROFILE_GAMES_DB.login_match_discovery`. Live matches, timer claims, Firebase Auth, and invite source metadata remain in Firebase. Canonical ownership and existing profile-link jobs remain in `PROFILE_DB`. Catch-up retains its exact request/cursor guards and reads bounded D1 pages after activation; invite recomputation still reads the retained gameplay source.
+
+Prepare and validate migrations `0014_login_match_discovery.sql`, `0015_login_match_discovery_control.sql`, and `0016_login_match_discovery_completion_guard.sql`, the capture-aware API, runtime tests, operator rehearsal, and a private artifact directory first. Upload the validated capture candidate, apply the additive migrations, and promote its explicit Version ID to 100%. No frontend, Firebase rules, trigger configuration, Queue pause, Workflow restart, or global write freeze is needed. The existing automatch persistence backend must already be D1.
+
+Use the existing `CLOUDFLARE_API_TOKEN` process environment and an explicitly selected private Firebase service-account credential file. Keep credentials and artifacts outside the repository, with owned mode-0700 artifact directories and mode-0600 files. The operator does not print player IDs, match IDs, or credential contents. Run the same exact deployed capture Version ID throughout the cutover:
+
+```sh
+npm run manage:login-match-discovery -- --status
+npm run manage:login-match-discovery -- --preflight --directory /secure/login-match-discovery --candidate-version-id <capture-version-id>
+npm run manage:login-match-discovery -- --export --directory /secure/login-match-discovery --firebase-credentials /secure/firebase-service-account.json
+npm run manage:login-match-discovery -- --import --directory /secure/login-match-discovery
+npm run manage:login-match-discovery -- --verify --directory /secure/login-match-discovery --firebase-credentials /secure/firebase-service-account.json --candidate-version-id <capture-version-id>
+npm run manage:login-match-discovery -- --activate --directory /secure/login-match-discovery --firebase-credentials /secure/firebase-service-account.json --candidate-version-id <capture-version-id>
+npm run manage:login-match-discovery -- --status
+```
+
+`--preflight` is the explicit capture-enforcement step. It verifies the exact sole 100% API deployment, disabled Worker subdomain/previews, the D1 automatch backend, and the installed completion guard before recording immutable capture version/time evidence and enabling that guard. An old session writer cannot complete an uncaptured transition: its completion batch rolls back, retaining the pending intent for capture-aware scheduled recovery. Capture remains enforced through export, import, and activation. Do not replace the capture version or disable the guard during the cutover.
+
+Export streams the unfiltered shallow `/players` and `/invites` inventories, then each player's shallow match-key inventory. It never combines `shallow` with Firebase query filters. A protected local SQLite spool bounds memory and sorts all keys by UTF-16 code units before publishing immutable pages of at most 200 keys. Every source stream must reach a valid end; malformed, oversized, truncated, or duplicate input leaves the export incomplete. Interrupted source streams restart from the beginning; completed immutable inventories and player exports are reused. All RTDB players are inventoried, including anonymous users and records whose Auth account has been deleted. Existing canonical profile owners or visible navigation rows are not a substitute for that inventory.
+
+The manifest accounts for every exported player and match key with counts, page digests, completion proofs, and capture generation. Historical resolution preserves exact invite-ID priority, then accepts only one existing rematch-prefix candidate. Missing and ambiguous resolutions remain explicit evidence and index rows. Import uses bounded parameterized batches, does not overwrite conflicting resolved mappings, and may coexist with idempotent capture. A resolved capture may supersede an unresolved historical backfill; source verification ignores timestamps/provenance except when proving concurrent additions came from capture.
+
+Before publishing an inferred rematch-prefix mapping, export checks pending session creations, captured mappings, and fresh exact-invite evidence so a concurrent new invite cannot be mistaken for an older prefix. Interrupted exports reuse already-published pages unchanged after checking their row identities against the source inventory.
+
+Verification streams the current source again and requires every current key to have compatible D1 coverage, every baseline key to remain accounted for, and every additional backfill row to belong to the immutable export. Concurrent source additions must have capture provenance. It also checks completed session-transition creations since capture began, requires pending transitions to reconcile, and records verification evidence. Activation repeats these checks, then atomically selects D1 only if enforcement, candidate, import proof, and journal conditions still match. Retry interrupted import/verification/activation with the same directory; conflicting mappings, disappearing baseline keys, incomplete inventories, or pending transitions are failures to reconcile rather than reasons to discard evidence.
+
+After activation, run the standard API smoke and the affected authenticated read-only profile/navigation checks. Verify account-link catch-up with anonymous-before-link, alternate-login, rematch, and merge-cleanup fixtures in isolation. Release the final API with the temporary Firebase discovery adapter removed and verify its catch-up path. Keep gameplay and Queues running and finish once the required checks pass; no observation window is added. Retain the capture guard and immutable source evidence. A rollback must preserve capture and pending jobs; never restore a pre-capture version or disable enforcement.
+
 ### Automatch persistence cutover
 
 The initial cutover completed on September 7, 2026 with API version `ba859dbe-c595-4b4d-8ec0-766b094e4065`. Production uses the active D1 backend. Later compatible automatch fixes use the routine API release path; the controls below belong to the initial migration or a concrete recovery requirement.

@@ -1,6 +1,5 @@
 "use strict";
 
-const { createInviteCandidatesFromMatchId } = require("@mons/shared/rematches");
 const { normalizeString } = require("./events/gameProjectionModel");
 
 const PROFILE_LINK_CATCHUP_MAX_INVITES = 20;
@@ -47,60 +46,16 @@ const createProfileLinkProjectionCore = ({
   now = Date.now,
   recomputeInviteProjection,
   repository,
-  resolveInviteIdFromMatchId: resolveInviteIdOverride,
   withInviteProjectionLock,
 }) => {
   if (
     !repository ||
+    typeof repository.listMatchesPage !== "function" ||
     typeof recomputeInviteProjection !== "function" ||
     typeof withInviteProjectionLock !== "function"
   ) {
     throw new TypeError("profile link projection dependencies are required");
   }
-
-  const readInviteExists = async (inviteId, cache) => {
-    const normalizedInviteId = normalizeString(inviteId);
-    if (!normalizedInviteId) {
-      return false;
-    }
-    if (cache.has(normalizedInviteId)) {
-      return await cache.get(normalizedInviteId);
-    }
-    const pending = repository.inviteExists(normalizedInviteId);
-    cache.set(normalizedInviteId, pending);
-    const exists = await pending;
-    cache.set(normalizedInviteId, exists);
-    return exists;
-  };
-
-  const resolveInviteId = async (matchId, cache) => {
-    if (resolveInviteIdOverride) {
-      return resolveInviteIdOverride(matchId, { inviteExistenceCache: cache });
-    }
-    const normalizedMatchId = normalizeString(matchId);
-    if (!normalizedMatchId) {
-      return null;
-    }
-    if (await readInviteExists(normalizedMatchId, cache)) {
-      return normalizedMatchId;
-    }
-    const existing = [];
-    for (const candidate of createInviteCandidatesFromMatchId(
-      normalizedMatchId,
-    )) {
-      if (await readInviteExists(candidate, cache)) {
-        existing.push(candidate);
-      }
-    }
-    if (existing.length > 1) {
-      logger.error("projector:match-resolver:multiple-candidates", {
-        matchId: normalizedMatchId,
-        candidates: existing,
-      });
-      return null;
-    }
-    return existing[0] || null;
-  };
 
   const processProfileLinkCatchup = async ({
     cleanupProfileIds = [],
@@ -146,27 +101,47 @@ const createProfileLinkProjectionCore = ({
         ? PROFILE_LINK_CATCHUP_MAX_INVITES_WITH_CLEANUP
         : PROFILE_LINK_CATCHUP_MAX_INVITES;
     const normalizedMatchCursor = normalizeString(matchCursor) || "";
-    const allMatchIds =
-      (await repository.getMatchIds(normalizedLoginUid)) || [];
+    const page = await repository.listMatchesPage(
+      normalizedLoginUid,
+      normalizedMatchCursor,
+      matchLimit,
+    );
+    if (
+      !page ||
+      !Array.isArray(page.entries) ||
+      page.entries.length > matchLimit ||
+      typeof page.hasMore !== "boolean"
+    ) {
+      throw new Error("projector:profile-link-catchup-invalid-page");
+    }
+    let previousMatchId = normalizedMatchCursor;
+    for (const entry of page.entries) {
+      if (
+        !entry ||
+        typeof entry.matchId !== "string" ||
+        entry.matchId <= previousMatchId ||
+        (entry.resolution === "resolved"
+          ? !normalizeString(entry.inviteId)
+          : !["missing", "ambiguous"].includes(entry.resolution) ||
+            entry.inviteId !== null)
+      ) {
+        throw new Error("projector:profile-link-catchup-invalid-page");
+      }
+      previousMatchId = entry.matchId;
+    }
     const startedAt = now();
     const shouldContinue = () =>
       now() - startedAt < PROFILE_LINK_CATCHUP_TIMEOUT_MS;
-    const pageMatchIds = allMatchIds
-      .filter((matchId) => matchId > normalizedMatchCursor)
-      .sort();
-    const matchIds = pageMatchIds.slice(0, matchLimit);
-    const inviteExistenceCache = new Map();
     const inviteIds = [];
     const inviteSet = new Set();
     let lastScannedMatchId = null;
     let matchIdsScanned = 0;
-    let hasMoreMatches = pageMatchIds.length > matchIds.length;
-    for (const matchId of matchIds) {
+    let hasMoreMatches = page.hasMore;
+    for (const { matchId, inviteId } of page.entries) {
       if (!shouldContinue()) {
         hasMoreMatches = true;
         break;
       }
-      const inviteId = await resolveInviteId(matchId, inviteExistenceCache);
       lastScannedMatchId = matchId;
       matchIdsScanned += 1;
       if (inviteId && !inviteSet.has(inviteId)) {
@@ -174,7 +149,7 @@ const createProfileLinkProjectionCore = ({
         inviteIds.push(inviteId);
       }
     }
-    if (matchIdsScanned < matchIds.length) {
+    if (matchIdsScanned < page.entries.length) {
       hasMoreMatches = true;
     }
     if (hasMoreMatches && !lastScannedMatchId) {
@@ -253,7 +228,6 @@ const createProfileLinkProjectionCore = ({
 
   return {
     processProfileLinkCatchup,
-    resolveInviteIdFromMatchId: resolveInviteId,
   };
 };
 

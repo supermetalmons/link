@@ -8,6 +8,10 @@ import {
   type GameplayRepository,
 } from "./gameplayRepository.ts";
 import {
+  listLoginMatchDiscoveryPage,
+  readLoginMatchDiscoveryBackend,
+} from "./loginMatchDiscoveryD1.ts";
+import {
   createProfileGameProjectionRuntime,
   readProjectionOwnershipSnapshot,
   type ProfileGameProjectionRuntime,
@@ -29,12 +33,6 @@ export type ProfileLinkProjectionRuntimeDependencies = {
     work: () => Promise<T>,
   ): Promise<T>;
 };
-
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
 
 export function createProfileLinkProjectionRuntime(
   env: Env,
@@ -62,19 +60,16 @@ export function createProfileLinkProjectionRuntime(
       wait: dependencies.wait,
     });
   const repository: ProfileLinkProjectionRepository = {
-    async getMatchIds(loginUid) {
-      const matches = toRecord(
-        await rtdb.getRtdbPath(`players/${loginUid}/matches`, {
-          shallow: true,
-        }),
+    async listMatchesPage(loginUid, afterMatchId, limit) {
+      if ((await readLoginMatchDiscoveryBackend(d1)) !== "d1") {
+        throw new Error("login-match-discovery-not-active");
+      }
+      return listLoginMatchDiscoveryPage(
+        d1,
+        loginUid,
+        afterMatchId || null,
+        limit,
       );
-      return matches ? Object.keys(matches) : [];
-    },
-    async inviteExists(inviteId) {
-      const value = await rtdb.getRtdbPath(`invites/${inviteId}`, {
-        shallow: true,
-      });
-      return value !== null && value !== undefined;
     },
     readProfileOwnershipSnapshot: (query) =>
       dependencies.readProfileOwnershipSnapshot

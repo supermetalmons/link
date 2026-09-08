@@ -43,17 +43,42 @@ const eventOwnership = (
   ),
 });
 
+const matchDiscoveryPage = async (
+  matches,
+  afterMatchId,
+  limit,
+  resolveInvite = async (matchId) => matchId,
+) => {
+  const matchIds = Object.keys(matches)
+    .filter((matchId) => matchId > afterMatchId)
+    .sort();
+  const entries = await Promise.all(
+    matchIds.slice(0, limit).map(async (matchId) => {
+      const inviteId = await resolveInvite(matchId);
+      return {
+        matchId,
+        inviteId,
+        resolution: inviteId ? "resolved" : "missing",
+      };
+    }),
+  );
+  return { entries, hasMore: matchIds.length > limit };
+};
+
 const processProfileLinkCatchup = async (input, dependencies) => {
   const core = createProfileLinkProjectionCore({
     logger: { error: () => undefined, info: () => undefined },
     recomputeInviteProjection: dependencies.recomputeInviteProjection,
-    resolveInviteIdFromMatchId: dependencies.resolveInviteIdFromMatchId,
     repository: {
-      async getMatchIds(loginUid) {
+      async listMatchesPage(loginUid, afterMatchId, limit) {
         const snapshot = await dependencies.readMatches(loginUid);
-        return snapshot.exists() ? Object.keys(snapshot.val() || {}) : [];
+        return matchDiscoveryPage(
+          snapshot.exists() ? snapshot.val() || {} : {},
+          afterMatchId,
+          limit,
+          dependencies.resolveInvite,
+        );
       },
-      inviteExists: async () => false,
       async readProfileOwnershipSnapshot({ loginUids }) {
         const entries = await Promise.all(
           loginUids.map(async (loginUid) => [
@@ -515,8 +540,8 @@ test("profile-link catchup processes exactly one cleanup match and advances the 
       return { sourceCleanupSafe: true };
     },
     repository: {
-      getMatchIds: async () => Object.keys(matches).reverse(),
-      inviteExists: async () => true,
+      listMatchesPage: async (_loginUid, afterMatchId, limit) =>
+        matchDiscoveryPage(matches, afterMatchId, limit),
       readProfileOwnershipSnapshot: async ({ loginUids }) => {
         ownerRead += 1;
         return projectionOwnership(
@@ -524,7 +549,6 @@ test("profile-link catchup processes exactly one cleanup match and advances the 
         );
       },
     },
-    resolveInviteIdFromMatchId: async (matchId) => matchId,
     withInviteProjectionLock: runWithoutProjectionLock,
   });
 
@@ -560,7 +584,7 @@ test("profile-link catchup accepts an unprofiled opponent without stale cleanup"
         ownerProfileIds: ["target-profile"],
         sourceCleanupSafe: false,
       }),
-      resolveInviteIdFromMatchId: async () => "invite-1",
+      resolveInvite: async () => "invite-1",
       withInviteProjectionLock: runWithoutProjectionLock,
     },
   );
@@ -587,7 +611,7 @@ test("profile-link catchup retries when the current owner is unresolved", async 
           ownerProfileIds: ["different-profile"],
           sourceCleanupSafe: false,
         }),
-        resolveInviteIdFromMatchId: async () => "invite-1",
+        resolveInvite: async () => "invite-1",
         withInviteProjectionLock: runWithoutProjectionLock,
       },
     ),
@@ -615,7 +639,7 @@ test("profile-link catchup retries blocked projections with stale cleanup", asyn
           ownerProfileIds: ["target-profile"],
           sourceCleanupSafe: false,
         }),
-        resolveInviteIdFromMatchId: async () => "invite-1",
+        resolveInvite: async () => "invite-1",
         withInviteProjectionLock: runWithoutProjectionLock,
       },
     ),
@@ -644,8 +668,8 @@ test("profile-link catchup advances one bounded 20-match page", async () => {
       return { sourceCleanupSafe: true };
     },
     repository: {
-      getMatchIds: async () => Object.keys(matches).reverse(),
-      inviteExists: async () => true,
+      listMatchesPage: async (_loginUid, afterMatchId, limit) =>
+        matchDiscoveryPage(matches, afterMatchId, limit),
       readProfileOwnershipSnapshot: async ({ loginUids }) =>
         projectionOwnership(
           loginUids.map((loginUid) => [loginUid, "profile-1"]),
@@ -691,13 +715,12 @@ test("profile-link catchup bounds scans with unresolved and duplicate invites", 
       recomputedInviteIds.push(inviteId);
       return { sourceCleanupSafe: true };
     },
-    resolveInviteIdFromMatchId: async (matchId) => {
-      inspectedMatchIds.push(matchId);
-      return Number(matchId.slice(-2)) % 2 === 0 ? null : "shared-invite";
-    },
     repository: {
-      getMatchIds: async () => Object.keys(matches).reverse(),
-      inviteExists: async () => true,
+      listMatchesPage: async (_loginUid, afterMatchId, limit) =>
+        matchDiscoveryPage(matches, afterMatchId, limit, async (matchId) => {
+          inspectedMatchIds.push(matchId);
+          return Number(matchId.slice(-2)) % 2 === 0 ? null : "shared-invite";
+        }),
       readProfileOwnershipSnapshot: async ({ loginUids }) =>
         projectionOwnership(
           loginUids.map((loginUid) => [loginUid, "profile-1"]),
@@ -726,11 +749,10 @@ test("profile-link catchup returns missing when the live link is gone", async ()
     logger: { error: () => undefined, info: () => undefined },
     recomputeInviteProjection: async () => ({ sourceCleanupSafe: true }),
     repository: {
-      getMatchIds: async () => {
+      listMatchesPage: async () => {
         matchReads += 1;
-        return [];
+        return { entries: [], hasMore: false };
       },
-      inviteExists: async () => true,
       readProfileOwnershipSnapshot: async ({ loginUids }) =>
         projectionOwnership(loginUids.map((loginUid) => [loginUid, null])),
     },
@@ -747,6 +769,101 @@ test("profile-link catchup returns missing when the live link is gone", async ()
   assert.equal(matchReads, 0);
 });
 
+test("profile-link catchup advances past missing and ambiguous discovery rows", async () => {
+  const requests = [];
+  const core = createProfileLinkProjectionCore({
+    logger: { error: () => undefined, info: () => undefined },
+    recomputeInviteProjection: async () => {
+      assert.fail("unresolved discovery rows must not project an invite");
+    },
+    repository: {
+      listMatchesPage: async (...args) => {
+        requests.push(args);
+        return {
+          entries: [
+            { matchId: "match-01", inviteId: null, resolution: "missing" },
+            { matchId: "match-02", inviteId: null, resolution: "ambiguous" },
+          ],
+          hasMore: true,
+        };
+      },
+      readProfileOwnershipSnapshot: async () =>
+        projectionOwnership([["login-1", "profile-1"]]),
+    },
+    withInviteProjectionLock: runWithoutProjectionLock,
+  });
+  const result = await core.processProfileLinkCatchup({
+    loginUid: "login-1",
+    matchCursor: "match-00",
+    profileId: "profile-1",
+    sourceUpdatedAtMs: 100,
+  });
+  assert.deepEqual(requests, [["login-1", "match-00", 20]]);
+  assert.equal(result.matchIdsScanned, 2);
+  assert.equal(result.processed, 0);
+  assert.equal(result.nextMatchCursor, "match-02");
+});
+
+test("profile-link catchup rejects invalid pages before projecting", async () => {
+  const entry = {
+    matchId: "match-01",
+    inviteId: "invite-1",
+    resolution: "resolved",
+  };
+  for (const page of [
+    { entries: [entry, entry], hasMore: false },
+    { entries: [{ ...entry, matchId: "match-00" }], hasMore: false },
+    { entries: [{ ...entry, inviteId: null }], hasMore: false },
+    { entries: [{ ...entry, resolution: "missing" }], hasMore: false },
+    { entries: [{ ...entry, resolution: "unknown" }], hasMore: false },
+    { entries: [entry], hasMore: undefined },
+    { entries: Array(21).fill(entry), hasMore: true },
+  ]) {
+    const core = createProfileLinkProjectionCore({
+      logger: { error: () => undefined, info: () => undefined },
+      recomputeInviteProjection: async () => {
+        assert.fail("invalid discovery pages must not project an invite");
+      },
+      repository: {
+        listMatchesPage: async () => page,
+        readProfileOwnershipSnapshot: async () =>
+          projectionOwnership([["login-1", "profile-1"]]),
+      },
+      withInviteProjectionLock: runWithoutProjectionLock,
+    });
+    await assert.rejects(
+      core.processProfileLinkCatchup({
+        loginUid: "login-1",
+        matchCursor: "match-00",
+        profileId: "profile-1",
+        sourceUpdatedAtMs: 100,
+      }),
+      /profile-link-catchup-invalid-page/,
+    );
+  }
+});
+
+test("profile-link catchup rejects a continuation page without progress", async () => {
+  const core = createProfileLinkProjectionCore({
+    logger: { error: () => undefined, info: () => undefined },
+    recomputeInviteProjection: async () => ({ sourceCleanupSafe: true }),
+    repository: {
+      listMatchesPage: async () => ({ entries: [], hasMore: true }),
+      readProfileOwnershipSnapshot: async () =>
+        projectionOwnership([["login-1", "profile-1"]]),
+    },
+    withInviteProjectionLock: runWithoutProjectionLock,
+  });
+  await assert.rejects(
+    core.processProfileLinkCatchup({
+      loginUid: "login-1",
+      profileId: "profile-1",
+      sourceUpdatedAtMs: 100,
+    }),
+    /profile-link-catchup-no-progress/,
+  );
+});
+
 test("profile-link catchup propagates D1 ownership failures before match reads", async () => {
   let matchReads = 0;
   const core = createProfileLinkProjectionCore({
@@ -756,11 +873,10 @@ test("profile-link catchup propagates D1 ownership failures before match reads",
       readProfileOwnershipSnapshot: async () => {
         throw new Error("d1-owner-unavailable");
       },
-      getMatchIds: async () => {
+      listMatchesPage: async () => {
         matchReads += 1;
-        return [];
+        return { entries: [], hasMore: false };
       },
-      inviteExists: async () => true,
     },
     withInviteProjectionLock: runWithoutProjectionLock,
   });
@@ -788,11 +904,15 @@ test("profile-link catchup starts its budget after initial reads", async () => {
     },
     recomputeInviteProjection: async () => ({ sourceCleanupSafe: true }),
     repository: {
-      getMatchIds: async () => {
+      listMatchesPage: async () => {
         initialReadsComplete = true;
-        return ["match-1"];
+        return {
+          entries: [
+            { matchId: "match-1", inviteId: "match-1", resolution: "resolved" },
+          ],
+          hasMore: false,
+        };
       },
-      inviteExists: async () => true,
       readProfileOwnershipSnapshot: async ({ loginUids }) =>
         projectionOwnership(
           loginUids.map((loginUid) => [loginUid, "profile-1"]),

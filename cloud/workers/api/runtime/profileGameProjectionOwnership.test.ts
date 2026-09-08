@@ -14,6 +14,7 @@ import {
   readProjectionOwnershipSnapshot,
 } from "../src/profileGameProjectionRepository.ts";
 import { createProfileLinkProjectionRuntime } from "../src/profileLinkProfileGameProjection.ts";
+import { captureLoginMatchDiscovery } from "../src/loginMatchDiscoveryD1.ts";
 import { getProfileGameProjection } from "../src/profileGamesD1.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { resolveInviteRole } from "../src/gameSessionMutations.ts";
@@ -295,6 +296,11 @@ describe("D1-authoritative profile game projection ownership", () => {
         "b".repeat(64),
       ),
     ]);
+    await testEnv.PROFILE_GAMES_DB.prepare(
+      `UPDATE login_match_discovery_control SET discovery_backend = 'd1',
+       capture_enforced = 1, capture_version_id = 'capture',
+       capture_started_at_ms = 1, verified_at_ms = 2, activated_at_ms = 3`,
+    ).run();
   });
 
   it("projects a merged login from its active canonical D1 owner", async () => {
@@ -474,7 +480,9 @@ describe("D1-authoritative profile game projection ownership", () => {
     const loginUid = "d1-catchup-login";
     const profileId = "d1-catchup-profile";
     await insertProfileOwner(profileId, loginUid);
-    const reads: string[] = [];
+    await captureLoginMatchDiscovery(testEnv.PROFILE_GAMES_DB, [
+      { loginUid, matchId: inviteId, inviteId },
+    ]);
     const recomputed: string[] = [];
     const runtime = createProfileLinkProjectionRuntime(testEnv, {
       logger: { error() {}, info() {} },
@@ -492,20 +500,8 @@ describe("D1-authoritative profile game projection ownership", () => {
         },
       },
       rtdb: {
-        async getRtdbPath(path, query) {
-          reads.push(path);
-          if (/^players\/.+\/profile$/.test(path)) {
-            throw new Error("unexpected-rtdb-profile-owner-read");
-          }
-          if (path === `players/${loginUid}/matches`) {
-            expect(query).toEqual({ shallow: true });
-            return { [inviteId]: true };
-          }
-          if (path === `invites/${inviteId}`) {
-            expect(query).toEqual({ shallow: true });
-            return true;
-          }
-          return null;
+        async getRtdbPath(path) {
+          throw new Error(`unexpected-rtdb-read:${path}`);
         },
       },
       async withInviteProjectionLock(_inviteId, work) {
@@ -523,9 +519,6 @@ describe("D1-authoritative profile game projection ownership", () => {
 
     expect(result?.profileId).toBe(profileId);
     expect(recomputed).toEqual([inviteId]);
-    expect(reads.some((path) => /^players\/.+\/profile$/.test(path))).toBe(
-      false,
-    );
   });
 
   it("reads each projection login through one ownership snapshot", async () => {
@@ -625,6 +618,19 @@ describe("D1-authoritative profile game projection ownership", () => {
             return target.prepare(query);
           };
         }
+        if (property === "withSession") {
+          return (...args: Parameters<D1Database["withSession"]>) => {
+            const session = target.withSession(...args);
+            return {
+              prepare(query: string) {
+                projectionStatements += 1;
+                return session.prepare(query);
+              },
+              batch: session.batch.bind(session),
+              getBookmark: session.getBookmark.bind(session),
+            };
+          };
+        }
         const member = Reflect.get(target, property, target);
         return typeof member === "function" ? member.bind(target) : member;
       },
@@ -634,6 +640,14 @@ describe("D1-authoritative profile game projection ownership", () => {
       (_, index) => `d1-full-budget-invite-${index}`,
     );
     const sortedInviteIds = [...inviteIds].sort();
+    await captureLoginMatchDiscovery(
+      testEnv.PROFILE_GAMES_DB,
+      inviteIds.map((inviteId) => ({
+        loginUid: hostLoginUids[0],
+        matchId: inviteId,
+        inviteId,
+      })),
+    );
     await testEnv.PROFILE_GAMES_DB.batch(
       cleanupSourceProfileIds.flatMap((profileId) =>
         inviteIds.map((inviteId) =>
@@ -652,22 +666,15 @@ describe("D1-authoritative profile game projection ownership", () => {
       profileDb: countingProfileDb,
       rtdb: {
         async getRtdbPath(path, query) {
-          if (path === `players/${hostLoginUids[0]}/matches`) {
-            expect(query).toEqual({ shallow: true });
-            return Object.fromEntries(
-              [...inviteIds].reverse().map((inviteId) => [inviteId, true]),
-            );
-          }
+          expect(query?.shallow).not.toBe(true);
           const inviteIndex = inviteIds.findIndex(
             (inviteId) => path === `invites/${inviteId}`,
           );
           if (inviteIndex >= 0) {
-            return query?.shallow
-              ? true
-              : {
-                  hostId: hostLoginUids[inviteIndex],
-                  guestId: guestLoginUids[inviteIndex],
-                };
+            return {
+              hostId: hostLoginUids[inviteIndex],
+              guestId: guestLoginUids[inviteIndex],
+            };
           }
           if (inviteIds.some((inviteId) => path === `automatch/${inviteId}`)) {
             return null;

@@ -75,7 +75,8 @@
     "latest:functions": "npx --yes npm-check-updates@latest -u --peer --packageFile cloud/functions/package.json && npm install --prefix cloud/functions",
     "latest:admin": "npx --yes npm-check-updates@latest -u --peer --packageFile cloud/admin/package.json && npm install --prefix cloud/admin",
     "latest": "npm run latest:root && npm run latest:functions && npm run latest:admin",
-    "manage:automatch-state": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-automatch-state.ts"
+    "manage:automatch-state": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-automatch-state.ts",
+    "manage:login-match-discovery": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-login-match-discovery.ts"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.1.2",
@@ -101,7 +102,8 @@
     "vite-plugin-checker": "^0.14.5",
     "vitest": "^4.1.11",
     "wrangler": "4.127.1",
-    "ws": "^8.21.3"
+    "ws": "^8.21.3",
+    "stream-json": "1.9.1"
   },
   "overrides": {
     "@metaplex-foundation/mpl-token-metadata": "3.4.0",

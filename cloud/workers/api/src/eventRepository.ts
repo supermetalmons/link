@@ -31,6 +31,12 @@ import {
   createGameplayRepository,
   type GameplayRepository,
 } from "./gameplayRepository.ts";
+import { parseAutomatchPath } from "./automatchD1.ts";
+import {
+  captureEventMatchDiscovery,
+  eventMatchCreationInviteIds,
+  isPlayerMatchPath,
+} from "./eventLoginMatchDiscovery.ts";
 
 const EVENT_OWNED_ROOTS = new Set([
   "events",
@@ -344,6 +350,7 @@ async function ensureIntentEffects(
 
 async function applyIntent(
   db: D1Database,
+  discoveryDb: D1Database,
   base: EventTransitionBackend,
   intent: EventTransitionIntent,
   admission: EventWriteAdmission,
@@ -361,6 +368,12 @@ async function applyIntent(
       throw new Error("event-transition-identity-conflict");
     }
     await ensureIntentEffects(base, currentIntent, signal);
+    await captureEventMatchDiscovery(
+      discoveryDb,
+      base.getPath,
+      eventMatchCreationInviteIds(currentIntent.rtdbEffects),
+      signal,
+    );
     await patchEventOwnedPaths(db, currentIntent.canonicalUpdates, {
       admission,
       expectedEventRevisions: {
@@ -387,6 +400,7 @@ async function applyIntent(
 
 async function patchD1EventState(
   db: D1Database,
+  discoveryDb: D1Database,
   base: EventTransitionBackend,
   updates: Record<string, unknown>,
   admission: EventWriteAdmission,
@@ -394,6 +408,9 @@ async function patchD1EventState(
 ): Promise<void> {
   const { canonicalUpdates, rtdbEffects } = splitUpdates(updates);
   if (Object.keys(canonicalUpdates).length === 0) {
+    if (eventMatchCreationInviteIds(rtdbEffects).length) {
+      throw new Error("event-match-creation-requires-transition");
+    }
     await base.patchRoot(rtdbEffects, signal);
     return;
   }
@@ -416,6 +433,9 @@ async function patchD1EventState(
   const eventId = eventIds[0];
   const revision = (await readEventSnapshot(db, eventId)).revision;
   if (revision < 1) {
+    if (eventMatchCreationInviteIds(rtdbEffects).length) {
+      throw new Error("event-match-creation-requires-transition");
+    }
     await patchEventOwnedPaths(db, canonicalUpdates, { admission });
     await base.patchRoot(rtdbEffects, signal);
     return;
@@ -447,7 +467,7 @@ async function patchD1EventState(
   if (!existing) {
     await createEventTransitionIntent(db, activeIntent, { admission });
   }
-  await applyIntent(db, base, activeIntent, admission, signal);
+  await applyIntent(db, discoveryDb, base, activeIntent, admission, signal);
 }
 
 export async function recoverEventTransitionIntents(
@@ -468,6 +488,7 @@ export async function recoverEventTransitionIntents(
         async (admission) => {
           await applyIntent(
             env.EVENT_DB,
+            env.PROFILE_GAMES_DB,
             { getPath: base.getRtdbPath, patchRoot: base.patchRtdbRoot },
             intent,
             admission,
@@ -520,6 +541,9 @@ export function createEventRtdbClient(
     allowStoredProfilePrizeAssignment = false,
   ): Promise<FirebaseRtdbTransactionResult> => {
     if (!isEventOwnedPath(path)) {
+      if (isPlayerMatchPath(path)) {
+        throw new Error("event-match-creation-requires-transition");
+      }
       if (guard || allowStoredProfilePrizeAssignment) {
         throw new Error("event-lock-guard-path-unsupported");
       }
@@ -652,7 +676,14 @@ export function createEventRtdbClient(
       return readEventOwnedPath(env.EVENT_DB, d1EventPath(cleanPath));
     },
     async patchRoot(updates, signal) {
-      if (!Object.keys(updates).some(isEventOwnedPath)) {
+      const paths = Object.keys(updates);
+      if (!paths.some(isEventOwnedPath)) {
+        if (
+          eventMatchCreationInviteIds(updates).length &&
+          !paths.some((path) => parseAutomatchPath(path) !== null)
+        ) {
+          throw new Error("event-match-creation-requires-transition");
+        }
         await base.patchRoot(updates, signal);
         return;
       }
@@ -662,6 +693,7 @@ export function createEventRtdbClient(
         async (admission) => {
           await patchD1EventState(
             env.EVENT_DB,
+            env.PROFILE_GAMES_DB,
             base,
             updates,
             admission,

@@ -37,6 +37,10 @@ import {
   type FreezeHistoricalMatchPresentations,
 } from "./historicalMatchPresentation.ts";
 import { readRatingCompletion } from "./ratingCompletionD1.ts";
+import {
+  captureEventMatchDiscovery,
+  eventMatchInviteIds,
+} from "./eventLoginMatchDiscovery.ts";
 
 type ProjectionRtdbRepository = Pick<GameplayRepository, "getRtdbPath">;
 
@@ -271,9 +275,20 @@ export function createEventProfileGameProjectionRuntime(
 
     async getEvent(eventId) {
       const event = await rtdb.getRtdbPath(`events/${eventId}`);
-      return event && typeof event === "object" && !Array.isArray(event)
-        ? (event as Record<string, unknown>)
-        : null;
+      const value =
+        event && typeof event === "object" && !Array.isArray(event)
+          ? (event as Record<string, unknown>)
+          : null;
+      if (value) {
+        await captureEventMatchDiscovery(
+          d1,
+          rtdb.getRtdbPath,
+          eventMatchInviteIds(value),
+          undefined,
+          (dependencies.now || Date.now)(),
+        );
+      }
+      return value;
     },
 
     readProfileOwnershipSnapshot: (query) =>

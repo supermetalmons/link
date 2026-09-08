@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import type { D1Migration } from "cloudflare:test";
+import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import {
   applyEventTestMigrations,
   transitionEventStorageMode,
@@ -25,7 +25,10 @@ import { buildEventProfileGameProjectionOutboxUpdates } from "../src/profileGame
 import { sweepEventTelegramProjections } from "../src/eventTelegramProjection.ts";
 import type { TelegramProjectionTask } from "../src/telegramProjectionTasks.ts";
 
-const testEnv = env as Env & { TEST_EVENT_D1_MIGRATIONS: D1Migration[] };
+const testEnv = env as Env & {
+  TEST_D1_MIGRATIONS: D1Migration[];
+  TEST_EVENT_D1_MIGRATIONS: D1Migration[];
+};
 const eventId = "NN3eRzoZo80";
 
 function eventRecord(status = "scheduled", recordEventId = eventId) {
@@ -67,6 +70,10 @@ async function withD1Admission<T>(
 
 describe("hybrid event repository", () => {
   beforeAll(async () => {
+    await applyD1Migrations(
+      testEnv.PROFILE_GAMES_DB,
+      testEnv.TEST_D1_MIGRATIONS,
+    );
     await applyEventTestMigrations(
       testEnv.EVENT_DB,
       testEnv.TEST_EVENT_D1_MIGRATIONS,
@@ -421,7 +428,17 @@ describe("hybrid event repository", () => {
     const update = {
       [`events/${eventId}/status`]: "active",
       [`events/${eventId}/updatedAtMs`]: 200,
+      "invites/event-match": {
+        eventId,
+        eventOwned: true,
+        hostId: "login-one",
+        guestId: "login-two",
+      },
       [matchPath]: { fen: "initial", flatMovesString: "" },
+      "players/login-two/matches/event-match": {
+        fen: "initial",
+        flatMovesString: "",
+      },
     };
     await expect(client.patchRoot(update)).rejects.toThrow(
       "ambiguous-rtdb-commit",
@@ -1051,7 +1068,13 @@ describe("hybrid event repository", () => {
       await expect(client.getPath("invites/invite-one")).resolves.toEqual({
         ok: true,
       });
-      await client.patchRoot({ "players/login-one/matches/match-one": {} });
+      await client.patchRoot({
+        "players/login-one/matches/match-one/timer": "",
+      });
+      await client.patchRoot({
+        "players/login-one/matches/match-one": { fen: "initial" },
+        "gameplayMutationReceipts/operation-one": { inviteId: "match-one" },
+      });
       await expect(
         client.transactPath("automatch/invite-one", () => ({ value: {} })),
       ).resolves.toMatchObject({ committed: true });
@@ -1064,7 +1087,8 @@ describe("hybrid event repository", () => {
     }
     expect(calls).toEqual([
       "get:invites/invite-one",
-      "patch:players/login-one/matches/match-one",
+      "patch:players/login-one/matches/match-one/timer",
+      "patch:players/login-one/matches/match-one,gameplayMutationReceipts/operation-one",
       "transact:automatch/invite-one",
     ]);
   });

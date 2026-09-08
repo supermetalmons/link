@@ -4,8 +4,18 @@ import type {
 } from "./profileGamesProjectionCore.js";
 
 export type ProfileLinkProjectionRepository = {
-  getMatchIds(loginUid: string): Promise<string[]>;
-  inviteExists(inviteId: string): Promise<boolean>;
+  listMatchesPage(
+    loginUid: string,
+    afterMatchId: string,
+    limit: number,
+  ): Promise<{
+    entries: Array<{
+      matchId: string;
+      inviteId: string | null;
+      resolution: "resolved" | "missing" | "ambiguous";
+    }>;
+    hasMore: boolean;
+  }>;
   readProfileOwnershipSnapshot(query: {
     loginUids: readonly string[];
     profileIds: readonly string[];
@@ -37,10 +47,6 @@ export function createProfileLinkProjectionCore(dependencies: {
     options?: RecomputeInviteProjectionOptions,
   ): Promise<RecomputeInviteProjectionResult>;
   repository: ProfileLinkProjectionRepository;
-  resolveInviteIdFromMatchId?(
-    matchId: string,
-    options: { inviteExistenceCache: Map<string, boolean | Promise<boolean>> },
-  ): Promise<string | null>;
   withInviteProjectionLock<T>(
     inviteId: string,
     work: () => Promise<T>,
