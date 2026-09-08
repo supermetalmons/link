@@ -24,6 +24,8 @@ const VERSION_PATTERN =
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
 const MAX_PAGES = 100_000;
 const MAX_RECORD_BYTES = 900_000;
+const LEGACY_WRITER_PREDICATE =
+  "(writer_generation != 2 OR (writer_owner_id IS NOT owner_id AND EXISTS (SELECT 1 FROM automatch_runtime_control WHERE singleton = 1 AND backend = 'rtdb')))";
 const ROOTS = [
   "automatch",
   "telegramAutomatches",
@@ -1278,7 +1280,7 @@ async function manageAutomatchState(
 }
 
 function migrationGuard(session: Session): string {
-  return `EXISTS (SELECT 1 FROM automatch_runtime_control WHERE singleton = 1 AND backend = 'rtdb' AND state = 'frozen' AND epoch = ${session.epoch} AND freeze_generation = ${session.freezeGeneration} AND json_type(metadata_json, '$.importResetGeneration') IS NULL) AND NOT EXISTS (SELECT 1 FROM automatch_write_admissions) AND EXISTS (SELECT 1 FROM game_session_legacy_fence WHERE singleton = 1 AND enabled = 1) AND NOT EXISTS (SELECT 1 FROM game_session_mutation_locks WHERE writer_generation != 2) AND NOT EXISTS (SELECT 1 FROM game_session_legacy_releases WHERE reconciled_at_ms IS NULL)`;
+  return `EXISTS (SELECT 1 FROM automatch_runtime_control WHERE singleton = 1 AND backend = 'rtdb' AND state = 'frozen' AND epoch = ${session.epoch} AND freeze_generation = ${session.freezeGeneration} AND json_type(metadata_json, '$.importResetGeneration') IS NULL) AND NOT EXISTS (SELECT 1 FROM automatch_write_admissions) AND EXISTS (SELECT 1 FROM game_session_legacy_fence WHERE singleton = 1 AND enabled = 1) AND NOT EXISTS (SELECT 1 FROM game_session_mutation_locks WHERE ${LEGACY_WRITER_PREDICATE}) AND NOT EXISTS (SELECT 1 FROM game_session_legacy_releases WHERE reconciled_at_ms IS NULL)`;
 }
 function createSqlDependencies(
   run: SqlRunner,
@@ -1309,7 +1311,7 @@ function createSqlDependencies(
   const status = async (): Promise<Status> => {
     const row = (
       await query(
-        "SELECT control.*, (SELECT COUNT(*) FROM automatch_write_admissions) AS admissions, (SELECT COUNT(*) FROM game_session_mutation_locks WHERE writer_generation != 2) AS legacy_locks, (SELECT COUNT(*) FROM game_session_legacy_releases WHERE reconciled_at_ms IS NULL) AS legacy_releases, (SELECT enabled FROM game_session_legacy_fence WHERE singleton = 1) AS legacy_fence FROM automatch_runtime_control AS control WHERE singleton = 1",
+        `SELECT control.*, (SELECT COUNT(*) FROM automatch_write_admissions) AS admissions, (SELECT COUNT(*) FROM game_session_mutation_locks WHERE ${LEGACY_WRITER_PREDICATE}) AS legacy_locks, (SELECT COUNT(*) FROM game_session_legacy_releases WHERE reconciled_at_ms IS NULL) AS legacy_releases, (SELECT enabled FROM game_session_legacy_fence WHERE singleton = 1) AS legacy_fence FROM automatch_runtime_control AS control WHERE singleton = 1`,
       )
     )[0];
     if (
@@ -1409,7 +1411,7 @@ function createSqlDependencies(
     },
     async readLegacyRows() {
       const rows = await query(
-        "SELECT lock_id, owner_id, operation_id, expires_at_ms, NULL AS released_at_ms FROM game_session_mutation_locks WHERE writer_generation != 2 UNION ALL SELECT lock_id, owner_id, operation_id, expires_at_ms, released_at_ms FROM game_session_legacy_releases WHERE reconciled_at_ms IS NULL ORDER BY lock_id, owner_id LIMIT 1000",
+        `SELECT lock_id, owner_id, operation_id, expires_at_ms, NULL AS released_at_ms FROM game_session_mutation_locks WHERE ${LEGACY_WRITER_PREDICATE} UNION ALL SELECT lock_id, owner_id, operation_id, expires_at_ms, released_at_ms FROM game_session_legacy_releases WHERE reconciled_at_ms IS NULL ORDER BY lock_id, owner_id LIMIT 1000`,
       );
       return rows.map((row) => {
         if (
@@ -1437,7 +1439,7 @@ function createSqlDependencies(
         );
       if (row.releasedAtMs === null) {
         await requireOne(
-          "DELETE FROM game_session_mutation_locks WHERE lock_id = ? AND owner_id = ? AND operation_id = ? AND expires_at_ms = ? AND writer_generation != 2 AND EXISTS (SELECT 1 FROM game_session_legacy_fence WHERE singleton = 1 AND enabled = 1) RETURNING lock_id",
+          `DELETE FROM game_session_mutation_locks WHERE lock_id = ? AND owner_id = ? AND operation_id = ? AND expires_at_ms = ? AND ${LEGACY_WRITER_PREDICATE} AND EXISTS (SELECT 1 FROM game_session_legacy_fence WHERE singleton = 1 AND enabled = 1) RETURNING lock_id`,
           [row.lockId, row.ownerId, row.operationId, row.expiresAtMs],
         );
       }
@@ -1492,8 +1494,7 @@ function createSqlDependencies(
       );
     },
     async resume(control, versionId) {
-      const guard =
-        "singleton = 1 AND backend = ? AND state = 'frozen' AND epoch = ? AND freeze_generation = ? AND candidate_version_id = ? AND NOT EXISTS (SELECT 1 FROM automatch_write_admissions) AND EXISTS (SELECT 1 FROM game_session_legacy_fence WHERE singleton = 1 AND enabled = 1) AND NOT EXISTS (SELECT 1 FROM game_session_mutation_locks WHERE writer_generation != 2) AND NOT EXISTS (SELECT 1 FROM game_session_legacy_releases WHERE reconciled_at_ms IS NULL)";
+      const guard = `singleton = 1 AND backend = ? AND state = 'frozen' AND epoch = ? AND freeze_generation = ? AND candidate_version_id = ? AND NOT EXISTS (SELECT 1 FROM automatch_write_admissions) AND EXISTS (SELECT 1 FROM game_session_legacy_fence WHERE singleton = 1 AND enabled = 1) AND NOT EXISTS (SELECT 1 FROM game_session_mutation_locks WHERE ${LEGACY_WRITER_PREDICATE}) AND NOT EXISTS (SELECT 1 FROM game_session_legacy_releases WHERE reconciled_at_ms IS NULL)`;
       let freezeGeneration = control.freezeGeneration;
       const guardValues = () => [
         control.backend,

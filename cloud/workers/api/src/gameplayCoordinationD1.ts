@@ -4,6 +4,9 @@ export const GAME_SESSION_MUTATION_LOCK_MS = 60_000;
 export const GAME_SESSION_MUTATION_LOCK_SWEEP_LIMIT = 1_000;
 export const GAME_SESSION_MUTATION_LOCK_RELEASE_ATTEMPTS = 3;
 export const MATCH_TIMER_START_SWEEP_LIMIT = 100;
+const CURRENT_SESSION_WRITER_SQL = `game_session_mutation_locks.writer_generation = 2
+  AND (game_session_mutation_locks.writer_owner_id IS game_session_mutation_locks.owner_id
+    OR EXISTS (SELECT 1 FROM automatch_runtime_control WHERE singleton = 1 AND backend = 'd1'))`;
 
 export type GameSessionMutationLock = {
   lockId: string;
@@ -203,15 +206,16 @@ export function createGameSessionMutationLockStore(
         const result = await db
           .prepare(
             `INSERT INTO game_session_mutation_locks
-               (lock_id, owner_id, operation_id, expires_at_ms, writer_generation)
-             VALUES (?, ?, ?, ?, 2)
+               (lock_id, owner_id, operation_id, expires_at_ms, writer_generation, writer_owner_id)
+             VALUES (?, ?, ?, ?, 2, ?)
              ON CONFLICT (lock_id) DO UPDATE SET
                owner_id = excluded.owner_id,
                operation_id = excluded.operation_id,
                expires_at_ms = excluded.expires_at_ms,
-               writer_generation = 2
+               writer_generation = 2,
+               writer_owner_id = excluded.writer_owner_id
              WHERE game_session_mutation_locks.expires_at_ms <= ?
-               AND (game_session_mutation_locks.writer_generation = 2
+               AND ((${CURRENT_SESSION_WRITER_SQL})
                  OR (SELECT enabled FROM game_session_legacy_fence WHERE singleton = 1) = 0)`,
           )
           .bind(
@@ -219,6 +223,7 @@ export function createGameSessionMutationLockStore(
             ownerId,
             lock.operationId,
             nowMs + GAME_SESSION_MUTATION_LOCK_MS,
+            ownerId,
             nowMs,
           )
           .run();
@@ -245,7 +250,7 @@ export function createGameSessionMutationLockStore(
              WHERE lock_id = ?
                AND owner_id = ?
                AND operation_id = ?
-               AND writer_generation = 2
+               AND (${CURRENT_SESSION_WRITER_SQL})
                AND expires_at_ms > ?`,
           )
           .bind(
@@ -307,7 +312,7 @@ export function createGameSessionMutationLockStore(
             `DELETE FROM game_session_mutation_locks
              WHERE lock_id IN (
                SELECT lock_id FROM game_session_mutation_locks
-               WHERE expires_at_ms <= ? AND writer_generation = 2
+               WHERE expires_at_ms <= ? AND (${CURRENT_SESSION_WRITER_SQL})
                ORDER BY expires_at_ms, lock_id
                LIMIT ?
              )`,

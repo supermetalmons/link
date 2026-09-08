@@ -42,6 +42,7 @@ function harness(t: test.TestContext) {
     "0009_automatch_state.sql",
     "0011_game_session_writer_fence.sql",
     "0012_automatch_admission_audit.sql",
+    "0013_game_session_writer_owner_fence.sql",
   ])
     db.exec(
       readFileSync(resolve("cloud/workers/api/migrations", migration), "utf8"),
@@ -722,6 +723,122 @@ test("legacy rows and release evidence block freeze until exact audited reconcil
     .get()!;
   assert.equal(released.evidence_digest, digest(evidence));
   await h.command("freeze");
+});
+
+test("legacy takeover of a stamped lease remains visible and fenced after staging", async (t) => {
+  for (const release of ["writer", "reconciliation"]) {
+    await t.test(release, async (t) => {
+      const h = harness(t);
+      const nowMs = h.dependencies.now();
+      h.db
+        .prepare(
+          "INSERT INTO game_session_mutation_locks (lock_id, owner_id, operation_id, expires_at_ms, writer_generation, writer_owner_id) VALUES ('manual', 'new-owner', 'new-operation', ?, 2, 'new-owner')",
+        )
+        .run(nowMs - 1);
+      h.db
+        .prepare(
+          `INSERT INTO game_session_mutation_locks
+             (lock_id, owner_id, operation_id, expires_at_ms)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT (lock_id) DO UPDATE SET
+             owner_id = excluded.owner_id,
+             operation_id = excluded.operation_id,
+             expires_at_ms = excluded.expires_at_ms
+           WHERE game_session_mutation_locks.expires_at_ms <= ?`,
+        )
+        .run("manual", "old-owner", "operation", nowMs + 60_000, nowMs);
+      await h.command("stage", ["--candidate-version-id", VERSION]);
+      assert.equal((await h.dependencies.status()).legacyLocks, 1);
+      const [row] = await h.dependencies.readLegacyRows();
+      assert.equal(row.ownerId, "old-owner");
+      assert.equal(row.releasedAtMs, null);
+      assert.throws(
+        () =>
+          h.db
+            .prepare(
+              "UPDATE game_session_mutation_locks SET expires_at_ms = ? WHERE lock_id = ? AND owner_id = ? AND operation_id = ? AND expires_at_ms > ?",
+            )
+            .run(nowMs + 60_001, "manual", "old-owner", "operation", nowMs + 1),
+        /writer-disabled/,
+      );
+      if (release === "writer") {
+        h.db
+          .prepare(
+            "DELETE FROM game_session_mutation_locks WHERE lock_id = ? AND owner_id = ? AND operation_id = ?",
+          )
+          .run("manual", "old-owner", "operation");
+        const [released] = await h.dependencies.readLegacyRows();
+        assert.equal(released.ownerId, "old-owner");
+        assert.equal(typeof released.releasedAtMs, "number");
+      }
+      h.advance(LEGACY_RETIREMENT_MS);
+      await assert.rejects(
+        h.command("freeze"),
+        /legacy writer evidence remains/,
+      );
+      const evidenceDirectory = resolve(h.directory, "takeover-evidence");
+      await h.command("inspect-legacy", ["--directory", evidenceDirectory]);
+      const file = resolve(
+        evidenceDirectory,
+        readdirSync(evidenceDirectory)[0],
+      );
+      const evidence = JSON.parse(readFileSync(file, "utf8"));
+      evidence.requestFinishedAtMs = h.dependencies.now();
+      evidence.completionEvidence = {
+        kind: "operator-investigation",
+        reference: "protected-log:legacy-takeover",
+        explanation:
+          "Legacy request completed and its recorded effects were reconciled.",
+      };
+      writeFileSync(file, JSON.stringify(evidence));
+      await h.command("reconcile-legacy", ["--evidence", file]);
+      assert.equal((await h.dependencies.status()).legacyLocks, 0);
+      h.db
+        .prepare(
+          "INSERT INTO game_session_mutation_locks (lock_id, owner_id, operation_id, expires_at_ms, writer_generation, writer_owner_id) VALUES ('manual', 'current-owner', 'current-operation', ?, 2, 'current-owner')",
+        )
+        .run(h.dependencies.now() + 60_000);
+      assert.equal((await h.dependencies.status()).legacyLocks, 0);
+      await h.command("freeze");
+    });
+  }
+});
+
+test("completed D1 cutovers keep unstamped generation-two leases compatible", async (t) => {
+  const h = harness(t);
+  await h.freeze();
+  await h.exportSource();
+  await h.importSource();
+  await h.activate();
+  h.db
+    .prepare(
+      "INSERT INTO game_session_mutation_locks (lock_id, owner_id, operation_id, expires_at_ms, writer_generation) VALUES ('manual', 'deployed-owner', 'operation', ?, 2)",
+    )
+    .run(h.dependencies.now() + 60_000);
+  assert.equal((await h.dependencies.status()).legacyLocks, 0);
+  assert.deepEqual(await h.dependencies.readLegacyRows(), []);
+  await h.command("resume", ["--candidate-version-id", VERSION]);
+  const refreshed = h.db
+    .prepare(
+      "UPDATE game_session_mutation_locks SET expires_at_ms = ? WHERE lock_id = ? AND owner_id = ? AND operation_id = ? AND writer_generation = 2 AND expires_at_ms > ?",
+    )
+    .run(
+      h.dependencies.now() + 60_001,
+      "manual",
+      "deployed-owner",
+      "operation",
+      h.dependencies.now(),
+    );
+  assert.equal(refreshed.changes, 1);
+  h.db.exec("DELETE FROM game_session_mutation_locks WHERE lock_id = 'manual'");
+  assert.deepEqual(await h.dependencies.readLegacyRows(), []);
+  assert.throws(
+    () =>
+      h.db.exec(
+        "INSERT INTO game_session_mutation_locks (lock_id, owner_id, operation_id, expires_at_ms) VALUES ('legacy', 'old-owner', 'old-operation', 1)",
+      ),
+    /writer-disabled/,
+  );
 });
 
 test("parser and source pagination enforce exact operations, protected evidence and integer-key ordering", () => {
