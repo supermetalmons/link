@@ -147,7 +147,7 @@ test("browser connection code has no RTDB profile-link dependency", () => {
   assert.doesNotMatch(freshSignInHandler, /isWatchOnly/);
 });
 
-test("browser match snapshots use the API while move transactions and live subscriptions retain RTDB", () => {
+test("browser match snapshots use the API while live subscriptions retain RTDB", () => {
   const source = readFileSync(
     new URL("../src/connection/connection.ts", import.meta.url),
     "utf8",
@@ -158,24 +158,11 @@ test("browser match snapshots use the API while move transactions and live subsc
     assert.ok(start >= 0 && end > start);
     return source.slice(start, end);
   };
-  const verification = methodSource(
-    "private async verifyMovePersistedAfterRetryWindow(",
-    "private getMoveRetryDelayMs(",
-  );
   const reconnect = methodSource(
     "public connectToGame(",
     "public tryNavigateWatchOnlyToLatestApprovedMatch(",
   );
-  for (const method of [verification, reconnect]) {
-    assert.match(method, /await readMatchSnapshotViaApi\(/);
-    assert.doesNotMatch(method, /\bget\s*\(/);
-  }
-  const move = methodSource(
-    "private async sendMoveAttempt(",
-    "private async verifyMovePersistedAfterRetryWindow(",
-  );
-  assert.match(move, /`players\/\$\{playerUid\}\/matches\/\$\{matchId\}`/);
-  assert.match(move, /runTransaction\(\s*matchRef,/);
+  assert.match(reconnect, /await readMatchSnapshotViaApi\(/);
   const live = source.slice(source.indexOf("private observeMatch("));
   assert.match(live, /`players\/\$\{playerId\}\/matches\/\$\{matchId\}`/);
   assert.match(live, /onValue\(\s*matchRef,/);

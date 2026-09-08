@@ -550,3 +550,331 @@ test("scoped surrender distinguishes rules denial from expired credentials and p
     );
   }
 });
+
+test("scoped moves use gameplay OAuth and retry ETag conflicts without losing concurrent fields", async () => {
+  const { privateKey } = await crypto.subtle.generateKey(
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-256",
+    },
+    true,
+    ["sign", "verify"],
+  );
+  const pem = Buffer.from(await crypto.subtle.exportKey("pkcs8", privateKey));
+  const original = {
+    fen: "first",
+    flatMovesString: "before",
+    gameVariant: "Classic",
+    timer: "timer",
+    status: "",
+    emojiId: 2,
+    aura: "seed",
+    sessionCreation: { operation: "created" },
+    extra: { untouched: true },
+  };
+  const concurrent = { ...original, timer: "new-timer", status: "surrendered" };
+  const expected = {
+    ...concurrent,
+    fen: "next",
+    flatMovesString: "before-next",
+  };
+  const responses = [
+    jsonResponse(original, 200, { ETag: '"first"' }),
+    jsonResponse(concurrent, 412),
+    jsonResponse(concurrent, 200, { ETag: '"second"' }),
+    jsonResponse(expected),
+  ];
+  const writes: RequestInit[] = [];
+  const client = createFirebaseRtdbClient(
+    {
+      ...env,
+      GAMEPLAY_SERVICE_ACCOUNT_EMAIL:
+        "gameplay@example.iam.gserviceaccount.com",
+      GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY: `-----BEGIN PRIVATE KEY-----\n${pem.toString("base64")}\n-----END PRIVATE KEY-----`,
+    },
+    {
+      scopedMatchMove: { playerId: "actor", matchId: "invite-1" },
+      fetcher: async (input, init) => {
+        const url = new URL(String(input));
+        if (url.hostname === "oauth2.googleapis.com") {
+          const assertion = new URLSearchParams(String(init?.body)).get(
+            "assertion",
+          )!;
+          const payload = JSON.parse(
+            Buffer.from(assertion.split(".")[1], "base64url").toString(),
+          );
+          assert.equal(payload.iss, "gameplay@example.iam.gserviceaccount.com");
+          return jsonResponse({ access_token: "gameplay-oauth" });
+        }
+        assert.equal(url.pathname, "/players/actor/matches/invite-1.json");
+        assert.deepEqual(
+          JSON.parse(url.searchParams.get("auth_variable_override")!),
+          {
+            uid: "actor",
+            token: { workerMoveMatchId: "invite-1" },
+          },
+        );
+        assert.equal(
+          new Headers(init?.headers).get("Authorization"),
+          "Bearer gameplay-oauth",
+        );
+        if (init?.method === "PUT") writes.push(init);
+        return responses.shift()!;
+      },
+    },
+  );
+  const result = await client.transactPath(
+    "players/actor/matches/invite-1",
+    (current) => ({
+      decision: "applied",
+      value: {
+        ...(current as Record<string, unknown>),
+        fen: "next",
+        flatMovesString: "before-next",
+      },
+    }),
+  );
+  assert.equal(result.committed, true);
+  assert.deepEqual(result.value, expected);
+  assert.equal(writes.length, 2);
+  assert.equal(new Headers(writes[0].headers).get("If-Match"), '"first"');
+  assert.equal(new Headers(writes[1].headers).get("If-Match"), '"second"');
+  assert.deepEqual(JSON.parse(String(writes[1].body)), expected);
+});
+
+test("scoped moves reject invalid or competing scopes and all out-of-scope paths", async () => {
+  let reads = 0;
+  const scope = { playerId: "actor", matchId: "invite-1" };
+  for (const invalid of [
+    null,
+    {},
+    { playerId: "", matchId: "invite-1" },
+    { playerId: "actor", matchId: " ../invite" },
+    { playerId: "actor", matchId: "invite/1" },
+  ]) {
+    assert.throws(
+      () =>
+        createFirebaseRtdbClient(env, {
+          scopedMatchMove: invalid as typeof scope,
+        }),
+      /invalid-match-move-scope/,
+    );
+  }
+  assert.throws(
+    () =>
+      createFirebaseRtdbClient(env, {
+        scopedMatchSurrender: scope,
+        scopedMatchMove: scope,
+      }),
+    /conflicting-match-write-scopes/,
+  );
+  const client = createFirebaseRtdbClient(env, {
+    scopedMatchMove: scope,
+    getAccessToken: async () => "token",
+    fetcher: async () => {
+      reads++;
+      throw new Error("unexpected-fetch");
+    },
+  });
+  for (const path of [
+    "",
+    "players/actor/matches",
+    "players/other/matches/invite-1",
+    "players/actor/matches/other",
+    "players/actor/matches/invite-1/fen",
+    "/players/actor/matches/invite-1",
+  ]) {
+    await assert.rejects(client.getPath(path), /match-move-path-outside-scope/);
+    await assert.rejects(
+      client.transactPath(path, () => null),
+      /match-move-path-outside-scope/,
+    );
+  }
+  await assert.rejects(
+    client.patchRoot({ "players/actor/matches/invite-1/fen": "next" }),
+    /match-move-multipath-write-forbidden/,
+  );
+  assert.equal(reads, 0);
+});
+
+test("scoped moves cannot create matches, change unrelated fields or replace an existing variant", async () => {
+  const original = {
+    fen: "first",
+    flatMovesString: "before",
+    gameVariant: "Classic",
+    timer: "timer",
+    status: "",
+    emojiId: 2,
+    aura: "seed",
+    version: 2,
+    color: "white",
+    sessionCreation: { operation: "created" },
+    extra: { untouched: true },
+  };
+  let writes = 0;
+  let stored: unknown = original;
+  const client = createFirebaseRtdbClient(env, {
+    scopedMatchMove: { playerId: "actor", matchId: "invite-1" },
+    getAccessToken: async () => "token",
+    fetcher: async (_input, init) => {
+      if (init?.method === "PUT") writes++;
+      return jsonResponse(stored, 200, { ETag: '"etag"' });
+    },
+  });
+  const path = "players/actor/matches/invite-1";
+  for (const [key, value] of [
+    ["status", "surrendered"],
+    ["timer", ""],
+    ["emojiId", 3],
+    ["aura", ""],
+    ["version", 1],
+    ["color", "black"],
+    ["sessionCreation", {}],
+    ["extra", {}],
+    ["gameVariant", "Other"],
+    ["fen", ""],
+    ["flatMovesString", 10],
+    ["unexpected", true],
+  ] as const) {
+    await assert.rejects(
+      client.transactPath(path, (current) => ({
+        value: {
+          ...(current as Record<string, unknown>),
+          fen: "next",
+          flatMovesString: "before-next",
+          [key]: value,
+        },
+      })),
+      /match-move-must-only-change-move-fields/,
+    );
+  }
+  for (const key of [
+    "status",
+    "timer",
+    "emojiId",
+    "aura",
+    "version",
+    "color",
+    "sessionCreation",
+    "extra",
+    "gameVariant",
+  ]) {
+    await assert.rejects(
+      client.transactPath(path, (current) => {
+        const value = {
+          ...(current as Record<string, unknown>),
+          fen: "next",
+          flatMovesString: "before-next",
+        } as Record<string, unknown>;
+        delete value[key];
+        return { value };
+      }),
+      /match-move-must-only-change-move-fields/,
+    );
+  }
+  await assert.rejects(
+    client.transactPath(path, (current) => {
+      const value = current as typeof original;
+      value.extra.untouched = false;
+      return {
+        value: { ...value, fen: "next", flatMovesString: "before-next" },
+      };
+    }),
+    /match-move-must-only-change-move-fields/,
+  );
+  assert.equal(original.extra.untouched, true);
+  stored = null;
+  await assert.rejects(
+    client.transactPath(path, () => ({ value: original })),
+    /match-move-must-only-change-move-fields/,
+  );
+  assert.equal(writes, 0);
+});
+
+test("scoped moves fill missing legacy fields and freeze the validated body before hooks", async () => {
+  for (const gameVariant of [undefined, ""]) {
+    const original = {
+      fen: "first",
+      ...(gameVariant === undefined ? {} : { gameVariant }),
+    };
+    const expected = {
+      ...original,
+      gameVariant: "Classic",
+      fen: "next",
+      flatMovesString: "next",
+    };
+    const client = createFirebaseRtdbClient(env, {
+      scopedMatchMove: { playerId: "actor", matchId: "invite-1" },
+      getAccessToken: async () => "token",
+      fetcher: async (_input, init) => {
+        if (init?.method === "PUT") {
+          assert.deepEqual(JSON.parse(String(init.body)), expected);
+          return jsonResponse(expected);
+        }
+        return jsonResponse(original, 200, { ETag: '"etag"' });
+      },
+    });
+    const result = await client.transactPath(
+      "players/actor/matches/invite-1",
+      (current) => ({
+        decision: "applied",
+        value: {
+          ...(current as Record<string, unknown>),
+          gameVariant: "Classic",
+          fen: "next",
+          flatMovesString: "next",
+        },
+      }),
+      undefined,
+      async ({ current, proposed }) => {
+        (current as Record<string, unknown>).status = "mutated";
+        (proposed as Record<string, unknown>).status = "mutated";
+      },
+    );
+    assert.deepEqual(result.value, expected);
+  }
+});
+
+test("scoped moves replay without PUT and distinguish rules denial from provider failures", async () => {
+  const path = "players/actor/matches/invite-1";
+  let requests = 0;
+  const replay = createFirebaseRtdbClient(env, {
+    scopedMatchMove: { playerId: "actor", matchId: "invite-1" },
+    getAccessToken: async () => "token",
+    fetcher: async (_input, init) => {
+      requests++;
+      assert.notEqual(init?.method, "PUT");
+      return jsonResponse({ fen: "next", flatMovesString: "move" }, 200, {
+        ETag: '"etag"',
+      });
+    },
+  });
+  const result = await replay.transactPath(path, () => ({
+    commit: false,
+    decision: "already-applied",
+  }));
+  assert.equal(result.committed, false);
+  assert.equal(result.decision, "already-applied");
+  assert.equal(requests, 1);
+  for (const [status, error, expected] of [
+    [401, "Permission denied", FirebaseRtdbPermissionDenied],
+    [403, "Permission denied.", FirebaseRtdbPermissionDenied],
+    [401, "Auth token is expired", FirebaseRtdbFailure],
+    [500, "Internal error", FirebaseRtdbFailure],
+  ] as const) {
+    const client = createFirebaseRtdbClient(env, {
+      scopedMatchMove: { playerId: "actor", matchId: "invite-1" },
+      getAccessToken: async () => "token",
+      fetcher: async () => jsonResponse({ error }, status),
+    });
+    await assert.rejects(
+      client.transactPath(path, () => null),
+      (value) => {
+        assert.equal((value as Error).constructor, expected);
+        return true;
+      },
+    );
+  }
+});

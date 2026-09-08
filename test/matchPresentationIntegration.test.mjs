@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
 import { MatchPresentationState } from "../src/connection/matchPresentationState.ts";
+import { moveDeliveryStorageKey } from "../src/connection/moveDelivery.ts";
 
 const sourceFile = (path) =>
   ts.createSourceFile(
@@ -107,9 +108,13 @@ function connectionHarness({ paired = true } = {}) {
       "getMatchPresentation",
       "updateEmoji",
       "surrender",
+      "moveDeliveryScope",
+      "isCurrentMoveBoard",
+      "recoverMoveBoard",
     ])} }`,
     {
       MatchPresentationState,
+      moveDeliveryStorageKey,
       InviteReactionChannel: Channel,
       readMatchPresentationViaApi: (...args) => {
         reads.push(args);
@@ -135,6 +140,9 @@ function connectionHarness({ paired = true } = {}) {
   const connection = Object.assign(new Constructor(), {
     db: {},
     matchPresentations: new Map(),
+    confirmedSurrenders: new Set(),
+    reconcilingMoveKeys: new Set(),
+    moveRecoveryTimers: new Map(),
     observedMatchSnapshots: new Map(),
     myMatch: { ...storedMatch },
     activeContext: {
@@ -167,6 +175,7 @@ function connectionHarness({ paired = true } = {}) {
       return this.activeContext;
     },
     createMatchContextGuard: () => () => true,
+    flushPendingMoves: async () => {},
     logContextEvent: () => {},
     updateStoredEmoji: (...args) => profileUpdates.push(args),
   });
@@ -246,6 +255,10 @@ function surrenderHarness() {
   const Constructor = compile(
     `class Connection { ${methods([
       "surrender",
+      "moveDeliveryScope",
+      "isCurrentMoveBoard",
+      "recoverMoveBoard",
+      "isCurrentAuthUser",
       "requireWritableContext",
       "createMatchContextGuard",
       "createSessionGuard",
@@ -253,6 +266,7 @@ function surrenderHarness() {
       "reconnectAfterMatchUpdateFailure",
     ])} }`,
     {
+      moveDeliveryStorageKey,
       surrenderMatchViaApi: (request, tokenProvider) => {
         requests.push({ request, tokenProvider });
         return pendingSurrender.promise;
@@ -261,6 +275,10 @@ function surrenderHarness() {
     "Connection",
   );
   const connection = Object.assign(new Constructor(), {
+    auth: state,
+    confirmedSurrenders: new Set(),
+    reconcilingMoveKeys: new Set(),
+    moveRecoveryTimers: new Map(),
     myMatch: {
       fen: "current-fen",
       flatMovesString: "current-moves",
@@ -292,6 +310,7 @@ function surrenderHarness() {
       return Object.assign(async () => "token", { assertCurrentUser });
     },
     logContextEvent: (event) => events.push(event),
+    flushPendingMoves: async () => {},
     signIn: async () => state.currentUser?.uid,
     connectToGame: (...args) => reconnects.push(args),
   });
@@ -306,6 +325,7 @@ test("surrender immediately updates only local status and queues the captured ac
     ...previous,
     status: "surrendered",
   });
+  await flush();
   assert.deepEqual(
     h.requests.map(({ request }) => request),
     [
@@ -354,6 +374,7 @@ test("surrender leaves local state unchanged without a match, writable context, 
 test("surrender failure reconciles through reconnect without assuming the optimistic write failed", async () => {
   const h = surrenderHarness();
   assert.equal(h.connection.surrender(), true);
+  await flush();
   h.pendingSurrender.reject(new Error("Gameplay request timed out."));
   await flush();
   assert.equal(h.connection.myMatch.status, "surrendered");
@@ -361,16 +382,27 @@ test("surrender failure reconciles through reconnect without assuming the optimi
   assert.deepEqual(h.reconnects, [["login-alias", "invite", false]]);
 });
 
-test("late surrender success and failure cannot affect a different match, context, session, or user", async () => {
+test("late surrender success and failure cannot affect a different match, invite, actor, or user", async () => {
   for (const invalidate of [
     (h) => {
       h.connection.activeContext.matchId = "invite1";
     },
     (h) => {
-      h.connection.activeContext.contextId += 1;
+      h.connection.activeContext.inviteId = "another-invite";
     },
     (h) => {
-      h.connection.sessionEpoch += 1;
+      h.connection.activeContext = {
+        ...h.connection.activeContext,
+        actorUid: "another-actor",
+        contextId: 2,
+      };
+    },
+    (h) => {
+      h.connection.activeContext = {
+        ...h.connection.activeContext,
+        loginUid: "another-login",
+        contextId: 2,
+      };
     },
     (h) => {
       h.state.currentUser = null;
@@ -382,6 +414,7 @@ test("late surrender success and failure cannot affect a different match, contex
     for (const reject of [false, true]) {
       const h = surrenderHarness();
       assert.equal(h.connection.surrender(), true);
+      await flush();
       invalidate(h);
       h.connection.myMatch = { status: "", fen: "another-match" };
       if (reject) h.pendingSurrender.reject(new Error("unavailable"));
@@ -394,6 +427,69 @@ test("late surrender success and failure cannot affect a different match, contex
         fen: "another-match",
       });
     }
+  }
+});
+
+test("late surrender success restores status and refreshes the same board after context or session replacement", async () => {
+  for (const renew of [
+    (h) => {
+      h.connection.activeContext = {
+        ...h.connection.activeContext,
+        contextId: 2,
+      };
+    },
+    (h) => {
+      h.connection.sessionEpoch = 2;
+      h.connection.activeContext = {
+        ...h.connection.activeContext,
+        sessionEpoch: 2,
+      };
+    },
+  ]) {
+    const h = surrenderHarness();
+    const scope = h.connection.moveDeliveryScope(h.connection.activeContext);
+    assert.equal(h.connection.surrender(), true);
+    await flush();
+    renew(h);
+    h.connection.myMatch = { status: "", fen: "reconnected-fen" };
+    h.pendingSurrender.resolve({ ok: true });
+    await flush();
+    assert.deepEqual(h.connection.myMatch, {
+      status: "surrendered",
+      fen: "reconnected-fen",
+    });
+    assert.equal(
+      h.connection.confirmedSurrenders.has(moveDeliveryStorageKey(scope)),
+      true,
+    );
+    assert.deepEqual(h.events, []);
+    assert.deepEqual(h.reconnects, [["login-alias", "invite", false]]);
+  }
+});
+
+test("late surrender failure retains the original context and session guard", async () => {
+  for (const invalidate of [
+    (h) => {
+      h.connection.activeContext.contextId += 1;
+    },
+    (h) => {
+      h.connection.sessionEpoch += 1;
+    },
+  ]) {
+    const h = surrenderHarness();
+    assert.equal(h.connection.surrender(), true);
+    await flush();
+    invalidate(h);
+    h.connection.myMatch = { status: "", fen: "reconnected-fen" };
+    h.pendingSurrender.reject(new Error("unavailable"));
+    await flush();
+    assert.deepEqual(h.events, []);
+    assert.deepEqual(h.reconnects, []);
+    assert.deepEqual(h.connection.myMatch, {
+      status: "",
+      fen: "reconnected-fen",
+    });
+    assert.equal(h.connection.confirmedSurrenders.size, 0);
   }
 });
 
@@ -416,6 +512,7 @@ test("surrender recovery keeps the original guard while reconnect authentication
     const pendingSignIn = deferred();
     h.connection.signIn = () => pendingSignIn.promise;
     assert.equal(h.connection.surrender(), true);
+    await flush();
     h.pendingSurrender.reject(new Error("unavailable"));
     await flush();
     assert.deepEqual(h.events, ["ctx.write.fail"]);

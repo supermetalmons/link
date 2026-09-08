@@ -104,6 +104,7 @@ function harness() {
     pendingWagerMutations: new Set(),
     wagerSnapshotGeneration: 0,
     ensureAuthenticated: async () => {},
+    flushPendingMoves: async () => {},
     requireWritableContext: () => instance.activeContext,
     isSessionEpochActive: (epoch) => epoch === instance.sessionEpoch,
     getOpponentId: () => "opponent",

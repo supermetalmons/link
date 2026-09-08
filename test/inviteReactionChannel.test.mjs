@@ -459,6 +459,7 @@ test("the actual Firebase auth callback tears down participant and spectator res
       },
       unregisterObserverCleanup: (_contextId, key) => observers.delete(key),
       clearEventSyncCaches: () => undefined,
+      refreshMoveDeliveries: () => undefined,
       getUserBoundAuthTokenProvider(uid) {
         assert.equal(uid, "original-login");
         return Object.assign(

@@ -12,6 +12,7 @@ const {
 
 let rules;
 let createFirebaseRtdbClient;
+let FirebaseRtdbFailure;
 let FirebaseRtdbPermissionDenied;
 
 const match = (fen = "fen-1", flatMovesString = "") => ({
@@ -51,19 +52,99 @@ function scopedSurrenderClient({
   );
 }
 
+function scopedMoveClient({
+  playerId = "host",
+  matchId = "invite1",
+  fetcher = fetch,
+} = {}) {
+  return createFirebaseRtdbClient(
+    { FIREBASE_RTDB_URL: "https://mons-link-default-rtdb.firebaseio.com" },
+    {
+      scopedMatchMove: { playerId, matchId },
+      getAccessToken: async () => "owner",
+      fetcher: (input, init) => fetcher(emulatorRestUrl(input), init),
+    },
+  );
+}
+
+function move(fen = "fen-next", flatMovesString = "move") {
+  return (current) => ({ value: { ...current, fen, flatMovesString } });
+}
+
+async function putWithOverride(
+  auth,
+  value,
+  path = "players/host/matches/invite1",
+) {
+  const url = emulatorRestUrl(
+    `https://mons-link-default-rtdb.firebaseio.com/${path}.json`,
+  );
+  url.searchParams.set("auth_variable_override", JSON.stringify(auth));
+  return fetch(url, {
+    method: "PUT",
+    headers: {
+      Authorization: "Bearer owner",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(value),
+  });
+}
+
+async function assertPermissionDenied(response) {
+  assert.ok([401, 403].includes(response.status), `HTTP ${response.status}`);
+  assert.match((await response.json()).error, /permission denied/i);
+}
+
 function surrender(current) {
   return { value: { ...current, status: "surrendered" } };
 }
 
 test.before(async () => {
-  ({ createFirebaseRtdbClient, FirebaseRtdbPermissionDenied } =
-    await import("../workers/api/src/firebaseRtdb.ts"));
+  ({
+    createFirebaseRtdbClient,
+    FirebaseRtdbFailure,
+    FirebaseRtdbPermissionDenied,
+  } = await import("../workers/api/src/firebaseRtdb.ts"));
   rules = await initializeTestEnvironment({
     projectId: "demo-mons-link-rules",
     database: {
       rules: readFileSync("cloud/database.rules.json", "utf8"),
     },
   });
+});
+
+test("match writes deny browser owners, linked logins, opponents and admins at every path depth", async () => {
+  const path = "players/host/matches/invite1";
+  for (const context of [
+    rules.unauthenticatedContext(),
+    rules.authenticatedContext("host"),
+    rules.authenticatedContext("host", { profileId: "profile-host" }),
+    rules.authenticatedContext("alternate", { profileId: "profile-host" }),
+    rules.authenticatedContext("alternate"),
+    rules.authenticatedContext("guest", { profileId: "profile-guest" }),
+    rules.authenticatedContext("host", { admin: true }),
+    rules.authenticatedContext("admin", { admin: true }),
+  ]) {
+    const database = context.database();
+    const moved = match("fen-next", "move");
+    await assertFails(
+      database.ref("players/host/matches").set({ invite1: moved }),
+    );
+    await assertFails(database.ref(path).set(moved));
+    await assertFails(database.ref(`${path}/fen`).set(moved.fen));
+    await assertFails(database.ref(`${path}/flatMovesString`).set("move"));
+    await assertFails(
+      database.ref(path).update({ fen: moved.fen, flatMovesString: "move" }),
+    );
+    await assertFails(database.ref().update({ [path]: moved }));
+    await assertFails(
+      database.ref().update({
+        [`${path}/fen`]: moved.fen,
+        [`${path}/flatMovesString`]: "move",
+      }),
+    );
+    assert.deepEqual((await database.ref(path).get()).val(), match());
+  }
 });
 
 test.after(async () => {
@@ -102,7 +183,7 @@ test.beforeEach(async () => {
   });
 });
 
-test("rules deny structural writes and preserve live participant writes", async () => {
+test("rules deny structural browser writes and preserve scoped Worker moves", async () => {
   const host = rules.authenticatedContext("host", {
     profileId: "profile-host",
   });
@@ -118,17 +199,26 @@ test("rules deny structural writes and preserve live participant writes", async 
   await assertFails(hostDb.ref("invites/invite1/hostRematches").set("1"));
   await assertFails(hostDb.ref("players/host/matches/invite2").set(match()));
   await assertFails(hostDb.ref("players/host/matches/invite1").remove());
-  await assertSucceeds(
+  await assertFails(
     hostDb.ref("players/host/matches/invite1").set(match("fen-2", "move")),
   );
   const alternate = rules.authenticatedContext("alternate", {
     profileId: "profile-host",
   });
-  await assertSucceeds(
+  await assertFails(
     alternate
       .database()
       .ref("players/host/matches/invite1")
       .set(match("fen-3", "move-more")),
+  );
+  assert.equal(
+    (
+      await scopedMoveClient().transactPath(
+        "players/host/matches/invite1",
+        move("fen-2", "move"),
+      )
+    ).committed,
+    true,
   );
 });
 
@@ -192,13 +282,16 @@ test("session creation evidence is immutable for every browser while moves prese
         );
         await assertFails(database.ref(matchPath).set(match()));
       }
-      await assertSucceeds(
+      await assertFails(
         database
           .ref(matchPath)
           .set({ ...initial, fen: "fen-next", flatMovesString: "move" }),
       );
       await assertFails(database.ref(`${matchPath}/status`).set("surrendered"));
     }
+    const result = await scopedMoveClient().transactPath(matchPath, move());
+    assert.equal(result.committed, true);
+    assert.equal(result.value.sessionCreation, storedMarker);
   }
 });
 
@@ -252,13 +345,22 @@ test("retired reactions remain readable but reject every browser write", async (
   assert.deepEqual(retained.val(), reaction);
 });
 
-test("rules retain same-profile writes through an RTDB link without a custom claim", async () => {
+test("same-profile RTDB links without a custom claim require Worker moves", async () => {
   const alternate = rules.authenticatedContext("alternate");
-  await assertSucceeds(
+  await assertFails(
     alternate
       .database()
       .ref("players/host/matches/invite1")
       .set(match("fen-linked", "move-linked")),
+  );
+  assert.equal(
+    (
+      await scopedMoveClient().transactPath(
+        "players/host/matches/invite1",
+        move("fen-linked", "move-linked"),
+      )
+    ).committed,
+    true,
   );
 });
 
@@ -390,7 +492,7 @@ test("match presentation seeds reject child, full-record, deletion and multi-pat
   }
 });
 
-test("unchanged presentation seeds permit moves while browser surrender is rejected", async () => {
+test("unchanged presentation seeds permit scoped moves while browser moves and surrender are rejected", async () => {
   let moveHistory = "";
   for (const context of [
     rules.authenticatedContext("host", { profileId: "profile-host" }),
@@ -398,12 +500,14 @@ test("unchanged presentation seeds permit moves while browser surrender is rejec
     rules.authenticatedContext("alternate"),
     rules.authenticatedContext("admin", { admin: true }),
   ]) {
-    moveHistory += "-move";
+    moveHistory = moveHistory ? `${moveHistory}-move` : "move";
     const reference = context.database().ref("players/host/matches/invite1");
-    await assertSucceeds(
-      reference.set(match(`fen${moveHistory}`, moveHistory)),
-    );
+    await assertFails(reference.set(match(`fen${moveHistory}`, moveHistory)));
     await assertFails(reference.update({ status: "surrendered" }));
+    await scopedMoveClient().transactPath(
+      "players/host/matches/invite1",
+      move(`fen${moveHistory}`, moveHistory),
+    );
     const stored = (await reference.once("value")).val();
     assert.equal(stored.emojiId, 1);
     assert.equal(stored.aura, "");
@@ -443,20 +547,13 @@ test("status changes, removal, and replacement require the Worker capability for
         await assertFails(database.ref().update({ [`${path}/status`]: null }));
       }
     }
-    for (const context of [
-      rules.authenticatedContext("host", { profileId: "profile-host" }),
-      rules.authenticatedContext("alternate", { profileId: "profile-host" }),
-      rules.authenticatedContext("alternate"),
-      rules.authenticatedContext("admin", { admin: true }),
-    ]) {
-      const reference = context.database().ref(path);
-      await assertSucceeds(
-        reference.set({ ...initial, fen: "next-fen", flatMovesString: "move" }),
-      );
-      const stored = (await reference.get()).val();
-      assert.equal(Object.hasOwn(stored, "status"), storedStatus !== undefined);
-      assert.equal(stored.status, storedStatus);
-    }
+    const moved = await scopedMoveClient().transactPath(path, move());
+    assert.equal(moved.committed, true);
+    assert.equal(
+      Object.hasOwn(moved.value, "status"),
+      storedStatus !== undefined,
+    );
+    assert.equal(moved.value.status, storedStatus);
   }
 });
 
@@ -480,9 +577,7 @@ test("scoped OAuth REST surrender retries an ETag conflict without losing a conc
       );
       if (init.method === "PUT" && !conflictInjected) {
         conflictInjected = true;
-        await browser
-          .ref(path)
-          .update({ fen: "fen-moved", flatMovesString: "move" });
+        await scopedMoveClient().transactPath(path, move("fen-moved", "move"));
         await rules.withSecurityRulesDisabled(async (context) => {
           await context
             .database()
@@ -555,6 +650,288 @@ test("scoped REST surrender enforces timer claims atomically at its conditional 
   }
 });
 
+test("scoped OAuth move retries ETag conflicts while preserving concurrent surrender and server fields", async () => {
+  const path = "players/host/matches/invite1";
+  let conflictInjected = false;
+  const writeStatuses = [];
+  const client = scopedMoveClient({
+    fetcher: async (url, init) => {
+      assert.deepEqual(
+        JSON.parse(url.searchParams.get("auth_variable_override")),
+        {
+          uid: "host",
+          token: { workerMoveMatchId: "invite1" },
+        },
+      );
+      assert.equal(
+        new Headers(init.headers).get("Authorization"),
+        "Bearer owner",
+      );
+      if (init.method === "PUT" && !conflictInjected) {
+        conflictInjected = true;
+        await scopedSurrenderClient().transactPath(path, surrender);
+        await rules.withSecurityRulesDisabled(async (context) => {
+          await context
+            .database()
+            .ref(path)
+            .update({
+              timer: "concurrent-server-timer",
+              sessionCreation: "retained-creation",
+              serverMetadata: { retained: true },
+            });
+        });
+      }
+      const response = await fetch(url, init);
+      if (init.method === "PUT") writeStatuses.push(response.status);
+      return response;
+    },
+  });
+  const result = await client.transactPath(path, move());
+  assert.equal(result.committed, true);
+  assert.deepEqual(writeStatuses, [412, 200]);
+  assert.deepEqual(result.value, {
+    ...match("fen-next", "move"),
+    status: "surrendered",
+    timer: "concurrent-server-timer",
+    sessionCreation: "retained-creation",
+    serverMetadata: { retained: true },
+  });
+});
+
+test("a lost scoped move response is acknowledged on replay without another write", async () => {
+  const path = "players/host/matches/invite1";
+  let writeCount = 0;
+  const client = scopedMoveClient({
+    fetcher: async (url, init) => {
+      const response = await fetch(url, init);
+      if (init.method === "PUT") {
+        writeCount += 1;
+        assert.equal(response.status, 200);
+        await response.arrayBuffer();
+        throw new Error("lost-move-response");
+      }
+      return response;
+    },
+  });
+  const updater = (current) =>
+    current.fen === "fen-next" && current.flatMovesString === "move"
+      ? { commit: false, decision: "already-applied" }
+      : move()(current);
+  await assert.rejects(client.transactPath(path, updater), FirebaseRtdbFailure);
+  const replay = await client.transactPath(path, updater);
+  assert.equal(replay.committed, false);
+  assert.equal(replay.decision, "already-applied");
+  assert.equal(writeCount, 1);
+});
+
+test("scoped REST moves enforce a timer fence created between their read and conditional write", async () => {
+  const path = "players/host/matches/invite1";
+  const claimPath = "matchTimerClaims/invite1";
+  const now = Date.now();
+  for (const [claim, allowed] of [
+    [null, true],
+    [{ status: "pending", expiresAtMs: now + 60_000 }, false],
+    [{ status: "claimed", expiresAtMs: null }, false],
+    [{ status: "pending", expiresAtMs: now - 1_000 }, true],
+    [{ status: "pending" }, false],
+    [{ status: "pending", expiresAtMs: "expired" }, false],
+    [{ status: "other", expiresAtMs: now - 1_000 }, false],
+    ["malformed", false],
+  ]) {
+    await rules.withSecurityRulesDisabled(async (context) => {
+      await context
+        .database()
+        .ref()
+        .update({ [path]: match(), [claimPath]: null });
+    });
+    let injected = false;
+    const client = scopedMoveClient({
+      fetcher: async (url, init) => {
+        if (init.method === "PUT" && !injected) {
+          injected = true;
+          await rules.withSecurityRulesDisabled(async (context) => {
+            await context.database().ref(claimPath).set(claim);
+          });
+        }
+        return fetch(url, init);
+      },
+    });
+    if (allowed) {
+      assert.equal((await client.transactPath(path, move())).committed, true);
+    } else {
+      await assert.rejects(
+        client.transactPath(path, move()),
+        FirebaseRtdbPermissionDenied,
+      );
+    }
+    assert.equal(injected, true);
+    const stored = (
+      await rules.unauthenticatedContext().database().ref(path).get()
+    ).val();
+    assert.deepEqual(stored, allowed ? match("fen-next", "move") : match());
+  }
+});
+
+test("scoped REST move and surrender capabilities cannot modify other session fields", async () => {
+  const path = "players/host/matches/invite1";
+  const initial = { ...match(), sessionCreation: "retained" };
+  await rules.withSecurityRulesDisabled(async (context) => {
+    await context.database().ref(path).set(initial);
+  });
+  for (const scope of ["workerMoveMatchId", "workerSurrenderMatchId"]) {
+    const auth = { uid: "host", token: { [scope]: "invite1" } };
+    const updated =
+      scope === "workerMoveMatchId"
+        ? { ...initial, fen: "fen-next", flatMovesString: "move" }
+        : { ...initial, status: "surrendered" };
+    for (const [field, changed] of [
+      ["version", 3],
+      ["color", "black"],
+      ["emojiId", 2],
+      ["aura", "rainbow"],
+      ["sessionCreation", "different"],
+      ["timer", "client-timer"],
+      ["gameVariant", "Blitz"],
+      ...(scope === "workerMoveMatchId"
+        ? [["status", "surrendered"]]
+        : [
+            ["fen", "fen-changed"],
+            ["flatMovesString", "move"],
+          ]),
+    ]) {
+      await assertPermissionDenied(
+        await putWithOverride(auth, { ...updated, [field]: changed }),
+      );
+      const deleted = { ...updated };
+      delete deleted[field];
+      await assertPermissionDenied(await putWithOverride(auth, deleted));
+    }
+    await assertPermissionDenied(await putWithOverride(auth, null));
+  }
+  assert.deepEqual(
+    (await rules.unauthenticatedContext().database().ref(path).get()).val(),
+    initial,
+  );
+});
+
+test("scoped REST moves preserve history prefixes and support legacy missing history and variants", async () => {
+  const path = "players/host/matches/invite1";
+  const auth = { uid: "host", token: { workerMoveMatchId: "invite1" } };
+  await scopedMoveClient().transactPath(path, move("fen-next", "first"));
+  for (const history of [
+    "different",
+    "prefix-first-suffix",
+    "firstSuffix",
+    "first-",
+  ]) {
+    await assertPermissionDenied(
+      await putWithOverride(auth, match("invalid-fen", history)),
+    );
+  }
+  await assertPermissionDenied(
+    await putWithOverride(auth, match("changed-without-move", "first")),
+  );
+  assert.equal(
+    (
+      await scopedMoveClient().transactPath(
+        path,
+        move("fen-two", "first-second"),
+      )
+    ).committed,
+    true,
+  );
+
+  for (const variant of [undefined, ""]) {
+    const legacy = match();
+    delete legacy.flatMovesString;
+    if (variant === undefined) delete legacy.gameVariant;
+    else legacy.gameVariant = variant;
+    await rules.withSecurityRulesDisabled(async (context) => {
+      await context.database().ref(path).set(legacy);
+    });
+    const surrendered = await scopedSurrenderClient().transactPath(
+      path,
+      surrender,
+    );
+    assert.equal(surrendered.value.gameVariant, variant);
+    assert.equal(Object.hasOwn(surrendered.value, "flatMovesString"), false);
+    const moved = await scopedMoveClient().transactPath(path, move());
+    assert.equal(moved.value.gameVariant, variant);
+    assert.equal(moved.value.status, "surrendered");
+    const filled = await scopedMoveClient().transactPath(path, (current) => ({
+      value: {
+        ...current,
+        fen: "fen-filled",
+        flatMovesString: "move-next",
+        gameVariant: "Classic",
+      },
+    }));
+    assert.equal(filled.committed, true);
+    assert.equal(filled.value.gameVariant, "Classic");
+  }
+});
+
+test("REST move overrides require the exact actor and one matching capability", async () => {
+  for (const auth of [
+    { uid: "host" },
+    { uid: "host", token: { admin: true } },
+    { uid: "host", token: { workerMoveMatchId: "different" } },
+    { uid: "guest", token: { workerMoveMatchId: "invite1" } },
+    {
+      uid: "alternate",
+      token: { profileId: "profile-host", workerMoveMatchId: "invite1" },
+    },
+    {
+      uid: "host",
+      token: {
+        workerMoveMatchId: "invite1",
+        workerSurrenderMatchId: "invite1",
+      },
+    },
+  ]) {
+    await assertPermissionDenied(
+      await putWithOverride(auth, match("fen-next", "move")),
+    );
+  }
+  await assertPermissionDenied(
+    await putWithOverride(
+      { uid: "host", token: { workerMoveMatchId: "missing" } },
+      match("fen-next", "move"),
+      "players/host/matches/missing",
+    ),
+  );
+  const url = emulatorRestUrl(
+    "https://mons-link-default-rtdb.firebaseio.com/players/host/matches/invite1.json",
+  );
+  url.searchParams.set(
+    "auth_variable_override",
+    JSON.stringify({ uid: "host", token: { workerMoveMatchId: "invite1" } }),
+  );
+  url.searchParams.set(
+    "auth",
+    createMockUserToken(
+      { sub: "host", iat: Math.floor(Date.now() / 1_000) },
+      "demo-mons-link-rules",
+    ),
+  );
+  const forged = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(match("fen-next", "move")),
+  });
+  assert.ok([400, 401, 403].includes(forged.status));
+  await forged.arrayBuffer();
+  assert.equal(
+    (
+      await scopedMoveClient().transactPath(
+        "players/host/matches/invite1",
+        move(),
+      )
+    ).committed,
+    true,
+  );
+});
+
 test("REST overrides require the matching actor and match capability", async () => {
   const path = "players/host/matches/invite1";
   const url = emulatorRestUrl(
@@ -565,6 +942,13 @@ test("REST overrides require the matching actor and match capability", async () 
     { uid: "host", token: { admin: true } },
     { uid: "host", token: { workerSurrenderMatchId: "different" } },
     { uid: "guest", token: { workerSurrenderMatchId: "invite1" } },
+    {
+      uid: "host",
+      token: {
+        workerSurrenderMatchId: "invite1",
+        workerMoveMatchId: "invite1",
+      },
+    },
     {
       uid: "alternate",
       token: { profileId: "profile-host", workerSurrenderMatchId: "invite1" },
@@ -607,7 +991,7 @@ test("REST overrides require the matching actor and match capability", async () 
   assert.equal((await client.transactPath(path, surrender)).committed, true);
 });
 
-test("legacy missing presentation fields must remain absent through browser writes", async () => {
+test("legacy missing presentation fields stay absent through scoped moves", async () => {
   const matchPath = "players/host/matches/invite1";
   for (const missingFields of [["emojiId"], ["aura"], ["emojiId", "aura"]]) {
     const legacyMatch = match();
@@ -626,17 +1010,21 @@ test("legacy missing presentation fields must remain absent through browser writ
           reference.set({ ...legacyMatch, [field]: match()[field] }),
         );
       }
-      await assertSucceeds(
+      await assertFails(
         reference.update({
           fen: "legacy-moved",
           flatMovesString: "legacy-move",
         }),
       );
       await assertFails(reference.update({ status: "surrendered" }));
-      const stored = (await reference.once("value")).val();
-      for (const field of missingFields)
-        assert.equal(Object.hasOwn(stored, field), false);
     }
+    const moved = await scopedMoveClient().transactPath(
+      matchPath,
+      move("legacy-moved", "legacy-move"),
+    );
+    assert.equal(moved.committed, true);
+    for (const field of missingFields)
+      assert.equal(Object.hasOwn(moved.value, field), false);
   }
 });
 

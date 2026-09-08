@@ -2,6 +2,7 @@ import {
   GAME_SESSION_OPERATION_ID_PATTERN,
   MAX_GAME_SESSION_RESPONSE_BYTES,
   MATCH_SNAPSHOT_PATH,
+  MATCH_MOVE_PATH,
   isCreateInviteResponse,
   isEndRematchResponse,
   isEnsureMatchResponse,
@@ -13,6 +14,9 @@ import {
   isResolveInviteRoleResponse,
   isSurrenderMatchRequest,
   isSurrenderMatchResponse,
+  isSubmitMoveRequest,
+  isSubmitMoveResponse,
+  isMoveHistoryPrefix,
   type CreateInviteRequest,
   type CreateInviteResponse,
   type EndRematchRequest,
@@ -31,6 +35,8 @@ import {
   type ResolveInviteRoleResponse,
   type SurrenderMatchRequest,
   type SurrenderMatchResponse,
+  type SubmitMoveRequest,
+  type SubmitMoveResponse,
 } from "@mons/shared/game-sessions";
 import {
   isCancelAutomatchResponse,
@@ -814,6 +820,47 @@ export function ensureMatchViaApi(
     tokenProvider,
     isEnsureMatchResponse,
     true,
+  );
+}
+
+export function submitMoveViaApi(
+  request: SubmitMoveRequest,
+  tokenProvider: AuthTokenProvider,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<SubmitMoveResponse> {
+  const timeoutMs = options.timeoutMs ?? GAMEPLAY_API_TIMEOUT_MS;
+  if (
+    !isSubmitMoveRequest(request) ||
+    !Number.isFinite(timeoutMs) ||
+    timeoutMs <= 0
+  ) {
+    return Promise.reject(
+      new GameplayApiError("invalid-argument", "invalid-move-request"),
+    );
+  }
+  const body: SubmitMoveRequest = {
+    ...request,
+    ...(request.previousStates
+      ? {
+          previousStates: request.previousStates.map((state) => ({ ...state })),
+        }
+      : {}),
+  };
+  return gameplayMutation(
+    MATCH_MOVE_PATH,
+    body,
+    tokenProvider,
+    (value): value is SubmitMoveResponse =>
+      isSubmitMoveResponse(value) &&
+      value.inviteId === body.inviteId &&
+      value.matchId === body.matchId &&
+      value.actorUid === body.playerId &&
+      (value.outcome !== "superseded" ||
+        (body.previousStates !== undefined &&
+          value.flatMovesString !== body.flatMovesString &&
+          isMoveHistoryPrefix(body.flatMovesString, value.flatMovesString))),
+    timeoutMs,
+    options,
   );
 }
 

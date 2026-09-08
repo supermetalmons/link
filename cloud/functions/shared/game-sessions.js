@@ -13,6 +13,9 @@ const GAME_SESSION_OPERATION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_GAME_SESSION_RESPONSE_BYTES = 640 * 1024;
 const MATCH_SNAPSHOT_PATH = "/matches/snapshot";
+const MATCH_MOVE_PATH = "/matches/move";
+const MAX_MATCH_MOVE_REQUEST_BYTES = 1024 * 1024;
+const MAX_MATCH_MOVE_PREVIOUS_STATES = 64;
 const MAX_GAME_SESSION_GAME_VARIANT_BYTES = 256;
 const MAX_GAME_SESSION_STATUS_BYTES = 1024;
 const MAX_GAME_SESSION_TIMER_BYTES = 1024;
@@ -109,6 +112,103 @@ const isSurrenderMatchResponse = (value) =>
     matchId: value.matchId,
     playerId: value.actorUid,
   });
+
+const countMoveHistory = (history) =>
+  history === "" ? 0 : history.split("-").length;
+
+const isMoveHistoryPrefix = (prefix, history) =>
+  prefix === "" || prefix === history || history.startsWith(`${prefix}-`);
+
+const isSubmitMoveRequest = (value) => {
+  if (!isRecord(value)) return false;
+  const keys = [
+    "inviteId",
+    "matchId",
+    "playerId",
+    "previousFlatMovesString",
+    "flatMovesString",
+    "fen",
+  ];
+  if (Object.hasOwn(value, "gameVariant")) keys.push("gameVariant");
+  if (Object.hasOwn(value, "previousStates")) keys.push("previousStates");
+  if (
+    !hasExactKeys(value, keys) ||
+    !isSurrenderMatchRequest({
+      inviteId: value.inviteId,
+      matchId: value.matchId,
+      playerId: value.playerId,
+    }) ||
+    !isMatchFenWithinLimit(value.fen) ||
+    value.fen === "" ||
+    !isMatchHistoryWithinLimits(value.previousFlatMovesString) ||
+    !isMatchHistoryWithinLimits(value.flatMovesString) ||
+    (Object.hasOwn(value, "gameVariant") &&
+      (!isBoundedString(
+        value.gameVariant,
+        MAX_GAME_SESSION_GAME_VARIANT_BYTES,
+      ) ||
+        value.gameVariant === ""))
+  ) {
+    return false;
+  }
+  const prefix = value.previousFlatMovesString
+    ? `${value.previousFlatMovesString}-`
+    : "";
+  if (
+    !value.flatMovesString.startsWith(prefix) ||
+    value.flatMovesString.length <= prefix.length
+  )
+    return false;
+  if (!Object.hasOwn(value, "previousStates")) return true;
+  const states = value.previousStates;
+  const baseCount = countMoveHistory(value.previousFlatMovesString);
+  const targetMoves = value.flatMovesString.split("-");
+  return (
+    Array.isArray(states) &&
+    states.length > 0 &&
+    states.length <= MAX_MATCH_MOVE_PREVIOUS_STATES &&
+    states.length === targetMoves.length - baseCount &&
+    targetMoves.every((move) => move !== "") &&
+    Array.from(states).every(
+      (state, index) =>
+        isRecord(state) &&
+        hasExactKeys(state, ["moveCount", "fen"]) &&
+        Number.isSafeInteger(state.moveCount) &&
+        state.moveCount === baseCount + index &&
+        isMatchFenWithinLimit(state.fen) &&
+        state.fen !== "",
+    ) &&
+    new TextEncoder().encode(JSON.stringify(value)).byteLength <=
+      MAX_MATCH_MOVE_REQUEST_BYTES
+  );
+};
+
+const isSubmitMoveResponse = (value) => {
+  if (
+    !isRecord(value) ||
+    value.ok !== true ||
+    !isSurrenderMatchRequest({
+      inviteId: value.inviteId,
+      matchId: value.matchId,
+      playerId: value.actorUid,
+    })
+  )
+    return false;
+  const keys = ["ok", "inviteId", "matchId", "actorUid", "outcome"];
+  if (value.outcome === "superseded") {
+    return (
+      hasExactKeys(value, [...keys, "fen", "flatMovesString"]) &&
+      isMatchFenWithinLimit(value.fen) &&
+      value.fen !== "" &&
+      isMatchHistoryWithinLimits(value.flatMovesString) &&
+      value.flatMovesString !== ""
+    );
+  }
+  return (
+    hasExactKeys(value, keys) &&
+    (value.outcome === "applied" || value.outcome === "already-applied")
+  );
+};
 
 const MATCH_RECORD_KEYS = [
   "version",
@@ -395,6 +495,9 @@ module.exports = {
   MANUAL_INVITE_ID_PATTERN,
   MAX_GAME_SESSION_RESPONSE_BYTES,
   MATCH_SNAPSHOT_PATH,
+  MATCH_MOVE_PATH,
+  MAX_MATCH_MOVE_REQUEST_BYTES,
+  MAX_MATCH_MOVE_PREVIOUS_STATES,
   MAX_GAME_SESSION_GAME_VARIANT_BYTES,
   MAX_GAME_SESSION_STATUS_BYTES,
   MAX_GAME_SESSION_TIMER_BYTES,
@@ -406,6 +509,10 @@ module.exports = {
   isEnsureMatchResponse,
   isSurrenderMatchRequest,
   isSurrenderMatchResponse,
+  isSubmitMoveRequest,
+  isSubmitMoveResponse,
+  countMoveHistory,
+  isMoveHistoryPrefix,
   isGameSessionMatch: isMatchRecord,
   isHistoricalMatchPair,
   isJoinInviteRequest,

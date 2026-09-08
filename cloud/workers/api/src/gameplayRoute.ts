@@ -1,5 +1,7 @@
 import {
   GAME_SESSION_OPERATION_ID_PATTERN,
+  MATCH_MOVE_PATH,
+  MAX_MATCH_MOVE_REQUEST_BYTES,
   isCreateInviteRequest,
   isEndRematchRequest,
   isEnsureMatchRequest,
@@ -7,6 +9,7 @@ import {
   isProposeRematchRequest,
   isResolveInviteRoleRequest,
   isSurrenderMatchRequest,
+  isSubmitMoveRequest,
 } from "@mons/shared/game-sessions";
 import { isAutoInviteId } from "@mons/shared/ids";
 import {
@@ -86,6 +89,11 @@ import {
   type SurrenderMatchDependencies,
 } from "./matchSurrender.ts";
 import {
+  enforceMatchMoveRateLimit,
+  submitMove,
+  type SubmitMoveDependencies,
+} from "./matchMove.ts";
+import {
   acceptWagerProposal,
   removeWagerProposal,
   sendWagerProposal,
@@ -130,6 +138,7 @@ import {
 } from "./profileOwnership.ts";
 
 export const GAMEPLAY_PATHS = new Set([
+  MATCH_MOVE_PATH,
   WAGER_FROZEN_READ_PATH,
   "/automatch/cancel",
   "/automatch/start",
@@ -176,6 +185,7 @@ export type GameplayRouteDependencies = {
   ratingRepository?: RatingRepository;
   timer?: Partial<MatchTimerDependencies>;
   surrender?: Partial<SurrenderMatchDependencies>;
+  move?: Partial<SubmitMoveDependencies>;
   wager?: Partial<WagerProposalDependencies>;
   wagerOutcome?: WagerOutcomeDependencies;
   verifyIdentity?: (
@@ -305,7 +315,12 @@ async function readGameplayBody(
 ): Promise<Record<string, unknown>> {
   let body: Record<string, unknown> | null;
   try {
-    body = toRecord(await readBoundedJson(request));
+    body = toRecord(
+      await readBoundedJson(
+        request,
+        pathname === MATCH_MOVE_PATH ? MAX_MATCH_MOVE_REQUEST_BYTES : undefined,
+      ),
+    );
   } catch {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
   }
@@ -362,6 +377,12 @@ async function readGameplayBody(
   }
   if (pathname === "/matches/surrender") {
     if (!isSurrenderMatchRequest(body)) {
+      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+    }
+    return body;
+  }
+  if (pathname === MATCH_MOVE_PATH) {
+    if (!isSubmitMoveRequest(body)) {
       throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
     }
     return body;
@@ -783,6 +804,19 @@ export async function handleGameplayRoute(
         repository,
         gameSessionDependencies,
       );
+    } else if (pathname === MATCH_MOVE_PATH) {
+      if (!isSubmitMoveRequest(body)) {
+        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
+      }
+      await enforceMatchMoveRateLimit(env.MOVE_RATE_LIMITER, identity.uid);
+      response = await submitMove(identity, body, repository, {
+        createMatchClient:
+          dependencies.move?.createMatchClient ||
+          ((scope) =>
+            createFirebaseRtdbClient(env, { scopedMatchMove: scope })),
+        assertMutationAllowed,
+        signal: dependencies.move?.signal || request.signal,
+      });
     } else if (pathname === "/matches/surrender") {
       if (!isSurrenderMatchRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");

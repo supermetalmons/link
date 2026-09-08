@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
+import { moveDeliveryStorageKey } from "../src/connection/moveDelivery.ts";
 import { isAutoInviteId } from "../cloud/functions/shared/ids.js";
 import { withAutomatchOperationLock } from "../src/connection/automatchOperationLock.ts";
 import { InviteMetadataState } from "../src/connection/inviteMetadataState.ts";
@@ -125,6 +126,7 @@ function harness(invite, onMatchRead = () => {}) {
     `class Connection { ${methods.join("\n")} }`,
     "Connection",
     {
+      moveDeliveryStorageKey,
       storage,
       InviteMetadataState,
       InviteMetadataChannel: class {
@@ -187,6 +189,13 @@ function harness(invite, onMatchRead = () => {}) {
     connectAttemptId: 0,
     nextContextId: 1,
     activeContext: null,
+    moveDeliveries: new Map(),
+    confirmedSurrenders: new Set(),
+    reconcilingMoveKeys: new Set(),
+    getMoveDelivery: (_scope, match) => ({
+      reconcile: () => match,
+      resume: noop,
+    }),
     auth: { currentUser: { uid: UID } },
     db: {},
     getUserBoundAuthTokenProvider: () => ({ assertCurrentUser: noop }),

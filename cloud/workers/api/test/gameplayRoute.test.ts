@@ -6,8 +6,14 @@ import {
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Game } from "mons-rules";
+import {
+  MATCH_MOVE_PATH,
+  MAX_MATCH_MOVE_REQUEST_BYTES,
+  type SubmitMoveRequest,
+} from "@mons/shared/game-sessions";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import {
+  createFirebaseRtdbClient,
   FirebaseRtdbFailure,
   FirebaseRtdbPermissionDenied,
   type FirebaseRtdbClient,
@@ -2853,4 +2859,638 @@ test("surrender observes auth, rate limit, ownership and mutation controls", asy
   };
   assert.equal((await frozen.call()).status, 503);
   assert.equal(frozen.stats.writes, 0);
+});
+
+function moveFixture({
+  loginUid = identity.uid,
+  playerId = identity.uid,
+  inviteValue = { hostId: identity.uid, guestId: "guest" },
+  matchValue = {
+    fen: "fen",
+    flatMovesString: "moves",
+    status: "",
+    timer: "4;12345",
+    emojiId: 1,
+    aura: "seed",
+    sessionCreation: { operationId: "created" },
+    extra: { retained: true },
+  },
+  ownerByUid = {},
+}: {
+  loginUid?: string;
+  playerId?: string;
+  inviteValue?: unknown;
+  matchValue?: unknown;
+  ownerByUid?: Readonly<Record<string, string | null>>;
+} = {}) {
+  const stats = { writes: 0, scopedClients: 0 };
+  const body: SubmitMoveRequest = {
+    inviteId: "invite",
+    matchId: "invite",
+    playerId,
+    previousFlatMovesString: "moves",
+    flatMovesString: "moves-next",
+    fen: "next-fen",
+    gameVariant: "Classic",
+  };
+  const client: Pick<FirebaseRtdbClient, "transactPath"> = {
+    async transactPath(path, updater, signal, beforeWrite) {
+      assert.equal(path, `players/${playerId}/matches/${body.matchId}`);
+      signal?.throwIfAborted();
+      const current = structuredClone(matchValue);
+      const result = applyTransaction(updater, current);
+      if (result.committed) {
+        await beforeWrite?.({
+          current,
+          proposed: result.value,
+          etag: '"etag"',
+        });
+        matchValue = result.value;
+        stats.writes++;
+      }
+      return result;
+    },
+  };
+  const dependencies: Parameters<typeof handleGameplayRoute>[3] = {
+    repository: repository({
+      readState: async (path) => {
+        assert.equal(path, "invites/invite");
+        return inviteValue;
+      },
+      readProfileOwnershipSnapshot: async (query) =>
+        ownershipSnapshot(query, { ownerByUid }),
+      transactState: async () => {
+        throw new Error("unrestricted-write");
+      },
+      patchRtdbRoot: async () => {
+        throw new Error("unrestricted-write");
+      },
+    }),
+    move: {
+      createMatchClient: (scope) => {
+        assert.deepEqual(scope, { playerId, matchId: body.matchId });
+        stats.scopedClients++;
+        return client;
+      },
+    },
+    verifyIdentity: async () => ({ uid: loginUid }),
+    logFailure: () => {},
+  };
+  return {
+    body,
+    client,
+    dependencies,
+    stats,
+    getMatch: () => matchValue,
+    call: (currentEnv = env, input: unknown = body) =>
+      handleGameplayRoute(
+        request(MATCH_MOVE_PATH, { body: input }),
+        currentEnv,
+        context(),
+        dependencies,
+      ),
+  };
+}
+
+test("moves compare and set only move fields and replay without a write", async () => {
+  const h = moveFixture();
+  const original = structuredClone(h.getMatch());
+  let key = "";
+  const currentEnv = {
+    ...env,
+    AUTH_RATE_LIMITER: {
+      limit: async () => {
+        throw new Error("wrong-limiter");
+      },
+    },
+    MOVE_RATE_LIMITER: {
+      limit: async (input: { key: string }) => {
+        key = input.key;
+        return { success: true };
+      },
+    },
+  };
+  for (const outcome of ["applied", "already-applied"]) {
+    const response = await h.call(currentEnv);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      ok: true,
+      inviteId: "invite",
+      matchId: "invite",
+      actorUid: identity.uid,
+      outcome,
+    });
+  }
+  assert.deepEqual(h.getMatch(), {
+    ...(original as Record<string, unknown>),
+    fen: h.body.fen,
+    flatMovesString: h.body.flatMovesString,
+    gameVariant: "Classic",
+  });
+  assert.equal(key, `match-move:${identity.uid}`);
+  assert.equal(h.stats.writes, 1);
+});
+
+test("moves authorize participants and canonical linked logins without profile shadows", async () => {
+  for (const playerId of [identity.uid, "guest"]) {
+    for (const loginUid of [playerId, "alternate"]) {
+      const h = moveFixture({
+        loginUid,
+        playerId,
+        ownerByUid: { alternate: "owner", [playerId]: "owner" },
+      });
+      assert.equal((await h.call()).status, 200);
+      assert.equal(h.stats.writes, 1);
+    }
+  }
+});
+
+test("moves reject unauthorized participants, unknown rematches and absent or malformed state", async () => {
+  for (const [h, status] of [
+    [moveFixture({ loginUid: "spectator" }), 403],
+    [
+      moveFixture({
+        loginUid: "alternate",
+        ownerByUid: { alternate: "other", [identity.uid]: "owner" },
+      }),
+      403,
+    ],
+    [moveFixture({ playerId: "unrelated" }), 403],
+    [moveFixture({ inviteValue: null }), 404],
+    [moveFixture({ inviteValue: [] }), 409],
+    [
+      moveFixture({
+        inviteValue: { hostId: identity.uid, guestId: identity.uid },
+      }),
+      409,
+    ],
+    [moveFixture({ matchValue: null }), 404],
+    [moveFixture({ matchValue: [] }), 409],
+    [moveFixture({ matchValue: { fen: "fen", flatMovesString: 42 } }), 409],
+  ] as const) {
+    assert.equal((await h.call()).status, status);
+    assert.equal(h.stats.writes, 0);
+  }
+  const missing = moveFixture();
+  missing.body.matchId = "invite2";
+  assert.equal((await missing.call()).status, 404);
+  assert.equal(missing.stats.scopedClients, 0);
+  const known = moveFixture({
+    inviteValue: {
+      hostId: identity.uid,
+      guestId: "guest",
+      hostRematches: "1;2",
+      guestRematches: "1",
+    },
+  });
+  known.body.matchId = "invite2";
+  assert.equal((await known.call()).status, 200);
+});
+
+test("moves reject conflicting history without overwriting the stored match", async () => {
+  for (const matchValue of [
+    { fen: "another-fen", flatMovesString: "moves-other", timer: "timer" },
+    { fen: "another-fen", flatMovesString: "moves-next", timer: "timer" },
+  ]) {
+    const h = moveFixture({ matchValue });
+    const response = await h.call();
+    assert.equal(response.status, 409);
+    assert.equal(
+      ((await response.json()) as { message: string }).message,
+      "move-chain-conflict",
+    );
+    assert.deepEqual(h.getMatch(), matchValue);
+    assert.equal(h.stats.writes, 0);
+  }
+});
+
+test("moves preserve existing variants and optional legacy fields", async () => {
+  for (const gameVariant of [undefined, "", "Custom"]) {
+    for (const requestedVariant of [undefined, "Classic"]) {
+      const matchValue = {
+        fen: "fen",
+        ...(gameVariant === undefined ? {} : { gameVariant }),
+        extra: { retained: true },
+      };
+      const h = moveFixture({ matchValue });
+      h.body.previousFlatMovesString = "";
+      h.body.flatMovesString = "next";
+      if (requestedVariant === undefined) delete h.body.gameVariant;
+      else h.body.gameVariant = requestedVariant;
+      assert.equal((await h.call()).status, 200);
+      const expectedVariant = gameVariant || requestedVariant;
+      assert.deepEqual(h.getMatch(), {
+        ...matchValue,
+        ...(expectedVariant ? { gameVariant: expectedVariant } : {}),
+        fen: "next-fen",
+        flatMovesString: "next",
+      });
+    }
+  }
+});
+
+test("moves accept long bounded histories and reject oversized or malformed requests", async () => {
+  const h = moveFixture({
+    matchValue: { fen: "fen", flatMovesString: "m".repeat(5000) },
+  });
+  h.body.previousFlatMovesString = "m".repeat(5000);
+  h.body.flatMovesString = `${h.body.previousFlatMovesString}-next`;
+  assert.equal((await h.call()).status, 200);
+  for (const input of [
+    {},
+    { ...h.body, status: "surrendered" },
+    { ...h.body, timer: "" },
+    { ...h.body, flatMovesString: "rewrite" },
+    { ...h.body, fen: "f".repeat(16 * 1024 + 1) },
+    { ...h.body, flatMovesString: "m".repeat(64 * 1024 + 1) },
+    { ...h.body, fen: "f".repeat(MAX_MATCH_MOVE_REQUEST_BYTES) },
+  ]) {
+    assert.equal((await h.call(env, input)).status, 400);
+  }
+  assert.equal(h.stats.writes, 1);
+});
+
+test("moves map temporary rules rejection to blocked and verify ambiguous commits by replay", async () => {
+  const blocked = moveFixture();
+  const transact = blocked.client.transactPath;
+  blocked.client.transactPath = async () => {
+    throw new FirebaseRtdbPermissionDenied();
+  };
+  const response = await blocked.call();
+  assert.equal(response.status, 409);
+  assert.equal(
+    ((await response.json()) as { message: string }).message,
+    "match-move-blocked",
+  );
+  blocked.client.transactPath = transact;
+  assert.equal((await blocked.call()).status, 200);
+  const uncertain = moveFixture();
+  const commit = uncertain.client.transactPath;
+  uncertain.client.transactPath = async (...args) => {
+    await commit(...args);
+    throw new FirebaseRtdbFailure();
+  };
+  assert.equal((await uncertain.call()).status, 503);
+  uncertain.client.transactPath = commit;
+  const replay = await uncertain.call();
+  assert.equal(replay.status, 200);
+  assert.equal(
+    ((await replay.json()) as { outcome: string }).outcome,
+    "already-applied",
+  );
+  assert.equal(uncertain.stats.writes, 1);
+});
+
+test("moves fail closed for auth, rate limits, unavailable ownership and a prewrite freeze", async () => {
+  const unauthorized = moveFixture();
+  unauthorized.dependencies.verifyIdentity = async () => {
+    throw new AuthApiFailure(401, "unauthenticated", "authentication-required");
+  };
+  assert.equal((await unauthorized.call()).status, 401);
+  assert.equal(unauthorized.stats.scopedClients, 0);
+  for (const [limit, status] of [
+    [async () => ({ success: false }), 429],
+    [
+      async () => {
+        throw new Error("limiter-unavailable");
+      },
+      503,
+    ],
+  ] as const) {
+    const h = moveFixture();
+    assert.equal(
+      (await h.call({ ...env, MOVE_RATE_LIMITER: { limit } })).status,
+      status,
+    );
+    assert.equal(h.stats.scopedClients, 0);
+  }
+  const unavailable = moveFixture({ loginUid: "alternate" });
+  unavailable.dependencies.repository!.readProfileOwnershipSnapshot =
+    async () => {
+      throw new Error("ownership-unavailable");
+    };
+  assert.equal((await unavailable.call()).status, 503);
+  assert.equal(unavailable.stats.scopedClients, 0);
+  const frozen = moveFixture();
+  let checks = 0;
+  frozen.dependencies.assertMutationAllowed = async () => {
+    if (++checks > 1)
+      throw new AuthApiFailure(503, "unavailable", "profile-writes-disabled");
+  };
+  assert.equal((await frozen.call()).status, 503);
+  assert.equal(frozen.stats.writes, 0);
+});
+
+function cumulativeMove(body: SubmitMoveRequest): SubmitMoveRequest {
+  return {
+    ...body,
+    previousFlatMovesString: "moves",
+    flatMovesString: "moves-a-z-next",
+    fen: "after-next",
+    previousStates: [
+      { moveCount: 1, fen: "fen" },
+      { moveCount: 2, fen: "after-a" },
+      { moveCount: 3, fen: "fen" },
+    ],
+  };
+}
+
+test("cumulative moves deliver all pending inputs from the base or any matching checkpoint", async () => {
+  for (const [flatMovesString, fen] of [
+    ["moves", "fen"],
+    ["moves-a", "after-a"],
+    ["moves-a-z", "fen"],
+  ]) {
+    const stored = {
+      flatMovesString,
+      fen,
+      timer: "current-timer",
+      status: "surrendered",
+      extra: { preserved: true },
+    };
+    const h = moveFixture({ matchValue: stored });
+    const body = cumulativeMove(h.body);
+    const result = await h.call(env, body);
+    assert.equal(result.status, 200);
+    assert.deepEqual(await result.json(), {
+      ok: true,
+      inviteId: body.inviteId,
+      matchId: body.matchId,
+      actorUid: body.playerId,
+      outcome: "applied",
+    });
+    assert.deepEqual(h.getMatch(), {
+      ...stored,
+      gameVariant: "Classic",
+      fen: body.fen,
+      flatMovesString: body.flatMovesString,
+    });
+    assert.equal(h.stats.writes, 1);
+  }
+});
+
+test("a cumulative successor recovers an earlier commit whose response was lost", async () => {
+  const h = moveFixture();
+  const latest = cumulativeMove(h.body);
+  const first: SubmitMoveRequest = {
+    ...latest,
+    flatMovesString: "moves-a",
+    fen: "after-a",
+    previousStates: latest.previousStates!.slice(0, 1),
+  };
+  const transact = h.client.transactPath;
+  h.client.transactPath = async (...args) => {
+    await transact(...args);
+    throw new FirebaseRtdbFailure();
+  };
+  assert.equal((await h.call(env, first)).status, 503);
+  h.client.transactPath = transact;
+  assert.equal((await h.call(env, latest)).status, 200);
+  assert.equal(
+    (h.getMatch() as Record<string, unknown>).flatMovesString,
+    latest.flatMovesString,
+  );
+  assert.equal(h.stats.writes, 2);
+});
+
+test("newer cumulative state supersedes late prefixes without rolling back and preserves legacy semantics", async () => {
+  const h = moveFixture();
+  const latest = cumulativeMove(h.body);
+  const older: SubmitMoveRequest = {
+    ...latest,
+    fen: "after-a",
+    flatMovesString: "moves-a",
+    previousStates: latest.previousStates!.slice(0, 1),
+  };
+  assert.equal((await h.call(env, latest)).status, 200);
+  const afterLatest = structuredClone(h.getMatch());
+  const late = await h.call(env, older);
+  assert.equal(late.status, 200);
+  assert.deepEqual(await late.json(), {
+    ok: true,
+    inviteId: latest.inviteId,
+    matchId: latest.matchId,
+    actorUid: latest.playerId,
+    outcome: "superseded",
+    fen: latest.fen,
+    flatMovesString: latest.flatMovesString,
+  });
+  assert.deepEqual(h.getMatch(), afterLatest);
+  const replay = await h.call(env, latest);
+  assert.equal(replay.status, 200);
+  assert.equal(
+    ((await replay.json()) as { outcome: string }).outcome,
+    "already-applied",
+  );
+  assert.equal(h.stats.writes, 1);
+  const legacyOlder = { ...older };
+  delete legacyOlder.previousStates;
+  assert.equal((await h.call(env, legacyOlder)).status, 409);
+  const legacyNext = {
+    ...latest,
+    previousFlatMovesString: latest.flatMovesString,
+    flatMovesString: `${latest.flatMovesString}-last`,
+    fen: "last-fen",
+  };
+  delete legacyNext.previousStates;
+  const next = await h.call(env, legacyNext);
+  assert.equal(next.status, 200);
+  assert.equal(((await next.json()) as { outcome: string }).outcome, "applied");
+  assert.equal(h.stats.writes, 2);
+});
+
+test("cumulative moves refuse divergent history, partial-entry prefixes and mismatching checkpoint FEN", async () => {
+  for (const [history, fen] of [
+    ["moves-other", "after-a"],
+    ["moves-aa", "after-a"],
+    ["move", "fen"],
+    ["", "fen"],
+    ["moves", "other-base"],
+    ["moves-a", "other-prefix"],
+    ["moves-a-z-next", "other-target"],
+  ]) {
+    const matchValue = { fen, flatMovesString: history, timer: "timer" };
+    const h = moveFixture({ matchValue });
+    const response = await h.call(env, cumulativeMove(h.body));
+    assert.equal(response.status, 409, `${history} / ${fen}`);
+    assert.equal(
+      ((await response.json()) as { message: string }).message,
+      "move-chain-conflict",
+    );
+    assert.equal(h.stats.writes, 0);
+    assert.deepEqual(h.getMatch(), matchValue);
+  }
+  const legacy = moveFixture({
+    matchValue: { fen: "after-a", flatMovesString: "moves-a" },
+  });
+  const body = cumulativeMove(legacy.body);
+  delete body.previousStates;
+  assert.equal((await legacy.call(env, body)).status, 409);
+  assert.equal(legacy.stats.writes, 0);
+});
+
+test("real moves and takebacks retain distinct history when FEN returns to an earlier board", async () => {
+  const game = new Game();
+  const baseFen = game.toFen();
+  const first = game.play([
+    { kind: "position", position: { row: 10, column: 3 } },
+    { kind: "position", position: { row: 9, column: 2 } },
+  ]);
+  assert.equal(first.kind, "complete");
+  const firstFen = game.toFen();
+  const undone = game.takeback();
+  assert.equal(undone.kind, "complete");
+  assert.equal(undone.inputFen, "z");
+  assert.equal(game.toFen(), baseFen);
+  const next = game.playFen(first.inputFen);
+  assert.equal(next.kind, "complete");
+  assert.equal(game.toFen(), firstFen);
+  const h = moveFixture({
+    matchValue: { fen: baseFen, flatMovesString: "", extra: true },
+  });
+  const final: SubmitMoveRequest = {
+    ...h.body,
+    previousFlatMovesString: "",
+    flatMovesString: `${first.inputFen}-z-${next.inputFen}`,
+    fen: firstFen,
+    previousStates: [
+      { moveCount: 0, fen: baseFen },
+      { moveCount: 1, fen: firstFen },
+      { moveCount: 2, fen: baseFen },
+    ],
+  };
+  const undoOnly = {
+    ...final,
+    flatMovesString: `${first.inputFen}-z`,
+    fen: baseFen,
+    previousStates: final.previousStates!.slice(0, 2),
+  };
+  const result = await h.call(env, undoOnly);
+  assert.equal(result.status, 200);
+  assert.equal(
+    ((await result.json()) as { outcome: string }).outcome,
+    "applied",
+  );
+  assert.equal((h.getMatch() as Record<string, unknown>).fen, baseFen);
+  assert.equal(
+    (h.getMatch() as Record<string, unknown>).flatMovesString,
+    undoOnly.flatMovesString,
+  );
+  assert.equal((await h.call(env, final)).status, 200);
+  assert.equal((await h.call(env, undoOnly)).status, 200);
+  assert.equal(
+    (h.getMatch() as Record<string, unknown>).flatMovesString,
+    final.flatMovesString,
+  );
+  assert.equal(h.stats.writes, 2);
+});
+
+test("cumulative requests preserve the whole body limit and validate superseded stored fields", async () => {
+  const h = moveFixture();
+  const body = cumulativeMove(h.body);
+  for (const previousStates of [
+    [],
+    [{ moveCount: 1, fen: "fen" }],
+    body.previousStates!.map((state) => ({
+      ...state,
+      moveCount: state.moveCount + 1,
+    })),
+    body.previousStates!.map((state) => ({ ...state, extra: true })),
+  ])
+    assert.equal((await h.call(env, { ...body, previousStates })).status, 400);
+  const oversized = {
+    ...body,
+    previousFlatMovesString: "",
+    flatMovesString: Array(64).fill("a").join("-"),
+    previousStates: Array.from({ length: 64 }, (_value, moveCount) => ({
+      moveCount,
+      fen: "\u0000".repeat(16 * 1024),
+    })),
+  };
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(oversized)) > MAX_MATCH_MOVE_REQUEST_BYTES,
+  );
+  assert.equal((await h.call(env, oversized)).status, 400);
+  for (const matchValue of [
+    { fen: "f".repeat(16 * 1024 + 1), flatMovesString: "moves-a-z-next-extra" },
+    { fen: "fen", flatMovesString: `moves-a-z-next-${"a".repeat(64 * 1024)}` },
+  ]) {
+    const invalid = moveFixture({ matchValue });
+    assert.equal(
+      (await invalid.call(env, cumulativeMove(invalid.body))).status,
+      409,
+    );
+    assert.equal(invalid.stats.writes, 0);
+  }
+  assert.equal(h.stats.scopedClients, 0);
+});
+
+test("cumulative REST CAS rechecks intermediate or superseding state after an ETag race", async () => {
+  for (const race of ["intermediate", "divergent", "superseded"] as const) {
+    const h = moveFixture();
+    const body = cumulativeMove(h.body);
+    const original = { fen: "fen", flatMovesString: "moves", timer: "old" };
+    const concurrent =
+      race === "superseded"
+        ? {
+            fen: "future-fen",
+            flatMovesString: `${body.flatMovesString}-future`,
+            timer: "new",
+          }
+        : {
+            fen: race === "divergent" ? "different-prefix" : "after-a",
+            flatMovesString: "moves-a",
+            timer: "new",
+          };
+    const expected = {
+      ...concurrent,
+      gameVariant: "Classic",
+      fen: body.fen,
+      flatMovesString: body.flatMovesString,
+    };
+    const writes: Record<string, unknown>[] = [];
+    let gets = 0;
+    const scoped = createFirebaseRtdbClient(env, {
+      scopedMatchMove: { playerId: body.playerId, matchId: body.matchId },
+      getAccessToken: async () => "token",
+      fetcher: async (_url, init) => {
+        if (init?.method === "PUT") {
+          writes.push(JSON.parse(String(init.body)));
+          assert.equal(
+            new Headers(init.headers).get("If-Match"),
+            writes.length === 1 ? '"first"' : '"second"',
+          );
+          return Response.json(writes.length === 1 ? concurrent : expected, {
+            status: writes.length === 1 ? 412 : 200,
+          });
+        }
+        return Response.json(++gets === 1 ? original : concurrent, {
+          headers: { ETag: gets === 1 ? '"first"' : '"second"' },
+        });
+      },
+    });
+    h.client.transactPath = scoped.transactPath;
+    const response = await h.call(env, body);
+    if (race === "intermediate") {
+      assert.equal(response.status, 200);
+      assert.equal(
+        ((await response.json()) as { outcome: string }).outcome,
+        "applied",
+      );
+      assert.equal(writes.length, 2);
+      assert.deepEqual(writes[1], expected);
+    } else {
+      assert.equal(response.status, race === "divergent" ? 409 : 200);
+      assert.equal(writes.length, 1);
+      const result = (await response.json()) as Record<string, unknown>;
+      assert.equal(
+        race === "divergent" ? result.message : result.outcome,
+        race === "divergent" ? "move-chain-conflict" : "superseded",
+      );
+      if (race === "superseded") {
+        assert.equal(result.flatMovesString, concurrent.flatMovesString);
+        assert.equal(result.fen, concurrent.fen);
+      }
+    }
+  }
 });

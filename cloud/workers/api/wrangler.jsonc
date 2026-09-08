@@ -105,6 +105,14 @@
       },
     },
     {
+      "name": "MOVE_RATE_LIMITER",
+      "namespace_id": "1616095646",
+      "simple": {
+        "limit": 120,
+        "period": 60,
+      },
+    },
+    {
       "name": "REACTION_RATE_LIMITER",
       "namespace_id": "1616095645",
       "simple": {

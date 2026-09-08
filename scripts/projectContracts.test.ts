@@ -91,7 +91,10 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.equal(config.account_id, "e25f90fc073ea309b54b8b5144bf28e0");
   assert.equal(config.main, "src/index.ts");
   assert.equal(config.compatibility_date, "2026-08-09");
-  assert.deepEqual(config.compatibility_flags, ["nodejs_compat"]);
+  assert.deepEqual(config.compatibility_flags, [
+    "nodejs_compat",
+    "enable_request_signal",
+  ]);
   assert.equal(config.workers_dev, false);
   assert.equal(config.preview_urls, false);
   assert.deepEqual(config.routes, [
@@ -192,6 +195,11 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       name: "AUTH_RATE_LIMITER",
       namespace_id: "1616095644",
       simple: { limit: 20, period: 60 },
+    },
+    {
+      name: "MOVE_RATE_LIMITER",
+      namespace_id: "1616095646",
+      simple: { limit: 120, period: 60 },
     },
     {
       name: "REACTION_RATE_LIMITER",

@@ -5,6 +5,7 @@ import ts from "typescript";
 import { InviteMetadataState } from "../src/connection/inviteMetadataState.ts";
 import { InviteMetadataApiError } from "../src/services/inviteMetadataApi.ts";
 import { withAutomatchOperationLock } from "../src/connection/automatchOperationLock.ts";
+import { moveDeliveryStorageKey } from "../src/connection/moveDelivery.ts";
 import { isAutoInviteId } from "../cloud/functions/shared/ids.js";
 import {
   parseRematchIndices,
@@ -69,6 +70,10 @@ const names = [
   "sendEndMatchIndicator",
   "rematchSeriesEndIsIndicated",
   "subscribeToAuthChanges",
+  "surrender",
+  "moveDeliveryScope",
+  "isCurrentMoveBoard",
+  "recoverMoveBoard",
 ];
 const methods = names.map((name) => {
   const method = declaration.members.find(
@@ -141,12 +146,15 @@ function harness({
   readWagers,
   readMatch,
   ensureMatch,
+  surrender,
 } = {}) {
   const events = {
     reads: [],
     firebaseReads: [],
     matchReads: [],
     ensuredMatches: [],
+    recoveredMatches: [],
+    surrenders: [],
     auth: [],
     home: [],
     ui: [],
@@ -169,6 +177,7 @@ function harness({
   let publishedWagerState = null;
   const noop = () => undefined;
   const dependencies = {
+    moveDeliveryStorageKey,
     InviteMetadataState,
     InviteMetadataApiError,
     withAutomatchOperationLock,
@@ -266,6 +275,11 @@ function harness({
       end
         ? end(...args)
         : { ok: true, inviteId: "invite", actorUid: "host", rematches: "x" },
+    surrenderMatchViaApi: async (request, provider) => {
+      provider.assertCurrentUser();
+      events.surrenders.push(request);
+      return surrender ? surrender(request) : { ok: true };
+    },
     ref: (_db, path) => path,
     get: async (path) => {
       events.firebaseReads.push(path);
@@ -294,7 +308,10 @@ function harness({
     didFailToLoadPendingInvite: () => events.ui.push("pending-failed"),
     didFindInviteThatCanBeJoined: () => events.ui.push("join-button"),
     enterWatchOnlyMode: () => events.ui.push("watch"),
-    didRecoverMyMatch: () => events.ui.push("recover"),
+    didRecoverMyMatch: (value) => {
+      events.ui.push("recover");
+      events.recoveredMatches.push({ ...value });
+    },
     didDiscoverExistingRematchProposalWaitingForResponse: () =>
       events.ui.push("pending-rematch"),
     didFindYourOwnInviteThatNobodyJoined: () => events.ui.push("waiting"),
@@ -349,6 +366,20 @@ function harness({
     connectAttemptId: 0,
     nextContextId: 1,
     activeContext: null,
+    moveDeliveries: new Map(),
+    reconcilingMoveKeys: new Set(),
+    confirmedSurrenders: new Set(),
+    moveRecoveryTimers: new Map(),
+    moveReconnectCooldownMs: 0,
+    moveReconnectLastAttemptAt: 0,
+    moveReconnectInFlight: false,
+    reconnectAfterMatchUpdateFailure: noop,
+    getMoveDelivery: (_scope, match) => ({
+      reconcile: () => match,
+      resume: noop,
+    }),
+    flushPendingMoves: async () => {},
+    refreshMoveDeliveries: noop,
     matchRefs: {},
     observedMatchSnapshots: new Map(),
     matchPresentations: new Map(),
@@ -965,6 +996,51 @@ test("rematch contexts retain historical wagers and refresh the new channel when
   assert.deepEqual(h.events.wagerStates.at(-1).state, proposalState(3));
   h.instance.detachFromMatchSession();
   assert.equal(h.counters.get("connectionObservers"), 0);
+});
+
+test("a stale in-flight match snapshot cannot undo a confirmed surrender", async () => {
+  const pendingRead = deferred();
+  const h = harness({
+    readMatch: (attempt) =>
+      attempt === 1 ? { ...match } : pendingRead.promise,
+  });
+  await h.connect();
+  h.instance.connectToGame("login", "invite", false);
+  await settle();
+  assert.equal(h.events.matchReads.length, 2);
+  assert.equal(h.instance.surrender(), true);
+  await settle();
+  assert.equal(h.events.surrenders.length, 1);
+  pendingRead.resolve({ ...match, status: "" });
+  await settle();
+  assert.deepEqual(h.events.errors, []);
+  assert.equal(h.instance.myMatch.status, "surrendered");
+  assert.equal(h.events.recoveredMatches.at(-1).status, "surrendered");
+  h.instance.detachFromMatchSession();
+});
+
+test("confirmed surrender hydration is restricted to its original login and match", async () => {
+  for (const overrides of [
+    { loginUid: "other" },
+    { inviteId: "other" },
+    { matchId: "invite1" },
+    { playerId: "guest" },
+  ]) {
+    const h = harness();
+    h.instance.confirmedSurrenders.add(
+      moveDeliveryStorageKey({
+        loginUid: "login",
+        inviteId: "invite",
+        matchId: "invite",
+        playerId: "host",
+        ...overrides,
+      }),
+    );
+    await h.connect();
+    assert.equal(h.instance.myMatch.status, "");
+    assert.equal(h.events.recoveredMatches.at(-1).status, "");
+    h.instance.detachFromMatchSession();
+  }
 });
 
 test("reconnect keeps the latest wager snapshot received while metadata bootstrap is pending", async () => {

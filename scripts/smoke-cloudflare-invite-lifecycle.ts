@@ -14,6 +14,10 @@ import {
   isJoinInviteResponse,
   isProposeRematchResponse,
   isSurrenderMatchResponse,
+  isSubmitMoveResponse,
+  MATCH_MOVE_PATH,
+  countMoveHistory,
+  type SubmitMoveRequest,
 } from "@mons/shared/game-sessions";
 import { INVITE_ID_RANDOM_LENGTH, isSafeFirebaseKey } from "@mons/shared/ids";
 import {
@@ -46,6 +50,7 @@ type Options = {
   baseUrl: string;
   output?: string;
   surrenderRulesPending?: boolean;
+  moveRulesPending?: boolean;
 };
 type Session = { uid: string; idToken: string };
 type OperationName = (typeof OPERATION_NAMES)[number];
@@ -93,7 +98,7 @@ class SmokeFailure extends Error {
 }
 
 function usage(): string {
-  return "Usage: npm run smoke:invite-lifecycle -- --base-url <https-api-url> [--output <report-json-file>] [--surrender-rules-pending]";
+  return "Usage: npm run smoke:invite-lifecycle -- --base-url <https-api-url> [--output <report-json-file>] [--surrender-rules-pending] [--move-rules-pending]";
 }
 
 function validateOptions(options: Options): Options {
@@ -116,24 +121,33 @@ function validateOptions(options: Options): Options {
     (options.output !== undefined &&
       (!options.output.trim() || options.output.includes("\0"))) ||
     (options.surrenderRulesPending !== undefined &&
-      typeof options.surrenderRulesPending !== "boolean")
+      typeof options.surrenderRulesPending !== "boolean") ||
+    (options.moveRulesPending !== undefined &&
+      typeof options.moveRulesPending !== "boolean")
   )
     throw new TypeError(usage());
   return {
     baseUrl: url.origin,
     ...(options.output ? { output: options.output } : {}),
     ...(options.surrenderRulesPending ? { surrenderRulesPending: true } : {}),
+    ...(options.moveRulesPending ? { moveRulesPending: true } : {}),
   };
 }
 
 function parseArgs(argv: string[]): Options {
   const values = new Map<string, string>();
   let surrenderRulesPending = false;
+  let moveRulesPending = false;
   for (let index = 0; index < argv.length; index++) {
     const key = argv[index];
     if (key === "--surrender-rules-pending") {
       if (surrenderRulesPending) throw new TypeError(usage());
       surrenderRulesPending = true;
+      continue;
+    }
+    if (key === "--move-rules-pending") {
+      if (moveRulesPending) throw new TypeError(usage());
+      moveRulesPending = true;
       continue;
     }
     const value = argv[++index];
@@ -149,6 +163,7 @@ function parseArgs(argv: string[]): Options {
     baseUrl: values.get("--base-url") || "",
     output: values.get("--output"),
     surrenderRulesPending,
+    moveRulesPending,
   });
 }
 
@@ -688,6 +703,141 @@ async function verifyTimerRules(
     );
 }
 
+function playLegalMove(active: Game): string {
+  const inputs: Input[] = [];
+  for (let step = 0; step < 8; step++) {
+    const next = active.preview(inputs);
+    if (next.kind === "complete") {
+      const played = active.play(inputs);
+      if (played.kind === "complete") return played.inputFen;
+      break;
+    }
+    const input =
+      next.kind === "awaiting-start" && next.positions[0]
+        ? ({ kind: "position", position: next.positions[0] } as const)
+        : next.kind === "awaiting-input"
+          ? next.options[0]?.input
+          : undefined;
+    if (!input) break;
+    inputs.push(input);
+  }
+  throw new SmokeFailure("Lifecycle could not produce a legal move.");
+}
+
+function nextLegalMatch(value: MatchRecord): MatchRecord {
+  const active = Game.fromFen(String(value.fen));
+  if (!active || active.activeColor !== value.color)
+    throw new SmokeFailure("Lifecycle mover did not own the active turn.");
+  const move = playLegalMove(active);
+  return {
+    ...value,
+    fen: active.toFen(),
+    flatMovesString: value.flatMovesString
+      ? `${value.flatMovesString}-${move}`
+      : move,
+  };
+}
+
+function cumulativeMoveRequests(
+  inviteId: string,
+  matchId: string,
+  playerId: string,
+  current: MatchRecord,
+): SubmitMoveRequest[] {
+  const active = Game.fromFen(String(current.fen));
+  if (!active || active.activeColor !== current.color)
+    throw new SmokeFailure(
+      "Lifecycle cumulative mover did not own the active turn.",
+    );
+  let history = String(current.flatMovesString);
+  const previousStates: { moveCount: number; fen: string }[] = [];
+  const requests: SubmitMoveRequest[] = [];
+  for (let index = 0; index < 4; index++) {
+    previousStates.push({
+      moveCount: countMoveHistory(history),
+      fen: active.toFen(),
+    });
+    let move: string;
+    if (index === 2) {
+      const output = active.takeback();
+      if (output.kind !== "complete")
+        throw new SmokeFailure("Lifecycle takeback could not be generated.");
+      move = output.inputFen;
+    } else move = playLegalMove(active);
+    history = history ? `${history}-${move}` : move;
+    requests.push({
+      inviteId,
+      matchId,
+      playerId,
+      previousFlatMovesString: String(current.flatMovesString),
+      flatMovesString: history,
+      fen: active.toFen(),
+      gameVariant: String(current.gameVariant),
+      previousStates: previousStates.map((state) => ({ ...state })),
+    });
+  }
+  if (
+    requests[1].fen !== requests[3].fen ||
+    requests[1].flatMovesString === requests[3].flatMovesString
+  )
+    throw new SmokeFailure(
+      "Lifecycle takeback sequence did not retain distinct history at the same FEN.",
+    );
+  return requests;
+}
+
+async function verifyMoveRules(
+  session: Session,
+  matchId: string,
+  current: MatchRecord,
+  next: MatchRecord,
+  dependencies: Dependencies,
+): Promise<void> {
+  const wholeUrl = matchUrl(session.uid, matchId, session);
+  const fenUrl = new URL(wholeUrl);
+  fenUrl.pathname = fenUrl.pathname.replace(/\.json$/, "/fen.json");
+  const rootUrl = new URL(wholeUrl);
+  rootUrl.pathname = "/.json";
+  const fields = { fen: next.fen, flatMovesString: next.flatMovesString };
+  const path = `players/${session.uid}/matches/${matchId}`;
+  for (const [url, method, body] of [
+    [wholeUrl, "PUT", next],
+    [wholeUrl, "PATCH", fields],
+    [fenUrl.href, "PUT", current.fen],
+    [
+      rootUrl.href,
+      "PATCH",
+      {
+        [`${path}/fen`]: next.fen,
+        [`${path}/flatMovesString`]: next.flatMovesString,
+      },
+    ],
+  ] as const) {
+    const result = await requestJson(
+      url,
+      {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      dependencies,
+    );
+    if (!permissionDenied(result))
+      throw new SmokeFailure(
+        "Lifecycle move rule did not deny a direct client move write.",
+      );
+    if (
+      !isDeepStrictEqual(
+        (await readMatch(session.uid, matchId, session, dependencies)).value,
+        current,
+      )
+    )
+      throw new SmokeFailure(
+        "Lifecycle rejected client move write changed the match.",
+      );
+  }
+}
+
 async function verifyLiveMatch(
   options: Options,
   inviteId: string,
@@ -702,47 +852,100 @@ async function verifyLiveMatch(
     throw new SmokeFailure("Lifecycle live match could not load its game.");
   const mover = game.activeColor === hostMatch.value.color ? host : guest;
   const opponent = mover === host ? guest : host;
-  const moved = await updateOwnedMatch(
-    mover,
+  const current =
+    mover === host
+      ? hostMatch
+      : await readMatch(mover.uid, matchId, mover, dependencies);
+  const moved = nextLegalMatch(current.value);
+  if (!options.moveRulesPending)
+    await verifyMoveRules(mover, matchId, current.value, moved, dependencies);
+  const burst = cumulativeMoveRequests(
+    inviteId,
     matchId,
-    (value) => {
-      const active = Game.fromFen(String(value.fen));
-      if (!active || active.activeColor !== value.color)
-        throw new SmokeFailure("Lifecycle mover did not own the active turn.");
-      const inputs: Input[] = [];
-      for (let step = 0; step < 8; step++) {
-        const next = active.preview(inputs);
-        if (next.kind === "complete") {
-          const played = active.play(inputs);
-          if (played.kind !== "complete") break;
-          return {
-            ...value,
-            fen: active.toFen(),
-            flatMovesString: value.flatMovesString
-              ? `${value.flatMovesString}-${played.inputFen}`
-              : played.inputFen,
-          };
-        }
-        const input =
-          next.kind === "awaiting-start" && next.positions[0]
-            ? ({ kind: "position", position: next.positions[0] } as const)
-            : next.kind === "awaiting-input"
-              ? next.options[0]?.input
-              : undefined;
-        if (!input) break;
-        inputs.push(input);
-      }
-      throw new SmokeFailure("Lifecycle could not produce a legal move.");
-    },
-    dependencies,
+    mover.uid,
+    current.value,
   );
-  if (
-    !isDeepStrictEqual(
-      (await readMatch(mover.uid, matchId, opponent, dependencies)).value,
-      moved,
+  const latest = burst[burst.length - 1];
+  const cumulativeMatch = {
+    ...current.value,
+    fen: latest.fen,
+    flatMovesString: latest.flatMovesString,
+  };
+  for (const [request, expectedOutcome] of [
+    [latest, null],
+    [burst[0], "superseded"],
+    [latest, "already-applied"],
+  ] as const) {
+    const result = await apiRequest(
+      options,
+      MATCH_MOVE_PATH,
+      mover,
+      request,
+      dependencies,
+    );
+    if (
+      !isSubmitMoveResponse(result) ||
+      result.inviteId !== inviteId ||
+      result.matchId !== matchId ||
+      result.actorUid !== mover.uid ||
+      (expectedOutcome !== null && result.outcome !== expectedOutcome) ||
+      (expectedOutcome === null && result.outcome === "superseded") ||
+      (result.outcome === "superseded" &&
+        (result.fen !== latest.fen ||
+          result.flatMovesString !== latest.flatMovesString))
     )
-  )
-    throw new SmokeFailure("Lifecycle opponent read missed the legal move.");
+      throw new SmokeFailure(
+        "Lifecycle cumulative API move returned an unexpected acknowledgement.",
+      );
+    if (
+      !isDeepStrictEqual(
+        (await readMatch(mover.uid, matchId, opponent, dependencies)).value,
+        cumulativeMatch,
+      )
+    )
+      throw new SmokeFailure(
+        "Lifecycle API move changed other state or was not observed by the opponent.",
+      );
+  }
+  const legacyMatch = nextLegalMatch(cumulativeMatch);
+  const legacy = {
+    inviteId,
+    matchId,
+    playerId: mover.uid,
+    previousFlatMovesString: latest.flatMovesString,
+    flatMovesString: legacyMatch.flatMovesString,
+    fen: legacyMatch.fen,
+    gameVariant: legacyMatch.gameVariant,
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const result = await apiRequest(
+      options,
+      MATCH_MOVE_PATH,
+      mover,
+      legacy,
+      dependencies,
+    );
+    if (
+      !isSubmitMoveResponse(result) ||
+      result.inviteId !== inviteId ||
+      result.matchId !== matchId ||
+      result.actorUid !== mover.uid ||
+      result.outcome === "superseded" ||
+      (attempt === 1 && result.outcome !== "already-applied")
+    )
+      throw new SmokeFailure(
+        "Lifecycle legacy API move returned an unexpected acknowledgement.",
+      );
+    if (
+      !isDeepStrictEqual(
+        (await readMatch(mover.uid, matchId, opponent, dependencies)).value,
+        legacyMatch,
+      )
+    )
+      throw new SmokeFailure(
+        "Lifecycle legacy API move changed unexpected match state.",
+      );
+  }
   const before = await readMatch(host.uid, matchId, host, dependencies);
   await mutation(
     options,
@@ -978,7 +1181,10 @@ async function runSmoke(
       inviteId,
       dependencies,
     );
-    report.checks.push("firebase-move-api-surrender-replay-and-opponent-read");
+    report.checks.push("api-move-surrender-replay-and-opponent-read");
+    report.checks.push("cumulative-moves-takebacks-and-reordered-replay");
+    if (!validated.moveRulesPending)
+      report.checks.push("firebase-move-write-rules");
     const hostRematch = await mutation(
       validated,
       "/rematches/propose",
@@ -1046,9 +1252,7 @@ async function runSmoke(
       `${inviteId}1`,
       dependencies,
     );
-    report.checks.push(
-      "firebase-rematch-move-api-surrender-replay-and-opponent-read",
-    );
+    report.checks.push("api-rematch-move-surrender-replay-and-opponent-read");
     await mutation(
       validated,
       "/rematches/end",

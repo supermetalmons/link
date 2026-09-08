@@ -45,6 +45,7 @@ const {
   startAutomatchViaApi,
   startMatchTimerViaApi,
   surrenderMatchViaApi,
+  submitMoveViaApi,
   syncEventStateViaApi,
   toggleEventPrizeSelectionViaApi,
   updateRatingsViaApi,
@@ -1595,6 +1596,270 @@ test("sends exact structural game-session mutations with stable operation IDs", 
     false,
   );
   assert.equal(isEnsureMatchRequest({ ...ensureRequest, aura: null }), false);
+});
+
+const submitMoveRequest = {
+  inviteId: "abcdefghijk",
+  matchId: "abcdefghijk1",
+  playerId: "original-player",
+  previousFlatMovesString: "first",
+  flatMovesString: "first-second",
+  fen: "next-fen",
+  gameVariant: "Classic",
+};
+const submitMoveResponse = {
+  ok: true,
+  inviteId: submitMoveRequest.inviteId,
+  matchId: submitMoveRequest.matchId,
+  actorUid: submitMoveRequest.playerId,
+  outcome: "applied",
+};
+
+test("submits authenticated move fields and accepts applied and replay acknowledgements", async () => {
+  const calls = [];
+  for (const outcome of ["applied", "already-applied"]) {
+    const response = { ...submitMoveResponse, outcome };
+    globalThis.fetch = async (input, init) => {
+      calls.push({ input: String(input), init });
+      return jsonResponse(response);
+    };
+    assert.deepEqual(
+      await submitMoveViaApi(submitMoveRequest, async () => "firebase-token"),
+      response,
+    );
+  }
+  for (const { input, init } of calls) {
+    assert.equal(input, "https://api.mons.link/matches/move");
+    assert.equal(init.method, "POST");
+    assert.equal(init.headers.Authorization, "Bearer firebase-token");
+    assert.equal(init.cache, "no-store");
+    assert.deepEqual(JSON.parse(init.body), submitMoveRequest);
+    assert.equal(init.headers[WAGER_STORAGE_VERSION_HEADER], undefined);
+  }
+});
+
+test("invalid move requests and deadlines fail before authentication or transport", async () => {
+  let authenticated = false;
+  const token = async () => {
+    authenticated = true;
+    return "token";
+  };
+  for (const request of [
+    { ...submitMoveRequest, status: "surrendered" },
+    { ...submitMoveRequest, timer: "" },
+    { ...submitMoveRequest, playerId: "" },
+    { ...submitMoveRequest, fen: "" },
+    { ...submitMoveRequest, flatMovesString: "first" },
+    { ...submitMoveRequest, flatMovesString: "unrelated-second" },
+  ]) {
+    await assert.rejects(
+      submitMoveViaApi(request, token),
+      (error) => error.code === "invalid-argument",
+    );
+  }
+  for (const timeoutMs of [0, -1, NaN, Infinity]) {
+    await assert.rejects(
+      submitMoveViaApi(submitMoveRequest, token, { timeoutMs }),
+      (error) => error.code === "invalid-argument",
+    );
+  }
+  assert.equal(authenticated, false);
+});
+
+test("move authentication refresh retains a snapshot of the original append", async () => {
+  const body = { ...submitMoveRequest };
+  const calls = [];
+  const refreshes = [];
+  globalThis.fetch = async (_input, init) => {
+    calls.push(JSON.parse(init.body));
+    body.fen = "mutated";
+    body.playerId = "changed";
+    return calls.length === 1
+      ? jsonResponse({ error: "unauthenticated" }, 401)
+      : jsonResponse(submitMoveResponse);
+  };
+  assert.deepEqual(
+    await submitMoveViaApi(body, async (refresh) => {
+      refreshes.push(refresh);
+      return "token";
+    }),
+    submitMoveResponse,
+  );
+  assert.deepEqual(refreshes, [false, true]);
+  assert.deepEqual(calls, [submitMoveRequest, submitMoveRequest]);
+});
+
+test("move checkpoints are copied before pending authentication can mutate the caller's array", async () => {
+  const request = {
+    ...submitMoveRequest,
+    previousStates: [{ moveCount: 1, fen: "base-fen" }],
+  };
+  let resolveToken;
+  const token = new Promise((resolve) => {
+    resolveToken = resolve;
+  });
+  const calls = [];
+  globalThis.fetch = async (_input, init) => {
+    calls.push(JSON.parse(init.body));
+    return jsonResponse(submitMoveResponse);
+  };
+  const submitted = submitMoveViaApi(request, () => token);
+  request.previousStates[0].fen = "changed-checkpoint";
+  request.previousStates.push({ moveCount: 2, fen: "extra" });
+  resolveToken("token");
+  await submitted;
+  assert.deepEqual(calls[0].previousStates, [
+    { moveCount: 1, fen: "base-fen" },
+  ]);
+});
+
+test("superseded acknowledgements require checkpoint opt-in and a strict complete history extension", async () => {
+  const request = {
+    ...submitMoveRequest,
+    previousStates: [{ moveCount: 1, fen: "base-fen" }],
+  };
+  const superseded = {
+    ...submitMoveResponse,
+    outcome: "superseded",
+    fen: "newer-fen",
+    flatMovesString: "first-second-third",
+  };
+  globalThis.fetch = async () => jsonResponse(superseded);
+  assert.deepEqual(
+    await submitMoveViaApi(request, async () => "token"),
+    superseded,
+  );
+  await assert.rejects(
+    submitMoveViaApi(submitMoveRequest, async () => "token"),
+    (error) => error.code === "unavailable",
+  );
+  for (const history of [
+    "first-second",
+    "first",
+    "first-secondish",
+    "unrelated-third",
+  ]) {
+    globalThis.fetch = async () =>
+      jsonResponse({ ...superseded, flatMovesString: history });
+    await assert.rejects(
+      submitMoveViaApi(request, async () => "token"),
+      (error) => error.code === "unavailable",
+    );
+  }
+});
+
+test("move acknowledgements must match the captured actor and target", async () => {
+  for (const response of [
+    { ...submitMoveResponse, inviteId: "another-invite" },
+    { ...submitMoveResponse, matchId: "abcdefghijk2" },
+    { ...submitMoveResponse, actorUid: "another-player" },
+    { ...submitMoveResponse, outcome: "unknown" },
+    { ok: true },
+  ]) {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return jsonResponse(response);
+    };
+    await assert.rejects(
+      submitMoveViaApi(submitMoveRequest, async () => "token"),
+      (error) => error.code === "unavailable",
+    );
+    assert.equal(calls, 1);
+  }
+});
+
+test("move transport preserves conflicts and leaves transient retries to the connection", async () => {
+  for (const [code, message, status] of [
+    ["aborted", "move-chain-conflict", 409],
+    ["failed-precondition", "match-move-blocked", 409],
+    ["unavailable", "firebase-unavailable", 503],
+  ]) {
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return jsonResponse({ error: code, message }, status);
+    };
+    await assert.rejects(
+      submitMoveViaApi(submitMoveRequest, async () => "token"),
+      (error) => error.code === code && error.message === message,
+    );
+    assert.equal(calls, 1);
+  }
+});
+
+test("move transport is bound to the original auth user across token, refresh, and response", async () => {
+  for (const phase of ["token", "refresh", "response"]) {
+    let currentUser;
+    const originalUser = {
+      uid: "login-alias",
+      getIdToken: async () => {
+        if (phase === "token") currentUser = { uid: "login-alias" };
+        return "token";
+      },
+    };
+    currentUser = originalUser;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      currentUser = null;
+      return phase === "refresh"
+        ? jsonResponse({ error: "unauthenticated" }, 401)
+        : jsonResponse(submitMoveResponse);
+    };
+    await assert.rejects(
+      submitMoveViaApi(
+        submitMoveRequest,
+        createUserBoundAuthTokenProvider(originalUser, () => currentUser),
+      ),
+      /authentication-changed/,
+    );
+    assert.equal(calls, phase === "token" ? 0 : 1);
+  }
+});
+
+test("move deadlines cover authentication and a pending response, and abort local transport", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0;
+  let signal;
+  globalThis.fetch = (_input, init) => {
+    calls++;
+    signal = init.signal;
+    return new Promise(() => {});
+  };
+  for (const provider of [() => new Promise(() => {}), async () => "token"]) {
+    const sent = submitMoveViaApi(submitMoveRequest, provider, {
+      timeoutMs: 800,
+    });
+    const rejected = assert.rejects(sent, /Gameplay request timed out/);
+    await Promise.resolve();
+    t.mock.timers.tick(800);
+    await rejected;
+  }
+  assert.equal(calls, 1);
+  assert.equal(signal.aborted, true);
+});
+
+test("move cancellation prevents transport during pending authentication", async () => {
+  const controller = new AbortController();
+  let resolveToken;
+  const token = new Promise((resolve) => {
+    resolveToken = resolve;
+  });
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return jsonResponse(submitMoveResponse);
+  };
+  const sent = submitMoveViaApi(submitMoveRequest, () => token, {
+    signal: controller.signal,
+  });
+  controller.abort();
+  await assert.rejects(sent, (error) => error.code === "aborted");
+  resolveToken("token");
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(calls, 0);
 });
 
 const surrenderRequest = {

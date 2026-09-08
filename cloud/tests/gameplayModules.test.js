@@ -41,7 +41,7 @@ test("player reads expose gameplay state without exposing retired wager storage"
   assert.equal(players.$userId.mining, undefined);
 });
 
-test("structural gameplay writes are Worker-owned while live match updates remain", () => {
+test("structural gameplay writes and live match updates require Workers", () => {
   const invites = databaseRules.rules.invites.$inviteId;
   const player = databaseRules.rules.players.$userId;
   assert.equal(invites[".write"], undefined);
@@ -54,6 +54,10 @@ test("structural gameplay writes are Worker-owned while live match updates remai
   assert.equal(player[".write"], undefined);
   assert.match(player.matches.$matchId[".write"], /data\.exists\(\)/);
   assert.match(player.matches.$matchId[".write"], /newData\.exists\(\)/);
+  assert.match(player.matches.$matchId[".write"], /auth\.uid === \$userId/);
+  assert.match(player.matches.$matchId[".write"], /workerMoveMatchId/);
+  assert.match(player.matches.$matchId[".write"], /workerSurrenderMatchId/);
+  assert.doesNotMatch(player.matches.$matchId[".write"], /admin|profileId/);
   assert.deepEqual(databaseRules.rules.gameplayMutationReceipts[".indexOn"], [
     "completedAtMs",
   ]);
@@ -64,18 +68,22 @@ test("structural gameplay writes are Worker-owned while live match updates remai
   assert.equal(databaseRules.rules.gameplayMutationLocks, undefined);
 });
 
-test("active timer claims fence live match writes", () => {
+test("active timer claims fence scoped match writes while preserving their timer", () => {
   assert.deepEqual(databaseRules.rules.matchTimerClaims, {
     ".read": false,
     ".write": false,
   });
   assert.equal(databaseRules.rules.matchTimerStarts, undefined);
-  assert.equal(
-    databaseRules.rules.players.$userId.matches.$matchId.timer[".validate"],
-    "newData.isString() && (newData.val() === '' || newData.val() === data.val() || (auth != null && auth.token.admin === true))",
-  );
   const matchValidation =
     databaseRules.rules.players.$userId.matches.$matchId[".validate"];
+  assert.match(
+    matchValidation,
+    /newData\.child\('timer'\)\.exists\(\) === data\.child\('timer'\)\.exists\(\)/,
+  );
+  assert.match(
+    matchValidation,
+    /newData\.child\('timer'\)\.val\(\) === data\.child\('timer'\)\.val\(\)/,
+  );
   assert.match(matchValidation, /matchTimerClaims/);
   assert.match(matchValidation, /expiresAtMs/);
 });

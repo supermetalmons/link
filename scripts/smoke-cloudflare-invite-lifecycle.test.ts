@@ -11,6 +11,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Game } from "mons-rules";
+import {
+  countMoveHistory,
+  isMoveHistoryPrefix,
+  isSubmitMoveRequest,
+} from "@mons/shared/game-sessions";
 import { parseStrictMatchTimer } from "@mons/shared/timers";
 import { INVITE_METADATA_MAX_MESSAGE_BYTES } from "@mons/shared/invite-metadata";
 import { parseArgs, runSmoke } from "./smoke-cloudflare-invite-lifecycle.ts";
@@ -93,6 +98,7 @@ function harness(
     suppressUpdates?: boolean;
     fastTimers?: boolean;
     rawInviteExists?: boolean;
+    directMovesAllowed?: boolean;
   } = {},
 ) {
   let source: Source | null = null;
@@ -186,6 +192,13 @@ function harness(
         assert.equal(body, null);
         return json({ error: "Permission denied" }, 401);
       }
+      if (method !== "GET" && !options.directMovesAllowed) {
+        assert.ok(method === "PUT" || method === "PATCH");
+        assert.ok(
+          url.pathname.startsWith("/players/") || url.pathname === "/.json",
+        );
+        return json({ error: "Permission denied" }, 401);
+      }
       const parts =
         /^\/players\/([^/]+)\/matches\/([^/]+?)(\/status)?\.json$/.exec(
           url.pathname,
@@ -268,6 +281,80 @@ function harness(
       });
     }
     assert.equal(method, "POST");
+    if (url.pathname === "/matches/move") {
+      assert.ok(isSubmitMoveRequest(body));
+      assert.equal(body.playerId, uid);
+      assert.equal(body.inviteId, INVITE);
+      const match = matches.get(`${uid}/${body.matchId}`)!;
+      assert.ok(match);
+      if (
+        body.previousStates &&
+        match.value.flatMovesString !== body.flatMovesString &&
+        isMoveHistoryPrefix(body.flatMovesString, match.value.flatMovesString)
+      ) {
+        return json({
+          ok: true,
+          inviteId: INVITE,
+          matchId: body.matchId,
+          actorUid: uid,
+          outcome: "superseded",
+          fen: match.value.fen,
+          flatMovesString: match.value.flatMovesString,
+        });
+      }
+      let outcome = "already-applied";
+      if (
+        match.value.fen !== body.fen ||
+        match.value.flatMovesString !== body.flatMovesString
+      ) {
+        if (body.previousStates) {
+          assert.ok(
+            isMoveHistoryPrefix(
+              body.previousFlatMovesString,
+              match.value.flatMovesString,
+            ),
+          );
+          assert.ok(
+            isMoveHistoryPrefix(
+              match.value.flatMovesString,
+              body.flatMovesString,
+            ),
+          );
+          assert.equal(
+            body.previousStates.find(
+              (state) =>
+                state.moveCount ===
+                countMoveHistory(match.value.flatMovesString),
+            )?.fen,
+            match.value.fen,
+          );
+        } else
+          assert.equal(
+            match.value.flatMovesString,
+            body.previousFlatMovesString,
+          );
+        const game = new Game();
+        for (const move of body.flatMovesString.split("-")) {
+          assert.equal(game.activeColor, match.value.color);
+          assert.equal(game.playFen(move).kind, "complete");
+        }
+        assert.equal(body.fen, game.toFen());
+        match.value = {
+          ...match.value,
+          fen: body.fen,
+          flatMovesString: body.flatMovesString,
+        };
+        match.revision++;
+        outcome = "applied";
+      }
+      return json({
+        ok: true,
+        inviteId: INVITE,
+        matchId: body.matchId,
+        actorUid: uid,
+        outcome,
+      });
+    }
     if (url.pathname === "/matches/surrender") {
       assert.ok(body && typeof body === "object" && "matchId" in body);
       assert.deepEqual(body, {
@@ -466,6 +553,10 @@ function harness(
 
 test("requires an explicit approved target and supports a report and pre-rule API verification", () => {
   assert.deepEqual(parseArgs(["--base-url", `${API}/`]), { baseUrl: API });
+  assert.deepEqual(parseArgs(["--move-rules-pending", "--base-url", API]), {
+    baseUrl: API,
+    moveRulesPending: true,
+  });
   assert.deepEqual(
     parseArgs(["--surrender-rules-pending", "--base-url", API]),
     {
@@ -502,17 +593,25 @@ test("requires an explicit approved target and supports a report and pre-rule AP
       "--surrender-rules-pending",
     ],
     ["--base-url", API, "--surrender-rules-pending", "true"],
+    ["--base-url", API, "--move-rules-pending", "--move-rules-pending"],
+    ["--base-url", API, "--move-rules-pending", "true"],
   ])
     assert.throws(() => parseArgs(args), /Usage:/);
 });
 
-test("runs the isolated lifecycle, API surrender replay, legal client moves, timer and status denials, and D1-only source proof", async () => {
+test("runs the isolated lifecycle, API move/surrender replay, direct move, timer and status denials, and D1-only source proof", async () => {
   const state = harness();
   const report = await runSmoke({ baseUrl: API }, state.dependencies);
   assert.equal(report.inviteId, INVITE);
   assert.deepEqual(report.matchIds, [INVITE, `${INVITE}1`]);
-  assert.equal(report.checks.length, 12);
+  assert.equal(report.checks.length, 14);
   assert.ok(report.checks.includes("firebase-surrender-write-rules"));
+  assert.ok(report.checks.includes("firebase-move-write-rules"));
+  assert.equal(
+    state.requests.filter((request) => request.url.pathname === "/matches/move")
+      .length,
+    10,
+  );
   assert.equal(
     state.requests.filter(
       (request) => request.url.pathname === "/matches/surrender",
@@ -557,7 +656,7 @@ test("pre-rule verification skips only direct status probes and still verifies A
     { baseUrl: API, surrenderRulesPending: true },
     state.dependencies,
   );
-  assert.equal(report.checks.length, 11);
+  assert.equal(report.checks.length, 13);
   assert.ok(!report.checks.includes("firebase-surrender-write-rules"));
   assert.equal(
     state.requests.filter(
@@ -571,6 +670,98 @@ test("pre-rule verification skips only direct status probes and still verifies A
     ),
   );
   assert.ok(state.matches.get(`${HOST}/${INVITE}`)?.value.flatMovesString);
+});
+
+test("pre-move-cutover smoke verifies API moves and replay while old direct writes remain allowed", async () => {
+  const state = harness({ directMovesAllowed: true });
+  const report = await runSmoke(
+    { baseUrl: API, moveRulesPending: true },
+    state.dependencies,
+  );
+  assert.ok(!report.checks.includes("firebase-move-write-rules"));
+  assert.ok(report.checks.includes("firebase-surrender-write-rules"));
+  assert.equal(
+    state.requests.filter((request) => request.url.pathname === "/matches/move")
+      .length,
+    10,
+  );
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+});
+
+test("post-cutover smoke fails if Firebase still accepts a direct legal move", async () => {
+  const state = harness({ directMovesAllowed: true });
+  await assert.rejects(
+    runSmoke({ baseUrl: API }, state.dependencies),
+    /move rule did not deny/,
+  );
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+});
+
+test("uncertain API move replays the identical request without applying it twice", async () => {
+  let uncertain = false;
+  const state = harness({
+    intercept(request, response) {
+      const result = response();
+      if (request.url.pathname === "/matches/move" && !uncertain) {
+        uncertain = true;
+        throw new Error("lost move response");
+      }
+      return result;
+    },
+  });
+  await runSmoke({ baseUrl: API }, state.dependencies);
+  const moves = state.requests.filter(
+    (request) => request.url.pathname === "/matches/move",
+  );
+  assert.equal(moves.length, 11);
+  assert.deepEqual(moves[0].body, moves[1].body);
+  assert.deepEqual(moves[0].body, moves[3].body);
+  assert.equal(state.matches.get(`${HOST}/${INVITE}`)?.revision, 4);
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+});
+
+test("older cumulative move must acknowledge superseded and match the original participant", async () => {
+  for (const fault of ["replay", "actor"] as const) {
+    let moves = 0;
+    const state = harness({
+      intercept(request, response) {
+        const result = response();
+        if (request.url.pathname === "/matches/move" && ++moves === 2) {
+          return json({
+            ok: true,
+            inviteId: INVITE,
+            matchId: INVITE,
+            actorUid: fault === "actor" ? GUEST : HOST,
+            outcome: fault === "replay" ? "applied" : "already-applied",
+          });
+        }
+        return result;
+      },
+    });
+    await assert.rejects(
+      runSmoke({ baseUrl: API }, state.dependencies),
+      /unexpected acknowledgement/,
+    );
+    assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+  }
+});
+
+test("move smoke rejects changes to unrelated stored fields", async () => {
+  const state = harness({
+    intercept(request, response) {
+      const result = response();
+      if (request.url.pathname === "/matches/move") {
+        state.matches.get(`${HOST}/${INVITE}`)!.value.sessionCreation =
+          "c".repeat(64);
+      }
+      return result;
+    },
+  });
+  await assert.rejects(
+    runSmoke({ baseUrl: API }, state.dependencies),
+    /API move changed other state/,
+  );
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
 });
 
 test("each direct status-write shape must return an actual permission denial", async () => {
@@ -617,7 +808,7 @@ test("replays an uncertain API surrender without issuing a direct Firebase fallb
   assert.equal(surrenders.length, 5);
   assert.deepEqual(surrenders[0].body, surrenders[1].body);
   assert.deepEqual(surrenders[0].body, surrenders[2].body);
-  assert.equal(state.matches.get(`${HOST}/${INVITE}`)?.revision, 3);
+  assert.equal(state.matches.get(`${HOST}/${INVITE}`)?.revision, 4);
 });
 
 test("rejects a surrender response for another participant and retains isolated cleanup", async () => {
@@ -910,6 +1101,7 @@ test("attempts both account deletions and reports cleanup failure without return
 test("restores the original timer before failing when the client timer rule is broken", async () => {
   let forged = false;
   const state = harness({
+    directMovesAllowed: true,
     intercept(request, response) {
       if (
         !forged &&
@@ -939,29 +1131,32 @@ test("restores the original timer before failing when the client timer rule is b
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
 });
 
-test("retries live match CAS conflicts against the newest ETag without overwriting other state", async () => {
+test("retries a transient API move failure with the identical move payload", async () => {
   let conflicted = false;
   const state = harness({
     intercept(request, response) {
       if (
         !conflicted &&
-        request.url.hostname.endsWith("firebaseio.com") &&
-        request.method === "PUT" &&
+        request.url.pathname === "/matches/move" &&
+        request.method === "POST" &&
         request.body &&
         typeof request.body === "object" &&
         "flatMovesString" in request.body &&
         request.body.flatMovesString
       ) {
         conflicted = true;
-        const match = state.matches.get(`${HOST}/${INVITE}`)!;
-        match.revision++;
-        return json(match.value, 412, { ETag: `"${match.revision}"` });
+        return json({ ok: false, error: "unavailable" }, 503);
       }
       return response();
     },
   });
   await runSmoke({ baseUrl: API }, state.dependencies);
   assert.equal(conflicted, true);
+  const moves = state.requests.filter(
+    (request) => request.url.pathname === "/matches/move",
+  );
+  assert.equal(moves.length, 11);
+  assert.deepEqual(moves[0].body, moves[1].body);
   assert.equal(
     state.matches.get(`${HOST}/${INVITE}`)?.value.status,
     "surrendered",

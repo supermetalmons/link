@@ -60,7 +60,38 @@ Keep existing request, connection, and smoke-command timeouts that detect stalle
 
 `upload:api` sends no production traffic. `promote:api` requires an explicit Version ID and routes 100% of traffic to it. Trigger application is a separate operation for reviewed configuration changes.
 
+## Cumulative move delivery release
+
+Frontend follow-up `ec7e6159-cbe0-41e5-9d17-e36ad270b801` preserves accepted end-series, rating, and wager-result operations across view changes. Confirmed surrender refreshes only the matching authenticated board and remains authoritative over an older in-flight match snapshot. All 539 client tests passed, and production assets matched the tested candidate. Evidence is retained in `/private/tmp/mons-terminal-recovery-VWRLqP`.
+
+Frontend follow-up `fa65fd9c-43b7-4ed0-866a-76ec5a058786` keeps accepted surrender bound to its original authenticated match while pending moves drain, even after navigation or reconnect. Other mutation context guards remain unchanged. All 516 client tests passed, and production assets matched the tested candidate. Evidence is retained in `/private/tmp/mons-surrender-navigation-8S8eac`.
+
+Released on September 8, 2026 with API version `3979ebc2-63e5-47a4-b889-6cc8f6ac50bb` and frontend version `8f9a7d69-ce81-45a6-9983-ac03f13d8015`, each serving 100% of traffic. The complete validation gate passed 2,747 tests. Production lifecycle checks verified cumulative move/move/takeback/move recovery, late older requests acknowledged without rollback, exact replay, legacy requests, and direct Firebase write denials. Browser checks verified rapid consecutive moves, takebacks, a five-action opponent batch, and successful undo after reload. The test series was ended and its temporary guest deleted. Evidence is retained in `/private/tmp/mons-move-reliable-release-MK2KK4`.
+
+Cumulative delivery adds optional `previousStates` checkpoints to the existing move API and preserves strict legacy requests. The browser journals pending moves and takebacks, sends cumulative batches, and reconciles delayed acknowledgements and reconnects. Firebase rules already permit cumulative append-only writes; this release changes only the API and frontend Workers, with no schema, rule, Queue, trigger, or maintenance-control changes.
+
+Validate the API, client delivery/replay behavior, shared contracts, and lifecycle tooling before uploading candidates. Promote the API first and run the standard API smoke and lifecycle smoke. The lifecycle sends a cumulative move/move/takeback/move target before its first request, requires the late first request to return `superseded` without a write, replays the latest target, and verifies a subsequent legacy move request. It also retains direct Firebase write-denial checks and cleans up temporary Auth sessions. Promote the validated frontend's exact version and verify rapid moves and takebacks, live opponent observation, and same-match reload recovery. Preserve the checkpoint-capable API as the rollback baseline once the new frontend is live. Record candidate IDs and checks; keep gameplay and Queue delivery running and finish once the required verification passes.
+
+## Move API and rules release
+
+The cutover completed on September 8, 2026 with API version `e865d985-8fc4-490a-8e08-d98912ac9dda` and frontend version `54a9cfd0-55a3-4d62-b79b-21e1f647af8c`, each serving 100% of traffic. The full validation gate passed 2,704 tests. Production checks verified API moves and replay on initial matches and rematches, direct Firebase move/status denials, unchanged timer protections, and temporary Auth-session cleanup. The promoted browser submitted moves before and after the rules cutover and observed the controlled opponent's moves live. The browser test series was ended and its temporary guest deleted. Deployed Firebase rules exactly matched the tested candidate. Release evidence is retained in `/private/tmp/mons-move-release-7MtqfD`.
+
+Move submissions retain Firebase match storage and subscriptions while moving browser writes to `POST /matches/move`. The API uses the existing gameplay service account with an exact-match `workerMoveMatchId` override. It preserves concurrent non-move fields and checks the existing timer-claim fence atomically. The only new binding is `MOVE_RATE_LIMITER`; no data migration, Queue pause, write freeze, or trigger deployment is required.
+
+Prepare the complete validation gate, frontend build, tested Firebase rules, and both Worker candidates before promotion. Record the current Worker versions and deployed Firebase rules. Promote the API candidate first and run the standard API smoke plus the isolated lifecycle check while direct browser move writes are still permitted:
+
+```sh
+npm run smoke:api -- --base-url https://api.mons.link
+npm run smoke:invite-lifecycle -- --base-url https://api.mons.link --move-rules-pending
+```
+
+Promote the validated frontend candidate, verify two-player move submission and live opponent observation, then deploy the reviewed database rules through `npm run deploy:firebase -- --project mons-link`. Rerun the lifecycle smoke without `--move-rules-pending`. It requires API move and surrender replay on initial matches and rematches, unchanged match fields, direct browser move/status denials, and temporary Auth-session cleanup. Compare the deployed Firebase rules with the tested candidate and record the deployed Worker versions.
+
+The cutover requires older open clients to refresh before submitting moves. Keep an API-capable frontend and backend as the rollback baseline after the rules cutover. Follow the routine release timing policy and finish when verification passes.
+
 ## Surrender API and rules release
+
+The move release above supersedes this historical procedure for current releases.
 
 The cutover completed on September 8, 2026 with API version `2e4d24c1-3948-4e8f-9725-3b866b27167b` and frontend version `48fe9424-8c55-421e-bc2e-e6c302e33a0f`, each serving 100% of traffic. The complete validation gate passed 2,592 tests. Production checks verified surrender/replay and opponent observation on initial matches and rematches, continued legal moves, direct status-write denials, and temporary Auth-session cleanup. The deployed Firebase rules matched the tested candidate. Release evidence is retained in `/private/tmp/mons-surrender-release-xNjHrQ`; unrelated in-progress Telegram edits were excluded from the release snapshot.
 

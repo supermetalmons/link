@@ -6,14 +6,7 @@ import {
   onAuthStateChanged,
   signOut,
 } from "firebase/auth";
-import {
-  getDatabase,
-  Database,
-  ref,
-  onValue,
-  off,
-  runTransaction,
-} from "firebase/database";
+import { getDatabase, Database, ref, onValue, off } from "firebase/database";
 import {
   didFindInviteThatCanBeJoined,
   didReceiveInviteReactionUpdate,
@@ -60,6 +53,12 @@ import {
 import { resolvePlayerProfileWithRetry } from "./playerProfileLookup";
 import { storage, type PendingAutomatchOperation } from "../utils/storage";
 import { withAutomatchOperationLock } from "./automatchOperationLock";
+import {
+  MoveDelivery,
+  moveDeliveryStorageKey,
+  type MoveDeliveryScope,
+  type MoveDeliveryStorage,
+} from "./moveDelivery";
 import { generateNewInviteId } from "../utils/misc";
 import {
   getWagerState,
@@ -110,6 +109,8 @@ import {
   startAutomatchViaApi,
   startMatchTimerViaApi,
   surrenderMatchViaApi,
+  submitMoveViaApi,
+  GameplayApiError,
   syncEventStateViaApi,
   toggleEventPrizeSelectionViaApi,
   updateRatingsViaApi,
@@ -442,11 +443,13 @@ class Connection {
     EventSyncCooldownCacheEntry
   >();
   private latestObservedEventById = new Map<string, EventRecord | null>();
-  private moveSendRequestId = 0;
-  private readonly moveSendRetryWindowMs = 60000;
-  private readonly moveSendAttemptMaxTimeoutMs = 20000;
-  private readonly moveSendPostRetryVerificationWindowMs = 3500;
-  private readonly moveSendPostRetryPollIntervalMs = 350;
+  private readonly moveDeliveries = new Map<string, MoveDelivery>();
+  private readonly reconcilingMoveKeys = new Set<string>();
+  private readonly confirmedSurrenders = new Set<string>();
+  private readonly moveRecoveryTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
   private moveReconnectInFlight = false;
   private moveReconnectLastAttemptAt = 0;
   private readonly moveReconnectCooldownMs = 3000;
@@ -825,6 +828,10 @@ class Connection {
     this.app = initializeApp(firebaseConfig);
     this.auth = getAuth(this.app);
     this.db = getDatabase(this.app);
+    if (typeof window !== "undefined") {
+      window.addEventListener("online", () => this.refreshMoveDeliveries());
+      window.addEventListener("pageshow", () => this.refreshMoveDeliveries());
+    }
     this.eventPollingRegistry = new EventPollingRegistry({
       addVisibilityListener: (listener) => {
         if (typeof document === "undefined") return () => undefined;
@@ -1697,6 +1704,7 @@ class Connection {
     incrementLifecycleCounter("connectionAuthSubscribers");
     const unsubscribe = onAuthStateChanged(this.auth, (user) => {
       const newUid = user?.uid ?? null;
+      this.refreshMoveDeliveries();
       if (
         this.inviteBootstrapLoginUid &&
         newUid !== this.inviteBootstrapLoginUid
@@ -1909,13 +1917,18 @@ class Connection {
     } catch {
       return;
     }
-    void endRematchViaApi(
-      {
-        operationId: crypto.randomUUID(),
-        inviteId: writableContext.inviteId,
-      },
-      tokenProvider,
-    )
+    void this.flushPendingMoves(writableContext, {
+      requireCurrentContext: false,
+    })
+      .then(() =>
+        endRematchViaApi(
+          {
+            operationId: crypto.randomUUID(),
+            inviteId: writableContext.inviteId,
+          },
+          tokenProvider,
+        ),
+      )
       .then((response) => {
         tokenProvider.assertCurrentUser();
         this.notifyNavigationGamesChanged();
@@ -1984,6 +1997,8 @@ class Connection {
     };
 
     void (async () => {
+      await this.flushPendingMoves(writableContext);
+      tokenProvider.assertCurrentUser();
       const response = await proposeRematchViaApi(
         {
           operationId,
@@ -2356,6 +2371,11 @@ class Connection {
         return { ok: false };
       }
       const opponentId = this.getOpponentId(writableContext.actorUid);
+      const tokenProvider = this.getUserBoundAuthTokenProvider(
+        writableContext.loginUid,
+      );
+      await this.flushPendingMoves(writableContext);
+      tokenProvider.assertCurrentUser();
       return startMatchTimerViaApi(
         {
           playerId: writableContext.actorUid,
@@ -2363,7 +2383,7 @@ class Connection {
           matchId: writableContext.matchId,
           inviteId: writableContext.inviteId,
         },
-        this.getAuthApiToken,
+        tokenProvider,
       );
     } catch (error) {
       console.error("Error starting a timer:", error);
@@ -2384,6 +2404,11 @@ class Connection {
         return { ok: false };
       }
       const opponentId = this.getOpponentId(writableContext.actorUid);
+      const tokenProvider = this.getUserBoundAuthTokenProvider(
+        writableContext.loginUid,
+      );
+      await this.flushPendingMoves(writableContext);
+      tokenProvider.assertCurrentUser();
       return claimMatchVictoryByTimerViaApi(
         {
           playerId: writableContext.actorUid,
@@ -2391,7 +2416,7 @@ class Connection {
           matchId: writableContext.matchId,
           inviteId: writableContext.inviteId,
         },
-        this.getAuthApiToken,
+        tokenProvider,
       );
     } catch (error) {
       console.error("Error claiming victory by timer:", error);
@@ -3100,7 +3125,6 @@ class Connection {
 
   public async updateRatings(): Promise<RatingUpdateResponse> {
     try {
-      await this.ensureAuthenticated();
       const writableContext = this.requireWritableContext(
         undefined,
         "updateRatings",
@@ -3109,6 +3133,14 @@ class Connection {
         return { ok: false };
       }
       const opponentId = this.getOpponentId(writableContext.actorUid);
+      const tokenProvider = this.getUserBoundAuthTokenProvider(
+        writableContext.loginUid,
+      );
+      await this.ensureAuthenticated();
+      await this.flushPendingMoves(writableContext, {
+        requireCurrentContext: false,
+      });
+      tokenProvider.assertCurrentUser();
       const response = await updateRatingsViaApi(
         {
           playerId: writableContext.actorUid,
@@ -3116,7 +3148,7 @@ class Connection {
           matchId: writableContext.matchId,
           opponentId,
         },
-        this.getAuthApiToken,
+        tokenProvider,
         {
           shouldRetry: () =>
             this.auth.currentUser?.uid === writableContext.loginUid,
@@ -3159,6 +3191,10 @@ class Connection {
           this.beginWagerSnapshotMutation(writableContext);
       }
       const tokenProvider = this.getUserBoundAuthTokenProvider(loginUid);
+      await this.flushPendingMoves(writableContext, {
+        requireCurrentContext: false,
+      });
+      tokenProvider.assertCurrentUser();
       const previousWagerState = matchGuard()
         ? this.cloneWagerState(getWagerState())
         : null;
@@ -4024,6 +4060,7 @@ class Connection {
     }
     const { inviteId, matchId, actorUid, loginUid, contextId, sessionEpoch } =
       writableContext;
+    const scope = this.moveDeliveryScope(writableContext);
     const matchGuard = this.createMatchContextGuard(inviteId, matchId);
     let tokenProvider: AuthTokenProvider & {
       readonly assertCurrentUser: () => void;
@@ -4044,12 +4081,25 @@ class Connection {
       }
     };
     this.myMatch.status = "surrendered";
-    void surrenderMatchViaApi(
-      { inviteId, matchId, playerId: actorUid },
-      tokenProvider,
-    )
+    void this.flushPendingMoves(writableContext, {
+      requireCurrentContext: false,
+    })
+      .then(() =>
+        surrenderMatchViaApi(
+          { inviteId, matchId, playerId: actorUid },
+          tokenProvider,
+        ),
+      )
       .then(() => {
-        if (!requestIsCurrent()) return;
+        tokenProvider.assertCurrentUser();
+        this.confirmedSurrenders.add(moveDeliveryStorageKey(scope));
+        if (this.isCurrentMoveBoard(scope) && this.myMatch) {
+          this.myMatch.status = "surrendered";
+        }
+        if (!requestIsCurrent()) {
+          this.recoverMoveBoard(scope);
+          return;
+        }
         this.logContextEvent("ctx.write.success", {
           reason: "surrender",
           inviteId,
@@ -4075,305 +4125,159 @@ class Connection {
     return true;
   }
 
+  private moveDeliveryScope(
+    context: MatchRuntimeContext & { actorUid: string },
+  ): MoveDeliveryScope {
+    return {
+      loginUid: context.loginUid,
+      inviteId: context.inviteId,
+      matchId: context.matchId,
+      playerId: context.actorUid,
+    };
+  }
+
+  private isCurrentMoveBoard(scope: MoveDeliveryScope): boolean {
+    const active = this.activeContext;
+    return (
+      !!active &&
+      active.loginUid === scope.loginUid &&
+      active.inviteId === scope.inviteId &&
+      active.matchId === scope.matchId &&
+      active.actorUid === scope.playerId &&
+      this.isCurrentAuthUser(scope.loginUid)
+    );
+  }
+
+  private recoverMoveBoard(scope: MoveDeliveryScope): void {
+    const key = moveDeliveryStorageKey(scope);
+    if (this.reconcilingMoveKeys.has(key) || !this.isCurrentMoveBoard(scope))
+      return;
+    const remaining =
+      this.moveReconnectCooldownMs -
+      (Date.now() - this.moveReconnectLastAttemptAt);
+    if (this.moveReconnectInFlight || remaining > 0) {
+      if (!this.moveRecoveryTimers.has(key)) {
+        this.moveRecoveryTimers.set(
+          key,
+          setTimeout(
+            () => {
+              this.moveRecoveryTimers.delete(key);
+              this.recoverMoveBoard(scope);
+            },
+            Math.max(100, remaining),
+          ),
+        );
+      }
+      return;
+    }
+    this.reconnectAfterMatchUpdateFailure(scope.inviteId, () =>
+      this.isCurrentMoveBoard(scope),
+    );
+  }
+
+  private getMoveDelivery(
+    scope: MoveDeliveryScope,
+    match: Pick<Match, "fen" | "flatMovesString" | "gameVariant">,
+  ): MoveDelivery {
+    const key = moveDeliveryStorageKey(scope);
+    const existing = this.moveDeliveries.get(key);
+    if (existing) return existing;
+    let persistence: MoveDeliveryStorage | null = null;
+    try {
+      if (typeof window !== "undefined") persistence = window.sessionStorage;
+    } catch {}
+    const recoverBoard = () => this.recoverMoveBoard(scope);
+    const delivery = new MoveDelivery(scope, match, {
+      storage: persistence,
+      isAuthorized: () => this.isCurrentAuthUser(scope.loginUid),
+      isOnline: () => typeof navigator === "undefined" || navigator.onLine,
+      submit: (request, options) =>
+        submitMoveViaApi(
+          request,
+          this.getUserBoundAuthTokenProvider(scope.loginUid),
+          options,
+        ),
+      read: async (options) => {
+        const response = await readMatchSnapshotViaApi(
+          { playerId: scope.playerId, matchId: scope.matchId },
+          options,
+        );
+        return response.match;
+      },
+      onError: (error, kind) => {
+        console.error("Move delivery:", kind, error);
+        if (kind === "conflict") recoverBoard();
+      },
+      onRemoteAdvance: recoverBoard,
+    });
+    this.moveDeliveries.set(key, delivery);
+    return delivery;
+  }
+
+  private async flushPendingMoves(
+    context: MatchRuntimeContext & { actorUid: string },
+    { requireCurrentContext = true }: { requireCurrentContext?: boolean } = {},
+  ): Promise<void> {
+    const delivery = this.moveDeliveries.get(
+      moveDeliveryStorageKey(this.moveDeliveryScope(context)),
+    );
+    try {
+      await delivery?.flush();
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== "match-move-finished")
+        throw error;
+    }
+    if (
+      (requireCurrentContext &&
+        !this.isContextActive(context.contextId, context.sessionEpoch)) ||
+      !this.isCurrentAuthUser(context.loginUid)
+    ) {
+      throw new GameplayApiError("aborted", "request-aborted");
+    }
+  }
+
+  private refreshMoveDeliveries(): void {
+    for (const delivery of this.moveDeliveries.values()) {
+      if (!this.isCurrentAuthUser(delivery.scope.loginUid)) delivery.pause();
+      else if (delivery.hasPendingMoves) void delivery.refresh();
+    }
+  }
+
   public sendMove(
     moveFen: string,
     newBoardFen: string,
     expectedMatchId: string,
   ): void {
-    const writableContext = this.requireWritableContext(
-      expectedMatchId,
-      "sendMove",
-    );
-    if (!writableContext || !this.myMatch) {
-      this.logContextEvent("ctx.write.blocked", {
-        reason: "sendMove",
-        blockReason: "missing-writable-context-or-match",
-        expectedMatchId,
-      });
-      return;
-    }
-    const previousFlatMovesString = this.myMatch.flatMovesString ?? "";
-    this.myMatch.fen = newBoardFen;
-    this.myMatch.flatMovesString = previousFlatMovesString
-      ? `${previousFlatMovesString}-${moveFen}`
-      : moveFen;
-    const matchToPersist: Match = { ...this.myMatch };
-    const expectedFlatMovesString = this.myMatch.flatMovesString ?? "";
-    const requestId = ++this.moveSendRequestId;
-    void this.sendCriticalMoveUpdateWithRetry(
-      requestId,
-      writableContext.inviteId,
-      writableContext.matchId,
-      writableContext.actorUid,
-      writableContext.contextId,
-      writableContext.sessionEpoch,
-      matchToPersist,
-      newBoardFen,
-      expectedFlatMovesString,
-      previousFlatMovesString,
-    );
-  }
-
-  private shouldContinueCriticalMoveSend(
-    requestId: number,
-    matchId: string,
-    playerUid: string,
-    contextId: number,
-    contextEpoch: number,
-    sessionGuard: () => boolean,
-  ): boolean {
-    const activeContext = this.activeContext;
-    return (
-      requestId === this.moveSendRequestId &&
-      sessionGuard() &&
-      this.isContextActive(contextId, contextEpoch) &&
-      !!activeContext &&
-      this.isCurrentAuthUser(activeContext.loginUid) &&
-      activeContext.matchId === matchId &&
-      activeContext.actorUid === playerUid
-    );
-  }
-
-  private async runMoveTransactionWithTimeout<T>(
-    promise: Promise<T>,
-    timeoutMs: number,
-  ): Promise<
-    | { timedOut: false; value: T }
-    | { timedOut: true; pendingAttempt: Promise<void> }
-  > {
-    let settled = false;
-    const trackedPromise = promise.finally(() => {
-      settled = true;
-    });
-    const raceResult = await Promise.race([
-      trackedPromise.then((value) => ({ kind: "value" as const, value })),
-      this.delay(timeoutMs).then(() => ({ kind: "timeout" as const })),
-    ]);
-    if (raceResult.kind === "timeout") {
-      if (settled) {
-        return { timedOut: false, value: await trackedPromise };
-      }
-      return {
-        timedOut: true,
-        pendingAttempt: trackedPromise.then(
-          () => undefined,
-          () => undefined,
-        ),
-      };
-    }
-    return { timedOut: false, value: raceResult.value };
-  }
-
-  private getMoveSendErrorCode(error: unknown): string {
-    if (error instanceof Error) {
-      return error.message;
-    }
-    return "unknown-move-send-error";
-  }
-
-  private getMoveSendPendingAttempt(error: unknown): Promise<void> | null {
-    if (!error || typeof error !== "object") {
-      return null;
-    }
-    const pendingAttempt = (error as { pendingAttempt?: unknown })
-      .pendingAttempt;
+    const context = this.requireWritableContext(expectedMatchId, "sendMove");
     if (
-      !pendingAttempt ||
-      typeof (pendingAttempt as Promise<void>).then !== "function"
-    ) {
-      return null;
-    }
-    return pendingAttempt as Promise<void>;
-  }
-
-  private async waitForPromiseToSettle(
-    promise: Promise<void>,
-    timeoutMs: number,
-  ): Promise<boolean> {
-    if (timeoutMs <= 0) {
-      return false;
-    }
-    let settled = false;
-    await Promise.race([
-      promise.finally(() => {
-        settled = true;
-      }),
-      this.delay(timeoutMs),
-    ]);
-    return settled;
-  }
-
-  private async sendMoveAttempt(
-    playerUid: string,
-    matchId: string,
-    matchToPersist: Match,
-    expectedFen: string,
-    expectedFlatMovesString: string,
-    previousFlatMovesString: string,
-    timeoutMs: number,
-  ): Promise<void> {
-    const matchPath = `players/${playerUid}/matches/${matchId}`;
-    const matchRef = ref(this.db, matchPath);
-    const transactionResult = await this.runMoveTransactionWithTimeout(
-      runTransaction(
-        matchRef,
-        (currentValue) => {
-          const currentMatch = currentValue as Match | null;
-          if (!currentMatch) {
-            return matchToPersist;
-          }
-          const currentFlatMovesString = currentMatch.flatMovesString ?? "";
-          if (
-            currentFlatMovesString === expectedFlatMovesString &&
-            currentMatch.fen === expectedFen
-          ) {
-            return currentMatch;
-          }
-          if (currentFlatMovesString !== previousFlatMovesString) {
-            return currentMatch;
-          }
-          const nextGameVariant =
-            typeof currentMatch.gameVariant === "string" &&
-            currentMatch.gameVariant !== ""
-              ? currentMatch.gameVariant
-              : typeof matchToPersist.gameVariant === "string" &&
-                  matchToPersist.gameVariant !== ""
-                ? matchToPersist.gameVariant
-                : undefined;
-          return {
-            ...currentMatch,
-            ...(nextGameVariant ? { gameVariant: nextGameVariant } : {}),
-            fen: expectedFen,
-            flatMovesString: expectedFlatMovesString,
-          } as Match;
-        },
-        { applyLocally: false },
-      ),
-      timeoutMs,
-    );
-    if (transactionResult.timedOut) {
-      const timeoutError = new Error("move-send-attempt-timeout") as Error & {
-        pendingAttempt?: Promise<void>;
-      };
-      timeoutError.pendingAttempt = transactionResult.pendingAttempt;
-      throw timeoutError;
-    }
-    const result = transactionResult.value;
-    const persistedMatch = result.snapshot.val() as Match | null;
-    if (!persistedMatch) {
-      if (!result.committed) {
-        throw new Error("move-send-transaction-not-committed");
-      }
-      throw new Error("missing-persisted-match");
-    }
-    const persistedFlatMovesString = persistedMatch.flatMovesString ?? "";
-    if (
-      persistedMatch.fen === expectedFen &&
-      persistedFlatMovesString === expectedFlatMovesString
-    ) {
+      !context ||
+      !this.myMatch ||
+      this.myMatch.status === "surrendered" ||
+      !this.isCurrentAuthUser(context.loginUid)
+    )
       return;
-    }
-    if (persistedFlatMovesString !== previousFlatMovesString) {
-      throw new Error("remote-move-chain-mismatch");
-    }
-    if (!result.committed) {
-      throw new Error("move-send-transaction-not-committed");
-    }
-    throw new Error("mismatch-persisted-match");
-  }
-
-  private async verifyMovePersistedAfterRetryWindow(
-    requestId: number,
-    playerUid: string,
-    matchId: string,
-    contextId: number,
-    contextEpoch: number,
-    expectedFen: string,
-    expectedFlatMovesString: string,
-    sessionGuard: () => boolean,
-  ): Promise<boolean> {
-    const verificationStartedAt = Date.now();
-    while (
-      Date.now() - verificationStartedAt <
-      this.moveSendPostRetryVerificationWindowMs
-    ) {
-      if (
-        !this.shouldContinueCriticalMoveSend(
-          requestId,
-          matchId,
-          playerUid,
-          contextId,
-          contextEpoch,
-          sessionGuard,
-        )
-      ) {
-        return false;
-      }
-      const elapsedMs = Date.now() - verificationStartedAt;
-      const remainingMs =
-        this.moveSendPostRetryVerificationWindowMs - elapsedMs;
-      if (remainingMs <= 0) {
-        return false;
-      }
-      const attemptTimeoutMs = Math.min(remainingMs, 1200);
-      try {
-        const verificationResult = await readMatchSnapshotViaApi(
-          { playerId: playerUid, matchId },
-          { timeoutMs: attemptTimeoutMs },
-        );
-        if (
-          !this.shouldContinueCriticalMoveSend(
-            requestId,
-            matchId,
-            playerUid,
-            contextId,
-            contextEpoch,
-            sessionGuard,
-          ) ||
-          Date.now() - verificationStartedAt >=
-            this.moveSendPostRetryVerificationWindowMs
-        ) {
-          return false;
-        }
-        const persistedMatch = verificationResult.match;
-        const persistedFlatMovesString = persistedMatch?.flatMovesString ?? "";
-        if (
-          persistedMatch &&
-          persistedMatch.fen === expectedFen &&
-          persistedFlatMovesString === expectedFlatMovesString
-        ) {
-          return true;
-        }
-      } catch {}
-      if (
-        !this.shouldContinueCriticalMoveSend(
-          requestId,
-          matchId,
-          playerUid,
-          contextId,
-          contextEpoch,
-          sessionGuard,
-        )
-      ) {
-        return false;
-      }
-      const remainingAfterAttemptMs =
-        this.moveSendPostRetryVerificationWindowMs -
-        (Date.now() - verificationStartedAt);
-      if (remainingAfterAttemptMs <= 0) {
-        return false;
-      }
-      const waitMs = Math.min(
-        this.moveSendPostRetryPollIntervalMs,
-        remainingAfterAttemptMs,
+    try {
+      const delivery = this.getMoveDelivery(
+        this.moveDeliveryScope(context),
+        this.myMatch,
       );
-      await this.delay(waitMs);
+      const latest = delivery.latest;
+      if (
+        latest.flatMovesString !== (this.myMatch.flatMovesString ?? "") ||
+        latest.fen !== this.myMatch.fen
+      ) {
+        throw new Error("move-local-state-mismatch");
+      }
+      const target = delivery.enqueue(moveFen, newBoardFen);
+      this.myMatch.fen = target.fen;
+      this.myMatch.flatMovesString = target.flatMovesString;
+    } catch (error) {
+      console.error("Move enqueue failed:", error);
+      this.reconnectAfterMatchUpdateFailure(
+        context.inviteId,
+        this.createMatchContextGuard(context.inviteId, context.matchId),
+      );
     }
-    return false;
-  }
-
-  private getMoveRetryDelayMs(attempt: number): number {
-    return Math.min(700 + attempt * 350, 3000);
   }
 
   private reconnectAfterMatchUpdateFailure(
@@ -4401,222 +4305,6 @@ class Connection {
       .finally(() => {
         this.moveReconnectInFlight = false;
       });
-  }
-
-  private async sendCriticalMoveUpdateWithRetry(
-    requestId: number,
-    inviteId: string | null,
-    matchId: string,
-    playerUid: string,
-    contextId: number,
-    contextEpoch: number,
-    matchToPersist: Match,
-    expectedFen: string,
-    expectedFlatMovesString: string,
-    previousFlatMovesString: string,
-  ): Promise<void> {
-    const sessionGuard = this.createSessionGuard();
-    const startedAt = Date.now();
-    let attempt = 0;
-    while (true) {
-      const elapsedMs = Date.now() - startedAt;
-      const remainingMs = this.moveSendRetryWindowMs - elapsedMs;
-      if (remainingMs <= 0) {
-        break;
-      }
-      if (
-        !this.shouldContinueCriticalMoveSend(
-          requestId,
-          matchId,
-          playerUid,
-          contextId,
-          contextEpoch,
-          sessionGuard,
-        )
-      ) {
-        return;
-      }
-      attempt += 1;
-      try {
-        const attemptTimeoutMs = Math.min(
-          remainingMs,
-          this.moveSendAttemptMaxTimeoutMs,
-        );
-        await this.sendMoveAttempt(
-          playerUid,
-          matchId,
-          matchToPersist,
-          expectedFen,
-          expectedFlatMovesString,
-          previousFlatMovesString,
-          attemptTimeoutMs,
-        );
-        if (
-          !this.shouldContinueCriticalMoveSend(
-            requestId,
-            matchId,
-            playerUid,
-            contextId,
-            contextEpoch,
-            sessionGuard,
-          )
-        ) {
-          return;
-        }
-        this.logContextEvent("ctx.write.success", {
-          reason: "sendMove",
-          attempt,
-          inviteId,
-          matchId,
-          actorUid: playerUid,
-          contextId,
-          sessionEpoch: contextEpoch,
-        });
-        this.myMatch = matchToPersist;
-        return;
-      } catch (error) {
-        if (
-          !this.shouldContinueCriticalMoveSend(
-            requestId,
-            matchId,
-            playerUid,
-            contextId,
-            contextEpoch,
-            sessionGuard,
-          )
-        ) {
-          return;
-        }
-        const errorCode = this.getMoveSendErrorCode(error);
-        if (errorCode === "remote-move-chain-mismatch") {
-          this.logContextEvent("ctx.write.fail", {
-            reason: "sendMove",
-            errorCode,
-            inviteId,
-            matchId,
-            actorUid: playerUid,
-            contextId,
-            sessionEpoch: contextEpoch,
-          });
-          this.reconnectAfterMatchUpdateFailure(inviteId, sessionGuard);
-          return;
-        }
-        this.logContextEvent("ctx.write.retry", {
-          reason: "sendMove",
-          inviteId,
-          matchId,
-          actorUid: playerUid,
-          contextId,
-          sessionEpoch: contextEpoch,
-          attempt,
-          errorCode,
-        });
-        this.reconnectAfterMatchUpdateFailure(inviteId, sessionGuard);
-        const pendingAttempt = this.getMoveSendPendingAttempt(error);
-        if (pendingAttempt) {
-          const remainingAfterFailureMs =
-            this.moveSendRetryWindowMs - (Date.now() - startedAt);
-          if (remainingAfterFailureMs <= 0) {
-            break;
-          }
-          const didPendingAttemptSettle = await this.waitForPromiseToSettle(
-            pendingAttempt,
-            remainingAfterFailureMs,
-          );
-          if (!didPendingAttemptSettle) {
-            break;
-          }
-        }
-        const remainingAfterFailureMs =
-          this.moveSendRetryWindowMs - (Date.now() - startedAt);
-        if (remainingAfterFailureMs <= 0) {
-          break;
-        }
-        const retryDelayMs = Math.min(
-          this.getMoveRetryDelayMs(attempt),
-          remainingAfterFailureMs,
-        );
-        if (retryDelayMs > 0) {
-          await this.delay(retryDelayMs);
-        }
-      }
-    }
-    if (
-      !this.shouldContinueCriticalMoveSend(
-        requestId,
-        matchId,
-        playerUid,
-        contextId,
-        contextEpoch,
-        sessionGuard,
-      )
-    ) {
-      return;
-    }
-    const didVerifyPersistedMove =
-      await this.verifyMovePersistedAfterRetryWindow(
-        requestId,
-        playerUid,
-        matchId,
-        contextId,
-        contextEpoch,
-        expectedFen,
-        expectedFlatMovesString,
-        sessionGuard,
-      );
-    if (didVerifyPersistedMove) {
-      if (
-        !this.shouldContinueCriticalMoveSend(
-          requestId,
-          matchId,
-          playerUid,
-          contextId,
-          contextEpoch,
-          sessionGuard,
-        )
-      ) {
-        return;
-      }
-      this.logContextEvent("ctx.write.success", {
-        reason: "sendMove",
-        inviteId,
-        matchId,
-        actorUid: playerUid,
-        contextId,
-        sessionEpoch: contextEpoch,
-        viaPostRetryVerification: true,
-      });
-      this.myMatch = matchToPersist;
-      return;
-    }
-    if (
-      !this.shouldContinueCriticalMoveSend(
-        requestId,
-        matchId,
-        playerUid,
-        contextId,
-        contextEpoch,
-        sessionGuard,
-      )
-    ) {
-      return;
-    }
-    this.logContextEvent("ctx.write.fail", {
-      reason: "sendMove",
-      inviteId,
-      matchId,
-      actorUid: playerUid,
-      contextId,
-      sessionEpoch: contextEpoch,
-      elapsedMs: Date.now() - startedAt,
-    });
-    this.reconnectAfterMatchUpdateFailure(
-      this.inviteId ?? inviteId,
-      sessionGuard,
-    );
-    if (typeof window !== "undefined") {
-      window.location.reload();
-    }
   }
 
   public signInIfNeededAndConnectToGame(
@@ -4970,11 +4658,22 @@ class Connection {
         );
         const canWrite = role !== "watch" && !!actorUid;
         let myMatch: Match | null = null;
+        let moveDelivery: MoveDelivery | null = null;
         if (canWrite && actorUid) {
+          const moveScope = {
+            loginUid: uid,
+            inviteId,
+            matchId,
+            playerId: actorUid,
+          };
+          const moveKey = moveDeliveryStorageKey(moveScope);
+          const existingDelivery = this.moveDeliveries.get(moveKey);
+          const readRevision = existingDelivery?.confirmationVersion;
+          existingDelivery?.suspend();
           const myMatchSnapshot = await readMatchSnapshotViaApi(
             { playerId: actorUid, matchId },
             { signal: controller.signal },
-          );
+          ).finally(() => existingDelivery?.resume());
           tokenProvider.assertCurrentUser();
           if (!isConnectActive()) {
             return;
@@ -5009,6 +4708,26 @@ class Connection {
               actorUid,
             });
             return;
+          }
+          moveDelivery = this.getMoveDelivery(moveScope, myMatch);
+          this.reconcilingMoveKeys.add(moveKey);
+          try {
+            if (moveDelivery.isConflicted) {
+              moveDelivery.resetAfterConflict(myMatch);
+            } else {
+              myMatch = {
+                ...myMatch,
+                ...moveDelivery.reconcile(myMatch, readRevision),
+              };
+            }
+          } catch (error) {
+            if (!moveDelivery.isConflicted) throw error;
+            moveDelivery.resetAfterConflict(myMatch);
+          } finally {
+            this.reconcilingMoveKeys.delete(moveKey);
+          }
+          if (this.confirmedSurrenders.has(moveKey)) {
+            myMatch.status = "surrendered";
           }
         }
         if (!isConnectActive()) {
@@ -5055,6 +4774,7 @@ class Connection {
           connectEpoch,
         );
         this.activateContext(nextContext, "connect-to-game");
+        moveDelivery?.resume();
         this.updateWagerStateForCurrentMatch();
         this.observeInviteReactions(nextContext);
         this.observeInviteMetadata(nextContext);

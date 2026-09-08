@@ -5,8 +5,13 @@ import { notifyInviteSourceChanged } from "./inviteWagersNotifications.ts";
 import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
   isReadMatchSnapshotRequest,
+  MAX_GAME_SESSION_GAME_VARIANT_BYTES,
   type ReadMatchSnapshotRequest,
 } from "@mons/shared/game-sessions";
+import {
+  isMatchFenWithinLimit,
+  isMatchHistoryWithinLimits,
+} from "@mons/shared/match-protocol";
 
 const FIREBASE_DATABASE_SCOPE =
   "https://www.googleapis.com/auth/firebase.database";
@@ -215,7 +220,9 @@ export function createFirebaseRtdbClient(
   env: Env,
   {
     scopedMatchSurrender,
-    credentials = scopedMatchSurrender
+    scopedMatchMove,
+    credentials = scopedMatchSurrender !== undefined ||
+    scopedMatchMove !== undefined
       ? {
           email: env.GAMEPLAY_SERVICE_ACCOUNT_EMAIL,
           privateKeyPem: env.GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY,
@@ -236,31 +243,41 @@ export function createFirebaseRtdbClient(
     maxTransactionAttempts?: number;
     now?: () => number;
     scopedMatchSurrender?: { playerId: string; matchId: string };
+    scopedMatchMove?: { playerId: string; matchId: string };
     timeoutMs?: number;
   } = {},
 ): FirebaseRtdbClient {
   const root = databaseRoot(env);
-  if (
-    scopedMatchSurrender !== undefined &&
-    (!scopedMatchSurrender ||
-      !isCanonicalFirebaseUid(scopedMatchSurrender.playerId) ||
-      !isSafeFirebaseKey(scopedMatchSurrender.matchId) ||
-      scopedMatchSurrender.matchId !== scopedMatchSurrender.matchId.trim())
-  ) {
-    throw new TypeError("invalid-match-surrender-scope");
+  if (scopedMatchSurrender !== undefined && scopedMatchMove !== undefined) {
+    throw new TypeError("conflicting-match-write-scopes");
   }
-  const surrenderPath = scopedMatchSurrender
-    ? `players/${scopedMatchSurrender.playerId}/matches/${scopedMatchSurrender.matchId}`
+  const scope = scopedMatchSurrender ?? scopedMatchMove;
+  const scopeKind = scopedMatchSurrender !== undefined ? "surrender" : "move";
+  if (
+    (scopedMatchSurrender !== undefined || scopedMatchMove !== undefined) &&
+    (!scope ||
+      !isCanonicalFirebaseUid(scope.playerId) ||
+      !isSafeFirebaseKey(scope.matchId) ||
+      scope.matchId !== scope.matchId.trim())
+  ) {
+    throw new TypeError(`invalid-match-${scopeKind}-scope`);
+  }
+  const scopedPath = scope
+    ? `players/${scope.playerId}/matches/${scope.matchId}`
     : null;
-  const authOverride = scopedMatchSurrender
+  const authOverride = scope
     ? JSON.stringify({
-        uid: scopedMatchSurrender.playerId,
-        token: { workerSurrenderMatchId: scopedMatchSurrender.matchId },
+        uid: scope.playerId,
+        token: {
+          [scopeKind === "surrender"
+            ? "workerSurrenderMatchId"
+            : "workerMoveMatchId"]: scope.matchId,
+        },
       })
     : null;
   const assertPath = (path: string): void => {
-    if (surrenderPath !== null && path !== surrenderPath) {
-      throw new TypeError("match-surrender-path-outside-scope");
+    if (scopedPath !== null && path !== scopedPath) {
+      throw new TypeError(`match-${scopeKind}-path-outside-scope`);
     }
   };
   let accessToken: Promise<string> | null = null;
@@ -302,7 +319,7 @@ export function createFirebaseRtdbClient(
     }
   };
   const throwResponseFailure = async (response: Response): Promise<never> => {
-    if (surrenderPath !== null && [401, 403].includes(response.status)) {
+    if (scopedPath !== null && [401, 403].includes(response.status)) {
       const value = await readBoundedJsonValue(
         response,
         MAX_RTDB_BODY_BYTES,
@@ -340,8 +357,8 @@ export function createFirebaseRtdbClient(
       );
     },
     async patchRoot(updates, signal) {
-      if (surrenderPath !== null) {
-        throw new TypeError("match-surrender-multipath-write-forbidden");
+      if (scopedPath !== null) {
+        throw new TypeError(`match-${scopeKind}-multipath-write-forbidden`);
       }
       const url = new URL(databaseUrl(root, ""));
       url.searchParams.set("print", "silent");
@@ -389,7 +406,7 @@ export function createFirebaseRtdbClient(
           () => new FirebaseRtdbFailure(),
         );
         const decision = validateTelegramTransactionDecision(
-          updater(surrenderPath === null ? current : structuredClone(current)),
+          updater(scopedPath === null ? current : structuredClone(current)),
         );
         if (!decision.commit) {
           return {
@@ -400,13 +417,17 @@ export function createFirebaseRtdbClient(
         }
         const body = JSON.stringify(decision.value);
         if (
-          surrenderPath !== null &&
+          scopedPath !== null &&
+          scopeKind === "surrender" &&
           (!current ||
             typeof current !== "object" ||
             Array.isArray(current) ||
             body !== JSON.stringify({ ...current, status: "surrendered" }))
         ) {
           throw new TypeError("match-surrender-must-only-change-status");
+        }
+        if (scopedPath !== null && scopeKind === "move") {
+          assertScopedMoveBody(current, decision.value, body);
         }
         await beforeWrite?.({ current, proposed: decision.value, etag });
         let committed = false;
@@ -449,6 +470,46 @@ export function createFirebaseRtdbClient(
       throw new FirebaseRtdbFailure();
     },
   };
+}
+
+function assertScopedMoveBody(
+  current: unknown,
+  proposed: unknown,
+  body: string,
+): void {
+  if (
+    !current ||
+    typeof current !== "object" ||
+    Array.isArray(current) ||
+    !proposed ||
+    typeof proposed !== "object" ||
+    Array.isArray(proposed)
+  ) {
+    throw new TypeError("match-move-must-only-change-move-fields");
+  }
+  const before = current as Record<string, unknown>;
+  const after = proposed as Record<string, unknown>;
+  const expected: Record<string, unknown> = { ...before };
+  if (
+    (before.gameVariant === undefined || before.gameVariant === "") &&
+    typeof after.gameVariant === "string" &&
+    after.gameVariant !== "" &&
+    new TextEncoder().encode(after.gameVariant).byteLength <=
+      MAX_GAME_SESSION_GAME_VARIANT_BYTES
+  ) {
+    expected.gameVariant = after.gameVariant;
+  }
+  expected.fen = after.fen;
+  expected.flatMovesString = after.flatMovesString;
+  if (
+    typeof after.fen !== "string" ||
+    !after.fen ||
+    !isMatchFenWithinLimit(after.fen) ||
+    !isMatchHistoryWithinLimits(after.flatMovesString) ||
+    body !== JSON.stringify(expected)
+  ) {
+    throw new TypeError("match-move-must-only-change-move-fields");
+  }
 }
 
 export {

@@ -124,6 +124,31 @@ export type SurrenderMatchResponse = {
   actorUid: string;
 };
 
+export type SubmitMoveRequest = SurrenderMatchRequest & {
+  previousFlatMovesString: string;
+  flatMovesString: string;
+  fen: string;
+  gameVariant?: string;
+  previousStates?: MovePreviousState[];
+};
+
+export type MovePreviousState = {
+  moveCount: number;
+  fen: string;
+};
+
+export type SubmitMoveResponse = SurrenderMatchResponse &
+  (
+    | { outcome: "applied" | "already-applied" }
+    | { outcome: "superseded"; fen: string; flatMovesString: string }
+  );
+
+export const MATCH_MOVE_PATH: "/matches/move";
+export const MAX_MATCH_MOVE_REQUEST_BYTES: 1048576;
+export const MAX_MATCH_MOVE_PREVIOUS_STATES: 64;
+export function countMoveHistory(history: string): number;
+export function isMoveHistoryPrefix(prefix: string, history: string): boolean;
+
 export const GAME_SESSION_OPERATION_ID_PATTERN: RegExp;
 export const MANUAL_INVITE_ID_PATTERN: RegExp;
 export const MAX_GAME_SESSION_RESPONSE_BYTES: number;
@@ -169,6 +194,10 @@ export function isSurrenderMatchRequest(
 export function isSurrenderMatchResponse(
   value: unknown,
 ): value is SurrenderMatchResponse;
+export function isSubmitMoveRequest(value: unknown): value is SubmitMoveRequest;
+export function isSubmitMoveResponse(
+  value: unknown,
+): value is SubmitMoveResponse;
 export function isGameSessionMatch(value: unknown): value is GameSessionMatch;
 export function isHistoricalMatchPair(
   value: unknown,
