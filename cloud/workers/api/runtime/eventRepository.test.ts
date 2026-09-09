@@ -9,17 +9,22 @@ import {
   acquireEventWriteAdmission,
   createEventTransitionIntent,
   listPendingEventTransitionIntents,
-  patchEventOwnedPaths,
   readEventOwnedPath,
   readEventSnapshot,
   releaseEventWriteAdmission,
+  type EventTransitionIntent,
   type EventWriteAdmission,
 } from "../src/eventD1.ts";
+import { createEventRtdbClient } from "../src/eventRepository.ts";
+import { prepareInviteEventIntent } from "../src/inviteEventEffects.ts";
 import {
-  EVENT_TRANSITION_RECEIPT_ROOT,
-  createEventRtdbClient,
-  recoverEventTransitionIntents,
-} from "../src/eventRepository.ts";
+  ensureEventTransitionReceipt,
+  readEventTransitionReceipt,
+} from "../src/eventTransitionReceiptsD1.ts";
+import {
+  eventTransitionFixture,
+  resetEventReceiptTestState,
+} from "./eventTransitionTestFixture.ts";
 import { processEventProfileGameProjection } from "../src/profileGameProjection.ts";
 import { buildEventProfileGameProjectionOutboxUpdates } from "../src/profileGameProjectionOutbox.ts";
 import { sweepEventTelegramProjections } from "../src/eventTelegramProjection.ts";
@@ -47,14 +52,17 @@ function eventRecord(status = "scheduled", recordEventId = eventId) {
   };
 }
 
-function applyFlatUpdates(
-  values: Map<string, unknown>,
-  updates: Record<string, unknown>,
-): void {
-  for (const [path, value] of Object.entries(updates)) {
-    if (value === null) values.delete(path);
-    else values.set(path, structuredClone(value));
-  }
+async function createPendingIntent(
+  intent: Extract<EventTransitionIntent, { schemaVersion: 1 }>,
+): Promise<Extract<EventTransitionIntent, { schemaVersion: 2 }>> {
+  const prepared = await prepareInviteEventIntent(
+    testEnv.PROFILE_GAMES_DB,
+    intent,
+  );
+  await withD1Admission((admission) =>
+    createEventTransitionIntent(testEnv.EVENT_DB, prepared, { admission }),
+  );
+  return prepared;
 }
 
 async function withD1Admission<T>(
@@ -81,6 +89,25 @@ describe("hybrid event repository", () => {
   });
 
   beforeEach(async () => {
+    await testEnv.PROFILE_GAMES_DB.batch([
+      testEnv.PROFILE_GAMES_DB.prepare("DELETE FROM invite_sources"),
+      testEnv.PROFILE_GAMES_DB.prepare(
+        "DELETE FROM invite_event_effect_receipts",
+      ),
+      testEnv.PROFILE_GAMES_DB.prepare("DELETE FROM login_match_discovery"),
+      testEnv.PROFILE_GAMES_DB.prepare(
+        "DELETE FROM invite_source_write_admissions",
+      ),
+      testEnv.PROFILE_GAMES_DB.prepare(
+        `UPDATE invite_source_control SET backend = 'd1', state = 'active',
+         epoch = 1, freeze_generation = 1, verified_at_ms = 1,
+         activated_at_ms = 2 WHERE singleton = 1`,
+      ),
+    ]);
+    await resetEventReceiptTestState(
+      testEnv.PROFILE_GAMES_DB,
+      testEnv.TEST_D1_MIGRATIONS,
+    );
     await testEnv.EVENT_DB.batch([
       testEnv.EVENT_DB.prepare(
         "UPDATE event_records SET pending_transition_id = NULL",
@@ -342,28 +369,19 @@ describe("hybrid event repository", () => {
   });
 
   it("recovers a failed RTDB effect before publishing the D1 revision", async () => {
-    const effects: Record<string, unknown>[] = [];
-    const values = new Map<string, unknown>();
-    let fail = true;
-    const client = createEventRtdbClient(testEnv, {
-      getPath: async (path) => values.get(path) ?? null,
-      patchRoot: async (updates) => {
-        effects.push(updates);
-        if (fail && Object.hasOwn(updates, "invites/event-match")) {
-          fail = false;
-          throw new Error("rtdb-offline");
-        }
-        applyFlatUpdates(values, updates);
-      },
-      transactPath: async () => ({ committed: false, value: null }),
-    });
-    await client.patchRoot({ [`events/${eventId}`]: eventRecord() });
+    const f = eventTransitionFixture(testEnv);
+    const timerPath = "players/login-one/matches/event-match/timer";
+    f.hooks.beforePatch = async () => {
+      f.hooks.beforePatch = undefined;
+      throw new Error("rtdb-offline");
+    };
+    await f.client.patchRoot({ [`events/${eventId}`]: eventRecord() });
     const update = {
       [`events/${eventId}/status`]: "active",
       [`events/${eventId}/updatedAtMs`]: 200,
-      "invites/event-match": { eventId },
+      [timerPath]: "gg",
     };
-    await expect(client.patchRoot(update)).rejects.toThrow("rtdb-offline");
+    await expect(f.client.patchRoot(update)).rejects.toThrow("rtdb-offline");
     expect(
       await testEnv.EVENT_DB.prepare(
         "SELECT COUNT(*) AS count FROM event_write_admissions",
@@ -373,30 +391,19 @@ describe("hybrid event repository", () => {
       event: { status: "scheduled" },
       revision: 1,
     });
-    expect(
-      await listPendingEventTransitionIntents(testEnv.EVENT_DB),
-    ).toHaveLength(1);
+    const [pending] = await listPendingEventTransitionIntents(testEnv.EVENT_DB);
+    expect(pending.schemaVersion).toBe(2);
     await expect(
-      client.patchRoot({ [`events/${eventId}/updatedAtMs`]: 150 }),
+      f.client.patchRoot({ [`events/${eventId}/updatedAtMs`]: 150 }),
     ).rejects.toThrow("event-transition-pending");
-    await client.patchRoot(update);
-    const effectWrites = effects.filter((candidate) =>
-      Object.hasOwn(candidate, "invites/event-match"),
-    );
-    expect(effectWrites).toHaveLength(2);
-    const receiptPath = Object.keys(effectWrites[1]).find((path) =>
-      path.startsWith(`${EVENT_TRANSITION_RECEIPT_ROOT}/`),
-    );
-    expect(receiptPath).toBeTypeOf("string");
-    expect(effectWrites[1]).toMatchObject({
-      "invites/event-match": { eventId },
-      [receiptPath!]: {
-        schemaVersion: 1,
-        eventId,
-        expectedRevision: 1,
-      },
-    });
-    expect(values.has(receiptPath!)).toBe(true);
+    await f.client.patchRoot(update);
+    expect(f.patches).toEqual([{ [timerPath]: "gg" }, { [timerPath]: "gg" }]);
+    expect(
+      await readEventTransitionReceipt(
+        testEnv.PROFILE_GAMES_DB,
+        pending.transitionId,
+      ),
+    ).toMatchObject({ schemaVersion: 2, eventId, expectedRevision: 1 });
     expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
       event: { status: "active", updatedAtMs: 200 },
       revision: 2,
@@ -406,227 +413,161 @@ describe("hybrid event repository", () => {
     );
   });
 
-  it("preserves advanced RTDB state after an ambiguous effect commit", async () => {
-    const values = new Map<string, unknown>();
-    const patches: Record<string, unknown>[] = [];
+  it("preserves advanced RTDB matches after an ambiguous creation commit", async () => {
+    const f = eventTransitionFixture(testEnv);
     const matchPath = "players/login-one/matches/event-match";
-    let ambiguous = true;
-    const base = {
-      getPath: async (path: string) => values.get(path) ?? null,
-      patchRoot: async (updates: Record<string, unknown>) => {
-        patches.push(updates);
-        applyFlatUpdates(values, updates);
-        if (ambiguous && Object.hasOwn(updates, matchPath)) {
-          ambiguous = false;
-          throw new Error("ambiguous-rtdb-commit");
-        }
-      },
-      transactPath: async () => ({ committed: false, value: null }),
+    f.hooks.afterTransaction = async (path) => {
+      if (path !== matchPath) return;
+      f.hooks.afterTransaction = undefined;
+      throw new Error("ambiguous-rtdb-commit");
     };
-    const client = createEventRtdbClient(testEnv, base);
-    await client.patchRoot({ [`events/${eventId}`]: eventRecord() });
-    const update = {
-      [`events/${eventId}/status`]: "active",
-      [`events/${eventId}/updatedAtMs`]: 200,
-      "invites/event-match": {
-        eventId,
-        eventOwned: true,
-        hostId: "login-one",
-        guestId: "login-two",
-      },
-      [matchPath]: { fen: "initial", flatMovesString: "" },
-      "players/login-two/matches/event-match": {
-        fen: "initial",
-        flatMovesString: "",
-      },
-    };
-    await expect(client.patchRoot(update)).rejects.toThrow(
-      "ambiguous-rtdb-commit",
-    );
-    const receiptPath = [...values.keys()].find((path) =>
-      path.startsWith(`${EVENT_TRANSITION_RECEIPT_ROOT}/`),
-    );
-    expect(receiptPath).toBeTypeOf("string");
-    values.set(matchPath, { fen: "advanced", flatMovesString: "l0,0;l1,1" });
-
+    await f.client.patchRoot({ [`events/${eventId}`]: eventRecord() });
     await expect(
-      recoverEventTransitionIntents(testEnv, {
-        getRtdbPath: base.getPath,
-        patchRtdbRoot: base.patchRoot,
+      f.client.patchRoot({
+        [`events/${eventId}/status`]: "active",
+        [`events/${eventId}/updatedAtMs`]: 200,
+        "invites/event-match": {
+          eventId,
+          eventOwned: true,
+          hostId: "login-one",
+          guestId: "login-two",
+        },
+        [matchPath]: { fen: "initial", flatMovesString: "" },
+        "players/login-two/matches/event-match": {
+          fen: "initial",
+          flatMovesString: "",
+        },
       }),
-    ).resolves.toBe(1);
-
-    expect(values.get(matchPath)).toEqual({
+    ).rejects.toThrow("ambiguous-rtdb-commit");
+    const stored = f.values.get(matchPath) as Record<string, unknown>;
+    const advanced = {
+      ...stored,
       fen: "advanced",
       flatMovesString: "l0,0;l1,1",
-    });
-    expect(
-      patches.filter((candidate) => Object.hasOwn(candidate, matchPath)),
-    ).toHaveLength(1);
-    expect(values.has(receiptPath!)).toBe(true);
+    };
+    f.values.set(matchPath, advanced);
+    await expect(f.recover()).resolves.toBe(1);
+    expect(f.values.get(matchPath)).toEqual(advanced);
+    expect(f.writes.filter((path) => path === matchPath)).toHaveLength(1);
     expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
       event: { status: "active", updatedAtMs: 200 },
       revision: 2,
     });
   });
 
-  it("serializes duplicate transition applications before reading receipts", async () => {
-    let continueReceiptRead!: () => void;
-    let markReceiptRead!: () => void;
-    const receiptRead = new Promise<void>((resolve) => {
-      markReceiptRead = resolve;
+  it("serializes duplicate transition applications before replaying effects", async () => {
+    const f = eventTransitionFixture(testEnv);
+    let continueEffects!: () => void;
+    let markEffectsStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markEffectsStarted = resolve;
     });
-    const receiptGate = new Promise<void>((resolve) => {
-      continueReceiptRead = resolve;
+    const gate = new Promise<void>((resolve) => {
+      continueEffects = resolve;
     });
-    const effects: Record<string, unknown>[] = [];
-    const client = createEventRtdbClient(testEnv, {
-      getPath: async () => {
-        markReceiptRead();
-        await receiptGate;
-        return null;
-      },
-      patchRoot: async (updates) => {
-        effects.push(updates);
-      },
-      transactPath: async () => ({ committed: false, value: null }),
-    });
-    await client.patchRoot({ [`events/${eventId}`]: eventRecord() });
+    f.hooks.beforePatch = async () => {
+      markEffectsStarted();
+      await gate;
+    };
+    await f.client.patchRoot({ [`events/${eventId}`]: eventRecord() });
     const update = {
       [`events/${eventId}/status`]: "active",
-      "invites/serialized-transition": { eventId },
+      "players/login-one/matches/serialized-transition/timer": "gg",
     };
-    const first = client.patchRoot(update);
-    await receiptRead;
-
-    await expect(client.patchRoot(update)).rejects.toThrow(
+    const first = f.client.patchRoot(update);
+    await started;
+    await expect(f.client.patchRoot(update)).rejects.toThrow(
       "event-transition-application-busy",
     );
-    continueReceiptRead();
+    continueEffects();
     await expect(first).resolves.toBeUndefined();
-    expect(
-      effects.filter((candidate) =>
-        Object.hasOwn(candidate, "invites/serialized-transition"),
-      ),
-    ).toHaveLength(1);
+    expect(f.patches).toHaveLength(1);
   });
 
   it("skips an intent that another recovery committed after it was listed", async () => {
+    const f = eventTransitionFixture(testEnv);
     const otherEventId = "eVKpl6f9aBI";
-    await withD1Admission((admission) =>
-      patchEventOwnedPaths(
-        testEnv.EVENT_DB,
-        {
-          [`events/${eventId}`]: eventRecord(),
-          [`events/${otherEventId}`]: eventRecord("scheduled", otherEventId),
-        },
-        { admission },
-      ),
-    );
     for (const [transitionId, targetEventId] of [
-      ["a-leading-transition", eventId],
+      ["a-stale-transition", eventId],
       ["b-stale-transition", otherEventId],
     ] as const) {
-      await withD1Admission((admission) =>
-        createEventTransitionIntent(
-          testEnv.EVENT_DB,
-          {
-            schemaVersion: 1,
-            transitionId,
-            eventId: targetEventId,
-            expectedRevision: 1,
-            rtdbEffects: {
-              [`invites/${transitionId}`]: { eventId: targetEventId },
-            },
-            canonicalUpdates: {
-              [`events/${targetEventId}/status`]: "active",
-            },
-            createdAtMs: 200,
-            updatedAtMs: 200,
-          },
-          { admission },
-        ),
-      );
+      await f.client.patchRoot({
+        [`events/${targetEventId}`]: eventRecord("scheduled", targetEventId),
+      });
+      await createPendingIntent({
+        schemaVersion: 1,
+        transitionId,
+        eventId: targetEventId,
+        expectedRevision: 1,
+        rtdbEffects: {
+          [`players/login-one/matches/${transitionId}/timer`]: "gg",
+        },
+        canonicalUpdates: { [`events/${targetEventId}/status`]: "active" },
+        createdAtMs: 200,
+        updatedAtMs: 200,
+      });
     }
-
-    const values = new Map<string, unknown>();
-    const patches: Record<string, unknown>[] = [];
     let nestedRecoveryStarted = false;
-    const patchRtdbRoot = async (updates: Record<string, unknown>) => {
-      patches.push(updates);
-      applyFlatUpdates(values, updates);
+    f.hooks.beforePatch = async () => {
+      if (nestedRecoveryStarted) return;
+      nestedRecoveryStarted = true;
+      await expect(f.recover()).rejects.toThrow(
+        "event-transition-recovery-failed",
+      );
     };
-    const getRtdbPath = async (path: string): Promise<unknown> => {
-      if (!nestedRecoveryStarted) {
-        nestedRecoveryStarted = true;
-        await expect(
-          recoverEventTransitionIntents(testEnv, {
-            getRtdbPath,
-            patchRtdbRoot,
-          }),
-        ).rejects.toThrow("event-transition-recovery-failed");
-      }
-      return values.get(path) ?? null;
-    };
-
-    await expect(
-      recoverEventTransitionIntents(testEnv, {
-        getRtdbPath,
-        patchRtdbRoot,
-      }),
-    ).resolves.toBe(2);
+    await expect(f.recover()).resolves.toBe(2);
     expect(nestedRecoveryStarted).toBe(true);
     expect(
-      patches.filter((updates) =>
-        Object.hasOwn(updates, "invites/b-stale-transition"),
+      f.patches.filter((updates) =>
+        Object.hasOwn(
+          updates,
+          "players/login-one/matches/b-stale-transition/timer",
+        ),
       ),
     ).toHaveLength(1);
     expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual(
       [],
     );
-    expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
-      event: { status: "active" },
-      revision: 2,
-    });
-    expect(
-      await readEventSnapshot(testEnv.EVENT_DB, otherEventId),
-    ).toMatchObject({ event: { status: "active" }, revision: 2 });
+    for (const targetEventId of [eventId, otherEventId]) {
+      expect(
+        await readEventSnapshot(testEnv.EVENT_DB, targetEventId),
+      ).toMatchObject({
+        event: { status: "active" },
+        revision: 2,
+      });
+    }
   });
 
-  it("fails closed on a conflicting RTDB transition receipt", async () => {
-    await withD1Admission((admission) =>
-      patchEventOwnedPaths(
-        testEnv.EVENT_DB,
-        { [`events/${eventId}`]: eventRecord() },
-        { admission },
-      ),
-    );
-    const intent = {
-      schemaVersion: 1 as const,
+  it("fails closed on a conflicting D1 transition receipt", async () => {
+    const f = eventTransitionFixture(testEnv);
+    await f.client.patchRoot({ [`events/${eventId}`]: eventRecord() });
+    const intent = await createPendingIntent({
+      schemaVersion: 1,
       transitionId: "conflicting-receipt",
       eventId,
       expectedRevision: 1,
-      rtdbEffects: { "invites/conflicting-receipt": { eventId } },
+      rtdbEffects: {
+        "players/login-one/matches/conflicting-receipt/timer": "gg",
+      },
       canonicalUpdates: { [`events/${eventId}/status`]: "active" },
       createdAtMs: 200,
       updatedAtMs: 200,
-    };
-    await withD1Admission((admission) =>
-      createEventTransitionIntent(testEnv.EVENT_DB, intent, { admission }),
+    });
+    await ensureEventTransitionReceipt(
+      testEnv.PROFILE_GAMES_DB,
+      {
+        schemaVersion: 2,
+        transitionId: intent.transitionId,
+        eventId: "another-event",
+        expectedRevision: 1,
+        payloadDigest: intent.payloadDigest,
+      },
+      { recordedAtMs: 200, guards: () => [] },
     );
-    const patchRoot = vi.fn(async () => undefined);
-    await expect(
-      recoverEventTransitionIntents(testEnv, {
-        getRtdbPath: async () => ({
-          schemaVersion: 1,
-          transitionId: intent.transitionId,
-          eventId: "another-event",
-          expectedRevision: 1,
-        }),
-        patchRtdbRoot: patchRoot,
-      }),
-    ).rejects.toThrow("event-transition-recovery-failed");
-    expect(patchRoot).not.toHaveBeenCalled();
+    await expect(f.recover()).rejects.toThrow(
+      "event-transition-recovery-failed",
+    );
+    expect(f.patches).toEqual([]);
     expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual([
       expect.objectContaining({
         transitionId: intent.transitionId,
@@ -636,66 +577,56 @@ describe("hybrid event repository", () => {
   });
 
   it("isolates transition recovery failures while keeping poison intents fenced", async () => {
+    const f = eventTransitionFixture(testEnv);
     const otherEventId = "eVKpl6f9aBI";
-    await withD1Admission((admission) =>
-      patchEventOwnedPaths(
-        testEnv.EVENT_DB,
-        {
-          [`events/${eventId}`]: eventRecord(),
-          [`events/${otherEventId}`]: eventRecord("scheduled", otherEventId),
-        },
-        { admission },
-      ),
-    );
     for (const [transitionId, targetEventId] of [
       ["a-failing-transition", eventId],
       ["b-working-transition", otherEventId],
     ] as const) {
-      await withD1Admission((admission) =>
-        createEventTransitionIntent(
-          testEnv.EVENT_DB,
-          {
-            schemaVersion: 1,
-            transitionId,
-            eventId: targetEventId,
-            expectedRevision: 1,
-            rtdbEffects: {
-              [`invites/${transitionId}`]: { eventId: targetEventId },
-            },
-            canonicalUpdates: {
-              [`events/${targetEventId}/status`]: "active",
-            },
-            createdAtMs: 200,
-            updatedAtMs: 200,
-          },
-          { admission },
-        ),
-      );
+      await f.client.patchRoot({
+        [`events/${targetEventId}`]: eventRecord("scheduled", targetEventId),
+      });
+      await createPendingIntent({
+        schemaVersion: 1,
+        transitionId,
+        eventId: targetEventId,
+        expectedRevision: 1,
+        rtdbEffects: {
+          [`players/login-one/matches/${transitionId}/timer`]: "gg",
+        },
+        canonicalUpdates: { [`events/${targetEventId}/status`]: "active" },
+        createdAtMs: 200,
+        updatedAtMs: 200,
+      });
     }
-    const repository = {
-      getRtdbPath: async () => null,
-      patchRtdbRoot: async (updates: Record<string, unknown>) => {
-        if (Object.hasOwn(updates, "invites/a-failing-transition")) {
-          throw new Error("rtdb-offline");
-        }
-      },
+    f.hooks.beforePatch = async (updates) => {
+      if (
+        Object.hasOwn(
+          updates,
+          "players/login-one/matches/a-failing-transition/timer",
+        )
+      ) {
+        throw new Error("rtdb-offline");
+      }
     };
-    await expect(
-      recoverEventTransitionIntents(testEnv, repository),
-    ).rejects.toThrow("event-transition-recovery-failed");
+    await expect(f.recover()).rejects.toThrow(
+      "event-transition-recovery-failed",
+    );
     expect(
       await readEventSnapshot(testEnv.EVENT_DB, otherEventId),
-    ).toMatchObject({ event: { status: "active" }, revision: 2 });
+    ).toMatchObject({
+      event: { status: "active" },
+      revision: 2,
+    });
     expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual([
       expect.objectContaining({
         transitionId: "a-failing-transition",
         attempts: 1,
       }),
     ]);
-
-    await expect(
-      recoverEventTransitionIntents(testEnv, repository),
-    ).rejects.toThrow("event-transition-recovery-failed");
+    await expect(f.recover()).rejects.toThrow(
+      "event-transition-recovery-failed",
+    );
     expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual([
       expect.objectContaining({
         transitionId: "a-failing-transition",
@@ -703,13 +634,7 @@ describe("hybrid event repository", () => {
       }),
     ]);
     await expect(
-      withD1Admission((admission) =>
-        patchEventOwnedPaths(
-          testEnv.EVENT_DB,
-          { [`events/${eventId}/updatedAtMs`]: 300 },
-          { admission },
-        ),
-      ),
+      f.client.patchRoot({ [`events/${eventId}/updatedAtMs`]: 300 }),
     ).rejects.toThrow("event-transition-pending");
     expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
       event: { status: "scheduled" },
@@ -718,29 +643,20 @@ describe("hybrid event repository", () => {
   });
 
   it("holds a durable admission while replaying raw RTDB effects", async () => {
-    await withD1Admission((admission) =>
-      patchEventOwnedPaths(
-        testEnv.EVENT_DB,
-        { [`events/${eventId}`]: eventRecord() },
-        { admission },
-      ),
-    );
-    await withD1Admission((admission) =>
-      createEventTransitionIntent(
-        testEnv.EVENT_DB,
-        {
-          schemaVersion: 1,
-          transitionId: "admitted-recovery",
-          eventId,
-          expectedRevision: 1,
-          rtdbEffects: { "invites/admitted-recovery": { eventId } },
-          canonicalUpdates: { [`events/${eventId}/status`]: "active" },
-          createdAtMs: 200,
-          updatedAtMs: 200,
-        },
-        { admission },
-      ),
-    );
+    const f = eventTransitionFixture(testEnv);
+    await f.client.patchRoot({ [`events/${eventId}`]: eventRecord() });
+    await createPendingIntent({
+      schemaVersion: 1,
+      transitionId: "admitted-recovery",
+      eventId,
+      expectedRevision: 1,
+      rtdbEffects: {
+        "players/login-one/matches/admitted-recovery/timer": "gg",
+      },
+      canonicalUpdates: { [`events/${eventId}/status`]: "active" },
+      createdAtMs: 200,
+      updatedAtMs: 200,
+    });
     let finishReplay!: () => void;
     let markStarted!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -749,13 +665,11 @@ describe("hybrid event repository", () => {
     const pending = new Promise<void>((resolve) => {
       finishReplay = resolve;
     });
-    const recovery = recoverEventTransitionIntents(testEnv, {
-      getRtdbPath: async () => null,
-      patchRtdbRoot: async () => {
-        markStarted();
-        await pending;
-      },
-    });
+    f.hooks.beforePatch = async () => {
+      markStarted();
+      await pending;
+    };
+    const recovery = f.recover();
     await started;
     await expect(
       transitionEventStorageMode(testEnv.EVENT_DB, {
@@ -778,16 +692,9 @@ describe("hybrid event repository", () => {
     });
   });
 
-  it("publishes mixed progress outboxes and RTDB effects for one event", async () => {
-    const effects: Record<string, unknown>[] = [];
-    const client = createEventRtdbClient(testEnv, {
-      getPath: async () => null,
-      patchRoot: async (updates) => {
-        effects.push(updates);
-      },
-      transactPath: async () => ({ committed: false, value: null }),
-    });
-    await client.patchRoot({ [`events/${eventId}`]: eventRecord() });
+  it("publishes mixed progress outboxes and RTDB timer effects with a D1 receipt", async () => {
+    const f = eventTransitionFixture(testEnv);
+    await f.client.patchRoot({ [`events/${eventId}`]: eventRecord() });
     const outbox = {
       schemaVersion: 1,
       eventId,
@@ -797,30 +704,58 @@ describe("hybrid event repository", () => {
       firstQueuedAtMs: 100,
       lastQueuedAtMs: 100,
     };
-    await client.patchRoot({
+    await f.client.patchRoot({
       "eventProgressOutbox/progress-mixed": outbox,
       "matchTimerStarts/login-one/match-one": null,
     });
-    const receiptPath = Object.keys(effects[0]).find((path) =>
-      path.startsWith(`${EVENT_TRANSITION_RECEIPT_ROOT}/`),
-    );
-    expect(receiptPath).toBeTypeOf("string");
-    expect(effects).toEqual([
-      {
-        "matchTimerStarts/login-one/match-one": null,
-        [receiptPath!]: expect.objectContaining({
-          eventId,
-          expectedRevision: 1,
-          schemaVersion: 1,
-        }),
-      },
+    expect(f.patches).toEqual([
+      { "matchTimerStarts/login-one/match-one": null },
     ]);
+    const row = await testEnv.PROFILE_GAMES_DB.prepare(
+      "SELECT receipt_json FROM event_transition_receipts",
+    ).first<string>("receipt_json");
+    expect(JSON.parse(row!)).toMatchObject({
+      eventId,
+      expectedRevision: 1,
+      schemaVersion: 2,
+    });
     expect(
       await readEventOwnedPath(
         testEnv.EVENT_DB,
         "eventProgressOutbox/progress-mixed",
       ),
     ).toEqual(outbox);
+  });
+
+  it("never delegates retained Firebase receipt paths for reads or mutations", async () => {
+    const getPath = vi.fn(async () => null);
+    const patchRoot = vi.fn(async () => undefined);
+    const transactPath = vi.fn(async () => ({ committed: false, value: null }));
+    const client = createEventRtdbClient(testEnv, {
+      getPath,
+      patchRoot,
+      transactPath,
+    });
+    for (const path of [
+      "eventTransitionReceipts",
+      "/eventTransitionReceipts/receipt/expectedRevision/",
+    ]) {
+      await expect(client.getPath(path)).rejects.toThrow(
+        "event-transition-receipt-path-reserved",
+      );
+      await expect(client.patchRoot({ [path]: null })).rejects.toThrow(
+        "event-transition-receipt-path-reserved",
+      );
+      await expect(
+        client.patchRoot({ [`events/${eventId}`]: eventRecord(), [path]: {} }),
+      ).rejects.toThrow("event-transition-receipt-path-reserved");
+      await expect(
+        client.transactPath(path, () => ({ value: {} })),
+      ).rejects.toThrow("event-transition-receipt-path-reserved");
+    }
+    expect(getPath).not.toHaveBeenCalled();
+    expect(patchRoot).not.toHaveBeenCalled();
+    expect(transactPath).not.toHaveBeenCalled();
   });
 
   it("processes event profile-game projections with the shared lease schema", async () => {

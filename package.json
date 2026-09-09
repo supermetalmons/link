@@ -55,6 +55,7 @@
     "manage:wager-reservations": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-wager-reservations.ts",
     "manage:wager-state": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-wager-state.ts",
     "manage:events": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-events.ts",
+    "manage:event-transition-receipts": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-event-transition-receipts.ts",
     "manage:profile-canonical": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-profile-canonical.ts",
     "manage:event-prize-withdrawals": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-event-prize-withdrawals.ts",
     "format:check:tooling": "prettier --check \"scripts/**/*.{ts,md}\" \"cloud/admin/**/*.js\" README.md cloud/README.md eslint.config.mjs package.json --ignore-unknown",

@@ -10,6 +10,13 @@ import type {
 import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
 import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
+  EVENT_RECEIPT_ADMISSION_KIND,
+  ensureEventTransitionReceipt,
+  eventReceiptControlGuardStatements,
+  eventTransitionReceiptGuardStatements,
+  readEventTransitionReceipt,
+} from "./eventTransitionReceiptsD1.ts";
+import {
   acquireInviteSourceAdmission,
   createInviteSourceD1Store,
   inviteSourceAdmissionGuardStatements,
@@ -294,17 +301,34 @@ export async function applyInviteEventEffects(
   ) {
     throw new Error("event-invite-source-unavailable");
   }
-  const admission = await acquireInviteSourceAdmission(db, "event-effects");
+  const expectedReceipt = {
+    schemaVersion: 2 as const,
+    transitionId: intent.transitionId,
+    eventId: intent.eventId,
+    expectedRevision: intent.expectedRevision,
+    payloadDigest: intent.payloadDigest,
+  };
+  const admission = await acquireInviteSourceAdmission(
+    db,
+    EVENT_RECEIPT_ADMISSION_KIND,
+  );
   const guards = () => [
     ...inviteSourceControlGuardStatements(db, control),
     ...inviteSourceAdmissionGuardStatements(db, admission),
+    ...eventReceiptControlGuardStatements(db),
   ];
   const assertWritable = async () => {
     signal?.throwIfAborted();
     await db.batch(guards());
   };
+  const hasCommittedEffects = async () => {
+    if (!(await readEffectReceipt(db, intent))) return false;
+    await db.batch(eventTransitionReceiptGuardStatements(db, expectedReceipt));
+    return true;
+  };
   try {
-    if (await readEffectReceipt(db, intent)) return;
+    await assertWritable();
+    if (await hasCommittedEffects()) return;
     const store = createInviteSourceD1Store(db);
     try {
       await db.batch([
@@ -312,18 +336,10 @@ export async function applyInviteEventEffects(
         ...store.buildRevisionGuardStatements(intent.inviteMutations),
       ]);
     } catch (error) {
-      if (await readEffectReceipt(db, intent)) return;
+      if (await hasCommittedEffects()) return;
       throw error;
     }
-    const receiptPath = `eventTransitionReceipts/${intent.transitionId}`;
-    const expectedReceipt = {
-      schemaVersion: 2,
-      transitionId: intent.transitionId,
-      eventId: intent.eventId,
-      expectedRevision: intent.expectedRevision,
-      payloadDigest: intent.payloadDigest,
-    };
-    const receipt = await raw.getPath(receiptPath, undefined, signal);
+    const receipt = await readEventTransitionReceipt(db, intent.transitionId);
     if (receipt !== null && receipt !== undefined) {
       if (canonical(receipt) !== canonical(expectedReceipt)) {
         throw new Error("event-transition-receipt-conflict");
@@ -359,25 +375,17 @@ export async function applyInviteEventEffects(
         await raw.patchRoot(otherEffects, signal);
       }
       await assertWritable();
-      await raw.transactPath(
-        receiptPath,
-        (current) => {
-          if (current !== null && current !== undefined) {
-            if (canonical(current) !== canonical(expectedReceipt)) {
-              throw new Error("event-transition-receipt-conflict");
-            }
-            return { commit: false, decision: "applied" };
-          }
-          return { value: expectedReceipt, decision: "created" };
-        },
+      await ensureEventTransitionReceipt(db, expectedReceipt, {
+        recordedAtMs: Date.now(),
+        guards,
         signal,
-        assertWritable,
-      );
+      });
     }
     signal?.throwIfAborted();
     try {
       await db.batch([
         ...guards(),
+        ...eventTransitionReceiptGuardStatements(db, expectedReceipt),
         ...store.buildRevisionGuardStatements(intent.inviteMutations),
         db
           .prepare(
@@ -402,7 +410,7 @@ export async function applyInviteEventEffects(
         ),
       ]);
     } catch (error) {
-      if (!(await readEffectReceipt(db, intent))) throw error;
+      if (!(await hasCommittedEffects())) throw error;
     }
   } finally {
     await releaseInviteSourceAdmission(db, admission);

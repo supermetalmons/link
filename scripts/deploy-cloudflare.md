@@ -448,6 +448,58 @@ npx wrangler tail mons-link-api --version-id <version-id> --format pretty --stat
 
 `historical_match_read_failed` is the handled public-history 503 signal; `--status error` covers uncaught Worker failures and limits, not handled 5xx responses. Any required-history smoke failure, archive conflict, recurring Queue failure, or new history 5xx requires freezing affected writes and repairing forward. Active match synchronization continues to use RTDB.
 
+## Event transition receipt D1 cutover
+
+Released September 9, 2026 with API version `6260dc9f-98cb-48b3-8eff-550f528254c0` serving 100%. All three historical V1 receipts were imported and verified against the unchanged Firebase source; receipt authority is active in D1. Both preserved event-progress Workflow instances use version `3fafbe01-1d83-4e11-ae21-163681bc4b31`, retaining their original IDs, payloads, outbox timestamps, and September 13 sleeps at 16:00 and 20:00 UTC. Event writes resumed in D1 at freeze generation 4, and unrelated writer gates and Queue delivery were unchanged.
+
+The complete validation lanes passed 2,946 tests, including 470 Worker runtime tests and 354 tooling tests. Authenticated read-only production API/current-event/ended-event checks passed before the cutover and after event writes resumed. The operator handled deletion/startup propagation through saved evidence and bounded readback; no public test event or announcement was created. Protected exports, validation logs, deployment proof, Workflow evidence, and the final readback are retained in `/private/tmp/mons-event-receipts-UKVKxM`.
+
+`0019_event_transition_receipts.sql` adds immutable effect acknowledgments and a one-way receipt control in `mons-link-profile-games`. The new `event_transition_receipts` rows acknowledge completed Firebase match effects; the existing `invite_event_effect_receipts` rows separately acknowledge the atomic D1 invite/discovery commit. Do not delete either receipt stage or reinterpret historical V1 receipts as executable transitions.
+
+Apply the additive `0020_event_transition_receipt_operator_lock.sql` before using the updated operator. For an existing receipt deployment, this operator fix requires only that migration; no Worker redeployment is needed. Every mutating receipt command acquires the same D1 lock across hosts, preventing activation and rollback from overlapping. Locks have no expiration or automatic takeover; `--status` reports the owner, operation, and creation time.
+
+An interrupted command or uncertain remote write can retain its lock. Confirm the original process has stopped and resolve every uncertain provider write before manually deleting the exact observed owner in `mons-link-profile-games`: `DELETE FROM event_transition_receipt_operator_lock WHERE singleton = 1 AND owner_token = '<observed-owner>';`. Then retry using the saved evidence directory. Never unlock based only on elapsed time.
+
+Prepare the complete validation gate, migration rehearsal, authenticated read fixtures, and API candidate before maintenance. Record the original deployment and writer gates. Apply only the reviewed additive migration after confirming the pending migration list. The initial `importing` control permits legacy receipt writers while rejecting the new writer admission kind.
+
+```sh
+npm run check:all
+npm run manage:event-transition-receipts -- --preflight
+npm run upload:api
+npx wrangler d1 migrations list mons-link-profile-games --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 migrations apply mons-link-profile-games --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+This cutover requires a narrow event-write freeze because old and new Worker versions otherwise consult different completion markers for the same effects. Use the receipt operator rather than broad event-schema maintenance controls. Keep manual gameplay, profile/withdrawal writes, invite and automatch gates, and Queue delivery in their prior states. There is no fixed observation window. Do not delete stale admissions based only on elapsed time.
+
+Use one new protected directory outside the repository throughout the cutover. The operator stores immutable exports, source and destination digests, original gate/deployment state, and Workflow execution evidence there. Firebase authentication uses `--firebase-credentials`, `GOOGLE_APPLICATION_CREDENTIALS`, or the existing Firebase CLI login; Cloudflare uses the existing process token or Wrangler login. Credentials never belong in command arguments or evidence output.
+
+```sh
+npm run manage:event-transition-receipts -- --freeze --directory /private/receipt-evidence --candidate-version-id <candidate-version-id>
+npm run manage:event-transition-receipts -- --export --directory /private/receipt-evidence
+npm run manage:event-transition-receipts -- --import --directory /private/receipt-evidence
+npm run manage:event-transition-receipts -- --verify --directory /private/receipt-evidence
+npm run promote:api -- --version-id <candidate-version-id>
+npm run manage:event-transition-receipts -- --activate --directory /private/receipt-evidence
+npm run manage:event-transition-receipts -- --resume --directory /private/receipt-evidence
+```
+
+Freezing requires no event admissions, active event leases, pending transition intents, or legacy effect admissions. Every page of event-progress Workflow instances is audited. Only instances still at their initial scheduled sleep may be terminated and recreated, after their exact payload, D1 outbox, original timestamps, and schedule are preserved. Any instance that has advanced into effect or delivery steps requires reconciliation before continuing.
+
+Import copies every V1/V2 receipt without changing Firebase. It is insert-only and resumable: identical records retain their original recording timestamp, while conflicting or malformed records stop the operation. Verification compares complete sorted key coverage, count, and canonical JSON digest against an unchanged source. Activation requires that proof, the same event freeze generation, and the exact candidate serving 100% of API traffic. It permanently fences the old `event-effects` admission kind.
+
+The operator refreshes only the `mons-link-event-progress` Workflow registration against the selected API deployment, records the returned Workflow version, and recreates terminated instances with the same IDs and payloads. Without a saved confirmed response, it registers again; an inventory difference never proves registration ownership. Each replacement must use that version and preserve its scheduled sleep before events resume. This targeted registration is necessary because Workflow versions are independent of API HTTP promotion; do not redeploy unrelated triggers or withdrawal Workflows.
+
+Before activation, `--abort --directory /private/receipt-evidence` restores the prior API deployment, required scheduled Workflows, and prior event gate. A completed abort closes that evidence directory to further migration operations; begin another attempt in a fresh directory. Repeating `--abort` remains safe. After activation, rollback to a legacy receipt writer is forbidden; repair forward with D1 receipt support. An uncertain provider response requires readback before another state change.
+
+Run the authenticated read-only API smoke with the prepared session and current/ended-event fixture:
+
+```sh
+npm run smoke:api -- --base-url https://api.mons.link --read-only --auth-token-fixture /private/receipt-evidence/api-smoke-auth.json --smoke-profile-fixture /private/receipt-evidence/api-smoke-profile.json --require-events
+```
+
+Verify receipt coverage and Workflow schedules, and record the final deployment and gate states. A replacement instance may report `running` while its only step is an unfinished future scheduled sleep; that exact step evidence is sufficient. Deletion and startup visibility receive bounded immediate readback attempts. If the operator reports pending propagation, retry the same `--resume` with its saved evidence; do not reset a created replacement or add an observation window. Do not create public test events or send announcements for verification. Retain the Firebase originals and protected migration evidence.
+
 ## Event D1 operations
 
 `mons-link-events` owns event data and coordination. Its control supports `d1` and `frozen`:
@@ -467,7 +519,7 @@ npx wrangler d1 migrations apply mons-link-events --remote --config cloud/worker
 npm run manage:events -- --recover-stale-admission <admission-id>
 ```
 
-Recover only a named expired admission after confirming its request finished. Never bulk-delete admissions. Pending transitions retry while preserving their fences; fix the implementation or unavailable dependency forward, and do not detach, delete, or dead-letter the intent. Successful transition receipts are immutable coordination evidence in `eventTransitionReceipts`; there is no scheduled receipt deletion. Do not restore `EVENT_DB` alone because event state and RTDB gameplay effects must remain consistent.
+Recover only a named expired admission after confirming its request finished. Never bulk-delete admissions. Pending transitions retry while preserving their fences; fix the implementation or unavailable dependency forward, and do not detach, delete, or dead-letter the intent. Successful transition receipts are immutable coordination evidence in `PROFILE_GAMES_DB.event_transition_receipts`; there is no scheduled receipt deletion. Do not restore `EVENT_DB` alone because event state, gameplay D1 receipts, and RTDB match effects must remain consistent.
 
 Validate current and ended events through the authenticated `--require-events` smoke. Its profile fixture includes `"events":{"currentId":"<scheduled-or-active-event-id>","endedId":"<ended-prize-event-id>","selectionPrizeId":"<selected-prize-id>","assignedPrizeId":"<assigned-prize-id>"}`. Use a visible, unwithdrawn assignment owned by that profile; add `selectionEventId` if the selection belongs to a different event. After verification, resume events and dependent stores, resume only Queues paused for maintenance, and repeat production smokes:
 

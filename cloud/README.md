@@ -91,7 +91,11 @@ npm run manage:events -- --resume-d1
 npm run manage:events -- --recover-stale-admission <admission-id>
 ```
 
-Freeze withdrawals and canonical-profile writes before maintenance that touches event state and its dependent effects. Wait for active requests and leases to drain. Status reports D1 leases, admissions and pending transitions. Recover only an expired admission whose request has finished. Pending transitions remain fenced and retry automatically; repair their underlying implementation or dependency failure while frozen. Successful `eventTransitionReceipts` are live coordination evidence and remain immutable.
+Freeze withdrawals and canonical-profile writes before maintenance that touches event state and its dependent effects. Wait for active requests and leases to drain. Status reports D1 leases, admissions and pending transitions. Recover only an expired admission whose request has finished. Pending transitions remain fenced and retry automatically; repair their underlying implementation or dependency failure while frozen.
+
+`mons-link-profile-games.event_transition_receipts` owns immutable acknowledgments of event effects applied to Firebase matches. These are distinct from `invite_event_effect_receipts`, which commits atomically with invite metadata and login-match discovery. Receipt recovery preserves transition payloads, match creation markers, and terminal timer effects. Historical V1 receipts are retained as evidence; the Worker executes only V2 transitions and never reads or writes the retained Firebase `eventTransitionReceipts` root.
+
+The [receipt migration procedure](../scripts/deploy-cloudflare.md#event-transition-receipt-d1-cutover) uses `npm run manage:event-transition-receipts` to export, import, verify, and activate receipt authority. It freezes event writes only, preserves scheduled Workflow identities and payloads, and leaves manual gameplay, unrelated writer gates, and Queue delivery running. Activation permanently rejects legacy receipt writers; afterward, repairs must retain D1 receipt support.
 
 ## Auth maintenance and recovery
 

@@ -1927,6 +1927,7 @@ export {
   exportedPages,
   createSqlDependencies,
   createProductionDependencies,
+  resolveCloudflareToken,
   manageInviteSource,
   type Arguments,
   type Control,

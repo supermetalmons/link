@@ -42,6 +42,25 @@ test("canonical D1 modules have no direct Firestore runtime dependency", () => {
 const repositoryRoot = resolve(import.meta.dirname, "../../../..");
 const runtimeExtensions = [".ts", ".tsx", ".js", ".mjs", ".cjs"];
 
+test("event transition receipts cannot restore Firebase runtime access", () => {
+  const sourcePaths = reachableRuntimeFiles(
+    resolve(import.meta.dirname, "../src/index.ts"),
+  );
+  const violations = sourcePaths
+    .filter((path) =>
+      /eventTransitionReceipts\/|\b(?:ensureIntentEffects|transitionReceiptPath)\b/.test(
+        readFileSync(path, "utf8"),
+      ),
+    )
+    .map((path) => relative(repositoryRoot, path));
+  assert.deepEqual(violations, []);
+  const source = readFileSync(
+    resolve(import.meta.dirname, "../src/eventTransitionReceiptsD1.ts"),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /firebaseRtdb|createGoogleAccessToken|\bfetch\(/);
+});
+
 test("Worker ownership ignores Firebase profile claims and RTDB profile shadows", () => {
   const sourcePaths = reachableRuntimeFiles(
     resolve(import.meta.dirname, "../src/index.ts"),

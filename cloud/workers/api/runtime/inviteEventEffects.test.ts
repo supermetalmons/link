@@ -16,6 +16,11 @@ import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
 import { createInviteSourceD1Store } from "../src/inviteSourceD1.ts";
 import { prepareInviteEventIntent } from "../src/inviteEventEffects.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
+import { resetEventReceiptTestState } from "./eventTransitionTestFixture.ts";
+import {
+  ensureEventTransitionReceipt,
+  readEventTransitionReceipt,
+} from "../src/eventTransitionReceiptsD1.ts";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
@@ -71,7 +76,7 @@ function matchEffects(id = inviteId) {
   };
 }
 
-function fixture() {
+function fixture(profileGamesDb = testEnv.PROFILE_GAMES_DB) {
   const values = new Map<string, unknown>();
   const writes: string[] = [];
   const reads: string[] = [];
@@ -83,12 +88,14 @@ function fixture() {
   const raw: FirebaseRtdbClient = {
     async getPath(path) {
       expect(path.startsWith("invites/")).toBe(false);
+      expect(path.startsWith("eventTransitionReceipts/")).toBe(false);
       reads.push(path);
       return structuredClone(values.get(path) ?? null);
     },
     async patchRoot(updates) {
       for (const [path, value] of Object.entries(updates)) {
         expect(path.startsWith("invites/")).toBe(false);
+        expect(path.startsWith("eventTransitionReceipts/")).toBe(false);
         expect(/^players\/[^/]+\/matches\/[^/]+$/.test(path)).toBe(false);
         writes.push(path);
         if (value === null) values.delete(path);
@@ -98,6 +105,7 @@ function fixture() {
     async transactPath(path, updater, signal, beforeWrite) {
       signal?.throwIfAborted();
       expect(path.startsWith("invites/")).toBe(false);
+      expect(path.startsWith("eventTransitionReceipts/")).toBe(false);
       if (hooks.failBeforePath === path) {
         hooks.failBeforePath = undefined;
         throw new Error("rtdb-before-create");
@@ -127,7 +135,7 @@ function fixture() {
       };
     },
   };
-  const source = createInviteSourceD1Store(testEnv.PROFILE_GAMES_DB);
+  const source = createInviteSourceD1Store(profileGamesDb);
   const base: FirebaseRtdbClient = {
     getPath: (path, query, signal) =>
       path.startsWith("invites/")
@@ -140,7 +148,8 @@ function fixture() {
       throw new Error("event-effects-escaped-to-session-coordinator");
     },
   };
-  const client = createEventRtdbClient(testEnv, base, raw);
+  const fixtureEnv = { ...testEnv, PROFILE_GAMES_DB: profileGamesDb };
+  const client = createEventRtdbClient(fixtureEnv, base, raw);
   return {
     values,
     writes,
@@ -157,13 +166,7 @@ function fixture() {
         ...matchEffects(),
         ...extra,
       }),
-    recover: () =>
-      recoverEventTransitionIntents(
-        testEnv,
-        { getRtdbPath: base.getPath, patchRtdbRoot: base.patchRoot },
-        100,
-        raw,
-      ),
+    recover: () => recoverEventTransitionIntents(fixtureEnv, 100, raw),
   };
 }
 
@@ -172,6 +175,7 @@ async function count(table: string) {
     ![
       "invite_sources",
       "invite_event_effect_receipts",
+      "event_transition_receipts",
       "login_match_discovery",
       "invite_source_write_admissions",
     ].includes(table)
@@ -226,6 +230,10 @@ describe("event transitions with canonical D1 invitation metadata", () => {
       testEnv.EVENT_DB.prepare("DELETE FROM event_write_admissions"),
       testEnv.EVENT_DB.prepare("DELETE FROM event_records"),
     ]);
+    await resetEventReceiptTestState(
+      testEnv.PROFILE_GAMES_DB,
+      testEnv.TEST_D1_MIGRATIONS,
+    );
   });
 
   it("atomically publishes every event invite and discovery row after proving its two live matches", async () => {
@@ -234,6 +242,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     await f.start(matchEffects("third-place-invite"));
     expect(await count("invite_sources")).toBe(2);
     expect(await count("invite_event_effect_receipts")).toBe(1);
+    expect(await count("event_transition_receipts")).toBe(1);
     expect(await count("login_match_discovery")).toBe(4);
     expect(await count("invite_source_write_admissions")).toBe(0);
     expect((await f.source.read(inviteId)).value).toEqual(
@@ -252,21 +261,25 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     );
   });
 
-  for (const failure of ["before-guest", "after-host", "after-receipt"]) {
+  for (const failure of [
+    "before-guest",
+    "after-host",
+    "before-receipt",
+    "after-receipt",
+  ]) {
     it(`recovers ${failure} without resetting advanced matches or replacing the prepared payload`, async () => {
       const f = fixture();
       await f.create();
       if (failure === "before-guest") f.hooks.failBeforePath = guestPath;
       if (failure === "after-host") f.hooks.failAfterPath = hostPath;
-      if (failure === "after-receipt") {
-        f.hooks.afterWrite = async (path) => {
-          if (path.startsWith("eventTransitionReceipts/")) {
-            f.hooks.afterWrite = undefined;
-            throw new Error("rtdb-ambiguous-receipt");
-          }
-        };
+      if (failure === "before-receipt" || failure === "after-receipt") {
+        await testEnv.PROFILE_GAMES_DB.prepare(
+          `CREATE TRIGGER reject_receipt_checkpoint
+           BEFORE INSERT ON ${failure === "before-receipt" ? "event_transition_receipts" : "invite_event_effect_receipts"}
+           BEGIN SELECT RAISE(ABORT, 'receipt-checkpoint'); END`,
+        ).run();
       }
-      await expect(f.start()).rejects.toThrow(/rtdb-/);
+      await expect(f.start()).rejects.toThrow(/rtdb-|receipt-checkpoint/);
       const [pending] = await listPendingEventTransitionIntents(
         testEnv.EVENT_DB,
       );
@@ -281,6 +294,12 @@ describe("event transitions with canonical D1 invitation metadata", () => {
       });
       expect(await count("invite_sources")).toBe(0);
       expect(await count("invite_event_effect_receipts")).toBe(0);
+      expect(await count("event_transition_receipts")).toBe(
+        failure === "after-receipt" ? 1 : 0,
+      );
+      await testEnv.PROFILE_GAMES_DB.prepare(
+        "DROP TRIGGER IF EXISTS reject_receipt_checkpoint",
+      ).run();
       expect(await f.recover()).toBe(1);
       expect(f.values.get(hostPath)).toMatchObject({
         fen: "advanced",
@@ -340,6 +359,120 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
       event: { status: "active" },
       revision: 2,
+    });
+  });
+
+  it("confirms an ambiguous D1 receipt insert without replaying live effects", async () => {
+    let lostReceiptResponse = false;
+    const database = new Proxy(testEnv.PROFILE_GAMES_DB, {
+      get(target, property) {
+        if (property === "batch") {
+          return async (statements: D1PreparedStatement[]) => {
+            const result = await target.batch(statements);
+            if (
+              !lostReceiptResponse &&
+              (await count("event_transition_receipts")) === 1
+            ) {
+              lostReceiptResponse = true;
+              throw new Error("d1-receipt-response-lost");
+            }
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const f = fixture(database);
+    await f.create();
+    await f.start();
+    expect(lostReceiptResponse).toBe(true);
+    expect(f.writes).toEqual([hostPath, guestPath]);
+    expect(await count("event_transition_receipts")).toBe(1);
+    expect(await count("invite_event_effect_receipts")).toBe(1);
+    expect(await f.recover()).toBe(0);
+  });
+
+  it("preserves terminal timers and later claim state after durable receipt confirmation", async () => {
+    const f = fixture();
+    await f.create();
+    const timerPath = "players/host/matches/older-match/timer";
+    const claimPath = "matchTimerClaims/older-match";
+    const startPath = "matchTimerStarts/host/older-match";
+    f.values.set(startPath, { pending: true });
+    await testEnv.PROFILE_GAMES_DB.prepare(
+      `CREATE TRIGGER reject_event_source_discovery
+       BEFORE INSERT ON login_match_discovery
+       BEGIN SELECT RAISE(ABORT, 'event-source-discovery-failed'); END`,
+    ).run();
+    await expect(
+      f.start({
+        [timerPath]: "gg",
+        [claimPath]: { status: "claimed", claimedAtMs: 100 },
+        [startPath]: null,
+      }),
+    ).rejects.toThrow("event-source-discovery-failed");
+    expect(await count("event_transition_receipts")).toBe(1);
+    expect(f.values.get(timerPath)).toBe("gg");
+    const laterClaim = { status: "claimed", claimedAtMs: 300, processed: true };
+    f.values.set(claimPath, laterClaim);
+    f.values.set(startPath, { nextGeneration: true });
+    const writes = f.writes.length;
+    await testEnv.PROFILE_GAMES_DB.prepare(
+      "DROP TRIGGER reject_event_source_discovery",
+    ).run();
+    await f.recover();
+    expect(f.writes).toHaveLength(writes);
+    expect(f.values.get(timerPath)).toBe("gg");
+    expect(f.values.get(claimPath)).toEqual(laterClaim);
+    expect(f.values.get(startPath)).toEqual({ nextGeneration: true });
+  });
+
+  it("fails before live writes when receipt authority is inactive or its table is unavailable", async () => {
+    const f = fixture();
+    await f.create();
+    await resetEventReceiptTestState(
+      testEnv.PROFILE_GAMES_DB,
+      testEnv.TEST_D1_MIGRATIONS,
+      false,
+    );
+    await expect(f.start()).rejects.toThrow();
+    expect(f.writes).toEqual([]);
+    await resetEventReceiptTestState(
+      testEnv.PROFILE_GAMES_DB,
+      testEnv.TEST_D1_MIGRATIONS,
+    );
+    await testEnv.PROFILE_GAMES_DB.prepare(
+      "DROP TABLE event_transition_receipts",
+    ).run();
+    await expect(f.recover()).rejects.toThrow(
+      "event-transition-recovery-failed",
+    );
+    expect(f.writes).toEqual([]);
+    expect(f.reads).toEqual([]);
+    expect(await count("invite_sources")).toBe(0);
+  });
+
+  it("requires exact RTDB-effect proof even when the final invite receipt exists", async () => {
+    const f = fixture();
+    await f.create();
+    f.hooks.failBeforePath = guestPath;
+    await expect(f.start()).rejects.toThrow("rtdb-before-create");
+    const [pending] = await listPendingEventTransitionIntents(testEnv.EVENT_DB);
+    if (pending.schemaVersion !== 2) throw new Error("missing-v2-intent");
+    await testEnv.PROFILE_GAMES_DB.prepare(
+      `INSERT INTO invite_event_effect_receipts
+       (transition_id, event_id, payload_digest, applied_at_ms) VALUES (?, ?, ?, ?)`,
+    )
+      .bind(pending.transitionId, eventId, pending.payloadDigest, 100)
+      .run();
+    await expect(f.recover()).rejects.toThrow(
+      "event-transition-recovery-failed",
+    );
+    expect(f.writes).toEqual([hostPath]);
+    expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
+      event: { status: "scheduled" },
+      revision: 1,
     });
   });
 
@@ -408,22 +541,36 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     expect(await count("invite_sources")).toBe(1);
   });
 
-  it("fails closed on a conflicting immutable RTDB effect receipt", async () => {
+  it("fails closed on a conflicting immutable D1 effect receipt", async () => {
     const f = fixture();
     await f.create();
     f.hooks.failBeforePath = guestPath;
     await expect(f.start()).rejects.toThrow("rtdb-before-create");
     const [pending] = await listPendingEventTransitionIntents(testEnv.EVENT_DB);
-    const receiptPath = `eventTransitionReceipts/${pending.transitionId}`;
-    f.values.set(receiptPath, { schemaVersion: 2, payloadDigest: "conflict" });
+    if (pending.schemaVersion !== 2) throw new Error("missing-v2-intent");
+    await ensureEventTransitionReceipt(
+      testEnv.PROFILE_GAMES_DB,
+      {
+        schemaVersion: 2,
+        transitionId: pending.transitionId,
+        eventId: pending.eventId,
+        expectedRevision: pending.expectedRevision,
+        payloadDigest: "f".repeat(64),
+      },
+      { recordedAtMs: 100, guards: () => [] },
+    );
     await expect(f.recover()).rejects.toThrow(
       "event-transition-recovery-failed",
     );
     expect(f.writes).toEqual([hostPath]);
     expect(await count("invite_sources")).toBe(0);
     expect(await count("invite_event_effect_receipts")).toBe(0);
-    f.values.delete(receiptPath);
-    expect(await f.recover()).toBe(1);
+    expect(
+      await readEventTransitionReceipt(
+        testEnv.PROFILE_GAMES_DB,
+        pending.transitionId,
+      ),
+    ).toMatchObject({ payloadDigest: "f".repeat(64) });
   });
 
   it("rejects v1 effects after activation and malformed v2 persisted intents", async () => {

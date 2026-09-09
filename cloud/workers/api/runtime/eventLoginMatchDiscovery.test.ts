@@ -5,16 +5,17 @@ import {
   captureEventMatchDiscovery,
   eventMatchInviteIds,
 } from "../src/eventLoginMatchDiscovery.ts";
-import {
-  createEventRtdbClient,
-  recoverEventTransitionIntents,
-} from "../src/eventRepository.ts";
+import { createEventRtdbClient } from "../src/eventRepository.ts";
 import { listPendingEventTransitionIntents } from "../src/eventD1.ts";
 import { processEventProfileGameProjection } from "../src/profileGameProjection.ts";
 import { createEventProfileGameProjectionRuntime } from "../src/profileGameProjectionRepository.ts";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+import {
+  eventTransitionFixture,
+  resetEventReceiptTestState,
+} from "./eventTransitionTestFixture.ts";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
@@ -137,6 +138,24 @@ describe("event login-match discovery", () => {
     await testEnv.PROFILE_GAMES_DB.prepare(
       "DELETE FROM login_match_discovery",
     ).run();
+    await testEnv.PROFILE_GAMES_DB.batch([
+      testEnv.PROFILE_GAMES_DB.prepare("DELETE FROM invite_sources"),
+      testEnv.PROFILE_GAMES_DB.prepare(
+        "DELETE FROM invite_event_effect_receipts",
+      ),
+      testEnv.PROFILE_GAMES_DB.prepare(
+        "DELETE FROM invite_source_write_admissions",
+      ),
+      testEnv.PROFILE_GAMES_DB.prepare(
+        `UPDATE invite_source_control SET backend = 'd1', state = 'active',
+         epoch = 1, freeze_generation = 1, verified_at_ms = 1,
+         activated_at_ms = 2 WHERE singleton = 1`,
+      ),
+    ]);
+    await resetEventReceiptTestState(
+      testEnv.PROFILE_GAMES_DB,
+      testEnv.TEST_D1_MIGRATIONS,
+    );
     await testEnv.EVENT_DB.batch([
       testEnv.EVENT_DB.prepare(
         "UPDATE event_records SET pending_transition_id = NULL",
@@ -152,8 +171,8 @@ describe("event login-match discovery", () => {
   });
 
   it("keeps the event intent pending when indexing fails after RTDB commit", async () => {
-    const fixture = rtdbFixture();
-    const repository = createEventRtdbClient(testEnv, fixture.client);
+    const fixture = eventTransitionFixture(testEnv);
+    const repository = fixture.client;
     await repository.patchRoot({ [`events/${eventId}`]: eventRecord() });
     await rejectIndexWrites();
     try {
@@ -167,20 +186,15 @@ describe("event login-match discovery", () => {
       expect(
         await listPendingEventTransitionIntents(testEnv.EVENT_DB),
       ).toHaveLength(1);
-      expect(fixture.patches).toHaveLength(1);
+      expect(fixture.writes).toHaveLength(2);
       expect(await indexedRows()).toEqual([]);
     } finally {
       await permitIndexWrites();
     }
     const hostMatchPath = `players/${hostUid}/matches/${inviteId}`;
     fixture.values.set(hostMatchPath, { fen: "advanced" });
-    await expect(
-      recoverEventTransitionIntents(testEnv, {
-        getRtdbPath: fixture.client.getPath,
-        patchRtdbRoot: fixture.client.patchRoot,
-      }),
-    ).resolves.toBe(1);
-    expect(fixture.patches).toHaveLength(1);
+    await expect(fixture.recover()).resolves.toBe(1);
+    expect(fixture.writes).toHaveLength(2);
     expect(fixture.values.get(hostMatchPath)).toEqual({ fen: "advanced" });
     expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual(
       [],

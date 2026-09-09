@@ -107,10 +107,7 @@ export async function handleScheduled(
     authState: () =>
       sweepExpiredAuthState(env.AUTH_STATE_DB, controller.scheduledTime),
     eventProgress: () => sweepEventProgress(env),
-    eventTransitions: () => {
-      const rawRtdbRepository = createGameplayRepository(env);
-      return recoverEventTransitionIntents(env, rawRtdbRepository);
-    },
+    eventTransitions: () => recoverEventTransitionIntents(env),
     gameSessionLocks: async () => {
       try {
         return await createGameSessionMutationLockStore(
