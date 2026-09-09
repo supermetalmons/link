@@ -471,7 +471,7 @@ test("metadata bootstrap preserves linked-login actors and loads existing wagers
   assert.equal(h.instance.activeContext.loginUid, "login");
   assert.equal(h.instance.activeContext.actorUid, "host");
   assert.deepEqual(h.events.wagering[0], wagers);
-  assert.ok(h.events.ui.includes("refresh-claims"));
+  assert.equal(h.events.ui.includes("refresh-claims"), false);
   h.channel().emit(snapshot({ revision: 2, hostRematches: "1" }));
   assert.deepEqual(h.instance.latestInvite.wagers, wagers);
   h.instance.detachFromMatchSession();

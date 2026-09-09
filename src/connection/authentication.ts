@@ -27,6 +27,7 @@ import {
   syncOwnProfileMiningState,
 } from "../services/ownProfileMiningHydration";
 import type { AuthState, AuthStatus } from "./authModels";
+import { ProfileApiError } from "../services/profileApi";
 
 export type { AuthState, AuthStatus } from "./authModels";
 
@@ -143,7 +144,11 @@ export function useAuthStatus() {
     }
     return { authStatus: "unauthenticated", ...EMPTY_AUTH_IDENTITY };
   });
+  const authChangeVersionRef = useRef(0);
   const setAuthStatus = useCallback((nextAuthStatus: AuthStatus) => {
+    if (nextAuthStatus !== "unauthenticated") {
+      authChangeVersionRef.current += 1;
+    }
     const nextIdentity =
       nextAuthStatus === "authenticated"
         ? storage.getAuthIdentity()
@@ -161,7 +166,6 @@ export function useAuthStatus() {
     });
   }, []);
   const authAttemptTimeoutIdsRef = useRef<Set<number>>(new Set());
-  const authChangeVersionRef = useRef(0);
 
   useEffect(() => {
     globalSetAuthStatus = setAuthStatus;
@@ -308,6 +312,26 @@ export function useAuthStatus() {
   useEffect(() => {
     let isCancelled = false;
     const authAttemptTimeoutIds = authAttemptTimeoutIdsRef.current;
+    let retryTimeoutId: number | undefined;
+    let pendingRetry: (() => void) | null = null;
+    let retryDelayMs = 1_000;
+    const clearRetry = () => {
+      window.clearTimeout(retryTimeoutId);
+      retryTimeoutId = undefined;
+      pendingRetry = null;
+    };
+    const retryPending = () => {
+      if (!navigator.onLine || document.visibilityState === "hidden") return;
+      const retry = pendingRetry;
+      clearRetry();
+      retry?.();
+    };
+    const scheduleRetry = (retry: () => void) => {
+      clearRetry();
+      pendingRetry = retry;
+      retryTimeoutId = window.setTimeout(retryPending, retryDelayMs);
+      retryDelayMs = Math.min(retryDelayMs * 2, 30_000);
+    };
     const scheduleDidAttemptAuthentication = () => {
       if (isCancelled) {
         return;
@@ -322,7 +346,8 @@ export function useAuthStatus() {
       }, 23);
       authAttemptTimeoutIds.add(timeoutId);
     };
-    const unsubscribe = connection.subscribeToAuthChanges((uid) => {
+    const restoreAuth = (uid: string | null) => {
+      clearRetry();
       if (isCancelled) {
         return;
       }
@@ -347,8 +372,16 @@ export function useAuthStatus() {
         return;
       }
 
-      connection.refreshTokenIfNeeded();
       const sessionGuard = connection.createSessionGuard();
+      const retryCurrentUser = () => {
+        if (
+          !isCancelled &&
+          isCurrentAuthChange() &&
+          connection.isCurrentAuthUser(uid)
+        ) {
+          restoreAuth(uid);
+        }
+      };
       void (async () => {
         const isStillValid = () =>
           !isCancelled && sessionGuard() && isCurrentAuthChange();
@@ -366,6 +399,7 @@ export function useAuthStatus() {
             : 1;
         let resolvedAura = storage.getPlayerEmojiAura("");
         let isIdentityVerified = false;
+        let shouldRetry = false;
         let didLoadAuthoritativeProfile = false;
         const resetResolvedIdentityToFallback = (
           nextProfileId: string,
@@ -431,22 +465,27 @@ export function useAuthStatus() {
                 return null;
               }
               return authoritativeProfile;
-            } catch {
+            } catch (error) {
               if (!isStillValid()) {
                 return null;
               }
+              shouldRetry =
+                !(error instanceof ProfileApiError) ||
+                ["unavailable", "resource-exhausted", "aborted"].includes(
+                  error.code,
+                );
               return null;
             }
           };
 
         try {
-          const claimSyncResult = await connection.syncProfileClaim();
+          const profileSyncResult = await connection.syncProfile();
           if (!isStillValid()) {
             return;
           }
           const syncedProfileId =
-            typeof claimSyncResult?.profileId === "string"
-              ? claimSyncResult.profileId
+            typeof profileSyncResult?.profileId === "string"
+              ? profileSyncResult.profileId
               : "";
           if (!syncedProfileId) {
             setAuthStatus("unauthenticated");
@@ -475,15 +514,6 @@ export function useAuthStatus() {
           if (authoritativeProfile) {
             isIdentityVerified =
               applyAuthoritativeProfile(authoritativeProfile);
-          } else {
-            const claimedProfileId =
-              await connection.getCurrentProfileClaimId();
-            if (!isStillValid()) {
-              return;
-            }
-            if (claimedProfileId !== "" && claimedProfileId === profileId) {
-              isIdentityVerified = true;
-            }
           }
         }
 
@@ -493,6 +523,7 @@ export function useAuthStatus() {
         if (!isIdentityVerified) {
           setAuthStatus("unauthenticated");
           scheduleDidAttemptAuthentication();
+          if (shouldRetry) scheduleRetry(retryCurrentUser);
           return;
         }
         if (isWatchOnly && !didLoadAuthoritativeProfile) {
@@ -531,10 +562,25 @@ export function useAuthStatus() {
         setupLoggedInPlayerProfile(profile, resolvedLoginUid);
         setAuthStatus("authenticated");
         scheduleDidAttemptAuthentication();
-      })();
+      })().finally(() => {
+        if (!isCancelled && isCurrentAuthChange() && !sessionGuard()) {
+          scheduleRetry(retryCurrentUser);
+        }
+      });
+    };
+    const unsubscribe = connection.subscribeToAuthChanges((uid) => {
+      retryDelayMs = 1_000;
+      restoreAuth(uid);
     });
+    window.addEventListener("online", retryPending);
+    window.addEventListener("pageshow", retryPending);
+    document.addEventListener("visibilitychange", retryPending);
     return () => {
       isCancelled = true;
+      clearRetry();
+      window.removeEventListener("online", retryPending);
+      window.removeEventListener("pageshow", retryPending);
+      document.removeEventListener("visibilitychange", retryPending);
       authChangeVersionRef.current += 1;
       authAttemptTimeoutIds.forEach((timeoutId) => {
         window.clearTimeout(timeoutId);

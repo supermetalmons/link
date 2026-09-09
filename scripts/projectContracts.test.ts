@@ -626,8 +626,20 @@ test("operations documentation describes current releases and D1 maintenance", (
   );
   assert.match(
     cloudReadme,
-    /custom `profileId` claims remain a non-authoritative browser compatibility signal/,
+    /custom `profileId` claims are retired from the browser and Worker runtime/,
   );
+  for (const document of [rootReadme, cloudReadme]) {
+    assert.match(document, /existing stored claims remain untouched/);
+    assert.match(document, /`POST \/auth\/profile\/sync`/);
+    assert.match(
+      document,
+      /`POST \/auth\/profile-claim\/sync` URL remains a compatibility alias/,
+    );
+    assert.doesNotMatch(
+      document,
+      /claims remain a non-authoritative browser compatibility signal|Claim repair validates|cleanup clears the Firebase claim/,
+    );
+  }
   assert.match(
     cloudReadme,
     /RTDB `players\/\{uid\}\/profile` links are retired: runtime code never reads, writes, or deletes them/,
@@ -780,10 +792,14 @@ test("operations documentation describes current releases and D1 maintenance", (
   );
 });
 
-test("profile claim synchronization uses the Worker route", () => {
+test("profile synchronization uses the D1 Worker route and preserves the legacy alias", () => {
   const authApi = readText("src/services/authApi.ts");
+  const authRoutes = readText("cloud/workers/api/src/authRoutes.ts");
 
-  assert.match(authApi, /\/auth\/profile-claim\/sync/);
+  assert.match(authApi, /\/auth\/profile\/sync/);
+  assert.doesNotMatch(authApi, /\/auth\/profile-claim\/sync/);
+  assert.match(authRoutes, /pathname === "\/auth\/profile\/sync"/);
+  assert.match(authRoutes, /pathname === "\/auth\/profile-claim\/sync"/);
 });
 
 test("browser customization and prize selection mutations use Worker routes", () => {

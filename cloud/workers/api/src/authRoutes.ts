@@ -42,10 +42,7 @@ import {
   X_CALLBACK_URI,
   X_FLOW_TTL_MS,
 } from "./xFlow.ts";
-import {
-  syncProfileClaim,
-  type ProfileClaimDependencies,
-} from "./profileClaim.ts";
+import { syncProfile, type ProfileSyncDependencies } from "./profileSync.ts";
 import {
   handleAuthMutation,
   type AuthMutationDependencies,
@@ -61,7 +58,7 @@ const AUTH_TOKEN_PATTERN = /^[A-Za-z0-9_-]{24}$/;
 export type AuthRouteDependencies = {
   logFailure?: (kind: string) => void;
   now?: () => number;
-  profileClaim?: ProfileClaimDependencies;
+  profileSync?: ProfileSyncDependencies;
   randomBytes?: (length: number) => Uint8Array;
   repository?: AuthProfileRepository;
   stateRepository?: AuthStateRepository;
@@ -322,11 +319,14 @@ export async function handleAuthRoute(
         corsHeaders,
       );
     }
-    if (pathname === "/auth/profile-claim/sync") {
+    if (
+      pathname === "/auth/profile/sync" ||
+      pathname === "/auth/profile-claim/sync"
+    ) {
       await enforceAuthRateLimit(env, `auth-profile-claim:${identity.uid}`);
       return authJsonResponse(
-        await syncProfileClaim(identity, env, {
-          ...dependencies.profileClaim,
+        await syncProfile(identity, env, {
+          ...dependencies.profileSync,
           repository,
         }),
         200,

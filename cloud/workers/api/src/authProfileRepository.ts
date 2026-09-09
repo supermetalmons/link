@@ -6,10 +6,7 @@ import { readStableCanonicalProfileAggregateByLogin } from "./profileCanonicalD1
 
 export type AuthProfileRepository = {
   getLinkedAuthMethods: (uid: string) => Promise<LinkedAuthMethodsResponse>;
-  getProfileClaimSource: (uid: string) => Promise<ProfileClaimSource>;
 };
-
-export type ProfileClaimSource = LinkedAuthMethodsResponse;
 
 export class AuthProfileRepositoryFailure extends Error {
   constructor() {
@@ -61,7 +58,6 @@ function createCanonicalAuthProfileRepository(
   };
   return {
     getLinkedAuthMethods: (uid) => linkedMethodsResponse(uid),
-    getProfileClaimSource: (uid) => linkedMethodsResponse(uid),
   };
 }
 

@@ -12,6 +12,7 @@ import type {
 } from "../src/authStateD1.ts";
 import { AuthStateFailure } from "../src/authStateD1.ts";
 import { handleAuthRoute } from "../src/authRoutes.ts";
+import { AUTH_PATHS } from "../src/authHttp.ts";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
@@ -54,12 +55,6 @@ function repository(
 ): AuthProfileRepository {
   return {
     getLinkedAuthMethods: async () => ({
-      ok: true,
-      profileId: null,
-      linkedMethods: { apple: false, eth: false, sol: false, x: false },
-      appleLinked: false,
-    }),
-    getProfileClaimSource: async () => ({
       ok: true,
       profileId: null,
       linkedMethods: { apple: false, eth: false, sol: false, x: false },
@@ -229,6 +224,7 @@ test("profile control blocks POST auth work while preserving reads", async () =>
     "/auth/methods/eth/verify",
     "/auth/methods/sol/verify",
     "/auth/methods/unlink",
+    "/auth/profile/sync",
     "/auth/profile-claim/sync",
     "/auth/x/flows",
     "/auth/x/flows/complete",
@@ -449,17 +445,107 @@ test("returns linked methods using the verified UID", async () => {
   });
 });
 
-test("synchronizes the profile claim through the authenticated POST route", async () => {
-  const calls: string[] = [];
-  const response = await handleAuthRoute(
-    request("/auth/profile-claim/sync", "POST", {}),
-    env,
-    ctx,
-    {
+for (const syncPath of ["/auth/profile/sync", "/auth/profile-claim/sync"]) {
+  test(`requires authentication and active auth mutations for ${syncPath}`, async () => {
+    assert.ok(AUTH_PATHS.has(syncPath));
+    let reads = 0;
+    const dependencies = {
       repository: repository({
-        getProfileClaimSource: async (uid) => {
-          calls.push(uid);
-          return {
+        getLinkedAuthMethods: async () => {
+          reads++;
+          throw new Error("unexpected-profile-read");
+        },
+      }),
+      verifyIdentity: async () => {
+        throw new AuthApiFailure(
+          401,
+          "unauthenticated",
+          "authentication-required",
+        );
+      },
+    };
+    const unauthenticated = await handleAuthRoute(
+      request(syncPath, "POST", {}),
+      env,
+      ctx,
+      dependencies,
+    );
+    assert.equal(unauthenticated.status, 401);
+    const disabled = await handleAuthRoute(
+      request(syncPath, "POST", {}),
+      new Proxy(env, {
+        get(target, property, receiver) {
+          return property === "AUTH_MUTATIONS_DISABLED"
+            ? "true"
+            : Reflect.get(target, property, receiver);
+        },
+      }),
+      ctx,
+      { ...dependencies, verifyIdentity },
+    );
+    assert.equal(disabled.status, 409);
+    assert.equal(
+      (await responseJson(disabled)).message,
+      "auth-mutations-disabled",
+    );
+    assert.equal(reads, 0);
+  });
+
+  test(`returns nullable canonical ownership through ${syncPath}`, async () => {
+    const response = await handleAuthRoute(
+      request(syncPath, "POST", {}),
+      env,
+      ctx,
+      {
+        repository: repository(),
+        profileSync: {
+          catchupStore: {
+            read: async () => null,
+            settleMissing: async () => false,
+          },
+        },
+        verifyIdentity,
+      },
+    );
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("Cache-Control"), "no-store");
+    assert.equal(
+      response.headers.get("Access-Control-Allow-Origin"),
+      "https://mons.link",
+    );
+    assert.deepEqual(await responseJson(response), {
+      ok: true,
+      profileId: null,
+      linkedMethods: { apple: false, eth: false, sol: false, x: false },
+      appleLinked: false,
+    });
+  });
+
+  test(`synchronizes canonical profile state through ${syncPath}`, async () => {
+    const calls: string[] = [];
+    const response = await handleAuthRoute(
+      request(syncPath, "POST", {}),
+      env,
+      ctx,
+      {
+        repository: repository({
+          getLinkedAuthMethods: async (uid) => {
+            calls.push(uid);
+            return {
+              ok: true,
+              profileId: "profile-1",
+              linkedMethods: {
+                apple: true,
+                eth: false,
+                sol: true,
+                x: false,
+              },
+              appleLinked: true,
+            };
+          },
+        }),
+        profileSync: {
+          syncCurrentCallerProfile: async () => ({
             ok: true,
             profileId: "profile-1",
             linkedMethods: {
@@ -469,122 +555,102 @@ test("synchronizes the profile claim through the authenticated POST route", asyn
               x: false,
             },
             appleLinked: true,
-          };
-        },
-      }),
-      profileClaim: {
-        syncCurrentCallerProfile: async () => ({
-          ok: true,
-          profileId: "profile-1",
-          linkedMethods: {
-            apple: true,
-            eth: false,
-            sol: true,
-            x: false,
-          },
-          appleLinked: true,
-        }),
-        authClient: {
-          getUser: async (uid) => ({
-            uid,
-            customClaims: { profileId: "profile-1" },
           }),
-          setCustomUserClaims: async () => undefined,
         },
+        verifyIdentity,
       },
-      verifyIdentity,
-    },
-  );
-  assert.equal(response.status, 200);
-  assert.deepEqual(calls, ["firebase-uid", "firebase-uid"]);
-  assert.deepEqual(await responseJson(response), {
-    ok: true,
-    profileId: "profile-1",
-    linkedMethods: { apple: true, eth: false, sol: true, x: false },
-    appleLinked: true,
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, ["firebase-uid", "firebase-uid"]);
+    assert.deepEqual(await responseJson(response), {
+      ok: true,
+      profileId: "profile-1",
+      linkedMethods: { apple: true, eth: false, sol: true, x: false },
+      appleLinked: true,
+    });
+
+    const rejectedMethod = await handleAuthRoute(
+      request(syncPath, "GET"),
+      env,
+      ctx,
+      { repository: repository(), verifyIdentity },
+    );
+    assert.equal(rejectedMethod.status, 405);
   });
 
-  const rejectedMethod = await handleAuthRoute(
-    request("/auth/profile-claim/sync", "GET"),
-    env,
-    ctx,
-    { repository: repository(), verifyIdentity },
-  );
-  assert.equal(rejectedMethod.status, 405);
-});
-
-test("sanitizes profile-claim reconciliation failures", async () => {
-  const logs: string[] = [];
-  const response = await handleAuthRoute(
-    request("/auth/profile-claim/sync", "POST", {}),
-    env,
-    ctx,
-    {
-      logFailure: (kind) => logs.push(kind),
-      repository: repository({
-        getProfileClaimSource: async () => ({
-          ok: true,
-          profileId: "profile-1",
-          linkedMethods: { apple: false, eth: false, sol: true, x: false },
-          appleLinked: false,
-        }),
-      }),
-      profileClaim: {
-        syncCurrentCallerProfile: async () => {
-          throw new Error("private-auth-response");
-        },
-      },
-      verifyIdentity,
-    },
-  );
-  assert.equal(response.status, 503);
-  assert.deepEqual(logs, ["auth-service-unavailable"]);
-  assert.deepEqual(await responseJson(response), {
-    ok: false,
-    error: "unavailable",
-    message: "auth-service-unavailable",
-  });
-});
-
-test("rate limits profile-claim synchronization before repository work", async () => {
-  const keys: string[] = [];
-  let profileReads = 0;
-  const response = await handleAuthRoute(
-    request("/auth/profile-claim/sync", "POST", {}),
-    {
-      ...env,
-      AUTH_RATE_LIMITER: {
-        limit: async ({ key }: RateLimitOptions) => {
-          keys.push(key);
-          return { success: false };
-        },
-      },
-    } as Env,
-    ctx,
-    {
-      repository: repository({
-        getProfileClaimSource: async () => {
-          profileReads++;
-          return {
+  test(`sanitizes reconciliation failures through ${syncPath}`, async () => {
+    const logs: string[] = [];
+    const response = await handleAuthRoute(
+      request(syncPath, "POST", {}),
+      env,
+      ctx,
+      {
+        logFailure: (kind) => logs.push(kind),
+        repository: repository({
+          getLinkedAuthMethods: async () => ({
             ok: true,
-            profileId: null,
-            linkedMethods: {
-              apple: false,
-              eth: false,
-              sol: false,
-              x: false,
-            },
+            profileId: "profile-1",
+            linkedMethods: { apple: false, eth: false, sol: true, x: false },
             appleLinked: false,
-          };
+          }),
+        }),
+        profileSync: {
+          syncCurrentCallerProfile: async () => {
+            throw new Error("private-auth-response");
+          },
         },
-      }),
-      verifyIdentity,
-    },
-  );
-  assert.equal(response.status, 429);
-  assert.deepEqual(keys, ["auth-profile-claim:firebase-uid"]);
-  assert.equal(profileReads, 0);
-});
+        verifyIdentity,
+      },
+    );
+    assert.equal(response.status, 503);
+    assert.deepEqual(logs, ["auth-service-unavailable"]);
+    assert.deepEqual(await responseJson(response), {
+      ok: false,
+      error: "unavailable",
+      message: "auth-service-unavailable",
+    });
+  });
+
+  test(`rate limits ${syncPath} before repository work`, async () => {
+    const keys: string[] = [];
+    let profileReads = 0;
+    const response = await handleAuthRoute(
+      request(syncPath, "POST", {}),
+      {
+        ...env,
+        AUTH_RATE_LIMITER: {
+          limit: async ({ key }: RateLimitOptions) => {
+            keys.push(key);
+            return { success: false };
+          },
+        },
+      } as Env,
+      ctx,
+      {
+        repository: repository({
+          getLinkedAuthMethods: async () => {
+            profileReads++;
+            return {
+              ok: true,
+              profileId: null,
+              linkedMethods: {
+                apple: false,
+                eth: false,
+                sol: false,
+                x: false,
+              },
+              appleLinked: false,
+            };
+          },
+        }),
+        verifyIdentity,
+      },
+    );
+    assert.equal(response.status, 429);
+    assert.deepEqual(keys, ["auth-profile-claim:firebase-uid"]);
+    assert.equal(profileReads, 0);
+  });
+}
 
 test("creates an exact X flow with bounded intent and PKCE state", async () => {
   const created: XRedirectFlowDocument[] = [];

@@ -19,7 +19,7 @@ Deploy only affected Workers. Shared prize-catalog changes need both the API and
 - `wrangler.jsonc` owns the frontend Worker configuration.
 - `cloud/workers/api/wrangler.jsonc` owns the API Worker routes, variables, bindings, Durable Object class exports, Queues, Workflows, consumers, and Cron schedule.
 - The migration directories under `cloud/workers/api/` own the six D1 schemas.
-- `PROFILE_DB.profile_login_owners` is authoritative for Worker login UID to canonical profile ownership. Firebase custom claims remain a non-authoritative browser compatibility signal. RTDB profile links are retained historical records with no runtime reads, writes, or cleanup.
+- `PROFILE_DB.profile_login_owners` is authoritative for Worker login UID to canonical profile ownership. Firebase `profileId` claims are no longer read or mirrored by runtime code; existing stored claims remain untouched. RTDB profile links are retained historical records with no runtime reads, writes, or cleanup.
 - `cloud/workers/api/release.env` stays empty so release commands never load developer environment files.
 - Encrypted secrets stay in Cloudflare; required names are declared in the API Wrangler configuration.
 - `EVENT_DB` owns event records, participants, prize selections, visible assigned prizes, progress markers, and event-specific projection state. Active match synchronization remains in RTDB. `PROFILE_GAMES_DB.invite_sources` owns invite metadata after the one-way invite-source activation.
@@ -59,6 +59,18 @@ Production API `workers_dev` and `preview_urls` remain disabled. [Workers implem
 Keep existing request, connection, and smoke-command timeouts that detect stalled checks; do not wrap the release or promotion-and-verification sequence in an additional overall deadline. A check timeout means that check is incomplete, not that the release has run out of time. Resolve uncertain outcomes and retry relevant checks as needed. Once the smoke and affected-feature check pass, record the deployed IDs and finish. Existing sampled logs and recovery jobs continue normally. Investigate concrete failures; apply only the maintenance controls that the failure requires.
 
 `upload:api` sends no production traffic. `promote:api` requires an explicit Version ID and routes 100% of traffic to it. Trigger application is a separate operation for reviewed configuration changes.
+
+## Firebase profile-claim mirroring retirement
+
+Frontend follow-up `b2239c52-b9b7-4bd5-bc97-c214e662e9e7` retries temporary profile-restoration failures with backoff capped at 30 seconds and immediate reconnect/visible-page wakeups. Retries pause while offline or hidden, stop for authoritative absence, and cannot overwrite a newer sign-in. All 565 client tests passed. Isolated production browser checks simulated sync and profile-lookup outages and verified automatic recovery in the same document through both timer and reconnect paths, without new Firebase Auth requests. Live assets matched the candidate; the API version remained unchanged. Evidence is retained in `/private/tmp/mons-auth-retry-HqIsnu`.
+
+Released on September 9, 2026 with API version `433dbdab-a6c8-4144-acfc-72becb5bcfc0` and frontend version `7e533a66-1a20-4d96-8054-d36c2058b257`, each serving 100% of traffic. The complete validation gate passed 2,797 tests. Production API checks verified both sync URLs repeatedly, authentication requirements, unchanged stored Firebase claims, and completed catch-up jobs remaining absent. Isolated browser checks verified canonical sign-in restoration, reload, and cross-login invite entry with the correct actor and role, without legacy sync calls, claim-specific token refreshes, fixture mutations, or browser errors. Production HTML and application bundles matched the uploaded frontend candidate. Evidence is retained in `/private/tmp/mons-claim-retirement-HnncXT`.
+
+Canonical profile synchronization uses `POST /auth/profile/sync`; `POST /auth/profile-claim/sync` remains a compatibility alias with the same response, authentication, maintenance gates, and rate-limit bucket. Both routes read canonical D1 ownership and preserve profile repair, username assignment, recovery barriers, and dispatch of existing profile-link catch-up jobs. Runtime code no longer reads, creates, updates, or deletes Firebase `profileId` claims. Existing stored claims remain untouched; Firebase anonymous sessions and normal token refresh continue.
+
+Prepare both candidates and the complete validation gate before promotion. Verify existing protected authentication fixtures, record their canonical ownership and catch-up progress, and record the current Worker versions. Promote the API first, run the standard API smoke, and exercise both sync routes repeatedly. Verify canonical responses, preserved catch-up request IDs/cursors, completed jobs remaining absent, and unchanged Firebase claims. Promote the prepared frontend version, then verify sign-in restoration, reload, and cross-login invite entry without claim-specific token refreshes. Keep the new API route available for the updated frontend.
+
+This is a routine compatible code release. No account sweep, D1 migration, Firebase rules change, secret deletion, trigger update, write freeze, or Queue pause is required. Preserve retained Firebase records and normal scheduled recovery. Finish after the required API and browser checks pass; record the deployed versions and evidence location below.
 
 ## Firebase profile-link retirement
 

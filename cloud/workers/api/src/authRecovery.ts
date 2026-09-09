@@ -6,10 +6,6 @@ import {
 import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
 import { MAX_PROFILE_MERGE_TARGET_HOPS } from "../../../functions/profileMergeTargets.js";
 import {
-  type FirebaseAuthAdminClient,
-  createFirebaseAuthAdminClient,
-} from "./firebaseAuthAdmin.ts";
-import {
   type FirebaseRtdbClient,
   createFirebaseRtdbClient,
 } from "./firebaseRtdb.ts";
@@ -49,7 +45,7 @@ export const MERGE_GAME_FINALIZE_DELAY_MS = 60 * 1_000;
 export const MERGE_PRIZE_RECOVERY_PAGE_SIZE = 20;
 const RETRY_DELAY_SECONDS = 60;
 const STALE_ENQUEUE_MS = 2 * 60 * 60 * 1_000;
-const CLAIM_PAGE_SIZE = 20;
+const LOGIN_RECOVERY_PAGE_SIZE = 20;
 const AUTH_RECOVERY_EVENT_PRIZE_OWNER_UID = "auth-recovery-worker";
 const AUTH_RECOVERY_PRIZE_OPERATION_TIMEOUT_MS = 20_000;
 
@@ -73,7 +69,6 @@ export type AuthRecoveryJob = {
 };
 
 type AuthRecoveryDependencies = {
-  authClient?: FirebaseAuthAdminClient;
   catchupStore?: ProfileLinkCatchupStore;
   buildPrizeCopy?: typeof buildPrizeCopy;
   d1?: D1Database;
@@ -149,11 +144,10 @@ export async function enqueueAuthRecovery(
   );
 }
 
-export async function ensureFirebaseProfileClaim(
+export async function dispatchProfileLinkCatchupForOwner(
   uid: string,
   profileId: string,
   dependencies: {
-    authClient: FirebaseAuthAdminClient;
     catchupStore: Pick<ProfileLinkCatchupStore, "readForOwner">;
     enqueueProfileLinkProjection?: (
       task: ProfileLinkProfileGameProjectionTask,
@@ -165,13 +159,6 @@ export async function ensureFirebaseProfileClaim(
     throw new TypeError("invalid-firebase-uid");
   }
   const catchup = await dependencies.catchupStore.readForOwner(uid, profileId);
-  const user = await dependencies.authClient.getUser(uid);
-  if (cleanString(user.customClaims.profileId) !== profileId) {
-    await dependencies.authClient.setCustomUserClaims(uid, {
-      ...user.customClaims,
-      profileId,
-    });
-  }
   if (catchup && dependencies.enqueueProfileLinkProjection) {
     try {
       await dependencies.enqueueProfileLinkProjection({
@@ -357,9 +344,6 @@ function createCanonicalAuthRecoveryService(
   const db = dependencies.profileDb || env.PROFILE_DB;
   const catchupStore =
     dependencies.catchupStore || createProfileLinkCatchupStore(db);
-  const authClient =
-    dependencies.authClient ||
-    createFirebaseAuthAdminClient(env, { signal: dependencies.signal });
   const rtdb =
     dependencies.rtdb ||
     createEventRtdbClient(
@@ -483,13 +467,12 @@ function createCanonicalAuthRecoveryService(
     }
   };
 
-  const recoverClaims = async (job: CanonicalRecoveryJob): Promise<void> => {
+  const recoverLogins = async (job: CanonicalRecoveryJob): Promise<void> => {
     for (const uid of job.loginUids
       .filter(isCanonicalFirebaseUid)
-      .slice(0, CLAIM_PAGE_SIZE)) {
+      .slice(0, LOGIN_RECOVERY_PAGE_SIZE)) {
       try {
-        await ensureFirebaseProfileClaim(uid, job.profileId, {
-          authClient,
+        await dispatchProfileLinkCatchupForOwner(uid, job.profileId, {
           catchupStore,
           enqueueProfileLinkProjection: (task) =>
             env.PROFILE_GAME_PROJECTION_QUEUE.send(task),
@@ -497,7 +480,7 @@ function createCanonicalAuthRecoveryService(
         });
         await removeLoginUid(job.profileId, uid);
       } catch {
-        logger.error(JSON.stringify({ event: "auth_claim_recovery_pending" }));
+        logger.error(JSON.stringify({ event: "auth_login_recovery_pending" }));
       }
     }
   };
@@ -770,7 +753,7 @@ function createCanonicalAuthRecoveryService(
     const aggregate = await readCanonicalProfileAggregate(db, profileId);
     if (!aggregate.recovery) return true;
     let job = canonicalRecoveryJob(aggregate.recovery);
-    await recoverClaims(job);
+    await recoverLogins(job);
     const refreshed = await readCanonicalProfileAggregate(db, profileId);
     if (!refreshed.recovery) return true;
     job = canonicalRecoveryJob(refreshed.recovery);

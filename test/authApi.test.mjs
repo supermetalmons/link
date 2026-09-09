@@ -23,7 +23,7 @@ const {
   completeXRedirectAuthViaApi,
   createUserBoundAuthTokenProvider,
   getLinkedAuthMethodsViaApi,
-  syncProfileClaimViaApi,
+  syncProfileViaApi,
   unlinkAuthMethodViaApi,
   verifyAppleTokenViaApi,
   verifyEthereumAddressViaApi,
@@ -87,10 +87,7 @@ test("auth API clients send exact bearer requests and validate responses", async
     (await getLinkedAuthMethodsViaApi(tokenProvider)).profileId,
     "profile-1",
   );
-  assert.equal(
-    (await syncProfileClaimViaApi(tokenProvider)).profileId,
-    "profile-1",
-  );
+  assert.equal((await syncProfileViaApi(tokenProvider)).profileId, "profile-1");
   assert.equal(
     (
       await beginXRedirectAuthViaApi(
@@ -110,7 +107,7 @@ test("auth API clients send exact bearer requests and validate responses", async
     [
       ["https://api.mons.link/auth/intents", "POST"],
       ["https://api.mons.link/auth/methods", "GET"],
-      ["https://api.mons.link/auth/profile-claim/sync", "POST"],
+      ["https://api.mons.link/auth/profile/sync", "POST"],
       ["https://api.mons.link/auth/x/flows", "POST"],
     ],
   );
@@ -559,7 +556,7 @@ test("applies the request deadline to Firebase token acquisition", async () => {
   }
 });
 
-test("allows profile claim synchronization a longer request deadline", async () => {
+test("allows canonical profile synchronization a longer request deadline", async () => {
   const originalSetTimeout = globalThis.setTimeout;
   const delays = [];
   globalThis.setTimeout = (callback, delay, ...args) => {
@@ -575,7 +572,7 @@ test("allows profile claim synchronization a longer request deadline", async () 
     });
   try {
     await getLinkedAuthMethodsViaApi(async () => "token");
-    await syncProfileClaimViaApi(async () => "token");
+    await syncProfileViaApi(async () => "token");
     assert.deepEqual(delays, [15_000, 30_000]);
   } finally {
     globalThis.setTimeout = originalSetTimeout;

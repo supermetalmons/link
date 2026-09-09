@@ -4,16 +4,10 @@ import {
   createAuthIdentityService,
   type AuthIdentityService,
 } from "./authIdentity.ts";
-import {
-  createFirebaseAuthAdminClient,
-  FirebaseAuthAdminFailure,
-  type FirebaseAuthAdminClient,
-} from "./firebaseAuthAdmin.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import {
   createAuthProfileRepository,
   type AuthProfileRepository,
-  type ProfileClaimSource,
 } from "./authProfileRepository.ts";
 import {
   createProfileLinkCatchupStore,
@@ -22,39 +16,29 @@ import {
 
 const MAX_RECONCILIATION_ATTEMPTS = 3;
 
-export type ProfileClaimDependencies = {
-  authClient?: FirebaseAuthAdminClient;
+export type ProfileSyncDependencies = {
   catchupStore?: Pick<ProfileLinkCatchupStore, "read" | "settleMissing">;
   logCleanupFailure?: (kind: string) => void;
-  repository?: Pick<AuthProfileRepository, "getProfileClaimSource">;
+  repository?: Pick<AuthProfileRepository, "getLinkedAuthMethods">;
   syncCurrentCallerProfile?: AuthIdentityService["syncCurrentCallerProfile"];
 };
 
-function cleanupFailureKind(error: unknown): string {
-  if (error instanceof FirebaseAuthAdminFailure) {
-    return "firebase-auth-unavailable";
-  }
-  return "profile-claim-cleanup-unavailable";
-}
-
-export async function syncProfileClaim(
+export async function syncProfile(
   identity: RequestIdentity,
   env: Env,
-  dependencies: ProfileClaimDependencies = {},
+  dependencies: ProfileSyncDependencies = {},
 ): Promise<LinkedAuthMethodsResponse> {
   const repository =
     dependencies.repository || createAuthProfileRepository(env);
-  const readSource = (): Promise<ProfileClaimSource> =>
-    repository.getProfileClaimSource(identity.uid);
+  const readSource = (): Promise<LinkedAuthMethodsResponse> =>
+    repository.getLinkedAuthMethods(identity.uid);
 
   let source = await readSource();
-  const authClient =
-    dependencies.authClient || createFirebaseAuthAdminClient(env);
   const logCleanupFailure =
     dependencies.logCleanupFailure ||
     ((kind: string) =>
       console.error(
-        JSON.stringify({ event: "profile_claim_cleanup_failure", kind }),
+        JSON.stringify({ event: "profile_sync_cleanup_failure", kind }),
       ));
   const syncCurrentCallerProfile =
     dependencies.syncCurrentCallerProfile ||
@@ -63,21 +47,13 @@ export async function syncProfileClaim(
     dependencies.catchupStore || createProfileLinkCatchupStore(env.PROFILE_DB);
 
   const cleanupMissingProfile = async (): Promise<void> => {
-    const [user, catchup] = await Promise.all([
-      authClient.getUser(identity.uid),
-      catchupStore.read(identity.uid),
-    ]);
+    const catchup = await catchupStore.read(identity.uid);
     if (catchup) {
       await catchupStore.settleMissing(
         identity.uid,
         catchup.requestId,
         catchup.matchCursor,
       );
-    }
-    const claims = { ...user.customClaims };
-    if (Object.hasOwn(claims, "profileId")) {
-      delete claims.profileId;
-      await authClient.setCustomUserClaims(identity.uid, claims);
     }
   };
 
@@ -92,8 +68,8 @@ export async function syncProfileClaim(
     }
     try {
       await cleanupMissingProfile();
-    } catch (error) {
-      logCleanupFailure(cleanupFailureKind(error));
+    } catch {
+      logCleanupFailure("profile-sync-cleanup-unavailable");
     }
 
     const verifiedSource = await readSource();
@@ -106,8 +82,8 @@ export async function syncProfileClaim(
   if (source.profileId === null) {
     try {
       await cleanupMissingProfile();
-    } catch (error) {
-      logCleanupFailure(cleanupFailureKind(error));
+    } catch {
+      logCleanupFailure("profile-sync-cleanup-unavailable");
     }
   }
   throw new AuthApiFailure(409, "aborted", "profile-claim-source-unstable");

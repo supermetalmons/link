@@ -186,7 +186,7 @@ import {
   completeXRedirectAuthViaApi,
   createUserBoundAuthTokenProvider,
   getLinkedAuthMethodsViaApi,
-  syncProfileClaimViaApi,
+  syncProfileViaApi,
   unlinkAuthMethodViaApi,
   verifyAppleTokenViaApi,
   verifyEthereumAddressViaApi,
@@ -1199,24 +1199,6 @@ class Connection {
     });
   }
 
-  public async refreshTokenIfNeeded(): Promise<void> {
-    try {
-      if (!this.auth.currentUser) {
-        console.warn("Cannot refresh token: No authenticated user");
-        return;
-      }
-
-      const token = await this.auth.currentUser.getIdTokenResult();
-
-      if (!token.claims.profileId) {
-        console.log("No profileId in claims, forcing token refresh");
-        await this.forceTokenRefresh();
-      }
-    } catch (error) {
-      console.error("Error checking or refreshing token:", error);
-    }
-  }
-
   public async seeIfFreshlySignedInProfileIsOneOfThePlayers(): Promise<void> {
     const routeState = getRouteStateSnapshot();
     const sessionGuard = this.createSessionGuard();
@@ -1264,32 +1246,6 @@ class Connection {
         },
         { force: true },
       );
-    }
-  }
-
-  public async forceTokenRefresh(): Promise<void> {
-    try {
-      if (!this.auth.currentUser) {
-        console.warn("Cannot refresh token: No authenticated user");
-      } else {
-        await this.auth.currentUser.getIdToken(true);
-      }
-    } catch (error) {
-      console.error("Failed to refresh authentication token:", error);
-    }
-  }
-
-  public async getCurrentProfileClaimId(): Promise<string> {
-    const user = this.auth.currentUser;
-    if (!user) {
-      return "";
-    }
-    try {
-      const token = await user.getIdTokenResult();
-      const profileId = token && token.claims ? token.claims.profileId : "";
-      return typeof profileId === "string" ? profileId : "";
-    } catch {
-      return "";
     }
   }
 
@@ -1562,12 +1518,12 @@ class Connection {
     }
   }
 
-  public async syncProfileClaim(): Promise<LinkedAuthMethodsResponse> {
+  public async syncProfile(): Promise<LinkedAuthMethodsResponse> {
     try {
       await this.ensureAuthenticated();
-      return syncProfileClaimViaApi(this.getAuthApiToken);
+      return syncProfileViaApi(this.getAuthApiToken);
     } catch (error) {
-      console.error("Error syncing profile claim:", error);
+      console.error("Error syncing profile:", error);
       throw error;
     }
   }
@@ -4807,10 +4763,6 @@ class Connection {
           }
         } else {
           this.observeMatch(workingInvite.hostId, matchId, nextContext);
-        }
-
-        if (actorUid && actorUid !== uid) {
-          void this.refreshTokenIfNeeded();
         }
       })
       .catch((error) => {

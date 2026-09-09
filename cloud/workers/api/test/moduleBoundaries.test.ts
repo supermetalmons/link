@@ -70,6 +70,24 @@ test("Worker ownership ignores Firebase profile claims and RTDB profile shadows"
   assert.deepEqual(profileShadowMatches, {});
 });
 
+test("browser and Worker runtime cannot restore Firebase profile claims or Admin account access", () => {
+  const sourcePaths = new Set([
+    ...reachableRuntimeFiles(resolve(import.meta.dirname, "../src/index.ts")),
+    ...reachableRuntimeFiles(resolve(repositoryRoot, "src/index.tsx")),
+  ]);
+  const forbidden =
+    /(?:\b(?:getIdTokenResult|customClaims|setCustomUserClaims|createFirebaseAuthAdminClient|FirebaseAuthAdminClient|ensureFirebaseProfileClaim|getCurrentProfileClaimId|getProfileClaimSource|syncProfileClaim)\b|\bclaims\s*(?:(?:\?\.|\.)\s*profileId\b|\[\s*["']profileId["']\s*\])|firebaseAuthAdmin|firebase-admin|identitytoolkit\.googleapis\.com|googleapis\.com\/auth\/identitytoolkit|accounts:(?:lookup|update|delete|batchCreate|batchDelete))/;
+  const violations = Array.from(sourcePaths)
+    .filter((path) => forbidden.test(readFileSync(path, "utf8")))
+    .map((path) => relative(repositoryRoot, path));
+  assert.deepEqual(violations, []);
+  const verifier = readFileSync(
+    resolve(import.meta.dirname, "../src/firebaseAuth.ts"),
+    "utf8",
+  );
+  assert.doesNotMatch(verifier, /\bprofileId\b/);
+});
+
 test("profile-link job coordination cannot use the retired Firebase outbox", () => {
   const sourcePaths = reachableRuntimeFiles(
     resolve(import.meta.dirname, "../src/index.ts"),
@@ -231,6 +249,7 @@ function resolveRuntimeImport(
     candidates.find(
       (candidate) =>
         candidate.startsWith(repositoryRoot) &&
+        runtimeExtensions.includes(extname(candidate)) &&
         existsSync(candidate) &&
         statSync(candidate).isFile(),
     ) || null

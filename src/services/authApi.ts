@@ -20,7 +20,7 @@ import {
 
 const AUTH_API_ROOT = "https://api.mons.link";
 const AUTH_API_TIMEOUT_MS = 15_000;
-const PROFILE_CLAIM_SYNC_TIMEOUT_MS = 30_000;
+const PROFILE_SYNC_TIMEOUT_MS = 30_000;
 const AUTH_MUTATION_TIMEOUT_MS = 60_000;
 const AUTH_API_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 
@@ -254,15 +254,15 @@ export function getLinkedAuthMethodsViaApi(
   );
 }
 
-export function syncProfileClaimViaApi(
+export function syncProfileViaApi(
   tokenProvider: AuthTokenProvider,
 ): Promise<LinkedAuthMethodsResponse> {
   return authRequest(
-    "/auth/profile-claim/sync",
+    "/auth/profile/sync",
     { method: "POST", body: JSON.stringify({}) },
     tokenProvider,
     isLinkedAuthMethodsResponse,
-    PROFILE_CLAIM_SYNC_TIMEOUT_MS,
+    PROFILE_SYNC_TIMEOUT_MS,
   );
 }
 

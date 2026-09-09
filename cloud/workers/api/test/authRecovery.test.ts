@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   createAuthRecoveryService,
-  ensureFirebaseProfileClaim,
+  dispatchProfileLinkCatchupForOwner,
   MERGE_PRIZE_RECOVERY_PAGE_SIZE,
 } from "../src/authRecovery.ts";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
@@ -23,26 +23,12 @@ function catchupJob(): ProfileLinkCatchupJob {
   };
 }
 
-test("claim repair validates ownership before updating claims and dispatches persisted work", async () => {
+test("profile-link catchup validates ownership before dispatching persisted work", async () => {
   const operations: string[] = [];
   const queued: unknown[] = [];
   const job = catchupJob();
   const originalJob = structuredClone(job);
-  await ensureFirebaseProfileClaim("firebase-uid", "current-profile", {
-    authClient: {
-      getUser: async () => {
-        operations.push("read-claims");
-        return {
-          uid: "firebase-uid",
-          customClaims: { admin: true, profileId: "previous-profile" },
-        };
-      },
-      setCustomUserClaims: async (uid, claims) => {
-        assert.equal(uid, "firebase-uid");
-        assert.deepEqual(claims, { admin: true, profileId: "current-profile" });
-        operations.push("repair-claims");
-      },
-    },
+  await dispatchProfileLinkCatchupForOwner("firebase-uid", "current-profile", {
     catchupStore: {
       readForOwner: async (uid, profileId) => {
         assert.equal(uid, "firebase-uid");
@@ -56,12 +42,7 @@ test("claim repair validates ownership before updating claims and dispatches per
       queued.push(task);
     },
   });
-  assert.deepEqual(operations, [
-    "read-owner-job",
-    "read-claims",
-    "repair-claims",
-    "enqueue",
-  ]);
+  assert.deepEqual(operations, ["read-owner-job", "enqueue"]);
   assert.deepEqual(queued, [
     {
       kind: "profile-link-profile-game-projection",
@@ -72,61 +53,55 @@ test("claim repair validates ownership before updating claims and dispatches per
   assert.deepEqual(job, originalJob);
 });
 
-test("claim repair does not access Firebase when canonical ownership validation fails", async () => {
+test("profile-link catchup does not dispatch when canonical ownership validation fails", async () => {
   const failure = new Error("canonical-profile-conflict");
-  let firebaseAccesses = 0;
+  const queued: unknown[] = [];
   await assert.rejects(
-    ensureFirebaseProfileClaim("firebase-uid", "current-profile", {
-      authClient: {
-        getUser: async () => {
-          firebaseAccesses++;
-          return { uid: "firebase-uid", customClaims: {} };
-        },
-        setCustomUserClaims: async () => {
-          firebaseAccesses++;
-        },
-      },
+    dispatchProfileLinkCatchupForOwner("firebase-uid", "current-profile", {
       catchupStore: {
         readForOwner: async () => {
           throw failure;
         },
       },
+      enqueueProfileLinkProjection: async (task) => {
+        queued.push(task);
+      },
     }),
     failure,
   );
-  assert.equal(firebaseAccesses, 0);
+  assert.deepEqual(queued, []);
 });
 
-test("claim retries preserve persisted catch-up progress through Auth failure", async () => {
+test("profile-link catchup retries preserve persisted progress through D1 failure", async () => {
   const job = { ...catchupJob(), matchCursor: "match-20", revision: 5 };
   const originalJob = structuredClone(job);
-  let failClaims = true;
+  let failOwnerRead = true;
   let ownerReads = 0;
   const queued: unknown[] = [];
-  const dependencies: Parameters<typeof ensureFirebaseProfileClaim>[2] = {
-    authClient: {
-      getUser: async () => ({ uid: "firebase-uid", customClaims: {} }),
-      setCustomUserClaims: async () => {
-        if (failClaims) throw new Error("firebase-auth-unavailable");
+  const dependencies: Parameters<typeof dispatchProfileLinkCatchupForOwner>[2] =
+    {
+      catchupStore: {
+        readForOwner: async () => {
+          ownerReads++;
+          if (failOwnerRead) throw new Error("canonical-profile-unavailable");
+          return job;
+        },
       },
-    },
-    catchupStore: {
-      readForOwner: async () => {
-        ownerReads++;
-        return job;
+      enqueueProfileLinkProjection: async (task) => {
+        queued.push(task);
       },
-    },
-    enqueueProfileLinkProjection: async (task) => {
-      queued.push(task);
-    },
-  };
+    };
   await assert.rejects(
-    ensureFirebaseProfileClaim("firebase-uid", "current-profile", dependencies),
-    /firebase-auth-unavailable/,
+    dispatchProfileLinkCatchupForOwner(
+      "firebase-uid",
+      "current-profile",
+      dependencies,
+    ),
+    /canonical-profile-unavailable/,
   );
   assert.deepEqual(queued, []);
-  failClaims = false;
-  await ensureFirebaseProfileClaim(
+  failOwnerRead = false;
+  await dispatchProfileLinkCatchupForOwner(
     "firebase-uid",
     "current-profile",
     dependencies,
@@ -142,20 +117,11 @@ test("claim retries preserve persisted catch-up progress through Auth failure", 
   ]);
 });
 
-test("claim repair leaves durable work recoverable when Queue dispatch fails", async () => {
+test("profile-link catchup leaves durable work recoverable when Queue dispatch fails", async () => {
   const job = catchupJob();
   const originalJob = structuredClone(job);
   const logs: string[] = [];
-  await ensureFirebaseProfileClaim("firebase-uid", "current-profile", {
-    authClient: {
-      getUser: async () => ({
-        uid: "firebase-uid",
-        customClaims: { profileId: "current-profile" },
-      }),
-      setCustomUserClaims: async () => {
-        throw new Error("unexpected-claims-write");
-      },
-    },
+  await dispatchProfileLinkCatchupForOwner("firebase-uid", "current-profile", {
     catchupStore: { readForOwner: async () => job },
     enqueueProfileLinkProjection: async () => {
       throw new Error("private-provider-detail");
@@ -178,51 +144,35 @@ test("claim repair leaves durable work recoverable when Queue dispatch fails", a
   assert.deepEqual(job, originalJob);
 });
 
-test("repeated claim repair does not recreate completed catch-up work", async () => {
-  const claims: Record<string, unknown> = {
-    admin: true,
-    profileId: "previous-profile",
-  };
+test("repeated profile-link catchup dispatch does not recreate completed work", async () => {
   let ownerReads = 0;
-  let claimWrites = 0;
-  const dependencies: Parameters<typeof ensureFirebaseProfileClaim>[2] = {
-    authClient: {
-      getUser: async () => ({
-        uid: "firebase-uid",
-        customClaims: { ...claims },
-      }),
-      setCustomUserClaims: async (_uid, value) => {
-        claimWrites++;
-        Object.assign(claims, value);
+  const dependencies: Parameters<typeof dispatchProfileLinkCatchupForOwner>[2] =
+    {
+      catchupStore: {
+        readForOwner: async () => {
+          ownerReads++;
+          return null;
+        },
       },
-    },
-    catchupStore: {
-      readForOwner: async () => {
-        ownerReads++;
-        return null;
+      enqueueProfileLinkProjection: async () => {
+        throw new Error("completed-work-must-not-be-enqueued");
       },
-    },
-    enqueueProfileLinkProjection: async () => {
-      throw new Error("completed-work-must-not-be-enqueued");
-    },
-    logger: {
-      error: () => {
-        throw new Error("unexpected-enqueue-failure");
+      logger: {
+        error: () => {
+          throw new Error("unexpected-enqueue-failure");
+        },
       },
-    },
-  };
-  await ensureFirebaseProfileClaim(
+    };
+  await dispatchProfileLinkCatchupForOwner(
     "firebase-uid",
     "current-profile",
     dependencies,
   );
-  await ensureFirebaseProfileClaim(
+  await dispatchProfileLinkCatchupForOwner(
     "firebase-uid",
     "current-profile",
     dependencies,
   );
-  assert.deepEqual(claims, { admin: true, profileId: "current-profile" });
-  assert.equal(claimWrites, 1);
   assert.equal(ownerReads, 2);
 });
 
@@ -259,10 +209,6 @@ test("event prize recovery leaves copying pending while the event lease is busy"
   const transactionPaths: string[] = [];
   const readPaths: string[] = [];
   const service = createAuthRecoveryService(TELEGRAM_TEST_ENV, {
-    authClient: {
-      getUser: async (uid) => ({ uid, customClaims: {} }),
-      setCustomUserClaims: async () => undefined,
-    },
     d1: profileDb,
     logger: { error() {}, info() {} },
     now: () => 1_000,
@@ -453,10 +399,6 @@ function prizeRecoveryService(
   profileGamesDb: D1Database = profileDb,
 ) {
   return createAuthRecoveryService(TELEGRAM_TEST_ENV, {
-    authClient: {
-      getUser: async (uid) => ({ uid, customClaims: {} }),
-      setCustomUserClaims: async () => undefined,
-    },
     d1: profileGamesDb,
     logger: { error() {}, info() {} },
     now: () => 1_000,
@@ -615,10 +557,6 @@ test("final prize recovery copies at most one page", async () => {
     }),
   } as unknown as D1Database;
   const service = createAuthRecoveryService(TELEGRAM_TEST_ENV, {
-    authClient: {
-      getUser: async (uid) => ({ uid, customClaims: {} }),
-      setCustomUserClaims: async () => undefined,
-    },
     buildPrizeCopy: (_sourceProfileId, targetProfileId, eventId) => ({
       eventId,
       profileId: targetProfileId,
@@ -685,10 +623,6 @@ test("event prize recovery aborts a stalled mutation before lease expiry", async
     },
   };
   const service = createAuthRecoveryService(TELEGRAM_TEST_ENV, {
-    authClient: {
-      getUser: async (uid) => ({ uid, customClaims: {} }),
-      setCustomUserClaims: async () => undefined,
-    },
     d1: profile.db,
     logger: { error() {}, info() {} },
     now: () => 1_000,

@@ -5,7 +5,6 @@ import type {
 } from "@mons/shared/auth";
 import type { AuthStateRepository } from "./authStateD1.ts";
 import { createCanonicalAuthIdentityService } from "./authIdentityCanonical.ts";
-import type { FirebaseAuthAdminClient } from "./firebaseAuthAdmin.ts";
 import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
 
 export type AuthIntent = {
@@ -70,7 +69,6 @@ export type AuthIdentityService = {
 };
 
 export type ServiceDependencies = {
-  authClient?: FirebaseAuthAdminClient;
   authState?: AuthStateRepository;
   now?: () => number;
   randomInteger?: (maximum: number) => number;

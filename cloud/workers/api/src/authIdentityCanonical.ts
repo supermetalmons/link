@@ -28,14 +28,7 @@ import type {
   LinkInput,
   ServiceDependencies,
 } from "./authIdentity.ts";
-import {
-  createFirebaseAuthAdminClient,
-  type FirebaseAuthAdminClient,
-} from "./firebaseAuthAdmin.ts";
-import {
-  createFirebaseRtdbClient,
-  type FirebaseRtdbClient,
-} from "./firebaseRtdb.ts";
+import { createFirebaseRtdbClient } from "./firebaseRtdb.ts";
 import {
   cleanString,
   finiteNumber,
@@ -49,8 +42,8 @@ import {
 } from "./authPolicy.ts";
 import {
   createAuthRecoveryService,
+  dispatchProfileLinkCatchupForOwner,
   enqueuePersistedCanonicalAuthRecovery,
-  ensureFirebaseProfileClaim,
   newAuthRecoveryJob,
 } from "./authRecovery.ts";
 import { createProfileLinkCatchupStore } from "./profileLinkCatchupD1.ts";
@@ -87,11 +80,6 @@ const AUTH_OP_REPLAY_TTL_MS = 10 * 60 * 1_000;
 const LINK_METHOD_MAX_ATTEMPTS = 3;
 const AUTO_NAME_MAX_ATTEMPTS = 30;
 const CANONICAL_AUTH_COMMIT_QUERY_BUDGET = 500;
-
-type CanonicalIdentityDependencies = ServiceDependencies & {
-  authClient?: FirebaseAuthAdminClient;
-  rtdb?: FirebaseRtdbClient;
-};
 
 type CanonicalCooldownRow = {
   revision: number;
@@ -599,14 +587,11 @@ export async function sweepExpiredCanonicalAuthCooldowns(
 
 export function createCanonicalAuthIdentityService(
   env: Env,
-  dependencies: CanonicalIdentityDependencies = {},
+  dependencies: ServiceDependencies = {},
 ): AuthIdentityService {
   const db = env.PROFILE_DB;
   const authState =
     dependencies.authState || createAuthStateRepository(env.AUTH_STATE_DB);
-  const authClient =
-    dependencies.authClient ||
-    createFirebaseAuthAdminClient(env, { signal: dependencies.signal });
   const rtdb =
     dependencies.rtdb ||
     createFirebaseRtdbClient(env, {
@@ -617,7 +602,6 @@ export function createCanonicalAuthIdentityService(
     });
   const now = dependencies.now || Date.now;
   const recovery = createAuthRecoveryService(env, {
-    authClient,
     now,
     profileDb: db,
     rtdb,
@@ -1365,8 +1349,7 @@ export function createCanonicalAuthIdentityService(
   ): Promise<CanonicalIdentityProfile> => {
     for (let attempt = 0; attempt < LINK_METHOD_MAX_ATTEMPTS; attempt++) {
       const profile = await acquireRecoveryBarrier(uid);
-      await ensureFirebaseProfileClaim(uid, profile.profile.profileId, {
-        authClient,
+      await dispatchProfileLinkCatchupForOwner(uid, profile.profile.profileId, {
         catchupStore: createProfileLinkCatchupStore(db),
         enqueueProfileLinkProjection: (task) =>
           env.PROFILE_GAME_PROJECTION_QUEUE.send(task),

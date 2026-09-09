@@ -113,7 +113,6 @@ export function handleLoginSuccess(res: AuthProfileResponse): boolean {
 
   notifyOtherTabsAboutSignIn(profileId, res.uid);
   clearPendingLogoutWipeAfterSignIn();
-  connection.forceTokenRefresh();
 
   if (!isWatchOnly) {
     updateEmojiAndAuraIfNeeded(emoji.toString(), res.aura ?? undefined, false);
