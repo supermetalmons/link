@@ -120,6 +120,14 @@
         "period": 60,
       },
     },
+    {
+      "name": "MATCH_SYNC_RATE_LIMITER",
+      "namespace_id": "1616095647",
+      "simple": {
+        "limit": 600,
+        "period": 60,
+      },
+    },
   ],
   "workflows": [
     {

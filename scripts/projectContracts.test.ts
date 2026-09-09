@@ -206,6 +206,11 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
       namespace_id: "1616095645",
       simple: { limit: 60, period: 60 },
     },
+    {
+      name: "MATCH_SYNC_RATE_LIMITER",
+      namespace_id: "1616095647",
+      simple: { limit: 600, period: 60 },
+    },
   ]);
   assert.deepEqual(config.queues, {
     producers: [
@@ -513,6 +518,7 @@ test("shared package preserves every direct export subpath", () => {
     "./invite-wagers": "./invite-wagers.js",
     "./match-protocol": "./match-protocol.js",
     "./match-presentation": "./match-presentation.js",
+    "./match-sync": "./match-sync.js",
     "./mining": "./mining.js",
     "./navigation": "./navigation.js",
     "./nfts": "./nfts.js",

@@ -136,6 +136,35 @@ export async function readLoginMatchDiscoveryBackend(
   return backend;
 }
 
+export async function readResolvedLoginMatchInviteId(
+  db: D1Database,
+  loginUid: string,
+  matchId: string,
+): Promise<string | null> {
+  if (!isCanonicalFirebaseUid(loginUid) || !isSafeFirebaseKey(matchId)) {
+    throw new TypeError("invalid-login-match-discovery-key");
+  }
+  const row = await db
+    .withSession("first-primary")
+    .prepare(
+      "SELECT invite_id, resolution FROM login_match_discovery WHERE login_uid = ? AND match_id = ?",
+    )
+    .bind(loginUid, matchId)
+    .first<{
+      invite_id: string | null;
+      resolution: MatchDiscoveryResolution;
+    }>();
+  if (!row) return null;
+  assertInput({
+    loginUid,
+    matchId,
+    inviteId: row.invite_id,
+    resolution: row.resolution,
+    provenance: "capture",
+  });
+  return row.resolution === "resolved" ? row.invite_id : null;
+}
+
 export async function listLoginMatchDiscoveryPage(
   db: D1Database,
   loginUid: string,

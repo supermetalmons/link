@@ -41,6 +41,8 @@ import {
   type InviteWagersReadResult,
   type InviteWagersSourceResult,
 } from "./inviteWagers.ts";
+import { MatchSyncRoom } from "./matchSyncRoom.ts";
+import type { MatchSyncReadResult } from "./matchSync.ts";
 
 export const MAX_INVITE_REACTION_SOCKETS = 256;
 export const MAX_INVITE_REACTION_SPECTATORS = 248;
@@ -54,6 +56,8 @@ const PARTICIPANT_SOCKET_TAGS = [
   "metadata-role:guest",
   "wagers-role:host",
   "wagers-role:guest",
+  "match-role:host",
+  "match-role:guest",
 ];
 const MAX_INVITE_ROOM_SPECTATOR_SOCKETS =
   MAX_INVITE_ROOM_SOCKETS -
@@ -129,7 +133,10 @@ function isReactionSocket(socket: WebSocket): boolean {
 }
 
 function canReceiveInvite(
-  attachment: InviteSocketAttachment,
+  attachment: Pick<
+    InviteSocketAttachment,
+    "role" | "actorUid" | "authenticated"
+  >,
   source: Extract<InviteMetadataReadResult, { status: "ok" }>,
 ): boolean {
   if (attachment.role === "host") {
@@ -172,6 +179,7 @@ export type InviteReactionPublishResult =
   "published" | "duplicate" | "conflict" | "participant-limit";
 
 export class InviteReactions extends DurableObject<Env> {
+  private readonly matchSync: MatchSyncRoom;
   private inviteReader: (inviteId: string) => Promise<unknown>;
   private inviteSequence: Promise<void> = Promise.resolve();
   private inviteAlarmSequence: Promise<void> = Promise.resolve();
@@ -181,6 +189,7 @@ export class InviteReactions extends DurableObject<Env> {
   private inviteInvalidationGeneration = 0;
   private inviteResultInvalidationGeneration = 0;
   private inviteResult: InviteReadResult | null = null;
+  private inviteCheckedAt = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -199,7 +208,29 @@ export class InviteReactions extends DurableObject<Env> {
     this.ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS invite_wagers (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), invite_id TEXT NOT NULL, snapshot_json TEXT, revision INTEGER NOT NULL, source_fingerprint TEXT)",
     );
+    this.ctx.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS invite_refresh_schedule (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), next_at_ms INTEGER NOT NULL)",
+    );
     this.inviteReader = createInviteSourceReader(env);
+    this.matchSync = new MatchSyncRoom(ctx, env, {
+      pinInvite: (inviteId) => {
+        this.pinInvite(inviteId);
+      },
+      readMetadata: async (inviteId) => {
+        if (
+          this.inviteResult &&
+          this.inviteResultInvalidationGeneration ===
+            this.inviteInvalidationGeneration &&
+          Date.now() - this.inviteCheckedAt < INVITE_METADATA_REFRESH_MS
+        )
+          return this.inviteResult.metadata;
+        return this.readMetadata(inviteId);
+      },
+      inviteGeneration: () => this.inviteInvalidationGeneration,
+      scheduleAlarm: (atMs) => this.scheduleInviteAlarm(atMs),
+      capacityFull: (role, ip) => this.matchRoomFull(role, ip),
+      canReceive: canReceiveInvite,
+    });
     this.ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair(
         REACTION_HEARTBEAT_REQUEST,
@@ -216,6 +247,7 @@ export class InviteReactions extends DurableObject<Env> {
       return new Response("WebSocket upgrade required", { status: 426 });
     }
     const pathname = new URL(request.url).pathname;
+    if (pathname === "/matches/socket") return this.matchSync.fetch(request);
     if (pathname === "/metadata/socket")
       return this.fetchInviteSocket(request, "metadata");
     if (pathname === "/wagers/socket")
@@ -363,6 +395,14 @@ export class InviteReactions extends DurableObject<Env> {
     return pending;
   }
 
+  private async scheduleInviteRefresh(atMs: number): Promise<void> {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO invite_refresh_schedule (singleton, next_at_ms) VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET next_at_ms = MIN(next_at_ms, excluded.next_at_ms)",
+      atMs,
+    );
+    await this.scheduleInviteAlarm(atMs);
+  }
+
   private applyMetadata(
     inviteId: string,
     result: InviteMetadataReadResult,
@@ -502,6 +542,7 @@ export class InviteReactions extends DurableObject<Env> {
       }
       const result = { metadata, wagers };
       this.inviteResult = result;
+      this.inviteCheckedAt = Date.now();
       this.inviteResultGeneration = generation;
       this.inviteResultInvalidationGeneration = invalidationGeneration;
       return result;
@@ -528,25 +569,50 @@ export class InviteReactions extends DurableObject<Env> {
     return (await this.readInvite(inviteId)).wagers;
   }
 
+  async readMatches(
+    inviteId: string,
+    matchId: string,
+  ): Promise<MatchSyncReadResult> {
+    return this.matchSync.read(inviteId, matchId);
+  }
+
+  async notifyMatchesChanged(
+    inviteId: string,
+    matchIds?: string[],
+  ): Promise<void> {
+    await this.matchSync.notify(inviteId, matchIds);
+  }
+
   async notifyMetadataChanged(inviteId: string): Promise<void> {
     this.inviteInvalidationGeneration++;
+    await this.matchSync.notify(inviteId);
     if (this.inviteSockets(undefined, true).length === 0) return;
     this.pinInvite(inviteId);
-    await this.scheduleInviteAlarm(Date.now());
+    await this.scheduleInviteRefresh(Date.now());
   }
 
   async notifyWagersChanged(inviteId: string): Promise<void> {
     this.inviteInvalidationGeneration++;
     if (this.inviteSockets("wagers", true).length === 0) return;
     this.pinInvite(inviteId);
-    await this.scheduleInviteAlarm(Date.now());
+    await this.scheduleInviteRefresh(Date.now());
   }
 
   async alarm(): Promise<void> {
     await this.serializeInvite(async () => {
       const sockets = this.inviteSockets(undefined, true);
-      if (sockets.length === 0) return;
-      await this.scheduleInviteAlarm(
+      if (sockets.length === 0) {
+        this.ctx.storage.sql.exec("DELETE FROM invite_refresh_schedule");
+        return;
+      }
+      const [scheduled] = this.ctx.storage.sql
+        .exec<{ next_at_ms: number }>(
+          "SELECT next_at_ms FROM invite_refresh_schedule WHERE singleton = 1",
+        )
+        .toArray();
+      if (scheduled && scheduled.next_at_ms > Date.now()) return;
+      this.ctx.storage.sql.exec("DELETE FROM invite_refresh_schedule");
+      await this.scheduleInviteRefresh(
         Date.now() +
           Math.min(INVITE_METADATA_REFRESH_MS, INVITE_WAGERS_REFRESH_MS),
       );
@@ -564,6 +630,32 @@ export class InviteReactions extends DurableObject<Env> {
         );
       }
     });
+    await this.matchSync.alarm();
+    const [scheduled] = this.ctx.storage.sql
+      .exec<{ next_at_ms: number }>(
+        "SELECT next_at_ms FROM invite_refresh_schedule WHERE singleton = 1",
+      )
+      .toArray();
+    const nextMatch = this.matchSync.nextAlarm();
+    const due = [scheduled?.next_at_ms, nextMatch].filter(
+      (value): value is number => typeof value === "number",
+    );
+    if (due.length) await this.scheduleInviteAlarm(Math.min(...due));
+  }
+
+  private matchRoomFull(role: string, ip: string): boolean {
+    return (
+      this.roomCapacityFull(role) ||
+      this.ctx.getWebSockets("channel:matches").length >=
+        MAX_INVITE_REACTION_SOCKETS ||
+      (role === "spectator"
+        ? this.ctx.getWebSockets("match-role:spectator").length >=
+            MAX_INVITE_REACTION_SPECTATORS ||
+          this.ctx.getWebSockets(`match-ip:${ip}`).length >=
+            MAX_INVITE_REACTION_SPECTATORS_PER_IP
+        : this.ctx.getWebSockets(`match-role:${role}`).length >=
+          MAX_INVITE_REACTION_SOCKETS_PER_PARTICIPANT)
+    );
   }
 
   private roomCapacityFull(role: string): boolean {
@@ -653,7 +745,7 @@ export class InviteReactions extends DurableObject<Env> {
           headers: { "Retry-After": "60" },
         });
       }
-      await this.scheduleInviteAlarm(
+      await this.scheduleInviteRefresh(
         Date.now() +
           (channel === "metadata"
             ? INVITE_METADATA_REFRESH_MS
@@ -943,13 +1035,16 @@ export class InviteReactions extends DurableObject<Env> {
 
   webSocketMessage(socket: WebSocket): void {
     socket.close(1008, "Reaction sockets are receive-only");
+    this.matchSync.closed(socket);
   }
 
   webSocketClose(socket: WebSocket): void {
     socket.close();
+    this.matchSync.closed(socket);
   }
 
   webSocketError(socket: WebSocket): void {
     socket.close(1011, "Reaction connection failed");
+    this.matchSync.closed(socket);
   }
 }

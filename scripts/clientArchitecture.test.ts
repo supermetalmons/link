@@ -354,6 +354,24 @@ test("client does not depend on Firestore", () => {
   }
 });
 
+test("client match delivery does not depend on Firebase Database", () => {
+  const isDatabaseDependency = (specifier: string) =>
+    [
+      "@firebase/database",
+      "@firebase/database-compat",
+      "firebase/compat/database",
+      "firebase/database",
+    ].some(
+      (prefix) => specifier === prefix || specifier.startsWith(`${prefix}/`),
+    );
+  const importers = sourceFiles
+    .filter((path) =>
+      dependencySpecifiers(path, "mixed").some(isDatabaseDependency),
+    )
+    .map(displayPath);
+  assert.deepEqual(importers, []);
+});
+
 test("client mixed graph includes no-substitution template imports", () => {
   assert.ok(
     dependencySpecifiers(

@@ -18,6 +18,7 @@ const functionNames = [
   "rememberRemoteMoveHistory",
   "hasPendingRemoteMoves",
   "drainRemoteMoveHistories",
+  "didReceiveMatchUpdates",
   "didReceiveMatchUpdate",
   "getProcessedMovesCount",
   "setProcessedMovesCountForColor",
@@ -155,6 +156,7 @@ function harness({ historical = false, connected = true, onOutput } = {}) {
     `${outputText}
     return {
       receive: (match, id = "match") => didReceiveMatchUpdate(match, match.color, id),
+      receiveBatch: (matches, id = "match", isActive = () => true) => didReceiveMatchUpdates(new Map(matches.map(match => [match.color, match])), id, isActive),
       game: () => game,
       counts: () => ({ white: whiteProcessedMovesCount, black: blackProcessedMovesCount }),
       install: (nextGame) => { installCurrentGameModel(nextGame); setProcessedMovesCounts(0, 0); isGameOver = false; },
@@ -225,6 +227,62 @@ function threeTurns() {
   }
   return { game, moves, snapshots, ordered };
 }
+
+test("combined snapshots replay the other actor's last move before surrender", () => {
+  for (const surrenderedColor of ["white", "black"]) {
+    for (const historical of [false, true]) {
+      const server = new Game();
+      const moves = { white: [], black: [] };
+      while (server.activeColor === surrenderedColor) {
+        moves[surrenderedColor].push(nextMove(server).inputFen);
+      }
+      const before = {
+        white: record(server, "white", moves.white),
+        black: record(server, "black", moves.black),
+      };
+      const movingColor = server.activeColor;
+      moves[movingColor].push(nextMove(server).inputFen);
+      const moving = record(server, movingColor, moves[movingColor]);
+      const surrendered = {
+        ...before[surrenderedColor],
+        status: "surrendered",
+      };
+      for (const batch of [
+        [surrendered, moving],
+        [moving, surrendered],
+      ]) {
+        const h = harness({ historical });
+        h.receive(before.white);
+        h.receive(before.black);
+        h.receiveBatch(batch);
+        assert.equal(h.game().toFen(), server.toFen());
+        assert.deepEqual(h.counts(), {
+          white: moves.white.length,
+          black: moves.black.length,
+        });
+        assert.ok(h.surrendered.length > 0);
+        assert.ok(h.surrendered.every((value) => value.fen === server.toFen()));
+      }
+    }
+  }
+});
+
+test("combined snapshots stop when replay changes the session", () => {
+  const fixture = threeTurns();
+  const h = harness({
+    onOutput: (_output, current) => current.invalidate("other-match"),
+  });
+  h.receiveBatch([fixture.snapshots.white, fixture.snapshots.black]);
+  assert.equal(h.played.length, 1);
+  assert.equal(h.surrendered.length, 0);
+  const inactive = harness();
+  inactive.receiveBatch(
+    [fixture.snapshots.white, fixture.snapshots.black],
+    "match",
+    () => false,
+  );
+  assert.equal(inactive.played.length, 0);
+});
 
 test("cumulative snapshots drain both colors across three turns in either arrival order", () => {
   const fixture = threeTurns();

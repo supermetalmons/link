@@ -49,6 +49,10 @@ import {
   releaseInviteSourceAdmission,
 } from "./inviteSourceD1.ts";
 import { notifyInviteSourceChanged } from "./inviteWagersNotifications.ts";
+import {
+  notifyMatchSyncChanged,
+  notifyMatchSyncInvites,
+} from "./matchSyncNotifications.ts";
 
 const EVENT_OWNED_ROOTS = new Set([
   "events",
@@ -557,16 +561,23 @@ async function notifyEventInviteEffects(
   intent: EventTransitionIntent,
 ): Promise<void> {
   if (intent.schemaVersion !== 2) return;
-  await notifyInviteSourceChanged(
-    env,
-    Object.fromEntries(
-      intent.inviteMutations.map(({ current, value }) => [
-        `invites/${current.inviteId}`,
-        value,
-      ]),
+  await Promise.all([
+    notifyInviteSourceChanged(
+      env,
+      Object.fromEntries(
+        intent.inviteMutations.map(({ current, value }) => [
+          `invites/${current.inviteId}`,
+          value,
+        ]),
+      ),
+      true,
     ),
-    true,
-  );
+    notifyMatchSyncInvites(
+      env,
+      intent.inviteMutations.map(({ current }) => current.inviteId),
+    ),
+    notifyMatchSyncChanged(env, intent.rtdbEffects),
+  ]);
 }
 
 export async function recoverEventTransitionIntents(

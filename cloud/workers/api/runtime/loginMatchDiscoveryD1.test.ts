@@ -6,6 +6,7 @@ import {
   captureLoginMatchDiscovery,
   listLoginMatchDiscoveryPage,
   readLoginMatchDiscoveryBackend,
+  readResolvedLoginMatchInviteId,
   type LoginMatchDiscoveryInput,
 } from "../src/loginMatchDiscoveryD1.ts";
 
@@ -89,6 +90,35 @@ describe("login match discovery D1", () => {
       entries: [{ matchId: "c", inviteId: "invite", resolution: "resolved" }],
       hasMore: false,
     });
+  });
+
+  it("resolves only the exact captured player and match pair", async () => {
+    await db.batch(
+      buildLoginMatchDiscoveryStatements(
+        db,
+        [
+          resolved("invite12", "invite1"),
+          { ...resolved("invite123"), inviteId: null, resolution: "ambiguous" },
+          { ...resolved("invite1234"), inviteId: null, resolution: "missing" },
+        ],
+        1,
+      ),
+    );
+    expect(await readResolvedLoginMatchInviteId(db, LOGIN, "invite12")).toBe(
+      "invite1",
+    );
+    expect(
+      await readResolvedLoginMatchInviteId(db, "other-login", "invite12"),
+    ).toBeNull();
+    expect(
+      await readResolvedLoginMatchInviteId(db, LOGIN, "invite123"),
+    ).toBeNull();
+    expect(
+      await readResolvedLoginMatchInviteId(db, LOGIN, "invite1234"),
+    ).toBeNull();
+    expect(
+      await readResolvedLoginMatchInviteId(db, LOGIN, "invite12345"),
+    ).toBeNull();
   });
 
   it("captures idempotently, upgrades unresolved rows, and protects resolved mappings", async () => {

@@ -6,11 +6,10 @@ import {
   onAuthStateChanged,
   signOut,
 } from "firebase/auth";
-import { getDatabase, Database, ref, onValue, off } from "firebase/database";
 import {
   didFindInviteThatCanBeJoined,
   didReceiveInviteReactionUpdate,
-  didReceiveMatchUpdate,
+  didReceiveMatchUpdates,
   didReceiveMatchPresentationUpdate,
   didRecoverInviteReactions,
   didRecoverMyMatch,
@@ -208,6 +207,12 @@ import { ObserverRegistry } from "./observerRegistry";
 import { InviteReactionChannel } from "./inviteReactionChannel";
 import { InviteMetadataChannel } from "./inviteMetadataChannel";
 import { InviteWagersChannel } from "./inviteWagersChannel";
+import { MatchSyncChannel } from "./matchSyncChannel";
+import type { MatchSyncSnapshot } from "@mons/shared/match-sync";
+import {
+  createMatchSyncSocketProtocols,
+  readMatchSyncViaApi,
+} from "../services/matchSyncApi";
 import type { InviteWagersSnapshot } from "@mons/shared/invite-wagers";
 import {
   createInviteWagersSocketProtocols,
@@ -363,7 +368,6 @@ const summarizeWagerState = (state: MatchWagerState | null) => {
 class Connection {
   private app: FirebaseApp;
   private auth: Auth;
-  private db: Database;
   private eventPollingRegistry: EventPollingRegistry;
 
   private inviteMetadataState: InviteMetadataState | null = null;
@@ -394,13 +398,15 @@ class Connection {
   private matchPresentations = new Map<string, MatchPresentation>();
   private miningFrozenPoller: FrozenMaterialsPoller | null = null;
   private miningFrozenLoginUid: string | null = null;
-  private matchRefs: { [key: string]: any } = {};
-  private observerRegistry = new ObserverRegistry(
-    (contextId, sessionEpoch) => this.isContextActive(contextId, sessionEpoch),
-    (reason, contextId) => {
-      this.logContextEvent("ctx.dispose", { reason, contextId });
-    },
-  );
+  private matchSyncSubscription: {
+    contextId: number;
+    channel: MatchSyncChannel;
+    players: Set<string>;
+    stop: () => void;
+  } | null = null;
+  private observerRegistry = new ObserverRegistry((reason, contextId) => {
+    this.logContextEvent("ctx.dispose", { reason, contextId });
+  });
 
   private loginUid: string | null = null;
   private sameProfilePlayerUid: string | null = null;
@@ -576,24 +582,6 @@ class Connection {
 
   private unregisterObserverCleanup(contextId: number, key: string): void {
     this.observerRegistry.unregister(contextId, key);
-  }
-
-  private observeContextValue(
-    context: MatchRuntimeContext,
-    key: string,
-    targetRef: any,
-    onData: (snapshot: any) => void,
-    onError?: (error: unknown) => void,
-    onCleanup?: () => void,
-  ): (() => void) | null {
-    return this.observerRegistry.observe(
-      context,
-      key,
-      targetRef,
-      onData,
-      onError,
-      onCleanup,
-    );
   }
 
   private cleanupObserverContext(contextId: number, reason: string): void {
@@ -827,7 +815,6 @@ class Connection {
 
     this.app = initializeApp(firebaseConfig);
     this.auth = getAuth(this.app);
-    this.db = getDatabase(this.app);
     if (typeof window !== "undefined") {
       window.addEventListener("online", () => this.refreshMoveDeliveries());
       window.addEventListener("pageshow", () => this.refreshMoveDeliveries());
@@ -1671,6 +1658,7 @@ class Connection {
         this.cleanupInviteMetadataObserver();
         this.cleanupWagerObserver();
         this.cleanupInviteReactionObserver();
+        this.stopObservingAllMatches();
         this.pendingWagerMutations.clear();
         this.wagerSnapshotGeneration += 1;
       }
@@ -5322,55 +5310,90 @@ class Connection {
     matchId: string,
     context: MatchRuntimeContext | null = this.activeContext,
   ): void {
-    const matchRef = ref(this.db, `players/${playerId}/matches/${matchId}`);
-    const key = `${matchId}_${playerId}`;
-    if (this.matchRefs[key]) {
+    if (
+      !context ||
+      context.matchId !== matchId ||
+      (context.canWrite && context.actorUid === playerId)
+    )
       return;
-    }
-    const observeEpoch = context?.sessionEpoch ?? this.sessionEpoch;
-    const contextId = context?.contextId ?? null;
-    const isObserverActive = () => {
-      if (contextId === null) {
-        return this.isSessionEpochActive(observeEpoch);
-      }
-      return this.isContextActive(contextId, observeEpoch);
-    };
-    if (context) {
-      this.unregisterObserverCleanup(context.contextId, `match:${key}`);
-      this.registerObserverCleanup(context.contextId, `match:${key}`, () => {
-        const existingRef = this.matchRefs[key];
-        if (existingRef) {
-          off(existingRef);
-          delete this.matchRefs[key];
-          decrementLifecycleCounter("connectionObservers");
-        }
-        this.observedMatchSnapshots.delete(key);
+    const isObserverActive = () =>
+      this.isContextActive(context.contextId, context.sessionEpoch) &&
+      this.isCurrentAuthUser(context.loginUid);
+    if (!isObserverActive()) return;
+    let subscription = this.matchSyncSubscription;
+    if (subscription?.contextId === context.contextId) {
+      if (subscription.players.has(playerId)) return;
+      subscription.players.add(playerId);
+      subscription.channel.refresh();
+    } else {
+      this.stopObservingAllMatches();
+      const players = new Set([playerId]);
+      const key = `match-sync:${matchId}`;
+      const channel = new MatchSyncChannel({
+        inviteId: context.inviteId,
+        matchId,
+        requiredPlayerIds: () => players,
+        createSocket: (url, protocols) => new WebSocket(url, protocols),
+        getProtocols: async (forceRefresh) => {
+          const tokenProvider = this.getUserBoundAuthTokenProvider(
+            context.loginUid,
+          );
+          const token = await tokenProvider(forceRefresh);
+          tokenProvider.assertCurrentUser();
+          return createMatchSyncSocketProtocols(token);
+        },
+        readMatches: (signal) =>
+          readMatchSyncViaApi(
+            context.inviteId,
+            matchId,
+            this.getUserBoundAuthTokenProvider(context.loginUid),
+            { signal },
+          ),
+        isActive: isObserverActive,
+        isOnline: () => typeof navigator === "undefined" || navigator.onLine,
+        isVisible: () =>
+          typeof document === "undefined" ||
+          document.visibilityState === "visible",
+        addWakeListener: (listener) => {
+          if (typeof window === "undefined") return () => undefined;
+          window.addEventListener("online", listener);
+          window.addEventListener("offline", listener);
+          window.addEventListener("pageshow", listener);
+          document.addEventListener("visibilitychange", listener);
+          return () => {
+            window.removeEventListener("online", listener);
+            window.removeEventListener("offline", listener);
+            window.removeEventListener("pageshow", listener);
+            document.removeEventListener("visibilitychange", listener);
+          };
+        },
+        onSnapshot: (snapshot) =>
+          this.applyMatchSyncSnapshot(context, snapshot, players),
+        onError: (error) => console.error("Error receiving matches:", error),
+        setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimer: (timer) => clearTimeout(timer),
+        random: Math.random,
       });
+      let stopped = false;
+      const stop = () => {
+        if (stopped) return;
+        stopped = true;
+        channel.stop();
+        this.unregisterObserverCleanup(context.contextId, key);
+        for (const uid of players)
+          this.observedMatchSnapshots.delete(`${matchId}_${uid}`);
+        if (this.matchSyncSubscription?.channel === channel)
+          this.matchSyncSubscription = null;
+        decrementLifecycleCounter("connectionObservers");
+      };
+      if (!this.registerObserverCleanup(context.contextId, key, stop)) {
+        channel.stop();
+        return;
+      }
+      subscription = { contextId: context.contextId, channel, players, stop };
+      this.matchSyncSubscription = subscription;
+      incrementLifecycleCounter("connectionObservers");
     }
-    this.matchRefs[key] = matchRef;
-    incrementLifecycleCounter("connectionObservers");
-
-    onValue(
-      matchRef,
-      (snapshot) => {
-        if (!isObserverActive()) {
-          return;
-        }
-        const matchData: Match | null = snapshot.val();
-        if (matchData) {
-          this.observedMatchSnapshots.set(key, matchData);
-          didReceiveMatchUpdate(matchData, playerId, matchId);
-        } else {
-          this.observedMatchSnapshots.delete(key);
-        }
-      },
-      (error) => {
-        if (!isObserverActive()) {
-          return;
-        }
-        console.error("Error observing match data:", error);
-      },
-    );
 
     this.getPlayerProfileWithRetry(playerId, isObserverActive)
       .then((profile) => {
@@ -5387,18 +5410,43 @@ class Connection {
       });
   }
 
+  private applyMatchSyncSnapshot(
+    context: MatchRuntimeContext,
+    snapshot: MatchSyncSnapshot,
+    players: ReadonlySet<string>,
+  ): void {
+    const isActive = () =>
+      this.isContextActive(context.contextId, context.sessionEpoch) &&
+      this.isCurrentAuthUser(context.loginUid);
+    if (
+      !isActive() ||
+      snapshot.inviteId !== context.inviteId ||
+      snapshot.matchId !== context.matchId
+    )
+      return;
+    const matches = new Map<string, Match>();
+    for (const playerId of players) {
+      if (context.canWrite && context.actorUid === playerId) continue;
+      const match =
+        playerId === snapshot.hostPlayerId
+          ? snapshot.hostMatch
+          : playerId === snapshot.guestPlayerId
+            ? snapshot.guestMatch
+            : null;
+      const key = `${context.matchId}_${playerId}`;
+      if (match) {
+        this.observedMatchSnapshots.set(key, match);
+        matches.set(playerId, match);
+      } else {
+        this.observedMatchSnapshots.delete(key);
+      }
+    }
+    didReceiveMatchUpdates(matches, context.matchId, isActive);
+  }
+
   private stopObservingAllMatches(): void {
-    let removedMatchCount = 0;
-    for (const key in this.matchRefs) {
-      off(this.matchRefs[key]);
-      console.log(`Stopped observing match for key ${key}`);
-      removedMatchCount += 1;
-    }
-    this.matchRefs = {};
+    this.matchSyncSubscription?.stop();
     this.observedMatchSnapshots.clear();
-    if (removedMatchCount > 0) {
-      decrementLifecycleCounter("connectionObservers", removedMatchCount);
-    }
   }
 }
 

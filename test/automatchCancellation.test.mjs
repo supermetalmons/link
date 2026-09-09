@@ -30,7 +30,6 @@ const methods = [
   "isContextActive",
   "isSessionEpochActive",
   "isCurrentAuthUser",
-  "observeContextValue",
   "registerObserverCleanup",
   "unregisterObserverCleanup",
   "observeInviteMetadata",
@@ -215,10 +214,7 @@ function harness(invite, onMatchRead = () => {}) {
     observeWagers: noop,
     observeMatch: (uid) => events.matches.push(uid),
   });
-  instance.observerRegistry = new Registry(
-    (contextId, epoch) => instance.isContextActive(contextId, epoch),
-    noop,
-  );
+  instance.observerRegistry = new Registry(noop);
   const settle = async () => {
     await new Promise(setImmediate);
     assert.deepEqual(events.errors, []);

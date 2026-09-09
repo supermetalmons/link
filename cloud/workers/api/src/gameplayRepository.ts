@@ -4,6 +4,7 @@ import {
   createAutomatchPersistence,
   type AutomatchPersistence,
 } from "./automatchPersistence.ts";
+import { notifyMatchSyncInvites } from "./matchSyncNotifications.ts";
 import { createWagerStateRtdbClient } from "./wagerStateRepository.ts";
 import type { HistoricalMatchPair } from "@mons/shared/game-sessions";
 import type {
@@ -307,8 +308,12 @@ export function createGameplayRepository(
 ): GameplayRepository {
   const automatchPersistence = createAutomatchPersistence(d1, rtdbClient, {
     now,
-    onCommitted: (inviteId) =>
-      notifyInviteSourceChanged(env, { [`invites/${inviteId}`]: true }, true),
+    onCommitted: async (inviteId) => {
+      await Promise.all([
+        notifyInviteSourceChanged(env, { [`invites/${inviteId}`]: true }, true),
+        notifyMatchSyncInvites(env, [inviteId]),
+      ]);
+    },
   });
   const source = createWagerStateRtdbClient(
     env.PROFILE_DB,

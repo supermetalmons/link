@@ -147,7 +147,7 @@ test("browser connection code has no RTDB profile-link dependency", () => {
   assert.doesNotMatch(freshSignInHandler, /isWatchOnly/);
 });
 
-test("browser match snapshots use the API while live subscriptions retain RTDB", () => {
+test("browser match snapshots and live subscriptions use Cloudflare", () => {
   const source = readFileSync(
     new URL("../src/connection/connection.ts", import.meta.url),
     "utf8",
@@ -164,6 +164,7 @@ test("browser match snapshots use the API while live subscriptions retain RTDB",
   );
   assert.match(reconnect, /await readMatchSnapshotViaApi\(/);
   const live = source.slice(source.indexOf("private observeMatch("));
-  assert.match(live, /`players\/\$\{playerId\}\/matches\/\$\{matchId\}`/);
-  assert.match(live, /onValue\(\s*matchRef,/);
+  assert.match(live, /new MatchSyncChannel\(/);
+  assert.match(live, /readMatchSyncViaApi\(/);
+  assert.doesNotMatch(source, /firebase\/database|\bonValue\(/);
 });

@@ -41,6 +41,19 @@ function deferred() {
   return { promise, resolve };
 }
 
+async function advanceToAlarm(room: Room): Promise<void> {
+  const scheduled = await runInDurableObject(room, (_instance, state) =>
+    state.storage.getAlarm(),
+  );
+  if (scheduled !== null)
+    vi.spyOn(Date, "now").mockReturnValue(Math.max(Date.now(), scheduled));
+}
+
+async function runScheduledAlarm(room: Room): Promise<boolean> {
+  await advanceToAlarm(room);
+  return runDurableObjectAlarm(room);
+}
+
 async function installSource(room: Room, source: Source) {
   await runInDurableObject(room, (instance) => {
     const target = instance as unknown as {
@@ -258,7 +271,7 @@ describe("durable invite metadata", () => {
     source.value = { ...invite, hostRematches: "1;2x", guestRematches: "1;2" };
     await evictDurableObject(room);
     await installSource(room, source);
-    expect(await runDurableObjectAlarm(room)).toBe(true);
+    expect(await runScheduledAlarm(room)).toBe(true);
     expect(source.reads).toBe(before + 1);
     expect(JSON.parse(await client.read()).snapshot).toMatchObject({
       revision: 2,
@@ -273,12 +286,14 @@ describe("durable invite metadata", () => {
   });
 
   it("returns notifications while a source read is pending and preserves their immediate successor alarm", async () => {
-    const now = Date.now() + 24 * 60 * 60 * 1_000;
+    let now = Date.now() + 24 * 60 * 60 * 1_000;
     const clock = vi.spyOn(Date, "now").mockReturnValue(now);
     try {
       const { room, inviteId, source } = await fixture();
       const client = acceptSocket(await metadataResponse(room, inviteId));
       await client.read();
+      now += INVITE_METADATA_REFRESH_MS;
+      clock.mockReturnValue(now);
       const nextAlarm = await runInDurableObject(
         room,
         async (instance, state) => {
@@ -303,7 +318,7 @@ describe("durable invite metadata", () => {
       );
       expect(nextAlarm).toBe(now);
       expect(JSON.parse(await client.read()).snapshot.hostRematches).toBe("1");
-      expect(await runDurableObjectAlarm(room)).toBe(true);
+      expect(await runScheduledAlarm(room)).toBe(true);
       expect(
         await runInDurableObject(room, (_instance, state) =>
           state.storage.getAlarm(),
@@ -328,7 +343,7 @@ describe("durable invite metadata", () => {
     source.read = async () => {
       throw new Error("offline");
     };
-    expect(await runDurableObjectAlarm(room)).toBe(true);
+    expect(await runScheduledAlarm(room)).toBe(true);
     expect(errors).toHaveBeenCalledOnce();
     expect(
       await runInDurableObject(room, (_instance, state) =>
@@ -337,15 +352,15 @@ describe("durable invite metadata", () => {
     ).not.toBeNull();
     source.read = undefined;
     source.value = { ...invite, guestRematches: "1" };
-    expect(await runDurableObjectAlarm(room)).toBe(true);
+    expect(await runScheduledAlarm(room)).toBe(true);
     expect(JSON.parse(await client.read()).snapshot.guestRematches).toBe("1");
     await closeSocket(client.socket);
     const reads = source.reads;
-    expect(await runDurableObjectAlarm(room)).toBe(true);
+    expect(await runScheduledAlarm(room)).toBe(true);
     expect(source.reads).toBe(reads);
-    expect(await runDurableObjectAlarm(room)).toBe(false);
+    expect(await runScheduledAlarm(room)).toBe(false);
     await room.notifyMetadataChanged(inviteId);
-    expect(await runDurableObjectAlarm(room)).toBe(false);
+    expect(await runScheduledAlarm(room)).toBe(false);
     expect(reaction.socket.readyState).toBe(WebSocket.OPEN);
   });
 
@@ -369,7 +384,7 @@ describe("durable invite metadata", () => {
       }),
     );
     source.value = { ...invite, guestId: null, password: "private" };
-    await runDurableObjectAlarm(room);
+    await runScheduledAlarm(room);
     expect(await closed).toBe(1008);
     expect(JSON.parse(await host.read()).snapshot.guestId).toBeNull();
     expect(host.socket.readyState).toBe(WebSocket.OPEN);
@@ -405,7 +420,7 @@ describe("durable invite metadata", () => {
     });
     expect(JSON.parse(await reactions.read()).type).toBe("reaction");
     source.value = { ...invite, hostRematches: "1" };
-    await runDurableObjectAlarm(room);
+    await runScheduledAlarm(room);
     expect(JSON.parse(await metadata.read()).type).toBe("snapshot");
     expect(metadata.messages).toEqual([]);
     expect(reactions.messages).toEqual([]);
@@ -437,7 +452,7 @@ describe("durable invite metadata", () => {
       ),
     );
     const reactions = await Promise.all(
-      Array.from({ length: 240 }, async (_, index) =>
+      Array.from({ length: 232 }, async (_, index) =>
         acceptSocket(
           await room.fetch("https://room.internal/socket", {
             headers: {
@@ -483,7 +498,7 @@ describe("durable invite metadata", () => {
         room,
         (_instance, state) => state.getWebSockets().length,
       ),
-    ).toBe(504);
+    ).toBe(496);
     expect(
       (
         await room.fetch("https://room.internal/socket", {

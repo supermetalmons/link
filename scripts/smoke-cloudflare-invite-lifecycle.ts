@@ -17,6 +17,7 @@ import {
   isSubmitMoveResponse,
   MATCH_MOVE_PATH,
   countMoveHistory,
+  normalizeMatchSnapshot,
   type SubmitMoveRequest,
 } from "@mons/shared/game-sessions";
 import { INVITE_ID_RANDOM_LENGTH, isSafeFirebaseKey } from "@mons/shared/ids";
@@ -27,6 +28,17 @@ import {
   isReadInviteMetadataResponse,
 } from "@mons/shared/invite-metadata";
 import type { InviteMetadataSnapshot } from "@mons/shared/invite-metadata";
+import {
+  MATCH_SYNC_MAX_MESSAGE_BYTES,
+  MATCH_SYNC_SOCKET_PROTOCOL,
+  isMatchSyncMessage,
+  isReadMatchSyncResponse,
+  type MatchSyncSnapshot,
+} from "@mons/shared/match-sync";
+import {
+  REACTION_HEARTBEAT_REQUEST,
+  REACTION_HEARTBEAT_RESPONSE,
+} from "@mons/shared/reactions";
 import { formatMatchTimer, MATCH_TIMER_DURATION_MS } from "@mons/shared/timers";
 
 const ORIGIN = "https://mons.link";
@@ -59,6 +71,7 @@ type SmokeSocket = {
   protocol: string;
   on(event: string, listener: (...args: unknown[]) => void): unknown;
   removeAllListeners(): unknown;
+  send(data: string): unknown;
   terminate(): void;
 };
 type Dependencies = {
@@ -174,11 +187,11 @@ function record(value: unknown): value is Record<string, unknown> {
 async function readJson(
   response: Response,
   signal: AbortSignal,
+  maxBytes = INVITE_METADATA_MAX_MESSAGE_BYTES,
 ): Promise<unknown> {
   if (
     !response.body ||
-    Number(response.headers.get("Content-Length")) >
-      INVITE_METADATA_MAX_MESSAGE_BYTES
+    Number(response.headers.get("Content-Length")) > maxBytes
   ) {
     void response.body?.cancel().catch(() => undefined);
     throw new SmokeFailure(
@@ -200,7 +213,7 @@ async function readJson(
       signal.throwIfAborted();
       if (chunk.done) break;
       bytes += chunk.value.byteLength;
-      if (bytes > INVITE_METADATA_MAX_MESSAGE_BYTES) throw new Error();
+      if (bytes > maxBytes) throw new Error();
       text += decoder.decode(chunk.value, { stream: true });
     }
     return JSON.parse(text + decoder.decode()) as unknown;
@@ -219,6 +232,7 @@ async function requestJson(
   url: string,
   init: RequestInit,
   dependencies: Dependencies,
+  maxBytes = INVITE_METADATA_MAX_MESSAGE_BYTES,
 ): Promise<HttpResult> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -247,7 +261,7 @@ async function requestJson(
     return {
       status: response.status,
       headers: response.headers,
-      payload: await readJson(response, controller.signal),
+      payload: await readJson(response, controller.signal, maxBytes),
     };
   };
   try {
@@ -349,6 +363,7 @@ async function apiRequest(
   session: Session,
   body: Record<string, unknown> | null,
   dependencies: Dependencies,
+  maxBytes = INVITE_METADATA_MAX_MESSAGE_BYTES,
 ): Promise<unknown> {
   return retry(async () => {
     const result = await requestJson(
@@ -364,6 +379,7 @@ async function apiRequest(
         ...(body ? { body: JSON.stringify(body) } : {}),
       },
       dependencies,
+      maxBytes,
     );
     expectOk(result, "Lifecycle API request");
     if (
@@ -397,6 +413,209 @@ async function mutation<T>(
   if (!isDeepStrictEqual(first, replay))
     throw new SmokeFailure("Lifecycle operation replay changed its receipt.");
   return first;
+}
+
+type MatchSyncState = Omit<MatchSyncSnapshot, "revision">;
+
+function matchSyncState(snapshot: MatchSyncSnapshot): MatchSyncState {
+  const { revision: _revision, ...state } = snapshot;
+  return state;
+}
+
+function matchChannel(
+  options: Options,
+  inviteId: string,
+  matchId: string,
+  session: Session | null,
+  dependencies: Dependencies,
+  minimumRevision = 0,
+) {
+  let socket: SmokeSocket;
+  try {
+    socket = dependencies.connect(
+      `${options.baseUrl.replace(/^https:/, "wss:")}/invites/${inviteId}/matches/${matchId}/socket`,
+      {
+        origin: ORIGIN,
+        ...(session
+          ? { headers: { Authorization: `Bearer ${session.idToken}` } }
+          : {}),
+        followRedirects: false,
+        handshakeTimeout: SOCKET_TIMEOUT_MS,
+        maxPayload: MATCH_SYNC_MAX_MESSAGE_BYTES,
+        perMessageDeflate: false,
+      },
+      MATCH_SYNC_SOCKET_PROTOCOL,
+    );
+  } catch {
+    throw new SmokeFailure("Lifecycle match socket could not connect.");
+  }
+  let current: MatchSyncSnapshot | null = null;
+  let failure: SmokeFailure | null = null;
+  let closed = false;
+  let heartbeatReceived = false;
+  const waiting = new Set<() => void>();
+  const notify = () => {
+    for (const check of waiting) check();
+  };
+  const fail = (message: string) => {
+    failure ||= new SmokeFailure(message);
+    notify();
+  };
+  socket.on("error", () => fail("Lifecycle match socket failed."));
+  socket.on("close", () => {
+    if (!closed) fail("Lifecycle match socket closed early.");
+  });
+  socket.on("unexpected-response", (_request, response) => {
+    if (record(response) && typeof response.destroy === "function")
+      response.destroy();
+    fail("Lifecycle match socket upgrade failed.");
+  });
+  socket.on("message", (data, isBinary) => {
+    try {
+      const bytes = Buffer.isBuffer(data)
+        ? data
+        : data instanceof ArrayBuffer
+          ? Buffer.from(data)
+          : Array.isArray(data) && data.every(Buffer.isBuffer)
+            ? Buffer.concat(data)
+            : null;
+      if (
+        isBinary ||
+        !bytes ||
+        bytes.byteLength > MATCH_SYNC_MAX_MESSAGE_BYTES ||
+        socket.protocol !== MATCH_SYNC_SOCKET_PROTOCOL
+      )
+        throw new Error();
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      if (text === REACTION_HEARTBEAT_RESPONSE) {
+        heartbeatReceived = true;
+        notify();
+        return;
+      }
+      const payload: unknown = JSON.parse(text);
+      if (
+        !isMatchSyncMessage(payload) ||
+        payload.snapshot.inviteId !== inviteId ||
+        payload.snapshot.matchId !== matchId ||
+        payload.snapshot.revision < minimumRevision ||
+        (current &&
+          (payload.snapshot.revision < current.revision ||
+            (payload.snapshot.revision === current.revision &&
+              !isDeepStrictEqual(payload.snapshot, current))))
+      )
+        throw new Error();
+      current = payload.snapshot;
+      notify();
+    } catch {
+      fail("Lifecycle match socket received an invalid snapshot.");
+    }
+  });
+  const waitFor = (ready: () => boolean, label: string): Promise<void> =>
+    new Promise((resolveWait, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      const finish = (error?: SmokeFailure) => {
+        if (settled) return;
+        settled = true;
+        if (timer) dependencies.clearTimeout(timer);
+        waiting.delete(check);
+        if (error) reject(error);
+        else resolveWait();
+      };
+      const check = () => {
+        if (failure) finish(failure);
+        else if (closed)
+          finish(new SmokeFailure("Lifecycle match socket was closed."));
+        else if (ready()) finish();
+      };
+      waiting.add(check);
+      timer = dependencies.setTimeout(
+        () => finish(new SmokeFailure(`Lifecycle match ${label} timed out.`)),
+        SOCKET_TIMEOUT_MS,
+      );
+      check();
+    });
+  return {
+    async waitFor(expected: MatchSyncState): Promise<MatchSyncSnapshot> {
+      await waitFor(
+        () =>
+          current !== null &&
+          isDeepStrictEqual(matchSyncState(current), expected),
+        "update",
+      );
+      return current!;
+    },
+    async heartbeat(): Promise<void> {
+      heartbeatReceived = false;
+      const pending = waitFor(() => heartbeatReceived, "heartbeat");
+      try {
+        socket.send(REACTION_HEARTBEAT_REQUEST);
+      } catch {
+        fail("Lifecycle match heartbeat could not be sent.");
+      }
+      await pending;
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      notify();
+      socket.removeAllListeners();
+      socket.on("error", () => undefined);
+      try {
+        socket.terminate();
+      } catch {}
+    },
+  };
+}
+
+type MatchChannel = ReturnType<typeof matchChannel>;
+
+async function verifyMatchChannels(
+  options: Options,
+  inviteId: string,
+  matchId: string,
+  host: Session,
+  guest: Session | null,
+  guestCreated: boolean,
+  channels: MatchChannel[],
+  dependencies: Dependencies,
+): Promise<MatchSyncSnapshot> {
+  const hostValue = (await readMatch(host.uid, matchId, host, dependencies))
+    .value;
+  const guestValue =
+    guestCreated && guest
+      ? (await readMatch(guest.uid, matchId, guest, dependencies)).value
+      : null;
+  const expected: MatchSyncState = {
+    inviteId,
+    matchId,
+    hostPlayerId: host.uid,
+    guestPlayerId: guest?.uid ?? null,
+    hostMatch: normalizeMatchSnapshot(hostValue),
+    guestMatch: guestValue ? normalizeMatchSnapshot(guestValue) : null,
+  };
+  if (!expected.hostMatch || (guestCreated && !expected.guestMatch))
+    throw new SmokeFailure("Lifecycle match source was invalid.");
+  const observed = await Promise.all(
+    channels.map((channel) => channel.waitFor(expected)),
+  );
+  const response = await apiRequest(
+    options,
+    `/invites/${inviteId}/matches/${matchId}/snapshot`,
+    host,
+    null,
+    dependencies,
+    MATCH_SYNC_MAX_MESSAGE_BYTES,
+  );
+  if (
+    !isReadMatchSyncResponse(response) ||
+    !isDeepStrictEqual(matchSyncState(response.snapshot), expected) ||
+    observed.some((snapshot) => snapshot.revision > response.snapshot.revision)
+  )
+    throw new SmokeFailure(
+      "Lifecycle match HTTP and socket snapshots disagreed.",
+    );
+  return response.snapshot;
 }
 
 function metadataChannel(
@@ -844,6 +1063,7 @@ async function verifyLiveMatch(
   host: Session,
   guest: Session,
   matchId: string,
+  channels: MatchChannel[],
   dependencies: Dependencies,
 ): Promise<void> {
   const hostMatch = await readMatch(host.uid, matchId, host, dependencies);
@@ -906,6 +1126,16 @@ async function verifyLiveMatch(
       throw new SmokeFailure(
         "Lifecycle API move changed other state or was not observed by the opponent.",
       );
+    await verifyMatchChannels(
+      options,
+      inviteId,
+      matchId,
+      host,
+      guest,
+      true,
+      channels,
+      dependencies,
+    );
   }
   const legacyMatch = nextLegalMatch(cumulativeMatch);
   const legacy = {
@@ -945,6 +1175,16 @@ async function verifyLiveMatch(
       throw new SmokeFailure(
         "Lifecycle legacy API move changed unexpected match state.",
       );
+    await verifyMatchChannels(
+      options,
+      inviteId,
+      matchId,
+      host,
+      guest,
+      true,
+      channels,
+      dependencies,
+    );
   }
   const before = await readMatch(host.uid, matchId, host, dependencies);
   await mutation(
@@ -969,6 +1209,30 @@ async function verifyLiveMatch(
     throw new SmokeFailure(
       "Lifecycle API surrender changed other state or was not observed by the opponent.",
     );
+  const final = await verifyMatchChannels(
+    options,
+    inviteId,
+    matchId,
+    host,
+    guest,
+    true,
+    channels,
+    dependencies,
+  );
+  const reconnect = matchChannel(
+    options,
+    inviteId,
+    matchId,
+    guest,
+    dependencies,
+    final.revision,
+  );
+  try {
+    await reconnect.waitFor(matchSyncState(final));
+    await reconnect.heartbeat();
+  } finally {
+    reconnect.close();
+  }
 }
 
 async function verifySurrenderRules(
@@ -1076,6 +1340,20 @@ async function runSmoke(
   };
   dependencies.log(JSON.stringify({ inviteId, operationIds }));
   const sessions: Session[] = [];
+  const matchChannels: MatchChannel[] = [];
+  let activeMatchChannels: MatchChannel[] = [];
+  const observeMatch = (matchId: string, session: Session | null) => {
+    const socket = matchChannel(
+      validated,
+      inviteId,
+      matchId,
+      session,
+      dependencies,
+    );
+    matchChannels.push(socket);
+    activeMatchChannels.push(socket);
+    return socket;
+  };
   let channel: ReturnType<typeof metadataChannel> | null = null;
   let createAttempted = false;
   let paired = false;
@@ -1132,6 +1410,19 @@ async function runSmoke(
     channel = metadataChannel(validated, inviteId, host, dependencies);
     await channel.waitFor(snapshot);
     report.checks.push("pending-http-and-authenticated-socket");
+    const hostMatchChannel = observeMatch(inviteId, host);
+    await verifyMatchChannels(
+      validated,
+      inviteId,
+      inviteId,
+      host,
+      null,
+      false,
+      activeMatchChannels,
+      dependencies,
+    );
+    await hostMatchChannel.heartbeat();
+    report.checks.push("pending-match-http-socket-and-heartbeat");
     await mutation(
       validated,
       "/invites/join",
@@ -1171,6 +1462,29 @@ async function runSmoke(
         "Lifecycle participants saw different invite metadata.",
       );
     report.checks.push("join-receipt-replay-and-live-metadata");
+    await verifyMatchChannels(
+      validated,
+      inviteId,
+      inviteId,
+      host,
+      guest,
+      true,
+      activeMatchChannels,
+      dependencies,
+    );
+    observeMatch(inviteId, guest);
+    observeMatch(inviteId, null);
+    await verifyMatchChannels(
+      validated,
+      inviteId,
+      inviteId,
+      host,
+      guest,
+      true,
+      activeMatchChannels,
+      dependencies,
+    );
+    report.checks.push("join-live-match-and-public-spectator");
     await verifyTimerRules(host, inviteId, dependencies);
     report.checks.push("firebase-timer-and-claim-write-rules");
     if (!validated.surrenderRulesPending) {
@@ -1183,10 +1497,12 @@ async function runSmoke(
       host,
       guest,
       inviteId,
+      activeMatchChannels,
       dependencies,
     );
     report.checks.push("api-move-surrender-replay-and-opponent-read");
     report.checks.push("cumulative-moves-takebacks-and-reordered-replay");
+    report.checks.push("live-match-moves-takebacks-surrender-and-reconnect");
     if (!validated.moveRulesPending)
       report.checks.push("firebase-move-write-rules");
     const hostRematch = await mutation(
@@ -1215,6 +1531,19 @@ async function runSmoke(
       dependencies,
     );
     await channel.waitFor(snapshot);
+    for (const socket of activeMatchChannels) socket.close();
+    activeMatchChannels = [];
+    observeMatch(`${inviteId}1`, host);
+    await verifyMatchChannels(
+      validated,
+      inviteId,
+      `${inviteId}1`,
+      host,
+      guest,
+      false,
+      activeMatchChannels,
+      dependencies,
+    );
     const guestRematch = await mutation(
       validated,
       "/rematches/propose",
@@ -1248,15 +1577,39 @@ async function runSmoke(
     );
     await channel.waitFor(snapshot);
     report.checks.push("both-rematch-receipts-and-live-metadata");
+    await verifyMatchChannels(
+      validated,
+      inviteId,
+      `${inviteId}1`,
+      host,
+      guest,
+      true,
+      activeMatchChannels,
+      dependencies,
+    );
+    observeMatch(`${inviteId}1`, guest);
+    observeMatch(`${inviteId}1`, null);
+    await verifyMatchChannels(
+      validated,
+      inviteId,
+      `${inviteId}1`,
+      host,
+      guest,
+      true,
+      activeMatchChannels,
+      dependencies,
+    );
     await verifyLiveMatch(
       validated,
       inviteId,
       host,
       guest,
       `${inviteId}1`,
+      activeMatchChannels,
       dependencies,
     );
     report.checks.push("api-rematch-move-surrender-replay-and-opponent-read");
+    report.checks.push("rematch-live-creation-moves-surrender-and-reconnect");
     await mutation(
       validated,
       "/rematches/end",
@@ -1316,6 +1669,7 @@ async function runSmoke(
         : new SmokeFailure("Lifecycle smoke failed.");
   } finally {
     channel?.close();
+    for (const socket of matchChannels) socket.close();
     if (!terminal && createAttempted && sessions.length === 2) {
       const [host, guest] = sessions;
       try {

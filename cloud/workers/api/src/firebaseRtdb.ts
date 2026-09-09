@@ -3,6 +3,7 @@ import { createGoogleAccessToken } from "./googleAuth.ts";
 import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
 import { notifyInviteSourceChanged } from "./inviteWagersNotifications.ts";
 import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { notifyMatchSyncChanged } from "./matchSyncNotifications.ts";
 import {
   isReadMatchSnapshotRequest,
   MAX_GAME_SESSION_GAME_VARIANT_BYTES,
@@ -380,7 +381,10 @@ export function createFirebaseRtdbClient(
         committed = true;
         await cancelResponseBody(response);
       } finally {
-        await notifyInviteSourceChanged(env, updates, committed);
+        await Promise.all([
+          notifyInviteSourceChanged(env, updates, committed),
+          notifyMatchSyncChanged(env, updates),
+        ]);
       }
     },
     async transactPath(path, updater, signal, beforeWrite) {
@@ -409,6 +413,7 @@ export function createFirebaseRtdbClient(
           updater(scopedPath === null ? current : structuredClone(current)),
         );
         if (!decision.commit) {
+          await notifyMatchSyncChanged(env, { [path]: current });
           return {
             committed: false,
             decision: decision.decision,
@@ -459,11 +464,14 @@ export function createFirebaseRtdbClient(
           };
         } finally {
           if (!conflict) {
-            await notifyInviteSourceChanged(
-              env,
-              { [path]: decision.value },
-              committed,
-            );
+            await Promise.all([
+              notifyInviteSourceChanged(
+                env,
+                { [path]: decision.value },
+                committed,
+              ),
+              notifyMatchSyncChanged(env, { [path]: decision.value }),
+            ]);
           }
         }
       }

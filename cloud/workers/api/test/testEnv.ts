@@ -272,6 +272,7 @@ export const TELEGRAM_TEST_ENV = {
   AUTH_STATE_DB: profileGamesDb,
   AUTH_RATE_LIMITER: rateLimit,
   MOVE_RATE_LIMITER: rateLimit,
+  MATCH_SYNC_RATE_LIMITER: rateLimit,
   REACTION_RATE_LIMITER: rateLimit,
   INVITE_REACTIONS: inviteReactions,
   EVENT_PROGRESS_WORKFLOW: workflow,

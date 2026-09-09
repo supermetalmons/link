@@ -5815,6 +5815,22 @@ function drainRemoteMoveHistories(
   return didMutate;
 }
 
+export function didReceiveMatchUpdates(
+  matches: ReadonlyMap<string, Match>,
+  matchId: string,
+  isActive: () => boolean,
+): void {
+  if (!isActive() || connection.getActiveMatchId() !== matchId) return;
+  const sessionGuard = getSessionGuard();
+  for (const match of matches.values()) {
+    rememberRemoteMoveHistory(match, matchId);
+  }
+  for (const [playerId, match] of matches) {
+    if (!isActive() || !sessionGuard()) return;
+    didReceiveMatchUpdate(match, playerId, matchId);
+  }
+}
+
 export function didReceiveMatchUpdate(
   match: Match,
   matchPlayerUid: string,

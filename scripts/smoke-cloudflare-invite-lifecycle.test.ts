@@ -15,9 +15,19 @@ import {
   countMoveHistory,
   isMoveHistoryPrefix,
   isSubmitMoveRequest,
+  normalizeMatchSnapshot,
 } from "@mons/shared/game-sessions";
 import { parseStrictMatchTimer } from "@mons/shared/timers";
 import { INVITE_METADATA_MAX_MESSAGE_BYTES } from "@mons/shared/invite-metadata";
+import {
+  MATCH_SYNC_MAX_MESSAGE_BYTES,
+  MATCH_SYNC_SOCKET_PROTOCOL,
+  type MatchSyncSnapshot,
+} from "@mons/shared/match-sync";
+import {
+  REACTION_HEARTBEAT_REQUEST,
+  REACTION_HEARTBEAT_RESPONSE,
+} from "@mons/shared/reactions";
 import { parseArgs, runSmoke } from "./smoke-cloudflare-invite-lifecycle.ts";
 import type {
   Dependencies,
@@ -81,8 +91,30 @@ type Match = {
 };
 
 class FakeSocket extends EventEmitter implements SmokeSocket {
-  protocol = "mons-invite-metadata-v1";
   terminated = false;
+  sent: string[] = [];
+  readonly protocol: string;
+  readonly matchId: string | null;
+  readonly suppressHeartbeat: boolean;
+  constructor(
+    protocol: string,
+    matchId: string | null,
+    suppressHeartbeat: boolean,
+  ) {
+    super();
+    this.protocol = protocol;
+    this.matchId = matchId;
+    this.suppressHeartbeat = suppressHeartbeat;
+  }
+  send(data: string) {
+    assert.equal(data, REACTION_HEARTBEAT_REQUEST);
+    assert.equal(this.protocol, MATCH_SYNC_SOCKET_PROTOCOL);
+    this.sent.push(data);
+    if (!this.suppressHeartbeat)
+      queueMicrotask(() =>
+        this.emit("message", Buffer.from(REACTION_HEARTBEAT_RESPONSE), false),
+      );
+  }
   terminate() {
     this.terminated = true;
   }
@@ -95,7 +127,12 @@ function harness(
       response: () => Response,
     ) => Promise<Response> | Response;
     socketFrame?: (snapshot: Source) => unknown;
+    matchSocketFrame?: (snapshot: MatchSyncSnapshot) => unknown;
     suppressUpdates?: boolean;
+    suppressMatchUpdates?: boolean;
+    suppressHeartbeat?: boolean;
+    failMatchReconnect?: boolean;
+    reconnectMatchRevision?: (revision: number) => number;
     fastTimers?: boolean;
     directMovesAllowed?: boolean;
   } = {},
@@ -117,6 +154,7 @@ function harness(
     { path: string; body: unknown; payload: unknown }
   >();
   const matches = new Map<string, { value: Match; revision: number }>();
+  const syncSnapshots = new Map<string, MatchSyncSnapshot>();
   const timers = new Set<ReturnType<typeof setTimeout>>();
   const timeoutDurations: number[] = [];
   const owner = (token: string | null) =>
@@ -127,18 +165,66 @@ function harness(
       type: "snapshot",
       snapshot,
     };
+  const syncSnapshot = (matchId: string): MatchSyncSnapshot => {
+    assert.ok(source);
+    const previous = syncSnapshots.get(matchId);
+    const next = {
+      inviteId: INVITE,
+      matchId,
+      revision: previous?.revision ?? 1,
+      hostPlayerId: HOST,
+      guestPlayerId: source.guestId,
+      hostMatch: normalizeMatchSnapshot(
+        matches.get(`${HOST}/${matchId}`)?.value ?? null,
+      ),
+      guestMatch: normalizeMatchSnapshot(
+        matches.get(`${GUEST}/${matchId}`)?.value ?? null,
+      ),
+    };
+    if (previous && JSON.stringify(previous) !== JSON.stringify(next))
+      next.revision++;
+    syncSnapshots.set(matchId, next);
+    return structuredClone(next);
+  };
+  const matchFrame = (snapshot: MatchSyncSnapshot) =>
+    options.matchSocketFrame?.(snapshot) ?? {
+      schemaVersion: 1,
+      type: "snapshot",
+      snapshot,
+    };
+  const broadcastMatches = (matchId?: string) => {
+    if (options.suppressUpdates || options.suppressMatchUpdates) return;
+    for (const socket of sockets) {
+      if (
+        socket.terminated ||
+        !socket.matchId ||
+        (matchId && socket.matchId !== matchId)
+      )
+        continue;
+      const snapshot = syncSnapshot(socket.matchId);
+      queueMicrotask(() => {
+        if (!socket.terminated)
+          socket.emit(
+            "message",
+            Buffer.from(JSON.stringify(matchFrame(snapshot))),
+            false,
+          );
+      });
+    }
+  };
   const broadcast = () => {
     if (!source || options.suppressUpdates) return;
     const value = structuredClone(source);
     queueMicrotask(() => {
       for (const socket of sockets)
-        if (!socket.terminated)
+        if (!socket.terminated && !socket.matchId)
           socket.emit(
             "message",
             Buffer.from(JSON.stringify(frame(value))),
             false,
           );
     });
+    broadcastMatches();
   };
   const seed = (uid: string, matchId: string, emojiId: number): Match => ({
     version: 2,
@@ -282,6 +368,13 @@ function harness(
         },
       });
     }
+    const syncPath = new RegExp(
+      `^/invites/${INVITE}/matches/(${INVITE}1?)/snapshot$`,
+    ).exec(url.pathname);
+    if (syncPath) {
+      assert.equal(method, "GET");
+      return json({ ok: true, snapshot: syncSnapshot(syncPath[1]) });
+    }
     assert.equal(method, "POST");
     if (url.pathname === "/matches/move") {
       assert.ok(isSubmitMoveRequest(body));
@@ -348,6 +441,7 @@ function harness(
         };
         match.revision++;
         outcome = "applied";
+        broadcastMatches(body.matchId);
       }
       return json({
         ok: true,
@@ -370,6 +464,7 @@ function harness(
       if (match.value.status !== "surrendered") {
         match.value.status = "surrendered";
         match.revision++;
+        broadcastMatches(String(body.matchId));
       }
       return json({
         ok: true,
@@ -500,17 +595,51 @@ function harness(
     },
     connect: (url, socketOptions, protocol) => {
       connections.push({ url, options: socketOptions, protocol });
-      assert.equal(
-        socketOptions.headers?.Authorization,
-        `Bearer ${TOKENS.get(HOST)}`,
+      const matchId =
+        protocol === MATCH_SYNC_SOCKET_PROTOCOL
+          ? new URL(url).pathname.split("/")[4]
+          : null;
+      if (!matchId)
+        assert.equal(
+          socketOptions.headers?.Authorization,
+          `Bearer ${TOKENS.get(HOST)}`,
+        );
+      else {
+        assert.equal(socketOptions.origin, "https://mons.link");
+        assert.equal(socketOptions.maxPayload, MATCH_SYNC_MAX_MESSAGE_BYTES);
+        assert.ok(
+          !socketOptions.headers?.Authorization ||
+            [...TOKENS.values()].some(
+              (token) =>
+                socketOptions.headers?.Authorization === `Bearer ${token}`,
+            ),
+        );
+      }
+      const socket = new FakeSocket(
+        protocol,
+        matchId,
+        options.suppressHeartbeat ?? false,
       );
-      const socket = new FakeSocket();
       sockets.push(socket);
       queueMicrotask(() => {
         assert.ok(source);
+        const reconnect =
+          matchId &&
+          matches.get(`${HOST}/${matchId}`)?.value.status === "surrendered";
+        if (reconnect && options.failMatchReconnect) {
+          socket.emit("error", new Error("Fixture reconnect failure"));
+          return;
+        }
+        const snapshot = matchId ? syncSnapshot(matchId) : null;
+        if (snapshot && reconnect && options.reconnectMatchRevision)
+          snapshot.revision = options.reconnectMatchRevision(snapshot.revision);
         socket.emit(
           "message",
-          Buffer.from(JSON.stringify(frame(structuredClone(source)))),
+          Buffer.from(
+            JSON.stringify(
+              snapshot ? matchFrame(snapshot) : frame(structuredClone(source)),
+            ),
+          ),
           false,
         );
       });
@@ -606,10 +735,34 @@ test("runs the isolated lifecycle, API move/surrender replay and retired Firebas
   const report = await runSmoke({ baseUrl: API }, state.dependencies);
   assert.equal(report.inviteId, INVITE);
   assert.deepEqual(report.matchIds, [INVITE, `${INVITE}1`]);
-  assert.equal(report.checks.length, 14);
+  assert.equal(report.checks.length, 18);
   assert.ok(report.checks.includes("firebase-surrender-write-rules"));
   assert.ok(report.checks.includes("firebase-move-write-rules"));
   assert.ok(report.checks.includes("firebase-invite-and-profile-read-denials"));
+  assert.ok(report.checks.includes("pending-match-http-socket-and-heartbeat"));
+  assert.ok(report.checks.includes("join-live-match-and-public-spectator"));
+  assert.ok(
+    report.checks.includes(
+      "live-match-moves-takebacks-surrender-and-reconnect",
+    ),
+  );
+  assert.ok(
+    report.checks.includes(
+      "rematch-live-creation-moves-surrender-and-reconnect",
+    ),
+  );
+  const gameplaySockets = state.connections.filter(
+    (connection) => connection.protocol === MATCH_SYNC_SOCKET_PROTOCOL,
+  );
+  assert.equal(gameplaySockets.length, 8);
+  assert.equal(
+    gameplaySockets.filter((connection) => !connection.options.headers).length,
+    2,
+  );
+  assert.equal(
+    state.sockets.reduce((count, socket) => count + socket.sent.length, 0),
+    3,
+  );
   assert.equal(
     state.requests.filter((request) => request.url.pathname === "/matches/move")
       .length,
@@ -665,7 +818,7 @@ test("pre-rule verification skips only direct status probes and still verifies A
     { baseUrl: API, surrenderRulesPending: true },
     state.dependencies,
   );
-  assert.equal(report.checks.length, 13);
+  assert.equal(report.checks.length, 17);
   assert.ok(!report.checks.includes("firebase-surrender-write-rules"));
   assert.equal(
     state.requests.filter(
@@ -972,6 +1125,125 @@ test("bounds each missing socket update without an overall release deadline", as
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.equal(state.timers.size, 0);
   assert.ok(state.timeoutDurations.every((duration) => duration === 15_000));
+});
+
+test("requires live match delivery before an HTTP refresh can repair a missed notification", async () => {
+  const state = harness({ suppressMatchUpdates: true, fastTimers: true });
+  await assert.rejects(
+    runSmoke({ baseUrl: API }, state.dependencies),
+    /match update timed out/,
+  );
+  assert.equal(
+    state.requests.filter((request) =>
+      request.url.pathname.endsWith("/snapshot"),
+    ).length,
+    1,
+  );
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+  assert.ok(state.sockets.every((socket) => socket.terminated));
+  assert.equal(state.timers.size, 0);
+});
+
+test("rejects malformed and wrong-target match socket snapshots without exposing contents", async (t) => {
+  for (const change of [
+    { matchId: "unrelated-match" },
+    { inviteId: "Unrelated1" },
+    { revision: -1 },
+    { secret: TOKENS.get(HOST) },
+    { hostMatch: { fen: TOKENS.get(HOST) } },
+  ]) {
+    await t.test(Object.keys(change)[0], async () => {
+      const state = harness({
+        matchSocketFrame: (snapshot) => ({
+          schemaVersion: 1,
+          type: "snapshot",
+          snapshot: { ...snapshot, ...change },
+        }),
+      });
+      await assert.rejects(
+        runSmoke({ baseUrl: API }, state.dependencies),
+        /match socket received an invalid snapshot/,
+      );
+      assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+      assert.ok(state.sockets.every((socket) => socket.terminated));
+      assert.ok(!state.logs.join("\n").includes(TOKENS.get(HOST)!));
+    });
+  }
+});
+
+test("rejects changed match state at an unchanged revision", async () => {
+  const state = harness({
+    matchSocketFrame: (snapshot) => ({
+      schemaVersion: 1,
+      type: "snapshot",
+      snapshot: { ...snapshot, revision: 1 },
+    }),
+  });
+  await assert.rejects(
+    runSmoke({ baseUrl: API }, state.dependencies),
+    /match socket received an invalid snapshot/,
+  );
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+  assert.ok(state.sockets.every((socket) => socket.terminated));
+});
+
+test("requires a match heartbeat and a fresh reconnect snapshot and cleans up on failure", async (t) => {
+  for (const options of [
+    { suppressHeartbeat: true, fastTimers: true },
+    { failMatchReconnect: true },
+  ]) {
+    await t.test(Object.keys(options)[0], async () => {
+      const state = harness(options);
+      await assert.rejects(
+        runSmoke({ baseUrl: API }, state.dependencies),
+        /match (heartbeat timed out|socket failed)/,
+      );
+      assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+      assert.ok(state.sockets.every((socket) => socket.terminated));
+      assert.equal(state.timers.size, 0);
+    });
+  }
+});
+
+test("rejects revision resets only on reconnect and cleans up every fixture", async () => {
+  const revisions: number[] = [];
+  const state = harness({
+    reconnectMatchRevision: (revision) => {
+      revisions.push(revision);
+      return 1;
+    },
+  });
+  await assert.rejects(
+    runSmoke({ baseUrl: API }, state.dependencies),
+    /match socket received an invalid snapshot/,
+  );
+  assert.equal(revisions.length, 1);
+  assert.ok(revisions[0] > 1);
+  assert.ok(state.source()?.hostRematches.endsWith("x"));
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+  assert.ok(state.sockets.every((socket) => socket.terminated));
+  assert.equal(state.timers.size, 0);
+});
+
+test("accepts unchanged or advancing reconnect revisions without changing match comparisons", async (t) => {
+  for (const advance of [0, 1]) {
+    await t.test(advance ? "higher revision" : "same revision", async () => {
+      let reconnects = 0;
+      const state = harness({
+        reconnectMatchRevision: (revision) => {
+          reconnects++;
+          return revision + advance;
+        },
+      });
+      const report = await runSmoke({ baseUrl: API }, state.dependencies);
+      assert.equal(reconnects, 2);
+      assert.equal(report.checks.length, 18);
+      assert.ok(state.source()?.hostRematches.endsWith("x"));
+      assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+      assert.ok(state.sockets.every((socket) => socket.terminated));
+      assert.equal(state.timers.size, 0);
+    });
+  }
 });
 
 test("does not mistake token failure for timer-rule permission denial", async () => {

@@ -20,6 +20,7 @@ const expectedSharedExports = {
   "./invite-wagers": "./invite-wagers.js",
   "./match-protocol": "./match-protocol.js",
   "./match-presentation": "./match-presentation.js",
+  "./match-sync": "./match-sync.js",
   "./mining": "./mining.js",
   "./navigation": "./navigation.js",
   "./nfts": "./nfts.js",

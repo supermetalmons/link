@@ -353,6 +353,7 @@ test("the actual Firebase auth callback tears down participant and spectator res
     "cleanupInviteReactionObserver",
     "cleanupInviteMetadataObserver",
     "cleanupWagerObserver",
+    "stopObservingAllMatches",
   ].map((name) => {
     const method = declaration.members.find(
       (node) => node.name?.getText(source) === name,
@@ -448,6 +449,7 @@ test("the actual Firebase auth callback tears down participant and spectator res
       },
       latestInvite: { hostId: "host", guestId: "guest" },
       inviteReactionSubscription: null,
+      observedMatchSnapshots: new Map([["old-match", {}]]),
       rememberMatchPresentation: () => undefined,
       isContextActive: () => true,
       isCurrentAuthUser(uid) {
