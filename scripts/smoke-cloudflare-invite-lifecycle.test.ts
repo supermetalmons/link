@@ -97,7 +97,6 @@ function harness(
     socketFrame?: (snapshot: Source) => unknown;
     suppressUpdates?: boolean;
     fastTimers?: boolean;
-    rawInviteExists?: boolean;
     directMovesAllowed?: boolean;
   } = {},
 ) {
@@ -183,9 +182,12 @@ function harness(
         uid,
         "Firebase requests use only the temporary participant tokens",
       );
-      if (url.pathname === `/invites/${INVITE}.json`) {
+      if (
+        url.pathname === `/invites/${INVITE}.json` ||
+        url.pathname === `/players/${uid}/profile.json`
+      ) {
         assert.equal(method, "GET");
-        return json(options.rawInviteExists ? source : null);
+        return json({ error: "Permission denied" }, 401);
       }
       if (url.pathname === `/matchTimerClaims/${INVITE}.json`) {
         assert.equal(method, "PUT");
@@ -599,7 +601,7 @@ test("requires an explicit approved target and supports a report and pre-rule AP
     assert.throws(() => parseArgs(args), /Usage:/);
 });
 
-test("runs the isolated lifecycle, API move/surrender replay, direct move, timer and status denials, and D1-only source proof", async () => {
+test("runs the isolated lifecycle, API move/surrender replay and retired Firebase access denials", async () => {
   const state = harness();
   const report = await runSmoke({ baseUrl: API }, state.dependencies);
   assert.equal(report.inviteId, INVITE);
@@ -607,6 +609,7 @@ test("runs the isolated lifecycle, API move/surrender replay, direct move, timer
   assert.equal(report.checks.length, 14);
   assert.ok(report.checks.includes("firebase-surrender-write-rules"));
   assert.ok(report.checks.includes("firebase-move-write-rules"));
+  assert.ok(report.checks.includes("firebase-invite-and-profile-read-denials"));
   assert.equal(
     state.requests.filter((request) => request.url.pathname === "/matches/move")
       .length,
@@ -631,6 +634,12 @@ test("runs the isolated lifecycle, API move/surrender replay, direct move, timer
   assert.equal(
     state.requests.filter(
       (request) => request.url.pathname === `/invites/${INVITE}.json`,
+    ).length,
+    2,
+  );
+  assert.equal(
+    state.requests.filter(
+      (request) => request.url.pathname === `/players/${HOST}/profile.json`,
     ).length,
     2,
   );
@@ -905,19 +914,34 @@ test("rejects a changed replay receipt, settles the same isolated series, and de
   assert.equal(state.timers.size, 0);
 });
 
-test("rejects a Firebase invite shadow and terminally cleans up without service-account writes", async () => {
-  const state = harness({ rawInviteExists: true });
-  await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
-    /source was still present in Firebase/,
-  );
-  assert.equal(state.source()?.hostRematches, "x");
-  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
-  assert.ok(
-    state.requests.every(
-      (request) => !request.url.searchParams.has("access_token"),
-    ),
-  );
+test("rejects readable retired paths and unrelated errors, then cleans up without service-account writes", async () => {
+  for (const path of [
+    `/invites/${INVITE}.json`,
+    `/players/${HOST}/profile.json`,
+  ]) {
+    for (const [status, payload] of [
+      [200, null],
+      [200, "retained-copy"],
+      [401, { error: "Invalid token" }],
+      [503, { error: "Unavailable" }],
+    ] as const) {
+      const state = harness({
+        intercept: (request, response) =>
+          request.url.pathname === path ? json(payload, status) : response(),
+      });
+      await assert.rejects(
+        runSmoke({ baseUrl: API }, state.dependencies),
+        /retired Firebase invite\/profile read was not denied/,
+      );
+      assert.equal(state.source()?.hostRematches, "x");
+      assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+      assert.ok(
+        state.requests.every(
+          (request) => !request.url.searchParams.has("access_token"),
+        ),
+      );
+    }
+  }
 });
 
 test("rejects invalid socket metadata without exposing its payload and cleans up sessions", async () => {

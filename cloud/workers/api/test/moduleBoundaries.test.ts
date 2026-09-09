@@ -42,17 +42,6 @@ test("canonical D1 modules have no direct Firestore runtime dependency", () => {
 const repositoryRoot = resolve(import.meta.dirname, "../../../..");
 const runtimeExtensions = [".ts", ".tsx", ".js", ".mjs", ".cjs"];
 
-const expectedProfileShadowMatches: Record<string, string[]> = {
-  "cloud/workers/api/src/authRecovery.ts": [
-    "players/${uid}/profile",
-    "players/${uid}/profile",
-  ],
-  "cloud/workers/api/src/profileClaim.ts": [
-    "players/${identity.uid}/profile",
-    "players/${identity.uid}/profile",
-  ],
-};
-
 test("Worker ownership ignores Firebase profile claims and RTDB profile shadows", () => {
   const sourcePaths = reachableRuntimeFiles(
     resolve(import.meta.dirname, "../src/index.ts"),
@@ -78,7 +67,7 @@ test("Worker ownership ignores Firebase profile claims and RTDB profile shadows"
         : [];
     }),
   );
-  assert.deepEqual(profileShadowMatches, expectedProfileShadowMatches);
+  assert.deepEqual(profileShadowMatches, {});
 });
 
 test("profile-link job coordination cannot use the retired Firebase outbox", () => {

@@ -19,7 +19,7 @@ Deploy only affected Workers. Shared prize-catalog changes need both the API and
 - `wrangler.jsonc` owns the frontend Worker configuration.
 - `cloud/workers/api/wrangler.jsonc` owns the API Worker routes, variables, bindings, Durable Object class exports, Queues, Workflows, consumers, and Cron schedule.
 - The migration directories under `cloud/workers/api/` own the six D1 schemas.
-- `PROFILE_DB.profile_login_owners` is authoritative for Worker login UID to canonical profile ownership. Firebase custom claims and RTDB profile links are non-authoritative browser-rule and recovery shadows.
+- `PROFILE_DB.profile_login_owners` is authoritative for Worker login UID to canonical profile ownership. Firebase custom claims remain a non-authoritative browser compatibility signal. RTDB profile links are retained historical records with no runtime reads, writes, or cleanup.
 - `cloud/workers/api/release.env` stays empty so release commands never load developer environment files.
 - Encrypted secrets stay in Cloudflare; required names are declared in the API Wrangler configuration.
 - `EVENT_DB` owns event records, participants, prize selections, visible assigned prizes, progress markers, and event-specific projection state. Active match synchronization remains in RTDB. `PROFILE_GAMES_DB.invite_sources` owns invite metadata after the one-way invite-source activation.
@@ -59,6 +59,18 @@ Production API `workers_dev` and `preview_urls` remain disabled. [Workers implem
 Keep existing request, connection, and smoke-command timeouts that detect stalled checks; do not wrap the release or promotion-and-verification sequence in an additional overall deadline. A check timeout means that check is incomplete, not that the release has run out of time. Resolve uncertain outcomes and retry relevant checks as needed. Once the smoke and affected-feature check pass, record the deployed IDs and finish. Existing sampled logs and recovery jobs continue normally. Investigate concrete failures; apply only the maintenance controls that the failure requires.
 
 `upload:api` sends no production traffic. `promote:api` requires an explicit Version ID and routes 100% of traffic to it. Trigger application is a separate operation for reviewed configuration changes.
+
+## Firebase profile-link retirement
+
+Released on September 9, 2026 with API version `7aa7d0e4-e03f-402b-8dcf-225f1e3a2bbc` serving 100% of traffic and the tested Firebase database rules deployed. The complete validation gate passed after updating its outdated profile-shadow documentation assertion. Production checks verified repeated authenticated claim synchronization, preserved token claims, completed catch-up jobs staying absent, and the retained RTDB profile copy remaining unchanged. Deployed rules matched the tested candidate; anonymous and authenticated reads of retained invite, profile, reaction, and wager paths were denied while Worker reads succeeded. The isolated lifecycle verified moves, takebacks, replay, rematches, surrender, and timer protections; live subscriptions received nine updates across three match subscriptions from both temporary players. The test series was ended and both temporary Auth sessions deleted. Evidence is retained in `/private/tmp/mons-profile-copy-retirement-xpnZjo`.
+
+This release retires runtime access to `players/{uid}/profile` and direct client access to those links and all `invites/{inviteId}` descendants, including retained reactions and wagers. Firebase Auth and `profileId` token claims remain active. Claim repair reads canonical D1 ownership and dispatches only the existing profile-link catch-up job; it never reconstructs or restarts work from an RTDB copy. Canonical ownership transactions already preserve previous-owner cleanup atomically. Existing RTDB values remain untouched, and live match subscriptions, scoped moves, surrender, and timer-claim fencing remain active.
+
+Before promotion, verify that profile migration `0015_finalize_profile_migrations.sql` is applied, canonical profile control is active, and invite-source control is active with backend `d1`. No schema migration, backfill, frontend release, resource provisioning, or trigger change is required. Keep writes and Queue delivery running under the routine release policy.
+
+Run `npm run check:all`, prepare protected authentication fixtures, record the existing API deployment and Firebase rules, and upload the validated API candidate. Promote its explicit version to 100%, then run the standard API smoke and authenticated profile-claim synchronization checks. Verify repeated synchronization preserves existing catch-up generations/cursors or completed-job absence.
+
+Deploy the tested rules through `npm run deploy:firebase -- --project mons-link`. Verify that direct invite/profile reads are denied while Worker profile/invite APIs and two-player move/subscription behavior succeed. Compare the deployed rules with the tested candidate and record the released API version and verification results. Older clients that read these retired paths must update. Retain the new API and restrictive rules as the baseline for subsequent repairs; finish once required checks pass.
 
 ## Cumulative move delivery release
 

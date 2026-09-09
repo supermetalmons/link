@@ -1371,9 +1371,6 @@ export function createCanonicalAuthIdentityService(
         enqueueProfileLinkProjection: (task) =>
           env.PROFILE_GAME_PROJECTION_QUEUE.send(task),
         logger: console,
-        now,
-        rtdb,
-        signal: dependencies.signal,
       });
       await recovery.removeLoginUid(profile.profile.profileId, uid);
       const confirmed = await profileByLogin(uid);

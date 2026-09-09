@@ -27,6 +27,19 @@ const match = (fen = "fen-1", flatMovesString = "") => ({
   timer: "",
 });
 
+function browserContexts() {
+  return [
+    rules.unauthenticatedContext(),
+    rules.authenticatedContext("host"),
+    rules.authenticatedContext("host", { profileId: "profile-host" }),
+    rules.authenticatedContext("guest", { profileId: "profile-guest" }),
+    rules.authenticatedContext("alternate", { profileId: "profile-host" }),
+    rules.authenticatedContext("alternate"),
+    rules.authenticatedContext("host", { admin: true }),
+    rules.authenticatedContext("admin", { admin: true }),
+  ];
+}
+
 function emulatorRestUrl(input) {
   const url = new URL(input);
   const emulator = rules.emulators.database;
@@ -183,6 +196,139 @@ test.beforeEach(async () => {
   });
 });
 
+test("retired invite sources deny every browser read and write at all path depths", async () => {
+  const invite = {
+    version: 2,
+    hostId: "host",
+    hostColor: "white",
+    guestId: "guest",
+    password: "retained-password",
+    hostRematches: "1",
+    guestRematches: "1",
+    metadata: { retained: true },
+  };
+  const paths = [
+    "/",
+    "invites",
+    "invites/invite1",
+    "invites/invite1/hostId",
+    "invites/invite1/guestId",
+    "invites/invite1/password",
+    "invites/invite1/hostRematches",
+    "invites/invite1/guestRematches",
+    "invites/invite1/metadata/retained",
+    "invites/missing",
+  ];
+  await rules.withSecurityRulesDisabled(async (context) => {
+    await context.database().ref("invites/invite1").set(invite);
+  });
+  for (const context of browserContexts()) {
+    const database = context.database();
+    for (const path of paths) {
+      await assertFails(database.ref(path).once("value"));
+      await assertFails(database.ref(path).set({ replaced: true }));
+      await assertFails(database.ref(path).remove());
+    }
+    await assertFails(
+      database.ref().update({
+        "invites/invite1/guestId": "alternate",
+        "players/host/matches/invite1/status": "surrendered",
+      }),
+    );
+  }
+  await rules.withSecurityRulesDisabled(async (context) => {
+    assert.deepEqual(
+      (await context.database().ref("invites/invite1").get()).val(),
+      invite,
+    );
+  });
+});
+
+test("retired profile copies deny every browser read and write including parent replacements", async () => {
+  const paths = [
+    "players",
+    "players/host",
+    "players/host/profile",
+    "players/host/profile/nested",
+    "players/alternate/profile",
+    "players/missing/profile",
+  ];
+  for (const context of browserContexts()) {
+    const database = context.database();
+    for (const path of paths) {
+      await assertFails(database.ref(path).once("value"));
+      await assertFails(database.ref(path).set("replacement-profile"));
+      await assertFails(database.ref(path).remove());
+    }
+    await assertFails(
+      database.ref("players/host").set({
+        profile: "replacement-profile",
+        matches: { invite1: match() },
+      }),
+    );
+    await assertFails(
+      database.ref("players/host").update({ profile: "replacement-profile" }),
+    );
+    await assertFails(
+      database.ref().update({
+        "players/host/profile": null,
+        "players/host/matches/invite1/status": "surrendered",
+      }),
+    );
+    assert.deepEqual(
+      (await assertSucceeds(database.ref("players/host/matches").get())).val(),
+      { invite1: match() },
+    );
+  }
+  await rules.withSecurityRulesDisabled(async (context) => {
+    assert.deepEqual(
+      (await context.database().ref("players/host").get()).val(),
+      { profile: "profile-host", matches: { invite1: match() } },
+    );
+  });
+});
+
+test(
+  "public live match subscriptions observe scoped Worker moves and surrender",
+  { timeout: 10000 },
+  async () => {
+    const reference = rules
+      .unauthenticatedContext()
+      .database()
+      .ref("players/host/matches/invite1");
+    let next;
+    const listen = (snapshot) => {
+      next?.(snapshot.val());
+    };
+    const waitForSnapshot = () =>
+      new Promise((resolve) => {
+        next = resolve;
+      });
+    const initial = waitForSnapshot();
+    reference.on("value", listen);
+    try {
+      assert.deepEqual(await initial, match());
+      const moved = waitForSnapshot();
+      await scopedMoveClient().transactPath(
+        "players/host/matches/invite1",
+        move(),
+      );
+      assert.deepEqual(await moved, match("fen-next", "move"));
+      const surrendered = waitForSnapshot();
+      await scopedSurrenderClient().transactPath(
+        "players/host/matches/invite1",
+        surrender,
+      );
+      assert.deepEqual(await surrendered, {
+        ...match("fen-next", "move"),
+        status: "surrendered",
+      });
+    } finally {
+      reference.off("value", listen);
+    }
+  },
+);
+
 test("rules deny structural browser writes and preserve scoped Worker moves", async () => {
   const host = rules.authenticatedContext("host", {
     profileId: "profile-host",
@@ -220,6 +366,28 @@ test("rules deny structural browser writes and preserve scoped Worker moves", as
     ).committed,
     true,
   );
+});
+
+test("scoped Worker capabilities cannot replace player parents or change retained profiles", async () => {
+  for (const token of [
+    { workerMoveMatchId: "invite1" },
+    { workerSurrenderMatchId: "invite1" },
+  ]) {
+    const auth = { uid: "host", token };
+    const updated = token.workerMoveMatchId
+      ? match("fen-next", "move")
+      : { ...match(), status: "surrendered" };
+    const player = { profile: "profile-host", matches: { invite1: updated } };
+    for (const [path, value] of [
+      ["players", { host: player }],
+      ["players/host", player],
+      ["players/host/matches", { invite1: updated }],
+      ["players/host/profile", "replacement-profile"],
+      ["players/host/profile", null],
+    ]) {
+      await assertPermissionDenied(await putWithOverride(auth, value, path));
+    }
+  }
 });
 
 test("automatch source rejects browser root, child and multipath writes including admin", async () => {
@@ -295,7 +463,7 @@ test("session creation evidence is immutable for every browser while moves prese
   }
 });
 
-test("retired reactions remain readable but reject every browser write", async () => {
+test("retired reactions reject every browser read and write while preserving stored values", async () => {
   const reaction = {
     uuid: "retained-reaction",
     kind: "voice",
@@ -308,18 +476,15 @@ test("retired reactions remain readable but reject every browser write", async (
       .ref("invites/invite1/reactions/host")
       .set(reaction);
   });
-  for (const context of [
-    rules.unauthenticatedContext(),
-    rules.authenticatedContext("host", { profileId: "profile-host" }),
-    rules.authenticatedContext("guest", { profileId: "profile-guest" }),
-    rules.authenticatedContext("alternate", { profileId: "profile-host" }),
-    rules.authenticatedContext("alternate"),
-    rules.authenticatedContext("admin", { admin: true }),
-  ]) {
+  for (const context of browserContexts()) {
     const database = context.database();
-    await assertSucceeds(
-      database.ref("invites/invite1/reactions/host").once("value"),
-    );
+    for (const path of [
+      "invites/invite1/reactions",
+      "invites/invite1/reactions/host",
+      "invites/invite1/reactions/host/variation",
+    ]) {
+      await assertFails(database.ref(path).once("value"));
+    }
     await assertFails(
       database.ref("invites/invite1/reactions").set({ host: reaction }),
     );
@@ -337,12 +502,13 @@ test("retired reactions remain readable but reject every browser write", async (
       }),
     );
   }
-  const retained = await rules
-    .unauthenticatedContext()
-    .database()
-    .ref("invites/invite1/reactions/host")
-    .once("value");
-  assert.deepEqual(retained.val(), reaction);
+  await rules.withSecurityRulesDisabled(async (context) => {
+    const retained = await context
+      .database()
+      .ref("invites/invite1/reactions/host")
+      .once("value");
+    assert.deepEqual(retained.val(), reaction);
+  });
 });
 
 test("same-profile RTDB links without a custom claim require Worker moves", async () => {
@@ -364,7 +530,7 @@ test("same-profile RTDB links without a custom claim require Worker moves", asyn
   );
 });
 
-test("retired wager state and resolution markers retain invite reads and reject every browser write", async () => {
+test("retired wager state and resolution markers reject every browser read and write", async () => {
   const wager = {
     proposals: { host: { material: "dust", count: 2 } },
     proposedBy: { host: true },
@@ -393,25 +559,16 @@ test("retired wager state and resolution markers retain invite reads and reject 
         [markersPath]: { invite1: true },
       });
   });
-  for (const context of [
-    rules.unauthenticatedContext(),
-    rules.authenticatedContext("host", { profileId: "profile-host" }),
-    rules.authenticatedContext("guest", { profileId: "profile-guest" }),
-    rules.authenticatedContext("alternate", { profileId: "profile-host" }),
-    rules.authenticatedContext("alternate"),
-    rules.authenticatedContext("admin", { admin: true }),
-  ]) {
+  for (const context of browserContexts()) {
     const database = context.database();
     for (const [path, expected] of [
       [wagerPath, { invite1: wager }],
       [`${wagerPath}/invite1`, wager],
+      [`${wagerPath}/invite1/proposals/host/count`, 2],
       [markersPath, { invite1: true }],
       [`${markersPath}/invite1`, true],
     ]) {
-      assert.deepEqual(
-        (await assertSucceeds(database.ref(path).once("value"))).val(),
-        expected,
-      );
+      await assertFails(database.ref(path).once("value"));
       await assertFails(database.ref(path).set(expected));
       await assertFails(database.ref(path).remove());
     }
@@ -430,19 +587,22 @@ test("retired wager state and resolution markers retain invite reads and reject 
         [`${markersPath}/invite2`]: true,
       }),
     );
-    const invite = (await database.ref("invites/invite1").once("value")).val();
+    await assertFails(database.ref("invites/invite1").once("value"));
     await assertFails(
-      database.ref("invites/invite1").set({ ...invite, wagers: null }),
+      database.ref("invites/invite1").set({ hostId: "host", wagers: null }),
     );
     await assertFails(database.ref("invites/invite1").remove());
   }
+  await rules.withSecurityRulesDisabled(async (context) => {
+    const database = context.database();
+    assert.deepEqual((await database.ref(wagerPath).once("value")).val(), {
+      invite1: wager,
+    });
+    assert.deepEqual((await database.ref(markersPath).once("value")).val(), {
+      invite1: true,
+    });
+  });
   const database = rules.unauthenticatedContext().database();
-  assert.deepEqual((await database.ref(wagerPath).once("value")).val(), {
-    invite1: wager,
-  });
-  assert.deepEqual((await database.ref(markersPath).once("value")).val(), {
-    invite1: true,
-  });
   assert.equal(
     (
       await database.ref("players/host/matches/invite1/status").once("value")

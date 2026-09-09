@@ -28,7 +28,7 @@ Account-link game discovery uses only the activated `PROFILE_GAMES_DB.login_matc
 
 The [invite-source cutover](scripts/deploy-cloudflare.md#invite-source-d1-cutover) uses `npm run manage:invite-source` to preserve every invite, prove the import, and activate D1 under narrowly scoped writer gates. It leaves Queue delivery, Firebase Auth, live matches, timer fences, and manual-game timers running; event-game timeout claims pause while the event gate is frozen. Its candidate must be the sole deployed API version, with no nonterminal event-progress Workflow instances. No frontend, Durable Object namespace, or Firebase rules release is required.
 
-The initial wager-state migration uses the [single-freeze cutover](scripts/deploy-cloudflare.md#wager-state-d1-cutover). Retained Firebase wager records keep their existing invite-read policy, but browser writes, including admin claims, are retired. Later compatible wager releases use the routine release path.
+The initial wager-state migration used the [single-freeze cutover](scripts/deploy-cloudflare.md#wager-state-d1-cutover). Retained Firebase invites, reactions, wagers, and profile links now deny client reads and writes, including clients with admin claims. Current clients use Worker APIs for these records. Firebase profile links are no longer read or maintained by runtime code; canonical ownership transactions in D1 own profile-link catch-up. Firebase Auth and its compatibility claims remain active. Later compatible releases use the routine release path.
 
 ## Setup and development
 

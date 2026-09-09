@@ -154,70 +154,23 @@ export async function ensureFirebaseProfileClaim(
   profileId: string,
   dependencies: {
     authClient: FirebaseAuthAdminClient;
-    catchupStore: Pick<ProfileLinkCatchupStore, "mergeCleanup" | "schedule">;
-    createRequestId?: () => string;
+    catchupStore: Pick<ProfileLinkCatchupStore, "readForOwner">;
     enqueueProfileLinkProjection?: (
       task: ProfileLinkProfileGameProjectionTask,
     ) => Promise<unknown>;
     logger?: Pick<Console, "error">;
-    now?: () => number;
-    rtdb: Pick<FirebaseRtdbClient, "getPath" | "patchRoot">;
-    signal?: AbortSignal;
   },
 ): Promise<void> {
   if (!isCanonicalFirebaseUid(uid)) {
     throw new TypeError("invalid-firebase-uid");
   }
-  const [user, profileLink] = await Promise.all([
-    dependencies.authClient.getUser(uid),
-    dependencies.rtdb.getPath(
-      `players/${uid}/profile`,
-      undefined,
-      dependencies.signal,
-    ),
-  ]);
-  const nowMs = (dependencies.now || Date.now)();
-  const previousProfileId = exactDocumentId(profileLink);
-  const repairProfileLink = cleanString(profileLink) !== profileId;
-  const scheduleCatchup = repairProfileLink
-    ? dependencies.catchupStore.schedule
-    : dependencies.catchupStore.mergeCleanup;
-  const catchup = await scheduleCatchup({
-    loginUid: uid,
-    profileId,
-    cleanupProfileIds:
-      previousProfileId && previousProfileId !== profileId
-        ? [previousProfileId]
-        : [],
-    requestId: dependencies.createRequestId
-      ? dependencies.createRequestId()
-      : crypto.randomUUID(),
-    nowMs,
-  });
-  const writes: Promise<void>[] = [];
-  if (repairProfileLink) {
-    writes.push(
-      dependencies.rtdb.patchRoot(
-        { [`players/${uid}/profile`]: profileId },
-        dependencies.signal,
-      ),
-    );
-  }
+  const catchup = await dependencies.catchupStore.readForOwner(uid, profileId);
+  const user = await dependencies.authClient.getUser(uid);
   if (cleanString(user.customClaims.profileId) !== profileId) {
-    writes.push(
-      dependencies.authClient.setCustomUserClaims(uid, {
-        ...user.customClaims,
-        profileId,
-      }),
-    );
-  }
-  const outcomes = await Promise.allSettled(writes);
-  const failure = outcomes.find(
-    (outcome): outcome is PromiseRejectedResult =>
-      outcome.status === "rejected",
-  );
-  if (failure) {
-    throw failure.reason;
+    await dependencies.authClient.setCustomUserClaims(uid, {
+      ...user.customClaims,
+      profileId,
+    });
   }
   if (catchup && dependencies.enqueueProfileLinkProjection) {
     try {
@@ -541,9 +494,6 @@ function createCanonicalAuthRecoveryService(
           enqueueProfileLinkProjection: (task) =>
             env.PROFILE_GAME_PROJECTION_QUEUE.send(task),
           logger,
-          now,
-          rtdb,
-          signal: dependencies.signal,
         });
         await removeLoginUid(job.profileId, uid);
       } catch {

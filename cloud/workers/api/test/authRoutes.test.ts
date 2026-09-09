@@ -491,10 +491,6 @@ test("synchronizes the profile claim through the authenticated POST route", asyn
           }),
           setCustomUserClaims: async () => undefined,
         },
-        rtdbClient: {
-          getPath: async () => "profile-1",
-          patchRoot: async () => undefined,
-        },
       },
       verifyIdentity,
     },

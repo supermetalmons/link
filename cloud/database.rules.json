@@ -29,28 +29,12 @@
     },
     "invites": {
       "$inviteId": {
-        ".read": "(data.child('hostId').exists() && data.child('guestId').exists()) || (auth != null && (!data.child('password').exists() || auth.uid === data.child('hostId').val() || (data.child('hostId').exists() && ((auth.token.profileId != null && root.child('players').child(data.child('hostId').val()).child('profile').val() === auth.token.profileId) || (root.child('players').child(auth.uid).child('profile').exists() && root.child('players').child(data.child('hostId').val()).child('profile').val() === root.child('players').child(auth.uid).child('profile').val())))))",
-        "hostId": {
-          ".validate": "auth.uid === newData.val() || newData.val() === data.val()"
-        },
-        "password": {
-          ".read": "auth != null && auth.uid === data.parent().child('hostId').val()",
-          ".validate": "newData.isString()"
-        },
-        "guestId": {
-          ".validate": "newData.isString() && auth.uid === newData.val() && newData.val() != data.parent().child('hostId').val() && (!data.parent().child('password').exists() || (data.parent().child('password').exists() && newData.parent().child('password').val() === data.parent().child('password').val())) && (!root.child('players').child(newData.val()).child('profile').exists() || !root.child('players').child(data.parent().child('hostId').val()).child('profile').exists() || root.child('players').child(newData.val()).child('profile').val() != root.child('players').child(data.parent().child('hostId').val()).child('profile').val())"
-        },
-        "guestRematches": {
-          ".validate": "newData.isString() && (!data.exists() || newData.val().contains(data.val()))"
-        },
-        "hostRematches": {
-          ".validate": "newData.isString() && (!data.exists() || newData.val().contains(data.val()))"
-        }
+        ".read": false,
+        ".write": false
       }
     },
     "players": {
       "$userId": {
-        ".validate": "newData.exists() && newData.child('matches').exists() && (auth.token.admin === true || ((!data.child('profile').exists() && !newData.child('profile').exists()) || (data.child('profile').exists() && newData.child('profile').val() === data.child('profile').val())))",
         "matches": {
           ".read": true,
           "$matchId": {
@@ -59,9 +43,8 @@
           }
         },
         "profile": {
-          ".read": true,
-          ".write": "auth != null && auth.token.admin === true",
-          ".validate": "!data.exists() && newData.isString() && newData.val().length > 0"
+          ".read": false,
+          ".write": false
         }
       }
     }

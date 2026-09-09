@@ -1012,21 +1012,25 @@ async function verifySurrenderRules(
   }
 }
 
-async function verifyNoRtdbInvite(
+async function verifyRetiredRtdbReads(
   inviteId: string,
   session: Session,
   dependencies: Dependencies,
 ): Promise<void> {
-  const result = await requestJson(
-    `${FIREBASE_DATABASE_ROOT}/invites/${inviteId}.json?auth=${encodeURIComponent(session.idToken)}`,
-    {},
-    dependencies,
-  );
-  expectOk(result, "Lifecycle retired RTDB invite read");
-  if (result.payload !== null)
-    throw new SmokeFailure(
-      "Lifecycle invite source was still present in Firebase.",
+  for (const path of [
+    `invites/${inviteId}`,
+    `players/${session.uid}/profile`,
+  ]) {
+    const result = await requestJson(
+      `${FIREBASE_DATABASE_ROOT}/${path}.json?auth=${encodeURIComponent(session.idToken)}`,
+      {},
+      dependencies,
     );
+    if (!permissionDenied(result))
+      throw new SmokeFailure(
+        "Lifecycle retired Firebase invite/profile read was not denied.",
+      );
+  }
 }
 
 async function runSmoke(
@@ -1124,7 +1128,7 @@ async function runSmoke(
       1,
       dependencies,
     );
-    await verifyNoRtdbInvite(inviteId, host, dependencies);
+    await verifyRetiredRtdbReads(inviteId, host, dependencies);
     channel = metadataChannel(validated, inviteId, host, dependencies);
     await channel.waitFor(snapshot);
     report.checks.push("pending-http-and-authenticated-socket");
@@ -1303,8 +1307,8 @@ async function runSmoke(
         "Lifecycle receipt replay reopened or changed the terminal series.",
       );
     report.checks.push("terminal-replay-preserved-source");
-    await verifyNoRtdbInvite(inviteId, host, dependencies);
-    report.checks.push("api-source-without-rtdb-invite-shadow");
+    await verifyRetiredRtdbReads(inviteId, host, dependencies);
+    report.checks.push("firebase-invite-and-profile-read-denials");
   } catch (error) {
     failure =
       error instanceof SmokeFailure

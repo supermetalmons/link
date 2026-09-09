@@ -82,17 +82,28 @@ async function moveOwner(loginUid: string, profileId: string) {
   });
 }
 
-function beforeBatch(action: () => Promise<void>): D1Database {
+function beforePrimaryBatch(action: () => Promise<void>): D1Database {
   let fired = false;
   return new Proxy(db, {
     get(target, property) {
-      if (property === "batch") {
-        return async (statements: D1PreparedStatement[]) => {
-          if (!fired) {
-            fired = true;
-            await action();
-          }
-          return target.batch(statements);
+      if (property === "withSession") {
+        return (constraint: D1SessionConstraint) => {
+          expect(constraint).toBe("first-primary");
+          return new Proxy(target.withSession(constraint), {
+            get(session, sessionProperty) {
+              if (sessionProperty === "batch") {
+                return async (statements: D1PreparedStatement[]) => {
+                  if (!fired) {
+                    fired = true;
+                    await action();
+                  }
+                  return session.batch(statements);
+                };
+              }
+              const value = Reflect.get(session, sessionProperty, session);
+              return typeof value === "function" ? value.bind(session) : value;
+            },
+          });
         };
       }
       const value = Reflect.get(target, property, target);
@@ -129,43 +140,32 @@ describe("profile-link catch-up D1", () => {
     const advanced = await store.read(loginUid);
     await moveOwner(loginUid, profileId);
     expect(await store.read(loginUid)).toEqual(advanced);
-    expect(
-      await store.mergeCleanup({
-        loginUid,
-        profileId,
-        cleanupProfileIds: [profileId],
-        requestId: uniqueId("ignored"),
-        nowMs: 1_200,
-      }),
-    ).toEqual(advanced);
+    expect(await store.readForOwner(loginUid, profileId)).toEqual(advanced);
+    expect(await store.readForOwner(loginUid, profileId)).toEqual(advanced);
+    expect(await store.read(loginUid)).toEqual(advanced);
   });
 
   it("coalesces cleanup across ownership changes and fences stale pages", async () => {
     const loginUid = uniqueId("login");
-    const originalProfileId = await createProfile([loginUid]);
+    const historicalProfileId = await createProfile([loginUid]);
+    const originalProfileId = await createProfile();
     const nextProfileId = await createProfile();
     const finalProfileId = await createProfile();
+    await moveOwner(loginUid, originalProfileId);
     const original = await store.read(loginUid);
     if (!original) throw new Error("missing-test-job");
     await store.advance(loginUid, original.requestId, null, "match-5", 1_100);
-    const repair = await store.mergeCleanup({
-      loginUid,
-      profileId: originalProfileId,
-      cleanupProfileIds: ["historical-profile"],
-      requestId: uniqueId("repair"),
-      nowMs: 1_200,
-    });
-    expect(repair?.matchCursor).toBeNull();
     await moveOwner(loginUid, nextProfileId);
-    const next = await store.read(loginUid);
+    const next = await store.readForOwner(loginUid, nextProfileId);
     expect(next?.cleanupProfileIds).toEqual(
-      [originalProfileId, "historical-profile"].sort(),
+      [originalProfileId, historicalProfileId].sort(),
     );
+    expect(next?.matchCursor).toBeNull();
     expect(next?.requestId).not.toBe(original.requestId);
     await moveOwner(loginUid, finalProfileId);
-    const final = await store.read(loginUid);
+    const final = await store.readForOwner(loginUid, finalProfileId);
     expect(final?.cleanupProfileIds).toEqual(
-      [originalProfileId, nextProfileId, "historical-profile"].sort(),
+      [originalProfileId, nextProfileId, historicalProfileId].sort(),
     );
     expect(
       await store.advance(loginUid, original.requestId, null, "match-8", 2_100),
@@ -230,53 +230,54 @@ describe("profile-link catch-up D1", () => {
     ).toBe(true);
   });
 
-  it("rejects a repair whose owner changes before the guarded write", async () => {
+  it("rejects an owner changed before the primary ownership and job snapshot", async () => {
     const loginUid = uniqueId("login");
     const profileId = await createProfile([loginUid]);
     const targetProfileId = await createProfile();
     const racingStore = createProfileLinkCatchupStore(
-      beforeBatch(() => moveOwner(loginUid, targetProfileId)),
+      beforePrimaryBatch(() => moveOwner(loginUid, targetProfileId)),
     );
     await expect(
-      racingStore.mergeCleanup({
-        loginUid,
-        profileId,
-        cleanupProfileIds: ["old-shadow"],
-        requestId: uniqueId("repair"),
-        nowMs: 3_000,
-      }),
+      racingStore.readForOwner(loginUid, profileId),
     ).rejects.toBeInstanceOf(CanonicalProfileConflict);
-    expect(await store.read(loginUid)).toMatchObject({
+    expect(
+      await racingStore.readForOwner(loginUid, targetProfileId),
+    ).toMatchObject({
       profileId: targetProfileId,
       cleanupProfileIds: [profileId],
     });
   });
 
-  it("retains repairs that race another cleanup producer", async () => {
+  it("rejects absent ownership and inactive profiles without changing jobs", async () => {
     const loginUid = uniqueId("login");
     const profileId = await createProfile([loginUid]);
-    const racingStore = createProfileLinkCatchupStore(
-      beforeBatch(async () => {
-        await store.mergeCleanup({
-          loginUid,
-          profileId,
-          cleanupProfileIds: ["first-shadow"],
-          requestId: uniqueId("first"),
-          nowMs: 2_000,
-        });
-      }),
-    );
-    const merged = await racingStore.mergeCleanup({
-      loginUid,
-      profileId,
-      cleanupProfileIds: ["second-shadow"],
-      requestId: uniqueId("second"),
-      nowMs: 2_100,
-    });
-    expect(merged?.cleanupProfileIds).toEqual([
-      "first-shadow",
-      "second-shadow",
-    ]);
+    const targetProfileId = await createProfile();
+    const job = await store.read(loginUid);
+    await expect(
+      store.readForOwner(uniqueId("missing-login"), profileId),
+    ).rejects.toBeInstanceOf(CanonicalProfileConflict);
+    await expect(
+      store.readForOwner(loginUid, uniqueId("missing-profile")),
+    ).rejects.toBeInstanceOf(CanonicalProfileConflict);
+    await db
+      .prepare(
+        "UPDATE profile_records SET state = 'retiring', merged_into_profile_id = ? WHERE profile_id = ?",
+      )
+      .bind(targetProfileId, profileId)
+      .run();
+    try {
+      await expect(
+        store.readForOwner(loginUid, profileId),
+      ).rejects.toBeInstanceOf(CanonicalProfileConflict);
+      expect(await store.read(loginUid)).toEqual(job);
+    } finally {
+      await db
+        .prepare(
+          "UPDATE profile_records SET state = 'active', merged_into_profile_id = NULL WHERE profile_id = ?",
+        )
+        .bind(profileId)
+        .run();
+    }
   });
 
   it("guards dispatch, cursor progress, and settlement independently", async () => {
@@ -325,23 +326,46 @@ describe("profile-link catch-up D1", () => {
     const job = await store.read(loginUid);
     if (!job) throw new Error("missing-test-job");
     await store.settle(loginUid, job.requestId, null);
-    expect(
-      await store.mergeCleanup({
-        loginUid,
-        profileId,
-        cleanupProfileIds: [profileId],
-        requestId: uniqueId("noop"),
-        nowMs: 3_000,
-      }),
-    ).toBeNull();
-    const repaired = await store.mergeCleanup({
-      loginUid,
-      profileId,
-      cleanupProfileIds: ["old-shadow"],
-      requestId: uniqueId("repair"),
-      nowMs: 3_010,
+    expect(await store.readForOwner(loginUid, profileId)).toBeNull();
+    await moveOwner(loginUid, profileId);
+    expect(await store.readForOwner(loginUid, profileId)).toBeNull();
+    expect(await store.read(loginUid)).toBeNull();
+    const targetProfileId = await createProfile();
+    await moveOwner(loginUid, targetProfileId);
+    expect(await store.readForOwner(loginUid, targetProfileId)).toMatchObject({
+      profileId: targetProfileId,
+      cleanupProfileIds: [profileId],
+      matchCursor: null,
     });
-    expect(repaired?.cleanupProfileIds).toEqual(["old-shadow"]);
+  });
+
+  it("still validates ownership and maintenance after a job completes", async () => {
+    const loginUid = uniqueId("login");
+    const profileId = await createProfile([loginUid]);
+    const otherProfileId = await createProfile();
+    const job = await store.read(loginUid);
+    if (!job) throw new Error("missing-test-job");
+    await store.settle(loginUid, job.requestId, null);
+    await expect(
+      store.readForOwner(loginUid, otherProfileId),
+    ).rejects.toBeInstanceOf(CanonicalProfileConflict);
+    await db
+      .prepare(
+        "UPDATE profile_canonical_control SET state = 'frozen' WHERE singleton = 1",
+      )
+      .run();
+    try {
+      await expect(
+        store.readForOwner(loginUid, profileId),
+      ).rejects.toBeInstanceOf(CanonicalProfileConflict);
+      expect(await store.read(loginUid)).toBeNull();
+    } finally {
+      await db
+        .prepare(
+          "UPDATE profile_canonical_control SET state = 'active' WHERE singleton = 1",
+        )
+        .run();
+    }
   });
 
   it("keeps jobs during frozen writes and rejects malformed persisted records", async () => {
@@ -363,13 +387,7 @@ describe("profile-link catch-up D1", () => {
       ).toBe(false);
       expect(await store.settle(loginUid, job.requestId, null)).toBe(false);
       await expect(
-        store.mergeCleanup({
-          loginUid,
-          profileId,
-          cleanupProfileIds: ["old-shadow"],
-          requestId: uniqueId("repair"),
-          nowMs: 4_000,
-        }),
+        store.readForOwner(loginUid, profileId),
       ).rejects.toBeInstanceOf(CanonicalProfileConflict);
       expect(await store.read(loginUid)).toEqual(job);
     } finally {
@@ -388,5 +406,23 @@ describe("profile-link catch-up D1", () => {
     await expect(store.read(loginUid)).rejects.toBeInstanceOf(
       CanonicalProfileCorruption,
     );
+    await expect(
+      store.readForOwner(loginUid, profileId),
+    ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+  });
+
+  it("rejects a persisted job that does not match its canonical owner", async () => {
+    const loginUid = uniqueId("login");
+    const profileId = await createProfile([loginUid]);
+    const targetProfileId = await createProfile();
+    await db
+      .prepare(
+        "UPDATE profile_link_catchup_jobs SET profile_id = ? WHERE login_uid = ?",
+      )
+      .bind(targetProfileId, loginUid)
+      .run();
+    await expect(
+      store.readForOwner(loginUid, profileId),
+    ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
   });
 });

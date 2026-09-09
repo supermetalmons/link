@@ -6,6 +6,7 @@ import { createAuthIdentityService } from "../src/authIdentity.ts";
 import { sweepExpiredCanonicalAuthCooldowns } from "../src/authIdentityCanonical.ts";
 import { createMiningRepository } from "../src/miningRepository.ts";
 import { createAuthRecoveryService } from "../src/authRecovery.ts";
+import { createProfileLinkCatchupStore } from "../src/profileLinkCatchupD1.ts";
 import { createProfileCustomizationRepository } from "../src/profileCustomizationRepository.ts";
 import {
   commitCanonicalPlan,
@@ -53,15 +54,25 @@ function firebaseState() {
       claims.set(uid, value);
     },
   };
+  const assertActivePath = (path: string): void => {
+    if (/^players\/[^/]+\/profile(?:\/|$)/.test(path)) {
+      throw new Error("retired-profile-copy-access");
+    }
+  };
   const rtdb: FirebaseRtdbClient = {
-    getPath: async (path) => rtdbValues.get(path) ?? null,
+    getPath: async (path) => {
+      assertActivePath(path);
+      return rtdbValues.get(path) ?? null;
+    },
     patchRoot: async (updates) => {
       for (const [path, value] of Object.entries(updates)) {
+        assertActivePath(path);
         if (value === null) rtdbValues.delete(path);
         else rtdbValues.set(path, value);
       }
     },
     transactPath: async (path, updater) => {
+      assertActivePath(path);
       const current = rtdbValues.get(path) ?? null;
       const decision = updater(current) as {
         commit?: boolean;
@@ -301,6 +312,70 @@ describe("canonical auth and profile runtime", () => {
     await resetCanonicalRows(testBindings.PROFILE_DB);
   });
 
+  it("profile sync preserves pending progress and never recreates completed catch-up work", async () => {
+    const firebase = firebaseState();
+    const uid = "retired-profile-copy-login";
+    const profileCopyPath = `players/${uid}/profile`;
+    firebase.rtdbValues.set(profileCopyPath, "retained-legacy-profile");
+    firebase.claims.set(uid, { admin: true });
+    const service = createAuthIdentityService(d1Env, {
+      authClient: firebase.authClient,
+      now: () => 2_000,
+      randomInteger: () => 0,
+      rtdb: firebase.rtdb,
+    });
+    const linked = await service.linkVerifiedMethod({
+      uid,
+      method: "eth",
+      methodValueRaw: "0x7777777777777777777777777777777777777777",
+      normalizedMethodValue: "0x7777777777777777777777777777777777777777",
+      intentId: "retired-profile-copy-intent",
+      requestEmoji: 4,
+      requestAura: null,
+      opId: "retired-profile-copy-operation",
+    });
+    const store = createProfileLinkCatchupStore(testBindings.PROFILE_DB);
+    const initial = await store.read(uid);
+    expect(initial?.profileId).toBe(linked.profileId);
+    if (!initial) throw new Error("missing-canonical-ownership-catchup");
+    await expect(
+      store.advance(uid, initial.requestId, null, "match-20", 2_001),
+    ).resolves.toBe(true);
+    const pending = await store.read(uid);
+    firebase.claims.set(uid, { admin: true, profileId: "stale-profile" });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(
+        service.syncCurrentCallerProfile(uid),
+      ).resolves.toMatchObject({
+        profileId: linked.profileId,
+      });
+      await expect(store.read(uid)).resolves.toEqual(pending);
+    }
+    expect(firebase.claims.get(uid)).toEqual({
+      admin: true,
+      profileId: linked.profileId,
+    });
+    await expect(
+      store.settle(uid, initial.requestId, "match-20"),
+    ).resolves.toBe(true);
+    firebase.claims.set(uid, { admin: true });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await expect(
+        service.syncCurrentCallerProfile(uid),
+      ).resolves.toMatchObject({
+        profileId: linked.profileId,
+      });
+      await expect(store.read(uid)).resolves.toBeNull();
+    }
+    expect(firebase.claims.get(uid)).toEqual({
+      admin: true,
+      profileId: linked.profileId,
+    });
+    expect(firebase.rtdbValues.get(profileCopyPath)).toBe(
+      "retained-legacy-profile",
+    );
+  });
+
   it("creates, replays, links, unlinks, and enforces cooldowns in D1", async () => {
     const firebase = firebaseState();
     let nowMs = 1_000;
@@ -476,8 +551,8 @@ describe("canonical auth and profile runtime", () => {
     );
     expect(profile?.profileId).toBe(first.profileId);
     expect(firebase.claims.get(ethInput.uid)?.profileId).toBe(first.profileId);
-    expect(firebase.rtdbValues.get(`players/${ethInput.uid}/profile`)).toBe(
-      first.profileId,
+    expect(firebase.rtdbValues.has(`players/${ethInput.uid}/profile`)).toBe(
+      false,
     );
   });
 
@@ -722,7 +797,7 @@ describe("canonical auth and profile runtime", () => {
     ).toBe(target.profileId);
     expect(
       firebase.rtdbValues.get("players/successful-replay-source-login/profile"),
-    ).toBe(target.profileId);
+    ).toBe(source.profileId);
   });
 
   it("heals a missing username before returning a successful X replay", async () => {
@@ -1062,9 +1137,7 @@ describe("canonical auth and profile runtime", () => {
       service.peekVerifyReplay(input.opId, "x", input.uid),
     ).resolves.toMatchObject({ username: "RecoverHandle" });
     expect(firebase.claims.get(input.uid)?.profileId).toBeTruthy();
-    expect(firebase.rtdbValues.get(`players/${input.uid}/profile`)).toBe(
-      firebase.claims.get(input.uid)?.profileId,
-    );
+    expect(firebase.rtdbValues.has(`players/${input.uid}/profile`)).toBe(false);
   });
 
   it("does not complete an expired incomplete replay", async () => {
@@ -1179,9 +1252,7 @@ describe("canonical auth and profile runtime", () => {
     });
     expect(ambiguities).toBe(1);
     expect(firebase.claims.get(uid)?.profileId).toBe(linked.profileId);
-    expect(firebase.rtdbValues.get(`players/${uid}/profile`)).toBe(
-      linked.profileId,
-    );
+    expect(firebase.rtdbValues.has(`players/${uid}/profile`)).toBe(false);
   });
 
   it("retries a profile revision change between resolve and aggregate reads", async () => {

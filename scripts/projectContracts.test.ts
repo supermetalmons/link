@@ -626,7 +626,11 @@ test("operations documentation describes current releases and D1 maintenance", (
   );
   assert.match(
     cloudReadme,
-    /custom `profileId` claims and RTDB `players\/\{uid\}\/profile` links are non-authoritative compatibility shadows/,
+    /custom `profileId` claims remain a non-authoritative browser compatibility signal/,
+  );
+  assert.match(
+    cloudReadme,
+    /RTDB `players\/\{uid\}\/profile` links are retired: runtime code never reads, writes, or deletes them/,
   );
   for (const document of [rootReadme, cloudReadme, guide]) {
     assert.doesNotMatch(

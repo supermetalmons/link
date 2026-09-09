@@ -11,11 +11,6 @@ import {
 } from "./firebaseAuthAdmin.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import {
-  createFirebaseRtdbClient,
-  FirebaseRtdbFailure,
-  type FirebaseRtdbClient,
-} from "./firebaseRtdb.ts";
-import {
   createAuthProfileRepository,
   type AuthProfileRepository,
   type ProfileClaimSource,
@@ -32,16 +27,12 @@ export type ProfileClaimDependencies = {
   catchupStore?: Pick<ProfileLinkCatchupStore, "read" | "settleMissing">;
   logCleanupFailure?: (kind: string) => void;
   repository?: Pick<AuthProfileRepository, "getProfileClaimSource">;
-  rtdbClient?: Pick<FirebaseRtdbClient, "getPath" | "patchRoot">;
   syncCurrentCallerProfile?: AuthIdentityService["syncCurrentCallerProfile"];
 };
 
 function cleanupFailureKind(error: unknown): string {
   if (error instanceof FirebaseAuthAdminFailure) {
     return "firebase-auth-unavailable";
-  }
-  if (error instanceof FirebaseRtdbFailure) {
-    return "firebase-rtdb-unavailable";
   }
   return "profile-claim-cleanup-unavailable";
 }
@@ -59,14 +50,6 @@ export async function syncProfileClaim(
   let source = await readSource();
   const authClient =
     dependencies.authClient || createFirebaseAuthAdminClient(env);
-  const rtdbClient =
-    dependencies.rtdbClient ||
-    createFirebaseRtdbClient(env, {
-      credentials: {
-        email: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL,
-        privateKeyPem: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY,
-      },
-    });
   const logCleanupFailure =
     dependencies.logCleanupFailure ||
     ((kind: string) =>
@@ -80,9 +63,8 @@ export async function syncProfileClaim(
     dependencies.catchupStore || createProfileLinkCatchupStore(env.PROFILE_DB);
 
   const cleanupMissingProfile = async (): Promise<void> => {
-    const [user, profileLink, catchup] = await Promise.all([
+    const [user, catchup] = await Promise.all([
       authClient.getUser(identity.uid),
-      rtdbClient.getPath(`players/${identity.uid}/profile`),
       catchupStore.read(identity.uid),
     ]);
     if (catchup) {
@@ -93,28 +75,9 @@ export async function syncProfileClaim(
       );
     }
     const claims = { ...user.customClaims };
-    const hasProfileClaim = Object.hasOwn(claims, "profileId");
-    const writes: Promise<void>[] = [];
-
-    if (profileLink !== null) {
-      writes.push(
-        rtdbClient.patchRoot({
-          [`players/${identity.uid}/profile`]: null,
-        }),
-      );
-    }
-    if (hasProfileClaim) {
+    if (Object.hasOwn(claims, "profileId")) {
       delete claims.profileId;
-      writes.push(authClient.setCustomUserClaims(identity.uid, claims));
-    }
-
-    const outcomes = await Promise.allSettled(writes);
-    const failure = outcomes.find(
-      (outcome): outcome is PromiseRejectedResult =>
-        outcome.status === "rejected",
-    );
-    if (failure) {
-      throw failure.reason;
+      await authClient.setCustomUserClaims(identity.uid, claims);
     }
   };
 

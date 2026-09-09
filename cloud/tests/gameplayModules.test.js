@@ -33,24 +33,26 @@ test("automatch REST queries retain their RTDB indexes", () => {
   );
 });
 
-test("player reads expose gameplay state without exposing retired wager storage", () => {
+test("player reads expose gameplay state without exposing retired profile and wager storage", () => {
   const players = databaseRules.rules.players;
+  assert.equal(databaseRules.rules[".read"], false);
   assert.equal(players[".read"], undefined);
+  assert.equal(players.$userId[".read"], undefined);
+  assert.equal(players.$userId[".validate"], undefined);
   assert.equal(players.$userId.matches[".read"], true);
-  assert.equal(players.$userId.profile[".read"], true);
+  assert.deepEqual(players.$userId.profile, {
+    ".read": false,
+    ".write": false,
+  });
   assert.equal(players.$userId.mining, undefined);
 });
 
 test("structural gameplay writes and live match updates require Workers", () => {
   const invites = databaseRules.rules.invites.$inviteId;
   const player = databaseRules.rules.players.$userId;
-  assert.equal(invites[".write"], undefined);
-  assert.equal(invites.guestId[".write"], undefined);
-  assert.equal(invites.hostRematches[".write"], undefined);
-  assert.equal(invites.guestRematches[".write"], undefined);
-  assert.equal(invites.reactions, undefined);
-  assert.equal(invites.wagers, undefined);
-  assert.equal(invites.matchesWagerResolutions, undefined);
+  assert.equal(databaseRules.rules[".write"], false);
+  assert.equal(databaseRules.rules.invites[".read"], undefined);
+  assert.deepEqual(invites, { ".read": false, ".write": false });
   assert.equal(player[".write"], undefined);
   assert.match(player.matches.$matchId[".write"], /data\.exists\(\)/);
   assert.match(player.matches.$matchId[".write"], /newData\.exists\(\)/);
