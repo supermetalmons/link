@@ -1,3 +1,4 @@
+import { socketTestIdentity } from "../test/socketTestSession.ts";
 import { env } from "cloudflare:workers";
 import {
   applyD1Migrations,
@@ -359,7 +360,7 @@ describe("durable match presentation", () => {
     const ctx = { waitUntil: (_promise: Promise<unknown>) => undefined };
     const dependencies = {
       repository,
-      verifyIdentity: async () => ({ uid: "host-login" }),
+      verifyIdentity: async () => socketTestIdentity("host-login"),
     };
     const socketRequest = (authenticated: boolean) =>
       new Request(

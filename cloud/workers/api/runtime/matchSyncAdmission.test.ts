@@ -1,3 +1,4 @@
+import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
 import { env } from "cloudflare:workers";
 import {
   evictDurableObject,
@@ -79,6 +80,7 @@ function request(
     "X-Mons-Match-Revision": "1",
     "X-Mons-Match-Protected": "0",
     "X-Mons-Match-Authenticated": "1",
+    ...socketTestSessionHeaders(),
   });
   for (const [key, value] of Object.entries(overrides)) {
     if (value === null) headers.delete(key);
@@ -299,6 +301,7 @@ describe("live match socket admission", () => {
           [`X-Mons-${name}-Revision`]: "1",
           [`X-Mons-${name}-Protected`]: "0",
           [`X-Mons-${name}-Authenticated`]: role === "spectator" ? "0" : "1",
+          ...socketTestSessionHeaders(),
           ...(role === "spectator"
             ? {}
             : { [`X-Mons-${name}-Actor`]: `${role}-login` }),
@@ -336,7 +339,11 @@ describe("live match socket admission", () => {
         Array.from({ length: 4 }, async () => {
           accept(
             await room.fetch("https://room.internal/socket", {
-              headers: { Upgrade: "websocket", "X-Mons-Reaction-Role": role },
+              headers: {
+                Upgrade: "websocket",
+                "X-Mons-Reaction-Role": role,
+                ...socketTestSessionHeaders(),
+              },
             }),
           );
           accept(

@@ -28,6 +28,7 @@ const expectedSharedExports = {
   "./ratings": "./ratings.js",
   "./reactions": "./reactions.js",
   "./rematches": "./rematches.js",
+  "./session-auth": "./session-auth.js",
   "./solana": "./solana.js",
   "./timers": "./timers.js",
   "./usernames": "./usernames.js",

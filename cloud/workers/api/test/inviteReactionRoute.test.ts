@@ -1,3 +1,4 @@
+import { socketTestIdentity } from "./socketTestSession.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -107,12 +108,13 @@ function setup(
     loginUidsByProfileId: new Map(),
     profileById: new Map(),
   });
+  const identity = socketTestIdentity(caller);
   const dependencies: InviteReactionRouteDependencies = {
     repository,
     verifyIdentity: async (incoming) => {
       calls.auth++;
       verifiedRequests.push(incoming);
-      return { uid: caller };
+      return identity;
     },
     room: {
       fetch: async (incoming) => {
@@ -145,6 +147,7 @@ function setup(
     repository,
     socketRequests,
     verifiedRequests,
+    identity,
   };
 }
 
@@ -356,6 +359,8 @@ test("authenticates participant subprotocols and strips credentials from the roo
         "Sec-WebSocket-Protocol": socketProtocols,
         "X-Mons-Reaction-Role": "guest",
         "X-Mons-Reaction-IP": "spoofed",
+        "X-Mons-Session-Id": "untrusted",
+        "X-Mons-Session-Expires-At": "9999999999999",
       },
     }),
     state.env,
@@ -381,6 +386,8 @@ test("authenticates participant subprotocols and strips credentials from the roo
     upgrade: "websocket",
     "x-mons-reaction-ip": "192.0.2.1",
     "x-mons-reaction-role": "host",
+    "x-mons-session-id": state.identity.sid,
+    "x-mons-session-expires-at": String(state.identity.authExpiresAtMs),
   });
   assert.deepEqual(state.calls.rates, [
     "reactions:connect:identity:host-login",

@@ -344,10 +344,6 @@ function harness({
       counters.set(key, (counters.get(key) ?? 0) + 1),
     decrementLifecycleCounter: (key, count = 1) =>
       counters.set(key, (counters.get(key) ?? 0) - count),
-    onAuthStateChanged: (_auth, callback) => {
-      authCallback = callback;
-      return noop;
-    },
     console: {
       log: noop,
       warn: noop,
@@ -359,7 +355,14 @@ function harness({
     `${outputText}\nreturn Connection;`,
   )(...Object.values(dependencies));
   instance = Object.assign(new Constructor(), {
-    auth: { currentUser: { uid: loginUid } },
+    auth: {
+      currentUser: { uid: loginUid },
+      getTokenRemainingMs: () => 300_000,
+      onAuthStateChanged: (callback) => {
+        authCallback = callback;
+        return noop;
+      },
+    },
     currentUid: loginUid,
     authUnsubscribers: new Set(),
     sessionEpoch: 1,

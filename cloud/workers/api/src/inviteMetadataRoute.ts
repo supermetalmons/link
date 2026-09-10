@@ -14,9 +14,10 @@ import {
 } from "./authHttp.ts";
 import { cancelResponseBody } from "./boundedStreams.ts";
 import {
-  verifyFirebaseRequest,
+  verifySessionRequest,
+  type SessionIdentity,
   type WorkerExecutionContext,
-} from "./firebaseAuth.ts";
+} from "./sessionAuth.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 import { resolveInviteRoleFromSnapshot } from "./gameSessionMutations.ts";
 import {
@@ -24,8 +25,8 @@ import {
   type GameplayRepository,
 } from "./gameplayRepository.ts";
 import type { InviteReactions } from "./inviteReactions.ts";
+import { socketSessionHeaders } from "./socketSession.ts";
 import { readInviteSocketToken } from "./inviteSocketAuth.ts";
-import type { RequestIdentity } from "./requestIdentity.ts";
 
 const METADATA_ROUTE_PATTERN = /^\/invites\/([^/]+)\/metadata(\/socket)?$/;
 
@@ -34,8 +35,9 @@ export type InviteMetadataRouteDependencies = {
   room?: Pick<InviteReactions, "readMetadata" | "fetch">;
   verifyIdentity?: (
     request: Request,
+    env: Env,
     ctx: WorkerExecutionContext,
-  ) => Promise<RequestIdentity>;
+  ) => Promise<SessionIdentity>;
   logFailure?: () => void;
 };
 
@@ -109,8 +111,9 @@ export async function handleInviteMetadataRoute(
         : null;
     }
     const identity = identityRequest
-      ? await (dependencies.verifyIdentity || verifyFirebaseRequest)(
+      ? await (dependencies.verifyIdentity || verifySessionRequest)(
           identityRequest,
+          env,
           ctx,
         )
       : null;
@@ -196,6 +199,7 @@ export async function handleInviteMetadataRoute(
             "X-Mons-Metadata-Revision": String(read.snapshot.revision),
             "X-Mons-Metadata-Protected": read.passwordProtected ? "1" : "0",
             "X-Mons-Metadata-Authenticated": identity ? "1" : "0",
+            ...socketSessionHeaders(identity),
             ...(role.actorUid
               ? { "X-Mons-Metadata-Actor": encodeURIComponent(role.actorUid) }
               : {}),

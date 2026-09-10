@@ -12,6 +12,11 @@ import {
   type XCallbackDependencyOverrides,
 } from "./xCallback.ts";
 import { AUTH_PATHS } from "./authHttp.ts";
+import { SESSION_PATHS } from "@mons/shared/session-auth";
+import {
+  handleSessionRoute,
+  type SessionRouteDependencies,
+} from "./sessionRoutes.ts";
 import { handleAuthRoute, type AuthRouteDependencies } from "./authRoutes.ts";
 import {
   handleMiningRoute,
@@ -27,7 +32,7 @@ import {
   handleProfileRoute,
   type ProfileRouteDependencies,
 } from "./profileRoute.ts";
-import type { WorkerExecutionContext } from "./firebaseAuth.ts";
+import type { WorkerExecutionContext } from "./sessionAuth.ts";
 import { EVENT_PATHS, handleEventRoute } from "./eventRoute.ts";
 import {
   EVENT_SNAPSHOT_PATH,
@@ -84,6 +89,7 @@ export async function handleRequest(
   env: Env,
   dependencyOverrides: Partial<WorkerDependencies> & {
     auth?: AuthRouteDependencies;
+    session?: SessionRouteDependencies;
     gameplay?: GameplayRouteDependencies;
     mining?: MiningRouteDependencies;
     profile?: ProfileRouteDependencies;
@@ -97,6 +103,9 @@ export async function handleRequest(
   ctx?: WorkerExecutionContext,
 ): Promise<Response> {
   const pathname = new URL(request.url).pathname;
+  if (SESSION_PATHS.includes(pathname)) {
+    return handleSessionRoute(request, env, dependencyOverrides.session);
+  }
   if (isMatchSyncPath(pathname)) {
     if (!ctx) return jsonResponse({ ok: false, error: "unavailable" }, 503);
     return handleMatchSyncRoute(

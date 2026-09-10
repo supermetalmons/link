@@ -101,10 +101,23 @@ test("browser and Worker runtime cannot restore Firebase profile claims or Admin
     .map((path) => relative(repositoryRoot, path));
   assert.deepEqual(violations, []);
   const verifier = readFileSync(
-    resolve(import.meta.dirname, "../src/firebaseAuth.ts"),
+    resolve(import.meta.dirname, "../src/sessionAuth.ts"),
     "utf8",
   );
   assert.doesNotMatch(verifier, /\bprofileId\b/);
+});
+
+test("Worker authentication cannot restore Firebase session acceptance", () => {
+  const violations = reachableRuntimeFiles(
+    resolve(import.meta.dirname, "../src/index.ts"),
+  )
+    .filter((path) =>
+      /verifyFirebaseRequest|securetoken\.google\.com|securetoken@system\.gserviceaccount\.com/.test(
+        readFileSync(path, "utf8"),
+      ),
+    )
+    .map((path) => relative(repositoryRoot, path));
+  assert.deepEqual(violations, []);
 });
 
 test("profile-link job coordination cannot use the retired Firebase outbox", () => {

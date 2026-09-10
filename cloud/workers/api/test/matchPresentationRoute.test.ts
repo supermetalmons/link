@@ -1,3 +1,4 @@
+import { socketTestIdentity } from "./socketTestSession.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { MatchPresentation } from "@mons/shared/match-presentation";
@@ -111,7 +112,7 @@ function setup(invite: unknown = paired, uid = "host-login") {
     repository,
     verifyIdentity: async () => {
       calls.auth++;
-      return { uid };
+      return socketTestIdentity(uid);
     },
     room: {
       ensurePresentations: async (matchId, seeds) => {

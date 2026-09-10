@@ -36,8 +36,8 @@ import type {
 
 const API = "https://api.mons.link";
 const INVITE = "SmokeAbc123";
-const HOST = "anonymous-host";
-const GUEST = "anonymous-guest";
+const HOST = "H".repeat(28);
+const GUEST = "G".repeat(28);
 const NOW = 1_800_000_000_000;
 const jwt = (uid: string) =>
   `header.${Buffer.from(JSON.stringify({ sub: uid })).toString("base64url")}.signature`;
@@ -135,8 +135,14 @@ function harness(
     reconnectMatchRevision?: (revision: number) => number;
     fastTimers?: boolean;
     directMovesAllowed?: boolean;
+    advanceMs?: number;
+    renewalFrame?: (
+      snapshot: Source | MatchSyncSnapshot,
+      protocol: string,
+    ) => unknown;
   } = {},
 ) {
+  let now = NOW;
   let source: Source | null = null;
   let signupCount = 0;
   let nextOperation = 0;
@@ -149,6 +155,10 @@ function harness(
     protocol: string;
   }[] = [];
   const deleted: string[] = [];
+  const sessionOwners = new Map<string, string>();
+  const sessionExpiries = new Map<string, number>();
+  const socketExpiries = new Map<FakeSocket, number>();
+  let expiredSockets = 0;
   const receipts = new Map<
     string,
     { path: string; body: unknown; payload: unknown }
@@ -247,26 +257,49 @@ function harness(
   });
   const handle = (request: RequestRecord): Response => {
     const { url, body, method, headers } = request;
-    if (url.hostname === "identitytoolkit.googleapis.com") {
+    if (url.pathname.startsWith("/auth/session/")) {
       assert.equal(method, "POST");
       assert.equal(headers.get("Origin"), "https://mons.link");
-      if (url.pathname === "/v1/accounts:signUp") {
-        assert.deepEqual(body, { returnSecureToken: true });
+      if (url.pathname === "/auth/session/anonymous") {
+        assert.ok(body && typeof body === "object" && "sessionId" in body);
+        const sessionId = String(body.sessionId);
         const uid = signupCount++ === 0 ? HOST : GUEST;
-        return json({ localId: uid, idToken: TOKENS.get(uid) });
+        sessionOwners.set(sessionId, uid);
+        sessionExpiries.set(uid, now + 300_000);
+        return json({
+          ok: true,
+          uid,
+          sessionId,
+          accessToken: TOKENS.get(uid),
+          accessExpiresAtMs: now + 300_000,
+        });
       }
-      assert.equal(url.pathname, "/v1/accounts:delete");
-      assert.ok(body && typeof body === "object" && "idToken" in body);
-      const uid = owner(String(body.idToken));
-      assert.ok(uid);
-      deleted.push(uid);
-      return json({});
+      if (url.pathname === "/auth/session/refresh") {
+        const sessionId = headers.get("Authorization")?.split(".")[1] || "";
+        const uid = sessionOwners.get(sessionId);
+        assert.ok(uid);
+        sessionExpiries.set(uid, now + 300_000);
+        return json({
+          ok: true,
+          uid,
+          sessionId,
+          accessToken: TOKENS.get(uid),
+          accessExpiresAtMs: now + 300_000,
+        });
+      }
+      assert.equal(url.pathname, "/auth/session/logout");
+      const uid = sessionOwners.get(
+        headers.get("Authorization")?.split(".")[1] || "",
+      );
+      if (uid) deleted.push(uid);
+      return new Response(null, { status: 204 });
     }
     if (url.hostname === "mons-link-default-rtdb.firebaseio.com") {
-      const uid = owner(url.searchParams.get("auth"));
-      assert.ok(
-        uid,
-        "Firebase requests use only the temporary participant tokens",
+      const uid = url.pathname.split("/")[2];
+      assert.equal(
+        url.searchParams.has("auth"),
+        false,
+        "Cloudflare tokens never go to Firebase",
       );
       if (
         url.pathname === `/invites/${INVITE}.json` ||
@@ -589,9 +622,23 @@ function harness(
       assert.equal(init?.redirect, "error");
       assert.ok(init?.signal);
       requests.push(request);
-      return options.intercept
+      const uid = owner(request.headers.get("Authorization")?.slice(7) || null);
+      if (uid && (sessionExpiries.get(uid) ?? 0) <= now)
+        return json({ ok: false, error: "unauthenticated" }, 401);
+      const response = await (options.intercept
         ? options.intercept(request, () => handle(request))
-        : handle(request);
+        : handle(request));
+      if (!request.url.pathname.startsWith("/auth/session/")) {
+        now += options.advanceMs ?? 0;
+        for (const [socket, expiry] of socketExpiries) {
+          if (!socket.terminated && expiry <= now) {
+            expiredSockets++;
+            socket.terminated = true;
+            socket.emit("close", 4001);
+          }
+        }
+      }
+      return response;
     },
     connect: (url, socketOptions, protocol) => {
       connections.push({ url, options: socketOptions, protocol });
@@ -620,6 +667,24 @@ function harness(
         matchId,
         options.suppressHeartbeat ?? false,
       );
+      const uid = owner(
+        typeof socketOptions.headers?.Authorization === "string"
+          ? socketOptions.headers.Authorization.slice(7)
+          : null,
+      );
+      if (uid) {
+        const expiry = sessionExpiries.get(uid)!;
+        assert.ok(expiry > now, "socket authenticates with an unexpired token");
+        socketExpiries.set(socket, expiry);
+      }
+      const renewed = connections
+        .slice(0, -1)
+        .some(
+          (prior) =>
+            prior.url === url &&
+            prior.options.headers?.Authorization ===
+              socketOptions.headers?.Authorization,
+        );
       sockets.push(socket);
       queueMicrotask(() => {
         assert.ok(source);
@@ -637,7 +702,14 @@ function harness(
           "message",
           Buffer.from(
             JSON.stringify(
-              snapshot ? matchFrame(snapshot) : frame(structuredClone(source)),
+              renewed && options.renewalFrame
+                ? options.renewalFrame(
+                    snapshot ?? structuredClone(source),
+                    protocol,
+                  )
+                : snapshot
+                  ? matchFrame(snapshot)
+                  : frame(structuredClone(source)),
             ),
           ),
           false,
@@ -648,7 +720,7 @@ function harness(
     createInviteId: () => INVITE,
     createOperationId: () =>
       `00000000-0000-4000-8000-${String(++nextOperation).padStart(12, "0")}`,
-    now: () => NOW,
+    now: () => now,
     log: (message) => logs.push(message),
     setTimeout: ((callback: () => void, milliseconds: number) => {
       timeoutDurations.push(milliseconds);
@@ -679,6 +751,11 @@ function harness(
     timers,
     timeoutDurations,
     source: () => source,
+    elapsed: () => now - NOW,
+    advance: (milliseconds: number) => {
+      now += milliseconds;
+    },
+    expiredSockets: () => expiredSockets,
   };
 }
 
@@ -736,8 +813,12 @@ test("runs the isolated lifecycle, API move/surrender replay and retired Firebas
   assert.equal(report.inviteId, INVITE);
   assert.deepEqual(report.matchIds, [INVITE, `${INVITE}1`]);
   assert.equal(report.checks.length, 18);
-  assert.ok(report.checks.includes("firebase-surrender-write-rules"));
-  assert.ok(report.checks.includes("firebase-move-write-rules"));
+  assert.ok(
+    report.checks.includes("firebase-unauthenticated-surrender-write-denials"),
+  );
+  assert.ok(
+    report.checks.includes("firebase-unauthenticated-move-write-denials"),
+  );
   assert.ok(report.checks.includes("firebase-invite-and-profile-read-denials"));
   assert.ok(report.checks.includes("pending-match-http-socket-and-heartbeat"));
   assert.ok(report.checks.includes("join-live-match-and-public-spectator"));
@@ -819,7 +900,9 @@ test("pre-rule verification skips only direct status probes and still verifies A
     state.dependencies,
   );
   assert.equal(report.checks.length, 17);
-  assert.ok(!report.checks.includes("firebase-surrender-write-rules"));
+  assert.ok(
+    !report.checks.includes("firebase-unauthenticated-surrender-write-denials"),
+  );
   assert.equal(
     state.requests.filter(
       (request) => request.url.pathname === "/matches/surrender",
@@ -840,8 +923,12 @@ test("pre-move-cutover smoke verifies API moves and replay while old direct writ
     { baseUrl: API, moveRulesPending: true },
     state.dependencies,
   );
-  assert.ok(!report.checks.includes("firebase-move-write-rules"));
-  assert.ok(report.checks.includes("firebase-surrender-write-rules"));
+  assert.ok(
+    !report.checks.includes("firebase-unauthenticated-move-write-denials"),
+  );
+  assert.ok(
+    report.checks.includes("firebase-unauthenticated-surrender-write-denials"),
+  );
   assert.equal(
     state.requests.filter((request) => request.url.pathname === "/matches/move")
       .length,
@@ -1144,6 +1231,125 @@ test("requires live match delivery before an HTTP refresh can repair a missed no
   assert.equal(state.timers.size, 0);
 });
 
+test("socket close diagnostics expose only numeric codes and known server reasons", async () => {
+  for (const reason of ["Match source unavailable", TOKENS.get(HOST)!]) {
+    const state = harness();
+    const connect = state.dependencies.connect;
+    state.dependencies.connect = (url, options, protocol) => {
+      const socket = connect(url, options, protocol);
+      if (protocol === MATCH_SYNC_SOCKET_PROTOCOL)
+        queueMicrotask(() =>
+          (socket as FakeSocket).emit("close", 1011, Buffer.from(reason)),
+        );
+      return socket;
+    };
+    await assert.rejects(
+      runSmoke({ baseUrl: API }, state.dependencies),
+      (error: unknown) =>
+        error instanceof Error &&
+        error.message.includes("1011") &&
+        error.message.includes(
+          reason === "Match source unavailable"
+            ? reason
+            : "unrecognized reason",
+        ) &&
+        !error.message.includes(TOKENS.get(HOST)!),
+    );
+  }
+});
+
+test("lifecycle observations renew expiring match and metadata sockets during long runs", async () => {
+  const state = harness({ advanceMs: 9_000 });
+  const report = await runSmoke({ baseUrl: API }, state.dependencies);
+  assert.ok(state.elapsed() > 300_000);
+  assert.ok(state.expiredSockets() > 0);
+  assert.ok(
+    state.requests.filter(
+      (request) => request.url.pathname === "/auth/session/refresh",
+    ).length > 2,
+  );
+  assert.ok(
+    state.connections.filter((connection) =>
+      connection.url.endsWith("/metadata/socket"),
+    ).length > 1,
+  );
+  assert.ok(
+    state.connections.filter(
+      (connection) =>
+        connection.url.includes("/matches/") &&
+        connection.options.headers?.Authorization,
+    ).length > 4,
+  );
+  assert.ok(report.checks.includes("terminal-replay-preserved-source"));
+  assert.ok(
+    state.sockets.some((socket) =>
+      socket.sent.includes(REACTION_HEARTBEAT_REQUEST),
+    ),
+  );
+  assert.ok(state.sockets.every((socket) => socket.terminated));
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+  assert.equal(state.timers.size, 0);
+});
+
+test("pending participant socket admission refreshes a token aged during source checks", async () => {
+  let advanced = false;
+  const state = harness({
+    intercept: (request, respond) => {
+      const response = respond();
+      if (
+        !advanced &&
+        request.url.pathname === `/players/${HOST}/profile.json`
+      ) {
+        advanced = true;
+        state.advance(300_000);
+      }
+      return response;
+    },
+  });
+  const report = await runSmoke({ baseUrl: API }, state.dependencies);
+  assert.equal(advanced, true);
+  assert.ok(report.checks.includes("pending-http-and-authenticated-socket"));
+  assert.ok(report.checks.includes("pending-match-http-socket-and-heartbeat"));
+  assert.ok(
+    state.requests.some(
+      (request) => request.url.pathname === "/auth/session/refresh",
+    ),
+  );
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+});
+
+test("token renewal preserves snapshot revision and target validation", async (t) => {
+  for (const [protocol, patch] of [
+    [MATCH_SYNC_SOCKET_PROTOCOL, { revision: 1 }],
+    [MATCH_SYNC_SOCKET_PROTOCOL, { matchId: "wrong-target" }],
+    ["mons-invite-metadata-v1", { revision: 1 }],
+    ["mons-invite-metadata-v1", { inviteId: "OtherInvite" }],
+  ] as const) {
+    await t.test(`${protocol}-${Object.keys(patch)[0]}`, async () => {
+      let changed = 0;
+      const state = harness({
+        advanceMs: 9_000,
+        renewalFrame: (snapshot, actualProtocol) => {
+          const modify = actualProtocol === protocol;
+          if (modify) changed++;
+          return {
+            schemaVersion: 1,
+            type: "snapshot",
+            snapshot: modify ? { ...snapshot, ...patch } : snapshot,
+          };
+        },
+      });
+      await assert.rejects(
+        runSmoke({ baseUrl: API }, state.dependencies),
+        /socket received an invalid snapshot/,
+      );
+      assert.ok(changed > 0);
+      assert.ok(state.sockets.every((socket) => socket.terminated));
+      assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+    });
+  }
+});
+
 test("rejects malformed and wrong-target match socket snapshots without exposing contents", async (t) => {
   for (const change of [
     { matchId: "unrelated-match" },
@@ -1351,14 +1557,14 @@ test("deletes the first session when the second signup fails without retrying ac
   let signups = 0;
   const state = harness({
     intercept(request, response) {
-      if (request.url.pathname === "/v1/accounts:signUp" && ++signups === 2)
+      if (request.url.pathname === "/auth/session/anonymous" && ++signups === 2)
         return json({ error: "unavailable" }, 503);
       return response();
     },
   });
   await assert.rejects(
     runSmoke({ baseUrl: API }, state.dependencies),
-    /anonymous session request returned 503/,
+    /Cloudflare session anonymous returned 503/,
   );
   assert.equal(signups, 2);
   assert.deepEqual(state.deleted, [HOST]);
@@ -1370,11 +1576,13 @@ test("attempts both account deletions and reports cleanup failure without return
   const state = harness({
     intercept(request, response) {
       if (
-        request.url.pathname === "/v1/accounts:delete" &&
-        request.body &&
-        typeof request.body === "object" &&
-        "idToken" in request.body &&
-        request.body.idToken === TOKENS.get(GUEST)
+        request.url.pathname === "/auth/session/logout" &&
+        request.headers.get("Authorization")?.split(".")[1] ===
+          (
+            state.requests.filter(
+              (value) => value.url.pathname === "/auth/session/anonymous",
+            )[1].body as { sessionId: string }
+          ).sessionId
       )
         return json({ error: { message: TOKENS.get(GUEST) } }, 403);
       return response();
@@ -1382,16 +1590,71 @@ test("attempts both account deletions and reports cleanup failure without return
   });
   await assert.rejects(
     runSmoke({ baseUrl: API }, state.dependencies),
-    /could not delete every temporary anonymous session/,
+    /could not revoke every temporary anonymous session/,
   );
   assert.deepEqual(state.deleted, [HOST]);
   assert.equal(
     state.requests.filter(
-      (request) => request.url.pathname === "/v1/accounts:delete",
+      (request) => request.url.pathname === "/auth/session/logout",
     ).length,
     2,
   );
   assert.ok(!state.logs.join("\n").includes(TOKENS.get(GUEST)!));
+});
+
+test("retries transient session revocation failures with the same capability", async (t) => {
+  for (const failure of ["server", "network"]) {
+    await t.test(failure, async () => {
+      const attempts = new Map<string, number>();
+      let failedCapability: string | undefined;
+      const state = harness({
+        intercept(request, response) {
+          if (request.url.pathname === "/auth/session/logout") {
+            const capability = request.headers.get("Authorization")!;
+            attempts.set(capability, (attempts.get(capability) || 0) + 1);
+            if (!failedCapability) {
+              failedCapability = capability;
+              if (failure === "network") throw new TypeError("fetch failed");
+              return json({ error: "temporarily-unavailable" }, 503);
+            }
+          }
+          return response();
+        },
+      });
+      const report = await runSmoke({ baseUrl: API }, state.dependencies);
+      assert.equal(attempts.get(failedCapability!), 2);
+      assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+      assert.ok(report.checks.includes("temporary-anonymous-sessions-revoked"));
+    });
+  }
+});
+
+test("bounds persistent revocation failures and rejects non-204 acknowledgements", async (t) => {
+  for (const status of [503, 200]) {
+    await t.test(String(status), async () => {
+      let attempts = 0;
+      let failedCapability: string | undefined;
+      const state = harness({
+        intercept(request, response) {
+          if (request.url.pathname === "/auth/session/logout") {
+            const capability = request.headers.get("Authorization")!;
+            failedCapability ||= capability;
+            if (capability === failedCapability) {
+              attempts++;
+              return json({}, status);
+            }
+          }
+          return response();
+        },
+      });
+      await assert.rejects(
+        runSmoke({ baseUrl: API }, state.dependencies),
+        /could not revoke every temporary anonymous session/,
+      );
+      assert.equal(attempts, status === 503 ? 3 : 1);
+      assert.equal(state.deleted.length, 1);
+    });
+  }
 });
 
 test("restores the original timer before failing when the client timer rule is broken", async () => {

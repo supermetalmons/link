@@ -76,10 +76,12 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
     fixture.stage = "prepared";
     for (const role of ROLES)
       Object.assign(fixture.actors[role], {
-        uid: `${role}-smoke`,
+        uid: role.padEnd(28, "0"),
         profileId: `${role}-profile`,
-        idToken: token(`${role}-smoke`),
-        refreshToken: `${role}-refresh-secret`,
+        accessToken: token(role.padEnd(28, "0")),
+        accessExpiresAtMs: NOW + 300_000,
+        sessionId: `00000000-0000-4000-8000-00000000000${role === "host" ? 1 : 2}`,
+        refreshToken: `mrs1.00000000-0000-4000-8000-00000000000${role === "host" ? 1 : 2}.${"A".repeat(43)}`,
       });
   }
   const totals: Record<Role, number> = {
@@ -174,7 +176,7 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
     ROLES.find(
       (role) =>
         headers.get("Authorization") ===
-        `Bearer ${fixture.actors[role].idToken}`,
+        `Bearer ${fixture.actors[role].accessToken}`,
     ) || null;
   const dependencies: Dependencies = {
     now: () => NOW,
@@ -218,26 +220,30 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
         assert.equal(headers.get("Origin"), "https://mons.link");
         assert.equal(headers.get("Referer"), "https://mons.link/");
       }
-      if (url.hostname === "identitytoolkit.googleapis.com") {
-        assert.equal(url.pathname, "/v1/accounts:signUp");
-        assert.deepEqual(body, { returnSecureToken: true });
+      if (url.pathname === "/auth/session/anonymous") {
+        assert.ok(body && typeof body === "object" && "sessionId" in body);
         const role = ROLES[signups++];
         assert.ok(role);
         return response({
-          localId: `${role}-smoke`,
-          idToken: token(`${role}-smoke`),
-          refreshToken: `${role}-refresh-secret`,
+          ok: true,
+          uid: role.padEnd(28, "0"),
+          sessionId: body.sessionId,
+          accessToken: token(role.padEnd(28, "0")),
+          accessExpiresAtMs: dependencies.now() + 300_000,
         });
       }
-      if (url.hostname === "securetoken.googleapis.com") {
-        const role = ROLES.find((value) =>
-          rawBody.includes(`${value}-refresh-secret`),
+      if (url.pathname === "/auth/session/refresh") {
+        const sessionId = headers.get("Authorization")?.split(".")[1];
+        const role = ROLES.find(
+          (value) => fixture.actors[value].sessionId === sessionId,
         );
         assert.ok(role);
         return response({
-          id_token: token(`${role}-smoke`),
-          refresh_token: `${role}-refresh-secret`,
-          user_id: `${role}-smoke`,
+          ok: true,
+          uid: role.padEnd(28, "0"),
+          sessionId,
+          accessToken: token(role.padEnd(28, "0")),
+          accessExpiresAtMs: dependencies.now() + 300_000,
         });
       }
       if (url.hostname === "mons-link-default-rtdb.firebaseio.com") {
@@ -247,9 +253,8 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
           "Surrender never writes directly to Firebase",
         );
         const id = fixture.invites.settle.id;
-        const role = ROLES.find(
-          (value) =>
-            fixture.actors[value].idToken === url.searchParams.get("auth"),
+        const role = ROLES.find((value) =>
+          url.pathname.startsWith(`/players/${value.padEnd(28, "0")}/`),
         );
         assert.ok(role);
         if (method === "GET") {
@@ -260,7 +265,7 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
           assert.ok(createdInvites.has(matchId));
           assert.equal(
             url.pathname,
-            `/players/${role}-smoke/matches/${matchId}.json`,
+            `/players/${role.padEnd(28, "0")}/matches/${matchId}.json`,
           );
           return response({
             version: 2,
@@ -320,7 +325,7 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
         linked[role] = true;
         return response({
           ok: true,
-          uid: `${role}-smoke`,
+          uid: role.padEnd(28, "0"),
           profileId: `${role}-profile`,
           username: null,
           sol: address,
@@ -664,7 +669,7 @@ test("delayed preparation preserves legacy host funding and funds only its unfin
     if (
       new URL(String(input)).pathname === "/mining/rock" &&
       new Headers(init?.headers).get("Authorization") ===
-        `Bearer ${h.fixture.actors.guest.idToken}`
+        `Bearer ${h.fixture.actors.guest.accessToken}`
     )
       return response({ error: "temporarily-unavailable" }, 503);
     return originalFetch(input, init);
@@ -801,7 +806,7 @@ test("preparation rejects foreign, event, advanced, or unreadable invites before
       h.requests.every(
         (request) =>
           request.method === "GET" ||
-          request.url.hostname === "securetoken.googleapis.com" ||
+          request.url.pathname === "/auth/session/refresh" ||
           request.url.pathname === "/profiles/lookup",
       ),
     );
@@ -900,6 +905,212 @@ test("active lifecycle uses separate proposal lineages, verifies broadcasts and 
       ),
   );
   assert.ok(before > 0);
+});
+
+test("long lifecycle runs renew HTTP and socket credentials without repeating settlement", async () => {
+  const h = model();
+  let now = NOW;
+  let refreshes = 0;
+  let expiredSockets = 0;
+  let rejectedRequests = 0;
+  const savedExpiries: number[] = [];
+  const issued = new Map(
+    Object.values(h.fixture.actors).map((actor) => [
+      actor.accessToken!,
+      actor.accessExpiresAtMs!,
+    ]),
+  );
+  const sockets = new Map<FakeSocket, number>();
+  const originalFetch = h.dependencies.fetch;
+  const originalConnect = h.dependencies.connect;
+  h.dependencies.now = () => now;
+  h.dependencies.connect = (url, protocols, options) => {
+    const bearer = protocols[1]?.slice("bearer.".length);
+    const expires = bearer ? issued.get(bearer) : undefined;
+    assert.ok(
+      expires !== undefined && expires > now,
+      "socket opens with a current token",
+    );
+    const socket = originalConnect(url, protocols, options);
+    sockets.set(socket as unknown as FakeSocket, expires);
+    return socket;
+  };
+  h.dependencies.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/auth/session/refresh") {
+      refreshes++;
+      const result = await originalFetch(input, init);
+      const value = (await result.json()) as {
+        uid: string;
+        accessExpiresAtMs: number;
+      };
+      const accessExpiresAtMs = now + 300_000;
+      const accessToken = `header.${Buffer.from(JSON.stringify({ sub: value.uid, exp: accessExpiresAtMs / 1000 })).toString("base64url")}.signature`;
+      issued.set(accessToken, accessExpiresAtMs);
+      return response({ ...value, accessToken, accessExpiresAtMs });
+    }
+    const bearer = new Headers(init?.headers).get("Authorization")?.slice(7);
+    if (url.origin === API_ROOT && bearer && (issued.get(bearer) ?? 0) <= now) {
+      rejectedRequests++;
+      return response({ ok: false, error: "unauthenticated" }, 401);
+    }
+    const result = await originalFetch(input, init);
+    if (url.origin === API_ROOT && bearer) {
+      now += 9_000;
+      for (const [socket, expires] of sockets) {
+        if (!socket.terminated && expires <= now) {
+          expiredSockets++;
+          socket.emit("close", 4001);
+        }
+      }
+    }
+    return result;
+  };
+  await activeLifecycle(
+    h.fixture,
+    () => {
+      for (const actor of Object.values(h.fixture.actors))
+        savedExpiries.push(actor.accessExpiresAtMs!);
+    },
+    h.dependencies,
+  );
+  assert.ok(now - NOW > 300_000);
+  assert.ok(refreshes >= 2);
+  assert.ok(expiredSockets > 0);
+  assert.equal(rejectedRequests, 0);
+  assert.equal(h.fixture.stage, "complete");
+  assert.equal(h.transfers, 1);
+  assert.ok(savedExpiries.some((expiry) => expiry > NOW + 300_000));
+  for (const path of [
+    "/wagers/proposals/accept",
+    "/matches/surrender",
+    "/wagers/outcomes/resolve",
+  ]) {
+    const requests = h.requests.filter(
+      (request) => request.url.pathname === path,
+    );
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[0].body, requests[1].body);
+  }
+  assert.ok(h.sockets.every((socket) => socket.terminated));
+});
+
+test("token renewal preserves unexpected socket failures", async (t) => {
+  for (const failure of ["server-close", "early-expiry", "frame", "error"]) {
+    await t.test(failure, async () => {
+      const h = model();
+      h.fixture.stage = "active";
+      let now = NOW;
+      let injected = false;
+      const originalFetch = h.dependencies.fetch;
+      h.dependencies.now = () => now;
+      h.dependencies.fetch = async (input, init) => {
+        const result = await originalFetch(input, init);
+        if (
+          !injected &&
+          new URL(String(input)).pathname === "/wagers/proposals/cancel"
+        ) {
+          injected = true;
+          now += failure === "early-expiry" ? 295_000 : 300_000;
+          const socket = h.sockets.find((value) => !value.terminated)!;
+          assert.ok(socket);
+          if (failure === "frame")
+            socket.emit("message", Buffer.from("invalid"), false);
+          else if (failure === "error") socket.emit("error", new Error());
+          else socket.emit("close", failure === "early-expiry" ? 4001 : 1011);
+        }
+        return result;
+      };
+      await assert.rejects(
+        activeLifecycle(h.fixture, () => undefined, h.dependencies),
+        failure === "frame"
+          ? /WebSocket frame was invalid/
+          : failure === "error"
+            ? /WebSocket failed/
+            : /WebSocket closed before completion/,
+      );
+      assert.equal(injected, true);
+      assert.ok(!h.fixture.steps.includes("cancel:remove"));
+      assert.ok(h.sockets.every((socket) => socket.terminated));
+    });
+  }
+});
+
+test("renewed sockets reject invalid initial snapshots before a later valid frame", async (t) => {
+  for (const failure of ["regressed-revision", "changed-content"]) {
+    await t.test(failure, async () => {
+      const h = model();
+      h.fixture.stage = "active";
+      let now = NOW;
+      let expired = false;
+      let injected = false;
+      const originalFetch = h.dependencies.fetch;
+      const originalConnect = h.dependencies.connect;
+      h.dependencies.now = () => now;
+      h.dependencies.fetch = async (input, init) => {
+        const path = new URL(String(input)).pathname;
+        const result = await originalFetch(input, init);
+        if (path === "/auth/session/refresh") {
+          const value = (await result.json()) as Record<string, unknown>;
+          return response({ ...value, accessExpiresAtMs: now + 300_000 });
+        }
+        if (!expired && path === "/wagers/proposals/cancel") {
+          expired = true;
+          now += 300_000;
+          for (const socket of h.sockets.filter((value) => !value.terminated))
+            socket.emit("close", 4001);
+        }
+        return result;
+      };
+      h.dependencies.connect = (url, protocols, options) => {
+        const inviteId = new URL(url).pathname.split("/")[2];
+        if (!expired || injected || inviteId !== h.fixture.invites.cancel.id)
+          return originalConnect(url, protocols, options);
+        injected = true;
+        const socket = new FakeSocket(inviteId);
+        h.sockets.push(socket);
+        const current = h.states.get(inviteId)!;
+        const initial = clone(current);
+        if (failure === "regressed-revision") initial.revision--;
+        else
+          initial.wagers[inviteId] = {
+            proposals: {
+              [h.fixture.actors.host.uid!]: {
+                material: "dust",
+                count: 1,
+                createdAt: NOW,
+              },
+            },
+            proposedBy: { [h.fixture.actors.host.uid!]: true },
+          };
+        current.revision++;
+        const corrected = clone(current);
+        queueMicrotask(() => {
+          for (const snapshot of [initial, corrected])
+            socket.emit(
+              "message",
+              Buffer.from(
+                JSON.stringify({
+                  schemaVersion: 1,
+                  type: "snapshot",
+                  snapshot,
+                }),
+              ),
+              false,
+            );
+        });
+        return socket as unknown as WebSocket;
+      };
+      await assert.rejects(
+        activeLifecycle(h.fixture, () => undefined, h.dependencies),
+        /WebSocket frame was invalid/,
+      );
+      assert.equal(injected, true);
+      assert.equal(h.fixture.stage, "active");
+      assert.ok(!h.fixture.steps.includes("cancel:remove"));
+      assert.ok(h.sockets.every((socket) => socket.terminated));
+    });
+  }
 });
 
 test("an uncertain API surrender resumes the same fixture and never writes directly to Firebase", async () => {
@@ -1112,7 +1323,7 @@ test("HTTP/WebSocket parity aligns a legitimate concurrent revision", async () =
   };
   const snapshot = await smokeSnapshots(
     inviteId,
-    h.fixture.actors.host.idToken,
+    h.fixture.actors.host.accessToken,
     h.dependencies,
   );
   assert.equal(snapshot.revision, 2);
@@ -1138,7 +1349,7 @@ test("HTTP/WebSocket parity still rejects different content at a matching revisi
     return originalFetch(input, init);
   };
   await assert.rejects(
-    smokeSnapshots(inviteId, h.fixture.actors.host.idToken, h.dependencies),
+    smokeSnapshots(inviteId, h.fixture.actors.host.accessToken, h.dependencies),
     /HTTP\/WebSocket snapshot parity did not match/,
   );
   assert.ok(h.sockets.every((socket) => socket.terminated));
@@ -1165,7 +1376,7 @@ test("HTTP/WebSocket parity rejects changed content at the same revision", async
   await assert.rejects(
     smokeSnapshots(
       h.fixture.invites.cancel.id,
-      h.fixture.actors.host.idToken,
+      h.fixture.actors.host.accessToken,
       h.dependencies,
     ),
     /WebSocket frame was invalid/,
@@ -1233,11 +1444,13 @@ test("fixture runner refuses an existing lock without remote requests", async ()
   }
 });
 
-test("existing fixtures refresh Firebase credentials with the allowed referrer without creating identities", async () => {
+test("existing fixtures refresh Cloudflare credentials without creating identities", async () => {
   const directory = mkdtempSync(join(tmpdir(), "wager-smoke-refresh-"));
   try {
     const path = join(directory, "fixture.json");
     const h = model();
+    delete h.fixture.actors.host.accessExpiresAtMs;
+    delete h.fixture.actors.guest.accessExpiresAtMs;
     saveFixture(path, h.fixture);
     await runSmoke(
       { mode: "frozen-read", baseUrl: API_ROOT, fixture: path },
@@ -1246,14 +1459,14 @@ test("existing fixtures refresh Firebase credentials with the allowed referrer w
     assert.equal(h.signups, 0);
     assert.equal(
       h.requests.filter(
-        (request) => request.url.hostname === "securetoken.googleapis.com",
+        (request) => request.url.pathname === "/auth/session/refresh",
       ).length,
       2,
     );
     assert.ok(
       h.requests.every(
         (request) =>
-          request.url.hostname === "securetoken.googleapis.com" ||
+          request.url.pathname === "/auth/session/refresh" ||
           request.method === "GET" ||
           ["/profiles/lookup", "/wagers/frozen/read"].includes(
             request.url.pathname,
@@ -1261,8 +1474,10 @@ test("existing fixtures refresh Firebase credentials with the allowed referrer w
       ),
     );
     const saved = readFixture(path);
-    assert.equal(saved.actors.host.uid, "host-smoke");
-    assert.equal(saved.actors.guest.uid, "guest-smoke");
+    assert.equal(saved.actors.host.uid, "host".padEnd(28, "0"));
+    assert.equal(saved.actors.guest.uid, "guest".padEnd(28, "0"));
+    for (const actor of Object.values(saved.actors))
+      assert.equal(actor.accessExpiresAtMs, NOW + 300_000);
     assert.equal(statSync(path).mode & 0o777, 0o600);
   } finally {
     rmSync(directory, { recursive: true, force: true });

@@ -14,9 +14,10 @@ import {
   isAllowedAuthOrigin,
 } from "./authHttp.ts";
 import {
-  verifyFirebaseRequest,
+  verifySessionRequest,
+  type SessionIdentity,
   type WorkerExecutionContext,
-} from "./firebaseAuth.ts";
+} from "./sessionAuth.ts";
 import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
   createGameplayRepository,
@@ -25,7 +26,7 @@ import {
 import { resolveInviteRole } from "./gameSessionMutations.ts";
 import { readBoundedJson } from "./http.ts";
 import type { InviteReactions } from "./inviteReactions.ts";
-import type { RequestIdentity } from "./requestIdentity.ts";
+import { socketSessionHeaders } from "./socketSession.ts";
 import {
   isPresentationMatchId,
   readPresentationInvite,
@@ -113,8 +114,9 @@ export type InviteReactionRouteDependencies = {
     Partial<Pick<InviteReactions, "ensurePresentations">>;
   verifyIdentity?: (
     request: Request,
+    env: Env,
     ctx: WorkerExecutionContext,
-  ) => Promise<RequestIdentity>;
+  ) => Promise<SessionIdentity>;
   logFailure?: () => void;
 };
 
@@ -221,13 +223,13 @@ export async function handleInviteReactionRoute(
       }
       let role: "host" | "guest" | "spectator" = "spectator";
       let rateKey = `reactions:connect:spectator:${ip}`;
+      let identity: SessionIdentity | null = null;
       if (credentials.token) {
-        const identity = await (
-          dependencies.verifyIdentity || verifyFirebaseRequest
-        )(
+        identity = await (dependencies.verifyIdentity || verifySessionRequest)(
           new Request(request.url, {
             headers: { Authorization: `Bearer ${credentials.token}` },
           }),
+          env,
           ctx,
         );
         const attemptsLimited = await reactionRateLimit(
@@ -280,6 +282,7 @@ export async function handleInviteReactionRoute(
             Upgrade: "websocket",
             "X-Mons-Reaction-Role": role,
             "X-Mons-Reaction-IP": ip,
+            ...socketSessionHeaders(identity),
             ...(credentials.protocol
               ? { "Sec-WebSocket-Protocol": credentials.protocol }
               : {}),
@@ -301,8 +304,8 @@ export async function handleInviteReactionRoute(
     );
     if (limited) return limited;
     const identity = await (
-      dependencies.verifyIdentity || verifyFirebaseRequest
-    )(request, ctx);
+      dependencies.verifyIdentity || verifySessionRequest
+    )(request, env, ctx);
     let reaction: unknown;
     try {
       reaction = await readBoundedJson(request, REACTION_MAX_MESSAGE_BYTES);

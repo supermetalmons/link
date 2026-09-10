@@ -266,6 +266,10 @@ const eventPrizeWithdrawalsDb = {
 } satisfies D1Database;
 
 export const TELEGRAM_TEST_ENV = {
+  SESSION_JWT_KEYS: JSON.stringify({
+    activeKid: "test",
+    keys: { test: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
+  }),
   APPLE_AUDIENCES: "link.mons",
   AUTH_MUTATIONS_DISABLED: "false",
   AUTH_RECOVERY_QUEUE: queue,

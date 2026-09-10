@@ -1,3 +1,4 @@
+import { socketTestIdentity } from "./socketTestSession.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -109,6 +110,7 @@ function setup({
     loginUidsByProfileId: new Map(),
     profileById: new Map(),
   });
+  const identity = socketTestIdentity(caller);
   const dependencies: InviteMetadataRouteDependencies = {
     repository,
     room: {
@@ -132,11 +134,11 @@ function setup({
     verifyIdentity: async (incoming) => {
       calls.auth++;
       assert.equal(incoming.headers.get("Authorization"), `Bearer ${token}`);
-      return { uid: caller };
+      return identity;
     },
     logFailure: () => undefined,
   };
-  return { env, dependencies, repository, calls };
+  return { env, identity, dependencies, repository, calls };
 }
 
 test("metadata preflight and routing precede auth and storage", async () => {
@@ -324,7 +326,11 @@ test("metadata upgrade strips credentials and binds admission to authorized snap
     request({
       socket: true,
       authenticated: true,
-      headers: { "X-Mons-Metadata-Role": "spectator" },
+      headers: {
+        "X-Mons-Metadata-Role": "spectator",
+        "X-Mons-Session-Id": "untrusted",
+        "X-Mons-Session-Expires-At": "9999999999999",
+      },
     }),
     state.env,
     ctx,
@@ -342,6 +348,11 @@ test("metadata upgrade strips credentials and binds admission to authorized snap
   assert.equal(forwarded.headers.get("X-Mons-Metadata-Authenticated"), "1");
   assert.equal(forwarded.headers.get("X-Mons-Metadata-Revision"), "1");
   assert.equal(forwarded.headers.get("X-Mons-Metadata-Protected"), "1");
+  assert.equal(forwarded.headers.get("X-Mons-Session-Id"), state.identity.sid);
+  assert.equal(
+    forwarded.headers.get("X-Mons-Session-Expires-At"),
+    String(state.identity.authExpiresAtMs),
+  );
 });
 
 test("changed admission rechecks source and access once, with a bounded failure", async () => {

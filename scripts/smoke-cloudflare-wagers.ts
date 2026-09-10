@@ -1,3 +1,9 @@
+import {
+  createSessionRequest,
+  createToolSession,
+  refreshToolSession,
+} from "./cloudflare/sessions.ts";
+import type { SessionCreateRequest } from "@mons/shared/session-auth";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -62,11 +68,10 @@ import {
 
 const ORIGIN = "https://mons.link";
 const API_ROOT = "https://api.mons.link";
-const FIREBASE_API_KEY = "AIzaSyC8Ihr4kDd34z-RXe8XTBCFtFbXebifo5Y";
-const FIREBASE_IDENTITY_ROOT = "https://identitytoolkit.googleapis.com/v1";
 const FIREBASE_DATABASE_ROOT = "https://mons-link-default-rtdb.firebaseio.com";
 const REQUEST_TIMEOUT_MS = 30_000;
 const SOCKET_TIMEOUT_MS = 10_000;
+const TOKEN_REFRESH_MARGIN_MS = 30_000;
 const MAX_HTTP_BYTES = 1024 * 1024;
 const MAX_FIXTURE_BYTES = 256 * 1024;
 const SCENARIOS = ["cancel", "decline", "settle"] as const;
@@ -84,8 +89,12 @@ type Options = {
 type Actor = {
   seed: string;
   uid?: string;
-  idToken?: string;
+  accessToken?: string;
+  accessExpiresAtMs?: number;
   refreshToken?: string;
+  sessionId?: string;
+  sessionCreation?: SessionCreateRequest;
+  revokeToken?: string;
   profileId?: string;
   miningDate?: string;
 };
@@ -95,7 +104,7 @@ type Invite = {
   joinOperationId: string;
 };
 type Fixture = {
-  version: 1;
+  version: 2;
   purpose: "mons-wager-smoke";
   baseUrl: string;
   runId: string;
@@ -115,6 +124,7 @@ type Dependencies = {
   ) => WebSocket;
   now: () => number;
   log: (message: string) => void;
+  saveFixture?: () => void;
 };
 
 function fail(message: string): never {
@@ -233,7 +243,7 @@ function readFixture(path: string): Fixture {
   const actors = record(input?.actors);
   const invites = record(input?.invites);
   if (
-    input?.version !== 1 ||
+    input?.version !== 2 ||
     input.purpose !== "mons-wager-smoke" ||
     input.baseUrl !== API_ROOT ||
     typeof input.runId !== "string" ||
@@ -257,8 +267,17 @@ function readFixture(path: string): Fixture {
     for (const key of ["uid", "profileId"])
       if (actor[key] !== undefined && !isSafeFirebaseKey(actor[key]))
         fail("Fixture identity is invalid.");
-    if (actor.idToken !== undefined && !isReactionSocketToken(actor.idToken))
+    if (
+      actor.accessToken !== undefined &&
+      !isReactionSocketToken(actor.accessToken)
+    )
       fail("Fixture token is invalid.");
+    if (
+      actor.accessExpiresAtMs !== undefined &&
+      (!Number.isSafeInteger(actor.accessExpiresAtMs) ||
+        Number(actor.accessExpiresAtMs) <= 0)
+    )
+      fail("Fixture token expiry is invalid.");
     if (
       actor.miningDate !== undefined &&
       (typeof actor.miningDate !== "string" ||
@@ -327,7 +346,7 @@ function createFixture(now: number): Fixture {
     joinOperationId: randomUUID(),
   });
   return {
-    version: 1,
+    version: 2,
     purpose: "mons-wager-smoke",
     baseUrl: API_ROOT,
     runId: randomUUID(),
@@ -405,63 +424,54 @@ async function requestJson(
   }
 }
 
-function tokenUid(token: string): string {
-  try {
-    const payload = record(
-      JSON.parse(
-        Buffer.from(token.split(".")[1], "base64url").toString("utf8"),
-      ),
-    );
-    if (typeof payload?.sub === "string") return payload.sub;
-  } catch {}
-  fail("Fixture token has no identity.");
-}
-
 async function refreshActor(
   actor: Actor,
   save: () => void,
   dependencies: Dependencies,
 ): Promise<void> {
-  if (!actor.uid || !actor.refreshToken)
+  if (!actor.uid || !actor.refreshToken || !actor.sessionId)
     fail("Fixture preparation is incomplete.");
-  const result = record(
-    await requestJson(
-      dependencies,
-      "Firebase token refresh",
-      `https://securetoken.googleapis.com/v1/token?key=${FIREBASE_API_KEY}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          Origin: ORIGIN,
-          Referer: `${ORIGIN}/`,
-        },
-        body: new URLSearchParams({
-          grant_type: "refresh_token",
-          refresh_token: actor.refreshToken,
-        }).toString(),
-      },
-    ),
+  const result = await refreshToolSession(
+    API_ROOT,
+    {
+      uid: actor.uid,
+      sessionId: actor.sessionId,
+      refreshToken: actor.refreshToken,
+    },
+    dependencies.fetch,
   );
-  if (
-    !isReactionSocketToken(result?.id_token) ||
-    result?.user_id !== actor.uid ||
-    typeof result.refresh_token !== "string" ||
-    tokenUid(result.id_token) !== actor.uid
-  )
-    fail("Firebase refresh identity did not match.");
-  actor.idToken = result.id_token;
-  actor.refreshToken = result.refresh_token;
+  actor.accessToken = result.accessToken;
+  actor.accessExpiresAtMs = result.accessExpiresAtMs;
   save();
+}
+
+async function accessToken(
+  authentication: Actor | string | undefined,
+  dependencies: Dependencies,
+): Promise<string | undefined> {
+  if (typeof authentication !== "object") return authentication;
+  if (
+    !authentication.accessToken ||
+    authentication.accessExpiresAtMs === undefined ||
+    authentication.accessExpiresAtMs <=
+      dependencies.now() + TOKEN_REFRESH_MARGIN_MS
+  )
+    await refreshActor(
+      authentication,
+      dependencies.saveFixture || (() => undefined),
+      dependencies,
+    );
+  return authentication.accessToken;
 }
 
 async function api(
   dependencies: Dependencies,
   path: string,
-  token?: string,
+  authentication?: Actor | string,
   body?: unknown,
   allowMissing = false,
 ): Promise<unknown> {
+  const token = await accessToken(authentication, dependencies);
   return requestJson(
     dependencies,
     `API ${path}`,
@@ -488,9 +498,9 @@ async function readMining(
   actor: Actor,
   dependencies: Dependencies,
 ): Promise<MiningSnapshot> {
-  if (!actor.uid || !actor.profileId || !actor.idToken)
+  if (!actor.uid || !actor.profileId || !actor.accessToken)
     fail("Fixture actor is not prepared.");
-  const result = await api(dependencies, "/profiles/lookup", actor.idToken, {
+  const result = await api(dependencies, "/profiles/lookup", actor, {
     kind: "login",
     id: actor.uid,
   });
@@ -511,41 +521,29 @@ async function prepareActor(
   dependencies: Dependencies,
 ): Promise<void> {
   if (!actor.uid) {
-    const session = record(
-      await requestJson(
-        dependencies,
-        "Firebase test session",
-        `${FIREBASE_IDENTITY_ROOT}/accounts:signUp?key=${FIREBASE_API_KEY}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Origin: ORIGIN,
-            Referer: `${ORIGIN}/`,
-          },
-          body: JSON.stringify({ returnSecureToken: true }),
-        },
-      ),
+    actor.sessionCreation ||= createSessionRequest();
+    save();
+    const session = await createToolSession(
+      API_ROOT,
+      dependencies.fetch,
+      actor.sessionCreation,
     );
-    if (
-      !isReactionSocketToken(session?.idToken) ||
-      !isSafeFirebaseKey(session?.localId) ||
-      typeof session?.refreshToken !== "string" ||
-      tokenUid(session.idToken) !== session.localId
-    )
-      fail("Firebase test session was invalid.");
-    actor.uid = session.localId;
-    actor.idToken = session.idToken;
+    actor.uid = session.uid;
+    actor.sessionId = session.sessionId;
+    actor.accessToken = session.accessToken;
+    actor.accessExpiresAtMs = session.accessExpiresAtMs;
     actor.refreshToken = session.refreshToken;
+    actor.revokeToken = session.revokeToken;
+    delete actor.sessionCreation;
     save();
   } else await refreshActor(actor, save, dependencies);
   if (!actor.profileId) {
-    const methods = await api(dependencies, "/auth/methods", actor.idToken);
+    const methods = await api(dependencies, "/auth/methods", actor);
     if (!isLinkedAuthMethodsResponse(methods))
       fail("Auth-method response was invalid.");
     if (methods.profileId) actor.profileId = methods.profileId;
     else {
-      const intent = await api(dependencies, "/auth/intents", actor.idToken, {
+      const intent = await api(dependencies, "/auth/intents", actor, {
         method: "sol",
       });
       if (!isAuthIntentResponse(intent)) fail("Solana intent was invalid.");
@@ -559,7 +557,7 @@ async function prepareActor(
       const linked = await api(
         dependencies,
         "/auth/methods/sol/verify",
-        actor.idToken,
+        actor,
         {
           intentId: intent.intentId,
           address: bs58.encode(key.publicKey),
@@ -584,7 +582,7 @@ async function prepareActor(
     equal(mining.materials, createEmptyMaterials(), "New profile balance");
     actor.miningDate = formatMiningDateUtc(new Date(dependencies.now()));
     save();
-    const mined = await api(dependencies, "/mining/rock", actor.idToken, {
+    const mined = await api(dependencies, "/mining/rock", actor, {
       date: actor.miningDate,
       materials: createFirstRockDrops().delta,
     });
@@ -608,7 +606,7 @@ async function prepareActor(
 
 async function readSnapshot(
   inviteId: string,
-  token: string | undefined,
+  token: Actor | string | undefined,
   dependencies: Dependencies,
 ): Promise<InviteWagersSnapshot> {
   const result = await api(
@@ -628,6 +626,8 @@ function openSocket(
   inviteId: string,
   token: string | undefined,
   dependencies: Dependencies,
+  expiresAtMs?: number,
+  previous?: InviteWagersSnapshot,
 ) {
   const socket = dependencies.connect(
     `${API_ROOT.replace("https:", "wss:")}/invites/${encodeURIComponent(inviteId)}/wagers/socket`,
@@ -661,9 +661,15 @@ function openSocket(
     stop();
   };
   socket.on("error", () => invalid("Wager WebSocket failed."));
-  socket.on("close", () =>
-    invalid("Wager WebSocket closed before completion."),
-  );
+  socket.on("close", (code) => {
+    if (
+      code === 4001 &&
+      expiresAtMs !== undefined &&
+      expiresAtMs <= dependencies.now()
+    )
+      return;
+    invalid("Wager WebSocket closed before completion.");
+  });
   socket.on("unexpected-response", (_request, response) => {
     response.destroy();
     invalid(`Wager WebSocket returned HTTP ${response.statusCode}.`);
@@ -686,14 +692,15 @@ function openSocket(
         return;
       }
       const frame: unknown = JSON.parse(text);
+      const baseline = latest ?? previous;
       if (
         !isInviteWagersMessage(frame) ||
         frame.snapshot.inviteId !== inviteId ||
-        (latest && frame.snapshot.revision < latest.revision)
+        (baseline && frame.snapshot.revision < baseline.revision)
       )
         throw new Error();
-      if (latest && frame.snapshot.revision === latest.revision)
-        equal(frame.snapshot, latest, "Same-revision WebSocket snapshot");
+      if (baseline && frame.snapshot.revision === baseline.revision)
+        equal(frame.snapshot, baseline, "Same-revision WebSocket snapshot");
       const initial = !latest;
       latest = frame.snapshot;
       notify();
@@ -728,12 +735,58 @@ function openSocket(
       changed.add(finish);
       finish();
     });
-  return { wait, close: stop };
+  return {
+    wait,
+    close: stop,
+    assertHealthy() {
+      if (error) throw error;
+    },
+    get snapshot() {
+      return latest ?? previous;
+    },
+  };
+}
+
+async function authenticatedSocket(
+  inviteId: string,
+  authentication: Actor | string | undefined,
+  dependencies: Dependencies,
+) {
+  const connect = async (previous?: InviteWagersSnapshot) => {
+    const token = await accessToken(authentication, dependencies);
+    const expiresAtMs =
+      typeof authentication === "object"
+        ? authentication.accessExpiresAtMs
+        : undefined;
+    return {
+      socket: openSocket(inviteId, token, dependencies, expiresAtMs, previous),
+      expiresAtMs,
+    };
+  };
+  let current = await connect();
+  return {
+    async wait(
+      predicate: (snapshot: InviteWagersSnapshot) => boolean,
+      heartbeat = false,
+    ) {
+      current.socket.assertHealthy();
+      if (
+        current.expiresAtMs !== undefined &&
+        current.expiresAtMs <= dependencies.now() + SOCKET_TIMEOUT_MS
+      ) {
+        const previous = current.socket.snapshot;
+        current.socket.close();
+        current = await connect(previous);
+      }
+      return current.socket.wait(predicate, heartbeat);
+    },
+    close: () => current.socket.close(),
+  };
 }
 
 async function smokeSnapshots(
   inviteId: string,
-  token: string | undefined,
+  token: Actor | string | undefined,
   dependencies: Dependencies,
 ): Promise<InviteWagersSnapshot> {
   const metadata = await api(
@@ -749,7 +802,7 @@ async function smokeSnapshots(
     fail("Snapshot smoke requires a paired invite.");
   let http = await readSnapshot(inviteId, token, dependencies);
   for (let attempt = 0; attempt < 2; attempt++) {
-    const socket = openSocket(inviteId, token, dependencies);
+    const socket = await authenticatedSocket(inviteId, token, dependencies);
     try {
       let matched = false;
       for (let alignment = 0; alignment < 3; alignment++) {
@@ -788,12 +841,9 @@ async function assertBalances(
       { ...createEmptyMaterials(), dust: total[index] },
       `${role} total materials`,
     );
-    const frozen = await api(
-      dependencies,
-      "/wagers/frozen/read",
-      actor.idToken,
-      { playerUid: actor.uid },
-    );
+    const frozen = await api(dependencies, "/wagers/frozen/read", actor, {
+      playerUid: actor.uid,
+    });
     if (!isWagerFrozenReadResponse(frozen) || frozen.playerUid !== actor.uid)
       fail("Frozen-balance response was invalid.");
     equal(
@@ -824,7 +874,7 @@ async function sendProposal(
     const result = await api(
       dependencies,
       "/wagers/proposals/send",
-      fixture.actors.host.idToken,
+      fixture.actors.host,
       input,
     );
     if (
@@ -843,6 +893,7 @@ async function prepare(
   save: () => void,
   dependencies: Dependencies,
 ): Promise<void> {
+  dependencies = { ...dependencies, saveFixture: save };
   if (fixture.stage !== "preparing")
     fail("Fixture is already prepared; use frozen-read or active-lifecycle.");
   for (const role of ["host", "guest"] as const) {
@@ -857,7 +908,7 @@ async function prepare(
     let metadata = await api(
       dependencies,
       metadataPath,
-      fixture.actors.host.idToken,
+      fixture.actors.host,
       undefined,
       true,
     );
@@ -865,7 +916,7 @@ async function prepare(
       const created = await api(
         dependencies,
         "/invites/create",
-        fixture.actors.host.idToken,
+        fixture.actors.host,
         {
           operationId: invite.createOperationId,
           inviteId: invite.id,
@@ -880,11 +931,7 @@ async function prepare(
         created.matchId !== invite.id
       )
         fail("Manual test-invite creation failed.");
-      metadata = await api(
-        dependencies,
-        metadataPath,
-        fixture.actors.host.idToken,
-      );
+      metadata = await api(dependencies, metadataPath, fixture.actors.host);
     }
     if (
       !isReadInviteMetadataResponse(metadata) ||
@@ -903,7 +950,7 @@ async function prepare(
       fail("Existing fixture invite is not an unchanged manual test invite.");
     const snapshot = await readSnapshot(
       invite.id,
-      fixture.actors.host.idToken,
+      fixture.actors.host,
       dependencies,
     );
     if (
@@ -931,7 +978,6 @@ async function prepare(
       const url = new URL(
         `${FIREBASE_DATABASE_ROOT}/players/${encodeURIComponent(actor.uid!)}/matches/${encodeURIComponent(invite.id)}.json`,
       );
-      url.searchParams.set("auth", actor.idToken!);
       const match = await requestJson(
         dependencies,
         "Existing fixture match read",
@@ -950,7 +996,7 @@ async function prepare(
       const joined = await api(
         dependencies,
         "/invites/join",
-        fixture.actors.guest.idToken,
+        fixture.actors.guest,
         {
           operationId: invite.joinOperationId,
           inviteId: invite.id,
@@ -975,7 +1021,7 @@ async function prepare(
     const id = fixture.invites[scenario].id;
     const snapshot = await smokeSnapshots(
       id,
-      fixture.actors.host.idToken,
+      fixture.actors.host,
       dependencies,
     );
     if (scenario === "cancel") {
@@ -1003,7 +1049,7 @@ async function frozenRead(
       fail("Prepared snapshot evidence is missing.");
     const actual = await smokeSnapshots(
       fixture.invites[scenario].id,
-      fixture.actors.host.idToken,
+      fixture.actors.host,
       dependencies,
     );
     equal(actual.wagers, expected.wagers, "Imported wager snapshot");
@@ -1019,11 +1065,12 @@ async function activeLifecycle(
   save: () => void,
   dependencies: Dependencies,
 ): Promise<void> {
+  dependencies = { ...dependencies, saveFixture: save };
   if (fixture.stage === "preparing")
     fail("Prepare this fixture before the release.");
   const host = fixture.actors.host;
   const guest = fixture.actors.guest;
-  if (!host.uid || !guest.uid || !host.idToken || !guest.idToken)
+  if (!host.uid || !guest.uid || !host.accessToken || !guest.accessToken)
     fail("Fixture identities are incomplete.");
   if (fixture.stage === "prepared") {
     await frozenRead(fixture, dependencies);
@@ -1043,7 +1090,7 @@ async function activeLifecycle(
     const metadata = await api(
       dependencies,
       `/invites/${encodeURIComponent(inviteId)}/metadata`,
-      host.idToken,
+      host,
     );
     if (
       !isReadInviteMetadataResponse(metadata) ||
@@ -1054,16 +1101,12 @@ async function activeLifecycle(
       metadata.snapshot.automatchStateHint !== null
     )
       fail("Lifecycle invite must belong only to the generated test profiles.");
-    const socket = openSocket(inviteId, host.idToken, dependencies);
+    const socket = await authenticatedSocket(inviteId, host, dependencies);
     try {
       await socket.wait(() => true, true);
       if (scenario !== "cancel")
         await step(`${scenario}:send`, async () => {
-          const before = await readSnapshot(
-            inviteId,
-            host.idToken,
-            dependencies,
-          );
+          const before = await readSnapshot(inviteId, host, dependencies);
           await sendProposal(fixture, scenario, dependencies);
           await socket.wait(
             (snapshot) =>
@@ -1073,7 +1116,7 @@ async function activeLifecycle(
         });
       if (scenario !== "settle") {
         await step(`${scenario}:remove`, async () => {
-          const token = scenario === "cancel" ? host.idToken : guest.idToken;
+          const token = scenario === "cancel" ? host : guest;
           for (let replay = 0; replay < 2; replay++) {
             const result = await api(
               dependencies,
@@ -1095,7 +1138,7 @@ async function activeLifecycle(
             const accepted = await api(
               dependencies,
               "/wagers/proposals/accept",
-              guest.idToken,
+              guest,
               input,
             );
             if (
@@ -1117,7 +1160,6 @@ async function activeLifecycle(
           const url = new URL(
             `${FIREBASE_DATABASE_ROOT}/players/${encodeURIComponent(guest.uid!)}/matches/${encodeURIComponent(inviteId)}.json`,
           );
-          url.searchParams.set("auth", guest.idToken!);
           const match = await requestJson(
             dependencies,
             "Dedicated guest match read",
@@ -1133,7 +1175,7 @@ async function activeLifecycle(
             const result = await api(
               dependencies,
               "/matches/surrender",
-              guest.idToken,
+              guest,
               { ...input, playerId: guest.uid },
             );
             if (
@@ -1160,7 +1202,7 @@ async function activeLifecycle(
             const result = await api(
               dependencies,
               "/wagers/outcomes/resolve",
-              host.idToken,
+              host,
               input,
             );
             if (
@@ -1182,7 +1224,7 @@ async function activeLifecycle(
     } finally {
       socket.close();
     }
-    const snapshot = await smokeSnapshots(inviteId, host.idToken, dependencies);
+    const snapshot = await smokeSnapshots(inviteId, host, dependencies);
     const wager = snapshot.wagers[inviteId];
     equal(wager?.proposals ?? {}, {}, `${scenario} final proposals`);
     if (scenario === "settle") {
@@ -1245,12 +1287,12 @@ async function runSmoke(
       validated.authTokenFixture &&
       (!auth ||
         Object.keys(auth).length !== 1 ||
-        !isReactionSocketToken(auth.idToken))
+        !isReactionSocketToken(auth.accessToken))
     )
-      fail("Auth fixture must contain only an idToken.");
+      fail("Auth fixture must contain only an accessToken.");
     await smokeSnapshots(
       validated.inviteId!,
-      auth?.idToken as string | undefined,
+      auth?.accessToken as string | undefined,
       dependencies,
     );
     return;
@@ -1278,6 +1320,7 @@ async function runSmoke(
       });
     }
     const save = () => saveFixture(path, fixture);
+    dependencies = { ...dependencies, saveFixture: save };
     if (validated.mode === "prepare-fixtures")
       await prepare(fixture, save, dependencies);
     else {

@@ -28,6 +28,7 @@ type InviteMetadataChannelDependencies = Pick<
   >,
   | "createSocket"
   | "getProtocols"
+  | "getTokenRemainingMs"
   | "isActive"
   | "isOnline"
   | "isVisible"

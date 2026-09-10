@@ -888,7 +888,7 @@ test("falls back unsafe X return URLs and sanitizes repository failures", async 
   assert.deepEqual(stateLogs, ["auth-state-unavailable"]);
 });
 
-test("rate limits and dispatches auth mutations after Firebase authentication", async () => {
+test("rate limits and dispatches auth mutations after session authentication", async () => {
   const keys: string[] = [];
   const response = await handleAuthRoute(
     request("/auth/methods/unlink", "POST", {

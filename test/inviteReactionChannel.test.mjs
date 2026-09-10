@@ -334,7 +334,7 @@ test("times out connections without a first snapshot and handles socket-construc
   failed.channel.stop();
 });
 
-test("the actual Firebase auth callback tears down participant and spectator resources on cross-tab signout or user replacement", async () => {
+test("the actual session auth callback tears down participant and spectator resources on cross-tab signout or user replacement", async () => {
   const source = ts.createSourceFile(
     "connection.ts",
     readFileSync(
@@ -417,10 +417,6 @@ test("the actual Firebase auth callback tears down participant and spectator res
         return id;
       },
       clearTimeout: (id) => timers.delete(id),
-      onAuthStateChanged: (_auth, callback) => {
-        authCallback = callback;
-        return () => undefined;
-      },
       incrementLifecycleCounter: (kind) =>
         counters.set(kind, (counters.get(kind) ?? 0) + 1),
       decrementLifecycleCounter: (kind) =>
@@ -433,7 +429,14 @@ test("the actual Firebase auth callback tears down participant and spectator res
       `${outputText}\nreturn Connection;`,
     )(...Object.values(dependencies));
     const connection = Object.assign(new Constructor(), {
-      auth: { currentUser: { uid: "original-login" } },
+      auth: {
+        currentUser: { uid: "original-login" },
+        getTokenRemainingMs: () => 300_000,
+        onAuthStateChanged: (callback) => {
+          authCallback = callback;
+          return () => undefined;
+        },
+      },
       currentUid: "original-login",
       authUnsubscribers: new Set(),
       pendingWagerMutations: new Set([{}]),
@@ -741,8 +744,8 @@ test("the handshake deadline includes token preparation and ignores late tokens 
 });
 
 test("rejects tokens resolved beyond the handshake deadline even when the timer callback is delayed", async (t) => {
-  let now = Date.now();
-  t.mock.method(Date, "now", () => now);
+  let now = performance.now();
+  t.mock.method(performance, "now", () => now);
   const pending = deferred();
   const h = harness({ getProtocols: () => pending.promise });
   h.next();

@@ -17,9 +17,9 @@ import {
   getAuthCorsHeaders,
 } from "./authHttp.ts";
 import {
-  verifyFirebaseRequest,
+  verifySessionRequest,
   type WorkerExecutionContext,
-} from "./firebaseAuth.ts";
+} from "./sessionAuth.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import { readBoundedJson } from "./http.ts";
 import {
@@ -63,6 +63,7 @@ export type ProfileRouteDependencies = {
   usernameRepository?: UsernameRepository;
   verifyIdentity?: (
     request: Request,
+    env: Env,
     ctx: WorkerExecutionContext,
   ) => Promise<RequestIdentity>;
 };
@@ -109,8 +110,8 @@ export async function handleProfileRoute(
     }
     const pathname = new URL(request.url).pathname;
     const identity = await (
-      dependencies.verifyIdentity || verifyFirebaseRequest
-    )(request, ctx);
+      dependencies.verifyIdentity || verifySessionRequest
+    )(request, env, ctx);
     if (PROFILE_WRITE_PATHS.has(pathname)) {
       await assertProfileMutationAllowed(env);
     }

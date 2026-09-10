@@ -1,3 +1,4 @@
+import { socketTestIdentity } from "./socketTestSession.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { InviteMetadataSnapshot } from "@mons/shared/invite-metadata";
@@ -158,6 +159,7 @@ function setup({
     loginUidsByProfileId: new Map(),
     profileById: new Map(),
   });
+  const identity = socketTestIdentity(caller);
   const dependencies: InviteWagersRouteDependencies = {
     repository,
     room: {
@@ -174,13 +176,13 @@ function setup({
     verifyIdentity: async (incoming) => {
       calls.auth++;
       assert.equal(incoming.headers.get("Authorization"), `Bearer ${token}`);
-      return { uid: caller };
+      return identity;
     },
     logFailure: () => {
       calls.logs++;
     },
   };
-  return { env, dependencies, repository, calls, state };
+  return { env, identity, dependencies, repository, calls, state };
 }
 
 test("wager routes and preflight dispatch without touching identity or storage", async () => {
@@ -369,6 +371,8 @@ test("upgrade strips caller credentials and spoofed admission headers", async ()
         "X-Mons-Wagers-Actor": "intruder",
         "X-Mons-Wagers-Revision": "999",
         "X-Mons-Wagers-Protected": "0",
+        "X-Mons-Session-Id": "untrusted",
+        "X-Mons-Session-Expires-At": "9999999999999",
       },
     }),
     h.env,
@@ -381,6 +385,8 @@ test("upgrade strips caller credentials and spoofed admission headers", async ()
   assert.deepEqual(Object.fromEntries(forwarded.headers), {
     "sec-websocket-protocol": INVITE_WAGERS_SOCKET_PROTOCOL,
     upgrade: "websocket",
+    "x-mons-session-id": h.identity.sid,
+    "x-mons-session-expires-at": String(h.identity.authExpiresAtMs),
     "x-mons-wagers-actor": "host-login",
     "x-mons-wagers-authenticated": "1",
     "x-mons-wagers-invite": "invite-one",

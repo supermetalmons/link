@@ -1,3 +1,4 @@
+import { socketTestIdentity } from "./socketTestSession.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -113,6 +114,7 @@ function setup({
     loginUidsByProfileId: new Map(),
     profileById: new Map(),
   });
+  const identity = socketTestIdentity(caller);
   const dependencies: MatchSyncRouteDependencies = {
     repository,
     room: {
@@ -139,13 +141,22 @@ function setup({
     verifyIdentity: async (incoming) => {
       calls.auth++;
       assert.equal(incoming.headers.get("Authorization"), `Bearer ${token}`);
-      return { uid: caller };
+      return identity;
     },
     logFailure: () => undefined,
   };
   const handle = (incoming = request()) =>
     handleMatchSyncRoute(incoming, env, ctx, dependencies);
-  return { env, dependencies, repository, source, snapshot, calls, handle };
+  return {
+    env,
+    identity,
+    dependencies,
+    repository,
+    source,
+    snapshot,
+    calls,
+    handle,
+  };
 }
 
 test("match sync routes preflight before identity, rate limits and storage", async () => {
@@ -256,7 +267,14 @@ test("read and connect buckets fail closed before accessing match state", async 
 test("socket admission forwards verified identity and match revision without its bearer token", async () => {
   const state = setup({ passwordProtected: true });
   const response = await state.handle(
-    request({ socket: true, authenticated: true }),
+    request({
+      socket: true,
+      authenticated: true,
+      headers: {
+        "X-Mons-Session-Id": "untrusted",
+        "X-Mons-Session-Expires-At": "9999999999999",
+      },
+    }),
   );
   assert.equal(response.status, 200);
   assert.deepEqual(state.calls.rates, [
@@ -276,6 +294,11 @@ test("socket admission forwards verified identity and match revision without its
   assert.equal(forwarded.headers.get("X-Mons-Match-Role"), "host");
   assert.equal(forwarded.headers.get("X-Mons-Match-Protected"), "1");
   assert.equal(forwarded.headers.get("X-Mons-Match-Authenticated"), "1");
+  assert.equal(forwarded.headers.get("X-Mons-Session-Id"), state.identity.sid);
+  assert.equal(
+    forwarded.headers.get("X-Mons-Session-Expires-At"),
+    String(state.identity.authExpiresAtMs),
+  );
 });
 
 test("same-profile logins use canonical ownership for socket actor admission", async () => {

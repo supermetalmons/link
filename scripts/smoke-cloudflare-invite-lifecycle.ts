@@ -1,3 +1,10 @@
+import {
+  createToolSession,
+  refreshToolSession,
+  revokeToolSession,
+  SessionRequestError,
+  type ToolSession,
+} from "./cloudflare/sessions.ts";
 import { randomInt, randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -20,7 +27,7 @@ import {
   normalizeMatchSnapshot,
   type SubmitMoveRequest,
 } from "@mons/shared/game-sessions";
-import { INVITE_ID_RANDOM_LENGTH, isSafeFirebaseKey } from "@mons/shared/ids";
+import { INVITE_ID_RANDOM_LENGTH } from "@mons/shared/ids";
 import {
   INVITE_METADATA_MAX_MESSAGE_BYTES,
   INVITE_METADATA_SOCKET_PROTOCOL,
@@ -42,8 +49,6 @@ import {
 import { formatMatchTimer, MATCH_TIMER_DURATION_MS } from "@mons/shared/timers";
 
 const ORIGIN = "https://mons.link";
-const FIREBASE_API_KEY = "AIzaSyC8Ihr4kDd34z-RXe8XTBCFtFbXebifo5Y";
-const FIREBASE_IDENTITY_ROOT = "https://identitytoolkit.googleapis.com/v1";
 const FIREBASE_DATABASE_ROOT = "https://mons-link-default-rtdb.firebaseio.com";
 const PREVIEW_HOST_PATTERN =
   /^[0-9a-f]{8}-mons-link-api\.lil-org\.workers\.dev$/;
@@ -64,7 +69,7 @@ type Options = {
   surrenderRulesPending?: boolean;
   moveRulesPending?: boolean;
 };
-type Session = { uid: string; idToken: string };
+type Session = ToolSession;
 type OperationName = (typeof OPERATION_NAMES)[number];
 type Operations = Record<OperationName, string>;
 type SmokeSocket = {
@@ -278,7 +283,9 @@ async function retry<T>(work: () => Promise<T>): Promise<T> {
       return await work();
     } catch (error) {
       if (
-        !(error instanceof SmokeFailure) ||
+        !(
+          error instanceof SmokeFailure || error instanceof SessionRequestError
+        ) ||
         !error.retryable ||
         attempt + 1 === MAX_REQUEST_ATTEMPTS
       )
@@ -296,67 +303,6 @@ function expectOk(result: HttpResult, label: string): void {
     );
 }
 
-async function identityRequest(
-  operation: "accounts:signUp" | "accounts:delete",
-  body: Record<string, unknown>,
-  dependencies: Dependencies,
-): Promise<unknown> {
-  const result = await requestJson(
-    `${FIREBASE_IDENTITY_ROOT}/${operation}?key=${FIREBASE_API_KEY}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Origin: ORIGIN,
-        Referer: `${ORIGIN}/`,
-      },
-      body: JSON.stringify(body),
-    },
-    dependencies,
-  );
-  expectOk(result, "Lifecycle anonymous session request");
-  return result.payload;
-}
-
-async function createSession(dependencies: Dependencies): Promise<Session> {
-  const payload = await identityRequest(
-    "accounts:signUp",
-    { returnSecureToken: true },
-    dependencies,
-  );
-  const idToken =
-    record(payload) && typeof payload.idToken === "string"
-      ? payload.idToken
-      : "";
-  const uid =
-    record(payload) && typeof payload.localId === "string"
-      ? payload.localId
-      : "";
-  let subject: unknown;
-  try {
-    const claims: unknown = JSON.parse(
-      Buffer.from(idToken.split(".")[1] || "", "base64url").toString("utf8"),
-    );
-    subject = record(claims) ? claims.sub : null;
-  } catch {
-    subject = null;
-  }
-  if (
-    !idToken ||
-    idToken.length > 16_000 ||
-    !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(idToken) ||
-    !isSafeFirebaseKey(uid) ||
-    subject !== uid
-  ) {
-    if (idToken)
-      await identityRequest("accounts:delete", { idToken }, dependencies);
-    throw new SmokeFailure(
-      "Lifecycle anonymous session response was incomplete.",
-    );
-  }
-  return { uid, idToken };
-}
-
 async function apiRequest(
   options: Options,
   path: string,
@@ -366,12 +312,13 @@ async function apiRequest(
   maxBytes = INVITE_METADATA_MAX_MESSAGE_BYTES,
 ): Promise<unknown> {
   return retry(async () => {
+    await refreshSession(options, session, dependencies);
     const result = await requestJson(
       `${options.baseUrl}${path}`,
       {
         method: body ? "POST" : "GET",
         headers: {
-          Authorization: `Bearer ${session.idToken}`,
+          Authorization: `Bearer ${session.accessToken}`,
           "Content-Type": "application/json",
           Accept: "application/json",
           Origin: ORIGIN,
@@ -393,6 +340,18 @@ async function apiRequest(
       );
     return result.payload;
   });
+}
+
+async function refreshSession(
+  options: Options,
+  session: Session,
+  dependencies: Dependencies,
+): Promise<void> {
+  if (session.accessExpiresAtMs <= dependencies.now() + 30_000)
+    Object.assign(
+      session,
+      await refreshToolSession(options.baseUrl, session, dependencies.fetch),
+    );
 }
 
 async function mutation<T>(
@@ -422,14 +381,33 @@ function matchSyncState(snapshot: MatchSyncSnapshot): MatchSyncState {
   return state;
 }
 
-function matchChannel(
+function socketCloseDetail(code: unknown, reason: unknown): string {
+  const value = Buffer.isBuffer(reason) ? reason.toString("utf8") : reason;
+  const known = [
+    "Session expired",
+    "Invite access changed",
+    "Invite unavailable",
+    "Match unavailable",
+    "Match source unavailable",
+    "Match admission failed",
+    "Invite metadata unavailable",
+    "Reaction sockets are receive-only",
+    "Reaction connection failed",
+    "Socket delivery failed",
+  ];
+  return `${typeof code === "number" ? code : "unknown"}; ${typeof value === "string" && known.includes(value) ? value : "unrecognized reason"}`;
+}
+
+function openMatchChannel(
   options: Options,
   inviteId: string,
   matchId: string,
   session: Session | null,
   dependencies: Dependencies,
   minimumRevision = 0,
+  previous: MatchSyncSnapshot | null = null,
 ) {
+  const expiresAtMs = session?.accessExpiresAtMs;
   let socket: SmokeSocket;
   try {
     socket = dependencies.connect(
@@ -437,7 +415,7 @@ function matchChannel(
       {
         origin: ORIGIN,
         ...(session
-          ? { headers: { Authorization: `Bearer ${session.idToken}` } }
+          ? { headers: { Authorization: `Bearer ${session.accessToken}` } }
           : {}),
         followRedirects: false,
         handshakeTimeout: SOCKET_TIMEOUT_MS,
@@ -462,8 +440,18 @@ function matchChannel(
     notify();
   };
   socket.on("error", () => fail("Lifecycle match socket failed."));
-  socket.on("close", () => {
-    if (!closed) fail("Lifecycle match socket closed early.");
+  socket.on("close", (code, reason) => {
+    if (
+      !closed &&
+      !(
+        code === 4001 &&
+        expiresAtMs !== undefined &&
+        expiresAtMs <= dependencies.now()
+      )
+    )
+      fail(
+        `Lifecycle match socket closed early (${socketCloseDetail(code, reason)}).`,
+      );
   });
   socket.on("unexpected-response", (_request, response) => {
     if (record(response) && typeof response.destroy === "function")
@@ -498,6 +486,10 @@ function matchChannel(
         payload.snapshot.inviteId !== inviteId ||
         payload.snapshot.matchId !== matchId ||
         payload.snapshot.revision < minimumRevision ||
+        (previous &&
+          (payload.snapshot.revision < previous.revision ||
+            (payload.snapshot.revision === previous.revision &&
+              !isDeepStrictEqual(payload.snapshot, previous)))) ||
         (current &&
           (payload.snapshot.revision < current.revision ||
             (payload.snapshot.revision === current.revision &&
@@ -536,6 +528,12 @@ function matchChannel(
       check();
     });
   return {
+    get snapshot() {
+      return current ?? previous;
+    },
+    assertHealthy() {
+      if (failure) throw failure;
+    },
     async waitFor(expected: MatchSyncState): Promise<MatchSyncSnapshot> {
       await waitFor(
         () =>
@@ -546,6 +544,7 @@ function matchChannel(
       return current!;
     },
     async heartbeat(): Promise<void> {
+      await waitFor(() => current !== null, "initial snapshot");
       heartbeatReceived = false;
       const pending = waitFor(() => heartbeatReceived, "heartbeat");
       try {
@@ -565,6 +564,87 @@ function matchChannel(
         socket.terminate();
       } catch {}
     },
+  };
+}
+
+function renewingChannel<
+  TSnapshot,
+  TChannel extends {
+    readonly snapshot: TSnapshot | null;
+    assertHealthy(): void;
+    close(): void;
+  },
+>(
+  options: Options,
+  session: Session | null,
+  dependencies: Dependencies,
+  open: (previous: TSnapshot | null) => TChannel,
+) {
+  let current: TChannel | null = null;
+  let expiresAtMs: number | undefined;
+  let pending: Promise<TChannel> | null = null;
+  let closed = false;
+  return {
+    ready(): Promise<TChannel> {
+      if (closed)
+        return Promise.reject(new SmokeFailure("Lifecycle socket was closed."));
+      if (!pending) {
+        pending = (async () => {
+          current?.assertHealthy();
+          if (
+            !current ||
+            (expiresAtMs !== undefined &&
+              expiresAtMs <= dependencies.now() + SOCKET_TIMEOUT_MS)
+          ) {
+            const previous = current?.snapshot ?? null;
+            current?.close();
+            if (session) await refreshSession(options, session, dependencies);
+            if (closed) throw new SmokeFailure("Lifecycle socket was closed.");
+            expiresAtMs = session?.accessExpiresAtMs;
+            current = open(previous);
+          }
+          return current;
+        })().finally(() => {
+          pending = null;
+        });
+      }
+      return pending;
+    },
+    close() {
+      closed = true;
+      current?.close();
+    },
+  };
+}
+
+function matchChannel(
+  options: Options,
+  inviteId: string,
+  matchId: string,
+  session: Session | null,
+  dependencies: Dependencies,
+  minimumRevision = 0,
+) {
+  const channel = renewingChannel(
+    options,
+    session,
+    dependencies,
+    (previous: MatchSyncSnapshot | null) =>
+      openMatchChannel(
+        options,
+        inviteId,
+        matchId,
+        session,
+        dependencies,
+        minimumRevision,
+        previous,
+      ),
+  );
+  return {
+    waitFor: async (expected: MatchSyncState) =>
+      (await channel.ready()).waitFor(expected),
+    heartbeat: async () => (await channel.ready()).heartbeat(),
+    close: () => channel.close(),
   };
 }
 
@@ -618,19 +698,21 @@ async function verifyMatchChannels(
   return response.snapshot;
 }
 
-function metadataChannel(
+function openMetadataChannel(
   options: Options,
   inviteId: string,
   session: Session,
   dependencies: Dependencies,
+  previous: InviteMetadataSnapshot | null = null,
 ) {
+  const expiresAtMs = session.accessExpiresAtMs;
   let socket: SmokeSocket;
   try {
     socket = dependencies.connect(
       `${options.baseUrl.replace(/^https:/, "wss:")}/invites/${inviteId}/metadata/socket`,
       {
         origin: ORIGIN,
-        headers: { Authorization: `Bearer ${session.idToken}` },
+        headers: { Authorization: `Bearer ${session.accessToken}` },
         followRedirects: false,
         handshakeTimeout: SOCKET_TIMEOUT_MS,
         maxPayload: INVITE_METADATA_MAX_MESSAGE_BYTES,
@@ -650,8 +732,11 @@ function metadataChannel(
     for (const notify of waiting) notify();
   };
   socket.on("error", () => fail("Lifecycle metadata socket failed."));
-  socket.on("close", () => {
-    if (!closed) fail("Lifecycle metadata socket closed early.");
+  socket.on("close", (code, reason) => {
+    if (!closed && !(code === 4001 && expiresAtMs <= dependencies.now()))
+      fail(
+        `Lifecycle metadata socket closed early (${socketCloseDetail(code, reason)}).`,
+      );
   });
   socket.on("unexpected-response", (_request, response) => {
     if (record(response) && typeof response.destroy === "function")
@@ -680,6 +765,10 @@ function metadataChannel(
       if (
         !isInviteMetadataMessage(payload) ||
         payload.snapshot.inviteId !== inviteId ||
+        (previous &&
+          (payload.snapshot.revision < previous.revision ||
+            (payload.snapshot.revision === previous.revision &&
+              !isDeepStrictEqual(payload.snapshot, previous)))) ||
         (current &&
           (payload.snapshot.revision < current.revision ||
             (payload.snapshot.revision === current.revision &&
@@ -693,6 +782,12 @@ function metadataChannel(
     }
   });
   return {
+    get snapshot() {
+      return current ?? previous;
+    },
+    assertHealthy() {
+      if (failure) throw failure;
+    },
     waitFor(expected: InviteMetadataSnapshot): Promise<void> {
       return new Promise((resolveWait, reject) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -739,6 +834,26 @@ function metadataChannel(
   };
 }
 
+function metadataChannel(
+  options: Options,
+  inviteId: string,
+  session: Session,
+  dependencies: Dependencies,
+) {
+  const channel = renewingChannel(
+    options,
+    session,
+    dependencies,
+    (previous: InviteMetadataSnapshot | null) =>
+      openMetadataChannel(options, inviteId, session, dependencies, previous),
+  );
+  return {
+    waitFor: async (expected: InviteMetadataSnapshot) =>
+      (await channel.ready()).waitFor(expected),
+    close: () => channel.close(),
+  };
+}
+
 async function readMetadata(
   options: Options,
   inviteId: string,
@@ -781,8 +896,8 @@ async function readMetadata(
   return payload.snapshot;
 }
 
-function matchUrl(uid: string, matchId: string, session: Session): string {
-  return `${FIREBASE_DATABASE_ROOT}/players/${encodeURIComponent(uid)}/matches/${encodeURIComponent(matchId)}.json?auth=${encodeURIComponent(session.idToken)}`;
+function matchUrl(uid: string, matchId: string): string {
+  return `${FIREBASE_DATABASE_ROOT}/players/${encodeURIComponent(uid)}/matches/${encodeURIComponent(matchId)}.json`;
 }
 
 function parseMatch(value: unknown): MatchRecord {
@@ -805,7 +920,7 @@ async function readMatch(
   dependencies: Dependencies,
 ) {
   const result = await requestJson(
-    matchUrl(uid, matchId, session),
+    matchUrl(uid, matchId),
     { headers: { "X-Firebase-ETag": "true" } },
     dependencies,
   );
@@ -833,7 +948,7 @@ async function updateOwnedMatch(
     );
     const next = update(current.value);
     const result = await requestJson(
-      matchUrl(session.uid, matchId, session),
+      matchUrl(session.uid, matchId),
       {
         method: "PUT",
         headers: {
@@ -871,7 +986,7 @@ async function verifyTimerRules(
 ): Promise<void> {
   const current = await readMatch(session.uid, matchId, session, dependencies);
   const result = await requestJson(
-    matchUrl(session.uid, matchId, session),
+    matchUrl(session.uid, matchId),
     {
       method: "PUT",
       headers: { "Content-Type": "application/json", "If-Match": current.etag },
@@ -908,7 +1023,7 @@ async function verifyTimerRules(
   )
     throw new SmokeFailure("Lifecycle rejected timer write changed the match.");
   const claim = await requestJson(
-    `${FIREBASE_DATABASE_ROOT}/matchTimerClaims/${matchId}.json?auth=${encodeURIComponent(session.idToken)}`,
+    `${FIREBASE_DATABASE_ROOT}/matchTimerClaims/${matchId}.json`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -1012,7 +1127,7 @@ async function verifyMoveRules(
   next: MatchRecord,
   dependencies: Dependencies,
 ): Promise<void> {
-  const wholeUrl = matchUrl(session.uid, matchId, session);
+  const wholeUrl = matchUrl(session.uid, matchId);
   const fenUrl = new URL(wholeUrl);
   fenUrl.pathname = fenUrl.pathname.replace(/\.json$/, "/fen.json");
   const rootUrl = new URL(wholeUrl);
@@ -1241,7 +1356,7 @@ async function verifySurrenderRules(
   dependencies: Dependencies,
 ): Promise<void> {
   const current = await readMatch(session.uid, matchId, session, dependencies);
-  const wholeUrl = matchUrl(session.uid, matchId, session);
+  const wholeUrl = matchUrl(session.uid, matchId);
   const statusUrl = new URL(wholeUrl);
   statusUrl.pathname = statusUrl.pathname.replace(/\.json$/, "/status.json");
   const { status: _status, ...withoutStatus } = current.value;
@@ -1286,7 +1401,7 @@ async function verifyRetiredRtdbReads(
     `players/${session.uid}/profile`,
   ]) {
     const result = await requestJson(
-      `${FIREBASE_DATABASE_ROOT}/${path}.json?auth=${encodeURIComponent(session.idToken)}`,
+      `${FIREBASE_DATABASE_ROOT}/${path}.json`,
       {},
       dependencies,
     );
@@ -1370,9 +1485,13 @@ async function runSmoke(
       : {}),
   });
   try {
-    sessions.push(await createSession(dependencies));
+    sessions.push(
+      await createToolSession(validated.baseUrl, dependencies.fetch),
+    );
     report.hostUid = sessions[0].uid;
-    sessions.push(await createSession(dependencies));
+    sessions.push(
+      await createToolSession(validated.baseUrl, dependencies.fetch),
+    );
     report.guestUid = sessions[1].uid;
     const [host, guest] = sessions;
     if (host.uid === guest.uid)
@@ -1489,7 +1608,7 @@ async function runSmoke(
     report.checks.push("firebase-timer-and-claim-write-rules");
     if (!validated.surrenderRulesPending) {
       await verifySurrenderRules(host, inviteId, dependencies);
-      report.checks.push("firebase-surrender-write-rules");
+      report.checks.push("firebase-unauthenticated-surrender-write-denials");
     }
     await verifyLiveMatch(
       validated,
@@ -1504,7 +1623,7 @@ async function runSmoke(
     report.checks.push("cumulative-moves-takebacks-and-reordered-replay");
     report.checks.push("live-match-moves-takebacks-surrender-and-reconnect");
     if (!validated.moveRulesPending)
-      report.checks.push("firebase-move-write-rules");
+      report.checks.push("firebase-unauthenticated-move-write-denials");
     const hostRematch = await mutation(
       validated,
       "/rematches/propose",
@@ -1666,7 +1785,11 @@ async function runSmoke(
     failure =
       error instanceof SmokeFailure
         ? error
-        : new SmokeFailure("Lifecycle smoke failed.");
+        : new SmokeFailure(
+            error instanceof Error && /^Cloudflare session /.test(error.message)
+              ? error.message
+              : "Lifecycle smoke failed.",
+          );
   } finally {
     channel?.close();
     for (const socket of matchChannels) socket.close();
@@ -1715,20 +1838,20 @@ async function runSmoke(
     const deleted = await Promise.allSettled(
       sessions.map((session) =>
         retry(() =>
-          identityRequest(
-            "accounts:delete",
-            { idToken: session.idToken },
-            dependencies,
+          revokeToolSession(
+            validated.baseUrl,
+            session.revokeToken,
+            dependencies.fetch,
           ),
         ),
       ),
     );
     if (deleted.some((result) => result.status === "rejected"))
       failure = new SmokeFailure(
-        "Lifecycle smoke could not delete every temporary anonymous session.",
+        "Lifecycle smoke could not revoke every temporary anonymous session.",
       );
     else if (sessions.length === 2)
-      report.checks.push("temporary-anonymous-sessions-deleted");
+      report.checks.push("temporary-anonymous-sessions-revoked");
     dependencies.log(JSON.stringify(report));
   }
   if (failure) throw failure;

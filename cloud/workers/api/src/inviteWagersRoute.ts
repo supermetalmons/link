@@ -14,9 +14,10 @@ import {
 } from "./authHttp.ts";
 import { cancelResponseBody } from "./boundedStreams.ts";
 import {
-  verifyFirebaseRequest,
+  verifySessionRequest,
+  type SessionIdentity,
   type WorkerExecutionContext,
-} from "./firebaseAuth.ts";
+} from "./sessionAuth.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 import { resolveInviteRoleFromSnapshot } from "./gameSessionMutations.ts";
 import {
@@ -24,8 +25,8 @@ import {
   type GameplayRepository,
 } from "./gameplayRepository.ts";
 import type { InviteReactions } from "./inviteReactions.ts";
+import { socketSessionHeaders } from "./socketSession.ts";
 import { readInviteSocketToken } from "./inviteSocketAuth.ts";
-import type { RequestIdentity } from "./requestIdentity.ts";
 
 const WAGERS_ROUTE_PATTERN = /^\/invites\/([^/]+)\/wagers(\/socket)?$/;
 
@@ -34,8 +35,9 @@ export type InviteWagersRouteDependencies = {
   room?: Pick<InviteReactions, "readWagers" | "fetch">;
   verifyIdentity?: (
     request: Request,
+    env: Env,
     ctx: WorkerExecutionContext,
-  ) => Promise<RequestIdentity>;
+  ) => Promise<SessionIdentity>;
   logFailure?: () => void;
 };
 
@@ -109,8 +111,9 @@ export async function handleInviteWagersRoute(
         : null;
     }
     const identity = identityRequest
-      ? await (dependencies.verifyIdentity || verifyFirebaseRequest)(
+      ? await (dependencies.verifyIdentity || verifySessionRequest)(
           identityRequest,
+          env,
           ctx,
         )
       : null;
@@ -195,6 +198,7 @@ export async function handleInviteWagersRoute(
               ? "1"
               : "0",
             "X-Mons-Wagers-Authenticated": identity ? "1" : "0",
+            ...socketSessionHeaders(identity),
             ...(role.actorUid
               ? { "X-Mons-Wagers-Actor": encodeURIComponent(role.actorUid) }
               : {}),

@@ -13,9 +13,10 @@ import {
 } from "./authHttp.ts";
 import { cancelResponseBody } from "./boundedStreams.ts";
 import {
-  verifyFirebaseRequest,
+  verifySessionRequest,
+  type SessionIdentity,
   type WorkerExecutionContext,
-} from "./firebaseAuth.ts";
+} from "./sessionAuth.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 import { resolveInviteRoleFromSnapshot } from "./gameSessionMutations.ts";
 import {
@@ -24,11 +25,11 @@ import {
 } from "./gameplayRepository.ts";
 import { normalizeInviteMetadata } from "./inviteMetadata.ts";
 import { readInviteSocketToken } from "./inviteSocketAuth.ts";
+import { socketSessionHeaders } from "./socketSession.ts";
 import {
   isRegisteredSyncMatch,
   type MatchSyncReadResult,
 } from "./matchSync.ts";
-import type { RequestIdentity } from "./requestIdentity.ts";
 
 const MATCH_SYNC_ROUTE_PATTERN =
   /^\/invites\/([^/]+)\/matches\/([^/]+)\/(snapshot|socket)$/;
@@ -44,8 +45,9 @@ export type MatchSyncRouteDependencies = {
   };
   verifyIdentity?: (
     request: Request,
+    env: Env,
     ctx: WorkerExecutionContext,
-  ) => Promise<RequestIdentity>;
+  ) => Promise<SessionIdentity>;
   logFailure?: () => void;
 };
 
@@ -123,8 +125,9 @@ export async function handleMatchSyncRoute(
         : null;
     }
     const identity = identityRequest
-      ? await (dependencies.verifyIdentity || verifyFirebaseRequest)(
+      ? await (dependencies.verifyIdentity || verifySessionRequest)(
           identityRequest,
+          env,
           ctx,
         )
       : null;
@@ -206,6 +209,7 @@ export async function handleMatchSyncRoute(
             "X-Mons-Match-Revision": String(read.snapshot.revision),
             "X-Mons-Match-Protected": metadata.passwordProtected ? "1" : "0",
             "X-Mons-Match-Authenticated": identity ? "1" : "0",
+            ...socketSessionHeaders(identity),
             ...(role.actorUid
               ? { "X-Mons-Match-Actor": encodeURIComponent(role.actorUid) }
               : {}),

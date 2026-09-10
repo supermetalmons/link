@@ -35,6 +35,11 @@ import { Sound } from "./utils/gameModels";
 import { initializeAppSessionManager } from "./session/AppSessionManager";
 import { getCurrentRouteState } from "./navigation/routeState";
 import { installLogoutSync } from "./session/logoutOrchestrator";
+import {
+  isLogoutRecoveryRequired,
+  subscribeToLogoutRecovery,
+} from "./session/logoutRecovery";
+import { LogoutRecoveryModal } from "./ui/identity/LogoutRecoveryModal";
 import { bindGameConnection } from "./game/gameConnectionPort";
 import {
   getIsMuted,
@@ -122,8 +127,13 @@ const App = () => {
   const [isLogoutUiLockedState, setIsLogoutUiLockedState] = useState(() =>
     isLogoutUiLocked(),
   );
+  const logoutRecoveryRequired = useSyncExternalStore(
+    subscribeToLogoutRecovery,
+    isLogoutRecoveryRequired,
+    isLogoutRecoveryRequired,
+  );
   const shouldHideAuthControls =
-    authStatus === "loading" || isLogoutUiLockedState;
+    authStatus === "loading" || isLogoutUiLockedState || logoutRecoveryRequired;
 
   bindIslandButtonDimmer((dimmed: boolean) => {
     setIsIslandButtonDim(dimmed);
@@ -181,6 +191,7 @@ const App = () => {
       <MainMenu />
       <BottomControls authState={authState} />
       <EventModal />
+      {logoutRecoveryRequired && <LogoutRecoveryModal />}
     </div>
   );
 };

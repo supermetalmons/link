@@ -179,7 +179,6 @@ test("isolates frontend builds from ambient and dotenv deployment values", () =>
     VITE_FROM_PRODUCTION: "",
     "VITE_MIXED.Name": "",
     NODE_ENV: "production",
-    VITE_MONS_FIREBASE_API_KEY: "",
     VITE_APPLE_CLIENT_ID: "",
     VITE_APP_TITLE: "",
     VITE_BUILD_DATETIME: "1750000123",

@@ -138,7 +138,6 @@ function createBuildEnvironment(
   }
 
   buildEnvironment.NODE_ENV = "production";
-  buildEnvironment.VITE_MONS_FIREBASE_API_KEY = "";
   buildEnvironment.VITE_APPLE_CLIENT_ID = "";
   buildEnvironment.VITE_APP_TITLE = "";
   buildEnvironment.VITE_BUILD_DATETIME = String(

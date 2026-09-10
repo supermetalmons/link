@@ -18,9 +18,9 @@ import {
   getAuthCorsHeaders,
 } from "./authHttp.ts";
 import {
-  verifyFirebaseRequest,
+  verifySessionRequest,
   type WorkerExecutionContext,
-} from "./firebaseAuth.ts";
+} from "./sessionAuth.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import {
   createMiningRepository,
@@ -41,6 +41,7 @@ export type MiningRouteDependencies = {
   repository?: MiningRepository;
   verifyIdentity?: (
     request: Request,
+    env: Env,
     ctx: WorkerExecutionContext,
   ) => Promise<RequestIdentity>;
 };
@@ -180,8 +181,8 @@ export async function handleMiningRoute(
       throw new AuthApiFailure(405, "method-not-allowed", "method-not-allowed");
     }
     const identity = await (
-      dependencies.verifyIdentity || verifyFirebaseRequest
-    )(request, ctx);
+      dependencies.verifyIdentity || verifySessionRequest
+    )(request, env, ctx);
     await assertProfileMutationAllowed(env);
     await enforceMiningRateLimit(env, identity.uid);
     const input = await parseMineRockRequest(request);

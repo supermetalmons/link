@@ -35,9 +35,9 @@ import {
   type EventParticipationDependencies,
 } from "./eventParticipation.ts";
 import {
-  verifyFirebaseRequest,
+  verifySessionRequest,
   type WorkerExecutionContext,
-} from "./firebaseAuth.ts";
+} from "./sessionAuth.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import { EventWritesDisabled, assertEventWritesAllowed } from "./eventD1.ts";
 import { createEventMutationRepository } from "./eventMutationRepository.ts";
@@ -70,6 +70,7 @@ export type EventRouteDependencies = {
   repository?: GameplayRepository;
   verifyIdentity?: (
     request: Request,
+    env: Env,
     ctx: WorkerExecutionContext,
   ) => Promise<RequestIdentity>;
   logFailure?: (kind: string) => void;
@@ -173,8 +174,8 @@ export async function handleEventRoute(
       : dependencies.control?.signal ||
         AbortSignal.timeout(EVENT_CONTROL_TIMEOUT_MS);
     const identity = await (
-      dependencies.verifyIdentity || verifyFirebaseRequest
-    )(request, ctx);
+      dependencies.verifyIdentity || verifySessionRequest
+    )(request, env, ctx);
     if (dependencies.assertEventWrites) {
       await dependencies.assertEventWrites();
     } else if (!dependencies.verifyIdentity) {

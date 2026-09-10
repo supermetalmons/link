@@ -1,3 +1,4 @@
+import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
 import { env } from "cloudflare:workers";
 import {
   evictDurableObject,
@@ -139,6 +140,7 @@ async function connect(
           "X-Mons-Match-Revision": String(value.snapshot.revision),
           "X-Mons-Match-Protected": "0",
           "X-Mons-Match-Authenticated": "1",
+          ...socketTestSessionHeaders(),
           ...overrides,
         },
       }),

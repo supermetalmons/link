@@ -20,9 +20,9 @@ import {
   type XRedirectFlowDocument,
 } from "./authStateD1.ts";
 import {
-  verifyFirebaseRequest,
+  verifySessionRequest,
   type WorkerExecutionContext,
-} from "./firebaseAuth.ts";
+} from "./sessionAuth.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import {
   AuthApiFailure,
@@ -65,6 +65,7 @@ export type AuthRouteDependencies = {
   mutation?: AuthMutationDependencies;
   verifyIdentity?: (
     request: Request,
+    env: Env,
     ctx: WorkerExecutionContext,
   ) => Promise<RequestIdentity>;
 };
@@ -260,8 +261,8 @@ export async function handleAuthRoute(
     const expectedMethod = pathname === "/auth/methods" ? "GET" : "POST";
     assertMethod(request, expectedMethod);
     const identity = await (
-      dependencies.verifyIdentity || verifyFirebaseRequest
-    )(request, ctx);
+      dependencies.verifyIdentity || verifySessionRequest
+    )(request, env, ctx);
     if (request.method === "POST") {
       await assertProfileMutationAllowed(env);
       if (authMutationsDisabled(env.AUTH_MUTATIONS_DISABLED)) {

@@ -8,6 +8,10 @@ const {
 const { tmpdir }: typeof import("node:os") = require("node:os");
 const { join }: typeof import("node:path") = require("node:path");
 const test: typeof import("node:test") = require("node:test");
+type RefreshableSession = Pick<
+  import("./cloudflare/sessions.ts").ToolSession,
+  "uid" | "sessionId" | "accessToken" | "accessExpiresAtMs" | "refreshToken"
+>;
 const {
   DEFAULT_SMOKE_PROFILE,
   DEFAULT_SMOKE_SOL,
@@ -38,6 +42,7 @@ const {
     baseUrl: string;
     readOnly: boolean;
     readOnlyAuthToken: string | null;
+    readOnlyAuthSession?: RefreshableSession;
     requireAutomatchOperationId?: boolean;
     requireWagerFrozenRead?: boolean;
     requireWagerStorageVersion?: boolean;
@@ -62,6 +67,7 @@ const {
     options: {
       baseUrl: string;
       readOnlyAuthToken?: string | null;
+      readOnlyAuthSession?: RefreshableSession;
       readOnly?: boolean;
       requireAutomatchOperationId?: boolean;
       requireWagerFrozenRead?: boolean;
@@ -87,6 +93,7 @@ const {
       fetch: typeof fetch;
       randomState: () => string;
       log: (message: string) => void;
+      now?: () => number;
     },
   ) => Promise<void>;
   smokeAuthenticatedAuthState: (
@@ -109,7 +116,7 @@ const {
       randomState: () => string;
       log: (message: string) => void;
     },
-    existingIdToken?: string,
+    existingAccessToken?: string,
     eventFixture?: {
       assignedPrizeId: string;
       currentId: string;
@@ -121,7 +128,7 @@ const {
   ) => Promise<void>;
   smokeEventReads: (
     baseUrl: string,
-    idToken: string,
+    accessToken: string,
     expectedProfileId: string | null,
     eventFixture:
       | {
@@ -140,7 +147,7 @@ const {
   ) => Promise<void>;
   smokeFrozenProfileWrite: (
     baseUrl: string,
-    idToken: string,
+    accessToken: string,
     dependencies: {
       fetch: typeof fetch;
       randomState: () => string;
@@ -149,7 +156,7 @@ const {
   ) => Promise<void>;
   smokeRequiredWagerFrozenRead: (
     baseUrl: string,
-    idToken: string,
+    accessToken: string,
     smokeProfile: {
       loginId: string;
       profileId: string;
@@ -163,7 +170,7 @@ const {
   ) => Promise<void>;
   smokeRequiredWagerStorageVersion: (
     baseUrl: string,
-    idToken: string,
+    accessToken: string,
     dependencies: {
       fetch: typeof fetch;
       randomState: () => string;
@@ -172,7 +179,7 @@ const {
   ) => Promise<void>;
   smokeRequiredAutomatchOperationId: (
     baseUrl: string,
-    idToken: string,
+    accessToken: string,
     dependencies: {
       fetch: typeof fetch;
       randomState: () => string;
@@ -182,7 +189,7 @@ const {
 };
 
 const WALLET = "11111111111111111111111111111111";
-const LOGIN = "known-login";
+const LOGIN = "L".repeat(28);
 const SMOKE_EVENTS = {
   assignedPrizeId: "1866",
   currentId: "NN3eRzoZo80",
@@ -235,6 +242,13 @@ const HISTORICAL_MATCH_PAIR = {
 const AUTH_TOKEN = `header.${Buffer.from(
   JSON.stringify({ sub: LOGIN }),
 ).toString("base64url")}.signature`;
+const REFRESHABLE_AUTH: RefreshableSession = {
+  uid: LOGIN,
+  sessionId: "00000000-0000-4000-8000-000000000001",
+  accessToken: AUTH_TOKEN,
+  accessExpiresAtMs: 1_800_000_300_000,
+  refreshToken: `mrs1.00000000-0000-4000-8000-000000000001.${"A".repeat(43)}`,
+};
 const EMPTY_NFTS = {
   ok: true,
   specials: [],
@@ -280,13 +294,15 @@ function profileFixture(value: unknown = SMOKE_PROFILE): {
   };
 }
 
-function authTokenFixture(idToken = AUTH_TOKEN): {
+function authTokenFixture(accessToken = AUTH_TOKEN): {
   cleanup(): void;
   path: string;
 } {
   const directory = mkdtempSync(join(tmpdir(), "mons-link-smoke-auth-"));
   const path = join(directory, "auth.json");
-  writeFileSync(path, JSON.stringify({ idToken }), { mode: 0o600 });
+  writeFileSync(path, JSON.stringify({ accessToken: accessToken }), {
+    mode: 0o600,
+  });
   return {
     path,
     cleanup: () => rmSync(directory, { recursive: true, force: true }),
@@ -494,6 +510,50 @@ test("parses only production and canonical preview smoke targets", () => {
   }
 });
 
+test("accepts bound refreshable auth fixtures and rejects malformed credentials", () => {
+  const profile = profileFixture();
+  const auth = profileFixture(REFRESHABLE_AUTH);
+  const args = [
+    "--base-url",
+    "https://api.mons.link",
+    "--read-only",
+    "--auth-token-fixture",
+    auth.path,
+    "--smoke-profile-fixture",
+    profile.path,
+  ];
+  try {
+    const options = parseArgs(args);
+    assert.equal(options.readOnlyAuthToken, AUTH_TOKEN);
+    assert.deepEqual(options.readOnlyAuthSession, REFRESHABLE_AUTH);
+    const { refreshToken: _refreshToken, ...incomplete } = REFRESHABLE_AUTH;
+    for (const value of [
+      incomplete,
+      { ...REFRESHABLE_AUTH, extra: true },
+      { ...REFRESHABLE_AUTH, uid: "G".repeat(28) },
+      {
+        ...REFRESHABLE_AUTH,
+        sessionId: "00000000-0000-4000-8000-000000000002",
+      },
+      {
+        ...REFRESHABLE_AUTH,
+        refreshToken: REFRESHABLE_AUTH.refreshToken.replace("mrs1", "mrv1"),
+      },
+      { ...REFRESHABLE_AUTH, accessExpiresAtMs: "1800000300000" },
+      { ...REFRESHABLE_AUTH, accessExpiresAtMs: 0 },
+    ]) {
+      writeFileSync(auth.path, JSON.stringify(value));
+      assert.throws(() => parseArgs(args), /Usage:/);
+    }
+    writeFileSync(auth.path, JSON.stringify(REFRESHABLE_AUTH));
+    chmodSync(auth.path, 0o644);
+    assert.throws(() => parseArgs(args), /Usage:/);
+  } finally {
+    auth.cleanup();
+    profile.cleanup();
+  }
+});
+
 test("rejects malformed historical match smoke fixtures", () => {
   const authFixture = authTokenFixture();
   const values = [
@@ -600,7 +660,7 @@ test("rejects invalid event selection fixtures", () => {
   }
 });
 
-test("smokes public, unauthenticated, and internal routes", async () => {
+test("smokes public, unauthenticated, and internal routes", async (t) => {
   const requests: Array<{ authorized: boolean; method: string; url: string }> =
     [];
   const leaderboardTypes: string[] = [];
@@ -619,7 +679,10 @@ test("smokes public, unauthenticated, and internal routes", async () => {
       method,
       url,
     });
-    assert.equal(init?.redirect, "manual");
+    assert.equal(
+      init?.redirect,
+      url.includes("/auth/session/") ? "error" : "manual",
+    );
     assert.equal(init?.signal instanceof AbortSignal, true);
 
     if (url.endsWith("/nfts") && method === "OPTIONS") {
@@ -985,11 +1048,20 @@ test("smokes public, unauthenticated, and internal routes", async () => {
         200,
       );
     }
-    if (url.includes("identitytoolkit.googleapis.com/v1/accounts:signUp")) {
-      return json({ idToken: "firebase-id-token", localId: "smoke-uid" }, 200);
+    if (url.includes("/auth/session/anonymous")) {
+      return json(
+        {
+          ok: true,
+          accessToken: `header.${Buffer.from(JSON.stringify({ sub: "SSSSSSSSSSSSSSSSSSSSSSSSSSSS" })).toString("base64url")}.signature`,
+          uid: "SSSSSSSSSSSSSSSSSSSSSSSSSSSS",
+          sessionId: JSON.parse(String(init?.body)).sessionId,
+          accessExpiresAtMs: Date.now() + 300_000,
+        },
+        200,
+      );
     }
-    if (url.includes("identitytoolkit.googleapis.com/v1/accounts:delete")) {
-      return json({}, 200);
+    if (url.includes("/auth/session/logout")) {
+      return new Response(null, { status: 204 });
     }
     if (
       [
@@ -1170,6 +1242,137 @@ test("smokes public, unauthenticated, and internal routes", async () => {
       ),
       false,
     );
+  }
+
+  for (const mode of [
+    "read-only",
+    "guest",
+    "wrong-uid",
+    "wrong-session",
+  ] as const) {
+    await t.test(`renews protected probes: ${mode}`, async () => {
+      nftPosts = 0;
+      let now = 1_800_000_000_000;
+      let session = { ...REFRESHABLE_AUTH };
+      let refreshes = 0;
+      let revocations = 0;
+      const protectedRequests: { path: string; token: string }[] = [];
+      const issued = new Map([
+        [session.accessToken, session.accessExpiresAtMs],
+      ]);
+      const invalidIdentity = mode === "wrong-uid" || mode === "wrong-session";
+      if (invalidIdentity) session.accessExpiresAtMs = now;
+      const slowFetch: typeof fetch = async (input, init) => {
+        const path = new URL(String(input)).pathname;
+        const headers = new Headers(init?.headers);
+        if (path === "/auth/session/refresh") {
+          refreshes++;
+          assert.equal(
+            headers.get("Authorization"),
+            `Bearer ${session.refreshToken}`,
+          );
+          const accessExpiresAtMs = now + 300_000;
+          const accessToken = `header.${Buffer.from(
+            JSON.stringify({
+              sub: session.uid,
+              sid: session.sessionId,
+              exp: accessExpiresAtMs / 1000,
+            }),
+          ).toString("base64url")}.signature`;
+          session = { ...session, accessToken, accessExpiresAtMs };
+          issued.set(accessToken, accessExpiresAtMs);
+          return json(
+            {
+              ok: true,
+              uid: mode === "wrong-uid" ? "G".repeat(28) : session.uid,
+              sessionId:
+                mode === "wrong-session"
+                  ? "00000000-0000-4000-8000-000000000002"
+                  : session.sessionId,
+              accessToken,
+              accessExpiresAtMs,
+            },
+            200,
+          );
+        }
+        if (path === "/auth/session/anonymous") {
+          assert.equal(mode, "guest");
+          const response = await fetchStub(input, init);
+          const value =
+            (await response.json()) as import("@mons/shared/session-auth").SessionTokenResponse;
+          const creation = JSON.parse(String(init?.body)) as {
+            refreshSecret: string;
+          };
+          session = {
+            ...value,
+            accessExpiresAtMs: now + 300_000,
+            refreshToken: `mrs1.${value.sessionId}.${creation.refreshSecret}`,
+          };
+          issued.set(session.accessToken, session.accessExpiresAtMs);
+          return json(
+            { ...value, accessExpiresAtMs: session.accessExpiresAtMs },
+            200,
+          );
+        }
+        if (path === "/auth/session/logout") {
+          revocations++;
+          assert.match(headers.get("Authorization") || "", /^Bearer mrv1\./);
+          return fetchStub(input, init);
+        }
+        const token = headers.get("Authorization")?.slice(7);
+        if (token) {
+          assert.ok(
+            (issued.get(token) ?? 0) > now,
+            `unexpired token for ${path}`,
+          );
+          protectedRequests.push({ path, token });
+          if (mode !== "guest")
+            headers.set("Authorization", `Bearer ${AUTH_TOKEN}`);
+        }
+        const response = await fetchStub(input, { ...init, headers });
+        now += mode === "guest" ? 14_900 : 9_000;
+        return response;
+      };
+      const work = smokeApi(
+        {
+          baseUrl: "https://api.mons.link",
+          requireHistory: false,
+          smokeProfile: SMOKE_PROFILE,
+          smokeSol: WALLET,
+          ...(mode === "guest"
+            ? {}
+            : {
+                readOnly: true,
+                readOnlyAuthToken: AUTH_TOKEN,
+                readOnlyAuthSession: { ...session },
+                requireWagerStorageVersion: true,
+              }),
+        },
+        {
+          fetch: slowFetch,
+          now: () => now,
+          randomState: () => "abcdefghijklmnopqrstuvwx",
+          log: () => undefined,
+        },
+      );
+      if (invalidIdentity) {
+        await assert.rejects(work, /Cloudflare refresh identity did not match/);
+        assert.equal(protectedRequests.length, 0);
+        assert.equal(refreshes, 1);
+      } else {
+        await work;
+        assert.ok(now - 1_800_000_000_000 > 300_000);
+        assert.ok(refreshes > 0);
+        if (mode === "read-only") {
+          const frozenReads = protectedRequests.filter(
+            ({ path }) => path === "/wagers/frozen/read",
+          );
+          assert.equal(frozenReads.length, 2);
+          assert.ok(frozenReads.every(({ token }) => token !== AUTH_TOKEN));
+        }
+      }
+      assert.equal(revocations, mode === "guest" ? 1 : 0);
+    });
   }
 
   for (const payload of [
@@ -2104,25 +2307,25 @@ test("accepts an empty authenticated navigation projection", async () => {
   );
 });
 
-test("deletes an anonymous smoke user after an incomplete signup response", async () => {
+test("revokes an anonymous smoke session after an incomplete creation response", async () => {
   let deleted = false;
   await assert.rejects(
     smokeAuthenticatedAuthState("https://api.mons.link", SMOKE_PROFILE, {
       fetch: async (input) => {
         const url = String(input);
-        if (url.includes("accounts:signUp")) {
-          return json({ idToken: "firebase-id-token" }, 200);
+        if (url.includes("/auth/session/anonymous")) {
+          return json({ accessToken: "firebase-id-token" }, 200);
         }
-        if (url.includes("accounts:delete")) {
+        if (url.includes("/auth/session/logout")) {
           deleted = true;
-          return json({}, 200);
+          return new Response(null, { status: 204 });
         }
         throw new Error(`Unexpected request: ${url}`);
       },
       randomState: () => "abcdefghijklmnopqrstuvwx",
       log: () => undefined,
     }),
-    /incomplete/,
+    /invalid/,
   );
   assert.equal(deleted, true);
 });

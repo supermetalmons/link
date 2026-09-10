@@ -1,3 +1,4 @@
+import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
 import { env } from "cloudflare:workers";
 import {
   evictDurableObject,
@@ -102,6 +103,7 @@ function request(
       [`X-Mons-${name}-Revision`]: "1",
       [`X-Mons-${name}-Protected`]: "0",
       [`X-Mons-${name}-Authenticated`]: "0",
+      ...socketTestSessionHeaders(),
       ...overrides,
     },
   });
@@ -713,6 +715,7 @@ describe("durable invite wagers", () => {
                           headers: {
                             Upgrade: "websocket",
                             "X-Mons-Reaction-Role": role,
+                            ...socketTestSessionHeaders(),
                           },
                         })
                       : request(inviteId, channel as "metadata" | "wagers", {

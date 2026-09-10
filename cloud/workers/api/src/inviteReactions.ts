@@ -43,6 +43,12 @@ import {
 } from "./inviteWagers.ts";
 import { MatchSyncRoom } from "./matchSyncRoom.ts";
 import type { MatchSyncReadResult } from "./matchSync.ts";
+import {
+  readSocketSession,
+  socketSessionCurrent,
+  SocketSessions,
+  type SocketSession,
+} from "./socketSession.ts";
 
 export const MAX_INVITE_REACTION_SOCKETS = 256;
 export const MAX_INVITE_REACTION_SPECTATORS = 248;
@@ -86,8 +92,7 @@ type InviteSocketAttachment = {
   inviteId: string;
   role: "host" | "guest" | "spectator";
   actorUid: string | null;
-  authenticated: boolean;
-};
+} & SocketSession;
 
 type StoredReaction = {
   sender_uid: string;
@@ -157,16 +162,6 @@ function canReceiveInvite(
   );
 }
 
-function send(socket: WebSocket, message: string): void {
-  try {
-    socket.send(message);
-  } catch {
-    try {
-      socket.close(1011, "Reaction delivery failed");
-    } catch {}
-  }
-}
-
 function logWagersRefreshFailure(inviteId: string, error: unknown): void {
   console.error({
     event: "invite_wagers_refresh_failed",
@@ -180,6 +175,7 @@ export type InviteReactionPublishResult =
 
 export class InviteReactions extends DurableObject<Env> {
   private readonly matchSync: MatchSyncRoom;
+  private readonly socketSessions: SocketSessions;
   private inviteReader: (inviteId: string) => Promise<unknown>;
   private inviteSequence: Promise<void> = Promise.resolve();
   private inviteAlarmSequence: Promise<void> = Promise.resolve();
@@ -193,6 +189,7 @@ export class InviteReactions extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.socketSessions = new SocketSessions(ctx);
     this.ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS latest_reactions (sender_uid TEXT PRIMARY KEY, reaction_json TEXT NOT NULL)",
     );
@@ -230,16 +227,14 @@ export class InviteReactions extends DurableObject<Env> {
       scheduleAlarm: (atMs) => this.scheduleInviteAlarm(atMs),
       capacityFull: (role, ip) => this.matchRoomFull(role, ip),
       canReceive: canReceiveInvite,
+      socketSessions: this.socketSessions,
     });
-    this.ctx.setWebSocketAutoResponse(
-      new WebSocketRequestResponsePair(
-        REACTION_HEARTBEAT_REQUEST,
-        REACTION_HEARTBEAT_RESPONSE,
-      ),
-    );
+    this.ctx.setWebSocketAutoResponse();
+    this.socketSessions.nextExpiry();
   }
 
   async fetch(request: Request): Promise<Response> {
+    this.socketSessions.nextExpiry();
     if (
       request.method !== "GET" ||
       request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
@@ -272,6 +267,12 @@ export class InviteReactions extends DurableObject<Env> {
     if (!["host", "guest", "spectator"].includes(role) || ip.length > 64) {
       return new Response("Invalid reaction admission", { status: 400 });
     }
+    const session = readSocketSession(request, role !== "spectator");
+    if (!session) return new Response("Session expired", { status: 401 });
+    if (session.authenticated)
+      await this.scheduleInviteAlarm(session.authExpiresAtMs);
+    if (!socketSessionCurrent(session))
+      return new Response("Session expired", { status: 401 });
     const allSockets = this.ctx.getWebSockets();
     const reactionSockets = allSockets.filter(isReactionSocket);
     const roleCount = (value: string) =>
@@ -317,12 +318,13 @@ export class InviteReactions extends DurableObject<Env> {
     pair[1].serializeAttachment({
       schemaVersion: version,
       matchId: version === 2 ? matchId : null,
+      ...session,
     });
     this.ctx.acceptWebSocket(pair[1], [
       `role:${role}`,
       ...(role === "spectator" ? [`spectator-ip:${ip}`] : []),
     ]);
-    pair[1].send(JSON.stringify(snapshot));
+    this.socketSessions.send(pair[1], JSON.stringify(snapshot));
     return new Response(null, {
       status: 101,
       webSocket: pair[0],
@@ -345,6 +347,7 @@ export class InviteReactions extends DurableObject<Env> {
         return (
           (attachment?.channel === "metadata" ||
             attachment?.channel === "wagers") &&
+          this.socketSessions.active(socket) &&
           (!activeOnly || socket.readyState === WebSocket.OPEN)
         );
       });
@@ -447,7 +450,7 @@ export class InviteReactions extends DurableObject<Env> {
       ) {
         socket.close(1008, "Invite access changed");
       } else if (serialized) {
-        send(socket, serialized);
+        this.socketSessions.send(socket, serialized);
       }
     }
     return source;
@@ -504,7 +507,7 @@ export class InviteReactions extends DurableObject<Env> {
             metadata,
           )
         ) {
-          send(socket, serialized);
+          this.socketSessions.send(socket, serialized);
         }
       }
     }
@@ -599,6 +602,7 @@ export class InviteReactions extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    this.socketSessions.nextExpiry();
     await this.serializeInvite(async () => {
       const sockets = this.inviteSockets(undefined, true);
       if (sockets.length === 0) {
@@ -637,9 +641,11 @@ export class InviteReactions extends DurableObject<Env> {
       )
       .toArray();
     const nextMatch = this.matchSync.nextAlarm();
-    const due = [scheduled?.next_at_ms, nextMatch].filter(
-      (value): value is number => typeof value === "number",
-    );
+    const due = [
+      scheduled?.next_at_ms,
+      nextMatch,
+      this.socketSessions.nextExpiry(),
+    ].filter((value): value is number => typeof value === "number");
     if (due.length) await this.scheduleInviteAlarm(Math.min(...due));
   }
 
@@ -729,13 +735,15 @@ export class InviteReactions extends DurableObject<Env> {
     ) {
       return new Response(`Invalid ${channel} admission`, { status: 400 });
     }
+    const session = readSocketSession(request, authenticated === "1");
+    if (!session) return new Response("Session expired", { status: 401 });
     const attachment: InviteSocketAttachment = {
       channel,
       schemaVersion: 1,
       inviteId,
       role,
       actorUid,
-      authenticated: authenticated === "1",
+      ...session,
     };
     const observedGeneration = this.inviteRefreshGeneration;
     return this.serializeInvite(async () => {
@@ -745,6 +753,8 @@ export class InviteReactions extends DurableObject<Env> {
           headers: { "Retry-After": "60" },
         });
       }
+      if (session.authenticated)
+        await this.scheduleInviteAlarm(session.authExpiresAtMs);
       await this.scheduleInviteRefresh(
         Date.now() +
           (channel === "metadata"
@@ -773,6 +783,8 @@ export class InviteReactions extends DurableObject<Env> {
       if (!canReceiveInvite(attachment, latest.metadata)) {
         return new Response("Invite access denied", { status: 403 });
       }
+      if (!socketSessionCurrent(session))
+        return new Response("Session expired", { status: 401 });
       if (this.inviteRoomFull(channel, role, ip)) {
         return new Response(`${name} room is full`, {
           status: 429,
@@ -791,7 +803,7 @@ export class InviteReactions extends DurableObject<Env> {
         type: "snapshot",
         snapshot: source.snapshot,
       };
-      pair[1].send(JSON.stringify(message));
+      this.socketSessions.send(pair[1], JSON.stringify(message));
       return new Response(null, {
         status: 101,
         webSocket: pair[0],
@@ -849,7 +861,10 @@ export class InviteReactions extends DurableObject<Env> {
     const v2Message = JSON.stringify({ ...event, schemaVersion: 2 });
     for (const socket of this.ctx.getWebSockets()) {
       if (isReactionSocket(socket)) {
-        send(socket, socketVersion(socket) === 2 ? v2Message : message);
+        this.socketSessions.send(
+          socket,
+          socketVersion(socket) === 2 ? v2Message : message,
+        );
       }
     }
     return "published";
@@ -1027,13 +1042,21 @@ export class InviteReactions extends DurableObject<Env> {
           attachment?.schemaVersion === 2 &&
           attachment.matchId === matchId
         )
-          send(socket, message);
+          this.socketSessions.send(socket, message);
       }
     }
     return result;
   }
 
-  webSocketMessage(socket: WebSocket): void {
+  webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
+    if (!this.socketSessions.active(socket)) {
+      this.matchSync.closed(socket);
+      return;
+    }
+    if (message === REACTION_HEARTBEAT_REQUEST) {
+      this.socketSessions.send(socket, REACTION_HEARTBEAT_RESPONSE);
+      return;
+    }
     socket.close(1008, "Reaction sockets are receive-only");
     this.matchSync.closed(socket);
   }

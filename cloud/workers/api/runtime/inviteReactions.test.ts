@@ -1,3 +1,7 @@
+import {
+  socketTestIdentity,
+  socketTestSessionHeaders,
+} from "../test/socketTestSession.ts";
 import { env } from "cloudflare:workers";
 import {
   applyD1Migrations,
@@ -59,7 +63,11 @@ async function connect(
   headers: Record<string, string> = {},
 ) {
   const response = await stub.fetch("https://reactions.internal/socket", {
-    headers: { Upgrade: "websocket", ...headers },
+    headers: {
+      Upgrade: "websocket",
+      ...socketTestSessionHeaders(),
+      ...headers,
+    },
   });
   return acceptSocket(response);
 }
@@ -171,7 +179,7 @@ describe("invite reaction rooms", () => {
                   "unauthenticated",
                   "authentication-required",
                 );
-              return { uid };
+              return socketTestIdentity(uid);
             },
           },
         },
@@ -343,7 +351,7 @@ describe("invite reaction rooms", () => {
     });
   });
 
-  it("answers heartbeats automatically and rejects client publication frames", async () => {
+  it("answers heartbeats after hibernation and rejects client publication frames", async () => {
     const stub = room();
     const client = await connect(stub);
     await client.read();
@@ -455,7 +463,11 @@ describe("invite reaction rooms", () => {
     );
     const expectFull = async (headers: Record<string, string>) => {
       const response = await stub.fetch("https://reactions.internal/socket", {
-        headers: { Upgrade: "websocket", ...headers },
+        headers: {
+          Upgrade: "websocket",
+          ...socketTestSessionHeaders(),
+          ...headers,
+        },
       });
       expect(response.status).toBe(429);
       await response.text();

@@ -9,9 +9,10 @@ import {
   getAuthCorsHeaders,
 } from "./authHttp.ts";
 import {
-  verifyFirebaseRequest,
+  verifySessionRequest,
+  type SessionIdentity,
   type WorkerExecutionContext,
-} from "./firebaseAuth.ts";
+} from "./sessionAuth.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
   createGameplayRepository,
@@ -27,7 +28,6 @@ import {
   requireCurrentPresentationMatch,
   requirePresentationPair,
 } from "./matchPresentationAccess.ts";
-import type { RequestIdentity } from "./requestIdentity.ts";
 
 const PRESENTATION_ROUTE_PATTERN =
   /^\/invites\/([^/]+)\/matches\/([^/]+)\/presentation$/;
@@ -37,8 +37,9 @@ export type MatchPresentationRouteDependencies = {
   room?: Pick<InviteReactions, "ensurePresentations" | "updatePresentation">;
   verifyIdentity?: (
     request: Request,
+    env: Env,
     ctx: WorkerExecutionContext,
-  ) => Promise<RequestIdentity>;
+  ) => Promise<SessionIdentity>;
   logFailure?: () => void;
 };
 
@@ -95,8 +96,9 @@ export async function handleMatchPresentationRoute(
     const repository = dependencies.repository || createGameplayRepository(env);
     const identity =
       request.method === "POST" || request.headers.has("Authorization")
-        ? await (dependencies.verifyIdentity || verifyFirebaseRequest)(
+        ? await (dependencies.verifyIdentity || verifySessionRequest)(
             request,
+            env,
             ctx,
           )
         : null;

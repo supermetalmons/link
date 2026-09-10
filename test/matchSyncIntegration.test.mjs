@@ -137,10 +137,6 @@ function harness({
       counters.set(name, (counters.get(name) ?? 0) + 1),
     decrementLifecycleCounter: (name) =>
       counters.set(name, (counters.get(name) ?? 0) - 1),
-    onAuthStateChanged: (_auth, callback) => {
-      authListener = callback;
-      return noop;
-    },
     setCurrentWagerMatch: noop,
   };
   const Constructor = new Function(
@@ -158,7 +154,14 @@ function harness({
     canWrite: participant,
   };
   connection = Object.assign(new Constructor(), {
-    auth: { currentUser: { uid: "login" } },
+    auth: {
+      currentUser: { uid: "login" },
+      getTokenRemainingMs: () => 300_000,
+      onAuthStateChanged: (callback) => {
+        authListener = callback;
+        return noop;
+      },
+    },
     authUnsubscribers: new Set(),
     currentUid: "login",
     loginUid: "login",

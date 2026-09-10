@@ -1,3 +1,8 @@
+const {
+  createToolSession,
+  refreshToolSession,
+  revokeToolSession,
+}: typeof import("./cloudflare/sessions.ts") = require("./cloudflare/sessions.ts");
 const { randomBytes } = require("node:crypto");
 const { readFileSync, statSync } = require("node:fs");
 const {
@@ -30,6 +35,10 @@ const {
   isEventPrizeId,
   isProfileEventPrizesResponse,
 }: typeof import("@mons/shared/event-prizes") = require("@mons/shared/event-prizes");
+const {
+  isSessionTokenResponse,
+  parseSessionCapability,
+}: typeof import("@mons/shared/session-auth") = require("@mons/shared/session-auth");
 
 const {
   isWagerFrozenReadResponse,
@@ -40,9 +49,8 @@ const {
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
+const TOKEN_REFRESH_MARGIN_MS = 30_000;
 const ORIGIN = "https://mons.link";
-const FIREBASE_API_KEY = "AIzaSyC8Ihr4kDd34z-RXe8XTBCFtFbXebifo5Y";
-const FIREBASE_IDENTITY_ROOT = "https://identitytoolkit.googleapis.com/v1";
 const PREVIEW_HOST_PATTERN =
   /^[0-9a-f]{8}-mons-link-api\.lil-org\.workers\.dev$/;
 const AUTOMATCH_SMOKE_OPERATION_ID = "00000000-0000-4000-8000-000000000001";
@@ -55,6 +63,7 @@ const DEFAULT_SMOKE_PROFILE = {
 type Options = {
   baseUrl: string;
   readOnlyAuthToken?: string | null;
+  readOnlyAuthSession?: RefreshableSession;
   readOnly?: boolean;
   requireAutomatchOperationId?: boolean;
   requireWagerFrozenRead?: boolean;
@@ -64,6 +73,10 @@ type Options = {
   smokeProfile: ProfileSmokeFixture;
   smokeSol: string;
 };
+type RefreshableSession = Pick<
+  import("./cloudflare/sessions.ts").ToolSession,
+  "uid" | "sessionId" | "accessToken" | "accessExpiresAtMs" | "refreshToken"
+>;
 type ProfileSmokeFixture = {
   loginId: string;
   profileId: string;
@@ -88,13 +101,15 @@ type Dependencies = {
   fetch: typeof fetch;
   randomState: () => string;
   log: (message: string) => void;
+  now?: () => number;
+  session?: { baseUrl: string; credentials: RefreshableSession };
 };
 
 function usage(): string {
   return "Usage: npm run smoke:api -- --base-url <https-url> [--read-only --auth-token-fixture <protected-json-file> [--require-history] [--require-events] [--require-automatch-operation-id] [--require-wager-frozen-read] [--require-wager-storage-version]] [--smoke-sol <wallet>] [--smoke-profile-fixture <protected-json-file>]";
 }
 
-function readAuthTokenFixture(path: string): string {
+function readAuthTokenFixture(path: string): string | RefreshableSession {
   let value: unknown;
   try {
     const stat = statSync(path);
@@ -109,21 +124,34 @@ function readAuthTokenFixture(path: string): string {
     throw new TypeError(usage());
   }
   const fields = value as Record<string, unknown>;
-  const idToken = typeof fields.idToken === "string" ? fields.idToken : "";
+  const accessToken =
+    typeof fields.accessToken === "string" ? fields.accessToken : "";
   if (
-    Object.keys(fields).length !== 1 ||
-    idToken.length > 16_000 ||
-    !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(idToken)
+    accessToken.length > 16_000 ||
+    !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(accessToken)
   ) {
     throw new TypeError(usage());
   }
-  return idToken;
+  if (Object.keys(fields).length === 1) return accessToken;
+  const { refreshToken, ...response } = fields;
+  if (
+    Object.keys(fields).length !== 5 ||
+    !isSessionTokenResponse({ ok: true, ...response }) ||
+    readTokenSubject(accessToken) !== fields.uid ||
+    parseSessionCapability(refreshToken, "refresh")?.sessionId !==
+      fields.sessionId
+  ) {
+    throw new TypeError(usage());
+  }
+  return fields as RefreshableSession;
 }
 
-function readTokenSubject(idToken: string): string {
+function readTokenSubject(accessToken: string): string {
   try {
     const payload = JSON.parse(
-      Buffer.from(idToken.split(".")[1] || "", "base64url").toString("utf8"),
+      Buffer.from(accessToken.split(".")[1] || "", "base64url").toString(
+        "utf8",
+      ),
     ) as unknown;
     const subject =
       payload && typeof payload === "object" && !Array.isArray(payload)
@@ -338,6 +366,7 @@ function normalizeBaseUrl(value: string): string {
 function parseArgs(argv: string[]): Options {
   let baseUrl = "";
   let readOnlyAuthToken: string | null = null;
+  let readOnlyAuthSession: RefreshableSession | undefined;
   let readOnly = false;
   let requireAutomatchOperationId = false;
   let requireWagerFrozenRead = false;
@@ -397,7 +426,13 @@ function parseArgs(argv: string[]): Options {
       baseUrl = normalizeBaseUrl(value);
     } else if (name === "--auth-token-fixture") {
       if (readOnlyAuthToken) throw new TypeError(usage());
-      readOnlyAuthToken = readAuthTokenFixture(value);
+      const authentication = readAuthTokenFixture(value);
+      readOnlyAuthToken =
+        typeof authentication === "string"
+          ? authentication
+          : authentication.accessToken;
+      if (typeof authentication !== "string")
+        readOnlyAuthSession = authentication;
     } else if (name === "--smoke-sol") {
       if (smokeSolOverridden) throw new TypeError(usage());
       smokeSol = value.trim();
@@ -431,6 +466,7 @@ function parseArgs(argv: string[]): Options {
     baseUrl,
     readOnly,
     readOnlyAuthToken,
+    ...(readOnlyAuthSession ? { readOnlyAuthSession } : {}),
     ...(requireAutomatchOperationId
       ? { requireAutomatchOperationId: true }
       : {}),
@@ -558,8 +594,31 @@ async function request(
   expectedStatus: number | readonly number[],
   dependencies: Dependencies,
 ): Promise<{ response: Response; body: string }> {
+  const headers = new Headers(init.headers);
+  const session = dependencies.session;
+  if (
+    session &&
+    headers.has("Authorization") &&
+    new URL(url).origin === session.baseUrl
+  ) {
+    if (
+      session.credentials.accessExpiresAtMs <=
+      (dependencies.now ?? Date.now)() + TOKEN_REFRESH_MARGIN_MS
+    ) {
+      Object.assign(
+        session.credentials,
+        await refreshToolSession(
+          session.baseUrl,
+          session.credentials,
+          dependencies.fetch,
+        ),
+      );
+    }
+    headers.set("Authorization", `Bearer ${session.credentials.accessToken}`);
+  }
   const response = await dependencies.fetch(url, {
     ...init,
+    headers,
     redirect: "manual",
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
@@ -574,40 +633,9 @@ async function request(
   return { response, body };
 }
 
-async function firebaseIdentityRequest(
-  operation: "accounts:delete" | "accounts:signUp",
-  body: Record<string, unknown>,
-  dependencies: Dependencies,
-): Promise<Record<string, unknown>> {
-  const url = new URL(`${FIREBASE_IDENTITY_ROOT}/${operation}`);
-  url.searchParams.set("key", FIREBASE_API_KEY);
-  const response = await dependencies.fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Origin: ORIGIN,
-      Referer: `${ORIGIN}/`,
-    },
-    body: JSON.stringify(body),
-    redirect: "manual",
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  const responseBody = await readBody(response);
-  if (response.status !== 200) {
-    throw new Error(
-      `Firebase anonymous smoke session returned ${response.status}.`,
-    );
-  }
-  const payload = parseJson(responseBody);
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new Error("Firebase anonymous smoke response was invalid.");
-  }
-  return payload as Record<string, unknown>;
-}
-
 async function smokeFrozenProfileWrite(
   baseUrl: string,
-  idToken: string,
+  accessToken: string,
   dependencies: Dependencies,
 ): Promise<void> {
   const result = await request(
@@ -615,7 +643,7 @@ async function smokeFrozenProfileWrite(
     {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${idToken}`,
+        Authorization: `Bearer ${accessToken}`,
         Origin: ORIGIN,
         "Content-Type": "application/json",
       },
@@ -648,7 +676,7 @@ async function smokeFrozenProfileWrite(
 
 async function smokeEventReads(
   baseUrl: string,
-  idToken: string,
+  accessToken: string,
   expectedProfileId: string | null,
   eventFixture: ProfileSmokeFixture["events"] | undefined,
   dependencies: Dependencies,
@@ -659,7 +687,7 @@ async function smokeEventReads(
   const prizesUrl = `${baseUrl}/events/prizes`;
   await smokeEventReadPreflight(url.href, dependencies);
   await smokeEventReadPreflight(prizesUrl, dependencies);
-  const headers = { Authorization: `Bearer ${idToken}`, Origin: ORIGIN };
+  const headers = { Authorization: `Bearer ${accessToken}`, Origin: ORIGIN };
   const snapshot = await request(
     url.href,
     { method: "GET", headers },
@@ -818,14 +846,14 @@ async function smokeEventReads(
 
 async function smokeRequiredAutomatchOperationId(
   baseUrl: string,
-  idToken: string,
+  accessToken: string,
   dependencies: Dependencies,
 ): Promise<void> {
-  await smokeFrozenProfileWrite(baseUrl, idToken, dependencies);
+  await smokeFrozenProfileWrite(baseUrl, accessToken, dependencies);
   const requestInit = {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${idToken}`,
+      Authorization: `Bearer ${accessToken}`,
       Origin: ORIGIN,
       "Content-Type": "application/json",
     },
@@ -880,7 +908,7 @@ async function smokeRequiredAutomatchOperationId(
 
 async function smokeRequiredWagerFrozenRead(
   baseUrl: string,
-  idToken: string,
+  accessToken: string,
   smokeProfile: ProfileSmokeFixture,
   dependencies: Dependencies,
 ): Promise<void> {
@@ -890,7 +918,7 @@ async function smokeRequiredWagerFrozenRead(
     !actorUid ||
     !isSafeFirebaseKey(actorUid) ||
     actorUid === smokeProfile.loginId ||
-    readTokenSubject(idToken) !== smokeProfile.loginId
+    readTokenSubject(accessToken) !== smokeProfile.loginId
   ) {
     throw new Error(
       "Required wager frozen-read smoke requires an authenticated alternate invite fixture.",
@@ -902,7 +930,7 @@ async function smokeRequiredWagerFrozenRead(
       {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${idToken}`,
+          Authorization: `Bearer ${accessToken}`,
           Origin: ORIGIN,
           "Content-Type": "application/json",
         },
@@ -923,10 +951,10 @@ async function smokeRequiredWagerFrozenRead(
 
 async function smokeRequiredWagerStorageVersion(
   baseUrl: string,
-  idToken: string,
+  accessToken: string,
   dependencies: Dependencies,
 ): Promise<void> {
-  await smokeFrozenProfileWrite(baseUrl, idToken, dependencies);
+  await smokeFrozenProfileWrite(baseUrl, accessToken, dependencies);
   for (const path of [
     "/wagers/proposals/send",
     "/wagers/proposals/accept",
@@ -940,7 +968,7 @@ async function smokeRequiredWagerStorageVersion(
         {
           method: "POST",
           headers: {
-            Authorization: `Bearer ${idToken}`,
+            Authorization: `Bearer ${accessToken}`,
             Origin: ORIGIN,
             "Content-Type": "application/json",
             ...(version === null
@@ -982,45 +1010,40 @@ async function smokeAuthenticatedAuthState(
   baseUrl: string,
   smokeProfile: ProfileSmokeFixture,
   dependencies: Dependencies,
-  existingIdToken?: string,
+  existingAccessToken?: string,
   eventFixture?: ProfileSmokeFixture["events"],
   requireAutomatchOperationId = false,
 ): Promise<void> {
-  if (existingIdToken && !smokeProfile.invite) {
+  if (existingAccessToken && !smokeProfile.invite) {
     throw new Error("Read-only smoke requires an alternate invite fixture.");
   }
   if (
-    existingIdToken &&
-    readTokenSubject(existingIdToken) !== smokeProfile.loginId
+    existingAccessToken &&
+    readTokenSubject(existingAccessToken) !== smokeProfile.loginId
   ) {
     throw new Error("Read-only token subject did not match the smoke login.");
   }
-  const session = existingIdToken
+  const session = existingAccessToken
     ? null
-    : await firebaseIdentityRequest(
-        "accounts:signUp",
-        { returnSecureToken: true },
-        dependencies,
-      );
-  const idToken =
-    existingIdToken ||
-    (typeof session?.idToken === "string" ? session.idToken.trim() : "");
-  const localId =
-    typeof session?.localId === "string" ? session.localId.trim() : "";
-  if (!idToken) {
-    throw new Error("Firebase anonymous smoke response was incomplete.");
-  }
+    : await createToolSession(baseUrl, dependencies.fetch);
+  const accessToken = existingAccessToken || session!.accessToken;
+  if (session)
+    dependencies = {
+      ...dependencies,
+      session: { baseUrl, credentials: session },
+    };
   try {
-    if (!existingIdToken && !localId) {
-      throw new Error("Firebase anonymous smoke response was incomplete.");
-    }
     const headers = {
-      Authorization: `Bearer ${idToken}`,
+      Authorization: `Bearer ${accessToken}`,
       Origin: ORIGIN,
       "Content-Type": "application/json",
     };
     if (requireAutomatchOperationId) {
-      await smokeRequiredAutomatchOperationId(baseUrl, idToken, dependencies);
+      await smokeRequiredAutomatchOperationId(
+        baseUrl,
+        accessToken,
+        dependencies,
+      );
     }
     const methods = await request(
       `${baseUrl}/auth/methods`,
@@ -1032,18 +1055,18 @@ async function smokeAuthenticatedAuthState(
     if (
       !isLinkedAuthMethodsResponse(methodsPayload) ||
       methodsPayload.profileId !==
-        (existingIdToken ? smokeProfile.profileId : null)
+        (existingAccessToken ? smokeProfile.profileId : null)
     ) {
       throw new Error("Auth ownership smoke response was invalid.");
     }
     await smokeEventReads(
       baseUrl,
-      idToken,
-      existingIdToken ? smokeProfile.profileId : null,
+      accessToken,
+      existingAccessToken ? smokeProfile.profileId : null,
       eventFixture,
       dependencies,
     );
-    if (!existingIdToken) {
+    if (!existingAccessToken) {
       const intent = await request(
         `${baseUrl}/auth/intents`,
         {
@@ -1179,7 +1202,7 @@ async function smokeAuthenticatedAuthState(
     if (!isReadNavigationGamesResponse(navigationPayload)) {
       throw new Error("Navigation read smoke response was invalid.");
     }
-    const roleFixture = existingIdToken ? smokeProfile.invite : null;
+    const roleFixture = existingAccessToken ? smokeProfile.invite : null;
     const roleInviteId =
       roleFixture?.id || `smoke-${dependencies.randomState()}`;
     const role = await request(
@@ -1220,13 +1243,8 @@ async function smokeAuthenticatedAuthState(
       throw new Error("Invite role smoke response was invalid.");
     }
   } finally {
-    if (!existingIdToken) {
-      await firebaseIdentityRequest(
-        "accounts:delete",
-        { idToken },
-        dependencies,
-      );
-    }
+    if (session)
+      await revokeToolSession(baseUrl, session.revokeToken, dependencies.fetch);
   }
 }
 
@@ -1279,7 +1297,11 @@ async function smokeApi(
 ): Promise<void> {
   if (
     (options.readOnly === true && !options.readOnlyAuthToken) ||
-    (options.readOnly !== true && !!options.readOnlyAuthToken)
+    (options.readOnly !== true && !!options.readOnlyAuthToken) ||
+    (options.readOnlyAuthSession &&
+      (options.readOnly !== true ||
+        options.readOnlyAuthSession.accessToken !== options.readOnlyAuthToken ||
+        options.readOnlyAuthSession.uid !== options.smokeProfile.loginId))
   ) {
     throw new Error("Read-only smoke requires an existing auth token fixture.");
   }
@@ -1328,6 +1350,15 @@ async function smokeApi(
     );
   }
   const nftUrl = `${options.baseUrl}/nfts`;
+  if (options.readOnlyAuthSession) {
+    dependencies = {
+      ...dependencies,
+      session: {
+        baseUrl: options.baseUrl,
+        credentials: { ...options.readOnlyAuthSession },
+      },
+    };
+  }
   const preflight = await request(
     nftUrl,
     {

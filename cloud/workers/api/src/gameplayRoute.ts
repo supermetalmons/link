@@ -52,9 +52,9 @@ import {
   getAuthCorsHeaders,
 } from "./authHttp.ts";
 import {
-  verifyFirebaseRequest,
+  verifySessionRequest,
   type WorkerExecutionContext,
-} from "./firebaseAuth.ts";
+} from "./sessionAuth.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import { MAX_FIREBASE_KEY_BYTES, isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
@@ -190,6 +190,7 @@ export type GameplayRouteDependencies = {
   wagerOutcome?: WagerOutcomeDependencies;
   verifyIdentity?: (
     request: Request,
+    env: Env,
     ctx: WorkerExecutionContext,
   ) => Promise<RequestIdentity>;
 };
@@ -521,8 +522,8 @@ export async function handleGameplayRoute(
       throw new AuthApiFailure(404, "not-found", "not-found");
     }
     const identity = await (
-      dependencies.verifyIdentity || verifyFirebaseRequest
-    )(request, ctx);
+      dependencies.verifyIdentity || verifySessionRequest
+    )(request, env, ctx);
     const repository =
       dependencies.repository || createEventGameplayRepository(env);
     const isWagerMutation =

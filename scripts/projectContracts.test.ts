@@ -170,6 +170,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   ]);
   assert.deepEqual(config.secrets, {
     required: [
+      "SESSION_JWT_KEYS",
       "FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL",
       "FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY",
       "GAMEPLAY_SERVICE_ACCOUNT_EMAIL",
@@ -526,6 +527,7 @@ test("shared package preserves every direct export subpath", () => {
     "./ratings": "./ratings.js",
     "./reactions": "./reactions.js",
     "./rematches": "./rematches.js",
+    "./session-auth": "./session-auth.js",
     "./solana": "./solana.js",
     "./timers": "./timers.js",
     "./usernames": "./usernames.js",

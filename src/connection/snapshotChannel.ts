@@ -2,6 +2,7 @@ import {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
 } from "@mons/shared/reactions";
+import { socketSessionRefreshDelay } from "./socketSession";
 
 export type SnapshotDelivery = {
   source: "http" | "socket";
@@ -37,6 +38,7 @@ export type SnapshotChannelDependencies<
   refreshMs: number;
   createSocket: (url: string, protocols?: string[]) => SnapshotSocket;
   getProtocols?: (forceRefresh: boolean) => Promise<string[]>;
+  getTokenRemainingMs?: (token: string) => number;
   readSnapshot: (signal: AbortSignal) => Promise<TResponse>;
   parseMessage: (value: unknown) => TSnapshot | null;
   captureGeneration?: () => number;
@@ -75,6 +77,8 @@ export class SnapshotChannel<
   private heartbeatTimer: Timer | null = null;
   private responseTimer: Timer | null = null;
   private httpTimer: Timer | null = null;
+  private authTimer: Timer | null = null;
+  private authRefreshAt: number | null = null;
   private connecting = false;
   private healthy = false;
   private connectionGeneration = 0;
@@ -120,7 +124,12 @@ export class SnapshotChannel<
       this.clearTimer("httpTimer");
       return;
     }
-    if (this.socket && this.socket.readyState >= 2) this.disconnect();
+    if (
+      this.socket &&
+      (this.socket.readyState >= 2 ||
+        (this.authRefreshAt !== null && this.now() >= this.authRefreshAt))
+    )
+      this.disconnect();
     if (!this.socket && !this.connecting) this.scheduleReconnect(0);
     this.requestRefresh();
   }
@@ -149,7 +158,7 @@ export class SnapshotChannel<
   }
 
   private now(): number {
-    return this.dependencies.now?.() ?? Date.now();
+    return this.dependencies.now?.() ?? performance.now();
   }
 
   private isCurrent(socket: SnapshotSocket): boolean {
@@ -157,7 +166,12 @@ export class SnapshotChannel<
   }
 
   private clearTimer(
-    key: "reconnectTimer" | "heartbeatTimer" | "responseTimer" | "httpTimer",
+    key:
+      | "reconnectTimer"
+      | "heartbeatTimer"
+      | "responseTimer"
+      | "httpTimer"
+      | "authTimer",
   ): void {
     const timer = this[key];
     if (timer !== null) this.dependencies.clearTimer(timer);
@@ -222,6 +236,8 @@ export class SnapshotChannel<
     this.healthy = false;
     this.clearTimer("heartbeatTimer");
     this.clearTimer("responseTimer");
+    this.clearTimer("authTimer");
+    this.authRefreshAt = null;
     const socket = this.socket;
     this.socket = null;
     if (!socket) return;
@@ -298,6 +314,23 @@ export class SnapshotChannel<
           return;
         }
         this.socket = socket;
+        const authDelay = socketSessionRefreshDelay(
+          protocols,
+          this.dependencies.getTokenRemainingMs,
+        );
+        this.authRefreshAt = authDelay === null ? null : this.now() + authDelay;
+        if (this.authRefreshAt !== null) {
+          this.authTimer = this.dependencies.setTimer(
+            () => {
+              this.authTimer = null;
+              if (!this.isCurrent(socket)) return;
+              this.disconnect();
+              this.scheduleReconnect(0);
+              this.requestRefresh();
+            },
+            Math.max(0, this.authRefreshAt - this.now()),
+          );
+        }
         socket.onmessage = (event) => this.receive(socket, event.data);
         socket.onclose = () => this.fail(socket);
         socket.onerror = () => this.fail(socket);

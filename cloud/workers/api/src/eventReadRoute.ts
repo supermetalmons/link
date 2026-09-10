@@ -21,9 +21,9 @@ import {
   readProfileEventPrizes,
 } from "./eventD1.ts";
 import {
-  verifyFirebaseRequest,
+  verifySessionRequest,
   type WorkerExecutionContext,
-} from "./firebaseAuth.ts";
+} from "./sessionAuth.ts";
 import {
   createGameplayRepository,
   type GameplayRepository,
@@ -45,6 +45,7 @@ type ReadDependencies = {
   >;
   verifyIdentity?: (
     request: Request,
+    env: Env,
     ctx: WorkerExecutionContext,
   ) => Promise<RequestIdentity>;
 };
@@ -156,8 +157,8 @@ export async function handleEventReadRoute(
       throw new AuthApiFailure(405, "method-not-allowed", "method-not-allowed");
     }
     const identity = await (
-      dependencies.verifyIdentity || verifyFirebaseRequest
-    )(request, ctx);
+      dependencies.verifyIdentity || verifySessionRequest
+    )(request, env, ctx);
     const url = new URL(request.url);
     const repository = dependencies.repository || createGameplayRepository(env);
     const requestedBookmark =

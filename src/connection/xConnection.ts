@@ -203,6 +203,13 @@ export const clearConsumedXRedirectResult = (): void => {
   notifyPendingXRedirectResultListeners();
 };
 
+export const clearXSignInTransientState = (): void => {
+  pendingXRedirectResult = null;
+  didConsumeInitialXRedirectSnapshot = true;
+  clearXRedirectParams();
+  notifyPendingXRedirectResultListeners();
+};
+
 export const isXRedirectStartedError = (value: unknown): boolean => {
   if (!value || typeof value !== "object") {
     return false;

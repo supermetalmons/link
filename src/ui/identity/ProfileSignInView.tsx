@@ -10,6 +10,7 @@ import styled from "styled-components";
 import { storage } from "../../utils/storage";
 import { connection } from "../../connection/connection";
 import { ModalOverlay, ModalPopup, ModalTitle } from "../SharedModalComponents";
+import { SessionResetNotice } from "./SessionResetNotice";
 import { didDismissSomethingWithOutsideTapJustNow } from "../controls/outsideTapState";
 import {
   closeMenuAndInfoIfAllowedForEvent,
@@ -52,7 +53,10 @@ import {
   updateShinyCardDisplayName,
 } from "../shinyCardUiPort";
 import { registerProfileTransientUiHandler } from "../uiSession";
-import { performLogoutCleanupAndReload } from "../../session/logoutOrchestrator";
+import {
+  performLogoutCleanupAndReload,
+  reloadAfterLogout,
+} from "../../session/logoutOrchestrator";
 import { useEthereumWalletPicker } from "../EthereumWalletPicker";
 import { primeInjectedEthereumProviderDiscovery } from "../../connection/injectedEthereumProviders";
 import {
@@ -92,7 +96,7 @@ export { signInButtonVisualStyles } from "./signInButtonStyles";
 configureLogoutUiLock({
   setAuthStatus: setAuthStatusGlobally,
   performCleanup: (options) => {
-    void performLogoutCleanupAndReload(options);
+    void performLogoutCleanupAndReload(options).catch(() => undefined);
   },
 });
 
@@ -719,13 +723,19 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
         return;
       }
       didStartFinalReset = true;
-      void performLogoutCleanupAndReload();
+      void performLogoutCleanupAndReload().catch(() => undefined);
     };
     const fallbackTimeoutId = window.setTimeout(() => {
       finalizeLogout();
     }, LOGOUT_SIGN_OUT_FALLBACK_DELAY_MS);
     connection
       .signOut()
+      .then((applied) => {
+        if (!applied) {
+          didStartFinalReset = true;
+          reloadAfterLogout();
+        }
+      })
       .catch(() => {})
       .finally(() => {
         window.clearTimeout(fallbackTimeoutId);
@@ -1251,6 +1261,7 @@ const ProfileSignIn: React.FC<ProfileSignInProps> = ({ authState }) => {
       <CustomConnectButton disabled={isXBusy} onClick={handleXClick}>
         {xText}
       </CustomConnectButton>
+      <SessionResetNotice />
       {inlineAuthError ? (
         <InlineAuthError>{inlineAuthError}</InlineAuthError>
       ) : null}

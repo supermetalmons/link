@@ -28,6 +28,7 @@ type InviteWagersChannelDependencies = Pick<
   SnapshotChannelDependencies<InviteWagersSnapshot, ReadInviteWagersResponse>,
   | "createSocket"
   | "getProtocols"
+  | "getTokenRemainingMs"
   | "isActive"
   | "isOnline"
   | "isVisible"

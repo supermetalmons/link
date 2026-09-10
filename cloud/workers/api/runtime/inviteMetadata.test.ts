@@ -1,3 +1,4 @@
+import { socketTestSessionHeaders } from "../test/socketTestSession.ts";
 import { env } from "cloudflare:workers";
 import {
   evictDurableObject,
@@ -112,6 +113,7 @@ function metadataRequest(
       "X-Mons-Metadata-Revision": "1",
       "X-Mons-Metadata-Protected": "0",
       "X-Mons-Metadata-Authenticated": "0",
+      ...socketTestSessionHeaders(),
       ...overrides,
     },
   });
@@ -482,7 +484,11 @@ describe("durable invite metadata", () => {
           ),
           acceptSocket(
             await room.fetch("https://room.internal/socket", {
-              headers: { Upgrade: "websocket", "X-Mons-Reaction-Role": role },
+              headers: {
+                Upgrade: "websocket",
+                "X-Mons-Reaction-Role": role,
+                ...socketTestSessionHeaders(),
+              },
             }),
           ),
         ]),

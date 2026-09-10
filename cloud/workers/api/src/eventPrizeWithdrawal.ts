@@ -42,9 +42,9 @@ import {
   getAuthCorsHeaders,
 } from "./authHttp.ts";
 import {
-  verifyFirebaseRequest,
+  verifySessionRequest,
   type WorkerExecutionContext,
-} from "./firebaseAuth.ts";
+} from "./sessionAuth.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
@@ -156,6 +156,7 @@ type RouteDependencies = {
   withdrawalStore?: EventPrizeWithdrawalStore;
   verifyIdentity?: (
     request: Request,
+    env: Env,
     ctx: WorkerExecutionContext,
   ) => Promise<RequestIdentity>;
   workflow?: Workflow<EventPrizeWithdrawalWorkflowInput>;
@@ -995,8 +996,8 @@ export async function handleEventPrizeWithdrawalRoute(
     }
     const pathname = new URL(request.url).pathname;
     const identity = await (
-      dependencies.verifyIdentity || verifyFirebaseRequest
-    )(request, ctx);
+      dependencies.verifyIdentity || verifySessionRequest
+    )(request, env, ctx);
     if (pathname === EVENT_PRIZE_WITHDRAWAL_PATH) {
       await assertProfileMutationAllowed(env);
     }

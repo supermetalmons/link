@@ -13,6 +13,7 @@ import {
   type MatchPresentationSnapshot,
 } from "@mons/shared/match-presentation";
 import { getInviteReactionSocketUrl } from "../services/inviteReactionsApi";
+import { socketSessionRefreshDelay } from "./socketSession";
 
 export const REACTION_RECONNECT_DELAYS_MS = [
   500, 1_000, 2_000, 4_000, 8_000, 15_000,
@@ -37,6 +38,7 @@ type InviteReactionChannelDependencies = {
   matchId?: string;
   createSocket: (url: string, protocols?: string[]) => ReactionSocket;
   getProtocols?: (forceRefresh: boolean) => Promise<string[]>;
+  getTokenRemainingMs?: (token: string) => number;
   isActive: () => boolean;
   isOnline: () => boolean;
   canConnect: () => boolean;
@@ -49,6 +51,7 @@ type InviteReactionChannelDependencies = {
   setTimer: (callback: () => void, delayMs: number) => Timer;
   clearTimer: (timer: Timer) => void;
   random: () => number;
+  now?: () => number;
 };
 
 export class InviteReactionChannel {
@@ -59,6 +62,8 @@ export class InviteReactionChannel {
   private reconnectTimer: Timer | null = null;
   private heartbeatTimer: Timer | null = null;
   private responseTimer: Timer | null = null;
+  private authTimer: Timer | null = null;
+  private authRefreshAt: number | null = null;
   private failures = 0;
   private initialized = false;
   private receivedSnapshot = false;
@@ -76,7 +81,12 @@ export class InviteReactionChannel {
 
   refresh(): void {
     if (!this.isActive()) return;
-    if (this.socket && this.socket.readyState >= 2) this.disconnect();
+    if (
+      this.socket &&
+      (this.socket.readyState >= 2 ||
+        (this.authRefreshAt !== null && this.now() >= this.authRefreshAt))
+    )
+      this.disconnect();
     if (!this.socket && !this.connecting) this.scheduleReconnect(0);
   }
 
@@ -96,12 +106,16 @@ export class InviteReactionChannel {
     return !this.signal.aborted && this.dependencies.isActive();
   }
 
+  private now(): number {
+    return this.dependencies.now?.() ?? performance.now();
+  }
+
   private isCurrent(socket: ReactionSocket): boolean {
     return this.isActive() && this.socket === socket;
   }
 
   private clearTimer(
-    key: "reconnectTimer" | "heartbeatTimer" | "responseTimer",
+    key: "reconnectTimer" | "heartbeatTimer" | "responseTimer" | "authTimer",
   ): void {
     const timer = this[key];
     if (timer !== null) this.dependencies.clearTimer(timer);
@@ -116,6 +130,8 @@ export class InviteReactionChannel {
     this.receivedSnapshot = false;
     this.clearTimer("heartbeatTimer");
     this.clearTimer("responseTimer");
+    this.clearTimer("authTimer");
+    this.authRefreshAt = null;
     if (!socket) return;
     socket.onopen = null;
     socket.onmessage = null;
@@ -166,7 +182,7 @@ export class InviteReactionChannel {
     this.connecting = true;
     const generation = ++this.connectionGeneration;
     const forceRefresh = this.connectionAttempts++ > 0;
-    const deadline = Date.now() + REACTION_HEARTBEAT_TIMEOUT_MS;
+    const deadline = this.now() + REACTION_HEARTBEAT_TIMEOUT_MS;
     const isPreparing = () =>
       this.isActive() &&
       this.connecting &&
@@ -178,7 +194,7 @@ export class InviteReactionChannel {
     }, REACTION_HEARTBEAT_TIMEOUT_MS);
     const open = (protocols?: string[]) => {
       if (!isPreparing()) return;
-      if (Date.now() >= deadline) {
+      if (this.now() >= deadline) {
         this.fail(null, new Error("reaction-snapshot-timeout"));
         return;
       }
@@ -206,6 +222,22 @@ export class InviteReactionChannel {
           return;
         }
         this.socket = socket;
+        const authDelay = socketSessionRefreshDelay(
+          protocols,
+          this.dependencies.getTokenRemainingMs,
+        );
+        this.authRefreshAt = authDelay === null ? null : this.now() + authDelay;
+        if (this.authRefreshAt !== null) {
+          this.authTimer = this.dependencies.setTimer(
+            () => {
+              this.authTimer = null;
+              if (!this.isCurrent(socket)) return;
+              this.disconnect();
+              this.scheduleReconnect(0);
+            },
+            Math.max(0, this.authRefreshAt - this.now()),
+          );
+        }
         socket.onmessage = (event) => this.receive(socket, event.data);
         socket.onclose = () =>
           this.fail(socket, new Error("reaction-socket-closed"));

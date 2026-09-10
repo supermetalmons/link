@@ -67,6 +67,18 @@ const STORAGE_KEYS = {
 type StorageKey = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS];
 
 const LOGOUT_PRESERVED_STORAGE_KEYS = new Set<string>([STORAGE_KEYS.IS_MUTED]);
+const SESSION_RESET_PRESERVED_STORAGE_KEYS = new Set<string>([
+  STORAGE_KEYS.IS_MUTED,
+  STORAGE_KEYS.PREFERRED_ASSETS_SET,
+  STORAGE_KEYS.BOARD_STYLE_SET,
+  STORAGE_KEYS.BOARD_COLOR_SET,
+  STORAGE_KEYS.BOARD_COLOR_SETS_BY_THEME,
+  STORAGE_KEYS.IS_EXPERIMENTING_WITH_SPRITES,
+  STORAGE_KEYS.IS_FIRST_LAUNCH,
+  STORAGE_KEYS.ISLAND_MON_TYPE,
+  STORAGE_KEYS.LEADERBOARD_TYPE,
+  STORAGE_KEYS.BOT_AUTOMOVE_MODE,
+]);
 
 export const shouldPreserveStorageKeyOnLogout = (key: string): boolean => {
   return LOGOUT_PRESERVED_STORAGE_KEYS.has(key);
@@ -470,6 +482,24 @@ export const storage = {
 
   setBotAutomoveMode: (value: string): void => {
     setItem(STORAGE_KEYS.BOT_AUTOMOVE_MODE, value);
+  },
+
+  resetSessionIdentity: (): void => {
+    Object.values(STORAGE_KEYS).forEach((key) => {
+      if (!SESSION_RESET_PRESERVED_STORAGE_KEYS.has(key))
+        localStorage.removeItem(key);
+    });
+    for (const store of [localStorage, sessionStorage]) {
+      removeMatchingStorageKeys(
+        store,
+        (key) =>
+          key === "appleIntentByStateV1" ||
+          key.startsWith("firebase:") ||
+          key.startsWith("mons:pending-moves:v1:") ||
+          key.startsWith(PENDING_AUTOMATCH_OPERATION_PREFIX) ||
+          shouldClearExternalUserStorageKey(key),
+      );
+    }
   },
 
   signOut: (): void => {

@@ -1,11 +1,4 @@
-import { initializeApp, FirebaseApp } from "firebase/app";
-import {
-  getAuth,
-  Auth,
-  signInAnonymously,
-  onAuthStateChanged,
-  signOut,
-} from "firebase/auth";
+import { sessionAuth } from "../session/sessionAuth";
 import {
   didFindInviteThatCanBeJoined,
   didReceiveInviteReactionUpdate,
@@ -366,8 +359,7 @@ const summarizeWagerState = (state: MatchWagerState | null) => {
 };
 
 class Connection {
-  private app: FirebaseApp;
-  private auth: Auth;
+  private auth = sessionAuth;
   private eventPollingRegistry: EventPollingRegistry;
 
   private inviteMetadataState: InviteMetadataState | null = null;
@@ -432,7 +424,6 @@ class Connection {
   private currentUid: string | null = "";
   private sessionEpoch = 0;
   private authUnsubscribers = new Set<() => void>();
-  private authBootstrapPromise: Promise<void> | null = null;
   private navigationGamesRefreshListeners = new Set<() => void>();
   private pendingInviteCreation: {
     inviteId: string;
@@ -802,19 +793,6 @@ class Connection {
   }
 
   constructor() {
-    const firebaseConfig = {
-      apiKey:
-        import.meta.env.VITE_MONS_FIREBASE_API_KEY ||
-        "AIzaSyC8Ihr4kDd34z-RXe8XTBCFtFbXebifo5Y",
-      authDomain: "mons-link.firebaseapp.com",
-      projectId: "mons-link",
-      storageBucket: "mons-link.firebasestorage.app",
-      messagingSenderId: "390871694056",
-      appId: "1:390871694056:web:49d0679d38f3045030675d",
-    };
-
-    this.app = initializeApp(firebaseConfig);
-    this.auth = getAuth(this.app);
     if (typeof window !== "undefined") {
       window.addEventListener("online", () => this.refreshMoveDeliveries());
       window.addEventListener("pageshow", () => this.refreshMoveDeliveries());
@@ -1245,7 +1223,7 @@ class Connection {
       if (this.auth.currentUser && this.auth.currentUser.uid) {
         return this.auth.currentUser.uid;
       }
-      await signInAnonymously(this.auth);
+      await this.auth.signInAnonymously();
       const uid = this.auth.currentUser?.uid;
       return uid;
     } catch (error) {
@@ -1254,10 +1232,10 @@ class Connection {
     }
   }
 
-  public async signOut(): Promise<void> {
+  public async signOut(): Promise<boolean> {
     let authSignOutError: unknown = null;
     try {
-      await signOut(this.auth);
+      if (!(await this.auth.signOut())) return false;
     } catch (error) {
       authSignOutError = error;
       console.error("Failed to sign out:", error);
@@ -1279,6 +1257,7 @@ class Connection {
     if (authSignOutError) {
       throw authSignOutError;
     }
+    return true;
   }
 
   public detachFromMatchSession(): void {
@@ -1645,32 +1624,38 @@ class Connection {
     callback: (uid: string | null) => void,
   ): () => void {
     incrementLifecycleCounter("connectionAuthSubscribers");
-    const unsubscribe = onAuthStateChanged(this.auth, (user) => {
-      const newUid = user?.uid ?? null;
-      this.refreshMoveDeliveries();
-      if (
-        this.inviteBootstrapLoginUid &&
-        newUid !== this.inviteBootstrapLoginUid
-      ) {
-        this.beginConnectAttempt();
-      }
-      if (this.activeContext && newUid !== this.activeContext.loginUid) {
-        this.cleanupInviteMetadataObserver();
-        this.cleanupWagerObserver();
-        this.cleanupInviteReactionObserver();
-        this.stopObservingAllMatches();
-        this.pendingWagerMutations.clear();
-        this.wagerSnapshotGeneration += 1;
-      }
-      if (newUid !== this.currentUid) {
-        this.clearEventSyncCaches();
-        if (this.miningFrozenPoller && newUid !== this.miningFrozenLoginUid) {
-          this.setSameProfilePlayerUid(null);
+    const unsubscribe = this.auth.onAuthStateChanged(
+      (user) => {
+        const newUid = user?.uid ?? null;
+        this.refreshMoveDeliveries();
+        if (
+          this.inviteBootstrapLoginUid &&
+          newUid !== this.inviteBootstrapLoginUid
+        ) {
+          this.beginConnectAttempt();
         }
-        this.currentUid = newUid;
-        callback(newUid);
-      }
-    });
+        if (this.activeContext && newUid !== this.activeContext.loginUid) {
+          this.cleanupInviteMetadataObserver();
+          this.cleanupWagerObserver();
+          this.cleanupInviteReactionObserver();
+          this.stopObservingAllMatches();
+          this.pendingWagerMutations.clear();
+          this.wagerSnapshotGeneration += 1;
+        }
+        if (newUid !== this.currentUid) {
+          this.clearEventSyncCaches();
+          if (this.miningFrozenPoller && newUid !== this.miningFrozenLoginUid) {
+            this.setSameProfilePlayerUid(null);
+          }
+          this.currentUid = newUid;
+          callback(newUid);
+        }
+      },
+      (error) => {
+        console.error("Session restoration failed:", error);
+        callback(null);
+      },
+    );
     this.authUnsubscribers.add(unsubscribe);
     return () => {
       if (this.authUnsubscribers.has(unsubscribe)) {
@@ -1690,44 +1675,7 @@ class Connection {
   }
 
   private async waitForInitialAuthState(): Promise<void> {
-    if (this.auth.currentUser) {
-      return;
-    }
-    if (!this.authBootstrapPromise) {
-      this.authBootstrapPromise = new Promise<void>((resolve) => {
-        let settled = false;
-        let timeoutId: ReturnType<typeof setTimeout> | null = null;
-        let unsubscribe: (() => void) | null = null;
-        const finish = () => {
-          if (settled) {
-            return;
-          }
-          settled = true;
-          if (timeoutId) {
-            clearTimeout(timeoutId);
-          }
-          if (unsubscribe) {
-            unsubscribe();
-          }
-          resolve();
-        };
-        unsubscribe = onAuthStateChanged(
-          this.auth,
-          () => {
-            finish();
-          },
-          () => {
-            finish();
-          },
-        );
-        timeoutId = setTimeout(() => {
-          finish();
-        }, 1500);
-      }).finally(() => {
-        this.authBootstrapPromise = null;
-      });
-    }
-    await this.authBootstrapPromise;
+    await this.auth.authStateReady();
   }
 
   private async ensureAuthenticated(): Promise<void> {
@@ -4912,6 +4860,7 @@ class Connection {
     const channel = new InviteMetadataChannel({
       inviteId: context.inviteId,
       createSocket: (url, protocols) => new WebSocket(url, protocols),
+      getTokenRemainingMs: (token) => this.auth.getTokenRemainingMs(token),
       getProtocols: async (forceRefresh) => {
         const tokenProvider = this.getUserBoundAuthTokenProvider(
           context.loginUid,
@@ -5014,6 +4963,7 @@ class Connection {
     const channel = new InviteWagersChannel({
       inviteId: context.inviteId,
       createSocket: (url, protocols) => new WebSocket(url, protocols),
+      getTokenRemainingMs: (token) => this.auth.getTokenRemainingMs(token),
       getProtocols: async (forceRefresh) => {
         const tokenProvider = this.getUserBoundAuthTokenProvider(
           context.loginUid,
@@ -5160,6 +5110,7 @@ class Connection {
       inviteId: context.inviteId,
       matchId: context.matchId,
       createSocket: (url, protocols) => new WebSocket(url, protocols),
+      getTokenRemainingMs: (token) => this.auth.getTokenRemainingMs(token),
       getProtocols: context.canWrite
         ? async (forceRefresh) => {
             const tokenProvider = this.getUserBoundAuthTokenProvider(
@@ -5334,6 +5285,7 @@ class Connection {
         matchId,
         requiredPlayerIds: () => players,
         createSocket: (url, protocols) => new WebSocket(url, protocols),
+        getTokenRemainingMs: (token) => this.auth.getTokenRemainingMs(token),
         getProtocols: async (forceRefresh) => {
           const tokenProvider = this.getUserBoundAuthTokenProvider(
             context.loginUid,

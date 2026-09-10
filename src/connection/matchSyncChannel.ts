@@ -19,6 +19,7 @@ type MatchSyncChannelDependencies = Pick<
   SnapshotChannelDependencies<MatchSyncSnapshot, ReadMatchSyncResponse>,
   | "createSocket"
   | "getProtocols"
+  | "getTokenRemainingMs"
   | "isActive"
   | "isOnline"
   | "isVisible"

@@ -454,3 +454,17 @@ test("navigation history stays on the profile-scoped gameplay API", () => {
   assert.doesNotMatch(cacheSource, /kind:\s*"login"/);
   assert.doesNotMatch(cacheSource, /scopeKey:\s*`login:/);
 });
+
+test("browser session runtime has no Firebase SDK dependency", () => {
+  const importers = sourceFiles
+    .filter((path) =>
+      dependencySpecifiers(path, "mixed").some(
+        (specifier) =>
+          specifier === "firebase" ||
+          specifier.startsWith("firebase/") ||
+          specifier.startsWith("@firebase/"),
+      ),
+    )
+    .map(displayPath);
+  assert.deepEqual(importers, []);
+});

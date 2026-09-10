@@ -6,10 +6,12 @@ import { connection } from "./connection";
 import { handleLoginSuccess } from "./loginSuccess";
 import {
   clearConsumedAppleRedirectResult,
+  clearAppleSignInTransientState,
   consumeAppleRedirectResult,
 } from "./appleConnection";
 import {
   clearConsumedXRedirectResult,
+  clearXSignInTransientState,
   consumeXRedirectResult,
 } from "./xConnection";
 import { formatAuthCooldownErrorMessage } from "./authCooldownErrors";
@@ -28,6 +30,7 @@ import {
 } from "../services/ownProfileMiningHydration";
 import type { AuthState, AuthStatus } from "./authModels";
 import { ProfileApiError } from "../services/profileApi";
+import { sessionAuth } from "../session/sessionAuth";
 
 export type { AuthState, AuthStatus } from "./authModels";
 
@@ -130,20 +133,10 @@ export function setAuthStatusGlobally(status: AuthStatus) {
 }
 
 export function useAuthStatus() {
-  const [authState, setAuthState] = useState<AuthState>(() => {
-    const identity = storage.getAuthIdentity();
-    const storedLoginId = storage.getLoginId("");
-    const storedUsername = storage.getUsername("");
-    if (identity.profileId !== "" && storedLoginId !== "") {
-      updateProfileDisplayName(
-        storedUsername,
-        identity.ethAddress,
-        identity.solAddress,
-      );
-      return { authStatus: "authenticated", ...identity };
-    }
-    return { authStatus: "unauthenticated", ...EMPTY_AUTH_IDENTITY };
-  });
+  const [authState, setAuthState] = useState<AuthState>(() => ({
+    authStatus: "loading",
+    ...EMPTY_AUTH_IDENTITY,
+  }));
   const authChangeVersionRef = useRef(0);
   const setAuthStatus = useCallback((nextAuthStatus: AuthStatus) => {
     if (nextAuthStatus !== "unauthenticated") {
@@ -175,10 +168,34 @@ export function useAuthStatus() {
   }, [setAuthStatus]);
 
   useEffect(() => {
+    let cancelled = false;
+    void sessionAuth.authStateReady().catch((error) => {
+      if (!cancelled)
+        setSignInInlineAuthError(
+          error instanceof Error
+            ? error.message
+            : "Session storage is unavailable. Try again.",
+        );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     let isCancelled = false;
     const completeAppleRedirectSignInIfNeeded = async () => {
       let redirectResult: ReturnType<typeof consumeAppleRedirectResult>;
       try {
+        await sessionAuth.authStateReady();
+        if (isCancelled) return;
+        if (
+          !sessionAuth.restoredSessionId ||
+          sessionAuth.currentUser?.sessionId !== sessionAuth.restoredSessionId
+        ) {
+          clearAppleSignInTransientState();
+          return;
+        }
         redirectResult = consumeAppleRedirectResult();
       } catch (error) {
         console.error("Apple redirect sign in error:", error);
@@ -228,6 +245,15 @@ export function useAuthStatus() {
     const completeXRedirectSignInIfNeeded = async () => {
       let redirectResult: ReturnType<typeof consumeXRedirectResult>;
       try {
+        await sessionAuth.authStateReady();
+        if (isCancelled) return;
+        if (
+          !sessionAuth.restoredSessionId ||
+          sessionAuth.currentUser?.sessionId !== sessionAuth.restoredSessionId
+        ) {
+          clearXSignInTransientState();
+          return;
+        }
         redirectResult = consumeXRedirectResult();
       } catch (error) {
         console.error("X redirect sign in parse error:", error);

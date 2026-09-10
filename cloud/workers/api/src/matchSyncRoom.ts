@@ -13,6 +13,12 @@ import {
   type MatchSyncMetadata,
   type MatchSyncReadResult,
 } from "./matchSync.ts";
+import {
+  readSocketSession,
+  socketSessionCurrent,
+  type SocketSession,
+  type SocketSessions,
+} from "./socketSession.ts";
 
 type MatchSocketAttachment = {
   channel: "matches";
@@ -21,8 +27,7 @@ type MatchSocketAttachment = {
   matchId: string;
   role: "host" | "guest" | "spectator";
   actorUid: string | null;
-  authenticated: boolean;
-};
+} & SocketSession;
 
 type StoredMatch = {
   match_id: string;
@@ -49,6 +54,7 @@ type MatchRoomDependencies = {
     attachment: MatchSocketAttachment,
     metadata: MatchSyncMetadata,
   ) => boolean;
+  socketSessions: SocketSessions;
 };
 
 export class MatchSyncRoom {
@@ -73,7 +79,7 @@ export class MatchSyncRoom {
       const attachment =
         socket.deserializeAttachment() as MatchSocketAttachment;
       return (
-        socket.readyState === WebSocket.OPEN &&
+        this.dependencies.socketSessions.active(socket) &&
         attachment?.channel === "matches" &&
         (matchId === undefined || attachment.matchId === matchId)
       );
@@ -134,11 +140,7 @@ export class MatchSyncRoom {
       if (!this.dependencies.canReceive(attachment, metadata)) {
         socket.close(1008, "Invite access changed");
       } else if (message) {
-        try {
-          socket.send(message);
-        } catch {
-          socket.close(1011, "Match delivery failed");
-        }
+        this.dependencies.socketSessions.send(socket, message);
       }
     }
     return next;
@@ -330,6 +332,8 @@ export class MatchSyncRoom {
         : !isCanonicalFirebaseUid(actorUid))
     )
       return new Response("Invalid match admission", { status: 400 });
+    const session = readSocketSession(request, authenticated === "1");
+    if (!session) return new Response("Session expired", { status: 401 });
     if (this.dependencies.capacityFull(role, ip))
       return new Response("Match room is full", {
         status: 429,
@@ -349,6 +353,8 @@ export class MatchSyncRoom {
         true,
         true,
       );
+      if (session.authenticated)
+        await this.dependencies.scheduleAlarm(session.authExpiresAtMs);
       const latest = await this.read(inviteId, matchId);
       if (latest.status !== "ok")
         return new Response("Match unavailable", {
@@ -359,6 +365,8 @@ export class MatchSyncRoom {
         latest.metadata.passwordProtected !== (protectedHeader === "1")
       )
         return new Response("Match admission changed", { status: 409 });
+      if (!socketSessionCurrent(session))
+        return new Response("Session expired", { status: 401 });
       const attachment: MatchSocketAttachment = {
         channel: "matches",
         schemaVersion: 1,
@@ -366,7 +374,7 @@ export class MatchSyncRoom {
         matchId,
         role,
         actorUid,
-        authenticated: authenticated === "1",
+        ...session,
       };
       if (!this.dependencies.canReceive(attachment, latest.metadata))
         return new Response("Invite access denied", { status: 403 });
@@ -383,7 +391,8 @@ export class MatchSyncRoom {
         ...(role === "spectator" ? [`match-ip:${ip}`] : []),
       ]);
       acceptedSocket = pair[1];
-      pair[1].send(
+      this.dependencies.socketSessions.send(
+        pair[1],
         JSON.stringify({
           schemaVersion: 1,
           type: "snapshot",

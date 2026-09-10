@@ -1,4 +1,10 @@
 import { shouldPreserveStorageKeyOnLogout, storage } from "../utils/storage";
+import { sessionAuth } from "./sessionAuth";
+import { setLogoutRecoveryRequired } from "./logoutRecovery";
+import {
+  SESSION_DATABASE_NAME,
+  SESSION_LOGOUT_INTENT_PREFIX,
+} from "./sessionStore";
 
 const LOGOUT_SYNC_CHANNEL = "mons-link-logout-sync";
 const LOGOUT_SYNC_STORAGE_KEY = "__mons_link_logout_sync__";
@@ -15,11 +21,13 @@ const SAFARI_RELOAD_FALLBACK_DELAY_MS = 180;
 
 type LogoutSignal = {
   id: string;
+  generation: string;
   cleanupMode?: LogoutCleanupMode;
 };
 
 type PendingLogoutWipeMarker = {
   id: string;
+  generation: string;
   createdAtMs: number;
   cleanupMode: LogoutCleanupMode;
 };
@@ -29,6 +37,7 @@ type SignInSignal = {
   tabId: string;
   profileId: string;
   loginId: string;
+  generation: string;
 };
 
 type IndexedDbFactoryWithDatabases = IDBFactory & {
@@ -65,9 +74,16 @@ const parseLogoutSignal = (value: unknown): LogoutSignal | null => {
   try {
     const parsed = JSON.parse(value) as {
       id?: unknown;
+      generation?: unknown;
       cleanupMode?: unknown;
     } | null;
-    if (!parsed || typeof parsed.id !== "string" || parsed.id === "") {
+    if (
+      !parsed ||
+      typeof parsed.id !== "string" ||
+      parsed.id === "" ||
+      typeof parsed.generation !== "string" ||
+      !parsed.generation
+    ) {
       return null;
     }
     const cleanupMode =
@@ -76,7 +92,7 @@ const parseLogoutSignal = (value: unknown): LogoutSignal | null => {
         : parsed.cleanupMode === "fast"
           ? "fast"
           : undefined;
-    return { id: parsed.id, cleanupMode };
+    return { id: parsed.id, generation: parsed.generation, cleanupMode };
   } catch {
     return null;
   }
@@ -92,6 +108,7 @@ const parseSignInSignal = (value: unknown): SignInSignal | null => {
       tabId?: unknown;
       profileId?: unknown;
       loginId?: unknown;
+      generation?: unknown;
     } | null;
     if (
       !parsed ||
@@ -102,7 +119,9 @@ const parseSignInSignal = (value: unknown): SignInSignal | null => {
       typeof parsed.profileId !== "string" ||
       parsed.profileId === "" ||
       typeof parsed.loginId !== "string" ||
-      parsed.loginId === ""
+      parsed.loginId === "" ||
+      typeof parsed.generation !== "string" ||
+      !parsed.generation
     ) {
       return null;
     }
@@ -111,6 +130,7 @@ const parseSignInSignal = (value: unknown): SignInSignal | null => {
       tabId: parsed.tabId,
       profileId: parsed.profileId,
       loginId: parsed.loginId,
+      generation: parsed.generation,
     };
   } catch {
     return null;
@@ -126,10 +146,17 @@ const parsePendingLogoutWipeMarker = (
   try {
     const parsed = JSON.parse(value) as {
       id?: unknown;
+      generation?: unknown;
       createdAtMs?: unknown;
       cleanupMode?: unknown;
     } | null;
-    if (!parsed || typeof parsed.id !== "string" || parsed.id === "") {
+    if (
+      !parsed ||
+      typeof parsed.id !== "string" ||
+      parsed.id === "" ||
+      typeof parsed.generation !== "string" ||
+      !parsed.generation
+    ) {
       return null;
     }
     const createdAtMs =
@@ -143,6 +170,7 @@ const parsePendingLogoutWipeMarker = (
       parsed.cleanupMode === "thorough" ? "thorough" : "fast";
     return {
       id: parsed.id,
+      generation: parsed.generation,
       createdAtMs: Math.floor(createdAtMs),
       cleanupMode,
     };
@@ -166,6 +194,7 @@ const doesPendingLogoutWipeMarkerMatch = (
 ): boolean => {
   return (
     left.id === right.id &&
+    left.generation === right.generation &&
     left.createdAtMs === right.createdAtMs &&
     left.cleanupMode === right.cleanupMode
   );
@@ -219,6 +248,7 @@ const clearPendingLogoutWipeHandledForTab = () => {
 const armPendingLogoutWipe = (
   signalId: string,
   cleanupMode: LogoutCleanupMode,
+  generation: string,
 ) => {
   if (!signalId) {
     return;
@@ -233,6 +263,7 @@ const armPendingLogoutWipe = (
   }
   const payload = JSON.stringify({
     id: signalId,
+    generation,
     createdAtMs: Date.now(),
     cleanupMode,
   });
@@ -271,6 +302,7 @@ const clearLocalStorageForLogout = (options?: {
   getLocalStorageKeys().forEach((key) => {
     if (
       key === LOGOUT_SYNC_STORAGE_KEY ||
+      key.startsWith(SESSION_LOGOUT_INTENT_PREFIX) ||
       shouldPreserveStorageKeyOnLogout(key)
     ) {
       return;
@@ -338,7 +370,10 @@ const clearIndexedDbForLogout = async () => {
     const names = databases
       .map((database) => database.name)
       .filter(
-        (name): name is string => typeof name === "string" && name.length > 0,
+        (name): name is string =>
+          typeof name === "string" &&
+          name.length > 0 &&
+          name !== SESSION_DATABASE_NAME,
       );
     await Promise.all(names.map((name) => deleteIndexedDbDatabase(name)));
   } catch {}
@@ -362,8 +397,14 @@ const waitFor = (ms: number): Promise<void> => {
 
 const clearClientPersistenceForLogout = async (
   cleanupMode: LogoutCleanupMode = "fast",
+  generation: string,
 ) => {
-  clearCriticalClientPersistenceForLogout({ preservePendingLogoutWipe: true });
+  const cleaned = await sessionAuth.runLogoutCleanup(generation, () =>
+    clearCriticalClientPersistenceForLogout({
+      preservePendingLogoutWipe: true,
+    }),
+  );
+  if (!cleaned) return false;
   const heavyCleanupPromise = Promise.all([
     clearIndexedDbForLogout().catch(() => {}),
     clearCacheStorageForLogout().catch(() => {}),
@@ -373,11 +414,20 @@ const clearClientPersistenceForLogout = async (
       ? THOROUGH_PRE_RELOAD_CLEANUP_MS
       : FAST_PRE_RELOAD_CLEANUP_MS;
   await Promise.race([heavyCleanupPromise, waitFor(preReloadBudgetMs)]);
+  return true;
 };
 
 export const enforcePendingLogoutWipeIfNeeded = () => {
   const marker = getPendingLogoutWipeMarker();
   if (!marker) {
+    return;
+  }
+  if (!sessionAuth.generation) return;
+  if (
+    sessionAuth.currentUser &&
+    marker.generation !== sessionAuth.currentUser.generation
+  ) {
+    clearPendingLogoutWipe();
     return;
   }
   if (isPendingLogoutWipeMarkerExpired(marker)) {
@@ -405,7 +455,7 @@ export const clearPendingLogoutWipeAfterSignIn = () => {
   clearPendingLogoutWipe();
 };
 
-const reloadAfterLogout = () => {
+export const reloadAfterLogout = () => {
   window.location.reload();
   window.setTimeout(() => {
     try {
@@ -424,16 +474,29 @@ const handleLogoutSignal = (
   isHandlingSignal = true;
   lastHandledSignalId = signal.id;
   const cleanupMode = signal.cleanupMode ?? "fast";
-  if (options?.source !== "pending-wipe-marker") {
-    armPendingLogoutWipe(signal.id, cleanupMode);
-  }
-  void clearClientPersistenceForLogout(cleanupMode).finally(() => {
+  void (async () => {
+    let superseded = false;
     try {
-      reloadAfterLogout();
+      superseded =
+        !(await sessionAuth.isLogoutRelevant(signal.generation)) ||
+        !(await sessionAuth.signOut(signal.generation));
+      if (superseded) return;
+      if (options?.source !== "pending-wipe-marker") {
+        armPendingLogoutWipe(signal.id, cleanupMode, signal.generation);
+      }
+      await clearClientPersistenceForLogout(cleanupMode, signal.generation);
+    } catch (error) {
+      if (sessionAuth.isStoppedForLogout && !sessionAuth.canReloadAfterLogout)
+        setLogoutRecoveryRequired(true);
+      throw error;
     } finally {
-      isHandlingSignal = false;
+      if (superseded || sessionAuth.canReloadAfterLogout) reloadAfterLogout();
     }
-  });
+  })()
+    .catch(() => undefined)
+    .finally(() => {
+      isHandlingSignal = false;
+    });
 };
 
 const handleSignInSignal = (signal: SignInSignal) => {
@@ -445,7 +508,13 @@ const handleSignInSignal = (signal: SignInSignal) => {
     return;
   }
   lastHandledSignInSignalId = signal.id;
-  reloadAfterLogout();
+  void sessionAuth
+    .reconcile()
+    .then(() => {
+      if (sessionAuth.currentUser?.generation === signal.generation)
+        reloadAfterLogout();
+    })
+    .catch(() => undefined);
 };
 
 const getLogoutBroadcastChannel = (): BroadcastChannel | null => {
@@ -473,8 +542,13 @@ const getSignInBroadcastChannel = (): BroadcastChannel | null => {
 const broadcastLogoutSignal = (
   signalId: string,
   cleanupMode: LogoutCleanupMode,
+  generation: string,
 ) => {
-  const payload = serializeLogoutSignal({ id: signalId, cleanupMode });
+  const payload = serializeLogoutSignal({
+    id: signalId,
+    cleanupMode,
+    generation,
+  });
   try {
     localStorage.setItem(LOGOUT_SYNC_STORAGE_KEY, payload);
   } catch {}
@@ -526,7 +600,11 @@ export const installLogoutSync = () => {
         return;
       }
       handleLogoutSignal(
-        { id: marker.id, cleanupMode: marker.cleanupMode },
+        {
+          id: marker.id,
+          cleanupMode: marker.cleanupMode,
+          generation: marker.generation,
+        },
         { source: "pending-wipe-marker" },
       );
       return;
@@ -574,14 +652,25 @@ export const performLogoutCleanupAndReload = async (options?: {
   cleanupMode?: LogoutCleanupMode;
 }) => {
   const cleanupMode = options?.cleanupMode ?? "fast";
-  const signalId = createSignalId();
-  lastHandledSignalId = signalId;
-  armPendingLogoutWipe(signalId, cleanupMode);
-  broadcastLogoutSignal(signalId, cleanupMode);
+  const generation = sessionAuth.logoutGeneration ?? sessionAuth.generation;
+  if (!generation) return;
+  let superseded = false;
   try {
-    await clearClientPersistenceForLogout(cleanupMode);
+    superseded =
+      !(await sessionAuth.isLogoutRelevant(generation)) ||
+      !(await sessionAuth.signOut(generation));
+    if (superseded) return;
+    const signalId = createSignalId();
+    lastHandledSignalId = signalId;
+    armPendingLogoutWipe(signalId, cleanupMode, generation);
+    broadcastLogoutSignal(signalId, cleanupMode, generation);
+    await clearClientPersistenceForLogout(cleanupMode, generation);
+  } catch (error) {
+    if (sessionAuth.isStoppedForLogout && !sessionAuth.canReloadAfterLogout)
+      setLogoutRecoveryRequired(true);
+    throw error;
   } finally {
-    reloadAfterLogout();
+    if (superseded || sessionAuth.canReloadAfterLogout) reloadAfterLogout();
   }
 };
 
@@ -592,11 +681,14 @@ export const notifyOtherTabsAboutSignIn = (
   if (!profileId || !loginId) {
     return;
   }
+  const generation = sessionAuth.currentUser?.generation;
+  if (!generation) return;
   const signal: SignInSignal = {
     id: createSignalId(),
     tabId,
     profileId,
     loginId,
+    generation,
   };
   lastHandledSignInSignalId = signal.id;
   broadcastSignInSignal(signal);
