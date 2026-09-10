@@ -5,8 +5,7 @@ import {
   dispatchProfileLinkCatchupForOwner,
   MERGE_PRIZE_RECOVERY_PAGE_SIZE,
 } from "../src/authRecovery.ts";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
-import type { EventRtdbClient } from "../src/eventRepository.ts";
+import type { AuthRecoveryPrizeStore } from "../src/eventRepository.ts";
 import type { ProfileLinkCatchupJob } from "../src/profileLinkCatchupD1.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
@@ -213,7 +212,7 @@ test("event prize recovery leaves copying pending while the event lease is busy"
     logger: { error() {}, info() {} },
     now: () => 1_000,
     profileDb,
-    rtdb: {
+    prizeStore: {
       async getPath(path) {
         readPaths.push(path);
         return {
@@ -226,7 +225,9 @@ test("event prize recovery leaves copying pending while the event lease is busy"
           },
         };
       },
-      patchRoot: async () => undefined,
+      async transactStoredProfileEventPrizeWithEventLease() {
+        throw new Error("busy-lease-must-not-write-prizes");
+      },
       async transactPath(path) {
         transactionPaths.push(path);
         return {
@@ -301,7 +302,7 @@ function prizeAssignment(prizeId: string, assignedAtMs: number) {
   };
 }
 
-function recoveryRtdb(input: {
+function recoveryPrizeStore(input: {
   liveAssignment: unknown;
   takeOverOnRefresh?: boolean;
   targetAssignment?: unknown;
@@ -318,7 +319,7 @@ function recoveryRtdb(input: {
   if (input.targetAssignment !== undefined) {
     values.set(targetPath, input.targetAssignment);
   }
-  const transactPath: FirebaseRtdbClient["transactPath"] = async (
+  const transactPath: AuthRecoveryPrizeStore["transactPath"] = async (
     path,
     updater,
   ) => {
@@ -354,8 +355,7 @@ function recoveryRtdb(input: {
       value: decision.value,
     };
   };
-  const client: FirebaseRtdbClient &
-    Pick<EventRtdbClient, "transactStoredProfileEventPrizeWithEventLease"> = {
+  const client: AuthRecoveryPrizeStore = {
     async getPath(path: string) {
       readPaths.push(path);
       if (path === "profileEventPrizes/source-profile") {
@@ -364,7 +364,6 @@ function recoveryRtdb(input: {
       if (path === sourcePath) return input.liveAssignment;
       return values.get(path) ?? null;
     },
-    patchRoot: async () => undefined,
     transactPath,
     transactStoredProfileEventPrizeWithEventLease(
       path,
@@ -395,7 +394,7 @@ function recoveryRtdb(input: {
 
 function prizeRecoveryService(
   profileDb: D1Database,
-  rtdb: ReturnType<typeof recoveryRtdb>["client"],
+  prizeStore: ReturnType<typeof recoveryPrizeStore>["client"],
   profileGamesDb: D1Database = profileDb,
 ) {
   return createAuthRecoveryService(TELEGRAM_TEST_ENV, {
@@ -403,14 +402,14 @@ function prizeRecoveryService(
     logger: { error() {}, info() {} },
     now: () => 1_000,
     profileDb,
-    rtdb,
+    prizeStore,
     withdrawalStore: { get: async () => null },
   });
 }
 
 test("event prize recovery rereads the source entitlement under its lease", async () => {
   const profile = recoveryProfileDb();
-  const rtdb = recoveryRtdb({
+  const prizeStore = recoveryPrizeStore({
     liveAssignment: {
       ...prizeAssignment("1111", 200),
       delivery: { channel: "wallet", revision: 2 },
@@ -420,10 +419,10 @@ test("event prize recovery rereads the source entitlement under its lease", asyn
       profileId: "target-profile",
     },
   });
-  const service = prizeRecoveryService(profile.db, rtdb.client);
+  const service = prizeRecoveryService(profile.db, prizeStore.client);
 
   assert.equal(await service.recoverProfile("target-profile"), false);
-  assert.deepEqual(rtdb.value(rtdb.targetPath), {
+  assert.deepEqual(prizeStore.value(prizeStore.targetPath), {
     eventId: "NN3eRzoZo80",
     profileId: "target-profile",
     place: 1,
@@ -431,8 +430,8 @@ test("event prize recovery rereads the source entitlement under its lease", asyn
     assignedAtMs: 200,
     delivery: { channel: "wallet", revision: 2 },
   });
-  assert.deepEqual(rtdb.guardedPaths, [rtdb.targetPath]);
-  assert.deepEqual(rtdb.readPaths.slice(0, 2), [
+  assert.deepEqual(prizeStore.guardedPaths, [prizeStore.targetPath]);
+  assert.deepEqual(prizeStore.readPaths.slice(0, 2), [
     "profileEventPrizes/source-profile",
     "profileEventPrizes/source-profile/NN3eRzoZo80",
   ]);
@@ -441,16 +440,17 @@ test("event prize recovery rereads the source entitlement under its lease", asyn
 
 test("event prize recovery does not mutate or advance after lease loss", async () => {
   const profile = recoveryProfileDb();
-  const rtdb = recoveryRtdb({
+  const prizeStore = recoveryPrizeStore({
     liveAssignment: prizeAssignment("1092", 100),
     takeOverOnRefresh: true,
   });
-  const service = prizeRecoveryService(profile.db, rtdb.client);
+  const service = prizeRecoveryService(profile.db, prizeStore.client);
 
   assert.equal(await service.recoverProfile("target-profile"), false);
-  assert.equal(rtdb.value(rtdb.targetPath), null);
+  assert.equal(prizeStore.value(prizeStore.targetPath), null);
   assert.equal(
-    rtdb.transactionPaths.filter((path) => path === rtdb.targetPath).length,
+    prizeStore.transactionPaths.filter((path) => path === prizeStore.targetPath)
+      .length,
     0,
   );
   assert.equal(profile.mutationBatches(), 0);
@@ -462,21 +462,21 @@ test("event prize recovery preserves assignments removed from the current catalo
     ...prizeAssignment("retired-prize", 200),
     delivery: { channel: "wallet", revision: 2 },
   };
-  const rtdb = recoveryRtdb({ liveAssignment: assignment });
-  const service = prizeRecoveryService(profile.db, rtdb.client);
+  const prizeStore = recoveryPrizeStore({ liveAssignment: assignment });
+  const service = prizeRecoveryService(profile.db, prizeStore.client);
 
   assert.equal(await service.recoverProfile("target-profile"), false);
-  assert.deepEqual(rtdb.value(rtdb.targetPath), {
+  assert.deepEqual(prizeStore.value(prizeStore.targetPath), {
     ...assignment,
     profileId: "target-profile",
   });
-  assert.deepEqual(rtdb.guardedPaths, [rtdb.targetPath]);
+  assert.deepEqual(prizeStore.guardedPaths, [prizeStore.targetPath]);
   assert.equal(profile.mutationBatches(), 1);
 });
 
 test("event prize recovery rescans late assignments before finalizing", async () => {
   const profile = recoveryProfileDb({ source_phase: "finalize" });
-  const rtdb = recoveryRtdb({
+  const prizeStore = recoveryPrizeStore({
     liveAssignment: prizeAssignment("1092", 200),
   });
   const statement = {
@@ -490,17 +490,21 @@ test("event prize recovery rescans late assignments before finalizing", async ()
   const profileGamesDb = {
     prepare: () => statement,
   } as unknown as D1Database;
-  const service = prizeRecoveryService(profile.db, rtdb.client, profileGamesDb);
+  const service = prizeRecoveryService(
+    profile.db,
+    prizeStore.client,
+    profileGamesDb,
+  );
 
   assert.equal(await service.recoverProfile("target-profile"), false);
-  assert.deepEqual(rtdb.value(rtdb.targetPath), {
+  assert.deepEqual(prizeStore.value(prizeStore.targetPath), {
     eventId: "NN3eRzoZo80",
     profileId: "target-profile",
     place: 1,
     prizeId: "1092",
     assignedAtMs: 200,
   });
-  assert.deepEqual(rtdb.readPaths.slice(0, 2), [
+  assert.deepEqual(prizeStore.readPaths.slice(0, 2), [
     "profileEventPrizes/source-profile",
     "profileEventPrizes/source-profile/NN3eRzoZo80",
   ]);
@@ -515,7 +519,15 @@ test("final prize recovery copies at most one page", async () => {
   const values = new Map<string, unknown>();
   const sourceReads: string[] = [];
   const listQueries: unknown[] = [];
-  const rtdb: FirebaseRtdbClient = {
+  const prizeStore: AuthRecoveryPrizeStore = {
+    transactStoredProfileEventPrizeWithEventLease(
+      path,
+      updater,
+      _guard,
+      signal,
+    ) {
+      return prizeStore.transactPath(path, updater, signal);
+    },
     async getPath(path, query) {
       if (path === "profileEventPrizes/source-profile") {
         listQueries.push(query);
@@ -524,7 +536,6 @@ test("final prize recovery copies at most one page", async () => {
       sourceReads.push(path);
       return {};
     },
-    patchRoot: async () => undefined,
     async transactPath(path, updater) {
       const current = values.get(path) ?? null;
       const decision = updater(current) as
@@ -568,7 +579,7 @@ test("final prize recovery copies at most one page", async () => {
     logger: { error() {}, info() {} },
     now: () => 1_000,
     profileDb: profile.db,
-    rtdb,
+    prizeStore,
     withdrawalStore: { get: async () => null },
   });
 
@@ -590,14 +601,21 @@ test("event prize recovery aborts a stalled mutation before lease expiry", async
   const profile = recoveryProfileDb();
   let lock: unknown = null;
   let targetSignal: AbortSignal | undefined;
-  const rtdb: FirebaseRtdbClient = {
+  const prizeStore: AuthRecoveryPrizeStore = {
+    transactStoredProfileEventPrizeWithEventLease(
+      path,
+      updater,
+      _guard,
+      signal,
+    ) {
+      return prizeStore.transactPath(path, updater, signal);
+    },
     async getPath(path) {
       if (path === "profileEventPrizes/source-profile") {
         return { [eventId]: prizeAssignment("1092", 100) };
       }
       return prizeAssignment("1092", 100);
     },
-    patchRoot: async () => undefined,
     async transactPath(path, updater, signal) {
       if (path === targetPath) {
         targetSignal = signal;
@@ -628,7 +646,7 @@ test("event prize recovery aborts a stalled mutation before lease expiry", async
     now: () => 1_000,
     prizeOperationTimeoutMs: 10,
     profileDb: profile.db,
-    rtdb,
+    prizeStore,
     withdrawalStore: { get: async () => null },
   });
 

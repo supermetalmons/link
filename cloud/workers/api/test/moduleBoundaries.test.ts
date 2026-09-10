@@ -313,3 +313,21 @@ test("the final Worker runtime has no Firestore profile transport or retired bin
     .map((path) => relative(repositoryRoot, path));
   assert.deepEqual(violations, []);
 });
+
+test("canonical auth and recovery cannot construct Firebase clients or access Firebase configuration", () => {
+  for (const file of [
+    "authIdentity.ts",
+    "authIdentityCanonical.ts",
+    "authRecovery.ts",
+  ]) {
+    const source = readFileSync(
+      resolve(import.meta.dirname, "../src", file),
+      "utf8",
+    );
+    assert.doesNotMatch(
+      source,
+      /firebaseRtdb|FirebaseRtdbClient|createEventRtdbClient|FIREBASE_[A-Z_]+|\bfetch\s*\(/,
+      file,
+    );
+  }
+});

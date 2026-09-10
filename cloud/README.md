@@ -115,6 +115,8 @@ Auth intents and X redirect flows are stored in the `mons-link-auth-state` D1 da
 
 `mons-link-auth-recovery` is the permanent recovery Queue. Its consumer applies `authRecoveryJobs` idempotently, and the scheduled sweep re-enqueues stale jobs. Investigate a stuck job without purging the Queue or deleting its job record.
 
+Identity reconciliation removes recovered login UIDs directly from the canonical D1 recovery record. Prize recovery uses a D1-only store for profile-prize reads, event-lock transactions, and lease-guarded stored-prize writes. Auth and recovery do not construct Firebase clients or require Firebase credentials. Recovery preserves retired prize assignments, withdrawal completion checks, bounded pagination, and durable retry progress. Shared Firebase credentials remain configured for the other backend adapters; downstream game projections still read active matches through the gameplay repository.
+
 ## Profile-game projection recovery
 
 Account-link game discovery uses the activated D1 index in `PROFILE_GAMES_DB.login_match_discovery`, controlled by `login_match_discovery_control`. `npm run manage:login-match-discovery -- --status` reports its source selection, capture enforcement, and row counts by resolution/provenance. Current API source rejects inactive control or unavailable D1 reads without a Firebase fallback. The index includes unlinked and deleted-auth login UIDs; profile ownership is still resolved separately from canonical D1 ownership. Missing or ambiguous historical invite mappings remain explicit rows. A different resolved mapping is a conflict that must be reconciled, never overwritten.

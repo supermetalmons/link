@@ -5,7 +5,6 @@ import type {
 } from "@mons/shared/auth";
 import type { AuthStateRepository } from "./authStateD1.ts";
 import { createCanonicalAuthIdentityService } from "./authIdentityCanonical.ts";
-import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
 
 export type AuthIntent = {
   consumedByOpId?: string;
@@ -72,7 +71,6 @@ export type ServiceDependencies = {
   authState?: AuthStateRepository;
   now?: () => number;
   randomInteger?: (maximum: number) => number;
-  rtdb?: FirebaseRtdbClient;
   signal?: AbortSignal;
 };
 

@@ -6,12 +6,8 @@ import {
 import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
 import { MAX_PROFILE_MERGE_TARGET_HOPS } from "../../../functions/profileMergeTargets.js";
 import {
-  type FirebaseRtdbClient,
-  createFirebaseRtdbClient,
-} from "./firebaseRtdb.ts";
-import {
-  createEventRtdbClient,
-  type EventRtdbClient,
+  createD1AuthRecoveryPrizeStore,
+  type AuthRecoveryPrizeStore,
 } from "./eventRepository.ts";
 import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
 import { cleanString, uniqueStoredFirebaseUids } from "./authPolicy.ts";
@@ -76,10 +72,7 @@ type AuthRecoveryDependencies = {
   now?: () => number;
   profileDb?: D1Database;
   prizeOperationTimeoutMs?: number;
-  rtdb?: FirebaseRtdbClient &
-    Partial<
-      Pick<EventRtdbClient, "transactStoredProfileEventPrizeWithEventLease">
-    >;
+  prizeStore?: AuthRecoveryPrizeStore;
   signal?: AbortSignal;
   withdrawalDb?: D1Database;
   withdrawalStore?: Pick<EventPrizeWithdrawalStore, "get">;
@@ -323,6 +316,20 @@ async function mutateCanonicalRecoveryJob(
   return next === null;
 }
 
+export async function removeCanonicalAuthRecoveryLoginUid(
+  db: D1Database,
+  profileId: string,
+  uid: string,
+  now: () => number = Date.now,
+): Promise<void> {
+  await mutateCanonicalRecoveryJob(db, profileId, (job) => {
+    const loginUids = job.loginUids.filter((candidate) => candidate !== uid);
+    return loginUids.length === job.loginUids.length
+      ? undefined
+      : { ...job, loginUids, updatedAtMs: now() };
+  });
+}
+
 export async function enqueuePersistedCanonicalAuthRecovery(
   env: Env,
   db: D1Database,
@@ -344,17 +351,8 @@ function createCanonicalAuthRecoveryService(
   const db = dependencies.profileDb || env.PROFILE_DB;
   const catchupStore =
     dependencies.catchupStore || createProfileLinkCatchupStore(db);
-  const rtdb =
-    dependencies.rtdb ||
-    createEventRtdbClient(
-      env,
-      createFirebaseRtdbClient(env, {
-        credentials: {
-          email: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL,
-          privateKeyPem: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY,
-        },
-      }),
-    );
+  const prizeStore =
+    dependencies.prizeStore || createD1AuthRecoveryPrizeStore(env.EVENT_DB);
   const logger = dependencies.logger || console;
   const now = dependencies.now || Date.now;
   const prizeOperationTimeoutMs =
@@ -372,14 +370,6 @@ function createCanonicalAuthRecoveryService(
     dependencies.withdrawalStore ||
     createD1EventPrizeWithdrawalStore(withdrawalDb, { now });
 
-  const removeLoginUid = (profileId: string, uid: string) =>
-    mutateCanonicalRecoveryJob(db, profileId, (job) => {
-      const loginUids = job.loginUids.filter((candidate) => candidate !== uid);
-      return loginUids.length === job.loginUids.length
-        ? undefined
-        : { ...job, loginUids, updatedAtMs: now() };
-    });
-
   const copyPrize = async (
     sourceProfileId: string,
     targetProfileId: string,
@@ -392,8 +382,10 @@ function createCanonicalAuthRecoveryService(
     const prizeLockManager = createEventLockManagerCore({
       createLockId: () => crypto.randomUUID(),
       now,
-      transactPath: (path, updater) => rtdb.transactPath(path, updater, signal),
-      releaseTransactPath: (path, updater) => rtdb.transactPath(path, updater),
+      transactPath: (path, updater) =>
+        prizeStore.transactPath(path, updater, signal),
+      releaseTransactPath: (path, updater) =>
+        prizeStore.transactPath(path, updater),
     });
     const lock = await prizeLockManager.acquireEventLock(
       eventId,
@@ -402,7 +394,7 @@ function createCanonicalAuthRecoveryService(
     if (!lock) throw new Error("auth-recovery-prize-lock-busy");
     const stopHeartbeat = prizeLockManager.startEventLockHeartbeat(lock);
     try {
-      const sourceAssignment = await rtdb.getPath(
+      const sourceAssignment = await prizeStore.getPath(
         `profileEventPrizes/${sourceProfileId}/${eventId}`,
         undefined,
         signal,
@@ -418,14 +410,12 @@ function createCanonicalAuthRecoveryService(
       const targetPath = `profileEventPrizes/${targetProfileId}/${eventId}`;
       const lockGuard = prizeLockManager.getEventLockGuard(lock);
       const transactTarget = (updater: (current: unknown) => unknown) =>
-        rtdb.transactStoredProfileEventPrizeWithEventLease
-          ? rtdb.transactStoredProfileEventPrizeWithEventLease(
-              targetPath,
-              updater,
-              lockGuard,
-              signal,
-            )
-          : rtdb.transactPath(targetPath, updater, signal);
+        prizeStore.transactStoredProfileEventPrizeWithEventLease(
+          targetPath,
+          updater,
+          lockGuard,
+          signal,
+        );
       const assertPrizeLockOwned = async (): Promise<void> => {
         if (!(await prizeLockManager.isEventLockStillOwned(lock))) {
           throw new Error("auth-recovery-prize-lock-lost");
@@ -478,7 +468,7 @@ function createCanonicalAuthRecoveryService(
             env.PROFILE_GAME_PROJECTION_QUEUE.send(task),
           logger,
         });
-        await removeLoginUid(job.profileId, uid);
+        await removeCanonicalAuthRecoveryLoginUid(db, job.profileId, uid, now);
       } catch {
         logger.error(JSON.stringify({ event: "auth_login_recovery_pending" }));
       }
@@ -496,7 +486,7 @@ function createCanonicalAuthRecoveryService(
   }> => {
     const cursor = prizeCursor || "";
     const source = record(
-      await rtdb.getPath(
+      await prizeStore.getPath(
         `profileEventPrizes/${sourceProfileId}`,
         {
           orderBy: "$key",
@@ -797,7 +787,7 @@ function createCanonicalAuthRecoveryService(
     return !(await readCanonicalProfileAggregate(db, profileId)).recovery;
   };
 
-  return { recoverProfile, removeLoginUid };
+  return { recoverProfile };
 }
 
 export function createAuthRecoveryService(

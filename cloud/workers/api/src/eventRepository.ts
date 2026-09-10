@@ -2,6 +2,7 @@ import { createAutomatchPersistence } from "./automatchPersistence.ts";
 import {
   createFirebaseRtdbClient,
   type FirebaseRtdbClient,
+  type FirebaseRtdbQuery,
   type FirebaseRtdbTransactionResult,
 } from "./firebaseRtdb.ts";
 import {
@@ -87,6 +88,10 @@ export type EventRtdbClient = FirebaseRtdbClient & {
     signal?: AbortSignal,
   ): Promise<FirebaseRtdbTransactionResult>;
 };
+export type AuthRecoveryPrizeStore = Pick<
+  EventRtdbClient,
+  "getPath" | "transactPath" | "transactStoredProfileEventPrizeWithEventLease"
+>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
@@ -590,6 +595,143 @@ export function createEventGameplayRepository(
   };
 }
 
+function transactD1EventPath(
+  db: D1Database,
+  path: string,
+  updater: (current: unknown) => unknown,
+  signal?: AbortSignal,
+  guard?: EventLockGuard,
+  allowStoredProfilePrizeAssignment = false,
+): Promise<FirebaseRtdbTransactionResult> {
+  return withEventWriteAdmission(
+    db,
+    "event-path-transaction",
+    async (admission) => {
+      const storagePath = d1EventPath(path);
+      if (
+        storagePath.startsWith("eventLocks/") ||
+        storagePath.startsWith("eventSyncThrottles/")
+      ) {
+        if (guard || allowStoredProfilePrizeAssignment) {
+          throw new Error("event-lock-guard-path-unsupported");
+        }
+        return transactEventCoordinationPath(
+          db,
+          storagePath,
+          (current) => transactionDecision(updater(current)),
+          { admission },
+        );
+      }
+      const eventLease = guard
+        ? {
+            eventId: guard.eventId,
+            lockId: guard.lockId,
+            ownerUid: guard.ownerUid,
+          }
+        : null;
+      const applyUpdate = (current: unknown) =>
+        transactionDecision(updater(current));
+      if (allowStoredProfilePrizeAssignment) {
+        if (!eventLease) {
+          throw new Error("event-lock-guard-path-unsupported");
+        }
+        return transactStoredProfileEventPrizePath(
+          db,
+          storagePath,
+          applyUpdate,
+          {
+            admission,
+            eventLease,
+            signal,
+          },
+        );
+      }
+      return transactEventOwnedPath(db, storagePath, applyUpdate, {
+        admission,
+        ...(eventLease ? { eventLease } : {}),
+        signal,
+      });
+    },
+  );
+}
+
+async function readProfileEventPrizePage(
+  db: D1Database,
+  path: string,
+  query: FirebaseRtdbQuery,
+): Promise<Record<string, unknown>> {
+  const prizes = (await readEventOwnedPath(db, path)) as Record<
+    string,
+    unknown
+  >;
+  const startAt = typeof query.startAt === "string" ? query.startAt : "";
+  const entries = Object.entries(prizes || {})
+    .filter(([eventId]) => !startAt || eventId >= startAt)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .slice(0, query.limitToFirst || 100);
+  return Object.fromEntries(entries);
+}
+
+function transactStoredProfileEventPrizeWithEventLease(
+  db: D1Database,
+  path: string,
+  updater: (current: unknown) => unknown,
+  guard: EventLockGuard,
+  signal?: AbortSignal,
+): Promise<FirebaseRtdbTransactionResult> {
+  const [root, profileId, eventId, ...nested] = normalizedPath(path).split("/");
+  if (
+    guard.lockRoot !== "eventLocks" ||
+    root !== "profileEventPrizes" ||
+    !profileId ||
+    eventId !== guard.eventId ||
+    nested.length > 0
+  ) {
+    throw new Error("event-lock-guard-path-unsupported");
+  }
+  return transactD1EventPath(db, path, updater, signal, guard, true);
+}
+
+export function createD1AuthRecoveryPrizeStore(
+  db: D1Database,
+): AuthRecoveryPrizeStore {
+  return {
+    async getPath(path, query) {
+      const cleanPath = normalizedPath(path);
+      if (!/^profileEventPrizes\/[^/]+(?:\/[^/]+)?$/.test(cleanPath)) {
+        throw new Error("auth-recovery-prize-path-unsupported");
+      }
+      if (query?.orderBy === "$key" && cleanPath.split("/").length === 2) {
+        return readProfileEventPrizePage(db, cleanPath, query);
+      }
+      if (query && Object.keys(query).length > 0) {
+        throw new Error("event-d1-query-unsupported");
+      }
+      return readEventOwnedPath(db, cleanPath);
+    },
+    async transactPath(path, updater, signal) {
+      if (!/^eventLocks\/[^/]+$/.test(normalizedPath(path))) {
+        throw new Error("auth-recovery-prize-path-unsupported");
+      }
+      return transactD1EventPath(db, path, updater, signal);
+    },
+    transactStoredProfileEventPrizeWithEventLease(
+      path,
+      updater,
+      guard,
+      signal,
+    ) {
+      return transactStoredProfileEventPrizeWithEventLease(
+        db,
+        path,
+        updater,
+        guard,
+        signal,
+      );
+    },
+  };
+}
+
 export function createEventRtdbClient(
   env: Env,
   base: EventRtdbBackend = createAutomatchPersistence(
@@ -598,72 +740,6 @@ export function createEventRtdbClient(
   ).client,
   raw: FirebaseRtdbClient = createEventRawClient(env),
 ): EventRtdbClient {
-  const transactPath = async (
-    path: string,
-    updater: (current: unknown) => unknown,
-    signal?: AbortSignal,
-    guard?: EventLockGuard,
-    allowStoredProfilePrizeAssignment = false,
-  ): Promise<FirebaseRtdbTransactionResult> => {
-    if (isTransitionReceiptPath(path)) {
-      throw new Error("event-transition-receipt-path-reserved");
-    }
-    if (!isEventOwnedPath(path)) {
-      if (isPlayerMatchPath(path)) {
-        throw new Error("event-match-creation-requires-transition");
-      }
-      if (guard || allowStoredProfilePrizeAssignment) {
-        throw new Error("event-lock-guard-path-unsupported");
-      }
-      return base.transactPath(path, updater, signal);
-    }
-    return withEventWriteAdmission(
-      env.EVENT_DB,
-      "event-path-transaction",
-      async (admission) => {
-        const storagePath = d1EventPath(path);
-        if (
-          storagePath.startsWith("eventLocks/") ||
-          storagePath.startsWith("eventSyncThrottles/")
-        ) {
-          if (guard || allowStoredProfilePrizeAssignment) {
-            throw new Error("event-lock-guard-path-unsupported");
-          }
-          return transactEventCoordinationPath(
-            env.EVENT_DB,
-            storagePath,
-            (current) => transactionDecision(updater(current)),
-            { admission },
-          );
-        }
-        const eventLease = guard
-          ? {
-              eventId: guard.eventId,
-              lockId: guard.lockId,
-              ownerUid: guard.ownerUid,
-            }
-          : null;
-        const applyUpdate = (current: unknown) =>
-          transactionDecision(updater(current));
-        if (allowStoredProfilePrizeAssignment) {
-          if (!eventLease) {
-            throw new Error("event-lock-guard-path-unsupported");
-          }
-          return transactStoredProfileEventPrizePath(
-            env.EVENT_DB,
-            storagePath,
-            applyUpdate,
-            { admission, eventLease, signal },
-          );
-        }
-        return transactEventOwnedPath(env.EVENT_DB, storagePath, applyUpdate, {
-          admission,
-          ...(eventLease ? { eventLease } : {}),
-          signal,
-        });
-      },
-    );
-  };
   return {
     async getPath(path, query, signal) {
       if (isTransitionReceiptPath(path)) {
@@ -730,16 +806,7 @@ export function createEventRtdbClient(
         cleanPath.startsWith("profileEventPrizes/") &&
         query?.orderBy === "$key"
       ) {
-        const prizes = (await readEventOwnedPath(
-          env.EVENT_DB,
-          cleanPath,
-        )) as Record<string, unknown>;
-        const startAt = typeof query.startAt === "string" ? query.startAt : "";
-        const entries = Object.entries(prizes || {})
-          .filter(([eventId]) => !startAt || eventId >= startAt)
-          .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-          .slice(0, query.limitToFirst || 100);
-        return Object.fromEntries(entries);
+        return readProfileEventPrizePage(env.EVENT_DB, cleanPath, query);
       }
       if (query && Object.keys(query).length > 0) {
         throw new Error("event-d1-query-unsupported");
@@ -778,26 +845,31 @@ export function createEventRtdbClient(
         },
       );
     },
-    transactPath: (path, updater, signal) =>
-      transactPath(path, updater, signal),
+    async transactPath(path, updater, signal) {
+      if (isTransitionReceiptPath(path)) {
+        throw new Error("event-transition-receipt-path-reserved");
+      }
+      if (!isEventOwnedPath(path)) {
+        if (isPlayerMatchPath(path)) {
+          throw new Error("event-match-creation-requires-transition");
+        }
+        return base.transactPath(path, updater, signal);
+      }
+      return transactD1EventPath(env.EVENT_DB, path, updater, signal);
+    },
     transactStoredProfileEventPrizeWithEventLease(
       path,
       updater,
       guard,
       signal,
     ) {
-      const [root, profileId, eventId, ...nested] =
-        normalizedPath(path).split("/");
-      if (
-        guard.lockRoot !== "eventLocks" ||
-        root !== "profileEventPrizes" ||
-        !profileId ||
-        eventId !== guard.eventId ||
-        nested.length > 0
-      ) {
-        throw new Error("event-lock-guard-path-unsupported");
-      }
-      return transactPath(path, updater, signal, guard, true);
+      return transactStoredProfileEventPrizeWithEventLease(
+        env.EVENT_DB,
+        path,
+        updater,
+        guard,
+        signal,
+      );
     },
   };
 }

@@ -1,7 +1,15 @@
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { USERNAME_MAX_LENGTH } from "@mons/shared/usernames";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { createAuthIdentityService } from "../src/authIdentity.ts";
 import { sweepExpiredCanonicalAuthCooldowns } from "../src/authIdentityCanonical.ts";
 import { createMiningRepository } from "../src/miningRepository.ts";
@@ -20,13 +28,31 @@ import {
 import { createProfileRepository } from "../src/profileRepository.ts";
 import { createUsernameRepository } from "../src/usernameRepository.ts";
 import { createAuthProfileRepository } from "../src/authProfileRepository.ts";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const testBindings = env as Env & {
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
 };
-const d1Env = testBindings;
+const credentialReads: string[] = [];
+const queueTransport = { async send() {} };
+const outboundFetch = vi.fn<typeof fetch>(async () => {
+  throw new Error("auth-must-not-fetch-firebase");
+});
+const d1Env = new Proxy(testBindings, {
+  get(target, property, receiver) {
+    if (
+      property === "PROFILE_GAME_PROJECTION_QUEUE" ||
+      property === "AUTH_RECOVERY_QUEUE"
+    ) {
+      return queueTransport;
+    }
+    if (typeof property === "string" && property.includes("FIREBASE")) {
+      credentialReads.push(property);
+      throw new Error("auth-must-not-read-firebase-configuration");
+    }
+    return Reflect.get(target, property, receiver);
+  },
+});
 
 async function readMergeSourceArchive(
   sourceProfileId: string,
@@ -42,52 +68,6 @@ async function readMergeSourceArchive(
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
-}
-
-function firebaseState() {
-  const rtdbValues = new Map<string, unknown>();
-  const assertActivePath = (path: string): void => {
-    if (/^players\/[^/]+\/profile(?:\/|$)/.test(path)) {
-      throw new Error("retired-profile-copy-access");
-    }
-  };
-  const rtdb: FirebaseRtdbClient = {
-    getPath: async (path) => {
-      assertActivePath(path);
-      return rtdbValues.get(path) ?? null;
-    },
-    patchRoot: async (updates) => {
-      for (const [path, value] of Object.entries(updates)) {
-        assertActivePath(path);
-        if (value === null) rtdbValues.delete(path);
-        else rtdbValues.set(path, value);
-      }
-    },
-    transactPath: async (path, updater) => {
-      assertActivePath(path);
-      const current = rtdbValues.get(path) ?? null;
-      const decision = updater(current) as {
-        commit?: boolean;
-        decision?: string;
-        value?: unknown;
-      };
-      if (decision.commit === false) {
-        return {
-          committed: false,
-          decision: decision.decision,
-          value: current,
-        };
-      }
-      if (decision.value === null) rtdbValues.delete(path);
-      else rtdbValues.set(path, decision.value);
-      return {
-        committed: true,
-        decision: decision.decision,
-        value: decision.value,
-      };
-    },
-  };
-  return { rtdb, rtdbValues };
 }
 
 function beforeMatchingBatch(
@@ -311,18 +291,23 @@ describe("canonical auth and profile runtime", () => {
   });
 
   beforeEach(async () => {
+    credentialReads.length = 0;
+    outboundFetch.mockClear();
+    vi.stubGlobal("fetch", outboundFetch);
     await resetCanonicalRows(testBindings.PROFILE_DB);
   });
 
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    expect(outboundFetch).not.toHaveBeenCalled();
+    expect(credentialReads).toEqual([]);
+  });
+
   it("profile sync preserves pending progress and never recreates completed catch-up work", async () => {
-    const firebase = firebaseState();
     const uid = "retired-profile-copy-login";
-    const profileCopyPath = `players/${uid}/profile`;
-    firebase.rtdbValues.set(profileCopyPath, "retained-legacy-profile");
     const service = createAuthIdentityService(d1Env, {
       now: () => 2_000,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     const linked = await service.linkVerifiedMethod({
       uid,
@@ -361,18 +346,13 @@ describe("canonical auth and profile runtime", () => {
       });
       await expect(store.read(uid)).resolves.toBeNull();
     }
-    expect(firebase.rtdbValues.get(profileCopyPath)).toBe(
-      "retained-legacy-profile",
-    );
   });
 
   it("creates, replays, links, unlinks, and enforces cooldowns in D1", async () => {
-    const firebase = firebaseState();
     let nowMs = 1_000;
     const service = createAuthIdentityService(d1Env, {
       now: () => nowMs,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     const ethInput = {
       uid: "canonical-login",
@@ -539,18 +519,13 @@ describe("canonical auth and profile runtime", () => {
       ethInput.uid,
     );
     expect(profile?.profileId).toBe(first.profileId);
-    expect(firebase.rtdbValues.has(`players/${ethInput.uid}/profile`)).toBe(
-      false,
-    );
   });
 
   it("refreshes Apple and X linked timestamps on re-verification", async () => {
-    const firebase = firebaseState();
     let nowMs = 1_000;
     const service = createAuthIdentityService(d1Env, {
       now: () => nowMs,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     const input = {
       uid: "provider-timestamp-login",
@@ -621,12 +596,10 @@ describe("canonical auth and profile runtime", () => {
   });
 
   it("normalizes canonical auth response strings and owned methods", async () => {
-    const firebase = firebaseState();
     let nowMs = 1_000;
     const service = createAuthIdentityService(d1Env, {
       now: () => nowMs,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     const uid = "normalized-auth-response-login";
     const eth = `0x${"a".repeat(40)}`;
@@ -710,12 +683,10 @@ describe("canonical auth and profile runtime", () => {
   });
 
   it("resolves canonical ownership and catch-up work before returning a successful replay after a merge", async () => {
-    const firebase = firebaseState();
     let nowMs = 1_000;
     const service = createAuthIdentityService(d1Env, {
       now: () => nowMs,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     const xUserId = "successful-replay-x-user";
     const source = await service.linkVerifiedMethod({
@@ -744,7 +715,6 @@ describe("canonical auth and profile runtime", () => {
     const recovery = createAuthRecoveryService(d1Env, {
       now: () => nowMs,
       profileDb: testBindings.PROFILE_DB,
-      rtdb: firebase.rtdb,
     });
     await recovery.recoverProfile(source.profileId);
     await recovery.recoverProfile(target.profileId);
@@ -761,10 +731,6 @@ describe("canonical auth and profile runtime", () => {
         xUsername: "ReplaySource",
       }),
     ).resolves.toMatchObject({ profileId: target.profileId });
-    firebase.rtdbValues.set(
-      "players/successful-replay-source-login/profile",
-      source.profileId,
-    );
 
     await expect(
       service.peekVerifyReplay(
@@ -785,19 +751,14 @@ describe("canonical auth and profile runtime", () => {
         target.profileId,
       ),
     ).resolves.toMatchObject({ profileId: target.profileId });
-    expect(
-      firebase.rtdbValues.get("players/successful-replay-source-login/profile"),
-    ).toBe(source.profileId);
   });
 
   it("heals a missing username before returning a successful X replay", async () => {
-    const firebase = firebaseState();
     const uid = "successful-username-replay-login";
     const opId = "successful-username-replay-operation";
     const service = createAuthIdentityService(d1Env, {
       now: () => 2_500,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     const linked = await service.linkVerifiedMethod({
       uid,
@@ -833,12 +794,10 @@ describe("canonical auth and profile runtime", () => {
   ] as const)(
     "heals a %s social username through profile sync after replay expiry",
     async (kind, invalidUsername) => {
-      const firebase = firebaseState();
       let nowMs = 1_000;
       const service = createAuthIdentityService(d1Env, {
         now: () => nowMs,
         randomInteger: () => 0,
-        rtdb: firebase.rtdb,
       });
       const uid = `${kind}-social-username-login`;
       const opId = `${kind}-social-username-operation`;
@@ -874,11 +833,9 @@ describe("canonical auth and profile runtime", () => {
   );
 
   it("uses a generated username when the X handle exceeds the app limit", async () => {
-    const firebase = firebaseState();
     const service = createAuthIdentityService(d1Env, {
       now: () => 2_500,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     const preferred = "X".repeat(USERNAME_MAX_LENGTH + 1);
 
@@ -907,14 +864,12 @@ describe("canonical auth and profile runtime", () => {
   ] as const)(
     "does not complete a failed replay across concurrent %s",
     async (timing) => {
-      const firebase = firebaseState();
       const uid = "removed-during-replay-login";
       const xUserId = "removed-during-replay-x-user";
       const opId = "removed-during-replay-x-operation";
       const baseService = createAuthIdentityService(d1Env, {
         now: () => 3_000,
         randomInteger: () => 0,
-        rtdb: firebase.rtdb,
       });
       const linked = await baseService.linkVerifiedMethod({
         uid,
@@ -944,7 +899,6 @@ describe("canonical auth and profile runtime", () => {
       const failedService = createAuthIdentityService(racedEnv, {
         now: () => 3_001,
         randomInteger: () => 0,
-        rtdb: firebase.rtdb,
       });
       await expect(
         failedService.linkVerifiedMethod({
@@ -1023,7 +977,6 @@ describe("canonical auth and profile runtime", () => {
       const replayService = createAuthIdentityService(replayEnv, {
         now: () => 3_002,
         randomInteger: () => 0,
-        rtdb: firebase.rtdb,
       });
 
       await expect(
@@ -1061,7 +1014,6 @@ describe("canonical auth and profile runtime", () => {
   );
 
   it("assigns the X username before completing an incomplete replay", async () => {
-    const firebase = firebaseState();
     let ambiguities = 0;
     const racedDb = failAfterMatchingBatch(
       testBindings.PROFILE_DB,
@@ -1083,7 +1035,6 @@ describe("canonical auth and profile runtime", () => {
     const service = createAuthIdentityService(racedEnv, {
       now: () => 4_000,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     const input = {
       uid: "incomplete-x-login",
@@ -1111,11 +1062,9 @@ describe("canonical auth and profile runtime", () => {
     await expect(
       readCanonicalProfileByLogin(testBindings.PROFILE_DB, input.uid),
     ).resolves.toMatchObject({ profile: { username: "RecoverHandle" } });
-    expect(firebase.rtdbValues.has(`players/${input.uid}/profile`)).toBe(false);
   });
 
   it("does not complete an expired incomplete replay", async () => {
-    const firebase = firebaseState();
     let nowMs = 5_000;
     const racedDb = failAfterMatchingBatch(
       testBindings.PROFILE_DB,
@@ -1135,7 +1084,6 @@ describe("canonical auth and profile runtime", () => {
     const service = createAuthIdentityService(racedEnv, {
       now: () => nowMs,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     const input = {
       uid: "expired-incomplete-x-login",
@@ -1163,12 +1111,10 @@ describe("canonical auth and profile runtime", () => {
   });
 
   it("preserves canonical ownership and catch-up work before returning an ambiguous unlink replay", async () => {
-    const firebase = firebaseState();
     const uid = "ambiguous-unlink-login";
     const baseService = createAuthIdentityService(d1Env, {
       now: () => 2_000,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     const linked = await baseService.linkVerifiedMethod({
       uid,
@@ -1190,7 +1136,6 @@ describe("canonical auth and profile runtime", () => {
       requestAura: null,
       opId: "ambiguous-unlink-sol-operation",
     });
-    firebase.rtdbValues.delete(`players/${uid}/profile`);
     let ambiguities = 0;
     const racedDb = failAfterMatchingBatch(
       testBindings.PROFILE_DB,
@@ -1212,7 +1157,6 @@ describe("canonical auth and profile runtime", () => {
     const racedService = createAuthIdentityService(racedEnv, {
       now: () => 3_000,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     await expect(
       racedService.unlinkMethod(uid, "eth", "ambiguous-unlink-operation"),
@@ -1227,15 +1171,12 @@ describe("canonical auth and profile runtime", () => {
         linked.profileId,
       ),
     ).resolves.toMatchObject({ profileId: linked.profileId });
-    expect(firebase.rtdbValues.has(`players/${uid}/profile`)).toBe(false);
   });
 
   it("retries a profile revision change between resolve and aggregate reads", async () => {
-    const firebase = firebaseState();
     const baseService = createAuthIdentityService(d1Env, {
       now: () => 3_000,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     const linked = await baseService.linkVerifiedMethod({
       uid: "auth-revision-login",
@@ -1299,7 +1240,6 @@ describe("canonical auth and profile runtime", () => {
     const racedService = createAuthIdentityService(racedEnv, {
       now: () => 3_001,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     await expect(
       racedService.syncCurrentCallerProfile("auth-revision-login"),
@@ -1312,12 +1252,10 @@ describe("canonical auth and profile runtime", () => {
   });
 
   it("retries auth method reads when the login owner moves during a merge", async () => {
-    const firebase = firebaseState();
     let nowMs = 20_000;
     const service = createAuthIdentityService(d1Env, {
       now: () => nowMs,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     const source = await service.linkVerifiedMethod({
       uid: "auth-move-source-login",
@@ -1343,7 +1281,6 @@ describe("canonical auth and profile runtime", () => {
     const recovery = createAuthRecoveryService(d1Env, {
       now: () => nowMs,
       profileDb: testBindings.PROFILE_DB,
-      rtdb: firebase.rtdb,
     });
     await recovery.recoverProfile(source.profileId);
     await recovery.recoverProfile(target.profileId);
@@ -1378,11 +1315,9 @@ describe("canonical auth and profile runtime", () => {
   });
 
   it("uses canonical readers and guarded profile mutations", async () => {
-    const firebase = firebaseState();
     const service = createAuthIdentityService(d1Env, {
       now: () => 10_000,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     const linked = await service.linkVerifiedMethod({
       uid: "profile-login",
@@ -1476,7 +1411,6 @@ describe("canonical auth and profile runtime", () => {
   });
 
   it("merges canonical owners while preserving the target username", async () => {
-    const firebase = firebaseState();
     let nowMs = 5_000;
     const targetEthRaw = "0xABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD";
     const targetEthNormalized = targetEthRaw.toLowerCase();
@@ -1498,7 +1432,6 @@ describe("canonical auth and profile runtime", () => {
     const dependencies = {
       now: () => nowMs,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     };
     const service = createAuthIdentityService(d1Env, dependencies);
     const target = await service.linkVerifiedMethod({
@@ -1533,7 +1466,6 @@ describe("canonical auth and profile runtime", () => {
     const recovery = createAuthRecoveryService(d1Env, {
       now: () => nowMs,
       profileDb: testBindings.PROFILE_DB,
-      rtdb: firebase.rtdb,
     });
     await expect(recovery.recoverProfile(target.profileId)).resolves.toBe(true);
     await expect(recovery.recoverProfile(source.profileId)).resolves.toBe(true);
@@ -1725,12 +1657,10 @@ describe("canonical auth and profile runtime", () => {
   });
 
   it("keeps chained merge archives separate from active profiles", async () => {
-    const firebase = firebaseState();
     let nowMs = 20_000;
     const service = createAuthIdentityService(d1Env, {
       now: () => nowMs,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     const ethRaw = "0xABCDEF0000000000000000000000000000000000";
     const ethNormalized = ethRaw.toLowerCase();
@@ -2003,11 +1933,10 @@ describe("canonical auth and profile runtime", () => {
           : Reflect.get(target, property, receiver);
       },
     });
-    const firebase = firebaseState();
+
     const service = createAuthIdentityService(observedEnv, {
       now: () => 9_000,
       randomInteger: () => 0,
-      rtdb: firebase.rtdb,
     });
     await expect(
       service.linkVerifiedMethod({

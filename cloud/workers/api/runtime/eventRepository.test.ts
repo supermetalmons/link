@@ -15,7 +15,10 @@ import {
   type EventTransitionIntent,
   type EventWriteAdmission,
 } from "../src/eventD1.ts";
-import { createEventRtdbClient } from "../src/eventRepository.ts";
+import {
+  createD1AuthRecoveryPrizeStore,
+  createEventRtdbClient,
+} from "../src/eventRepository.ts";
 import { prepareInviteEventIntent } from "../src/inviteEventEffects.ts";
 import {
   ensureEventTransitionReceipt,
@@ -842,6 +845,51 @@ describe("hybrid event repository", () => {
         `eventLocks/telegram:${eventId}`,
       ),
     ).toMatchObject({ lockId: "telegram-lock" });
+  });
+
+  it("restricts the D1 auth recovery store to prize reads and event leases", async () => {
+    const store = createD1AuthRecoveryPrizeStore(testEnv.EVENT_DB);
+    const unsupportedPaths = [
+      "players/login/matches/match",
+      `events/${eventId}`,
+      "profileEventPrizes",
+      `profileEventPrizes/profile-one/${eventId}/prizeId`,
+    ];
+    for (const path of unsupportedPaths) {
+      await expect(store.getPath(path)).rejects.toThrow(
+        "auth-recovery-prize-path-unsupported",
+      );
+      await expect(
+        store.transactPath(path, () => ({ value: null })),
+      ).rejects.toThrow("auth-recovery-prize-path-unsupported");
+    }
+    await expect(
+      store.transactPath(`profileEventPrizes/profile-one/${eventId}`, () => ({
+        value: null,
+      })),
+    ).rejects.toThrow("auth-recovery-prize-path-unsupported");
+    await expect(
+      store.getPath("profileEventPrizes/profile-one", { orderBy: "prizeId" }),
+    ).rejects.toThrow("event-d1-query-unsupported");
+    await expect(
+      store.getPath(`profileEventPrizes/profile-one/${eventId}`, {
+        orderBy: "$key",
+      }),
+    ).rejects.toThrow("event-d1-query-unsupported");
+    expect(
+      await store.getPath("profileEventPrizes/profile-one", {
+        orderBy: "$key",
+        limitToFirst: 2,
+      }),
+    ).toEqual({});
+    expect(
+      await store.getPath(`profileEventPrizes/profile-one/${eventId}`),
+    ).toBeNull();
+    expect(
+      await testEnv.EVENT_DB.prepare(
+        "SELECT COUNT(*) AS count FROM event_write_admissions",
+      ).first<number>("count"),
+    ).toBe(0);
   });
 
   it("copies stored retired prizes under an event lease while ordinary writes remain strict", async () => {

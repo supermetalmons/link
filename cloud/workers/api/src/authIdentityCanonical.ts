@@ -28,7 +28,6 @@ import type {
   LinkInput,
   ServiceDependencies,
 } from "./authIdentity.ts";
-import { createFirebaseRtdbClient } from "./firebaseRtdb.ts";
 import {
   cleanString,
   finiteNumber,
@@ -41,7 +40,7 @@ import {
   uniqueStrings,
 } from "./authPolicy.ts";
 import {
-  createAuthRecoveryService,
+  removeCanonicalAuthRecoveryLoginUid,
   dispatchProfileLinkCatchupForOwner,
   enqueuePersistedCanonicalAuthRecovery,
   newAuthRecoveryJob,
@@ -592,21 +591,7 @@ export function createCanonicalAuthIdentityService(
   const db = env.PROFILE_DB;
   const authState =
     dependencies.authState || createAuthStateRepository(env.AUTH_STATE_DB);
-  const rtdb =
-    dependencies.rtdb ||
-    createFirebaseRtdbClient(env, {
-      credentials: {
-        email: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL,
-        privateKeyPem: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY,
-      },
-    });
   const now = dependencies.now || Date.now;
-  const recovery = createAuthRecoveryService(env, {
-    now,
-    profileDb: db,
-    rtdb,
-    signal: dependencies.signal,
-  });
   const randomInteger =
     dependencies.randomInteger ||
     ((maximum: number) => {
@@ -1355,7 +1340,12 @@ export function createCanonicalAuthIdentityService(
           env.PROFILE_GAME_PROJECTION_QUEUE.send(task),
         logger: console,
       });
-      await recovery.removeLoginUid(profile.profile.profileId, uid);
+      await removeCanonicalAuthRecoveryLoginUid(
+        db,
+        profile.profile.profileId,
+        uid,
+        now,
+      );
       const confirmed = await profileByLogin(uid);
       if (
         !confirmed ||
