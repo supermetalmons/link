@@ -14,6 +14,8 @@ const {
   LEGACY_CORE_PRIZES_EVENT_ID,
   PLANET_PEPPA_PRIZES_EVENT_ID,
   RARE_WEITSMANS_PRIZES_EVENT_ID,
+  SHELVES_PRIZES_EVENT_ID,
+  VEHICLE_WAMMIN_PRIZES_EVENT_ID,
   getEventPrizeConfig,
   getEventPrizeDefinition,
   isEventPrizeAssignmentRecord,
@@ -263,6 +265,12 @@ test("maps the compressed event to the supplied prizes in fallback order", () =>
     "3727",
     "3728",
     "3729",
+    "865",
+    "1643",
+    "1213",
+    "1241",
+    "443",
+    "1274",
   ]);
   for (const prize of config.prizes) {
     assert.equal(bs58.default.decode(prize.assetAddress).length, 32);
@@ -498,6 +506,126 @@ test("maps the Planet Peppa event to claimable Core prizes", () => {
     );
   }
 });
+
+for (const {
+  eventId,
+  expectedEventId,
+  collectionName,
+  imageWidth,
+  imageHeight,
+  collectionAddress,
+  prizes,
+  otherEventId,
+  otherPrizeId,
+} of [
+  {
+    eventId: SHELVES_PRIZES_EVENT_ID,
+    expectedEventId: "Q7uRdLXyVKF",
+    collectionName: "Shelves",
+    imageWidth: 1320,
+    imageHeight: 1951,
+    collectionAddress: "BsnjB6xDv2HNenoZiNFDE1uMZVj86ciXwYAX75nUTDSt",
+    prizes: [
+      {
+        id: "865",
+        imageUrl: "https://cdn.lil.org/player/shelves/mid/865.webp",
+        assetAddress: "BuAjut5Ks3Yz3PKsrCjKxsk7B5bDBSJzjXQRTarbwkwD",
+      },
+      {
+        id: "1643",
+        imageUrl: "https://cdn.lil.org/player/shelves/mid/1643.webp",
+        assetAddress: "7H1vUoGWLxpgGqDJsH1Nr1tmQTFQKE7yWnRqyXAuFuvj",
+      },
+      {
+        id: "1213",
+        imageUrl: "https://cdn.lil.org/player/shelves/mid/1213.webp",
+        assetAddress: "2bRdHBoJUtYfYBzpmWbQD5hqkpypjk43i2AiGJwc2UaN",
+      },
+    ],
+    otherEventId: VEHICLE_WAMMIN_PRIZES_EVENT_ID,
+    otherPrizeId: "1241",
+  },
+  {
+    eventId: VEHICLE_WAMMIN_PRIZES_EVENT_ID,
+    expectedEventId: "wjFa2d03Ciu",
+    collectionName: "Vehicle Wammin",
+    imageWidth: 1000,
+    imageHeight: 1000,
+    collectionAddress: "BBkMWyu4RRrNSdjGDV27FGgZZ58o7jfvQY1MrD2iTfs6",
+    prizes: [
+      {
+        id: "1241",
+        imageUrl: "https://cdn.lil.org/player/vehicle_wammin/mid/1241.webp",
+        assetAddress: "5hNqZsyBS4fJvUAyUEmmD1mn23B8D8nQQKJ9b55ZZSJE",
+      },
+      {
+        id: "443",
+        imageUrl: "https://cdn.lil.org/player/vehicle_wammin/mid/443.webp",
+        assetAddress: "Bvr7KVjxHvbx91Y6oXDqZFuVh88Amtwpy5MHPYhvrjX4",
+      },
+      {
+        id: "1274",
+        imageUrl: "https://cdn.lil.org/player/vehicle_wammin/mid/1274.webp",
+        assetAddress: "Fzz4SWp9LDbMv17MmL1KV4odb1DJ4sJys6w91NaWLsEW",
+      },
+    ],
+    otherEventId: SHELVES_PRIZES_EVENT_ID,
+    otherPrizeId: "865",
+  },
+]) {
+  test(`maps the ${collectionName} event to the supplied claimable compressed prizes`, () => {
+    const config = getEventPrizeConfig(eventId);
+    assert.equal(eventId, expectedEventId);
+    assert.equal(config.eventId, eventId);
+    assert.equal(config.collectionName, collectionName);
+    assert.deepEqual(
+      config.prizes.map((prize) => ({
+        id: prize.id,
+        imageUrl: prize.imageUrl,
+        imageWidth: prize.imageWidth,
+        imageHeight: prize.imageHeight,
+        assetAddress: prize.assetAddress,
+        collectionAddress: prize.collectionAddress,
+        standard: prize.standard,
+        claimAvailable: prize.claimAvailable,
+      })),
+      prizes.map((prize) => ({
+        ...prize,
+        imageWidth,
+        imageHeight,
+        collectionAddress,
+        standard: "compressed",
+        claimAvailable: true,
+      })),
+    );
+    assert.equal(isEventPrizeEvent(eventId), true);
+    for (const prize of config.prizes) {
+      assert.equal(bs58.default.decode(prize.assetAddress).length, 32);
+      assert.equal(bs58.default.decode(prize.collectionAddress).length, 32);
+      assert.equal(isEventPrizeId(eventId, prize.id), true);
+      assert.equal(isEventPrizeId(otherEventId, prize.id), false);
+      assert.equal(
+        isToggleEventPrizeSelectionRequest({ eventId, prizeId: prize.id }),
+        true,
+      );
+      assert.equal(
+        isEventPrizeWithdrawalRequest({
+          eventId,
+          prizeId: prize.id,
+          solanaAddress: "11111111111111111111111111111111",
+        }),
+        true,
+      );
+    }
+    for (const prizeId of [otherPrizeId, "unknown", ` ${prizes[0].id} `]) {
+      assert.equal(isEventPrizeId(eventId, prizeId), false);
+      assert.equal(
+        isToggleEventPrizeSelectionRequest({ eventId, prizeId }),
+        false,
+      );
+    }
+  });
+}
 
 test("database rules retire event prize selection access", () => {
   assert.equal(databaseRules.rules.eventPrizeSelections, undefined);

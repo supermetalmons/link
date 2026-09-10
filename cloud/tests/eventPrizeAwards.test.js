@@ -3,6 +3,10 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+  SHELVES_PRIZES_EVENT_ID,
+  VEHICLE_WAMMIN_PRIZES_EVENT_ID,
+} = require("@mons/shared/event-prizes");
+const {
   buildProfileEventPrizeMergeCopies,
   buildEventPrizeAssignments,
   isEventPrizeId,
@@ -207,6 +211,44 @@ test("assigns Planet Peppa prizes by preference with the supplied fallback order
   assert.equal(fallback["3"].prizeId, "3729");
 });
 
+for (const [collectionName, eventId, prizeIds] of [
+  ["Shelves", SHELVES_PRIZES_EVENT_ID, ["865", "1643", "1213"]],
+  ["Vehicle Wammin", VEHICLE_WAMMIN_PRIZES_EVENT_ID, ["1241", "443", "1274"]],
+]) {
+  test(`assigns ${collectionName} prizes by preference with the supplied fallback order`, () => {
+    const [firstPrizeId, secondPrizeId, thirdPrizeId] = prizeIds;
+    const preferred = build(
+      {
+        first: thirdPrizeId,
+        second: firstPrizeId,
+        third: secondPrizeId,
+      },
+      eventId,
+    );
+    assert.equal(preferred["1"].prizeId, thirdPrizeId);
+    assert.equal(preferred["2"].prizeId, firstPrizeId);
+    assert.equal(preferred["3"].prizeId, secondPrizeId);
+
+    const conflict = build(
+      {
+        first: secondPrizeId,
+        second: secondPrizeId,
+        third: thirdPrizeId,
+      },
+      eventId,
+    );
+    assert.equal(conflict["1"].prizeId, secondPrizeId);
+    assert.equal(conflict["2"].prizeId, firstPrizeId);
+    assert.equal(conflict["3"].prizeId, thirdPrizeId);
+
+    const fallback = build({}, eventId);
+    assert.deepEqual(
+      [1, 2, 3].map((place) => fallback[place].prizeId),
+      prizeIds,
+    );
+  });
+}
+
 test("validates prize IDs against their configured event", () => {
   assert.equal(isEventPrizeId("NN3eRzoZo80", "1092"), true);
   assert.equal(isEventPrizeId("NN3eRzoZo80", "1866"), false);
@@ -220,6 +262,10 @@ test("validates prize IDs against their configured event", () => {
   assert.equal(isEventPrizeId("RpPjMNyrJJa", "281"), false);
   assert.equal(isEventPrizeId("z3oj52Iiime", "3727"), true);
   assert.equal(isEventPrizeId("z3oj52Iiime", "217"), false);
+  assert.equal(isEventPrizeId(SHELVES_PRIZES_EVENT_ID, "865"), true);
+  assert.equal(isEventPrizeId(SHELVES_PRIZES_EVENT_ID, "1241"), false);
+  assert.equal(isEventPrizeId(VEHICLE_WAMMIN_PRIZES_EVENT_ID, "1241"), true);
+  assert.equal(isEventPrizeId(VEHICLE_WAMMIN_PRIZES_EVENT_ID, "865"), false);
   assert.deepEqual(build({ first: "1092" }, "unsupported"), {});
 });
 

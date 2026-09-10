@@ -69,6 +69,10 @@ import {
   isMatchSyncPath,
   type MatchSyncRouteDependencies,
 } from "./matchSyncRoute.ts";
+import {
+  handleMatchPresentationMigrationRoute,
+  MATCH_PRESENTATION_MIGRATION_PATH,
+} from "./matchPresentationMigrationRoute.ts";
 
 const RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
 
@@ -103,6 +107,9 @@ export async function handleRequest(
   ctx?: WorkerExecutionContext,
 ): Promise<Response> {
   const pathname = new URL(request.url).pathname;
+  if (pathname === MATCH_PRESENTATION_MIGRATION_PATH) {
+    return handleMatchPresentationMigrationRoute(request, env);
+  }
   if (SESSION_PATHS.includes(pathname)) {
     return handleSessionRoute(request, env, dependencyOverrides.session);
   }

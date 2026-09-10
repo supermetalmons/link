@@ -29,9 +29,10 @@ import type { InviteReactions } from "./inviteReactions.ts";
 import { socketSessionHeaders } from "./socketSession.ts";
 import {
   isPresentationMatchId,
+  readMatchPresentationSnapshot,
   readPresentationInvite,
-  readPresentationSeeds,
   requirePresentationPair,
+  type MatchPresentationReadDependencies,
 } from "./matchPresentationAccess.ts";
 
 const REACTION_ROUTE_PATTERN = /^\/invites\/([^/]+)\/reactions(\/socket)?$/;
@@ -108,17 +109,18 @@ async function reactionRateLimit(
       );
 }
 
-export type InviteReactionRouteDependencies = {
-  repository?: GameplayRepository;
-  room?: Pick<InviteReactions, "fetch" | "publish"> &
-    Partial<Pick<InviteReactions, "ensurePresentations">>;
-  verifyIdentity?: (
-    request: Request,
-    env: Env,
-    ctx: WorkerExecutionContext,
-  ) => Promise<SessionIdentity>;
-  logFailure?: () => void;
-};
+export type InviteReactionRouteDependencies =
+  MatchPresentationReadDependencies & {
+    repository?: GameplayRepository;
+    room?: Pick<InviteReactions, "fetch" | "publish"> &
+      Partial<Pick<InviteReactions, "ensurePresentations">>;
+    verifyIdentity?: (
+      request: Request,
+      env: Env,
+      ctx: WorkerExecutionContext,
+    ) => Promise<SessionIdentity>;
+    logFailure?: () => void;
+  };
 
 export function isInviteReactionPath(pathname: string): boolean {
   return REACTION_ROUTE_PATTERN.test(pathname);
@@ -263,18 +265,26 @@ export async function handleInviteReactionRoute(
         await requirePairedInvite(repository, route.inviteId);
       const room =
         dependencies.room || env.INVITE_REACTIONS.getByName(route.inviteId);
+      let presentationHeaders: Record<string, string> = {};
       if (route.matchId) {
         const invite = await readPresentationInvite(repository, route.inviteId);
         requirePresentationPair(invite);
-        const seeds = await readPresentationSeeds(
+        const { canonical } = await readMatchPresentationSnapshot(
+          env,
           repository,
           route.inviteId,
           route.matchId,
           invite,
+          { ...dependencies, room },
         );
-        if (!room.ensurePresentations)
-          throw new TypeError("presentation-room-unavailable");
-        await room.ensurePresentations(route.matchId, seeds);
+        if (canonical) {
+          presentationHeaders = {
+            "X-Mons-Presentation-Canonical": "1",
+            "X-Mons-Presentation-Actors": encodeURIComponent(
+              JSON.stringify([invite.hostId, invite.guestId]),
+            ),
+          };
+        }
       }
       return await room.fetch(
         new Request("https://reactions.internal/socket", {
@@ -283,6 +293,7 @@ export async function handleInviteReactionRoute(
             "X-Mons-Reaction-Role": role,
             "X-Mons-Reaction-IP": ip,
             ...socketSessionHeaders(identity),
+            ...presentationHeaders,
             ...(credentials.protocol
               ? { "Sec-WebSocket-Protocol": credentials.protocol }
               : {}),

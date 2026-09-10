@@ -10,6 +10,7 @@ import {
 } from "../src/automatch.ts";
 import { cancelAutomatch } from "../src/gameplayRoute.ts";
 import {
+  createManualInvite,
   endRematchSeries,
   ensureParticipantMatch,
   joinInvite,
@@ -23,6 +24,10 @@ import {
 import { createGameSessionMutationLockStore } from "../src/gameplayCoordinationD1.ts";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type {
+  MatchPresentationCreation,
+  PrepareMatchPresentations,
+} from "../src/matchPresentationRegistry.ts";
 import { settleAutomatchProfileGameProjectionOutbox } from "../src/profileGameProjection.ts";
 import type {
   ProfileOwnershipQuery,
@@ -164,8 +169,15 @@ function ownership(query: ProfileOwnershipQuery): ProfileOwnershipSnapshot {
   };
 }
 
-function client(firebase: LiveFirebase, uid: string, database = db) {
-  const persistence = createAutomatchPersistence(database, firebase);
+function client(
+  firebase: LiveFirebase,
+  uid: string,
+  database = db,
+  prepareMatchPresentations?: PrepareMatchPresentations,
+) {
+  const persistence = createAutomatchPersistence(database, firebase, {
+    prepareMatchPresentations,
+  });
   const repository: GameplayRepository = {
     automatchPersistence: persistence,
     getRtdbPath: persistence.client.getPath,
@@ -287,6 +299,141 @@ describe("automatch lifecycle through D1 persistence", () => {
       db.prepare("DELETE FROM game_session_projection_outbox"),
       db.prepare("DELETE FROM game_session_mutation_receipts"),
     ]);
+  });
+
+  it("prepares only actual player creations across manual invites, joins, rematches, ensures and automatch", async () => {
+    const firebase = new LiveFirebase();
+    const prepared: MatchPresentationCreation[] = [];
+    const prepare: PrepareMatchPresentations = async (creations) => {
+      for (const creation of creations) {
+        expect(
+          firebase.read(
+            `players/${creation.actorUid}/matches/${creation.matchId}`,
+          ),
+        ).toMatchObject({
+          ...(creation.actorUid.startsWith("auto-")
+            ? { emojiId: "", aura: null }
+            : { emojiId: creation.emojiId, aura: creation.aura }),
+          sessionCreation: creation.sourceId,
+        });
+      }
+      prepared.push(...structuredClone(creations));
+      return [];
+    };
+    const host = client(firebase, "host", db, prepare);
+    const guest = client(firebase, "guest", db, prepare);
+    const createRequest = {
+      inviteId: "appearance-manual",
+      operationId: crypto.randomUUID(),
+      emojiId: 7,
+      aura: "host-aura",
+    };
+    const created = await createManualInvite(
+      host.identity,
+      createRequest,
+      host.repository,
+      host.dependencies,
+    );
+    expect(
+      await createManualInvite(
+        host.identity,
+        createRequest,
+        host.repository,
+        host.dependencies,
+      ),
+    ).toEqual(created);
+    await joinInvite(
+      guest.identity,
+      {
+        ...createRequest,
+        operationId: crypto.randomUUID(),
+        emojiId: 8,
+        aura: "guest-aura",
+      },
+      guest.repository,
+      guest.dependencies,
+    );
+    const rematch = await proposeRematch(
+      host.identity,
+      { ...createRequest, operationId: crypto.randomUUID(), emojiId: 9 },
+      host.repository,
+      host.dependencies,
+    );
+    await ensureParticipantMatch(
+      guest.identity,
+      {
+        ...createRequest,
+        operationId: crypto.randomUUID(),
+        matchId: rematch.matchId,
+        emojiId: 10,
+        aura: "guest-rematch",
+      },
+      guest.repository,
+      guest.dependencies,
+    );
+    await proposeRematch(
+      guest.identity,
+      { ...createRequest, operationId: crypto.randomUUID(), emojiId: 11 },
+      guest.repository,
+      guest.dependencies,
+    );
+    const queued = await start(client(firebase, "auto-host", db, prepare));
+    if (!queued.ok) throw new Error("expected-automatch-queue");
+    await start(client(firebase, "auto-guest", db, prepare));
+    expect(
+      prepared.map(({ inviteId, matchId, actorUid, emojiId, aura }) => ({
+        inviteId,
+        matchId,
+        actorUid,
+        emojiId,
+        aura,
+      })),
+    ).toEqual([
+      {
+        inviteId: created.inviteId,
+        matchId: created.matchId,
+        actorUid: "host",
+        emojiId: 7,
+        aura: "host-aura",
+      },
+      {
+        inviteId: created.inviteId,
+        matchId: created.matchId,
+        actorUid: "guest",
+        emojiId: 8,
+        aura: "guest-aura",
+      },
+      {
+        inviteId: created.inviteId,
+        matchId: rematch.matchId,
+        actorUid: "host",
+        emojiId: 9,
+        aura: "host-aura",
+      },
+      {
+        inviteId: created.inviteId,
+        matchId: rematch.matchId,
+        actorUid: "guest",
+        emojiId: 10,
+        aura: "guest-rematch",
+      },
+      {
+        inviteId: queued.inviteId,
+        matchId: queued.inviteId,
+        actorUid: "auto-host",
+        emojiId: 0,
+        aura: "",
+      },
+      {
+        inviteId: queued.inviteId,
+        matchId: queued.inviteId,
+        actorUid: "auto-guest",
+        emojiId: 0,
+        aura: "",
+      },
+    ]);
+    expect(new Set(prepared.map((creation) => creation.sourceId)).size).toBe(6);
+    await assertSettled();
   });
 
   it("starts, replays, matches and preserves the host's live record", async () => {

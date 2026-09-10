@@ -4,6 +4,7 @@ import {
 } from "./firebaseRtdb.ts";
 import { createWagerStateRtdbClient } from "./wagerStateRepository.ts";
 import { createAutomatchPersistence } from "./automatchPersistence.ts";
+import { prepareCreatedMatchPresentations } from "./matchPresentationRegistry.ts";
 
 const INVITE_SOURCE_CLIENT_TTL_MS = 5 * 60 * 1_000;
 
@@ -31,6 +32,8 @@ export function createInviteSourceReader(
         env.PROFILE_DB,
         createAutomatchPersistence(env.PROFILE_GAMES_DB, createClient(), {
           now,
+          prepareMatchPresentations: (creations) =>
+            prepareCreatedMatchPresentations(env, creations),
         }).client,
         { now },
       );

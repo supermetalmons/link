@@ -402,6 +402,59 @@ describe("D1-authoritative profile game projection ownership", () => {
     expect(guestSeed).toEqual({ emojiId: 1, aura: "" });
   });
 
+  it("canonical presentation projection never reads Firebase cosmetic copies", async () => {
+    const inviteId = "canonical-presentation-projection";
+    const hostLoginId = "canonical-presentation-host";
+    const guestLoginId = "canonical-presentation-guest";
+    const hostProfileId = "canonical-presentation-profile";
+    await insertProfileOwner(hostProfileId, hostLoginId);
+    const reads: string[] = [];
+    const runtime = createProfileGameProjectionRuntime(testEnv, {
+      readPresentationControl: async () => ({ phase: "durable" }),
+      readRegisteredPresentations: async (_env, selectedInviteId, matchId) => {
+        expect(selectedInviteId).toBe(inviteId);
+        return {
+          matchId,
+          players: {
+            [guestLoginId]: {
+              matchId,
+              actorUid: guestLoginId,
+              emojiId: 8,
+              aura: "rainbow",
+              revision: 4,
+            },
+          },
+        };
+      },
+      rtdb: {
+        async getRtdbPath(path) {
+          reads.push(path);
+          if (path === `invites/${inviteId}`)
+            return {
+              hostId: hostLoginId,
+              guestId: guestLoginId,
+              hostRematches: "x",
+              guestRematches: "x",
+            };
+          if (path === `automatch/${inviteId}`) return null;
+          throw new Error(`unexpected-firebase-read:${path}`);
+        },
+      },
+      wait: async () => undefined,
+    });
+    await runtime.recomputeInviteProjection(inviteId, "rating-completed", {
+      eventTimestampMs: 200,
+    });
+    await expect(
+      getProfileGameProjection(
+        testEnv.PROFILE_GAMES_DB,
+        hostProfileId,
+        inviteId,
+      ),
+    ).resolves.toMatchObject({ data: { opponentEmoji: 8 } });
+    expect(reads.some((path) => path.startsWith("players/"))).toBe(false);
+  });
+
   it("ends event games from canonical D1 ratings and ignores Firebase markers", async () => {
     const hostLoginId = "rating-projection-host-login";
     const guestLoginId = "rating-projection-guest-login";

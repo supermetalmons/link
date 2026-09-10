@@ -23,25 +23,27 @@ import { readBoundedJson } from "./http.ts";
 import type { InviteReactions } from "./inviteReactions.ts";
 import {
   isPresentationMatchId,
+  readMatchPresentationSnapshot,
   readPresentationInvite,
-  readPresentationSeeds,
   requireCurrentPresentationMatch,
   requirePresentationPair,
+  type MatchPresentationReadDependencies,
 } from "./matchPresentationAccess.ts";
 
 const PRESENTATION_ROUTE_PATTERN =
   /^\/invites\/([^/]+)\/matches\/([^/]+)\/presentation$/;
 
-export type MatchPresentationRouteDependencies = {
-  repository?: GameplayRepository;
-  room?: Pick<InviteReactions, "ensurePresentations" | "updatePresentation">;
-  verifyIdentity?: (
-    request: Request,
-    env: Env,
-    ctx: WorkerExecutionContext,
-  ) => Promise<SessionIdentity>;
-  logFailure?: () => void;
-};
+export type MatchPresentationRouteDependencies =
+  MatchPresentationReadDependencies & {
+    repository?: GameplayRepository;
+    room?: Pick<InviteReactions, "ensurePresentations" | "updatePresentation">;
+    verifyIdentity?: (
+      request: Request,
+      env: Env,
+      ctx: WorkerExecutionContext,
+    ) => Promise<SessionIdentity>;
+    logFailure?: () => void;
+  };
 
 export function isMatchPresentationPath(pathname: string): boolean {
   return PRESENTATION_ROUTE_PATTERN.test(pathname);
@@ -152,23 +154,21 @@ export async function handleMatchPresentationRoute(
           "invalid-presentation",
         );
     }
-    const seeds = await readPresentationSeeds(
+    const room = dependencies.room || env.INVITE_REACTIONS.getByName(inviteId);
+    const { snapshot } = await readMatchPresentationSnapshot(
+      env,
       repository,
       inviteId,
       matchId,
       invite,
+      {
+        ...dependencies,
+        room,
+        ...(request.method === "POST" && actorUid
+          ? { requiredActorUid: actorUid }
+          : {}),
+      },
     );
-    if (
-      request.method === "POST" &&
-      (!actorUid || !Object.hasOwn(seeds, actorUid))
-    )
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        "actor-match-not-found",
-      );
-    const room = dependencies.room || env.INVITE_REACTIONS.getByName(inviteId);
-    const snapshot = await room.ensurePresentations(matchId, seeds);
     if (request.method === "GET")
       return authJsonResponse(
         { ok: true, presentation: snapshot },

@@ -111,6 +111,7 @@ function setup(
   const identity = socketTestIdentity(caller);
   const dependencies: InviteReactionRouteDependencies = {
     repository,
+    readPresentationControl: async () => ({ phase: "legacy" }),
     verifyIdentity: async (incoming) => {
       calls.auth++;
       verifiedRequests.push(incoming);
@@ -758,4 +759,83 @@ test("v2 rejects missing, extra, unrelated or unavailable match selections and v
     assert.equal(response.status, expected);
   }
   assert.equal(state.calls.sockets, 0);
+});
+
+test("durable v2 admission includes an ensured registered guest before a rematch proposal without Firebase reads", async () => {
+  const state = setup({
+    hostId: "host-login",
+    guestId: "guest-login",
+    hostRematches: "1",
+    guestRematches: "",
+  });
+  state.dependencies.readPresentationControl = async () => ({
+    phase: "durable",
+  });
+  state.dependencies.readRegisteredPresentations = async (
+    _env,
+    _inviteId,
+    matchId,
+  ) => ({
+    matchId,
+    players: Object.fromEntries(
+      ["host-login", "guest-login"].map((actorUid) => [
+        actorUid,
+        { matchId, actorUid, emojiId: 1000, aura: "rainbow", revision: 3 },
+      ]),
+    ),
+  });
+  state.dependencies.room!.ensurePresentations = async () => {
+    throw new Error("unexpected-legacy-bootstrap");
+  };
+  const response = await handleInviteReactionRoute(
+    request(true, {
+      path: "/invites/invite-one/reactions/socket?matchId=invite-one1",
+      headers: { "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL_V2 },
+    }),
+    state.env,
+    ctx,
+    state.dependencies,
+  );
+  assert.equal(response.status, 200);
+  assert.equal(
+    state.socketRequests[0].headers.get("X-Mons-Presentation-Canonical"),
+    "1",
+  );
+  assert.deepEqual(
+    JSON.parse(
+      decodeURIComponent(
+        state.socketRequests[0].headers.get("X-Mons-Presentation-Actors")!,
+      ),
+    ),
+    ["host-login", "guest-login"],
+  );
+  assert.equal(
+    state.calls.reads.some((path) => path.startsWith("players/")),
+    false,
+  );
+});
+
+test("durable v2 admission fails before upgrade when registered appearance is unavailable", async () => {
+  const state = setup();
+  state.dependencies.readPresentationControl = async () => ({
+    phase: "durable",
+  });
+  state.dependencies.readRegisteredPresentations = async () => {
+    throw new Error("registered-presentation-missing");
+  };
+  const response = await handleInviteReactionRoute(
+    request(true, {
+      path: "/invites/invite-one/reactions/socket?matchId=invite-one",
+      headers: { "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL_V2 },
+    }),
+    state.env,
+    ctx,
+    state.dependencies,
+  );
+  assert.equal(response.status, 503);
+  assert.equal(state.calls.sockets, 0);
+  assert.equal(
+    state.calls.reads.some((path) => path.startsWith("players/")),
+    false,
+  );
 });

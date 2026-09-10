@@ -85,7 +85,9 @@ const profileGamesDb = {
       : query.includes("automatch_runtime_control") ||
           query.includes("automatch_write_admissions")
         ? automatchStatement(query)
-        : d1Statement,
+        : query.includes("match_presentation_control")
+          ? presentationControlStatement
+          : d1Statement,
   withSession: (): D1DatabaseSession => ({
     prepare: (query: string): D1PreparedStatement =>
       profileGamesDb.prepare(query),
@@ -93,6 +95,25 @@ const profileGamesDb = {
     getBookmark: () => null,
   }),
 } satisfies D1Database;
+
+const presentationControlStatement: D1PreparedStatement = {
+  all: d1Statement.all,
+  raw: d1Statement.raw,
+  run: d1Statement.run,
+  bind: () => presentationControlStatement,
+  first: async <T>() =>
+    ({
+      phase: "legacy",
+      candidate_version_id: null,
+      migration_id: null,
+      capture_started_at_ms: null,
+      source_digest: null,
+      source_count: null,
+      verification_digest: null,
+      verified_at_ms: null,
+      activated_at_ms: null,
+    }) as T,
+};
 
 function inviteSourceStatement(
   query: string,
@@ -266,6 +287,7 @@ const eventPrizeWithdrawalsDb = {
 } satisfies D1Database;
 
 export const TELEGRAM_TEST_ENV = {
+  MATCH_PRESENTATION_MIGRATION_SECRET: "test-presentation-migration-secret",
   SESSION_JWT_KEYS: JSON.stringify({
     activeKid: "test",
     keys: { test: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },

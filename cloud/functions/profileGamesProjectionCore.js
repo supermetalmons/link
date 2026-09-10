@@ -297,7 +297,11 @@ const createProfileGamesProjectionCore = ({
               ),
             )
           : null;
-        if (emoji === null) {
+        if (
+          emoji === null &&
+          (!repository.allowRtdbMatchEmojiFallback ||
+            (await repository.allowRtdbMatchEmojiFallback()))
+        ) {
           const matchData = await retry(() =>
             repository.getRtdbPath(
               `players/${normalizedLoginUid}/matches/${candidateMatchId}`,

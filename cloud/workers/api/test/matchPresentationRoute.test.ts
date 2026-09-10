@@ -110,6 +110,7 @@ function setup(invite: unknown = paired, uid = "host-login") {
   };
   const dependencies: MatchPresentationRouteDependencies = {
     repository,
+    readPresentationControl: async () => ({ phase: "legacy" }),
     verifyIdentity: async () => {
       calls.auth++;
       return socketTestIdentity(uid);
@@ -532,4 +533,223 @@ test("rate limits before storage and returns retry headers", async () => {
   assert.equal(response.headers.get("Retry-After"), "60");
   assert.equal(state.calls.auth, 0);
   assert.deepEqual(state.calls.reads, []);
+});
+
+test("durable presentation reads and updates use registered cosmetics without Firebase match reads", async () => {
+  const state = setup();
+  state.dependencies.readPresentationControl = async () => ({
+    phase: "durable",
+  });
+  state.dependencies.readRegisteredPresentations = async (
+    _env,
+    inviteId,
+    matchId,
+  ) => {
+    assert.equal(inviteId, "invite-one");
+    return {
+      matchId,
+      players: { "host-login": { ...state.current, matchId } },
+    };
+  };
+  state.dependencies.room!.ensurePresentations = async () => {
+    throw new Error("unexpected-legacy-bootstrap");
+  };
+  for (const method of ["GET", "POST"]) {
+    const response = await handleMatchPresentationRoute(
+      request(method),
+      state.env,
+      ctx,
+      state.dependencies,
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { presentation: unknown };
+    assert.deepEqual(
+      body.presentation,
+      method === "GET"
+        ? { matchId: "invite-one", players: { "host-login": state.current } }
+        : state.current,
+    );
+  }
+  assert.equal(
+    state.calls.reads.some((path) => path.startsWith("players/")),
+    false,
+  );
+});
+
+test("durable pending rematches expose only registered actors", async () => {
+  const state = setup({ ...paired, hostRematches: "1", guestRematches: "" });
+  state.dependencies.readPresentationControl = async () => ({
+    phase: "durable",
+  });
+  state.dependencies.readRegisteredPresentations = async (
+    _env,
+    _inviteId,
+    matchId,
+  ) => ({
+    matchId,
+    players: Object.fromEntries(
+      ["host-login"].map((actorUid) => [
+        actorUid,
+        { ...state.current, matchId, actorUid },
+      ]),
+    ),
+  });
+  const response = await handleMatchPresentationRoute(
+    request("GET", {
+      path: "/invites/invite-one/matches/invite-one1/presentation",
+      anonymous: true,
+    }),
+    state.env,
+    ctx,
+    state.dependencies,
+  );
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    presentation: { players: Record<string, unknown> };
+  };
+  assert.deepEqual(Object.keys(body.presentation.players), ["host-login"]);
+  assert.deepEqual(state.calls.ensured, []);
+  assert.equal(
+    state.calls.reads.some((path) => path.startsWith("players/")),
+    false,
+  );
+});
+
+test("durable ensured guest matches remain readable before a guest rematch proposal", async () => {
+  const state = setup(
+    { ...paired, hostRematches: "1", guestRematches: "" },
+    "guest-login",
+  );
+  state.dependencies.readPresentationControl = async () => ({
+    phase: "durable",
+  });
+  state.dependencies.readRegisteredPresentations = async (
+    _env,
+    _inviteId,
+    matchId,
+  ) => ({
+    matchId,
+    players: Object.fromEntries(
+      ["host-login", "guest-login"].map((actorUid) => [
+        actorUid,
+        { ...state.current, matchId, actorUid },
+      ]),
+    ),
+  });
+  const path = "/invites/invite-one/matches/invite-one1/presentation";
+  const response = await handleMatchPresentationRoute(
+    request("GET", { path, anonymous: true }),
+    state.env,
+    ctx,
+    state.dependencies,
+  );
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    presentation: { players: Record<string, unknown> };
+  };
+  assert.deepEqual(Object.keys(body.presentation.players).sort(), [
+    "guest-login",
+    "host-login",
+  ]);
+  const updateResponse = await handleMatchPresentationRoute(
+    request("POST", { path }),
+    state.env,
+    ctx,
+    state.dependencies,
+  );
+  assert.equal(updateResponse.status, 409);
+  assert.equal(
+    ((await updateResponse.json()) as { message: string }).message,
+    "match-not-current",
+  );
+  assert.deepEqual(state.calls.updated, []);
+  assert.equal(
+    state.calls.reads.some((selected) => selected.startsWith("players/")),
+    false,
+  );
+});
+
+test("durable missing actors and unavailable registered storage never bootstrap Firebase appearance", async () => {
+  const state = setup();
+  state.dependencies.readPresentationControl = async () => ({
+    phase: "durable",
+  });
+  state.dependencies.readRegisteredPresentations = async (
+    _env,
+    _inviteId,
+    matchId,
+  ) => ({
+    matchId,
+    players: {
+      "guest-login": { ...state.current, matchId, actorUid: "guest-login" },
+    },
+  });
+  const missingActor = await handleMatchPresentationRoute(
+    request(),
+    state.env,
+    ctx,
+    state.dependencies,
+  );
+  assert.equal(missingActor.status, 409);
+  assert.equal(
+    ((await missingActor.json()) as { message: string }).message,
+    "actor-match-not-found",
+  );
+  state.dependencies.readRegisteredPresentations = async (
+    _env,
+    _inviteId,
+    matchId,
+  ) => ({ matchId, players: {} });
+  assert.equal(
+    (
+      await handleMatchPresentationRoute(
+        request("GET"),
+        state.env,
+        ctx,
+        state.dependencies,
+      )
+    ).status,
+    404,
+  );
+  state.dependencies.readRegisteredPresentations = async () => {
+    throw new Error("registered-presentation-missing");
+  };
+  assert.equal(
+    (
+      await handleMatchPresentationRoute(
+        request("GET"),
+        state.env,
+        ctx,
+        state.dependencies,
+      )
+    ).status,
+    503,
+  );
+  assert.deepEqual(state.calls.ensured, []);
+  assert.deepEqual(state.calls.updated, []);
+  assert.equal(
+    state.calls.reads.some((path) => path.startsWith("players/")),
+    false,
+  );
+});
+
+test("legacy presentation rows do not authorize an actor whose source match is absent", async () => {
+  const state = setup();
+  state.records.delete("players/host-login/matches/invite-one");
+  state.dependencies.room!.ensurePresentations = async (matchId) => ({
+    matchId,
+    players: { "host-login": state.current },
+  });
+  assert.equal(
+    (
+      await handleMatchPresentationRoute(
+        request(),
+        state.env,
+        ctx,
+        state.dependencies,
+      )
+    ).status,
+    409,
+  );
+  assert.deepEqual(state.calls.updated, []);
 });

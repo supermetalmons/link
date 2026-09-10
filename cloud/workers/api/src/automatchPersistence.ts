@@ -16,6 +16,7 @@ import {
 } from "./gameSessionTransitions.ts";
 import type { GameSessionMutationLockStore } from "./gameplayCoordinationD1.ts";
 import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
+import type { PrepareMatchPresentations } from "./matchPresentationRegistry.ts";
 import {
   acquireInviteSourceAdmission,
   createInviteSourceD1Store,
@@ -50,9 +51,11 @@ export function createAutomatchPersistence(
   {
     now = Date.now,
     onCommitted,
+    prepareMatchPresentations,
   }: {
     now?: () => number;
     onCommitted?: (inviteId: string) => Promise<void>;
+    prepareMatchPresentations?: PrepareMatchPresentations;
   } = {},
 ) {
   const held = new Map<string, GameSessionLeaseProof>();
@@ -64,6 +67,7 @@ export function createAutomatchPersistence(
     store,
     now,
     onCommitted,
+    prepareMatchPresentations,
   });
 
   const control = async () => {
@@ -148,6 +152,7 @@ export function createAutomatchPersistence(
           store,
           now,
           onCommitted,
+          prepareMatchPresentations,
           writeGuards: () => automatchAdmissionGuardStatements(db, admission),
           inviteAdmission,
         });
@@ -226,6 +231,7 @@ export function createAutomatchPersistence(
               store,
               now,
               onCommitted,
+              prepareMatchPresentations,
               writeGuards: guards,
               inviteAdmission,
             });
@@ -342,6 +348,7 @@ export function createAutomatchPersistence(
             store,
             now,
             onCommitted,
+            prepareMatchPresentations,
             writeGuards: () => automatchAdmissionGuardStatements(db, admission),
             inviteAdmission,
           }).sweep(limit),

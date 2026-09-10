@@ -435,10 +435,11 @@ describe("hybrid event repository", () => {
           hostId: "login-one",
           guestId: "login-two",
         },
-        [matchPath]: { fen: "initial", flatMovesString: "" },
+        [matchPath]: { fen: "initial", flatMovesString: "", color: "white" },
         "players/login-two/matches/event-match": {
           fen: "initial",
           flatMovesString: "",
+          color: "black",
         },
       }),
     ).rejects.toThrow("ambiguous-rtdb-commit");

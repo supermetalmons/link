@@ -15,6 +15,13 @@ import {
   createInviteSourceD1Store,
   releaseInviteSourceAdmission,
 } from "../src/inviteSourceD1.ts";
+import {
+  prepareCreatedMatchPresentations,
+  readRegisteredMatchPresentations,
+  type MatchPresentationCreation,
+  type PrepareMatchPresentations,
+} from "../src/matchPresentationRegistry.ts";
+import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
@@ -178,6 +185,31 @@ function pendingCount() {
     .first<number>("count");
 }
 
+function presentationRegistrationCount() {
+  return db
+    .prepare("SELECT COUNT(*) AS count FROM match_presentation_registrations")
+    .first<number>("count");
+}
+
+function presentationCapture() {
+  const prepared: MatchPresentationCreation[][] = [];
+  const current = new Map<string, { emojiId: number; aura: string }>();
+  const prepare: PrepareMatchPresentations = async (creations) => {
+    prepared.push(structuredClone([...creations]));
+    for (const creation of creations) {
+      const key = `${creation.matchId}/${creation.actorUid}`;
+      if (!current.has(key))
+        current.set(key, { emojiId: creation.emojiId, aura: creation.aura });
+    }
+    return creations.map((creation) => ({
+      ...creation,
+      seedDigest: "a".repeat(64),
+      provenance: "creation" as const,
+    }));
+  };
+  return { prepared, current, prepare };
+}
+
 async function activateInviteSource(rtdb?: MemoryRtdb) {
   await db
     .prepare(
@@ -215,6 +247,7 @@ describe("recoverable D1 game-session transitions", () => {
   });
 
   beforeEach(async () => {
+    await resetMatchPresentationTestState(db, testEnv.TEST_D1_MIGRATIONS);
     await db.batch([
       db.prepare("DELETE FROM invite_source_write_admissions"),
       db.prepare("DELETE FROM invite_sources"),
@@ -240,6 +273,146 @@ describe("recoverable D1 game-session transitions", () => {
   });
 
   describe("D1 invite source", () => {
+    it("fences an old creator until capture-aware recovery registers its actual appearance", async () => {
+      const rtdb = new MemoryRtdb();
+      const source = await activateInviteSource(rtdb);
+      await resetMatchPresentationTestState(
+        db,
+        testEnv.TEST_D1_MIGRATIONS,
+        true,
+      );
+      await expect(
+        coordinator(rtdb).commit(createUpdates(), await leases()),
+      ).rejects.toThrow("match-presentation-capture-required");
+      expect((await source.read(INVITE)).revision).toBe(0);
+      expect(await pendingCount()).toBe(1);
+      expect(await presentationRegistrationCount()).toBe(0);
+      const recovery = coordinator(rtdb, {
+        prepareMatchPresentations: (creations) =>
+          prepareCreatedMatchPresentations(env, creations),
+      });
+      await recovery.recoverResource(INVITE);
+      expect(await presentationRegistrationCount()).toBe(1);
+      expect(
+        await readRegisteredMatchPresentations(env, INVITE, INVITE),
+      ).toEqual({
+        matchId: INVITE,
+        players: {
+          [HOST]: {
+            matchId: INVITE,
+            actorUid: HOST,
+            emojiId: 1,
+            aura: "",
+            revision: 0,
+          },
+        },
+      });
+      expect((await source.read(INVITE)).revision).toBe(1);
+      expect(await pendingCount()).toBe(0);
+      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+    });
+
+    it("requires successful appearance preparation before publishing a created match", async () => {
+      const rtdb = new MemoryRtdb();
+      const source = await activateInviteSource(rtdb);
+      const capture = presentationCapture();
+      let failAppearance = true;
+      const transitions = coordinator(rtdb, {
+        async prepareMatchPresentations(creations) {
+          expect(await rtdb.getPath(MATCH_PATH)).toMatchObject({
+            emojiId: 1,
+            aura: "",
+            sessionCreation: creations[0].sourceId,
+          });
+          expect((await source.read(INVITE)).revision).toBe(0);
+          expect(await presentationRegistrationCount()).toBe(0);
+          const result = await capture.prepare(creations);
+          if (failAppearance) throw new Error("appearance-unavailable");
+          return result;
+        },
+      });
+      await expect(
+        transitions.commit(createUpdates(), await leases()),
+      ).rejects.toThrow("appearance-unavailable");
+      expect(await pendingCount()).toBe(1);
+      expect(await presentationRegistrationCount()).toBe(0);
+      expect((await source.read(INVITE)).revision).toBe(0);
+      expect(
+        await createAutomatchD1Store(db).getPath(
+          `gameplayMutationReceipts/${OPERATION}`,
+        ),
+      ).toBeNull();
+      capture.current.set(`${INVITE}/${HOST}`, { emojiId: 8, aura: "edited" });
+      failAppearance = false;
+      await transitions.recoverResource(INVITE);
+      expect(capture.prepared).toHaveLength(2);
+      expect(capture.prepared[1]).toEqual(capture.prepared[0]);
+      expect(capture.prepared[0]).toEqual([
+        {
+          inviteId: INVITE,
+          matchId: INVITE,
+          actorUid: HOST,
+          emojiId: 1,
+          aura: "",
+          sourceId: expect.stringMatching(/^[a-f0-9]{64}$/),
+        },
+      ]);
+      expect(capture.current.get(`${INVITE}/${HOST}`)).toEqual({
+        emojiId: 8,
+        aura: "edited",
+      });
+      expect(await presentationRegistrationCount()).toBe(1);
+      expect((await source.read(INVITE)).revision).toBe(1);
+      expect(await pendingCount()).toBe(0);
+      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+    });
+
+    it("rolls back appearance registration with failed publication and recovers the same seed", async () => {
+      const rtdb = new MemoryRtdb();
+      const source = await activateInviteSource(rtdb);
+      const capture = presentationCapture();
+      const transitions = coordinator(rtdb, {
+        prepareMatchPresentations: capture.prepare,
+      });
+      await db.exec(
+        "CREATE TRIGGER test_presentation_publication_failure BEFORE INSERT ON invite_sources BEGIN SELECT RAISE(ABORT, 'presentation-publication-unavailable'); END;",
+      );
+      try {
+        await expect(
+          transitions.commit(createUpdates(), await leases()),
+        ).rejects.toThrow("presentation-publication-unavailable");
+        expect(await presentationRegistrationCount()).toBe(0);
+        expect(capture.current.size).toBe(1);
+        expect((await source.read(INVITE)).revision).toBe(0);
+      } finally {
+        await db.exec("DROP TRIGGER test_presentation_publication_failure");
+      }
+      await transitions.recoverResource(INVITE);
+      expect(capture.prepared[1]).toEqual(capture.prepared[0]);
+      expect(await presentationRegistrationCount()).toBe(1);
+      expect(await pendingCount()).toBe(0);
+      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+    });
+
+    it("does not seed an uncertain RTDB creation until its marker is verified by recovery", async () => {
+      const rtdb = new MemoryRtdb();
+      await activateInviteSource(rtdb);
+      rtdb.afterWriteFailure = MATCH_PATH;
+      const capture = presentationCapture();
+      const transitions = coordinator(rtdb, {
+        prepareMatchPresentations: capture.prepare,
+      });
+      await expect(
+        transitions.commit(createUpdates(), await leases()),
+      ).rejects.toThrow("uncertain-applied-write");
+      expect(capture.prepared).toEqual([]);
+      expect(await presentationRegistrationCount()).toBe(0);
+      await transitions.recoverResource(INVITE);
+      expect(capture.prepared).toHaveLength(1);
+      expect(await presentationRegistrationCount()).toBe(1);
+      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+    });
+
     it("publishes source, receipts, and discovery together after create-only match effects", async () => {
       const rtdb = new MemoryRtdb();
       const source = await activateInviteSource(rtdb);

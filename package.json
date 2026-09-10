@@ -78,6 +78,7 @@
     "latest": "npm run latest:root && npm run latest:functions && npm run latest:admin",
     "manage:automatch-state": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-automatch-state.ts",
     "manage:login-match-discovery": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-login-match-discovery.ts",
+    "manage:match-presentations": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-match-presentations.ts",
     "manage:invite-source": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-invite-source.ts"
   },
   "devDependencies": {

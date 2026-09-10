@@ -164,6 +164,7 @@ export const PrizeChoiceButton = styled.button<{
     css`
       appearance: none;
       -webkit-appearance: none;
+      aspect-ratio: 1 / 1;
       clip-path: inset(0 round 8px);
       background: #f2f1f4;
 
@@ -180,6 +181,15 @@ export const PrizeImage = styled.img<{ $concealed?: boolean }>`
   max-width: 100%;
   width: 100%;
   filter: ${(props) => (props.$concealed ? "blur(10px)" : "none")};
+
+  ${(props) =>
+    props.$concealed &&
+    css`
+      position: absolute;
+      inset: 0;
+      object-fit: cover;
+      object-position: center;
+    `}
 `;
 
 const mysteryPrizeFloat = keyframes`

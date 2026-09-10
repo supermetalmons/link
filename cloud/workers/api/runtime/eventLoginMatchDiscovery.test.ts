@@ -65,8 +65,14 @@ function matchEffects() {
       hostId: hostUid,
       guestId: guestUid,
     },
-    [`players/${hostUid}/matches/${inviteId}`]: { fen: "initial" },
-    [`players/${guestUid}/matches/${inviteId}`]: { fen: "initial" },
+    [`players/${hostUid}/matches/${inviteId}`]: {
+      fen: "initial",
+      color: "white",
+    },
+    [`players/${guestUid}/matches/${inviteId}`]: {
+      fen: "initial",
+      color: "black",
+    },
   };
 }
 

@@ -71,6 +71,8 @@ test("uses approved catalog names in lowercase and trims event IDs", () => {
     ["oXAceF6anag", "artifact magazine 3"],
     ["RpPjMNyrJJa", "rare weitsmans"],
     [EVENT_ID, "planet peppa"],
+    [prizeCatalog.SHELVES_PRIZES_EVENT_ID, "shelves"],
+    [prizeCatalog.VEHICLE_WAMMIN_PRIZES_EVENT_ID, "vehicle wammin"],
   ]) {
     const result = buildEventPrizeAnnouncement({ eventId: ` ${eventId} ` });
     assert.equal(result.collectionName, collectionName);

@@ -1,4 +1,5 @@
 import { MAX_EVENT_PARTICIPANTS } from "@mons/shared/events";
+import { normalizeHistoricalMatchRecord } from "@mons/shared/game-sessions";
 import {
   MATCH_TIMER_CLAIM_ROOT,
   MATCH_TIMER_TERMINAL,
@@ -29,6 +30,11 @@ import {
   buildLoginMatchDiscoveryStatements,
   type LoginMatchDiscoveryInput,
 } from "./loginMatchDiscoveryD1.ts";
+import {
+  buildMatchPresentationRegistrationStatements,
+  type MatchPresentationRegistration,
+  type PrepareMatchPresentations,
+} from "./matchPresentationRegistry.ts";
 
 type V2Intent = Extract<EventTransitionIntent, { schemaVersion: 2 }>;
 type JsonRecord = Record<string, unknown>;
@@ -288,6 +294,7 @@ export async function applyInviteEventEffects(
   raw: FirebaseRtdbClient,
   intent: V2Intent,
   signal?: AbortSignal,
+  prepareMatchPresentations?: PrepareMatchPresentations,
 ): Promise<void> {
   if ((await digest(digestInput(intent))) !== intent.payloadDigest) {
     throw new Error("event-transition-payload-conflict");
@@ -321,9 +328,52 @@ export async function applyInviteEventEffects(
     signal?.throwIfAborted();
     await db.batch(guards());
   };
+  let presentations: MatchPresentationRegistration[] | null = null;
+  const preparePresentations = async () => {
+    if (presentations !== null) return presentations;
+    signal?.throwIfAborted();
+    presentations = prepareMatchPresentations
+      ? await prepareMatchPresentations(
+          await Promise.all(
+            creations.map(async ([path, value]) => {
+              const match = normalizeHistoricalMatchRecord(value);
+              if (!match)
+                throw new Error("event-match-presentation-creation-invalid");
+              const [, actorUid, , matchId] = path.split("/");
+              return {
+                inviteId: matchId,
+                matchId,
+                actorUid,
+                emojiId: match.emojiId,
+                aura: match.aura,
+                sourceId: await digest({
+                  transitionId: intent.transitionId,
+                  payloadDigest: intent.payloadDigest,
+                  path,
+                }),
+              };
+            }),
+          ),
+        )
+      : [];
+    return presentations;
+  };
   const hasCommittedEffects = async () => {
     if (!(await readEffectReceipt(db, intent))) return false;
     await db.batch(eventTransitionReceiptGuardStatements(db, expectedReceipt));
+    const registrations = await preparePresentations();
+    if (registrations.length) {
+      signal?.throwIfAborted();
+      await db.batch([
+        ...guards(),
+        ...eventTransitionReceiptGuardStatements(db, expectedReceipt),
+        ...buildMatchPresentationRegistrationStatements(
+          db,
+          registrations,
+          Date.now(),
+        ),
+      ]);
+    }
     return true;
   };
   try {
@@ -381,12 +431,18 @@ export async function applyInviteEventEffects(
         signal,
       });
     }
+    const registrations = await preparePresentations();
     signal?.throwIfAborted();
     try {
       await db.batch([
         ...guards(),
         ...eventTransitionReceiptGuardStatements(db, expectedReceipt),
         ...store.buildRevisionGuardStatements(intent.inviteMutations),
+        ...buildMatchPresentationRegistrationStatements(
+          db,
+          registrations,
+          Date.now(),
+        ),
         db
           .prepare(
             `INSERT INTO invite_event_effect_receipts

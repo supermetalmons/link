@@ -9,7 +9,11 @@ const {
 const inviteId = "presentation-invite";
 const guestMatchPath = `players/guest-login/matches/${inviteId}`;
 
-function fixture({ getMatchEmoji, guestProfile = null }) {
+function fixture({
+  getMatchEmoji,
+  guestProfile = null,
+  allowRtdbMatchEmojiFallback,
+}) {
   const writes = [];
   const reads = [];
   const presentationReads = [];
@@ -21,6 +25,7 @@ function fixture({ getMatchEmoji, guestProfile = null }) {
   const core = createProfileGamesProjectionCore({
     logger: { error() {} },
     repository: {
+      allowRtdbMatchEmojiFallback,
       async commitProjectionWrites(nextWrites) {
         for (const write of nextWrites) {
           writes.push(write);
@@ -132,4 +137,26 @@ test("presentation failures retry without publishing a stale seed avatar", async
   ]);
   assert.deepEqual(state.writes, []);
   assert.equal(state.reads.includes(guestMatchPath), false);
+});
+
+test("durable presentation misses never read Firebase seed avatars", async () => {
+  const state = fixture({
+    getMatchEmoji: async () => null,
+    allowRtdbMatchEmojiFallback: async () => false,
+  });
+  await state.recompute();
+  assert.equal(state.reads.includes(guestMatchPath), false);
+  assert.deepEqual(state.writes, []);
+});
+
+test("appearance authority failures preserve projection state without Firebase fallback", async () => {
+  const state = fixture({
+    getMatchEmoji: async () => null,
+    allowRtdbMatchEmojiFallback: async () => {
+      throw new Error("authority-unavailable");
+    },
+  });
+  await assert.rejects(state.recompute(), /authority-unavailable/);
+  assert.equal(state.reads.includes(guestMatchPath), false);
+  assert.deepEqual(state.writes, []);
 });

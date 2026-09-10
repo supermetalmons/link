@@ -41,6 +41,12 @@ import {
   captureEventMatchDiscovery,
   eventMatchInviteIds,
 } from "./eventLoginMatchDiscovery.ts";
+import {
+  freezeRegisteredMatchPresentations,
+  readMatchPresentationControl,
+  readRegisteredMatchPresentations,
+} from "./matchPresentationRegistry.ts";
+import type { MatchPresentationReadDependencies } from "./matchPresentationAccess.ts";
 
 type ProjectionRtdbRepository = Pick<GameplayRepository, "getRtdbPath">;
 
@@ -72,9 +78,10 @@ export type EventProfileGameProjectionRuntime = {
   }>;
 };
 
-type ProfileGameProjectionDependencies = {
+type ProfileGameProjectionDependencies = MatchPresentationReadDependencies & {
   d1?: D1Database;
   freezePresentations?: FreezeHistoricalMatchPresentations;
+  freezeRegisteredPresentations?: typeof freezeRegisteredMatchPresentations;
   logger?: Pick<Console, "error">;
   now?: () => number;
   profileDb?: D1Database;
@@ -171,6 +178,8 @@ export function createProfileGameProjectionRuntime(
   const profileDb = dependencies.profileDb || env.PROFILE_DB;
   const rtdb = dependencies.rtdb || createGameplayRepository(env);
   const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
+  const readPresentationControl = () =>
+    (dependencies.readPresentationControl || readMatchPresentationControl)(d1);
   const logger: Pick<Console, "error"> = dependencies.logger || {
     error(message, ...optionalParams) {
       const context = optionalParams[0];
@@ -200,10 +209,16 @@ export function createProfileGameProjectionRuntime(
     getRtdbPath: (path) => rtdb.getRtdbPath(path),
 
     async getMatchEmoji(inviteId, matchId, loginUid) {
+      const control = await readPresentationControl();
       const snapshot =
-        await env.INVITE_REACTIONS.getByName(inviteId).getPresentationSnapshot(
-          matchId,
-        );
+        control.phase === "durable"
+          ? await (
+              dependencies.readRegisteredPresentations ||
+              readRegisteredMatchPresentations
+            )(env, inviteId, matchId)
+          : await env.INVITE_REACTIONS.getByName(
+              inviteId,
+            ).getPresentationSnapshot(matchId);
       if (
         !isMatchPresentationSnapshot(snapshot) ||
         snapshot.matchId !== matchId
@@ -213,6 +228,10 @@ export function createProfileGameProjectionRuntime(
       return Object.hasOwn(snapshot.players, loginUid)
         ? snapshot.players[loginUid].emojiId
         : null;
+    },
+
+    async allowRtdbMatchEmojiFallback() {
+      return (await readPresentationControl()).phase !== "durable";
     },
 
     hasCompletedRatingUpdate: (inviteId, matchId) =>
@@ -243,12 +262,20 @@ export function createProfileGameProjectionRuntime(
             input.finalizedAtMs,
           ),
         },
-        dependencies.freezePresentations ||
-          ((inviteId, matchId, seeds) =>
-            env.INVITE_REACTIONS.getByName(inviteId).freezePresentations(
-              matchId,
-              seeds,
-            )),
+        async (inviteId, matchId, seeds) => {
+          if ((await readPresentationControl()).phase === "durable") {
+            return (
+              dependencies.freezeRegisteredPresentations ||
+              freezeRegisteredMatchPresentations
+            )(env, inviteId, matchId, Object.keys(seeds));
+          }
+          return dependencies.freezePresentations
+            ? dependencies.freezePresentations(inviteId, matchId, seeds)
+            : env.INVITE_REACTIONS.getByName(inviteId).freezePresentations(
+                matchId,
+                seeds,
+              );
+        },
       );
     },
   };

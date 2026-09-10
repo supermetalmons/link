@@ -21,6 +21,13 @@ import {
   ensureEventTransitionReceipt,
   readEventTransitionReceipt,
 } from "../src/eventTransitionReceiptsD1.ts";
+import {
+  prepareCreatedMatchPresentations,
+  readRegisteredMatchPresentations,
+  type MatchPresentationCreation,
+  type PrepareMatchPresentations,
+} from "../src/matchPresentationRegistry.ts";
+import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
@@ -67,11 +74,15 @@ function matchEffects(id = inviteId) {
       fen: "initial",
       flatMovesString: "",
       color: "white",
+      emojiId: 2,
+      aura: "host-aura",
     },
     [`players/guest/matches/${id}`]: {
       fen: "initial",
       flatMovesString: "",
       color: "black",
+      emojiId: 3,
+      aura: "guest-aura",
     },
   };
 }
@@ -84,6 +95,7 @@ function fixture(profileGamesDb = testEnv.PROFILE_GAMES_DB) {
     failBeforePath?: string;
     failAfterPath?: string;
     afterWrite?: (path: string) => Promise<void>;
+    prepareMatchPresentations?: PrepareMatchPresentations;
   } = {};
   const raw: FirebaseRtdbClient = {
     async getPath(path) {
@@ -149,7 +161,14 @@ function fixture(profileGamesDb = testEnv.PROFILE_GAMES_DB) {
     },
   };
   const fixtureEnv = { ...testEnv, PROFILE_GAMES_DB: profileGamesDb };
-  const client = createEventRtdbClient(fixtureEnv, base, raw);
+  const prepareMatchPresentations: PrepareMatchPresentations = (creations) =>
+    hooks.prepareMatchPresentations?.(creations) || Promise.resolve([]);
+  const client = createEventRtdbClient(
+    fixtureEnv,
+    base,
+    raw,
+    prepareMatchPresentations,
+  );
   return {
     values,
     writes,
@@ -166,7 +185,13 @@ function fixture(profileGamesDb = testEnv.PROFILE_GAMES_DB) {
         ...matchEffects(),
         ...extra,
       }),
-    recover: () => recoverEventTransitionIntents(fixtureEnv, 100, raw),
+    recover: () =>
+      recoverEventTransitionIntents(
+        fixtureEnv,
+        100,
+        raw,
+        prepareMatchPresentations,
+      ),
   };
 }
 
@@ -178,6 +203,7 @@ async function count(table: string) {
       "event_transition_receipts",
       "login_match_discovery",
       "invite_source_write_admissions",
+      "match_presentation_registrations",
     ].includes(table)
   ) {
     throw new Error("unsupported-test-table");
@@ -185,6 +211,16 @@ async function count(table: string) {
   return testEnv.PROFILE_GAMES_DB.prepare(
     `SELECT COUNT(*) AS count FROM ${table}`,
   ).first<number>("count");
+}
+
+function appearanceRegistrations(
+  creations: readonly MatchPresentationCreation[],
+) {
+  return creations.map((creation) => ({
+    ...creation,
+    seedDigest: "a".repeat(64),
+    provenance: "creation" as const,
+  }));
 }
 
 describe("event transitions with canonical D1 invitation metadata", () => {
@@ -200,6 +236,10 @@ describe("event transitions with canonical D1 invitation metadata", () => {
   });
 
   beforeEach(async () => {
+    await resetMatchPresentationTestState(
+      testEnv.PROFILE_GAMES_DB,
+      testEnv.TEST_D1_MIGRATIONS,
+    );
     await testEnv.PROFILE_GAMES_DB.batch([
       testEnv.PROFILE_GAMES_DB.prepare(
         "DROP TRIGGER IF EXISTS reject_event_source_discovery",
@@ -238,12 +278,30 @@ describe("event transitions with canonical D1 invitation metadata", () => {
 
   it("atomically publishes every event invite and discovery row after proving its two live matches", async () => {
     const f = fixture();
+    f.hooks.prepareMatchPresentations = async (creations) => {
+      expect(creations).toHaveLength(4);
+      expect(await count("invite_sources")).toBe(0);
+      expect(await count("match_presentation_registrations")).toBe(0);
+      for (const creation of creations) {
+        expect(
+          f.values.get(
+            `players/${creation.actorUid}/matches/${creation.matchId}`,
+          ),
+        ).toMatchObject({
+          emojiId: creation.emojiId,
+          aura: creation.aura,
+          sessionCreation: creation.sourceId,
+        });
+      }
+      return appearanceRegistrations(creations);
+    };
     await f.create();
     await f.start(matchEffects("third-place-invite"));
     expect(await count("invite_sources")).toBe(2);
     expect(await count("invite_event_effect_receipts")).toBe(1);
     expect(await count("event_transition_receipts")).toBe(1);
     expect(await count("login_match_discovery")).toBe(4);
+    expect(await count("match_presentation_registrations")).toBe(4);
     expect(await count("invite_source_write_admissions")).toBe(0);
     expect((await f.source.read(inviteId)).value).toEqual(
       matchEffects()[`invites/${inviteId}`],
@@ -256,6 +314,92 @@ describe("event transitions with canonical D1 invitation metadata", () => {
       event: { status: "active" },
       revision: 2,
     });
+    expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual(
+      [],
+    );
+  });
+
+  it("fences an old event writer and recovers its durable effects with registered appearances", async () => {
+    const f = fixture();
+    await f.create();
+    await resetMatchPresentationTestState(
+      testEnv.PROFILE_GAMES_DB,
+      testEnv.TEST_D1_MIGRATIONS,
+      true,
+    );
+    await expect(f.start()).rejects.toThrow(
+      "match-presentation-capture-required",
+    );
+    expect(f.writes).toEqual([hostPath, guestPath]);
+    expect(await count("invite_sources")).toBe(0);
+    expect(await count("invite_event_effect_receipts")).toBe(0);
+    expect(await count("match_presentation_registrations")).toBe(0);
+    expect(
+      await listPendingEventTransitionIntents(testEnv.EVENT_DB),
+    ).toHaveLength(1);
+    f.hooks.prepareMatchPresentations = (creations) =>
+      prepareCreatedMatchPresentations(env, creations);
+    await f.recover();
+    expect(await count("invite_sources")).toBe(1);
+    expect(await count("match_presentation_registrations")).toBe(2);
+    expect(
+      await readRegisteredMatchPresentations(env, inviteId, inviteId),
+    ).toMatchObject({
+      matchId: inviteId,
+      players: {
+        host: { actorUid: "host", emojiId: 2, aura: "host-aura", revision: 0 },
+        guest: {
+          actorUid: "guest",
+          emojiId: 3,
+          aura: "guest-aura",
+          revision: 0,
+        },
+      },
+    });
+    expect(f.writes).toEqual([hostPath, guestPath]);
+    expect(f.reads).toEqual([]);
+    expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual(
+      [],
+    );
+  });
+
+  it("keeps appearance failures recoverable after Firebase confirmation without resetting current appearance", async () => {
+    const f = fixture();
+    const prepared: MatchPresentationCreation[][] = [];
+    const current = new Map<string, { emojiId: number; aura: string }>();
+    let failAppearance = true;
+    f.hooks.prepareMatchPresentations = async (creations) => {
+      prepared.push(structuredClone([...creations]));
+      for (const creation of creations) {
+        const key = `${creation.matchId}/${creation.actorUid}`;
+        if (!current.has(key))
+          current.set(key, { emojiId: creation.emojiId, aura: creation.aura });
+      }
+      if (failAppearance) throw new Error("appearance-unavailable");
+      return appearanceRegistrations(creations);
+    };
+    await f.create();
+    await expect(f.start()).rejects.toThrow("appearance-unavailable");
+    expect(f.writes).toEqual([hostPath, guestPath]);
+    expect(await count("event_transition_receipts")).toBe(1);
+    expect(await count("invite_sources")).toBe(0);
+    expect(await count("match_presentation_registrations")).toBe(0);
+    expect(
+      await listPendingEventTransitionIntents(testEnv.EVENT_DB),
+    ).toHaveLength(1);
+    current.set(`${inviteId}/host`, { emojiId: 9, aura: "edited" });
+    failAppearance = false;
+    await f.recover();
+    expect(prepared).toHaveLength(2);
+    expect(prepared[1]).toEqual(prepared[0]);
+    expect(current.get(`${inviteId}/host`)).toEqual({
+      emojiId: 9,
+      aura: "edited",
+    });
+    expect(await count("match_presentation_registrations")).toBe(2);
+    expect(await count("invite_sources")).toBe(1);
+    expect(f.writes).toEqual([hostPath, guestPath]);
+    expect(f.reads).toEqual([]);
     expect(await listPendingEventTransitionIntents(testEnv.EVENT_DB)).toEqual(
       [],
     );
@@ -314,6 +458,8 @@ describe("event transitions with canonical D1 invitation metadata", () => {
 
   it("rolls back all invitation sources and receipts if discovery capture fails", async () => {
     const f = fixture();
+    f.hooks.prepareMatchPresentations = async (creations) =>
+      appearanceRegistrations(creations);
     await f.create();
     await testEnv.PROFILE_GAMES_DB.prepare(
       `CREATE TRIGGER reject_event_source_discovery
@@ -325,6 +471,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     );
     expect(await count("invite_sources")).toBe(0);
     expect(await count("invite_event_effect_receipts")).toBe(0);
+    expect(await count("match_presentation_registrations")).toBe(0);
     const writes = f.writes.length;
     await testEnv.PROFILE_GAMES_DB.prepare(
       "DROP TRIGGER reject_event_source_discovery",
@@ -334,6 +481,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     expect(await count("invite_sources")).toBe(2);
     expect(await count("invite_event_effect_receipts")).toBe(1);
     expect(await count("login_match_discovery")).toBe(4);
+    expect(await count("match_presentation_registrations")).toBe(4);
   });
 
   it("uses the committed D1 effect receipt when EVENT_DB finalization must be retried", async () => {
@@ -349,6 +497,9 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     expect(await count("invite_event_effect_receipts")).toBe(1);
     const writes = f.writes.length;
     const reads = f.reads.length;
+    expect(await count("match_presentation_registrations")).toBe(0);
+    f.hooks.prepareMatchPresentations = async (creations) =>
+      appearanceRegistrations(creations);
     await testEnv.EVENT_DB.prepare(
       "DROP TRIGGER reject_event_source_finalization",
     ).run();
@@ -356,6 +507,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     expect(f.writes).toHaveLength(writes);
     expect(f.reads).toHaveLength(reads);
     expect((await f.source.read(inviteId)).revision).toBe(1);
+    expect(await count("match_presentation_registrations")).toBe(2);
     expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
       event: { status: "active" },
       revision: 2,

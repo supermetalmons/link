@@ -53,6 +53,10 @@ import {
   notifyMatchSyncChanged,
   notifyMatchSyncInvites,
 } from "./matchSyncNotifications.ts";
+import {
+  prepareCreatedMatchPresentations,
+  type PrepareMatchPresentations,
+} from "./matchPresentationRegistry.ts";
 
 const EVENT_OWNED_ROOTS = new Set([
   "events",
@@ -375,6 +379,7 @@ async function applyIntent(
   admission: EventWriteAdmission,
   raw: FirebaseRtdbClient,
   onCommitted: (intent: EventTransitionIntent) => Promise<void>,
+  prepareMatchPresentations: PrepareMatchPresentations,
   signal?: AbortSignal,
 ): Promise<void> {
   let lock: Record<string, unknown> | null = null;
@@ -392,7 +397,13 @@ async function applyIntent(
       throw new Error("event-transition-legacy-source-disabled");
     }
     await withInviteEffectsAdmission(discoveryDb, async () => {
-      await applyInviteEventEffects(discoveryDb, raw, currentIntent, signal);
+      await applyInviteEventEffects(
+        discoveryDb,
+        raw,
+        currentIntent,
+        signal,
+        prepareMatchPresentations,
+      );
     });
     await onCommitted(currentIntent);
     await patchEventOwnedPaths(db, currentIntent.canonicalUpdates, {
@@ -427,6 +438,7 @@ async function patchD1EventState(
   admission: EventWriteAdmission,
   raw: FirebaseRtdbClient,
   onCommitted: (intent: EventTransitionIntent) => Promise<void>,
+  prepareMatchPresentations: PrepareMatchPresentations,
   signal?: AbortSignal,
 ): Promise<void> {
   const { canonicalUpdates, rtdbEffects } = splitUpdates(updates);
@@ -500,6 +512,7 @@ async function patchD1EventState(
       admission,
       raw,
       onCommitted,
+      prepareMatchPresentations,
       signal,
     );
   });
@@ -542,6 +555,8 @@ export async function recoverEventTransitionIntents(
   env: Env,
   limit = 100,
   raw: FirebaseRtdbClient = createEventRawClient(env),
+  prepareMatchPresentations: PrepareMatchPresentations = (creations) =>
+    prepareCreatedMatchPresentations(env, creations),
 ): Promise<number> {
   const control = await readEventRuntimeControl(env.EVENT_DB);
   if (control.storageMode !== "d1") return 0;
@@ -561,6 +576,7 @@ export async function recoverEventTransitionIntents(
             admission,
             raw,
             (committed) => notifyEventInviteEffects(env, committed),
+            prepareMatchPresentations,
           );
         },
       );
@@ -737,8 +753,14 @@ export function createEventRtdbClient(
   base: EventRtdbBackend = createAutomatchPersistence(
     env.PROFILE_GAMES_DB,
     createEventRawClient(env),
+    {
+      prepareMatchPresentations: (creations) =>
+        prepareCreatedMatchPresentations(env, creations),
+    },
   ).client,
   raw: FirebaseRtdbClient = createEventRawClient(env),
+  prepareMatchPresentations: PrepareMatchPresentations = (creations) =>
+    prepareCreatedMatchPresentations(env, creations),
 ): EventRtdbClient {
   return {
     async getPath(path, query, signal) {
@@ -840,6 +862,7 @@ export function createEventRtdbClient(
             admission,
             raw,
             (committed) => notifyEventInviteEffects(env, committed),
+            prepareMatchPresentations,
             signal,
           );
         },

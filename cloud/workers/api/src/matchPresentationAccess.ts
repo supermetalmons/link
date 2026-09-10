@@ -1,5 +1,9 @@
 import { normalizeHistoricalMatchRecord } from "@mons/shared/game-sessions";
 import {
+  isMatchPresentationSnapshot,
+  type MatchPresentationSnapshot,
+} from "@mons/shared/match-presentation";
+import {
   getLatestApprovedRematchIndex,
   parseInviteMatchIndex,
   parseRematchIndices,
@@ -8,7 +12,21 @@ import {
 import { AuthApiFailure } from "./authErrors.ts";
 import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
-import type { MatchPresentationSeeds } from "./inviteReactions.ts";
+import type {
+  InviteReactions,
+  MatchPresentationSeeds,
+} from "./inviteReactions.ts";
+import {
+  readMatchPresentationControl,
+  readRegisteredMatchPresentations,
+} from "./matchPresentationRegistry.ts";
+
+export type MatchPresentationReadDependencies = {
+  readPresentationControl?: (
+    db: D1Database,
+  ) => Promise<{ phase: "legacy" | "capture" | "durable" }>;
+  readRegisteredPresentations?: typeof readRegisteredMatchPresentations;
+};
 
 export type PresentationInvite = Record<string, unknown> & {
   hostId: string;
@@ -104,17 +122,7 @@ export async function readPresentationSeeds(
   matchId: string,
   invite: PresentationInvite,
 ): Promise<MatchPresentationSeeds> {
-  const index = parseInviteMatchIndex(inviteId, matchId);
-  if (
-    index === null ||
-    (index !== 0 &&
-      ![
-        ...parseRematchIndices(invite.hostRematches),
-        ...parseRematchIndices(invite.guestRematches),
-      ].includes(index))
-  ) {
-    throw new AuthApiFailure(404, "not-found", "match-not-found");
-  }
+  requireRegisteredPresentationMatch(inviteId, matchId, invite);
   const actors = invite.guestId
     ? [invite.hostId, invite.guestId]
     : [invite.hostId];
@@ -134,4 +142,84 @@ export async function readPresentationSeeds(
   if (!Object.keys(seeds).length)
     throw new AuthApiFailure(404, "not-found", "match-not-found");
   return seeds;
+}
+
+function requireRegisteredPresentationMatch(
+  inviteId: string,
+  matchId: string,
+  invite: PresentationInvite,
+): number {
+  const index = parseInviteMatchIndex(inviteId, matchId);
+  if (
+    index === null ||
+    (index !== 0 &&
+      ![
+        ...parseRematchIndices(invite.hostRematches),
+        ...parseRematchIndices(invite.guestRematches),
+      ].includes(index))
+  ) {
+    throw new AuthApiFailure(404, "not-found", "match-not-found");
+  }
+  return index;
+}
+
+export async function readMatchPresentationSnapshot(
+  env: Env,
+  repository: GameplayRepository,
+  inviteId: string,
+  matchId: string,
+  invite: PresentationInvite,
+  dependencies: MatchPresentationReadDependencies & {
+    room: Partial<Pick<InviteReactions, "ensurePresentations">>;
+    requiredActorUid?: string;
+  },
+): Promise<{ canonical: boolean; snapshot: MatchPresentationSnapshot }> {
+  requireRegisteredPresentationMatch(inviteId, matchId, invite);
+  const control = await (
+    dependencies.readPresentationControl || readMatchPresentationControl
+  )(env.PROFILE_GAMES_DB);
+  if (control.phase !== "durable") {
+    const seeds = await readPresentationSeeds(
+      repository,
+      inviteId,
+      matchId,
+      invite,
+    );
+    requirePresentationActor(Object.keys(seeds), dependencies.requiredActorUid);
+    if (!dependencies.room.ensurePresentations)
+      throw new TypeError("presentation-room-unavailable");
+    return {
+      canonical: false,
+      snapshot: await dependencies.room.ensurePresentations(matchId, seeds),
+    };
+  }
+  const current = await (
+    dependencies.readRegisteredPresentations || readRegisteredMatchPresentations
+  )(env, inviteId, matchId);
+  if (!isMatchPresentationSnapshot(current) || current.matchId !== matchId)
+    throw new Error("presentation-unavailable");
+  const players = Object.fromEntries(
+    Object.entries(current.players).filter(
+      ([actorUid]) => actorUid === invite.hostId || actorUid === invite.guestId,
+    ),
+  );
+  if (!Object.keys(players).length)
+    throw new AuthApiFailure(404, "not-found", "match-not-found");
+  requirePresentationActor(Object.keys(players), dependencies.requiredActorUid);
+  return {
+    canonical: true,
+    snapshot: { matchId, players },
+  };
+}
+
+function requirePresentationActor(
+  actorUids: string[],
+  requiredActorUid?: string,
+): void {
+  if (requiredActorUid && !actorUids.includes(requiredActorUid))
+    throw new AuthApiFailure(
+      409,
+      "failed-precondition",
+      "actor-match-not-found",
+    );
 }

@@ -1,3 +1,4 @@
+import { normalizeHistoricalMatchRecord } from "@mons/shared/game-sessions";
 import {
   createAutomatchD1Store,
   isAutomatchRevisionConflict,
@@ -7,6 +8,11 @@ import {
 import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
 import { buildLoginMatchDiscoveryStatements } from "./loginMatchDiscoveryD1.ts";
+import {
+  buildMatchPresentationRegistrationStatements,
+  type MatchPresentationRegistration,
+  type PrepareMatchPresentations,
+} from "./matchPresentationRegistry.ts";
 import {
   acquireInviteSourceAdmission,
   createInviteSourceD1Store,
@@ -94,6 +100,7 @@ export type GameSessionTransitionsOptions = {
   now?: () => number;
   createId?: () => string;
   onCommitted?: (inviteId: string) => Promise<void>;
+  prepareMatchPresentations?: PrepareMatchPresentations;
   writeGuards?: () => D1PreparedStatement[] | Promise<D1PreparedStatement[]>;
 };
 
@@ -425,6 +432,7 @@ export function createGameSessionTransitions({
   now = Date.now,
   createId = () => crypto.randomUUID(),
   onCommitted,
+  prepareMatchPresentations,
   writeGuards = () => [],
 }: GameSessionTransitionsOptions) {
   const inviteGuards = ({ admission, control }: InviteOperation) => [
@@ -497,7 +505,7 @@ export function createGameSessionTransitions({
     payload: TransitionPayload,
     operation: InviteOperation,
     signal?: AbortSignal,
-  ): Promise<void> {
+  ): Promise<MatchPresentationRegistration[]> {
     await assertInviteOperation(operation);
     if (
       (payload.version === 1 && operation.control.backend !== "rtdb") ||
@@ -531,7 +539,34 @@ export function createGameSessionTransitions({
         signal,
       );
     }
-    if (payload.version === 2) return;
+    signal?.throwIfAborted();
+    const presentations = prepareMatchPresentations
+      ? await prepareMatchPresentations(
+          payload.creations.map((creation) => {
+            const [root, actorUid, matches, matchId, extra] = pathParts(
+              creation.path,
+            );
+            const match = normalizeHistoricalMatchRecord(creation.value);
+            if (
+              root !== "players" ||
+              matches !== "matches" ||
+              !matchId ||
+              extra ||
+              !match
+            )
+              fail("invalid-match-presentation-creation");
+            return {
+              inviteId: payload.inviteId,
+              matchId,
+              actorUid,
+              emojiId: match.emojiId,
+              aura: match.aura,
+              sourceId: creation.marker,
+            };
+          }),
+        )
+      : [];
+    if (payload.version === 2) return presentations;
     signal?.throwIfAborted();
     await assertInviteOperation(operation);
     await rtdb.transactPath(
@@ -569,6 +604,7 @@ export function createGameSessionTransitions({
       },
       signal,
     );
+    return presentations;
   }
 
   async function applyState(
@@ -579,13 +615,18 @@ export function createGameSessionTransitions({
     if (row.status === "completed") return;
     const payload = readPayload(row);
     try {
-      await materialize(payload, operation, signal);
+      const presentations = await materialize(payload, operation, signal);
       signal?.throwIfAborted();
       const active = await read(payload.transitionId);
       if (!active || active.status === "completed") return;
       const statements = [
         ...(await writeGuards()),
         ...inviteGuards(operation),
+        ...buildMatchPresentationRegistrationStatements(
+          db,
+          presentations,
+          now(),
+        ),
         db
           .prepare(
             `INSERT INTO game_session_transition_guards (singleton)

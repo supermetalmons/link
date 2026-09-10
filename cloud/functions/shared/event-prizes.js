@@ -10,6 +10,8 @@ const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_ID = "VOxalSrexcA";
 const ARTIFACT_MAGAZINE_3_PRIZES_EVENT_2_ID = "oXAceF6anag";
 const RARE_WEITSMANS_PRIZES_EVENT_ID = "RpPjMNyrJJa";
 const PLANET_PEPPA_PRIZES_EVENT_ID = "z3oj52Iiime";
+const SHELVES_PRIZES_EVENT_ID = "Q7uRdLXyVKF";
+const VEHICLE_WAMMIN_PRIZES_EVENT_ID = "wjFa2d03Ciu";
 const CORE_PRIZE_COLLECTION_ADDRESS =
   "2xF7dq3maFLud8FQUYAyLiWucdF7RePyzHJs7NkurkoD";
 const COMPRESSED_PRIZE_COLLECTION_ADDRESS =
@@ -20,6 +22,10 @@ const RARE_WEITSMANS_COLLECTION_ADDRESS =
   "3Rb9mG22dkAFVA8PVRgD76SiHUwUTK38Kq55NkrZuR2k";
 const PLANET_PEPPA_COLLECTION_ADDRESS =
   "9irtKRLZkY4MjFFQNZPX3o6ZTszfR8kXFJXPBUvEDo9v";
+const SHELVES_COLLECTION_ADDRESS =
+  "BsnjB6xDv2HNenoZiNFDE1uMZVj86ciXwYAX75nUTDSt";
+const VEHICLE_WAMMIN_COLLECTION_ADDRESS =
+  "BBkMWyu4RRrNSdjGDV27FGgZZ58o7jfvQY1MrD2iTfs6";
 const SCARECROW_PRIZE_IMAGE_SIZE = Object.freeze({
   imageWidth: 420,
   imageHeight: 525,
@@ -39,6 +45,14 @@ const RARE_WEITSMANS_IMAGE_SIZE = Object.freeze({
 const PLANET_PEPPA_IMAGE_SIZE = Object.freeze({
   imageWidth: 1200,
   imageHeight: 1200,
+});
+const SHELVES_IMAGE_SIZE = Object.freeze({
+  imageWidth: 1320,
+  imageHeight: 1951,
+});
+const VEHICLE_WAMMIN_IMAGE_SIZE = Object.freeze({
+  imageWidth: 1000,
+  imageHeight: 1000,
 });
 
 const createPrize = ({
@@ -262,6 +276,72 @@ const EVENT_PRIZE_CONFIGS = Object.freeze({
       }),
     ]),
   }),
+  [SHELVES_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: SHELVES_PRIZES_EVENT_ID,
+    collectionName: "Shelves",
+    prizes: Object.freeze([
+      createPrize({
+        ...SHELVES_IMAGE_SIZE,
+        id: "865",
+        imageUrl: "https://cdn.lil.org/player/shelves/mid/865.webp",
+        assetAddress: "BuAjut5Ks3Yz3PKsrCjKxsk7B5bDBSJzjXQRTarbwkwD",
+        collectionAddress: SHELVES_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...SHELVES_IMAGE_SIZE,
+        id: "1643",
+        imageUrl: "https://cdn.lil.org/player/shelves/mid/1643.webp",
+        assetAddress: "7H1vUoGWLxpgGqDJsH1Nr1tmQTFQKE7yWnRqyXAuFuvj",
+        collectionAddress: SHELVES_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...SHELVES_IMAGE_SIZE,
+        id: "1213",
+        imageUrl: "https://cdn.lil.org/player/shelves/mid/1213.webp",
+        assetAddress: "2bRdHBoJUtYfYBzpmWbQD5hqkpypjk43i2AiGJwc2UaN",
+        collectionAddress: SHELVES_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
+  [VEHICLE_WAMMIN_PRIZES_EVENT_ID]: Object.freeze({
+    eventId: VEHICLE_WAMMIN_PRIZES_EVENT_ID,
+    collectionName: "Vehicle Wammin",
+    prizes: Object.freeze([
+      createPrize({
+        ...VEHICLE_WAMMIN_IMAGE_SIZE,
+        id: "1241",
+        imageUrl: "https://cdn.lil.org/player/vehicle_wammin/mid/1241.webp",
+        assetAddress: "5hNqZsyBS4fJvUAyUEmmD1mn23B8D8nQQKJ9b55ZZSJE",
+        collectionAddress: VEHICLE_WAMMIN_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...VEHICLE_WAMMIN_IMAGE_SIZE,
+        id: "443",
+        imageUrl: "https://cdn.lil.org/player/vehicle_wammin/mid/443.webp",
+        assetAddress: "Bvr7KVjxHvbx91Y6oXDqZFuVh88Amtwpy5MHPYhvrjX4",
+        collectionAddress: VEHICLE_WAMMIN_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+      createPrize({
+        ...VEHICLE_WAMMIN_IMAGE_SIZE,
+        id: "1274",
+        imageUrl: "https://cdn.lil.org/player/vehicle_wammin/mid/1274.webp",
+        assetAddress: "Fzz4SWp9LDbMv17MmL1KV4odb1DJ4sJys6w91NaWLsEW",
+        collectionAddress: VEHICLE_WAMMIN_COLLECTION_ADDRESS,
+        standard: "compressed",
+        claimAvailable: true,
+      }),
+    ]),
+  }),
 });
 
 const EVENT_PRIZE_IDS = Object.freeze(
@@ -465,6 +545,8 @@ module.exports = {
   LEGACY_CORE_PRIZES_EVENT_ID,
   PLANET_PEPPA_PRIZES_EVENT_ID,
   RARE_WEITSMANS_PRIZES_EVENT_ID,
+  SHELVES_PRIZES_EVENT_ID,
+  VEHICLE_WAMMIN_PRIZES_EVENT_ID,
   getEventPrizeConfig,
   getEventPrizeDefinition,
   getEventPrizeDefinitions,

@@ -44,6 +44,15 @@ import {
 import { MatchSyncRoom } from "./matchSyncRoom.ts";
 import type { MatchSyncReadResult } from "./matchSync.ts";
 import {
+  assertMatchPresentationRegistration,
+  listMatchPresentationRegistrations,
+  matchPresentationSeedDigest,
+  selectRegisteredPresentations,
+  type MatchPresentationRegistration,
+  type MatchPresentationSeedRegistration,
+  type RegisteredMatchPresentationSnapshot,
+} from "./matchPresentationRegistry.ts";
+import {
   readSocketSession,
   socketSessionCurrent,
   SocketSessions,
@@ -107,6 +116,17 @@ type StoredPresentation = {
   revision: number;
   operation_id: string | null;
   operation_json: string | null;
+};
+
+type StoredPresentationSeed = {
+  invite_id: string;
+  match_id: string;
+  actor_uid: string;
+  seed_digest: string;
+  emoji_id: number;
+  aura: string;
+  provenance: "creation" | "backfill";
+  source_id: string;
 };
 
 export type MatchPresentationSeeds = Record<
@@ -200,6 +220,9 @@ export class InviteReactions extends DurableObject<Env> {
       "CREATE TABLE IF NOT EXISTS frozen_match_presentations (match_id TEXT NOT NULL, actor_uid TEXT NOT NULL, emoji_id INTEGER NOT NULL, aura TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(match_id, actor_uid))",
     );
     this.ctx.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS match_presentation_seeds (match_id TEXT NOT NULL, actor_uid TEXT NOT NULL, invite_id TEXT NOT NULL, seed_digest TEXT NOT NULL, emoji_id INTEGER NOT NULL, aura TEXT NOT NULL, provenance TEXT NOT NULL, source_id TEXT NOT NULL, PRIMARY KEY(match_id, actor_uid))",
+    );
+    this.ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS invite_metadata (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), invite_id TEXT NOT NULL, snapshot_json TEXT, revision INTEGER NOT NULL)",
     );
     this.ctx.storage.sql.exec(
@@ -264,6 +287,28 @@ export class InviteReactions extends DurableObject<Env> {
     ) {
       return new Response("Invalid presentation match", { status: 400 });
     }
+    let canonicalActors: string[] | null = null;
+    if (request.headers.get("X-Mons-Presentation-Canonical") === "1") {
+      try {
+        const value: unknown = JSON.parse(
+          decodeURIComponent(
+            request.headers.get("X-Mons-Presentation-Actors") || "",
+          ),
+        );
+        if (
+          version !== 2 ||
+          !Array.isArray(value) ||
+          !value.length ||
+          value.length > 2 ||
+          value.some((uid) => !isCanonicalFirebaseUid(uid))
+        ) {
+          return new Response("Invalid presentation actors", { status: 400 });
+        }
+        canonicalActors = value;
+      } catch {
+        return new Response("Invalid presentation actors", { status: 400 });
+      }
+    }
     if (!["host", "guest", "spectator"].includes(role) || ip.length > 64) {
       return new Response("Invalid reaction admission", { status: 400 });
     }
@@ -271,6 +316,48 @@ export class InviteReactions extends DurableObject<Env> {
     if (!session) return new Response("Session expired", { status: 401 });
     if (session.authenticated)
       await this.scheduleInviteAlarm(session.authExpiresAtMs);
+    let canonicalRegistrations: MatchPresentationRegistration[] | null = null;
+    if (canonicalActors) {
+      const { invite_id: inviteId } = this.ctx.storage.sql
+        .exec<Pick<StoredMetadata, "invite_id">>(
+          "SELECT invite_id FROM invite_metadata WHERE singleton = 1",
+        )
+        .one();
+      const actors = canonicalActors;
+      const before = this.readPresentations(matchId!).players;
+      const read = async () =>
+        (
+          await listMatchPresentationRegistrations(
+            this.env.PROFILE_GAMES_DB,
+            inviteId,
+            matchId!,
+          )
+        ).filter((row) => actors.includes(row.actorUid));
+      canonicalRegistrations = await read();
+      if (!canonicalRegistrations.length)
+        throw new Error("match-presentation-unavailable");
+      const registeredActors = new Set(
+        canonicalRegistrations.map((row) => row.actorUid),
+      );
+      const missedUpdates = Object.values(
+        this.readPresentations(matchId!).players,
+      )
+        .filter(
+          (value) =>
+            actors.includes(value.actorUid) &&
+            !registeredActors.has(value.actorUid) &&
+            value.revision > (before[value.actorUid]?.revision ?? 0),
+        )
+        .map((value) => value.actorUid);
+      if (missedUpdates.length) {
+        canonicalRegistrations = await read();
+        const refreshedActors = new Set(
+          canonicalRegistrations.map((row) => row.actorUid),
+        );
+        if (missedUpdates.some((actorUid) => !refreshedActors.has(actorUid)))
+          throw new Error("match-presentation-unavailable");
+      }
+    }
     if (!socketSessionCurrent(session))
       return new Response("Session expired", { status: 401 });
     const allSockets = this.ctx.getWebSockets();
@@ -307,7 +394,13 @@ export class InviteReactions extends DurableObject<Env> {
             schemaVersion: 2,
             type: "snapshot",
             reactions,
-            presentation: this.readPresentations(matchId!),
+            presentation: canonicalRegistrations
+              ? selectRegisteredPresentations(
+                  matchId!,
+                  canonicalRegistrations,
+                  this.registeredPresentationSnapshot(matchId!),
+                )
+              : this.readPresentations(matchId!),
           }
         : {
             schemaVersion: REACTION_PROTOCOL_VERSION,
@@ -922,6 +1015,18 @@ export class InviteReactions extends DurableObject<Env> {
       throw new TypeError("presentation-participant-limit");
     }
     for (const [actorUid, seed] of Object.entries(seeds)) {
+      if (
+        !Object.hasOwn(current.players, actorUid) &&
+        this.ctx.storage.sql
+          .exec(
+            "SELECT 1 FROM match_presentation_seeds WHERE match_id = ? AND actor_uid = ?",
+            matchId,
+            actorUid,
+          )
+          .toArray().length
+      ) {
+        throw new Error("match-presentation-unavailable");
+      }
       this.ctx.storage.sql.exec(
         "INSERT OR IGNORE INTO match_presentations (match_id, actor_uid, emoji_id, aura, revision) VALUES (?, ?, ?, ?, 0)",
         matchId,
@@ -946,6 +1051,170 @@ export class InviteReactions extends DurableObject<Env> {
     matchId: string,
   ): Promise<MatchPresentationSnapshot> {
     return this.readPresentations(matchId);
+  }
+
+  private readCanonicalPresentationPlayers(
+    matchId: string,
+    actorUids: readonly string[],
+  ): MatchPresentationSnapshot {
+    const snapshot = this.registeredPresentationSnapshot(matchId);
+    const players = Object.fromEntries(
+      actorUids.map((actorUid) => {
+        if (!Object.hasOwn(snapshot.players, actorUid))
+          throw new Error("match-presentation-unavailable");
+        return [actorUid, snapshot.players[actorUid]];
+      }),
+    );
+    return { matchId, players };
+  }
+
+  private registeredPresentationSnapshot(
+    matchId: string,
+  ): RegisteredMatchPresentationSnapshot {
+    if (!isSafeFirebaseKey(matchId))
+      throw new TypeError("invalid-presentation-match");
+    const seeds = this.ctx.storage.sql
+      .exec<StoredPresentationSeed>(
+        "SELECT * FROM match_presentation_seeds WHERE match_id = ? ORDER BY actor_uid",
+        matchId,
+      )
+      .toArray();
+    const current = this.readPresentations(matchId);
+    const players = Object.fromEntries(
+      seeds.map((seed) => {
+        if (!Object.hasOwn(current.players, seed.actor_uid))
+          throw new Error("match-presentation-unavailable");
+        return [seed.actor_uid, current.players[seed.actor_uid]];
+      }),
+    );
+    const seedDigests = Object.fromEntries(
+      seeds.map((seed) => [seed.actor_uid, seed.seed_digest]),
+    );
+    const snapshot = { matchId, players, seedDigests };
+    if (!isMatchPresentationSnapshot({ matchId, players }))
+      throw new Error("match-presentation-unavailable");
+    return snapshot;
+  }
+
+  async registerPresentationSeeds(
+    inviteId: string,
+    seeds: MatchPresentationSeedRegistration[],
+  ): Promise<MatchPresentationRegistration[]> {
+    if (!seeds.length || seeds.length > 100)
+      throw new TypeError("invalid-presentation-seed-batch");
+    for (const seed of seeds) {
+      assertMatchPresentationRegistration(seed);
+      if (
+        seed.inviteId !== inviteId ||
+        (await matchPresentationSeedDigest(seed)) !== seed.seedDigest
+      )
+        throw new TypeError("invalid-presentation-seed-digest");
+    }
+    return this.ctx.storage.transactionSync(() => {
+      this.pinInvite(inviteId);
+      return seeds.map((seed) => {
+        const existing = this.ctx.storage.sql
+          .exec<StoredPresentationSeed>(
+            "SELECT * FROM match_presentation_seeds WHERE match_id = ? AND actor_uid = ?",
+            seed.matchId,
+            seed.actorUid,
+          )
+          .toArray()[0];
+        if (
+          existing &&
+          (existing.invite_id !== inviteId ||
+            existing.seed_digest !== seed.seedDigest ||
+            existing.emoji_id !== seed.emojiId ||
+            existing.aura !== seed.aura)
+        ) {
+          throw new Error("match-presentation-seed-conflict");
+        }
+        if (
+          existing &&
+          !Object.hasOwn(
+            this.readPresentations(seed.matchId).players,
+            seed.actorUid,
+          )
+        ) {
+          throw new Error("match-presentation-unavailable");
+        }
+        this.initializePresentations(seed.matchId, {
+          [seed.actorUid]: { emojiId: seed.emojiId, aura: seed.aura },
+        });
+        this.ctx.storage.sql.exec(
+          "INSERT OR IGNORE INTO match_presentation_seeds (match_id, actor_uid, invite_id, seed_digest, emoji_id, aura, provenance, source_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+          seed.matchId,
+          seed.actorUid,
+          inviteId,
+          seed.seedDigest,
+          seed.emojiId,
+          seed.aura,
+          seed.provenance,
+          seed.sourceId,
+        );
+        const snapshot = this.registeredPresentationSnapshot(seed.matchId);
+        if (snapshot.seedDigests[seed.actorUid] !== seed.seedDigest)
+          throw new Error("match-presentation-seed-unacknowledged");
+        return {
+          inviteId,
+          matchId: seed.matchId,
+          actorUid: seed.actorUid,
+          seedDigest: seed.seedDigest,
+          provenance: existing?.provenance || seed.provenance,
+          sourceId: existing?.source_id || seed.sourceId,
+        };
+      });
+    });
+  }
+
+  async getRegisteredPresentationSnapshot(
+    matchId: string,
+  ): Promise<RegisteredMatchPresentationSnapshot> {
+    return this.registeredPresentationSnapshot(matchId);
+  }
+
+  async getFrozenPresentationSnapshot(
+    matchId: string,
+  ): Promise<MatchPresentationSnapshot> {
+    if (!isSafeFirebaseKey(matchId))
+      throw new TypeError("invalid-presentation-match");
+    return this.readPresentations(matchId, true);
+  }
+
+  async freezeRegisteredPresentations(
+    matchId: string,
+    actorUids: string[],
+  ): Promise<MatchPresentationSnapshot> {
+    if (
+      !actorUids.length ||
+      actorUids.length > 2 ||
+      actorUids.some((uid) => !isCanonicalFirebaseUid(uid))
+    )
+      throw new TypeError("invalid-presentation-actors");
+    return this.ctx.storage.transactionSync(() => {
+      const frozen = this.readPresentations(matchId, true);
+      const missing = actorUids.filter(
+        (uid) => !Object.hasOwn(frozen.players, uid),
+      );
+      if (missing.length) {
+        const snapshot = this.readCanonicalPresentationPlayers(
+          matchId,
+          missing,
+        );
+        for (const actorUid of missing) {
+          const value = snapshot.players[actorUid];
+          this.ctx.storage.sql.exec(
+            "INSERT OR IGNORE INTO frozen_match_presentations (match_id, actor_uid, emoji_id, aura, revision) VALUES (?, ?, ?, ?, ?)",
+            matchId,
+            actorUid,
+            value.emojiId,
+            value.aura,
+            value.revision,
+          );
+        }
+      }
+      return this.readPresentations(matchId, true);
+    });
   }
 
   async freezePresentations(

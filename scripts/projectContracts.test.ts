@@ -171,6 +171,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.deepEqual(config.secrets, {
     required: [
       "SESSION_JWT_KEYS",
+      "MATCH_PRESENTATION_MIGRATION_SECRET",
       "FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL",
       "FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY",
       "GAMEPLAY_SERVICE_ACCOUNT_EMAIL",

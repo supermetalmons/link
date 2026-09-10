@@ -141,6 +141,79 @@ describe("historical match presentation", () => {
     expect((await stored()).pair.hostMatch?.emojiId).toBe(12);
   });
 
+  it("durable archives freeze registered actors without passing Firebase appearance seeds", async () => {
+    const canonicalFreeze = vi.fn(async () => snapshot());
+    const legacyFreeze = vi.fn<FreezeHistoricalMatchPresentations>(async () => {
+      throw new Error("unexpected-legacy-freeze");
+    });
+    const runtime = createProfileGameProjectionRuntime(env, {
+      readPresentationControl: async () => ({ phase: "durable" }),
+      freezePresentations: legacyFreeze,
+      freezeRegisteredPresentations: canonicalFreeze,
+      now: () => 2_000,
+      rtdb: {
+        getRtdbPath: async () => {
+          throw new Error("unexpected-firebase-read");
+        },
+      },
+    });
+    await runtime.archiveHistoricalMatch!(archiveInput());
+    expect(canonicalFreeze).toHaveBeenCalledExactlyOnceWith(
+      env,
+      inviteId,
+      inviteId,
+      ["host", "guest"],
+    );
+    expect(legacyFreeze).not.toHaveBeenCalled();
+    expect((await stored()).pair.hostMatch?.emojiId).toBe(12);
+    expect((await stored()).pair.guestMatch?.emojiId).toBe(14);
+
+    const replay = createProfileGameProjectionRuntime(env, {
+      readPresentationControl: async () => {
+        throw new Error("unnecessary-authority-read");
+      },
+      freezeRegisteredPresentations: async () => {
+        throw new Error("unnecessary-do-read");
+      },
+      rtdb: {
+        getRtdbPath: async () => {
+          throw new Error("unexpected-firebase-read");
+        },
+      },
+    });
+    await replay.archiveHistoricalMatch!(archiveInput());
+    expect((await stored()).revision).toBe(1);
+  });
+
+  it("missing durable appearance leaves archival retryable without legacy seed initialization", async () => {
+    const legacyFreeze = vi.fn<FreezeHistoricalMatchPresentations>(async () =>
+      snapshot(),
+    );
+    const runtime = createProfileGameProjectionRuntime(env, {
+      readPresentationControl: async () => ({ phase: "durable" }),
+      freezePresentations: legacyFreeze,
+      freezeRegisteredPresentations: async () => {
+        throw new Error("registered-presentation-missing");
+      },
+      rtdb: {
+        getRtdbPath: async () => {
+          throw new Error("unexpected-firebase-read");
+        },
+      },
+    });
+    await expect(
+      runtime.archiveHistoricalMatch!(archiveInput()),
+    ).rejects.toThrow("registered-presentation-missing");
+    expect(legacyFreeze).not.toHaveBeenCalled();
+    expect(
+      await readHistoricalMatchSnapshot(
+        env.PROFILE_GAMES_DB,
+        inviteId,
+        inviteId,
+      ),
+    ).toBeNull();
+  });
+
   it("leaves history retryable when the DO is unavailable", async () => {
     const unavailable = vi.fn<FreezeHistoricalMatchPresentations>(async () => {
       throw new Error("do-unavailable");
