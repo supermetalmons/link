@@ -3,9 +3,10 @@ import { chmodSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { isAbsolute, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { Readable, type Transform } from "node:stream";
+import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { pathToFileURL } from "node:url";
+import { parserStream } from "stream-json";
 import { assertFirebaseInviteSourceAvailable } from "./invite-source-retirement.ts";
 import {
   canonicalJson,
@@ -28,9 +29,6 @@ const { matchDiscoverySortKey, resolveMatchDiscoveryInvite } =
       hasInvite: (inviteId: string) => Promise<boolean>,
     ): Promise<{ inviteId: string | null; resolution: Resolution }>;
   };
-const { parser } = require("stream-json") as {
-  parser(options: Record<string, boolean>): Transform;
-};
 const ROOT = resolve(import.meta.dirname, "..");
 const DATABASE = "mons-link-profile-games";
 const FIREBASE_ROOT = "https://mons-link-default-rtdb.firebaseio.com";
@@ -185,7 +183,7 @@ function parseArgs(argv: string[]): Arguments {
 }
 
 async function* parseShallowKeys(source: Readable): AsyncGenerator<string> {
-  const tokens = parser({
+  const tokens = parserStream({
     packKeys: false,
     packStrings: false,
     packNumbers: false,

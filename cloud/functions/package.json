@@ -10,7 +10,7 @@
   "dependencies": {
     "@mons/shared": "file:shared",
     "bs58": "^6.0.0",
-    "mons-rules": "0.4.9"
+    "mons-rules": "0.4.11"
   },
   "optionalDependencies": {
     "utf-8-validate": "6.0.6"
