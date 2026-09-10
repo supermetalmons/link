@@ -103,15 +103,15 @@ const presentationControlStatement: D1PreparedStatement = {
   bind: () => presentationControlStatement,
   first: async <T>() =>
     ({
-      phase: "legacy",
-      candidate_version_id: null,
-      migration_id: null,
-      capture_started_at_ms: null,
-      source_digest: null,
-      source_count: null,
-      verification_digest: null,
-      verified_at_ms: null,
-      activated_at_ms: null,
+      phase: "durable",
+      candidate_version_id: "00000000-0000-4000-8000-000000000001",
+      migration_id: "00000000-0000-4000-8000-000000000002",
+      capture_started_at_ms: 1,
+      source_digest: "a".repeat(64),
+      source_count: 0,
+      verification_digest: "b".repeat(64),
+      verified_at_ms: 2,
+      activated_at_ms: 3,
     }) as T,
 };
 
@@ -128,15 +128,15 @@ function inviteSourceStatement(
       (query.includes("INSERT INTO invite_source_write_admissions")
         ? { admission_id: bindings[0] }
         : {
-            backend: "rtdb",
+            backend: "d1",
             state: "active",
-            epoch: 0,
+            epoch: 1,
             freeze_generation: 0,
-            candidate_version_id: null,
-            source_digest: null,
-            import_digest: null,
-            verified_at_ms: null,
-            activated_at_ms: null,
+            candidate_version_id: "00000000-0000-4000-8000-000000000001",
+            source_digest: "a".repeat(64),
+            import_digest: "a".repeat(64),
+            verified_at_ms: 2,
+            activated_at_ms: 3,
             metadata_json: null,
           }) as T,
   };
@@ -157,22 +157,26 @@ function automatchStatement(
             admission_id: bindings[0],
             kind: bindings[1],
             created_at_ms: bindings[2],
-            backend: "rtdb",
+            backend: "d1",
             epoch: 1,
             freeze_generation: 0,
           }
         : {
-            backend: "rtdb",
+            backend: "d1",
             state: "active",
             epoch: 1,
             freeze_generation: 0,
-            staged_at_ms: null,
-            candidate_version_id: null,
-            imported_at_ms: null,
-            source_digest: null,
-            import_digest: null,
-            activated_at_ms: null,
-            metadata_json: null,
+            staged_at_ms: 1,
+            candidate_version_id: "00000000-0000-4000-8000-000000000001",
+            imported_at_ms: 2,
+            source_digest: "a".repeat(64),
+            import_digest: "a".repeat(64),
+            activated_at_ms: 3,
+            metadata_json: JSON.stringify({
+              verifiedAtMs: 2,
+              activationCandidateVersionId:
+                "00000000-0000-4000-8000-000000000001",
+            }),
           }) as T,
   };
 }
@@ -349,4 +353,56 @@ export function withProfileControl(
     ),
   } satisfies D1Database;
   return { ...environment, PROFILE_DB: database };
+}
+
+export function withInviteSourceReads(
+  environment: Env,
+  readSource: (inviteId: string) => unknown | Promise<unknown>,
+): Env {
+  const wrapPrepare =
+    (prepare: D1Database["prepare"]): D1Database["prepare"] =>
+    (query) => {
+      if (
+        query !==
+        "SELECT source_json, revision FROM invite_sources WHERE invite_id = ?"
+      )
+        return prepare(query);
+      const statement = (bindings: unknown[] = []): D1PreparedStatement => ({
+        all: d1Statement.all,
+        raw: d1Statement.raw,
+        run: d1Statement.run,
+        bind: (...values) => statement(values),
+        first: async <T>() => {
+          if (bindings.length !== 1 || typeof bindings[0] !== "string")
+            throw new Error("invalid-test-invite-source-query");
+          const source = await readSource(bindings[0]);
+          return source === null || source === undefined
+            ? null
+            : ({
+                source_json: JSON.stringify(source),
+                revision: 1,
+              } as T);
+        },
+      });
+      return statement();
+    };
+  const database: D1Database = {
+    batch: environment.PROFILE_GAMES_DB.batch.bind(
+      environment.PROFILE_GAMES_DB,
+    ),
+    dump: environment.PROFILE_GAMES_DB.dump.bind(environment.PROFILE_GAMES_DB),
+    exec: environment.PROFILE_GAMES_DB.exec.bind(environment.PROFILE_GAMES_DB),
+    prepare: wrapPrepare(
+      environment.PROFILE_GAMES_DB.prepare.bind(environment.PROFILE_GAMES_DB),
+    ),
+    withSession: (...args) => {
+      const session = environment.PROFILE_GAMES_DB.withSession(...args);
+      return {
+        batch: session.batch.bind(session),
+        getBookmark: session.getBookmark.bind(session),
+        prepare: wrapPrepare(session.prepare.bind(session)),
+      };
+    },
+  };
+  return { ...environment, PROFILE_GAMES_DB: database };
 }

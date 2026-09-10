@@ -235,10 +235,10 @@ export async function prepareCreatedMatchPresentations(
 ): Promise<MatchPresentationRegistration[]> {
   if (creations.length === 0) return [];
   if (
-    (await readMatchPresentationControl(env.PROFILE_GAMES_DB)).phase ===
-    "legacy"
+    (await readMatchPresentationControl(env.PROFILE_GAMES_DB)).phase !==
+    "durable"
   )
-    return [];
+    throw new Error("match-presentation-authority-not-active");
   const groups = new Map<string, MatchPresentationSeedRegistration[]>();
   for (const creation of creations) {
     const row: MatchPresentationSeedRegistration = {

@@ -32,10 +32,7 @@ import {
 } from "./profileGamesD1.ts";
 import { readHistoricalMatchSnapshot } from "./historicalMatchesD1.ts";
 import type { HistoricalMatchSource } from "./historicalMatches.ts";
-import {
-  archiveHistoricalMatchWithPresentation,
-  type FreezeHistoricalMatchPresentations,
-} from "./historicalMatchPresentation.ts";
+import { archiveHistoricalMatchWithPresentation } from "./historicalMatchPresentation.ts";
 import { readRatingCompletion } from "./ratingCompletionD1.ts";
 import {
   captureEventMatchDiscovery,
@@ -80,7 +77,6 @@ export type EventProfileGameProjectionRuntime = {
 
 type ProfileGameProjectionDependencies = MatchPresentationReadDependencies & {
   d1?: D1Database;
-  freezePresentations?: FreezeHistoricalMatchPresentations;
   freezeRegisteredPresentations?: typeof freezeRegisteredMatchPresentations;
   logger?: Pick<Console, "error">;
   now?: () => number;
@@ -210,15 +206,12 @@ export function createProfileGameProjectionRuntime(
 
     async getMatchEmoji(inviteId, matchId, loginUid) {
       const control = await readPresentationControl();
-      const snapshot =
-        control.phase === "durable"
-          ? await (
-              dependencies.readRegisteredPresentations ||
-              readRegisteredMatchPresentations
-            )(env, inviteId, matchId)
-          : await env.INVITE_REACTIONS.getByName(
-              inviteId,
-            ).getPresentationSnapshot(matchId);
+      if (control.phase !== "durable")
+        throw new Error("match-presentation-authority-not-active");
+      const snapshot = await (
+        dependencies.readRegisteredPresentations ||
+        readRegisteredMatchPresentations
+      )(env, inviteId, matchId);
       if (
         !isMatchPresentationSnapshot(snapshot) ||
         snapshot.matchId !== matchId
@@ -228,10 +221,6 @@ export function createProfileGameProjectionRuntime(
       return Object.hasOwn(snapshot.players, loginUid)
         ? snapshot.players[loginUid].emojiId
         : null;
-    },
-
-    async allowRtdbMatchEmojiFallback() {
-      return (await readPresentationControl()).phase !== "durable";
     },
 
     hasCompletedRatingUpdate: (inviteId, matchId) =>
@@ -263,18 +252,12 @@ export function createProfileGameProjectionRuntime(
           ),
         },
         async (inviteId, matchId, seeds) => {
-          if ((await readPresentationControl()).phase === "durable") {
-            return (
-              dependencies.freezeRegisteredPresentations ||
-              freezeRegisteredMatchPresentations
-            )(env, inviteId, matchId, Object.keys(seeds));
-          }
-          return dependencies.freezePresentations
-            ? dependencies.freezePresentations(inviteId, matchId, seeds)
-            : env.INVITE_REACTIONS.getByName(inviteId).freezePresentations(
-                matchId,
-                seeds,
-              );
+          if ((await readPresentationControl()).phase !== "durable")
+            throw new Error("match-presentation-authority-not-active");
+          return (
+            dependencies.freezeRegisteredPresentations ||
+            freezeRegisteredMatchPresentations
+          )(env, inviteId, matchId, Object.keys(seeds));
         },
       );
     },

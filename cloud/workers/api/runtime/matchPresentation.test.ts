@@ -23,6 +23,11 @@ import {
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { handleRequest } from "../src/router.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+import { activateDurableMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
+import {
+  buildMatchPresentationRegistrationStatements,
+  prepareCreatedMatchPresentations,
+} from "../src/matchPresentationRegistry.ts";
 
 beforeAll(async () => {
   const testEnv = env as Env & {
@@ -30,6 +35,15 @@ beforeAll(async () => {
     TEST_D1_MIGRATIONS: D1Migration[];
   };
   await applyD1Migrations(env.PROFILE_GAMES_DB, testEnv.TEST_D1_MIGRATIONS);
+  await env.PROFILE_GAMES_DB.batch([
+    env.PROFILE_GAMES_DB.prepare(
+      "UPDATE automatch_runtime_control SET backend = 'd1' WHERE singleton = 1",
+    ),
+    env.PROFILE_GAMES_DB.prepare(
+      "UPDATE invite_source_control SET backend = 'd1', state = 'active', epoch = 1, verified_at_ms = 2, activated_at_ms = 3 WHERE singleton = 1",
+    ),
+  ]);
+  await activateDurableMatchPresentationTestState(env.PROFILE_GAMES_DB);
   await applyRetiredProfileMigrations(
     env.PROFILE_DB,
     testEnv.TEST_PROFILE_D1_MIGRATIONS,
@@ -54,6 +68,46 @@ const update = (
 });
 const room = () =>
   env.INVITE_REACTIONS.getByName(`presentation-${crypto.randomUUID()}`);
+
+async function registeredRepository(
+  inviteId: string,
+  actorSeeds: Record<string, { emojiId: number; aura: string }>,
+) {
+  const actors = Object.keys(actorSeeds);
+  const registrations = await prepareCreatedMatchPresentations(
+    env,
+    actors.map((actorUid) => ({
+      inviteId,
+      matchId: inviteId,
+      actorUid,
+      ...actorSeeds[actorUid],
+      sourceId: "test:router-creation",
+    })),
+  );
+  await env.PROFILE_GAMES_DB.batch([
+    ...buildMatchPresentationRegistrationStatements(
+      env.PROFILE_GAMES_DB,
+      registrations,
+      1,
+    ),
+    env.PROFILE_GAMES_DB.prepare(
+      "INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
+    ).bind(inviteId, JSON.stringify({ hostId: actors[0], guestId: actors[1] })),
+  ]);
+  return createGameplayRepository(env, {
+    rtdbClient: {
+      getPath: async () => {
+        throw new Error("unexpected-firebase-read");
+      },
+      patchRoot: async () => {
+        throw new Error("unexpected-firebase-write");
+      },
+      transactPath: async () => {
+        throw new Error("unexpected-firebase-write");
+      },
+    },
+  });
+}
 
 function acceptSocket(response: Response) {
   expect(response.status).toBe(101);
@@ -336,27 +390,7 @@ describe("durable match presentation", () => {
 
   it("integrates participant updates and anonymous v2 hydration through the public router", async () => {
     const inviteId = `route-${crypto.randomUUID()}`;
-    const repository = createGameplayRepository(env, {
-      rtdbClient: {
-        getPath: async (path) =>
-          path === `invites/${inviteId}`
-            ? { hostId: "host-login", guestId: "guest-login" }
-            : path.startsWith("players/")
-              ? {
-                  color: path.includes("host-login") ? "white" : "black",
-                  emojiId: 1,
-                  aura: "",
-                  fen: "position",
-                }
-              : null,
-        patchRoot: async () => {
-          throw new Error("unexpected-firebase-write");
-        },
-        transactPath: async () => {
-          throw new Error("unexpected-firebase-write");
-        },
-      },
-    });
+    const repository = await registeredRepository(inviteId, seeds);
     const ctx = { waitUntil: (_promise: Promise<unknown>) => undefined };
     const dependencies = {
       repository,
@@ -441,25 +475,15 @@ describe("durable match presentation", () => {
   it("hydrates maximal escaped and Unicode legacy match keys through v2 routing", async () => {
     for (const inviteId of ['"\\'.repeat(384), "🫠".repeat(192)]) {
       const actors = ['"\\'.repeat(63) + "a", '"\\'.repeat(63) + "b"];
-      const repository = createGameplayRepository(env, {
-        rtdbClient: {
-          getPath: async (path) =>
-            path === `invites/${inviteId}`
-              ? { hostId: actors[0], guestId: actors[1] }
-              : {
-                  color: "white",
-                  emojiId: 1,
-                  aura: '"\\'.repeat(16),
-                  fen: "position",
-                },
-          patchRoot: async () => {
-            throw new Error("unexpected-firebase-write");
-          },
-          transactPath: async () => {
-            throw new Error("unexpected-firebase-write");
-          },
-        },
-      });
+      const repository = await registeredRepository(
+        inviteId,
+        Object.fromEntries(
+          actors.map((actorUid) => [
+            actorUid,
+            { emojiId: 1, aura: '"\\'.repeat(16) },
+          ]),
+        ),
+      );
       const stub = env.INVITE_REACTIONS.getByName(inviteId);
       for (const actorUid of actors)
         await stub.publish(actorUid, {

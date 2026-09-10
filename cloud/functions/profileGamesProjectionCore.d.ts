@@ -28,7 +28,6 @@ export type ProfileGamesProjectionRepository = {
     matchId: string,
     loginUid: string,
   ): Promise<number | null>;
-  allowRtdbMatchEmojiFallback?(): Promise<boolean>;
   hasCompletedRatingUpdate(inviteId: string, matchId: string): Promise<boolean>;
   readProfileOwnershipSnapshot(query: {
     loginUids: readonly string[];

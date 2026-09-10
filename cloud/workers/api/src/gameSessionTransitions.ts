@@ -38,25 +38,16 @@ export type GameSessionLeaseProof = {
 };
 
 type JsonRecord = Record<string, unknown>;
-type TransitionMarker = {
-  sequence: number;
-  transitionId: string;
-  digest: string;
-};
 type MatchCreation = {
   path: string;
   value: JsonRecord;
   marker: string;
 };
-type InviteEffect = {
-  existed: boolean;
-  expectedMarker: TransitionMarker | null;
-  expectedFields: JsonRecord;
-  updates: JsonRecord;
-  marker: TransitionMarker;
-};
-type TransitionPayloadBase = {
+type TransitionPayload = {
+  version: 2;
   inviteId: string;
+  inviteSourceEpoch: number;
+  inviteMutations: InviteSourceMutation[];
   transitionId: string;
   digest: string;
   resources: string[];
@@ -64,15 +55,6 @@ type TransitionPayloadBase = {
   creations: MatchCreation[];
   createdAtMs: number;
 };
-type TransitionPayload = TransitionPayloadBase &
-  (
-    | { version: 1; invite: InviteEffect }
-    | {
-        version: 2;
-        inviteSourceEpoch: number;
-        inviteMutations: InviteSourceMutation[];
-      }
-  );
 type TransitionRow = {
   transition_id: string;
   invite_id: string;
@@ -157,31 +139,6 @@ function readField(value: unknown, path: string): unknown {
   return current ?? null;
 }
 
-function setField(target: JsonRecord, path: string, value: unknown): void {
-  const parts = path.split("/");
-  let current = target;
-  for (const key of parts.slice(0, -1)) {
-    const existing = Object.hasOwn(current, key) ? current[key] : null;
-    const nested: JsonRecord = record(existing) ? { ...existing } : {};
-    Object.defineProperty(current, key, {
-      value: nested,
-      enumerable: true,
-      writable: true,
-      configurable: true,
-    });
-    current = nested;
-  }
-  const key = parts.at(-1)!;
-  if (value === null) delete current[key];
-  else
-    Object.defineProperty(current, key, {
-      value,
-      enumerable: true,
-      writable: true,
-      configurable: true,
-    });
-}
-
 function resolveValue(
   value: unknown,
   current: unknown,
@@ -223,26 +180,6 @@ function resolveValue(
       resolveValue(child, record(current) ? current[key] : null, nowMs),
     ]),
   );
-}
-
-function marker(value: unknown): TransitionMarker | null {
-  if (value === null || value === undefined) return null;
-  if (
-    !record(value) ||
-    Object.keys(value).length !== 3 ||
-    !Number.isSafeInteger(value.sequence) ||
-    Number(value.sequence) < 1 ||
-    typeof value.transitionId !== "string" ||
-    !isSafeFirebaseKey(value.transitionId) ||
-    typeof value.digest !== "string" ||
-    !/^[a-f0-9]{64}$/.test(value.digest)
-  )
-    return fail("invalid-marker");
-  return {
-    sequence: Number(value.sequence),
-    transitionId: value.transitionId,
-    digest: value.digest,
-  };
 }
 
 function validateLease(proof: GameSessionLeaseProof): void {
@@ -393,7 +330,7 @@ function splitUpdates(updates: JsonRecord): {
 function readPayload(row: TransitionRow): TransitionPayload {
   const payload: TransitionPayload = JSON.parse(row.payload_json);
   if (
-    (payload.version !== 1 && payload.version !== 2) ||
+    payload.version !== 2 ||
     payload.transitionId !== row.transition_id ||
     payload.inviteId !== row.invite_id ||
     !Array.isArray(payload.resources) ||
@@ -402,22 +339,21 @@ function readPayload(row: TransitionRow): TransitionPayload {
   )
     fail("invalid-intent");
   if (
-    payload.version === 2 &&
-    (!Number.isSafeInteger(payload.inviteSourceEpoch) ||
-      payload.inviteSourceEpoch < 1 ||
-      !Array.isArray(payload.inviteMutations) ||
-      payload.inviteMutations.length !== 1 ||
-      payload.inviteMutations.some(
-        ({ current, value }) =>
-          !current ||
-          current.inviteId !== payload.inviteId ||
-          !Number.isSafeInteger(current.revision) ||
-          current.revision < 0 ||
-          (current.value !== null && !record(current.value)) ||
-          !record(value) ||
-          isEventOwnedInviteSource(current.value) ||
-          isEventOwnedInviteSource(value),
-      ))
+    !Number.isSafeInteger(payload.inviteSourceEpoch) ||
+    payload.inviteSourceEpoch < 1 ||
+    !Array.isArray(payload.inviteMutations) ||
+    payload.inviteMutations.length !== 1 ||
+    payload.inviteMutations.some(
+      ({ current, value }) =>
+        !current ||
+        current.inviteId !== payload.inviteId ||
+        !Number.isSafeInteger(current.revision) ||
+        current.revision < 0 ||
+        (current.value !== null && !record(current.value)) ||
+        !record(value) ||
+        isEventOwnedInviteSource(current.value) ||
+        isEventOwnedInviteSource(value),
+    )
   )
     fail("invalid-invite-source-intent");
   return payload;
@@ -469,6 +405,8 @@ export function createGameSessionTransitions({
     operation: InviteOperation,
   ): Promise<void> {
     const current = await readInviteSourceControl(db);
+    if (current.backend !== "d1" || operation.control.backend !== "d1")
+      fail("invite-source-backend-retired");
     if (
       current.backend !== operation.control.backend ||
       current.epoch !== operation.control.epoch ||
@@ -521,12 +459,7 @@ export function createGameSessionTransitions({
     signal?: AbortSignal,
   ): Promise<MatchPresentationRegistration[]> {
     await assertInviteOperation(operation);
-    if (
-      (payload.version === 1 && operation.control.backend !== "rtdb") ||
-      (payload.version === 2 &&
-        (operation.control.backend !== "d1" ||
-          payload.inviteSourceEpoch !== operation.control.epoch))
-    )
+    if (payload.inviteSourceEpoch !== operation.control.epoch)
       fail("invite-source-backend-conflict");
     for (const creation of payload.creations) {
       signal?.throwIfAborted();
@@ -580,44 +513,6 @@ export function createGameSessionTransitions({
           }),
         )
       : [];
-    if (payload.version === 2) return presentations;
-    signal?.throwIfAborted();
-    await assertInviteOperation(operation);
-    await rtdb.transactPath(
-      `invites/${payload.inviteId}`,
-      (current) => {
-        if (current !== null && current !== undefined && !record(current))
-          fail("invalid-invite-source");
-        const currentInvite = record(current) ? current : null;
-        const currentMarker = marker(
-          currentInvite?.[GAME_SESSION_TRANSITION_FIELD],
-        );
-        if (currentMarker?.transitionId === payload.transitionId) {
-          if (canonical(currentMarker) !== canonical(payload.invite.marker))
-            fail("marker-conflict");
-          return { commit: false, decision: "applied" };
-        }
-        if (
-          (currentInvite !== null) !== payload.invite.existed ||
-          canonical(currentMarker) !== canonical(payload.invite.expectedMarker)
-        )
-          fail("invite-precondition-conflict");
-        for (const [field, expected] of Object.entries(
-          payload.invite.expectedFields,
-        )) {
-          if (
-            canonical(readField(currentInvite, field)) !== canonical(expected)
-          )
-            fail("invite-precondition-conflict");
-        }
-        const next = { ...(currentInvite || {}) };
-        for (const [field, value] of Object.entries(payload.invite.updates))
-          setField(next, field, value);
-        next[GAME_SESSION_TRANSITION_FIELD] = payload.invite.marker;
-        return { value: next, decision: "applied" };
-      },
-      signal,
-    );
     return presentations;
   }
 
@@ -683,9 +578,7 @@ export function createGameSessionTransitions({
           now(),
         ),
         ...store.buildCommitStatements(payload.mutations, now()),
-        ...(payload.version === 2
-          ? inviteStore.buildCommitStatements(payload.inviteMutations, now())
-          : []),
+        ...inviteStore.buildCommitStatements(payload.inviteMutations, now()),
         db
           .prepare(
             "UPDATE game_session_transitions SET status = 'completed', updated_at_ms = ?, last_error = NULL WHERE transition_id = ? AND status = 'pending'",
@@ -764,13 +657,6 @@ export function createGameSessionTransitions({
       fail("invite-lease-required");
     if (new Set(leases.map((proof) => proof.lockId)).size !== leases.length)
       fail("duplicate-lease");
-    const rawInvite =
-      operation.control.backend === "rtdb"
-        ? await rtdb.getPath(`invites/${split.inviteId}`, undefined, signal)
-        : null;
-    if (rawInvite !== null && rawInvite !== undefined && !record(rawInvite))
-      fail("invalid-invite-source");
-    const legacyInvite = record(rawInvite) ? rawInvite : null;
     const invitePatch = Object.keys(split.inviteUpdates).length
       ? Object.fromEntries(
           Object.entries(split.inviteUpdates).map(([field, value]) => [
@@ -789,20 +675,17 @@ export function createGameSessionTransitions({
       fail("invalid-intent-id");
     for (let attempt = 0; attempt < MAX_PREPARATION_ATTEMPTS; attempt++) {
       signal?.throwIfAborted();
-      const inviteMutations =
-        operation.control.backend === "d1"
-          ? await inviteStore.preparePatch(invitePatch, createdAtMs, signal)
-          : [];
+      const inviteMutations = await inviteStore.preparePatch(
+        invitePatch,
+        createdAtMs,
+        signal,
+      );
       if (
-        operation.control.backend === "d1" &&
-        (inviteMutations.length !== 1 ||
-          inviteMutations[0].current.inviteId !== split.inviteId)
+        inviteMutations.length !== 1 ||
+        inviteMutations[0].current.inviteId !== split.inviteId
       )
         fail("invalid-invite-source-mutation");
-      const currentInvite =
-        operation.control.backend === "d1"
-          ? inviteMutations[0].current.value
-          : legacyInvite;
+      const currentInvite = inviteMutations[0].current.value;
       if (
         isEventOwnedInviteSource(currentInvite) ||
         isEventOwnedInviteSource(split.inviteUpdates) ||
@@ -810,12 +693,6 @@ export function createGameSessionTransitions({
       )
         fail("event-owned-invite");
       if (!currentInvite && !split.inviteUpdates.hostId) fail("invite-missing");
-      const expectedMarker =
-        operation.control.backend === "rtdb"
-          ? marker(currentInvite?.[GAME_SESSION_TRANSITION_FIELD])
-          : null;
-      const sequence = (expectedMarker?.sequence || 0) + 1;
-      if (!Number.isSafeInteger(sequence)) fail("sequence-exhausted");
       const mutations = await store.preparePatch(
         split.canonicalUpdates,
         createdAtMs,
@@ -851,16 +728,12 @@ export function createGameSessionTransitions({
         mutations,
         inviteUpdates,
         expectedFields,
-        expectedMarker,
+        expectedMarker: null,
         matchUpdates: split.matchUpdates,
         resources,
         createdAtMs,
-        ...(operation.control.backend === "d1"
-          ? {
-              inviteSourceEpoch: operation.control.epoch,
-              inviteMutations,
-            }
-          : {}),
+        inviteSourceEpoch: operation.control.epoch,
+        inviteMutations,
       });
       const creations = await Promise.all(
         split.matchUpdates.map(async ({ path, value }) => ({
@@ -876,22 +749,9 @@ export function createGameSessionTransitions({
         resources,
         mutations,
         creations,
-        ...(operation.control.backend === "d1"
-          ? {
-              version: 2 as const,
-              inviteSourceEpoch: operation.control.epoch,
-              inviteMutations,
-            }
-          : {
-              version: 1 as const,
-              invite: {
-                existed: currentInvite !== null,
-                expectedMarker,
-                expectedFields,
-                updates: inviteUpdates,
-                marker: { sequence, transitionId, digest: contentDigest },
-              },
-            }),
+        version: 2,
+        inviteSourceEpoch: operation.control.epoch,
+        inviteMutations,
         createdAtMs,
       };
       signal?.throwIfAborted();

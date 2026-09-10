@@ -39,6 +39,7 @@ import type {
 } from "../src/profileOwnership.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
+import { createAutomatchPersistenceStub } from "./automatchPersistenceTestUtils.ts";
 
 const identity: RequestIdentity = {
   uid: "login-1",
@@ -1321,12 +1322,17 @@ test("rejects structural mutations for event-owned invites", async () => {
   );
 });
 
-test("removes only expired mutation receipts in bounded sweeps", async () => {
+test("uses the canonical bounded expiry operation without reading or patching Firebase receipts", async () => {
   assert.equal(GAME_SESSION_MUTATION_RECEIPT_SWEEP_LIMIT, 1000);
-  const state = repository({
-    gameplayMutationReceiptExpirations: {
-      [ids.create]: { completedAtMs: 1 },
-      [ids.join]: { completedAtMs: 900_000_000 },
+  const state = repository();
+  const calls: number[][] = [];
+  state.repository.getRtdbPath = async () => {
+    throw new Error("unexpected-receipt-read");
+  };
+  state.repository.automatchPersistence = createAutomatchPersistenceStub({
+    async expireReceipts(cutoff, limit) {
+      calls.push([cutoff, limit]);
+      return 3;
     },
   });
   const count = await sweepGameSessionMutationReceipts(
@@ -1336,9 +1342,18 @@ test("removes only expired mutation receipts in bounded sweeps", async () => {
       repository: state.repository,
     },
   );
-  assert.equal(count, 1);
-  assert.deepEqual(state.patches[0], {
-    [`gameplayMutationReceipts/${ids.create}`]: null,
-    [`gameplayMutationReceiptExpirations/${ids.create}`]: null,
-  });
+  assert.equal(count, 3);
+  assert.deepEqual(calls, [[100, 1000]]);
+  assert.deepEqual(state.patches, []);
+});
+
+test("rejects receipt expiry without a canonical persistence coordinator", async () => {
+  const state = repository();
+  await assert.rejects(
+    sweepGameSessionMutationReceipts(TELEGRAM_TEST_ENV as Env, {
+      repository: state.repository,
+    }),
+    /automatch-persistence-unavailable/,
+  );
+  assert.deepEqual(state.patches, []);
 });

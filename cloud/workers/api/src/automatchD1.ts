@@ -228,12 +228,17 @@ export async function acquireAutomatchWriteAdmission(
       `INSERT INTO automatch_write_admissions
          (admission_id, epoch, freeze_generation, backend, kind, created_at_ms, phase)
        SELECT ?, epoch, freeze_generation, backend, ?, ?, 'prepared'
-       FROM automatch_runtime_control WHERE singleton = 1 AND state = 'active'
+       FROM automatch_runtime_control WHERE singleton = 1 AND state = 'active' AND backend = 'd1'
        RETURNING *`,
     )
     .bind(admissionId, kind, timestamp(now()))
     .first<AdmissionRow>();
-  if (!row) throw new AutomatchD1Failure("automatch-writes-frozen");
+  if (!row) {
+    if ((await readAutomatchRuntimeControl(db)).backend !== "d1") {
+      throw new AutomatchD1Failure("automatch-backend-retired");
+    }
+    throw new AutomatchD1Failure("automatch-writes-frozen");
+  }
   return admissionFromRow(row);
 }
 

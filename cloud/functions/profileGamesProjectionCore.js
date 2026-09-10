@@ -286,7 +286,7 @@ const createProfileGamesProjectionCore = ({
     );
     for (const candidateMatchId of candidateMatchIds) {
       try {
-        let emoji = repository.getMatchEmoji
+        const emoji = repository.getMatchEmoji
           ? getEmojiId(
               await retry(() =>
                 repository.getMatchEmoji(
@@ -297,18 +297,6 @@ const createProfileGamesProjectionCore = ({
               ),
             )
           : null;
-        if (
-          emoji === null &&
-          (!repository.allowRtdbMatchEmojiFallback ||
-            (await repository.allowRtdbMatchEmojiFallback()))
-        ) {
-          const matchData = await retry(() =>
-            repository.getRtdbPath(
-              `players/${normalizedLoginUid}/matches/${candidateMatchId}`,
-            ),
-          );
-          emoji = getEmojiId(matchData && matchData.emojiId);
-        }
         if (emoji !== null) {
           const summary = { name: null, emoji };
           cache.set(cacheKey, summary);

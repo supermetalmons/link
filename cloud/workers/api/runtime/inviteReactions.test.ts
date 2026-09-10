@@ -28,6 +28,7 @@ import { AuthApiFailure } from "../src/authErrors.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { handleRequest } from "../src/router.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+import { activateDurableMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 
 beforeAll(async () => {
   const testEnv = env as Env & {
@@ -35,6 +36,15 @@ beforeAll(async () => {
     TEST_D1_MIGRATIONS: D1Migration[];
   };
   await applyD1Migrations(env.PROFILE_GAMES_DB, testEnv.TEST_D1_MIGRATIONS);
+  await env.PROFILE_GAMES_DB.batch([
+    env.PROFILE_GAMES_DB.prepare(
+      "UPDATE automatch_runtime_control SET backend = 'd1' WHERE singleton = 1",
+    ),
+    env.PROFILE_GAMES_DB.prepare(
+      "UPDATE invite_source_control SET backend = 'd1', state = 'active', epoch = 1, verified_at_ms = 2, activated_at_ms = 3 WHERE singleton = 1",
+    ),
+  ]);
+  await activateDurableMatchPresentationTestState(env.PROFILE_GAMES_DB);
   await applyRetiredProfileMigrations(
     env.PROFILE_DB,
     testEnv.TEST_PROFILE_D1_MIGRATIONS,
@@ -116,12 +126,21 @@ describe("invite reaction rooms", () => {
   it("routes authenticated participant posts to real room sockets and reconnect snapshots", async () => {
     const inviteId = `integration-${crypto.randomUUID()}`;
     const otherInviteId = `integration-${crypto.randomUUID()}`;
+    await env.PROFILE_GAMES_DB.batch(
+      [inviteId, otherInviteId].map((id) =>
+        env.PROFILE_GAMES_DB.prepare(
+          "INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
+        ).bind(
+          id,
+          JSON.stringify({ hostId: "host-login", guestId: "guest-login" }),
+        ),
+      ),
+    );
     const repository = createGameplayRepository(env, {
       rtdbClient: {
-        getPath: async (path) =>
-          path === `invites/${inviteId}` || path === `invites/${otherInviteId}`
-            ? { hostId: "host-login", guestId: "guest-login" }
-            : null,
+        getPath: async () => {
+          throw new Error("unexpected-firebase-read");
+        },
         patchRoot: async () => {
           throw new Error("unexpected-firebase-write");
         },

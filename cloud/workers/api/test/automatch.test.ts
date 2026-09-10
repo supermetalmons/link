@@ -26,6 +26,10 @@ import type {
   ProfileOwnershipSnapshot,
 } from "../src/profileOwnership.ts";
 import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
+import {
+  createAutomatchPersistenceStub,
+  createAutomatchQueueLookup,
+} from "./automatchPersistenceTestUtils.ts";
 
 const identity: RequestIdentity = {
   uid: "guest-uid",
@@ -264,6 +268,9 @@ function repository(
     ...remainingOverrides
   } = overrides;
   return {
+    automatchPersistence: createAutomatchPersistenceStub({
+      readQueuedByLogins: createAutomatchQueueLookup(getRtdbPath),
+    }),
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
@@ -316,6 +323,19 @@ function repository(
     ...remainingOverrides,
   };
 }
+
+test("requires canonical persistence for owner lookup without reading a Firebase queue", async () => {
+  const source = repository({
+    automatchPersistence: undefined,
+    async getRtdbPath() {
+      throw new Error("unexpected-queue-read");
+    },
+  });
+  await assert.rejects(
+    findOwnedQueuedAutomatch(["host"], source),
+    /automatch-persistence-unavailable/,
+  );
+});
 
 test("normalizes the first bounded queue result", () => {
   assert.deepEqual(getFirstQueuedAutomatch({ auto_one: { uid: "host" } }), {

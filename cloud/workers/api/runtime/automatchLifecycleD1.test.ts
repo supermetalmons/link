@@ -24,10 +24,13 @@ import {
 import { createGameSessionMutationLockStore } from "../src/gameplayCoordinationD1.ts";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
-import type {
-  MatchPresentationCreation,
-  PrepareMatchPresentations,
+import {
+  prepareCreatedMatchPresentations,
+  type MatchPresentationCreation,
+  type PrepareMatchPresentations,
 } from "../src/matchPresentationRegistry.ts";
+import { createInviteSourceD1Store } from "../src/inviteSourceD1.ts";
+import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 import { settleAutomatchProfileGameProjectionOutbox } from "../src/profileGameProjection.ts";
 import type {
   ProfileOwnershipQuery,
@@ -36,6 +39,7 @@ import type {
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
+let fixtureId = 0;
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -72,7 +76,8 @@ class LiveFirebase implements FirebaseRtdbClient {
     path: string,
     query?: Parameters<FirebaseRtdbClient["getPath"]>[1],
   ): Promise<unknown> {
-    if (parseAutomatchPath(path)) throw new Error("retired-firebase-root-read");
+    if (parseAutomatchPath(path) || path.startsWith("invites/"))
+      throw new Error("retired-firebase-root-read");
     const value = this.read(path);
     return query?.shallow === true && record(value)
       ? Object.fromEntries(Object.keys(value).map((key) => [key, true]))
@@ -81,7 +86,7 @@ class LiveFirebase implements FirebaseRtdbClient {
 
   async patchRoot(updates: Record<string, unknown>): Promise<void> {
     for (const [path, value] of Object.entries(updates)) {
-      if (parseAutomatchPath(path))
+      if (parseAutomatchPath(path) || path.startsWith("invites/"))
         throw new Error("retired-firebase-root-write");
       this.put(path, value);
       this.writePaths.push(path);
@@ -93,7 +98,7 @@ class LiveFirebase implements FirebaseRtdbClient {
     updater: (current: unknown) => unknown,
     signal?: AbortSignal,
   ) {
-    if (parseAutomatchPath(path))
+    if (parseAutomatchPath(path) || path.startsWith("invites/"))
       throw new Error("retired-firebase-root-transaction");
     for (let attempt = 0; attempt < 25; attempt++) {
       signal?.throwIfAborted();
@@ -173,7 +178,8 @@ function client(
   firebase: LiveFirebase,
   uid: string,
   database = db,
-  prepareMatchPresentations?: PrepareMatchPresentations,
+  prepareMatchPresentations: PrepareMatchPresentations = (creations) =>
+    prepareCreatedMatchPresentations(env, creations),
 ) {
   const persistence = createAutomatchPersistence(database, firebase, {
     prepareMatchPresentations,
@@ -203,7 +209,7 @@ function client(
     mutationLocks: persistence.decorateLocks(
       createGameSessionMutationLockStore(database),
     ),
-    random: createSeededRandom(uid),
+    random: createSeededRandom(`automatch-lifecycle-${fixtureId}:${uid}`),
     enqueueProfileGameProjection: async (task) => {
       queued.push(task);
     },
@@ -285,10 +291,22 @@ describe("automatch lifecycle through D1 persistence", () => {
   });
 
   beforeEach(async () => {
+    fixtureId++;
+    await resetMatchPresentationTestState(
+      db,
+      testEnv.TEST_D1_MIGRATIONS,
+      "durable",
+    );
     await db.batch([
       db.prepare(
         "UPDATE automatch_runtime_control SET backend = 'd1', state = 'active' WHERE singleton = 1",
       ),
+      db.prepare(
+        "UPDATE invite_source_control SET backend = 'd1', state = 'active', epoch = 1, freeze_generation = 0, verified_at_ms = 1, activated_at_ms = 1 WHERE singleton = 1",
+      ),
+      db.prepare("DELETE FROM invite_sources"),
+      db.prepare("DELETE FROM invite_source_write_admissions"),
+      db.prepare("DELETE FROM login_match_discovery"),
       db.prepare("DELETE FROM game_session_transition_resources"),
       db.prepare("DELETE FROM game_session_transitions"),
       db.prepare("DELETE FROM game_session_mutation_locks"),
@@ -318,7 +336,7 @@ describe("automatch lifecycle through D1 persistence", () => {
         });
       }
       prepared.push(...structuredClone(creations));
-      return [];
+      return prepareCreatedMatchPresentations(env, creations);
     };
     const host = client(firebase, "host", db, prepare);
     const guest = client(firebase, "guest", db, prepare);
@@ -464,11 +482,13 @@ describe("automatch lifecycle through D1 persistence", () => {
       mode: "matched",
       matchedImmediately: true,
     });
-    expect(firebase.read(`invites/${inviteId}`)).toMatchObject({
-      hostId: "host",
-      guestId: "guest",
-      sessionTransition: { sequence: 2 },
-      automatchOperationIds: { host: hostOperation, guest: guestOperation },
+    expect(await createInviteSourceD1Store(db).read(inviteId)).toMatchObject({
+      revision: 2,
+      value: {
+        hostId: "host",
+        guestId: "guest",
+        automatchOperationIds: { host: hostOperation, guest: guestOperation },
+      },
     });
     expect(firebase.read(hostMatchPath)).toMatchObject({
       flatMovesString: "preserved-live-move",
@@ -672,8 +692,10 @@ describe("automatch lifecycle through D1 persistence", () => {
       ),
     ).toEqual({ ok: true });
     expect(await createAutomatchD1Store(db).list("automatch")).toHaveLength(0);
-    expect(firebase.read(`invites/${outcomes[0].inviteId}`)).toMatchObject({
-      automatchStateHint: "canceled",
+    expect(
+      await createInviteSourceD1Store(db).read(outcomes[0].inviteId),
+    ).toMatchObject({
+      value: { automatchStateHint: "canceled" },
     });
     await assertSettled();
   });
@@ -733,12 +755,12 @@ describe("automatch lifecycle through D1 persistence", () => {
       ),
     ).toEqual({ ok: true });
     expect(preparations).toBe(2);
-    expect(firebase.writePaths.slice(writes)).toEqual([
-      `invites/${pending.inviteId}`,
-    ]);
-    expect(firebase.read(`invites/${pending.inviteId}`)).toMatchObject({
-      automatchStateHint: "canceled",
-      sessionTransition: { sequence: 2 },
+    expect(firebase.writePaths.slice(writes)).toEqual([]);
+    expect(
+      await createInviteSourceD1Store(db).read(pending.inviteId),
+    ).toMatchObject({
+      revision: 2,
+      value: { automatchStateHint: "canceled" },
     });
     expect(await store.getPath(`automatch/${pending.inviteId}`)).toBeNull();
     expect(
@@ -779,8 +801,8 @@ describe("automatch lifecycle through D1 persistence", () => {
       response: { mode: "pending" },
     });
     const inviteId = record(receipt) ? String(receipt.inviteId) : "";
-    expect(firebase.read(`invites/${inviteId}`)).toMatchObject({
-      automatchStateHint: "canceled",
+    expect(await createInviteSourceD1Store(db).read(inviteId)).toMatchObject({
+      value: { automatchStateHint: "canceled" },
     });
     expect(await createAutomatchD1Store(db).list("automatch")).toHaveLength(0);
     expect(

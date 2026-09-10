@@ -21,6 +21,7 @@ import {
   proposeRematch,
 } from "../src/gameSessionMutations.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
@@ -40,7 +41,8 @@ class MemoryFirebase implements FirebaseRtdbClient {
     path: string,
     query?: Parameters<FirebaseRtdbClient["getPath"]>[1],
   ): Promise<unknown> {
-    if (parseAutomatchPath(path)) throw new Error("retired-firebase-read");
+    if (parseAutomatchPath(path) || path.startsWith("invites/"))
+      throw new Error("retired-firebase-read");
     let value: unknown = this.data;
     for (const key of path.split("/")) {
       if (!record(value) || !Object.hasOwn(value, key)) return null;
@@ -53,7 +55,8 @@ class MemoryFirebase implements FirebaseRtdbClient {
 
   async patchRoot(updates: Record<string, unknown>): Promise<void> {
     for (const [path, value] of Object.entries(updates)) {
-      if (parseAutomatchPath(path)) throw new Error("retired-firebase-write");
+      if (parseAutomatchPath(path) || path.startsWith("invites/"))
+        throw new Error("retired-firebase-write");
       const parts = path.split("/");
       let parent = this.data;
       for (const key of parts.slice(0, -1)) {
@@ -155,15 +158,25 @@ describe("game discovery through the production gameplay repositories", () => {
   });
 
   beforeEach(async () => {
+    await resetMatchPresentationTestState(
+      db,
+      testEnv.TEST_D1_MIGRATIONS,
+      "durable",
+    );
     await db.batch([
       db.prepare(
         "UPDATE automatch_runtime_control SET backend = 'd1', state = 'active' WHERE singleton = 1",
+      ),
+      db.prepare(
+        "UPDATE invite_source_control SET backend = 'd1', state = 'active', epoch = 1, freeze_generation = 0, verified_at_ms = 1, activated_at_ms = 1 WHERE singleton = 1",
       ),
       db.prepare(
         "UPDATE login_match_discovery_control SET capture_enforced = 1, capture_version_id = '11111111-1111-4111-8111-111111111111', capture_started_at_ms = 1 WHERE singleton = 1",
       ),
       ...[
         "login_match_discovery",
+        "invite_sources",
+        "invite_source_write_admissions",
         "game_session_transition_resources",
         "game_session_transitions",
         "game_session_mutation_locks",

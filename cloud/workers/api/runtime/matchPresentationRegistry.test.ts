@@ -23,7 +23,10 @@ import {
   type MatchPresentationRegistration,
   type MatchPresentationSeedRegistration,
 } from "../src/matchPresentationRegistry.ts";
-import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
+import {
+  resetMatchPresentationTestState,
+  activateDurableMatchPresentationTestState as activateDurable,
+} from "./matchPresentationTestFixture.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
@@ -112,18 +115,6 @@ function update(
   };
 }
 
-async function activateDurable(): Promise<void> {
-  await db
-    .prepare(
-      `UPDATE match_presentation_control
-     SET phase = 'durable', source_digest = ?, source_count = 0,
-         verification_digest = ?, verified_at_ms = 2, activated_at_ms = 3
-     WHERE singleton = 1`,
-    )
-    .bind("a".repeat(64), "b".repeat(64))
-    .run();
-}
-
 function acceptSocket(response: Response) {
   expect(response.status).toBe(101);
   const socket = response.webSocket!;
@@ -150,7 +141,11 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  await resetMatchPresentationTestState(db, testEnv.TEST_D1_MIGRATIONS, true);
+  await resetMatchPresentationTestState(
+    db,
+    testEnv.TEST_D1_MIGRATIONS,
+    "durable",
+  );
 });
 
 afterEach(async () => {
@@ -171,6 +166,27 @@ afterEach(async () => {
 });
 
 describe("match presentation registration", () => {
+  it("rejects retired authorities before registering creation seeds", async () => {
+    for (const capture of [false, true]) {
+      await resetMatchPresentationTestState(
+        db,
+        testEnv.TEST_D1_MIGRATIONS,
+        capture,
+      );
+      const { inviteId, matchId, room } = fixture();
+      await expect(
+        prepareCreatedMatchPresentations(noFirebaseEnv, [creation(inviteId)]),
+      ).rejects.toThrow("match-presentation-authority-not-active");
+      expect(await room.getPresentationSnapshot(matchId)).toEqual({
+        matchId,
+        players: {},
+      });
+      expect(
+        await listMatchPresentationRegistrations(db, inviteId, matchId),
+      ).toEqual([]);
+    }
+  });
+
   it("imports immutable seed proof without overwriting live operations or frozen appearance", async () => {
     const { inviteId, matchId, room } = fixture();
     const source = creation(inviteId);
@@ -345,7 +361,7 @@ describe("match presentation registration", () => {
       creation(inviteId, hostUid, matchId),
     ]);
     await commit(rows);
-    await activateDurable();
+    await activateDurable(db);
 
     const result = await readRegisteredMatchPresentations(
       noFirebaseEnv,
@@ -453,7 +469,7 @@ describe("match presentation registration", () => {
       creation(inviteId, guestUid, matchId, 2),
     ]);
     await commit(rows.filter((row) => row.actorUid === hostUid));
-    await activateDurable();
+    await activateDurable(db);
     const current = await readRegisteredMatchPresentations(
       noFirebaseEnv,
       inviteId,
@@ -511,7 +527,7 @@ describe("match presentation registration", () => {
         matchId,
       );
     });
-    await activateDurable();
+    await activateDurable(db);
 
     expect(
       await freezeRegisteredMatchPresentations(
@@ -535,7 +551,7 @@ describe("match presentation registration", () => {
     const guestRows = await prepareCreatedMatchPresentations(noFirebaseEnv, [
       creation(inviteId, guestUid, matchId, 2),
     ]);
-    await activateDurable();
+    await activateDurable(db);
     await expect(
       freezeRegisteredMatchPresentations(noFirebaseEnv, inviteId, matchId, [
         hostUid,
@@ -581,7 +597,7 @@ describe("match presentation registration", () => {
       creation(inviteId),
     ]);
     await commit(rows);
-    await activateDurable();
+    await activateDurable(db);
     const activated = await readMatchPresentationControl(db);
     expect(activated).toMatchObject({
       phase: "durable",

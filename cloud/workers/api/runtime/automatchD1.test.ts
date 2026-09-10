@@ -437,7 +437,7 @@ describe("D1 automatch state", () => {
     ).rejects.toThrow("cannot return");
   });
 
-  it("rejects staging D1 writes even with a valid RTDB admission", async () => {
+  it("rejects the retired RTDB backend without creating a write admission", async () => {
     await db.batch([
       db.prepare("DELETE FROM automatch_runtime_control"),
       db.prepare(
@@ -446,11 +446,17 @@ describe("D1 automatch state", () => {
          VALUES (1, 'rtdb', 'active', 1, 0)`,
       ),
     ]);
-    const { store } = await writableStore();
-    await expect(
-      store.patchRoot({ "automatch/invite": { uid: "host" } }),
-    ).rejects.toThrow();
-    expect(await store.getPath("automatch/invite")).toBeNull();
+    await expect(acquireAutomatchWriteAdmission(db, "test")).rejects.toThrow(
+      "automatch-backend-retired",
+    );
+    expect(
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM automatch_write_admissions")
+        .first("count"),
+    ).toBe(0);
+    expect(
+      await createAutomatchD1Store(db).getPath("automatch/invite"),
+    ).toBeNull();
   });
 
   it("expires only numeric due receipt markers and preserves pending transitions", async () => {

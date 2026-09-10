@@ -678,6 +678,27 @@ test("operations documentation describes current releases and D1 maintenance", (
   );
   assert.match(releasePolicy, /promotion/i);
   assert.match(releasePolicy, /candidate/i);
+  const retiredOperators = readSection("Retired migration operators");
+  for (const operator of [
+    "wager-state",
+    "login-match-discovery",
+    "match-presentations",
+    "event-transition-receipts",
+    "invite-source",
+    "automatch-state",
+  ]) {
+    assert.ok(retiredOperators.includes(`manage:${operator}`), operator);
+    for (const document of [rootReadme, cloudReadme, guide]) {
+      assert.doesNotMatch(
+        document,
+        new RegExp(
+          `npm run manage:${operator}[^\\n]*--(?:preflight|stage|export|import|verify|activate|abort|enable-capture|inspect-legacy|reconcile-legacy)\\b`,
+        ),
+      );
+    }
+  }
+  assert.match(retiredOperators, /Status commands are read-only/);
+  assert.match(retiredOperators, /exact active-match Firebase proofs/);
   const apiRelease = readSection("API Worker release");
   assertOrderedSteps(apiRelease, [
     "npm run upload:api",

@@ -13,7 +13,7 @@ import {
   type InviteMetadataRouteDependencies,
 } from "../src/inviteMetadataRoute.ts";
 import { handleRequest } from "../src/router.ts";
-import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+import { TELEGRAM_TEST_ENV, withInviteSourceReads } from "./testEnv.ts";
 
 const ctx = { waitUntil: (_promise: Promise<unknown>) => undefined };
 const token = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJob3N0LWxvZ2luIn0.signature";
@@ -80,21 +80,25 @@ function setup({
     rates: [] as string[],
     sockets: [] as Request[],
   };
-  const env = {
-    ...TELEGRAM_TEST_ENV,
-    REACTION_RATE_LIMITER: {
-      limit: async ({ key }: { key: string }) => {
-        calls.rates.push(key);
-        return { success: true };
+  const env = withInviteSourceReads(
+    {
+      ...TELEGRAM_TEST_ENV,
+      REACTION_RATE_LIMITER: {
+        limit: async ({ key }: { key: string }) => {
+          calls.rates.push(key);
+          return { success: true };
+        },
       },
+    } as Env,
+    (inviteId) => {
+      assert.equal(inviteId, snapshot.inviteId);
+      return { hostId: snapshot.hostId, guestId: snapshot.guestId };
     },
-  } as Env;
+  );
   const repository = createGameplayRepository(env, {
     rtdbClient: {
-      getPath: async (path, query) => {
-        assert.equal(path, `invites/${snapshot.inviteId}`);
-        assert.deepEqual(query, { shallow: true });
-        return { hostId: true };
+      getPath: async () => {
+        throw new Error("unexpected-firebase-read");
       },
       patchRoot: async () => {
         throw new Error("unexpected-write");

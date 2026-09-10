@@ -32,6 +32,23 @@ Deploy only affected Workers. Shared prize-catalog changes need both the API and
 
 Authenticate Wrangler locally or provide `CLOUDFLARE_API_TOKEN` through the process environment. Never put credentials in command arguments, source files, release files, or logs.
 
+## Retired migration operators
+
+The Firebase-to-D1 and appearance cutovers below are complete. The operator package commands remain available for current status and recovery, with this supported surface:
+
+| Command                            | Supported operations                                                                  |
+| ---------------------------------- | ------------------------------------------------------------------------------------- |
+| `manage:wager-state`               | `--status`                                                                            |
+| `manage:login-match-discovery`     | `--status`                                                                            |
+| `manage:match-presentations`       | `--status`                                                                            |
+| `manage:event-transition-receipts` | `--status`                                                                            |
+| `manage:invite-source`             | `--status`, `--inspect-admission`, `--reconcile-admission`                            |
+| `manage:automatch-state`           | `--status`, D1 `--freeze`/`--resume`, `--inspect-admissions`, `--reconcile-admission` |
+
+Retired migration arguments fail before provider clients or credentials are accessed. Status commands are read-only and need no Firebase credentials. Current D1 recovery preserves existing evidence formats and may read exact active-match Firebase proofs. It never scans retired Firebase invite data. Other D1 maintenance operators and Firebase rules tooling retain their existing behavior.
+
+Retain historical SQL migrations, activation proofs, stored receipts, source exceptions, and protected evidence. A compatible code cleanup needs no schema migration, write freeze, Queue pause, Workflow restart, or trigger update.
+
 ## Validation
 
 For routine releases, run the checks relevant to the change before promotion. Use focused prize tests and frontend/API typechecks for a catalog change; use the frontend build's checks for frontend edits. Reuse completed checks for unchanged source. Install dependencies only when missing or changed. Reserve the complete gate below for broad changes, dependencies/contracts, stateful behavior, and coordinated maintenance:
@@ -60,6 +77,12 @@ Production API `workers_dev` and `preview_urls` remain disabled. [Workers implem
 Keep existing request, connection, and smoke-command timeouts that detect stalled checks; do not wrap the release or promotion-and-verification sequence in an additional overall deadline. A check timeout means that check is incomplete, not that the release has run out of time. Resolve uncertain outcomes and retry relevant checks as needed. Once the smoke and affected-feature check pass, record the deployed IDs and finish. Existing sampled logs and recovery jobs continue normally. Investigate concrete failures; apply only the maintenance controls that the failure requires.
 
 `upload:api` sends no production traffic. `promote:api` requires an explicit Version ID and routes 100% of traffic to it. Trigger application is a separate operation for reviewed configuration changes.
+
+## Firebase migration-path retirement
+
+Released on September 10, 2026 with API version `48c5d916-3b6f-468e-b8ab-cfe1d2064708` serving 100% of traffic, replacing `c0d768e9-6394-4902-acea-ea6b93e75bd4`. The cleanup removes retired Firebase automatch/invite backends, their admission audit, v1 pending session transitions, appearance seed fallbacks, and completed migration operations. Current D1 status, maintenance, and admission recovery remain available, including exact active-match Firebase evidence reads. Existing v2 payload serialization is unchanged; completed historical rows and both event-receipt formats remain intact. All 37 deployed bindings, including 16 encrypted secrets, runtime settings, handlers, and disabled Worker subdomain/previews were verified unchanged.
+
+Validation completed all repository gates with 3,048 tests under Node 24 and Java 21, including 559 Worker runtime tests and 272 tooling tests. The first full run identified legacy runtime fixtures; those fixtures were updated, the complete runtime suite and affected static checks passed, and successful unchanged validation lanes were reused. Production API smoke, 18 isolated lifecycle checks, 15 appearance checks, three existing-match appearance/reconnect checks, and three unchanged historical-pair checks passed. Temporary series were ended, sockets closed, and sessions revoked. Final status checks confirmed unchanged authority and retained source-exception evidence. No schema, frontend, Firebase rules, trigger, namespace, write-freeze, or Queue-pause operation was needed. Release evidence, source fingerprints, and verification reports are retained in `/private/tmp/mons-firebase-retirement-N0aLah`.
 
 ## Invite-reader and credential cleanup
 
@@ -250,120 +273,35 @@ npx wrangler tail mons-link-api --version-id <version-id> --search profile-owner
 
 ### Invite-source D1 cutover
 
-The cutover completed on September 8, 2026. All 4,572 existing invite records were imported and verified with source/import digest `e72239f6dd17623eff01ff52d42fab283000ccb507e74e5394c06fb2bc186b0b`, then activated at invite-source epoch 1 on API version `df89c91c-8bf2-4277-99fb-fbee1c7fc837`. Invite, session/automatch, and event gates were restored to their prior active states; Queue delivery continued throughout. Full repository validation and production API, metadata, wager, reaction/presentation, and isolated game lifecycle checks passed. The lifecycle check confirmed new invitations have no RTDB metadata shadow, preserved live match writes and timer rules, and removed its temporary Auth sessions. Protected evidence is retained in `/private/tmp/mons-invite-cutover-T2Wqvt`. Treat the procedure below as the completed initial migration; subsequent compatible releases use the routine release path and must retain D1 invite authority.
+The cutover completed on September 8, 2026. All 4,572 existing invite records were imported and verified with source/import digest `e72239f6dd17623eff01ff52d42fab283000ccb507e74e5394c06fb2bc186b0b`, then activated at invite-source epoch 1 on API version `df89c91c-8bf2-4277-99fb-fbee1c7fc837`. Invite, session/automatch, and event gates were restored to their prior active states; Queue delivery continued throughout. Full repository validation and production API, metadata, wager, reaction/presentation, and isolated game lifecycle checks passed. The lifecycle check confirmed new invitations have no RTDB metadata shadow, preserved live match writes and timer rules, and removed its temporary Auth sessions. Protected evidence is retained in `/private/tmp/mons-invite-cutover-T2Wqvt`. Subsequent compatible releases use the routine release path and retain D1 invite authority.
 
 For an orphaned invite-source admission, `npm run manage:invite-source -- --status` includes the total count and up to 100 admission tuples, ordered by creation time and UUID. Runtime acquisition/release failure logs also identify the admission. Inspect exactly one with `--inspect-admission <UUID> --directory /private/admission-evidence`. This saves an immutable inspection and a separate `-evidence.json` template in a user-owned 0700 directory outside the repository, with 0600 files. Preserve the inspection and complete the template's `requestFinishedAtMs`, `completionEvidence.reference` and `explanation`, and `sourceReconciliation` fields. The source proof requires `scopeComplete: true`, a reference and explanation covering all original request effects and receipts, and `sources: [{inviteId, digest}]` for every affected invite. Each digest is SHA-256 of the shared `canonicalJson(normalizeInviteSource(value))`, or `canonicalJson(null)` for an absent source, read from the current authority. Set `noSourceEffects: true` with an empty source list only when the investigation proves no source work was dispatched, such as a confirmed acquisition failure before the callback started. A request timeout, elapsed time, or zero pending intents alone proves neither completion nor reconciliation.
 
-Run `npm run manage:invite-source -- --reconcile-admission --evidence /private/admission-evidence/<completed-evidence-file>.json`. Recovery checks the exact inspected admission tuple and unchanged writer controls, current source digests, and absence of session intents/resources/locks, event intents (including uncertain/dead records), and event leases. Other admission rows remain untouched and do not prevent separate reconciliation of multiple crash orphans. Recovery never changes gates or expires work; it works before or after source activation with active or partially frozen gates. After an uncertain delete response, retry the same evidence file and retain its matching protected pre-delete artifact and completion receipt. A missing row without matching pre-delete evidence is rejected. Terminal output contains identifiers and digests, never source payloads.
+Run `npm run manage:invite-source -- --reconcile-admission --evidence /private/admission-evidence/<completed-evidence-file>.json`. Recovery checks the exact inspected admission tuple and unchanged writer controls, current source digests, and absence of session intents/resources/locks, event intents (including uncertain/dead records), and event leases. Other admission rows remain untouched and do not prevent separate reconciliation of multiple crash orphans. Recovery never changes gates or expires work; it requires D1 authority and supports active or partially frozen gates. After an uncertain delete response, retry the same evidence file and retain its matching protected pre-delete artifact and completion receipt. A missing row without matching pre-delete evidence is rejected. Terminal output contains identifiers and digests, never source payloads.
 
-This migration moves the private `invites/{inviteId}` source aggregate into `PROFILE_GAMES_DB.invite_sources`. Participants, passwords, colors, rematch strings, event ownership, automatch operation IDs, cancellation metadata, transition markers, unknown fields, and empty objects are preserved. The already retired root children `reactions`, `wagers`, and `matchesWagerResolutions` are excluded; their canonical stores and all Firebase live matches, timer claims, and profile-rule shadows remain intact.
-
-Coordinated maintenance is required because an old Firebase invite writer and a D1 writer must not update different authorities. The operator owns an independent invite gate and temporarily freezes only the existing automatch/session and event writer gates. Queue delivery, canonical profiles, auth, mining, live moves, surrender, and manual-game timers remain active. Event-game timeout claims pause while the event gate is frozen because they write event-progress outboxes. Do not add Queue pauses, a global profile freeze, or artificial drain waits. Gate transitions and activation require actual completed work: all affected admissions, session resources, session intents, session leases, event intents including dead/uncertain records, and event leases must be absent. Expiration alone is not completion evidence; never delete an admission, transition, or lease to manufacture a clean count.
-
-Prepare schema `0018_invite_sources.sql`, the control-aware API, full validation, operator rehearsal, and protected evidence before maintenance. `--preflight` performs a bounded read-only source scan without requiring the new schema. It reports only counts and byte sizes. Firebase authentication uses an explicit private `--firebase-credentials` file, then `GOOGLE_APPLICATION_CREDENTIALS`, then the existing Firebase CLI login. Cloudflare requests use `CLOUDFLARE_API_TOKEN` or the current Wrangler OAuth login; credentials are captured privately and never printed or placed in command arguments.
-
-```sh
-npm run check:all
-npm run manage:invite-source -- --preflight
-npm run upload:api
-npx wrangler d1 migrations list mons-link-profile-games --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler d1 migrations apply mons-link-profile-games --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npm run promote:api -- --version-id <candidate-version-id>
-npm run smoke:api -- --base-url https://api.mons.link
-```
-
-Confirm only the reviewed additive migration is pending before applying it. The candidate initially reads and writes the retained RTDB source under the new control; no dual-write mode is introduced. Confirm it is the sole 100% deployed API version. Keep `workers_dev` and preview URLs disabled. Reuse completed validation for unchanged source.
-
-Before freezing, the operator inventories every cursor page of `mons-link-event-progress` instances. It rejects any nonterminal instance, including waiting, paused, queued, running, or rollback work, and fails closed on incomplete pagination. A Workflow version ID is not treated as a Worker candidate ID. Do not terminate or recreate Workflows merely to make this check pass: inspect their durable state and reconcile the concrete instance first. Existing completed instances, pending outboxes, Queue backlog, class names, and payloads remain unchanged. No withdrawal Workflow operation is required.
-
-Use one owned mode-0700 directory outside the repository throughout the attempt. Its maintenance file records the exact candidate, gate generations, and each prior state before any gate changes. Freeze first gates events, then sessions, and finally invite writes. Each gate transition atomically rejects unfinished work. If a request arrives between the status read and the SQL update, the freeze fails safely and can be retried after that request finishes.
-
-```sh
-npm run manage:invite-source -- --freeze --directory /secure/invite-source --candidate-version-id <candidate-version-id>
-npm run manage:invite-source -- --status
-npm run manage:invite-source -- --export --directory /secure/invite-source
-npm run manage:invite-source -- --import --directory /secure/invite-source
-npm run manage:invite-source -- --activate --directory /secure/invite-source --candidate-version-id <candidate-version-id>
-```
-
-Export streams the complete unfiltered shallow invite-key inventory into a protected SQLite spool, then reads bounded groups of source records. Four concurrent reads preserve deterministic page order; completed mode-0600 pages and manifests are immutable and resumable. Import uses bounded parameterized batches, never overwrites a conflicting row, and requires the same frozen writer epoch. Do not enumerate only active, visible, profiled, or historically indexed games. Deleted-auth players, abandoned invites, private invites, historical rematches, and event games remain covered.
-
-Activation performs a fresh full verification: it compares the entire normalized source with every destination record, checks exact key coverage and row count, rechecks all frozen generations and candidate deployment, and repeats the complete Workflow audit. It persists this proof immediately before atomically advancing the invite authority from RTDB epoch 0 to D1 epoch 1 while gates remain frozen. A separate `--verify --directory /secure/invite-source --candidate-version-id <candidate-version-id>` remains available for isolated rehearsal or diagnosis; the routine cutover does not reread the source through both commands. Retained Firebase records are never a fallback. After activation, do not promote a pre-cutover source writer or revert the epoch; repair forward with a D1-aware build.
-
-While frozen, run the standard API smoke and read-only metadata, wager, reaction, and presentation checks against dedicated or existing paired invites. Confirm private-invite access and linked-login ownership with current authenticated fixtures when available; do not depend on expired fixtures. Verify D1 source failure cannot become a missing invite or an empty snapshot. Preserve the DO namespace, subscriptions, revision counters, and shared alarm. No frontend, Firebase rules, trigger configuration, or namespace release is needed.
-
-```sh
-npm run smoke:api -- --base-url https://api.mons.link
-npm run smoke:invite-metadata -- --base-url https://api.mons.link --invite-id <paired-invite-id>
-npm run smoke:reactions -- --base-url https://api.mons.link --invite-id <paired-invite-id>
-npm run manage:invite-source -- --resume --directory /secure/invite-source --candidate-version-id <candidate-version-id>
-npm run smoke:api -- --base-url https://api.mons.link
-npm run smoke:invite-lifecycle -- --base-url https://api.mons.link
-```
-
-Resume restores only gate states changed by this attempt, preserving prior freezes. Verify create/join, linked-login access, private invites, rematches and replay with isolated fixtures, plus unchanged live moves, surrender, timer fences, and metadata/wager/reaction/presentation reconnect. Exercise automatch and event transition recovery in isolation so checks cannot match real waiting players or announce unsolicited events. Record the import count/digest, active epoch, exact API version, and restored control states. Finish once required checks pass; no post-success observation window is added.
-
-For a repair after activation, validate and deploy a D1-aware repair as the sole 100% API version, then run `--resume --directory /secure/invite-source --candidate-version-id <repair-version>` with the same evidence directory. Adopting the repair version requires all three gates frozen and affected work drained; it preserves the original candidate, activation, and import evidence. Completion receipts use `resumed-<candidate-version-id>.json`, preserving earlier receipts. Interrupted resumes check only gates still awaiting restoration, so traffic in reopened scopes does not block the remaining gates.
-
-`smoke:invite-lifecycle` creates fresh temporary anonymous sessions and its own manual invite, so it needs no preexisting token or fixture. It verifies create/join/rematch/end receipt replay, metadata HTTP and authenticated WebSocket delivery, legal Firebase move writes, API surrender/replay and opponent observation, direct status-write and timer-rule denials, and absence of the new invite in Firebase after D1 activation. Before the surrender rules cutover, pass `--surrender-rules-pending` to omit only the direct status-write denial probes. It then closes the series and deletes its temporary Auth accounts. It never calls automatch, rating, prize, event, or Telegram endpoints. An optional `--output /secure/unique-report.json` writes a new mode-0600 report exclusively; use a new path for each run.
-
-Before activation only, `--abort --directory /secure/invite-source --candidate-version-id <candidate-version-id>` discards this attempt's unused D1 import and restores its own gate changes. A partial freeze before import can be aborted while source work remains unfinished, allowing that work to recover on the unchanged RTDB authority. Staged-data cleanup requires the same frozen generations and completed-work proof. The protected evidence remains; begin a later attempt in a new directory. Aborting activated D1 storage is rejected. The older automatch, login-discovery, and wager migration source operations also reject retained Firebase invite scans after activation; their status commands remain available.
+The initial source scan, import, activation, and migration gate-restoration commands are retired. The existing `invite_sources` records, activation evidence, and historical SQL migrations remain intact. Retained Firebase invite data is never a fallback. Current session transitions publish invite metadata and operation receipts in D1 while preserving create-only Firebase match writes.
 
 ### Account-link game discovery cutover
 
-The cutover completed on September 8, 2026: 9,664 resolved game mappings across 2,681 Firebase player records were verified and activated in D1. API version `51cc6aa9-7bab-4ab7-b788-33705f4049cc` includes the follow-up fix that lets ordinary session writes reach their existing journal. Use this version or a later capture-aware build for rollback; earlier cutover builds incorrectly rejected ordinary game creation. Current source requires active D1 discovery and has no Firebase discovery fallback. Later compatible changes use the routine API release path. The steps below document the initial staged cutover.
+The cutover completed on September 8, 2026: 9,664 resolved game mappings across 2,681 Firebase player records were verified and activated in D1. API version `51cc6aa9-7bab-4ab7-b788-33705f4049cc` includes the follow-up fix that lets ordinary session writes reach their existing journal. Use this version or a later capture-aware build for rollback; earlier cutover builds incorrectly rejected ordinary game creation. Current source requires active D1 discovery and has no Firebase discovery fallback. Later compatible changes use the routine API release path. The initial migration operations are retired.
 
-This additive migration moves only account-link match-key discovery and historical invite resolution into `PROFILE_GAMES_DB.login_match_discovery`. Live matches, timer claims, Firebase Auth, and invite source metadata remain in Firebase. Canonical ownership and existing profile-link jobs remain in `PROFILE_DB`. Catch-up retains its exact request/cursor guards and reads bounded D1 pages after activation; invite recomputation still reads the retained gameplay source.
-
-Prepare and validate migrations `0014_login_match_discovery.sql`, `0015_login_match_discovery_control.sql`, and `0016_login_match_discovery_completion_guard.sql`, the capture-aware API, runtime tests, operator rehearsal, and a private artifact directory first. Upload the validated capture candidate, apply the additive migrations, and promote its explicit Version ID to 100%. No frontend, Firebase rules, trigger configuration, Queue pause, Workflow restart, or global write freeze is needed. The existing automatch persistence backend must already be D1.
-
-Use the existing `CLOUDFLARE_API_TOKEN` process environment and an explicitly selected private Firebase service-account credential file. Keep credentials and artifacts outside the repository, with owned mode-0700 artifact directories and mode-0600 files. The operator does not print player IDs, match IDs, or credential contents. Run the same exact deployed capture Version ID throughout the cutover:
-
-```sh
-npm run manage:login-match-discovery -- --status
-npm run manage:login-match-discovery -- --preflight --directory /secure/login-match-discovery --candidate-version-id <capture-version-id>
-npm run manage:login-match-discovery -- --export --directory /secure/login-match-discovery --firebase-credentials /secure/firebase-service-account.json
-npm run manage:login-match-discovery -- --import --directory /secure/login-match-discovery
-npm run manage:login-match-discovery -- --verify --directory /secure/login-match-discovery --firebase-credentials /secure/firebase-service-account.json --candidate-version-id <capture-version-id>
-npm run manage:login-match-discovery -- --activate --directory /secure/login-match-discovery --firebase-credentials /secure/firebase-service-account.json --candidate-version-id <capture-version-id>
-npm run manage:login-match-discovery -- --status
-```
-
-`--preflight` is the explicit capture-enforcement step. It verifies the exact sole 100% API deployment, disabled Worker subdomain/previews, the D1 automatch backend, and the installed completion guard before recording immutable capture version/time evidence and enabling that guard. An old session writer cannot complete an uncaptured transition: its completion batch rolls back, retaining the pending intent for capture-aware scheduled recovery. Capture remains enforced through export, import, and activation. Do not replace the capture version or disable the guard during the cutover.
-
-Export streams the unfiltered shallow `/players` and `/invites` inventories, then each player's shallow match-key inventory. It never combines `shallow` with Firebase query filters. A protected local SQLite spool bounds memory and sorts all keys by UTF-16 code units before publishing immutable pages of at most 200 keys. Every source stream must reach a valid end; malformed, oversized, truncated, or duplicate input leaves the export incomplete. Interrupted source streams restart from the beginning; completed immutable inventories and player exports are reused. All RTDB players are inventoried, including anonymous users and records whose Auth account has been deleted. Existing canonical profile owners or visible navigation rows are not a substitute for that inventory.
-
-The manifest accounts for every exported player and match key with counts, page digests, completion proofs, and capture generation. Historical resolution preserves exact invite-ID priority, then accepts only one existing rematch-prefix candidate. Missing and ambiguous resolutions remain explicit evidence and index rows. Import uses bounded parameterized batches, does not overwrite conflicting resolved mappings, and may coexist with idempotent capture. A resolved capture may supersede an unresolved historical backfill; source verification ignores timestamps/provenance except when proving concurrent additions came from capture.
-
-Before publishing an inferred rematch-prefix mapping, export checks pending session creations, captured mappings, and fresh exact-invite evidence so a concurrent new invite cannot be mistaken for an older prefix. Interrupted exports reuse already-published pages unchanged after checking their row identities against the source inventory.
-
-Verification streams the current source again and requires every current key to have compatible D1 coverage, every baseline key to remain accounted for, and every additional backfill row to belong to the immutable export. Concurrent source additions must have capture provenance. It also checks completed session-transition creations since capture began, requires pending transitions to reconcile, and records verification evidence. Activation repeats these checks, then atomically selects D1 only if enforcement, candidate, import proof, and journal conditions still match. Retry interrupted import/verification/activation with the same directory; conflicting mappings, disappearing baseline keys, incomplete inventories, or pending transitions are failures to reconcile rather than reasons to discard evidence.
-
-After activation, run the standard API smoke and the affected authenticated read-only profile/navigation checks. Verify account-link catch-up with anonymous-before-link, alternate-login, rematch, and merge-cleanup fixtures in isolation. Release the final API with the temporary Firebase discovery adapter removed and verify its catch-up path. Keep gameplay and Queues running and finish once the required checks pass; no observation window is added. Retain the capture guard and immutable source evidence. A rollback must preserve capture and pending jobs; never restore a pre-capture version or disable enforcement.
+`npm run manage:login-match-discovery -- --status` reports authority, capture enforcement, and row counts by provenance/resolution. Preserve the capture guard, immutable source evidence, pending catch-up jobs, and current event-discovery repair. Active match reads remain in Firebase; discovery reads use D1. Historical migrations `0014` through `0016` remain unchanged.
 
 ### Automatch persistence cutover
 
-The initial cutover completed on September 7, 2026 with API version `ba859dbe-c595-4b4d-8ec0-766b094e4065`. Production uses the active D1 backend. Later compatible automatch fixes use the routine API release path; the controls below belong to the initial migration or a concrete recovery requirement.
+The initial cutover completed on September 7, 2026 with API version `ba859dbe-c595-4b4d-8ec0-766b094e4065`. Production uses the active D1 backend. Later compatible automatch fixes use the routine API release path; the retained maintenance controls require a concrete recovery need.
 
-Automatch queue entries, Telegram lifecycle sources, both shared session projection outboxes, operation receipts, and receipt expiration markers move together into `PROFILE_GAMES_DB`. Manual joins and rematches share these outboxes and receipts. Live matches, timer claims, invite source metadata, and Firebase Auth stay in Firebase. The existing API Worker, Queues, and Cron own the new stores; no extra resource is provisioned.
+Automatch entries, Telegram lifecycle sources, session projection outboxes, operation receipts, and receipt expiration markers use `PROFILE_GAMES_DB`. Live match records and timer claims retain their Firebase authority. Initial staging, source scans, imports, activation, RTDB reset, and legacy admission reconciliation are retired. Preserve the existing tables, activation evidence, and historical migration files.
 
-This is coordinated maintenance because old and new writers must not split these records between Firebase and D1. Prepare the additive migrations, control-aware API candidate, migration tooling, Firebase rules, full validation, and protected evidence directory first. The source manifests and pages contain private waiting-player records; keep them outside the repository in a mode-0700 directory and mode-0600 files. Use `npm run manage:automatch-state -- --help` for exact operator arguments.
+`npm run manage:automatch-state -- --status` reports current control and admission counts. For a concrete D1 repair, use `--freeze --candidate-version-id <currently-deployed-version>`, then `--resume --candidate-version-id <repair-version>` after promoting the repair. These commands retain deployment checks, guarded gate changes, and unresolved-work checks. They never reset activated data and are not part of routine releases.
 
-Release the control-aware candidate at 100% while its tracked D1 control still selects RTDB. Its versioned lease writes stamp the acquiring owner; apply migration `0013_game_session_writer_owner_fence.sql` before releasing that API and enabling a new RTDB staging fence. Unstamped or inherited-owner RTDB leases remain legacy evidence; do not backfill them. Already activated D1 deployments retain compatibility with existing generation-two leases. Stage its exact version through the migration tool, which fences new legacy acquisitions and records the staging time. Preserve old lease and release evidence until its effects are reconciled. Compatible control-aware candidate refinements preserve that original fenced staging time and version evidence while updating the exact candidate required for export and activation. Continue necessary implementation verification and migration rehearsal during normal service. Before freezing, require old Cron/Queue invocations to have retired and legacy HTTP effects to be reconciled. Do not infer retirement from sampled logs, equal successive reads, or a version promotion alone; do not add an artificial observation window while service is frozen.
+Inspect retained work with `npm run manage:automatch-state -- --inspect-admissions --directory /secure/automatch-admission-audit`, then use `--reconcile-admission --evidence /secure/audited-admission.json` after establishing request completion and comparing every scoped source target. Keep evidence outside the repository in an owned mode-0700 directory with mode-0600 files. Never delete admissions merely because they are old.
 
-Deploy the reviewed database rules that deny browser-admin automatch writes and preserve the immutable `sessionCreation` field on existing match records, including legacy records without that field. Pause only `mons-link-profile-game-projection` and `mons-link-telegram-projection`, preserving their prior pause states. Freeze the automatch persistence admission gate; this blocks new affected persistence writes and receipt cleanup without freezing live moves, timers, authentication, or unrelated stores. Require admitted work to complete and uncertain effects to be reconciled. Queue backlog may remain.
+Admission inspection and reconciliation support D1-backed admissions only. D1 `prepared` rows still require completed-request and scoped source evidence; that phase does not prove no work was dispatched. If the investigation proves no source work was dispatched, set `noSourceEffects: true` with `sources: []`, completed-request evidence, and a `scopeEvidence` reference and explanation establishing the empty scope. Recorded source targets cannot be bypassed this way. Canonical D1 receipts and outboxes remain readable, while retired Firebase invite evidence stays blocked.
 
-Export all six roots through the migration tool; import the immutable pages; verify complete record equality, source stability, pending-entry references, the exact candidate version, and the unchanged freeze generation. Activate D1 only while frozen and after verification. Resume only controls changed for this migration. The backend activation is one-way; retained Firebase records are evidence, never a fallback. After activation, repair forward with a D1-aware version.
+Current D1 admission recovery may read exact `players/{uid}/matches/{matchId}` Firebase proofs using the existing explicit credential provider. Retired Firebase invite scans and RTDB admission recovery are rejected. The runtime journal retains resource reservations beyond execution-lease expiry. Match creation never overwrites an existing match; D1 finalization publishes invite/source/outbox/receipt changes once. Retries and the five-minute Cron recover the same v2 operation. Completed historical rows remain intact.
 
-Staging RTDB writes record their exact patch scope or each conditional transaction attempt before dispatch. An uncertain response retains its admission and proof; only a proven pre-dispatch abort or durably recorded completion can release automatically. Inspect retained work with `npm run manage:automatch-state -- --inspect-admissions --directory /secure/automatch-admission-audit`, then use `--reconcile-admission --evidence /secure/audited-admission.json` after establishing request completion and comparing every recorded source target. Legacy untracked writes also require audited scope evidence. Never delete admissions merely because they are old.
-
-These commands remain available for D1-backed admissions after invite-source activation. D1 `prepared` rows still require completed-request and scoped source evidence; that phase does not prove no work was dispatched. If the investigation proves no source work was dispatched, set `noSourceEffects: true` with `sources: []`, completed-request evidence, and a `scopeEvidence` reference and explanation establishing the empty scope. Recorded source targets cannot be bypassed this way. Canonical D1 receipts and outboxes remain readable, while retired Firebase invite evidence stays blocked.
-
-Before D1 activation, `--resume` discards unactivated import data and verification metadata while keeping the gate frozen until cleanup finishes. It preserves the staging evidence and export files. Retry the same command after an interruption, then use a fresh export for the next cutover. Activated D1 data is never reset.
-
-The runtime journal reserves the invite and affected owners beyond execution-lease expiry. Match creation uses conditional writes that never overwrite an existing match. Invite metadata updates preserve unrelated fields and retain a monotonic `sessionTransition` marker. D1 finalization commits queue/source/outbox/receipt changes once. Retries and the existing five-minute Cron recover the same persisted operation; never remove a pending intent or its reservations as routine cleanup.
-
-Verify imported waiting players and operation replay with read-only protected fixtures. Test full start/match/cancel behavior in isolation so production checks cannot match a test profile with a real waiting player or send unsolicited Telegram messages. Run the standard API smoke and affected read-only metadata checks after activation, then finish once required checks pass; no post-success observation is needed.
+`npm run smoke:invite-lifecycle -- --base-url https://api.mons.link` creates temporary anonymous sessions and its own manual invite. It checks create/join/rematch/end replay, HTTP and authenticated WebSocket snapshots, moves/takebacks/replay, surrender, timer protection, and reconnects. It ends its series and revokes its sessions. It never calls automatch, rating, prize, event, or Telegram endpoints. An optional `--output /secure/unique-report.json` writes a new protected report; use a unique path for each run.
 
 ### Initial reaction namespace and cutover
 
@@ -418,51 +356,11 @@ The complete baseline contains 9,762 physical match records across 2,740 players
 
 The complete final validation gate passed all 3,183 tests, including 527 Worker runtime and 445 operator/tooling tests. After activation, standard API smoke, 15 isolated appearance checks, 18 gameplay lifecycle checks, and three existing-match read-only checks passed. These verified creation, joins, pending/ensured/accepted rematches, appearance updates, operation replay, reconnects, gameplay snapshot compatibility, and cleanup. Separate production checks confirmed exact canonical membership for the linked-login fixture, all nine unchanged host-only presentations with absent guest snapshots, six preserved archives, and no live exception registrations. Valid signed migration import and readback requests both return `410 migration-retired`. Test series were ended, sockets closed, and temporary sessions revoked. Protected source manifests, resumable receipts, provider/version proofs, and verification reports are retained in `/var/folders/cz/m4rxwj814l35cw0zm3yht7180000gn/T/mons-match-appearance-release-7NhKLv`. Subsequent repairs preserve Durable Object authority with no Firebase appearance fallback.
 
-This online migration makes `InviteReactions` authoritative for appearance initialization, reads, updates, and historical capture. Apply additive `PROFILE_GAMES_DB` migration `0021_match_presentations.sql` with its control initially in `legacy`. Capture initializes immutable seed evidence and missing live appearance before registration commits with manual transition completion or event invite publication. Existing live values, revisions, operation IDs, and frozen rows remain unchanged. Firebase match seed fields stay available to compatible gameplay snapshots.
+`npm run manage:match-presentations -- --status` reports durable authority, actor registration counts, and retained alias/archive evidence counts. Initial capture, inventory, import, verification, and activation commands are retired. Historical SQL migrations and all protected manifests, receipts, source exceptions, Firebase originals, and Durable Object live/frozen state remain intact.
 
-Prepare the full validation gate and API candidate first, provision `MATCH_PRESENTATION_MIGRATION_SECRET` as a dedicated encrypted Worker secret in that candidate, apply only the reviewed additive migration, then promote the candidate's exact Version ID. Use the routine release path: gameplay and Queues remain active, existing maintenance settings stay unchanged, and there is no artificial observation window. A provider delay or verification retry has no overall release deadline. This migration needs no frontend, Firebase rules, Workflow replacement, or Durable Object namespace deployment.
+Current creation requires actor registration and immutable Durable Object seed evidence. HTTP reads, v2 socket admission, avatar projection, and archive capture require registered Durable Object appearance; missing registered state fails retryably. There is no pre-durable Firebase seed fallback. Public APIs, v1/v2 reaction protocols, existing RPC methods, and the retired migration endpoint contract are unchanged.
 
-```sh
-npm run check:all
-npm run upload:api
-npx wrangler d1 migrations list mons-link-profile-games --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler d1 migrations apply mons-link-profile-games --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npm run promote:api -- --version-id <candidate-version-id>
-npm run manage:match-presentations -- --status
-```
-
-Use an owned mode-0700 directory outside the repository for all evidence; JSON artifacts and credential files must be mode 0600 (service-account credentials also accept 0400). Supply `CLOUDFLARE_API_TOKEN` and the dedicated `MATCH_PRESENTATION_MIGRATION_SECRET` through the operator process environment, never command arguments or tracked files. Source scans accept an explicit `--firebase-credentials /secure/firebase.json`, then `GOOGLE_APPLICATION_CREDENTIALS`, then the existing Firebase CLI login. No operation reads the retired Firebase invite root.
-
-Before capture, review the exact deployed candidate and every currently registered or nonterminal version-pinned event writer. Preserve their provider Worker-version metadata, exact source modules fetched with `GET /accounts/{account}/workers/workers/mons-link-api/versions/{version}?include=modules`, Workflow-version metadata, and acknowledged registration receipts that bind Workflow IDs to Worker IDs. Timestamp proximity is insufficient. The operator checks every numbered instance page, the current Workflow registration, provider script etags, retained source hashes, and freshly fetched module hashes. Unknown or incompatible writers block capture with their version IDs; compatible older writers may leave a durable intent for the current recovery engine instead of publishing incomplete appearance.
-
-The protected `--writer-evidence` JSON contains `{ "schemaVersion": 1, "candidate": { ... }, "writers": [{ ... }] }`. Each entry has `workerVersionId`, `scriptEtag`, `source: { file, sha256 }`, and `review: { guardCompatibleDiscovery: true, atomicEventPublication: true, recoverableIntent: true }`; the candidate also requires `review.captureAware: true`. `source.file` points to the protected exact-version provider JSON and `source.sha256` is `providerModulesDigest(result.modules)` exported by `scripts/manage-match-presentations.ts`. Each Workflow entry additionally has `workflowVersionId`, `workflowId`, `className: "EventProgressWorkflow"`, exact `workflowCreatedOn`, and `binding: { file, digest }`, where `digest` is the canonical JSON digest exported by `scripts/manage-wager-state.ts`. The binding artifact is either the retained provider registration acknowledgment with `workerVersion` and `response.result.version_id`, or the existing receipt operator's `{ versionId, workflowVersion }` acknowledgment. These review assertions must reflect inspection of the exact provider-bound code, including atomic discovery/publication and recoverable intents.
-
-```sh
-npm run manage:match-presentations -- --preflight --directory /secure/appearances --candidate-version-id <candidate-version-id> --writer-evidence /secure/appearance-writers.json
-npm run manage:match-presentations -- --enable-capture --directory /secure/appearances --candidate-version-id <candidate-version-id> --writer-evidence /secure/appearance-writers.json
-npm run manage:match-presentations -- --export --directory /secure/appearances --firebase-credentials /secure/firebase.json
-npm run manage:match-presentations -- --import --directory /secure/appearances
-npm run manage:match-presentations -- --activate --directory /secure/appearances --candidate-version-id <candidate-version-id> --writer-evidence /secure/appearance-writers.json --firebase-credentials /secure/firebase.json
-```
-
-Preflight is read-only. `enable-capture` binds the one-way capture generation before inventory. Export independently inventories every Firebase player and match key, including anonymous actors, alongside paged D1 discovery and canonical invite metadata. Every actual source record must normalize successfully and map unambiguously to its canonical actor. Rematch indices must exist in the invite's committed series; an explicitly ensured opponent record is valid before that opponent approves the rematch. A referenced index alone never fabricates an absent actor. Orphan keys, malformed records, unresolved mappings, discovery entries without physical source records, and pending creation intents block completion and retain evidence for recovery. Invite metadata alone does not prove an actor was created: references with neither an actual match record nor discovery evidence are recorded in protected absent-metadata manifest pages and receive no appearance registration. The September 10 audit found nine such guest references; Firebase returned null and the existing public presentation API correctly returned only the host. Verification rechecks each recorded absence or requires valid captured creation if that actor has since appeared.
-
-The September 10 source audit found twelve physical copies whose login UID is not a stored invite participant. Six are proven copies belonging to the same active profile as exactly one canonical participant, with matching color and normalized immutable appearance. The other six have either no matching active canonical owner or a conflicting color. The user authorized retaining those six incompatible records separately in D1 and preserving their Firebase originals. These twelve exact keys are handled only through reviewed source evidence; none becomes a live registered actor.
-
-For this reconciliation, apply additive migration `0022_match_presentation_source_exceptions.sql` while the existing candidate remains in capture. The mode-0600 `--source-exceptions` JSON has `{ "schemaVersion": 1, "exceptions": [...] }`; every declaration includes `inviteId`, `matchId`, physical `actorUid`, full raw JSON `sourceDigest`, `disposition` (`alias` or `archive`), and `reason` (`linked-login-copy`, `no-canonical-owner`, or `conflicting-color`). Aliases also name `canonicalActorUid`. Pass this explicit file to export, verify, and activate. It is copied immutably into the protected export directory, and normal pages from an interrupted export remain reusable.
-
-The operator independently rechecks direct active profile ownership, the exact classification, raw color, normalized seed equality, and actual target existence. An alias target must also occur as an ordinary canonical row in the complete physical inventory. Every physical source, including all twelve reviewed records, contributes to the manifest count and digest. Only ordinary canonical actors are initialized through the Durable Object import endpoint. `match_presentation_source_exceptions` retains the complete original raw JSON, immutable raw-source and seed hashes, ownership/classification evidence, and manifest binding for each reviewed physical record. Alias evidence points to a verified canonical Durable Object seed; archived records have no live target. Guards prevent these physical keys from entering live registration in either insertion order. Verification compares the full archived JSON and fresh ownership/classification evidence, checks exact exception-table coverage, and rejects any omitted, changed, extra, or unreviewed record. Retained Firebase originals remain untouched.
-
-```sh
-npm run manage:match-presentations -- --export --directory /secure/appearances --source-exceptions /secure/appearance-source-exceptions.json
-npm run manage:match-presentations -- --activate --directory /secure/appearances --candidate-version-id <candidate-version-id> --writer-evidence /secure/appearance-writers.json --source-exceptions /secure/appearance-source-exceptions.json
-```
-
-Import uses bounded purpose-signed batches at the existing `/internal/match-presentations/migration` endpoint. The HMAC covers the exact body, purpose, and timestamp; every request includes the capture migration ID and complete manifest digest. An import acknowledgment means Durable Object initialization and D1 registration succeeded; repeated imports only initialize missing rows. Protected page and batch receipts resume uncertain operations with the same identities and digests. Never edit or replace a partially completed manifest to bypass a mismatch.
-
-Standalone `verify` is optional; use it when a separate review checkpoint is needed. Running `activate` directly after a completed import performs the same complete verification and avoids a redundant source rescan. Verify and activate each perform a fresh independent source inventory, immutable seed comparison, registry coverage audit, and readback of registered Durable Object seed evidence plus valid current appearance. Current appearance may differ from its immutable seed because of legitimate edits. Extra backfill registrations fail verification; concurrent creations must have captured discovery evidence and matching actual source/readback. Activation repeats the checks and switches the same deployed candidate to `durable`, disabling all migration endpoint operations. If activation acknowledgment is uncertain, rerun it with the same retained evidence and inspect status.
-
-After activation, run the ordinary API smoke, isolated invite lifecycle checks, and existing paired-match v2 snapshot/reconnect smoke. Verify waiting host, join, pending/accepted/ensured rematches, emoji/aura changes, replay, reconnect, and unchanged archived appearance and gameplay snapshots. Use the matching existing `--match-id` with `smoke:reactions`. Do not create public events or send announcements for verification. Record final authority, candidate ID, source counts/digests, and verification results; finish once required checks pass. Retain Firebase records and all protected migration evidence. Subsequent repairs and releases preserve Durable Object authority and never restore a Firebase appearance fallback.
+After a relevant API release, verify isolated waiting-host/join/rematch appearance initialization, emoji/aura updates and replay, paired v2 reconnect snapshots, and unchanged historical appearance. Use existing protected fixtures or temporary manual games; do not create public events or send announcements.
 
 ### Read-only reaction smoke
 
@@ -474,7 +372,7 @@ npm run smoke:reactions -- --base-url https://api.mons.link --invite-id <existin
 
 The smoke connects as a spectator with `Origin: https://mons.link`, validates the versioned snapshot and invite membership of any reaction entries, sends only the application heartbeat, disconnects, and repeats to verify reconnect delivery. Each connection has a ten-second deadline and a 4 KiB message limit; redirects are disabled and output excludes reaction contents. An empty snapshot passes. A pending or missing invite, origin/upgrade rejection, malformed message, missing heartbeat, or premature disconnect fails the command. Run it on the API custom domain after a release affecting reactions; when maintenance paused writes, run it before resuming them. The default `smoke:api` command remains unchanged and never broadcasts reactions to a live game.
 
-Adding `--match-id <existing-match-id>` explicitly selects v2. The smoke requires successful v2 protocol negotiation, validates the selected match's presentation snapshot and any arriving presentation events within a 16 KiB envelope, and repeats after reconnect. The larger response bound accommodates maximum-length legacy match IDs; presentation mutation bodies retain a 4 KiB limit. The smoke never sends a presentation mutation, logs cosmetic values, or imports historical records. Before appearance authority activation, the server may lazily initialize missing presentation seeds while serving the snapshot; after activation it reads only registered Durable Object state. Omitting `--match-id` retains the v1 reaction-only smoke.
+Adding `--match-id <existing-match-id>` explicitly selects v2. The smoke requires successful v2 protocol negotiation, validates the selected match's presentation snapshot and any arriving presentation events within a 16 KiB envelope, and repeats after reconnect. The larger response bound accommodates maximum-length legacy match IDs; presentation mutation bodies retain a 4 KiB limit. The smoke never sends a presentation mutation, logs cosmetic values, or imports historical records. The server reads only registered Durable Object state and never initializes appearance from Firebase while serving a snapshot. Omitting `--match-id` retains the v1 reaction-only smoke.
 
 Unit coverage for this command uses simulated sockets and timers in `npm run test:tooling`. It does not replace the two-player/spectator browser verification before the final rules cutover.
 
@@ -546,49 +444,7 @@ The complete validation lanes passed 2,946 tests, including 470 Worker runtime t
 
 `0019_event_transition_receipts.sql` adds immutable effect acknowledgments and a one-way receipt control in `mons-link-profile-games`. The new `event_transition_receipts` rows acknowledge completed Firebase match effects; the existing `invite_event_effect_receipts` rows separately acknowledge the atomic D1 invite/discovery commit. Do not delete either receipt stage or reinterpret historical V1 receipts as executable transitions.
 
-Apply the additive `0020_event_transition_receipt_operator_lock.sql` before using the updated operator. For an existing receipt deployment, this operator fix requires only that migration; no Worker redeployment is needed. Every mutating receipt command acquires the same D1 lock across hosts, preventing activation and rollback from overlapping. Locks have no expiration or automatic takeover; `--status` reports the owner, operation, and creation time.
-
-An interrupted command or uncertain remote write can retain its lock. Confirm the original process has stopped and resolve every uncertain provider write before manually deleting the exact observed owner in `mons-link-profile-games`: `DELETE FROM event_transition_receipt_operator_lock WHERE singleton = 1 AND owner_token = '<observed-owner>';`. Then retry using the saved evidence directory. Never unlock based only on elapsed time.
-
-Prepare the complete validation gate, migration rehearsal, authenticated read fixtures, and API candidate before maintenance. Record the original deployment and writer gates. Apply only the reviewed additive migration after confirming the pending migration list. The initial `importing` control permits legacy receipt writers while rejecting the new writer admission kind.
-
-```sh
-npm run check:all
-npm run manage:event-transition-receipts -- --preflight
-npm run upload:api
-npx wrangler d1 migrations list mons-link-profile-games --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler d1 migrations apply mons-link-profile-games --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-```
-
-This cutover requires a narrow event-write freeze because old and new Worker versions otherwise consult different completion markers for the same effects. Use the receipt operator rather than broad event-schema maintenance controls. Keep manual gameplay, profile/withdrawal writes, invite and automatch gates, and Queue delivery in their prior states. There is no fixed observation window. Do not delete stale admissions based only on elapsed time.
-
-Use one new protected directory outside the repository throughout the cutover. The operator stores immutable exports, source and destination digests, original gate/deployment state, and Workflow execution evidence there. Firebase authentication uses `--firebase-credentials`, `GOOGLE_APPLICATION_CREDENTIALS`, or the existing Firebase CLI login; Cloudflare uses the existing process token or Wrangler login. Credentials never belong in command arguments or evidence output.
-
-```sh
-npm run manage:event-transition-receipts -- --freeze --directory /private/receipt-evidence --candidate-version-id <candidate-version-id>
-npm run manage:event-transition-receipts -- --export --directory /private/receipt-evidence
-npm run manage:event-transition-receipts -- --import --directory /private/receipt-evidence
-npm run manage:event-transition-receipts -- --verify --directory /private/receipt-evidence
-npm run promote:api -- --version-id <candidate-version-id>
-npm run manage:event-transition-receipts -- --activate --directory /private/receipt-evidence
-npm run manage:event-transition-receipts -- --resume --directory /private/receipt-evidence
-```
-
-Freezing requires no event admissions, active event leases, pending transition intents, or legacy effect admissions. Every page of event-progress Workflow instances is audited. Only instances still at their initial scheduled sleep may be terminated and recreated, after their exact payload, D1 outbox, original timestamps, and schedule are preserved. Any instance that has advanced into effect or delivery steps requires reconciliation before continuing.
-
-Import copies every V1/V2 receipt without changing Firebase. It is insert-only and resumable: identical records retain their original recording timestamp, while conflicting or malformed records stop the operation. Verification compares complete sorted key coverage, count, and canonical JSON digest against an unchanged source. Activation requires that proof, the same event freeze generation, and the exact candidate serving 100% of API traffic. It permanently fences the old `event-effects` admission kind.
-
-The operator refreshes only the `mons-link-event-progress` Workflow registration against the selected API deployment, records the returned Workflow version, and recreates terminated instances with the same IDs and payloads. Without a saved confirmed response, it registers again; an inventory difference never proves registration ownership. Each replacement must use that version and preserve its scheduled sleep before events resume. This targeted registration is necessary because Workflow versions are independent of API HTTP promotion; do not redeploy unrelated triggers or withdrawal Workflows.
-
-Before activation, `--abort --directory /private/receipt-evidence` restores the prior API deployment, required scheduled Workflows, and prior event gate. A completed abort closes that evidence directory to further migration operations; begin another attempt in a fresh directory. Repeating `--abort` remains safe. After activation, rollback to a legacy receipt writer is forbidden; repair forward with D1 receipt support. An uncertain provider response requires readback before another state change.
-
-Run the authenticated read-only API smoke with the prepared session and current/ended-event fixture:
-
-```sh
-npm run smoke:api -- --base-url https://api.mons.link --read-only --auth-token-fixture /private/receipt-evidence/api-smoke-auth.json --smoke-profile-fixture /private/receipt-evidence/api-smoke-profile.json --require-events
-```
-
-Verify receipt coverage and Workflow schedules, and record the final deployment and gate states. A replacement instance may report `running` while its only step is an unfinished future scheduled sleep; that exact step evidence is sufficient. Deletion and startup visibility receive bounded immediate readback attempts. If the operator reports pending propagation, retry the same `--resume` with its saved evidence; do not reset a created replacement or add an observation window. Do not create public test events or send announcements for verification. Retain the Firebase originals and protected migration evidence.
+`npm run manage:event-transition-receipts -- --status` retains authority, maintenance counts, deployed-version/Workflow visibility, and operator-lock reporting. Initial migration freeze/export/import/verification/activation, rollback, Workflow recreation, and gate-restoration commands are retired. Preserve all receipts and historical migrations, including the existing operator-lock table. An unexpected retained lock requires investigation using its protected evidence; elapsed time alone does not establish completion. Current event incidents use the event maintenance and recovery operations below.
 
 ## Event D1 operations
 
@@ -621,85 +477,13 @@ npm run manage:profile-canonical -- --resume
 
 ## Wager state D1 cutover
 
-This one-time migration moves `invites/{inviteId}/wagers/{matchId}` and `invites/{inviteId}/matchesWagerResolutions/{matchId}` into `PROFILE_DB.invite_wager_states`. Wager reservations, mining balances, and transfer receipts already live in D1. The storage change requires one continuous freeze because an old RTDB writer and a new D1 writer must never settle the same wager against different source state. Freeze canonical profiles and wager reservations and pause only `mons-link-telegram-delivery`, which carries settlement retries. Other Queues, event storage, invite metadata, and live Firebase match synchronization retain their existing controls. This targeted procedure replaces the generic historical drain and observation periods above: inspect actual admissions and leases, perform the required checks, and use no artificial waits or post-success monitoring window.
+Wager source authority was activated in D1 on September 7, 2026, at epoch 1 with API version `4f7c875b-8821-42c6-b206-803a36e5b17a`. Activation evidence records 171 wagers, 275 resolution markers, and 276 imported aggregate rows, with equal source/import digest `a299bba08d68ab6794ae51c7f1f160af6b37059dbe460c6b21ef4ac3bcb71450`. The verified profile baseline digest is `dc2bccad355a89137a899286eb834202f2b453d85b76ab596ca31edff3b3470a`. These immutable import facts remain visible in the D1 activation record; current counts can increase through ordinary gameplay.
 
-Prepare the complete validation gate, rules dry run, protected smoke fixtures, and API candidate before freezing. Record the current deployed API version, the candidate Version ID, both writer controls, and the settlement Queue's pause state. Reuse validation for unchanged source. No frontend, trigger, or Durable Object namespace release is needed. Wager-state export/import/verify/activate require `CLOUDFLARE_API_TOKEN` in the process environment for parameterized D1 requests; supply no token through arguments or files in the repository. Preflight can use the existing Wrangler authentication and needs no new schema, freeze, or output directory.
+`PROFILE_DB.invite_wager_states` owns wager proposals, agreements, settlement state, and resolution markers. The existing reservation, balance, transfer, and queued-recovery contracts remain unchanged. Retained Firebase wager and resolution records never provide a fallback.
 
-```sh
-npm run check:all
-node --experimental-strip-types scripts/deploy-firebase.ts --project mons-link --dry-run
-npm run manage:wager-state -- --preflight
-npm run smoke:wagers -- --base-url https://api.mons.link --prepare-fixtures --fixture /secure/wager-smoke.json
-npm run upload:api
-```
+`npm run manage:wager-state -- --status` reports maintenance state, activation evidence, and current destination counts. The initial preflight, export, import, verification, and activation commands are retired. Current wager repairs use the reservation and canonical-profile maintenance operators. Preserve migration `0016`, stored records, and protected historical evidence.
 
-Create the smoke fixture's parent directory with mode `0700` before preparation. Preparation writes a mode-`0600` fixture containing locally generated Solana signing seeds, Firebase refresh tokens, two new test-profile IDs, and three manual invite IDs. It funds each profile through its supported first-rock mining request for exactly one dust and leaves a pending host proposal in the cancellation invite. The other invites isolate decline and settlement because canceled or declined reservation lineages cannot be reused. No user-funded profile, D1 seed, blockchain transaction, rating update, automatch, event, or external announcement is used. Retain the fixture for every later phase; do not replace it after an uncertain request.
-
-Start the single freeze and pause settlement delivery only if it was active:
-
-```sh
-npm run manage:profile-canonical -- --freeze
-npm run manage:wager-reservations -- --freeze
-npx wrangler queues pause-delivery mons-link-telegram-delivery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npm run manage:profile-canonical -- --status
-npm run manage:wager-reservations -- --status
-```
-
-Require zero wager admissions and active gameplay leases before continuing. Investigate any expired or uncertain admission; recover it only after its request has finished and its RTDB and D1 effects have been reconciled. A timeout or expired lease alone does not prove that an old write finished. Preserve consumed reservation tombstones, pending settlements, balances, and transfer receipts throughout the procedure.
-
-Retire Firebase browser writes before export, including the nested admin grants, then apply the reviewed profile migration. Confirm the pending migration list contains only the expected wager-state migration `0016` before applying it. Retained Firebase records and their parent invite-read policy remain unchanged.
-
-```sh
-node --experimental-strip-types scripts/deploy-firebase.ts --project mons-link
-npx wrangler d1 migrations list mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler d1 migrations apply mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npm run manage:wager-state -- --status
-```
-
-Export into a new protected directory outside the repository. The same directory resumes an interrupted export or import; never edit its manifest, source pages, or baseline evidence. `--firebase-credentials /secure/firebase-service-account.json` optionally selects a protected service-account file for preflight, export, verify, and activate; otherwise the CLI checks `GOOGLE_APPLICATION_CREDENTIALS` and then the existing Firebase CLI login. Pass only the credential file path; never log its contents or authentication tokens. The export preserves complete internal wager state and resolution markers, including historical matches and pending operations. Unknown nested wager fields are retained; a malformed nonobject wager aggregate must be reconciled before export.
-
-```sh
-npm run manage:wager-state -- --export --directory /secure/wager-state-cutover
-npm run manage:wager-state -- --import --directory /secure/wager-state-cutover
-npm run manage:wager-state -- --verify --directory /secure/wager-state-cutover --candidate-version-id <candidate-version-id>
-```
-
-Verification must prove complete source-to-D1 equality and unchanged reservation, balance, and transfer-receipt baseline, with all writer controls still frozen and admissions and leases drained. Review only counts, digests, and sanitized failure details in terminal output; retain the protected evidence directory. Resolve a mismatch before activation. Do not introduce a bridge version, dual writes, a Firebase fallback, or a temporary unfreeze to make progress.
-
-Activate D1 and immediately promote the exact verified candidate to 100% while the same freeze remains in effect. Activation repeats full source, destination, and baseline verification before advancing the immutable writer epoch from `0` to `1`. Old code cannot acquire a compatible wager admission after activation. Confirm the explicit candidate is the only deployed API version before resuming any writes.
-
-```sh
-npm run manage:wager-state -- --activate --directory /secure/wager-state-cutover --candidate-version-id <candidate-version-id>
-npm run promote:api -- --version-id <candidate-version-id>
-npm run manage:wager-state -- --status
-npm run smoke:api -- --base-url https://api.mons.link --read-only --require-history --require-wager-frozen-read --require-wager-storage-version --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
-npm run smoke:wagers -- --base-url https://api.mons.link --frozen-read --fixture /secure/wager-smoke.json
-npm run smoke:invite-metadata -- --base-url https://api.mons.link --invite-id <existing-paired-invite-id>
-npm run smoke:reactions -- --base-url https://api.mons.link --invite-id <existing-paired-invite-id>
-```
-
-While frozen, verify current and historical wager HTTP snapshots, wager WebSocket delivery and reconnect, and unchanged invite metadata, reaction, and presentation behavior. Confirm stored proposals, agreements, internal settlement state, and markers still match the import evidence. Confirm Firebase rules are deployed and preserve reads while rejecting legacy writes. A failure leaves the same freeze and Queue pause in place for repair; after activation, repair forward with D1-aware code and never promote a pre-cutover writer or revert the epoch.
-
-When those checks pass, resume reservations, then canonical profiles, and restore settlement delivery only if this cutover paused it. Preserve any freeze or Queue pause that predated the work.
-
-```sh
-npm run manage:wager-reservations -- --resume-d1
-npm run manage:profile-canonical -- --resume
-npx wrangler queues resume-delivery mons-link-telegram-delivery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npm run smoke:api -- --base-url https://api.mons.link
-npm run smoke:api -- --base-url https://api.mons.link --read-only --require-history --require-wager-frozen-read --auth-token-fixture /secure/api-smoke-auth.json --smoke-profile-fixture /secure/api-smoke-profile.json
-npm run smoke:wagers -- --base-url https://api.mons.link --active-lifecycle --fixture /secure/wager-smoke.json
-```
-
-The lifecycle opens wager sockets before each mutation, checks broadcasts and reconnect snapshots, replays each action, and verifies released reservations plus a single dust transfer from guest to host. The guest surrenders through the API, with replay and stored-field preservation checks; no rating request is sent. A failed phase preserves its completed-step journal so an explicit rerun continues with the same identities, invites, and operation lineages. Keep historical wagers and live moves usable. Record the active epoch, deployed Version ID, verification digests/counts, and final control states, then finish. Keep the original Firebase records and protected export and smoke fixtures. Later compatible wager changes use the routine API release path.
-
-For an existing paired invite, HTTP/WebSocket snapshot and reconnect verification also has a read-only mode. Create a separate mode-`0600` `/secure/wager-smoke-auth.json` containing only `{ "accessToken": "<current-Cloudflare-JWT>" }`.
-
-```sh
-npm run smoke:wagers -- --base-url https://api.mons.link --read-only --invite-id <existing-paired-invite-id> --auth-token-fixture /secure/wager-smoke-auth.json
-```
-
-Omit the auth fixture to verify public spectator reads. Each HTTP request and socket operation has its own deadline; there is no overall smoke-phase or release deadline and no artificial observation wait.
+For an affected routine release, use the existing read-only wager smoke with an explicit paired invite and protected auth fixture where required. The separate isolated `smoke:wagers` fixture workflow remains available for wager mutation changes. It uses dedicated test profiles and their own mined dust, preserves its credential fixture across retries, and never calls automatch, rating, event, or announcement endpoints.
 
 ## Wager reservation D1 operations
 

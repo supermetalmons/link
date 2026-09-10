@@ -9,11 +9,7 @@ const {
 const inviteId = "presentation-invite";
 const guestMatchPath = `players/guest-login/matches/${inviteId}`;
 
-function fixture({
-  getMatchEmoji,
-  guestProfile = null,
-  allowRtdbMatchEmojiFallback,
-}) {
+function fixture({ getMatchEmoji, guestProfile = null }) {
   const writes = [];
   const reads = [];
   const presentationReads = [];
@@ -25,7 +21,6 @@ function fixture({
   const core = createProfileGamesProjectionCore({
     logger: { error() {} },
     repository: {
-      allowRtdbMatchEmojiFallback,
       async commitProjectionWrites(nextWrites) {
         for (const write of nextWrites) {
           writes.push(write);
@@ -112,17 +107,6 @@ test("canonical profile avatars retain precedence without reading match presenta
   assert.equal(state.reads.includes(guestMatchPath), false);
 });
 
-test("a missing presentation row preserves the Firebase seed fallback", async () => {
-  const state = fixture({ getMatchEmoji: async () => null });
-  await state.recompute();
-
-  assert.equal(state.writes[0].data.opponentEmoji, 1);
-  assert.deepEqual(state.presentationReads, [
-    [inviteId, inviteId, "guest-login"],
-  ]);
-  assert.equal(state.reads.includes(guestMatchPath), true);
-});
-
 test("presentation failures retry without publishing a stale seed avatar", async () => {
   const state = fixture({
     getMatchEmoji: async () => {
@@ -142,7 +126,6 @@ test("presentation failures retry without publishing a stale seed avatar", async
 test("durable presentation misses never read Firebase seed avatars", async () => {
   const state = fixture({
     getMatchEmoji: async () => null,
-    allowRtdbMatchEmojiFallback: async () => false,
   });
   await state.recompute();
   assert.equal(state.reads.includes(guestMatchPath), false);
@@ -151,8 +134,7 @@ test("durable presentation misses never read Firebase seed avatars", async () =>
 
 test("appearance authority failures preserve projection state without Firebase fallback", async () => {
   const state = fixture({
-    getMatchEmoji: async () => null,
-    allowRtdbMatchEmojiFallback: async () => {
+    getMatchEmoji: async () => {
       throw new Error("authority-unavailable");
     },
   });

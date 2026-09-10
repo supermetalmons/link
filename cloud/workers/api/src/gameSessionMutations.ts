@@ -1268,46 +1268,18 @@ export async function sweepGameSessionMutationReceipts(
   } = {},
 ): Promise<number> {
   const cutoff = now() - GAME_SESSION_MUTATION_RECEIPT_RETENTION_MS;
-  const expired = await repository.automatchPersistence?.expireReceipts(
+  const persistence = repository.automatchPersistence;
+  if (!persistence) {
+    throw new AuthApiFailure(
+      503,
+      "unavailable",
+      "automatch-persistence-unavailable",
+    );
+  }
+  return persistence.expireReceipts(
     cutoff,
     GAME_SESSION_MUTATION_RECEIPT_SWEEP_LIMIT,
   );
-  if (expired !== null && expired !== undefined) return expired;
-  const value = toRecord(
-    await repository.getRtdbPath(
-      GAME_SESSION_MUTATION_RECEIPT_EXPIRATION_ROOT,
-      {
-        orderBy: "completedAtMs",
-        endAt: cutoff,
-        limitToFirst: GAME_SESSION_MUTATION_RECEIPT_SWEEP_LIMIT,
-      },
-    ),
-  );
-  if (!value) {
-    return 0;
-  }
-  const updates = Object.entries(value).reduce<Record<string, null>>(
-    (result, [operationId, raw]) => {
-      const completedAtMs = Number(toRecord(raw)?.completedAtMs);
-      if (
-        isSafeFirebaseKey(operationId) &&
-        Number.isFinite(completedAtMs) &&
-        completedAtMs <= cutoff
-      ) {
-        result[`${GAME_SESSION_MUTATION_RECEIPT_ROOT}/${operationId}`] = null;
-        result[
-          `${GAME_SESSION_MUTATION_RECEIPT_EXPIRATION_ROOT}/${operationId}`
-        ] = null;
-      }
-      return result;
-    },
-    {},
-  );
-  const count = Object.keys(updates).length / 2;
-  if (count > 0) {
-    await repository.patchRtdbRoot(updates);
-  }
-  return count;
 }
 
 export {

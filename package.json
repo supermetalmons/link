@@ -100,7 +100,6 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "firebase-tools": "15.30.0",
     "prettier": "^3.9.6",
-    "stream-json": "3.6.0",
     "typescript": "^6.0.3",
     "vite": "^8.3.0",
     "vite-plugin-checker": "^0.14.5",

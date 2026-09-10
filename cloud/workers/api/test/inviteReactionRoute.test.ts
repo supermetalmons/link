@@ -102,6 +102,12 @@ function setup(
       },
     },
   });
+  repository.getRtdbPath = async (path) => {
+    calls.reads.push(path);
+    if (!path.startsWith("invites/"))
+      throw new Error("unexpected-firebase-read");
+    return invite;
+  };
   repository.readProfileOwnershipSnapshot = async (query) => ({
     canonicalProfileIdByProfileId: new Map(),
     loginOwnerByUid: new Map(query.loginUids.map((uid) => [uid, null])),
@@ -111,7 +117,16 @@ function setup(
   const identity = socketTestIdentity(caller);
   const dependencies: InviteReactionRouteDependencies = {
     repository,
-    readPresentationControl: async () => ({ phase: "legacy" }),
+    readPresentationControl: async () => ({ phase: "durable" }),
+    readRegisteredPresentations: async (_env, _inviteId, matchId) => ({
+      matchId,
+      players: Object.fromEntries(
+        ["host-login", "guest-login"].map((actorUid) => [
+          actorUid,
+          { matchId, actorUid, emojiId: 1001, aura: "rainbow", revision: 0 },
+        ]),
+      ),
+    }),
     verifyIdentity: async (incoming) => {
       calls.auth++;
       verifiedRequests.push(incoming);
@@ -668,15 +683,15 @@ test("fails closed on auth, rate limit and ownership failures and reports confli
   );
 });
 
-test("v2 sockets validate their match, seed presentation, and negotiate anonymous or participant admission", async () => {
+test("v2 sockets validate registered presentation and negotiate anonymous or participant admission", async () => {
   for (const authenticated of [false, true]) {
     const state = setup();
     const ensured: unknown[] = [];
     state.repository.getRtdbPath = async (path) => {
       state.calls.reads.push(path);
-      return path === "invites/invite-one"
-        ? { hostId: "host-login", guestId: "guest-login" }
-        : { color: "white", emojiId: "1001", aura: "rainbow", fen: "position" };
+      if (path === "invites/invite-one")
+        return { hostId: "host-login", guestId: "guest-login" };
+      throw new Error(`unexpected-firebase-read:${path}`);
     };
     state.dependencies.room!.ensurePresentations = async (matchId, seeds) => {
       ensured.push({ matchId, seeds });
@@ -719,15 +734,15 @@ test("v2 sockets validate their match, seed presentation, and negotiate anonymou
       state.socketRequests[0].headers.get("X-Mons-Reaction-Role"),
       authenticated ? "host" : "spectator",
     );
-    assert.deepEqual(ensured, [
-      {
-        matchId: "invite-one",
-        seeds: {
-          "host-login": { emojiId: 1001, aura: "rainbow" },
-          "guest-login": { emojiId: 1001, aura: "rainbow" },
-        },
-      },
-    ]);
+    assert.deepEqual(ensured, []);
+    assert.equal(
+      state.socketRequests[0].headers.get("X-Mons-Presentation-Canonical"),
+      "1",
+    );
+    assert.equal(
+      state.calls.reads.some((path) => path.startsWith("players/")),
+      false,
+    );
   }
 });
 
@@ -838,4 +853,26 @@ test("durable v2 admission fails before upgrade when registered appearance is un
     state.calls.reads.some((path) => path.startsWith("players/")),
     false,
   );
+});
+
+test("v2 rejects retired appearance authorities before socket admission", async () => {
+  for (const phase of ["legacy", "capture"] as const) {
+    const state = setup();
+    state.dependencies.readPresentationControl = async () => ({ phase });
+    const response = await handleInviteReactionRoute(
+      request(true, {
+        path: "/invites/invite-one/reactions/socket?matchId=invite-one",
+        headers: { "Sec-WebSocket-Protocol": REACTION_SOCKET_PROTOCOL_V2 },
+      }),
+      state.env,
+      ctx,
+      state.dependencies,
+    );
+    assert.equal(response.status, 503);
+    assert.equal(state.calls.sockets, 0);
+    assert.equal(
+      state.calls.reads.some((path) => path.startsWith("players/")),
+      false,
+    );
+  }
 });

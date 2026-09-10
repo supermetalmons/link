@@ -3,7 +3,7 @@ import type { D1Migration } from "cloudflare:test";
 export async function resetMatchPresentationTestState(
   db: D1Database,
   migrations: D1Migration[],
-  capture = false,
+  phase: boolean | "durable" = false,
 ): Promise<void> {
   const migration = migrations.find((entry) =>
     entry.name.includes("0021_match_presentations"),
@@ -28,7 +28,7 @@ export async function resetMatchPresentationTestState(
     ...(sourceExceptions?.queries.map((query) => db.prepare(query)) || []),
     ...(insertGuards?.queries.map((query) => db.prepare(query)) || []),
   ]);
-  if (capture) {
+  if (phase) {
     await db
       .prepare(
         `UPDATE match_presentation_control
@@ -40,4 +40,26 @@ export async function resetMatchPresentationTestState(
       )
       .run();
   }
+  if (phase === "durable") await activateDurableMatchPresentationTestState(db);
+}
+
+export async function activateDurableMatchPresentationTestState(
+  db: D1Database,
+): Promise<void> {
+  await db.batch([
+    db.prepare(`UPDATE match_presentation_control
+      SET phase = 'capture',
+          candidate_version_id = '00000000-0000-4000-8000-000000000001',
+          migration_id = '00000000-0000-4000-8000-000000000002',
+          capture_started_at_ms = 1
+      WHERE singleton = 1 AND phase = 'legacy'`),
+    db
+      .prepare(
+        `UPDATE match_presentation_control
+      SET phase = 'durable', source_digest = ?, source_count = 0,
+          verification_digest = ?, verified_at_ms = 2, activated_at_ms = 3
+      WHERE singleton = 1 AND phase = 'capture'`,
+      )
+      .bind("a".repeat(64), "b".repeat(64)),
+  ]);
 }

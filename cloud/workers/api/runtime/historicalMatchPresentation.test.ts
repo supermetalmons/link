@@ -13,6 +13,11 @@ import {
   writeHistoricalMatchSnapshot,
 } from "../src/historicalMatchesD1.ts";
 import { createProfileGameProjectionRuntime } from "../src/profileGameProjectionRepository.ts";
+import {
+  buildMatchPresentationRegistrationStatements,
+  prepareCreatedMatchPresentations,
+} from "../src/matchPresentationRegistry.ts";
+import { activateDurableMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const inviteId = "presentation-history";
@@ -80,6 +85,7 @@ describe("historical match presentation", () => {
       testEnv.PROFILE_GAMES_DB,
       testEnv.TEST_D1_MIGRATIONS,
     );
+    await activateDurableMatchPresentationTestState(testEnv.PROFILE_GAMES_DB);
   });
 
   beforeEach(async () => {
@@ -89,11 +95,10 @@ describe("historical match presentation", () => {
   });
 
   it("freezes current presentation in the common archive runtime without changing gameplay", async () => {
-    const freeze = vi.fn<FreezeHistoricalMatchPresentations>(async () =>
-      snapshot(),
-    );
+    const freeze = vi.fn(async () => snapshot());
     const runtime = createProfileGameProjectionRuntime(env, {
-      freezePresentations: freeze,
+      readPresentationControl: async () => ({ phase: "durable" }),
+      freezeRegisteredPresentations: freeze,
       now: () => 2_000,
       rtdb: {
         getRtdbPath: async () => {
@@ -104,10 +109,10 @@ describe("historical match presentation", () => {
     if (!runtime.archiveHistoricalMatch)
       throw new Error("missing-archive-runtime");
     await runtime.archiveHistoricalMatch(archiveInput());
-    expect(freeze).toHaveBeenCalledExactlyOnceWith(inviteId, inviteId, {
-      host: { emojiId: 1, aura: "" },
-      guest: { emojiId: 2, aura: "" },
-    });
+    expect(freeze).toHaveBeenCalledExactlyOnceWith(env, inviteId, inviteId, [
+      "host",
+      "guest",
+    ]);
     const value = await stored();
     expect(value.pair.hostMatch).toEqual({
       ...pair().hostMatch,
@@ -143,12 +148,8 @@ describe("historical match presentation", () => {
 
   it("durable archives freeze registered actors without passing Firebase appearance seeds", async () => {
     const canonicalFreeze = vi.fn(async () => snapshot());
-    const legacyFreeze = vi.fn<FreezeHistoricalMatchPresentations>(async () => {
-      throw new Error("unexpected-legacy-freeze");
-    });
     const runtime = createProfileGameProjectionRuntime(env, {
       readPresentationControl: async () => ({ phase: "durable" }),
-      freezePresentations: legacyFreeze,
       freezeRegisteredPresentations: canonicalFreeze,
       now: () => 2_000,
       rtdb: {
@@ -164,7 +165,6 @@ describe("historical match presentation", () => {
       inviteId,
       ["host", "guest"],
     );
-    expect(legacyFreeze).not.toHaveBeenCalled();
     expect((await stored()).pair.hostMatch?.emojiId).toBe(12);
     expect((await stored()).pair.guestMatch?.emojiId).toBe(14);
 
@@ -186,12 +186,8 @@ describe("historical match presentation", () => {
   });
 
   it("missing durable appearance leaves archival retryable without legacy seed initialization", async () => {
-    const legacyFreeze = vi.fn<FreezeHistoricalMatchPresentations>(async () =>
-      snapshot(),
-    );
     const runtime = createProfileGameProjectionRuntime(env, {
       readPresentationControl: async () => ({ phase: "durable" }),
-      freezePresentations: legacyFreeze,
       freezeRegisteredPresentations: async () => {
         throw new Error("registered-presentation-missing");
       },
@@ -204,7 +200,6 @@ describe("historical match presentation", () => {
     await expect(
       runtime.archiveHistoricalMatch!(archiveInput()),
     ).rejects.toThrow("registered-presentation-missing");
-    expect(legacyFreeze).not.toHaveBeenCalled();
     expect(
       await readHistoricalMatchSnapshot(
         env.PROFILE_GAMES_DB,
@@ -212,6 +207,32 @@ describe("historical match presentation", () => {
         inviteId,
       ),
     ).toBeNull();
+  });
+
+  it("rejects retired appearance authorities without freezing or writing history", async () => {
+    for (const phase of ["legacy", "capture"] as const) {
+      const freeze = vi.fn(async () => snapshot());
+      const runtime = createProfileGameProjectionRuntime(env, {
+        readPresentationControl: async () => ({ phase }),
+        freezeRegisteredPresentations: freeze,
+        rtdb: {
+          getRtdbPath: async () => {
+            throw new Error("unexpected-firebase-read");
+          },
+        },
+      });
+      await expect(
+        runtime.archiveHistoricalMatch!(archiveInput()),
+      ).rejects.toThrow("match-presentation-authority-not-active");
+      expect(freeze).not.toHaveBeenCalled();
+      expect(
+        await readHistoricalMatchSnapshot(
+          env.PROFILE_GAMES_DB,
+          inviteId,
+          inviteId,
+        ),
+      ).toBeNull();
+    }
   });
 
   it("leaves history retryable when the DO is unavailable", async () => {
@@ -245,10 +266,24 @@ describe("historical match presentation", () => {
     input.inviteId = "presentation-archive-retry";
     input.pair.matchId = input.inviteId;
     const room = env.INVITE_REACTIONS.getByName(input.inviteId);
-    await room.ensurePresentations(input.pair.matchId, {
-      host: { emojiId: 1, aura: "" },
-      guest: { emojiId: 2, aura: "" },
-    });
+    const registrations = await prepareCreatedMatchPresentations(
+      env,
+      ["host", "guest"].map((actorUid) => ({
+        inviteId: input.inviteId,
+        matchId: input.pair.matchId,
+        actorUid,
+        emojiId: actorUid === "host" ? 1 : 2,
+        aura: "",
+        sourceId: "test:history-creation",
+      })),
+    );
+    await env.PROFILE_GAMES_DB.batch(
+      buildMatchPresentationRegistrationStatements(
+        env.PROFILE_GAMES_DB,
+        registrations,
+        1,
+      ),
+    );
     await room.updatePresentation("host", input.pair.matchId, {
       operationId: crypto.randomUUID(),
       expectedRevision: 0,
@@ -360,9 +395,7 @@ describe("historical match presentation", () => {
     const initial = archiveInput("backfill");
     initial.pair.guestMatch = null;
     await writeHistoricalMatchSnapshot(env.PROFILE_GAMES_DB, initial);
-    const freeze = vi.fn<FreezeHistoricalMatchPresentations>(async () =>
-      snapshot(),
-    );
+    const freeze = vi.fn(async () => snapshot());
     await archiveHistoricalMatchWithPresentation(
       env.PROFILE_GAMES_DB,
       archiveInput(),

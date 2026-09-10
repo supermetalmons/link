@@ -20,12 +20,6 @@ const payload = {
   emojiId: 1000,
   aura: "rainbow",
 };
-const match = {
-  color: "white",
-  emojiId: "10",
-  aura: "legacy",
-  fen: "position",
-};
 const paired = { hostId: "host-login", guestId: "guest-login" };
 
 function request(
@@ -71,18 +65,23 @@ function setup(invite: unknown = paired, uid = "host-login") {
       },
     },
   } as Env;
-  const records = new Map<string, unknown>([
-    ["invites/invite-one", invite],
-    ["players/host-login/matches/invite-one", match],
-    [
-      "players/guest-login/matches/invite-one",
-      { ...match, color: "black", emojiId: 1001, aura: "" },
-    ],
-  ]);
+  const records = new Map<string, unknown>([["invites/invite-one", invite]]);
+  const presentations = new Map<string, MatchPresentation>();
+  for (const matchId of ["invite-one", "invite-one1", "invite-one2"])
+    for (const actorUid of ["host-login", "guest-login"])
+      presentations.set(`${actorUid}/${matchId}`, {
+        matchId,
+        actorUid,
+        emojiId: actorUid === "host-login" ? 10 : 1001,
+        aura: "",
+        revision: 0,
+      });
   const repository = createGameplayRepository(env, {
     rtdbClient: {
       getPath: async (path) => {
         calls.reads.push(path);
+        if (path.startsWith("players/"))
+          throw new Error("unexpected-firebase-appearance-read");
         return records.get(path) ?? null;
       },
       patchRoot: async () => {
@@ -93,6 +92,12 @@ function setup(invite: unknown = paired, uid = "host-login") {
       },
     },
   });
+  repository.getRtdbPath = async (path) => {
+    calls.reads.push(path);
+    if (path.startsWith("players/"))
+      throw new Error("unexpected-firebase-appearance-read");
+    return records.get(path) ?? null;
+  };
   repository.readProfileOwnershipSnapshot = async (query) => ({
     canonicalProfileIdByProfileId: new Map(),
     loginOwnerByUid: new Map(
@@ -110,7 +115,15 @@ function setup(invite: unknown = paired, uid = "host-login") {
   };
   const dependencies: MatchPresentationRouteDependencies = {
     repository,
-    readPresentationControl: async () => ({ phase: "legacy" }),
+    readPresentationControl: async () => ({ phase: "durable" }),
+    readRegisteredPresentations: async (_env, _inviteId, matchId) => ({
+      matchId,
+      players: Object.fromEntries(
+        [...presentations.values()]
+          .filter((presentation) => presentation.matchId === matchId)
+          .map((presentation) => [presentation.actorUid, presentation]),
+      ),
+    }),
     verifyIdentity: async () => {
       calls.auth++;
       return socketTestIdentity(uid);
@@ -138,7 +151,15 @@ function setup(invite: unknown = paired, uid = "host-login") {
     },
     logFailure: () => undefined,
   };
-  return { env, dependencies, calls, records, repository, current };
+  return {
+    env,
+    dependencies,
+    calls,
+    records,
+    presentations,
+    repository,
+    current,
+  };
 }
 
 test("presentation routes preflight before authentication or reads", async () => {
@@ -171,7 +192,7 @@ test("presentation routes preflight before authentication or reads", async () =>
   });
 });
 
-test("presentation updates resolve the actor server-side and normalize Firebase cosmetic seeds", async () => {
+test("presentation updates resolve the actor server-side with registered cosmetics", async () => {
   const state = setup({ ...paired, eventId: "event-one" });
   const response = await handleMatchPresentationRoute(
     request(),
@@ -187,15 +208,11 @@ test("presentation updates resolve the actor server-side and normalize Firebase 
   assert.deepEqual(state.calls.updated, [
     { actorUid: "host-login", matchId: "invite-one", update: payload },
   ]);
-  assert.deepEqual(state.calls.ensured, [
-    {
-      matchId: "invite-one",
-      seeds: {
-        "host-login": { emojiId: 10, aura: "legacy" },
-        "guest-login": { emojiId: 1001, aura: "" },
-      },
-    },
-  ]);
+  assert.deepEqual(state.calls.ensured, []);
+  assert.equal(
+    state.calls.reads.some((path) => path.startsWith("players/")),
+    false,
+  );
   assert.deepEqual(state.calls.rates, [
     "presentation:post:ip:192.0.2.1",
     "presentation:post:actor:host-login",
@@ -309,12 +326,6 @@ test("updates target each actor's latest match, including only their own pending
       { ...paired, hostRematches: "1;2", guestRematches: "1" },
       uid,
     );
-    for (const index of [1, 2])
-      for (const actorUid of ["host-login", "guest-login"])
-        state.records.set(
-          `players/${actorUid}/matches/invite-one${index}`,
-          match,
-        );
     const expected = uid === "host-login" ? 2 : 1;
     for (const index of [0, 1, 2]) {
       const path = `/invites/invite-one/matches/invite-one${index || ""}/presentation`;
@@ -335,10 +346,6 @@ test("updates target each actor's latest match, including only their own pending
     ...paired,
     hostRematches: "1x",
     guestRematches: "1x",
-  });
-  finished.records.set("players/host-login/matches/invite-one1", {
-    ...match,
-    status: "surrendered",
   });
   assert.equal(
     (
@@ -361,7 +368,6 @@ test("an ended series keeps the latest approved match current when a proposal wa
       { ...paired, hostRematches: "1", guestRematches: "x" },
       uid,
     );
-    state.records.set("players/host-login/matches/invite-one1", match);
     assert.equal(
       (
         await handleMatchPresentationRoute(
@@ -440,7 +446,7 @@ test("rejects invalid paths, match membership, payloads and missing actor record
       ).status,
       400,
     );
-  state.records.delete("players/host-login/matches/invite-one");
+  state.presentations.delete("host-login/invite-one");
   assert.equal(
     (
       await handleMatchPresentationRoute(
@@ -733,23 +739,27 @@ test("durable missing actors and unavailable registered storage never bootstrap 
   );
 });
 
-test("legacy presentation rows do not authorize an actor whose source match is absent", async () => {
-  const state = setup();
-  state.records.delete("players/host-login/matches/invite-one");
-  state.dependencies.room!.ensurePresentations = async (matchId) => ({
-    matchId,
-    players: { "host-login": state.current },
-  });
-  assert.equal(
-    (
-      await handleMatchPresentationRoute(
-        request(),
+test("retired appearance authorities fail without reading or initializing Firebase seeds", async () => {
+  for (const phase of ["legacy", "capture"] as const) {
+    const state = setup();
+    state.dependencies.readPresentationControl = async () => ({ phase });
+    state.dependencies.readRegisteredPresentations = async () => {
+      throw new Error("unexpected-registered-read");
+    };
+    for (const method of ["GET", "POST"]) {
+      const response = await handleMatchPresentationRoute(
+        request(method),
         state.env,
         ctx,
         state.dependencies,
-      )
-    ).status,
-    409,
-  );
-  assert.deepEqual(state.calls.updated, []);
+      );
+      assert.equal(response.status, 503);
+    }
+    assert.deepEqual(state.calls.ensured, []);
+    assert.deepEqual(state.calls.updated, []);
+    assert.equal(
+      state.calls.reads.some((path) => path.startsWith("players/")),
+      false,
+    );
+  }
 });

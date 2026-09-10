@@ -37,7 +37,11 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  await resetMatchPresentationTestState(db, testEnv.TEST_D1_MIGRATIONS, true);
+  await resetMatchPresentationTestState(
+    db,
+    testEnv.TEST_D1_MIGRATIONS,
+    "durable",
+  );
 });
 
 afterEach(async () => {
@@ -115,12 +119,6 @@ async function fixture() {
       )
       .bind(inviteId, JSON.stringify(invite)),
   ]);
-  await db
-    .prepare(
-      "UPDATE match_presentation_control SET phase = 'durable', source_digest = ?, source_count = 1, verification_digest = ?, verified_at_ms = 2, activated_at_ms = 3 WHERE singleton = 1",
-    )
-    .bind("a".repeat(64), "b".repeat(64))
-    .run();
   const repository = {
     async getRtdbPath(path: string) {
       expect(path).toBe(`invites/${inviteId}`);

@@ -1,5 +1,4 @@
 import { AuthApiFailure } from "./authErrors.ts";
-import { createAutomatchAdmissionAudit } from "./automatchAdmissionAudit.ts";
 import {
   acquireAutomatchWriteAdmission,
   automatchAdmissionGuardStatements,
@@ -72,6 +71,13 @@ export function createAutomatchPersistence(
 
   const control = async () => {
     const value = await readAutomatchRuntimeControl(db);
+    if (value.backend !== "d1") {
+      throw new AuthApiFailure(
+        503,
+        "unavailable",
+        "automatch-persistence-backend-retired",
+      );
+    }
     return value;
   };
 
@@ -79,7 +85,6 @@ export function createAutomatchPersistence(
     kind: string,
     work: (
       admission: AutomatchWriteAdmission,
-      audit: ReturnType<typeof createAutomatchAdmissionAudit>,
       inviteAdmission: InviteSourceAdmission,
     ) => Promise<T>,
   ): Promise<T> => {
@@ -97,31 +102,20 @@ export function createAutomatchPersistence(
       }
       throw error;
     });
-    const audit = createAutomatchAdmissionAudit(db, admission, { now });
     let inviteAdmission: InviteSourceAdmission | undefined;
     try {
       inviteAdmission = await acquireInviteSourceAdmission(db, kind, { now });
-      const result = await work(admission, audit, inviteAdmission);
-      if (admission.backend === "rtdb") await audit.markCompleted();
-      return result;
-    } catch (error) {
-      if (admission.backend === "rtdb") {
-        try {
-          await audit.markUncertain();
-        } catch {}
+      if (inviteAdmission.backend !== "d1") {
+        throw new InviteSourceFailure("invite-source-backend-retired");
       }
-      throw error;
+      return await work(admission, inviteAdmission);
     } finally {
       try {
         if (inviteAdmission) {
           await releaseInviteSourceAdmission(db, inviteAdmission);
         }
       } finally {
-        if (admission.backend === "d1") {
-          await releaseAutomatchWriteAdmission(db, admission);
-        } else {
-          await audit.releaseIfSafe();
-        }
+        await releaseAutomatchWriteAdmission(db, admission);
       }
     }
   };
@@ -130,7 +124,7 @@ export function createAutomatchPersistence(
     keys: readonly string[],
     signal?: AbortSignal,
   ) => {
-    if ((await control()).backend !== "d1") return false;
+    await control();
     signal?.throwIfAborted();
     const pending = await db
       .withSession("first-primary")
@@ -145,7 +139,7 @@ export function createAutomatchPersistence(
     if (!pending.results.length) return false;
     return write(
       "session-transition-recovery",
-      async (admission, _audit, inviteAdmission) => {
+      async (admission, inviteAdmission) => {
         const transitions = createGameSessionTransitions({
           db,
           rtdb: raw,
@@ -174,12 +168,8 @@ export function createAutomatchPersistence(
       if (!owned && !resource) return raw.getPath(path, query, signal);
       const mode = await control();
       const inviteControl = invite ? await readInviteSourceControl(db) : null;
-      if (mode.backend === "rtdb") {
-        if (inviteControl?.backend === "d1")
-          throw new InviteSourceFailure(
-            "invite-source-session-backend-conflict",
-          );
-        return raw.getPath(path, query, signal);
+      if (inviteControl && inviteControl.backend !== "d1") {
+        throw new InviteSourceFailure("invite-source-backend-retired");
       }
       if (resource) {
         if (
@@ -192,9 +182,7 @@ export function createAutomatchPersistence(
       }
       const value = owned
         ? await store.getPath(path, query, signal)
-        : inviteControl?.backend === "d1"
-          ? await inviteStore.getPath(path, query, signal)
-          : await raw.getPath(path, query, signal);
+        : await inviteStore.getPath(path, query, signal);
       if (resource) await reader.assertResourceAvailable(resource);
       return value;
     },
@@ -206,22 +194,9 @@ export function createAutomatchPersistence(
         return raw.patchRoot(updates, signal);
       return write(
         "automatch-persistence-patch",
-        async (admission, audit, inviteAdmission) => {
+        async (admission, inviteAdmission) => {
           if (!owned.length) {
-            if (inviteAdmission.backend === "d1")
-              throw new InviteSourceFailure(
-                "invite-source-transition-required",
-              );
-            return raw.patchRoot(updates, signal);
-          }
-          if (admission.backend === "rtdb") {
-            if (inviteAdmission.backend === "d1")
-              throw new InviteSourceFailure(
-                "invite-source-session-backend-conflict",
-              );
-            await audit.preparePatch(updates);
-            await audit.markDispatching();
-            return raw.patchRoot(updates, signal);
+            throw new InviteSourceFailure("invite-source-transition-required");
           }
           const guards = () => automatchAdmissionGuardStatements(db, admission);
           if (owned.length !== paths.length) {
@@ -254,47 +229,25 @@ export function createAutomatchPersistence(
     },
     async transactPath(path, updater, signal) {
       if (inviteSourcePath(path)) {
-        return write(
-          "invite-source-transaction",
-          async (_admission, _audit, inviteAdmission) => {
-            if (inviteAdmission.backend === "d1")
-              throw new InviteSourceFailure(
-                "invite-source-transition-required",
-              );
-            return raw.transactPath(path, updater, signal);
-          },
-        );
+        throw new InviteSourceFailure("invite-source-transition-required");
       }
       if (!parseAutomatchPath(path)) {
         return raw.transactPath(path, updater, signal);
       }
-      return write(
-        "automatch-persistence-transaction",
-        async (admission, audit) => {
-          if (admission.backend === "rtdb") {
-            await audit.prepareTransaction(path);
-            await audit.markDispatching();
-            return raw.transactPath(
-              path,
-              updater,
-              signal,
-              audit.recordTransactionAttempt,
-            );
-          }
-          const resource = resourceForPath(path);
-          const guarded = createAutomatchD1Store(db, {
-            now,
-            writeGuards: () => [
-              ...automatchAdmissionGuardStatements(db, admission),
-              ...gameSessionResourceGuardStatements(
-                db,
-                resource ? [resource] : [],
-              ),
-            ],
-          });
-          return guarded.transactPath(path, updater, signal);
-        },
-      );
+      return write("automatch-persistence-transaction", async (admission) => {
+        const resource = resourceForPath(path);
+        const guarded = createAutomatchD1Store(db, {
+          now,
+          writeGuards: () => [
+            ...automatchAdmissionGuardStatements(db, admission),
+            ...gameSessionResourceGuardStatements(
+              db,
+              resource ? [resource] : [],
+            ),
+          ],
+        });
+        return guarded.transactPath(path, updater, signal);
+      });
     },
   };
 
@@ -307,26 +260,25 @@ export function createAutomatchPersistence(
       );
     },
     async writesEnabled() {
+      const inviteControl = await readInviteSourceControl(db);
+      if (inviteControl.backend !== "d1") {
+        throw new InviteSourceFailure("invite-source-backend-retired");
+      }
       return (
-        (await control()).state === "active" &&
-        (await readInviteSourceControl(db)).state === "active"
+        (await control()).state === "active" && inviteControl.state === "active"
       );
     },
     async readQueuedByLogins(
       loginUids: readonly string[],
       signal?: AbortSignal,
-    ): Promise<Record<string, unknown> | null> {
-      if ((await control()).backend !== "d1") return null;
+    ): Promise<Record<string, unknown>> {
+      await control();
       const rows = await store.listEntriesByLogins(loginUids, 2, signal);
       return Object.fromEntries(rows.map((row) => [row.key, row.value]));
     },
-    async expireReceipts(
-      cutoffMs: number,
-      limit: number,
-    ): Promise<number | null> {
+    async expireReceipts(cutoffMs: number, limit: number): Promise<number> {
       const mode = await control();
       if (mode.state === "frozen") return 0;
-      if (mode.backend !== "d1") return null;
       return write("session-receipt-expiry", (admission) =>
         createAutomatchD1Store(db, {
           now,
@@ -336,22 +288,20 @@ export function createAutomatchPersistence(
     },
     async sweep(limit = 10) {
       const mode = await control();
-      if (mode.backend !== "d1" || mode.state === "frozen") {
+      if (mode.state === "frozen") {
         return { recovered: 0, failed: 0 };
       }
-      return write(
-        "session-transition-sweep",
-        (admission, _audit, inviteAdmission) =>
-          createGameSessionTransitions({
-            db,
-            rtdb: raw,
-            store,
-            now,
-            onCommitted,
-            prepareMatchPresentations,
-            writeGuards: () => automatchAdmissionGuardStatements(db, admission),
-            inviteAdmission,
-          }).sweep(limit),
+      return write("session-transition-sweep", (admission, inviteAdmission) =>
+        createGameSessionTransitions({
+          db,
+          rtdb: raw,
+          store,
+          now,
+          onCommitted,
+          prepareMatchPresentations,
+          writeGuards: () => automatchAdmissionGuardStatements(db, admission),
+          inviteAdmission,
+        }).sweep(limit),
       );
     },
     decorateLocks(
@@ -359,10 +309,7 @@ export function createAutomatchPersistence(
     ): GameSessionMutationLockStore {
       return {
         async acquire(lock, ownerId, nowMs) {
-          const mode = await control();
-          if (mode.backend === "d1") {
-            await recover(lock.lockId);
-          }
+          await recover(lock.lockId);
           await base.acquire(lock, ownerId, nowMs);
           held.set(lock.lockId, { ...lock, ownerId });
         },

@@ -1,4 +1,3 @@
-import { normalizeHistoricalMatchRecord } from "@mons/shared/game-sessions";
 import {
   isMatchPresentationSnapshot,
   type MatchPresentationSnapshot,
@@ -12,10 +11,7 @@ import {
 import { AuthApiFailure } from "./authErrors.ts";
 import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
-import type {
-  InviteReactions,
-  MatchPresentationSeeds,
-} from "./inviteReactions.ts";
+import type { InviteReactions } from "./inviteReactions.ts";
 import {
   readMatchPresentationControl,
   readRegisteredMatchPresentations,
@@ -116,34 +112,6 @@ export function requireCurrentPresentationMatch(
   }
 }
 
-export async function readPresentationSeeds(
-  repository: GameplayRepository,
-  inviteId: string,
-  matchId: string,
-  invite: PresentationInvite,
-): Promise<MatchPresentationSeeds> {
-  requireRegisteredPresentationMatch(inviteId, matchId, invite);
-  const actors = invite.guestId
-    ? [invite.hostId, invite.guestId]
-    : [invite.hostId];
-  const entries = await Promise.all(
-    actors.map(async (actorUid) => {
-      const value = await repository.getRtdbPath(
-        `players/${actorUid}/matches/${matchId}`,
-      );
-      if (value === null || value === undefined) return null;
-      const match = normalizeHistoricalMatchRecord(value);
-      if (!match)
-        throw new AuthApiFailure(409, "failed-precondition", "match-invalid");
-      return [actorUid, { emojiId: match.emojiId, aura: match.aura }] as const;
-    }),
-  );
-  const seeds = Object.fromEntries(entries.filter((entry) => entry !== null));
-  if (!Object.keys(seeds).length)
-    throw new AuthApiFailure(404, "not-found", "match-not-found");
-  return seeds;
-}
-
 function requireRegisteredPresentationMatch(
   inviteId: string,
   matchId: string,
@@ -165,7 +133,7 @@ function requireRegisteredPresentationMatch(
 
 export async function readMatchPresentationSnapshot(
   env: Env,
-  repository: GameplayRepository,
+  _repository: GameplayRepository,
   inviteId: string,
   matchId: string,
   invite: PresentationInvite,
@@ -178,21 +146,8 @@ export async function readMatchPresentationSnapshot(
   const control = await (
     dependencies.readPresentationControl || readMatchPresentationControl
   )(env.PROFILE_GAMES_DB);
-  if (control.phase !== "durable") {
-    const seeds = await readPresentationSeeds(
-      repository,
-      inviteId,
-      matchId,
-      invite,
-    );
-    requirePresentationActor(Object.keys(seeds), dependencies.requiredActorUid);
-    if (!dependencies.room.ensurePresentations)
-      throw new TypeError("presentation-room-unavailable");
-    return {
-      canonical: false,
-      snapshot: await dependencies.room.ensurePresentations(matchId, seeds),
-    };
-  }
+  if (control.phase !== "durable")
+    throw new Error("match-presentation-authority-not-active");
   const current = await (
     dependencies.readRegisteredPresentations || readRegisteredMatchPresentations
   )(env, inviteId, matchId);

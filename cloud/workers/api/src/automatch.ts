@@ -73,7 +73,6 @@ export const AUTOMATCH_TOTAL_TIMEOUT_MS = 20_000;
 const AUTOMATCH_PASSWORD_LENGTH = 15;
 const AUTOMATCH_OWNER_LOCK_MIN_RETRY_MS = 25;
 const AUTOMATCH_OWNER_LOCK_MAX_RETRY_MS = 1_000;
-const AUTOMATCH_LOGIN_UID_QUERY_CONCURRENCY = 10;
 const AUTOMATCH_UID_LOOKUP_LIMIT = 2;
 const AUTOMATCH_OWNER_LOGIN_UID_LIMIT = 512;
 const AUTOMATCH_CANCELLATION_RECONCILE_TIMEOUT_MS = 1_000;
@@ -336,33 +335,19 @@ export async function findOwnedQueuedAutomatches(
   signal?: AbortSignal,
 ): Promise<QueuedAutomatch[]> {
   const uniqueLoginUids = Array.from(new Set(loginUids));
-  const stored = await repository.automatchPersistence?.readQueuedByLogins(
-    uniqueLoginUids,
-    signal,
-  );
-  if (stored !== undefined && stored !== null) {
-    return uniqueLoginUids
-      .flatMap((uid) => getQueuedAutomatchesForUid(stored, uid))
-      .sort(compareQueuedAutomatches);
-  }
-  const allCandidates: QueuedAutomatch[] = [];
-  for (
-    let offset = 0;
-    offset < uniqueLoginUids.length;
-    offset += AUTOMATCH_LOGIN_UID_QUERY_CONCURRENCY
-  ) {
-    signal?.throwIfAborted();
-    const batchCandidates = await Promise.all(
-      uniqueLoginUids
-        .slice(offset, offset + AUTOMATCH_LOGIN_UID_QUERY_CONCURRENCY)
-        .map((loginUid) =>
-          readQueuedAutomatchesByUid(loginUid, repository, signal),
-        ),
+  const persistence = repository.automatchPersistence;
+  if (!persistence) {
+    throw new AuthApiFailure(
+      503,
+      "unavailable",
+      "automatch-persistence-unavailable",
     );
-    allCandidates.push(...batchCandidates.flat());
   }
+  const stored = await persistence.readQueuedByLogins(uniqueLoginUids, signal);
   signal?.throwIfAborted();
-  return allCandidates.sort(compareQueuedAutomatches);
+  return uniqueLoginUids
+    .flatMap((uid) => getQueuedAutomatchesForUid(stored, uid))
+    .sort(compareQueuedAutomatches);
 }
 
 async function didClearOwnedQueuedAutomatches(

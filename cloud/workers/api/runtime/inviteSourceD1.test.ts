@@ -164,7 +164,7 @@ describe("canonical invite source", () => {
     );
   });
 
-  it("switches an existing coordinator immediately and never falls back for missing D1 rows", async () => {
+  it("rejects a retired source mode and never falls back for missing D1 rows", async () => {
     let firebaseReads = 0;
     const raw: FirebaseRtdbClient = {
       async getPath() {
@@ -179,9 +179,10 @@ describe("canonical invite source", () => {
       },
     };
     const coordinator = createAutomatchPersistence(db, raw);
-    expect(await coordinator.client.getPath("invites/one")).toEqual({
-      hostId: "stale-firebase",
-    });
+    await expect(coordinator.client.getPath("invites/one")).rejects.toThrow(
+      "invite-source-backend-retired",
+    );
+    expect(firebaseReads).toBe(0);
     await activate();
     const store = createInviteSourceD1Store(db);
     await db.batch(
@@ -206,14 +207,14 @@ describe("canonical invite source", () => {
       await coordinator.client.getPath("invites/one", { shallow: true }),
     ).toEqual({ hostId: true, password: true, settings: true });
     expect(await coordinator.client.getPath("invites/missing")).toBeNull();
-    expect(firebaseReads).toBe(1);
+    expect(firebaseReads).toBe(0);
     await db
       .prepare("DELETE FROM invite_source_control WHERE singleton = 1")
       .run();
     await expect(coordinator.client.getPath("invites/one")).rejects.toThrow(
       "invite-source-control-unavailable",
     );
-    expect(firebaseReads).toBe(1);
+    expect(firebaseReads).toBe(0);
     await db
       .prepare(
         `INSERT INTO invite_source_control (singleton, backend, state, epoch, freeze_generation)

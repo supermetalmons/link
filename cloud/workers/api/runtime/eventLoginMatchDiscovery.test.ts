@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -140,6 +141,11 @@ describe("event login-match discovery", () => {
   });
 
   beforeEach(async () => {
+    await resetMatchPresentationTestState(
+      testEnv.PROFILE_GAMES_DB,
+      testEnv.TEST_D1_MIGRATIONS,
+      "durable",
+    );
     await permitIndexWrites();
     await testEnv.PROFILE_GAMES_DB.prepare(
       "DELETE FROM login_match_discovery",

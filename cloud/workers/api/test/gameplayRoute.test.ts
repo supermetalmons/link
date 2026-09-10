@@ -40,6 +40,10 @@ import {
 } from "../src/wagerReservationOperations.ts";
 import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
+import {
+  createAutomatchPersistenceStub,
+  createAutomatchQueueLookup,
+} from "./automatchPersistenceTestUtils.ts";
 
 const env = {
   ...TELEGRAM_TEST_ENV,
@@ -208,7 +212,13 @@ function repository(
     },
     ...overrides,
   };
-  return attachMemoryWagerFrozenStore(value);
+  const result = attachMemoryWagerFrozenStore(value);
+  result.automatchPersistence ??= createAutomatchPersistenceStub({
+    readQueuedByLogins: createAutomatchQueueLookup((...args) =>
+      result.readState(...args),
+    ),
+  });
+  return result;
 }
 
 function wagerRepository(

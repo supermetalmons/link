@@ -162,7 +162,8 @@ function fixture(profileGamesDb = testEnv.PROFILE_GAMES_DB) {
   };
   const fixtureEnv = { ...testEnv, PROFILE_GAMES_DB: profileGamesDb };
   const prepareMatchPresentations: PrepareMatchPresentations = (creations) =>
-    hooks.prepareMatchPresentations?.(creations) || Promise.resolve([]);
+    hooks.prepareMatchPresentations?.(creations) ||
+    Promise.resolve(appearanceRegistrations(creations));
   const client = createEventRtdbClient(
     fixtureEnv,
     base,
@@ -239,6 +240,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     await resetMatchPresentationTestState(
       testEnv.PROFILE_GAMES_DB,
       testEnv.TEST_D1_MIGRATIONS,
+      "durable",
     );
     await testEnv.PROFILE_GAMES_DB.batch([
       testEnv.PROFILE_GAMES_DB.prepare(
@@ -322,11 +324,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
   it("fences an old event writer and recovers its durable effects with registered appearances", async () => {
     const f = fixture();
     await f.create();
-    await resetMatchPresentationTestState(
-      testEnv.PROFILE_GAMES_DB,
-      testEnv.TEST_D1_MIGRATIONS,
-      true,
-    );
+    f.hooks.prepareMatchPresentations = async () => [];
     await expect(f.start()).rejects.toThrow(
       "match-presentation-capture-required",
     );
@@ -497,9 +495,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     expect(await count("invite_event_effect_receipts")).toBe(1);
     const writes = f.writes.length;
     const reads = f.reads.length;
-    expect(await count("match_presentation_registrations")).toBe(0);
-    f.hooks.prepareMatchPresentations = async (creations) =>
-      appearanceRegistrations(creations);
+    expect(await count("match_presentation_registrations")).toBe(2);
     await testEnv.EVENT_DB.prepare(
       "DROP TRIGGER reject_event_source_finalization",
     ).run();

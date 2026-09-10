@@ -16,10 +16,15 @@ import {
 import { createProfileLinkProjectionRuntime } from "../src/profileLinkProfileGameProjection.ts";
 import { captureLoginMatchDiscovery } from "../src/loginMatchDiscoveryD1.ts";
 import { getProfileGameProjection } from "../src/profileGamesD1.ts";
+import {
+  buildMatchPresentationRegistrationStatements,
+  prepareCreatedMatchPresentations,
+} from "../src/matchPresentationRegistry.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { resolveInviteRole } from "../src/gameSessionMutations.ts";
 import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
+import { activateDurableMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
@@ -296,6 +301,7 @@ describe("D1-authoritative profile game projection ownership", () => {
         "b".repeat(64),
       ),
     ]);
+    await activateDurableMatchPresentationTestState(testEnv.PROFILE_GAMES_DB);
     await testEnv.PROFILE_GAMES_DB.prepare(
       `UPDATE login_match_discovery_control SET discovery_backend = 'd1',
        capture_enforced = 1, capture_version_id = 'capture',
@@ -348,6 +354,22 @@ describe("D1-authoritative profile game projection ownership", () => {
     const hostProfileId = "presentation-projection-profile";
     const guestSeed = { emojiId: 1, aura: "" };
     await insertProfileOwner(hostProfileId, hostLoginId);
+    const registrations = await prepareCreatedMatchPresentations(testEnv, [
+      {
+        inviteId,
+        matchId,
+        actorUid: guestLoginId,
+        ...guestSeed,
+        sourceId: "test:rematch-creation",
+      },
+    ]);
+    await testEnv.PROFILE_GAMES_DB.batch(
+      buildMatchPresentationRegistrationStatements(
+        testEnv.PROFILE_GAMES_DB,
+        registrations,
+        1,
+      ),
+    );
     const runtime = createProfileGameProjectionRuntime(testEnv, {
       rtdb: {
         async getRtdbPath(path) {
@@ -360,8 +382,6 @@ describe("D1-authoritative profile game projection ownership", () => {
             };
           }
           if (path === `automatch/${inviteId}`) return null;
-          if (path === `players/${guestLoginId}/matches/${matchId}`)
-            return guestSeed;
           throw new Error(`unexpected-rtdb-read:${path}`);
         },
       },
@@ -379,7 +399,6 @@ describe("D1-authoritative profile game projection ownership", () => {
     ).resolves.toMatchObject({ data: { opponentEmoji: 1 } });
 
     const room = testEnv.INVITE_REACTIONS.getByName(inviteId);
-    await room.ensurePresentations(matchId, { [guestLoginId]: guestSeed });
     await room.updatePresentation(guestLoginId, matchId, {
       operationId: crypto.randomUUID(),
       expectedRevision: 0,
@@ -779,21 +798,28 @@ describe("D1-authoritative profile game projection ownership", () => {
     const inviteId = "d1-role-invite";
     await insertProfileOwner(profileId, hostUid);
     await insertAdditionalLoginOwner(profileId, alternateUid);
+    await testEnv.PROFILE_GAMES_DB.batch([
+      testEnv.PROFILE_GAMES_DB.prepare(
+        "UPDATE automatch_runtime_control SET backend = 'd1' WHERE singleton = 1",
+      ),
+      testEnv.PROFILE_GAMES_DB.prepare(
+        "UPDATE invite_source_control SET backend = 'd1', state = 'active', epoch = 1, verified_at_ms = 1, activated_at_ms = 1 WHERE singleton = 1",
+      ),
+      testEnv.PROFILE_GAMES_DB.prepare(
+        "INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms) VALUES (?, ?, 1, 1)",
+      ).bind(inviteId, JSON.stringify({ hostId: hostUid, guestId: null })),
+    ]);
     const reads: string[] = [];
     const rtdbClient: FirebaseRtdbClient = {
       async getPath(path) {
         reads.push(path);
-        if (/^players\/.+\/profile$/.test(path)) {
-          throw new Error("unexpected-rtdb-profile-owner-read");
-        }
-        if (path === `invites/${inviteId}`) {
-          return { hostId: hostUid, guestId: null };
-        }
-        return null;
+        throw new Error(`unexpected-firebase-read:${path}`);
       },
-      async patchRoot() {},
+      async patchRoot() {
+        throw new Error("unexpected-firebase-write");
+      },
       async transactPath() {
-        return { committed: false, value: null };
+        throw new Error("unexpected-firebase-write");
       },
     };
     const repository = createGameplayRepository(testEnv, { rtdbClient });
@@ -801,7 +827,7 @@ describe("D1-authoritative profile game projection ownership", () => {
     await expect(
       resolveInviteRole({ uid: alternateUid }, { inviteId }, repository),
     ).resolves.toMatchObject({ actorUid: hostUid, role: "host" });
-    expect(reads).toEqual([`invites/${inviteId}`]);
+    expect(reads).toEqual([]);
   });
 
   it("reserves a monotonic fence before committing an event projection", async () => {
