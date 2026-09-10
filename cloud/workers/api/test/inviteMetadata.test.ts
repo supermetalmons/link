@@ -69,40 +69,32 @@ test("metadata normalization distinguishes missing sources from invalid and over
   }
 });
 
-test("metadata source reads compose the invite root and refresh the bounded client cache", async () => {
-  let nowMs = 0;
-  let clients = 0;
+test("metadata reads normalize each fresh source and recover after read failures", async () => {
+  let value: unknown = invite;
   let fail = false;
-  const paths: string[] = [];
+  const inviteIds: string[] = [];
   const read = createInviteMetadataReader(TELEGRAM_TEST_ENV, {
-    now: () => nowMs,
-    createClient: () => {
-      clients++;
-      return {
-        patchRoot: async () => {
-          throw new Error("unexpected-write");
-        },
-        transactPath: async () => {
-          throw new Error("unexpected-write");
-        },
-        getPath: async (path) => {
-          paths.push(path);
-          if (fail) throw new Error("source-unavailable");
-          return invite;
-        },
-      };
+    readSource: async (id) => {
+      inviteIds.push(id);
+      if (fail) throw new Error("source-unavailable");
+      return value;
     },
   });
-  assert.equal((await read(inviteId)).status, "ok");
-  await read(inviteId);
-  assert.equal(clients, 1);
-  nowMs = 5 * 60 * 1_000;
-  await read(inviteId);
-  assert.equal(clients, 2);
+  assert.deepEqual(
+    await read(inviteId),
+    normalizeInviteMetadata(inviteId, invite),
+  );
+  value = { ...invite, hostRematches: "1", password: "private" };
+  assert.deepEqual(
+    await read(inviteId),
+    normalizeInviteMetadata(inviteId, value),
+  );
   fail = true;
   await assert.rejects(read(inviteId), /source-unavailable/);
   fail = false;
-  await read(inviteId);
-  assert.equal(clients, 3);
-  assert.deepEqual(paths, Array(5).fill(`invites/${inviteId}`));
+  value = null;
+  assert.deepEqual(await read(inviteId), { status: "missing" });
+  value = { ...invite, hostColor: "invalid" };
+  assert.deepEqual(await read(inviteId), { status: "invalid" });
+  assert.deepEqual(inviteIds, Array(5).fill(inviteId));
 });

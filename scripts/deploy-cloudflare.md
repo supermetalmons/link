@@ -61,6 +61,12 @@ Keep existing request, connection, and smoke-command timeouts that detect stalle
 
 `upload:api` sends no production traffic. `promote:api` requires an explicit Version ID and routes 100% of traffic to it. Trigger application is a separate operation for reviewed configuration changes.
 
+## Invite-reader and credential cleanup
+
+Released on September 10, 2026 with API version `7b3dcdfe-227f-40c2-a28c-ba347cb39c52` serving 100% of traffic, replacing `a445685e-972b-4407-a902-c38bdfee73cd`. Invite readers now compose canonical invite and wager D1 records directly, preserving activation checks, frozen reads, and session-transition guards. Google token exchange requires explicit credentials; unscoped RTDB clients require credentials or a token provider, while scoped move/surrender clients retain gameplay credentials. The four retired Firebase identity/Telegram credential names are removed from runtime requirements. All 37 deployed bindings, including all 16 encrypted secrets, and runtime configuration were verified unchanged.
+
+The complete validation gate passed all 3,228 tests, including 567 Worker runtime tests. Production API smoke, metadata/wager/reaction/presentation snapshots, heartbeats, reconnects, and presentation HTTP reads passed. The first production lifecycle attempt closed a match socket after join with `1011; Match source unavailable`; its cleanup succeeded, and a fresh isolated attempt passed all 18 lifecycle checks without another code change. Existing diagnostics did not identify the first closure's cause. The baseline and both production attempts ended their series and revoked all six temporary sessions. Invite and automatch controls remained active on D1. No frontend, schema, Firebase rules, trigger, service-account, or encrypted-secret changes were made, and no write freeze or Queue pause was applied. Source hashes, validation output, provider proofs, and verification reports are retained in `/private/tmp/mons-firebase-cleanup-release`.
+
 ## Auth/recovery Firebase cleanup
 
 Released on September 10, 2026 with API version `d9deacf7-eaaf-45b2-9db5-aadaf9f0b122` serving 100% of traffic. Cleanup commit `80529839e` removes identity's Firebase client construction and routes prize recovery through a D1-only store with mandatory event-lease guards. Public contracts, schemas, shared credentials, gameplay storage, and Queue payloads are unchanged. The candidate preserves the already-deployed prize catalog from API version `0f093d66-d08b-4adf-8912-88efc9ff9efd`; unrelated frontend styling was not released.
@@ -777,7 +783,7 @@ npm run deploy:firebase -- --project mons-link
 
 ## IAM and secrets
 
-The Firebase identity has only Firebase Auth and RTDB permissions. The gameplay identity has only RTDB read/write permissions. Do not broaden either identity to Editor or Owner.
+The gameplay service account supplies the active match adapters and has only RTDB read/write permissions. Do not broaden it to Editor or Owner. Firebase identity and Telegram service-account credentials are no longer Worker runtime requirements. Retain their existing encrypted secrets, Google accounts, and keys; removing a name from `secrets.required` does not delete a provisioned secret or authorize account cleanup.
 
 Keep X, Telegram bot credentials, Helius, Google private keys, and the event-prize wallet as encrypted Worker secrets. The `TELEGRAM_QUEUE_BRIDGE_SECRET` operator credential is also provisioned in a protected local file; see [cloud operations](../cloud/README.md#telegram-recovery-and-announcements). Automatic Sunday Mons prize announcements use the existing bot credentials and require no announcement bridge secret. Routine releases reuse existing encrypted values.
 

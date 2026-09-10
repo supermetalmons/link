@@ -307,9 +307,6 @@ export const TELEGRAM_TEST_ENV = {
   EVENT_PRIZE_WITHDRAWALS_DB: eventPrizeWithdrawalsDb,
   EVENT_PRIZE_WITHDRAWAL_WORKFLOW: workflow,
   FIREBASE_RTDB_URL: "https://mons-link-default-rtdb.firebaseio.com",
-  FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL:
-    "identity@example.iam.gserviceaccount.com",
-  FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   GAMEPLAY_SERVICE_ACCOUNT_EMAIL: "gameplay@example.iam.gserviceaccount.com",
   GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",
@@ -322,9 +319,6 @@ export const TELEGRAM_TEST_ENV = {
   TELEGRAM_DB: telegramDb,
   TELEGRAM_PROJECTION_QUEUE: queue,
   TELEGRAM_EXTRA_CHAT_ID: "test-telegram-chat",
-  TELEGRAM_FIREBASE_SERVICE_ACCOUNT_EMAIL:
-    "telegram@example.iam.gserviceaccount.com",
-  TELEGRAM_FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   TELEGRAM_QUEUE_BRIDGE_SECRET: "test-bridge-secret",
   X_CLIENT_ID: "test-x-client-id",
   X_CLIENT_SECRET: "test-x-client-secret",

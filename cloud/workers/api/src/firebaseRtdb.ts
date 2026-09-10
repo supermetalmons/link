@@ -51,6 +51,24 @@ export type FirebaseRtdbCredentials = {
   privateKeyPem: string;
 };
 
+type FirebaseMatchWriteScope = { playerId: string; matchId: string };
+
+type FirebaseRtdbOptions = {
+  credentials?: FirebaseRtdbCredentials;
+  fetcher?: typeof fetch;
+  getAccessToken?: () => Promise<string>;
+  maxTransactionAttempts?: number;
+  now?: () => number;
+  scopedMatchSurrender?: FirebaseMatchWriteScope;
+  scopedMatchMove?: FirebaseMatchWriteScope;
+  timeoutMs?: number;
+} & (
+  | { credentials: FirebaseRtdbCredentials }
+  | { getAccessToken: () => Promise<string> }
+  | { scopedMatchSurrender: FirebaseMatchWriteScope }
+  | { scopedMatchMove: FirebaseMatchWriteScope }
+);
+
 type FirebaseRtdbLocation = { FIREBASE_RTDB_URL: string };
 
 export type FirebaseRtdbQuery = {
@@ -228,25 +246,13 @@ export function createFirebaseRtdbClient(
           email: env.GAMEPLAY_SERVICE_ACCOUNT_EMAIL,
           privateKeyPem: env.GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY,
         }
-      : {
-          email: env.TELEGRAM_FIREBASE_SERVICE_ACCOUNT_EMAIL,
-          privateKeyPem: env.TELEGRAM_FIREBASE_SERVICE_ACCOUNT_PRIVATE_KEY,
-        },
+      : undefined,
     fetcher = fetch,
     getAccessToken: getAccessTokenOverride,
     maxTransactionAttempts = MAX_TRANSACTION_ATTEMPTS,
     now = Date.now,
     timeoutMs = RTDB_TIMEOUT_MS,
-  }: {
-    credentials?: FirebaseRtdbCredentials;
-    fetcher?: typeof fetch;
-    getAccessToken?: () => Promise<string>;
-    maxTransactionAttempts?: number;
-    now?: () => number;
-    scopedMatchSurrender?: { playerId: string; matchId: string };
-    scopedMatchMove?: { playerId: string; matchId: string };
-    timeoutMs?: number;
-  } = {},
+  }: FirebaseRtdbOptions,
 ): FirebaseRtdbClient {
   const root = databaseRoot(env);
   if (scopedMatchSurrender !== undefined && scopedMatchMove !== undefined) {
@@ -262,6 +268,21 @@ export function createFirebaseRtdbClient(
       scope.matchId !== scope.matchId.trim())
   ) {
     throw new TypeError(`invalid-match-${scopeKind}-scope`);
+  }
+  const tokenProvider =
+    getAccessTokenOverride ||
+    (credentials
+      ? () =>
+          createGoogleAccessToken({
+            credentials,
+            fetcher,
+            now,
+            scopes: [FIREBASE_DATABASE_SCOPE, GOOGLE_USERINFO_EMAIL_SCOPE],
+            timeoutMs,
+          })
+      : null);
+  if (!tokenProvider) {
+    throw new TypeError("missing-firebase-rtdb-credentials");
   }
   const scopedPath = scope
     ? `players/${scope.playerId}/matches/${scope.matchId}`
@@ -283,15 +304,7 @@ export function createFirebaseRtdbClient(
   };
   let accessToken: Promise<string> | null = null;
   const getAccessToken = () => {
-    accessToken ||= getAccessTokenOverride
-      ? getAccessTokenOverride()
-      : createGoogleAccessToken(env, {
-          credentials,
-          fetcher,
-          now,
-          scopes: [FIREBASE_DATABASE_SCOPE, GOOGLE_USERINFO_EMAIL_SCOPE],
-          timeoutMs,
-        });
+    accessToken ||= tokenProvider();
     return accessToken;
   };
   const authorizedFetch = async (

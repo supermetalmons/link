@@ -1,18 +1,115 @@
 import { env } from "cloudflare:workers";
 import {
   applyD1Migrations,
+  createExecutionContext,
   evictDurableObject,
+  runInDurableObject,
+  waitOnExecutionContext,
   type D1Migration,
 } from "cloudflare:test";
-import { beforeAll, expect, it } from "vitest";
+import { afterEach, beforeAll, expect, it } from "vitest";
 import { INVITE_METADATA_SOCKET_PROTOCOL } from "@mons/shared/invite-metadata";
+import { INVITE_WAGERS_SOCKET_PROTOCOL } from "@mons/shared/invite-wagers";
 import { createInviteSourceD1Store } from "../src/inviteSourceD1.ts";
+import { handleInviteMetadataRoute } from "../src/inviteMetadataRoute.ts";
+import { handleInviteWagersRoute } from "../src/inviteWagersRoute.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
 };
+type Room = DurableObjectStub<
+  import("../src/inviteReactions.ts").InviteReactions
+>;
+const sockets: WebSocket[] = [];
+const rooms: Room[] = [];
+
+async function readHttp(inviteId: string, channel: "metadata" | "wagers") {
+  const ctx = createExecutionContext();
+  const handler =
+    channel === "metadata"
+      ? handleInviteMetadataRoute
+      : handleInviteWagersRoute;
+  const response = await handler(
+    new Request(`https://api.mons.link/invites/${inviteId}/${channel}`, {
+      headers: { Origin: "https://mons.link", "CF-Connecting-IP": "192.0.2.1" },
+    }),
+    env,
+    ctx,
+  );
+  await waitOnExecutionContext(ctx);
+  expect(response.status).toBe(200);
+  return response.json() as Promise<{
+    ok: true;
+    snapshot: Record<string, unknown>;
+  }>;
+}
+
+async function openSocket(
+  room: Room,
+  inviteId: string,
+  channel: "metadata" | "wagers",
+  revision: number,
+) {
+  const name = channel === "metadata" ? "Metadata" : "Wagers";
+  const response = await room.fetch(
+    new Request(`https://room.internal/${channel}/socket`, {
+      headers: {
+        Upgrade: "websocket",
+        "Sec-WebSocket-Protocol":
+          channel === "metadata"
+            ? INVITE_METADATA_SOCKET_PROTOCOL
+            : INVITE_WAGERS_SOCKET_PROTOCOL,
+        [`X-Mons-${name}-Invite`]: encodeURIComponent(inviteId),
+        [`X-Mons-${name}-Role`]: "spectator",
+        [`X-Mons-${name}-IP`]: "192.0.2.1",
+        [`X-Mons-${name}-Revision`]: String(revision),
+        [`X-Mons-${name}-Protected`]: "1",
+        [`X-Mons-${name}-Authenticated`]: "0",
+      },
+    }),
+  );
+  expect(response.status).toBe(101);
+  const socket = response.webSocket!;
+  const messages: string[] = [];
+  const pending: ((value: string) => void)[] = [];
+  socket.addEventListener("message", (event) => {
+    const reader = pending.shift();
+    if (reader) reader(String(event.data));
+    else messages.push(String(event.data));
+  });
+  socket.accept();
+  sockets.push(socket);
+  return async () =>
+    JSON.parse(
+      await (messages.length
+        ? Promise.resolve(messages.shift()!)
+        : new Promise<string>((resolve) => pending.push(resolve))),
+    );
+}
+
+afterEach(async () => {
+  await Promise.all(
+    rooms
+      .splice(0)
+      .map((room) =>
+        runInDurableObject(room, (_instance, state) =>
+          state.storage.deleteAlarm(),
+        ),
+      ),
+  );
+  await Promise.all(
+    sockets.splice(0).map(async (socket) => {
+      if (socket.readyState === WebSocket.CLOSED) return;
+      const closed = new Promise<void>((resolve) =>
+        socket.addEventListener("close", () => resolve(), { once: true }),
+      );
+      socket.close(1000, "Test complete");
+      await closed;
+    }),
+  );
+});
 
 beforeAll(async () => {
   await applyD1Migrations(env.PROFILE_GAMES_DB, testEnv.TEST_D1_MIGRATIONS);
@@ -31,7 +128,7 @@ beforeAll(async () => {
   ]);
 });
 
-it("delivers and recovers metadata from canonical D1 through the default room source", async () => {
+it("delivers HTTP and socket metadata and wagers from canonical D1 through eviction and reconnect", async () => {
   const inviteId = `source-${crypto.randomUUID()}`;
   const source = createInviteSourceD1Store(env.PROFILE_GAMES_DB);
   await env.PROFILE_GAMES_DB.batch(
@@ -50,78 +147,103 @@ it("delivers and recovers metadata from canonical D1 through the default room so
       1,
     ),
   );
+  const wager = {
+    proposals: { "host-login": { material: "dust", count: 2, createdAt: 1 } },
+  };
+  await env.PROFILE_DB.prepare(
+    `INSERT INTO invite_wager_states
+     (invite_id, match_id, wager_json, resolution_marker, revision, updated_at_ms)
+     VALUES (?, ?, ?, 0, 1, 1)`,
+  )
+    .bind(inviteId, inviteId, JSON.stringify(wager))
+    .run();
   const room = env.INVITE_REACTIONS.getByName(inviteId);
+  rooms.push(room);
   const first = await room.readMetadata(inviteId);
   expect(first.status).toBe("ok");
   if (first.status !== "ok") throw new Error("metadata-missing");
   expect(first.passwordProtected).toBe(true);
   expect(first.snapshot).not.toHaveProperty("password");
-  const response = await room.fetch(
-    new Request("https://room.internal/metadata/socket", {
-      headers: {
-        Upgrade: "websocket",
-        "Sec-WebSocket-Protocol": INVITE_METADATA_SOCKET_PROTOCOL,
-        "X-Mons-Metadata-Invite": encodeURIComponent(inviteId),
-        "X-Mons-Metadata-Role": "spectator",
-        "X-Mons-Metadata-IP": "192.0.2.1",
-        "X-Mons-Metadata-Revision": String(first.snapshot.revision),
-        "X-Mons-Metadata-Protected": "1",
-        "X-Mons-Metadata-Authenticated": "0",
-      },
-    }),
+  expect((await readHttp(inviteId, "metadata")).snapshot).toEqual(
+    first.snapshot,
   );
-  expect(response.status).toBe(101);
-  const socket = response.webSocket!;
-  const messages: string[] = [];
-  const pending: ((value: string) => void)[] = [];
-  socket.addEventListener("message", (event) => {
-    const reader = pending.shift();
-    if (reader) reader(String(event.data));
-    else messages.push(String(event.data));
-  });
-  socket.accept();
-  const read = () =>
-    messages.length
-      ? Promise.resolve(messages.shift()!)
-      : new Promise<string>((resolve) => pending.push(resolve));
-  try {
-    const initial = JSON.parse(await read());
-    expect(initial.snapshot.hostRematches).toBe("");
-    const wagers = await room.readWagers(inviteId);
-    if (wagers.status !== "ok") throw new Error("wagers-unavailable");
-    await env.PROFILE_GAMES_DB.batch(
-      source.buildCommitStatements(
-        await source.preparePatch(
-          {
-            [`invites/${inviteId}/hostRematches`]: "1",
-          },
-          2,
-        ),
+  const read = await openSocket(
+    room,
+    inviteId,
+    "metadata",
+    first.snapshot.revision,
+  );
+  const initial = await read();
+  expect(initial.snapshot.hostRematches).toBe("");
+  const wagers = await room.readWagers(inviteId);
+  if (wagers.status !== "ok") throw new Error("wagers-unavailable");
+  expect(wagers.snapshot.wagers).toEqual({ [inviteId]: wager });
+  expect((await readHttp(inviteId, "wagers")).snapshot).toEqual(
+    wagers.snapshot,
+  );
+  const readWagers = await openSocket(
+    room,
+    inviteId,
+    "wagers",
+    wagers.snapshot.revision,
+  );
+  expect((await readWagers()).snapshot).toEqual(wagers.snapshot);
+  await env.PROFILE_GAMES_DB.batch(
+    source.buildCommitStatements(
+      await source.preparePatch(
+        {
+          [`invites/${inviteId}/hostRematches`]: "1",
+        },
         2,
       ),
-    );
-    await room.notifyMetadataChanged(inviteId);
-    const changed = JSON.parse(await read());
-    expect(changed.snapshot.hostRematches).toBe("1");
-    expect(changed.snapshot.revision).toBeGreaterThan(
-      initial.snapshot.revision,
-    );
-    const nextWagers = await room.readWagers(inviteId);
-    if (nextWagers.status !== "ok") throw new Error("wagers-unavailable");
-    expect(nextWagers.snapshot).toEqual(wagers.snapshot);
-    await evictDurableObject(room);
-    const recovered = await room.readMetadata(inviteId);
-    expect(recovered).toMatchObject({
-      status: "ok",
-      snapshot: { hostRematches: "1", revision: changed.snapshot.revision },
-    });
-  } finally {
-    if (socket.readyState !== WebSocket.CLOSED) {
-      const closed = new Promise<void>((resolve) =>
-        socket.addEventListener("close", () => resolve(), { once: true }),
-      );
-      socket.close(1000, "Test complete");
-      await closed;
-    }
-  }
+      2,
+    ),
+  );
+  await room.notifyMetadataChanged(inviteId);
+  const changed = await read();
+  expect(changed.snapshot.hostRematches).toBe("1");
+  expect(changed.snapshot.revision).toBeGreaterThan(initial.snapshot.revision);
+  const nextWagers = await room.readWagers(inviteId);
+  if (nextWagers.status !== "ok") throw new Error("wagers-unavailable");
+  expect(nextWagers.snapshot).toEqual(wagers.snapshot);
+  const changedWager = {
+    proposals: { "host-login": { material: "dust", count: 5, createdAt: 1 } },
+  };
+  await env.PROFILE_DB.prepare(
+    "UPDATE invite_wager_states SET wager_json = ?, revision = 2 WHERE invite_id = ? AND match_id = ?",
+  )
+    .bind(JSON.stringify(changedWager), inviteId, inviteId)
+    .run();
+  await room.notifyWagersChanged(inviteId);
+  const changedWagers = await readWagers();
+  expect(changedWagers.snapshot.wagers).toEqual({ [inviteId]: changedWager });
+  expect(changedWagers.snapshot.revision).toBeGreaterThan(
+    wagers.snapshot.revision,
+  );
+  await evictDurableObject(room);
+  const recovered = await room.readMetadata(inviteId);
+  expect(recovered).toMatchObject({
+    status: "ok",
+    snapshot: { hostRematches: "1", revision: changed.snapshot.revision },
+  });
+  expect((await readHttp(inviteId, "metadata")).snapshot).toEqual(
+    changed.snapshot,
+  );
+  expect((await readHttp(inviteId, "wagers")).snapshot).toEqual(
+    changedWagers.snapshot,
+  );
+  const reconnectedMetadata = await openSocket(
+    room,
+    inviteId,
+    "metadata",
+    changed.snapshot.revision,
+  );
+  const reconnectedWagers = await openSocket(
+    room,
+    inviteId,
+    "wagers",
+    changedWagers.snapshot.revision,
+  );
+  expect((await reconnectedMetadata()).snapshot).toEqual(changed.snapshot);
+  expect((await reconnectedWagers()).snapshot).toEqual(changedWagers.snapshot);
 });

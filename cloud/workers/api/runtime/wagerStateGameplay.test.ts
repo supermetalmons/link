@@ -143,6 +143,16 @@ async function fixture(failCompletedWrite = false) {
     },
   });
   const runtimeEnv = { ...env, PROFILE_DB: profileDb };
+  await env.PROFILE_GAMES_DB.prepare(
+    `INSERT INTO invite_sources (invite_id, source_json, revision, updated_at_ms)
+       VALUES (?, ?, 1, ?)`,
+  )
+    .bind(
+      inviteId,
+      JSON.stringify({ hostId: host, guestId: guest, hostColor: "white" }),
+      now(),
+    )
+    .run();
   const repository = createGameplayRepository(runtimeEnv, {
     rtdbClient: firebase,
     now,
@@ -150,10 +160,7 @@ async function fixture(failCompletedWrite = false) {
   const runtime = createWagerReservationRuntime(runtimeEnv, repository, {
     now,
   });
-  const readSource = createInviteSourceReader(runtimeEnv, {
-    createClient: () => firebase,
-    now,
-  });
+  const readSource = createInviteSourceReader(runtimeEnv);
   const { mutationLocks } = createMemoryGameplayCoordinationStores();
   const request = {
     inviteId,
@@ -203,6 +210,15 @@ describe("D1 wager gameplay integration", () => {
       testEnv.TEST_PROFILE_D1_MIGRATIONS,
       "a".repeat(64),
     );
+    await env.PROFILE_GAMES_DB.batch([
+      env.PROFILE_GAMES_DB.prepare(
+        "UPDATE automatch_runtime_control SET backend = 'd1', state = 'active' WHERE singleton = 1",
+      ),
+      env.PROFILE_GAMES_DB.prepare(
+        `UPDATE invite_source_control SET backend = 'd1', state = 'active',
+         epoch = 1, verified_at_ms = 1, activated_at_ms = 1 WHERE singleton = 1`,
+      ),
+    ]);
   });
 
   it("ignores retained Firebase wagers and safely cancels and declines D1 proposals", async () => {

@@ -1,49 +1,31 @@
+import { readAutomatchRuntimeControl } from "./automatchD1.ts";
+import { assertGameSessionResourceAvailable } from "./gameSessionTransitions.ts";
 import {
-  createFirebaseRtdbClient,
-  type FirebaseRtdbClient,
-} from "./firebaseRtdb.ts";
-import { createWagerStateRtdbClient } from "./wagerStateRepository.ts";
-import { createAutomatchPersistence } from "./automatchPersistence.ts";
-import { prepareCreatedMatchPresentations } from "./matchPresentationRegistry.ts";
-
-const INVITE_SOURCE_CLIENT_TTL_MS = 5 * 60 * 1_000;
+  createInviteSourceD1Store,
+  InviteSourceFailure,
+  readInviteSourceControl,
+} from "./inviteSourceD1.ts";
+import { composeInviteWagerSource } from "./inviteWagerSource.ts";
+import { createWagerStateD1Store } from "./wagerStateD1.ts";
 
 export function createInviteSourceReader(
-  env: Env,
-  {
-    createClient = () =>
-      createFirebaseRtdbClient(env, {
-        credentials: {
-          email: env.GAMEPLAY_SERVICE_ACCOUNT_EMAIL,
-          privateKeyPem: env.GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY,
-        },
-      }),
-    now = Date.now,
-  }: {
-    createClient?: () => FirebaseRtdbClient;
-    now?: () => number;
-  } = {},
+  env: Pick<Env, "PROFILE_GAMES_DB" | "PROFILE_DB">,
 ): (inviteId: string) => Promise<unknown> {
-  let client: Pick<FirebaseRtdbClient, "getPath"> | null = null;
-  let expiresAtMs = 0;
+  const source = createInviteSourceD1Store(env.PROFILE_GAMES_DB);
+  const wagers = createWagerStateD1Store(env.PROFILE_DB);
   return async (inviteId) => {
-    if (!client || now() >= expiresAtMs) {
-      client = createWagerStateRtdbClient(
-        env.PROFILE_DB,
-        createAutomatchPersistence(env.PROFILE_GAMES_DB, createClient(), {
-          now,
-          prepareMatchPresentations: (creations) =>
-            prepareCreatedMatchPresentations(env, creations),
-        }).client,
-        { now },
-      );
-      expiresAtMs = now() + INVITE_SOURCE_CLIENT_TTL_MS;
+    const states = await wagers.readInvite(inviteId);
+    const mode = await readAutomatchRuntimeControl(env.PROFILE_GAMES_DB);
+    const control = await readInviteSourceControl(env.PROFILE_GAMES_DB);
+    if (mode.backend !== "d1" && control.backend === "d1") {
+      throw new InviteSourceFailure("invite-source-session-backend-conflict");
     }
-    try {
-      return await client.getPath(`invites/${inviteId}`);
-    } catch (error) {
-      client = null;
-      throw error;
+    if (control.backend !== "d1") {
+      throw new InviteSourceFailure("invite-source-not-activated");
     }
+    await assertGameSessionResourceAvailable(env.PROFILE_GAMES_DB, inviteId);
+    const snapshot = await source.read(inviteId);
+    await assertGameSessionResourceAvailable(env.PROFILE_GAMES_DB, inviteId);
+    return composeInviteWagerSource(snapshot.value, states);
   };
 }

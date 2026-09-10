@@ -5,7 +5,6 @@ import {
   createServiceAccountAssertion,
   GoogleAuthFailure,
 } from "../src/googleAuth.ts";
-import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const output = new ArrayBuffer(bytes.byteLength);
@@ -68,23 +67,21 @@ test("creates a signed service-account assertion for explicit scopes", async () 
   );
 });
 
-test("exchanges an assertion using the Firebase identity credential", async () => {
+test("exchanges an assertion using explicit service-account credentials", async () => {
   const { privateKeyPem: pem } = await generateKeyPair();
   const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
-  const accessToken = await createGoogleAccessToken(
-    {
-      ...TELEGRAM_TEST_ENV,
-      FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY: pem,
-    } as Env,
-    {
-      fetcher: async (input, init) => {
-        requests.push({ input, init });
-        return Response.json({ access_token: "google-access-token" });
-      },
-      now: () => 1_700_000_000_000,
-      scopes: ["scope:test"],
+  const accessToken = await createGoogleAccessToken({
+    credentials: {
+      email: "gameplay@example.iam.gserviceaccount.com",
+      privateKeyPem: pem,
     },
-  );
+    fetcher: async (input, init) => {
+      requests.push({ input, init });
+      return Response.json({ access_token: "google-access-token" });
+    },
+    now: () => 1_700_000_000_000,
+    scopes: ["scope:test"],
+  });
   assert.equal(accessToken, "google-access-token");
   assert.equal(requests.length, 1);
   assert.equal(
@@ -93,6 +90,14 @@ test("exchanges an assertion using the Firebase identity credential", async () =
   );
   assert.equal(requests[0].init?.method, "POST");
   assert.ok(requests[0].init?.signal instanceof AbortSignal);
+  const assertion = new URLSearchParams(String(requests[0].init?.body)).get(
+    "assertion",
+  )!;
+  const claims = JSON.parse(
+    Buffer.from(assertion.split(".")[1], "base64url").toString("utf8"),
+  );
+  assert.equal(claims.iss, "gameplay@example.iam.gserviceaccount.com");
+  assert.equal(claims.scope, "scope:test");
 });
 
 test("fails closed for malformed credentials and rejected exchanges", async () => {
@@ -116,9 +121,9 @@ test("fails closed for malformed credentials and rejected exchanges", async () =
     GoogleAuthFailure,
   );
   await assert.rejects(
-    createGoogleAccessToken(TELEGRAM_TEST_ENV as Env, {
+    createGoogleAccessToken({
       credentials: {
-        email: TELEGRAM_TEST_ENV.FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL,
+        email: "gameplay@example.iam.gserviceaccount.com",
         privateKeyPem: pem,
       },
       fetcher: async () => new Response("denied", { status: 403 }),

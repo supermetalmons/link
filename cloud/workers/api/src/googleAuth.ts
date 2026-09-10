@@ -104,27 +104,21 @@ export async function createServiceAccountAssertion({
   }
 }
 
-export async function createGoogleAccessToken(
-  env: Env,
-  {
-    credentials = {
-      email: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL,
-      privateKeyPem: env.FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY,
-    },
-    fetcher = fetch,
-    now = Date.now,
-    scopes,
-    signal,
-    timeoutMs = GOOGLE_TIMEOUT_MS,
-  }: {
-    credentials?: { email: string; privateKeyPem: string };
-    fetcher?: typeof fetch;
-    now?: () => number;
-    scopes: readonly string[];
-    signal?: AbortSignal;
-    timeoutMs?: number;
-  },
-): Promise<string> {
+export async function createGoogleAccessToken({
+  credentials,
+  fetcher = fetch,
+  now = Date.now,
+  scopes,
+  signal,
+  timeoutMs = GOOGLE_TIMEOUT_MS,
+}: {
+  credentials: { email: string; privateKeyPem: string };
+  fetcher?: typeof fetch;
+  now?: () => number;
+  scopes: readonly string[];
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}): Promise<string> {
   const assertion = await createServiceAccountAssertion({
     email: credentials.email,
     privateKeyPem: credentials.privateKeyPem,

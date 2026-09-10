@@ -423,6 +423,31 @@ function readPayload(row: TransitionRow): TransitionPayload {
   return payload;
 }
 
+function readGameSessionResourceTransition(
+  db: D1Database,
+  resourceKey: string,
+): Promise<TransitionRow | null> {
+  return db
+    .withSession("first-primary")
+    .prepare(
+      `SELECT t.transition_id, t.invite_id, t.payload_json, t.status
+        FROM game_session_transition_resources r
+        JOIN game_session_transitions t ON t.transition_id = r.transition_id
+        WHERE r.resource_key = ?`,
+    )
+    .bind(resourceKey)
+    .first<TransitionRow>();
+}
+
+export async function assertGameSessionResourceAvailable(
+  db: D1Database,
+  resourceKey: string,
+): Promise<void> {
+  if (await readGameSessionResourceTransition(db, resourceKey)) {
+    fail("resource-pending");
+  }
+}
+
 export function createGameSessionTransitions({
   db,
   rtdb,
@@ -482,24 +507,13 @@ export function createGameSessionTransitions({
       .bind(transitionId)
       .first<TransitionRow>();
 
-  async function pendingResource(
+  const pendingResource = (
     resourceKey: string,
-  ): Promise<TransitionRow | null> {
-    return db
-      .withSession("first-primary")
-      .prepare(
-        `SELECT t.transition_id, t.invite_id, t.payload_json, t.status
-        FROM game_session_transition_resources r
-        JOIN game_session_transitions t ON t.transition_id = r.transition_id
-        WHERE r.resource_key = ?`,
-      )
-      .bind(resourceKey)
-      .first<TransitionRow>();
-  }
+  ): Promise<TransitionRow | null> =>
+    readGameSessionResourceTransition(db, resourceKey);
 
-  async function assertResourceAvailable(resourceKey: string): Promise<void> {
-    if (await pendingResource(resourceKey)) fail("resource-pending");
-  }
+  const assertResourceAvailable = (resourceKey: string): Promise<void> =>
+    assertGameSessionResourceAvailable(db, resourceKey);
 
   async function materialize(
     payload: TransitionPayload,

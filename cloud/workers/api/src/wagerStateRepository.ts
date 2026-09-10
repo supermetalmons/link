@@ -4,6 +4,7 @@ import type {
   FirebaseRtdbTransactionResult,
 } from "./firebaseRtdb.ts";
 import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { composeInviteWagerSource } from "./inviteWagerSource.ts";
 import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
 import {
   createWagerStateD1Store,
@@ -277,30 +278,18 @@ export function createWagerStateRtdbClient(
       }
       const inviteId = owned?.inviteId || parts[1];
       const states = await store.readInvite(inviteId, signal, shallow);
-      const wagers = Object.fromEntries(
-        states
-          .filter((state) => state.wager !== null)
-          .map((state) => [state.matchId, state.wager]),
-      );
-      const markers = Object.fromEntries(
-        states
-          .filter((state) => state.resolutionMarker !== null)
-          .map((state) => [state.matchId, state.resolutionMarker]),
-      );
-      if (owned) {
-        const values = owned.field === "wagers" ? wagers : markers;
-        const value = Object.keys(values).length ? values : null;
-        return shallow ? shallowValue(value) : value;
+      if (!owned) {
+        const source = await base.getPath(path, query, signal);
+        return composeInviteWagerSource(source, states, shallow);
       }
-      const source = await base.getPath(path, query, signal);
-      if (!record(source)) return source;
-      const invite = { ...source };
-      delete invite.wagers;
-      delete invite.matchesWagerResolutions;
-      if (Object.keys(wagers).length) invite.wagers = shallow ? true : wagers;
-      if (Object.keys(markers).length)
-        invite.matchesWagerResolutions = shallow ? true : markers;
-      return invite;
+      const field = owned.field === "wagers" ? "wager" : "resolutionMarker";
+      const values = Object.fromEntries(
+        states
+          .filter((state) => state[field] !== null)
+          .map((state) => [state.matchId, state[field]]),
+      );
+      const value = Object.keys(values).length ? values : null;
+      return shallow ? shallowValue(value) : value;
     },
 
     async patchRoot(updates, signal) {

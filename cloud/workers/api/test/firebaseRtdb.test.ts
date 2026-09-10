@@ -13,9 +13,6 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 const env = {
   ...TELEGRAM_TEST_ENV,
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
-  FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL:
-    "worker@example.iam.gserviceaccount.com",
-  FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",
   NFT_RATE_LIMITER: { limit: async () => ({ success: true }) },
   X_CLIENT_ID: "test-x-client",
@@ -32,6 +29,90 @@ function jsonResponse(
     headers: { "Content-Type": "application/json", ...headers },
   });
 }
+
+test("unscoped clients require credentials or an injected access token", async () => {
+  const explicitOnlyEnv = new Proxy(env, {
+    get(target, property, receiver) {
+      if (String(property).includes("SERVICE_ACCOUNT")) {
+        throw new Error("unexpected-service-account-access");
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  assert.throws(
+    () =>
+      createFirebaseRtdbClient(
+        explicitOnlyEnv,
+        {} as Parameters<typeof createFirebaseRtdbClient>[1],
+      ),
+    /missing-firebase-rtdb-credentials/,
+  );
+  let tokenRequests = 0;
+  const client = createFirebaseRtdbClient(explicitOnlyEnv, {
+    getAccessToken: async () => {
+      tokenRequests++;
+      return "injected-access-token";
+    },
+    fetcher: async (_input, init) => {
+      assert.equal(
+        new Headers(init?.headers).get("Authorization"),
+        "Bearer injected-access-token",
+      );
+      return jsonResponse(null);
+    },
+  });
+  await client.getPath("players/actor/matches/invite-1");
+  await client.getPath("players/opponent/matches/invite-1");
+  assert.equal(tokenRequests, 1);
+});
+
+test("unscoped clients exchange only their explicitly supplied credentials", async () => {
+  const { privateKey } = await crypto.subtle.generateKey(
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-256",
+    },
+    true,
+    ["sign", "verify"],
+  );
+  const pem = Buffer.from(await crypto.subtle.exportKey("pkcs8", privateKey));
+  let exchanges = 0;
+  const client = createFirebaseRtdbClient(env, {
+    credentials: {
+      email: "explicit@example.iam.gserviceaccount.com",
+      privateKeyPem: `-----BEGIN PRIVATE KEY-----\n${pem.toString("base64")}\n-----END PRIVATE KEY-----`,
+    },
+    fetcher: async (input, init) => {
+      const url = new URL(String(input));
+      if (url.hostname === "oauth2.googleapis.com") {
+        exchanges++;
+        const assertion = new URLSearchParams(String(init?.body)).get(
+          "assertion",
+        )!;
+        const claims = JSON.parse(
+          Buffer.from(assertion.split(".")[1], "base64url").toString("utf8"),
+        );
+        assert.equal(claims.iss, "explicit@example.iam.gserviceaccount.com");
+        assert.equal(
+          claims.scope,
+          "https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email",
+        );
+        return jsonResponse({ access_token: "explicit-access-token" });
+      }
+      assert.equal(url.search, "");
+      assert.equal(
+        new Headers(init?.headers).get("Authorization"),
+        "Bearer explicit-access-token",
+      );
+      return jsonResponse(null);
+    },
+  });
+  await client.getPath("players/actor/matches/invite-1");
+  await client.getPath("players/opponent/matches/invite-1");
+  assert.equal(exchanges, 1);
+});
 
 test("reads gameplay state through authenticated bounded REST requests", async () => {
   const requests: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];

@@ -66,9 +66,11 @@ export function normalizeInviteMetadata(
 
 export function createInviteMetadataReader(
   env: Env,
-  dependencies: Parameters<typeof createInviteSourceReader>[1] = {},
+  dependencies: {
+    readSource?: ReturnType<typeof createInviteSourceReader>;
+  } = {},
 ): (inviteId: string) => Promise<InviteMetadataReadResult> {
-  const read = createInviteSourceReader(env, dependencies);
+  const read = dependencies.readSource || createInviteSourceReader(env);
   return async (inviteId) =>
     normalizeInviteMetadata(inviteId, await read(inviteId));
 }

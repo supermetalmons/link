@@ -5,9 +5,6 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const env = {
   ...TELEGRAM_TEST_ENV,
-  FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL:
-    "worker@example.iam.gserviceaccount.com",
-  FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
   NFT_RATE_LIMITER: { limit: async () => ({ success: true }) },

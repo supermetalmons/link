@@ -23,9 +23,6 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 const PROJECTION_TEST_ENV = {
   ...TELEGRAM_TEST_ENV,
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
-  FIREBASE_IDENTITY_SERVICE_ACCOUNT_EMAIL:
-    "worker@example.iam.gserviceaccount.com",
-  FIREBASE_IDENTITY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",
   NFT_RATE_LIMITER: { limit: async () => ({ success: true }) },
   X_CLIENT_ID: "test-x-client",

@@ -42,6 +42,28 @@ test("canonical D1 modules have no direct Firestore runtime dependency", () => {
 const repositoryRoot = resolve(import.meta.dirname, "../../../..");
 const runtimeExtensions = [".ts", ".tsx", ".js", ".mjs", ".cjs"];
 
+test("invite source readers cannot construct Firebase or Google clients", () => {
+  const violations = reachableRuntimeFiles(
+    resolve(import.meta.dirname, "../src/inviteSource.ts"),
+  )
+    .filter((path) => /\/(?:firebaseRtdb|googleAuth)\.ts$/.test(path))
+    .map((path) => relative(repositoryRoot, path));
+  assert.deepEqual(violations, []);
+});
+
+test("Worker runtime cannot restore retired Firebase credentials", () => {
+  const violations = reachableRuntimeFiles(
+    resolve(import.meta.dirname, "../src/index.ts"),
+  )
+    .filter((path) =>
+      /\b(?:FIREBASE_IDENTITY_SERVICE_ACCOUNT|TELEGRAM_FIREBASE_SERVICE_ACCOUNT)_(?:EMAIL|PRIVATE_KEY)\b/.test(
+        readFileSync(path, "utf8"),
+      ),
+    )
+    .map((path) => relative(repositoryRoot, path));
+  assert.deepEqual(violations, []);
+});
+
 test("event transition receipts cannot restore Firebase runtime access", () => {
   const sourcePaths = reachableRuntimeFiles(
     resolve(import.meta.dirname, "../src/index.ts"),
