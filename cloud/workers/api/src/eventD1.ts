@@ -117,6 +117,7 @@ type RuntimeControlRow = {
 type EventMutationState = {
   current: EventJsonRecord | null;
   next: EventJsonRecord | null;
+  originalSelections: Readonly<Record<string, string>> | null;
   pendingTransitionId: string | null;
   revision: number;
   selections: Record<string, string> | null;
@@ -124,6 +125,7 @@ type EventMutationState = {
 };
 
 type ProfilePrizeMutationState = {
+  originalPrizes: Readonly<Record<string, EventPrizeAssignmentRecord>>;
   prizes: Record<string, EventPrizeAssignmentRecord>;
   revision: number;
 };
@@ -217,6 +219,27 @@ function nullableInteger(value: unknown, minimum = 0): number | null {
 function cloneJson<T>(value: T): T {
   if (!isJsonValue(value)) throw new EventD1Failure("invalid-event-json");
   return structuredClone(value);
+}
+
+function jsonValuesEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right)) return false;
+    if (left.length !== right.length) return false;
+    for (let index = 0; index < left.length; index++) {
+      if (!jsonValuesEqual(left[index], right[index])) return false;
+    }
+    return true;
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const keys = Object.keys(left);
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every(
+      (key) =>
+        Object.hasOwn(right, key) && jsonValuesEqual(left[key], right[key]),
+    )
+  );
 }
 
 function encodeJson(value: unknown): string {
@@ -342,6 +365,7 @@ function parseEventRow(row: EventRow): EventMutationState {
   return {
     current: event,
     next: cloneJson(event),
+    originalSelections: null,
     pendingTransitionId: row.pending_transition_id,
     revision: safeInteger(row.revision, 1),
     selections: null,
@@ -368,6 +392,7 @@ async function readEventState(
     : {
         current: null,
         next: null,
+        originalSelections: null,
         pendingTransitionId: null,
         revision: 0,
         selections: null,
@@ -767,7 +792,10 @@ async function ensureSelections(
   eventId: string,
   state: EventMutationState,
 ): Promise<Record<string, string>> {
-  state.selections ??= await readSelections(db, eventId);
+  if (state.selections === null) {
+    state.originalSelections = await readSelections(db, eventId);
+    state.selections = { ...state.originalSelections };
+  }
   return state.selections;
 }
 
@@ -776,7 +804,11 @@ async function readProfilePrizeMutationState(
   profileId: string,
 ): Promise<ProfilePrizeMutationState> {
   const snapshot = await readProfileEventPrizes(db, profileId);
-  return { prizes: snapshot.prizes, revision: snapshot.revision };
+  return {
+    originalPrizes: snapshot.prizes,
+    prizes: { ...snapshot.prizes },
+    revision: snapshot.revision,
+  };
 }
 
 function eventRevisionGuard(
@@ -1143,20 +1175,35 @@ async function patchEventOwnedPathsInternal(
       ),
     );
     if (state.selectionsChanged) {
-      mutations.push(
-        db
-          .prepare("DELETE FROM event_prize_selections WHERE event_id = ?")
-          .bind(eventId),
-      );
-      for (const [profileId, prizeId] of Object.entries(
-        state.selections || {},
-      )) {
+      const originalSelections = state.originalSelections || {};
+      const selections = state.selections || {};
+      for (const profileId of Object.keys(originalSelections)) {
+        if (!Object.hasOwn(selections, profileId)) {
+          mutations.push(
+            db
+              .prepare(
+                "DELETE FROM event_prize_selections WHERE event_id = ? AND profile_id = ?",
+              )
+              .bind(eventId, profileId),
+          );
+        }
+      }
+      for (const [profileId, prizeId] of Object.entries(selections)) {
+        if (
+          Object.hasOwn(originalSelections, profileId) &&
+          originalSelections[profileId] === prizeId
+        ) {
+          continue;
+        }
         mutations.push(
           db
             .prepare(
               `INSERT INTO event_prize_selections (
                  event_id, profile_id, prize_id, updated_at_ms
-               ) VALUES (?, ?, ?, ?)`,
+               ) VALUES (?, ?, ?, ?)
+               ON CONFLICT (event_id, profile_id) DO UPDATE SET
+                 prize_id = excluded.prize_id,
+                 updated_at_ms = excluded.updated_at_ms`,
             )
             .bind(eventId, profileId, prizeId, nowMs),
         );
@@ -1170,18 +1217,33 @@ async function patchEventOwnedPathsInternal(
       options.expectedProfilePrizeRevisions?.[profileId] ?? state.revision;
     if (expected !== state.revision) throw new EventD1Conflict();
     guards.push(profileRevisionGuard(db, profileId, expected));
-    mutations.push(
-      db
-        .prepare("DELETE FROM profile_event_prizes WHERE profile_id = ?")
-        .bind(profileId),
-    );
+    for (const eventId of Object.keys(state.originalPrizes)) {
+      if (!Object.hasOwn(state.prizes, eventId)) {
+        mutations.push(
+          db
+            .prepare(
+              "DELETE FROM profile_event_prizes WHERE profile_id = ? AND event_id = ?",
+            )
+            .bind(profileId, eventId),
+        );
+      }
+    }
     for (const [eventId, assignment] of Object.entries(state.prizes)) {
+      if (
+        Object.hasOwn(state.originalPrizes, eventId) &&
+        jsonValuesEqual(state.originalPrizes[eventId], assignment)
+      ) {
+        continue;
+      }
       mutations.push(
         db
           .prepare(
             `INSERT INTO profile_event_prizes (
                profile_id, event_id, assignment_json, updated_at_ms
-             ) VALUES (?, ?, ?, ?)`,
+             ) VALUES (?, ?, ?, ?)
+             ON CONFLICT (profile_id, event_id) DO UPDATE SET
+               assignment_json = excluded.assignment_json,
+               updated_at_ms = excluded.updated_at_ms`,
           )
           .bind(profileId, eventId, encodeJson(assignment), nowMs),
       );

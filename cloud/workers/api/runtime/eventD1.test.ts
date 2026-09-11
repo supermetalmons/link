@@ -70,6 +70,63 @@ function assignment(targetProfileId = profileId) {
   };
 }
 
+async function readPrizeStorage() {
+  const results = await testEnv.EVENT_DB.batch<Record<string, unknown>>([
+    testEnv.EVENT_DB.prepare(
+      "SELECT * FROM event_prize_selections ORDER BY event_id, profile_id",
+    ),
+    testEnv.EVENT_DB.prepare(
+      "SELECT * FROM profile_event_prizes ORDER BY profile_id, event_id",
+    ),
+    testEnv.EVENT_DB.prepare(
+      "SELECT * FROM profile_event_prize_revisions ORDER BY profile_id",
+    ),
+    testEnv.EVENT_DB.prepare("SELECT * FROM event_records ORDER BY event_id"),
+    testEnv.EVENT_DB.prepare(
+      "SELECT * FROM event_progress_outboxes ORDER BY outbox_id",
+    ),
+  ]);
+  return {
+    selections: results[0].results,
+    prizes: results[1].results,
+    profileRevisions: results[2].results,
+    events: results[3].results,
+    outboxes: results[4].results,
+  };
+}
+
+async function seedPrizeRows() {
+  const otherEventId = "FRkdorMWaYW";
+  const otherAssignment = {
+    ...assignment(),
+    eventId: otherEventId,
+    prizeId: "1866",
+    archivedMetadata: { edition: 1, labels: ["first", "second"] },
+  };
+  await patchEventOwnedPaths(
+    testEnv.EVENT_DB,
+    {
+      [`events/${eventId}`]: eventRecord(),
+      [`events/${otherEventId}`]: eventRecord({ eventId: otherEventId }),
+      [`eventPrizeSelections/${eventId}`]: {
+        [profileId]: prizeId,
+        "profile-two": "1111",
+      },
+      [`profileEventPrizes/${profileId}`]: {
+        [eventId]: assignment(),
+        [otherEventId]: otherAssignment,
+      },
+    },
+    { now: () => 200 },
+  );
+  await testEnv.EVENT_DB.prepare(
+    "UPDATE profile_event_prizes SET assignment_json = ? WHERE profile_id = ? AND event_id = ?",
+  )
+    .bind(JSON.stringify(otherAssignment, null, 2), profileId, otherEventId)
+    .run();
+  return { otherEventId, otherAssignment };
+}
+
 async function withD1Admission<T>(
   operation: (
     admission: Awaited<ReturnType<typeof acquireEventWriteAdmission>>,
@@ -507,6 +564,349 @@ describe("event D1 store", () => {
     const snapshot = await readEventSnapshot(testEnv.EVENT_DB, eventId);
     expect(snapshot.event?.prizeAssignments).toEqual({ "1": assignment() });
   });
+
+  it("changes individual prize rows without rewriting their neighbors", async () => {
+    const { otherEventId } = await seedPrizeRows();
+    const before = await readPrizeStorage();
+    const changedAssignment = {
+      ...assignment(),
+      assignedAtMs: 3_000,
+      futureMetadata: { nested: ["retained", { enabled: true }] },
+    };
+    const result = await patchEventOwnedPaths(
+      testEnv.EVENT_DB,
+      {
+        [`eventPrizeSelections/${eventId}/${profileId}`]: "1514",
+        [`eventPrizeSelections/${eventId}/profile-three`]: prizeId,
+        [`profileEventPrizes/${profileId}/${eventId}`]: changedAssignment,
+      },
+      { now: () => 300 },
+    );
+    const after = await readPrizeStorage();
+    expect(result).toEqual({
+      eventRevisions: { [eventId]: 2 },
+      profilePrizeRevisions: { [profileId]: 2 },
+    });
+    expect(after.selections).toEqual([
+      {
+        event_id: eventId,
+        profile_id: profileId,
+        prize_id: "1514",
+        updated_at_ms: 300,
+      },
+      {
+        event_id: eventId,
+        profile_id: "profile-three",
+        prize_id: prizeId,
+        updated_at_ms: 300,
+      },
+      before.selections.find((row) => row.profile_id === "profile-two"),
+    ]);
+    expect(after.prizes.find((row) => row.event_id === otherEventId)).toEqual(
+      before.prizes.find((row) => row.event_id === otherEventId),
+    );
+    expect(after.prizes.find((row) => row.event_id === eventId)).toEqual({
+      profile_id: profileId,
+      event_id: eventId,
+      assignment_json: JSON.stringify(changedAssignment),
+      updated_at_ms: 300,
+    });
+    await patchEventOwnedPaths(
+      testEnv.EVENT_DB,
+      {
+        [`eventPrizeSelections/${eventId}/profile-three`]: null,
+        [`profileEventPrizes/${profileId}/${eventId}`]: null,
+      },
+      { now: () => 400 },
+    );
+    const deleted = await readPrizeStorage();
+    expect(deleted.selections).toEqual(
+      after.selections.filter((row) => row.profile_id !== "profile-three"),
+    );
+    expect(deleted.prizes).toEqual(
+      before.prizes.filter((row) => row.event_id === otherEventId),
+    );
+  });
+
+  it.each([true, false])(
+    "preserves collection replacement order and clears prize rows (root first: %s)",
+    async (rootFirst) => {
+      const { otherEventId, otherAssignment } = await seedPrizeRows();
+      const before = await readPrizeStorage();
+      const addedEventId = "VOxalSrexcA";
+      const addedAssignment = {
+        ...assignment(),
+        eventId: addedEventId,
+        prizeId: "282",
+      };
+      await patchEventOwnedPaths(testEnv.EVENT_DB, {
+        [`events/${addedEventId}`]: eventRecord({ eventId: addedEventId }),
+      });
+      const roots = {
+        [`eventPrizeSelections/${eventId}`]: {
+          [profileId]: prizeId,
+          "profile-three": "1514",
+        },
+        [`profileEventPrizes/${profileId}`]: {
+          [eventId]: assignment(),
+          [addedEventId]: addedAssignment,
+        },
+      };
+      const children = {
+        [`eventPrizeSelections/${eventId}/profile-two`]: "1111",
+        [`profileEventPrizes/${profileId}/${otherEventId}`]: otherAssignment,
+      };
+      await patchEventOwnedPaths(
+        testEnv.EVENT_DB,
+        rootFirst ? { ...roots, ...children } : { ...children, ...roots },
+        { now: () => 300 },
+      );
+      const after = await readPrizeStorage();
+      expect(after.selections).toEqual([
+        before.selections.find((row) => row.profile_id === profileId),
+        {
+          event_id: eventId,
+          profile_id: "profile-three",
+          prize_id: "1514",
+          updated_at_ms: 300,
+        },
+        ...(rootFirst
+          ? [before.selections.find((row) => row.profile_id === "profile-two")]
+          : []),
+      ]);
+      expect(after.prizes).toEqual([
+        ...(rootFirst
+          ? [before.prizes.find((row) => row.event_id === otherEventId)]
+          : []),
+        before.prizes.find((row) => row.event_id === eventId),
+        {
+          profile_id: profileId,
+          event_id: addedEventId,
+          assignment_json: JSON.stringify(addedAssignment),
+          updated_at_ms: 300,
+        },
+      ]);
+      const cleared = await patchEventOwnedPaths(
+        testEnv.EVENT_DB,
+        {
+          [`eventPrizeSelections/${eventId}`]: null,
+          [`profileEventPrizes/${profileId}`]: null,
+        },
+        { now: () => 400 },
+      );
+      expect(cleared).toEqual({
+        eventRevisions: { [eventId]: 3 },
+        profilePrizeRevisions: { [profileId]: 3 },
+      });
+      const empty = await readPrizeStorage();
+      expect(empty.selections).toEqual([]);
+      expect(empty.prizes).toEqual([]);
+    },
+  );
+
+  it("advances aggregate revisions for no-ops without changing prize rows", async () => {
+    const { otherEventId, otherAssignment } = await seedPrizeRows();
+    const before = await readPrizeStorage();
+    const reorderedAssignment = {
+      archivedMetadata: { labels: ["first", "second"], edition: 1 },
+      assignedAtMs: otherAssignment.assignedAtMs,
+      prizeId: otherAssignment.prizeId,
+      place: otherAssignment.place,
+      profileId,
+      eventId: otherEventId,
+    };
+    const selections = { [profileId]: prizeId, "profile-two": "1111" };
+    const prizes = {
+      [eventId]: assignment(),
+      [otherEventId]: reorderedAssignment,
+    };
+    const updates = [
+      {
+        [`eventPrizeSelections/${eventId}/${profileId}`]: prizeId,
+        [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
+      },
+      {
+        [`eventPrizeSelections/${eventId}`]: selections,
+        [`profileEventPrizes/${profileId}`]: prizes,
+      },
+      {
+        [`eventPrizeSelections/${eventId}/missing-profile`]: null,
+        [`profileEventPrizes/${profileId}/missing-event`]: null,
+      },
+      {
+        [`eventPrizeSelections/${eventId}`]: {
+          ...selections,
+          [profileId]: "1514",
+        },
+        [`eventPrizeSelections/${eventId}/${profileId}`]: prizeId,
+        [`profileEventPrizes/${profileId}`]: {
+          ...prizes,
+          [eventId]: { ...assignment(), assignedAtMs: 4_000 },
+        },
+        [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
+      },
+    ];
+    for (const [index, update] of updates.entries()) {
+      const nowMs = 300 + index;
+      const revision = index + 2;
+      expect(
+        await patchEventOwnedPaths(testEnv.EVENT_DB, update, {
+          now: () => nowMs,
+        }),
+      ).toEqual({
+        eventRevisions: { [eventId]: revision },
+        profilePrizeRevisions: { [profileId]: revision },
+      });
+      const after = await readPrizeStorage();
+      expect(after.selections).toEqual(before.selections);
+      expect(after.prizes).toEqual(before.prizes);
+      expect(after.profileRevisions).toEqual([
+        { profile_id: profileId, revision, updated_at_ms: nowMs },
+      ]);
+      expect(after.events.find((row) => row.event_id === eventId)).toEqual({
+        ...before.events.find((row) => row.event_id === eventId),
+        revision,
+      });
+    }
+    const changed = {
+      ...otherAssignment,
+      archivedMetadata: { edition: 1, labels: ["second", "first"] },
+    };
+    await patchEventOwnedPaths(
+      testEnv.EVENT_DB,
+      { [`profileEventPrizes/${profileId}/${otherEventId}`]: changed },
+      { now: () => 500 },
+    );
+    expect(
+      (await readPrizeStorage()).prizes.find(
+        (row) => row.event_id === otherEventId,
+      ),
+    ).toMatchObject({
+      assignment_json: JSON.stringify(changed),
+      updated_at_ms: 500,
+    });
+  });
+
+  it("retains historical prize bytes while rejecting resubmitted retired prizes", async () => {
+    const { otherEventId, otherAssignment } = await seedPrizeRows();
+    const retiredAssignment = { ...otherAssignment, prizeId: "retired-prize" };
+    await testEnv.EVENT_DB.batch([
+      testEnv.EVENT_DB.prepare(
+        "UPDATE event_prize_selections SET prize_id = ? WHERE event_id = ? AND profile_id = ?",
+      ).bind("retired-prize", eventId, "profile-two"),
+      testEnv.EVENT_DB.prepare(
+        "UPDATE profile_event_prizes SET assignment_json = ? WHERE profile_id = ? AND event_id = ?",
+      ).bind(
+        JSON.stringify(retiredAssignment, null, 2),
+        profileId,
+        otherEventId,
+      ),
+    ]);
+    const before = await readPrizeStorage();
+    await patchEventOwnedPaths(
+      testEnv.EVENT_DB,
+      {
+        [`eventPrizeSelections/${eventId}/${profileId}`]: "1514",
+        [`profileEventPrizes/${profileId}/${eventId}`]: {
+          ...assignment(),
+          assignedAtMs: 3_000,
+        },
+      },
+      { now: () => 300 },
+    );
+    const updated = await readPrizeStorage();
+    expect(
+      updated.selections.find((row) => row.profile_id === "profile-two"),
+    ).toEqual(
+      before.selections.find((row) => row.profile_id === "profile-two"),
+    );
+    expect(updated.prizes.find((row) => row.event_id === otherEventId)).toEqual(
+      before.prizes.find((row) => row.event_id === otherEventId),
+    );
+    for (const invalid of [
+      { [`eventPrizeSelections/${eventId}/profile-two`]: "retired-prize" },
+      {
+        [`eventPrizeSelections/${eventId}`]: {
+          [profileId]: "1514",
+          "profile-two": "retired-prize",
+        },
+      },
+      {
+        [`profileEventPrizes/${profileId}/${otherEventId}`]: retiredAssignment,
+      },
+      {
+        [`profileEventPrizes/${profileId}`]: {
+          [eventId]: { ...assignment(), assignedAtMs: 3_000 },
+          [otherEventId]: retiredAssignment,
+        },
+      },
+    ]) {
+      await expect(
+        patchEventOwnedPaths(testEnv.EVENT_DB, invalid, { now: () => 400 }),
+      ).rejects.toBeInstanceOf(EventD1Failure);
+      expect(await readPrizeStorage()).toEqual(updated);
+    }
+  });
+
+  it.each([
+    "event revision",
+    "profile revision",
+    "expired admission",
+    "SQL failure",
+  ])(
+    "keeps prize changes, revisions, and outboxes atomic after %s",
+    async (failure) => {
+      const { otherEventId } = await seedPrizeRows();
+      const before = await readPrizeStorage();
+      await withD1Admission(async (active) => {
+        const admission =
+          failure === "expired admission"
+            ? await acquireEventWriteAdmission(testEnv.EVENT_DB, {
+                nowMs: 1,
+                ttlMs: 1,
+              })
+            : active;
+        try {
+          await expect(
+            patchEventOwnedPathsRaw(
+              testEnv.EVENT_DB,
+              {
+                [`eventPrizeSelections/${eventId}/${profileId}`]: "1514",
+                [`eventPrizeSelections/${eventId}/profile-two`]: null,
+                [`profileEventPrizes/${profileId}/${eventId}`]: {
+                  ...assignment(),
+                  assignedAtMs: 3_000,
+                },
+                [`profileEventPrizes/${profileId}/${otherEventId}`]: null,
+                "eventProgressOutbox/atomic-prizes": {
+                  schemaVersion: 1,
+                  eventId:
+                    failure === "SQL failure" ? "missing-event" : eventId,
+                  runAtMs: 1_000,
+                  lastQueuedAtMs: 300,
+                },
+              },
+              {
+                admission,
+                now: () => 300,
+                ...(failure === "event revision"
+                  ? { expectedEventRevisions: { [eventId]: 0 } }
+                  : {}),
+                ...(failure === "profile revision"
+                  ? { expectedProfilePrizeRevisions: { [profileId]: 0 } }
+                  : {}),
+              },
+            ),
+          ).rejects.toBeInstanceOf(EventD1Conflict);
+        } finally {
+          if (admission !== active) {
+            await releaseEventWriteAdmission(testEnv.EVENT_DB, admission);
+          }
+        }
+      });
+      expect(await readPrizeStorage()).toEqual(before);
+    },
+  );
 
   it("reads retired prize IDs without accepting them in new writes", async () => {
     const retiredPrizeId = "retired-prize";
