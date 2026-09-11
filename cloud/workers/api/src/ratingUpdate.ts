@@ -1,6 +1,7 @@
 import glicko2 from "glicko2";
 import type { HistoricalMatchPair } from "@mons/shared/game-sessions";
 import { isAutoInviteId } from "@mons/shared/ids";
+import { readGameplayMatchPair } from "./gameplayMatchReads.ts";
 import {
   buildOrderedMoveHistory,
   isMatchFenWithinLimit,
@@ -657,14 +658,12 @@ export async function updateRatings(
     }
     return { ok: true };
   }
-  const [playerValue, opponentValue] = await Promise.all([
-    repository.getRtdbPath(
-      `players/${request.playerId}/matches/${request.matchId}`,
-    ),
-    repository.getRtdbPath(
-      `players/${request.opponentId}/matches/${request.matchId}`,
-    ),
-  ]);
+  const [playerValue, opponentValue] = await readGameplayMatchPair(repository, {
+    inviteId: request.inviteId,
+    matchId: request.matchId,
+    playerId: request.playerId,
+    opponentId: request.opponentId,
+  });
   const playerMatch = readMatchRecord(playerValue);
   const opponentMatch = readMatchRecord(opponentValue);
   const hostPlayerId = typeof invite.hostId === "string" ? invite.hostId : "";

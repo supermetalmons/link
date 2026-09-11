@@ -122,14 +122,10 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.deepEqual(Object.keys(config.vars || {}).sort(), [
     "APPLE_AUDIENCES",
     "AUTH_MUTATIONS_DISABLED",
-    "FIREBASE_RTDB_URL",
   ]);
   assert.equal(config.vars?.APPLE_AUDIENCES, "link.mons");
   assert.match(config.vars?.AUTH_MUTATIONS_DISABLED || "", /^(?:true|false)$/);
-  assert.equal(
-    config.vars?.FIREBASE_RTDB_URL,
-    "https://mons-link-default-rtdb.firebaseio.com",
-  );
+  assert.equal(config.vars?.FIREBASE_RTDB_URL, undefined);
   assert.deepEqual(config.d1_databases, [
     {
       binding: "PROFILE_GAMES_DB",
@@ -172,8 +168,7 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     required: [
       "SESSION_JWT_KEYS",
       "MATCH_PRESENTATION_MIGRATION_SECRET",
-      "GAMEPLAY_SERVICE_ACCOUNT_EMAIL",
-      "GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY",
+      "MATCH_STATE_MIGRATION_SECRET",
       "HELIUS_RPC_API_KEY",
       "EVENT_PRIZE_ADMIN_PRIVATE_KEY",
       "TELEGRAM_BOT_TOKEN",
@@ -698,7 +693,7 @@ test("operations documentation describes current releases and D1 maintenance", (
     }
   }
   assert.match(retiredOperators, /Status commands are read-only/);
-  assert.match(retiredOperators, /exact active-match Firebase proofs/);
+  assert.match(retiredOperators, /exact retained Firebase proofs/);
   const apiRelease = readSection("API Worker release");
   assertOrderedSteps(apiRelease, [
     "npm run upload:api",

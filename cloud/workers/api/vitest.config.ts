@@ -4,6 +4,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig(async () => ({
   root: import.meta.dirname,
+  cacheDir: join(import.meta.dirname, ".cache/vite"),
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },

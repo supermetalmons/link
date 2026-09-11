@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
+import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 import { createSeededRandom } from "@mons/shared/ids";
 import {
   emptyAutomatchProfile,
@@ -287,7 +288,7 @@ async function assertSettled() {
 
 describe("automatch lifecycle through D1 persistence", () => {
   beforeAll(async () => {
-    await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+    await applyStrictMatchStateTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
   });
 
   beforeEach(async () => {

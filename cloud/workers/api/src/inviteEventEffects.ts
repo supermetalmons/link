@@ -9,6 +9,11 @@ import type {
   EventTransitionIntent,
 } from "./eventD1.ts";
 import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
+import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
+import type {
+  MatchStateEventEffectsRequest,
+  MatchStateRecord,
+} from "./matchStateTypes.ts";
 import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
 import {
   EVENT_RECEIPT_ADMISSION_KIND,
@@ -28,6 +33,7 @@ import {
 } from "./inviteSourceD1.ts";
 import {
   buildLoginMatchDiscoveryStatements,
+  readResolvedLoginMatchInviteId,
   type LoginMatchDiscoveryInput,
 } from "./loginMatchDiscoveryD1.ts";
 import {
@@ -42,6 +48,97 @@ type EventEffectReceipt = {
   event_id: string;
   payload_digest: string;
 };
+
+async function applyTypedMatchEffects(
+  db: D1Database,
+  raw: FirebaseRtdbClient,
+  intent: V2Intent,
+  creations: [string, JsonRecord][],
+  otherEffects: JsonRecord,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!raw.applyMatchEventEffects)
+    throw new Error("event-match-effects-unavailable");
+  const groups = new Map<
+    string,
+    Omit<MatchStateEventEffectsRequest, "epoch">
+  >();
+  const group = (inviteId: string) => {
+    let value = groups.get(inviteId);
+    if (!value) {
+      value = {
+        inviteId,
+        operationId: intent.transitionId,
+        creations: [],
+        claims: [],
+        terminalTimers: [],
+      };
+      groups.set(inviteId, value);
+    }
+    return value;
+  };
+  for (const [path, value] of creations) {
+    const [, playerId, , matchId] = path.split("/");
+    group(matchId).creations!.push({
+      playerId,
+      matchId,
+      value: value as MatchStateRecord,
+      marker: await digest({
+        transitionId: intent.transitionId,
+        payloadDigest: intent.payloadDigest,
+        path,
+      }),
+    });
+  }
+  for (const [path, value] of Object.entries(otherEffects)) {
+    const parts = path.split("/");
+    if (parts[0] !== MATCH_TIMER_CLAIM_ROOT) continue;
+    if (
+      !record(value) ||
+      !isSafeFirebaseKey(value.inviteId) ||
+      !isCanonicalFirebaseUid(value.playerId) ||
+      !isCanonicalFirebaseUid(value.opponentId)
+    )
+      throw new Error("event-match-claim-invalid");
+    group(value.inviteId).claims!.push({
+      matchId: parts[1],
+      playerId: value.playerId,
+      opponentId: value.opponentId,
+      claim: value as MatchStateRecord,
+    });
+  }
+  for (const path of Object.keys(otherEffects)) {
+    const parts = path.split("/");
+    if (parts[0] !== "players") continue;
+    const [, playerId, , matchId] = parts;
+    const claim = otherEffects[`${MATCH_TIMER_CLAIM_ROOT}/${matchId}`];
+    const inviteId =
+      record(claim) && typeof claim.inviteId === "string"
+        ? claim.inviteId
+        : await readResolvedLoginMatchInviteId(db, playerId, matchId);
+    if (!inviteId) throw new Error("event-match-route-unavailable");
+    group(inviteId).terminalTimers!.push({ matchId, playerId });
+  }
+  for (const input of groups.values()) {
+    signal?.throwIfAborted();
+    await raw.applyMatchEventEffects(input, signal);
+  }
+  const cleanup = Object.keys(otherEffects).filter((path) =>
+    path.startsWith("matchTimerStarts/"),
+  );
+  if (cleanup.length) {
+    await db.batch(
+      cleanup.map((path) => {
+        const [, matchId, playerId] = path.split("/");
+        return db
+          .prepare(
+            "DELETE FROM match_timer_starts WHERE match_id = ? AND player_id = ?",
+          )
+          .bind(matchId, playerId);
+      }),
+    );
+  }
+}
 
 function record(value: unknown): value is JsonRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -296,6 +393,23 @@ export async function applyInviteEventEffects(
   signal?: AbortSignal,
   prepareMatchPresentations?: PrepareMatchPresentations,
 ): Promise<void> {
+  await requireActiveDurableMatchState(db);
+  return applyAdmittedInviteEventEffects(
+    db,
+    raw,
+    intent,
+    signal,
+    prepareMatchPresentations,
+  );
+}
+
+async function applyAdmittedInviteEventEffects(
+  db: D1Database,
+  raw: FirebaseRtdbClient,
+  intent: V2Intent,
+  signal?: AbortSignal,
+  prepareMatchPresentations?: PrepareMatchPresentations,
+): Promise<void> {
   if ((await digest(digestInput(intent))) !== intent.payloadDigest) {
     throw new Error("event-transition-payload-conflict");
   }
@@ -395,34 +509,46 @@ export async function applyInviteEventEffects(
         throw new Error("event-transition-receipt-conflict");
       }
     } else {
-      for (const [path, value] of creations) {
+      if (raw.applyMatchEventEffects) {
         await assertWritable();
-        const marker = await digest({
-          transitionId: intent.transitionId,
-          payloadDigest: intent.payloadDigest,
-          path,
-        });
-        await raw.transactPath(
-          path,
-          (current) => {
-            if (current !== null && current !== undefined) {
-              if (record(current) && current.sessionCreation === marker) {
-                return { commit: false, decision: "applied" };
-              }
-              throw new Error("event-match-creation-conflict");
-            }
-            return {
-              value: { ...value, sessionCreation: marker },
-              decision: "created",
-            };
-          },
+        await applyTypedMatchEffects(
+          db,
+          raw,
+          intent,
+          creations,
+          otherEffects,
           signal,
-          assertWritable,
         );
-      }
-      if (Object.keys(otherEffects).length) {
-        await assertWritable();
-        await raw.patchRoot(otherEffects, signal);
+      } else {
+        for (const [path, value] of creations) {
+          await assertWritable();
+          const marker = await digest({
+            transitionId: intent.transitionId,
+            payloadDigest: intent.payloadDigest,
+            path,
+          });
+          await raw.transactPath(
+            path,
+            (current) => {
+              if (current !== null && current !== undefined) {
+                if (record(current) && current.sessionCreation === marker) {
+                  return { commit: false, decision: "applied" };
+                }
+                throw new Error("event-match-creation-conflict");
+              }
+              return {
+                value: { ...value, sessionCreation: marker },
+                decision: "created",
+              };
+            },
+            signal,
+            assertWritable,
+          );
+        }
+        if (Object.keys(otherEffects).length) {
+          await assertWritable();
+          await raw.patchRoot(otherEffects, signal);
+        }
       }
       await assertWritable();
       await ensureEventTransitionReceipt(db, expectedReceipt, {

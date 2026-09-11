@@ -161,6 +161,7 @@ export function createAutomatchPersistence(
     recoverResources([key], signal);
 
   const client: FirebaseRtdbClient = {
+    ...raw,
     async getPath(path, query, signal) {
       const owned = parseAutomatchPath(path);
       const invite = inviteSourcePath(path);

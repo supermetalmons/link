@@ -1,3 +1,4 @@
+import { readGameplayMatchPair } from "./gameplayMatchReads.ts";
 import {
   isCreateEventResponse,
   isDisqualifyEventMatchWinnersResponse,
@@ -123,6 +124,7 @@ function createRuntime(env: Env, dependencies: EventControlDependencies) {
   });
   return createEventRuntime({
     admin: createEventAdminAdapter(repository, signal),
+    readMatchPair: (input) => readGameplayMatchPair(repository, input, signal),
     enqueueEventProgressTask: async ({
       eventId,
       sourceKey,

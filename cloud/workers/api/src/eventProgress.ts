@@ -4,6 +4,8 @@ import type {
   WorkflowStep,
   WorkflowStepConfig,
 } from "cloudflare:workers";
+import { readGameplayMatchPair } from "./gameplayMatchReads.ts";
+import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
 import {
   createRatingRepository,
   type GameplayRepository,
@@ -377,9 +379,10 @@ async function ensureEventProgressWorkflowInstance(
 }
 
 export async function ensureEventProgressWorkflow(
-  env: Pick<Env, "EVENT_DB" | "EVENT_PROGRESS_WORKFLOW">,
+  env: Pick<Env, "EVENT_DB" | "EVENT_PROGRESS_WORKFLOW" | "PROFILE_GAMES_DB">,
   plan: EventProgressPlan,
 ): Promise<void> {
+  await requireActiveDurableMatchState(env.PROFILE_GAMES_DB);
   await withEventProgressDispatchAdmission(env.EVENT_DB, () =>
     ensureEventProgressWorkflowInstance(env.EVENT_PROGRESS_WORKFLOW, plan),
   );
@@ -595,6 +598,7 @@ export async function sweepEventProgress(
   env: Env,
   dependencies: EventProgressSweepDependencies = {},
 ): Promise<void> {
+  await requireActiveDurableMatchState(env.PROFILE_GAMES_DB);
   await withEventProgressDispatchAdmission(env.EVENT_DB, () =>
     sweepAdmittedEventProgress(env, dependencies),
   );
@@ -751,6 +755,8 @@ export function createWorkflowEventRuntime(
     repository,
     runtime: createEventRuntime({
       admin: createEventAdminAdapter(repository, signal),
+      readMatchPair: (input) =>
+        readGameplayMatchPair(repository, input, signal),
       enqueueEventProgressTask: async () => {
         throw new Error("workflow-cannot-schedule-event-progress");
       },

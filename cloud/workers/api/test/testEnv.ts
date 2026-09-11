@@ -79,15 +79,18 @@ const profileGamesDb = {
   dump: async () => new ArrayBuffer(0),
   exec: async () => ({ count: 0, duration: 0 }),
   prepare: (query: string): D1PreparedStatement =>
-    query.includes("invite_source_control") ||
-    query.includes("invite_source_write_admissions")
-      ? inviteSourceStatement(query)
-      : query.includes("automatch_runtime_control") ||
-          query.includes("automatch_write_admissions")
-        ? automatchStatement(query)
-        : query.includes("match_presentation_control")
-          ? presentationControlStatement
-          : d1Statement,
+    query.includes("match_state_control") ||
+    query.includes("match_state_write_admissions")
+      ? matchStateStatement(query)
+      : query.includes("invite_source_control") ||
+          query.includes("invite_source_write_admissions")
+        ? inviteSourceStatement(query)
+        : query.includes("automatch_runtime_control") ||
+            query.includes("automatch_write_admissions")
+          ? automatchStatement(query)
+          : query.includes("match_presentation_control")
+            ? presentationControlStatement
+            : d1Statement,
   withSession: (): D1DatabaseSession => ({
     prepare: (query: string): D1PreparedStatement =>
       profileGamesDb.prepare(query),
@@ -95,6 +98,36 @@ const profileGamesDb = {
     getBookmark: () => null,
   }),
 } satisfies D1Database;
+
+function matchStateStatement(query: string): D1PreparedStatement {
+  return {
+    all: d1Statement.all,
+    raw: d1Statement.raw,
+    bind: () => matchStateStatement(query),
+    run: async () => ({
+      success: true,
+      results: [],
+      meta: { ...d1Meta, changes: 1 },
+    }),
+    first: async <T>() =>
+      ({
+        backend: "durable",
+        state: "active",
+        epoch: 2,
+        freeze_generation: 0,
+        candidate_version_id: null,
+        import_id: null,
+        source_digest: null,
+        source_record_count: null,
+        source_claim_count: null,
+        source_bundle_count: null,
+        fence_digest: null,
+        verified_digest: null,
+        verified_at_ms: null,
+        activated_at_ms: null,
+      }) as T,
+  };
+}
 
 const presentationControlStatement: D1PreparedStatement = {
   all: d1Statement.all,
@@ -292,6 +325,7 @@ const eventPrizeWithdrawalsDb = {
 
 export const TELEGRAM_TEST_ENV = {
   MATCH_PRESENTATION_MIGRATION_SECRET: "test-presentation-migration-secret",
+  MATCH_STATE_MIGRATION_SECRET: "test-match-state-secret",
   SESSION_JWT_KEYS: JSON.stringify({
     activeKid: "test",
     keys: { test: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },

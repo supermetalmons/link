@@ -1,15 +1,10 @@
 import {
-  countMoveHistory,
   isMoveHistoryPrefix,
   isSubmitMoveRequest,
   isSubmitMoveResponse,
   type SubmitMoveRequest,
   type SubmitMoveResponse,
 } from "@mons/shared/game-sessions";
-import {
-  isMatchFenWithinLimit,
-  isMatchHistoryWithinLimits,
-} from "@mons/shared/match-protocol";
 import {
   inviteMatchesPlayers,
   parseInviteMatchIndex,
@@ -28,6 +23,7 @@ import {
   type FirebaseRtdbClient,
 } from "./firebaseRtdb.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
+import { decideMatchStateMove } from "./matchStateLogic.ts";
 import {
   getLoginProfileId,
   requireProfileOwnershipSnapshot,
@@ -40,7 +36,8 @@ type MoveRepository = Pick<
 >;
 
 export type SubmitMoveDependencies = {
-  createMatchClient: (
+  submitCanonical?: (request: SubmitMoveRequest) => Promise<SubmitMoveResponse>;
+  createMatchClient?: (
     scope: Pick<SubmitMoveRequest, "playerId" | "matchId">,
   ) => Pick<FirebaseRtdbClient, "transactPath">;
   assertMutationAllowed?: () => Promise<void>;
@@ -173,6 +170,16 @@ export async function submitMove(
   }
   signal.throwIfAborted();
   await dependencies.assertMutationAllowed?.();
+  if (dependencies.submitCanonical) {
+    return dependencies.submitCanonical(request);
+  }
+  if (!dependencies.createMatchClient) {
+    throw new AuthApiFailure(
+      503,
+      "unavailable",
+      "match-state-canonical-operation-required",
+    );
+  }
   const client = dependencies.createMatchClient({
     playerId: request.playerId,
     matchId: request.matchId,
@@ -181,63 +188,10 @@ export async function submitMove(
     const result = await client.transactPath(
       `players/${request.playerId}/matches/${request.matchId}`,
       (current) => {
-        if (current === null || current === undefined) {
-          throw new AuthApiFailure(404, "not-found", "match-not-found");
-        }
-        const match = toRecord(current);
-        if (
-          !match ||
-          typeof match.fen !== "string" ||
-          !match.fen ||
-          (match.flatMovesString !== undefined &&
-            typeof match.flatMovesString !== "string")
-        ) {
-          throw new AuthApiFailure(409, "failed-precondition", "match-invalid");
-        }
-        const history = match.flatMovesString ?? "";
-        if (
-          request.previousStates &&
-          (!isMatchFenWithinLimit(match.fen) ||
-            !isMatchHistoryWithinLimits(history))
-        ) {
-          throw new AuthApiFailure(409, "failed-precondition", "match-invalid");
-        }
-        if (history === request.flatMovesString && match.fen === request.fen) {
-          return { commit: false, decision: "already-applied" };
-        }
-        if (
-          request.previousStates &&
-          history !== request.flatMovesString &&
-          isMoveHistoryPrefix(request.flatMovesString, history)
-        ) {
-          return { commit: false, decision: "superseded" };
-        }
-        const previousState =
-          request.previousStates?.[
-            countMoveHistory(history) -
-              countMoveHistory(request.previousFlatMovesString)
-          ];
-        const matchesPreviousState = request.previousStates
-          ? isMoveHistoryPrefix(request.previousFlatMovesString, history) &&
-            isMoveHistoryPrefix(history, request.flatMovesString) &&
-            previousState?.fen === match.fen
-          : history === request.previousFlatMovesString;
-        if (!matchesPreviousState) {
-          throw new AuthApiFailure(409, "aborted", "move-chain-conflict");
-        }
-        const gameVariant =
-          match.gameVariant === undefined || match.gameVariant === ""
-            ? request.gameVariant
-            : undefined;
-        return {
-          decision: "applied",
-          value: {
-            ...match,
-            ...(gameVariant ? { gameVariant } : {}),
-            fen: request.fen,
-            flatMovesString: request.flatMovesString,
-          },
-        };
+        const decision = decideMatchStateMove(current, request);
+        return decision.outcome === "applied"
+          ? { decision: "applied", value: decision.value }
+          : { commit: false, decision: decision.outcome };
       },
       signal,
       async () => {

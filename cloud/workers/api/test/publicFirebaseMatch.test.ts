@@ -4,7 +4,7 @@ import {
   FirebaseRtdbFailure,
   MAX_RTDB_BODY_BYTES,
   readPublicFirebaseMatch,
-} from "../src/firebaseRtdb.ts";
+} from "../test/legacyFirebaseRtdb.ts";
 
 const env = {
   FIREBASE_RTDB_URL: "https://mons-link-default-rtdb.firebaseio.com",

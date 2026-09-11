@@ -1,10 +1,10 @@
 import { createAutomatchPersistence } from "./automatchPersistence.ts";
 import {
-  createFirebaseRtdbClient,
   type FirebaseRtdbClient,
   type FirebaseRtdbQuery,
   type FirebaseRtdbTransactionResult,
 } from "./firebaseRtdb.ts";
+import { createMatchStateSource } from "./matchStateSource.ts";
 import {
   EventD1Conflict,
   EventWritesDisabled,
@@ -75,7 +75,12 @@ const EVENT_TRANSITION_APPLICATION_LOCK_OWNER = "event-transition-applier";
 export const EVENT_TRANSITION_RECEIPT_ROOT = "eventTransitionReceipts";
 type EventRtdbBackend = Pick<
   FirebaseRtdbClient,
-  "getPath" | "patchRoot" | "transactPath"
+  | "getPath"
+  | "patchRoot"
+  | "transactPath"
+  | "readMatchPair"
+  | "createMatchRecords"
+  | "applyMatchEventEffects"
 >;
 type EventTransitionBackend = Pick<EventRtdbBackend, "getPath" | "patchRoot">;
 type EventLockGuard = {
@@ -519,12 +524,7 @@ async function patchD1EventState(
 }
 
 function createEventRawClient(env: Env): FirebaseRtdbClient {
-  return createFirebaseRtdbClient(env, {
-    credentials: {
-      email: env.GAMEPLAY_SERVICE_ACCOUNT_EMAIL,
-      privateKeyPem: env.GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY,
-    },
-  });
+  return createMatchStateSource(env);
 }
 
 async function notifyEventInviteEffects(
@@ -602,6 +602,7 @@ export function createEventGameplayRepository(
     getPath: base.getRtdbPath,
     patchRoot: base.patchRtdbRoot,
     transactPath: base.transactRtdbPath,
+    readMatchPair: base.readMatchPair,
   });
   return {
     ...base,
@@ -763,6 +764,7 @@ export function createEventRtdbClient(
     prepareCreatedMatchPresentations(env, creations),
 ): EventRtdbClient {
   return {
+    ...base,
     async getPath(path, query, signal) {
       if (isTransitionReceiptPath(path)) {
         throw new Error("event-transition-receipt-path-reserved");

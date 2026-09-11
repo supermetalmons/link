@@ -4,7 +4,7 @@ import {
   createGoogleAccessToken,
   createServiceAccountAssertion,
   GoogleAuthFailure,
-} from "../src/googleAuth.ts";
+} from "../test/legacyGoogleAuth.ts";
 
 function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   const output = new ArrayBuffer(bytes.byteLength);

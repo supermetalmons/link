@@ -83,7 +83,9 @@ import {
   startMatchTimer,
   type MatchTimerDependencies,
 } from "./matchTimer.ts";
-import { createFirebaseRtdbClient } from "./firebaseRtdb.ts";
+import { canonicalMatchOperations } from "./matchStateClient.ts";
+import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
+import { MatchStateD1Failure } from "./matchStateD1.ts";
 import {
   surrenderMatch,
   type SurrenderMatchDependencies,
@@ -508,6 +510,40 @@ export async function handleGameplayRoute(
   ctx: WorkerExecutionContext,
   dependencies: GameplayRouteDependencies = {},
 ): Promise<Response> {
+  const pathname = new URL(request.url).pathname;
+  if (
+    request.method !== "POST" ||
+    GAMEPLAY_READ_PATHS.has(pathname) ||
+    !GAMEPLAY_PATHS.has(pathname)
+  )
+    return handleGameplayRequest(request, env, ctx, dependencies);
+  try {
+    await requireActiveDurableMatchState(env.PROFILE_GAMES_DB);
+    return await handleGameplayRequest(request, env, ctx, dependencies);
+  } catch (error) {
+    let headers: Record<string, string> = { Vary: "Origin" };
+    try {
+      headers = getAuthCorsHeaders(request);
+    } catch {}
+    return authErrorResponse(
+      new AuthApiFailure(
+        503,
+        "unavailable",
+        error instanceof MatchStateD1Failure
+          ? error.message
+          : "gameplay-service-unavailable",
+      ),
+      { ...headers, "Retry-After": "60" },
+    );
+  }
+}
+
+async function handleGameplayRequest(
+  request: Request,
+  env: Env,
+  ctx: WorkerExecutionContext,
+  dependencies: GameplayRouteDependencies = {},
+): Promise<Response> {
   let corsHeaders: Record<string, string> = { Vary: "Origin" };
   try {
     corsHeaders = getAuthCorsHeaders(request);
@@ -698,6 +734,9 @@ export async function handleGameplayRoute(
       assertMutationAllowed,
       mutationLocks: coordination.mutationLocks,
     };
+    const canonical = pathname.startsWith("/matches/")
+      ? await canonicalMatchOperations(env)
+      : null;
     let response;
     if (pathname === "/automatch/cancel") {
       response = await cancelAutomatch(
@@ -811,10 +850,9 @@ export async function handleGameplayRoute(
       }
       await enforceMatchMoveRateLimit(env.MOVE_RATE_LIMITER, identity.uid);
       response = await submitMove(identity, body, repository, {
-        createMatchClient:
-          dependencies.move?.createMatchClient ||
-          ((scope) =>
-            createFirebaseRtdbClient(env, { scopedMatchMove: scope })),
+        submitCanonical:
+          dependencies.move?.submitCanonical || canonical?.submitCanonical,
+        createMatchClient: dependencies.move?.createMatchClient,
         assertMutationAllowed,
         signal: dependencies.move?.signal || request.signal,
       });
@@ -827,10 +865,10 @@ export async function handleGameplayRoute(
         identity.uid,
       );
       response = await surrenderMatch(identity, body, repository, {
-        createMatchClient:
-          dependencies.surrender?.createMatchClient ||
-          ((scope) =>
-            createFirebaseRtdbClient(env, { scopedMatchSurrender: scope })),
+        surrenderCanonical:
+          dependencies.surrender?.surrenderCanonical ||
+          canonical?.surrenderCanonical,
+        createMatchClient: dependencies.surrender?.createMatchClient,
         assertMutationAllowed,
         signal: dependencies.surrender?.signal || request.signal,
       });
@@ -841,6 +879,8 @@ export async function handleGameplayRoute(
       await enforceMatchTimerRateLimit(env.AUTH_RATE_LIMITER, identity.uid);
       response = await startMatchTimer(identity, body, repository, {
         ...dependencies.timer,
+        startCanonical:
+          dependencies.timer?.startCanonical || canonical?.startCanonical,
         assertMutationAllowed,
         enqueueEventProgress:
           dependencies.timer?.enqueueEventProgress ||
@@ -858,6 +898,8 @@ export async function handleGameplayRoute(
       );
       const claim = claimMatchVictoryByTimer(identity, body, repository, {
         ...dependencies.timer,
+        claimCanonical:
+          dependencies.timer?.claimCanonical || canonical?.claimCanonical,
         assertMutationAllowed,
         enqueueEventProgress:
           dependencies.timer?.enqueueEventProgress ||

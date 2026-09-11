@@ -10,84 +10,10 @@ const {
   requireLaterGameFromMatchData,
 } = require("../functions/gameplay/matchReconstruction");
 
-test("automatch REST queries retain their RTDB indexes", () => {
-  assert.deepEqual(databaseRules.rules.automatch[".indexOn"], [
-    "uid",
-    "profileId",
-  ]);
-  assert.deepEqual(
-    databaseRules.rules.telegramProjectionOutbox.automatch[".indexOn"],
-    ["updatedAtMs"],
-  );
-  assert.deepEqual(
-    databaseRules.rules.profileGameProjectionOutbox.automatch[".indexOn"],
-    ["lastQueuedAtMs"],
-  );
-  assert.equal(
-    databaseRules.rules.profileGameProjectionOutbox.event,
-    undefined,
-  );
-  assert.equal(
-    databaseRules.rules.profileGameProjectionOutbox.profile,
-    undefined,
-  );
-});
-
-test("player reads expose gameplay state without exposing retired profile and wager storage", () => {
-  const players = databaseRules.rules.players;
-  assert.equal(databaseRules.rules[".read"], false);
-  assert.equal(players[".read"], undefined);
-  assert.equal(players.$userId[".read"], undefined);
-  assert.equal(players.$userId[".validate"], undefined);
-  assert.equal(players.$userId.matches[".read"], true);
-  assert.deepEqual(players.$userId.profile, {
-    ".read": false,
-    ".write": false,
+test("retired Realtime Database has no client grants or gameplay indexes", () => {
+  assert.deepEqual(databaseRules, {
+    rules: { ".read": false, ".write": false },
   });
-  assert.equal(players.$userId.mining, undefined);
-});
-
-test("structural gameplay writes and live match updates require Workers", () => {
-  const invites = databaseRules.rules.invites.$inviteId;
-  const player = databaseRules.rules.players.$userId;
-  assert.equal(databaseRules.rules[".write"], false);
-  assert.equal(databaseRules.rules.invites[".read"], undefined);
-  assert.deepEqual(invites, { ".read": false, ".write": false });
-  assert.equal(player[".write"], undefined);
-  assert.match(player.matches.$matchId[".write"], /data\.exists\(\)/);
-  assert.match(player.matches.$matchId[".write"], /newData\.exists\(\)/);
-  assert.match(player.matches.$matchId[".write"], /auth\.uid === \$userId/);
-  assert.match(player.matches.$matchId[".write"], /workerMoveMatchId/);
-  assert.match(player.matches.$matchId[".write"], /workerSurrenderMatchId/);
-  assert.doesNotMatch(player.matches.$matchId[".write"], /admin|profileId/);
-  assert.deepEqual(databaseRules.rules.gameplayMutationReceipts[".indexOn"], [
-    "completedAtMs",
-  ]);
-  assert.deepEqual(
-    databaseRules.rules.gameplayMutationReceiptExpirations[".indexOn"],
-    ["completedAtMs"],
-  );
-  assert.equal(databaseRules.rules.gameplayMutationLocks, undefined);
-});
-
-test("active timer claims fence scoped match writes while preserving their timer", () => {
-  assert.deepEqual(databaseRules.rules.matchTimerClaims, {
-    ".read": false,
-    ".write": false,
-  });
-  assert.equal(databaseRules.rules.matchTimerStarts, undefined);
-  const matchValidation =
-    databaseRules.rules.players.$userId.matches.$matchId[".validate"];
-  assert.match(
-    matchValidation,
-    /newData\.child\('timer'\)\.exists\(\) === data\.child\('timer'\)\.exists\(\)/,
-  );
-  assert.match(
-    matchValidation,
-    /newData\.child\('timer'\)\.val\(\) === data\.child\('timer'\)\.val\(\)/,
-  );
-  assert.match(matchValidation, /matchTimerClaims/);
-  assert.match(matchValidation, /expiresAtMs/);
 });
 
 test("match reconstruction retains the strict timer selection policy", () => {

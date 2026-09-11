@@ -1,3 +1,4 @@
+import { readGameplayMatchPair } from "./gameplayMatchReads.ts";
 import {
   isMaterialName,
   normalizeCount,
@@ -349,25 +350,22 @@ function readStoredSettlement(
 }
 
 async function readMatchPair(
+  inviteId: string,
   playerUid: string,
   opponentUid: string,
   matchId: string,
-  repository: Pick<GameplayRepository, "getRtdbPath">,
+  repository: Pick<GameplayRepository, "getRtdbPath" | "readMatchPair">,
   signal?: AbortSignal,
 ): Promise<[MatchRecord | null, MatchRecord | null]> {
-  const paths = [
-    `players/${playerUid}/matches/${matchId}`,
-    `players/${opponentUid}/matches/${matchId}`,
-  ];
-  const first = await Promise.allSettled(
-    paths.map((path) => repository.getRtdbPath(path, undefined, signal)),
-  );
-  const values = await Promise.all(
-    first.map((result, index) =>
-      result.status === "fulfilled"
-        ? result.value
-        : repository.getRtdbPath(paths[index], undefined, signal),
-    ),
+  const values = await readGameplayMatchPair(
+    repository,
+    {
+      inviteId,
+      matchId,
+      playerId: playerUid,
+      opponentId: opponentUid,
+    },
+    signal,
   );
   return [parseMatchRecord(values[0]), parseMatchRecord(values[1])];
 }
@@ -792,6 +790,7 @@ export async function resolveWagerOutcome(
     return participants;
   }
   const [playerMatch, opponentMatch] = await readMatchPair(
+    request.inviteId,
     participants.playerUid,
     participants.opponentUid,
     request.matchId,

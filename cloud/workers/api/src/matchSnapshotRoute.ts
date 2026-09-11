@@ -4,7 +4,7 @@ import {
   type ReadMatchSnapshotRequest,
   type ReadMatchSnapshotResponse,
 } from "@mons/shared/game-sessions";
-import { readPublicFirebaseMatch } from "./firebaseRtdb.ts";
+import { readMatchStateRecord } from "./matchStateRouting.ts";
 
 type MatchSnapshotRouteDependencies = {
   readMatch?: (
@@ -66,7 +66,7 @@ export async function handleMatchSnapshotRoute(
     return errorResponse(400, "invalid-argument", "invalid-request");
   }
   try {
-    const raw = await (dependencies.readMatch || readPublicFirebaseMatch)(
+    const raw = await (dependencies.readMatch || readMatchStateRecord)(
       env,
       input,
       { signal: request.signal },

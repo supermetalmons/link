@@ -50,6 +50,12 @@ export type EventRuntime = {
 };
 
 export function createEventRuntime(dependencies: {
+  readMatchPair?: (input: {
+    inviteId: string;
+    matchId: string;
+    playerId: string;
+    opponentId: string;
+  }) => Promise<[unknown, unknown]>;
   admin: {
     database(): {
       ref(path?: string): {

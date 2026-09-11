@@ -42,7 +42,34 @@ import {
   type InviteWagersSourceResult,
 } from "./inviteWagers.ts";
 import { MatchSyncRoom } from "./matchSyncRoom.ts";
-import type { MatchSyncReadResult } from "./matchSync.ts";
+import type { MatchSyncMetadata, MatchSyncReadResult } from "./matchSync.ts";
+import { MatchStateStore } from "./matchStateStore.ts";
+import { captureMatchStateRpc, type MatchStateRpc } from "./matchStateRpc.ts";
+import type {
+  MatchStateActivateRequest,
+  MatchStateClaimTimerRequest,
+  MatchStateCreateRequest,
+  MatchStateEffect,
+  MatchStateEventEffectsRequest,
+  MatchStateImportRequest,
+  MatchStateImportTarget,
+  MatchStateMoveRequest,
+  MatchStatePairRequest,
+  MatchStateRecordRequest,
+  MatchStateStartTimerRequest,
+  MatchStateSurrenderRequest,
+} from "./matchStateTypes.ts";
+import { createMatchTimerStartStore } from "./gameplayCoordinationD1.ts";
+import {
+  acquireEventWriteAdmission,
+  patchEventOwnedPaths,
+  releaseEventWriteAdmission,
+} from "./eventD1.ts";
+import {
+  buildEventProgressPlan,
+  ensureEventProgressWorkflow,
+} from "./eventProgress.ts";
+import { assertProfileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
 import {
   assertMatchPresentationRegistration,
   listMatchPresentationRegistrations,
@@ -193,9 +220,14 @@ function logWagersRefreshFailure(inviteId: string, error: unknown): void {
 export type InviteReactionPublishResult =
   "published" | "duplicate" | "conflict" | "participant-limit";
 
-export class InviteReactions extends DurableObject<Env> {
+export class InviteReactions
+  extends DurableObject<Env>
+  implements MatchStateRpc
+{
   private readonly matchSync: MatchSyncRoom;
+  private readonly matchState: MatchStateStore;
   private readonly socketSessions: SocketSessions;
+  private matchEffectsPending: Promise<void> | null = null;
   private inviteReader: (inviteId: string) => Promise<unknown>;
   private inviteSequence: Promise<void> = Promise.resolve();
   private inviteAlarmSequence: Promise<void> = Promise.resolve();
@@ -232,7 +264,12 @@ export class InviteReactions extends DurableObject<Env> {
       "CREATE TABLE IF NOT EXISTS invite_refresh_schedule (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), next_at_ms INTEGER NOT NULL)",
     );
     this.inviteReader = createInviteSourceReader(env);
-    this.matchSync = new MatchSyncRoom(ctx, env, {
+    this.matchState = new MatchStateStore(ctx.storage, {
+      timerStarts: createMatchTimerStartStore(env.PROFILE_GAMES_DB),
+      scheduleAlarm: (atMs, transaction) =>
+        this.scheduleInviteAlarm(atMs, transaction),
+    });
+    this.matchSync = new MatchSyncRoom(ctx, {
       pinInvite: (inviteId) => {
         this.pinInvite(inviteId);
       },
@@ -247,6 +284,8 @@ export class InviteReactions extends DurableObject<Env> {
         return this.readMetadata(inviteId);
       },
       inviteGeneration: () => this.inviteInvalidationGeneration,
+      sourceEpoch: () => this.matchState.readSource().epoch,
+      readPair: (metadata, matchId) => this.readMatchPair(metadata, matchId),
       scheduleAlarm: (atMs) => this.scheduleInviteAlarm(atMs),
       capacityFull: (role, ip) => this.matchRoomFull(role, ip),
       canReceive: canReceiveInvite,
@@ -480,13 +519,22 @@ export class InviteReactions extends DurableObject<Env> {
     return pending;
   }
 
-  private scheduleInviteAlarm(atMs: number): Promise<void> {
-    const pending = this.inviteAlarmSequence.then(async () => {
-      const current = await this.ctx.storage.getAlarm();
+  private scheduleInviteAlarm(
+    atMs: number,
+    transaction?: Pick<DurableObjectTransaction, "getAlarm" | "setAlarm">,
+  ): Promise<void> {
+    const schedule = async (
+      storage: Pick<DurableObjectTransaction, "getAlarm" | "setAlarm">,
+    ) => {
+      const current = await storage.getAlarm();
       if (current === null || current > atMs) {
-        await this.ctx.storage.setAlarm(atMs);
+        await storage.setAlarm(atMs);
       }
-    });
+    };
+    if (transaction) return schedule(transaction);
+    const pending = this.inviteAlarmSequence.then(() =>
+      this.ctx.storage.transaction(schedule),
+    );
     this.inviteAlarmSequence = pending.catch(() => undefined);
     return pending;
   }
@@ -672,6 +720,195 @@ export class InviteReactions extends DurableObject<Env> {
     return this.matchSync.read(inviteId, matchId);
   }
 
+  private async readMatchPair(
+    metadata: MatchSyncMetadata,
+    matchId: string,
+  ): Promise<[unknown, unknown]> {
+    const local = () => {
+      const source = this.matchState.readSource();
+      const pair = this.matchState.readPair({
+        inviteId: metadata.snapshot.inviteId,
+        epoch: source.epoch,
+        matchId,
+        playerId: metadata.snapshot.hostId,
+        opponentId: metadata.snapshot.guestId,
+      });
+      return [pair.playerMatch, pair.opponentMatch] as [unknown, unknown];
+    };
+    return local();
+  }
+
+  async readCanonicalMatchRecord(input: MatchStateRecordRequest) {
+    return captureMatchStateRpc(() => {
+      this.pinInvite(input.inviteId);
+      return this.matchState.readRecord(input);
+    });
+  }
+
+  async readCanonicalMatchPair(input: MatchStatePairRequest) {
+    return captureMatchStateRpc(() => {
+      this.pinInvite(input.inviteId);
+      return this.matchState.readPair(input);
+    });
+  }
+
+  async createCanonicalMatch(input: MatchStateCreateRequest) {
+    return captureMatchStateRpc(async () => {
+      this.pinInvite(input.inviteId);
+      const result = this.matchState.createRecords(input);
+      await this.notifyCanonicalMatches(input.inviteId, result.changedMatchIds);
+      return result;
+    });
+  }
+
+  async submitCanonicalMove(input: MatchStateMoveRequest) {
+    return captureMatchStateRpc(async () => {
+      this.pinInvite(input.inviteId);
+      const result = this.matchState.move(input);
+      await this.notifyCanonicalMatches(input.inviteId, [input.matchId]);
+      return result;
+    });
+  }
+
+  async surrenderCanonicalMatch(input: MatchStateSurrenderRequest) {
+    return captureMatchStateRpc(async () => {
+      this.pinInvite(input.inviteId);
+      const result = this.matchState.surrender(input);
+      await this.notifyCanonicalMatches(input.inviteId, [input.matchId]);
+      return result;
+    });
+  }
+
+  async startCanonicalMatchTimer(input: MatchStateStartTimerRequest) {
+    return captureMatchStateRpc(async () => {
+      this.pinInvite(input.inviteId);
+      const result = await this.matchState.startTimer(input);
+      await this.notifyCanonicalMatches(input.inviteId, [input.matchId]);
+      return result;
+    });
+  }
+
+  async claimCanonicalMatchTimer(input: MatchStateClaimTimerRequest) {
+    return captureMatchStateRpc(async () => {
+      this.pinInvite(input.inviteId);
+      const result = await this.matchState.claimTimer(input);
+      await this.notifyCanonicalMatches(input.inviteId, [input.matchId]);
+      await this.dispatchMatchEffects();
+      return result;
+    });
+  }
+
+  async applyCanonicalMatchEventEffects(input: MatchStateEventEffectsRequest) {
+    return captureMatchStateRpc(async () => {
+      this.pinInvite(input.inviteId);
+      const result = await this.matchState.applyEventEffects(input);
+      await this.notifyCanonicalMatches(input.inviteId, result.changedMatchIds);
+      return result;
+    });
+  }
+
+  async importMatchState(input: MatchStateImportRequest) {
+    return captureMatchStateRpc(async () => {
+      this.pinInvite(input.inviteId);
+      return this.matchState.stageImport(input);
+    });
+  }
+
+  async inspectMatchStateImport(input: MatchStateImportTarget) {
+    return captureMatchStateRpc(async () => {
+      this.pinInvite(input.inviteId);
+      return this.matchState.readImport(input);
+    });
+  }
+
+  async activateMatchState(input: MatchStateActivateRequest) {
+    return captureMatchStateRpc(async () => {
+      this.pinInvite(input.inviteId);
+      const result = await this.matchState.activate(input);
+      this.matchSync.invalidateSource();
+      await this.notifyCanonicalMatches(input.inviteId);
+      return result;
+    });
+  }
+
+  private async notifyCanonicalMatches(
+    inviteId: string,
+    matchIds?: string[],
+  ): Promise<void> {
+    try {
+      await this.matchSync.notify(inviteId, matchIds);
+    } catch (error) {
+      console.error({
+        event: "canonical_match_notification_failed",
+        inviteId,
+        kind: error instanceof Error ? error.name : "unknown",
+      });
+    }
+  }
+
+  private async deliverMatchEffect(effect: MatchStateEffect): Promise<void> {
+    await assertProfileBackgroundMutationsEnabled(this.env);
+    await createMatchTimerStartStore(this.env.PROFILE_GAMES_DB).deletePair(
+      effect.playerId,
+      effect.opponentId,
+      effect.matchId,
+    );
+    if (!effect.eventId) return;
+    const plan = await buildEventProgressPlan(
+      {
+        eventId: effect.eventId,
+        sourceKey: effect.sourceKey,
+        reason: effect.reason,
+      },
+      effect.claimedAtMs,
+    );
+    const admission = await acquireEventWriteAdmission(this.env.EVENT_DB);
+    let released = false;
+    try {
+      await patchEventOwnedPaths(
+        this.env.EVENT_DB,
+        { [`eventProgressOutbox/${plan.outboxId}`]: plan.outbox },
+        { admission },
+      );
+    } finally {
+      released = await releaseEventWriteAdmission(this.env.EVENT_DB, admission);
+    }
+    if (!released) throw new Error("match-event-admission-release-unconfirmed");
+    await ensureEventProgressWorkflow(this.env, plan);
+  }
+
+  private dispatchMatchEffects(): Promise<void> {
+    if (this.matchEffectsPending) return this.matchEffectsPending;
+    const pending = this.flushMatchEffects();
+    this.matchEffectsPending = pending;
+    void pending
+      .finally(() => {
+        if (this.matchEffectsPending === pending)
+          this.matchEffectsPending = null;
+      })
+      .catch(() => undefined);
+    return pending;
+  }
+
+  private async flushMatchEffects(): Promise<void> {
+    for (const effect of this.matchState.listDueEffects(Date.now(), 20)) {
+      try {
+        await this.deliverMatchEffect(effect);
+        this.matchState.completeEffect(effect.effectId);
+      } catch (error) {
+        await this.matchState.retryEffect(effect.effectId, Date.now() + 60_000);
+        console.error({
+          event: "canonical_match_effect_retry",
+          inviteId: effect.inviteId,
+          matchId: effect.matchId,
+          kind: error instanceof Error ? error.name : "unknown",
+        });
+      }
+    }
+    const next = this.matchState.nextEffectAt();
+    if (next !== null) await this.scheduleInviteAlarm(next);
+  }
+
   async notifyMatchesChanged(
     inviteId: string,
     matchIds?: string[],
@@ -696,6 +933,7 @@ export class InviteReactions extends DurableObject<Env> {
 
   async alarm(): Promise<void> {
     this.socketSessions.nextExpiry();
+    await this.dispatchMatchEffects();
     await this.serializeInvite(async () => {
       const sockets = this.inviteSockets(undefined, true);
       if (sockets.length === 0) {
@@ -737,6 +975,7 @@ export class InviteReactions extends DurableObject<Env> {
     const due = [
       scheduled?.next_at_ms,
       nextMatch,
+      this.matchState.nextEffectAt(),
       this.socketSessions.nextExpiry(),
     ].filter((value): value is number => typeof value === "number");
     if (due.length) await this.scheduleInviteAlarm(Math.min(...due));

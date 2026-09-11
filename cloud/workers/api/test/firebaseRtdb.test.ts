@@ -7,7 +7,7 @@ import {
   FirebaseRtdbPermissionDenied,
   firebaseRtdbIncrement,
   MAX_RTDB_BODY_BYTES,
-} from "../src/firebaseRtdb.ts";
+} from "../test/legacyFirebaseRtdb.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const env = {

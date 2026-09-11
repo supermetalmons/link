@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
+import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 import { createSeededRandom } from "@mons/shared/ids";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -149,7 +150,7 @@ async function assertPublished(inviteId: string, operationId: string) {
 
 describe("game discovery through the production gameplay repositories", () => {
   beforeAll(async () => {
-    await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+    await applyStrictMatchStateTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
     await applyRetiredProfileMigrations(
       env.PROFILE_DB,
       testEnv.TEST_PROFILE_D1_MIGRATIONS,

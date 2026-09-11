@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
+import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 import {
   applyEventTestMigrations,
   transitionEventStorageMode,
@@ -15,7 +16,10 @@ import {
 } from "../src/eventD1.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 
-const testEnv = env as Env & { TEST_EVENT_D1_MIGRATIONS: D1Migration[] };
+const testEnv = env as Env & {
+  TEST_EVENT_D1_MIGRATIONS: D1Migration[];
+  TEST_D1_MIGRATIONS: D1Migration[];
+};
 const eventId = "NN3eRzoZo80";
 const profileId = "profile-one";
 
@@ -37,6 +41,10 @@ function eventRecord() {
 
 describe("event read route", () => {
   beforeAll(async () => {
+    await applyStrictMatchStateTestMigrations(
+      testEnv.PROFILE_GAMES_DB,
+      testEnv.TEST_D1_MIGRATIONS,
+    );
     await applyEventTestMigrations(
       testEnv.EVENT_DB,
       testEnv.TEST_EVENT_D1_MIGRATIONS,

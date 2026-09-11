@@ -4,7 +4,6 @@ import {
   type MatchSyncSnapshot,
 } from "@mons/shared/match-sync";
 import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
-import { readPublicFirebaseMatch } from "./firebaseRtdb.ts";
 import type { InviteMetadataReadResult } from "./inviteMetadata.ts";
 import {
   assertMatchSyncEnvelope,
@@ -41,6 +40,7 @@ type MatchReadState = {
   pending?: Promise<MatchSyncReadResult>;
   checkedAt: number;
   inviteGeneration: number;
+  sourceEpoch: number;
   result?: Extract<MatchSyncReadResult, { status: "ok" }>;
 };
 
@@ -48,6 +48,11 @@ type MatchRoomDependencies = {
   pinInvite: (inviteId: string) => void;
   readMetadata: (inviteId: string) => Promise<InviteMetadataReadResult>;
   inviteGeneration: () => number;
+  sourceEpoch: () => number;
+  readPair: (
+    metadata: MatchSyncMetadata,
+    matchId: string,
+  ) => Promise<[unknown, unknown]>;
   scheduleAlarm: (atMs: number) => Promise<void>;
   capacityFull: (role: string, ip: string) => boolean;
   canReceive: (
@@ -60,18 +65,16 @@ type MatchRoomDependencies = {
 export class MatchSyncRoom {
   private readonly states = new Map<string, MatchReadState>();
   private readonly admissions = new Map<string, number>();
-  private readMatch: (playerId: string, matchId: string) => Promise<unknown>;
+  private readPair: MatchRoomDependencies["readPair"];
 
   constructor(
     private readonly ctx: DurableObjectState,
-    env: Env,
     private readonly dependencies: MatchRoomDependencies,
   ) {
     ctx.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS match_sync_snapshots (match_id TEXT PRIMARY KEY, snapshot_json TEXT NOT NULL, revision INTEGER NOT NULL, next_at_ms INTEGER)",
     );
-    this.readMatch = (playerId, matchId) =>
-      readPublicFirebaseMatch(env, { playerId, matchId });
+    this.readPair = dependencies.readPair;
   }
 
   private sockets(matchId?: string): WebSocket[] {
@@ -89,7 +92,12 @@ export class MatchSyncRoom {
   private state(matchId: string): MatchReadState {
     let state = this.states.get(matchId);
     if (!state) {
-      state = { generation: 0, checkedAt: 0, inviteGeneration: -1 };
+      state = {
+        generation: 0,
+        checkedAt: 0,
+        inviteGeneration: -1,
+        sourceEpoch: -1,
+      };
       this.states.set(matchId, state);
     }
     return state;
@@ -179,16 +187,18 @@ export class MatchSyncRoom {
     state: MatchReadState,
   ): Promise<MatchSyncReadResult> {
     state.result = undefined;
-    try {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const generation = state.generation;
-        const inviteGeneration = this.dependencies.inviteGeneration();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const generation = state.generation;
+      const inviteGeneration = this.dependencies.inviteGeneration();
+      const sourceEpoch = this.dependencies.sourceEpoch();
+      const current = () =>
+        generation === state.generation &&
+        inviteGeneration === this.dependencies.inviteGeneration() &&
+        sourceEpoch === this.dependencies.sourceEpoch();
+      let readingSource = true;
+      try {
         const metadata = await this.dependencies.readMetadata(inviteId);
-        if (
-          generation !== state.generation ||
-          inviteGeneration !== this.dependencies.inviteGeneration()
-        )
-          continue;
+        if (!current()) continue;
         if (metadata.status !== "ok") {
           this.close(matchId, 1008, "Invite unavailable");
           return metadata;
@@ -197,17 +207,9 @@ export class MatchSyncRoom {
           this.close(matchId, 1008, "Match unavailable");
           return { status: "missing" };
         }
-        const [hostValue, guestValue] = await Promise.all([
-          this.readMatch(metadata.snapshot.hostId, matchId),
-          metadata.snapshot.guestId === null
-            ? null
-            : this.readMatch(metadata.snapshot.guestId, matchId),
-        ]);
-        if (
-          generation !== state.generation ||
-          inviteGeneration !== this.dependencies.inviteGeneration()
-        )
-          continue;
+        const [hostValue, guestValue] = await this.readPair(metadata, matchId);
+        if (!current()) continue;
+        readingSource = false;
         const snapshot = this.apply(
           createMatchSyncSnapshot(metadata, matchId, hostValue, guestValue),
           metadata,
@@ -216,23 +218,23 @@ export class MatchSyncRoom {
         state.result = result;
         state.checkedAt = Date.now();
         state.inviteGeneration = inviteGeneration;
+        state.sourceEpoch = sourceEpoch;
         await this.scheduleMatch(
           matchId,
           state.checkedAt + MATCH_SYNC_REFRESH_MS,
         );
-        if (
-          generation !== state.generation ||
-          inviteGeneration !== this.dependencies.inviteGeneration()
-        )
-          continue;
+        if (!current()) continue;
         return result;
+      } catch (error) {
+        if (!current()) continue;
+        state.result = undefined;
+        if (readingSource && attempt < 2) continue;
+        this.close(matchId, 1011, "Match source unavailable");
+        throw error;
       }
-      throw new Error("match-sync-source-kept-changing");
-    } catch (error) {
-      state.result = undefined;
-      this.close(matchId, 1011, "Match source unavailable");
-      throw error;
     }
+    state.result = undefined;
+    throw new Error("match-sync-source-kept-changing");
   }
 
   read(
@@ -249,6 +251,7 @@ export class MatchSyncRoom {
       !force &&
       state.result &&
       state.inviteGeneration === this.dependencies.inviteGeneration() &&
+      state.sourceEpoch === this.dependencies.sourceEpoch() &&
       Date.now() - state.checkedAt < MATCH_SYNC_REFRESH_MS
     )
       return Promise.resolve(state.result);
@@ -260,6 +263,13 @@ export class MatchSyncRoom {
       })
       .catch(() => undefined);
     return pending;
+  }
+
+  invalidateSource(): void {
+    for (const state of this.states.values()) {
+      state.generation++;
+      state.result = undefined;
+    }
   }
 
   async notify(inviteId: string, matchIds?: string[]): Promise<void> {
@@ -458,11 +468,19 @@ export class MatchSyncRoom {
         try {
           await this.read(inviteId, matchId, true);
         } catch (error) {
+          const code =
+            error instanceof Error &&
+            /^(?:match|invite|event|profile)[a-zA-Z0-9:_-]{0,120}$/.test(
+              error.message,
+            )
+              ? error.message
+              : undefined;
           console.error({
             event: "match_sync_refresh_failed",
             inviteId,
             matchId,
             kind: error instanceof Error ? error.name : "unknown",
+            ...(code ? { code } : {}),
           });
         }
       }

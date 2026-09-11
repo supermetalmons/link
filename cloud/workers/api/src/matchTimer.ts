@@ -100,6 +100,13 @@ type MatchTimerClaimFence = {
 };
 
 export type MatchTimerDependencies = {
+  startCanonical?: (
+    request: StartMatchTimerRequest,
+  ) => Promise<StartMatchTimerResponse>;
+  claimCanonical?: (
+    request: ClaimMatchVictoryByTimerRequest,
+    inviteValue: unknown,
+  ) => Promise<ClaimMatchVictoryByTimerResponse>;
   assertMutationAllowed?: () => Promise<void>;
   enqueueEventProgress?: (plan: EventProgressPlan) => Promise<void>;
   now?: () => number;
@@ -459,6 +466,26 @@ export async function startMatchTimer(
     ? AbortSignal.any([dependencies.signal, timeoutSignal])
     : timeoutSignal;
   await authorizePlayer(identity, request.playerId, repository, signal);
+  if (dependencies.startCanonical) {
+    const inviteValue = await repository.getRtdbPath(
+      `invites/${request.inviteId}`,
+      undefined,
+      signal,
+    );
+    if (
+      !inviteMatchesPlayers(
+        inviteValue,
+        request.playerId,
+        request.opponentId,
+      ) ||
+      parseInviteMatchIndex(request.inviteId, request.matchId) === null
+    ) {
+      throw new AuthApiFailure(403, "permission-denied", "permission-denied");
+    }
+    signal.throwIfAborted();
+    await dependencies.assertMutationAllowed?.();
+    return dependencies.startCanonical(request);
+  }
   const [playerValue, opponentValue, inviteValue] = await readMatchRecords(
     request,
     repository,
@@ -612,6 +639,26 @@ export async function claimMatchVictoryByTimer(
     ? AbortSignal.any([dependencies.signal, timeoutSignal])
     : timeoutSignal;
   await authorizePlayer(identity, request.playerId, repository, signal);
+  if (dependencies.claimCanonical) {
+    const inviteValue = await repository.getRtdbPath(
+      `invites/${request.inviteId}`,
+      undefined,
+      signal,
+    );
+    if (
+      !inviteMatchesPlayers(
+        inviteValue,
+        request.playerId,
+        request.opponentId,
+      ) ||
+      parseInviteMatchIndex(request.inviteId, request.matchId) === null
+    ) {
+      throw new AuthApiFailure(403, "permission-denied", "permission-denied");
+    }
+    signal.throwIfAborted();
+    await dependencies.assertMutationAllowed?.();
+    return dependencies.claimCanonical(request, inviteValue);
+  }
   const [playerValue, opponentValue, inviteValue] = await readMatchRecords(
     request,
     repository,

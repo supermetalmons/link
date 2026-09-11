@@ -15,6 +15,7 @@ import {
   REACTION_SOCKET_PROTOCOL_V2,
 } from "@mons/shared/reactions";
 import type { InviteReactions } from "../src/inviteReactions.ts";
+import type { MatchSyncMetadata } from "../src/matchSync.ts";
 import { SOCKET_TEST_SESSION_ID } from "../test/socketTestSession.ts";
 
 type Channel = "reactions" | "presentation" | "metadata" | "wagers" | "matches";
@@ -36,14 +37,16 @@ async function fixture() {
   await runInDurableObject(room, (instance) => {
     const mutable = instance as unknown as {
       inviteReader: () => Promise<unknown>;
-      matchSync: { readMatch: (playerId: string) => Promise<unknown> };
+      matchSync: {
+        readPair: (metadata: MatchSyncMetadata) => Promise<[unknown, unknown]>;
+      };
     };
     mutable.inviteReader = async () => ({
       hostId: "host-login",
       guestId: "guest-login",
       hostColor: "white",
     });
-    mutable.matchSync.readMatch = async (playerId) => ({
+    const readMatch = (playerId: string) => ({
       version: 2,
       color: playerId === "host-login" ? "white" : "black",
       emojiId: 1,
@@ -54,6 +57,12 @@ async function fixture() {
       flatMovesString: "",
       timer: "",
     });
+    mutable.matchSync.readPair = async (metadata) => [
+      readMatch(metadata.snapshot.hostId),
+      metadata.snapshot.guestId === null
+        ? null
+        : readMatch(metadata.snapshot.guestId),
+    ];
   });
   await room.ensurePresentations(inviteId, {
     "host-login": { emojiId: 1, aura: "" },

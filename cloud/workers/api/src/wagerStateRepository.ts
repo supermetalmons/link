@@ -256,6 +256,7 @@ export function createWagerStateRtdbClient(
   };
 
   return {
+    ...base,
     async getPath(path, query, signal) {
       const parts = pathParts(path);
       const owned = ownedPath(parts);

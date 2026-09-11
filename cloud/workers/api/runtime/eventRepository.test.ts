@@ -1,7 +1,8 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
+import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 import {
   applyEventTestMigrations,
   transitionEventStorageMode,
@@ -82,7 +83,7 @@ async function withD1Admission<T>(
 
 describe("hybrid event repository", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyStrictMatchStateTestMigrations(
       testEnv.PROFILE_GAMES_DB,
       testEnv.TEST_D1_MIGRATIONS,
     );

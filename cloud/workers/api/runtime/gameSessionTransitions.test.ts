@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
+import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 import { createAutomatchD1Store } from "../src/automatchD1.ts";
 import {
   createGameSessionTransitions,
@@ -250,7 +251,7 @@ function interleavePreparations(
 
 describe("recoverable D1 game-session transitions", () => {
   beforeAll(async () => {
-    await applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS);
+    await applyStrictMatchStateTestMigrations(db, testEnv.TEST_D1_MIGRATIONS);
   });
 
   beforeEach(async () => {

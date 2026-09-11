@@ -1,3 +1,4 @@
+import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
 import {
   isToggleEventPrizeSelectionRequest,
   type ToggleEventPrizeSelectionRequest,
@@ -146,6 +147,30 @@ export async function readEventBody(
 }
 
 export async function handleEventRoute(
+  request: Request,
+  env: Env,
+  ctx: WorkerExecutionContext,
+  dependencies: EventRouteDependencies = {},
+): Promise<Response> {
+  const pathname = new URL(request.url).pathname;
+  if (request.method !== "POST" || !EVENT_PATHS.has(pathname))
+    return handleEventRequest(request, env, ctx, dependencies);
+  try {
+    await requireActiveDurableMatchState(env.PROFILE_GAMES_DB);
+    return await handleEventRequest(request, env, ctx, dependencies);
+  } catch {
+    let headers: Record<string, string> = { Vary: "Origin" };
+    try {
+      headers = getAuthCorsHeaders(request);
+    } catch {}
+    return authErrorResponse(
+      new AuthApiFailure(503, "unavailable", "match-state-writes-disabled"),
+      { ...headers, "Retry-After": "60" },
+    );
+  }
+}
+
+async function handleEventRequest(
   request: Request,
   env: Env,
   ctx: WorkerExecutionContext,

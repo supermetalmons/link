@@ -1752,7 +1752,7 @@ test("the shared projection core has no Firebase runtime dependencies", () => {
 
 test("RTDB rules retire event state and outboxes", () => {
   const rules = JSON.parse(fs.readFileSync(databaseRulesPath, "utf8"));
-  assert.equal(rules.rules.telegramProjectionOutbox.event, undefined);
+  assert.equal(rules.rules.telegramProjectionOutbox?.event, undefined);
   assert.equal(rules.rules.eventTelegramProjectionLocks, undefined);
   assert.equal(rules.rules.eventTelegramProjections, undefined);
   assert.equal(rules.rules.telegramMessages, undefined);

@@ -17,8 +17,14 @@ import {
   FirebaseRtdbFailure,
   FirebaseRtdbPermissionDenied,
   type FirebaseRtdbClient,
-} from "../src/firebaseRtdb.ts";
+} from "../test/legacyFirebaseRtdb.ts";
 import { GameSessionMutationLockFailure } from "../src/gameplayCoordinationD1.ts";
+import { submitMove } from "../src/matchMove.ts";
+import { surrenderMatch } from "../src/matchSurrender.ts";
+import {
+  startMatchTimer,
+  claimMatchVictoryByTimer,
+} from "../src/matchTimer.ts";
 import {
   cancelAutomatch as cancelAutomatchImpl,
   handleGameplayRoute as handleGameplayRouteImpl,
@@ -97,8 +103,66 @@ function handleGameplayRoute(
     (dependencies.repository
       ? coordinationFor(dependencies.repository)
       : createMemoryGameplayCoordinationStores());
+  const actor = () =>
+    dependencies.verifyIdentity
+      ? dependencies.verifyIdentity(request, env, ctx)
+      : Promise.resolve(identity);
+  const source = dependencies.repository;
+  const move =
+    source &&
+    dependencies.move?.createMatchClient &&
+    !dependencies.move.submitCanonical
+      ? {
+          ...dependencies.move,
+          submitCanonical: async (input: SubmitMoveRequest) =>
+            submitMove(await actor(), input, source, {
+              ...dependencies.move,
+              assertMutationAllowed: dependencies.assertMutationAllowed,
+            }),
+        }
+      : dependencies.move;
+  const surrender =
+    source &&
+    dependencies.surrender?.createMatchClient &&
+    !dependencies.surrender.surrenderCanonical
+      ? {
+          ...dependencies.surrender,
+          surrenderCanonical: async (
+            input: Parameters<typeof surrenderMatch>[1],
+          ) =>
+            surrenderMatch(await actor(), input, source, {
+              ...dependencies.surrender,
+              assertMutationAllowed: dependencies.assertMutationAllowed,
+            }),
+        }
+      : dependencies.surrender;
+  const timer =
+    source && dependencies.timer?.resolveGame
+      ? {
+          ...dependencies.timer,
+          startCanonical: async (
+            input: Parameters<typeof startMatchTimer>[1],
+          ) =>
+            startMatchTimer(await actor(), input, source, {
+              ...dependencies.timer,
+              timerStarts: coordination.timerStarts,
+              assertMutationAllowed: dependencies.assertMutationAllowed,
+            }),
+          claimCanonical: async (
+            input: Parameters<typeof claimMatchVictoryByTimer>[1],
+          ) =>
+            claimMatchVictoryByTimer(await actor(), input, source, {
+              ...dependencies.timer,
+              timerStarts: coordination.timerStarts,
+              assertMutationAllowed: dependencies.assertMutationAllowed,
+            }),
+        }
+      : dependencies.timer;
   return handleGameplayRouteImpl(request, env, ctx, {
     ...dependencies,
+    move,
+    surrender,
+    timer,
     coordination,
     wagerReservations:
       dependencies.wagerReservations ||
@@ -1725,6 +1789,7 @@ test("routes match timer starts with rate limiting and idempotent storage", asyn
   });
   assert.equal(rateLimitKey, `timer:${identity.uid}`);
   assert.deepEqual(paths, [
+    "invites/match-1",
     `players/${identity.uid}/matches/match-1`,
     "players/opponent-uid/matches/match-1",
     "invites/match-1",

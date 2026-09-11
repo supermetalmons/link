@@ -1,4 +1,7 @@
-import { cancelResponseBody, readBoundedJsonValue } from "./boundedStreams.ts";
+import {
+  cancelResponseBody,
+  readBoundedJsonValue,
+} from "../src/boundedStreams.ts";
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_TIMEOUT_MS = 5_000;

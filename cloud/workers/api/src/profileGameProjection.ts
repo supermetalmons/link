@@ -1,3 +1,4 @@
+import { readGameplayMatchPair } from "./gameplayMatchReads.ts";
 import {
   buildHistoricalMatchPair,
   buildTransitionHistoricalMatchPair,
@@ -71,14 +72,12 @@ async function archiveHistoricalDescriptor(
   let hostMatch: unknown;
   let guestMatch: unknown;
   try {
-    [hostMatch, guestMatch] = await Promise.all([
-      rtdb.getRtdbPath(
-        `players/${descriptor.hostPlayerId}/matches/${descriptor.matchId}`,
-      ),
-      rtdb.getRtdbPath(
-        `players/${descriptor.guestPlayerId}/matches/${descriptor.matchId}`,
-      ),
-    ]);
+    [hostMatch, guestMatch] = await readGameplayMatchPair(rtdb, {
+      inviteId,
+      matchId: descriptor.matchId,
+      playerId: descriptor.hostPlayerId,
+      opponentId: descriptor.guestPlayerId,
+    });
   } catch (error) {
     if (alreadyArchived) return;
     throw error;
@@ -146,7 +145,7 @@ type ProfileLinkProjectionResult = Pick<
 >;
 type ProfileGameProjectionRtdb = Pick<
   GameplayRepository,
-  "getRtdbPath" | "transactRtdbPath"
+  "getRtdbPath" | "transactRtdbPath" | "readMatchPair"
 >;
 
 type ProfileLinkProjectionJobs = Pick<

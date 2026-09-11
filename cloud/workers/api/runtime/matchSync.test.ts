@@ -17,6 +17,7 @@ import {
   REACTION_HEARTBEAT_RESPONSE,
 } from "@mons/shared/reactions";
 import type { InviteReactions } from "../src/inviteReactions.ts";
+import type { MatchSyncMetadata } from "../src/matchSync.ts";
 
 type Room = DurableObjectStub<InviteReactions>;
 type Source = {
@@ -24,6 +25,7 @@ type Source = {
   matches: Map<string, unknown>;
   reads: string[];
   metadataReads: number;
+  epoch: number;
   read?: (playerId: string, matchId: string) => Promise<unknown>;
 };
 
@@ -46,19 +48,31 @@ async function install(room: Room, source: Source) {
     const mutable = instance as unknown as {
       inviteReader: () => Promise<unknown>;
       matchSync: {
-        readMatch: (playerId: string, matchId: string) => Promise<unknown>;
+        readPair: (
+          metadata: MatchSyncMetadata,
+          matchId: string,
+        ) => Promise<[unknown, unknown]>;
+        dependencies: { sourceEpoch: () => number };
       };
     };
     mutable.inviteReader = async () => {
       source.metadataReads++;
       return structuredClone(source.invite);
     };
-    mutable.matchSync.readMatch = async (playerId, matchId) => {
+    mutable.matchSync.dependencies.sourceEpoch = () => source.epoch;
+    const readMatch = async (playerId: string, matchId: string) => {
       source.reads.push(`${playerId}/${matchId}`);
       return source.read
         ? source.read(playerId, matchId)
         : structuredClone(source.matches.get(`${playerId}/${matchId}`) ?? null);
     };
+    mutable.matchSync.readPair = async (metadata, matchId) =>
+      Promise.all([
+        readMatch(metadata.snapshot.hostId, matchId),
+        metadata.snapshot.guestId === null
+          ? null
+          : readMatch(metadata.snapshot.guestId, matchId),
+      ]);
   });
 }
 
@@ -87,6 +101,7 @@ async function fixture(paired = true) {
     ]),
     reads: [],
     metadataReads: 0,
+    epoch: 0,
   };
   rooms.push(room);
   await install(room, source);
@@ -376,6 +391,75 @@ describe("live match snapshots", () => {
     });
   });
 
+  for (const failure of ["metadata", "pair"] as const) {
+    it(`retries a transient ${failure} read without closing its active socket`, async () => {
+      const { room, inviteId, source } = await fixture();
+      const channel = await connect(room, inviteId);
+      await channel.snapshot();
+      source.matches.set(`host-login/${inviteId}`, {
+        ...match,
+        fen: "recovered",
+        flatMovesString: "a",
+      });
+      let attempts = 0;
+      await runInDurableObject(room, async (instance) => {
+        const mutable = instance as unknown as {
+          matchSync: {
+            dependencies: {
+              readMetadata: (inviteId: string) => Promise<unknown>;
+            };
+            readPair: (
+              metadata: MatchSyncMetadata,
+              matchId: string,
+            ) => Promise<[unknown, unknown]>;
+          };
+        };
+        if (failure === "metadata") {
+          const metadata = await instance.readMetadata(inviteId);
+          mutable.matchSync.dependencies.readMetadata = async () => {
+            if (++attempts === 1) throw new Error("temporary-invite-read");
+            return metadata;
+          };
+        } else {
+          mutable.matchSync.readPair = async () => {
+            if (++attempts === 1) throw new Error("temporary-pair-read");
+            return [
+              source.matches.get(`host-login/${inviteId}`),
+              source.matches.get(`guest-login/${inviteId}`),
+            ];
+          };
+        }
+        await instance.notifyMatchesChanged(inviteId, [inviteId]);
+        expect(await instance.readMatches(inviteId, inviteId)).toMatchObject({
+          status: "ok",
+          snapshot: { revision: 2, hostMatch: { fen: "recovered" } },
+        });
+      });
+      expect(attempts).toBe(2);
+      expect(await channel.snapshot()).toMatchObject({
+        revision: 2,
+        hostMatch: { fen: "recovered" },
+      });
+      expect(channel.socket.readyState).toBe(WebSocket.OPEN);
+    });
+  }
+
+  it("does not retry malformed match snapshots as a transient source failure", async () => {
+    const { room, inviteId, source } = await fixture();
+    const channel = await connect(room, inviteId);
+    await channel.snapshot();
+    source.matches.set(`host-login/${inviteId}`, { ...match, fen: null });
+    const before = source.reads.length;
+    const closed = new Promise<CloseEvent>((resolve) =>
+      channel.socket.addEventListener("close", resolve, { once: true }),
+    );
+    await room.notifyMatchesChanged(inviteId, [inviteId]);
+    await runNextAlarm(room);
+    expect((await closed).code).toBe(1011);
+    expect(source.reads.length - before).toBe(2);
+    expect(channel.messages).toHaveLength(0);
+  });
+
   it("preserves valid state on upstream failure and closes the socket for HTTP recovery", async () => {
     const { room, inviteId, source } = await fixture();
     const channel = await connect(room, inviteId);
@@ -411,6 +495,74 @@ describe("live match snapshots", () => {
     expect(await room.readMatches(inviteId, inviteId)).toMatchObject({
       status: "ok",
       snapshot: { revision: 1 },
+    });
+  });
+
+  for (const completion of ["success", "failure"] as const) {
+    it(`discards a legacy ${completion} after source activation without closing live sockets`, async () => {
+      const { room, inviteId, source } = await fixture();
+      const channel = await connect(room, inviteId);
+      expect(await channel.snapshot()).toMatchObject({ revision: 1 });
+      await runInDurableObject(room, async (instance) => {
+        let started!: () => void;
+        let release!: () => void;
+        const began = new Promise<void>((resolve) => {
+          started = resolve;
+        });
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let paused = false;
+        source.read = async (playerId, matchId) => {
+          const value = structuredClone(
+            source.matches.get(`${playerId}/${matchId}`) ?? null,
+          );
+          if (!paused && playerId === "host-login") {
+            paused = true;
+            started();
+            await gate;
+            if (completion === "failure") throw new Error("retired-source");
+          }
+          return value;
+        };
+        await instance.notifyMatchesChanged(inviteId, [inviteId]);
+        const pending = instance.readMatches(inviteId, inviteId);
+        await began;
+        source.matches.set(`host-login/${inviteId}`, {
+          ...match,
+          fen: "canonical",
+          flatMovesString: "canonical-move",
+        });
+        source.epoch++;
+        release();
+        expect(await pending).toMatchObject({
+          status: "ok",
+          snapshot: { revision: 2, hostMatch: { fen: "canonical" } },
+        });
+      });
+      expect(await channel.snapshot()).toMatchObject({
+        revision: 2,
+        hostMatch: { fen: "canonical" },
+      });
+      expect(channel.socket.readyState).toBe(WebSocket.OPEN);
+    });
+  }
+
+  it("invalidates a recent cached snapshot when the source epoch changes", async () => {
+    const { room, inviteId, source } = await fixture();
+    expect(await room.readMatches(inviteId, inviteId)).toMatchObject({
+      status: "ok",
+      snapshot: { revision: 1 },
+    });
+    source.matches.set(`host-login/${inviteId}`, {
+      ...match,
+      fen: "activated",
+      flatMovesString: "latest",
+    });
+    source.epoch++;
+    expect(await room.readMatches(inviteId, inviteId)).toMatchObject({
+      status: "ok",
+      snapshot: { revision: 2, hostMatch: { fen: "activated" } },
     });
   });
 

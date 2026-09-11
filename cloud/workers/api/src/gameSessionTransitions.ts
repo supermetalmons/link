@@ -1,4 +1,6 @@
 import { normalizeHistoricalMatchRecord } from "@mons/shared/game-sessions";
+import type { MatchStateRecord } from "./matchStateTypes.ts";
+import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
 import {
   createAutomatchD1Store,
   isAutomatchRevisionConflict,
@@ -75,7 +77,10 @@ type InviteOperation = { admission: InviteAdmission; control: InviteControl };
 
 export type GameSessionTransitionsOptions = {
   db: D1Database;
-  rtdb: Pick<FirebaseRtdbClient, "getPath" | "transactPath">;
+  rtdb: Pick<
+    FirebaseRtdbClient,
+    "getPath" | "transactPath" | "createMatchRecords"
+  >;
   store?: TransitionStore;
   inviteStore?: InviteTransitionStore;
   inviteAdmission?: InviteAdmission;
@@ -461,31 +466,46 @@ export function createGameSessionTransitions({
     await assertInviteOperation(operation);
     if (payload.inviteSourceEpoch !== operation.control.epoch)
       fail("invite-source-backend-conflict");
-    for (const creation of payload.creations) {
-      signal?.throwIfAborted();
-      await assertInviteOperation(operation);
-      await rtdb.transactPath(
-        creation.path,
-        (current) => {
-          if (current !== null && current !== undefined) {
-            if (
-              record(current) &&
-              current[GAME_SESSION_CREATION_FIELD] === creation.marker
-            )
-              return { commit: false, decision: "applied" };
-            return fail("match-creation-conflict");
-          }
-          return {
-            value: {
-              ...creation.value,
-              [GAME_SESSION_CREATION_FIELD]: creation.marker,
-            },
-            decision: "created",
-          };
+    if (rtdb.createMatchRecords && payload.creations.length) {
+      await rtdb.createMatchRecords(
+        {
+          inviteId: payload.inviteId,
+          transitionId: payload.transitionId,
+          records: payload.creations.map((creation) => ({
+            matchId: creation.path.split("/")[3],
+            playerId: creation.path.split("/")[1],
+            value: creation.value as MatchStateRecord,
+            marker: creation.marker,
+          })),
         },
         signal,
       );
-    }
+    } else
+      for (const creation of payload.creations) {
+        signal?.throwIfAborted();
+        await assertInviteOperation(operation);
+        await rtdb.transactPath(
+          creation.path,
+          (current) => {
+            if (current !== null && current !== undefined) {
+              if (
+                record(current) &&
+                current[GAME_SESSION_CREATION_FIELD] === creation.marker
+              )
+                return { commit: false, decision: "applied" };
+              return fail("match-creation-conflict");
+            }
+            return {
+              value: {
+                ...creation.value,
+                [GAME_SESSION_CREATION_FIELD]: creation.marker,
+              },
+              decision: "created",
+            };
+          },
+          signal,
+        );
+      }
     signal?.throwIfAborted();
     const presentations = prepareMatchPresentations
       ? await prepareMatchPresentations(
@@ -517,6 +537,16 @@ export function createGameSessionTransitions({
   }
 
   async function applyState(
+    row: TransitionRow,
+    operation: InviteOperation,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (row.status === "completed") return;
+    await requireActiveDurableMatchState(db);
+    await applyAdmittedState(row, operation, signal);
+  }
+
+  async function applyAdmittedState(
     row: TransitionRow,
     operation: InviteOperation,
     signal?: AbortSignal,

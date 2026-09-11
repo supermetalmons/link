@@ -1,4 +1,6 @@
 import { handleRequest } from "./router.ts";
+import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
+import { readMatchStateControl } from "./matchStateD1.ts";
 import { handleTelegramBridge } from "./telegramBridge.ts";
 import {
   AUTH_RECOVERY_QUEUE_NAME,
@@ -134,15 +136,24 @@ export async function handleScheduled(
         throw new Error("game-session-transition-recovery-failed");
       return result;
     },
-    matchTimerStarts: () =>
-      sweepMatchTimerStarts(
+    matchTimerStarts: async () => {
+      if (
+        (await readMatchStateControl(env.PROFILE_GAMES_DB)).state !== "active"
+      )
+        return;
+      await requireActiveDurableMatchState(env.PROFILE_GAMES_DB);
+      return sweepMatchTimerStarts(
         createMatchTimerStartStore(env.PROFILE_GAMES_DB),
         createGameplayRepository(env),
         {
-          assertMutationAllowed: () => assertProfileMutationAllowed(env),
+          assertMutationAllowed: async () => {
+            await assertProfileMutationAllowed(env);
+            await requireActiveDurableMatchState(env.PROFILE_GAMES_DB);
+          },
           now: () => controller.scheduledTime,
         },
-      ),
+      );
+    },
     profileGameProjection: () =>
       handleProfileGameProjectionSweep(controller, env),
     telegramProjection: () => handleTelegramProjectionSweep(controller, env),

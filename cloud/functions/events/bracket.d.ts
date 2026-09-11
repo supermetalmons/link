@@ -71,6 +71,12 @@ export type EventBracketRuntime = {
 };
 
 export function createEventBracketRuntime(dependencies: {
+  readMatchPair?: (input: {
+    inviteId: string;
+    matchId: string;
+    playerId: string;
+    opponentId: string;
+  }) => Promise<[unknown, unknown]>;
   admin: EventBracketAdmin;
   batchReadWithRetry?: (
     refs: unknown[],

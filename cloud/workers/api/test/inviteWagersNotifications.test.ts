@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import { createFirebaseRtdbClient } from "../test/legacyFirebaseRtdb.ts";
 import {
   changedInviteWagersIds,
   notifyInviteWagersChanged,

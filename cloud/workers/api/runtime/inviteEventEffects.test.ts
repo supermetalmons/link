@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
+import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   acquireEventWriteAdmission,
@@ -226,7 +227,7 @@ function appearanceRegistrations(
 
 describe("event transitions with canonical D1 invitation metadata", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyStrictMatchStateTestMigrations(
       testEnv.PROFILE_GAMES_DB,
       testEnv.TEST_D1_MIGRATIONS,
     );

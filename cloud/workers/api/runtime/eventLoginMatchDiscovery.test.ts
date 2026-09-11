@@ -1,6 +1,7 @@
 import { env } from "cloudflare:workers";
 import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
+import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   captureEventMatchDiscovery,
@@ -125,7 +126,7 @@ async function permitIndexWrites() {
 
 describe("event login-match discovery", () => {
   beforeAll(async () => {
-    await applyD1Migrations(
+    await applyStrictMatchStateTestMigrations(
       testEnv.PROFILE_GAMES_DB,
       testEnv.TEST_D1_MIGRATIONS,
     );

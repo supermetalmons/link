@@ -17,7 +17,11 @@ import {
   isSubmitMoveRequest,
   normalizeMatchSnapshot,
 } from "@mons/shared/game-sessions";
-import { parseStrictMatchTimer } from "@mons/shared/timers";
+import {
+  formatMatchTimer,
+  MATCH_TIMER_DURATION_MS,
+  parseStrictMatchTimer,
+} from "@mons/shared/timers";
 import { INVITE_METADATA_MAX_MESSAGE_BYTES } from "@mons/shared/invite-metadata";
 import {
   MATCH_SYNC_MAX_MESSAGE_BYTES,
@@ -135,6 +139,8 @@ function harness(
     reconnectMatchRevision?: (revision: number) => number;
     fastTimers?: boolean;
     directMovesAllowed?: boolean;
+    matchStorage?: "durable";
+    delayFinalRematchUpdateMs?: number | "forever";
     advanceMs?: number;
     renewalFrame?: (
       snapshot: Source | MatchSyncSnapshot,
@@ -159,6 +165,7 @@ function harness(
   const sessionExpiries = new Map<string, number>();
   const socketExpiries = new Map<FakeSocket, number>();
   let expiredSockets = 0;
+  let delayedMatchFrames = 0;
   const receipts = new Map<
     string,
     { path: string; body: unknown; payload: unknown }
@@ -212,14 +219,28 @@ function harness(
       )
         continue;
       const snapshot = syncSnapshot(socket.matchId);
-      queueMicrotask(() => {
+      const deliver = () => {
         if (!socket.terminated)
           socket.emit(
             "message",
             Buffer.from(JSON.stringify(matchFrame(snapshot))),
             false,
           );
-      });
+      };
+      if (
+        options.delayFinalRematchUpdateMs !== undefined &&
+        socket.matchId === `${INVITE}1` &&
+        snapshot.hostMatch?.status === "" &&
+        snapshot.guestMatch?.status === "" &&
+        [snapshot.hostMatch, snapshot.guestMatch].some(
+          (match) =>
+            match !== null && countMoveHistory(match.flatMovesString) === 5,
+        )
+      ) {
+        delayedMatchFrames++;
+        if (options.delayFinalRematchUpdateMs !== "forever")
+          setTimeout(deliver, options.delayFinalRematchUpdateMs);
+      } else queueMicrotask(deliver);
     }
   };
   const broadcast = () => {
@@ -301,6 +322,28 @@ function harness(
         false,
         "Cloudflare tokens never go to Firebase",
       );
+      if (options.matchStorage === "durable") {
+        assert.equal(headers.get("Authorization"), null);
+        assert.equal(headers.get("X-Firebase-ETag"), null);
+        assert.equal(headers.get("If-Match"), null);
+        const ownMatch = new RegExp(
+          `^/players/(?:${HOST}|${GUEST})/matches/${INVITE}1?\\.json$`,
+        ).test(url.pathname);
+        const claim = new RegExp(`^/matchTimerClaims/${INVITE}1?\\.json$`).test(
+          url.pathname,
+        );
+        const retired =
+          url.pathname === `/invites/${INVITE}.json` ||
+          url.pathname === `/players/${HOST}/profile.json`;
+        assert.ok(
+          ownMatch || claim || retired,
+          "Durable probes touch only newly created fixture paths",
+        );
+        assert.ok(
+          method === "GET" || (method === "PUT" && !retired && body === null),
+        );
+        return json({ error: "Permission denied" }, 403);
+      }
       if (
         url.pathname === `/invites/${INVITE}.json` ||
         url.pathname === `/players/${uid}/profile.json`
@@ -384,6 +427,28 @@ function harness(
       return json(match.value);
     }
     assert.equal(url.origin, API);
+    if (url.pathname === "/matches/snapshot") {
+      assert.equal(options.matchStorage, "durable");
+      assert.equal(method, "GET");
+      assert.equal(headers.get("Authorization"), null);
+      assert.equal(url.searchParams.size, 2);
+      const playerId = url.searchParams.get("playerId");
+      const matchId = url.searchParams.get("matchId");
+      assert.ok(playerId === HOST || playerId === GUEST);
+      assert.ok(matchId === INVITE || matchId === `${INVITE}1`);
+      return json(
+        {
+          ok: true,
+          playerId,
+          matchId,
+          match: normalizeMatchSnapshot(
+            matches.get(`${playerId}/${matchId}`)?.value ?? null,
+          ),
+        },
+        200,
+        { "Access-Control-Allow-Origin": "*" },
+      );
+    }
     const uid = owner(
       headers.get("Authorization")?.replace(/^Bearer /, "") || null,
     );
@@ -409,6 +474,34 @@ function harness(
       return json({ ok: true, snapshot: syncSnapshot(syncPath[1]) });
     }
     assert.equal(method, "POST");
+    if (url.pathname === "/matches/timer/start") {
+      assert.equal(options.matchStorage, "durable");
+      assert.ok(body && typeof body === "object" && "matchId" in body);
+      assert.deepEqual(body, {
+        inviteId: INVITE,
+        matchId: body.matchId,
+        playerId: uid,
+        opponentId: uid === HOST ? GUEST : HOST,
+      });
+      const match = matches.get(`${uid}/${body.matchId}`)!;
+      assert.ok(match);
+      const game = Game.fromFen(match.value.fen)!;
+      assert.notEqual(game.activeColor, match.value.color);
+      const current = parseStrictMatchTimer(match.value.timer);
+      if (current?.turnNumber !== game.turnNumber) {
+        match.value.timer = formatMatchTimer(
+          game.turnNumber,
+          now + MATCH_TIMER_DURATION_MS + 500,
+        );
+        match.revision++;
+        broadcastMatches(String(body.matchId));
+      }
+      return json({
+        ok: true,
+        timer: match.value.timer,
+        duration: MATCH_TIMER_DURATION_MS,
+      });
+    }
     if (url.pathname === "/matches/move") {
       assert.ok(isSubmitMoveRequest(body));
       assert.equal(body.playerId, uid);
@@ -756,20 +849,41 @@ function harness(
       now += milliseconds;
     },
     expiredSockets: () => expiredSockets,
+    delayedMatchFrames: () => delayedMatchFrames,
   };
 }
 
 test("requires an explicit approved target and supports a report and pre-rule API verification", () => {
-  assert.deepEqual(parseArgs(["--base-url", `${API}/`]), { baseUrl: API });
-  assert.deepEqual(parseArgs(["--move-rules-pending", "--base-url", API]), {
+  assert.deepEqual(parseArgs(["--base-url", `${API}/`]), {
     baseUrl: API,
-    moveRulesPending: true,
+    matchStorage: "durable",
   });
   assert.deepEqual(
-    parseArgs(["--surrender-rules-pending", "--base-url", API]),
+    parseArgs([
+      "--move-rules-pending",
+      "--base-url",
+      API,
+      "--match-storage",
+      "rtdb",
+    ]),
+    {
+      baseUrl: API,
+      moveRulesPending: true,
+      matchStorage: "rtdb",
+    },
+  );
+  assert.deepEqual(
+    parseArgs([
+      "--surrender-rules-pending",
+      "--base-url",
+      API,
+      "--match-storage",
+      "rtdb",
+    ]),
     {
       baseUrl: API,
       surrenderRulesPending: true,
+      matchStorage: "rtdb",
     },
   );
   assert.deepEqual(
@@ -782,6 +896,7 @@ test("requires an explicit approved target and supports a report and pre-rule AP
     {
       baseUrl: "https://abcd1234-mons-link-api.lil-org.workers.dev",
       output: "/tmp/report.json",
+      matchStorage: "durable",
     },
   );
   for (const args of [
@@ -803,13 +918,255 @@ test("requires an explicit approved target and supports a report and pre-rule AP
     ["--base-url", API, "--surrender-rules-pending", "true"],
     ["--base-url", API, "--move-rules-pending", "--move-rules-pending"],
     ["--base-url", API, "--move-rules-pending", "true"],
+    ["--base-url", API, "--move-rules-pending"],
+    ["--base-url", API, "--surrender-rules-pending"],
   ])
     assert.throws(() => parseArgs(args), /Usage:/);
 });
 
+test("accepts explicit durable match storage and rejects skipped retired-rule verification", () => {
+  assert.deepEqual(
+    parseArgs(["--base-url", API, "--match-storage", "durable"]),
+    {
+      baseUrl: API,
+      matchStorage: "durable",
+    },
+  );
+  assert.deepEqual(parseArgs(["--base-url", API, "--match-storage", "rtdb"]), {
+    baseUrl: API,
+    matchStorage: "rtdb",
+  });
+  for (const extra of [
+    ["--match-storage", "invalid"],
+    ["--match-storage", "durable", "--match-storage", "durable"],
+    ["--match-storage", "durable", "--move-rules-pending"],
+    ["--match-storage", "durable", "--surrender-rules-pending"],
+  ])
+    assert.throws(() => parseArgs(["--base-url", API, ...extra]), /Usage:/);
+});
+
+test("default smoke verifies durable Worker snapshots, original timer deadlines and retired fixture-only access", async () => {
+  const state = harness({ matchStorage: "durable" });
+  const report = await runSmoke({ baseUrl: API }, state.dependencies);
+  assert.equal(report.matchStorage, "durable");
+  assert.ok(
+    report.checks.includes(
+      "retired-firebase-match-and-claim-read-write-denials",
+    ),
+  );
+  assert.ok(
+    report.checks.includes(
+      "canonical-timer-start-and-original-deadline-replay",
+    ),
+  );
+  assert.ok(
+    report.checks.includes(
+      "canonical-rematch-timer-deadline-and-retired-source-denials",
+    ),
+  );
+  assert.ok(
+    report.checks.includes("cumulative-moves-takebacks-and-reordered-replay"),
+  );
+  assert.ok(
+    report.checks.includes(
+      "live-match-moves-takebacks-surrender-and-reconnect",
+    ),
+  );
+  assert.ok(report.checks.includes("terminal-replay-preserved-source"));
+  const snapshots = state.requests.filter(
+    (request) => request.url.pathname === "/matches/snapshot",
+  );
+  assert.ok(snapshots.length > 20);
+  assert.ok(
+    snapshots.every(
+      (request) =>
+        request.method === "GET" &&
+        request.headers.get("Authorization") === null,
+    ),
+  );
+  const firebase = state.requests.filter((request) =>
+    request.url.hostname.endsWith("firebaseio.com"),
+  );
+  assert.ok(firebase.length > 0);
+  assert.ok(
+    firebase.every(
+      (request) =>
+        request.method === "GET" ||
+        (request.method === "PUT" && request.body === null),
+    ),
+  );
+  assert.ok(
+    firebase.every(
+      (request) =>
+        !request.url.search &&
+        request.headers.get("Authorization") === null &&
+        request.headers.get("X-Firebase-ETag") === null &&
+        request.headers.get("If-Match") === null,
+    ),
+  );
+  assert.ok(firebase.every((request) => request.url.pathname !== "/.json"));
+  const starts = state.requests.filter(
+    (request) => request.url.pathname === "/matches/timer/start",
+  );
+  assert.equal(starts.length, 4);
+  assert.deepEqual(starts[0].body, starts[1].body);
+  assert.deepEqual(starts[2].body, starts[3].body);
+  assert.equal(
+    state.requests.filter(
+      (request) => request.url.pathname === "/matches/timer/claim",
+    ).length,
+    0,
+  );
+  assert.ok(
+    state.timeoutDurations.every(
+      (milliseconds) => milliseconds === 15_000 || milliseconds === 30_000,
+    ),
+  );
+  assert.ok(state.sockets.every((socket) => socket.terminated));
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+  assert.equal(state.timers.size, 0);
+  assert.equal(state.source()?.hostRematches, "1x");
+  for (const token of TOKENS.values())
+    assert.ok(!state.logs.join("\n").includes(token));
+});
+
+test("durable smoke rejects changed timer deadlines and still ends the series and revokes sessions", async () => {
+  let starts = 0;
+  const state = harness({
+    matchStorage: "durable",
+    intercept: async (request, respond) => {
+      const response = respond();
+      if (request.url.pathname === "/matches/timer/start" && ++starts === 2) {
+        const value: {
+          ok: true;
+          timer: string;
+          duration: number;
+        } = await response.json();
+        const timer = parseStrictMatchTimer(value.timer)!;
+        return json({
+          ...value,
+          timer: formatMatchTimer(timer.turnNumber, timer.targetTimestamp + 1),
+        });
+      }
+      return response;
+    },
+  });
+  await assert.rejects(
+    runSmoke({ baseUrl: API, matchStorage: "durable" }, state.dependencies),
+    /timer retry changed its original deadline/,
+  );
+  assert.equal(starts, 2);
+  assert.ok(state.source()?.hostRematches.endsWith("x"));
+  assert.ok(state.sockets.every((socket) => socket.terminated));
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+  assert.equal(state.timers.size, 0);
+});
+
+test("durable smoke retries transient canonical reads without switching to Firebase", async () => {
+  let failed = false;
+  const state = harness({
+    matchStorage: "durable",
+    intercept: (request, respond) => {
+      if (request.url.pathname === "/matches/snapshot" && !failed) {
+        failed = true;
+        return json({ ok: false, error: "unavailable" }, 503, {
+          "Access-Control-Allow-Origin": "*",
+        });
+      }
+      return respond();
+    },
+  });
+  await runSmoke({ baseUrl: API, matchStorage: "durable" }, state.dependencies);
+  assert.equal(failed, true);
+  const snapshots = state.requests.filter(
+    (request) => request.url.pathname === "/matches/snapshot",
+  );
+  assert.equal(snapshots[0].url.href, snapshots[1].url.href);
+  assert.ok(
+    state.requests.every(
+      (request) => request.headers.get("X-Firebase-ETag") === null,
+    ),
+  );
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+});
+
+test("durable smoke rejects malformed, private or mismatched canonical snapshots without leaking payloads", async (t) => {
+  for (const change of [
+    { playerId: "another-player" },
+    { matchId: "another-match" },
+    { match: null },
+    { extra: TOKENS.get(HOST) },
+  ])
+    await t.test(Object.keys(change)[0], async () => {
+      const state = harness({
+        matchStorage: "durable",
+        intercept: async (request, respond) => {
+          const response = respond();
+          if (request.url.pathname !== "/matches/snapshot") return response;
+          return json({ ...(await response.json()), ...change }, 200, {
+            "Access-Control-Allow-Origin": "*",
+          });
+        },
+      });
+      await assert.rejects(
+        runSmoke({ baseUrl: API, matchStorage: "durable" }, state.dependencies),
+        /canonical match snapshot was invalid/,
+      );
+      assert.ok(state.source()?.hostRematches.endsWith("x"));
+      assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+      assert.ok(!state.logs.join("\n").includes(TOKENS.get(HOST)!));
+    });
+});
+
+test("durable smoke requires confirmed Firebase read and write denial", async (t) => {
+  for (const method of ["GET", "PUT"])
+    await t.test(method, async () => {
+      const state = harness({
+        matchStorage: "durable",
+        intercept: (request, respond) => {
+          if (
+            request.url.hostname.endsWith("firebaseio.com") &&
+            request.url.pathname.includes("/matches/") &&
+            request.method === method
+          )
+            return json(
+              method === "GET" ? null : { error: "Could not parse auth token" },
+              method === "GET" ? 200 : 401,
+            );
+          return respond();
+        },
+      });
+      await assert.rejects(
+        runSmoke({ baseUrl: API, matchStorage: "durable" }, state.dependencies),
+        /retired Firebase match\/claim access was not denied/,
+      );
+      assert.ok(state.source()?.hostRematches.endsWith("x"));
+      assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+      assert.equal(state.timers.size, 0);
+    });
+});
+
+test("durable smoke keeps reconnect revision checks and cleanup enabled", async () => {
+  const state = harness({
+    matchStorage: "durable",
+    reconnectMatchRevision: () => 1,
+  });
+  await assert.rejects(
+    runSmoke({ baseUrl: API, matchStorage: "durable" }, state.dependencies),
+    /match socket received an invalid snapshot/,
+  );
+  assert.ok(state.source()?.hostRematches.endsWith("x"));
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+  assert.ok(state.sockets.every((socket) => socket.terminated));
+  assert.equal(state.timers.size, 0);
+});
+
 test("runs the isolated lifecycle, API move/surrender replay and retired Firebase access denials", async () => {
   const state = harness();
-  const report = await runSmoke({ baseUrl: API }, state.dependencies);
+  const report = await runSmoke(
+    { baseUrl: API, matchStorage: "rtdb" },
+    state.dependencies,
+  );
   assert.equal(report.inviteId, INVITE);
   assert.deepEqual(report.matchIds, [INVITE, `${INVITE}1`]);
   assert.equal(report.checks.length, 18);
@@ -864,7 +1221,12 @@ test("runs the isolated lifecycle, API move/surrender replay and retired Firebas
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.ok(state.sockets.every((socket) => socket.terminated));
   assert.equal(state.timers.size, 0);
-  assert.ok(state.timeoutDurations.every((duration) => duration === 15_000));
+  assert.ok(
+    state.timeoutDurations.every(
+      (duration) => duration === 15_000 || duration === 30_000,
+    ),
+  );
+  assert.ok(state.timeoutDurations.includes(30_000));
   assert.equal(
     state.requests.filter(
       (request) => request.url.pathname === `/invites/${INVITE}.json`,
@@ -896,7 +1258,7 @@ test("runs the isolated lifecycle, API move/surrender replay and retired Firebas
 test("pre-rule verification skips only direct status probes and still verifies API surrender and legal moves", async () => {
   const state = harness();
   const report = await runSmoke(
-    { baseUrl: API, surrenderRulesPending: true },
+    { baseUrl: API, matchStorage: "rtdb", surrenderRulesPending: true },
     state.dependencies,
   );
   assert.equal(report.checks.length, 17);
@@ -920,7 +1282,7 @@ test("pre-rule verification skips only direct status probes and still verifies A
 test("pre-move-cutover smoke verifies API moves and replay while old direct writes remain allowed", async () => {
   const state = harness({ directMovesAllowed: true });
   const report = await runSmoke(
-    { baseUrl: API, moveRulesPending: true },
+    { baseUrl: API, matchStorage: "rtdb", moveRulesPending: true },
     state.dependencies,
   );
   assert.ok(
@@ -940,7 +1302,7 @@ test("pre-move-cutover smoke verifies API moves and replay while old direct writ
 test("post-cutover smoke fails if Firebase still accepts a direct legal move", async () => {
   const state = harness({ directMovesAllowed: true });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /move rule did not deny/,
   );
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -958,7 +1320,7 @@ test("uncertain API move replays the identical request without applying it twice
       return result;
     },
   });
-  await runSmoke({ baseUrl: API }, state.dependencies);
+  await runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies);
   const moves = state.requests.filter(
     (request) => request.url.pathname === "/matches/move",
   );
@@ -988,7 +1350,7 @@ test("older cumulative move must acknowledge superseded and match the original p
       },
     });
     await assert.rejects(
-      runSmoke({ baseUrl: API }, state.dependencies),
+      runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
       /unexpected acknowledgement/,
     );
     assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1007,7 +1369,7 @@ test("move smoke rejects changes to unrelated stored fields", async () => {
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /API move changed other state/,
   );
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1029,7 +1391,7 @@ test("each direct status-write shape must return an actual permission denial", a
       },
     });
     await assert.rejects(
-      runSmoke({ baseUrl: API }, state.dependencies),
+      runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
       /surrender rule did not deny/,
     );
     assert.equal(probes, target);
@@ -1050,7 +1412,7 @@ test("replays an uncertain API surrender without issuing a direct Firebase fallb
       return result;
     },
   });
-  await runSmoke({ baseUrl: API }, state.dependencies);
+  await runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies);
   const surrenders = state.requests.filter(
     (request) => request.url.pathname === "/matches/surrender",
   );
@@ -1075,7 +1437,7 @@ test("rejects a surrender response for another participant and retains isolated 
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /unexpected receipt/,
   );
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1095,7 +1457,7 @@ test("rejects API surrender that changes another persisted match field", async (
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /API surrender changed other state/,
   );
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1113,7 +1475,7 @@ test("retries an uncertain mutation with the identical operation and never creat
       return result;
     },
   });
-  await runSmoke({ baseUrl: API }, state.dependencies);
+  await runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies);
   const joins = state.requests.filter(
     (request) => request.url.pathname === "/invites/join",
   );
@@ -1146,7 +1508,7 @@ test("rejects a changed replay receipt, settles the same isolated series, and de
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /replay changed its receipt/,
   );
   assert.equal(state.source()?.hostRematches, "x");
@@ -1170,7 +1532,7 @@ test("rejects readable retired paths and unrelated errors, then cleans up withou
           request.url.pathname === path ? json(payload, status) : response(),
       });
       await assert.rejects(
-        runSmoke({ baseUrl: API }, state.dependencies),
+        runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
         /retired Firebase invite\/profile read was not denied/,
       );
       assert.equal(state.source()?.hostRematches, "x");
@@ -1193,7 +1555,7 @@ test("rejects invalid socket metadata without exposing its payload and cleans up
     }),
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /invalid snapshot/,
   );
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1205,19 +1567,28 @@ test("rejects invalid socket metadata without exposing its payload and cleans up
 test("bounds each missing socket update without an overall release deadline", async () => {
   const state = harness({ suppressUpdates: true, fastTimers: true });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /metadata update timed out/,
   );
   assert.equal(state.source()?.hostRematches, "x");
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.equal(state.timers.size, 0);
-  assert.ok(state.timeoutDurations.every((duration) => duration === 15_000));
+  assert.ok(
+    state.timeoutDurations.every(
+      (duration) => duration === 15_000 || duration === 30_000,
+    ),
+  );
+  assert.ok(
+    state.connections.every(
+      (connection) => connection.options.handshakeTimeout === 15_000,
+    ),
+  );
 });
 
 test("requires live match delivery before an HTTP refresh can repair a missed notification", async () => {
   const state = harness({ suppressMatchUpdates: true, fastTimers: true });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /match update timed out/,
   );
   assert.equal(
@@ -1228,6 +1599,179 @@ test("requires live match delivery before an HTTP refresh can repair a missed no
   );
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.ok(state.sockets.every((socket) => socket.terminated));
+  assert.equal(state.timers.size, 0);
+});
+
+const flushSmoke = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+test("accepts the final rematch update after sixteen simulated seconds without relaxing state checks", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const state = harness({ delayFinalRematchUpdateMs: 16_000 });
+  let settled = false;
+  const pending = runSmoke(
+    { baseUrl: API, matchStorage: "rtdb" },
+    state.dependencies,
+  ).then(
+    (report) => {
+      settled = true;
+      return { report };
+    },
+    (error: unknown) => {
+      settled = true;
+      return { error };
+    },
+  );
+  for (
+    let attempt = 0;
+    attempt < 20 && state.delayedMatchFrames() === 0 && !settled;
+    attempt++
+  )
+    await flushSmoke();
+  assert.ok(state.delayedMatchFrames() > 0);
+  await flushSmoke();
+  t.mock.timers.tick(15_000);
+  state.advance(15_000);
+  await flushSmoke();
+  assert.equal(
+    settled,
+    false,
+    "The healthy retry window remains open after fifteen seconds",
+  );
+  t.mock.timers.tick(1_000);
+  state.advance(1_000);
+  const result = await pending;
+  assert.ok(
+    "report" in result,
+    "The exact final snapshot must complete the smoke",
+  );
+  assert.ok(
+    result.report.checks.includes(
+      "rematch-live-creation-moves-surrender-and-reconnect",
+    ),
+  );
+  assert.equal(state.source()?.hostRematches, "1x");
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+  assert.ok(state.sockets.every((socket) => socket.terminated));
+  assert.equal(state.timers.size, 0);
+});
+
+test("bounds a permanently withheld final update at thirty simulated seconds and reports only safe state summaries", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const state = harness({ delayFinalRematchUpdateMs: "forever" });
+  let settled = false;
+  const pending = runSmoke(
+    { baseUrl: API, matchStorage: "rtdb" },
+    state.dependencies,
+  ).then(
+    () => {
+      settled = true;
+      return null;
+    },
+    (error: unknown) => {
+      settled = true;
+      return error;
+    },
+  );
+  for (
+    let attempt = 0;
+    attempt < 20 && state.delayedMatchFrames() === 0 && !settled;
+    attempt++
+  )
+    await flushSmoke();
+  assert.ok(state.delayedMatchFrames() > 0);
+  await flushSmoke();
+  t.mock.timers.tick(29_999);
+  state.advance(29_999);
+  await flushSmoke();
+  assert.equal(settled, false);
+  t.mock.timers.tick(1);
+  state.advance(1);
+  const error = await pending;
+  assert.ok(error instanceof Error);
+  assert.match(error.message, /Lifecycle match update timed out\./);
+  assert.ok(error.message.includes(`matchId=${INVITE}1`));
+  assert.match(error.message, /currentRevision=\d+/);
+  assert.ok(error.message.includes("expectedGuestMoves=5"));
+  assert.ok(error.message.includes("currentGuestMoves=4"));
+  assert.ok(!error.message.includes(HOST));
+  assert.ok(!error.message.includes(GUEST));
+  for (const token of TOKENS.values())
+    assert.ok(!error.message.includes(token));
+  for (const entry of state.matches.values()) {
+    assert.ok(!error.message.includes(entry.value.fen));
+    if (entry.value.flatMovesString)
+      assert.ok(!error.message.includes(entry.value.flatMovesString));
+  }
+  assert.ok(state.source()?.hostRematches.endsWith("x"));
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+  assert.ok(state.sockets.every((socket) => socket.terminated));
+  assert.equal(state.timers.size, 0);
+});
+
+test("renews an authenticated match channel with twenty seconds remaining before a thirty-second wait", async () => {
+  let advanced = false;
+  const state = harness({
+    intercept: (request, respond) => {
+      const response = respond();
+      if (
+        !advanced &&
+        request.method === "GET" &&
+        request.url.pathname === `/players/${GUEST}/matches/${INVITE}1.json` &&
+        countMoveHistory(
+          state.matches.get(`${GUEST}/${INVITE}1`)?.value.flatMovesString || "",
+        ) === 5
+      ) {
+        advanced = true;
+        state.advance(280_000);
+      }
+      return response;
+    },
+  });
+  await runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies);
+  assert.equal(advanced, true);
+  assert.ok(
+    state.connections.filter(
+      (connection) =>
+        connection.url.endsWith(`/matches/${INVITE}1/socket`) &&
+        connection.options.headers?.Authorization,
+    ).length >= 5,
+  );
+  assert.ok(
+    state.requests.filter(
+      (request) => request.url.pathname === "/auth/session/refresh",
+    ).length >= 2,
+  );
+  assert.equal(state.expiredSockets(), 0);
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
+  assert.equal(state.timers.size, 0);
+});
+
+test("redacts arbitrary status payloads from match timeout diagnostics", async () => {
+  const state = harness({
+    fastTimers: true,
+    matchSocketFrame: (snapshot) => ({
+      schemaVersion: 1,
+      type: "snapshot",
+      snapshot:
+        countMoveHistory(snapshot.hostMatch?.flatMovesString || "") === 4
+          ? {
+              ...snapshot,
+              hostMatch: { ...snapshot.hostMatch, status: TOKENS.get(HOST) },
+            }
+          : snapshot,
+    }),
+  });
+  await assert.rejects(
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+    (error) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /currentHostStatus=other/);
+      assert.ok(!error.message.includes(TOKENS.get(HOST)!));
+      assert.ok(!error.message.includes(new Game().toFen()));
+      return true;
+    },
+  );
+  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.equal(state.timers.size, 0);
 });
 
@@ -1244,7 +1788,7 @@ test("socket close diagnostics expose only numeric codes and known server reason
       return socket;
     };
     await assert.rejects(
-      runSmoke({ baseUrl: API }, state.dependencies),
+      runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
       (error: unknown) =>
         error instanceof Error &&
         error.message.includes("1011") &&
@@ -1260,7 +1804,10 @@ test("socket close diagnostics expose only numeric codes and known server reason
 
 test("lifecycle observations renew expiring match and metadata sockets during long runs", async () => {
   const state = harness({ advanceMs: 9_000 });
-  const report = await runSmoke({ baseUrl: API }, state.dependencies);
+  const report = await runSmoke(
+    { baseUrl: API, matchStorage: "rtdb" },
+    state.dependencies,
+  );
   assert.ok(state.elapsed() > 300_000);
   assert.ok(state.expiredSockets() > 0);
   assert.ok(
@@ -1306,7 +1853,10 @@ test("pending participant socket admission refreshes a token aged during source 
       return response;
     },
   });
-  const report = await runSmoke({ baseUrl: API }, state.dependencies);
+  const report = await runSmoke(
+    { baseUrl: API, matchStorage: "rtdb" },
+    state.dependencies,
+  );
   assert.equal(advanced, true);
   assert.ok(report.checks.includes("pending-http-and-authenticated-socket"));
   assert.ok(report.checks.includes("pending-match-http-socket-and-heartbeat"));
@@ -1340,7 +1890,7 @@ test("token renewal preserves snapshot revision and target validation", async (t
         },
       });
       await assert.rejects(
-        runSmoke({ baseUrl: API }, state.dependencies),
+        runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
         /socket received an invalid snapshot/,
       );
       assert.ok(changed > 0);
@@ -1367,7 +1917,7 @@ test("rejects malformed and wrong-target match socket snapshots without exposing
         }),
       });
       await assert.rejects(
-        runSmoke({ baseUrl: API }, state.dependencies),
+        runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
         /match socket received an invalid snapshot/,
       );
       assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1386,7 +1936,7 @@ test("rejects changed match state at an unchanged revision", async () => {
     }),
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /match socket received an invalid snapshot/,
   );
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1401,7 +1951,7 @@ test("requires a match heartbeat and a fresh reconnect snapshot and cleans up on
     await t.test(Object.keys(options)[0], async () => {
       const state = harness(options);
       await assert.rejects(
-        runSmoke({ baseUrl: API }, state.dependencies),
+        runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
         /match (heartbeat timed out|socket failed)/,
       );
       assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1420,7 +1970,7 @@ test("rejects revision resets only on reconnect and cleans up every fixture", as
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /match socket received an invalid snapshot/,
   );
   assert.equal(revisions.length, 1);
@@ -1441,7 +1991,10 @@ test("accepts unchanged or advancing reconnect revisions without changing match 
           return revision + advance;
         },
       });
-      const report = await runSmoke({ baseUrl: API }, state.dependencies);
+      const report = await runSmoke(
+        { baseUrl: API, matchStorage: "rtdb" },
+        state.dependencies,
+      );
       assert.equal(reconnects, 2);
       assert.equal(report.checks.length, 18);
       assert.ok(state.source()?.hostRematches.endsWith("x"));
@@ -1468,7 +2021,7 @@ test("does not mistake token failure for timer-rule permission denial", async ()
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /timer rule did not return permission denial/,
   );
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1485,7 +2038,7 @@ test("treats a writable claim namespace as a failure even though its probe canno
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /claim fence was writable/,
   );
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1515,7 +2068,7 @@ test("cancels oversized responses, sanitizes failures, and deletes the known ses
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /invalid or oversized response/,
   );
   assert.equal(canceled, true);
@@ -1535,7 +2088,7 @@ test("bounds a nonresponsive request and preserves the same mutation IDs during 
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /request timed out/,
   );
   assert.equal(pendingRequests, 3);
@@ -1563,7 +2116,7 @@ test("deletes the first session when the second signup fails without retrying ac
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /Cloudflare session anonymous returned 503/,
   );
   assert.equal(signups, 2);
@@ -1589,7 +2142,7 @@ test("attempts both account deletions and reports cleanup failure without return
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /could not revoke every temporary anonymous session/,
   );
   assert.deepEqual(state.deleted, [HOST]);
@@ -1621,7 +2174,10 @@ test("retries transient session revocation failures with the same capability", a
           return response();
         },
       });
-      const report = await runSmoke({ baseUrl: API }, state.dependencies);
+      const report = await runSmoke(
+        { baseUrl: API, matchStorage: "rtdb" },
+        state.dependencies,
+      );
       assert.equal(attempts.get(failedCapability!), 2);
       assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
       assert.ok(report.checks.includes("temporary-anonymous-sessions-revoked"));
@@ -1648,7 +2204,7 @@ test("bounds persistent revocation failures and rejects non-204 acknowledgements
         },
       });
       await assert.rejects(
-        runSmoke({ baseUrl: API }, state.dependencies),
+        runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
         /could not revoke every temporary anonymous session/,
       );
       assert.equal(attempts, status === 503 ? 3 : 1);
@@ -1681,7 +2237,7 @@ test("restores the original timer before failing when the client timer rule is b
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API }, state.dependencies),
+    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
     /allowed a client to forge a timer/,
   );
   assert.equal(forged, true);
@@ -1709,7 +2265,7 @@ test("retries a transient API move failure with the identical move payload", asy
       return response();
     },
   });
-  await runSmoke({ baseUrl: API }, state.dependencies);
+  await runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies);
   assert.equal(conflicted, true);
   const moves = state.requests.filter(
     (request) => request.url.pathname === "/matches/move",
@@ -1732,7 +2288,7 @@ test("writes an exclusive report containing only fixture IDs and passed checks",
   try {
     const state = harness();
     const report = await runSmoke(
-      { baseUrl: API, output: path },
+      { baseUrl: API, matchStorage: "rtdb", output: path },
       state.dependencies,
     );
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), report);
@@ -1741,7 +2297,10 @@ test("writes an exclusive report containing only fixture IDs and passed checks",
       assert.ok(!readFileSync(path, "utf8").includes(token));
     writeFileSync(path, "existing-report");
     await assert.rejects(
-      runSmoke({ baseUrl: API, output: path }, harness().dependencies),
+      runSmoke(
+        { baseUrl: API, matchStorage: "rtdb", output: path },
+        harness().dependencies,
+      ),
       /could not create its report file/,
     );
     assert.equal(readFileSync(path, "utf8"), "existing-report");

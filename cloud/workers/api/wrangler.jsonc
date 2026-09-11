@@ -24,7 +24,6 @@
   "vars": {
     "APPLE_AUDIENCES": "link.mons",
     "AUTH_MUTATIONS_DISABLED": "false",
-    "FIREBASE_RTDB_URL": "https://mons-link-default-rtdb.firebaseio.com",
   },
   "d1_databases": [
     {
@@ -74,8 +73,7 @@
     "required": [
       "SESSION_JWT_KEYS",
       "MATCH_PRESENTATION_MIGRATION_SECRET",
-      "GAMEPLAY_SERVICE_ACCOUNT_EMAIL",
-      "GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY",
+      "MATCH_STATE_MIGRATION_SECRET",
       "HELIUS_RPC_API_KEY",
       "EVENT_PRIZE_ADMIN_PRIVATE_KEY",
       "TELEGRAM_BOT_TOKEN",

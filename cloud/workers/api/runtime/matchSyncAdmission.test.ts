@@ -10,6 +10,7 @@ import { MATCH_SYNC_SOCKET_PROTOCOL } from "@mons/shared/match-sync";
 import { INVITE_METADATA_SOCKET_PROTOCOL } from "@mons/shared/invite-metadata";
 import { INVITE_WAGERS_SOCKET_PROTOCOL } from "@mons/shared/invite-wagers";
 import type { InviteReactions } from "../src/inviteReactions.ts";
+import type { MatchSyncMetadata } from "../src/matchSync.ts";
 
 type Room = DurableObjectStub<InviteReactions>;
 type Source = {
@@ -27,11 +28,14 @@ async function install(room: Room, source: Source) {
     const mutable = instance as unknown as {
       inviteReader: () => Promise<unknown>;
       matchSync: {
-        readMatch: (playerId: string, matchId: string) => Promise<unknown>;
+        readPair: (
+          metadata: MatchSyncMetadata,
+          matchId: string,
+        ) => Promise<[unknown, unknown]>;
       };
     };
     mutable.inviteReader = async () => structuredClone(source.invite);
-    mutable.matchSync.readMatch = async (playerId) => {
+    const readMatch = (playerId: string) => {
       source.reads++;
       return {
         version: 2,
@@ -45,6 +49,12 @@ async function install(room: Room, source: Source) {
         timer: "",
       };
     };
+    mutable.matchSync.readPair = async (metadata) => [
+      readMatch(metadata.snapshot.hostId),
+      metadata.snapshot.guestId === null
+        ? null
+        : readMatch(metadata.snapshot.guestId),
+    ];
   });
 }
 

@@ -680,12 +680,21 @@ const createEventBracketRuntime = (dependencies = {}) => {
       return null;
     }
 
-    const [hostSnapshot, guestSnapshot] = await batchReadWithRetry([
-      admin.database().ref(`players/${hostLoginUid}/matches/${inviteId}`),
-      admin.database().ref(`players/${guestLoginUid}/matches/${inviteId}`),
-    ]);
-    const hostMatch = hostSnapshot.val();
-    const guestMatch = guestSnapshot.val();
+    const [hostMatch, guestMatch] = dependencies.readMatchPair
+      ? await dependencies.readMatchPair({
+          inviteId,
+          matchId: inviteId,
+          playerId: hostLoginUid,
+          opponentId: guestLoginUid,
+        })
+      : (
+          await batchReadWithRetry([
+            admin.database().ref(`players/${hostLoginUid}/matches/${inviteId}`),
+            admin
+              .database()
+              .ref(`players/${guestLoginUid}/matches/${inviteId}`),
+          ])
+        ).map((snapshot) => snapshot.val());
     const outcome = await resolveMatchWinner(hostMatch, guestMatch);
     if (outcome.winner === "player") {
       return {

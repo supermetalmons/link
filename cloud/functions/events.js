@@ -73,6 +73,7 @@ const createEventRuntime = (dependencies) => {
   } = createEventBracketRuntime({
     admin,
     readEventPrizeWithdrawals,
+    readMatchPair: dependencies.readMatchPair,
   });
   const HttpsError = EventRuntimeError;
   const EVENT_SYNC_THROTTLE_WINDOW_MS = 500;

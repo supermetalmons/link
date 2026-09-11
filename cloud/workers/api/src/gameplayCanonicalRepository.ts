@@ -680,6 +680,7 @@ export function createCanonicalGameplayRepository(
     getRtdbPath: rtdb.getPath,
     patchRtdbRoot: rtdb.patchRoot,
     transactRtdbPath: rtdb.transactPath,
+    readMatchPair: rtdb.readMatchPair,
 
     async getNavigationGame(profileId, inviteId) {
       return getD1NavigationGame(profileGamesDb, profileId, inviteId);
@@ -820,6 +821,7 @@ export function createCanonicalRatingRepository(
   };
   return {
     getRtdbPath: gameplay.getRtdbPath,
+    readMatchPair: gameplay.readMatchPair,
     patchRtdbRoot: gameplay.patchRtdbRoot,
     readProfileOwnershipSnapshot: gameplay.readProfileOwnershipSnapshot,
 

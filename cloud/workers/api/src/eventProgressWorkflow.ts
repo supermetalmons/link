@@ -1,3 +1,4 @@
+import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
 import {
   WorkflowEntrypoint,
   type WorkflowEvent,
@@ -44,6 +45,7 @@ export function createEventProgressWorkflowDependencies(
         signal,
         getEventRepository(),
       );
+      await requireActiveDurableMatchState(env.PROFILE_GAMES_DB);
       return runtime.runEventSyncState({
         eventId: params.eventId,
         requesterUid: EVENT_PROGRESS_WORKER_UID,

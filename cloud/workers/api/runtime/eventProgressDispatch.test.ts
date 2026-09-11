@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
-import { type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
+import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   buildEventProgressPlan,
@@ -12,7 +13,10 @@ import { readEventOwnedPath } from "../src/eventD1.ts";
 import { createEventRtdbClient } from "../src/eventRepository.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
 
-const testEnv = env as Env & { TEST_EVENT_D1_MIGRATIONS: D1Migration[] };
+const testEnv = env as Env & {
+  TEST_EVENT_D1_MIGRATIONS: D1Migration[];
+  TEST_D1_MIGRATIONS: D1Migration[];
+};
 const eventId = "dispatch-admission-event";
 
 async function freezeEventGate(): Promise<boolean> {
@@ -113,6 +117,10 @@ async function seedOutbox(): Promise<{
 
 describe("event-progress Workflow dispatch admissions", () => {
   beforeAll(async () => {
+    await applyStrictMatchStateTestMigrations(
+      testEnv.PROFILE_GAMES_DB,
+      testEnv.TEST_D1_MIGRATIONS,
+    );
     await applyEventTestMigrations(
       testEnv.EVENT_DB,
       testEnv.TEST_EVENT_D1_MIGRATIONS,

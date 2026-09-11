@@ -7,17 +7,17 @@ import {
 import { notifyMatchSyncInvites } from "./matchSyncNotifications.ts";
 import { prepareCreatedMatchPresentations } from "./matchPresentationRegistry.ts";
 import { createWagerStateRtdbClient } from "./wagerStateRepository.ts";
+import { createMatchStateSource } from "./matchStateSource.ts";
 import type { HistoricalMatchPair } from "@mons/shared/game-sessions";
 import type {
   MiningMaterialName,
   MiningMaterials,
   MiningSnapshot,
 } from "@mons/shared/mining";
-import {
-  createFirebaseRtdbClient,
-  type FirebaseRtdbClient,
-  type FirebaseRtdbQuery,
-  type FirebaseRtdbTransactionResult,
+import type {
+  FirebaseRtdbClient,
+  FirebaseRtdbQuery,
+  FirebaseRtdbTransactionResult,
 } from "./firebaseRtdb.ts";
 import {
   createCanonicalGameplayRepository,
@@ -159,7 +159,10 @@ export type RatingFinalizeResult =
 
 export type RatingRepository = Pick<
   GameplayRepository,
-  "getRtdbPath" | "patchRtdbRoot" | "readProfileOwnershipSnapshot"
+  | "getRtdbPath"
+  | "patchRtdbRoot"
+  | "readProfileOwnershipSnapshot"
+  | "readMatchPair"
 > & {
   applyFebruaryChallengeReplay: (
     playerProfileId: string,
@@ -237,6 +240,7 @@ export type RatingProfileGameProjectionRepository = RatingRepository & {
 };
 
 export type GameplayRepository = ProfileOwnershipReader & {
+  readMatchPair?: FirebaseRtdbClient["readMatchPair"];
   automatchPersistence?: AutomatchPersistence;
   wagerFrozen?: WagerFrozenStore;
   applyWagerTransferOnce: (
@@ -293,21 +297,12 @@ export function createGameplayRepository(
   {
     d1 = env.PROFILE_GAMES_DB,
     wagerFrozen,
-    fetcher = fetch,
     now = Date.now,
-    timeoutMs,
-    rtdbClient = createFirebaseRtdbClient(env, {
-      credentials: {
-        email: env.GAMEPLAY_SERVICE_ACCOUNT_EMAIL,
-        privateKeyPem: env.GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY,
-      },
-      fetcher,
-      now,
-      timeoutMs,
-    }),
+    rtdbClient,
   }: GameplayRepositoryDependencies = {},
 ): GameplayRepository {
-  const automatchPersistence = createAutomatchPersistence(d1, rtdbClient, {
+  const matchSource = rtdbClient || createMatchStateSource(env);
+  const automatchPersistence = createAutomatchPersistence(d1, matchSource, {
     now,
     prepareMatchPresentations: (creations) =>
       prepareCreatedMatchPresentations(env, creations),
@@ -333,6 +328,7 @@ export function createGameplayRepository(
     }),
     wagerFrozen,
     automatchPersistence,
+    readMatchPair: matchSource.readMatchPair,
   };
 }
 

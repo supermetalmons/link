@@ -27,7 +27,10 @@ type SurrenderRepository = Pick<
 >;
 
 export type SurrenderMatchDependencies = {
-  createMatchClient: (
+  surrenderCanonical?: (
+    request: SurrenderMatchRequest,
+  ) => Promise<SurrenderMatchResponse>;
+  createMatchClient?: (
     scope: Pick<SurrenderMatchRequest, "playerId" | "matchId">,
   ) => Pick<FirebaseRtdbClient, "transactPath">;
   assertMutationAllowed?: () => Promise<void>;
@@ -105,6 +108,16 @@ export async function surrenderMatch(
   }
   signal.throwIfAborted();
   await dependencies.assertMutationAllowed?.();
+  if (dependencies.surrenderCanonical) {
+    return dependencies.surrenderCanonical(request);
+  }
+  if (!dependencies.createMatchClient) {
+    throw new AuthApiFailure(
+      503,
+      "unavailable",
+      "match-state-canonical-operation-required",
+    );
+  }
   const client = dependencies.createMatchClient({
     playerId: request.playerId,
     matchId: request.matchId,

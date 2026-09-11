@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
-import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import type { D1Migration } from "cloudflare:test";
+import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixture.ts";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createAutomatchPersistence } from "../src/automatchPersistence.ts";
 import { createGameSessionMutationLockStore } from "../src/gameplayCoordinationD1.ts";
@@ -68,7 +69,9 @@ function persistence(client: FirebaseRtdbClient, database = db) {
 }
 
 describe("automatch persistence integration", () => {
-  beforeAll(() => applyD1Migrations(db, testEnv.TEST_D1_MIGRATIONS));
+  beforeAll(() =>
+    applyStrictMatchStateTestMigrations(db, testEnv.TEST_D1_MIGRATIONS),
+  );
   beforeEach(async () => {
     await resetMatchPresentationTestState(
       db,
