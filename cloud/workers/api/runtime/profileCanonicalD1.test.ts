@@ -12,6 +12,7 @@ import {
   commitCanonicalPlan,
   countCanonicalCommitStatements,
   materializeCanonicalProfile,
+  readCanonicalAuthRecoveryJob,
   readCanonicalLeaderboard,
   readCanonicalMergeTarget,
   readCanonicalProfile,
@@ -24,6 +25,7 @@ import {
   readCanonicalWagerSettlement,
   resolveCanonicalProfile,
   resolveCanonicalPublicProfile,
+  type CanonicalAuthRecoveryValue,
   type CanonicalExpectation,
   type CanonicalMutation,
   type CanonicalProfileValue,
@@ -160,6 +162,40 @@ function observeAggregateDatabase(
   return { database, batches };
 }
 
+function observeRecoveryDatabase(failure?: Error) {
+  const reads: Array<{ query: string; values: unknown[] }> = [];
+  const wrap = (
+    statement: D1PreparedStatement,
+    query: string,
+    values: unknown[] = [],
+  ): D1PreparedStatement =>
+    new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind") {
+          return (...bound: unknown[]) =>
+            wrap(target.bind(...bound), query, bound);
+        }
+        if (property === "first") {
+          return async () => {
+            reads.push({ query: query.replace(/\s+/g, " ").trim(), values });
+            if (failure) throw failure;
+            return target.first();
+          };
+        }
+        throw new Error("unexpected-recovery-statement-operation");
+      },
+    });
+  const database = new Proxy(testEnv.PROFILE_DB, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (query: string) => wrap(target.prepare(query), query);
+      }
+      throw new Error("unexpected-recovery-database-operation");
+    },
+  });
+  return { database, reads };
+}
+
 async function resetCanonicalRows(db: D1Database): Promise<void> {
   await db.batch([
     db.prepare("DELETE FROM rating_updates"),
@@ -211,6 +247,93 @@ describe("canonical profile D1 store", () => {
 
   beforeEach(async () => {
     await resetCanonicalRows(testEnv.PROFILE_DB);
+  });
+
+  describe("auth recovery reader", () => {
+    async function seedRecovery(): Promise<CanonicalAuthRecoveryValue> {
+      const value = profileValue("canonical-recovery-reader");
+      const recovery: CanonicalAuthRecoveryValue = {
+        profileId: value.profile.id,
+        loginUids: ["login-recovery-one", "login-recovery-two"],
+        sourceProfileIds: ["source-recovery-one", "source-recovery-two"],
+        sourcePhase: "prizes",
+        prizeCursor: "event-recovery-cursor",
+        phaseStartedAtMs: 2_000,
+        lastEnqueuedAtMs: 3_000,
+        createdAtMs: 1_000,
+        updatedAtMs: 4_000,
+      };
+      await commitCanonicalPlan(testEnv.PROFILE_DB, {
+        expectations: [
+          { kind: "profile-absent", profileId: value.profile.id },
+          { kind: "auth-recovery-absent", profileId: value.profile.id },
+        ],
+        mutations: [
+          { kind: "insert-active-profile", value },
+          { kind: "insert-auth-recovery", value: recovery },
+        ],
+      });
+      return recovery;
+    }
+
+    it("reads every recovery field with one query to the recovery table", async () => {
+      const recovery = await seedRecovery();
+      const observed = observeRecoveryDatabase();
+
+      await expect(
+        readCanonicalAuthRecoveryJob(observed.database, recovery.profileId),
+      ).resolves.toEqual({ ...recovery, revision: 1 });
+      expect(observed.reads).toEqual([
+        {
+          query:
+            "SELECT * FROM profile_auth_recovery_jobs WHERE profile_id = ?",
+          values: [recovery.profileId],
+        },
+      ]);
+    });
+
+    it("returns null for missing recovery and binds the profile ID unchanged", async () => {
+      await seedRecovery();
+      const profileId = " canonical-recovery-reader' OR 1 = 1 -- ";
+      const observed = observeRecoveryDatabase();
+
+      await expect(
+        readCanonicalAuthRecoveryJob(observed.database, profileId),
+      ).resolves.toBeNull();
+      expect(observed.reads).toEqual([
+        {
+          query:
+            "SELECT * FROM profile_auth_recovery_jobs WHERE profile_id = ?",
+          values: [profileId],
+        },
+      ]);
+    });
+
+    it.each(["login_uids_json", "source_profile_ids_json"] as const)(
+      "rejects malformed recovery contents in %s",
+      async (column) => {
+        const recovery = await seedRecovery();
+        await testEnv.PROFILE_DB.prepare(
+          `UPDATE profile_auth_recovery_jobs SET ${column} = ? WHERE profile_id = ?`,
+        )
+          .bind('["valid", false]', recovery.profileId)
+          .run();
+
+        await expect(
+          readCanonicalAuthRecoveryJob(testEnv.PROFILE_DB, recovery.profileId),
+        ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+      },
+    );
+
+    it("preserves D1 read failures", async () => {
+      const failure = new Error("D1 unavailable");
+      const observed = observeRecoveryDatabase(failure);
+
+      await expect(
+        readCanonicalAuthRecoveryJob(observed.database, "recovery-profile"),
+      ).rejects.toBe(failure);
+      expect(observed.reads).toHaveLength(1);
+    });
   });
 
   it("commits a revisioned profile aggregate atomically", async () => {

@@ -1313,6 +1313,17 @@ export async function readCanonicalProfileAggregate(
   return parseCanonicalProfileAggregateResults(results);
 }
 
+export async function readCanonicalAuthRecoveryJob(
+  db: D1Database,
+  profileId: string,
+): Promise<CanonicalAuthRecoverySnapshot | null> {
+  const row = await db
+    .prepare("SELECT * FROM profile_auth_recovery_jobs WHERE profile_id = ?")
+    .bind(profileId)
+    .first();
+  return row === null ? null : parseCanonicalAuthRecoveryRow(row);
+}
+
 function assertCanonicalAggregateTopology(
   profileId: string,
   aggregate: CanonicalProfileAggregateSnapshot,

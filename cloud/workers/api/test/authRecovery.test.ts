@@ -201,6 +201,9 @@ test("event prize recovery leaves copying pending while the event lease is busy"
     bind() {
       return statement;
     },
+    async first() {
+      return recoveryRow;
+    },
   };
   const profileDb = {
     prepare: () => statement,
@@ -284,6 +287,9 @@ function recoveryProfileDb(
   const statement = {
     bind() {
       return statement;
+    },
+    async first() {
+      return recoveryRow;
     },
   };
   let mutationBatches = 0;

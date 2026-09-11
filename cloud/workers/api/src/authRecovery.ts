@@ -30,6 +30,7 @@ import {
   CanonicalProfileConflict,
   commitCanonicalPlan,
   parseCanonicalAuthRecoveryRow,
+  readCanonicalAuthRecoveryJob,
   readCanonicalMergeTarget,
   readCanonicalProfileAggregate,
   type CanonicalAuthRecoverySnapshot,
@@ -292,9 +293,9 @@ async function mutateCanonicalRecoveryJob(
   profileId: string,
   update: (job: CanonicalRecoveryJob) => AuthRecoveryJob | null | undefined,
 ): Promise<boolean> {
-  const aggregate = await readCanonicalProfileAggregate(db, profileId);
-  if (!aggregate.recovery) return true;
-  const job = canonicalRecoveryJob(aggregate.recovery);
+  const recovery = await readCanonicalAuthRecoveryJob(db, profileId);
+  if (!recovery) return true;
+  const job = canonicalRecoveryJob(recovery);
   const next = update(job);
   if (next === undefined) return false;
   await commitCanonicalPlan(db, {
@@ -740,13 +741,13 @@ function createCanonicalAuthRecoveryService(
   };
 
   const recoverProfile = async (profileId: string): Promise<boolean> => {
-    const aggregate = await readCanonicalProfileAggregate(db, profileId);
-    if (!aggregate.recovery) return true;
-    let job = canonicalRecoveryJob(aggregate.recovery);
+    const recovery = await readCanonicalAuthRecoveryJob(db, profileId);
+    if (!recovery) return true;
+    let job = canonicalRecoveryJob(recovery);
     await recoverLogins(job);
-    const refreshed = await readCanonicalProfileAggregate(db, profileId);
-    if (!refreshed.recovery) return true;
-    job = canonicalRecoveryJob(refreshed.recovery);
+    const refreshed = await readCanonicalAuthRecoveryJob(db, profileId);
+    if (!refreshed) return true;
+    job = canonicalRecoveryJob(refreshed);
     if (job.loginUids.some(isCanonicalLoginUid)) return false;
     if (job.sourceProfileIds.length === 0) {
       if (job.loginUids.length !== 0) {
@@ -784,7 +785,7 @@ function createCanonicalAuthRecoveryService(
         );
       }
     }
-    return !(await readCanonicalProfileAggregate(db, profileId)).recovery;
+    return !(await readCanonicalAuthRecoveryJob(db, profileId));
   };
 
   return { recoverProfile };

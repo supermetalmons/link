@@ -11,10 +11,16 @@ import {
   vi,
 } from "vitest";
 import { createAuthIdentityService } from "../src/authIdentity.ts";
-import { createAuthRecoveryService } from "../src/authRecovery.ts";
+import {
+  createAuthRecoveryService,
+  MERGE_GAME_FINALIZE_DELAY_MS,
+  removeCanonicalAuthRecoveryLoginUid,
+} from "../src/authRecovery.ts";
 import { createD1AuthRecoveryPrizeStore } from "../src/eventRepository.ts";
 import { createD1EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
 import { readEventRuntimeControl } from "../src/eventD1.ts";
+import { CanonicalProfileConflict } from "../src/profileCanonicalD1.ts";
+import { createProfileLinkCatchupStore } from "../src/profileLinkCatchupD1.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import {
   applyEventTestMigrations,
@@ -121,6 +127,7 @@ async function fixture(prizeId = "retired-prize") {
     ).bind(sourceProfileId, eventId, JSON.stringify(assignment)),
   ]);
   return {
+    loginUid: uid,
     targetProfileId: target.profileId,
     assignment,
     targetPath: `profileEventPrizes/${target.profileId}/${eventId}`,
@@ -188,6 +195,97 @@ describe("canonical auth recovery with D1 prize storage", () => {
     expect(outboundFetch).not.toHaveBeenCalled();
     expect(credentialReads).toEqual([]);
   });
+
+  it("reports completion when the recovery job is deleted during login processing", async () => {
+    const f = await fixture();
+    await testEnv.PROFILE_DB.prepare(
+      "UPDATE profile_auth_recovery_jobs SET login_uids_json = ? WHERE profile_id = ?",
+    )
+      .bind(JSON.stringify([f.loginUid]), f.targetProfileId)
+      .run();
+    const catchupStore = createProfileLinkCatchupStore(testEnv.PROFILE_DB);
+    const readForOwner = vi.fn(async (loginUid: string, profileId: string) => {
+      await testEnv.PROFILE_DB.prepare(
+        "DELETE FROM profile_auth_recovery_jobs WHERE profile_id = ?",
+      )
+        .bind(profileId)
+        .run();
+      return catchupStore.readForOwner(loginUid, profileId);
+    });
+    const service = createAuthRecoveryService(d1Env, {
+      logger,
+      catchupStore: { ...catchupStore, readForOwner },
+    });
+
+    await expect(service.recoverProfile(f.targetProfileId)).resolves.toBe(true);
+    expect(readForOwner).toHaveBeenCalledExactlyOnceWith(
+      f.loginUid,
+      f.targetProfileId,
+    );
+    expect(await f.readJob()).toBeNull();
+  });
+
+  it.each(["remove-login", "delete-job"])(
+    "preserves newer recovery work when a stale read attempts to %s",
+    async (operation) => {
+      const f = await fixture();
+      await testEnv.PROFILE_DB.prepare(
+        `UPDATE profile_auth_recovery_jobs
+         SET login_uids_json = ?, source_profile_ids_json = '[]', source_phase = 'finalize'
+         WHERE profile_id = ?`,
+      )
+        .bind(
+          JSON.stringify(operation === "remove-login" ? [f.loginUid] : []),
+          f.targetProfileId,
+        )
+        .run();
+      const nowMs = Date.now() + MERGE_GAME_FINALIZE_DELAY_MS + 1;
+      let successor: Awaited<ReturnType<typeof f.readJob>> = null;
+      const profileDb = new Proxy(testEnv.PROFILE_DB, {
+        get(target, property) {
+          if (property === "batch") {
+            return async (statements: D1PreparedStatement[]) => {
+              await target
+                .prepare(
+                  `UPDATE profile_auth_recovery_jobs
+                   SET login_uids_json = ?, source_profile_ids_json = ?, source_phase = 'prizes',
+                     updated_at_ms = ?, revision = revision + 1
+                   WHERE profile_id = ?`,
+                )
+                .bind(
+                  JSON.stringify([f.loginUid, "successor-login"]),
+                  JSON.stringify([sourceProfileId]),
+                  nowMs,
+                  f.targetProfileId,
+                )
+                .run();
+              successor = await f.readJob();
+              return target.batch(statements);
+            };
+          }
+          const member = Reflect.get(target, property, target);
+          return typeof member === "function" ? member.bind(target) : member;
+        },
+      });
+      const mutation =
+        operation === "remove-login"
+          ? removeCanonicalAuthRecoveryLoginUid(
+              profileDb,
+              f.targetProfileId,
+              f.loginUid,
+              () => nowMs,
+            )
+          : createAuthRecoveryService(d1Env, {
+              logger,
+              profileDb,
+              now: () => nowMs,
+            }).recoverProfile(f.targetProfileId);
+
+      await expect(mutation).rejects.toBeInstanceOf(CanonicalProfileConflict);
+      expect(successor).not.toBeNull();
+      expect(await f.readJob()).toEqual(successor);
+    },
+  );
 
   it("copies retired assignments and replays through the default D1 construction", async () => {
     const f = await fixture();
