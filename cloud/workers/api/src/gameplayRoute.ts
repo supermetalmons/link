@@ -961,7 +961,7 @@ async function handleGameplayRequest(
           scheduleRetry:
             dependencies.wagerOutcome?.scheduleRetry ||
             (async (task) => {
-              await env.TELEGRAM_DELIVERY_QUEUE.send(task, {
+              await env.WAGER_SETTLEMENT_QUEUE.send(task, {
                 delaySeconds: WAGER_SETTLEMENT_INITIAL_RETRY_DELAY_SECONDS,
               });
             }),

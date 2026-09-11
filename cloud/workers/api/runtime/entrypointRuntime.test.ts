@@ -8,6 +8,7 @@ import { EventPrizeWithdrawalWorkflow } from "../src/eventPrizeWithdrawalWorkflo
 import { AUTH_RECOVERY_QUEUE_NAME } from "../src/authRecovery.ts";
 import { PROFILE_GAME_PROJECTION_QUEUE_NAME } from "../src/profileGameProjectionTasks.ts";
 import { TELEGRAM_PROJECTION_QUEUE_NAME } from "../src/telegramProjectionTasks.ts";
+import { WAGER_SETTLEMENT_QUEUE_NAME } from "../src/wagerSettlementQueue.ts";
 import worker, { handleScheduled } from "../src/workerHandler.ts";
 import { TELEGRAM_TEST_ENV, withProfileControl } from "../test/testEnv.ts";
 
@@ -113,13 +114,13 @@ describe("Worker entrypoint", () => {
     expect(tracked.retries).toEqual([{ delaySeconds: 300 }]);
   });
 
-  it("acks stale wagers while frozen without blocking Telegram work", async () => {
+  it("forwards legacy wagers while frozen without blocking Telegram work", async () => {
     const deferred: Array<{ body: unknown; options?: QueueSendOptions }> = [];
     const settlement = queueMessage({
       kind: "wager-settlement",
       inviteId: "invite-1",
-      matchId: "match-1",
-      operationId: "operation-1",
+      matchId: "invite-1",
+      operationId: "a".repeat(64),
     });
     const unrelated = queueMessage({ kind: "invalid-telegram-task" });
     await worker.queue(
@@ -129,8 +130,8 @@ describe("Worker entrypoint", () => {
       ]),
       {
         ...withProfileControl(TELEGRAM_TEST_ENV as unknown as Env, "frozen"),
-        TELEGRAM_DELIVERY_QUEUE: {
-          ...TELEGRAM_TEST_ENV.TELEGRAM_DELIVERY_QUEUE,
+        WAGER_SETTLEMENT_QUEUE: {
+          ...TELEGRAM_TEST_ENV.WAGER_SETTLEMENT_QUEUE,
           send: async (body, options) => {
             deferred.push({ body, options });
             return {
@@ -142,9 +143,109 @@ describe("Worker entrypoint", () => {
     );
     expect(settlement.acknowledgements()).toBe(1);
     expect(settlement.retries).toEqual([]);
-    expect(deferred).toEqual([]);
+    expect(deferred).toEqual([
+      { body: settlement.message.body, options: undefined },
+    ]);
     expect(unrelated.acknowledgements()).toBe(1);
     expect(unrelated.retries).toEqual([]);
+  });
+
+  it("routes completed and stale wagers past frozen or unreadable global profile gates", async () => {
+    for (const control of ["frozen", "unreadable"] as const) {
+      for (const status of ["completed", "stale"] as const) {
+        let stateReads = 0;
+        const environment = withProfileControl(
+          TELEGRAM_TEST_ENV as unknown as Env,
+          "frozen",
+        );
+        const base = environment.PROFILE_DB;
+        const state = {
+          activation_epoch: 1,
+          verified_at_ms: 1,
+          activated_at_ms: 1,
+          invite_id: "invite-1",
+          match_id: "invite-1",
+          wager_json: JSON.stringify({
+            settlement: {
+              version: 2,
+              kind: "proposals",
+              state: "completed",
+              operationId: (status === "completed" ? "a" : "b").repeat(64),
+              fingerprint: "settlement-fingerprint",
+              claimedAtMs: 1,
+              completedAtMs: 2,
+              releases: [],
+            },
+          }),
+          resolution_marker: null,
+          revision: 1,
+        };
+        const database: D1Database = {
+          batch: base.batch.bind(base),
+          dump: base.dump.bind(base),
+          exec: base.exec.bind(base),
+          prepare(query) {
+            if (
+              query.includes("profile_canonical_control") &&
+              control === "unreadable"
+            ) {
+              throw new Error("profile-control-unavailable");
+            }
+            if (!query.includes("wager_state_activation")) {
+              return base.prepare(query);
+            }
+            const fallback = base.prepare(query);
+            const statement: D1PreparedStatement = {
+              all: fallback.all.bind(fallback),
+              raw: fallback.raw.bind(fallback),
+              run: fallback.run.bind(fallback),
+              bind: () => statement,
+              first: async <T>() => {
+                stateReads += 1;
+                return state as T;
+              },
+            };
+            return statement;
+          },
+          withSession: () => ({
+            prepare: (query) => database.prepare(query),
+            batch: base.batch.bind(base),
+            getBookmark: () => null,
+          }),
+        };
+        const tracked = queueMessage({
+          kind: "wager-settlement",
+          inviteId: "invite-1",
+          matchId: "invite-1",
+          operationId: "a".repeat(64),
+        });
+        await worker.queue(
+          queueBatch(WAGER_SETTLEMENT_QUEUE_NAME, [tracked.message]),
+          {
+            ...environment,
+            PROFILE_DB: database,
+            WAGER_SETTLEMENT_QUEUE: {
+              ...TELEGRAM_TEST_ENV.WAGER_SETTLEMENT_QUEUE,
+              send: async () => {
+                throw new Error("unexpected-wager-deferral");
+              },
+            },
+            get TELEGRAM_DB(): D1Database {
+              throw new Error("unexpected-telegram-db");
+            },
+            get TELEGRAM_DELIVERY_QUEUE(): Queue {
+              throw new Error("unexpected-telegram-queue");
+            },
+            get TELEGRAM_BOT_TOKEN(): string {
+              throw new Error("unexpected-telegram-token");
+            },
+          },
+        );
+        expect(stateReads).toBeGreaterThan(0);
+        expect(tracked.acknowledgements()).toBe(1);
+        expect(tracked.retries).toEqual([]);
+      }
+    }
   });
 
   it("pauses profile Cron work while independent sweeps continue", async () => {

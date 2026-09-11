@@ -80,6 +80,28 @@ npm run publish:api:workflows -- --version-id <worker-version-id> --workflow mon
 
 This publication updates code for new instances and does not modify Queue delivery, Worker Cron, routes, or existing instances. Compatible releases preserve running instances on their original versions. A concrete incompatible state change requires the coordinated handoff described in its migration procedure.
 
+## Wager settlement Queue rollout
+
+The settlement Queue split uses one compatible API release with unchanged wager payloads and no database migration. Keep writes and existing Queue delivery active. During preparation, inspect the two queue names and create only missing resources, then validate and upload the API candidate:
+
+```sh
+npx wrangler queues create mons-link-wager-settlement --message-retention-period-secs 345600 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues create mons-link-wager-settlement-dlq --message-retention-period-secs 1209600 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+Promote the exact candidate with `promote:api`, then attach the dedicated consumer and verify its settings. Messages produced before attachment remain queued. Use this targeted operation; `deploy:api:triggers` also updates other consumers, routes, Cron, and Workflow definitions:
+
+```sh
+npx wrangler queues consumer add mons-link-wager-settlement mons-link-api --batch-size 1 --batch-timeout 0 --message-retries 100 --dead-letter-queue mons-link-wager-settlement-dlq --max-concurrency 1 --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues consumer list mons-link-wager-settlement --json --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+```
+
+If provisioning or attachment returns an uncertain result, inspect remote state before retrying. Preserve existing resources and settings. Run `smoke:api` and the fixture-owned `smoke:wagers` active lifecycle. Verify both queue paths by publishing the same already-completed fixture settlement task through the authenticated Queue API, once to the settlement queue and once to the legacy Telegram queue. Correlate its operation ID with successful processing and forwarding logs, then confirm unchanged balances. Use bounded delivery checks without artificial initial delays or post-success observation; a missing confirmation requires investigation, not a success claim.
+
+Legacy wager messages forward unchanged to `WAGER_SETTLEMENT_QUEUE` without added delay. Acknowledge the legacy message only after enqueue succeeds; retry it if forwarding fails. Existing settlement replay and admission checks remain in the dedicated consumer.
+
+For rollback, retain both settlement queues and the attached consumer. Promote only the recorded compatible pre-split Worker version after verifying that its queue fallback handles unchanged wager payloads; it can consume the new queue using its existing settlement handler. Do not remove or purge queues, or apply old trigger configuration. Legacy Telegram DLQ entries can still contain settlement work and require canonical-state reconciliation before a specific replay.
+
 ## Coordinated maintenance release
 
 Use maintenance only for a concrete schema, state-compatibility, resource-lifecycle, or incident requirement. Specify the affected stores, writer gates, Queues, leases, and recovery condition before applying controls. Prepare and validate candidates first. Preserve any maintenance or Queue pause state that predates the operation.
@@ -126,7 +148,7 @@ Pause the permanent profile-related Queues when a migration changes profile sche
 npx wrangler queues pause-delivery mons-link-auth-recovery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 npx wrangler queues pause-delivery mons-link-profile-game-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 npx wrangler queues pause-delivery mons-link-telegram-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler queues pause-delivery mons-link-telegram-delivery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues pause-delivery mons-link-wager-settlement --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
 After applying the migration, inspect the expected schema, run `PRAGMA foreign_key_check`, smoke production, then resume the control and Queues:
@@ -136,8 +158,10 @@ npm run manage:profile-canonical -- --resume
 npx wrangler queues resume-delivery mons-link-auth-recovery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 npx wrangler queues resume-delivery mons-link-profile-game-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 npx wrangler queues resume-delivery mons-link-telegram-projection --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler queues resume-delivery mons-link-telegram-delivery --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler queues resume-delivery mons-link-wager-settlement --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
+
+When running a pre-split rollback version, include `mons-link-telegram-delivery` in these pause and resume operations because that version executes settlement retries there. The current version only forwards legacy wager messages to the settlement queue.
 
 Canonical profile incidents freeze D1 and fix forward. `legacy_fields_json` contains retained migrated data and must remain intact.
 
@@ -199,7 +223,7 @@ npm run manage:wager-reservations -- --resume-d1
 npm run manage:profile-canonical -- --resume
 ```
 
-Recover only an expired admission whose original request has finished and whose uncertain effects have been reconciled. Resume requires admissions and gameplay leases drained. Include `mons-link-telegram-delivery` in coordinated maintenance because it delivers settlement retries. Validate frozen reads and stale-client rejection while canonical writes remain frozen, then verify normal wagering after resume. Keep writes frozen and repair forward on failures; canonical balances, reservations, and wager settlement records must stay consistent.
+Recover only an expired admission whose original request has finished and whose uncertain effects have been reconciled. Resume requires admissions and gameplay leases drained. Include `mons-link-wager-settlement` in coordinated maintenance because it executes settlement retries. A pre-split rollback version also requires `mons-link-telegram-delivery`; the current Telegram handler only forwards legacy wager messages. Validate frozen reads and stale-client rejection while canonical writes remain frozen, then verify normal wagering after resume. Keep writes frozen and repair forward on failures; canonical balances, reservations, and wager settlement records must stay consistent.
 
 ## Event-prize withdrawal D1 operations
 

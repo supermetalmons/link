@@ -77,6 +77,8 @@ Event control supports `d1` and `frozen`. The event-progress Workflow owns sched
 
 `PROFILE_DB.invite_wager_states` owns proposals, agreements, settlement state, and resolution markers. Reserved balances, consumed operation tombstones, pending settlements, and replay records are current application data. Current wager incidents use `manage:wager-reservations` and canonical-profile maintenance. Reconcile uncertain effects before settling an expired admission.
 
+`WAGER_SETTLEMENT_QUEUE` sends initial and deferred settlement retries to `mons-link-wager-settlement`, with exhausted retries retained in `mons-link-wager-settlement-dlq`. The consumer preserves profile and reservation admission checks and runs independently of Telegram delivery. Legacy wager messages in `mons-link-telegram-delivery` forward unchanged without added delay; the original message is acknowledged only after enqueue succeeds and retried if forwarding fails. Inspect legacy Telegram DLQ entries as well as the settlement DLQ during recovery; preserve their operation IDs and reconcile canonical state before replaying a specific task.
+
 Prize withdrawals retain D1 leases, destination identity, signed transaction bytes, exact signature recovery, and completion records. Freeze affected storage before a schema change or terminating an instance. The read-only withdrawal Workflow preflight validates wallet identity and RPC access without sending a transaction. Never manually rewrite assigned prizes or replay a possibly completed transfer.
 
 ## Telegram recovery and announcements

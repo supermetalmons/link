@@ -1,29 +1,13 @@
-import { createTestWagerReservationRuntime } from "./wagerFrozenTestUtils.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
 import { MAX_RECORD_KEY_BYTES } from "../src/recordKeys.ts";
-import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import {
-  handleTelegramQueueMessage as handleTelegramQueueMessageImpl,
+  handleTelegramQueueMessage,
   infrastructureRetryDelaySeconds,
   logicalDelaySeconds,
-  parseWagerSettlementRetryTask,
-  WAGER_SETTLEMENT_RETRY_DELAY_SECONDS,
 } from "../src/telegramQueue.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
-
-function handleTelegramQueueMessage(
-  message: Parameters<typeof handleTelegramQueueMessageImpl>[0],
-  env: Parameters<typeof handleTelegramQueueMessageImpl>[1],
-  dependencies: Parameters<typeof handleTelegramQueueMessageImpl>[2] = {},
-) {
-  return handleTelegramQueueMessageImpl(message, env, {
-    createWagerReservations: (_env, repository) =>
-      createTestWagerReservationRuntime(repository),
-    ...dependencies,
-  });
-}
 
 const task = {
   messageKey: "automatch:invite-1",
@@ -70,7 +54,6 @@ function queueMessage(body: unknown, attempts = 1) {
 }
 
 const unusedRepository = {} as TelegramRepository;
-const unusedGameplayRepository = {} as GameplayRepository;
 
 const wagerTask = {
   kind: "wager-settlement" as const,
@@ -193,337 +176,122 @@ test("calculates bounded logical and infrastructure delays", () => {
   assert.equal(infrastructureRetryDelaySeconds(100), 60);
 });
 
-test("validates and processes durable wager settlement retries", async () => {
-  assert.deepEqual(parseWagerSettlementRetryTask(wagerTask), wagerTask);
-  assert.deepEqual(
-    parseWagerSettlementRetryTask(recoverableWagerTask),
-    recoverableWagerTask,
-  );
-  assert.equal(
-    parseWagerSettlementRetryTask({ ...wagerTask, extra: true }),
-    null,
-  );
-  assert.equal(
-    parseWagerSettlementRetryTask({
-      ...recoverableWagerTask,
-      resolution: { ...recoverableWagerTask.resolution, extra: true },
-    }),
-    null,
-  );
-  assert.equal(
-    parseWagerSettlementRetryTask({
-      ...recoverableWagerTask,
-      resolution: { ...recoverableWagerTask.resolution, winnerUid: "" },
-    }),
-    null,
-  );
-  assert.equal(
-    parseWagerSettlementRetryTask({
-      ...recoverableWagerTask,
-      resolution: { ...recoverableWagerTask.resolution, winnerUid: " host" },
-    }),
-    null,
-  );
-  for (const invalid of [
-    { ...recoverableWagerTask, inviteId: "invite/child" },
-    { ...recoverableWagerTask, matchId: `invite${String.fromCharCode(1)}` },
-    {
-      ...recoverableWagerTask,
-      resolution: {
-        ...recoverableWagerTask.resolution,
-        winnerUid: "w".repeat(MAX_RECORD_KEY_BYTES + 1),
-      },
+function forwardingEnvironment(send: Queue["send"]): Env {
+  return {
+    ...envWithQueue(TELEGRAM_TEST_ENV.TELEGRAM_DELIVERY_QUEUE.send),
+    WAGER_SETTLEMENT_QUEUE: {
+      ...TELEGRAM_TEST_ENV.WAGER_SETTLEMENT_QUEUE,
+      send,
     },
-    {
-      ...recoverableWagerTask,
-      resolution: {
-        ...recoverableWagerTask.resolution,
-        loserUid: "guest#unsafe",
-      },
+    get PROFILE_DB(): D1Database {
+      throw new Error("unexpected-profile-db");
     },
-  ]) {
-    assert.equal(parseWagerSettlementRetryTask(invalid), null);
-  }
-  const queued = queueMessage(recoverableWagerTask);
-  const resumed: unknown[] = [];
-  await handleTelegramQueueMessage(
-    queued.message,
-    envWithQueue(TELEGRAM_TEST_ENV.TELEGRAM_DELIVERY_QUEUE.send),
-    {
-      createGameplay: () => unusedGameplayRepository,
-      logger: { error() {}, info() {} },
-      resumeSettlement: async (input, repository) => {
-        resumed.push(input, repository);
-        return "completed";
-      },
+    get TELEGRAM_DB(): D1Database {
+      throw new Error("unexpected-telegram-db");
     },
-  );
-  assert.equal(queued.acknowledgements(), 1);
-  assert.deepEqual(queued.retries, []);
-  assert.equal(resumed.length, 2);
-  assert.deepEqual(resumed[0], recoverableWagerTask);
-  assert.equal(
-    typeof (resumed[1] as GameplayRepository).wagerFrozen?.transact,
-    "function",
-  );
-});
-
-test("acknowledges malformed wager retry tasks", async () => {
-  const invalidTasks = [
-    {
-      ...recoverableWagerTask,
-      resolution: { ...recoverableWagerTask.resolution, loserProfileId: "" },
-    },
-    { ...recoverableWagerTask, inviteId: "invite/child" },
-    { ...recoverableWagerTask, matchId: `invite${String.fromCharCode(31)}` },
-    {
-      ...recoverableWagerTask,
-      resolution: {
-        ...recoverableWagerTask.resolution,
-        winnerUid: "w".repeat(MAX_RECORD_KEY_BYTES + 1),
-      },
-    },
-    {
-      ...recoverableWagerTask,
-      resolution: {
-        ...recoverableWagerTask.resolution,
-        loserUid: "guest[unsafe",
-      },
-    },
-  ];
-  let controlReads = 0;
-  let repositoryCreates = 0;
-  for (const invalidTask of invalidTasks) {
-    const queued = queueMessage(invalidTask);
-    await handleTelegramQueueMessage(
-      queued.message,
-      envWithQueue(TELEGRAM_TEST_ENV.TELEGRAM_DELIVERY_QUEUE.send),
-      {
-        createGameplay: () => {
-          repositoryCreates += 1;
-          return unusedGameplayRepository;
-        },
-        logger: { error() {}, info() {} },
-        profileMutationsEnabled: async () => {
-          controlReads += 1;
-          return true;
-        },
-      },
-    );
-    assert.equal(queued.acknowledgements(), 1);
-    assert.deepEqual(queued.retries, []);
-  }
-  assert.equal(controlReads, 0);
-  assert.equal(repositoryCreates, 0);
-});
-
-test("acks completed and stale wagers while control is frozen or unreadable", async () => {
-  const cases = [
-    { status: "completed" as const, controlUnavailable: false },
-    { status: "stale" as const, controlUnavailable: true },
-  ];
-  for (const { status, controlUnavailable } of cases) {
-    const queued = queueMessage(wagerTask);
-    const deferred: unknown[] = [];
-    await handleTelegramQueueMessage(
-      queued.message,
-      envWithQueue(async (body) => {
-        deferred.push(body);
-        return {
-          metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
-        };
-      }),
-      {
-        classifySettlement: async () => status,
-        createGameplay: () => unusedGameplayRepository,
-        logger: { error() {}, info() {} },
-        profileMutationsEnabled: async () => {
-          if (controlUnavailable) throw new Error("control-unavailable");
-          return false;
-        },
-        resumeSettlement: async () => {
-          throw new Error("unexpected-resume");
-        },
-      },
-    );
-    assert.equal(queued.acknowledgements(), 1);
-    assert.deepEqual(queued.retries, []);
-    assert.deepEqual(deferred, []);
-  }
-});
-
-test("durably defers pending and unclaimed wagers while writes are disabled", async () => {
-  for (const status of ["pending", "unclaimed"] as const) {
-    const queued = queueMessage(recoverableWagerTask);
-    const deferred: Array<{ body: unknown; options?: QueueSendOptions }> = [];
-    await handleTelegramQueueMessage(
-      queued.message,
-      envWithQueue(async (body, options) => {
-        deferred.push({ body, options });
-        return {
-          metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
-        };
-      }),
-      {
-        classifySettlement: async () => status,
-        createGameplay: () => unusedGameplayRepository,
-        logger: { error() {}, info() {} },
-        profileMutationsEnabled: async () => false,
-      },
-    );
-    assert.equal(queued.acknowledgements(), 1);
-    assert.deepEqual(queued.retries, []);
-    assert.deepEqual(deferred, [
-      {
-        body: recoverableWagerTask,
-        options: { delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS },
-      },
-    ]);
-  }
-});
-
-test("defers a wager that freezes at a settlement write boundary", async () => {
-  const queued = queueMessage(recoverableWagerTask);
-  const deferred: Array<{ body: unknown; options?: QueueSendOptions }> = [];
-  let controlReads = 0;
-  await handleTelegramQueueMessage(
-    queued.message,
-    envWithQueue(async (body, options) => {
-      deferred.push({ body, options });
-      return {
-        metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
-      };
-    }),
-    {
-      createGameplay: () => unusedGameplayRepository,
-      logger: { error() {}, info() {} },
-      profileMutationsEnabled: async () => {
-        controlReads += 1;
-        return controlReads === 1;
-      },
-      resumeSettlement: async (_task, _repository, _now, assertAllowed) => {
-        await assertAllowed?.();
-        return "completed";
-      },
-    },
-  );
-  assert.equal(controlReads, 2);
-  assert.equal(queued.acknowledgements(), 1);
-  assert.deepEqual(queued.retries, []);
-  assert.deepEqual(deferred, [
-    {
-      body: recoverableWagerTask,
-      options: { delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS },
-    },
-  ]);
-});
-
-test("durably defers wagers when frozen-state classification is unavailable", async () => {
-  const queued = queueMessage(recoverableWagerTask);
-  const deferred: Array<{ body: unknown; options?: QueueSendOptions }> = [];
-  await handleTelegramQueueMessage(
-    queued.message,
-    envWithQueue(async (body, options) => {
-      deferred.push({ body, options });
-      return {
-        metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
-      };
-    }),
-    {
-      classifySettlement: async () => {
-        throw new Error("state-unavailable");
-      },
-      createGameplay: () => unusedGameplayRepository,
-      logger: { error() {}, info() {} },
-      profileMutationsEnabled: async () => false,
-    },
-  );
-  assert.equal(queued.acknowledgements(), 1);
-  assert.deepEqual(queued.retries, []);
-  assert.deepEqual(deferred, [
-    {
-      body: recoverableWagerTask,
-      options: { delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS },
-    },
-  ]);
-});
-
-test("falls back to Queue retry when durable wager deferral fails", async () => {
-  const queued = queueMessage(recoverableWagerTask);
-  await handleTelegramQueueMessage(
-    queued.message,
-    envWithQueue(async () => {
-      throw new Error("queue-unavailable");
-    }),
-    {
-      classifySettlement: async () => "pending",
-      createGameplay: () => unusedGameplayRepository,
-      logger: { error() {}, info() {} },
-      profileMutationsEnabled: async () => false,
-    },
-  );
-  assert.equal(queued.acknowledgements(), 0);
-  assert.deepEqual(queued.retries, [
-    { delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS },
-  ]);
-});
-
-test("acks terminal wager cancellations without requeueing", async () => {
-  const queued = queueMessage(wagerTask, 3);
-  const deferred: Array<{ body: unknown; options?: QueueSendOptions }> = [];
-  await handleTelegramQueueMessage(
-    queued.message,
-    envWithQueue(async (body, options) => {
-      deferred.push({ body, options });
-      return {
-        metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
-      };
-    }),
-    {
-      createGameplay: () => unusedGameplayRepository,
-      logger: { error() {}, info() {} },
-      profileMutationsEnabled: async () => true,
-      resumeSettlement: async () => "completed",
-    },
-  );
-  assert.equal(queued.acknowledgements(), 1);
-  assert.deepEqual(queued.retries, []);
-  assert.deepEqual(deferred, []);
-});
-
-test("retries an active wager failure and later completes it", async () => {
-  const unclaimed = queueMessage(recoverableWagerTask, 3);
-  const pending = queueMessage(recoverableWagerTask, 4);
-  const deferred: unknown[] = [];
-  let claimed = false;
-  const dependencies = {
-    createGameplay: () => unusedGameplayRepository,
-    logger: { error() {}, info() {} },
-    profileMutationsEnabled: async () => true,
-    resumeSettlement: async () => {
-      if (!claimed) throw new Error("wager-settlement-unclaimed");
-      return "completed" as const;
+    get TELEGRAM_BOT_TOKEN(): string {
+      throw new Error("unexpected-telegram-token");
     },
   };
+}
+
+const forwardingDependencies = {
+  createRepository: (): TelegramRepository => {
+    throw new Error("unexpected-telegram-repository");
+  },
+  logger: { error() {}, info() {} },
+  sleep: async () => {
+    throw new Error("unexpected-telegram-pacing");
+  },
+};
+
+test("forwards legacy wager tasks unchanged before acknowledging without Telegram work", async () => {
+  for (const body of [wagerTask, recoverableWagerTask]) {
+    const queued = queueMessage(body);
+    const forwarded: Array<{ body: unknown; options?: QueueSendOptions }> = [];
+    await handleTelegramQueueMessage(
+      queued.message,
+      forwardingEnvironment(async (task, options) => {
+        assert.equal(queued.acknowledgements(), 0);
+        forwarded.push({ body: task, options });
+        return {
+          metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+        };
+      }),
+      forwardingDependencies,
+    );
+    assert.deepEqual(forwarded, [{ body, options: undefined }]);
+    assert.equal(queued.acknowledgements(), 1);
+    assert.deepEqual(queued.retries, []);
+  }
+});
+
+test("retries the original wager message when forwarding fails", async () => {
+  const queued = queueMessage(recoverableWagerTask, 4);
   await handleTelegramQueueMessage(
-    unclaimed.message,
-    envWithQueue(async (body) => {
-      deferred.push(body);
-      return {
-        metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
-      };
+    queued.message,
+    forwardingEnvironment(async () => {
+      throw new Error("wager-queue-unavailable");
     }),
-    dependencies,
+    forwardingDependencies,
   );
-  assert.equal(unclaimed.acknowledgements(), 0);
-  assert.deepEqual(unclaimed.retries, [{ delaySeconds: 4 }]);
-  claimed = true;
+  assert.equal(queued.acknowledgements(), 0);
+  assert.deepEqual(queued.retries, [{ delaySeconds: 8 }]);
+});
+
+test("preserves the settlement identity if forwarding succeeds but acknowledgement is lost", async () => {
+  const first = queueMessage(recoverableWagerTask);
+  const replay = queueMessage(structuredClone(recoverableWagerTask), 2);
+  const forwarded: unknown[] = [];
+  const environment = forwardingEnvironment(async (body) => {
+    forwarded.push(structuredClone(body));
+    return {
+      metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
+    };
+  });
+  first.message.ack = () => {
+    throw new Error("acknowledgement-lost");
+  };
   await handleTelegramQueueMessage(
-    pending.message,
-    envWithQueue(TELEGRAM_TEST_ENV.TELEGRAM_DELIVERY_QUEUE.send),
-    dependencies,
+    first.message,
+    environment,
+    forwardingDependencies,
   );
-  assert.equal(pending.acknowledgements(), 1);
-  assert.deepEqual(pending.retries, []);
-  assert.deepEqual(deferred, []);
+  await handleTelegramQueueMessage(
+    replay.message,
+    environment,
+    forwardingDependencies,
+  );
+  assert.deepEqual(first.retries, [{ delaySeconds: 1 }]);
+  assert.equal(replay.acknowledgements(), 1);
+  assert.deepEqual(replay.retries, []);
+  assert.deepEqual(forwarded, [recoverableWagerTask, recoverableWagerTask]);
+});
+
+test("acknowledges malformed legacy wagers without forwarding them", async () => {
+  const errors: unknown[] = [];
+  for (const body of [
+    { ...wagerTask, extra: true },
+    { ...wagerTask, inviteId: "invite/child" },
+    { ...wagerTask, matchId: "m".repeat(MAX_RECORD_KEY_BYTES + 1) },
+    {
+      ...recoverableWagerTask,
+      resolution: { ...recoverableWagerTask.resolution, winnerUid: "" },
+    },
+  ]) {
+    const queued = queueMessage(body);
+    await handleTelegramQueueMessage(
+      queued.message,
+      forwardingEnvironment(async () => {
+        assert.fail("malformed task forwarded");
+      }),
+      {
+        ...forwardingDependencies,
+        logger: { info() {}, error: (entry) => errors.push(entry) },
+      },
+    );
+    assert.equal(queued.acknowledgements(), 1);
+    assert.deepEqual(queued.retries, []);
+  }
+  assert.equal(errors.length, 4);
 });

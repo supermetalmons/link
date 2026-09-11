@@ -214,6 +214,10 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
         queue: "mons-link-telegram-delivery",
       },
       {
+        binding: "WAGER_SETTLEMENT_QUEUE",
+        queue: "mons-link-wager-settlement",
+      },
+      {
         binding: "TELEGRAM_PROJECTION_QUEUE",
         queue: "mons-link-telegram-projection",
       },
@@ -237,6 +241,14 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
         max_batch_timeout: 0,
         max_retries: 100,
         dead_letter_queue: "mons-link-telegram-delivery-dlq",
+        max_concurrency: 1,
+      },
+      {
+        queue: "mons-link-wager-settlement",
+        max_batch_size: 1,
+        max_batch_timeout: 0,
+        max_retries: 100,
+        dead_letter_queue: "mons-link-wager-settlement-dlq",
         max_concurrency: 1,
       },
       {

@@ -21,30 +21,15 @@ import {
   readTelegramStorageMode,
   type TelegramStorageMode,
 } from "./telegramD1.ts";
+import { parseWagerSettlementRetryTask } from "./wagerSettlementQueue.ts";
 import {
-  createGameplayRepository,
-  type GameplayRepository,
-} from "./gameplayRepository.ts";
-import { isSafeRecordKey } from "./recordKeys.ts";
-import {
-  classifyWagerSettlementRetry,
-  resumeWagerSettlement,
-  type WagerSettlementResolution,
-  type WagerSettlementRetryTask,
-} from "./wagerOutcome.ts";
-import { profileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
-import {
-  createWagerReservationRuntime,
-  type WagerReservationRuntime,
-} from "./wagerReservationRuntime.ts";
+  infrastructureRetryDelaySeconds,
+  MAX_INFRASTRUCTURE_RETRY_DELAY_SECONDS,
+} from "./queueRetry.ts";
 
 const MAX_QUEUE_DELAY_SECONDS = 24 * 60 * 60;
 const MIN_DISPATCH_INTERVAL_MS = 1_000;
-const MAX_INFRASTRUCTURE_RETRY_DELAY_SECONDS = 60;
 const TELEGRAM_FROZEN_RETRY_SECONDS = 60;
-const WAGER_SETTLEMENT_RETRY_DELAY_SECONDS = 5 * 60;
-
-class WagerSettlementWritesDisabled extends Error {}
 
 const defaultSleep = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
@@ -69,71 +54,11 @@ function toRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function isExactNonEmptyString(value: unknown): value is string {
-  return (
-    typeof value === "string" && value.trim() === value && value.length > 0
-  );
-}
-
-function parseWagerSettlementRetryTask(
-  value: unknown,
-): WagerSettlementRetryTask | null {
-  const task = toRecord(value);
-  if (
-    task?.kind !== "wager-settlement" ||
-    !isSafeRecordKey(task.inviteId) ||
-    !isSafeRecordKey(task.matchId) ||
-    typeof task.operationId !== "string"
-  ) {
-    return null;
-  }
-  if (Object.keys(task).length === 4) {
-    return {
-      kind: "wager-settlement",
-      inviteId: task.inviteId,
-      matchId: task.matchId,
-      operationId: task.operationId,
-    };
-  }
-  const resolution = toRecord(task.resolution);
-  if (
-    Object.keys(task).length !== 5 ||
-    !resolution ||
-    Object.keys(resolution).length !== 4 ||
-    !isExactNonEmptyString(resolution.winnerUid) ||
-    !isSafeRecordKey(resolution.winnerUid) ||
-    !isExactNonEmptyString(resolution.winnerProfileId) ||
-    !isExactNonEmptyString(resolution.loserUid) ||
-    !isSafeRecordKey(resolution.loserUid) ||
-    !isExactNonEmptyString(resolution.loserProfileId)
-  ) {
-    return null;
-  }
-  const parsedResolution: WagerSettlementResolution = {
-    winnerUid: resolution.winnerUid,
-    winnerProfileId: resolution.winnerProfileId,
-    loserUid: resolution.loserUid,
-    loserProfileId: resolution.loserProfileId,
-  };
-  return {
-    kind: "wager-settlement",
-    inviteId: task.inviteId,
-    matchId: task.matchId,
-    operationId: task.operationId,
-    resolution: parsedResolution,
-  };
-}
-
 function logicalDelaySeconds(scheduleTimeMs: number, nowMs: number): number {
   return Math.min(
     MAX_QUEUE_DELAY_SECONDS,
     Math.max(0, Math.ceil((scheduleTimeMs - nowMs) / 1_000)),
   );
-}
-
-function infrastructureRetryDelaySeconds(attempts: number): number {
-  const exponent = Math.max(0, Math.min(6, attempts - 1));
-  return Math.min(MAX_INFRASTRUCTURE_RETRY_DELAY_SECONDS, 2 ** exponent);
 }
 
 function createTelegramClient(env: Env): TelegramClient {
@@ -163,71 +88,21 @@ function createRetryScheduler(
   };
 }
 
-async function deferWagerSettlement(
-  message: Message<unknown>,
-  task: WagerSettlementRetryTask,
-  env: Env,
-  logger: Pick<Console, "error" | "info">,
-  reason: string,
-  code?: string,
-): Promise<void> {
-  try {
-    await env.TELEGRAM_DELIVERY_QUEUE.send(task, {
-      delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS,
-    });
-    message.ack();
-    const entry = JSON.stringify({
-      event: "wager_settlement_queue_deferred",
-      operationId: task.operationId,
-      reason,
-      ...(code ? { code } : {}),
-    });
-    if (code) {
-      logger.error(entry);
-    } else {
-      logger.info(entry);
-    }
-  } catch (error) {
-    message.retry({ delaySeconds: WAGER_SETTLEMENT_RETRY_DELAY_SECONDS });
-    logger.error(
-      JSON.stringify({
-        event: "wager_settlement_queue_defer_failed",
-        operationId: task.operationId,
-        reason,
-        code: error instanceof Error ? error.message : "unknown",
-      }),
-    );
-  }
-}
-
 export async function handleTelegramQueueMessage(
   message: Message<unknown>,
   env: Env,
   {
     createRepository,
     createEngine = createTelegramDeliveryEngine,
-    createGameplay = (workerEnv) => createGameplayRepository(workerEnv),
-    classifySettlement = classifyWagerSettlementRetry,
     logger = console,
     now = Date.now,
-    profileMutationsEnabled = profileBackgroundMutationsEnabled,
-    createWagerReservations = createWagerReservationRuntime,
     readStorageMode,
-    resumeSettlement = resumeWagerSettlement,
     sleep = defaultSleep,
   }: {
     createRepository?: (env: Env) => TelegramRepository;
     createEngine?: TelegramEngineFactory;
-    createGameplay?: (env: Env) => GameplayRepository;
-    classifySettlement?: typeof classifyWagerSettlementRetry;
     logger?: Pick<Console, "error" | "info">;
     now?: () => number;
-    profileMutationsEnabled?: typeof profileBackgroundMutationsEnabled;
-    createWagerReservations?: (
-      env: Env,
-      repository: GameplayRepository,
-    ) => WagerReservationRuntime;
-    resumeSettlement?: typeof resumeWagerSettlement;
     readStorageMode?: (db: D1Database) => Promise<TelegramStorageMode>;
     sleep?: (milliseconds: number) => Promise<void>;
   } = {},
@@ -242,88 +117,22 @@ export async function handleTelegramQueueMessage(
       );
       return;
     }
-    let mutationsEnabled = false;
     try {
-      mutationsEnabled = await profileMutationsEnabled(env);
-    } catch {
-      mutationsEnabled = false;
-    }
-    if (!mutationsEnabled) {
-      try {
-        const status = await classifySettlement(task, createGameplay(env));
-        if (status === "completed" || status === "stale") {
-          message.ack();
-          logger.info(
-            JSON.stringify({
-              event: "wager_settlement_queue_processed",
-              operationId: task.operationId,
-              status,
-            }),
-          );
-          return;
-        }
-      } catch (error) {
-        await deferWagerSettlement(
-          message,
-          task,
-          env,
-          logger,
-          "classification-unavailable",
-          error instanceof Error ? error.message : "unknown",
-        );
-        return;
-      }
-      await deferWagerSettlement(
-        message,
-        task,
-        env,
-        logger,
-        "profile-writes-disabled",
-      );
-      return;
-    }
-    const assertMutationAllowed = async () => {
-      let enabled = false;
-      try {
-        enabled = await profileMutationsEnabled(env);
-      } catch {}
-      if (!enabled) throw new WagerSettlementWritesDisabled();
-    };
-    try {
-      const status = await createWagerReservations(
-        env,
-        createGameplay(env),
-      ).run("wager-settlement", (admittedRepository, admissionGuard) =>
-        resumeSettlement(task, admittedRepository, now, async () => {
-          await assertMutationAllowed();
-          await admissionGuard();
-        }),
-      );
+      await env.WAGER_SETTLEMENT_QUEUE.send(task);
       message.ack();
       logger.info(
         JSON.stringify({
-          event: "wager_settlement_queue_processed",
+          event: "wager_settlement_queue_forwarded",
           operationId: task.operationId,
-          status,
         }),
       );
     } catch (error) {
-      if (error instanceof WagerSettlementWritesDisabled) {
-        await deferWagerSettlement(
-          message,
-          task,
-          env,
-          logger,
-          "profile-writes-disabled",
-        );
-        return;
-      }
       message.retry({
         delaySeconds: infrastructureRetryDelaySeconds(message.attempts),
       });
       logger.error(
         JSON.stringify({
-          event: "wager_settlement_queue_failed",
+          event: "wager_settlement_queue_forward_failed",
           operationId: task.operationId,
           code: error instanceof Error ? error.message : "unknown",
         }),
@@ -424,11 +233,8 @@ export {
   MAX_QUEUE_DELAY_SECONDS,
   MIN_DISPATCH_INTERVAL_MS,
   TELEGRAM_FROZEN_RETRY_SECONDS,
-  WAGER_SETTLEMENT_RETRY_DELAY_SECONDS,
   createRetryScheduler,
   infrastructureRetryDelaySeconds,
   logicalDelaySeconds,
-  parseWagerSettlementRetryTask,
   type TelegramTaskPayload,
-  type WagerSettlementRetryTask,
 };

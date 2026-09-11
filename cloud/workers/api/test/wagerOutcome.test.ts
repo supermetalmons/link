@@ -34,6 +34,7 @@ import {
 } from "../src/wagerOutcome.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
+import { handleWagerSettlementQueueMessage } from "../src/wagerSettlementQueue.ts";
 
 const env = {
   ...TELEGRAM_TEST_ENV,
@@ -982,7 +983,7 @@ test("rejects the legacy settlement schema", async () => {
   );
 });
 
-test("recovers when HTTP stops after queueing but before the claim", async () => {
+test("recovers before the claim and settles once after a lost Queue acknowledgement", async () => {
   const state = createRepository({
     wager: { agreed: { material: "dust", count: 2 } },
   });
@@ -1018,14 +1019,34 @@ test("recovers when HTTP stops after queueing but before the claim", async () =>
     await classifyWagerSettlementRetry(tasks[0], state.repository),
     "unclaimed",
   );
-  assert.equal(
-    await resumeWagerSettlement(tasks[0], state.repository, () => 600),
-    "completed",
-  );
-  assert.equal(
-    await resumeWagerSettlement(tasks[0], state.repository, () => 700),
-    "completed",
-  );
+  const retries: QueueRetryOptions[] = [];
+  let acknowledgements = 0;
+  for (const attempts of [1, 2]) {
+    await handleWagerSettlementQueueMessage(
+      {
+        id: "wager-settlement-retry",
+        timestamp: new Date(0),
+        body: structuredClone(tasks[0]),
+        attempts,
+        ack: () => {
+          if (attempts === 1) throw new Error("acknowledgement-lost");
+          acknowledgements += 1;
+        },
+        retry: (options) => retries.push(options || {}),
+      },
+      env,
+      {
+        createGameplay: () => state.repository,
+        createWagerReservations: (_env, repository) =>
+          createTestWagerReservationRuntime(repository),
+        logger: { error() {}, info() {} },
+        now: () => 600,
+        profileMutationsEnabled: async () => true,
+      },
+    );
+  }
+  assert.equal(acknowledgements, 1);
+  assert.deepEqual(retries, [{ delaySeconds: 1 }]);
   assert.equal(state.appliedTransfers, 1);
   assert.equal(state.transferCalls, 1);
   assert.equal(state.marker, true);
@@ -2199,14 +2220,20 @@ test("queues a durable retry before settling", async () => {
     request({ inviteId: "invite", matchId: "invite" }),
     {
       ...env,
-      TELEGRAM_DELIVERY_QUEUE: {
-        ...TELEGRAM_TEST_ENV.TELEGRAM_DELIVERY_QUEUE,
+      WAGER_SETTLEMENT_QUEUE: {
+        ...TELEGRAM_TEST_ENV.WAGER_SETTLEMENT_QUEUE,
         send: async (task, options) => {
           order.push("queue");
           tasks.push({ task, options });
           return {
             metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
           };
+        },
+      },
+      TELEGRAM_DELIVERY_QUEUE: {
+        ...TELEGRAM_TEST_ENV.TELEGRAM_DELIVERY_QUEUE,
+        send: async () => {
+          throw new Error("unexpected-telegram-queue");
         },
       },
     } as Env,

@@ -11,8 +11,12 @@ import {
 import {
   handleTelegramQueue,
   type TelegramTaskPayload,
-  type WagerSettlementRetryTask,
 } from "./telegramQueue.ts";
+import {
+  handleWagerSettlementQueue,
+  WAGER_SETTLEMENT_QUEUE_NAME,
+} from "./wagerSettlementQueue.ts";
+import type { WagerSettlementRetryTask } from "./wagerOutcome.ts";
 import {
   handleTelegramProjectionQueue,
   handleTelegramProjectionSweep,
@@ -225,6 +229,9 @@ async function handleQueue(
   }
   if (batch.queue === PROFILE_GAME_PROJECTION_QUEUE_NAME) {
     return handleProfileGameProjectionQueue(batch, env);
+  }
+  if (batch.queue === WAGER_SETTLEMENT_QUEUE_NAME) {
+    return handleWagerSettlementQueue(batch, env);
   }
   return handleTelegramQueue(batch, env);
 }
