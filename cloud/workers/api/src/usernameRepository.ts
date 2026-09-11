@@ -5,6 +5,7 @@ import {
   materializeCanonicalProfile,
   readStableCanonicalProfileAggregateByLogin,
 } from "./profileCanonicalD1.ts";
+import { readCanonicalProfileMutationByLogin } from "./profileMutationD1.ts";
 
 const MAX_TRANSACTION_ATTEMPTS = 5;
 
@@ -54,18 +55,21 @@ export function createUsernameRepository(
       const updatedAtMs = now();
       for (let attempt = 0; attempt < attempts; attempt++) {
         try {
-          const resolved = await readStableCanonicalProfileAggregateByLogin(
-            d1,
-            loginUid,
-          );
+          const resolved = nextUsername
+            ? await readCanonicalProfileMutationByLogin(d1, loginUid)
+            : await readStableCanonicalProfileAggregateByLogin(d1, loginUid);
           if (!resolved) return "profile-not-found";
           const owner = resolved.owner;
-          const aggregate = resolved.aggregate;
-          const profile = aggregate.profile;
+          const aggregate = "aggregate" in resolved ? resolved.aggregate : null;
+          const profile =
+            "profile" in resolved
+              ? resolved.profile
+              : resolved.aggregate.profile;
           if (!profile) throw new UsernameRepositoryFailure();
           const currentUsername = profile.profile.username || "";
           if (currentUsername === nextUsername) return "updated";
           if (!nextUsername) {
+            if (!aggregate) throw new UsernameRepositoryFailure();
             const methods = new Set(
               aggregate.authMethods.map((method) => method.method),
             );

@@ -35,7 +35,10 @@ The complete gate uses Node.js 24 or newer and needs no Java or external databas
 
 ```sh
 npm run manage:profile-canonical -- --status
+npm run manage:profile-canonical -- --audit
 ```
+
+Ordinary commits check topology only for affected profiles, so unrelated corruption does not block healthy updates. `--audit` checks topology across the whole profile store with one read-only query and reports counts for inconsistent retiring-profile redirects, active profiles with redirects, and login owners, auth methods, or recovery jobs without an active profile. It exits unsuccessfully for any violation or unreadable result and does not change maintenance state.
 
 Schema maintenance may require `--freeze`, affected Queue pauses, verification of drained admissions/leases, the reviewed D1 migration, and `PRAGMA foreign_key_check`. Resume only after required checks pass. The deployment guide contains store-specific commands. Routine code changes do not need this procedure. Never rewrite profile ownership, delete imported profile fields, or restore a coordinated database independently.
 

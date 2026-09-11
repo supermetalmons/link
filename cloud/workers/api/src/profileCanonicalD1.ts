@@ -8,6 +8,7 @@ import {
 } from "@mons/shared/profiles";
 import { buildUsernameLookupKey } from "@mons/shared/usernames";
 import { MAX_PROFILE_MERGE_TARGET_HOPS } from "../../../runtime/profileMergeTargets.js";
+import { CANONICAL_PROFILE_TOPOLOGY_VIOLATION_PREDICATE } from "./profileTopologySql.ts";
 
 export const CANONICAL_PROFILE_REDIRECT_LIMIT = 4;
 export const CANONICAL_PROFILE_INTERNAL_REDIRECT_LIMIT =
@@ -3589,53 +3590,108 @@ export function countCanonicalCommitStatements(
         }, 0);
 }
 
-function canonicalTopologyGuardStatement(db: D1Database): D1PreparedStatement {
-  return guardStatement(
-    db,
-    `EXISTS (
-       SELECT 1
-       FROM profile_records AS profile
-       WHERE profile.state = 'retiring'
-         AND NOT EXISTS (
-           SELECT 1
-           FROM profile_merge_targets AS mapping
-           WHERE mapping.source_profile_id = profile.profile_id
-             AND mapping.target_profile_id = profile.merged_into_profile_id
-         )
-     )
-     OR EXISTS (
-       SELECT 1
-       FROM profile_records AS profile
-       JOIN profile_merge_targets AS mapping
-         ON mapping.source_profile_id = profile.profile_id
-       WHERE profile.state = 'active'
-     )
-     OR EXISTS (
-       SELECT 1
-       FROM profile_login_owners AS owner
-       LEFT JOIN profile_records AS profile
-         ON profile.profile_id = owner.profile_id
-        AND profile.state = 'active'
-       WHERE profile.profile_id IS NULL
-     )
-     OR EXISTS (
-       SELECT 1
-       FROM profile_auth_methods AS method
-       LEFT JOIN profile_records AS profile
-         ON profile.profile_id = method.profile_id
-        AND profile.state = 'active'
-       WHERE profile.profile_id IS NULL
-     )
-     OR EXISTS (
-       SELECT 1
-       FROM profile_auth_recovery_jobs AS recovery
-       LEFT JOIN profile_records AS profile
-         ON profile.profile_id = recovery.profile_id
-        AND profile.state = 'active'
-       WHERE profile.profile_id IS NULL
-     )`,
-    [],
-  );
+function canonicalTopologyProfileIds(plan: CanonicalCommitPlan): string[] {
+  const profileIds = new Set<string>();
+  for (const mutation of plan.mutations) {
+    switch (mutation.kind) {
+      case "insert-active-profile":
+      case "update-active-profile":
+        profileIds.add(mutation.value.profile.id);
+        break;
+      case "retire-profile-with-redirect":
+        profileIds.add(mutation.profile.profile.id);
+        profileIds.add(mutation.redirect.targetProfileId);
+        break;
+      case "delete-retired-profile":
+        profileIds.add(mutation.profileId);
+        profileIds.add(mutation.targetProfileId);
+        break;
+      case "insert-login-owner":
+      case "insert-auth-method":
+      case "insert-auth-recovery":
+      case "update-auth-recovery":
+        profileIds.add(mutation.value.profileId);
+        break;
+      case "delete-auth-recovery":
+        profileIds.add(mutation.profileId);
+        break;
+      case "move-login-owner-set":
+        profileIds.add(mutation.sourceProfileId);
+        profileIds.add(mutation.targetProfileId);
+        break;
+      case "update-login-owner":
+      case "delete-login-owner": {
+        const loginUid =
+          mutation.kind === "update-login-owner"
+            ? mutation.value.loginUid
+            : mutation.loginUid;
+        const previous = plan.expectations.find(
+          (expectation) =>
+            expectation.kind === "login-owner-revision" &&
+            expectation.loginUid === loginUid,
+        );
+        if (previous?.kind !== "login-owner-revision") {
+          throw new TypeError("unsafe-canonical-commit-plan");
+        }
+        profileIds.add(previous.profileId);
+        if (mutation.kind === "update-login-owner") {
+          profileIds.add(mutation.value.profileId);
+        }
+        break;
+      }
+      case "update-auth-method":
+      case "delete-auth-method": {
+        const identity =
+          mutation.kind === "update-auth-method" ? mutation.value : mutation;
+        const previous = plan.expectations.find(
+          (expectation) =>
+            expectation.kind === "auth-method-revision" &&
+            expectation.method === identity.method &&
+            expectation.normalizedValue === identity.normalizedValue,
+        );
+        if (previous?.kind !== "auth-method-revision") {
+          throw new TypeError("unsafe-canonical-commit-plan");
+        }
+        profileIds.add(previous.profileId);
+        if (mutation.kind === "update-auth-method") {
+          profileIds.add(mutation.value.profileId);
+        }
+        break;
+      }
+      case "insert-february-opponent":
+      case "delete-february-opponent":
+      case "insert-auth-operation":
+      case "update-auth-operation":
+      case "delete-auth-operation":
+      case "insert-method-revocation":
+      case "update-method-revocation":
+      case "delete-method-revocation":
+      case "insert-method-cooldown":
+      case "update-method-cooldown":
+      case "delete-method-cooldown":
+      case "insert-rating-update":
+      case "update-rating-update":
+      case "delete-rating-update":
+      case "insert-wager-settlement":
+        break;
+      default: {
+        const unsupported: never = mutation;
+        throw new TypeError("unsafe-canonical-commit-plan", {
+          cause: unsupported,
+        });
+      }
+    }
+  }
+  return [...profileIds];
+}
+
+function canonicalTopologyGuardStatement(
+  db: D1Database,
+  plan: CanonicalCommitPlan,
+): D1PreparedStatement {
+  return guardStatement(db, CANONICAL_PROFILE_TOPOLOGY_VIOLATION_PREDICATE, [
+    JSON.stringify(canonicalTopologyProfileIds(plan)),
+  ]);
 }
 
 export async function commitCanonicalPlan(
@@ -3655,7 +3711,7 @@ export async function commitCanonicalPlan(
     ),
     ...buildCanonicalGuardStatements(db, plan.expectations),
     ...plan.mutations.flatMap((mutation) => mutationStatements(db, mutation)),
-    canonicalTopologyGuardStatement(db),
+    canonicalTopologyGuardStatement(db, plan),
   ];
   try {
     await db.batch(statements);

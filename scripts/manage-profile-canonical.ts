@@ -1,13 +1,18 @@
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
+import {
+  CANONICAL_PROFILE_TOPOLOGY_AUDIT_SQL,
+  CANONICAL_PROFILE_TOPOLOGY_VIOLATION_KINDS,
+} from "../cloud/workers/api/src/profileTopologySql.ts";
 
 type ControlState = "frozen" | "active";
-type Operation = "status" | "freeze" | "resume";
+type Operation = "status" | "freeze" | "resume" | "audit";
 type Control = { state: ControlState };
 type Dependencies = {
   log(message: string): void;
   readControl(): Control;
+  readTopologyAudit(): unknown;
   updateState(expected: ControlState, next: ControlState): void;
 };
 
@@ -22,7 +27,12 @@ function parseArgs(argv: string[]): Operation {
     );
   }
   const value = argv[0]?.replace(/^--/, "") as Operation;
-  if (value !== "status" && value !== "freeze" && value !== "resume") {
+  if (
+    value !== "status" &&
+    value !== "freeze" &&
+    value !== "resume" &&
+    value !== "audit"
+  ) {
     throw new TypeError(
       "choose exactly one profile canonical control operation",
     );
@@ -30,7 +40,7 @@ function parseArgs(argv: string[]): Operation {
   return value;
 }
 
-function transition(operation: Exclude<Operation, "status">): {
+function transition(operation: Exclude<Operation, "status" | "audit">): {
   expected: readonly ControlState[];
   next: ControlState;
 } {
@@ -42,6 +52,36 @@ function manageProfileCanonical(
   operation: Operation,
   dependencies: Dependencies,
 ): void {
+  if (operation === "audit") {
+    const rows = dependencies.readTopologyAudit();
+    if (
+      !Array.isArray(rows) ||
+      rows.length !== 1 ||
+      !rows[0] ||
+      typeof rows[0] !== "object" ||
+      Array.isArray(rows[0])
+    ) {
+      throw new Error("invalid profile canonical topology audit");
+    }
+    const row = rows[0] as Record<string, unknown>;
+    const violations = Object.fromEntries(
+      CANONICAL_PROFILE_TOPOLOGY_VIOLATION_KINDS.map((kind) => {
+        const count = row[kind];
+        if (
+          typeof count !== "number" ||
+          !Number.isSafeInteger(count) ||
+          count < 0
+        ) {
+          throw new Error("invalid profile canonical topology audit");
+        }
+        return [kind, count];
+      }),
+    );
+    const ok = Object.values(violations).every((count) => count === 0);
+    dependencies.log(JSON.stringify({ operation, ok, violations }));
+    if (!ok) throw new Error("profile canonical topology violations detected");
+    return;
+  }
   let control = dependencies.readControl();
   if (operation !== "status") {
     const change = transition(operation);
@@ -64,7 +104,10 @@ function manageProfileCanonical(
   );
 }
 
-function runWrangler(command: string): Array<Record<string, unknown>> {
+function runWrangler(
+  command: string,
+  strict = false,
+): Array<Record<string, unknown>> {
   const result = spawnSync(
     resolve("node_modules/.bin/wrangler"),
     [
@@ -90,6 +133,20 @@ function runWrangler(command: string): Array<Record<string, unknown>> {
   if (result.status !== 0) throw new Error("wrangler command failed");
   const parsed = JSON.parse(String(result.stdout)) as unknown;
   if (!Array.isArray(parsed)) throw new Error("invalid D1 JSON response");
+  if (strict) {
+    const entry = parsed[0];
+    if (
+      parsed.length !== 1 ||
+      !entry ||
+      typeof entry !== "object" ||
+      Array.isArray(entry) ||
+      entry.success !== true ||
+      !Array.isArray(entry.results)
+    ) {
+      throw new Error("invalid D1 audit response");
+    }
+    return entry.results;
+  }
   const entry = parsed.find(
     (value) =>
       value &&
@@ -124,6 +181,8 @@ function execute(argv = process.argv.slice(2)): void {
   manageProfileCanonical(parseArgs(argv), {
     log: console.log,
     readControl: readRemoteControl,
+    readTopologyAudit: () =>
+      runWrangler(CANONICAL_PROFILE_TOPOLOGY_AUDIT_SQL, true),
     updateState: updateRemoteState,
   });
 }

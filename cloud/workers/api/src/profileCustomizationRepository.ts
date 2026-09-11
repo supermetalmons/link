@@ -3,9 +3,9 @@ import {
   CanonicalProfileConflict,
   commitCanonicalPlan,
   materializeCanonicalProfile,
-  readStableCanonicalProfileAggregateByLogin,
   type CanonicalProfileSnapshot,
 } from "./profileCanonicalD1.ts";
+import { readCanonicalProfileMutationByLogin } from "./profileMutationD1.ts";
 
 export type ProfileCustomizationProfile = {
   documentName: string;
@@ -55,14 +55,10 @@ export function createProfileCustomizationRepository(
     async updateCustomization(uid, request, authorize) {
       for (let attempt = 0; attempt < 5; attempt++) {
         try {
-          const resolved = await readStableCanonicalProfileAggregateByLogin(
-            d1,
-            uid,
-          );
+          const resolved = await readCanonicalProfileMutationByLogin(d1, uid);
           if (!resolved) return "profile-not-found";
           const owner = resolved.owner;
-          const profile = resolved.aggregate.profile;
-          if (!profile) throw new CanonicalProfileConflict();
+          const profile = resolved.profile;
           await authorize({
             documentName: profile.profileId,
             eth: profile.profile.eth || "",
