@@ -1,11 +1,13 @@
 import { buildUsernameLookupKey } from "@mons/shared/usernames";
 import {
   CanonicalProfileConflict,
-  commitCanonicalPlan,
-  materializeCanonicalProfile,
   readStableCanonicalProfileAggregateByLogin,
 } from "./profileCanonicalD1.ts";
-import { readCanonicalProfileMutationByLogin } from "./profileMutationD1.ts";
+import {
+  commitCanonicalProfileUpdate,
+  materializeCanonicalProfileUpdate,
+  readCanonicalProfileMutationByLogin,
+} from "./profileMutationD1.ts";
 
 const MAX_TRANSACTION_ATTEMPTS = 5;
 
@@ -97,50 +99,28 @@ export function createUsernameRepository(
             }
             usernameOwnedByProfile = existing?.profile_id === profile.profileId;
           }
-          const nextProfile = materializeCanonicalProfile({
-            profile: {
+          const nextProfile = materializeCanonicalProfileUpdate(
+            profile,
+            {
               ...profile.profile,
               username: nextUsername || null,
             },
-            state: profile.state,
-            mergedIntoProfileId: profile.mergedIntoProfileId,
-            legacyFields: profile.legacyFields,
-            createdAtMs: profile.createdAtMs,
             updatedAtMs,
-            mergedAtMs: profile.mergedAtMs,
-            sortPresence: profile.sortPresence,
-            sortValues: profile.sortValues,
-            winPresent: profile.winPresent,
-            emojiPresent: profile.emojiPresent,
-            gameplayEmoji: profile.gameplayEmoji,
-          });
-          await commitCanonicalPlan(d1, {
-            expectations: [
-              {
-                kind: "profile-revision",
-                profileId: profile.profileId,
-                revision: profile.revision,
-              },
-              {
-                kind: "login-owner-revision",
-                loginUid,
-                profileId: owner.profileId,
-                revision: owner.revision,
-              },
-              ...(usernameKey
-                ? usernameOwnedByProfile
-                  ? ([
-                      {
-                        kind: "username-owner",
-                        usernameKey,
-                        profileId: profile.profileId,
-                        revision: profile.revision,
-                      },
-                    ] as const)
-                  : ([{ kind: "username-absent", usernameKey }] as const)
-                : []),
-            ],
-            mutations: [{ kind: "update-active-profile", value: nextProfile }],
+          );
+          await commitCanonicalProfileUpdate(d1, profile, nextProfile, {
+            owner,
+            additionalExpectations: usernameKey
+              ? usernameOwnedByProfile
+                ? ([
+                    {
+                      kind: "username-owner",
+                      usernameKey,
+                      profileId: profile.profileId,
+                      revision: profile.revision,
+                    },
+                  ] as const)
+                : ([{ kind: "username-absent", usernameKey }] as const)
+              : [],
           });
           return "updated";
         } catch (error) {

@@ -1,15 +1,90 @@
 import {
   CanonicalProfileCorruption,
+  commitCanonicalPlan,
+  materializeCanonicalProfile,
   parseCanonicalLoginOwnerRow,
   parseCanonicalProfileRow,
+  type CanonicalExpectation,
   type CanonicalLoginOwnerSnapshot,
   type CanonicalProfileSnapshot,
+  type CanonicalProfileValue,
+  type CanonicalSortKey,
 } from "./profileCanonicalD1.ts";
 
 export type CanonicalProfileMutationSnapshot = {
   owner: CanonicalLoginOwnerSnapshot;
   profile: CanonicalProfileSnapshot;
 };
+
+export function materializeCanonicalProfileUpdate(
+  snapshot: CanonicalProfileSnapshot,
+  profile: CanonicalProfileSnapshot["profile"],
+  updatedAtMs: number,
+  {
+    sortUpdates = {},
+    winPresent = snapshot.winPresent,
+    emojiPresent = snapshot.emojiPresent,
+    gameplayEmoji = snapshot.gameplayEmoji,
+  }: {
+    sortUpdates?: Partial<Record<CanonicalSortKey, number>>;
+    winPresent?: boolean;
+    emojiPresent?: boolean;
+    gameplayEmoji?: string | number;
+  } = {},
+): CanonicalProfileValue {
+  return materializeCanonicalProfile({
+    profile,
+    createdAtMs: snapshot.createdAtMs,
+    updatedAtMs,
+    legacyFields: snapshot.legacyFields,
+    mergedAtMs: snapshot.mergedAtMs,
+    mergedIntoProfileId: snapshot.mergedIntoProfileId,
+    state: snapshot.state,
+    sortPresence: {
+      ...snapshot.sortPresence,
+      ...Object.fromEntries(Object.keys(sortUpdates).map((key) => [key, true])),
+    },
+    sortValues: { ...snapshot.sortValues, ...sortUpdates },
+    winPresent,
+    emojiPresent,
+    gameplayEmoji,
+  });
+}
+
+export function commitCanonicalProfileUpdate(
+  db: D1Database,
+  snapshot: CanonicalProfileSnapshot,
+  value: CanonicalProfileValue,
+  {
+    owner,
+    additionalExpectations = [],
+  }: {
+    owner?: CanonicalLoginOwnerSnapshot;
+    additionalExpectations?: readonly CanonicalExpectation[];
+  } = {},
+): Promise<void> {
+  return commitCanonicalPlan(db, {
+    expectations: [
+      {
+        kind: "profile-revision",
+        profileId: snapshot.profileId,
+        revision: snapshot.revision,
+      },
+      ...(owner
+        ? ([
+            {
+              kind: "login-owner-revision",
+              loginUid: owner.loginUid,
+              profileId: owner.profileId,
+              revision: owner.revision,
+            },
+          ] as const)
+        : []),
+      ...additionalExpectations,
+    ],
+    mutations: [{ kind: "update-active-profile", value }],
+  });
+}
 
 export async function readCanonicalProfileMutationByLogin(
   db: D1Database,

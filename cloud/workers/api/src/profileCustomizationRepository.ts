@@ -1,11 +1,13 @@
 import type { ProfileCustomizationUpdateRequest } from "@mons/shared/profiles";
 import {
   CanonicalProfileConflict,
-  commitCanonicalPlan,
-  materializeCanonicalProfile,
   type CanonicalProfileSnapshot,
 } from "./profileCanonicalD1.ts";
-import { readCanonicalProfileMutationByLogin } from "./profileMutationD1.ts";
+import {
+  commitCanonicalProfileUpdate,
+  materializeCanonicalProfileUpdate,
+  readCanonicalProfileMutationByLogin,
+} from "./profileMutationD1.ts";
 
 export type ProfileCustomizationProfile = {
   documentName: string;
@@ -64,40 +66,15 @@ export function createProfileCustomizationRepository(
             eth: profile.profile.eth || "",
             sol: profile.profile.sol || "",
           });
-          const value = materializeCanonicalProfile({
-            profile: customizedProfile(profile, request),
-            state: profile.state,
-            mergedIntoProfileId: profile.mergedIntoProfileId,
-            legacyFields: profile.legacyFields,
-            createdAtMs: profile.createdAtMs,
-            updatedAtMs: now(),
-            mergedAtMs: profile.mergedAtMs,
-            sortPresence: profile.sortPresence,
-            sortValues: profile.sortValues,
-            winPresent: profile.winPresent,
-            emojiPresent:
-              request.field === "emojiAndAura" ? true : profile.emojiPresent,
-            gameplayEmoji:
-              request.field === "emojiAndAura"
-                ? request.value.emoji
-                : profile.gameplayEmoji,
-          });
-          await commitCanonicalPlan(d1, {
-            expectations: [
-              {
-                kind: "profile-revision",
-                profileId: profile.profileId,
-                revision: profile.revision,
-              },
-              {
-                kind: "login-owner-revision",
-                loginUid: uid,
-                profileId: owner.profileId,
-                revision: owner.revision,
-              },
-            ],
-            mutations: [{ kind: "update-active-profile", value }],
-          });
+          const value = materializeCanonicalProfileUpdate(
+            profile,
+            customizedProfile(profile, request),
+            now(),
+            request.field === "emojiAndAura"
+              ? { emojiPresent: true, gameplayEmoji: request.value.emoji }
+              : {},
+          );
+          await commitCanonicalProfileUpdate(d1, profile, value, { owner });
           return "updated";
         } catch (error) {
           if (error instanceof CanonicalProfileConflict && attempt < 4) {

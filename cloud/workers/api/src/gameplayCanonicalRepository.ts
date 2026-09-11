@@ -10,7 +10,6 @@ import {
 } from "@mons/shared/mining";
 import {
   commitCanonicalPlan,
-  materializeCanonicalProfile,
   parseCanonicalRatingUpdateRow,
   readCanonicalProfileOwnershipSnapshot,
   readCanonicalRatingUpdate,
@@ -32,6 +31,7 @@ import {
   type CanonicalSortKey,
   type CanonicalWagerSettlement,
 } from "./profileCanonicalD1.ts";
+import { materializeCanonicalProfileUpdate } from "./profileMutationD1.ts";
 import type { StateRepository } from "./stateRepositoryTypes.ts";
 import {
   deleteD1NavigationGame,
@@ -259,32 +259,6 @@ function ratingProfileFromAggregate(
   };
 }
 
-function profileValueFromSnapshot(
-  snapshot: CanonicalProfileSnapshot,
-  profile: CanonicalProfileSnapshot["profile"],
-  updatedAtMs: number,
-  sortUpdates: Partial<Record<CanonicalSortKey, number>> = {},
-  winPresent = snapshot.winPresent,
-): CanonicalProfileValue {
-  return materializeCanonicalProfile({
-    profile,
-    createdAtMs: snapshot.createdAtMs,
-    updatedAtMs: Math.max(snapshot.updatedAtMs, updatedAtMs),
-    legacyFields: snapshot.legacyFields,
-    mergedAtMs: snapshot.mergedAtMs,
-    mergedIntoProfileId: snapshot.mergedIntoProfileId,
-    state: snapshot.state,
-    sortPresence: {
-      ...snapshot.sortPresence,
-      ...Object.fromEntries(Object.keys(sortUpdates).map((key) => [key, true])),
-    },
-    sortValues: { ...snapshot.sortValues, ...sortUpdates },
-    winPresent,
-    emojiPresent: snapshot.emojiPresent,
-    gameplayEmoji: snapshot.gameplayEmoji,
-  });
-}
-
 function patchCanonicalProfile(
   snapshot: CanonicalProfileSnapshot,
   patch: Record<string, unknown>,
@@ -325,12 +299,11 @@ function patchCanonicalProfile(
       sortUpdates[material] = profile.mining.materials[material];
     }
   }
-  return profileValueFromSnapshot(
+  return materializeCanonicalProfileUpdate(
     snapshot,
     profile,
-    updatedAtMs,
-    sortUpdates,
-    winPresent,
+    Math.max(snapshot.updatedAtMs, updatedAtMs),
+    { sortUpdates, winPresent },
   );
 }
 

@@ -14,6 +14,7 @@ import {
   type CanonicalProfileMutationSnapshot,
 } from "../src/profileMutationD1.ts";
 import { createProfileCustomizationRepository } from "../src/profileCustomizationRepository.ts";
+import { createMiningRepository } from "../src/miningRepository.ts";
 import { createUsernameRepository } from "../src/usernameRepository.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
@@ -324,6 +325,127 @@ describe("canonical profile mutation reads", () => {
     });
     expect(observed.firstQueries).toHaveLength(1);
     expect(observed.batchQueries.map((queries) => queries.length)).toEqual([6]);
+  });
+
+  it("replaces a legacy emoji with zero without changing sparse fields", async () => {
+    const initial = await createProfile(
+      { aura: "rainbow" },
+      {
+        legacyFields: { imported: { emoji: "" } },
+        emojiPresent: false,
+        gameplayEmoji: "legacy-gameplay-emoji",
+        winPresent: false,
+        sortPresence: { rating: false, nonce: false, mp: true },
+        sortValues: { mp: null },
+      },
+    );
+    await expect(
+      createProfileCustomizationRepository(testEnv, {
+        now: () => 4_000,
+      }).updateCustomization(
+        initial.owner.loginUid,
+        { field: "emojiAndAura", value: { emoji: 0, aura: "" } },
+        async () => undefined,
+      ),
+    ).resolves.toBe("updated");
+    await expect(
+      readCanonicalProfile(db, initial.profile.profileId),
+    ).resolves.toEqual({
+      ...initial.profile,
+      profile: { ...initial.profile.profile, emoji: 0, aura: "" },
+      emojiPresent: true,
+      gameplayEmoji: 0,
+      revision: 2,
+      updatedAtMs: 4_000,
+    });
+  });
+
+  it("updates every mining sort while preserving unrelated sparse fields", async () => {
+    const initial = await createProfile(
+      {},
+      {
+        legacyFields: { imported: { mining: null } },
+        emojiPresent: false,
+        gameplayEmoji: "legacy-gameplay-emoji",
+        winPresent: false,
+        sortPresence: {
+          rating: false,
+          mp: true,
+          dust: false,
+          slime: false,
+          gum: false,
+          metal: false,
+          ice: false,
+        },
+        sortValues: { mp: null },
+      },
+    );
+    const mining = {
+      lastRockDate: "2026-09-11",
+      materials: { dust: 0, slime: 3, gum: 4, metal: 5, ice: 6 },
+    };
+    await expect(
+      createMiningRepository(testEnv, { now: () => 4_000 }).updateMining(
+        initial.profile.profileId,
+        mining,
+        `d1:${initial.profile.revision}`,
+      ),
+    ).resolves.toBe("updated");
+    await expect(
+      readCanonicalProfile(db, initial.profile.profileId),
+    ).resolves.toEqual({
+      ...initial.profile,
+      profile: { ...initial.profile.profile, mining },
+      sortPresence: {
+        ...initial.profile.sortPresence,
+        dust: true,
+        slime: true,
+        gum: true,
+        metal: true,
+        ice: true,
+      },
+      sortValues: { ...initial.profile.sortValues, ...mining.materials },
+      revision: 2,
+      updatedAtMs: 4_000,
+    });
+  });
+
+  it("rejects a mining write after a concurrent edit without overwriting it", async () => {
+    const initial = await createProfile();
+    const observed = observeDatabase({
+      beforeFirstBatch: async () => {
+        await createProfileCustomizationRepository(testEnv, {
+          now: () => 3_000,
+        }).updateCustomization(
+          initial.owner.loginUid,
+          { field: "cardBackgroundId", value: 4 },
+          async () => undefined,
+        );
+      },
+    });
+    await expect(
+      createMiningRepository(testEnv, {
+        d1: observed.database,
+        now: () => 4_000,
+      }).updateMining(
+        initial.profile.profileId,
+        {
+          lastRockDate: "2026-09-11",
+          materials: { dust: 0, slime: 3, gum: 4, metal: 5, ice: 6 },
+        },
+        `d1:${initial.profile.revision}`,
+      ),
+    ).resolves.toBe("conflict");
+    await expect(
+      readCanonicalProfile(db, initial.profile.profileId),
+    ).resolves.toEqual({
+      ...initial.profile,
+      profile: { ...initial.profile.profile, cardBackgroundId: 4 },
+      revision: 2,
+      updatedAtMs: 3_000,
+    });
+    expect(observed.firstQueries).toHaveLength(1);
+    expect(observed.batchQueries).toHaveLength(1);
   });
 
   it("never writes when customization authorization fails", async () => {

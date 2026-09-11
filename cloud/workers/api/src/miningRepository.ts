@@ -5,12 +5,14 @@ import {
 } from "@mons/shared/mining";
 import {
   CanonicalProfileConflict,
-  commitCanonicalPlan,
-  materializeCanonicalProfile,
   readCanonicalProfileOwnershipSnapshot,
   readCanonicalProfile,
   resolveCanonicalProfile,
 } from "./profileCanonicalD1.ts";
+import {
+  commitCanonicalProfileUpdate,
+  materializeCanonicalProfileUpdate,
+} from "./profileMutationD1.ts";
 import type {
   ProfileOwnershipReader,
   ProfileOwnershipSnapshot,
@@ -110,35 +112,18 @@ export function createMiningRepository(
       ) {
         return "conflict";
       }
-      const sortPresence = {
-        ...profile.sortPresence,
-        ...Object.fromEntries(MATERIAL_KEYS.map((key) => [key, true])),
-      };
-      const sortValues = {
-        ...profile.sortValues,
-        ...Object.fromEntries(
-          MATERIAL_KEYS.map((key) => [key, mining.materials[key]]),
-        ),
-      };
-      const value = materializeCanonicalProfile({
-        profile: { ...profile.profile, mining },
-        state: profile.state,
-        mergedIntoProfileId: profile.mergedIntoProfileId,
-        legacyFields: profile.legacyFields,
-        createdAtMs: profile.createdAtMs,
-        updatedAtMs: now(),
-        mergedAtMs: profile.mergedAtMs,
-        sortPresence,
-        sortValues,
-        winPresent: profile.winPresent,
-        emojiPresent: profile.emojiPresent,
-        gameplayEmoji: profile.gameplayEmoji,
-      });
+      const value = materializeCanonicalProfileUpdate(
+        profile,
+        { ...profile.profile, mining },
+        now(),
+        {
+          sortUpdates: Object.fromEntries(
+            MATERIAL_KEYS.map((key) => [key, mining.materials[key]]),
+          ),
+        },
+      );
       try {
-        await commitCanonicalPlan(d1, {
-          expectations: [{ kind: "profile-revision", profileId, revision }],
-          mutations: [{ kind: "update-active-profile", value }],
-        });
+        await commitCanonicalProfileUpdate(d1, profile, value);
         return "updated";
       } catch (error) {
         if (error instanceof CanonicalProfileConflict) return "conflict";

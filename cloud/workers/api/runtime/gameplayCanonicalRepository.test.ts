@@ -405,7 +405,7 @@ describe("canonical gameplay repositories", () => {
       loserProfileId: "d1-game-loser",
       material: "dust" as const,
       count: 3,
-      appliedAtMs: 3_000,
+      appliedAtMs: 500,
     };
     await expect(repository.applyWagerTransferOnce(transfer)).resolves.toBe(
       "applied",
@@ -431,10 +431,20 @@ describe("canonical gameplay repositories", () => {
       metal: false,
       ice: false,
     });
-    expect(
-      (await readCanonicalProfile(testEnv.PROFILE_DB, "d1-game-loser"))?.profile
-        .mining.materials.dust,
-    ).toBe(7);
+    expect(storedWinner?.sortValues).toMatchObject({
+      dust: 3,
+      slime: null,
+      gum: null,
+      metal: null,
+      ice: null,
+    });
+    expect(storedWinner?.updatedAtMs).toBe(1_000);
+    const storedLoser = await readCanonicalProfile(
+      testEnv.PROFILE_DB,
+      "d1-game-loser",
+    );
+    expect(storedLoser?.profile.mining.materials.dust).toBe(7);
+    expect(storedLoser?.updatedAtMs).toBe(1_000);
   });
 
   it("records insufficient materials with the raw fingerprint", async () => {
