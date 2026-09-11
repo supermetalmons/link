@@ -4,14 +4,14 @@ import { applyStrictMatchStateTestMigrations } from "./strictMatchStateTestFixtu
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createAutomatchPersistence } from "../src/automatchPersistence.ts";
 import { createGameSessionMutationLockStore } from "../src/gameplayCoordinationD1.ts";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import type { StateRepository } from "../src/stateRepositoryTypes.ts";
 import { validateTelegramTransactionDecision } from "../src/telegramTransaction.ts";
 import { resetMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
 
-function firebase() {
+function memoryState() {
   const values = new Map<string, unknown>();
   const patches: Record<string, unknown>[] = [];
   const assertLivePath = (path: string) => {
@@ -19,10 +19,10 @@ function firebase() {
       !/^players\/[^/]+\/matches\//.test(path) &&
       !path.startsWith("matchTimerClaims/")
     ) {
-      throw new Error("retired-firebase-path");
+      throw new Error("retired-source-path");
     }
   };
-  const client: FirebaseRtdbClient = {
+  const client: StateRepository = {
     async getPath(path) {
       assertLivePath(path);
       return structuredClone(values.get(path) ?? null);
@@ -56,7 +56,7 @@ function firebase() {
   return { values, patches, client };
 }
 
-function persistence(client: FirebaseRtdbClient, database = db) {
+function persistence(client: StateRepository, database = db) {
   return createAutomatchPersistence(database, client, {
     async prepareMatchPresentations(creations) {
       return creations.map((creation) => ({
@@ -106,7 +106,7 @@ describe("automatch persistence integration", () => {
   });
 
   it("routes mixed session writes through the journal and outbox transactions exclusively to D1", async () => {
-    const raw = firebase();
+    const raw = memoryState();
     const runtime = persistence(raw.client);
     const locks = runtime.decorateLocks(createGameSessionMutationLockStore(db));
     const lock = { lockId: "invite-one", operationId: "operation-one" };
@@ -163,7 +163,7 @@ describe("automatch persistence integration", () => {
   });
 
   it("recovers an uncertain match creation before admitting a competing session and preserves moves", async () => {
-    const raw = firebase();
+    const raw = memoryState();
     let failCreation = true;
     const runtime = persistence({
       ...raw.client,
@@ -224,7 +224,7 @@ describe("automatch persistence integration", () => {
   });
 
   it("rejects frozen persistence writes while allowing raw live match updates", async () => {
-    const raw = firebase();
+    const raw = memoryState();
     const runtime = persistence(raw.client);
     await db
       .prepare(
@@ -261,7 +261,7 @@ describe("automatch persistence integration", () => {
           )
           .run();
       }
-      const raw = firebase();
+      const raw = memoryState();
       const runtime = persistence(raw.client);
       await expect(
         runtime.client.getPath("invites/invite-one"),
@@ -298,7 +298,7 @@ describe("automatch persistence integration", () => {
   );
 
   it("rejects direct invite mutations while preserving raw match and timer operations", async () => {
-    const raw = firebase();
+    const raw = memoryState();
     const runtime = persistence(raw.client);
     await expect(
       runtime.client.patchRoot({ "invites/invite-one": { hostId: "host" } }),
@@ -343,7 +343,7 @@ describe("automatch persistence integration", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
-    const runtime = persistence(firebase().client, observed);
+    const runtime = persistence(memoryState().client, observed);
     await runtime.recoverLogins(
       Array.from({ length: 512 }, (_, i) => `login-${i}`),
     );

@@ -1,4 +1,4 @@
-import { createHash, createSign, randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   constants,
@@ -23,8 +23,6 @@ import { spawnSync } from "node:child_process";
 
 type JsonRecord = Record<string, unknown>;
 
-const PROJECT_ID = "mons-link";
-
 const PROFILE_DATABASE = "mons-link-profiles";
 
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -38,10 +36,6 @@ function record(value: unknown): JsonRecord | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonRecord)
     : null;
-}
-
-function integer(value: unknown): value is number {
-  return Number.isSafeInteger(value) && Number(value) >= 0;
 }
 
 function canonicalJson(value: unknown): string {
@@ -342,93 +336,6 @@ async function readResponseJson(
   }
 }
 
-function createFirebaseTokenProvider(
-  credentialsPath?: string,
-): () => Promise<string> {
-  let cached: { value: string; expiresAt: number } | null = null;
-  return async () => {
-    if (cached && cached.expiresAt > Date.now() + 60_000) return cached.value;
-    const body = new URLSearchParams();
-    if (credentialsPath) {
-      const credentials = record(readPrivateJson(credentialsPath, true));
-      if (
-        !credentials ||
-        credentials.type !== "service_account" ||
-        typeof credentials.client_email !== "string" ||
-        typeof credentials.private_key !== "string" ||
-        credentials.project_id !== PROJECT_ID
-      )
-        throw new Error(
-          "expected a private mons-link service-account credential file",
-        );
-      const issuedAt = Math.floor(Date.now() / 1000);
-      const encoded = (value: unknown) =>
-        Buffer.from(JSON.stringify(value)).toString("base64url");
-      const message = `${encoded({ alg: "RS256", typ: "JWT" })}.${encoded({ iss: credentials.client_email, scope: "https://www.googleapis.com/auth/firebase.database https://www.googleapis.com/auth/userinfo.email", aud: "https://oauth2.googleapis.com/token", iat: issuedAt, exp: issuedAt + 3600 })}`;
-      const signature = createSign("RSA-SHA256")
-        .update(message)
-        .sign(credentials.private_key, "base64url");
-      body.set("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer");
-      body.set("assertion", `${message}.${signature}`);
-    } else {
-      const require = createRequire(import.meta.url);
-      const auth = require("firebase-tools/lib/auth.js") as {
-        getProjectDefaultAccount(path: string):
-          | {
-              tokens?: {
-                refresh_token?: string;
-                access_token?: string;
-                expires_at?: number;
-              };
-            }
-          | undefined;
-      };
-      const api = require("firebase-tools/lib/api.js") as {
-        clientId(): string;
-        clientSecret(): string;
-      };
-      const account = auth.getProjectDefaultAccount(resolve(ROOT, "cloud"));
-      const tokens = account?.tokens;
-      if (
-        tokens?.access_token &&
-        typeof tokens.expires_at === "number" &&
-        tokens.expires_at > Date.now() + 60_000
-      ) {
-        cached = { value: tokens.access_token, expiresAt: tokens.expires_at };
-        return cached.value;
-      }
-      if (!tokens?.refresh_token)
-        throw new Error(
-          "Firebase authentication unavailable; run firebase login locally or provide --firebase-credentials",
-        );
-      body.set("grant_type", "refresh_token");
-      body.set("refresh_token", tokens.refresh_token);
-      body.set("client_id", api.clientId());
-      body.set("client_secret", api.clientSecret());
-    }
-    const response = await fetch("https://oauth2.googleapis.com/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-      redirect: "error",
-      signal: AbortSignal.timeout(30_000),
-    });
-    const token = record(await readResponseJson(response, 64 * 1024));
-    if (
-      !token ||
-      typeof token.access_token !== "string" ||
-      !integer(token.expires_in) ||
-      token.expires_in < 1
-    )
-      throw new Error("invalid Firebase access-token response");
-    cached = {
-      value: token.access_token,
-      expiresAt: Date.now() + token.expires_in * 1000,
-    };
-    return cached.value;
-  };
-}
-
 function resolveCloudflareToken(): string {
   if (process.env.CLOUDFLARE_API_TOKEN) return process.env.CLOUDFLARE_API_TOKEN;
   const directory = privateDirectory(
@@ -483,7 +390,6 @@ export {
   writePrivateImmutable,
   createWranglerRunner,
   readResponseJson,
-  createFirebaseTokenProvider,
   resolveCloudflareToken,
   type SqlRunner,
 };

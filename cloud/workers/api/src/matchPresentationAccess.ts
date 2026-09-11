@@ -9,7 +9,7 @@ import {
   rematchSeriesEnded,
 } from "@mons/shared/rematches";
 import { AuthApiFailure } from "./authErrors.ts";
-import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import type { InviteReactions } from "./inviteReactions.ts";
 import {
@@ -37,7 +37,7 @@ export function isPresentationMatchId(
 ): boolean {
   return (
     matchId === matchId.trim() &&
-    isSafeFirebaseKey(matchId) &&
+    isSafeRecordKey(matchId) &&
     parseInviteMatchIndex(inviteId, matchId) !== null
   );
 }
@@ -46,7 +46,7 @@ export async function readPresentationInvite(
   repository: GameplayRepository,
   inviteId: string,
 ): Promise<PresentationInvite> {
-  const value = await repository.getRtdbPath(`invites/${inviteId}`);
+  const value = await repository.getStatePath(`invites/${inviteId}`);
   if (value === null || value === undefined) {
     throw new AuthApiFailure(404, "not-found", "invite-not-found");
   }
@@ -56,10 +56,10 @@ export async function readPresentationInvite(
       : null;
   if (
     !invite ||
-    !isCanonicalFirebaseUid(invite.hostId) ||
+    !isCanonicalLoginUid(invite.hostId) ||
     (invite.guestId !== undefined &&
       invite.guestId !== null &&
-      (!isCanonicalFirebaseUid(invite.guestId) ||
+      (!isCanonicalLoginUid(invite.guestId) ||
         invite.guestId === invite.hostId))
   ) {
     throw new AuthApiFailure(409, "failed-precondition", "invite-invalid");

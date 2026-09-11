@@ -159,30 +159,31 @@ function repository(
   const transactState =
     overrides.transactState ||
     (async () => ({ committed: false, value: null }));
-  const value: Omit<GameplayRepository, "getRtdbPath" | "transactRtdbPath"> = {
-    applyWagerTransferOnce: async () => "applied",
-    deleteNavigationGame: async () => "deleted",
-    getNavigationGame: async () => null,
-    getMiningMaterials: async () => ({
-      dust: 10,
-      slime: 10,
-      gum: 10,
-      metal: 10,
-      ice: 10,
-    }),
-    getMiningSnapshot: async () => null,
-    readState: async () => ({ hostId: "host", guestId: "guest" }),
-    patchRtdbRoot: async () => undefined,
-    readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
-    ...overrides,
-    transactState: async (path, updater, signal) => {
-      assert.doesNotMatch(
-        path,
-        /^(?:gameplayMutationLocks|matchTimerStarts)\//,
-      );
-      return transactState(path, updater, signal);
-    },
-  };
+  const value: Omit<GameplayRepository, "getStatePath" | "transactStatePath"> =
+    {
+      applyWagerTransferOnce: async () => "applied",
+      deleteNavigationGame: async () => "deleted",
+      getNavigationGame: async () => null,
+      getMiningMaterials: async () => ({
+        dust: 10,
+        slime: 10,
+        gum: 10,
+        metal: 10,
+        ice: 10,
+      }),
+      getMiningSnapshot: async () => null,
+      readState: async () => ({ hostId: "host", guestId: "guest" }),
+      patchStateRoot: async () => undefined,
+      readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
+      ...overrides,
+      transactState: async (path, updater, signal) => {
+        assert.doesNotMatch(
+          path,
+          /^(?:gameplayMutationLocks|matchTimerStarts)\//,
+        );
+        return transactState(path, updater, signal);
+      },
+    };
   return attachMemoryWagerFrozenStore(value);
 }
 
@@ -735,7 +736,7 @@ test("accept reserves the available count and clears both proposals", async () =
         if (path === "reservations/guest") return mining.guest;
         return wager;
       },
-      patchRtdbRoot: async (updates) => {
+      patchStateRoot: async (updates) => {
         patches.push(updates);
       },
       transactState: async (path, updater) => {

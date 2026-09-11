@@ -1,11 +1,11 @@
 import {
   EVENT_PRIZE_ANNOUNCEMENT_LEAD_MS,
   isEventPrizeAnnouncementEvent,
-} from "../../../functions/telegram/eventPrizeAnnouncement.js";
+} from "../../../runtime/telegram/eventPrizeAnnouncement.js";
 import {
   SUNDAY_MONS_REMINDER_LEAD_MS,
   isSundayMonsReminderEvent,
-} from "../../../functions/telegram/sundayMonsReminder.js";
+} from "../../../runtime/telegram/sundayMonsReminder.js";
 
 export const EVENT_ANNOUNCEMENT_KINDS = ["prizes", "reminder"] as const;
 export type EventAnnouncementKind = (typeof EVENT_ANNOUNCEMENT_KINDS)[number];

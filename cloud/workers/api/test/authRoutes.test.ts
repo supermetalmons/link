@@ -77,7 +77,7 @@ function stateRepository(
       method: "x",
       nonce: "nonce",
       state: "state",
-      uid: "firebase-uid",
+      uid: "login-uid",
     }),
     getXFlow: async () => null,
     updateXFlow: async () => 2,
@@ -95,14 +95,14 @@ function intent(overrides: Partial<AuthIntentRecord> = {}): AuthIntentRecord {
     method: "x",
     nonce: "nonce",
     state: "state",
-    uid: "firebase-uid",
+    uid: "login-uid",
     ...overrides,
   };
 }
 
 const verifyIdentity = async () => ({
-  idToken: "firebase-id-token",
-  uid: "firebase-uid",
+  idToken: "session-token",
+  uid: "login-uid",
 });
 
 function responseJson(response: Response): Promise<Record<string, unknown>> {
@@ -338,16 +338,16 @@ test("creates exact auth intents for every supported method", async () => {
     assert.equal(payload.expiresAtMs, 1_300_000);
   }
   assert.deepEqual(keys, [
-    "auth-intent:eth:firebase-uid",
-    "auth-intent:sol:firebase-uid",
-    "auth-intent:apple:firebase-uid",
-    "auth-intent:x:firebase-uid",
+    "auth-intent:eth:login-uid",
+    "auth-intent:sol:login-uid",
+    "auth-intent:apple:login-uid",
+    "auth-intent:x:login-uid",
   ]);
   assert.equal(documents.length, 4);
   assert.match(documents[0].nonce, /^[A-Za-z0-9]{24}$/);
   assert.match(documents[1].nonce, /^[A-Za-z0-9_-]{24}$/);
   assert.equal(documents[0].consumedAtMs, null);
-  assert.equal(documents[0].uid, "firebase-uid");
+  assert.equal(documents[0].uid, "login-uid");
 });
 
 test("validates intent bodies, fails closed, and bounds ID collisions", async () => {
@@ -433,7 +433,7 @@ test("returns linked methods using the verified UID", async () => {
     },
   );
   assert.equal(response.status, 200);
-  assert.deepEqual(calls, ["firebase-uid"]);
+  assert.deepEqual(calls, ["login-uid"]);
   assert.deepEqual(await responseJson(response), {
     ok: true,
     profileId: "profile-1",
@@ -558,7 +558,7 @@ for (const syncPath of ["/auth/profile/sync", "/auth/profile-claim/sync"]) {
       },
     );
     assert.equal(response.status, 200);
-    assert.deepEqual(calls, ["firebase-uid", "firebase-uid"]);
+    assert.deepEqual(calls, ["login-uid", "login-uid"]);
     assert.deepEqual(await responseJson(response), {
       ok: true,
       profileId: "profile-1",
@@ -644,7 +644,7 @@ for (const syncPath of ["/auth/profile/sync", "/auth/profile-claim/sync"]) {
       },
     );
     assert.equal(response.status, 429);
-    assert.deepEqual(keys, ["auth-profile-claim:firebase-uid"]);
+    assert.deepEqual(keys, ["auth-profile-claim:login-uid"]);
     assert.equal(profileReads, 0);
   });
 }
@@ -695,7 +695,7 @@ test("creates an exact X flow with bounded intent and PKCE state", async () => {
   assert.equal(created[0].returnUrl, "https://mons.link/settings?tab=identity");
   assert.equal(created[0].codeVerifier.length, 64);
   assert.equal(created[0].codeChallenge.length, 43);
-  assert.deepEqual(rateKeys, ["auth-x-flow:firebase-uid"]);
+  assert.deepEqual(rateKeys, ["auth-x-flow:login-uid"]);
 });
 
 test("keeps only exact account-owned preview X return URLs", async () => {
@@ -853,7 +853,7 @@ test("falls back unsafe X return URLs and sanitizes repository failures", async 
       logFailure: (kind) => logs.push(kind),
       repository: repository({
         getLinkedAuthMethods: async () => {
-          throw new Error("private-firebase-id-token-flow-id");
+          throw new Error("private-session-token-flow-id");
         },
       }),
       verifyIdentity,
@@ -923,7 +923,7 @@ test("rate limits and dispatches auth mutations after session authentication", a
             throw new Error("unexpected");
           },
           unlinkMethod: async (uid, method, opId) => {
-            assert.equal(uid, "firebase-uid");
+            assert.equal(uid, "login-uid");
             assert.equal(method, "apple");
             assert.equal(opId, "6ba7b810-9dad-41d1-80b4-00c04fd430c8");
             return {
@@ -945,7 +945,7 @@ test("rate limits and dispatches auth mutations after session authentication", a
     },
   );
   assert.equal(response.status, 200);
-  assert.deepEqual(keys, ["auth-mutation:methods:unlink:firebase-uid"]);
+  assert.deepEqual(keys, ["auth-mutation:methods:unlink:login-uid"]);
   assert.deepEqual(await responseJson(response), {
     ok: true,
     profileId: "profile-1",

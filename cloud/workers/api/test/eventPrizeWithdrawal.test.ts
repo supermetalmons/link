@@ -188,14 +188,14 @@ function repository() {
     }),
     getMiningSnapshot: async () => null,
     getNavigationGame: async () => null,
-    getRtdbPath: async (path) => values.get(path) ?? null,
-    patchRtdbRoot: async (updates) => {
+    getStatePath: async (path) => values.get(path) ?? null,
+    patchStateRoot: async (updates) => {
       for (const [path, next] of Object.entries(updates)) {
         if (next === null) values.delete(path);
         else values.set(path, next);
       }
     },
-    transactRtdbPath: async (path, updater) => {
+    transactStatePath: async (path, updater) => {
       const current = values.get(path) ?? null;
       const decision = updater(current) as {
         commit?: false;
@@ -225,16 +225,12 @@ function repository() {
         ) as Record<string, unknown> | undefined) ?? null
       );
     },
-    reference(candidateEventId, candidatePrizeId) {
+    record(candidateEventId, candidatePrizeId) {
       const path = `eventPrizeWithdrawals/${candidateEventId}/${candidatePrizeId}`;
       const read = () => values.get(path) ?? null;
       return {
-        async once() {
-          const current = read();
-          return {
-            exists: () => current !== null && current !== undefined,
-            val: () => current,
-          };
+        async read() {
+          return read();
         },
         async transaction(updater) {
           const current = read();
@@ -242,14 +238,14 @@ function repository() {
           if (next === undefined) {
             return {
               committed: false,
-              snapshot: { exists: () => current !== null, val: () => current },
+              value: current,
             };
           }
           if (next === null) values.delete(path);
           else values.set(path, next);
           return {
             committed: true,
-            snapshot: { exists: () => next !== null, val: () => next },
+            value: next,
           };
         },
         async update(updates) {
@@ -851,14 +847,16 @@ test("completed execution retries projection cleanup failures", async () => {
     status: "completed",
     transactionSignature: "signature",
   });
-  const transactRtdbPath = state.value.transactRtdbPath;
+  const transactStatePath = state.value.transactStatePath;
   const failingRepository = {
     ...state.value,
-    transactRtdbPath: async (...args: Parameters<typeof transactRtdbPath>) => {
+    transactStatePath: async (
+      ...args: Parameters<typeof transactStatePath>
+    ) => {
       if (args[0].startsWith("profileEventPrizes/")) {
         throw new Error("database unavailable");
       }
-      return transactRtdbPath(...args);
+      return transactStatePath(...args);
     },
   };
 

@@ -19,19 +19,19 @@ import {
   releaseInviteSourceAdmission,
 } from "../src/inviteSourceD1.ts";
 import { createAutomatchPersistence } from "../src/automatchPersistence.ts";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import type { StateRepository } from "../src/stateRepositoryTypes.ts";
 
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
 const db = env.PROFILE_GAMES_DB;
-const raw: FirebaseRtdbClient = {
+const raw: StateRepository = {
   async getPath() {
-    throw new Error("unexpected-firebase-read");
+    throw new Error("unexpected-source-read");
   },
   async patchRoot() {
-    throw new Error("unexpected-firebase-write");
+    throw new Error("unexpected-source-write");
   },
   async transactPath() {
-    throw new Error("unexpected-firebase-write");
+    throw new Error("unexpected-source-write");
   },
 };
 
@@ -165,24 +165,24 @@ describe("canonical invite source", () => {
   });
 
   it("rejects a retired source mode and never falls back for missing D1 rows", async () => {
-    let firebaseReads = 0;
-    const raw: FirebaseRtdbClient = {
+    let sourceReads = 0;
+    const raw: StateRepository = {
       async getPath() {
-        firebaseReads++;
-        return { hostId: "stale-firebase" };
+        sourceReads++;
+        return { hostId: "stale-source" };
       },
       async patchRoot() {
-        throw new Error("unexpected-firebase-write");
+        throw new Error("unexpected-source-write");
       },
       async transactPath() {
-        throw new Error("unexpected-firebase-write");
+        throw new Error("unexpected-source-write");
       },
     };
     const coordinator = createAutomatchPersistence(db, raw);
     await expect(coordinator.client.getPath("invites/one")).rejects.toThrow(
       "invite-source-backend-retired",
     );
-    expect(firebaseReads).toBe(0);
+    expect(sourceReads).toBe(0);
     await activate();
     const store = createInviteSourceD1Store(db);
     await db.batch(
@@ -207,14 +207,14 @@ describe("canonical invite source", () => {
       await coordinator.client.getPath("invites/one", { shallow: true }),
     ).toEqual({ hostId: true, password: true, settings: true });
     expect(await coordinator.client.getPath("invites/missing")).toBeNull();
-    expect(firebaseReads).toBe(0);
+    expect(sourceReads).toBe(0);
     await db
       .prepare("DELETE FROM invite_source_control WHERE singleton = 1")
       .run();
     await expect(coordinator.client.getPath("invites/one")).rejects.toThrow(
       "invite-source-control-unavailable",
     );
-    expect(firebaseReads).toBe(0);
+    expect(sourceReads).toBe(0);
     await db
       .prepare(
         `INSERT INTO invite_source_control (singleton, backend, state, epoch, freeze_generation)

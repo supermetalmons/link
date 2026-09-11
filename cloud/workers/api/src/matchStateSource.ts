@@ -1,4 +1,4 @@
-import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
+import type { StateRepository } from "./stateRepositoryTypes.ts";
 import { registerMatchStateRoutes } from "./matchStateD1.ts";
 import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
 import {
@@ -6,9 +6,9 @@ import {
   readMatchStateRecord,
 } from "./matchStateRouting.ts";
 import { getMatchStateRpc, unwrapMatchStateRpc } from "./matchStateRpc.ts";
-import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 
-export function createMatchStateSource(env: Env): FirebaseRtdbClient {
+export function createMatchStateSource(env: Env): StateRepository {
   return {
     async getPath(path, query, signal) {
       signal?.throwIfAborted();
@@ -17,8 +17,8 @@ export function createMatchStateSource(env: Env): FirebaseRtdbClient {
         parts[0] !== "players" ||
         parts[2] !== "matches" ||
         parts.length < 4 ||
-        !isCanonicalFirebaseUid(parts[1]) ||
-        parts.slice(3).some((part) => !isSafeFirebaseKey(part)) ||
+        !isCanonicalLoginUid(parts[1]) ||
+        parts.slice(3).some((part) => !isSafeRecordKey(part)) ||
         query
       )
         throw new Error("match-state-unsupported-read-path");

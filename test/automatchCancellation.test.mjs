@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
 import { moveDeliveryStorageKey } from "../src/connection/moveDelivery.ts";
-import { isAutoInviteId } from "../cloud/functions/shared/ids.js";
+import { isAutoInviteId } from "../cloud/runtime/shared/ids.js";
 import { withAutomatchOperationLock } from "../src/connection/automatchOperationLock.ts";
 import { InviteMetadataState } from "../src/connection/inviteMetadataState.ts";
 
@@ -63,7 +63,7 @@ function instantiate(source, className, dependencies) {
   return Constructor;
 }
 
-const UID = "firebase-uid";
+const UID = "login-uid";
 const INVITE_ID = "auto_canceled";
 const OPERATION_ID = "00000000-0000-4000-8000-000000000001";
 const pendingInvite = {

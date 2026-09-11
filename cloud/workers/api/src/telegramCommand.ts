@@ -2,10 +2,10 @@ import {
   buildTelegramDeleteDesired,
   buildTelegramSendDesired,
   validateTelegramMessageKey,
-} from "../../../functions/telegram/desiredStateCore.js";
-import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
+} from "../../../runtime/telegram/desiredStateCore.js";
+import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
 import { refreshSundayMonsReminder } from "./eventReminderProjection.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import { readBoundedBody } from "./http.ts";
 import {
   hasValidTelegramBridgeSignature,
@@ -133,7 +133,7 @@ function parseCommand(body: string): TelegramCommand {
     if (
       typeof eventId !== "string" ||
       eventId !== eventId.trim() ||
-      !isSafeFirebaseKey(eventId)
+      !isSafeRecordKey(eventId)
     ) {
       throw new TypeError("invalid-event-id");
     }

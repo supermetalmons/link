@@ -2,11 +2,11 @@ import {
   TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT,
   getAutomatchTelegramProjectionOutboxPath,
   getAutomatchTelegramSourcePath,
-} from "../../../functions/telegram/automatchSource.js";
+} from "../../../runtime/telegram/automatchSource.js";
 import {
   buildTelegramEditDesired,
   buildTelegramSendDesired,
-} from "../../../functions/telegram/desiredStateCore.js";
+} from "../../../runtime/telegram/desiredStateCore.js";
 import {
   asObject,
   buildAutomatchProjectionGuard,
@@ -15,15 +15,15 @@ import {
   mergeRatingResultFragment,
   shouldProjectRatingTelegramUpdate,
   type AutomatchTelegramProjection,
-} from "../../../functions/telegram/projectionCore.js";
-import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
-import { createEventRtdbClient } from "./eventRepository.ts";
+} from "../../../runtime/telegram/projectionCore.js";
+import type { StateRepository } from "./stateRepositoryTypes.ts";
+import { createEventStateRepository } from "./eventRepository.ts";
 import {
   createGameplayRepository,
   createRatingRepository,
   type RatingProjectionRepository,
 } from "./gameplayRepository.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import {
   parseTelegramProjectionTask,
   TELEGRAM_PROJECTION_SCHEMA_VERSION,
@@ -35,7 +35,7 @@ import {
   enqueueInitialTelegramDelivery,
   type InitialTelegramDelivery,
 } from "./telegramDeliveryTasks.ts";
-import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
+import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
 import {
   createD1TelegramAnnouncementRepository,
   createD1TelegramRepository,
@@ -64,7 +64,7 @@ type ProjectionLogger = Pick<Console, "error" | "info">;
 
 type ProjectionDependencies = {
   createRating?: (env: Env) => RatingProjectionRepository;
-  createRtdb?: (env: Env) => FirebaseRtdbClient;
+  createStateRepository?: (env: Env) => StateRepository;
   createTelegram?: (env: Env) => TelegramRepository;
   createAnnouncements?: (
     env: Env,
@@ -92,7 +92,7 @@ function parseOutbox(value: unknown): AutomatchProjectionOutbox | null {
   return record?.schemaVersion === TELEGRAM_PROJECTION_SCHEMA_VERSION &&
     record.status === "pending" &&
     typeof record.requestId === "string" &&
-    isSafeFirebaseKey(record.requestId) &&
+    isSafeRecordKey(record.requestId) &&
     typeof updatedAtMs === "number" &&
     Number.isFinite(updatedAtMs) &&
     updatedAtMs >= 0
@@ -123,21 +123,21 @@ function projectionDesired(projection: AutomatchTelegramProjection) {
 
 async function readAutomatchInputs(
   inviteId: string,
-  rtdb: FirebaseRtdbClient,
+  state: StateRepository,
 ): Promise<{ inviteData: unknown; source: unknown }> {
   const [source, inviteData] = await Promise.all([
-    rtdb.getPath(getAutomatchTelegramSourcePath(inviteId)),
-    rtdb.getPath(`invites/${inviteId}`),
+    state.getPath(getAutomatchTelegramSourcePath(inviteId)),
+    state.getPath(`invites/${inviteId}`),
   ]);
   return { source, inviteData };
 }
 
 async function projectAutomatchSource(
   inviteId: string,
-  rtdb: FirebaseRtdbClient,
+  state: StateRepository,
   telegram: TelegramRepository,
 ): Promise<AutomatchProjectionResult> {
-  let input = await readAutomatchInputs(inviteId, rtdb);
+  let input = await readAutomatchInputs(inviteId, state);
   for (let attempt = 0; attempt < PROJECTION_INPUT_RETRIES; attempt += 1) {
     const projection = buildAutomatchTelegramProjection({
       inviteId,
@@ -165,7 +165,7 @@ async function projectAutomatchSource(
         };
       },
     );
-    const latest = await readAutomatchInputs(inviteId, rtdb);
+    const latest = await readAutomatchInputs(inviteId, state);
     if (inputFingerprint(input) === inputFingerprint(latest)) {
       return transaction.committed
         ? {
@@ -183,20 +183,20 @@ async function projectAutomatchSource(
 }
 
 async function settleAutomatchOutbox(
-  rtdb: FirebaseRtdbClient,
+  state: StateRepository,
   task: AutomatchTelegramProjectionTask,
-  state: "clear" | "dead",
+  disposition: "clear" | "dead",
   now: () => number,
   reason = "",
 ): Promise<boolean> {
-  const result = await rtdb.transactPath(
+  const result = await state.transactPath(
     getAutomatchTelegramProjectionOutboxPath(task.inviteId),
     (current) => {
       const record = toRecord(current);
       if (record?.requestId !== task.requestId) {
         return { commit: false, decision: "stale" };
       }
-      return state === "clear"
+      return disposition === "clear"
         ? { value: null, decision: "cleared" }
         : {
             value: {
@@ -215,24 +215,26 @@ async function settleAutomatchOutbox(
 
 async function processAutomatchTask(
   task: AutomatchTelegramProjectionTask,
-  rtdb: FirebaseRtdbClient,
+  state: StateRepository,
   enqueueDelivery: (input: InitialTelegramDelivery) => Promise<unknown>,
   now: () => number,
   telegram: TelegramRepository,
 ): Promise<string> {
   const outbox = parseOutbox(
-    await rtdb.getPath(getAutomatchTelegramProjectionOutboxPath(task.inviteId)),
+    await state.getPath(
+      getAutomatchTelegramProjectionOutboxPath(task.inviteId),
+    ),
   );
   if (!outbox || outbox.requestId !== task.requestId) {
     return "stale";
   }
   const projection = await projectAutomatchSource(
     task.inviteId,
-    rtdb,
+    state,
     telegram,
   );
   if (projection.status === "invalid") {
-    await settleAutomatchOutbox(rtdb, task, "dead", now, "invalid-source");
+    await settleAutomatchOutbox(state, task, "dead", now, "invalid-source");
     return "dead";
   }
   if (projection.delivery) {
@@ -242,13 +244,13 @@ async function processAutomatchTask(
       producer: "automatch-projection",
     });
   }
-  await settleAutomatchOutbox(rtdb, task, "clear", now);
+  await settleAutomatchOutbox(state, task, "clear", now);
   return projection.status;
 }
 
 async function processRatingTask(
   task: RatingTelegramProjectionTask,
-  rtdb: FirebaseRtdbClient,
+  state: StateRepository,
   rating: RatingProjectionRepository,
   enqueueDelivery: (input: InitialTelegramDelivery) => Promise<unknown>,
   now: () => number,
@@ -271,7 +273,7 @@ async function processRatingTask(
     return "dead";
   }
   let mergeReason = "skipped";
-  await rtdb.transactPath(
+  await state.transactPath(
     getAutomatchTelegramSourcePath(update.inviteId),
     (source) => {
       const merged = mergeRatingResultFragment(source, update);
@@ -292,7 +294,7 @@ async function processRatingTask(
   }
   const projection = await projectAutomatchSource(
     update.inviteId,
-    rtdb,
+    state,
     telegram,
   );
   if (projection.status === "invalid") {
@@ -335,9 +337,9 @@ export async function handleTelegramProjectionMessage(
     );
     return;
   }
-  const createRtdb =
-    dependencies.createRtdb ||
-    ((workerEnv: Env) => createEventRtdbClient(workerEnv));
+  const createStateRepository =
+    dependencies.createStateRepository ||
+    ((workerEnv: Env) => createEventStateRepository(workerEnv));
   const createRating =
     dependencies.createRating ||
     ((workerEnv: Env) =>
@@ -355,7 +357,7 @@ export async function handleTelegramProjectionMessage(
     return;
   }
   try {
-    const rtdb = createRtdb(env);
+    const state = createStateRepository(env);
     const telegram = dependencies.createTelegram
       ? dependencies.createTelegram(env)
       : createD1TelegramRepository(env.TELEGRAM_DB, { now });
@@ -363,7 +365,7 @@ export async function handleTelegramProjectionMessage(
     if (task.kind === "automatch-telegram-projection") {
       status = await processAutomatchTask(
         task,
-        rtdb,
+        state,
         enqueueDelivery,
         now,
         telegram,
@@ -371,7 +373,7 @@ export async function handleTelegramProjectionMessage(
     } else if (task.kind === "event-telegram-projection") {
       status = await processEventProjectionTask(
         task,
-        rtdb,
+        state,
         createRating(env),
         enqueueDelivery,
         now,
@@ -386,7 +388,7 @@ export async function handleTelegramProjectionMessage(
     } else {
       status = await processRatingTask(
         task,
-        rtdb,
+        state,
         createRating(env),
         enqueueDelivery,
         now,
@@ -419,11 +421,11 @@ export async function handleTelegramProjectionQueue(
   batch: MessageBatch<unknown>,
   env: Env,
 ): Promise<void> {
-  const rtdb = createEventRtdbClient(env);
+  const state = createEventStateRepository(env);
   const rating = createRatingRepository(env, createGameplayRepository(env));
   for (const message of batch.messages) {
     await handleTelegramProjectionMessage(message, env, {
-      createRtdb: () => rtdb,
+      createStateRepository: () => state,
       createRating: () => rating,
     });
   }
@@ -443,7 +445,7 @@ function automatchSweepEntries(value: unknown): AutomatchSweepEntry[] {
   return Object.entries(records).flatMap(([inviteId, raw]) => {
     const outbox = parseOutbox(raw);
     return [
-      outbox && isSafeFirebaseKey(inviteId)
+      outbox && isSafeRecordKey(inviteId)
         ? {
             kind: "candidate" as const,
             value: {
@@ -471,11 +473,11 @@ function automatchSweepTasks(value: unknown): TelegramProjectionTask[] {
 }
 
 async function claimAutomatchSweepCandidate(
-  rtdb: FirebaseRtdbClient,
+  state: StateRepository,
   candidate: AutomatchSweepCandidate,
   nowMs: number,
 ): Promise<boolean> {
-  const result = await rtdb.transactPath(
+  const result = await state.transactPath(
     getAutomatchTelegramProjectionOutboxPath(candidate.task.inviteId),
     (current) => {
       const outbox = parseOutbox(current);
@@ -497,18 +499,18 @@ async function claimAutomatchSweepCandidate(
 }
 
 async function markInvalidAutomatchSweepEntry(
-  rtdb: FirebaseRtdbClient,
+  state: StateRepository,
   inviteId: string,
   nowMs: number,
 ): Promise<void> {
-  await rtdb.transactPath(
+  await state.transactPath(
     getAutomatchTelegramProjectionOutboxPath(inviteId),
     (current) => {
       const record = toRecord(current);
       const updatedAtMs = record?.updatedAtMs;
       if (
         !record ||
-        (parseOutbox(current) && isSafeFirebaseKey(inviteId)) ||
+        (parseOutbox(current) && isSafeRecordKey(inviteId)) ||
         typeof updatedAtMs !== "number" ||
         !Number.isFinite(updatedAtMs) ||
         updatedAtMs > nowMs
@@ -561,12 +563,12 @@ async function collectSuccessfulClaims<T>(
 
 async function sweepAutomatchProjections(
   env: Env,
-  rtdb: FirebaseRtdbClient,
+  state: StateRepository,
   logger: ProjectionLogger,
   nowMs: number,
 ): Promise<number> {
   try {
-    const value = await rtdb.getPath(
+    const value = await state.getPath(
       TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT,
       {
         orderBy: "updatedAtMs",
@@ -585,7 +587,7 @@ async function sweepAutomatchProjections(
     let invalidFailure: Error | null = null;
     for (const inviteId of invalidInviteIds) {
       try {
-        await markInvalidAutomatchSweepEntry(rtdb, inviteId, nowMs);
+        await markInvalidAutomatchSweepEntry(state, inviteId, nowMs);
       } catch (error) {
         invalidFailure ||=
           error instanceof Error
@@ -594,7 +596,7 @@ async function sweepAutomatchProjections(
       }
     }
     const claims = await collectSuccessfulClaims(candidates, (candidate) =>
-      claimAutomatchSweepCandidate(rtdb, candidate, nowMs),
+      claimAutomatchSweepCandidate(state, candidate, nowMs),
     );
     const tasks = claims.claimed.map(({ task }) => task);
     await sendTaskBatches(env.TELEGRAM_PROJECTION_QUEUE, tasks);
@@ -660,21 +662,21 @@ export async function sweepTelegramProjections(
 ): Promise<{ automatch: number; event: number; rating: number }> {
   const logger = dependencies.logger || console;
   const now = dependencies.now || Date.now;
-  const createRtdb =
-    dependencies.createRtdb ||
-    ((workerEnv: Env) => createEventRtdbClient(workerEnv));
+  const createStateRepository =
+    dependencies.createStateRepository ||
+    ((workerEnv: Env) => createEventStateRepository(workerEnv));
   const createRating =
     dependencies.createRating ||
     ((workerEnv: Env) =>
       createRatingRepository(workerEnv, createGameplayRepository(workerEnv)));
   const nowMs = now();
-  const rtdb = createRtdb(env);
+  const state = createStateRepository(env);
   const rating = createRating(env);
   const [automatch, event, ratingCount] = await Promise.allSettled([
-    sweepAutomatchProjections(env, rtdb, logger, nowMs),
+    sweepAutomatchProjections(env, state, logger, nowMs),
     sweepEventTelegramProjections(
       env.TELEGRAM_PROJECTION_QUEUE,
-      rtdb,
+      state,
       nowMs,
     ).catch((error) => {
       logger.error(

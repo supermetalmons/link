@@ -46,7 +46,6 @@ function harness(t: test.TestContext) {
   db.exec("UPDATE game_session_legacy_fence SET enabled=1");
   let deployed = VERSION;
   const calls: string[] = [];
-  const firebaseReads: string[] = [];
   const log: RecordValue[] = [];
   let sqlInterceptor:
     | ((sql: string, execute: () => RecordValue[]) => Promise<RecordValue[]>)
@@ -63,10 +62,6 @@ function harness(t: test.TestContext) {
       async assertDeployment(version) {
         if (version !== deployed) throw new Error("deployment mismatch");
       },
-      async readEvidencePath(path) {
-        firebaseReads.push(path);
-        return null;
-      },
     },
     () => 2000000,
   );
@@ -81,7 +76,6 @@ function harness(t: test.TestContext) {
     db,
     directory,
     calls,
-    firebaseReads,
     log,
     dependencies,
     command,
@@ -172,7 +166,7 @@ test("D1 no-source-effects recovery clears only the named orphan and replays wit
     await h.command("reconcile-admission", ["--evidence", file]);
     assert.equal(h.log.at(-1)?.alreadyAbsent, true);
     assert.deepEqual(await h.dependencies.readAdmissions(), unrelated);
-    assert.deepEqual(h.firebaseReads, []);
+
     assert.equal(
       h.calls.filter((sql) =>
         sql.startsWith("DELETE FROM automatch_write_admissions"),
@@ -206,7 +200,6 @@ test("D1 no-source-effects recovery requires finished-request and complete scope
       /finished-request evidence|request scope/,
     );
     assert.deepEqual(await h.dependencies.readAdmissions(), before);
-    assert.deepEqual(h.firebaseReads, []);
   }
 });
 
@@ -238,7 +231,7 @@ test("D1 no-source-effects recovery rejects recorded targets and nonempty source
       h.command("reconcile-admission", ["--evidence", file]),
     );
     assert.deepEqual(await h.dependencies.readAdmissions(), before);
-    assert.deepEqual(h.firebaseReads, []);
+
     assert.ok(
       !h.calls.some((sql) =>
         sql.startsWith("DELETE FROM automatch_write_admissions"),
@@ -256,7 +249,7 @@ test("D1 prepared admissions need completed-request scope and D1 source evidence
   assert.equal(template.admission.backend, "d1");
   assert.equal(template.admission.proofJson, null);
   assert.deepEqual(template.sources, []);
-  assert.deepEqual(h.firebaseReads, []);
+
   await assert.rejects(
     h.command("reconcile-admission", ["--evidence", file]),
     /finished-request evidence/,
@@ -311,7 +304,6 @@ test("D1 prepared admissions need completed-request scope and D1 source evidence
   await h.command("reconcile-admission", ["--evidence", file]);
   assert.equal(h.log.at(-1)?.alreadyAbsent, true);
   assert.deepEqual(await h.dependencies.readAdmissions(), unrelated);
-  assert.deepEqual(h.firebaseReads, []);
 });
 
 test("D1 admission reconciliation rejects a tuple changed after inspection", async (t) => {
@@ -328,10 +320,9 @@ test("D1 admission reconciliation rejects a tuple changed after inspection", asy
     /changed after inspection/,
   );
   assert.equal((await h.dependencies.status()).admissions, 1);
-  assert.deepEqual(h.firebaseReads, []);
 });
 
-test("D1 admission proofs read owned snapshots from SQL and retain live player evidence access", async (t) => {
+test("D1 admission proofs read owned snapshots from SQL and reject retired match paths", async (t) => {
   const h = harness(t);
   activateD1Sources(h);
   const receipt = { completedAtMs: 900, response: { ok: true } };
@@ -361,19 +352,15 @@ test("D1 admission proofs read owned snapshots from SQL and retain live player e
       digest: digest(value),
     })),
   );
-  assert.deepEqual(h.firebaseReads, []);
+
   const [admission] = await h.dependencies.readAdmissions();
-  assert.equal(
-    await h.dependencies.readAdmissionPath(
-      admission,
-      "players/host/matches/10",
-    ),
-    null,
+  await assert.rejects(
+    h.dependencies.readAdmissionPath(admission, "players/host/matches/10"),
+    /retired admission source-proof path/,
   );
-  assert.deepEqual(h.firebaseReads, ["players/host/matches/10"]);
+
   await h.command("reconcile-admission", ["--evidence", file]);
   assert.equal((await h.dependencies.status()).admissions, 0);
-  assert.deepEqual(h.firebaseReads, ["players/host/matches/10"]);
 });
 
 test("transaction admissions retain bounded attempts and reject stale phase revisions before deletion", async (t) => {
@@ -457,7 +444,7 @@ test("D1 maintenance preserves records, receipts and original activation evidenc
     h.db.prepare("SELECT * FROM game_session_mutation_receipts").all(),
     receipt,
   );
-  assert.deepEqual(h.firebaseReads, []);
+
   assert.ok(!h.calls.some((sql) => sql.startsWith("DELETE FROM")));
   await h.command("freeze", ["--candidate-version-id", OTHER_VERSION]);
   await h.command("resume", ["--candidate-version-id", OTHER_VERSION]);
@@ -478,7 +465,7 @@ test("D1 resume refuses unresolved admissions and active candidate adoption with
   );
   assert.deepEqual(await h.dependencies.status(), before);
 });
-test("retired RTDB control and unexpected legacy writer evidence cannot be frozen or resumed", async (t) => {
+test("retired source control and unexpected legacy writer evidence cannot be frozen or resumed", async (t) => {
   for (const scenario of ["rtdb", "legacy", "unverified"]) {
     const h = harness(t);
     if (scenario === "rtdb") {
@@ -511,7 +498,7 @@ test("generation changes between inspection and maintenance writes fail the SQL 
   await assert.rejects(h.command("freeze"), /changed/);
   assert.equal((await h.dependencies.status()).control.state, "active");
 });
-test("D1 recovery rejects retired invite evidence and broad player paths before Firebase access", async (t) => {
+test("D1 recovery rejects retired source evidence without attempting remote reads", async (t) => {
   const h = harness(t);
   insertAdmission(h, "prepared");
   const [admission] = await h.dependencies.readAdmissions();
@@ -521,14 +508,14 @@ test("D1 recovery rejects retired invite evidence and broad player paths before 
     "players/host",
     "players/host/profile",
     "players/host/matches",
+    "players/host/matches/10",
   ])
     await assert.rejects(
       h.dependencies.readAdmissionPath(admission, path),
       /retired/,
     );
-  assert.deepEqual(h.firebaseReads, []);
 });
-test("RTDB admissions reject even completed evidence and cannot be inspected or reconciled", async (t) => {
+test("Legacy admissions reject even completed evidence and cannot be inspected or reconciled", async (t) => {
   for (const phase of ["prepared", "completed"]) {
     const h = harness(t);
     insertAdmission(h, phase, null, "rtdb");
@@ -543,13 +530,12 @@ test("RTDB admissions reject even completed evidence and cannot be inspected or 
       }),
       { mode: 0o600 },
     );
-    await assert.rejects(inspectAdmission(h), /RTDB admissions are retired/);
+    await assert.rejects(inspectAdmission(h), /legacy admissions are retired/);
     await assert.rejects(
       h.command("reconcile-admission", ["--evidence", file]),
-      /RTDB admissions are retired/,
+      /legacy admissions are retired/,
     );
     assert.equal((await h.dependencies.status()).admissions, 1);
-    assert.deepEqual(h.firebaseReads, []);
   }
 });
 test("completed D1 admissions retain the exact recorded proof and replay safely", async (t) => {
@@ -607,46 +593,23 @@ test("uncertain D1 patch reconciliation requires every recorded target and rejec
   await h.command("reconcile-admission", ["--evidence", file]);
   assert.equal((await h.dependencies.status()).admissions, 0);
 });
-test("remote evidence reads are bounded to one active match before credentials are requested", async () => {
-  let tokens = 0;
-  const paths: string[] = [];
-  const deps = createRemoteDependencies(undefined, {
+test("remote dependency construction requires no source credentials or network", () => {
+  let requests = 0;
+  const deps = createRemoteDependencies({
     config: { name: "mons-link-api", account_id: "a".repeat(32) },
-    firebaseToken: async () => {
-      tokens++;
-      return "private-fixture-token";
-    },
-    fetcher: async (input, init) => {
-      paths.push(String(input));
-      assert.equal(init?.method, "GET");
-      assert.equal(init?.cache, "no-store");
-      assert.equal(init?.redirect, "error");
-      return Response.json({ fen: "active" });
+    fetcher: async () => {
+      requests++;
+      throw new Error("unexpected request");
     },
   });
-  for (const path of [
-    "invites/invite",
-    "automatch/invite",
-    "players/host",
-    "players/host/profile",
-    "players/host/matches",
-  ])
-    await assert.rejects(
-      deps.readEvidencePath(path),
-      /limited to one active match/,
-    );
-  assert.equal(tokens, 0);
-  assert.deepEqual(await deps.readEvidencePath("players/host/matches/invite"), {
-    fen: "active",
-  });
-  assert.equal(tokens, 1);
-  assert.equal(paths.length, 1);
+  assert.deepEqual(Object.keys(deps), ["assertDeployment"]);
+  assert.equal(requests, 0);
 });
 test("deployment verification preserves the exact 100-percent candidate and disabled previews", async () => {
   let enabled = false,
     version = VERSION;
   const urls: string[] = [];
-  const deps = createRemoteDependencies(undefined, {
+  const deps = createRemoteDependencies({
     apiToken: "fixture-token",
     config: { name: "mons-link-api", account_id: "a".repeat(32) },
     fetcher: async (input, init) => {
@@ -672,4 +635,38 @@ test("deployment verification preserves the exact 100-percent candidate and disa
   version = OTHER_VERSION;
   await assert.rejects(deps.assertDeployment(VERSION), /sole 100/);
   assert.ok(urls.every((url) => url.includes("api.cloudflare.com")));
+});
+
+test("D1 admissions with retired match source proofs remain untouched even when marked completed", async (t) => {
+  for (const phase of ["prepared", "completed"]) {
+    await t.test(phase, async (t) => {
+      const h = harness(t);
+      insertAdmission(h, phase, {
+        schemaVersion: 1,
+        kind: "patch",
+        updates: { "players/host/matches/game": { fen: "retained-source" } },
+      });
+      const [admission] = await h.dependencies.readAdmissions();
+      const file = resolve(h.directory, "retired-source-proof.json");
+      writeFileSync(
+        file,
+        canonicalJson({
+          schemaVersion: 1,
+          admission,
+          admissionDigest: digest(admission),
+        }),
+        { mode: 0o600 },
+      );
+      await assert.rejects(
+        inspectAdmission(h),
+        /retired or invalid admission source-proof path/,
+      );
+      await assert.rejects(
+        h.command("reconcile-admission", ["--evidence", file]),
+        /retired or invalid admission source-proof path/,
+      );
+      assert.deepEqual(await h.dependencies.readAdmissions(), [admission]);
+      assert.ok(h.calls.every((sql) => !sql.startsWith("DELETE")));
+    });
+  }
 });

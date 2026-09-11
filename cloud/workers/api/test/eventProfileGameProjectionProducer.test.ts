@@ -6,8 +6,8 @@ import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 function repository(input: {
-  get?: GameplayRepository["getRtdbPath"];
-  patch: GameplayRepository["patchRtdbRoot"];
+  get?: GameplayRepository["getStatePath"];
+  patch: GameplayRepository["patchStateRoot"];
 }): GameplayRepository {
   return {
     applyWagerTransferOnce: async () => "applied",
@@ -24,9 +24,9 @@ function repository(input: {
     }),
     getMiningSnapshot: async () => null,
     getNavigationGame: async () => null,
-    getRtdbPath: input.get || (async () => null),
-    patchRtdbRoot: input.patch,
-    transactRtdbPath: async () => ({ committed: false, value: null }),
+    getStatePath: input.get || (async () => null),
+    patchStateRoot: input.patch,
+    transactStatePath: async () => ({ committed: false, value: null }),
   };
 }
 
@@ -62,7 +62,7 @@ test("event mutations persist cleanup owners before enqueueing", async () => {
     },
   );
 
-  await wrapped.patchRtdbRoot({
+  await wrapped.patchStateRoot({
     "events/event-1/participants/source-profile": null,
     "events/event-1/updatedAtMs": 123,
   });
@@ -108,7 +108,7 @@ test("event deletion captures every pre-mutation owner", async () => {
       now: () => 456,
     },
   );
-  await wrapped.patchRtdbRoot({ "events/event-1": null });
+  await wrapped.patchStateRoot({ "events/event-1": null });
   const outbox = getEventProfileGameProjectionOutboxPath("event-1");
   assert.equal(
     persisted[`${outbox}/cleanupOwnerProfileIds/owner-profile`],
@@ -135,9 +135,9 @@ test("superseding event writes preserve accumulated cleanup children", async () 
       now: () => patches.length + 1,
     },
   );
-  await wrapped.patchRtdbRoot({ "events/event-1/status": "active" });
+  await wrapped.patchStateRoot({ "events/event-1/status": "active" });
   previousOwner = "owner-b";
-  await wrapped.patchRtdbRoot({ "events/event-1/status": "ended" });
+  await wrapped.patchStateRoot({ "events/event-1/status": "ended" });
   const outbox = getEventProfileGameProjectionOutboxPath("event-1");
   assert.equal(patches[0][`${outbox}/cleanupOwnerProfileIds/owner-a`], true);
   assert.equal(patches[1][`${outbox}/cleanupOwnerProfileIds/owner-b`], true);
@@ -167,7 +167,7 @@ test("enqueue failure leaves the committed event marker recoverable", async () =
       now: () => 789,
     },
   );
-  await wrapped.patchRtdbRoot({ "events/event-1/status": "active" });
+  await wrapped.patchStateRoot({ "events/event-1/status": "active" });
   const outbox = getEventProfileGameProjectionOutboxPath("event-1");
   assert.equal(persisted[`${outbox}/requestId`], "request-1");
   assert.equal(logs.length, 1);
@@ -198,14 +198,14 @@ test("non-event writes pass through and scheduled dispatch is detached", async (
     },
   );
   const inviteUpdate = { "invites/invite-1/status": "active" };
-  await wrapped.patchRtdbRoot(inviteUpdate);
+  await wrapped.patchStateRoot(inviteUpdate);
   assert.deepEqual(patches, [inviteUpdate]);
   assert.equal(enqueues, 0);
   const irrelevantEventUpdate = { "events/event-1/rounds/0": {} };
-  await wrapped.patchRtdbRoot(irrelevantEventUpdate);
+  await wrapped.patchStateRoot(irrelevantEventUpdate);
   assert.deepEqual(patches, [inviteUpdate, irrelevantEventUpdate]);
   assert.equal(enqueues, 0);
-  await wrapped.patchRtdbRoot({ "events/event-1/status": "active" });
+  await wrapped.patchStateRoot({ "events/event-1/status": "active" });
   assert.equal(scheduled.length, 1);
   finishEnqueue?.();
   await scheduled[0];

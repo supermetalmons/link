@@ -51,20 +51,29 @@ async function fixture(host = match, guest = { ...match, color: "black" }) {
   const input = {
     inviteId,
     epoch: 2,
-    importId: crypto.randomUUID(),
     records: [
-      { matchId: inviteId, playerId: "host-login", value: host },
-      { matchId: inviteId, playerId: "guest-login", value: guest },
+      {
+        matchId: inviteId,
+        playerId: "host-login",
+        marker: "host-created",
+        value: host,
+      },
+      {
+        matchId: inviteId,
+        playerId: "guest-login",
+        marker: "guest-created",
+        value: guest,
+      },
     ],
-    claims: [],
   };
   return { room, rpc: getMatchStateRpc(env, inviteId), inviteId, input };
 }
 
-async function activate(input: Awaited<ReturnType<typeof fixture>>["input"]) {
+async function createMatches(
+  input: Awaited<ReturnType<typeof fixture>>["input"],
+) {
   const rpc = getMatchStateRpc(env, input.inviteId);
-  const snapshot = unwrapMatchStateRpc(await rpc.importMatchState(input));
-  return unwrapMatchStateRpc(await rpc.activateMatchState(snapshot));
+  return unwrapMatchStateRpc(await rpc.createCanonicalMatch(input));
 }
 
 async function close(socket: WebSocket) {
@@ -113,10 +122,8 @@ describe("canonical match room integration", () => {
     });
   });
 
-  it("keeps staged data invisible and serializes typed failures across RPC", async () => {
+  it("keeps empty rooms unavailable and serializes typed failures across RPC", async () => {
     const { rpc, inviteId, input } = await fixture();
-    const snapshot = unwrapMatchStateRpc(await rpc.importMatchState(input));
-    expect(snapshot.recordCount).toBe(2);
     expect(
       await rpc.readCanonicalMatchRecord({
         inviteId,
@@ -130,7 +137,7 @@ describe("canonical match room integration", () => {
       code: "unavailable",
       message: "match-state-authority-unavailable",
     });
-    unwrapMatchStateRpc(await rpc.activateMatchState(snapshot));
+    await createMatches(input);
     expect(
       unwrapMatchStateRpc(
         await rpc.readCanonicalMatchPair({
@@ -152,7 +159,7 @@ describe("canonical match room integration", () => {
     ).toMatchObject({ ok: false, status: 503, code: "unavailable" });
   });
 
-  it("preserves live snapshot revisions and sockets while switching to the local pair", async () => {
+  it("preserves live snapshot revisions and sockets when canonical records are initialized", async () => {
     const { room, rpc, inviteId, input } = await fixture();
     await runInDurableObject(room, (instance) => {
       const target = instance as unknown as {
@@ -191,7 +198,7 @@ describe("canonical match room integration", () => {
     const socket = response.webSocket!;
     socket.accept();
     sockets.push(socket);
-    await activate(input);
+    await createMatches(input);
     await runInDurableObject(room, (instance) => {
       const target = instance as unknown as {
         matchSync: {
@@ -242,7 +249,7 @@ describe("canonical match room integration", () => {
     );
     host.timer = formatMatchTimer(game.turnNumber, Date.now() - 1_000);
     const { room, rpc, inviteId, input } = await fixture(host, guest);
-    await activate(input);
+    await createMatches(input);
     let attempts = 0;
     await runInDurableObject(room, (instance) => {
       const target = instance as unknown as {

@@ -60,12 +60,12 @@ function sweepRepository(
 ) {
   const patches: Record<string, unknown>[] = [];
   const value: EventProgressSweepRepository = {
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       if (path === "eventProgressOutbox") return outbox;
       if (path === "events") return null;
       return null;
     },
-    patchRtdbRoot: async (updates) => {
+    patchStateRoot: async (updates) => {
       await onPatch?.(updates);
       patches.push(updates);
     },
@@ -97,12 +97,12 @@ test("scheduled-event sweep discovers both announcements and retains their first
   const records = new Map<string, unknown>();
   let creates = 0;
   const repository: EventProgressSweepRepository = {
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       if (path === "events") return { [eventId]: event };
       if (path === "eventProgressOutbox") return {};
       return records.get(path) ?? null;
     },
-    patchRtdbRoot: async (updates) => {
+    patchStateRoot: async (updates) => {
       for (const [path, value] of Object.entries(updates))
         records.set(path, value);
     },
@@ -242,13 +242,13 @@ test("both announcements survive slow start dispatch and all three jobs can fail
             ? "scheduled-start-reconciliation"
             : null;
     const repository: EventProgressSweepRepository = {
-      getRtdbPath: async (path) =>
+      getStatePath: async (path) =>
         path === "events"
           ? { [eventId]: event }
           : path === "eventProgressOutbox"
             ? {}
             : (records.get(path) ?? null),
-      patchRtdbRoot: async (updates) => {
+      patchStateRoot: async (updates) => {
         for (const [path, value] of Object.entries(updates))
           records.set(path, value);
       },
@@ -438,7 +438,7 @@ test("dispatches valid outbox records before reporting dead-letter failure", asy
   ]);
 });
 
-test("recovers a finalized event rating when its RTDB outbox write was lost", async () => {
+test("recovers a finalized event rating when its outbox write was lost", async () => {
   const repository = sweepRepository({});
   const calls: string[] = [];
   const ratingRepository = {

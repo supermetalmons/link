@@ -49,7 +49,7 @@ test("sends the exact authenticated mining request and validates responses", asy
   };
 
   assert.deepEqual(
-    await mineRockViaApi(request, async () => "firebase-token"),
+    await mineRockViaApi(request, async () => "session-token"),
     success,
   );
   assert.equal(calls.length, 1);
@@ -60,18 +60,18 @@ test("sends the exact authenticated mining request and validates responses", asy
   assert.deepEqual(JSON.parse(calls[0].init.body), request);
   const headers = new Headers(calls[0].init.headers);
   assert.equal(headers.get("Accept"), "application/json");
-  assert.equal(headers.get("Authorization"), "Bearer firebase-token");
+  assert.equal(headers.get("Authorization"), "Bearer session-token");
   assert.equal(headers.get("Content-Type"), "application/json");
 
   globalThis.fetch = async () =>
     jsonResponse({ ok: false, reason: "date-not-advanced" });
-  assert.deepEqual(
-    await mineRockViaApi(request, async () => "firebase-token"),
-    { ok: false, reason: "date-not-advanced" },
-  );
+  assert.deepEqual(await mineRockViaApi(request, async () => "session-token"), {
+    ok: false,
+    reason: "date-not-advanced",
+  });
 });
 
-test("refreshes the Firebase token exactly once after a 401", async () => {
+test("refreshes the session token exactly once after a 401", async () => {
   const refreshes = [];
   const tokens = [];
   globalThis.fetch = async (_input, init) => {

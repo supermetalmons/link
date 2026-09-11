@@ -5,7 +5,7 @@ import test from "node:test";
 import {
   matchDiscoverySortKey,
   type MatchDiscoveryEntry,
-} from "../../../functions/shared/login-match-discovery.js";
+} from "../../../runtime/shared/login-match-discovery.js";
 import { createProfileLinkProjectionRuntime } from "../src/profileLinkProfileGameProjection.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
@@ -96,8 +96,8 @@ test("profile-link projection rejects inactive D1 discovery without Firebase rea
         assert.fail("inactive discovery must retain work before projecting");
       },
     },
-    rtdb: {
-      async getRtdbPath() {
+    state: {
+      async getStatePath() {
         assert.fail("inactive discovery must not fall back to Firebase");
       },
     },
@@ -151,8 +151,8 @@ test("D1 profile-link discovery uses bounded ordered pages without Firebase disc
         };
       },
     },
-    rtdb: {
-      async getRtdbPath() {
+    state: {
+      async getStatePath() {
         assert.fail(
           "D1 discovery must not read Firebase match keys or invites",
         );
@@ -221,8 +221,8 @@ test("D1 profile-link cleanup requests one match and advances past unresolved re
         assert.fail("the first unresolved record must not project an invite");
       },
     },
-    rtdb: {
-      async getRtdbPath() {
+    state: {
+      async getStatePath() {
         assert.fail("D1 discovery must not access Firebase");
       },
     },
@@ -264,8 +264,8 @@ test("D1 profile-link failures propagate without falling back to Firebase", asyn
             assert.fail("failed discovery must not project an invite");
           },
         },
-        rtdb: {
-          async getRtdbPath() {
+        state: {
+          async getStatePath() {
             assert.fail("D1 discovery failure must not fall back to Firebase");
           },
         },

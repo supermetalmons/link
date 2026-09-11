@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
-import { isAutoInviteId } from "../cloud/functions/shared/ids.js";
+import { isAutoInviteId } from "../cloud/runtime/shared/ids.js";
 
 const readSource = (path) =>
   ts.createSourceFile(

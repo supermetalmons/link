@@ -1,4 +1,4 @@
-import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import {
   CanonicalProfileConflict,
   CanonicalProfileCorruption,
@@ -81,18 +81,18 @@ function parseJob(row: JobRow): ProfileLinkCatchupJob {
     throw new CanonicalProfileCorruption();
   }
   if (
-    !isCanonicalFirebaseUid(row.login_uid) ||
-    !isSafeFirebaseKey(row.request_id) ||
-    !isSafeFirebaseKey(row.profile_id) ||
+    !isCanonicalLoginUid(row.login_uid) ||
+    !isSafeRecordKey(row.request_id) ||
+    !isSafeRecordKey(row.profile_id) ||
     !Array.isArray(cleanupIds) ||
     !cleanupIds.every(
       (value): value is string =>
         typeof value === "string" &&
-        isSafeFirebaseKey(value) &&
+        isSafeRecordKey(value) &&
         value !== row.profile_id,
     ) ||
     new Set(cleanupIds).size !== cleanupIds.length ||
-    (row.match_cursor !== null && !isSafeFirebaseKey(row.match_cursor)) ||
+    (row.match_cursor !== null && !isSafeRecordKey(row.match_cursor)) ||
     !validTimestamp(row.source_updated_at_ms) ||
     !validTimestamp(row.last_queued_at_ms) ||
     !Number.isSafeInteger(row.revision) ||
@@ -149,7 +149,7 @@ export function createProfileLinkCatchupStore(
   return {
     read,
     async readForOwner(loginUid, profileId) {
-      if (!isCanonicalFirebaseUid(loginUid) || !isSafeFirebaseKey(profileId)) {
+      if (!isCanonicalLoginUid(loginUid) || !isSafeRecordKey(profileId)) {
         throw new TypeError("invalid-profile-link-catchup-owner");
       }
       const session = db.withSession("first-primary");
@@ -218,7 +218,7 @@ export function createProfileLinkCatchupStore(
     async advance(loginUid, requestId, expectedCursor, nextCursor, nowMs) {
       assertTimestamp(nowMs);
       if (
-        !isSafeFirebaseKey(nextCursor) ||
+        !isSafeRecordKey(nextCursor) ||
         (expectedCursor !== null && nextCursor <= expectedCursor)
       ) {
         throw new TypeError("invalid-profile-link-catchup-cursor");

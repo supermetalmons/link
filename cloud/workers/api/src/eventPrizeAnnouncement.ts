@@ -1,23 +1,23 @@
 import {
   buildEventPrizeAnnouncement,
   EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS,
-} from "../../../functions/telegram/eventPrizeAnnouncement.js";
+} from "../../../runtime/telegram/eventPrizeAnnouncement.js";
 import {
   buildSundayMonsReminder,
   isSundayMonsReminderLeadMs,
-} from "../../../functions/telegram/sundayMonsReminder.js";
+} from "../../../runtime/telegram/sundayMonsReminder.js";
 import {
   sendTelegramMediaGroup,
   sendTelegramMessage,
   TELEGRAM_HTTP_TIMEOUT_MS,
   type TelegramResult,
-} from "../../../functions/telegram/client.js";
-import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
-import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
+} from "../../../runtime/telegram/client.js";
+import { createEventLockManagerCore } from "../../../runtime/events/lockManagerCore.js";
+import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
 import { readEventRuntimeControl } from "./eventD1.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import {
   EVENT_ANNOUNCEMENT_KINDS,
   EVENT_ANNOUNCEMENT_SPECS,
@@ -50,7 +50,7 @@ export type EventPrizeAnnouncementDeliveryDependencies = {
   controlsEnabled?: (env: Env) => Promise<boolean>;
   eventRepository?: Pick<
     GameplayRepository,
-    "getRtdbPath" | "transactRtdbPath"
+    "getStatePath" | "transactStatePath"
   >;
   log?: (record: Record<string, unknown>) => void;
   now?: () => number;
@@ -191,7 +191,7 @@ export async function deliverEventPrizeAnnouncement(
       ? { status: "skipped", reason: "delivery-window-expired" }
       : { status: "retryable", reason, retryAtMs };
   if (
-    !isSafeFirebaseKey(input.eventId) ||
+    !isSafeRecordKey(input.eventId) ||
     ![input.startAtMs, input.runAtMs, input.firstQueuedAtMs].every(
       (value) => Number.isSafeInteger(value) && value > 0,
     ) ||
@@ -231,7 +231,7 @@ export async function deliverEventPrizeAnnouncement(
     now,
     createLockId: () => crypto.randomUUID(),
     transactPath: (path, updater) =>
-      eventRepository.transactRtdbPath(path, updater),
+      eventRepository.transactStatePath(path, updater),
   });
   let lock;
   try {
@@ -275,7 +275,7 @@ export async function deliverEventPrizeAnnouncement(
     }
   };
   try {
-    const eventData = await eventRepository.getRtdbPath(
+    const eventData = await eventRepository.getStatePath(
       `events/${input.eventId}`,
     );
     if (

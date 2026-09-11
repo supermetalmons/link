@@ -17,7 +17,7 @@ import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const NOW_MS = Date.UTC(2026, 7, 18, 12);
 const ctx = { waitUntil: () => undefined };
-const identity = { uid: "firebase-uid" };
+const identity = { uid: "login-uid" };
 
 function envWithRateLimit(
   limit: (
@@ -204,7 +204,7 @@ test("authenticates and rate limits before reading the request body", async () =
   );
   assert.equal(limited.status, 429);
   assert.equal(limitedRequest.bodyUsed, false);
-  assert.deepEqual(keys, ["mining:firebase-uid"]);
+  assert.deepEqual(keys, ["mining:login-uid"]);
 
   const unavailable = await handleMiningRoute(
     request({ date: "2026-08-18" }),

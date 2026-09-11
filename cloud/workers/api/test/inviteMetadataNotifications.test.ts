@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFirebaseRtdbClient } from "../test/legacyFirebaseRtdb.ts";
+import { notifyInviteSourceChanged } from "../src/inviteWagersNotifications.ts";
 import {
   changedInviteMetadataIds,
   notifyInviteMetadataChanged,
@@ -48,49 +48,34 @@ test("metadata notifications cover structural producer writes and ignore unrelat
   );
 });
 
-test("successful RTDB PATCH and conditional writes notify after commit, once per invite", async () => {
-  const calls: string[] = [];
+test("committed source updates notify metadata once per invite", async () => {
+  const notices: string[] = [];
   const env = {
     ...TELEGRAM_TEST_ENV,
     INVITE_REACTIONS: {
       getByName: (id: string) => ({
         notifyMetadataChanged: async (incoming: string) => {
           assert.equal(incoming, id);
-          calls.push(`notify:${id}`);
+          notices.push(id);
         },
+        notifyWagersChanged: async () =>
+          assert.fail("metadata already invalidates wagers"),
       }),
     },
   } as unknown as Env;
-  const client = createFirebaseRtdbClient(env, {
-    getAccessToken: async () => "token",
-    fetcher: async (_url, init) => {
-      calls.push(init?.method || "GET");
-      if (init?.method === "PATCH") return new Response(null, { status: 204 });
-      return new Response(JSON.stringify({ hostId: "host" }), {
-        headers: { ETag: "etag" },
-      });
+  await notifyInviteSourceChanged(
+    env,
+    {
+      "invites/manual/hostRematches": "1",
+      "invites/manual/guestRematches": "1",
+      "invites/joined/guestId": "guest",
     },
-  });
-  await client.patchRoot({
-    "invites/manual/hostRematches": "1",
-    "invites/manual/guestRematches": "1",
-  });
-  assert.deepEqual(calls, ["PATCH", "notify:manual"]);
-  calls.length = 0;
-  await client.transactPath("invites/manual/guestId", () => ({
-    value: "guest",
-    decision: "joined",
-  }));
-  assert.deepEqual(calls, ["GET", "PUT", "notify:manual"]);
-  calls.length = 0;
-  await client.transactPath("invites/manual", () => ({
-    commit: false,
-    decision: "replay",
-  }));
-  assert.deepEqual(calls, ["GET"]);
+    true,
+  );
+  assert.deepEqual(notices, ["manual", "joined"]);
 });
 
-test("failed commits do not notify and unavailable notification delivery cannot reject committed work", async () => {
+test("unconfirmed changes skip metadata and notification failure cannot reject committed work", async () => {
   let notices = 0;
   const env = {
     ...TELEGRAM_TEST_ENV,
@@ -99,14 +84,15 @@ test("failed commits do not notify and unavailable notification delivery cannot 
         notifyMetadataChanged: async () => {
           notices++;
         },
+        notifyWagersChanged: async () => undefined,
       }),
     },
   } as unknown as Env;
-  const client = createFirebaseRtdbClient(env, {
-    getAccessToken: async () => "token",
-    fetcher: async () => new Response(null, { status: 503 }),
-  });
-  await assert.rejects(client.patchRoot({ "invites/manual/guestId": "guest" }));
+  await notifyInviteSourceChanged(
+    env,
+    { "invites/manual/guestId": "guest" },
+    false,
+  );
   assert.equal(notices, 0);
   let failures = 0;
   const unavailable = {

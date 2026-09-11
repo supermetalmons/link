@@ -193,7 +193,7 @@ function connectionHarness({ paired = true } = {}) {
   };
 }
 
-test("actual connection hydrates before pairing and isolates optimistic appearance from Firebase gameplay records", async (t) => {
+test("actual connection hydrates before pairing and isolates optimistic appearance from legacy gameplay records", async (t) => {
   t.mock.method(console, "error", () => {});
   const h = connectionHarness({ paired: false });
   assert.equal(h.room().canConnect(), false);

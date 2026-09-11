@@ -3,9 +3,9 @@ import test from "node:test";
 import type { SubmitMoveRequest } from "@mons/shared/game-sessions";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import {
-  FirebaseRtdbFailure,
-  FirebaseRtdbPermissionDenied,
-} from "../src/firebaseRtdb.ts";
+  StateRepositoryFailure,
+  StateRepositoryPermissionDenied,
+} from "../src/stateRepositoryTypes.ts";
 import { submitMove } from "../src/matchMove.ts";
 
 const request: SubmitMoveRequest = {
@@ -39,7 +39,7 @@ function harness({
     status: "",
     custom: { retained: true },
   } as Record<string, unknown>,
-  writeFailure = new FirebaseRtdbPermissionDenied() as Error,
+  writeFailure = new StateRepositoryPermissionDenied() as Error,
   onWrite = () => {},
   signal,
 }: {
@@ -54,7 +54,7 @@ function harness({
   const writes: Array<{ path: string; value: unknown }> = [];
   const scopes: unknown[] = [];
   const repository: Parameters<typeof submitMove>[2] = {
-    async getRtdbPath(path, query, requestSignal) {
+    async getStatePath(path, query, requestSignal) {
       reads.push(path);
       assert.equal(query, undefined);
       assert.ok(requestSignal);
@@ -68,7 +68,7 @@ function harness({
         };
       }
       assert.equal(path, "matchTimerClaims/invite1");
-      if (claimReadFailure) throw new FirebaseRtdbFailure();
+      if (claimReadFailure) throw new StateRepositoryFailure();
       return structuredClone(claim);
     },
     async readProfileOwnershipSnapshot() {
@@ -199,7 +199,7 @@ test("already-applied and superseded requests stay successful without consulting
 });
 
 test("upstream uncertainty and history conflicts do not read timer claims or change error semantics", async () => {
-  const failure = new FirebaseRtdbFailure();
+  const failure = new StateRepositoryFailure();
   const unavailable = harness({ writeFailure: failure });
   await assert.rejects(unavailable.run(), (error) => error === failure);
   assert.deepEqual(unavailable.reads, ["invites/invite"]);

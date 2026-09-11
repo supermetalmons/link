@@ -556,7 +556,7 @@ test("sends exact authenticated event-control mutations", async () => {
     calls.push({ input: String(input), init });
     return jsonResponse(responses.shift());
   };
-  const tokenProvider = async () => "firebase-token";
+  const tokenProvider = async () => "session-token";
   assert.deepEqual(
     await createEventViaApi(
       { startsInMinutes: 5, announceOnTelegram: true },
@@ -603,7 +603,7 @@ test("sends exact authenticated event-control mutations", async () => {
     calls.every(
       (call) =>
         new Headers(call.init.headers).get("Authorization") ===
-        "Bearer firebase-token",
+        "Bearer session-token",
     ),
     true,
   );
@@ -682,7 +682,7 @@ test("sends granular Telegram announcements with either event schedule", async (
     assert.equal(isCreateEventRequest(request), true);
     const response = await createEventViaApi(
       request,
-      async () => "firebase-token",
+      async () => "session-token",
     );
     assert.deepEqual(
       response.event.telegramAnnouncements,
@@ -724,7 +724,7 @@ test("sends explicit Sunday Mons flags with either event schedule", async () => 
       assert.equal(isCreateEventRequest(request), true);
       const response = await createEventViaApi(
         request,
-        async () => "firebase-token",
+        async () => "session-token",
       );
       assert.equal(response.event.isSundayMons, options.isSundayMons === true);
       assert.deepEqual(JSON.parse(calls.at(-1).init.body), request);
@@ -889,7 +889,7 @@ test("reads conditional event snapshots and profile prizes with transport metada
       },
     });
   };
-  const tokenProvider = Object.assign(async () => "firebase-token", {
+  const tokenProvider = Object.assign(async () => "session-token", {
     assertCurrentUser: () => undefined,
   });
 
@@ -924,7 +924,7 @@ test("reads conditional event snapshots and profile prizes with transport metada
   );
   assert.equal(calls[1].input, "https://api.mons.link/events/prizes");
   const headers = new Headers(calls[0].init.headers);
-  assert.equal(headers.get("Authorization"), "Bearer firebase-token");
+  assert.equal(headers.get("Authorization"), "Bearer session-token");
   assert.equal(headers.get("If-None-Match"), 'W/"event-2"');
   assert.equal(headers.get("X-D1-Bookmark"), "bookmark-2");
   assert.equal(calls[0].init.method, "GET");
@@ -1263,10 +1263,7 @@ test("sends the exact event prize selection mutation", async () => {
     prizeId: "1092",
   };
   assert.deepEqual(
-    await toggleEventPrizeSelectionViaApi(
-      request,
-      async () => "firebase-token",
-    ),
+    await toggleEventPrizeSelectionViaApi(request, async () => "session-token"),
     {
       ok: true,
       eventId: LEGACY_CORE_PRIZES_EVENT_ID,
@@ -1280,7 +1277,7 @@ test("sends the exact event prize selection mutation", async () => {
   assert.deepEqual(JSON.parse(calls[0].init.body), request);
   assert.equal(
     new Headers(calls[0].init.headers).get("Authorization"),
-    "Bearer firebase-token",
+    "Bearer session-token",
   );
   assert.equal(isToggleEventPrizeSelectionRequest(request), true);
   assert.equal(
@@ -1323,7 +1320,7 @@ test("reads the exact authenticated authoritative invite role", async () => {
   assert.deepEqual(
     await readInviteRoleViaApi(
       { inviteId: "abcdefghijk" },
-      async () => "firebase-token",
+      async () => "session-token",
     ),
     response,
   );
@@ -1333,7 +1330,7 @@ test("reads the exact authenticated authoritative invite role", async () => {
   });
   assert.equal(
     new Headers(calls[0].init.headers).get("Authorization"),
-    "Bearer firebase-token",
+    "Bearer session-token",
   );
   assert.equal(isResolveInviteRoleRequest({ inviteId: "abcdefghijk" }), true);
   assert.equal(
@@ -1382,7 +1379,7 @@ test("retries one transient authoritative invite role failure", async () => {
   assert.deepEqual(
     await readInviteRoleViaApi(
       { inviteId: "abcdefghijk" },
-      async () => "firebase-token",
+      async () => "session-token",
     ),
     response,
   );
@@ -1477,7 +1474,7 @@ test("sends exact structural game-session mutations with stable operation IDs", 
     calls.push({ input: String(input), init });
     return jsonResponse(responses.shift());
   };
-  const tokenProvider = async () => "firebase-token";
+  const tokenProvider = async () => "session-token";
   const presentation = { emojiId: 7, aura: "rainbow" };
   const createRequest = {
     operationId: operationIds[0],
@@ -1624,14 +1621,14 @@ test("submits authenticated move fields and accepts applied and replay acknowled
       return jsonResponse(response);
     };
     assert.deepEqual(
-      await submitMoveViaApi(submitMoveRequest, async () => "firebase-token"),
+      await submitMoveViaApi(submitMoveRequest, async () => "session-token"),
       response,
     );
   }
   for (const { input, init } of calls) {
     assert.equal(input, "https://api.mons.link/matches/move");
     assert.equal(init.method, "POST");
-    assert.equal(init.headers.Authorization, "Bearer firebase-token");
+    assert.equal(init.headers.Authorization, "Bearer session-token");
     assert.equal(init.cache, "no-store");
     assert.deepEqual(JSON.parse(init.body), submitMoveRequest);
     assert.equal(init.headers[WAGER_STORAGE_VERSION_HEADER], undefined);
@@ -1773,7 +1770,7 @@ test("move transport preserves conflicts and leaves transient retries to the con
   for (const [code, message, status] of [
     ["aborted", "move-chain-conflict", 409],
     ["failed-precondition", "match-move-blocked", 409],
-    ["unavailable", "firebase-unavailable", 503],
+    ["unavailable", "storage-unavailable", 503],
   ]) {
     let calls = 0;
     globalThis.fetch = async () => {
@@ -1884,17 +1881,14 @@ test("sends only surrender identity through authenticated API requests and accep
   assert.equal(isSurrenderMatchResponse(surrenderResponse), true);
   for (let attempt = 0; attempt < 2; attempt++) {
     assert.deepEqual(
-      await surrenderMatchViaApi(
-        surrenderRequest,
-        async () => "firebase-token",
-      ),
+      await surrenderMatchViaApi(surrenderRequest, async () => "session-token"),
       surrenderResponse,
     );
   }
   for (const { input, init } of calls) {
     assert.equal(input, "https://api.mons.link/matches/surrender");
     assert.equal(init.method, "POST");
-    assert.equal(init.headers.Authorization, "Bearer firebase-token");
+    assert.equal(init.headers.Authorization, "Bearer session-token");
     assert.equal(init.cache, "no-store");
     assert.deepEqual(JSON.parse(init.body), surrenderRequest);
     assert.equal(init.headers[WAGER_STORAGE_VERSION_HEADER], undefined);
@@ -1907,7 +1901,7 @@ test("sends only surrender identity through authenticated API requests and accep
   ]) {
     assert.equal(isSurrenderMatchRequest(request), false);
     await assert.rejects(
-      surrenderMatchViaApi(request, async () => "firebase-token"),
+      surrenderMatchViaApi(request, async () => "session-token"),
       (error) =>
         error instanceof GameplayApiError && error.code === "invalid-argument",
     );
@@ -1927,7 +1921,7 @@ test("surrender refreshes authentication once while retaining the original targe
   assert.deepEqual(
     await surrenderMatchViaApi(surrenderRequest, async (forceRefresh) => {
       tokens.push(forceRefresh);
-      return "firebase-token";
+      return "session-token";
     }),
     surrenderResponse,
   );
@@ -1949,7 +1943,7 @@ test("surrender rejects malformed or mismatched success without retrying", async
       return jsonResponse(response);
     };
     await assert.rejects(
-      surrenderMatchViaApi(surrenderRequest, async () => "firebase-token"),
+      surrenderMatchViaApi(surrenderRequest, async () => "session-token"),
       (error) =>
         error instanceof GameplayApiError && error.code === "unavailable",
     );
@@ -1975,7 +1969,7 @@ test("surrender preserves backend failures and does not retry an uncertain submi
       return failure();
     };
     await assert.rejects(
-      surrenderMatchViaApi(surrenderRequest, async () => "firebase-token"),
+      surrenderMatchViaApi(surrenderRequest, async () => "session-token"),
       GameplayApiError,
     );
     assert.equal(calls, 1);
@@ -1989,7 +1983,7 @@ test("surrender remains bound to the original user before transport, on token re
       uid: "login-alias",
       getIdToken: async () => {
         if (phase === "token") currentUser = { uid: "login-alias" };
-        return "firebase-token";
+        return "session-token";
       },
     };
     currentUser = originalUser;
@@ -2023,7 +2017,7 @@ test("surrender applies the existing deadline to authentication and a pending re
   };
   for (const tokenProvider of [
     () => new Promise(() => {}),
-    async () => "firebase-token",
+    async () => "session-token",
   ]) {
     const request = surrenderMatchViaApi(surrenderRequest, tokenProvider);
     const rejected = assert.rejects(request, /Gameplay request timed out/);
@@ -2079,7 +2073,7 @@ test("accepts the largest valid ensured match response", async () => {
           emojiId: 1,
           aura: "",
         },
-        async () => "firebase-token",
+        async () => "session-token",
       )
     ).match.flatMovesString.length,
     MAX_MATCH_HISTORY_BYTES,
@@ -2112,7 +2106,7 @@ test("retries busy and ambiguous failures with the same operation ID", async () 
     emojiId: 7,
     aura: "rainbow",
   };
-  await createInviteViaApi(request, async () => "firebase-token");
+  await createInviteViaApi(request, async () => "session-token");
   assert.equal(calls, 3);
   assert.deepEqual(bodies, [request, request, request]);
 });
@@ -2136,7 +2130,7 @@ test("bounds structural retries to one request deadline", async (t) => {
         emojiId: 7,
         aura: "rainbow",
       },
-      async () => "firebase-token",
+      async () => "session-token",
     ),
     (error) =>
       error instanceof GameplayApiError &&
@@ -2281,7 +2275,7 @@ test("sends the exact rating mutation with strict contracts", async () => {
     matchId: "auto_aaaaaaaaaaa",
   };
   assert.deepEqual(
-    await updateRatingsViaApi(request, async () => "firebase-token", {
+    await updateRatingsViaApi(request, async () => "session-token", {
       now: () => now,
       sleep: async (milliseconds) => {
         delays.push(milliseconds);
@@ -2295,7 +2289,7 @@ test("sends the exact rating mutation with strict contracts", async () => {
   assert.deepEqual(JSON.parse(calls[0].init.body), request);
   assert.equal(
     new Headers(calls[0].init.headers).get("Authorization"),
-    "Bearer firebase-token",
+    "Bearer session-token",
   );
   assert.equal(RATING_API_TIMEOUT_MS, 60_000);
   assert.equal(RATING_BUSY_RETRY_DELAY_MS, 31_000);
@@ -2325,7 +2319,7 @@ test("does not retry a busy rating update after its auth identity changes", asyn
     },
     async () => {
       tokens++;
-      return "firebase-token";
+      return "session-token";
     },
     {
       shouldRetry: () => false,
@@ -2360,7 +2354,7 @@ test("retries one unavailable rating update within the same deadline", async () 
         inviteId: "auto_aaaaaaaaaaa",
         matchId: "auto_aaaaaaaaaaa",
       },
-      async () => "firebase-token",
+      async () => "session-token",
     ),
     { ok: true },
   );
@@ -2383,7 +2377,7 @@ test("bounds a busy rating retry to one 60-second deadline", async () => {
       inviteId: "auto_aaaaaaaaaaa",
       matchId: "auto_aaaaaaaaaaa",
     },
-    async () => "firebase-token",
+    async () => "session-token",
     {
       now: () => now,
       sleep: async (milliseconds) => {
@@ -2494,7 +2488,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
         emojiId: 7,
         aura: "rainbow",
       },
-      async () => "firebase-token",
+      async () => "session-token",
       AUTOMATCH_OPERATION_ID,
     ),
     {
@@ -2504,13 +2498,13 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
       matchedImmediately: false,
     },
   );
-  assert.deepEqual(await cancelAutomatchViaApi(async () => "firebase-token"), {
+  assert.deepEqual(await cancelAutomatchViaApi(async () => "session-token"), {
     ok: true,
   });
   assert.deepEqual(
     await removeNavigationGameViaApi(
       { inviteId: "invite-1" },
-      async () => "firebase-token",
+      async () => "session-token",
     ),
     {
       ok: true,
@@ -2523,7 +2517,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
   const readRequest = { limit: 80, cursor: null };
   const readResponse = await readNavigationGamesViaApi(
     readRequest,
-    async () => "firebase-token",
+    async () => "session-token",
   );
   assert.equal(isReadNavigationGamesRequest(readRequest), true);
   assert.equal(isReadNavigationGamesResponse(readResponse), true);
@@ -2541,13 +2535,13 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
     eliminatedByProfileId: null,
   };
   assert.deepEqual(
-    await joinEventViaApi({ eventId: "event-1" }, async () => "firebase-token"),
+    await joinEventViaApi({ eventId: "event-1" }, async () => "session-token"),
     { ok: true, eventId: "event-1", participant },
   );
   assert.deepEqual(
     await removeEventParticipantViaApi(
       { eventId: "event-1", participantProfileId: "profile-2" },
-      async () => "firebase-token",
+      async () => "session-token",
     ),
     { ok: true, eventId: "event-1", removedProfileId: "profile-2" },
   );
@@ -2559,7 +2553,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
         matchId: "match-1",
         inviteId: "match-1",
       },
-      async () => "firebase-token",
+      async () => "session-token",
     ),
     { ok: true, timer: "4;1000", duration: 90000 },
   );
@@ -2571,21 +2565,21 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
         matchId: "match-1",
         inviteId: "match-1",
       },
-      async () => "firebase-token",
+      async () => "session-token",
     ),
     { ok: true },
   );
   assert.deepEqual(
     await cancelWagerProposalViaApi(
       { inviteId: "invite-1", matchId: "match-1" },
-      async () => "firebase-token",
+      async () => "session-token",
     ),
     { ok: true },
   );
   assert.deepEqual(
     await declineWagerProposalViaApi(
       { inviteId: "invite-1", matchId: "match-1" },
-      async () => "firebase-token",
+      async () => "session-token",
     ),
     { ok: false, reason: "proposal-missing" },
   );
@@ -2597,7 +2591,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
         material: "dust",
         count: 4,
       },
-      async () => "firebase-token",
+      async () => "session-token",
     ),
     {
       ok: true,
@@ -2615,14 +2609,14 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
   assert.deepEqual(
     await acceptWagerProposalViaApi(
       { inviteId: "invite-1", matchId: "match-1" },
-      async () => "firebase-token",
+      async () => "session-token",
     ),
     { ok: true, count: 2 },
   );
   assert.deepEqual(
     await resolveWagerOutcomeViaApi(
       { inviteId: "invite-1", matchId: "match-1" },
-      async () => "firebase-token",
+      async () => "session-token",
     ),
     {
       ok: true,
@@ -2692,7 +2686,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
     assert.ok(call.init.signal instanceof AbortSignal);
     const headers = new Headers(call.init.headers);
     assert.equal(headers.get("Accept"), "application/json");
-    assert.equal(headers.get("Authorization"), "Bearer firebase-token");
+    assert.equal(headers.get("Authorization"), "Bearer session-token");
     assert.equal(headers.get("Content-Type"), "application/json");
     assert.equal(
       headers.get(WAGER_STORAGE_VERSION_HEADER),
@@ -2702,7 +2696,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
   await assert.rejects(
     startAutomatchViaApi(
       { emojiId: 7, aura: "rainbow" },
-      async () => "firebase-token",
+      async () => "session-token",
       "invalid",
     ),
     (error) =>
@@ -2982,7 +2976,7 @@ test("sends exact authenticated gameplay mutations and validates contracts", asy
   assert.equal(isWagerOutcomeResolveResponse({ ok: true, mining: null }), true);
 });
 
-test("refreshes the Firebase token once after a 401", async () => {
+test("refreshes the session token once after a 401", async () => {
   const refreshes = [];
   const tokens = [];
   globalThis.fetch = async (_input, init) => {

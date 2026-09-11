@@ -8,7 +8,7 @@ const defaultAppTitle = "mons.link • Play Mons";
 
 const sharedPackageDirectory = resolve(
   import.meta.dirname,
-  "cloud/functions/shared",
+  "cloud/runtime/shared",
 );
 const sharedPackageManifest = JSON.parse(
   readFileSync(resolve(sharedPackageDirectory, "package.json"), "utf8"),

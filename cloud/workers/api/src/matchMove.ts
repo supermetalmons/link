@@ -16,12 +16,12 @@ import {
   parseStrictMatchTimer,
 } from "@mons/shared/timers";
 import { AuthApiFailure } from "./authErrors.ts";
-import { isCanonicalFirebaseUid } from "./firebaseKeys.ts";
+import { isCanonicalLoginUid } from "./recordKeys.ts";
 import {
-  FirebaseRtdbFailure,
-  FirebaseRtdbPermissionDenied,
-  type FirebaseRtdbClient,
-} from "./firebaseRtdb.ts";
+  StateRepositoryFailure,
+  StateRepositoryPermissionDenied,
+  type StateRepository,
+} from "./stateRepositoryTypes.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import { decideMatchStateMove } from "./matchStateLogic.ts";
 import {
@@ -32,14 +32,14 @@ import type { RequestIdentity } from "./requestIdentity.ts";
 
 type MoveRepository = Pick<
   GameplayRepository,
-  "getRtdbPath" | "readProfileOwnershipSnapshot"
+  "getStatePath" | "readProfileOwnershipSnapshot"
 >;
 
 export type SubmitMoveDependencies = {
   submitCanonical?: (request: SubmitMoveRequest) => Promise<SubmitMoveResponse>;
   createMatchClient?: (
     scope: Pick<SubmitMoveRequest, "playerId" | "matchId">,
-  ) => Pick<FirebaseRtdbClient, "transactPath">;
+  ) => Pick<StateRepository, "transactPath">;
   assertMutationAllowed?: () => Promise<void>;
   signal?: AbortSignal;
 };
@@ -58,7 +58,7 @@ async function hasCommittedTimerClaim(
 ): Promise<boolean> {
   try {
     const claim = toRecord(
-      await repository.getRtdbPath(
+      await repository.getStatePath(
         `${MATCH_TIMER_CLAIM_ROOT}/${request.matchId}`,
         undefined,
         AbortSignal.any([signal, AbortSignal.timeout(1200)]),
@@ -68,8 +68,8 @@ async function hasCommittedTimerClaim(
     return (
       claim?.status === "claimed" &&
       claim.inviteId === request.inviteId &&
-      isCanonicalFirebaseUid(claim.playerId) &&
-      isCanonicalFirebaseUid(claim.opponentId) &&
+      isCanonicalLoginUid(claim.playerId) &&
+      isCanonicalLoginUid(claim.opponentId) &&
       inviteMatchesPlayers(invite, claim.playerId, claim.opponentId) &&
       typeof claim.turnNumber === "number" &&
       Number.isSafeInteger(claim.turnNumber) &&
@@ -119,7 +119,7 @@ export async function submitMove(
     ? AbortSignal.any([dependencies.signal, timeout])
     : timeout;
   signal.throwIfAborted();
-  const inviteValue = await repository.getRtdbPath(
+  const inviteValue = await repository.getStatePath(
     `invites/${request.inviteId}`,
     undefined,
     signal,
@@ -130,10 +130,10 @@ export async function submitMove(
   const invite = toRecord(inviteValue);
   if (
     !invite ||
-    !isCanonicalFirebaseUid(invite.hostId) ||
+    !isCanonicalLoginUid(invite.hostId) ||
     (invite.guestId !== null &&
       invite.guestId !== undefined &&
-      (!isCanonicalFirebaseUid(invite.guestId) ||
+      (!isCanonicalLoginUid(invite.guestId) ||
         invite.guestId === invite.hostId))
   ) {
     throw new AuthApiFailure(409, "failed-precondition", "invite-invalid");
@@ -217,7 +217,7 @@ export async function submitMove(
         response.flatMovesString === request.flatMovesString ||
         !isMoveHistoryPrefix(request.flatMovesString, response.flatMovesString)
       )
-        throw new FirebaseRtdbFailure();
+        throw new StateRepositoryFailure();
       return response;
     }
     if (
@@ -227,7 +227,7 @@ export async function submitMove(
       match?.fen !== request.fen ||
       match.flatMovesString !== request.flatMovesString
     ) {
-      throw new FirebaseRtdbFailure();
+      throw new StateRepositoryFailure();
     }
     return {
       ok: true,
@@ -237,7 +237,7 @@ export async function submitMove(
       outcome: result.committed ? "applied" : "already-applied",
     };
   } catch (error) {
-    if (error instanceof FirebaseRtdbPermissionDenied) {
+    if (error instanceof StateRepositoryPermissionDenied) {
       const finished = await hasCommittedTimerClaim(
         request,
         invite,

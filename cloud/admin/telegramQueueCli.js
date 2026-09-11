@@ -7,7 +7,7 @@ const {
   createTelegramManualRecoveryDispatcher,
   enqueueTelegramDeliveryTask,
   sendTelegramCommand,
-} = require("../functions/telegram/queueBridge");
+} = require("../runtime/telegram/queueBridge");
 
 const MAX_BRIDGE_SECRET_BYTES = 8 * 1024;
 

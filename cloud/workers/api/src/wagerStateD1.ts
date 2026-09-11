@@ -1,4 +1,4 @@
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 
 export const WAGER_STATE_WRITER_EPOCH = 1;
 
@@ -70,7 +70,7 @@ export async function assertWagerStateActivated(db: D1Database): Promise<void> {
 }
 
 function requireKey(key: WagerStateKey): void {
-  if (!isSafeFirebaseKey(key.inviteId) || !isSafeFirebaseKey(key.matchId)) {
+  if (!isSafeRecordKey(key.inviteId) || !isSafeRecordKey(key.matchId)) {
     throw new TypeError("invalid-wager-state-key");
   }
 }
@@ -178,7 +178,7 @@ export function createWagerStateD1Store(
       signal?: AbortSignal,
       shallow = false,
     ): Promise<WagerStateSnapshot[]> {
-      if (!isSafeFirebaseKey(inviteId))
+      if (!isSafeRecordKey(inviteId))
         throw new TypeError("invalid-wager-state-key");
       signal?.throwIfAborted();
       const result = await db

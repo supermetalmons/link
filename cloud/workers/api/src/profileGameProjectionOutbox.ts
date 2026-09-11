@@ -1,4 +1,4 @@
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import { PROFILE_GAME_PROJECTION_SCHEMA_VERSION } from "./profileGameProjectionTasks.ts";
 import type { HistoricalMatchDescriptor } from "./historicalMatches.ts";
 
@@ -45,11 +45,11 @@ export function salvageHistoricalMatchDescriptors(
     const hostPlayerId = record?.hostPlayerId;
     const guestPlayerId = record?.guestPlayerId;
     const source = record?.source;
-    return isSafeFirebaseKey(matchId) &&
+    return isSafeRecordKey(matchId) &&
       typeof hostPlayerId === "string" &&
-      isSafeFirebaseKey(hostPlayerId) &&
+      isSafeRecordKey(hostPlayerId) &&
       typeof guestPlayerId === "string" &&
-      isSafeFirebaseKey(guestPlayerId) &&
+      isSafeRecordKey(guestPlayerId) &&
       guestPlayerId !== hostPlayerId &&
       typeof finalizedAtMs === "number" &&
       Number.isSafeInteger(finalizedAtMs) &&
@@ -144,8 +144,8 @@ export function buildEventProfileGameProjectionOutboxUpdates(input: {
   timestamp: number;
 }): Record<string, unknown> {
   if (
-    !isSafeFirebaseKey(input.eventId) ||
-    !isSafeFirebaseKey(input.requestId) ||
+    !isSafeRecordKey(input.eventId) ||
+    !isSafeRecordKey(input.requestId) ||
     !Number.isSafeInteger(input.timestamp) ||
     input.timestamp < 0
   ) {
@@ -161,7 +161,7 @@ export function buildEventProfileGameProjectionOutboxUpdates(input: {
     [`${outboxPath}/deadAtMs`]: null,
   };
   for (const profileId of new Set(input.cleanupOwnerProfileIds)) {
-    if (!isSafeFirebaseKey(profileId)) {
+    if (!isSafeRecordKey(profileId)) {
       throw new TypeError("invalid event projection cleanup profile id");
     }
     updates[`${outboxPath}/cleanupOwnerProfileIds/${profileId}`] = true;
@@ -188,7 +188,7 @@ export function parseAutomatchProfileGameProjectionOutbox(
   return record?.schemaVersion === PROFILE_GAME_PROJECTION_SCHEMA_VERSION &&
     record.status === "pending" &&
     typeof record.requestId === "string" &&
-    isSafeFirebaseKey(record.requestId) &&
+    isSafeRecordKey(record.requestId) &&
     typeof sourceUpdatedAtMs === "number" &&
     Number.isFinite(sourceUpdatedAtMs) &&
     sourceUpdatedAtMs >= 0 &&
@@ -222,14 +222,14 @@ export function parseEventProfileGameProjectionOutbox(
   return record?.schemaVersion === PROFILE_GAME_PROJECTION_SCHEMA_VERSION &&
     record.status === "pending" &&
     typeof record.requestId === "string" &&
-    isSafeFirebaseKey(record.requestId) &&
+    isSafeRecordKey(record.requestId) &&
     typeof lastQueuedAtMs === "number" &&
     Number.isSafeInteger(lastQueuedAtMs) &&
     lastQueuedAtMs >= 0 &&
     cleanup !== null &&
     cleanupEntries.every(
       ([profileId, included]) =>
-        isSafeFirebaseKey(profileId) && included === true,
+        isSafeRecordKey(profileId) && included === true,
     )
     ? {
         schemaVersion: record.schemaVersion,

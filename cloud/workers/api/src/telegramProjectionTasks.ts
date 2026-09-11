@@ -1,4 +1,4 @@
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import { isSafeOperationId } from "./operationIds.ts";
 
 export const TELEGRAM_PROJECTION_QUEUE_NAME = "mons-link-telegram-projection";
@@ -43,8 +43,8 @@ function exactKeys(
   );
 }
 
-function validRtdbId(value: unknown): value is string {
-  return typeof value === "string" && isSafeFirebaseKey(value);
+function validRecordId(value: unknown): value is string {
+  return typeof value === "string" && isSafeRecordKey(value);
 }
 
 export function parseTelegramProjectionTask(
@@ -56,8 +56,8 @@ export function parseTelegramProjectionTask(
   }
   if (task.kind === "automatch-telegram-projection") {
     return exactKeys(task, ["kind", "inviteId", "requestId"]) &&
-      validRtdbId(task.inviteId) &&
-      validRtdbId(task.requestId)
+      validRecordId(task.inviteId) &&
+      validRecordId(task.requestId)
       ? {
           kind: task.kind,
           inviteId: task.inviteId,
@@ -73,8 +73,8 @@ export function parseTelegramProjectionTask(
   }
   if (task.kind === "event-telegram-projection") {
     return exactKeys(task, ["kind", "eventId", "requestId"]) &&
-      validRtdbId(task.eventId) &&
-      validRtdbId(task.requestId)
+      validRecordId(task.eventId) &&
+      validRecordId(task.requestId)
       ? {
           kind: task.kind,
           eventId: task.eventId,

@@ -167,8 +167,6 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
   assert.deepEqual(config.secrets, {
     required: [
       "SESSION_JWT_KEYS",
-      "MATCH_PRESENTATION_MIGRATION_SECRET",
-      "MATCH_STATE_MIGRATION_SECRET",
       "HELIUS_RPC_API_KEY",
       "EVENT_PRIZE_ADMIN_PRIVATE_KEY",
       "TELEGRAM_BOT_TOKEN",
@@ -306,27 +304,48 @@ test("Wrangler release environment contains no active values", () => {
   assert.deepEqual(activeLines, []);
 });
 
-test("Firebase configuration deploys only Realtime Database rules", () => {
-  const config = readJson<Record<string, unknown>>("cloud/firebase.json");
-  assert.equal(Object.hasOwn(config, "functions"), false);
-  assert.equal(typeof config.database, "object");
-  assert.equal(Object.hasOwn(config, "firestore"), false);
+test("retired provider tools and migration entry points stay removed", () => {
   for (const path of [
-    "cloud/firestore.rules",
-    "cloud/firestore.indexes.json",
-    "scripts/migrate-profile-reads.ts",
-    "scripts/migrate-profile-canonical.ts",
-    "cloud/admin/_admin.js",
-    "cloud/admin/cleanupAuthMethodRevocations.js",
-  ]) {
+    "cloud/firebase.json",
+    "cloud/.firebaserc",
+    "cloud/database.rules.json",
+    "scripts/deploy-firebase.ts",
+    "scripts/match-state-provider.ts",
+    "scripts/match-state-manifest.ts",
+    "cloud/workers/api/src/matchStateMigrationRoute.ts",
+    "cloud/workers/api/src/matchPresentationMigrationRoute.ts",
+    "cloud/workers/api/test/legacyFirebaseRtdb.ts",
+    "cloud/workers/api/test/legacyGoogleAuth.ts",
+  ])
     assert.equal(existsSync(resolve(repositoryRoot, path)), false, path);
+  const manifest = readJson<PackageManifest>("package.json");
+  for (const name of [
+    "firebase",
+    "firebase-admin",
+    "firebase-functions",
+    "firebase-tools",
+    "@firebase/rules-unit-testing",
+  ]) {
+    assert.equal(manifest.dependencies?.[name], undefined, name);
+    assert.equal(manifest.devDependencies?.[name], undefined, name);
   }
+  for (const name of [
+    "prepare:firebase",
+    "deploy:firebase",
+    "test:database-rules",
+  ]) {
+    assert.equal(manifest.scripts?.[name], undefined, name);
+  }
+  assert.doesNotMatch(
+    manifest.scripts?.["check:all"] || "",
+    /firebase|emulators|java/i,
+  );
 });
 
 test("package manifests preserve public scripts and deployment command vectors", () => {
   const rootPackage = readJson<PackageManifest>("package.json");
-  const functionsPackage = readJson<PackageManifest>(
-    "cloud/functions/package.json",
+  const runtimePackage = readJson<PackageManifest>(
+    "cloud/runtime/package.json",
   );
   const adminPackage = readJson<PackageManifest>("cloud/admin/package.json");
   const apiPackage = readJson<PackageManifest>(
@@ -359,7 +378,6 @@ test("package manifests preserve public scripts and deployment command vectors",
     "lint:tooling",
     "typecheck:tooling",
     "test:tooling",
-    "test:database-rules",
     "check:tooling:core",
     "check:tooling",
     "check:all",
@@ -367,11 +385,9 @@ test("package manifests preserve public scripts and deployment command vectors",
     "repo-clean",
     "format",
     "format:check",
-    "prepare:firebase",
-    "deploy:firebase",
     "deploy",
     "latest:root",
-    "latest:functions",
+    "latest:runtime",
     "latest:admin",
     "latest",
   ];
@@ -407,8 +423,6 @@ test("package manifests preserve public scripts and deployment command vectors",
       "manage:events": rootPackage.scripts?.["manage:events"],
       "manage:profile-canonical":
         rootPackage.scripts?.["manage:profile-canonical"],
-      "prepare:firebase": rootPackage.scripts?.["prepare:firebase"],
-      "deploy:firebase": rootPackage.scripts?.["deploy:firebase"],
       deploy: rootPackage.scripts?.deploy,
       "repo-clean": rootPackage.scripts?.["repo-clean"],
     },
@@ -435,17 +449,13 @@ test("package manifests preserve public scripts and deployment command vectors",
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-events.ts",
       "manage:profile-canonical":
         "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/manage-profile-canonical.ts",
-      "prepare:firebase":
-        "npm --prefix cloud/functions ci && npm --prefix cloud/functions test",
-      "deploy:firebase":
-        "npm run prepare:firebase && node --experimental-strip-types scripts/deploy-firebase.ts",
       deploy: "node --experimental-strip-types scripts/deploy-cloudflare.ts",
       "repo-clean": "bash scripts/repo-clean.sh",
     },
   );
-  assert.equal(functionsPackage.main, undefined);
+  assert.equal(runtimePackage.main, undefined);
   assert.equal(
-    existsSync(resolve(repositoryRoot, "cloud/functions/index.js")),
+    existsSync(resolve(repositoryRoot, "cloud/runtime/index.js")),
     false,
   );
   for (const [command, filename] of [
@@ -466,10 +476,10 @@ test("package manifests preserve public scripts and deployment command vectors",
       );
     }
   }
-  assert.deepEqual(functionsPackage.scripts, {
+  assert.deepEqual(runtimePackage.scripts, {
     test: "node --experimental-strip-types --test ../tests/*.test.js",
   });
-  assert.equal(functionsPackage.dependencies?.["firebase-admin"], undefined);
+  assert.equal(runtimePackage.dependencies?.["firebase-admin"], undefined);
   assert.equal(adminPackage.dependencies?.["firebase-admin"], undefined);
   assert.deepEqual(adminPackage.scripts, {
     "recover:telegram": "node recoverTelegramDelivery.js",
@@ -494,11 +504,11 @@ test("package manifests preserve public scripts and deployment command vectors",
 
 test("shared package preserves every direct export subpath", () => {
   const rootPackage = readJson<PackageManifest>("package.json");
-  const functionsPackage = readJson<PackageManifest>(
-    "cloud/functions/package.json",
+  const runtimePackage = readJson<PackageManifest>(
+    "cloud/runtime/package.json",
   );
   const sharedPackage = readJson<PackageManifest>(
-    "cloud/functions/shared/package.json",
+    "cloud/runtime/shared/package.json",
   );
   const expectedExports = {
     "./auth": "./auth.js",
@@ -533,14 +543,14 @@ test("shared package preserves every direct export subpath", () => {
   assert.deepEqual(sharedPackage.exports, expectedExports);
   assert.equal(
     rootPackage.dependencies?.["@mons/shared"],
-    "file:cloud/functions/shared",
+    "file:cloud/runtime/shared",
   );
-  assert.equal(functionsPackage.dependencies?.["@mons/shared"], "file:shared");
+  assert.equal(runtimePackage.dependencies?.["@mons/shared"], "file:shared");
 
   for (const target of Object.values(expectedExports)) {
     const implementationPath = resolve(
       repositoryRoot,
-      "cloud/functions/shared",
+      "cloud/runtime/shared",
       target,
     );
     const declarationPath = implementationPath.replace(/\.js$/, ".d.ts");
@@ -576,16 +586,6 @@ test("API Worker preserves its runtime export surface", () => {
 });
 
 test("remaining deployment CLIs preserve their offline modes", () => {
-  const { parseArgs: parseFirebaseArgs } = require(
-    resolve(repositoryRoot, "scripts/deploy-firebase.ts"),
-  ) as {
-    parseArgs: (argv: string[]) => Record<string, unknown>;
-  };
-  assert.deepEqual(parseFirebaseArgs(["--dry-run", "--project", "mons-link"]), {
-    dryRun: true,
-    project: "mons-link",
-  });
-
   const frontendHelp = spawnSync(
     process.execPath,
     [
@@ -607,7 +607,7 @@ test("remaining deployment CLIs preserve their offline modes", () => {
   assert.match(frontendHelp.stdout, /npm run deploy -- production/);
 });
 
-test("operations documentation describes current releases and D1 maintenance", () => {
+test("operations documentation keeps candidate releases and canonical recovery explicit", () => {
   const rootReadme = readText("README.md");
   const cloudReadme = readText("cloud/README.md");
   const guide = readText("scripts/deploy-cloudflare.md");
@@ -620,197 +620,64 @@ test("operations documentation describes current releases and D1 maintenance", (
     cloudReadme,
     /\[Cloudflare deployment guide\]\(\.\.\/scripts\/deploy-cloudflare\.md\)/,
   );
-  assert.match(
-    cloudReadme,
-    /`PROFILE_DB\.profile_login_owners` is the sole source/,
-  );
-  assert.match(
-    cloudReadme,
-    /custom `profileId` claims are retired from the browser and Worker runtime/,
-  );
-  for (const document of [rootReadme, cloudReadme]) {
-    assert.match(document, /existing stored claims remain untouched/);
-    assert.match(document, /`POST \/auth\/profile\/sync`/);
-    assert.match(
-      document,
-      /`POST \/auth\/profile-claim\/sync` URL remains a compatibility alias/,
-    );
-    assert.doesNotMatch(
-      document,
-      /claims remain a non-authoritative browser compatibility signal|Claim repair validates|cleanup clears the Firebase claim/,
-    );
-  }
-  assert.match(
-    cloudReadme,
-    /RTDB `players\/\{uid\}\/profile` links are retired: runtime code never reads, writes, or deletes them/,
-  );
-  for (const document of [rootReadme, cloudReadme, guide]) {
-    assert.doesNotMatch(
-      document,
-      /npm run migrate:|--return-to-firebase|--activate-d1|--recover-import|functions:secrets:access|wrangler rollback/,
-    );
-  }
-  const readSection = (heading: string): string => {
+  const section = (heading: string) => {
     const start = guide.indexOf(`## ${heading}\n`);
     assert.notEqual(start, -1, heading);
     const end = guide.indexOf("\n## ", start + heading.length + 4);
-    return guide.slice(start, end === -1 ? undefined : end);
+    return guide.slice(start, end < 0 ? undefined : end);
   };
-  const assertOrderedSteps = (section: string, steps: string[]): void => {
-    let previousStepIndex = -1;
-    for (const step of steps) {
-      const stepIndex = section.indexOf(step);
-      assert.ok(stepIndex > previousStepIndex, step);
-      previousStepIndex = stepIndex;
-    }
-  };
-  const releasePolicy = readSection("Release policy");
-  assert.match(releasePolicy, /routine/i);
-  assert.match(releasePolicy, /Routine releases have no overall time limit/);
+  const policy = section("Release policy");
+  assert.match(policy, /Routine releases have no overall time limit/);
   assert.match(
-    releasePolicy,
+    policy,
     /verification-only waits or observation windows longer than 60 seconds/,
   );
-  assert.match(releasePolicy, /promotion/i);
-  assert.match(releasePolicy, /candidate/i);
-  const retiredOperators = readSection("Retired migration operators");
-  for (const operator of [
-    "wager-state",
-    "login-match-discovery",
-    "match-presentations",
-    "event-transition-receipts",
-    "invite-source",
-    "automatch-state",
-  ]) {
-    assert.ok(retiredOperators.includes(`manage:${operator}`), operator);
-    for (const document of [rootReadme, cloudReadme, guide]) {
-      assert.doesNotMatch(
-        document,
-        new RegExp(
-          `npm run manage:${operator}[^\\n]*--(?:preflight|stage|export|import|verify|activate|abort|enable-capture|inspect-legacy|reconcile-legacy)\\b`,
-        ),
-      );
-    }
-  }
-  assert.match(retiredOperators, /Status commands are read-only/);
-  assert.match(retiredOperators, /exact retained Firebase proofs/);
-  const apiRelease = readSection("API Worker release");
-  assertOrderedSteps(apiRelease, [
+  const release = section("API Worker release");
+  const steps = [
     "npm run upload:api",
     "npm run promote:api -- --version-id <version-id>",
     "npm run smoke:api -- --base-url https://api.mons.link",
-  ]);
-  assert.doesNotMatch(
-    apiRelease,
-    /npm run manage:[^\n]*--(?:freeze|resume)|queues (?:pause|resume)-delivery|(?:15|fifteen)[ -]minutes|npm run deploy:api:triggers|--require-wager-storage-version/,
-  );
-  const maintenanceRelease = readSection("Coordinated maintenance release");
-  assertOrderedSteps(maintenanceRelease, [
-    "npm run manage:profile-canonical -- --freeze",
-    "Wait at least 15 minutes",
-    "GET https://api.cloudflare.com/client/v4/accounts/e25f90fc073ea309b54b8b5144bf28e0/workers/scripts/mons-link-api/subdomain",
-    "Require `enabled: false` and `previews_enabled: false`",
-    "npm run upload:api",
-    "npm run promote:api -- --version-id <version-id>",
-    "npm run deploy:api:triggers",
-    "npm run smoke:api -- --base-url https://api.mons.link --read-only --require-history --require-wager-frozen-read --require-wager-storage-version",
-    "npm run smoke:reactions -- --base-url https://api.mons.link --invite-id <existing-paired-invite-id>",
-    "npm run manage:profile-canonical -- --resume",
-  ]);
-  for (const section of [apiRelease, maintenanceRelease]) {
-    assert.doesNotMatch(
-      section,
-      /<version-preview-url>|(?:previews_enabled|preview_urls)"?\s*:\s*true/,
-    );
+  ];
+  let previous = -1;
+  for (const step of steps) {
+    const index = release.indexOf(step);
+    assert.ok(index > previous, step);
+    previous = index;
   }
+  assert.doesNotMatch(
+    release,
+    /npm run manage:[^\n]*--(?:freeze|resume)|queues (?:pause|resume)-delivery/,
+  );
   assert.match(
-    apiRelease,
+    release,
     /Production API `workers_dev` and `preview_urls` remain disabled/,
   );
   assert.match(
-    apiRelease,
-    /Workers implementing a Durable Object do not receive version-preview URLs/,
-  );
-  assert.match(maintenanceRelease, /alternate-login invite-role authorization/);
-  assert.match(maintenanceRelease, /Wait at least 15 minutes/);
-  const reactionBootstrap = maintenanceRelease.slice(
-    maintenanceRelease.indexOf("### Initial reaction namespace and cutover"),
-    maintenanceRelease.indexOf("### Match presentation cutover"),
-  );
-  assert.match(reactionBootstrap, /one-time exception to candidate upload/);
-  assert.match(reactionBootstrap, /already-provisioned, unchanged class/);
-  assert.match(reactionBootstrap, /Retain the API namespace/);
-  assert.ok(
-    reactionBootstrap.indexOf("wrangler deploy --dry-run --strict") <
-      reactionBootstrap.indexOf("wrangler deploy --strict"),
-  );
-  assert.ok(
-    reactionBootstrap.indexOf("wrangler deploy --strict") <
-      reactionBootstrap.indexOf("Release the frontend next"),
-  );
-  assert.ok(
-    reactionBootstrap.indexOf("Release the frontend next") <
-      reactionBootstrap.indexOf("npm run deploy:firebase"),
+    section("Canonical operators"),
+    /--inspect-admissions --directory <new-private-output-directory>/,
   );
   assert.match(
-    maintenanceRelease,
-    /npm run smoke:reactions -- --base-url https:\/\/api\.mons\.link --invite-id <existing-paired-invite-id>/,
+    section("Canonical operators"),
+    /reads the import identity from D1/,
   );
-  assert.match(maintenanceRelease, /publishes no reaction/);
-  for (const queue of [
-    "auth-recovery",
-    "profile-game-projection",
-    "telegram-projection",
-    "telegram-delivery",
-  ]) {
-    assert.equal(
-      maintenanceRelease.includes(`queues pause-delivery mons-link-${queue}`),
-      true,
-    );
-    assert.ok(
-      maintenanceRelease.indexOf(`queues pause-delivery mons-link-${queue}`) <
-        maintenanceRelease.indexOf("Wait at least 15 minutes"),
-    );
-    assert.equal(
-      maintenanceRelease.includes(`queues resume-delivery mons-link-${queue}`),
-      true,
-    );
-  }
   for (const command of [
-    "npm run manage:events -- --freeze",
-    "npm run manage:events -- --resume-d1",
-    "npm run manage:events -- --recover-stale-admission <admission-id>",
-    "npm run manage:wager-reservations -- --recover-admission <admission-id> --confirm-request-finished --confirm-source-reconciled",
-    "npm run manage:wager-reservations -- --resume-d1",
-    "npm run manage:event-prize-withdrawals -- --freeze",
-    "npm run deploy -- production --version-id <version-id>",
-    "npm run deploy:firebase -- --project mons-link --dry-run",
-    "PRAGMA foreign_key_check",
-  ]) {
-    assert.equal(guide.includes(command), true, command);
-  }
-  assert.match(
-    guide,
-    /workflows trigger mons-link-event-prize-withdrawal '\{"schemaVersion":1,"kind":"preflight"\}' --id "\$event_prize_preflight_id"/,
-  );
-  assert.match(
-    guide,
-    /workflows instances describe mons-link-event-prize-withdrawal "\$event_prize_preflight_id"/,
-  );
+    "manage:events",
+    "manage:wager-reservations",
+    "manage:event-prize-withdrawals",
+    "manage:profile-canonical",
+  ])
+    assert.ok(guide.includes(command), command);
+  assert.match(guide, /PRAGMA foreign_key_check/);
   assert.match(guide, /Never bulk-delete admissions/);
   assert.match(
     guide,
     /Successful transition receipts are immutable coordination evidence/,
   );
-  assert.match(guide, /missing snapshot returns `pair: null`/);
-  assert.match(guide, /never reads RTDB or persists data/);
-  assert.match(guide, /no RTDB recovery or backfill path/);
-  assert.doesNotMatch(cloudReadme, /announceEventPrizes|telegram-announcement/);
-  assert.match(cloudReadme, /one hour before/);
-  assert.match(
-    cloudReadme,
-    /--bridge-secret-file \/Users\/ivan\/\.config\/mons-link\/secrets\/telegram-queue/,
-  );
+  for (const document of [rootReadme, cloudReadme, guide])
+    assert.doesNotMatch(
+      document,
+      /npm run deploy:firebase|npm run test:database-rules|cloud\/functions/,
+    );
 });
 
 test("profile synchronization uses the D1 Worker route and preserves the legacy alias", () => {

@@ -316,7 +316,7 @@ describe("canonical auth recovery with D1 prize storage", () => {
         testEnv.EVENT_PRIZE_WITHDRAWALS_DB,
       );
       const complete = () =>
-        withdrawals.reference(eventId, prizeId).transaction(() => ({
+        withdrawals.record(eventId, prizeId).transaction(() => ({
           eventId,
           prizeId,
           status: "completed",

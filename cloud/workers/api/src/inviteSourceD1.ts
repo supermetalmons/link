@@ -1,5 +1,7 @@
-import type { FirebaseRtdbQuery } from "./firebaseRtdb.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { RETIRED_STATE_BACKEND } from "./stateCompatibility.ts";
+import { STATE_VALUE_FIELD } from "./stateCompatibility.ts";
+import type { StateQuery } from "./stateRepositoryTypes.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 
 const RETIRED_FIELDS = new Set([
   "reactions",
@@ -8,7 +10,7 @@ const RETIRED_FIELDS = new Set([
 ]);
 
 export type InviteSourceControl = {
-  backend: "rtdb" | "d1";
+  backend: typeof RETIRED_STATE_BACKEND | "d1";
   state: "active" | "frozen";
   epoch: number;
   freezeGeneration: number;
@@ -64,8 +66,7 @@ function integer(value: unknown): value is number {
 }
 
 function requireId(value: string): void {
-  if (!isSafeFirebaseKey(value))
-    throw new TypeError("invalid-invite-source-key");
+  if (!isSafeRecordKey(value)) throw new TypeError("invalid-invite-source-key");
 }
 
 export function isEventOwnedInviteSource(value: unknown): boolean {
@@ -139,11 +140,11 @@ export async function readInviteSourceControl(
     .first<ControlRow>();
   if (
     !row ||
-    (row.backend !== "rtdb" && row.backend !== "d1") ||
+    (row.backend !== RETIRED_STATE_BACKEND && row.backend !== "d1") ||
     (row.state !== "active" && row.state !== "frozen") ||
     !integer(row.epoch) ||
     !integer(row.freeze_generation) ||
-    (row.backend === "rtdb" && row.epoch !== 0) ||
+    (row.backend === RETIRED_STATE_BACKEND && row.epoch !== 0) ||
     (row.backend === "d1" &&
       (row.epoch < 1 ||
         !integer(row.verified_at_ms) ||
@@ -393,10 +394,10 @@ function resolveValue(
       ),
     );
   if (!record(value)) return value;
-  if (Object.hasOwn(value, ".sv")) {
+  if (Object.hasOwn(value, STATE_VALUE_FIELD)) {
     if (Object.keys(value).length !== 1)
       throw new TypeError("invalid-invite-source-server-value");
-    const marker = value[".sv"];
+    const marker = value[STATE_VALUE_FIELD];
     if (marker === "timestamp") return nowMs;
     if (
       record(marker) &&
@@ -534,7 +535,7 @@ export function createInviteSourceD1Store(
     buildCommitStatements,
     async getPath(
       path: string,
-      query?: FirebaseRtdbQuery,
+      query?: StateQuery,
       signal?: AbortSignal,
     ): Promise<unknown> {
       const owned = inviteSourcePath(path);

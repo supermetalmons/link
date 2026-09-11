@@ -483,7 +483,7 @@ describe("gameplay with canonical Durable Object storage", () => {
     const guest = `event-guest-${eventId}`;
     rooms.add(inviteId);
     const repository = createEventGameplayRepository(workerEnv);
-    await repository.patchRtdbRoot({
+    await repository.patchStateRoot({
       [`events/${eventId}`]: {
         schemaVersion: 2,
         eventId,
@@ -499,7 +499,7 @@ describe("gameplay with canonical Durable Object storage", () => {
       },
     });
     const fen = new Game().toFen();
-    await repository.patchRtdbRoot({
+    await repository.patchStateRoot({
       [`events/${eventId}/status`]: "active",
       [`events/${eventId}/updatedAtMs`]: 200,
       [`invites/${inviteId}`]: {
@@ -535,7 +535,7 @@ describe("gameplay with canonical Durable Object storage", () => {
     });
     expect(original.playerMatch).toMatchObject({ color: "white", fen });
     expect(original.opponentMatch).toMatchObject({ color: "black", fen });
-    await repository.patchRtdbRoot({
+    await repository.patchStateRoot({
       [`events/${eventId}/updatedAtMs`]: 300,
       [`players/${host}/matches/${inviteId}/timer`]: MATCH_TIMER_TERMINAL,
     });

@@ -16,11 +16,11 @@ export function cleanString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-export function readStoredFirebaseUid(value: unknown): string | null {
+export function readStoredLoginUid(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
-export function uniqueStoredFirebaseUids(...values: unknown[]): string[] {
+export function uniqueStoredLoginUids(...values: unknown[]): string[] {
   const result = new Set<string>();
   for (const value of values) {
     if (!Array.isArray(value)) {

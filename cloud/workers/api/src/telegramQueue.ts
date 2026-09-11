@@ -3,19 +3,19 @@ import {
   createTelegramLocalRetryBarrier,
   type TelegramEngineResult,
   type TelegramRepository,
-} from "../../../functions/telegram/deliveryEngine.js";
+} from "../../../runtime/telegram/deliveryEngine.js";
 import {
   buildTelegramDeliveryTaskId,
   normalizeOptionalTimestamp,
   normalizeTaskPayload,
   type TelegramTaskPayload,
-} from "../../../functions/telegram/taskIdentity.js";
+} from "../../../runtime/telegram/taskIdentity.js";
 import {
   deleteTelegramMessage,
   editTelegramMessage,
   sendTelegramMessage,
   type TelegramClient,
-} from "../../../functions/telegram/client.js";
+} from "../../../runtime/telegram/client.js";
 import {
   createD1TelegramRepository,
   readTelegramStorageMode,
@@ -25,7 +25,7 @@ import {
   createGameplayRepository,
   type GameplayRepository,
 } from "./gameplayRepository.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import {
   classifyWagerSettlementRetry,
   resumeWagerSettlement,
@@ -81,8 +81,8 @@ function parseWagerSettlementRetryTask(
   const task = toRecord(value);
   if (
     task?.kind !== "wager-settlement" ||
-    !isSafeFirebaseKey(task.inviteId) ||
-    !isSafeFirebaseKey(task.matchId) ||
+    !isSafeRecordKey(task.inviteId) ||
+    !isSafeRecordKey(task.matchId) ||
     typeof task.operationId !== "string"
   ) {
     return null;
@@ -101,10 +101,10 @@ function parseWagerSettlementRetryTask(
     !resolution ||
     Object.keys(resolution).length !== 4 ||
     !isExactNonEmptyString(resolution.winnerUid) ||
-    !isSafeFirebaseKey(resolution.winnerUid) ||
+    !isSafeRecordKey(resolution.winnerUid) ||
     !isExactNonEmptyString(resolution.winnerProfileId) ||
     !isExactNonEmptyString(resolution.loserUid) ||
-    !isSafeFirebaseKey(resolution.loserUid) ||
+    !isSafeRecordKey(resolution.loserUid) ||
     !isExactNonEmptyString(resolution.loserProfileId)
   ) {
     return null;

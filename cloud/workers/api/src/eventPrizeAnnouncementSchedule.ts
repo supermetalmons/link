@@ -10,7 +10,7 @@ import {
   type EventProgressPlan,
 } from "./eventProgress.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 
 export const EVENT_PRIZE_ANNOUNCEMENT_REASON =
   EVENT_ANNOUNCEMENT_SPECS.prizes.reason;
@@ -20,7 +20,7 @@ const SCHEDULE_FIELDS = new Set(["isSundayMons", "startAtMs", "status"]);
 
 type ScheduleRepository = Pick<
   GameplayRepository,
-  "getRtdbPath" | "patchRtdbRoot"
+  "getStatePath" | "patchStateRoot"
 >;
 
 type ScheduleDependencies = {
@@ -43,7 +43,7 @@ export async function buildEventAnnouncementPlan(
   kind: EventAnnouncementKind,
 ): Promise<EventProgressPlan | null> {
   const spec = EVENT_ANNOUNCEMENT_SPECS[kind];
-  if (!isSafeFirebaseKey(eventId) || !spec.isEligible(eventId, event)) {
+  if (!isSafeRecordKey(eventId) || !spec.isEligible(eventId, event)) {
     return null;
   }
   const startAtMs = toRecord(event)?.startAtMs;
@@ -80,7 +80,7 @@ async function preserveSchedule(
 ): Promise<EventProgressPlan> {
   const existing = await parseEventProgressOutbox(
     plan.outboxId,
-    await repository.getRtdbPath(
+    await repository.getStatePath(
       `eventProgressOutbox/${plan.outboxId}`,
       undefined,
       signal,
@@ -105,7 +105,7 @@ async function scheduleEventAnnouncement(
   );
   if (!candidate) return;
   const plan = await preserveSchedule(repository, candidate);
-  await repository.patchRtdbRoot({
+  await repository.patchStateRoot({
     [`eventProgressOutbox/${plan.outboxId}`]: plan.outbox,
   });
   await ensureEventProgressWorkflow(env, plan);
@@ -151,14 +151,14 @@ export function createEventAnnouncementScheduleRepository(
   const logger = dependencies.logger || console;
   return {
     ...repository,
-    async patchRtdbRoot(updates, signal) {
+    async patchStateRoot(updates, signal) {
       const eventIds = new Set<string>();
       for (const path of Object.keys(updates)) {
         const [root, eventId, field, ...nested] = path.split("/");
         if (
           root === "events" &&
           eventId &&
-          isSafeFirebaseKey(eventId) &&
+          isSafeRecordKey(eventId) &&
           nested.length === 0 &&
           (field === undefined || SCHEDULE_FIELDS.has(field))
         ) {
@@ -172,7 +172,7 @@ export function createEventAnnouncementScheduleRepository(
         const event = toRecord(
           Object.hasOwn(updates, path)
             ? updates[path]
-            : await repository.getRtdbPath(path, undefined, signal),
+            : await repository.getStatePath(path, undefined, signal),
         );
         if (!event) continue;
         const nextEvent = { ...event };
@@ -195,7 +195,7 @@ export function createEventAnnouncementScheduleRepository(
           plans.push(plan);
         }
       }
-      await repository.patchRtdbRoot(nextUpdates, signal);
+      await repository.patchStateRoot(nextUpdates, signal);
       if (plans.length === 0) return;
       const dispatch = async () => {
         const results = await Promise.allSettled(plans.map(enqueue));

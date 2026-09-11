@@ -10,10 +10,10 @@ import {
   releaseEventWriteAdmission,
 } from "../src/eventD1.ts";
 import {
-  createEventRtdbClient,
+  createEventStateRepository,
   recoverEventTransitionIntents,
 } from "../src/eventRepository.ts";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import type { StateRepository } from "../src/stateRepositoryTypes.ts";
 import { createInviteSourceD1Store } from "../src/inviteSourceD1.ts";
 import { prepareInviteEventIntent } from "../src/inviteEventEffects.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
@@ -98,7 +98,7 @@ function fixture(profileGamesDb = testEnv.PROFILE_GAMES_DB) {
     afterWrite?: (path: string) => Promise<void>;
     prepareMatchPresentations?: PrepareMatchPresentations;
   } = {};
-  const raw: FirebaseRtdbClient = {
+  const raw: StateRepository = {
     async getPath(path) {
       expect(path.startsWith("invites/")).toBe(false);
       expect(path.startsWith("eventTransitionReceipts/")).toBe(false);
@@ -121,7 +121,7 @@ function fixture(profileGamesDb = testEnv.PROFILE_GAMES_DB) {
       expect(path.startsWith("eventTransitionReceipts/")).toBe(false);
       if (hooks.failBeforePath === path) {
         hooks.failBeforePath = undefined;
-        throw new Error("rtdb-before-create");
+        throw new Error("state-before-create");
       }
       const current = structuredClone(values.get(path) ?? null);
       const result = updater(current);
@@ -139,7 +139,7 @@ function fixture(profileGamesDb = testEnv.PROFILE_GAMES_DB) {
       await hooks.afterWrite?.(path);
       if (hooks.failAfterPath === path) {
         hooks.failAfterPath = undefined;
-        throw new Error("rtdb-ambiguous-create");
+        throw new Error("state-ambiguous-create");
       }
       return {
         committed: true,
@@ -149,7 +149,7 @@ function fixture(profileGamesDb = testEnv.PROFILE_GAMES_DB) {
     },
   };
   const source = createInviteSourceD1Store(profileGamesDb);
-  const base: FirebaseRtdbClient = {
+  const base: StateRepository = {
     getPath: (path, query, signal) =>
       path.startsWith("invites/")
         ? source.getPath(path, query, signal)
@@ -165,7 +165,7 @@ function fixture(profileGamesDb = testEnv.PROFILE_GAMES_DB) {
   const prepareMatchPresentations: PrepareMatchPresentations = (creations) =>
     hooks.prepareMatchPresentations?.(creations) ||
     Promise.resolve(appearanceRegistrations(creations));
-  const client = createEventRtdbClient(
+  const client = createEventStateRepository(
     fixtureEnv,
     base,
     raw,
@@ -362,7 +362,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     );
   });
 
-  it("keeps appearance failures recoverable after Firebase confirmation without resetting current appearance", async () => {
+  it("keeps appearance failures recoverable after match confirmation without resetting current appearance", async () => {
     const f = fixture();
     const prepared: MatchPresentationCreation[][] = [];
     const current = new Map<string, { emojiId: number; aura: string }>();
@@ -422,7 +422,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
            BEGIN SELECT RAISE(ABORT, 'receipt-checkpoint'); END`,
         ).run();
       }
-      await expect(f.start()).rejects.toThrow(/rtdb-|receipt-checkpoint/);
+      await expect(f.start()).rejects.toThrow(/state-|receipt-checkpoint/);
       const [pending] = await listPendingEventTransitionIntents(
         testEnv.EVENT_DB,
       );
@@ -602,11 +602,11 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     expect(await count("invite_sources")).toBe(0);
   });
 
-  it("requires exact RTDB-effect proof even when the final invite receipt exists", async () => {
+  it("requires exact match-effect proof even when the final invite receipt exists", async () => {
     const f = fixture();
     await f.create();
     f.hooks.failBeforePath = guestPath;
-    await expect(f.start()).rejects.toThrow("rtdb-before-create");
+    await expect(f.start()).rejects.toThrow("state-before-create");
     const [pending] = await listPendingEventTransitionIntents(testEnv.EVENT_DB);
     if (pending.schemaVersion !== 2) throw new Error("missing-v2-intent");
     await testEnv.PROFILE_GAMES_DB.prepare(
@@ -694,7 +694,7 @@ describe("event transitions with canonical D1 invitation metadata", () => {
     const f = fixture();
     await f.create();
     f.hooks.failBeforePath = guestPath;
-    await expect(f.start()).rejects.toThrow("rtdb-before-create");
+    await expect(f.start()).rejects.toThrow("state-before-create");
     const [pending] = await listPendingEventTransitionIntents(testEnv.EVENT_DB);
     if (pending.schemaVersion !== 2) throw new Error("missing-v2-intent");
     await ensureEventTransitionReceipt(

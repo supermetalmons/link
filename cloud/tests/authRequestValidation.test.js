@@ -9,7 +9,7 @@ const {
   isSolanaAuthVerificationRequest,
   isXAuthCompletionRequest,
   normalizeAuthPresentation,
-} = require("../functions/shared/auth");
+} = require("../runtime/shared/auth");
 
 const token = "a".repeat(24);
 const requestValidators = [

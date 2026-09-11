@@ -390,7 +390,7 @@ function createRepository({
   if (modernizeWager) modernizeWagerState(state);
   const repository: Omit<
     GameplayRepository,
-    "getRtdbPath" | "transactRtdbPath"
+    "getStatePath" | "transactStatePath"
   > = {
     applyWagerTransferOnce: async (input) => {
       state.transferCalls += 1;
@@ -437,7 +437,7 @@ function createRepository({
       if (miningMatch) return state.frozen[miningMatch[1]];
       return null;
     },
-    patchRtdbRoot: async (updates) => {
+    patchStateRoot: async (updates) => {
       if (failPatch) {
         failPatch = false;
         throw new Error("patch-failed");
@@ -2101,7 +2101,7 @@ test("rejects lineage adjustment deltas that do not match the fingerprint", asyn
   }
 });
 
-test("resumes an empty proposal settlement after RTDB drops empty values", async () => {
+test("resumes an empty proposal settlement after storage drops empty values", async () => {
   const state = createRepository({
     failPatchOnce: true,
     wager: { proposalRemovalOperations: { previous: { count: 1 } } },
@@ -2175,7 +2175,7 @@ test("rate limits outcome requests before repository work", async () => {
     {
       repository: {
         ...createRepository().repository,
-        getRtdbPath: async () => {
+        getStatePath: async () => {
           reads += 1;
           return null;
         },

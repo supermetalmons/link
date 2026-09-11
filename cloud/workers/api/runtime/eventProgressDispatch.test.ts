@@ -10,7 +10,7 @@ import {
   type EventProgressSweepRepository,
 } from "../src/eventProgress.ts";
 import { readEventOwnedPath } from "../src/eventD1.ts";
-import { createEventRtdbClient } from "../src/eventRepository.ts";
+import { createEventStateRepository } from "../src/eventRepository.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
 
 const testEnv = env as Env & {
@@ -89,7 +89,7 @@ async function seedOutbox(): Promise<{
     { eventId, sourceKey: "timer:test", reason: "timer-claimed" },
     100,
   );
-  const client = createEventRtdbClient(testEnv);
+  const client = createEventStateRepository(testEnv);
   await client.patchRoot({
     [`events/${eventId}`]: {
       schemaVersion: 2,
@@ -109,8 +109,8 @@ async function seedOutbox(): Promise<{
   return {
     plan,
     repository: {
-      getRtdbPath: client.getPath,
-      patchRtdbRoot: client.patchRoot,
+      getStatePath: client.getPath,
+      patchStateRoot: client.patchRoot,
     },
   };
 }
@@ -169,9 +169,9 @@ describe("event-progress Workflow dispatch admissions", () => {
       await sweepEventProgress(f.value, {
         repository: {
           ...repository,
-          async patchRtdbRoot(updates) {
+          async patchStateRoot(updates) {
             await assertBlocked("before-outbox");
-            await repository.patchRtdbRoot(updates);
+            await repository.patchStateRoot(updates);
             await assertBlocked("after-outbox");
           },
         },

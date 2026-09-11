@@ -306,7 +306,7 @@ test("short takeback history remains provisional when the archive is absent or f
   }
 });
 
-test("pre-proposal Firebase pairs fetch the authoritative archive and never overwrite its cosmetics", async () => {
+test("pre-proposal legacy pairs fetch the authoritative archive and never overwrite its cosmetics", async () => {
   const archived = pair(1001);
   const h = harness(async () => archived);
   h.provisional(pair());

@@ -31,7 +31,7 @@ import { readBoundedJson } from "./http.ts";
 import {
   cleanString,
   normalizeMethodValue,
-  readStoredFirebaseUid,
+  readStoredLoginUid,
 } from "./authPolicy.ts";
 import { X_FLOW_TTL_MS } from "./xFlow.ts";
 
@@ -401,7 +401,7 @@ async function executeAuthMutation(
         }),
       );
       const current = await loadFlow();
-      if (readStoredFirebaseUid(current.uid) !== identity.uid) {
+      if (readStoredLoginUid(current.uid) !== identity.uid) {
         throw new AuthApiFailure(
           403,
           "permission-denied",
@@ -442,7 +442,7 @@ async function executeAuthMutation(
   let flow = await loadFlow();
   let refreshedFlow = false;
   while (true) {
-    if (readStoredFirebaseUid(flow.uid) !== identity.uid) {
+    if (readStoredLoginUid(flow.uid) !== identity.uid) {
       throw new AuthApiFailure(
         403,
         "permission-denied",

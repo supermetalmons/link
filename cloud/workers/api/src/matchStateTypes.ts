@@ -108,30 +108,6 @@ export type MatchStateEventEffectsRequest = MatchStateAuthority & {
   }>;
 };
 
-export type MatchStateImportRequest = MatchStateAuthority & {
-  importId: string;
-  records: Array<{
-    matchId: string;
-    playerId: string;
-    value: MatchStateRecord;
-  }>;
-  claims: Array<{ matchId: string; value: MatchStateRecord }>;
-};
-
-export type MatchStateImportTarget = MatchStateAuthority & { importId: string };
-
-export type MatchStateImportSnapshot = MatchStateImportRequest & {
-  digest: string;
-  recordCount: number;
-  claimCount: number;
-};
-
-export type MatchStateActivateRequest = MatchStateImportTarget & {
-  digest: string;
-  recordCount: number;
-  claimCount: number;
-};
-
 export type MatchStateOperations = {
   readRecord(input: MatchStateRecordRequest): MatchStateRecord | null;
   readPair(input: MatchStatePairRequest): MatchStatePair;

@@ -2,7 +2,7 @@ import { readBoundedBody } from "./http.ts";
 import {
   normalizeTaskPayload,
   type TelegramTaskPayload,
-} from "../../../functions/telegram/taskIdentity.js";
+} from "../../../runtime/telegram/taskIdentity.js";
 import {
   createTelegramBridgeSignature,
   hasValidTelegramBridgeSignature,

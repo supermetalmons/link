@@ -120,7 +120,7 @@ async function fixture() {
       .bind(inviteId, JSON.stringify(invite)),
   ]);
   const repository = {
-    async getRtdbPath(path: string) {
+    async getStatePath(path: string) {
       expect(path).toBe(`invites/${inviteId}`);
       const row = await db
         .prepare("SELECT source_json FROM invite_sources WHERE invite_id = ?")

@@ -1,4 +1,4 @@
-import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import type { InviteRoomNotificationOptions } from "./inviteRoomNotifications.ts";
 import { readResolvedLoginMatchInviteId } from "./loginMatchDiscoveryD1.ts";
 
@@ -18,9 +18,9 @@ export function changedMatchSyncTargets(
       parts[0] !== "players" ||
       parts[2] !== "matches" ||
       parts.length < 4 ||
-      !isCanonicalFirebaseUid(parts[1]) ||
+      !isCanonicalLoginUid(parts[1]) ||
       parts[3] !== parts[3].trim() ||
-      parts.slice(3).some((part) => !isSafeFirebaseKey(part))
+      parts.slice(3).some((part) => !isSafeRecordKey(part))
     ) {
       continue;
     }
@@ -82,8 +82,7 @@ export async function notifyMatchSyncChanged(
     signal.throwIfAborted();
     const rooms = new Map<string, Set<string>>();
     for (const { target, inviteId } of resolved) {
-      if (!isSafeFirebaseKey(inviteId) || inviteId !== inviteId.trim())
-        continue;
+      if (!isSafeRecordKey(inviteId) || inviteId !== inviteId.trim()) continue;
       const matchIds = rooms.get(inviteId) || new Set<string>();
       matchIds.add(target.matchId);
       rooms.set(inviteId, matchIds);
@@ -106,7 +105,7 @@ export async function notifyMatchSyncInvites(
   options: InviteRoomNotificationOptions = {},
 ): Promise<void> {
   const ids = [...new Set(inviteIds)].filter(
-    (id) => isSafeFirebaseKey(id) && id === id.trim(),
+    (id) => isSafeRecordKey(id) && id === id.trim(),
   );
   if (!ids.length || !env.INVITE_REACTIONS) return;
   await boundedNotification(async (signal) => {

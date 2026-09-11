@@ -1,8 +1,8 @@
 import { createTestWagerReservationRuntime } from "./wagerFrozenTestUtils.ts";
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
-import { MAX_FIREBASE_KEY_BYTES } from "../src/firebaseKeys.ts";
+import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
+import { MAX_RECORD_KEY_BYTES } from "../src/recordKeys.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import {
   handleTelegramQueueMessage as handleTelegramQueueMessageImpl,
@@ -133,7 +133,7 @@ test("acks invalid poison messages and retries infrastructure failures", async (
       ...dependencies,
       createEngine: () => ({
         reconcile: async () => {
-          throw new Error("rtdb unavailable");
+          throw new Error("state unavailable");
         },
       }),
     },
@@ -231,7 +231,7 @@ test("validates and processes durable wager settlement retries", async () => {
       ...recoverableWagerTask,
       resolution: {
         ...recoverableWagerTask.resolution,
-        winnerUid: "w".repeat(MAX_FIREBASE_KEY_BYTES + 1),
+        winnerUid: "w".repeat(MAX_RECORD_KEY_BYTES + 1),
       },
     },
     {
@@ -280,7 +280,7 @@ test("acknowledges malformed wager retry tasks", async () => {
       ...recoverableWagerTask,
       resolution: {
         ...recoverableWagerTask.resolution,
-        winnerUid: "w".repeat(MAX_FIREBASE_KEY_BYTES + 1),
+        winnerUid: "w".repeat(MAX_RECORD_KEY_BYTES + 1),
       },
     },
     {
@@ -431,7 +431,7 @@ test("durably defers wagers when frozen-state classification is unavailable", as
     }),
     {
       classifySettlement: async () => {
-        throw new Error("rtdb-unavailable");
+        throw new Error("state-unavailable");
       },
       createGameplay: () => unusedGameplayRepository,
       logger: { error() {}, info() {} },

@@ -3,13 +3,13 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const telegramDelivery = require("../functions/telegramDelivery");
-const deliveryEngine = require("../functions/telegram/deliveryEngine");
-const desiredState = require("../functions/telegram/desiredState");
-const deliveryPolicy = require("../functions/telegram/deliveryPolicy");
-const queueBridge = require("../functions/telegram/queueBridge");
-const taskIdentity = require("../functions/telegram/taskIdentity");
-const eventProjectionCore = require("../functions/telegram/eventProjectionCore");
+const telegramDelivery = require("../runtime/telegramDelivery");
+const deliveryEngine = require("../runtime/telegram/deliveryEngine");
+const desiredState = require("../runtime/telegram/desiredState");
+const deliveryPolicy = require("../runtime/telegram/deliveryPolicy");
+const queueBridge = require("../runtime/telegram/queueBridge");
+const taskIdentity = require("../runtime/telegram/taskIdentity");
+const eventProjectionCore = require("../runtime/telegram/eventProjectionCore");
 
 test("event Telegram projection is exposed through the shared core", () => {
   assert.equal(

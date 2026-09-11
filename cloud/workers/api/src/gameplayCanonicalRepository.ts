@@ -32,7 +32,7 @@ import {
   type CanonicalSortKey,
   type CanonicalWagerSettlement,
 } from "./profileCanonicalD1.ts";
-import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
+import type { StateRepository } from "./stateRepositoryTypes.ts";
 import {
   deleteD1NavigationGame,
   getD1NavigationGame,
@@ -502,7 +502,7 @@ function replayWagerSettlement(
 export function createCanonicalGameplayRepository(
   db: D1Database,
   profileGamesDb: D1Database,
-  rtdb: FirebaseRtdbClient,
+  state: StateRepository,
   options: CanonicalRepositoryOptions,
 ): GameplayRepository {
   const attempts = retryCount(options.maxAttempts);
@@ -677,10 +677,10 @@ export function createCanonicalGameplayRepository(
       }
     },
 
-    getRtdbPath: rtdb.getPath,
-    patchRtdbRoot: rtdb.patchRoot,
-    transactRtdbPath: rtdb.transactPath,
-    readMatchPair: rtdb.readMatchPair,
+    getStatePath: state.getPath,
+    patchStateRoot: state.patchRoot,
+    transactStatePath: state.transactPath,
+    readMatchPair: state.readMatchPair,
 
     async getNavigationGame(profileId, inviteId) {
       return getD1NavigationGame(profileGamesDb, profileId, inviteId);
@@ -820,9 +820,9 @@ export function createCanonicalRatingRepository(
     return snapshot ? ratingData(snapshot) : null;
   };
   return {
-    getRtdbPath: gameplay.getRtdbPath,
+    getStatePath: gameplay.getStatePath,
     readMatchPair: gameplay.readMatchPair,
-    patchRtdbRoot: gameplay.patchRtdbRoot,
+    patchStateRoot: gameplay.patchStateRoot,
     readProfileOwnershipSnapshot: gameplay.readProfileOwnershipSnapshot,
 
     readRatingUpdate: readOperation,

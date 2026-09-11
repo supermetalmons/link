@@ -16,7 +16,7 @@ import {
 } from "@mons/shared/wagers";
 import { AuthApiFailure } from "./authErrors.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import type { GameSessionMutationLockStore } from "./gameplayCoordinationD1.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import { withGameSessionMutationLease } from "./gameSessionMutations.ts";
@@ -148,7 +148,7 @@ export async function resolveWagerParticipantUids(
   inviteId: string,
   repository: GameplayRepository,
 ): Promise<WagerParticipantUids | WagerParticipants | WagerParticipantFailure> {
-  const invite = toRecord(await repository.getRtdbPath(`invites/${inviteId}`));
+  const invite = toRecord(await repository.getStatePath(`invites/${inviteId}`));
   if (!invite) {
     return { ok: false, reason: "invite-not-found" };
   }
@@ -157,7 +157,7 @@ export async function resolveWagerParticipantUids(
   if (!hostId || !guestId) {
     return { ok: false, reason: "missing-opponent" };
   }
-  if (!isSafeFirebaseKey(hostId) || !isSafeFirebaseKey(guestId)) {
+  if (!isSafeRecordKey(hostId) || !isSafeRecordKey(guestId)) {
     throw new Error("invalid-wager-participant");
   }
   if (identity.uid === hostId) {
@@ -536,7 +536,7 @@ async function sendWagerProposalUnlocked(
     throw new Error("wager-operation-unavailable");
   }
   if (existingReservationState.status === "consumed") {
-    const wager = toRecord(await repository.getRtdbPath(wagerPath));
+    const wager = toRecord(await repository.getStatePath(wagerPath));
     const agreementOperation = toRecord(wager?.agreementOperation);
     const agreement = isWagerAgreement(wager?.agreed) ? wager.agreed : null;
     if (
@@ -554,7 +554,7 @@ async function sendWagerProposalUnlocked(
     }
     return { ok: false, reason: "proposal-unavailable" };
   }
-  const wagerBefore = toRecord(await repository.getRtdbPath(wagerPath));
+  const wagerBefore = toRecord(await repository.getStatePath(wagerPath));
   const opponentProposalBefore = toRecord(
     toRecord(wagerBefore?.proposals)?.[participants.opponentUid],
   );
@@ -614,7 +614,7 @@ async function sendWagerProposalUnlocked(
   let wagerAfter: Record<string, unknown> | null = null;
   await mutation.refreshLease();
   try {
-    const result = await repository.transactRtdbPath(
+    const result = await repository.transactStatePath(
       wagerPath,
       (current) => {
         const transition = transitionWagerProposal(current, {
@@ -637,7 +637,7 @@ async function sendWagerProposalUnlocked(
     );
     wagerAfter = toRecord(result.value);
   } catch {
-    wagerAfter = toRecord(await repository.getRtdbPath(wagerPath));
+    wagerAfter = toRecord(await repository.getStatePath(wagerPath));
   }
   const agreementOperation = toRecord(wagerAfter?.agreementOperation);
   const removalOperations = toRecord(wagerAfter?.proposalRemovalOperations);
@@ -754,7 +754,7 @@ async function acceptWagerProposalUnlocked(
     "proposer-adjustment",
   );
   const wagerPath = `invites/${request.inviteId}/wagers/${request.matchId}`;
-  const wager = toRecord(await repository.getRtdbPath(wagerPath));
+  const wager = toRecord(await repository.getStatePath(wagerPath));
   const replayOperation = toRecord(wager?.agreementOperation);
   const replayAgreement = wager?.agreed;
   if (
@@ -842,7 +842,7 @@ async function acceptWagerProposalUnlocked(
   let wagerAfter: Record<string, unknown> | null = null;
   await mutation.refreshLease();
   try {
-    const result = await repository.transactRtdbPath(
+    const result = await repository.transactStatePath(
       wagerPath,
       (current) => {
         const currentWager = toRecord(current);
@@ -939,7 +939,7 @@ async function acceptWagerProposalUnlocked(
     );
     wagerAfter = toRecord(result.value);
   } catch {
-    wagerAfter = toRecord(await repository.getRtdbPath(wagerPath));
+    wagerAfter = toRecord(await repository.getStatePath(wagerPath));
   }
   const agreementOperation = toRecord(wagerAfter?.agreementOperation);
   const storedAgreement = wagerAfter?.agreed;
@@ -974,7 +974,7 @@ async function removeProposal(
   mutation: WagerMutationContext,
 ): Promise<Record<string, unknown> | null> {
   const wagerPath = `invites/${inviteId}/wagers/${matchId}`;
-  const wagerBefore = toRecord(await repository.getRtdbPath(wagerPath));
+  const wagerBefore = toRecord(await repository.getStatePath(wagerPath));
   const proposalBefore = toRecord(
     toRecord(wagerBefore?.proposals)?.[proposalUid],
   );
@@ -995,7 +995,7 @@ async function removeProposal(
   let wagerAfter: unknown;
   await mutation.refreshLease();
   try {
-    const result = await repository.transactRtdbPath(
+    const result = await repository.transactStatePath(
       wagerPath,
       (current) => {
         const wager = toRecord(current);
@@ -1055,7 +1055,7 @@ async function removeProposal(
     }
     wagerAfter = result.value;
   } catch {
-    wagerAfter = await repository.getRtdbPath(wagerPath);
+    wagerAfter = await repository.getStatePath(wagerPath);
     const recoveredWager = toRecord(wagerAfter);
     const recoveredOperations = toRecord(
       recoveredWager?.proposalRemovalOperations,

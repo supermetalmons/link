@@ -17,26 +17,25 @@ const {
   loadEndedMatchResults,
   renderUpcomingMessage,
   splitEventTelegramProjectionUpdates,
-} = require("../functions/telegram/eventProjectionCore");
+} = require("../runtime/telegram/eventProjectionCore");
 const {
   buildTelegramEditDesired,
-} = require("../functions/telegram/desiredStateCore");
+} = require("../runtime/telegram/desiredStateCore");
 const {
   buildSundayMonsReminder,
-} = require("../functions/telegram/sundayMonsReminder");
+} = require("../runtime/telegram/sundayMonsReminder");
 const {
   EVENT_LOCK_ROOT,
   EVENT_LOCK_TTL_MS,
   createEventLockManagerCore,
-} = require("../functions/events/lockManagerCore");
+} = require("../runtime/events/lockManagerCore");
 const {
-  runRtdbDecisionTransaction,
-} = require("../functions/rtdbDecisionTransaction");
+  runStateDecisionTransaction,
+} = require("../runtime/stateDecisionTransaction");
 
 const EVENT_ID = "EV2026";
 const NOW_MS = Date.UTC(2026, 7, 7, 12, 0, 0);
 const START_AT_MS = Date.UTC(2026, 7, 8, 17, 0, 0);
-const databaseRulesPath = path.resolve(__dirname, "..", "database.rules.json");
 const ALICE_EMOJI =
   '<tg-emoji emoji-id="5273900723417929741">&#11088;</tg-emoji>';
 const BOB_EMOJI =
@@ -425,8 +424,8 @@ const createRuntimeDatabase = (initial = {}) => {
           }
           return createSnapshot(values.get(path) ?? null);
         },
-        transaction: async (update, _onComplete, applyLocally) => {
-          this.transactionCalls.push({ path, applyLocally });
+        transaction: async (update, ...extra) => {
+          this.transactionCalls.push({ path, argumentCount: 1 + extra.length });
           let output = update(undefined);
           const authoritative = clone(values.get(path) ?? null);
           if (authoritative !== null) {
@@ -435,7 +434,7 @@ const createRuntimeDatabase = (initial = {}) => {
           if (output === undefined) {
             return {
               committed: false,
-              snapshot: createSnapshot(authoritative),
+              value: clone(authoritative),
             };
           }
           if (output === null) {
@@ -445,7 +444,7 @@ const createRuntimeDatabase = (initial = {}) => {
           }
           return {
             committed: true,
-            snapshot: createSnapshot(output),
+            value: clone(output),
           };
         },
       };
@@ -489,7 +488,7 @@ const createRuntimeLockManager = (
     logger: { error() {} },
     lockRoot,
     transactPath: (path, updater) =>
-      runRtdbDecisionTransaction(database.ref(path), updater),
+      runStateDecisionTransaction(database.ref(path), updater),
   });
 };
 
@@ -1742,21 +1741,12 @@ test("the runtime projector does not backfill an unarmed ended event", async () 
 
 test("the shared projection core has no Firebase runtime dependencies", () => {
   const source = fs.readFileSync(
-    path.resolve(__dirname, "../functions/telegram/eventProjectionCore.js"),
+    path.resolve(__dirname, "../runtime/telegram/eventProjectionCore.js"),
     "utf8",
   );
   assert.equal(source.includes("firebase-admin"), false);
   assert.equal(source.includes("firebase-functions"), false);
   assert.equal(source.includes("queueBridge"), false);
-});
-
-test("RTDB rules retire event state and outboxes", () => {
-  const rules = JSON.parse(fs.readFileSync(databaseRulesPath, "utf8"));
-  assert.equal(rules.rules.telegramProjectionOutbox?.event, undefined);
-  assert.equal(rules.rules.eventTelegramProjectionLocks, undefined);
-  assert.equal(rules.rules.eventTelegramProjections, undefined);
-  assert.equal(rules.rules.telegramMessages, undefined);
-  assert.equal(rules.rules.events, undefined);
 });
 
 test("guarded writes reject cross-event and unsupported-channel message keys", async (t) => {

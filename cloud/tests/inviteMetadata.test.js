@@ -4,8 +4,8 @@ const {
   isInviteMetadataSnapshot,
   isReadInviteMetadataResponse,
   isInviteMetadataMessage,
-} = require("../functions/shared/invite-metadata");
-const { isInviteRoomMessage } = require("../functions/shared/reactions");
+} = require("../runtime/shared/invite-metadata");
+const { isInviteRoomMessage } = require("../runtime/shared/reactions");
 
 const snapshot = {
   inviteId: "invite-one",

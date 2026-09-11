@@ -29,14 +29,14 @@ const connectionSource = readFileSync(
   "utf8",
 );
 
-const OPERATION_KEY = "pendingAutomatchOperation:firebase-uid";
+const OPERATION_KEY = "pendingAutomatchOperation:login-uid";
 const OPERATION_ID = "00000000-0000-4000-8000-000000000001";
 const VALID_OPERATION = {
   createdAtMs: 1_750_000_000_000,
   operationId: OPERATION_ID,
   request: { emojiId: 7, aura: "rainbow" },
   resolvedInviteId: null,
-  uid: "firebase-uid",
+  uid: "login-uid",
 };
 
 const methodSource = (start, end) => {
@@ -170,7 +170,7 @@ test("executes same-user operations serially through the Web-Lock wrapper", asyn
   const results = await Promise.all(
     Array.from({ length: 8 }, (_, index) =>
       withAutomatchOperationLock(
-        "firebase-uid",
+        "login-uid",
         async () => {
           active += 1;
           maxActive = Math.max(maxActive, active);
@@ -189,7 +189,7 @@ test("executes same-user operations serially through the Web-Lock wrapper", asyn
   assert.deepEqual(completionOrder, results);
   assert.deepEqual(
     requestedNames,
-    Array.from({ length: 8 }, () => "mons-automatch:firebase-uid"),
+    Array.from({ length: 8 }, () => "mons-automatch:login-uid"),
   );
 });
 
@@ -197,7 +197,7 @@ test("fails closed in browsers without Web Locks", async () => {
   let didRun = false;
   await assert.rejects(
     withAutomatchOperationLock(
-      "firebase-uid",
+      "login-uid",
       async () => {
         didRun = true;
       },

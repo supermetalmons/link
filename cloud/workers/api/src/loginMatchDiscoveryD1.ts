@@ -1,10 +1,11 @@
+import { RETIRED_STATE_BACKEND } from "./stateCompatibility.ts";
 import {
   matchDiscoverySortKey,
   type MatchDiscoveryEntry,
   type MatchDiscoveryPage,
   type MatchDiscoveryResolution,
-} from "../../../functions/shared/login-match-discovery.js";
-import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+} from "../../../runtime/shared/login-match-discovery.js";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 
 const CAPTURE_BATCH_SIZE = 40;
 const MAX_PAGE_SIZE = 20;
@@ -28,12 +29,12 @@ type DiscoveryRow = {
 
 function assertInput(row: LoginMatchDiscoveryInput): void {
   if (
-    !isCanonicalFirebaseUid(row.loginUid) ||
-    !isSafeFirebaseKey(row.matchId) ||
+    !isCanonicalLoginUid(row.loginUid) ||
+    !isSafeRecordKey(row.matchId) ||
     !["resolved", "missing", "ambiguous"].includes(row.resolution) ||
     !["capture", "backfill"].includes(row.provenance) ||
     (row.resolution === "resolved"
-      ? !isSafeFirebaseKey(row.inviteId)
+      ? !isSafeRecordKey(row.inviteId)
       : row.inviteId !== null)
   ) {
     throw new TypeError("invalid-login-match-discovery-row");
@@ -123,14 +124,14 @@ export async function captureLoginMatchDiscovery(
 
 export async function readLoginMatchDiscoveryBackend(
   db: D1Database,
-): Promise<"rtdb" | "d1"> {
+): Promise<typeof RETIRED_STATE_BACKEND | "d1"> {
   const backend = await db
     .withSession("first-primary")
     .prepare(
       "SELECT discovery_backend FROM login_match_discovery_control WHERE singleton = 1",
     )
     .first<string>("discovery_backend");
-  if (backend !== "rtdb" && backend !== "d1") {
+  if (backend !== RETIRED_STATE_BACKEND && backend !== "d1") {
     throw new Error("login-match-discovery-control-unavailable");
   }
   return backend;
@@ -141,7 +142,7 @@ export async function readResolvedLoginMatchInviteId(
   loginUid: string,
   matchId: string,
 ): Promise<string | null> {
-  if (!isCanonicalFirebaseUid(loginUid) || !isSafeFirebaseKey(matchId)) {
+  if (!isCanonicalLoginUid(loginUid) || !isSafeRecordKey(matchId)) {
     throw new TypeError("invalid-login-match-discovery-key");
   }
   const row = await db
@@ -172,8 +173,8 @@ export async function listLoginMatchDiscoveryPage(
   limit: number,
 ): Promise<LoginMatchDiscoveryPage> {
   if (
-    !isCanonicalFirebaseUid(loginUid) ||
-    (afterMatchId !== null && !isSafeFirebaseKey(afterMatchId)) ||
+    !isCanonicalLoginUid(loginUid) ||
+    (afterMatchId !== null && !isSafeRecordKey(afterMatchId)) ||
     !Number.isInteger(limit) ||
     limit < 1 ||
     limit > MAX_PAGE_SIZE

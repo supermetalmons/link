@@ -1,8 +1,8 @@
 import type { D1Migration } from "cloudflare:test";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import type { StateRepository } from "../src/stateRepositoryTypes.ts";
 import { createInviteSourceD1Store } from "../src/inviteSourceD1.ts";
 import {
-  createEventRtdbClient,
+  createEventStateRepository,
   recoverEventTransitionIntents,
 } from "../src/eventRepository.ts";
 
@@ -56,10 +56,10 @@ export function eventTransitionFixture(
   } = {};
   const assertPath = (path: string) => {
     if (/^(?:invites|eventTransitionReceipts)(?:\/|$)/.test(path)) {
-      throw new Error("retired-firebase-event-path");
+      throw new Error("retired-source-event-path");
     }
   };
-  const raw: FirebaseRtdbClient = {
+  const raw: StateRepository = {
     async getPath(path) {
       assertPath(path);
       reads.push(path);
@@ -111,7 +111,7 @@ export function eventTransitionFixture(
     },
   };
   const source = createInviteSourceD1Store(env.PROFILE_GAMES_DB);
-  const base: FirebaseRtdbClient = {
+  const base: StateRepository = {
     getPath: (path, query, signal) =>
       path.startsWith("invites/")
         ? source.getPath(path, query, signal)
@@ -127,7 +127,7 @@ export function eventTransitionFixture(
     hooks,
     raw,
     source,
-    client: createEventRtdbClient(env, base, raw),
+    client: createEventStateRepository(env, base, raw),
     recover: () => recoverEventTransitionIntents(env, 100, raw),
   };
 }

@@ -5,7 +5,7 @@ const test = require("node:test");
 const {
   matchDiscoverySortKey,
   resolveMatchDiscoveryInvite,
-} = require("../functions/shared/login-match-discovery");
+} = require("../runtime/shared/login-match-discovery");
 
 test("discovery sort keys preserve JavaScript ordering for numeric and Unicode IDs", () => {
   const ids = ["a10", "a2", "2", "10", "a", "a😀", "a\ue000", " A ", "é"];

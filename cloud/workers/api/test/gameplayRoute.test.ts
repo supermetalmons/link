@@ -13,11 +13,10 @@ import {
 } from "@mons/shared/game-sessions";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import {
-  createFirebaseRtdbClient,
-  FirebaseRtdbFailure,
-  FirebaseRtdbPermissionDenied,
-  type FirebaseRtdbClient,
-} from "../test/legacyFirebaseRtdb.ts";
+  StateRepositoryFailure,
+  StateRepositoryPermissionDenied,
+  type StateRepository,
+} from "../src/stateRepositoryTypes.ts";
 import { GameSessionMutationLockFailure } from "../src/gameplayCoordinationD1.ts";
 import { submitMove } from "../src/matchMove.ts";
 import { surrenderMatch } from "../src/matchSurrender.ts";
@@ -61,7 +60,7 @@ const env = {
 } as Env;
 
 const identity: RequestIdentity = {
-  uid: "firebase-uid",
+  uid: "login-uid",
 };
 const AUTOMATCH_OPERATION_ID = "00000000-0000-4000-8000-000000000001";
 
@@ -251,31 +250,32 @@ function repository(
   overrides: Partial<GameplayRepository> = {},
 ): GameplayRepository {
   const transactionValues = new Map<string, unknown>();
-  const value: Omit<GameplayRepository, "getRtdbPath" | "transactRtdbPath"> = {
-    applyWagerTransferOnce: async () => "applied",
-    deleteNavigationGame: async () => "deleted",
-    readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
-    getNavigationGame: async () => null,
-    getMiningMaterials: async () => ({
-      dust: 10,
-      slime: 10,
-      gum: 10,
-      metal: 10,
-      ice: 10,
-    }),
-    getMiningSnapshot: async () => null,
-    readState: async () => null,
-    patchRtdbRoot: async () => undefined,
-    transactState: async (path, updater) => {
-      const current = transactionValues.get(path) ?? null;
-      const result = applyTransaction(updater, current);
-      if (result.committed) {
-        transactionValues.set(path, result.value);
-      }
-      return result;
-    },
-    ...overrides,
-  };
+  const value: Omit<GameplayRepository, "getStatePath" | "transactStatePath"> =
+    {
+      applyWagerTransferOnce: async () => "applied",
+      deleteNavigationGame: async () => "deleted",
+      readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
+      getNavigationGame: async () => null,
+      getMiningMaterials: async () => ({
+        dust: 10,
+        slime: 10,
+        gum: 10,
+        metal: 10,
+        ice: 10,
+      }),
+      getMiningSnapshot: async () => null,
+      readState: async () => null,
+      patchStateRoot: async () => undefined,
+      transactState: async (path, updater) => {
+        const current = transactionValues.get(path) ?? null;
+        const result = applyTransaction(updater, current);
+        if (result.committed) {
+          transactionValues.set(path, result.value);
+        }
+        return result;
+      },
+      ...overrides,
+    };
   const result = attachMemoryWagerFrozenStore(value);
   result.automatchPersistence ??= createAutomatchPersistenceStub({
     readQueuedByLogins: createAutomatchQueueLookup((...args) =>
@@ -403,7 +403,7 @@ test("cancels the deterministic UID automatch with exact v2 multipath updates", 
         if (path === "automatch") {
           assert.deepEqual(query, {
             orderBy: "uid",
-            equalTo: "firebase-uid",
+            equalTo: "login-uid",
             limitToFirst: 2,
           });
           return queueExists
@@ -432,9 +432,9 @@ test("cancels the deterministic UID automatch with exact v2 multipath updates", 
           return null;
         }
         if (path === "invites/auto-newer/hostId") return identity.uid;
-        assert.fail(`unexpected RTDB path ${path}`);
+        assert.fail(`unexpected state path ${path}`);
       },
-      patchRtdbRoot: async (updates) => {
+      patchStateRoot: async (updates) => {
         patches.push(updates);
         if (updates["automatch/auto-newer"] === null) queueExists = false;
       },
@@ -515,7 +515,7 @@ test("cancels every queue owned by merged logins", async () => {
         }
         return null;
       },
-      patchRtdbRoot: async (updates) => {
+      patchStateRoot: async (updates) => {
         for (const [path, value] of Object.entries(updates)) {
           const queue = /^automatch\/(.+)$/.exec(path);
           if (queue && value === null) queues.delete(queue[1]);
@@ -565,9 +565,9 @@ test("skips cancellation when a guest wins the invite lease race", async () => {
         }
         if (path === "invites/auto-race/guestId") return "guest-uid";
         if (path === "invites/auto-race/hostId") return "host-uid";
-        assert.fail(`unexpected RTDB path ${path}`);
+        assert.fail(`unexpected state path ${path}`);
       },
-      patchRtdbRoot: async (updates) => {
+      patchStateRoot: async (updates) => {
         patches.push(updates);
       },
     }),
@@ -611,9 +611,9 @@ test("shared cancellation rejects changed queue timestamps and versions", async 
             if (path === "automatch/auto_changed") return current;
             if (path === "invites/auto_changed/guestId") return null;
             if (path === "invites/auto_changed/hostId") return identity.uid;
-            assert.fail(`unexpected RTDB path ${path}`);
+            assert.fail(`unexpected state path ${path}`);
           },
-          patchRtdbRoot: async () => {
+          patchStateRoot: async () => {
             patches += 1;
           },
         }),
@@ -682,9 +682,9 @@ test("cancels an alternate-login legacy queue without a root scan", async () => 
         }
         if (path === "invites/auto-alias/guestId") return null;
         if (path === "invites/auto-alias/hostId") return "legacy-login";
-        assert.fail(`unexpected RTDB path ${path}`);
+        assert.fail(`unexpected state path ${path}`);
       },
-      patchRtdbRoot: async (updates) => {
+      patchStateRoot: async (updates) => {
         patches.push(updates);
         if (updates["automatch/auto-alias"] === null) queueExists = false;
       },
@@ -704,8 +704,8 @@ test("returns false without writes for missing queues and existing guests", asyn
     identity,
     repository({
       readState: async (path) =>
-        path === "players/firebase-uid/profile" ? "profile" : null,
-      patchRtdbRoot: async () => {
+        path === "players/login-uid/profile" ? "profile" : null,
+      patchStateRoot: async () => {
         patches++;
       },
     }),
@@ -716,13 +716,13 @@ test("returns false without writes for missing queues and existing guests", asyn
     identity,
     repository({
       readState: async (path) => {
-        if (path === "players/firebase-uid/profile") return "profile";
+        if (path === "players/login-uid/profile") return "profile";
         if (path === "automatch") return { invite: {} };
         if (path === "automatch/invite") return {};
         if (path === "invites/invite/guestId") return "guest";
         return null;
       },
-      patchRtdbRoot: async () => {
+      patchStateRoot: async () => {
         patches++;
       },
     }),
@@ -739,7 +739,7 @@ test("keeps legacy automatch cancellation free of Telegram v2 updates", async ()
     identity,
     repository({
       readState: async (path) => {
-        if (path === "players/firebase-uid/profile") return "profile";
+        if (path === "players/login-uid/profile") return "profile";
         if (path === "automatch") {
           return queueExists
             ? {
@@ -764,7 +764,7 @@ test("keeps legacy automatch cancellation free of Telegram v2 updates", async ()
         if (path === "invites/auto-legacy/hostId") return identity.uid;
         return null;
       },
-      patchRtdbRoot: async (updates) => {
+      patchStateRoot: async (updates) => {
         patches.push(updates);
         if (updates["automatch/auto-legacy"] === null) queueExists = false;
       },
@@ -803,7 +803,7 @@ test("keeps legacy automatch cancellation free of Telegram v2 updates", async ()
 
 test("preserves every navigation precondition outcome", async () => {
   const basePaths = async (path: string): Promise<unknown> => {
-    if (path === "players/firebase-uid/profile") return "profile-1";
+    if (path === "players/login-uid/profile") return "profile-1";
     if (path === "invites/invite-1") return {};
     if (path === "automatch/invite-1") return null;
     return null;
@@ -817,7 +817,7 @@ test("preserves every navigation precondition outcome", async () => {
   }> = [
     {
       name: "profile unresolved",
-      identity: { uid: "firebase-uid" },
+      identity: { uid: "login-uid" },
       repo: {
         readState: async () => null,
         readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
@@ -833,7 +833,7 @@ test("preserves every navigation precondition outcome", async () => {
       name: "invite missing",
       repo: {
         readState: async (path) =>
-          path === "players/firebase-uid/profile" ? "profile-1" : null,
+          path === "players/login-uid/profile" ? "profile-1" : null,
       },
       expected: {
         ok: true,
@@ -846,7 +846,7 @@ test("preserves every navigation precondition outcome", async () => {
       name: "invite active",
       repo: {
         readState: async (path) =>
-          path === "players/firebase-uid/profile"
+          path === "players/login-uid/profile"
             ? "profile-1"
             : path === "invites/invite-1"
               ? { guestId: "guest" }
@@ -864,7 +864,7 @@ test("preserves every navigation precondition outcome", async () => {
       inviteId: "auto_invite1",
       repo: {
         readState: async (path) =>
-          path === "players/firebase-uid/profile"
+          path === "players/login-uid/profile"
             ? "profile-1"
             : path === "invites/auto_invite1"
               ? { automatchStateHint: "pending" }
@@ -932,7 +932,7 @@ test("fails closed before removing a D1 game when ownership is unavailable", asy
         "invite-1",
         repository({
           readState: async () => {
-            throw new Error("rtdb-unavailable");
+            throw new Error("state-unavailable");
           },
           readProfileOwnershipSnapshot: async () => {
             throw new Error("profile-storage-unavailable");
@@ -1073,7 +1073,7 @@ test("validates automatch operation IDs before the frozen-write gate", async () 
         repositoryReads++;
         return null;
       },
-      patchRtdbRoot: async () => {
+      patchStateRoot: async () => {
         repositoryWrites++;
       },
     }),
@@ -1140,7 +1140,7 @@ test("rejects a rate-limited automatch start before repository access", async ()
           repositoryReads++;
           return null;
         },
-        patchRtdbRoot: async () => {
+        patchStateRoot: async () => {
           repositoryWrites++;
         },
       }),
@@ -1289,7 +1289,7 @@ test("routes strict authenticated structural game-session mutations", async () =
         random: () => 0,
       },
       repository: repository({
-        patchRtdbRoot: async (updates) => {
+        patchStateRoot: async (updates) => {
           patches.push(updates);
         },
       }),
@@ -1476,7 +1476,7 @@ test("routes authoritative invite role reads without mutation rate limiting", as
               password: "secret",
             };
           }
-          if (path === "players/firebase-uid/profile") return "profile-1";
+          if (path === "players/login-uid/profile") return "profile-1";
           if (path === "players/host-login/profile") return "profile-host";
           return null;
         },
@@ -1493,7 +1493,7 @@ test("routes authoritative invite role reads without mutation rate limiting", as
     {
       repository: repository({
         readState: async () => {
-          throw new Error("rtdb-unavailable");
+          throw new Error("state-unavailable");
         },
       }),
       verifyIdentity: async () => identity,
@@ -1604,7 +1604,7 @@ test("routes exact authenticated rating updates without a new rate limit", async
       return { status: "committed", data: plan.repairData };
     },
     readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       assert.doesNotMatch(path, /matchesRatingUpdates/);
       if (path === `invites/${ratingRequest.inviteId}`) {
         return {
@@ -1640,7 +1640,7 @@ test("routes exact authenticated rating updates without a new rate limit", async
       }
       return null;
     },
-    patchRtdbRoot: async (updates) => {
+    patchStateRoot: async (updates) => {
       patches.push(updates);
     },
     readRatingUpdate: async () => null,
@@ -1831,7 +1831,7 @@ test("routes timer victory claims with a separate limit and terminal update", as
         timer: "",
       };
     },
-    patchRtdbRoot: async (updates) => {
+    patchStateRoot: async (updates) => {
       assert.equal(retainedClaims.length, 1);
       assert.equal(
         Object.keys(updates).some((path) =>
@@ -1989,8 +1989,8 @@ test("sanitizes timer claim repository failures", async () => {
                 timer: "",
               };
         },
-        patchRtdbRoot: async () => {
-          throw new Error("private-rtdb-detail");
+        patchStateRoot: async () => {
+          throw new Error("private-state-detail");
         },
         transactState: async (_path, updater) =>
           applyTransaction(updater, {
@@ -2020,7 +2020,7 @@ test("sanitizes timer claim repository failures", async () => {
     error: "unavailable",
     message: "gameplay-service-unavailable",
   });
-  assert.doesNotMatch(JSON.stringify(payload), /private-rtdb-detail/);
+  assert.doesNotMatch(JSON.stringify(payload), /private-state-detail/);
   assert.deepEqual(failures, ["gameplay-service-unavailable"]);
 });
 
@@ -2655,7 +2655,7 @@ test("reads only the authenticated caller profile from D1", async () => {
         readProfileOwnershipSnapshot: async (query) =>
           ownershipForLogins(query, () => "profile-from-d1"),
         readState: async (path) => {
-          assert.fail(`unexpected RTDB read ${path}`);
+          assert.fail(`unexpected state read ${path}`);
         },
       }),
       readNavigationPage: async (_db, profileId, limit, cursor) => {
@@ -2690,7 +2690,7 @@ test("fails closed when navigation profile ownership is unavailable", async () =
     {
       repository: repository({
         readState: async () => {
-          throw new Error("rtdb-unavailable");
+          throw new Error("state-unavailable");
         },
         readProfileOwnershipSnapshot: async () => {
           throw new Error("profile-storage-unavailable");
@@ -2731,7 +2731,7 @@ function surrenderFixture({
 } = {}) {
   const stats = { writes: 0, scopedClients: 0 };
   const body = { inviteId: "invite", matchId: "invite", playerId };
-  const client: Pick<FirebaseRtdbClient, "transactPath"> = {
+  const client: Pick<StateRepository, "transactPath"> = {
     async transactPath(path, updater, signal, beforeWrite) {
       assert.equal(path, `players/${playerId}/matches/${body.matchId}`);
       signal?.throwIfAborted();
@@ -2760,7 +2760,7 @@ function surrenderFixture({
       transactState: async () => {
         throw new Error("unrestricted-write");
       },
-      patchRtdbRoot: async () => {
+      patchStateRoot: async () => {
         throw new Error("unrestricted-write");
       },
     }),
@@ -2871,8 +2871,8 @@ test("surrender rejects unauthorized, missing and unrelated match requests befor
 
 test("surrender maps rule rejection to a conflict and leaves provider failures unavailable", async () => {
   for (const [error, status, code] of [
-    [new FirebaseRtdbPermissionDenied(), 409, "failed-precondition"],
-    [new FirebaseRtdbFailure(), 503, "unavailable"],
+    [new StateRepositoryPermissionDenied(), 409, "failed-precondition"],
+    [new StateRepositoryFailure(), 503, "unavailable"],
   ] as const) {
     const h = surrenderFixture();
     h.client.transactPath = async () => {
@@ -2890,7 +2890,7 @@ test("a surrender commit with a lost response can be replayed without a second w
   const transact = h.client.transactPath;
   h.client.transactPath = async (...args) => {
     await transact(...args);
-    throw new FirebaseRtdbFailure();
+    throw new StateRepositoryFailure();
   };
   assert.equal((await h.call()).status, 503);
   h.client.transactPath = transact;
@@ -2965,7 +2965,7 @@ function moveFixture({
     fen: "next-fen",
     gameVariant: "Classic",
   };
-  const client: Pick<FirebaseRtdbClient, "transactPath"> = {
+  const client: Pick<StateRepository, "transactPath"> = {
     async transactPath(path, updater, signal, beforeWrite) {
       assert.equal(path, `players/${playerId}/matches/${body.matchId}`);
       signal?.throwIfAborted();
@@ -2994,7 +2994,7 @@ function moveFixture({
       transactState: async () => {
         throw new Error("unrestricted-write");
       },
-      patchRtdbRoot: async () => {
+      patchStateRoot: async () => {
         throw new Error("unrestricted-write");
       },
     }),
@@ -3186,7 +3186,7 @@ test("moves map temporary rules rejection to blocked and verify ambiguous commit
   const blocked = moveFixture();
   const transact = blocked.client.transactPath;
   blocked.client.transactPath = async () => {
-    throw new FirebaseRtdbPermissionDenied();
+    throw new StateRepositoryPermissionDenied();
   };
   const response = await blocked.call();
   assert.equal(response.status, 409);
@@ -3200,7 +3200,7 @@ test("moves map temporary rules rejection to blocked and verify ambiguous commit
   const commit = uncertain.client.transactPath;
   uncertain.client.transactPath = async (...args) => {
     await commit(...args);
-    throw new FirebaseRtdbFailure();
+    throw new StateRepositoryFailure();
   };
   assert.equal((await uncertain.call()).status, 503);
   uncertain.client.transactPath = commit;
@@ -3313,7 +3313,7 @@ test("a cumulative successor recovers an earlier commit whose response was lost"
   const transact = h.client.transactPath;
   h.client.transactPath = async (...args) => {
     await transact(...args);
-    throw new FirebaseRtdbFailure();
+    throw new StateRepositoryFailure();
   };
   assert.equal((await h.call(env, first)).status, 503);
   h.client.transactPath = transact;
@@ -3497,7 +3497,7 @@ test("cumulative requests preserve the whole body limit and validate superseded 
   assert.equal(h.stats.scopedClients, 0);
 });
 
-test("cumulative REST CAS rechecks intermediate or superseding state after an ETag race", async () => {
+test("cumulative transactions recheck intermediate or superseding state after a concurrent write", async () => {
   for (const race of ["intermediate", "divergent", "superseded"] as const) {
     const h = moveFixture();
     const body = cumulativeMove(h.body);
@@ -3521,27 +3521,22 @@ test("cumulative REST CAS rechecks intermediate or superseding state after an ET
       flatMovesString: body.flatMovesString,
     };
     const writes: Record<string, unknown>[] = [];
-    let gets = 0;
-    const scoped = createFirebaseRtdbClient(env, {
-      scopedMatchMove: { playerId: body.playerId, matchId: body.matchId },
-      getAccessToken: async () => "token",
-      fetcher: async (_url, init) => {
-        if (init?.method === "PUT") {
-          writes.push(JSON.parse(String(init.body)));
-          assert.equal(
-            new Headers(init.headers).get("If-Match"),
-            writes.length === 1 ? '"first"' : '"second"',
-          );
-          return Response.json(writes.length === 1 ? concurrent : expected, {
-            status: writes.length === 1 ? 412 : 200,
-          });
-        }
-        return Response.json(++gets === 1 ? original : concurrent, {
-          headers: { ETag: gets === 1 ? '"first"' : '"second"' },
+    h.client.transactPath = async (path, updater, signal, beforeWrite) => {
+      assert.equal(path, `players/${body.playerId}/matches/${body.matchId}`);
+      for (const [attempt, current] of [original, concurrent].entries()) {
+        signal?.throwIfAborted();
+        const result = applyTransaction(updater, structuredClone(current));
+        if (!result.committed) return result;
+        await beforeWrite?.({
+          current,
+          proposed: result.value,
+          etag: String(attempt),
         });
-      },
-    });
-    h.client.transactPath = scoped.transactPath;
+        writes.push(result.value as Record<string, unknown>);
+        if (attempt === 1) return result;
+      }
+      throw new Error("unexpected-transaction-exhaustion");
+    };
     const response = await h.call(env, body);
     if (race === "intermediate") {
       assert.equal(response.status, 200);

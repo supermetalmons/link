@@ -14,9 +14,9 @@ import { GameSessionMutationLockFailure } from "../src/gameplayCoordinationD1.ts
 import { cancelAutomatch as cancelAutomatchImpl } from "../src/gameplayRoute.ts";
 import type { RequestIdentity } from "../src/requestIdentity.ts";
 import {
-  FIREBASE_RTDB_SERVER_TIMESTAMP,
-  firebaseRtdbIncrement,
-} from "../src/firebaseRtdb.ts";
+  STATE_SERVER_TIMESTAMP,
+  stateIncrement,
+} from "../src/stateRepositoryTypes.ts";
 import type {
   GameplayProfile,
   GameplayRepository,
@@ -160,7 +160,7 @@ function assertPendingReceiptUpdates(
   assert.deepEqual(updates[`gameplayMutationReceipts/${operationId}`], {
     schemaVersion: 1,
     aura: "",
-    completedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+    completedAtMs: STATE_SERVER_TIMESTAMP,
     emojiId: 1,
     inviteId,
     kind: "automatch-start",
@@ -177,7 +177,7 @@ function assertPendingReceiptUpdates(
   });
   assert.deepEqual(
     updates[`gameplayMutationReceiptExpirations/${operationId}`],
-    { completedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP },
+    { completedAtMs: STATE_SERVER_TIMESTAMP },
   );
   assert.equal(
     updates[`invites/${inviteId}/automatchOperationIds/${requesterUid}`],
@@ -260,16 +260,16 @@ function repository(
 ): GameplayRepository {
   const transactionValues = new Map<string, unknown>();
   const receiptValues = new Map<string, unknown>();
-  const getRtdbPath = overrides.getRtdbPath;
-  const patchRtdbRoot = overrides.patchRtdbRoot;
+  const getStatePath = overrides.getStatePath;
+  const patchStateRoot = overrides.patchStateRoot;
   const {
-    getRtdbPath: _ignoredGet,
-    patchRtdbRoot: _ignoredPatch,
+    getStatePath: _ignoredGet,
+    patchStateRoot: _ignoredPatch,
     ...remainingOverrides
   } = overrides;
   return {
     automatchPersistence: createAutomatchPersistenceStub({
-      readQueuedByLogins: createAutomatchQueueLookup(getRtdbPath),
+      readQueuedByLogins: createAutomatchQueueLookup(getStatePath),
     }),
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
@@ -283,13 +283,13 @@ function repository(
       ice: 10,
     }),
     getMiningSnapshot: async () => null,
-    getRtdbPath: async (path, query, signal) =>
+    getStatePath: async (path, query, signal) =>
       path.startsWith("gameplayMutationReceipts/")
         ? readReceipt
           ? readReceipt()
           : (receiptValues.get(path) ?? null)
-        : (getRtdbPath?.(path, query, signal) ?? null),
-    patchRtdbRoot: async (updates, signal) => {
+        : (getStatePath?.(path, query, signal) ?? null),
+    patchStateRoot: async (updates, signal) => {
       for (const [path, value] of Object.entries(updates)) {
         if (path.startsWith("gameplayMutationReceipts/")) {
           receiptValues.set(path, {
@@ -298,9 +298,9 @@ function repository(
           });
         }
       }
-      await patchRtdbRoot?.(updates, signal);
+      await patchStateRoot?.(updates, signal);
     },
-    transactRtdbPath: async (path, updater) => {
+    transactStatePath: async (path, updater) => {
       const decision = updater(transactionValues.get(path) ?? null) as {
         commit?: boolean;
         decision?: string;
@@ -327,7 +327,7 @@ function repository(
 test("requires canonical persistence for owner lookup without reading a Firebase queue", async () => {
   const source = repository({
     automatchPersistence: undefined,
-    async getRtdbPath() {
+    async getStatePath() {
       throw new Error("unexpected-queue-read");
     },
   });
@@ -363,7 +363,7 @@ test("creates a pending automatch with profile metadata and exact roots", async 
     identity,
     request(),
     repository({
-      getRtdbPath: async (path, query) => {
+      getStatePath: async (path, query) => {
         if (path === `gameplayMutationReceipts/${AUTOMATCH_OPERATION_ID}`) {
           return null;
         }
@@ -379,7 +379,7 @@ test("creates a pending automatch with profile metadata and exact roots", async 
         assert.deepEqual(query, { orderBy: "$key", limitToFirst: 1 });
         return null;
       },
-      patchRtdbRoot: async (value) => {
+      patchStateRoot: async (value) => {
         updates = value;
       },
     }),
@@ -440,7 +440,7 @@ test("creates a pending automatch with profile metadata and exact roots", async 
   assert.deepEqual(receipt.response, result);
   assert.deepEqual(
     updates[`gameplayMutationReceiptExpirations/${AUTOMATCH_OPERATION_ID}`],
-    { completedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP },
+    { completedAtMs: STATE_SERVER_TIMESTAMP },
   );
   const queue = updates["automatch/auto_aaaaaaaaaaa"] as Record<
     string,
@@ -462,8 +462,8 @@ test("creates a pending automatch with profile metadata and exact roots", async 
       status: "pending",
       requestId: "request-1",
       reason: "automatch-queue",
-      sourceUpdatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
-      lastQueuedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+      sourceUpdatedAtMs: STATE_SERVER_TIMESTAMP,
+      lastQueuedAtMs: STATE_SERVER_TIMESTAMP,
     },
   );
   assert.deepEqual(
@@ -472,13 +472,13 @@ test("creates a pending automatch with profile metadata and exact roots", async 
       schemaVersion: 1,
       status: "pending",
       requestId: "request-1",
-      updatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+      updatedAtMs: STATE_SERVER_TIMESTAMP,
     },
   );
   assert.equal(queue.emojiId, 9);
   assert.equal(queue.profileId, "guest-profile");
   assert.equal(queue.password, "aaaaaaaaaaaaaaa");
-  assert.deepEqual(queue.timestamp, FIREBASE_RTDB_SERVER_TIMESTAMP);
+  assert.deepEqual(queue.timestamp, STATE_SERVER_TIMESTAMP);
   assert.equal(match.emojiId, 9);
   assert.equal(match.aura, "rainbow");
   assert.equal(match.color, "white");
@@ -510,7 +510,7 @@ test("returns a committed pending automatch despite release failure", async () =
   const telegramTasks: unknown[] = [];
   let committed = false;
   const value = repository({
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       if (!committed) return null;
       if (path === "automatch/auto_aaaaaaaaaaa") {
         return { uid: identity.uid };
@@ -530,7 +530,7 @@ test("returns a committed pending automatch despite release failure", async () =
       }
       return null;
     },
-    patchRtdbRoot: async () => {
+    patchStateRoot: async () => {
       committed = true;
       throw new Error("response-lost-after-commit");
     },
@@ -587,7 +587,7 @@ test("uses client metadata without canonical ownership for an unlinked login", a
         ownershipSnapshot(query, {
           ownerByUid: { [identity.uid]: null },
         }),
-      patchRtdbRoot: async (value) => {
+      patchStateRoot: async (value) => {
         updates = value;
       },
     }),
@@ -621,8 +621,8 @@ test("automatch queue failures preserve the committed response and outboxes", as
     identity,
     request(),
     repository({
-      getRtdbPath: async () => null,
-      patchRtdbRoot: async (value) => {
+      getStatePath: async () => null,
+      patchStateRoot: async (value) => {
         updates = value;
       },
     }),
@@ -653,8 +653,8 @@ test("automatch queue failures preserve the committed response and outboxes", as
       status: "pending",
       requestId: "request-1",
       reason: "automatch-queue",
-      sourceUpdatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
-      lastQueuedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+      sourceUpdatedAtMs: STATE_SERVER_TIMESTAMP,
+      lastQueuedAtMs: STATE_SERVER_TIMESTAMP,
     },
   );
   assert.deepEqual(
@@ -663,7 +663,7 @@ test("automatch queue failures preserve the committed response and outboxes", as
       schemaVersion: 1,
       status: "pending",
       requestId: "request-1",
-      updatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+      updatedAtMs: STATE_SERVER_TIMESTAMP,
     },
   );
 });
@@ -680,11 +680,11 @@ test("fails closed before reading a queue when ownership is unavailable", async 
           readProfileOwnershipSnapshot: async () => {
             throw new Error("profile-unavailable");
           },
-          getRtdbPath: async () => {
+          getStatePath: async () => {
             queueReads++;
             return { auto_existing: { uid: identity.uid } };
           },
-          patchRtdbRoot: async () => {
+          patchStateRoot: async () => {
             writes++;
           },
         }),
@@ -720,7 +720,7 @@ test("returns pending automatches for the same login or profile", async (t) => {
                 [profile.profileId]: [identity.uid, "other-uid"],
               },
             }),
-          getRtdbPath: async (path) => {
+          getStatePath: async (path) => {
             const queue = {
               profileId: queuedProfile,
               uid: queuedUid,
@@ -736,7 +736,7 @@ test("returns pending automatches for the same login or profile", async (t) => {
             }
             assert.fail(`unexpected path ${path}`);
           },
-          patchRtdbRoot: async (value) => {
+          patchStateRoot: async (value) => {
             updates = value;
           },
         }),
@@ -759,7 +759,7 @@ test("receipts a same-login queue that appears after owner convergence", async (
     identity,
     request(),
     repository({
-      getRtdbPath: async (path, query) => {
+      getStatePath: async (path, query) => {
         if (path === "automatch/auto_late") {
           return { uid: identity.uid };
         }
@@ -778,7 +778,7 @@ test("receipts a same-login queue that appears after owner convergence", async (
         assert.deepEqual(query, { orderBy: "$key", limitToFirst: 1 });
         return { auto_late: { uid: identity.uid } };
       },
-      patchRtdbRoot: async (value) => {
+      patchStateRoot: async (value) => {
         updates = value;
       },
     }),
@@ -811,7 +811,7 @@ test("finds another owned login queue before scanning for a match", async () => 
             [profile.profileId]: ["alternate-uid", identity.uid],
           },
         }),
-      getRtdbPath: async (path, query) => {
+      getStatePath: async (path, query) => {
         if (path === "automatch/auto_owned") {
           return {
             uid: "alternate-uid",
@@ -839,7 +839,7 @@ test("finds another owned login queue before scanning for a match", async () => 
             }
           : null;
       },
-      patchRtdbRoot: async (value) => {
+      patchStateRoot: async (value) => {
         updates = value;
       },
     }),
@@ -861,7 +861,7 @@ test("receipts a pending shortcut as matched when the guest wins the invite race
     identity,
     request(),
     repository({
-      getRtdbPath: async (path) => {
+      getStatePath: async (path) => {
         if (path === "automatch") {
           return { auto_race: { uid: identity.uid } };
         }
@@ -875,7 +875,7 @@ test("receipts a pending shortcut as matched when the guest wins the invite race
         }
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async (value) => {
+      patchStateRoot: async (value) => {
         updates = value;
       },
     }),
@@ -906,7 +906,7 @@ test("does not receipt a canceled pending shortcut", async () => {
     identity,
     request(),
     repository({
-      getRtdbPath: async (path, query) => {
+      getStatePath: async (path, query) => {
         if (path === "automatch") {
           if (query?.orderBy === "uid" && ownerQueueReads++ === 0) {
             return { auto_canceled: { uid: identity.uid } };
@@ -923,7 +923,7 @@ test("does not receipt a canceled pending shortcut", async () => {
         }
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async (value) => {
+      patchStateRoot: async (value) => {
         updates = value;
       },
     }),
@@ -960,7 +960,7 @@ test("uses the supplied ownership snapshot without revalidation", async () => {
         ownershipReads++;
         throw new Error("ownership must not be re-read");
       },
-      getRtdbPath: async (_path, query) =>
+      getStatePath: async (_path, query) =>
         query?.equalTo === "former-alias"
           ? {
               auto_foreign: {
@@ -981,7 +981,7 @@ test("selects the newest queue across owned logins", async () => {
   const result = await findOwnedQueuedAutomatch(
     [identity.uid, "first-alias", "second-alias"],
     repository({
-      getRtdbPath: async (_path, query) => {
+      getStatePath: async (_path, query) => {
         if (query?.equalTo === "first-alias") {
           return {
             auto_older: { uid: "first-alias", timestamp: 1 },
@@ -1004,7 +1004,7 @@ test("breaks equal queue timestamps deterministically per login", async () => {
   const result = await findOwnedQueuedAutomatch(
     [identity.uid],
     repository({
-      getRtdbPath: async () => ({
+      getStatePath: async () => ({
         auto_z: { uid: identity.uid, timestamp: 2 },
         auto_a: { uid: identity.uid, timestamp: 2 },
         auto_old: { uid: identity.uid, timestamp: 1 },
@@ -1027,7 +1027,7 @@ test("reads every bounded owner alias and selects the newest queue", async () =>
   const result = await findOwnedQueuedAutomatch(
     loginUids,
     repository({
-      getRtdbPath: async (_path, query) => {
+      getStatePath: async (_path, query) => {
         const loginUid = String(query?.equalTo || "");
         if (loginUid === identity.uid) return null;
         aliasReads += 1;
@@ -1062,7 +1062,7 @@ test("bounds automatch alias lookups", async () => {
               ],
             },
           }),
-        getRtdbPath: async (_path, query) => {
+        getStatePath: async (_path, query) => {
           if (query?.equalTo !== identity.uid) aliasReads++;
           return null;
         },
@@ -1091,7 +1091,7 @@ test("serializes concurrent starts for logins on the same profile", async () => 
           [profile.profileId]: ["second-uid", "first-uid"],
         },
       }),
-    getRtdbPath: async (path, query) => {
+    getStatePath: async (path, query) => {
       const queueMatch = /^automatch\/([^/]+)$/.exec(path);
       if (queueMatch) return queued.get(queueMatch[1]) || null;
       const inviteMatch = /^invites\/([^/]+)$/.exec(path);
@@ -1102,7 +1102,7 @@ test("serializes concurrent starts for logins on the same profile", async () => 
       );
       return entries.length > 0 ? Object.fromEntries(entries) : null;
     },
-    patchRtdbRoot: async (updates) => {
+    patchStateRoot: async (updates) => {
       await new Promise((resolve) => setTimeout(resolve, 125));
       for (const [path, value] of Object.entries(updates)) {
         const queueMatch = /^automatch\/([^/]+)$/.exec(path);
@@ -1182,11 +1182,11 @@ test("serializes one operation while canonical ownership changes", async () => {
             : {},
         });
       },
-      getRtdbPath: async (path) => {
+      getStatePath: async (path) => {
         if (path === "automatch") return null;
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async (updates) => {
+      patchStateRoot: async (updates) => {
         sourceWrites++;
         markPatchEntered();
         await patchBlocked;
@@ -1261,7 +1261,7 @@ test("converges pending queues after their owners merge", async () => {
           },
         });
       },
-      getRtdbPath: async (path, query) => {
+      getStatePath: async (path, query) => {
         if (path === "automatch" && query?.orderBy === "uid") {
           const matches = [...queues]
             .filter(([, value]) => value.uid === query.equalTo)
@@ -1280,7 +1280,7 @@ test("converges pending queues after their owners merge", async () => {
         }
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async (updates) => {
+      patchStateRoot: async (updates) => {
         patches.push(updates);
         for (const [path, value] of Object.entries(updates)) {
           const queueMatch = /^automatch\/(.+)$/.exec(path);
@@ -1362,7 +1362,7 @@ test("repeatedly converges same-UID queues hidden behind the bounded query", asy
     identity,
     request(),
     repository({
-      getRtdbPath: async (path, query) => {
+      getStatePath: async (path, query) => {
         if (path === "automatch") {
           assert.deepEqual(query, {
             orderBy: "uid",
@@ -1387,7 +1387,7 @@ test("repeatedly converges same-UID queues hidden behind the bounded query", asy
         }
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async (updates) => {
+      patchStateRoot: async (updates) => {
         if (
           Object.hasOwn(
             updates,
@@ -1463,7 +1463,7 @@ test("shared cancellation reconciles an ambiguous committed patch", async () => 
   const canceled = await cancelQueuedAutomatch(
     queued,
     repository({
-      getRtdbPath: async (path) => {
+      getStatePath: async (path) => {
         if (path === `automatch/${queued.inviteId}`) return queue;
         if (path === `invites/${queued.inviteId}`) return invite;
         if (path === `invites/${queued.inviteId}/guestId`) {
@@ -1480,7 +1480,7 @@ test("shared cancellation reconciles an ambiguous committed patch", async () => 
         }
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async () => {
+      patchStateRoot: async () => {
         patches += 1;
         throw new Error("response-lost-after-commit");
       },
@@ -1537,7 +1537,7 @@ test("requires commit proof after a lock release failure", async () => {
   let patches = 0;
   let proofReads = 0;
   const value = repository({
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       if (path === `automatch/${queued.inviteId}`) return queued.data;
       if (path === `invites/${queued.inviteId}/guestId`) return null;
       if (path === `invites/${queued.inviteId}/hostId`) return identity.uid;
@@ -1553,7 +1553,7 @@ test("requires commit proof after a lock release failure", async () => {
       }
       assert.fail(`unexpected path ${path}`);
     },
-    patchRtdbRoot: async () => {
+    patchStateRoot: async () => {
       patches++;
       throw new Error("response-lost-without-commit");
     },
@@ -1591,7 +1591,7 @@ test("returns successful cancellation after proving a committed release failure"
   const profileTasks: unknown[] = [];
   const telegramTasks: unknown[] = [];
   const value = repository({
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       if (path === `automatch/${queued.inviteId}`) return queue;
       if (path === `invites/${queued.inviteId}`) return invite;
       if (path === `invites/${queued.inviteId}/guestId`) return invite.guestId;
@@ -1604,7 +1604,7 @@ test("returns successful cancellation after proving a committed release failure"
       }
       assert.fail(`unexpected path ${path}`);
     },
-    patchRtdbRoot: async () => {
+    patchStateRoot: async () => {
       queue = null;
       invite = {
         ...invite,
@@ -1661,7 +1661,7 @@ test("uses a final fresh proof read after cancellation polling stops", async () 
   const canceled = await cancelQueuedAutomatch(
     queued,
     repository({
-      getRtdbPath: async (path, _query, signal) => {
+      getStatePath: async (path, _query, signal) => {
         assert.ok(signal);
         if (signal !== operation.signal) {
           if (!pollingSignal) {
@@ -1699,7 +1699,7 @@ test("uses a final fresh proof read after cancellation polling stops", async () 
         }
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async (_updates, signal) => {
+      patchStateRoot: async (_updates, signal) => {
         assert.equal(signal, operation.signal);
         throw new Error("response-lost-before-visible");
       },
@@ -1765,7 +1765,7 @@ test("reconciles a committed cancellation after the operation signal aborts", as
   const canceled = await cancelQueuedAutomatch(
     queued,
     repository({
-      getRtdbPath: async (path, _query, signal) => {
+      getStatePath: async (path, _query, signal) => {
         assert.ok(signal);
         if (path === `automatch/${queued.inviteId}`) {
           if (queue === null) reconciliationSignals.push(signal);
@@ -1793,7 +1793,7 @@ test("reconciles a committed cancellation after the operation signal aborts", as
         }
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async (_updates, signal) => {
+      patchStateRoot: async (_updates, signal) => {
         assert.equal(signal, operation.signal);
         queue = null;
         invite = {
@@ -1865,7 +1865,7 @@ test("public cancellation succeeds when its only queue committed before abort", 
   const result = await cancelAutomatch(
     identity,
     repository({
-      getRtdbPath: async (path, _query, signal) => {
+      getStatePath: async (path, _query, signal) => {
         signal?.throwIfAborted();
         if (path === "automatch") {
           queueQueries += 1;
@@ -1884,7 +1884,7 @@ test("public cancellation succeeds when its only queue committed before abort", 
         }
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async (updates, signal) => {
+      patchStateRoot: async (updates, signal) => {
         assert.equal(signal, operation.signal);
         queue = null;
         invite = {
@@ -1972,7 +1972,7 @@ test("public cancellation succeeds when the last of two queues commits before ab
   const result = await cancelAutomatch(
     identity,
     repository({
-      getRtdbPath: async (path, _query, signal) => {
+      getStatePath: async (path, _query, signal) => {
         signal?.throwIfAborted();
         if (path === "automatch") {
           queueQueries += 1;
@@ -2002,7 +2002,7 @@ test("public cancellation succeeds when the last of two queues commits before ab
         }
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async (updates, signal) => {
+      patchStateRoot: async (updates, signal) => {
         assert.equal(signal, operation.signal);
         const inviteId = inviteIds.find(
           (candidate) => updates[`automatch/${candidate}`] === null,
@@ -2083,7 +2083,7 @@ test("public cancellation does not hide a third queued match after abort", async
     cancelAutomatch(
       identity,
       repository({
-        getRtdbPath: async (path, query, signal) => {
+        getStatePath: async (path, query, signal) => {
           signal?.throwIfAborted();
           if (path === "automatch") {
             return Object.fromEntries(
@@ -2113,7 +2113,7 @@ test("public cancellation does not hide a third queued match after abort", async
           }
           assert.fail(`unexpected path ${path}`);
         },
-        patchRtdbRoot: async (updates) => {
+        patchStateRoot: async (updates) => {
           const inviteId = inviteIds.find(
             (candidate) => updates[`automatch/${candidate}`] === null,
           );
@@ -2176,7 +2176,7 @@ test("ambiguous cancellation rejects a competing match", async () => {
     cancelQueuedAutomatch(
       queued,
       repository({
-        getRtdbPath: async (path) => {
+        getStatePath: async (path) => {
           if (path === `automatch/${queued.inviteId}`) return queue;
           if (path === `invites/${queued.inviteId}`) return invite;
           if (path === `invites/${queued.inviteId}/guestId`) {
@@ -2193,7 +2193,7 @@ test("ambiguous cancellation rejects a competing match", async () => {
           }
           assert.fail(`unexpected path ${path}`);
         },
-        patchRtdbRoot: async () => {
+        patchStateRoot: async () => {
           queue = null;
           invite = {
             ...invite,
@@ -2230,7 +2230,7 @@ test("bounds repeated duplicate convergence to 512 cancellation attempts", async
       identity,
       request(),
       repository({
-        getRtdbPath: async (path) => {
+        getStatePath: async (path) => {
           if (path === "automatch") {
             return {
               auto_keep: { uid: identity.uid, timestamp: 2 },
@@ -2245,7 +2245,7 @@ test("bounds repeated duplicate convergence to 512 cancellation attempts", async
           if (path === "invites/auto_stale/hostId") return identity.uid;
           assert.fail(`unexpected path ${path}`);
         },
-        patchRtdbRoot: async () => {
+        patchStateRoot: async () => {
           patches += 1;
         },
       }),
@@ -2309,7 +2309,7 @@ test("converges a candidate owner before consuming its surviving queue", async (
           },
         });
       },
-      getRtdbPath: async (path, query) => {
+      getStatePath: async (path, query) => {
         if (path === "automatch") {
           const matches = [...queues]
             .filter(([, value]) =>
@@ -2330,7 +2330,7 @@ test("converges a candidate owner before consuming its surviving queue", async (
         }
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async (updates) => {
+      patchStateRoot: async (updates) => {
         patches.push(updates);
         for (const [path, value] of Object.entries(updates)) {
           const queueMatch = /^automatch\/(.+)$/.exec(path);
@@ -2373,7 +2373,7 @@ test("converges a candidate owner before consuming its surviving queue", async (
 test("backs off boundedly while the profile queue lock is busy", async () => {
   let nowMs = 0;
   const delays: number[] = [];
-  const value = repository({ getRtdbPath: async () => null });
+  const value = repository({ getStatePath: async () => null });
   coordinationFor(value).lockRows.set(
     await automatchOwnerLockId(`profile:${profile.profileId}`),
     {
@@ -2439,7 +2439,7 @@ test("replays a null-projection receipt before an ownership outage", async () =>
   assert.deepEqual(telegramTasks, []);
 });
 
-test("replays receipts after RTDB omits their null projection ID", async () => {
+test("replays receipts after storage omits their null projection ID", async () => {
   for (const mode of ["pending", "matched"] as const) {
     const receipt = storedAutomatchReceipt("auto_existing", mode);
     delete receipt.profileProjectionRequestId;
@@ -2452,7 +2452,7 @@ test("replays receipts after RTDB omits their null projection ID", async () => {
           readProfileOwnershipSnapshot: async () => {
             assert.fail("replay must not read ownership");
           },
-          patchRtdbRoot: async () => {
+          patchStateRoot: async () => {
             assert.fail("replay must not write");
           },
         },
@@ -2495,7 +2495,7 @@ test("returns pending when one pair snapshot has the same canonical owner", asyn
               : { "merged-profile": [identity.uid, "host-uid"] },
         });
       },
-      getRtdbPath: async (path) => {
+      getStatePath: async (path) => {
         if (path === "automatch") {
           return {
             auto_existing: {
@@ -2519,7 +2519,7 @@ test("returns pending when one pair snapshot has the same canonical owner", asyn
         }
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async (value) => {
+      patchStateRoot: async (value) => {
         updates = value;
       },
     }),
@@ -2535,7 +2535,7 @@ test("returns pending when one pair snapshot has the same canonical owner", asyn
   assertPendingReceiptUpdates(updates, "auto_existing");
 });
 
-test("uses one pair snapshot through the RTDB match write", async () => {
+test("uses one pair snapshot through the match write", async () => {
   let committed = false;
   let ownershipChanged = false;
   let ownershipReads = 0;
@@ -2561,7 +2561,7 @@ test("uses one pair snapshot through the RTDB match write", async () => {
           },
         });
       },
-      getRtdbPath: async (path) => {
+      getStatePath: async (path) => {
         if (path === "automatch") {
           return {
             auto_snapshot: {
@@ -2586,7 +2586,7 @@ test("uses one pair snapshot through the RTDB match write", async () => {
         }
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async (updates) => {
+      patchStateRoot: async (updates) => {
         writes++;
         matchedUpdates = updates;
         committed = true;
@@ -2627,7 +2627,7 @@ test("fails before the match patch when the pair snapshot is unavailable", async
           }
           throw new Error("D1 unavailable");
         },
-        getRtdbPath: async (path) => {
+        getStatePath: async (path) => {
           if (path === "automatch") {
             return {
               auto_existing: {
@@ -2645,7 +2645,7 @@ test("fails before the match patch when the pair snapshot is unavailable", async
           if (path === "invites/auto_existing/guestId") return null;
           assert.fail(`unexpected path ${path}`);
         },
-        patchRtdbRoot: async () => {
+        patchStateRoot: async () => {
           writes++;
         },
       }),
@@ -2666,7 +2666,7 @@ test("matches a different v2 candidate without rereading a known commit", async 
     identity,
     request(),
     repository({
-      getRtdbPath: async (path) => {
+      getStatePath: async (path) => {
         if (path === "automatch") {
           return {
             auto_existing: {
@@ -2698,7 +2698,7 @@ test("matches a different v2 candidate without rereading a known commit", async 
         }
         assert.fail(`unexpected path ${path}`);
       },
-      patchRtdbRoot: async (value) => {
+      patchStateRoot: async (value) => {
         updates = value;
       },
     }),
@@ -2750,7 +2750,7 @@ test("matches a different v2 candidate without rereading a known commit", async 
   );
   assert.deepEqual(
     updates["telegramAutomatches/auto_existing/generation"],
-    firebaseRtdbIncrement(1),
+    stateIncrement(1),
   );
   assert.match(
     String(updates["telegramAutomatches/auto_existing/matchedText"]),
@@ -2762,7 +2762,7 @@ test("matches a different v2 candidate without rereading a known commit", async 
       schemaVersion: 1,
       status: "pending",
       requestId: "request-1",
-      updatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+      updatedAtMs: STATE_SERVER_TIMESTAMP,
     },
   );
   assert.deepEqual(
@@ -2772,8 +2772,8 @@ test("matches a different v2 candidate without rereading a known commit", async 
       status: "pending",
       requestId: "request-1",
       reason: "automatch-queue",
-      sourceUpdatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
-      lastQueuedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+      sourceUpdatedAtMs: STATE_SERVER_TIMESTAMP,
+      lastQueuedAtMs: STATE_SERVER_TIMESTAMP,
     },
   );
 });
@@ -2786,7 +2786,7 @@ test("keeps legacy matches free of Telegram v2 updates", async () => {
     identity,
     request(),
     repository({
-      getRtdbPath: async (path) => {
+      getStatePath: async (path) => {
         if (path === "automatch") {
           return {
             auto_legacy: {
@@ -2808,7 +2808,7 @@ test("keeps legacy matches free of Telegram v2 updates", async () => {
         }
         return null;
       },
-      patchRtdbRoot: async (value) => {
+      patchStateRoot: async (value) => {
         updates = value;
         committed = true;
       },
@@ -2845,8 +2845,8 @@ test("keeps legacy matches free of Telegram v2 updates", async () => {
       status: "pending",
       requestId: "legacy-request",
       reason: "automatch-queue",
-      sourceUpdatedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
-      lastQueuedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+      sourceUpdatedAtMs: STATE_SERVER_TIMESTAMP,
+      lastQueuedAtMs: STATE_SERVER_TIMESTAMP,
     },
   );
   assert.deepEqual(profileProjectionTasks, [
@@ -2877,7 +2877,7 @@ test("bounds failed guest verification to four total attempts", async () => {
     identity,
     request(),
     repository({
-      getRtdbPath: async (path) => {
+      getStatePath: async (path) => {
         if (path === "automatch") {
           queueReads++;
           return {
@@ -2897,7 +2897,7 @@ test("bounds failed guest verification to four total attempts", async () => {
         }
         return null;
       },
-      patchRtdbRoot: async (updates) => {
+      patchStateRoot: async (updates) => {
         writes.push(updates);
       },
     }),
@@ -2915,7 +2915,7 @@ test("reconciles a committed match after an ambiguous patch failure", async () =
     identity,
     request(),
     repository({
-      getRtdbPath: async (path) => {
+      getStatePath: async (path) => {
         if (path === "automatch") {
           return {
             auto_committed: {
@@ -2943,7 +2943,7 @@ test("reconciles a committed match after an ambiguous patch failure", async () =
         }
         return committed ? "guest-uid" : null;
       },
-      patchRtdbRoot: async () => {
+      patchStateRoot: async () => {
         writes++;
         committed = true;
         throw new Error("response-lost-after-commit");
@@ -2969,7 +2969,7 @@ test("returns a proven match after the original signal aborts", async () => {
     identity,
     request(),
     repository({
-      getRtdbPath: async (path, _query, signal) => {
+      getStatePath: async (path, _query, signal) => {
         if (signal?.aborted) {
           throw new Error("stale-signal-read");
         }
@@ -3000,7 +3000,7 @@ test("returns a proven match after the original signal aborts", async () => {
         }
         return committed ? identity.uid : null;
       },
-      patchRtdbRoot: async () => {
+      patchStateRoot: async () => {
         committed = true;
         controller.abort();
         throw new Error("response-lost-after-commit");
@@ -3036,7 +3036,7 @@ test("returns a resolved match without rereading through an aborted signal", asy
     identity,
     request(),
     repository({
-      getRtdbPath: async (path, _query, signal) => {
+      getStatePath: async (path, _query, signal) => {
         if (signal?.aborted) throw new Error("stale-signal-read");
         if (path === "automatch") {
           return {
@@ -3056,7 +3056,7 @@ test("returns a resolved match without rereading through an aborted signal", asy
         }
         return null;
       },
-      patchRtdbRoot: async () => {
+      patchStateRoot: async () => {
         controller.abort();
       },
     }),
@@ -3076,7 +3076,7 @@ test("rejects a committed match with a conflicting receipt", async () => {
   let receipt: unknown = null;
   const value = repository(
     {
-      getRtdbPath: async (path) => {
+      getStatePath: async (path) => {
         if (path === "automatch") {
           return {
             auto_unproven_release: {
@@ -3098,7 +3098,7 @@ test("rejects a committed match with a conflicting receipt", async () => {
         }
         return null;
       },
-      patchRtdbRoot: async (updates) => {
+      patchStateRoot: async (updates) => {
         receipt = {
           ...(receiptFromUpdates(updates) as Record<string, unknown>),
           aura: "different",
@@ -3135,7 +3135,7 @@ test("returns a committed match despite release failure", async () => {
   const profileTasks: unknown[] = [];
   const telegramTasks: unknown[] = [];
   const value = repository({
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       if (path === "automatch") {
         return {
           auto_release_committed: {
@@ -3158,7 +3158,7 @@ test("returns a committed match despite release failure", async () => {
       }
       return null;
     },
-    patchRtdbRoot: async () => {
+    patchStateRoot: async () => {
       writes++;
       committed = true;
     },
@@ -3208,7 +3208,7 @@ test("returns one committed match when the owner lock release fails", async () =
   let committed = false;
   let writes = 0;
   const value = repository({
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       if (path === "automatch") {
         return {
           auto_owner_release: {
@@ -3230,7 +3230,7 @@ test("returns one committed match when the owner lock release fails", async () =
       }
       return null;
     },
-    patchRtdbRoot: async () => {
+    patchStateRoot: async () => {
       writes++;
       committed = true;
     },
@@ -3260,11 +3260,11 @@ test("returns one committed match when the owner lock release fails", async () =
 test("replays a committed result when the operation lock release is ambiguous", async () => {
   let writes = 0;
   const value = repository({
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       if (path === "automatch") return null;
       assert.fail(`unexpected path ${path}`);
     },
-    patchRtdbRoot: async () => {
+    patchStateRoot: async () => {
       writes++;
     },
   });
@@ -3304,7 +3304,7 @@ test("does not retry an unconfirmed patch failure", async () => {
         request(),
         repository(
           {
-            getRtdbPath: async (path) => {
+            getStatePath: async (path) => {
               if (path === "automatch") {
                 queueReads++;
                 return {
@@ -3324,7 +3324,7 @@ test("does not retry an unconfirmed patch failure", async () => {
               }
               return null;
             },
-            patchRtdbRoot: async () => {
+            patchStateRoot: async () => {
               writes++;
               throw new Error("unconfirmed-patch");
             },
@@ -3345,7 +3345,7 @@ test("replays an ambiguously committed match before creating another queue", asy
   let writes = 0;
   const value = repository(
     {
-      getRtdbPath: async (path, query) => {
+      getStatePath: async (path, query) => {
         if (path === "automatch") {
           if (query?.orderBy === "uid" && query.equalTo === identity.uid) {
             return null;
@@ -3379,7 +3379,7 @@ test("replays an ambiguously committed match before creating another queue", asy
         }
         return null;
       },
-      patchRtdbRoot: async (updates) => {
+      patchStateRoot: async (updates) => {
         writes++;
         receipt = {
           ...(updates[
@@ -3430,7 +3430,7 @@ test("does no work with an expired server signal", async () => {
     identity,
     request(),
     repository({
-      getRtdbPath: async () => {
+      getStatePath: async () => {
         reads++;
         return null;
       },

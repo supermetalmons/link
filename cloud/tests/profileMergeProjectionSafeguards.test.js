@@ -4,17 +4,17 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   createEventProfileGameProjectionCore,
-} = require("../functions/eventProfileGameProjectionCore");
+} = require("../runtime/eventProfileGameProjectionCore");
 const {
   buildInviteProjectionOwnerPlan,
   buildResolvedProfile,
   createProfileGamesProjectionCore,
   readExistingProjectionDocuments,
-} = require("../functions/profileGamesProjectionCore");
+} = require("../runtime/profileGamesProjectionCore");
 const {
   createProfileLinkProjectionCore,
   processWithConcurrency,
-} = require("../functions/profileLinkProjectionCore");
+} = require("../runtime/profileLinkProjectionCore");
 
 const runWithoutProjectionLock = async (_inviteId, work) => work();
 
@@ -244,11 +244,11 @@ const runInviteProjection = async ({
         currentUpdateTimes[profileId] ||= "revision-1";
         return { data, updateTime: currentUpdateTimes[profileId] };
       },
-      async getRtdbPath(path) {
+      async getStatePath(path) {
         if (path === `invites/${inviteId}`) return invite;
         if (path === `automatch/${inviteId}`) return null;
         if (/^players\/.+\/profile$/.test(path)) {
-          throw new Error("unexpected-rtdb-profile-owner-read");
+          throw new Error("unexpected-state-profile-owner-read");
         }
         if (path.startsWith("players/")) return null;
         throw new Error(`unexpected-path:${path}`);
@@ -408,21 +408,21 @@ test("invite cleanup follows the resolved merge-target path", () => {
   });
 });
 
-test("invite projection ignores an RTDB profile shadow when D1 has no owner", async () => {
+test("invite projection ignores an legacy profile shadow when D1 has no owner", async () => {
   const inviteId = "d1-owner-missing-invite";
-  let rtdbProfileReads = 0;
+  let legacyProfileReads = 0;
   const core = createProfileGamesProjectionCore({
     repository: {
       hasCompletedRatingUpdate: async () => false,
       commitProjectionWrites: async () => undefined,
       getProjection: async () => null,
-      async getRtdbPath(path) {
+      async getStatePath(path) {
         if (path === `invites/${inviteId}`) {
           return { hostId: "host-login" };
         }
         if (path === `automatch/${inviteId}`) return null;
         if (path === "players/host-login/profile") {
-          rtdbProfileReads += 1;
+          legacyProfileReads += 1;
           return "shadow-profile";
         }
         return null;
@@ -436,7 +436,7 @@ test("invite projection ignores an RTDB profile shadow when D1 has no owner", as
     eventTimestampMs: 100,
   });
 
-  assert.equal(rtdbProfileReads, 0);
+  assert.equal(legacyProfileReads, 0);
   assert.deepEqual(result.ownerProfileIds, []);
   assert.equal(result.blockedReason, "unresolved-owner-profile");
 });
@@ -457,13 +457,13 @@ test("invite projection retries D1 ownership failures without writing", async ()
         throw new Error("d1-owner-unavailable");
       },
       getProjection: async () => null,
-      async getRtdbPath(path) {
+      async getStatePath(path) {
         if (path === `invites/${inviteId}`) {
           return { hostId: "host-login" };
         }
         if (path === `automatch/${inviteId}`) return null;
         if (/^players\/.+\/profile$/.test(path)) {
-          throw new Error("unexpected-rtdb-profile-owner-read");
+          throw new Error("unexpected-state-profile-owner-read");
         }
         return null;
       },

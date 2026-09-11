@@ -10,7 +10,7 @@ import {
 } from "@mons/shared/match-protocol";
 import { MATCH_TIMER_TERMINAL } from "@mons/shared/timers";
 import { Color, Game } from "mons-rules";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 
 export type HistoricalMatchSource = "backfill" | "rating" | "transition";
 export const HISTORICAL_MATCH_ARCHIVE_VERSION = 1;
@@ -33,17 +33,17 @@ export function buildHistoricalMatchPair(input: {
   matchId: unknown;
 }): HistoricalMatchPair | null {
   const matchId =
-    typeof input.matchId === "string" && isSafeFirebaseKey(input.matchId)
+    typeof input.matchId === "string" && isSafeRecordKey(input.matchId)
       ? input.matchId
       : "";
   const hostPlayerId =
     typeof input.hostPlayerId === "string" &&
-    isSafeFirebaseKey(input.hostPlayerId)
+    isSafeRecordKey(input.hostPlayerId)
       ? input.hostPlayerId
       : "";
   const guestPlayerId =
     typeof input.guestPlayerId === "string" &&
-    isSafeFirebaseKey(input.guestPlayerId) &&
+    isSafeRecordKey(input.guestPlayerId) &&
     input.guestPlayerId !== hostPlayerId
       ? input.guestPlayerId
       : null;

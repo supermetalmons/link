@@ -38,15 +38,15 @@ import {
   TELEGRAM_AUTOMATCH_VERSION,
   buildAutomatchTelegramProjectionOutboxUpdates,
   buildMatchedAutomatchTelegramUpdates,
-} from "../../../functions/telegram/automatchSource.js";
-import { getDisplayNameFromAddress } from "../../../functions/telegramDisplay.js";
+} from "../../../runtime/telegram/automatchSource.js";
+import { getDisplayNameFromAddress } from "../../../runtime/telegramDisplay.js";
 import { AuthApiFailure } from "./authErrors.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
 import {
-  FIREBASE_RTDB_SERVER_TIMESTAMP,
-  firebaseRtdbIncrement,
-} from "./firebaseRtdb.ts";
-import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+  STATE_SERVER_TIMESTAMP,
+  stateIncrement,
+} from "./stateRepositoryTypes.ts";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import {
   createGameplayRepository,
   type GameplayProfile,
@@ -454,7 +454,7 @@ async function runGameSessionMutation<T extends GameSessionResponse>(
     request.operationId,
     dependencies.mutationLocks,
     async (refresh) => {
-      const rawReceipt = await repository.getRtdbPath(
+      const rawReceipt = await repository.getStatePath(
         mutationReceiptPath(request.operationId),
       );
       const existing = parseReceipt(rawReceipt);
@@ -495,10 +495,10 @@ async function runGameSessionMutation<T extends GameSessionResponse>(
           projectionRequestId,
           requesterUid,
           response: outcome.response,
-          completedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+          completedAtMs: STATE_SERVER_TIMESTAMP,
         },
         [mutationReceiptExpirationPath(request.operationId)]: {
-          completedAtMs: FIREBASE_RTDB_SERVER_TIMESTAMP,
+          completedAtMs: STATE_SERVER_TIMESTAMP,
         },
       };
       if (outcome.projectReason) {
@@ -509,13 +509,13 @@ async function runGameSessionMutation<T extends GameSessionResponse>(
             inviteId: request.inviteId,
             reason: outcome.projectReason,
             requestId: request.operationId,
-            timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
+            timestamp: STATE_SERVER_TIMESTAMP,
           }),
         );
       }
       await dependencies.assertMutationAllowed?.();
       await refresh();
-      await repository.patchRtdbRoot(updates);
+      await repository.patchStateRoot(updates);
       if (projectionRequestId) {
         await dispatchProjection(
           request.inviteId,
@@ -534,7 +534,7 @@ export async function resolveInviteRole(
   request: ResolveInviteRoleRequest,
   repository: GameplayRepository,
 ): Promise<ResolveInviteRoleResponse> {
-  const storedInvite = await repository.getRtdbPath(
+  const storedInvite = await repository.getStatePath(
     `invites/${request.inviteId}`,
   );
   return resolveInviteRoleFromSnapshot(
@@ -566,9 +566,8 @@ export async function resolveInviteRoleFromSnapshot(
       : readStoredString(storedGuestId);
   const passwordProtected = Object.hasOwn(invite, "password");
   if (
-    !isCanonicalFirebaseUid(hostId) ||
-    (guestId !== null &&
-      (!isCanonicalFirebaseUid(guestId) || guestId === hostId))
+    !isCanonicalLoginUid(hostId) ||
+    (guestId !== null && (!isCanonicalLoginUid(guestId) || guestId === hostId))
   ) {
     throw failedPrecondition("invite-invalid");
   }
@@ -623,7 +622,7 @@ async function resolveParticipant(
 ): Promise<ParticipantResolution> {
   const hostUid = readStoredString(invite.hostId);
   const guestUid = readStoredString(invite.guestId);
-  if (!isSafeFirebaseKey(hostUid) || !isSafeFirebaseKey(guestUid)) {
+  if (!isSafeRecordKey(hostUid) || !isSafeRecordKey(guestUid)) {
     throw failedPrecondition("missing-opponent");
   }
   if (identity.uid === hostUid) {
@@ -690,7 +689,7 @@ export async function createManualInvite(
     repository,
     isCreateInviteResponse,
     async () => {
-      if (await repository.getRtdbPath(`invites/${request.inviteId}`)) {
+      if (await repository.getStatePath(`invites/${request.inviteId}`)) {
         throw failedPrecondition("invite-already-exists");
       }
       const random = dependencies.random || secureRandom;
@@ -777,13 +776,13 @@ function automatchJoinUpdates(
     ...buildMatchedAutomatchTelegramUpdates({
       inviteId,
       matchedText: `${existingName} vs. ${joiningName} https://mons.link/${inviteId}`,
-      timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
-      generation: firebaseRtdbIncrement(1),
+      timestamp: STATE_SERVER_TIMESTAMP,
+      generation: stateIncrement(1),
     }),
     ...buildAutomatchTelegramProjectionOutboxUpdates({
       inviteId,
       requestId: operationId,
-      timestamp: FIREBASE_RTDB_SERVER_TIMESTAMP,
+      timestamp: STATE_SERVER_TIMESTAMP,
     }),
   };
 }
@@ -802,18 +801,18 @@ export async function joinInvite(
     isJoinInviteResponse,
     async () => {
       const invite = toRecord(
-        await repository.getRtdbPath(`invites/${request.inviteId}`),
+        await repository.getStatePath(`invites/${request.inviteId}`),
       );
       if (!invite) {
         throw new AuthApiFailure(404, "not-found", "invite-not-found");
       }
       ensureMutableInvite(invite);
       const hostUid = readStoredString(invite.hostId);
-      if (!isSafeFirebaseKey(hostUid)) {
+      if (!isSafeRecordKey(hostUid)) {
         throw failedPrecondition("invite-invalid");
       }
       const currentGuestUid = readStoredString(invite.guestId);
-      if (currentGuestUid && !isSafeFirebaseKey(currentGuestUid)) {
+      if (currentGuestUid && !isSafeRecordKey(currentGuestUid)) {
         throw failedPrecondition("invite-invalid");
       }
       let ownership: ProfileOwnershipSnapshot | null = null;
@@ -866,7 +865,7 @@ export async function joinInvite(
       let pendingAutomatch: Record<string, unknown> | null = null;
       if (isAutoInviteId(request.inviteId) && !currentGuestUid) {
         pendingAutomatch = toRecord(
-          await repository.getRtdbPath(`automatch/${request.inviteId}`),
+          await repository.getStatePath(`automatch/${request.inviteId}`),
         );
         if (readStoredString(pendingAutomatch?.uid) !== hostUid) {
           throw failedPrecondition("automatch-not-pending");
@@ -874,7 +873,7 @@ export async function joinInvite(
       }
       const guestUid = currentGuestUid || identity.uid;
       const existingMatch = normalizeMatch(
-        await repository.getRtdbPath(
+        await repository.getStatePath(
           `players/${guestUid}/matches/${request.inviteId}`,
         ),
       );
@@ -890,7 +889,7 @@ export async function joinInvite(
         };
       }
       const hostMatch = normalizeMatch(
-        await repository.getRtdbPath(
+        await repository.getStatePath(
           `players/${hostUid}/matches/${request.inviteId}`,
         ),
       );
@@ -910,7 +909,7 @@ export async function joinInvite(
         const automatch =
           pendingAutomatch ||
           toRecord(
-            await repository.getRtdbPath(`automatch/${request.inviteId}`),
+            await repository.getStatePath(`automatch/${request.inviteId}`),
           ) ||
           {};
         const profile = joiningProfile(
@@ -1001,7 +1000,7 @@ export async function proposeRematch(
     isProposeRematchResponse,
     async () => {
       const invite = toRecord(
-        await repository.getRtdbPath(`invites/${request.inviteId}`),
+        await repository.getStatePath(`invites/${request.inviteId}`),
       );
       if (!invite) {
         throw new AuthApiFailure(404, "not-found", "invite-not-found");
@@ -1034,8 +1033,8 @@ export async function proposeRematch(
       const matchId = `${request.inviteId}${index}`;
       const matchPath = `players/${participant.actorUid}/matches/${matchId}`;
       const [storedMatch, storedOpponent] = await Promise.all([
-        repository.getRtdbPath(matchPath),
-        repository.getRtdbPath(
+        repository.getStatePath(matchPath),
+        repository.getStatePath(
           `players/${participant.opponentUid}/matches/${matchId}`,
         ),
       ]);
@@ -1122,7 +1121,7 @@ export async function endRematchSeries(
     isEndRematchResponse,
     async () => {
       const invite = toRecord(
-        await repository.getRtdbPath(`invites/${request.inviteId}`),
+        await repository.getStatePath(`invites/${request.inviteId}`),
       );
       if (!invite) {
         throw new AuthApiFailure(404, "not-found", "invite-not-found");
@@ -1197,7 +1196,7 @@ export async function ensureParticipantMatch(
     isEnsureMatchResponse,
     async () => {
       const invite = toRecord(
-        await repository.getRtdbPath(`invites/${request.inviteId}`),
+        await repository.getStatePath(`invites/${request.inviteId}`),
       );
       if (!invite) {
         throw new AuthApiFailure(404, "not-found", "invite-not-found");
@@ -1213,7 +1212,7 @@ export async function ensureParticipantMatch(
         repository,
       );
       const existing = normalizeMatch(
-        await repository.getRtdbPath(
+        await repository.getStatePath(
           `players/${participant.actorUid}/matches/${request.matchId}`,
         ),
       );
@@ -1230,7 +1229,7 @@ export async function ensureParticipantMatch(
         };
       }
       const opponent = normalizeMatch(
-        await repository.getRtdbPath(
+        await repository.getStatePath(
           `players/${participant.opponentUid}/matches/${request.matchId}`,
         ),
       );

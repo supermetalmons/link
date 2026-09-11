@@ -8,8 +8,8 @@ const {
   isInviteReactionForInvite,
   isInviteReactionMessage,
   isSendInviteReactionResponse,
-} = require("../functions/shared/reactions");
-const { VALID_REACTION_IDS } = require("../functions/shared/nfts");
+} = require("../runtime/shared/reactions");
+const { VALID_REACTION_IDS } = require("../runtime/shared/nfts");
 
 const reaction = {
   uuid: "12345678-1234-4123-8123-123456789012",

@@ -1,4 +1,4 @@
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import {
   normalizeEventTransitionReceiptRow,
   parseEventTransitionReceipt,
@@ -22,7 +22,7 @@ function fail(message = "invalid-event-transition-receipt"): never {
 }
 
 function safeKey(value: string): boolean {
-  return value === value.trim() && isSafeFirebaseKey(value);
+  return value === value.trim() && isSafeRecordKey(value);
 }
 
 export async function readEventTransitionReceipt(

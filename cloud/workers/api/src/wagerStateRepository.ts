@@ -1,9 +1,9 @@
 import type {
-  FirebaseRtdbClient,
-  FirebaseRtdbQuery,
-  FirebaseRtdbTransactionResult,
-} from "./firebaseRtdb.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+  StateRepository,
+  StateQuery,
+  StateTransactionResult,
+} from "./stateRepositoryTypes.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import { composeInviteWagerSource } from "./inviteWagerSource.ts";
 import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
 import {
@@ -37,7 +37,7 @@ function record(value: unknown): value is Record<string, unknown> {
 
 function pathParts(path: string): string[] {
   const parts = path.replace(/^\/+|\/+$/g, "").split("/");
-  if (parts.some((part) => !isSafeFirebaseKey(part))) {
+  if (parts.some((part) => !isSafeRecordKey(part))) {
     throw new TypeError("invalid-wager-state-path");
   }
   return parts;
@@ -53,7 +53,7 @@ function ownedPath(parts: readonly string[]): OwnedPath | null {
   };
 }
 
-function shallowQuery(query?: FirebaseRtdbQuery): boolean {
+function shallowQuery(query?: StateQuery): boolean {
   if (!query) return false;
   if (Object.keys(query).some((key) => key !== "shallow")) {
     throw new TypeError("wager-state-query-unsupported");
@@ -112,7 +112,7 @@ function normalizeJson(value: unknown): unknown {
     } else {
       const values = Object.entries(entry)
         .map(([key, nested]) => {
-          if (!isSafeFirebaseKey(key))
+          if (!isSafeRecordKey(key))
             throw new TypeError("invalid-wager-state-json");
           return [key, normalize(nested, depth + 1)] as const;
         })
@@ -236,11 +236,11 @@ function rejectOverlaps(paths: readonly string[]): void {
   }
 }
 
-export function createWagerStateRtdbClient(
+export function createWagerStateRepository(
   db: D1Database,
-  base: FirebaseRtdbClient,
+  base: StateRepository,
   options: WagerStateRepositoryOptions = {},
-): FirebaseRtdbClient {
+): StateRepository {
   const store = createWagerStateD1Store(db, options);
   const requireWritable = () => {
     if (!options.writeGuards)
@@ -348,11 +348,7 @@ export function createWagerStateRtdbClient(
       throw new WagerStateD1Failure("wager-state-conflict");
     },
 
-    async transactPath(
-      path,
-      updater,
-      signal,
-    ): Promise<FirebaseRtdbTransactionResult> {
+    async transactPath(path, updater, signal): Promise<StateTransactionResult> {
       const parts = pathParts(path);
       const owned = ownedPath(parts);
       if (!owned) {

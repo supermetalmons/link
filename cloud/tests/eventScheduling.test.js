@@ -13,7 +13,7 @@ const {
   parseScheduledTimeParts,
   resolveRequestedScheduleTimezone,
   resolveScheduledDateTimeStartAtMs,
-} = require("../functions/events/scheduling");
+} = require("../runtime/events/scheduling");
 
 test("parses complete calendar dates and 24-hour wall times", () => {
   assert.deepEqual(parseScheduledDateParts("2028-02-29"), {

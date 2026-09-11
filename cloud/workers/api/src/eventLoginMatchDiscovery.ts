@@ -1,6 +1,6 @@
 import { MAX_EVENT_PARTICIPANTS } from "@mons/shared/events";
-import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
-import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
+import type { StateRepository } from "./stateRepositoryTypes.ts";
 import { captureLoginMatchDiscovery } from "./loginMatchDiscoveryD1.ts";
 
 const EVENT_MATCH_DISCOVERY_CONCURRENCY = 4;
@@ -53,7 +53,7 @@ export function eventMatchInviteIds(event: Record<string, unknown>): string[] {
     const inviteId = match.inviteId;
     if (inviteId === null || inviteId === undefined || inviteId === "")
       return [];
-    if (typeof inviteId !== "string" || !isSafeFirebaseKey(inviteId)) {
+    if (typeof inviteId !== "string" || !isSafeRecordKey(inviteId)) {
       throw new Error("event-match-discovery-invalid-invite");
     }
     return [inviteId];
@@ -62,7 +62,7 @@ export function eventMatchInviteIds(event: Record<string, unknown>): string[] {
 
 export async function captureEventMatchDiscovery(
   db: D1Database,
-  read: FirebaseRtdbClient["getPath"],
+  read: StateRepository["getPath"],
   inputInviteIds: readonly string[],
   signal?: AbortSignal,
   nowMs = Date.now(),
@@ -70,7 +70,7 @@ export async function captureEventMatchDiscovery(
   const inviteIds = [...new Set(inputInviteIds)];
   if (
     inviteIds.length > MAX_EVENT_PARTICIPANTS ||
-    !inviteIds.every(isSafeFirebaseKey)
+    !inviteIds.every(isSafeRecordKey)
   ) {
     throw new Error("event-match-discovery-invalid-invites");
   }
@@ -90,8 +90,8 @@ export async function captureEventMatchDiscovery(
           const hostId = invite?.hostId;
           const guestId = invite?.guestId;
           if (
-            !isCanonicalFirebaseUid(hostId) ||
-            !isCanonicalFirebaseUid(guestId) ||
+            !isCanonicalLoginUid(hostId) ||
+            !isCanonicalLoginUid(guestId) ||
             hostId === guestId
           ) {
             throw new Error("event-match-discovery-invite-unavailable");

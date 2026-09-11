@@ -3,7 +3,7 @@ import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createEmptyMaterials } from "@mons/shared/mining";
 import type { CompletePlayerProfile } from "@mons/shared/profiles";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import type { StateRepository } from "../src/stateRepositoryTypes.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { createInviteSourceReader } from "../src/inviteSource.ts";
 import {
@@ -84,12 +84,12 @@ async function fixture(failCompletedWrite = false) {
     insertProfile(host),
     insertProfile(guest),
   ]);
-  let firebaseWrites = 0;
+  let sourceWrites = 0;
   let failureInjected = false;
   const staleWager = {
     proposals: { [host]: { material: "dust", count: 999 } },
   };
-  const firebase: FirebaseRtdbClient = {
+  const memoryState: StateRepository = {
     async getPath(path) {
       if (path === `invites/${inviteId}`)
         return {
@@ -108,15 +108,15 @@ async function fixture(failCompletedWrite = false) {
           flatMovesString: "",
           status: "surrendered",
         };
-      throw new Error(`unexpected-firebase-read:${path}`);
+      throw new Error(`unexpected-source-read:${path}`);
     },
     async patchRoot() {
-      firebaseWrites++;
-      throw new Error("unexpected-firebase-write");
+      sourceWrites++;
+      throw new Error("unexpected-source-write");
     },
     async transactPath() {
-      firebaseWrites++;
-      throw new Error("unexpected-firebase-transaction");
+      sourceWrites++;
+      throw new Error("unexpected-source-transaction");
     },
   };
   const profileDb = new Proxy(env.PROFILE_DB, {
@@ -154,7 +154,7 @@ async function fixture(failCompletedWrite = false) {
     )
     .run();
   const repository = createGameplayRepository(runtimeEnv, {
-    rtdbClient: firebase,
+    stateClient: memoryState,
     now,
   });
   const runtime = createWagerReservationRuntime(runtimeEnv, repository, {
@@ -197,7 +197,7 @@ async function fixture(failCompletedWrite = false) {
     send,
     accept,
     mutationLocks,
-    firebaseWrites: () => firebaseWrites,
+    sourceWrites: () => sourceWrites,
     failureInjected: () => failureInjected,
   };
 }
@@ -225,7 +225,7 @@ describe("D1 wager gameplay integration", () => {
     for (const action of ["cancel", "decline"] as const) {
       const state = await fixture();
       expect(
-        await state.repository.getRtdbPath(
+        await state.repository.getStatePath(
           `invites/${state.inviteId}/wagers/${state.inviteId}`,
         ),
       ).toBeNull();
@@ -252,7 +252,7 @@ describe("D1 wager gameplay integration", () => {
       expect(
         (await state.repository.getMiningMaterials(state.hostProfile)).dust,
       ).toBe(10);
-      expect(state.firebaseWrites()).toBe(0);
+      expect(state.sourceWrites()).toBe(0);
     }
   });
 
@@ -292,11 +292,11 @@ describe("D1 wager gameplay integration", () => {
     expect((await state.runtime.readBalance(state.host)).frozen.dust).toBe(0);
     expect((await state.runtime.readBalance(state.guest)).frozen.dust).toBe(0);
     expect(
-      await state.repository.getRtdbPath(
+      await state.repository.getStatePath(
         `invites/${state.inviteId}/matchesWagerResolutions/${state.inviteId}`,
       ),
     ).toBe(true);
-    const stored = await state.repository.getRtdbPath(
+    const stored = await state.repository.getStatePath(
       `invites/${state.inviteId}`,
     );
     expect(stored).toMatchObject({
@@ -308,6 +308,6 @@ describe("D1 wager gameplay integration", () => {
       },
     });
     expect(await state.readSource(state.inviteId)).toEqual(stored);
-    expect(state.firebaseWrites()).toBe(0);
+    expect(state.sourceWrites()).toBe(0);
   });
 });

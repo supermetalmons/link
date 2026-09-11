@@ -246,28 +246,21 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
           accessExpiresAtMs: dependencies.now() + 300_000,
         });
       }
-      if (url.hostname === "mons-link-default-rtdb.firebaseio.com") {
-        assert.equal(
-          method,
-          "GET",
-          "Surrender never writes directly to Firebase",
-        );
+      if (url.pathname === "/matches/snapshot") {
+        assert.equal(url.origin, API_ROOT);
+        assert.equal(method, "GET");
+        assert.equal(headers.get("Authorization"), null);
         const id = fixture.invites.settle.id;
-        const role = ROLES.find((value) =>
-          url.pathname.startsWith(`/players/${value.padEnd(28, "0")}/`),
-        );
+        const playerId = url.searchParams.get("playerId");
+        const matchId = url.searchParams.get("matchId")!;
+        const role = ROLES.find((value) => playerId === value.padEnd(28, "0"));
         assert.ok(role);
-        if (method === "GET") {
-          const matchId = url.pathname
-            .split("/")
-            .at(-1)!
-            .replace(/\.json$/, "");
-          assert.ok(createdInvites.has(matchId));
-          assert.equal(
-            url.pathname,
-            `/players/${role.padEnd(28, "0")}/matches/${matchId}.json`,
-          );
-          return response({
+        assert.ok(createdInvites.has(matchId));
+        return response({
+          ok: true,
+          playerId,
+          matchId,
+          match: {
             version: 2,
             color: role === "host" ? "white" : "black",
             emojiId: 1,
@@ -280,9 +273,8 @@ function model({ fresh = false, failFirstResolve = false } = {}) {
                 : "",
             flatMovesString: "",
             timer: "",
-            sessionCreation: "a".repeat(64),
-          });
-        }
+          },
+        });
       }
       assert.equal(url.origin, API_ROOT);
       assert.equal(headers.get("Origin"), "https://mons.link");
@@ -788,14 +780,13 @@ test("preparation rejects foreign, event, advanced, or unreadable invites before
           });
         }
       }
-      if (
-        altered === "played-match" &&
-        url.hostname === "mons-link-default-rtdb.firebaseio.com"
-      )
+      if (altered === "played-match" && url.pathname === "/matches/snapshot") {
+        const payload = await result.json();
         return response({
-          ...(await result.json()),
-          flatMovesString: "played",
+          ...payload,
+          match: { ...payload.match, flatMovesString: "played" },
         });
+      }
       return result;
     };
     await assert.rejects(
@@ -810,6 +801,41 @@ test("preparation rejects foreign, event, advanced, or unreadable invites before
           request.url.pathname === "/profiles/lookup",
       ),
     );
+  }
+});
+
+test("fixture preparation rejects missing, mismatched, or private canonical snapshots before gameplay writes", async (t) => {
+  for (const patch of [
+    { playerId: "another-player" },
+    { matchId: "another-match" },
+    { match: null },
+    { privateField: "private-fixture-value" },
+  ]) {
+    await t.test(Object.keys(patch)[0], async () => {
+      const h = model();
+      h.fixture.stage = "preparing";
+      const originalFetch = h.dependencies.fetch;
+      h.dependencies.fetch = async (input, init) => {
+        const result = await originalFetch(input, init);
+        if (new URL(String(input)).pathname !== "/matches/snapshot")
+          return result;
+        return response({ ...(await result.json()), ...patch });
+      };
+      await assert.rejects(
+        prepare(h.fixture, () => undefined, h.dependencies),
+        /Canonical match snapshot was missing, invalid, or for another match/,
+      );
+      assert.ok(h.requests.every((request) => request.url.origin === API_ROOT));
+      assert.ok(
+        h.requests.every(
+          (request) =>
+            request.method === "GET" ||
+            ["/auth/session/refresh", "/profiles/lookup"].includes(
+              request.url.pathname,
+            ),
+        ),
+      );
+    });
   }
 });
 
@@ -1113,7 +1139,7 @@ test("renewed sockets reject invalid initial snapshots before a later valid fram
   }
 });
 
-test("an uncertain API surrender resumes the same fixture and never writes directly to Firebase", async () => {
+test("an uncertain API surrender resumes the same fixture using only Worker endpoints", async () => {
   const h = model();
   const originalFetch = h.dependencies.fetch;
   let uncertain = false;
@@ -1150,8 +1176,9 @@ test("an uncertain API surrender resumes the same fixture and never writes direc
   assert.ok(
     h.requests.every(
       (request) =>
-        request.url.hostname !== "mons-link-default-rtdb.firebaseio.com" ||
-        request.method === "GET",
+        request.url.origin === API_ROOT &&
+        (request.url.pathname !== "/matches/snapshot" ||
+          request.method === "GET"),
     ),
   );
 });
@@ -1175,7 +1202,7 @@ test("surrender validates the API actor before recording the step or resolving t
   assert.equal(h.transfers, 0);
 });
 
-test("surrender checks persisted match fields including the creation marker before resolving the wager", async () => {
+test("surrender checks the canonical public match fields before resolving the wager", async () => {
   const h = model();
   const originalFetch = h.dependencies.fetch;
   let surrendered = false;
@@ -1183,12 +1210,12 @@ test("surrender checks persisted match fields including the creation marker befo
     const result = await originalFetch(input, init);
     const url = new URL(String(input));
     if (url.pathname === "/matches/surrender") surrendered = true;
-    if (
-      url.hostname === "mons-link-default-rtdb.firebaseio.com" &&
-      surrendered
-    ) {
+    if (url.pathname === "/matches/snapshot" && surrendered) {
       const payload = await result.json();
-      return response({ ...payload, sessionCreation: "b".repeat(64) });
+      return response({
+        ...payload,
+        match: { ...payload.match, aura: "changed" },
+      });
     }
     return result;
   };

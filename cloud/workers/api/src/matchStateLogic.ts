@@ -12,12 +12,8 @@ import {
   parseStrictMatchTimer,
 } from "@mons/shared/timers";
 import { AuthApiFailure } from "./authErrors.ts";
-import { isCanonicalFirebaseUid } from "./firebaseKeys.ts";
-import type {
-  MatchStateImportRequest,
-  MatchStateJson,
-  MatchStateRecord,
-} from "./matchStateTypes.ts";
+import { isCanonicalLoginUid } from "./recordKeys.ts";
+import type { MatchStateJson, MatchStateRecord } from "./matchStateTypes.ts";
 
 export function matchStateRecord(value: unknown): MatchStateRecord | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -131,8 +127,8 @@ export function isCommittedMatchStateClaim(
   return (
     claim.status === "claimed" &&
     claim.inviteId === inviteId &&
-    isCanonicalFirebaseUid(claim.playerId) &&
-    isCanonicalFirebaseUid(claim.opponentId) &&
+    isCanonicalLoginUid(claim.playerId) &&
+    isCanonicalLoginUid(claim.opponentId) &&
     claim.playerId !== claim.opponentId &&
     Number.isSafeInteger(claim.turnNumber) &&
     (claim.turnNumber as number) >= 0 &&
@@ -173,32 +169,4 @@ export async function digestMatchState(value: unknown): Promise<string> {
   return Array.from(new Uint8Array(bytes), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
-}
-
-export function sortMatchStateImport(
-  input: MatchStateImportRequest,
-): MatchStateImportRequest {
-  const compare = (left: string, right: string) =>
-    left < right ? -1 : left > right ? 1 : 0;
-  return {
-    inviteId: input.inviteId,
-    epoch: input.epoch,
-    importId: input.importId,
-    records: input.records
-      .map(({ matchId, playerId, value }) => ({ matchId, playerId, value }))
-      .sort(
-        (left, right) =>
-          compare(left.matchId, right.matchId) ||
-          compare(left.playerId, right.playerId),
-      ),
-    claims: input.claims
-      .map(({ matchId, value }) => ({ matchId, value }))
-      .sort((left, right) => compare(left.matchId, right.matchId)),
-  };
-}
-
-export function digestMatchStateImport(
-  input: MatchStateImportRequest,
-): Promise<string> {
-  return digestMatchState(sortMatchStateImport(input));
 }

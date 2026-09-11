@@ -7,7 +7,7 @@ const test = require("node:test");
 
 const withdrawalPath = path.resolve(
   __dirname,
-  "../functions/eventPrizeWithdrawal.js",
+  "../runtime/eventPrizeWithdrawal.js",
 );
 
 test("preserves the event-prize withdrawal facade", () => {

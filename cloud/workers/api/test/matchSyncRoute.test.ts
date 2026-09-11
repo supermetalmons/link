@@ -103,7 +103,7 @@ function setup({
     guestMatch: null,
   };
   const repository = createGameplayRepository(env);
-  repository.getRtdbPath = async (path) => {
+  repository.getStatePath = async (path) => {
     calls.existence++;
     assert.equal(path, "invites/invite-one");
     return source;
@@ -222,7 +222,7 @@ test("missing, invalid and unregistered canonical invites do not allocate a room
     [new Error("source-unavailable"), 503],
   ] as const) {
     const state = setup();
-    state.repository.getRtdbPath = async () => {
+    state.repository.getStatePath = async () => {
       if (source instanceof Error) throw source;
       return source;
     };

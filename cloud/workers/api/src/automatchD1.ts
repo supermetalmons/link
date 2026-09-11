@@ -1,8 +1,10 @@
+import { RETIRED_STATE_BACKEND } from "./stateCompatibility.ts";
+import { STATE_VALUE_FIELD } from "./stateCompatibility.ts";
 import type {
-  FirebaseRtdbQuery,
-  FirebaseRtdbTransactionResult,
-} from "./firebaseRtdb.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+  StateQuery,
+  StateTransactionResult,
+} from "./stateRepositoryTypes.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
 
 export const AUTOMATCH_RECORD_TABLES = {
@@ -62,7 +64,7 @@ export type AutomatchRecordMutation = {
 };
 
 export type AutomatchRuntimeControl = {
-  backend: "rtdb" | "d1";
+  backend: typeof RETIRED_STATE_BACKEND | "d1";
   state: "active" | "frozen";
   epoch: number;
   freezeGeneration: number;
@@ -77,7 +79,7 @@ export type AutomatchRuntimeControl = {
 
 export type AutomatchWriteAdmission = {
   admissionId: string;
-  backend: "rtdb" | "d1";
+  backend: typeof RETIRED_STATE_BACKEND | "d1";
   epoch: number;
   freezeGeneration: number;
   kind: string;
@@ -100,7 +102,7 @@ type ControlRow = {
 
 type AdmissionRow = {
   admission_id: string;
-  backend: "rtdb" | "d1";
+  backend: typeof RETIRED_STATE_BACKEND | "d1";
   epoch: number;
   freeze_generation: number;
   kind: string;
@@ -134,7 +136,7 @@ function requireRoot(root: AutomatchRoot) {
 }
 
 function requireKey(key: string): void {
-  if (!isSafeFirebaseKey(key)) {
+  if (!isSafeRecordKey(key)) {
     throw new TypeError("invalid-automatch-key");
   }
 }
@@ -171,7 +173,7 @@ export async function readAutomatchRuntimeControl(
     .first<ControlRow>();
   if (
     !row ||
-    (row.backend !== "rtdb" && row.backend !== "d1") ||
+    (row.backend !== RETIRED_STATE_BACKEND && row.backend !== "d1") ||
     (row.state !== "active" && row.state !== "frozen") ||
     !Number.isSafeInteger(row.epoch) ||
     row.epoch < 1 ||
@@ -411,11 +413,11 @@ export function resolveAutomatchServerValues(
   nowMs: number,
 ): unknown {
   timestamp(nowMs);
-  if (record(value) && Object.hasOwn(value, ".sv")) {
+  if (record(value) && Object.hasOwn(value, STATE_VALUE_FIELD)) {
     if (Object.keys(value).length !== 1)
       throw new TypeError("invalid-automatch-server-value");
-    if (value[".sv"] === "timestamp") return nowMs;
-    const operation = value[".sv"];
+    if (value[STATE_VALUE_FIELD] === "timestamp") return nowMs;
+    const operation = value[STATE_VALUE_FIELD];
     if (
       record(operation) &&
       Object.keys(operation).length === 1 &&
@@ -477,7 +479,7 @@ const ORDER_FIELDS = new Set([
   "completedAtMs",
 ]);
 
-function validateQuery(query: FirebaseRtdbQuery): void {
+function validateQuery(query: StateQuery): void {
   if (Object.keys(query).some((field) => !QUERY_FIELDS.has(field))) {
     throw new TypeError("unsupported-automatch-query");
   }
@@ -554,7 +556,7 @@ function queryBound(value: string | number | boolean | null | undefined): {
 
 function querySql(
   column: string,
-  query: FirebaseRtdbQuery,
+  query: StateQuery,
 ): { where: string; order: string; values: Array<string | number> } {
   validateQuery(query);
   const field = query.orderBy || "$key";
@@ -658,7 +660,7 @@ export function createAutomatchD1Store(
 
   async function list(
     root: AutomatchRoot,
-    query: FirebaseRtdbQuery = {},
+    query: StateQuery = {},
     signal?: AbortSignal,
   ): Promise<AutomatchRecordSnapshot[]> {
     const { table, valueColumn, revisionColumn } = requireRoot(root);
@@ -722,7 +724,7 @@ export function createAutomatchD1Store(
 
   async function getPath(
     path: string,
-    query: FirebaseRtdbQuery = {},
+    query: StateQuery = {},
     signal?: AbortSignal,
   ): Promise<unknown> {
     const owned = parseAutomatchPath(path);
@@ -889,7 +891,7 @@ export function createAutomatchD1Store(
     path: string,
     updater: (current: unknown) => unknown,
     signal?: AbortSignal,
-  ): Promise<FirebaseRtdbTransactionResult> {
+  ): Promise<StateTransactionResult> {
     const owned = parseAutomatchPath(path);
     if (!owned?.key)
       throw new TypeError("automatch-transaction-must-target-record");

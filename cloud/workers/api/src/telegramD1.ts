@@ -1,6 +1,6 @@
-import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
-import { createTelegramRepository } from "../../../functions/telegram/repositoryCore.js";
-import { validateTelegramMessageKey } from "../../../functions/telegram/desiredStateCore.js";
+import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
+import { createTelegramRepository } from "../../../runtime/telegram/repositoryCore.js";
+import { validateTelegramMessageKey } from "../../../runtime/telegram/desiredStateCore.js";
 import { validateTelegramTransactionDecision } from "./telegramTransaction.ts";
 import type { EventAnnouncementKind } from "./eventAnnouncementKinds.ts";
 

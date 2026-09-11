@@ -6,7 +6,7 @@ const prizeCatalog = require("@mons/shared/event-prizes");
 const {
   AUTOMATCH_WAITING_EMOJI_ID,
   getTelegramEmojiTag,
-} = require("../functions/telegramDisplay");
+} = require("../runtime/telegramDisplay");
 const {
   EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS,
   EVENT_PRIZE_ANNOUNCEMENT_LEAD_MS,
@@ -15,7 +15,7 @@ const {
   TELEGRAM_MEDIA_CAPTION_MAX_LENGTH,
   buildEventPrizeAnnouncement,
   isEventPrizeAnnouncementEvent,
-} = require("../functions/telegram/eventPrizeAnnouncement");
+} = require("../runtime/telegram/eventPrizeAnnouncement");
 
 const EVENT_ID = "z3oj52Iiime";
 const EVENT_URL = `https://mons.link/event/${EVENT_ID}`;
@@ -30,7 +30,7 @@ const CONFIG = prizeCatalog.getEventPrizeConfig(EVENT_ID);
 
 const withPrizeConfig = (context, config) => {
   const modulePath =
-    require.resolve("../functions/telegram/eventPrizeAnnouncement");
+    require.resolve("../runtime/telegram/eventPrizeAnnouncement");
   context.mock.method(prizeCatalog, "getEventPrizeConfig", () => config);
   delete require.cache[modulePath];
   try {

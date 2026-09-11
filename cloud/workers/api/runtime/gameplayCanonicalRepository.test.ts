@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { CompletePlayerProfile } from "@mons/shared/profiles";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import type { StateRepository } from "../src/stateRepositoryTypes.ts";
 import {
   canonicalProfileFields,
   createCanonicalRatingRepository,
@@ -21,31 +21,31 @@ import {
 } from "../src/profileCanonicalD1.ts";
 import { createProfileGameProjectionRuntime } from "../src/profileGameProjectionRepository.ts";
 import { getProfileGameProjection } from "../src/profileGamesD1.ts";
-import { loadEndedMatchResults } from "../../../functions/telegram/eventProjectionCore.js";
+import { loadEndedMatchResults } from "../../../runtime/telegram/eventProjectionCore.js";
 
 const testEnv = env as Env & {
   TEST_D1_MIGRATIONS: D1Migration[];
   TEST_PROFILE_D1_MIGRATIONS: D1Migration[];
 };
 
-const rtdbValues = new Map<string, unknown>();
-const rtdb: FirebaseRtdbClient = {
-  getPath: async (path) => rtdbValues.get(path) ?? null,
+const stateValues = new Map<string, unknown>();
+const state: StateRepository = {
+  getPath: async (path) => stateValues.get(path) ?? null,
   patchRoot: async (updates) => {
     for (const [path, value] of Object.entries(updates)) {
-      if (value === null) rtdbValues.delete(path);
-      else rtdbValues.set(path, value);
+      if (value === null) stateValues.delete(path);
+      else stateValues.set(path, value);
     }
   },
   transactPath: async (path, update) => {
-    const current = rtdbValues.get(path) ?? null;
+    const current = stateValues.get(path) ?? null;
     const result = update(current);
     const resultRecord =
       result && typeof result === "object" && !Array.isArray(result)
         ? (result as Record<string, unknown>)
         : {};
     if (Object.hasOwn(resultRecord, "value")) {
-      rtdbValues.set(path, resultRecord.value);
+      stateValues.set(path, resultRecord.value);
       return { committed: true, value: resultRecord.value };
     }
     return {
@@ -379,7 +379,7 @@ describe("canonical gameplay repositories", () => {
       ],
     });
     const repository = createGameplayRepository(testEnv, {
-      rtdbClient: rtdb,
+      stateClient: state,
     });
     const ownership = await repository.readProfileOwnershipSnapshot({
       loginUids: ["d1-game-login-winner", "d1-game-login-loser"],
@@ -453,11 +453,11 @@ describe("canonical gameplay repositories", () => {
     const repository = createGameplayRepository(
       { ...testEnv, PROFILE_DB: failAfterFirstWrite(testEnv.PROFILE_DB) },
       {
-        rtdbClient: rtdb,
+        stateClient: state,
       },
     );
     const replayRepository = createGameplayRepository(testEnv, {
-      rtdbClient: rtdb,
+      stateClient: state,
     });
     const transfer = {
       operationId: "d1-insufficient-wager",
@@ -532,7 +532,7 @@ describe("canonical gameplay repositories", () => {
       },
     });
     const repository = createGameplayRepository(testEnv, {
-      rtdbClient: rtdb,
+      stateClient: state,
     });
     const transfer = {
       operationId: "d1-same-profile-wager",
@@ -595,7 +595,7 @@ describe("canonical gameplay repositories", () => {
       sortValues: { rating: 0 },
     });
     const gameplay = createGameplayRepository(testEnv, {
-      rtdbClient: rtdb,
+      stateClient: state,
     });
     const rating = createRatingRepository(testEnv, gameplay);
     const gameplayOwnership = await gameplay.readProfileOwnershipSnapshot({
@@ -695,7 +695,7 @@ describe("canonical gameplay repositories", () => {
         },
       ],
     });
-    const gameplay = createGameplayRepository(testEnv, { rtdbClient: rtdb });
+    const gameplay = createGameplayRepository(testEnv, { stateClient: state });
     const rating = createRatingRepository(testEnv, gameplay, {
       now: () => 3_000,
     });
@@ -722,7 +722,7 @@ describe("canonical gameplay repositories", () => {
     await insertProfile(playerProfileId, "d1-feb-existing-player-login");
     await insertProfile(sourceOpponentProfileId, null);
     await insertProfile(targetOpponentProfileId, null);
-    const gameplay = createGameplayRepository(testEnv, { rtdbClient: rtdb });
+    const gameplay = createGameplayRepository(testEnv, { stateClient: state });
     const rating = createRatingRepository(testEnv, gameplay, {
       now: () => 3_000,
     });
@@ -759,7 +759,7 @@ describe("canonical gameplay repositories", () => {
     await insertProfile(playerProfileId, "d1-feb-fenced-player-login");
     await insertProfile(sourceOpponentProfileId, null);
     await insertProfile(targetOpponentProfileId, null);
-    const gameplay = createGameplayRepository(testEnv, { rtdbClient: rtdb });
+    const gameplay = createGameplayRepository(testEnv, { stateClient: state });
     await createRatingRepository(testEnv, gameplay, {
       now: () => 2_000,
     }).applyFebruaryChallengeReplay(playerProfileId, sourceOpponentProfileId);
@@ -883,7 +883,7 @@ describe("canonical gameplay repositories", () => {
         });
       },
     );
-    const gameplay = createGameplayRepository(testEnv, { rtdbClient: rtdb });
+    const gameplay = createGameplayRepository(testEnv, { stateClient: state });
     const rating = createCanonicalRatingRepository(racedDb, gameplay, {
       createFailure: () => new Error("rating-unavailable"),
       maxAttempts: 5,
@@ -922,7 +922,7 @@ describe("canonical gameplay repositories", () => {
       false,
     );
     const gameplay = createGameplayRepository(testEnv, {
-      rtdbClient: rtdb,
+      stateClient: state,
     });
     const rating = createRatingRepository(testEnv, gameplay, {
       now: () => 2_000,
@@ -1101,7 +1101,9 @@ describe("canonical gameplay repositories", () => {
   ])(
     "loads $label event scores through the canonical rating repository",
     async ({ label, player, opponent, expectedPlayer, expectedOpponent }) => {
-      const gameplay = createGameplayRepository(testEnv, { rtdbClient: rtdb });
+      const gameplay = createGameplayRepository(testEnv, {
+        stateClient: state,
+      });
       const rating = createRatingRepository(testEnv, gameplay, {
         now: () => 2_000,
       });
@@ -1237,7 +1239,7 @@ describe("canonical gameplay repositories", () => {
       ],
     });
     const gameplay = createGameplayRepository(testEnv, {
-      rtdbClient: rtdb,
+      stateClient: state,
     });
     const rating = createCanonicalRatingRepository(
       testEnv.PROFILE_DB,
@@ -1288,7 +1290,7 @@ describe("canonical gameplay repositories", () => {
   it("retries rating finalization when a missing login is created", async () => {
     await insertProfile("d1-created-opponent", "d1-created-opponent-login");
     const gameplay = createGameplayRepository(testEnv, {
-      rtdbClient: rtdb,
+      stateClient: state,
     });
     const identity = {
       inviteId: "d1-created-invite",
@@ -1370,7 +1372,7 @@ describe("canonical gameplay repositories", () => {
     await insertProfile("d1-race-target", null, { rating: 1800 });
     await insertProfile("d1-race-opponent", "d1-race-opponent-login");
     const gameplay = createGameplayRepository(testEnv, {
-      rtdbClient: rtdb,
+      stateClient: state,
     });
     const identity = {
       inviteId: "d1-race-invite",
@@ -1553,7 +1555,7 @@ describe("canonical gameplay repositories", () => {
     await insertProfile("d1-ambiguous-player", "d1-ambiguous-login-player");
     await insertProfile("d1-ambiguous-opponent", "d1-ambiguous-login-opponent");
     const gameplay = createGameplayRepository(testEnv, {
-      rtdbClient: rtdb,
+      stateClient: state,
     });
     const identity = {
       inviteId: "d1-ambiguous-invite",
@@ -1641,20 +1643,20 @@ describe("canonical gameplay repositories", () => {
       username: "D1Guest",
       emoji: 9,
     });
-    rtdbValues.set("invites/auto_bbbbbbbbbbb", {
+    stateValues.set("invites/auto_bbbbbbbbbbb", {
       hostId: "d1-project-login-host",
       guestId: "d1-project-login-guest",
     });
-    rtdbValues.set("players/d1-project-login-host/profile", "d1-project-host");
-    rtdbValues.set(
+    stateValues.set("players/d1-project-login-host/profile", "d1-project-host");
+    stateValues.set(
       "players/d1-project-login-guest/profile",
       "d1-project-guest",
     );
     const runtime = createProfileGameProjectionRuntime(testEnv, {
       profileDb: testEnv.PROFILE_DB,
       d1: testEnv.PROFILE_GAMES_DB,
-      rtdb: {
-        getRtdbPath: async (path) => rtdbValues.get(path) ?? null,
+      state: {
+        getStatePath: async (path) => stateValues.get(path) ?? null,
       },
       wait: async () => undefined,
     });

@@ -33,10 +33,10 @@ import {
   finiteNumber,
   hashMethodValue,
   normalizeMethodValue,
-  readStoredFirebaseUid,
+  readStoredLoginUid,
   throwMethodCooldown,
   throwProfileMethodCooldown,
-  uniqueStoredFirebaseUids,
+  uniqueStoredLoginUids,
   uniqueStrings,
 } from "./authPolicy.ts";
 import {
@@ -228,7 +228,7 @@ function recoveryValue(
   }
   return {
     profileId,
-    loginUids: uniqueStoredFirebaseUids(snapshot.loginUids, loginUids),
+    loginUids: uniqueStoredLoginUids(snapshot.loginUids, loginUids),
     sourceProfileIds: Array.from(
       new Set([...snapshot.sourceProfileIds, ...sourceProfileIds]),
     ),
@@ -1534,7 +1534,7 @@ export function createCanonicalAuthIdentityService(
     allowConsumed = false,
   ): AuthIntent => {
     if (!intent) authFailure(409, "failed-precondition", "intent-not-found");
-    if (readStoredFirebaseUid(intent.uid) !== uid)
+    if (readStoredLoginUid(intent.uid) !== uid)
       authFailure(403, "permission-denied", "intent-user-mismatch");
     if (cleanString(intent.method) !== method)
       authFailure(409, "failed-precondition", "intent-method-mismatch");

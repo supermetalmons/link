@@ -1705,10 +1705,7 @@ const MainMenu: React.FC = () => {
           typeof error === "object" &&
           "message" in error &&
           typeof (error as { message?: unknown }).message === "string"
-            ? (error as { message: string }).message.replace(
-                /^Firebase:\s*/i,
-                "",
-              )
+            ? (error as { message: string }).message
             : "Failed to create event.";
         setEventModalPendingCreateError(message);
       })

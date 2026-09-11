@@ -2,7 +2,7 @@ import {
   createProfileLinkProjectionCore,
   type ProfileLinkProjectionRepository,
   type ProfileLinkProjectionSummary as CoreProfileLinkProjectionSummary,
-} from "../../../functions/profileLinkProjectionCore.js";
+} from "../../../runtime/profileLinkProjectionCore.js";
 import {
   createGameplayRepository,
   type GameplayRepository,
@@ -26,7 +26,7 @@ export type ProfileLinkProjectionRuntimeDependencies = {
   profileDb?: D1Database;
   projection?: ProfileGameProjectionRuntime;
   readProfileOwnershipSnapshot?: ProfileLinkProjectionRepository["readProfileOwnershipSnapshot"];
-  rtdb?: Pick<GameplayRepository, "getRtdbPath">;
+  state?: Pick<GameplayRepository, "getStatePath">;
   wait?: (milliseconds: number) => Promise<void>;
   withInviteProjectionLock<T>(
     inviteId: string,
@@ -47,7 +47,7 @@ export function createProfileLinkProjectionRuntime(
   }): Promise<ProfileLinkProjectionSummary | null>;
 } {
   const profileDb = dependencies.profileDb || env.PROFILE_DB;
-  const rtdb = dependencies.rtdb || createGameplayRepository(env);
+  const state = dependencies.state || createGameplayRepository(env);
   const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
   const projection =
     dependencies.projection ||
@@ -56,7 +56,7 @@ export function createProfileLinkProjectionRuntime(
       logger: dependencies.logger,
       now: dependencies.now,
       profileDb,
-      rtdb,
+      state,
       wait: dependencies.wait,
     });
   const repository: ProfileLinkProjectionRepository = {

@@ -189,7 +189,7 @@ describe("socket session lifetime", () => {
       const expiry = Date.now() + 300_000;
       const invalid: Record<string, string | null>[] = [
         { "X-Mons-Session-Id": null },
-        { "X-Mons-Session-Id": "firebase-uid" },
+        { "X-Mons-Session-Id": "login-uid" },
         { "X-Mons-Session-Expires-At": null },
         { "X-Mons-Session-Expires-At": String(Date.now()) },
         { "X-Mons-Session-Expires-At": "1.5" },

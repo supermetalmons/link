@@ -28,7 +28,7 @@ const {
   readTimestampMillis,
 } = await import("../src/connection/valueNormalizers.ts");
 
-test("normalizes primitive Firebase values", () => {
+test("normalizes primitive stored values", () => {
   assert.equal(normalizeString("value"), "value");
   assert.equal(normalizeString(2), "");
   assert.equal(normalizeStringOrNull(""), null);

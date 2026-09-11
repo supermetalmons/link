@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildEventPrizeAnnouncement } from "../../../functions/telegram/eventPrizeAnnouncement.js";
-import { buildSundayMonsReminder } from "../../../functions/telegram/sundayMonsReminder.js";
-import type { TelegramResult } from "../../../functions/telegram/client.js";
+import { buildEventPrizeAnnouncement } from "../../../runtime/telegram/eventPrizeAnnouncement.js";
+import { buildSundayMonsReminder } from "../../../runtime/telegram/sundayMonsReminder.js";
+import type { TelegramResult } from "../../../runtime/telegram/client.js";
 import {
   deliverEventPrizeAnnouncement,
   type EventPrizeAnnouncementDeliveryDependencies,
@@ -119,8 +119,8 @@ function fixture(input = INPUT) {
     now: () => nowMs,
     controlsEnabled: async () => true,
     eventRepository: {
-      getRtdbPath: async () => eventData,
-      transactRtdbPath: async (path, updater) => {
+      getStatePath: async () => eventData,
+      transactStatePath: async (path, updater) => {
         const current = locks.get(path) ?? null;
         const result = updater(current) as {
           commit?: false;

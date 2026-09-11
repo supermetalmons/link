@@ -11,7 +11,7 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 function catchupJob(): ProfileLinkCatchupJob {
   return {
-    loginUid: "firebase-uid",
+    loginUid: "login-uid",
     requestId: "repair-request",
     profileId: "current-profile",
     cleanupProfileIds: ["older-profile", "previous-profile"],
@@ -27,10 +27,10 @@ test("profile-link catchup validates ownership before dispatching persisted work
   const queued: unknown[] = [];
   const job = catchupJob();
   const originalJob = structuredClone(job);
-  await dispatchProfileLinkCatchupForOwner("firebase-uid", "current-profile", {
+  await dispatchProfileLinkCatchupForOwner("login-uid", "current-profile", {
     catchupStore: {
       readForOwner: async (uid, profileId) => {
-        assert.equal(uid, "firebase-uid");
+        assert.equal(uid, "login-uid");
         assert.equal(profileId, "current-profile");
         operations.push("read-owner-job");
         return job;
@@ -45,7 +45,7 @@ test("profile-link catchup validates ownership before dispatching persisted work
   assert.deepEqual(queued, [
     {
       kind: "profile-link-profile-game-projection",
-      loginUid: "firebase-uid",
+      loginUid: "login-uid",
       requestId: "repair-request",
     },
   ]);
@@ -56,7 +56,7 @@ test("profile-link catchup does not dispatch when canonical ownership validation
   const failure = new Error("canonical-profile-conflict");
   const queued: unknown[] = [];
   await assert.rejects(
-    dispatchProfileLinkCatchupForOwner("firebase-uid", "current-profile", {
+    dispatchProfileLinkCatchupForOwner("login-uid", "current-profile", {
       catchupStore: {
         readForOwner: async () => {
           throw failure;
@@ -92,7 +92,7 @@ test("profile-link catchup retries preserve persisted progress through D1 failur
     };
   await assert.rejects(
     dispatchProfileLinkCatchupForOwner(
-      "firebase-uid",
+      "login-uid",
       "current-profile",
       dependencies,
     ),
@@ -101,7 +101,7 @@ test("profile-link catchup retries preserve persisted progress through D1 failur
   assert.deepEqual(queued, []);
   failOwnerRead = false;
   await dispatchProfileLinkCatchupForOwner(
-    "firebase-uid",
+    "login-uid",
     "current-profile",
     dependencies,
   );
@@ -110,7 +110,7 @@ test("profile-link catchup retries preserve persisted progress through D1 failur
   assert.deepEqual(queued, [
     {
       kind: "profile-link-profile-game-projection",
-      loginUid: "firebase-uid",
+      loginUid: "login-uid",
       requestId: job.requestId,
     },
   ]);
@@ -120,7 +120,7 @@ test("profile-link catchup leaves durable work recoverable when Queue dispatch f
   const job = catchupJob();
   const originalJob = structuredClone(job);
   const logs: string[] = [];
-  await dispatchProfileLinkCatchupForOwner("firebase-uid", "current-profile", {
+  await dispatchProfileLinkCatchupForOwner("login-uid", "current-profile", {
     catchupStore: { readForOwner: async () => job },
     enqueueProfileLinkProjection: async () => {
       throw new Error("private-provider-detail");
@@ -136,7 +136,7 @@ test("profile-link catchup leaves durable work recoverable when Queue dispatch f
     [
       {
         event: "profile_link_profile_game_projection_enqueue_failed",
-        loginUid: "firebase-uid",
+        loginUid: "login-uid",
       },
     ],
   );
@@ -163,12 +163,12 @@ test("repeated profile-link catchup dispatch does not recreate completed work", 
       },
     };
   await dispatchProfileLinkCatchupForOwner(
-    "firebase-uid",
+    "login-uid",
     "current-profile",
     dependencies,
   );
   await dispatchProfileLinkCatchupForOwner(
-    "firebase-uid",
+    "login-uid",
     "current-profile",
     dependencies,
   );

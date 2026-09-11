@@ -226,14 +226,14 @@ function createRepository(initial: Record<string, unknown> = {}) {
         profileById,
       } as ProfileOwnershipSnapshot;
     },
-    getRtdbPath: async (path) => getPath(values, path),
-    patchRtdbRoot: async (updates) => {
+    getStatePath: async (path) => getPath(values, path),
+    patchStateRoot: async (updates) => {
       patches.push(updates);
       for (const [path, value] of Object.entries(updates)) {
         setPath(values, path, value);
       }
     },
-    transactRtdbPath: async (path, updater) => {
+    transactStatePath: async (path, updater) => {
       const current = getPath(values, path);
       const output = updater(current);
       if (
@@ -351,8 +351,8 @@ function workflowEnvironment(
 test("creates a scheduled event only after its Workflow exists", async () => {
   const order: string[] = [];
   const repository = createRepository();
-  const originalPatch = repository.repository.patchRtdbRoot;
-  repository.repository.patchRtdbRoot = async (updates, signal) => {
+  const originalPatch = repository.repository.patchStateRoot;
+  repository.repository.patchStateRoot = async (updates, signal) => {
     order.push("patch");
     await originalPatch(updates, signal);
   };
@@ -759,8 +759,8 @@ test("alternate creator ownership fails from the snapshot under the event lock",
     throw new Error("d1-unavailable");
   };
   let transactions = 0;
-  const transact = state.repository.transactRtdbPath;
-  state.repository.transactRtdbPath = async (...args) => {
+  const transact = state.repository.transactStatePath;
+  state.repository.transactStatePath = async (...args) => {
     transactions += 1;
     return transact(...args);
   };
@@ -855,16 +855,16 @@ test("checks alternate ownership before the final event lock and write", async (
     candidateProfileId === "retired-profile"
       ? "canonical-profile"
       : candidateProfileId;
-  const transact = state.repository.transactRtdbPath;
-  state.repository.transactRtdbPath = async (path, updater, signal) => {
+  const transact = state.repository.transactStatePath;
+  state.repository.transactStatePath = async (path, updater, signal) => {
     const result = await transact(path, updater, signal);
     if (path === "eventLocks/event-1" && result.decision === "refreshed") {
       order.push("lock");
     }
     return result;
   };
-  const patch = state.repository.patchRtdbRoot;
-  state.repository.patchRtdbRoot = async (...args) => {
+  const patch = state.repository.patchStateRoot;
+  state.repository.patchStateRoot = async (...args) => {
     order.push("write");
     return patch(...args);
   };
@@ -906,8 +906,8 @@ test("rejects alternate creator access when login and profile disagree", async (
     },
   });
   let transactions = 0;
-  const transact = state.repository.transactRtdbPath;
-  state.repository.transactRtdbPath = async (...args) => {
+  const transact = state.repository.transactStatePath;
+  state.repository.transactStatePath = async (...args) => {
     transactions += 1;
     return transact(...args);
   };
@@ -945,15 +945,15 @@ test("rate limits public event sync before runtime I/O", async () => {
   } as Env;
   const state = createRepository();
   let runtimeIo = 0;
-  state.repository.getRtdbPath = async () => {
+  state.repository.getStatePath = async () => {
     runtimeIo += 1;
-    throw new Error("unexpected-rtdb-read");
+    throw new Error("unexpected-source-read");
   };
   state.repository.readProfileOwnershipSnapshot = async () => {
     runtimeIo += 1;
     throw new Error("unexpected-d1-read");
   };
-  state.repository.transactRtdbPath = async () => {
+  state.repository.transactStatePath = async () => {
     runtimeIo += 1;
     throw new Error("unexpected-lock");
   };
@@ -1015,15 +1015,15 @@ test("fails closed before event sync runtime creation when limiting fails", asyn
   } as Env;
   const state = createRepository();
   let runtimeIo = 0;
-  state.repository.getRtdbPath = async () => {
+  state.repository.getStatePath = async () => {
     runtimeIo += 1;
-    throw new Error("unexpected-rtdb-read");
+    throw new Error("unexpected-source-read");
   };
   state.repository.readProfileOwnershipSnapshot = async () => {
     runtimeIo += 1;
     throw new Error("unexpected-d1-read");
   };
-  state.repository.transactRtdbPath = async () => {
+  state.repository.transactStatePath = async () => {
     runtimeIo += 1;
     throw new Error("unexpected-lock");
   };
@@ -1441,8 +1441,8 @@ test("reads alternate ownership once after acquiring the event lock", async () =
     candidateProfileId === "retired-profile"
       ? "canonical-profile"
       : candidateProfileId;
-  const transact = state.repository.transactRtdbPath;
-  state.repository.transactRtdbPath = async (path, updater, signal) => {
+  const transact = state.repository.transactStatePath;
+  state.repository.transactStatePath = async (path, updater, signal) => {
     const result = await transact(path, updater, signal);
     if (path === "eventLocks/event-1" && result.committed) {
       lockAcquired = true;
@@ -1519,8 +1519,8 @@ test("fails closed under the event lock when D1 ownership is unavailable", async
   state.repository.getGameplayProfile = async () => {
     throw new Error("d1-unavailable");
   };
-  const transact = state.repository.transactRtdbPath;
-  state.repository.transactRtdbPath = async (...args) => {
+  const transact = state.repository.transactStatePath;
+  state.repository.transactStatePath = async (...args) => {
     transactions += 1;
     return transact(...args);
   };

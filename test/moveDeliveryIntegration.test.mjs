@@ -75,7 +75,7 @@ function harness() {
     removeItem: (key) => records.delete(key),
   };
   const repository = {
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       assert.equal(path, `invites/${scope.inviteId}`);
       return {
         hostId: scope.playerId,

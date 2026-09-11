@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
-import { createWagerStateRtdbClient } from "../src/wagerStateRepository.ts";
+import type { StateRepository } from "../src/stateRepositoryTypes.ts";
+import { createWagerStateRepository } from "../src/wagerStateRepository.ts";
 
 function createFixture() {
   let databaseAccesses = 0;
@@ -12,10 +12,10 @@ function createFixture() {
     },
   });
   const forwarded: unknown[] = [];
-  const base: FirebaseRtdbClient = {
+  const base: StateRepository = {
     async getPath(path, query) {
       forwarded.push({ path, query });
-      return { firebase: true };
+      return { memoryState: true };
     },
     async patchRoot(updates) {
       forwarded.push(updates);
@@ -26,13 +26,13 @@ function createFixture() {
     },
   };
   return {
-    client: createWagerStateRtdbClient(db, base),
+    client: createWagerStateRepository(db, base),
     forwarded,
     databaseAccesses: () => databaseAccesses,
   };
 }
 
-test("rejects mutations spanning canonical wagers and Firebase before either store is touched", async () => {
+test("rejects mutations spanning canonical wagers and other state before either store is touched", async () => {
   const fixture = createFixture();
   await assert.rejects(
     fixture.client.patchRoot({
@@ -135,7 +135,7 @@ test("requires an admitted writer and rejects unsupported owned queries without 
   assert.equal(fixture.databaseAccesses(), 0);
 });
 
-test("preserves Firebase-only gameplay updates and metadata replacements", async () => {
+test("preserves unowned gameplay updates and metadata replacements", async () => {
   const fixture = createFixture();
   const updates = {
     "invites/invite": { hostId: "host", guestId: "guest" },
@@ -144,7 +144,7 @@ test("preserves Firebase-only gameplay updates and metadata replacements", async
   };
   await fixture.client.patchRoot(updates);
   assert.deepEqual(await fixture.client.getPath("players/host/matches/match"), {
-    firebase: true,
+    memoryState: true,
   });
   await fixture.client.transactPath("matchTimerClaims/match", () => ({
     value: {},

@@ -1,5 +1,6 @@
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
-import { firebaseRtdbIncrement } from "./firebaseRtdb.ts";
+import { STATE_FAILURE_MESSAGES } from "./stateCompatibility.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
+import { stateIncrement } from "./stateRepositoryTypes.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import type { EventTelegramProjectionTask } from "./telegramProjectionTasks.ts";
 
@@ -21,7 +22,7 @@ function eventIdsFromUpdates(updates: Record<string, unknown>): string[] {
   const eventIds = new Set<string>();
   for (const path of Object.keys(updates)) {
     const [root, eventId] = path.split("/");
-    if (root === "events" && eventId && isSafeFirebaseKey(eventId)) {
+    if (root === "events" && eventId && isSafeRecordKey(eventId)) {
       eventIds.add(eventId);
     }
   }
@@ -29,8 +30,8 @@ function eventIdsFromUpdates(updates: Record<string, unknown>): string[] {
 }
 
 export function getEventTelegramProjectionOutboxPath(eventId: string): string {
-  if (!isSafeFirebaseKey(eventId)) {
-    throw new TypeError("eventId must be a safe Firebase key");
+  if (!isSafeRecordKey(eventId)) {
+    throw new TypeError(STATE_FAILURE_MESSAGES.invalidEventId);
   }
   return `${EVENT_TELEGRAM_PROJECTION_OUTBOX_ROOT}/${eventId}`;
 }
@@ -38,8 +39,8 @@ export function getEventTelegramProjectionOutboxPath(eventId: string): string {
 export function getEventTelegramProjectionGenerationPath(
   eventId: string,
 ): string {
-  if (!isSafeFirebaseKey(eventId)) {
-    throw new TypeError("eventId must be a safe Firebase key");
+  if (!isSafeRecordKey(eventId)) {
+    throw new TypeError(STATE_FAILURE_MESSAGES.invalidEventId);
   }
   return `${EVENT_TELEGRAM_PROJECTION_GENERATION_ROOT}/${eventId}`;
 }
@@ -48,8 +49,8 @@ export function buildEventTelegramProjectionOutbox(
   requestId: string,
   updatedAtMs: number,
 ): Record<string, unknown> {
-  if (!isSafeFirebaseKey(requestId)) {
-    throw new TypeError("requestId must be a safe Firebase key");
+  if (!isSafeRecordKey(requestId)) {
+    throw new TypeError(STATE_FAILURE_MESSAGES.invalidRequestId);
   }
   if (!Number.isSafeInteger(updatedAtMs) || updatedAtMs < 0) {
     throw new TypeError("updatedAtMs must be a non-negative integer");
@@ -78,10 +79,10 @@ export function createEventTelegramProjectionRepository(
   const now = dependencies.now || Date.now;
   return {
     ...repository,
-    async patchRtdbRoot(updates, signal) {
+    async patchStateRoot(updates, signal) {
       const eventIds = eventIdsFromUpdates(updates);
       if (eventIds.length === 0) {
-        await repository.patchRtdbRoot(updates, signal);
+        await repository.patchStateRoot(updates, signal);
         return;
       }
       const updatedAtMs = now();
@@ -95,9 +96,9 @@ export function createEventTelegramProjectionRepository(
         nextUpdates[getEventTelegramProjectionOutboxPath(task.eventId)] =
           buildEventTelegramProjectionOutbox(task.requestId, updatedAtMs);
         nextUpdates[getEventTelegramProjectionGenerationPath(task.eventId)] =
-          firebaseRtdbIncrement(1);
+          stateIncrement(1);
       }
-      await repository.patchRtdbRoot(nextUpdates, signal);
+      await repository.patchStateRoot(nextUpdates, signal);
       const dispatch = async () => {
         const results = await Promise.allSettled(tasks.map(enqueue));
         for (let index = 0; index < results.length; index += 1) {

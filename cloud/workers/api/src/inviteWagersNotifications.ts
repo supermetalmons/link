@@ -1,4 +1,4 @@
-import { normalizeFirebaseKey } from "@mons/shared/ids";
+import { normalizeRecordKey } from "@mons/shared/ids";
 import { changedInviteMetadataIds } from "./inviteMetadataNotifications.ts";
 import {
   notifyInviteRooms,
@@ -26,11 +26,10 @@ export function changedInviteWagersIds(
       !Array.isArray(value)
     ) {
       for (const inviteId of Object.keys(value)) {
-        if (normalizeFirebaseKey(inviteId) === inviteId)
-          inviteIds.add(inviteId);
+        if (normalizeRecordKey(inviteId) === inviteId) inviteIds.add(inviteId);
       }
     } else if (
-      normalizeFirebaseKey(parts[1]) === parts[1] &&
+      normalizeRecordKey(parts[1]) === parts[1] &&
       (parts.length === 2 || WAGER_SOURCE_FIELDS.has(parts[2]))
     ) {
       inviteIds.add(parts[1]);

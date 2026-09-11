@@ -22,9 +22,9 @@ function match(
 
 function repository(
   records: Readonly<Record<string, unknown>>,
-): Pick<GameplayRepository, "getRtdbPath"> {
+): Pick<GameplayRepository, "getStatePath"> {
   return {
-    getRtdbPath: async (path) => records[path] ?? null,
+    getStatePath: async (path) => records[path] ?? null,
   };
 }
 
@@ -142,7 +142,7 @@ test("cleans legacy markers from owner-only terminal and later-turn proof", asyn
     await sweepMatchTimerStarts(
       stores.timerStarts,
       {
-        getRtdbPath: async (path) => {
+        getStatePath: async (path) => {
           paths.push(path);
           return records[path] ?? null;
         },
@@ -230,7 +230,7 @@ test("backfills one bounded legacy invite match without guessing ambiguous oppon
   const result = await sweepMatchTimerStarts(
     stores.timerStarts,
     {
-      getRtdbPath: async (path) => {
+      getStatePath: async (path) => {
         paths.push(path);
         return records[path] ?? null;
       },
@@ -365,8 +365,8 @@ test("fails the sweep with a bounded sanitized summary", async () => {
       sweepMatchTimerStarts(
         stores.timerStarts,
         {
-          getRtdbPath: async () => {
-            throw new Error("private-rtdb-detail");
+          getStatePath: async () => {
+            throw new Error("private-state-detail");
           },
         },
         {
@@ -377,10 +377,10 @@ test("fails the sweep with a bounded sanitized summary", async () => {
           },
         },
       ),
-    /private-rtdb-detail/,
+    /private-state-detail/,
   );
   assert.equal(logs.length, 1);
-  assert.doesNotMatch(logs[0], /private-player|private-rtdb-detail/);
+  assert.doesNotMatch(logs[0], /private-player|private-state-detail/);
   assert.deepEqual(JSON.parse(logs[0]), {
     event: "match_timer_start_sweep_failed",
     deleted: 0,

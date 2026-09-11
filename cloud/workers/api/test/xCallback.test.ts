@@ -40,7 +40,7 @@ function flow(overrides: Partial<XRedirectFlow> = {}): XRedirectFlow {
     returnUrl: "https://mons.link/settings?tab=identity",
     revision: REVISION,
     status: "created",
-    uid: "firebase-uid",
+    uid: "login-uid",
     updatedAtMs: 900_000,
     xUserId: "",
     xUsername: "",

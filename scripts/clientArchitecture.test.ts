@@ -30,7 +30,8 @@ function collectSourceFiles(directory: string): string[] {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      files.push(...collectSourceFiles(path));
+      if (!entry.name.startsWith(".") && entry.name !== "node_modules")
+        files.push(...collectSourceFiles(path));
     } else if (sourceExtensions.includes(extname(entry.name))) {
       files.push(path);
     }
@@ -467,4 +468,39 @@ test("browser session runtime has no Firebase SDK dependency", () => {
     )
     .map(displayPath);
   assert.deepEqual(importers, []);
+});
+
+test("application and operator runtimes have no retired provider dependencies or endpoints", () => {
+  const roots = [
+    "src",
+    "cloud/runtime",
+    "cloud/workers/api/src",
+    "cloud/admin",
+    "scripts",
+  ];
+  const files = roots
+    .flatMap((root) => collectSourceFiles(resolve(repositoryRoot, root)))
+    .filter((path) => !/\.test\.[cm]?[jt]sx?$/.test(path));
+  for (const path of files) {
+    const retired = dependencySpecifiers(path, "mixed").filter((specifier) =>
+      /^(?:firebase(?:[/-]|$)|@firebase\/)/.test(specifier),
+    );
+    assert.deepEqual(retired, [], displayPath(path));
+    assert.doesNotMatch(
+      readFileSync(path, "utf8"),
+      /https?:\/\/[^\s"'`]*(?:firebaseio\.com|firebasedatabase\.app|firestore\.googleapis\.com|identitytoolkit\.googleapis\.com|securetoken\.google\.com|oauth2\.googleapis\.com)/,
+      displayPath(path),
+    );
+  }
+  const lock = JSON.parse(
+    readFileSync(resolve(repositoryRoot, "package-lock.json"), "utf8"),
+  ) as {
+    packages?: Record<string, unknown>;
+  };
+  assert.deepEqual(
+    Object.keys(lock.packages || {}).filter((path) =>
+      /node_modules\/(?:firebase(?:[/-]|$)|@firebase\/)/.test(path),
+    ),
+    [],
+  );
 });

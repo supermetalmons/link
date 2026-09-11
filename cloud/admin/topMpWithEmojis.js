@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 const { randomUUID } = require("node:crypto");
 const { createProfileD1Reader } = require("./_d1");
-const { getDisplayNameFromAddress } = require("../functions/telegramDisplay");
+const { getDisplayNameFromAddress } = require("../runtime/telegramDisplay");
 const {
   createLeaderboardHeading,
   parseLeaderboardLimit,

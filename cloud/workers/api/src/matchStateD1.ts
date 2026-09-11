@@ -1,7 +1,8 @@
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { RETIRED_STATE_BACKEND } from "./stateCompatibility.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 
 export type MatchStateControl = {
-  backend: "rtdb" | "durable";
+  backend: typeof RETIRED_STATE_BACKEND | "durable";
   state: "active" | "draining" | "frozen";
   epoch: number;
   freezeGeneration: number;
@@ -85,7 +86,7 @@ function safeInteger(value: unknown, minimum = 0): value is number {
 }
 
 function safeKey(value: string): void {
-  if (!isSafeFirebaseKey(value) || value !== value.trim())
+  if (!isSafeRecordKey(value) || value !== value.trim())
     throw new MatchStateD1Failure("invalid-key");
 }
 
@@ -103,7 +104,7 @@ export async function readMatchStateControl(
   }
   if (
     !row ||
-    (row.backend !== "rtdb" && row.backend !== "durable") ||
+    (row.backend !== RETIRED_STATE_BACKEND && row.backend !== "durable") ||
     !["active", "draining", "frozen"].includes(row.state) ||
     !safeInteger(row.epoch, 1) ||
     !safeInteger(row.freeze_generation)

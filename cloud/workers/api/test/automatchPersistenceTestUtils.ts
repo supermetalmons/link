@@ -2,7 +2,7 @@ import type { AutomatchPersistence } from "../src/automatchPersistence.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 
 export function createAutomatchQueueLookup(
-  readState?: GameplayRepository["getRtdbPath"],
+  readState?: GameplayRepository["getStatePath"],
 ): AutomatchPersistence["readQueuedByLogins"] {
   return async (loginUids, signal) => {
     const rows = await Promise.all(

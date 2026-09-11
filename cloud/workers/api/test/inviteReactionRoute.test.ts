@@ -89,7 +89,7 @@ function setup(
     },
   } as Env;
   const repository = createGameplayRepository(env, {
-    rtdbClient: {
+    stateClient: {
       getPath: async (path) => {
         calls.reads.push(path);
         return invite;
@@ -102,10 +102,9 @@ function setup(
       },
     },
   });
-  repository.getRtdbPath = async (path) => {
+  repository.getStatePath = async (path) => {
     calls.reads.push(path);
-    if (!path.startsWith("invites/"))
-      throw new Error("unexpected-firebase-read");
+    if (!path.startsWith("invites/")) throw new Error("unexpected-source-read");
     return invite;
   };
   repository.readProfileOwnershipSnapshot = async (query) => ({
@@ -687,11 +686,11 @@ test("v2 sockets validate registered presentation and negotiate anonymous or par
   for (const authenticated of [false, true]) {
     const state = setup();
     const ensured: unknown[] = [];
-    state.repository.getRtdbPath = async (path) => {
+    state.repository.getStatePath = async (path) => {
       state.calls.reads.push(path);
       if (path === "invites/invite-one")
         return { hostId: "host-login", guestId: "guest-login" };
-      throw new Error(`unexpected-firebase-read:${path}`);
+      throw new Error(`unexpected-source-read:${path}`);
     };
     state.dependencies.room!.ensurePresentations = async (matchId, seeds) => {
       ensured.push({ matchId, seeds });

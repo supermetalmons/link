@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import type { D1Migration } from "cloudflare:test";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import type { StateRepository } from "../src/stateRepositoryTypes.ts";
 import {
   acquireWagerReservationAdmission,
   releaseWagerReservationAdmission,
@@ -11,7 +11,8 @@ import {
   assertWagerStateActivated,
   createWagerStateD1Store,
 } from "../src/wagerStateD1.ts";
-import { createWagerStateRtdbClient } from "../src/wagerStateRepository.ts";
+import { createWagerStateRepository } from "../src/wagerStateRepository.ts";
+import { notifyInviteSourceChanged } from "../src/inviteWagersNotifications.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const migrations = (env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] })
@@ -19,15 +20,15 @@ const migrations = (env as Env & { TEST_PROFILE_D1_MIGRATIONS: D1Migration[] })
 const db = env.PROFILE_DB;
 const now = () => 2_000_000;
 
-const unexpectedFirebase: FirebaseRtdbClient = {
+const unexpectedSource: StateRepository = {
   async getPath() {
-    throw new Error("unexpected-firebase-read");
+    throw new Error("unexpected-source-read");
   },
   async patchRoot() {
-    throw new Error("unexpected-firebase-write");
+    throw new Error("unexpected-source-write");
   },
   async transactPath() {
-    throw new Error("unexpected-firebase-transaction");
+    throw new Error("unexpected-source-transaction");
   },
 };
 
@@ -56,7 +57,7 @@ describe("canonical wager state", () => {
   it("commits wager completion and its marker atomically and retains deletion revisions", async () => {
     await withWriter(async (writeGuards) => {
       const notifications: boolean[] = [];
-      const client = createWagerStateRtdbClient(db, unexpectedFirebase, {
+      const client = createWagerStateRepository(db, unexpectedSource, {
         writeGuards,
         now,
         notify: async (_updates, committed) => {
@@ -124,8 +125,8 @@ describe("canonical wager state", () => {
 
   it("merges canonical wagers into full invite reads and masks retained Firebase values", async () => {
     await withWriter(async (writeGuards) => {
-      const base: FirebaseRtdbClient = {
-        ...unexpectedFirebase,
+      const base: StateRepository = {
+        ...unexpectedSource,
         async getPath(path, query) {
           if (path === "invites/missing") return null;
           return query?.shallow
@@ -138,7 +139,7 @@ describe("canonical wager state", () => {
               };
         },
       };
-      const client = createWagerStateRtdbClient(db, base, { writeGuards, now });
+      const client = createWagerStateRepository(db, base, { writeGuards, now });
       await client.patchRoot({
         "invites/composed/wagers/composed": {
           agreed: { count: 2 },
@@ -169,10 +170,10 @@ describe("canonical wager state", () => {
   it("projects only field presence for shallow reads of large wager histories", async () => {
     await withWriter(async (writeGuards) => {
       const history = "x".repeat(100_000);
-      const client = createWagerStateRtdbClient(
+      const client = createWagerStateRepository(
         db,
         {
-          ...unexpectedFirebase,
+          ...unexpectedSource,
           async getPath(path, query) {
             expect(query).toEqual({ shallow: true });
             return path === "invites/shallow-missing" ? null : { hostId: true };
@@ -227,7 +228,7 @@ describe("canonical wager state", () => {
 
   it("retries concurrent state changes and rolls back every row when a CAS snapshot is stale", async () => {
     await withWriter(async (writeGuards) => {
-      const client = createWagerStateRtdbClient(db, unexpectedFirebase, {
+      const client = createWagerStateRepository(db, unexpectedSource, {
         writeGuards,
         now,
       });
@@ -284,7 +285,7 @@ describe("canonical wager state", () => {
 
   it("keeps admission guards in the state transaction and invalidates uncertain commits", async () => {
     await withWriter(async (writeGuards) => {
-      const rejected = createWagerStateRtdbClient(db, unexpectedFirebase, {
+      const rejected = createWagerStateRepository(db, unexpectedSource, {
         writeGuards: () => [
           ...writeGuards(),
           db.prepare(
@@ -318,9 +319,9 @@ describe("canonical wager state", () => {
           return typeof value === "function" ? value.bind(target) : value;
         },
       });
-      const uncertain = createWagerStateRtdbClient(
+      const uncertain = createWagerStateRepository(
         uncertainDb,
-        unexpectedFirebase,
+        unexpectedSource,
         {
           writeGuards,
           now,
@@ -334,11 +335,94 @@ describe("canonical wager state", () => {
           "invites/uncertain/wagers/uncertain": { operationId: "once" },
         }),
       ).rejects.toThrow("response-lost-after-commit");
-      const reader = createWagerStateRtdbClient(db, unexpectedFirebase);
+      const reader = createWagerStateRepository(db, unexpectedSource);
       expect(
         await reader.getPath("invites/uncertain/wagers/uncertain"),
       ).toEqual({ operationId: "once" });
       expect(notifications).toEqual([false]);
+    });
+  });
+
+  it("delivers room invalidations for confirmed and ambiguous D1 writes while leaving reads and no-ops quiet", async () => {
+    await withWriter(async (writeGuards) => {
+      const notices: string[] = [];
+      const notifyingEnv = {
+        ...env,
+        INVITE_REACTIONS: {
+          getByName: (inviteId: string) => ({
+            notifyWagersChanged: async () => {
+              notices.push(inviteId);
+            },
+          }),
+        },
+      } as unknown as Env;
+      const notify = (updates: Record<string, unknown>, committed: boolean) =>
+        notifyInviteSourceChanged(notifyingEnv, updates, committed);
+      for (const operation of ["patch", "transaction"]) {
+        const inviteId = `notified-${operation}`;
+        const path = `invites/${inviteId}/wagers/${inviteId}`;
+        const client = createWagerStateRepository(db, unexpectedSource, {
+          writeGuards,
+          now,
+          notify,
+        });
+        const write = (repository: StateRepository, value: unknown) =>
+          operation === "patch"
+            ? repository.patchRoot({ [path]: value })
+            : repository.transactPath(path, () => ({ value }));
+        await write(client, { phase: "confirmed" });
+        expect(notices.splice(0)).toEqual([inviteId]);
+        await client.transactPath(path, () => ({
+          commit: false,
+          decision: "already-applied",
+        }));
+        expect(notices).toEqual([]);
+        const uncertainDb = new Proxy(db, {
+          get(target, property) {
+            if (property === "batch")
+              return async (statements: D1PreparedStatement[]) => {
+                await target.batch(statements);
+                throw new Error("lost-commit-response");
+              };
+            const value = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        await expect(
+          write(
+            createWagerStateRepository(uncertainDb, unexpectedSource, {
+              writeGuards,
+              now,
+              notify,
+            }),
+            { phase: "ambiguous" },
+          ),
+        ).rejects.toThrow("lost-commit-response");
+        expect(await client.getPath(path)).toEqual({ phase: "ambiguous" });
+        expect(notices.splice(0)).toEqual([inviteId]);
+        const unreadableDb = new Proxy(db, {
+          get(target, property) {
+            if (property === "withSession")
+              return () => {
+                throw new Error("read-unavailable");
+              };
+            const value = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+        await expect(
+          write(
+            createWagerStateRepository(unreadableDb, unexpectedSource, {
+              writeGuards,
+              now,
+              notify,
+            }),
+            { phase: "not-written" },
+          ),
+        ).rejects.toThrow();
+        expect(await client.getPath(path)).toEqual({ phase: "ambiguous" });
+        expect(notices).toEqual([]);
+      }
     });
   });
 });

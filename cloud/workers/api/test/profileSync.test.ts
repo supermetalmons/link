@@ -6,7 +6,7 @@ import type { ProfileLinkCatchupJob } from "../src/profileLinkCatchupD1.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const env = TELEGRAM_TEST_ENV as Env;
-const identity = { uid: "firebase-uid" };
+const identity = { uid: "login-uid" };
 const linkedSource = {
   ok: true as const,
   profileId: "profile-1",

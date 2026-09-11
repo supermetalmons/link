@@ -138,8 +138,6 @@ function harness(
     failMatchReconnect?: boolean;
     reconnectMatchRevision?: (revision: number) => number;
     fastTimers?: boolean;
-    directMovesAllowed?: boolean;
-    matchStorage?: "durable";
     delayFinalRematchUpdateMs?: number | "forever";
     advanceMs?: number;
     renewalFrame?: (
@@ -315,120 +313,8 @@ function harness(
       if (uid) deleted.push(uid);
       return new Response(null, { status: 204 });
     }
-    if (url.hostname === "mons-link-default-rtdb.firebaseio.com") {
-      const uid = url.pathname.split("/")[2];
-      assert.equal(
-        url.searchParams.has("auth"),
-        false,
-        "Cloudflare tokens never go to Firebase",
-      );
-      if (options.matchStorage === "durable") {
-        assert.equal(headers.get("Authorization"), null);
-        assert.equal(headers.get("X-Firebase-ETag"), null);
-        assert.equal(headers.get("If-Match"), null);
-        const ownMatch = new RegExp(
-          `^/players/(?:${HOST}|${GUEST})/matches/${INVITE}1?\\.json$`,
-        ).test(url.pathname);
-        const claim = new RegExp(`^/matchTimerClaims/${INVITE}1?\\.json$`).test(
-          url.pathname,
-        );
-        const retired =
-          url.pathname === `/invites/${INVITE}.json` ||
-          url.pathname === `/players/${HOST}/profile.json`;
-        assert.ok(
-          ownMatch || claim || retired,
-          "Durable probes touch only newly created fixture paths",
-        );
-        assert.ok(
-          method === "GET" || (method === "PUT" && !retired && body === null),
-        );
-        return json({ error: "Permission denied" }, 403);
-      }
-      if (
-        url.pathname === `/invites/${INVITE}.json` ||
-        url.pathname === `/players/${uid}/profile.json`
-      ) {
-        assert.equal(method, "GET");
-        return json({ error: "Permission denied" }, 401);
-      }
-      if (url.pathname === `/matchTimerClaims/${INVITE}.json`) {
-        assert.equal(method, "PUT");
-        assert.equal(body, null);
-        return json({ error: "Permission denied" }, 401);
-      }
-      if (method !== "GET" && !options.directMovesAllowed) {
-        assert.ok(method === "PUT" || method === "PATCH");
-        assert.ok(
-          url.pathname.startsWith("/players/") || url.pathname === "/.json",
-        );
-        return json({ error: "Permission denied" }, 401);
-      }
-      const parts =
-        /^\/players\/([^/]+)\/matches\/([^/]+?)(\/status)?\.json$/.exec(
-          url.pathname,
-        );
-      assert.ok(parts, "No unrelated Firebase paths are touched");
-      const key = `${parts[1]}/${parts[2]}`;
-      const match = matches.get(key);
-      assert.ok(match);
-      const etag = `"${match.revision}"`;
-      if (method === "GET") {
-        assert.equal(headers.get("X-Firebase-ETag"), "true");
-        return json(match.value, 200, { ETag: etag });
-      }
-      assert.equal(method, "PUT");
-      assert.equal(uid, parts[1], "A participant writes only their own match");
-      if (
-        parts[3] ||
-        !body ||
-        typeof body !== "object" ||
-        !("status" in body) ||
-        body.status !== match.value.status
-      )
-        return json({ error: "Permission denied" }, 401);
-      assert.ok(body && typeof body === "object" && "timer" in body);
-      if (headers.get("If-Match") !== etag)
-        return json(match.value, 412, { ETag: etag });
-      if (body.timer !== match.value.timer && body.timer !== "") {
-        assert.deepEqual(parseStrictMatchTimer(body.timer), {
-          turnNumber: 1,
-          targetTimestamp: NOW + 90_000,
-        });
-        return json({ error: "Permission denied" }, 401);
-      }
-      const { status, timer, fen, flatMovesString, ...unchanged } =
-        body as Match;
-      const {
-        status: _previous,
-        timer: _previousTimer,
-        fen: previousFen,
-        flatMovesString: previousMoves,
-        ...prior
-      } = match.value;
-      assert.deepEqual(
-        unchanged,
-        prior,
-        "The transaction preserves presentation and creation markers",
-      );
-      assert.equal(status, match.value.status);
-      if (flatMovesString !== previousMoves) {
-        const game = Game.fromFen(previousFen)!;
-        assert.equal(game.activeColor, match.value.color);
-        assert.ok(flatMovesString.startsWith(previousMoves));
-        assert.equal(
-          game.playFen(flatMovesString.split("-").at(-1)!).kind,
-          "complete",
-        );
-        assert.equal(fen, game.toFen());
-      } else assert.equal(fen, previousFen);
-      assert.ok(timer === match.value.timer || timer === "");
-      match.value = structuredClone(body as Match);
-      match.revision++;
-      return json(match.value);
-    }
     assert.equal(url.origin, API);
     if (url.pathname === "/matches/snapshot") {
-      assert.equal(options.matchStorage, "durable");
       assert.equal(method, "GET");
       assert.equal(headers.get("Authorization"), null);
       assert.equal(url.searchParams.size, 2);
@@ -475,7 +361,6 @@ function harness(
     }
     assert.equal(method, "POST");
     if (url.pathname === "/matches/timer/start") {
-      assert.equal(options.matchStorage, "durable");
       assert.ok(body && typeof body === "object" && "matchId" in body);
       assert.deepEqual(body, {
         inviteId: INVITE,
@@ -853,39 +738,8 @@ function harness(
   };
 }
 
-test("requires an explicit approved target and supports a report and pre-rule API verification", () => {
-  assert.deepEqual(parseArgs(["--base-url", `${API}/`]), {
-    baseUrl: API,
-    matchStorage: "durable",
-  });
-  assert.deepEqual(
-    parseArgs([
-      "--move-rules-pending",
-      "--base-url",
-      API,
-      "--match-storage",
-      "rtdb",
-    ]),
-    {
-      baseUrl: API,
-      moveRulesPending: true,
-      matchStorage: "rtdb",
-    },
-  );
-  assert.deepEqual(
-    parseArgs([
-      "--surrender-rules-pending",
-      "--base-url",
-      API,
-      "--match-storage",
-      "rtdb",
-    ]),
-    {
-      baseUrl: API,
-      surrenderRulesPending: true,
-      matchStorage: "rtdb",
-    },
-  );
+test("requires an explicit approved target and supports only the current lifecycle report", () => {
+  assert.deepEqual(parseArgs(["--base-url", `${API}/`]), { baseUrl: API });
   assert.deepEqual(
     parseArgs([
       "--base-url",
@@ -896,7 +750,6 @@ test("requires an explicit approved target and supports a report and pre-rule AP
     {
       baseUrl: "https://abcd1234-mons-link-api.lil-org.workers.dev",
       output: "/tmp/report.json",
-      matchStorage: "durable",
     },
   );
   for (const args of [
@@ -909,61 +762,23 @@ test("requires an explicit approved target and supports a report and pre-rule AP
     ["--base-url", `${API}?token=secret`],
     ["--base-url", API, "--password", "invented"],
     ["--base-url", API, "--auth-token", "secret"],
-    [
-      "--base-url",
-      API,
-      "--surrender-rules-pending",
-      "--surrender-rules-pending",
-    ],
-    ["--base-url", API, "--surrender-rules-pending", "true"],
-    ["--base-url", API, "--move-rules-pending", "--move-rules-pending"],
-    ["--base-url", API, "--move-rules-pending", "true"],
-    ["--base-url", API, "--move-rules-pending"],
+    ["--base-url", API, "--match-storage", "durable"],
     ["--base-url", API, "--surrender-rules-pending"],
+    ["--base-url", API, "--move-rules-pending"],
   ])
     assert.throws(() => parseArgs(args), /Usage:/);
 });
 
-test("accepts explicit durable match storage and rejects skipped retired-rule verification", () => {
-  assert.deepEqual(
-    parseArgs(["--base-url", API, "--match-storage", "durable"]),
-    {
-      baseUrl: API,
-      matchStorage: "durable",
-    },
-  );
-  assert.deepEqual(parseArgs(["--base-url", API, "--match-storage", "rtdb"]), {
-    baseUrl: API,
-    matchStorage: "rtdb",
-  });
-  for (const extra of [
-    ["--match-storage", "invalid"],
-    ["--match-storage", "durable", "--match-storage", "durable"],
-    ["--match-storage", "durable", "--move-rules-pending"],
-    ["--match-storage", "durable", "--surrender-rules-pending"],
-  ])
-    assert.throws(() => parseArgs(["--base-url", API, ...extra]), /Usage:/);
-});
-
-test("default smoke verifies durable Worker snapshots, original timer deadlines and retired fixture-only access", async () => {
-  const state = harness({ matchStorage: "durable" });
+test("default smoke verifies only Worker snapshots, original timer deadlines and isolated gameplay", async () => {
+  const state = harness({});
   const report = await runSmoke({ baseUrl: API }, state.dependencies);
   assert.equal(report.matchStorage, "durable");
-  assert.ok(
-    report.checks.includes(
-      "retired-firebase-match-and-claim-read-write-denials",
-    ),
-  );
   assert.ok(
     report.checks.includes(
       "canonical-timer-start-and-original-deadline-replay",
     ),
   );
-  assert.ok(
-    report.checks.includes(
-      "canonical-rematch-timer-deadline-and-retired-source-denials",
-    ),
-  );
+  assert.ok(report.checks.includes("canonical-rematch-timer-deadline-replay"));
   assert.ok(
     report.checks.includes("cumulative-moves-takebacks-and-reordered-replay"),
   );
@@ -984,27 +799,7 @@ test("default smoke verifies durable Worker snapshots, original timer deadlines 
         request.headers.get("Authorization") === null,
     ),
   );
-  const firebase = state.requests.filter((request) =>
-    request.url.hostname.endsWith("firebaseio.com"),
-  );
-  assert.ok(firebase.length > 0);
-  assert.ok(
-    firebase.every(
-      (request) =>
-        request.method === "GET" ||
-        (request.method === "PUT" && request.body === null),
-    ),
-  );
-  assert.ok(
-    firebase.every(
-      (request) =>
-        !request.url.search &&
-        request.headers.get("Authorization") === null &&
-        request.headers.get("X-Firebase-ETag") === null &&
-        request.headers.get("If-Match") === null,
-    ),
-  );
-  assert.ok(firebase.every((request) => request.url.pathname !== "/.json"));
+  assert.ok(state.requests.every((request) => request.url.origin === API));
   const starts = state.requests.filter(
     (request) => request.url.pathname === "/matches/timer/start",
   );
@@ -1033,7 +828,6 @@ test("default smoke verifies durable Worker snapshots, original timer deadlines 
 test("durable smoke rejects changed timer deadlines and still ends the series and revokes sessions", async () => {
   let starts = 0;
   const state = harness({
-    matchStorage: "durable",
     intercept: async (request, respond) => {
       const response = respond();
       if (request.url.pathname === "/matches/timer/start" && ++starts === 2) {
@@ -1052,7 +846,7 @@ test("durable smoke rejects changed timer deadlines and still ends the series an
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "durable" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     /timer retry changed its original deadline/,
   );
   assert.equal(starts, 2);
@@ -1062,10 +856,9 @@ test("durable smoke rejects changed timer deadlines and still ends the series an
   assert.equal(state.timers.size, 0);
 });
 
-test("durable smoke retries transient canonical reads without switching to Firebase", async () => {
+test("durable smoke retries transient canonical reads through the same endpoint", async () => {
   let failed = false;
   const state = harness({
-    matchStorage: "durable",
     intercept: (request, respond) => {
       if (request.url.pathname === "/matches/snapshot" && !failed) {
         failed = true;
@@ -1076,17 +869,13 @@ test("durable smoke retries transient canonical reads without switching to Fireb
       return respond();
     },
   });
-  await runSmoke({ baseUrl: API, matchStorage: "durable" }, state.dependencies);
+  await runSmoke({ baseUrl: API }, state.dependencies);
   assert.equal(failed, true);
   const snapshots = state.requests.filter(
     (request) => request.url.pathname === "/matches/snapshot",
   );
   assert.equal(snapshots[0].url.href, snapshots[1].url.href);
-  assert.ok(
-    state.requests.every(
-      (request) => request.headers.get("X-Firebase-ETag") === null,
-    ),
-  );
+  assert.ok(state.requests.every((request) => request.url.origin === API));
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
 });
 
@@ -1099,7 +888,6 @@ test("durable smoke rejects malformed, private or mismatched canonical snapshots
   ])
     await t.test(Object.keys(change)[0], async () => {
       const state = harness({
-        matchStorage: "durable",
         intercept: async (request, respond) => {
           const response = respond();
           if (request.url.pathname !== "/matches/snapshot") return response;
@@ -1109,7 +897,7 @@ test("durable smoke rejects malformed, private or mismatched canonical snapshots
         },
       });
       await assert.rejects(
-        runSmoke({ baseUrl: API, matchStorage: "durable" }, state.dependencies),
+        runSmoke({ baseUrl: API }, state.dependencies),
         /canonical match snapshot was invalid/,
       );
       assert.ok(state.source()?.hostRematches.endsWith("x"));
@@ -1118,41 +906,12 @@ test("durable smoke rejects malformed, private or mismatched canonical snapshots
     });
 });
 
-test("durable smoke requires confirmed Firebase read and write denial", async (t) => {
-  for (const method of ["GET", "PUT"])
-    await t.test(method, async () => {
-      const state = harness({
-        matchStorage: "durable",
-        intercept: (request, respond) => {
-          if (
-            request.url.hostname.endsWith("firebaseio.com") &&
-            request.url.pathname.includes("/matches/") &&
-            request.method === method
-          )
-            return json(
-              method === "GET" ? null : { error: "Could not parse auth token" },
-              method === "GET" ? 200 : 401,
-            );
-          return respond();
-        },
-      });
-      await assert.rejects(
-        runSmoke({ baseUrl: API, matchStorage: "durable" }, state.dependencies),
-        /retired Firebase match\/claim access was not denied/,
-      );
-      assert.ok(state.source()?.hostRematches.endsWith("x"));
-      assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
-      assert.equal(state.timers.size, 0);
-    });
-});
-
 test("durable smoke keeps reconnect revision checks and cleanup enabled", async () => {
   const state = harness({
-    matchStorage: "durable",
     reconnectMatchRevision: () => 1,
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "durable" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     /match socket received an invalid snapshot/,
   );
   assert.ok(state.source()?.hostRematches.endsWith("x"));
@@ -1161,22 +920,12 @@ test("durable smoke keeps reconnect revision checks and cleanup enabled", async 
   assert.equal(state.timers.size, 0);
 });
 
-test("runs the isolated lifecycle, API move/surrender replay and retired Firebase access denials", async () => {
+test("runs the isolated lifecycle with API move and surrender replay", async () => {
   const state = harness();
-  const report = await runSmoke(
-    { baseUrl: API, matchStorage: "rtdb" },
-    state.dependencies,
-  );
+  const report = await runSmoke({ baseUrl: API }, state.dependencies);
   assert.equal(report.inviteId, INVITE);
   assert.deepEqual(report.matchIds, [INVITE, `${INVITE}1`]);
-  assert.equal(report.checks.length, 18);
-  assert.ok(
-    report.checks.includes("firebase-unauthenticated-surrender-write-denials"),
-  );
-  assert.ok(
-    report.checks.includes("firebase-unauthenticated-move-write-denials"),
-  );
-  assert.ok(report.checks.includes("firebase-invite-and-profile-read-denials"));
+  assert.equal(report.checks.length, 16);
   assert.ok(report.checks.includes("pending-match-http-socket-and-heartbeat"));
   assert.ok(report.checks.includes("join-live-match-and-public-spectator"));
   assert.ok(
@@ -1227,18 +976,6 @@ test("runs the isolated lifecycle, API move/surrender replay and retired Firebas
     ),
   );
   assert.ok(state.timeoutDurations.includes(30_000));
-  assert.equal(
-    state.requests.filter(
-      (request) => request.url.pathname === `/invites/${INVITE}.json`,
-    ).length,
-    2,
-  );
-  assert.equal(
-    state.requests.filter(
-      (request) => request.url.pathname === `/players/${HOST}/profile.json`,
-    ).length,
-    2,
-  );
   const hostReplays = state.requests.filter(
     (request) =>
       request.url.pathname === "/rematches/propose" &&
@@ -1255,59 +992,6 @@ test("runs the isolated lifecycle, API move/surrender replay and retired Firebas
     assert.ok(!state.logs.join("\n").includes(token));
 });
 
-test("pre-rule verification skips only direct status probes and still verifies API surrender and legal moves", async () => {
-  const state = harness();
-  const report = await runSmoke(
-    { baseUrl: API, matchStorage: "rtdb", surrenderRulesPending: true },
-    state.dependencies,
-  );
-  assert.equal(report.checks.length, 17);
-  assert.ok(
-    !report.checks.includes("firebase-unauthenticated-surrender-write-denials"),
-  );
-  assert.equal(
-    state.requests.filter(
-      (request) => request.url.pathname === "/matches/surrender",
-    ).length,
-    4,
-  );
-  assert.ok(
-    state.requests.every(
-      (request) => !request.url.pathname.endsWith("/status.json"),
-    ),
-  );
-  assert.ok(state.matches.get(`${HOST}/${INVITE}`)?.value.flatMovesString);
-});
-
-test("pre-move-cutover smoke verifies API moves and replay while old direct writes remain allowed", async () => {
-  const state = harness({ directMovesAllowed: true });
-  const report = await runSmoke(
-    { baseUrl: API, matchStorage: "rtdb", moveRulesPending: true },
-    state.dependencies,
-  );
-  assert.ok(
-    !report.checks.includes("firebase-unauthenticated-move-write-denials"),
-  );
-  assert.ok(
-    report.checks.includes("firebase-unauthenticated-surrender-write-denials"),
-  );
-  assert.equal(
-    state.requests.filter((request) => request.url.pathname === "/matches/move")
-      .length,
-    10,
-  );
-  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
-});
-
-test("post-cutover smoke fails if Firebase still accepts a direct legal move", async () => {
-  const state = harness({ directMovesAllowed: true });
-  await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
-    /move rule did not deny/,
-  );
-  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
-});
-
 test("uncertain API move replays the identical request without applying it twice", async () => {
   let uncertain = false;
   const state = harness({
@@ -1320,7 +1004,7 @@ test("uncertain API move replays the identical request without applying it twice
       return result;
     },
   });
-  await runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies);
+  await runSmoke({ baseUrl: API }, state.dependencies);
   const moves = state.requests.filter(
     (request) => request.url.pathname === "/matches/move",
   );
@@ -1350,7 +1034,7 @@ test("older cumulative move must acknowledge superseded and match the original p
       },
     });
     await assert.rejects(
-      runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+      runSmoke({ baseUrl: API }, state.dependencies),
       /unexpected acknowledgement/,
     );
     assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1362,45 +1046,19 @@ test("move smoke rejects changes to unrelated stored fields", async () => {
     intercept(request, response) {
       const result = response();
       if (request.url.pathname === "/matches/move") {
-        state.matches.get(`${HOST}/${INVITE}`)!.value.sessionCreation =
-          "c".repeat(64);
+        state.matches.get(`${HOST}/${INVITE}`)!.value.aura = "changed";
       }
       return result;
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     /API move changed other state/,
   );
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
 });
 
-test("each direct status-write shape must return an actual permission denial", async () => {
-  for (let target = 1; target <= 4; target++) {
-    let probes = 0;
-    const state = harness({
-      intercept(request, response) {
-        if (
-          request.url.pathname.startsWith("/players/") &&
-          request.method === "PUT" &&
-          !request.headers.has("If-Match") &&
-          ++probes === target
-        )
-          return json(request.body);
-        return response();
-      },
-    });
-    await assert.rejects(
-      runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
-      /surrender rule did not deny/,
-    );
-    assert.equal(probes, target);
-    assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
-    assert.equal(state.source()?.hostRematches, "x");
-  }
-});
-
-test("replays an uncertain API surrender without issuing a direct Firebase fallback", async () => {
+test("replays an uncertain API surrender through the same endpoint", async () => {
   let uncertain = false;
   const state = harness({
     intercept(request, response) {
@@ -1412,7 +1070,7 @@ test("replays an uncertain API surrender without issuing a direct Firebase fallb
       return result;
     },
   });
-  await runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies);
+  await runSmoke({ baseUrl: API }, state.dependencies);
   const surrenders = state.requests.filter(
     (request) => request.url.pathname === "/matches/surrender",
   );
@@ -1437,7 +1095,7 @@ test("rejects a surrender response for another participant and retains isolated 
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     /unexpected receipt/,
   );
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1450,14 +1108,13 @@ test("rejects API surrender that changes another persisted match field", async (
       const result = response();
       if (request.url.pathname === "/matches/surrender" && !changed) {
         changed = true;
-        state.matches.get(`${HOST}/${INVITE}`)!.value.sessionCreation =
-          "c".repeat(64);
+        state.matches.get(`${HOST}/${INVITE}`)!.value.aura = "changed";
       }
       return result;
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     /API surrender changed other state/,
   );
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1475,7 +1132,7 @@ test("retries an uncertain mutation with the identical operation and never creat
       return result;
     },
   });
-  await runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies);
+  await runSmoke({ baseUrl: API }, state.dependencies);
   const joins = state.requests.filter(
     (request) => request.url.pathname === "/invites/join",
   );
@@ -1508,42 +1165,12 @@ test("rejects a changed replay receipt, settles the same isolated series, and de
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     /replay changed its receipt/,
   );
   assert.equal(state.source()?.hostRematches, "x");
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
   assert.equal(state.timers.size, 0);
-});
-
-test("rejects readable retired paths and unrelated errors, then cleans up without service-account writes", async () => {
-  for (const path of [
-    `/invites/${INVITE}.json`,
-    `/players/${HOST}/profile.json`,
-  ]) {
-    for (const [status, payload] of [
-      [200, null],
-      [200, "retained-copy"],
-      [401, { error: "Invalid token" }],
-      [503, { error: "Unavailable" }],
-    ] as const) {
-      const state = harness({
-        intercept: (request, response) =>
-          request.url.pathname === path ? json(payload, status) : response(),
-      });
-      await assert.rejects(
-        runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
-        /retired Firebase invite\/profile read was not denied/,
-      );
-      assert.equal(state.source()?.hostRematches, "x");
-      assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
-      assert.ok(
-        state.requests.every(
-          (request) => !request.url.searchParams.has("access_token"),
-        ),
-      );
-    }
-  }
 });
 
 test("rejects invalid socket metadata without exposing its payload and cleans up sessions", async () => {
@@ -1555,7 +1182,7 @@ test("rejects invalid socket metadata without exposing its payload and cleans up
     }),
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     /invalid snapshot/,
   );
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1567,7 +1194,7 @@ test("rejects invalid socket metadata without exposing its payload and cleans up
 test("bounds each missing socket update without an overall release deadline", async () => {
   const state = harness({ suppressUpdates: true, fastTimers: true });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     /metadata update timed out/,
   );
   assert.equal(state.source()?.hostRematches, "x");
@@ -1588,12 +1215,14 @@ test("bounds each missing socket update without an overall release deadline", as
 test("requires live match delivery before an HTTP refresh can repair a missed notification", async () => {
   const state = harness({ suppressMatchUpdates: true, fastTimers: true });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     /match update timed out/,
   );
   assert.equal(
-    state.requests.filter((request) =>
-      request.url.pathname.endsWith("/snapshot"),
+    state.requests.filter(
+      (request) =>
+        request.url.pathname.startsWith("/invites/") &&
+        request.url.pathname.endsWith("/snapshot"),
     ).length,
     1,
   );
@@ -1608,10 +1237,7 @@ test("accepts the final rematch update after sixteen simulated seconds without r
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const state = harness({ delayFinalRematchUpdateMs: 16_000 });
   let settled = false;
-  const pending = runSmoke(
-    { baseUrl: API, matchStorage: "rtdb" },
-    state.dependencies,
-  ).then(
+  const pending = runSmoke({ baseUrl: API }, state.dependencies).then(
     (report) => {
       settled = true;
       return { report };
@@ -1659,10 +1285,7 @@ test("bounds a permanently withheld final update at thirty simulated seconds and
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const state = harness({ delayFinalRematchUpdateMs: "forever" });
   let settled = false;
-  const pending = runSmoke(
-    { baseUrl: API, matchStorage: "rtdb" },
-    state.dependencies,
-  ).then(
+  const pending = runSmoke({ baseUrl: API }, state.dependencies).then(
     () => {
       settled = true;
       return null;
@@ -1716,7 +1339,9 @@ test("renews an authenticated match channel with twenty seconds remaining before
       if (
         !advanced &&
         request.method === "GET" &&
-        request.url.pathname === `/players/${GUEST}/matches/${INVITE}1.json` &&
+        request.url.pathname === "/matches/snapshot" &&
+        request.url.searchParams.get("playerId") === GUEST &&
+        request.url.searchParams.get("matchId") === `${INVITE}1` &&
         countMoveHistory(
           state.matches.get(`${GUEST}/${INVITE}1`)?.value.flatMovesString || "",
         ) === 5
@@ -1727,7 +1352,7 @@ test("renews an authenticated match channel with twenty seconds remaining before
       return response;
     },
   });
-  await runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies);
+  await runSmoke({ baseUrl: API }, state.dependencies);
   assert.equal(advanced, true);
   assert.ok(
     state.connections.filter(
@@ -1762,7 +1387,7 @@ test("redacts arbitrary status payloads from match timeout diagnostics", async (
     }),
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     (error) => {
       assert.ok(error instanceof Error);
       assert.match(error.message, /currentHostStatus=other/);
@@ -1788,7 +1413,7 @@ test("socket close diagnostics expose only numeric codes and known server reason
       return socket;
     };
     await assert.rejects(
-      runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+      runSmoke({ baseUrl: API }, state.dependencies),
       (error: unknown) =>
         error instanceof Error &&
         error.message.includes("1011") &&
@@ -1804,10 +1429,7 @@ test("socket close diagnostics expose only numeric codes and known server reason
 
 test("lifecycle observations renew expiring match and metadata sockets during long runs", async () => {
   const state = harness({ advanceMs: 9_000 });
-  const report = await runSmoke(
-    { baseUrl: API, matchStorage: "rtdb" },
-    state.dependencies,
-  );
+  const report = await runSmoke({ baseUrl: API }, state.dependencies);
   assert.ok(state.elapsed() > 300_000);
   assert.ok(state.expiredSockets() > 0);
   assert.ok(
@@ -1843,20 +1465,14 @@ test("pending participant socket admission refreshes a token aged during source 
   const state = harness({
     intercept: (request, respond) => {
       const response = respond();
-      if (
-        !advanced &&
-        request.url.pathname === `/players/${HOST}/profile.json`
-      ) {
+      if (!advanced && request.url.pathname === `/invites/${INVITE}/metadata`) {
         advanced = true;
         state.advance(300_000);
       }
       return response;
     },
   });
-  const report = await runSmoke(
-    { baseUrl: API, matchStorage: "rtdb" },
-    state.dependencies,
-  );
+  const report = await runSmoke({ baseUrl: API }, state.dependencies);
   assert.equal(advanced, true);
   assert.ok(report.checks.includes("pending-http-and-authenticated-socket"));
   assert.ok(report.checks.includes("pending-match-http-socket-and-heartbeat"));
@@ -1890,7 +1506,7 @@ test("token renewal preserves snapshot revision and target validation", async (t
         },
       });
       await assert.rejects(
-        runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+        runSmoke({ baseUrl: API }, state.dependencies),
         /socket received an invalid snapshot/,
       );
       assert.ok(changed > 0);
@@ -1917,7 +1533,7 @@ test("rejects malformed and wrong-target match socket snapshots without exposing
         }),
       });
       await assert.rejects(
-        runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+        runSmoke({ baseUrl: API }, state.dependencies),
         /match socket received an invalid snapshot/,
       );
       assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1936,7 +1552,7 @@ test("rejects changed match state at an unchanged revision", async () => {
     }),
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     /match socket received an invalid snapshot/,
   );
   assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1951,7 +1567,7 @@ test("requires a match heartbeat and a fresh reconnect snapshot and cleans up on
     await t.test(Object.keys(options)[0], async () => {
       const state = harness(options);
       await assert.rejects(
-        runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+        runSmoke({ baseUrl: API }, state.dependencies),
         /match (heartbeat timed out|socket failed)/,
       );
       assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
@@ -1970,7 +1586,7 @@ test("rejects revision resets only on reconnect and cleans up every fixture", as
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     /match socket received an invalid snapshot/,
   );
   assert.equal(revisions.length, 1);
@@ -1991,57 +1607,15 @@ test("accepts unchanged or advancing reconnect revisions without changing match 
           return revision + advance;
         },
       });
-      const report = await runSmoke(
-        { baseUrl: API, matchStorage: "rtdb" },
-        state.dependencies,
-      );
+      const report = await runSmoke({ baseUrl: API }, state.dependencies);
       assert.equal(reconnects, 2);
-      assert.equal(report.checks.length, 18);
+      assert.equal(report.checks.length, 16);
       assert.ok(state.source()?.hostRematches.endsWith("x"));
       assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
       assert.ok(state.sockets.every((socket) => socket.terminated));
       assert.equal(state.timers.size, 0);
     });
   }
-});
-
-test("does not mistake token failure for timer-rule permission denial", async () => {
-  const state = harness({
-    intercept(request, response) {
-      if (
-        request.url.hostname.endsWith("firebaseio.com") &&
-        request.method === "PUT" &&
-        request.body &&
-        typeof request.body === "object" &&
-        "timer" in request.body &&
-        request.body.timer
-      )
-        return json({ error: "Could not parse auth token" }, 401);
-      return response();
-    },
-  });
-  await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
-    /timer rule did not return permission denial/,
-  );
-  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
-});
-
-test("treats a writable claim namespace as a failure even though its probe cannot create a fence", async () => {
-  const state = harness({
-    intercept(request, response) {
-      if (request.url.pathname.startsWith("/matchTimerClaims/")) {
-        assert.equal(request.body, null);
-        return json(null);
-      }
-      return response();
-    },
-  });
-  await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
-    /claim fence was writable/,
-  );
-  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
 });
 
 test("cancels oversized responses, sanitizes failures, and deletes the known sessions", async () => {
@@ -2068,7 +1642,7 @@ test("cancels oversized responses, sanitizes failures, and deletes the known ses
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     /invalid or oversized response/,
   );
   assert.equal(canceled, true);
@@ -2088,7 +1662,7 @@ test("bounds a nonresponsive request and preserves the same mutation IDs during 
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     /request timed out/,
   );
   assert.equal(pendingRequests, 3);
@@ -2116,7 +1690,7 @@ test("deletes the first session when the second signup fails without retrying ac
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     /Cloudflare session anonymous returned 503/,
   );
   assert.equal(signups, 2);
@@ -2142,7 +1716,7 @@ test("attempts both account deletions and reports cleanup failure without return
     },
   });
   await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+    runSmoke({ baseUrl: API }, state.dependencies),
     /could not revoke every temporary anonymous session/,
   );
   assert.deepEqual(state.deleted, [HOST]);
@@ -2174,10 +1748,7 @@ test("retries transient session revocation failures with the same capability", a
           return response();
         },
       });
-      const report = await runSmoke(
-        { baseUrl: API, matchStorage: "rtdb" },
-        state.dependencies,
-      );
+      const report = await runSmoke({ baseUrl: API }, state.dependencies);
       assert.equal(attempts.get(failedCapability!), 2);
       assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
       assert.ok(report.checks.includes("temporary-anonymous-sessions-revoked"));
@@ -2204,46 +1775,13 @@ test("bounds persistent revocation failures and rejects non-204 acknowledgements
         },
       });
       await assert.rejects(
-        runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
+        runSmoke({ baseUrl: API }, state.dependencies),
         /could not revoke every temporary anonymous session/,
       );
       assert.equal(attempts, status === 503 ? 3 : 1);
       assert.equal(state.deleted.length, 1);
     });
   }
-});
-
-test("restores the original timer before failing when the client timer rule is broken", async () => {
-  let forged = false;
-  const state = harness({
-    directMovesAllowed: true,
-    intercept(request, response) {
-      if (
-        !forged &&
-        request.url.hostname.endsWith("firebaseio.com") &&
-        request.method === "PUT" &&
-        request.body &&
-        typeof request.body === "object" &&
-        "timer" in request.body &&
-        request.body.timer
-      ) {
-        forged = true;
-        const match = state.matches.get(`${HOST}/${INVITE}`)!;
-        match.value = structuredClone(request.body as Match);
-        match.revision++;
-        return json(match.value);
-      }
-      return response();
-    },
-  });
-  await assert.rejects(
-    runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies),
-    /allowed a client to forge a timer/,
-  );
-  assert.equal(forged, true);
-  assert.equal(state.matches.get(`${HOST}/${INVITE}`)?.value.timer, "");
-  assert.equal(state.source()?.hostRematches, "x");
-  assert.deepEqual(state.deleted.sort(), [GUEST, HOST]);
 });
 
 test("retries a transient API move failure with the identical move payload", async () => {
@@ -2265,7 +1803,7 @@ test("retries a transient API move failure with the identical move payload", asy
       return response();
     },
   });
-  await runSmoke({ baseUrl: API, matchStorage: "rtdb" }, state.dependencies);
+  await runSmoke({ baseUrl: API }, state.dependencies);
   assert.equal(conflicted, true);
   const moves = state.requests.filter(
     (request) => request.url.pathname === "/matches/move",
@@ -2288,7 +1826,7 @@ test("writes an exclusive report containing only fixture IDs and passed checks",
   try {
     const state = harness();
     const report = await runSmoke(
-      { baseUrl: API, matchStorage: "rtdb", output: path },
+      { baseUrl: API, output: path },
       state.dependencies,
     );
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), report);
@@ -2297,10 +1835,7 @@ test("writes an exclusive report containing only fixture IDs and passed checks",
       assert.ok(!readFileSync(path, "utf8").includes(token));
     writeFileSync(path, "existing-report");
     await assert.rejects(
-      runSmoke(
-        { baseUrl: API, matchStorage: "rtdb", output: path },
-        harness().dependencies,
-      ),
+      runSmoke({ baseUrl: API, output: path }, harness().dependencies),
       /could not create its report file/,
     );
     assert.equal(readFileSync(path, "utf8"), "existing-report");

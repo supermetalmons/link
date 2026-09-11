@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { EventLockManager } from "../../../functions/events/lockManagerCore.js";
+import type { EventLockManager } from "../../../runtime/events/lockManagerCore.js";
 import { LEGACY_CORE_PRIZES_EVENT_ID } from "@mons/shared/event-prizes";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { handleEventRoute } from "../src/eventRoute.ts";
@@ -109,7 +109,7 @@ function createRepository(): GameplayRepository {
       ice: 0,
     }),
     getMiningSnapshot: async () => null,
-    getRtdbPath: async (path) =>
+    getStatePath: async (path) =>
       path === "events/event-1"
         ? {
             eventId: "event-1",
@@ -120,8 +120,8 @@ function createRepository(): GameplayRepository {
             participants: { [profileId]: participant },
           }
         : null,
-    patchRtdbRoot: async () => undefined,
-    transactRtdbPath: async () => ({ committed: false, value: null }),
+    patchStateRoot: async () => undefined,
+    transactStatePath: async () => ({ committed: false, value: null }),
   };
 }
 
@@ -381,7 +381,7 @@ test("returns strict join and removal responses", async () => {
       ...dependencies,
       repository: {
         ...createRepository(),
-        getRtdbPath: async () => ({
+        getStatePath: async () => ({
           eventId: "event-1",
           status: "scheduled",
           startAtMs: 10_000,
@@ -412,7 +412,7 @@ test("returns strict join and removal responses", async () => {
 test("returns a strict event prize selection response", async () => {
   const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
   const repository = createRepository();
-  repository.getRtdbPath = async (path) =>
+  repository.getStatePath = async (path) =>
     path === `events/${eventId}`
       ? {
           eventId,
@@ -420,7 +420,7 @@ test("returns a strict event prize selection response", async () => {
           participants: { [profileId]: participant },
         }
       : null;
-  repository.transactRtdbPath = async (_path, updater) => {
+  repository.transactStatePath = async (_path, updater) => {
     const decision = updater(null);
     assert.ok(decision && typeof decision === "object" && "value" in decision);
     return { committed: true, value: decision.value };

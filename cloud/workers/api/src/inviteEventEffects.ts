@@ -1,3 +1,5 @@
+import { STATE_EFFECTS_FIELD } from "./stateCompatibility.ts";
+import { STATE_VALUE_FIELD } from "./stateCompatibility.ts";
 import { MAX_EVENT_PARTICIPANTS } from "@mons/shared/events";
 import { normalizeHistoricalMatchRecord } from "@mons/shared/game-sessions";
 import {
@@ -8,13 +10,13 @@ import type {
   EventInviteSourceMutation,
   EventTransitionIntent,
 } from "./eventD1.ts";
-import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
+import type { StateRepository } from "./stateRepositoryTypes.ts";
 import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
 import type {
   MatchStateEventEffectsRequest,
   MatchStateRecord,
 } from "./matchStateTypes.ts";
-import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import {
   EVENT_RECEIPT_ADMISSION_KIND,
   ensureEventTransitionReceipt,
@@ -51,7 +53,7 @@ type EventEffectReceipt = {
 
 async function applyTypedMatchEffects(
   db: D1Database,
-  raw: FirebaseRtdbClient,
+  raw: StateRepository,
   intent: V2Intent,
   creations: [string, JsonRecord][],
   otherEffects: JsonRecord,
@@ -95,9 +97,9 @@ async function applyTypedMatchEffects(
     if (parts[0] !== MATCH_TIMER_CLAIM_ROOT) continue;
     if (
       !record(value) ||
-      !isSafeFirebaseKey(value.inviteId) ||
-      !isCanonicalFirebaseUid(value.playerId) ||
-      !isCanonicalFirebaseUid(value.opponentId)
+      !isSafeRecordKey(value.inviteId) ||
+      !isCanonicalLoginUid(value.playerId) ||
+      !isCanonicalLoginUid(value.opponentId)
     )
       throw new Error("event-match-claim-invalid");
     group(value.inviteId).claims!.push({
@@ -181,8 +183,11 @@ function resolveTimestamps(value: unknown, nowMs: number): unknown {
     canonical(value);
     return value;
   }
-  if (Object.hasOwn(value, ".sv")) {
-    if (Object.keys(value).length !== 1 || value[".sv"] !== "timestamp") {
+  if (Object.hasOwn(value, STATE_VALUE_FIELD)) {
+    if (
+      Object.keys(value).length !== 1 ||
+      value[STATE_VALUE_FIELD] !== "timestamp"
+    ) {
       throw new Error("event-transition-invalid-server-value");
     }
     return nowMs;
@@ -211,7 +216,7 @@ function digestInput(intent: Omit<V2Intent, "payloadDigest">) {
     sourceEpoch: intent.sourceEpoch,
     canonicalUpdates: intent.canonicalUpdates,
     inviteMutations: intent.inviteMutations,
-    rtdbEffects: intent.rtdbEffects,
+    [STATE_EFFECTS_FIELD]: intent[STATE_EFFECTS_FIELD],
     createdAtMs: intent.createdAtMs,
   };
 }
@@ -230,14 +235,14 @@ function effectLayout(intent: V2Intent): {
       mutation,
     ]),
   );
-  const paths = Object.keys(intent.rtdbEffects);
+  const paths = Object.keys(intent[STATE_EFFECTS_FIELD]);
   if (paths.length > MAX_EVENT_PARTICIPANTS * 4) {
     throw new Error("event-transition-too-many-effects");
   }
-  for (const [path, value] of Object.entries(intent.rtdbEffects)) {
+  for (const [path, value] of Object.entries(intent[STATE_EFFECTS_FIELD])) {
     const parts = path.split("/");
     if (
-      parts.some((part) => !isSafeFirebaseKey(part)) ||
+      parts.some((part) => !isSafeRecordKey(part)) ||
       parts[0] === "invites" ||
       parts[0] === "eventTransitionReceipts" ||
       paths.some((other) => other !== path && path.startsWith(`${other}/`))
@@ -251,10 +256,10 @@ function effectLayout(intent: V2Intent): {
           !record(value) ||
           Object.hasOwn(value, "sessionCreation") ||
           !source ||
-          !isCanonicalFirebaseUid(parts[1]) ||
+          !isCanonicalLoginUid(parts[1]) ||
           source.value.eventId !== intent.eventId ||
-          !isCanonicalFirebaseUid(source.value.hostId) ||
-          !isCanonicalFirebaseUid(source.value.guestId) ||
+          !isCanonicalLoginUid(source.value.hostId) ||
+          !isCanonicalLoginUid(source.value.guestId) ||
           source.value.hostId === source.value.guestId ||
           ![source.value.hostId, source.value.guestId].includes(parts[1])
         ) {
@@ -316,8 +321,8 @@ function effectLayout(intent: V2Intent): {
     }
     if (
       mutation.current.value === null &&
-      (!isCanonicalFirebaseUid(mutation.value.hostId) ||
-        !isCanonicalFirebaseUid(mutation.value.guestId) ||
+      (!isCanonicalLoginUid(mutation.value.hostId) ||
+        !isCanonicalLoginUid(mutation.value.guestId) ||
         !paths.includes(
           `players/${mutation.value.hostId}/matches/${inviteId}`,
         ) ||
@@ -342,7 +347,7 @@ export async function prepareInviteEventIntent(
   }
   const inviteMutations: EventInviteSourceMutation[] =
     await createInviteSourceD1Store(db).preparePatch(
-      eventInviteSourceUpdates(intent.rtdbEffects),
+      eventInviteSourceUpdates(intent[STATE_EFFECTS_FIELD]),
       intent.createdAtMs,
       signal,
     );
@@ -351,8 +356,8 @@ export async function prepareInviteEventIntent(
     schemaVersion: 2,
     sourceEpoch: control.epoch,
     inviteMutations,
-    rtdbEffects: Object.fromEntries(
-      Object.entries(intent.rtdbEffects)
+    [STATE_EFFECTS_FIELD]: Object.fromEntries(
+      Object.entries(intent[STATE_EFFECTS_FIELD])
         .filter(([path]) => !path.startsWith("invites/"))
         .map(([path, value]) => [
           path,
@@ -388,7 +393,7 @@ async function readEffectReceipt(
 
 export async function applyInviteEventEffects(
   db: D1Database,
-  raw: FirebaseRtdbClient,
+  raw: StateRepository,
   intent: V2Intent,
   signal?: AbortSignal,
   prepareMatchPresentations?: PrepareMatchPresentations,
@@ -405,7 +410,7 @@ export async function applyInviteEventEffects(
 
 async function applyAdmittedInviteEventEffects(
   db: D1Database,
-  raw: FirebaseRtdbClient,
+  raw: StateRepository,
   intent: V2Intent,
   signal?: AbortSignal,
   prepareMatchPresentations?: PrepareMatchPresentations,

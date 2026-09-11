@@ -13,7 +13,7 @@ const {
   recomputeRoundStatuses,
   setMatchSlotBlocked,
   setMatchSlotParticipant,
-} = require("../functions/events/bracket");
+} = require("../runtime/events/bracket");
 
 const participant = (profileId, joinedAtMs) => ({
   profileId,
@@ -554,16 +554,12 @@ test("prize projection accepts an unplaced participant merged into the winner", 
   const eventId = "NN3eRzoZo80";
   const projected = [];
   const runtime = createEventBracketRuntime({
-    admin: {
-      database: () => ({
-        ref: (path) => ({
-          transaction: async (updater) => {
-            const value = updater(null);
-            projected.push({ path, value });
-            return { committed: value !== undefined };
-          },
-        }),
-      }),
+    state: {
+      transaction: async (path, updater) => {
+        const value = updater(null);
+        projected.push({ path, value });
+        return { committed: value !== undefined, value };
+      },
     },
     readEventPrizeWithdrawals: async () => ({}),
   });

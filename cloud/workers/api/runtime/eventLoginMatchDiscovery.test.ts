@@ -7,11 +7,11 @@ import {
   captureEventMatchDiscovery,
   eventMatchInviteIds,
 } from "../src/eventLoginMatchDiscovery.ts";
-import { createEventRtdbClient } from "../src/eventRepository.ts";
+import { createEventStateRepository } from "../src/eventRepository.ts";
 import { listPendingEventTransitionIntents } from "../src/eventD1.ts";
 import { processEventProfileGameProjection } from "../src/profileGameProjection.ts";
 import { createEventProfileGameProjectionRuntime } from "../src/profileGameProjectionRepository.ts";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import type { StateRepository } from "../src/stateRepositoryTypes.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import {
@@ -78,11 +78,11 @@ function matchEffects() {
   };
 }
 
-function rtdbFixture(initial: Record<string, unknown> = {}) {
+function stateFixture(initial: Record<string, unknown> = {}) {
   const values = new Map(Object.entries(initial));
   const patches: Record<string, unknown>[] = [];
   const reads: string[] = [];
-  const client: FirebaseRtdbClient = {
+  const client: StateRepository = {
     async getPath(path, query) {
       reads.push(path);
       if (path.startsWith("players/")) expect(query).toEqual({ shallow: true });
@@ -96,7 +96,7 @@ function rtdbFixture(initial: Record<string, unknown> = {}) {
       }
     },
     async transactPath() {
-      throw new Error("unexpected-rtdb-transaction");
+      throw new Error("unexpected-source-transaction");
     },
   };
   return { client, patches, reads, values };
@@ -183,7 +183,7 @@ describe("event login-match discovery", () => {
     ]);
   });
 
-  it("keeps the event intent pending when indexing fails after RTDB commit", async () => {
+  it("keeps the event intent pending when indexing fails after match creation", async () => {
     const fixture = eventTransitionFixture(testEnv);
     const repository = fixture.client;
     await repository.patchRoot({ [`events/${eventId}`]: eventRecord() });
@@ -224,8 +224,8 @@ describe("event login-match discovery", () => {
   });
 
   it("captures old Workflow output before event outbox acknowledgment", async () => {
-    const fixture = rtdbFixture(matchEffects());
-    const repository = createEventRtdbClient(testEnv, fixture.client);
+    const fixture = stateFixture(matchEffects());
+    const repository = createEventStateRepository(testEnv, fixture.client);
     const outboxPath = `profileGameProjectionOutbox/event/${eventId}`;
     await repository.patchRoot({
       [`events/${eventId}`]: {
@@ -242,7 +242,7 @@ describe("event login-match discovery", () => {
       },
     });
     const runtime = createEventProfileGameProjectionRuntime(testEnv, {
-      rtdb: { getRtdbPath: repository.getPath },
+      state: { getStatePath: repository.getPath },
       wait: async () => undefined,
     });
     const process = () =>
@@ -253,8 +253,8 @@ describe("event login-match discovery", () => {
           requestId: "old-workflow-projection",
         },
         {
-          getRtdbPath: repository.getPath,
-          transactRtdbPath: repository.transactPath,
+          getStatePath: repository.getPath,
+          transactStatePath: repository.transactPath,
         },
         runtime,
       );
@@ -276,7 +276,7 @@ describe("event login-match discovery", () => {
   });
 
   it("captures original actors even when current profile ownership is unavailable", async () => {
-    const fixture = rtdbFixture({
+    const fixture = stateFixture({
       ...matchEffects(),
       [`events/${eventId}`]: {
         ...eventRecord(),
@@ -285,7 +285,7 @@ describe("event login-match discovery", () => {
       },
     });
     const runtime = createEventProfileGameProjectionRuntime(testEnv, {
-      rtdb: { getRtdbPath: fixture.client.getPath },
+      state: { getStatePath: fixture.client.getPath },
       wait: async () => undefined,
     });
     await expect(runtime.reconcileEventProjection(eventId)).rejects.toThrow();
@@ -295,7 +295,7 @@ describe("event login-match discovery", () => {
   });
 
   it("requires both physical matches and includes the third-place invite", async () => {
-    const fixture = rtdbFixture(matchEffects());
+    const fixture = stateFixture(matchEffects());
     fixture.values.delete(`players/${guestUid}/matches/${inviteId}`);
     const ids = eventMatchInviteIds({
       rounds: {},
@@ -332,8 +332,8 @@ describe("event login-match discovery", () => {
   });
 
   it("rejects unjournaled match creation before applying any effects", async () => {
-    const fixture = rtdbFixture();
-    const repository = createEventRtdbClient(testEnv, fixture.client);
+    const fixture = stateFixture();
+    const repository = createEventStateRepository(testEnv, fixture.client);
     for (const updates of [
       matchEffects(),
       { [`events/${eventId}`]: eventRecord(), ...matchEffects() },
@@ -352,7 +352,7 @@ describe("event login-match discovery", () => {
   });
 
   it("bounds event discovery before reading an oversized bracket", async () => {
-    const fixture = rtdbFixture();
+    const fixture = stateFixture();
     await expect(
       captureEventMatchDiscovery(
         testEnv.PROFILE_GAMES_DB,

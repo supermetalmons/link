@@ -1,4 +1,4 @@
-import { normalizeFirebaseKey } from "@mons/shared/ids";
+import { normalizeRecordKey } from "@mons/shared/ids";
 import { parseInviteMatchIndex } from "@mons/shared/rematches";
 import {
   MATCH_SYNC_MAX_MESSAGE_BYTES,
@@ -32,8 +32,8 @@ export class MatchSyncApiError extends Error {
 function matchSyncPath(inviteId: string, matchId: string): string {
   if (
     !inviteId ||
-    normalizeFirebaseKey(inviteId) !== inviteId ||
-    normalizeFirebaseKey(matchId) !== matchId ||
+    normalizeRecordKey(inviteId) !== inviteId ||
+    normalizeRecordKey(matchId) !== matchId ||
     parseInviteMatchIndex(inviteId, matchId) === null
   ) {
     throw new MatchSyncApiError("invalid-invite");

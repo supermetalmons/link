@@ -1,6 +1,6 @@
 const { WebSocket }: typeof import("ws") = require("ws");
 const {
-  normalizeFirebaseKey,
+  normalizeRecordKey,
 }: typeof import("@mons/shared/ids") = require("@mons/shared/ids");
 const {
   isInviteReactionForInvite,
@@ -56,9 +56,9 @@ function validateOptions(options: Options): Options {
     url.hash ||
     (url.hostname !== "api.mons.link" &&
       !PREVIEW_HOST_PATTERN.test(url.hostname)) ||
-    normalizeFirebaseKey(options.inviteId) !== options.inviteId ||
+    normalizeRecordKey(options.inviteId) !== options.inviteId ||
     (options.matchId !== undefined &&
-      (normalizeFirebaseKey(options.matchId) !== options.matchId ||
+      (normalizeRecordKey(options.matchId) !== options.matchId ||
         parseInviteMatchIndex(options.inviteId, options.matchId) === null))
   ) {
     throw new TypeError(usage());

@@ -96,9 +96,9 @@ function setup({
     },
   );
   const repository = createGameplayRepository(env, {
-    rtdbClient: {
+    stateClient: {
       getPath: async () => {
-        throw new Error("unexpected-firebase-read");
+        throw new Error("unexpected-source-read");
       },
       patchRoot: async () => {
         throw new Error("unexpected-write");
@@ -202,7 +202,7 @@ test("unknown invites and failed existence checks never access a Durable Object"
           },
         },
       });
-      state.repository.getRtdbPath = async (path, query) => {
+      state.repository.getStatePath = async (path, query) => {
         assert.equal(path, "invites/invite-one");
         assert.deepEqual(query, { shallow: true });
         if (source instanceof Error) throw source;

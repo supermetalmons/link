@@ -9,7 +9,7 @@ import {
   type UpdateMatchPresentationRequest,
   type UpdateMatchPresentationResponse,
 } from "@mons/shared/match-presentation";
-import { normalizeFirebaseKey } from "@mons/shared/ids";
+import { normalizeRecordKey } from "@mons/shared/ids";
 import { parseInviteMatchIndex } from "@mons/shared/rematches";
 import type { AuthTokenProvider } from "./authApi";
 
@@ -30,8 +30,8 @@ export class MatchPresentationApiError extends Error {
 
 function presentationPath(inviteId: string, matchId: string): string {
   if (
-    normalizeFirebaseKey(inviteId) !== inviteId ||
-    normalizeFirebaseKey(matchId) !== matchId ||
+    normalizeRecordKey(inviteId) !== inviteId ||
+    normalizeRecordKey(matchId) !== matchId ||
     parseInviteMatchIndex(inviteId, matchId) === null
   ) {
     throw new MatchPresentationApiError("invalid-match-presentation");

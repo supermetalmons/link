@@ -128,7 +128,7 @@ async function sign(
 
 test("rejects forged, future, overlong and wrong-purpose access credentials", async () => {
   const invalidClaims = [
-    { sub: "old-firebase-uid" },
+    { sub: "old-login-uid" },
     { sid: "invalid-session-id" },
     { iss: "https://securetoken.google.com/mons-link" },
     { aud: "mons-link" },

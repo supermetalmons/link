@@ -145,9 +145,9 @@ function setup({
     },
   );
   const repository = createGameplayRepository(env, {
-    rtdbClient: {
+    stateClient: {
       getPath: async () => {
-        throw new Error("unexpected-firebase-read");
+        throw new Error("unexpected-source-read");
       },
       patchRoot: async () => {
         throw new Error("unexpected-write");
@@ -539,7 +539,7 @@ test("missing invites and failed existence checks never allocate a room", async 
           },
         },
       });
-      h.repository.getRtdbPath = async () => {
+      h.repository.getStatePath = async () => {
         if (source instanceof Error) throw source;
         return source;
       };

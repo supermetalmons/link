@@ -1,8 +1,6 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
 const test = require("node:test");
 const bs58 = require("bs58");
 const {
@@ -31,7 +29,6 @@ const {
   isEventPrizeWithdrawalStatusRequest,
   isToggleEventPrizeSelectionRequest,
 } = require("@mons/shared/event-prizes");
-const databaseRules = require("../database.rules.json");
 
 test("reveals scheduled prizes only inside the final hour", () => {
   const nowMs = 10_000_000;
@@ -626,18 +623,6 @@ for (const {
     }
   });
 }
-
-test("database rules retire event prize selection access", () => {
-  assert.equal(databaseRules.rules.eventPrizeSelections, undefined);
-  assert.equal(databaseRules.rules.profileEventPrizes, undefined);
-});
-
-test("retired Firestore rules are absent", () => {
-  assert.equal(
-    fs.existsSync(path.resolve(__dirname, "..", "firestore.rules")),
-    false,
-  );
-});
 
 test("catalog membership rejects inherited keys and padded IDs", () => {
   for (const eventId of ["constructor", "toString", "__proto__"]) {

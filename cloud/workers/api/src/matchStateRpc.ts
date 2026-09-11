@@ -8,20 +8,15 @@ import type {
   StartMatchTimerResponse,
 } from "@mons/shared/timers";
 import type {
-  MatchStateActivateRequest,
   MatchStateClaimTimerRequest,
   MatchStateCreateRequest,
   MatchStateCreateResult,
   MatchStateEventEffectsRequest,
-  MatchStateImportRequest,
-  MatchStateImportSnapshot,
-  MatchStateImportTarget,
   MatchStateMoveRequest,
   MatchStatePair,
   MatchStatePairRequest,
   MatchStateRecord,
   MatchStateRecordRequest,
-  MatchStateSource,
   MatchStateStartTimerRequest,
   MatchStateSurrenderRequest,
 } from "./matchStateTypes.ts";
@@ -60,15 +55,6 @@ export type MatchStateRpc = {
   applyCanonicalMatchEventEffects(
     input: MatchStateEventEffectsRequest,
   ): Promise<MatchStateRpcResult<MatchStateCreateResult>>;
-  importMatchState(
-    input: MatchStateImportRequest,
-  ): Promise<MatchStateRpcResult<MatchStateImportSnapshot>>;
-  inspectMatchStateImport(
-    input: MatchStateImportTarget,
-  ): Promise<MatchStateRpcResult<MatchStateImportSnapshot>>;
-  activateMatchState(
-    input: MatchStateActivateRequest,
-  ): Promise<MatchStateRpcResult<MatchStateSource>>;
 };
 
 export function getMatchStateRpc(

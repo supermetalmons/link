@@ -5,7 +5,7 @@ const {
   buildPendingAutomatchTelegramSource,
   buildMatchedAutomatchTelegramUpdates,
   buildAutomatchTelegramLifecycleUpdates,
-} = require("../functions/telegram/automatchSource");
+} = require("../runtime/telegram/automatchSource");
 const {
   buildAutomatchProjectionGuard,
   buildAutomatchTelegramProjection,
@@ -13,7 +13,7 @@ const {
   resolveAutomatchTelegramLifecycle,
   getAutomatchResultFragments,
   renderMatchedAutomatchTelegramText,
-} = require("../functions/telegram/projectionCore");
+} = require("../runtime/telegram/projectionCore");
 
 const inviteId = "auto_example";
 const waitingText =

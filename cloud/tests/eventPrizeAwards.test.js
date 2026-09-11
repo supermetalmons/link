@@ -11,7 +11,7 @@ const {
   buildEventPrizeAssignments,
   isEventPrizeId,
   normalizeEventPrizeAssignments,
-} = require("../functions/eventPrizeAwards");
+} = require("../runtime/eventPrizeAwards");
 
 const placements = [
   { place: 1, profileId: "first" },

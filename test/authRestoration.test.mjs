@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import ts from "typescript";
-import { normalizeProfileEmojiId } from "../cloud/functions/shared/profiles.js";
+import { normalizeProfileEmojiId } from "../cloud/runtime/shared/profiles.js";
 import { ProfileApiError } from "../src/services/profileApi.ts";
 
 const source = ts.createSourceFile(
@@ -346,21 +346,21 @@ test("restores ownership through the D1 profile lookup when synchronization fail
   assert.equal(h.events.claimReads, 0);
 });
 
-test("retains cached data and the Firebase session when both canonical APIs fail", async () => {
+test("retains cached data and the session when both canonical APIs fail", async () => {
   const h = harness({
     syncProfile: unavailable,
     lookupProfile: unavailable,
     claimProfileId: "profile-1",
   });
   h.changeAuth();
-  const firebaseUser = h.connection.auth.currentUser;
+  const sessionUser = h.connection.auth.currentUser;
   await h.settle();
 
   assert.deepEqual(h.events.statuses, ["unauthenticated"]);
   assert.deepEqual(h.events.profiles, []);
   assert.deepEqual(h.events.displays, []);
   assert.deepEqual(h.data, cachedIdentity);
-  assert.equal(h.connection.auth.currentUser, firebaseUser);
+  assert.equal(h.connection.auth.currentUser, sessionUser);
   assert.equal(h.events.claimReads, 0);
   assert.equal(h.events.tokenRefreshes, 0);
   assert.equal(h.events.attempts, 1);
@@ -466,7 +466,7 @@ test("hydrates watch-only presentation after confirming unchanged ownership", as
   assert.deepEqual(h.events.mining, [profile]);
 });
 
-test("recovers a transient outage by timer without another Firebase auth callback", async () => {
+test("recovers a transient outage by timer without another session auth callback", async () => {
   let available = false;
   const h = harness({
     syncProfile: async () =>
@@ -474,7 +474,7 @@ test("recovers a transient outage by timer without another Firebase auth callbac
     lookupProfile: unavailable,
   });
   h.changeAuth();
-  const firebaseUser = h.connection.auth.currentUser;
+  const sessionUser = h.connection.auth.currentUser;
   await h.settle();
   assert.deepEqual(h.events.statuses, ["unauthenticated"]);
   assert.deepEqual(h.retryDelays(), [1_000]);
@@ -487,7 +487,7 @@ test("recovers a transient outage by timer without another Firebase auth callbac
   assert.deepEqual(h.events.statuses, ["unauthenticated", "authenticated"]);
   assert.equal(h.events.syncs, 2);
   assert.equal(h.events.profiles[0].profile.id, "profile-1");
-  assert.equal(h.connection.auth.currentUser, firebaseUser);
+  assert.equal(h.connection.auth.currentUser, sessionUser);
   assert.deepEqual(h.data, cachedIdentity);
   assert.deepEqual(h.retryDelays(), []);
   assert.equal(h.events.claimReads, 0);

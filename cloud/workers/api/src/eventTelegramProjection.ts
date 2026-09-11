@@ -1,5 +1,5 @@
 import { resolveEventTelegramAnnouncements } from "@mons/shared/events";
-import { buildTelegramEditDesired } from "../../../functions/telegram/desiredStateCore.js";
+import { buildTelegramEditDesired } from "../../../runtime/telegram/desiredStateCore.js";
 import {
   EVENT_TELEGRAM_PROJECTION_GUARD_FIELD,
   EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
@@ -11,10 +11,10 @@ import {
   isV2TelegramEvent,
   loadEndedMatchResults,
   splitEventTelegramProjectionUpdates,
-} from "../../../functions/telegram/eventProjectionCore.js";
-import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
-import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+} from "../../../runtime/telegram/eventProjectionCore.js";
+import { createEventLockManagerCore } from "../../../runtime/events/lockManagerCore.js";
+import type { StateRepository } from "./stateRepositoryTypes.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import type { RatingProjectionRepository } from "./gameplayRepository.ts";
 import {
   EVENT_TELEGRAM_PROJECTION_OUTBOX_ROOT,
@@ -26,7 +26,7 @@ import type {
   EventTelegramProjectionTask,
   TelegramProjectionTask,
 } from "./telegramProjectionTasks.ts";
-import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
+import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
 import type { InitialTelegramDelivery } from "./telegramDeliveryTasks.ts";
 import { adoptSundayMonsReminderMessage } from "./eventReminderProjection.ts";
 import type { TelegramAnnouncementRepository } from "./telegramD1.ts";
@@ -68,7 +68,7 @@ export function parseEventProjectionOutbox(value: unknown): EventOutbox | null {
   return record?.schemaVersion === EVENT_TELEGRAM_PROJECTION_SCHEMA_VERSION &&
     record.status === "pending" &&
     typeof record.requestId === "string" &&
-    isSafeFirebaseKey(record.requestId) &&
+    isSafeRecordKey(record.requestId) &&
     typeof updatedAtMs === "number" &&
     Number.isSafeInteger(updatedAtMs) &&
     updatedAtMs >= 0 &&
@@ -86,10 +86,10 @@ export function parseEventProjectionOutbox(value: unknown): EventOutbox | null {
 }
 
 async function settleEventOutbox(
-  rtdb: FirebaseRtdbClient,
+  state: StateRepository,
   task: EventTelegramProjectionTask,
 ): Promise<boolean> {
-  const result = await rtdb.transactPath(
+  const result = await state.transactPath(
     getEventTelegramProjectionOutboxPath(task.eventId),
     (current) => {
       const outbox = parseEventProjectionOutbox(current);
@@ -102,11 +102,11 @@ async function settleEventOutbox(
   return result.committed === true;
 }
 
-function createProjectionLockManager(rtdb: FirebaseRtdbClient) {
+function createProjectionLockManager(state: StateRepository) {
   return createEventLockManagerCore({
     lockRoot: EVENT_TELEGRAM_PROJECTION_LOCK_ROOT,
     createLockId: () => crypto.randomUUID(),
-    transactPath: rtdb.transactPath,
+    transactPath: state.transactPath,
     logger: {
       error: (_message, error) => {
         console.error(
@@ -133,12 +133,12 @@ function persistedProjectionGeneration(value: unknown): number {
 }
 
 async function commitFencedProjectionUpdate(
-  rtdb: FirebaseRtdbClient,
+  state: StateRepository,
   path: string,
   value: unknown,
   generation: number,
 ): Promise<boolean> {
-  const result = await rtdb.transactPath(path, (current) => {
+  const result = await state.transactPath(path, (current) => {
     if (persistedProjectionGeneration(current) > generation) {
       return { commit: false, decision: "newer-projection" };
     }
@@ -227,7 +227,7 @@ async function commitFencedDesiredUpdate(
 
 export async function processEventProjectionTask(
   task: EventTelegramProjectionTask,
-  rtdb: FirebaseRtdbClient,
+  state: StateRepository,
   rating: RatingProjectionRepository,
   enqueueDelivery: (input: InitialTelegramDelivery) => Promise<unknown>,
   now: () => number,
@@ -238,12 +238,12 @@ export async function processEventProjectionTask(
   },
 ): Promise<string> {
   const outbox = parseEventProjectionOutbox(
-    await rtdb.getPath(getEventTelegramProjectionOutboxPath(task.eventId)),
+    await state.getPath(getEventTelegramProjectionOutboxPath(task.eventId)),
   );
   if (!outbox || outbox.requestId !== task.requestId) {
     return "stale";
   }
-  const lockManager = createProjectionLockManager(rtdb);
+  const lockManager = createProjectionLockManager(state);
   const lockHandle = await lockManager.acquireEventLock(
     task.eventId,
     EVENT_TELEGRAM_PROJECTION_OWNER_UID,
@@ -254,23 +254,23 @@ export async function processEventProjectionTask(
   const stopHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
   try {
     const [eventData, rawState, rawGeneration] = await Promise.all([
-      rtdb.getPath(`events/${task.eventId}`),
-      rtdb.getPath(`${EVENT_TELEGRAM_PROJECTION_ROOT}/${task.eventId}`),
-      rtdb.getPath(getEventTelegramProjectionGenerationPath(task.eventId)),
+      state.getPath(`events/${task.eventId}`),
+      state.getPath(`${EVENT_TELEGRAM_PROJECTION_ROOT}/${task.eventId}`),
+      state.getPath(getEventTelegramProjectionGenerationPath(task.eventId)),
     ]);
     if (!isV2TelegramEvent(eventData)) {
-      await settleEventOutbox(rtdb, task);
+      await settleEventOutbox(state, task);
       return eventData === null ? "missing" : "not-v2";
     }
     const event = asObject(eventData);
-    const state = asObject(rawState);
+    const projectionState = asObject(rawState);
     const generation = readProjectionGeneration(rawGeneration);
     const announcements = resolveEventTelegramAnnouncements(event);
     const upcomingMessageKey = `event:${task.eventId}:upcoming`;
     const reminderMessageKey = `event:${task.eventId}:reminder`;
     const readReminderMessage = async () => {
       if (!telegram) {
-        return rtdb.getPath(`telegramMessages/${reminderMessageKey}`);
+        return state.getPath(`telegramMessages/${reminderMessageKey}`);
       }
       const current = await telegram.getMessage(reminderMessageKey);
       if (
@@ -294,12 +294,13 @@ export async function processEventProjectionTask(
       await Promise.all([
         telegram
           ? telegram.getMessage(upcomingMessageKey)
-          : rtdb.getPath(`telegramMessages/${upcomingMessageKey}`),
+          : state.getPath(`telegramMessages/${upcomingMessageKey}`),
         readReminderMessage(),
         announcements.results &&
         event.status === "ended" &&
-        state.endedAnnouncementArmed === true &&
-        (typeof state.endedText !== "string" || state.endedText === "")
+        projectionState.endedAnnouncementArmed === true &&
+        (typeof projectionState.endedText !== "string" ||
+          projectionState.endedText === "")
           ? loadEndedMatchResults(eventData, {
               readRatingUpdate: (operationId) =>
                 rating.readRatingUpdate(operationId),
@@ -316,7 +317,7 @@ export async function processEventProjectionTask(
       nowMs: now(),
     });
     if (projection.action !== "project") {
-      await settleEventOutbox(rtdb, task);
+      await settleEventOutbox(state, task);
       return projection.action;
     }
     const updates = addEventTelegramProjectionGuard({
@@ -365,7 +366,7 @@ export async function processEventProjectionTask(
                 ? asObject(asObject(editable.message).applied)
                 : undefined,
             )
-          : await commitFencedProjectionUpdate(rtdb, path, value, generation);
+          : await commitFencedProjectionUpdate(state, path, value, generation);
         if (committed === "deferred") {
           deferredTextFields.add(editable!.textField);
         } else if (committed) {
@@ -388,7 +389,7 @@ export async function processEventProjectionTask(
     await refreshLock();
     const [statePath, projectedState] = Object.entries(stateUpdates)[0];
     const stateCommitted = await commitFencedProjectionUpdate(
-      rtdb,
+      state,
       statePath,
       deferredTextFields.size > 0
         ? {
@@ -396,7 +397,9 @@ export async function processEventProjectionTask(
             ...Object.fromEntries(
               Array.from(deferredTextFields, (field) => [
                 field,
-                typeof state[field] === "string" ? state[field] : "",
+                typeof projectionState[field] === "string"
+                  ? projectionState[field]
+                  : "",
               ]),
             ),
             lastProjectedSignature: "",
@@ -407,7 +410,7 @@ export async function processEventProjectionTask(
     if (deferredTextFields.size > 0) {
       throw new Error("event-telegram-delivery-changed");
     }
-    await settleEventOutbox(rtdb, task);
+    await settleEventOutbox(state, task);
     return stateCommitted ? "projected" : "superseded";
   } finally {
     stopHeartbeat();
@@ -421,7 +424,7 @@ export function eventProjectionSweepEntries(
   const records = toRecord(value) || {};
   return Object.entries(records).map(([eventId, raw]) => {
     const outbox = parseEventProjectionOutbox(raw);
-    return outbox && isSafeFirebaseKey(eventId)
+    return outbox && isSafeRecordKey(eventId)
       ? {
           kind: "candidate" as const,
           value: {
@@ -438,11 +441,11 @@ export function eventProjectionSweepEntries(
 }
 
 export async function claimEventProjectionSweepCandidate(
-  rtdb: FirebaseRtdbClient,
+  state: StateRepository,
   candidate: EventProjectionSweepCandidate,
   nowMs: number,
 ): Promise<boolean> {
-  const result = await rtdb.transactPath(
+  const result = await state.transactPath(
     getEventTelegramProjectionOutboxPath(candidate.task.eventId),
     (current) => {
       const outbox = parseEventProjectionOutbox(current);
@@ -468,18 +471,18 @@ export async function claimEventProjectionSweepCandidate(
 }
 
 async function markInvalidEventProjectionSweepEntry(
-  rtdb: FirebaseRtdbClient,
+  state: StateRepository,
   eventId: string,
   nowMs: number,
 ): Promise<void> {
-  await rtdb.transactPath(
+  await state.transactPath(
     `${EVENT_TELEGRAM_PROJECTION_OUTBOX_ROOT}/${eventId}`,
     (current) => {
       const record = toRecord(current);
       const updatedAtMs = record?.updatedAtMs;
       if (
         !record ||
-        (parseEventProjectionOutbox(current) && isSafeFirebaseKey(eventId)) ||
+        (parseEventProjectionOutbox(current) && isSafeRecordKey(eventId)) ||
         typeof updatedAtMs !== "number" ||
         !Number.isFinite(updatedAtMs) ||
         updatedAtMs > nowMs
@@ -502,10 +505,10 @@ async function markInvalidEventProjectionSweepEntry(
 
 export async function sweepEventTelegramProjections(
   queue: Queue<TelegramProjectionTask>,
-  rtdb: FirebaseRtdbClient,
+  state: StateRepository,
   nowMs: number,
 ): Promise<number> {
-  const value = await rtdb.getPath(EVENT_TELEGRAM_PROJECTION_OUTBOX_ROOT, {
+  const value = await state.getPath(EVENT_TELEGRAM_PROJECTION_OUTBOX_ROOT, {
     orderBy: "updatedAtMs",
     startAt: 0,
     endAt: nowMs,
@@ -521,7 +524,7 @@ export async function sweepEventTelegramProjections(
   const failures: Error[] = [];
   for (const eventId of invalidEventIds) {
     try {
-      await markInvalidEventProjectionSweepEntry(rtdb, eventId, nowMs);
+      await markInvalidEventProjectionSweepEntry(state, eventId, nowMs);
     } catch (error) {
       failures.push(
         error instanceof Error ? error : new Error("invalid-record-failed"),
@@ -531,7 +534,7 @@ export async function sweepEventTelegramProjections(
   const tasks: EventTelegramProjectionTask[] = [];
   for (const candidate of candidates) {
     try {
-      if (await claimEventProjectionSweepCandidate(rtdb, candidate, nowMs)) {
+      if (await claimEventProjectionSweepCandidate(state, candidate, nowMs)) {
         tasks.push(candidate.task);
       }
     } catch (error) {

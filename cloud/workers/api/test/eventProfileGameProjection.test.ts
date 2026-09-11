@@ -5,7 +5,7 @@ import {
   type EventProfileGameProjectionRepository,
   type EventProjectionSourceFence,
   type EventProjectionWrite,
-} from "../../../functions/eventProfileGameProjectionCore.js";
+} from "../../../runtime/eventProfileGameProjectionCore.js";
 
 function createRepository(input: {
   canonicalProfileIds?: Record<string, string | null>;

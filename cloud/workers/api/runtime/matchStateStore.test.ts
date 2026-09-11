@@ -8,9 +8,8 @@ import {
   MatchStateStore,
   type MatchStateStoreOptions,
 } from "../src/matchStateStore.ts";
-import { digestMatchStateImport } from "../src/matchStateLogic.ts";
+import { seedRetainedMatchState } from "./retainedMatchStateFixture.ts";
 import type {
-  MatchStateImportRequest,
   MatchStateMoveRequest,
   MatchStateRecord,
 } from "../src/matchStateTypes.ts";
@@ -145,7 +144,7 @@ describe("canonical match state storage", () => {
     const importedFixture = fixture();
     await runInDurableObject(importedFixture.room, async (_instance, ctx) => {
       const store = new MatchStateStore(ctx.storage, options());
-      const snapshot = await store.stageImport({
+      seedRetainedMatchState(ctx.storage, {
         ...importedFixture.input,
         importId: "null-import",
         records: [
@@ -157,7 +156,6 @@ describe("canonical match state storage", () => {
         ],
         claims: [],
       });
-      await store.activate(snapshot);
       expect(store.readRecord(importedFixture.input)).toMatchObject({
         aura: null,
         nested: { absent: null },
@@ -504,73 +502,56 @@ describe("canonical match state storage", () => {
     });
   });
 
-  it("stages exact raw records invisibly, verifies digest, and activates without changing deadlines", async () => {
+  it("retains exact imported records, deadlines, and source evidence after eviction", async () => {
     const { room, input, records } = fixture();
-    const bundle: MatchStateImportRequest = {
+    const retained = {
       inviteId: input.inviteId,
       epoch: 4,
       importId: "cutover-one",
       records: records.map(({ marker, ...record }) => ({
         ...record,
-        value: { ...record.value, sessionCreation: marker },
+        value: { ...record.value, sessionCreation: marker } as MatchStateRecord,
       })),
-      claims: [],
     };
-    bundle.records[0].value.timer = formatMatchTimer(
+    retained.records[0].value.timer = formatMatchTimer(
       game.turnNumber,
       future - 60_000,
     );
-    await runInDurableObject(room, async (_instance, ctx) => {
+    await runInDurableObject(room, (_instance, ctx) => {
       const store = new MatchStateStore(ctx.storage, options());
-      const first = await store.stageImport({
-        ...bundle,
-        records: bundle.records.slice(0, 1),
+      seedRetainedMatchState(ctx.storage, retained);
+      expect(store.readSource()).toMatchObject({
+        status: "active",
+        epoch: 4,
+        importId: retained.importId,
+        digest: "a".repeat(64),
       });
-      expect(first.recordCount).toBe(1);
-      expect(store.readSource()).toMatchObject({ status: "staged", epoch: 0 });
-      expect(() => store.readPair(input)).toThrow(
-        "match-state-authority-unavailable",
+      expect(store.readPair({ ...input, epoch: 4 }).playerMatch).toEqual(
+        retained.records[0].value,
       );
       expect(() => store.createRecords({ ...input, records })).toThrow(
         "match-state-authority-unavailable",
       );
-      const snapshot = await store.stageImport({
-        ...bundle,
-        records: bundle.records.slice(1),
-      });
-      expect(snapshot.digest).toBe(await digestMatchStateImport(bundle));
-      await expect(
-        store.activate({ ...snapshot, digest: "0".repeat(64) }),
-      ).rejects.toThrow("match-state-import-verification-failed");
-      const source = await store.activate(snapshot);
-      expect(source).toMatchObject({
-        status: "active",
-        epoch: 4,
-        digest: snapshot.digest,
-      });
-      expect(store.readPair({ ...input, epoch: 4 }).playerMatch).toEqual(
-        bundle.records[0].value,
-      );
-      expect(await store.activate(snapshot)).toEqual(source);
-      expect((await store.stageImport(bundle)).digest).toBe(snapshot.digest);
-      await expect(
-        store.stageImport({
-          ...bundle,
-          records: [
-            {
-              ...bundle.records[0],
-              value: match("white", { fen: "tampered" }),
-            },
-          ],
-        }),
-      ).rejects.toThrow("match-state-import-record-conflict");
     });
     await evictDurableObject(room);
     await runInDurableObject(room, (_instance, ctx) => {
       const store = new MatchStateStore(ctx.storage, options());
-      expect(store.readSource()).toMatchObject({ status: "active", epoch: 4 });
-      expect(store.readPair({ ...input, epoch: 4 }).playerMatch?.timer).toBe(
-        bundle.records[0].value.timer,
+      expect(store.readSource()).toMatchObject({
+        status: "active",
+        epoch: 4,
+        digest: "a".repeat(64),
+      });
+      expect(store.readPair({ ...input, epoch: 4 }).playerMatch).toEqual(
+        retained.records[0].value,
+      );
+      const evidence = ctx.storage.sql
+        .exec<{ value_json: string }>(
+          "SELECT value_json FROM match_state_staged_records WHERE player_id = ?",
+          input.playerId,
+        )
+        .one();
+      expect(JSON.parse(evidence.value_json)).toEqual(
+        retained.records[0].value,
       );
     });
   });
@@ -583,7 +564,7 @@ describe("canonical match state storage", () => {
         ctx.storage,
         options({ now: () => now }),
       );
-      const imported = await store.stageImport({
+      seedRetainedMatchState(ctx.storage, {
         ...input,
         importId: "pending-claim",
         records: records.map(({ matchId, playerId, value }) => ({
@@ -598,63 +579,9 @@ describe("canonical match state storage", () => {
           },
         ],
       });
-      await store.activate(imported);
       expect(() => store.move(move(input))).toThrow("match-move-blocked");
       now += 10;
       expect(store.move(move(input)).outcome).toBe("applied");
-    });
-  });
-
-  it("rejects activation when a staging chunk arrives during digest verification", async () => {
-    const { room, input, records } = fixture();
-    await runInDurableObject(room, async (_instance, ctx) => {
-      const store = new MatchStateStore(ctx.storage, options());
-      const bundle = {
-        inviteId: input.inviteId,
-        epoch: input.epoch,
-        importId: "racing-import",
-        records: [records[0]],
-        claims: [],
-      };
-      const snapshot = await store.stageImport(bundle);
-      const activation = store.activate(snapshot);
-      const appended = store.stageImport({ ...bundle, records: [records[1]] });
-      await expect(activation).rejects.toThrow("match-state-import-changed");
-      const complete = await appended;
-      expect(store.readSource().status).toBe("staged");
-      expect(complete.recordCount).toBe(2);
-      await store.activate(complete);
-      expect(store.readPair(input).opponentMatch).toMatchObject({
-        color: "black",
-      });
-    });
-  });
-
-  it("uses the same Unicode key order for import fingerprints and readback", async () => {
-    const { room, input } = fixture();
-    await runInDurableObject(room, async (_instance, ctx) => {
-      const store = new MatchStateStore(ctx.storage, options());
-      const bundle = {
-        inviteId: input.inviteId,
-        epoch: input.epoch,
-        importId: "unicode-import",
-        records: [
-          { matchId: input.matchId, playerId: "\uE000", value: match("white") },
-          { matchId: input.matchId, playerId: "😀", value: match("black") },
-        ],
-        claims: [],
-      };
-      const snapshot = await store.stageImport(bundle);
-      expect(snapshot.records.map((record) => record.playerId)).toEqual([
-        "😀",
-        "\uE000",
-      ]);
-      expect(snapshot.digest).toBe(await digestMatchStateImport(bundle));
-      await store.activate(snapshot);
-      expect(
-        store.readPair({ ...input, playerId: "\uE000", opponentId: "😀" })
-          .opponentMatch?.color,
-      ).toBe("black");
     });
   });
 
@@ -662,7 +589,7 @@ describe("canonical match state storage", () => {
     const { room, input, records } = fixture();
     await runInDurableObject(room, async (_instance, ctx) => {
       const store = new MatchStateStore(ctx.storage, options());
-      const imported = await store.stageImport({
+      seedRetainedMatchState(ctx.storage, {
         ...input,
         importId: "committed-claim",
         records: records.map(({ matchId, playerId, value }) => ({
@@ -694,7 +621,6 @@ describe("canonical match state storage", () => {
           },
         ],
       });
-      await store.activate(imported);
       expect(store.move(move(input)).outcome).toBe("already-applied");
       expect(() =>
         store.move(

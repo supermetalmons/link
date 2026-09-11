@@ -10,7 +10,7 @@ const {
 } = require("./telegramQueueCli");
 const {
   validateTelegramMessageKey,
-} = require("../functions/telegram/desiredStateCore");
+} = require("../runtime/telegram/desiredStateCore");
 
 const RECOVERY_TIMEOUT_MS = 60_000;
 const POLL_INTERVAL_MS = 1_000;

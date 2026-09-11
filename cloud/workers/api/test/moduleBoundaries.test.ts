@@ -193,7 +193,7 @@ test("ownership consumers cannot restore legacy APIs or final fences", () => {
   const eventProjectionCore = readFileSync(
     resolve(
       import.meta.dirname,
-      "../../../functions/eventProfileGameProjectionCore.js",
+      "../../../runtime/eventProfileGameProjectionCore.js",
     ),
     "utf8",
   );
@@ -348,7 +348,7 @@ test("canonical auth and recovery cannot construct Firebase clients or access Fi
     );
     assert.doesNotMatch(
       source,
-      /firebaseRtdb|FirebaseRtdbClient|createEventRtdbClient|FIREBASE_[A-Z_]+|\bfetch\s*\(/,
+      /firebaseRtdb|\bStateRepository\b|createEventStateRepository|FIREBASE_[A-Z_]+|\bfetch\s*\(/,
       file,
     );
   }

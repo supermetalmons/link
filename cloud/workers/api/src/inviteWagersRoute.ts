@@ -18,7 +18,7 @@ import {
   type SessionIdentity,
   type WorkerExecutionContext,
 } from "./sessionAuth.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import { resolveInviteRoleFromSnapshot } from "./gameSessionMutations.ts";
 import {
   createGameplayRepository,
@@ -55,7 +55,7 @@ function readRoute(request: Request): { inviteId: string; socket: boolean } {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-invite-id");
   }
   if (
-    !isSafeFirebaseKey(inviteId) ||
+    !isSafeRecordKey(inviteId) ||
     inviteId.trim() !== inviteId ||
     url.search
   ) {
@@ -129,7 +129,7 @@ export async function handleInviteWagersRoute(
       );
     }
     const repository = dependencies.repository || createGameplayRepository(env);
-    const invite = await repository.getRtdbPath(`invites/${inviteId}`, {
+    const invite = await repository.getStatePath(`invites/${inviteId}`, {
       shallow: true,
     });
     if (invite === null || invite === undefined) {

@@ -25,15 +25,15 @@ import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTe
 
 type TimerRepository = Pick<
   GameplayRepository,
-  "getRtdbPath" | "readProfileOwnershipSnapshot" | "transactRtdbPath"
+  "getStatePath" | "readProfileOwnershipSnapshot" | "transactStatePath"
 >;
 
 type ClaimTimerRepository = Pick<
   GameplayRepository,
-  | "getRtdbPath"
-  | "patchRtdbRoot"
+  | "getStatePath"
+  | "patchStateRoot"
   | "readProfileOwnershipSnapshot"
-  | "transactRtdbPath"
+  | "transactStatePath"
 >;
 
 const identity: RequestIdentity = {
@@ -190,19 +190,19 @@ function repository({
   const stores = createMemoryGameplayCoordinationStores();
   let storedTimer = currentTimer;
   const value: TimerRepository = {
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       paths.push(path);
       if (path === "players/player-1/matches/match-1") return player;
       if (path === "players/player-2/matches/match-1") return opponent;
       if (path === `invites/${inviteId}`) return invite;
-      assert.fail(`unexpected RTDB path ${path}`);
+      assert.fail(`unexpected state path ${path}`);
     },
     readProfileOwnershipSnapshot: async (query) =>
       ownershipSnapshot(query, {
         "login-2": "profile-1",
         "player-1": typeof profile === "string" ? profile : null,
       }),
-    transactRtdbPath: async (path, updater) => {
+    transactStatePath: async (path, updater) => {
       paths.push(path);
       const current = storedTimer;
       const decision = updater(current) as {
@@ -279,7 +279,7 @@ function claimRepository({
   let opponentReads = 0;
   let storedClaim: unknown = initialClaim;
   const value: ClaimTimerRepository = {
-    getRtdbPath: async (path, _query, signal) => {
+    getStatePath: async (path, _query, signal) => {
       signal?.throwIfAborted();
       paths.push(path);
       if (path.startsWith("players/player-1/matches/")) {
@@ -295,9 +295,9 @@ function claimRepository({
           : liveOpponent;
       }
       if (path.startsWith("invites/")) return invite;
-      assert.fail(`unexpected RTDB path ${path}`);
+      assert.fail(`unexpected state path ${path}`);
     },
-    patchRtdbRoot: async (updates, signal) => {
+    patchStateRoot: async (updates, signal) => {
       signal?.throwIfAborted();
       patchAttempts++;
       if (patchAttempts <= failPatchAttempts) {
@@ -310,7 +310,7 @@ function claimRepository({
         "login-2": "profile-1",
         "player-1": typeof profile === "string" ? profile : null,
       }),
-    transactRtdbPath: async (path, updater, signal) => {
+    transactStatePath: async (path, updater, signal) => {
       signal?.throwIfAborted();
       paths.push(path);
       const decision = updater(storedClaim) as {
@@ -446,7 +446,7 @@ test("starts the timer for a directly authenticated player", async () => {
   ]);
 });
 
-test("finishes the admitted RTDB write after the request signal aborts", async () => {
+test("finishes the admitted match write after the request signal aborts", async () => {
   const repo = repository();
   const controller = new AbortController();
   const baseStore = repo.coordination.timerStarts;
@@ -464,8 +464,8 @@ test("finishes the admitted RTDB write after the request signal aborts", async (
       return marker;
     },
   };
-  const transact = repo.value.transactRtdbPath;
-  repo.value.transactRtdbPath = async (path, updater, signal) => {
+  const transact = repo.value.transactStatePath;
+  repo.value.transactStatePath = async (path, updater, signal) => {
     assert.equal(signal?.aborted, false);
     return transact(path, updater, signal);
   };
@@ -490,7 +490,7 @@ test("retries only failed match reads once", async () => {
   let playerReads = 0;
   let opponentReads = 0;
   const value: TimerRepository = {
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       if (path === "invites/match-1") {
         return { hostId: "player-1", guestId: "player-2" };
       }
@@ -504,7 +504,7 @@ test("retries only failed match reads once", async () => {
       opponentReads++;
       return match("white");
     },
-    transactRtdbPath: async (_path, updater) => {
+    transactStatePath: async (_path, updater) => {
       const decision = updater("") as { decision?: string; value?: unknown };
       return {
         committed: true,
@@ -612,9 +612,9 @@ test("returns an existing same-turn timer without extending it", async () => {
 
 test("uses a same-turn timer discovered in the fresh snapshot", async () => {
   const repo = repository();
-  const read = repo.value.getRtdbPath;
+  const read = repo.value.getStatePath;
   let playerReads = 0;
-  repo.value.getRtdbPath = async (path, query, signal) => {
+  repo.value.getStatePath = async (path, query, signal) => {
     if (path === "players/player-1/matches/match-1") {
       playerReads++;
       if (playerReads === 2) {
@@ -646,9 +646,9 @@ test("uses a same-turn timer discovered in the fresh snapshot", async () => {
 
 test("rejects a newer fresh timer before creating a marker", async () => {
   const repo = repository();
-  const read = repo.value.getRtdbPath;
+  const read = repo.value.getStatePath;
   let playerReads = 0;
-  repo.value.getRtdbPath = async (path, query, signal) => {
+  repo.value.getStatePath = async (path, query, signal) => {
     if (path === "players/player-1/matches/match-1") {
       playerReads++;
       if (playerReads === 2) {
@@ -677,13 +677,13 @@ test("concurrent starts converge on the first timer", async () => {
   const stored = new Map<string, unknown>();
   let writes = 0;
   const value: TimerRepository = {
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       if (path === "invites/match-1") {
         return { hostId: "player-1", guestId: "player-2" };
       }
       return path.includes("player-1") ? match("black") : match("white");
     },
-    transactRtdbPath: async (path, updater) => {
+    transactStatePath: async (path, updater) => {
       const current = stored.get(path) ?? null;
       const decision = updater(current) as {
         commit?: boolean;
@@ -729,7 +729,7 @@ test("advances one marker and rejects stale earlier turns", async () => {
   const stored = new Map<string, unknown>();
   let turnNumber = 7;
   const value: TimerRepository = {
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       if (path === "invites/match-1") {
         return { hostId: "player-1", guestId: "player-2" };
       }
@@ -741,7 +741,7 @@ test("advances one marker and rejects stale earlier turns", async () => {
       }
       return match("white");
     },
-    transactRtdbPath: async (path, updater) => {
+    transactStatePath: async (path, updater) => {
       const current = stored.get(path) ?? null;
       const decision = updater(current) as {
         commit?: boolean;
@@ -922,7 +922,7 @@ test("restores the first timer after the match record is cleared", async () => {
   const timerPath = "players/player-1/matches/match-1/timer";
   const stored = new Map<string, unknown>();
   const value: TimerRepository = {
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       if (path === "invites/match-1") {
         return { hostId: "player-1", guestId: "player-2" };
       }
@@ -934,7 +934,7 @@ test("restores the first timer after the match record is cleared", async () => {
       }
       return match("white");
     },
-    transactRtdbPath: async (path, updater) => {
+    transactStatePath: async (path, updater) => {
       const current = stored.get(path) ?? null;
       const decision = updater(current) as {
         commit?: boolean;
@@ -1133,8 +1133,8 @@ test("finishes a timer claim when the caller aborts before fence acknowledgment"
   const repo = claimRepository();
   const controller = new AbortController();
   let nowMs = 1_001;
-  const transact = repo.value.transactRtdbPath;
-  repo.value.transactRtdbPath = async (path, updater, signal) => {
+  const transact = repo.value.transactStatePath;
+  repo.value.transactStatePath = async (path, updater, signal) => {
     const result = await transact(path, updater, signal);
     controller.abort();
     signal?.throwIfAborted();
@@ -1185,15 +1185,15 @@ for (const failure of ["read-failed", "snapshot-changed"]) {
           : undefined,
     });
     const controller = new AbortController();
-    const transact = repo.value.transactRtdbPath;
-    repo.value.transactRtdbPath = async (path, updater, signal) => {
+    const transact = repo.value.transactStatePath;
+    repo.value.transactStatePath = async (path, updater, signal) => {
       const result = await transact(path, updater, signal);
       controller.abort();
       signal?.throwIfAborted();
       return result;
     };
-    const read = repo.value.getRtdbPath;
-    repo.value.getRtdbPath = async (path, query, signal) => {
+    const read = repo.value.getStatePath;
+    repo.value.getStatePath = async (path, query, signal) => {
       if (failure === "read-failed" && repo.transactions.length > 0) {
         throw new Error("fresh-read-failed");
       }
@@ -1404,9 +1404,9 @@ test("rejects invalid timer-claim ownership and repository writes", async () => 
   assert.ok(failingWrite.coordination.timerRows.has("player-1/match-1"));
 });
 
-test("retains a D1 marker when the RTDB timer write fails", async () => {
+test("retains a D1 marker when the match timer write fails", async () => {
   const repo = repository();
-  repo.value.transactRtdbPath = async () => {
+  repo.value.transactStatePath = async () => {
     throw new Error("timer-write-failed");
   };
   await assert.rejects(
@@ -1426,9 +1426,9 @@ test("retains a D1 marker when the RTDB timer write fails", async () => {
 
 test("does not install a timer after the match becomes terminal", async () => {
   const repo = repository();
-  const read = repo.value.getRtdbPath;
+  const read = repo.value.getStatePath;
   let opponentReads = 0;
-  repo.value.getRtdbPath = async (path, query, signal) => {
+  repo.value.getStatePath = async (path, query, signal) => {
     if (path === "players/player-2/matches/match-1") {
       opponentReads++;
       if (opponentReads > 1) {

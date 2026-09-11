@@ -77,11 +77,11 @@ function setup(invite: unknown = paired, uid = "host-login") {
         revision: 0,
       });
   const repository = createGameplayRepository(env, {
-    rtdbClient: {
+    stateClient: {
       getPath: async (path) => {
         calls.reads.push(path);
         if (path.startsWith("players/"))
-          throw new Error("unexpected-firebase-appearance-read");
+          throw new Error("unexpected-source-appearance-read");
         return records.get(path) ?? null;
       },
       patchRoot: async () => {
@@ -92,10 +92,10 @@ function setup(invite: unknown = paired, uid = "host-login") {
       },
     },
   });
-  repository.getRtdbPath = async (path) => {
+  repository.getStatePath = async (path) => {
     calls.reads.push(path);
     if (path.startsWith("players/"))
-      throw new Error("unexpected-firebase-appearance-read");
+      throw new Error("unexpected-source-appearance-read");
     return records.get(path) ?? null;
   };
   repository.readProfileOwnershipSnapshot = async (query) => ({

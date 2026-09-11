@@ -1,16 +1,17 @@
+import { STATE_FAILURE_MESSAGES } from "./stateCompatibility.ts";
 import {
   getEventPrizeDefinition,
   isEventPrizeAssignmentWireRecord,
   isEventPrizeStandard,
 } from "@mons/shared/event-prizes";
-import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
-import { MAX_PROFILE_MERGE_TARGET_HOPS } from "../../../functions/profileMergeTargets.js";
+import { createEventLockManagerCore } from "../../../runtime/events/lockManagerCore.js";
+import { MAX_PROFILE_MERGE_TARGET_HOPS } from "../../../runtime/profileMergeTargets.js";
 import {
   createD1AuthRecoveryPrizeStore,
   type AuthRecoveryPrizeStore,
 } from "./eventRepository.ts";
-import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
-import { cleanString, uniqueStoredFirebaseUids } from "./authPolicy.ts";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
+import { cleanString, uniqueStoredLoginUids } from "./authPolicy.ts";
 import {
   createProfileLinkCatchupStore,
   type ProfileLinkCatchupStore,
@@ -88,7 +89,7 @@ function exactDocumentId(value: unknown): string {
   if (typeof value !== "string" || value.trim() !== value) {
     return "";
   }
-  return isSafeFirebaseKey(value) ? value : "";
+  return isSafeRecordKey(value) ? value : "";
 }
 
 export function parseAuthRecoveryTask(value: unknown): AuthRecoveryTask | null {
@@ -109,7 +110,7 @@ export function newAuthRecoveryJob(
 ): AuthRecoveryJob {
   return {
     profileId,
-    loginUids: uniqueStoredFirebaseUids(loginUids),
+    loginUids: uniqueStoredLoginUids(loginUids),
     sourceProfileIds: Array.from(new Set(sourceProfileIds)),
     sourcePhase: sourceProfileIds.length > 0 ? "prizes" : "finalize",
     prizeCursor: null,
@@ -148,8 +149,8 @@ export async function dispatchProfileLinkCatchupForOwner(
     logger?: Pick<Console, "error">;
   },
 ): Promise<void> {
-  if (!isCanonicalFirebaseUid(uid)) {
-    throw new TypeError("invalid-firebase-uid");
+  if (!isCanonicalLoginUid(uid)) {
+    throw new TypeError(STATE_FAILURE_MESSAGES.invalidLoginUid);
   }
   const catchup = await dependencies.catchupStore.readForOwner(uid, profileId);
   if (catchup && dependencies.enqueueProfileLinkProjection) {
@@ -459,7 +460,7 @@ function createCanonicalAuthRecoveryService(
 
   const recoverLogins = async (job: CanonicalRecoveryJob): Promise<void> => {
     for (const uid of job.loginUids
-      .filter(isCanonicalFirebaseUid)
+      .filter(isCanonicalLoginUid)
       .slice(0, LOGIN_RECOVERY_PAGE_SIZE)) {
       try {
         await dispatchProfileLinkCatchupForOwner(uid, job.profileId, {
@@ -747,7 +748,7 @@ function createCanonicalAuthRecoveryService(
     const refreshed = await readCanonicalProfileAggregate(db, profileId);
     if (!refreshed.recovery) return true;
     job = canonicalRecoveryJob(refreshed.recovery);
-    if (job.loginUids.some(isCanonicalFirebaseUid)) return false;
+    if (job.loginUids.some(isCanonicalLoginUid)) return false;
     if (job.sourceProfileIds.length === 0) {
       if (job.loginUids.length !== 0) {
         logger.error(JSON.stringify({ event: "auth_recovery_uid_invalid" }));

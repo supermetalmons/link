@@ -2,7 +2,7 @@ import type { GameplayRepository } from "./gameplayRepository.ts";
 import type { MatchStatePairRequest } from "./matchStateTypes.ts";
 
 export async function readGameplayMatchPair(
-  repository: Pick<GameplayRepository, "getRtdbPath" | "readMatchPair">,
+  repository: Pick<GameplayRepository, "getStatePath" | "readMatchPair">,
   request: Omit<MatchStatePairRequest, "epoch">,
   signal?: AbortSignal,
 ): Promise<[unknown, unknown]> {
@@ -13,7 +13,7 @@ export async function readGameplayMatchPair(
   const read = (playerId: string | null) =>
     playerId === null
       ? Promise.resolve(null)
-      : repository.getRtdbPath(
+      : repository.getStatePath(
           `players/${playerId}/matches/${request.matchId}`,
           undefined,
           signal,

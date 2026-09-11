@@ -13,7 +13,7 @@ import {
   type SessionIdentity,
   type WorkerExecutionContext,
 } from "./sessionAuth.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import {
   createGameplayRepository,
   type GameplayRepository,
@@ -58,7 +58,7 @@ function readRoute(request: Request): { inviteId: string; matchId: string } {
     if (
       url.search ||
       inviteId.trim() !== inviteId ||
-      !isSafeFirebaseKey(inviteId) ||
+      !isSafeRecordKey(inviteId) ||
       !isPresentationMatchId(inviteId, matchId)
     )
       throw new Error();
@@ -112,10 +112,10 @@ export async function handleMatchPresentationRoute(
         { inviteId },
         {
           ...repository,
-          getRtdbPath: async (path) =>
+          getStatePath: async (path) =>
             path === `invites/${inviteId}`
               ? invite
-              : repository.getRtdbPath(path),
+              : repository.getStatePath(path),
         },
       );
       actorUid = role.actorUid;

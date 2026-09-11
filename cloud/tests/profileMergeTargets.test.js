@@ -7,7 +7,7 @@ const {
   orderProfileMergeCleanupIds,
   resolveProfileMergeTargetId,
   resolveProfileMergeTargetPath,
-} = require("../functions/profileMergeTargets");
+} = require("../runtime/profileMergeTargets");
 
 const resolveFrom = (profileId, targets, options = {}) =>
   resolveProfileMergeTargetId({

@@ -3,7 +3,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const { getEventParticipantIds } = require("../functions/events/participants");
+const { getEventParticipantIds } = require("../runtime/events/participants");
 
 test("event participant eligibility rejects missing and malformed containers", () => {
   assert.deepEqual(getEventParticipantIds(), []);

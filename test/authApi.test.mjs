@@ -77,7 +77,7 @@ test("auth API clients send exact bearer requests and validate responses", async
     return jsonResponse(responses.shift());
   };
   const tokenProvider = async (forceRefresh) =>
-    forceRefresh ? "fresh-token" : "firebase-token";
+    forceRefresh ? "fresh-token" : "session-token";
 
   assert.equal(
     (await beginAuthIntentViaApi("eth", tokenProvider)).intentId,
@@ -113,7 +113,7 @@ test("auth API clients send exact bearer requests and validate responses", async
   );
   for (const call of calls) {
     const headers = new Headers(call.init.headers);
-    assert.equal(headers.get("Authorization"), "Bearer firebase-token");
+    assert.equal(headers.get("Authorization"), "Bearer session-token");
     assert.equal(headers.get("Accept"), "application/json");
     assert.equal(call.init.cache, "no-store");
     assert.ok(call.init.signal instanceof AbortSignal);
@@ -152,7 +152,7 @@ test("auth mutation clients use exact Worker routes and preserve typed responses
     calls.push({ input: String(input), init });
     return jsonResponse(responses.shift());
   };
-  const token = async () => "firebase-token";
+  const token = async () => "session-token";
   await verifySolanaAddressViaApi(
     {
       intentId: "intent-sol",
@@ -202,7 +202,7 @@ test("auth mutation clients use exact Worker routes and preserve typed responses
     assert.equal(call.init.method, "POST");
     assert.equal(
       new Headers(call.init.headers).get("Authorization"),
-      "Bearer firebase-token",
+      "Bearer session-token",
     );
   }
   const unlinkBody = JSON.parse(calls[4].init.body);
@@ -539,7 +539,7 @@ test("does not wait for a stalled 401 body cancellation", async () => {
   assert.equal(requests, 2);
 });
 
-test("applies the request deadline to Firebase token acquisition", async () => {
+test("applies the request deadline to session token acquisition", async () => {
   const originalSetTimeout = globalThis.setTimeout;
   globalThis.setTimeout = (callback, _delay, ...args) =>
     originalSetTimeout(callback, 0, ...args);

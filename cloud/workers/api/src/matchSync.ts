@@ -11,7 +11,7 @@ import {
   parseInviteMatchIndex,
   parseRematchIndices,
 } from "@mons/shared/rematches";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import type { InviteMetadataReadResult } from "./inviteMetadata.ts";
 
 export type MatchSyncMetadata = Extract<
@@ -27,7 +27,7 @@ export function isRegisteredSyncMatch(
   metadata: MatchSyncMetadata,
   matchId: string,
 ): boolean {
-  if (matchId !== matchId.trim() || !isSafeFirebaseKey(matchId)) return false;
+  if (matchId !== matchId.trim() || !isSafeRecordKey(matchId)) return false;
   const index = parseInviteMatchIndex(metadata.snapshot.inviteId, matchId);
   return (
     index !== null &&

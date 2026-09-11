@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createTelegramRepository } from "../../../functions/telegram/repositoryCore.js";
-import { buildSundayMonsReminder } from "../../../functions/telegram/sundayMonsReminder.js";
+import { createTelegramRepository } from "../../../runtime/telegram/repositoryCore.js";
+import { buildSundayMonsReminder } from "../../../runtime/telegram/sundayMonsReminder.js";
 import {
   adoptSundayMonsReminderMessage,
   refreshSundayMonsReminder,
@@ -80,11 +80,11 @@ function fixture() {
     now: () => NOW_MS,
     createRequestId: () => "refresh-request",
     eventRepository: {
-      getRtdbPath: async (path) => {
+      getStatePath: async (path) => {
         assert.equal(path, `events/${EVENT_ID}`);
         return eventData;
       },
-      patchRtdbRoot: async (updates) => void writes.push(updates),
+      patchStateRoot: async (updates) => void writes.push(updates),
     },
     announcementRepository: {
       get: async (requestId) => {
@@ -306,7 +306,7 @@ test("disabled controls and failed marker persistence retry without dispatching"
   await assert.rejects(state.refresh(), /writes-disabled/);
   assert.equal(state.writes.length, 0);
   state.dependencies.controlsEnabled = async () => true;
-  state.dependencies.eventRepository!.patchRtdbRoot = async () => {
+  state.dependencies.eventRepository!.patchStateRoot = async () => {
     throw new Error("persist-failed");
   };
   await assert.rejects(state.refresh(), /persist-failed/);

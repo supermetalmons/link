@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   createEventProfileGameProjectionCore,
-} = require("../functions/eventProfileGameProjectionCore");
+} = require("../runtime/eventProfileGameProjectionCore");
 
 const ownershipSnapshot = ({ canonical = {}, logins = {} } = {}) => ({
   canonicalProfileIdByProfileId: new Map(Object.entries(canonical)),

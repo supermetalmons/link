@@ -18,7 +18,7 @@ import {
   type SessionIdentity,
   type WorkerExecutionContext,
 } from "./sessionAuth.ts";
-import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import {
   createGameplayRepository,
   type GameplayRepository,
@@ -140,7 +140,7 @@ function readRoute(request: Request): {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-invite-id");
   }
   if (
-    !isSafeFirebaseKey(inviteId) ||
+    !isSafeRecordKey(inviteId) ||
     inviteId.trim() !== inviteId ||
     (url.search &&
       (!match?.[2] ||
@@ -159,7 +159,7 @@ async function requirePairedInvite(
   repository: GameplayRepository,
   inviteId: string,
 ): Promise<void> {
-  const value = await repository.getRtdbPath(`invites/${inviteId}`);
+  const value = await repository.getStatePath(`invites/${inviteId}`);
   if (value === null || value === undefined) {
     throw new AuthApiFailure(404, "not-found", "invite-not-found");
   }
@@ -169,8 +169,8 @@ async function requirePairedInvite(
       : null;
   if (
     !invite ||
-    !isCanonicalFirebaseUid(invite.hostId) ||
-    !isCanonicalFirebaseUid(invite.guestId) ||
+    !isCanonicalLoginUid(invite.hostId) ||
+    !isCanonicalLoginUid(invite.guestId) ||
     invite.hostId === invite.guestId
   ) {
     throw new AuthApiFailure(409, "failed-precondition", "invite-not-paired");

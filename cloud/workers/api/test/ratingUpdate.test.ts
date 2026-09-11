@@ -242,7 +242,7 @@ function createRepository({
       finalPlan = buildPlan(playerProfile, opponentProfile);
       return { status: "committed", data: finalPlan.repairData };
     },
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       assert.doesNotMatch(path, /matchesRatingUpdates/);
       if (path === `invites/${request.inviteId}`) return invite;
       if (path === `players/${request.playerId}/matches/${request.matchId}`) {
@@ -255,7 +255,7 @@ function createRepository({
       }
       return null;
     },
-    patchRtdbRoot: async (updates) => {
+    patchStateRoot: async (updates) => {
       assert.ok(
         Object.keys(updates).every(
           (path) => !path.includes("matchesRatingUpdates"),
@@ -649,7 +649,7 @@ test("event ratings persist and dispatch one deterministic progress outbox", asy
   );
 });
 
-test("event ratings retain a pending recovery marker when RTDB repair fails", async () => {
+test("event ratings retain a pending recovery marker when match repair fails", async () => {
   const state = createRepository({
     invite: {
       hostId: request.playerId,
@@ -658,15 +658,15 @@ test("event ratings retain a pending recovery marker when RTDB repair fails", as
       eventId: "event-1",
     },
   });
-  state.repository.patchRtdbRoot = async () => {
-    throw new Error("rtdb-unavailable");
+  state.repository.patchStateRoot = async () => {
+    throw new Error("state-unavailable");
   };
   await assert.rejects(
     updateRatings(identity, request, state.repository, {
       createOwnerToken: () => "owner-token",
       now: () => 2_000,
     }),
-    /rtdb-unavailable/,
+    /state-unavailable/,
   );
   assert.equal(
     state.getFinalPlan()?.ratingUpdate.eventProgressState,

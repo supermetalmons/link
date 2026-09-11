@@ -14,7 +14,7 @@ import {
   type GameSessionLeaseProof,
 } from "./gameSessionTransitions.ts";
 import type { GameSessionMutationLockStore } from "./gameplayCoordinationD1.ts";
-import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
+import type { StateRepository } from "./stateRepositoryTypes.ts";
 import type { PrepareMatchPresentations } from "./matchPresentationRegistry.ts";
 import {
   acquireInviteSourceAdmission,
@@ -46,7 +46,7 @@ function resourceForPath(path: string): string | null {
 
 export function createAutomatchPersistence(
   db: D1Database,
-  raw: FirebaseRtdbClient,
+  raw: StateRepository,
   {
     now = Date.now,
     onCommitted,
@@ -62,7 +62,7 @@ export function createAutomatchPersistence(
   const inviteStore = createInviteSourceD1Store(db, { now });
   const reader = createGameSessionTransitions({
     db,
-    rtdb: raw,
+    state: raw,
     store,
     now,
     onCommitted,
@@ -142,7 +142,7 @@ export function createAutomatchPersistence(
       async (admission, inviteAdmission) => {
         const transitions = createGameSessionTransitions({
           db,
-          rtdb: raw,
+          state: raw,
           store,
           now,
           onCommitted,
@@ -160,7 +160,7 @@ export function createAutomatchPersistence(
   const recover = (key: string, signal?: AbortSignal) =>
     recoverResources([key], signal);
 
-  const client: FirebaseRtdbClient = {
+  const client: StateRepository = {
     ...raw,
     async getPath(path, query, signal) {
       const owned = parseAutomatchPath(path);
@@ -203,7 +203,7 @@ export function createAutomatchPersistence(
           if (owned.length !== paths.length) {
             const transitions = createGameSessionTransitions({
               db,
-              rtdb: raw,
+              state: raw,
               store,
               now,
               onCommitted,
@@ -295,7 +295,7 @@ export function createAutomatchPersistence(
       return write("session-transition-sweep", (admission, inviteAdmission) =>
         createGameSessionTransitions({
           db,
-          rtdb: raw,
+          state: raw,
           store,
           now,
           onCommitted,

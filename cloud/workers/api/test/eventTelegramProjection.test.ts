@@ -3,18 +3,18 @@ import test from "node:test";
 import {
   createTelegramDeliveryEngine,
   createTelegramLocalRetryBarrier,
-} from "../../../functions/telegram/deliveryEngine.js";
-import { buildTelegramSendDesired } from "../../../functions/telegram/desiredStateCore.js";
-import { buildSundayMonsReminder } from "../../../functions/telegram/sundayMonsReminder.js";
-import type { TelegramResult } from "../../../functions/telegram/client.js";
-import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
+} from "../../../runtime/telegram/deliveryEngine.js";
+import { buildTelegramSendDesired } from "../../../runtime/telegram/desiredStateCore.js";
+import { buildSundayMonsReminder } from "../../../runtime/telegram/sundayMonsReminder.js";
+import type { TelegramResult } from "../../../runtime/telegram/client.js";
+import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
 import type { TelegramAnnouncementRecord } from "../src/telegramD1.ts";
 import {
   buildEventTelegramProjection,
   buildEventTelegramProjectionUpdates,
-} from "../../../functions/telegram/eventProjectionCore.js";
-import { createTelegramRepository } from "../../../functions/telegram/repositoryCore.js";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+} from "../../../runtime/telegram/eventProjectionCore.js";
+import { createTelegramRepository } from "../../../runtime/telegram/repositoryCore.js";
+import type { StateRepository } from "../src/stateRepositoryTypes.ts";
 import {
   processEventProjectionTask,
   sweepEventTelegramProjections,
@@ -33,7 +33,7 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 function store(initial: Record<string, unknown>) {
   const values = new Map(Object.entries(initial));
-  const client: FirebaseRtdbClient = {
+  const client: StateRepository = {
     async getPath(path) {
       return values.get(path) ?? null;
     },
@@ -77,10 +77,10 @@ function ratingRepository(): RatingProjectionRepository {
     applyFebruaryChallengeReplay: async () => undefined,
     claimRatingTelegramProjection: async () => false,
     finalizeRatingUpdate: async () => ({ status: "lost" }),
-    getRtdbPath: async () => null,
+    getStatePath: async () => null,
     listDueRatingTelegramProjections: async () => [],
     markRatingTelegramProjection: async () => undefined,
-    patchRtdbRoot: async () => undefined,
+    patchStateRoot: async () => undefined,
     readProfileOwnershipSnapshot: async () => {
       throw new Error("unexpected-profile-ownership-read");
     },
@@ -1307,7 +1307,7 @@ test("the projection queue supplies announcement receipts for reminder adoption"
     },
     { ...TELEGRAM_TEST_ENV, TELEGRAM_EXTRA_CHAT_ID: "community-chat" },
     {
-      createRtdb: () => f.state.client,
+      createStateRepository: () => f.state.client,
       createTelegram: () => f.telegram,
       createRating: ratingRepository,
       createAnnouncements: () => ({ get: async () => f.receipt }),

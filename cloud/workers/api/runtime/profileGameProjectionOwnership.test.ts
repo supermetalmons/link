@@ -22,7 +22,7 @@ import {
 } from "../src/matchPresentationRegistry.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import { resolveInviteRole } from "../src/gameSessionMutations.ts";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import type { StateRepository } from "../src/stateRepositoryTypes.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import { activateDurableMatchPresentationTestState } from "./matchPresentationTestFixture.ts";
 
@@ -317,11 +317,11 @@ describe("D1-authoritative profile game projection ownership", () => {
     const reads: string[] = [];
     const runtime = createProfileGameProjectionRuntime(testEnv, {
       logger: { error() {} },
-      rtdb: {
-        async getRtdbPath(path) {
+      state: {
+        async getStatePath(path) {
           reads.push(path);
           if (/^players\/.+\/profile$/.test(path)) {
-            throw new Error("unexpected-rtdb-profile-owner-read");
+            throw new Error("unexpected-source-profile-owner-read");
           }
           if (path === `invites/${inviteId}`) return { hostId: loginUid };
           if (path === `automatch/${inviteId}`) return null;
@@ -371,8 +371,8 @@ describe("D1-authoritative profile game projection ownership", () => {
       ),
     );
     const runtime = createProfileGameProjectionRuntime(testEnv, {
-      rtdb: {
-        async getRtdbPath(path) {
+      state: {
+        async getStatePath(path) {
           if (path === `invites/${inviteId}`) {
             return {
               hostId: hostLoginId,
@@ -382,7 +382,7 @@ describe("D1-authoritative profile game projection ownership", () => {
             };
           }
           if (path === `automatch/${inviteId}`) return null;
-          throw new Error(`unexpected-rtdb-read:${path}`);
+          throw new Error(`unexpected-source-read:${path}`);
         },
       },
       wait: async () => undefined,
@@ -445,8 +445,8 @@ describe("D1-authoritative profile game projection ownership", () => {
           },
         };
       },
-      rtdb: {
-        async getRtdbPath(path) {
+      state: {
+        async getStatePath(path) {
           reads.push(path);
           if (path === `invites/${inviteId}`)
             return {
@@ -456,7 +456,7 @@ describe("D1-authoritative profile game projection ownership", () => {
               guestRematches: "x",
             };
           if (path === `automatch/${inviteId}`) return null;
-          throw new Error(`unexpected-firebase-read:${path}`);
+          throw new Error(`unexpected-source-read:${path}`);
         },
       },
       wait: async () => undefined,
@@ -513,8 +513,8 @@ describe("D1-authoritative profile game projection ownership", () => {
           .run();
       }
       const runtime = createProfileGameProjectionRuntime(testEnv, {
-        rtdb: {
-          async getRtdbPath(path) {
+        state: {
+          async getStatePath(path) {
             if (path === `invites/${entry.inviteId}`) {
               return {
                 eventOwned: true,
@@ -526,7 +526,7 @@ describe("D1-authoritative profile game projection ownership", () => {
               };
             }
             if (path === `automatch/${entry.inviteId}`) return null;
-            throw new Error(`unexpected-rtdb-read:${path}`);
+            throw new Error(`unexpected-source-read:${path}`);
           },
         },
         wait: async () => undefined,
@@ -571,9 +571,9 @@ describe("D1-authoritative profile game projection ownership", () => {
           };
         },
       },
-      rtdb: {
-        async getRtdbPath(path) {
-          throw new Error(`unexpected-rtdb-read:${path}`);
+      state: {
+        async getStatePath(path) {
+          throw new Error(`unexpected-source-read:${path}`);
         },
       },
       async withInviteProjectionLock(_inviteId, work) {
@@ -736,8 +736,8 @@ describe("D1-authoritative profile game projection ownership", () => {
       d1: countingProjectionDb,
       logger: { error() {}, info() {} },
       profileDb: countingProfileDb,
-      rtdb: {
-        async getRtdbPath(path, query) {
+      state: {
+        async getStatePath(path, query) {
           expect(query?.shallow).not.toBe(true);
           const inviteIndex = inviteIds.findIndex(
             (inviteId) => path === `invites/${inviteId}`,
@@ -751,7 +751,7 @@ describe("D1-authoritative profile game projection ownership", () => {
           if (inviteIds.some((inviteId) => path === `automatch/${inviteId}`)) {
             return null;
           }
-          throw new Error(`unexpected-rtdb-read:${path}`);
+          throw new Error(`unexpected-source-read:${path}`);
         },
       },
       wait: async () => undefined,
@@ -810,19 +810,19 @@ describe("D1-authoritative profile game projection ownership", () => {
       ).bind(inviteId, JSON.stringify({ hostId: hostUid, guestId: null })),
     ]);
     const reads: string[] = [];
-    const rtdbClient: FirebaseRtdbClient = {
+    const stateClient: StateRepository = {
       async getPath(path) {
         reads.push(path);
-        throw new Error(`unexpected-firebase-read:${path}`);
+        throw new Error(`unexpected-source-read:${path}`);
       },
       async patchRoot() {
-        throw new Error("unexpected-firebase-write");
+        throw new Error("unexpected-source-write");
       },
       async transactPath() {
-        throw new Error("unexpected-firebase-write");
+        throw new Error("unexpected-source-write");
       },
     };
-    const repository = createGameplayRepository(testEnv, { rtdbClient });
+    const repository = createGameplayRepository(testEnv, { stateClient });
 
     await expect(
       resolveInviteRole({ uid: alternateUid }, { inviteId }, repository),
@@ -836,8 +836,8 @@ describe("D1-authoritative profile game projection ownership", () => {
     const loginUid = "d1-fenced-event-login";
     await insertProfileOwner(profileId, loginUid);
     const runtime = createEventProfileGameProjectionRuntime(testEnv, {
-      rtdb: {
-        async getRtdbPath(path) {
+      state: {
+        async getStatePath(path) {
           expect(path).toBe(`events/${eventId}`);
           return {
             eventId,

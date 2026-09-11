@@ -228,10 +228,9 @@ const wagerControlStatement: D1PreparedStatement = {
   bind: () => wagerControlStatement,
   first: async <T>() =>
     ({
-      storage_mode: "firebase",
-      previous_storage_mode: null,
+      storage_mode: "d1",
       freeze_generation: 0,
-      activated_at_ms: null,
+      updated_at_ms: 1,
     }) as T,
 };
 const wagerStateActivation = {
@@ -324,8 +323,6 @@ const eventPrizeWithdrawalsDb = {
 } satisfies D1Database;
 
 export const TELEGRAM_TEST_ENV = {
-  MATCH_PRESENTATION_MIGRATION_SECRET: "test-presentation-migration-secret",
-  MATCH_STATE_MIGRATION_SECRET: "test-match-state-secret",
   SESSION_JWT_KEYS: JSON.stringify({
     activeKid: "test",
     keys: { test: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
@@ -344,9 +341,6 @@ export const TELEGRAM_TEST_ENV = {
   EVENT_PRIZE_ADMIN_PRIVATE_KEY: "test-event-prize-private-key",
   EVENT_PRIZE_WITHDRAWALS_DB: eventPrizeWithdrawalsDb,
   EVENT_PRIZE_WITHDRAWAL_WORKFLOW: workflow,
-  FIREBASE_RTDB_URL: "https://mons-link-default-rtdb.firebaseio.com",
-  GAMEPLAY_SERVICE_ACCOUNT_EMAIL: "gameplay@example.iam.gserviceaccount.com",
-  GAMEPLAY_SERVICE_ACCOUNT_PRIVATE_KEY: "test-private-key",
   HELIUS_RPC_API_KEY: "test-helius-key",
   NFT_RATE_LIMITER: rateLimit,
   PROFILE_GAME_PROJECTION_QUEUE: queue,

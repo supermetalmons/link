@@ -8,18 +8,18 @@ const {
   getSundayMonsReminderLeadMs,
   isSundayMonsReminderEvent,
   isSundayMonsReminderLeadMs,
-} = require("../functions/telegram/sundayMonsReminder");
+} = require("../runtime/telegram/sundayMonsReminder");
 const {
   buildEventPrizeAnnouncement,
   isEventPrizeAnnouncementEvent,
-} = require("../functions/telegram/eventPrizeAnnouncement");
+} = require("../runtime/telegram/eventPrizeAnnouncement");
 const {
   AUTOMATCH_WAITING_EMOJI_ID,
   getTelegramEmojiTag,
-} = require("../functions/telegramDisplay");
+} = require("../runtime/telegramDisplay");
 const {
   renderUpcomingMessage,
-} = require("../functions/telegram/eventProjectionCore");
+} = require("../runtime/telegram/eventProjectionCore");
 
 const PRIZE_EVENT_ID = "z3oj52Iiime";
 const NO_PRIZES_EVENT_ID = "sunday-no-prizes";

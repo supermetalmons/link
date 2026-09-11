@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFirebaseRtdbClient } from "../test/legacyFirebaseRtdb.ts";
 import {
   changedInviteWagersIds,
   notifyInviteWagersChanged,
+  notifyInviteSourceChanged,
 } from "../src/inviteWagersNotifications.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
@@ -60,44 +60,8 @@ test("wager invalidation covers source and access changes without unrelated stat
   );
 });
 
-test("confirmed PATCH and CAS invalidation happens after the attempted write", async () => {
+test("confirmed source changes deduplicate metadata and wager invalidations", async () => {
   const calls: string[] = [];
-  const env = environment(async (id) => {
-    calls.push(`notify:${id}`);
-  });
-  const client = createFirebaseRtdbClient(env, {
-    getAccessToken: async () => "token",
-    fetcher: async (_url, init) => {
-      calls.push(init?.method || "GET");
-      return init?.method === "PATCH"
-        ? new Response(null, { status: 204 })
-        : new Response(JSON.stringify({ proposedBy: { host: true } }), {
-            headers: { ETag: "etag" },
-          });
-    },
-  });
-  await client.patchRoot({
-    "invites/invite/wagers/match/proposals/host": {},
-    "invites/invite/wagers/match/proposedBy/host": true,
-  });
-  assert.deepEqual(calls, ["PATCH", "notify:invite"]);
-  calls.length = 0;
-  await client.transactPath("invites/invite/wagers/match", () => ({
-    value: {},
-    decision: "accepted",
-  }));
-  assert.deepEqual(calls, ["GET", "PUT", "notify:invite"]);
-  calls.length = 0;
-  await client.transactPath("invites/invite/wagers/match", () => ({
-    commit: false,
-    decision: "noop",
-  }));
-  assert.deepEqual(calls, ["GET"]);
-});
-
-test("confirmed metadata and wager changes share one invalidation per invite while ambiguous writes still notify wagers", async () => {
-  const calls: string[] = [];
-  let ambiguous = false;
   const env = {
     ...TELEGRAM_TEST_ENV,
     INVITE_REACTIONS: {
@@ -111,101 +75,36 @@ test("confirmed metadata and wager changes share one invalidation per invite whi
       }),
     },
   } as unknown as Env;
-  const client = createFirebaseRtdbClient(env, {
-    getAccessToken: async () => "token",
-    fetcher: async (_url, init) => {
-      if (!init?.method || init.method === "GET")
-        return new Response("{}", { headers: { ETag: "etag" } });
-      if (ambiguous) throw new Error("lost-response");
-      return init.method === "PATCH"
-        ? new Response(null, { status: 204 })
-        : new Response("{}");
+  await notifyInviteSourceChanged(
+    env,
+    {
+      "invites/combined/guestId": "guest",
+      "invites/combined/wagers/match": {},
+      "invites/wager-only/wagers/match": {},
     },
-  });
-  await client.patchRoot({
-    "invites/combined/guestId": "guest",
-    "invites/combined/wagers/match": {},
-    "invites/wager-only/wagers/match": {},
-  });
+    true,
+  );
   assert.deepEqual(calls, ["metadata:combined", "wagers:wager-only"]);
   calls.length = 0;
-  await client.transactPath("invites/combined", () => ({
-    value: {},
-    decision: "replace",
-  }));
+  await notifyInviteSourceChanged(env, { "invites/combined": {} }, true);
   assert.deepEqual(calls, ["metadata:combined"]);
-  calls.length = 0;
-  ambiguous = true;
-  await assert.rejects(client.patchRoot({ "invites/combined": {} }));
-  assert.deepEqual(calls, ["wagers:combined"]);
 });
 
-test("ambiguous writes invalidate without changing the original error result", async () => {
-  for (const method of ["PATCH", "PUT"]) {
-    for (const failure of ["network", "response", "http"]) {
-      const calls: string[] = [];
-      const client = createFirebaseRtdbClient(
-        environment(async (id) => {
-          calls.push(`notify:${id}`);
-        }),
-        {
-          getAccessToken: async () => "token",
-          fetcher: async (_url, init) => {
-            calls.push(init?.method || "GET");
-            if (init?.method === "GET" || !init?.method) {
-              return new Response("{}", { headers: { ETag: "etag" } });
-            }
-            if (failure === "network")
-              throw new Error("response-lost-after-commit");
-            if (failure === "http") return new Response(null, { status: 503 });
-            return new Response("invalid-json", { status: 200 });
-          },
-        },
-      );
-      const action =
-        method === "PATCH"
-          ? client.patchRoot({ "invites/invite/wagers/match": {} })
-          : client.transactPath("invites/invite/wagers/match", () => ({
-              value: {},
-              decision: "write",
-            }));
-      if (method === "PATCH" && failure === "response") await action;
-      else await assert.rejects(action);
-      assert.equal(calls.at(-1), "notify:invite");
-      assert.equal(
-        calls.filter((call) => call.startsWith("notify:")).length,
-        1,
-      );
-    }
-  }
-});
-
-test("read failures and known conditional conflicts do not invalidate uncommitted state", async () => {
-  let notices = 0;
-  for (const failRead of [true, false]) {
-    const client = createFirebaseRtdbClient(
-      environment(async () => {
-        notices++;
-      }),
-      {
-        getAccessToken: async () => "token",
-        maxTransactionAttempts: 1,
-        fetcher: async (_url, init) => {
-          if (failRead) throw new Error("read-failed");
-          return init?.method === "PUT"
-            ? new Response(null, { status: 412 })
-            : new Response("{}", { headers: { ETag: "etag" } });
-        },
-      },
-    );
-    await assert.rejects(
-      client.transactPath("invites/invite/wagers/match", () => ({
-        value: {},
-        decision: "write",
-      })),
-    );
-  }
-  assert.equal(notices, 0);
+test("ambiguous source changes invalidate wagers without claiming metadata committed", async () => {
+  const notices: string[] = [];
+  await notifyInviteSourceChanged(
+    environment(async (id) => {
+      notices.push(id);
+    }),
+    {
+      "invites/combined": {},
+      "invites/wager-only/wagers/match/proposals/host": {},
+      "invites/wager-only/wagers/match/proposedBy/host": true,
+      "invites/unrelated/hostRematches": "1",
+    },
+    false,
+  );
+  assert.deepEqual(notices, ["combined", "wager-only"]);
 });
 
 test("failed or stuck room notifications are bounded and cannot reject committed work", async () => {
@@ -228,14 +127,11 @@ test("failed or stuck room notifications are bounded and cannot reject committed
     );
     assert.equal(failures, 1);
   }
-  const client = createFirebaseRtdbClient(
+  await notifyInviteSourceChanged(
     environment(async () => {
       throw new Error("unavailable");
     }),
-    {
-      getAccessToken: async () => "token",
-      fetcher: async () => new Response(null, { status: 204 }),
-    },
+    { "invites/invite/wagers/match": {} },
+    true,
   );
-  await client.patchRoot({ "invites/invite/wagers/match": {} });
 });

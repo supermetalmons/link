@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createTelegramRepository } from "../../../functions/telegram/repositoryCore.js";
+import { createTelegramRepository } from "../../../runtime/telegram/repositoryCore.js";
 import {
   handleTelegramCommand,
   MAX_TELEGRAM_COMMAND_BODY_BYTES,

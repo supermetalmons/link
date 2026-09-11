@@ -6,7 +6,7 @@ import {
 } from "./automatchPersistence.ts";
 import { notifyMatchSyncInvites } from "./matchSyncNotifications.ts";
 import { prepareCreatedMatchPresentations } from "./matchPresentationRegistry.ts";
-import { createWagerStateRtdbClient } from "./wagerStateRepository.ts";
+import { createWagerStateRepository } from "./wagerStateRepository.ts";
 import { createMatchStateSource } from "./matchStateSource.ts";
 import type { HistoricalMatchPair } from "@mons/shared/game-sessions";
 import type {
@@ -15,10 +15,10 @@ import type {
   MiningSnapshot,
 } from "@mons/shared/mining";
 import type {
-  FirebaseRtdbClient,
-  FirebaseRtdbQuery,
-  FirebaseRtdbTransactionResult,
-} from "./firebaseRtdb.ts";
+  StateRepository,
+  StateQuery,
+  StateTransactionResult,
+} from "./stateRepositoryTypes.ts";
 import {
   createCanonicalGameplayRepository,
   createCanonicalRatingRepository,
@@ -159,8 +159,8 @@ export type RatingFinalizeResult =
 
 export type RatingRepository = Pick<
   GameplayRepository,
-  | "getRtdbPath"
-  | "patchRtdbRoot"
+  | "getStatePath"
+  | "patchStateRoot"
   | "readProfileOwnershipSnapshot"
   | "readMatchPair"
 > & {
@@ -240,7 +240,7 @@ export type RatingProfileGameProjectionRepository = RatingRepository & {
 };
 
 export type GameplayRepository = ProfileOwnershipReader & {
-  readMatchPair?: FirebaseRtdbClient["readMatchPair"];
+  readMatchPair?: StateRepository["readMatchPair"];
   automatchPersistence?: AutomatchPersistence;
   wagerFrozen?: WagerFrozenStore;
   applyWagerTransferOnce: (
@@ -256,20 +256,20 @@ export type GameplayRepository = ProfileOwnershipReader & {
   ) => Promise<NavigationGameDocument | null>;
   getMiningMaterials: (profileId: string) => Promise<MiningMaterials>;
   getMiningSnapshot: (profileId: string) => Promise<MiningSnapshot | null>;
-  getRtdbPath: (
+  getStatePath: (
     path: string,
-    query?: FirebaseRtdbQuery,
+    query?: StateQuery,
     signal?: AbortSignal,
   ) => Promise<unknown>;
-  patchRtdbRoot: (
+  patchStateRoot: (
     updates: Record<string, unknown>,
     signal?: AbortSignal,
   ) => Promise<void>;
-  transactRtdbPath: (
+  transactStatePath: (
     path: string,
     updater: (current: unknown) => unknown,
     signal?: AbortSignal,
-  ) => Promise<FirebaseRtdbTransactionResult>;
+  ) => Promise<StateTransactionResult>;
 };
 
 type GameplayRepositoryDependencies = {
@@ -277,7 +277,7 @@ type GameplayRepositoryDependencies = {
   d1?: D1Database;
   fetcher?: typeof fetch;
   now?: () => number;
-  rtdbClient?: FirebaseRtdbClient;
+  stateClient?: StateRepository;
   timeoutMs?: number;
 };
 
@@ -298,10 +298,10 @@ export function createGameplayRepository(
     d1 = env.PROFILE_GAMES_DB,
     wagerFrozen,
     now = Date.now,
-    rtdbClient,
+    stateClient,
   }: GameplayRepositoryDependencies = {},
 ): GameplayRepository {
-  const matchSource = rtdbClient || createMatchStateSource(env);
+  const matchSource = stateClient || createMatchStateSource(env);
   const automatchPersistence = createAutomatchPersistence(d1, matchSource, {
     now,
     prepareMatchPresentations: (creations) =>
@@ -313,7 +313,7 @@ export function createGameplayRepository(
       ]);
     },
   });
-  const source = createWagerStateRtdbClient(
+  const source = createWagerStateRepository(
     env.PROFILE_DB,
     automatchPersistence.client,
     {

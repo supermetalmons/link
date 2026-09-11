@@ -1,4 +1,4 @@
-import { normalizeFirebaseKey } from "@mons/shared/ids";
+import { normalizeRecordKey } from "@mons/shared/ids";
 import {
   INVITE_METADATA_MAX_MESSAGE_BYTES,
   INVITE_METADATA_SOCKET_PROTOCOL,
@@ -29,7 +29,7 @@ export class InviteMetadataApiError extends Error {
 }
 
 function metadataPath(inviteId: string): string {
-  if (!inviteId || normalizeFirebaseKey(inviteId) !== inviteId) {
+  if (!inviteId || normalizeRecordKey(inviteId) !== inviteId) {
     throw new InviteMetadataApiError("invalid-invite");
   }
   return `/invites/${encodeURIComponent(inviteId)}/metadata`;

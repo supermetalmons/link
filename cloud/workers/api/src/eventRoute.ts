@@ -17,7 +17,7 @@ import {
   type RemoveEventParticipantRequest,
   type SyncEventStateRequest,
 } from "@mons/shared/events";
-import { normalizeFirebaseKey } from "@mons/shared/ids";
+import { normalizeRecordKey } from "@mons/shared/ids";
 import {
   AuthApiFailure,
   authErrorResponse,
@@ -105,7 +105,7 @@ export async function readEventBody(
     if (!isJoinEventRequest(body)) {
       throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
     }
-    return { eventId: normalizeFirebaseKey(body.eventId) || "" };
+    return { eventId: normalizeRecordKey(body.eventId) || "" };
   }
   if (pathname === "/events/create") {
     if (!isCreateEventRequest(body)) {
@@ -141,8 +141,8 @@ export async function readEventBody(
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
   }
   return {
-    eventId: normalizeFirebaseKey(body.eventId) || "",
-    participantProfileId: normalizeFirebaseKey(body.participantProfileId) || "",
+    eventId: normalizeRecordKey(body.eventId) || "",
+    participantProfileId: normalizeRecordKey(body.participantProfileId) || "",
   };
 }
 

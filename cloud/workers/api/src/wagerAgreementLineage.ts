@@ -1,6 +1,6 @@
 import type { MiningMaterialName } from "@mons/shared/mining";
 import { isWagerAgreement, type WagerAgreement } from "@mons/shared/wagers";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import {
   createOperationId,
@@ -104,8 +104,8 @@ async function createLineageContext(
     !Number.isSafeInteger(proposerReservedCount) ||
     proposerReservedCount <= 0 ||
     agreement.count > proposerReservedCount ||
-    !isSafeFirebaseKey(agreement.proposerId) ||
-    !isSafeFirebaseKey(agreement.accepterId) ||
+    !isSafeRecordKey(agreement.proposerId) ||
+    !isSafeRecordKey(agreement.accepterId) ||
     agreement.proposerId === agreement.accepterId
   ) {
     return null;
@@ -402,7 +402,7 @@ async function markWagerAgreementLineageReady(
 ): Promise<void> {
   let value: unknown;
   try {
-    const result = await repository.transactRtdbPath(wagerPath, (current) => {
+    const result = await repository.transactStatePath(wagerPath, (current) => {
       const wager = toRecord(current);
       const agreementOperation = toRecord(wager?.agreementOperation);
       if (
@@ -429,7 +429,7 @@ async function markWagerAgreementLineageReady(
     });
     value = result.value;
   } catch {
-    value = await repository.getRtdbPath(wagerPath);
+    value = await repository.getStatePath(wagerPath);
   }
   if (!sameLineageReady(value, operationId, fingerprint)) {
     throw new Error("wager-agreement-lineage-unavailable");
@@ -442,7 +442,7 @@ export async function ensureWagerAgreementLineageReady(
   now: () => number,
   assertMutationAllowed?: () => Promise<void>,
 ): Promise<void> {
-  const wager = toRecord(await repository.getRtdbPath(wagerPath));
+  const wager = toRecord(await repository.getStatePath(wagerPath));
   const agreementOperation = toRecord(wager?.agreementOperation);
   if (
     !agreementOperation ||
@@ -460,7 +460,7 @@ export async function ensureWagerAgreementLineageReady(
     agreementOperation,
   );
   if (!adjustments) {
-    const current = await repository.getRtdbPath(wagerPath);
+    const current = await repository.getStatePath(wagerPath);
     if (sameLineageReady(current, operationId, fingerprint)) {
       return;
     }

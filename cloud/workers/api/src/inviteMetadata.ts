@@ -4,7 +4,7 @@ import {
   isInviteMetadataSnapshot,
   type InviteMetadataSnapshot,
 } from "@mons/shared/invite-metadata";
-import { isCanonicalFirebaseUid } from "./firebaseKeys.ts";
+import { isCanonicalLoginUid } from "./recordKeys.ts";
 import { createInviteSourceReader } from "./inviteSource.ts";
 
 export type InviteMetadataReadResult =
@@ -56,7 +56,7 @@ export function normalizeInviteMetadata(
     automatchOperationIds: Object.fromEntries(
       Object.entries(record(invite.automatchOperationIds) || {}).filter(
         (entry): entry is [string, string] =>
-          isCanonicalFirebaseUid(entry[0]) &&
+          isCanonicalLoginUid(entry[0]) &&
           typeof entry[1] === "string" &&
           GAME_SESSION_OPERATION_ID_PATTERN.test(entry[1]),
       ),

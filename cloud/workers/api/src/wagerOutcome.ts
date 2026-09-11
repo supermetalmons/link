@@ -354,7 +354,7 @@ async function readMatchPair(
   playerUid: string,
   opponentUid: string,
   matchId: string,
-  repository: Pick<GameplayRepository, "getRtdbPath" | "readMatchPair">,
+  repository: Pick<GameplayRepository, "getStatePath" | "readMatchPair">,
   signal?: AbortSignal,
 ): Promise<[MatchRecord | null, MatchRecord | null]> {
   const values = await readGameplayMatchPair(
@@ -521,7 +521,7 @@ async function claimSettlement(
   let current: unknown;
   await assertMutationAllowed?.();
   try {
-    const transaction = await repository.transactRtdbPath(
+    const transaction = await repository.transactStatePath(
       wagerPath,
       (value) => {
         const wager = toRecord(value);
@@ -568,7 +568,7 @@ async function claimSettlement(
     }
     current = transaction.value;
   } catch {
-    current = await repository.getRtdbPath(wagerPath, undefined, signal);
+    current = await repository.getStatePath(wagerPath, undefined, signal);
   }
   const wager = toRecord(current);
   const settlement = readStoredSettlement(wager);
@@ -652,7 +652,7 @@ async function completeSettlement(
     };
   }
   await assertMutationAllowed?.();
-  await repository.patchRtdbRoot(updates, signal);
+  await repository.patchStateRoot(updates, signal);
   return insufficientMaterials
     ? WAGER_SETTLEMENT_INSUFFICIENT_MATERIALS_REASON
     : null;
@@ -660,7 +660,7 @@ async function completeSettlement(
 
 async function readWagerSettlementRetry(
   task: WagerSettlementRetryTask,
-  repository: Pick<GameplayRepository, "getRtdbPath">,
+  repository: Pick<GameplayRepository, "getStatePath">,
 ): Promise<
   | { state: "completed" | "stale" }
   | { state: "unclaimed" }
@@ -672,7 +672,7 @@ async function readWagerSettlementRetry(
   ) {
     return { state: "stale" };
   }
-  const rawWager = await repository.getRtdbPath(
+  const rawWager = await repository.getStatePath(
     `invites/${task.inviteId}/wagers/${task.matchId}`,
   );
   if (rawWager === null || rawWager === undefined) {
@@ -694,7 +694,7 @@ async function readWagerSettlementRetry(
 
 export async function classifyWagerSettlementRetry(
   task: WagerSettlementRetryTask,
-  repository: Pick<GameplayRepository, "getRtdbPath">,
+  repository: Pick<GameplayRepository, "getStatePath">,
 ): Promise<WagerSettlementRetryState> {
   return (await readWagerSettlementRetry(task, repository)).state;
 }
@@ -818,14 +818,14 @@ export async function resolveWagerOutcome(
   const wagerPath = `invites/${request.inviteId}/wagers/${request.matchId}`;
   const markerPath = `invites/${request.inviteId}/matchesWagerResolutions/${request.matchId}`;
   if (
-    (await repository.getRtdbPath(
+    (await repository.getStatePath(
       markerPath,
       undefined,
       dependencies.signal,
     )) === true
   ) {
     const markedWager = toRecord(
-      await repository.getRtdbPath(wagerPath, undefined, dependencies.signal),
+      await repository.getStatePath(wagerPath, undefined, dependencies.signal),
     );
     const markedSettlement = readStoredSettlement(markedWager);
     const proposals = toRecord(markedWager?.proposals);

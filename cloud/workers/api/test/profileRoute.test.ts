@@ -18,7 +18,7 @@ import {
 } from "./testEnv.ts";
 
 const ctx = { waitUntil: () => undefined };
-const identity = { idToken: "firebase-id-token", uid: "firebase-uid" };
+const identity = { idToken: "session-token", uid: "login-uid" };
 const TELEGRAM_TEST_ENV = {
   ...BASE_ENV,
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
@@ -137,7 +137,7 @@ test("applies authenticated CORS and rejects methods before authentication", asy
   assert.equal(verifications, 0);
 });
 
-test("accepts Firebase UID character limits and profile ID byte limits", () => {
+test("accepts login UID character limits and profile ID byte limits", () => {
   assert.equal(validLookupId("login", "é".repeat(128)), true);
   assert.equal(validLookupId("login", "é".repeat(129)), false);
   assert.equal(validLookupId("profile", "é".repeat(750)), true);
@@ -339,7 +339,7 @@ test("preserves username validation and repository outcomes", async () => {
       },
     );
     assert.deepEqual(await responseJson(response), expected);
-    assert.deepEqual(calls, [["firebase-uid", "Mons"]]);
+    assert.deepEqual(calls, [["login-uid", "Mons"]]);
   }
 });
 
@@ -418,7 +418,7 @@ test("updates one exact customization field for the verified login", async () =>
   assert.equal(response.status, 200);
   assert.deepEqual(await responseJson(response), { ok: true });
   assert.deepEqual(calls, [
-    ["firebase-uid", { field: "completedProblems", value: ["1"] }],
+    ["login-uid", { field: "completedProblems", value: ["1"] }],
   ]);
 });
 

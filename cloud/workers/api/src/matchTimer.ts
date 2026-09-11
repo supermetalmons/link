@@ -26,7 +26,7 @@ import {
 import { Color, Game } from "mons-rules";
 import { AuthApiFailure } from "./authErrors.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import type { MatchTimerStartStore } from "./gameplayCoordinationD1.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import {
@@ -120,15 +120,15 @@ export type MatchTimerDependencies = {
 
 type MatchTimerRepository = Pick<
   GameplayRepository,
-  "getRtdbPath" | "readProfileOwnershipSnapshot" | "transactRtdbPath"
+  "getStatePath" | "readProfileOwnershipSnapshot" | "transactStatePath"
 >;
 
 type MatchTimerClaimRepository = Pick<
   GameplayRepository,
-  | "getRtdbPath"
-  | "patchRtdbRoot"
+  | "getStatePath"
+  | "patchStateRoot"
   | "readProfileOwnershipSnapshot"
-  | "transactRtdbPath"
+  | "transactStatePath"
 >;
 
 type MatchTimerRequest =
@@ -204,13 +204,13 @@ async function readMatchRecords(
     `invites/${request.inviteId}`,
   ];
   const initial = await Promise.allSettled(
-    paths.map((path) => repository.getRtdbPath(path, undefined, signal)),
+    paths.map((path) => repository.getStatePath(path, undefined, signal)),
   );
   const values = await Promise.all(
     initial.map((result, index) =>
       result.status === "fulfilled"
         ? result.value
-        : repository.getRtdbPath(paths[index], undefined, signal),
+        : repository.getStatePath(paths[index], undefined, signal),
     ),
   );
   return [values[0], values[1], values[2]];
@@ -341,7 +341,7 @@ async function buildTimerClaimSideEffectUpdates(
     invite?.eventOwned === true && typeof invite.eventId === "string"
       ? invite.eventId.trim()
       : "";
-  if (!eventId || !isSafeFirebaseKey(eventId)) {
+  if (!eventId || !isSafeRecordKey(eventId)) {
     return { progress: null, updates };
   }
   const sourceKey = `timer:${request.inviteId}:${request.matchId}`;
@@ -399,7 +399,7 @@ async function persistTimerClaimSideEffects(
     attempt++
   ) {
     try {
-      await repository.patchRtdbRoot(updates, signal);
+      await repository.patchStateRoot(updates, signal);
       return;
     } catch (error) {
       lastError = error;
@@ -443,7 +443,7 @@ async function releasePendingClaimFence(
   repository: MatchTimerClaimRepository,
   signal: AbortSignal,
 ): Promise<void> {
-  await repository.transactRtdbPath(
+  await repository.transactStatePath(
     path,
     (current) => {
       const value = toRecord(current);
@@ -467,7 +467,7 @@ export async function startMatchTimer(
     : timeoutSignal;
   await authorizePlayer(identity, request.playerId, repository, signal);
   if (dependencies.startCanonical) {
-    const inviteValue = await repository.getRtdbPath(
+    const inviteValue = await repository.getStatePath(
       `invites/${request.inviteId}`,
       undefined,
       signal,
@@ -597,7 +597,7 @@ export async function startMatchTimer(
   }
   const timer = marker.timer;
   const commitSignal = AbortSignal.timeout(MATCH_TIMER_OPERATION_TIMEOUT_MS);
-  const timerTransaction = await repository.transactRtdbPath(
+  const timerTransaction = await repository.transactStatePath(
     `players/${request.playerId}/matches/${request.matchId}/timer`,
     (current) => {
       if (current === MATCH_TIMER_TERMINAL) {
@@ -640,7 +640,7 @@ export async function claimMatchVictoryByTimer(
     : timeoutSignal;
   await authorizePlayer(identity, request.playerId, repository, signal);
   if (dependencies.claimCanonical) {
-    const inviteValue = await repository.getRtdbPath(
+    const inviteValue = await repository.getStatePath(
       `invites/${request.inviteId}`,
       undefined,
       signal,
@@ -762,7 +762,7 @@ export async function claimMatchVictoryByTimer(
     turnNumber: game.turnNumber,
     expiresAtMs: claimStartedAtMs + MATCH_TIMER_CLAIM_LEASE_MS,
   };
-  const claimTransaction = await repository.transactRtdbPath(
+  const claimTransaction = await repository.transactStatePath(
     claimPath,
     (current) => {
       const value = toRecord(current);

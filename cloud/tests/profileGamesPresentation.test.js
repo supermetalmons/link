@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   createProfileGamesProjectionCore,
-} = require("../functions/profileGamesProjectionCore");
+} = require("../runtime/profileGamesProjectionCore");
 
 const inviteId = "presentation-invite";
 const guestMatchPath = `players/guest-login/matches/${inviteId}`;
@@ -31,7 +31,7 @@ function fixture({ getMatchEmoji, guestProfile = null }) {
         }
       },
       getProjection: async (profileId) => projections.get(profileId) || null,
-      async getRtdbPath(path) {
+      async getStatePath(path) {
         reads.push(path);
         if (path === `invites/${inviteId}`) {
           return {
@@ -43,7 +43,7 @@ function fixture({ getMatchEmoji, guestProfile = null }) {
         }
         if (path === `automatch/${inviteId}`) return null;
         if (path === guestMatchPath) return { emojiId: 1, aura: "" };
-        throw new Error(`unexpected-rtdb-read:${path}`);
+        throw new Error(`unexpected-state-read:${path}`);
       },
       async getMatchEmoji(...args) {
         presentationReads.push(args);
@@ -123,7 +123,7 @@ test("presentation failures retry without publishing a stale seed avatar", async
   assert.equal(state.reads.includes(guestMatchPath), false);
 });
 
-test("durable presentation misses never read Firebase seed avatars", async () => {
+test("durable presentation misses never read legacy seed avatars", async () => {
   const state = fixture({
     getMatchEmoji: async () => null,
   });
@@ -132,7 +132,7 @@ test("durable presentation misses never read Firebase seed avatars", async () =>
   assert.deepEqual(state.writes, []);
 });
 
-test("appearance authority failures preserve projection state without Firebase fallback", async () => {
+test("appearance authority failures preserve projection state without legacy fallback", async () => {
   const state = fixture({
     getMatchEmoji: async () => {
       throw new Error("authority-unavailable");

@@ -26,16 +26,16 @@ describe("D1 wager reservation runtime", () => {
   });
 
   it("uses D1 exclusively, releases successful admissions, and permits frozen reads", async () => {
-    let firebaseAccesses = 0;
+    let sourceAccesses = 0;
     let frozenWork = 0;
-    const unexpectedFirebase = async () => {
-      firebaseAccesses++;
-      throw new Error("unexpected-firebase-reservation-access");
+    const unexpectedSource = async () => {
+      sourceAccesses++;
+      throw new Error("unexpected-source-reservation-access");
     };
     const repository = {
-      getRtdbPath: unexpectedFirebase,
-      transactRtdbPath: unexpectedFirebase,
-      patchRtdbRoot: unexpectedFirebase,
+      getStatePath: unexpectedSource,
+      transactStatePath: unexpectedSource,
+      patchStateRoot: unexpectedSource,
     } as unknown as GameplayRepository;
     const runtime = createWagerReservationRuntime(env, repository, {
       now: () => 2_000_000,
@@ -88,14 +88,14 @@ describe("D1 wager reservation runtime", () => {
       }),
     ).rejects.toThrow("wager-reservation-writes-disabled");
     expect(frozenWork).toBe(0);
-    expect(firebaseAccesses).toBe(0);
+    expect(sourceAccesses).toBe(0);
   });
 
   it("fails unavailable D1 control closed without querying gameplay storage", async () => {
-    let firebaseAccesses = 0;
+    let sourceAccesses = 0;
     const repository = {
-      getRtdbPath: async () => {
-        firebaseAccesses++;
+      getStatePath: async () => {
+        sourceAccesses++;
         return null;
       },
     } as unknown as GameplayRepository;
@@ -121,6 +121,6 @@ describe("D1 wager reservation runtime", () => {
         throw new Error("unexpected-work");
       }),
     ).rejects.toThrow("wager-reservation-unavailable");
-    expect(firebaseAccesses).toBe(0);
+    expect(sourceAccesses).toBe(0);
   });
 });

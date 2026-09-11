@@ -94,7 +94,7 @@ describe("event read route", () => {
       },
       {
         repository: {
-          getRtdbPath: async () => null,
+          getStatePath: async () => null,
           readProfileOwnershipSnapshot: async () => {
             throw new Error("unused");
           },
@@ -124,7 +124,7 @@ describe("event read route", () => {
       { waitUntil() {} },
       {
         repository: {
-          getRtdbPath: async () => null,
+          getStatePath: async () => null,
           readProfileOwnershipSnapshot: async () => {
             throw new Error("unused");
           },
@@ -146,7 +146,7 @@ describe("event read route", () => {
       { waitUntil() {} },
       {
         repository: {
-          getRtdbPath: async () => null,
+          getStatePath: async () => null,
           readProfileOwnershipSnapshot: async () => {
             throw new Error("unused");
           },
@@ -175,7 +175,7 @@ describe("event read route", () => {
       { waitUntil() {} },
       {
         repository: {
-          getRtdbPath: async () => {
+          getStatePath: async () => {
             throw new Error("storage should not run");
           },
           readProfileOwnershipSnapshot: async () => {
@@ -191,9 +191,9 @@ describe("event read route", () => {
   it("serves only the caller's canonical profile prizes", async () => {
     const repository: Pick<
       GameplayRepository,
-      "getRtdbPath" | "readProfileOwnershipSnapshot"
+      "getStatePath" | "readProfileOwnershipSnapshot"
     > = {
-      getRtdbPath: async () => null,
+      getStatePath: async () => null,
       async readProfileOwnershipSnapshot() {
         return {
           loginOwnerByUid: new Map([["login-one", { profileId, revision: 1 }]]),
@@ -251,9 +251,9 @@ describe("event read route", () => {
   it("includes a D1 bookmark for callers without a canonical profile", async () => {
     const repository: Pick<
       GameplayRepository,
-      "getRtdbPath" | "readProfileOwnershipSnapshot"
+      "getStatePath" | "readProfileOwnershipSnapshot"
     > = {
-      getRtdbPath: async () => null,
+      getStatePath: async () => null,
       async readProfileOwnershipSnapshot() {
         return {
           loginOwnerByUid: new Map([["anonymous-login", null]]),

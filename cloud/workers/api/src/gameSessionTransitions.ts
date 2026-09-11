@@ -1,3 +1,4 @@
+import { STATE_VALUE_FIELD } from "./stateCompatibility.ts";
 import { normalizeHistoricalMatchRecord } from "@mons/shared/game-sessions";
 import type { MatchStateRecord } from "./matchStateTypes.ts";
 import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
@@ -7,8 +8,8 @@ import {
   parseAutomatchPath,
   type AutomatchRecordMutation,
 } from "./automatchD1.ts";
-import type { FirebaseRtdbClient } from "./firebaseRtdb.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import type { StateRepository } from "./stateRepositoryTypes.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import { buildLoginMatchDiscoveryStatements } from "./loginMatchDiscoveryD1.ts";
 import {
   buildMatchPresentationRegistrationStatements,
@@ -77,8 +78,8 @@ type InviteOperation = { admission: InviteAdmission; control: InviteControl };
 
 export type GameSessionTransitionsOptions = {
   db: D1Database;
-  rtdb: Pick<
-    FirebaseRtdbClient,
+  state: Pick<
+    StateRepository,
     "getPath" | "transactPath" | "createMatchRecords"
   >;
   store?: TransitionStore;
@@ -131,7 +132,7 @@ async function digest(value: unknown): Promise<string> {
 
 function pathParts(path: string): string[] {
   const parts = path.split("/");
-  if (parts.some((part) => !isSafeFirebaseKey(part))) fail("invalid-path");
+  if (parts.some((part) => !isSafeRecordKey(part))) fail("invalid-path");
   return parts;
 }
 
@@ -161,10 +162,10 @@ function resolveValue(
     canonical(value);
     return value;
   }
-  if (Object.hasOwn(value, ".sv")) {
+  if (Object.hasOwn(value, STATE_VALUE_FIELD)) {
     if (Object.keys(value).length !== 1) return fail("invalid-server-value");
-    if (value[".sv"] === "timestamp") return nowMs;
-    const server = value[".sv"];
+    if (value[STATE_VALUE_FIELD] === "timestamp") return nowMs;
+    const server = value[STATE_VALUE_FIELD];
     if (
       record(server) &&
       Object.keys(server).length === 1 &&
@@ -189,7 +190,7 @@ function resolveValue(
 
 function validateLease(proof: GameSessionLeaseProof): void {
   if (
-    !isSafeFirebaseKey(proof.lockId) ||
+    !isSafeRecordKey(proof.lockId) ||
     typeof proof.operationId !== "string" ||
     !proof.operationId ||
     typeof proof.ownerId !== "string" ||
@@ -199,7 +200,7 @@ function validateLease(proof: GameSessionLeaseProof): void {
 }
 
 export function gameSessionOperationResource(operationId: string): string {
-  if (!isSafeFirebaseKey(operationId)) fail("invalid-operation");
+  if (!isSafeRecordKey(operationId)) fail("invalid-operation");
   return `gameplay-operation:${operationId}`;
 }
 
@@ -226,7 +227,7 @@ function loginResources(mutations: AutomatchRecordMutation[]): string[] {
       if (!record(value)) continue;
       for (const key of ["uid", "requesterUid"]) {
         const uid = value[key];
-        if (typeof uid === "string" && isSafeFirebaseKey(uid)) uids.add(uid);
+        if (typeof uid === "string" && isSafeRecordKey(uid)) uids.add(uid);
       }
     }
   }
@@ -300,7 +301,7 @@ function splitUpdates(updates: JsonRecord): {
   if (inviteIds.size !== 1 || !Object.keys(canonicalUpdates).length)
     fail("invalid-scope");
   const inviteId = [...inviteIds][0];
-  if (!isSafeFirebaseKey(inviteId)) fail("invalid-invite");
+  if (!isSafeRecordKey(inviteId)) fail("invalid-invite");
   for (const field of Object.keys(inviteUpdates)) {
     if (
       [
@@ -391,7 +392,7 @@ export async function assertGameSessionResourceAvailable(
 
 export function createGameSessionTransitions({
   db,
-  rtdb,
+  state,
   store = createAutomatchD1Store(db),
   inviteStore = createInviteSourceD1Store(db),
   inviteAdmission,
@@ -466,8 +467,8 @@ export function createGameSessionTransitions({
     await assertInviteOperation(operation);
     if (payload.inviteSourceEpoch !== operation.control.epoch)
       fail("invite-source-backend-conflict");
-    if (rtdb.createMatchRecords && payload.creations.length) {
-      await rtdb.createMatchRecords(
+    if (state.createMatchRecords && payload.creations.length) {
+      await state.createMatchRecords(
         {
           inviteId: payload.inviteId,
           transitionId: payload.transitionId,
@@ -484,7 +485,7 @@ export function createGameSessionTransitions({
       for (const creation of payload.creations) {
         signal?.throwIfAborted();
         await assertInviteOperation(operation);
-        await rtdb.transactPath(
+        await state.transactPath(
           creation.path,
           (current) => {
             if (current !== null && current !== undefined) {
@@ -700,7 +701,7 @@ export function createGameSessionTransitions({
     if (
       !Number.isSafeInteger(createdAtMs) ||
       createdAtMs < 0 ||
-      !isSafeFirebaseKey(transitionId)
+      !isSafeRecordKey(transitionId)
     )
       fail("invalid-intent-id");
     for (let attempt = 0; attempt < MAX_PREPARATION_ATTEMPTS; attempt++) {

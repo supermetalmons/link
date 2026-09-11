@@ -1,5 +1,5 @@
-import { getOwnerProfileIds } from "../../../functions/events/eventProjectionModel.js";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { getOwnerProfileIds } from "../../../runtime/events/eventProjectionModel.js";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import { buildEventProfileGameProjectionOutboxUpdates } from "./profileGameProjectionOutbox.ts";
 import type { EventProfileGameProjectionTask } from "./profileGameProjectionTasks.ts";
@@ -37,7 +37,7 @@ export function eventIdsFromProfileGameProjectionUpdates(
     if (
       root === "events" &&
       eventId &&
-      isSafeFirebaseKey(eventId) &&
+      isSafeRecordKey(eventId) &&
       (field === undefined || PROFILE_GAME_EVENT_FIELDS.has(field))
     ) {
       eventIds.add(eventId);
@@ -61,15 +61,15 @@ export function createEventProfileGameProjectionRepository(
   const now = dependencies.now || Date.now;
   return {
     ...repository,
-    async patchRtdbRoot(updates, signal) {
+    async patchStateRoot(updates, signal) {
       const eventIds = eventIdsFromProfileGameProjectionUpdates(updates);
       if (eventIds.length === 0) {
-        await repository.patchRtdbRoot(updates, signal);
+        await repository.patchStateRoot(updates, signal);
         return;
       }
       const previousEvents = await Promise.all(
         eventIds.map((eventId) =>
-          repository.getRtdbPath(`events/${eventId}`, undefined, signal),
+          repository.getStatePath(`events/${eventId}`, undefined, signal),
         ),
       );
       const timestamp = now();
@@ -95,7 +95,7 @@ export function createEventProfileGameProjectionRepository(
           }),
         );
       }
-      await repository.patchRtdbRoot(nextUpdates, signal);
+      await repository.patchStateRoot(nextUpdates, signal);
       const dispatch = async () => {
         const results = await Promise.allSettled(tasks.map(enqueue));
         for (let index = 0; index < results.length; index += 1) {

@@ -2,13 +2,13 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { createSeededRandom } = require("../functions/shared/ids");
+const { createSeededRandom } = require("../runtime/shared/ids");
 const {
   LEGACY_CORE_PRIZES_EVENT_ID,
-} = require("../functions/shared/event-prizes");
+} = require("../runtime/shared/event-prizes");
 const {
   buildScheduledEventDueUpdatesCore,
-} = require("../functions/events/startTransitionCore");
+} = require("../runtime/events/startTransitionCore");
 
 const createParticipant = (index) => ({
   profileId: `profile-${index}`,

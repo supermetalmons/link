@@ -1,6 +1,6 @@
 const { WebSocket }: typeof import("ws") = require("ws");
 const {
-  normalizeFirebaseKey,
+  normalizeRecordKey,
 }: typeof import("@mons/shared/ids") = require("@mons/shared/ids");
 const {
   INVITE_METADATA_MAX_MESSAGE_BYTES,
@@ -54,7 +54,7 @@ function validateOptions(options: Options): Options {
     url.hash ||
     (url.hostname !== "api.mons.link" &&
       !PREVIEW_HOST_PATTERN.test(url.hostname)) ||
-    normalizeFirebaseKey(options.inviteId) !== options.inviteId
+    normalizeRecordKey(options.inviteId) !== options.inviteId
   ) {
     throw new TypeError(usage());
   }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { EventLockManager } from "../../../functions/events/lockManagerCore.js";
+import type { EventLockManager } from "../../../runtime/events/lockManagerCore.js";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { LEGACY_CORE_PRIZES_EVENT_ID } from "@mons/shared/event-prizes";
 import {
@@ -242,19 +242,19 @@ function createRepository({
         profileById,
       } as ProfileOwnershipSnapshot;
     },
-    getRtdbPath: async (path) =>
+    getStatePath: async (path) =>
       path in pathValues
         ? structuredClone(pathValues[path])
         : path === `events/${event?.eventId || "event-1"}`
           ? structuredClone(event)
           : null,
-    patchRtdbRoot: async (updates) => {
+    patchStateRoot: async (updates) => {
       patches.push(structuredClone(updates));
       if (patchError) {
         throw patchError;
       }
     },
-    transactRtdbPath: async () => ({ committed: false, value: null }),
+    transactStatePath: async () => ({ committed: false, value: null }),
   };
   return { patches, repository };
 }
@@ -827,11 +827,11 @@ test("memoizes prize selections when a join crosses the start deadline", async (
     profilesByUid: { "alternate-login": alternateProfile },
     pathValues: { [`eventPrizeSelections/${eventId}`]: selections },
   });
-  const getRtdbPath = state.repository.getRtdbPath;
+  const getStatePath = state.repository.getStatePath;
   let selectionReads = 0;
-  state.repository.getRtdbPath = async (...args) => {
+  state.repository.getStatePath = async (...args) => {
     if (args[0] === `eventPrizeSelections/${eventId}`) selectionReads += 1;
-    return getRtdbPath(...args);
+    return getStatePath(...args);
   };
   const times = [100, 101];
 
@@ -886,11 +886,11 @@ test("deadline-crossing join persists and reconciles its canonical participant",
     },
     patchError: new Error("ambiguous-join"),
   });
-  const patchRtdbRoot = state.repository.patchRtdbRoot;
-  const getRtdbPath = state.repository.getRtdbPath;
+  const patchStateRoot = state.repository.patchStateRoot;
+  const getStatePath = state.repository.getStatePath;
   const reconciliationPaths: string[] = [];
   let patchAttempted = false;
-  state.repository.patchRtdbRoot = async (updates, signal) => {
+  state.repository.patchStateRoot = async (updates, signal) => {
     const paths = Object.keys(updates);
     assert.equal(
       paths.some((parent, index) =>
@@ -902,11 +902,11 @@ test("deadline-crossing join persists and reconciles its canonical participant",
       false,
     );
     patchAttempted = true;
-    return patchRtdbRoot(updates, signal);
+    return patchStateRoot(updates, signal);
   };
-  state.repository.getRtdbPath = async (path, query, signal) => {
+  state.repository.getStatePath = async (path, query, signal) => {
     if (patchAttempted) reconciliationPaths.push(path);
-    return getRtdbPath(path, query, signal);
+    return getStatePath(path, query, signal);
   };
   const times = [100, 101];
 
@@ -1104,12 +1104,12 @@ test("threads one operation signal through event reads and commit calls", async 
   const signal = AbortSignal.timeout(1_000);
   const seen: AbortSignal[] = [];
   const repository = createRepository().repository;
-  repository.getRtdbPath = async (_path, _query, receivedSignal) => {
+  repository.getStatePath = async (_path, _query, receivedSignal) => {
     assert.ok(receivedSignal);
     seen.push(receivedSignal);
     return scheduledEvent({ participants: {} });
   };
-  repository.patchRtdbRoot = async (_updates, receivedSignal) => {
+  repository.patchStateRoot = async (_updates, receivedSignal) => {
     assert.ok(receivedSignal);
     seen.push(receivedSignal);
   };
@@ -1309,14 +1309,14 @@ test("reconciles an ambiguous committed removal", async () => {
       "events/event-1/updatedAtMs": 100,
     },
   });
-  const patch = repository.patchRtdbRoot;
-  repository.patchRtdbRoot = async (updates, signal) => {
+  const patch = repository.patchStateRoot;
+  repository.patchStateRoot = async (updates, signal) => {
     await patch(updates, signal);
     operationController.abort();
     throw patchError;
   };
-  const getPath = repository.getRtdbPath;
-  repository.getRtdbPath = async (path, query, signal) => {
+  const getPath = repository.getStatePath;
+  repository.getStatePath = async (path, query, signal) => {
     if (path !== "events/event-1") {
       assert.notEqual(signal, operationController.signal);
       assert.equal(signal?.aborted, false);
@@ -1451,8 +1451,8 @@ test("checks alternate ownership before the final lock and write", async () => {
           profile: canonicalProfile,
         };
   };
-  const patch = repository.patchRtdbRoot;
-  repository.patchRtdbRoot = async (...args) => {
+  const patch = repository.patchStateRoot;
+  repository.patchStateRoot = async (...args) => {
     order.push("write");
     return patch(...args);
   };
@@ -1647,7 +1647,7 @@ test("toggles an event prize selection with the canonical participant", async ()
   });
   const paths: string[] = [];
   let stored: unknown = null;
-  repository.transactRtdbPath = async (path, updater) => {
+  repository.transactStatePath = async (path, updater) => {
     paths.push(path);
     const decision = updater(stored);
     if (
@@ -1698,7 +1698,7 @@ test("rejects early prize changes without saving or clearing a preference", asyn
       });
       let stored: unknown = initialSelection;
       let transactions = 0;
-      repository.transactRtdbPath = async (_path, updater) => {
+      repository.transactStatePath = async (_path, updater) => {
         transactions++;
         const decision = updater(stored);
         assert.ok(
@@ -1737,7 +1737,7 @@ test("accepts prize choices inside the final hour and after the event starts", a
   ]) {
     const { repository } = createRepository({ event });
     let transactions = 0;
-    repository.transactRtdbPath = async (_path, updater) => {
+    repository.transactStatePath = async (_path, updater) => {
       transactions++;
       const decision = updater(null);
       assert.ok(
@@ -1762,7 +1762,7 @@ test("uses the postponed start from the locked event read for prize selection", 
   const event = scheduledEvent({ eventId, startAtMs: nowMs + 3_599_999 });
   const { repository } = createRepository({ event });
   let transactions = 0;
-  repository.transactRtdbPath = async () => {
+  repository.transactStatePath = async () => {
     transactions++;
     return { committed: true, value: "1092" };
   };
@@ -1792,7 +1792,7 @@ test("rejects invalid scheduled prize timestamps before saving", async () => {
       event: scheduledEvent({ eventId, startAtMs }),
     });
     let transactions = 0;
-    repository.transactRtdbPath = async () => {
+    repository.transactStatePath = async () => {
       transactions++;
       return { committed: true, value: "1092" };
     };
@@ -1821,7 +1821,7 @@ test("falls back to the unique participant owned by the verified login", async (
     }),
   });
   let path = "";
-  repository.transactRtdbPath = async (receivedPath, updater) => {
+  repository.transactStatePath = async (receivedPath, updater) => {
     path = receivedPath;
     const decision = updater(null);
     assert.ok(decision && typeof decision === "object" && "value" in decision);
@@ -1851,7 +1851,7 @@ test("direct participant UID prize selection does not read D1 ownership", async 
   repository.resolveCanonicalProfileId = async () => {
     throw new Error("d1-unavailable");
   };
-  repository.transactRtdbPath = async (_path, updater) => {
+  repository.transactStatePath = async (_path, updater) => {
     const decision = updater(null);
     assert.ok(decision && typeof decision === "object" && "value" in decision);
     return { committed: true, value: decision.value };
@@ -1885,7 +1885,7 @@ test("selects prizes through canonical ownership of a retired participant", asyn
     canonicalProfileIds: { "retired-profile": "canonical-profile" },
   });
   let path = "";
-  repository.transactRtdbPath = async (receivedPath, updater) => {
+  repository.transactStatePath = async (receivedPath, updater) => {
     path = receivedPath;
     const decision = updater(null);
     assert.ok(decision && typeof decision === "object" && "value" in decision);
@@ -1921,7 +1921,7 @@ test("selects prizes through a canonical source ID without a stored login", asyn
     canonicalProfileIds: { "retired-profile": "canonical-profile" },
   });
   let path = "";
-  repository.transactRtdbPath = async (receivedPath, updater) => {
+  repository.transactStatePath = async (receivedPath, updater) => {
     path = receivedPath;
     const decision = updater(null);
     assert.ok(decision && typeof decision === "object" && "value" in decision);
@@ -1988,7 +1988,7 @@ test("rejects a prize selection after losing its event lock", async () => {
     event: scheduledEvent({ eventId }),
   });
   let transactions = 0;
-  repository.transactRtdbPath = async () => {
+  repository.transactStatePath = async () => {
     transactions++;
     return { committed: true, value: "1092" };
   };

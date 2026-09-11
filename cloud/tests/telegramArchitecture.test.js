@@ -7,10 +7,10 @@ const test = require("node:test");
 
 const cloudRoot = path.resolve(__dirname, "..");
 const repositoryRoot = path.resolve(cloudRoot, "..");
-const functionsRoot = path.join(cloudRoot, "functions");
+const runtimeRoot = path.join(cloudRoot, "runtime");
 const adminRoot = path.join(cloudRoot, "admin");
 const telegramClientPaths = new Set([
-  path.join(functionsRoot, "telegram", "client.js"),
+  path.join(runtimeRoot, "telegram", "client.js"),
   path.join(
     repositoryRoot,
     "cloud",
@@ -116,7 +116,7 @@ test("legacy Telegram transport helpers stay removed", () => {
   ];
   const violations = [];
   for (const filePath of [
-    ...listJavaScriptFiles(functionsRoot),
+    ...listJavaScriptFiles(runtimeRoot),
     ...listJavaScriptFiles(adminRoot),
   ]) {
     const source = fs.readFileSync(filePath, "utf8");
@@ -133,7 +133,7 @@ test("a blocked Telegram client cannot delay latency-critical domain handlers", 
   const domainFiles = [
     path.join(repositoryRoot, "cloud/workers/api/src/automatch.ts"),
     path.join(repositoryRoot, "cloud/workers/api/src/ratingUpdate.ts"),
-    path.join(functionsRoot, "events.js"),
+    path.join(runtimeRoot, "events.js"),
   ];
   for (const filePath of domainFiles) {
     const source = fs.readFileSync(filePath, "utf8");
@@ -165,7 +165,7 @@ test("rating responses do not enqueue event progress tasks", () => {
 
 test("event Telegram projection uses a dedicated lock without changing domain locks", () => {
   const eventsSource = fs.readFileSync(
-    path.join(functionsRoot, "events.js"),
+    path.join(runtimeRoot, "events.js"),
     "utf8",
   );
   assert.equal(eventsSource.includes("eventTelegramProjectionLocks"), false);
@@ -184,7 +184,7 @@ test("event Telegram projection uses a dedicated lock without changing domain lo
     true,
   );
   const coreSource = fs.readFileSync(
-    path.join(functionsRoot, "telegram", "eventProjectionCore.js"),
+    path.join(runtimeRoot, "telegram", "eventProjectionCore.js"),
     "utf8",
   );
   assert.equal(coreSource.includes("eventTelegramProjectionLocks"), true);
@@ -250,7 +250,7 @@ test("admin Telegram scripts use signed commands and durable aliases", () => {
     assert.match(source, /parseBridgeSecretFile/);
     assert.match(source, /randomUUID/);
     assert.equal(source.includes('ref("telegramMessages")'), false);
-    assert.equal(source.includes("../functions/.env"), false);
+    assert.equal(source.includes("../runtime/.env"), false);
   }
   const shootingSource = fs.readFileSync(
     path.join(adminRoot, "shootingStarAlert.js"),

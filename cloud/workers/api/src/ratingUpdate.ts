@@ -24,8 +24,8 @@ import { Color, Game, resolveMatch } from "mons-rules";
 import {
   getDisplayNameFromAddress,
   getTelegramEmojiTag,
-} from "../../../functions/telegramDisplay.js";
-import { TELEGRAM_AUTOMATCH_VERSION } from "../../../functions/telegram/automatchSource.js";
+} from "../../../runtime/telegramDisplay.js";
+import { TELEGRAM_AUTOMATCH_VERSION } from "../../../runtime/telegram/automatchSource.js";
 import { AuthApiFailure } from "./authErrors.ts";
 import type { MatchTimerStartStore } from "./gameplayCoordinationD1.ts";
 import {
@@ -550,7 +550,7 @@ async function repairRatingSideEffects(
     : null;
   if (progress) {
     await assertMutationAllowed?.();
-    await repository.patchRtdbRoot({
+    await repository.patchStateRoot({
       [`eventProgressOutbox/${progress.outboxId}`]: progress.outbox,
     });
   }
@@ -613,7 +613,7 @@ export async function updateRatings(
   );
   const operationId = `${request.inviteId}__${request.matchId}`;
   const [inviteValue, completed] = await Promise.all([
-    repository.getRtdbPath(`invites/${request.inviteId}`),
+    repository.getStatePath(`invites/${request.inviteId}`),
     repository.hasCompletedRatingUpdate(request.inviteId, request.matchId),
   ]);
   const invite = toRecord(inviteValue);

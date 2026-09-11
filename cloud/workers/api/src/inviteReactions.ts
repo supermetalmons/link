@@ -30,7 +30,7 @@ import {
   type InviteWagersMessage,
   type InviteWagersSnapshot,
 } from "@mons/shared/invite-wagers";
-import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import {
   normalizeInviteMetadata,
   type InviteMetadataReadResult,
@@ -46,13 +46,10 @@ import type { MatchSyncMetadata, MatchSyncReadResult } from "./matchSync.ts";
 import { MatchStateStore } from "./matchStateStore.ts";
 import { captureMatchStateRpc, type MatchStateRpc } from "./matchStateRpc.ts";
 import type {
-  MatchStateActivateRequest,
   MatchStateClaimTimerRequest,
   MatchStateCreateRequest,
   MatchStateEffect,
   MatchStateEventEffectsRequest,
-  MatchStateImportRequest,
-  MatchStateImportTarget,
   MatchStateMoveRequest,
   MatchStatePairRequest,
   MatchStateRecordRequest,
@@ -322,7 +319,7 @@ export class InviteReactions
     }
     if (
       version === 2 &&
-      (!matchId || matchId !== matchId.trim() || !isSafeFirebaseKey(matchId))
+      (!matchId || matchId !== matchId.trim() || !isSafeRecordKey(matchId))
     ) {
       return new Response("Invalid presentation match", { status: 400 });
     }
@@ -339,7 +336,7 @@ export class InviteReactions
           !Array.isArray(value) ||
           !value.length ||
           value.length > 2 ||
-          value.some((uid) => !isCanonicalFirebaseUid(uid))
+          value.some((uid) => !isCanonicalLoginUid(uid))
         ) {
           return new Response("Invalid presentation actors", { status: 400 });
         }
@@ -488,7 +485,7 @@ export class InviteReactions
   private pinInvite(inviteId: string): StoredMetadata {
     if (
       inviteId !== inviteId.trim() ||
-      !isSafeFirebaseKey(inviteId) ||
+      !isSafeRecordKey(inviteId) ||
       (this.ctx.id.name && this.ctx.id.name !== inviteId)
     ) {
       throw new TypeError("invalid-metadata-invite");
@@ -807,30 +804,6 @@ export class InviteReactions
     });
   }
 
-  async importMatchState(input: MatchStateImportRequest) {
-    return captureMatchStateRpc(async () => {
-      this.pinInvite(input.inviteId);
-      return this.matchState.stageImport(input);
-    });
-  }
-
-  async inspectMatchStateImport(input: MatchStateImportTarget) {
-    return captureMatchStateRpc(async () => {
-      this.pinInvite(input.inviteId);
-      return this.matchState.readImport(input);
-    });
-  }
-
-  async activateMatchState(input: MatchStateActivateRequest) {
-    return captureMatchStateRpc(async () => {
-      this.pinInvite(input.inviteId);
-      const result = await this.matchState.activate(input);
-      this.matchSync.invalidateSource();
-      await this.notifyCanonicalMatches(input.inviteId);
-      return result;
-    });
-  }
-
   private async notifyCanonicalMatches(
     inviteId: string,
     matchIds?: string[],
@@ -1063,7 +1036,7 @@ export class InviteReactions
       (authenticated !== "0" && authenticated !== "1") ||
       (role === "spectator"
         ? actorUid !== null
-        : !isCanonicalFirebaseUid(actorUid))
+        : !isCanonicalLoginUid(actorUid))
     ) {
       return new Response(`Invalid ${channel} admission`, { status: 400 });
     }
@@ -1148,7 +1121,7 @@ export class InviteReactions
     senderUid: string,
     reaction: InviteReaction,
   ): Promise<InviteReactionPublishResult> {
-    if (!isCanonicalFirebaseUid(senderUid) || !isInviteReaction(reaction)) {
+    if (!isCanonicalLoginUid(senderUid) || !isInviteReaction(reaction)) {
       throw new TypeError("invalid-reaction");
     }
     const normalized: InviteReaction = {
@@ -1243,7 +1216,7 @@ export class InviteReactions
     };
     if (
       !isMatchPresentationSnapshot(normalized) ||
-      Object.keys(seeds).some((uid) => !isCanonicalFirebaseUid(uid))
+      Object.keys(seeds).some((uid) => !isCanonicalLoginUid(uid))
     ) {
       throw new TypeError("invalid-presentation-seeds");
     }
@@ -1310,7 +1283,7 @@ export class InviteReactions
   private registeredPresentationSnapshot(
     matchId: string,
   ): RegisteredMatchPresentationSnapshot {
-    if (!isSafeFirebaseKey(matchId))
+    if (!isSafeRecordKey(matchId))
       throw new TypeError("invalid-presentation-match");
     const seeds = this.ctx.storage.sql
       .exec<StoredPresentationSeed>(
@@ -1415,7 +1388,7 @@ export class InviteReactions
   async getFrozenPresentationSnapshot(
     matchId: string,
   ): Promise<MatchPresentationSnapshot> {
-    if (!isSafeFirebaseKey(matchId))
+    if (!isSafeRecordKey(matchId))
       throw new TypeError("invalid-presentation-match");
     return this.readPresentations(matchId, true);
   }
@@ -1427,7 +1400,7 @@ export class InviteReactions
     if (
       !actorUids.length ||
       actorUids.length > 2 ||
-      actorUids.some((uid) => !isCanonicalFirebaseUid(uid))
+      actorUids.some((uid) => !isCanonicalLoginUid(uid))
     )
       throw new TypeError("invalid-presentation-actors");
     return this.ctx.storage.transactionSync(() => {
@@ -1483,7 +1456,7 @@ export class InviteReactions
     request: UpdateMatchPresentationRequest,
   ): Promise<MatchPresentationUpdateResult> {
     if (
-      !isCanonicalFirebaseUid(actorUid) ||
+      !isCanonicalLoginUid(actorUid) ||
       !isUpdateMatchPresentationRequest(request)
     ) {
       throw new TypeError("invalid-presentation-update");

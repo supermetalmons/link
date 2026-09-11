@@ -19,8 +19,8 @@ import * as monsRules from "mons-rules";
 import {
   createEventLockManagerCore,
   type EventLockManager,
-} from "../../../functions/events/lockManagerCore.js";
-import { buildScheduledEventDueUpdatesCore } from "../../../functions/events/startTransitionCore.js";
+} from "../../../runtime/events/lockManagerCore.js";
+import { buildScheduledEventDueUpdatesCore } from "../../../runtime/events/startTransitionCore.js";
 import {
   buildEventOwnershipQuery,
   directParticipantParticipation,
@@ -30,8 +30,8 @@ import {
   requesterOwnsProfileReference,
   resolveParticipantParticipation,
   type EventOwnershipSnapshot,
-} from "../../../functions/events/ownership.js";
-import { getDisplayNameFromAddress } from "../../../functions/telegramDisplay.js";
+} from "../../../runtime/events/ownership.js";
+import { getDisplayNameFromAddress } from "../../../runtime/telegramDisplay.js";
 import { AuthApiFailure } from "./authErrors.ts";
 import type {
   GameplayProfile,
@@ -54,10 +54,10 @@ type EventDueTransition = {
 
 export type EventParticipationRepository = Pick<
   GameplayRepository,
-  | "getRtdbPath"
-  | "patchRtdbRoot"
+  | "getStatePath"
+  | "patchStateRoot"
   | "readProfileOwnershipSnapshot"
-  | "transactRtdbPath"
+  | "transactStatePath"
 >;
 
 export type EventParticipationDependencies = {
@@ -205,7 +205,7 @@ async function readEvent(
   signal: AbortSignal,
 ): Promise<EventRecord> {
   const value = toRecord(
-    await repository.getRtdbPath(`events/${eventId}`, undefined, signal),
+    await repository.getStatePath(`events/${eventId}`, undefined, signal),
   );
   if (!value) {
     throw new AuthApiFailure(404, "not-found", "Event not found.");
@@ -219,7 +219,7 @@ async function readPrizeSelections(
   signal: AbortSignal,
 ): Promise<unknown> {
   if (!isEventPrizeEvent(eventId)) return undefined;
-  const selections = await repository.getRtdbPath(
+  const selections = await repository.getStatePath(
     `eventPrizeSelections/${eventId}`,
     undefined,
     signal,
@@ -249,9 +249,9 @@ function createDefaultLockManager(
   return createEventLockManagerCore({
     createLockId: () => crypto.randomUUID(),
     transactPath: (path, updater) =>
-      repository.transactRtdbPath(path, updater, signal),
+      repository.transactStatePath(path, updater, signal),
     releaseTransactPath: (path, updater) =>
-      repository.transactRtdbPath(path, updater),
+      repository.transactStatePath(path, updater),
     sleep: (milliseconds) => scheduler.wait(milliseconds, { signal }),
     logger: {
       error: (_message, error) => {
@@ -288,12 +288,12 @@ async function patchWithReconciliation(
   checks: readonly ReconciliationCheck[],
 ): Promise<void> {
   try {
-    await repository.patchRtdbRoot(updates, operationSignal);
+    await repository.patchStateRoot(updates, operationSignal);
   } catch (error) {
     const signal = AbortSignal.timeout(EVENT_RECONCILIATION_TIMEOUT_MS);
     const values = await Promise.all(
       checks.map(({ path }) =>
-        repository.getRtdbPath(path, undefined, signal).catch(() => undefined),
+        repository.getStatePath(path, undefined, signal).catch(() => undefined),
       ),
     );
     if (
@@ -981,7 +981,7 @@ export async function toggleEventPrizeSelection(
       );
     }
     await requireOwnedLock(lockManager, lockHandle, busyMessage);
-    const result = await repository.transactRtdbPath(
+    const result = await repository.transactStatePath(
       `eventPrizeSelections/${eventId}/${participantProfileId}`,
       (current) => ({
         value: current === request.prizeId ? null : request.prizeId,

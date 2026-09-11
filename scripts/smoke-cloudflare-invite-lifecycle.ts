@@ -17,7 +17,6 @@ import {
   MANUAL_INVITE_ID_PATTERN,
   isCreateInviteResponse,
   isEndRematchResponse,
-  isGameSessionMatch,
   isJoinInviteResponse,
   isProposeRematchResponse,
   isSurrenderMatchResponse,
@@ -27,6 +26,7 @@ import {
   countMoveHistory,
   normalizeMatchSnapshot,
   type SubmitMoveRequest,
+  type GameSessionMatch,
 } from "@mons/shared/game-sessions";
 import { INVITE_ID_RANDOM_LENGTH } from "@mons/shared/ids";
 import {
@@ -48,14 +48,11 @@ import {
   REACTION_HEARTBEAT_RESPONSE,
 } from "@mons/shared/reactions";
 import {
-  formatMatchTimer,
   isStartMatchTimerResponse,
-  MATCH_TIMER_DURATION_MS,
   parseStrictMatchTimer,
 } from "@mons/shared/timers";
 
 const ORIGIN = "https://mons.link";
-const FIREBASE_DATABASE_ROOT = "https://mons-link-default-rtdb.firebaseio.com";
 const PREVIEW_HOST_PATTERN =
   /^[0-9a-f]{8}-mons-link-api\.lil-org\.workers\.dev$/;
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -73,9 +70,6 @@ const OPERATION_NAMES = [
 type Options = {
   baseUrl: string;
   output?: string;
-  surrenderRulesPending?: boolean;
-  moveRulesPending?: boolean;
-  matchStorage?: "rtdb" | "durable";
 };
 type Session = ToolSession;
 type OperationName = (typeof OPERATION_NAMES)[number];
@@ -108,13 +102,10 @@ type Report = {
   guestUid: string;
   operationIds: Operations;
   checks: string[];
-  matchStorage?: "durable";
+  matchStorage: "durable";
 };
 type HttpResult = { status: number; headers: Headers; payload: unknown };
-type MatchRecord = Record<string, unknown> & {
-  sessionCreation?: string;
-  timer: string;
-};
+type MatchRecord = GameSessionMatch;
 
 class SmokeFailure extends Error {
   readonly retryable: boolean;
@@ -125,11 +116,10 @@ class SmokeFailure extends Error {
 }
 
 function usage(): string {
-  return "Usage: npm run smoke:invite-lifecycle -- --base-url <https-api-url> [--output <report-json-file>] [--match-storage durable|rtdb] [--surrender-rules-pending] [--move-rules-pending] (default match storage: durable)";
+  return "Usage: npm run smoke:invite-lifecycle -- --base-url <https-api-url> [--output <report-json-file>]";
 }
 
 function validateOptions(options: Options): Options {
-  const matchStorage = options.matchStorage ?? "durable";
   let url: URL;
   try {
     url = new URL(options.baseUrl);
@@ -148,66 +138,31 @@ function validateOptions(options: Options): Options {
       !PREVIEW_HOST_PATTERN.test(url.hostname)) ||
     (options.output !== undefined &&
       (!options.output.trim() || options.output.includes("\0"))) ||
-    (options.surrenderRulesPending !== undefined &&
-      typeof options.surrenderRulesPending !== "boolean") ||
-    (options.moveRulesPending !== undefined &&
-      typeof options.moveRulesPending !== "boolean") ||
-    (options.matchStorage !== undefined &&
-      options.matchStorage !== "rtdb" &&
-      options.matchStorage !== "durable") ||
-    (matchStorage === "durable" &&
-      (options.surrenderRulesPending || options.moveRulesPending))
+    Object.keys(options).some((key) => key !== "baseUrl" && key !== "output")
   )
     throw new TypeError(usage());
   return {
     baseUrl: url.origin,
     ...(options.output ? { output: options.output } : {}),
-    ...(options.surrenderRulesPending ? { surrenderRulesPending: true } : {}),
-    ...(options.moveRulesPending ? { moveRulesPending: true } : {}),
-    matchStorage,
   };
 }
 
 function parseArgs(argv: string[]): Options {
   const values = new Map<string, string>();
-  let surrenderRulesPending = false;
-  let moveRulesPending = false;
   for (let index = 0; index < argv.length; index++) {
     const key = argv[index];
-    if (key === "--surrender-rules-pending") {
-      if (surrenderRulesPending) throw new TypeError(usage());
-      surrenderRulesPending = true;
-      continue;
-    }
-    if (key === "--move-rules-pending") {
-      if (moveRulesPending) throw new TypeError(usage());
-      moveRulesPending = true;
-      continue;
-    }
     const value = argv[++index];
     if (
-      (key !== "--base-url" &&
-        key !== "--output" &&
-        key !== "--match-storage") ||
+      (key !== "--base-url" && key !== "--output") ||
       !value ||
       values.has(key)
     )
       throw new TypeError(usage());
     values.set(key, value);
   }
-  const matchStorage = values.get("--match-storage");
-  if (
-    matchStorage !== undefined &&
-    matchStorage !== "rtdb" &&
-    matchStorage !== "durable"
-  )
-    throw new TypeError(usage());
   return validateOptions({
     baseUrl: values.get("--base-url") || "",
     output: values.get("--output"),
-    surrenderRulesPending,
-    moveRulesPending,
-    matchStorage,
   });
 }
 
@@ -715,13 +670,11 @@ async function verifyMatchChannels(
   channels: MatchChannel[],
   dependencies: Dependencies,
 ): Promise<MatchSyncSnapshot> {
-  const hostValue = (
-    await readMatch(host.uid, matchId, host, dependencies, options)
-  ).value;
+  const hostValue = (await readMatch(host.uid, matchId, dependencies, options))
+    .value;
   const guestValue =
     guestCreated && guest
-      ? (await readMatch(guest.uid, matchId, guest, dependencies, options))
-          .value
+      ? (await readMatch(guest.uid, matchId, dependencies, options)).value
       : null;
   const expected: MatchSyncState = {
     inviteId,
@@ -953,176 +906,34 @@ async function readMetadata(
   return payload.snapshot;
 }
 
-function matchUrl(uid: string, matchId: string): string {
-  return `${FIREBASE_DATABASE_ROOT}/players/${encodeURIComponent(uid)}/matches/${encodeURIComponent(matchId)}.json`;
-}
-
-function parseMatch(value: unknown): MatchRecord {
-  if (
-    !record(value) ||
-    typeof value.sessionCreation !== "string" ||
-    !/^[a-f0-9]{64}$/.test(value.sessionCreation)
-  )
-    throw new SmokeFailure("Lifecycle live match lacked its creation marker.");
-  const { sessionCreation, ...match } = value;
-  if (!isGameSessionMatch(match))
-    throw new SmokeFailure("Lifecycle live match was invalid.");
-  return { ...match, sessionCreation };
-}
-
 async function readMatch(
   uid: string,
   matchId: string,
-  session: Session,
   dependencies: Dependencies,
-  options?: Options,
+  options: Options,
 ) {
-  if (options?.matchStorage === "durable") {
-    const query = new URLSearchParams({ playerId: uid, matchId });
-    return retry(async () => {
-      const result = await requestJson(
-        `${options.baseUrl}/matches/snapshot?${query}`,
-        { headers: { Accept: "application/json", Origin: ORIGIN } },
-        dependencies,
-        MATCH_SYNC_MAX_MESSAGE_BYTES,
-      );
-      expectOk(result, "Lifecycle canonical match read");
-      if (
-        !isReadMatchSnapshotResponse(result.payload) ||
-        result.payload.playerId !== uid ||
-        result.payload.matchId !== matchId ||
-        !result.payload.match ||
-        result.headers.get("Access-Control-Allow-Origin") !== "*" ||
-        !/(?:^|,)\s*no-store\s*(?:,|$)/i.test(
-          result.headers.get("Cache-Control") || "",
-        )
-      )
-        throw new SmokeFailure(
-          "Lifecycle canonical match snapshot was invalid.",
-        );
-      return { value: result.payload.match as MatchRecord, etag: null };
-    });
-  }
-  const result = await requestJson(
-    matchUrl(uid, matchId),
-    { headers: { "X-Firebase-ETag": "true" } },
-    dependencies,
-  );
-  expectOk(result, "Lifecycle live match read");
-  const etag = result.headers.get("ETag");
-  if (!etag || etag.length > 512)
-    throw new SmokeFailure(
-      "Lifecycle live match read lacked its transaction ETag.",
-    );
-  return { value: parseMatch(result.payload), etag };
-}
-
-async function updateOwnedMatch(
-  session: Session,
-  matchId: string,
-  update: (value: MatchRecord) => MatchRecord,
-  dependencies: Dependencies,
-): Promise<MatchRecord> {
-  for (let attempt = 0; attempt < MAX_REQUEST_ATTEMPTS; attempt++) {
-    const current = await readMatch(
-      session.uid,
-      matchId,
-      session,
-      dependencies,
-    );
-    const next = update(current.value);
-    if (!current.etag)
-      throw new SmokeFailure("Lifecycle legacy match ETag was missing.");
+  const query = new URLSearchParams({ playerId: uid, matchId });
+  return retry(async () => {
     const result = await requestJson(
-      matchUrl(session.uid, matchId),
-      {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-          "If-Match": current.etag,
-        },
-        body: JSON.stringify(next),
-      },
+      `${options.baseUrl}/matches/snapshot?${query}`,
+      { headers: { Accept: "application/json", Origin: ORIGIN } },
       dependencies,
+      MATCH_SYNC_MAX_MESSAGE_BYTES,
     );
-    if (result.status === 412) continue;
-    expectOk(result, "Lifecycle owned match transaction");
-    if (!isDeepStrictEqual(result.payload, next))
-      throw new SmokeFailure(
-        "Lifecycle owned match transaction changed its payload.",
-      );
-    return next;
-  }
-  throw new SmokeFailure("Lifecycle owned match transaction kept conflicting.");
-}
-
-function permissionDenied(result: HttpResult): boolean {
-  return (
-    (result.status === 401 || result.status === 403) &&
-    record(result.payload) &&
-    typeof result.payload.error === "string" &&
-    /permission denied/i.test(result.payload.error)
-  );
-}
-
-async function verifyTimerRules(
-  session: Session,
-  matchId: string,
-  dependencies: Dependencies,
-): Promise<void> {
-  const current = await readMatch(session.uid, matchId, session, dependencies);
-  if (!current.etag)
-    throw new SmokeFailure("Lifecycle legacy match ETag was missing.");
-  const result = await requestJson(
-    matchUrl(session.uid, matchId),
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json", "If-Match": current.etag },
-      body: JSON.stringify({
-        ...current.value,
-        timer: formatMatchTimer(
-          1,
-          dependencies.now() + MATCH_TIMER_DURATION_MS,
-        ),
-      }),
-    },
-    dependencies,
-  );
-  if (result.status === 200) {
-    await updateOwnedMatch(
-      session,
-      matchId,
-      (value) => ({ ...value, timer: current.value.timer }),
-      dependencies,
-    );
-    throw new SmokeFailure(
-      "Lifecycle rules allowed a client to forge a timer.",
-    );
-  }
-  if (!permissionDenied(result))
-    throw new SmokeFailure(
-      "Lifecycle timer rule did not return permission denial.",
-    );
-  if (
-    !isDeepStrictEqual(
-      (await readMatch(session.uid, matchId, session, dependencies)).value,
-      current.value,
+    expectOk(result, "Lifecycle canonical match read");
+    if (
+      !isReadMatchSnapshotResponse(result.payload) ||
+      result.payload.playerId !== uid ||
+      result.payload.matchId !== matchId ||
+      !result.payload.match ||
+      result.headers.get("Access-Control-Allow-Origin") !== "*" ||
+      !/(?:^|,)\s*no-store\s*(?:,|$)/i.test(
+        result.headers.get("Cache-Control") || "",
+      )
     )
-  )
-    throw new SmokeFailure("Lifecycle rejected timer write changed the match.");
-  const claim = await requestJson(
-    `${FIREBASE_DATABASE_ROOT}/matchTimerClaims/${matchId}.json`,
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: "null",
-    },
-    dependencies,
-  );
-  if (!permissionDenied(claim))
-    throw new SmokeFailure(
-      "Lifecycle timer claim fence was writable by a client.",
-    );
+      throw new SmokeFailure("Lifecycle canonical match snapshot was invalid.");
+    return { value: result.payload.match };
+  });
 }
 
 function playLegalMove(active: Game): string {
@@ -1208,58 +1019,6 @@ function cumulativeMoveRequests(
   return requests;
 }
 
-async function verifyMoveRules(
-  session: Session,
-  matchId: string,
-  current: MatchRecord,
-  next: MatchRecord,
-  dependencies: Dependencies,
-): Promise<void> {
-  const wholeUrl = matchUrl(session.uid, matchId);
-  const fenUrl = new URL(wholeUrl);
-  fenUrl.pathname = fenUrl.pathname.replace(/\.json$/, "/fen.json");
-  const rootUrl = new URL(wholeUrl);
-  rootUrl.pathname = "/.json";
-  const fields = { fen: next.fen, flatMovesString: next.flatMovesString };
-  const path = `players/${session.uid}/matches/${matchId}`;
-  for (const [url, method, body] of [
-    [wholeUrl, "PUT", next],
-    [wholeUrl, "PATCH", fields],
-    [fenUrl.href, "PUT", current.fen],
-    [
-      rootUrl.href,
-      "PATCH",
-      {
-        [`${path}/fen`]: next.fen,
-        [`${path}/flatMovesString`]: next.flatMovesString,
-      },
-    ],
-  ] as const) {
-    const result = await requestJson(
-      url,
-      {
-        method,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-      dependencies,
-    );
-    if (!permissionDenied(result))
-      throw new SmokeFailure(
-        "Lifecycle move rule did not deny a direct client move write.",
-      );
-    if (
-      !isDeepStrictEqual(
-        (await readMatch(session.uid, matchId, session, dependencies)).value,
-        current,
-      )
-    )
-      throw new SmokeFailure(
-        "Lifecycle rejected client move write changed the match.",
-      );
-  }
-}
-
 async function verifyLiveMatch(
   options: Options,
   inviteId: string,
@@ -1269,13 +1028,7 @@ async function verifyLiveMatch(
   channels: MatchChannel[],
   dependencies: Dependencies,
 ): Promise<void> {
-  const hostMatch = await readMatch(
-    host.uid,
-    matchId,
-    host,
-    dependencies,
-    options,
-  );
+  const hostMatch = await readMatch(host.uid, matchId, dependencies, options);
   const game = Game.fromFen(String(hostMatch.value.fen));
   if (!game)
     throw new SmokeFailure("Lifecycle live match could not load its game.");
@@ -1284,30 +1037,25 @@ async function verifyLiveMatch(
   const current =
     mover === host
       ? hostMatch
-      : await readMatch(mover.uid, matchId, mover, dependencies, options);
-  if (options.matchStorage === "durable") {
-    await verifyCanonicalTimer(
-      options,
-      inviteId,
-      matchId,
-      opponent,
-      mover,
-      dependencies,
-    );
-    await verifyMatchChannels(
-      options,
-      inviteId,
-      matchId,
-      host,
-      guest,
-      true,
-      channels,
-      dependencies,
-    );
-  }
-  const moved = nextLegalMatch(current.value);
-  if (options.matchStorage !== "durable" && !options.moveRulesPending)
-    await verifyMoveRules(mover, matchId, current.value, moved, dependencies);
+      : await readMatch(mover.uid, matchId, dependencies, options);
+  await verifyCanonicalTimer(
+    options,
+    inviteId,
+    matchId,
+    opponent,
+    mover,
+    dependencies,
+  );
+  await verifyMatchChannels(
+    options,
+    inviteId,
+    matchId,
+    host,
+    guest,
+    true,
+    channels,
+    dependencies,
+  );
   const burst = cumulativeMoveRequests(
     inviteId,
     matchId,
@@ -1348,8 +1096,7 @@ async function verifyLiveMatch(
       );
     if (
       !isDeepStrictEqual(
-        (await readMatch(mover.uid, matchId, opponent, dependencies, options))
-          .value,
+        (await readMatch(mover.uid, matchId, dependencies, options)).value,
         cumulativeMatch,
       )
     )
@@ -1398,8 +1145,7 @@ async function verifyLiveMatch(
       );
     if (
       !isDeepStrictEqual(
-        (await readMatch(mover.uid, matchId, opponent, dependencies, options))
-          .value,
+        (await readMatch(mover.uid, matchId, dependencies, options)).value,
         legacyMatch,
       )
     )
@@ -1417,13 +1163,7 @@ async function verifyLiveMatch(
       dependencies,
     );
   }
-  const before = await readMatch(
-    host.uid,
-    matchId,
-    host,
-    dependencies,
-    options,
-  );
+  const before = await readMatch(host.uid, matchId, dependencies, options);
   await mutation(
     options,
     "/matches/surrender",
@@ -1436,13 +1176,7 @@ async function verifyLiveMatch(
       value.actorUid === host.uid,
     dependencies,
   );
-  const observed = await readMatch(
-    host.uid,
-    matchId,
-    guest,
-    dependencies,
-    options,
-  );
+  const observed = await readMatch(host.uid, matchId, dependencies, options);
   if (
     !isDeepStrictEqual(observed.value, {
       ...before.value,
@@ -1486,13 +1220,7 @@ async function verifyCanonicalTimer(
   opponent: Session,
   dependencies: Dependencies,
 ): Promise<void> {
-  const before = await readMatch(
-    player.uid,
-    matchId,
-    player,
-    dependencies,
-    options,
-  );
+  const before = await readMatch(player.uid, matchId, dependencies, options);
   const body = {
     inviteId,
     matchId,
@@ -1511,13 +1239,7 @@ async function verifyCanonicalTimer(
     !parseStrictMatchTimer(started.timer)
   )
     throw new SmokeFailure("Lifecycle canonical timer start was invalid.");
-  const observed = await readMatch(
-    player.uid,
-    matchId,
-    opponent,
-    dependencies,
-    options,
-  );
+  const observed = await readMatch(player.uid, matchId, dependencies, options);
   if (
     !isDeepStrictEqual(observed.value, {
       ...before.value,
@@ -1542,126 +1264,11 @@ async function verifyCanonicalTimer(
     throw new SmokeFailure(
       "Lifecycle canonical timer retry changed its original deadline.",
     );
-  const final = await readMatch(
-    player.uid,
-    matchId,
-    opponent,
-    dependencies,
-    options,
-  );
+  const final = await readMatch(player.uid, matchId, dependencies, options);
   if (!isDeepStrictEqual(final.value, observed.value))
     throw new SmokeFailure(
       "Lifecycle canonical timer retry changed match state.",
     );
-}
-
-async function verifyRetiredMatchAccess(
-  options: Options,
-  session: Session,
-  matchId: string,
-  dependencies: Dependencies,
-): Promise<void> {
-  const before = await readMatch(
-    session.uid,
-    matchId,
-    session,
-    dependencies,
-    options,
-  );
-  for (const url of [
-    matchUrl(session.uid, matchId),
-    `${FIREBASE_DATABASE_ROOT}/matchTimerClaims/${encodeURIComponent(matchId)}.json`,
-  ]) {
-    for (const method of ["GET", "PUT"]) {
-      const result = await requestJson(
-        url,
-        {
-          method,
-          ...(method === "PUT"
-            ? { headers: { "Content-Type": "application/json" }, body: "null" }
-            : {}),
-        },
-        dependencies,
-      );
-      if (!permissionDenied(result))
-        throw new SmokeFailure(
-          "Lifecycle retired Firebase match/claim access was not denied.",
-        );
-    }
-  }
-  const after = await readMatch(
-    session.uid,
-    matchId,
-    session,
-    dependencies,
-    options,
-  );
-  if (!isDeepStrictEqual(after.value, before.value))
-    throw new SmokeFailure(
-      "Lifecycle retired Firebase probes changed canonical match state.",
-    );
-}
-
-async function verifySurrenderRules(
-  session: Session,
-  matchId: string,
-  dependencies: Dependencies,
-): Promise<void> {
-  const current = await readMatch(session.uid, matchId, session, dependencies);
-  const wholeUrl = matchUrl(session.uid, matchId);
-  const statusUrl = new URL(wholeUrl);
-  statusUrl.pathname = statusUrl.pathname.replace(/\.json$/, "/status.json");
-  const { status: _status, ...withoutStatus } = current.value;
-  for (const [url, body] of [
-    [statusUrl.href, "surrendered"],
-    [wholeUrl, { ...current.value, status: "surrendered" }],
-    [statusUrl.href, null],
-    [wholeUrl, withoutStatus],
-  ] as const) {
-    const result = await requestJson(
-      url,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-      dependencies,
-    );
-    if (!permissionDenied(result))
-      throw new SmokeFailure(
-        "Lifecycle surrender rule did not deny a direct client status write.",
-      );
-    if (
-      !isDeepStrictEqual(
-        (await readMatch(session.uid, matchId, session, dependencies)).value,
-        current.value,
-      )
-    )
-      throw new SmokeFailure(
-        "Lifecycle rejected client status write changed the match.",
-      );
-  }
-}
-
-async function verifyRetiredRtdbReads(
-  inviteId: string,
-  session: Session,
-  dependencies: Dependencies,
-): Promise<void> {
-  for (const path of [
-    `invites/${inviteId}`,
-    `players/${session.uid}/profile`,
-  ]) {
-    const result = await requestJson(
-      `${FIREBASE_DATABASE_ROOT}/${path}.json`,
-      {},
-      dependencies,
-    );
-    if (!permissionDenied(result))
-      throw new SmokeFailure(
-        "Lifecycle retired Firebase invite/profile read was not denied.",
-      );
-  }
 }
 
 async function runSmoke(
@@ -1704,9 +1311,7 @@ async function runSmoke(
     guestUid: "",
     operationIds,
     checks: [],
-    ...(validated.matchStorage === "durable"
-      ? { matchStorage: "durable" as const }
-      : {}),
+    matchStorage: "durable",
   };
   dependencies.log(JSON.stringify({ inviteId, operationIds }));
   const sessions: Session[] = [];
@@ -1780,7 +1385,6 @@ async function runSmoke(
       1,
       dependencies,
     );
-    await verifyRetiredRtdbReads(inviteId, host, dependencies);
     channel = metadataChannel(validated, inviteId, host, dependencies);
     await channel.waitFor(snapshot);
     report.checks.push("pending-http-and-authenticated-socket");
@@ -1859,21 +1463,6 @@ async function runSmoke(
       dependencies,
     );
     report.checks.push("join-live-match-and-public-spectator");
-    if (validated.matchStorage === "durable") {
-      await verifyRetiredMatchAccess(validated, host, inviteId, dependencies);
-      await verifyRetiredMatchAccess(validated, guest, inviteId, dependencies);
-      report.checks.push("retired-firebase-match-and-claim-read-write-denials");
-    } else {
-      await verifyTimerRules(host, inviteId, dependencies);
-      report.checks.push("firebase-timer-and-claim-write-rules");
-    }
-    if (
-      validated.matchStorage !== "durable" &&
-      !validated.surrenderRulesPending
-    ) {
-      await verifySurrenderRules(host, inviteId, dependencies);
-      report.checks.push("firebase-unauthenticated-surrender-write-denials");
-    }
     await verifyLiveMatch(
       validated,
       inviteId,
@@ -1886,10 +1475,7 @@ async function runSmoke(
     report.checks.push("api-move-surrender-replay-and-opponent-read");
     report.checks.push("cumulative-moves-takebacks-and-reordered-replay");
     report.checks.push("live-match-moves-takebacks-surrender-and-reconnect");
-    if (validated.matchStorage === "durable")
-      report.checks.push("canonical-timer-start-and-original-deadline-replay");
-    if (validated.matchStorage !== "durable" && !validated.moveRulesPending)
-      report.checks.push("firebase-unauthenticated-move-write-denials");
+    report.checks.push("canonical-timer-start-and-original-deadline-replay");
     const hostRematch = await mutation(
       validated,
       "/rematches/propose",
@@ -1995,23 +1581,7 @@ async function runSmoke(
     );
     report.checks.push("api-rematch-move-surrender-replay-and-opponent-read");
     report.checks.push("rematch-live-creation-moves-surrender-and-reconnect");
-    if (validated.matchStorage === "durable") {
-      await verifyRetiredMatchAccess(
-        validated,
-        host,
-        `${inviteId}1`,
-        dependencies,
-      );
-      await verifyRetiredMatchAccess(
-        validated,
-        guest,
-        `${inviteId}1`,
-        dependencies,
-      );
-      report.checks.push(
-        "canonical-rematch-timer-deadline-and-retired-source-denials",
-      );
-    }
+    report.checks.push("canonical-rematch-timer-deadline-replay");
     await mutation(
       validated,
       "/rematches/end",
@@ -2062,8 +1632,6 @@ async function runSmoke(
         "Lifecycle receipt replay reopened or changed the terminal series.",
       );
     report.checks.push("terminal-replay-preserved-source");
-    await verifyRetiredRtdbReads(inviteId, host, dependencies);
-    report.checks.push("firebase-invite-and-profile-read-denials");
   } catch (error) {
     failure =
       error instanceof SmokeFailure

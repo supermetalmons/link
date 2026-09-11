@@ -340,7 +340,7 @@ export async function releaseUnreferencedWagerReservation(
 ): Promise<"missing" | "referenced" | "released"> {
   if (
     wagerReferencesReservationOperation(
-      await repository.getRtdbPath(input.wagerPath),
+      await repository.getStatePath(input.wagerPath),
       input.playerUid,
       input.reservationOperationId,
     )

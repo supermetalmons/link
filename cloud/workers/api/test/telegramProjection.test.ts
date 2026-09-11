@@ -1,7 +1,7 @@
-import { createTelegramRepository } from "../../../functions/telegram/repositoryCore.js";
+import { createTelegramRepository } from "../../../runtime/telegram/repositoryCore.js";
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import type { StateRepository } from "../src/stateRepositoryTypes.ts";
 import type {
   RatingProjectionRepository,
   RatingUpdateData,
@@ -29,9 +29,9 @@ const PROJECTION_TEST_ENV = {
   X_CLIENT_SECRET: "test-x-secret",
 } satisfies Env;
 
-function rtdbState(initial: Record<string, unknown>) {
+function memoryState(initial: Record<string, unknown>) {
   const state = new Map(Object.entries(initial));
-  const client: FirebaseRtdbClient = {
+  const client: StateRepository = {
     async getPath(path) {
       return state.get(path) ?? null;
     },
@@ -109,7 +109,7 @@ function ratingRepository(
     applyFebruaryChallengeReplay: async () => undefined,
     claimRatingTelegramProjection: async () => true,
     finalizeRatingUpdate: async () => ({ status: "lost" }),
-    getRtdbPath: async () => null,
+    getStatePath: async () => null,
     listDueRatingTelegramProjections: async (updatedBeforeMs) =>
       data && (data.telegramProjectionUpdatedAtMs || 0) <= updatedBeforeMs
         ? [
@@ -127,7 +127,7 @@ function ratingRepository(
     ) => {
       marks.push({ state, ...(reason ? { reason } : {}) });
     },
-    patchRtdbRoot: async () => undefined,
+    patchStateRoot: async () => undefined,
     readProfileOwnershipSnapshot: async () => {
       throw new Error("unexpected-profile-ownership-read");
     },
@@ -242,7 +242,7 @@ test("automatch projection persists desired state and clears its exact outbox", 
     inviteId: "auto_example",
     requestId: "request-1",
   };
-  const store = rtdbState({
+  const store = memoryState({
     "telegramProjectionOutbox/automatch/auto_example": {
       schemaVersion: 1,
       status: "pending",
@@ -295,7 +295,7 @@ test("automatch projection persists desired state and clears its exact outbox", 
 });
 
 test("automatch projection acknowledges stale work and dead-letters invalid sources", async () => {
-  const stale = rtdbState({
+  const stale = memoryState({
     "telegramProjectionOutbox/automatch/auto_example": {
       schemaVersion: 1,
       status: "pending",
@@ -318,7 +318,7 @@ test("automatch projection acknowledges stale work and dead-letters invalid sour
     "stale",
   );
 
-  const invalid = rtdbState({
+  const invalid = memoryState({
     "telegramProjectionOutbox/automatch/auto_example": {
       schemaVersion: 1,
       status: "pending",
@@ -356,7 +356,7 @@ test("automatch projection acknowledges stale work and dead-letters invalid sour
 });
 
 test("rating projection merges once, projects the latest source, and completes", async () => {
-  const store = rtdbState({
+  const store = memoryState({
     "telegramAutomatches/auto_example": {
       version: 2,
       lifecycle: "matched",
@@ -416,7 +416,7 @@ test("projection dispatch failures preserve pending recovery markers", async () 
     inviteId: "auto_example",
     requestId: "request-1",
   };
-  const store = rtdbState({
+  const store = memoryState({
     "telegramProjectionOutbox/automatch/auto_example": {
       schemaVersion: 1,
       status: "pending",
@@ -494,7 +494,7 @@ test("projection queue acknowledges poison tasks and retries transient failures"
     4,
   );
   await handleTelegramProjectionMessage(failed.message, PROJECTION_TEST_ENV, {
-    createRtdb: () => {
+    createStateRepository: () => {
       throw new Error("temporary");
     },
     logger: { error() {}, info() {} },
@@ -527,7 +527,7 @@ test("scheduled recovery batches both pending outbox kinds", async () => {
     requestId: "request-1",
     updatedAtMs: 100,
   };
-  const store = rtdbState({
+  const store = memoryState({
     "telegramProjectionOutbox/automatch/auto_example": marker,
   });
   const getPath = store.client.getPath;
@@ -549,7 +549,7 @@ test("scheduled recovery batches both pending outbox kinds", async () => {
   };
   const marks: Array<{ state: string; reason?: string }> = [];
   const result = await sweepTelegramProjections(env, {
-    createRtdb: () => store.client,
+    createStateRepository: () => store.client,
     createRating: () => ratingRepository(ratingUpdate(), marks),
     now: () => 600_000,
   });
@@ -593,14 +593,14 @@ test("recovery takes current records and reports scan failures", async () => {
     },
   } satisfies Env;
   const logs: string[] = [];
-  const failedRtdb = rtdbState({}).client;
-  failedRtdb.getPath = async () => {
-    throw new Error("rtdb-unavailable");
+  const failedState = memoryState({}).client;
+  failedState.getPath = async () => {
+    throw new Error("state-unavailable");
   };
   await assert.rejects(
     () =>
       sweepTelegramProjections(env, {
-        createRtdb: () => failedRtdb,
+        createStateRepository: () => failedState,
         createRating: () => ratingRepository(ratingUpdate(), []),
         logger: { error: (message) => logs.push(message), info() {} },
         now: () => 600_000,
@@ -616,7 +616,7 @@ test("recovery takes current records and reports scan failures", async () => {
   ]);
 
   batches.length = 0;
-  const recentStore = rtdbState({
+  const recentStore = memoryState({
     "telegramProjectionOutbox/automatch/auto_example": {
       schemaVersion: 1,
       status: "pending",
@@ -637,7 +637,7 @@ test("recovery takes current records and reports scan failures", async () => {
         }
       : recentGetPath(path, query);
   const recovered = await sweepTelegramProjections(env, {
-    createRtdb: () => recentStore.client,
+    createStateRepository: () => recentStore.client,
     createRating: () => ratingRepository(null, []),
     now: () => 600_000,
   });
@@ -675,7 +675,7 @@ test("recovery sends successful claims before reporting claim failures", async (
     requestId: "request-1",
     updatedAtMs: 100,
   };
-  const store = rtdbState({
+  const store = memoryState({
     "telegramProjectionOutbox/automatch/auto_bad": marker,
     "telegramProjectionOutbox/automatch/auto_good": marker,
   });
@@ -695,7 +695,7 @@ test("recovery sends successful claims before reporting claim failures", async (
   await assert.rejects(
     () =>
       sweepTelegramProjections(env, {
-        createRtdb: () => store.client,
+        createStateRepository: () => store.client,
         createRating: () => ratingRepository(null, []),
         logger: { error: (message) => logs.push(message), info() {} },
         now: () => 600_000,
@@ -733,7 +733,7 @@ test("recovery removes malformed markers from the timestamp index", async () => 
       },
     ]),
   );
-  const store = rtdbState(
+  const store = memoryState(
     Object.fromEntries(
       Object.entries(records).map(([inviteId, record]) => [
         `telegramProjectionOutbox/automatch/${inviteId}`,
@@ -747,7 +747,7 @@ test("recovery removes malformed markers from the timestamp index", async () => 
       ? records
       : getPath(path, query);
   const result = await sweepTelegramProjections(PROJECTION_TEST_ENV, {
-    createRtdb: () => store.client,
+    createStateRepository: () => store.client,
     createRating: () => ratingRepository(null, []),
     now: () => 600_000,
   });
@@ -783,7 +783,7 @@ test("recovery claims bounded pages sequentially", async () => {
   };
   assert.deepEqual(
     await sweepTelegramProjections(PROJECTION_TEST_ENV, {
-      createRtdb: () => rtdbState({}).client,
+      createStateRepository: () => memoryState({}).client,
       createRating: () => rating,
       now: () => 600_000,
     }),

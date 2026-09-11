@@ -95,15 +95,15 @@ async function registeredRepository(
     ).bind(inviteId, JSON.stringify({ hostId: actors[0], guestId: actors[1] })),
   ]);
   return createGameplayRepository(env, {
-    rtdbClient: {
+    stateClient: {
       getPath: async () => {
-        throw new Error("unexpected-firebase-read");
+        throw new Error("unexpected-source-read");
       },
       patchRoot: async () => {
-        throw new Error("unexpected-firebase-write");
+        throw new Error("unexpected-source-write");
       },
       transactPath: async () => {
-        throw new Error("unexpected-firebase-write");
+        throw new Error("unexpected-source-write");
       },
     },
   });

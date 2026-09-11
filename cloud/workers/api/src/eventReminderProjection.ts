@@ -1,10 +1,10 @@
-import { buildTelegramEditDesired } from "../../../functions/telegram/desiredStateCore.js";
-import type { TelegramRepository } from "../../../functions/telegram/deliveryEngine.js";
-import { isV2TelegramEvent } from "../../../functions/telegram/eventProjectionCore.js";
+import { buildTelegramEditDesired } from "../../../runtime/telegram/desiredStateCore.js";
+import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
+import { isV2TelegramEvent } from "../../../runtime/telegram/eventProjectionCore.js";
 import {
   getSundayMonsReminderLeadMs,
   isSundayMonsReminderEvent,
-} from "../../../functions/telegram/sundayMonsReminder.js";
+} from "../../../runtime/telegram/sundayMonsReminder.js";
 import { readEventRuntimeControl } from "./eventD1.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
 import {
@@ -12,8 +12,8 @@ import {
   getEventTelegramProjectionGenerationPath,
   getEventTelegramProjectionOutboxPath,
 } from "./eventTelegramProjectionProducer.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
-import { firebaseRtdbIncrement } from "./firebaseRtdb.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
+import { stateIncrement } from "./stateRepositoryTypes.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import { profileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
 import {
@@ -33,7 +33,7 @@ export type SundayMonsReminderRefreshResult = {
 
 export type SundayMonsReminderRefreshDependencies = {
   controlsEnabled?: (env: Env) => Promise<boolean>;
-  eventRepository?: Pick<GameplayRepository, "getRtdbPath" | "patchRtdbRoot">;
+  eventRepository?: Pick<GameplayRepository, "getStatePath" | "patchStateRoot">;
   announcementRepository?: Pick<TelegramAnnouncementRepository, "get">;
   enqueue?: (task: EventTelegramProjectionTask) => Promise<unknown>;
   now?: () => number;
@@ -47,7 +47,7 @@ function confirmedReminder(
   chatId: string,
 ): { text: string; messageId: number; appliedAtMs: number } | null {
   if (
-    !isSafeFirebaseKey(eventId) ||
+    !isSafeRecordKey(eventId) ||
     !chatId.trim() ||
     receipt?.kind !== "reminder" ||
     receipt.eventId !== eventId ||
@@ -150,7 +150,7 @@ export async function refreshSundayMonsReminder(
   eventId: string,
   dependencies: SundayMonsReminderRefreshDependencies = {},
 ): Promise<SundayMonsReminderRefreshResult> {
-  if (!isSafeFirebaseKey(eventId)) {
+  if (!isSafeRecordKey(eventId)) {
     return { status: "skipped", reason: "invalid-event-id" };
   }
   if (!(await (dependencies.controlsEnabled || controlsEnabled)(env))) {
@@ -162,7 +162,7 @@ export async function refreshSundayMonsReminder(
     dependencies.announcementRepository ||
     createD1TelegramAnnouncementRepository(env.TELEGRAM_DB);
   const [event, receipt] = await Promise.all([
-    repository.getRtdbPath(`events/${eventId}`),
+    repository.getStatePath(`events/${eventId}`),
     announcements.get(`event:${eventId}:reminder:v1`),
   ]);
   if (!isSundayMonsReminderEvent(eventId, event) || !isV2TelegramEvent(event)) {
@@ -180,11 +180,10 @@ export async function refreshSundayMonsReminder(
     eventId,
     requestId,
   };
-  await repository.patchRtdbRoot({
+  await repository.patchStateRoot({
     [getEventTelegramProjectionOutboxPath(eventId)]:
       buildEventTelegramProjectionOutbox(requestId, nowMs),
-    [getEventTelegramProjectionGenerationPath(eventId)]:
-      firebaseRtdbIncrement(1),
+    [getEventTelegramProjectionGenerationPath(eventId)]: stateIncrement(1),
   });
   let reason: string | undefined;
   try {

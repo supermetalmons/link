@@ -5,7 +5,7 @@ const test = require("node:test");
 const {
   buildEventTelegramProjection,
   buildEventTelegramProjectionUpdates,
-} = require("../functions/telegram/eventProjectionCore");
+} = require("../runtime/telegram/eventProjectionCore");
 const {
   buildTelegramDeleteDesired,
   buildTelegramDeleteUpdates,
@@ -18,14 +18,14 @@ const {
   queueTelegramSend,
   resolveTelegramDestination,
   validateTelegramMessageKey,
-} = require("../functions/telegramDelivery");
+} = require("../runtime/telegramDelivery");
 const {
   buildTelegramDeliveryTaskId,
   createTelegramDeliveryDispatcher,
   createTelegramManualRecoveryDispatcher,
   enqueueTelegramDeliveryTask,
   signTelegramBridgeRequest,
-} = require("../functions/telegram/queueBridge");
+} = require("../runtime/telegram/queueBridge");
 
 const clone = (value) =>
   value === undefined ? undefined : structuredClone(value);
@@ -279,7 +279,7 @@ const editDesired = (overrides = {}) =>
     ...overrides,
   });
 
-test("builds deterministic desired state and Firebase multipath updates", () => {
+test("builds deterministic desired state and multipath state updates", () => {
   const input = {
     messageKey: "automatch:invite-1",
     destination: "community",
@@ -347,7 +347,7 @@ test("community and legacy events destinations resolve to the community chat", (
   );
 });
 
-test("validates Firebase-safe logical message keys", () => {
+test("validates record-safe logical message keys", () => {
   assert.equal(
     validateTelegramMessageKey("event:abc:upcoming"),
     "event:abc:upcoming",
@@ -357,7 +357,7 @@ test("validates Firebase-safe logical message keys", () => {
   }
 });
 
-test("legacy RTDB queue APIs fail closed after D1 cutover", async () => {
+test("legacy legacy queue APIs fail closed after D1 cutover", async () => {
   await assert.rejects(
     () =>
       queueTelegramSend({
@@ -3179,7 +3179,7 @@ test("expired hard-crash gates settle without another Telegram call", async (t) 
   });
 });
 
-test("proof payload bounds an idempotent retry when RTDB finalization failed", async () => {
+test("proof payload bounds an idempotent retry when state finalization failed", async () => {
   const desired = editDesired();
   let rejectFinalization = true;
   const repository = createRepository(
@@ -3254,7 +3254,7 @@ test("proof payload bounds an idempotent retry when RTDB finalization failed", a
   assert.equal(repository.state.get("key").delivery.deadLetterAtMs, nowMs);
 });
 
-test("proof payload bounds pending cleanup when RTDB finalization failed", async () => {
+test("proof payload bounds pending cleanup when state finalization failed", async () => {
   const desired = sendDesired();
   let rejectFinalization = true;
   const repository = createRepository(

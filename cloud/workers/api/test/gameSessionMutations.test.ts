@@ -302,8 +302,8 @@ function repository(initial: Record<string, unknown> = {}, nowMs = 1_000) {
       ice: 0,
     }),
     getMiningSnapshot: async () => null,
-    getRtdbPath: async (path) => values.get(path) ?? null,
-    patchRtdbRoot: async (updates) => {
+    getStatePath: async (path) => values.get(path) ?? null,
+    patchStateRoot: async (updates) => {
       patches.push(updates);
       for (const [path, raw] of Object.entries(updates)) {
         const value = resolveServerValues(raw, nowMs);
@@ -326,7 +326,7 @@ function repository(initial: Record<string, unknown> = {}, nowMs = 1_000) {
           }),
         ),
       ),
-    transactRtdbPath: async (path, updater) => {
+    transactStatePath: async (path, updater) => {
       const current = values.get(path) ?? null;
       const decision = updater(current) as {
         commit?: boolean;
@@ -546,7 +546,7 @@ test("uses only canonical D1 evidence for alternate invite roles", async () => {
     "watch",
   );
 
-  canonicalHost.getRtdbPath = async (path) => {
+  canonicalHost.getStatePath = async (path) => {
     assert.equal(path, "invites/abcdefghijk");
     return base["invites/abcdefghijk"];
   };
@@ -652,12 +652,12 @@ test("rejects missing, malformed, and unavailable invite role state", async () =
       guestId: "guest-login",
     },
   }).repository;
-  unavailable.getRtdbPath = async () => {
-    throw new Error("rtdb-unavailable");
+  unavailable.getStatePath = async () => {
+    throw new Error("state-unavailable");
   };
   await assert.rejects(
     () => resolveInviteRole(identity, request, unavailable),
-    /rtdb-unavailable/,
+    /state-unavailable/,
   );
 
   const ownershipUnavailable = repository({
@@ -666,12 +666,12 @@ test("rejects missing, malformed, and unavailable invite role state", async () =
       guestId: "guest-login",
     },
   }).repository;
-  ownershipUnavailable.getRtdbPath = async (path) => {
+  ownershipUnavailable.getStatePath = async (path) => {
     if (path === "invites/abcdefghijk") {
       return { hostId: "host-login", guestId: "guest-login" };
     }
     if (path === "players/alternate-login/profile") {
-      throw new Error("rtdb-unavailable");
+      throw new Error("state-unavailable");
     }
     return null;
   };
@@ -890,7 +890,7 @@ test("creates and replays one atomic manual invite mutation", async () => {
   );
 });
 
-test("rechecks mutation control immediately before the RTDB commit", async () => {
+test("rechecks mutation control immediately before the state commit", async () => {
   const state = repository();
   await assert.rejects(
     () =>
@@ -1001,10 +1001,10 @@ test("checks merged invite owners after reading the locked invite", async () => 
     },
     "players/host-login/matches/abcdefghijk": match("white"),
   });
-  const readPath = state.repository.getRtdbPath;
+  const readPath = state.repository.getStatePath;
   let inviteRead = false;
   let ownershipReads = 0;
-  state.repository.getRtdbPath = async (...args) => {
+  state.repository.getStatePath = async (...args) => {
     if (args[0] === "invites/abcdefghijk") inviteRead = true;
     return readPath(...args);
   };
@@ -1326,7 +1326,7 @@ test("uses the canonical bounded expiry operation without reading or patching Fi
   assert.equal(GAME_SESSION_MUTATION_RECEIPT_SWEEP_LIMIT, 1000);
   const state = repository();
   const calls: number[][] = [];
-  state.repository.getRtdbPath = async () => {
+  state.repository.getStatePath = async () => {
     throw new Error("unexpected-receipt-read");
   };
   state.repository.automatchPersistence = createAutomatchPersistenceStub({

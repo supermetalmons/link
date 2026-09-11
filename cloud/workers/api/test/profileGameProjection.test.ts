@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test, { beforeEach } from "node:test";
 import { Color, Game, GameVariant } from "mons-rules";
-import { createEventProfileGameProjectionCore } from "../../../functions/eventProfileGameProjectionCore.js";
-import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
+import { createEventProfileGameProjectionCore } from "../../../runtime/eventProfileGameProjectionCore.js";
+import { createEventLockManagerCore } from "../../../runtime/events/lockManagerCore.js";
 import type {
   RatingProfileGameProjectionRepository,
   RatingUpdateData,
@@ -80,7 +80,7 @@ beforeEach(() => {
   };
 });
 
-function assertActiveRtdbPath(path: string): void {
+function assertActiveStatePath(path: string): void {
   assert.doesNotMatch(
     path,
     /^(?:profileGameProjectionLocks\/(?:automatch|profile)|profileGameProjectionOutbox\/profile)(?:\/|$)/,
@@ -128,7 +128,7 @@ function ratingRepository(
     applyFebruaryChallengeReplay: async () => undefined,
     claimRatingProfileGameProjection: async () => true,
     finalizeRatingUpdate: async () => ({ status: "lost" }),
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       assert.doesNotMatch(path, /matchesRatingUpdates/);
       return null;
     },
@@ -144,7 +144,7 @@ function ratingRepository(
         ...(reason ? { reason } : {}),
       });
     },
-    patchRtdbRoot: async (updates) => {
+    patchStateRoot: async (updates) => {
       assert.ok(
         Object.keys(updates).every(
           (path) => !path.includes("matchesRatingUpdates"),
@@ -364,7 +364,7 @@ function eventRuntime(
   };
 }
 
-function applyRtdbTransaction(
+function applyStateTransaction(
   current: unknown,
   updater: (value: unknown) => unknown,
 ): { committed: boolean; decision?: string; value: unknown } {
@@ -378,18 +378,18 @@ function applyRtdbTransaction(
     : { committed: true, decision: output.decision, value: output.value };
 }
 
-function projectionLockRtdb(values = new Map<string, unknown>()) {
+function projectionLockState(values = new Map<string, unknown>()) {
   return {
-    getRtdbPath: async (path: string) => {
-      assertActiveRtdbPath(path);
+    getStatePath: async (path: string) => {
+      assertActiveStatePath(path);
       return values.get(path);
     },
-    transactRtdbPath: async (
+    transactStatePath: async (
       path: string,
       updater: (current: unknown) => unknown,
     ) => {
-      assertActiveRtdbPath(path);
-      const result = applyRtdbTransaction(values.get(path), updater);
+      assertActiveStatePath(path);
+      const result = applyStateTransaction(values.get(path), updater);
       if (result.committed) {
         values.set(path, result.value);
       }
@@ -722,13 +722,13 @@ test("automatch projection uses the immutable source timestamp and exact-clears"
     options: Record<string, unknown>;
     reason: string;
   }> = [];
-  const rtdb = {
-    getRtdbPath: async (requestedPath: string) => values.get(requestedPath),
-    transactRtdbPath: async (
+  const state = {
+    getStatePath: async (requestedPath: string) => values.get(requestedPath),
+    transactStatePath: async (
       requestedPath: string,
       updater: (current: unknown) => unknown,
     ) => {
-      const result = applyRtdbTransaction(values.get(requestedPath), updater);
+      const result = applyStateTransaction(values.get(requestedPath), updater);
       if (result.committed) {
         values.set(requestedPath, result.value);
       }
@@ -738,7 +738,7 @@ test("automatch projection uses the immutable source timestamp and exact-clears"
   assert.equal(
     await processAutomatchProfileGameProjection(
       automatchTask(),
-      rtdb,
+      state,
       runtime(calls),
       locks,
     ),
@@ -757,7 +757,7 @@ test("automatch projection uses the immutable source timestamp and exact-clears"
   assert.equal(
     await processAutomatchProfileGameProjection(
       automatchTask(),
-      rtdb,
+      state,
       runtime(calls),
       locks,
     ),
@@ -812,11 +812,11 @@ test("automatch projection archives accumulated historical descriptors", async (
     ],
   ]);
   const archived: unknown[] = [];
-  const rtdb = projectionLockRtdb(values);
+  const state = projectionLockState(values);
   assert.equal(
     await processAutomatchProfileGameProjection(
       automatchTask(),
-      rtdb,
+      state,
       {
         archiveHistoricalMatch: async (input) => {
           archived.push(input);
@@ -864,7 +864,7 @@ test("automatch projection settles descriptors already archived in D1", async ()
   assert.equal(
     await processAutomatchProfileGameProjection(
       automatchTask(),
-      projectionLockRtdb(values),
+      projectionLockState(values),
       {
         archiveHistoricalMatch: async () => {
           archived++;
@@ -924,7 +924,7 @@ test("automatch projection retries partial sources even when D1 has a row", asyn
   await assert.rejects(
     processAutomatchProfileGameProjection(
       automatchTask(),
-      projectionLockRtdb(values),
+      projectionLockState(values),
       {
         archiveHistoricalMatch: async () => {
           throw new Error("must-not-archive-partial");
@@ -994,7 +994,7 @@ test("automatch projection settles historical descriptors in bounded batches", a
   assert.equal(
     await processAutomatchProfileGameProjection(
       automatchTask(),
-      projectionLockRtdb(values),
+      projectionLockState(values),
       {
         archiveHistoricalMatch: async (input) => {
           archived.push(input);
@@ -1074,7 +1074,7 @@ test("automatch projection settles later descriptors when an earlier one retries
   await assert.rejects(
     processAutomatchProfileGameProjection(
       automatchTask(),
-      projectionLockRtdb(values),
+      projectionLockState(values),
       {
         archiveHistoricalMatch: async ({ pair }) => {
           archived.push(pair.matchId);
@@ -1115,14 +1115,14 @@ test("automatch projection serializes newer work behind the current invite", asy
   const started = new Promise<void>((resolve) => {
     firstStarted = resolve;
   });
-  const rtdb = {
-    getRtdbPath: async (path: string) => values.get(path),
-    transactRtdbPath: async (
+  const state = {
+    getStatePath: async (path: string) => values.get(path),
+    transactStatePath: async (
       path: string,
       updater: (current: unknown) => unknown,
     ) => {
-      assertActiveRtdbPath(path);
-      const result = applyRtdbTransaction(values.get(path), updater);
+      assertActiveStatePath(path);
+      const result = applyStateTransaction(values.get(path), updater);
       if (result.committed) {
         values.set(path, result.value);
       }
@@ -1131,7 +1131,7 @@ test("automatch projection serializes newer work behind the current invite", asy
   };
   const first = processAutomatchProfileGameProjection(
     automatchTask(),
-    rtdb,
+    state,
     {
       recomputeInviteProjection: async () => {
         firstStarted?.();
@@ -1156,7 +1156,7 @@ test("automatch projection serializes newer work behind the current invite", asy
     () =>
       processAutomatchProfileGameProjection(
         automatchTask("request-new"),
-        rtdb,
+        state,
         runtime([]),
         locks,
         "owner-b",
@@ -1169,7 +1169,7 @@ test("automatch projection serializes newer work behind the current invite", asy
   assert.equal(
     await processAutomatchProfileGameProjection(
       automatchTask("request-new"),
-      rtdb,
+      state,
       {
         recomputeInviteProjection: async () => {
           projection = "matched";
@@ -1208,11 +1208,11 @@ test("event projection reconciles cleanup owners and exact-clears its outbox", a
   const values = new Map<string, unknown>([[outboxPath, eventOutbox()]]);
   const calls: Array<{ cleanupOwnerProfileIds: string[]; eventId: string }> =
     [];
-  const rtdb = projectionLockRtdb(values);
+  const state = projectionLockState(values);
   assert.equal(
     await processEventProfileGameProjection(
       eventTask(),
-      rtdb,
+      state,
       eventRuntime(calls),
       "event-owner",
       () => 300,
@@ -1228,7 +1228,7 @@ test("event projection reconciles cleanup owners and exact-clears its outbox", a
   assert.equal(
     await processEventProfileGameProjection(
       eventTask(),
-      rtdb,
+      state,
       eventRuntime(calls),
       "event-owner",
       () => 400,
@@ -1241,7 +1241,7 @@ test("event projection reconciles cleanup owners and exact-clears its outbox", a
 test("event projection preserves a superseding outbox", async () => {
   const outboxPath = "profileGameProjectionOutbox/event/event-1";
   const values = new Map<string, unknown>([[outboxPath, eventOutbox()]]);
-  const rtdb = projectionLockRtdb(values);
+  const state = projectionLockState(values);
   const runtime: EventProfileGameProjectionRuntime = {
     async reconcileEventProjection() {
       values.set(outboxPath, eventOutbox("event-request-new", 400));
@@ -1256,7 +1256,7 @@ test("event projection preserves a superseding outbox", async () => {
   assert.equal(
     await processEventProfileGameProjection(
       eventTask(),
-      rtdb,
+      state,
       runtime,
       "event-owner",
       () => 300,
@@ -1275,7 +1275,7 @@ test("event projection cannot write after its lease is taken over", async () => 
   const values = new Map<string, unknown>([
     [outboxPath, eventOutbox("event-request-1", 200, [])],
   ]);
-  const rtdb = projectionLockRtdb(values);
+  const state = projectionLockState(values);
   const writes: unknown[][] = [];
   let nowMs = 0;
   let tookOver = false;
@@ -1308,7 +1308,7 @@ test("event projection cannot write after its lease is taken over", async () => 
             includeLegacyOwnerId: true,
             lockRoot: "profileGameProjectionLocks/event",
             now: () => nowMs,
-            transactPath: rtdb.transactRtdbPath,
+            transactPath: state.transactStatePath,
           });
           assert.ok(
             await contender.acquireEventLock("event-1", "successor-owner"),
@@ -1339,7 +1339,7 @@ test("event projection cannot write after its lease is taken over", async () => 
   await assert.rejects(
     processEventProfileGameProjection(
       eventTask(),
-      rtdb,
+      state,
       core,
       "stale-owner",
       () => nowMs,
@@ -1798,12 +1798,12 @@ test("automatch Queue retries transient work without settling its outbox", async
   let transactions = 0;
   await handleProfileGameProjectionMessage(failed.message, TELEGRAM_TEST_ENV, {
     createLocks: () => locks,
-    createRtdb: () => ({
-      getRtdbPath: async (path) => values.get(path),
-      transactRtdbPath: async (path, updater) => {
+    createStateRepository: () => ({
+      getStatePath: async (path) => values.get(path),
+      transactStatePath: async (path, updater) => {
         transactions++;
-        assertActiveRtdbPath(path);
-        const result = applyRtdbTransaction(values.get(path), updater);
+        assertActiveStatePath(path);
+        const result = applyStateTransaction(values.get(path), updater);
         if (result.committed) {
           values.set(path, result.value);
         }
@@ -1834,7 +1834,7 @@ test("event Queue retries transient work without settling its outbox", async () 
         throw new Error("temporary-event-projection-failure");
       },
     }),
-    createRtdb: () => projectionLockRtdb(values),
+    createStateRepository: () => projectionLockState(values),
     logger: { error() {}, info() {} },
   });
   assert.equal(failed.acknowledgements(), 0);
@@ -1866,7 +1866,7 @@ test("profile-link Queue immediately dispatches the next capped page", async () 
     {
       createLocks: () => locks,
       createProfileLinkJobs: () => profileLinkJobs(values),
-      createRtdb: () => projectionLockRtdb(),
+      createStateRepository: () => projectionLockState(),
       createRuntime: () => runtime([]),
       logger: { error() {}, info() {} },
       now: () => 300,
@@ -1894,7 +1894,7 @@ test("profile-link Queue reports missing after exact settlement", async () => {
   await handleProfileGameProjectionMessage(message.message, TELEGRAM_TEST_ENV, {
     createLocks: () => locks,
     createProfileLinkJobs: () => profileLinkJobs(values),
-    createRtdb: () => projectionLockRtdb(),
+    createStateRepository: () => projectionLockState(),
     createRuntime: () => runtime([]),
     logger: {
       error() {},
@@ -1922,7 +1922,7 @@ test("profile game projection Queue keeps exhausted infrastructure work pending"
     {
       createLocks: () => locks,
       createRating: () => ratingRepository(ratingUpdate(), state),
-      createRtdb: () => projectionLockRtdb(),
+      createStateRepository: () => projectionLockState(),
       createRuntime: () => ({
         recomputeInviteProjection: async () => {
           throw new Error("persistent-failure");
@@ -2078,9 +2078,9 @@ test("event recovery normalizes every non-null malformed marker", async () => {
     let current = value;
     const result = await repairInvalidEventSweepEntry(
       {
-        getRtdbPath: async () => null,
-        transactRtdbPath: async (_path, updater) => {
-          const transaction = applyRtdbTransaction(current, updater);
+        getStatePath: async () => null,
+        transactStatePath: async (_path, updater) => {
+          const transaction = applyStateTransaction(current, updater);
           if (transaction.committed) {
             current = transaction.value;
           }
@@ -2183,8 +2183,8 @@ test("event recovery claims due outboxes and repairs malformed records", async (
     ["event-negative", { ...eventOutbox(), lastQueuedAtMs: -1 }],
     ["event-boolean", { ...eventOutbox(), lastQueuedAtMs: false }],
   ]);
-  const rtdb = {
-    getRtdbPath: async (path: string, query?: Record<string, unknown>) => {
+  const state = {
+    getStatePath: async (path: string, query?: Record<string, unknown>) => {
       assert.equal(path, "profileGameProjectionOutbox/event");
       if (query?.endAt === 300_000) {
         return Object.fromEntries(values);
@@ -2196,12 +2196,12 @@ test("event recovery claims due outboxes and repairs malformed records", async (
       });
       return null;
     },
-    transactRtdbPath: async (
+    transactStatePath: async (
       path: string,
       updater: (current: unknown) => unknown,
     ) => {
       const eventId = path.split("/").at(-1) || "";
-      const result = applyRtdbTransaction(values.get(eventId), updater);
+      const result = applyStateTransaction(values.get(eventId), updater);
       if (result.committed) {
         values.set(eventId, result.value);
       }
@@ -2217,7 +2217,7 @@ test("event recovery claims due outboxes and repairs malformed records", async (
       },
       {
         createRequestId: () => requestIds.shift() || "unexpected",
-        createRtdb: () => rtdb,
+        createStateRepository: () => state,
         logger: { error: (message) => logs.push(String(message)), info() {} },
         now: () => 600_000,
       },
@@ -2319,8 +2319,8 @@ test("automatch recovery claims due outboxes, repairs poison, and preserves sour
       },
     ],
   ]);
-  const rtdb = {
-    getRtdbPath: async (path: string, query?: Record<string, unknown>) => {
+  const state = {
+    getStatePath: async (path: string, query?: Record<string, unknown>) => {
       assert.equal(path, "profileGameProjectionOutbox/automatch");
       if (query?.endAt === 300_000) {
         return Object.fromEntries(
@@ -2343,12 +2343,12 @@ test("automatch recovery claims due outboxes, repairs poison, and preserves sour
         ),
       );
     },
-    transactRtdbPath: async (
+    transactStatePath: async (
       path: string,
       updater: (current: unknown) => unknown,
     ) => {
       const inviteId = path.split("/").at(-1) || "";
-      const result = applyRtdbTransaction(values.get(inviteId), updater);
+      const result = applyStateTransaction(values.get(inviteId), updater);
       if (result.committed) {
         values.set(inviteId, result.value);
       }
@@ -2370,7 +2370,7 @@ test("automatch recovery claims due outboxes, repairs poison, and preserves sour
       },
       {
         createRequestId: () => requestIds.shift() || "unexpected",
-        createRtdb: () => rtdb,
+        createStateRepository: () => state,
         logger: { error: (message) => logs.push(String(message)), info() {} },
         now: () => 600_000,
       },
@@ -2442,13 +2442,13 @@ test("automatch recovery claims due outboxes, repairs poison, and preserves sour
 
 test("automatch recovery claims an outbox only once", async () => {
   let current: unknown = automatchOutbox("request-1", 50, 100);
-  const rtdb = {
-    getRtdbPath: async () => current,
-    transactRtdbPath: async (
+  const state = {
+    getStatePath: async () => current,
+    transactStatePath: async (
       _path: string,
       updater: (value: unknown) => unknown,
     ) => {
-      const result = applyRtdbTransaction(current, updater);
+      const result = applyStateTransaction(current, updater);
       if (result.committed) {
         current = result.value;
       }
@@ -2461,8 +2461,8 @@ test("automatch recovery claims an outbox only once", async () => {
   };
   assert.deepEqual(
     await Promise.all([
-      claimAutomatchSweepCandidate(rtdb, candidate, 600_000),
-      claimAutomatchSweepCandidate(rtdb, candidate, 600_000),
+      claimAutomatchSweepCandidate(state, candidate, 600_000),
+      claimAutomatchSweepCandidate(state, candidate, 600_000),
     ]),
     [true, false],
   );
@@ -2498,8 +2498,8 @@ test("profile-link recovery claims due markers on the existing Queue", async () 
       },
       {
         createProfileLinkJobs: () => profileLinkJobs(values),
-        createRtdb: () => {
-          throw new Error("unexpected-rtdb-access");
+        createStateRepository: () => {
+          throw new Error("unexpected-source-access");
         },
         now: () => 600_000,
       },
@@ -2520,14 +2520,14 @@ test("automatch, rating, and nested profile-link work share one invite lock", as
       automatchOutbox(),
     ],
   ]);
-  const rtdb = projectionLockRtdb(values);
+  const repositoryState = projectionLockState(values);
   const jobValues = new Map([["login-1", profileLinkJob()]]);
   const invite = { scope: "invite" as const, resourceId: "auto_aaaaaaaaaaa" };
   await locks.acquire(invite, "existing-owner", 100);
   await assert.rejects(
     processAutomatchProfileGameProjection(
       automatchTask(),
-      rtdb,
+      repositoryState,
       runtime([]),
       locks,
       "automatch-owner",
@@ -2601,7 +2601,7 @@ test("D1 lock acquisition failures retry without running or settling projections
             throw new ProfileGameProjectionLockFailure("acquire", scope);
           },
         }),
-        createRtdb: () => projectionLockRtdb(values),
+        createStateRepository: () => projectionLockState(values),
         createProfileLinkJobs: () => profileLinkJobs(jobValues),
         createRuntime: () => ({
           recomputeInviteProjection: async () => {
@@ -2665,7 +2665,7 @@ test("projection sweep cleans locks once and preserves enqueue work on cleanup f
             throw new ProfileGameProjectionLockFailure("cleanup", "cleanup");
           },
         }),
-        createRtdb: () => projectionLockRtdb(values),
+        createStateRepository: () => projectionLockState(values),
         createProfileLinkJobs: () => profileLinkJobs(),
         createRating: () => ratingRepository(null, state),
         now: () => 1_000_000,
@@ -2772,7 +2772,7 @@ test("profile-link Queue resumes the durable cursor after continuation dispatch 
   const dependencies = {
     createLocks: () => locks,
     createProfileLinkJobs: () => profileLinkJobs(values),
-    createRtdb: () => projectionLockRtdb(),
+    createStateRepository: () => projectionLockState(),
     createRuntime: () => runtime([]),
     logger: silentLogger,
     now: () => 300,
@@ -2828,8 +2828,8 @@ test("profile-link concurrent recovery sweeps dispatch each due D1 job once", as
   };
   const dependencies = {
     createProfileLinkJobs: () => profileLinkJobs(values),
-    createRtdb: () => {
-      throw new Error("unexpected-rtdb-access");
+    createStateRepository: () => {
+      throw new Error("unexpected-source-access");
     },
     now: () => 600_000,
   };

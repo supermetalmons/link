@@ -14,7 +14,7 @@ const {
   isResolveInviteRoleResponse,
 }: typeof import("@mons/shared/game-sessions") = require("@mons/shared/game-sessions");
 const {
-  isSafeFirebaseKey,
+  isSafeRecordKey,
 }: typeof import("@mons/shared/ids") = require("@mons/shared/ids");
 const {
   isExactNftApiResponse,
@@ -287,8 +287,8 @@ function readProfileSmokeFixture(path: string): ProfileSmokeFixture {
       (Object.keys(eventFields).length !==
         (Object.hasOwn(eventFields, "selectionEventId") ? 5 : 4) ||
         !events ||
-        !isSafeFirebaseKey(events.currentId) ||
-        !isSafeFirebaseKey(events.endedId) ||
+        !isSafeRecordKey(events.currentId) ||
+        !isSafeRecordKey(events.endedId) ||
         events.currentId === events.endedId ||
         (events.selectionEventId !== undefined &&
           events.selectionEventId !== events.currentId &&
@@ -309,8 +309,8 @@ function readProfileSmokeFixture(path: string): ProfileSmokeFixture {
     profileId === ".." ||
     invalidControl ||
     (invite !== null &&
-      (!isSafeFirebaseKey(invite.id) ||
-        !isSafeFirebaseKey(invite.actorUid) ||
+      (!isSafeRecordKey(invite.id) ||
+        !isSafeRecordKey(invite.actorUid) ||
         !invite.role ||
         invite.actorUid === loginId))
   ) {
@@ -456,7 +456,7 @@ function parseArgs(argv: string[]): Options {
     ((requireWagerFrozenRead || requireWagerStorageVersion) &&
       (!readOnly ||
         !readOnlyAuthToken ||
-        !isSafeFirebaseKey(smokeProfile.loginId))) ||
+        !isSafeRecordKey(smokeProfile.loginId))) ||
     (readOnlyAuthToken !== null &&
       readTokenSubject(readOnlyAuthToken) !== smokeProfile.loginId)
   ) {
@@ -914,9 +914,9 @@ async function smokeRequiredWagerFrozenRead(
 ): Promise<void> {
   const actorUid = smokeProfile.invite?.actorUid;
   if (
-    !isSafeFirebaseKey(smokeProfile.loginId) ||
+    !isSafeRecordKey(smokeProfile.loginId) ||
     !actorUid ||
-    !isSafeFirebaseKey(actorUid) ||
+    !isSafeRecordKey(actorUid) ||
     actorUid === smokeProfile.loginId ||
     readTokenSubject(accessToken) !== smokeProfile.loginId
   ) {
@@ -1338,9 +1338,9 @@ async function smokeApi(
       options.requireWagerStorageVersion === true) &&
     (options.readOnly !== true ||
       !options.readOnlyAuthToken ||
-      !isSafeFirebaseKey(options.smokeProfile.loginId) ||
+      !isSafeRecordKey(options.smokeProfile.loginId) ||
       !options.smokeProfile.invite ||
-      !isSafeFirebaseKey(options.smokeProfile.invite.actorUid) ||
+      !isSafeRecordKey(options.smokeProfile.invite.actorUid) ||
       options.smokeProfile.invite.actorUid === options.smokeProfile.loginId ||
       readTokenSubject(options.readOnlyAuthToken) !==
         options.smokeProfile.loginId)

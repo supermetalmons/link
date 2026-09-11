@@ -5,18 +5,18 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
-const { batchReadWithRetry } = require("../functions/batchRead");
+const { batchReadWithRetry } = require("../runtime/batchRead");
 const {
   resolveMatchResult,
   resolveMatchWinner,
-} = require("../functions/matchOutcome");
+} = require("../runtime/matchOutcome");
 const {
   getDisplayNameFromAddress,
   getTelegramEmojiTag,
   resolveTelegramEmojiId,
-} = require("../functions/telegramDisplay");
-const { customTelegramEmojis } = require("../functions/telegramEmojiData");
-const utils = require("../functions/utils");
+} = require("../runtime/telegramDisplay");
+const { customTelegramEmojis } = require("../runtime/telegramEmojiData");
+const utils = require("../runtime/utils");
 
 test("utils preserves its compatibility export surface", () => {
   assert.deepEqual(Object.keys(utils), [
@@ -35,8 +35,8 @@ test("utils preserves its compatibility export surface", () => {
 });
 
 test("production modules import foundation leaves instead of the utils facade", () => {
-  const functionsDirectory = path.resolve(__dirname, "../functions");
-  const pendingDirectories = [functionsDirectory];
+  const runtimeDirectory = path.resolve(__dirname, "../runtime");
+  const pendingDirectories = [runtimeDirectory];
   const facadeConsumers = [];
 
   while (pendingDirectories.length > 0) {
@@ -52,7 +52,7 @@ test("production modules import foundation leaves instead of the utils facade", 
         continue;
       }
       const filename = path.join(directory, entry.name);
-      if (filename === path.join(functionsDirectory, "utils.js")) {
+      if (filename === path.join(runtimeDirectory, "utils.js")) {
         continue;
       }
       const source = fs.readFileSync(filename, "utf8");
@@ -66,10 +66,10 @@ test("production modules import foundation leaves instead of the utils facade", 
           specifier,
         );
         if (
-          requiredFilename === path.join(functionsDirectory, "utils") ||
-          requiredFilename === path.join(functionsDirectory, "utils.js")
+          requiredFilename === path.join(runtimeDirectory, "utils") ||
+          requiredFilename === path.join(runtimeDirectory, "utils.js")
         ) {
-          facadeConsumers.push(path.relative(functionsDirectory, filename));
+          facadeConsumers.push(path.relative(runtimeDirectory, filename));
           break;
         }
       }
@@ -149,10 +149,10 @@ test("batch reads retry only failed initial reads", async () => {
   const errors = [];
   console.error = (...args) => errors.push(args);
   try {
-    assert.deepEqual(await batchReadWithRetry(references), [
-      recoveredSnapshot,
-      stableSnapshot,
-    ]);
+    assert.deepEqual(
+      await batchReadWithRetry(references.map((reference) => reference.once)),
+      [recoveredSnapshot, stableSnapshot],
+    );
   } finally {
     console.error = originalConsoleError;
   }
@@ -187,7 +187,7 @@ test("match outcome exposes the folded result mapping asynchronously", async () 
   });
   assert.deepEqual(await resolveMatchResult(null, null), { result: "none" });
   assert.equal(
-    fs.existsSync(path.resolve(__dirname, "../functions/matchResult.js")),
+    fs.existsSync(path.resolve(__dirname, "../runtime/matchResult.js")),
     false,
   );
 });

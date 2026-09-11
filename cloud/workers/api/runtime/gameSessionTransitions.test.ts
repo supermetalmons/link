@@ -10,7 +10,7 @@ import {
   gameSessionResourceGuardStatements,
   type GameSessionLeaseProof,
 } from "../src/gameSessionTransitions.ts";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import type { StateRepository } from "../src/stateRepositoryTypes.ts";
 import {
   acquireInviteSourceAdmission,
   createInviteSourceD1Store,
@@ -39,8 +39,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-class MemoryRtdb implements Pick<
-  FirebaseRtdbClient,
+class MemoryStateRepository implements Pick<
+  StateRepository,
   "getPath" | "transactPath"
 > {
   readonly values = new Map<string, unknown>();
@@ -52,7 +52,7 @@ class MemoryRtdb implements Pick<
 
   async getPath(path: string): Promise<unknown> {
     if (this.forbidInviteAccess && path.startsWith("invites/"))
-      throw new Error("retired-rtdb-invite-access");
+      throw new Error("retired-source-invite-access");
     return structuredClone(this.values.get(path) ?? null);
   }
 
@@ -173,12 +173,12 @@ function createUpdates() {
 }
 
 function coordinator(
-  rtdb: MemoryRtdb,
+  state: MemoryStateRepository,
   options: Partial<Parameters<typeof createGameSessionTransitions>[0]> = {},
 ) {
   return createGameSessionTransitions({
     db,
-    rtdb,
+    state,
     now: () => NOW,
     prepareMatchPresentations: presentationCapture().prepare,
     ...options,
@@ -218,13 +218,13 @@ function presentationCapture() {
   return { prepared, current, prepare };
 }
 
-async function activateInviteSource(rtdb?: MemoryRtdb) {
+async function activateInviteSource(state?: MemoryStateRepository) {
   await db
     .prepare(
       "UPDATE invite_source_control SET backend = 'd1', state = 'active', epoch = 1, verified_at_ms = 1, activated_at_ms = 1 WHERE singleton = 1",
     )
     .run();
-  if (rtdb) rtdb.forbidInviteAccess = true;
+  if (state) state.forbidInviteAccess = true;
   return createInviteSourceD1Store(db, { now: () => NOW });
 }
 
@@ -286,9 +286,9 @@ describe("recoverable D1 game-session transitions", () => {
 
   describe("D1 invite source", () => {
     it("preserves the deployed v2 transition serialization and creation digest", async () => {
-      const rtdb = new MemoryRtdb();
-      await activateInviteSource(rtdb);
-      await coordinator(rtdb, {
+      const state = new MemoryStateRepository();
+      await activateInviteSource(state);
+      await coordinator(state, {
         createId: () => "v2-serialization-proof",
       }).commit(createUpdates(), await leases());
       const payload = await db
@@ -309,15 +309,15 @@ describe("recoverable D1 game-session transitions", () => {
     });
 
     it("fences an old creator until capture-aware recovery registers its actual appearance", async () => {
-      const rtdb = new MemoryRtdb();
-      const source = await activateInviteSource(rtdb);
+      const state = new MemoryStateRepository();
+      const source = await activateInviteSource(state);
       await resetMatchPresentationTestState(
         db,
         testEnv.TEST_D1_MIGRATIONS,
         "durable",
       );
       await expect(
-        coordinator(rtdb, { prepareMatchPresentations: undefined }).commit(
+        coordinator(state, { prepareMatchPresentations: undefined }).commit(
           createUpdates(),
           await leases(),
         ),
@@ -325,7 +325,7 @@ describe("recoverable D1 game-session transitions", () => {
       expect((await source.read(INVITE)).revision).toBe(0);
       expect(await pendingCount()).toBe(1);
       expect(await presentationRegistrationCount()).toBe(0);
-      const recovery = coordinator(rtdb, {
+      const recovery = coordinator(state, {
         prepareMatchPresentations: (creations) =>
           prepareCreatedMatchPresentations(env, creations),
       });
@@ -347,17 +347,17 @@ describe("recoverable D1 game-session transitions", () => {
       });
       expect((await source.read(INVITE)).revision).toBe(1);
       expect(await pendingCount()).toBe(0);
-      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+      expect(state.writes.get(MATCH_PATH)).toBe(1);
     });
 
     it("requires successful appearance preparation before publishing a created match", async () => {
-      const rtdb = new MemoryRtdb();
-      const source = await activateInviteSource(rtdb);
+      const state = new MemoryStateRepository();
+      const source = await activateInviteSource(state);
       const capture = presentationCapture();
       let failAppearance = true;
-      const transitions = coordinator(rtdb, {
+      const transitions = coordinator(state, {
         async prepareMatchPresentations(creations) {
-          expect(await rtdb.getPath(MATCH_PATH)).toMatchObject({
+          expect(await state.getPath(MATCH_PATH)).toMatchObject({
             emojiId: 1,
             aura: "",
             sessionCreation: creations[0].sourceId,
@@ -402,14 +402,14 @@ describe("recoverable D1 game-session transitions", () => {
       expect(await presentationRegistrationCount()).toBe(1);
       expect((await source.read(INVITE)).revision).toBe(1);
       expect(await pendingCount()).toBe(0);
-      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+      expect(state.writes.get(MATCH_PATH)).toBe(1);
     });
 
     it("rolls back appearance registration with failed publication and recovers the same seed", async () => {
-      const rtdb = new MemoryRtdb();
-      const source = await activateInviteSource(rtdb);
+      const state = new MemoryStateRepository();
+      const source = await activateInviteSource(state);
       const capture = presentationCapture();
-      const transitions = coordinator(rtdb, {
+      const transitions = coordinator(state, {
         prepareMatchPresentations: capture.prepare,
       });
       await db.exec(
@@ -429,15 +429,15 @@ describe("recoverable D1 game-session transitions", () => {
       expect(capture.prepared[1]).toEqual(capture.prepared[0]);
       expect(await presentationRegistrationCount()).toBe(1);
       expect(await pendingCount()).toBe(0);
-      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+      expect(state.writes.get(MATCH_PATH)).toBe(1);
     });
 
-    it("does not seed an uncertain RTDB creation until its marker is verified by recovery", async () => {
-      const rtdb = new MemoryRtdb();
-      await activateInviteSource(rtdb);
-      rtdb.afterWriteFailure = MATCH_PATH;
+    it("does not seed an uncertain match creation until its marker is verified by recovery", async () => {
+      const state = new MemoryStateRepository();
+      await activateInviteSource(state);
+      state.afterWriteFailure = MATCH_PATH;
       const capture = presentationCapture();
-      const transitions = coordinator(rtdb, {
+      const transitions = coordinator(state, {
         prepareMatchPresentations: capture.prepare,
       });
       await expect(
@@ -448,14 +448,14 @@ describe("recoverable D1 game-session transitions", () => {
       await transitions.recoverResource(INVITE);
       expect(capture.prepared).toHaveLength(1);
       expect(await presentationRegistrationCount()).toBe(1);
-      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+      expect(state.writes.get(MATCH_PATH)).toBe(1);
     });
 
     it("publishes source, receipts, and discovery together after create-only match effects", async () => {
-      const rtdb = new MemoryRtdb();
-      const source = await activateInviteSource(rtdb);
+      const state = new MemoryStateRepository();
+      const source = await activateInviteSource(state);
       const store = createAutomatchD1Store(db);
-      rtdb.beforeWrite = async () => {
+      state.beforeWrite = async () => {
         expect((await source.read(INVITE)).revision).toBe(0);
         expect(
           await store.getPath(`gameplayMutationReceipts/${OPERATION}`),
@@ -466,7 +466,7 @@ describe("recoverable D1 game-session transitions", () => {
             .first("count"),
         ).toBe(0);
       };
-      await coordinator(rtdb).commit(createUpdates(), await leases());
+      await coordinator(state).commit(createUpdates(), await leases());
       expect(await source.read(INVITE)).toEqual({
         inviteId: INVITE,
         revision: 1,
@@ -497,22 +497,22 @@ describe("recoverable D1 game-session transitions", () => {
         inviteMutations: [{ current: { inviteId: INVITE, revision: 0 } }],
       });
       expect(payload.invite).toBeUndefined();
-      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+      expect(state.writes.get(MATCH_PATH)).toBe(1);
       expect(await pendingCount()).toBe(0);
       expect(await inviteAdmissionCount()).toBe(0);
     });
 
     it("recovers an uncertain creation without replaying advanced moves or the source revision", async () => {
-      const rtdb = new MemoryRtdb();
-      const source = await activateInviteSource(rtdb);
-      rtdb.afterWriteFailure = MATCH_PATH;
-      const transitions = coordinator(rtdb);
+      const state = new MemoryStateRepository();
+      const source = await activateInviteSource(state);
+      state.afterWriteFailure = MATCH_PATH;
+      const transitions = coordinator(state);
       await expect(
         transitions.commit(createUpdates(), await leases()),
       ).rejects.toThrow("uncertain-applied-write");
       expect((await source.read(INVITE)).revision).toBe(0);
-      const created = await rtdb.getPath(MATCH_PATH);
-      rtdb.values.set(MATCH_PATH, {
+      const created = await state.getPath(MATCH_PATH);
+      state.values.set(MATCH_PATH, {
         ...(isRecord(created) ? created : {}),
         fen: "advanced",
         flatMovesString: "a;b",
@@ -520,18 +520,18 @@ describe("recoverable D1 game-session transitions", () => {
       await transitions.recoverResource(
         gameSessionOperationResource(OPERATION),
       );
-      expect(await rtdb.getPath(MATCH_PATH)).toMatchObject({
+      expect(await state.getPath(MATCH_PATH)).toMatchObject({
         fen: "advanced",
         flatMovesString: "a;b",
       });
       expect(await transitions.recoverResource(INVITE)).toBe(false);
       expect((await source.read(INVITE)).revision).toBe(1);
-      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+      expect(state.writes.get(MATCH_PATH)).toBe(1);
     });
 
     it("preserves later source and live moves when another worker finishes a blocked creation", async () => {
-      const rtdb = new MemoryRtdb();
-      const source = await activateInviteSource(rtdb);
+      const state = new MemoryStateRepository();
+      const source = await activateInviteSource(state);
       let release: () => void = () => {};
       let entered: () => void = () => {};
       const blocked = new Promise<void>((resolve) => {
@@ -540,21 +540,21 @@ describe("recoverable D1 game-session transitions", () => {
       const reached = new Promise<void>((resolve) => {
         entered = resolve;
       });
-      rtdb.beforeWrite = async () => {
-        rtdb.beforeWrite = undefined;
+      state.beforeWrite = async () => {
+        state.beforeWrite = undefined;
         entered();
         await blocked;
       };
-      const original = coordinator(rtdb).commit(
+      const original = coordinator(state).commit(
         createUpdates(),
         await leases(),
       );
       await reached;
       try {
-        await coordinator(rtdb).recoverResource(INVITE);
+        await coordinator(state).recoverResource(INVITE);
         expect(await inviteAdmissionCount()).toBe(1);
-        const created = await rtdb.getPath(MATCH_PATH);
-        rtdb.values.set(MATCH_PATH, {
+        const created = await state.getPath(MATCH_PATH);
+        state.values.set(MATCH_PATH, {
           ...(isRecord(created) ? created : {}),
           fen: "newer-position",
           flatMovesString: "a;b;c",
@@ -574,19 +574,19 @@ describe("recoverable D1 game-session transitions", () => {
         revision: 2,
         value: { telegramDeliveryVersion: 3 },
       });
-      expect(await rtdb.getPath(MATCH_PATH)).toMatchObject({
+      expect(await state.getPath(MATCH_PATH)).toMatchObject({
         fen: "newer-position",
         flatMovesString: "a;b;c",
       });
-      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+      expect(state.writes.get(MATCH_PATH)).toBe(1);
       expect(await pendingCount()).toBe(0);
       expect(await inviteAdmissionCount()).toBe(0);
     });
 
     it("rolls back source, receipt, outbox, and discovery when finalization fails", async () => {
-      const rtdb = new MemoryRtdb();
-      const source = await activateInviteSource(rtdb);
-      const transitions = coordinator(rtdb);
+      const state = new MemoryStateRepository();
+      const source = await activateInviteSource(state);
+      const transitions = coordinator(state);
       await db.exec(
         "CREATE TRIGGER test_invite_finalization_failure BEFORE INSERT ON invite_sources BEGIN SELECT RAISE(ABORT, 'test-source-unavailable'); END;",
       );
@@ -613,12 +613,12 @@ describe("recoverable D1 game-session transitions", () => {
       await transitions.recoverResource(INVITE);
       expect((await source.read(INVITE)).revision).toBe(1);
       expect(await pendingCount()).toBe(0);
-      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+      expect(state.writes.get(MATCH_PATH)).toBe(1);
     });
 
     it("recognizes an uncertain D1 completion without applying its source twice", async () => {
-      const rtdb = new MemoryRtdb();
-      const source = await activateInviteSource(rtdb);
+      const state = new MemoryStateRepository();
+      const source = await activateInviteSource(state);
       let finalizing = false;
       let uncertainResponses = 0;
       const uncertainDb = new Proxy(db, {
@@ -638,7 +638,7 @@ describe("recoverable D1 game-session transitions", () => {
           return typeof value === "function" ? value.bind(target) : value;
         },
       });
-      await coordinator(rtdb, {
+      await coordinator(state, {
         db: uncertainDb,
         inviteStore: {
           ...source,
@@ -655,8 +655,8 @@ describe("recoverable D1 game-session transitions", () => {
     });
 
     it("preserves metadata and legacy provenance during rematch and match-only commits", async () => {
-      const rtdb = new MemoryRtdb();
-      const source = await activateInviteSource(rtdb);
+      const state = new MemoryStateRepository();
+      const source = await activateInviteSource(state);
       const legacyMarker = {
         sequence: 8,
         transitionId: "legacy",
@@ -680,7 +680,7 @@ describe("recoverable D1 game-session transitions", () => {
         )
         .run();
       const proofs = await leases([INVITE]);
-      await coordinator(rtdb).commit(
+      await coordinator(state).commit(
         {
           [`invites/${INVITE}/hostRematches`]: "12",
           [`players/${HOST}/matches/${INVITE}2`]: {
@@ -692,7 +692,7 @@ describe("recoverable D1 game-session transitions", () => {
         },
         proofs,
       );
-      await coordinator(rtdb).commit(
+      await coordinator(state).commit(
         {
           [`players/guest/matches/${INVITE}2`]: {
             fen: "guest-seed",
@@ -712,18 +712,18 @@ describe("recoverable D1 game-session transitions", () => {
           sessionTransition: legacyMarker,
         },
       });
-      expect(rtdb.writes.get(`players/${HOST}/matches/${INVITE}2`)).toBe(1);
-      expect(rtdb.writes.get(`players/guest/matches/${INVITE}2`)).toBe(1);
+      expect(state.writes.get(`players/${HOST}/matches/${INVITE}2`)).toBe(1);
+      expect(state.writes.get(`players/guest/matches/${INVITE}2`)).toBe(1);
     });
 
     it("retries only preparation CAS conflicts with a stable identity and resolved timestamp", async () => {
-      const rtdb = new MemoryRtdb();
-      const source = await activateInviteSource(rtdb);
+      const state = new MemoryStateRepository();
+      const source = await activateInviteSource(state);
       let attempts = 0;
       let ids = 0;
       let nowMs = NOW;
       const updates = createUpdates();
-      await coordinator(rtdb, {
+      await coordinator(state, {
         now: () => nowMs,
         createId: () => `source-intent-${++ids}`,
         inviteStore: {
@@ -759,12 +759,12 @@ describe("recoverable D1 game-session transitions", () => {
         revision: 2,
         value: { telegramDeliveryVersion: 2, automatchCanceledAt: NOW },
       });
-      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+      expect(state.writes.get(MATCH_PATH)).toBe(1);
     });
 
     it("retains the original source precondition and rematch seed during recovery", async () => {
-      const rtdb = new MemoryRtdb();
-      const source = await activateInviteSource(rtdb);
+      const state = new MemoryStateRepository();
+      const source = await activateInviteSource(state);
       await db.batch(
         source.buildCommitStatements(
           await source.preparePatch({
@@ -773,8 +773,8 @@ describe("recoverable D1 game-session transitions", () => {
         ),
       );
       const rematchPath = `players/${HOST}/matches/${INVITE}1`;
-      rtdb.afterWriteFailure = rematchPath;
-      const transitions = coordinator(rtdb);
+      state.afterWriteFailure = rematchPath;
+      const transitions = coordinator(state);
       await expect(
         transitions.commit(
           {
@@ -803,10 +803,10 @@ describe("recoverable D1 game-session transitions", () => {
         revision: 2,
         value: { guestId: "different-guest" },
       });
-      expect(await rtdb.getPath(rematchPath)).toMatchObject({
+      expect(await state.getPath(rematchPath)).toMatchObject({
         fen: "fixed-rematch",
       });
-      expect(rtdb.writes.get(rematchPath)).toBe(1);
+      expect(state.writes.get(rematchPath)).toBe(1);
       expect(await pendingCount()).toBe(1);
     });
 
@@ -816,12 +816,12 @@ describe("recoverable D1 game-session transitions", () => {
     ])(
       "rejects existing and proposed event ownership %j before effects",
       async (ownership) => {
-        const rtdb = new MemoryRtdb();
-        const source = await activateInviteSource(rtdb);
+        const state = new MemoryStateRepository();
+        const source = await activateInviteSource(state);
         const proofs = await leases();
         const updates = createUpdates();
         await expect(
-          coordinator(rtdb).commit(
+          coordinator(state).commit(
             {
               ...updates,
               [INVITE_PATH]: { ...updates[INVITE_PATH], ...ownership },
@@ -852,18 +852,18 @@ describe("recoverable D1 game-session transitions", () => {
             }),
           ),
         );
-        await expect(coordinator(rtdb).commit(updates, proofs)).rejects.toThrow(
-          "event-owned-invite",
-        );
-        expect(rtdb.values.size).toBe(0);
+        await expect(
+          coordinator(state).commit(updates, proofs),
+        ).rejects.toThrow("event-owned-invite");
+        expect(state.values.size).toBe(0);
         expect(await pendingCount()).toBe(0);
       },
     );
 
     it("rejects legacy recovery after activation without touching RTDB invites or matches", async () => {
-      const rtdb = new MemoryRtdb();
-      rtdb.beforeWriteFailure = MATCH_PATH;
-      const transitions = coordinator(rtdb);
+      const state = new MemoryStateRepository();
+      state.beforeWriteFailure = MATCH_PATH;
+      const transitions = coordinator(state);
       await expect(
         transitions.commit(createUpdates(), await leases()),
       ).rejects.toThrow("before-write");
@@ -875,7 +875,7 @@ describe("recoverable D1 game-session transitions", () => {
       await expect(transitions.recoverResource(INVITE)).rejects.toThrow(
         "invalid-intent",
       );
-      expect(rtdb.values.size).toBe(0);
+      expect(state.values.size).toBe(0);
       expect(await pendingCount()).toBe(1);
       await expect(transitions.assertResourceAvailable(INVITE)).rejects.toThrow(
         "resource-pending",
@@ -888,15 +888,15 @@ describe("recoverable D1 game-session transitions", () => {
           "UPDATE invite_source_control SET backend = 'rtdb', epoch = 0, verified_at_ms = NULL, activated_at_ms = NULL WHERE singleton = 1",
         )
         .run();
-      const rtdb = new MemoryRtdb();
-      const transitions = coordinator(rtdb);
+      const state = new MemoryStateRepository();
+      const transitions = coordinator(state);
       await expect(
         transitions.commit(createUpdates(), await leases()),
       ).rejects.toThrow("invite-source-backend-retired");
       await expect(transitions.sweep()).rejects.toThrow(
         "invite-source-backend-retired",
       );
-      expect(rtdb.values.size).toBe(0);
+      expect(state.values.size).toBe(0);
       expect(await pendingCount()).toBe(0);
       expect(await inviteAdmissionCount()).toBe(0);
     });
@@ -914,8 +914,8 @@ describe("recoverable D1 game-session transitions", () => {
         )
         .bind(INVITE, payload, NOW, NOW)
         .run();
-      const rtdb = new MemoryRtdb();
-      expect(await coordinator(rtdb).sweep()).toEqual({
+      const state = new MemoryStateRepository();
+      expect(await coordinator(state).sweep()).toEqual({
         recovered: 0,
         failed: 0,
       });
@@ -926,16 +926,16 @@ describe("recoverable D1 game-session transitions", () => {
           )
           .first("payload_json"),
       ).toBe(payload);
-      expect(rtdb.values.size).toBe(0);
+      expect(state.values.size).toBe(0);
     });
 
     it("leaves supplied admissions owned by the coordinator and rejects a revoked admission", async () => {
-      const rtdb = new MemoryRtdb();
-      await activateInviteSource(rtdb);
+      const state = new MemoryStateRepository();
+      await activateInviteSource(state);
       const admission = await acquireInviteSourceAdmission(db, "coordinator", {
         now: () => NOW,
       });
-      const transitions = coordinator(rtdb, { inviteAdmission: admission });
+      const transitions = coordinator(state, { inviteAdmission: admission });
       await transitions.commit(createUpdates(), await leases());
       expect(await inviteAdmissionCount()).toBe(1);
       await releaseInviteSourceAdmission(db, admission);
@@ -943,15 +943,15 @@ describe("recoverable D1 game-session transitions", () => {
         "invite_source_control_guard",
       );
       expect(await inviteAdmissionCount()).toBe(0);
-      expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+      expect(state.writes.get(MATCH_PATH)).toBe(1);
     });
 
     it("does not retry a control change as a source revision conflict", async () => {
-      const rtdb = new MemoryRtdb();
-      const source = await activateInviteSource(rtdb);
+      const state = new MemoryStateRepository();
+      const source = await activateInviteSource(state);
       let attempts = 0;
       await expect(
-        coordinator(rtdb, {
+        coordinator(state, {
           inviteStore: {
             ...source,
             async preparePatch(...args) {
@@ -968,14 +968,14 @@ describe("recoverable D1 game-session transitions", () => {
         }).commit(createUpdates(), await leases()),
       ).rejects.toThrow("invite_source_control_guard");
       expect(attempts).toBe(1);
-      expect(rtdb.values.size).toBe(0);
+      expect(state.values.size).toBe(0);
       expect(await pendingCount()).toBe(0);
     });
   });
 
   it("keeps the receipt and projection outbox unpublished when discovery capture fails", async () => {
-    const rtdb = new MemoryRtdb();
-    const transitions = coordinator(rtdb);
+    const state = new MemoryStateRepository();
+    const transitions = coordinator(state);
     await db
       .prepare(
         `CREATE TRIGGER test_discovery_capture_failure
@@ -988,7 +988,7 @@ describe("recoverable D1 game-session transitions", () => {
         transitions.commit(createUpdates(), await leases()),
       ).rejects.toThrow("test-discovery-unavailable");
       expect(await pendingCount()).toBe(1);
-      expect(await rtdb.getPath(MATCH_PATH)).toMatchObject({ fen: "seed" });
+      expect(await state.getPath(MATCH_PATH)).toMatchObject({ fen: "seed" });
       expect(
         await db
           .prepare(
@@ -1023,13 +1023,13 @@ describe("recoverable D1 game-session transitions", () => {
         .prepare("SELECT COUNT(*) AS count FROM game_session_projection_outbox")
         .first("count"),
     ).toBe(1);
-    expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+    expect(state.writes.get(MATCH_PATH)).toBe(1);
   });
 
-  it("keeps reservations after a failed RTDB write and recovers through login and operation keys", async () => {
-    const rtdb = new MemoryRtdb();
-    rtdb.beforeWriteFailure = MATCH_PATH;
-    const transitions = coordinator(rtdb);
+  it("keeps reservations after a failed match write and recovers through login and operation keys", async () => {
+    const state = new MemoryStateRepository();
+    state.beforeWriteFailure = MATCH_PATH;
+    const transitions = coordinator(state);
     await expect(
       transitions.commit(createUpdates(), await leases()),
     ).rejects.toThrow("before-write");
@@ -1053,15 +1053,15 @@ describe("recoverable D1 game-session transitions", () => {
   });
 
   it("does not replay a created match after an uncertain write and later moves", async () => {
-    const rtdb = new MemoryRtdb();
-    rtdb.afterWriteFailure = MATCH_PATH;
-    const transitions = coordinator(rtdb);
+    const state = new MemoryStateRepository();
+    state.afterWriteFailure = MATCH_PATH;
+    const transitions = coordinator(state);
     await expect(
       transitions.commit(createUpdates(), await leases()),
     ).rejects.toThrow("uncertain");
-    const match = await rtdb.getPath(MATCH_PATH);
+    const match = await state.getPath(MATCH_PATH);
     expect(isRecord(match)).toBe(true);
-    rtdb.values.set(MATCH_PATH, {
+    state.values.set(MATCH_PATH, {
       ...(isRecord(match) ? match : {}),
       fen: "after-move",
       flatMovesString: "move-1",
@@ -1069,20 +1069,20 @@ describe("recoverable D1 game-session transitions", () => {
       status: "surrendered",
     });
     await transitions.recoverResource(INVITE);
-    expect(await rtdb.getPath(MATCH_PATH)).toMatchObject({
+    expect(await state.getPath(MATCH_PATH)).toMatchObject({
       fen: "after-move",
       flatMovesString: "move-1",
       timer: "terminal",
       status: "surrendered",
     });
-    expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+    expect(state.writes.get(MATCH_PATH)).toBe(1);
   });
 
   it("notifies after recovered finalization and ignores notification failure", async () => {
-    const rtdb = new MemoryRtdb();
-    rtdb.afterWriteFailure = MATCH_PATH;
+    const state = new MemoryStateRepository();
+    state.afterWriteFailure = MATCH_PATH;
     const notifications: string[] = [];
-    const transitions = coordinator(rtdb, {
+    const transitions = coordinator(state, {
       async onCommitted(inviteId) {
         expect(await pendingCount()).toBe(0);
         expect(
@@ -1103,19 +1103,19 @@ describe("recoverable D1 game-session transitions", () => {
   });
 
   it("rejects legacy or differently marked records at an expected-create target", async () => {
-    const rtdb = new MemoryRtdb();
-    rtdb.values.set(MATCH_PATH, {
+    const state = new MemoryStateRepository();
+    state.values.set(MATCH_PATH, {
       fen: "legacy-moves",
       flatMovesString: "a;b",
     });
     await expect(
-      coordinator(rtdb).commit(createUpdates(), await leases()),
+      coordinator(state).commit(createUpdates(), await leases()),
     ).rejects.toThrow("match-creation-conflict");
-    expect(await rtdb.getPath(MATCH_PATH)).toEqual({
+    expect(await state.getPath(MATCH_PATH)).toEqual({
       fen: "legacy-moves",
       flatMovesString: "a;b",
     });
-    expect(rtdb.values.has(INVITE_PATH)).toBe(false);
+    expect(state.values.has(INVITE_PATH)).toBe(false);
     expect(
       await createAutomatchD1Store(db).getPath(`automatch/${INVITE}`),
     ).toBeNull();
@@ -1123,15 +1123,15 @@ describe("recoverable D1 game-session transitions", () => {
   });
 
   it("protects the prepared revisions from projection settlement until recovery completes", async () => {
-    const rtdb = new MemoryRtdb();
+    const state = new MemoryStateRepository();
     const store = createAutomatchD1Store(db, { writeGuards: () => [] });
     await store.patchRoot({
       [`profileGameProjectionOutbox/automatch/${INVITE}`]: {
         requestId: "older",
       },
     });
-    rtdb.beforeWriteFailure = MATCH_PATH;
-    const transitions = coordinator(rtdb);
+    state.beforeWriteFailure = MATCH_PATH;
+    const transitions = coordinator(state);
     await expect(
       transitions.commit(createUpdates(), await leases()),
     ).rejects.toThrow("before-write");
@@ -1150,7 +1150,7 @@ describe("recoverable D1 game-session transitions", () => {
   });
 
   it("refreshes conflicted D1 snapshots while preserving the original transition identity and time", async () => {
-    const rtdb = new MemoryRtdb();
+    const state = new MemoryStateRepository();
     const store = createAutomatchD1Store(db, { writeGuards: () => [] });
     const outboxPath = `profileGameProjectionOutbox/automatch/${INVITE}`;
     await store.patchRoot({ [outboxPath]: { requestId: "older" } });
@@ -1159,18 +1159,18 @@ describe("recoverable D1 game-session transitions", () => {
     let ids = 0;
     let inviteReads = 0;
     const notifications: string[] = [];
-    await coordinator(rtdb, {
+    await coordinator(state, {
       now: () => nowMs,
       createId: () => `intent-${++ids}`,
       onCommitted: async (inviteId) => {
         notifications.push(inviteId);
       },
-      rtdb: {
+      state: {
         async getPath(path) {
           inviteReads++;
-          return rtdb.getPath(path);
+          return state.getPath(path);
         },
-        transactPath: rtdb.transactPath.bind(rtdb),
+        transactPath: state.transactPath.bind(state),
       },
       store: interleavePreparations(store, async (attempt) => {
         preparations = attempt;
@@ -1215,16 +1215,16 @@ describe("recoverable D1 game-session transitions", () => {
       revision: 1,
       value: { hostId: HOST, automatchStateHint: "pending" },
     });
-    expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
-    expect(rtdb.writes.has(INVITE_PATH)).toBe(false);
+    expect(state.writes.get(MATCH_PATH)).toBe(1);
+    expect(state.writes.has(INVITE_PATH)).toBe(false);
     expect(await pendingCount()).toBe(0);
   });
 
   it("bounds preparation conflicts to three attempts without publishing effects", async () => {
-    const rtdb = new MemoryRtdb();
+    const state = new MemoryStateRepository();
     const store = createAutomatchD1Store(db, { writeGuards: () => [] });
     let preparations = 0;
-    const transitions = coordinator(rtdb, {
+    const transitions = coordinator(state, {
       store: interleavePreparations(store, async (attempt) => {
         preparations = attempt;
         await store.patchRoot({
@@ -1238,7 +1238,7 @@ describe("recoverable D1 game-session transitions", () => {
       transitions.commit(createUpdates(), await leases()),
     ).rejects.toThrow("automatch_revision_guard");
     expect(preparations).toBe(3);
-    expect(rtdb.values.size).toBe(0);
+    expect(state.values.size).toBe(0);
     expect(await pendingCount()).toBe(0);
     await expect(
       transitions.assertResourceAvailable(INVITE),
@@ -1251,12 +1251,12 @@ describe("recoverable D1 game-session transitions", () => {
   it.each(["lease", "abort", "database"])(
     "stops a preparation retry when interrupted by %s failure",
     async (failure) => {
-      const rtdb = new MemoryRtdb();
+      const state = new MemoryStateRepository();
       const store = createAutomatchD1Store(db, { writeGuards: () => [] });
       const controller = new AbortController();
       let preparations = 0;
       let nowMs = NOW;
-      const transitions = coordinator(rtdb, {
+      const transitions = coordinator(state, {
         now: () => nowMs,
         writeGuards: () =>
           failure === "database" && preparations === 2
@@ -1287,7 +1287,7 @@ describe("recoverable D1 game-session transitions", () => {
             : "CHECK constraint failed",
       );
       expect(preparations).toBe(2);
-      expect(rtdb.values.size).toBe(0);
+      expect(state.values.size).toBe(0);
       expect(await pendingCount()).toBe(0);
       await expect(
         transitions.assertResourceAvailable(INVITE),
@@ -1295,13 +1295,13 @@ describe("recoverable D1 game-session transitions", () => {
     },
   );
 
-  it("does not prepare another intent after an RTDB materialization failure", async () => {
-    const rtdb = new MemoryRtdb();
+  it("does not prepare another intent after a match materialization failure", async () => {
+    const state = new MemoryStateRepository();
     const store = createAutomatchD1Store(db, { writeGuards: () => [] });
     let preparations = 0;
-    rtdb.beforeWriteFailure = MATCH_PATH;
+    state.beforeWriteFailure = MATCH_PATH;
     await expect(
-      coordinator(rtdb, {
+      coordinator(state, {
         store: interleavePreparations(store, async (attempt) => {
           preparations = attempt;
         }),
@@ -1312,7 +1312,7 @@ describe("recoverable D1 game-session transitions", () => {
   });
 
   it("cannot reserve an expired, stolen, or legacy lease", async () => {
-    const rtdb = new MemoryRtdb();
+    const state = new MemoryStateRepository();
     const proofs = await leases();
     await db
       .prepare(
@@ -1321,10 +1321,10 @@ describe("recoverable D1 game-session transitions", () => {
       .bind(NOW, INVITE)
       .run();
     await expect(
-      coordinator(rtdb).commit(createUpdates(), proofs),
+      coordinator(state).commit(createUpdates(), proofs),
     ).rejects.toThrow();
     expect(await pendingCount()).toBe(0);
-    expect(rtdb.values.size).toBe(0);
+    expect(state.values.size).toBe(0);
     await db
       .prepare(
         "UPDATE game_session_mutation_locks SET expires_at_ms = ?, writer_generation = 0 WHERE lock_id = ?",
@@ -1332,7 +1332,7 @@ describe("recoverable D1 game-session transitions", () => {
       .bind(NOW + 60_000, INVITE)
       .run();
     await expect(
-      coordinator(rtdb).commit(createUpdates(), proofs),
+      coordinator(state).commit(createUpdates(), proofs),
     ).rejects.toThrow();
     expect(await pendingCount()).toBe(0);
     await db
@@ -1342,13 +1342,13 @@ describe("recoverable D1 game-session transitions", () => {
       .bind(INVITE)
       .run();
     await expect(
-      coordinator(rtdb).commit(createUpdates(), proofs),
+      coordinator(state).commit(createUpdates(), proofs),
     ).rejects.toThrow();
     expect(await pendingCount()).toBe(0);
   });
 
   it("allows concurrent recovery but a late create CAS never overwrites live progress", async () => {
-    const rtdb = new MemoryRtdb();
+    const state = new MemoryStateRepository();
     let release: () => void = () => {};
     let entered: () => void = () => {};
     const blocked = new Promise<void>((resolve) => {
@@ -1357,36 +1357,36 @@ describe("recoverable D1 game-session transitions", () => {
     const reached = new Promise<void>((resolve) => {
       entered = resolve;
     });
-    rtdb.beforeWrite = async (path) => {
+    state.beforeWrite = async (path) => {
       if (path !== MATCH_PATH) return;
-      rtdb.beforeWrite = undefined;
+      state.beforeWrite = undefined;
       entered();
       await blocked;
     };
-    const transitions = coordinator(rtdb);
+    const transitions = coordinator(state);
     const original = transitions.commit(createUpdates(), await leases());
     await reached;
-    await coordinator(rtdb).recoverResource(INVITE);
-    const match = await rtdb.getPath(MATCH_PATH);
-    rtdb.values.set(MATCH_PATH, {
+    await coordinator(state).recoverResource(INVITE);
+    const match = await state.getPath(MATCH_PATH);
+    state.values.set(MATCH_PATH, {
       ...(isRecord(match) ? match : {}),
       fen: "live-progress",
       flatMovesString: "a;b;c",
     });
     release();
     await original;
-    expect(await rtdb.getPath(MATCH_PATH)).toMatchObject({
+    expect(await state.getPath(MATCH_PATH)).toMatchObject({
       fen: "live-progress",
       flatMovesString: "a;b;c",
     });
-    expect(rtdb.writes.get(MATCH_PATH)).toBe(1);
+    expect(state.writes.get(MATCH_PATH)).toBe(1);
     expect(await pendingCount()).toBe(0);
   });
 
   it("recovers cancellation once while preserving invite metadata and the Telegram generation", async () => {
-    const rtdb = new MemoryRtdb();
+    const state = new MemoryStateRepository();
     const store = createAutomatchD1Store(db, { writeGuards: () => [] });
-    const source = await activateInviteSource(rtdb);
+    const source = await activateInviteSource(state);
     await db.batch(
       source.buildCommitStatements(
         await source.preparePatch({
@@ -1407,7 +1407,7 @@ describe("recoverable D1 game-session transitions", () => {
         lifecycle: "pending",
       },
     });
-    const transitions = coordinator(rtdb);
+    const transitions = coordinator(state);
     const updates = {
       [`automatch/${INVITE}`]: null,
       [`telegramAutomatches/${INVITE}/generation`]: { ".sv": { increment: 1 } },
@@ -1449,12 +1449,12 @@ describe("recoverable D1 game-session transitions", () => {
         custom: { retained: true },
       },
     });
-    expect(rtdb.writes.has(INVITE_PATH)).toBe(false);
+    expect(state.writes.has(INVITE_PATH)).toBe(false);
   });
 
   it("ensures an initial match from canonical invite metadata and records its actor", async () => {
-    const rtdb = new MemoryRtdb();
-    const source = await activateInviteSource(rtdb);
+    const state = new MemoryStateRepository();
+    const source = await activateInviteSource(state);
     await db.batch(
       source.buildCommitStatements(
         await source.preparePatch({
@@ -1462,7 +1462,7 @@ describe("recoverable D1 game-session transitions", () => {
         }),
       ),
     );
-    await coordinator(rtdb).commit(
+    await coordinator(state).commit(
       {
         [MATCH_PATH]: {
           fen: "mirrored",
@@ -1478,7 +1478,7 @@ describe("recoverable D1 game-session transitions", () => {
       revision: 2,
       value: { hostRematches: "1" },
     });
-    expect(await rtdb.getPath(MATCH_PATH)).toMatchObject({
+    expect(await state.getPath(MATCH_PATH)).toMatchObject({
       fen: "mirrored",
       sessionCreation: expect.any(String),
     });
@@ -1498,8 +1498,8 @@ describe("recoverable D1 game-session transitions", () => {
   for (const matchId of [INVITE, `${INVITE}1`]) {
     it(`captures the guest match path for ${matchId} independently of the caller login`, async () => {
       const actorUid = "stored-guest-actor";
-      const rtdb = new MemoryRtdb();
-      const source = await activateInviteSource(rtdb);
+      const state = new MemoryStateRepository();
+      const source = await activateInviteSource(state);
       await db.batch(
         source.buildCommitStatements(
           await source.preparePatch({
@@ -1507,7 +1507,7 @@ describe("recoverable D1 game-session transitions", () => {
           }),
         ),
       );
-      await coordinator(rtdb).commit(
+      await coordinator(state).commit(
         {
           [`players/${actorUid}/matches/${matchId}`]: {
             fen: "guest-seed",
@@ -1533,13 +1533,13 @@ describe("recoverable D1 game-session transitions", () => {
   }
 
   it("bounds recovery and leaves failed intents reserved for a later retry", async () => {
-    const rtdb = new MemoryRtdb();
-    rtdb.beforeWriteFailure = MATCH_PATH;
-    const transitions = coordinator(rtdb);
+    const state = new MemoryStateRepository();
+    state.beforeWriteFailure = MATCH_PATH;
+    const transitions = coordinator(state);
     await expect(
       transitions.commit(createUpdates(), await leases()),
     ).rejects.toThrow();
-    rtdb.beforeWriteFailure = MATCH_PATH;
+    state.beforeWriteFailure = MATCH_PATH;
     expect(await transitions.sweep(1)).toEqual({ recovered: 0, failed: 1 });
     expect(await pendingCount()).toBe(1);
     expect(await transitions.sweep(1)).toEqual({ recovered: 1, failed: 0 });
@@ -1547,9 +1547,9 @@ describe("recoverable D1 game-session transitions", () => {
   });
 
   it("bounds completed journal retention without deleting markers or pending work", async () => {
-    const rtdb = new MemoryRtdb();
-    await coordinator(rtdb).commit(createUpdates(), await leases());
-    const existingMarker = await rtdb.getPath(MATCH_PATH);
+    const state = new MemoryStateRepository();
+    await coordinator(state).commit(createUpdates(), await leases());
+    const existingMarker = await state.getPath(MATCH_PATH);
     const future = NOW + GAME_SESSION_TRANSITION_RETENTION_MS + 1;
     await db
       .prepare(
@@ -1563,7 +1563,7 @@ describe("recoverable D1 game-session transitions", () => {
         "INSERT INTO game_session_transition_resources (resource_key, transition_id) VALUES ('held-invite', 'held-intent')",
       )
       .run();
-    expect(await coordinator(rtdb, { now: () => future }).sweep(1)).toEqual({
+    expect(await coordinator(state, { now: () => future }).sweep(1)).toEqual({
       recovered: 0,
       failed: 1,
     });
@@ -1575,9 +1575,9 @@ describe("recoverable D1 game-session transitions", () => {
         .first("count"),
     ).toBe(0);
     expect(await pendingCount()).toBe(1);
-    expect(await rtdb.getPath(MATCH_PATH)).toEqual(existingMarker);
+    expect(await state.getPath(MATCH_PATH)).toEqual(existingMarker);
     await expect(
-      coordinator(rtdb).assertResourceAvailable("held-invite"),
+      coordinator(state).assertResourceAvailable("held-invite"),
     ).rejects.toThrow("resource-pending");
   });
 });

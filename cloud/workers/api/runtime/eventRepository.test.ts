@@ -19,7 +19,7 @@ import {
 } from "../src/eventD1.ts";
 import {
   createD1AuthRecoveryPrizeStore,
-  createEventRtdbClient,
+  createEventStateRepository,
 } from "../src/eventRepository.ts";
 import { prepareInviteEventIntent } from "../src/inviteEventEffects.ts";
 import {
@@ -142,7 +142,7 @@ describe("hybrid event repository", () => {
        END`,
     ).run();
     try {
-      const client = createEventRtdbClient(testEnv, {
+      const client = createEventStateRepository(testEnv, {
         getPath: async () => null,
         patchRoot: async (updates) => {
           effects.push(updates);
@@ -152,10 +152,10 @@ describe("hybrid event repository", () => {
       const update = { [`events/${eventId}`]: eventRecord() };
       await expect(client.patchRoot(update)).resolves.toBeUndefined();
       expect(effects).toEqual([]);
-      const failedClient = createEventRtdbClient(testEnv, {
+      const failedClient = createEventStateRepository(testEnv, {
         getPath: async () => null,
         patchRoot: async () => {
-          throw new Error("firebase-write-failed");
+          throw new Error("state-write-failed");
         },
         transactPath: async () => ({ committed: false, value: null }),
       });
@@ -200,9 +200,9 @@ describe("hybrid event repository", () => {
     }
   });
 
-  it("publishes event projection metadata without an RTDB mirror", async () => {
+  it("publishes event projection metadata without a legacy mirror", async () => {
     const effects: Record<string, unknown>[] = [];
-    const client = createEventRtdbClient(testEnv, {
+    const client = createEventStateRepository(testEnv, {
       getPath: async () => null,
       patchRoot: async (updates) => {
         effects.push(updates);
@@ -248,7 +248,7 @@ describe("hybrid event repository", () => {
   });
 
   it("quarantines malformed Telegram outboxes in D1 mode", async () => {
-    const client = createEventRtdbClient(testEnv, {
+    const client = createEventStateRepository(testEnv, {
       getPath: async () => null,
       patchRoot: async () => undefined,
       transactPath: async () => ({ committed: false, value: null }),
@@ -317,7 +317,7 @@ describe("hybrid event repository", () => {
   });
 
   it("pages mixed-case profile prize IDs in binary cursor order", async () => {
-    const client = createEventRtdbClient(testEnv, {
+    const client = createEventStateRepository(testEnv, {
       getPath: async () => null,
       patchRoot: async () => undefined,
       transactPath: async () => ({ committed: false, value: null }),
@@ -378,12 +378,60 @@ describe("hybrid event repository", () => {
     expect(collected).toEqual(binaryOrder);
   });
 
-  it("recovers a failed RTDB effect before publishing the D1 revision", async () => {
+  it("replays a stored v2 intent with unchanged serialized effect keys and digest", async () => {
+    const f = eventTransitionFixture(testEnv);
+    const timerPath = "players/login-one/matches/event-match/timer";
+    await f.client.patchRoot({ [`events/${eventId}`]: eventRecord() });
+    const pending = await createPendingIntent({
+      schemaVersion: 1,
+      transitionId: "compatibility-transition",
+      eventId,
+      expectedRevision: 1,
+      canonicalUpdates: {
+        [`events/${eventId}/status`]: "active",
+        [`events/${eventId}/updatedAtMs`]: 200,
+      },
+      rtdbEffects: { [timerPath]: "gg" },
+      createdAtMs: 200,
+      updatedAtMs: 200,
+    });
+    expect(pending.payloadDigest).toBe(
+      "6d1ec90c315e871b8614f55297b3bfd28f27d2fd947db2e390f9e8e532f0f1ba",
+    );
+    const stored = await testEnv.EVENT_DB.prepare(
+      "SELECT intent_json FROM event_transition_intents WHERE transition_id = ?",
+    )
+      .bind(pending.transitionId)
+      .first<string>("intent_json");
+    expect(stored).toContain(
+      '"rtdbEffects":{"players/login-one/matches/event-match/timer":"gg"}',
+    );
+    expect(JSON.parse(stored!)).toEqual(pending);
+    expect(await f.recover()).toBe(1);
+    expect(f.values.get(timerPath)).toBe("gg");
+    expect(
+      await readEventTransitionReceipt(
+        testEnv.PROFILE_GAMES_DB,
+        pending.transitionId,
+      ),
+    ).toMatchObject({
+      schemaVersion: 2,
+      payloadDigest: pending.payloadDigest,
+    });
+    expect(await readEventSnapshot(testEnv.EVENT_DB, eventId)).toMatchObject({
+      event: { status: "active", updatedAtMs: 200 },
+      revision: 2,
+    });
+    expect(await f.recover()).toBe(0);
+    expect(f.patches).toEqual([{ [timerPath]: "gg" }]);
+  });
+
+  it("recovers a failed match effect before publishing the D1 revision", async () => {
     const f = eventTransitionFixture(testEnv);
     const timerPath = "players/login-one/matches/event-match/timer";
     f.hooks.beforePatch = async () => {
       f.hooks.beforePatch = undefined;
-      throw new Error("rtdb-offline");
+      throw new Error("state-offline");
     };
     await f.client.patchRoot({ [`events/${eventId}`]: eventRecord() });
     const update = {
@@ -391,7 +439,7 @@ describe("hybrid event repository", () => {
       [`events/${eventId}/updatedAtMs`]: 200,
       [timerPath]: "gg",
     };
-    await expect(f.client.patchRoot(update)).rejects.toThrow("rtdb-offline");
+    await expect(f.client.patchRoot(update)).rejects.toThrow("state-offline");
     expect(
       await testEnv.EVENT_DB.prepare(
         "SELECT COUNT(*) AS count FROM event_write_admissions",
@@ -423,13 +471,13 @@ describe("hybrid event repository", () => {
     );
   });
 
-  it("preserves advanced RTDB matches after an ambiguous creation commit", async () => {
+  it("preserves advanced matches after an ambiguous creation commit", async () => {
     const f = eventTransitionFixture(testEnv);
     const matchPath = "players/login-one/matches/event-match";
     f.hooks.afterTransaction = async (path) => {
       if (path !== matchPath) return;
       f.hooks.afterTransaction = undefined;
-      throw new Error("ambiguous-rtdb-commit");
+      throw new Error("ambiguous-state-commit");
     };
     await f.client.patchRoot({ [`events/${eventId}`]: eventRecord() });
     await expect(
@@ -449,7 +497,7 @@ describe("hybrid event repository", () => {
           color: "black",
         },
       }),
-    ).rejects.toThrow("ambiguous-rtdb-commit");
+    ).rejects.toThrow("ambiguous-state-commit");
     const stored = f.values.get(matchPath) as Record<string, unknown>;
     const advanced = {
       ...stored,
@@ -617,7 +665,7 @@ describe("hybrid event repository", () => {
           "players/login-one/matches/a-failing-transition/timer",
         )
       ) {
-        throw new Error("rtdb-offline");
+        throw new Error("state-offline");
       }
     };
     await expect(f.recover()).rejects.toThrow(
@@ -653,7 +701,7 @@ describe("hybrid event repository", () => {
     });
   });
 
-  it("holds a durable admission while replaying raw RTDB effects", async () => {
+  it("holds a durable admission while replaying match effects", async () => {
     const f = eventTransitionFixture(testEnv);
     await f.client.patchRoot({ [`events/${eventId}`]: eventRecord() });
     await createPendingIntent({
@@ -703,7 +751,7 @@ describe("hybrid event repository", () => {
     });
   });
 
-  it("publishes mixed progress outboxes and RTDB timer effects with a D1 receipt", async () => {
+  it("publishes mixed progress outboxes and timer effects with a D1 receipt", async () => {
     const f = eventTransitionFixture(testEnv);
     await f.client.patchRoot({ [`events/${eventId}`]: eventRecord() });
     const outbox = {
@@ -742,7 +790,7 @@ describe("hybrid event repository", () => {
     const getPath = vi.fn(async () => null);
     const patchRoot = vi.fn(async () => undefined);
     const transactPath = vi.fn(async () => ({ committed: false, value: null }));
-    const client = createEventRtdbClient(testEnv, {
+    const client = createEventStateRepository(testEnv, {
       getPath,
       patchRoot,
       transactPath,
@@ -770,7 +818,7 @@ describe("hybrid event repository", () => {
   });
 
   it("processes event profile-game projections with the shared lease schema", async () => {
-    const client = createEventRtdbClient(testEnv, {
+    const client = createEventStateRepository(testEnv, {
       getPath: async () => null,
       patchRoot: async () => undefined,
       transactPath: async () => ({ committed: false, value: null }),
@@ -800,8 +848,8 @@ describe("hybrid event repository", () => {
           requestId: "profile-request",
         },
         {
-          getRtdbPath: client.getPath,
-          transactRtdbPath: client.transactPath,
+          getStatePath: client.getPath,
+          transactStatePath: client.transactPath,
         },
         {
           reconcileEventProjection: async () => ({
@@ -824,7 +872,7 @@ describe("hybrid event repository", () => {
   });
 
   it("stores domain and projection locks in namespaced D1 leases", async () => {
-    const client = createEventRtdbClient(testEnv, {
+    const client = createEventStateRepository(testEnv, {
       getPath: async () => null,
       patchRoot: async () => undefined,
       transactPath: async () => ({ committed: false, value: null }),
@@ -901,7 +949,7 @@ describe("hybrid event repository", () => {
   });
 
   it("copies stored retired prizes under an event lease while ordinary writes remain strict", async () => {
-    const client = createEventRtdbClient(testEnv, {
+    const client = createEventStateRepository(testEnv, {
       getPath: async () => null,
       patchRoot: async () => undefined,
       transactPath: async () => ({ committed: false, value: null }),
@@ -975,7 +1023,7 @@ describe("hybrid event repository", () => {
   });
 
   it("atomically rejects stored prize writes after a D1 event lease is replaced or expired", async () => {
-    const client = createEventRtdbClient(testEnv, {
+    const client = createEventStateRepository(testEnv, {
       getPath: async () => null,
       patchRoot: async () => undefined,
       transactPath: async () => ({ committed: false, value: null }),
@@ -1030,9 +1078,9 @@ describe("hybrid event repository", () => {
     expect(await readEventOwnedPath(testEnv.EVENT_DB, targetPath)).toBeNull();
   });
 
-  it("delegates unrelated RTDB operations even while event storage is frozen", async () => {
+  it("delegates unrelated state operations even while event storage is frozen", async () => {
     const calls: string[] = [];
-    const client = createEventRtdbClient(testEnv, {
+    const client = createEventStateRepository(testEnv, {
       getPath: async (path) => {
         calls.push(`get:${path}`);
         return { ok: true };

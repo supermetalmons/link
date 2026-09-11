@@ -1,32 +1,37 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createEventBracketRuntime } from "../../../functions/events/bracket.js";
-import type { EventOwnershipSnapshot } from "../../../functions/events/ownership.js";
+import { createEventBracketRuntime } from "../../../runtime/events/bracket.js";
+import type { EventOwnershipSnapshot } from "../../../runtime/events/ownership.js";
 
-function snapshot(value: unknown) {
-  return { exists: () => value !== null, val: () => value };
-}
-
-function createAdmin(
+function createState(
   values: Map<string, unknown>,
   beforeTransaction?: (path: string, values: Map<string, unknown>) => void,
 ) {
   return {
-    database: () => ({
-      ref: (path = "") => ({
-        once: async () => snapshot(values.get(path) ?? null),
-        transaction: async (updater: (current: unknown) => unknown) => {
-          beforeTransaction?.(path, values);
-          const current = values.get(path) ?? null;
-          const next = updater(current);
-          if (next === undefined) {
-            return { committed: false, snapshot: snapshot(current) };
-          }
-          values.set(path, next);
-          return { committed: true, snapshot: snapshot(next) };
-        },
-      }),
-    }),
+    async read(path: string) {
+      return values.get(path) ?? null;
+    },
+    async set(path: string, value: unknown) {
+      values.set(path, value);
+    },
+    async remove(path: string) {
+      values.delete(path);
+    },
+    async update(path: string, updates: Record<string, unknown>) {
+      values.set(path, {
+        ...((values.get(path) as Record<string, unknown>) || {}),
+        ...updates,
+      });
+    },
+    async transaction(path: string, updater: (current: unknown) => unknown) {
+      beforeTransaction?.(path, values);
+      const current = values.get(path) ?? null;
+      const next = updater(current);
+      if (next === undefined) return { committed: false, value: current };
+      if (next === null) values.delete(path);
+      else values.set(path, next);
+      return { committed: true, value: next };
+    },
   };
 }
 
@@ -70,7 +75,7 @@ const mergedPrizeOwnership = prizeOwnership([
 test("reconciles canonical prize projections without changing event history", async () => {
   const values = new Map<string, unknown>();
   const runtime = createEventBracketRuntime({
-    admin: createAdmin(values),
+    state: createState(values),
     readEventPrizeWithdrawals: async () => ({}),
   });
   const assignment = {
@@ -125,7 +130,7 @@ test("uses injected canonical withdrawals when filtering prize projections", asy
   const prizeId = "1092";
   const values = new Map<string, unknown>();
   const runtime = createEventBracketRuntime({
-    admin: createAdmin(values),
+    state: createState(values),
     readEventPrizeWithdrawals: async () => ({
       [prizeId]: {
         assetAddress: "JEGmxy88eGv9vD4rWRtN5so9fMfMU6WA5djgrysDWKrU",
@@ -169,7 +174,7 @@ test("does not overwrite a canonical prize assignment inserted concurrently", as
   const values = new Map<string, unknown>();
   let inserted = false;
   const runtime = createEventBracketRuntime({
-    admin: createAdmin(values, (path, currentValues) => {
+    state: createState(values, (path, currentValues) => {
       if (path === targetPath && !inserted) {
         currentValues.set(path, conflictingAssignment);
         inserted = true;
@@ -200,7 +205,7 @@ test("does not overwrite a canonical prize assignment inserted concurrently", as
 test("rejects two awards that collapse to one canonical profile", async () => {
   const eventId = "NN3eRzoZo80";
   const runtime = createEventBracketRuntime({
-    admin: createAdmin(new Map()),
+    state: createState(new Map()),
     readEventPrizeWithdrawals: async () => ({}),
   });
   await assert.rejects(

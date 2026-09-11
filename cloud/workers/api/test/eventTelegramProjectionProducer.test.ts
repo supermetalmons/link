@@ -9,7 +9,7 @@ import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 function repository(
-  patch: GameplayRepository["patchRtdbRoot"],
+  patch: GameplayRepository["patchStateRoot"],
 ): GameplayRepository {
   return {
     applyWagerTransferOnce: async () => "applied",
@@ -26,9 +26,9 @@ function repository(
     }),
     getMiningSnapshot: async () => null,
     getNavigationGame: async () => null,
-    getRtdbPath: async () => null,
-    patchRtdbRoot: patch,
-    transactRtdbPath: async () => ({ committed: false, value: null }),
+    getStatePath: async () => null,
+    patchStateRoot: patch,
+    transactStatePath: async () => ({ committed: false, value: null }),
   };
 }
 
@@ -53,7 +53,7 @@ test("event writes persist exact outboxes before enqueueing", async () => {
     },
   );
 
-  await wrapped.patchRtdbRoot({
+  await wrapped.patchStateRoot({
     "events/event-b/status": "active",
     "events/event-a/updatedAtMs": 123,
     "events/event-b/updatedAtMs": 123,
@@ -103,7 +103,7 @@ test("non-event writes pass through without projection work", async () => {
     },
   );
   const updates = { "invites/invite-1/status": "active" };
-  await wrapped.patchRtdbRoot(updates);
+  await wrapped.patchStateRoot(updates);
   assert.deepEqual(patches, [updates]);
   assert.equal(enqueues, 0);
 });
@@ -125,7 +125,7 @@ test("enqueue failure leaves the committed marker recoverable", async () => {
       now: () => 456,
     },
   );
-  await wrapped.patchRtdbRoot({ "events/event-1/status": "active" });
+  await wrapped.patchStateRoot({ "events/event-1/status": "active" });
   assert.deepEqual(persisted[getEventTelegramProjectionOutboxPath("event-1")], {
     schemaVersion: 1,
     status: "pending",
@@ -152,7 +152,7 @@ test("scheduled dispatch does not hold the committed mutation open", async () =>
       schedule: (work) => scheduled.push(work),
     },
   );
-  await wrapped.patchRtdbRoot({ "events/event-1/status": "active" });
+  await wrapped.patchStateRoot({ "events/event-1/status": "active" });
   assert.equal(scheduled.length, 1);
   finishEnqueue?.();
   await scheduled[0];

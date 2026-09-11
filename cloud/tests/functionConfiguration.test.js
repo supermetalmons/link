@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
-const { getRpcUrl } = require("../functions/eventPrizes/solana");
+const { getRpcUrl } = require("../runtime/eventPrizes/solana");
 
 const runModuleLoadingCheck = (source) => {
   const result = spawnSync(process.execPath, ["-e", source], {
@@ -27,7 +27,7 @@ test("builds the Helius RPC URL from an injected secret value", () => {
 test("shared Solana loading excludes standard-specific SDKs", () => {
   const withdrawalPath = path.resolve(
     __dirname,
-    "../functions/eventPrizeWithdrawal.js",
+    "../runtime/eventPrizeWithdrawal.js",
   );
   runModuleLoadingCheck(`
     const { loadSolanaDependencies } = require(${JSON.stringify(withdrawalPath)});
@@ -45,7 +45,7 @@ test("shared Solana loading excludes standard-specific SDKs", () => {
 test("Core Solana loading excludes Bubblegum", () => {
   const withdrawalPath = path.resolve(
     __dirname,
-    "../functions/eventPrizeWithdrawal.js",
+    "../runtime/eventPrizeWithdrawal.js",
   );
   runModuleLoadingCheck(`
     const { loadSolanaDependencies } = require(${JSON.stringify(withdrawalPath)});
@@ -66,7 +66,7 @@ test("Core Solana loading excludes Bubblegum", () => {
 test("compressed Solana loading excludes Core", () => {
   const withdrawalPath = path.resolve(
     __dirname,
-    "../functions/eventPrizeWithdrawal.js",
+    "../runtime/eventPrizeWithdrawal.js",
   );
   runModuleLoadingCheck(`
     const { loadSolanaDependencies } = require(${JSON.stringify(withdrawalPath)});

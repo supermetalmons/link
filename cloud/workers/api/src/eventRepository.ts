@@ -1,9 +1,10 @@
+import { STATE_EFFECTS_FIELD } from "./stateCompatibility.ts";
 import { createAutomatchPersistence } from "./automatchPersistence.ts";
 import {
-  type FirebaseRtdbClient,
-  type FirebaseRtdbQuery,
-  type FirebaseRtdbTransactionResult,
-} from "./firebaseRtdb.ts";
+  type StateRepository,
+  type StateQuery,
+  type StateTransactionResult,
+} from "./stateRepositoryTypes.ts";
 import { createMatchStateSource } from "./matchStateSource.ts";
 import {
   EventD1Conflict,
@@ -73,8 +74,8 @@ const EVENT_OWNED_ROOTS = new Set([
 const EVENT_TRANSITION_APPLICATION_LOCK_TTL_MS = 5 * 60 * 1_000;
 const EVENT_TRANSITION_APPLICATION_LOCK_OWNER = "event-transition-applier";
 export const EVENT_TRANSITION_RECEIPT_ROOT = "eventTransitionReceipts";
-type EventRtdbBackend = Pick<
-  FirebaseRtdbClient,
+type EventStateBackend = Pick<
+  StateRepository,
   | "getPath"
   | "patchRoot"
   | "transactPath"
@@ -82,23 +83,23 @@ type EventRtdbBackend = Pick<
   | "createMatchRecords"
   | "applyMatchEventEffects"
 >;
-type EventTransitionBackend = Pick<EventRtdbBackend, "getPath" | "patchRoot">;
+type EventTransitionBackend = Pick<EventStateBackend, "getPath" | "patchRoot">;
 type EventLockGuard = {
   eventId: string;
   lockId: string;
   lockRoot: string;
   ownerUid: string;
 };
-export type EventRtdbClient = FirebaseRtdbClient & {
+export type EventStateRepository = StateRepository & {
   transactStoredProfileEventPrizeWithEventLease(
     path: string,
     updater: (current: unknown) => unknown,
     guard: EventLockGuard,
     signal?: AbortSignal,
-  ): Promise<FirebaseRtdbTransactionResult>;
+  ): Promise<StateTransactionResult>;
 };
 export type AuthRecoveryPrizeStore = Pick<
-  EventRtdbClient,
+  EventStateRepository,
   "getPath" | "transactPath" | "transactStoredProfileEventPrizeWithEventLease"
 >;
 
@@ -191,14 +192,14 @@ export function isEventOwnedPath(path: string): boolean {
 
 function splitUpdates(updates: Record<string, unknown>): {
   canonicalUpdates: Record<string, unknown>;
-  rtdbEffects: Record<string, unknown>;
+  [STATE_EFFECTS_FIELD]: Record<string, unknown>;
 } {
   const canonicalUpdates: Record<string, unknown> = {};
-  const rtdbEffects: Record<string, unknown> = {};
+  const stateEffects: Record<string, unknown> = {};
   for (const [path, value] of Object.entries(updates)) {
-    (isEventOwnedPath(path) ? canonicalUpdates : rtdbEffects)[path] = value;
+    (isEventOwnedPath(path) ? canonicalUpdates : stateEffects)[path] = value;
   }
-  return { canonicalUpdates, rtdbEffects };
+  return { canonicalUpdates, [STATE_EFFECTS_FIELD]: stateEffects };
 }
 
 function eventIdsFromUpdates(updates: Record<string, unknown>): string[] {
@@ -249,12 +250,12 @@ function bytesToHex(value: ArrayBuffer): string {
 async function transitionId(
   eventId: string,
   revision: number,
-  rtdbEffects: Record<string, unknown>,
+  stateEffects: Record<string, unknown>,
 ): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(
-      `${eventId}\n${revision}\n${canonicalJson(rtdbEffects)}`,
+      `${eventId}\n${revision}\n${canonicalJson(stateEffects)}`,
     ),
   );
   return `et_${bytesToHex(digest)}`;
@@ -275,7 +276,8 @@ function sameTransitionIntent(
     left.expectedRevision === right.expectedRevision &&
     canonicalJson(left.canonicalUpdates) ===
       canonicalJson(right.canonicalUpdates) &&
-    canonicalJson(left.rtdbEffects) === canonicalJson(right.rtdbEffects) &&
+    canonicalJson(left[STATE_EFFECTS_FIELD]) ===
+      canonicalJson(right[STATE_EFFECTS_FIELD]) &&
     (left.schemaVersion !== 2 ||
       (right.schemaVersion === 2 &&
         left.payloadDigest === right.payloadDigest &&
@@ -382,7 +384,7 @@ async function applyIntent(
   discoveryDb: D1Database,
   intent: EventTransitionIntent,
   admission: EventWriteAdmission,
-  raw: FirebaseRtdbClient,
+  raw: StateRepository,
   onCommitted: (intent: EventTransitionIntent) => Promise<void>,
   prepareMatchPresentations: PrepareMatchPresentations,
   signal?: AbortSignal,
@@ -441,24 +443,25 @@ async function patchD1EventState(
   base: EventTransitionBackend,
   updates: Record<string, unknown>,
   admission: EventWriteAdmission,
-  raw: FirebaseRtdbClient,
+  raw: StateRepository,
   onCommitted: (intent: EventTransitionIntent) => Promise<void>,
   prepareMatchPresentations: PrepareMatchPresentations,
   signal?: AbortSignal,
 ): Promise<void> {
-  const { canonicalUpdates, rtdbEffects } = splitUpdates(updates);
+  const { canonicalUpdates, [STATE_EFFECTS_FIELD]: stateEffects } =
+    splitUpdates(updates);
   if (Object.keys(canonicalUpdates).length === 0) {
-    if (eventMatchCreationInviteIds(rtdbEffects).length) {
+    if (eventMatchCreationInviteIds(stateEffects).length) {
       throw new Error("event-match-creation-requires-transition");
     }
-    await base.patchRoot(rtdbEffects, signal);
+    await base.patchRoot(stateEffects, signal);
     return;
   }
-  if (Object.keys(rtdbEffects).length === 0) {
+  if (Object.keys(stateEffects).length === 0) {
     await patchEventOwnedPaths(db, canonicalUpdates, { admission });
     return;
   }
-  if (Object.keys(rtdbEffects).some(isTransitionReceiptPath)) {
+  if (Object.keys(stateEffects).some(isTransitionReceiptPath)) {
     throw new Error("event-transition-receipt-path-reserved");
   }
   await withInviteEffectsAdmission(discoveryDb, async () => {
@@ -470,18 +473,18 @@ async function patchD1EventState(
     const revision = (await readEventSnapshot(db, eventId)).revision;
     if (revision < 1) {
       if (
-        eventMatchCreationInviteIds(rtdbEffects).length ||
-        Object.keys(rtdbEffects).some((path) =>
+        eventMatchCreationInviteIds(stateEffects).length ||
+        Object.keys(stateEffects).some((path) =>
           normalizedPath(path).startsWith("invites/"),
         )
       ) {
         throw new Error("event-match-creation-requires-transition");
       }
       await patchEventOwnedPaths(db, canonicalUpdates, { admission });
-      await base.patchRoot(rtdbEffects, signal);
+      await base.patchRoot(stateEffects, signal);
       return;
     }
-    const id = await transitionId(eventId, revision, rtdbEffects);
+    const id = await transitionId(eventId, revision, stateEffects);
     const nowMs = Date.now();
     const intent: Extract<EventTransitionIntent, { schemaVersion: 1 }> = {
       schemaVersion: 1,
@@ -489,7 +492,7 @@ async function patchD1EventState(
       eventId,
       expectedRevision: revision,
       canonicalUpdates,
-      rtdbEffects,
+      [STATE_EFFECTS_FIELD]: stateEffects,
       createdAtMs: nowMs,
       updatedAtMs: nowMs,
     };
@@ -499,7 +502,8 @@ async function patchD1EventState(
       (canonicalJson(existing.canonicalUpdates) !==
         canonicalJson(canonicalUpdates) ||
         (existing.schemaVersion === 1 &&
-          canonicalJson(existing.rtdbEffects) !== canonicalJson(rtdbEffects)) ||
+          canonicalJson(existing[STATE_EFFECTS_FIELD]) !==
+            canonicalJson(stateEffects)) ||
         existing.eventId !== eventId ||
         existing.expectedRevision !== revision)
     ) {
@@ -523,7 +527,7 @@ async function patchD1EventState(
   });
 }
 
-function createEventRawClient(env: Env): FirebaseRtdbClient {
+function createEventRawClient(env: Env): StateRepository {
   return createMatchStateSource(env);
 }
 
@@ -547,14 +551,14 @@ async function notifyEventInviteEffects(
       env,
       intent.inviteMutations.map(({ current }) => current.inviteId),
     ),
-    notifyMatchSyncChanged(env, intent.rtdbEffects),
+    notifyMatchSyncChanged(env, intent[STATE_EFFECTS_FIELD]),
   ]);
 }
 
 export async function recoverEventTransitionIntents(
   env: Env,
   limit = 100,
-  raw: FirebaseRtdbClient = createEventRawClient(env),
+  raw: StateRepository = createEventRawClient(env),
   prepareMatchPresentations: PrepareMatchPresentations = (creations) =>
     prepareCreatedMatchPresentations(env, creations),
 ): Promise<number> {
@@ -598,17 +602,17 @@ export function createEventGameplayRepository(
   env: Env,
   base: GameplayRepository = createGameplayRepository(env),
 ): GameplayRepository {
-  const eventClient = createEventRtdbClient(env, {
-    getPath: base.getRtdbPath,
-    patchRoot: base.patchRtdbRoot,
-    transactPath: base.transactRtdbPath,
+  const eventClient = createEventStateRepository(env, {
+    getPath: base.getStatePath,
+    patchRoot: base.patchStateRoot,
+    transactPath: base.transactStatePath,
     readMatchPair: base.readMatchPair,
   });
   return {
     ...base,
-    getRtdbPath: eventClient.getPath,
-    patchRtdbRoot: eventClient.patchRoot,
-    transactRtdbPath: eventClient.transactPath,
+    getStatePath: eventClient.getPath,
+    patchStateRoot: eventClient.patchRoot,
+    transactStatePath: eventClient.transactPath,
   };
 }
 
@@ -619,7 +623,7 @@ function transactD1EventPath(
   signal?: AbortSignal,
   guard?: EventLockGuard,
   allowStoredProfilePrizeAssignment = false,
-): Promise<FirebaseRtdbTransactionResult> {
+): Promise<StateTransactionResult> {
   return withEventWriteAdmission(
     db,
     "event-path-transaction",
@@ -675,7 +679,7 @@ function transactD1EventPath(
 async function readProfileEventPrizePage(
   db: D1Database,
   path: string,
-  query: FirebaseRtdbQuery,
+  query: StateQuery,
 ): Promise<Record<string, unknown>> {
   const prizes = (await readEventOwnedPath(db, path)) as Record<
     string,
@@ -695,7 +699,7 @@ function transactStoredProfileEventPrizeWithEventLease(
   updater: (current: unknown) => unknown,
   guard: EventLockGuard,
   signal?: AbortSignal,
-): Promise<FirebaseRtdbTransactionResult> {
+): Promise<StateTransactionResult> {
   const [root, profileId, eventId, ...nested] = normalizedPath(path).split("/");
   if (
     guard.lockRoot !== "eventLocks" ||
@@ -749,9 +753,9 @@ export function createD1AuthRecoveryPrizeStore(
   };
 }
 
-export function createEventRtdbClient(
+export function createEventStateRepository(
   env: Env,
-  base: EventRtdbBackend = createAutomatchPersistence(
+  base: EventStateBackend = createAutomatchPersistence(
     env.PROFILE_GAMES_DB,
     createEventRawClient(env),
     {
@@ -759,10 +763,10 @@ export function createEventRtdbClient(
         prepareCreatedMatchPresentations(env, creations),
     },
   ).client,
-  raw: FirebaseRtdbClient = createEventRawClient(env),
+  raw: StateRepository = createEventRawClient(env),
   prepareMatchPresentations: PrepareMatchPresentations = (creations) =>
     prepareCreatedMatchPresentations(env, creations),
-): EventRtdbClient {
+): EventStateRepository {
   return {
     ...base,
     async getPath(path, query, signal) {

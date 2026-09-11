@@ -1,3 +1,5 @@
+import { STATE_EFFECTS_FIELD } from "./stateCompatibility.ts";
+import { STATE_VALUE_FIELD } from "./stateCompatibility.ts";
 import { isEventPrizeId } from "@mons/shared/event-prizes";
 
 const MAX_EVENT_TRANSACTION_ATTEMPTS = 12;
@@ -52,7 +54,7 @@ type EventTransitionIntentBase = {
   createdAtMs: number;
   eventId: string;
   expectedRevision: number;
-  rtdbEffects: Record<string, unknown>;
+  [STATE_EFFECTS_FIELD]: Record<string, unknown>;
   transitionId: string;
   updatedAtMs: number;
 };
@@ -1362,8 +1364,8 @@ async function patchEventOwnedPathsInternal(
     let state = current?.state || {};
     if (update.generation !== undefined) {
       const increment = isRecord(update.generation)
-        ? isRecord(update.generation[".sv"])
-          ? update.generation[".sv"].increment
+        ? isRecord(update.generation[STATE_VALUE_FIELD])
+          ? update.generation[STATE_VALUE_FIELD].increment
           : undefined
         : undefined;
       generation =
@@ -1888,7 +1890,7 @@ function validateTransitionIntent(
     !exactKey(value.eventId) ||
     !Number.isSafeInteger(value.expectedRevision) ||
     value.expectedRevision < 1 ||
-    !isRecord(value.rtdbEffects) ||
+    !isRecord(value[STATE_EFFECTS_FIELD]) ||
     !isRecord(value.canonicalUpdates) ||
     !Number.isSafeInteger(value.createdAtMs) ||
     value.createdAtMs < 0 ||

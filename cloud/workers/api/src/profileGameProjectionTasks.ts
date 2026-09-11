@@ -1,4 +1,4 @@
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import { isSafeOperationId } from "./operationIds.ts";
 
 export const PROFILE_GAME_PROJECTION_QUEUE_NAME =
@@ -56,9 +56,9 @@ export function parseProfileGameProjectionTask(
     exactKeys(task, ["kind", "inviteId", "requestId"]) &&
     task.kind === "automatch-profile-game-projection" &&
     typeof task.inviteId === "string" &&
-    isSafeFirebaseKey(task.inviteId) &&
+    isSafeRecordKey(task.inviteId) &&
     typeof task.requestId === "string" &&
-    isSafeFirebaseKey(task.requestId)
+    isSafeRecordKey(task.requestId)
   ) {
     return {
       kind: task.kind,
@@ -70,9 +70,9 @@ export function parseProfileGameProjectionTask(
     exactKeys(task, ["kind", "loginUid", "requestId"]) &&
     task.kind === "profile-link-profile-game-projection" &&
     typeof task.loginUid === "string" &&
-    isSafeFirebaseKey(task.loginUid) &&
+    isSafeRecordKey(task.loginUid) &&
     typeof task.requestId === "string" &&
-    isSafeFirebaseKey(task.requestId)
+    isSafeRecordKey(task.requestId)
   ) {
     return {
       kind: task.kind,
@@ -84,9 +84,9 @@ export function parseProfileGameProjectionTask(
     exactKeys(task, ["kind", "eventId", "requestId"]) &&
     task.kind === "event-profile-game-projection" &&
     typeof task.eventId === "string" &&
-    isSafeFirebaseKey(task.eventId) &&
+    isSafeRecordKey(task.eventId) &&
     typeof task.requestId === "string" &&
-    isSafeFirebaseKey(task.requestId)
+    isSafeRecordKey(task.requestId)
   ) {
     return {
       kind: task.kind,

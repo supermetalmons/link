@@ -3,7 +3,6 @@ import test from "node:test";
 import {
   canonicalMatchStateJson,
   decideMatchStateMove,
-  digestMatchStateImport,
   isCommittedMatchStateClaim,
   normalizeCreatedMatchState,
 } from "../src/matchStateLogic.ts";
@@ -112,34 +111,6 @@ test("new creation normalization matches null deletion and array readback", () =
   assert.deepEqual(input.array, [null, { remove: null, keep: "value" }, null]);
 });
 
-test("import fingerprints are stable across record and object-key ordering", async () => {
-  const record = {
-    matchId: "invite-one",
-    playerId: "host-login",
-    value: { fen: "initial", color: "white" },
-  };
-  const other = {
-    matchId: "invite-one",
-    playerId: "guest-login",
-    value: { color: "black", fen: "initial" },
-  };
-  const bundle = {
-    inviteId: "invite-one",
-    epoch: 1,
-    importId: "import-one",
-    records: [record, other],
-    claims: [],
-  };
-  assert.equal(
-    await digestMatchStateImport(bundle),
-    await digestMatchStateImport({ ...bundle, records: [other, record] }),
-  );
-  assert.notEqual(
-    await digestMatchStateImport(bundle),
-    await digestMatchStateImport({ ...bundle, epoch: 2 }),
-  );
-});
-
 test("committed fences require complete terminal claim evidence", () => {
   const claim = {
     inviteId: "invite-one",
@@ -169,7 +140,7 @@ test("committed fences require complete terminal claim evidence", () => {
 function canonicalRepository(guestId = "guest-login") {
   const paths: string[] = [];
   const repository = {
-    async getRtdbPath(path: string) {
+    async getStatePath(path: string) {
       paths.push(path);
       assert.equal(path, "invites/invite-one");
       return {
@@ -184,11 +155,11 @@ function canonicalRepository(guestId = "guest-login") {
     async readProfileOwnershipSnapshot() {
       throw new Error("unexpected-ownership-read");
     },
-    async transactRtdbPath() {
-      throw new Error("unexpected-firebase-transaction");
+    async transactStatePath() {
+      throw new Error("unexpected-source-transaction");
     },
-    async patchRtdbRoot() {
-      throw new Error("unexpected-firebase-patch");
+    async patchStateRoot() {
+      throw new Error("unexpected-source-patch");
     },
   } as unknown as GameplayRepository;
   return { repository, paths };
@@ -206,7 +177,7 @@ test("canonical move and surrender branches keep authorization and bypass Fireba
   };
   const deps = {
     createMatchClient: () => {
-      throw new Error("unexpected-firebase-client");
+      throw new Error("unexpected-source-client");
     },
     assertMutationAllowed: async () => {
       checks++;

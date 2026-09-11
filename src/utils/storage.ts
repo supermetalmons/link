@@ -1,6 +1,7 @@
 import type { AssetsSet, BoardStyleSet } from "../content/boardStyleModels";
 import { GAME_SESSION_OPERATION_ID_PATTERN } from "@mons/shared/game-sessions";
-import { isSafeFirebaseKey } from "@mons/shared/ids";
+import { isSafeRecordKey } from "@mons/shared/ids";
+import { isRetiredSessionStorageKey } from "./sessionStorageCompatibility.js";
 import {
   isStartAutomatchRequest,
   type StartAutomatchRequest,
@@ -160,7 +161,7 @@ export const storage = {
       !(
         operation.resolvedInviteId === null ||
         (typeof operation.resolvedInviteId === "string" &&
-          isSafeFirebaseKey(operation.resolvedInviteId))
+          isSafeRecordKey(operation.resolvedInviteId))
       ) ||
       !Number.isSafeInteger(operation.createdAtMs) ||
       Number(operation.createdAtMs) <= 0 ||
@@ -494,7 +495,7 @@ export const storage = {
         store,
         (key) =>
           key === "appleIntentByStateV1" ||
-          key.startsWith("firebase:") ||
+          isRetiredSessionStorageKey(key) ||
           key.startsWith("mons:pending-moves:v1:") ||
           key.startsWith(PENDING_AUTOMATCH_OPERATION_PREFIX) ||
           shouldClearExternalUserStorageKey(key),

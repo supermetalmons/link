@@ -6,7 +6,7 @@ import {
   type EventProfileGameProjectionRepository,
   type EventProjectionSourceFence,
   type EventProjectionWrite,
-} from "../../../functions/eventProfileGameProjectionCore.js";
+} from "../../../runtime/eventProfileGameProjectionCore.js";
 import {
   createProfileGamesProjectionCore,
   type ProfileGamesProjectionRepository,
@@ -14,7 +14,7 @@ import {
   type ProjectionWrite,
   type RecomputeInviteProjectionOptions,
   type RecomputeInviteProjectionResult,
-} from "../../../functions/profileGamesProjectionCore.js";
+} from "../../../runtime/profileGamesProjectionCore.js";
 import {
   createGameplayRepository,
   type GameplayRepository,
@@ -45,7 +45,7 @@ import {
 } from "./matchPresentationRegistry.ts";
 import type { MatchPresentationReadDependencies } from "./matchPresentationAccess.ts";
 
-type ProjectionRtdbRepository = Pick<GameplayRepository, "getRtdbPath">;
+type ProjectionStateRepository = Pick<GameplayRepository, "getStatePath">;
 
 export type ProfileGameProjectionRuntime = {
   archiveHistoricalMatch?(input: {
@@ -81,7 +81,7 @@ type ProfileGameProjectionDependencies = MatchPresentationReadDependencies & {
   logger?: Pick<Console, "error">;
   now?: () => number;
   profileDb?: D1Database;
-  rtdb?: ProjectionRtdbRepository;
+  state?: ProjectionStateRepository;
   wait?: (milliseconds: number) => Promise<void>;
 };
 
@@ -172,7 +172,7 @@ export function createProfileGameProjectionRuntime(
   dependencies: ProfileGameProjectionDependencies = {},
 ): ProfileGameProjectionRuntime {
   const profileDb = dependencies.profileDb || env.PROFILE_DB;
-  const rtdb = dependencies.rtdb || createGameplayRepository(env);
+  const state = dependencies.state || createGameplayRepository(env);
   const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
   const readPresentationControl = () =>
     (dependencies.readPresentationControl || readMatchPresentationControl)(d1);
@@ -202,7 +202,7 @@ export function createProfileGameProjectionRuntime(
       return getProfileGameProjection(d1, profileId, inviteId);
     },
 
-    getRtdbPath: (path) => rtdb.getRtdbPath(path),
+    getStatePath: (path) => state.getStatePath(path),
 
     async getMatchEmoji(inviteId, matchId, loginUid) {
       const control = await readPresentationControl();
@@ -269,7 +269,7 @@ export function createEventProfileGameProjectionRuntime(
   dependencies: ProfileGameProjectionDependencies = {},
 ): EventProfileGameProjectionRuntime {
   const profileDb = dependencies.profileDb || env.PROFILE_DB;
-  const rtdb = dependencies.rtdb || createGameplayRepository(env);
+  const state = dependencies.state || createGameplayRepository(env);
   const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
   const repository: EventProfileGameProjectionRepository = {
     async commitProjectionWrites(
@@ -284,7 +284,7 @@ export function createEventProfileGameProjectionRuntime(
     },
 
     async getEvent(eventId) {
-      const event = await rtdb.getRtdbPath(`events/${eventId}`);
+      const event = await state.getStatePath(`events/${eventId}`);
       const value =
         event && typeof event === "object" && !Array.isArray(event)
           ? (event as Record<string, unknown>)
@@ -292,7 +292,7 @@ export function createEventProfileGameProjectionRuntime(
       if (value) {
         await captureEventMatchDiscovery(
           d1,
-          rtdb.getRtdbPath,
+          state.getStatePath,
           eventMatchInviteIds(value),
           undefined,
           (dependencies.now || Date.now)(),

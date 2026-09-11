@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFirebaseRtdbClient } from "../test/legacyFirebaseRtdb.ts";
 import {
   changedMatchSyncTargets,
   notifyMatchSyncChanged,
@@ -114,81 +113,6 @@ test("missing discovery never guesses numeric invite suffixes and postfinalizati
   assert.deepEqual(notices, []);
   await notifyMatchSyncInvites(env, ["invite123", "invite123", "invalid/key"]);
   assert.deepEqual(notices, [["invite123", undefined]]);
-});
-
-test("successful, uncertain and idempotent RTDB match operations all invalidate canonical reads", async () => {
-  for (const operation of [
-    "patch",
-    "put",
-    "noop",
-    "uncertain-patch",
-    "uncertain-put",
-  ] as const) {
-    const calls: string[] = [];
-    const env = environment({
-      notify: async (inviteId, matchIds) => {
-        calls.push(`notify:${inviteId}:${matchIds?.join(",")}`);
-      },
-    });
-    const client = createFirebaseRtdbClient(env, {
-      getAccessToken: async () => "token",
-      fetcher: async (_url, init) => {
-        const method = init?.method || "GET";
-        calls.push(method);
-        if (method === "GET")
-          return new Response("{}", { headers: { ETag: "etag" } });
-        if (operation.startsWith("uncertain"))
-          throw new Error("lost-response-after-commit");
-        return method === "PATCH"
-          ? new Response(null, { status: 204 })
-          : new Response("{}");
-      },
-    });
-    const task = operation.includes("patch")
-      ? client.patchRoot({ "players/host/matches/invite-one1/timer": "gg" })
-      : client.transactPath("players/host/matches/invite-one1", () =>
-          operation === "noop"
-            ? { commit: false, decision: "already-applied" }
-            : { value: {}, decision: "applied" },
-        );
-    if (operation.startsWith("uncertain"))
-      await assert.rejects(task, /firebase-rtdb-unavailable/);
-    else await task;
-    assert.equal(calls.at(-1), "notify:invite-one:invite-one1");
-    assert.equal(calls.filter((call) => call.startsWith("notify:")).length, 1);
-    if (operation === "noop")
-      assert.deepEqual(calls, ["GET", "notify:invite-one:invite-one1"]);
-  }
-});
-
-test("failed reads, updater validation and known CAS conflicts never invalidate matches", async () => {
-  for (const failure of ["read", "updater", "conflict"] as const) {
-    let notices = 0;
-    const client = createFirebaseRtdbClient(
-      environment({
-        notify: async () => {
-          notices++;
-        },
-      }),
-      {
-        getAccessToken: async () => "token",
-        maxTransactionAttempts: 1,
-        fetcher: async (_url, init) => {
-          if (failure === "read") throw new Error("read-unavailable");
-          return init?.method === "PUT"
-            ? new Response(null, { status: 412 })
-            : new Response("{}", { headers: { ETag: "etag" } });
-        },
-      },
-    );
-    await assert.rejects(
-      client.transactPath("players/host/matches/invite-one", () => {
-        if (failure === "updater") throw new Error("invalid-state");
-        return { value: {}, decision: "applied" };
-      }),
-    );
-    assert.equal(notices, 0);
-  }
 });
 
 test("the notification deadline includes discovery and prevents late RPC dispatch", async () => {

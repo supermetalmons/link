@@ -1,0 +1,22 @@
+# Shared browser and backend rules
+
+`@mons/shared` is the canonical home for deterministic, side-effect-free rules
+used by the React browser app, the Cloudflare API Worker, and portable backend
+modules.
+
+The package lives inside `cloud/runtime` alongside portable backend modules.
+The root app and backend modules consume it through local `file:` dependencies,
+while Worker source is compiled
+through the root toolchain. No generated copy or publish step is required.
+
+Keep shared modules:
+
+- browser-safe CommonJS JavaScript with a matching `.d.ts` file;
+- free of DOM, storage, network, and process-specific behavior;
+- split into direct subpath imports such as `@mons/shared/mining`;
+- explicit about policy differences, such as local versus UTC mining dates or
+  strict client versus tolerant server normalization.
+
+React state, Worker bindings and queues, database transactions, persistence,
+logging, and other I/O stay in their runtime adapters. When a rule is needed by
+multiple runtimes, add it here first and make each runtime delegate to it.

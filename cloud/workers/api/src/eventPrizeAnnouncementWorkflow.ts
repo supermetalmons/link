@@ -1,5 +1,5 @@
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
-import { EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS } from "../../../functions/telegram/eventPrizeAnnouncement.js";
+import { EVENT_PRIZE_ANNOUNCEMENT_GRACE_MS } from "../../../runtime/telegram/eventPrizeAnnouncement.js";
 import {
   InvalidEventProgressPayloadError,
   parseEventProgressOutbox,

@@ -5,7 +5,7 @@ import {
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 import { createWagerFrozenD1Store } from "./wagerFrozenD1.ts";
-import { createWagerStateRtdbClient } from "./wagerStateRepository.ts";
+import { createWagerStateRepository } from "./wagerStateRepository.ts";
 import { notifyInviteSourceChanged } from "./inviteWagersNotifications.ts";
 import type { WagerFrozenBalance } from "./wagerFrozenStore.ts";
 import {
@@ -82,12 +82,12 @@ export function createWagerReservationRuntime(
           now,
           writeGuards,
         });
-        const wagerState = createWagerStateRtdbClient(
+        const wagerState = createWagerStateRepository(
           db,
           {
-            getPath: repository.getRtdbPath,
-            patchRoot: repository.patchRtdbRoot,
-            transactPath: repository.transactRtdbPath,
+            getPath: repository.getStatePath,
+            patchRoot: repository.patchStateRoot,
+            transactPath: repository.transactStatePath,
           },
           {
             now,
@@ -101,8 +101,8 @@ export function createWagerReservationRuntime(
           {
             ...repository,
             wagerFrozen: store,
-            patchRtdbRoot: wagerState.patchRoot,
-            transactRtdbPath: wagerState.transactPath,
+            patchStateRoot: wagerState.patchRoot,
+            transactStatePath: wagerState.transactPath,
           },
           () => assertAdmission(admission),
         );

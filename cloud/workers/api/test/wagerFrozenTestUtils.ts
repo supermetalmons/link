@@ -25,8 +25,8 @@ type MemoryBackend = {
 };
 
 export type TestGameplayRepository = GameplayRepository & {
-  readState: GameplayRepository["getRtdbPath"];
-  transactState: GameplayRepository["transactRtdbPath"];
+  readState: GameplayRepository["getStatePath"];
+  transactState: GameplayRepository["transactStatePath"];
 };
 
 function record(value: unknown): Record<string, unknown> {
@@ -123,20 +123,20 @@ export function createMemoryWagerFrozenStore(
 }
 
 export function attachMemoryWagerFrozenStore(
-  state: Omit<TestGameplayRepository, "getRtdbPath" | "transactRtdbPath">,
+  state: Omit<TestGameplayRepository, "getStatePath" | "transactStatePath">,
 ): TestGameplayRepository {
   const assertGameplayPath = (path: string) => {
     if (/^(?:reservations\/|players\/[^/]+\/mining(?:\/|$))/.test(path)) {
-      throw new Error("unexpected-reservation-rtdb-path");
+      throw new Error("unexpected-reservation-source-path");
     }
   };
   const repository: TestGameplayRepository = {
     ...state,
-    getRtdbPath: (...args) => {
+    getStatePath: (...args) => {
       assertGameplayPath(args[0]);
       return repository.readState(...args);
     },
-    transactRtdbPath: (...args) => {
+    transactStatePath: (...args) => {
       assertGameplayPath(args[0]);
       return repository.transactState(...args);
     },

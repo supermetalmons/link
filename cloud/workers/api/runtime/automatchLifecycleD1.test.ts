@@ -23,7 +23,7 @@ import {
   parseAutomatchPath,
 } from "../src/automatchD1.ts";
 import { createGameSessionMutationLockStore } from "../src/gameplayCoordinationD1.ts";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import type { StateRepository } from "../src/stateRepositoryTypes.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
 import {
   prepareCreatedMatchPresentations,
@@ -46,7 +46,7 @@ function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-class LiveFirebase implements FirebaseRtdbClient {
+class MemoryMatchState implements StateRepository {
   readonly data: Record<string, unknown> = {};
   readonly writePaths: string[] = [];
   failWrites = false;
@@ -75,10 +75,10 @@ class LiveFirebase implements FirebaseRtdbClient {
 
   async getPath(
     path: string,
-    query?: Parameters<FirebaseRtdbClient["getPath"]>[1],
+    query?: Parameters<StateRepository["getPath"]>[1],
   ): Promise<unknown> {
     if (parseAutomatchPath(path) || path.startsWith("invites/"))
-      throw new Error("retired-firebase-root-read");
+      throw new Error("retired-source-root-read");
     const value = this.read(path);
     return query?.shallow === true && record(value)
       ? Object.fromEntries(Object.keys(value).map((key) => [key, true]))
@@ -88,7 +88,7 @@ class LiveFirebase implements FirebaseRtdbClient {
   async patchRoot(updates: Record<string, unknown>): Promise<void> {
     for (const [path, value] of Object.entries(updates)) {
       if (parseAutomatchPath(path) || path.startsWith("invites/"))
-        throw new Error("retired-firebase-root-write");
+        throw new Error("retired-source-root-write");
       this.put(path, value);
       this.writePaths.push(path);
     }
@@ -100,10 +100,10 @@ class LiveFirebase implements FirebaseRtdbClient {
     signal?: AbortSignal,
   ) {
     if (parseAutomatchPath(path) || path.startsWith("invites/"))
-      throw new Error("retired-firebase-root-transaction");
+      throw new Error("retired-source-root-transaction");
     for (let attempt = 0; attempt < 25; attempt++) {
       signal?.throwIfAborted();
-      if (this.failWrites) throw new Error("firebase-offline");
+      if (this.failWrites) throw new Error("state-offline");
       const current = this.read(path);
       const decision = updater(current);
       if (!record(decision)) throw new Error("invalid-test-transaction");
@@ -120,7 +120,7 @@ class LiveFirebase implements FirebaseRtdbClient {
       if (this.failAfterNextMatch && path.startsWith("players/")) {
         this.failAfterNextMatch = false;
         this.failWrites = true;
-        throw new Error("firebase-match-response-lost");
+        throw new Error("state-match-response-lost");
       }
       return {
         committed: true,
@@ -176,20 +176,20 @@ function ownership(query: ProfileOwnershipQuery): ProfileOwnershipSnapshot {
 }
 
 function client(
-  firebase: LiveFirebase,
+  memoryState: MemoryMatchState,
   uid: string,
   database = db,
   prepareMatchPresentations: PrepareMatchPresentations = (creations) =>
     prepareCreatedMatchPresentations(env, creations),
 ) {
-  const persistence = createAutomatchPersistence(database, firebase, {
+  const persistence = createAutomatchPersistence(database, memoryState, {
     prepareMatchPresentations,
   });
   const repository: GameplayRepository = {
     automatchPersistence: persistence,
-    getRtdbPath: persistence.client.getPath,
-    patchRtdbRoot: persistence.client.patchRoot,
-    transactRtdbPath: persistence.client.transactPath,
+    getStatePath: persistence.client.getPath,
+    patchStateRoot: persistence.client.patchRoot,
+    transactStatePath: persistence.client.transactPath,
     readProfileOwnershipSnapshot: async (query) => ownership(query),
     applyWagerTransferOnce: async () => {
       throw new Error("unexpected-wager-transfer");
@@ -321,12 +321,12 @@ describe("automatch lifecycle through D1 persistence", () => {
   });
 
   it("prepares only actual player creations across manual invites, joins, rematches, ensures and automatch", async () => {
-    const firebase = new LiveFirebase();
+    const memoryState = new MemoryMatchState();
     const prepared: MatchPresentationCreation[] = [];
     const prepare: PrepareMatchPresentations = async (creations) => {
       for (const creation of creations) {
         expect(
-          firebase.read(
+          memoryState.read(
             `players/${creation.actorUid}/matches/${creation.matchId}`,
           ),
         ).toMatchObject({
@@ -339,8 +339,8 @@ describe("automatch lifecycle through D1 persistence", () => {
       prepared.push(...structuredClone(creations));
       return prepareCreatedMatchPresentations(env, creations);
     };
-    const host = client(firebase, "host", db, prepare);
-    const guest = client(firebase, "guest", db, prepare);
+    const host = client(memoryState, "host", db, prepare);
+    const guest = client(memoryState, "guest", db, prepare);
     const createRequest = {
       inviteId: "appearance-manual",
       operationId: crypto.randomUUID(),
@@ -396,9 +396,9 @@ describe("automatch lifecycle through D1 persistence", () => {
       guest.repository,
       guest.dependencies,
     );
-    const queued = await start(client(firebase, "auto-host", db, prepare));
+    const queued = await start(client(memoryState, "auto-host", db, prepare));
     if (!queued.ok) throw new Error("expected-automatch-queue");
-    await start(client(firebase, "auto-guest", db, prepare));
+    await start(client(memoryState, "auto-guest", db, prepare));
     expect(
       prepared.map(({ inviteId, matchId, actorUid, emojiId, aura }) => ({
         inviteId,
@@ -456,26 +456,26 @@ describe("automatch lifecycle through D1 persistence", () => {
   });
 
   it("starts, replays, matches and preserves the host's live record", async () => {
-    const firebase = new LiveFirebase();
-    const host = client(firebase, "host");
+    const memoryState = new MemoryMatchState();
+    const host = client(memoryState, "host");
     const hostOperation = crypto.randomUUID();
     const pending = await start(host, hostOperation);
     expect(pending).toMatchObject({ ok: true, mode: "pending" });
     if (!pending.ok) throw new Error("expected-pending-invite");
     const inviteId = pending.inviteId;
     const hostMatchPath = `players/host/matches/${inviteId}`;
-    const hostMatch = firebase.read(hostMatchPath);
+    const hostMatch = memoryState.read(hostMatchPath);
     expect(hostMatch).toMatchObject({ sessionCreation: expect.any(String) });
-    firebase.put(hostMatchPath, {
+    memoryState.put(hostMatchPath, {
       ...(record(hostMatch) ? hostMatch : {}),
       flatMovesString: "preserved-live-move",
     });
-    const writes = firebase.writePaths.length;
-    expect(await start(client(firebase, "host"), hostOperation)).toEqual(
+    const writes = memoryState.writePaths.length;
+    expect(await start(client(memoryState, "host"), hostOperation)).toEqual(
       pending,
     );
-    expect(firebase.writePaths.length).toBe(writes);
-    const guest = client(firebase, "guest");
+    expect(memoryState.writePaths.length).toBe(writes);
+    const guest = client(memoryState, "guest");
     const guestOperation = crypto.randomUUID();
     expect(await start(guest, guestOperation)).toEqual({
       ok: true,
@@ -491,12 +491,14 @@ describe("automatch lifecycle through D1 persistence", () => {
         automatchOperationIds: { host: hostOperation, guest: guestOperation },
       },
     });
-    expect(firebase.read(hostMatchPath)).toMatchObject({
+    expect(memoryState.read(hostMatchPath)).toMatchObject({
       flatMovesString: "preserved-live-move",
     });
-    expect(firebase.read(`players/guest/matches/${inviteId}`)).toMatchObject({
-      sessionCreation: expect.any(String),
-    });
+    expect(memoryState.read(`players/guest/matches/${inviteId}`)).toMatchObject(
+      {
+        sessionCreation: expect.any(String),
+      },
+    );
     expect(
       await createAutomatchD1Store(db).getPath(`automatch/${inviteId}`),
     ).toBeNull();
@@ -510,10 +512,10 @@ describe("automatch lifecycle through D1 persistence", () => {
   });
 
   it("manually joins a pending automatch and proposes a rematch through the same journal", async () => {
-    const firebase = new LiveFirebase();
-    const pending = await start(client(firebase, "host"));
+    const memoryState = new MemoryMatchState();
+    const pending = await start(client(memoryState, "host"));
     if (!pending.ok) throw new Error("expected-pending-invite");
-    const guest = client(firebase, "guest");
+    const guest = client(memoryState, "guest");
     const joinRequest = {
       inviteId: pending.inviteId,
       operationId: crypto.randomUUID(),
@@ -547,7 +549,7 @@ describe("automatch lifecycle through D1 persistence", () => {
       rematches: "1",
     });
     expect(
-      firebase.read(`players/guest/matches/${pending.inviteId}1`),
+      memoryState.read(`players/guest/matches/${pending.inviteId}1`),
     ).toMatchObject({ sessionCreation: expect.any(String) });
     expect(
       await createAutomatchD1Store(db).getPath(`automatch/${pending.inviteId}`),
@@ -566,9 +568,9 @@ describe("automatch lifecycle through D1 persistence", () => {
   it.each([false, true])(
     "reuses an ensured rematch without resetting it (legacy: %s)",
     async (legacy) => {
-      const firebase = new LiveFirebase();
-      const host = client(firebase, "host");
-      const guest = client(firebase, "guest");
+      const memoryState = new MemoryMatchState();
+      const host = client(memoryState, "host");
+      const guest = client(memoryState, "guest");
       const pending = await start(host);
       if (!pending.ok) throw new Error("expected-pending-invite");
       await start(guest);
@@ -591,12 +593,12 @@ describe("automatch lifecycle through D1 persistence", () => {
         guest.dependencies,
       );
       const path = `players/guest/matches/${proposed.matchId}`;
-      const stored = firebase.read(path);
+      const stored = memoryState.read(path);
       if (!record(stored)) throw new Error("expected-ensured-match");
       if (legacy) delete stored.sessionCreation;
       stored.flatMovesString = "preserved-rematch-move";
       stored.timer = "2;123456";
-      firebase.put(path, stored);
+      memoryState.put(path, stored);
       const approvalRequest = request();
       const approved = await proposeRematch(
         guest.identity,
@@ -609,7 +611,7 @@ describe("automatch lifecycle through D1 persistence", () => {
         flatMovesString: stored.flatMovesString,
         timer: stored.timer,
       });
-      expect(firebase.read(path)).toEqual(stored);
+      expect(memoryState.read(path)).toEqual(stored);
       expect(
         await proposeRematch(
           guest.identity,
@@ -633,9 +635,9 @@ describe("automatch lifecycle through D1 persistence", () => {
   );
 
   it("rejects an invalid existing rematch before reserving the invite", async () => {
-    const firebase = new LiveFirebase();
-    const host = client(firebase, "host");
-    const guest = client(firebase, "guest");
+    const memoryState = new MemoryMatchState();
+    const host = client(memoryState, "host");
+    const guest = client(memoryState, "guest");
     const pending = await start(host);
     if (!pending.ok) throw new Error("expected-pending-invite");
     await start(guest);
@@ -651,7 +653,7 @@ describe("automatch lifecycle through D1 persistence", () => {
       host.repository,
       host.dependencies,
     );
-    firebase.put(`players/guest/matches/${proposed.matchId}`, {
+    memoryState.put(`players/guest/matches/${proposed.matchId}`, {
       fen: "",
       color: "white",
     });
@@ -673,10 +675,10 @@ describe("automatch lifecycle through D1 persistence", () => {
   });
 
   it("serializes concurrent linked-login starts into one owned pending invite and cancels it", async () => {
-    const firebase = new LiveFirebase();
+    const memoryState = new MemoryMatchState();
     const outcomes = await Promise.all([
-      start(client(firebase, "host")),
-      start(client(firebase, "host-linked")),
+      start(client(memoryState, "host")),
+      start(client(memoryState, "host-linked")),
     ]);
     expect(outcomes[0]).toMatchObject({ ok: true, mode: "pending" });
     expect(outcomes[1]).toMatchObject({ ok: true, mode: "pending" });
@@ -684,7 +686,7 @@ describe("automatch lifecycle through D1 persistence", () => {
       throw new Error("expected-owned-pending");
     expect(outcomes[0].inviteId).toBe(outcomes[1].inviteId);
     expect(await createAutomatchD1Store(db).list("automatch")).toHaveLength(1);
-    const linked = client(firebase, "host-linked");
+    const linked = client(memoryState, "host-linked");
     expect(
       await cancelAutomatch(
         linked.identity,
@@ -702,8 +704,8 @@ describe("automatch lifecycle through D1 persistence", () => {
   });
 
   it("cancels once when a Queue consumer settles the outbox during preparation", async () => {
-    const firebase = new LiveFirebase();
-    const host = client(firebase, "host");
+    const memoryState = new MemoryMatchState();
+    const host = client(memoryState, "host");
     const pending = await start(host);
     if (!pending.ok) throw new Error("expected-pending-invite");
     const store = createAutomatchD1Store(db);
@@ -746,8 +748,8 @@ describe("automatch lifecycle through D1 persistence", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
-    const writes = firebase.writePaths.length;
-    const canceler = client(firebase, "host", racingDb);
+    const writes = memoryState.writePaths.length;
+    const canceler = client(memoryState, "host", racingDb);
     expect(
       await cancelAutomatch(
         canceler.identity,
@@ -756,7 +758,7 @@ describe("automatch lifecycle through D1 persistence", () => {
       ),
     ).toEqual({ ok: true });
     expect(preparations).toBe(2);
-    expect(firebase.writePaths.slice(writes)).toEqual([]);
+    expect(memoryState.writePaths.slice(writes)).toEqual([]);
     expect(
       await createInviteSourceD1Store(db).read(pending.inviteId),
     ).toMatchObject({
@@ -772,9 +774,9 @@ describe("automatch lifecycle through D1 persistence", () => {
   });
 
   it("recovers an interrupted start before cancellation so the queue cannot reappear", async () => {
-    const firebase = new LiveFirebase();
-    firebase.failAfterNextMatch = true;
-    const host = client(firebase, "host");
+    const memoryState = new MemoryMatchState();
+    memoryState.failAfterNextMatch = true;
+    const host = client(memoryState, "host");
     const operationId = crypto.randomUUID();
     await expect(start(host, operationId)).rejects.toThrow();
     expect(
@@ -785,8 +787,8 @@ describe("automatch lifecycle through D1 persistence", () => {
         .first("count"),
     ).toBe(1);
     expect(await createAutomatchD1Store(db).list("automatch")).toHaveLength(0);
-    firebase.failWrites = false;
-    const canceler = client(firebase, "host-linked");
+    memoryState.failWrites = false;
+    const canceler = client(memoryState, "host-linked");
     expect(
       await cancelAutomatch(
         canceler.identity,
@@ -807,7 +809,7 @@ describe("automatch lifecycle through D1 persistence", () => {
     });
     expect(await createAutomatchD1Store(db).list("automatch")).toHaveLength(0);
     expect(
-      firebase.writePaths.filter((path) => path.startsWith("players/")),
+      memoryState.writePaths.filter((path) => path.startsWith("players/")),
     ).toHaveLength(1);
     await assertSettled();
   });
@@ -833,7 +835,7 @@ describe("automatch lifecycle through D1 persistence", () => {
       .run();
     const queries: string[] = [];
     const session = client(
-      new LiveFirebase(),
+      new MemoryMatchState(),
       "unused",
       countReads(db, queries),
     );

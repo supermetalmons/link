@@ -100,9 +100,9 @@ describe("historical match presentation", () => {
       readPresentationControl: async () => ({ phase: "durable" }),
       freezeRegisteredPresentations: freeze,
       now: () => 2_000,
-      rtdb: {
-        getRtdbPath: async () => {
-          throw new Error("unexpected-rtdb-read");
+      state: {
+        getStatePath: async () => {
+          throw new Error("unexpected-source-read");
         },
       },
     });
@@ -152,9 +152,9 @@ describe("historical match presentation", () => {
       readPresentationControl: async () => ({ phase: "durable" }),
       freezeRegisteredPresentations: canonicalFreeze,
       now: () => 2_000,
-      rtdb: {
-        getRtdbPath: async () => {
-          throw new Error("unexpected-firebase-read");
+      state: {
+        getStatePath: async () => {
+          throw new Error("unexpected-source-read");
         },
       },
     });
@@ -175,9 +175,9 @@ describe("historical match presentation", () => {
       freezeRegisteredPresentations: async () => {
         throw new Error("unnecessary-do-read");
       },
-      rtdb: {
-        getRtdbPath: async () => {
-          throw new Error("unexpected-firebase-read");
+      state: {
+        getStatePath: async () => {
+          throw new Error("unexpected-source-read");
         },
       },
     });
@@ -191,9 +191,9 @@ describe("historical match presentation", () => {
       freezeRegisteredPresentations: async () => {
         throw new Error("registered-presentation-missing");
       },
-      rtdb: {
-        getRtdbPath: async () => {
-          throw new Error("unexpected-firebase-read");
+      state: {
+        getStatePath: async () => {
+          throw new Error("unexpected-source-read");
         },
       },
     });
@@ -215,9 +215,9 @@ describe("historical match presentation", () => {
       const runtime = createProfileGameProjectionRuntime(env, {
         readPresentationControl: async () => ({ phase }),
         freezeRegisteredPresentations: freeze,
-        rtdb: {
-          getRtdbPath: async () => {
-            throw new Error("unexpected-firebase-read");
+        state: {
+          getStatePath: async () => {
+            throw new Error("unexpected-source-read");
           },
         },
       });
@@ -291,9 +291,9 @@ describe("historical match presentation", () => {
       aura: "rainbow",
     });
     const runtime = createProfileGameProjectionRuntime(env, {
-      rtdb: {
-        getRtdbPath: async () => {
-          throw new Error("unexpected-rtdb-read");
+      state: {
+        getStatePath: async () => {
+          throw new Error("unexpected-source-read");
         },
       },
     });

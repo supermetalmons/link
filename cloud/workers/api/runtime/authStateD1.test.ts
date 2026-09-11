@@ -29,7 +29,7 @@ function authIntent(
     method: "x",
     nonce: "nonce",
     state: "state",
-    uid: "firebase-uid",
+    uid: "login-uid",
     ...overrides,
   };
 }
@@ -50,7 +50,7 @@ function xFlow(
     method: "x",
     returnUrl: "https://mons.link/",
     status: "created",
-    uid: "firebase-uid",
+    uid: "login-uid",
     updatedAtMs: 1_000_000,
     xUserId: null,
     xUsername: null,
@@ -116,7 +116,7 @@ describe("auth state D1 repository", () => {
       consumedByOpId: "intent:abcdefghijklmnopqrstuvwx",
       intentId: "abcdefghijklmnopqrstuvwx",
       method: "sol" as const,
-      uid: "firebase-uid",
+      uid: "login-uid",
     };
     const outcomes = await Promise.all([
       repository.consumeAuthIntent(input),

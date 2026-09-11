@@ -56,7 +56,7 @@ import {
   type WorkerExecutionContext,
 } from "./sessionAuth.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
-import { MAX_FIREBASE_KEY_BYTES, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { MAX_RECORD_KEY_BYTES, isSafeRecordKey } from "./recordKeys.ts";
 import {
   type GameplayRepository,
   createRatingRepository,
@@ -260,8 +260,8 @@ export async function removeNavigationGame(
     return skippedNavigationResponse(inviteId, "profile-unresolved");
   }
   const [inviteValue, automatchValue] = await Promise.all([
-    repository.getRtdbPath(`invites/${inviteId}`),
-    repository.getRtdbPath(`automatch/${inviteId}`),
+    repository.getStatePath(`invites/${inviteId}`),
+    repository.getStatePath(`automatch/${inviteId}`),
   ]);
   const invite = toRecord(inviteValue);
   if (!invite) {
@@ -439,7 +439,7 @@ async function readGameplayBody(
       }
       const inviteId = body.inviteId.trim();
       const matchId = body.matchId.trim();
-      if (!isSafeFirebaseKey(inviteId) || !isSafeFirebaseKey(matchId)) {
+      if (!isSafeRecordKey(inviteId) || !isSafeRecordKey(matchId)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
       return {
@@ -454,7 +454,7 @@ async function readGameplayBody(
     }
     const inviteId = body.inviteId.trim();
     const matchId = body.matchId.trim();
-    if (!isSafeFirebaseKey(inviteId) || !isSafeFirebaseKey(matchId)) {
+    if (!isSafeRecordKey(inviteId) || !isSafeRecordKey(matchId)) {
       throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
     }
     return { inviteId, matchId } satisfies WagerProposalAcceptRequest;
@@ -465,7 +465,7 @@ async function readGameplayBody(
     }
     const inviteId = body.inviteId.trim();
     const matchId = body.matchId.trim();
-    if (!isSafeFirebaseKey(inviteId) || !isSafeFirebaseKey(matchId)) {
+    if (!isSafeRecordKey(inviteId) || !isSafeRecordKey(matchId)) {
       throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
     }
     return { inviteId, matchId };
@@ -479,10 +479,10 @@ async function readGameplayBody(
     const inviteId = body.inviteId.trim();
     const matchId = body.matchId.trim();
     if (
-      !isSafeFirebaseKey(playerId) ||
-      !isSafeFirebaseKey(opponentId) ||
-      !isSafeFirebaseKey(inviteId) ||
-      !isSafeFirebaseKey(matchId) ||
+      !isSafeRecordKey(playerId) ||
+      !isSafeRecordKey(opponentId) ||
+      !isSafeRecordKey(inviteId) ||
+      !isSafeRecordKey(matchId) ||
       !isSafeOperationId(`${inviteId}__${matchId}`)
     ) {
       throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
@@ -498,7 +498,7 @@ async function readGameplayBody(
     throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
   }
   const inviteId = body.inviteId.trim();
-  if (!isSafeFirebaseKey(inviteId)) {
+  if (!isSafeRecordKey(inviteId)) {
     throw new AuthApiFailure(400, "invalid-argument", "invalid-invite-id");
   }
   return { inviteId };
@@ -1047,8 +1047,8 @@ async function handleGameplayRequest(
 }
 
 export {
-  MAX_FIREBASE_KEY_BYTES,
-  isSafeFirebaseKey,
+  MAX_RECORD_KEY_BYTES,
+  isSafeRecordKey,
   readGameplayBody,
   resolveProfileId,
 };

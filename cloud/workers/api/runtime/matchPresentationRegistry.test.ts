@@ -33,7 +33,7 @@ const db = env.PROFILE_GAMES_DB;
 const hostUid = "registry-host";
 const guestUid = "registry-guest";
 const sockets: WebSocket[] = [];
-const noFirebaseEnv = new Proxy(env, {
+const networkIsolatedEnv = new Proxy(env, {
   get(target, property, receiver) {
     if (
       typeof property === "string" &&
@@ -75,7 +75,7 @@ async function withLocalRoom(
   run: (localEnv: Env) => Promise<void>,
 ): Promise<void> {
   await runInDurableObject(room, async (instance) => {
-    const localEnv = new Proxy(noFirebaseEnv, {
+    const localEnv = new Proxy(networkIsolatedEnv, {
       get(target, property, receiver) {
         return property === "INVITE_REACTIONS"
           ? { getByName: () => instance }
@@ -175,7 +175,9 @@ describe("match presentation registration", () => {
       );
       const { inviteId, matchId, room } = fixture();
       await expect(
-        prepareCreatedMatchPresentations(noFirebaseEnv, [creation(inviteId)]),
+        prepareCreatedMatchPresentations(networkIsolatedEnv, [
+          creation(inviteId),
+        ]),
       ).rejects.toThrow("match-presentation-authority-not-active");
       expect(await room.getPresentationSnapshot(matchId)).toEqual({
         matchId,
@@ -220,7 +222,11 @@ describe("match presentation registration", () => {
     expect(edited.presentation.revision).toBe(1);
     expect(current.presentation.revision).toBe(2);
     expect(
-      await readRegisteredMatchPresentations(noFirebaseEnv, inviteId, matchId),
+      await readRegisteredMatchPresentations(
+        networkIsolatedEnv,
+        inviteId,
+        matchId,
+      ),
     ).toEqual({ matchId, players: { [hostUid]: current.presentation } });
     expect(await room.getFrozenPresentationSnapshot(matchId)).toEqual(frozen);
     expect(
@@ -261,7 +267,11 @@ describe("match presentation registration", () => {
     await evictDurableObject(room);
 
     expect(
-      await readRegisteredMatchPresentations(noFirebaseEnv, inviteId, matchId),
+      await readRegisteredMatchPresentations(
+        networkIsolatedEnv,
+        inviteId,
+        matchId,
+      ),
     ).toEqual({ matchId, players: { [hostUid]: current.presentation } });
     expect(await room.updatePresentation(hostUid, matchId, operation)).toEqual({
       ...current,
@@ -307,14 +317,19 @@ describe("match presentation registration", () => {
       await listMatchPresentationRegistrations(db, inviteId, matchId),
     ).toEqual(first);
     expect(
-      (await readRegisteredMatchPresentations(noFirebaseEnv, inviteId, matchId))
-        .players[hostUid].emojiId,
+      (
+        await readRegisteredMatchPresentations(
+          networkIsolatedEnv,
+          inviteId,
+          matchId,
+        )
+      ).players[hostUid].emojiId,
     ).toBe(1);
   });
 
   it("keeps seed preparation invisible until the actor registration commits", async () => {
     const { inviteId, matchId, room } = fixture();
-    const rows = await prepareCreatedMatchPresentations(noFirebaseEnv, [
+    const rows = await prepareCreatedMatchPresentations(networkIsolatedEnv, [
       creation(inviteId),
       creation(inviteId, guestUid, matchId, 2),
     ]);
@@ -322,7 +337,11 @@ describe("match presentation registration", () => {
       Object.keys((await room.getPresentationSnapshot(matchId)).players),
     ).toHaveLength(2);
     expect(
-      await readRegisteredMatchPresentations(noFirebaseEnv, inviteId, matchId),
+      await readRegisteredMatchPresentations(
+        networkIsolatedEnv,
+        inviteId,
+        matchId,
+      ),
     ).toEqual({ matchId, players: {} });
 
     await commit(rows.filter((row) => row.actorUid === hostUid));
@@ -330,7 +349,7 @@ describe("match presentation registration", () => {
       Object.keys(
         (
           await readRegisteredMatchPresentations(
-            noFirebaseEnv,
+            networkIsolatedEnv,
             inviteId,
             matchId,
           )
@@ -342,7 +361,7 @@ describe("match presentation registration", () => {
       Object.keys(
         (
           await readRegisteredMatchPresentations(
-            noFirebaseEnv,
+            networkIsolatedEnv,
             inviteId,
             matchId,
           )
@@ -357,14 +376,14 @@ describe("match presentation registration", () => {
     await room.ensurePresentations(matchId, {
       [guestUid]: { emojiId: 2, aura: "" },
     });
-    const rows = await prepareCreatedMatchPresentations(noFirebaseEnv, [
+    const rows = await prepareCreatedMatchPresentations(networkIsolatedEnv, [
       creation(inviteId, hostUid, matchId),
     ]);
     await commit(rows);
     await activateDurable(db);
 
     const result = await readRegisteredMatchPresentations(
-      noFirebaseEnv,
+      networkIsolatedEnv,
       inviteId,
       matchId,
     );
@@ -383,7 +402,7 @@ describe("match presentation registration", () => {
   it("rejects a registered actor without current appearance or immutable DO proof without fallback", async () => {
     for (const table of ["match_presentations", "match_presentation_seeds"]) {
       const { inviteId, matchId, room } = fixture();
-      const rows = await prepareCreatedMatchPresentations(noFirebaseEnv, [
+      const rows = await prepareCreatedMatchPresentations(networkIsolatedEnv, [
         creation(inviteId),
       ]);
       await commit(rows);
@@ -444,7 +463,7 @@ describe("match presentation registration", () => {
 
   it("rejects mismatched D1 and DO seed evidence", async () => {
     const { inviteId, matchId } = fixture();
-    const rows = await prepareCreatedMatchPresentations(noFirebaseEnv, [
+    const rows = await prepareCreatedMatchPresentations(networkIsolatedEnv, [
       creation(inviteId),
     ]);
     const differentDigest = await matchPresentationSeedDigest({
@@ -453,25 +472,28 @@ describe("match presentation registration", () => {
     });
     await commit([{ ...rows[0], seedDigest: differentDigest }]);
     await expect(
-      readRegisteredMatchPresentations(noFirebaseEnv, inviteId, matchId),
+      readRegisteredMatchPresentations(networkIsolatedEnv, inviteId, matchId),
     ).rejects.toThrow("match-presentation-unavailable");
     await expect(
-      freezeRegisteredMatchPresentations(noFirebaseEnv, inviteId, matchId, [
-        hostUid,
-      ]),
+      freezeRegisteredMatchPresentations(
+        networkIsolatedEnv,
+        inviteId,
+        matchId,
+        [hostUid],
+      ),
     ).rejects.toThrow("match-presentation-unavailable");
   });
 
   it("canonical sockets hide prepared orphan actors and receive later committed guest updates", async () => {
     const { inviteId, matchId, room } = fixture();
-    const rows = await prepareCreatedMatchPresentations(noFirebaseEnv, [
+    const rows = await prepareCreatedMatchPresentations(networkIsolatedEnv, [
       creation(inviteId),
       creation(inviteId, guestUid, matchId, 2),
     ]);
     await commit(rows.filter((row) => row.actorUid === hostUid));
     await activateDurable(db);
     const current = await readRegisteredMatchPresentations(
-      noFirebaseEnv,
+      networkIsolatedEnv,
       inviteId,
       matchId,
     );
@@ -531,14 +553,18 @@ describe("match presentation registration", () => {
 
     expect(
       await freezeRegisteredMatchPresentations(
-        noFirebaseEnv,
+        networkIsolatedEnv,
         inviteId,
         matchId,
         [hostUid],
       ),
     ).toEqual(frozen);
     expect(
-      await readRegisteredMatchPresentations(noFirebaseEnv, inviteId, matchId),
+      await readRegisteredMatchPresentations(
+        networkIsolatedEnv,
+        inviteId,
+        matchId,
+      ),
     ).toEqual({ matchId, players: {} });
     expect((await room.getPresentationSnapshot(matchId)).players).toEqual({});
   });
@@ -548,15 +574,18 @@ describe("match presentation registration", () => {
     const hostFrozen = await room.freezePresentations(matchId, {
       [hostUid]: { emojiId: 7, aura: "rainbow" },
     });
-    const guestRows = await prepareCreatedMatchPresentations(noFirebaseEnv, [
-      creation(inviteId, guestUid, matchId, 2),
-    ]);
+    const guestRows = await prepareCreatedMatchPresentations(
+      networkIsolatedEnv,
+      [creation(inviteId, guestUid, matchId, 2)],
+    );
     await activateDurable(db);
     await expect(
-      freezeRegisteredMatchPresentations(noFirebaseEnv, inviteId, matchId, [
-        hostUid,
-        guestUid,
-      ]),
+      freezeRegisteredMatchPresentations(
+        networkIsolatedEnv,
+        inviteId,
+        matchId,
+        [hostUid, guestUid],
+      ),
     ).rejects.toThrow("historical-match-presentation-unavailable");
     expect(await room.getFrozenPresentationSnapshot(matchId)).toEqual(
       hostFrozen,
@@ -569,7 +598,7 @@ describe("match presentation registration", () => {
       update({ emojiId: 8, aura: "" }),
     );
     const frozen = await freezeRegisteredMatchPresentations(
-      noFirebaseEnv,
+      networkIsolatedEnv,
       inviteId,
       matchId,
       [hostUid, guestUid],
@@ -583,7 +612,7 @@ describe("match presentation registration", () => {
     );
     expect(
       await freezeRegisteredMatchPresentations(
-        noFirebaseEnv,
+        networkIsolatedEnv,
         inviteId,
         matchId,
         [hostUid, guestUid],
@@ -593,7 +622,7 @@ describe("match presentation registration", () => {
 
   it("keeps registration and activated authority proofs immutable", async () => {
     const { inviteId, matchId } = fixture();
-    const rows = await prepareCreatedMatchPresentations(noFirebaseEnv, [
+    const rows = await prepareCreatedMatchPresentations(networkIsolatedEnv, [
       creation(inviteId),
     ]);
     await commit(rows);

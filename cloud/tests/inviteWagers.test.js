@@ -5,11 +5,11 @@ const {
   isInviteWagersSnapshot,
   isReadInviteWagersResponse,
   isInviteWagersMessage,
-} = require("../functions/shared/invite-wagers");
+} = require("../runtime/shared/invite-wagers");
 const {
   isInviteMetadataMessage,
-} = require("../functions/shared/invite-metadata");
-const { isInviteRoomMessage } = require("../functions/shared/reactions");
+} = require("../runtime/shared/invite-metadata");
+const { isInviteRoomMessage } = require("../runtime/shared/reactions");
 
 const wager = {
   proposals: { host: { material: "dust", count: 2, createdAt: 1 } },

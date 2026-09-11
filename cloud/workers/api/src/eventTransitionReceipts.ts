@@ -1,4 +1,4 @@
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 
 type ReceiptIdentity = {
   transitionId: string;
@@ -62,7 +62,7 @@ function safeKey(value: unknown): value is string {
   return (
     typeof value === "string" &&
     value === value.trim() &&
-    isSafeFirebaseKey(value)
+    isSafeRecordKey(value)
   );
 }
 

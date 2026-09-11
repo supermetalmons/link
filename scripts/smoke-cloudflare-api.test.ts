@@ -1179,7 +1179,7 @@ test("smokes public, unauthenticated, and internal routes", async (t) => {
     ].sort(),
   );
   assert.equal(
-    requests.some(({ url }) => url.includes("identitytoolkit.googleapis.com")),
+    requests.some(({ url }) => new URL(url).hostname !== "api.mons.link"),
     false,
   );
   for (const pathname of ["/events/snapshot", "/events/prizes"]) {
@@ -1237,9 +1237,7 @@ test("smokes public, unauthenticated, and internal routes", async (t) => {
       gate === "requireWagerStorageVersion" ? 10 : 0,
     );
     assert.equal(
-      requests.some(({ url }) =>
-        url.includes("identitytoolkit.googleapis.com"),
-      ),
+      requests.some(({ url }) => new URL(url).hostname !== "api.mons.link"),
       false,
     );
   }
@@ -2126,7 +2124,7 @@ test("requires the read-only token to own the smoke profile", async () => {
       {
         fetch: async (input) => {
           const url = String(input);
-          if (url.includes("identitytoolkit.googleapis.com")) {
+          if (new URL(url).hostname !== "api.mons.link") {
             identityRequests++;
             throw new Error("unexpected-identity-request");
           }
@@ -2314,7 +2312,7 @@ test("revokes an anonymous smoke session after an incomplete creation response",
       fetch: async (input) => {
         const url = String(input);
         if (url.includes("/auth/session/anonymous")) {
-          return json({ accessToken: "firebase-id-token" }, 200);
+          return json({ accessToken: "invalid-access-token" }, 200);
         }
         if (url.includes("/auth/session/logout")) {
           deleted = true;

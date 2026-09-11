@@ -35,8 +35,8 @@ function fixture(owners: Record<string, string | null> = {}) {
   const repository = createGameplayRepository(environment);
   let reads = 0;
   let snapshots = 0;
-  repository.getRtdbPath = async () => {
-    throw new Error("unexpected-rtdb-read");
+  repository.getStatePath = async () => {
+    throw new Error("unexpected-source-read");
   };
   repository.readProfileOwnershipSnapshot = async (query) => {
     snapshots++;
@@ -273,7 +273,7 @@ test("rechecks client storage version after activation races admission dispatch"
   let versionChecks = 0;
   let admissions = 0;
   let domainReads = 0;
-  value.repository.getRtdbPath = async () => {
+  value.repository.getStatePath = async () => {
     domainReads++;
     throw new Error("unexpected-domain-work");
   };

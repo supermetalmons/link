@@ -4,7 +4,6 @@ import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   canonicalJson,
-  createFirebaseTokenProvider,
   createWranglerRunner,
   digest,
   privateDirectory,
@@ -15,8 +14,6 @@ import {
 } from "./operator/runtime.ts";
 
 const DATABASE = "mons-link-profile-games";
-
-const FIREBASE_ROOT = "https://mons-link-default-rtdb.firebaseio.com";
 
 const VERSION_PATTERN =
   /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -55,7 +52,6 @@ type Arguments = {
   directory?: string;
   evidence?: string;
   candidateVersionId?: string;
-  firebaseCredentials?: string;
 };
 
 type Control = {
@@ -103,7 +99,6 @@ type Dependencies = {
   freeze(control: Control): Promise<void>;
   resume(control: Control, versionId: string): Promise<void>;
   assertDeployment(versionId: string): Promise<void>;
-  readEvidencePath(path: string): Promise<unknown>;
 };
 
 function record(value: unknown): RecordValue | null {
@@ -148,12 +143,7 @@ function parseArgs(argv: string[]): Arguments {
     const name = argv[index],
       value = argv[index + 1];
     if (
-      ![
-        "--directory",
-        "--evidence",
-        "--candidate-version-id",
-        "--firebase-credentials",
-      ].includes(name) ||
+      !["--directory", "--evidence", "--candidate-version-id"].includes(name) ||
       !value ||
       value.startsWith("--") ||
       options.has(name)
@@ -163,8 +153,7 @@ function parseArgs(argv: string[]): Arguments {
   }
   const directory = options.get("--directory"),
     evidence = options.get("--evidence"),
-    candidateVersionId = options.get("--candidate-version-id"),
-    firebaseCredentials = options.get("--firebase-credentials");
+    candidateVersionId = options.get("--candidate-version-id");
   if (
     (operation === "inspect-admissions") !== Boolean(directory) ||
     (directory && !isAbsolute(directory))
@@ -186,20 +175,11 @@ function parseArgs(argv: string[]): Arguments {
     throw new Error(
       "resume requires the exact --candidate-version-id UUID; freeze optionally accepts it",
     );
-  if (
-    firebaseCredentials &&
-    (!["inspect-admissions", "reconcile-admission"].includes(operation) ||
-      !isAbsolute(firebaseCredentials))
-  )
-    throw new Error(
-      "Firebase credentials are accepted only as an absolute path for active-match admission evidence",
-    );
   return {
     operation,
     directory,
     evidence,
     candidateVersionId,
-    firebaseCredentials,
   };
 }
 
@@ -239,8 +219,7 @@ function evidencePath(value: unknown): value is string {
     typeof value === "string" &&
     value.length <= 4096 &&
     value.split("/").every(safeKey) &&
-    (ROOTS.some((root) => value === root || value.startsWith(`${root}/`)) ||
-      activeMatchEvidencePath(value))
+    ROOTS.some((root) => value === root || value.startsWith(`${root}/`))
   );
 }
 
@@ -260,7 +239,7 @@ function admissionTargetPaths(admission: AdmissionRow): string[] | null {
     paths.length > 10000 ||
     paths.some((path) => !evidencePath(path))
   )
-    throw new Error("invalid recorded admission target scope");
+    throw new Error("retired or invalid admission source-proof path");
   return [...new Set(paths)].sort();
 }
 
@@ -311,9 +290,10 @@ async function reconcileAdmission(
     throw new Error("invalid admission recovery evidence");
   const admission = parseAdmission(evidence.admission);
   if (admission.backend !== "d1")
-    throw new Error("RTDB admissions are retired");
+    throw new Error("legacy admissions are retired");
   if (digest(admission) !== evidence.admissionDigest)
     throw new Error("admission evidence digest mismatch");
+  const expected = admissionTargetPaths(admission);
   const currentRows = await dependencies.readAdmissions(admission.admissionId);
   if (currentRows.length === 0) {
     dependencies.log({
@@ -345,7 +325,6 @@ async function reconcileAdmission(
       throw new Error(
         "uncertain admission requires finished-request evidence; age or a timeout is not completion evidence",
       );
-    const expected = admissionTargetPaths(admission);
     const noSourceEffects = evidence.noSourceEffects === true;
     if (
       (evidence.noSourceEffects !== undefined &&
@@ -477,7 +456,9 @@ function assertD1Control(status: Status): void {
     typeof status.control.metadata.activationCandidateVersionId !== "string" ||
     !VERSION_PATTERN.test(status.control.metadata.activationCandidateVersionId)
   )
-    throw new Error("D1 activation is unverified; RTDB maintenance is retired");
+    throw new Error(
+      "D1 activation is unverified; legacy maintenance is retired",
+    );
   if (!status.legacyFence || status.legacyLocks !== 0)
     throw new Error("unexpected legacy writer evidence; inspect status");
 }
@@ -491,7 +472,7 @@ async function manageAutomatchState(
     const admissions = await dependencies.readAdmissions();
     for (const admission of admissions) {
       if (admission.backend !== "d1")
-        throw new Error("RTDB admissions are retired");
+        throw new Error("legacy admissions are retired");
       const paths = admissionTargetPaths(admission);
       const sources =
         paths === null
@@ -558,7 +539,7 @@ async function manageAutomatchState(
 
 function createSqlDependencies(
   run: SqlRunner,
-  remote: Pick<Dependencies, "assertDeployment" | "readEvidencePath">,
+  remote: Pick<Dependencies, "assertDeployment">,
   now = Date.now,
 ): Dependencies {
   const query = (sql: string, bindings: Array<string | number | null> = []) =>
@@ -626,12 +607,11 @@ function createSqlDependencies(
         .sort((left, right) => right.length - left.length)
         .find((root) => path === root || path.startsWith(`${root}/`));
       if (admission.backend !== "d1")
-        throw new Error("RTDB admissions are retired");
-      if (!root) {
-        if (!activeMatchEvidencePath(path))
-          throw new Error("retained Firebase paths are retired");
-        return remote.readEvidencePath(path);
-      }
+        throw new Error("legacy admissions are retired");
+      if (!root)
+        throw new Error(
+          "retired admission source-proof path; only canonical D1 records can be inspected",
+        );
       const [key, ...nested] = path.slice(root.length + 1).split("/");
       if (!safeKey(key))
         throw new Error("D1 admission proof must identify an exact record");
@@ -677,7 +657,7 @@ function createSqlDependencies(
     },
     async resume(control, versionId) {
       if (control.backend !== "d1")
-        throw new Error("RTDB maintenance is retired");
+        throw new Error("legacy maintenance is retired");
       const guard = `singleton = 1 AND backend = 'd1' AND state = 'frozen' AND epoch = ? AND freeze_generation = ? AND candidate_version_id = ? AND NOT EXISTS (SELECT 1 FROM automatch_write_admissions) AND EXISTS (SELECT 1 FROM game_session_legacy_fence WHERE singleton = 1 AND enabled = 1) AND NOT EXISTS (SELECT 1 FROM game_session_mutation_locks WHERE ${LEGACY_WRITER_PREDICATE}) AND NOT EXISTS (SELECT 1 FROM game_session_legacy_releases WHERE reconciled_at_ms IS NULL)`;
       await requireOne(
         `UPDATE automatch_runtime_control SET state = 'active', candidate_version_id = ? WHERE ${guard} RETURNING singleton`,
@@ -693,18 +673,14 @@ function createSqlDependencies(
 }
 
 function createRemoteDependencies(
-  credentialsPath?: string,
   options: {
     fetcher?: typeof fetch;
     apiToken?: string;
-    firebaseToken?: () => Promise<string>;
     config?: RecordValue;
   } = {},
-): Pick<Dependencies, "assertDeployment" | "readEvidencePath"> {
+): Pick<Dependencies, "assertDeployment"> {
   const fetcher = options.fetcher || fetch,
     apiToken = options.apiToken || process.env.CLOUDFLARE_API_TOKEN;
-  const token =
-    options.firebaseToken || createFirebaseTokenProvider(credentialsPath);
   const require = createRequire(import.meta.url),
     typescript = require("typescript") as typeof import("typescript");
   const config =
@@ -767,28 +743,6 @@ function createRemoteDependencies(
           "Worker subdomain and version previews must remain disabled",
         );
     },
-    async readEvidencePath(path) {
-      if (!activeMatchEvidencePath(path))
-        throw new Error(
-          "Firebase evidence is limited to one active match record",
-        );
-      const url = new URL(
-        `${FIREBASE_ROOT}/${path.split("/").map(encodeURIComponent).join("/")}.json`,
-      );
-      return readResponseJson(
-        await fetcher(url, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${await token()}`,
-            Accept: "application/json",
-          },
-          cache: "no-store",
-          redirect: "error",
-          signal: AbortSignal.timeout(60_000),
-        }),
-        1024 * 1024,
-      );
-    },
   };
 }
 
@@ -796,22 +750,9 @@ async function execute(argv = process.argv.slice(2)): Promise<void> {
   const args = parseArgs(argv);
   const dependencies = createSqlDependencies(
     createWranglerRunner(),
-    createRemoteDependencies(
-      args.firebaseCredentials || process.env.GOOGLE_APPLICATION_CREDENTIALS,
-    ),
+    createRemoteDependencies(),
   );
   await manageAutomatchState(args, dependencies);
-}
-
-function activeMatchEvidencePath(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  const parts = value.split("/");
-  return (
-    parts.length >= 4 &&
-    parts[0] === "players" &&
-    parts[2] === "matches" &&
-    parts.every(safeKey)
-  );
 }
 
 export {

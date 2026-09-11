@@ -5,7 +5,7 @@ import {
   isMatchSyncSnapshot,
   isReadMatchSyncResponse,
   MATCH_SYNC_MAX_MESSAGE_BYTES,
-} from "../../../functions/shared/match-sync.js";
+} from "../../../runtime/shared/match-sync.js";
 import {
   createMatchSyncSnapshot,
   isRegisteredSyncMatch,

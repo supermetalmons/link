@@ -7,10 +7,10 @@ const {
   EVENT_LOCK_REFRESH_INTERVAL_MS,
   EVENT_LOCK_TTL_MS,
   createEventLockManagerCore,
-} = require("../functions/events/lockManagerCore");
+} = require("../runtime/events/lockManagerCore");
 const {
-  runRtdbDecisionTransaction,
-} = require("../functions/rtdbDecisionTransaction");
+  runStateDecisionTransaction,
+} = require("../runtime/stateDecisionTransaction");
 
 const clone = (value) =>
   value === undefined ? undefined : structuredClone(value);
@@ -31,8 +31,8 @@ const createColdDatabase = (initial = {}) => {
     ref(path) {
       return {
         path,
-        async transaction(update, _onComplete, applyLocally) {
-          transactionCalls.push({ path, applyLocally });
+        async transaction(update, ...extra) {
+          transactionCalls.push({ path, argumentCount: 1 + extra.length });
           if (failures.has(path)) {
             throw failures.get(path);
           }
@@ -44,7 +44,7 @@ const createColdDatabase = (initial = {}) => {
           if (output === undefined) {
             return {
               committed: false,
-              snapshot: createSnapshot(authoritative),
+              value: clone(authoritative),
             };
           }
           if (output === null) {
@@ -54,7 +54,7 @@ const createColdDatabase = (initial = {}) => {
           }
           return {
             committed: true,
-            snapshot: createSnapshot(output),
+            value: clone(output),
           };
         },
       };
@@ -97,7 +97,7 @@ const createManager = ({
     lockRoot,
     includeLegacyOwnerId,
     transactPath: (path, updater) =>
-      runRtdbDecisionTransaction(database.ref(path), updater),
+      runStateDecisionTransaction(database.ref(path), updater),
   });
 };
 
@@ -119,7 +119,7 @@ test("validates configured lock roots and preserves the core default", () => {
         lockRoot: "/locks",
         transactPath: async () => ({ committed: false, value: null }),
       }),
-    /lockRoot must be a valid RTDB path/,
+    /lockRoot must be a valid state path/,
   );
   const nested = createEventLockManagerCore({
     createLockId: () => "lock",
@@ -134,7 +134,7 @@ test("validates configured lock roots and preserves the core default", () => {
         lockRoot: "locks//nested",
         transactPath: async () => ({ committed: false, value: null }),
       }),
-    /lockRoot must be a valid RTDB path/,
+    /lockRoot must be a valid state path/,
   );
   assert.throws(
     () =>
@@ -143,7 +143,7 @@ test("validates configured lock roots and preserves the core default", () => {
         lockRoot: "locks\u0001child",
         transactPath: async () => ({ committed: false, value: null }),
       }),
-    /lockRoot must be a valid RTDB path/,
+    /lockRoot must be a valid state path/,
   );
   assert.equal(EVENT_LOCK_ROOT, "eventLocks");
 });
@@ -169,7 +169,7 @@ test("acquires the legacy-compatible event lock schema through a cold transactio
     acquiredAtMs: 1_000,
     refreshedAtMs: 1_000,
   });
-  assert.equal(database.transactionCalls[0].applyLocally, false);
+  assert.equal(database.transactionCalls[0].argumentCount, 1);
 });
 
 test("profile projection leases interoperate with legacy ownerId consumers", async () => {
@@ -185,7 +185,7 @@ test("profile projection leases interoperate with legacy ownerId consumers", asy
   assert.ok(handle);
   assert.equal(database.read(path).ownerId, "new-owner");
 
-  const legacyAttempt = await runRtdbDecisionTransaction(
+  const legacyAttempt = await runStateDecisionTransaction(
     database.ref(path),
     (current) =>
       typeof current?.ownerId === "string" && current.expiresAtMs > 1_000

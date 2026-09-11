@@ -1,8 +1,6 @@
 import type { NftApiRequest } from "@mons/shared/nfts";
 import { CORS_HEADERS, jsonResponse, parseRequestBody } from "./http.ts";
 import { fetchNftInventory } from "./inventory.ts";
-import { MATCH_STATE_MIGRATION_PATH } from "./matchStateMigration.ts";
-import { handleMatchStateMigrationRoute } from "./matchStateMigrationRoute.ts";
 import {
   HELIUS_TIMEOUT_MS,
   MAX_HELIUS_RESPONSE_BODY_BYTES,
@@ -71,10 +69,6 @@ import {
   isMatchSyncPath,
   type MatchSyncRouteDependencies,
 } from "./matchSyncRoute.ts";
-import {
-  handleMatchPresentationMigrationRoute,
-  MATCH_PRESENTATION_MIGRATION_PATH,
-} from "./matchPresentationMigrationRoute.ts";
 
 const RATE_LIMIT_RETRY_AFTER_SECONDS = 60;
 
@@ -109,12 +103,6 @@ export async function handleRequest(
   ctx?: WorkerExecutionContext,
 ): Promise<Response> {
   const pathname = new URL(request.url).pathname;
-  if (pathname === MATCH_STATE_MIGRATION_PATH) {
-    return handleMatchStateMigrationRoute(request, env);
-  }
-  if (pathname === MATCH_PRESENTATION_MIGRATION_PATH) {
-    return handleMatchPresentationMigrationRoute(request, env);
-  }
   if (SESSION_PATHS.includes(pathname)) {
     return handleSessionRoute(request, env, dependencyOverrides.session);
   }

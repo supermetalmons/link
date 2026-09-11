@@ -8,12 +8,12 @@ import {
   parseRematchIndices,
 } from "@mons/shared/rematches";
 import { AuthApiFailure } from "./authErrors.ts";
-import { isCanonicalFirebaseUid } from "./firebaseKeys.ts";
+import { isCanonicalLoginUid } from "./recordKeys.ts";
 import {
-  FirebaseRtdbFailure,
-  FirebaseRtdbPermissionDenied,
-  type FirebaseRtdbClient,
-} from "./firebaseRtdb.ts";
+  StateRepositoryFailure,
+  StateRepositoryPermissionDenied,
+  type StateRepository,
+} from "./stateRepositoryTypes.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import {
   getLoginProfileId,
@@ -23,7 +23,7 @@ import type { RequestIdentity } from "./requestIdentity.ts";
 
 type SurrenderRepository = Pick<
   GameplayRepository,
-  "getRtdbPath" | "readProfileOwnershipSnapshot"
+  "getStatePath" | "readProfileOwnershipSnapshot"
 >;
 
 export type SurrenderMatchDependencies = {
@@ -32,7 +32,7 @@ export type SurrenderMatchDependencies = {
   ) => Promise<SurrenderMatchResponse>;
   createMatchClient?: (
     scope: Pick<SurrenderMatchRequest, "playerId" | "matchId">,
-  ) => Pick<FirebaseRtdbClient, "transactPath">;
+  ) => Pick<StateRepository, "transactPath">;
   assertMutationAllowed?: () => Promise<void>;
   signal?: AbortSignal;
 };
@@ -57,7 +57,7 @@ export async function surrenderMatch(
     ? AbortSignal.any([dependencies.signal, timeout])
     : timeout;
   signal.throwIfAborted();
-  const inviteValue = await repository.getRtdbPath(
+  const inviteValue = await repository.getStatePath(
     `invites/${request.inviteId}`,
     undefined,
     signal,
@@ -68,10 +68,10 @@ export async function surrenderMatch(
   const invite = toRecord(inviteValue);
   if (
     !invite ||
-    !isCanonicalFirebaseUid(invite.hostId) ||
+    !isCanonicalLoginUid(invite.hostId) ||
     (invite.guestId !== null &&
       invite.guestId !== undefined &&
-      (!isCanonicalFirebaseUid(invite.guestId) ||
+      (!isCanonicalLoginUid(invite.guestId) ||
         invite.guestId === invite.hostId))
   ) {
     throw new AuthApiFailure(409, "failed-precondition", "invite-invalid");
@@ -147,10 +147,10 @@ export async function surrenderMatch(
       (!result.committed && result.decision !== "already-surrendered") ||
       toRecord(result.value)?.status !== "surrendered"
     ) {
-      throw new FirebaseRtdbFailure();
+      throw new StateRepositoryFailure();
     }
   } catch (error) {
-    if (error instanceof FirebaseRtdbPermissionDenied) {
+    if (error instanceof StateRepositoryPermissionDenied) {
       throw new AuthApiFailure(
         409,
         "failed-precondition",

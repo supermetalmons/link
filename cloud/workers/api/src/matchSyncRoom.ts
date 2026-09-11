@@ -3,7 +3,7 @@ import {
   MATCH_SYNC_SOCKET_PROTOCOL,
   type MatchSyncSnapshot,
 } from "@mons/shared/match-sync";
-import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import type { InviteMetadataReadResult } from "./inviteMetadata.ts";
 import {
   assertMatchSyncEnvelope,
@@ -243,7 +243,7 @@ export class MatchSyncRoom {
     force = false,
   ): Promise<MatchSyncReadResult> {
     this.dependencies.pinInvite(inviteId);
-    if (matchId !== matchId.trim() || !isSafeFirebaseKey(matchId))
+    if (matchId !== matchId.trim() || !isSafeRecordKey(matchId))
       throw new TypeError("invalid-match-sync-target");
     const state = this.state(matchId);
     if (state.pending) return state.pending;
@@ -288,7 +288,7 @@ export class MatchSyncRoom {
     let subscribed = false;
     const now = Date.now();
     for (const matchId of new Set(ids)) {
-      if (matchId !== matchId.trim() || !isSafeFirebaseKey(matchId))
+      if (matchId !== matchId.trim() || !isSafeRecordKey(matchId))
         throw new TypeError("invalid-match-sync-target");
       const state = this.states.get(matchId);
       if (state) {
@@ -317,7 +317,7 @@ export class MatchSyncRoom {
       matchId = decodeURIComponent(header("Match") || "");
       actorUid = header("Actor") ? decodeURIComponent(header("Actor")!) : null;
       this.dependencies.pinInvite(inviteId);
-      if (matchId !== matchId.trim() || !isSafeFirebaseKey(matchId))
+      if (matchId !== matchId.trim() || !isSafeRecordKey(matchId))
         throw new TypeError();
     } catch {
       return new Response("Invalid match target", { status: 400 });
@@ -339,7 +339,7 @@ export class MatchSyncRoom {
       (authenticated !== "0" && authenticated !== "1") ||
       (role === "spectator"
         ? actorUid !== null
-        : !isCanonicalFirebaseUid(actorUid))
+        : !isCanonicalLoginUid(actorUid))
     )
       return new Response("Invalid match admission", { status: 400 });
     const session = readSocketSession(request, authenticated === "1");

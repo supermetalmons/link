@@ -28,7 +28,7 @@ import {
   createGameplayRepository,
   type GameplayRepository,
 } from "./gameplayRepository.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import {
   getLoginProfileId,
   requireProfileOwnershipSnapshot,
@@ -41,7 +41,7 @@ export const PROFILE_EVENT_PRIZES_PATH = "/events/prizes";
 type ReadDependencies = {
   repository?: Pick<
     GameplayRepository,
-    "getRtdbPath" | "readProfileOwnershipSnapshot"
+    "getStatePath" | "readProfileOwnershipSnapshot"
   >;
   verifyIdentity?: (
     request: Request,
@@ -51,9 +51,7 @@ type ReadDependencies = {
 };
 
 function safeKey(value: string): string {
-  return value && value.trim() === value && isSafeFirebaseKey(value)
-    ? value
-    : "";
+  return value && value.trim() === value && isSafeRecordKey(value) ? value : "";
 }
 
 function etag(

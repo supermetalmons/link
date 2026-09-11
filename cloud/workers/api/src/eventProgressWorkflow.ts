@@ -80,7 +80,7 @@ export class EventProgressWorkflow extends WorkflowEntrypoint<
         const repository = createEventGameplayRepository(this.env);
         return await runEventAnnouncementWorkflow(event, step, {
           readOutbox: (outboxId) =>
-            repository.getRtdbPath(`eventProgressOutbox/${outboxId}`),
+            repository.getStatePath(`eventProgressOutbox/${outboxId}`),
           deliver: (input) =>
             deliverEventPrizeAnnouncement(this.env, input, {
               eventRepository: repository,

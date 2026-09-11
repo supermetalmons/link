@@ -25,11 +25,11 @@ import {
   isAuthProfileResponse,
   isLinkedAuthMethodsResponse,
 } from "@mons/shared/auth";
-import { INVITE_ID_RANDOM_LENGTH, isSafeFirebaseKey } from "@mons/shared/ids";
+import { INVITE_ID_RANDOM_LENGTH, isSafeRecordKey } from "@mons/shared/ids";
 import {
   isCreateInviteResponse,
   isJoinInviteResponse,
-  isGameSessionMatch,
+  isReadMatchSnapshotResponse,
   isSurrenderMatchResponse,
   type GameSessionMatch,
 } from "@mons/shared/game-sessions";
@@ -68,7 +68,6 @@ import {
 
 const ORIGIN = "https://mons.link";
 const API_ROOT = "https://api.mons.link";
-const FIREBASE_DATABASE_ROOT = "https://mons-link-default-rtdb.firebaseio.com";
 const REQUEST_TIMEOUT_MS = 30_000;
 const SOCKET_TIMEOUT_MS = 10_000;
 const TOKEN_REFRESH_MARGIN_MS = 30_000;
@@ -153,18 +152,28 @@ function equal(actual: unknown, expected: unknown, label: string): void {
     fail(`${label} did not match.`);
 }
 
-function isStoredMatch(
-  value: unknown,
-): value is GameSessionMatch & { sessionCreation?: string } {
-  const stored = record(value);
-  if (!stored) return false;
-  const { sessionCreation, ...match } = stored;
-  return (
-    isGameSessionMatch(match) &&
-    (sessionCreation === undefined ||
-      (typeof sessionCreation === "string" &&
-        /^[a-f0-9]{64}$/.test(sessionCreation)))
+async function readMatchSnapshot(
+  playerId: string,
+  matchId: string,
+  dependencies: Dependencies,
+): Promise<GameSessionMatch> {
+  const query = new URLSearchParams({ playerId, matchId });
+  const payload = await requestJson(
+    dependencies,
+    "Canonical match snapshot",
+    `${API_ROOT}/matches/snapshot?${query}`,
+    { headers: { Accept: "application/json", Origin: ORIGIN } },
   );
+  if (
+    !isReadMatchSnapshotResponse(payload) ||
+    payload.playerId !== playerId ||
+    payload.matchId !== matchId ||
+    payload.match === null
+  )
+    fail(
+      "Canonical match snapshot was missing, invalid, or for another match.",
+    );
+  return payload.match;
 }
 
 function usage(): never {
@@ -212,7 +221,7 @@ function parseArgs(argv: string[]): Options {
   if (mode === "read-only") {
     if (
       fixture ||
-      !isSafeFirebaseKey(inviteId) ||
+      !isSafeRecordKey(inviteId) ||
       (authTokenFixture && !isAbsolute(authTokenFixture))
     )
       usage();
@@ -265,7 +274,7 @@ function readFixture(path: string): Fixture {
     )
       fail("Fixture actor is invalid.");
     for (const key of ["uid", "profileId"])
-      if (actor[key] !== undefined && !isSafeFirebaseKey(actor[key]))
+      if (actor[key] !== undefined && !isSafeRecordKey(actor[key]))
         fail("Fixture identity is invalid.");
     if (
       actor.accessToken !== undefined &&
@@ -975,17 +984,12 @@ async function prepare(
     for (const role of ["host", "guest"] as const) {
       if (role === "guest" && metadata.snapshot.guestId === null) continue;
       const actor = fixture.actors[role];
-      const url = new URL(
-        `${FIREBASE_DATABASE_ROOT}/players/${encodeURIComponent(actor.uid!)}/matches/${encodeURIComponent(invite.id)}.json`,
-      );
-      const match = await requestJson(
+      const match = await readMatchSnapshot(
+        actor.uid!,
+        invite.id,
         dependencies,
-        "Existing fixture match read",
-        url.href,
-        { headers: { Origin: ORIGIN, Referer: `${ORIGIN}/` } },
       );
       if (
-        !isStoredMatch(match) ||
         match.status !== "" ||
         match.flatMovesString !== "" ||
         match.timer !== ""
@@ -1157,19 +1161,12 @@ async function activeLifecycle(
           );
         });
         await step("settle:surrender", async () => {
-          const url = new URL(
-            `${FIREBASE_DATABASE_ROOT}/players/${encodeURIComponent(guest.uid!)}/matches/${encodeURIComponent(inviteId)}.json`,
-          );
-          const match = await requestJson(
+          const match = await readMatchSnapshot(
+            guest.uid!,
+            inviteId,
             dependencies,
-            "Dedicated guest match read",
-            url.href,
-            { headers: { Origin: ORIGIN, Referer: `${ORIGIN}/` } },
           );
-          if (
-            !isStoredMatch(match) ||
-            !["", "surrendered"].includes(match.status)
-          )
+          if (!["", "surrendered"].includes(match.status))
             fail("Dedicated guest match cannot surrender.");
           for (let replay = 0; replay < 2; replay++) {
             const result = await api(
@@ -1186,12 +1183,7 @@ async function activeLifecycle(
             )
               fail("Dedicated guest surrender/replay failed.");
             equal(
-              await requestJson(
-                dependencies,
-                "Dedicated guest surrendered match read",
-                url.href,
-                { headers: { Origin: ORIGIN, Referer: `${ORIGIN}/` } },
-              ),
+              await readMatchSnapshot(guest.uid!, inviteId, dependencies),
               { ...match, status: "surrendered" },
               "Guest surrender preserved match state",
             );

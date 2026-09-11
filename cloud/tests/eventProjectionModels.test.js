@@ -6,7 +6,7 @@ const {
   buildPreviewParticipants,
   getListSortAtMs,
   mapEventStatusToNavigationStatus,
-} = require("../functions/events/eventProjectionModel");
+} = require("../runtime/events/eventProjectionModel");
 const {
   deriveProjectionStatus,
   getOwnerContext,
@@ -15,7 +15,7 @@ const {
   pickListSortMillis,
   readTimestampMillis,
   shouldProjectInvite,
-} = require("../functions/events/gameProjectionModel");
+} = require("../runtime/events/gameProjectionModel");
 
 test("event projection previews normalize ordering and limits", () => {
   const participants = Object.fromEntries(
@@ -88,7 +88,7 @@ test("game projection status keeps automatch, event rating, and rematch preceden
   );
 });
 
-test("game projection ignores Firebase rating markers and keeps ordinary games active", () => {
+test("game projection ignores legacy rating markers and keeps ordinary games active", () => {
   for (const inviteData of [
     {
       eventOwned: true,

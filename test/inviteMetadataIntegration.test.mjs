@@ -6,11 +6,11 @@ import { InviteMetadataState } from "../src/connection/inviteMetadataState.ts";
 import { InviteMetadataApiError } from "../src/services/inviteMetadataApi.ts";
 import { withAutomatchOperationLock } from "../src/connection/automatchOperationLock.ts";
 import { moveDeliveryStorageKey } from "../src/connection/moveDelivery.ts";
-import { isAutoInviteId } from "../cloud/functions/shared/ids.js";
+import { isAutoInviteId } from "../cloud/runtime/shared/ids.js";
 import {
   parseRematchIndices,
   rematchSeriesEnded,
-} from "../cloud/functions/shared/rematches.js";
+} from "../cloud/runtime/shared/rematches.js";
 
 const source = ts.createSourceFile(
   "connection.ts",
@@ -150,7 +150,7 @@ function harness({
 } = {}) {
   const events = {
     reads: [],
-    firebaseReads: [],
+    legacyReads: [],
     matchReads: [],
     ensuredMatches: [],
     recoveredMatches: [],
@@ -282,8 +282,8 @@ function harness({
     },
     ref: (_db, path) => path,
     get: async (path) => {
-      events.firebaseReads.push(path);
-      assert.fail(`unexpected Firebase read: ${path}`);
+      events.legacyReads.push(path);
+      assert.fail(`unexpected legacy read: ${path}`);
     },
     readMatchSnapshotViaApi: async (input, options) => {
       events.matchReads.push({ ...input, ...options });
@@ -469,7 +469,7 @@ test("metadata bootstrap preserves linked-login actors and loads existing wagers
     [{ playerId: "host", matchId: "invite" }],
   );
   assert.ok(h.events.matchReads[0].signal instanceof AbortSignal);
-  assert.deepEqual(h.events.firebaseReads, []);
+  assert.deepEqual(h.events.legacyReads, []);
   assert.equal(h.events.wagerReads.length, 1);
   assert.equal(h.instance.activeContext.loginUid, "login");
   assert.equal(h.instance.activeContext.actorUid, "host");
@@ -499,11 +499,11 @@ test("reconnect ensures a participant match only after a successful missing Work
   assert.equal(h.instance.activeContext.actorUid, "host");
   assert.deepEqual(h.instance.myMatch, ensuredMatch);
   assert.equal(h.events.ui.filter((value) => value === "recover").length, 2);
-  assert.deepEqual(h.events.firebaseReads, []);
+  assert.deepEqual(h.events.legacyReads, []);
   h.instance.detachFromMatchSession();
 });
 
-test("a failed Worker snapshot during reconnect preserves the session without ensuring or reading Firebase", async () => {
+test("a failed Worker snapshot during reconnect preserves the session without ensuring or reading legacy storage", async () => {
   const h = harness({
     readMatch: (attempt) => {
       if (attempt > 1) throw new Error("snapshot-unavailable");
@@ -524,7 +524,7 @@ test("a failed Worker snapshot during reconnect preserves the session without en
   assert.equal(h.channel(), previousChannel);
   assert.deepEqual(h.instance.myMatch, match);
   assert.equal(h.events.ui.filter((value) => value === "recover").length, 1);
-  assert.deepEqual(h.events.firebaseReads, []);
+  assert.deepEqual(h.events.legacyReads, []);
   h.instance.detachFromMatchSession();
 });
 
@@ -554,7 +554,7 @@ for (const invalidation of ["account replacement", "navigation"]) {
     assert.deepEqual(h.events.ensuredMatches, []);
     assert.equal(h.instance.activeContext, contextAfterInvalidation);
     assert.equal(h.events.ui.filter((value) => value === "recover").length, 1);
-    assert.deepEqual(h.events.firebaseReads, []);
+    assert.deepEqual(h.events.legacyReads, []);
     unsubscribe();
     h.instance.detachFromMatchSession();
   });
@@ -611,7 +611,7 @@ test("a late bootstrap result after account replacement cannot activate a game",
   await settle();
   assert.equal(h.instance.activeContext, null);
   assert.equal(h.events.matchReads.length, 0);
-  assert.equal(h.events.firebaseReads.length, 0);
+  assert.equal(h.events.legacyReads.length, 0);
   assert.equal(h.events.channels.length, 0);
 });
 
@@ -637,7 +637,7 @@ test("uncertain manual joining recovers the authoritative viewer and paired meta
     h.events.matchReads.map(({ playerId, matchId }) => ({ playerId, matchId })),
     [{ playerId: "guest", matchId: "invite" }],
   );
-  assert.deepEqual(h.events.firebaseReads, []);
+  assert.deepEqual(h.events.legacyReads, []);
   h.instance.detachFromMatchSession();
 });
 
@@ -798,7 +798,7 @@ const proposalState = (count) => ({
   proposals: { host: { material: "dust", count } },
 });
 
-test("empty Worker wager bootstrap clears the displayed match without any Firebase wager read", async () => {
+test("empty Worker wager bootstrap clears the displayed match without any legacy wager read", async () => {
   const h = harness({ wagers: {} });
   await h.connect();
   assert.deepEqual(h.instance.latestInvite.wagers, {});
@@ -827,7 +827,7 @@ test("detaching during wager bootstrap aborts the read and drops its late respon
   await settle();
   assert.equal(h.instance.activeContext, null);
   assert.equal(h.events.wagerChannels.length, 0);
-  assert.equal(h.events.firebaseReads.length, 0);
+  assert.equal(h.events.legacyReads.length, 0);
 });
 
 test("account replacement during wager bootstrap never publishes the old account snapshot", async () => {

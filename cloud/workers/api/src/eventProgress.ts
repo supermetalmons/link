@@ -1,4 +1,4 @@
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import type {
   WorkflowEvent,
   WorkflowStep,
@@ -15,8 +15,8 @@ import { createD1EventPrizeWithdrawalReader } from "./eventPrizeWithdrawalD1.ts"
 import {
   createEventRuntime,
   type EventProgressOutboxRecord,
-} from "../../../functions/events.js";
-import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
+} from "../../../runtime/events.js";
+import { createEventLockManagerCore } from "../../../runtime/events/lockManagerCore.js";
 import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
 import { requireProfileOwnershipSnapshot } from "./profileOwnership.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
@@ -69,7 +69,7 @@ export type EventProgressWorkflowDependencies = {
 
 export type EventProgressSweepRepository = Pick<
   GameplayRepository,
-  "getRtdbPath" | "patchRtdbRoot"
+  "getStatePath" | "patchStateRoot"
 >;
 
 export type EventProgressRatingRepository = Pick<
@@ -96,98 +96,51 @@ export class EventProgressRetryableError extends Error {
   }
 }
 
-type RtdbSnapshot = {
-  exists(): boolean;
-  val(): unknown;
-};
-
 function toRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
 }
 
-function snapshot(value: unknown): RtdbSnapshot {
-  return {
-    exists: () => value !== null && value !== undefined,
-    val: () => value,
-  };
-}
-
-function prefixUpdates(
-  path: string,
-  updates: Record<string, unknown>,
-): Record<string, unknown> {
-  if (!path) {
-    return updates;
-  }
-  return Object.fromEntries(
-    Object.entries(updates).map(([key, value]) => [`${path}/${key}`, value]),
-  );
-}
-
-export function createEventAdminAdapter(
+export function createEventStateAdapter(
   repository: Pick<
     GameplayRepository,
-    "getRtdbPath" | "patchRtdbRoot" | "transactRtdbPath"
+    "getStatePath" | "patchStateRoot" | "transactStatePath"
   >,
   signal?: AbortSignal,
 ) {
+  const normalizePath = (path: string) => path.replace(/^\/+|\/+$/g, "");
   return {
-    database() {
-      return {
-        ref(path = "") {
-          const normalizedPath = path.replace(/^\/+|\/+$/g, "");
-          return {
-            async once(event: "value") {
-              if (event !== "value") {
-                throw new TypeError("Only value snapshots are supported");
-              }
-              return snapshot(
-                await repository.getRtdbPath(normalizedPath, undefined, signal),
-              );
-            },
-            async remove() {
-              await repository.patchRtdbRoot(
-                { [normalizedPath]: null },
-                signal,
-              );
-            },
-            async set(value: unknown) {
-              await repository.patchRtdbRoot(
-                { [normalizedPath]: value },
-                signal,
-              );
-            },
-            async transaction(
-              updater: (current: unknown) => unknown,
-              _onComplete?: unknown,
-              _applyLocally?: boolean,
-            ) {
-              const result = await repository.transactRtdbPath(
-                normalizedPath,
-                (current) => {
-                  const next = updater(current);
-                  return next === undefined
-                    ? { commit: false }
-                    : { value: next };
-                },
-                signal,
-              );
-              return {
-                committed: result.committed,
-                snapshot: snapshot(result.value),
-              };
-            },
-            async update(updates: Record<string, unknown>) {
-              await repository.patchRtdbRoot(
-                prefixUpdates(normalizedPath, updates),
-                signal,
-              );
-            },
-          };
+    read: (path: string) =>
+      repository.getStatePath(normalizePath(path), undefined, signal),
+    set: (path: string, value: unknown) =>
+      repository.patchStateRoot({ [normalizePath(path)]: value }, signal),
+    remove: (path: string) =>
+      repository.patchStateRoot({ [normalizePath(path)]: null }, signal),
+    update(path: string, updates: Record<string, unknown>) {
+      const normalizedPath = normalizePath(path);
+      return repository.patchStateRoot(
+        normalizedPath
+          ? Object.fromEntries(
+              Object.entries(updates).map(([key, value]) => [
+                `${normalizedPath}/${key}`,
+                value,
+              ]),
+            )
+          : updates,
+        signal,
+      );
+    },
+    async transaction(path: string, updater: (current: unknown) => unknown) {
+      const result = await repository.transactStatePath(
+        normalizePath(path),
+        (current) => {
+          const value = updater(current);
+          return value === undefined ? { commit: false } : { value };
         },
-      };
+        signal,
+      );
+      return { committed: result.committed, value: result.value };
     },
   };
 }
@@ -254,7 +207,7 @@ export async function parseEventProgressOutbox(
   if (
     !record ||
     record.schemaVersion !== EVENT_PROGRESS_SCHEMA_VERSION ||
-    !isSafeFirebaseKey(record.eventId) ||
+    !isSafeRecordKey(record.eventId) ||
     typeof record.sourceKey !== "string" ||
     !record.sourceKey.trim() ||
     typeof record.reason !== "string" ||
@@ -389,21 +342,21 @@ export async function ensureEventProgressWorkflow(
 }
 
 async function removeOutbox(
-  repository: Pick<GameplayRepository, "patchRtdbRoot">,
+  repository: Pick<GameplayRepository, "patchStateRoot">,
   outboxId: string,
 ): Promise<void> {
-  await repository.patchRtdbRoot({
+  await repository.patchStateRoot({
     [`${EVENT_PROGRESS_OUTBOX_ROOT}/${outboxId}`]: null,
   });
 }
 
 async function deadLetterOutbox(
-  repository: Pick<GameplayRepository, "patchRtdbRoot">,
+  repository: Pick<GameplayRepository, "patchStateRoot">,
   outboxId: string,
   originalRecord: unknown,
   nowMs: number,
 ): Promise<void> {
-  await repository.patchRtdbRoot({
+  await repository.patchStateRoot({
     [`${EVENT_PROGRESS_OUTBOX_DEAD_ROOT}/${outboxId}`]: {
       deadAtMs: nowMs,
       originalRecord: originalRecord === undefined ? null : originalRecord,
@@ -434,7 +387,7 @@ async function dispatchOutboxPlan(
     await removeOutbox(repository, plan.outboxId);
     return;
   }
-  await repository.patchRtdbRoot({
+  await repository.patchStateRoot({
     [`${EVENT_PROGRESS_OUTBOX_ROOT}/${plan.outboxId}/lastQueuedAtMs`]: now(),
   });
 }
@@ -466,7 +419,7 @@ async function reconcileScheduledEvents(
   now: () => number,
 ): Promise<void> {
   const value = toRecord(
-    await repository.getRtdbPath("events", {
+    await repository.getStatePath("events", {
       orderBy: "status",
       equalTo: "scheduled",
     }),
@@ -482,7 +435,7 @@ async function reconcileScheduledEvents(
       const event = toRecord(eventValue);
       const startAtMs = event?.startAtMs;
       if (
-        !isSafeFirebaseKey(eventId) ||
+        !isSafeRecordKey(eventId) ||
         typeof startAtMs !== "number" ||
         !Number.isSafeInteger(startAtMs) ||
         startAtMs < 0
@@ -507,11 +460,11 @@ async function reconcileScheduledEvents(
             },
             discoveredAtMs,
           );
-          const existing = await repository.getRtdbPath(
+          const existing = await repository.getStatePath(
             `${EVENT_PROGRESS_OUTBOX_ROOT}/${plan.outboxId}`,
           );
           if (existing === null) {
-            await repository.patchRtdbRoot({
+            await repository.patchStateRoot({
               [`${EVENT_PROGRESS_OUTBOX_ROOT}/${plan.outboxId}`]: plan.outbox,
             });
           }
@@ -554,9 +507,9 @@ async function recoverRatingEventProgress(
       }
       if (
         record.version !== RATING_EVENT_PROGRESS_SCHEMA_VERSION ||
-        !isSafeFirebaseKey(record.eventId) ||
-        !isSafeFirebaseKey(record.inviteId) ||
-        !isSafeFirebaseKey(record.matchId) ||
+        !isSafeRecordKey(record.eventId) ||
+        !isSafeRecordKey(record.inviteId) ||
+        !isSafeRecordKey(record.matchId) ||
         record.operationId !== `${record.inviteId}__${record.matchId}`
       ) {
         await ratingRepository.markRatingEventProgress(
@@ -575,7 +528,7 @@ async function recoverRatingEventProgress(
         },
         nowMs,
       );
-      await repository.patchRtdbRoot({
+      await repository.patchStateRoot({
         [`${EVENT_PROGRESS_OUTBOX_ROOT}/${plan.outboxId}`]: plan.outbox,
       });
       await dispatchOutboxPlan(env, repository, plan, now);
@@ -617,7 +570,7 @@ async function sweepAdmittedEventProgress(
       : dependencies.ratingRepository ||
         createRatingRepository(env, repository as GameplayRepository);
   const value = toRecord(
-    await repository.getRtdbPath(EVENT_PROGRESS_OUTBOX_ROOT, {
+    await repository.getStatePath(EVENT_PROGRESS_OUTBOX_ROOT, {
       orderBy: "lastQueuedAtMs",
       limitToFirst: EVENT_PROGRESS_SWEEP_LIMIT,
     }),
@@ -733,9 +686,9 @@ export function createWorkflowEventRuntime(
   const lockManager = createEventLockManagerCore({
     createLockId: () => crypto.randomUUID(),
     transactPath: (path, updater) =>
-      repository.transactRtdbPath(path, updater, signal),
+      repository.transactStatePath(path, updater, signal),
     releaseTransactPath: (path, updater) =>
-      repository.transactRtdbPath(path, updater),
+      repository.transactStatePath(path, updater),
     sleep: (milliseconds) => scheduler.wait(milliseconds, { signal }),
     logger: {
       error: (_message, error) => {
@@ -754,7 +707,7 @@ export function createWorkflowEventRuntime(
   return {
     repository,
     runtime: createEventRuntime({
-      admin: createEventAdminAdapter(repository, signal),
+      state: createEventStateAdapter(repository, signal),
       readMatchPair: (input) =>
         readGameplayMatchPair(repository, input, signal),
       enqueueEventProgressTask: async () => {

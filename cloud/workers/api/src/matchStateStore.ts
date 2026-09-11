@@ -15,7 +15,7 @@ import {
   type StartMatchTimerResponse,
 } from "@mons/shared/timers";
 import { AuthApiFailure } from "./authErrors.ts";
-import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import type { MatchTimerStartStore } from "./gameplayCoordinationD1.ts";
 import {
   parseMatchTimerRecord,
@@ -27,23 +27,17 @@ import {
 import {
   canonicalMatchStateJson,
   decideMatchStateMove,
-  digestMatchStateImport,
   isCommittedMatchStateClaim,
   matchStateRecord,
   normalizeCreatedMatchState,
-  sortMatchStateImport,
 } from "./matchStateLogic.ts";
 import type {
-  MatchStateActivateRequest,
   MatchStateAuthority,
   MatchStateClaimTimerRequest,
   MatchStateCreateRequest,
   MatchStateCreateResult,
   MatchStateEffect,
   MatchStateEventEffectsRequest,
-  MatchStateImportRequest,
-  MatchStateImportSnapshot,
-  MatchStateImportTarget,
   MatchStateMoveRequest,
   MatchStatePair,
   MatchStatePairRequest,
@@ -94,7 +88,7 @@ function validKey(value: unknown): asserts value is string {
   if (
     typeof value !== "string" ||
     value !== value.trim() ||
-    !isSafeFirebaseKey(value)
+    !isSafeRecordKey(value)
   ) {
     throw new TypeError("match-state-invalid-key");
   }
@@ -213,7 +207,7 @@ export class MatchStateStore {
   private target(input: MatchStateRecordRequest): void {
     validKey(input.matchId);
     if (
-      !isCanonicalFirebaseUid(input.playerId) ||
+      !isCanonicalLoginUid(input.playerId) ||
       parseInviteMatchIndex(input.inviteId, input.matchId) === null
     ) {
       throw new TypeError("match-state-invalid-target");
@@ -293,7 +287,7 @@ export class MatchStateStore {
     this.target(input);
     if (
       input.opponentId !== null &&
-      (!isCanonicalFirebaseUid(input.opponentId) ||
+      (!isCanonicalLoginUid(input.opponentId) ||
         input.opponentId === input.playerId)
     ) {
       throw new TypeError("match-state-invalid-opponent");
@@ -851,186 +845,6 @@ export class MatchStateStore {
       );
       const due = this.nextEffectAt();
       if (due !== null) await this.ensureAlarm(due, transaction);
-    });
-  }
-
-  async stageImport(
-    input: MatchStateImportRequest,
-  ): Promise<MatchStateImportSnapshot> {
-    validKey(input.importId);
-    this.storage.transactionSync(() => {
-      const source = this.identity(input);
-      if (
-        (source.importId !== null &&
-          (source.importId !== input.importId ||
-            source.stagedEpoch !== input.epoch)) ||
-        (source.status === "active" && source.importId === null)
-      )
-        fail("match-state-import-conflict");
-      this.storage.sql.exec(
-        "INSERT INTO match_state_source(singleton, invite_id, staged_epoch, import_id) VALUES (1, ?, ?, ?) ON CONFLICT(singleton) DO NOTHING",
-        input.inviteId,
-        input.epoch,
-        input.importId,
-      );
-      for (const record of input.records) {
-        this.target({ ...input, ...record });
-        if (!matchStateRecord(record.value))
-          throw new TypeError("match-state-invalid-import-record");
-        const json = canonicalMatchStateJson(record.value);
-        const [previous] = this.storage.sql
-          .exec<{ value_json: string }>(
-            "SELECT value_json FROM match_state_staged_records WHERE import_id = ? AND match_id = ? AND player_id = ?",
-            input.importId,
-            record.matchId,
-            record.playerId,
-          )
-          .toArray();
-        if (previous && previous.value_json !== json)
-          fail("match-state-import-record-conflict");
-        if (source.status === "active" && !previous)
-          fail("match-state-import-already-active");
-        this.storage.sql.exec(
-          "INSERT OR IGNORE INTO match_state_staged_records(import_id, match_id, player_id, value_json) VALUES (?, ?, ?, ?)",
-          input.importId,
-          record.matchId,
-          record.playerId,
-          json,
-        );
-      }
-      for (const claim of input.claims) {
-        validKey(claim.matchId);
-        if (
-          parseInviteMatchIndex(input.inviteId, claim.matchId) === null ||
-          !matchStateRecord(claim.value)
-        ) {
-          throw new TypeError("match-state-invalid-import-claim");
-        }
-        const json = canonicalMatchStateJson(claim.value);
-        const [previous] = this.storage.sql
-          .exec<{ value_json: string }>(
-            "SELECT value_json FROM match_state_staged_claims WHERE import_id = ? AND match_id = ?",
-            input.importId,
-            claim.matchId,
-          )
-          .toArray();
-        if (previous && previous.value_json !== json)
-          fail("match-state-import-claim-conflict");
-        if (source.status === "active" && !previous)
-          fail("match-state-import-already-active");
-        this.storage.sql.exec(
-          "INSERT OR IGNORE INTO match_state_staged_claims(import_id, match_id, value_json) VALUES (?, ?, ?)",
-          input.importId,
-          claim.matchId,
-          json,
-        );
-      }
-    });
-    return this.readImport(input);
-  }
-
-  private importContents(
-    input: MatchStateImportTarget,
-  ): MatchStateImportRequest {
-    const source = this.identity(input);
-    validKey(input.importId);
-    if (
-      source.importId !== input.importId ||
-      source.stagedEpoch !== input.epoch
-    )
-      fail("match-state-import-missing");
-    return sortMatchStateImport({
-      inviteId: input.inviteId,
-      epoch: input.epoch,
-      importId: input.importId,
-      records: this.storage.sql
-        .exec<{ match_id: string; player_id: string; value_json: string }>(
-          "SELECT match_id, player_id, value_json FROM match_state_staged_records WHERE import_id = ? ORDER BY match_id, player_id",
-          input.importId,
-        )
-        .toArray()
-        .map((row) => ({
-          matchId: row.match_id,
-          playerId: row.player_id,
-          value: JSON.parse(row.value_json),
-        })),
-      claims: this.storage.sql
-        .exec<{ match_id: string; value_json: string }>(
-          "SELECT match_id, value_json FROM match_state_staged_claims WHERE import_id = ? ORDER BY match_id",
-          input.importId,
-        )
-        .toArray()
-        .map((row) => ({
-          matchId: row.match_id,
-          value: JSON.parse(row.value_json),
-        })),
-    });
-  }
-
-  async readImport(
-    input: MatchStateImportTarget,
-  ): Promise<MatchStateImportSnapshot> {
-    const contents = this.importContents(input);
-    return {
-      ...contents,
-      digest: await digestMatchStateImport(contents),
-      recordCount: contents.records.length,
-      claimCount: contents.claims.length,
-    };
-  }
-
-  async activate(input: MatchStateActivateRequest): Promise<MatchStateSource> {
-    const snapshot = await this.readImport(input);
-    if (
-      input.digest !== snapshot.digest ||
-      input.recordCount !== snapshot.recordCount ||
-      input.claimCount !== snapshot.claimCount
-    )
-      fail("match-state-import-verification-failed");
-    return this.storage.transactionSync(() => {
-      const source = this.identity(input);
-      const contents = this.importContents(input);
-      if (
-        canonicalMatchStateJson(contents) !==
-        canonicalMatchStateJson({
-          inviteId: snapshot.inviteId,
-          epoch: snapshot.epoch,
-          importId: snapshot.importId,
-          records: snapshot.records,
-          claims: snapshot.claims,
-        })
-      )
-        fail("match-state-import-changed");
-      if (source.status === "active") {
-        if (source.epoch !== input.epoch || source.digest !== input.digest)
-          fail("match-state-activation-conflict");
-        return source;
-      }
-      if (
-        this.storage.sql
-          .exec<{ count: number }>(
-            "SELECT COUNT(*) AS count FROM match_state_records",
-          )
-          .one().count !== 0
-      ) {
-        fail("match-state-activation-record-conflict");
-      }
-      const changed = new Set<string>();
-      for (const record of contents.records) {
-        this.putRecord(record.matchId, record.playerId, record.value);
-        changed.add(record.matchId);
-      }
-      for (const claim of contents.claims) {
-        this.putClaim(claim.matchId, claim.value);
-        changed.add(claim.matchId);
-      }
-      for (const matchId of changed) this.bump(matchId);
-      this.storage.sql.exec(
-        "UPDATE match_state_source SET active_epoch = ?, digest = ? WHERE singleton = 1",
-        input.epoch,
-        input.digest,
-      );
-      return this.readSource();
     });
   }
 }

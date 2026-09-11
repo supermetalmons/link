@@ -3,18 +3,11 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const databaseRules = require("../database.rules.json");
 const {
   buildOrderedMatchSubmissions,
   buildOrderedMoveHistory,
   requireLaterGameFromMatchData,
-} = require("../functions/gameplay/matchReconstruction");
-
-test("retired Realtime Database has no client grants or gameplay indexes", () => {
-  assert.deepEqual(databaseRules, {
-    rules: { ".read": false, ".write": false },
-  });
-});
+} = require("../runtime/gameplay/matchReconstruction");
 
 test("match reconstruction retains the strict timer selection policy", () => {
   const playerGame = {

@@ -186,7 +186,7 @@ test("sends exact authenticated profile requests", async () => {
     calls.push({ input: String(input), init });
     return jsonResponse(responses.shift());
   };
-  const tokenProvider = async () => "firebase-token";
+  const tokenProvider = async () => "session-token";
 
   assert.equal(
     (await getProfileByLoginIdViaApi("login-1", tokenProvider)).id,
@@ -238,7 +238,7 @@ test("sends exact authenticated profile requests", async () => {
     assert.equal(call.init.cache, "no-store");
     assert.ok(call.init.signal instanceof AbortSignal);
     const headers = new Headers(call.init.headers);
-    assert.equal(headers.get("Authorization"), "Bearer firebase-token");
+    assert.equal(headers.get("Authorization"), "Bearer session-token");
     assert.equal(headers.get("Accept"), "application/json");
     assert.equal(headers.get("Content-Type"), "application/json");
   }

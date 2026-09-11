@@ -5,7 +5,7 @@ import {
   HISTORICAL_MATCH_ARCHIVE_VERSION,
   type HistoricalMatchDescriptor,
 } from "./historicalMatches.ts";
-import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
+import { createEventLockManagerCore } from "../../../runtime/events/lockManagerCore.js";
 import {
   createGameplayRepository,
   createRatingRepository,
@@ -13,7 +13,7 @@ import {
   type RatingProfileGameProjectionRepository,
 } from "./gameplayRepository.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import {
   AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT,
   EVENT_PROFILE_GAME_PROJECTION_LOCK_ROOT,
@@ -63,7 +63,7 @@ const HISTORICAL_MATCH_ARCHIVE_BATCH_SIZE = 5;
 async function archiveHistoricalDescriptor(
   descriptor: HistoricalMatchDescriptor,
   inviteId: string,
-  rtdb: ProfileGameProjectionRtdb,
+  state: ProfileGameProjectionState,
   runtime: ProfileGameProjectionRuntime,
 ): Promise<void> {
   const alreadyArchived = runtime.hasHistoricalMatch
@@ -72,7 +72,7 @@ async function archiveHistoricalDescriptor(
   let hostMatch: unknown;
   let guestMatch: unknown;
   try {
-    [hostMatch, guestMatch] = await readGameplayMatchPair(rtdb, {
+    [hostMatch, guestMatch] = await readGameplayMatchPair(state, {
       inviteId,
       matchId: descriptor.matchId,
       playerId: descriptor.hostPlayerId,
@@ -109,9 +109,9 @@ async function archiveHistoricalDescriptor(
 async function settleHistoricalDescriptor(
   task: AutomatchProfileGameProjectionTask,
   descriptor: HistoricalMatchDescriptor,
-  rtdb: ProfileGameProjectionRtdb,
+  state: ProfileGameProjectionState,
 ): Promise<boolean> {
-  const result = await rtdb.transactRtdbPath(
+  const result = await state.transactStatePath(
     getAutomatchProfileGameProjectionOutboxPath(task.inviteId),
     (current) => {
       const record = toRecord(current);
@@ -143,9 +143,9 @@ type ProfileLinkProjectionResult = Pick<
   ProfileLinkProjectionSummary,
   "didHitInviteCap" | "nextMatchCursor"
 >;
-type ProfileGameProjectionRtdb = Pick<
+type ProfileGameProjectionState = Pick<
   GameplayRepository,
-  "getRtdbPath" | "transactRtdbPath" | "readMatchPair"
+  "getStatePath" | "transactStatePath" | "readMatchPair"
 >;
 
 type ProfileLinkProjectionJobs = Pick<
@@ -158,7 +158,7 @@ export type ProfileGameProjectionDependencies = {
   createProfileLinkJobs?: (env: Env) => ProfileLinkProjectionJobs;
   createEventRuntime?: (env: Env) => EventProfileGameProjectionRuntime;
   createRating?: (env: Env) => RatingProfileGameProjectionRepository;
-  createRtdb?: (env: Env) => ProfileGameProjectionRtdb;
+  createStateRepository?: (env: Env) => ProfileGameProjectionState;
   createRequestId?: () => string;
   createRuntime?: (env: Env) => ProfileGameProjectionRuntime;
   logger?: ProfileGameProjectionLogger;
@@ -219,8 +219,8 @@ function validRatingProjectionRecord(
       PROFILE_GAME_PROJECTION_SCHEMA_VERSION &&
     Number.isSafeInteger(update.completedAtMs) &&
     (update.completedAtMs || 0) > 0 &&
-    isSafeFirebaseKey(update.inviteId) &&
-    isSafeFirebaseKey(update.matchId) &&
+    isSafeRecordKey(update.inviteId) &&
+    isSafeRecordKey(update.matchId) &&
     operationId === `${update.inviteId}__${update.matchId}`,
   );
 }
@@ -237,9 +237,9 @@ export function profileGameProjectionRetryDelaySeconds(
 
 export async function settleAutomatchProfileGameProjectionOutbox(
   task: AutomatchProfileGameProjectionTask,
-  rtdb: ProfileGameProjectionRtdb,
+  state: ProfileGameProjectionState,
 ): Promise<boolean> {
-  const result = await rtdb.transactRtdbPath(
+  const result = await state.transactStatePath(
     getAutomatchProfileGameProjectionOutboxPath(task.inviteId),
     (current) => {
       const outbox = parseAutomatchProfileGameProjectionOutbox(current);
@@ -254,7 +254,7 @@ export async function settleAutomatchProfileGameProjectionOutbox(
 
 export async function processAutomatchProfileGameProjection(
   task: AutomatchProfileGameProjectionTask,
-  rtdb: ProfileGameProjectionRtdb,
+  state: ProfileGameProjectionState,
   runtime: ProfileGameProjectionRuntime,
   locks: ProfileGameProjectionLockStore,
   ownerId: string = crypto.randomUUID(),
@@ -269,7 +269,7 @@ export async function processAutomatchProfileGameProjection(
   await locks.acquire(lock, ownerId, now());
   try {
     const outbox = parseAutomatchProfileGameProjectionOutbox(
-      await rtdb.getRtdbPath(
+      await state.getStatePath(
         getAutomatchProfileGameProjectionOutboxPath(task.inviteId),
       ),
     );
@@ -290,10 +290,10 @@ export async function processAutomatchProfileGameProjection(
         await archiveHistoricalDescriptor(
           descriptor,
           task.inviteId,
-          rtdb,
+          state,
           runtime,
         );
-        if (!(await settleHistoricalDescriptor(task, descriptor, rtdb))) {
+        if (!(await settleHistoricalDescriptor(task, descriptor, state))) {
           return "superseded";
         }
       } catch (error) {
@@ -318,7 +318,7 @@ export async function processAutomatchProfileGameProjection(
     ) {
       return "continued";
     }
-    return (await settleAutomatchProfileGameProjectionOutbox(task, rtdb))
+    return (await settleAutomatchProfileGameProjectionOutbox(task, state))
       ? "projected"
       : "superseded";
   } finally {
@@ -328,9 +328,9 @@ export async function processAutomatchProfileGameProjection(
 
 export async function settleEventProfileGameProjectionOutbox(
   task: EventProfileGameProjectionTask,
-  rtdb: ProfileGameProjectionRtdb,
+  state: ProfileGameProjectionState,
 ): Promise<boolean> {
-  const result = await rtdb.transactRtdbPath(
+  const result = await state.transactStatePath(
     getEventProfileGameProjectionOutboxPath(task.eventId),
     (current) => {
       const outbox = parseEventProfileGameProjectionOutbox(current);
@@ -345,13 +345,13 @@ export async function settleEventProfileGameProjectionOutbox(
 
 export async function processEventProfileGameProjection(
   task: EventProfileGameProjectionTask,
-  rtdb: ProfileGameProjectionRtdb,
+  state: ProfileGameProjectionState,
   runtime: EventProfileGameProjectionRuntime,
   ownerId: string = crypto.randomUUID(),
   now: () => number = Date.now,
 ): Promise<"missing" | "projected" | "stale" | "superseded"> {
   const initialOutbox = parseEventProfileGameProjectionOutbox(
-    await rtdb.getRtdbPath(
+    await state.getStatePath(
       getEventProfileGameProjectionOutboxPath(task.eventId),
     ),
   );
@@ -362,7 +362,7 @@ export async function processEventProfileGameProjection(
     lockRoot: EVENT_PROFILE_GAME_PROJECTION_LOCK_ROOT,
     createLockId: () => crypto.randomUUID(),
     includeLegacyOwnerId: true,
-    transactPath: rtdb.transactRtdbPath,
+    transactPath: state.transactStatePath,
     now,
   });
   const lock = await lockManager.acquireEventLock(task.eventId, ownerId);
@@ -370,7 +370,7 @@ export async function processEventProfileGameProjection(
   const stopHeartbeat = lockManager.startEventLockHeartbeat(lock);
   try {
     const outbox = parseEventProfileGameProjectionOutbox(
-      await rtdb.getRtdbPath(
+      await state.getStatePath(
         getEventProfileGameProjectionOutboxPath(task.eventId),
       ),
     );
@@ -388,7 +388,7 @@ export async function processEventProfileGameProjection(
         },
       },
     );
-    return (await settleEventProfileGameProjectionOutbox(task, rtdb))
+    return (await settleEventProfileGameProjectionOutbox(task, state))
       ? result.status
       : "superseded";
   } finally {
@@ -484,7 +484,7 @@ function automatchSweepEntries(value: unknown): AutomatchSweepEntry[] {
   const records = toRecord(value) || {};
   return Object.entries(records).map(([inviteId, raw]) => {
     const outbox = parseAutomatchProfileGameProjectionOutbox(raw);
-    return outbox && isSafeFirebaseKey(inviteId)
+    return outbox && isSafeRecordKey(inviteId)
       ? {
           kind: "candidate",
           value: {
@@ -504,7 +504,7 @@ function eventSweepEntries(value: unknown): EventSweepEntry[] {
   const records = toRecord(value) || {};
   return Object.entries(records).map(([eventId, raw]) => {
     const outbox = parseEventProfileGameProjectionOutbox(raw);
-    return outbox && isSafeFirebaseKey(eventId)
+    return outbox && isSafeRecordKey(eventId)
       ? {
           kind: "candidate",
           value: {
@@ -521,11 +521,11 @@ function eventSweepEntries(value: unknown): EventSweepEntry[] {
 }
 
 async function claimAutomatchSweepCandidate(
-  rtdb: ProfileGameProjectionRtdb,
+  state: ProfileGameProjectionState,
   candidate: AutomatchSweepCandidate,
   nowMs: number,
 ): Promise<boolean> {
-  const result = await rtdb.transactRtdbPath(
+  const result = await state.transactStatePath(
     getAutomatchProfileGameProjectionOutboxPath(candidate.task.inviteId),
     (current) => {
       const outbox = parseAutomatchProfileGameProjectionOutbox(current);
@@ -547,11 +547,11 @@ async function claimAutomatchSweepCandidate(
 }
 
 async function claimEventSweepCandidate(
-  rtdb: ProfileGameProjectionRtdb,
+  state: ProfileGameProjectionState,
   candidate: EventSweepCandidate,
   nowMs: number,
 ): Promise<boolean> {
-  const result = await rtdb.transactRtdbPath(
+  const result = await state.transactStatePath(
     getEventProfileGameProjectionOutboxPath(candidate.task.eventId),
     (current) => {
       const outbox = parseEventProfileGameProjectionOutbox(current);
@@ -583,28 +583,28 @@ function salvageEventCleanupOwnerProfileIds(value: unknown): string[] {
       Object.entries(
         toRecord(toRecord(value)?.cleanupOwnerProfileIds) || {},
       ).flatMap(([profileId, included]) =>
-        included === true && isSafeFirebaseKey(profileId) ? [profileId] : [],
+        included === true && isSafeRecordKey(profileId) ? [profileId] : [],
       ),
     ),
   );
 }
 
 async function repairInvalidEventSweepEntry(
-  rtdb: ProfileGameProjectionRtdb,
+  state: ProfileGameProjectionState,
   eventId: string,
   nowMs: number,
   createRequestId: () => string,
 ): Promise<InvalidEventSweepResult> {
-  const safeEventId = isSafeFirebaseKey(eventId);
+  const safeEventId = isSafeRecordKey(eventId);
   const requestId = safeEventId ? createRequestId() : "";
-  const result = await rtdb.transactRtdbPath(
+  const result = await state.transactStatePath(
     `${EVENT_PROFILE_GAME_PROJECTION_OUTBOX_ROOT}/${eventId}`,
     (current) => {
       if (
         current === null ||
         current === undefined ||
         (parseEventProfileGameProjectionOutbox(current) &&
-          isSafeFirebaseKey(eventId))
+          isSafeRecordKey(eventId))
       ) {
         return { commit: false, decision: "changed" };
       }
@@ -648,14 +648,14 @@ type InvalidAutomatchSweepResult =
   | { kind: "repaired"; task: AutomatchProfileGameProjectionTask };
 
 async function repairInvalidAutomatchSweepEntry(
-  rtdb: ProfileGameProjectionRtdb,
+  state: ProfileGameProjectionState,
   inviteId: string,
   nowMs: number,
   createRequestId: () => string,
 ): Promise<InvalidAutomatchSweepResult> {
-  const safeInviteId = isSafeFirebaseKey(inviteId);
+  const safeInviteId = isSafeRecordKey(inviteId);
   const requestId = safeInviteId ? createRequestId() : "";
-  const result = await rtdb.transactRtdbPath(
+  const result = await state.transactStatePath(
     getAutomatchProfileGameProjectionOutboxPath(inviteId),
     (current) => {
       const record = toRecord(current);
@@ -664,7 +664,7 @@ async function repairInvalidAutomatchSweepEntry(
         current === undefined ||
         (record &&
           parseAutomatchProfileGameProjectionOutbox(current) &&
-          isSafeFirebaseKey(inviteId))
+          isSafeRecordKey(inviteId))
       ) {
         return { commit: false, decision: "changed" };
       }
@@ -832,8 +832,8 @@ export async function handleProfileGameProjectionMessage(
   const now = dependencies.now || Date.now;
   try {
     const ownerId = crypto.randomUUID();
-    const rtdb = (
-      dependencies.createRtdb ||
+    const state = (
+      dependencies.createStateRepository ||
       ((workerEnv: Env) => createEventGameplayRepository(workerEnv))
     )(env);
     const runtime = (
@@ -848,7 +848,7 @@ export async function handleProfileGameProjectionMessage(
     if (task.kind === "automatch-profile-game-projection") {
       status = await processAutomatchProfileGameProjection(
         task,
-        rtdb,
+        state,
         runtime,
         locks,
         ownerId,
@@ -882,7 +882,7 @@ export async function handleProfileGameProjectionMessage(
             logger: linkLogger,
             now,
             projection: runtime,
-            rtdb,
+            state,
             withInviteProjectionLock: input.withInviteProjectionLock,
           }).process(input);
         },
@@ -896,7 +896,7 @@ export async function handleProfileGameProjectionMessage(
     } else if (task.kind === "event-profile-game-projection") {
       status = await processEventProfileGameProjection(
         task,
-        rtdb,
+        state,
         (
           dependencies.createEventRuntime ||
           createEventProfileGameProjectionRuntime
@@ -950,17 +950,17 @@ export async function handleProfileGameProjectionQueue(
   batch: MessageBatch<unknown>,
   env: Env,
 ): Promise<void> {
-  const rtdb = createEventGameplayRepository(env);
-  const rating = createRatingRepository(env, rtdb);
-  const runtime = createProfileGameProjectionRuntime(env, { rtdb });
-  const eventRuntime = createEventProfileGameProjectionRuntime(env, { rtdb });
+  const state = createEventGameplayRepository(env);
+  const rating = createRatingRepository(env, state);
+  const runtime = createProfileGameProjectionRuntime(env, { state });
+  const eventRuntime = createEventProfileGameProjectionRuntime(env, { state });
   const locks = createProfileGameProjectionLockStore(env.PROFILE_GAMES_DB);
   for (const message of batch.messages) {
     await handleProfileGameProjectionMessage(message, env, {
       createLocks: () => locks,
       createEventRuntime: () => eventRuntime,
       createRating: () => rating,
-      createRtdb: () => rtdb,
+      createStateRepository: () => state,
       createRuntime: () => runtime,
     });
   }
@@ -1028,8 +1028,8 @@ export async function sweepRatingProfileGameProjections(
         }
         if (
           record.version !== PROFILE_GAME_PROJECTION_SCHEMA_VERSION ||
-          !isSafeFirebaseKey(record.inviteId) ||
-          !isSafeFirebaseKey(record.matchId) ||
+          !isSafeRecordKey(record.inviteId) ||
+          !isSafeRecordKey(record.matchId) ||
           record.operationId !== `${record.inviteId}__${record.matchId}`
         ) {
           await rating.markRatingProfileGameProjection(
@@ -1075,17 +1075,17 @@ export async function sweepAutomatchProfileGameProjections(
     dependencies.createRequestId || (() => crypto.randomUUID());
   const nowMs = now();
   const dueBeforeMs = nowMs - PROFILE_GAME_PROJECTION_RECOVERY_DELAY_MS;
-  const rtdb = (
-    dependencies.createRtdb ||
+  const state = (
+    dependencies.createStateRepository ||
     ((workerEnv: Env) => createGameplayRepository(workerEnv))
   )(env);
   const [dueValue, malformedValue] = await Promise.all([
-    rtdb.getRtdbPath(AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT, {
+    state.getStatePath(AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT, {
       orderBy: "lastQueuedAtMs",
       endAt: dueBeforeMs,
       limitToFirst: PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
     }),
-    rtdb.getRtdbPath(AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT, {
+    state.getStatePath(AUTOMATCH_PROFILE_GAME_PROJECTION_OUTBOX_ROOT, {
       orderBy: "lastQueuedAtMs",
       startAt: "",
       limitToFirst: PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
@@ -1104,7 +1104,7 @@ export async function sweepAutomatchProfileGameProjections(
   for (const inviteId of invalidInviteIds) {
     try {
       const result = await repairInvalidAutomatchSweepEntry(
-        rtdb,
+        state,
         inviteId,
         nowMs,
         createRequestId,
@@ -1134,7 +1134,7 @@ export async function sweepAutomatchProfileGameProjections(
     entry.kind === "candidate" ? [entry.value] : [],
   );
   const claims = await collectSuccessfulClaims(candidates, (candidate) =>
-    claimAutomatchSweepCandidate(rtdb, candidate, nowMs),
+    claimAutomatchSweepCandidate(state, candidate, nowMs),
   );
   const tasks: ProfileGameProjectionTask[] = [
     ...repairedTasks,
@@ -1163,17 +1163,17 @@ export async function sweepEventProfileGameProjections(
     dependencies.createRequestId || (() => crypto.randomUUID());
   const nowMs = now();
   const dueBeforeMs = nowMs - PROFILE_GAME_PROJECTION_RECOVERY_DELAY_MS;
-  const rtdb = (
-    dependencies.createRtdb ||
+  const state = (
+    dependencies.createStateRepository ||
     ((workerEnv: Env) => createEventGameplayRepository(workerEnv))
   )(env);
   const [dueValue, malformedValue] = await Promise.all([
-    rtdb.getRtdbPath(EVENT_PROFILE_GAME_PROJECTION_OUTBOX_ROOT, {
+    state.getStatePath(EVENT_PROFILE_GAME_PROJECTION_OUTBOX_ROOT, {
       orderBy: "lastQueuedAtMs",
       endAt: dueBeforeMs,
       limitToFirst: PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
     }),
-    rtdb.getRtdbPath(EVENT_PROFILE_GAME_PROJECTION_OUTBOX_ROOT, {
+    state.getStatePath(EVENT_PROFILE_GAME_PROJECTION_OUTBOX_ROOT, {
       orderBy: "lastQueuedAtMs",
       startAt: "",
       limitToFirst: PROFILE_GAME_PROJECTION_SWEEP_LIMIT,
@@ -1196,7 +1196,7 @@ export async function sweepEventProfileGameProjections(
   for (const eventId of invalidEventIds) {
     try {
       const result = await repairInvalidEventSweepEntry(
-        rtdb,
+        state,
         eventId,
         nowMs,
         createRequestId,
@@ -1231,7 +1231,7 @@ export async function sweepEventProfileGameProjections(
   }
   const claims = await collectSuccessfulClaims(
     Array.from(candidateByEventId.values()),
-    (candidate) => claimEventSweepCandidate(rtdb, candidate, nowMs),
+    (candidate) => claimEventSweepCandidate(state, candidate, nowMs),
   );
   const tasks: ProfileGameProjectionTask[] = [
     ...repairedTasks,

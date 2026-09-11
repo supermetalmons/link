@@ -13,8 +13,8 @@ import {
   type SyncEventStateRequest,
   type SyncEventStateResponse,
 } from "@mons/shared/events";
-import { createEventRuntime } from "../../../functions/events.js";
-import { createEventLockManagerCore } from "../../../functions/events/lockManagerCore.js";
+import { createEventRuntime } from "../../../runtime/events.js";
+import { createEventLockManagerCore } from "../../../runtime/events/lockManagerCore.js";
 import { AuthApiFailure, type AuthErrorCode } from "./authErrors.ts";
 import {
   createGameplayRepository,
@@ -22,7 +22,7 @@ import {
 } from "./gameplayRepository.ts";
 import {
   buildEventProgressPlan,
-  createEventAdminAdapter,
+  createEventStateAdapter,
   ensureEventProgressWorkflow,
 } from "./eventProgress.ts";
 import { createD1EventPrizeWithdrawalReader } from "./eventPrizeWithdrawalD1.ts";
@@ -105,9 +105,9 @@ function createRuntime(env: Env, dependencies: EventControlDependencies) {
   const lockManager = createEventLockManagerCore({
     createLockId: () => crypto.randomUUID(),
     transactPath: (path, updater) =>
-      repository.transactRtdbPath(path, updater, signal),
+      repository.transactStatePath(path, updater, signal),
     releaseTransactPath: (path, updater) =>
-      repository.transactRtdbPath(path, updater),
+      repository.transactStatePath(path, updater),
     sleep:
       dependencies.sleep ||
       ((milliseconds) => scheduler.wait(milliseconds, { signal })),
@@ -123,7 +123,7 @@ function createRuntime(env: Env, dependencies: EventControlDependencies) {
     },
   });
   return createEventRuntime({
-    admin: createEventAdminAdapter(repository, signal),
+    state: createEventStateAdapter(repository, signal),
     readMatchPair: (input) => readGameplayMatchPair(repository, input, signal),
     enqueueEventProgressTask: async ({
       eventId,

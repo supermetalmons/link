@@ -19,7 +19,7 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 import { prepareSiweMessage } from "../../../../src/connection/siweMessage.ts";
 
 const env = TELEGRAM_TEST_ENV as Env;
-const identity = { uid: "login-1", idToken: "firebase-token" };
+const identity = { uid: "login-1", idToken: "session-token" };
 const ctx = { waitUntil: () => undefined };
 const INTENT_ID = "abcdefghijklmnopqrstuvwx";
 const FLOW_ID = "zyxwvutsrqponmlkjihgfedc";

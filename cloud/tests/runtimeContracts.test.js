@@ -6,8 +6,8 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 
-const functionsDirectory = path.resolve(__dirname, "../functions");
-const sharedDirectory = path.join(functionsDirectory, "shared");
+const runtimeDirectory = path.resolve(__dirname, "../runtime");
+const sharedDirectory = path.join(runtimeDirectory, "shared");
 
 const expectedSharedExports = {
   "./auth": "./auth.js",
@@ -54,7 +54,7 @@ test("preserves the @mons/shared subpath export map and declarations", () => {
 
 test("keeps standard-specific Solana SDKs out of portable module loading", () => {
   const script = `
-    require(${JSON.stringify(path.join(functionsDirectory, "eventPrizes/solana.js"))});
+    require(${JSON.stringify(path.join(runtimeDirectory, "eventPrizes/solana.js"))});
     const forbidden = [
       "/node_modules/@metaplex-foundation/mpl-core/",
       "/node_modules/@metaplex-foundation/mpl-bubblegum/",

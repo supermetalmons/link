@@ -3,7 +3,7 @@ import {
   type MatchPresentationSnapshot,
 } from "@mons/shared/match-presentation";
 import { parseInviteMatchIndex } from "@mons/shared/rematches";
-import { isCanonicalFirebaseUid, isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 
 export type MatchPresentationCreation = {
   inviteId: string;
@@ -72,10 +72,10 @@ export function assertMatchPresentationRegistration(
   row: MatchPresentationRegistration,
 ): void {
   if (
-    !isSafeFirebaseKey(row.inviteId) ||
-    !isSafeFirebaseKey(row.matchId) ||
+    !isSafeRecordKey(row.inviteId) ||
+    !isSafeRecordKey(row.matchId) ||
     parseInviteMatchIndex(row.inviteId, row.matchId) === null ||
-    !isCanonicalFirebaseUid(row.actorUid) ||
+    !isCanonicalLoginUid(row.actorUid) ||
     !DIGEST.test(row.seedDigest) ||
     !["creation", "backfill"].includes(row.provenance) ||
     typeof row.sourceId !== "string" ||
@@ -93,10 +93,10 @@ export async function matchPresentationSeedDigest(
   >,
 ): Promise<string> {
   if (
-    !isSafeFirebaseKey(seed.inviteId) ||
-    !isSafeFirebaseKey(seed.matchId) ||
+    !isSafeRecordKey(seed.inviteId) ||
+    !isSafeRecordKey(seed.matchId) ||
     parseInviteMatchIndex(seed.inviteId, seed.matchId) === null ||
-    !isCanonicalFirebaseUid(seed.actorUid) ||
+    !isCanonicalLoginUid(seed.actorUid) ||
     !isMatchPresentationSnapshot({
       matchId: seed.matchId,
       players: {
@@ -204,7 +204,7 @@ export async function listMatchPresentationRegistrations(
   inviteId: string,
   matchId: string,
 ): Promise<MatchPresentationRegistration[]> {
-  if (!isSafeFirebaseKey(inviteId) || !isSafeFirebaseKey(matchId))
+  if (!isSafeRecordKey(inviteId) || !isSafeRecordKey(matchId))
     throw new TypeError("invalid-presentation-key");
   const result = await db
     .withSession("first-primary")
@@ -327,7 +327,7 @@ export async function freezeRegisteredMatchPresentations(
   if (
     !actorUids.length ||
     actorUids.length > 2 ||
-    actorUids.some((uid) => !isCanonicalFirebaseUid(uid))
+    actorUids.some((uid) => !isCanonicalLoginUid(uid))
   )
     throw new TypeError("invalid-presentation-actors");
   const room = env.INVITE_REACTIONS.getByName(inviteId);

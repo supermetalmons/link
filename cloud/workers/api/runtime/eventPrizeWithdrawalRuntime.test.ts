@@ -7,7 +7,7 @@ import {
   type EventPrizeWithdrawalWorkflowInput,
 } from "../src/eventPrizeWithdrawal.ts";
 import { runEventPrizeWithdrawalWorkflow } from "../src/eventPrizeWithdrawalWorkflow.ts";
-import { loadSolanaDependencies } from "../../../functions/eventPrizes/solana.js";
+import { loadSolanaDependencies } from "../../../runtime/eventPrizes/solana.js";
 import { withProfileControl } from "../test/testEnv.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 

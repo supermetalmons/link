@@ -8,15 +8,11 @@ type JsonRow = {
 
 export type EventPrizeWithdrawalStorageMode = "d1" | "frozen";
 
-export type EventPrizeWithdrawalReference = {
-  once(event: "value"): Promise<{ exists(): boolean; val(): unknown }>;
-  transaction(
-    updater: (current: unknown) => unknown,
-    onComplete?: unknown,
-    applyLocally?: boolean,
-  ): Promise<{
+export type EventPrizeWithdrawalRecord = {
+  read(): Promise<unknown>;
+  transaction(updater: (current: unknown) => unknown): Promise<{
     committed: boolean;
-    snapshot: { exists(): boolean; val(): unknown };
+    value: unknown;
   }>;
   update(updates: Record<string, unknown>): Promise<void>;
 };
@@ -26,7 +22,7 @@ export type EventPrizeWithdrawalStore = {
     eventId: string,
     prizeId: string,
   ): Promise<Record<string, unknown> | null>;
-  reference(eventId: string, prizeId: string): EventPrizeWithdrawalReference;
+  record(eventId: string, prizeId: string): EventPrizeWithdrawalRecord;
   replacePaths(updates: Record<string, unknown>): Promise<void>;
 };
 
@@ -55,13 +51,6 @@ function cleanKey(value: string): string {
   return value.trim() === value && value.length > 0 && !value.includes("/")
     ? value
     : "";
-}
-
-function snapshot(value: unknown): { exists(): boolean; val(): unknown } {
-  return {
-    exists: () => value !== null && value !== undefined,
-    val: () => value,
-  };
 }
 
 function safeVersion(value: unknown): number {
@@ -372,7 +361,7 @@ export function createD1EventPrizeWithdrawalStore(
         null
       );
     },
-    reference(eventId, prizeId) {
+    record(eventId, prizeId) {
       const normalizedEventId = cleanKey(eventId);
       const normalizedPrizeId = cleanKey(prizeId);
       if (!normalizedEventId || !normalizedPrizeId) {
@@ -381,13 +370,10 @@ export function createD1EventPrizeWithdrawalStore(
         );
       }
       return {
-        async once(event) {
-          if (event !== "value") throw new TypeError("unsupported-d1-event");
-          return snapshot(
-            await createD1EventPrizeWithdrawalStore(db, { now }).get(
-              normalizedEventId,
-              normalizedPrizeId,
-            ),
+        read() {
+          return createD1EventPrizeWithdrawalStore(db, { now }).get(
+            normalizedEventId,
+            normalizedPrizeId,
           );
         },
         async transaction(updater) {
@@ -400,7 +386,7 @@ export function createD1EventPrizeWithdrawalStore(
           );
           return {
             committed: result.committed,
-            snapshot: snapshot(result.value),
+            value: result.value,
           };
         },
         async update(updates) {

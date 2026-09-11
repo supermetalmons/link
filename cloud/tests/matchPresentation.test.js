@@ -8,11 +8,11 @@ const {
   isReadMatchPresentationResponse,
   isUpdateMatchPresentationResponse,
   isMatchPresentationConflictResponse,
-} = require("../functions/shared/match-presentation");
+} = require("../runtime/shared/match-presentation");
 const {
   isInviteReactionMessage,
   isInviteRoomMessage,
-} = require("../functions/shared/reactions");
+} = require("../runtime/shared/reactions");
 
 const presentation = {
   matchId: "invite-one",
@@ -166,7 +166,7 @@ test("v2 room messages require appearance snapshots while preserving strict v1 v
   assert.equal(isInviteRoomMessage({ ...v2, extra: true }), false);
 });
 
-test("bounded v2 envelopes fit the largest Firebase keys including JSON escaping and Unicode", () => {
+test("bounded v2 envelopes fit the largest record keys including JSON escaping and Unicode", () => {
   for (const matchId of ['"\\'.repeat(384), "🫠".repeat(192)]) {
     const actors = ['"\\'.repeat(63) + "a", '"\\'.repeat(63) + "b"];
     const players = Object.fromEntries(

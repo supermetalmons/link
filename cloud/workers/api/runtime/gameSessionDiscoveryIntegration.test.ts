@@ -12,7 +12,7 @@ import {
   parseAutomatchPath,
 } from "../src/automatchD1.ts";
 import { createEventGameplayRepository } from "../src/eventRepository.ts";
-import type { FirebaseRtdbClient } from "../src/firebaseRtdb.ts";
+import type { StateRepository } from "../src/stateRepositoryTypes.ts";
 import { createGameSessionMutationLockStore } from "../src/gameplayCoordinationD1.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
 import {
@@ -34,16 +34,16 @@ function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-class MemoryFirebase implements FirebaseRtdbClient {
+class MemoryStateRepository implements StateRepository {
   readonly data: Record<string, unknown> = {};
   readonly writes: string[] = [];
 
   async getPath(
     path: string,
-    query?: Parameters<FirebaseRtdbClient["getPath"]>[1],
+    query?: Parameters<StateRepository["getPath"]>[1],
   ): Promise<unknown> {
     if (parseAutomatchPath(path) || path.startsWith("invites/"))
-      throw new Error("retired-firebase-read");
+      throw new Error("retired-source-read");
     let value: unknown = this.data;
     for (const key of path.split("/")) {
       if (!record(value) || !Object.hasOwn(value, key)) return null;
@@ -57,7 +57,7 @@ class MemoryFirebase implements FirebaseRtdbClient {
   async patchRoot(updates: Record<string, unknown>): Promise<void> {
     for (const [path, value] of Object.entries(updates)) {
       if (parseAutomatchPath(path) || path.startsWith("invites/"))
-        throw new Error("retired-firebase-write");
+        throw new Error("retired-source-write");
       const parts = path.split("/");
       let parent = this.data;
       for (const key of parts.slice(0, -1)) {
@@ -85,10 +85,10 @@ class MemoryFirebase implements FirebaseRtdbClient {
   }
 }
 
-function client(firebase: MemoryFirebase, uid: string) {
+function client(memoryState: MemoryStateRepository, uid: string) {
   const repository = createEventGameplayRepository(
     env,
-    createGameplayRepository(env, { rtdbClient: firebase }),
+    createGameplayRepository(env, { stateClient: memoryState }),
   );
   const persistence = repository.automatchPersistence!;
   const dependencies: AutomatchDependencies = {
@@ -192,9 +192,9 @@ describe("game discovery through the production gameplay repositories", () => {
   });
 
   it("captures anonymous manual creation, guest joining, and both rematch participants", async () => {
-    const firebase = new MemoryFirebase();
-    const host = client(firebase, "host");
-    const guest = client(firebase, "guest");
+    const memoryState = new MemoryStateRepository();
+    const host = client(memoryState, "host");
+    const guest = client(memoryState, "guest");
     const creation = request("manual-discovery");
     const created = await createManualInvite(
       host.identity,
@@ -205,7 +205,7 @@ describe("game discovery through the production gameplay repositories", () => {
     expect(created).toMatchObject({ ok: true, hostId: "host" });
     expect(await captured()).toEqual([mapping("host", creation.inviteId)]);
     await assertPublished(creation.inviteId, creation.operationId);
-    const writes = firebase.writes.length;
+    const writes = memoryState.writes.length;
     expect(
       await createManualInvite(
         host.identity,
@@ -214,7 +214,7 @@ describe("game discovery through the production gameplay repositories", () => {
         host.dependencies,
       ),
     ).toEqual(created);
-    expect(firebase.writes).toHaveLength(writes);
+    expect(memoryState.writes).toHaveLength(writes);
 
     const joining = request(creation.inviteId);
     expect(
@@ -258,9 +258,9 @@ describe("game discovery through the production gameplay repositories", () => {
   });
 
   it("captures automatic matchmaking for both anonymous logins", async () => {
-    const firebase = new MemoryFirebase();
-    const host = client(firebase, "host");
-    const guest = client(firebase, "guest");
+    const memoryState = new MemoryStateRepository();
+    const host = client(memoryState, "host");
+    const guest = client(memoryState, "guest");
     const hostRequest = operation();
     const pending = await startAutomatch(
       host.identity,
@@ -288,8 +288,8 @@ describe("game discovery through the production gameplay repositories", () => {
   });
 
   it("retains a failed capture in the journal and recovers without rewriting the live match", async () => {
-    const firebase = new MemoryFirebase();
-    const host = client(firebase, "host");
+    const memoryState = new MemoryStateRepository();
+    const host = client(memoryState, "host");
     const creation = request("capture-recovery");
     await db.exec(
       "CREATE TRIGGER test_capture_failure BEFORE INSERT ON login_match_discovery BEGIN SELECT RAISE(ABORT, 'test-discovery-unavailable'); END;",
@@ -324,7 +324,7 @@ describe("game discovery through the production gameplay repositories", () => {
     expect(await host.persistence.sweep()).toEqual({ recovered: 1, failed: 0 });
     expect(await captured()).toEqual([mapping("host", creation.inviteId)]);
     expect(
-      firebase.writes.filter(
+      memoryState.writes.filter(
         (path) => path === `players/host/matches/${creation.inviteId}`,
       ),
     ).toHaveLength(1);

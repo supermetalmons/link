@@ -33,7 +33,7 @@ function scheduledEvent(overrides: Record<string, unknown> = {}) {
 
 function memoryRepository(
   initial: Record<string, unknown> = {},
-  beforeCommit?: GameplayRepository["patchRtdbRoot"],
+  beforeCommit?: GameplayRepository["patchStateRoot"],
 ) {
   let data = structuredClone(initial);
   const patches: Record<string, unknown>[] = [];
@@ -61,11 +61,11 @@ function memoryRepository(
     readProfileOwnershipSnapshot: async () => {
       throw new Error("unexpected-profile-read");
     },
-    getRtdbPath: async (path) => {
+    getStatePath: async (path) => {
       reads.push(path);
       return structuredClone(get(path));
     },
-    patchRtdbRoot: async (updates, signal) => {
+    patchStateRoot: async (updates, signal) => {
       await beforeCommit?.(updates, signal);
       const next = structuredClone(data);
       for (const [path, value] of Object.entries(updates)) {
@@ -84,7 +84,7 @@ function memoryRepository(
       data = next;
       patches.push(structuredClone(updates));
     },
-    transactRtdbPath: async () => ({ committed: false, value: null }),
+    transactStatePath: async () => ({ committed: false, value: null }),
   };
   return { get, patches, reads, repository };
 }
@@ -129,7 +129,7 @@ test("event creation commits both announcement markers atomically before dispatc
     enqueued.push(plan);
   });
 
-  const pending = wrapped.patchRtdbRoot({
+  const pending = wrapped.patchStateRoot({
     [EVENT_PATH]: event,
     "invites/unrelated/status": "active",
   });
@@ -167,7 +167,7 @@ test("failed event persistence cannot dispatch or leave a schedule without the e
   });
 
   await assert.rejects(
-    wrapped.patchRtdbRoot({
+    wrapped.patchStateRoot({
       [EVENT_PATH]: scheduledEvent({ startAtMs: 30_000_000 }),
     }),
     /persistence-unavailable/,
@@ -201,7 +201,7 @@ test("dispatch failure leaves the committed marker available for sweep recovery"
   );
   assert.ok(expected);
 
-  await wrapped.patchRtdbRoot({ [EVENT_PATH]: event });
+  await wrapped.patchStateRoot({ [EVENT_PATH]: event });
 
   assert.deepEqual(memory.get(EVENT_PATH), event);
   assert.deepEqual(
@@ -232,9 +232,9 @@ test("repeat scheduling preserves first queue time and the workflow identity", a
     () => nowMs,
   );
 
-  await wrapped.patchRtdbRoot({ [EVENT_PATH]: scheduledEvent() });
+  await wrapped.patchStateRoot({ [EVENT_PATH]: scheduledEvent() });
   nowMs += 5_000;
-  await wrapped.patchRtdbRoot({ [`${EVENT_PATH}/startAtMs`]: START_AT_MS });
+  await wrapped.patchStateRoot({ [`${EVENT_PATH}/startAtMs`]: START_AT_MS });
 
   assert.equal(enqueued.length, 2);
   assert.deepEqual(enqueued[1], enqueued[0]);
@@ -255,9 +255,11 @@ test("both notification kinds preserve their first scheduling proof on repeat wr
     () => nowMs,
   );
 
-  await wrapped.patchRtdbRoot({ [EVENT_PATH]: event });
+  await wrapped.patchStateRoot({ [EVENT_PATH]: event });
   nowMs += 60_000;
-  await wrapped.patchRtdbRoot({ [`${EVENT_PATH}/startAtMs`]: event.startAtMs });
+  await wrapped.patchStateRoot({
+    [`${EVENT_PATH}/startAtMs`]: event.startAtMs,
+  });
 
   assert.equal(enqueued.length, 4);
   const identities = new Set(enqueued.map((plan) => plan.workflowId));
@@ -296,7 +298,7 @@ test("rediscovery preserves a persisted three-hour reminder without creating a f
       const wrapped = wrapper(memory, async (plan) => {
         dispatched.push({ id: plan.workflowId, params: plan.params });
       });
-      await wrapped.patchRtdbRoot({
+      await wrapped.patchStateRoot({
         [`${EVENT_PATH}/startAtMs`]: event.startAtMs,
       });
     } else {
@@ -366,7 +368,7 @@ test("failure dispatching either kind leaves both markers and dispatches the oth
       },
     );
 
-    await wrapped.patchRtdbRoot({ [EVENT_PATH]: event });
+    await wrapped.patchStateRoot({ [EVENT_PATH]: event });
 
     assert.deepEqual(
       new Set(attempted),
@@ -404,7 +406,7 @@ test("a Sunday Mons event without prizes schedules only its four-hour reminder",
     null,
   );
 
-  await wrapped.patchRtdbRoot({ [`events/${eventId}`]: event });
+  await wrapped.patchStateRoot({ [`events/${eventId}`]: event });
 
   assert.deepEqual(enqueued, [reminder]);
   assert.deepEqual(memory.patches, [
@@ -483,7 +485,7 @@ test("missing the four-hour discovery cutoff still permits the independent prize
     () => targetMs + 1,
   );
 
-  await wrapped.patchRtdbRoot({ [EVENT_PATH]: event });
+  await wrapped.patchStateRoot({ [EVENT_PATH]: event });
 
   assert.deepEqual(enqueued, [prize]);
   assert.equal(memory.get(`eventProgressOutbox/${onTime.outboxId}`), null);
@@ -505,7 +507,7 @@ test("partial changes evaluate the event after all scheduling fields are applied
     enqueued.push(plan);
   });
 
-  await wrapped.patchRtdbRoot({
+  await wrapped.patchStateRoot({
     [`${EVENT_PATH}/status`]: "scheduled",
     [`${EVENT_PATH}/isSundayMons`]: true,
     [`${EVENT_PATH}/startAtMs`]: START_AT_MS,
@@ -542,7 +544,7 @@ test("only scheduled strict Sunday Mons events with catalog prizes create marker
     });
     const updates = { [`events/${eventId}`]: event };
 
-    await wrapped.patchRtdbRoot(updates);
+    await wrapped.patchStateRoot(updates);
 
     assert.deepEqual(enqueued, [], JSON.stringify({ eventId, event }));
     assert.deepEqual(memory.patches, [updates]);
@@ -593,7 +595,7 @@ test("first discovery at the target is accepted but a millisecond late is skippe
   );
   const updates = { [EVENT_PATH]: scheduledEvent() };
 
-  await wrapped.patchRtdbRoot(updates);
+  await wrapped.patchStateRoot(updates);
 
   assert.deepEqual(memory.patches, [updates]);
   assert.deepEqual(enqueued, []);
@@ -606,8 +608,8 @@ test("postponement creates a distinct schedule without overwriting the earlier m
     enqueued.push(plan);
   });
 
-  await wrapped.patchRtdbRoot({ [EVENT_PATH]: scheduledEvent() });
-  await wrapped.patchRtdbRoot({
+  await wrapped.patchStateRoot({ [EVENT_PATH]: scheduledEvent() });
+  await wrapped.patchStateRoot({
     [`${EVENT_PATH}/startAtMs`]: START_AT_MS + 7_200_000,
   });
 
@@ -650,7 +652,7 @@ test("gameplay updates and existing progress markers pass through unchanged", as
     [`eventProgressOutbox/${existing.outboxId}/lastQueuedAtMs`]: NOW_MS + 1,
   };
 
-  await wrapped.patchRtdbRoot(updates);
+  await wrapped.patchStateRoot(updates);
 
   assert.deepEqual(memory.patches, [updates]);
   assert.deepEqual(memory.reads, []);

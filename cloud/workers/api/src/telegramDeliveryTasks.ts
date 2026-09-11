@@ -1,7 +1,7 @@
 import {
   normalizeTaskPayload,
   type TelegramTaskPayload,
-} from "../../../functions/telegram/taskIdentity.js";
+} from "../../../runtime/telegram/taskIdentity.js";
 
 export type InitialTelegramDelivery = {
   generation: string;

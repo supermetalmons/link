@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
   createProfileGamesProjectionCore,
-} = require("../functions/profileGamesProjectionCore");
+} = require("../runtime/profileGamesProjectionCore");
 
 const inviteId = "rating-event-invite";
 
@@ -24,7 +24,7 @@ const fixture = ({
         writes.push(...nextWrites);
       },
       getProjection: async () => null,
-      async getRtdbPath(path) {
+      async getStatePath(path) {
         if (path === `invites/${inviteId}`) {
           return {
             eventOwned: true,
@@ -34,7 +34,7 @@ const fixture = ({
           };
         }
         if (path === `automatch/${inviteId}`) return null;
-        throw new Error(`unexpected-rtdb-read:${path}`);
+        throw new Error(`unexpected-state-read:${path}`);
       },
       async hasCompletedRatingUpdate(readInviteId, matchId) {
         completionReads.push([readInviteId, matchId]);
@@ -61,7 +61,7 @@ const fixture = ({
   };
 };
 
-test("event games end from canonical rating completion without Firebase markers", async () => {
+test("event games end from canonical rating completion without legacy markers", async () => {
   const { completionReads, recompute, writes } = fixture({
     readCompletion: async () => true,
   });
@@ -72,7 +72,7 @@ test("event games end from canonical rating completion without Firebase markers"
   assert.ok(writes.every((write) => write.data.status === "ended"));
 });
 
-test("Firebase completion markers cannot end an event game", async () => {
+test("legacy completion markers cannot end an event game", async () => {
   const { recompute, writes } = fixture({
     inviteFields: { matchesRatingUpdates: { [inviteId]: true } },
   });

@@ -7,7 +7,7 @@ import {
   type LeaderboardReadType,
 } from "@mons/shared/profiles";
 import { buildUsernameLookupKey } from "@mons/shared/usernames";
-import { MAX_PROFILE_MERGE_TARGET_HOPS } from "../../../functions/profileMergeTargets.js";
+import { MAX_PROFILE_MERGE_TARGET_HOPS } from "../../../runtime/profileMergeTargets.js";
 
 export const CANONICAL_PROFILE_REDIRECT_LIMIT = 4;
 export const CANONICAL_PROFILE_INTERNAL_REDIRECT_LIMIT =

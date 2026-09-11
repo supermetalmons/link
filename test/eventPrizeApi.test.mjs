@@ -178,7 +178,7 @@ test("times out locally without cancelling the Workflow", async () => {
   );
 });
 
-test("bounds stalled Firebase token acquisition", async () => {
+test("bounds stalled session token acquisition", async () => {
   await assert.rejects(
     withdrawEventPrizeViaApi(
       eventId,

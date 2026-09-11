@@ -4,17 +4,17 @@ const assert = require("node:assert/strict");
 const { createRequire } = require("node:module");
 const test = require("node:test");
 const bs58 = require("bs58");
-const requireFunctionDependency = createRequire(
-  require.resolve("../functions/package.json"),
+const requireRuntimeDependency = createRequire(
+  require.resolve("../runtime/package.json"),
 );
 const { createSignerFromKeypair, none, publicKeyBytes, signerIdentity, some } =
-  requireFunctionDependency("@metaplex-foundation/umi");
+  requireRuntimeDependency("@metaplex-foundation/umi");
 const {
   publicKey: publicKeySerializer,
   u8,
   u64,
-} = requireFunctionDependency("@metaplex-foundation/umi/serializers");
-const { createUmi } = requireFunctionDependency(
+} = requireRuntimeDependency("@metaplex-foundation/umi/serializers");
+const { createUmi } = requireRuntimeDependency(
   "@metaplex-foundation/umi-bundle-defaults",
 );
 const {
@@ -26,7 +26,7 @@ const {
   hashMetadataCreators,
   hashMetadataData,
   mplBubblegum,
-} = requireFunctionDependency("@metaplex-foundation/mpl-bubblegum");
+} = requireRuntimeDependency("@metaplex-foundation/mpl-bubblegum");
 const {
   EVENT_PRIZE_ADMIN_WALLET,
   buildWithdrawalCompletionUpdates,
@@ -40,8 +40,8 @@ const {
   isCompletedEventPrizeWithdrawal,
   isMatchingProfileEventPrizeAssignment,
   normalizeSolanaAddress,
-} = require("../functions/eventPrizeWithdrawalState");
-const eventPrizeProjectionState = require("../functions/eventPrizeProjectionState");
+} = require("../runtime/eventPrizeWithdrawalState");
+const eventPrizeProjectionState = require("../runtime/eventPrizeProjectionState");
 const {
   acquireWithdrawalClaim,
   buildCompressedTransferBuilder,
@@ -61,10 +61,10 @@ const {
   validateCompressedPrizeAsset,
   validatePrizeAssignment,
   waitForSubmittedTransactionStatus,
-} = require("../functions/eventPrizeWithdrawal");
+} = require("../runtime/eventPrizeWithdrawal");
 const {
   resolveProfileMergeTargetPath,
-} = require("../functions/profileMergeTargets");
+} = require("../runtime/profileMergeTargets");
 
 const eventId = "NN3eRzoZo80";
 const prizeId = "1092";
@@ -72,11 +72,11 @@ const assetAddress = getEventPrizeAssetAddress(eventId, prizeId);
 const profileId = "profile";
 const recipientAddress = "11111111111111111111111111111111";
 const removeMatchingProfileEventPrizeAssignment = async ({
-  targetRef,
+  targetRecord,
   eventId: targetEventId,
   prizeId: targetPrizeId,
 }) => {
-  const result = await targetRef.transaction((assignment) =>
+  const result = await targetRecord.transaction((assignment) =>
     isMatchingProfileEventPrizeAssignment(
       assignment,
       targetEventId,
@@ -85,7 +85,7 @@ const removeMatchingProfileEventPrizeAssignment = async ({
       ? null
       : (assignment ?? null),
   );
-  return result.committed === true && result.snapshot.val() === null;
+  return result.committed === true && result.value === null;
 };
 
 const createProjectionDependencies = ({
@@ -93,28 +93,16 @@ const createProjectionDependencies = ({
   mergeTargets = {},
   transactionError = null,
 } = {}) => ({
-  admin: {
-    database: () => ({
-      ref: (path) => ({
-        transaction: async (update) => {
-          if (transactionError) {
-            throw transactionError;
-          }
-          const next = update(assignments.get(path) ?? null);
-          if (next === undefined) {
-            return {
-              committed: false,
-              snapshot: { val: () => assignments.get(path) ?? null },
-            };
-          }
-          assignments.set(path, next);
-          return {
-            committed: true,
-            snapshot: { val: () => next },
-          };
-        },
-      }),
-    }),
+  state: {
+    transaction: async (path, update) => {
+      if (transactionError) throw transactionError;
+      const next = update(assignments.get(path) ?? null);
+      if (next === undefined) {
+        return { committed: false, value: assignments.get(path) ?? null };
+      }
+      assignments.set(path, next);
+      return { committed: true, value: next };
+    },
   },
   removeMatchingProfileEventPrizeAssignment,
   resolveCanonicalProfilePath: (candidateProfileId) =>
@@ -128,7 +116,7 @@ const createProjectionDependencies = ({
 });
 
 test("re-exports the shared event-prize projection policy", () => {
-  const withdrawalState = require("../functions/eventPrizeWithdrawalState");
+  const withdrawalState = require("../runtime/eventPrizeWithdrawalState");
   for (const name of [
     "filterProjectableEventPrizeAssignments",
     "getCompletedEventPrizeProjectionCleanupRequest",
@@ -930,7 +918,7 @@ test("checks the authoritative claim after a stale local transaction read", asyn
     leaseId: "lease-current",
     leaseExpiresAtMs: Date.now() + 60_000,
   };
-  const withdrawalRef = {
+  const withdrawalRecord = {
     transaction: async (update) => {
       const optimistic = update(null);
       assert.equal(optimistic.status, "processing");
@@ -938,13 +926,13 @@ test("checks the authoritative claim after a stale local transaction read", asyn
       assert.equal(unchanged, authoritative);
       return {
         committed: true,
-        snapshot: { val: () => unchanged },
+        value: unchanged,
       };
     },
   };
   await assert.rejects(
     acquireWithdrawalClaim({
-      withdrawalRef,
+      withdrawalRecord,
       eventId,
       prizeId,
       assetAddress,
@@ -975,7 +963,7 @@ test("retries acquisition when a busy lease expires after the transaction", asyn
     leaseExpiresAtMs: Date.now() + 5,
   };
   let transactionCount = 0;
-  const withdrawalRef = {
+  const withdrawalRecord = {
     transaction: async (update) => {
       transactionCount += 1;
       const next = update(authoritative);
@@ -988,12 +976,12 @@ test("retries acquisition when a busy lease expires after the transaction", asyn
       }
       return {
         committed: true,
-        snapshot: { val: () => next },
+        value: next,
       };
     },
   };
   const claimResult = await acquireWithdrawalClaim({
-    withdrawalRef,
+    withdrawalRecord,
     eventId,
     prizeId,
     assetAddress,
@@ -1014,7 +1002,7 @@ test("persists a submission after refreshing a stale local transaction cache", a
     leaseId: "lease",
   };
   const inputs = [];
-  const withdrawalRef = {
+  const withdrawalRecord = {
     transaction: async (update) => {
       inputs.push(null);
       assert.equal(update(null), null);
@@ -1022,12 +1010,12 @@ test("persists a submission after refreshing a stale local transaction cache", a
       const submitted = update(authoritative);
       return {
         committed: true,
-        snapshot: { val: () => submitted },
+        value: submitted,
       };
     },
   };
   const persisted = await persistSubmittedTransaction({
-    withdrawalRef,
+    withdrawalRecord,
     leaseId: "lease",
     transactionSignature: "signature",
     signedTransactionBase64: "transaction",
@@ -1076,13 +1064,13 @@ test("simulates a signed transfer before persisting its submission", async () =>
     },
   };
   let current = { status: "processing", leaseId: "lease" };
-  const withdrawalRef = {
+  const withdrawalRecord = {
     transaction: async (update) => {
       calls.push("persist");
       current = update(current);
       return {
         committed: true,
-        snapshot: { val: () => current },
+        value: current,
       };
     },
   };
@@ -1090,7 +1078,7 @@ test("simulates a signed transfer before persisting its submission", async () =>
   const submitted = await buildSubmittedTransaction({
     umi,
     builder,
-    withdrawalRef,
+    withdrawalRecord,
     leaseId: "lease",
   });
 
@@ -1111,19 +1099,19 @@ test("does not persist a submission after authoritative lease ownership changes"
     status: "processing",
     leaseId: "another-lease",
   };
-  const withdrawalRef = {
+  const withdrawalRecord = {
     transaction: async (update) => {
       const unchanged = update(authoritative);
       assert.equal(unchanged, authoritative);
       return {
         committed: true,
-        snapshot: { val: () => unchanged },
+        value: unchanged,
       };
     },
   };
   await assert.rejects(
     persistSubmittedTransaction({
-      withdrawalRef,
+      withdrawalRecord,
       leaseId: "lease",
       transactionSignature: "signature",
       signedTransactionBase64: "transaction",
@@ -1140,18 +1128,18 @@ test("discards only the exact definitive submitted transaction", async () => {
     leaseId: "lease",
     transactionSignature: "signature",
   };
-  const withdrawalRef = {
+  const withdrawalRecord = {
     transaction: async (update) => {
       current = update(current);
       return {
         committed: true,
-        snapshot: { val: () => current },
+        value: current,
       };
     },
   };
 
   await discardDefinitiveSubmittedTransaction({
-    withdrawalRef,
+    withdrawalRecord,
     leaseId: "lease",
     transactionSignature: "signature",
   });
@@ -1169,7 +1157,7 @@ test("checks authoritative state before discarding a submission", async () => {
     transactionSignature: "signature",
   };
   const inputs = [];
-  const withdrawalRef = {
+  const withdrawalRecord = {
     transaction: async (update) => {
       inputs.push(null);
       assert.equal(update(null), null);
@@ -1177,13 +1165,13 @@ test("checks authoritative state before discarding a submission", async () => {
       assert.equal(update(authoritative), null);
       return {
         committed: true,
-        snapshot: { val: () => null },
+        value: null,
       };
     },
   };
 
   await discardDefinitiveSubmittedTransaction({
-    withdrawalRef,
+    withdrawalRecord,
     leaseId: "lease",
     transactionSignature: "signature",
   });
@@ -1196,20 +1184,20 @@ test("does not discard a concurrent successor submission", async () => {
     leaseId: "successor-lease",
     transactionSignature: "successor-signature",
   };
-  const withdrawalRef = {
+  const withdrawalRecord = {
     transaction: async (update) => {
       const next = update(successor);
       assert.equal(next, successor);
       return {
         committed: true,
-        snapshot: { val: () => successor },
+        value: successor,
       };
     },
   };
 
   await assert.rejects(
     discardDefinitiveSubmittedTransaction({
-      withdrawalRef,
+      withdrawalRecord,
       leaseId: "old-lease",
       transactionSignature: "old-signature",
     }),
@@ -2341,7 +2329,7 @@ test("projection cleanup failures remain retryable", async () => {
 
 test("completed merge cleanup removes only the matching target projection", async () => {
   let currentAssignment = { eventId, prizeId, profileId, place: 1 };
-  const targetRef = {
+  const targetRecord = {
     transaction: async (update) => {
       const next = update(currentAssignment);
       if (next === undefined) {
@@ -2350,13 +2338,13 @@ test("completed merge cleanup removes only the matching target projection", asyn
       currentAssignment = next;
       return {
         committed: true,
-        snapshot: { val: () => next },
+        value: next,
       };
     },
   };
   assert.equal(
     await removeMatchingProfileEventPrizeAssignment({
-      targetRef,
+      targetRecord,
       eventId,
       prizeId,
     }),
@@ -2372,7 +2360,7 @@ test("completed merge cleanup removes only the matching target projection", asyn
   };
   assert.equal(
     await removeMatchingProfileEventPrizeAssignment({
-      targetRef,
+      targetRecord,
       eventId,
       prizeId,
     }),
@@ -2389,7 +2377,7 @@ test("completed merge cleanup removes only the matching target projection", asyn
 test("removes a completed prize projection after a stale local read", async () => {
   const authoritative = { eventId, prizeId, profileId, place: 1 };
   const inputs = [];
-  const targetRef = {
+  const targetRecord = {
     transaction: async (update) => {
       inputs.push(null);
       assert.equal(update(null), null);
@@ -2397,13 +2385,13 @@ test("removes a completed prize projection after a stale local read", async () =
       const removed = update(authoritative);
       return {
         committed: true,
-        snapshot: { val: () => removed },
+        value: removed,
       };
     },
   };
   assert.equal(
     await removeMatchingProfileEventPrizeAssignment({
-      targetRef,
+      targetRecord,
       eventId,
       prizeId,
     }),

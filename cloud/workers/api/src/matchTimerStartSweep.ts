@@ -8,7 +8,7 @@ import type {
   MatchTimerStartStore,
 } from "./gameplayCoordinationD1.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
-import { isSafeFirebaseKey } from "./firebaseKeys.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import {
   parseMatchTimerRecord,
   rawMatchTimerIsTerminal,
@@ -20,7 +20,7 @@ import {
 const MATCH_TIMER_START_SWEEP_CONCURRENCY = 5;
 const MATCH_TIMER_START_INVITE_CANDIDATE_LIMIT = 17;
 
-type MatchTimerStartSweepRepository = Pick<GameplayRepository, "getRtdbPath">;
+type MatchTimerStartSweepRepository = Pick<GameplayRepository, "getStatePath">;
 
 export type MatchTimerStartSweepDependencies = {
   assertMutationAllowed: () => Promise<void>;
@@ -78,7 +78,7 @@ function opponentFromInvite(
         : null;
   return typeof opponentId === "string" &&
     opponentId !== marker.playerId &&
-    isSafeFirebaseKey(opponentId)
+    isSafeRecordKey(opponentId)
     ? opponentId
     : null;
 }
@@ -93,12 +93,14 @@ async function resolveLegacyOpponent(
   ];
   if (
     candidates.length > MATCH_TIMER_START_INVITE_CANDIDATE_LIMIT ||
-    candidates.some((candidate) => !isSafeFirebaseKey(candidate))
+    candidates.some((candidate) => !isSafeRecordKey(candidate))
   ) {
     return null;
   }
   const invites = await Promise.all(
-    candidates.map((inviteId) => repository.getRtdbPath(`invites/${inviteId}`)),
+    candidates.map((inviteId) =>
+      repository.getStatePath(`invites/${inviteId}`),
+    ),
   );
   const opponents = new Set(
     invites.flatMap((invite, index) => {
@@ -164,7 +166,7 @@ async function reconcileMarker(
 ): Promise<"deleted" | "retained" | "stale"> {
   const playerPath = `players/${marker.playerId}/matches/${marker.matchId}`;
   if (marker.opponentId === null) {
-    const playerValue = await repository.getRtdbPath(playerPath);
+    const playerValue = await repository.getStatePath(playerPath);
     if (rawMatchProvesMarkerObsolete(marker, playerValue)) {
       await assertMutationAllowed();
       return (await store.deleteIfUnchanged(marker)) ? "deleted" : "stale";
@@ -181,7 +183,7 @@ async function reconcileMarker(
       return "stale";
     }
     const activeMarker = { ...marker, opponentId };
-    const opponentValue = await repository.getRtdbPath(
+    const opponentValue = await repository.getStatePath(
       `players/${opponentId}/matches/${marker.matchId}`,
     );
     return reconcileKnownMatch(
@@ -195,8 +197,8 @@ async function reconcileMarker(
     );
   }
   const [playerValue, opponentValue] = await Promise.all([
-    repository.getRtdbPath(playerPath),
-    repository.getRtdbPath(
+    repository.getStatePath(playerPath),
+    repository.getStatePath(
       `players/${marker.opponentId}/matches/${marker.matchId}`,
     ),
   ]);
