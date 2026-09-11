@@ -6,6 +6,7 @@ import { canonicalMatchOperations } from "../src/matchStateClient.ts";
 import { readMatchStateRecord } from "../src/matchStateRouting.ts";
 import { readMatchStateRoute } from "../src/matchStateD1.ts";
 import { createGameplayRepository } from "../src/gameplayRepository.ts";
+import { getMatchStateRpc, unwrapMatchStateRpc } from "../src/matchStateRpc.ts";
 
 const db = env.PROFILE_GAMES_DB;
 const testEnv = env as Env & { TEST_D1_MIGRATIONS: D1Migration[] };
@@ -186,32 +187,172 @@ describe("strict match runtime", () => {
     expect(await admissions()).toEqual(before);
   });
 
-  it("does not create uncertain migration admissions when a DO reply is lost", async () => {
-    const before = await admissions();
-    const workerEnv = new Proxy(strictEnv(), {
-      get(target, property, receiver) {
-        if (property === "INVITE_REACTIONS")
-          return {
-            getByName: () => ({
-              submitCanonicalMove: async () => {
-                throw new Error("injected-lost-do-response");
-              },
-            }),
-          };
-        return Reflect.get(target, property, receiver);
-      },
+  for (const operation of ["move", "surrender"] as const) {
+    it(`replays a committed ${operation} after a lost DO reply without another revision`, async () => {
+      const before = await admissions();
+      const fetcher = vi
+        .spyOn(globalThis, "fetch")
+        .mockRejectedValue(new Error("unexpected-outbound-request"));
+      const request = input();
+      const source = createMatchStateSource(strictEnv());
+      await source.createMatchRecords!({
+        inviteId: request.inviteId,
+        transitionId: "create",
+        records: [
+          {
+            ...request,
+            marker: "created",
+            value: {
+              color: "white",
+              fen: "initial",
+              flatMovesString: "",
+              status: "",
+              timer: "4;12345",
+              aura: "retained",
+              extra: { retained: true },
+            },
+          },
+        ],
+      });
+      const rpc = getMatchStateRpc(env, request.inviteId);
+      const readPair = async () =>
+        unwrapMatchStateRpc(
+          await rpc.readCanonicalMatchPair({
+            ...request,
+            epoch: 2,
+            opponentId: null,
+          }),
+        );
+      const initial = await readPair();
+      let loseReply = true;
+      const loseFirstReply = async <T>(work: Promise<T>): Promise<T> => {
+        const result = await work;
+        expect(result).toMatchObject({ ok: true });
+        if (loseReply) {
+          loseReply = false;
+          throw new Error("injected-lost-do-response");
+        }
+        return result;
+      };
+      const workerEnv = new Proxy(strictEnv(), {
+        get(target, property, receiver) {
+          if (property === "INVITE_REACTIONS")
+            return {
+              getByName: () => ({
+                submitCanonicalMove: (
+                  value: Parameters<typeof rpc.submitCanonicalMove>[0],
+                ) => loseFirstReply(rpc.submitCanonicalMove(value)),
+                surrenderCanonicalMatch: (
+                  value: Parameters<typeof rpc.surrenderCanonicalMatch>[0],
+                ) => loseFirstReply(rpc.surrenderCanonicalMatch(value)),
+              }),
+            };
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      const operations = await canonicalMatchOperations(workerEnv);
+      const execute = () =>
+        operation === "move"
+          ? operations.submitCanonical({
+              ...request,
+              previousFlatMovesString: "",
+              flatMovesString: "a",
+              fen: "first",
+            })
+          : operations.surrenderCanonical(request);
+      await expect(execute()).rejects.toThrow("injected-lost-do-response");
+      const committed = await readPair();
+      expect(committed).toEqual({
+        ...initial,
+        revision: initial.revision + 1,
+        playerMatch: {
+          ...initial.playerMatch,
+          ...(operation === "move"
+            ? { fen: "first", flatMovesString: "a" }
+            : { status: "surrendered" }),
+        },
+      });
+      await expect(execute()).resolves.toEqual({
+        ok: true,
+        inviteId: request.inviteId,
+        matchId: request.matchId,
+        actorUid: request.playerId,
+        ...(operation === "move" ? { outcome: "already-applied" } : {}),
+      });
+      expect(await readPair()).toEqual(committed);
+      expect(await admissions()).toEqual(before);
+      expect(fetcher).not.toHaveBeenCalled();
     });
-    const operations = await canonicalMatchOperations(workerEnv);
-    await expect(
-      operations.submitCanonical({
-        ...input(),
-        previousFlatMovesString: "",
-        flatMovesString: "a",
-        fen: "first",
-      }),
-    ).rejects.toThrow("injected-lost-do-response");
-    expect(await admissions()).toEqual(before);
-  });
+  }
+
+  for (const control of [
+    { state: "frozen", epoch: 2, message: "match-state-writes-disabled" },
+    {
+      state: "active",
+      epoch: 3,
+      message: "match-state-durable-authority-required",
+    },
+  ]) {
+    it(`rechecks ${control.state} authority at epoch ${control.epoch} before every canonical command`, async () => {
+      const before = await admissions();
+      let changed = false;
+      const authorityDb = new Proxy(db, {
+        get(target, property, receiver) {
+          if (property === "withSession")
+            return () => ({
+              prepare: (query: string) => ({
+                first: async () => {
+                  const row = await db
+                    .withSession("first-primary")
+                    .prepare(query)
+                    .first();
+                  return changed
+                    ? { ...row, state: control.state, epoch: control.epoch }
+                    : row;
+                },
+              }),
+            });
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      const getByName = vi.fn(() => {
+        throw new Error("unexpected-do-call");
+      });
+      const workerEnv = new Proxy(
+        strictEnv({ PROFILE_GAMES_DB: authorityDb }),
+        {
+          get(target, property, receiver) {
+            if (property === "INVITE_REACTIONS") return { getByName };
+            return Reflect.get(target, property, receiver);
+          },
+        },
+      );
+      const operations = await canonicalMatchOperations(workerEnv);
+      changed = true;
+      const request = input();
+      const timerRequest = { ...request, opponentId: "strict-opponent" };
+      for (const execute of [
+        () =>
+          operations.submitCanonical({
+            ...request,
+            previousFlatMovesString: "",
+            flatMovesString: "a",
+            fen: "first",
+          }),
+        () => operations.surrenderCanonical(request),
+        () => operations.startCanonical(timerRequest),
+        () =>
+          operations.claimCanonical(timerRequest, {
+            eventOwned: true,
+            eventId: "event-one",
+          }),
+      ]) {
+        await expect(execute()).rejects.toThrow(control.message);
+      }
+      expect(getByName).not.toHaveBeenCalled();
+      expect(await admissions()).toEqual(before);
+    });
+  }
 
   it("guards route registration after creation and leaves a failed registration replayable", async () => {
     const before = await admissions();

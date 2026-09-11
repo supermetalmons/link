@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { SubmitMoveRequest } from "@mons/shared/game-sessions";
+import type {
+  SubmitMoveRequest,
+  SubmitMoveResponse,
+} from "@mons/shared/game-sessions";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import {
-  StateRepositoryFailure,
-  StateRepositoryPermissionDenied,
-} from "../src/stateRepositoryTypes.ts";
+import { StateRepositoryFailure } from "../src/stateRepositoryTypes.ts";
 import { submitMove } from "../src/matchMove.ts";
 
 const request: SubmitMoveRequest = {
@@ -18,47 +18,30 @@ const request: SubmitMoveRequest = {
   previousStates: [{ moveCount: 1, fen: "first-fen" }],
 };
 
-const claimed = {
-  status: "claimed",
-  inviteId: "invite",
-  playerId: "opponent",
-  opponentId: "actor",
-  timer: "3;1000",
-  turnNumber: 3,
-  claimedAtMs: 1200,
-  expiresAtMs: null,
-};
-
 function harness({
-  claim = claimed as unknown,
-  claimReadFailure = false,
-  current = {
-    fen: "first-fen",
-    flatMovesString: "first",
-    timer: "retained",
-    status: "",
-    custom: { retained: true },
-  } as Record<string, unknown>,
-  writeFailure = new StateRepositoryPermissionDenied() as Error,
-  onWrite = () => {},
-  signal,
+  response = {
+    ok: true,
+    inviteId: request.inviteId,
+    matchId: request.matchId,
+    actorUid: request.playerId,
+    outcome: "applied",
+  } as SubmitMoveResponse,
+  failure,
+  onRead = () => {},
 }: {
-  claim?: unknown;
-  claimReadFailure?: boolean;
-  current?: Record<string, unknown>;
-  writeFailure?: Error;
-  onWrite?: () => void;
-  signal?: AbortSignal;
+  response?: SubmitMoveResponse;
+  failure?: Error;
+  onRead?: () => void;
 } = {}) {
-  const reads: string[] = [];
-  const writes: Array<{ path: string; value: unknown }> = [];
-  const scopes: unknown[] = [];
+  const steps: string[] = [];
+  const calls: SubmitMoveRequest[] = [];
   const repository: Parameters<typeof submitMove>[2] = {
-    async readInviteMetadata(inviteId, requestSignal) {
+    async readInviteMetadata(inviteId, signal) {
       assert.equal(inviteId, "invite");
-      assert.ok(requestSignal);
-      requestSignal.throwIfAborted();
-      reads.push(`invites/${inviteId}`);
+      assert.ok(signal);
+      signal.throwIfAborted();
+      steps.push("invite");
+      onRead();
       return {
         hostId: "actor",
         guestId: "opponent",
@@ -66,156 +49,121 @@ function harness({
         guestRematches: "1",
       };
     },
-    async getStatePath(path, query, requestSignal) {
-      reads.push(path);
-      assert.equal(query, undefined);
-      assert.ok(requestSignal);
-      requestSignal.throwIfAborted();
-      assert.equal(path, "matchTimerClaims/invite1");
-      if (claimReadFailure) throw new StateRepositoryFailure();
-      return structuredClone(claim);
-    },
     async readProfileOwnershipSnapshot() {
       throw new Error("unexpected-ownership-read");
     },
   };
   return {
-    reads,
-    writes,
-    scopes,
-    run: (body = request) =>
+    steps,
+    calls,
+    run: ({
+      body = request,
+      signal,
+      assertMutationAllowed = async () => {
+        steps.push("admission");
+      },
+    }: {
+      body?: SubmitMoveRequest;
+      signal?: AbortSignal;
+      assertMutationAllowed?: () => Promise<void>;
+    } = {}) =>
       submitMove({ uid: "actor" }, body, repository, {
         signal,
-        createMatchClient(scope) {
-          scopes.push(scope);
-          return {
-            async transactPath(path, updater, requestSignal, beforeWrite) {
-              assert.equal(path, "players/actor/matches/invite1");
-              requestSignal?.throwIfAborted();
-              const snapshot = structuredClone(current);
-              const decision = updater(snapshot) as {
-                commit?: false;
-                value?: unknown;
-                decision?: string;
-              };
-              if (decision.commit === false)
-                return {
-                  committed: false,
-                  value: snapshot,
-                  decision: decision.decision,
-                };
-              await beforeWrite?.({
-                current: snapshot,
-                proposed: decision.value,
-                etag: '"source"',
-              });
-              writes.push({ path, value: decision.value });
-              onWrite();
-              throw writeFailure;
-            },
-          };
+        assertMutationAllowed,
+        async submitCanonical(input) {
+          steps.push("canonical");
+          calls.push(input);
+          if (failure) throw failure;
+          return response;
         },
       }),
   };
 }
 
-const failsWith = (message: string) => (error: unknown) => {
-  assert.ok(error instanceof AuthApiFailure);
-  assert.equal(error.status, 409);
-  assert.equal(error.code, "failed-precondition");
-  assert.equal(error.message, message);
-  return true;
-};
+test("move delegates each outcome to the canonical match operation", async () => {
+  for (const response of [
+    {
+      ok: true,
+      inviteId: request.inviteId,
+      matchId: request.matchId,
+      actorUid: request.playerId,
+      outcome: "applied",
+    },
+    {
+      ok: true,
+      inviteId: request.inviteId,
+      matchId: request.matchId,
+      actorUid: request.playerId,
+      outcome: "already-applied",
+    },
+    {
+      ok: true,
+      inviteId: request.inviteId,
+      matchId: request.matchId,
+      actorUid: request.playerId,
+      outcome: "superseded",
+      fen: "third-fen",
+      flatMovesString: "first-second-third",
+    },
+  ] satisfies SubmitMoveResponse[]) {
+    const h = harness({ response });
+    assert.equal(await h.run(), response);
+    assert.deepEqual(h.steps, ["invite", "admission", "canonical"]);
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0], request);
+  }
+});
 
-test("a rejected move identifies committed timer claims for either participant", async () => {
-  for (const claim of [
-    claimed,
-    { ...claimed, playerId: "actor", opponentId: "opponent" },
-    { ...claimed, timer: "gg", expiresAtMs: undefined },
+test("move preserves canonical timer outcomes and infrastructure uncertainty", async () => {
+  for (const failure of [
+    new AuthApiFailure(409, "failed-precondition", "match-move-finished"),
+    new AuthApiFailure(409, "failed-precondition", "match-move-blocked"),
+    new AuthApiFailure(409, "aborted", "move-chain-conflict"),
+    new StateRepositoryFailure(),
   ]) {
-    const h = harness({ claim });
-    await assert.rejects(h.run(), failsWith("match-move-finished"));
-    assert.deepEqual(h.reads, ["invites/invite", "matchTimerClaims/invite1"]);
-    assert.deepEqual(h.scopes, [{ playerId: "actor", matchId: "invite1" }]);
-    assert.deepEqual(h.writes, [
-      {
-        path: "players/actor/matches/invite1",
-        value: {
-          fen: "second-fen",
-          flatMovesString: "first-second",
-          timer: "retained",
-          status: "",
-          custom: { retained: true },
-        },
-      },
-    ]);
+    const h = harness({ failure });
+    await assert.rejects(h.run(), (error) => error === failure);
+    assert.deepEqual(h.steps, ["invite", "admission", "canonical"]);
+    assert.equal(h.calls.length, 1);
   }
 });
 
-test("pending, expired, missing and malformed claim evidence remains retryable", async () => {
-  for (const claim of [
-    null,
-    { ...claimed, status: "pending", expiresAtMs: Date.now() + 30_000 },
-    { ...claimed, status: "pending", expiresAtMs: Date.now() - 30_000 },
-    { status: "claimed" },
-    { ...claimed, inviteId: "another-invite" },
-    { ...claimed, playerId: "unrelated" },
-    { ...claimed, claimedAtMs: undefined },
-    { ...claimed, claimedAtMs: "1200" },
-    { ...claimed, expiresAtMs: 1500 },
-    { ...claimed, timer: "malformed" },
-    { ...claimed, turnNumber: 4 },
-    { ...claimed, turnNumber: 3.5 },
-    [],
-  ]) {
-    const h = harness({ claim });
-    await assert.rejects(h.run(), failsWith("match-move-blocked"));
-    assert.deepEqual(h.reads, ["invites/invite", "matchTimerClaims/invite1"]);
-    assert.equal(h.writes.length, 1);
-  }
-});
-
-test("failed or aborted claim reads never classify an uncertain rejection as terminal", async () => {
-  const unavailable = harness({ claimReadFailure: true });
-  await assert.rejects(unavailable.run(), failsWith("match-move-blocked"));
-  const controller = new AbortController();
-  const aborted = harness({
-    signal: controller.signal,
-    onWrite: () => controller.abort(),
-  });
-  await assert.rejects(aborted.run(), failsWith("match-move-blocked"));
-  assert.deepEqual(aborted.reads, [
-    "invites/invite",
-    "matchTimerClaims/invite1",
-  ]);
-});
-
-test("already-applied and superseded requests stay successful without consulting a committed timer claim", async () => {
-  for (const [current, outcome] of [
-    [{ fen: "second-fen", flatMovesString: "first-second" }, "already-applied"],
-    [{ fen: "third-fen", flatMovesString: "first-second-third" }, "superseded"],
-  ] as const) {
-    const h = harness({ current });
-    assert.equal((await h.run()).outcome, outcome);
-    assert.deepEqual(h.reads, ["invites/invite"]);
-    assert.deepEqual(h.writes, []);
-  }
-});
-
-test("upstream uncertainty and history conflicts do not read timer claims or change error semantics", async () => {
-  const failure = new StateRepositoryFailure();
-  const unavailable = harness({ writeFailure: failure });
-  await assert.rejects(unavailable.run(), (error) => error === failure);
-  assert.deepEqual(unavailable.reads, ["invites/invite"]);
-  const conflict = harness({
-    current: { fen: "different", flatMovesString: "first-other" },
-  });
+test("invalid move requests and unauthorized participants never dispatch", async () => {
+  const invalid = harness();
   await assert.rejects(
-    conflict.run(),
-    (error) =>
-      error instanceof AuthApiFailure &&
-      error.message === "move-chain-conflict",
+    invalid.run({ body: { ...request, fen: "" } }),
+    (error) => error instanceof AuthApiFailure && error.status === 400,
   );
-  assert.deepEqual(conflict.reads, ["invites/invite"]);
-  assert.deepEqual(conflict.writes, []);
+  assert.deepEqual(invalid.steps, []);
+  const unrelated = harness();
+  await assert.rejects(
+    unrelated.run({ body: { ...request, playerId: "outsider" } }),
+    (error) => error instanceof AuthApiFailure && error.status === 403,
+  );
+  assert.deepEqual(unrelated.steps, ["invite"]);
+  assert.deepEqual(unrelated.calls, []);
+});
+
+test("move observes cancellation before admission and preserves admission failures", async () => {
+  const reason = new Error("request-cancelled");
+  const controller = new AbortController();
+  const cancelled = harness({ onRead: () => controller.abort(reason) });
+  await assert.rejects(
+    cancelled.run({ signal: controller.signal }),
+    (error) => error === reason,
+  );
+  assert.deepEqual(cancelled.steps, ["invite"]);
+  assert.deepEqual(cancelled.calls, []);
+  const blocked = harness();
+  const failure = new Error("writes-frozen");
+  await assert.rejects(
+    blocked.run({
+      assertMutationAllowed: async () => {
+        throw failure;
+      },
+    }),
+    (error) => error === failure,
+  );
+  assert.deepEqual(blocked.steps, ["invite"]);
+  assert.deepEqual(blocked.calls, []);
 });

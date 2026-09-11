@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { MATCH_TIMER_TERMINAL, formatMatchTimer } from "@mons/shared/timers";
 import { normalizeMatchSnapshot } from "@mons/shared/game-sessions";
 import type { InviteReactions } from "../src/inviteReactions.ts";
@@ -368,6 +368,62 @@ describe("canonical match state storage", () => {
     });
   });
 
+  it("concurrent timer starts keep the first deadline and change the match once", async () => {
+    const { room, input, records } = fixture();
+    await runInDurableObject(room, async (_instance, ctx) => {
+      const markerStore = timers();
+      let now = future;
+      let calls = 0;
+      let releaseFirst!: () => void;
+      let markFirstReady!: () => void;
+      const firstPending = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const firstReady = new Promise<void>((resolve) => {
+        markFirstReady = resolve;
+      });
+      const store = new MatchStateStore(
+        ctx.storage,
+        options({
+          now: () => now,
+          timerStarts: {
+            ...markerStore,
+            async getOrAdvance(...args) {
+              const first = ++calls === 1;
+              const marker = await markerStore.getOrAdvance(...args);
+              if (first) {
+                now += 5_000;
+                markFirstReady();
+                await firstPending;
+              } else {
+                releaseFirst();
+              }
+              return marker;
+            },
+          },
+        }),
+      );
+      store.createRecords({ ...input, records });
+      const before = store.readPair(input);
+      const pending = store.startTimer(input);
+      await firstReady;
+      const [first, second] = await Promise.all([
+        pending,
+        store.startTimer(input),
+      ]);
+      expect(first).toEqual(second);
+      expect(first.timer).toBe(
+        formatMatchTimer(game.turnNumber, future + 90_500),
+      );
+      expect(calls).toBe(2);
+      expect(store.readPair(input)).toEqual({
+        ...before,
+        revision: before.revision + 1,
+        playerMatch: { ...before.playerMatch, timer: first.timer },
+      });
+    });
+  });
+
   it("cleans terminal markers before trying to parse a malformed peer", async () => {
     const { room, input, records } = fixture();
     await runInDurableObject(room, async (_instance, ctx) => {
@@ -474,6 +530,139 @@ describe("canonical match state storage", () => {
       expect(await ctx.storage.getAlarm()).toBe(originalAlarm);
     });
   });
+
+  it("retries failed marker cleanup on terminal replay without changing the claim or effect", async () => {
+    const { room, input, records } = fixture();
+    await runInDurableObject(room, async (_instance, ctx) => {
+      const markerStore = timers();
+      let cleanupAttempts = 0;
+      const store = new MatchStateStore(
+        ctx.storage,
+        options({
+          timerStarts: {
+            ...markerStore,
+            async deletePair(...args) {
+              cleanupAttempts++;
+              expect(args).toEqual([
+                input.playerId,
+                input.opponentId,
+                input.matchId,
+              ]);
+              if (cleanupAttempts === 1)
+                throw new Error("marker-cleanup-failed");
+              await markerStore.deletePair(...args);
+            },
+          },
+        }),
+      );
+      const timer = formatMatchTimer(game.turnNumber, future - 1);
+      records[0].value.timer = timer;
+      for (const [playerId, opponentId] of [
+        [input.playerId, input.opponentId],
+        [input.opponentId, input.playerId],
+      ]) {
+        await markerStore.getOrAdvance(
+          playerId,
+          opponentId,
+          input.matchId,
+          { timer, turnNumber: game.turnNumber },
+          future - 1,
+        );
+      }
+      store.createRecords({ ...input, records });
+      const request = { ...input, eventId: "event-one" };
+      expect(await store.claimTimer(request)).toEqual({ ok: true });
+      const committed = store.readPair(input);
+      const effects = store.listDueEffects();
+      const alarm = await ctx.storage.getAlarm();
+      expect(committed.playerMatch?.timer).toBe(MATCH_TIMER_TERMINAL);
+
+      await expect(store.claimTimer(request)).rejects.toThrow(
+        "marker-cleanup-failed",
+      );
+      expect(store.readPair(input)).toEqual(committed);
+      expect(store.listDueEffects()).toEqual(effects);
+      expect(await store.claimTimer(request)).toEqual({ ok: true });
+      expect(cleanupAttempts).toBe(2);
+      expect(store.readPair(input)).toEqual(committed);
+      expect(store.listDueEffects()).toEqual(effects);
+      expect(await ctx.storage.getAlarm()).toBe(alarm);
+      for (const [playerId, opponentId] of [
+        [input.playerId, input.opponentId],
+        [input.opponentId, input.playerId],
+      ]) {
+        expect(
+          await markerStore.getOrAdvance(
+            playerId,
+            opponentId,
+            input.matchId,
+            {
+              timer: formatMatchTimer(game.turnNumber, future + 100),
+              turnNumber: game.turnNumber,
+            },
+            future,
+          ),
+        ).toMatchObject({
+          timer: formatMatchTimer(game.turnNumber, future + 100),
+        });
+      }
+    });
+  });
+
+  for (const [condition, resolvedGame] of [
+    ["the caller's own turn", { ...game, activeColor: "white" }],
+    ["an engine-declared winner", { ...game, winner: "white" }],
+  ] as const) {
+    for (const operation of ["startTimer", "claimTimer"] as const) {
+      it(`rejects ${operation} with ${condition} without changing canonical state`, async () => {
+        const { room, input, records } = fixture();
+        await runInDurableObject(room, async (_instance, ctx) => {
+          const markerStore = timers();
+          const getOrAdvance = vi.fn(markerStore.getOrAdvance);
+          const deletePair = vi.fn(markerStore.deletePair);
+          const store = new MatchStateStore(
+            ctx.storage,
+            options({
+              resolveGame: () => resolvedGame,
+              timerStarts: { getOrAdvance, deletePair },
+            }),
+          );
+          records[0].value.timer = formatMatchTimer(
+            game.turnNumber,
+            future - 1,
+          );
+          store.createRecords({ ...input, records });
+          const before = store.readPair(input);
+          const alarm = future + 60_000;
+          await ctx.storage.setAlarm(alarm);
+
+          await expect(store[operation](input)).rejects.toMatchObject({
+            status: 409,
+            code: "failed-precondition",
+            message: resolvedGame.winner
+              ? "game is already over."
+              : operation === "startTimer"
+                ? "can't start a timer on your own turn."
+                : "can't claim timer victory on your own turn.",
+          });
+          expect(store.readPair(input)).toEqual(before);
+          expect(getOrAdvance).not.toHaveBeenCalled();
+          if (operation === "startTimer" && resolvedGame.winner) {
+            expect(deletePair).toHaveBeenCalledExactlyOnceWith(
+              input.playerId,
+              input.opponentId,
+              input.matchId,
+            );
+          } else {
+            expect(deletePair).not.toHaveBeenCalled();
+          }
+          expect(store.nextEffectAt()).toBeNull();
+          expect(store.listDueEffects()).toEqual([]);
+          expect(await ctx.storage.getAlarm()).toBe(alarm);
+        });
+      });
+    }
+  }
 
   it("preserves earlier alarms and rejects early, stale-turn, and invalid-history claims", async () => {
     const { room, input, records } = fixture();

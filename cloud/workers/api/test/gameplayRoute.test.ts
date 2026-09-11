@@ -12,18 +12,7 @@ import {
   type SubmitMoveRequest,
 } from "@mons/shared/game-sessions";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import {
-  StateRepositoryFailure,
-  StateRepositoryPermissionDenied,
-  type StateRepository,
-} from "../src/stateRepositoryTypes.ts";
 import { GameSessionMutationLockFailure } from "../src/gameplayCoordinationD1.ts";
-import { submitMove } from "../src/matchMove.ts";
-import { surrenderMatch } from "../src/matchSurrender.ts";
-import {
-  startMatchTimer,
-  claimMatchVictoryByTimer,
-} from "../src/matchTimer.ts";
 import {
   cancelAutomatch as cancelAutomatchImpl,
   handleGameplayRoute as handleGameplayRouteImpl,
@@ -102,66 +91,8 @@ function handleGameplayRoute(
     (dependencies.repository
       ? coordinationFor(dependencies.repository)
       : createMemoryGameplayCoordinationStores());
-  const actor = () =>
-    dependencies.verifyIdentity
-      ? dependencies.verifyIdentity(request, env, ctx)
-      : Promise.resolve(identity);
-  const source = dependencies.repository;
-  const move =
-    source &&
-    dependencies.move?.createMatchClient &&
-    !dependencies.move.submitCanonical
-      ? {
-          ...dependencies.move,
-          submitCanonical: async (input: SubmitMoveRequest) =>
-            submitMove(await actor(), input, source, {
-              ...dependencies.move,
-              assertMutationAllowed: dependencies.assertMutationAllowed,
-            }),
-        }
-      : dependencies.move;
-  const surrender =
-    source &&
-    dependencies.surrender?.createMatchClient &&
-    !dependencies.surrender.surrenderCanonical
-      ? {
-          ...dependencies.surrender,
-          surrenderCanonical: async (
-            input: Parameters<typeof surrenderMatch>[1],
-          ) =>
-            surrenderMatch(await actor(), input, source, {
-              ...dependencies.surrender,
-              assertMutationAllowed: dependencies.assertMutationAllowed,
-            }),
-        }
-      : dependencies.surrender;
-  const timer =
-    source && dependencies.timer?.resolveGame
-      ? {
-          ...dependencies.timer,
-          startCanonical: async (
-            input: Parameters<typeof startMatchTimer>[1],
-          ) =>
-            startMatchTimer(await actor(), input, source, {
-              ...dependencies.timer,
-              timerStarts: coordination.timerStarts,
-              assertMutationAllowed: dependencies.assertMutationAllowed,
-            }),
-          claimCanonical: async (
-            input: Parameters<typeof claimMatchVictoryByTimer>[1],
-          ) =>
-            claimMatchVictoryByTimer(await actor(), input, source, {
-              ...dependencies.timer,
-              timerStarts: coordination.timerStarts,
-              assertMutationAllowed: dependencies.assertMutationAllowed,
-            }),
-        }
-      : dependencies.timer;
   return handleGameplayRouteImpl(request, env, ctx, {
     ...dependencies,
-    move,
-    surrender,
-    timer,
     coordination,
     wagerReservations:
       dependencies.wagerReservations ||
@@ -1715,67 +1646,43 @@ test("routes exact authenticated rating updates without a new rate limit", async
   assert.equal(oversizedOperation.status, 400);
 });
 
-test("routes match timer starts with rate limiting and idempotent storage", async () => {
+test("routes match timer starts through the canonical command with rate limiting", async () => {
   let rateLimitKey = "";
-  const timerEnv = {
-    ...env,
-    AUTH_RATE_LIMITER: {
-      limit: async ({ key }: RateLimitOptions) => {
-        rateLimitKey = key;
-        return { success: true };
-      },
-    },
-  } as Env;
+  const body = {
+    playerId: identity.uid,
+    opponentId: "opponent-uid",
+    matchId: "match-1",
+    inviteId: "match-1",
+  };
   const paths: string[] = [];
-  const timerRepository = repository({
-    readState: async (path) => {
-      paths.push(path);
-      if (path === "invites/match-1") {
-        return { hostId: identity.uid, guestId: "opponent-uid" };
-      }
-      if (path.startsWith(`players/${identity.uid}/`)) {
-        return {
-          color: "black",
-          fen: "player-fen",
-          flatMovesString: "",
-          status: "",
-          timer: "4;12345",
-        };
-      }
-      return {
-        color: "white",
-        fen: "opponent-fen",
-        flatMovesString: "",
-        status: "",
-        timer: "",
-      };
-    },
-    transactState: async (path, updater) => {
-      paths.push(path);
-      return applyTransaction(updater, "4;12345");
-    },
-  });
+  const calls: unknown[] = [];
   const response = await handleGameplayRoute(
-    request("/matches/timer/start", {
-      body: {
-        playerId: identity.uid,
-        opponentId: "opponent-uid",
-        matchId: "match-1",
-        inviteId: "match-1",
+    request("/matches/timer/start", { body }),
+    {
+      ...env,
+      AUTH_RATE_LIMITER: {
+        limit: async ({ key }: RateLimitOptions) => {
+          rateLimitKey = key;
+          return { success: true };
+        },
       },
-    }),
-    timerEnv,
+    } as Env,
     context(),
     {
-      repository: timerRepository,
+      repository: repository({
+        readState: async (path) => {
+          paths.push(path);
+          assert.equal(path, "invites/match-1");
+          return { hostId: identity.uid, guestId: "opponent-uid" };
+        },
+        transactState: async () => assert.fail("unexpected-state-transaction"),
+        patchStateRoot: async () => assert.fail("unexpected-state-write"),
+      }),
       timer: {
-        now: () => 1_000,
-        resolveGame: () => ({
-          activeColor: "white",
-          historyValid: true,
-          turnNumber: 4,
-          winner: undefined,
-        }),
+        startCanonical: async (input) => {
+          calls.push(input);
+          return { ok: true, timer: "4;12345", duration: 90_000 };
+        },
       },
       verifyIdentity: async () => identity,
     },
@@ -1787,90 +1694,28 @@ test("routes match timer starts with rate limiting and idempotent storage", asyn
     duration: 90_000,
   });
   assert.equal(rateLimitKey, `timer:${identity.uid}`);
-  assert.deepEqual(paths, [
-    "invites/match-1",
-    `players/${identity.uid}/matches/match-1`,
-    "players/opponent-uid/matches/match-1",
-    "invites/match-1",
-    `players/${identity.uid}/matches/match-1`,
-    "players/opponent-uid/matches/match-1",
-    "invites/match-1",
-    `players/${identity.uid}/matches/match-1/timer`,
-  ]);
-  assert.deepEqual(
-    coordinationFor(timerRepository).timerRows.get(`${identity.uid}/match-1`),
-    { timer: "4;12345", turnNumber: 4, updatedAtMs: 1_000 },
-  );
+  assert.deepEqual(paths, ["invites/match-1"]);
+  assert.deepEqual(calls, [body]);
 });
 
-test("routes timer victory claims with a separate limit and terminal update", async () => {
+test("routes canonical timer claims with their invite, separate limit and retained promise", async () => {
   let rateLimitKey = "";
-  const patches: Array<Record<string, unknown>> = [];
   const retainedClaims: Promise<unknown>[] = [];
-  const timerRepository = repository({
-    readState: async (path) => {
-      assert.doesNotMatch(path, /^matchTimerStarts\//);
-      if (path === "invites/match-1") {
-        return { hostId: identity.uid, guestId: "opponent-uid" };
-      }
-      if (path.startsWith(`players/${identity.uid}/`)) {
-        return {
-          color: "black",
-          fen: "player-fen",
-          flatMovesString: "",
-          status: "",
-          timer: "4;1000",
-        };
-      }
-      return {
-        color: "white",
-        fen: "opponent-fen",
-        flatMovesString: "",
-        status: "",
-        timer: "",
-      };
-    },
-    patchStateRoot: async (updates) => {
-      assert.equal(retainedClaims.length, 1);
-      assert.equal(
-        Object.keys(updates).some((path) =>
-          path.startsWith("matchTimerStarts/"),
-        ),
-        false,
-      );
-      patches.push(updates);
-    },
-    transactState: async (path, updater) => {
-      assert.doesNotMatch(path, /^matchTimerStarts\//);
-      return applyTransaction(updater, {
-        color: "black",
-        fen: "player-fen",
-        flatMovesString: "",
-        status: "",
-        timer: "4;1000",
-      });
-    },
-  });
-  const coordination = coordinationFor(timerRepository);
-  coordination.timerRows.set(`${identity.uid}/match-1`, {
-    timer: "4;1000",
-    turnNumber: 4,
-    updatedAtMs: 900,
-  });
-  coordination.timerRows.set("opponent-uid/match-1", {
-    timer: "4;1000",
-    turnNumber: 4,
-    updatedAtMs: 900,
-  });
+  const body = {
+    playerId: identity.uid,
+    opponentId: "opponent-uid",
+    matchId: "match-1",
+    inviteId: "match-1",
+  };
+  const invite = {
+    hostId: identity.uid,
+    guestId: "opponent-uid",
+    eventOwned: true,
+    eventId: "event-1",
+  };
+  const calls: unknown[] = [];
   const response = await handleGameplayRoute(
-    request("/matches/timer/claim", {
-      body: {
-        playerId: identity.uid,
-        opponentId: "opponent-uid",
-        matchId: "match-1",
-        inviteId: "match-1",
-      },
-    }),
+    request("/matches/timer/claim", { body }),
     {
       ...env,
       AUTH_RATE_LIMITER: {
@@ -1882,15 +1727,20 @@ test("routes timer victory claims with a separate limit and terminal update", as
     } as Env,
     context(retainedClaims),
     {
-      repository: timerRepository,
+      repository: repository({
+        readState: async (path) => {
+          assert.equal(path, "invites/match-1");
+          return invite;
+        },
+        transactState: async () => assert.fail("unexpected-state-transaction"),
+        patchStateRoot: async () => assert.fail("unexpected-state-write"),
+      }),
       timer: {
-        now: () => 1_001,
-        resolveGame: () => ({
-          activeColor: "white",
-          historyValid: true,
-          turnNumber: 4,
-          winner: undefined,
-        }),
+        claimCanonical: async (input, inviteValue) => {
+          assert.equal(retainedClaims.length, 1);
+          calls.push({ input, inviteValue });
+          return { ok: true };
+        },
       },
       verifyIdentity: async () => identity,
     },
@@ -1899,22 +1749,7 @@ test("routes timer victory claims with a separate limit and terminal update", as
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { ok: true });
   assert.equal(rateLimitKey, `timer-claim:${identity.uid}`);
-  assert.deepEqual(patches, [
-    {
-      [`players/${identity.uid}/matches/match-1/timer`]: "gg",
-      "matchTimerClaims/match-1": {
-        status: "claimed",
-        playerId: identity.uid,
-        opponentId: "opponent-uid",
-        inviteId: "match-1",
-        timer: "4;1000",
-        turnNumber: 4,
-        claimedAtMs: 1_001,
-        expiresAtMs: null,
-      },
-    },
-  ]);
-  assert.equal(coordination.timerRows.size, 0);
+  assert.deepEqual(calls, [{ input: body, inviteValue: invite }]);
 });
 
 test("rejects rate-limited timer claims before repository access", async () => {
@@ -1952,7 +1787,7 @@ test("rejects rate-limited timer claims before repository access", async () => {
   assert.equal(reads, 0);
 });
 
-test("sanitizes timer claim repository failures", async () => {
+test("sanitizes canonical timer claim failures", async () => {
   const failures: string[] = [];
   const response = await handleGameplayRoute(
     request("/matches/timer/claim", {
@@ -1969,45 +1804,14 @@ test("sanitizes timer claim repository failures", async () => {
       logFailure: (kind) => failures.push(kind),
       repository: repository({
         readState: async (path) => {
-          if (path === "invites/match-1") {
-            return { hostId: identity.uid, guestId: "opponent-uid" };
-          }
-          return path.includes(identity.uid)
-            ? {
-                color: "black",
-                fen: "player-fen",
-                flatMovesString: "",
-                status: "",
-                timer: "4;1000",
-              }
-            : {
-                color: "white",
-                fen: "opponent-fen",
-                flatMovesString: "",
-                status: "",
-                timer: "",
-              };
+          assert.equal(path, "invites/match-1");
+          return { hostId: identity.uid, guestId: "opponent-uid" };
         },
-        patchStateRoot: async () => {
-          throw new Error("private-state-detail");
-        },
-        transactState: async (_path, updater) =>
-          applyTransaction(updater, {
-            color: "black",
-            fen: "player-fen",
-            flatMovesString: "",
-            status: "",
-            timer: "4;1000",
-          }),
       }),
       timer: {
-        now: () => 1_001,
-        resolveGame: () => ({
-          activeColor: "white",
-          historyValid: true,
-          turnNumber: 4,
-          winner: undefined,
-        }),
+        claimCanonical: async () => {
+          throw new Error("private-state-detail");
+        },
       },
       verifyIdentity: async () => identity,
     },
@@ -2706,68 +2510,48 @@ test("fails closed when navigation profile ownership is unavailable", async () =
   assert.equal(reads, 0);
 });
 
+function matchRouteRepository(
+  inviteValue: unknown,
+  ownerByUid: Readonly<Record<string, string | null>>,
+) {
+  return repository({
+    readState: async (path) => {
+      assert.equal(path, "invites/invite");
+      return inviteValue;
+    },
+    readProfileOwnershipSnapshot: async (query) =>
+      ownershipSnapshot(query, { ownerByUid }),
+    transactState: async () => assert.fail("unexpected-state-transaction"),
+    patchStateRoot: async () => assert.fail("unexpected-state-write"),
+  });
+}
+
+type MatchRouteFixtureOptions = {
+  loginUid?: string;
+  playerId?: string;
+  inviteValue?: unknown;
+  ownerByUid?: Readonly<Record<string, string | null>>;
+};
+
 function surrenderFixture({
   loginUid = identity.uid,
   playerId = identity.uid,
   inviteValue = { hostId: identity.uid, guestId: "guest" },
-  matchValue = {
-    fen: "fen",
-    flatMovesString: "moves",
-    status: "",
-    timer: "4;12345",
-    emojiId: 1,
-    aura: "seed",
-    sessionCreation: { operationId: "created" },
-    extra: { retained: true },
-  },
   ownerByUid = {},
-}: {
-  loginUid?: string;
-  playerId?: string;
-  inviteValue?: unknown;
-  matchValue?: unknown;
-  ownerByUid?: Readonly<Record<string, string | null>>;
-} = {}) {
-  const stats = { writes: 0, scopedClients: 0 };
+}: MatchRouteFixtureOptions = {}) {
   const body = { inviteId: "invite", matchId: "invite", playerId };
-  const client: Pick<StateRepository, "transactPath"> = {
-    async transactPath(path, updater, signal, beforeWrite) {
-      assert.equal(path, `players/${playerId}/matches/${body.matchId}`);
-      signal?.throwIfAborted();
-      const current = structuredClone(matchValue);
-      const result = applyTransaction(updater, current);
-      if (result.committed) {
-        await beforeWrite?.({
-          current,
-          proposed: result.value,
-          etag: '"etag"',
-        });
-        matchValue = result.value;
-        stats.writes++;
-      }
-      return result;
-    },
-  };
+  const calls: unknown[] = [];
   const dependencies: Parameters<typeof handleGameplayRoute>[3] = {
-    repository: repository({
-      readState: async (path) => {
-        assert.equal(path, "invites/invite");
-        return inviteValue;
-      },
-      readProfileOwnershipSnapshot: async (query) =>
-        ownershipSnapshot(query, { ownerByUid }),
-      transactState: async () => {
-        throw new Error("unrestricted-write");
-      },
-      patchStateRoot: async () => {
-        throw new Error("unrestricted-write");
-      },
-    }),
+    repository: matchRouteRepository(inviteValue, ownerByUid),
     surrender: {
-      createMatchClient: (scope) => {
-        assert.deepEqual(scope, { playerId, matchId: body.matchId });
-        stats.scopedClients++;
-        return client;
+      surrenderCanonical: async (input) => {
+        calls.push(input);
+        return {
+          ok: true,
+          inviteId: input.inviteId,
+          matchId: input.matchId,
+          actorUid: input.playerId,
+        };
       },
     },
     verifyIdentity: async () => ({ uid: loginUid }),
@@ -2775,10 +2559,8 @@ function surrenderFixture({
   };
   return {
     body,
-    client,
+    calls,
     dependencies,
-    stats,
-    getMatch: () => matchValue,
     call: (currentEnv = env) =>
       handleGameplayRoute(
         request("/matches/surrender", { body }),
@@ -2789,11 +2571,10 @@ function surrenderFixture({
   };
 }
 
-test("surrender changes only status through the scoped client and replays without writing", async () => {
+test("surrender dispatches the authenticated request with the game-session limit", async () => {
   const h = surrenderFixture();
-  const before = structuredClone(h.getMatch());
   let rateLimitKey = "";
-  const currentEnv = {
+  const response = await h.call({
     ...env,
     AUTH_RATE_LIMITER: {
       limit: async ({ key }: { key: string }) => {
@@ -2801,26 +2582,19 @@ test("surrender changes only status through the scoped client and replays withou
         return { success: true };
       },
     },
-  };
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const response = await h.call(currentEnv);
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), {
-      ok: true,
-      inviteId: "invite",
-      matchId: "invite",
-      actorUid: identity.uid,
-    });
-  }
-  assert.deepEqual(h.getMatch(), {
-    ...(before as Record<string, unknown>),
-    status: "surrendered",
   });
-  assert.equal(h.stats.writes, 1);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    inviteId: "invite",
+    matchId: "invite",
+    actorUid: identity.uid,
+  });
+  assert.deepEqual(h.calls, [h.body]);
   assert.equal(rateLimitKey, `game-session:${identity.uid}`);
 });
 
-test("surrender authorizes guest and canonical linked logins without Firebase profile shadows", async () => {
+test("surrender authorizes guests and linked logins before canonical dispatch", async () => {
   for (const playerId of [identity.uid, "guest"]) {
     const h = surrenderFixture({
       loginUid: "alternate",
@@ -2828,13 +2602,14 @@ test("surrender authorizes guest and canonical linked logins without Firebase pr
       ownerByUid: { alternate: "owner", [playerId]: "owner" },
     });
     assert.equal((await h.call()).status, 200);
-    assert.equal(h.stats.writes, 1);
+    assert.deepEqual(h.calls, [h.body]);
   }
   const guest = surrenderFixture({ loginUid: "guest", playerId: "guest" });
   assert.equal((await guest.call()).status, 200);
+  assert.deepEqual(guest.calls, [guest.body]);
 });
 
-test("surrender rejects unauthorized, missing and unrelated match requests before scoped writes", async () => {
+test("surrender rejects unauthorized players and invalid invites or rematches before dispatch", async () => {
   for (const [h, status] of [
     [surrenderFixture({ loginUid: "spectator" }), 403],
     [
@@ -2847,15 +2622,14 @@ test("surrender rejects unauthorized, missing and unrelated match requests befor
     [surrenderFixture({ playerId: "unrelated" }), 403],
     [surrenderFixture({ inviteValue: null }), 404],
     [surrenderFixture({ inviteValue: [] }), 409],
-    [surrenderFixture({ matchValue: null }), 404],
   ] as const) {
     assert.equal((await h.call()).status, status);
-    assert.equal(h.stats.writes, 0);
+    assert.deepEqual(h.calls, []);
   }
   const missingRematch = surrenderFixture();
   missingRematch.body.matchId = "invite2";
   assert.equal((await missingRematch.call()).status, 404);
-  assert.equal(missingRematch.stats.scopedClients, 0);
+  assert.deepEqual(missingRematch.calls, []);
   const knownRematch = surrenderFixture({
     inviteValue: {
       hostId: identity.uid,
@@ -2866,35 +2640,42 @@ test("surrender rejects unauthorized, missing and unrelated match requests befor
   });
   knownRematch.body.matchId = "invite2";
   assert.equal((await knownRematch.call()).status, 200);
+  assert.deepEqual(knownRematch.calls, [knownRematch.body]);
 });
 
-test("surrender maps rule rejection to a conflict and leaves provider failures unavailable", async () => {
-  for (const [error, status, code] of [
-    [new StateRepositoryPermissionDenied(), 409, "failed-precondition"],
-    [new StateRepositoryFailure(), 503, "unavailable"],
+test("surrender preserves canonical errors and sanitizes unexpected failures", async () => {
+  for (const [error, status, code, message] of [
+    [
+      new AuthApiFailure(409, "failed-precondition", "match-surrender-blocked"),
+      409,
+      "failed-precondition",
+      "match-surrender-blocked",
+    ],
+    [
+      new AuthApiFailure(404, "not-found", "match-not-found"),
+      404,
+      "not-found",
+      "match-not-found",
+    ],
+    [
+      new Error("private-provider-detail"),
+      503,
+      "unavailable",
+      "gameplay-service-unavailable",
+    ],
   ] as const) {
     const h = surrenderFixture();
-    h.client.transactPath = async () => {
+    h.dependencies.surrender!.surrenderCanonical = async () => {
       throw error;
     };
     const response = await h.call();
     assert.equal(response.status, status);
-    assert.equal(((await response.json()) as { error: string }).error, code);
-    assert.equal(h.stats.writes, 0);
+    assert.deepEqual(await response.json(), {
+      ok: false,
+      error: code,
+      message,
+    });
   }
-});
-
-test("a surrender commit with a lost response can be replayed without a second write", async () => {
-  const h = surrenderFixture();
-  const transact = h.client.transactPath;
-  h.client.transactPath = async (...args) => {
-    await transact(...args);
-    throw new StateRepositoryFailure();
-  };
-  assert.equal((await h.call()).status, 503);
-  h.client.transactPath = transact;
-  assert.equal((await h.call()).status, 200);
-  assert.equal(h.stats.writes, 1);
 });
 
 test("surrender observes auth, rate limit, ownership and mutation controls", async () => {
@@ -2903,7 +2684,7 @@ test("surrender observes auth, rate limit, ownership and mutation controls", asy
     throw new AuthApiFailure(401, "unauthenticated", "authentication-required");
   };
   assert.equal((await unauthenticated.call()).status, 401);
-  assert.equal(unauthenticated.stats.scopedClients, 0);
+  assert.deepEqual(unauthenticated.calls, []);
   const limited = surrenderFixture();
   assert.equal(
     (
@@ -2914,47 +2695,28 @@ test("surrender observes auth, rate limit, ownership and mutation controls", asy
     ).status,
     429,
   );
-  assert.equal(limited.stats.scopedClients, 0);
+  assert.deepEqual(limited.calls, []);
   const unavailable = surrenderFixture({ loginUid: "alternate" });
   unavailable.dependencies.repository!.readProfileOwnershipSnapshot =
     async () => {
       throw new Error("ownership-unavailable");
     };
   assert.equal((await unavailable.call()).status, 503);
-  assert.equal(unavailable.stats.scopedClients, 0);
+  assert.deepEqual(unavailable.calls, []);
   const frozen = surrenderFixture();
-  let checks = 0;
   frozen.dependencies.assertMutationAllowed = async () => {
-    if (++checks > 1)
-      throw new AuthApiFailure(503, "unavailable", "profile-writes-disabled");
+    throw new AuthApiFailure(503, "unavailable", "profile-writes-disabled");
   };
   assert.equal((await frozen.call()).status, 503);
-  assert.equal(frozen.stats.writes, 0);
+  assert.deepEqual(frozen.calls, []);
 });
 
 function moveFixture({
   loginUid = identity.uid,
   playerId = identity.uid,
   inviteValue = { hostId: identity.uid, guestId: "guest" },
-  matchValue = {
-    fen: "fen",
-    flatMovesString: "moves",
-    status: "",
-    timer: "4;12345",
-    emojiId: 1,
-    aura: "seed",
-    sessionCreation: { operationId: "created" },
-    extra: { retained: true },
-  },
   ownerByUid = {},
-}: {
-  loginUid?: string;
-  playerId?: string;
-  inviteValue?: unknown;
-  matchValue?: unknown;
-  ownerByUid?: Readonly<Record<string, string | null>>;
-} = {}) {
-  const stats = { writes: 0, scopedClients: 0 };
+}: MatchRouteFixtureOptions = {}) {
   const body: SubmitMoveRequest = {
     inviteId: "invite",
     matchId: "invite",
@@ -2964,44 +2726,19 @@ function moveFixture({
     fen: "next-fen",
     gameVariant: "Classic",
   };
-  const client: Pick<StateRepository, "transactPath"> = {
-    async transactPath(path, updater, signal, beforeWrite) {
-      assert.equal(path, `players/${playerId}/matches/${body.matchId}`);
-      signal?.throwIfAborted();
-      const current = structuredClone(matchValue);
-      const result = applyTransaction(updater, current);
-      if (result.committed) {
-        await beforeWrite?.({
-          current,
-          proposed: result.value,
-          etag: '"etag"',
-        });
-        matchValue = result.value;
-        stats.writes++;
-      }
-      return result;
-    },
-  };
+  const calls: SubmitMoveRequest[] = [];
   const dependencies: Parameters<typeof handleGameplayRoute>[3] = {
-    repository: repository({
-      readState: async (path) => {
-        assert.equal(path, "invites/invite");
-        return inviteValue;
-      },
-      readProfileOwnershipSnapshot: async (query) =>
-        ownershipSnapshot(query, { ownerByUid }),
-      transactState: async () => {
-        throw new Error("unrestricted-write");
-      },
-      patchStateRoot: async () => {
-        throw new Error("unrestricted-write");
-      },
-    }),
+    repository: matchRouteRepository(inviteValue, ownerByUid),
     move: {
-      createMatchClient: (scope) => {
-        assert.deepEqual(scope, { playerId, matchId: body.matchId });
-        stats.scopedClients++;
-        return client;
+      submitCanonical: async (input) => {
+        calls.push(input);
+        return {
+          ok: true,
+          inviteId: input.inviteId,
+          matchId: input.matchId,
+          actorUid: input.playerId,
+          outcome: "applied",
+        };
       },
     },
     verifyIdentity: async () => ({ uid: loginUid }),
@@ -3009,10 +2746,8 @@ function moveFixture({
   };
   return {
     body,
-    client,
+    calls,
     dependencies,
-    stats,
-    getMatch: () => matchValue,
     call: (currentEnv = env, input: unknown = body) =>
       handleGameplayRoute(
         request(MATCH_MOVE_PATH, { body: input }),
@@ -3023,16 +2758,13 @@ function moveFixture({
   };
 }
 
-test("moves compare and set only move fields and replay without a write", async () => {
+test("moves dispatch the full request and use the dedicated rate limiter", async () => {
   const h = moveFixture();
-  const original = structuredClone(h.getMatch());
   let key = "";
-  const currentEnv = {
+  const response = await h.call({
     ...env,
     AUTH_RATE_LIMITER: {
-      limit: async () => {
-        throw new Error("wrong-limiter");
-      },
+      limit: async () => assert.fail("wrong-limiter"),
     },
     MOVE_RATE_LIMITER: {
       limit: async (input: { key: string }) => {
@@ -3040,29 +2772,49 @@ test("moves compare and set only move fields and replay without a write", async 
         return { success: true };
       },
     },
-  };
-  for (const outcome of ["applied", "already-applied"]) {
-    const response = await h.call(currentEnv);
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), {
-      ok: true,
-      inviteId: "invite",
-      matchId: "invite",
-      actorUid: identity.uid,
-      outcome,
-    });
-  }
-  assert.deepEqual(h.getMatch(), {
-    ...(original as Record<string, unknown>),
-    fen: h.body.fen,
-    flatMovesString: h.body.flatMovesString,
-    gameVariant: "Classic",
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    inviteId: "invite",
+    matchId: "invite",
+    actorUid: identity.uid,
+    outcome: "applied",
   });
   assert.equal(key, `match-move:${identity.uid}`);
-  assert.equal(h.stats.writes, 1);
+  assert.deepEqual(h.calls, [h.body]);
 });
 
-test("moves authorize participants and canonical linked logins without profile shadows", async () => {
+test("moves preserve canonical replay and superseded response payloads", async () => {
+  for (const result of [
+    { outcome: "already-applied" as const },
+    {
+      outcome: "superseded" as const,
+      fen: "later-fen",
+      flatMovesString: "moves-next-later",
+    },
+  ]) {
+    const h = moveFixture();
+    h.body.previousStates = [{ moveCount: 1, fen: "fen" }];
+    const expected = {
+      ok: true as const,
+      inviteId: h.body.inviteId,
+      matchId: h.body.matchId,
+      actorUid: h.body.playerId,
+      ...result,
+    };
+    h.dependencies.move!.submitCanonical = async (input) => {
+      h.calls.push(input);
+      return expected;
+    };
+    const response = await h.call();
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), expected);
+    assert.deepEqual(h.calls, [h.body]);
+  }
+});
+
+test("moves authorize participants and linked logins before canonical dispatch", async () => {
   for (const playerId of [identity.uid, "guest"]) {
     for (const loginUid of [playerId, "alternate"]) {
       const h = moveFixture({
@@ -3071,12 +2823,12 @@ test("moves authorize participants and canonical linked logins without profile s
         ownerByUid: { alternate: "owner", [playerId]: "owner" },
       });
       assert.equal((await h.call()).status, 200);
-      assert.equal(h.stats.writes, 1);
+      assert.deepEqual(h.calls, [h.body]);
     }
   }
 });
 
-test("moves reject unauthorized participants, unknown rematches and absent or malformed state", async () => {
+test("moves reject unauthorized players and invalid invites or rematches before dispatch", async () => {
   for (const [h, status] of [
     [moveFixture({ loginUid: "spectator" }), 403],
     [
@@ -3095,17 +2847,14 @@ test("moves reject unauthorized participants, unknown rematches and absent or ma
       }),
       409,
     ],
-    [moveFixture({ matchValue: null }), 404],
-    [moveFixture({ matchValue: [] }), 409],
-    [moveFixture({ matchValue: { fen: "fen", flatMovesString: 42 } }), 409],
   ] as const) {
     assert.equal((await h.call()).status, status);
-    assert.equal(h.stats.writes, 0);
+    assert.deepEqual(h.calls, []);
   }
   const missing = moveFixture();
   missing.body.matchId = "invite2";
   assert.equal((await missing.call()).status, 404);
-  assert.equal(missing.stats.scopedClients, 0);
+  assert.deepEqual(missing.calls, []);
   const known = moveFixture({
     inviteValue: {
       hostId: identity.uid,
@@ -3116,54 +2865,11 @@ test("moves reject unauthorized participants, unknown rematches and absent or ma
   });
   known.body.matchId = "invite2";
   assert.equal((await known.call()).status, 200);
-});
-
-test("moves reject conflicting history without overwriting the stored match", async () => {
-  for (const matchValue of [
-    { fen: "another-fen", flatMovesString: "moves-other", timer: "timer" },
-    { fen: "another-fen", flatMovesString: "moves-next", timer: "timer" },
-  ]) {
-    const h = moveFixture({ matchValue });
-    const response = await h.call();
-    assert.equal(response.status, 409);
-    assert.equal(
-      ((await response.json()) as { message: string }).message,
-      "move-chain-conflict",
-    );
-    assert.deepEqual(h.getMatch(), matchValue);
-    assert.equal(h.stats.writes, 0);
-  }
-});
-
-test("moves preserve existing variants and optional legacy fields", async () => {
-  for (const gameVariant of [undefined, "", "Custom"]) {
-    for (const requestedVariant of [undefined, "Classic"]) {
-      const matchValue = {
-        fen: "fen",
-        ...(gameVariant === undefined ? {} : { gameVariant }),
-        extra: { retained: true },
-      };
-      const h = moveFixture({ matchValue });
-      h.body.previousFlatMovesString = "";
-      h.body.flatMovesString = "next";
-      if (requestedVariant === undefined) delete h.body.gameVariant;
-      else h.body.gameVariant = requestedVariant;
-      assert.equal((await h.call()).status, 200);
-      const expectedVariant = gameVariant || requestedVariant;
-      assert.deepEqual(h.getMatch(), {
-        ...matchValue,
-        ...(expectedVariant ? { gameVariant: expectedVariant } : {}),
-        fen: "next-fen",
-        flatMovesString: "next",
-      });
-    }
-  }
+  assert.deepEqual(known.calls, [known.body]);
 });
 
 test("moves accept long bounded histories and reject oversized or malformed requests", async () => {
-  const h = moveFixture({
-    matchValue: { fen: "fen", flatMovesString: "m".repeat(5000) },
-  });
+  const h = moveFixture();
   h.body.previousFlatMovesString = "m".repeat(5000);
   h.body.flatMovesString = `${h.body.previousFlatMovesString}-next`;
   assert.equal((await h.call()).status, 200);
@@ -3178,47 +2884,57 @@ test("moves accept long bounded histories and reject oversized or malformed requ
   ]) {
     assert.equal((await h.call(env, input)).status, 400);
   }
-  assert.equal(h.stats.writes, 1);
+  assert.deepEqual(h.calls, [h.body]);
 });
 
-test("moves map temporary rules rejection to blocked and verify ambiguous commits by replay", async () => {
-  const blocked = moveFixture();
-  const transact = blocked.client.transactPath;
-  blocked.client.transactPath = async () => {
-    throw new StateRepositoryPermissionDenied();
-  };
-  const response = await blocked.call();
-  assert.equal(response.status, 409);
-  assert.equal(
-    ((await response.json()) as { message: string }).message,
-    "match-move-blocked",
-  );
-  blocked.client.transactPath = transact;
-  assert.equal((await blocked.call()).status, 200);
-  const uncertain = moveFixture();
-  const commit = uncertain.client.transactPath;
-  uncertain.client.transactPath = async (...args) => {
-    await commit(...args);
-    throw new StateRepositoryFailure();
-  };
-  assert.equal((await uncertain.call()).status, 503);
-  uncertain.client.transactPath = commit;
-  const replay = await uncertain.call();
-  assert.equal(replay.status, 200);
-  assert.equal(
-    ((await replay.json()) as { outcome: string }).outcome,
-    "already-applied",
-  );
-  assert.equal(uncertain.stats.writes, 1);
+test("moves preserve canonical conflicts and sanitize unexpected failures", async () => {
+  for (const [error, status, code, message] of [
+    [
+      new AuthApiFailure(409, "failed-precondition", "match-move-blocked"),
+      409,
+      "failed-precondition",
+      "match-move-blocked",
+    ],
+    [
+      new AuthApiFailure(409, "failed-precondition", "move-chain-conflict"),
+      409,
+      "failed-precondition",
+      "move-chain-conflict",
+    ],
+    [
+      new AuthApiFailure(404, "not-found", "match-not-found"),
+      404,
+      "not-found",
+      "match-not-found",
+    ],
+    [
+      new Error("private-provider-detail"),
+      503,
+      "unavailable",
+      "gameplay-service-unavailable",
+    ],
+  ] as const) {
+    const h = moveFixture();
+    h.dependencies.move!.submitCanonical = async () => {
+      throw error;
+    };
+    const response = await h.call();
+    assert.equal(response.status, status);
+    assert.deepEqual(await response.json(), {
+      ok: false,
+      error: code,
+      message,
+    });
+  }
 });
 
-test("moves fail closed for auth, rate limits, unavailable ownership and a prewrite freeze", async () => {
+test("moves fail closed for auth, rate limits, unavailable ownership and mutation controls", async () => {
   const unauthorized = moveFixture();
   unauthorized.dependencies.verifyIdentity = async () => {
     throw new AuthApiFailure(401, "unauthenticated", "authentication-required");
   };
   assert.equal((await unauthorized.call()).status, 401);
-  assert.equal(unauthorized.stats.scopedClients, 0);
+  assert.deepEqual(unauthorized.calls, []);
   for (const [limit, status] of [
     [async () => ({ success: false }), 429],
     [
@@ -3233,7 +2949,7 @@ test("moves fail closed for auth, rate limits, unavailable ownership and a prewr
       (await h.call({ ...env, MOVE_RATE_LIMITER: { limit } })).status,
       status,
     );
-    assert.equal(h.stats.scopedClients, 0);
+    assert.deepEqual(h.calls, []);
   }
   const unavailable = moveFixture({ loginUid: "alternate" });
   unavailable.dependencies.repository!.readProfileOwnershipSnapshot =
@@ -3241,21 +2957,19 @@ test("moves fail closed for auth, rate limits, unavailable ownership and a prewr
       throw new Error("ownership-unavailable");
     };
   assert.equal((await unavailable.call()).status, 503);
-  assert.equal(unavailable.stats.scopedClients, 0);
+  assert.deepEqual(unavailable.calls, []);
   const frozen = moveFixture();
-  let checks = 0;
   frozen.dependencies.assertMutationAllowed = async () => {
-    if (++checks > 1)
-      throw new AuthApiFailure(503, "unavailable", "profile-writes-disabled");
+    throw new AuthApiFailure(503, "unavailable", "profile-writes-disabled");
   };
   assert.equal((await frozen.call()).status, 503);
-  assert.equal(frozen.stats.writes, 0);
+  assert.deepEqual(frozen.calls, []);
 });
 
-function cumulativeMove(body: SubmitMoveRequest): SubmitMoveRequest {
-  return {
-    ...body,
-    previousFlatMovesString: "moves",
+test("cumulative move requests retain checkpoints and enforce the whole body limit", async () => {
+  const h = moveFixture();
+  const body: SubmitMoveRequest = {
+    ...h.body,
     flatMovesString: "moves-a-z-next",
     fen: "after-next",
     previousStates: [
@@ -3264,201 +2978,8 @@ function cumulativeMove(body: SubmitMoveRequest): SubmitMoveRequest {
       { moveCount: 3, fen: "fen" },
     ],
   };
-}
-
-test("cumulative moves deliver all pending inputs from the base or any matching checkpoint", async () => {
-  for (const [flatMovesString, fen] of [
-    ["moves", "fen"],
-    ["moves-a", "after-a"],
-    ["moves-a-z", "fen"],
-  ]) {
-    const stored = {
-      flatMovesString,
-      fen,
-      timer: "current-timer",
-      status: "surrendered",
-      extra: { preserved: true },
-    };
-    const h = moveFixture({ matchValue: stored });
-    const body = cumulativeMove(h.body);
-    const result = await h.call(env, body);
-    assert.equal(result.status, 200);
-    assert.deepEqual(await result.json(), {
-      ok: true,
-      inviteId: body.inviteId,
-      matchId: body.matchId,
-      actorUid: body.playerId,
-      outcome: "applied",
-    });
-    assert.deepEqual(h.getMatch(), {
-      ...stored,
-      gameVariant: "Classic",
-      fen: body.fen,
-      flatMovesString: body.flatMovesString,
-    });
-    assert.equal(h.stats.writes, 1);
-  }
-});
-
-test("a cumulative successor recovers an earlier commit whose response was lost", async () => {
-  const h = moveFixture();
-  const latest = cumulativeMove(h.body);
-  const first: SubmitMoveRequest = {
-    ...latest,
-    flatMovesString: "moves-a",
-    fen: "after-a",
-    previousStates: latest.previousStates!.slice(0, 1),
-  };
-  const transact = h.client.transactPath;
-  h.client.transactPath = async (...args) => {
-    await transact(...args);
-    throw new StateRepositoryFailure();
-  };
-  assert.equal((await h.call(env, first)).status, 503);
-  h.client.transactPath = transact;
-  assert.equal((await h.call(env, latest)).status, 200);
-  assert.equal(
-    (h.getMatch() as Record<string, unknown>).flatMovesString,
-    latest.flatMovesString,
-  );
-  assert.equal(h.stats.writes, 2);
-});
-
-test("newer cumulative state supersedes late prefixes without rolling back and preserves legacy semantics", async () => {
-  const h = moveFixture();
-  const latest = cumulativeMove(h.body);
-  const older: SubmitMoveRequest = {
-    ...latest,
-    fen: "after-a",
-    flatMovesString: "moves-a",
-    previousStates: latest.previousStates!.slice(0, 1),
-  };
-  assert.equal((await h.call(env, latest)).status, 200);
-  const afterLatest = structuredClone(h.getMatch());
-  const late = await h.call(env, older);
-  assert.equal(late.status, 200);
-  assert.deepEqual(await late.json(), {
-    ok: true,
-    inviteId: latest.inviteId,
-    matchId: latest.matchId,
-    actorUid: latest.playerId,
-    outcome: "superseded",
-    fen: latest.fen,
-    flatMovesString: latest.flatMovesString,
-  });
-  assert.deepEqual(h.getMatch(), afterLatest);
-  const replay = await h.call(env, latest);
-  assert.equal(replay.status, 200);
-  assert.equal(
-    ((await replay.json()) as { outcome: string }).outcome,
-    "already-applied",
-  );
-  assert.equal(h.stats.writes, 1);
-  const legacyOlder = { ...older };
-  delete legacyOlder.previousStates;
-  assert.equal((await h.call(env, legacyOlder)).status, 409);
-  const legacyNext = {
-    ...latest,
-    previousFlatMovesString: latest.flatMovesString,
-    flatMovesString: `${latest.flatMovesString}-last`,
-    fen: "last-fen",
-  };
-  delete legacyNext.previousStates;
-  const next = await h.call(env, legacyNext);
-  assert.equal(next.status, 200);
-  assert.equal(((await next.json()) as { outcome: string }).outcome, "applied");
-  assert.equal(h.stats.writes, 2);
-});
-
-test("cumulative moves refuse divergent history, partial-entry prefixes and mismatching checkpoint FEN", async () => {
-  for (const [history, fen] of [
-    ["moves-other", "after-a"],
-    ["moves-aa", "after-a"],
-    ["move", "fen"],
-    ["", "fen"],
-    ["moves", "other-base"],
-    ["moves-a", "other-prefix"],
-    ["moves-a-z-next", "other-target"],
-  ]) {
-    const matchValue = { fen, flatMovesString: history, timer: "timer" };
-    const h = moveFixture({ matchValue });
-    const response = await h.call(env, cumulativeMove(h.body));
-    assert.equal(response.status, 409, `${history} / ${fen}`);
-    assert.equal(
-      ((await response.json()) as { message: string }).message,
-      "move-chain-conflict",
-    );
-    assert.equal(h.stats.writes, 0);
-    assert.deepEqual(h.getMatch(), matchValue);
-  }
-  const legacy = moveFixture({
-    matchValue: { fen: "after-a", flatMovesString: "moves-a" },
-  });
-  const body = cumulativeMove(legacy.body);
-  delete body.previousStates;
-  assert.equal((await legacy.call(env, body)).status, 409);
-  assert.equal(legacy.stats.writes, 0);
-});
-
-test("real moves and takebacks retain distinct history when FEN returns to an earlier board", async () => {
-  const game = new Game();
-  const baseFen = game.toFen();
-  const first = game.play([
-    { kind: "position", position: { row: 10, column: 3 } },
-    { kind: "position", position: { row: 9, column: 2 } },
-  ]);
-  assert.equal(first.kind, "complete");
-  const firstFen = game.toFen();
-  const undone = game.takeback();
-  assert.equal(undone.kind, "complete");
-  assert.equal(undone.inputFen, "z");
-  assert.equal(game.toFen(), baseFen);
-  const next = game.playFen(first.inputFen);
-  assert.equal(next.kind, "complete");
-  assert.equal(game.toFen(), firstFen);
-  const h = moveFixture({
-    matchValue: { fen: baseFen, flatMovesString: "", extra: true },
-  });
-  const final: SubmitMoveRequest = {
-    ...h.body,
-    previousFlatMovesString: "",
-    flatMovesString: `${first.inputFen}-z-${next.inputFen}`,
-    fen: firstFen,
-    previousStates: [
-      { moveCount: 0, fen: baseFen },
-      { moveCount: 1, fen: firstFen },
-      { moveCount: 2, fen: baseFen },
-    ],
-  };
-  const undoOnly = {
-    ...final,
-    flatMovesString: `${first.inputFen}-z`,
-    fen: baseFen,
-    previousStates: final.previousStates!.slice(0, 2),
-  };
-  const result = await h.call(env, undoOnly);
-  assert.equal(result.status, 200);
-  assert.equal(
-    ((await result.json()) as { outcome: string }).outcome,
-    "applied",
-  );
-  assert.equal((h.getMatch() as Record<string, unknown>).fen, baseFen);
-  assert.equal(
-    (h.getMatch() as Record<string, unknown>).flatMovesString,
-    undoOnly.flatMovesString,
-  );
-  assert.equal((await h.call(env, final)).status, 200);
-  assert.equal((await h.call(env, undoOnly)).status, 200);
-  assert.equal(
-    (h.getMatch() as Record<string, unknown>).flatMovesString,
-    final.flatMovesString,
-  );
-  assert.equal(h.stats.writes, 2);
-});
-
-test("cumulative requests preserve the whole body limit and validate superseded stored fields", async () => {
-  const h = moveFixture();
-  const body = cumulativeMove(h.body);
+  assert.equal((await h.call(env, body)).status, 200);
+  assert.deepEqual(h.calls, [body]);
   for (const previousStates of [
     [],
     [{ moveCount: 1, fen: "fen" }],
@@ -3467,8 +2988,9 @@ test("cumulative requests preserve the whole body limit and validate superseded 
       moveCount: state.moveCount + 1,
     })),
     body.previousStates!.map((state) => ({ ...state, extra: true })),
-  ])
+  ]) {
     assert.equal((await h.call(env, { ...body, previousStates })).status, 400);
+  }
   const oversized = {
     ...body,
     previousFlatMovesString: "",
@@ -3482,81 +3004,89 @@ test("cumulative requests preserve the whole body limit and validate superseded 
     Buffer.byteLength(JSON.stringify(oversized)) > MAX_MATCH_MOVE_REQUEST_BYTES,
   );
   assert.equal((await h.call(env, oversized)).status, 400);
-  for (const matchValue of [
-    { fen: "f".repeat(16 * 1024 + 1), flatMovesString: "moves-a-z-next-extra" },
-    { fen: "fen", flatMovesString: `moves-a-z-next-${"a".repeat(64 * 1024)}` },
-  ]) {
-    const invalid = moveFixture({ matchValue });
-    assert.equal(
-      (await invalid.call(env, cumulativeMove(invalid.body))).status,
-      409,
-    );
-    assert.equal(invalid.stats.writes, 0);
-  }
-  assert.equal(h.stats.scopedClients, 0);
+  assert.deepEqual(h.calls, [body]);
 });
 
-test("cumulative transactions recheck intermediate or superseding state after a concurrent write", async () => {
-  for (const race of ["intermediate", "divergent", "superseded"] as const) {
-    const h = moveFixture();
-    const body = cumulativeMove(h.body);
-    const original = { fen: "fen", flatMovesString: "moves", timer: "old" };
-    const concurrent =
-      race === "superseded"
-        ? {
-            fen: "future-fen",
-            flatMovesString: `${body.flatMovesString}-future`,
-            timer: "new",
-          }
-        : {
-            fen: race === "divergent" ? "different-prefix" : "after-a",
-            flatMovesString: "moves-a",
-            timer: "new",
-          };
-    const expected = {
-      ...concurrent,
-      gameVariant: "Classic",
-      fen: body.fen,
-      flatMovesString: body.flatMovesString,
-    };
-    const writes: Record<string, unknown>[] = [];
-    h.client.transactPath = async (path, updater, signal, beforeWrite) => {
-      assert.equal(path, `players/${body.playerId}/matches/${body.matchId}`);
-      for (const [attempt, current] of [original, concurrent].entries()) {
-        signal?.throwIfAborted();
-        const result = applyTransaction(updater, structuredClone(current));
-        if (!result.committed) return result;
-        await beforeWrite?.({
-          current,
-          proposed: result.value,
-          etag: String(attempt),
-        });
-        writes.push(result.value as Record<string, unknown>);
-        if (attempt === 1) return result;
-      }
-      throw new Error("unexpected-transaction-exhaustion");
-    };
-    const response = await h.call(env, body);
-    if (race === "intermediate") {
-      assert.equal(response.status, 200);
-      assert.equal(
-        ((await response.json()) as { outcome: string }).outcome,
-        "applied",
-      );
-      assert.equal(writes.length, 2);
-      assert.deepEqual(writes[1], expected);
-    } else {
-      assert.equal(response.status, race === "divergent" ? 409 : 200);
-      assert.equal(writes.length, 1);
-      const result = (await response.json()) as Record<string, unknown>;
-      assert.equal(
-        race === "divergent" ? result.message : result.outcome,
-        race === "divergent" ? "move-chain-conflict" : "superseded",
-      );
-      if (race === "superseded") {
-        assert.equal(result.flatMovesString, concurrent.flatMovesString);
-        assert.equal(result.fen, concurrent.fen);
-      }
-    }
+test("match mutation routes observe request cancellation before canonical dispatch", async () => {
+  for (const [path, body] of [
+    [MATCH_MOVE_PATH, moveFixture().body],
+    ["/matches/surrender", surrenderFixture().body],
+    [
+      "/matches/timer/start",
+      {
+        inviteId: "invite",
+        matchId: "invite",
+        playerId: identity.uid,
+        opponentId: "guest",
+      },
+    ],
+    [
+      "/matches/timer/claim",
+      {
+        inviteId: "invite",
+        matchId: "invite",
+        playerId: identity.uid,
+        opponentId: "guest",
+      },
+    ],
+  ] as const) {
+    const controller = new AbortController();
+    const calls: unknown[] = [];
+    const response = await handleGameplayRoute(
+      new Request(request(path, { body }), { signal: controller.signal }),
+      env,
+      context(),
+      {
+        repository: repository({
+          readState: async (statePath) => {
+            assert.equal(statePath, "invites/invite");
+            controller.abort(new Error("private-cancellation-detail"));
+            return { hostId: identity.uid, guestId: "guest" };
+          },
+        }),
+        verifyIdentity: async () => identity,
+        move: {
+          submitCanonical: async (input) => {
+            calls.push(input);
+            return {
+              ok: true,
+              inviteId: input.inviteId,
+              matchId: input.matchId,
+              actorUid: input.playerId,
+              outcome: "applied",
+            };
+          },
+        },
+        surrender: {
+          surrenderCanonical: async (input) => {
+            calls.push(input);
+            return {
+              ok: true,
+              inviteId: input.inviteId,
+              matchId: input.matchId,
+              actorUid: input.playerId,
+            };
+          },
+        },
+        timer: {
+          startCanonical: async (input) => {
+            calls.push(input);
+            return { ok: true, timer: "4;12345", duration: 90_000 };
+          },
+          claimCanonical: async (input) => {
+            calls.push(input);
+            return { ok: true };
+          },
+        },
+        logFailure: () => {},
+      },
+    );
+    assert.equal(response.status, 503, path);
+    assert.deepEqual(await response.json(), {
+      ok: false,
+      error: "unavailable",
+      message: "gameplay-service-unavailable",
+    });
+    assert.deepEqual(calls, [], path);
   }
 });

@@ -9,11 +9,6 @@ import {
 } from "@mons/shared/rematches";
 import { AuthApiFailure } from "./authErrors.ts";
 import { isCanonicalLoginUid } from "./recordKeys.ts";
-import {
-  StateRepositoryFailure,
-  StateRepositoryPermissionDenied,
-  type StateRepository,
-} from "./stateRepositoryTypes.ts";
 import type { GameplayRepository } from "./gameplayRepository.ts";
 import {
   getLoginProfileId,
@@ -27,12 +22,9 @@ type SurrenderRepository = Pick<
 >;
 
 export type SurrenderMatchDependencies = {
-  surrenderCanonical?: (
+  surrenderCanonical: (
     request: SurrenderMatchRequest,
   ) => Promise<SurrenderMatchResponse>;
-  createMatchClient?: (
-    scope: Pick<SurrenderMatchRequest, "playerId" | "matchId">,
-  ) => Pick<StateRepository, "transactPath">;
   assertMutationAllowed?: () => Promise<void>;
   signal?: AbortSignal;
 };
@@ -107,61 +99,5 @@ export async function surrenderMatch(
   }
   signal.throwIfAborted();
   await dependencies.assertMutationAllowed?.();
-  if (dependencies.surrenderCanonical) {
-    return dependencies.surrenderCanonical(request);
-  }
-  if (!dependencies.createMatchClient) {
-    throw new AuthApiFailure(
-      503,
-      "unavailable",
-      "match-state-canonical-operation-required",
-    );
-  }
-  const client = dependencies.createMatchClient({
-    playerId: request.playerId,
-    matchId: request.matchId,
-  });
-  try {
-    const result = await client.transactPath(
-      `players/${request.playerId}/matches/${request.matchId}`,
-      (current) => {
-        const match = toRecord(current);
-        if (!match) {
-          throw new AuthApiFailure(404, "not-found", "match-not-found");
-        }
-        return match.status === "surrendered"
-          ? { commit: false, decision: "already-surrendered" }
-          : {
-              decision: "surrendered",
-              value: { ...match, status: "surrendered" },
-            };
-      },
-      signal,
-      async () => {
-        signal.throwIfAborted();
-        await dependencies.assertMutationAllowed?.();
-      },
-    );
-    if (
-      (!result.committed && result.decision !== "already-surrendered") ||
-      toRecord(result.value)?.status !== "surrendered"
-    ) {
-      throw new StateRepositoryFailure();
-    }
-  } catch (error) {
-    if (error instanceof StateRepositoryPermissionDenied) {
-      throw new AuthApiFailure(
-        409,
-        "failed-precondition",
-        "match-surrender-blocked",
-      );
-    }
-    throw error;
-  }
-  return {
-    ok: true,
-    inviteId: request.inviteId,
-    matchId: request.matchId,
-    actorUid: request.playerId,
-  };
+  return dependencies.surrenderCanonical(request);
 }

@@ -81,7 +81,8 @@ import {
   enforceMatchTimerClaimRateLimit,
   enforceMatchTimerRateLimit,
   startMatchTimer,
-  type MatchTimerDependencies,
+  type StartMatchTimerDependencies,
+  type ClaimMatchVictoryByTimerDependencies,
 } from "./matchTimer.ts";
 import { canonicalMatchOperations } from "./matchStateClient.ts";
 import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
@@ -185,7 +186,9 @@ export type GameplayRouteDependencies = {
   repository?: GameplayRepository;
   rating?: Partial<RatingUpdateDependencies>;
   ratingRepository?: RatingRepository;
-  timer?: Partial<MatchTimerDependencies>;
+  timer?: Partial<
+    StartMatchTimerDependencies & ClaimMatchVictoryByTimerDependencies
+  >;
   surrender?: Partial<SurrenderMatchDependencies>;
   move?: Partial<SubmitMoveDependencies>;
   wager?: Partial<WagerProposalDependencies>;
@@ -844,19 +847,18 @@ async function handleGameplayRequest(
         repository,
         gameSessionDependencies,
       );
-    } else if (pathname === MATCH_MOVE_PATH) {
+    } else if (pathname === MATCH_MOVE_PATH && canonical) {
       if (!isSubmitMoveRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
       await enforceMatchMoveRateLimit(env.MOVE_RATE_LIMITER, identity.uid);
       response = await submitMove(identity, body, repository, {
         submitCanonical:
-          dependencies.move?.submitCanonical || canonical?.submitCanonical,
-        createMatchClient: dependencies.move?.createMatchClient,
+          dependencies.move?.submitCanonical || canonical.submitCanonical,
         assertMutationAllowed,
         signal: dependencies.move?.signal || request.signal,
       });
-    } else if (pathname === "/matches/surrender") {
+    } else if (pathname === "/matches/surrender" && canonical) {
       if (!isSurrenderMatchRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
@@ -867,28 +869,22 @@ async function handleGameplayRequest(
       response = await surrenderMatch(identity, body, repository, {
         surrenderCanonical:
           dependencies.surrender?.surrenderCanonical ||
-          canonical?.surrenderCanonical,
-        createMatchClient: dependencies.surrender?.createMatchClient,
+          canonical.surrenderCanonical,
         assertMutationAllowed,
         signal: dependencies.surrender?.signal || request.signal,
       });
-    } else if (pathname === "/matches/timer/start") {
+    } else if (pathname === "/matches/timer/start" && canonical) {
       if (!isStartMatchTimerRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
       await enforceMatchTimerRateLimit(env.AUTH_RATE_LIMITER, identity.uid);
       response = await startMatchTimer(identity, body, repository, {
-        ...dependencies.timer,
         startCanonical:
-          dependencies.timer?.startCanonical || canonical?.startCanonical,
+          dependencies.timer?.startCanonical || canonical.startCanonical,
         assertMutationAllowed,
-        enqueueEventProgress:
-          dependencies.timer?.enqueueEventProgress ||
-          defaultEnqueueEventProgress,
         signal: dependencies.timer?.signal || request.signal,
-        timerStarts: coordination.timerStarts,
       });
-    } else if (pathname === "/matches/timer/claim") {
+    } else if (pathname === "/matches/timer/claim" && canonical) {
       if (!isClaimMatchVictoryByTimerRequest(body)) {
         throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
       }
@@ -897,15 +893,10 @@ async function handleGameplayRequest(
         identity.uid,
       );
       const claim = claimMatchVictoryByTimer(identity, body, repository, {
-        ...dependencies.timer,
         claimCanonical:
-          dependencies.timer?.claimCanonical || canonical?.claimCanonical,
+          dependencies.timer?.claimCanonical || canonical.claimCanonical,
         assertMutationAllowed,
-        enqueueEventProgress:
-          dependencies.timer?.enqueueEventProgress ||
-          defaultEnqueueEventProgress,
         signal: dependencies.timer?.signal || request.signal,
-        timerStarts: coordination.timerStarts,
       });
       ctx.waitUntil(claim.catch(() => undefined));
       response = await claim;

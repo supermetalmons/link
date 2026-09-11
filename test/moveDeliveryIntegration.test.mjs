@@ -5,6 +5,7 @@ import { setImmediate } from "node:timers/promises";
 import { Game } from "mons-rules";
 import { MoveDelivery } from "../src/connection/moveDelivery.ts";
 import { submitMove } from "../cloud/workers/api/src/matchMove.ts";
+import { decideMatchStateMove } from "../cloud/workers/api/src/matchStateLogic.ts";
 
 registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -85,40 +86,29 @@ function harness() {
         guestRematches: "",
       };
     },
-    getStatePath: async () => {
-      throw new Error("Unexpected aggregate invite lookup");
-    },
     readProfileOwnershipSnapshot: () => {
       throw new Error("Unexpected linked identity lookup");
     },
   };
   const service = (request) =>
     submitMove({ uid: scope.loginUid }, request, repository, {
-      createMatchClient: () => ({
-        transactPath: async (path, update, signal, beforeWrite) => {
-          assert.equal(
-            path,
-            `players/${scope.playerId}/matches/${scope.matchId}`,
-          );
-          signal.throwIfAborted();
-          const current = structuredClone(stored);
-          const decision = update(current);
-          if (decision.commit === false)
-            return {
-              committed: false,
-              decision: decision.decision,
-              value: current,
-            };
-          await beforeWrite?.();
+      submitCanonical: async (input) => {
+        const decision = decideMatchStateMove(structuredClone(stored), input);
+        if (decision.outcome === "applied") {
           stored = structuredClone(decision.value);
           revision++;
-          return {
-            committed: true,
-            decision: decision.decision,
-            value: structuredClone(stored),
-          };
-        },
-      }),
+        }
+        return {
+          ok: true,
+          inviteId: input.inviteId,
+          matchId: input.matchId,
+          actorUid: input.playerId,
+          outcome: decision.outcome,
+          ...(decision.outcome === "superseded"
+            ? { fen: stored.fen, flatMovesString: stored.flatMovesString }
+            : {}),
+        };
+      },
     });
   function delivery() {
     const requests = [];

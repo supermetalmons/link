@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Game } from "mons-rules";
+import type { SubmitMoveRequest } from "@mons/shared/game-sessions";
+import {
+  MAX_MATCH_FEN_BYTES,
+  MAX_MATCH_HISTORY_BYTES,
+} from "@mons/shared/match-protocol";
 import {
   canonicalMatchStateJson,
   decideMatchStateMove,
@@ -14,7 +20,6 @@ import {
   startMatchTimer,
 } from "../src/matchTimer.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
-import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTestUtils.ts";
 
 const request = {
   inviteId: "invite-one",
@@ -153,30 +158,17 @@ function canonicalRepository(guestId = "guest-login") {
         eventId: "event-one",
       };
     },
-    async getStatePath() {
-      throw new Error("unexpected-aggregate-read");
-    },
     async readProfileOwnershipSnapshot() {
       throw new Error("unexpected-ownership-read");
     },
-    async transactStatePath() {
-      throw new Error("unexpected-source-transaction");
-    },
-    async patchStateRoot() {
-      throw new Error("unexpected-source-patch");
-    },
   } satisfies Pick<
     GameplayRepository,
-    | "readInviteMetadata"
-    | "getStatePath"
-    | "readProfileOwnershipSnapshot"
-    | "transactStatePath"
-    | "patchStateRoot"
+    "readInviteMetadata" | "readProfileOwnershipSnapshot"
   >;
   return { repository, paths };
 }
 
-test("canonical move and surrender branches keep authorization and bypass Firebase transactions", async () => {
+test("move and surrender authorize once before their canonical operations", async () => {
   const { repository, paths } = canonicalRepository();
   let checks = 0;
   const identity = { uid: request.playerId };
@@ -187,9 +179,6 @@ test("canonical move and surrender branches keep authorization and bypass Fireba
     actorUid: request.playerId,
   };
   const deps = {
-    createMatchClient: () => {
-      throw new Error("unexpected-source-client");
-    },
     assertMutationAllowed: async () => {
       checks++;
     },
@@ -220,7 +209,7 @@ test("canonical move and surrender branches keep authorization and bypass Fireba
   assert.deepEqual(paths, ["invites/invite-one", "invites/invite-one"]);
 });
 
-test("canonical timer branches only read the D1 invite and forward its event identity", async () => {
+test("timer operations read the invite and forward its event identity", async () => {
   const { repository, paths } = canonicalRepository();
   const input = {
     inviteId: request.inviteId,
@@ -229,11 +218,9 @@ test("canonical timer branches only read the D1 invite and forward its event ide
     opponentId: "guest-login",
   };
   const identity = { uid: request.playerId };
-  const timerStarts = createMemoryGameplayCoordinationStores().timerStarts;
   const timer = formatMatchTimer(7, 123_000);
   assert.deepEqual(
     await startMatchTimer(identity, input, repository, {
-      timerStarts,
       startCanonical: async (value) => {
         assert.deepEqual(value, input);
         return { ok: true, timer, duration: 90_000 };
@@ -243,7 +230,6 @@ test("canonical timer branches only read the D1 invite and forward its event ide
   );
   assert.deepEqual(
     await claimMatchVictoryByTimer(identity, input, repository, {
-      timerStarts,
       claimCanonical: async (value, invite) => {
         assert.deepEqual(value, input);
         assert.equal((invite as Record<string, unknown>).eventId, "event-one");
@@ -268,7 +254,6 @@ test("unauthorized timer participants never reach the canonical operation", asyn
       },
       repository,
       {
-        timerStarts: createMemoryGameplayCoordinationStores().timerStarts,
         startCanonical: async () => {
           throw new Error("unexpected-canonical-call");
         },
@@ -276,4 +261,222 @@ test("unauthorized timer participants never reach the canonical operation", asyn
     ),
     /permission-denied/,
   );
+});
+
+function cumulativeMove(): SubmitMoveRequest {
+  return {
+    ...request,
+    gameVariant: "Classic",
+    previousFlatMovesString: "moves",
+    flatMovesString: "moves-a-z-next",
+    fen: "after-next",
+    previousStates: [
+      { moveCount: 1, fen: "fen" },
+      { moveCount: 2, fen: "after-a" },
+      { moveCount: 3, fen: "fen" },
+    ],
+  };
+}
+
+test("move decisions preserve existing variants and optional legacy fields", () => {
+  for (const gameVariant of [undefined, "", "Custom"]) {
+    for (const requestedVariant of [undefined, "Classic"]) {
+      const source = {
+        fen: "initial",
+        ...(gameVariant === undefined ? {} : { gameVariant }),
+        extra: { retained: true },
+      };
+      const next = decideMatchStateMove(source, {
+        ...request,
+        ...(requestedVariant === undefined
+          ? {}
+          : { gameVariant: requestedVariant }),
+      });
+      const expectedVariant = gameVariant || requestedVariant;
+      assert.equal(next.outcome, "applied");
+      assert.deepEqual(next.value, {
+        ...source,
+        ...(expectedVariant ? { gameVariant: expectedVariant } : {}),
+        fen: request.fen,
+        flatMovesString: request.flatMovesString,
+      });
+      assert.deepEqual(source.extra, { retained: true });
+    }
+  }
+});
+
+test("cumulative moves apply from the base or any matching checkpoint", () => {
+  const input = cumulativeMove();
+  for (const [flatMovesString, fen] of [
+    ["moves", "fen"],
+    ["moves-a", "after-a"],
+    ["moves-a-z", "fen"],
+  ]) {
+    const source = {
+      flatMovesString,
+      fen,
+      timer: "current-timer",
+      status: "surrendered",
+      extra: { preserved: true },
+    };
+    const next = decideMatchStateMove(source, input);
+    assert.equal(next.outcome, "applied");
+    assert.deepEqual(next.value, {
+      ...source,
+      gameVariant: "Classic",
+      fen: input.fen,
+      flatMovesString: input.flatMovesString,
+    });
+    assert.equal(source.flatMovesString, flatMovesString);
+  }
+});
+
+test("newer cumulative state supersedes late prefixes and preserves legacy semantics", () => {
+  const latest = cumulativeMove();
+  const source = {
+    fen: latest.fen,
+    flatMovesString: latest.flatMovesString,
+    timer: "retained",
+  };
+  const older = {
+    ...latest,
+    fen: "after-a",
+    flatMovesString: "moves-a",
+    previousStates: latest.previousStates!.slice(0, 1),
+  };
+  const late = decideMatchStateMove(source, older);
+  assert.equal(late.outcome, "superseded");
+  assert.equal(late.value, source);
+  const replay = decideMatchStateMove(source, latest);
+  assert.equal(replay.outcome, "already-applied");
+  assert.equal(replay.value, source);
+  const legacyOlder: SubmitMoveRequest = { ...older };
+  delete legacyOlder.previousStates;
+  assert.throws(
+    () => decideMatchStateMove(source, legacyOlder),
+    /move-chain-conflict/,
+  );
+  const legacyNext = {
+    ...latest,
+    previousFlatMovesString: latest.flatMovesString,
+    flatMovesString: `${latest.flatMovesString}-last`,
+    fen: "last-fen",
+  };
+  delete legacyNext.previousStates;
+  const next = decideMatchStateMove(source, legacyNext);
+  assert.equal(next.outcome, "applied");
+  assert.equal(next.value.flatMovesString, legacyNext.flatMovesString);
+  assert.equal(next.value.timer, "retained");
+});
+
+test("cumulative moves reject divergent histories, partial-entry prefixes and mismatching FEN", () => {
+  const input = cumulativeMove();
+  for (const [flatMovesString, fen] of [
+    ["moves-other", "after-a"],
+    ["moves-aa", "after-a"],
+    ["move", "fen"],
+    ["", "fen"],
+    ["moves", "other-base"],
+    ["moves-a", "other-prefix"],
+    ["moves-a-z-next", "other-target"],
+  ]) {
+    const source = { fen, flatMovesString, timer: "retained" };
+    assert.throws(
+      () => decideMatchStateMove(source, input),
+      /move-chain-conflict/,
+    );
+    assert.deepEqual(source, { fen, flatMovesString, timer: "retained" });
+  }
+  const legacy = { ...input };
+  delete legacy.previousStates;
+  assert.throws(
+    () =>
+      decideMatchStateMove(
+        { fen: "after-a", flatMovesString: "moves-a" },
+        legacy,
+      ),
+    /move-chain-conflict/,
+  );
+});
+
+test("real moves and takebacks retain distinct history when the board repeats", () => {
+  const game = new Game();
+  const baseFen = game.toFen();
+  const first = game.play([
+    { kind: "position", position: { row: 10, column: 3 } },
+    { kind: "position", position: { row: 9, column: 2 } },
+  ]);
+  assert.equal(first.kind, "complete");
+  const firstFen = game.toFen();
+  const undone = game.takeback();
+  assert.equal(undone.kind, "complete");
+  assert.equal(undone.inputFen, "z");
+  assert.equal(game.toFen(), baseFen);
+  const next = game.playFen(first.inputFen);
+  assert.equal(next.kind, "complete");
+  assert.equal(game.toFen(), firstFen);
+  const final: SubmitMoveRequest = {
+    ...request,
+    previousFlatMovesString: "",
+    flatMovesString: `${first.inputFen}-z-${next.inputFen}`,
+    fen: firstFen,
+    previousStates: [
+      { moveCount: 0, fen: baseFen },
+      { moveCount: 1, fen: firstFen },
+      { moveCount: 2, fen: baseFen },
+    ],
+  };
+  const undoOnly = {
+    ...final,
+    flatMovesString: `${first.inputFen}-z`,
+    fen: baseFen,
+    previousStates: final.previousStates!.slice(0, 2),
+  };
+  const undoneState = decideMatchStateMove(
+    { fen: baseFen, flatMovesString: "", extra: true },
+    undoOnly,
+  );
+  assert.equal(undoneState.outcome, "applied");
+  assert.equal(undoneState.value.fen, baseFen);
+  assert.equal(undoneState.value.flatMovesString, undoOnly.flatMovesString);
+  const finalState = decideMatchStateMove(undoneState.value, final);
+  assert.equal(finalState.outcome, "applied");
+  assert.equal(finalState.value.flatMovesString, final.flatMovesString);
+  assert.equal(finalState.value.extra, true);
+  const late = decideMatchStateMove(finalState.value, undoOnly);
+  assert.equal(late.outcome, "superseded");
+  assert.equal(late.value, finalState.value);
+});
+
+test("cumulative moves reject oversized stored fields before returning superseded", () => {
+  for (const source of [
+    {
+      fen: "f".repeat(MAX_MATCH_FEN_BYTES + 1),
+      flatMovesString: "moves-a-z-next-extra",
+    },
+    {
+      fen: "fen",
+      flatMovesString: `moves-a-z-next-${"a".repeat(MAX_MATCH_HISTORY_BYTES)}`,
+    },
+  ])
+    assert.throws(
+      () => decideMatchStateMove(source, cumulativeMove()),
+      /match-invalid/,
+    );
+});
+
+test("move decisions reject missing and malformed stored records", () => {
+  for (const value of [null, undefined])
+    assert.throws(
+      () => decideMatchStateMove(value, request),
+      /match-not-found/,
+    );
+  for (const value of [
+    [],
+    false,
+    {},
+    { fen: "" },
+    { fen: "fen", flatMovesString: 1 },
+  ])
+    assert.throws(() => decideMatchStateMove(value, request), /match-invalid/);
 });
