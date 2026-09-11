@@ -128,6 +128,58 @@ function beforeMatchingBatch(
   };
 }
 
+function aroundMatchingAll(
+  database: D1Database,
+  matches: (query: string) => boolean,
+  timing: "before" | "after",
+  action: () => Promise<void>,
+): D1Database {
+  const nativeStatements = new WeakMap<object, D1PreparedStatement>();
+  let fired = false;
+  const wrap = (
+    statement: D1PreparedStatement,
+    query: string,
+  ): D1PreparedStatement => {
+    const wrapped = new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind") {
+          return (...values: unknown[]) => wrap(target.bind(...values), query);
+        }
+        if (property === "all") {
+          return async <T = unknown>(): Promise<D1Result<T>> => {
+            if (fired || !matches(query)) return target.all<T>();
+            fired = true;
+            if (timing === "before") await action();
+            const result = await target.all<T>();
+            if (timing === "after") await action();
+            return result;
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    nativeStatements.set(wrapped, statement);
+    return wrapped;
+  };
+  const unwrap = (statements: D1PreparedStatement[]) =>
+    statements.map((statement) => nativeStatements.get(statement) || statement);
+  return {
+    prepare: (query) => wrap(database.prepare(query), query),
+    batch: (statements) => database.batch(unwrap(statements)),
+    dump: () => database.dump(),
+    exec: (query) => database.exec(query),
+    withSession: (constraintOrBookmark) => {
+      const session = database.withSession(constraintOrBookmark);
+      return {
+        prepare: (query) => wrap(session.prepare(query), query),
+        batch: (statements) => session.batch(unwrap(statements)),
+        getBookmark: () => session.getBookmark(),
+      };
+    },
+  };
+}
+
 function failAfterMatchingBatch(
   database: D1Database,
   matches: (queries: readonly string[]) => boolean,
@@ -1251,68 +1303,80 @@ describe("canonical auth and profile runtime", () => {
     ).toBe(12);
   });
 
-  it("retries auth method reads when the login owner moves during a merge", async () => {
-    let nowMs = 20_000;
-    const service = createAuthIdentityService(d1Env, {
-      now: () => nowMs,
-      randomInteger: () => 0,
-    });
-    const source = await service.linkVerifiedMethod({
-      uid: "auth-move-source-login",
-      method: "sol",
-      methodValueRaw: "55555555555555555555555555555555",
-      normalizedMethodValue: "55555555555555555555555555555555",
-      intentId: "auth-move-source-intent",
-      requestEmoji: 5,
-      requestAura: null,
-      opId: "auth-move-source-operation",
-    });
-    const target = await service.linkVerifiedMethod({
-      uid: "auth-move-target-login",
-      method: "eth",
-      methodValueRaw: "0x5555555555555555555555555555555555555555",
-      normalizedMethodValue: "0x5555555555555555555555555555555555555555",
-      intentId: "auth-move-target-intent",
-      requestEmoji: 5,
-      requestAura: null,
-      opId: "auth-move-target-operation",
-    });
-    nowMs += 60_001;
-    const recovery = createAuthRecoveryService(d1Env, {
-      now: () => nowMs,
-      profileDb: testBindings.PROFILE_DB,
-    });
-    await recovery.recoverProfile(source.profileId);
-    await recovery.recoverProfile(target.profileId);
-    let merges = 0;
-    const racedDb = beforeMatchingBatch(
-      testBindings.PROFILE_DB,
-      (queries) =>
-        queries.some((query) => query.includes("FROM profile_auth_methods")),
-      async () => {
-        merges++;
-        await service.linkVerifiedMethod({
-          uid: "auth-move-target-login",
-          method: "sol",
-          methodValueRaw: "55555555555555555555555555555555",
-          normalizedMethodValue: "55555555555555555555555555555555",
-          intentId: "auth-move-merge-intent",
-          requestEmoji: 5,
-          requestAura: null,
-          opId: "auth-move-merge-operation",
-        });
-      },
-    );
-    await expect(
-      createAuthProfileRepository(d1Env, {
-        d1: racedDb,
-      }).getLinkedAuthMethods("auth-move-source-login"),
-    ).resolves.toMatchObject({
-      profileId: target.profileId,
-      linkedMethods: { eth: true, sol: true },
-    });
-    expect(merges).toBe(1);
-  });
+  it.each(["before", "after"] as const)(
+    "reads a coherent auth snapshot when the login owner merges %s the query",
+    async (timing) => {
+      const fixtureId = `auth-move-${timing}`;
+      const addressCharacter = timing === "before" ? "5" : "6";
+      const solAddress = addressCharacter.repeat(32);
+      const ethAddress = `0x${addressCharacter.repeat(40)}`;
+      let nowMs = 20_000;
+      const service = createAuthIdentityService(d1Env, {
+        now: () => nowMs,
+        randomInteger: () => 0,
+      });
+      const source = await service.linkVerifiedMethod({
+        uid: `${fixtureId}-source-login`,
+        method: "sol",
+        methodValueRaw: solAddress,
+        normalizedMethodValue: solAddress,
+        intentId: `${fixtureId}-source-intent`,
+        requestEmoji: 5,
+        requestAura: null,
+        opId: `${fixtureId}-source-operation`,
+      });
+      const target = await service.linkVerifiedMethod({
+        uid: `${fixtureId}-target-login`,
+        method: "eth",
+        methodValueRaw: ethAddress,
+        normalizedMethodValue: ethAddress,
+        intentId: `${fixtureId}-target-intent`,
+        requestEmoji: 5,
+        requestAura: null,
+        opId: `${fixtureId}-target-operation`,
+      });
+      nowMs += 60_001;
+      const recovery = createAuthRecoveryService(d1Env, {
+        now: () => nowMs,
+        profileDb: testBindings.PROFILE_DB,
+      });
+      await recovery.recoverProfile(source.profileId);
+      await recovery.recoverProfile(target.profileId);
+      let merges = 0;
+      const racedDb = aroundMatchingAll(
+        testBindings.PROFILE_DB,
+        (query) => query.includes("profile_auth_methods"),
+        timing,
+        async () => {
+          merges++;
+          await service.linkVerifiedMethod({
+            uid: `${fixtureId}-target-login`,
+            method: "sol",
+            methodValueRaw: solAddress,
+            normalizedMethodValue: solAddress,
+            intentId: `${fixtureId}-merge-intent`,
+            requestEmoji: 5,
+            requestAura: null,
+            opId: `${fixtureId}-merge-operation`,
+          });
+        },
+      );
+      const repository = createAuthProfileRepository(d1Env, { d1: racedDb });
+      await expect(
+        repository.getLinkedAuthMethods(`${fixtureId}-source-login`),
+      ).resolves.toMatchObject({
+        profileId: timing === "before" ? target.profileId : source.profileId,
+        linkedMethods: { eth: timing === "before", sol: true },
+      });
+      await expect(
+        repository.getLinkedAuthMethods(`${fixtureId}-source-login`),
+      ).resolves.toMatchObject({
+        profileId: target.profileId,
+        linkedMethods: { eth: true, sol: true },
+      });
+      expect(merges).toBe(1);
+    },
+  );
 
   it("uses canonical readers and guarded profile mutations", async () => {
     const service = createAuthIdentityService(d1Env, {
