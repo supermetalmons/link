@@ -1,46 +1,4 @@
-import {
-  GAME_SESSION_OPERATION_ID_PATTERN,
-  MATCH_MOVE_PATH,
-  MAX_MATCH_MOVE_REQUEST_BYTES,
-  isCreateInviteRequest,
-  isEndRematchRequest,
-  isEnsureMatchRequest,
-  isJoinInviteRequest,
-  isProposeRematchRequest,
-  isResolveInviteRoleRequest,
-  isSurrenderMatchRequest,
-  isSubmitMoveRequest,
-} from "@mons/shared/game-sessions";
-import { isAutoInviteId } from "@mons/shared/ids";
-import {
-  inferAutomatchStateHint,
-  isReadNavigationGamesRequest,
-  isRemoveNavigationGameRequest,
-  isStartAutomatchRequest,
-  type CancelAutomatchResponse,
-  type RemoveNavigationGameResponse,
-} from "@mons/shared/navigation";
-import {
-  WAGER_FROZEN_READ_PATH,
-  isWagerFrozenReadRequest,
-  isWagerFrozenReadResponse,
-  isWagerOutcomeResolveRequest,
-  isWagerProposalAcceptRequest,
-  isWagerProposalRemovalRequest,
-  isWagerProposalSendRequest,
-  type WagerProposalAcceptRequest,
-  type WagerProposalSendRequest,
-} from "@mons/shared/wagers";
-import {
-  isClaimMatchVictoryByTimerRequest,
-  isStartMatchTimerRequest,
-  type ClaimMatchVictoryByTimerRequest,
-  type StartMatchTimerRequest,
-} from "@mons/shared/timers";
-import {
-  isRatingUpdateRequest,
-  type RatingUpdateRequest,
-} from "@mons/shared/ratings";
+import { WAGER_FROZEN_READ_PATH } from "@mons/shared/wagers";
 import {
   AuthApiFailure,
   authErrorResponse,
@@ -55,456 +13,67 @@ import {
   verifySessionRequest,
   type WorkerExecutionContext,
 } from "./sessionAuth.ts";
-import type { RequestIdentity } from "./requestIdentity.ts";
-import { MAX_RECORD_KEY_BYTES, isSafeRecordKey } from "./recordKeys.ts";
 import {
-  type GameplayRepository,
-  createRatingRepository,
-  type RatingRepository,
-} from "./gameplayRepository.ts";
-import {
-  createGameplayCoordinationStores,
   GameSessionMutationLockFailure,
   MatchTimerStartStoreFailure,
-  type GameplayCoordinationStores,
 } from "./gameplayCoordinationD1.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
-import { isSafeOperationId } from "./operationIds.ts";
-import { readBoundedJson } from "./http.ts";
-import {
-  cancelOwnedQueuedAutomatches,
-  startAutomatch,
-  type AutomatchDependencies,
-} from "./automatch.ts";
-import {
-  claimMatchVictoryByTimer,
-  enforceMatchTimerClaimRateLimit,
-  enforceMatchTimerRateLimit,
-  startMatchTimer,
-  type StartMatchTimerDependencies,
-  type ClaimMatchVictoryByTimerDependencies,
-} from "./matchTimer.ts";
-import { canonicalMatchOperations } from "./matchStateClient.ts";
 import { requireActiveDurableMatchState } from "./matchStateAuthority.ts";
 import { MatchStateD1Failure } from "./matchStateD1.ts";
-import {
-  surrenderMatch,
-  type SurrenderMatchDependencies,
-} from "./matchSurrender.ts";
-import {
-  enforceMatchMoveRateLimit,
-  submitMove,
-  type SubmitMoveDependencies,
-} from "./matchMove.ts";
-import {
-  acceptWagerProposal,
-  removeWagerProposal,
-  sendWagerProposal,
-  type WagerProposalDependencies,
-} from "./wagerProposal.ts";
-import {
-  enforceWagerOutcomeRateLimit,
-  resolveWagerOutcome,
-  WAGER_SETTLEMENT_INITIAL_RETRY_DELAY_SECONDS,
-  type WagerOutcomeDependencies,
-} from "./wagerOutcome.ts";
-import {
-  updateRatings,
-  type RatingUpdateDependencies,
-} from "./ratingUpdate.ts";
-import {
-  ensureEventProgressWorkflow,
-  type EventProgressPlan,
-} from "./eventProgress.ts";
-import type { TelegramProjectionTask } from "./telegramProjectionTasks.ts";
-import type { ProfileGameProjectionTask } from "./profileGameProjectionTasks.ts";
-import {
-  createManualInvite,
-  endRematchSeries,
-  enforceGameSessionMutationRateLimit,
-  ensureParticipantMatch,
-  joinInvite,
-  proposeRematch,
-  resolveInviteRole,
-  type GameSessionMutationDependencies,
-} from "./gameSessionMutations.ts";
-import { readProfileGamesPage } from "./profileGamesD1.ts";
+import { enforceWagerOutcomeRateLimit } from "./wagerOutcome.ts";
 import { assertProfileMutationAllowed } from "./profileCanonicalActivation.ts";
 import {
   createWagerReservationRuntime,
   WagerClientUpdateRequired,
-  type WagerReservationRuntime,
 } from "./wagerReservationRuntime.ts";
 import {
-  getLoginProfileId,
-  requireProfileOwnershipSnapshot,
-} from "./profileOwnership.ts";
+  automatchRoutes,
+  readAutomatchOperationId,
+} from "./gameplayRoutes/automatch.ts";
+import { sessionRoutes } from "./gameplayRoutes/sessions.ts";
+import { matchRoutes } from "./gameplayRoutes/matches.ts";
+import { navigationRoutes } from "./gameplayRoutes/navigation.ts";
+import { ratingRoutes } from "./gameplayRoutes/ratings.ts";
+import { wagerRoutes } from "./gameplayRoutes/wagers.ts";
+import {
+  invalidRequest,
+  prepareGameplayRoute,
+  type GameplayRoute,
+} from "./gameplayRoutes/definition.ts";
+import type { GameplayRouteDependencies } from "./gameplayRoutes/runtime.ts";
 
-export const GAMEPLAY_PATHS = new Set([
-  MATCH_MOVE_PATH,
-  WAGER_FROZEN_READ_PATH,
-  "/automatch/cancel",
-  "/automatch/start",
-  "/invites/create",
-  "/invites/join",
-  "/invites/role/read",
-  "/matches/ensure",
-  "/matches/surrender",
-  "/matches/timer/claim",
-  "/matches/timer/start",
-  "/navigation/games/read",
-  "/navigation/games/remove",
-  "/ratings/update",
-  "/rematches/end",
-  "/rematches/propose",
-  "/wagers/proposals/accept",
-  "/wagers/proposals/cancel",
-  "/wagers/proposals/decline",
-  "/wagers/proposals/send",
-  "/wagers/outcomes/resolve",
-]);
+export type { GameplayRouteDependencies } from "./gameplayRoutes/runtime.ts";
+export { cancelAutomatch } from "./gameplayRoutes/automatch.ts";
+export {
+  removeNavigationGame,
+  resolveProfileId,
+} from "./gameplayRoutes/navigation.ts";
+export { MAX_RECORD_KEY_BYTES, isSafeRecordKey } from "./recordKeys.ts";
 
-const GAMEPLAY_READ_PATHS = new Set([
-  WAGER_FROZEN_READ_PATH,
-  "/invites/role/read",
-  "/navigation/games/read",
-]);
+const gameplayRoutes: ReadonlyMap<string, GameplayRoute> = new Map(
+  [
+    ...automatchRoutes,
+    ...sessionRoutes,
+    ...matchRoutes,
+    ...navigationRoutes,
+    ...ratingRoutes,
+    ...wagerRoutes,
+  ].map((route) => [route.path, route]),
+);
 
-export type GameplayRouteDependencies = {
-  wagerReservations?: WagerReservationRuntime;
-  assertMutationAllowed?: () => Promise<void>;
-  automatch?: Partial<AutomatchDependencies>;
-  coordination?: GameplayCoordinationStores;
-  gameSession?: Partial<GameSessionMutationDependencies>;
-  logCoordinationFailure?: (record: {
-    operation: string;
-    store: "mutation-lock" | "timer-start";
-  }) => void;
-  logFailure?: (kind: string) => void;
-  profileGamesDb?: D1Database;
-  readNavigationPage?: typeof readProfileGamesPage;
-  repository?: GameplayRepository;
-  rating?: Partial<RatingUpdateDependencies>;
-  ratingRepository?: RatingRepository;
-  timer?: Partial<
-    StartMatchTimerDependencies & ClaimMatchVictoryByTimerDependencies
-  >;
-  surrender?: Partial<SurrenderMatchDependencies>;
-  move?: Partial<SubmitMoveDependencies>;
-  wager?: Partial<WagerProposalDependencies>;
-  wagerOutcome?: WagerOutcomeDependencies;
-  verifyIdentity?: (
-    request: Request,
-    env: Env,
-    ctx: WorkerExecutionContext,
-  ) => Promise<RequestIdentity>;
-};
+export const GAMEPLAY_PATHS = new Set(gameplayRoutes.keys());
 
-function toRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function normalizeString(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
-}
-
-function readAutomatchOperationId(request: Request): string {
-  const values = new URL(request.url).searchParams.getAll("operationId");
-  if (
-    values.length !== 1 ||
-    !GAME_SESSION_OPERATION_ID_PATTERN.test(values[0])
-  ) {
-    throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-  }
-  return values[0];
-}
-
-async function resolveProfileId(
-  identity: RequestIdentity,
-  repository: GameplayRepository,
-): Promise<string> {
-  const ownership = await requireProfileOwnershipSnapshot(repository, {
-    loginUids: [identity.uid],
-    profileIds: [],
-  });
-  return getLoginProfileId(ownership, identity.uid) || "";
-}
-
-export async function cancelAutomatch(
-  identity: RequestIdentity,
-  repository: GameplayRepository,
-  dependencies: AutomatchDependencies,
-): Promise<CancelAutomatchResponse> {
-  return {
-    ok: await cancelOwnedQueuedAutomatches(
-      identity.uid,
-      repository,
-      dependencies,
-    ),
-  };
-}
-
-function skippedNavigationResponse(
-  inviteId: string,
-  reason: string,
-): RemoveNavigationGameResponse {
-  return { ok: true, skipped: true, reason, inviteId };
-}
-
-export async function removeNavigationGame(
-  identity: RequestIdentity,
-  inviteId: string,
-  repository: GameplayRepository,
-): Promise<RemoveNavigationGameResponse> {
-  const profileId = await resolveProfileId(identity, repository);
-  if (!profileId) {
-    return skippedNavigationResponse(inviteId, "profile-unresolved");
-  }
-  const [inviteValue, automatchValue] = await Promise.all([
-    repository.readInviteMetadata(inviteId),
-    repository.getStatePath(`automatch/${inviteId}`),
-  ]);
-  const invite = toRecord(inviteValue);
-  if (!invite) {
-    return skippedNavigationResponse(inviteId, "invite-missing");
-  }
-  const guestId = normalizeString(invite.guestId);
-  if (guestId) {
-    return skippedNavigationResponse(inviteId, "invite-active");
-  }
-  if (
-    inferAutomatchStateHint({
-      inviteId,
-      queueValue: automatchValue,
-      hasGuest: false,
-      storedStateHint: invite.automatchStateHint,
-    }) === "pending"
-  ) {
-    return skippedNavigationResponse(inviteId, "pending-automatch");
-  }
-  const game = await repository.getNavigationGame(profileId, inviteId);
-  if (!game) {
-    return {
-      ...skippedNavigationResponse(inviteId, "not-found"),
-      deleted: false,
-    };
-  }
-  if (game.status !== "waiting") {
-    return {
-      ...skippedNavigationResponse(
-        inviteId,
-        game.status ? `status-${game.status}` : "status-missing",
-      ),
-      deleted: false,
-    };
-  }
-  const result = await repository.deleteNavigationGame(profileId, inviteId);
-  return result === "deleted"
-    ? {
-        ok: true,
-        skipped: false,
-        deleted: true,
-        reason: null,
-        inviteId,
-      }
-    : {
-        ...skippedNavigationResponse(inviteId, "not-found"),
-        deleted: false,
-      };
-}
-
-async function readGameplayBody(
+export async function readGameplayBody(
   request: Request,
   pathname: string,
 ): Promise<Record<string, unknown>> {
-  let body: Record<string, unknown> | null;
-  try {
-    body = toRecord(
-      await readBoundedJson(
-        request,
-        pathname === MATCH_MOVE_PATH ? MAX_MATCH_MOVE_REQUEST_BYTES : undefined,
-      ),
-    );
-  } catch {
-    throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-  }
-  if (!body) {
-    throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-  }
-  if (pathname === WAGER_FROZEN_READ_PATH) {
-    if (!isWagerFrozenReadRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === "/automatch/cancel") {
-    if (Object.keys(body).length !== 0) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === "/automatch/start") {
-    if (!isStartAutomatchRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === "/navigation/games/read") {
-    if (!isReadNavigationGamesRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === "/invites/create") {
-    if (!isCreateInviteRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === "/invites/join") {
-    if (!isJoinInviteRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === "/invites/role/read") {
-    if (!isResolveInviteRoleRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === "/matches/ensure") {
-    if (!isEnsureMatchRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === "/matches/surrender") {
-    if (!isSurrenderMatchRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === MATCH_MOVE_PATH) {
-    if (!isSubmitMoveRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === "/rematches/propose") {
-    if (!isProposeRematchRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === "/rematches/end") {
-    if (!isEndRematchRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return body;
-  }
-  if (pathname === "/matches/timer/start") {
-    if (!isStartMatchTimerRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    const playerId = body.playerId.trim();
-    const opponentId = body.opponentId.trim();
-    const matchId = body.matchId.trim();
-    const inviteId = body.inviteId.trim();
-    return {
-      playerId,
-      opponentId,
-      matchId,
-      inviteId,
-    } satisfies StartMatchTimerRequest;
-  }
-  if (pathname === "/matches/timer/claim") {
-    if (!isClaimMatchVictoryByTimerRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    const playerId = body.playerId.trim();
-    const opponentId = body.opponentId.trim();
-    const matchId = body.matchId.trim();
-    const inviteId = body.inviteId.trim();
-    return {
-      playerId,
-      opponentId,
-      matchId,
-      inviteId,
-    } satisfies ClaimMatchVictoryByTimerRequest;
-  }
-  if (pathname.startsWith("/wagers/proposals/")) {
-    if (pathname === "/wagers/proposals/send") {
-      if (!isWagerProposalSendRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      const inviteId = body.inviteId.trim();
-      const matchId = body.matchId.trim();
-      if (!isSafeRecordKey(inviteId) || !isSafeRecordKey(matchId)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      return {
-        inviteId,
-        matchId,
-        material: body.material,
-        count: body.count,
-      } satisfies WagerProposalSendRequest;
-    }
-    if (!isWagerProposalAcceptRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    const inviteId = body.inviteId.trim();
-    const matchId = body.matchId.trim();
-    if (!isSafeRecordKey(inviteId) || !isSafeRecordKey(matchId)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return { inviteId, matchId } satisfies WagerProposalAcceptRequest;
-  }
-  if (pathname === "/wagers/outcomes/resolve") {
-    if (!isWagerOutcomeResolveRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    const inviteId = body.inviteId.trim();
-    const matchId = body.matchId.trim();
-    if (!isSafeRecordKey(inviteId) || !isSafeRecordKey(matchId)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return { inviteId, matchId };
-  }
-  if (pathname === "/ratings/update") {
-    if (!isRatingUpdateRequest(body)) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    const playerId = body.playerId.trim();
-    const opponentId = body.opponentId.trim();
-    const inviteId = body.inviteId.trim();
-    const matchId = body.matchId.trim();
-    if (
-      !isSafeRecordKey(playerId) ||
-      !isSafeRecordKey(opponentId) ||
-      !isSafeRecordKey(inviteId) ||
-      !isSafeRecordKey(matchId) ||
-      !isSafeOperationId(`${inviteId}__${matchId}`)
-    ) {
-      throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-    }
-    return {
-      playerId,
-      opponentId,
-      inviteId,
-      matchId,
-    } satisfies RatingUpdateRequest;
-  }
-  if (!isRemoveNavigationGameRequest(body)) {
-    throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-  }
-  const inviteId = body.inviteId.trim();
-  if (!isSafeRecordKey(inviteId)) {
-    throw new AuthApiFailure(400, "invalid-argument", "invalid-invite-id");
-  }
-  return { inviteId };
+  const fallbackPath = pathname.startsWith("/wagers/proposals/")
+    ? "/wagers/proposals/accept"
+    : "/navigation/games/remove";
+  const route =
+    gameplayRoutes.get(pathname) || gameplayRoutes.get(fallbackPath);
+  if (!route) throw invalidRequest();
+  return (await prepareGameplayRoute(request, route)).body;
 }
 
 export async function handleGameplayRoute(
@@ -516,7 +85,7 @@ export async function handleGameplayRoute(
   const pathname = new URL(request.url).pathname;
   if (
     request.method !== "POST" ||
-    GAMEPLAY_READ_PATHS.has(pathname) ||
+    gameplayRoutes.get(pathname)?.readOnly ||
     !GAMEPLAY_PATHS.has(pathname)
   )
     return handleGameplayRequest(request, env, ctx, dependencies);
@@ -557,7 +126,8 @@ async function handleGameplayRequest(
       throw new AuthApiFailure(405, "method-not-allowed", "method-not-allowed");
     }
     const pathname = new URL(request.url).pathname;
-    if (!GAMEPLAY_PATHS.has(pathname)) {
+    const route = gameplayRoutes.get(pathname);
+    if (!route) {
       throw new AuthApiFailure(404, "not-found", "not-found");
     }
     const identity = await (
@@ -577,411 +147,24 @@ async function handleGameplayRequest(
       pathname === "/automatch/start"
         ? readAutomatchOperationId(request)
         : null;
-    if (!GAMEPLAY_READ_PATHS.has(pathname)) {
+    if (!route.readOnly) {
       await assertProfileMutationAllowed(env);
     }
     if (pathname === "/wagers/outcomes/resolve") {
       await enforceWagerOutcomeRateLimit(env.AUTH_RATE_LIMITER, identity.uid);
     }
-    const body = await readGameplayBody(request, pathname);
-    if (pathname === WAGER_FROZEN_READ_PATH) {
-      if (!isWagerFrozenReadRequest(body) || !reservations) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      if (body.playerUid !== identity.uid) {
-        const ownership = await requireProfileOwnershipSnapshot(repository, {
-          loginUids: [identity.uid, body.playerUid],
-          profileIds: [],
-        });
-        const profileId = getLoginProfileId(ownership, identity.uid);
-        if (
-          !profileId ||
-          profileId !== getLoginProfileId(ownership, body.playerUid)
-        ) {
-          throw new AuthApiFailure(
-            403,
-            "permission-denied",
-            "wager-player-not-owned",
-          );
-        }
-      }
-      const balance = await reservations.readBalance(body.playerUid);
-      const response = { ok: true, playerUid: body.playerUid, ...balance };
-      if (!isWagerFrozenReadResponse(response)) {
-        throw new AuthApiFailure(
-          503,
-          "unavailable",
-          "wager-reservation-unavailable",
-        );
-      }
-      return authJsonResponse(response, 200, corsHeaders);
-    }
-    const baseCoordination =
-      dependencies.coordination ||
-      createGameplayCoordinationStores(env.PROFILE_GAMES_DB);
-    const coordination = repository.automatchPersistence
-      ? {
-          ...baseCoordination,
-          mutationLocks: repository.automatchPersistence.decorateLocks(
-            baseCoordination.mutationLocks,
-          ),
-        }
-      : baseCoordination;
-    const assertMutationAllowed =
-      dependencies.assertMutationAllowed ||
-      (() => assertProfileMutationAllowed(env));
-    const runWager = <T>(
-      work: (
-        admittedRepository: GameplayRepository,
-        guard: () => Promise<void>,
-      ) => Promise<T>,
-    ): Promise<T> => {
-      if (!reservations) throw new Error("wager-reservation-unavailable");
-      return reservations.run(
-        pathname,
-        async (admittedRepository, admissionGuard) => {
-          await reservations.assertClientVersion(request);
-          return work(admittedRepository, async () => {
-            await assertMutationAllowed();
-            await admissionGuard();
-          });
-        },
-      );
-    };
-    const defaultEnqueueEventProgress = async (plan: EventProgressPlan) => {
-      ctx.waitUntil(
-        ensureEventProgressWorkflow(env, plan).catch(() => {
-          console.error(
-            JSON.stringify({
-              event: "event_progress_enqueue_failed",
-              eventId: plan.params.eventId,
-              sourceKey: plan.params.sourceKey,
-            }),
-          );
-        }),
-      );
-    };
-    const defaultEnqueueTelegramProjection = async (
-      task: TelegramProjectionTask,
-    ) => {
-      if (
-        repository.automatchPersistence &&
-        !(await repository.automatchPersistence.writesEnabled())
-      )
-        return;
-      ctx.waitUntil(
-        env.TELEGRAM_PROJECTION_QUEUE.send(task).catch(() => {
-          console.error(
-            JSON.stringify({
-              event: "telegram_projection_enqueue_failed",
-              kind: task.kind,
-            }),
-          );
-        }),
-      );
-    };
-    const defaultEnqueueProfileGameProjection = async (
-      task: ProfileGameProjectionTask,
-    ) => {
-      if (
-        repository.automatchPersistence &&
-        !(await repository.automatchPersistence.writesEnabled())
-      )
-        return;
-      ctx.waitUntil(
-        env.PROFILE_GAME_PROJECTION_QUEUE.send(task).catch(() => {
-          console.error(
-            JSON.stringify({
-              event: "profile_game_projection_enqueue_failed",
-              kind: task.kind,
-            }),
-          );
-        }),
-      );
-    };
-    const automatchDependencies: AutomatchDependencies = {
-      ...dependencies.automatch,
-      assertMutationAllowed,
-      enqueueProfileGameProjection:
-        dependencies.automatch?.enqueueProfileGameProjection ||
-        defaultEnqueueProfileGameProjection,
-      enqueueTelegramProjection:
-        dependencies.automatch?.enqueueTelegramProjection ||
-        defaultEnqueueTelegramProjection,
-      mutationLocks: coordination.mutationLocks,
-    };
-    const ratingDependencies: RatingUpdateDependencies = {
-      ...dependencies.rating,
-      assertMutationAllowed,
-      enqueueEventProgress:
-        dependencies.rating?.enqueueEventProgress ||
-        defaultEnqueueEventProgress,
-      enqueueProfileGameProjection:
-        dependencies.rating?.enqueueProfileGameProjection ||
-        defaultEnqueueProfileGameProjection,
-      enqueueTelegramProjection:
-        dependencies.rating?.enqueueTelegramProjection ||
-        defaultEnqueueTelegramProjection,
-      timerStarts: coordination.timerStarts,
-    };
-    const gameSessionDependencies: GameSessionMutationDependencies = {
-      ...dependencies.gameSession,
-      assertMutationAllowed,
-      enqueueProfileGameProjection:
-        dependencies.gameSession?.enqueueProfileGameProjection ||
-        defaultEnqueueProfileGameProjection,
-      mutationLocks: coordination.mutationLocks,
-    };
-    const wagerDependencies: WagerProposalDependencies = {
-      ...dependencies.wager,
-      assertMutationAllowed,
-      mutationLocks: coordination.mutationLocks,
-    };
-    const canonical = pathname.startsWith("/matches/")
-      ? await canonicalMatchOperations(env)
-      : null;
-    let response;
-    if (pathname === "/automatch/cancel") {
-      response = await cancelAutomatch(
-        identity,
-        repository,
-        automatchDependencies,
-      );
-    } else if (pathname === "/automatch/start") {
-      if (!isStartAutomatchRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      if (!automatchOperationId) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      await enforceGameSessionMutationRateLimit(
-        env.AUTH_RATE_LIMITER,
-        identity.uid,
-      );
-      response = await startAutomatch(
-        identity,
-        { ...body, operationId: automatchOperationId },
-        repository,
-        automatchDependencies,
-      );
-    } else if (pathname === "/invites/create") {
-      if (!isCreateInviteRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      await enforceGameSessionMutationRateLimit(
-        env.AUTH_RATE_LIMITER,
-        identity.uid,
-      );
-      response = await createManualInvite(
-        identity,
-        body,
-        repository,
-        gameSessionDependencies,
-      );
-    } else if (pathname === "/invites/join") {
-      if (!isJoinInviteRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      await enforceGameSessionMutationRateLimit(
-        env.AUTH_RATE_LIMITER,
-        identity.uid,
-      );
-      const joinResponse = await joinInvite(
-        identity,
-        body,
-        repository,
-        gameSessionDependencies,
-      );
-      response = joinResponse;
-      if (joinResponse.joined && isAutoInviteId(body.inviteId)) {
-        await defaultEnqueueTelegramProjection({
-          kind: "automatch-telegram-projection",
-          inviteId: body.inviteId,
-          requestId: body.operationId,
-        });
-      }
-    } else if (pathname === "/invites/role/read") {
-      if (!isResolveInviteRoleRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      response = await resolveInviteRole(identity, body, repository);
-    } else if (pathname === "/matches/ensure") {
-      if (!isEnsureMatchRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      await enforceGameSessionMutationRateLimit(
-        env.AUTH_RATE_LIMITER,
-        identity.uid,
-      );
-      response = await ensureParticipantMatch(
-        identity,
-        body,
-        repository,
-        gameSessionDependencies,
-      );
-    } else if (pathname === "/rematches/propose") {
-      if (!isProposeRematchRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      await enforceGameSessionMutationRateLimit(
-        env.AUTH_RATE_LIMITER,
-        identity.uid,
-      );
-      response = await proposeRematch(
-        identity,
-        body,
-        repository,
-        gameSessionDependencies,
-      );
-    } else if (pathname === "/rematches/end") {
-      if (!isEndRematchRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      await enforceGameSessionMutationRateLimit(
-        env.AUTH_RATE_LIMITER,
-        identity.uid,
-      );
-      response = await endRematchSeries(
-        identity,
-        body,
-        repository,
-        gameSessionDependencies,
-      );
-    } else if (pathname === MATCH_MOVE_PATH && canonical) {
-      if (!isSubmitMoveRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      await enforceMatchMoveRateLimit(env.MOVE_RATE_LIMITER, identity.uid);
-      response = await submitMove(identity, body, repository, {
-        submitCanonical:
-          dependencies.move?.submitCanonical || canonical.submitCanonical,
-        assertMutationAllowed,
-        signal: dependencies.move?.signal || request.signal,
-      });
-    } else if (pathname === "/matches/surrender" && canonical) {
-      if (!isSurrenderMatchRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      await enforceGameSessionMutationRateLimit(
-        env.AUTH_RATE_LIMITER,
-        identity.uid,
-      );
-      response = await surrenderMatch(identity, body, repository, {
-        surrenderCanonical:
-          dependencies.surrender?.surrenderCanonical ||
-          canonical.surrenderCanonical,
-        assertMutationAllowed,
-        signal: dependencies.surrender?.signal || request.signal,
-      });
-    } else if (pathname === "/matches/timer/start" && canonical) {
-      if (!isStartMatchTimerRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      await enforceMatchTimerRateLimit(env.AUTH_RATE_LIMITER, identity.uid);
-      response = await startMatchTimer(identity, body, repository, {
-        startCanonical:
-          dependencies.timer?.startCanonical || canonical.startCanonical,
-        assertMutationAllowed,
-        signal: dependencies.timer?.signal || request.signal,
-      });
-    } else if (pathname === "/matches/timer/claim" && canonical) {
-      if (!isClaimMatchVictoryByTimerRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      await enforceMatchTimerClaimRateLimit(
-        env.AUTH_RATE_LIMITER,
-        identity.uid,
-      );
-      const claim = claimMatchVictoryByTimer(identity, body, repository, {
-        claimCanonical:
-          dependencies.timer?.claimCanonical || canonical.claimCanonical,
-        assertMutationAllowed,
-        signal: dependencies.timer?.signal || request.signal,
-      });
-      ctx.waitUntil(claim.catch(() => undefined));
-      response = await claim;
-    } else if (pathname === "/navigation/games/read") {
-      if (!isReadNavigationGamesRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      const profileId = await resolveProfileId(identity, repository);
-      response = profileId
-        ? await (dependencies.readNavigationPage || readProfileGamesPage)(
-            dependencies.profileGamesDb || env.PROFILE_GAMES_DB,
-            profileId,
-            body.limit,
-            body.cursor,
-          )
-        : { ok: true, items: [], nextCursor: null, hasMore: false };
-    } else if (pathname === "/navigation/games/remove") {
-      response = await removeNavigationGame(
-        identity,
-        normalizeString(body.inviteId),
-        repository,
-      );
-    } else if (pathname === "/ratings/update") {
-      if (!isRatingUpdateRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      response = await updateRatings(
-        identity,
-        body,
-        dependencies.ratingRepository ||
-          createRatingRepository(env, repository),
-        ratingDependencies,
-      );
-    } else if (pathname === "/wagers/proposals/send") {
-      if (!isWagerProposalSendRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      response = await runWager((admittedRepository, guard) =>
-        sendWagerProposal(identity, body, admittedRepository, {
-          ...wagerDependencies,
-          assertMutationAllowed: guard,
-        }),
-      );
-    } else if (pathname === "/wagers/proposals/accept") {
-      if (!isWagerProposalAcceptRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      response = await runWager((admittedRepository, guard) =>
-        acceptWagerProposal(identity, body, admittedRepository, {
-          ...wagerDependencies,
-          assertMutationAllowed: guard,
-        }),
-      );
-    } else if (pathname === "/wagers/outcomes/resolve") {
-      if (!isWagerOutcomeResolveRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      response = await runWager((admittedRepository, guard) =>
-        resolveWagerOutcome(identity, body, admittedRepository, {
-          ...dependencies.wagerOutcome,
-          assertMutationAllowed: guard,
-          scheduleRetry:
-            dependencies.wagerOutcome?.scheduleRetry ||
-            (async (task) => {
-              await env.WAGER_SETTLEMENT_QUEUE.send(task, {
-                delaySeconds: WAGER_SETTLEMENT_INITIAL_RETRY_DELAY_SECONDS,
-              });
-            }),
-          signal: dependencies.wagerOutcome?.signal || request.signal,
-        }),
-      );
-    } else {
-      if (!isWagerProposalRemovalRequest(body)) {
-        throw new AuthApiFailure(400, "invalid-argument", "invalid-request");
-      }
-      response = await runWager((admittedRepository, guard) =>
-        removeWagerProposal(
-          identity,
-          body,
-          pathname.endsWith("/cancel") ? "cancel" : "decline",
-          admittedRepository,
-          { ...wagerDependencies, assertMutationAllowed: guard },
-        ),
-      );
-    }
+    const prepared = await prepareGameplayRoute(request, route);
+    const response = await prepared.execute({
+      request,
+      env,
+      ctx,
+      dependencies,
+      pathname,
+      identity,
+      repository,
+      reservations,
+      automatchOperationId,
+    });
     return authJsonResponse(response, 200, corsHeaders);
   } catch (error) {
     if (error instanceof WagerClientUpdateRequired) {
@@ -1036,10 +219,3 @@ async function handleGameplayRequest(
     return authErrorResponse(failure, corsHeaders);
   }
 }
-
-export {
-  MAX_RECORD_KEY_BYTES,
-  isSafeRecordKey,
-  readGameplayBody,
-  resolveProfileId,
-};
