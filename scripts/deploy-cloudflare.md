@@ -34,7 +34,7 @@ Authenticate Wrangler locally or provide `CLOUDFLARE_API_TOKEN` through the proc
 
 ## Active-match storage cutover
 
-Completed September 11, 2026. API version `bad5a3f4-2301-47a8-9fb5-42968e5b3c4b` serves 100% of traffic. Match authority is `durable`, active at epoch 2, with no remaining migration admissions or operator lock. Events are active in D1 at freeze generation 5. The existing `InviteReactions` namespace is unchanged; no frontend release or new Worker namespace was needed.
+Completed September 11, 2026 with API version `bad5a3f4-2301-47a8-9fb5-42968e5b3c4b` at 100% of traffic. Match authority is `durable`, active at epoch 2, with no remaining migration admissions or operator lock. Events are active in D1 at freeze generation 5. The existing `InviteReactions` namespace is unchanged; no frontend release or new Worker namespace was needed.
 
 The verified import covers all 9,821 Firebase match records, 9 timer claims, and 4,629 invite rooms. Twelve previously documented nonparticipant records remain exact read-only D1 legacy records; there are no legacy claims or unresolved playable mappings. Source and verification digests match `486123eba6e315ccd0d0c911bdcd706a3f823ccfb03a8217d6db15aa70aec6aa`. Current route counts can increase through ordinary gameplay; immutable import counts remain in `match_state_control` and the protected manifest. Absolute timer deadlines, unknown record fields, creation markers, source records, and delivery revisions were preserved.
 
@@ -58,6 +58,14 @@ npm run manage:match-state -- --inspect-admissions --directory <original-private
 ```
 
 Completed migration write phases are retired and fail before credentials or source access. Preserve all control and evidence tables. Do not clear unexplained admissions or locks, reset authority, overwrite failed-import evidence, or restart the migration to force progress. Subsequent compatible releases use the routine release path below.
+
+## Match-read availability guard
+
+Released September 11, 2026 with API version `d32b357a-4a13-42b8-8c27-51e4471ea511` at 100%, from commit `450695107`. An exact durable route whose canonical record is missing now returns `503` instead of `match: null`, preventing reconnect recovery from treating unavailable storage as a new match. An absent route still returns `match: null`. The initialized-room regression test covers both outcomes.
+
+Validation passed 1,011 API Node tests, 613 Worker runtime tests, 335 tooling tests, typecheck, lint, formatting, and generated-binding checks. Production API smoke passed, and four existing match snapshots were identical before and after promotion; the absent-match check also passed. All bindings and the existing namespace were verified unchanged, with retired Firebase credentials still absent.
+
+The compatible Workflow definitions were published for new instances: event progress `84d04905-06f5-4d36-9ada-bd75b35bdb3e` and prize withdrawal `28bb01b2-1745-420e-b753-b66614faf235`. Existing instances, schedules, and settings were preserved. This routine release required no schema, frontend, Firebase rules, IAM, Queue, or maintenance-control changes. Release evidence is retained in `/private/tmp/mons-match-read-fix-m8lgdC`.
 
 ## Retired migration operators
 
