@@ -32,7 +32,7 @@ import type { RequestIdentity } from "./requestIdentity.ts";
 
 type MoveRepository = Pick<
   GameplayRepository,
-  "getStatePath" | "readProfileOwnershipSnapshot"
+  "getStatePath" | "readInviteMetadata" | "readProfileOwnershipSnapshot"
 >;
 
 export type SubmitMoveDependencies = {
@@ -119,9 +119,8 @@ export async function submitMove(
     ? AbortSignal.any([dependencies.signal, timeout])
     : timeout;
   signal.throwIfAborted();
-  const inviteValue = await repository.getStatePath(
-    `invites/${request.inviteId}`,
-    undefined,
+  const inviteValue = await repository.readInviteMetadata(
+    request.inviteId,
     signal,
   );
   if (inviteValue === null || inviteValue === undefined) {

@@ -8,6 +8,8 @@ import { notifyMatchSyncInvites } from "./matchSyncNotifications.ts";
 import { prepareCreatedMatchPresentations } from "./matchPresentationRegistry.ts";
 import { createWagerStateRepository } from "./wagerStateRepository.ts";
 import { createMatchStateSource } from "./matchStateSource.ts";
+import { InviteSourceFailure } from "./inviteSourceD1.ts";
+import { isSafeRecordKey } from "./recordKeys.ts";
 import type { HistoricalMatchPair } from "@mons/shared/game-sessions";
 import type {
   MiningMaterialName,
@@ -240,6 +242,10 @@ export type RatingProfileGameProjectionRepository = RatingRepository & {
 };
 
 export type GameplayRepository = ProfileOwnershipReader & {
+  readInviteMetadata: (
+    inviteId: string,
+    signal?: AbortSignal,
+  ) => Promise<Record<string, unknown> | null>;
   readMatchPair?: StateRepository["readMatchPair"];
   automatchPersistence?: AutomatchPersistence;
   wagerFrozen?: WagerFrozenStore;
@@ -328,6 +334,23 @@ export function createGameplayRepository(
     }),
     wagerFrozen,
     automatchPersistence,
+    async readInviteMetadata(inviteId, signal) {
+      signal?.throwIfAborted();
+      if (!isSafeRecordKey(inviteId)) {
+        throw new TypeError("invalid-invite-source-key");
+      }
+      const value = await automatchPersistence.client.getPath(
+        `invites/${inviteId}`,
+        undefined,
+        signal,
+      );
+      signal?.throwIfAborted();
+      if (value === null) return null;
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new InviteSourceFailure("invite-source-corrupt");
+      }
+      return value as Record<string, unknown>;
+    },
     readMatchPair: matchSource.readMatchPair,
   };
 }

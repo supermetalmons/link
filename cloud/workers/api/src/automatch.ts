@@ -578,7 +578,7 @@ async function readAutomatchCancellationProof(
   try {
     const [queueValue, inviteValue, outboxRequestId] = await Promise.all([
       repository.getStatePath(`automatch/${inviteId}`, undefined, signal),
-      repository.getStatePath(`invites/${inviteId}`, undefined, signal),
+      repository.readInviteMetadata(inviteId, signal),
       repository.getStatePath(
         `${getAutomatchProfileGameProjectionOutboxPath(inviteId)}/requestId`,
         undefined,
@@ -1042,7 +1042,7 @@ async function persistExistingAutomatchReceipt(
       async () => {
         const [queueValue, inviteValue] = await Promise.all([
           repository.getStatePath(`automatch/${inviteId}`, undefined, signal),
-          repository.getStatePath(`invites/${inviteId}`, undefined, signal),
+          repository.readInviteMetadata(inviteId, signal),
         ]);
         const queueUid = normalizeString(toRecord(queueValue)?.uid);
         const invite = toRecord(inviteValue);
@@ -1461,11 +1461,7 @@ async function attemptAutomatch(
             undefined,
             signal,
           ),
-          repository.getStatePath(
-            `invites/${queued.inviteId}`,
-            undefined,
-            signal,
-          ),
+          repository.readInviteMetadata(queued.inviteId, signal),
         ]);
         const currentInvite = toRecord(currentInviteValue);
         if (

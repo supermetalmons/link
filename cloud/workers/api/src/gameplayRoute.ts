@@ -260,7 +260,7 @@ export async function removeNavigationGame(
     return skippedNavigationResponse(inviteId, "profile-unresolved");
   }
   const [inviteValue, automatchValue] = await Promise.all([
-    repository.getStatePath(`invites/${inviteId}`),
+    repository.readInviteMetadata(inviteId),
     repository.getStatePath(`automatch/${inviteId}`),
   ]);
   const invite = toRecord(inviteValue);

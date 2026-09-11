@@ -388,10 +388,7 @@ function createRepository({
     wager: structuredClone(wager),
   };
   if (modernizeWager) modernizeWagerState(state);
-  const repository: Omit<
-    GameplayRepository,
-    "getStatePath" | "transactStatePath"
-  > = {
+  const repository: Parameters<typeof attachMemoryWagerFrozenStore>[0] = {
     applyWagerTransferOnce: async (input) => {
       state.transferCalls += 1;
       if (transferFingerprint) {

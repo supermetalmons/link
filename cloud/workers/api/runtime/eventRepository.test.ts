@@ -905,6 +905,9 @@ describe("hybrid event repository", () => {
         },
         {
           getStatePath: client.getPath,
+          readInviteMetadata: async () => {
+            throw new Error("unexpected-invite-metadata-read");
+          },
           transactStatePath: client.transactPath,
         },
         {

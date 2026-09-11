@@ -1,6 +1,6 @@
 import { MAX_EVENT_PARTICIPANTS } from "@mons/shared/events";
 import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
-import type { StateRepository } from "./stateRepositoryTypes.ts";
+import type { GameplayRepository } from "./gameplayRepository.ts";
 import { captureLoginMatchDiscovery } from "./loginMatchDiscoveryD1.ts";
 
 const EVENT_MATCH_DISCOVERY_CONCURRENCY = 4;
@@ -62,7 +62,7 @@ export function eventMatchInviteIds(event: Record<string, unknown>): string[] {
 
 export async function captureEventMatchDiscovery(
   db: D1Database,
-  read: StateRepository["getPath"],
+  repository: Pick<GameplayRepository, "getStatePath" | "readInviteMetadata">,
   inputInviteIds: readonly string[],
   signal?: AbortSignal,
   nowMs = Date.now(),
@@ -85,7 +85,7 @@ export async function captureEventMatchDiscovery(
         .slice(offset, offset + EVENT_MATCH_DISCOVERY_CONCURRENCY)
         .map(async (inviteId) => {
           const invite = record(
-            await read(`invites/${inviteId}`, undefined, signal),
+            await repository.readInviteMetadata(inviteId, signal),
           );
           const hostId = invite?.hostId;
           const guestId = invite?.guestId;
@@ -98,7 +98,7 @@ export async function captureEventMatchDiscovery(
           }
           return Promise.all(
             [hostId, guestId].map(async (loginUid) => {
-              const match = await read(
+              const match = await repository.getStatePath(
                 `players/${loginUid}/matches/${inviteId}`,
                 { shallow: true },
                 signal,

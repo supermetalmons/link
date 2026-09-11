@@ -145,7 +145,7 @@ type ProfileLinkProjectionResult = Pick<
 >;
 type ProfileGameProjectionState = Pick<
   GameplayRepository,
-  "getStatePath" | "transactStatePath" | "readMatchPair"
+  "getStatePath" | "readInviteMetadata" | "transactStatePath" | "readMatchPair"
 >;
 
 type ProfileLinkProjectionJobs = Pick<

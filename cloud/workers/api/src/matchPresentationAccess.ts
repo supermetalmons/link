@@ -46,7 +46,7 @@ export async function readPresentationInvite(
   repository: GameplayRepository,
   inviteId: string,
 ): Promise<PresentationInvite> {
-  const value = await repository.getStatePath(`invites/${inviteId}`);
+  const value = await repository.readInviteMetadata(inviteId);
   if (value === null || value === undefined) {
     throw new AuthApiFailure(404, "not-found", "invite-not-found");
   }

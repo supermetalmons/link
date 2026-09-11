@@ -380,6 +380,9 @@ function applyStateTransaction(
 
 function projectionLockState(values = new Map<string, unknown>()) {
   return {
+    readInviteMetadata: async () => {
+      throw new Error("unexpected-invite-metadata-read");
+    },
     getStatePath: async (path: string) => {
       assertActiveStatePath(path);
       return values.get(path);
@@ -723,6 +726,9 @@ test("automatch projection uses the immutable source timestamp and exact-clears"
     reason: string;
   }> = [];
   const state = {
+    readInviteMetadata: async () => {
+      throw new Error("unexpected-invite-metadata-read");
+    },
     getStatePath: async (requestedPath: string) => values.get(requestedPath),
     transactStatePath: async (
       requestedPath: string,
@@ -1116,6 +1122,9 @@ test("automatch projection serializes newer work behind the current invite", asy
     firstStarted = resolve;
   });
   const state = {
+    readInviteMetadata: async () => {
+      throw new Error("unexpected-invite-metadata-read");
+    },
     getStatePath: async (path: string) => values.get(path),
     transactStatePath: async (
       path: string,
@@ -1799,6 +1808,9 @@ test("automatch Queue retries transient work without settling its outbox", async
   await handleProfileGameProjectionMessage(failed.message, TELEGRAM_TEST_ENV, {
     createLocks: () => locks,
     createStateRepository: () => ({
+      readInviteMetadata: async () => {
+        throw new Error("unexpected-invite-metadata-read");
+      },
       getStatePath: async (path) => values.get(path),
       transactStatePath: async (path, updater) => {
         transactions++;
@@ -2079,6 +2091,9 @@ test("event recovery normalizes every non-null malformed marker", async () => {
     const result = await repairInvalidEventSweepEntry(
       {
         getStatePath: async () => null,
+        readInviteMetadata: async () => {
+          throw new Error("unexpected-invite-metadata-read");
+        },
         transactStatePath: async (_path, updater) => {
           const transaction = applyStateTransaction(current, updater);
           if (transaction.committed) {
@@ -2184,6 +2199,9 @@ test("event recovery claims due outboxes and repairs malformed records", async (
     ["event-boolean", { ...eventOutbox(), lastQueuedAtMs: false }],
   ]);
   const state = {
+    readInviteMetadata: async () => {
+      throw new Error("unexpected-invite-metadata-read");
+    },
     getStatePath: async (path: string, query?: Record<string, unknown>) => {
       assert.equal(path, "profileGameProjectionOutbox/event");
       if (query?.endAt === 300_000) {
@@ -2320,6 +2338,9 @@ test("automatch recovery claims due outboxes, repairs poison, and preserves sour
     ],
   ]);
   const state = {
+    readInviteMetadata: async () => {
+      throw new Error("unexpected-invite-metadata-read");
+    },
     getStatePath: async (path: string, query?: Record<string, unknown>) => {
       assert.equal(path, "profileGameProjectionOutbox/automatch");
       if (query?.endAt === 300_000) {
@@ -2443,6 +2464,9 @@ test("automatch recovery claims due outboxes, repairs poison, and preserves sour
 test("automatch recovery claims an outbox only once", async () => {
   let current: unknown = automatchOutbox("request-1", 50, 100);
   const state = {
+    readInviteMetadata: async () => {
+      throw new Error("unexpected-invite-metadata-read");
+    },
     getStatePath: async () => current,
     transactStatePath: async (
       _path: string,

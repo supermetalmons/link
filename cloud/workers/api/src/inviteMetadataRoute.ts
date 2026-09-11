@@ -129,9 +129,7 @@ export async function handleInviteMetadataRoute(
       );
     }
     const repository = dependencies.repository || createGameplayRepository(env);
-    const invite = await repository.getStatePath(`invites/${inviteId}`, {
-      shallow: true,
-    });
+    const invite = await repository.readInviteMetadata(inviteId);
     if (invite === null || invite === undefined) {
       throw new AuthApiFailure(404, "not-found", "invite-not-found");
     }

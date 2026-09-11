@@ -103,9 +103,12 @@ function setup({
     guestMatch: null,
   };
   const repository = createGameplayRepository(env);
-  repository.getStatePath = async (path) => {
+  repository.getStatePath = async () => {
+    throw new Error("unexpected-full-state-read");
+  };
+  repository.readInviteMetadata = async (inviteId) => {
     calls.existence++;
-    assert.equal(path, "invites/invite-one");
+    assert.equal(inviteId, "invite-one");
     return source;
   };
   repository.readProfileOwnershipSnapshot = async (query) => ({
@@ -222,7 +225,7 @@ test("missing, invalid and unregistered canonical invites do not allocate a room
     [new Error("source-unavailable"), 503],
   ] as const) {
     const state = setup();
-    state.repository.getStatePath = async () => {
+    state.repository.readInviteMetadata = async () => {
       if (source instanceof Error) throw source;
       return source;
     };

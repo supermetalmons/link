@@ -534,9 +534,7 @@ export async function resolveInviteRole(
   request: ResolveInviteRoleRequest,
   repository: GameplayRepository,
 ): Promise<ResolveInviteRoleResponse> {
-  const storedInvite = await repository.getStatePath(
-    `invites/${request.inviteId}`,
-  );
+  const storedInvite = await repository.readInviteMetadata(request.inviteId);
   return resolveInviteRoleFromSnapshot(
     identity,
     request,
@@ -689,7 +687,7 @@ export async function createManualInvite(
     repository,
     isCreateInviteResponse,
     async () => {
-      if (await repository.getStatePath(`invites/${request.inviteId}`)) {
+      if (await repository.readInviteMetadata(request.inviteId)) {
         throw failedPrecondition("invite-already-exists");
       }
       const random = dependencies.random || secureRandom;
@@ -801,7 +799,7 @@ export async function joinInvite(
     isJoinInviteResponse,
     async () => {
       const invite = toRecord(
-        await repository.getStatePath(`invites/${request.inviteId}`),
+        await repository.readInviteMetadata(request.inviteId),
       );
       if (!invite) {
         throw new AuthApiFailure(404, "not-found", "invite-not-found");
@@ -1000,7 +998,7 @@ export async function proposeRematch(
     isProposeRematchResponse,
     async () => {
       const invite = toRecord(
-        await repository.getStatePath(`invites/${request.inviteId}`),
+        await repository.readInviteMetadata(request.inviteId),
       );
       if (!invite) {
         throw new AuthApiFailure(404, "not-found", "invite-not-found");
@@ -1121,7 +1119,7 @@ export async function endRematchSeries(
     isEndRematchResponse,
     async () => {
       const invite = toRecord(
-        await repository.getStatePath(`invites/${request.inviteId}`),
+        await repository.readInviteMetadata(request.inviteId),
       );
       if (!invite) {
         throw new AuthApiFailure(404, "not-found", "invite-not-found");
@@ -1196,7 +1194,7 @@ export async function ensureParticipantMatch(
     isEnsureMatchResponse,
     async () => {
       const invite = toRecord(
-        await repository.getStatePath(`invites/${request.inviteId}`),
+        await repository.readInviteMetadata(request.inviteId),
       );
       if (!invite) {
         throw new AuthApiFailure(404, "not-found", "invite-not-found");

@@ -102,10 +102,12 @@ function setup(
       },
     },
   });
-  repository.getStatePath = async (path) => {
-    calls.reads.push(path);
-    if (!path.startsWith("invites/")) throw new Error("unexpected-source-read");
-    return invite;
+  repository.getStatePath = async () => {
+    throw new Error("unexpected-full-state-read");
+  };
+  repository.readInviteMetadata = async (inviteId) => {
+    calls.reads.push(`invites/${inviteId}`);
+    return invite as Record<string, unknown> | null;
   };
   repository.readProfileOwnershipSnapshot = async (query) => ({
     canonicalProfileIdByProfileId: new Map(),
@@ -686,11 +688,10 @@ test("v2 sockets validate registered presentation and negotiate anonymous or par
   for (const authenticated of [false, true]) {
     const state = setup();
     const ensured: unknown[] = [];
-    state.repository.getStatePath = async (path) => {
-      state.calls.reads.push(path);
-      if (path === "invites/invite-one")
-        return { hostId: "host-login", guestId: "guest-login" };
-      throw new Error(`unexpected-source-read:${path}`);
+    state.repository.readInviteMetadata = async (inviteId) => {
+      state.calls.reads.push(`invites/${inviteId}`);
+      assert.equal(inviteId, "invite-one");
+      return { hostId: "host-login", guestId: "guest-login" };
     };
     state.dependencies.room!.ensurePresentations = async (matchId, seeds) => {
       ensured.push({ matchId, seeds });

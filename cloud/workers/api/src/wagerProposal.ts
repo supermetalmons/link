@@ -148,7 +148,7 @@ export async function resolveWagerParticipantUids(
   inviteId: string,
   repository: GameplayRepository,
 ): Promise<WagerParticipantUids | WagerParticipants | WagerParticipantFailure> {
-  const invite = toRecord(await repository.getStatePath(`invites/${inviteId}`));
+  const invite = toRecord(await repository.readInviteMetadata(inviteId));
   if (!invite) {
     return { ok: false, reason: "invite-not-found" };
   }

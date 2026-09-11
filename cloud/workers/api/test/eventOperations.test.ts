@@ -105,6 +105,8 @@ function createRepository(initial: Record<string, unknown> = {}) {
   let repository: TestGameplayRepository;
   repository = {
     ...eventReadFixture(async (path) => getPath(values, path)),
+    readInviteMetadata: async (inviteId) =>
+      getPath(values, `invites/${inviteId}`) as Record<string, unknown> | null,
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     findProfileId: async () => profileId,

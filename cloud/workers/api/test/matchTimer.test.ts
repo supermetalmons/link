@@ -25,12 +25,16 @@ import { createMemoryGameplayCoordinationStores } from "./gameplayCoordinationTe
 
 type TimerRepository = Pick<
   GameplayRepository,
-  "getStatePath" | "readProfileOwnershipSnapshot" | "transactStatePath"
+  | "getStatePath"
+  | "readInviteMetadata"
+  | "readProfileOwnershipSnapshot"
+  | "transactStatePath"
 >;
 
 type ClaimTimerRepository = Pick<
   GameplayRepository,
   | "getStatePath"
+  | "readInviteMetadata"
   | "patchStateRoot"
   | "readProfileOwnershipSnapshot"
   | "transactStatePath"
@@ -190,11 +194,16 @@ function repository({
   const stores = createMemoryGameplayCoordinationStores();
   let storedTimer = currentTimer;
   const value: TimerRepository = {
+    readInviteMetadata: async (requestedInviteId, signal) => {
+      signal?.throwIfAborted();
+      assert.equal(requestedInviteId, inviteId);
+      paths.push(`invites/${requestedInviteId}`);
+      return invite as Record<string, unknown> | null;
+    },
     getStatePath: async (path) => {
       paths.push(path);
       if (path === "players/player-1/matches/match-1") return player;
       if (path === "players/player-2/matches/match-1") return opponent;
-      if (path === `invites/${inviteId}`) return invite;
       assert.fail(`unexpected state path ${path}`);
     },
     readProfileOwnershipSnapshot: async (query) =>
@@ -279,6 +288,11 @@ function claimRepository({
   let opponentReads = 0;
   let storedClaim: unknown = initialClaim;
   const value: ClaimTimerRepository = {
+    readInviteMetadata: async (inviteId, signal) => {
+      signal?.throwIfAborted();
+      paths.push(`invites/${inviteId}`);
+      return invite as Record<string, unknown> | null;
+    },
     getStatePath: async (path, _query, signal) => {
       signal?.throwIfAborted();
       paths.push(path);
@@ -294,7 +308,6 @@ function claimRepository({
           ? opponent
           : liveOpponent;
       }
-      if (path.startsWith("invites/")) return invite;
       assert.fail(`unexpected state path ${path}`);
     },
     patchStateRoot: async (updates, signal) => {
@@ -490,10 +503,12 @@ test("retries only failed match reads once", async () => {
   let playerReads = 0;
   let opponentReads = 0;
   const value: TimerRepository = {
+    readInviteMetadata: async (inviteId) => {
+      assert.equal(inviteId, "match-1");
+      return { hostId: "player-1", guestId: "player-2" };
+    },
     getStatePath: async (path) => {
-      if (path === "invites/match-1") {
-        return { hostId: "player-1", guestId: "player-2" };
-      }
+      assert.ok(!path.startsWith("invites/"));
       if (path.includes("player-1")) {
         playerReads++;
         if (playerReads === 1) {
@@ -524,6 +539,76 @@ test("retries only failed match reads once", async () => {
   assert.equal(playerReads, 3);
   assert.equal(opponentReads, 2);
 });
+
+for (const operation of ["start", "claim"] as const) {
+  test(`${operation} retries failed invite metadata reads through the narrow reader`, async () => {
+    const repo = claimRepository({
+      player: match("black", { timer: operation === "claim" ? "7;1000" : "" }),
+    });
+    const read = repo.value.readInviteMetadata;
+    const signals: AbortSignal[] = [];
+    repo.value.readInviteMetadata = async (inviteId, signal) => {
+      assert.ok(signal);
+      signals.push(signal);
+      if (signals.length === 1) throw new Error("transient-invite-read");
+      return read(inviteId, signal);
+    };
+    const run =
+      operation === "start" ? startMatchTimer : claimMatchVictoryByTimer;
+    await run(identity, request, repo.value, {
+      now: () => 1_001,
+      resolveGame: () => gameState(),
+    });
+    assert.equal(signals.length, 3);
+    assert.equal(signals[0], signals[1]);
+  });
+
+  test(`${operation} preserves cancellation during invite metadata admission`, async () => {
+    const repo = claimRepository();
+    const controller = new AbortController();
+    const failure = new Error("caller-cancelled");
+    let reads = 0;
+    repo.value.readInviteMetadata = async (_inviteId, signal) => {
+      reads++;
+      assert.ok(signal);
+      controller.abort(failure);
+      signal.throwIfAborted();
+      assert.fail("cancelled read must abort");
+    };
+    const run =
+      operation === "start" ? startMatchTimer : claimMatchVictoryByTimer;
+    await assert.rejects(
+      () => run(identity, request, repo.value, { signal: controller.signal }),
+      (error) => error === failure,
+    );
+    assert.equal(reads, 2);
+    assert.deepEqual(repo.transactions, []);
+    assert.deepEqual(repo.patches, []);
+  });
+
+  test(`canonical ${operation} admits through invite metadata without aggregate reads`, async () => {
+    const repo = claimRepository();
+    repo.value.getStatePath = async () => assert.fail("unexpected-state-read");
+    let calls = 0;
+    const run =
+      operation === "start" ? startMatchTimer : claimMatchVictoryByTimer;
+    await run(identity, request, repo.value, {
+      startCanonical: async (input) => {
+        calls++;
+        assert.deepEqual(input, request);
+        return { ok: true, timer: "7;1000", duration: 90_000 };
+      },
+      claimCanonical: async (input, invite) => {
+        calls++;
+        assert.deepEqual(input, request);
+        assert.deepEqual(invite, { hostId: "player-1", guestId: "player-2" });
+        return { ok: true };
+      },
+    });
+    assert.equal(calls, 1);
+    assert.deepEqual(repo.paths, ["invites/match-1"]);
+  });
+}
 
 test("authorizes a same-profile login and rejects unrelated identities", async () => {
   const sameProfile = repository();
@@ -677,10 +762,12 @@ test("concurrent starts converge on the first timer", async () => {
   const stored = new Map<string, unknown>();
   let writes = 0;
   const value: TimerRepository = {
+    readInviteMetadata: async (inviteId) => {
+      assert.equal(inviteId, "match-1");
+      return { hostId: "player-1", guestId: "player-2" };
+    },
     getStatePath: async (path) => {
-      if (path === "invites/match-1") {
-        return { hostId: "player-1", guestId: "player-2" };
-      }
+      assert.ok(!path.startsWith("invites/"));
       return path.includes("player-1") ? match("black") : match("white");
     },
     transactStatePath: async (path, updater) => {
@@ -729,10 +816,12 @@ test("advances one marker and rejects stale earlier turns", async () => {
   const stored = new Map<string, unknown>();
   let turnNumber = 7;
   const value: TimerRepository = {
+    readInviteMetadata: async (inviteId) => {
+      assert.equal(inviteId, "match-1");
+      return { hostId: "player-1", guestId: "player-2" };
+    },
     getStatePath: async (path) => {
-      if (path === "invites/match-1") {
-        return { hostId: "player-1", guestId: "player-2" };
-      }
+      assert.ok(!path.startsWith("invites/"));
       if (path === "players/player-1/matches/match-1") {
         const timer = stored.get(timerPath);
         return match("black", {
@@ -922,10 +1011,12 @@ test("restores the first timer after the match record is cleared", async () => {
   const timerPath = "players/player-1/matches/match-1/timer";
   const stored = new Map<string, unknown>();
   const value: TimerRepository = {
+    readInviteMetadata: async (inviteId) => {
+      assert.equal(inviteId, "match-1");
+      return { hostId: "player-1", guestId: "player-2" };
+    },
     getStatePath: async (path) => {
-      if (path === "invites/match-1") {
-        return { hostId: "player-1", guestId: "player-2" };
-      }
+      assert.ok(!path.startsWith("invites/"));
       if (path === "players/player-1/matches/match-1") {
         const timer = stored.get(timerPath);
         return match("black", {

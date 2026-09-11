@@ -302,7 +302,15 @@ function repository(initial: Record<string, unknown> = {}, nowMs = 1_000) {
       ice: 0,
     }),
     getMiningSnapshot: async () => null,
-    getStatePath: async (path) => values.get(path) ?? null,
+    readInviteMetadata: async (inviteId) =>
+      (values.get(`invites/${inviteId}`) ?? null) as Record<
+        string,
+        unknown
+      > | null,
+    getStatePath: async (path) => {
+      assert.ok(!/^invites\/[^/]+$/.test(path), "use readInviteMetadata");
+      return values.get(path) ?? null;
+    },
     patchStateRoot: async (updates) => {
       patches.push(updates);
       for (const [path, raw] of Object.entries(updates)) {
@@ -546,8 +554,8 @@ test("uses only canonical D1 evidence for alternate invite roles", async () => {
     "watch",
   );
 
-  canonicalHost.getStatePath = async (path) => {
-    assert.equal(path, "invites/abcdefghijk");
+  canonicalHost.readInviteMetadata = async (inviteId) => {
+    assert.equal(inviteId, "abcdefghijk");
     return base["invites/abcdefghijk"];
   };
   assert.equal(
@@ -652,7 +660,7 @@ test("rejects missing, malformed, and unavailable invite role state", async () =
       guestId: "guest-login",
     },
   }).repository;
-  unavailable.getStatePath = async () => {
+  unavailable.readInviteMetadata = async () => {
     throw new Error("state-unavailable");
   };
   await assert.rejects(
@@ -1001,12 +1009,12 @@ test("checks merged invite owners after reading the locked invite", async () => 
     },
     "players/host-login/matches/abcdefghijk": match("white"),
   });
-  const readPath = state.repository.getStatePath;
+  const readInviteMetadata = state.repository.readInviteMetadata;
   let inviteRead = false;
   let ownershipReads = 0;
-  state.repository.getStatePath = async (...args) => {
-    if (args[0] === "invites/abcdefghijk") inviteRead = true;
-    return readPath(...args);
+  state.repository.readInviteMetadata = async (...args) => {
+    if (args[0] === "abcdefghijk") inviteRead = true;
+    return readInviteMetadata(...args);
   };
   state.repository.readProfileOwnershipSnapshot = async (query) => {
     assert.equal(inviteRead, true);

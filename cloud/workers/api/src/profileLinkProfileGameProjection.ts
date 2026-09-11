@@ -26,7 +26,7 @@ export type ProfileLinkProjectionRuntimeDependencies = {
   profileDb?: D1Database;
   projection?: ProfileGameProjectionRuntime;
   readProfileOwnershipSnapshot?: ProfileLinkProjectionRepository["readProfileOwnershipSnapshot"];
-  state?: Pick<GameplayRepository, "getStatePath">;
+  state?: Pick<GameplayRepository, "getStatePath" | "readInviteMetadata">;
   wait?: (milliseconds: number) => Promise<void>;
   withInviteProjectionLock<T>(
     inviteId: string,

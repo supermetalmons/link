@@ -250,32 +250,31 @@ function repository(
   overrides: Partial<GameplayRepository> = {},
 ): GameplayRepository {
   const transactionValues = new Map<string, unknown>();
-  const value: Omit<GameplayRepository, "getStatePath" | "transactStatePath"> =
-    {
-      applyWagerTransferOnce: async () => "applied",
-      deleteNavigationGame: async () => "deleted",
-      readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
-      getNavigationGame: async () => null,
-      getMiningMaterials: async () => ({
-        dust: 10,
-        slime: 10,
-        gum: 10,
-        metal: 10,
-        ice: 10,
-      }),
-      getMiningSnapshot: async () => null,
-      readState: async () => null,
-      patchStateRoot: async () => undefined,
-      transactState: async (path, updater) => {
-        const current = transactionValues.get(path) ?? null;
-        const result = applyTransaction(updater, current);
-        if (result.committed) {
-          transactionValues.set(path, result.value);
-        }
-        return result;
-      },
-      ...overrides,
-    };
+  const value: Parameters<typeof attachMemoryWagerFrozenStore>[0] = {
+    applyWagerTransferOnce: async () => "applied",
+    deleteNavigationGame: async () => "deleted",
+    readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
+    getNavigationGame: async () => null,
+    getMiningMaterials: async () => ({
+      dust: 10,
+      slime: 10,
+      gum: 10,
+      metal: 10,
+      ice: 10,
+    }),
+    getMiningSnapshot: async () => null,
+    readState: async () => null,
+    patchStateRoot: async () => undefined,
+    transactState: async (path, updater) => {
+      const current = transactionValues.get(path) ?? null;
+      const result = applyTransaction(updater, current);
+      if (result.committed) {
+        transactionValues.set(path, result.value);
+      }
+      return result;
+    },
+    ...overrides,
+  };
   const result = attachMemoryWagerFrozenStore(value);
   result.automatchPersistence ??= createAutomatchPersistenceStub({
     readQueuedByLogins: createAutomatchQueueLookup((...args) =>

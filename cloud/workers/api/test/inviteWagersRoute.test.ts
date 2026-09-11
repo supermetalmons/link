@@ -157,6 +157,9 @@ function setup({
       },
     },
   });
+  repository.getStatePath = async () => {
+    throw new Error("unexpected-full-state-read");
+  };
   repository.readProfileOwnershipSnapshot = async (query) => ({
     canonicalProfileIdByProfileId: new Map(),
     loginOwnerByUid: new Map(query.loginUids.map((uid) => [uid, null])),
@@ -539,9 +542,9 @@ test("missing invites and failed existence checks never allocate a room", async 
           },
         },
       });
-      h.repository.getStatePath = async () => {
+      h.repository.readInviteMetadata = async () => {
         if (source instanceof Error) throw source;
-        return source;
+        return source ?? null;
       };
       const response = await handleInviteWagersRoute(
         request({ socket }),

@@ -11,9 +11,11 @@ const inviteId = "rating-event-invite";
 const fixture = ({
   inviteFields = {},
   readCompletion = async () => false,
+  readMetadata,
 } = {}) => {
   const writes = [];
   const completionReads = [];
+  const metadataReads = [];
   const profiles = new Map([
     ["host-profile", { username: "host", emoji: 1 }],
     ["guest-profile", { username: "guest", emoji: 2 }],
@@ -24,15 +26,19 @@ const fixture = ({
         writes.push(...nextWrites);
       },
       getProjection: async () => null,
+      async readInviteMetadata(readInviteId) {
+        metadataReads.push(readInviteId);
+        assert.equal(readInviteId, inviteId);
+        return readMetadata
+          ? readMetadata(readInviteId)
+          : {
+              eventOwned: true,
+              hostId: "host-login",
+              guestId: "guest-login",
+              ...inviteFields,
+            };
+      },
       async getStatePath(path) {
-        if (path === `invites/${inviteId}`) {
-          return {
-            eventOwned: true,
-            hostId: "host-login",
-            guestId: "guest-login",
-            ...inviteFields,
-          };
-        }
         if (path === `automatch/${inviteId}`) return null;
         throw new Error(`unexpected-state-read:${path}`);
       },
@@ -52,6 +58,7 @@ const fixture = ({
   });
   return {
     completionReads,
+    metadataReads,
     recompute: (options = {}) =>
       core.recomputeInviteProjection(inviteId, "rating-completed", {
         eventTimestampMs: 100,
@@ -70,6 +77,22 @@ test("event games end from canonical rating completion without legacy markers", 
   assert.deepEqual(completionReads, [[inviteId, inviteId]]);
   assert.equal(writes.length, 2);
   assert.ok(writes.every((write) => write.data.status === "ended"));
+});
+
+test("invite metadata failures retry without falling back to an aggregate read", async () => {
+  let attempts = 0;
+  const { metadataReads, recompute, writes } = fixture({
+    readMetadata: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("invite-metadata-unavailable");
+      return { hostId: "host-login", guestId: "guest-login" };
+    },
+  });
+  await recompute();
+
+  assert.deepEqual(metadataReads, [inviteId, inviteId]);
+  assert.equal(writes.length, 2);
+  assert.ok(writes.every((write) => write.data.status === "active"));
 });
 
 test("legacy completion markers cannot end an event game", async () => {

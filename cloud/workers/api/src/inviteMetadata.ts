@@ -5,7 +5,7 @@ import {
   type InviteMetadataSnapshot,
 } from "@mons/shared/invite-metadata";
 import { isCanonicalLoginUid } from "./recordKeys.ts";
-import { createInviteSourceReader } from "./inviteSource.ts";
+import { createGameplayRepository } from "./gameplayRepository.ts";
 
 export type InviteMetadataReadResult =
   | {
@@ -67,10 +67,11 @@ export function normalizeInviteMetadata(
 export function createInviteMetadataReader(
   env: Env,
   dependencies: {
-    readSource?: ReturnType<typeof createInviteSourceReader>;
+    readSource?: (inviteId: string) => Promise<unknown>;
   } = {},
 ): (inviteId: string) => Promise<InviteMetadataReadResult> {
-  const read = dependencies.readSource || createInviteSourceReader(env);
+  const read =
+    dependencies.readSource || createGameplayRepository(env).readInviteMetadata;
   return async (inviteId) =>
     normalizeInviteMetadata(inviteId, await read(inviteId));
 }

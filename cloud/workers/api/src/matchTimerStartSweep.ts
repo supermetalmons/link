@@ -20,7 +20,10 @@ import {
 const MATCH_TIMER_START_SWEEP_CONCURRENCY = 5;
 const MATCH_TIMER_START_INVITE_CANDIDATE_LIMIT = 17;
 
-type MatchTimerStartSweepRepository = Pick<GameplayRepository, "getStatePath">;
+type MatchTimerStartSweepRepository = Pick<
+  GameplayRepository,
+  "getStatePath" | "readInviteMetadata"
+>;
 
 export type MatchTimerStartSweepDependencies = {
   assertMutationAllowed: () => Promise<void>;
@@ -98,9 +101,7 @@ async function resolveLegacyOpponent(
     return null;
   }
   const invites = await Promise.all(
-    candidates.map((inviteId) =>
-      repository.getStatePath(`invites/${inviteId}`),
-    ),
+    candidates.map((inviteId) => repository.readInviteMetadata(inviteId)),
   );
   const opponents = new Set(
     invites.flatMap((invite, index) => {

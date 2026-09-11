@@ -22,9 +22,17 @@ function match(
 
 function repository(
   records: Readonly<Record<string, unknown>>,
-): Pick<GameplayRepository, "getStatePath"> {
+): Pick<GameplayRepository, "getStatePath" | "readInviteMetadata"> {
   return {
-    getStatePath: async (path) => records[path] ?? null,
+    getStatePath: async (path) => {
+      assert.ok(!path.startsWith("invites/"));
+      return records[path] ?? null;
+    },
+    readInviteMetadata: async (inviteId) =>
+      (records[`invites/${inviteId}`] ?? null) as Record<
+        string,
+        unknown
+      > | null,
   };
 }
 
@@ -142,7 +150,9 @@ test("cleans legacy markers from owner-only terminal and later-turn proof", asyn
     await sweepMatchTimerStarts(
       stores.timerStarts,
       {
+        readInviteMetadata: async () => assert.fail("unexpected-invite-read"),
         getStatePath: async (path) => {
+          assert.ok(!path.startsWith("invites/"));
           paths.push(path);
           return records[path] ?? null;
         },
@@ -230,7 +240,15 @@ test("backfills one bounded legacy invite match without guessing ambiguous oppon
   const result = await sweepMatchTimerStarts(
     stores.timerStarts,
     {
+      readInviteMetadata: async (inviteId) => {
+        paths.push(`invites/${inviteId}`);
+        return (records[`invites/${inviteId}`] ?? null) as Record<
+          string,
+          unknown
+        > | null;
+      },
       getStatePath: async (path) => {
+        assert.ok(!path.startsWith("invites/"));
         paths.push(path);
         return records[path] ?? null;
       },
@@ -365,6 +383,7 @@ test("fails the sweep with a bounded sanitized summary", async () => {
       sweepMatchTimerStarts(
         stores.timerStarts,
         {
+          readInviteMetadata: async () => assert.fail("unexpected-invite-read"),
           getStatePath: async () => {
             throw new Error("private-state-detail");
           },

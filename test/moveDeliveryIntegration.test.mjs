@@ -75,14 +75,18 @@ function harness() {
     removeItem: (key) => records.delete(key),
   };
   const repository = {
-    getStatePath: async (path) => {
-      assert.equal(path, `invites/${scope.inviteId}`);
+    readInviteMetadata: async (inviteId, signal) => {
+      assert.equal(inviteId, scope.inviteId);
+      signal.throwIfAborted();
       return {
         hostId: scope.playerId,
         guestId: "opponent",
         hostRematches: "",
         guestRematches: "",
       };
+    },
+    getStatePath: async () => {
+      throw new Error("Unexpected aggregate invite lookup");
     },
     readProfileOwnershipSnapshot: () => {
       throw new Error("Unexpected linked identity lookup");

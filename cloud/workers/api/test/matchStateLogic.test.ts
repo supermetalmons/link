@@ -140,9 +140,10 @@ test("committed fences require complete terminal claim evidence", () => {
 function canonicalRepository(guestId = "guest-login") {
   const paths: string[] = [];
   const repository = {
-    async getStatePath(path: string) {
-      paths.push(path);
-      assert.equal(path, "invites/invite-one");
+    async readInviteMetadata(inviteId: string, signal?: AbortSignal) {
+      signal?.throwIfAborted();
+      paths.push(`invites/${inviteId}`);
+      assert.equal(inviteId, "invite-one");
       return {
         hostId: "host-login",
         guestId,
@@ -151,6 +152,9 @@ function canonicalRepository(guestId = "guest-login") {
         eventOwned: true,
         eventId: "event-one",
       };
+    },
+    async getStatePath() {
+      throw new Error("unexpected-aggregate-read");
     },
     async readProfileOwnershipSnapshot() {
       throw new Error("unexpected-ownership-read");
@@ -161,7 +165,14 @@ function canonicalRepository(guestId = "guest-login") {
     async patchStateRoot() {
       throw new Error("unexpected-source-patch");
     },
-  } as unknown as GameplayRepository;
+  } satisfies Pick<
+    GameplayRepository,
+    | "readInviteMetadata"
+    | "getStatePath"
+    | "readProfileOwnershipSnapshot"
+    | "transactStatePath"
+    | "patchStateRoot"
+  >;
   return { repository, paths };
 }
 

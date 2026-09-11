@@ -472,7 +472,7 @@ export function createCanonicalGameplayRepository(
   profileGamesDb: D1Database,
   state: StateRepository,
   options: CanonicalRepositoryOptions,
-): GameplayRepository {
+): Omit<GameplayRepository, "readInviteMetadata"> {
   const attempts = retryCount(options.maxAttempts);
   return {
     async applyWagerTransferOnce(input: WagerTransferInput) {

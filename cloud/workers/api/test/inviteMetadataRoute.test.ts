@@ -108,6 +108,9 @@ function setup({
       },
     },
   });
+  repository.getStatePath = async () => {
+    throw new Error("unexpected-full-state-read");
+  };
   repository.readProfileOwnershipSnapshot = async (query) => ({
     canonicalProfileIdByProfileId: new Map(),
     loginOwnerByUid: new Map(query.loginUids.map((uid) => [uid, null])),
@@ -202,11 +205,10 @@ test("unknown invites and failed existence checks never access a Durable Object"
           },
         },
       });
-      state.repository.getStatePath = async (path, query) => {
-        assert.equal(path, "invites/invite-one");
-        assert.deepEqual(query, { shallow: true });
+      state.repository.readInviteMetadata = async (inviteId) => {
+        assert.equal(inviteId, "invite-one");
         if (source instanceof Error) throw source;
-        return source;
+        return source ?? null;
       };
       const response = await handleInviteMetadataRoute(
         request({ socket }),

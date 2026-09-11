@@ -283,12 +283,17 @@ function repository(
       ice: 10,
     }),
     getMiningSnapshot: async () => null,
-    getStatePath: async (path, query, signal) =>
-      path.startsWith("gameplayMutationReceipts/")
+    readInviteMetadata: async (inviteId, signal) =>
+      ((await getStatePath?.(`invites/${inviteId}`, undefined, signal)) ??
+        null) as Record<string, unknown> | null,
+    getStatePath: async (path, query, signal) => {
+      assert.ok(!/^invites\/[^/]+$/.test(path), "use readInviteMetadata");
+      return path.startsWith("gameplayMutationReceipts/")
         ? readReceipt
           ? readReceipt()
           : (receiptValues.get(path) ?? null)
-        : (getStatePath?.(path, query, signal) ?? null),
+        : (getStatePath?.(path, query, signal) ?? null);
+    },
     patchStateRoot: async (updates, signal) => {
       for (const [path, value] of Object.entries(updates)) {
         if (path.startsWith("gameplayMutationReceipts/")) {

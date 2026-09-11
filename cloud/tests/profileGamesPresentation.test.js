@@ -31,16 +31,17 @@ function fixture({ getMatchEmoji, guestProfile = null }) {
         }
       },
       getProjection: async (profileId) => projections.get(profileId) || null,
+      async readInviteMetadata(readInviteId) {
+        assert.equal(readInviteId, inviteId);
+        return {
+          hostId: "host-login",
+          guestId: "guest-login",
+          hostRematches: "x",
+          guestRematches: "x",
+        };
+      },
       async getStatePath(path) {
         reads.push(path);
-        if (path === `invites/${inviteId}`) {
-          return {
-            hostId: "host-login",
-            guestId: "guest-login",
-            hostRematches: "x",
-            guestRematches: "x",
-          };
-        }
         if (path === `automatch/${inviteId}`) return null;
         if (path === guestMatchPath) return { emojiId: 1, aura: "" };
         throw new Error(`unexpected-state-read:${path}`);

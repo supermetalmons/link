@@ -53,6 +53,9 @@ function memoryRepository(
   };
   const repository: EventGameplayRepository = {
     ...eventReadFixture(read),
+    readInviteMetadata: async () => {
+      throw new Error("unexpected-invite-metadata-read");
+    },
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     getMiningMaterials: async () => ({

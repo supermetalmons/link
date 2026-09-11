@@ -187,6 +187,12 @@ function client(
   });
   const repository: GameplayRepository = {
     automatchPersistence: persistence,
+    readInviteMetadata: async (inviteId, signal) =>
+      (await persistence.client.getPath(
+        `invites/${inviteId}`,
+        undefined,
+        signal,
+      )) as Record<string, unknown> | null,
     getStatePath: persistence.client.getPath,
     patchStateRoot: persistence.client.patchRoot,
     transactStatePath: persistence.client.transactPath,

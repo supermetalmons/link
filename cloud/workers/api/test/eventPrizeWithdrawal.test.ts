@@ -178,6 +178,9 @@ function repository() {
   ]);
   const value: GameplayRepository &
     Pick<EventGameplayRepository, "readProfileEventPrizeAssignment"> = {
+    readInviteMetadata: async () => {
+      throw new Error("unexpected-invite-metadata-read");
+    },
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     readProfileOwnershipSnapshot:

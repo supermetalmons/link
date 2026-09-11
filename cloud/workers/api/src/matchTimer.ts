@@ -120,12 +120,16 @@ export type MatchTimerDependencies = {
 
 type MatchTimerRepository = Pick<
   GameplayRepository,
-  "getStatePath" | "readProfileOwnershipSnapshot" | "transactStatePath"
+  | "getStatePath"
+  | "readInviteMetadata"
+  | "readProfileOwnershipSnapshot"
+  | "transactStatePath"
 >;
 
 type MatchTimerClaimRepository = Pick<
   GameplayRepository,
   | "getStatePath"
+  | "readInviteMetadata"
   | "patchStateRoot"
   | "readProfileOwnershipSnapshot"
   | "transactStatePath"
@@ -198,19 +202,25 @@ async function readMatchRecords(
   repository: MatchTimerRepository,
   signal: AbortSignal,
 ): Promise<[unknown, unknown, unknown]> {
-  const paths = [
-    `players/${request.playerId}/matches/${request.matchId}`,
-    `players/${request.opponentId}/matches/${request.matchId}`,
-    `invites/${request.inviteId}`,
+  const reads = [
+    () =>
+      repository.getStatePath(
+        `players/${request.playerId}/matches/${request.matchId}`,
+        undefined,
+        signal,
+      ),
+    () =>
+      repository.getStatePath(
+        `players/${request.opponentId}/matches/${request.matchId}`,
+        undefined,
+        signal,
+      ),
+    () => repository.readInviteMetadata(request.inviteId, signal),
   ];
-  const initial = await Promise.allSettled(
-    paths.map((path) => repository.getStatePath(path, undefined, signal)),
-  );
+  const initial = await Promise.allSettled(reads.map((read) => read()));
   const values = await Promise.all(
     initial.map((result, index) =>
-      result.status === "fulfilled"
-        ? result.value
-        : repository.getStatePath(paths[index], undefined, signal),
+      result.status === "fulfilled" ? result.value : reads[index](),
     ),
   );
   return [values[0], values[1], values[2]];
@@ -467,9 +477,8 @@ export async function startMatchTimer(
     : timeoutSignal;
   await authorizePlayer(identity, request.playerId, repository, signal);
   if (dependencies.startCanonical) {
-    const inviteValue = await repository.getStatePath(
-      `invites/${request.inviteId}`,
-      undefined,
+    const inviteValue = await repository.readInviteMetadata(
+      request.inviteId,
       signal,
     );
     if (
@@ -640,9 +649,8 @@ export async function claimMatchVictoryByTimer(
     : timeoutSignal;
   await authorizePlayer(identity, request.playerId, repository, signal);
   if (dependencies.claimCanonical) {
-    const inviteValue = await repository.getStatePath(
-      `invites/${request.inviteId}`,
-      undefined,
+    const inviteValue = await repository.readInviteMetadata(
+      request.inviteId,
       signal,
     );
     if (

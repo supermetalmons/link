@@ -244,8 +244,11 @@ const runInviteProjection = async ({
         currentUpdateTimes[profileId] ||= "revision-1";
         return { data, updateTime: currentUpdateTimes[profileId] };
       },
+      async readInviteMetadata(readInviteId) {
+        assert.equal(readInviteId, inviteId);
+        return invite;
+      },
       async getStatePath(path) {
-        if (path === `invites/${inviteId}`) return invite;
         if (path === `automatch/${inviteId}`) return null;
         if (/^players\/.+\/profile$/.test(path)) {
           throw new Error("unexpected-state-profile-owner-read");
@@ -416,10 +419,11 @@ test("invite projection ignores an legacy profile shadow when D1 has no owner", 
       hasCompletedRatingUpdate: async () => false,
       commitProjectionWrites: async () => undefined,
       getProjection: async () => null,
+      async readInviteMetadata(readInviteId) {
+        assert.equal(readInviteId, inviteId);
+        return { hostId: "host-login" };
+      },
       async getStatePath(path) {
-        if (path === `invites/${inviteId}`) {
-          return { hostId: "host-login" };
-        }
         if (path === `automatch/${inviteId}`) return null;
         if (path === "players/host-login/profile") {
           legacyProfileReads += 1;
@@ -457,10 +461,11 @@ test("invite projection retries D1 ownership failures without writing", async ()
         throw new Error("d1-owner-unavailable");
       },
       getProjection: async () => null,
+      async readInviteMetadata(readInviteId) {
+        assert.equal(readInviteId, inviteId);
+        return { hostId: "host-login" };
+      },
       async getStatePath(path) {
-        if (path === `invites/${inviteId}`) {
-          return { hostId: "host-login" };
-        }
         if (path === `automatch/${inviteId}`) return null;
         if (/^players\/.+\/profile$/.test(path)) {
           throw new Error("unexpected-state-profile-owner-read");

@@ -22,6 +22,7 @@ import {
   consumeWagerReservationOperation,
   createWagerReservationOperationId,
   removeWagerProposal as removeWagerProposalImpl,
+  resolveWagerParticipantUids,
   sendWagerProposal as sendWagerProposalImpl,
   type WagerProposalAction,
   type WagerProposalDependencies,
@@ -159,33 +160,95 @@ function repository(
   const transactState =
     overrides.transactState ||
     (async () => ({ committed: false, value: null }));
-  const value: Omit<GameplayRepository, "getStatePath" | "transactStatePath"> =
-    {
-      applyWagerTransferOnce: async () => "applied",
-      deleteNavigationGame: async () => "deleted",
-      getNavigationGame: async () => null,
-      getMiningMaterials: async () => ({
-        dust: 10,
-        slime: 10,
-        gum: 10,
-        metal: 10,
-        ice: 10,
-      }),
-      getMiningSnapshot: async () => null,
-      readState: async () => ({ hostId: "host", guestId: "guest" }),
-      patchStateRoot: async () => undefined,
-      readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
-      ...overrides,
-      transactState: async (path, updater, signal) => {
-        assert.doesNotMatch(
-          path,
-          /^(?:gameplayMutationLocks|matchTimerStarts)\//,
-        );
-        return transactState(path, updater, signal);
-      },
-    };
+  const value: Parameters<typeof attachMemoryWagerFrozenStore>[0] = {
+    applyWagerTransferOnce: async () => "applied",
+    deleteNavigationGame: async () => "deleted",
+    getNavigationGame: async () => null,
+    getMiningMaterials: async () => ({
+      dust: 10,
+      slime: 10,
+      gum: 10,
+      metal: 10,
+      ice: 10,
+    }),
+    getMiningSnapshot: async () => null,
+    readState: async () => ({ hostId: "host", guestId: "guest" }),
+    patchStateRoot: async () => undefined,
+    readProfileOwnershipSnapshot: async (query) => ownershipSnapshot(query),
+    ...overrides,
+    transactState: async (path, updater, signal) => {
+      assert.doesNotMatch(
+        path,
+        /^(?:gameplayMutationLocks|matchTimerStarts)\//,
+      );
+      return transactState(path, updater, signal);
+    },
+  };
   return attachMemoryWagerFrozenStore(value);
 }
+
+test("participant checks use metadata without loading wagers or direct-owner profiles", async () => {
+  let metadataReads = 0;
+  const value = repository({
+    readInviteMetadata: async (inviteId) => {
+      metadataReads++;
+      assert.equal(inviteId, "invite");
+      return { hostId: " host ", guestId: " guest " };
+    },
+    readState: async () => {
+      throw new Error("unexpected-aggregate-read");
+    },
+    readProfileOwnershipSnapshot: async () => {
+      throw new Error("unexpected-profile-read");
+    },
+  });
+  for (const [uid, opponentUid] of [
+    ["host", "guest"],
+    ["guest", "host"],
+  ]) {
+    assert.deepEqual(
+      await resolveWagerParticipantUids({ uid }, "invite", value),
+      {
+        playerUid: uid,
+        opponentUid,
+        ownership: null,
+      },
+    );
+  }
+  assert.equal(metadataReads, 2);
+});
+
+test("metadata participant checks preserve missing and invalid participant failures", async () => {
+  const cases: Array<[Record<string, unknown> | null, string]> = [
+    [null, "invite-not-found"],
+    [{ hostId: "host" }, "missing-opponent"],
+    [{ hostId: 123, guestId: "guest" }, "missing-opponent"],
+    [{ hostId: "host", guestId: null }, "missing-opponent"],
+  ];
+  for (const [metadata, reason] of cases) {
+    const value = repository({ readInviteMetadata: async () => metadata });
+    assert.deepEqual(
+      await resolveWagerParticipantUids(identity, "invite", value),
+      {
+        ok: false,
+        reason,
+      },
+    );
+  }
+  await assert.rejects(
+    resolveWagerParticipantUids(
+      identity,
+      "invite",
+      repository({
+        readInviteMetadata: async () => ({
+          hostId: "host/unsafe",
+          guestId: "guest",
+        }),
+      }),
+    ),
+    /invalid-wager-participant/,
+  );
+});
 
 function applyTransaction(
   updater: (current: unknown) => unknown,

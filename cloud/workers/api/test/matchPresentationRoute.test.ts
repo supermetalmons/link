@@ -92,11 +92,15 @@ function setup(invite: unknown = paired, uid = "host-login") {
       },
     },
   });
-  repository.getStatePath = async (path) => {
-    calls.reads.push(path);
-    if (path.startsWith("players/"))
-      throw new Error("unexpected-source-appearance-read");
-    return records.get(path) ?? null;
+  repository.getStatePath = async () => {
+    throw new Error("unexpected-full-state-read");
+  };
+  repository.readInviteMetadata = async (inviteId) => {
+    calls.reads.push(`invites/${inviteId}`);
+    return (records.get(`invites/${inviteId}`) ?? null) as Record<
+      string,
+      unknown
+    > | null;
   };
   repository.readProfileOwnershipSnapshot = async (query) => ({
     canonicalProfileIdByProfileId: new Map(),
@@ -209,10 +213,7 @@ test("presentation updates resolve the actor server-side with registered cosmeti
     { actorUid: "host-login", matchId: "invite-one", update: payload },
   ]);
   assert.deepEqual(state.calls.ensured, []);
-  assert.equal(
-    state.calls.reads.some((path) => path.startsWith("players/")),
-    false,
-  );
+  assert.deepEqual(state.calls.reads, ["invites/invite-one"]);
   assert.deepEqual(state.calls.rates, [
     "presentation:post:ip:192.0.2.1",
     "presentation:post:actor:host-login",

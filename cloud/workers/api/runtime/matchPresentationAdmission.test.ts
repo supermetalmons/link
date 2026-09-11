@@ -120,8 +120,8 @@ async function fixture() {
       .bind(inviteId, JSON.stringify(invite)),
   ]);
   const repository = {
-    async getStatePath(path: string) {
-      expect(path).toBe(`invites/${inviteId}`);
+    async readInviteMetadata(requestedInviteId: string) {
+      expect(requestedInviteId).toBe(inviteId);
       const row = await db
         .prepare("SELECT source_json FROM invite_sources WHERE invite_id = ?")
         .bind(inviteId)

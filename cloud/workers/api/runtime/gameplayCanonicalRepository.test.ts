@@ -1666,6 +1666,11 @@ describe("canonical gameplay repositories", () => {
       profileDb: testEnv.PROFILE_DB,
       d1: testEnv.PROFILE_GAMES_DB,
       state: {
+        readInviteMetadata: async (inviteId) =>
+          (stateValues.get(`invites/${inviteId}`) ?? null) as Record<
+            string,
+            unknown
+          > | null,
         getStatePath: async (path) => stateValues.get(path) ?? null,
       },
       wait: async () => undefined,

@@ -123,7 +123,11 @@ export function createMemoryWagerFrozenStore(
 }
 
 export function attachMemoryWagerFrozenStore(
-  state: Omit<TestGameplayRepository, "getStatePath" | "transactStatePath">,
+  state: Omit<
+    TestGameplayRepository,
+    "getStatePath" | "transactStatePath" | "readInviteMetadata"
+  > &
+    Partial<Pick<TestGameplayRepository, "readInviteMetadata">>,
 ): TestGameplayRepository {
   const assertGameplayPath = (path: string) => {
     if (/^(?:reservations\/|players\/[^/]+\/mining(?:\/|$))/.test(path)) {
@@ -132,6 +136,14 @@ export function attachMemoryWagerFrozenStore(
   };
   const repository: TestGameplayRepository = {
     ...state,
+    readInviteMetadata:
+      state.readInviteMetadata ??
+      (async (inviteId, signal) =>
+        (await repository.readState(
+          `invites/${inviteId}`,
+          undefined,
+          signal,
+        )) as Record<string, unknown> | null),
     getStatePath: (...args) => {
       assertGameplayPath(args[0]);
       return repository.readState(...args);

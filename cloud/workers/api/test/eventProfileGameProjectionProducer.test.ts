@@ -12,6 +12,9 @@ function repository(input: {
 }): EventGameplayRepository {
   return {
     ...eventReadFixture(input.get || (async () => null)),
+    readInviteMetadata: async () => {
+      throw new Error("unexpected-invite-metadata-read");
+    },
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     readProfileOwnershipSnapshot: async () => {

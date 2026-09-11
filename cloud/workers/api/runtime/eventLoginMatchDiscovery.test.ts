@@ -87,6 +87,7 @@ function stateFixture(initial: Record<string, unknown> = {}) {
   const values = new Map(Object.entries(initial));
   const patches: Record<string, unknown>[] = [];
   const reads: string[] = [];
+  const metadataReads: string[] = [];
   const read = async (path: string, query?: StateQuery) => {
     reads.push(path);
     if (path.startsWith("players/")) expect(query).toEqual({ shallow: true });
@@ -106,7 +107,22 @@ function stateFixture(initial: Record<string, unknown> = {}) {
       throw new Error("unexpected-source-transaction");
     },
   };
-  return { client, patches, reads, values };
+  const reader = {
+    async getStatePath(path: string, query?: StateQuery) {
+      if (path.startsWith("invites/"))
+        throw new Error("unexpected-invite-aggregate-read");
+      return read(path, query);
+    },
+    async readInviteMetadata(inviteId: string, signal?: AbortSignal) {
+      signal?.throwIfAborted();
+      metadataReads.push(inviteId);
+      return (values.get(`invites/${inviteId}`) ?? null) as Record<
+        string,
+        unknown
+      > | null;
+    },
+  };
+  return { client, metadataReads, patches, reader, reads, values };
 }
 
 async function indexedRows() {
@@ -250,7 +266,7 @@ describe("event login-match discovery", () => {
     });
     const runtime = createEventProfileGameProjectionRuntime(testEnv, {
       state: {
-        getStatePath: repository.getPath,
+        ...fixture.reader,
         readEvent: repository.readEvent,
       },
       wait: async () => undefined,
@@ -264,6 +280,7 @@ describe("event login-match discovery", () => {
         },
         {
           getStatePath: repository.getPath,
+          readInviteMetadata: fixture.reader.readInviteMetadata,
           transactStatePath: repository.transactPath,
         },
         runtime,
@@ -283,6 +300,8 @@ describe("event login-match discovery", () => {
     expect(fixture.reads).not.toContain(
       `players/changed-bracket-login/matches/${inviteId}`,
     );
+    expect(fixture.metadataReads).toContain(inviteId);
+    expect(fixture.reads).not.toContain(`invites/${inviteId}`);
   });
 
   it("captures original actors even when current profile ownership is unavailable", async () => {
@@ -296,7 +315,7 @@ describe("event login-match discovery", () => {
     });
     const runtime = createEventProfileGameProjectionRuntime(testEnv, {
       state: {
-        getStatePath: fixture.client.getPath,
+        ...fixture.reader,
         readEvent: fixture.client.readEvent,
       },
       wait: async () => undefined,
@@ -315,11 +334,7 @@ describe("event login-match discovery", () => {
       thirdPlaceMatch: { inviteId },
     });
     await expect(
-      captureEventMatchDiscovery(
-        testEnv.PROFILE_GAMES_DB,
-        fixture.client.getPath,
-        ids,
-      ),
+      captureEventMatchDiscovery(testEnv.PROFILE_GAMES_DB, fixture.reader, ids),
     ).rejects.toThrow("event-match-discovery-match-unavailable");
     expect(await indexedRows()).toEqual([]);
   });
@@ -369,10 +384,11 @@ describe("event login-match discovery", () => {
     await expect(
       captureEventMatchDiscovery(
         testEnv.PROFILE_GAMES_DB,
-        fixture.client.getPath,
+        fixture.reader,
         Array.from({ length: 33 }, (_, index) => `invite-${index}`),
       ),
     ).rejects.toThrow("event-match-discovery-invalid-invites");
     expect(fixture.reads).toEqual([]);
+    expect(fixture.metadataReads).toEqual([]);
   });
 });

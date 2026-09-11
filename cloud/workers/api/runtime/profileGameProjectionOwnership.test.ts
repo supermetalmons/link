@@ -318,12 +318,17 @@ describe("D1-authoritative profile game projection ownership", () => {
     const runtime = createProfileGameProjectionRuntime(testEnv, {
       logger: { error() {} },
       state: {
+        async readInviteMetadata(candidateInviteId) {
+          expect(candidateInviteId).toBe(inviteId);
+          return { hostId: loginUid };
+        },
         async getStatePath(path) {
           reads.push(path);
           if (/^players\/.+\/profile$/.test(path)) {
             throw new Error("unexpected-source-profile-owner-read");
           }
-          if (path === `invites/${inviteId}`) return { hostId: loginUid };
+          if (path.startsWith("invites/"))
+            throw new Error("unexpected-invite-aggregate-read");
           if (path === `automatch/${inviteId}`) return null;
           return null;
         },
@@ -372,15 +377,16 @@ describe("D1-authoritative profile game projection ownership", () => {
     );
     const runtime = createProfileGameProjectionRuntime(testEnv, {
       state: {
+        async readInviteMetadata(candidateInviteId) {
+          expect(candidateInviteId).toBe(inviteId);
+          return {
+            hostId: hostLoginId,
+            guestId: guestLoginId,
+            hostRematches: "1x",
+            guestRematches: "1x",
+          };
+        },
         async getStatePath(path) {
-          if (path === `invites/${inviteId}`) {
-            return {
-              hostId: hostLoginId,
-              guestId: guestLoginId,
-              hostRematches: "1x",
-              guestRematches: "1x",
-            };
-          }
           if (path === `automatch/${inviteId}`) return null;
           throw new Error(`unexpected-source-read:${path}`);
         },
@@ -446,15 +452,17 @@ describe("D1-authoritative profile game projection ownership", () => {
         };
       },
       state: {
+        async readInviteMetadata(candidateInviteId) {
+          expect(candidateInviteId).toBe(inviteId);
+          return {
+            hostId: hostLoginId,
+            guestId: guestLoginId,
+            hostRematches: "x",
+            guestRematches: "x",
+          };
+        },
         async getStatePath(path) {
           reads.push(path);
-          if (path === `invites/${inviteId}`)
-            return {
-              hostId: hostLoginId,
-              guestId: guestLoginId,
-              hostRematches: "x",
-              guestRematches: "x",
-            };
           if (path === `automatch/${inviteId}`) return null;
           throw new Error(`unexpected-source-read:${path}`);
         },
@@ -514,17 +522,18 @@ describe("D1-authoritative profile game projection ownership", () => {
       }
       const runtime = createProfileGameProjectionRuntime(testEnv, {
         state: {
+          async readInviteMetadata(candidateInviteId) {
+            expect(candidateInviteId).toBe(entry.inviteId);
+            return {
+              eventOwned: true,
+              hostId: hostLoginId,
+              guestId: guestLoginId,
+              ...(entry.status === "done"
+                ? {}
+                : { matchesRatingUpdates: { [entry.inviteId]: true } }),
+            };
+          },
           async getStatePath(path) {
-            if (path === `invites/${entry.inviteId}`) {
-              return {
-                eventOwned: true,
-                hostId: hostLoginId,
-                guestId: guestLoginId,
-                ...(entry.status === "done"
-                  ? {}
-                  : { matchesRatingUpdates: { [entry.inviteId]: true } }),
-              };
-            }
             if (path === `automatch/${entry.inviteId}`) return null;
             throw new Error(`unexpected-source-read:${path}`);
           },
@@ -572,6 +581,9 @@ describe("D1-authoritative profile game projection ownership", () => {
         },
       },
       state: {
+        async readInviteMetadata(inviteId) {
+          throw new Error(`unexpected-invite-metadata-read:${inviteId}`);
+        },
         async getStatePath(path) {
           throw new Error(`unexpected-source-read:${path}`);
         },
@@ -737,17 +749,18 @@ describe("D1-authoritative profile game projection ownership", () => {
       logger: { error() {}, info() {} },
       profileDb: countingProfileDb,
       state: {
-        async getStatePath(path, query) {
-          expect(query?.shallow).not.toBe(true);
-          const inviteIndex = inviteIds.findIndex(
-            (inviteId) => path === `invites/${inviteId}`,
-          );
+        async readInviteMetadata(inviteId) {
+          const inviteIndex = inviteIds.indexOf(inviteId);
           if (inviteIndex >= 0) {
             return {
               hostId: hostLoginUids[inviteIndex],
               guestId: guestLoginUids[inviteIndex],
             };
           }
+          throw new Error(`unexpected-invite-metadata-read:${inviteId}`);
+        },
+        async getStatePath(path, query) {
+          expect(query?.shallow).not.toBe(true);
           if (inviteIds.some((inviteId) => path === `automatch/${inviteId}`)) {
             return null;
           }
@@ -837,6 +850,9 @@ describe("D1-authoritative profile game projection ownership", () => {
     await insertProfileOwner(profileId, loginUid);
     const runtime = createEventProfileGameProjectionRuntime(testEnv, {
       state: {
+        async readInviteMetadata() {
+          throw new Error("unexpected-invite-metadata-read");
+        },
         async getStatePath() {
           throw new Error("unexpected-generic-state-read");
         },

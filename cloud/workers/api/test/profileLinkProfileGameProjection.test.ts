@@ -97,6 +97,9 @@ test("profile-link projection rejects inactive D1 discovery without Firebase rea
       },
     },
     state: {
+      async readInviteMetadata() {
+        assert.fail("unexpected-invite-metadata-read");
+      },
       async getStatePath() {
         assert.fail("inactive discovery must not fall back to Firebase");
       },
@@ -152,6 +155,9 @@ test("D1 profile-link discovery uses bounded ordered pages without Firebase disc
       },
     },
     state: {
+      async readInviteMetadata() {
+        assert.fail("unexpected-invite-metadata-read");
+      },
       async getStatePath() {
         assert.fail(
           "D1 discovery must not read Firebase match keys or invites",
@@ -222,6 +228,9 @@ test("D1 profile-link cleanup requests one match and advances past unresolved re
       },
     },
     state: {
+      async readInviteMetadata() {
+        assert.fail("unexpected-invite-metadata-read");
+      },
       async getStatePath() {
         assert.fail("D1 discovery must not access Firebase");
       },
@@ -265,6 +274,9 @@ test("D1 profile-link failures propagate without falling back to Firebase", asyn
           },
         },
         state: {
+          async readInviteMetadata() {
+            assert.fail("unexpected-invite-metadata-read");
+          },
           async getStatePath() {
             assert.fail("D1 discovery failure must not fall back to Firebase");
           },

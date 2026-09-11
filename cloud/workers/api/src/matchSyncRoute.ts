@@ -148,7 +148,7 @@ export async function handleMatchSyncRoute(
     const repository = dependencies.repository || createGameplayRepository(env);
     const existence = normalizeInviteMetadata(
       inviteId,
-      await repository.getStatePath(`invites/${inviteId}`),
+      await repository.readInviteMetadata(inviteId),
     );
     if (existence.status === "missing") {
       throw new AuthApiFailure(404, "not-found", "invite-not-found");

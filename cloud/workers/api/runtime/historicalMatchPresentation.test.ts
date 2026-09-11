@@ -101,6 +101,9 @@ describe("historical match presentation", () => {
       freezeRegisteredPresentations: freeze,
       now: () => 2_000,
       state: {
+        readInviteMetadata: async () => {
+          throw new Error("unexpected-invite-metadata-read");
+        },
         getStatePath: async () => {
           throw new Error("unexpected-source-read");
         },
@@ -153,6 +156,9 @@ describe("historical match presentation", () => {
       freezeRegisteredPresentations: canonicalFreeze,
       now: () => 2_000,
       state: {
+        readInviteMetadata: async () => {
+          throw new Error("unexpected-invite-metadata-read");
+        },
         getStatePath: async () => {
           throw new Error("unexpected-source-read");
         },
@@ -176,6 +182,9 @@ describe("historical match presentation", () => {
         throw new Error("unnecessary-do-read");
       },
       state: {
+        readInviteMetadata: async () => {
+          throw new Error("unexpected-invite-metadata-read");
+        },
         getStatePath: async () => {
           throw new Error("unexpected-source-read");
         },
@@ -192,6 +201,9 @@ describe("historical match presentation", () => {
         throw new Error("registered-presentation-missing");
       },
       state: {
+        readInviteMetadata: async () => {
+          throw new Error("unexpected-invite-metadata-read");
+        },
         getStatePath: async () => {
           throw new Error("unexpected-source-read");
         },
@@ -216,6 +228,9 @@ describe("historical match presentation", () => {
         readPresentationControl: async () => ({ phase }),
         freezeRegisteredPresentations: freeze,
         state: {
+          readInviteMetadata: async () => {
+            throw new Error("unexpected-invite-metadata-read");
+          },
           getStatePath: async () => {
             throw new Error("unexpected-source-read");
           },
@@ -292,6 +307,9 @@ describe("historical match presentation", () => {
     });
     const runtime = createProfileGameProjectionRuntime(env, {
       state: {
+        readInviteMetadata: async () => {
+          throw new Error("unexpected-invite-metadata-read");
+        },
         getStatePath: async () => {
           throw new Error("unexpected-source-read");
         },

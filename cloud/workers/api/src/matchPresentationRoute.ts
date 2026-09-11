@@ -18,7 +18,7 @@ import {
   createGameplayRepository,
   type GameplayRepository,
 } from "./gameplayRepository.ts";
-import { resolveInviteRole } from "./gameSessionMutations.ts";
+import { resolveInviteRoleFromSnapshot } from "./gameSessionMutations.ts";
 import { readBoundedJson } from "./http.ts";
 import type { InviteReactions } from "./inviteReactions.ts";
 import {
@@ -107,16 +107,11 @@ export async function handleMatchPresentationRoute(
     const invite = await readPresentationInvite(repository, inviteId);
     let actorUid: string | null = null;
     if (identity) {
-      const role = await resolveInviteRole(
+      const role = await resolveInviteRoleFromSnapshot(
         identity,
         { inviteId },
-        {
-          ...repository,
-          getStatePath: async (path) =>
-            path === `invites/${inviteId}`
-              ? invite
-              : repository.getStatePath(path),
-        },
+        invite,
+        repository,
       );
       actorUid = role.actorUid;
     }

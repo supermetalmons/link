@@ -23,7 +23,7 @@ import type { RequestIdentity } from "./requestIdentity.ts";
 
 type SurrenderRepository = Pick<
   GameplayRepository,
-  "getStatePath" | "readProfileOwnershipSnapshot"
+  "readInviteMetadata" | "readProfileOwnershipSnapshot"
 >;
 
 export type SurrenderMatchDependencies = {
@@ -57,9 +57,8 @@ export async function surrenderMatch(
     ? AbortSignal.any([dependencies.signal, timeout])
     : timeout;
   signal.throwIfAborted();
-  const inviteValue = await repository.getStatePath(
-    `invites/${request.inviteId}`,
-    undefined,
+  const inviteValue = await repository.readInviteMetadata(
+    request.inviteId,
     signal,
   );
   if (inviteValue === null || inviteValue === undefined) {

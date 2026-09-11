@@ -54,19 +54,23 @@ function harness({
   const writes: Array<{ path: string; value: unknown }> = [];
   const scopes: unknown[] = [];
   const repository: Parameters<typeof submitMove>[2] = {
+    async readInviteMetadata(inviteId, requestSignal) {
+      assert.equal(inviteId, "invite");
+      assert.ok(requestSignal);
+      requestSignal.throwIfAborted();
+      reads.push(`invites/${inviteId}`);
+      return {
+        hostId: "actor",
+        guestId: "opponent",
+        hostRematches: "1",
+        guestRematches: "1",
+      };
+    },
     async getStatePath(path, query, requestSignal) {
       reads.push(path);
       assert.equal(query, undefined);
       assert.ok(requestSignal);
       requestSignal.throwIfAborted();
-      if (path === "invites/invite") {
-        return {
-          hostId: "actor",
-          guestId: "opponent",
-          hostRematches: "1",
-          guestRematches: "1",
-        };
-      }
       assert.equal(path, "matchTimerClaims/invite1");
       if (claimReadFailure) throw new StateRepositoryFailure();
       return structuredClone(claim);

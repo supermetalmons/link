@@ -49,7 +49,10 @@ import {
 } from "./matchPresentationRegistry.ts";
 import type { MatchPresentationReadDependencies } from "./matchPresentationAccess.ts";
 
-type ProjectionStateRepository = Pick<GameplayRepository, "getStatePath">;
+type ProjectionStateRepository = Pick<
+  GameplayRepository,
+  "getStatePath" | "readInviteMetadata"
+>;
 
 export type ProfileGameProjectionRuntime = {
   archiveHistoricalMatch?(input: {
@@ -207,6 +210,7 @@ export function createProfileGameProjectionRuntime(
     },
 
     getStatePath: (path) => state.getStatePath(path),
+    readInviteMetadata: (inviteId) => state.readInviteMetadata(inviteId),
 
     async getMatchEmoji(inviteId, matchId, loginUid) {
       const control = await readPresentationControl();
@@ -271,7 +275,10 @@ export function createProfileGameProjectionRuntime(
 export function createEventProfileGameProjectionRuntime(
   env: Env,
   dependencies: Omit<ProfileGameProjectionDependencies, "state"> & {
-    state?: Pick<EventGameplayRepository, "getStatePath" | "readEvent">;
+    state?: Pick<
+      EventGameplayRepository,
+      "getStatePath" | "readInviteMetadata" | "readEvent"
+    >;
   } = {},
 ): EventProfileGameProjectionRuntime {
   const profileDb = dependencies.profileDb || env.PROFILE_DB;
@@ -294,7 +301,7 @@ export function createEventProfileGameProjectionRuntime(
       if (value) {
         await captureEventMatchDiscovery(
           d1,
-          state.getStatePath,
+          state,
           eventMatchInviteIds(value),
           undefined,
           (dependencies.now || Date.now)(),
