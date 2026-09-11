@@ -98,7 +98,7 @@ npm run recover:telegram -- --message-key <key> --action confirm-send-absent --b
 
 Use `confirm-send-applied --message-id <telegram-message-id>` when Telegram created the message, or `abandon` to retain the audit record and stop delivery.
 
-The reminder timing update was released on September 8, 2026 in API version `7a94cfb8-550d-45c1-9ab1-4399ea9b6e11`. Use this or a later compatible version for rollback once four-hour jobs exist; it accepts both stored three-hour and four-hour schedules. Validation and release evidence is retained in `/private/tmp/mons-reminder-release-x51eqD`.
+Once four-hour reminder jobs exist, rollback requires API version `7a94cfb8-550d-45c1-9ab1-4399ea9b6e11` or a later compatible version that accepts both stored three-hour and four-hour schedules.
 
 New Sunday Mons reminders send automatically four hours before the scheduled event start. Previously queued three-hour reminders retain their original schedule, and participant updates preserve the heading of already-sent messages. Only scheduled events with `isSundayMons === true` and a valid start time qualify; prizes are not required. The standalone HTML message goes to the community destination with notifications enabled and link previews disabled:
 
@@ -116,7 +116,7 @@ Sunday Mons prize announcements send automatically one hour before the scheduled
 
 `EVENT_PROGRESS_WORKFLOW` sleeps until each notification's target; the existing event progress sweep discovers eligible events and recovers pending dispatches. Event changes persist eligible scheduling markers atomically before dispatch. Events first discovered after a notification's target skip that notification; previously scheduled jobs have a 60-second delivery grace period. Before sending, the workflow checks the canonical event and any required prize catalog entry under the event lease. A postponement can schedule a new job for each unsent notification; superseded jobs do nothing.
 
-Each event has one permanent delivery identity per notification kind. A confirmed reminder or prize album never resends, including after postponement. Only safely retryable Telegram failures can retry within the grace period; timeouts, interrupted sends, and ambiguous responses block automatic retries to prevent duplicates. Historical manual prize receipts remain valid. These announcements have no manual send trigger and require no separate announcement bridge credential. The initial reminder rollout requires only the API Worker and an additive Telegram D1 migration that records the notification kind and makes delivery uniqueness specific to each event and kind; no frontend or trigger deployment is needed. Live reminder participant lists require an API-only release with no additional database migration.
+Each event has one permanent delivery identity per notification kind. A confirmed reminder or prize album never resends, including after postponement. Only safely retryable Telegram failures can retry within the grace period; timeouts, interrupted sends, and ambiguous responses block automatic retries to prevent duplicates. Historical manual prize receipts remain valid. These announcements have no manual send trigger and require no separate announcement bridge credential. Telegram D1 enforces delivery uniqueness per event and notification kind. Compatible announcement and reminder changes use the routine API release path; publish the event-progress Workflow definition when its code or dependencies change.
 
 ## Other admin tools
 
@@ -135,5 +135,5 @@ Publish GP, MP, or shooting-star leaderboard messages through the Queue bridge:
 ```sh
 node cloud/admin/topGpWithEmojis.js 25 --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
 node cloud/admin/topMpWithEmojis.js 25 --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
-npm --prefix cloud/admin run shooting:alert -- --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue --project mons-link
+npm --prefix cloud/admin run shooting:alert -- --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
 ```

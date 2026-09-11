@@ -3,11 +3,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 
-const telegramDelivery = require("../runtime/telegramDelivery");
-const deliveryEngine = require("../runtime/telegram/deliveryEngine");
-const desiredState = require("../runtime/telegram/desiredState");
 const deliveryPolicy = require("../runtime/telegram/deliveryPolicy");
-const queueBridge = require("../runtime/telegram/queueBridge");
 const taskIdentity = require("../runtime/telegram/taskIdentity");
 const eventProjectionCore = require("../runtime/telegram/eventProjectionCore");
 
@@ -17,21 +13,6 @@ test("event Telegram projection is exposed through the shared core", () => {
     "function",
   );
   assert.equal(typeof eventProjectionCore.loadEndedMatchResults, "function");
-});
-
-test("delivery exports use the extracted engine and desired-state modules", () => {
-  assert.strictEqual(
-    telegramDelivery.createTelegramDeliveryEngine,
-    deliveryEngine.createTelegramDeliveryEngine,
-  );
-  assert.strictEqual(
-    telegramDelivery.buildTelegramSendDesired,
-    desiredState.buildTelegramSendDesired,
-  );
-  assert.strictEqual(
-    telegramDelivery.buildTelegramEditUpdates,
-    desiredState.buildTelegramEditUpdates,
-  );
 });
 
 test("retry policy preserves deadline clamping and rate-limit proof timing", () => {
@@ -56,11 +37,7 @@ test("retry policy preserves deadline clamping and rate-limit proof timing", () 
   );
 });
 
-test("queue bridge retains the extracted deterministic task identity", () => {
-  assert.strictEqual(
-    queueBridge.buildTelegramDeliveryTaskId,
-    taskIdentity.buildTelegramDeliveryTaskId,
-  );
+test("task identities stay deterministic and distinguish pending deletes", () => {
   const payload = {
     messageKey: "automatch:invite-1",
     revision: "revision-1",

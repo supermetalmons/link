@@ -99,14 +99,13 @@ function privateDirectory(directory: string): string {
   return real;
 }
 
-function readPrivateJson(path: string, allowReadOnly = false): unknown {
+function readPrivateJson(path: string): unknown {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const stat = fstatSync(fd);
     if (
       !stat.isFile() ||
-      ((stat.mode & 0o777) !== 0o600 &&
-        !(allowReadOnly && (stat.mode & 0o777) === 0o400)) ||
+      (stat.mode & 0o777) !== 0o600 ||
       stat.uid !== process.getuid?.() ||
       stat.size > MAX_FILE_BYTES
     ) {
@@ -114,7 +113,7 @@ function readPrivateJson(path: string, allowReadOnly = false): unknown {
         "artifact must be a private regular file no larger than 64 MiB",
       );
     }
-    if (!allowReadOnly && stat.nlink === 2) {
+    if (stat.nlink === 2) {
       const directory = privateDirectory(dirname(path));
       for (const name of readdirSync(directory)) {
         if (

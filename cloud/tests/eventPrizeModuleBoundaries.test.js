@@ -7,35 +7,10 @@ const test = require("node:test");
 
 const withdrawalPath = path.resolve(
   __dirname,
-  "../runtime/eventPrizeWithdrawal.js",
+  "../runtime/eventPrizes/withdrawalOrchestrator.js",
 );
 
-test("preserves the event-prize withdrawal facade", () => {
-  const withdrawal = require(withdrawalPath);
-
-  assert.deepEqual(Object.keys(withdrawal).sort(), [
-    "acquireWithdrawalClaim",
-    "buildCompressedTransferBuilder",
-    "buildSubmittedTransaction",
-    "deserializePersistedSubmittedTransaction",
-    "discardDefinitiveSubmittedTransaction",
-    "handleWithdrawEventPrize",
-    "inspectSubmittedWithdrawal",
-    "isDefinitiveSubmittedTransactionFailure",
-    "loadPrizeAssetState",
-    "loadSolanaDependencies",
-    "persistSubmittedTransaction",
-    "reconcileCompletedWithdrawalProjections",
-    "reconcileSubmittedAssetState",
-    "recoverSubmittedWithdrawal",
-    "sendAndConfirmSubmittedTransaction",
-    "validateCompressedPrizeAsset",
-    "validatePrizeAssignment",
-    "waitForSubmittedTransactionStatus",
-  ]);
-});
-
-test("keeps Solana SDK loading behind the facade's lazy adapter", () => {
+test("keeps withdrawal orchestration independent of eager Solana SDK loading", () => {
   const result = spawnSync(
     process.execPath,
     [

@@ -202,11 +202,13 @@ test("persists exact recovery requests and exposes metadata-only status", async 
 test("freezes commands and rejects invalid or oversized requests", async () => {
   const sent: unknown[] = [];
   const state = repositoryState();
+  const command = {
+    kind: "recovery-status",
+    messageKey: "message-1",
+    requestId: "18ea8b32-ca88-4492-8ecb-42f87670a901",
+  };
   const frozen = await handleTelegramCommand(
-    await signedRequest({
-      kind: "smoke",
-      requestId: "18ea8b32-ca88-4492-8ecb-42f87670a901",
-    }),
+    await signedRequest(command),
     commandEnv(sent),
     {
       now: () => NOW_MS,
@@ -218,7 +220,7 @@ test("freezes commands and rejects invalid or oversized requests", async () => {
   const invalid = await handleTelegramCommand(
     new Request("https://api.mons.link/internal/telegram/command", {
       method: "POST",
-      body: JSON.stringify({ kind: "smoke", requestId: "bad" }),
+      body: JSON.stringify(command),
     }),
     commandEnv(sent),
   );
@@ -232,7 +234,7 @@ test("freezes commands and rejects invalid or oversized requests", async () => {
   assert.equal(oversized.status, 400);
 });
 
-test("delete-only smoke persists and queues without accepting arbitrary targets", async () => {
+test("rejects retired smoke commands before storage access or queue writes", async () => {
   const state = repositoryState();
   const sent: unknown[] = [];
   const requestId = "18ea8b32-ca88-4492-8ecb-42f87670a901";
@@ -241,16 +243,19 @@ test("delete-only smoke persists and queues without accepting arbitrary targets"
     commandEnv(sent),
     {
       now: () => NOW_MS,
-      readStorageMode: async () => "d1",
+      async readStorageMode() {
+        assert.fail("retired commands must not read storage controls");
+      },
       repository: state.repository,
     },
   );
-  assert.equal(response.status, 202);
-  const message = state.values.get(
-    `telegramMessages/migration-smoke:${requestId}`,
-  ) as { desired?: { operation?: string } };
-  assert.equal(message.desired?.operation, "delete");
-  assert.equal(sent.length, 1);
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {
+    ok: false,
+    error: "invalid-request",
+  });
+  assert.equal(state.values.size, 0);
+  assert.equal(sent.length, 0);
 });
 
 test("signed reminder refreshes delegate only the event identity and can repeat", async () => {

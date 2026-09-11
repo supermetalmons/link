@@ -167,6 +167,13 @@ describe("canonical match state storage", () => {
     await runInDurableObject(room, (_instance, ctx) => {
       const store = new MatchStateStore(ctx.storage, options());
       expect(
+        ctx.storage.sql
+          .exec(
+            "SELECT name FROM sqlite_schema WHERE name IN ('match_state_staged_records', 'match_state_staged_claims')",
+          )
+          .toArray(),
+      ).toEqual([]);
+      expect(
         store.createRecords({ ...input, records }).changedMatchIds,
       ).toEqual([input.matchId]);
       expect(store.readSource()).toMatchObject({ status: "active", epoch: 1 });
@@ -199,6 +206,40 @@ describe("canonical match state storage", () => {
       expect(
         store.readRecord({ ...input, playerId: input.opponentId }),
       ).toMatchObject({ fen: "initial" });
+    });
+  });
+
+  it("keeps retained staged sources unavailable across eviction", async () => {
+    const { room, input, records } = fixture();
+    const expectedSource = {
+      inviteId: input.inviteId,
+      epoch: 0,
+      status: "staged",
+      importId: "unfinished-import",
+      stagedEpoch: input.epoch,
+      digest: "a".repeat(64),
+    };
+    await runInDurableObject(room, (_instance, ctx) => {
+      seedRetainedMatchState(ctx.storage, {
+        ...input,
+        importId: expectedSource.importId,
+        records,
+      });
+      ctx.storage.sql.exec(
+        "UPDATE match_state_source SET active_epoch = NULL WHERE singleton = 1",
+      );
+    });
+    await evictDurableObject(room);
+    await runInDurableObject(room, (_instance, ctx) => {
+      const store = new MatchStateStore(ctx.storage, options());
+      expect(store.readSource()).toEqual(expectedSource);
+      expect(() => store.createRecords({ ...input, records })).toThrow(
+        "match-state-authority-unavailable",
+      );
+      expect(() => store.readRecord(input)).toThrow(
+        "match-state-authority-unavailable",
+      );
+      expect(store.readSource()).toEqual(expectedSource);
     });
   });
 
@@ -512,6 +553,12 @@ describe("canonical match state storage", () => {
         ...record,
         value: { ...record.value, sessionCreation: marker } as MatchStateRecord,
       })),
+      claims: [
+        {
+          matchId: input.matchId,
+          value: { status: "pending", expiresAtMs: future - 1 },
+        },
+      ],
     };
     retained.records[0].value.timer = formatMatchTimer(
       game.turnNumber,
@@ -544,6 +591,9 @@ describe("canonical match state storage", () => {
       expect(store.readPair({ ...input, epoch: 4 }).playerMatch).toEqual(
         retained.records[0].value,
       );
+      expect(store.readPair({ ...input, epoch: 4 }).claim).toEqual(
+        retained.claims[0].value,
+      );
       const evidence = ctx.storage.sql
         .exec<{ value_json: string }>(
           "SELECT value_json FROM match_state_staged_records WHERE player_id = ?",
@@ -552,6 +602,15 @@ describe("canonical match state storage", () => {
         .one();
       expect(JSON.parse(evidence.value_json)).toEqual(
         retained.records[0].value,
+      );
+      const claimEvidence = ctx.storage.sql
+        .exec<{ value_json: string }>(
+          "SELECT value_json FROM match_state_staged_claims WHERE match_id = ?",
+          input.matchId,
+        )
+        .one();
+      expect(JSON.parse(claimEvidence.value_json)).toEqual(
+        retained.claims[0].value,
       );
     });
   });

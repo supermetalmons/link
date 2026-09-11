@@ -2,12 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const {
-  createTelegramDeliveryDispatcher,
-  createTelegramManualRecoveryDispatcher,
-  enqueueTelegramDeliveryTask,
-  sendTelegramCommand,
-} = require("../runtime/telegram/queueBridge");
+const { sendTelegramCommand } = require("../runtime/telegram/queueBridge");
 
 const MAX_BRIDGE_SECRET_BYTES = 8 * 1024;
 
@@ -50,17 +45,7 @@ const readBridgeSecret = (filePath, { readFile = fs.readFileSync } = {}) => {
 };
 
 const createDispatchers = (secret, dependencies = {}) => {
-  const enqueueTask = (input) =>
-    enqueueTelegramDeliveryTask(input, {
-      fetchImpl: dependencies.fetchImpl,
-      now: dependencies.now,
-      secret,
-    });
   return {
-    dispatchDelivery: createTelegramDeliveryDispatcher({ enqueueTask }),
-    dispatchManualRecovery: createTelegramManualRecoveryDispatcher({
-      enqueueTask,
-    }),
     sendCommand: (command) =>
       sendTelegramCommand(command, {
         fetchImpl: dependencies.fetchImpl,

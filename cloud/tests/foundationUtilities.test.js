@@ -16,68 +16,6 @@ const {
   resolveTelegramEmojiId,
 } = require("../runtime/telegramDisplay");
 const { customTelegramEmojis } = require("../runtime/telegramEmojiData");
-const utils = require("../runtime/utils");
-
-test("utils preserves its compatibility export surface", () => {
-  assert.deepEqual(Object.keys(utils), [
-    "batchReadWithRetry",
-    "getDisplayNameFromAddress",
-    "getTelegramEmojiTag",
-    "customTelegramEmojis",
-  ]);
-  assert.strictEqual(utils.batchReadWithRetry, batchReadWithRetry);
-  assert.strictEqual(
-    utils.getDisplayNameFromAddress,
-    getDisplayNameFromAddress,
-  );
-  assert.strictEqual(utils.getTelegramEmojiTag, getTelegramEmojiTag);
-  assert.strictEqual(utils.customTelegramEmojis, customTelegramEmojis);
-});
-
-test("production modules import foundation leaves instead of the utils facade", () => {
-  const runtimeDirectory = path.resolve(__dirname, "../runtime");
-  const pendingDirectories = [runtimeDirectory];
-  const facadeConsumers = [];
-
-  while (pendingDirectories.length > 0) {
-    const directory = pendingDirectories.pop();
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        if (entry.name !== "node_modules") {
-          pendingDirectories.push(path.join(directory, entry.name));
-        }
-        continue;
-      }
-      if (!entry.isFile() || !entry.name.endsWith(".js")) {
-        continue;
-      }
-      const filename = path.join(directory, entry.name);
-      if (filename === path.join(runtimeDirectory, "utils.js")) {
-        continue;
-      }
-      const source = fs.readFileSync(filename, "utf8");
-      for (const match of source.matchAll(/require\(["']([^"']+)["']\)/g)) {
-        const specifier = match[1];
-        if (!specifier.startsWith(".")) {
-          continue;
-        }
-        const requiredFilename = path.resolve(
-          path.dirname(filename),
-          specifier,
-        );
-        if (
-          requiredFilename === path.join(runtimeDirectory, "utils") ||
-          requiredFilename === path.join(runtimeDirectory, "utils.js")
-        ) {
-          facadeConsumers.push(path.relative(runtimeDirectory, filename));
-          break;
-        }
-      }
-    }
-  }
-
-  assert.deepEqual(facadeConsumers.sort(), []);
-});
 
 test("Telegram emoji data preserves the complete configured catalog", () => {
   assert.equal(Object.keys(customTelegramEmojis).length, 622);

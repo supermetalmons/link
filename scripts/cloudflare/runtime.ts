@@ -44,11 +44,9 @@ function stripEnvironment(
 function createWranglerEnvironment(
   source: ProcessEnvironment,
   logDirectory: string,
-  options: { ci?: boolean } = {},
 ): ProcessEnvironment {
   return {
     ...source,
-    ...(options.ci ? { CI: "true" } : {}),
     WRANGLER_LOG_PATH: logDirectory,
     WRANGLER_LOG_SANITIZE: "true",
     WRANGLER_SEND_ERROR_REPORTS: "false",
@@ -60,23 +58,18 @@ function readCloudflareApiToken({
   tokenFile,
   environment,
   readFile,
-  includeReadError = false,
 }: {
   tokenFile?: string;
   environment: ProcessEnvironment;
   readFile: (path: string, encoding: "utf8") => string;
-  includeReadError?: boolean;
 }): string {
   if (tokenFile) {
     let token: string;
     try {
       token = readFile(resolve(tokenFile), "utf8").trim();
     } catch (error) {
-      if (includeReadError) {
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new DeployError(`Unable to read --token-file: ${detail}`);
-      }
-      throw new DeployError("Unable to read --token-file.");
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new DeployError(`Unable to read --token-file: ${detail}`);
     }
     if (!token) {
       throw new DeployError("The Cloudflare token file is empty.");
@@ -99,7 +92,6 @@ function runCommand(
   environment: ProcessEnvironment,
   label: string,
   runtime: CommandRuntime,
-  options: { includeSpawnError?: boolean } = {},
 ): void {
   const result = runtime.spawn(command, args, {
     cwd: runtime.repoRoot,
@@ -109,12 +101,7 @@ function runCommand(
   });
 
   if (result.error) {
-    if (options.includeSpawnError) {
-      throw new DeployError(
-        `${label} could not start: ${result.error.message}`,
-      );
-    }
-    throw new DeployError(`${label} could not start.`);
+    throw new DeployError(`${label} could not start: ${result.error.message}`);
   }
   if (result.status !== 0) {
     const exitCode = result.status ?? 1;

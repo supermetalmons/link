@@ -1037,7 +1037,7 @@ async function prepare(
   fixture.stage = "prepared";
   save();
   dependencies.log(
-    "[wager-smoke] Preparation passed; one pending 1-dust proposal is retained for migration verification.",
+    "[wager-smoke] Preparation passed; one pending 1-dust proposal is retained for release verification.",
   );
 }
 

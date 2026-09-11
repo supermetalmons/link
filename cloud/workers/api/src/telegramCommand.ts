@@ -1,5 +1,4 @@
 import {
-  buildTelegramDeleteDesired,
   buildTelegramSendDesired,
   validateTelegramMessageKey,
 } from "../../../runtime/telegram/desiredStateCore.js";
@@ -62,11 +61,6 @@ type RecoveryStatusCommand = {
   requestId: string;
 };
 
-type SmokeCommand = {
-  kind: "smoke";
-  requestId: string;
-};
-
 type EventReminderRefreshCommand = {
   kind: "event-reminder-refresh";
   eventId: string;
@@ -76,8 +70,7 @@ type TelegramCommand =
   | EventReminderRefreshCommand
   | RecoveryCommand
   | RecoveryStatusCommand
-  | SendCommand
-  | SmokeCommand;
+  | SendCommand;
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -229,16 +222,6 @@ function parseCommand(body: string): TelegramCommand {
       messageKey: validateTelegramMessageKey(nonEmptyString(value.messageKey)),
       requestId,
     };
-  }
-  if (kind === "smoke") {
-    if (!exactKeys(value, ["kind", "requestId"])) {
-      throw new TypeError("invalid-command");
-    }
-    const requestId = nonEmptyString(value.requestId);
-    if (!REQUEST_ID_PATTERN.test(requestId)) {
-      throw new TypeError("invalid-request-id");
-    }
-    return { kind, requestId };
   }
   throw new TypeError("invalid-command");
 }
@@ -452,33 +435,6 @@ async function handleRecoveryStatus(
   return commandResponse(404, { ok: false, error: "recovery-not-found" });
 }
 
-async function handleSmoke(
-  command: SmokeCommand,
-  repository: TelegramRepository,
-  env: Env,
-): Promise<Response> {
-  const messageKey = `migration-smoke:${command.requestId}`;
-  const desired = buildTelegramDeleteDesired({
-    destination: "community",
-    sourceRevision: command.requestId,
-  });
-  await repository.transactMessage(messageKey, (current) => ({
-    value: { ...(record(current) || {}), desired },
-    decision: "migration-smoke-persisted",
-  }));
-  await enqueueInitialTelegramDelivery(env, {
-    messageKey,
-    revision: desired.revision,
-    generation: `migration-smoke:${command.requestId}`,
-    producer: "migration-smoke",
-  });
-  return commandResponse(202, {
-    ok: true,
-    messageKey,
-    revision: desired.revision,
-  });
-}
-
 export async function handleTelegramCommand(
   request: Request,
   env: Env,
@@ -569,9 +525,6 @@ export async function handleTelegramCommand(
     }
     if (command.kind === "recovery-status") {
       return await handleRecoveryStatus(command, repository);
-    }
-    if (command.kind === "smoke") {
-      return await handleSmoke(command, repository, env);
     }
     return commandResponse(400, { ok: false, error: "invalid-request" });
   } catch (error) {

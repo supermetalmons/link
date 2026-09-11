@@ -16,6 +16,12 @@ export function seedRetainedMatchState(
 ): void {
   storage.transactionSync(() => {
     storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS match_state_staged_records (import_id TEXT NOT NULL, match_id TEXT NOT NULL, player_id TEXT NOT NULL, value_json TEXT NOT NULL, PRIMARY KEY(import_id, match_id, player_id))",
+    );
+    storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS match_state_staged_claims (import_id TEXT NOT NULL, match_id TEXT NOT NULL, value_json TEXT NOT NULL, PRIMARY KEY(import_id, match_id))",
+    );
+    storage.sql.exec(
       "INSERT INTO match_state_source(singleton, invite_id, active_epoch, staged_epoch, import_id, digest) VALUES (1, ?, ?, ?, ?, ?)",
       input.inviteId,
       input.epoch,

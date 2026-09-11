@@ -220,7 +220,6 @@ function execute(
           tokenFile: options.tokenFile,
           environment: dependencies.processEnv,
           readFile: dependencies.readFile,
-          includeReadError: true,
         });
   const buildEnvironment = createBuildEnvironment(dependencies);
 
@@ -237,7 +236,6 @@ function execute(
       buildEnvironment,
       "Frontend build",
       dependencies,
-      { includeSpawnError: true },
     );
   }
 
@@ -279,7 +277,6 @@ function execute(
         wranglerEnvironment,
         "Wrangler version upload",
         dependencies,
-        { includeSpawnError: true },
       );
       versionId = readUploadedVersionId(outputFile, dependencies);
       dependencies.log(`[deploy] Version: ${versionId} (new)`);
@@ -304,7 +301,6 @@ function execute(
     wranglerEnvironment,
     "Wrangler",
     dependencies,
-    { includeSpawnError: true },
   );
 }
 

@@ -153,12 +153,6 @@ export class MatchStateStore {
       "CREATE TABLE IF NOT EXISTS match_state_claims (match_id TEXT PRIMARY KEY, value_json TEXT NOT NULL)",
     );
     storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS match_state_staged_records (import_id TEXT NOT NULL, match_id TEXT NOT NULL, player_id TEXT NOT NULL, value_json TEXT NOT NULL, PRIMARY KEY(import_id, match_id, player_id))",
-    );
-    storage.sql.exec(
-      "CREATE TABLE IF NOT EXISTS match_state_staged_claims (import_id TEXT NOT NULL, match_id TEXT NOT NULL, value_json TEXT NOT NULL, PRIMARY KEY(import_id, match_id))",
-    );
-    storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS match_state_effects (effect_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, next_at_ms INTEGER, attempts INTEGER NOT NULL DEFAULT 0, completed_at_ms INTEGER)",
     );
     storage.sql.exec(

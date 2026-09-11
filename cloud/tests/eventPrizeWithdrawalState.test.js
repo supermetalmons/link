@@ -43,25 +43,35 @@ const {
 } = require("../runtime/eventPrizeWithdrawalState");
 const eventPrizeProjectionState = require("../runtime/eventPrizeProjectionState");
 const {
-  acquireWithdrawalClaim,
   buildCompressedTransferBuilder,
-  buildSubmittedTransaction,
-  discardDefinitiveSubmittedTransaction,
-  deserializePersistedSubmittedTransaction,
-  handleWithdrawEventPrize,
-  inspectSubmittedWithdrawal,
-  isDefinitiveSubmittedTransactionFailure,
   loadPrizeAssetState,
-  loadSolanaDependencies,
-  persistSubmittedTransaction,
+  validateCompressedPrizeAsset,
+} = require("../runtime/eventPrizes/assets");
+const {
+  reconcileCompletedWithdrawalProjections,
+} = require("../runtime/eventPrizes/projectionReconciliation");
+const {
+  inspectSubmittedWithdrawal,
   reconcileSubmittedAssetState,
   recoverSubmittedWithdrawal,
-  reconcileCompletedWithdrawalProjections,
+} = require("../runtime/eventPrizes/submissionRecovery");
+const { loadSolanaDependencies } = require("../runtime/eventPrizes/solana");
+const {
+  buildSubmittedTransaction,
+  deserializePersistedSubmittedTransaction,
+  isDefinitiveSubmittedTransactionFailure,
   sendAndConfirmSubmittedTransaction,
-  validateCompressedPrizeAsset,
-  validatePrizeAssignment,
   waitForSubmittedTransactionStatus,
-} = require("../runtime/eventPrizeWithdrawal");
+} = require("../runtime/eventPrizes/submittedTransactions");
+const {
+  handleWithdrawEventPrize,
+  validatePrizeAssignment,
+} = require("../runtime/eventPrizes/withdrawalOrchestrator");
+const {
+  acquireWithdrawalClaim,
+  discardDefinitiveSubmittedTransaction,
+  persistSubmittedTransaction,
+} = require("../runtime/eventPrizes/withdrawalRepository");
 const {
   resolveProfileMergeTargetPath,
 } = require("../runtime/profileMergeTargets");

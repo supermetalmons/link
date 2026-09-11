@@ -23,7 +23,3 @@ export const didNotDismissAnythingWithOutsideTapJustNow = (): boolean => {
     isMobile,
   );
 };
-
-export const resetOutsideTapStateForTests = (dismissedAtMs: number): void => {
-  latestModalOutsideTapDismissDate = dismissedAtMs;
-};

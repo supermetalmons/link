@@ -13,19 +13,16 @@ const {
   buildTelegramEditUpdates,
   buildTelegramSendDesired,
   buildTelegramSendUpdates,
-  createTelegramDeliveryEngine,
-  createTelegramLocalRetryBarrier,
-  queueTelegramSend,
   resolveTelegramDestination,
   validateTelegramMessageKey,
-} = require("../runtime/telegramDelivery");
+} = require("../runtime/telegram/desiredStateCore");
+const {
+  createTelegramDeliveryEngine,
+  createTelegramLocalRetryBarrier,
+} = require("../runtime/telegram/deliveryEngine");
 const {
   buildTelegramDeliveryTaskId,
-  createTelegramDeliveryDispatcher,
-  createTelegramManualRecoveryDispatcher,
-  enqueueTelegramDeliveryTask,
-  signTelegramBridgeRequest,
-} = require("../runtime/telegram/queueBridge");
+} = require("../runtime/telegram/taskIdentity");
 
 const clone = (value) =>
   value === undefined ? undefined : structuredClone(value);
@@ -355,20 +352,6 @@ test("validates record-safe logical message keys", () => {
   for (const key of ["", " spaced", "a.b", "a#b", "a$b", "a/b", "a[b", "a]b"]) {
     assert.throws(() => validateTelegramMessageKey(key), TypeError);
   }
-});
-
-test("legacy legacy queue APIs fail closed after D1 cutover", async () => {
-  await assert.rejects(
-    () =>
-      queueTelegramSend({
-        messageKey: "admin:test:1",
-        destination: "community",
-        instanceKey: "admin:test:1",
-        text: "notice",
-        sourceRevision: "1",
-      }),
-    /telegram-d1-command-required/,
-  );
 });
 
 test("delivers a new send and persists its receipt", async () => {
@@ -4506,208 +4489,19 @@ test("consecutive replacements preserve and drain every pending cleanup", async 
   assert.deepEqual(order, ["send:20", "send:30", "delete:10", "delete:20"]);
 });
 
-test("dispatcher enqueues every valid revision as a wake-up task", async () => {
-  const desired = sendDesired();
-  const enqueued = [];
-  const dispatcher = createTelegramDeliveryDispatcher({
-    enqueueTask: async (payload) => {
-      enqueued.push(payload);
-      return { enqueued: true };
-    },
-  });
-  await dispatcher({
-    messageKey: "key",
-    revision: "old",
-    generation: "generation-old",
-  });
-  await dispatcher({
-    messageKey: "key",
-    revision: desired.revision,
-    generation: "generation-1",
-  });
-  assert.deepEqual(enqueued, [
-    {
-      messageKey: "key",
-      revision: "old",
-      taskKind: "desired",
-      retrySequence: 0,
-      generation: "generation-old",
-    },
-    {
-      messageKey: "key",
-      revision: desired.revision,
-      taskKind: "desired",
-      retrySequence: 0,
-      generation: "generation-1",
-    },
-  ]);
-  assert.equal(
-    buildTelegramDeliveryTaskId("key", desired.revision, "generation-1"),
-    buildTelegramDeliveryTaskId("key", desired.revision, "generation-1"),
-  );
-});
-
-test("dispatcher rejects unsafe keys and incomplete identities", async () => {
-  let enqueues = 0;
-  const dispatcher = createTelegramDeliveryDispatcher({
-    enqueueTask: async () => {
-      enqueues += 1;
-    },
-  });
-  await assert.rejects(
-    () =>
-      dispatcher({
-        messageKey: "unsafe/key",
-        revision: "revision",
-        generation: "generation",
-      }),
-    TypeError,
-  );
-  await assert.rejects(
-    () =>
-      dispatcher({
-        messageKey: "key",
-        revision: " ",
-        generation: "generation",
-      }),
-    TypeError,
-  );
-  await assert.rejects(
-    () =>
-      dispatcher({
-        messageKey: "key",
-        revision: "revision",
-        generation: "",
-      }),
-    TypeError,
-  );
-  assert.equal(enqueues, 0);
-});
-
-test("manual recovery dispatcher creates an isolated recovery task", async () => {
-  const enqueued = [];
-  const dispatcher = createTelegramManualRecoveryDispatcher({
-    enqueueTask: async (payload) => {
-      enqueued.push(payload);
-      return { enqueued: true };
-    },
-  });
-  await dispatcher({
-    messageKey: "key",
-    requestId: "request-1",
-    generation: "event-1",
-  });
-  assert.deepEqual(enqueued, [
-    {
-      messageKey: "key",
-      revision: "manual-recovery",
-      taskKind: "manual-recovery",
-      retrySequence: 0,
-      generation: "request-1:event-1",
-    },
-  ]);
-});
-
-test("A to B to A revision changes receive unique durable task generations", async () => {
+test("A to B to A revisions retain distinct durable task generations", () => {
   const desiredA = sendDesired({ text: "A", sourceRevision: "A" });
   const desiredB = sendDesired({ text: "B", sourceRevision: "B" });
-  const enqueued = [];
-  const dispatcher = createTelegramDeliveryDispatcher({
-    enqueueTask: async (payload) => {
-      enqueued.push({
-        ...payload,
-        taskId: buildTelegramDeliveryTaskId(
-          payload.messageKey,
-          payload.revision,
-          payload.generation,
-        ),
-      });
-      return { enqueued: true };
-    },
-  });
-
-  await dispatcher({
-    messageKey: "key",
-    revision: desiredA.revision,
-    generation: "event-a-1",
-  });
-  await dispatcher({
-    messageKey: "key",
-    revision: desiredB.revision,
-    generation: "event-b",
-  });
-  await dispatcher({
-    messageKey: "key",
-    revision: desiredA.revision,
-    generation: "event-a-2",
-  });
-
-  assert.deepEqual(
-    enqueued.map(({ revision, generation }) => ({ revision, generation })),
-    [
-      { revision: desiredA.revision, generation: "event-a-1" },
-      { revision: desiredB.revision, generation: "event-b" },
-      { revision: desiredA.revision, generation: "event-a-2" },
-    ],
+  const taskIds = [
+    [desiredA.revision, "event-a-1"],
+    [desiredB.revision, "event-b"],
+    [desiredA.revision, "event-a-2"],
+  ].map(([revision, generation]) =>
+    buildTelegramDeliveryTaskId("key", revision, generation),
   );
-  assert.notEqual(enqueued[0].taskId, enqueued[2].taskId);
-});
-
-test("task enqueue signs and posts the normalized wake-up payload", async () => {
-  const calls = [];
-  const nowMs = 1_700_000_000_000;
-  const input = {
-    messageKey: "key",
-    revision: "revision",
-    taskKind: "desired",
-    retrySequence: 0,
-    generation: "generation",
-  };
-  const result = await enqueueTelegramDeliveryTask(input, {
-    fetchImpl: async (url, init) => {
-      calls.push({ url, init });
-      return new Response(null, { status: 202 });
-    },
-    now: () => nowMs,
-    secret: "bridge-secret",
-  });
-  const body = JSON.stringify(input);
-  const timestamp = String(Math.floor(nowMs / 1_000));
+  assert.equal(new Set(taskIds).size, 3);
   assert.equal(
-    calls[0].url,
-    "https://api.mons.link/internal/telegram/delivery",
-  );
-  assert.equal(calls[0].init.body, body);
-  assert.equal(calls[0].init.headers["X-Mons-Telegram-Timestamp"], timestamp);
-  assert.equal(
-    calls[0].init.headers["X-Mons-Telegram-Signature"],
-    signTelegramBridgeRequest({ body, secret: "bridge-secret", timestamp }),
-  );
-  assert.equal(result.taskId, buildTelegramDeliveryTaskId(input));
-});
-
-test("task enqueue fails closed on bridge rejection and transport failure", async () => {
-  const input = {
-    messageKey: "key",
-    revision: "revision",
-    generation: "generation",
-  };
-  await assert.rejects(
-    () =>
-      enqueueTelegramDeliveryTask(input, {
-        fetchImpl: async () => new Response(null, { status: 503 }),
-        secret: "bridge-secret",
-      }),
-    { code: "telegram-queue-bridge-rejected", status: 503 },
-  );
-  await assert.rejects(
-    () =>
-      enqueueTelegramDeliveryTask(input, {
-        fetchImpl: async () => {
-          throw new Error("network failure");
-        },
-        secret: "bridge-secret",
-      }),
-    { code: "telegram-queue-bridge-unavailable" },
+    taskIds[0],
+    buildTelegramDeliveryTaskId("key", desiredA.revision, "event-a-1"),
   );
 });

@@ -25,12 +25,12 @@ test("builds the Helius RPC URL from an injected secret value", () => {
 });
 
 test("shared Solana loading excludes standard-specific SDKs", () => {
-  const withdrawalPath = path.resolve(
+  const solanaPath = path.resolve(
     __dirname,
-    "../runtime/eventPrizeWithdrawal.js",
+    "../runtime/eventPrizes/solana.js",
   );
   runModuleLoadingCheck(`
-    const { loadSolanaDependencies } = require(${JSON.stringify(withdrawalPath)});
+    const { loadSolanaDependencies } = require(${JSON.stringify(solanaPath)});
     loadSolanaDependencies();
     const loaded = Object.keys(require.cache).filter((modulePath) =>
       modulePath.includes("/node_modules/@metaplex-foundation/mpl-core/") ||
@@ -43,12 +43,12 @@ test("shared Solana loading excludes standard-specific SDKs", () => {
 });
 
 test("Core Solana loading excludes Bubblegum", () => {
-  const withdrawalPath = path.resolve(
+  const solanaPath = path.resolve(
     __dirname,
-    "../runtime/eventPrizeWithdrawal.js",
+    "../runtime/eventPrizes/solana.js",
   );
   runModuleLoadingCheck(`
-    const { loadSolanaDependencies } = require(${JSON.stringify(withdrawalPath)});
+    const { loadSolanaDependencies } = require(${JSON.stringify(solanaPath)});
     loadSolanaDependencies("core");
     const loaded = Object.keys(require.cache);
     const hasCore = loaded.some((modulePath) =>
@@ -64,12 +64,12 @@ test("Core Solana loading excludes Bubblegum", () => {
 });
 
 test("compressed Solana loading excludes Core", () => {
-  const withdrawalPath = path.resolve(
+  const solanaPath = path.resolve(
     __dirname,
-    "../runtime/eventPrizeWithdrawal.js",
+    "../runtime/eventPrizes/solana.js",
   );
   runModuleLoadingCheck(`
-    const { loadSolanaDependencies } = require(${JSON.stringify(withdrawalPath)});
+    const { loadSolanaDependencies } = require(${JSON.stringify(solanaPath)});
     loadSolanaDependencies("compressed");
     const loaded = Object.keys(require.cache);
     const hasCore = loaded.some((modulePath) =>

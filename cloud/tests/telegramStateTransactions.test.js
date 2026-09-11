@@ -7,9 +7,11 @@ const {
   buildTelegramDeleteDesired,
   buildTelegramEditDesired,
   buildTelegramSendDesired,
+} = require("../runtime/telegram/desiredStateCore");
+const {
   createTelegramDeliveryEngine,
   createTelegramLocalRetryBarrier,
-} = require("../runtime/telegramDelivery");
+} = require("../runtime/telegram/deliveryEngine");
 const {
   createTelegramRepository,
 } = require("../runtime/telegram/repositoryCore");
