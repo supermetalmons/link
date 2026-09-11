@@ -1262,53 +1262,39 @@ export async function readCanonicalLeaderboard(
   );
 }
 
-export async function readCanonicalProfileAggregate(
+function canonicalProfileAggregateStatements(
   db: D1Database,
-  profileId: string,
-): Promise<CanonicalProfileAggregateSnapshot> {
-  const results = await db.batch([
-    db
-      .prepare("SELECT * FROM profile_records WHERE profile_id = ?")
-      .bind(profileId),
-    db
-      .prepare(
-        `SELECT * FROM profile_login_owners
-         WHERE profile_id = ? ORDER BY login_uid ASC`,
-      )
-      .bind(profileId),
-    db
-      .prepare(
-        `SELECT * FROM profile_auth_methods
-         WHERE profile_id = ? ORDER BY method ASC`,
-      )
-      .bind(profileId),
-    db
-      .prepare(
-        `SELECT opponent_profile_id FROM profile_february_opponents
-         WHERE profile_id = ? ORDER BY opponent_profile_id ASC`,
-      )
-      .bind(profileId),
-    db
-      .prepare(
-        `SELECT source_profile_id, target_profile_id, merged_at_ms, op_id
-         FROM profile_merge_targets WHERE source_profile_id = ?`,
-      )
-      .bind(profileId),
-    db
-      .prepare("SELECT * FROM profile_auth_recovery_jobs WHERE profile_id = ?")
-      .bind(profileId),
-  ]);
-  const profileRow = results[0].results[0] as ProfileRow | undefined;
-  const mergeRow = results[4].results[0] as MergeTargetRow | undefined;
-  const recoveryRow = results[5].results[0] as RecoveryRow | undefined;
+  source: { profileId: string } | { loginUid: string },
+): D1PreparedStatement[] {
+  const profileIdSql =
+    "profileId" in source
+      ? "?"
+      : "(SELECT profile_id FROM profile_login_owners WHERE login_uid = ?)";
+  const key = "profileId" in source ? source.profileId : source.loginUid;
+  return [
+    `SELECT * FROM profile_records WHERE profile_id = ${profileIdSql}`,
+    `SELECT * FROM profile_login_owners
+     WHERE profile_id = ${profileIdSql} ORDER BY login_uid ASC`,
+    `SELECT * FROM profile_auth_methods
+     WHERE profile_id = ${profileIdSql} ORDER BY method ASC`,
+    `SELECT opponent_profile_id FROM profile_february_opponents
+     WHERE profile_id = ${profileIdSql} ORDER BY opponent_profile_id ASC`,
+    `SELECT source_profile_id, target_profile_id, merged_at_ms, op_id
+     FROM profile_merge_targets WHERE source_profile_id = ${profileIdSql}`,
+    `SELECT * FROM profile_auth_recovery_jobs WHERE profile_id = ${profileIdSql}`,
+  ].map((query) => db.prepare(query).bind(key));
+}
+
+function parseCanonicalProfileAggregateResults(
+  results: readonly D1Result[],
+): CanonicalProfileAggregateSnapshot {
+  const profileRow = results[0].results[0];
+  const mergeRow = results[4].results[0];
+  const recoveryRow = results[5].results[0];
   return {
     profile: profileRow ? parseCanonicalProfileRow(profileRow) : null,
-    loginOwners: (results[1].results as LoginOwnerRow[]).map(
-      parseCanonicalLoginOwnerRow,
-    ),
-    authMethods: (results[2].results as AuthMethodRow[]).map(
-      parseCanonicalAuthMethodRow,
-    ),
+    loginOwners: results[1].results.map(parseCanonicalLoginOwnerRow),
+    authMethods: results[2].results.map(parseCanonicalAuthMethodRow),
     februaryOpponentProfileIds: results[3].results.map((entry) =>
       nonempty(record(entry)?.opponent_profile_id),
     ),
@@ -1317,43 +1303,14 @@ export async function readCanonicalProfileAggregate(
   };
 }
 
-function canonicalAggregateFingerprint(
-  aggregate: CanonicalProfileAggregateSnapshot,
-): string {
-  return JSON.stringify({
-    profile: aggregate.profile
-      ? [
-          aggregate.profile.profileId,
-          aggregate.profile.revision,
-          aggregate.profile.state,
-          aggregate.profile.mergedIntoProfileId,
-        ]
-      : null,
-    loginOwners: aggregate.loginOwners.map((owner) => [
-      owner.loginUid,
-      owner.profileId,
-      owner.revision,
-      owner.createdAtMs,
-      owner.updatedAtMs,
-    ]),
-    authMethods: aggregate.authMethods.map((method) => [
-      method.method,
-      method.normalizedValue,
-      method.profileId,
-      method.revision,
-    ]),
-    februaryOpponentProfileIds: aggregate.februaryOpponentProfileIds,
-    mergeTarget: aggregate.mergeTarget
-      ? [
-          aggregate.mergeTarget.sourceProfileId,
-          aggregate.mergeTarget.targetProfileId,
-          aggregate.mergeTarget.mergedAtMs,
-        ]
-      : null,
-    recovery: aggregate.recovery
-      ? [aggregate.recovery.profileId, aggregate.recovery.revision]
-      : null,
-  });
+export async function readCanonicalProfileAggregate(
+  db: D1Database,
+  profileId: string,
+): Promise<CanonicalProfileAggregateSnapshot> {
+  const results = await db.batch(
+    canonicalProfileAggregateStatements(db, { profileId }),
+  );
+  return parseCanonicalProfileAggregateResults(results);
 }
 
 function assertCanonicalAggregateTopology(
@@ -1393,59 +1350,13 @@ function assertCanonicalAggregateTopology(
   }
 }
 
-function stableObservationLimit(value: number): number {
-  if (!Number.isSafeInteger(value) || value < 2 || value > 8) {
-    throw new TypeError("invalid-canonical-stable-read-limit");
-  }
-  return value;
-}
-
-async function readStableCanonicalSnapshot<T>(options: {
-  fingerprint: (value: T) => string;
-  maxObservations: number;
-  read: () => Promise<T>;
-  validate: (value: T) => void;
-}): Promise<T> {
-  let previousFingerprint: string | null = null;
-  let consecutiveCorruption = 0;
-  for (
-    let observation = 0;
-    observation < stableObservationLimit(options.maxObservations);
-    observation += 1
-  ) {
-    let value: T;
-    try {
-      value = await options.read();
-      consecutiveCorruption = 0;
-    } catch (error) {
-      if (!(error instanceof CanonicalProfileCorruption)) throw error;
-      previousFingerprint = null;
-      consecutiveCorruption += 1;
-      if (consecutiveCorruption >= 2) throw error;
-      continue;
-    }
-    const fingerprint = options.fingerprint(value);
-    if (previousFingerprint === fingerprint) {
-      options.validate(value);
-      return value;
-    }
-    previousFingerprint = fingerprint;
-  }
-  throw new CanonicalProfileConflict();
-}
-
-export async function readStableCanonicalProfileAggregate(
+export async function readCanonicalProfileAggregateSnapshot(
   db: D1Database,
   profileId: string,
-  maxObservations = 4,
 ): Promise<CanonicalProfileAggregateSnapshot> {
-  return readStableCanonicalSnapshot({
-    read: () => readCanonicalProfileAggregate(db, profileId),
-    fingerprint: canonicalAggregateFingerprint,
-    validate: (aggregate) =>
-      assertCanonicalAggregateTopology(profileId, aggregate),
-    maxObservations,
-  });
+  const aggregate = await readCanonicalProfileAggregate(db, profileId);
+  assertCanonicalAggregateTopology(profileId, aggregate);
+  return aggregate;
 }
 
 function canonicalOwnershipInputs(
@@ -1953,45 +1864,31 @@ export async function readCanonicalProfileOwnershipSnapshot(
   });
 }
 
-export async function readStableCanonicalProfileAggregateByLogin(
+export async function readCanonicalProfileAggregateByLogin(
   db: D1Database,
   loginUid: string,
-  maxObservations = 4,
 ): Promise<CanonicalResolvedProfileAggregateSnapshot | null> {
-  return readStableCanonicalSnapshot({
-    read: async () => {
-      const owner = await readCanonicalLoginOwner(db, loginUid);
-      if (!owner) return null;
-      const profile = await resolveCanonicalProfile(db, owner.profileId);
-      if (!profile) throw new CanonicalProfileCorruption();
-      return {
-        owner,
-        aggregate: await readCanonicalProfileAggregate(db, profile.profileId),
-      };
-    },
-    fingerprint: (value) =>
-      value
-        ? JSON.stringify([
-            value.owner.loginUid,
-            value.owner.profileId,
-            value.owner.revision,
-            canonicalAggregateFingerprint(value.aggregate),
-          ])
-        : "null",
-    validate: (value) => {
-      if (!value) return;
-      const profile = value.aggregate.profile;
-      if (
-        !profile ||
-        profile.state !== "active" ||
-        value.owner.profileId !== profile.profileId
-      ) {
-        throw new CanonicalProfileCorruption();
-      }
-      assertCanonicalAggregateTopology(profile.profileId, value.aggregate);
-    },
-    maxObservations,
-  });
+  const [ownerResult, ...aggregateResults] = await db.batch([
+    db
+      .prepare("SELECT * FROM profile_login_owners WHERE login_uid = ?")
+      .bind(loginUid),
+    ...canonicalProfileAggregateStatements(db, { loginUid }),
+  ]);
+  const ownerRow = ownerResult.results[0];
+  if (!ownerRow) return null;
+  const owner = parseCanonicalLoginOwnerRow(ownerRow);
+  const aggregate = parseCanonicalProfileAggregateResults(aggregateResults);
+  const profile = aggregate.profile;
+  if (
+    !profile ||
+    profile.state !== "active" ||
+    owner.loginUid !== loginUid ||
+    owner.profileId !== profile.profileId
+  ) {
+    throw new CanonicalProfileCorruption();
+  }
+  assertCanonicalAggregateTopology(profile.profileId, aggregate);
+  return { owner, aggregate };
 }
 
 export async function readCanonicalAuthOperation(

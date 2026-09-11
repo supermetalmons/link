@@ -85,6 +85,7 @@ async function createProfile(
 function observeDatabase(
   options: {
     beforeFirstBatch?: () => Promise<void>;
+    afterFirstBatch?: () => Promise<void>;
     mapMutationRow?: (row: Record<string, unknown>) => Record<string, unknown>;
   } = {},
 ) {
@@ -133,11 +134,13 @@ function observeDatabase(
             ),
           );
           if (batchQueries.length === 1) await options.beforeFirstBatch?.();
-          return target.batch(
+          const results = await target.batch(
             statements.map(
               (statement) => nativeStatements.get(statement) || statement,
             ),
           );
+          if (batchQueries.length === 1) await options.afterFirstBatch?.();
+          return results;
         };
       }
       const member = Reflect.get(target, property, target);
@@ -599,6 +602,66 @@ describe("canonical profile mutation reads", () => {
     ).resolves.toEqual(initial.profile);
   });
 
+  it("rechecks username clearing after a concurrent social method link", async () => {
+    const initial = await createProfile({
+      username: `ClearRace${crypto.randomUUID()}`,
+    });
+    const normalizedValue = crypto.randomUUID();
+    const observed = observeDatabase({
+      afterFirstBatch: async () => {
+        await commitCanonicalPlan(db, {
+          expectations: [
+            { kind: "profile-revision", ...initial.profile },
+            { kind: "auth-method-absent", method: "x", normalizedValue },
+          ],
+          mutations: [
+            {
+              kind: "update-active-profile",
+              value: materializeCanonicalProfile({
+                ...initial.profile,
+                updatedAtMs: 3_000,
+              }),
+            },
+            {
+              kind: "insert-auth-method",
+              value: {
+                method: "x",
+                normalizedValue,
+                rawValue: normalizedValue,
+                profileId: initial.profile.profileId,
+                appleEmailMasked: null,
+                xUsername: "NewSocialMethod",
+                linkedAtMs: 3_000,
+                consentAtMs: null,
+                consentSource: null,
+                createdAtMs: 3_000,
+                updatedAtMs: 3_000,
+              },
+            },
+          ],
+        });
+      },
+    });
+    await expect(
+      createUsernameRepository(testEnv, {
+        d1: observed.database,
+        now: () => 4_000,
+      }).editUsername(initial.owner.loginUid, ""),
+    ).resolves.toBe("cannot-clear");
+    expect(observed.firstQueries).toHaveLength(0);
+    expect(
+      observed.batchQueries.filter((queries) =>
+        queries.every((query) => query.trimStart().startsWith("SELECT")),
+      ),
+    ).toHaveLength(2);
+    await expect(
+      readCanonicalProfile(db, initial.profile.profileId),
+    ).resolves.toMatchObject({
+      profile: { username: initial.profile.profile.username },
+      revision: 2,
+    });
+  });
+
   it.each<{
     methods: CanonicalAuthMethodValue["method"][];
     eth: string | null;
@@ -648,11 +711,8 @@ describe("canonical profile mutation reads", () => {
           d1: observed.database,
         }).editUsername(initial.owner.loginUid, ""),
       ).resolves.toBe(outcome);
-      expect(
-        observed.firstQueries.every(
-          (query) => !query.includes("mutation_owner_login_uid"),
-        ),
-      ).toBe(true);
+      expect(observed.firstQueries).toHaveLength(0);
+      expect(observed.batchQueries[0]).toHaveLength(7);
       expect(
         observed.batchQueries
           .flat()

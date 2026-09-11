@@ -16,12 +16,12 @@ import {
   readCanonicalMergeTarget,
   readCanonicalProfile,
   readCanonicalProfileAggregate,
+  readCanonicalProfileAggregateByLogin,
+  readCanonicalProfileAggregateSnapshot,
   readCanonicalProfileOwnershipSnapshot,
   readCanonicalPublicProfileByLogin,
   readCanonicalRatingUpdate,
   readCanonicalWagerSettlement,
-  readStableCanonicalProfileAggregate,
-  readStableCanonicalProfileAggregateByLogin,
   resolveCanonicalProfile,
   resolveCanonicalPublicProfile,
   type CanonicalExpectation,
@@ -100,6 +100,64 @@ function ratingValue(
     eventProgressVersion: null,
     ...overrides,
   };
+}
+
+function observeAggregateDatabase(
+  options: {
+    beforeBatch?: () => Promise<void>;
+    afterBatch?: () => Promise<void>;
+    mapResults?: (
+      queries: string[],
+      results: D1Result<Record<string, unknown>>[],
+    ) => D1Result<Record<string, unknown>>[];
+  } = {},
+) {
+  const batches: string[][] = [];
+  const statements = new WeakMap<object, D1PreparedStatement>();
+  const queries = new WeakMap<object, string>();
+  const wrap = (statement: D1PreparedStatement, query: string) => {
+    const wrapped: D1PreparedStatement = new Proxy(statement, {
+      get(target, property) {
+        if (property === "bind") {
+          return (...values: unknown[]) => wrap(target.bind(...values), query);
+        }
+        if (["first", "all", "run", "raw"].includes(String(property))) {
+          return () => {
+            throw new Error("aggregate-read-outside-batch");
+          };
+        }
+        const member = Reflect.get(target, property, target);
+        return typeof member === "function" ? member.bind(target) : member;
+      },
+    });
+    statements.set(wrapped, statement);
+    queries.set(wrapped, query);
+    return wrapped;
+  };
+  const database = new Proxy(testEnv.PROFILE_DB, {
+    get(target, property) {
+      if (property === "prepare") {
+        return (query: string) => wrap(target.prepare(query), query);
+      }
+      if (property === "batch") {
+        return async (prepared: D1PreparedStatement[]) => {
+          const batchQueries = prepared.map(
+            (statement) => queries.get(statement) || "",
+          );
+          batches.push(batchQueries);
+          if (batches.length === 1) await options.beforeBatch?.();
+          const results = await target.batch<Record<string, unknown>>(
+            prepared.map((statement) => statements.get(statement) || statement),
+          );
+          if (batches.length === 1) await options.afterBatch?.();
+          return options.mapResults?.(batchQueries, results) || results;
+        };
+      }
+      const member = Reflect.get(target, property, target);
+      return typeof member === "function" ? member.bind(target) : member;
+    },
+  });
+  return { database, batches };
 }
 
 async function resetCanonicalRows(db: D1Database): Promise<void> {
@@ -226,6 +284,54 @@ describe("canonical profile D1 store", () => {
       ],
     });
 
+    await commitCanonicalPlan(testEnv.PROFILE_DB, {
+      expectations: [
+        { kind: "login-owner-absent", loginUid: "login-a-success" },
+        {
+          kind: "auth-method-absent",
+          method: "apple",
+          normalizedValue: "apple-success",
+        },
+        {
+          kind: "february-opponent-absent",
+          profileId: value.profile.id,
+          opponentProfileId: "opponent-0",
+        },
+      ],
+      mutations: [
+        {
+          kind: "insert-login-owner",
+          value: {
+            loginUid: "login-a-success",
+            profileId: value.profile.id,
+            createdAtMs: 1_000,
+            updatedAtMs: 1_000,
+          },
+        },
+        {
+          kind: "insert-auth-method",
+          value: {
+            method: "apple",
+            normalizedValue: "apple-success",
+            rawValue: "apple-success",
+            profileId: value.profile.id,
+            appleEmailMasked: null,
+            xUsername: null,
+            linkedAtMs: null,
+            consentAtMs: null,
+            consentSource: null,
+            createdAtMs: 1_000,
+            updatedAtMs: 1_000,
+          },
+        },
+        {
+          kind: "insert-february-opponent",
+          profileId: value.profile.id,
+          opponentProfileId: "opponent-0",
+          recordedAtMs: 1_000,
+        },
+      ],
+    });
     const aggregate = await readCanonicalProfileAggregate(
       testEnv.PROFILE_DB,
       value.profile.id,
@@ -233,16 +339,37 @@ describe("canonical profile D1 store", () => {
     expect(aggregate.profile?.revision).toBe(1);
     expect(aggregate.profile?.gameplayEmoji).toBe("gameplay-only");
     expect(aggregate.loginOwners.map((owner) => owner.loginUid)).toEqual([
+      "login-a-success",
       "login-success",
     ]);
-    expect(aggregate.authMethods[0]).toMatchObject({
+    expect(aggregate.authMethods.map((method) => method.method)).toEqual([
+      "apple",
+      "eth",
+    ]);
+    expect(aggregate.authMethods[1]).toMatchObject({
       method: "eth",
       normalizedValue: "0xabc",
       rawValue: "0xAbC",
       revision: 1,
     });
-    expect(aggregate.februaryOpponentProfileIds).toEqual(["opponent-1"]);
+    expect(aggregate.februaryOpponentProfileIds).toEqual([
+      "opponent-0",
+      "opponent-1",
+    ]);
     expect(aggregate.recovery?.loginUids).toEqual(["login-success"]);
+    const direct = observeAggregateDatabase();
+    await expect(
+      readCanonicalProfileAggregateSnapshot(direct.database, value.profile.id),
+    ).resolves.toEqual(aggregate);
+    expect(direct.batches.map((queries) => queries.length)).toEqual([6]);
+    const byLogin = observeAggregateDatabase();
+    const resolved = await readCanonicalProfileAggregateByLogin(
+      byLogin.database,
+      "login-success",
+    );
+    expect(resolved?.aggregate).toEqual(aggregate);
+    expect(resolved?.owner).toEqual(aggregate.loginOwners[1]);
+    expect(byLogin.batches.map((queries) => queries.length)).toEqual([7]);
   });
 
   it("keeps opaque archives out of public profile reads", async () => {
@@ -487,6 +614,15 @@ describe("canonical profile D1 store", () => {
     );
     if (!retired) throw new Error("missing retired profile");
     await expect(
+      readCanonicalProfileAggregateSnapshot(
+        testEnv.PROFILE_DB,
+        source.profile.id,
+      ),
+    ).resolves.toMatchObject({
+      profile: retired,
+      mergeTarget: { targetProfileId: target.profile.id },
+    });
+    await expect(
       commitCanonicalPlan(testEnv.PROFILE_DB, {
         expectations: [
           {
@@ -545,6 +681,24 @@ describe("canonical profile D1 store", () => {
     expect(
       await readCanonicalProfile(testEnv.PROFILE_DB, source.profile.id),
     ).toBeNull();
+    await expect(
+      readCanonicalProfileAggregateSnapshot(
+        testEnv.PROFILE_DB,
+        source.profile.id,
+      ),
+    ).resolves.toEqual({
+      profile: null,
+      loginOwners: [],
+      authMethods: [],
+      februaryOpponentProfileIds: [],
+      mergeTarget: {
+        sourceProfileId: source.profile.id,
+        targetProfileId: target.profile.id,
+        mergedAtMs: 2_000,
+        opId: "canonical-lifecycle-merge",
+      },
+      recovery: null,
+    });
     await expect(
       readCanonicalMergeTarget(testEnv.PROFILE_DB, source.profile.id),
     ).resolves.toMatchObject({ targetProfileId: target.profile.id });
@@ -1080,177 +1234,317 @@ describe("canonical profile D1 store", () => {
     expect(ownership.profileById.get(profileId)?.profileId).toBe(profileId);
   });
 
-  it("retries changing aggregates and rejects stable owner corruption", async () => {
-    const value = profileValue("canonical-stable-profile", {
+  it("returns one coherent aggregate without waiting for later writes to settle", async () => {
+    const value = profileValue("canonical-snapshot-profile", {
       emojiPresent: false,
       gameplayEmoji: 17,
+      winPresent: false,
+      sortPresence: { rating: false, nonce: false, mp: true },
+      sortValues: { mp: null },
+      legacyFields: { imported: { emoji: "" }, opaque: [1, null] },
     });
     await commitCanonicalPlan(testEnv.PROFILE_DB, {
-      expectations: [
-        { kind: "profile-absent", profileId: value.profile.id },
-        { kind: "login-owner-absent", loginUid: "canonical-stable-login" },
-      ],
-      mutations: [
-        { kind: "insert-active-profile", value },
-        {
-          kind: "insert-login-owner",
-          value: {
-            loginUid: "canonical-stable-login",
-            profileId: value.profile.id,
-            createdAtMs: 1_000,
-            updatedAtMs: 1_000,
-          },
-        },
-      ],
+      expectations: [{ kind: "profile-absent", profileId: value.profile.id }],
+      mutations: [{ kind: "insert-active-profile", value }],
     });
-    expect(
-      (
-        await readStableCanonicalProfileAggregateByLogin(
-          testEnv.PROFILE_DB,
-          "canonical-stable-login",
-        )
-      )?.aggregate.profile?.gameplayEmoji,
-    ).toBe(17);
-
-    let batchReads = 0;
-    const changingDb = new Proxy(testEnv.PROFILE_DB, {
-      get(target, property) {
-        if (property === "batch") {
-          return async (statements: D1PreparedStatement[]) => {
-            const results = await target.batch(statements);
-            batchReads += 1;
-            if (batchReads === 1) {
-              await target
-                .prepare(
-                  `UPDATE profile_records
-                   SET revision = revision + 1
-                   WHERE profile_id = ?`,
-                )
-                .bind(value.profile.id)
-                .run();
-            }
-            return results;
-          };
-        }
-        const member = Reflect.get(target, property);
-        return typeof member === "function" ? member.bind(target) : member;
+    const expected = await readCanonicalProfileAggregate(
+      testEnv.PROFILE_DB,
+      value.profile.id,
+    );
+    const observed = observeAggregateDatabase({
+      afterBatch: async () => {
+        await commitCanonicalPlan(testEnv.PROFILE_DB, {
+          expectations: [
+            {
+              kind: "profile-revision",
+              profileId: value.profile.id,
+              revision: 1,
+            },
+          ],
+          mutations: [
+            {
+              kind: "update-active-profile",
+              value: { ...value, updatedAtMs: 2_000 },
+            },
+          ],
+        });
       },
     });
-    expect(
-      (await readStableCanonicalProfileAggregate(changingDb, value.profile.id))
-        .profile?.revision,
-    ).toBe(2);
-    expect(batchReads).toBe(3);
-
-    const alwaysChangingDb = new Proxy(testEnv.PROFILE_DB, {
-      get(target, property) {
-        if (property === "batch") {
-          return async (statements: D1PreparedStatement[]) => {
-            const results = await target.batch(statements);
-            await target
-              .prepare(
-                `UPDATE profile_records
-                 SET revision = revision + 1
-                 WHERE profile_id = ?`,
-              )
-              .bind(value.profile.id)
-              .run();
-            return results;
-          };
-        }
-        const member = Reflect.get(target, property);
-        return typeof member === "function" ? member.bind(target) : member;
-      },
-    });
-    await expect(
-      readStableCanonicalProfileAggregate(
-        alwaysChangingDb,
-        value.profile.id,
-        3,
-      ),
-    ).rejects.toBeInstanceOf(CanonicalProfileConflict);
-
-    const redirectSource = profileValue("canonical-stable-source");
-    const redirectTarget = profileValue("canonical-stable-target");
-    await commitCanonicalPlan(testEnv.PROFILE_DB, {
-      expectations: [
-        { kind: "profile-absent", profileId: redirectSource.profile.id },
-        { kind: "profile-absent", profileId: redirectTarget.profile.id },
-        { kind: "login-owner-absent", loginUid: "canonical-stale-owner" },
-      ],
-      mutations: [
-        { kind: "insert-active-profile", value: redirectSource },
-        { kind: "insert-active-profile", value: redirectTarget },
-        {
-          kind: "insert-login-owner",
-          value: {
-            loginUid: "canonical-stale-owner",
-            profileId: redirectSource.profile.id,
-            createdAtMs: 1_000,
-            updatedAtMs: 1_000,
-          },
-        },
-      ],
-    });
-    const redirectSourceSnapshot = await readCanonicalProfile(
-      testEnv.PROFILE_DB,
-      redirectSource.profile.id,
+    const snapshot = await readCanonicalProfileAggregateSnapshot(
+      observed.database,
+      value.profile.id,
     );
-    const redirectTargetSnapshot = await readCanonicalProfile(
-      testEnv.PROFILE_DB,
-      redirectTarget.profile.id,
-    );
-    if (!redirectSourceSnapshot || !redirectTargetSnapshot) {
-      throw new Error("missing redirect profiles");
-    }
+    expect(snapshot).toEqual(expected);
+    expect(observed.batches.map((queries) => queries.length)).toEqual([6]);
     await expect(
       commitCanonicalPlan(testEnv.PROFILE_DB, {
         expectations: [
           {
             kind: "profile-revision",
-            profileId: redirectSourceSnapshot.profileId,
-            revision: redirectSourceSnapshot.revision,
-          },
-          {
-            kind: "profile-revision",
-            profileId: redirectTargetSnapshot.profileId,
-            revision: redirectTargetSnapshot.revision,
-          },
-          {
-            kind: "merge-target-absent",
-            sourceProfileId: redirectSourceSnapshot.profileId,
+            profileId: value.profile.id,
+            revision: snapshot.profile!.revision,
           },
         ],
-        mutations: [
+        mutations: [{ kind: "update-active-profile", value }],
+      }),
+    ).rejects.toBeInstanceOf(CanonicalProfileConflict);
+    expect(
+      (await readCanonicalProfile(testEnv.PROFILE_DB, value.profile.id))
+        ?.revision,
+    ).toBe(2);
+  });
+
+  it("reads missing profiles and logins in one batch each", async () => {
+    const direct = observeAggregateDatabase();
+    await expect(
+      readCanonicalProfileAggregateSnapshot(
+        direct.database,
+        "missing-snapshot-profile",
+      ),
+    ).resolves.toEqual({
+      profile: null,
+      loginOwners: [],
+      authMethods: [],
+      februaryOpponentProfileIds: [],
+      mergeTarget: null,
+      recovery: null,
+    });
+    expect(direct.batches.map((queries) => queries.length)).toEqual([6]);
+    const byLogin = observeAggregateDatabase();
+    await expect(
+      readCanonicalProfileAggregateByLogin(
+        byLogin.database,
+        "missing-snapshot-login",
+      ),
+    ).resolves.toBeNull();
+    expect(byLogin.batches.map((queries) => queries.length)).toEqual([7]);
+  });
+
+  it.each(["before", "after"] as const)(
+    "reads the complete old or new aggregate when an owner merges %s the batch",
+    async (timing) => {
+      const source = profileValue("snapshot-merge-source");
+      const target = profileValue("snapshot-merge-target");
+      const loginUid = "snapshot-merge-login";
+      await commitCanonicalPlan(testEnv.PROFILE_DB, {
+        expectations: [
+          { kind: "profile-absent", profileId: source.profile.id },
+          { kind: "profile-absent", profileId: target.profile.id },
+          { kind: "login-owner-absent", loginUid },
           {
-            kind: "retire-profile-with-redirect",
-            profile: materializeCanonicalProfile({
-              ...redirectSourceSnapshot,
-              state: "retiring",
-              mergedIntoProfileId: redirectTargetSnapshot.profileId,
-              mergedAtMs: 2_000,
-              updatedAtMs: 2_000,
-            }),
-            redirect: {
-              sourceProfileId: redirectSourceSnapshot.profileId,
-              targetProfileId: redirectTargetSnapshot.profileId,
-              mergedAtMs: 2_000,
-              opId: null,
-              sourceLegacyFields: redirectSourceSnapshot.legacyFields,
+            kind: "auth-method-absent",
+            method: "sol",
+            normalizedValue: "snapshot-sol",
+          },
+          {
+            kind: "february-opponent-absent",
+            profileId: target.profile.id,
+            opponentProfileId: "snapshot-opponent",
+          },
+          { kind: "auth-recovery-absent", profileId: target.profile.id },
+        ],
+        mutations: [
+          { kind: "insert-active-profile", value: source },
+          { kind: "insert-active-profile", value: target },
+          {
+            kind: "insert-login-owner",
+            value: {
+              loginUid,
+              profileId: source.profile.id,
+              createdAtMs: 1_000,
+              updatedAtMs: 1_000,
+            },
+          },
+          {
+            kind: "insert-auth-method",
+            value: {
+              method: "sol",
+              normalizedValue: "snapshot-sol",
+              rawValue: "snapshot-sol",
+              profileId: target.profile.id,
+              appleEmailMasked: null,
+              xUsername: null,
+              linkedAtMs: null,
+              consentAtMs: null,
+              consentSource: null,
+              createdAtMs: 1_000,
+              updatedAtMs: 1_000,
+            },
+          },
+          {
+            kind: "insert-february-opponent",
+            profileId: target.profile.id,
+            opponentProfileId: "snapshot-opponent",
+            recordedAtMs: 1_000,
+          },
+          {
+            kind: "insert-auth-recovery",
+            value: {
+              profileId: target.profile.id,
+              loginUids: [],
+              sourceProfileIds: [],
+              sourcePhase: "finalize",
+              prizeCursor: null,
+              phaseStartedAtMs: 1_000,
+              lastEnqueuedAtMs: 0,
+              createdAtMs: 1_000,
+              updatedAtMs: 1_000,
             },
           },
         ],
-      }),
-    ).rejects.toBeInstanceOf(CanonicalProfileConflict);
-    await expect(
-      readStableCanonicalProfileAggregateByLogin(
+      });
+      const old = await readCanonicalProfileAggregateByLogin(
         testEnv.PROFILE_DB,
-        "canonical-stale-owner",
-      ),
-    ).resolves.toMatchObject({
-      aggregate: { profile: { state: "active" } },
-    });
-  });
+        loginUid,
+      );
+      let merged = 0;
+      const merge = async () => {
+        merged++;
+        await commitCanonicalPlan(testEnv.PROFILE_DB, {
+          expectations: [
+            {
+              kind: "profile-revision",
+              profileId: source.profile.id,
+              revision: 1,
+            },
+            {
+              kind: "profile-revision",
+              profileId: target.profile.id,
+              revision: 1,
+            },
+            {
+              kind: "login-owner-revision",
+              loginUid,
+              profileId: source.profile.id,
+              revision: 1,
+            },
+            { kind: "merge-target-absent", sourceProfileId: source.profile.id },
+          ],
+          mutations: [
+            {
+              kind: "update-login-owner",
+              value: {
+                loginUid,
+                profileId: target.profile.id,
+                createdAtMs: 1_000,
+                updatedAtMs: 2_000,
+              },
+            },
+            {
+              kind: "retire-profile-with-redirect",
+              profile: materializeCanonicalProfile({
+                ...source,
+                state: "retiring",
+                mergedIntoProfileId: target.profile.id,
+                mergedAtMs: 2_000,
+                updatedAtMs: 2_000,
+              }),
+              redirect: {
+                sourceProfileId: source.profile.id,
+                targetProfileId: target.profile.id,
+                mergedAtMs: 2_000,
+                opId: "snapshot-merge",
+                sourceLegacyFields: source.legacyFields,
+              },
+            },
+          ],
+        });
+      };
+      const observed = observeAggregateDatabase(
+        timing === "before" ? { beforeBatch: merge } : { afterBatch: merge },
+      );
+      const snapshot = await readCanonicalProfileAggregateByLogin(
+        observed.database,
+        loginUid,
+      );
+      const current = await readCanonicalProfileAggregateByLogin(
+        testEnv.PROFILE_DB,
+        loginUid,
+      );
+      expect(snapshot).toEqual(timing === "before" ? current : old);
+      expect(current).toMatchObject({
+        owner: { profileId: target.profile.id, revision: 2 },
+        aggregate: {
+          profile: { profileId: target.profile.id },
+          loginOwners: [{ loginUid, profileId: target.profile.id }],
+          authMethods: [{ method: "sol" }],
+          februaryOpponentProfileIds: ["snapshot-opponent"],
+          recovery: { profileId: target.profile.id },
+        },
+      });
+      expect(merged).toBe(1);
+      expect(observed.batches.map((queries) => queries.length)).toEqual([7]);
+    },
+  );
+
+  it.each([
+    ["orphaned owner", "profile_records", "missing"],
+    ["invalid profile", "profile_records", "revision"],
+    ["invalid owner", "profile_login_owners", "revision"],
+    ["inactive owner", "profile_records", "retiring"],
+    ["active redirect", "profile_merge_targets", "redirect"],
+  ] as const)(
+    "rejects %s in a transactional login snapshot",
+    async (_name, table, corruption) => {
+      const value = profileValue("snapshot-corruption-profile");
+      const loginUid = "snapshot-corruption-login";
+      await commitCanonicalPlan(testEnv.PROFILE_DB, {
+        expectations: [
+          { kind: "profile-absent", profileId: value.profile.id },
+          { kind: "login-owner-absent", loginUid },
+        ],
+        mutations: [
+          { kind: "insert-active-profile", value },
+          {
+            kind: "insert-login-owner",
+            value: {
+              loginUid,
+              profileId: value.profile.id,
+              createdAtMs: 1_000,
+              updatedAtMs: 1_000,
+            },
+          },
+        ],
+      });
+      const observed = observeAggregateDatabase({
+        mapResults: (queries, results) =>
+          results.map((result, index) => {
+            if (/\bFROM\s+([a-z_]+)/i.exec(queries[index])?.[1] !== table)
+              return result;
+            if (corruption === "missing") return { ...result, results: [] };
+            if (corruption === "redirect")
+              return {
+                ...result,
+                results: [
+                  {
+                    source_profile_id: value.profile.id,
+                    target_profile_id: "different-profile",
+                    merged_at_ms: 2_000,
+                    op_id: null,
+                  },
+                ],
+              };
+            return {
+              ...result,
+              results: result.results.map((row) => ({
+                ...row,
+                ...(corruption === "revision"
+                  ? { revision: 0 }
+                  : {
+                      state: "retiring",
+                      merged_into_profile_id: "different-profile",
+                      merged_at_ms: 2_000,
+                    }),
+              })),
+            };
+          }),
+      });
+      await expect(
+        readCanonicalProfileAggregateByLogin(observed.database, loginUid),
+      ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+      expect(observed.batches.map((queries) => queries.length)).toEqual([7]);
+    },
+  );
 
   it("resolves bulk ownership in one transactional batch", async () => {
     const value = profileValue("canonical-bulk-owner");

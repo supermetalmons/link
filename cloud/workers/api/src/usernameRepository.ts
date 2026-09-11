@@ -1,7 +1,7 @@
 import { buildUsernameLookupKey } from "@mons/shared/usernames";
 import {
   CanonicalProfileConflict,
-  readStableCanonicalProfileAggregateByLogin,
+  readCanonicalProfileAggregateByLogin,
 } from "./profileCanonicalD1.ts";
 import {
   commitCanonicalProfileUpdate,
@@ -59,7 +59,7 @@ export function createUsernameRepository(
         try {
           const resolved = nextUsername
             ? await readCanonicalProfileMutationByLogin(d1, loginUid)
-            : await readStableCanonicalProfileAggregateByLogin(d1, loginUid);
+            : await readCanonicalProfileAggregateByLogin(d1, loginUid);
           if (!resolved) return "profile-not-found";
           const owner = resolved.owner;
           const aggregate = "aggregate" in resolved ? resolved.aggregate : null;

@@ -57,8 +57,8 @@ import {
   readCanonicalAuthMethod,
   readCanonicalAuthOperation,
   readCanonicalMergeTarget,
-  readStableCanonicalProfileAggregate,
-  readStableCanonicalProfileAggregateByLogin,
+  readCanonicalProfileAggregateSnapshot,
+  readCanonicalProfileAggregateByLogin,
   resolveCanonicalProfile,
   type CanonicalAuthMethodSnapshot,
   type CanonicalAuthMethodValue,
@@ -610,7 +610,7 @@ export function createCanonicalAuthIdentityService(
     for (let attempt = 0; attempt < LINK_METHOD_MAX_ATTEMPTS; attempt++) {
       const resolved = await resolveCanonicalProfile(db, profileId);
       if (!resolved) return null;
-      const aggregate = await readStableCanonicalProfileAggregate(
+      const aggregate = await readCanonicalProfileAggregateSnapshot(
         db,
         resolved.profileId,
       );
@@ -625,7 +625,7 @@ export function createCanonicalAuthIdentityService(
   const profileByLogin = async (
     uid: string,
   ): Promise<CanonicalIdentityProfile | null> => {
-    const resolved = await readStableCanonicalProfileAggregateByLogin(db, uid);
+    const resolved = await readCanonicalProfileAggregateByLogin(db, uid);
     if (!resolved) return null;
     const profile = resolved.aggregate.profile;
     if (!profile || resolved.owner.profileId !== profile.profileId) {
@@ -1354,7 +1354,7 @@ export function createCanonicalAuthIdentityService(
         continue;
       if (
         (
-          await readStableCanonicalProfileAggregate(
+          await readCanonicalProfileAggregateSnapshot(
             db,
             profile.profile.profileId,
           )

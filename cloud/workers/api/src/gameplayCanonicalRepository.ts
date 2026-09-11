@@ -13,8 +13,8 @@ import {
   parseCanonicalRatingUpdateRow,
   readCanonicalProfileOwnershipSnapshot,
   readCanonicalRatingUpdate,
-  readStableCanonicalProfileAggregate,
-  readStableCanonicalProfileAggregateByLogin,
+  readCanonicalProfileAggregateSnapshot,
+  readCanonicalProfileAggregateByLogin,
   readCanonicalWagerSettlement,
   resolveCanonicalProfile,
   CanonicalProfileConflict,
@@ -218,7 +218,7 @@ function gameplayOwnershipSnapshot(
   });
 }
 
-type StableLoginAggregate = {
+type LoginAggregate = {
   aggregate: CanonicalProfileAggregateSnapshot | null;
   owner: CanonicalLoginOwnerSnapshot | null;
 };
@@ -226,13 +226,8 @@ type StableLoginAggregate = {
 async function aggregateByLogin(
   db: D1Database,
   loginUid: string,
-  maxAttempts = 5,
-): Promise<StableLoginAggregate> {
-  const resolved = await readStableCanonicalProfileAggregateByLogin(
-    db,
-    loginUid,
-    Math.min(8, Math.max(2, maxAttempts)),
-  );
+): Promise<LoginAggregate> {
+  const resolved = await readCanonicalProfileAggregateByLogin(db, loginUid);
   return resolved || { aggregate: null, owner: null };
 }
 
@@ -928,12 +923,12 @@ export function createCanonicalRatingRepository(
         ) {
           return { status: "lost" };
         }
-        let playerSnapshot: StableLoginAggregate;
-        let opponentSnapshot: StableLoginAggregate;
+        let playerSnapshot: LoginAggregate;
+        let opponentSnapshot: LoginAggregate;
         try {
           [playerSnapshot, opponentSnapshot] = await Promise.all([
-            aggregateByLogin(db, input.playerId, attempts),
-            aggregateByLogin(db, input.opponentId, attempts),
+            aggregateByLogin(db, input.playerId),
+            aggregateByLogin(db, input.opponentId),
           ]);
         } catch (error) {
           if (error instanceof CanonicalProfileConflict) continue;
@@ -1050,8 +1045,8 @@ export function createCanonicalRatingRepository(
           return;
         }
         const [player, opponent] = await Promise.all([
-          readStableCanonicalProfileAggregate(db, resolvedPlayerProfileId),
-          readStableCanonicalProfileAggregate(db, resolvedOpponentProfileId),
+          readCanonicalProfileAggregateSnapshot(db, resolvedPlayerProfileId),
+          readCanonicalProfileAggregateSnapshot(db, resolvedOpponentProfileId),
         ]);
         if (
           player.profile?.state !== "active" ||
