@@ -70,7 +70,7 @@ function telegramStore(initial: unknown = null) {
 }
 
 function fixture() {
-  let eventData: unknown = event;
+  let eventData: Record<string, unknown> | null = event;
   let receipt: TelegramAnnouncementRecord | null = sentReceipt();
   const writes: Record<string, unknown>[] = [];
   const queued: EventTelegramProjectionTask[] = [];
@@ -80,8 +80,8 @@ function fixture() {
     now: () => NOW_MS,
     createRequestId: () => "refresh-request",
     eventRepository: {
-      getStatePath: async (path) => {
-        assert.equal(path, `events/${EVENT_ID}`);
+      readEvent: async (eventId) => {
+        assert.equal(eventId, EVENT_ID);
         return eventData;
       },
       patchStateRoot: async (updates) => void writes.push(updates),
@@ -103,7 +103,8 @@ function fixture() {
     writes,
     queued,
     logs,
-    setEvent: (value: unknown) => void (eventData = value),
+    setEvent: (value: Record<string, unknown> | null) =>
+      void (eventData = value),
     setReceipt: (value: TelegramAnnouncementRecord | null) =>
       void (receipt = value),
     refresh: () => refreshSundayMonsReminder(env, EVENT_ID, dependencies),

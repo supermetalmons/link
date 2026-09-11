@@ -2,14 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createEventProfileGameProjectionRepository } from "../src/eventProfileGameProjectionProducer.ts";
 import { getEventProfileGameProjectionOutboxPath } from "../src/profileGameProjectionOutbox.ts";
-import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type { EventGameplayRepository } from "../src/eventRepository.ts";
+import { eventReadFixture } from "./eventReadFixture.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 function repository(input: {
-  get?: GameplayRepository["getStatePath"];
-  patch: GameplayRepository["patchStateRoot"];
-}): GameplayRepository {
+  get?: EventGameplayRepository["getStatePath"];
+  patch: EventGameplayRepository["patchStateRoot"];
+}): EventGameplayRepository {
   return {
+    ...eventReadFixture(input.get || (async () => null)),
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     readProfileOwnershipSnapshot: async () => {

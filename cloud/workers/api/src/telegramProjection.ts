@@ -1,3 +1,4 @@
+import type { EventReads } from "../../../runtime/eventReads.js";
 import {
   TELEGRAM_AUTOMATCH_PROJECTION_OUTBOX_ROOT,
   getAutomatchTelegramProjectionOutboxPath,
@@ -64,7 +65,9 @@ type ProjectionLogger = Pick<Console, "error" | "info">;
 
 type ProjectionDependencies = {
   createRating?: (env: Env) => RatingProjectionRepository;
-  createStateRepository?: (env: Env) => StateRepository;
+  createStateRepository?: (
+    env: Env,
+  ) => StateRepository & Pick<EventReads, "readEvent">;
   createTelegram?: (env: Env) => TelegramRepository;
   createAnnouncements?: (
     env: Env,

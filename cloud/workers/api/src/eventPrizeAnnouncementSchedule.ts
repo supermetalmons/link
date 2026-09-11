@@ -9,7 +9,7 @@ import {
   parseEventProgressOutbox,
   type EventProgressPlan,
 } from "./eventProgress.ts";
-import type { GameplayRepository } from "./gameplayRepository.ts";
+import type { EventGameplayRepository } from "./eventRepository.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 
 export const EVENT_PRIZE_ANNOUNCEMENT_REASON =
@@ -19,8 +19,8 @@ export const SUNDAY_MONS_REMINDER_REASON =
 const SCHEDULE_FIELDS = new Set(["isSundayMons", "startAtMs", "status"]);
 
 type ScheduleRepository = Pick<
-  GameplayRepository,
-  "getStatePath" | "patchStateRoot"
+  EventGameplayRepository,
+  "getStatePath" | "patchStateRoot" | "readEvent"
 >;
 
 type ScheduleDependencies = {
@@ -141,9 +141,9 @@ export async function scheduleEventAnnouncements(
 
 export function createEventAnnouncementScheduleRepository(
   env: Env,
-  repository: GameplayRepository,
+  repository: EventGameplayRepository,
   dependencies: ScheduleDependencies = {},
-): GameplayRepository {
+): EventGameplayRepository {
   const now = dependencies.now || Date.now;
   const enqueue =
     dependencies.enqueue ||
@@ -172,7 +172,7 @@ export function createEventAnnouncementScheduleRepository(
         const event = toRecord(
           Object.hasOwn(updates, path)
             ? updates[path]
-            : await repository.getStatePath(path, undefined, signal),
+            : await repository.readEvent(eventId, signal),
         );
         if (!event) continue;
         const nextEvent = { ...event };

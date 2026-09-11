@@ -455,6 +455,36 @@ test("routes claim-enabled compressed prizes through destination validation", as
   );
 });
 
+test("withdrawal reads the entitlement through its typed profile prize reader", async () => {
+  const reads = [];
+  await assert.rejects(
+    handleWithdrawEventPrize(
+      {
+        auth: { uid: "login" },
+        data: { eventId, prizeId, solanaAddress: recipientAddress },
+      },
+      {
+        state: {
+          read: async (path) => {
+            assert.equal(path, `eventPrizeWithdrawals/${eventId}/${prizeId}`);
+            return null;
+          },
+          transaction: () =>
+            assert.fail("unassigned prizes must not be claimed"),
+        },
+        readProfileByLoginUid: async () => ({ id: profileId }),
+        readProfileEventPrizeAssignment: async (...identity) => {
+          reads.push(identity);
+          return null;
+        },
+      },
+    ),
+    (error) =>
+      error.code === "not-found" && error.message === "Event prize not found.",
+  );
+  assert.deepEqual(reads, [[profileId, eventId]]);
+});
+
 test("recognizes completed compressed withdrawal records", () => {
   const compressedEventId = "FRkdorMWaYW";
   const compressedPrizeId = "1866";

@@ -7,7 +7,15 @@ import {
 } from "../src/authRecovery.ts";
 import type { AuthRecoveryPrizeStore } from "../src/eventRepository.ts";
 import type { ProfileLinkCatchupJob } from "../src/profileLinkCatchupD1.ts";
+import type {
+  EventPrizeAssignmentRecord,
+  ProfileEventPrizePageQuery,
+} from "../../../runtime/eventReads.js";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
+
+async function rejectLegacyPrizeRead(): Promise<never> {
+  throw new Error("auth-recovery-must-use-typed-prize-reads");
+}
 
 function catchupJob(): ProfileLinkCatchupJob {
   return {
@@ -206,15 +214,19 @@ test("event prize recovery leaves copying pending while the event lease is busy"
     ],
   } as unknown as D1Database;
   const transactionPaths: string[] = [];
-  const readPaths: string[] = [];
+  const readProfileIds: string[] = [];
   const service = createAuthRecoveryService(TELEGRAM_TEST_ENV, {
     d1: profileDb,
     logger: { error() {}, info() {} },
     now: () => 1_000,
     profileDb,
     prizeStore: {
-      async getPath(path) {
-        readPaths.push(path);
+      getPath: rejectLegacyPrizeRead,
+      async readProfileEventPrizeAssignment() {
+        throw new Error("busy-lease-must-not-read-prize-assignment");
+      },
+      async listProfileEventPrizeAssignments(profileId) {
+        readProfileIds.push(profileId);
         return {
           [eventId]: {
             eventId,
@@ -245,7 +257,7 @@ test("event prize recovery leaves copying pending while the event lease is busy"
   });
 
   assert.equal(await service.recoverProfile("target-profile"), false);
-  assert.deepEqual(readPaths, ["profileEventPrizes/source-profile"]);
+  assert.deepEqual(readProfileIds, ["source-profile"]);
   assert.deepEqual(transactionPaths, [`eventLocks/${eventId}`]);
 });
 
@@ -292,7 +304,10 @@ function recoveryProfileDb(
   return { db, mutationBatches: () => mutationBatches };
 }
 
-function prizeAssignment(prizeId: string, assignedAtMs: number) {
+function prizeAssignment(
+  prizeId: string,
+  assignedAtMs: number,
+): EventPrizeAssignmentRecord {
   return {
     eventId: "NN3eRzoZo80",
     profileId: "source-profile",
@@ -303,17 +318,17 @@ function prizeAssignment(prizeId: string, assignedAtMs: number) {
 }
 
 function recoveryPrizeStore(input: {
-  liveAssignment: unknown;
+  liveAssignment: EventPrizeAssignmentRecord | null;
   takeOverOnRefresh?: boolean;
   targetAssignment?: unknown;
 }) {
   const eventId = "NN3eRzoZo80";
   const lockPath = `eventLocks/${eventId}`;
-  const sourcePath = `profileEventPrizes/source-profile/${eventId}`;
   const targetPath = `profileEventPrizes/target-profile/${eventId}`;
   const values = new Map<string, unknown>();
   const guardedPaths: string[] = [];
-  const readPaths: string[] = [];
+  const prizeReads: Array<{ profileId: string; eventId?: string }> = [];
+  const listQueries: Array<ProfileEventPrizePageQuery | undefined> = [];
   const transactionPaths: string[] = [];
   let lockTransactions = 0;
   if (input.targetAssignment !== undefined) {
@@ -356,13 +371,18 @@ function recoveryPrizeStore(input: {
     };
   };
   const client: AuthRecoveryPrizeStore = {
-    async getPath(path: string) {
-      readPaths.push(path);
-      if (path === "profileEventPrizes/source-profile") {
-        return { [eventId]: prizeAssignment("1092", 100) };
-      }
-      if (path === sourcePath) return input.liveAssignment;
-      return values.get(path) ?? null;
+    getPath: rejectLegacyPrizeRead,
+    async listProfileEventPrizeAssignments(profileId, query) {
+      prizeReads.push({ profileId });
+      listQueries.push(query);
+      assert.equal(profileId, "source-profile");
+      return { [eventId]: prizeAssignment("1092", 100) };
+    },
+    async readProfileEventPrizeAssignment(profileId, assignmentEventId) {
+      prizeReads.push({ profileId, eventId: assignmentEventId });
+      assert.equal(profileId, "source-profile");
+      assert.equal(assignmentEventId, eventId);
+      return input.liveAssignment;
     },
     transactPath,
     transactStoredProfileEventPrizeWithEventLease(
@@ -384,7 +404,8 @@ function recoveryPrizeStore(input: {
   };
   return {
     guardedPaths,
-    readPaths,
+    listQueries,
+    prizeReads,
     targetPath,
     transactionPaths,
     value: (path: string) => values.get(path) ?? null,
@@ -431,9 +452,9 @@ test("event prize recovery rereads the source entitlement under its lease", asyn
     delivery: { channel: "wallet", revision: 2 },
   });
   assert.deepEqual(prizeStore.guardedPaths, [prizeStore.targetPath]);
-  assert.deepEqual(prizeStore.readPaths.slice(0, 2), [
-    "profileEventPrizes/source-profile",
-    "profileEventPrizes/source-profile/NN3eRzoZo80",
+  assert.deepEqual(prizeStore.prizeReads.slice(0, 2), [
+    { profileId: "source-profile" },
+    { profileId: "source-profile", eventId: "NN3eRzoZo80" },
   ]);
   assert.equal(profile.mutationBatches(), 1);
 });
@@ -454,6 +475,23 @@ test("event prize recovery does not mutate or advance after lease loss", async (
     0,
   );
   assert.equal(profile.mutationBatches(), 0);
+});
+
+test("event prize recovery does not recopy the inclusive cursor assignment", async () => {
+  const cursor = "NN3eRzoZo80";
+  const profile = recoveryProfileDb({ prize_cursor: cursor });
+  const prizeStore = recoveryPrizeStore({
+    liveAssignment: prizeAssignment("1092", 100),
+  });
+  const service = prizeRecoveryService(profile.db, prizeStore.client);
+
+  assert.equal(await service.recoverProfile("target-profile"), false);
+  assert.deepEqual(prizeStore.listQueries, [
+    { startAt: cursor, limit: MERGE_PRIZE_RECOVERY_PAGE_SIZE + 2 },
+  ]);
+  assert.deepEqual(prizeStore.prizeReads, [{ profileId: "source-profile" }]);
+  assert.deepEqual(prizeStore.transactionPaths, []);
+  assert.equal(profile.mutationBatches(), 1);
 });
 
 test("event prize recovery preserves assignments removed from the current catalog", async () => {
@@ -504,9 +542,9 @@ test("event prize recovery rescans late assignments before finalizing", async ()
     prizeId: "1092",
     assignedAtMs: 200,
   });
-  assert.deepEqual(prizeStore.readPaths.slice(0, 2), [
-    "profileEventPrizes/source-profile",
-    "profileEventPrizes/source-profile/NN3eRzoZo80",
+  assert.deepEqual(prizeStore.prizeReads.slice(0, 2), [
+    { profileId: "source-profile" },
+    { profileId: "source-profile", eventId: "NN3eRzoZo80" },
   ]);
 });
 
@@ -520,6 +558,7 @@ test("final prize recovery copies at most one page", async () => {
   const sourceReads: string[] = [];
   const listQueries: unknown[] = [];
   const prizeStore: AuthRecoveryPrizeStore = {
+    getPath: rejectLegacyPrizeRead,
     transactStoredProfileEventPrizeWithEventLease(
       path,
       updater,
@@ -528,13 +567,20 @@ test("final prize recovery copies at most one page", async () => {
     ) {
       return prizeStore.transactPath(path, updater, signal);
     },
-    async getPath(path, query) {
-      if (path === "profileEventPrizes/source-profile") {
-        listQueries.push(query);
-        return Object.fromEntries(eventIds.map((eventId) => [eventId, {}]));
-      }
-      sourceReads.push(path);
-      return {};
+    async listProfileEventPrizeAssignments(profileId, query) {
+      assert.equal(profileId, "source-profile");
+      listQueries.push(query);
+      return Object.fromEntries(
+        eventIds.map((eventId) => [
+          eventId,
+          { ...prizeAssignment("1092", 100), eventId },
+        ]),
+      );
+    },
+    async readProfileEventPrizeAssignment(profileId, eventId) {
+      assert.equal(profileId, "source-profile");
+      sourceReads.push(eventId);
+      return { ...prizeAssignment("1092", 100), eventId };
     },
     async transactPath(path, updater) {
       const current = values.get(path) ?? null;
@@ -586,8 +632,7 @@ test("final prize recovery copies at most one page", async () => {
   assert.equal(await service.recoverProfile("target-profile"), false);
   assert.deepEqual(listQueries, [
     {
-      orderBy: "$key",
-      limitToFirst: MERGE_PRIZE_RECOVERY_PAGE_SIZE + 1,
+      limit: MERGE_PRIZE_RECOVERY_PAGE_SIZE + 1,
     },
   ]);
   assert.equal(sourceReads.length, MERGE_PRIZE_RECOVERY_PAGE_SIZE);
@@ -602,6 +647,7 @@ test("event prize recovery aborts a stalled mutation before lease expiry", async
   let lock: unknown = null;
   let targetSignal: AbortSignal | undefined;
   const prizeStore: AuthRecoveryPrizeStore = {
+    getPath: rejectLegacyPrizeRead,
     transactStoredProfileEventPrizeWithEventLease(
       path,
       updater,
@@ -610,10 +656,13 @@ test("event prize recovery aborts a stalled mutation before lease expiry", async
     ) {
       return prizeStore.transactPath(path, updater, signal);
     },
-    async getPath(path) {
-      if (path === "profileEventPrizes/source-profile") {
-        return { [eventId]: prizeAssignment("1092", 100) };
-      }
+    async listProfileEventPrizeAssignments(profileId) {
+      assert.equal(profileId, "source-profile");
+      return { [eventId]: prizeAssignment("1092", 100) };
+    },
+    async readProfileEventPrizeAssignment(profileId, assignmentEventId) {
+      assert.equal(profileId, "source-profile");
+      assert.equal(assignmentEventId, eventId);
       return prizeAssignment("1092", 100);
     },
     async transactPath(path, updater, signal) {

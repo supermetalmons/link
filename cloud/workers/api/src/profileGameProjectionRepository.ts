@@ -1,3 +1,7 @@
+import {
+  createEventGameplayRepository,
+  type EventGameplayRepository,
+} from "./eventRepository.ts";
 import { type HistoricalMatchPair } from "@mons/shared/game-sessions";
 import { isMatchPresentationSnapshot } from "@mons/shared/match-presentation";
 import {
@@ -266,10 +270,12 @@ export function createProfileGameProjectionRuntime(
 
 export function createEventProfileGameProjectionRuntime(
   env: Env,
-  dependencies: ProfileGameProjectionDependencies = {},
+  dependencies: Omit<ProfileGameProjectionDependencies, "state"> & {
+    state?: Pick<EventGameplayRepository, "getStatePath" | "readEvent">;
+  } = {},
 ): EventProfileGameProjectionRuntime {
   const profileDb = dependencies.profileDb || env.PROFILE_DB;
-  const state = dependencies.state || createGameplayRepository(env);
+  const state = dependencies.state || createEventGameplayRepository(env);
   const d1 = dependencies.d1 || env.PROFILE_GAMES_DB;
   const repository: EventProfileGameProjectionRepository = {
     async commitProjectionWrites(
@@ -284,11 +290,7 @@ export function createEventProfileGameProjectionRuntime(
     },
 
     async getEvent(eventId) {
-      const event = await state.getStatePath(`events/${eventId}`);
-      const value =
-        event && typeof event === "object" && !Array.isArray(event)
-          ? (event as Record<string, unknown>)
-          : null;
+      const value = await state.readEvent(eventId);
       if (value) {
         await captureEventMatchDiscovery(
           d1,

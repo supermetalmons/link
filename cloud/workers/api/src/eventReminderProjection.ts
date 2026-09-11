@@ -14,7 +14,7 @@ import {
 } from "./eventTelegramProjectionProducer.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import { stateIncrement } from "./stateRepositoryTypes.ts";
-import type { GameplayRepository } from "./gameplayRepository.ts";
+import type { EventGameplayRepository } from "./eventRepository.ts";
 import { profileBackgroundMutationsEnabled } from "./profileCanonicalActivation.ts";
 import {
   createD1TelegramAnnouncementRepository,
@@ -33,7 +33,10 @@ export type SundayMonsReminderRefreshResult = {
 
 export type SundayMonsReminderRefreshDependencies = {
   controlsEnabled?: (env: Env) => Promise<boolean>;
-  eventRepository?: Pick<GameplayRepository, "getStatePath" | "patchStateRoot">;
+  eventRepository?: Pick<
+    EventGameplayRepository,
+    "readEvent" | "patchStateRoot"
+  >;
   announcementRepository?: Pick<TelegramAnnouncementRepository, "get">;
   enqueue?: (task: EventTelegramProjectionTask) => Promise<unknown>;
   now?: () => number;
@@ -162,7 +165,7 @@ export async function refreshSundayMonsReminder(
     dependencies.announcementRepository ||
     createD1TelegramAnnouncementRepository(env.TELEGRAM_DB);
   const [event, receipt] = await Promise.all([
-    repository.getStatePath(`events/${eventId}`),
+    repository.readEvent(eventId),
     announcements.get(`event:${eventId}:reminder:v1`),
   ]);
   if (!isSundayMonsReminderEvent(eventId, event) || !isV2TelegramEvent(event)) {

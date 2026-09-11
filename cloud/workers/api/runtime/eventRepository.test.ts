@@ -353,20 +353,22 @@ describe("hybrid event repository", () => {
     const binaryOrder = assignments
       .map(([assignmentEventId]) => assignmentEventId)
       .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
-    const firstRead = (await client.getPath(`profileEventPrizes/${profileId}`, {
-      orderBy: "$key",
-      limitToFirst: assignments.length,
-    })) as Record<string, unknown>;
+    const firstRead = await client.listProfileEventPrizeAssignments(profileId, {
+      limit: assignments.length,
+    });
     expect(Object.keys(firstRead)).toEqual(binaryOrder);
 
+    const prizeStore = createD1AuthRecoveryPrizeStore(testEnv.EVENT_DB);
     const collected: string[] = [];
     let cursor = "";
     while (true) {
-      const result = (await client.getPath(`profileEventPrizes/${profileId}`, {
-        orderBy: "$key",
-        ...(cursor ? { startAt: cursor } : {}),
-        limitToFirst: cursor ? 4 : 3,
-      })) as Record<string, unknown>;
+      const result = await prizeStore.listProfileEventPrizeAssignments(
+        profileId,
+        {
+          ...(cursor ? { startAt: cursor } : {}),
+          limit: cursor ? 4 : 3,
+        },
+      );
       const remaining = Object.keys(result)
         .filter((candidate) => candidate > cursor)
         .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
@@ -376,6 +378,60 @@ describe("hybrid event repository", () => {
       cursor = page.at(-1)!;
     }
     expect(collected).toEqual(binaryOrder);
+  });
+
+  it("serves typed event and prize reads without the generic state backend", async () => {
+    const genericRead = vi.fn(async () => {
+      throw new Error("typed-event-read-must-not-use-generic-backend");
+    });
+    const client = createEventStateRepository(testEnv, {
+      getPath: genericRead,
+      patchRoot: async () => undefined,
+      transactPath: async () => ({ committed: false, value: null }),
+    });
+    const profileId = "profile-one";
+    const assignment = {
+      profileId,
+      eventId,
+      place: 1,
+      prizeId: "1092",
+      assignedAtMs: 100,
+    };
+    await client.patchRoot({
+      [`events/${eventId}`]: eventRecord(),
+      [`eventPrizeSelections/${eventId}/${profileId}`]: "1092",
+      [`profileEventPrizes/${profileId}/${eventId}`]: assignment,
+    });
+    await expect(client.readEvent(eventId)).resolves.toEqual(eventRecord());
+    await expect(client.readEventPrizeSelections(eventId)).resolves.toEqual({
+      [profileId]: "1092",
+    });
+    await expect(client.readEventSnapshot(eventId)).resolves.toEqual({
+      eventId,
+      event: eventRecord(),
+      prizeSelections: { [profileId]: "1092" },
+      revision: 1,
+    });
+    await expect(client.readProfileEventPrizes(profileId)).resolves.toEqual({
+      profileId,
+      prizes: { [eventId]: assignment },
+      revision: 1,
+    });
+    await expect(client.listEventsByStatus("scheduled", 1)).resolves.toEqual({
+      [eventId]: eventRecord(),
+    });
+    await expect(client.listEventsByStatus("active")).resolves.toEqual({});
+    const prizeStore = createD1AuthRecoveryPrizeStore(testEnv.EVENT_DB);
+    await expect(
+      prizeStore.readProfileEventPrizeAssignment(profileId, eventId),
+    ).resolves.toEqual(assignment);
+    await expect(
+      prizeStore.listProfileEventPrizeAssignments(profileId, {
+        startAt: eventId,
+        limit: 1,
+      }),
+    ).resolves.toEqual({ [eventId]: assignment });
+    expect(genericRead).not.toHaveBeenCalled();
   });
 
   it("replays a stored v2 intent with unchanged serialized effect keys and digest", async () => {

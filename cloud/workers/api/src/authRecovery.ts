@@ -395,9 +395,9 @@ function createCanonicalAuthRecoveryService(
     if (!lock) throw new Error("auth-recovery-prize-lock-busy");
     const stopHeartbeat = prizeLockManager.startEventLockHeartbeat(lock);
     try {
-      const sourceAssignment = await prizeStore.getPath(
-        `profileEventPrizes/${sourceProfileId}/${eventId}`,
-        undefined,
+      const sourceAssignment = await prizeStore.readProfileEventPrizeAssignment(
+        sourceProfileId,
+        eventId,
         signal,
       );
       const assignment = (dependencies.buildPrizeCopy || buildPrizeCopy)(
@@ -487,12 +487,11 @@ function createCanonicalAuthRecoveryService(
   }> => {
     const cursor = prizeCursor || "";
     const source = record(
-      await prizeStore.getPath(
-        `profileEventPrizes/${sourceProfileId}`,
+      await prizeStore.listProfileEventPrizeAssignments(
+        sourceProfileId,
         {
-          orderBy: "$key",
           ...(cursor ? { startAt: cursor } : {}),
-          limitToFirst: cursor
+          limit: cursor
             ? MERGE_PRIZE_RECOVERY_PAGE_SIZE + 2
             : MERGE_PRIZE_RECOVERY_PAGE_SIZE + 1,
         },

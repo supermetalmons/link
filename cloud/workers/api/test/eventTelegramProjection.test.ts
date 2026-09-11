@@ -1,3 +1,5 @@
+import { eventReadFixture } from "./eventReadFixture.ts";
+import type { EventReads } from "../../../runtime/eventReads.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
@@ -33,8 +35,10 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 function store(initial: Record<string, unknown>) {
   const values = new Map(Object.entries(initial));
-  const client: StateRepository = {
+  const client: StateRepository & EventReads = {
+    ...eventReadFixture(async (path) => values.get(path) ?? null),
     async getPath(path) {
+      assert.ok(!path.startsWith("events/"));
       return values.get(path) ?? null;
     },
     async patchRoot(updates) {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { EventSnapshot } from "../../../runtime/eventReads.js";
 import type { EventLockManager } from "../../../runtime/events/lockManagerCore.js";
 import { AuthApiFailure } from "../src/authErrors.ts";
 import { LEGACY_CORE_PRIZES_EVENT_ID } from "@mons/shared/event-prizes";
@@ -97,6 +98,44 @@ function createRepository({
   patchError?: Error;
 } = {}) {
   const patches: Record<string, unknown>[] = [];
+  const readEventValue = (eventId: string): Record<string, unknown> | null => {
+    const value = structuredClone(
+      pathValues[`events/${eventId}`] ??
+        (eventId === (event?.eventId || "event-1") ? event : null),
+    ) as Record<string, unknown> | null;
+    if (value && patches.length) {
+      const prefix = `events/${eventId}/`;
+      for (const [path, fieldValue] of Object.entries(pathValues)) {
+        if (!path.startsWith(prefix)) continue;
+        const parts = path.slice(prefix.length).split("/");
+        let parent = value;
+        for (const part of parts.slice(0, -1)) {
+          parent[part] ??= {};
+          parent = parent[part] as Record<string, unknown>;
+        }
+        const key = parts.at(-1)!;
+        if (fieldValue === null) delete parent[key];
+        else parent[key] = structuredClone(fieldValue);
+      }
+    }
+    return value;
+  };
+  const readSelections = (eventId: string): Record<string, string> => {
+    const prefix = `eventPrizeSelections/${eventId}`;
+    const selections = structuredClone(pathValues[prefix] || {}) as Record<
+      string,
+      string
+    >;
+    if (patches.length) {
+      for (const [path, value] of Object.entries(pathValues)) {
+        if (!path.startsWith(`${prefix}/`)) continue;
+        const key = path.slice(prefix.length + 1);
+        if (value === null) delete selections[key];
+        else selections[key] = value as string;
+      }
+    }
+    return selections;
+  };
   let repository: TestEventParticipationRepository;
   repository = {
     getGameplayProfile: async (uid) =>
@@ -242,12 +281,14 @@ function createRepository({
         profileById,
       } as ProfileOwnershipSnapshot;
     },
-    getStatePath: async (path) =>
-      path in pathValues
-        ? structuredClone(pathValues[path])
-        : path === `events/${event?.eventId || "event-1"}`
-          ? structuredClone(event)
-          : null,
+    readEvent: async (eventId) => readEventValue(eventId),
+    readEventPrizeSelections: async (eventId) => readSelections(eventId),
+    readEventSnapshot: async (eventId) => ({
+      event: readEventValue(eventId),
+      eventId,
+      prizeSelections: readSelections(eventId),
+      revision: 1,
+    }),
     patchStateRoot: async (updates) => {
       patches.push(structuredClone(updates));
       if (patchError) {
@@ -808,7 +849,7 @@ test("late join dismisses a one-player prize event before profile ownership", as
   assert.equal(ownershipReads, 0);
 });
 
-test("memoizes prize selections when a join crosses the start deadline", async () => {
+test("uses one locked prize snapshot when a join crosses the start deadline", async () => {
   const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
   const alternateProfile = {
     ...creatorProfile,
@@ -827,11 +868,16 @@ test("memoizes prize selections when a join crosses the start deadline", async (
     profilesByUid: { "alternate-login": alternateProfile },
     pathValues: { [`eventPrizeSelections/${eventId}`]: selections },
   });
-  const getStatePath = state.repository.getStatePath;
-  let selectionReads = 0;
-  state.repository.getStatePath = async (...args) => {
-    if (args[0] === `eventPrizeSelections/${eventId}`) selectionReads += 1;
-    return getStatePath(...args);
+  const readSnapshot = state.repository.readEventSnapshot;
+  let snapshotReads = 0;
+  let lockAcquired = false;
+  state.repository.readEventSnapshot = async (...args) => {
+    assert.equal(lockAcquired, true);
+    snapshotReads += 1;
+    return readSnapshot(...args);
+  };
+  state.repository.readEventPrizeSelections = async () => {
+    throw new Error("unexpected-separate-prize-read");
   };
   const times = [100, 101];
 
@@ -840,7 +886,11 @@ test("memoizes prize selections when a join crosses the start deadline", async (
     { eventId },
     state.repository,
     {
-      lockManager: createLockManager().manager,
+      lockManager: createLockManager({
+        onAcquire: () => {
+          lockAcquired = true;
+        },
+      }).manager,
       now: () => times.shift() ?? 101,
       buildDueUpdates: async (input) => {
         assert.deepEqual(input.prizeSelections, selections);
@@ -856,7 +906,77 @@ test("memoizes prize selections when a join crosses the start deadline", async (
   );
 
   assert.equal(response.participant.profileId, alternateProfile.profileId);
-  assert.equal(selectionReads, 1);
+  assert.equal(snapshotReads, 1);
+});
+
+test("refreshes event and prize selections together after the participation lock", async () => {
+  for (const operation of ["join", "remove"] as const) {
+    const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
+    const event = scheduledEvent({
+      eventId,
+      participants: {
+        [profileId]: creatorParticipant(1),
+        opponent: participant("opponent", "opponent-login", 2),
+      },
+    });
+    const pathValues = {
+      [`eventPrizeSelections/${eventId}`]: { [profileId]: "1092" },
+    };
+    const { repository, patches } = createRepository({ event, pathValues });
+    const reads: string[] = [];
+    const readEvent = repository.readEvent;
+    const readSnapshot = repository.readEventSnapshot;
+    repository.readEvent = async (...args) => {
+      reads.push("event");
+      return readEvent(...args);
+    };
+    repository.readEventSnapshot = async (...args) => {
+      reads.push("snapshot");
+      return readSnapshot(...args);
+    };
+    repository.readEventPrizeSelections = async () => {
+      throw new Error("unexpected-separate-prize-read");
+    };
+    let dueBuilds = 0;
+    const dependencies = {
+      lockManager: createLockManager({
+        onAcquire: () => {
+          reads.push("lock");
+          event.startAtMs = 100;
+          pathValues[`eventPrizeSelections/${eventId}`] = {
+            [profileId]: "1111",
+          };
+        },
+      }).manager,
+      now: () => 100,
+      buildDueUpdates: async (input: {
+        event: Record<string, unknown>;
+        prizeSelections?: unknown;
+      }) => {
+        dueBuilds += 1;
+        assert.equal(input.event.startAtMs, 100);
+        assert.deepEqual(input.prizeSelections, { [profileId]: "1111" });
+        return noDueTransition();
+      },
+    };
+    await expectFailure(
+      operation === "join"
+        ? joinEvent(identity, { eventId }, repository, dependencies)
+        : removeEventParticipant(
+            identity,
+            { eventId, participantProfileId: "opponent" },
+            repository,
+            dependencies,
+          ),
+      409,
+      operation === "join"
+        ? "This event is no longer accepting participants."
+        : "This event can no longer remove participants.",
+    );
+    assert.deepEqual(reads, ["event", "lock", "snapshot"]);
+    assert.equal(dueBuilds, 1);
+    assert.deepEqual(patches, []);
+  }
 });
 
 test("deadline-crossing join persists and reconciles its canonical participant", async () => {
@@ -887,8 +1007,8 @@ test("deadline-crossing join persists and reconciles its canonical participant",
     patchError: new Error("ambiguous-join"),
   });
   const patchStateRoot = state.repository.patchStateRoot;
-  const getStatePath = state.repository.getStatePath;
-  const reconciliationPaths: string[] = [];
+  const readSnapshot = state.repository.readEventSnapshot;
+  const reconciliationSnapshots: EventSnapshot[] = [];
   let patchAttempted = false;
   state.repository.patchStateRoot = async (updates, signal) => {
     const paths = Object.keys(updates);
@@ -904,9 +1024,11 @@ test("deadline-crossing join persists and reconciles its canonical participant",
     patchAttempted = true;
     return patchStateRoot(updates, signal);
   };
-  state.repository.getStatePath = async (path, query, signal) => {
-    if (patchAttempted) reconciliationPaths.push(path);
-    return getStatePath(path, query, signal);
+  state.repository.readEventSnapshot = async (eventId, signal) => {
+    assert.equal(patchAttempted, true);
+    const snapshot = await readSnapshot(eventId, signal);
+    reconciliationSnapshots.push(snapshot);
+    return snapshot;
   };
   const times = [100, 101];
 
@@ -934,16 +1056,12 @@ test("deadline-crossing join persists and reconciles its canonical participant",
     ],
     canonicalParticipant,
   );
-  assert.ok(
-    reconciliationPaths.includes(
-      `events/event-1/participants/${canonicalProfileId}`,
-    ),
-  );
-  assert.equal(
-    reconciliationPaths.includes(
-      `events/event-1/participants/${retiredProfileId}`,
-    ),
-    false,
+  assert.equal(reconciliationSnapshots.length, 1);
+  assert.deepEqual(
+    (reconciliationSnapshots[0].event?.participants as Record<string, unknown>)[
+      canonicalProfileId
+    ],
+    canonicalParticipant,
   );
 });
 
@@ -1084,6 +1202,31 @@ test("reconciles an ambiguous join with its committed due transition", async () 
   );
 });
 
+test("preserves the join write error when reconciliation cannot read an event", async () => {
+  for (const unavailable of ["missing", "failed"] as const) {
+    const patchError = new Error("ambiguous-join");
+    const { repository } = createRepository({
+      event: scheduledEvent({ participants: {} }),
+      patchError,
+    });
+    let snapshotReads = 0;
+    repository.readEventSnapshot = async (eventId) => {
+      snapshotReads += 1;
+      if (unavailable === "failed") throw new Error("snapshot-unavailable");
+      return { eventId, event: null, prizeSelections: {}, revision: 1 };
+    };
+    await assert.rejects(
+      joinEvent(identity, { eventId: "event-1" }, repository, {
+        lockManager: createLockManager().manager,
+        now: () => 100,
+        buildDueUpdates: noDueTransition,
+      }),
+      (error) => error === patchError,
+    );
+    assert.equal(snapshotReads, 1);
+  }
+});
+
 test("does not commit a join after losing the event lock", async () => {
   const { patches, repository } = createRepository();
   const lock = createLockManager({ owned: false });
@@ -1104,7 +1247,7 @@ test("threads one operation signal through event reads and commit calls", async 
   const signal = AbortSignal.timeout(1_000);
   const seen: AbortSignal[] = [];
   const repository = createRepository().repository;
-  repository.getStatePath = async (_path, _query, receivedSignal) => {
+  repository.readEvent = async (_eventId, receivedSignal) => {
     assert.ok(receivedSignal);
     seen.push(receivedSignal);
     return scheduledEvent({ participants: {} });
@@ -1315,13 +1458,13 @@ test("reconciles an ambiguous committed removal", async () => {
     operationController.abort();
     throw patchError;
   };
-  const getPath = repository.getStatePath;
-  repository.getStatePath = async (path, query, signal) => {
-    if (path !== "events/event-1") {
-      assert.notEqual(signal, operationController.signal);
-      assert.equal(signal?.aborted, false);
-    }
-    return getPath(path, query, signal);
+  const readSnapshot = repository.readEventSnapshot;
+  let snapshotReads = 0;
+  repository.readEventSnapshot = async (eventId, signal) => {
+    snapshotReads += 1;
+    assert.notEqual(signal, operationController.signal);
+    assert.equal(signal?.aborted, false);
+    return readSnapshot(eventId, signal);
   };
   const lock = createLockManager();
   assert.deepEqual(
@@ -1338,6 +1481,53 @@ test("reconciles an ambiguous committed removal", async () => {
     ),
     { ok: true, eventId: "event-1", removedProfileId: "target-profile" },
   );
+  assert.equal(snapshotReads, 1);
+});
+
+test("requires one removal snapshot to confirm participant, selection, and timestamp", async () => {
+  for (const stale of ["participant", "selection", "timestamp"] as const) {
+    const target = participant("target-profile", "target-login", 2);
+    const patchError = new Error("ambiguous-removal");
+    const { repository } = createRepository({
+      event: scheduledEvent({
+        participants: {
+          [profileId]: creatorParticipant(1),
+          "target-profile": target,
+        },
+      }),
+      patchError,
+    });
+    let snapshotReads = 0;
+    repository.readEventSnapshot = async (eventId): Promise<EventSnapshot> => {
+      snapshotReads += 1;
+      return {
+        eventId,
+        event: {
+          updatedAtMs: stale === "timestamp" ? 99 : 100,
+          ...(stale === "participant"
+            ? { participants: { "target-profile": target } }
+            : {}),
+        },
+        prizeSelections:
+          stale === "selection" ? { "target-profile": "1092" } : {},
+        revision: 1,
+      };
+    };
+    await assert.rejects(
+      removeEventParticipant(
+        identity,
+        { eventId: "event-1", participantProfileId: "target-profile" },
+        repository,
+        {
+          lockManager: createLockManager().manager,
+          now: () => 100,
+          buildDueUpdates: noDueTransition,
+        },
+      ),
+      (error) => error === patchError,
+    );
+    assert.equal(snapshotReads, 1);
+  }
 });
 
 test("enforces removal ownership and protects the creator", async () => {

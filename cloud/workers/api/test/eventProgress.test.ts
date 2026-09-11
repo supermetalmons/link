@@ -60,9 +60,10 @@ function sweepRepository(
 ) {
   const patches: Record<string, unknown>[] = [];
   const value: EventProgressSweepRepository = {
+    readEvent: async () => null,
+    listEventsByStatus: async () => ({}),
     getStatePath: async (path) => {
       if (path === "eventProgressOutbox") return outbox;
-      if (path === "events") return null;
       return null;
     },
     patchStateRoot: async (updates) => {
@@ -97,8 +98,12 @@ test("scheduled-event sweep discovers both announcements and retains their first
   const records = new Map<string, unknown>();
   let creates = 0;
   const repository: EventProgressSweepRepository = {
+    readEvent: async (id) => (id === eventId ? event : null),
+    listEventsByStatus: async (status) => {
+      assert.equal(status, "scheduled");
+      return { [eventId]: event };
+    },
     getStatePath: async (path) => {
-      if (path === "events") return { [eventId]: event };
       if (path === "eventProgressOutbox") return {};
       return records.get(path) ?? null;
     },
@@ -242,12 +247,13 @@ test("both announcements survive slow start dispatch and all three jobs can fail
             ? "scheduled-start-reconciliation"
             : null;
     const repository: EventProgressSweepRepository = {
+      readEvent: async (id) => (id === eventId ? event : null),
+      listEventsByStatus: async (status) => {
+        assert.equal(status, "scheduled");
+        return { [eventId]: event };
+      },
       getStatePath: async (path) =>
-        path === "events"
-          ? { [eventId]: event }
-          : path === "eventProgressOutbox"
-            ? {}
-            : (records.get(path) ?? null),
+        path === "eventProgressOutbox" ? {} : (records.get(path) ?? null),
       patchStateRoot: async (updates) => {
         for (const [path, value] of Object.entries(updates))
           records.set(path, value);

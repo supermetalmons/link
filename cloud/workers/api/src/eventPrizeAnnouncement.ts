@@ -16,7 +16,7 @@ import { createEventLockManagerCore } from "../../../runtime/events/lockManagerC
 import type { TelegramRepository } from "../../../runtime/telegram/deliveryEngine.js";
 import { readEventRuntimeControl } from "./eventD1.ts";
 import { createEventGameplayRepository } from "./eventRepository.ts";
-import type { GameplayRepository } from "./gameplayRepository.ts";
+import type { EventGameplayRepository } from "./eventRepository.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import {
   EVENT_ANNOUNCEMENT_KINDS,
@@ -49,8 +49,8 @@ export type EventPrizeAnnouncementDeliveryResult = {
 export type EventPrizeAnnouncementDeliveryDependencies = {
   controlsEnabled?: (env: Env) => Promise<boolean>;
   eventRepository?: Pick<
-    GameplayRepository,
-    "getStatePath" | "transactStatePath"
+    EventGameplayRepository,
+    "readEvent" | "transactStatePath"
   >;
   log?: (record: Record<string, unknown>) => void;
   now?: () => number;
@@ -275,9 +275,7 @@ export async function deliverEventPrizeAnnouncement(
     }
   };
   try {
-    const eventData = await eventRepository.getStatePath(
-      `events/${input.eventId}`,
-    );
+    const eventData = await eventRepository.readEvent(input.eventId);
     if (
       !specification.isEligible(input.eventId, eventData) ||
       (eventData as { startAtMs?: unknown }).startAtMs !== input.startAtMs

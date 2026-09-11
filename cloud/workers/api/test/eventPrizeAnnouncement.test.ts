@@ -104,7 +104,7 @@ function memoryAnnouncementRepository() {
 function fixture(input = INPUT) {
   let nowMs = input.runAtMs;
   let retryNotBeforeMs = 0;
-  let eventData: unknown = {
+  let eventData: Record<string, unknown> | null = {
     status: "scheduled",
     startAtMs: input.startAtMs,
     isSundayMons: true,
@@ -119,7 +119,7 @@ function fixture(input = INPUT) {
     now: () => nowMs,
     controlsEnabled: async () => true,
     eventRepository: {
-      getStatePath: async () => eventData,
+      readEvent: async () => eventData,
       transactStatePath: async (path, updater) => {
         const current = locks.get(path) ?? null;
         const result = updater(current) as {
@@ -169,7 +169,8 @@ function fixture(input = INPUT) {
     locks,
     logs,
     setNow: (value: number) => void (nowMs = value),
-    setEvent: (value: unknown) => void (eventData = value),
+    setEvent: (value: Record<string, unknown> | null) =>
+      void (eventData = value),
     retryNotBefore: () => retryNotBeforeMs,
     deliver: (request = input) =>
       deliverEventPrizeAnnouncement(env, request, dependencies),

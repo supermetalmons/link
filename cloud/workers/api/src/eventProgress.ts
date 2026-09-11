@@ -19,7 +19,10 @@ import {
 import { createEventLockManagerCore } from "../../../runtime/events/lockManagerCore.js";
 import { PROFILE_BACKGROUND_SWEEP_LIMIT } from "./profileBackgroundLimits.ts";
 import { requireProfileOwnershipSnapshot } from "./profileOwnership.ts";
-import { createEventGameplayRepository } from "./eventRepository.ts";
+import {
+  createEventGameplayRepository,
+  type EventGameplayRepository,
+} from "./eventRepository.ts";
 import { createEventMutationRepository } from "./eventMutationRepository.ts";
 import { scheduleEventAnnouncements } from "./eventPrizeAnnouncementSchedule.ts";
 import {
@@ -68,8 +71,8 @@ export type EventProgressWorkflowDependencies = {
 };
 
 export type EventProgressSweepRepository = Pick<
-  GameplayRepository,
-  "getStatePath" | "patchStateRoot"
+  EventGameplayRepository,
+  "getStatePath" | "patchStateRoot" | "readEvent" | "listEventsByStatus"
 >;
 
 export type EventProgressRatingRepository = Pick<
@@ -104,13 +107,23 @@ function toRecord(value: unknown): Record<string, unknown> | null {
 
 export function createEventStateAdapter(
   repository: Pick<
-    GameplayRepository,
-    "getStatePath" | "patchStateRoot" | "transactStatePath"
+    EventGameplayRepository,
+    | "getStatePath"
+    | "patchStateRoot"
+    | "transactStatePath"
+    | "readEvent"
+    | "readEventPrizeSelections"
+    | "readEventSnapshot"
   >,
   signal?: AbortSignal,
 ) {
   const normalizePath = (path: string) => path.replace(/^\/+|\/+$/g, "");
   return {
+    readEvent: (eventId: string) => repository.readEvent(eventId, signal),
+    readEventPrizeSelections: (eventId: string) =>
+      repository.readEventPrizeSelections(eventId, signal),
+    readEventSnapshot: (eventId: string) =>
+      repository.readEventSnapshot(eventId, signal),
     read: (path: string) =>
       repository.getStatePath(normalizePath(path), undefined, signal),
     set: (path: string, value: unknown) =>
@@ -418,12 +431,7 @@ async function reconcileScheduledEvents(
   repository: EventProgressSweepRepository,
   now: () => number,
 ): Promise<void> {
-  const value = toRecord(
-    await repository.getStatePath("events", {
-      orderBy: "status",
-      equalTo: "scheduled",
-    }),
-  );
+  const value = toRecord(await repository.listEventsByStatus("scheduled"));
   if (!value) {
     return;
   }
@@ -568,7 +576,7 @@ async function sweepAdmittedEventProgress(
     dependencies.ratingRepository === null
       ? null
       : dependencies.ratingRepository ||
-        createRatingRepository(env, repository as GameplayRepository);
+        createRatingRepository(env, createEventGameplayRepository(env));
   const value = toRecord(
     await repository.getStatePath(EVENT_PROGRESS_OUTBOX_ROOT, {
       orderBy: "lastQueuedAtMs",

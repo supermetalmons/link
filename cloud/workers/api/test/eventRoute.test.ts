@@ -6,7 +6,8 @@ import { AuthApiFailure } from "../src/authErrors.ts";
 import { handleEventRoute } from "../src/eventRoute.ts";
 import { EVENT_CONTROL_TIMEOUT_MS } from "../src/eventOperations.ts";
 import { EVENT_OPERATION_TIMEOUT_MS } from "../src/eventParticipation.ts";
-import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type { EventGameplayRepository } from "../src/eventRepository.ts";
+import { eventReadFixture } from "./eventReadFixture.ts";
 import { TELEGRAM_TEST_ENV, withProfileControl } from "./testEnv.ts";
 
 const profileId = "creator-profile";
@@ -48,8 +49,20 @@ const lockManager: EventLockManager = {
   startEventLockHeartbeat: () => () => undefined,
 };
 
-function createRepository(): GameplayRepository {
+function createRepository(): EventGameplayRepository {
+  const read: EventGameplayRepository["getStatePath"] = async (path) =>
+    path === "events/event-1"
+      ? {
+          eventId: "event-1",
+          status: "scheduled",
+          startAtMs: 10_000,
+          createdByLoginUid: identity.uid,
+          createdByProfileId: profileId,
+          participants: { [profileId]: participant },
+        }
+      : null;
   return {
+    ...eventReadFixture(read),
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     readProfileOwnershipSnapshot: async (query) => {
@@ -109,17 +122,7 @@ function createRepository(): GameplayRepository {
       ice: 0,
     }),
     getMiningSnapshot: async () => null,
-    getStatePath: async (path) =>
-      path === "events/event-1"
-        ? {
-            eventId: "event-1",
-            status: "scheduled",
-            startAtMs: 10_000,
-            createdByLoginUid: identity.uid,
-            createdByProfileId: profileId,
-            participants: { [profileId]: participant },
-          }
-        : null,
+    getStatePath: read,
     patchStateRoot: async () => undefined,
     transactStatePath: async () => ({ committed: false, value: null }),
   };
@@ -381,7 +384,7 @@ test("returns strict join and removal responses", async () => {
       ...dependencies,
       repository: {
         ...createRepository(),
-        getStatePath: async () => ({
+        readEvent: async () => ({
           eventId: "event-1",
           status: "scheduled",
           startAtMs: 10_000,
@@ -412,8 +415,8 @@ test("returns strict join and removal responses", async () => {
 test("returns a strict event prize selection response", async () => {
   const eventId = LEGACY_CORE_PRIZES_EVENT_ID;
   const repository = createRepository();
-  repository.getStatePath = async (path) =>
-    path === `events/${eventId}`
+  repository.readEvent = async (id) =>
+    id === eventId
       ? {
           eventId,
           status: "active",

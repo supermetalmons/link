@@ -1,3 +1,4 @@
+import type { EventReads } from "../../../runtime/eventReads.js";
 import { resolveEventTelegramAnnouncements } from "@mons/shared/events";
 import { buildTelegramEditDesired } from "../../../runtime/telegram/desiredStateCore.js";
 import {
@@ -227,7 +228,7 @@ async function commitFencedDesiredUpdate(
 
 export async function processEventProjectionTask(
   task: EventTelegramProjectionTask,
-  state: StateRepository,
+  state: StateRepository & Pick<EventReads, "readEvent">,
   rating: RatingProjectionRepository,
   enqueueDelivery: (input: InitialTelegramDelivery) => Promise<unknown>,
   now: () => number,
@@ -254,7 +255,7 @@ export async function processEventProjectionTask(
   const stopHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
   try {
     const [eventData, rawState, rawGeneration] = await Promise.all([
-      state.getPath(`events/${task.eventId}`),
+      state.readEvent(task.eventId),
       state.getPath(`${EVENT_TELEGRAM_PROJECTION_ROOT}/${task.eventId}`),
       state.getPath(getEventTelegramProjectionGenerationPath(task.eventId)),
     ]);

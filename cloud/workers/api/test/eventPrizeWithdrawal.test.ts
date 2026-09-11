@@ -12,6 +12,8 @@ import {
 } from "../src/eventPrizeWithdrawal.ts";
 import type { EventPrizeWithdrawalStore } from "../src/eventPrizeWithdrawalD1.ts";
 import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type { EventGameplayRepository } from "../src/eventRepository.ts";
+import type { EventPrizeAssignmentRecord } from "../../../runtime/eventReads.js";
 import type {
   ProfileOwnershipQuery,
   ProfileOwnershipProfileSnapshot,
@@ -171,10 +173,11 @@ function repository() {
   const values = new Map<string, unknown>([
     [
       `profileEventPrizes/${profileId}/${eventId}`,
-      { eventId, place: 1, prizeId, profileId },
+      { eventId, place: 1, prizeId, profileId, assignedAtMs: 1 },
     ],
   ]);
-  const value: GameplayRepository = {
+  const value: GameplayRepository &
+    Pick<EventGameplayRepository, "readProfileEventPrizeAssignment"> = {
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     readProfileOwnershipSnapshot:
@@ -188,7 +191,17 @@ function repository() {
     }),
     getMiningSnapshot: async () => null,
     getNavigationGame: async () => null,
-    getStatePath: async (path) => values.get(path) ?? null,
+    getStatePath: async (path) => {
+      assert.ok(!path.startsWith("profileEventPrizes/"));
+      return values.get(path) ?? null;
+    },
+    readProfileEventPrizeAssignment: async (
+      candidateProfileId,
+      candidateEventId,
+    ) =>
+      (values.get(
+        `profileEventPrizes/${candidateProfileId}/${candidateEventId}`,
+      ) as EventPrizeAssignmentRecord | undefined) ?? null,
     patchStateRoot: async (updates) => {
       for (const [path, next] of Object.entries(updates)) {
         if (next === null) values.delete(path);

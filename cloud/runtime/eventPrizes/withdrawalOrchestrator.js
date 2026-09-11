@@ -190,8 +190,9 @@ const handleWithdrawEventPrize = async (request, dependencies) => {
     [1, 2, 3].includes(Number(existingWithdrawal.place));
   let place = Number(existingWithdrawal?.place);
   if (!submittedRecordCanResume) {
-    const assignment = await state.read(
-      `profileEventPrizes/${profileId}/${eventId}`,
+    const assignment = await dependencies.readProfileEventPrizeAssignment(
+      profileId,
+      eventId,
     );
     place = validatePrizeAssignment({
       assignment,

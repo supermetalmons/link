@@ -1,7 +1,7 @@
 import { STATE_FAILURE_MESSAGES } from "./stateCompatibility.ts";
 import { isSafeRecordKey } from "./recordKeys.ts";
 import { stateIncrement } from "./stateRepositoryTypes.ts";
-import type { GameplayRepository } from "./gameplayRepository.ts";
+import type { EventGameplayRepository } from "./eventRepository.ts";
 import type { EventTelegramProjectionTask } from "./telegramProjectionTasks.ts";
 
 export const EVENT_TELEGRAM_PROJECTION_OUTBOX_ROOT =
@@ -66,9 +66,9 @@ export function buildEventTelegramProjectionOutbox(
 
 export function createEventTelegramProjectionRepository(
   env: Env,
-  repository: GameplayRepository,
+  repository: EventGameplayRepository,
   dependencies: ProducerDependencies = {},
-): GameplayRepository {
+): EventGameplayRepository {
   const createRequestId =
     dependencies.createRequestId || (() => crypto.randomUUID());
   const enqueue =

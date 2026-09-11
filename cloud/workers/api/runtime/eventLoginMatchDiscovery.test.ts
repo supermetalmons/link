@@ -11,7 +11,12 @@ import { createEventStateRepository } from "../src/eventRepository.ts";
 import { listPendingEventTransitionIntents } from "../src/eventD1.ts";
 import { processEventProfileGameProjection } from "../src/profileGameProjection.ts";
 import { createEventProfileGameProjectionRuntime } from "../src/profileGameProjectionRepository.ts";
-import type { StateRepository } from "../src/stateRepositoryTypes.ts";
+import type {
+  StateRepository,
+  StateQuery,
+} from "../src/stateRepositoryTypes.ts";
+import type { EventReads } from "../../../runtime/eventReads.js";
+import { eventReadFixture } from "../test/eventReadFixture.ts";
 import { applyEventTestMigrations } from "./eventTestMigrations.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 import {
@@ -82,12 +87,14 @@ function stateFixture(initial: Record<string, unknown> = {}) {
   const values = new Map(Object.entries(initial));
   const patches: Record<string, unknown>[] = [];
   const reads: string[] = [];
-  const client: StateRepository = {
-    async getPath(path, query) {
-      reads.push(path);
-      if (path.startsWith("players/")) expect(query).toEqual({ shallow: true });
-      return values.get(path) ?? null;
-    },
+  const read = async (path: string, query?: StateQuery) => {
+    reads.push(path);
+    if (path.startsWith("players/")) expect(query).toEqual({ shallow: true });
+    return values.get(path) ?? null;
+  };
+  const client: StateRepository & EventReads = {
+    ...eventReadFixture(read),
+    getPath: read,
     async patchRoot(updates) {
       patches.push(updates);
       for (const [path, value] of Object.entries(updates)) {
@@ -242,7 +249,10 @@ describe("event login-match discovery", () => {
       },
     });
     const runtime = createEventProfileGameProjectionRuntime(testEnv, {
-      state: { getStatePath: repository.getPath },
+      state: {
+        getStatePath: repository.getPath,
+        readEvent: repository.readEvent,
+      },
       wait: async () => undefined,
     });
     const process = () =>
@@ -285,7 +295,10 @@ describe("event login-match discovery", () => {
       },
     });
     const runtime = createEventProfileGameProjectionRuntime(testEnv, {
-      state: { getStatePath: fixture.client.getPath },
+      state: {
+        getStatePath: fixture.client.getPath,
+        readEvent: fixture.client.readEvent,
+      },
       wait: async () => undefined,
     });
     await expect(runtime.reconcileEventProjection(eventId)).rejects.toThrow();
@@ -348,7 +361,7 @@ describe("event login-match discovery", () => {
       })),
     ).rejects.toThrow("event-match-creation-requires-transition");
     expect(fixture.patches).toEqual([]);
-    expect(await repository.getPath(`events/${eventId}`)).toBeNull();
+    expect(await repository.readEvent(eventId)).toBeNull();
   });
 
   it("bounds event discovery before reading an oversized bracket", async () => {

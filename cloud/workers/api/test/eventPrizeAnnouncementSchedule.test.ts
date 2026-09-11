@@ -12,7 +12,8 @@ import {
   buildEventProgressPlan,
   type EventProgressPlan,
 } from "../src/eventProgress.ts";
-import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type { EventGameplayRepository } from "../src/eventRepository.ts";
+import { eventReadFixture } from "./eventReadFixture.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 const EVENT_ID = "z3oj52Iiime";
@@ -33,7 +34,7 @@ function scheduledEvent(overrides: Record<string, unknown> = {}) {
 
 function memoryRepository(
   initial: Record<string, unknown> = {},
-  beforeCommit?: GameplayRepository["patchStateRoot"],
+  beforeCommit?: EventGameplayRepository["patchStateRoot"],
 ) {
   let data = structuredClone(initial);
   const patches: Record<string, unknown>[] = [];
@@ -46,7 +47,12 @@ function memoryRepository(
     }
     return value ?? null;
   };
-  const repository: GameplayRepository = {
+  const read = async (path: string) => {
+    reads.push(path);
+    return structuredClone(get(path));
+  };
+  const repository: EventGameplayRepository = {
+    ...eventReadFixture(read),
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     getMiningMaterials: async () => ({
@@ -62,8 +68,8 @@ function memoryRepository(
       throw new Error("unexpected-profile-read");
     },
     getStatePath: async (path) => {
-      reads.push(path);
-      return structuredClone(get(path));
+      assert.ok(!path.startsWith("events/"));
+      return read(path);
     },
     patchStateRoot: async (updates, signal) => {
       await beforeCommit?.(updates, signal);

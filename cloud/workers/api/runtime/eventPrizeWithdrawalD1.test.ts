@@ -284,6 +284,9 @@ describe("event prize withdrawal D1 repository", () => {
       readProfileOwnershipSnapshot: async () => {
         throw new Error("unexpected-profile-ownership-read");
       },
+      readProfileEventPrizeAssignment: async () => {
+        throw new Error("unexpected-profile-prize-read");
+      },
       getStatePath: async (candidatePath: string) =>
         sourceValues.get(candidatePath) ?? null,
       patchStateRoot: async (updates: Record<string, unknown>) => {

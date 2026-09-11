@@ -1,6 +1,6 @@
 import { getOwnerProfileIds } from "../../../runtime/events/eventProjectionModel.js";
 import { isSafeRecordKey } from "./recordKeys.ts";
-import type { GameplayRepository } from "./gameplayRepository.ts";
+import type { EventGameplayRepository } from "./eventRepository.ts";
 import { buildEventProfileGameProjectionOutboxUpdates } from "./profileGameProjectionOutbox.ts";
 import type { EventProfileGameProjectionTask } from "./profileGameProjectionTasks.ts";
 
@@ -48,9 +48,9 @@ export function eventIdsFromProfileGameProjectionUpdates(
 
 export function createEventProfileGameProjectionRepository(
   env: Env,
-  repository: GameplayRepository,
+  repository: EventGameplayRepository,
   dependencies: ProducerDependencies = {},
-): GameplayRepository {
+): EventGameplayRepository {
   const createRequestId =
     dependencies.createRequestId || (() => crypto.randomUUID());
   const enqueue =
@@ -68,9 +68,7 @@ export function createEventProfileGameProjectionRepository(
         return;
       }
       const previousEvents = await Promise.all(
-        eventIds.map((eventId) =>
-          repository.getStatePath(`events/${eventId}`, undefined, signal),
-        ),
+        eventIds.map((eventId) => repository.readEvent(eventId, signal)),
       );
       const timestamp = now();
       const tasks = eventIds.map((eventId) => ({

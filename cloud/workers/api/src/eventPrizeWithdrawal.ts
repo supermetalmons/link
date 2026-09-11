@@ -46,8 +46,10 @@ import {
   type WorkerExecutionContext,
 } from "./sessionAuth.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
-import type { GameplayRepository } from "./gameplayRepository.ts";
-import { createEventGameplayRepository } from "./eventRepository.ts";
+import {
+  createEventGameplayRepository,
+  type EventGameplayRepository,
+} from "./eventRepository.ts";
 import { readBoundedJson } from "./http.ts";
 import {
   createD1EventPrizeWithdrawalStore,
@@ -128,6 +130,7 @@ type EventPrizeState = {
 
 type EventPrizeRuntimeDependencies = {
   state: EventPrizeState;
+  readProfileEventPrizeAssignment: EventGameplayRepository["readProfileEventPrizeAssignment"];
   createEventPrizeUmi(standard: "compressed" | "core"): unknown;
   now(): number;
   readWithdrawal(
@@ -146,10 +149,11 @@ type EventPrizeRuntimeDependencies = {
 };
 
 type EventPrizeGameplayRepository = Pick<
-  GameplayRepository,
+  EventGameplayRepository,
   | "getStatePath"
   | "patchStateRoot"
   | "readProfileOwnershipSnapshot"
+  | "readProfileEventPrizeAssignment"
   | "transactStatePath"
 >;
 
@@ -305,6 +309,8 @@ export async function createEventPrizeRuntimeDependencies(
   };
   return {
     state: createEventPrizeState(repository, withdrawalStore),
+    readProfileEventPrizeAssignment: (profileId, eventId, signal) =>
+      repository.readProfileEventPrizeAssignment(profileId, eventId, signal),
     createEventPrizeUmi: (standard) =>
       createConfiguredEventPrizeUmi(standard, {
         adminPrivateKey: env.EVENT_PRIZE_ADMIN_PRIVATE_KEY,
@@ -697,8 +703,9 @@ async function admitWithdrawal(
     [1, 2, 3].includes(Number(withdrawal.place));
   let place = Number(withdrawal?.place);
   if (!submittedRecordCanResume) {
-    const assignment = await repository.getStatePath(
-      `profileEventPrizes/${profileId}/${request.eventId}`,
+    const assignment = await repository.readProfileEventPrizeAssignment(
+      profileId,
+      request.eventId,
     );
     place = validatePrizeAssignment({
       assignment,
@@ -1050,8 +1057,9 @@ export async function handleEventPrizeWithdrawalRoute(
         runtime,
       );
       if (!owned.withdrawal) {
-        const assignment = await repository.getStatePath(
-          `profileEventPrizes/${owned.profileId}/${body.eventId}`,
+        const assignment = await repository.readProfileEventPrizeAssignment(
+          owned.profileId,
+          body.eventId,
         );
         validatePrizeAssignment({
           assignment,

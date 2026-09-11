@@ -5,13 +5,15 @@ import {
   getEventTelegramProjectionGenerationPath,
   getEventTelegramProjectionOutboxPath,
 } from "../src/eventTelegramProjectionProducer.ts";
-import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type { EventGameplayRepository } from "../src/eventRepository.ts";
+import { eventReadFixture } from "./eventReadFixture.ts";
 import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 
 function repository(
-  patch: GameplayRepository["patchStateRoot"],
-): GameplayRepository {
+  patch: EventGameplayRepository["patchStateRoot"],
+): EventGameplayRepository {
   return {
+    ...eventReadFixture(async () => null),
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     readProfileOwnershipSnapshot: async () => {

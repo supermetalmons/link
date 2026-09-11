@@ -16,6 +16,7 @@ import {
   type RemoveEventParticipantResponse,
 } from "@mons/shared/events";
 import * as monsRules from "mons-rules";
+import type { EventReads, EventSnapshot } from "../../../runtime/eventReads.js";
 import {
   createEventLockManagerCore,
   type EventLockManager,
@@ -54,11 +55,12 @@ type EventDueTransition = {
 
 export type EventParticipationRepository = Pick<
   GameplayRepository,
-  | "getStatePath"
-  | "patchStateRoot"
-  | "readProfileOwnershipSnapshot"
-  | "transactStatePath"
->;
+  "patchStateRoot" | "readProfileOwnershipSnapshot" | "transactStatePath"
+> &
+  Pick<
+    EventReads,
+    "readEvent" | "readEventPrizeSelections" | "readEventSnapshot"
+  >;
 
 export type EventParticipationDependencies = {
   buildDueUpdates?: (input: {
@@ -204,38 +206,36 @@ async function readEvent(
   repository: EventParticipationRepository,
   signal: AbortSignal,
 ): Promise<EventRecord> {
-  const value = toRecord(
-    await repository.getStatePath(`events/${eventId}`, undefined, signal),
-  );
-  if (!value) {
+  return requireEvent(await repository.readEvent(eventId, signal));
+}
+
+function requireEvent(value: EventRecord | null): EventRecord {
+  const event = toRecord(value);
+  if (!event) {
     throw new AuthApiFailure(404, "not-found", "Event not found.");
   }
-  return cloneEvent(value);
+  return cloneEvent(event);
 }
 
-async function readPrizeSelections(
+async function readParticipationSnapshot(
   eventId: string,
   repository: EventParticipationRepository,
   signal: AbortSignal,
-): Promise<unknown> {
-  if (!isEventPrizeEvent(eventId)) return undefined;
-  const selections = await repository.getStatePath(
-    `eventPrizeSelections/${eventId}`,
-    undefined,
-    signal,
-  );
-  return selections === null || selections === undefined
-    ? {}
-    : structuredClone(selections);
-}
-
-function createPrizeSelectionLoader(
-  eventId: string,
-  repository: EventParticipationRepository,
-  signal: AbortSignal,
-): () => Promise<unknown> {
-  let pending: Promise<unknown> | null = null;
-  return () => (pending ??= readPrizeSelections(eventId, repository, signal));
+): Promise<{
+  event: EventRecord;
+  prizeSelections: Record<string, string> | undefined;
+}> {
+  if (!isEventPrizeEvent(eventId)) {
+    return {
+      event: await readEvent(eventId, repository, signal),
+      prizeSelections: undefined,
+    };
+  }
+  const snapshot = await repository.readEventSnapshot(eventId, signal);
+  return {
+    event: requireEvent(snapshot.event),
+    prizeSelections: structuredClone(snapshot.prizeSelections),
+  };
 }
 
 function getPrizeSelectionProfileIds(value: unknown): string[] {
@@ -276,12 +276,10 @@ async function requireOwnedLock(
   }
 }
 
-type ReconciliationCheck = {
-  path: string;
-  matches: (value: unknown) => boolean;
-};
+type ReconciliationCheck = (snapshot: EventSnapshot) => boolean;
 
 async function patchWithReconciliation(
+  eventId: string,
   updates: Record<string, unknown>,
   repository: EventParticipationRepository,
   operationSignal: AbortSignal,
@@ -291,14 +289,13 @@ async function patchWithReconciliation(
     await repository.patchStateRoot(updates, operationSignal);
   } catch (error) {
     const signal = AbortSignal.timeout(EVENT_RECONCILIATION_TIMEOUT_MS);
-    const values = await Promise.all(
-      checks.map(({ path }) =>
-        repository.getStatePath(path, undefined, signal).catch(() => undefined),
-      ),
-    );
+    const snapshot = await repository
+      .readEventSnapshot(eventId, signal)
+      .catch(() => null);
     if (
+      !snapshot ||
       checks.length === 0 ||
-      !checks.every((check, index) => check.matches(values[index]))
+      !checks.every((check) => check(snapshot))
     ) {
       throw error;
     }
@@ -361,13 +358,16 @@ async function persistDueTransition(
     );
   }
   await requireOwnedLock(lockManager, lockHandle, busyMessage);
-  await patchWithReconciliation(dueTransition.updates, repository, signal, [
-    { path: statusPath, matches: (value) => value === expectedStatus },
-    {
-      path: updatedAtPath,
-      matches: (value) => value === expectedUpdatedAtMs,
-    },
-  ]);
+  await patchWithReconciliation(
+    eventId,
+    dueTransition.updates,
+    repository,
+    signal,
+    [
+      ({ event }) => (event?.status ?? null) === expectedStatus,
+      ({ event }) => (event?.updatedAtMs ?? null) === expectedUpdatedAtMs,
+    ],
+  );
 }
 
 async function persistJoin(
@@ -381,22 +381,19 @@ async function persistJoin(
   const updatedAtPath = `events/${eventId}/updatedAtMs`;
   const expectedUpdatedAtMs = requireTimestamp(updates[updatedAtPath]);
   const checks: ReconciliationCheck[] = [
-    {
-      path: `events/${eventId}/participants/${participant.profileId}`,
-      matches: (value) => isSameParticipant(value, participant),
-    },
-    {
-      path: updatedAtPath,
-      matches: (value) => value === expectedUpdatedAtMs,
-    },
+    ({ event }) =>
+      isSameParticipant(
+        toRecord(event?.participants)?.[participant.profileId] ?? null,
+        participant,
+      ),
+    ({ event }) => (event?.updatedAtMs ?? null) === expectedUpdatedAtMs,
   ];
   if (expectedTransitionStatus !== undefined) {
-    checks.push({
-      path: `events/${eventId}/status`,
-      matches: (value) => value === expectedTransitionStatus,
-    });
+    checks.push(
+      ({ event }) => (event?.status ?? null) === expectedTransitionStatus,
+    );
   }
-  await patchWithReconciliation(updates, repository, signal, checks);
+  await patchWithReconciliation(eventId, updates, repository, signal, checks);
   return participant;
 }
 
@@ -409,19 +406,12 @@ async function persistRemoval(
 ): Promise<void> {
   const updatedAtPath = `events/${eventId}/updatedAtMs`;
   const expectedUpdatedAtMs = requireTimestamp(updates[updatedAtPath]);
-  await patchWithReconciliation(updates, repository, signal, [
-    {
-      path: `events/${eventId}/participants/${participantProfileId}`,
-      matches: (value) => value === null,
-    },
-    {
-      path: `eventPrizeSelections/${eventId}/${participantProfileId}`,
-      matches: (value) => value === null,
-    },
-    {
-      path: updatedAtPath,
-      matches: (value) => value === expectedUpdatedAtMs,
-    },
+  await patchWithReconciliation(eventId, updates, repository, signal, [
+    ({ event }) =>
+      (toRecord(event?.participants)?.[participantProfileId] ?? null) === null,
+    ({ prizeSelections }) =>
+      (prizeSelections[participantProfileId] ?? null) === null,
+    ({ event }) => (event?.updatedAtMs ?? null) === expectedUpdatedAtMs,
   ]);
 }
 
@@ -503,13 +493,9 @@ export async function joinEvent(
   );
   const stopHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
   try {
-    const event = await readEvent(eventId, repository, signal);
+    const { event, prizeSelections: eventPrizeSelections } =
+      await readParticipationSnapshot(eventId, repository, signal);
     const participants = toRecord(event.participants) || {};
-    const loadPrizeSelections = createPrizeSelectionLoader(
-      eventId,
-      repository,
-      signal,
-    );
     const nowMs = now();
     if (
       event.status === "scheduled" &&
@@ -517,7 +503,7 @@ export async function joinEvent(
       nowMs >= event.startAtMs &&
       participantCount(event) < 2
     ) {
-      const prizeSelections = await loadPrizeSelections();
+      const prizeSelections = eventPrizeSelections;
       const dueTransition = await buildDueUpdates({
         eventId,
         event,
@@ -551,7 +537,7 @@ export async function joinEvent(
       !directParticipation.isParticipant ||
       (typeof event.startAtMs === "number" && nowMs >= event.startAtMs)
     ) {
-      prizeSelections = await loadPrizeSelections();
+      prizeSelections = eventPrizeSelections;
       ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
         loginUids: [identity.uid],
         profileIds: getPrizeSelectionProfileIds(prizeSelections),
@@ -648,7 +634,7 @@ export async function joinEvent(
     const isDueAtSettle =
       typeof event.startAtMs === "number" && settleNowMs >= event.startAtMs;
     if (isDueAtSettle) {
-      prizeSelections = await loadPrizeSelections();
+      prizeSelections = eventPrizeSelections;
     }
     if (!ownershipSnapshot && isDueAtSettle) {
       ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
@@ -733,7 +719,8 @@ export async function removeEventParticipant(
   );
   const stopHeartbeat = lockManager.startEventLockHeartbeat(lockHandle);
   try {
-    const event = await readEvent(eventId, repository, signal);
+    const { event, prizeSelections: eventPrizeSelections } =
+      await readParticipationSnapshot(eventId, repository, signal);
     const creatorLoginUid = normalizeString(event.createdByLoginUid);
     const creatorProfileId = normalizeString(event.createdByProfileId);
     const participants = toRecord(event.participants) || {};
@@ -742,15 +729,10 @@ export async function removeEventParticipant(
     const targetProfileId =
       normalizeString(targetParticipant?.profileId) || participantProfileId;
     const directCreator = identity.uid === creatorLoginUid;
-    const loadPrizeSelections = createPrizeSelectionLoader(
-      eventId,
-      repository,
-      signal,
-    );
     let ownershipSnapshot: EventOwnershipSnapshot | null = null;
     let prizeSelections: unknown;
     if (!directCreator) {
-      prizeSelections = await loadPrizeSelections();
+      prizeSelections = eventPrizeSelections;
       ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
         loginUids: [identity.uid],
         profileIds: getPrizeSelectionProfileIds(prizeSelections),
@@ -795,7 +777,7 @@ export async function removeEventParticipant(
       dueNowMs: number,
     ): Promise<boolean> => {
       if (dueNowMs < startAtMs) return false;
-      prizeSelections = await loadPrizeSelections();
+      prizeSelections = eventPrizeSelections;
       if (!ownershipSnapshot && participantCount(event) >= 2) {
         ownershipSnapshot = await loadOwnershipSnapshot(event, repository, {
           loginUids: [identity.uid],

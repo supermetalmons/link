@@ -837,8 +837,11 @@ describe("D1-authoritative profile game projection ownership", () => {
     await insertProfileOwner(profileId, loginUid);
     const runtime = createEventProfileGameProjectionRuntime(testEnv, {
       state: {
-        async getStatePath(path) {
-          expect(path).toBe(`events/${eventId}`);
+        async getStatePath() {
+          throw new Error("unexpected-generic-state-read");
+        },
+        async readEvent(candidateEventId) {
+          expect(candidateEventId).toBe(eventId);
           return {
             eventId,
             status: "scheduled",

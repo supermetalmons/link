@@ -1,6 +1,20 @@
 import { STATE_EFFECTS_FIELD } from "./stateCompatibility.ts";
 import { STATE_VALUE_FIELD } from "./stateCompatibility.ts";
 import { isEventPrizeId } from "@mons/shared/event-prizes";
+import type {
+  EventJsonRecord,
+  EventPrizeAssignmentRecord,
+  EventSnapshot,
+  ProfileEventPrizePageQuery,
+  ProfileEventPrizeSnapshot,
+} from "../../../runtime/eventReads.js";
+
+export type {
+  EventJsonRecord,
+  EventPrizeAssignmentRecord,
+  EventSnapshot,
+  ProfileEventPrizeSnapshot,
+} from "../../../runtime/eventReads.js";
 
 const MAX_EVENT_TRANSACTION_ATTEMPTS = 12;
 const EVENT_WRITE_ADMISSION_TTL_MS = 5 * 60 * 1_000;
@@ -9,14 +23,6 @@ const UTF8_ENCODER = new TextEncoder();
 
 export type EventD1Connection = Pick<D1Database, "batch" | "prepare">;
 export type EventStorageMode = "frozen" | "d1";
-export type EventJsonRecord = Record<string, unknown>;
-export type EventPrizeAssignmentRecord = {
-  assignedAtMs: number;
-  eventId: string;
-  place: 1 | 2 | 3;
-  prizeId: string;
-  profileId: string;
-} & EventJsonRecord;
 
 export type EventRuntimeControl = {
   freezeGeneration: number;
@@ -34,19 +40,6 @@ export type EventLeaseGuard = {
   eventId: string;
   lockId: string;
   ownerUid: string;
-};
-
-export type EventSnapshot = {
-  event: EventJsonRecord | null;
-  eventId: string;
-  prizeSelections: Record<string, string>;
-  revision: number;
-};
-
-export type ProfileEventPrizeSnapshot = {
-  prizes: Record<string, EventPrizeAssignmentRecord>;
-  profileId: string;
-  revision: number;
 };
 
 type EventTransitionIntentBase = {
@@ -396,6 +389,22 @@ async function readSelections(
   return selectionsFromRows(eventId, rows.results);
 }
 
+export async function readEvent(
+  db: EventD1Connection,
+  eventId: string,
+): Promise<EventJsonRecord | null> {
+  return (await readEventState(db, eventId)).current;
+}
+
+export async function readEventPrizeSelections(
+  db: EventD1Connection,
+  eventId: string,
+): Promise<Record<string, string>> {
+  const normalizedEventId = exactKey(eventId);
+  if (!normalizedEventId) throw new EventD1Failure("invalid-event-id");
+  return readSelections(db, normalizedEventId);
+}
+
 function selectionsFromRows(
   eventId: string,
   rows: Array<{ prize_id: string; profile_id: string }>,
@@ -517,6 +526,46 @@ export async function readProfileEventPrizes(
     profileId: normalizedProfileId,
     revision: revisionRow ? safeInteger(revisionRow.revision, 1) : 0,
   };
+}
+
+export async function readProfileEventPrizeAssignment(
+  db: EventD1Connection,
+  profileId: string,
+  eventId: string,
+): Promise<EventPrizeAssignmentRecord | null> {
+  const normalizedProfileId = exactKey(profileId);
+  if (!normalizedProfileId) throw new EventD1Failure("invalid-profile-id");
+  const normalizedEventId = exactKey(eventId);
+  if (!normalizedEventId) throw new EventD1Failure("invalid-event-id");
+  const row = await db
+    .prepare(
+      `SELECT assignment_json FROM profile_event_prizes
+       WHERE profile_id = ? AND event_id = ?`,
+    )
+    .bind(normalizedProfileId, normalizedEventId)
+    .first<{ assignment_json: string }>();
+  return row
+    ? parseStoredEventPrizeAssignment(
+        normalizedProfileId,
+        normalizedEventId,
+        decodeJson(row.assignment_json),
+      )
+    : null;
+}
+
+export async function listProfileEventPrizeAssignments(
+  db: EventD1Connection,
+  profileId: string,
+  query: ProfileEventPrizePageQuery = {},
+): Promise<Record<string, EventPrizeAssignmentRecord>> {
+  const { prizes } = await readProfileEventPrizes(db, profileId);
+  const startAt = typeof query.startAt === "string" ? query.startAt : "";
+  return Object.fromEntries(
+    Object.entries(prizes)
+      .filter(([eventId]) => !startAt || eventId >= startAt)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .slice(0, query.limit || 100),
+  );
 }
 
 function parseRuntimeControl(

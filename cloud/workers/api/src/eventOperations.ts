@@ -1,3 +1,7 @@
+import {
+  createEventGameplayRepository,
+  type EventGameplayRepository,
+} from "./eventRepository.ts";
 import { readGameplayMatchPair } from "./gameplayMatchReads.ts";
 import {
   isCreateEventResponse,
@@ -16,10 +20,7 @@ import {
 import { createEventRuntime } from "../../../runtime/events.js";
 import { createEventLockManagerCore } from "../../../runtime/events/lockManagerCore.js";
 import { AuthApiFailure, type AuthErrorCode } from "./authErrors.ts";
-import {
-  createGameplayRepository,
-  type GameplayRepository,
-} from "./gameplayRepository.ts";
+import { createGameplayRepository } from "./gameplayRepository.ts";
 import {
   buildEventProgressPlan,
   createEventStateAdapter,
@@ -34,7 +35,7 @@ export const EVENT_CONTROL_TIMEOUT_MS = 30_000;
 export type EventControlDependencies = {
   now?: () => number;
   random?: () => number;
-  repository?: GameplayRepository;
+  repository?: EventGameplayRepository;
   signal?: AbortSignal;
   sleep?: (milliseconds: number) => Promise<void>;
 };
@@ -101,7 +102,10 @@ function createRuntime(env: Env, dependencies: EventControlDependencies) {
     dependencies.signal || AbortSignal.timeout(EVENT_CONTROL_TIMEOUT_MS);
   const repository =
     dependencies.repository ||
-    createGameplayRepository(env, { timeoutMs: EVENT_CONTROL_TIMEOUT_MS });
+    createEventGameplayRepository(
+      env,
+      createGameplayRepository(env, { timeoutMs: EVENT_CONTROL_TIMEOUT_MS }),
+    );
   const lockManager = createEventLockManagerCore({
     createLockId: () => crypto.randomUUID(),
     transactPath: (path, updater) =>

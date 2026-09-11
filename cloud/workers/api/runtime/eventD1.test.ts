@@ -14,15 +14,20 @@ import {
   listDueEventProgressOutboxes,
   listDueEventTelegramProjectionOutboxes,
   listPendingEventTransitionIntents,
+  listProfileEventPrizeAssignments,
   patchEventOwnedPaths as patchEventOwnedPathsRaw,
+  readEvent,
   readEventOwnedPath,
+  readEventPrizeSelections,
   readEventRuntimeControl,
   readEventSnapshot,
   readEventTelegramProjectionState,
   readProfileEventPrizes,
+  readProfileEventPrizeAssignment,
   releaseEventWriteAdmission,
   transactEventOwnedPath as transactEventOwnedPathRaw,
   validateEventAggregate,
+  type EventD1Connection,
 } from "../src/eventD1.ts";
 
 const testEnv = env as Env & { TEST_EVENT_D1_MIGRATIONS: D1Migration[] };
@@ -156,12 +161,253 @@ describe("event D1 store", () => {
       revision: 1,
     });
     expect(session.getBookmark()).toBeTypeOf("string");
+    await expect(readEvent(session, eventId)).resolves.toEqual(eventRecord());
+    await expect(readEventPrizeSelections(session, eventId)).resolves.toEqual({
+      [profileId]: prizeId,
+    });
     expect(
       (await readEventOwnedPath(
         testEnv.EVENT_DB,
         `events/${eventId}/unknownFutureField`,
       )) as unknown,
     ).toEqual({ retained: true });
+  });
+
+  it("reads only the requested event or prize rows", async () => {
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`events/${eventId}`]: eventRecord(),
+      [`eventPrizeSelections/${eventId}/${profileId}`]: prizeId,
+      [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
+    });
+    const session = testEnv.EVENT_DB.withSession("first-primary");
+    const queries: string[] = [];
+    const db: EventD1Connection = {
+      prepare(query) {
+        queries.push(query);
+        return session.prepare(query);
+      },
+      batch: (statements) => session.batch(statements),
+    };
+
+    await expect(readEvent(db, eventId)).resolves.toEqual(eventRecord());
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain("FROM event_records WHERE event_id = ?");
+    queries.length = 0;
+
+    await expect(readEventPrizeSelections(db, eventId)).resolves.toEqual({
+      [profileId]: prizeId,
+    });
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain("FROM event_prize_selections");
+    queries.length = 0;
+
+    await expect(
+      readProfileEventPrizeAssignment(db, profileId, eventId),
+    ).resolves.toEqual(assignment());
+    expect(queries).toHaveLength(1);
+    expect(queries[0]).toContain("FROM profile_event_prizes");
+    expect(queries[0]).toContain("WHERE profile_id = ? AND event_id = ?");
+    expect(session.getBookmark()).toBeTypeOf("string");
+  });
+
+  it("returns empty typed reads for missing records and rejects invalid IDs", async () => {
+    await expect(readEvent(testEnv.EVENT_DB, eventId)).resolves.toBeNull();
+    await expect(
+      readEventPrizeSelections(testEnv.EVENT_DB, eventId),
+    ).resolves.toEqual({});
+    await expect(
+      readProfileEventPrizeAssignment(testEnv.EVENT_DB, profileId, eventId),
+    ).resolves.toBeNull();
+    await expect(
+      listProfileEventPrizeAssignments(testEnv.EVENT_DB, profileId),
+    ).resolves.toEqual({});
+
+    for (const invalidId of ["", "has/slash", " padded", "has#hash"]) {
+      await expect(readEvent(testEnv.EVENT_DB, invalidId)).rejects.toThrow(
+        "invalid-event-id",
+      );
+      await expect(
+        readEventPrizeSelections(testEnv.EVENT_DB, invalidId),
+      ).rejects.toThrow("invalid-event-id");
+      await expect(
+        readProfileEventPrizeAssignment(testEnv.EVENT_DB, invalidId, eventId),
+      ).rejects.toThrow("invalid-profile-id");
+      await expect(
+        readProfileEventPrizeAssignment(testEnv.EVENT_DB, profileId, invalidId),
+      ).rejects.toThrow("invalid-event-id");
+      await expect(
+        listProfileEventPrizeAssignments(testEnv.EVENT_DB, invalidId),
+      ).rejects.toThrow("invalid-profile-id");
+    }
+  });
+
+  it("validates narrow event reads independently from prize selections", async () => {
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`events/${eventId}`]: eventRecord(),
+      [`eventPrizeSelections/${eventId}/${profileId}`]: prizeId,
+    });
+    await testEnv.EVENT_DB.prepare(
+      "UPDATE event_prize_selections SET prize_id = ? WHERE event_id = ?",
+    )
+      .bind("invalid#prize", eventId)
+      .run();
+    await expect(readEvent(testEnv.EVENT_DB, eventId)).resolves.toEqual(
+      eventRecord(),
+    );
+    await expect(
+      readEventPrizeSelections(testEnv.EVENT_DB, eventId),
+    ).rejects.toThrow("invalid-event-prize-selection");
+    await expect(readEventSnapshot(testEnv.EVENT_DB, eventId)).rejects.toThrow(
+      "invalid-event-prize-selection",
+    );
+
+    await testEnv.EVENT_DB.batch([
+      testEnv.EVENT_DB.prepare(
+        "UPDATE event_prize_selections SET prize_id = ? WHERE event_id = ?",
+      ).bind(prizeId, eventId),
+      testEnv.EVENT_DB.prepare(
+        "UPDATE event_records SET status = 'active' WHERE event_id = ?",
+      ).bind(eventId),
+    ]);
+    await expect(readEvent(testEnv.EVENT_DB, eventId)).rejects.toThrow(
+      "event-row-mismatch",
+    );
+    await expect(
+      readEventPrizeSelections(testEnv.EVENT_DB, eventId),
+    ).resolves.toEqual({ [profileId]: prizeId });
+    await expect(readEventSnapshot(testEnv.EVENT_DB, eventId)).rejects.toThrow(
+      "event-row-mismatch",
+    );
+  });
+
+  it("reads one assignment without validating unrelated profile prizes", async () => {
+    const otherEventId = "other-event";
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`events/${eventId}`]: eventRecord(),
+      [`events/${otherEventId}`]: eventRecord({ eventId: otherEventId }),
+      [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
+    });
+    await testEnv.EVENT_DB.prepare(
+      `INSERT INTO profile_event_prizes (
+         profile_id, event_id, assignment_json, updated_at_ms
+       ) VALUES (?, ?, ?, ?)`,
+    )
+      .bind(profileId, otherEventId, JSON.stringify(assignment()), 2_000)
+      .run();
+
+    await expect(
+      readProfileEventPrizeAssignment(testEnv.EVENT_DB, profileId, eventId),
+    ).resolves.toEqual(assignment());
+    await expect(
+      readProfileEventPrizeAssignment(
+        testEnv.EVENT_DB,
+        profileId,
+        otherEventId,
+      ),
+    ).rejects.toThrow("invalid-event-prize-assignment");
+    await expect(
+      readProfileEventPrizes(testEnv.EVENT_DB, profileId),
+    ).rejects.toThrow("invalid-event-prize-assignment");
+    await expect(
+      listProfileEventPrizeAssignments(testEnv.EVENT_DB, profileId, {
+        limit: 1,
+      }),
+    ).rejects.toThrow("invalid-event-prize-assignment");
+  });
+
+  it("preserves inclusive lexical prize pagination and the default limit", async () => {
+    const eventIds = ["prize-a", "prize-B", "prize-b"];
+    await patchEventOwnedPaths(
+      testEnv.EVENT_DB,
+      Object.fromEntries(
+        eventIds.map((id) => [`events/${id}`, eventRecord({ eventId: id })]),
+      ),
+    );
+    await testEnv.EVENT_DB.batch(
+      eventIds.map((id) =>
+        testEnv.EVENT_DB.prepare(
+          `INSERT INTO profile_event_prizes (
+             profile_id, event_id, assignment_json, updated_at_ms
+           ) VALUES (?, ?, ?, ?)`,
+        ).bind(
+          profileId,
+          id,
+          JSON.stringify({ ...assignment(), eventId: id }),
+          2_000,
+        ),
+      ),
+    );
+    expect(
+      Object.keys(
+        await listProfileEventPrizeAssignments(testEnv.EVENT_DB, profileId),
+      ),
+    ).toEqual(["prize-B", "prize-a", "prize-b"]);
+    expect(
+      Object.keys(
+        await listProfileEventPrizeAssignments(testEnv.EVENT_DB, profileId, {
+          startAt: "prize-a",
+          limit: 1,
+        }),
+      ),
+    ).toEqual(["prize-a"]);
+    expect(
+      Object.keys(
+        await listProfileEventPrizeAssignments(testEnv.EVENT_DB, profileId, {
+          limit: 0,
+        }),
+      ),
+    ).toEqual(["prize-B", "prize-a", "prize-b"]);
+  });
+
+  it("keeps typed reads available while writes are frozen without admissions", async () => {
+    await patchEventOwnedPaths(testEnv.EVENT_DB, {
+      [`events/${eventId}`]: eventRecord(),
+      [`eventPrizeSelections/${eventId}/${profileId}`]: prizeId,
+      [`profileEventPrizes/${profileId}/${eventId}`]: assignment(),
+    });
+    await transitionEventStorageMode(testEnv.EVENT_DB, {
+      expected: { storageMode: "d1" },
+      next: { storageMode: "frozen" },
+      nowMs: 300,
+    });
+    try {
+      const session = testEnv.EVENT_DB.withSession("first-primary");
+      await expect(readEvent(session, eventId)).resolves.toEqual(eventRecord());
+      await expect(readEventPrizeSelections(session, eventId)).resolves.toEqual(
+        {
+          [profileId]: prizeId,
+        },
+      );
+      await expect(
+        readProfileEventPrizeAssignment(session, profileId, eventId),
+      ).resolves.toEqual(assignment());
+      await expect(readEventSnapshot(session, eventId)).resolves.toMatchObject({
+        event: eventRecord(),
+        revision: 1,
+      });
+      await expect(readProfileEventPrizes(session, profileId)).resolves.toEqual(
+        {
+          profileId,
+          prizes: { [eventId]: assignment() },
+          revision: 1,
+        },
+      );
+      await expect(
+        listProfileEventPrizeAssignments(session, profileId),
+      ).resolves.toEqual({ [eventId]: assignment() });
+      expect(session.getBookmark()).toBeTypeOf("string");
+      expect(
+        await testEnv.EVENT_DB.prepare(
+          "SELECT COUNT(*) AS count FROM event_write_admissions",
+        ).first<number>("count"),
+      ).toBe(0);
+    } finally {
+      await transitionEventStorageMode(testEnv.EVENT_DB, {
+        expected: { storageMode: "frozen" },
+        next: { storageMode: "d1" },
+        nowMs: 400,
+      });
+    }
   });
 
   it("rejects malformed aggregates without stripping unknown JSON fields", () => {
@@ -302,6 +548,12 @@ describe("event D1 store", () => {
       profileId,
       revision: 1,
     });
+    await expect(
+      readEventPrizeSelections(testEnv.EVENT_DB, eventId),
+    ).resolves.toEqual({ [profileId]: retiredPrizeId });
+    await expect(
+      readProfileEventPrizeAssignment(testEnv.EVENT_DB, profileId, eventId),
+    ).resolves.toEqual(retiredAssignment);
 
     await expect(
       patchEventOwnedPaths(testEnv.EVENT_DB, {

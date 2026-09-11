@@ -1,4 +1,6 @@
 import { STATE_EFFECTS_FIELD } from "./stateCompatibility.ts";
+import type { EventReads } from "../../../runtime/eventReads.js";
+import { createEventReadRepository } from "./eventReadRepository.ts";
 import { createAutomatchPersistence } from "./automatchPersistence.ts";
 import {
   type StateRepository,
@@ -90,17 +92,24 @@ type EventLockGuard = {
   lockRoot: string;
   ownerUid: string;
 };
-export type EventStateRepository = StateRepository & {
-  transactStoredProfileEventPrizeWithEventLease(
-    path: string,
-    updater: (current: unknown) => unknown,
-    guard: EventLockGuard,
-    signal?: AbortSignal,
-  ): Promise<StateTransactionResult>;
-};
+export type EventGameplayRepository = GameplayRepository & EventReads;
+
+export type EventStateRepository = StateRepository &
+  EventReads & {
+    transactStoredProfileEventPrizeWithEventLease(
+      path: string,
+      updater: (current: unknown) => unknown,
+      guard: EventLockGuard,
+      signal?: AbortSignal,
+    ): Promise<StateTransactionResult>;
+  };
 export type AuthRecoveryPrizeStore = Pick<
   EventStateRepository,
-  "getPath" | "transactPath" | "transactStoredProfileEventPrizeWithEventLease"
+  | "getPath"
+  | "readProfileEventPrizeAssignment"
+  | "listProfileEventPrizeAssignments"
+  | "transactPath"
+  | "transactStoredProfileEventPrizeWithEventLease"
 >;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -601,7 +610,7 @@ export async function recoverEventTransitionIntents(
 export function createEventGameplayRepository(
   env: Env,
   base: GameplayRepository = createGameplayRepository(env),
-): GameplayRepository {
+): EventGameplayRepository {
   const eventClient = createEventStateRepository(env, {
     getPath: base.getStatePath,
     patchRoot: base.patchStateRoot,
@@ -610,6 +619,7 @@ export function createEventGameplayRepository(
   });
   return {
     ...base,
+    ...createEventReadRepository(env.EVENT_DB),
     getStatePath: eventClient.getPath,
     patchStateRoot: eventClient.patchRoot,
     transactStatePath: eventClient.transactPath,
@@ -716,7 +726,10 @@ function transactStoredProfileEventPrizeWithEventLease(
 export function createD1AuthRecoveryPrizeStore(
   db: D1Database,
 ): AuthRecoveryPrizeStore {
+  const reads = createEventReadRepository(db);
   return {
+    readProfileEventPrizeAssignment: reads.readProfileEventPrizeAssignment,
+    listProfileEventPrizeAssignments: reads.listProfileEventPrizeAssignments,
     async getPath(path, query) {
       const cleanPath = normalizedPath(path);
       if (!/^profileEventPrizes\/[^/]+(?:\/[^/]+)?$/.test(cleanPath)) {
@@ -769,6 +782,7 @@ export function createEventStateRepository(
 ): EventStateRepository {
   return {
     ...base,
+    ...createEventReadRepository(env.EVENT_DB),
     async getPath(path, query, signal) {
       if (isTransitionReceiptPath(path)) {
         throw new Error("event-transition-receipt-path-reserved");

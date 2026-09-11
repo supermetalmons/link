@@ -2,6 +2,8 @@ import { createTelegramRepository } from "../../../runtime/telegram/repositoryCo
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { StateRepository } from "../src/stateRepositoryTypes.ts";
+import type { EventReads } from "../../../runtime/eventReads.js";
+import { eventReadFixture } from "./eventReadFixture.ts";
 import type {
   RatingProjectionRepository,
   RatingUpdateData,
@@ -31,8 +33,10 @@ const PROJECTION_TEST_ENV = {
 
 function memoryState(initial: Record<string, unknown>) {
   const state = new Map(Object.entries(initial));
-  const client: StateRepository = {
+  const client: StateRepository & EventReads = {
+    ...eventReadFixture(async (path) => state.get(path) ?? null),
     async getPath(path) {
+      assert.ok(!path.startsWith("events/"));
       return state.get(path) ?? null;
     },
     async patchRoot(updates) {

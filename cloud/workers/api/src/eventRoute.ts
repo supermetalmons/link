@@ -39,7 +39,7 @@ import {
   verifySessionRequest,
   type WorkerExecutionContext,
 } from "./sessionAuth.ts";
-import type { GameplayRepository } from "./gameplayRepository.ts";
+import type { EventGameplayRepository } from "./eventRepository.ts";
 import { EventWritesDisabled, assertEventWritesAllowed } from "./eventD1.ts";
 import { createEventMutationRepository } from "./eventMutationRepository.ts";
 import { readBoundedJson } from "./http.ts";
@@ -68,7 +68,7 @@ export type EventRouteDependencies = {
   assertEventWrites?: () => Promise<void>;
   control?: EventControlDependencies;
   participation?: EventParticipationDependencies;
-  repository?: GameplayRepository;
+  repository?: EventGameplayRepository;
   verifyIdentity?: (
     request: Request,
     env: Env,

@@ -6,7 +6,8 @@ import type {
   EventCreateOptions,
 } from "@mons/shared/events";
 import { AuthApiFailure } from "../src/authErrors.ts";
-import type { GameplayRepository } from "../src/gameplayRepository.ts";
+import type { EventGameplayRepository } from "../src/eventRepository.ts";
+import { eventReadFixture } from "./eventReadFixture.ts";
 import type { ProfileOwnershipSnapshot } from "../src/profileOwnership.ts";
 import {
   createEvent,
@@ -20,7 +21,7 @@ import { TELEGRAM_TEST_ENV } from "./testEnv.ts";
 const profileId = "creator-profile";
 const identity = { uid: "creator-login" };
 
-type TestGameplayRepository = GameplayRepository & {
+type TestGameplayRepository = EventGameplayRepository & {
   findProfileId(uid: string): Promise<string | null>;
   getGameplayProfile(
     uid: string,
@@ -103,6 +104,7 @@ function createRepository(initial: Record<string, unknown> = {}) {
   const patches: Record<string, unknown>[] = [];
   let repository: TestGameplayRepository;
   repository = {
+    ...eventReadFixture(async (path) => getPath(values, path)),
     applyWagerTransferOnce: async () => "applied",
     deleteNavigationGame: async () => "deleted",
     findProfileId: async () => profileId,
@@ -945,7 +947,7 @@ test("rate limits public event sync before runtime I/O", async () => {
   } as Env;
   const state = createRepository();
   let runtimeIo = 0;
-  state.repository.getStatePath = async () => {
+  state.repository.readEvent = async () => {
     runtimeIo += 1;
     throw new Error("unexpected-source-read");
   };
@@ -1015,7 +1017,7 @@ test("fails closed before event sync runtime creation when limiting fails", asyn
   } as Env;
   const state = createRepository();
   let runtimeIo = 0;
-  state.repository.getStatePath = async () => {
+  state.repository.readEvent = async () => {
     runtimeIo += 1;
     throw new Error("unexpected-source-read");
   };

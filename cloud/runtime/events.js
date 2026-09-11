@@ -95,13 +95,6 @@ const createEventRuntime = (dependencies) => {
 
   const cloneValue = (value) => JSON.parse(JSON.stringify(value));
 
-  const readPrizeSelections = async (eventId) => {
-    const selectionsValue = await state.read(`eventPrizeSelections/${eventId}`);
-    const selections = selectionsValue;
-    if (selections === null || selections === undefined) return {};
-    return typeof selections === "object" ? cloneValue(selections) : selections;
-  };
-
   const getPrizeSelectionProfileIds = (value) =>
     value && typeof value === "object" && !Array.isArray(value)
       ? Object.keys(value)
@@ -407,7 +400,7 @@ const createEventRuntime = (dependencies) => {
       );
     }
 
-    const initialEventValue = await state.read(`events/${eventId}`);
+    const initialEventValue = await state.readEvent(eventId);
     if (!(initialEventValue !== null && initialEventValue !== undefined)) {
       throw new HttpsError("not-found", "Event not found.");
     }
@@ -428,7 +421,12 @@ const createEventRuntime = (dependencies) => {
     const stopLockHeartbeat = startEventLockHeartbeat(lockHandle);
 
     try {
-      const eventValue = await state.read(`events/${eventId}`);
+      const snapshot = isEventPrizeEvent(eventId)
+        ? await state.readEventSnapshot(eventId)
+        : null;
+      const eventValue = snapshot
+        ? snapshot.event
+        : await state.readEvent(eventId);
       if (!(eventValue !== null && eventValue !== undefined)) {
         throw new HttpsError("not-found", "Event not found.");
       }
@@ -441,7 +439,7 @@ const createEventRuntime = (dependencies) => {
         normalizeString(event.status) === "scheduled" &&
         typeof event.startAtMs === "number" &&
         nowMs >= event.startAtMs
-          ? await readPrizeSelections(eventId)
+          ? cloneValue(snapshot.prizeSelections)
           : undefined;
       const directCreator = request.auth.uid === creatorLoginUid;
       const dueParticipantCount = getEventParticipantIds(event).length;
@@ -609,7 +607,7 @@ const createEventRuntime = (dependencies) => {
       let didDisqualify = false;
       let resolvedMatchKey = matchKeyInput;
       try {
-        const eventValue = await state.read(`events/${eventId}`);
+        const eventValue = await state.readEvent(eventId);
         if (!(eventValue !== null && eventValue !== undefined)) {
           throw new HttpsError("not-found", "Event not found.");
         }
@@ -767,7 +765,7 @@ const createEventRuntime = (dependencies) => {
     let stopLockHeartbeat = () => {};
 
     try {
-      const eventValue = await state.read(`events/${eventId}`);
+      const eventValue = await state.readEvent(eventId);
       if (!(eventValue !== null && eventValue !== undefined)) {
         throw new HttpsError("not-found", "Event not found.");
       }
@@ -785,7 +783,12 @@ const createEventRuntime = (dependencies) => {
       }
       stopLockHeartbeat = startEventLockHeartbeat(lockHandle);
 
-      const lockedEventValue = await state.read(`events/${eventId}`);
+      const snapshot = isEventPrizeEvent(eventId)
+        ? await state.readEventSnapshot(eventId)
+        : null;
+      const lockedEventValue = snapshot
+        ? snapshot.event
+        : await state.readEvent(eventId);
       if (!(lockedEventValue !== null && lockedEventValue !== undefined)) {
         throw new HttpsError("not-found", "Event not found.");
       }
@@ -800,7 +803,7 @@ const createEventRuntime = (dependencies) => {
             typeof event.startAtMs === "number" &&
             nowMs >= event.startAtMs))
       ) {
-        prizeSelections = await readPrizeSelections(eventId);
+        prizeSelections = cloneValue(snapshot.prizeSelections);
       }
       const directParticipation = enforceParticipantGate
         ? directRequesterParticipation(event, requesterUid)
@@ -1228,7 +1231,7 @@ const createEventRuntime = (dependencies) => {
       if (didChange) {
         const lockOwned = await isEventLockStillOwned(lockHandle);
         if (!lockOwned) {
-          const latestValue = await state.read(`events/${eventId}`);
+          const latestValue = await state.readEvent(eventId);
           syncLog.skipped = true;
           syncLog.reason = "locked";
           return buildSkippedSyncResponse({
@@ -1274,7 +1277,7 @@ const createEventRuntime = (dependencies) => {
         });
       }
 
-      const refreshedValue = await state.read(`events/${eventId}`);
+      const refreshedValue = await state.readEvent(eventId);
       syncLog.didChange = didChange;
       return {
         ok: true,
