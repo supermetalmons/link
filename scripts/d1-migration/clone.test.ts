@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { canonicalJson } from "../operator/runtime.ts";
 import {
   captureSchema,
   cloneDatabase,
@@ -536,6 +537,43 @@ test("wide-table page responses remain below eight MiB", async () => {
     assert.equal(copied.tables[0].rows, "110");
     assert.ok(sizes.every((size) => size + 4_096 <= 8 * 1_024 * 1_024));
     assert.ok(pages.length === 2 && pages[0] > 16 && pages[0] < 128);
+  } finally {
+    source.close();
+    target.close();
+  }
+});
+
+test("persisted recursively sorted schema keys preserve clone and verification digests", async () => {
+  const source = database();
+  const target = database();
+  try {
+    source.exec(`
+      CREATE TABLE parent(id INTEGER PRIMARY KEY, value TEXT DEFAULT 'retained');
+      CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id));
+      INSERT INTO parent VALUES(1,'preserved');
+      INSERT INTO child VALUES(2,1);
+      CREATE INDEX child_parent ON child(parent_id);
+      CREATE TRIGGER immutable_child BEFORE DELETE ON child BEGIN SELECT RAISE(ABORT,'immutable'); END;
+    `);
+    const captured = await captureSchema(queryFor(source));
+    const persisted = JSON.parse(canonicalJson(captured));
+    assert.notEqual(JSON.stringify(captured), JSON.stringify(persisted));
+    const before = await digestDatabase(queryFor(source), { schema: captured });
+    assert.deepEqual(
+      await digestDatabase(queryFor(source), { schema: persisted }),
+      before,
+    );
+    const copied = await cloneDatabase(queryFor(source), queryFor(target), {
+      schema: persisted,
+    });
+    assert.deepEqual(copied, before);
+    const persistedDigest = JSON.parse(canonicalJson(copied));
+    assert.deepEqual(
+      await verifyDatabase(queryFor(source), queryFor(target), {
+        expectedSourceDigest: persistedDigest,
+      }),
+      copied,
+    );
   } finally {
     source.close();
     target.close();

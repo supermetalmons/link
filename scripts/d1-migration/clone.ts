@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { canonicalJson } from "../operator/runtime.ts";
 
 export type SqlQuery = (
   sql: string,
@@ -489,7 +490,7 @@ async function readSequences(
 }
 
 function digestSchema(schema: DatabaseSchema): string {
-  return createHash("sha256").update(JSON.stringify(schema)).digest("hex");
+  return createHash("sha256").update(canonicalJson(schema)).digest("hex");
 }
 
 function finishDigest(
