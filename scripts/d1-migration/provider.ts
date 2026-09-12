@@ -1,4 +1,5 @@
 import { resolveCloudflareToken } from "../operator/runtime.ts";
+import { migrationFetch } from "./transport.ts";
 
 export type ApiMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 export type ApiRecord = Record<string, unknown>;
@@ -55,7 +56,7 @@ export function createCloudflareProvider(
 ) {
   if (!/^[a-f0-9]{32}$/.test(accountId)) throw new Error("invalid account ID");
   const token = options.token || resolveCloudflareToken();
-  const fetcher = options.fetcher || fetch;
+  const fetcher = options.fetcher || migrationFetch;
   const root = `https://api.cloudflare.com/client/v4/accounts/${accountId}/`;
   const envelope = async (
     path: string,

@@ -39,6 +39,7 @@ import {
 } from "./clone.ts";
 import { runCloneRehearsal } from "./rehearsal.ts";
 import { retryRead, concurrentSettled } from "./retry.ts";
+import { migrationFetch } from "./transport.ts";
 import { runWorkerRehearsal } from "./worker-rehearsal.ts";
 import { freezeDomainControls, resumeDomainControls } from "./controls.ts";
 import {
@@ -572,17 +573,21 @@ async function maintenanceRequest(
   const signature = createHmac("sha256", bridgeSecret(args))
     .update(`${timestamp}.${body}`)
     .digest("base64url");
-  const response = await fetch("https://api.mons.link/internal/d1-migration", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Mons-Telegram-Timestamp": timestamp,
-      "X-Mons-Telegram-Signature": signature,
+  const fetcher = input.operation === "barrier" ? migrationFetch : fetch;
+  const response = await fetcher(
+    "https://api.mons.link/internal/d1-migration",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Mons-Telegram-Timestamp": timestamp,
+        "X-Mons-Telegram-Signature": signature,
+      },
+      body,
+      redirect: "error",
+      signal: AbortSignal.timeout(60_000),
     },
-    body,
-    redirect: "error",
-    signal: AbortSignal.timeout(60_000),
-  });
+  );
   let value: ApiRecord;
   try {
     value = apiRecord(await response.json());
