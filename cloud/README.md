@@ -20,6 +20,23 @@ Canonical ownership changes create catch-up work atomically in D1. The scheduled
 
 `AUTH_MUTATIONS_DISABLED` is the tracked auth maintenance switch. Change it through candidate upload and explicit promotion. Auth intents are consume-once and revision-fenced; do not manually edit active rows.
 
+### Auth recovery quarantine
+
+The recovery sweep quarantines malformed jobs by their raw profile ID and `CAST(revision AS TEXT)` token in `PROFILE_DB.profile_auth_recovery_quarantine`. It retains the canonical job unchanged and skips that revision on later sweeps; a changed revision is eligible again. Raw identifiers and snapshot comparisons preserve database bytes, including BLOBs and invalid UTF-8. Quarantine logs identify jobs using `profileIdHex` and `revisionHex`. Deleting a completed canonical job also removes its quarantine marker.
+
+Inspect retained jobs with this read-only query against `PROFILE_DB`:
+
+```sql
+SELECT hex(quarantine.profile_id) AS profile_id_hex, quarantine.reason,
+       hex(quarantine.revision_token) AS revision_token_hex,
+       quarantine.quarantined_at_ms, jobs.*
+FROM profile_auth_recovery_quarantine AS quarantine
+JOIN profile_auth_recovery_jobs AS jobs USING (profile_id)
+ORDER BY quarantine.quarantined_at_ms, quarantine.profile_id;
+```
+
+Apply migration `0017_auth_recovery_quarantine.sql` with canonical profile writes frozen. Repair quarantined data only under the canonical profile maintenance procedure below, preserving job IDs, source IDs, and existing replay cursors. A reviewed repair must bump the canonical job revision so recovery can reconsider it; do not manually edit active rows or clear markers to force retries.
+
 ## Setup
 
 ```sh
