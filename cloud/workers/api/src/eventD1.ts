@@ -583,13 +583,53 @@ export async function listProfileEventPrizeAssignments(
   profileId: string,
   query: ProfileEventPrizePageQuery = {},
 ): Promise<Record<string, EventPrizeAssignmentRecord>> {
-  const { prizes } = await readProfileEventPrizes(db, profileId);
+  const normalizedProfileId = exactKey(profileId);
+  if (!normalizedProfileId) throw new EventD1Failure("invalid-profile-id");
   const startAt = typeof query.startAt === "string" ? query.startAt : "";
+  const limit = safeInteger(query.limit || 100, 1);
+  const ascii = /^[\x20-\x7e]*$/;
+  let rows = ascii.test(startAt)
+    ? (
+        await db
+          .prepare(
+            `SELECT profile_id, event_id, assignment_json
+             FROM profile_event_prizes
+             WHERE profile_id = ? AND event_id >= ?
+             ORDER BY event_id LIMIT ?`,
+          )
+          .bind(normalizedProfileId, startAt, limit)
+          .all<AssignmentRow>()
+      ).results
+    : null;
+  // Existing recovery cursors use JavaScript's UTF-16 ordering.
+  if (rows === null || rows.some((row) => !ascii.test(row.event_id))) {
+    const stored = await db
+      .prepare(
+        `SELECT profile_id, event_id, assignment_json
+         FROM profile_event_prizes WHERE profile_id = ?`,
+      )
+      .bind(normalizedProfileId)
+      .all<AssignmentRow>();
+    rows = stored.results
+      .filter((row) => row.event_id >= startAt)
+      .sort((left, right) =>
+        left.event_id < right.event_id
+          ? -1
+          : left.event_id > right.event_id
+            ? 1
+            : 0,
+      )
+      .slice(0, limit);
+  }
   return Object.fromEntries(
-    Object.entries(prizes)
-      .filter(([eventId]) => !startAt || eventId >= startAt)
-      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-      .slice(0, query.limit || 100),
+    rows.map((row) => [
+      row.event_id,
+      parseStoredEventPrizeAssignment(
+        normalizedProfileId,
+        row.event_id,
+        decodeJson(row.assignment_json),
+      ),
+    ]),
   );
 }
 

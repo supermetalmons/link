@@ -264,6 +264,15 @@ describe("event D1 store", () => {
     expect(queries).toHaveLength(1);
     expect(queries[0]).toContain("FROM profile_event_prizes");
     expect(queries[0]).toContain("WHERE profile_id = ? AND event_id = ?");
+    queries.length = 0;
+
+    await expect(
+      listProfileEventPrizeAssignments(db, profileId, {
+        startAt: eventId,
+        limit: 1,
+      }),
+    ).resolves.toEqual({ [eventId]: assignment() });
+    expect(queries).toHaveLength(1);
     expect(session.getBookmark()).toBeTypeOf("string");
   });
 
@@ -369,11 +378,26 @@ describe("event D1 store", () => {
       listProfileEventPrizeAssignments(testEnv.EVENT_DB, profileId, {
         limit: 1,
       }),
+    ).resolves.toEqual({ [eventId]: assignment() });
+    await expect(
+      listProfileEventPrizeAssignments(testEnv.EVENT_DB, profileId, {
+        startAt: otherEventId,
+        limit: 1,
+      }),
     ).rejects.toThrow("invalid-event-prize-assignment");
   });
 
   it("preserves inclusive lexical prize pagination and the default limit", async () => {
-    const eventIds = ["prize-a", "prize-B", "prize-b"];
+    const eventIds = [
+      "prize-a",
+      "prize-B",
+      "prize-b",
+      ...Array.from(
+        { length: 100 },
+        (_, index) => `prize-c-${String(index).padStart(3, "0")}`,
+      ),
+    ];
+    const expectedOrder = [...eventIds].sort();
     await patchEventOwnedPaths(
       testEnv.EVENT_DB,
       Object.fromEntries(
@@ -398,7 +422,7 @@ describe("event D1 store", () => {
       Object.keys(
         await listProfileEventPrizeAssignments(testEnv.EVENT_DB, profileId),
       ),
-    ).toEqual(["prize-B", "prize-a", "prize-b"]);
+    ).toEqual(expectedOrder.slice(0, 100));
     expect(
       Object.keys(
         await listProfileEventPrizeAssignments(testEnv.EVENT_DB, profileId, {
@@ -413,8 +437,113 @@ describe("event D1 store", () => {
           limit: 0,
         }),
       ),
-    ).toEqual(["prize-B", "prize-a", "prize-b"]);
+    ).toEqual(expectedOrder.slice(0, 100));
+    expect(
+      Object.keys(
+        await listProfileEventPrizeAssignments(testEnv.EVENT_DB, profileId, {
+          startAt: "prize-c-095",
+          limit: 3,
+        }),
+      ),
+    ).toEqual(["prize-c-095", "prize-c-096", "prize-c-097"]);
+    await expect(
+      listProfileEventPrizeAssignments(testEnv.EVENT_DB, profileId, {
+        startAt: "prize-c-095-extra",
+        limit: 1,
+      }),
+    ).resolves.toEqual({
+      "prize-c-096": { ...assignment(), eventId: "prize-c-096" },
+    });
+    await expect(
+      listProfileEventPrizeAssignments(testEnv.EVENT_DB, profileId, {
+        startAt: "prize-z",
+      }),
+    ).resolves.toEqual({});
+    for (const limit of [-1, 1.5, Infinity]) {
+      await expect(
+        listProfileEventPrizeAssignments(testEnv.EVENT_DB, profileId, {
+          limit,
+        }),
+      ).rejects.toThrow("invalid-event-integer");
+    }
   });
+
+  it.each(["", "prize-"])(
+    "preserves Unicode prize recovery pagination with prefix %j",
+    async (prefix) => {
+      const emojiId = `${prefix}😀`;
+      const eventIds = [
+        ...Array.from(
+          { length: 21 },
+          (_, index) => `${prefix}\uE000${String(index).padStart(2, "0")}`,
+        ),
+        emojiId,
+      ];
+      const expectedOrder = [...eventIds].sort();
+      await patchEventOwnedPaths(
+        testEnv.EVENT_DB,
+        Object.fromEntries(
+          eventIds.map((id) => [`events/${id}`, eventRecord({ eventId: id })]),
+        ),
+      );
+      await testEnv.EVENT_DB.batch(
+        eventIds.map((id) =>
+          testEnv.EVENT_DB.prepare(
+            `INSERT INTO profile_event_prizes (
+               profile_id, event_id, assignment_json, updated_at_ms
+             ) VALUES (?, ?, ?, ?)`,
+          ).bind(
+            profileId,
+            id,
+            JSON.stringify({ ...assignment(), eventId: id }),
+            2_000,
+          ),
+        ),
+      );
+
+      const copied: string[] = [];
+      let cursor = "";
+      let complete = false;
+      for (let attempt = 0; attempt < 3 && !complete; attempt += 1) {
+        const source = await listProfileEventPrizeAssignments(
+          testEnv.EVENT_DB,
+          profileId,
+          { startAt: cursor, limit: cursor ? 22 : 21 },
+        );
+        const remaining = Object.keys(source)
+          .filter((id) => id > cursor)
+          .sort();
+        const page = remaining.slice(0, 20);
+        copied.push(...page);
+        complete = remaining.length <= page.length;
+        cursor = page.at(-1) || cursor;
+      }
+      expect(complete).toBe(true);
+      expect(copied).toEqual(expectedOrder);
+
+      expect(
+        Object.keys(
+          await listProfileEventPrizeAssignments(testEnv.EVENT_DB, profileId, {
+            startAt: emojiId,
+            limit: 3,
+          }),
+        ),
+      ).toEqual(expectedOrder.slice(0, 3));
+      await testEnv.EVENT_DB.prepare(
+        "DELETE FROM profile_event_prizes WHERE profile_id = ? AND event_id = ?",
+      )
+        .bind(profileId, emojiId)
+        .run();
+      expect(
+        Object.keys(
+          await listProfileEventPrizeAssignments(testEnv.EVENT_DB, profileId, {
+            startAt: emojiId,
+            limit: 3,
+          }),
+        ),
+      ).toEqual(expectedOrder.slice(1, 4));
+    },
+  );
 
   it("keeps typed reads available while writes are frozen without admissions", async () => {
     await patchEventOwnedPaths(testEnv.EVENT_DB, {
