@@ -1,13 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
 import {
-  apiMaintenanceEnabled,
-  apiMaintenanceResponse,
-  assertApiAvailable,
-  assertD1MigrationIdentity,
-  d1MigrationDigest,
-  type D1MigrationBarrierRequest,
-} from "./d1MigrationControl.ts";
-import {
   REACTION_HEARTBEAT_REQUEST,
   REACTION_HEARTBEAT_RESPONSE,
   REACTION_PROTOCOL_VERSION,
@@ -131,7 +123,6 @@ export class InviteReactions
   private inviteAlarmSequence: Promise<void> = Promise.resolve();
   private readonly inviteChannels: InviteChannelsRoom;
   private readonly presentations: MatchPresentationStore;
-  private readonly migrationOperations = new Set<Promise<unknown>>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -180,274 +171,172 @@ export class InviteReactions
     this.socketSessions.nextExpiry();
   }
 
-  private trackMigrationOperation<T>(work: () => T | Promise<T>): Promise<T> {
-    assertApiAvailable(this.env);
-    let pending: Promise<T>;
-    try {
-      pending = Promise.resolve(work());
-    } catch (error) {
-      return Promise.reject(error);
-    }
-    this.migrationOperations.add(pending);
-    void pending
-      .finally(() => this.migrationOperations.delete(pending))
-      .catch(() => undefined);
-    return pending;
-  }
-
-  private async rearmMigrationRecovery(): Promise<void> {
-    await this.scheduleInviteAlarm(Date.now() + 60_000);
-  }
-
-  async maintenanceBarrier(input: D1MigrationBarrierRequest) {
-    const identity = assertD1MigrationIdentity(
-      this.env,
-      input.runId,
-      input.expectedVersionId ?? null,
-    );
-    await Promise.allSettled([...this.migrationOperations]);
-    if (this.migrationOperations.size)
-      throw new Error("d1-migration-object-busy");
-    if (this.matchEffectsPending) await this.matchEffectsPending;
-    await this.inviteAlarmSequence;
-    for (const socket of this.ctx.getWebSockets()) {
-      try {
-        socket.close(1013, "API maintenance");
-      } catch {}
-    }
-    const snapshot = this.ctx.storage.transactionSync(() => {
-      const tables = this.ctx.storage.sql
-        .exec<{ name: string }>(
-          "SELECT name FROM sqlite_master WHERE type = 'table' AND substr(name, 1, 7) != 'sqlite_' AND substr(name, 1, 5) != '__cf_' AND substr(name, 1, 4) != '_cf_' ORDER BY name",
-        )
-        .toArray();
-      const values = tables.map(({ name }) => {
-        const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
-        const columns = this.ctx.storage.sql.exec(
-          `SELECT * FROM ${quote(name)} LIMIT 0`,
-        ).columnNames;
-        const query = columns
-          .map(
-            (column) =>
-              `typeof(${quote(column)}) || ':' || hex(CAST(${quote(column)} AS BLOB))`,
-          )
-          .join(", ");
-        const order = columns.map((_, index) => String(index + 1)).join(", ");
-        return {
-          table: name,
-          columns,
-          rows: Array.from(
-            this.ctx.storage.sql
-              .exec(`SELECT ${query} FROM ${quote(name)} ORDER BY ${order}`)
-              .raw(),
-          ),
-        };
-      });
-      return {
-        source: this.matchState.readSource(),
-        canonical: values.filter(
-          (entry) => entry.table !== "match_state_effects",
-        ),
-        effects: values.filter(
-          (entry) => entry.table === "match_state_effects",
-        ),
-        pendingEffects: this.ctx.storage.sql
-          .exec<{ count: number }>(
-            "SELECT COUNT(*) AS count FROM match_state_effects WHERE completed_at_ms IS NULL",
-          )
-          .one().count,
-        nextEffectAt: this.matchState.nextEffectAt(),
-      };
-    });
-    await this.ctx.storage.sync();
-    const [canonicalDigest, effectDigest] = await Promise.all([
-      d1MigrationDigest(snapshot.canonical),
-      d1MigrationDigest(snapshot.effects),
-    ]);
-    await this.rearmMigrationRecovery();
-    return {
-      ...identity,
-      objectId: this.ctx.id.toString(),
-      source: snapshot.source,
-      canonicalDigest,
-      effectDigest,
-      pendingEffects: snapshot.pendingEffects,
-      nextEffectAt: snapshot.nextEffectAt,
-      alarmAt: await this.ctx.storage.getAlarm(),
-    };
-  }
-
   async fetch(request: Request): Promise<Response> {
-    if (apiMaintenanceEnabled(this.env))
-      return apiMaintenanceResponse(this.env);
-    return this.trackMigrationOperation(async () => {
-      this.socketSessions.nextExpiry();
-      if (
-        request.method !== "GET" ||
-        request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
-      ) {
-        return new Response("WebSocket upgrade required", { status: 426 });
-      }
-      const pathname = new URL(request.url).pathname;
-      if (pathname === "/matches/socket") return this.matchSync.fetch(request);
-      if (pathname === "/metadata/socket")
-        return this.inviteChannels.fetch(request, "metadata");
-      if (pathname === "/wagers/socket")
-        return this.inviteChannels.fetch(request, "wagers");
-      const role = request.headers.get("X-Mons-Reaction-Role") || "spectator";
-      const ip = request.headers.get("X-Mons-Reaction-IP") || "unknown";
-      const protocol = request.headers.get("Sec-WebSocket-Protocol");
-      const version = protocol === REACTION_SOCKET_PROTOCOL_V2 ? 2 : 1;
-      let matchId: string | null = null;
+    this.socketSessions.nextExpiry();
+    if (
+      request.method !== "GET" ||
+      request.headers.get("Upgrade")?.toLowerCase() !== "websocket"
+    ) {
+      return new Response("WebSocket upgrade required", { status: 426 });
+    }
+    const pathname = new URL(request.url).pathname;
+    if (pathname === "/matches/socket") return this.matchSync.fetch(request);
+    if (pathname === "/metadata/socket")
+      return this.inviteChannels.fetch(request, "metadata");
+    if (pathname === "/wagers/socket")
+      return this.inviteChannels.fetch(request, "wagers");
+    const role = request.headers.get("X-Mons-Reaction-Role") || "spectator";
+    const ip = request.headers.get("X-Mons-Reaction-IP") || "unknown";
+    const protocol = request.headers.get("Sec-WebSocket-Protocol");
+    const version = protocol === REACTION_SOCKET_PROTOCOL_V2 ? 2 : 1;
+    let matchId: string | null = null;
+    try {
+      const encodedMatchId = request.headers.get("X-Mons-Presentation-Match");
+      if (encodedMatchId !== null) matchId = decodeURIComponent(encodedMatchId);
+    } catch {
+      return new Response("Invalid presentation match", { status: 400 });
+    }
+    if (
+      version === 2 &&
+      (!matchId || matchId !== matchId.trim() || !isSafeRecordKey(matchId))
+    ) {
+      return new Response("Invalid presentation match", { status: 400 });
+    }
+    let canonicalActors: string[] | null = null;
+    if (request.headers.get("X-Mons-Presentation-Canonical") === "1") {
       try {
-        const encodedMatchId = request.headers.get("X-Mons-Presentation-Match");
-        if (encodedMatchId !== null)
-          matchId = decodeURIComponent(encodedMatchId);
-      } catch {
-        return new Response("Invalid presentation match", { status: 400 });
-      }
-      if (
-        version === 2 &&
-        (!matchId || matchId !== matchId.trim() || !isSafeRecordKey(matchId))
-      ) {
-        return new Response("Invalid presentation match", { status: 400 });
-      }
-      let canonicalActors: string[] | null = null;
-      if (request.headers.get("X-Mons-Presentation-Canonical") === "1") {
-        try {
-          const value: unknown = JSON.parse(
-            decodeURIComponent(
-              request.headers.get("X-Mons-Presentation-Actors") || "",
-            ),
-          );
-          if (
-            version !== 2 ||
-            !Array.isArray(value) ||
-            !value.length ||
-            value.length > 2 ||
-            value.some((uid) => !isCanonicalLoginUid(uid))
-          ) {
-            return new Response("Invalid presentation actors", { status: 400 });
-          }
-          canonicalActors = value;
-        } catch {
+        const value: unknown = JSON.parse(
+          decodeURIComponent(
+            request.headers.get("X-Mons-Presentation-Actors") || "",
+          ),
+        );
+        if (
+          version !== 2 ||
+          !Array.isArray(value) ||
+          !value.length ||
+          value.length > 2 ||
+          value.some((uid) => !isCanonicalLoginUid(uid))
+        ) {
           return new Response("Invalid presentation actors", { status: 400 });
         }
+        canonicalActors = value;
+      } catch {
+        return new Response("Invalid presentation actors", { status: 400 });
       }
-      if (!["host", "guest", "spectator"].includes(role) || ip.length > 64) {
-        return new Response("Invalid reaction admission", { status: 400 });
-      }
-      const session = readSocketSession(request, role !== "spectator");
-      if (!session) return new Response("Session expired", { status: 401 });
-      if (session.authenticated)
-        await this.scheduleInviteAlarm(session.authExpiresAtMs);
-      let canonicalRegistrations: MatchPresentationRegistration[] | null = null;
-      if (canonicalActors) {
-        const inviteId = this.inviteChannels.pinnedInviteId();
-        const actors = canonicalActors;
-        const before = this.presentations.readPresentations(matchId!).players;
-        const read = async () =>
-          (
-            await listMatchPresentationRegistrations(
-              this.env.PROFILE_GAMES_DB,
-              inviteId,
-              matchId!,
-            )
-          ).filter((row) => actors.includes(row.actorUid));
+    }
+    if (!["host", "guest", "spectator"].includes(role) || ip.length > 64) {
+      return new Response("Invalid reaction admission", { status: 400 });
+    }
+    const session = readSocketSession(request, role !== "spectator");
+    if (!session) return new Response("Session expired", { status: 401 });
+    if (session.authenticated)
+      await this.scheduleInviteAlarm(session.authExpiresAtMs);
+    let canonicalRegistrations: MatchPresentationRegistration[] | null = null;
+    if (canonicalActors) {
+      const inviteId = this.inviteChannels.pinnedInviteId();
+      const actors = canonicalActors;
+      const before = this.presentations.readPresentations(matchId!).players;
+      const read = async () =>
+        (
+          await listMatchPresentationRegistrations(
+            this.env.PROFILE_GAMES_DB,
+            inviteId,
+            matchId!,
+          )
+        ).filter((row) => actors.includes(row.actorUid));
+      canonicalRegistrations = await read();
+      if (!canonicalRegistrations.length)
+        throw new Error("match-presentation-unavailable");
+      const registeredActors = new Set(
+        canonicalRegistrations.map((row) => row.actorUid),
+      );
+      const missedUpdates = Object.values(
+        this.presentations.readPresentations(matchId!).players,
+      )
+        .filter(
+          (value) =>
+            actors.includes(value.actorUid) &&
+            !registeredActors.has(value.actorUid) &&
+            value.revision > (before[value.actorUid]?.revision ?? 0),
+        )
+        .map((value) => value.actorUid);
+      if (missedUpdates.length) {
         canonicalRegistrations = await read();
-        if (!canonicalRegistrations.length)
-          throw new Error("match-presentation-unavailable");
-        const registeredActors = new Set(
+        const refreshedActors = new Set(
           canonicalRegistrations.map((row) => row.actorUid),
         );
-        const missedUpdates = Object.values(
-          this.presentations.readPresentations(matchId!).players,
+        if (missedUpdates.some((actorUid) => !refreshedActors.has(actorUid)))
+          throw new Error("match-presentation-unavailable");
+      }
+    }
+    if (!socketSessionCurrent(session))
+      return new Response("Session expired", { status: 401 });
+    const allSockets = this.ctx.getWebSockets();
+    const reactionSockets = allSockets.filter(isReactionSocket);
+    const roleCount = (value: string) =>
+      this.ctx.getWebSockets(`role:${value}`).length;
+    const spectatorCount =
+      reactionSockets.length - roleCount("host") - roleCount("guest");
+    const ipCount = this.ctx.getWebSockets(`spectator-ip:${ip}`).length;
+    if (
+      this.roomCapacityFull(role) ||
+      reactionSockets.length >= MAX_INVITE_REACTION_SOCKETS ||
+      (role === "spectator"
+        ? spectatorCount >= MAX_INVITE_REACTION_SPECTATORS ||
+          ipCount >= MAX_INVITE_REACTION_SPECTATORS_PER_IP
+        : roleCount(role) >= MAX_INVITE_REACTION_SOCKETS_PER_PARTICIPANT)
+    ) {
+      return new Response("Reaction room is full", {
+        status: 429,
+        headers: { "Retry-After": "60" },
+      });
+    }
+    const reactions = Object.fromEntries(
+      this.ctx.storage.sql
+        .exec<StoredReaction>(
+          "SELECT sender_uid, reaction_json FROM latest_reactions ORDER BY sender_uid",
         )
-          .filter(
-            (value) =>
-              actors.includes(value.actorUid) &&
-              !registeredActors.has(value.actorUid) &&
-              value.revision > (before[value.actorUid]?.revision ?? 0),
-          )
-          .map((value) => value.actorUid);
-        if (missedUpdates.length) {
-          canonicalRegistrations = await read();
-          const refreshedActors = new Set(
-            canonicalRegistrations.map((row) => row.actorUid),
-          );
-          if (missedUpdates.some((actorUid) => !refreshedActors.has(actorUid)))
-            throw new Error("match-presentation-unavailable");
-        }
-      }
-      if (!socketSessionCurrent(session))
-        return new Response("Session expired", { status: 401 });
-      const allSockets = this.ctx.getWebSockets();
-      const reactionSockets = allSockets.filter(isReactionSocket);
-      const roleCount = (value: string) =>
-        this.ctx.getWebSockets(`role:${value}`).length;
-      const spectatorCount =
-        reactionSockets.length - roleCount("host") - roleCount("guest");
-      const ipCount = this.ctx.getWebSockets(`spectator-ip:${ip}`).length;
-      if (
-        this.roomCapacityFull(role) ||
-        reactionSockets.length >= MAX_INVITE_REACTION_SOCKETS ||
-        (role === "spectator"
-          ? spectatorCount >= MAX_INVITE_REACTION_SPECTATORS ||
-            ipCount >= MAX_INVITE_REACTION_SPECTATORS_PER_IP
-          : roleCount(role) >= MAX_INVITE_REACTION_SOCKETS_PER_PARTICIPANT)
-      ) {
-        return new Response("Reaction room is full", {
-          status: 429,
-          headers: { "Retry-After": "60" },
-        });
-      }
-      const reactions = Object.fromEntries(
-        this.ctx.storage.sql
-          .exec<StoredReaction>(
-            "SELECT sender_uid, reaction_json FROM latest_reactions ORDER BY sender_uid",
-          )
-          .toArray()
-          .map((row) => [row.sender_uid, JSON.parse(row.reaction_json)]),
-      );
-      const snapshot: InviteReactionSnapshot | InviteRoomSnapshot =
-        version === 2
-          ? {
-              schemaVersion: 2,
-              type: "snapshot",
-              reactions,
-              presentation: canonicalRegistrations
-                ? selectRegisteredPresentations(
-                    matchId!,
-                    canonicalRegistrations,
-                    this.presentations.registeredPresentationSnapshot(matchId!),
-                  )
-                : this.presentations.readPresentations(matchId!),
-            }
-          : {
-              schemaVersion: REACTION_PROTOCOL_VERSION,
-              type: "snapshot",
-              reactions,
-            };
-      const pair = new WebSocketPair();
-      pair[1].serializeAttachment({
-        schemaVersion: version,
-        matchId: version === 2 ? matchId : null,
-        ...session,
-      });
-      this.ctx.acceptWebSocket(pair[1], [
-        `role:${role}`,
-        ...(role === "spectator" ? [`spectator-ip:${ip}`] : []),
-      ]);
-      this.socketSessions.send(pair[1], JSON.stringify(snapshot));
-      return new Response(null, {
-        status: 101,
-        webSocket: pair[0],
-        headers:
-          protocol === REACTION_SOCKET_PROTOCOL ||
-          protocol === REACTION_SOCKET_PROTOCOL_V2
-            ? { "Sec-WebSocket-Protocol": protocol }
-            : {},
-      });
+        .toArray()
+        .map((row) => [row.sender_uid, JSON.parse(row.reaction_json)]),
+    );
+    const snapshot: InviteReactionSnapshot | InviteRoomSnapshot =
+      version === 2
+        ? {
+            schemaVersion: 2,
+            type: "snapshot",
+            reactions,
+            presentation: canonicalRegistrations
+              ? selectRegisteredPresentations(
+                  matchId!,
+                  canonicalRegistrations,
+                  this.presentations.registeredPresentationSnapshot(matchId!),
+                )
+              : this.presentations.readPresentations(matchId!),
+          }
+        : {
+            schemaVersion: REACTION_PROTOCOL_VERSION,
+            type: "snapshot",
+            reactions,
+          };
+    const pair = new WebSocketPair();
+    pair[1].serializeAttachment({
+      schemaVersion: version,
+      matchId: version === 2 ? matchId : null,
+      ...session,
+    });
+    this.ctx.acceptWebSocket(pair[1], [
+      `role:${role}`,
+      ...(role === "spectator" ? [`spectator-ip:${ip}`] : []),
+    ]);
+    this.socketSessions.send(pair[1], JSON.stringify(snapshot));
+    return new Response(null, {
+      status: 101,
+      webSocket: pair[0],
+      headers:
+        protocol === REACTION_SOCKET_PROTOCOL ||
+        protocol === REACTION_SOCKET_PROTOCOL_V2
+          ? { "Sec-WebSocket-Protocol": protocol }
+          : {},
     });
   }
 
@@ -472,24 +361,18 @@ export class InviteReactions
   }
 
   async readMetadata(inviteId: string): Promise<InviteMetadataReadResult> {
-    return this.trackMigrationOperation(async () => {
-      return this.inviteChannels.readMetadata(inviteId);
-    });
+    return this.inviteChannels.readMetadata(inviteId);
   }
 
   async readWagers(inviteId: string): Promise<InviteWagersReadResult> {
-    return this.trackMigrationOperation(async () => {
-      return this.inviteChannels.readWagers(inviteId);
-    });
+    return this.inviteChannels.readWagers(inviteId);
   }
 
   async readMatches(
     inviteId: string,
     matchId: string,
   ): Promise<MatchSyncReadResult> {
-    return this.trackMigrationOperation(async () => {
-      return this.matchSync.read(inviteId, matchId);
-    });
+    return this.matchSync.read(inviteId, matchId);
   }
 
   private async readMatchPair(
@@ -512,92 +395,70 @@ export class InviteReactions
 
   async readCanonicalMatchRecord(input: MatchStateRecordRequest) {
     return captureMatchStateRpc(() => {
-      return this.trackMigrationOperation(async () => {
-        this.inviteChannels.pinInvite(input.inviteId);
-        return this.matchState.readRecord(input);
-      });
+      this.inviteChannels.pinInvite(input.inviteId);
+      return this.matchState.readRecord(input);
     });
   }
 
   async readCanonicalMatchPair(input: MatchStatePairRequest) {
     return captureMatchStateRpc(() => {
-      return this.trackMigrationOperation(async () => {
-        this.inviteChannels.pinInvite(input.inviteId);
-        return this.matchState.readPair(input);
-      });
+      this.inviteChannels.pinInvite(input.inviteId);
+      return this.matchState.readPair(input);
     });
   }
 
   async createCanonicalMatch(input: MatchStateCreateRequest) {
     return captureMatchStateRpc(async () => {
-      return this.trackMigrationOperation(async () => {
-        this.inviteChannels.pinInvite(input.inviteId);
-        const result = this.matchState.createRecords(input);
-        await this.notifyCanonicalMatches(
-          input.inviteId,
-          result.changedMatchIds,
-        );
-        return result;
-      });
+      this.inviteChannels.pinInvite(input.inviteId);
+      const result = this.matchState.createRecords(input);
+      await this.notifyCanonicalMatches(input.inviteId, result.changedMatchIds);
+      return result;
     });
   }
 
   async submitCanonicalMove(input: MatchStateMoveRequest) {
     return captureMatchStateRpc(async () => {
-      return this.trackMigrationOperation(async () => {
-        this.inviteChannels.pinInvite(input.inviteId);
-        const result = this.matchState.move(input);
-        await this.notifyCanonicalMatches(input.inviteId, [input.matchId]);
-        return result;
-      });
+      this.inviteChannels.pinInvite(input.inviteId);
+      const result = this.matchState.move(input);
+      await this.notifyCanonicalMatches(input.inviteId, [input.matchId]);
+      return result;
     });
   }
 
   async surrenderCanonicalMatch(input: MatchStateSurrenderRequest) {
     return captureMatchStateRpc(async () => {
-      return this.trackMigrationOperation(async () => {
-        this.inviteChannels.pinInvite(input.inviteId);
-        const result = this.matchState.surrender(input);
-        await this.notifyCanonicalMatches(input.inviteId, [input.matchId]);
-        return result;
-      });
+      this.inviteChannels.pinInvite(input.inviteId);
+      const result = this.matchState.surrender(input);
+      await this.notifyCanonicalMatches(input.inviteId, [input.matchId]);
+      return result;
     });
   }
 
   async startCanonicalMatchTimer(input: MatchStateStartTimerRequest) {
     return captureMatchStateRpc(async () => {
-      return this.trackMigrationOperation(async () => {
-        this.inviteChannels.pinInvite(input.inviteId);
-        const result = await this.matchState.startTimer(input);
-        await this.notifyCanonicalMatches(input.inviteId, [input.matchId]);
-        return result;
-      });
+      this.inviteChannels.pinInvite(input.inviteId);
+      const result = await this.matchState.startTimer(input);
+      await this.notifyCanonicalMatches(input.inviteId, [input.matchId]);
+      return result;
     });
   }
 
   async claimCanonicalMatchTimer(input: MatchStateClaimTimerRequest) {
     return captureMatchStateRpc(async () => {
-      return this.trackMigrationOperation(async () => {
-        this.inviteChannels.pinInvite(input.inviteId);
-        const result = await this.matchState.claimTimer(input);
-        await this.notifyCanonicalMatches(input.inviteId, [input.matchId]);
-        await this.dispatchMatchEffects();
-        return result;
-      });
+      this.inviteChannels.pinInvite(input.inviteId);
+      const result = await this.matchState.claimTimer(input);
+      await this.notifyCanonicalMatches(input.inviteId, [input.matchId]);
+      await this.dispatchMatchEffects();
+      return result;
     });
   }
 
   async applyCanonicalMatchEventEffects(input: MatchStateEventEffectsRequest) {
     return captureMatchStateRpc(async () => {
-      return this.trackMigrationOperation(async () => {
-        this.inviteChannels.pinInvite(input.inviteId);
-        const result = await this.matchState.applyEventEffects(input);
-        await this.notifyCanonicalMatches(
-          input.inviteId,
-          result.changedMatchIds,
-        );
-        return result;
-      });
+      this.inviteChannels.pinInvite(input.inviteId);
+      const result = await this.matchState.applyEventEffects(input);
+      await this.notifyCanonicalMatches(input.inviteId, result.changedMatchIds);
+      return result;
     });
   }
 
@@ -683,44 +544,32 @@ export class InviteReactions
     inviteId: string,
     matchIds?: string[],
   ): Promise<void> {
-    return this.trackMigrationOperation(async () => {
-      await this.matchSync.notify(inviteId, matchIds);
-    });
+    await this.matchSync.notify(inviteId, matchIds);
   }
 
   async notifyMetadataChanged(inviteId: string): Promise<void> {
-    return this.trackMigrationOperation(async () => {
-      this.inviteChannels.invalidate();
-      await this.matchSync.notify(inviteId);
-      await this.inviteChannels.refreshIfSubscribed(inviteId);
-    });
+    this.inviteChannels.invalidate();
+    await this.matchSync.notify(inviteId);
+    await this.inviteChannels.refreshIfSubscribed(inviteId);
   }
 
   async notifyWagersChanged(inviteId: string): Promise<void> {
-    return this.trackMigrationOperation(async () => {
-      this.inviteChannels.invalidate();
-      await this.inviteChannels.refreshIfSubscribed(inviteId, "wagers");
-    });
+    this.inviteChannels.invalidate();
+    await this.inviteChannels.refreshIfSubscribed(inviteId, "wagers");
   }
 
   async alarm(): Promise<void> {
-    if (apiMaintenanceEnabled(this.env)) {
-      await this.rearmMigrationRecovery();
-      return;
-    }
-    return this.trackMigrationOperation(async () => {
-      this.socketSessions.nextExpiry();
-      await this.dispatchMatchEffects();
-      await this.inviteChannels.alarm();
-      await this.matchSync.alarm();
-      const due = [
-        this.inviteChannels.nextAlarm(),
-        this.matchSync.nextAlarm(),
-        this.matchState.nextEffectAt(),
-        this.socketSessions.nextExpiry(),
-      ].filter((value): value is number => typeof value === "number");
-      if (due.length) await this.scheduleInviteAlarm(Math.min(...due));
-    });
+    this.socketSessions.nextExpiry();
+    await this.dispatchMatchEffects();
+    await this.inviteChannels.alarm();
+    await this.matchSync.alarm();
+    const due = [
+      this.inviteChannels.nextAlarm(),
+      this.matchSync.nextAlarm(),
+      this.matchState.nextEffectAt(),
+      this.socketSessions.nextExpiry(),
+    ].filter((value): value is number => typeof value === "number");
+    if (due.length) await this.scheduleInviteAlarm(Math.min(...due));
   }
 
   private matchRoomFull(role: string, ip: string): boolean {
@@ -753,123 +602,104 @@ export class InviteReactions
     senderUid: string,
     reaction: InviteReaction,
   ): Promise<InviteReactionPublishResult> {
-    return this.trackMigrationOperation(async () => {
-      if (!isCanonicalLoginUid(senderUid) || !isInviteReaction(reaction)) {
-        throw new TypeError("invalid-reaction");
+    if (!isCanonicalLoginUid(senderUid) || !isInviteReaction(reaction)) {
+      throw new TypeError("invalid-reaction");
+    }
+    const normalized: InviteReaction = {
+      uuid: reaction.uuid,
+      kind: reaction.kind,
+      variation: reaction.variation,
+      matchId: reaction.matchId,
+    };
+    const serialized = JSON.stringify(normalized);
+    const [stored] = this.ctx.storage.sql
+      .exec<StoredReaction>(
+        "SELECT sender_uid, reaction_json FROM latest_reactions WHERE sender_uid = ?",
+        senderUid,
+      )
+      .toArray();
+    if (stored) {
+      const previous: InviteReaction = JSON.parse(stored.reaction_json);
+      if (previous.uuid === normalized.uuid) {
+        return stored.reaction_json === serialized ? "duplicate" : "conflict";
       }
-      const normalized: InviteReaction = {
-        uuid: reaction.uuid,
-        kind: reaction.kind,
-        variation: reaction.variation,
-        matchId: reaction.matchId,
-      };
-      const serialized = JSON.stringify(normalized);
-      const [stored] = this.ctx.storage.sql
-        .exec<StoredReaction>(
-          "SELECT sender_uid, reaction_json FROM latest_reactions WHERE sender_uid = ?",
-          senderUid,
+    } else if (
+      this.ctx.storage.sql
+        .exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM latest_reactions",
         )
-        .toArray();
-      if (stored) {
-        const previous: InviteReaction = JSON.parse(stored.reaction_json);
-        if (previous.uuid === normalized.uuid) {
-          return stored.reaction_json === serialized ? "duplicate" : "conflict";
-        }
-      } else if (
-        this.ctx.storage.sql
-          .exec<{ count: number }>(
-            "SELECT COUNT(*) AS count FROM latest_reactions",
-          )
-          .one().count >= 2
-      ) {
-        return "participant-limit";
+        .one().count >= 2
+    ) {
+      return "participant-limit";
+    }
+    this.ctx.storage.sql.exec(
+      "INSERT INTO latest_reactions (sender_uid, reaction_json) VALUES (?, ?) ON CONFLICT(sender_uid) DO UPDATE SET reaction_json = excluded.reaction_json",
+      senderUid,
+      serialized,
+    );
+    const event: InviteReactionEvent = {
+      schemaVersion: REACTION_PROTOCOL_VERSION,
+      type: "reaction",
+      senderUid,
+      reaction: normalized,
+    };
+    const message = JSON.stringify(event);
+    const v2Message = JSON.stringify({ ...event, schemaVersion: 2 });
+    for (const socket of this.ctx.getWebSockets()) {
+      if (isReactionSocket(socket)) {
+        this.socketSessions.send(
+          socket,
+          socketVersion(socket) === 2 ? v2Message : message,
+        );
       }
-      this.ctx.storage.sql.exec(
-        "INSERT INTO latest_reactions (sender_uid, reaction_json) VALUES (?, ?) ON CONFLICT(sender_uid) DO UPDATE SET reaction_json = excluded.reaction_json",
-        senderUid,
-        serialized,
-      );
-      const event: InviteReactionEvent = {
-        schemaVersion: REACTION_PROTOCOL_VERSION,
-        type: "reaction",
-        senderUid,
-        reaction: normalized,
-      };
-      const message = JSON.stringify(event);
-      const v2Message = JSON.stringify({ ...event, schemaVersion: 2 });
-      for (const socket of this.ctx.getWebSockets()) {
-        if (isReactionSocket(socket)) {
-          this.socketSessions.send(
-            socket,
-            socketVersion(socket) === 2 ? v2Message : message,
-          );
-        }
-      }
-      return "published";
-    });
+    }
+    return "published";
   }
 
   async ensurePresentations(
     matchId: string,
     seeds: MatchPresentationSeeds,
   ): Promise<MatchPresentationSnapshot> {
-    return this.trackMigrationOperation(async () => {
-      return this.presentations.ensurePresentations(matchId, seeds);
-    });
+    return this.presentations.ensurePresentations(matchId, seeds);
   }
 
   async getPresentationSnapshot(
     matchId: string,
   ): Promise<MatchPresentationSnapshot> {
-    return this.trackMigrationOperation(async () => {
-      return this.presentations.getPresentationSnapshot(matchId);
-    });
+    return this.presentations.getPresentationSnapshot(matchId);
   }
 
   async registerPresentationSeeds(
     inviteId: string,
     seeds: MatchPresentationSeedRegistration[],
   ): Promise<MatchPresentationRegistration[]> {
-    return this.trackMigrationOperation(async () => {
-      return this.presentations.registerPresentationSeeds(inviteId, seeds);
-    });
+    return this.presentations.registerPresentationSeeds(inviteId, seeds);
   }
 
   async getRegisteredPresentationSnapshot(
     matchId: string,
   ): Promise<RegisteredMatchPresentationSnapshot> {
-    return this.trackMigrationOperation(async () => {
-      return this.presentations.getRegisteredPresentationSnapshot(matchId);
-    });
+    return this.presentations.getRegisteredPresentationSnapshot(matchId);
   }
 
   async getFrozenPresentationSnapshot(
     matchId: string,
   ): Promise<MatchPresentationSnapshot> {
-    return this.trackMigrationOperation(async () => {
-      return this.presentations.getFrozenPresentationSnapshot(matchId);
-    });
+    return this.presentations.getFrozenPresentationSnapshot(matchId);
   }
 
   async freezeRegisteredPresentations(
     matchId: string,
     actorUids: string[],
   ): Promise<MatchPresentationSnapshot> {
-    return this.trackMigrationOperation(async () => {
-      return this.presentations.freezeRegisteredPresentations(
-        matchId,
-        actorUids,
-      );
-    });
+    return this.presentations.freezeRegisteredPresentations(matchId, actorUids);
   }
 
   async freezePresentations(
     matchId: string,
     seeds: MatchPresentationSeeds,
   ): Promise<MatchPresentationSnapshot> {
-    return this.trackMigrationOperation(async () => {
-      return this.presentations.freezePresentations(matchId, seeds);
-    });
+    return this.presentations.freezePresentations(matchId, seeds);
   }
 
   async updatePresentation(
@@ -877,37 +707,31 @@ export class InviteReactions
     matchId: string,
     request: UpdateMatchPresentationRequest,
   ): Promise<MatchPresentationUpdateResult> {
-    return this.trackMigrationOperation(async () => {
-      const result = this.presentations.updatePresentation(
-        actorUid,
-        matchId,
-        request,
-      );
-      if (result.status === "updated") {
-        const message = JSON.stringify({
-          schemaVersion: 2,
-          type: "presentation",
-          presentation: result.presentation,
-        });
-        for (const socket of this.ctx.getWebSockets()) {
-          const attachment = socket.deserializeAttachment();
-          if (
-            isReactionSocket(socket) &&
-            attachment?.schemaVersion === 2 &&
-            attachment.matchId === matchId
-          )
-            this.socketSessions.send(socket, message);
-        }
+    const result = this.presentations.updatePresentation(
+      actorUid,
+      matchId,
+      request,
+    );
+    if (result.status === "updated") {
+      const message = JSON.stringify({
+        schemaVersion: 2,
+        type: "presentation",
+        presentation: result.presentation,
+      });
+      for (const socket of this.ctx.getWebSockets()) {
+        const attachment = socket.deserializeAttachment();
+        if (
+          isReactionSocket(socket) &&
+          attachment?.schemaVersion === 2 &&
+          attachment.matchId === matchId
+        )
+          this.socketSessions.send(socket, message);
       }
-      return result;
-    });
+    }
+    return result;
   }
 
   webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
-    if (apiMaintenanceEnabled(this.env)) {
-      socket.close(1013, "API maintenance");
-      return;
-    }
     if (!this.socketSessions.active(socket)) {
       this.matchSync.closed(socket);
       return;
@@ -921,16 +745,11 @@ export class InviteReactions
   }
 
   webSocketClose(socket: WebSocket): void {
-    if (apiMaintenanceEnabled(this.env)) return;
     socket.close();
     this.matchSync.closed(socket);
   }
 
   webSocketError(socket: WebSocket): void {
-    if (apiMaintenanceEnabled(this.env)) {
-      socket.close(1013, "API maintenance");
-      return;
-    }
     socket.close(1011, "Reaction connection failed");
     this.matchSync.closed(socket);
   }

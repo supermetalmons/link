@@ -54,6 +54,36 @@ describe("Worker entrypoint", () => {
     expect(typeof entrypoint.default.scheduled).toBe("function");
   });
 
+  it("returns the normal 404 for retired migration commands without accessing bindings", async () => {
+    const bindingsRead: PropertyKey[] = [];
+    const environment = new Proxy({} as Env, {
+      get(_target, property) {
+        bindingsRead.push(property);
+        throw new Error(`unexpected-binding-access:${String(property)}`);
+      },
+    });
+    const response = await worker.fetch(
+      new Request("https://api.mons.link/internal/d1-migration", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          schemaVersion: 1,
+          kind: "d1-migration",
+          runId: "retired-migration",
+          operation: "fence",
+          expectedVersionId: "11111111-1111-4111-8111-111111111111",
+          binding: "PROFILE_DB",
+          schemaDigest: "a".repeat(64),
+        }),
+      }),
+      environment,
+      {} as ExecutionContext,
+    );
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ ok: false, error: "not-found" });
+    expect(bindingsRead).toEqual([]);
+  });
+
   it("rechecks active control inside mutating Workflow work", async () => {
     const frozen = withProfileControl(
       TELEGRAM_TEST_ENV as unknown as Env,

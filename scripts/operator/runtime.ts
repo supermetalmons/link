@@ -19,7 +19,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { operatorConfigPath, resolveD1Coordinates } from "./configuration.ts";
+import { DEFAULT_API_CONFIG, resolveD1Coordinates } from "./configuration.ts";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -211,7 +211,7 @@ function parseD1Results(response: unknown): JsonRecord[] {
 function createWranglerRunner({
   apiToken = process.env.CLOUDFLARE_API_TOKEN,
   fetcher = fetch,
-  configPath = operatorConfigPath(),
+  configPath = DEFAULT_API_CONFIG,
 }: {
   apiToken?: string;
   fetcher?: typeof fetch;

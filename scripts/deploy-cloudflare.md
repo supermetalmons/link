@@ -17,6 +17,7 @@ Deploy only affected Workers. Shared prize-catalog changes need both the API and
 ## Source of truth
 
 - `wrangler.jsonc` owns the frontend Worker configuration; `cloud/workers/api/wrangler.jsonc` owns API routes, bindings, variables, Queues, Workflows, consumers, and the Cron schedule.
+- The six canonical D1 databases run in ENAM. Operators resolve stable bindings from the API configuration; direct Wrangler commands use bindings such as `PROFILE_DB` and `EVENT_DB`.
 - The six migration directories under `cloud/workers/api/` retain the applied D1 schema history. Never rename or rewrite an applied migration.
 - `PROFILE_DB.profile_login_owners` owns login-to-profile identity. Profiles, authentication state, events, wagers, reservations, projections, withdrawals, and Telegram delivery use their configured D1 databases.
 - `PROFILE_GAMES_DB.invite_sources` owns invite metadata. Active match records and timer claims live in the existing SQLite `InviteReactions` Durable Object; D1 retains routes and immutable legacy match records.
@@ -71,6 +72,8 @@ Keep existing request, connection, and smoke-command timeouts that detect stalle
 
 `upload:api` sends no production traffic. `promote:api` requires an explicit Version ID and routes 100% of traffic to it. Trigger application is a separate operation for reviewed configuration changes.
 
+Event read bookmarks are scoped by `EVENT_DB_BOOKMARK_EPOCH`, which must equal the configured `EVENT_DB` UUID. Legacy or foreign bookmarks restart from the primary and receive a current scoped bookmark, including on `304` responses. Rollback candidates must retain the current ENAM bindings and scoped bookmark support.
+
 When Workflow code or its dependencies change, publish the affected owned definitions after promoting the exact Worker version and before uploading another candidate. The helper preserves current Workflow settings and schedules, checks that the selected Worker is both the latest upload and the version serving 100% of traffic, and records the resulting distinct Workflow version IDs. Cloudflare's Workflow publication API has no atomic Worker-version pin, so do not run concurrent Worker uploads or promotions during this command. The helper rechecks both conditions around publication and fails closed on a mismatch. Its dry-run makes read-only provider requests. Omit `--workflow` to select both configured definitions when their shared dependencies change:
 
 ```sh
@@ -109,33 +112,6 @@ Use maintenance only for a concrete schema, state-compatibility, resource-lifecy
 Freeze only the affected canonical writers and pause only the consumers that could violate the maintenance invariant. Confirm relevant admissions and leases have drained from their actual state. Apply the reviewed schema or lifecycle change, validate the schema and `PRAGMA foreign_key_check`, then promote the exact compatible candidate and verify its reads before resuming affected writers. Never reset authority, bulk-delete evidence, or restore one coordinated database independently.
 
 Keep API `workers_dev` and `preview_urls` disabled. Use the custom domain for verification. On failure, retain the required maintenance controls and repair forward. Resume only controls changed for this operation. Routine compatible releases use the API and frontend release sections without freezes, Queue pauses, fixed drain waits, or observation windows.
-
-## D1 region relocation
-
-`migrate:d1-region` moves all six canonical databases together to replacements with the `-enam` suffix. It preserves stable binding names, the existing Durable Object namespace, stored deadlines, migration history, and encrypted secrets. This is coordinated maintenance because changing database identities requires one consistent copy across API requests, Durable Objects, Queues, and versioned Workflows.
-
-Use a new protected directory outside the repository. The operator stores an immutable manifest chain, exact resource IDs, control transitions, typed table digests, Workflow histories, and verification reports there. Keep this directory and the fenced source databases until separately reviewed cleanup. `status` shows recorded progress; it does not resume work.
-
-```sh
-npm run migrate:d1-region -- preflight --directory /secure/d1-enam
-npm run migrate:d1-region -- prepare --directory /secure/d1-enam
-npm run migrate:d1-region -- quiesce --directory /secure/d1-enam --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
-npm run migrate:d1-region -- copy --directory /secure/d1-enam
-npm run migrate:d1-region -- verify --directory /secure/d1-enam --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
-npm run migrate:d1-region -- cutover --directory /secure/d1-enam --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
-npm run migrate:d1-region -- resume --directory /secure/d1-enam --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
-npm run migrate:d1-region -- status --directory /secure/d1-enam
-```
-
-Preparation proves ENAM placement, rehearses exact copies and native Workflow handoff on isolated resources, runs the complete repository gate, prepares fixture-owned wagering checks, and uploads the maintenance candidate. `API_MAINTENANCE` rejects application HTTP traffic, suppresses cron and Queue work, and gates every Durable Object entrypoint. Only signed, typed migration inspection and barrier commands remain available. Workflow execution continues to use database controls rather than the versioned API flag.
-
-Quiescence preserves existing pause/freeze states, reconciles only evidenced expired admissions, installs source-only rejection triggers atomically with drain assertions, and requires barriers from the existing object inventory. Copies preserve SQLite storage types and bytes, restore application triggers after data, and compare every table and schema object. Live integrity verification uses supported `PRAGMA quick_check`, foreign-key checks, and domain topology audits.
-
-After cutover begins, earlier source phases are rejected. Waiting Workflows are individually handed off with the same IDs, payloads, retention, and deadlines; completed histories are left untouched. Resume restores only destination controls changed by this operation, verifies the real API and isolated gameplay behavior, and keeps all source fences in place. Never reopen a stale source after destination writes begin.
-
-Event read bookmarks include `EVENT_DB_BOOKMARK_EPOCH`, which must equal the current event database UUID. Legacy or foreign-database bookmarks restart from the primary and receive a current scoped bookmark, including on `304` responses. After cutover, rollback candidates must retain the replacement database bindings and scoped bookmark support.
-
-Existing operator commands resolve their logical database names through stable bindings. To inspect a saved source configuration explicitly, set `MONS_D1_CONFIG` to its protected candidate configuration path; direct Wrangler D1 commands should use bindings such as `PROFILE_DB` and `EVENT_DB` rather than retired physical names. Admission recovery supports `--evidence /secure/proof.json` to bind the request-finished and source-reconciled proof to the exact retained row.
 
 ## Gameplay and delivery verification
 
@@ -227,7 +203,7 @@ npx wrangler d1 migrations apply EVENT_DB --remote --config cloud/workers/api/wr
 npm run manage:events -- --recover-stale-admission <admission-id>
 ```
 
-Recover only a named expired admission after confirming its request finished. Never bulk-delete admissions. Pending transitions retry while preserving their fences; fix the implementation or unavailable dependency forward, and do not detach, delete, or dead-letter the intent. Successful transition receipts are immutable coordination evidence in `PROFILE_GAMES_DB.event_transition_receipts`; there is no scheduled receipt deletion. Do not restore `EVENT_DB` alone because event state, gameplay D1 receipts, and Durable Object match effects must remain consistent.
+Recover only a named expired admission after confirming its request finished. Add `--evidence /secure/proof.json` to bind the request-finished and source-reconciled proof to the exact retained admission row; the file must be private and use an absolute path. Never bulk-delete admissions. Pending transitions retry while preserving their fences; fix the implementation or unavailable dependency forward, and do not detach, delete, or dead-letter the intent. Successful transition receipts are immutable coordination evidence in `PROFILE_GAMES_DB.event_transition_receipts`; there is no scheduled receipt deletion. Do not restore `EVENT_DB` alone because event state, gameplay D1 receipts, and Durable Object match effects must remain consistent.
 
 Validate current and ended events through the authenticated `--require-events` smoke. Its profile fixture includes `"events":{"currentId":"<scheduled-or-active-event-id>","endedId":"<ended-prize-event-id>","selectionPrizeId":"<selected-prize-id>","assignedPrizeId":"<assigned-prize-id>"}`. Use a visible, unwithdrawn assignment owned by that profile; add `selectionEventId` if the selection belongs to a different event. After verification, resume events and dependent stores, resume only Queues paused for maintenance, and repeat production smokes:
 

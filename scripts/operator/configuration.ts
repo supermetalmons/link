@@ -18,12 +18,6 @@ export const DEFAULT_API_CONFIG = resolve(
   "../../cloud/workers/api/wrangler.jsonc",
 );
 
-export function operatorConfigPath(): string {
-  return process.env.MONS_D1_CONFIG
-    ? resolve(process.env.MONS_D1_CONFIG)
-    : DEFAULT_API_CONFIG;
-}
-
 export function resolveD1Binding(target: string): D1Binding {
   if (Object.values(D1_BINDINGS).includes(target as D1Binding))
     return target as D1Binding;
@@ -32,7 +26,7 @@ export function resolveD1Binding(target: string): D1Binding {
   throw new Error("unknown canonical D1 binding");
 }
 
-export function readOperatorConfiguration(path = operatorConfigPath()) {
+export function readOperatorConfiguration(path = DEFAULT_API_CONFIG) {
   const require = createRequire(import.meta.url);
   const ts = require("typescript") as typeof import("typescript");
   const parsed = ts.parseConfigFileTextToJson(path, readFileSync(path, "utf8"));
@@ -43,7 +37,7 @@ export function readOperatorConfiguration(path = operatorConfigPath()) {
 
 export function resolveD1Coordinates(
   target: string,
-  path = operatorConfigPath(),
+  path = DEFAULT_API_CONFIG,
 ) {
   const binding = resolveD1Binding(target);
   const configuration = readOperatorConfiguration(path);

@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { createRequire } from "node:module";
 import test from "node:test";
-import { resolveD1Coordinates } from "../operator/configuration.ts";
-import { createWranglerRunner } from "../operator/runtime.ts";
+import { resolveD1Coordinates } from "./operator/configuration.ts";
+import { createWranglerRunner } from "./operator/runtime.ts";
 
 const accountId = "a".repeat(32);
 const databaseId = "11111111-1111-4111-8111-111111111111";
@@ -57,7 +57,7 @@ test("logical names and stable bindings resolve the suffixed replacement through
 
 test("operator and admin configuration reject duplicate or missing stable bindings", (t) => {
   const require = createRequire(import.meta.url);
-  const { parseConfig } = require("../../cloud/admin/_d1.js") as {
+  const { parseConfig } = require("../cloud/admin/_d1.js") as {
     parseConfig: (path: string) => unknown;
   };
   const entry = {

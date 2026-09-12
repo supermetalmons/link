@@ -1,5 +1,5 @@
 import {
-  operatorConfigPath,
+  DEFAULT_API_CONFIG,
   resolveD1Binding,
 } from "./operator/configuration.ts";
 import { spawnSync } from "node:child_process";
@@ -21,7 +21,7 @@ type Dependencies = {
 };
 
 const DATABASE = "mons-link-profiles";
-const CONFIG = operatorConfigPath();
+const CONFIG = DEFAULT_API_CONFIG;
 const RELEASE_ENV = "cloud/workers/api/release.env";
 
 function parseArgs(argv: string[]): Operation {

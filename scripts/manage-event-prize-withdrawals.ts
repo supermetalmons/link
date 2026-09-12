@@ -1,5 +1,5 @@
 import {
-  operatorConfigPath,
+  DEFAULT_API_CONFIG,
   resolveD1Binding,
 } from "./operator/configuration.ts";
 import { createHash } from "node:crypto";
@@ -29,7 +29,7 @@ type ManagementDependencies = {
 };
 
 const DATABASE = "mons-link-event-prize-withdrawals";
-const CONFIG_PATH = operatorConfigPath();
+const CONFIG_PATH = DEFAULT_API_CONFIG;
 const RELEASE_ENV_PATH = "cloud/workers/api/release.env";
 const VALID_STATUSES = new Set([
   "blocked",

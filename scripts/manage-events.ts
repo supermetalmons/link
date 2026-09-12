@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
-  operatorConfigPath,
+  DEFAULT_API_CONFIG,
   resolveD1Binding,
 } from "./operator/configuration.ts";
 import { readPrivateJson } from "./operator/runtime.ts";
@@ -65,7 +65,7 @@ type ManagementDependencies = {
 };
 
 const DATABASE = "mons-link-events";
-const CONFIG_PATH = operatorConfigPath();
+const CONFIG_PATH = DEFAULT_API_CONFIG;
 const RELEASE_ENV_PATH = "cloud/workers/api/release.env";
 
 function validAdmissionId(value: unknown): value is string {

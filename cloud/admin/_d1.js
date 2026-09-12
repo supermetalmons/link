@@ -14,7 +14,7 @@ function record(value) {
     : null;
 }
 
-function parseConfig(configPath = process.env.MONS_D1_CONFIG || CONFIG_PATH) {
+function parseConfig(configPath = CONFIG_PATH) {
   const errors = [];
   const parsed = parse(readFileSync(configPath, "utf8"), errors, {
     allowTrailingComma: true,

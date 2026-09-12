@@ -33,7 +33,6 @@ type WranglerConfig = {
   routes?: Array<Record<string, unknown>>;
   secrets?: { required?: string[] };
   vars?: Record<string, string>;
-  version_metadata?: { binding: string };
   d1_databases?: Array<Record<string, unknown>>;
   durable_objects?: Record<string, unknown>;
   exports?: Record<string, unknown>;
@@ -121,15 +120,10 @@ test("API Wrangler configuration preserves its route, secrets, and bindings", ()
     },
   ]);
   assert.deepEqual(Object.keys(config.vars || {}).sort(), [
-    "API_MAINTENANCE",
     "APPLE_AUDIENCES",
     "AUTH_MUTATIONS_DISABLED",
-    "D1_MIGRATION_RUN_ID",
     "EVENT_DB_BOOKMARK_EPOCH",
   ]);
-  assert.equal(config.version_metadata?.binding, "CF_VERSION_METADATA");
-  assert.match(config.vars?.API_MAINTENANCE || "", /^(?:true|false)$/);
-  assert.match(config.vars?.D1_MIGRATION_RUN_ID || "", /^[A-Za-z0-9_-]*$/);
   assert.equal(
     config.vars?.EVENT_DB_BOOKMARK_EPOCH,
     config.d1_databases?.find((binding) => binding.binding === "EVENT_DB")

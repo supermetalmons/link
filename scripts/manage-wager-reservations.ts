@@ -1,5 +1,5 @@
 import {
-  operatorConfigPath,
+  DEFAULT_API_CONFIG,
   resolveD1Binding,
 } from "./operator/configuration.ts";
 import { spawnSync } from "node:child_process";
@@ -39,7 +39,7 @@ type Dependencies = {
 
 const DATABASE = "mons-link-profiles";
 const GAMEPLAY_DATABASE = "mons-link-profile-games";
-const CONFIG_PATH = operatorConfigPath();
+const CONFIG_PATH = DEFAULT_API_CONFIG;
 const RELEASE_ENV_PATH = "cloud/workers/api/release.env";
 
 function record(value: unknown): JsonRecord | null {
