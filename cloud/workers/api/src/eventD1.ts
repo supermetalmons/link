@@ -130,6 +130,13 @@ type ProfilePrizeMutationState = {
   revision: number;
 };
 
+type ProfilePrizeAssignmentSnapshot = {
+  assignment: EventPrizeAssignmentRecord | null;
+  eventId: string;
+  profileId: string;
+  revision: number;
+};
+
 type PathMutationOptions = {
   admission: EventWriteAdmission;
   allowStoredProfilePrizeAssignment?: boolean;
@@ -139,12 +146,13 @@ type PathMutationOptions = {
   expectedProfilePrizeRevisions?: Readonly<Record<string, number>>;
   expectedTelegramStateRevisions?: Readonly<Record<string, number>>;
   now?: () => number;
+  profilePrizeSnapshot?: ProfilePrizeAssignmentSnapshot;
   transition?: { eventId: string; transitionId: string };
 };
 
 type PublicPathMutationOptions = Omit<
   PathMutationOptions,
-  "allowStoredProfilePrizeAssignment"
+  "allowStoredProfilePrizeAssignment" | "profilePrizeSnapshot"
 >;
 
 type PathMutationResult = {
@@ -851,6 +859,39 @@ async function readProfilePrizeMutationState(
   };
 }
 
+async function readProfilePrizeAssignmentSnapshot(
+  db: EventD1Connection,
+  profileId: string,
+  eventId: string,
+): Promise<ProfilePrizeAssignmentSnapshot> {
+  const normalizedProfileId = exactKey(profileId);
+  if (!normalizedProfileId) throw new EventD1Failure("invalid-profile-id");
+  const row = await db
+    .prepare(
+      `SELECT
+         (SELECT assignment_json FROM profile_event_prizes
+          WHERE profile_id = ? AND event_id = ?) AS assignment_json,
+         (SELECT revision FROM profile_event_prize_revisions
+          WHERE profile_id = ?) AS revision`,
+    )
+    .bind(normalizedProfileId, eventId, normalizedProfileId)
+    .first<{ assignment_json: string | null; revision: number | null }>();
+  if (!row) throw new EventD1Failure();
+  return {
+    assignment:
+      row.assignment_json === null
+        ? null
+        : parseStoredEventPrizeAssignment(
+            normalizedProfileId,
+            eventId,
+            decodeJson(row.assignment_json),
+          ),
+    eventId,
+    profileId: normalizedProfileId,
+    revision: row.revision === null ? 0 : safeInteger(row.revision, 1),
+  };
+}
+
 function eventRevisionGuard(
   db: EventD1Connection,
   eventId: string,
@@ -993,6 +1034,22 @@ async function patchEventOwnedPathsInternal(
   const nowMs = safeInteger(now());
   const eventStates = new Map<string, EventMutationState>();
   const profileStates = new Map<string, ProfilePrizeMutationState>();
+  const snapshot = options.profilePrizeSnapshot;
+  if (snapshot) {
+    const path = `profileEventPrizes/${snapshot.profileId}/${snapshot.eventId}`;
+    if (Object.keys(updates).length !== 1 || !Object.hasOwn(updates, path)) {
+      throw new EventD1Failure("invalid-profile-prize-snapshot-scope");
+    }
+    const originalPrizes =
+      snapshot.assignment === null
+        ? {}
+        : { [snapshot.eventId]: snapshot.assignment };
+    profileStates.set(snapshot.profileId, {
+      originalPrizes,
+      prizes: Object.assign(Object.create(null), originalPrizes),
+      revision: snapshot.revision,
+    });
+  }
   const progressUpdates = new Map<string, unknown>();
   const progressDeadUpdates = new Map<string, unknown>();
   const profileProjectionUpdates = new Map<string, unknown>();
@@ -1713,6 +1770,7 @@ async function transactEventOwnedPathInternal(
     let expectedPathValues: Record<string, unknown> | undefined;
     let expectedProfilePrizeRevisions: Record<string, number> | undefined;
     let expectedTelegramStateRevisions: Record<string, number> | undefined;
+    let profilePrizeSnapshot: ProfilePrizeAssignmentSnapshot | undefined;
     let current: unknown;
     if (
       (parts[0] === "events" || parts[0] === "eventPrizeSelections") &&
@@ -1728,6 +1786,16 @@ async function transactEventOwnedPathInternal(
           : parts.length === 2
             ? snapshot.prizeSelections
             : getNested(snapshot.prizeSelections, parts.slice(2));
+    } else if (parts[0] === "profileEventPrizes" && parts.length === 3) {
+      profilePrizeSnapshot = await readProfilePrizeAssignmentSnapshot(
+        db,
+        parts[1],
+        parts[2],
+      );
+      expectedProfilePrizeRevisions = {
+        [parts[1]]: profilePrizeSnapshot.revision,
+      };
+      current = cloneJson(profilePrizeSnapshot.assignment);
     } else if (parts[0] === "profileEventPrizes" && parts[1]) {
       const snapshot = await readProfileEventPrizes(db, parts[1]);
       expectedProfilePrizeRevisions = { [parts[1]]: snapshot.revision };
@@ -1789,6 +1857,7 @@ async function transactEventOwnedPathInternal(
             options.allowStoredProfilePrizeAssignment,
           eventLease: options.eventLease,
           now: options.now,
+          profilePrizeSnapshot,
         },
       );
       return {

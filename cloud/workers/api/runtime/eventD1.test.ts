@@ -154,7 +154,7 @@ function patchEventOwnedPaths(
 }
 
 function transactEventOwnedPath(
-  db: D1Database,
+  db: EventD1Connection,
   path: string,
   updater: Parameters<typeof transactEventOwnedPathRaw>[2],
   options: Omit<
@@ -667,6 +667,228 @@ describe("event D1 store", () => {
       event: { status: "scheduled" },
       revision: 1,
     });
+  });
+
+  it("transacts one profile prize in one read despite a malformed sibling", async () => {
+    const { otherEventId, otherAssignment } = await seedPrizeRows();
+    await testEnv.EVENT_DB.prepare(
+      "UPDATE profile_event_prizes SET assignment_json = ? WHERE profile_id = ? AND event_id = ?",
+    )
+      .bind(
+        JSON.stringify(
+          { ...otherAssignment, eventId: "mismatched-event" },
+          null,
+          2,
+        ),
+        profileId,
+        otherEventId,
+      )
+      .run();
+    const before = await readPrizeStorage();
+    await expect(
+      readProfileEventPrizes(testEnv.EVENT_DB, profileId),
+    ).rejects.toThrow("invalid-event-prize-assignment");
+    let reads = 0;
+    const db: EventD1Connection = {
+      prepare(query) {
+        if (/^\s*SELECT\b/i.test(query)) reads += 1;
+        return testEnv.EVENT_DB.prepare(query);
+      },
+      batch: (statements) => testEnv.EVENT_DB.batch(statements),
+    };
+    const changed = { ...assignment(), assignedAtMs: 3_000 };
+    await expect(
+      transactEventOwnedPath(
+        db,
+        `profileEventPrizes/${profileId}/${eventId}`,
+        (current) => {
+          expect(current).toEqual(assignment());
+          return { value: changed };
+        },
+        { now: () => 300 },
+      ),
+    ).resolves.toMatchObject({ committed: true, value: changed });
+    expect(reads).toBe(1);
+    const after = await readPrizeStorage();
+    expect(after.prizes.find((row) => row.event_id === otherEventId)).toEqual(
+      before.prizes.find((row) => row.event_id === otherEventId),
+    );
+    expect(after.prizes.find((row) => row.event_id === eventId)).toMatchObject({
+      assignment_json: JSON.stringify(changed),
+      updated_at_ms: 300,
+    });
+    expect(after.profileRevisions).toEqual([
+      { profile_id: profileId, revision: 2, updated_at_ms: 300 },
+    ]);
+    expect(after.events).toEqual(before.events);
+  });
+
+  it("persists mutations made directly to a profile prize transaction value", async () => {
+    const { otherEventId, otherAssignment } = await seedPrizeRows();
+    const changed = {
+      ...otherAssignment,
+      assignedAtMs: 3_000,
+      archivedMetadata: { edition: 1, labels: ["first", "second", "third"] },
+    };
+    const result = await transactEventOwnedPath(
+      testEnv.EVENT_DB,
+      `profileEventPrizes/${profileId}/${otherEventId}`,
+      (current) => {
+        const prize = current as typeof otherAssignment;
+        prize.assignedAtMs = 3_000;
+        prize.archivedMetadata.labels.push("third");
+        return { value: prize };
+      },
+      { now: () => 300 },
+    );
+    expect(result).toMatchObject({
+      committed: true,
+      value: changed,
+    });
+    const stored = await readPrizeStorage();
+    expect(
+      stored.prizes.find((row) => row.event_id === otherEventId),
+    ).toMatchObject({
+      assignment_json: JSON.stringify(changed),
+      updated_at_ms: 300,
+    });
+    expect(stored.profileRevisions).toEqual([
+      { profile_id: profileId, revision: 2, updated_at_ms: 300 },
+    ]);
+  });
+
+  it("distinguishes declining a profile prize transaction from committing unchanged bytes", async () => {
+    const { otherEventId, otherAssignment } = await seedPrizeRows();
+    const before = await readPrizeStorage();
+    const path = `profileEventPrizes/${profileId}/${otherEventId}`;
+    await expect(
+      transactEventOwnedPath(
+        testEnv.EVENT_DB,
+        path,
+        () => ({ commit: false, decision: "already-assigned" }),
+        { now: () => 300 },
+      ),
+    ).resolves.toEqual({
+      committed: false,
+      decision: "already-assigned",
+      value: otherAssignment,
+    });
+    expect(await readPrizeStorage()).toEqual(before);
+    await expect(
+      transactEventOwnedPath(
+        testEnv.EVENT_DB,
+        path,
+        (current) => ({ value: current }),
+        { now: () => 400 },
+      ),
+    ).resolves.toMatchObject({ committed: true, value: otherAssignment });
+    expect(await readPrizeStorage()).toEqual({
+      ...before,
+      profileRevisions: [
+        { profile_id: profileId, revision: 2, updated_at_ms: 400 },
+      ],
+    });
+  });
+
+  it.each(["creation", "absent deletion"])(
+    "starts the profile prize revision at one after a leaf %s",
+    async (operation) => {
+      await patchEventOwnedPaths(testEnv.EVENT_DB, {
+        [`events/${eventId}`]: eventRecord(),
+      });
+      const before = await readPrizeStorage();
+      const value = operation === "creation" ? assignment() : null;
+      await expect(
+        transactEventOwnedPath(
+          testEnv.EVENT_DB,
+          `profileEventPrizes/${profileId}/${eventId}`,
+          (current) => {
+            expect(current).toBeNull();
+            return { value };
+          },
+          { now: () => 300 },
+        ),
+      ).resolves.toMatchObject({ committed: true, value });
+      expect(await readPrizeStorage()).toEqual({
+        ...before,
+        prizes: value
+          ? [
+              {
+                profile_id: profileId,
+                event_id: eventId,
+                assignment_json: JSON.stringify(value),
+                updated_at_ms: 300,
+              },
+            ]
+          : [],
+        profileRevisions: [
+          { profile_id: profileId, revision: 1, updated_at_ms: 300 },
+        ],
+      });
+    },
+  );
+
+  it("retries a profile prize transaction when a sibling changes before commit", async () => {
+    const { otherEventId, otherAssignment } = await seedPrizeRows();
+    const sibling = { ...otherAssignment, assignedAtMs: 4_000 };
+    const observed: unknown[] = [];
+    let changeSibling = false;
+    const db: EventD1Connection = {
+      prepare: (query) => testEnv.EVENT_DB.prepare(query),
+      async batch(statements) {
+        if (changeSibling) {
+          changeSibling = false;
+          await patchEventOwnedPaths(
+            testEnv.EVENT_DB,
+            { [`profileEventPrizes/${profileId}/${otherEventId}`]: sibling },
+            { now: () => 300 },
+          );
+        }
+        return testEnv.EVENT_DB.batch(statements);
+      },
+    };
+    const changed = { ...assignment(), assignedAtMs: 3_000 };
+    await expect(
+      transactEventOwnedPath(
+        db,
+        `profileEventPrizes/${profileId}/${eventId}`,
+        (current) => {
+          observed.push(current);
+          changeSibling = observed.length === 1;
+          return { value: changed };
+        },
+        { now: () => 400 },
+      ),
+    ).resolves.toMatchObject({ committed: true, value: changed });
+    expect(observed).toEqual([assignment(), assignment()]);
+    await expect(
+      readProfileEventPrizes(testEnv.EVENT_DB, profileId),
+    ).resolves.toEqual({
+      prizes: { [eventId]: changed, [otherEventId]: sibling },
+      profileId,
+      revision: 3,
+    });
+    expect((await readPrizeStorage()).profileRevisions).toEqual([
+      { profile_id: profileId, revision: 3, updated_at_ms: 400 },
+    ]);
+  });
+
+  it("does not write a profile prize transaction aborted in its updater", async () => {
+    await seedPrizeRows();
+    const before = await readPrizeStorage();
+    const controller = new AbortController();
+    await expect(
+      transactEventOwnedPath(
+        testEnv.EVENT_DB,
+        `profileEventPrizes/${profileId}/${eventId}`,
+        () => {
+          controller.abort();
+          return { value: { ...assignment(), assignedAtMs: 3_000 } };
+        },
+        { now: () => 300, signal: controller.signal },
+      ),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(await readPrizeStorage()).toEqual(before);
   });
 
   it("keeps visible profile prizes separate from historical event assignments", async () => {
