@@ -38,6 +38,7 @@ import {
   resetCloneTarget,
 } from "./clone.ts";
 import { runCloneRehearsal } from "./rehearsal.ts";
+import { retryRead, concurrentSettled } from "./retry.ts";
 import { runWorkerRehearsal } from "./worker-rehearsal.ts";
 import { freezeDomainControls, resumeDomainControls } from "./controls.ts";
 import {
@@ -554,7 +555,7 @@ function bridgeSecret(args: MigrationArguments): string {
   return secret;
 }
 
-async function maintenanceCommand(
+async function maintenanceRequest(
   args: MigrationArguments,
   manifest: MigrationManifest,
   versionId: string,
@@ -582,17 +583,52 @@ async function maintenanceCommand(
     redirect: "error",
     signal: AbortSignal.timeout(60_000),
   });
-  const value = apiRecord(await response.json());
+  let value: ApiRecord;
+  try {
+    value = apiRecord(await response.json());
+  } catch {
+    throw Object.assign(
+      new Error(`maintenance response was not valid JSON (${response.status})`),
+      { httpStatus: response.status },
+    );
+  }
   if (
     !response.ok ||
     value.ok !== true ||
     value.versionId !== versionId ||
     value.runId !== manifest.runId
   )
-    throw new Error(
-      `maintenance ${String(input.operation)} was not confirmed (${response.status}; ${String(value.message || value.error || "identity mismatch")})`,
+    throw Object.assign(
+      new Error(
+        `maintenance ${String(input.operation)} was not confirmed (${response.status}; ${String(value.message || value.error || "identity mismatch")})`,
+      ),
+      { httpStatus: response.status },
     );
   return value;
+}
+
+async function maintenanceCommand(
+  args: MigrationArguments,
+  manifest: MigrationManifest,
+  versionId: string,
+  input: ApiRecord,
+): Promise<ApiRecord> {
+  const read = () => maintenanceRequest(args, manifest, versionId, input);
+  if (input.operation !== "barrier") return read();
+  return retryRead(read, {
+    shouldRetry: (error) => {
+      if (!(error instanceof Error)) return false;
+      const status = (error as Error & { httpStatus?: number }).httpStatus;
+      return (
+        (typeof status === "number" && status >= 500) ||
+        ["TypeError", "TimeoutError", "AbortError"].includes(error.name)
+      );
+    },
+    onRetry: ({ attempt, delayMs }) =>
+      console.log(
+        JSON.stringify({ event: "migration_barrier_retry", attempt, delayMs }),
+      ),
+  });
 }
 
 async function assertVersionBindings(
@@ -1250,16 +1286,7 @@ async function concurrent<T>(
   operation: (item: T) => Promise<void>,
   limit = 16,
 ) {
-  let next = 0;
-  const results = await Promise.allSettled(
-    Array.from({ length: Math.min(limit, items.length) }, async () => {
-      while (next < items.length) await operation(items[next++]);
-    }),
-  );
-  const failure = results.find(
-    (result): result is PromiseRejectedResult => result.status === "rejected",
-  );
-  if (failure) throw failure.reason;
+  await concurrentSettled(items, operation, limit);
 }
 
 function barrierIdentity(value: ApiRecord): unknown {
@@ -1281,11 +1308,28 @@ async function collectBarriers(
   phase: "source" | "destination",
 ) {
   const completed = new Map<string, ApiRecord>();
+  const resumePartial = manifest.records[`${phase}Barriers`] === undefined;
   const verify = async (target: ApiRecord) => {
-    const result = await maintenanceCommand(args, manifest, versionId, {
-      operation: "barrier",
-      ...target,
-    });
+    const cachedPath =
+      typeof target.objectId === "string"
+        ? resolve(args.directory, `do-${phase}-${target.objectId}.json`)
+        : null;
+    const cached =
+      resumePartial && cachedPath && existsSync(cachedPath)
+        ? apiRecord(readPrivateJson(cachedPath))
+        : null;
+    const result =
+      cached &&
+      isReusableBarrier(cached, {
+        runId: manifest.runId,
+        versionId,
+        objectId: String(target.objectId),
+      })
+        ? cached
+        : await maintenanceCommand(args, manifest, versionId, {
+            operation: "barrier",
+            ...target,
+          });
     const id = field(result, "objectId");
     if (
       target.inviteId &&
@@ -1386,6 +1430,28 @@ async function collectBarriers(
   manifest.records[`${phase}Barriers`] = result;
   recordEvidence(args, manifest, `${phase}-barriers`, result);
   return result;
+}
+
+export function isReusableBarrier(
+  value: ApiRecord,
+  expected: { runId: string; versionId: string; objectId: string },
+): boolean {
+  return (
+    value.ok === true &&
+    value.schemaVersion === 1 &&
+    value.maintenance === true &&
+    value.runId === expected.runId &&
+    value.versionId === expected.versionId &&
+    value.objectId === expected.objectId &&
+    /^[a-f0-9]{64}$/.test(String(value.canonicalDigest)) &&
+    /^[a-f0-9]{64}$/.test(String(value.effectDigest)) &&
+    (value.source === null ||
+      (typeof value.source === "object" && !Array.isArray(value.source))) &&
+    (value.nextEffectAt === null || Number.isSafeInteger(value.nextEffectAt)) &&
+    (value.alarmAt === null || Number.isSafeInteger(value.alarmAt)) &&
+    Number.isSafeInteger(value.pendingEffects) &&
+    Number(value.pendingEffects) >= 0
+  );
 }
 
 async function quiesceMigration(

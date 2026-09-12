@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   assertMigrationDirection,
+  isReusableBarrier,
   parseMigrationArguments,
   publicationReceipt,
 } from "./operator.ts";
@@ -108,4 +109,45 @@ test("first publication and receipt-based retry produce identical immutable evid
   assert.throws(() =>
     publicationReceipt({ ...receipt, workflowVersionId: undefined }),
   );
+});
+
+test("barrier recovery reuses only complete evidence for the exact migration, Worker version, and object", () => {
+  const expected = {
+    runId: "run",
+    versionId: "version",
+    objectId: "a".repeat(64),
+  };
+  const evidence = {
+    ...expected,
+    ok: true,
+    schemaVersion: 1,
+    maintenance: true,
+    source: null,
+    nextEffectAt: null,
+    alarmAt: 1789227353447,
+    canonicalDigest: "b".repeat(64),
+    effectDigest: "c".repeat(64),
+    pendingEffects: 0,
+  };
+  assert.equal(isReusableBarrier(evidence, expected), true);
+  for (const changes of [
+    { ok: false },
+    { schemaVersion: 2 },
+    { maintenance: undefined },
+    { source: undefined },
+    { nextEffectAt: undefined },
+    { alarmAt: undefined },
+    { runId: "another-run" },
+    { versionId: "another-version" },
+    { objectId: "d".repeat(64) },
+    { canonicalDigest: "invalid" },
+    { effectDigest: undefined },
+    { pendingEffects: -1 },
+    { pendingEffects: 0.5 },
+    { pendingEffects: "0" },
+  ])
+    assert.equal(
+      isReusableBarrier({ ...evidence, ...changes }, expected),
+      false,
+    );
 });
