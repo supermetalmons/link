@@ -108,7 +108,7 @@ When `invite` is false, joins and postponements cannot send an invite. A confirm
 
 The Queue operator bridge credential is provisioned in the protected local file `/Users/ivan/.config/mons-link/secrets/telegram-queue`. Pass its path explicitly with `--bridge-secret-file`; commands require this explicit credential and use no environment fallback.
 
-Delivery and recovery records live in the `mons-link-telegram` D1 database. Ambiguous sends remain `uncertain` and are never retried automatically. Preview and execute one reviewed recovery action through the signed Worker command endpoint:
+Delivery and recovery records live in the `TELEGRAM_DB` D1 database. Ambiguous sends remain `uncertain` and are never retried automatically. Preview and execute one reviewed recovery action through the signed Worker command endpoint:
 
 ```sh
 npm run recover:telegram -- --message-key <key> --action confirm-send-absent --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
@@ -139,7 +139,7 @@ Each event has one permanent delivery identity per notification kind. A confirme
 
 ## Other admin tools
 
-Canonical profile admin readers require an explicit `CLOUDFLARE_API_TOKEN` scoped to Account D1 Read for `mons-link-profiles`. They accept `frozen` and `active` and never use the Wrangler login token. Use a separate read-only operator token supplied through the process environment; do not place it in arguments or logs.
+Canonical profile admin readers require an explicit `CLOUDFLARE_API_TOKEN` scoped to Account D1 Read for `PROFILE_DB`. They accept `frozen` and `active` and never use the Wrangler login token. Use a separate read-only operator token supplied through the process environment; do not place it in arguments or logs.
 
 List profile addresses:
 

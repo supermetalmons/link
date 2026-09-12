@@ -16,10 +16,10 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { operatorConfigPath, resolveD1Coordinates } from "./configuration.ts";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -211,33 +211,20 @@ function parseD1Results(response: unknown): JsonRecord[] {
 function createWranglerRunner({
   apiToken = process.env.CLOUDFLARE_API_TOKEN,
   fetcher = fetch,
-}: { apiToken?: string; fetcher?: typeof fetch } = {}): SqlRunner {
+  configPath = operatorConfigPath(),
+}: {
+  apiToken?: string;
+  fetcher?: typeof fetch;
+  configPath?: string;
+} = {}): SqlRunner {
   return async (sql, database = PROFILE_DATABASE, bindings = []) => {
     if (bindings.length > 100 || Buffer.byteLength(sql) > 90 * 1024)
       throw new Error("D1 query exceeds the bounded SQL or parameter limit");
+    const { accountId, databaseId, binding } = resolveD1Coordinates(
+      database,
+      configPath,
+    );
     if (apiToken) {
-      const require = createRequire(import.meta.url);
-      const typescript = require("typescript") as typeof import("typescript");
-      const configPath = resolve(ROOT, "cloud/workers/api/wrangler.jsonc");
-      const parsed = typescript.parseConfigFileTextToJson(
-        configPath,
-        readFileSync(configPath, "utf8"),
-      );
-      const config = record(parsed.config);
-      const accountId = config?.account_id;
-      const databases = config?.d1_databases;
-      const entry = Array.isArray(databases)
-        ? databases.map(record).find((item) => item?.database_name === database)
-        : null;
-      const databaseId = entry?.database_id;
-      if (
-        parsed.error ||
-        typeof accountId !== "string" ||
-        !/^[a-f0-9]{32}$/.test(accountId) ||
-        typeof databaseId !== "string" ||
-        !VERSION_PATTERN.test(databaseId)
-      )
-        throw new Error("invalid tracked D1 account or database configuration");
       const response = await fetcher(
         `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${databaseId}/query`,
         {
@@ -267,13 +254,13 @@ function createWranglerRunner({
         [
           "d1",
           "execute",
-          database,
+          binding,
           "--remote",
           "--command",
           sql,
           "--json",
           "--config",
-          "cloud/workers/api/wrangler.jsonc",
+          configPath,
           "--env-file",
           "cloud/workers/api/release.env",
         ],

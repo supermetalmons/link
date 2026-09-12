@@ -1,10 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   manageEvents,
   parseArgs,
+  parseAdmissionRecoveryEvidence,
+  readAdmissionRecoveryEvidence,
+  recoverRemoteStaleAdmission,
   type EventControl,
   type EventWriteAdmissionStatus,
   type ManagementDependencies,
@@ -122,6 +134,33 @@ test("event management operations are explicit", () => {
     parseArgs(["--recover-stale-admission", "invalid/admission"]),
   );
   assert.throws(() => parseArgs(["--delete-firebase"]));
+  assert.deepEqual(
+    parseArgs([
+      "--recover-stale-admission",
+      "ewa_expired-one",
+      "--evidence",
+      "/private/proof.json",
+    ]),
+    {
+      kind: "recover-stale-admission",
+      admissionId: "ewa_expired-one",
+      evidencePath: "/private/proof.json",
+    },
+  );
+  assert.throws(() =>
+    parseArgs([
+      "--recover-stale-admission",
+      "ewa_expired-one",
+      "--evidence",
+      "relative.json",
+    ]),
+  );
+  assert.throws(() =>
+    parseArgs(["--recover-stale-admission", "ewa_expired-one", "--evidence"]),
+  );
+  assert.throws(() =>
+    parseArgs(["--freeze", "--evidence", "/private/proof.json"]),
+  );
 });
 
 test("D1 mode supports maintenance freeze and explicit resume", () => {
@@ -215,6 +254,225 @@ test("stale admission recovery is named, expired, and leaves other fences", () =
       expired: false,
     },
   ]);
+});
+
+const reviewedRecoveryEvidence = () => ({
+  admission: {
+    admission_id: "ewa_reviewed-one",
+    freeze_generation: 1,
+    created_at_ms: 100,
+    expires_at_ms: 900,
+  },
+  requestFinished: true,
+  sourceReconciled: true,
+  rationale:
+    "The original request finished and its effects were reconciled against the retained receipts.",
+  reviewedReceipts: ["retained-receipt"],
+});
+
+const reviewedAdmission: EventWriteAdmissionStatus = {
+  admissionId: "ewa_reviewed-one",
+  freezeGeneration: 1,
+  createdAtMs: 100,
+  expiresAtMs: 900,
+  expired: true,
+};
+
+test("recovery evidence requires explicit completion and reconciliation assertions with a complete exact snapshot", () => {
+  assert.deepEqual(
+    parseAdmissionRecoveryEvidence(
+      reviewedRecoveryEvidence(),
+      "ewa_reviewed-one",
+    ),
+    {
+      admissionId: "ewa_reviewed-one",
+      freezeGeneration: 1,
+      createdAtMs: 100,
+      expiresAtMs: 900,
+    },
+  );
+  for (const patch of [
+    { requestFinished: false },
+    { requestFinished: undefined },
+    { sourceReconciled: false },
+    { sourceReconciled: undefined },
+    { rationale: "  " },
+    { rationale: undefined },
+  ])
+    assert.throws(() =>
+      parseAdmissionRecoveryEvidence(
+        { ...reviewedRecoveryEvidence(), ...patch },
+        "ewa_reviewed-one",
+      ),
+    );
+  for (const patch of [
+    { admission_id: "ewa_different" },
+    { freeze_generation: "1" },
+    { freeze_generation: Number.MAX_SAFE_INTEGER + 1 },
+    { created_at_ms: -1 },
+    { created_at_ms: undefined },
+    { expires_at_ms: 100 },
+    { extra_unreviewed_field: "changed-schema" },
+  ]) {
+    const evidence = reviewedRecoveryEvidence();
+    assert.throws(() =>
+      parseAdmissionRecoveryEvidence(
+        { ...evidence, admission: { ...evidence.admission, ...patch } },
+        "ewa_reviewed-one",
+      ),
+    );
+  }
+});
+
+test("evidence-bound recovery deletes only the reviewed admission and does not log its rationale", () => {
+  const other = { ...reviewedAdmission, admissionId: "ewa_retained-other" };
+  const state = dependencies(control("d1"), {
+    admissions: [reviewedAdmission, other],
+  });
+  const evidence = reviewedRecoveryEvidence();
+  manageEvents(
+    {
+      kind: "recover-stale-admission",
+      admissionId: reviewedAdmission.admissionId,
+      evidencePath: "/private/proof.json",
+    },
+    {
+      ...state.value,
+      readRecoveryEvidence: (path) => {
+        assert.equal(path, "/private/proof.json");
+        return evidence;
+      },
+    },
+  );
+  assert.deepEqual(state.admissions, [other]);
+  assert.ok(state.logs.every((line) => !line.includes(evidence.rationale)));
+});
+
+test("a matching ID cannot substitute a changed generation or lifetime for the evidenced row", () => {
+  for (const patch of [
+    { freezeGeneration: 2 },
+    { createdAtMs: 101 },
+    { expiresAtMs: 901 },
+  ]) {
+    const changed = { ...reviewedAdmission, ...patch };
+    const state = dependencies(control("d1"), { admissions: [changed] });
+    assert.throws(
+      () =>
+        manageEvents(
+          {
+            kind: "recover-stale-admission",
+            admissionId: reviewedAdmission.admissionId,
+            evidencePath: "/private/proof.json",
+          },
+          {
+            ...state.value,
+            readRecoveryEvidence: reviewedRecoveryEvidence,
+            recoverStaleAdmission: () =>
+              assert.fail("changed evidence must not reach the delete CAS"),
+          },
+        ),
+      /differs from the reviewed evidence/,
+    );
+    assert.deepEqual(state.admissions, [changed]);
+  }
+});
+
+test("a row changed after evidence comparison is rejected by the pinned full-row recovery CAS", () => {
+  const state = dependencies(control("d1"), {
+    admissions: [reviewedAdmission],
+  });
+  assert.throws(
+    () =>
+      manageEvents(
+        {
+          kind: "recover-stale-admission",
+          admissionId: reviewedAdmission.admissionId,
+          evidencePath: "/private/proof.json",
+        },
+        {
+          ...state.value,
+          readRecoveryEvidence: reviewedRecoveryEvidence,
+          recoverStaleAdmission: (expected, nowMs) => {
+            assert.deepEqual(expected, reviewedAdmission);
+            state.admissions[0].freezeGeneration = 2;
+            return state.value.recoverStaleAdmission(expected, nowMs);
+          },
+        },
+      ),
+    /recovery conflicted/,
+  );
+  assert.equal(state.admissions.length, 1);
+  assert.equal(state.admissions[0].freezeGeneration, 2);
+});
+
+test("recovery evidence is loaded only from an owned private regular file at an absolute path", () => {
+  const directory = mkdtempSync(join(tmpdir(), "mons-event-evidence-"));
+  const path = join(directory, "evidence.json");
+  try {
+    writeFileSync(path, JSON.stringify(reviewedRecoveryEvidence()), {
+      mode: 0o600,
+    });
+    assert.equal(
+      readAdmissionRecoveryEvidence(path, reviewedAdmission.admissionId)
+        .freezeGeneration,
+      1,
+    );
+    assert.throws(
+      () =>
+        readAdmissionRecoveryEvidence(
+          "relative.json",
+          reviewedAdmission.admissionId,
+        ),
+      /absolute/,
+    );
+    chmodSync(path, 0o644);
+    assert.throws(
+      () => readAdmissionRecoveryEvidence(path, reviewedAdmission.admissionId),
+      /private regular file/,
+    );
+    chmodSync(path, 0o600);
+    const link = join(directory, "link.json");
+    symlinkSync(path, link);
+    assert.throws(() =>
+      readAdmissionRecoveryEvidence(link, reviewedAdmission.admissionId),
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the actual recovery SQL preserves a changed same-ID row and all unselected admissions", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec(`CREATE TABLE event_write_admissions(admission_id TEXT PRIMARY KEY,freeze_generation INTEGER,created_at_ms INTEGER,expires_at_ms INTEGER);
+      INSERT INTO event_write_admissions VALUES('ewa_reviewed-one',2,100,900),('ewa_retained-other',1,100,900);`);
+    const query = (sql: string) =>
+      db.prepare(sql).all() as Record<string, unknown>[];
+    assert.equal(
+      recoverRemoteStaleAdmission(reviewedAdmission, 1_000, query),
+      false,
+    );
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS count FROM event_write_admissions").get()
+        ?.count,
+      2,
+    );
+    assert.equal(
+      recoverRemoteStaleAdmission(
+        { ...reviewedAdmission, freezeGeneration: 2 },
+        1_000,
+        query,
+      ),
+      true,
+    );
+    assert.equal(
+      db.prepare("SELECT admission_id FROM event_write_admissions").get()
+        ?.admission_id,
+      "ewa_retained-other",
+    );
+  } finally {
+    db.close();
+  }
 });
 
 test("status is read-only and does not expose event payloads", () => {

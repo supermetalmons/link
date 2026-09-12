@@ -1,9 +1,9 @@
 const { readFileSync } = require("node:fs");
 const { resolve } = require("node:path");
-const ts = require("typescript");
+const { parse } = require("jsonc-parser");
 
 const CONFIG_PATH = resolve(__dirname, "../workers/api/wrangler.jsonc");
-const DATABASE_NAME = "mons-link-profiles";
+const DATABASE_BINDING = "PROFILE_DB";
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const ADDRESS_PAGE_SIZE = 500;
 const MAX_ADDRESS_PAGES = 10_000;
@@ -14,23 +14,25 @@ function record(value) {
     : null;
 }
 
-function parseConfig() {
-  const parsed = ts.parseConfigFileTextToJson(
-    CONFIG_PATH,
-    readFileSync(CONFIG_PATH, "utf8"),
-  );
-  if (parsed.error) {
+function parseConfig(configPath = process.env.MONS_D1_CONFIG || CONFIG_PATH) {
+  const errors = [];
+  const parsed = parse(readFileSync(configPath, "utf8"), errors, {
+    allowTrailingComma: true,
+    disallowComments: false,
+  });
+  if (errors.length > 0) {
     throw new Error("Invalid Cloudflare Worker configuration.");
   }
-  const config = record(parsed.config);
+  const config = record(parsed);
   const accountId = config?.account_id;
-  const database = Array.isArray(config?.d1_databases)
-    ? config.d1_databases.find(
-        (entry) => record(entry)?.database_name === DATABASE_NAME,
+  const databases = Array.isArray(config?.d1_databases)
+    ? config.d1_databases.filter(
+        (entry) => record(entry)?.binding === DATABASE_BINDING,
       )
-    : null;
-  const databaseId = record(database)?.database_id;
+    : [];
+  const databaseId = record(databases[0])?.database_id;
   if (
+    databases.length !== 1 ||
     typeof accountId !== "string" ||
     !/^[a-f0-9]{32}$/i.test(accountId) ||
     typeof databaseId !== "string" ||
@@ -78,8 +80,13 @@ async function boundedText(response) {
   }
 }
 
-function createD1Query({ fetcher = fetch, token, coordinates } = {}) {
-  const { accountId, databaseId } = coordinates || parseConfig();
+function createD1Query({
+  fetcher = fetch,
+  token,
+  coordinates,
+  configPath,
+} = {}) {
+  const { accountId, databaseId } = coordinates || parseConfig(configPath);
   const bearer = token || cloudflareToken();
   const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${databaseId}/query`;
   return async (sql, params = []) => {
@@ -292,7 +299,7 @@ function createProfileD1Reader({ query = createD1Query() } = {}) {
 }
 
 module.exports = {
-  DATABASE_NAME,
+  DATABASE_BINDING,
   MAX_RESPONSE_BYTES,
   boundedText,
   cloudflareToken,

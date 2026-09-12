@@ -1,3 +1,7 @@
+import {
+  operatorConfigPath,
+  resolveD1Binding,
+} from "./operator/configuration.ts";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -35,7 +39,7 @@ type Dependencies = {
 
 const DATABASE = "mons-link-profiles";
 const GAMEPLAY_DATABASE = "mons-link-profile-games";
-const CONFIG_PATH = "cloud/workers/api/wrangler.jsonc";
+const CONFIG_PATH = operatorConfigPath();
 const RELEASE_ENV_PATH = "cloud/workers/api/release.env";
 
 function record(value: unknown): JsonRecord | null {
@@ -219,7 +223,7 @@ function d1Rows(command: string, database = DATABASE): JsonRecord[] {
       wranglerArgs([
         "d1",
         "execute",
-        database,
+        resolveD1Binding(database),
         "--remote",
         "--command",
         command,

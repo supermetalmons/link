@@ -1,3 +1,7 @@
+import {
+  operatorConfigPath,
+  resolveD1Binding,
+} from "./operator/configuration.ts";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
@@ -17,7 +21,7 @@ type Dependencies = {
 };
 
 const DATABASE = "mons-link-profiles";
-const CONFIG = "cloud/workers/api/wrangler.jsonc";
+const CONFIG = operatorConfigPath();
 const RELEASE_ENV = "cloud/workers/api/release.env";
 
 function parseArgs(argv: string[]): Operation {
@@ -113,7 +117,7 @@ function runWrangler(
     [
       "d1",
       "execute",
-      DATABASE,
+      resolveD1Binding(DATABASE),
       "--remote",
       "--config",
       CONFIG,

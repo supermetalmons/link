@@ -58,6 +58,14 @@ import { recoverEventTransitionIntents } from "./eventRepository.ts";
 import { readAutomatchRuntimeControl } from "./automatchD1.ts";
 import { MATCH_SNAPSHOT_PATH } from "@mons/shared/game-sessions";
 import { handleMatchSnapshotRoute } from "./matchSnapshotRoute.ts";
+import {
+  apiMaintenanceEnabled,
+  apiMaintenanceResponse,
+} from "./d1MigrationControl.ts";
+import {
+  D1_MIGRATION_PATH,
+  handleD1MigrationRoute,
+} from "./d1MigrationRoute.ts";
 
 export { extractIdFromJsonUri } from "./helius.ts";
 export type { ProviderFetch } from "./provider.ts";
@@ -69,6 +77,10 @@ export function handleFetch(
   ctx: ExecutionContext,
 ): Promise<Response> {
   const pathname = new URL(request.url).pathname;
+  if (pathname === D1_MIGRATION_PATH)
+    return handleD1MigrationRoute(request, env);
+  if (apiMaintenanceEnabled(env))
+    return Promise.resolve(apiMaintenanceResponse(env));
   if (pathname === MATCH_SNAPSHOT_PATH) {
     return handleMatchSnapshotRoute(request, env);
   }
@@ -104,6 +116,7 @@ export async function handleScheduled(
   env: Env,
   overrides: Partial<ScheduledTasks> = {},
 ): Promise<void> {
+  if (apiMaintenanceEnabled(env)) return;
   const profileWritesEnabled = profileBackgroundMutationsEnabled(env);
   const persistenceWritesEnabled = readAutomatchRuntimeControl(
     env.PROFILE_GAMES_DB,
@@ -203,6 +216,10 @@ async function handleQueue(
   batch: MessageBatch<unknown>,
   env: Env,
 ): Promise<void> {
+  if (apiMaintenanceEnabled(env)) {
+    retryQueueMessages(batch);
+    return;
+  }
   if (
     (batch.queue === PROFILE_GAME_PROJECTION_QUEUE_NAME ||
       batch.queue === TELEGRAM_PROJECTION_QUEUE_NAME) &&

@@ -1,6 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  operatorConfigPath,
+  resolveD1Binding,
+} from "./operator/configuration.ts";
+import { readPrivateJson } from "./operator/runtime.ts";
 
 type JsonRecord = Record<string, unknown>;
 type StorageMode = "frozen" | "d1";
@@ -8,6 +13,7 @@ type StorageManagementOperation = "status" | "freeze" | "resume-d1";
 type RecoverStaleAdmissionOperation = {
   admissionId: string;
   kind: "recover-stale-admission";
+  evidencePath?: string;
 };
 type ManagementOperation =
   StorageManagementOperation | RecoverStaleAdmissionOperation;
@@ -19,6 +25,8 @@ type EventWriteAdmissionStatus = {
   expired: boolean;
   expiresAtMs: number;
 };
+
+type ExpectedEventWriteAdmission = Omit<EventWriteAdmissionStatus, "expired">;
 
 type PendingEventTransitionStatus = {
   applicationLeaseExpiresAtMs: number | null;
@@ -44,6 +52,7 @@ type ManagementDependencies = {
   log(message: string): void;
   now(): number;
   readControl(): EventControl;
+  readRecoveryEvidence?(path: string): unknown;
   recoverStaleAdmission(
     admission: EventWriteAdmissionStatus,
     nowMs: number,
@@ -56,7 +65,7 @@ type ManagementDependencies = {
 };
 
 const DATABASE = "mons-link-events";
-const CONFIG_PATH = "cloud/workers/api/wrangler.jsonc";
+const CONFIG_PATH = operatorConfigPath();
 const RELEASE_ENV_PATH = "cloud/workers/api/release.env";
 
 function validAdmissionId(value: unknown): value is string {
@@ -77,12 +86,20 @@ function validAdmissionId(value: unknown): value is string {
 
 function parseArgs(argv: string[]): ManagementOperation {
   if (argv[0] === "--recover-stale-admission") {
-    if (argv.length !== 2 || !validAdmissionId(argv[1])) {
+    if (
+      !validAdmissionId(argv[1]) ||
+      (argv.length !== 2 &&
+        (argv.length !== 4 || argv[2] !== "--evidence" || !isAbsolute(argv[3])))
+    ) {
       throw new TypeError(
-        "--recover-stale-admission requires one valid admission ID",
+        "--recover-stale-admission requires one valid admission ID and optional --evidence with an absolute private JSON path",
       );
     }
-    return { kind: "recover-stale-admission", admissionId: argv[1] };
+    return {
+      kind: "recover-stale-admission",
+      admissionId: argv[1],
+      ...(argv.length === 4 ? { evidencePath: argv[3] } : {}),
+    };
   }
   if (argv.length !== 1) {
     throw new TypeError("choose exactly one event storage control operation");
@@ -106,6 +123,14 @@ function manageEvents(
   const nowMs = dependencies.now();
   let recoveredAdmissionId: string | undefined;
   if (typeof operation !== "string") {
+    const expected = operation.evidencePath
+      ? parseAdmissionRecoveryEvidence(
+          (dependencies.readRecoveryEvidence || readPrivateJson)(
+            requireEvidencePath(operation.evidencePath),
+          ),
+          operation.admissionId,
+        )
+      : null;
     const admission = dependencies
       .listWriteAdmissions(nowMs)
       .find((candidate) => candidate.admissionId === operation.admissionId);
@@ -115,7 +140,23 @@ function manageEvents(
     if (!admission.expired) {
       throw new Error("event write admission has not expired");
     }
-    if (!dependencies.recoverStaleAdmission(admission, nowMs)) {
+    if (
+      expected &&
+      (admission.admissionId !== expected.admissionId ||
+        admission.freezeGeneration !== expected.freezeGeneration ||
+        admission.createdAtMs !== expected.createdAtMs ||
+        admission.expiresAtMs !== expected.expiresAtMs)
+    ) {
+      throw new Error(
+        "event write admission differs from the reviewed evidence",
+      );
+    }
+    if (
+      !dependencies.recoverStaleAdmission(
+        expected ? { ...expected, expired: true } : admission,
+        nowMs,
+      )
+    ) {
       throw new Error("event write admission recovery conflicted");
     }
     recoveredAdmissionId = admission.admissionId;
@@ -161,13 +202,75 @@ function record(value: unknown): JsonRecord | null {
     : null;
 }
 
+function requireEvidencePath(path: string): string {
+  if (!isAbsolute(path))
+    throw new Error(
+      "event admission evidence requires an absolute private JSON path",
+    );
+  return path;
+}
+
+function parseAdmissionRecoveryEvidence(
+  value: unknown,
+  expectedAdmissionId: string,
+): ExpectedEventWriteAdmission {
+  const evidence = record(value);
+  const admission = record(evidence?.admission);
+  const columns = [
+    "admission_id",
+    "freeze_generation",
+    "created_at_ms",
+    "expires_at_ms",
+  ];
+  if (
+    !evidence ||
+    !admission ||
+    evidence.requestFinished !== true ||
+    evidence.sourceReconciled !== true ||
+    typeof evidence.rationale !== "string" ||
+    evidence.rationale.trim().length === 0 ||
+    !validAdmissionId(expectedAdmissionId) ||
+    admission.admission_id !== expectedAdmissionId ||
+    Object.keys(admission).length !== columns.length ||
+    columns.some((column) => !Object.hasOwn(admission, column))
+  ) {
+    throw new Error("invalid reviewed event admission recovery evidence");
+  }
+  const number = (column: string): number => {
+    const value = admission[column];
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+      throw new Error("invalid event admission evidence integer");
+    return value;
+  };
+  const createdAtMs = number("created_at_ms");
+  const expiresAtMs = number("expires_at_ms");
+  if (expiresAtMs <= createdAtMs)
+    throw new Error("invalid event admission evidence expiry");
+  return {
+    admissionId: expectedAdmissionId,
+    freezeGeneration: number("freeze_generation"),
+    createdAtMs,
+    expiresAtMs,
+  };
+}
+
+function readAdmissionRecoveryEvidence(
+  path: string,
+  expectedAdmissionId: string,
+): ExpectedEventWriteAdmission {
+  return parseAdmissionRecoveryEvidence(
+    readPrivateJson(requireEvidencePath(path)),
+    expectedAdmissionId,
+  );
+}
+
 function runWrangler(command: string): JsonRecord[] {
   const result = spawnSync(
     resolve("node_modules/.bin/wrangler"),
     [
       "d1",
       "execute",
-      DATABASE,
+      resolveD1Binding(DATABASE),
       "--remote",
       "--config",
       CONFIG_PATH,
@@ -291,8 +394,9 @@ function readWriteAdmissionRows(_nowMs: number): EventWriteAdmissionStatus[] {
 function recoverRemoteStaleAdmission(
   admission: EventWriteAdmissionStatus,
   _nowMs: number,
+  executeSql: typeof runWrangler = runWrangler,
 ): boolean {
-  const rows = runWrangler(
+  const rows = executeSql(
     `DELETE FROM event_write_admissions WHERE admission_id = ${sqlText(admission.admissionId)} AND freeze_generation = ${admission.freezeGeneration} AND created_at_ms = ${admission.createdAtMs} AND expires_at_ms = ${admission.expiresAtMs} AND expires_at_ms <= unixepoch() * 1000 RETURNING admission_id`,
   );
   return rows.length === 1 && rows[0]?.admission_id === admission.admissionId;
@@ -392,8 +496,12 @@ export {
   execute,
   manageEvents,
   parseArgs,
+  parseAdmissionRecoveryEvidence,
+  readAdmissionRecoveryEvidence,
+  recoverRemoteStaleAdmission,
   type EventControl,
   type EventWriteAdmissionStatus,
+  type ExpectedEventWriteAdmission,
   type ManagementDependencies,
   type ManagementOperation,
   type PendingEventTransitionStatus,

@@ -7,6 +7,12 @@ import {
   transitionEventStorageMode,
 } from "./eventTestMigrations.ts";
 import { handleEventReadRoute } from "../src/eventReadRoute.ts";
+import { AuthApiFailure } from "../src/authErrors.ts";
+import {
+  eventBookmarkConstraint,
+  MAX_EVENT_BOOKMARK_LENGTH,
+  scopeEventBookmark,
+} from "../src/eventBookmarks.ts";
 import { handleEventRoute } from "../src/eventRoute.ts";
 import {
   acquireEventWriteAdmission,
@@ -22,6 +28,35 @@ const testEnv = env as Env & {
 };
 const eventId = "NN3eRzoZo80";
 const profileId = "profile-one";
+
+function observedEventDatabase(
+  constraints: Array<string | undefined>,
+): D1Database {
+  return new Proxy(testEnv.EVENT_DB, {
+    get(target, property) {
+      if (property === "withSession") {
+        return (constraint?: string) => {
+          constraints.push(constraint);
+          return target.withSession(constraint);
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+function snapshotDependencies() {
+  return {
+    repository: {
+      getStatePath: async () => null,
+      readProfileOwnershipSnapshot: async () => {
+        throw new Error("unused");
+      },
+    },
+    verifyIdentity: async () => ({ uid: "login-one" }),
+  };
+}
 
 function eventRecord() {
   return {
@@ -163,6 +198,160 @@ describe("event read route", () => {
     expect(response.headers.get("Access-Control-Expose-Headers")).toContain(
       "X-D1-Bookmark",
     );
+  });
+
+  it("replaces old or malformed bookmark scopes on primary without changing the body or ETag", async () => {
+    const constraints: Array<string | undefined> = [];
+    const configured = {
+      ...testEnv,
+      EVENT_DB: observedEventDatabase(constraints),
+    };
+    const url = `https://api.mons.link/events/snapshot?eventId=${eventId}`;
+    const baseline = await handleEventReadRoute(
+      new Request(url, { headers: { Origin: "https://mons.link" } }),
+      configured,
+      { waitUntil() {} },
+      snapshotDependencies(),
+    );
+    expect(baseline.status).toBe(200);
+    const baselineBody = await baseline.text();
+    const etag = baseline.headers.get("ETag")!;
+    const epoch: string = testEnv.EVENT_DB_BOOKMARK_EPOCH;
+    const prefix = `mons-d1-v1:${epoch}:`;
+    const foreignEpoch =
+      epoch === "00000000-0000-4000-8000-000000000001"
+        ? "00000000-0000-4000-8000-000000000002"
+        : "00000000-0000-4000-8000-000000000001";
+    const headers = [
+      "old-native-bookmark",
+      scopeEventBookmark("native-from-old-database", foreignEpoch),
+      "mons-d1-v1:invalid:bookmark",
+      `${prefix}native with whitespace`,
+      `${prefix}${"x".repeat(MAX_EVENT_BOOKMARK_LENGTH)}`,
+      "",
+    ];
+    for (const bookmark of headers) {
+      const response = await handleEventReadRoute(
+        new Request(url, {
+          headers: { Origin: "https://mons.link", "X-D1-Bookmark": bookmark },
+        }),
+        configured,
+        { waitUntil() {} },
+        snapshotDependencies(),
+      );
+      expect(response.status).toBe(200);
+      expect(constraints.at(-1)).toBe("first-primary");
+      expect(response.headers.get("ETag")).toBe(etag);
+      expect(response.headers.get("X-D1-Bookmark")?.startsWith(prefix)).toBe(
+        true,
+      );
+      expect(await response.text()).toBe(baselineBody);
+      const conditional = await handleEventReadRoute(
+        new Request(url, {
+          headers: {
+            Origin: "https://mons.link",
+            "X-D1-Bookmark": bookmark,
+            "If-None-Match": etag,
+          },
+        }),
+        configured,
+        { waitUntil() {} },
+        snapshotDependencies(),
+      );
+      expect(conditional.status).toBe(304);
+      expect(constraints.at(-1)).toBe("first-primary");
+      expect(conditional.headers.get("ETag")).toBe(etag);
+      expect(conditional.headers.get("X-D1-Bookmark")?.startsWith(prefix)).toBe(
+        true,
+      );
+      expect(await conditional.text()).toBe("");
+    }
+  });
+
+  it("continues a matching scoped bookmark as the exact native D1 constraint", async () => {
+    const constraints: Array<string | undefined> = [];
+    const configured = {
+      ...testEnv,
+      EVENT_DB: observedEventDatabase(constraints),
+    };
+    const url = `https://api.mons.link/events/snapshot?eventId=${eventId}`;
+    const first = await handleEventReadRoute(
+      new Request(url, { headers: { Origin: "https://mons.link" } }),
+      configured,
+      { waitUntil() {} },
+      snapshotDependencies(),
+    );
+    const bookmark = first.headers.get("X-D1-Bookmark")!;
+    const native = eventBookmarkConstraint(
+      bookmark,
+      testEnv.EVENT_DB_BOOKMARK_EPOCH,
+    );
+    expect(native).not.toBe("first-primary");
+    const second = await handleEventReadRoute(
+      new Request(url, {
+        headers: {
+          Origin: "https://mons.link",
+          "X-D1-Bookmark": bookmark,
+          "If-None-Match": first.headers.get("ETag")!,
+        },
+      }),
+      configured,
+      { waitUntil() {} },
+      snapshotDependencies(),
+    );
+    expect(second.status).toBe(304);
+    expect(constraints.at(-1)).toBe(native);
+    expect(
+      second.headers
+        .get("X-D1-Bookmark")
+        ?.startsWith(`mons-d1-v1:${testEnv.EVENT_DB_BOOKMARK_EPOCH}:`),
+    ).toBe(true);
+  });
+
+  it("fails closed for missing or invalid bookmark epochs without changing authentication errors", async () => {
+    for (const epoch of [undefined, "", "invalid"]) {
+      const constraints: Array<string | undefined> = [];
+      const configured = new Proxy(
+        { ...testEnv, EVENT_DB: observedEventDatabase(constraints) },
+        {
+          get(target, property) {
+            return property === "EVENT_DB_BOOKMARK_EPOCH"
+              ? epoch
+              : Reflect.get(target, property);
+          },
+        },
+      );
+      const request = new Request(
+        `https://api.mons.link/events/snapshot?eventId=${eventId}`,
+        { headers: { Origin: "https://mons.link" } },
+      );
+      const response = await handleEventReadRoute(
+        request,
+        configured,
+        { waitUntil() {} },
+        snapshotDependencies(),
+      );
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({
+        ok: false,
+        error: "unavailable",
+        message: "event-read-unavailable",
+      });
+      expect(constraints).toEqual([]);
+      const unauthorized = await handleEventReadRoute(
+        request,
+        configured,
+        { waitUntil() {} },
+        {
+          ...snapshotDependencies(),
+          verifyIdentity: async () => {
+            throw new AuthApiFailure(401, "unauthenticated", "unauthenticated");
+          },
+        },
+      );
+      expect(unauthorized.status).toBe(401);
+      expect(constraints).toEqual([]);
+    }
   });
 
   it("rejects oversized event IDs before storage reads", async () => {

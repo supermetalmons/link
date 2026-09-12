@@ -1,3 +1,7 @@
+import {
+  operatorConfigPath,
+  resolveD1Binding,
+} from "./operator/configuration.ts";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
@@ -25,7 +29,7 @@ type ManagementDependencies = {
 };
 
 const DATABASE = "mons-link-event-prize-withdrawals";
-const CONFIG_PATH = "cloud/workers/api/wrangler.jsonc";
+const CONFIG_PATH = operatorConfigPath();
 const RELEASE_ENV_PATH = "cloud/workers/api/release.env";
 const VALID_STATUSES = new Set([
   "blocked",
@@ -192,7 +196,7 @@ function runWrangler(args: string[]): JsonRecord[] {
     [
       "d1",
       "execute",
-      DATABASE,
+      resolveD1Binding(DATABASE),
       "--remote",
       "--config",
       CONFIG_PATH,

@@ -34,6 +34,11 @@ import {
   requireProfileOwnershipSnapshot,
 } from "./profileOwnership.ts";
 import type { RequestIdentity } from "./requestIdentity.ts";
+import {
+  eventBookmarkConstraint,
+  requireEventBookmarkEpoch,
+  scopeEventBookmark,
+} from "./eventBookmarks.ts";
 
 export const EVENT_SNAPSHOT_PATH = "/events/snapshot";
 export const PROFILE_EVENT_PRIZES_PATH = "/events/prizes";
@@ -159,10 +164,14 @@ export async function handleEventReadRoute(
     )(request, env, ctx);
     const url = new URL(request.url);
     const repository = dependencies.repository || createGameplayRepository(env);
-    const requestedBookmark =
-      request.headers.get(EVENT_BOOKMARK_HEADER)?.trim() || "";
+    const bookmarkEpoch = requireEventBookmarkEpoch(
+      env.EVENT_DB_BOOKMARK_EPOCH,
+    );
     const session = env.EVENT_DB.withSession(
-      requestedBookmark || "first-primary",
+      eventBookmarkConstraint(
+        request.headers.get(EVENT_BOOKMARK_HEADER),
+        bookmarkEpoch,
+      ),
     );
     let body: EventSnapshotResponse | ProfileEventPrizesResponse;
     let valueEtag: string;
@@ -185,7 +194,7 @@ export async function handleEventReadRoute(
       throw new AuthApiFailure(404, "not-found", "not-found");
     }
     assertBounded(body);
-    const bookmark = session.getBookmark() || "";
+    const bookmark = scopeEventBookmark(session.getBookmark(), bookmarkEpoch);
     const headers = readHeaders(corsHeaders, valueEtag, bookmark);
     if (request.headers.get("If-None-Match")?.trim() === valueEtag) {
       return notModified(headers);

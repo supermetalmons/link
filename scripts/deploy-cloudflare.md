@@ -110,6 +110,33 @@ Freeze only the affected canonical writers and pause only the consumers that cou
 
 Keep API `workers_dev` and `preview_urls` disabled. Use the custom domain for verification. On failure, retain the required maintenance controls and repair forward. Resume only controls changed for this operation. Routine compatible releases use the API and frontend release sections without freezes, Queue pauses, fixed drain waits, or observation windows.
 
+## D1 region relocation
+
+`migrate:d1-region` moves all six canonical databases together to replacements with the `-enam` suffix. It preserves stable binding names, the existing Durable Object namespace, stored deadlines, migration history, and encrypted secrets. This is coordinated maintenance because changing database identities requires one consistent copy across API requests, Durable Objects, Queues, and versioned Workflows.
+
+Use a new protected directory outside the repository. The operator stores an immutable manifest chain, exact resource IDs, control transitions, typed table digests, Workflow histories, and verification reports there. Keep this directory and the fenced source databases until separately reviewed cleanup. `status` shows recorded progress; it does not resume work.
+
+```sh
+npm run migrate:d1-region -- preflight --directory /secure/d1-enam
+npm run migrate:d1-region -- prepare --directory /secure/d1-enam
+npm run migrate:d1-region -- quiesce --directory /secure/d1-enam --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
+npm run migrate:d1-region -- copy --directory /secure/d1-enam
+npm run migrate:d1-region -- verify --directory /secure/d1-enam --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
+npm run migrate:d1-region -- cutover --directory /secure/d1-enam --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
+npm run migrate:d1-region -- resume --directory /secure/d1-enam --bridge-secret-file /Users/ivan/.config/mons-link/secrets/telegram-queue
+npm run migrate:d1-region -- status --directory /secure/d1-enam
+```
+
+Preparation proves ENAM placement, rehearses exact copies and native Workflow handoff on isolated resources, runs the complete repository gate, prepares fixture-owned wagering checks, and uploads the maintenance candidate. `API_MAINTENANCE` rejects application HTTP traffic, suppresses cron and Queue work, and gates every Durable Object entrypoint. Only signed, typed migration inspection and barrier commands remain available. Workflow execution continues to use database controls rather than the versioned API flag.
+
+Quiescence preserves existing pause/freeze states, reconciles only evidenced expired admissions, installs source-only rejection triggers atomically with drain assertions, and requires barriers from the existing object inventory. Copies preserve SQLite storage types and bytes, restore application triggers after data, and compare every table and schema object. Live integrity verification uses supported `PRAGMA quick_check`, foreign-key checks, and domain topology audits.
+
+After cutover begins, earlier source phases are rejected. Waiting Workflows are individually handed off with the same IDs, payloads, retention, and deadlines; completed histories are left untouched. Resume restores only destination controls changed by this operation, verifies the real API and isolated gameplay behavior, and keeps all source fences in place. Never reopen a stale source after destination writes begin.
+
+Event read bookmarks include `EVENT_DB_BOOKMARK_EPOCH`, which must equal the current event database UUID. Legacy or foreign-database bookmarks restart from the primary and receive a current scoped bookmark, including on `304` responses. After cutover, rollback candidates must retain the replacement database bindings and scoped bookmark support.
+
+Existing operator commands resolve their logical database names through stable bindings. To inspect a saved source configuration explicitly, set `MONS_D1_CONFIG` to its protected candidate configuration path; direct Wrangler D1 commands should use bindings such as `PROFILE_DB` and `EVENT_DB` rather than retired physical names. Admission recovery supports `--evidence /secure/proof.json` to bind the request-finished and source-reconciled proof to the exact retained row.
+
 ## Gameplay and delivery verification
 
 For changes to gameplay or shared state adapters, run the isolated lifecycle smoke after API promotion:
@@ -138,8 +165,8 @@ The canonical profile control accepts only `active` and `frozen`. Freeze before 
 ```sh
 npm run manage:profile-canonical -- --status
 npm run manage:profile-canonical -- --freeze
-npx wrangler d1 migrations list mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
-npx wrangler d1 migrations apply mons-link-profiles --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 migrations list PROFILE_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 migrations apply PROFILE_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
 Pause the permanent profile-related Queues when a migration changes profile schema or invariants:
@@ -167,7 +194,7 @@ Canonical profile incidents freeze D1 and fix forward. `legacy_fields_json` cont
 
 ## Historical match D1 operations
 
-`mons-link-profile-games` D1 is the sole source for the public historical-match endpoint. A missing snapshot returns `pair: null`; the endpoint never reconstructs or persists data on a read miss. There is no read-through recovery or backfill path. Releases affecting history or its projections must pass the authenticated `--require-history` smoke using a known non-null D1 snapshot. Prepare its fixture before promotion and include this check in the required live verification; for coordinated maintenance, run it before canonical writes resume. Unrelated catalog or frontend changes do not require this fixture.
+`PROFILE_GAMES_DB` D1 is the sole source for the public historical-match endpoint. A missing snapshot returns `pair: null`; the endpoint never reconstructs or persists data on a read miss. There is no read-through recovery or backfill path. Releases affecting history or its projections must pass the authenticated `--require-history` smoke using a known non-null D1 snapshot. Prepare its fixture before promotion and include this check in the required live verification; for coordinated maintenance, run it before canonical writes resume. Unrelated catalog or frontend changes do not require this fixture.
 
 During a relevant maintenance observation window or an investigation, tail historical reads and their rating- and transition-driven archival projections. Routine releases require no fixed observation window:
 
@@ -183,7 +210,7 @@ npx wrangler tail mons-link-api --version-id <version-id> --format pretty --stat
 
 ## Event D1 operations
 
-`mons-link-events` owns event data and coordination. Its control supports `d1` and `frozen`:
+`EVENT_DB` owns event data and coordination. Its control supports `d1` and `frozen`:
 
 ```sh
 npm run manage:event-prize-withdrawals -- --freeze
@@ -195,8 +222,8 @@ npm run manage:events -- --freeze
 Wait until no withdrawal is `processing` or `submitted`, and event/projection leases and write admissions have drained before changing coordinated state. Inspect all pages of version-pinned Workflow instances during schema maintenance. Freeze storage before terminating an instance, and preserve pending D1 work for recovery.
 
 ```sh
-npx wrangler d1 execute mons-link-event-prize-withdrawals --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env --command "SELECT COUNT(*) AS pending_withdrawals FROM event_prize_withdrawals WHERE json_extract(record_json, '$.status') IN ('processing', 'submitted');" --json
-npx wrangler d1 migrations apply mons-link-events --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 execute EVENT_PRIZE_WITHDRAWALS_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env --command "SELECT COUNT(*) AS pending_withdrawals FROM event_prize_withdrawals WHERE json_extract(record_json, '$.status') IN ('processing', 'submitted');" --json
+npx wrangler d1 migrations apply EVENT_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 npm run manage:events -- --recover-stale-admission <admission-id>
 ```
 
@@ -227,7 +254,7 @@ Recover only an expired admission whose original request has finished and whose 
 
 ## Event-prize withdrawal D1 operations
 
-`mons-link-event-prize-withdrawals` owns admission, leases, persisted Solana submissions, and completion records. Its runtime control accepts `d1` and `frozen`:
+`EVENT_PRIZE_WITHDRAWALS_DB` owns admission, leases, persisted Solana submissions, and completion records. Its runtime control accepts `d1` and `frozen`:
 
 ```sh
 npm run manage:event-prize-withdrawals -- --status
@@ -260,10 +287,10 @@ npx wrangler workflows instances list mons-link-event-prize-withdrawal --per-pag
 
 ## Telegram D1 operations
 
-Delivery and recovery records live in `mons-link-telegram`. Apply its schema before promoting a Worker that requires it:
+Delivery and recovery records live in `TELEGRAM_DB`. Apply its schema before promoting a Worker that requires it:
 
 ```sh
-npx wrangler d1 migrations apply mons-link-telegram --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
+npx wrangler d1 migrations apply TELEGRAM_DB --remote --config cloud/workers/api/wrangler.jsonc --env-file cloud/workers/api/release.env
 ```
 
 `telegram_runtime_control` uses `d1` and `frozen`. Missing or unreadable control state fails closed. Ambiguous sends remain `uncertain` and require an operator-reviewed recovery action; never retry them blindly.
