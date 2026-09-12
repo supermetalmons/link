@@ -579,3 +579,176 @@ test("persisted recursively sorted schema keys preserve clone and verification d
     target.close();
   }
 });
+
+test("verification overlaps four rows with out-of-order replies while preserving the sequential copy digest", async () => {
+  const source = database();
+  const target = database();
+  try {
+    source.exec(
+      "CREATE TABLE concurrent_cells(id INTEGER PRIMARY KEY, value BLOB)",
+    );
+    for (let id = 1; id <= 8; id++)
+      source
+        .prepare("INSERT INTO concurrent_cells VALUES (?,?)")
+        .run(id, Buffer.alloc(4_096, id));
+    const raw = queryFor(source);
+    let copying = 0;
+    let copyPeak = 0;
+    const copyQuery: SqlQuery = async (sql, params) => {
+      if (!sql.startsWith("SELECT hex(substr")) return raw(sql, params);
+      copying++;
+      copyPeak = Math.max(copyPeak, copying);
+      try {
+        await new Promise<void>((resolve) => queueMicrotask(resolve));
+        return await raw(sql, params);
+      } finally {
+        copying--;
+      }
+    };
+    const expected = await cloneDatabase(copyQuery, queryFor(target));
+    assert.equal(copyPeak, 1);
+    let active = 0;
+    let peak = 0;
+    let queued: Array<{
+      id: number;
+      resolve: (rows: Record<string, unknown>[]) => void;
+      rows: Record<string, unknown>[];
+    }> = [];
+    const completionOrder: number[] = [];
+    const parallel: SqlQuery = async (sql, params) => {
+      if (!sql.startsWith("SELECT hex(substr")) return raw(sql, params);
+      const id = Number(/CAST\('(\d+)' AS INTEGER\)/.exec(sql)![1]);
+      active++;
+      peak = Math.max(peak, active);
+      const rows = await raw(sql, params);
+      return new Promise((resolve) => {
+        queued.push({ id, resolve, rows });
+        if (queued.length === 4) {
+          const current = queued;
+          queued = [];
+          for (const pending of current.reverse()) {
+            completionOrder.push(pending.id);
+            active--;
+            pending.resolve(pending.rows);
+          }
+        }
+      });
+    };
+    const actual = await digestDatabase(parallel);
+    assert.equal(peak, 4);
+    assert.deepEqual(completionOrder, [4, 3, 2, 1, 8, 7, 6, 5]);
+    assert.deepEqual(actual, expected);
+  } finally {
+    source.close();
+    target.close();
+  }
+});
+
+test("verification batches budget decoded row bytes and allow an oversized valid row alone", async () => {
+  for (const wideRow of [false, true]) {
+    const source = database();
+    try {
+      source.exec(
+        "CREATE TABLE budget_cells(id INTEGER PRIMARY KEY, a BLOB, b BLOB, c BLOB)",
+      );
+      const rows = wideRow ? 2 : 4;
+      for (let id = 1; id <= rows; id++)
+        source
+          .prepare("INSERT INTO budget_cells VALUES (?,?,?,?)")
+          .run(
+            id,
+            Buffer.alloc(1_500_000, id),
+            wideRow ? Buffer.alloc(1_500_000, id) : null,
+            wideRow ? Buffer.alloc(1_500_000, id) : null,
+          );
+      const raw = queryFor(source);
+      const startedRows = new Set<number>();
+      const completedRows = new Set<number>();
+      let activeRows = 0;
+      let peakRows = 0;
+      const parallel: SqlQuery = async (sql, params) => {
+        if (!sql.startsWith("SELECT hex(substr")) return raw(sql, params);
+        const id = Number(/CAST\('(\d+)' AS INTEGER\)/.exec(sql)![1]);
+        if (!startedRows.has(id)) {
+          startedRows.add(id);
+          activeRows++;
+          peakRows = Math.max(peakRows, activeRows);
+          if (activeRows > 1)
+            assert.ok(activeRows * 3_000_000 <= 8 * 1_024 * 1_024);
+        }
+        await new Promise<void>((resolve) => queueMicrotask(resolve));
+        const result = await raw(sql, params);
+        const lastColumn = sql.includes(
+          `CAST("${wideRow ? "c" : "a"}" AS BLOB)`,
+        );
+        if (
+          lastColumn &&
+          Number(params![0]) - 1 + Number(params![1]) === 1_500_000
+        ) {
+          completedRows.add(id);
+          activeRows--;
+        }
+        return result;
+      };
+      const actual = await digestDatabase(parallel);
+      assert.equal(actual.tables[0].rows, String(rows));
+      assert.equal(peakRows, wideRow ? 1 : 2);
+      assert.equal(completedRows.size, rows);
+      assert.equal(activeRows, 0);
+    } finally {
+      source.close();
+    }
+  }
+});
+
+test("a failed verification read waits for every started row and starts no later batch", async () => {
+  const source = database();
+  try {
+    source.exec(
+      "CREATE TABLE failure_cells(id INTEGER PRIMARY KEY,value BLOB)",
+    );
+    for (let id = 1; id <= 8; id++)
+      source
+        .prepare("INSERT INTO failure_cells VALUES (?,?)")
+        .run(id, Buffer.alloc(4_096, id));
+    const raw = queryFor(source);
+    const started = Promise.withResolvers<void>();
+    const pending: Array<{ id: number; finish: () => void }> = [];
+    const readRows: number[] = [];
+    const settledRows: number[] = [];
+    const failing: SqlQuery = async (sql, params) => {
+      if (!sql.startsWith("SELECT hex(substr")) return raw(sql, params);
+      const id = Number(/CAST\('(\d+)' AS INTEGER\)/.exec(sql)![1]);
+      readRows.push(id);
+      const result = await raw(sql, params);
+      return new Promise((resolve, reject) => {
+        pending.push({
+          id,
+          finish: () => {
+            settledRows.push(id);
+            if (id === 1) reject(new Error("injected row read failure"));
+            else resolve(result);
+          },
+        });
+        if (pending.length === 4) started.resolve();
+      });
+    };
+    let finished = false;
+    const digest = digestDatabase(failing).finally(() => {
+      finished = true;
+    });
+    const rejected = assert.rejects(digest, /injected row read failure/);
+    await started.promise;
+    pending[0].finish();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(finished, false);
+    assert.deepEqual(readRows, [1, 2, 3, 4]);
+    for (const entry of pending.slice(1).reverse()) entry.finish();
+    await rejected;
+    assert.deepEqual(settledRows, [1, 4, 3, 2]);
+    assert.deepEqual(readRows, [1, 2, 3, 4]);
+    assert.equal(finished, true);
+  } finally {
+    source.close();
+  }
+});

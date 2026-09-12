@@ -404,6 +404,51 @@ async function readCells(
   return prefixes.map((prefix) => prefix.cell);
 }
 
+function estimatedRowBytes(
+  row: Record<string, unknown>,
+  columnCount: number,
+): number {
+  let bytes = 2;
+  for (let index = 0; index < columnCount; index++) {
+    const prefix = decodePrefix(row[`c${index}`]);
+    bytes += Buffer.byteLength(JSON.stringify(prefix.cell)) + 1;
+    if (prefix.cell.type === "text" || prefix.cell.type === "blob")
+      bytes += prefix.bytes * 2 - prefix.cell.hex.length;
+  }
+  return bytes;
+}
+
+async function readVerificationBatch(
+  query: SqlQuery,
+  table: TableSchema,
+  page: Record<string, unknown>[],
+  start: number,
+  offset: bigint,
+  signal?: AbortSignal,
+): Promise<Cell[][]> {
+  const columnCount = readColumns(table).length;
+  let bytes = 0;
+  let end = start;
+  while (end < page.length && end - start < 4) {
+    const nextBytes = estimatedRowBytes(page[end], columnCount);
+    if (end > start && bytes + nextBytes > MAX_PAGE_BYTES) break;
+    bytes += nextBytes;
+    end++;
+  }
+  signal?.throwIfAborted();
+  const results = await Promise.allSettled(
+    page
+      .slice(start, end)
+      .map((row, index) =>
+        readCells(query, table, row, offset + BigInt(index), signal),
+      ),
+  );
+  return results.map((result) => {
+    if (result.status === "rejected") throw result.reason;
+    return result.value;
+  });
+}
+
 async function scanTable(
   query: SqlQuery,
   table: TableSchema,
@@ -434,12 +479,25 @@ async function scanTable(
        ORDER BY ${orderColumns(table).map(identifier).join(", ")} LIMIT ${pageRows}${offset}`,
     );
     if (page.length > pageRows) fail("oversized page");
-    for (const row of page) {
-      const cells = await readCells(query, table, row, rows, options.signal);
-      hash.update(JSON.stringify(cells) + "\n");
-      if (onRow) await onRow(cells);
-      cursor = cells;
-      rows++;
+    for (let index = 0; index < page.length;) {
+      const batch =
+        stage === "verify"
+          ? await readVerificationBatch(
+              query,
+              table,
+              page,
+              index,
+              rows,
+              options.signal,
+            )
+          : [await readCells(query, table, page[index], rows, options.signal)];
+      for (const cells of batch) {
+        hash.update(JSON.stringify(cells) + "\n");
+        if (onRow) await onRow(cells);
+        cursor = cells;
+        rows++;
+      }
+      index += batch.length;
     }
     await options.onProgress?.({
       stage,
