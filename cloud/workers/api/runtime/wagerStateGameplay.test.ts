@@ -307,7 +307,11 @@ describe("D1 wager gameplay integration", () => {
         },
       },
     });
-    expect(await state.readSource(state.inviteId)).toEqual(stored);
+    expect(await state.readSource(state.inviteId)).toEqual({
+      hostId: state.host,
+      guestId: state.guest,
+      hostColor: "white",
+    });
     expect(state.sourceWrites()).toBe(0);
   });
 });

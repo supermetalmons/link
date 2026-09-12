@@ -13,6 +13,10 @@ import { INVITE_WAGERS_SOCKET_PROTOCOL } from "@mons/shared/invite-wagers";
 import { createInviteSourceD1Store } from "../src/inviteSourceD1.ts";
 import { handleInviteMetadataRoute } from "../src/inviteMetadataRoute.ts";
 import { handleInviteWagersRoute } from "../src/inviteWagersRoute.ts";
+import {
+  WagerStateD1Failure,
+  type WagerStateSnapshot,
+} from "../src/wagerStateD1.ts";
 import { applyRetiredProfileMigrations } from "./profileTestMigrations.ts";
 
 const testEnv = env as Env & {
@@ -25,7 +29,10 @@ type Room = DurableObjectStub<
 const sockets: WebSocket[] = [];
 const rooms: Room[] = [];
 
-async function readHttp(inviteId: string, channel: "metadata" | "wagers") {
+async function readHttpResponse(
+  inviteId: string,
+  channel: "metadata" | "wagers",
+) {
   const ctx = createExecutionContext();
   const handler =
     channel === "metadata"
@@ -39,11 +46,86 @@ async function readHttp(inviteId: string, channel: "metadata" | "wagers") {
     ctx,
   );
   await waitOnExecutionContext(ctx);
+  return response;
+}
+
+async function readHttp(inviteId: string, channel: "metadata" | "wagers") {
+  const response = await readHttpResponse(inviteId, channel);
   expect(response.status).toBe(200);
   return response.json() as Promise<{
     ok: true;
     snapshot: Record<string, unknown>;
   }>;
+}
+
+async function seedInvite() {
+  const inviteId = `source-${crypto.randomUUID()}`;
+  const source = createInviteSourceD1Store(env.PROFILE_GAMES_DB);
+  await env.PROFILE_GAMES_DB.batch(
+    source.buildCommitStatements(
+      await source.preparePatch(
+        {
+          [`invites/${inviteId}`]: {
+            hostId: "host-login",
+            guestId: "guest-login",
+            hostColor: "white",
+            password: "private-seed",
+          },
+        },
+        1,
+      ),
+      1,
+    ),
+  );
+  const wager = {
+    proposals: { "host-login": { material: "dust", count: 2, createdAt: 1 } },
+  };
+  await env.PROFILE_DB.prepare(
+    `INSERT INTO invite_wager_states
+     (invite_id, match_id, wager_json, resolution_marker, revision, updated_at_ms)
+     VALUES (?, ?, ?, 0, 1, 1)`,
+  )
+    .bind(inviteId, inviteId, JSON.stringify(wager))
+    .run();
+  const room = env.INVITE_REACTIONS.getByName(inviteId);
+  rooms.push(room);
+  return { inviteId, source, room, wager };
+}
+
+async function trackReads(room: Room) {
+  const reads = { metadata: 0, wagers: 0, failure: null as string | null };
+  await runInDurableObject(room, (instance) => {
+    const target = instance as unknown as {
+      inviteReader: (inviteId: string) => Promise<unknown>;
+      wagerReader: (inviteId: string) => Promise<WagerStateSnapshot[]>;
+    };
+    const inviteReader = target.inviteReader;
+    const wagerReader = target.wagerReader;
+    target.inviteReader = async (inviteId) => {
+      reads.metadata++;
+      return inviteReader(inviteId);
+    };
+    target.wagerReader = async (inviteId) => {
+      reads.wagers++;
+      if (reads.failure) throw new WagerStateD1Failure(reads.failure);
+      return wagerReader(inviteId);
+    };
+  });
+  return reads;
+}
+
+async function storedWagers(room: Room) {
+  return runInDurableObject(room, (_instance, state) =>
+    state.storage.sql
+      .exec<{
+        revision: number;
+        snapshot_json: string;
+        source_fingerprint: string;
+      }>(
+        "SELECT revision, snapshot_json, source_fingerprint FROM invite_wagers WHERE singleton = 1",
+      )
+      .one(),
+  );
 }
 
 async function openSocket(
@@ -129,36 +211,7 @@ beforeAll(async () => {
 });
 
 it("delivers HTTP and socket metadata and wagers from canonical D1 through eviction and reconnect", async () => {
-  const inviteId = `source-${crypto.randomUUID()}`;
-  const source = createInviteSourceD1Store(env.PROFILE_GAMES_DB);
-  await env.PROFILE_GAMES_DB.batch(
-    source.buildCommitStatements(
-      await source.preparePatch(
-        {
-          [`invites/${inviteId}`]: {
-            hostId: "host-login",
-            guestId: "guest-login",
-            hostColor: "white",
-            password: "private-seed",
-          },
-        },
-        1,
-      ),
-      1,
-    ),
-  );
-  const wager = {
-    proposals: { "host-login": { material: "dust", count: 2, createdAt: 1 } },
-  };
-  await env.PROFILE_DB.prepare(
-    `INSERT INTO invite_wager_states
-     (invite_id, match_id, wager_json, resolution_marker, revision, updated_at_ms)
-     VALUES (?, ?, ?, 0, 1, 1)`,
-  )
-    .bind(inviteId, inviteId, JSON.stringify(wager))
-    .run();
-  const room = env.INVITE_REACTIONS.getByName(inviteId);
-  rooms.push(room);
+  const { inviteId, source, room, wager } = await seedInvite();
   const first = await room.readMetadata(inviteId);
   expect(first.status).toBe("ok");
   if (first.status !== "ok") throw new Error("metadata-missing");
@@ -247,3 +300,107 @@ it("delivers HTTP and socket metadata and wagers from canonical D1 through evict
   expect((await reconnectedMetadata()).snapshot).toEqual(changed.snapshot);
   expect((await reconnectedWagers()).snapshot).toEqual(changedWagers.snapshot);
 });
+
+it("serves and refreshes metadata-only HTTP and sockets without querying wagers", async () => {
+  const { inviteId, source, room } = await seedInvite();
+  const reads = await trackReads(room);
+  reads.failure = "wager-state-not-activated";
+  const first = await room.readMetadata(inviteId);
+  if (first.status !== "ok") throw new Error("metadata-unavailable");
+  expect((await readHttp(inviteId, "metadata")).snapshot).toEqual(
+    first.snapshot,
+  );
+  const read = await openSocket(
+    room,
+    inviteId,
+    "metadata",
+    first.snapshot.revision,
+  );
+  expect((await read()).snapshot).toEqual(first.snapshot);
+  await env.PROFILE_GAMES_DB.batch(
+    source.buildCommitStatements(
+      await source.preparePatch(
+        { [`invites/${inviteId}/hostRematches`]: "1" },
+        2,
+      ),
+      2,
+    ),
+  );
+  await room.notifyMetadataChanged(inviteId);
+  const changed = await read();
+  expect(changed.snapshot.hostRematches).toBe("1");
+  expect(changed.snapshot.revision).toBeGreaterThan(first.snapshot.revision);
+  expect((await readHttp(inviteId, "metadata")).snapshot).toEqual(
+    changed.snapshot,
+  );
+  expect(reads.metadata).toBeGreaterThan(0);
+  expect(reads.wagers).toBe(0);
+});
+
+it.each(["wager-state-not-activated", "wager-state-corrupt"])(
+  "keeps mixed-room metadata healthy and preserves stored wagers when wager reads fail with %s",
+  async (failure) => {
+    const { inviteId, source, room, wager } = await seedInvite();
+    const initial = await room.readWagers(inviteId);
+    if (initial.status !== "ok") throw new Error("wagers-unavailable");
+    expect(initial.snapshot.wagers).toEqual({ [inviteId]: wager });
+    const readWagers = await openSocket(
+      room,
+      inviteId,
+      "wagers",
+      initial.snapshot.revision,
+    );
+    expect((await readWagers()).snapshot).toEqual(initial.snapshot);
+    const retained = await storedWagers(room);
+    const reads = await trackReads(room);
+    reads.failure = failure;
+    expect((await readHttp(inviteId, "metadata")).snapshot).toEqual(
+      initial.metadata.snapshot,
+    );
+    const readMetadata = await openSocket(
+      room,
+      inviteId,
+      "metadata",
+      initial.metadata.snapshot.revision,
+    );
+    expect((await readMetadata()).snapshot).toEqual(initial.metadata.snapshot);
+    await env.PROFILE_GAMES_DB.batch(
+      source.buildCommitStatements(
+        await source.preparePatch(
+          { [`invites/${inviteId}/hostRematches`]: "1" },
+          2,
+        ),
+        2,
+      ),
+    );
+    const changed = await room.readMetadata(inviteId);
+    if (changed.status !== "ok") throw new Error("metadata-unavailable");
+    expect((await readMetadata()).snapshot).toEqual(changed.snapshot);
+    expect(changed.snapshot.hostRematches).toBe("1");
+    expect(changed.snapshot.revision).toBeGreaterThan(
+      initial.metadata.snapshot.revision,
+    );
+    expect(reads.wagers).toBe(0);
+    expect(await storedWagers(room)).toEqual(retained);
+    expect(await room.readWagers(inviteId)).toEqual({ status: "invalid" });
+    const failedHttp = await readHttpResponse(inviteId, "wagers");
+    expect(failedHttp.status).toBe(503);
+    expect(await failedHttp.json()).toMatchObject({
+      ok: false,
+      error: "unavailable",
+    });
+    expect(reads.wagers).toBeGreaterThan(0);
+    expect(await storedWagers(room)).toEqual(retained);
+    expect((await readHttp(inviteId, "metadata")).snapshot).toEqual(
+      changed.snapshot,
+    );
+    reads.failure = null;
+    const recovered = await room.readWagers(inviteId);
+    expect(recovered).toMatchObject({
+      status: "ok",
+      snapshot: initial.snapshot,
+      metadata: changed,
+    });
+    expect(await storedWagers(room)).toEqual(retained);
+  },
+);

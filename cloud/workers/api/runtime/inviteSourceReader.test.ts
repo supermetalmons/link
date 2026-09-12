@@ -79,13 +79,17 @@ function readOnlyDatabase(
   return wrapDatabase(database);
 }
 
-function reader(games?: ReadInterceptor, profile?: ReadInterceptor) {
+function reader(
+  games?: ReadInterceptor,
+  profileAccess = () => {
+    throw new Error("unexpected-profile-binding-access");
+  },
+) {
   return createInviteSourceReader(
     new Proxy(env, {
       get(target, property) {
         if (property === "PROFILE_GAMES_DB") return readOnlyDatabase(db, games);
-        if (property === "PROFILE_DB")
-          return readOnlyDatabase(env.PROFILE_DB, profile);
+        if (property === "PROFILE_DB") return profileAccess();
         if (/FIREBASE|SERVICE_ACCOUNT/.test(String(property)))
           throw new Error(
             `unexpected-firebase-configuration:${String(property)}`,
@@ -192,7 +196,7 @@ describe("D1-only invite source reader", () => {
     },
   );
 
-  it("preserves private metadata, unknown fields, empty wagers, and false resolution markers without changing source rows", async () => {
+  it("returns only metadata while preserving source and retained wager rows", async () => {
     const wager = {
       proposals: { "host-login": { material: "dust", count: 2 } },
     };
@@ -200,16 +204,13 @@ describe("D1-only invite source reader", () => {
     await seedWager("empty", {}, false);
     await seedWager("resolved", null, true);
     await seedWager("unresolved", null, false);
+    const storedWagers = await env.PROFILE_DB.prepare(
+      "SELECT * FROM invite_wager_states WHERE invite_id = ? ORDER BY match_id",
+    )
+      .bind(inviteId)
+      .all();
     const read = reader();
-    expect(await read(inviteId)).toEqual({
-      ...source,
-      wagers: { empty: {}, proposal: wager },
-      matchesWagerResolutions: {
-        empty: false,
-        resolved: true,
-        unresolved: false,
-      },
-    });
+    expect(await read(inviteId)).toEqual(source);
     expect(
       await db
         .prepare(
@@ -218,13 +219,15 @@ describe("D1-only invite source reader", () => {
         .bind(inviteId)
         .first(),
     ).toEqual({ source_json: JSON.stringify(source), revision: 1 });
-    await env.PROFILE_DB.prepare(
-      `UPDATE invite_wager_states SET wager_json = NULL, resolution_marker = NULL,
-         revision = revision + 1 WHERE invite_id = ?`,
-    )
-      .bind(inviteId)
-      .run();
-    expect(await read(inviteId)).toEqual(source);
+    expect(
+      (
+        await env.PROFILE_DB.prepare(
+          "SELECT * FROM invite_wager_states WHERE invite_id = ? ORDER BY match_id",
+        )
+          .bind(inviteId)
+          .all()
+      ).results,
+    ).toEqual(storedWagers.results);
   });
 
   it("returns null for missing invites even when retained wager rows exist", async () => {
@@ -265,28 +268,17 @@ describe("D1-only invite source reader", () => {
     },
   );
 
-  it.each([
-    null,
-    { activation_epoch: 0 },
-    { verified_at_ms: null },
-    { activated_at_ms: 0 },
-  ])(
-    "requires valid wager activation %j, including missing invites",
-    async (replacement) => {
-      await db.prepare("DELETE FROM invite_sources").run();
-      const read = reader(undefined, async (query, execute) => {
-        const result = (await execute()) as D1Result<Record<string, unknown>>;
-        return query.includes("FROM wager_state_activation")
-          ? {
-              ...result,
-              results:
-                replacement === null
-                  ? []
-                  : result.results.map((row) => ({ ...row, ...replacement })),
-            }
-          : result;
+  it.each(["wager-state-not-activated", "wager-state-corrupt"])(
+    "reads metadata and missing invites without accessing a profile binding that fails with %s",
+    async (failure) => {
+      const profileAccess = vi.fn(() => {
+        throw new Error(failure);
       });
-      await expect(read(inviteId)).rejects.toThrow("wager-state-not-activated");
+      const read = reader(undefined, profileAccess);
+      expect(await read(inviteId)).toEqual(source);
+      await db.prepare("DELETE FROM invite_sources").run();
+      expect(await read(inviteId)).toBeNull();
+      expect(profileAccess).not.toHaveBeenCalled();
     },
   );
 
@@ -334,20 +326,6 @@ describe("D1-only invite source reader", () => {
         : value;
     });
     await expect(read(inviteId)).rejects.toThrow("invite-source-corrupt");
-  });
-
-  it("rejects corrupt wager rows without returning partial metadata", async () => {
-    await seedWager("broken", {}, null);
-    const read = reader(undefined, async (query, execute) => {
-      const result = (await execute()) as D1Result<Record<string, unknown>>;
-      return query.includes("FROM wager_state_activation")
-        ? {
-            ...result,
-            results: result.results.map((row) => ({ ...row, wager_json: "{" })),
-          }
-        : result;
-    });
-    await expect(read(inviteId)).rejects.toThrow("wager-state-corrupt");
   });
 
   it("reads fresh data after success and a transient D1 failure", async () => {

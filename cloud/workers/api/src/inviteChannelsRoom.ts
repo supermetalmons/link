@@ -20,6 +20,8 @@ import {
   type InviteWagersReadResult,
   type InviteWagersSourceResult,
 } from "./inviteWagers.ts";
+import { composeInviteWagerSource } from "./inviteWagerSource.ts";
+import type { WagerStateSnapshot } from "./wagerStateD1.ts";
 import {
   readSocketSession,
   socketSessionCurrent,
@@ -31,7 +33,7 @@ type InviteChannel = "metadata" | "wagers";
 
 type InviteReadResult = {
   metadata: InviteMetadataReadResult;
-  wagers: InviteWagersReadResult;
+  wagers?: InviteWagersReadResult;
 };
 
 type StoredMetadata = {
@@ -87,6 +89,7 @@ function logWagersRefreshFailure(inviteId: string, error: unknown): void {
 
 type InviteChannelsDependencies = {
   readInvite: (inviteId: string) => Promise<unknown>;
+  readWagerStates: (inviteId: string) => Promise<WagerStateSnapshot[]>;
   scheduleAlarm: (atMs: number) => Promise<void>;
   capacityFull: (role: string) => boolean;
   socketSessions: SocketSessions;
@@ -101,6 +104,8 @@ type InviteChannelsDependencies = {
 export class InviteChannelsRoom {
   private inviteSequence: Promise<void> = Promise.resolve();
   private queuedInviteRead: Promise<InviteReadResult> | null = null;
+  private queuedInviteNeedsWagers = false;
+  private pendingWagerAdmissions = 0;
   private inviteRefreshGeneration = 0;
   private inviteResultGeneration = 0;
   private inviteInvalidationGeneration = 0;
@@ -252,12 +257,8 @@ export class InviteChannelsRoom {
     return source;
   }
 
-  private applyWagers(
-    result: InviteWagersSourceResult,
-    metadata: InviteMetadataReadResult,
-  ): InviteWagersReadResult {
-    const sockets = this.inviteSockets("wagers", true);
-    for (const socket of sockets) {
+  private revalidateWagerAccess(metadata: InviteMetadataReadResult): void {
+    for (const socket of this.inviteSockets("wagers", true)) {
       if (
         metadata.status === "missing" ||
         (metadata.status === "ok" &&
@@ -269,6 +270,12 @@ export class InviteChannelsRoom {
         socket.close(1008, "Invite access changed");
       }
     }
+  }
+
+  private applyWagers(
+    result: InviteWagersSourceResult,
+    metadata: InviteMetadataReadResult,
+  ): InviteWagersReadResult {
     if (result.status !== "ok" || metadata.status !== "ok") {
       return { status: result.status === "missing" ? "missing" : "invalid" };
     }
@@ -296,7 +303,7 @@ export class InviteChannelsRoom {
         snapshot,
       };
       const serialized = JSON.stringify(message);
-      for (const socket of sockets) {
+      for (const socket of this.inviteSockets("wagers", true)) {
         if (
           canReceiveInvite(
             socket.deserializeAttachment() as InviteSocketAttachment,
@@ -310,36 +317,58 @@ export class InviteChannelsRoom {
     return { status: "ok", snapshot, metadata };
   }
 
-  private async refreshInvite(inviteId: string): Promise<InviteReadResult> {
+  private async refreshInvite(
+    inviteId: string,
+    needsWagers = false,
+  ): Promise<InviteReadResult> {
     this.pinInvite(inviteId);
+    needsWagers ||= this.pendingWagerAdmissions > 0;
     const generation = ++this.inviteRefreshGeneration;
     this.inviteResult = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       const invalidationGeneration = this.inviteInvalidationGeneration;
+      let wagerStates: WagerStateSnapshot[] | undefined;
+      if (needsWagers) {
+        try {
+          wagerStates = await this.dependencies.readWagerStates(inviteId);
+        } catch (error) {
+          logWagersRefreshFailure(inviteId, error);
+        }
+      }
       const value = await this.dependencies.readInvite(inviteId);
       const metadataSource = normalizeInviteMetadata(inviteId, value);
-      let wagerSource: InviteWagersSourceResult;
-      try {
-        wagerSource = await normalizeInviteWagers(
-          inviteId,
-          value,
-          metadataSource,
-        );
-      } catch (error) {
-        logWagersRefreshFailure(inviteId, error);
-        wagerSource = { status: "invalid" };
+      let wagerSource: InviteWagersSourceResult | undefined;
+      if (needsWagers) {
+        try {
+          wagerSource =
+            wagerStates === undefined
+              ? {
+                  status:
+                    metadataSource.status === "missing" ? "missing" : "invalid",
+                }
+              : await normalizeInviteWagers(
+                  inviteId,
+                  composeInviteWagerSource(value, wagerStates),
+                  metadataSource,
+                );
+        } catch (error) {
+          logWagersRefreshFailure(inviteId, error);
+          wagerSource = { status: "invalid" };
+        }
       }
       if (invalidationGeneration !== this.inviteInvalidationGeneration)
         continue;
       const metadata = this.applyMetadata(inviteId, metadataSource);
-      let wagers: InviteWagersReadResult;
-      try {
-        wagers = this.applyWagers(wagerSource, metadata);
-      } catch (error) {
-        logWagersRefreshFailure(inviteId, error);
-        wagers = { status: "invalid" };
+      this.revalidateWagerAccess(metadata);
+      const result: InviteReadResult = { metadata };
+      if (wagerSource) {
+        try {
+          result.wagers = this.applyWagers(wagerSource, metadata);
+        } catch (error) {
+          logWagersRefreshFailure(inviteId, error);
+          result.wagers = { status: "invalid" };
+        }
       }
-      const result = { metadata, wagers };
       this.inviteResult = result;
       this.inviteCheckedAt = Date.now();
       this.inviteResultGeneration = generation;
@@ -349,12 +378,18 @@ export class InviteChannelsRoom {
     throw new Error("invite-source-kept-changing");
   }
 
-  private readInvite(inviteId: string): Promise<InviteReadResult> {
+  private readInvite(
+    inviteId: string,
+    needsWagers = false,
+  ): Promise<InviteReadResult> {
     this.pinInvite(inviteId);
+    this.queuedInviteNeedsWagers ||= needsWagers;
     if (!this.queuedInviteRead) {
       this.queuedInviteRead = this.serializeInvite(() => {
+        const needsWagers = this.queuedInviteNeedsWagers;
         this.queuedInviteRead = null;
-        return this.refreshInvite(inviteId);
+        this.queuedInviteNeedsWagers = false;
+        return this.refreshInvite(inviteId, needsWagers);
       });
     }
     return this.queuedInviteRead;
@@ -376,7 +411,9 @@ export class InviteChannelsRoom {
   }
 
   async readWagers(inviteId: string): Promise<InviteWagersReadResult> {
-    return (await this.readInvite(inviteId)).wagers;
+    const result = await this.readInvite(inviteId, true);
+    if (!result.wagers) throw new Error("invite-wagers-refresh-missing");
+    return result.wagers;
   }
 
   async refreshIfSubscribed(
@@ -409,7 +446,10 @@ export class InviteChannelsRoom {
       const attachment =
         sockets[0].deserializeAttachment() as InviteSocketAttachment;
       try {
-        await this.refreshInvite(attachment.inviteId);
+        await this.refreshInvite(
+          attachment.inviteId,
+          this.inviteSockets("wagers", true).length > 0,
+        );
       } catch (error) {
         console.error(
           JSON.stringify({
@@ -499,6 +539,7 @@ export class InviteChannelsRoom {
       ...session,
     };
     const observedGeneration = this.inviteRefreshGeneration;
+    if (channel === "wagers") this.pendingWagerAdmissions++;
     return this.serializeInvite(async () => {
       if (this.inviteRoomFull(channel, role, ip)) {
         return new Response(`${name} room is full`, {
@@ -518,10 +559,12 @@ export class InviteChannelsRoom {
         this.inviteResult &&
         this.inviteResultGeneration > observedGeneration &&
         this.inviteResultInvalidationGeneration ===
-          this.inviteInvalidationGeneration
+          this.inviteInvalidationGeneration &&
+        (channel === "metadata" || this.inviteResult.wagers !== undefined)
           ? this.inviteResult
-          : await this.refreshInvite(inviteId);
+          : await this.refreshInvite(inviteId, channel === "wagers");
       const source = latest[channel];
+      if (!source) throw new Error("invite-wagers-refresh-missing");
       if (source.status !== "ok" || latest.metadata.status !== "ok") {
         return new Response(`Invite ${channel} unavailable`, {
           status: source.status === "missing" ? 404 : 409,
@@ -562,6 +605,8 @@ export class InviteChannelsRoom {
         webSocket: pair[0],
         headers: { "Sec-WebSocket-Protocol": protocol },
       });
+    }).finally(() => {
+      if (channel === "wagers") this.pendingWagerAdmissions--;
     });
   }
 }

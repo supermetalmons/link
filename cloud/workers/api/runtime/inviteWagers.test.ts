@@ -17,6 +17,7 @@ import {
   REACTION_HEARTBEAT_RESPONSE,
   REACTION_SOCKET_PROTOCOL_V2,
 } from "@mons/shared/reactions";
+import type { WagerStateSnapshot } from "../src/wagerStateD1.ts";
 
 type Room = DurableObjectStub<
   import("../src/inviteReactions.ts").InviteReactions
@@ -24,7 +25,9 @@ type Room = DurableObjectStub<
 type Source = {
   value: unknown;
   reads: number;
+  wagerReads: number;
   read?: () => Promise<unknown>;
+  wagerRead?: () => Promise<WagerStateSnapshot[]>;
 };
 
 const rooms: Room[] = [];
@@ -61,10 +64,41 @@ async function installSource(room: Room, source: Source) {
   await runInDurableObject(room, (instance) => {
     const target = instance as unknown as {
       inviteReader: (inviteId: string) => Promise<unknown>;
+      wagerReader: (inviteId: string) => Promise<WagerStateSnapshot[]>;
     };
     target.inviteReader = async () => {
       source.reads++;
-      return source.read ? await source.read() : source.value;
+      const value = source.read ? await source.read() : source.value;
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        return value;
+      const metadata = { ...value } as Record<string, unknown>;
+      delete metadata.wagers;
+      delete metadata.matchesWagerResolutions;
+      return metadata;
+    };
+    target.wagerReader = async (inviteId) => {
+      source.wagerReads++;
+      if (source.wagerRead) return source.wagerRead();
+      const value = source.value as Record<string, unknown> | null;
+      const wagers = value?.wagers;
+      const markers = value?.matchesWagerResolutions as
+        Record<string, boolean> | undefined;
+      const wagerEntries =
+        wagers && (typeof wagers !== "object" || Array.isArray(wagers))
+          ? { [inviteId]: wagers }
+          : (wagers as Record<string, unknown> | undefined);
+      return [
+        ...new Set([
+          ...Object.keys(wagerEntries ?? {}),
+          ...Object.keys(markers ?? {}),
+        ]),
+      ].map((matchId) => ({
+        inviteId,
+        matchId,
+        wager: wagerEntries?.[matchId] ?? null,
+        resolutionMarker: markers?.[matchId] ?? null,
+        revision: 1,
+      }));
     };
   });
 }
@@ -78,6 +112,7 @@ async function fixture() {
       wagers: { [inviteId]: { proposals: { "host-login": proposal } } },
     },
     reads: 0,
+    wagerReads: 0,
   };
   rooms.push(room);
   await installSource(room, source);
@@ -207,32 +242,80 @@ describe("durable invite wagers", () => {
     ).toBeNull();
   });
 
-  it("coalesces both channel reads and simultaneous admissions into one canonical read", async () => {
+  it.each(["wagers", "metadata"] as const)(
+    "coalesces both channel reads and simultaneous admissions with %s first",
+    async (firstChannel) => {
+      const { room, inviteId, source } = await fixture();
+      const results = await runInDurableObject(room, (instance) =>
+        Promise.all([
+          instance.readMetadata(inviteId),
+          instance.readWagers(inviteId),
+          instance.readMetadata(inviteId),
+          instance.readWagers(inviteId),
+        ]),
+      );
+      expect(results.every((result) => result.status === "ok")).toBe(true);
+      expect(source.reads).toBe(1);
+      expect(source.wagerReads).toBe(1);
+      const admissionReads = await runInDurableObject(
+        room,
+        async (instance) => {
+          const channels = [
+            firstChannel,
+            firstChannel === "wagers" ? "metadata" : "wagers",
+          ] as const;
+          const responses = await Promise.all([
+            ...channels.flatMap((channel) =>
+              Array.from({ length: 4 }, () =>
+                instance.fetch(request(inviteId, channel)),
+              ),
+            ),
+          ]);
+          expect(responses.every((response) => response.status === 101)).toBe(
+            true,
+          );
+          const clients = responses.map((response) => response.webSocket!);
+          clients.forEach((socket) => socket.accept());
+          await Promise.all(clients.map(closeSocket));
+          return source.reads;
+        },
+      );
+      expect(admissionReads).toBe(2);
+      expect(source.wagerReads).toBe(2);
+    },
+  );
+
+  it("keeps foreground metadata reads and admissions free of wager reads and hashing with wager viewers connected", async () => {
     const { room, inviteId, source } = await fixture();
-    const results = await runInDurableObject(room, (instance) =>
-      Promise.all([
-        instance.readMetadata(inviteId),
-        instance.readWagers(inviteId),
-        instance.readMetadata(inviteId),
-        instance.readWagers(inviteId),
-      ]),
-    );
-    expect(results.every((result) => result.status === "ok")).toBe(true);
-    expect(source.reads).toBe(1);
-    const admissionReads = await runInDurableObject(room, async (instance) => {
-      const responses = await Promise.all([
-        ...Array.from({ length: 4 }, () => instance.fetch(request(inviteId))),
-        ...Array.from({ length: 4 }, () =>
-          instance.fetch(request(inviteId, "metadata")),
-        ),
-      ]);
-      expect(responses.every((response) => response.status === 101)).toBe(true);
-      const clients = responses.map((response) => response.webSocket!);
-      clients.forEach((socket) => socket.accept());
-      await Promise.all(clients.map(closeSocket));
-      return source.reads;
+    const wager = acceptSocket(await room.fetch(request(inviteId)));
+    await wager.read();
+    const stored = await storedWagers(room);
+    const wagerReads = source.wagerReads;
+    source.value = {
+      ...invite,
+      hostRematches: "1",
+      wagers: {
+        [inviteId]: { proposals: { "host-login": { ...proposal, count: 7 } } },
+      },
+    };
+    const digest = vi.spyOn(crypto.subtle, "digest");
+    expect(await room.readMetadata(inviteId)).toMatchObject({
+      status: "ok",
+      snapshot: { revision: 2, hostRematches: "1" },
     });
-    expect(admissionReads).toBe(2);
+    const metadata = acceptSocket(
+      await room.fetch(
+        request(inviteId, "metadata", {
+          "X-Mons-Metadata-Revision": "2",
+        }),
+      ),
+    );
+    expect(JSON.parse(await metadata.read()).snapshot.hostRematches).toBe("1");
+    expect(source.wagerReads).toBe(wagerReads);
+    expect(digest).not.toHaveBeenCalled();
+    expect(await storedWagers(room)).toEqual(stored);
+    expect(wager.messages).toEqual([]);
+    expect(wager.socket.readyState).toBe(WebSocket.OPEN);
   });
 
   it("starts a fresh reconciliation read after an in-flight source read even when notification is missed", async () => {
@@ -261,6 +344,7 @@ describe("durable invite wagers", () => {
       return Promise.all([older, newer, shared]);
     });
     expect(source.reads).toBe(3);
+    expect(source.wagerReads).toBe(3);
     expect(results[0]).toMatchObject({
       status: "ok",
       snapshot: { revision: 1, wagers: {} },
@@ -305,6 +389,7 @@ describe("durable invite wagers", () => {
       return Promise.all([older, newer]);
     });
     expect(source.reads).toBe(4);
+    expect(source.wagerReads).toBe(4);
     for (const result of results) {
       expect(result).toMatchObject({
         status: "ok",
@@ -339,8 +424,10 @@ describe("durable invite wagers", () => {
       },
     };
     const before = source.reads;
+    const wagerReads = source.wagerReads;
     expect(await runScheduledAlarm(room)).toBe(true);
     expect(source.reads).toBe(before + 1);
+    expect(source.wagerReads).toBe(wagerReads + 1);
     expect(JSON.parse(await wager.read()).snapshot).toMatchObject({
       revision: 2,
       wagers: { [inviteId]: { proposals: { "host-login": { count: 5 } } } },
@@ -360,9 +447,10 @@ describe("durable invite wagers", () => {
     expect(wager.messages).toEqual([]);
   });
 
-  it("rejects stale wager admission after a private-only change while metadata revision is unchanged", async () => {
+  it("rejects stale wager admission after a metadata-only refresh leaves a private-only wager change unread", async () => {
     const { room, inviteId, source } = await fixture();
     await room.readWagers(inviteId);
+    const stored = await storedWagers(room);
     source.value = {
       ...invite,
       wagers: {
@@ -374,15 +462,57 @@ describe("durable invite wagers", () => {
         },
       },
     };
+    const metadata = await room.readMetadata(inviteId);
+    expect(metadata.status === "ok" && metadata.snapshot.revision).toBe(1);
+    expect(source.wagerReads).toBe(1);
+    expect(await storedWagers(room)).toEqual(stored);
     expect((await room.fetch(request(inviteId))).status).toBe(409);
+    expect(source.wagerReads).toBe(2);
     const client = acceptSocket(
       await room.fetch(
         request(inviteId, "wagers", { "X-Mons-Wagers-Revision": "2" }),
       ),
     );
     expect(JSON.parse(await client.read()).snapshot.revision).toBe(2);
-    const metadata = await room.readMetadata(inviteId);
-    expect(metadata.status === "ok" && metadata.snapshot.revision).toBe(1);
+  });
+
+  it("gives a wager admission arriving during a metadata-only read a fresh wager read", async () => {
+    const { room, inviteId, source } = await fixture();
+    await room.readWagers(inviteId);
+    const admission = await runInDurableObject(room, async (instance) => {
+      const began = deferred();
+      const release = deferred();
+      source.read = async () => {
+        const captured = source.value;
+        began.resolve();
+        await release.promise;
+        return captured;
+      };
+      const metadata = instance.readMetadata(inviteId);
+      await began.promise;
+      source.value = {
+        ...invite,
+        wagers: {
+          [inviteId]: {
+            proposals: { "host-login": { ...proposal, count: 7 } },
+          },
+        },
+      };
+      const response = instance.fetch(request(inviteId));
+      source.read = undefined;
+      release.resolve();
+      expect(await metadata).toMatchObject({
+        status: "ok",
+        snapshot: { revision: 1 },
+      });
+      return (await response).status;
+    });
+    expect(admission).toBe(409);
+    expect(source.reads).toBe(3);
+    expect(source.wagerReads).toBe(2);
+    expect(JSON.parse((await storedWagers(room)).snapshot_json).revision).toBe(
+      2,
+    );
   });
 
   it("preserves last good wagers during corruption or an outage and keeps metadata updates independent", async () => {
@@ -436,16 +566,55 @@ describe("durable invite wagers", () => {
     const digest = vi
       .spyOn(crypto.subtle, "digest")
       .mockRejectedValueOnce(new Error("projection-offline"));
-    const metadata = await room.readMetadata(inviteId);
+    const [metadata, wagers] = await runInDurableObject(room, (instance) =>
+      Promise.all([
+        instance.readMetadata(inviteId),
+        instance.readWagers(inviteId),
+      ]),
+    );
     expect(metadata).toMatchObject({
       status: "ok",
       snapshot: { revision: 2, hostRematches: "1" },
     });
+    expect(wagers).toEqual({ status: "invalid" });
+    expect(digest).toHaveBeenCalledTimes(1);
     expect(await storedWagers(room)).toEqual(stored);
     digest.mockRestore();
     expect(await room.readWagers(inviteId)).toMatchObject({
       status: "ok",
       snapshot: { revision: 2 },
+    });
+  });
+
+  it("keeps metadata available and stored wager snapshots intact when the wager reader fails", async () => {
+    const { room, inviteId, source } = await fixture();
+    await room.readWagers(inviteId);
+    const stored = await storedWagers(room);
+    source.value = { ...invite, hostRematches: "1" };
+    source.wagerRead = async () => {
+      throw new Error("wager-db-offline");
+    };
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const [metadata, wagers] = await runInDurableObject(room, (instance) =>
+      Promise.all([
+        instance.readMetadata(inviteId),
+        instance.readWagers(inviteId),
+      ]),
+    );
+    expect(metadata).toMatchObject({
+      status: "ok",
+      snapshot: { revision: 2, hostRematches: "1" },
+    });
+    expect(wagers).toEqual({ status: "invalid" });
+    expect(await storedWagers(room)).toEqual(stored);
+    expect(source.reads).toBe(2);
+    expect(source.wagerReads).toBe(2);
+    expect(await room.readMetadata(inviteId)).toEqual(metadata);
+    expect(source.wagerReads).toBe(2);
+    source.wagerRead = undefined;
+    expect(await room.readWagers(inviteId)).toMatchObject({
+      status: "ok",
+      snapshot: { revision: 2, wagers: {} },
     });
   });
 
@@ -494,6 +663,35 @@ describe("durable invite wagers", () => {
       ).status,
     ).toBe(403);
   });
+
+  it.each(["missing", "revoked"] as const)(
+    "closes wager viewers after metadata-only refresh detects %s access without reading or hashing wagers",
+    async (change) => {
+      const { room, inviteId, source } = await fixture();
+      const viewer = acceptSocket(await room.fetch(request(inviteId)));
+      await viewer.read();
+      const stored = await storedWagers(room);
+      const wagerReads = source.wagerReads;
+      const closed = new Promise<number>((resolve) =>
+        viewer.socket.addEventListener(
+          "close",
+          (event) => resolve(event.code),
+          { once: true },
+        ),
+      );
+      source.value =
+        change === "missing"
+          ? null
+          : { ...invite, guestId: null, password: "private", wagers: [] };
+      const digest = vi.spyOn(crypto.subtle, "digest");
+      const metadata = await room.readMetadata(inviteId);
+      expect(metadata.status).toBe(change === "missing" ? "missing" : "ok");
+      expect(await closed).toBe(1008);
+      expect(source.wagerReads).toBe(wagerReads);
+      expect(digest).not.toHaveBeenCalled();
+      expect(await storedWagers(room)).toEqual(stored);
+    },
+  );
 
   it("preserves immediate invalidations that arrive during an in-flight source read", async () => {
     const { room, inviteId, source } = await fixture();

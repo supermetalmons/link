@@ -25,6 +25,7 @@ type Source = {
   matches: Map<string, unknown>;
   reads: string[];
   metadataReads: number;
+  wagerReads: number;
   epoch: number;
   read?: (playerId: string, matchId: string) => Promise<unknown>;
 };
@@ -47,6 +48,7 @@ async function install(room: Room, source: Source) {
   await runInDurableObject(room, (instance) => {
     const mutable = instance as unknown as {
       inviteReader: () => Promise<unknown>;
+      wagerReader: () => Promise<never>;
       matchSync: {
         readPair: (
           metadata: MatchSyncMetadata,
@@ -58,6 +60,10 @@ async function install(room: Room, source: Source) {
     mutable.inviteReader = async () => {
       source.metadataReads++;
       return structuredClone(source.invite);
+    };
+    mutable.wagerReader = async () => {
+      source.wagerReads++;
+      throw new Error("unexpected-wager-read");
     };
     mutable.matchSync.dependencies.sourceEpoch = () => source.epoch;
     const readMatch = async (playerId: string, matchId: string) => {
@@ -101,6 +107,7 @@ async function fixture(paired = true) {
     ]),
     reads: [],
     metadataReads: 0,
+    wagerReads: 0,
     epoch: 0,
   };
   rooms.push(room);
@@ -196,6 +203,23 @@ afterEach(async () => {
 });
 
 describe("live match snapshots", () => {
+  it("refreshes match metadata without reading wagers", async () => {
+    const { room, inviteId, source } = await fixture();
+    expect(await room.readMatches(inviteId, inviteId)).toMatchObject({
+      status: "ok",
+    });
+    const channel = await connect(room, inviteId);
+    await channel.snapshot();
+    const reads = source.metadataReads;
+    await room.notifyMetadataChanged(inviteId);
+    await runNextAlarm(room);
+    expect(source.metadataReads).toBeGreaterThan(reads);
+    await evictDurableObject(room);
+    await install(room, source);
+    await runNextAlarm(room);
+    expect(source.wagerReads).toBe(0);
+  });
+
   it("sanitizes, shares reads and persists revisions across eviction", async () => {
     const { room, inviteId, source } = await fixture();
     const first = await room.readMatches(inviteId, inviteId);

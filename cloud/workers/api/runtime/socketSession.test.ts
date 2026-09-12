@@ -37,6 +37,7 @@ async function fixture() {
   await runInDurableObject(room, (instance) => {
     const mutable = instance as unknown as {
       inviteReader: () => Promise<unknown>;
+      wagerReader: () => Promise<[]>;
       matchSync: {
         readPair: (metadata: MatchSyncMetadata) => Promise<[unknown, unknown]>;
       };
@@ -46,6 +47,7 @@ async function fixture() {
       guestId: "guest-login",
       hostColor: "white",
     });
+    mutable.wagerReader = async () => [];
     const readMatch = (playerId: string) => ({
       version: 2,
       color: playerId === "host-login" ? "white" : "black",

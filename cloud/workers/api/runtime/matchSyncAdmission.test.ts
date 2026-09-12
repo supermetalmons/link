@@ -27,6 +27,7 @@ async function install(room: Room, source: Source) {
   await runInDurableObject(room, (instance) => {
     const mutable = instance as unknown as {
       inviteReader: () => Promise<unknown>;
+      wagerReader: () => Promise<[]>;
       matchSync: {
         readPair: (
           metadata: MatchSyncMetadata,
@@ -35,6 +36,7 @@ async function install(room: Room, source: Source) {
       };
     };
     mutable.inviteReader = async () => structuredClone(source.invite);
+    mutable.wagerReader = async () => [];
     const readMatch = (playerId: string) => {
       source.reads++;
       return {

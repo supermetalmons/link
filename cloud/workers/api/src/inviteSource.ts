@@ -5,16 +5,11 @@ import {
   InviteSourceFailure,
   readInviteSourceControl,
 } from "./inviteSourceD1.ts";
-import { composeInviteWagerSource } from "./inviteWagerSource.ts";
-import { createWagerStateD1Store } from "./wagerStateD1.ts";
-
 export function createInviteSourceReader(
-  env: Pick<Env, "PROFILE_GAMES_DB" | "PROFILE_DB">,
+  env: Pick<Env, "PROFILE_GAMES_DB">,
 ): (inviteId: string) => Promise<unknown> {
   const source = createInviteSourceD1Store(env.PROFILE_GAMES_DB);
-  const wagers = createWagerStateD1Store(env.PROFILE_DB);
   return async (inviteId) => {
-    const states = await wagers.readInvite(inviteId);
     const mode = await readAutomatchRuntimeControl(env.PROFILE_GAMES_DB);
     const control = await readInviteSourceControl(env.PROFILE_GAMES_DB);
     if (mode.backend !== "d1" && control.backend === "d1") {
@@ -26,6 +21,6 @@ export function createInviteSourceReader(
     await assertGameSessionResourceAvailable(env.PROFILE_GAMES_DB, inviteId);
     const snapshot = await source.read(inviteId);
     await assertGameSessionResourceAvailable(env.PROFILE_GAMES_DB, inviteId);
-    return composeInviteWagerSource(snapshot.value, states);
+    return snapshot.value;
   };
 }

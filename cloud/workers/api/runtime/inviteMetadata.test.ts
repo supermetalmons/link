@@ -23,6 +23,7 @@ type Room = DurableObjectStub<
 type Source = {
   value: unknown;
   reads: number;
+  wagerReads: number;
   read?: () => Promise<unknown>;
 };
 
@@ -59,10 +60,15 @@ async function installSource(room: Room, source: Source) {
   await runInDurableObject(room, (instance) => {
     const target = instance as unknown as {
       inviteReader: (inviteId: string) => Promise<unknown>;
+      wagerReader: () => Promise<never>;
     };
     target.inviteReader = async () => {
       source.reads++;
       return source.read ? await source.read() : source.value;
+    };
+    target.wagerReader = async () => {
+      source.wagerReads++;
+      throw new Error("unexpected-wager-read");
     };
   });
 }
@@ -70,7 +76,7 @@ async function installSource(room: Room, source: Source) {
 async function fixture(value: unknown = invite) {
   const inviteId = `metadata-${crypto.randomUUID()}`;
   const room = env.INVITE_REACTIONS.getByName(inviteId);
-  const source: Source = { value, reads: 0 };
+  const source: Source = { value, reads: 0, wagerReads: 0 };
   rooms.push(room);
   await installSource(room, source);
   return { inviteId, room, source };
@@ -155,6 +161,25 @@ afterEach(async () => {
 });
 
 describe("durable invite metadata", () => {
+  it("skips wager reads and hashing through metadata admission, notification and eviction recovery", async () => {
+    const { room, inviteId, source } = await fixture();
+    const digest = vi.spyOn(crypto.subtle, "digest");
+    expect(await room.readMetadata(inviteId)).toMatchObject({ status: "ok" });
+    const client = acceptSocket(await metadataResponse(room, inviteId));
+    await client.read();
+    source.value = { ...invite, hostRematches: "1" };
+    await room.notifyMetadataChanged(inviteId);
+    await runScheduledAlarm(room);
+    expect(JSON.parse(await client.read()).snapshot.hostRematches).toBe("1");
+    await evictDurableObject(room);
+    await installSource(room, source);
+    source.value = { ...invite, hostRematches: "1;2" };
+    await runScheduledAlarm(room);
+    expect(JSON.parse(await client.read()).snapshot.hostRematches).toBe("1;2");
+    expect(source.wagerReads).toBe(0);
+    expect(digest).not.toHaveBeenCalled();
+  });
+
   it("persists monotonic sanitized snapshots while private-only changes leave the public revision unchanged", async () => {
     const { room, inviteId, source } = await fixture({
       ...invite,

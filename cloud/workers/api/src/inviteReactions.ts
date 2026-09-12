@@ -26,6 +26,10 @@ import {
 
 import { isCanonicalLoginUid, isSafeRecordKey } from "./recordKeys.ts";
 import { createInviteSourceReader } from "./inviteSource.ts";
+import {
+  createWagerStateD1Store,
+  type WagerStateSnapshot,
+} from "./wagerStateD1.ts";
 import { MatchSyncRoom } from "./matchSyncRoom.ts";
 import type { MatchSyncMetadata, MatchSyncReadResult } from "./matchSync.ts";
 import { MatchStateStore } from "./matchStateStore.ts";
@@ -115,6 +119,7 @@ export class InviteReactions
   private readonly socketSessions: SocketSessions;
   private matchEffectsPending: Promise<void> | null = null;
   private inviteReader: (inviteId: string) => Promise<unknown>;
+  private wagerReader: (inviteId: string) => Promise<WagerStateSnapshot[]>;
   private inviteAlarmSequence: Promise<void> = Promise.resolve();
   private readonly inviteChannels: InviteChannelsRoom;
   private readonly presentations: MatchPresentationStore;
@@ -126,8 +131,10 @@ export class InviteReactions
       "CREATE TABLE IF NOT EXISTS latest_reactions (sender_uid TEXT PRIMARY KEY, reaction_json TEXT NOT NULL)",
     );
     this.inviteReader = createInviteSourceReader(env);
+    this.wagerReader = createWagerStateD1Store(env.PROFILE_DB).readInvite;
     this.inviteChannels = new InviteChannelsRoom(ctx, {
       readInvite: (inviteId) => this.inviteReader(inviteId),
+      readWagerStates: (inviteId) => this.wagerReader(inviteId),
       scheduleAlarm: (atMs) => this.scheduleInviteAlarm(atMs),
       capacityFull: (role) => this.roomCapacityFull(role),
       socketSessions: this.socketSessions,
