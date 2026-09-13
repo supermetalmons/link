@@ -112,6 +112,9 @@ function observeAggregateDatabase(
       queries: string[],
       results: D1Result<Record<string, unknown>>[],
     ) => D1Result<Record<string, unknown>>[];
+    mapFirst?: (
+      row: Record<string, unknown> | null,
+    ) => Record<string, unknown> | null;
   } = {},
 ) {
   const batches: string[][] = [];
@@ -122,6 +125,10 @@ function observeAggregateDatabase(
       get(target, property) {
         if (property === "bind") {
           return (...values: unknown[]) => wrap(target.bind(...values), query);
+        }
+        if (property === "first" && options.mapFirst) {
+          return async () =>
+            options.mapFirst!(await target.first<Record<string, unknown>>());
         }
         if (["first", "all", "run", "raw"].includes(String(property))) {
           return () => {
@@ -334,6 +341,213 @@ describe("canonical profile D1 store", () => {
       ).rejects.toBe(failure);
       expect(observed.reads).toHaveLength(1);
     });
+  });
+
+  describe("public profile login reader", () => {
+    const loginUid = "public-reader-login";
+
+    async function seedLookup() {
+      const value = profileValue("public-reader-profile");
+      await commitCanonicalPlan(testEnv.PROFILE_DB, {
+        expectations: [
+          { kind: "profile-absent", profileId: value.profile.id },
+          { kind: "login-owner-absent", loginUid },
+        ],
+        mutations: [
+          { kind: "insert-active-profile", value },
+          {
+            kind: "insert-login-owner",
+            value: {
+              loginUid,
+              profileId: value.profile.id,
+              createdAtMs: 1_000,
+              updatedAtMs: 1_000,
+            },
+          },
+        ],
+      });
+      return value;
+    }
+
+    it("reads a healthy profile with one query", async () => {
+      const value = await seedLookup();
+      const observed = observeRecoveryDatabase();
+      await expect(
+        readCanonicalPublicProfileByLogin(observed.database, loginUid),
+      ).resolves.toMatchObject({
+        profileId: value.profile.id,
+        profile: value.profile,
+        state: "active",
+      });
+      expect(observed.reads).toHaveLength(1);
+      expect(observed.reads[0].values).toEqual([loginUid]);
+      expect(observed.reads[0].query).not.toContain("legacy_fields_json");
+    });
+
+    it("returns null for an unknown login with one unchanged bound lookup", async () => {
+      await seedLookup();
+      const missingLogin = ` ${loginUid}' OR 1 = 1 -- `;
+      const observed = observeRecoveryDatabase();
+      await expect(
+        readCanonicalPublicProfileByLogin(observed.database, missingLogin),
+      ).resolves.toBeNull();
+      expect(observed.reads).toHaveLength(1);
+      expect(observed.reads[0].values).toEqual([missingLogin]);
+    });
+
+    it.each([
+      ["lookup_login_uid", ""],
+      ["lookup_profile_id", ""],
+      ["lookup_revision", 0],
+      ["lookup_created_at_ms", -1],
+      ["lookup_updated_at_ms", -1],
+      ["payload_json", "{}"],
+      ["rating_sort", 99],
+    ])("rejects malformed %s", async (column, invalid) => {
+      await seedLookup();
+      const observed = observeAggregateDatabase({
+        mapFirst: (row) => ({ ...row, [column]: invalid }),
+      });
+      await expect(
+        readCanonicalPublicProfileByLogin(observed.database, loginUid),
+      ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+      expect(observed.batches).toHaveLength(0);
+    });
+
+    it("preserves a missing profile without a redirect as null", async () => {
+      await seedLookup();
+      const observed = observeAggregateDatabase({
+        mapFirst: (row) => ({ ...row, profile_id: null }),
+      });
+      await expect(
+        readCanonicalPublicProfileByLogin(observed.database, loginUid),
+      ).resolves.toBeNull();
+      expect(observed.batches).toHaveLength(0);
+    });
+
+    it("rejects a retiring profile without a merge record", async () => {
+      await seedLookup();
+      const observed = observeAggregateDatabase({
+        mapFirst: (row) => ({
+          ...row,
+          state: "retiring",
+          merged_into_profile_id: "missing-target",
+        }),
+      });
+      await expect(
+        readCanonicalPublicProfileByLogin(observed.database, loginUid),
+      ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+      expect(observed.batches).toHaveLength(0);
+    });
+
+    it.each(["active", "retiring", "deleted"] as const)(
+      "preserves redirect behavior for an %s source",
+      async (sourceState) => {
+        const value = await seedLookup();
+        const target = profileValue("public-reader-target");
+        await commitCanonicalPlan(testEnv.PROFILE_DB, {
+          expectations: [
+            { kind: "profile-absent", profileId: target.profile.id },
+          ],
+          mutations: [{ kind: "insert-active-profile", value: target }],
+        });
+        const observed = observeAggregateDatabase({
+          mapFirst: (row) => ({
+            ...row,
+            lookup_merge_source_profile_id: value.profile.id,
+          }),
+          mapResults: (_queries, results) => {
+            const source = results[0].results[0];
+            if (source?.profile_id !== value.profile.id) return results;
+            return [
+              {
+                ...results[0],
+                results:
+                  sourceState === "deleted"
+                    ? []
+                    : [
+                        {
+                          ...source,
+                          state: sourceState,
+                          merged_into_profile_id:
+                            sourceState === "retiring"
+                              ? target.profile.id
+                              : null,
+                        },
+                      ],
+              },
+              {
+                ...results[1],
+                results: [
+                  {
+                    source_profile_id: value.profile.id,
+                    target_profile_id: target.profile.id,
+                    merged_at_ms: 2_000,
+                    op_id: null,
+                  },
+                ],
+              },
+            ];
+          },
+        });
+        const result = readCanonicalPublicProfileByLogin(
+          observed.database,
+          loginUid,
+        );
+        if (sourceState === "active") {
+          await expect(result).rejects.toBeInstanceOf(
+            CanonicalProfileCorruption,
+          );
+          expect(observed.batches).toHaveLength(1);
+        } else {
+          await expect(result).resolves.toMatchObject({
+            profileId: target.profile.id,
+          });
+          expect(observed.batches).toHaveLength(2);
+        }
+      },
+    );
+
+    it.each(["cycle", "depth"] as const)(
+      "keeps the original source and rejects redirect %s failures",
+      async (failure) => {
+        const value = await seedLookup();
+        let hop = 0;
+        const observed = observeAggregateDatabase({
+          mapFirst: (row) => ({
+            ...row,
+            lookup_merge_source_profile_id: value.profile.id,
+          }),
+          mapResults: (_queries, results) => {
+            const source =
+              hop === 0 ? value.profile.id : `deleted-source-${hop}`;
+            const target =
+              failure === "cycle" && hop === 1
+                ? value.profile.id
+                : `deleted-source-${hop + 1}`;
+            hop += 1;
+            return [
+              { ...results[0], results: [] },
+              {
+                ...results[1],
+                results: [
+                  {
+                    source_profile_id: source,
+                    target_profile_id: target,
+                    merged_at_ms: 2_000,
+                    op_id: null,
+                  },
+                ],
+              },
+            ];
+          },
+        });
+        await expect(
+          readCanonicalPublicProfileByLogin(observed.database, loginUid),
+        ).rejects.toBeInstanceOf(CanonicalProfileCorruption);
+        expect(observed.batches).toHaveLength(failure === "cycle" ? 2 : 33);
+      },
+    );
   });
 
   it("commits a revisioned profile aggregate atomically", async () => {

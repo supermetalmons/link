@@ -1202,8 +1202,41 @@ export async function readCanonicalPublicProfileByLogin(
   db: D1Database,
   loginUid: string,
 ): Promise<CanonicalPublicProfileSnapshot | null> {
-  const owner = await readCanonicalLoginOwner(db, loginUid);
-  return owner ? resolveCanonicalPublicProfile(db, owner.profileId) : null;
+  const row = await db
+    .prepare(
+      `SELECT ${CANONICAL_PUBLIC_PROFILE_COLUMNS.split(",")
+        .map((column) => `profile.${column.trim()}`)
+        .join(", ")},
+              owner.login_uid AS lookup_login_uid,
+              owner.profile_id AS lookup_profile_id,
+              owner.revision AS lookup_revision,
+              owner.created_at_ms AS lookup_created_at_ms,
+              owner.updated_at_ms AS lookup_updated_at_ms,
+              mapping.source_profile_id AS lookup_merge_source_profile_id
+       FROM profile_login_owners AS owner
+       LEFT JOIN profile_records AS profile
+         ON profile.profile_id = owner.profile_id
+       LEFT JOIN profile_merge_targets AS mapping
+         ON mapping.source_profile_id = owner.profile_id
+       WHERE owner.login_uid = ?`,
+    )
+    .bind(loginUid)
+    .first<Record<string, unknown>>();
+  if (!row) return null;
+  const owner = parseCanonicalLoginOwnerRow({
+    login_uid: row.lookup_login_uid,
+    profile_id: row.lookup_profile_id,
+    revision: row.lookup_revision,
+    created_at_ms: row.lookup_created_at_ms,
+    updated_at_ms: row.lookup_updated_at_ms,
+  });
+  if (row.lookup_merge_source_profile_id !== null) {
+    return resolveCanonicalPublicProfile(db, owner.profileId);
+  }
+  if (row.profile_id === null) return null;
+  const profile = parseCanonicalPublicProfileRow(row);
+  if (profile.state === "retiring") throw new CanonicalProfileCorruption();
+  return profile;
 }
 
 function leaderboardColumns(type: LeaderboardReadType): {
